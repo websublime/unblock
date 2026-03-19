@@ -10,6 +10,7 @@ the project has four products built in sequence. each depends on the previous be
 
 ```
 phase 1-3     mcp server (v1.0.0)              ← you are here
+v1.1.0        post-launch enhancements (homebrew, stale, jira, etc.)
 phase 4       plugin (claude code + copilot)
 phase 5-6     desktop app (v2.0.0)
 phase 7       monetisation
@@ -21,7 +22,7 @@ phase 7       monetisation
 
 **goal:** an agent can find, claim, edit, complete work and see cascade unblocking.
 
-**crates:** `unblock-core`, `unblock-mcp`
+**crates:** `unblock-core`, `unblock-github`, `unblock-mcp`
 
 | what | detail |
 |---|---|
@@ -30,7 +31,7 @@ phase 7       monetisation
 | graph engine | petgraph `DiGraph`, `build()`, `compute_ready_set()`, `unblock_cascade()`, `detect_cycles()`, `would_create_cycle()` |
 | cache | `GraphCache` with ttl, invalidation, freshness check |
 | config | env vars only (`GITHUB_TOKEN`, `GITHUB_API_URL`, `UNBLOCK_REPO`, `UNBLOCK_PROJECT`, etc.) |
-| github client | `reqwest` + graphql reads + rest mutations. `GitHubClient` with `api_base_url` for ghe support |
+| github client (`unblock-github`) | `reqwest` + graphql reads + rest mutations. `GitHubClient` with `api_base_url` for ghe support. shared crate reusable by mcp and desktop |
 | github graphql | `fetch_graph_data()` — single paginated query returns all issues + blocking edges + projects v2 fields |
 | github mutations | `create_issue()`, `close_issue()`, `reopen_issue()`, `update_issue()`, `add_comment()`, `add_blocked_by()`, `remove_blocked_by()` |
 | github projects | `resolve_project()`, `setup_fields()`, `batch_update_fields()` |
@@ -69,14 +70,30 @@ phase 7       monetisation
 | circuit breaker | `CircuitBreaker` — 5 failures → open for 10s → half-open probe |
 | retry | exponential backoff + jitter, max 3, only on 429/503 |
 | observability | opentelemetry optional (`UNBLOCK_OTEL_ENDPOINT`), structured tracing json |
-| distribution | cargo-dist: 5 targets (linux x86_64/arm64 musl, macos x86_64/arm64, windows x86_64) |
-| homebrew | `websublime/homebrew-tap` formula, auto-updated by cargo-dist |
+| distribution | cargo-dist: 5 targets (linux x86_64/arm64 musl, macos x86_64/arm64, windows x86_64). shell + powershell installers |
 | npm wrapper | `@unblock/cli` — downloads platform binary on postinstall |
+| v1.0.0 gap features | batch ops (`update`/`close`/`reopen`/`show`), `dep_tree` tool, date range filters, label OR filter |
 | release flow | `cargo-release` → tag `unblock-mcp-v1.0.0` → cargo-dist auto-builds |
 
 **quality gate:** 100% public api coverage, property tests (proptest), fuzz testing for parser.
 
 **output:** `v1.0.0` — production-ready mcp server.
+
+---
+
+## v1.1.0 — post-launch enhancements
+
+**goal:** features deferred from v1.0.0 that strengthen the product before the plugin phase.
+
+| what | detail |
+|---|---|
+| homebrew tap | `websublime/homebrew-tap` formula, auto-updated by cargo-dist |
+| `stale` tool | find issues with no updates for N days |
+| `create_from_plan` tool | parse markdown document → N issues with dependencies |
+| `merge` tool | consolidate duplicate issues |
+| label list | list all labels in the repo |
+| issue templates | parametrized templates for common issue patterns |
+| jira awareness | `setup --jira` generates `jira-sync.yml` workflow. `create --jira-key` populates body convention. `doctor` verifies jira secrets when configured |
 
 ---
 
@@ -88,11 +105,12 @@ phase 7       monetisation
 
 | what | detail |
 |---|---|
-| core agents | grace (pm), ada (architect), fernando (po), sherlock (research), linus (reviewer), quinn (qa), martin (refactorer) |
-| planning skills | `/product-requirements`, `/architect-solution`, `/create-tasks` |
+| plugin location | `plugin/` directory in monorepo, independent versioning (v0.x) |
+| core agents (8) | grace (pm), ada (architect), fernando (po), sherlock (research), daphne (discovery), linus (reviewer), quinn (qa), martin (refactorer). all agents are `.md` configuration files (role, instructions, tool permissions), not compiled code |
+| planning skills | `/product-requirements`, `/architect-solution`, `/create-tasks`, `/create-issue` |
 | execution skills | `/start-task` (6 phases + self-check loop), `/rework-task`, `/review-task`, `/qa-task` |
-| setup skills | `/setup-project` (fields + "review findings" milestone + supervisors + github actions + editor configs), `/add-supervisor` |
-| hooks | `SessionStart` (prime context + needs-rework alert), `PreToolUse` (discipline injection for supervisors) |
+| setup skills | `/setup-project` (fields + "review findings" milestone + supervisors + github actions + editor configs), `/add-supervisor`, `/update-plugin` |
+| hooks | `SessionStart` (prime context + needs-rework alert), `PreToolUse` (discipline injection for supervisors), `PreCompact` (progress preservation) |
 | github actions | `unblock-review.yml` (label trigger: needs-review), `unblock-qa.yml` (label trigger: approved) |
 | session isolation | review and qa run in fresh ci sessions. zero implementation context. context from comment trail only |
 | findings tracking | non-positive items from review/qa → issues under "review findings" milestone via fernando. dedup against existing issues |
@@ -113,7 +131,7 @@ phase 7       monetisation
 
 | what | detail |
 |---|---|
-| crate extraction | extract `unblock-github` from `unblock-mcp` into shared crate |
+| shared crate | `unblock-github` already exists as shared crate (created in phase 1). desktop imports directly |
 | gpui app bootstrap | window creation, custom theme, force-directed graph renderer |
 | core views | graph view, ready queue panel, agent panel, toolbar, detail panel |
 
@@ -183,6 +201,7 @@ docs/
 ├── unblock-project-plan.md              ← when to build it (mcp)
 ├── unblock-cicd-architecture.md         ← how to ship it (all products)
 ├── unblock-prd-plugin.md                ← what to build (plugin)
+├── unblock-architecture-plugin.md       ← how to build it (plugin)
 └── research/
     ├── beads-vs-unblock-comparison.md   ← competitive analysis
     └── unblock-jira-research.md         ← enterprise integration

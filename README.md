@@ -132,37 +132,42 @@ zero config for the common case.
 
 17 tools. each operates on the current repo.
 
-### core workflow
+### core workflow (6)
 
 | tool | purpose |
 |---|---|
 | `://ready` | find issues with no active blockers — the ready queue |
 | `://claim` | take ownership — sets agent, status, timestamp atomically |
-| `://close` | complete + cascade — unblocks dependents automatically |
 | `://create` | new issue with deps, priority, labels, parent |
-| `://prime` | session context — inject repo state into agent context |
+| `://update` | edit fields — priority, status, labels, body sections, assignees |
+| `://close` | complete + cascade — unblocks dependents automatically |
+| `://reopen` | reopen a closed issue, recompute blocking status |
 
-### dependency graph
+### dependencies (4)
 
 | tool | purpose |
 |---|---|
 | `://depends` | declare a blocking relationship |
 | `://dep_remove` | remove a blocking relationship |
 | `://dep_cycles` | detect circular dependencies |
-| `://show` | full issue detail with deps, comments, parsed body |
+| `://comment` | add structured comment to issue |
 
-### management
+### query (4)
 
 | tool | purpose |
 |---|---|
-| `://update` | edit fields — priority, status, labels, body sections, assignees |
-| `://comment` | add structured comment to issue |
+| `://show` | full issue detail with deps, comments, parsed body |
 | `://list` | filtered issue list with sorting and pagination |
 | `://search` | full-text search via github search api |
-| `://reopen` | reopen a closed issue, recompute blocking status |
 | `://stats` | repo stats — by status, priority, blocked/ready counts, agents |
+
+### setup & diagnostics (3)
+
+| tool | purpose |
+|---|---|
 | `://setup` | create projects v2 fields, migrate existing issues |
 | `://doctor` | health check — fields, project, graph consistency, rate limits |
+| `://prime` | session context — inject repo state into agent context |
 
 ---
 
@@ -258,6 +263,7 @@ coming soon.
 | [`unblock-project-plan.md`](docs/unblock-project-plan.md) | project plan — mcp server |
 | [`unblock-cicd-architecture.md`](docs/unblock-cicd-architecture.md) | ci/cd — builds, releases, distribution |
 | [`unblock-prd-plugin.md`](docs/unblock-prd-plugin.md) | product requirements — plugin (cc + copilot) |
+| [`unblock-architecture-plugin.md`](docs/unblock-architecture-plugin.md) | architecture specification — plugin |
 | [`unblock-jira-research.md`](docs/research/unblock-jira-research.md) | jira integration research |
 | [`beads-vs-unblock-comparison.md`](docs/research/beads-vs-unblock-comparison.md) | feature comparison with beads cli |
 | [`unblock-brand-guide.md`](branding/unblock-brand-guide.md) | brand guide — identity, colours, typography |
