@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| **Version** | 1.0.0-draft |
+| **Version** | 1.1.0-draft |
 | **Author** | Miguel Ramos |
 | **Org** | websublime |
 | **Repo** | `websublime/unblock` |
@@ -72,7 +72,7 @@ resolver = "2"
 
 [workspace.package]
 edition = "2024"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/websublime/unblock"
 
 [workspace.dependencies]
@@ -211,7 +211,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p unblock-core -p unblock-github -p unblock-mcp
 
-  # ─── Desktop tests (only if desktop code changed) ───
+  # ─── Desktop tests (Phase 5-6 only — only if desktop code changed) ───
   test-desktop:
     name: Test Desktop (${{ matrix.os }})
     needs: check
@@ -282,9 +282,11 @@ path = "src/main.rs"
 
 [package.metadata.dist]
 # cargo-dist configuration
-installers = ["shell", "powershell", "homebrew"]
-tap = "websublime/homebrew-tap"
-publish-jobs = ["homebrew"]
+installers = ["shell", "powershell"]
+# Homebrew deferred to v1.1.0+ — curl installer + npm + cargo install provide sufficient coverage for v1.0.0
+# When enabled: installers = ["shell", "powershell", "homebrew"]
+# tap = "websublime/homebrew-tap"
+# publish-jobs = ["homebrew"]
 targets = [
     "x86_64-unknown-linux-musl",
     "aarch64-unknown-linux-musl",
@@ -318,25 +320,27 @@ Announce → adds release notes from CHANGELOG.md
 | `unblock-mcp-installer.sh` | Unix | Shell installer script |
 | `unblock-mcp-installer.ps1` | Windows | PowerShell installer script |
 
-### 5.4 Install Methods
+### 5.4 Install Methods (v1.0.0)
 
 ```bash
 # Shell installer (Linux/macOS)
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/websublime/unblock/releases/latest/download/unblock-mcp-installer.sh | sh
-
-# Homebrew
-brew install websublime/tap/unblock-mcp
 
 # npm
 npx @unblock/cli
 
 # Cargo (requires Rust toolchain)
 cargo install unblock-mcp
+
+# Homebrew (v1.1.0+)
+# brew install websublime/tap/unblock-mcp
 ```
 
 ---
 
 ## 6. Release — Desktop App
+
+> **Phase 5-6 only** — do not implement until the desktop app exists. Sections 6-6.6 are forward-looking specifications.
 
 ### 6.1 Why Not cargo-dist
 
@@ -578,8 +582,8 @@ chmod +x Unblock-x86_64.AppImage
 | Channel | MCP (`unblock-mcp`) | Desktop (`unblock-app`) |
 |---|---|---|
 | GitHub Releases | ✅ Tarballs + installers (cargo-dist) | ✅ `.dmg` + AppImage (custom) |
-| Homebrew formula | ✅ `brew install websublime/tap/unblock-mcp` | — |
-| Homebrew cask | — | ✅ `brew install --cask websublime/tap/unblock-desktop` |
+| Homebrew formula | ⏳ v1.1.0+ `brew install websublime/tap/unblock-mcp` | — |
+| Homebrew cask | — | ⏳ Phase 5-6 `brew install --cask websublime/tap/unblock-desktop` |
 | npm | ✅ `npx @unblock/cli` | ❌ |
 | Shell installer | ✅ `curl \| sh` (cargo-dist) | ❌ |
 | PowerShell installer | ✅ `irm \| iex` (cargo-dist) | ❌ |
@@ -588,6 +592,8 @@ chmod +x Unblock-x86_64.AppImage
 ---
 
 ## 8. Homebrew Tap
+
+> **v1.1.0+ (MCP formula) / Phase 5-6 (Desktop cask)** — not required for v1.0.0 launch. Curl installer + npm + cargo install provide sufficient distribution coverage. Implement when adoption justifies the additional channel.
 
 Repository: `websublime/homebrew-tap`
 
@@ -691,7 +697,7 @@ unblock-mcp ready --json
 
 | Secret | Used by | Purpose | Status |
 |---|---|---|---|
-| `HOMEBREW_TAP_TOKEN` | MCP release (cargo-dist) | PAT with write access to `websublime/homebrew-tap` | Required |
+| `HOMEBREW_TAP_TOKEN` | MCP release (cargo-dist) | PAT with write access to `websublime/homebrew-tap` | v1.1.0+ |
 | `NPM_TOKEN` | npm publish | npm automation token for `@unblock/cli` | Required |
 | `CARGO_REGISTRY_TOKEN` | Optional | For `cargo publish` to crates.io | Optional |
 
@@ -740,9 +746,11 @@ cargo release -p unblock-mcp --execute 1.1.0
 cargo release -p unblock-app --execute 2.1.0
 # Wait for CI green → desktop-release.yml runs → artifacts published
 
-# 3. Post-release
-# - Verify Homebrew: brew update && brew install websublime/tap/unblock-mcp
+# 3. Post-release (v1.0.0)
+# - Verify curl installer: curl ... | sh && unblock-mcp --version
 # - Verify npm: npx @unblock/cli --version
-# - Verify desktop: download .dmg, open, bypass Gatekeeper, app launches
+# - Verify cargo: cargo install unblock-mcp && unblock-mcp --version
 # - Update README badges if major version
+# Post-release (v1.1.0+): verify Homebrew: brew update && brew install websublime/tap/unblock-mcp
+# Post-release (Phase 5-6): verify desktop: download .dmg, bypass Gatekeeper, app launches
 ```
