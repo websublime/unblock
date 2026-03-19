@@ -325,7 +325,8 @@ User-invocable slash commands. Each skill orchestrates one phase of the pipeline
 |---|---|---|---|
 | **product-requirements** | `/product-requirements` | Elicit and structure a PRD from a raw idea | Grace (PM) |
 | **architect-solution** | `/architect-solution` | Design spec and implementation plan from PRD | Ada (Architect) |
-| **create-tasks** | `/create-tasks` | Create GitHub Issues with deps from spec. Milestones for epics, Sub-Issues for hierarchy | Fernando (PO) |
+| **create-tasks** | `/create-tasks` | Create GitHub Issues with deps from approved spec/PRD. Milestones for epics, Sub-Issues for hierarchy. Batch, structural | Fernando (PO) |
+| **create-issue** | `/create-issue` | Create individual GitHub Issues ad-hoc from documentation or description. Single issue, interactive | Fernando (PO) |
 
 ### 7.2 Execution Skills
 
@@ -342,6 +343,7 @@ User-invocable slash commands. Each skill orchestrates one phase of the pipeline
 |---|---|---|
 | **setup-project** | `/setup-project` | Bootstrap: `setup` MCP tool (creates Project V2 fields), create "Review Findings" milestone, detect stack, create supervisors, install hooks and GitHub Actions |
 | **add-supervisor** | `/add-supervisor [tech]` | Create a new implementation supervisor for a specific technology |
+| **update-plugin** | `/update-plugin` | Check for plugin updates, cleanup legacy local files, optionally refresh supervisors via Discovery |
 
 ### 7.4 Skill Detail: `/start-task`
 
@@ -432,14 +434,17 @@ Runs in a clean CI session (GitHub Action). No access to review session context.
 
 Specialized sub-agents with scoped responsibilities. Each has a name, a role, and explicit boundaries.
 
+**All agents are `.md` configuration files** — markdown documents defining role, instructions, tool permissions, and model preference. They are not compiled code. This follows the same pattern as mister-anderson: agent definitions are declarative configuration, portable across Claude Code (via `agents/` directory), and interpretable by any MCP-compatible editor via custom instructions.
+
 ### 8.1 Agent Roster
 
 | Agent | Name | Role | Model | Dispatched by |
 |---|---|---|---|---|
 | Product Manager | Grace | PRD elicitation and structuring | opus | `/product-requirements` |
 | Architect | Ada | System design and spec creation | opus | `/architect-solution` |
-| Product Owner | Fernando | Issue creation with context and deps | sonnet | `/create-tasks`, findings tracking |
+| Product Owner | Fernando | Issue creation with context and deps | sonnet | `/create-tasks`, `/create-issue`, findings tracking |
 | Research | Sherlock | Codebase investigation, file discovery | sonnet | `/start-task` (investigation phase) |
+| Discovery | Daphne | Tech stack detection, external agent fetch, supervisor generation | sonnet | `/setup-project`, `/add-supervisor` |
 | Code Reviewer | Linus | Read-only code review, structured findings | opus | `/review-task` |
 | QA Gate | Quinn | Spec conformity, test/build/lint validation | opus | `/qa-task` |
 | Refactoring Supervisor | Martin | Fix validated review findings | sonnet | `/review-task` (refactoring phase) |
@@ -449,7 +454,7 @@ Specialized sub-agents with scoped responsibilities. Each has a name, a role, an
 
 **Not distributed with the plugin.** Generated at runtime by `/setup-project` or `/add-supervisor`.
 
-The Discovery agent (Sherlock in on-demand mode) analyzes the project's codebase and creates supervisor agents tailored to the detected technologies. A Rust project gets `rust-supervisor.md` in `.claude/agents/` with Cargo-specific test/build/lint commands, Rust naming conventions, and project-specific file paths. A React monorepo might get both `react-supervisor.md` and `node-backend-supervisor.md`.
+The Discovery agent (Daphne) analyzes the project's codebase, fetches specialist content from an external agent directory, filters it for size and relevance, and creates supervisor agents tailored to the detected technologies. Persona names for each supervisor are generated dynamically at creation time. A Rust project gets `rust-supervisor.md` in `.claude/agents/` with Cargo-specific test/build/lint commands, Rust naming conventions, and project-specific file paths. A React monorepo might get both `react-supervisor.md` and `node-backend-supervisor.md`.
 
 Each generated supervisor:
 - Is named `{tech}-supervisor` (e.g., `rust-supervisor`, `react-supervisor`)
@@ -469,6 +474,7 @@ Supervisors are stored locally in `.claude/agents/` and never modified by plugin
 | Ada | Read files, write spec, research | Write code, create issues |
 | Fernando | Create/update issues, add comments, add deps | Write code, design solutions |
 | Sherlock | Read files, search codebase, add comments | Write code, create issues, modify files |
+| Daphne | Read files, detect tech stack, WebFetch external directory, write supervisor agents | Write application code, create issues, close issues |
 | Linus | Read files, read diff, add review comment | Write code, modify files, close issues |
 | Quinn | Read files, run tests/build/lint, add QA comment | Write code, modify files, close issues |
 | Martin | Read/write files, fix specific findings | Create issues, close issues, change scope |
@@ -594,7 +600,26 @@ SUPERVISOR DISPATCH: Before implementing, follow these rules:
 6. Never close issues — your job ends at pushing + needs-review (Rule 6)
 ```
 
-Only injected for agents with `-supervisor` suffix. Not injected for Linus, Quinn, Grace, Ada, or Fernando.
+Only injected for agents with `-supervisor` suffix. Not injected for Linus, Quinn, Grace, Ada, Fernando, or Daphne.
+
+### 11.3 PreCompact (Progress Preservation)
+
+Triggered before Claude Code compacts the conversation context. Preserves work-in-progress state by logging a progress comment on the current issue.
+
+```
+# Detects if an issue is currently being worked on (in_progress status with agent set)
+# Logs a PROGRESS comment to the issue via the comment MCP tool:
+
+PROGRESS:
+Working on: [current task description from issue title]
+Files touched: [list of modified files from git status]
+Status: [description of current implementation state]
+Next steps: [what remains to be done]
+```
+
+This ensures that if the session continues after compaction, the agent can reconstruct its working state from the comment trail. Combined with SessionStart's `prime` call, this provides continuity across context resets.
+
+Only triggers if there is an active `in_progress` issue claimed by the current agent. If no issue is in progress, the hook is a no-op.
 
 ---
 
@@ -706,50 +731,73 @@ The GitHub Actions runner is free for public repos (2,000 minutes/month) or bill
 
 ### 13.1 File Layout
 
+The plugin lives inside the monorepo at `plugin/`, with independent versioning (like `unblock-mcp` and `unblock-app`). Source repository is `websublime/unblock`.
+
 ```
-websublime/unblock-plugin/
-├── plugin.json                        # Plugin metadata
-├── agents/
-│   ├── architect.md                   # Ada — system design
-│   ├── product-manager.md             # Grace — PRD elicitation
-│   ├── beads-owner.md                 # Fernando — issue management
-│   ├── research.md                    # Sherlock — codebase investigation
-│   ├── code-reviewer.md              # Linus — code review gate
-│   ├── qa-gate.md                     # Quinn — QA validation gate
-│   └── refactoring-supervisor.md     # Martin — fix review findings
-├── skills/
-│   ├── product-requirements/SKILL.md
-│   ├── architect-solution/SKILL.md
-│   ├── create-tasks/SKILL.md
-│   ├── start-task/SKILL.md
-│   ├── rework-task/SKILL.md
-│   ├── review-task/SKILL.md
-│   ├── qa-task/SKILL.md
-│   ├── setup-project/SKILL.md
-│   ├── add-supervisor/SKILL.md
-│   └── subagents-discipline/SKILL.md
-├── hooks/
-│   ├── hooks.json
-│   ├── session-start.sh
-│   └── inject-discipline-reminder.sh
-└── templates/
-    └── github-actions/
-        ├── unblock-review.yml
-        └── unblock-qa.yml
+websublime/unblock/
+└── plugin/
+    ├── .claude-plugin/
+    │   └── plugin.json                    # Plugin metadata (version, source: websublime/unblock)
+    ├── marketplace.json                   # Marketplace listing metadata
+    ├── agents/
+    │   ├── architect.md                   # Ada — system design
+    │   ├── product-manager.md             # Grace — PRD elicitation
+    │   ├── product-owner.md               # Fernando — issue management
+    │   ├── research.md                    # Sherlock — codebase investigation
+    │   ├── discovery.md                   # Daphne — tech stack detection + supervisor generation
+    │   ├── code-reviewer.md              # Linus — code review gate
+    │   ├── qa-gate.md                     # Quinn — QA validation gate
+    │   └── refactoring-supervisor.md     # Martin — fix review findings
+    ├── skills/
+    │   ├── product-requirements/SKILL.md
+    │   ├── architect-solution/SKILL.md
+    │   ├── create-tasks/SKILL.md
+    │   ├── create-issue/SKILL.md
+    │   ├── start-task/SKILL.md
+    │   ├── rework-task/SKILL.md
+    │   ├── review-task/SKILL.md
+    │   ├── qa-task/SKILL.md
+    │   ├── setup-project/SKILL.md
+    │   ├── add-supervisor/SKILL.md
+    │   ├── update-plugin/SKILL.md
+    │   └── subagents-discipline/SKILL.md
+    ├── hooks/
+    │   ├── hooks.json
+    │   ├── session-start.sh
+    │   ├── inject-discipline-reminder.sh
+    │   └── pre-compact.sh
+    └── templates/
+        ├── UNBLOCK-WORKFLOW.md            # Injected into each generated supervisor
+        ├── CLAUDE.md.template             # Project orchestrator config
+        ├── AGENTS.md.template             # Agent workflow guide
+        └── github-actions/
+            ├── unblock-review.yml
+            └── unblock-qa.yml
 ```
 
-**No supervisor files in the plugin source.** Supervisors are generated at runtime by `/setup-project` (via the Discovery agent) based on the project's detected tech stack. The Discovery agent analyzes the codebase (Cargo.toml, package.json, Dockerfile, etc.), determines which technologies are in use, and creates project-specific supervisor agents in `.claude/agents/`. Each generated supervisor includes the correct test/build/lint commands, file paths, conventions, and workflow discipline rules for that project. The `/add-supervisor` skill generates additional supervisors on demand.
+**No supervisor files in the plugin source.** Supervisors are generated at runtime by `/setup-project` (via Daphne, the Discovery agent) based on the project's detected tech stack. Daphne analyzes the codebase, fetches specialist content from an external directory, filters it for size and relevance, generates a dynamic persona name, injects the UNBLOCK-WORKFLOW.md template, and writes the supervisor to `.claude/agents/`. The `/add-supervisor` skill generates additional supervisors on demand.
 
-### 13.2 What the Plugin Provides vs What Stays Local
+### 13.2 Versioning
+
+The plugin follows independent versioning within the monorepo, consistent with `unblock-mcp` (v1.x) and `unblock-app` (v2.x):
+
+```
+unblock-plugin   → v0.1.0, v0.2.0, v0.3.0 ...  (Phase 4)
+```
+
+Version is tracked in `plugin/.claude-plugin/plugin.json` and `plugin/marketplace.json`. The `/update-plugin` skill compares the local version file (`.claude/.unblock-plugin-version`) against the installed plugin version to detect updates.
+
+### 13.3 What the Plugin Provides vs What Stays Local
 
 | Component | Provided by plugin | Local to project |
 |---|---|---|
-| Core agents (7) | ✅ Grace, Ada, Fernando, Sherlock, Linus, Quinn, Martin | — |
-| Skills (10) | ✅ | — |
-| Hooks (2) | ✅ SessionStart, PreToolUse | — |
+| Core agents (8) | ✅ Grace, Ada, Fernando, Sherlock, Daphne, Linus, Quinn, Martin | — |
+| Skills (12) | ✅ | — |
+| Hooks (3) | ✅ SessionStart, PreToolUse, PreCompact | — |
+| Templates (3) | ✅ UNBLOCK-WORKFLOW.md, CLAUDE.md.template, AGENTS.md.template | — |
 | GitHub Action templates | ✅ (copied to `.github/workflows/` on setup) | ✅ (customisable) |
-| Implementation supervisors | ❌ **not in plugin** | ✅ generated by `/setup-project` Discovery |
-| CLAUDE.md / AGENTS.md | — | ✅ (generated on setup, project-specific) |
+| Implementation supervisors | ❌ **not in plugin** | ✅ generated by `/setup-project` via Daphne |
+| CLAUDE.md / AGENTS.md | — | ✅ (generated from templates on setup, project-specific) |
 | Unblock MCP server config | ✅ (injected on setup) | ✅ (env vars) |
 | `.github/copilot-instructions.md` | ✅ (generated on setup) | ✅ (customisable) |
 
@@ -760,11 +808,11 @@ websublime/unblock-plugin/
 ### 14.1 Plugin Installation
 
 ```bash
-# Step 1: Add marketplace
-/plugin marketplace add websublime/unblock-plugin
+# Step 1: Add marketplace (source: monorepo websublime/unblock, path: plugin/)
+/plugin marketplace add websublime/unblock
 
 # Step 2: Install plugin
-/plugin install unblock-plugin@websublime-unblock-plugin
+/plugin install unblock@websublime-unblock
 
 # Step 3: Bootstrap project
 /setup-project
@@ -775,12 +823,15 @@ websublime/unblock-plugin/
 1. Run Unblock `setup` MCP tool — creates Projects V2 fields (Status, Priority, Agent, etc.)
 2. Create "Review Findings" milestone via `create` — persistent milestone for tracking review and QA findings across all tasks. Created once, reused forever. This ensures findings tracking (§10) never needs to search-or-create at runtime
 3. Detect tech stack from project files (Cargo.toml, package.json, etc.)
-4. Generate implementation supervisors for detected technologies via Discovery agent (Sherlock in on-demand mode) — writes to `.claude/agents/`
+4. Generate implementation supervisors for detected technologies via Discovery agent (Daphne) — fetches specialist content from external directory, filters for size/relevance, injects UNBLOCK-WORKFLOW.md template, writes to `.claude/agents/`
 5. Copy GitHub Action workflows to `.github/workflows/` (unblock-review.yml, unblock-qa.yml)
 6. Generate `.github/copilot-instructions.md` — Copilot custom instructions with workflow rules, discipline, MCP tool guidance, and supervisor conventions (see §15.2)
-7. Write CLAUDE.md with project context, supervisor routing, and "Review Findings" milestone reference
-8. Write AGENTS.md with available agents (core + generated supervisors)
+7. Write CLAUDE.md from template — project context, tech stack, supervisor routing, "Review Findings" milestone reference, and orchestrator identity rules
+8. Write AGENTS.md from template — workflow guide, MCP tool reference, available agents (core + generated supervisors), issue types, and session completion checklist
 9. Configure Unblock MCP server in `.claude/settings.json` and `.vscode/mcp.json`
+10. Write version file (`.claude/.unblock-plugin-version`) for update tracking
+
+> Template content for UNBLOCK-WORKFLOW.md, CLAUDE.md, and AGENTS.md is specified in `unblock-architecture-plugin.md`.
 
 ### 14.3 MCP Server Configuration
 
