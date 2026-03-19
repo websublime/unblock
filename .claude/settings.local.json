@@ -1,0 +1,23 @@
+{
+  "includeCoAuthoredBy": false,
+  "permissions": {
+    "allow": [
+      "mcp__acp__Write",
+      "mcp__acp__Edit",
+      "Bash(find:*)",
+      "Bash(cargo fmt --check --all)",
+      "Bash(cargo clippy --workspace -- -D warnings)",
+      "Bash(cargo test --workspace)",
+      "Bash(cargo test -p unblock-core)",
+      "Bash(cargo test -p unblock-github)",
+      "Bash(cargo test -p unblock-mcp)",
+      "Bash(cargo build --workspace)",
+      "Bash(cargo build -p unblock-mcp)",
+      "Bash(cargo doc --no-deps --workspace)"
+    ]
+  },
+  "model": "opus",
+  "enabledPlugins": {
+    "mister-anderson@websublime-mister-anderson": true
+  }
+}
