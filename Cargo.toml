@@ -25,6 +25,7 @@ anyhow = "1"
 rmcp = { version = "1.0", features = ["server", "transport-io"] }
 schemars = "1"
 rand = "0.9"
+proptest = "1"
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
