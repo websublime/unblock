@@ -74,7 +74,7 @@ The backend is Unblock MCP server — GitHub Issues + Projects V2 with dependenc
 - Multi-agent orchestration — this is a single-developer pipeline with agent delegation, not an agent swarm
 - Replacing human judgment — the developer decides when to merge, what to rework, and what findings to defer
 - CI/CD pipeline — the plugin triggers GitHub Actions but does not replace existing build/deploy workflows
-- IDE-agnostic — the plugin targets Claude Code first, GitHub Copilot second. Other editors are out of scope for v1
+- Editor-specific extensions — the Unblock MCP server works with any MCP-compatible editor. Claude Code gets the richest experience (plugins, hooks, sub-agents), other editors get MCP tools + custom instructions. No dedicated Copilot Extension, Cursor Extension, etc.
 
 ---
 
@@ -819,9 +819,11 @@ Claude Code provides:
 - MCP server integration
 - Worktree support (future: parallel implementation)
 
-### 15.2 GitHub Copilot (Secondary)
+### 15.2 GitHub Copilot (via MCP + Custom Instructions)
 
-Copilot agent mode supports MCP servers but has a fundamentally different execution model — no plugin system, no sub-agent dispatch, no hooks. The integration uses two mechanisms: **custom instructions** for the local workflow and **GitHub Actions** (identical to CC) for review/QA.
+Copilot agent mode supports MCP servers natively — the Unblock MCP server works without any adapter or extension. GitHub deprecated Copilot Extensions (GitHub App-based) in November 2025 in favour of MCP, making this the official and only integration path.
+
+The integration uses two mechanisms: **MCP tools** for task operations (identical to CC) and **custom instructions** (`.github/copilot-instructions.md`) for workflow guidance.
 
 #### Feature Comparison
 
@@ -943,24 +945,29 @@ This project uses these implementation patterns:
 - **No sub-agent personas** — developer asks Copilot directly: "investigate the codebase for issue #42" instead of dispatching Sherlock. The custom instructions guide behavior but don't enforce persona boundaries
 - **No slash commands** — developer describes what they want in natural language ("start working on issue #42") instead of `/start-task #42`. Custom instructions ensure the right workflow is followed
 
-#### Future: Copilot Extension
+#### Why No Dedicated Copilot Extension
 
-A dedicated GitHub Copilot Extension (`@unblock`) could automate the manual parts:
-- `@unblock start #42` — equivalent to `/start-task`
-- `@unblock status` — equivalent to `prime`
-- Auto-inject context on chat open (similar to SessionStart)
-- Enforce persona boundaries via extension logic
+GitHub deprecated Copilot Extensions (GitHub App-based) in September 2025 and completed the sunset on November 10, 2025. The replacement is MCP servers — which is exactly what Unblock already is.
 
-This is scoped for v2 of the plugin, after CC plugin is validated. See §16 PL14.
+The Unblock MCP server IS the Copilot integration. No additional extension, app, or middleware is needed. Copilot Agent Mode calls MCP tools autonomously, guided by the custom instructions. The developer says "start working on issue #42" and Copilot, with access to Unblock MCP tools + the workflow rules in `copilot-instructions.md`, executes the same pipeline that CC executes via `/start-task`.
 
-### 15.3 Future: Cursor, Aider, Windsurf
+This is a strategic advantage: one MCP server serves every compatible editor. Build once, works everywhere.
 
-Any MCP-compatible editor can use the Unblock MCP tools directly. The custom instructions approach (§15.2) works for any editor that supports a system prompt file:
-- **Cursor** — `.cursor/rules/unblock.mdc` (same content as copilot-instructions, different path)
-- **Aider** — `.aider.conf.yml` with conventions section
-- **Windsurf** — `.windsurfrules`
+### 15.3 Supported Editors Summary
 
-The GitHub Actions for review/QA work regardless of which editor triggered the implementation. The pipeline is editor-agnostic from review onwards.
+The Unblock MCP server is the universal integration layer. Custom instructions provide the workflow guidance. GitHub Actions handle review/QA. The combination works across any MCP-compatible editor.
+
+| Editor | MCP Tools | Workflow Config | Sub-agent Dispatch | Hooks | GitHub Actions |
+|---|---|---|---|---|---|
+| **Claude Code** | ✅ plugin config | CLAUDE.md + agent files | ✅ `Task()` | ✅ SessionStart, PreToolUse | ✅ |
+| **GitHub Copilot** | ✅ `.vscode/mcp.json` | `.github/copilot-instructions.md` | ❌ natural language | ❌ | ✅ |
+| **Cursor** | ✅ MCP config | `.cursor/rules/unblock.mdc` | ❌ natural language | ❌ | ✅ |
+| **Windsurf** | ✅ MCP config | `.windsurfrules` | ❌ natural language | ❌ | ✅ |
+| **Aider** | ✅ MCP config | `.aider.conf.yml` | ❌ natural language | ❌ | ✅ |
+
+`/setup-project` generates the config files for all detected editors (based on presence of `.vscode/`, `.cursor/`, etc.). The content is the same — workflow rules, discipline, MCP tool guidance — adapted to each editor's format.
+
+The pipeline is editor-agnostic from review onwards. Any editor that can push a branch and add a label triggers the same GitHub Actions.
 
 ---
 
@@ -977,9 +984,9 @@ The GitHub Actions for review/QA work regardless of which editor triggered the i
 | PL7 | Supervisors generated at setup, not distributed with plugin | Discovery analyzes the actual project and creates supervisors with correct commands, paths, and conventions. Generic templates would miss project-specific details. One supervisor per tech stack, routing via assignee field |
 | PL8 | GitHub Actions over local watcher | Event-driven (no polling), runs in clean environment (no local state leakage), logs visible in GitHub, free for public repos |
 | PL9 | Plugin provides core agents + skills, project owns supervisors | Core agents (reviewer, QA, PM, architect) are universal. Supervisors are project-specific, generated by Discovery, and never modified by plugin updates |
-| PL10 | Claude Code first, Copilot second | CC has the richest plugin model (Task dispatch, hooks, agent files). Copilot support is additive via custom instructions, not a redesign |
+| PL10 | Claude Code first, other editors via MCP + custom instructions | CC has the richest plugin model (Task dispatch, hooks, agent files). All other editors get the same MCP tools + workflow via custom instructions. GitHub deprecated Copilot Extensions in favour of MCP — validating this approach |
 | PL11 | Unblock MCP as backend, not Beads CLI | GitHub Issues are the source of truth. Zero local database. Comment trail in GitHub comments. Labels as state. Projects V2 fields for typed data. No Dolt/SQLite dependency |
 | PL12 | `/rework-task` as separate skill from `/start-task` | Rework is simpler — no investigation, no new branch, no supervisor selection. Reads findings directly and fixes. Distinct skill reduces confusion |
 | PL13 | "Review Findings" milestone created at setup, not at first finding | Eliminates search-or-create logic at runtime in CI sessions. `/setup-project` creates it once, CLAUDE.md stores the reference, all agents read from there |
-| PL14 | Copilot via custom instructions, Extension deferred to v2 | `.github/copilot-instructions.md` provides workflow rules, discipline, and MCP tool guidance. Works today without waiting for Extension API. Extension adds automation (slash commands, auto-context) when CC plugin is validated |
-| PL15 | `/setup-project` generates editor configs for all supported editors | One command creates `.github/copilot-instructions.md`, CLAUDE.md, and future `.cursor/rules/` etc. Developer doesn't manually configure each editor |
+| PL14 | MCP server IS the Copilot/editor integration — no extension needed | GitHub sunset Copilot Extensions (Nov 2025) in favour of MCP. The Unblock MCP server works natively with Copilot Agent Mode, Cursor, Windsurf, Aider. Build once, works everywhere. Custom instructions provide the workflow layer |
+| PL15 | `/setup-project` generates editor configs for all detected editors | One command creates `.github/copilot-instructions.md`, CLAUDE.md, `.cursor/rules/`, etc. Developer doesn't manually configure each editor |
