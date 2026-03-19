@@ -1,0 +1,36 @@
+[workspace]
+members = [
+    "crates/unblock-core",
+    "crates/unblock-github",
+    "crates/unblock-mcp",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/websublime/unblock"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+reqwest = { version = "0.12", features = ["json"] }
+petgraph = "0.7"
+chrono = { version = "0.4", features = ["serde"] }
+snafu = "0.8"
+anyhow = "1"
+rmcp = { version = "1.0", features = ["server", "transport-io"] }
+schemars = "1"
+rand = "0.9"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
