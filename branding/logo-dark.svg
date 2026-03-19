@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 120" width="400" height="120">
+  <rect width="400" height="120" rx="12" fill="#0F172A"/>
+  <text x="40" y="72" font-family="'JetBrains Mono', 'Fira Code', 'SF Mono', monospace" font-size="40" font-weight="700" fill="#A78BFA" letter-spacing="-0.5">://</text>
+  <text x="128" y="72" font-family="'JetBrains Mono', 'Fira Code', 'SF Mono', monospace" font-size="40" fill="#F8FAFC" letter-spacing="-0.5">unblock</text>
+</svg>

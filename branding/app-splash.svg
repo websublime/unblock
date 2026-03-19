@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 320" width="480" height="320">
+  <!-- Canvas background -->
+  <rect width="480" height="320" rx="16" fill="#0D1217"/>
+
+  <!-- Subtle surface panel -->
+  <rect x="40" y="40" width="400" height="240" rx="12" fill="#141A21" stroke="#1E293B" stroke-width="0.5"/>
+
+  <!-- Primary lockup -->
+  <text x="240" y="120" text-anchor="middle" font-family="'JetBrains Mono', 'Fira Code', 'SF Mono', monospace" font-size="40" font-weight="700" fill="#A78BFA" letter-spacing="-0.5">://unblock</text>
+
+  <!-- Version -->
+  <text x="240" y="150" text-anchor="middle" font-family="'JetBrains Mono', 'Fira Code', 'SF Mono', monospace" font-size="12" fill="#64748B">v2.0.0</text>
+
+  <!-- Tagline -->
+  <text x="240" y="180" text-anchor="middle" font-family="'JetBrains Mono', 'Fira Code', 'SF Mono', monospace" font-size="11" fill="#475569">dependency-aware task tracking for AI agents</text>
+
+  <!-- Tool badges -->
+  <rect x="108" y="204" width="68" height="22" rx="4" fill="none" stroke="#A78BFA" stroke-width="0.5" opacity="0.5"/>
+  <text x="142" y="218" text-anchor="middle" font-family="'JetBrains Mono', 'Fira Code', 'SF Mono', monospace" font-size="9" fill="#A78BFA" opacity="0.5">://ready</text>
+
+  <rect x="184" y="204" width="68" height="22" rx="4" fill="none" stroke="#A78BFA" stroke-width="0.5" opacity="0.5"/>
+  <text x="218" y="218" text-anchor="middle" font-family="'JetBrains Mono', 'Fira Code', 'SF Mono', monospace" font-size="9" fill="#A78BFA" opacity="0.5">://claim</text>
+
+  <rect x="260" y="204" width="64" height="22" rx="4" fill="none" stroke="#A78BFA" stroke-width="0.5" opacity="0.5"/>
+  <text x="292" y="218" text-anchor="middle" font-family="'JetBrains Mono', 'Fira Code', 'SF Mono', monospace" font-size="9" fill="#A78BFA" opacity="0.5">://close</text>
+
+  <rect x="332" y="204" width="68" height="22" rx="4" fill="none" stroke="#A78BFA" stroke-width="0.5" opacity="0.5"/>
+  <text x="366" y="218" text-anchor="middle" font-family="'JetBrains Mono', 'Fira Code', 'SF Mono', monospace" font-size="9" fill="#A78BFA" opacity="0.5">://graph</text>
+
+  <!-- Footer -->
+  <text x="240" y="260" text-anchor="middle" font-family="'JetBrains Mono', 'Fira Code', 'SF Mono', monospace" font-size="10" fill="#334155">websublime · MIT · Rust + GPUI</text>
+</svg>

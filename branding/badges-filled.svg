@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 40" width="600" height="40">
+  <!-- ://ready -->
+  <rect x="0" y="4" width="82" height="28" rx="4" fill="#1E1B4B" stroke="#312E81" stroke-width="1"/>
+  <text x="41" y="22" text-anchor="middle" font-family="'JetBrains Mono', 'Fira Code', 'SF Mono', monospace" font-size="11" fill="#C4B5FD">://ready</text>
+
+  <!-- ://claim -->
+  <rect x="90" y="4" width="80" height="28" rx="4" fill="#1E1B4B" stroke="#312E81" stroke-width="1"/>
+  <text x="130" y="22" text-anchor="middle" font-family="'JetBrains Mono', 'Fira Code', 'SF Mono', monospace" font-size="11" fill="#C4B5FD">://claim</text>
+
+  <!-- ://close -->
+  <rect x="178" y="4" width="80" height="28" rx="4" fill="#1E1B4B" stroke="#312E81" stroke-width="1"/>
+  <text x="218" y="22" text-anchor="middle" font-family="'JetBrains Mono', 'Fira Code', 'SF Mono', monospace" font-size="11" fill="#C4B5FD">://close</text>
+
+  <!-- ://depends -->
+  <rect x="266" y="4" width="94" height="28" rx="4" fill="#1E1B4B" stroke="#312E81" stroke-width="1"/>
+  <text x="313" y="22" text-anchor="middle" font-family="'JetBrains Mono', 'Fira Code', 'SF Mono', monospace" font-size="11" fill="#C4B5FD">://depends</text>
+
+  <!-- ://stats -->
+  <rect x="368" y="4" width="80" height="28" rx="4" fill="#1E1B4B" stroke="#312E81" stroke-width="1"/>
+  <text x="408" y="22" text-anchor="middle" font-family="'JetBrains Mono', 'Fira Code', 'SF Mono', monospace" font-size="11" fill="#C4B5FD">://stats</text>
+
+  <!-- ://prime -->
+  <rect x="456" y="4" width="80" height="28" rx="4" fill="#1E1B4B" stroke="#312E81" stroke-width="1"/>
+  <text x="496" y="22" text-anchor="middle" font-family="'JetBrains Mono', 'Fira Code', 'SF Mono', monospace" font-size="11" fill="#C4B5FD">://prime</text>
+</svg>
