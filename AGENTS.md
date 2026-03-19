@@ -1,16 +1,10 @@
 # Agent Instructions
 
-This project uses **bd** (beads) for issue tracking. Run `bd onboard` to get started.
+## Beads Version Compatibility
 
-## Quick Reference
-
-```bash
-bd ready              # Find available work
-bd show <id>          # View issue details
-bd update <id> --claim  # Claim work atomically
-bd close <id>         # Complete work
-bd dolt push          # Push beads data to remote
-```
+Check compatibility:
+- Changelog: https://github.com/steveyegge/beads/blob/main/CHANGELOG.md
+- Run `/beads-compat` to check installed version
 
 ## Non-Interactive Shell Commands
 
@@ -36,7 +30,6 @@ cp -rf source dest          # NOT: cp -r source dest
 - `apt-get` - use `-y` flag
 - `brew` - use `HOMEBREW_NO_AUTO_UPDATE=1` env var
 
-<!-- BEGIN BEADS INTEGRATION -->
 ## Issue Tracking with bd (beads)
 
 **IMPORTANT**: This project uses **bd (beads)** for ALL issue tracking. Do NOT use markdown TODOs, task lists, or other tracking methods.
@@ -44,34 +37,30 @@ cp -rf source dest          # NOT: cp -r source dest
 ### Why bd?
 
 - Dependency-aware: Track blockers and relationships between issues
-- Version-controlled: Built on Dolt with cell-level merge
+- Database-backed: Dolt (MySQL protocol) with version history
 - Agent-optimized: JSON output, ready work detection, discovered-from links
 - Prevents duplicate tracking systems and confusion
 
 ### Quick Start
 
 **Check for ready work:**
-
 ```bash
 bd ready --json
 ```
 
 **Create new issues:**
-
 ```bash
 bd create "Issue title" --description="Detailed context" -t bug|feature|task -p 0-4 --json
-bd create "Issue title" --description="What this issue is about" -p 1 --deps discovered-from:bd-123 --json
+bd create "Issue title" -p 1 --deps discovered-from:<parent-id> --json
 ```
 
 **Claim and update:**
-
 ```bash
 bd update <id> --claim --json
 bd update bd-42 --priority 1 --json
 ```
 
 **Complete work:**
-
 ```bash
 bd close bd-42 --reason "Completed" --json
 ```
@@ -101,13 +90,19 @@ bd close bd-42 --reason "Completed" --json
    - `bd create "Found bug" --description="Details about what was found" -p 1 --deps discovered-from:<parent-id>`
 5. **Complete**: `bd close <id> --reason "Done"`
 
-### Auto-Sync
+### Storage
 
-bd automatically syncs with git:
+bd uses Dolt (MySQL protocol) as its database backend:
+- Data stored with full version history
+- Use `bd dolt push` / `bd dolt pull` to sync with remote
+- No manual JSONL export needed — Dolt handles versioning
 
-- Exports to `.beads/issues.jsonl` after changes (5s debounce)
-- Imports from JSONL when newer (e.g., after `git pull`)
-- No manual export/import needed!
+### CLI Help
+
+Run `bd <command> --help` to see all available flags for any command.
+For example: `bd create --help` shows `--parent`, `--deps`, `--assignee`, etc.
+
+Get more info from reference: https://github.com/steveyegge/beads/raw/refs/heads/main/docs/CLI_REFERENCE.md
 
 ### Important Rules
 
@@ -115,11 +110,9 @@ bd automatically syncs with git:
 - ✅ Always use `--json` flag for programmatic use
 - ✅ Link discovered work with `discovered-from` dependencies
 - ✅ Check `bd ready` before asking "what should I work on?"
-- ❌ Do NOT create markdown TODO lists
+- ❌ Do NOT create markdown files as TODO lists
 - ❌ Do NOT use external issue trackers
 - ❌ Do NOT duplicate tracking systems
-
-For more details, see README.md and docs/QUICKSTART.md.
 
 ## Landing the Plane (Session Completion)
 
@@ -133,7 +126,10 @@ For more details, see README.md and docs/QUICKSTART.md.
 4. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash
    git pull --rebase
-   bd dolt push
+   # Only sync dolt if remote is NOT localhost:
+   bd dolt remote list --json  # check remote URL
+   # If remote URL contains "localhost" or "127.0.0.1" → skip dolt push (local DB, no sync needed)
+   # If remote URL is external (e.g., hosted dolt) → run: bd dolt push
    git push
    git status  # MUST show "up to date with origin"
    ```
@@ -146,5 +142,3 @@ For more details, see README.md and docs/QUICKSTART.md.
 - NEVER stop before pushing - that leaves work stranded locally
 - NEVER say "ready to push when you are" - YOU must push
 - If push fails, resolve and retry until it succeeds
-
-<!-- END BEADS INTEGRATION -->
