@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| **Version** | 1.0.0-draft |
+| **Version** | 1.1.0-draft |
 | **Author** | Miguel Ramos |
 | **Org** | websublime |
 | **Repo** | `websublime/unblock` |
@@ -58,8 +58,8 @@ No task is done unless ALL of these pass:
 |---|---|---|---|---|
 | **1 — Foundation** | v0.1.0 | Agent can find, claim, edit, complete work + see cascade | 4 | ~14 days |
 | **2 — Complete** | v0.2.0 | Full tool suite + Claude Code plugin | 3 | ~8 days |
-| **3 — Production** | v1.0.0 | Hardened, distributed, production-ready | 3 | ~6 days |
-| **Total** | | | **10 epics** | **~28 days focused** |
+| **3 — Production** | v1.0.0 | Hardened, distributed, production-ready + v1.0.0 gap features | 4 | ~8 days |
+| **Total** | | | **11 epics** | **~30 days focused** |
 
 ---
 
@@ -77,11 +77,12 @@ No task is done unless ALL of these pass:
 
 | Task | Description | DoD | Ref |
 |---|---|---|---|
-| **1.1.1** Cargo workspace | Create `websublime/unblock` repo. `Cargo.toml` workspace with `crates/unblock-core` and `crates/unblock-mcp`. Workspace-level `[lints]`, `[dependencies]`, edition 2024 | `cargo check --workspace` passes. `clippy` + `fmt` clean. README.md with project description, license MIT | ARCH §17.1 |
+| **1.1.1** Cargo workspace | Create `websublime/unblock` repo. `Cargo.toml` workspace with `crates/unblock-core`, `crates/unblock-github`, and `crates/unblock-mcp`. Workspace-level `[lints]`, `[dependencies]`, edition 2024 | `cargo check --workspace` passes. `clippy` + `fmt` clean. README.md with project description, license MIT OR Apache-2.0 | ARCH §17.1 |
 | **1.1.2** CI pipeline | GitHub Actions: fmt check, clippy, test, tarpaulin coverage on ubuntu + macos. Branch protection on `main` requiring CI pass | Push to `main` triggers CI. Badge in README shows status | ARCH §17.3 |
 | **1.1.3** Core crate skeleton | `unblock-core/src/lib.rs` with module declarations: `types`, `graph`, `cache`, `config`, `errors`. Empty modules with `//!` module docs | `cargo doc --no-deps -p unblock-core` builds clean | ARCH §4.1 |
-| **1.1.4** MCP crate skeleton | `unblock-mcp/src/main.rs` with module declarations: `server`, `errors`, `tools/`, `github/`. Empty modules with `//!` module docs | `cargo check -p unblock-mcp` passes | ARCH §4.2 |
-| **1.1.5** CLAUDE.md + .claude/ | `CLAUDE.md` at repo root with workflow instructions, tool descriptions, coding standards. `.claude/settings.json` with lint/test commands | Agent can read CLAUDE.md and understand the project workflow | PRD §8 |
+| **1.1.4** GitHub crate skeleton | `unblock-github/src/lib.rs` with module declarations: `client`, `graphql`, `mutations`, `projects`, `errors`. Empty modules with `//!` module docs | `cargo doc --no-deps -p unblock-github` builds clean | ARCH §4.2 |
+| **1.1.5** MCP crate skeleton | `unblock-mcp/src/main.rs` with module declarations: `server`, `errors`, `tools/`. Depends on `unblock-core` and `unblock-github`. Empty modules with `//!` module docs | `cargo check -p unblock-mcp` passes | ARCH §4.2 |
+| **1.1.6** CLAUDE.md + .claude/ | `CLAUDE.md` at repo root with workflow instructions, tool descriptions, coding standards. `.claude/settings.json` with lint/test commands | Agent can read CLAUDE.md and understand the project workflow | PRD §8 |
 
 ---
 
@@ -101,9 +102,9 @@ No task is done unless ALL of these pass:
 
 ---
 
-### Epic 1.3 — GitHub API Layer (unblock-mcp)
+### Epic 1.3 — GitHub API Layer (unblock-github)
 
-**Goal:** Connect to GitHub, fetch data, write mutations. The bridge between GitHub and the graph engine.
+**Goal:** Connect to GitHub, fetch data, write mutations. The bridge between GitHub and the graph engine. Lives in `crates/unblock-github` as a shared crate reusable by both MCP server and future desktop app.
 
 | Task | Description | DoD | Ref |
 |---|---|---|---|
@@ -219,10 +220,26 @@ No task is done unless ALL of these pass:
 
 | Task | Description | DoD | Ref |
 |---|---|---|---|
-| **3.3.1** Cross-platform binaries | Release workflow: 5 targets (linux x86_64/ARM64 musl, macOS x86_64/ARM64, Windows x86_64) | Tag triggers build. All 5 binaries as release assets | ARCH §17.2 |
-| **3.3.2** Homebrew formula | `websublime/homebrew-tap`. `brew install websublime/tap/unblock` | Install + upgrade work. Formula has test block | PRD §10 Phase 3 |
-| **3.3.3** npm wrapper | `@unblock/cli` on npm. Downloads platform binary. `npx @unblock/cli` | `npx @unblock/cli ready` works. Platform detection correct | PRD §10 Phase 3 |
-| **3.3.4** v1.0.0 release | Tag, release notes, README update with badges + install + quick start | Release published. README comprehensive. Plugin listed | — |
+| **3.3.1** Cross-platform binaries | Release workflow with cargo-dist: 5 targets (linux x86_64/ARM64 musl, macOS x86_64/ARM64, Windows x86_64). Shell + PowerShell installers | Tag triggers build. All 5 binaries as release assets. `curl \| sh` installs correctly | ARCH §17.2 |
+| **3.3.2** npm wrapper | `@unblock/cli` on npm. Downloads platform binary on postinstall. `npx @unblock/cli` | `npx @unblock/cli ready` works. Platform detection correct | PRD §10 Phase 3 |
+| **3.3.3** v1.0.0 release | Tag `unblock-mcp-v1.0.0`, release notes, README update with badges + install + quick start | Release published. README comprehensive. Plugin listed | — |
+
+> **Deferred to v1.1.0:** Homebrew tap (`websublime/homebrew-tap`) — curl installer + npm + cargo install provide sufficient coverage for v1.0.0.
+
+---
+
+### Epic 3.4 — v1.0.0 Gap Features
+
+**Goal:** Feature gaps identified in competitive analysis that strengthen the v1.0.0 offering.
+
+**Ref:** `research/beads-vs-unblock-comparison.md`
+
+| Task | Description | DoD | Ref |
+|---|---|---|---|
+| **3.4.1** Batch operations | Accept `ids: Vec<u64>` on `update`, `close`, `reopen`, `show`. Process sequentially, return results array. Rebuild graph once at end | Integration: batch close 3 issues → all closed, cascade computed once. Batch show → all returned. Partial failure → results + errors | Gap G1 |
+| **3.4.2** `dep_tree` tool | Expose `dependency_tree(root, direction, max_depth)` from graph engine as MCP tool. Returns tree structure with status annotations | Integration: dep_tree on issue with 3 levels of deps → correct tree. Direction upstream/downstream works. max_depth respected | Gap G3.5 |
+| **3.4.3** Date range filters | Add `created_after`, `created_before`, `updated_after`, `updated_before` params to `list` tool | Integration: filter by date range returns correct subset. Combinable with existing filters | Gap G6 |
+| **3.4.4** Label OR filter | Add `label_mode: "and" \| "or"` param to `list` tool (default: `and`) | Integration: `list --label bug,enhancement --label_mode or` returns issues with either label | Gap G8 |
 
 ---
 
@@ -230,7 +247,7 @@ No task is done unless ALL of these pass:
 
 ```
 Phase 1
-  1.1 Workspace ──► 1.2 Core ──► 1.3 GitHub API ──► 1.4 MCP Tools
+  1.1 Workspace ──► 1.2 Core ──► 1.3 GitHub API (unblock-github) ──► 1.4 MCP Tools
 
 Phase 2
   2.1 Tools ◄── 1.4
@@ -241,6 +258,7 @@ Phase 3
   3.1 Resilience ◄── 1.3
   3.2 Observability ◄── 1.4
   3.3 Distribution ◄── 2.1 + 3.1 + 3.2
+  3.4 Gap Features ◄── 2.1
 ```
 
 ---
@@ -262,7 +280,7 @@ Phase 3
 |---|---|---|---|
 | **MCP Foundation** | v0.1.0 | 9 tools E2E. Full agent workflow | Week 7 |
 | **MCP Complete** | v0.2.0 | Core tools + plugin. Feature-complete | Week 11 |
-| **MCP Production** | v1.0.0 | Resilient, observable, distributed | Week 15 |
+| **MCP Production** | v1.0.0 | Resilient, observable, distributed, gap features | Week 17 |
 
 ---
 
@@ -270,10 +288,10 @@ Phase 3
 
 | Phase | Epics | Tasks | Focused days |
 |---|---|---|---|
-| Phase 1 | 4 | 26 | ~14 |
+| Phase 1 | 4 | 27 | ~14 |
 | Phase 2 | 3 | 14 | ~8 |
-| Phase 3 | 3 | 9 | ~6 |
-| **Total** | **10** | **49** | **~28** |
+| Phase 3 | 4 | 13 | ~8 |
+| **Total** | **11** | **54** | **~30** |
 
 ---
 
