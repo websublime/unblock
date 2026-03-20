@@ -516,15 +516,38 @@ mod tests {
         use super::*;
         use proptest::prelude::*;
 
+        /// Strategy to generate a random `IssueState`.
+        fn arb_issue_state() -> impl Strategy<Value = IssueState> {
+            prop_oneof![Just(IssueState::Open), Just(IssueState::Closed),]
+        }
+
+        /// Strategy to generate a random `Priority`.
+        fn arb_priority() -> impl Strategy<Value = Priority> {
+            prop_oneof![
+                Just(Priority::P0),
+                Just(Priority::P1),
+                Just(Priority::P2),
+                Just(Priority::P3),
+                Just(Priority::P4),
+            ]
+        }
+
         proptest! {
             #[test]
             fn ready_set_never_contains_issue_with_open_blocker(
                 num_issues in 1_u64..100,
+                issue_states in proptest::collection::vec(arb_issue_state(), 1..100),
+                issue_priorities in proptest::collection::vec(arb_priority(), 1..100),
                 edges in proptest::collection::vec((1_u64..100, 1_u64..100), 0..200),
             ) {
-                // Generate issues numbered 1..=num_issues, all open.
+                // Generate issues with random states and priorities.
                 let issues: Vec<Issue> = (1..=num_issues)
-                    .map(|n| make_issue(n, IssueState::Open, Priority::P2))
+                    .map(|n| {
+                        let idx = (n - 1) as usize;
+                        let state = issue_states.get(idx).copied().unwrap_or(IssueState::Open);
+                        let priority = issue_priorities.get(idx).copied().unwrap_or(Priority::P2);
+                        make_issue(n, state, priority)
+                    })
                     .collect();
 
                 // Filter edges to only reference existing issue numbers.
@@ -537,7 +560,7 @@ mod tests {
                 let graph = DependencyGraph::build(&issues, &blocking_edges);
                 let ready = graph.compute_ready_set(&issues);
 
-                // Invariant: no issue in the ready set has an open blocker.
+                // Invariant 1: no issue in the ready set has an open blocker.
                 for summary in &ready {
                     if let Some(&node_idx) = graph.node_map.get(&summary.number) {
                         for neighbor_idx in graph.graph.neighbors_directed(node_idx, Direction::Outgoing) {
@@ -551,6 +574,32 @@ mod tests {
                             );
                         }
                     }
+                }
+
+                // Invariant 2: every issue in the ready set must be IssueState::Open.
+                for summary in &ready {
+                    let original = issues.iter().find(|i| i.number == summary.number);
+                    if let Some(issue) = original {
+                        prop_assert_eq!(
+                            issue.state,
+                            IssueState::Open,
+                            "Ready issue {} should be Open, was {:?}",
+                            summary.number,
+                            issue.state
+                        );
+                    }
+                }
+
+                // Invariant 3: ready set is sorted by priority ASC, then created_at ASC.
+                for window in ready.windows(2) {
+                    let a_key = window[0].priority.as_sort_key();
+                    let b_key = window[1].priority.as_sort_key();
+                    prop_assert!(
+                        (a_key, window[0].created_at) <= (b_key, window[1].created_at),
+                        "Ready set not sorted: issue {} (P{}, {:?}) should come before {} (P{}, {:?})",
+                        window[0].number, a_key, window[0].created_at,
+                        window[1].number, b_key, window[1].created_at
+                    );
                 }
             }
         }
