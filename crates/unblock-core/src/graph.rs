@@ -205,6 +205,15 @@ impl DependencyGraph {
     ///
     /// If `closed_number` is not present in the graph, an empty `Vec` is
     /// returned without panicking.
+    ///
+    /// # Note on `_all_issues`
+    ///
+    /// The `_all_issues` parameter is intentionally unused in this initial
+    /// implementation. It is part of the public signature because future
+    /// enhancements (e.g., ancestry filtering, subgraph scoping, enriching
+    /// cascade results with full [`Issue`] metadata) will require access to
+    /// the complete issue list beyond what the graph topology alone provides.
+    /// Including it now avoids a breaking API change later.
     #[must_use]
     pub fn compute_unblock_cascade(&self, closed_number: u64, _all_issues: &[Issue]) -> Vec<u64> {
         // Look up the node for the issue being closed.
