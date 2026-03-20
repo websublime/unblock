@@ -38,7 +38,7 @@ impl GitHubClient {
     ///
     /// Builds a `reqwest::Client` with the following default headers:
     /// - `Authorization: Bearer {token}`
-    /// - `User-Agent: unblock-mcp/{version}`
+    /// - `User-Agent: unblock-github/{version}`
     /// - `Accept: application/vnd.github+json`
     /// - `X-GitHub-Api-Version: 2022-11-28`
     ///
@@ -65,9 +65,12 @@ impl GitHubClient {
         );
 
         // User-Agent header.
+        // Uses unblock-github crate name + version since this library is shared
+        // across products (MCP server, desktop app). env!("CARGO_PKG_VERSION")
+        // resolves to this crate's version, not the binary's.
         headers.insert(
             USER_AGENT,
-            HeaderValue::from_static(concat!("unblock-mcp/", env!("CARGO_PKG_VERSION"))),
+            HeaderValue::from_static(concat!("unblock-github/", env!("CARGO_PKG_VERSION"))),
         );
 
         // Accept header — GitHub JSON format.
