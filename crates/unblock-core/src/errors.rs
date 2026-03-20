@@ -153,7 +153,7 @@ mod tests {
         }
         .build();
         assert!(err.to_string().contains("bot-1"));
-        assert!(err.to_string().contains("7"));
+        assert!(err.to_string().contains('7'));
         assert_eq!(err.status_code(), 409);
     }
 
@@ -194,7 +194,7 @@ mod tests {
     fn issue_not_closed_display_and_status() {
         let err = IssueNotClosedSnafu { number: 3_u64 }.build();
         let msg = err.to_string();
-        assert!(msg.contains("3"));
+        assert!(msg.contains('3'));
         assert!(msg.contains("not closed"));
         assert_eq!(err.status_code(), 409);
     }
@@ -302,7 +302,8 @@ mod tests {
 
         for err in &errors {
             // This line would fail to compile if DomainError didn't impl Error
-            let _dyn_err: &dyn std::error::Error = err;
+            let dyn_err: &dyn std::error::Error = err;
+            _ = dyn_err;
             assert!(!err.to_string().is_empty());
         }
     }
