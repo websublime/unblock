@@ -788,10 +788,9 @@ mod tests {
                     .collect();
                 if let Some(&closed_number) = open_issues.first() {
                     let cascade = graph.compute_unblock_cascade(closed_number, &issues);
+                    // Soundness: every returned issue has no remaining open blockers.
                     for &unblocked_num in &cascade {
-                        // Every cascaded issue must be a dependent of closed_number.
                         if let Some(&dep_node) = graph.node_map.get(&unblocked_num) {
-                            // Check all blockers of this dependent are resolved.
                             for blocker_idx in graph.graph.neighbors_directed(dep_node, Direction::Outgoing) {
                                 let blocker_num = graph.graph[blocker_idx];
                                 if blocker_num == closed_number {
@@ -803,6 +802,37 @@ mod tests {
                                     "Cascade returned {} but blocker {} is still open",
                                     unblocked_num,
                                     blocker_num
+                                );
+                            }
+                        }
+                    }
+
+                    // Completeness: every dependent of closed_number whose blockers
+                    // are all resolved MUST appear in the cascade result.
+                    let cascade_set: std::collections::HashSet<u64> =
+                        cascade.iter().copied().collect();
+                    if let Some(&closed_node) = graph.node_map.get(&closed_number) {
+                        for dep_idx in graph.graph.neighbors_directed(closed_node, Direction::Incoming) {
+                            let dep_number = graph.graph[dep_idx];
+                            let all_resolved = graph
+                                .graph
+                                .neighbors_directed(dep_idx, Direction::Outgoing)
+                                .all(|blocker_idx| {
+                                    let blocker_num = graph.graph[blocker_idx];
+                                    if blocker_num == closed_number {
+                                        return true;
+                                    }
+                                    graph
+                                        .issue_state
+                                        .get(&blocker_num)
+                                        .is_some_and(|s| *s == IssueState::Closed)
+                                });
+                            if all_resolved {
+                                prop_assert!(
+                                    cascade_set.contains(&dep_number),
+                                    "Issue {} has all blockers resolved after closing {} but is missing from cascade",
+                                    dep_number,
+                                    closed_number
                                 );
                             }
                         }
