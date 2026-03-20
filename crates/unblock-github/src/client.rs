@@ -31,6 +31,8 @@ pub struct GitHubClient {
     repo: String,
     /// Optional GitHub Projects V2 number.
     project_number: Option<u64>,
+    // TODO(unblock-467.6): Add token, project_id, and field_ids fields per ARCH §8.1
+    // when extending the struct for Projects V2 field management.
 }
 
 impl GitHubClient {
