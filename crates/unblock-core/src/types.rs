@@ -175,7 +175,7 @@ pub struct BlockingEdge {
 ///
 /// Contains only the fields needed for display and sorting, avoiding the
 /// full weight of [`Issue`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueSummary {
     /// GitHub issue number.
     pub number: u64,
