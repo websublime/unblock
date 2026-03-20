@@ -216,6 +216,17 @@ pub struct BodySections {
     pub acceptance_criteria: Option<String>,
 }
 
+impl From<&str> for BodySections {
+    /// Create `BodySections` by parsing a markdown body.
+    ///
+    /// Equivalent to [`BodySections::from_markdown()`]. Enables idiomatic
+    /// conversion via `BodySections::from("## Description\n\n...")` and
+    /// `.into()` in generic contexts.
+    fn from(body: &str) -> Self {
+        Self::from_markdown(body)
+    }
+}
+
 impl BodySections {
     /// Parse structured sections from a markdown body.
     ///
@@ -386,6 +397,30 @@ mod tests {
         ] {
             assert!(p.as_sort_key() <= 4);
         }
+    }
+
+    // ── From<&str> for BodySections ─────────────────────────────────────
+
+    #[test]
+    fn from_str_delegates_to_from_markdown() {
+        let body = "\
+## Description
+
+A description.
+
+## Design Notes
+
+Some notes.";
+
+        let from_trait: BodySections = body.into();
+        let from_method = BodySections::from_markdown(body);
+        assert_eq!(from_trait, from_method);
+    }
+
+    #[test]
+    fn from_str_empty_body() {
+        let sections = BodySections::from("");
+        assert_eq!(sections, BodySections::default());
     }
 
     // ── BodySections::from_markdown ─────────────────────────────────────
