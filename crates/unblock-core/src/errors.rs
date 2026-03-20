@@ -119,9 +119,13 @@ impl DomainError {
     #[must_use]
     pub fn status_code(&self) -> u16 {
         match self {
+            // 404 Not Found
             Self::IssueNotFound { .. } | Self::FieldNotFound { .. } => 404,
+            // 400 Bad Request
             Self::Validation { .. } => 400,
+            // 422 Unprocessable Entity
             Self::CircularDependency { .. } => 422,
+            // 409 Conflict
             Self::AlreadyClaimed { .. }
             | Self::IssueBlocked { .. }
             | Self::IssueDeferred { .. }
