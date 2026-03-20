@@ -163,7 +163,7 @@ pub enum IssueType {
 ///
 /// Mapped from GitHub's native `blockedBy` relationship.
 /// The edge direction is: `source` is blocked by `target`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BlockingEdge {
     /// Issue number that is blocked.
     pub source: u64,
