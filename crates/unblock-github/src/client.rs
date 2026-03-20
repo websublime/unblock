@@ -185,6 +185,10 @@ impl GitHubClient {
         }
 
         // Fall back to reading the git remote origin URL.
+        // NOTE: Uses a relative path per the bead spec ("read .git/config in cwd").
+        // This assumes the process CWD is the repository root at the time of client
+        // construction. For the MCP server, this is guaranteed by the stdio transport
+        // launching in the workspace root.
         let git_config = std::fs::read_to_string(".git/config").map_err(|e| {
             GitRemoteSnafu {
                 message: format!("failed to read .git/config: {e}"),
