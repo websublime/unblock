@@ -1229,9 +1229,19 @@ pub struct Config {
 }
 
 impl Config {
+    /// Convenience wrapper — reads from `std::env::var`.
     pub fn load() -> Result<Self, DomainError> {
+        Self::load_from(|key| std::env::var(key))
+    }
+
+    /// Accepts a custom env reader so tests can supply a HashMap-backed
+    /// closure instead of mutating process-global state (`std::env::set_var`
+    /// is `unsafe` in edition 2024).
+    pub fn load_from(
+        env: impl Fn(&str) -> Result<String, VarError>,
+    ) -> Result<Self, DomainError> {
         // ...
-        let api_base_url = env::var("GITHUB_API_URL")
+        let api_base_url = env("GITHUB_API_URL")
             .unwrap_or_else(|_| "https://api.github.com".to_string())
             .trim_end_matches('/')
             .to_string();
@@ -1240,7 +1250,7 @@ impl Config {
 }
 ```
 
-No config file. Environment variables only. The GitHub version is simpler — no TOML parsing, no file search, no merge logic.
+No config file. Environment variables only. The GitHub version is simpler — no TOML parsing, no file search, no merge logic. The `load_from` pattern avoids `unsafe` in edition 2024 and eliminates flaky tests from concurrent env-var mutation.
 
 **GitHub Enterprise compatibility:** `GITHUB_API_URL` follows the convention used by `gh` CLI (`GH_HOST`) and GitHub Actions (`GITHUB_API_URL`). For GHE Server the value is `https://<host>/api/v3`; for GHE Cloud with data residency it is `https://api.<host>`. The trailing-slash normalisation avoids double-slash bugs in URL construction.
 
