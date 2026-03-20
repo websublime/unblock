@@ -121,8 +121,18 @@ impl DependencyGraph {
     /// Per ARCH section 6.2, defer-until is a post-filter at the MCP tool layer, not
     /// in the graph engine. The graph engine remains date-free.
     ///
+    /// **Contract:** The `issues` slice should match the issues used to build the
+    /// graph. The blocker evaluation uses the graph's internal state snapshot (built
+    /// at construction time), while open-issue filtering uses the passed-in slice.
+    /// Passing a different set of issues than what was used in `build()` may produce
+    /// inconsistent results.
+    ///
     /// Results are sorted by priority ascending (P0 first), then by `created_at`
     /// ascending (oldest first) as a tiebreaker.
+    // TODO(unblock-45a.4): ARCH §6.2 specifies Status == Open filter here (excluding
+    // InProgress, Blocked, Deferred, Closed). Currently only IssueState::Open is
+    // checked. The ready tool layer partially handles this (excludes InProgress),
+    // but consider adding Status::Open filtering in the graph engine per ARCH spec.
     #[must_use]
     pub fn compute_ready_set(&self, issues: &[Issue]) -> Vec<IssueSummary> {
         let mut ready: Vec<IssueSummary> = Vec::new();
@@ -146,6 +156,10 @@ impl DependencyGraph {
                     })
             } else {
                 // Issue not in graph — treat as unblocked (no edges).
+                tracing::debug!(
+                    issue = issue.number,
+                    "Issue not found in graph node_map, treating as unblocked"
+                );
                 false
             };
 
