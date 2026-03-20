@@ -257,7 +257,7 @@ mod tests {
         }
     }
 
-    /// Helper to create an issue with a specific created_at for sort testing.
+    /// Helper to create an issue with a specific `created_at` for sort testing.
     fn make_issue_at(
         number: u64,
         state: IssueState,
@@ -474,7 +474,7 @@ mod tests {
         // Build graph with issue 1 only, but compute ready set with issue 1 and 2.
         let issue1 = make_issue(1, IssueState::Open, Priority::P2);
         let issue2 = make_issue(2, IssueState::Open, Priority::P1);
-        let graph = DependencyGraph::build(&[issue1.clone()], &[]);
+        let graph = DependencyGraph::build(std::slice::from_ref(&issue1), &[]);
         let ready = graph.compute_ready_set(&[issue1, issue2]);
 
         let ready_numbers: Vec<u64> = ready.iter().map(|s| s.number).collect();
@@ -543,7 +543,7 @@ mod tests {
                 // Generate issues with random states and priorities.
                 let issues: Vec<Issue> = (1..=num_issues)
                     .map(|n| {
-                        let idx = (n - 1) as usize;
+                        let idx = usize::try_from(n - 1).expect("issue number fits in usize");
                         let state = issue_states.get(idx).copied().unwrap_or(IssueState::Open);
                         let priority = issue_priorities.get(idx).copied().unwrap_or(Priority::P2);
                         make_issue(n, state, priority)
