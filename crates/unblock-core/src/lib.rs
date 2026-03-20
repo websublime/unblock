@@ -22,5 +22,5 @@ pub mod cache;
 /// Environment-based configuration.
 pub mod config;
 
-/// Domain error types.
+/// Domain error types with HTTP status code mapping.
 pub mod errors;
