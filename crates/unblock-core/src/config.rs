@@ -91,6 +91,21 @@ const DEFAULT_AGENT: &str = "agent";
 /// Default GitHub API base URL.
 const DEFAULT_API_BASE_URL: &str = "https://api.github.com";
 
+/// Validates that a repository string is in `owner/repo` format.
+///
+/// The string must contain exactly one `/`, with non-empty `owner` and `repo`
+/// segments on each side.
+fn validate_repo_format(repo: &str) -> Result<(), crate::errors::DomainError> {
+    let parts: Vec<&str> = repo.split('/').collect();
+    if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
+        return Err(ValidationSnafu {
+            message: format!("UNBLOCK_REPO must be in 'owner/repo' format, got: {repo}"),
+        }
+        .build());
+    }
+    Ok(())
+}
+
 impl Config {
     /// Loads configuration from the process environment.
     ///
@@ -139,7 +154,13 @@ impl Config {
             .trim_end_matches('/')
             .to_owned();
 
-        let repo = env("UNBLOCK_REPO").ok();
+        let repo = match env("UNBLOCK_REPO") {
+            Ok(val) => {
+                validate_repo_format(&val)?;
+                Some(val)
+            }
+            Err(_) => None,
+        };
 
         let project_number = match env("UNBLOCK_PROJECT") {
             Ok(val) => Some(val.parse::<u64>().map_err(|_| {
@@ -282,5 +303,78 @@ mod tests {
         let env = make_env(&[]);
         let err = Config::load_from(env).unwrap_err();
         assert_eq!(err.status_code(), 400);
+    }
+
+    #[test]
+    fn valid_repo_format_accepted() {
+        let env = make_env(&[
+            ("GITHUB_TOKEN", "ghp_test"),
+            ("UNBLOCK_REPO", "acme/widgets"),
+        ]);
+        let config = Config::load_from(env).expect("should load");
+        assert_eq!(config.repo.as_deref(), Some("acme/widgets"));
+    }
+
+    #[test]
+    fn repo_missing_slash_returns_validation_error() {
+        let env = make_env(&[
+            ("GITHUB_TOKEN", "ghp_test"),
+            ("UNBLOCK_REPO", "just-a-name"),
+        ]);
+        let err = Config::load_from(env).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("UNBLOCK_REPO"),
+            "error should mention UNBLOCK_REPO: {msg}"
+        );
+        assert!(
+            msg.contains("owner/repo"),
+            "error should mention expected format: {msg}"
+        );
+    }
+
+    #[test]
+    fn repo_extra_segments_returns_validation_error() {
+        let env = make_env(&[
+            ("GITHUB_TOKEN", "ghp_test"),
+            ("UNBLOCK_REPO", "owner/repo/extra"),
+        ]);
+        let err = Config::load_from(env).unwrap_err();
+        assert!(err.to_string().contains("UNBLOCK_REPO"));
+    }
+
+    #[test]
+    fn repo_empty_owner_returns_validation_error() {
+        let env = make_env(&[("GITHUB_TOKEN", "ghp_test"), ("UNBLOCK_REPO", "/repo")]);
+        let err = Config::load_from(env).unwrap_err();
+        assert!(err.to_string().contains("UNBLOCK_REPO"));
+    }
+
+    #[test]
+    fn repo_empty_repo_returns_validation_error() {
+        let env = make_env(&[("GITHUB_TOKEN", "ghp_test"), ("UNBLOCK_REPO", "owner/")]);
+        let err = Config::load_from(env).unwrap_err();
+        assert!(err.to_string().contains("UNBLOCK_REPO"));
+    }
+
+    #[test]
+    fn repo_just_slash_returns_validation_error() {
+        let env = make_env(&[("GITHUB_TOKEN", "ghp_test"), ("UNBLOCK_REPO", "/")]);
+        let err = Config::load_from(env).unwrap_err();
+        assert!(err.to_string().contains("UNBLOCK_REPO"));
+    }
+
+    #[test]
+    fn repo_empty_string_returns_validation_error() {
+        let env = make_env(&[("GITHUB_TOKEN", "ghp_test"), ("UNBLOCK_REPO", "")]);
+        let err = Config::load_from(env).unwrap_err();
+        assert!(err.to_string().contains("UNBLOCK_REPO"));
+    }
+
+    #[test]
+    fn repo_not_set_is_none() {
+        let env = make_env(&[("GITHUB_TOKEN", "ghp_test")]);
+        let config = Config::load_from(env).expect("should load");
+        assert_eq!(config.repo, None);
     }
 }
