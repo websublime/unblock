@@ -191,6 +191,63 @@ impl DependencyGraph {
         ready
     }
 
+    /// Compute which issues become fully unblocked when `closed_number` closes.
+    ///
+    /// Finds all issues that list `closed_number` as a blocker, then checks
+    /// whether each one's **remaining** blockers are all closed. An issue is
+    /// returned only if every blocker is either `closed_number` itself or
+    /// already [`IssueState::Closed`] in the graph's state snapshot.
+    ///
+    /// This method is purely computational — it does not mutate the graph,
+    /// update issue state, or perform any I/O. It is called by the MCP
+    /// `close` tool to determine which downstream issues need field updates
+    /// (e.g., `Status → Ready`, cascade comment).
+    ///
+    /// If `closed_number` is not present in the graph, an empty `Vec` is
+    /// returned without panicking.
+    #[must_use]
+    pub fn compute_unblock_cascade(&self, closed_number: u64, _all_issues: &[Issue]) -> Vec<u64> {
+        // Look up the node for the issue being closed.
+        let Some(&closed_node) = self.node_map.get(&closed_number) else {
+            return Vec::new();
+        };
+
+        // Find issues that are blocked BY closed_number.
+        // Edge direction: source -> target means "source is blocked by target".
+        // So nodes with an edge TO closed_number are its Incoming neighbors.
+        let dependents = self
+            .graph
+            .neighbors_directed(closed_node, Direction::Incoming);
+
+        let mut unblocked = Vec::new();
+
+        for dependent_idx in dependents {
+            let dependent_number = self.graph[dependent_idx];
+
+            // Check ALL blockers of this dependent (its Outgoing neighbors).
+            let all_blockers_resolved = self
+                .graph
+                .neighbors_directed(dependent_idx, Direction::Outgoing)
+                .all(|blocker_idx| {
+                    let blocker_number = self.graph[blocker_idx];
+                    // Treat closed_number as closed even if issue_state says Open.
+                    if blocker_number == closed_number {
+                        return true;
+                    }
+                    // All other blockers must already be Closed.
+                    self.issue_state
+                        .get(&blocker_number)
+                        .is_some_and(|state| *state == IssueState::Closed)
+                });
+
+            if all_blockers_resolved {
+                unblocked.push(dependent_number);
+            }
+        }
+
+        unblocked
+    }
+
     /// Returns a reference to the internal node map.
     ///
     /// Useful for downstream methods (cascade, cycle detection, tree traversal)
@@ -510,6 +567,127 @@ mod tests {
         assert_eq!(ready[0].number, 3);
     }
 
+    // ── compute_unblock_cascade ────────────────────────────────────────────
+
+    #[test]
+    fn cascade_a_blocks_b_and_c_returns_both() {
+        // A (1) blocks B (2) and C (3). Close A → both B and C are fully unblocked.
+        let issues = vec![
+            make_issue(1, IssueState::Open, Priority::P2),
+            make_issue(2, IssueState::Open, Priority::P1),
+            make_issue(3, IssueState::Open, Priority::P0),
+        ];
+        // B is blocked by A, C is blocked by A.
+        let edges = vec![
+            BlockingEdge {
+                source: 2,
+                target: 1,
+            },
+            BlockingEdge {
+                source: 3,
+                target: 1,
+            },
+        ];
+        let graph = DependencyGraph::build(&issues, &edges);
+        let mut cascade = graph.compute_unblock_cascade(1, &issues);
+        cascade.sort_unstable();
+        assert_eq!(cascade, vec![2, 3]);
+    }
+
+    #[test]
+    fn cascade_co_blockers_returns_empty_when_other_open() {
+        // A (1) and D (4) both block E (5). Close A → E still has D as open blocker.
+        let issues = vec![
+            make_issue(1, IssueState::Open, Priority::P2),
+            make_issue(4, IssueState::Open, Priority::P1),
+            make_issue(5, IssueState::Open, Priority::P0),
+        ];
+        // E is blocked by A and D.
+        let edges = vec![
+            BlockingEdge {
+                source: 5,
+                target: 1,
+            },
+            BlockingEdge {
+                source: 5,
+                target: 4,
+            },
+        ];
+        let graph = DependencyGraph::build(&issues, &edges);
+        let cascade = graph.compute_unblock_cascade(1, &issues);
+        assert!(
+            cascade.is_empty(),
+            "E still has open blocker D, cascade should be empty but got {cascade:?}"
+        );
+    }
+
+    #[test]
+    fn cascade_co_blockers_returns_unblocked_when_other_closed() {
+        // A (1) and D (4) both block E (5). D is already closed. Close A → E is unblocked.
+        let issues = vec![
+            make_issue(1, IssueState::Open, Priority::P2),
+            make_issue(4, IssueState::Closed, Priority::P1),
+            make_issue(5, IssueState::Open, Priority::P0),
+        ];
+        let edges = vec![
+            BlockingEdge {
+                source: 5,
+                target: 1,
+            },
+            BlockingEdge {
+                source: 5,
+                target: 4,
+            },
+        ];
+        let graph = DependencyGraph::build(&issues, &edges);
+        let cascade = graph.compute_unblock_cascade(1, &issues);
+        assert_eq!(cascade, vec![5]);
+    }
+
+    #[test]
+    fn cascade_blocks_nothing_returns_empty() {
+        // A (1) blocks nothing.
+        let issues = vec![
+            make_issue(1, IssueState::Open, Priority::P2),
+            make_issue(2, IssueState::Open, Priority::P1),
+        ];
+        let graph = DependencyGraph::build(&issues, &[]);
+        let cascade = graph.compute_unblock_cascade(1, &issues);
+        assert!(cascade.is_empty());
+    }
+
+    #[test]
+    fn cascade_closed_number_not_in_graph_returns_empty() {
+        // closed_number 99 doesn't exist in the graph.
+        let issues = vec![make_issue(1, IssueState::Open, Priority::P2)];
+        let graph = DependencyGraph::build(&issues, &[]);
+        let cascade = graph.compute_unblock_cascade(99, &issues);
+        assert!(cascade.is_empty());
+    }
+
+    #[test]
+    fn cascade_empty_graph_returns_empty() {
+        let graph = DependencyGraph::build(&[], &[]);
+        let cascade = graph.compute_unblock_cascade(1, &[]);
+        assert!(cascade.is_empty());
+    }
+
+    #[test]
+    fn cascade_returns_issue_numbers_not_summaries() {
+        // Verify the return type is Vec<u64> (compile-time check, but let's be explicit).
+        let issues = vec![
+            make_issue(1, IssueState::Open, Priority::P2),
+            make_issue(2, IssueState::Open, Priority::P1),
+        ];
+        let edges = vec![BlockingEdge {
+            source: 2,
+            target: 1,
+        }];
+        let graph = DependencyGraph::build(&issues, &edges);
+        let cascade: Vec<u64> = graph.compute_unblock_cascade(1, &issues);
+        assert_eq!(cascade, vec![2]);
+    }
+
     // ── Proptest ──────────────────────────────────────────────────────────
 
     mod proptests {
@@ -590,7 +768,39 @@ mod tests {
                     }
                 }
 
-                // Invariant 3: ready set is sorted by priority ASC, then created_at ASC.
+                // Invariant 3: cascade result is a subset of dependents, and every
+                // returned issue has no remaining open blockers (treating closed_number
+                // as closed).
+                // Pick an arbitrary open issue to close for cascade testing.
+                let open_issues: Vec<u64> = issues
+                    .iter()
+                    .filter(|i| i.state == IssueState::Open)
+                    .map(|i| i.number)
+                    .collect();
+                if let Some(&closed_number) = open_issues.first() {
+                    let cascade = graph.compute_unblock_cascade(closed_number, &issues);
+                    for &unblocked_num in &cascade {
+                        // Every cascaded issue must be a dependent of closed_number.
+                        if let Some(&dep_node) = graph.node_map.get(&unblocked_num) {
+                            // Check all blockers of this dependent are resolved.
+                            for blocker_idx in graph.graph.neighbors_directed(dep_node, Direction::Outgoing) {
+                                let blocker_num = graph.graph[blocker_idx];
+                                if blocker_num == closed_number {
+                                    continue; // treated as closed
+                                }
+                                let blocker_state = graph.issue_state.get(&blocker_num);
+                                prop_assert!(
+                                    blocker_state == Some(&IssueState::Closed),
+                                    "Cascade returned {} but blocker {} is still open",
+                                    unblocked_num,
+                                    blocker_num
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // Invariant 4: ready set is sorted by priority ASC, then created_at ASC.
                 for window in ready.windows(2) {
                     let a_key = window[0].priority.as_sort_key();
                     let b_key = window[1].priority.as_sort_key();
