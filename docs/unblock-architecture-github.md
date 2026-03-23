@@ -595,7 +595,7 @@ impl GitHubClient {
 
     /// Build a REST API URL. Works for both github.com and GHE.
     /// e.g. "{api_base_url}/repos/{owner}/{repo}/issues"
-    fn rest_url(&self, path: &str) -> String {
+    pub fn rest_url(&self, path: &str) -> String {
         format!("{}{path}", self.api_base_url)
     }
 
@@ -603,7 +603,7 @@ impl GitHubClient {
     /// github.com:   "https://api.github.com/graphql"
     /// GHE Server:   "https://<host>/api/graphql" (strips /v3 suffix)
     /// GHE Cloud:    "https://api.<host>/graphql"
-    fn graphql_url(&self) -> String {
+    pub fn graphql_url(&self) -> String {
         let base = self.api_base_url.strip_suffix("/v3").unwrap_or(&self.api_base_url);
         format!("{base}/graphql")
     }
