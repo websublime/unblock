@@ -116,6 +116,7 @@ impl Config {
     ///
     /// Returns [`DomainError::Validation`](crate::errors::DomainError::Validation) if:
     /// - `GITHUB_TOKEN` is not set or is an empty string.
+    /// - `UNBLOCK_REPO` is set but does not match the expected `owner/repo` format.
     /// - `UNBLOCK_CACHE_TTL` is set but cannot be parsed as `u64`.
     /// - `UNBLOCK_PROJECT` is set but cannot be parsed as `u64`.
     pub fn load() -> Result<Self, crate::errors::DomainError> {
@@ -132,6 +133,7 @@ impl Config {
     ///
     /// Returns [`DomainError::Validation`](crate::errors::DomainError::Validation) if:
     /// - `GITHUB_TOKEN` is not set or is an empty string.
+    /// - `UNBLOCK_REPO` is set but does not match the expected `owner/repo` format.
     /// - `UNBLOCK_CACHE_TTL` is set but cannot be parsed as `u64`.
     /// - `UNBLOCK_PROJECT` is set but cannot be parsed as `u64`.
     pub fn load_from(
