@@ -69,3 +69,116 @@ pub enum Error {
         message: String,
     },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use snafu::IntoError;
+    use unblock_core::errors::IssueNotFoundSnafu;
+
+    #[test]
+    fn domain_display_delegates_to_source() {
+        let domain_err = IssueNotFoundSnafu { number: 42_u64 }.build();
+        let expected = domain_err.to_string();
+        let err = Error::from(domain_err);
+        assert_eq!(err.to_string(), expected);
+    }
+
+    #[test]
+    fn github_api_display() {
+        let err = GitHubApiSnafu {
+            message: "Not Found".to_owned(),
+        }
+        .build();
+        assert_eq!(err.to_string(), "GitHub API error: Not Found");
+    }
+
+    #[test]
+    fn github_graphql_display() {
+        let err = GitHubGraphQLSnafu {
+            errors: "Field 'x' not found".to_owned(),
+        }
+        .build();
+        assert_eq!(err.to_string(), "GitHub GraphQL error: Field 'x' not found");
+    }
+
+    #[tokio::test]
+    async fn github_unavailable_display() {
+        // Connect to localhost port 1 — reliably refused, no network needed.
+        let reqwest_err = reqwest::Client::new()
+            .get("http://[::1]:1")
+            .send()
+            .await
+            .expect_err("connection to port 1 should be refused");
+        let err = GitHubUnavailableSnafu.into_error(reqwest_err);
+        let msg = err.to_string();
+        assert!(
+            msg.starts_with("Cannot connect to GitHub: "),
+            "unexpected display: {msg}"
+        );
+    }
+
+    #[test]
+    fn rate_limited_display() {
+        let err = RateLimitedSnafu.build();
+        assert_eq!(err.to_string(), "GitHub rate limit exceeded");
+    }
+
+    #[test]
+    fn circuit_breaker_open_display() {
+        let err = CircuitBreakerOpenSnafu.build();
+        assert_eq!(
+            err.to_string(),
+            "Circuit breaker open \u{2014} GitHub consistently failing"
+        );
+    }
+
+    #[test]
+    fn project_not_configured_display() {
+        let err = ProjectNotConfiguredSnafu.build();
+        assert_eq!(
+            err.to_string(),
+            "Projects V2 not configured \u{2014} run `setup` first"
+        );
+    }
+
+    #[test]
+    fn git_remote_display() {
+        let err = GitRemoteSnafu {
+            message: "no origin remote".to_owned(),
+        }
+        .build();
+        assert_eq!(
+            err.to_string(),
+            "Failed to detect git remote: no origin remote"
+        );
+    }
+
+    #[test]
+    fn all_non_network_variants_implement_error_trait() {
+        let errors: Vec<Error> = vec![
+            Error::from(IssueNotFoundSnafu { number: 1_u64 }.build()),
+            GitHubApiSnafu {
+                message: "err".to_owned(),
+            }
+            .build(),
+            GitHubGraphQLSnafu {
+                errors: "err".to_owned(),
+            }
+            .build(),
+            RateLimitedSnafu.build(),
+            CircuitBreakerOpenSnafu.build(),
+            ProjectNotConfiguredSnafu.build(),
+            GitRemoteSnafu {
+                message: "err".to_owned(),
+            }
+            .build(),
+        ];
+
+        for err in &errors {
+            let dyn_err: &dyn std::error::Error = err;
+            _ = dyn_err;
+            assert!(!err.to_string().is_empty());
+        }
+    }
+}
