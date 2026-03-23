@@ -593,6 +593,28 @@ impl GitHubClient {
     /// Auto-detect owner/repo from git remote.
     fn resolve_repo(config: &Config) -> Result<(String, String), Error> { /* ... */ }
 
+    // -- Read-only accessors for downstream crates and testing --
+
+    /// Returns a reference to the underlying HTTP client.
+    #[must_use]
+    pub fn http(&self) -> &reqwest::Client { &self.http }
+
+    /// Returns the repository owner.
+    #[must_use]
+    pub fn owner(&self) -> &str { &self.owner }
+
+    /// Returns the repository name.
+    #[must_use]
+    pub fn repo(&self) -> &str { &self.repo }
+
+    /// Returns the GitHub API base URL.
+    #[must_use]
+    pub fn api_base_url(&self) -> &str { &self.api_base_url }
+
+    /// Returns the project number, if configured.
+    #[must_use]
+    pub fn project_number(&self) -> Option<u64> { self.project_number }
+
     /// Build a REST API URL. Works for both github.com and GHE.
     /// e.g. "{api_base_url}/repos/{owner}/{repo}/issues"
     pub fn rest_url(&self, path: &str) -> String {
