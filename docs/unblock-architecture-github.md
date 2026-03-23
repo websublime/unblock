@@ -1334,10 +1334,10 @@ impl DomainError {
 | `FieldNotFound` | 404 | Boot validation or `update` referencing missing field |
 | `Validation` | 400 | Any input validation failure |
 
-### 13.2 Infrastructure Errors (unblock-mcp)
+### 13.2 Infrastructure Errors (unblock-github)
 
 ```rust
-// crates/unblock-mcp/src/errors.rs
+// crates/unblock-github/src/errors.rs
 
 use snafu::prelude::*;
 use unblock_core::errors::DomainError;
@@ -1355,7 +1355,7 @@ pub enum Error {
     #[snafu(display("GitHub GraphQL error: {errors}"))]
     GitHubGraphQL { errors: String },
 
-    #[snafu(display("Cannot connect to GitHub"))]
+    #[snafu(display("Cannot connect to GitHub: {source}"))]
     GitHubUnavailable { source: reqwest::Error },
 
     #[snafu(display("GitHub rate limit exceeded"))]
@@ -1367,8 +1367,8 @@ pub enum Error {
     #[snafu(display("Projects V2 not configured — run `setup` first"))]
     ProjectNotConfigured,
 
-    #[snafu(display("Failed to detect git remote"))]
-    GitRemote { source: std::io::Error },
+    #[snafu(display("Failed to detect git remote: {message}"))]
+    GitRemote { message: String },
 }
 
 /// Convert to MCP protocol error.
