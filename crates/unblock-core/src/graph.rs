@@ -310,6 +310,11 @@ impl DependencyGraph {
     /// Returns `(issue_number, depth)` pairs **excluding** the root itself.
     /// If `root` is not in the graph the result is empty. Nodes are visited
     /// at most once (cycle-safe).
+    // DEVIATION(unblock-b6b.20): Returns Vec<(u64, usize)> instead of
+    // DependencyTree struct per ARCH §6.4. The richer type includes Status and
+    // IssueState per node with recursive TreeNode children. Upgrade when the
+    // show tool (unblock-45a.8) is implemented. See also unblock-b6b.21 for
+    // the missing TraversalDirection::Both variant.
     #[must_use]
     pub fn dependency_tree(
         &self,
