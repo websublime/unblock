@@ -148,6 +148,7 @@ mod tests {
             msg.starts_with("Cannot connect to GitHub: "),
             "unexpected display: {msg}"
         );
+        assert_eq!(err.status_code(), 503);
     }
 
     #[test]
