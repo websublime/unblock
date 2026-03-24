@@ -290,6 +290,22 @@ mod tests {
         assert!(!cache.is_fresh().await);
     }
 
+    // ── zero-duration TTL is never fresh ────────────────────────────────
+
+    #[tokio::test]
+    async fn zero_ttl_is_never_fresh() {
+        let cache = GraphCache::new(Duration::ZERO);
+        let (graph, ready_set) = test_graph();
+
+        cache.update(ready_set, graph).await;
+
+        // With a zero TTL the strict `elapsed() < ttl` check can never
+        // succeed — the cache is always stale immediately after population.
+        assert!(!cache.is_fresh().await);
+        assert!(cache.get_ready_set().await.is_none());
+        assert!(cache.get_graph().await.is_none());
+    }
+
     // ── concurrent readers ─────────────────────────────────────────────
 
     #[tokio::test]
