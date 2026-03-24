@@ -596,6 +596,7 @@ impl GitHubClient {
     // -- Read-only accessors for downstream crates and testing --
 
     /// Returns a reference to the underlying HTTP client.
+    /// Provisioned for upcoming `graphql.rs` and `mutations.rs` usage.
     #[must_use]
     pub fn http(&self) -> &reqwest::Client { &self.http }
 
