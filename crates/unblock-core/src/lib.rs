@@ -10,7 +10,7 @@
 //! - **Config** — environment-based configuration
 //! - **Errors** — domain error types with snafu
 
-/// Domain types: `Issue`, `IssueComment`, `Status`, `Priority`, `ReadyState`, `BlockingEdge`, `BodySections`.
+/// Domain types: `Issue`, `IssueComment`, `RelatedIssue`, `Status`, `Priority`, `ReadyState`, `BlockingEdge`, `BodySections`.
 pub mod types;
 
 /// Dependency graph engine: build, ready set, cascade, cycle detection.
