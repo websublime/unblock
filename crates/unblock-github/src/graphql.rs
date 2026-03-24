@@ -260,8 +260,8 @@ fn parse_issue(value: &serde_json::Value) -> Issue {
     let assignees = parse_string_nodes(value, "assignees", "login");
 
     let comments = parse_comments(value);
-    let blocked_by = parse_related_issues(value, "trackedInIssues");
-    let blocking = parse_related_issues(value, "trackedBy");
+    let blocked_by = parse_related_issues(value, "trackedBy");
+    let blocking = parse_related_issues(value, "trackedInIssues");
     let parent = parse_parent_issue(value);
     let sub_issues = parse_related_issues(value, "subIssues");
 
@@ -882,12 +882,12 @@ mod tests {
             },
             "trackedInIssues": {
                 "nodes": [
-                    {"number": 10, "title": "Dep A", "state": "OPEN"}
+                    {"number": 20, "title": "Blocks me", "state": "OPEN"}
                 ]
             },
             "trackedBy": {
                 "nodes": [
-                    {"number": 20, "title": "Blocked by me", "state": "OPEN"}
+                    {"number": 10, "title": "Dep A", "state": "OPEN"}
                 ]
             },
             "parent": {"number": 1, "title": "Epic", "state": "OPEN"},
