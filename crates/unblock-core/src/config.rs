@@ -91,6 +91,31 @@ const DEFAULT_AGENT: &str = "agent";
 /// Default GitHub API base URL.
 const DEFAULT_API_BASE_URL: &str = "https://api.github.com";
 
+/// The set of valid tracing log-level strings.
+///
+/// These correspond to the five levels supported by the `tracing` crate.
+/// Values are stored in lowercase; validation is case-insensitive.
+const VALID_LOG_LEVELS: [&str; 5] = ["error", "warn", "info", "debug", "trace"];
+
+/// Validates that a log-level string is one of the known tracing levels.
+///
+/// Comparison is case-insensitive. On failure, returns a
+/// [`DomainError::Validation`](crate::errors::DomainError::Validation) listing
+/// the accepted values.
+fn validate_log_level(level: &str) -> Result<(), crate::errors::DomainError> {
+    let lower = level.to_lowercase();
+    if VALID_LOG_LEVELS.contains(&lower.as_str()) {
+        Ok(())
+    } else {
+        Err(ValidationSnafu {
+            message: format!(
+                "UNBLOCK_LOG_LEVEL must be one of: error, warn, info, debug, trace; got: {level}"
+            ),
+        }
+        .build())
+    }
+}
+
 /// Validates that a repository string is in `owner/repo` format.
 ///
 /// The string must contain exactly one `/`, with non-empty `owner` and `repo`
@@ -119,6 +144,8 @@ impl Config {
     /// - `UNBLOCK_REPO` is set but does not match the expected `owner/repo` format.
     /// - `UNBLOCK_PROJECT` is set but cannot be parsed as `u64`.
     /// - `UNBLOCK_CACHE_TTL` is set but cannot be parsed as `u64`.
+    /// - `UNBLOCK_LOG_LEVEL` is set but is not one of: `error`, `warn`, `info`,
+    ///   `debug`, `trace`.
     pub fn load() -> Result<Self, crate::errors::DomainError> {
         Self::load_from(|key| std::env::var(key))
     }
@@ -136,6 +163,8 @@ impl Config {
     /// - `UNBLOCK_REPO` is set but does not match the expected `owner/repo` format.
     /// - `UNBLOCK_PROJECT` is set but cannot be parsed as `u64`.
     /// - `UNBLOCK_CACHE_TTL` is set but cannot be parsed as `u64`.
+    /// - `UNBLOCK_LOG_LEVEL` is set but is not one of: `error`, `warn`, `info`,
+    ///   `debug`, `trace`.
     pub fn load_from(
         env: impl Fn(&str) -> Result<String, VarError>,
     ) -> Result<Self, crate::errors::DomainError> {
@@ -187,6 +216,8 @@ impl Config {
         };
 
         let log_level = env("UNBLOCK_LOG_LEVEL").unwrap_or_else(|_| DEFAULT_LOG_LEVEL.to_owned());
+        validate_log_level(&log_level)?;
+        let log_level = log_level.to_lowercase();
 
         let otel_endpoint = env("UNBLOCK_OTEL_ENDPOINT").ok();
 
@@ -378,5 +409,51 @@ mod tests {
         let env = make_env(&[("GITHUB_TOKEN", "ghp_test")]);
         let config = Config::load_from(env).expect("should load");
         assert_eq!(config.repo, None);
+    }
+
+    #[test]
+    fn invalid_log_level_returns_validation_error() {
+        let env = make_env(&[
+            ("GITHUB_TOKEN", "ghp_test"),
+            ("UNBLOCK_LOG_LEVEL", "verbose"),
+        ]);
+        let err = Config::load_from(env).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("UNBLOCK_LOG_LEVEL"),
+            "error should mention UNBLOCK_LOG_LEVEL: {msg}"
+        );
+        assert!(
+            msg.contains("verbose"),
+            "error should echo the invalid value: {msg}"
+        );
+    }
+
+    #[test]
+    fn valid_log_levels_accepted() {
+        for level in &["error", "warn", "info", "debug", "trace"] {
+            let vars = [("GITHUB_TOKEN", "ghp_test"), ("UNBLOCK_LOG_LEVEL", level)];
+            let env = make_env(&vars);
+            let config = Config::load_from(env).unwrap_or_else(|e| {
+                panic!("level '{level}' should be valid but got error: {e}");
+            });
+            assert_eq!(config.log_level, *level);
+        }
+    }
+
+    #[test]
+    fn case_insensitive_log_level() {
+        for level in &["INFO", "Debug", "TRACE", "Warn", "ERROR"] {
+            let vars = [("GITHUB_TOKEN", "ghp_test"), ("UNBLOCK_LOG_LEVEL", level)];
+            let env = make_env(&vars);
+            let config = Config::load_from(env).unwrap_or_else(|e| {
+                panic!("level '{level}' should be valid (case-insensitive) but got error: {e}");
+            });
+            assert_eq!(
+                config.log_level,
+                level.to_lowercase(),
+                "log_level should be normalized to lowercase for '{level}'"
+            );
+        }
     }
 }
