@@ -1,8 +1,8 @@
 //! Domain types for the unblock system.
 //!
-//! Defines the core data structures: `Issue`, `IssueComment`, `IssueState`,
-//! `Status`, `Priority`, `ReadyState`, `IssueType`, `BlockingEdge`,
-//! `IssueSummary`, and `BodySections`.
+//! Defines the core data structures: `Issue`, `IssueComment`, `RelatedIssue`,
+//! `IssueState`, `Status`, `Priority`, `ReadyState`, `IssueType`,
+//! `BlockingEdge`, `IssueSummary`, and `BodySections`.
 //!
 //! All types are backend-agnostic — the GitHub client handles mapping from
 //! GitHub-specific field names. The graph engine works identically regardless
@@ -73,6 +73,14 @@ pub struct Issue {
     pub url: String,
     /// Comments on the issue (populated by `fetch_issue()`, empty for bulk fetches).
     pub comments: Vec<IssueComment>,
+    /// Issues that block this issue (populated by `fetch_issue()` only).
+    pub blocked_by: Vec<RelatedIssue>,
+    /// Issues that this issue blocks (populated by `fetch_issue()` only).
+    pub blocking: Vec<RelatedIssue>,
+    /// Parent issue if this is a sub-issue (populated by `fetch_issue()` only).
+    pub parent: Option<RelatedIssue>,
+    /// Sub-issues of this issue (populated by `fetch_issue()` only).
+    pub sub_issues: Vec<RelatedIssue>,
 }
 
 /// GitHub native issue state.
@@ -174,6 +182,21 @@ pub enum IssueType {
     Chore,
     /// A time-boxed investigation.
     Spike,
+}
+
+/// A lightweight reference to a related issue.
+///
+/// Used for dependency relationships (`blockedBy`, `blocking`),
+/// parent issues, and sub-issues returned by `fetch_issue()`.
+/// Contains only the fields available from nested GraphQL fragments.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RelatedIssue {
+    /// GitHub issue number.
+    pub number: u64,
+    /// Issue title.
+    pub title: String,
+    /// GitHub native issue state.
+    pub state: IssueState,
 }
 
 /// A blocking edge in the dependency graph.

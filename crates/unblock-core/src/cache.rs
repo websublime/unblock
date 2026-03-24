@@ -179,6 +179,10 @@ mod tests {
             updated_at: Utc::now(),
             url: format!("https://github.com/test/repo/issues/{number}"),
             comments: vec![],
+            blocked_by: vec![],
+            blocking: vec![],
+            parent: None,
+            sub_issues: vec![],
         }
     }
 
