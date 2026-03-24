@@ -16,6 +16,7 @@ petgraph = { workspace = true }
 chrono = { workspace = true }
 snafu = { workspace = true }
 tracing = { workspace = true }
+tokio = { version = "1", features = ["sync"] }
 
 [dev-dependencies]
 tokio = { workspace = true }
