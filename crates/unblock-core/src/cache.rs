@@ -17,17 +17,20 @@ use crate::types::IssueSummary;
 
 /// A snapshot of the computed graph state at a point in time.
 ///
+/// Crate-internal only — external consumers access cached data through
+/// [`GraphCache`] accessor methods (`get_ready_set`, `get_graph`).
+///
 /// Stored inside [`GraphCache`] and replaced atomically on each update.
 /// Both `ready_set` and `graph` are cloned out through the `RwLock` on read,
 /// so callers get an owned copy that does not hold the lock.
 #[derive(Debug, Clone)]
-pub struct CacheEntry {
+pub(crate) struct CacheEntry {
     /// The pre-computed ready set (issues with no active blockers).
-    pub ready_set: Vec<IssueSummary>,
+    pub(crate) ready_set: Vec<IssueSummary>,
     /// Timestamp when this entry was computed.
-    pub computed_at: Instant,
+    pub(crate) computed_at: Instant,
     /// The full dependency graph, enabling ad-hoc queries without a rebuild.
-    pub graph: DependencyGraph,
+    pub(crate) graph: DependencyGraph,
 }
 
 /// In-memory cache for the computed ready set and dependency graph.
