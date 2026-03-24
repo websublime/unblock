@@ -7,7 +7,12 @@
 //! The cache stores both the computed ready set and the full
 //! [`DependencyGraph`](crate::graph::DependencyGraph), so callers can run ad-hoc
 //! graph queries (e.g., dependency tree, cycle detection) without a full rebuild.
+//!
+//! Cached values are wrapped in [`Arc`](std::sync::Arc) so that read accessors return
+//! reference-counted handles instead of deep-cloning the entire data structure.
+//! This makes `get_ready_set()` and `get_graph()` O(1) regardless of graph size.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::RwLock;
@@ -21,16 +26,17 @@ use crate::types::IssueSummary;
 /// [`GraphCache`] accessor methods (`get_ready_set`, `get_graph`).
 ///
 /// Stored inside [`GraphCache`] and replaced atomically on each update.
-/// Both `ready_set` and `graph` are cloned out through the `RwLock` on read,
-/// so callers get an owned copy that does not hold the lock.
+/// Both `ready_set` and `graph` are wrapped in [`Arc`] so that read
+/// accessors return cheap reference-counted handles (O(1) atomic
+/// increment) instead of deep-cloning the entire data structure.
 #[derive(Debug, Clone)]
 pub(crate) struct CacheEntry {
     /// The pre-computed ready set (issues with no active blockers).
-    pub(crate) ready_set: Vec<IssueSummary>,
+    pub(crate) ready_set: Arc<Vec<IssueSummary>>,
     /// Timestamp when this entry was computed.
     pub(crate) computed_at: Instant,
     /// The full dependency graph, enabling ad-hoc queries without a rebuild.
-    pub(crate) graph: DependencyGraph,
+    pub(crate) graph: Arc<DependencyGraph>,
 }
 
 /// In-memory cache for the computed ready set and dependency graph.
@@ -74,27 +80,30 @@ impl GraphCache {
     /// Return the cached ready set if fresh, or `None` if stale or empty.
     ///
     /// A cache entry is considered fresh when it exists and
-    /// `computed_at + ttl > now`. The returned `Vec` is cloned out of the
-    /// lock so the caller owns it without holding the read guard.
+    /// `computed_at + ttl > now`. The returned [`Arc`] is a cheap
+    /// reference-counted handle (O(1) atomic increment) — no deep clone
+    /// occurs regardless of how many issues are in the ready set.
     #[must_use]
-    pub async fn get_ready_set(&self) -> Option<Vec<IssueSummary>> {
+    pub async fn get_ready_set(&self) -> Option<Arc<Vec<IssueSummary>>> {
         let guard = self.inner.read().await;
         guard
             .as_ref()
             .filter(|entry| entry.computed_at.elapsed() < self.ttl)
-            .map(|entry| entry.ready_set.clone())
+            .map(|entry| Arc::clone(&entry.ready_set))
     }
 
     /// Replace the cached entry with a new ready set and graph.
     ///
+    /// The provided values are wrapped in [`Arc`] before storing, so
+    /// subsequent reads return cheap reference-counted handles.
     /// Sets `computed_at` to `Instant::now()`, resetting the TTL window.
     /// This acquires an exclusive write lock.
     pub async fn update(&self, ready_set: Vec<IssueSummary>, graph: DependencyGraph) {
         let mut guard = self.inner.write().await;
         *guard = Some(CacheEntry {
-            ready_set,
+            ready_set: Arc::new(ready_set),
             computed_at: Instant::now(),
-            graph,
+            graph: Arc::new(graph),
         });
     }
 
@@ -123,14 +132,16 @@ impl GraphCache {
     /// Return the cached dependency graph if fresh, or `None` if stale or empty.
     ///
     /// Enables ad-hoc graph queries (dependency tree, cycle detection) without
-    /// triggering a full rebuild. The returned graph is cloned out of the lock.
+    /// triggering a full rebuild. The returned [`Arc`] is a cheap
+    /// reference-counted handle (O(1) atomic increment) — no deep clone
+    /// occurs regardless of graph size.
     #[must_use]
-    pub async fn get_graph(&self) -> Option<DependencyGraph> {
+    pub async fn get_graph(&self) -> Option<Arc<DependencyGraph>> {
         let guard = self.inner.read().await;
         guard
             .as_ref()
             .filter(|entry| entry.computed_at.elapsed() < self.ttl)
-            .map(|entry| entry.graph.clone())
+            .map(|entry| Arc::clone(&entry.graph))
     }
 }
 
@@ -199,7 +210,7 @@ mod tests {
 
         let cached = cache.get_ready_set().await;
         assert!(cached.is_some());
-        assert_eq!(cached.unwrap(), ready_set);
+        assert_eq!(*cached.unwrap(), ready_set);
     }
 
     // ── TTL expiry returns None ────────────────────────────────────────
@@ -360,18 +371,18 @@ mod tests {
         );
 
         // All ready_set readers should return the same data.
-        assert_eq!(results.0.unwrap(), ready_set);
-        assert_eq!(results.1.unwrap(), ready_set);
-        assert_eq!(results.2.unwrap(), ready_set);
-        assert_eq!(results.3.unwrap(), ready_set);
-        assert_eq!(results.4.unwrap(), ready_set);
+        assert_eq!(*results.0.unwrap(), ready_set);
+        assert_eq!(*results.1.unwrap(), ready_set);
+        assert_eq!(*results.2.unwrap(), ready_set);
+        assert_eq!(*results.3.unwrap(), ready_set);
+        assert_eq!(*results.4.unwrap(), ready_set);
         // Graph reader should return Some.
         assert!(results.5.is_some());
         // is_fresh should return true.
         assert!(results.6);
-        assert_eq!(results.7.unwrap(), ready_set);
-        assert_eq!(results.8.unwrap(), ready_set);
-        assert_eq!(results.9.unwrap(), ready_set);
+        assert_eq!(*results.7.unwrap(), ready_set);
+        assert_eq!(*results.8.unwrap(), ready_set);
+        assert_eq!(*results.9.unwrap(), ready_set);
     }
 
     // ── update replaces previous entry ─────────────────────────────────
