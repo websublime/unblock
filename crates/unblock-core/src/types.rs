@@ -201,6 +201,21 @@ pub struct IssueSummary {
     pub url: String,
 }
 
+/// Direction for dependency tree traversal.
+///
+/// Controls which edges are followed during BFS traversal of the
+/// dependency graph. Used by [`DependencyGraph::dependency_tree()`]
+/// to walk either upstream (blockers) or downstream (blocked issues).
+///
+/// [`DependencyGraph::dependency_tree()`]: crate::graph::DependencyGraph::dependency_tree
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TraversalDirection {
+    /// Follow outgoing edges — walk toward blockers (who blocks this issue?).
+    Upstream,
+    /// Follow incoming edges — walk toward dependents (what does this issue block?).
+    Downstream,
+}
+
 /// Parsed sections from the issue body markdown.
 ///
 /// Three sections only — each data type lives in the correct GitHub primitive.

@@ -8,12 +8,13 @@
 //! - `detect_all_cycles()` — find all circular dependencies via Tarjan's SCC
 //! - `dependency_tree()` — BFS traversal with depth limit
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use petgraph::Direction;
+use petgraph::algo::{has_path_connecting, tarjan_scc};
 use petgraph::graph::{DiGraph, NodeIndex};
 
-use crate::types::{BlockingEdge, Issue, IssueState, IssueSummary, Status};
+use crate::types::{BlockingEdge, Issue, IssueState, IssueSummary, Status, TraversalDirection};
 
 /// The dependency graph for a single repository.
 ///
@@ -255,6 +256,99 @@ impl DependencyGraph {
         }
 
         unblocked
+    }
+
+    /// Check whether adding a dependency edge from `source` to `target` would
+    /// create a cycle in the graph.
+    ///
+    /// Returns `true` if a path already exists from `target` to `source` — adding
+    /// the edge `source → target` would then close a cycle. Returns `false` when
+    /// either node is unknown to the graph (the edge would reference a
+    /// non-existent issue, so no cycle is possible).
+    ///
+    /// This is a pre-mutation check: call it **before** adding the edge. Used by
+    /// the `depends` MCP tool for early rejection of circular dependencies.
+    #[must_use]
+    pub fn would_create_cycle(&self, source: u64, target: u64) -> bool {
+        let Some(&source_idx) = self.node_map.get(&source) else {
+            return false;
+        };
+        let Some(&target_idx) = self.node_map.get(&target) else {
+            return false;
+        };
+
+        // If a path target → source already exists, adding source → target
+        // would close a cycle.
+        has_path_connecting(&self.graph, target_idx, source_idx, None)
+    }
+
+    /// Detect all cycles in the dependency graph.
+    ///
+    /// Uses Tarjan's strongly-connected-components algorithm. Returns every
+    /// SCC with more than one node — each inner `Vec` contains the issue
+    /// numbers that form a cycle. Single-node SCCs (the common case) are
+    /// filtered out. Returns an empty `Vec` when the graph is acyclic.
+    #[must_use]
+    pub fn detect_all_cycles(&self) -> Vec<Vec<u64>> {
+        tarjan_scc(&self.graph)
+            .into_iter()
+            .filter(|scc| scc.len() > 1)
+            .map(|scc| scc.into_iter().map(|idx| self.graph[idx]).collect())
+            .collect()
+    }
+
+    /// Walk the dependency tree from `root` via BFS, stopping at `max_depth`.
+    ///
+    /// - [`TraversalDirection::Upstream`] follows **outgoing** edges (blockers
+    ///   of `root` — "who blocks this issue?").
+    /// - [`TraversalDirection::Downstream`] follows **incoming** edges
+    ///   (dependents of `root` — "what does this issue block?").
+    ///
+    /// Returns `(issue_number, depth)` pairs **excluding** the root itself.
+    /// If `root` is not in the graph the result is empty. Nodes are visited
+    /// at most once (cycle-safe).
+    #[must_use]
+    pub fn dependency_tree(
+        &self,
+        root: u64,
+        direction: TraversalDirection,
+        max_depth: usize,
+    ) -> Vec<(u64, usize)> {
+        let Some(&root_idx) = self.node_map.get(&root) else {
+            return Vec::new();
+        };
+
+        let graph_direction = match direction {
+            // Upstream: follow outgoing edges (source → blocker).
+            TraversalDirection::Upstream => Direction::Outgoing,
+            // Downstream: follow incoming edges (dependent → source).
+            TraversalDirection::Downstream => Direction::Incoming,
+        };
+
+        let mut visited = HashSet::new();
+        visited.insert(root_idx);
+
+        let mut queue: VecDeque<(NodeIndex, usize)> = VecDeque::new();
+        queue.push_back((root_idx, 0));
+
+        let mut result = Vec::new();
+
+        while let Some((node, depth)) = queue.pop_front() {
+            if depth >= max_depth {
+                continue;
+            }
+
+            for neighbor in self.graph.neighbors_directed(node, graph_direction) {
+                if visited.insert(neighbor) {
+                    let issue_number = self.graph[neighbor];
+                    let next_depth = depth + 1;
+                    result.push((issue_number, next_depth));
+                    queue.push_back((neighbor, next_depth));
+                }
+            }
+        }
+
+        result
     }
 
     /// Returns a reference to the internal node map.
@@ -697,6 +791,341 @@ mod tests {
         assert_eq!(cascade, vec![2]);
     }
 
+    // ── would_create_cycle ──────────────────────────────────────────────
+
+    #[test]
+    fn would_create_cycle_true_when_reverse_path_exists() {
+        // B→A path exists. Adding A→B would create a cycle.
+        let issues = vec![
+            make_issue(1, IssueState::Open, Priority::P2),
+            make_issue(2, IssueState::Open, Priority::P1),
+        ];
+        // Edge: 2 is blocked by 1 (edge 2→1).
+        let edges = vec![BlockingEdge {
+            source: 2,
+            target: 1,
+        }];
+        let graph = DependencyGraph::build(&issues, &edges);
+        // Adding 1→2 would create cycle: 1→2→1.
+        assert!(graph.would_create_cycle(1, 2));
+    }
+
+    #[test]
+    fn would_create_cycle_false_when_no_reverse_path() {
+        let issues = vec![
+            make_issue(1, IssueState::Open, Priority::P2),
+            make_issue(2, IssueState::Open, Priority::P1),
+        ];
+        let graph = DependencyGraph::build(&issues, &[]);
+        assert!(!graph.would_create_cycle(1, 2));
+    }
+
+    #[test]
+    fn would_create_cycle_false_when_source_unknown() {
+        let issues = vec![make_issue(1, IssueState::Open, Priority::P2)];
+        let graph = DependencyGraph::build(&issues, &[]);
+        assert!(!graph.would_create_cycle(99, 1));
+    }
+
+    #[test]
+    fn would_create_cycle_false_when_target_unknown() {
+        let issues = vec![make_issue(1, IssueState::Open, Priority::P2)];
+        let graph = DependencyGraph::build(&issues, &[]);
+        assert!(!graph.would_create_cycle(1, 99));
+    }
+
+    #[test]
+    fn would_create_cycle_transitive_path() {
+        // Chain: 1→2→3. Adding 3→1 would create a cycle.
+        let issues = vec![
+            make_issue(1, IssueState::Open, Priority::P2),
+            make_issue(2, IssueState::Open, Priority::P1),
+            make_issue(3, IssueState::Open, Priority::P0),
+        ];
+        let edges = vec![
+            BlockingEdge {
+                source: 1,
+                target: 2,
+            },
+            BlockingEdge {
+                source: 2,
+                target: 3,
+            },
+        ];
+        let graph = DependencyGraph::build(&issues, &edges);
+        // Path 1→2→3 exists, so adding 3→1 closes the cycle.
+        assert!(graph.would_create_cycle(3, 1));
+        // But adding 1→3 (parallel edge) does not create a cycle.
+        assert!(!graph.would_create_cycle(1, 3));
+    }
+
+    #[test]
+    fn would_create_cycle_empty_graph() {
+        let graph = DependencyGraph::build(&[], &[]);
+        assert!(!graph.would_create_cycle(1, 2));
+    }
+
+    // ── detect_all_cycles ─────────────────────────────────────────────────
+
+    #[test]
+    fn detect_all_cycles_empty_when_acyclic() {
+        let issues = vec![
+            make_issue(1, IssueState::Open, Priority::P2),
+            make_issue(2, IssueState::Open, Priority::P1),
+        ];
+        let edges = vec![BlockingEdge {
+            source: 1,
+            target: 2,
+        }];
+        let graph = DependencyGraph::build(&issues, &edges);
+        assert!(graph.detect_all_cycles().is_empty());
+    }
+
+    #[test]
+    fn detect_all_cycles_finds_two_node_cycle() {
+        // A→B and B→A form a cycle.
+        let issues = vec![
+            make_issue(1, IssueState::Open, Priority::P2),
+            make_issue(2, IssueState::Open, Priority::P1),
+        ];
+        let edges = vec![
+            BlockingEdge {
+                source: 1,
+                target: 2,
+            },
+            BlockingEdge {
+                source: 2,
+                target: 1,
+            },
+        ];
+        let graph = DependencyGraph::build(&issues, &edges);
+        let cycles = graph.detect_all_cycles();
+        assert_eq!(cycles.len(), 1);
+        let mut cycle = cycles[0].clone();
+        cycle.sort_unstable();
+        assert_eq!(cycle, vec![1, 2]);
+    }
+
+    #[test]
+    fn detect_all_cycles_finds_three_node_cycle() {
+        // 1→2→3→1.
+        let issues = vec![
+            make_issue(1, IssueState::Open, Priority::P2),
+            make_issue(2, IssueState::Open, Priority::P1),
+            make_issue(3, IssueState::Open, Priority::P0),
+        ];
+        let edges = vec![
+            BlockingEdge {
+                source: 1,
+                target: 2,
+            },
+            BlockingEdge {
+                source: 2,
+                target: 3,
+            },
+            BlockingEdge {
+                source: 3,
+                target: 1,
+            },
+        ];
+        let graph = DependencyGraph::build(&issues, &edges);
+        let cycles = graph.detect_all_cycles();
+        assert_eq!(cycles.len(), 1);
+        let mut cycle = cycles[0].clone();
+        cycle.sort_unstable();
+        assert_eq!(cycle, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn detect_all_cycles_empty_graph() {
+        let graph = DependencyGraph::build(&[], &[]);
+        assert!(graph.detect_all_cycles().is_empty());
+    }
+
+    #[test]
+    fn detect_all_cycles_no_edges() {
+        let issues = vec![
+            make_issue(1, IssueState::Open, Priority::P2),
+            make_issue(2, IssueState::Open, Priority::P1),
+        ];
+        let graph = DependencyGraph::build(&issues, &[]);
+        assert!(graph.detect_all_cycles().is_empty());
+    }
+
+    // ── dependency_tree ───────────────────────────────────────────────────
+
+    #[test]
+    fn dependency_tree_upstream_returns_blockers() {
+        // 1 is blocked by 2, 2 is blocked by 3.
+        // Upstream from 1 should return [(2, 1), (3, 2)].
+        let issues = vec![
+            make_issue(1, IssueState::Open, Priority::P2),
+            make_issue(2, IssueState::Open, Priority::P1),
+            make_issue(3, IssueState::Open, Priority::P0),
+        ];
+        let edges = vec![
+            BlockingEdge {
+                source: 1,
+                target: 2,
+            },
+            BlockingEdge {
+                source: 2,
+                target: 3,
+            },
+        ];
+        let graph = DependencyGraph::build(&issues, &edges);
+        let tree = graph.dependency_tree(1, TraversalDirection::Upstream, 10);
+        assert_eq!(tree, vec![(2, 1), (3, 2)]);
+    }
+
+    #[test]
+    fn dependency_tree_downstream_returns_blocked_issues() {
+        // 2 is blocked by 1, 3 is blocked by 1.
+        // Downstream from 1 should return [(2, 1), (3, 1)] (order may vary).
+        let issues = vec![
+            make_issue(1, IssueState::Open, Priority::P2),
+            make_issue(2, IssueState::Open, Priority::P1),
+            make_issue(3, IssueState::Open, Priority::P0),
+        ];
+        let edges = vec![
+            BlockingEdge {
+                source: 2,
+                target: 1,
+            },
+            BlockingEdge {
+                source: 3,
+                target: 1,
+            },
+        ];
+        let graph = DependencyGraph::build(&issues, &edges);
+        let mut tree = graph.dependency_tree(1, TraversalDirection::Downstream, 10);
+        tree.sort_by_key(|&(num, _)| num);
+        assert_eq!(tree.len(), 2);
+        assert_eq!(tree[0], (2, 1));
+        assert_eq!(tree[1], (3, 1));
+    }
+
+    #[test]
+    fn dependency_tree_stops_at_max_depth() {
+        // Chain: 1→2→3→4. With max_depth=2 from 1, should see (2,1) and (3,2) but not (4,3).
+        let issues = vec![
+            make_issue(1, IssueState::Open, Priority::P2),
+            make_issue(2, IssueState::Open, Priority::P1),
+            make_issue(3, IssueState::Open, Priority::P0),
+            make_issue(4, IssueState::Open, Priority::P0),
+        ];
+        let edges = vec![
+            BlockingEdge {
+                source: 1,
+                target: 2,
+            },
+            BlockingEdge {
+                source: 2,
+                target: 3,
+            },
+            BlockingEdge {
+                source: 3,
+                target: 4,
+            },
+        ];
+        let graph = DependencyGraph::build(&issues, &edges);
+        let tree = graph.dependency_tree(1, TraversalDirection::Upstream, 2);
+        assert_eq!(tree, vec![(2, 1), (3, 2)]);
+        // 4 is at depth 3, beyond max_depth=2.
+        assert!(!tree.iter().any(|&(num, _)| num == 4));
+    }
+
+    #[test]
+    fn dependency_tree_max_depth_zero_returns_empty() {
+        let issues = vec![
+            make_issue(1, IssueState::Open, Priority::P2),
+            make_issue(2, IssueState::Open, Priority::P1),
+        ];
+        let edges = vec![BlockingEdge {
+            source: 1,
+            target: 2,
+        }];
+        let graph = DependencyGraph::build(&issues, &edges);
+        let tree = graph.dependency_tree(1, TraversalDirection::Upstream, 0);
+        assert!(tree.is_empty());
+    }
+
+    #[test]
+    fn dependency_tree_root_not_in_graph_returns_empty() {
+        let issues = vec![make_issue(1, IssueState::Open, Priority::P2)];
+        let graph = DependencyGraph::build(&issues, &[]);
+        let tree = graph.dependency_tree(99, TraversalDirection::Upstream, 10);
+        assert!(tree.is_empty());
+    }
+
+    #[test]
+    fn dependency_tree_handles_diamond() {
+        // Diamond: 1→2, 1→3, 2→4, 3→4. Upstream from 1.
+        // Should visit 2, 3 at depth 1, then 4 at depth 2 (once, not twice).
+        let issues = vec![
+            make_issue(1, IssueState::Open, Priority::P2),
+            make_issue(2, IssueState::Open, Priority::P1),
+            make_issue(3, IssueState::Open, Priority::P0),
+            make_issue(4, IssueState::Open, Priority::P0),
+        ];
+        let edges = vec![
+            BlockingEdge {
+                source: 1,
+                target: 2,
+            },
+            BlockingEdge {
+                source: 1,
+                target: 3,
+            },
+            BlockingEdge {
+                source: 2,
+                target: 4,
+            },
+            BlockingEdge {
+                source: 3,
+                target: 4,
+            },
+        ];
+        let graph = DependencyGraph::build(&issues, &edges);
+        let tree = graph.dependency_tree(1, TraversalDirection::Upstream, 10);
+        // 4 should appear exactly once at depth 2.
+        let fours: Vec<_> = tree.iter().filter(|&&(num, _)| num == 4).collect();
+        assert_eq!(fours.len(), 1);
+        assert_eq!(fours[0].1, 2);
+        assert_eq!(tree.len(), 3); // 2, 3, 4
+    }
+
+    #[test]
+    fn dependency_tree_cycle_safe() {
+        // 1→2→1 (cycle). Should not loop forever.
+        let issues = vec![
+            make_issue(1, IssueState::Open, Priority::P2),
+            make_issue(2, IssueState::Open, Priority::P1),
+        ];
+        let edges = vec![
+            BlockingEdge {
+                source: 1,
+                target: 2,
+            },
+            BlockingEdge {
+                source: 2,
+                target: 1,
+            },
+        ];
+        let graph = DependencyGraph::build(&issues, &edges);
+        let tree = graph.dependency_tree(1, TraversalDirection::Upstream, 10);
+        // Should visit 2 at depth 1, then stop (1 already visited).
+        assert_eq!(tree, vec![(2, 1)]);
+    }
+
+    #[test]
+    fn dependency_tree_excludes_root() {
+        let issues = vec![make_issue(1, IssueState::Open, Priority::P2)];
+        let graph = DependencyGraph::build(&issues, &[]);
+        let tree = graph.dependency_tree(1, TraversalDirection::Upstream, 10);
+        assert!(tree.is_empty());
+    }
+
     // ── Proptest ──────────────────────────────────────────────────────────
 
     mod proptests {
@@ -850,6 +1279,60 @@ mod tests {
                         window[0].number, a_key, window[0].created_at,
                         window[1].number, b_key, window[1].created_at
                     );
+                }
+            }
+
+            /// Property: would_create_cycle is consistent with detect_all_cycles.
+            ///
+            /// If would_create_cycle returns false for edge (A, B), then adding
+            /// that edge should not place A and B in the same SCC.
+            #[test]
+            fn would_create_cycle_consistent_with_detect(
+                num_issues in 2_u64..50,
+                edges in proptest::collection::vec((1_u64..50, 1_u64..50), 0..100),
+                probe_source in 1_u64..50,
+                probe_target in 1_u64..50,
+            ) {
+                // Build all issues as Open.
+                let issues: Vec<Issue> = (1..=num_issues)
+                    .map(|n| make_issue(n, IssueState::Open, Priority::P2))
+                    .collect();
+
+                // Filter edges to valid, non-self-loop.
+                let blocking_edges: Vec<BlockingEdge> = edges
+                    .into_iter()
+                    .filter(|(s, t)| *s != *t && *s <= num_issues && *t <= num_issues)
+                    .map(|(s, t)| BlockingEdge { source: s, target: t })
+                    .collect();
+
+                let graph = DependencyGraph::build(&issues, &blocking_edges);
+
+                // Only test if both probe nodes exist in the graph and are distinct.
+                if probe_source != probe_target
+                    && probe_source <= num_issues
+                    && probe_target <= num_issues
+                {
+                    let would_cycle = graph.would_create_cycle(probe_source, probe_target);
+
+                    if !would_cycle {
+                        // Add the edge and rebuild to check no new cycle containing both.
+                        let mut extended_edges = blocking_edges.clone();
+                        extended_edges.push(BlockingEdge {
+                            source: probe_source,
+                            target: probe_target,
+                        });
+                        let extended_graph = DependencyGraph::build(&issues, &extended_edges);
+                        let cycles = extended_graph.detect_all_cycles();
+                        for cycle in &cycles {
+                            prop_assert!(
+                                !(cycle.contains(&probe_source) && cycle.contains(&probe_target)),
+                                "would_create_cycle({}, {}) returned false but they are in the same SCC: {:?}",
+                                probe_source,
+                                probe_target,
+                                cycle
+                            );
+                        }
+                    }
                 }
             }
         }
