@@ -76,6 +76,7 @@ impl GraphCache {
     /// A cache entry is considered fresh when it exists and
     /// `computed_at + ttl > now`. The returned `Vec` is cloned out of the
     /// lock so the caller owns it without holding the read guard.
+    #[must_use]
     pub async fn get_ready_set(&self) -> Option<Vec<IssueSummary>> {
         let guard = self.inner.read().await;
         guard
@@ -111,6 +112,7 @@ impl GraphCache {
     /// Check whether the cache contains a fresh (non-expired) entry.
     ///
     /// Returns `true` if an entry exists and `computed_at + ttl > now`.
+    #[must_use]
     pub async fn is_fresh(&self) -> bool {
         let guard = self.inner.read().await;
         guard
@@ -122,6 +124,7 @@ impl GraphCache {
     ///
     /// Enables ad-hoc graph queries (dependency tree, cycle detection) without
     /// triggering a full rebuild. The returned graph is cloned out of the lock.
+    #[must_use]
     pub async fn get_graph(&self) -> Option<DependencyGraph> {
         let guard = self.inner.read().await;
         guard
