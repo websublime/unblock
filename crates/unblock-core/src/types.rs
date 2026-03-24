@@ -214,6 +214,8 @@ pub enum TraversalDirection {
     Upstream,
     /// Follow incoming edges — walk toward dependents (what does this issue block?).
     Downstream,
+    /// Follow both directions — upstream blockers and downstream dependents.
+    Both,
 }
 
 /// Parsed sections from the issue body markdown.
