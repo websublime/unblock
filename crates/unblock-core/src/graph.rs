@@ -865,6 +865,14 @@ mod tests {
         assert!(!graph.would_create_cycle(1, 2));
     }
 
+    #[test]
+    fn would_create_cycle_self_loop() {
+        // A node blocking itself is always a cycle, even with no existing edges.
+        let issues = vec![make_issue(1, IssueState::Open, Priority::P2)];
+        let graph = DependencyGraph::build(&issues, &[]);
+        assert!(graph.would_create_cycle(1, 1));
+    }
+
     // ── detect_all_cycles ─────────────────────────────────────────────────
 
     #[test]
