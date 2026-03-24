@@ -1,7 +1,7 @@
 //! Domain types for the unblock system.
 //!
-//! Defines the core data structures: `Issue`, `IssueState`, `Status`,
-//! `Priority`, `ReadyState`, `IssueType`, `BlockingEdge`,
+//! Defines the core data structures: `Issue`, `IssueComment`, `IssueState`,
+//! `Status`, `Priority`, `ReadyState`, `IssueType`, `BlockingEdge`,
 //! `IssueSummary`, and `BodySections`.
 //!
 //! All types are backend-agnostic — the GitHub client handles mapping from
@@ -10,6 +10,21 @@
 
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
+
+/// A comment on a GitHub issue.
+///
+/// Parsed from the GraphQL `comments` connection on a single-issue fetch.
+/// Only included in [`Issue`] when fetched via `fetch_issue()` — the bulk
+/// `fetch_graph_data()` omits comments for performance.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IssueComment {
+    /// GitHub login of the comment author.
+    pub author: String,
+    /// Full markdown body of the comment.
+    pub body: String,
+    /// Timestamp when the comment was created.
+    pub created_at: DateTime<Utc>,
+}
 
 /// An issue in the dependency graph.
 ///
@@ -56,6 +71,8 @@ pub struct Issue {
     pub updated_at: DateTime<Utc>,
     /// HTML URL for linking back to GitHub.
     pub url: String,
+    /// Comments on the issue (populated by `fetch_issue()`, empty for bulk fetches).
+    pub comments: Vec<IssueComment>,
 }
 
 /// GitHub native issue state.

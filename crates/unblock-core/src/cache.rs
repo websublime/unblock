@@ -178,6 +178,7 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             url: format!("https://github.com/test/repo/issues/{number}"),
+            comments: vec![],
         }
     }
 
