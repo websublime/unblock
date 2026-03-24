@@ -809,8 +809,9 @@ mod tests {
 
                     // Completeness: every dependent of closed_number whose blockers
                     // are all resolved MUST appear in the cascade result.
-                    let cascade_set: std::collections::HashSet<u64> =
-                        cascade.iter().copied().collect();
+                    let mut cascade_set =
+                        std::collections::HashSet::with_capacity(cascade.len());
+                    cascade_set.extend(cascade.iter().copied());
                     if let Some(&closed_node) = graph.node_map.get(&closed_number) {
                         for dep_idx in graph.graph.neighbors_directed(closed_node, Direction::Incoming) {
                             let dep_number = graph.graph[dep_idx];
