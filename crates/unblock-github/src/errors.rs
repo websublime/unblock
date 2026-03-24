@@ -104,9 +104,11 @@ mod tests {
 
     #[tokio::test]
     async fn github_unavailable_display() {
-        // Connect to localhost port 1 — reliably refused, no network needed.
+        // Connect to IPv4 loopback port 1 — port 1 is reserved/privileged and
+        // reliably refused on all platforms. Uses 127.0.0.1 instead of [::1] to
+        // avoid failures on CI environments where IPv6 is disabled.
         let reqwest_err = reqwest::Client::new()
-            .get("http://[::1]:1")
+            .get("http://127.0.0.1:1")
             .send()
             .await
             .expect_err("connection to port 1 should be refused");
