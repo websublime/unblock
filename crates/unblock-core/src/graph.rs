@@ -292,6 +292,9 @@ impl DependencyGraph {
     pub fn detect_all_cycles(&self) -> Vec<Vec<u64>> {
         tarjan_scc(&self.graph)
             .into_iter()
+            // Single-node SCCs are isolated nodes or self-loops; only multi-node
+            // SCCs represent real dependency cycles. Self-loops are rejected at
+            // insertion time by `add_blocked_by`.
             .filter(|scc| scc.len() > 1)
             .map(|scc| scc.into_iter().map(|idx| self.graph[idx]).collect())
             .collect()
