@@ -64,6 +64,8 @@ impl DependencyGraph {
     ///         milestone: None, assignees: vec![], state: IssueState::Open,
     ///         body: None, created_at: Utc::now(), updated_at: Utc::now(),
     ///         url: String::new(), comments: vec![],
+    ///         blocked_by: vec![], blocking: vec![],
+    ///         parent: None, sub_issues: vec![],
     ///     },
     /// ];
     /// let edges: Vec<BlockingEdge> = vec![];
@@ -428,6 +430,10 @@ mod tests {
             updated_at: Utc::now(),
             url: String::new(),
             comments: vec![],
+            blocked_by: vec![],
+            blocking: vec![],
+            parent: None,
+            sub_issues: vec![],
         }
     }
 
