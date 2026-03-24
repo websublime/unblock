@@ -306,6 +306,8 @@ impl DependencyGraph {
     ///   of `root` — "who blocks this issue?").
     /// - [`TraversalDirection::Downstream`] follows **incoming** edges
     ///   (dependents of `root` — "what does this issue block?").
+    /// - [`TraversalDirection::Both`] follows edges in **both** directions
+    ///   (upstream blockers and downstream dependents combined).
     ///
     /// Returns `(issue_number, depth)` pairs **excluding** the root itself.
     /// If `root` is not in the graph the result is empty. Nodes are visited
@@ -313,8 +315,7 @@ impl DependencyGraph {
     // DEVIATION(unblock-b6b.20): Returns Vec<(u64, usize)> instead of
     // DependencyTree struct per ARCH §6.4. The richer type includes Status and
     // IssueState per node with recursive TreeNode children. Upgrade when the
-    // show tool (unblock-45a.8) is implemented. See also unblock-b6b.21 for
-    // the missing TraversalDirection::Both variant.
+    // show tool (unblock-45a.8) is implemented.
     #[must_use]
     pub fn dependency_tree(
         &self,
@@ -326,11 +327,13 @@ impl DependencyGraph {
             return Vec::new();
         };
 
-        let graph_direction = match direction {
+        let directions: &[Direction] = match direction {
             // Upstream: follow outgoing edges (source → blocker).
-            TraversalDirection::Upstream => Direction::Outgoing,
+            TraversalDirection::Upstream => &[Direction::Outgoing],
             // Downstream: follow incoming edges (dependent → source).
-            TraversalDirection::Downstream => Direction::Incoming,
+            TraversalDirection::Downstream => &[Direction::Incoming],
+            // Both: follow edges in both directions from each node.
+            TraversalDirection::Both => &[Direction::Outgoing, Direction::Incoming],
         };
 
         let mut visited = HashSet::new();
@@ -346,12 +349,14 @@ impl DependencyGraph {
                 continue;
             }
 
-            for neighbor in self.graph.neighbors_directed(node, graph_direction) {
-                if visited.insert(neighbor) {
-                    let issue_number = self.graph[neighbor];
-                    let next_depth = depth + 1;
-                    result.push((issue_number, next_depth));
-                    queue.push_back((neighbor, next_depth));
+            for &dir in directions {
+                for neighbor in self.graph.neighbors_directed(node, dir) {
+                    if visited.insert(neighbor) {
+                        let issue_number = self.graph[neighbor];
+                        let next_depth = depth + 1;
+                        result.push((issue_number, next_depth));
+                        queue.push_back((neighbor, next_depth));
+                    }
                 }
             }
         }
@@ -1140,6 +1145,114 @@ mod tests {
         let graph = DependencyGraph::build(&issues, &[]);
         let tree = graph.dependency_tree(1, TraversalDirection::Upstream, 10);
         assert!(tree.is_empty());
+    }
+
+    #[test]
+    fn dependency_tree_both_returns_upstream_and_downstream() {
+        // Graph: 2→1→3 (1 is blocked by 3, 2 is blocked by 1).
+        // Both from 1 should return upstream blocker (3) and downstream dependent (2).
+        let issues = vec![
+            make_issue(1, IssueState::Open, Priority::P2),
+            make_issue(2, IssueState::Open, Priority::P1),
+            make_issue(3, IssueState::Open, Priority::P0),
+        ];
+        let edges = vec![
+            BlockingEdge {
+                source: 1,
+                target: 3,
+            },
+            BlockingEdge {
+                source: 2,
+                target: 1,
+            },
+        ];
+        let graph = DependencyGraph::build(&issues, &edges);
+        let mut tree = graph.dependency_tree(1, TraversalDirection::Both, 10);
+        tree.sort_by_key(|&(num, _)| num);
+        assert_eq!(tree.len(), 2);
+        // Both neighbors at depth 1.
+        assert_eq!(tree[0], (2, 1));
+        assert_eq!(tree[1], (3, 1));
+    }
+
+    #[test]
+    fn dependency_tree_both_deduplicates_shared_nodes() {
+        // Diamond: 1→2, 3→1, 2→4, 3→4.
+        // Both from 1: upstream gives 2→4, downstream gives 3→4.
+        // Node 4 is reachable from both directions but should appear only once.
+        let issues = vec![
+            make_issue(1, IssueState::Open, Priority::P2),
+            make_issue(2, IssueState::Open, Priority::P1),
+            make_issue(3, IssueState::Open, Priority::P0),
+            make_issue(4, IssueState::Open, Priority::P0),
+        ];
+        let edges = vec![
+            BlockingEdge {
+                source: 1,
+                target: 2,
+            },
+            BlockingEdge {
+                source: 3,
+                target: 1,
+            },
+            BlockingEdge {
+                source: 2,
+                target: 4,
+            },
+            BlockingEdge {
+                source: 3,
+                target: 4,
+            },
+        ];
+        let graph = DependencyGraph::build(&issues, &edges);
+        let tree = graph.dependency_tree(1, TraversalDirection::Both, 10);
+        // All three nodes (2, 3, 4) reachable, 4 only once.
+        let fours: Vec<_> = tree.iter().filter(|&&(num, _)| num == 4).collect();
+        assert_eq!(fours.len(), 1);
+        assert_eq!(tree.len(), 3);
+    }
+
+    #[test]
+    fn dependency_tree_both_respects_max_depth() {
+        // Chain: 2→1→3→4. Both from 1 with max_depth=1.
+        // Should see 2 (downstream, depth 1) and 3 (upstream, depth 1), but not 4.
+        let issues = vec![
+            make_issue(1, IssueState::Open, Priority::P2),
+            make_issue(2, IssueState::Open, Priority::P1),
+            make_issue(3, IssueState::Open, Priority::P0),
+            make_issue(4, IssueState::Open, Priority::P0),
+        ];
+        let edges = vec![
+            BlockingEdge {
+                source: 1,
+                target: 3,
+            },
+            BlockingEdge {
+                source: 3,
+                target: 4,
+            },
+            BlockingEdge {
+                source: 2,
+                target: 1,
+            },
+        ];
+        let graph = DependencyGraph::build(&issues, &edges);
+        let mut tree = graph.dependency_tree(1, TraversalDirection::Both, 1);
+        tree.sort_by_key(|&(num, _)| num);
+        assert_eq!(tree.len(), 2);
+        assert_eq!(tree[0], (2, 1));
+        assert_eq!(tree[1], (3, 1));
+        // 4 is at depth 2, beyond max_depth=1.
+        assert!(!tree.iter().any(|&(num, _)| num == 4));
+    }
+
+    #[test]
+    fn traversal_direction_serde_roundtrip_both() {
+        let direction = TraversalDirection::Both;
+        let json = serde_json::to_string(&direction).expect("serialize");
+        assert_eq!(json, "\"Both\"");
+        let deserialized: TraversalDirection = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(deserialized, TraversalDirection::Both);
     }
 
     // ── Proptest ──────────────────────────────────────────────────────────
