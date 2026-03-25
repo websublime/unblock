@@ -59,6 +59,7 @@ fn generate_issues(n: usize) -> Vec<Issue> {
                 },
                 claimed_at: None,
                 ready_state: ReadyState::Ready,
+                #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
                 story_points: Some((i % 8 + 1) as i32),
                 defer_until: None,
                 labels: vec![format!("area-{}", i % 5), "benchmark".to_owned()],
