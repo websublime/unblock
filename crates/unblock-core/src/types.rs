@@ -245,7 +245,8 @@ pub struct IssueSummary {
 ///
 /// Controls which edges are followed during BFS traversal of the
 /// dependency graph. Used by [`DependencyGraph::dependency_tree()`]
-/// to walk either upstream (blockers) or downstream (blocked issues).
+/// to walk upstream (blockers), downstream (blocked issues), or both
+/// directions simultaneously.
 ///
 /// [`DependencyGraph::dependency_tree()`]: crate::graph::DependencyGraph::dependency_tree
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
