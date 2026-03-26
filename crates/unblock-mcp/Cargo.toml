@@ -24,3 +24,4 @@ tracing-subscriber = { workspace = true }
 rmcp = { workspace = true }
 schemars = { workspace = true }
 snafu = { workspace = true }
+anyhow = { workspace = true }
