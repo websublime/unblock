@@ -3,6 +3,7 @@
 //! Reads configuration from environment variables:
 //! - `GITHUB_TOKEN` (required)
 //! - `GITHUB_API_URL` (optional, default: `https://api.github.com`)
+//! - `GITHUB_URL` (optional, default: `https://github.com`)
 //! - `UNBLOCK_REPO` (optional, auto-detect from git remote)
 //! - `UNBLOCK_PROJECT` (optional, auto-detect from linked Projects V2)
 //! - `UNBLOCK_AGENT` (optional, default: `agent`)
@@ -31,6 +32,7 @@ use crate::errors::ValidationSnafu;
 /// | Env var | Field | Default |
 /// |---------|-------|---------|
 /// | `GITHUB_API_URL` | [`api_base_url`](Self::api_base_url) | `https://api.github.com` |
+/// | `GITHUB_URL` | [`github_url`](Self::github_url) | `https://github.com` |
 /// | `UNBLOCK_REPO` | [`repo`](Self::repo) | `None` (auto-detect) |
 /// | `UNBLOCK_PROJECT` | [`project_number`](Self::project_number) | `None` (auto-detect) |
 /// | `UNBLOCK_AGENT` | [`agent`](Self::agent) | `"agent"` |
@@ -47,6 +49,14 @@ pub struct Config {
     /// Defaults to `https://api.github.com`. For GitHub Enterprise Server,
     /// set to `https://<host>/api/v3`. Trailing slashes are stripped.
     pub api_base_url: String,
+
+    /// GitHub web URL (from `GITHUB_URL`).
+    ///
+    /// Defaults to `https://github.com`. For GitHub Enterprise Server,
+    /// set to `https://<ghe-host>`. Used by the git remote parser to match
+    /// remote origin URLs. This is the **web** URL, not the API URL.
+    /// Trailing slashes are stripped.
+    pub github_url: String,
 
     /// Repository in `owner/repo` format (from `UNBLOCK_REPO`).
     ///
@@ -90,6 +100,9 @@ const DEFAULT_AGENT: &str = "agent";
 
 /// Default GitHub API base URL.
 const DEFAULT_API_BASE_URL: &str = "https://api.github.com";
+
+/// Default GitHub web URL.
+const DEFAULT_GITHUB_URL: &str = "https://github.com";
 
 /// The set of valid tracing log-level strings.
 ///
@@ -185,6 +198,12 @@ impl Config {
             .trim_end_matches('/')
             .to_owned();
 
+        // GITHUB_URL with trailing-slash normalisation.
+        let github_url = env("GITHUB_URL")
+            .unwrap_or_else(|_| DEFAULT_GITHUB_URL.to_owned())
+            .trim_end_matches('/')
+            .to_owned();
+
         let repo = match env("UNBLOCK_REPO") {
             Ok(val) => {
                 validate_repo_format(&val)?;
@@ -224,6 +243,7 @@ impl Config {
         Ok(Self {
             token,
             api_base_url,
+            github_url,
             repo,
             project_number,
             agent,
@@ -271,6 +291,7 @@ mod tests {
 
         assert_eq!(config.token, "ghp_test123");
         assert_eq!(config.api_base_url, "https://api.github.com");
+        assert_eq!(config.github_url, "https://github.com");
         assert_eq!(config.repo, None);
         assert_eq!(config.project_number, None);
         assert_eq!(config.agent, "agent");
@@ -284,6 +305,7 @@ mod tests {
         let env = make_env(&[
             ("GITHUB_TOKEN", "ghp_override"),
             ("GITHUB_API_URL", "https://ghe.example.com/api/v3/"),
+            ("GITHUB_URL", "https://ghe.example.com/"),
             ("UNBLOCK_REPO", "acme/widgets"),
             ("UNBLOCK_PROJECT", "42"),
             ("UNBLOCK_AGENT", "my-bot"),
@@ -296,6 +318,7 @@ mod tests {
         assert_eq!(config.token, "ghp_override");
         // Trailing slash stripped:
         assert_eq!(config.api_base_url, "https://ghe.example.com/api/v3");
+        assert_eq!(config.github_url, "https://ghe.example.com");
         assert_eq!(config.repo.as_deref(), Some("acme/widgets"));
         assert_eq!(config.project_number, Some(42));
         assert_eq!(config.agent, "my-bot");
@@ -455,5 +478,34 @@ mod tests {
                 "log_level should be normalized to lowercase for '{level}'"
             );
         }
+    }
+
+    // ── GITHUB_URL tests ──────────────────────────────────────────────
+
+    #[test]
+    fn github_url_defaults_to_github_com() {
+        let env = make_env(&[("GITHUB_TOKEN", "ghp_test")]);
+        let config = Config::load_from(env).expect("should load");
+        assert_eq!(config.github_url, "https://github.com");
+    }
+
+    #[test]
+    fn github_url_override_applied() {
+        let env = make_env(&[
+            ("GITHUB_TOKEN", "ghp_test"),
+            ("GITHUB_URL", "https://ghe.corp.com"),
+        ]);
+        let config = Config::load_from(env).expect("should load");
+        assert_eq!(config.github_url, "https://ghe.corp.com");
+    }
+
+    #[test]
+    fn github_url_trailing_slashes_stripped() {
+        let env = make_env(&[
+            ("GITHUB_TOKEN", "ghp_test"),
+            ("GITHUB_URL", "https://ghe.corp.com///"),
+        ]);
+        let config = Config::load_from(env).expect("should load");
+        assert_eq!(config.github_url, "https://ghe.corp.com");
     }
 }
