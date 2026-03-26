@@ -219,6 +219,7 @@ QA:             spec conformity, test/build/lint, verdict
 |---|---|---|---|
 | `GITHUB_TOKEN` | yes | — | pat or github app token |
 | `GITHUB_API_URL` | no | `https://api.github.com` | ghe: `https://<host>/api/v3` |
+| `GITHUB_URL` | no | `https://github.com` | ghe: `https://<ghe-host>` (web url, not api) |
 | `UNBLOCK_REPO` | no | auto-detect | `owner/repo` format |
 | `UNBLOCK_PROJECT` | no | auto-detect | project number |
 | `UNBLOCK_AGENT` | no | `agent` | default agent name |

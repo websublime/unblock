@@ -205,7 +205,7 @@ impl GitHubClient {
             .build()
         })?;
 
-        parse_github_url(&url)
+        parse_github_url(&url, &config.github_url)
     }
 
     /// Resolves the project number from configuration.
@@ -220,28 +220,46 @@ impl GitHubClient {
 
 /// Parses a GitHub URL into `(owner, repo)`.
 ///
-/// Supported formats:
-/// - `https://github.com/owner/repo.git`
-/// - `https://github.com/owner/repo`
-/// - `git@github.com:owner/repo.git`
-/// - `git@github.com:owner/repo`
+/// The `github_url` parameter specifies the expected GitHub host as a web URL
+/// (e.g. `https://github.com` or `https://ghe.corp.com`). The hostname is
+/// extracted and used to match HTTPS and SSH remote URL formats.
+///
+/// Supported formats (where `<host>` is derived from `github_url`):
+/// - `https://<host>/owner/repo.git`
+/// - `https://<host>/owner/repo`
+/// - `http://<host>/owner/repo[.git]`
+/// - `git@<host>:owner/repo.git`
+/// - `git@<host>:owner/repo`
 ///
 /// # Errors
 ///
-/// Returns [`Error::GitRemote`] if the URL is not a recognized GitHub format.
-pub fn parse_github_url(url: &str) -> Result<(String, String), Error> {
+/// Returns [`Error::GitRemote`] if the URL is not a recognized GitHub format
+/// or if the `github_url` cannot be parsed to extract a hostname.
+pub fn parse_github_url(url: &str, github_url: &str) -> Result<(String, String), Error> {
     let url = url.trim();
 
-    // Try HTTPS format: https://github.com/owner/repo[.git]
+    // Extract the hostname from github_url.
+    // github_url is expected to be like "https://github.com" or "https://ghe.corp.com".
+    let host = extract_host(github_url).ok_or_else(|| {
+        GitRemoteSnafu {
+            message: format!("cannot extract hostname from GITHUB_URL: {github_url}"),
+        }
+        .build()
+    })?;
+
+    // Try HTTPS format: https://<host>/owner/repo[.git]
+    let secure_prefix = format!("https://{host}/");
+    let plain_prefix = format!("http://{host}/");
     if let Some(path) = url
-        .strip_prefix("https://github.com/")
-        .or_else(|| url.strip_prefix("http://github.com/"))
+        .strip_prefix(&secure_prefix)
+        .or_else(|| url.strip_prefix(&plain_prefix))
     {
         return parse_owner_repo_from_path(path, url);
     }
 
-    // Try SSH format: git@github.com:owner/repo[.git]
-    if let Some(path) = url.strip_prefix("git@github.com:") {
+    // Try SSH format: git@<host>:owner/repo[.git]
+    let ssh_prefix = format!("git@{host}:");
+    if let Some(path) = url.strip_prefix(&ssh_prefix) {
         return parse_owner_repo_from_path(path, url);
     }
 
@@ -249,6 +267,26 @@ pub fn parse_github_url(url: &str) -> Result<(String, String), Error> {
         message: format!("not a GitHub URL: {url}"),
     }
     .build())
+}
+
+/// Extracts the hostname from a URL string.
+///
+/// Handles URLs with or without a scheme. For example:
+/// - `https://github.com` -> `github.com`
+/// - `https://ghe.corp.com/` -> `ghe.corp.com`
+/// - `https://ghe.corp.com:8443` -> `ghe.corp.com:8443`
+fn extract_host(url: &str) -> Option<String> {
+    // Strip the scheme (e.g. "https://").
+    let after_scheme = url.find("://").map_or(url, |i| &url[i + 3..]);
+
+    // Take everything up to the first '/' (the host, possibly with port).
+    let host = after_scheme.split('/').next()?;
+
+    if host.is_empty() {
+        return None;
+    }
+
+    Some(host.to_owned())
 }
 
 /// Extracts `(owner, repo)` from a `owner/repo[.git]` path segment.
@@ -318,44 +356,51 @@ mod tests {
 
     // ── parse_github_url ─────────────────────────────────────────────
 
+    const DEFAULT_GH_URL: &str = "https://github.com";
+
     #[test]
     fn parse_https_with_git_suffix() {
-        let (owner, repo) = parse_github_url("https://github.com/websublime/unblock.git").unwrap();
+        let (owner, repo) =
+            parse_github_url("https://github.com/websublime/unblock.git", DEFAULT_GH_URL).unwrap();
         assert_eq!(owner, "websublime");
         assert_eq!(repo, "unblock");
     }
 
     #[test]
     fn parse_https_without_git_suffix() {
-        let (owner, repo) = parse_github_url("https://github.com/websublime/unblock").unwrap();
+        let (owner, repo) =
+            parse_github_url("https://github.com/websublime/unblock", DEFAULT_GH_URL).unwrap();
         assert_eq!(owner, "websublime");
         assert_eq!(repo, "unblock");
     }
 
     #[test]
     fn parse_ssh_with_git_suffix() {
-        let (owner, repo) = parse_github_url("git@github.com:websublime/unblock.git").unwrap();
+        let (owner, repo) =
+            parse_github_url("git@github.com:websublime/unblock.git", DEFAULT_GH_URL).unwrap();
         assert_eq!(owner, "websublime");
         assert_eq!(repo, "unblock");
     }
 
     #[test]
     fn parse_ssh_without_git_suffix() {
-        let (owner, repo) = parse_github_url("git@github.com:websublime/unblock").unwrap();
+        let (owner, repo) =
+            parse_github_url("git@github.com:websublime/unblock", DEFAULT_GH_URL).unwrap();
         assert_eq!(owner, "websublime");
         assert_eq!(repo, "unblock");
     }
 
     #[test]
     fn parse_https_with_trailing_slash() {
-        let (owner, repo) = parse_github_url("https://github.com/acme/widgets/").unwrap();
+        let (owner, repo) =
+            parse_github_url("https://github.com/acme/widgets/", DEFAULT_GH_URL).unwrap();
         assert_eq!(owner, "acme");
         assert_eq!(repo, "widgets");
     }
 
     #[test]
     fn parse_non_github_url_returns_error() {
-        let err = parse_github_url("https://gitlab.com/owner/repo").unwrap_err();
+        let err = parse_github_url("https://gitlab.com/owner/repo", DEFAULT_GH_URL).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("not a GitHub URL"),
@@ -365,17 +410,116 @@ mod tests {
 
     #[test]
     fn parse_empty_string_returns_error() {
-        assert!(parse_github_url("").is_err());
+        assert!(parse_github_url("", DEFAULT_GH_URL).is_err());
     }
 
     #[test]
     fn parse_garbage_returns_error() {
-        assert!(parse_github_url("not-a-url").is_err());
+        assert!(parse_github_url("not-a-url", DEFAULT_GH_URL).is_err());
     }
 
     #[test]
     fn parse_github_url_with_extra_segments_returns_error() {
-        assert!(parse_github_url("https://github.com/owner/repo/pulls").is_err());
+        assert!(parse_github_url("https://github.com/owner/repo/pulls", DEFAULT_GH_URL).is_err());
+    }
+
+    // ── parse_github_url with GHE host ────────────────────────────────
+
+    #[test]
+    fn parse_ghe_https_with_git_suffix() {
+        let (owner, repo) = parse_github_url(
+            "https://ghe.corp.com/acme/widgets.git",
+            "https://ghe.corp.com",
+        )
+        .unwrap();
+        assert_eq!(owner, "acme");
+        assert_eq!(repo, "widgets");
+    }
+
+    #[test]
+    fn parse_ghe_https_without_git_suffix() {
+        let (owner, repo) =
+            parse_github_url("https://ghe.corp.com/acme/widgets", "https://ghe.corp.com").unwrap();
+        assert_eq!(owner, "acme");
+        assert_eq!(repo, "widgets");
+    }
+
+    #[test]
+    fn parse_ghe_ssh() {
+        let (owner, repo) =
+            parse_github_url("git@ghe.corp.com:acme/widgets.git", "https://ghe.corp.com").unwrap();
+        assert_eq!(owner, "acme");
+        assert_eq!(repo, "widgets");
+    }
+
+    #[test]
+    fn parse_ghe_http() {
+        let (owner, repo) =
+            parse_github_url("http://ghe.corp.com/acme/widgets", "https://ghe.corp.com").unwrap();
+        assert_eq!(owner, "acme");
+        assert_eq!(repo, "widgets");
+    }
+
+    #[test]
+    fn parse_ghe_url_mismatch_returns_error() {
+        // Remote points to github.com but GITHUB_URL is set to a GHE host.
+        let err = parse_github_url("https://github.com/acme/widgets", "https://ghe.corp.com")
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not a GitHub URL"),
+            "expected 'not a GitHub URL' in: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_ghe_with_port() {
+        let (owner, repo) = parse_github_url(
+            "https://ghe.corp.com:8443/acme/widgets",
+            "https://ghe.corp.com:8443",
+        )
+        .unwrap();
+        assert_eq!(owner, "acme");
+        assert_eq!(repo, "widgets");
+    }
+
+    // ── extract_host ──────────────────────────────────────────────────
+
+    #[test]
+    fn extract_host_from_https_url() {
+        assert_eq!(
+            extract_host("https://github.com").as_deref(),
+            Some("github.com")
+        );
+    }
+
+    #[test]
+    fn extract_host_from_ghe_url() {
+        assert_eq!(
+            extract_host("https://ghe.corp.com").as_deref(),
+            Some("ghe.corp.com")
+        );
+    }
+
+    #[test]
+    fn extract_host_with_trailing_slash() {
+        assert_eq!(
+            extract_host("https://ghe.corp.com/").as_deref(),
+            Some("ghe.corp.com")
+        );
+    }
+
+    #[test]
+    fn extract_host_with_port() {
+        assert_eq!(
+            extract_host("https://ghe.corp.com:8443").as_deref(),
+            Some("ghe.corp.com:8443")
+        );
+    }
+
+    #[test]
+    fn extract_host_empty_returns_none() {
+        assert_eq!(extract_host("https://"), None);
     }
 
     // ── parse_remote_origin_url ──────────────────────────────────────
@@ -435,6 +579,7 @@ mod tests {
         let config = Config {
             token: "ghp_test".to_owned(),
             api_base_url: "https://api.github.com".to_owned(),
+            github_url: "https://github.com".to_owned(),
             repo: Some("acme/widgets".to_owned()),
             project_number: None,
             agent: "agent".to_owned(),
@@ -454,6 +599,7 @@ mod tests {
         let config = Config {
             token: "ghp_test".to_owned(),
             api_base_url: "https://api.github.com".to_owned(),
+            github_url: "https://github.com".to_owned(),
             repo: None,
             project_number: Some(42),
             agent: "agent".to_owned(),
@@ -469,6 +615,7 @@ mod tests {
         let config = Config {
             token: "ghp_test".to_owned(),
             api_base_url: "https://api.github.com".to_owned(),
+            github_url: "https://github.com".to_owned(),
             repo: None,
             project_number: None,
             agent: "agent".to_owned(),
