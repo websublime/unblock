@@ -37,11 +37,12 @@ pub struct CreateIssueParams {
 
 /// Minimal response shape from the REST POST /issues endpoint.
 ///
-/// Only the `number` field is needed — the full issue is re-fetched via
-/// `fetch_issue()` to get Projects V2 fields and computed data.
+/// Captures `number` for re-fetch and `node_id` for project mutations,
+/// avoiding an extra REST GET when adding the issue to a project.
 #[derive(Debug, Deserialize)]
 struct CreateIssueResponse {
     number: u64,
+    node_id: String,
 }
 
 /// Minimal response shape from the REST POST /issues/{n}/comments endpoint.
@@ -140,10 +141,11 @@ impl GitHubClient {
             .context(errors::GitHubUnavailableSnafu)?;
 
         let number = created.number;
+        let node_id = created.node_id;
 
         // Best-effort: add to project if configured.
         if let Some(project_number) = self.project_number()
-            && let Err(e) = self.add_issue_to_project(number, project_number).await
+            && let Err(e) = self.add_issue_to_project(&node_id, project_number).await
         {
             warn!(
                 number,
@@ -291,59 +293,13 @@ impl GitHubClient {
 
     /// Adds an issue to a GitHub Projects V2 project.
     ///
-    /// Uses the GraphQL `addProjectV2ItemById` mutation. Requires the issue's
-    /// node ID, which is fetched via a lightweight REST call first.
+    /// Uses the GraphQL `addProjectV2ItemById` mutation. The caller provides
+    /// the issue `node_id` directly (from the REST create response), avoiding
+    /// an extra REST GET round-trip.
     ///
     /// This is an internal helper — callers use `create_issue()` which calls
     /// this automatically when a project is configured.
-    async fn add_issue_to_project(
-        &self,
-        issue_number: u64,
-        project_number: u64,
-    ) -> Result<(), Error> {
-        // Fetch the issue's node_id via REST (lightweight, avoids full GraphQL fetch).
-        let url = self.rest_url(&format!(
-            "/repos/{}/{}/issues/{issue_number}",
-            self.owner(),
-            self.repo()
-        ));
-
-        let response = self
-            .http()
-            .get(&url)
-            .send()
-            .await
-            .context(errors::GitHubUnavailableSnafu)?;
-
-        let status = response.status();
-
-        if !status.is_success() {
-            let message = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "unknown error".to_owned());
-            return Err(errors::GitHubApiSnafu {
-                status: status.as_u16(),
-                message,
-            }
-            .build());
-        }
-
-        let issue_json: serde_json::Value = response
-            .json()
-            .await
-            .context(errors::GitHubUnavailableSnafu)?;
-
-        let node_id = issue_json["node_id"]
-            .as_str()
-            .unwrap_or_default()
-            .to_owned();
-
-        if node_id.is_empty() {
-            warn!(issue_number, "Issue has no node_id — cannot add to project");
-            return Ok(());
-        }
-
+    async fn add_issue_to_project(&self, node_id: &str, project_number: u64) -> Result<(), Error> {
         // Fetch the project's node ID via GraphQL.
         let project_query = "
             query FindProject($owner: String!, $repo: String!, $projectNumber: Int!) {
