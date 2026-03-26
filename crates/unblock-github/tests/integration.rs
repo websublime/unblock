@@ -1478,7 +1478,7 @@ async fn fetch_project_item_id(
     String::new()
 }
 
-/// Fetches the current value of a specific field on a ProjectV2Item via
+/// Fetches the current value of a specific field on a `ProjectV2Item` via
 /// GraphQL. Returns `Some(value)` if found, `None` otherwise.
 ///
 /// Works for both single-select fields (returns the option name) and text
