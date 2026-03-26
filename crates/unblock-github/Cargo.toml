@@ -18,3 +18,7 @@ reqwest = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
 snafu = { workspace = true }
+
+[dev-dependencies]
+wiremock = { workspace = true }
+tokio = { workspace = true }

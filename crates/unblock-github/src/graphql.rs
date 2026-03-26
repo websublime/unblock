@@ -1428,4 +1428,206 @@ mod tests {
         let edges = extract_blocking_edges(&node);
         assert!(edges.is_empty());
     }
+
+    // ── fetch_graph_data pagination (wiremock) ─────────────────────────
+
+    /// Creates a `GitHubClient` pointing at a custom base URL for mock testing.
+    ///
+    /// Delegates to `GitHubClient::new_for_test` which constructs a bare client
+    /// with no auth headers. The `api_base_url` should be a wiremock server URI
+    /// so that `graphql_url()` routes requests to the mock.
+    fn make_mock_client(api_base_url: &str) -> GitHubClient {
+        GitHubClient::new_for_test(api_base_url)
+    }
+
+    /// Builds a mock GraphQL response page for `fetch_graph_data`.
+    ///
+    /// Each issue node has the minimal fields required by `parse_graph_issue`:
+    /// number, id, title, body, state, url, createdAt, updatedAt, labels,
+    /// milestone, assignees, and optionally trackedBy edges.
+    fn make_page_response(
+        issues: &[(u64, &str, Vec<u64>)],
+        has_next_page: bool,
+        end_cursor: Option<&str>,
+    ) -> serde_json::Value {
+        let nodes: Vec<serde_json::Value> = issues
+            .iter()
+            .map(|(number, title, blockers)| {
+                let tracked_by_nodes: Vec<serde_json::Value> = blockers
+                    .iter()
+                    .map(|n| serde_json::json!({"number": n}))
+                    .collect();
+                serde_json::json!({
+                    "id": format!("node-{number}"),
+                    "number": number,
+                    "title": title,
+                    "body": null,
+                    "state": "OPEN",
+                    "url": format!("https://github.com/test-owner/test-repo/issues/{number}"),
+                    "createdAt": "2026-01-01T00:00:00Z",
+                    "updatedAt": "2026-01-01T00:00:00Z",
+                    "labels": {"nodes": []},
+                    "milestone": null,
+                    "assignees": {"nodes": []},
+                    "trackedBy": {"nodes": tracked_by_nodes}
+                })
+            })
+            .collect();
+
+        serde_json::json!({
+            "data": {
+                "repository": {
+                    "issues": {
+                        "pageInfo": {
+                            "hasNextPage": has_next_page,
+                            "endCursor": end_cursor,
+                        },
+                        "nodes": nodes,
+                    }
+                }
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn fetch_graph_data_multi_page_pagination() {
+        use wiremock::matchers::{body_string_contains, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let client = make_mock_client(&server.uri());
+
+        // Page 1: cursor is null → returns 2 issues, hasNextPage: true.
+        // The JSON body will contain `"cursor":null` for the first request.
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("\"cursor\":null"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(make_page_response(
+                &[(1, "Issue one", vec![]), (2, "Issue two", vec![1])],
+                true,
+                Some("cursor-page1"),
+            )))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // Page 2: cursor is "cursor-page1" → returns 1 issue, hasNextPage: false.
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("\"cursor\":\"cursor-page1\""))
+            .respond_with(ResponseTemplate::new(200).set_body_json(make_page_response(
+                &[(3, "Issue three", vec![2])],
+                false,
+                None,
+            )))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (issues, edges) = client.fetch_graph_data().await.expect("should succeed");
+
+        // All 3 issues from both pages.
+        assert_eq!(issues.len(), 3);
+        assert_eq!(issues[0].number, 1);
+        assert_eq!(issues[0].title, "Issue one");
+        assert_eq!(issues[1].number, 2);
+        assert_eq!(issues[1].title, "Issue two");
+        assert_eq!(issues[2].number, 3);
+        assert_eq!(issues[2].title, "Issue three");
+
+        // Edges: issue 2 blocked by 1, issue 3 blocked by 2.
+        assert_eq!(edges.len(), 2);
+        assert_eq!(edges[0].source, 2);
+        assert_eq!(edges[0].target, 1);
+        assert_eq!(edges[1].source, 3);
+        assert_eq!(edges[1].target, 2);
+    }
+
+    #[tokio::test]
+    async fn fetch_graph_data_single_page_no_extra_requests() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let client = make_mock_client(&server.uri());
+
+        // Single page: hasNextPage: false on the first (and only) request.
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(make_page_response(
+                &[(10, "Only issue", vec![])],
+                false,
+                None,
+            )))
+            .expect(1) // Exactly 1 request — no extra page fetches.
+            .mount(&server)
+            .await;
+
+        let (issues, edges) = client.fetch_graph_data().await.expect("should succeed");
+
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].number, 10);
+        assert!(edges.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fetch_graph_data_null_end_cursor_breaks_pagination() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let client = make_mock_client(&server.uri());
+
+        // Pathological response: hasNextPage: true but endCursor: null.
+        // The infinite-loop guard (graphql.rs:289-298) should break out
+        // and return the partial results from this single page.
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(make_page_response(
+                &[(5, "Partial one", vec![]), (6, "Partial two", vec![5])],
+                true, // hasNextPage: true (would loop forever without guard)
+                None, // endCursor: null (triggers the guard)
+            )))
+            .expect(1) // Only 1 request — guard prevents re-fetch.
+            .mount(&server)
+            .await;
+
+        let (issues, edges) = client.fetch_graph_data().await.expect("should succeed");
+
+        // Returns partial results from the single page.
+        assert_eq!(issues.len(), 2);
+        assert_eq!(issues[0].number, 5);
+        assert_eq!(issues[1].number, 6);
+
+        // Edge: issue 6 blocked by issue 5.
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].source, 6);
+        assert_eq!(edges[0].target, 5);
+    }
+
+    #[tokio::test]
+    async fn fetch_graph_data_empty_repo_returns_empty_vecs() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let client = make_mock_client(&server.uri());
+
+        // Empty repo: no issue nodes, hasNextPage: false.
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(make_page_response(
+                &[],
+                false,
+                None,
+            )))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (issues, edges) = client.fetch_graph_data().await.expect("should succeed");
+
+        assert!(issues.is_empty());
+        assert!(edges.is_empty());
+    }
 }
