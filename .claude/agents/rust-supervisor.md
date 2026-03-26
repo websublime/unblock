@@ -164,6 +164,7 @@ Cargo.toml           # Workspace root
   ```
 - Atomic commits — each commit must compile and pass tests
 - Conventional commits: `feat:`, `fix:`, `docs:`, `chore:`, `refactor:`, `test:`
+- **Pub API change tracking** — when a `pub fn`, `pub struct`, `pub enum`, or `pub trait` signature changes in a library crate (`unblock-core`, `unblock-github`), the commit body must include an `API:` line (additive changes) or `BREAKING CHANGE:` footer (incompatible changes) noting the signature change. This enables changelog generation and semver decisions. Binary crate (`unblock-mcp`) is excluded.
 
 ---
 
