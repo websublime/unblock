@@ -3,14 +3,18 @@
 //! - `create_issue()` — REST POST
 //! - `close_issue()` — REST PATCH
 //! - `add_comment()` — REST POST
+//! - `add_blocked_by()` — GraphQL mutation (blocking relationship)
+//! - `remove_blocked_by()` — GraphQL mutation (blocking relationship)
+//! - `add_sub_issue()` — GraphQL mutation (sub-issue relationship, preview)
 //!
-//! All mutations use the GitHub REST API for simplicity. Error handling follows
-//! the same pattern as GraphQL: 429 → `RateLimited`, 404 → `IssueNotFound`,
-//! other non-2xx → `GitHubApi`.
+//! REST mutations use the GitHub REST API for simplicity. Blocking and sub-issue
+//! mutations use GraphQL because these features are only available via GraphQL.
+//! Error handling follows the same pattern: 429 → `RateLimited`, 404 →
+//! `IssueNotFound`, other non-2xx → `GitHubApi`.
 
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt as _;
-use tracing::{instrument, warn};
+use tracing::{debug, instrument, warn};
 use unblock_core::types::Issue;
 
 use crate::client::GitHubClient;
@@ -349,6 +353,208 @@ impl GitHubClient {
 
         self.graphql(mutation, mutation_vars).await?;
 
+        Ok(())
+    }
+
+    /// Resolves a GitHub issue number to a GraphQL global node ID.
+    ///
+    /// Queries `repository(owner, name) { issue(number: N) { id } }` and
+    /// returns the node ID string. Returns [`IssueNotFound`] if the issue
+    /// does not exist (null response from the API).
+    ///
+    /// [`IssueNotFound`]: unblock_core::errors::DomainError::IssueNotFound
+    async fn resolve_node_id(&self, number: u64) -> Result<String, Error> {
+        let query = "
+            query ResolveNodeId($owner: String!, $repo: String!, $number: Int!) {
+                repository(owner: $owner, name: $repo) {
+                    issue(number: $number) {
+                        id
+                    }
+                }
+            }
+        ";
+
+        let variables = serde_json::json!({
+            "owner": self.owner(),
+            "repo": self.repo(),
+            "number": number,
+        });
+
+        let response = self.graphql(query, variables).await?;
+        let node_id = response["data"]["repository"]["issue"]["id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+
+        if node_id.is_empty() {
+            return Err(unblock_core::errors::IssueNotFoundSnafu { number }
+                .build()
+                .into());
+        }
+
+        debug!(number, node_id = %node_id, "Resolved issue number to node ID");
+        Ok(node_id)
+    }
+
+    /// Adds a blocking relationship between two issues.
+    ///
+    /// After this call, `issue_number` is blocked by `blocked_by_number`.
+    /// Both issue numbers are resolved to GraphQL node IDs internally.
+    ///
+    /// Uses the GitHub GraphQL `addIssueDependency` mutation with
+    /// `dependentId` (the blocked issue) and `dependencyId` (the blocker).
+    ///
+    /// **Note:** Cycle detection is **not** performed here — it is the
+    /// responsibility of the MCP tool handler layer (see bead 1.4.9).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Domain`] with [`DomainError::IssueNotFound`] if either
+    /// issue does not exist.
+    /// Returns [`Error::Domain`] with [`DomainError::DuplicateDependency`] if
+    /// the blocking relationship already exists.
+    /// Returns [`Error::GitHubGraphQL`] for other GraphQL errors.
+    ///
+    /// [`DomainError::IssueNotFound`]: unblock_core::errors::DomainError::IssueNotFound
+    /// [`DomainError::DuplicateDependency`]: unblock_core::errors::DomainError::DuplicateDependency
+    #[instrument(skip(self), fields(owner = %self.owner(), repo = %self.repo()))]
+    pub async fn add_blocked_by(
+        &self,
+        issue_number: u64,
+        blocked_by_number: u64,
+    ) -> Result<(), Error> {
+        let issue_id = self.resolve_node_id(issue_number).await?;
+        let blocker_id = self.resolve_node_id(blocked_by_number).await?;
+
+        // Pre-check: fetch the issue and see if the relationship already exists.
+        let issue = self.fetch_issue(issue_number).await?;
+        let already_blocked = issue
+            .blocked_by
+            .iter()
+            .any(|r| r.number == blocked_by_number);
+
+        if already_blocked {
+            return Err(unblock_core::errors::DuplicateDependencySnafu {
+                source: issue_number,
+                target: blocked_by_number,
+            }
+            .build()
+            .into());
+        }
+
+        let mutation = "
+            mutation AddBlockedBy($dependentId: ID!, $dependencyId: ID!) {
+                addIssueDependency(input: {dependentId: $dependentId, dependencyId: $dependencyId}) {
+                    clientMutationId
+                }
+            }
+        ";
+
+        let variables = serde_json::json!({
+            "dependentId": issue_id,
+            "dependencyId": blocker_id,
+        });
+
+        self.graphql(mutation, variables).await?;
+
+        debug!(
+            issue_number,
+            blocked_by_number, "Added blocking relationship"
+        );
+        Ok(())
+    }
+
+    /// Removes a blocking relationship between two issues.
+    ///
+    /// After this call, `issue_number` is no longer blocked by
+    /// `blocked_by_number`. Both issue numbers are resolved to GraphQL node
+    /// IDs internally.
+    ///
+    /// Uses the GitHub GraphQL `removeIssueDependency` mutation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Domain`] with [`DomainError::IssueNotFound`] if either
+    /// issue does not exist.
+    /// Returns [`Error::GitHubGraphQL`] for other GraphQL errors.
+    ///
+    /// [`DomainError::IssueNotFound`]: unblock_core::errors::DomainError::IssueNotFound
+    #[instrument(skip(self), fields(owner = %self.owner(), repo = %self.repo()))]
+    pub async fn remove_blocked_by(
+        &self,
+        issue_number: u64,
+        blocked_by_number: u64,
+    ) -> Result<(), Error> {
+        let issue_id = self.resolve_node_id(issue_number).await?;
+        let blocker_id = self.resolve_node_id(blocked_by_number).await?;
+
+        let mutation = "
+            mutation RemoveBlockedBy($dependentId: ID!, $dependencyId: ID!) {
+                removeIssueDependency(input: {dependentId: $dependentId, dependencyId: $dependencyId}) {
+                    clientMutationId
+                }
+            }
+        ";
+
+        let variables = serde_json::json!({
+            "dependentId": issue_id,
+            "dependencyId": blocker_id,
+        });
+
+        self.graphql(mutation, variables).await?;
+
+        debug!(
+            issue_number,
+            blocked_by_number, "Removed blocking relationship"
+        );
+        Ok(())
+    }
+
+    /// Adds an issue as a sub-issue of a parent issue.
+    ///
+    /// After this call, `child_number` becomes a sub-issue of
+    /// `parent_number`. Both issue numbers are resolved to GraphQL node IDs
+    /// internally.
+    ///
+    /// Uses the GitHub GraphQL `addSubIssue` mutation with the
+    /// `GraphQL-Features: sub_issues` preview header, which is required as
+    /// of March 2026.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Domain`] with [`DomainError::IssueNotFound`] if either
+    /// issue does not exist.
+    /// Returns [`Error::GitHubGraphQL`] for other GraphQL errors.
+    ///
+    /// [`DomainError::IssueNotFound`]: unblock_core::errors::DomainError::IssueNotFound
+    #[instrument(skip(self), fields(owner = %self.owner(), repo = %self.repo()))]
+    pub async fn add_sub_issue(
+        &self,
+        parent_number: u64,
+        child_number: u64,
+    ) -> Result<(), Error> {
+        let parent_id = self.resolve_node_id(parent_number).await?;
+        let child_id = self.resolve_node_id(child_number).await?;
+
+        let mutation = "
+            mutation AddSubIssue($parentId: ID!, $childId: ID!) {
+                addSubIssue(input: {issueId: $parentId, subIssueId: $childId}) {
+                    issue {
+                        id
+                    }
+                }
+            }
+        ";
+
+        let variables = serde_json::json!({
+            "parentId": parent_id,
+            "childId": child_id,
+        });
+
+        self.graphql_with_features(mutation, variables, &["sub_issues"])
+            .await?;
+
+        debug!(parent_number, child_number, "Added sub-issue relationship");
         Ok(())
     }
 }
