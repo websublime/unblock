@@ -423,11 +423,18 @@ impl GitHubClient {
         issue_number: u64,
         blocked_by_number: u64,
     ) -> Result<(), Error> {
-        let issue_id = self.resolve_node_id(issue_number).await?;
+        // Fetch the issue first: validates existence, provides the node_id, and
+        // gives us blocked_by for the duplicate pre-check — avoiding a redundant
+        // resolve_node_id call for issue_number.
+        let issue = self.fetch_issue(issue_number).await?;
+        let issue_id = issue.node_id;
+
         let blocker_id = self.resolve_node_id(blocked_by_number).await?;
 
-        // Pre-check: fetch the issue and see if the relationship already exists.
-        let issue = self.fetch_issue(issue_number).await?;
+        // Pre-check: see if the blocking relationship already exists.
+        // NOTE: This has a TOCTOU race — between this check and the mutation,
+        // another caller could add the same relationship. Acceptable for the
+        // current single-agent MCP server use case.
         let already_blocked = issue
             .blocked_by
             .iter()
