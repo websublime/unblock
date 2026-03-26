@@ -390,7 +390,7 @@ impl GitHubClient {
 /// Parses the `X-RateLimit-Reset` header from a response into a `DateTime<Utc>`.
 ///
 /// Falls back to `Utc::now()` if the header is missing or unparseable.
-fn parse_rate_limit_reset(response: &reqwest::Response) -> DateTime<Utc> {
+pub(crate) fn parse_rate_limit_reset(response: &reqwest::Response) -> DateTime<Utc> {
     response
         .headers()
         .get("x-ratelimit-reset")
