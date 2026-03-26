@@ -1259,7 +1259,10 @@ mod tests {
                             {"field": {"name": "Priority"}, "name": "P1"},
                             {"field": {"name": "Agent"}, "text": "claude"},
                             {"field": {"name": "StoryPoints"}, "number": 5.0},
-                            {"field": {"name": "DeferUntil"}, "date": "2026-06-01"}
+                            {"field": {"name": "DeferUntil"}, "date": "2026-06-01"},
+                            {"field": {"name": "IssueType"}, "name": "Bug"},
+                            {"field": {"name": "ReadyState"}, "name": "Ready"},
+                            {"field": {"name": "ClaimedAt"}, "text": "2026-03-15T10:30:00Z"}
                         ]
                     }
                 }]
@@ -1282,6 +1285,13 @@ mod tests {
         assert_eq!(
             issue.defer_until,
             Some(chrono::NaiveDate::from_ymd_opt(2026, 6, 1).expect("valid date"))
+        );
+        assert_eq!(issue.issue_type, Some(IssueType::Bug));
+        assert_eq!(issue.ready_state, ReadyState::Ready);
+        assert!(issue.claimed_at.is_some(), "ClaimedAt should be parsed");
+        assert_eq!(
+            issue.claimed_at.expect("just asserted").to_rfc3339(),
+            "2026-03-15T10:30:00+00:00"
         );
     }
 
