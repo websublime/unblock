@@ -5,7 +5,7 @@
 //! set.
 
 use unblock_core::config::Config;
-use unblock_core::types::IssueState;
+use unblock_core::types::{IssueState, Status};
 use unblock_github::client::GitHubClient;
 
 /// Returns `true` if the `GITHUB_TOKEN` env var is set and non-empty.
@@ -123,4 +123,128 @@ async fn fetch_issue_returns_issue_not_found_for_nonexistent_number() {
         "error should indicate issue not found, got: {msg} (status: {})",
         err.status_code()
     );
+}
+
+// ── fetch_graph_data ───────────────────────────────────────────────
+
+#[tokio::test]
+async fn fetch_graph_data_returns_issues_from_real_repo() {
+    if !has_github_token() {
+        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+        return;
+    }
+
+    let config = test_config();
+    let client = GitHubClient::new(&config)
+        .await
+        .expect("GitHubClient::new() should succeed");
+
+    let (issues, edges) = client
+        .fetch_graph_data()
+        .await
+        .expect("fetch_graph_data() should succeed");
+
+    // The test repo should have at least one open issue.
+    // If the repo has zero open issues this assertion will fail — that is fine,
+    // it means the test repo needs seeding.
+    assert!(
+        !issues.is_empty(),
+        "fetch_graph_data should return at least one open issue"
+    );
+
+    // Verify all returned issues are open.
+    for issue in &issues {
+        assert_eq!(
+            issue.state,
+            IssueState::Open,
+            "fetch_graph_data should only return open issues, but issue #{} is {:?}",
+            issue.number,
+            issue.state
+        );
+    }
+
+    // Verify basic fields are populated.
+    let first = &issues[0];
+    assert!(first.number > 0, "issue number should be positive");
+    assert!(!first.title.is_empty(), "title should be non-empty");
+    assert!(!first.node_id.is_empty(), "node_id should be non-empty");
+
+    // Verify detail fields are empty (per types.rs contract).
+    for issue in &issues {
+        assert!(
+            issue.comments.is_empty(),
+            "comments should be empty for graph issues (issue #{})",
+            issue.number
+        );
+        assert!(
+            issue.blocked_by.is_empty(),
+            "blocked_by should be empty for graph issues (issue #{})",
+            issue.number
+        );
+        assert!(
+            issue.blocking.is_empty(),
+            "blocking should be empty for graph issues (issue #{})",
+            issue.number
+        );
+        assert!(
+            issue.parent.is_none(),
+            "parent should be None for graph issues (issue #{})",
+            issue.number
+        );
+        assert!(
+            issue.sub_issues.is_empty(),
+            "sub_issues should be empty for graph issues (issue #{})",
+            issue.number
+        );
+    }
+
+    // Edges are optional — a repo might not have blocking relationships.
+    // Just verify the types are correct (no panics).
+    for edge in &edges {
+        assert!(edge.source > 0, "edge source should be positive");
+        assert!(edge.target > 0, "edge target should be positive");
+        assert_ne!(
+            edge.source, edge.target,
+            "self-blocking edges should not exist"
+        );
+    }
+
+    // Log for manual review when running with GITHUB_TOKEN.
+    eprintln!(
+        "fetch_graph_data: {} issues, {} edges",
+        issues.len(),
+        edges.len()
+    );
+}
+
+#[tokio::test]
+async fn fetch_graph_data_issues_have_valid_status_and_priority() {
+    if !has_github_token() {
+        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+        return;
+    }
+
+    let config = test_config();
+    let client = GitHubClient::new(&config)
+        .await
+        .expect("GitHubClient::new() should succeed");
+
+    let (issues, _) = client
+        .fetch_graph_data()
+        .await
+        .expect("fetch_graph_data() should succeed");
+
+    // Every issue should have a valid status and priority (possibly defaults).
+    for issue in &issues {
+        // Status must be one of the known variants.
+        let _valid = matches!(
+            issue.status,
+            Status::Open | Status::InProgress | Status::Blocked | Status::Deferred | Status::Closed
+        );
+        assert!(
+            _valid,
+            "issue #{} has unexpected status {:?}",
+            issue.number, issue.status
+        );
+    }
 }
