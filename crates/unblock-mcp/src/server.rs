@@ -1,4 +1,143 @@
 //! MCP server bootstrap and state management.
 //!
-//! `ServerState` holds `GitHubClient`, `GraphCache`, and `Config`.
-//! Uses rmcp stdio transport with `ServerInfo` metadata.
+//! [`ServerState`] holds [`GitHubClient`](unblock_github::client::GitHubClient),
+//! [`GraphCache`](unblock_core::cache::GraphCache), and
+//! [`Config`](unblock_core::config::Config). [`UnblockServer`] implements the rmcp
+//! [`ServerHandler`](rmcp::ServerHandler) trait, exposing MCP tools over stdio transport.
+//!
+//! The server is constructed via [`UnblockServer::new`], which takes ownership of a
+//! [`ServerState`] and wraps it in an [`Arc`] for shared access across tool handlers.
+
+use std::sync::Arc;
+
+use rmcp::handler::server::router::tool::ToolRouter;
+use rmcp::model::{Implementation, ServerInfo};
+use rmcp::{ServerHandler, tool_handler, tool_router};
+use unblock_core::cache::GraphCache;
+use unblock_core::config::Config;
+use unblock_github::client::GitHubClient;
+
+/// Instructions string injected into the agent context window.
+///
+/// Provides a concise reference card for agents describing each tool, its purpose,
+/// key parameters, and when to use it. This is sent as part of the MCP `ServerInfo`
+/// during initialization.
+pub const INSTRUCTIONS_STR: &str = "\
+# unblock — Dependency-Aware Task Tracking
+
+unblock turns GitHub Issues into a dependency graph. Ask `ready` to get unblocked work.
+
+## Workflow
+1. `setup` — Configure the target repository (run once per session)
+2. `ready` — Get issues with no active blockers (the main entry point)
+3. `claim` — Assign yourself to an issue before starting work
+4. `close` — Close a completed issue (auto-unblocks dependents)
+
+## Tools
+
+### Core Workflow
+| Tool    | Purpose                                              | Key Params                          |
+|---------|------------------------------------------------------|-------------------------------------|
+| setup   | Set target repo and project                          | owner, repo, project_number?        |
+| ready   | Find issues that can be worked on right now           | limit?, type?, priority?, agent?    |
+| claim   | Assign yourself to an issue                          | issue_number, agent?                |
+| close   | Close an issue and cascade-unblock dependents        | issue_number                        |
+| create  | Create a new issue with optional dependencies        | title, body?, blocked_by?           |
+
+### Query & Dependencies
+| Tool    | Purpose                                              | Key Params                          |
+|---------|------------------------------------------------------|-------------------------------------|
+| show    | Get full details for a single issue                  | issue_number                        |
+| depends | Show the dependency tree for an issue                | issue_number, direction?            |
+| comment | Add a comment to an issue                            | issue_number, body                  |
+| update  | Update issue fields (priority, labels, body, etc.)   | issue_number, fields...             |
+
+## Tips
+- Always call `ready` first to find unblocked work.
+- Use `claim` before starting work to prevent conflicts.
+- After `close`, dependents are automatically re-evaluated.
+- Write tools (create, close, update, comment, claim) trigger a graph rebuild.
+- Read tools (ready, show, depends) use the cache for fast responses.
+";
+
+/// Shared state for all MCP tool handlers.
+///
+/// Holds the GitHub API client, the in-memory graph cache, and the application
+/// configuration. All fields are wrapped in [`Arc`] so that `ServerState` itself
+/// can be shared across tool handlers via `Arc<ServerState>`.
+///
+/// # Thread Safety
+///
+/// `ServerState` is `Send + Sync` because all inner types are `Send + Sync`:
+/// - [`Config`] is `Clone + Send + Sync` (plain data).
+/// - [`GitHubClient`] wraps `reqwest::Client` which is `Send + Sync`.
+/// - [`GraphCache`] uses `tokio::sync::RwLock` which is `Send + Sync`.
+#[derive(Debug)]
+#[allow(dead_code)] // Fields used by tool handlers added in beads 45a.3–45a.11.
+pub struct ServerState {
+    /// Application configuration loaded from environment variables.
+    pub config: Arc<Config>,
+    /// GitHub API client for GraphQL and REST operations.
+    pub client: Arc<GitHubClient>,
+    /// In-memory cache for the dependency graph and ready set.
+    pub cache: Arc<GraphCache>,
+}
+
+/// MCP server implementation for unblock.
+///
+/// Wraps [`ServerState`] in an [`Arc`] and provides tool routing via rmcp macros.
+/// Implements [`ServerHandler`] to serve MCP requests over stdio transport.
+///
+/// Constructed via [`UnblockServer::new`].
+pub struct UnblockServer {
+    /// Shared server state accessible by all tool handlers.
+    #[allow(dead_code)] // Used by tool handlers added in beads 45a.3–45a.11.
+    state: Arc<ServerState>,
+    /// Tool router generated by the `#[tool_router]` macro.
+    #[allow(dead_code)]
+    tool_router: ToolRouter<Self>,
+}
+
+impl UnblockServer {
+    /// Creates a new `UnblockServer` from the given state.
+    ///
+    /// Wraps the state in an `Arc` for shared access across tool handlers
+    /// and initializes the tool router.
+    #[must_use]
+    pub fn new(state: ServerState) -> Self {
+        Self {
+            state: Arc::new(state),
+            tool_router: Self::tool_router(),
+        }
+    }
+
+    /// Returns a reference to the shared server state.
+    #[must_use]
+    #[allow(dead_code)] // Used by tool handlers added in beads 45a.3–45a.11.
+    pub fn state(&self) -> &Arc<ServerState> {
+        &self.state
+    }
+}
+
+/// Tool router implementation — tools will be added in subsequent beads (45a.3–45a.11).
+#[tool_router]
+impl UnblockServer {}
+
+#[tool_handler]
+impl ServerHandler for UnblockServer {
+    fn get_info(&self) -> ServerInfo {
+        let capabilities = rmcp::model::ServerCapabilities::builder()
+            .enable_tools()
+            .build();
+        ServerInfo::new(capabilities)
+            .with_server_info(Implementation::new("unblock", env!("CARGO_PKG_VERSION")))
+            .with_instructions(INSTRUCTIONS_STR)
+    }
+}
+
+// Static assertions: ServerState must be Send + Sync.
+const _: () = {
+    const fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<ServerState>();
+    assert_send_sync::<Arc<ServerState>>();
+};
