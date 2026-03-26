@@ -1243,6 +1243,7 @@ Backend: GitHub Issues + Projects V2
 pub struct Config {
     pub token: String,              // GITHUB_TOKEN (required)
     pub api_base_url: String,       // GITHUB_API_URL (default: "https://api.github.com")
+    pub github_url: String,         // GITHUB_URL (default: "https://github.com")
     pub repo: Option<String>,       // UNBLOCK_REPO (auto-detect from git remote)
     pub project_number: Option<u64>,// UNBLOCK_PROJECT (auto-detect from linked projects)
     pub agent: String,              // UNBLOCK_AGENT (default: "agent")
