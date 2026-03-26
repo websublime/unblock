@@ -528,11 +528,7 @@ impl GitHubClient {
     ///
     /// [`DomainError::IssueNotFound`]: unblock_core::errors::DomainError::IssueNotFound
     #[instrument(skip(self), fields(owner = %self.owner(), repo = %self.repo()))]
-    pub async fn add_sub_issue(
-        &self,
-        parent_number: u64,
-        child_number: u64,
-    ) -> Result<(), Error> {
+    pub async fn add_sub_issue(&self, parent_number: u64, child_number: u64) -> Result<(), Error> {
         let parent_id = self.resolve_node_id(parent_number).await?;
         let child_id = self.resolve_node_id(child_number).await?;
 
