@@ -261,27 +261,8 @@ impl GitHubClient {
                 .and_then(serde_json::Value::as_array)
             {
                 for node in nodes {
-                    let issue_number = json_u64(node, "number");
-
                     // Extract blocking edges from trackedByIssues.
-                    // trackedBy (alias for trackedByIssues) = issues that track
-                    // this one = blockers of this issue.
-                    // Edge direction: source (this issue) blocked BY target (blocker).
-                    if let Some(blockers) = node
-                        .get("trackedBy")
-                        .and_then(|v| v.get("nodes"))
-                        .and_then(|v| v.as_array())
-                    {
-                        for blocker in blockers {
-                            let blocker_number = json_u64(blocker, "number");
-                            if blocker_number > 0 {
-                                all_edges.push(BlockingEdge {
-                                    source: issue_number,
-                                    target: blocker_number,
-                                });
-                            }
-                        }
-                    }
+                    all_edges.extend(extract_blocking_edges(node));
 
                     // Parse issue with graph-specific parser (omits comments,
                     // blocked_by, blocking, parent, sub_issues).
@@ -561,6 +542,34 @@ fn parse_graph_issue(value: &serde_json::Value) -> Issue {
         parent: None,
         sub_issues: Vec::new(),
     }
+}
+
+/// Extracts [`BlockingEdge`] entries from a single issue JSON node.
+///
+/// Reads the `trackedBy` (alias for `trackedByIssues`) connection and creates
+/// one edge per blocker. Each edge has `source` = the blocked issue number and
+/// `target` = the blocker issue number. Skips entries with a zero issue number.
+fn extract_blocking_edges(node: &serde_json::Value) -> Vec<BlockingEdge> {
+    let issue_number = json_u64(node, "number");
+    let mut edges = Vec::new();
+
+    if let Some(blockers) = node
+        .get("trackedBy")
+        .and_then(|v| v.get("nodes"))
+        .and_then(|v| v.as_array())
+    {
+        for blocker in blockers {
+            let blocker_number = json_u64(blocker, "number");
+            if blocker_number > 0 {
+                edges.push(BlockingEdge {
+                    source: issue_number,
+                    target: blocker_number,
+                });
+            }
+        }
+    }
+
+    edges
 }
 
 /// Extracts a `u64` from a JSON object by key.
@@ -1345,11 +1354,10 @@ mod tests {
         assert!(issue.claimed_at.is_none());
     }
 
-    // ── BlockingEdge extraction (logic tested via parse_graph_issue context) ──
+    // ── BlockingEdge extraction (via extract_blocking_edges helper) ──────
 
     #[test]
     fn blocking_edge_direction_source_blocked_by_target() {
-        // Simulate what fetch_graph_data does: extract edges from trackedBy.
         let node = serde_json::json!({
             "number": 42,
             "trackedBy": {
@@ -1360,24 +1368,7 @@ mod tests {
             }
         });
 
-        let issue_number = json_u64(&node, "number");
-        let mut edges = Vec::new();
-
-        if let Some(blockers) = node
-            .get("trackedBy")
-            .and_then(|v| v.get("nodes"))
-            .and_then(|v| v.as_array())
-        {
-            for blocker in blockers {
-                let blocker_number = json_u64(blocker, "number");
-                if blocker_number > 0 {
-                    edges.push(BlockingEdge {
-                        source: issue_number,
-                        target: blocker_number,
-                    });
-                }
-            }
-        }
+        let edges = extract_blocking_edges(&node);
 
         assert_eq!(edges.len(), 2);
         // source = blocked issue (42), target = blocker
@@ -1399,24 +1390,7 @@ mod tests {
             }
         });
 
-        let issue_number = json_u64(&node, "number");
-        let mut edges = Vec::new();
-
-        if let Some(blockers) = node
-            .get("trackedBy")
-            .and_then(|v| v.get("nodes"))
-            .and_then(|v| v.as_array())
-        {
-            for blocker in blockers {
-                let blocker_number = json_u64(blocker, "number");
-                if blocker_number > 0 {
-                    edges.push(BlockingEdge {
-                        source: issue_number,
-                        target: blocker_number,
-                    });
-                }
-            }
-        }
+        let edges = extract_blocking_edges(&node);
 
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].target, 5);
@@ -1431,25 +1405,7 @@ mod tests {
             }
         });
 
-        let issue_number = json_u64(&node, "number");
-        let mut edges = Vec::new();
-
-        if let Some(blockers) = node
-            .get("trackedBy")
-            .and_then(|v| v.get("nodes"))
-            .and_then(|v| v.as_array())
-        {
-            for blocker in blockers {
-                let blocker_number = json_u64(blocker, "number");
-                if blocker_number > 0 {
-                    edges.push(BlockingEdge {
-                        source: issue_number,
-                        target: blocker_number,
-                    });
-                }
-            }
-        }
-
+        let edges = extract_blocking_edges(&node);
         assert!(edges.is_empty());
     }
 
@@ -1459,25 +1415,7 @@ mod tests {
             "number": 42
         });
 
-        let issue_number = json_u64(&node, "number");
-        let mut edges = Vec::new();
-
-        if let Some(blockers) = node
-            .get("trackedBy")
-            .and_then(|v| v.get("nodes"))
-            .and_then(|v| v.as_array())
-        {
-            for blocker in blockers {
-                let blocker_number = json_u64(blocker, "number");
-                if blocker_number > 0 {
-                    edges.push(BlockingEdge {
-                        source: issue_number,
-                        target: blocker_number,
-                    });
-                }
-            }
-        }
-
+        let edges = extract_blocking_edges(&node);
         assert!(edges.is_empty());
     }
 }
