@@ -626,3 +626,424 @@ async fn add_comment_returns_issue_not_found_for_nonexistent_number() {
         err
     );
 }
+
+// ── mutations: add_blocked_by / remove_blocked_by ───────────────────
+
+#[tokio::test]
+async fn add_blocked_by_creates_blocking_relationship() {
+    if !has_github_token() {
+        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+        return;
+    }
+
+    let config = test_config();
+    let client = GitHubClient::new(&config)
+        .await
+        .expect("GitHubClient::new() should succeed");
+
+    // Create two issues: A will be blocked by B.
+    let issue_a = client
+        .create_issue(CreateIssueParams {
+            title: "[test] add_blocked_by issue A (blocked)".to_owned(),
+            body: Some("Automated test — safe to close.".to_owned()),
+            labels: vec!["test".to_owned()],
+            milestone: None,
+            assignees: vec![],
+        })
+        .await
+        .expect("create_issue A should succeed");
+
+    let mut guard_a = CloseIssueGuard::new(&client, issue_a.number);
+
+    let issue_b = client
+        .create_issue(CreateIssueParams {
+            title: "[test] add_blocked_by issue B (blocker)".to_owned(),
+            body: Some("Automated test — safe to close.".to_owned()),
+            labels: vec!["test".to_owned()],
+            milestone: None,
+            assignees: vec![],
+        })
+        .await
+        .expect("create_issue B should succeed");
+
+    let mut guard_b = CloseIssueGuard::new(&client, issue_b.number);
+
+    // Add blocking relationship: A is blocked by B.
+    client
+        .add_blocked_by(issue_a.number, issue_b.number)
+        .await
+        .expect("add_blocked_by should succeed");
+
+    // Re-fetch A and verify B is in blockedBy.
+    let refetched_a = client
+        .fetch_issue(issue_a.number)
+        .await
+        .expect("fetch_issue A should succeed after add_blocked_by");
+
+    let has_blocker = refetched_a
+        .blocked_by
+        .iter()
+        .any(|r| r.number == issue_b.number);
+    assert!(
+        has_blocker,
+        "issue A should show B in blocked_by, got: {:?}",
+        refetched_a
+            .blocked_by
+            .iter()
+            .map(|r| r.number)
+            .collect::<Vec<_>>()
+    );
+
+    // Cleanup: remove the relationship, then close both issues.
+    let _ = client
+        .remove_blocked_by(issue_a.number, issue_b.number)
+        .await;
+    client
+        .close_issue(issue_a.number, Some("Test cleanup".to_owned()))
+        .await
+        .expect("close A should succeed");
+    guard_a.disarm();
+    client
+        .close_issue(issue_b.number, Some("Test cleanup".to_owned()))
+        .await
+        .expect("close B should succeed");
+    guard_b.disarm();
+
+    eprintln!(
+        "add_blocked_by test: #{} blocked by #{} — verified",
+        issue_a.number, issue_b.number
+    );
+}
+
+#[tokio::test]
+async fn remove_blocked_by_removes_blocking_relationship() {
+    if !has_github_token() {
+        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+        return;
+    }
+
+    let config = test_config();
+    let client = GitHubClient::new(&config)
+        .await
+        .expect("GitHubClient::new() should succeed");
+
+    // Create two issues: A will be blocked by B, then unblocked.
+    let issue_a = client
+        .create_issue(CreateIssueParams {
+            title: "[test] remove_blocked_by issue A".to_owned(),
+            body: Some("Automated test — safe to close.".to_owned()),
+            labels: vec!["test".to_owned()],
+            milestone: None,
+            assignees: vec![],
+        })
+        .await
+        .expect("create_issue A should succeed");
+
+    let mut guard_a = CloseIssueGuard::new(&client, issue_a.number);
+
+    let issue_b = client
+        .create_issue(CreateIssueParams {
+            title: "[test] remove_blocked_by issue B".to_owned(),
+            body: Some("Automated test — safe to close.".to_owned()),
+            labels: vec!["test".to_owned()],
+            milestone: None,
+            assignees: vec![],
+        })
+        .await
+        .expect("create_issue B should succeed");
+
+    let mut guard_b = CloseIssueGuard::new(&client, issue_b.number);
+
+    // Add, then remove the blocking relationship.
+    client
+        .add_blocked_by(issue_a.number, issue_b.number)
+        .await
+        .expect("add_blocked_by should succeed");
+
+    client
+        .remove_blocked_by(issue_a.number, issue_b.number)
+        .await
+        .expect("remove_blocked_by should succeed");
+
+    // Re-fetch A and verify B is no longer in blockedBy.
+    let refetched_a = client
+        .fetch_issue(issue_a.number)
+        .await
+        .expect("fetch_issue A should succeed after remove_blocked_by");
+
+    let has_blocker = refetched_a
+        .blocked_by
+        .iter()
+        .any(|r| r.number == issue_b.number);
+    assert!(
+        !has_blocker,
+        "issue A should NOT show B in blocked_by after removal, got: {:?}",
+        refetched_a
+            .blocked_by
+            .iter()
+            .map(|r| r.number)
+            .collect::<Vec<_>>()
+    );
+
+    // Cleanup.
+    client
+        .close_issue(issue_a.number, Some("Test cleanup".to_owned()))
+        .await
+        .expect("close A should succeed");
+    guard_a.disarm();
+    client
+        .close_issue(issue_b.number, Some("Test cleanup".to_owned()))
+        .await
+        .expect("close B should succeed");
+    guard_b.disarm();
+
+    eprintln!(
+        "remove_blocked_by test: #{} no longer blocked by #{} — verified",
+        issue_a.number, issue_b.number
+    );
+}
+
+#[tokio::test]
+async fn add_blocked_by_duplicate_returns_duplicate_dependency() {
+    if !has_github_token() {
+        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+        return;
+    }
+
+    let config = test_config();
+    let client = GitHubClient::new(&config)
+        .await
+        .expect("GitHubClient::new() should succeed");
+
+    // Create two issues.
+    let issue_a = client
+        .create_issue(CreateIssueParams {
+            title: "[test] duplicate_dependency issue A".to_owned(),
+            body: Some("Automated test — safe to close.".to_owned()),
+            labels: vec!["test".to_owned()],
+            milestone: None,
+            assignees: vec![],
+        })
+        .await
+        .expect("create_issue A should succeed");
+
+    let mut guard_a = CloseIssueGuard::new(&client, issue_a.number);
+
+    let issue_b = client
+        .create_issue(CreateIssueParams {
+            title: "[test] duplicate_dependency issue B".to_owned(),
+            body: Some("Automated test — safe to close.".to_owned()),
+            labels: vec!["test".to_owned()],
+            milestone: None,
+            assignees: vec![],
+        })
+        .await
+        .expect("create_issue B should succeed");
+
+    let mut guard_b = CloseIssueGuard::new(&client, issue_b.number);
+
+    // First add should succeed.
+    client
+        .add_blocked_by(issue_a.number, issue_b.number)
+        .await
+        .expect("first add_blocked_by should succeed");
+
+    // Second add should return DuplicateDependency (status 409).
+    let result = client.add_blocked_by(issue_a.number, issue_b.number).await;
+    assert!(
+        result.is_err(),
+        "second add_blocked_by should return an error"
+    );
+    let err = result.unwrap_err();
+    assert_eq!(
+        err.status_code(),
+        409,
+        "error should be 409 DuplicateDependency, got: {} ({})",
+        err.status_code(),
+        err
+    );
+
+    // Cleanup.
+    let _ = client
+        .remove_blocked_by(issue_a.number, issue_b.number)
+        .await;
+    client
+        .close_issue(issue_a.number, Some("Test cleanup".to_owned()))
+        .await
+        .expect("close A should succeed");
+    guard_a.disarm();
+    client
+        .close_issue(issue_b.number, Some("Test cleanup".to_owned()))
+        .await
+        .expect("close B should succeed");
+    guard_b.disarm();
+
+    eprintln!("duplicate_dependency test: second add correctly rejected — verified");
+}
+
+#[tokio::test]
+async fn add_blocked_by_returns_issue_not_found_for_nonexistent_number() {
+    if !has_github_token() {
+        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+        return;
+    }
+
+    let config = test_config();
+    let client = GitHubClient::new(&config)
+        .await
+        .expect("GitHubClient::new() should succeed");
+
+    // Both issues non-existent.
+    let result = client.add_blocked_by(999_999_999, 999_999_998).await;
+    assert!(
+        result.is_err(),
+        "add_blocked_by with non-existent issues should fail"
+    );
+    let err = result.unwrap_err();
+    assert_eq!(
+        err.status_code(),
+        404,
+        "error should be 404 IssueNotFound, got: {} ({})",
+        err.status_code(),
+        err
+    );
+}
+
+#[tokio::test]
+async fn remove_blocked_by_returns_issue_not_found_for_nonexistent_number() {
+    if !has_github_token() {
+        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+        return;
+    }
+
+    let config = test_config();
+    let client = GitHubClient::new(&config)
+        .await
+        .expect("GitHubClient::new() should succeed");
+
+    let result = client.remove_blocked_by(999_999_999, 999_999_998).await;
+    assert!(
+        result.is_err(),
+        "remove_blocked_by with non-existent issues should fail"
+    );
+    let err = result.unwrap_err();
+    assert_eq!(
+        err.status_code(),
+        404,
+        "error should be 404 IssueNotFound, got: {} ({})",
+        err.status_code(),
+        err
+    );
+}
+
+// ── mutations: add_sub_issue ────────────────────────────────────────
+
+#[tokio::test]
+async fn add_sub_issue_creates_parent_child_relationship() {
+    if !has_github_token() {
+        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+        return;
+    }
+
+    let config = test_config();
+    let client = GitHubClient::new(&config)
+        .await
+        .expect("GitHubClient::new() should succeed");
+
+    // Create parent and child issues.
+    let parent = client
+        .create_issue(CreateIssueParams {
+            title: "[test] add_sub_issue parent".to_owned(),
+            body: Some("Automated test — safe to close.".to_owned()),
+            labels: vec!["test".to_owned()],
+            milestone: None,
+            assignees: vec![],
+        })
+        .await
+        .expect("create parent should succeed");
+
+    let mut guard_parent = CloseIssueGuard::new(&client, parent.number);
+
+    let child = client
+        .create_issue(CreateIssueParams {
+            title: "[test] add_sub_issue child".to_owned(),
+            body: Some("Automated test — safe to close.".to_owned()),
+            labels: vec!["test".to_owned()],
+            milestone: None,
+            assignees: vec![],
+        })
+        .await
+        .expect("create child should succeed");
+
+    let mut guard_child = CloseIssueGuard::new(&client, child.number);
+
+    // Add sub-issue relationship.
+    client
+        .add_sub_issue(parent.number, child.number)
+        .await
+        .expect("add_sub_issue should succeed");
+
+    // Re-fetch parent and verify child appears in subIssues.
+    let refetched_parent = client
+        .fetch_issue(parent.number)
+        .await
+        .expect("fetch_issue parent should succeed after add_sub_issue");
+
+    let has_child = refetched_parent
+        .sub_issues
+        .iter()
+        .any(|r| r.number == child.number);
+    assert!(
+        has_child,
+        "parent should show child in sub_issues, got: {:?}",
+        refetched_parent
+            .sub_issues
+            .iter()
+            .map(|r| r.number)
+            .collect::<Vec<_>>()
+    );
+
+    // Cleanup.
+    client
+        .close_issue(child.number, Some("Test cleanup".to_owned()))
+        .await
+        .expect("close child should succeed");
+    guard_child.disarm();
+    client
+        .close_issue(parent.number, Some("Test cleanup".to_owned()))
+        .await
+        .expect("close parent should succeed");
+    guard_parent.disarm();
+
+    eprintln!(
+        "add_sub_issue test: #{} is sub-issue of #{} — verified",
+        child.number, parent.number
+    );
+}
+
+#[tokio::test]
+async fn add_sub_issue_returns_issue_not_found_for_nonexistent_number() {
+    if !has_github_token() {
+        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+        return;
+    }
+
+    let config = test_config();
+    let client = GitHubClient::new(&config)
+        .await
+        .expect("GitHubClient::new() should succeed");
+
+    let result = client.add_sub_issue(999_999_999, 999_999_998).await;
+    assert!(
+        result.is_err(),
+        "add_sub_issue with non-existent issues should fail"
+    );
+    let err = result.unwrap_err();
+    assert_eq!(
+        err.status_code(),
+        404,
+        "error should be 404 IssueNotFound, got: {} ({})",
+        err.status_code(),
+        err
+    );
+}
