@@ -53,10 +53,11 @@ async fn main() -> Result<(), crate::errors::BootstrapError> {
         cache: Arc::new(cache),
     };
 
+    let repo_slug = format!("{}/{}", state.client.owner(), state.client.repo());
     info!(
         server_name = "unblock",
         version = env!("CARGO_PKG_VERSION"),
-        repo = %state.client.owner().to_owned() + "/" + state.client.repo(),
+        repo = %repo_slug,
         project = ?state.client.project_number(),
         "Starting unblock MCP server"
     );
