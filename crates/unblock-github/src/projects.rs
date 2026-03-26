@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+use chrono::NaiveDate;
 use serde::Deserialize;
 use tracing::{debug, instrument, warn};
 
@@ -68,8 +69,8 @@ pub enum FieldValue {
     Text(String),
     /// A numeric value.
     Number(f64),
-    /// A date value in ISO 8601 format (YYYY-MM-DD).
-    Date(String),
+    /// A date value (serialized as ISO 8601 YYYY-MM-DD for the GraphQL API).
+    Date(NaiveDate),
 }
 
 /// Specification for a required Projects V2 field.
@@ -313,7 +314,7 @@ impl GitHubClient {
         let value_input = match value {
             FieldValue::Text(t) => serde_json::json!({ "text": t }),
             FieldValue::Number(n) => serde_json::json!({ "number": n }),
-            FieldValue::Date(d) => serde_json::json!({ "date": d }),
+            FieldValue::Date(d) => serde_json::json!({ "date": d.to_string() }),
             FieldValue::SingleSelectOption(option_id) => {
                 serde_json::json!({ "singleSelectOptionId": option_id })
             }
