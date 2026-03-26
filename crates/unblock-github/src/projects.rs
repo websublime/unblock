@@ -235,9 +235,10 @@ impl GitHubClient {
     /// For single-select fields, options are created as part of the field creation.
     /// Returns [`ProjectFieldIds`] with all resolved field and option IDs.
     ///
-    /// The result is cached on the client via [`set_field_ids`](Self::set_field_ids)
+    /// The caller should cache the result via [`set_field_ids`](Self::set_field_ids)
     /// so subsequent calls to [`update_field`](Self::update_field) can resolve
-    /// field/option IDs without another round-trip.
+    /// field/option IDs without another round-trip. This method does **not**
+    /// cache automatically.
     ///
     /// # Errors
     ///
