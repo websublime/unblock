@@ -1330,6 +1330,14 @@ async fn update_field_changes_value_on_project_item() {
         .await
         .expect("update_field(Priority=P1) should succeed");
 
+    // Re-fetch to confirm the Priority value was persisted.
+    let priority_value = fetch_field_value(&client, &item_id, &field_ids.priority.field_id).await;
+    assert_eq!(
+        priority_value.as_deref(),
+        Some("P1"),
+        "Re-fetched Priority should be P1"
+    );
+
     // Update the Agent text field.
     client
         .update_field(
@@ -1341,6 +1349,14 @@ async fn update_field_changes_value_on_project_item() {
         .await
         .expect("update_field(Agent=test-agent) should succeed");
 
+    // Re-fetch to confirm the Agent value was persisted.
+    let agent_value = fetch_field_value(&client, &item_id, &field_ids.agent).await;
+    assert_eq!(
+        agent_value.as_deref(),
+        Some("test-agent"),
+        "Re-fetched Agent should be 'test-agent'"
+    );
+
     // Cleanup.
     client
         .close_issue(issue.number, Some("Test cleanup".to_owned()))
@@ -1349,7 +1365,7 @@ async fn update_field_changes_value_on_project_item() {
     guard.disarm();
 
     eprintln!(
-        "update_field test: updated Priority and Agent on issue #{} — verified",
+        "update_field test: updated Priority and Agent on issue #{} — re-fetch verified",
         issue.number
     );
 }
@@ -1460,4 +1476,67 @@ async fn fetch_project_item_id(
     }
 
     String::new()
+}
+
+/// Fetches the current value of a specific field on a ProjectV2Item via
+/// GraphQL. Returns `Some(value)` if found, `None` otherwise.
+///
+/// Works for both single-select fields (returns the option name) and text
+/// fields (returns the text value).
+async fn fetch_field_value(client: &GitHubClient, item_id: &str, field_id: &str) -> Option<String> {
+    let query = "
+        query ItemFieldValue($itemId: ID!) {
+            node(id: $itemId) {
+                ... on ProjectV2Item {
+                    fieldValues(first: 30) {
+                        nodes {
+                            ... on ProjectV2ItemFieldSingleSelectValue {
+                                field { ... on ProjectV2SingleSelectField { id } }
+                                name
+                            }
+                            ... on ProjectV2ItemFieldTextValue {
+                                field { ... on ProjectV2Field { id } }
+                                text
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    ";
+
+    let body = serde_json::json!({
+        "query": query,
+        "variables": { "itemId": item_id },
+    });
+
+    let response: serde_json::Value = client
+        .http()
+        .post(client.graphql_url())
+        .json(&body)
+        .send()
+        .await
+        .expect("GraphQL request should succeed")
+        .json()
+        .await
+        .expect("GraphQL response should be valid JSON");
+
+    let nodes = response["data"]["node"]["fieldValues"]["nodes"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+
+    for node in &nodes {
+        // Single-select field value.
+        if node["field"]["id"].as_str() == Some(field_id) {
+            if let Some(name) = node["name"].as_str() {
+                return Some(name.to_owned());
+            }
+            if let Some(text) = node["text"].as_str() {
+                return Some(text.to_owned());
+            }
+        }
+    }
+
+    None
 }
