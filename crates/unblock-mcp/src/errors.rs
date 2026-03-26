@@ -2,7 +2,15 @@
 //!
 //! Maps domain errors (`unblock-core`) and infrastructure errors (`unblock-github`)
 //! to MCP error responses with appropriate error codes.
+//!
+//! [`github_error_to_mcp`] provides the bridge between infrastructure errors and
+//! JSON-RPC error responses, mapping HTTP status codes to appropriate MCP error codes.
+//!
+//! A `From` impl is not possible here due to the Rust orphan rule — neither
+//! `ErrorData` (from `rmcp`) nor `Error` (from `unblock-github`) is defined in
+//! this crate.
 
+use rmcp::model::{ErrorCode, ErrorData};
 use snafu::Snafu;
 
 /// Errors that can occur during MCP server bootstrap.
@@ -45,4 +53,184 @@ pub enum BootstrapError {
         /// The underlying tokio `JoinError`.
         source: tokio::task::JoinError,
     },
+}
+
+/// Maps a GitHub infrastructure error to an MCP JSON-RPC error response.
+///
+/// Converts the HTTP status code from the error into the most appropriate
+/// JSON-RPC error code:
+///
+/// | HTTP status              | JSON-RPC code             |
+/// |--------------------------|---------------------------|
+/// | 400, 404, 409, 412, 422  | `INVALID_PARAMS` (-32602) |
+/// | 429, 500, 503            | `INTERNAL_ERROR` (-32603) |
+/// | other                    | `INTERNAL_ERROR` (-32603) |
+///
+/// The error's `Display` output becomes the JSON-RPC error message.
+pub(crate) fn github_error_to_mcp(err: unblock_github::errors::Error) -> ErrorData {
+    let code = match err.status_code() {
+        400 | 404 | 409 | 412 | 422 => ErrorCode::INVALID_PARAMS,
+        _ => ErrorCode::INTERNAL_ERROR,
+    };
+    ErrorData {
+        code,
+        message: err.to_string().into(),
+        data: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use snafu::IntoError;
+    use unblock_core::errors::IssueNotFoundSnafu;
+    use unblock_github::errors::{
+        CircuitBreakerOpenSnafu, GitHubApiSnafu, GitHubGraphQLSnafu, GitRemoteSnafu,
+        ProjectNotConfiguredSnafu, RateLimitedSnafu,
+    };
+
+    /// Helper: convert a `unblock_github::errors::Error` to `ErrorData` and return (code, message).
+    fn convert(err: unblock_github::errors::Error) -> (ErrorCode, String) {
+        let ed = github_error_to_mcp(err);
+        (ed.code, ed.message.into_owned())
+    }
+
+    #[test]
+    fn domain_error_maps_to_invalid_params() {
+        // Domain errors (e.g., IssueNotFound) have status_code 404.
+        let err = unblock_github::errors::Error::from(
+            IssueNotFoundSnafu { number: 42_u64 }.build(),
+        );
+        let (code, msg) = convert(err);
+        assert_eq!(code, ErrorCode::INVALID_PARAMS);
+        assert!(msg.contains("42"), "message should contain issue number: {msg}");
+    }
+
+    #[test]
+    fn github_api_404_maps_to_invalid_params() {
+        let err = GitHubApiSnafu {
+            status: 404_u16,
+            message: "Not Found".to_owned(),
+        }
+        .build();
+        let (code, msg) = convert(err);
+        assert_eq!(code, ErrorCode::INVALID_PARAMS);
+        assert!(msg.contains("404"), "message should contain status: {msg}");
+    }
+
+    #[test]
+    fn github_api_400_maps_to_invalid_params() {
+        let err = GitHubApiSnafu {
+            status: 400_u16,
+            message: "Bad Request".to_owned(),
+        }
+        .build();
+        let (code, _) = convert(err);
+        assert_eq!(code, ErrorCode::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn github_api_409_maps_to_invalid_params() {
+        let err = GitHubApiSnafu {
+            status: 409_u16,
+            message: "Conflict".to_owned(),
+        }
+        .build();
+        let (code, _) = convert(err);
+        assert_eq!(code, ErrorCode::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn github_graphql_maps_to_invalid_params() {
+        // GraphQL errors have status_code 422.
+        let err = GitHubGraphQLSnafu {
+            errors: vec!["Field 'x' not found".to_owned()],
+        }
+        .build();
+        let (code, msg) = convert(err);
+        assert_eq!(code, ErrorCode::INVALID_PARAMS);
+        assert!(
+            msg.contains("Field 'x' not found"),
+            "message should contain GraphQL error: {msg}"
+        );
+    }
+
+    #[test]
+    fn project_not_configured_maps_to_invalid_params() {
+        // ProjectNotConfigured has status_code 412.
+        let err = ProjectNotConfiguredSnafu.build();
+        let (code, msg) = convert(err);
+        assert_eq!(code, ErrorCode::INVALID_PARAMS);
+        assert!(
+            msg.contains("setup"),
+            "message should mention setup: {msg}"
+        );
+    }
+
+    #[test]
+    fn rate_limited_maps_to_internal_error() {
+        // RateLimited has status_code 429.
+        let err = RateLimitedSnafu {
+            reset_at: Utc::now(),
+        }
+        .build();
+        let (code, msg) = convert(err);
+        assert_eq!(code, ErrorCode::INTERNAL_ERROR);
+        assert!(
+            msg.contains("rate limit"),
+            "message should mention rate limit: {msg}"
+        );
+    }
+
+    #[test]
+    fn circuit_breaker_maps_to_internal_error() {
+        // CircuitBreakerOpen has status_code 503.
+        let err = CircuitBreakerOpenSnafu {
+            since: std::time::Instant::now(),
+        }
+        .build();
+        let (code, _) = convert(err);
+        assert_eq!(code, ErrorCode::INTERNAL_ERROR);
+    }
+
+    #[tokio::test]
+    async fn github_unavailable_maps_to_internal_error() {
+        // GitHubUnavailable has status_code 503. Need a real reqwest error.
+        let reqwest_err = reqwest::Client::new()
+            .get("http://127.0.0.1:1")
+            .send()
+            .await
+            .expect_err("connection to port 1 should be refused");
+        let err = unblock_github::errors::GitHubUnavailableSnafu
+            .into_error(reqwest_err);
+        let (code, msg) = convert(err);
+        assert_eq!(code, ErrorCode::INTERNAL_ERROR);
+        assert!(
+            msg.contains("Cannot connect"),
+            "message should describe connectivity issue: {msg}"
+        );
+    }
+
+    #[test]
+    fn git_remote_maps_to_internal_error() {
+        // GitRemote has status_code 500.
+        let err = GitRemoteSnafu {
+            message: "no origin remote".to_owned(),
+        }
+        .build();
+        let (code, msg) = convert(err);
+        assert_eq!(code, ErrorCode::INTERNAL_ERROR);
+        assert!(
+            msg.contains("no origin remote"),
+            "message should contain detail: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_data_has_no_extra_data_field() {
+        let err = ProjectNotConfiguredSnafu.build();
+        let ed = github_error_to_mcp(err);
+        assert!(ed.data.is_none(), "data field should be None");
+    }
 }
