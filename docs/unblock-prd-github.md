@@ -718,6 +718,7 @@ The agent doesn't wait for the full rebuild — it gets results in milliseconds 
 |---|---|---|---|
 | `GITHUB_TOKEN` | Yes | — | PAT or GitHub App token |
 | `GITHUB_API_URL` | No | `https://api.github.com` | API base URL. GHE Server: `https://<host>/api/v3` |
+| `GITHUB_URL` | No | `https://github.com` | Web URL for git remote matching. GHE: `https://<ghe-host>` (not the API URL) |
 | `UNBLOCK_REPO` | No | Auto-detect from git remote | `owner/repo` format |
 | `UNBLOCK_PROJECT` | No | Auto-detect first linked project | Project number |
 | `UNBLOCK_AGENT` | No | `agent` | Default agent name |
