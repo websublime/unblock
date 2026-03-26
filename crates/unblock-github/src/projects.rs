@@ -222,10 +222,16 @@ impl GitHubClient {
 
         debug!(project_number, project_id = %project_id, "Resolved project V2");
 
-        #[allow(clippy::cast_possible_truncation)]
+        let number = u32::try_from(project_number).map_err(|_| {
+            errors::GitHubGraphQLSnafu {
+                errors: vec![format!("Project number {project_number} exceeds u32::MAX")],
+            }
+            .build()
+        })?;
+
         Ok(ProjectInfo {
             id: project_id,
-            number: project_number as u32,
+            number,
         })
     }
 
