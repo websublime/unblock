@@ -9,6 +9,65 @@ use unblock_core::types::{IssueState, Status};
 use unblock_github::client::GitHubClient;
 use unblock_github::mutations::CreateIssueParams;
 
+/// Drop guard that closes a GitHub issue on scope exit, even during a panic
+/// unwind. This ensures integration tests do not leave orphaned open issues
+/// when an assertion fails before the explicit cleanup call.
+///
+/// The guard captures a reference to the [`GitHubClient`] and the issue number
+/// at creation time. On drop it uses the current tokio runtime handle to
+/// block on the async `close_issue` call. If the close fails the error is
+/// logged to stderr but does not cause a secondary panic (which would abort
+/// the process during an unwind).
+struct CloseIssueGuard<'a> {
+    client: &'a GitHubClient,
+    issue_number: u64,
+    /// Set to `true` once the test completes successfully and the caller has
+    /// already cleaned up (or does not need cleanup). When `true`, the guard
+    /// skips the `close_issue` call in `Drop`.
+    disarmed: bool,
+}
+
+impl<'a> CloseIssueGuard<'a> {
+    /// Creates an armed guard that will close `issue_number` on drop.
+    fn new(client: &'a GitHubClient, issue_number: u64) -> Self {
+        Self {
+            client,
+            issue_number,
+            disarmed: false,
+        }
+    }
+
+    /// Disarms the guard so that `Drop` becomes a no-op. Call this after the
+    /// test has successfully cleaned up on its own.
+    fn disarm(&mut self) {
+        self.disarmed = true;
+    }
+}
+
+impl Drop for CloseIssueGuard<'_> {
+    fn drop(&mut self) {
+        if self.disarmed {
+            return;
+        }
+        // We are inside an async tokio test, so a runtime handle is available.
+        // `block_in_place` + `block_on` lets us run the async close from a
+        // synchronous `Drop` context without panicking about nested runtimes.
+        let number = self.issue_number;
+        let client = self.client;
+        tokio::task::block_in_place(|| {
+            let handle = tokio::runtime::Handle::current();
+            if let Err(e) = handle.block_on(client.close_issue(
+                number,
+                Some("Automated test cleanup (drop guard)".to_owned()),
+            )) {
+                eprintln!("CloseIssueGuard: failed to close issue #{number}: {e}");
+            } else {
+                eprintln!("CloseIssueGuard: cleaned up issue #{number}");
+            }
+        });
+    }
+}
+
 /// Returns `true` if the `GITHUB_TOKEN` env var is set and non-empty.
 fn has_github_token() -> bool {
     std::env::var("GITHUB_TOKEN")
@@ -277,6 +336,9 @@ async fn create_issue_returns_issue_with_correct_fields() {
         .await
         .expect("create_issue() should succeed");
 
+    // Arm the drop guard so the issue is closed even if an assertion panics.
+    let mut guard = CloseIssueGuard::new(&client, issue.number);
+
     // Verify the returned issue has the correct fields.
     assert!(issue.number > 0, "issue number should be positive");
     assert_eq!(
@@ -291,11 +353,13 @@ async fn create_issue_returns_issue_with_correct_fields() {
         "newly created issue should be Open"
     );
 
-    // Cleanup: close the created issue.
+    // Explicit cleanup on the happy path; disarm the guard so it does not
+    // double-close.
     client
         .close_issue(issue.number, Some("Automated test cleanup".to_owned()))
         .await
         .expect("close_issue() cleanup should succeed");
+    guard.disarm();
 
     eprintln!(
         "create_issue test: created and closed issue #{}",
@@ -331,11 +395,17 @@ async fn close_issue_closes_issue_and_refetch_confirms() {
         .await
         .expect("create_issue() should succeed");
 
+    // Arm the drop guard so the issue is closed even if an assertion panics.
+    let mut guard = CloseIssueGuard::new(&client, issue.number);
+
     // Close it without a reason.
     client
         .close_issue(issue.number, None)
         .await
         .expect("close_issue() should succeed");
+
+    // The issue is now closed; disarm since cleanup is no longer needed.
+    guard.disarm();
 
     // Re-fetch and verify it is closed.
     let refetched = client
@@ -378,6 +448,9 @@ async fn close_issue_with_reason_adds_comment_before_closing() {
         .await
         .expect("create_issue() should succeed");
 
+    // Arm the drop guard so the issue is closed even if an assertion panics.
+    let mut guard = CloseIssueGuard::new(&client, issue.number);
+
     let reason_text = "Closing because the test is complete.";
 
     // Close with a reason (adds comment first).
@@ -385,6 +458,9 @@ async fn close_issue_with_reason_adds_comment_before_closing() {
         .close_issue(issue.number, Some(reason_text.to_owned()))
         .await
         .expect("close_issue() with reason should succeed");
+
+    // The issue is now closed; disarm since cleanup is no longer needed.
+    guard.disarm();
 
     // Re-fetch and verify the comment appears.
     let refetched = client
@@ -475,6 +551,9 @@ async fn add_comment_posts_comment_and_returns_url() {
         .await
         .expect("create_issue() should succeed");
 
+    // Arm the drop guard so the issue is closed even if an assertion panics.
+    let mut guard = CloseIssueGuard::new(&client, issue.number);
+
     let comment_body = "Integration test comment — hello from add_comment!";
 
     let comment_url = client
@@ -504,11 +583,13 @@ async fn add_comment_posts_comment_and_returns_url() {
         "comment should appear in issue comments after add_comment()"
     );
 
-    // Cleanup: close the issue.
+    // Explicit cleanup on the happy path; disarm the guard so it does not
+    // double-close.
     client
         .close_issue(issue.number, Some("Test cleanup".to_owned()))
         .await
         .expect("close_issue() cleanup should succeed");
+    guard.disarm();
 
     eprintln!(
         "add_comment test: commented on issue #{}, URL: {comment_url}",
