@@ -24,3 +24,7 @@ tracing-subscriber = { workspace = true }
 rmcp = { workspace = true }
 schemars = { workspace = true }
 snafu = { workspace = true }
+
+[dev-dependencies]
+chrono = { workspace = true }
+reqwest = { workspace = true }
