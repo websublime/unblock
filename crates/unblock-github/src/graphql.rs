@@ -6,7 +6,7 @@
 
 use chrono::{DateTime, Utc};
 use snafu::ResultExt as _;
-use tracing::{debug, instrument};
+use tracing::{debug, instrument, warn};
 use unblock_core::types::{
     BlockingEdge, Issue, IssueComment, IssueState, IssueType, Priority, ReadyState, RelatedIssue,
     Status,
@@ -300,10 +300,23 @@ impl GitHubClient {
                 break;
             }
 
-            cursor = page_info
+            let next_cursor = page_info
                 .get("endCursor")
                 .and_then(serde_json::Value::as_str)
                 .map(String::from);
+
+            // Guard against infinite loop: if GitHub returns hasNextPage:true
+            // but endCursor is null, cursor would reset to None and re-fetch
+            // the first page forever. Break to prevent this.
+            if next_cursor.is_none() {
+                warn!(
+                    "GitHub API returned hasNextPage=true but endCursor=null; \
+                     stopping pagination to avoid infinite loop"
+                );
+                break;
+            }
+
+            cursor = next_cursor;
         }
 
         debug!(
