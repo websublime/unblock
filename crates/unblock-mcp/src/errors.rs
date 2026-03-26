@@ -3,7 +3,7 @@
 //! Maps domain errors (`unblock-core`) and infrastructure errors (`unblock-github`)
 //! to MCP error responses with appropriate error codes.
 //!
-//! [`github_error_to_mcp`] provides the bridge between infrastructure errors and
+//! `github_error_to_mcp` provides the bridge between infrastructure errors and
 //! JSON-RPC error responses, mapping HTTP status codes to appropriate MCP error codes.
 //!
 //! A `From` impl is not possible here due to the Rust orphan rule — neither
@@ -67,6 +67,8 @@ pub enum BootstrapError {
 /// | other                    | `INTERNAL_ERROR` (-32603) |
 ///
 /// The error's `Display` output becomes the JSON-RPC error message.
+#[allow(dead_code)] // Used by tool handlers added in beads 45a.3–45a.11.
+#[allow(clippy::needless_pass_by_value)] // Intentional: consumes the error in a map_err chain.
 pub(crate) fn github_error_to_mcp(err: unblock_github::errors::Error) -> ErrorData {
     let code = match err.status_code() {
         400 | 404 | 409 | 412 | 422 => ErrorCode::INVALID_PARAMS,
@@ -99,12 +101,14 @@ mod tests {
     #[test]
     fn domain_error_maps_to_invalid_params() {
         // Domain errors (e.g., IssueNotFound) have status_code 404.
-        let err = unblock_github::errors::Error::from(
-            IssueNotFoundSnafu { number: 42_u64 }.build(),
-        );
+        let err =
+            unblock_github::errors::Error::from(IssueNotFoundSnafu { number: 42_u64 }.build());
         let (code, msg) = convert(err);
         assert_eq!(code, ErrorCode::INVALID_PARAMS);
-        assert!(msg.contains("42"), "message should contain issue number: {msg}");
+        assert!(
+            msg.contains("42"),
+            "message should contain issue number: {msg}"
+        );
     }
 
     #[test]
@@ -162,10 +166,7 @@ mod tests {
         let err = ProjectNotConfiguredSnafu.build();
         let (code, msg) = convert(err);
         assert_eq!(code, ErrorCode::INVALID_PARAMS);
-        assert!(
-            msg.contains("setup"),
-            "message should mention setup: {msg}"
-        );
+        assert!(msg.contains("setup"), "message should mention setup: {msg}");
     }
 
     #[test]
@@ -202,8 +203,7 @@ mod tests {
             .send()
             .await
             .expect_err("connection to port 1 should be refused");
-        let err = unblock_github::errors::GitHubUnavailableSnafu
-            .into_error(reqwest_err);
+        let err = unblock_github::errors::GitHubUnavailableSnafu.into_error(reqwest_err);
         let (code, msg) = convert(err);
         assert_eq!(code, ErrorCode::INTERNAL_ERROR);
         assert!(
