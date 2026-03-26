@@ -21,7 +21,6 @@ reqwest = { version = "0.12", features = ["json"] }
 petgraph = "0.7"
 chrono = { version = "0.4", features = ["serde"] }
 snafu = "0.8"
-anyhow = "1"
 rmcp = { version = "1.0", features = ["server", "transport-io"] }
 schemars = "1"
 rand = "0.9"
