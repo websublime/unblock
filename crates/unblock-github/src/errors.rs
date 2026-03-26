@@ -41,10 +41,10 @@ pub enum Error {
     },
 
     /// One or more errors in a GitHub GraphQL response.
-    #[snafu(display("GitHub GraphQL error: {errors}"))]
+    #[snafu(display("GitHub GraphQL error: {}", errors.join("; ")))]
     GitHubGraphQL {
-        /// Concatenated error messages from the GraphQL response.
-        errors: String,
+        /// Individual error messages from the GraphQL response.
+        errors: Vec<String>,
     },
 
     /// Network or connection failure when reaching GitHub.
@@ -126,7 +126,7 @@ mod tests {
     #[test]
     fn github_graphql_display() {
         let err = GitHubGraphQLSnafu {
-            errors: "Field 'x' not found".to_owned(),
+            errors: vec!["Field 'x' not found".to_owned()],
         }
         .build();
         assert_eq!(err.to_string(), "GitHub GraphQL error: Field 'x' not found");
@@ -210,7 +210,7 @@ mod tests {
             }
             .build(),
             GitHubGraphQLSnafu {
-                errors: "err".to_owned(),
+                errors: vec!["err".to_owned()],
             }
             .build(),
             RateLimitedSnafu {
@@ -254,7 +254,7 @@ mod tests {
     #[test]
     fn status_code_github_graphql() {
         let err = GitHubGraphQLSnafu {
-            errors: "bad field".to_owned(),
+            errors: vec!["bad field".to_owned()],
         }
         .build();
         assert_eq!(err.status_code(), 422);
