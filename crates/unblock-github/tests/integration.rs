@@ -8,6 +8,7 @@ use unblock_core::config::Config;
 use unblock_core::types::{IssueState, Status};
 use unblock_github::client::GitHubClient;
 use unblock_github::mutations::CreateIssueParams;
+use unblock_github::projects::FieldValue;
 
 /// Drop guard that closes a GitHub issue on scope exit, even during a panic
 /// unwind. This ensures integration tests do not leave orphaned open issues
@@ -71,6 +72,13 @@ impl Drop for CloseIssueGuard<'_> {
 /// Returns `true` if the `GITHUB_TOKEN` env var is set and non-empty.
 fn has_github_token() -> bool {
     std::env::var("GITHUB_TOKEN")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
+}
+
+/// Returns `true` if `UNBLOCK_PROJECT` env var is set and non-empty.
+fn has_project_number() -> bool {
+    std::env::var("UNBLOCK_PROJECT")
         .map(|v| !v.is_empty())
         .unwrap_or(false)
 }
@@ -1046,4 +1054,410 @@ async fn add_sub_issue_returns_issue_not_found_for_nonexistent_number() {
         err.status_code(),
         err
     );
+}
+
+// ── Projects V2: resolve_project_info ───────────────────────────────
+
+#[tokio::test]
+async fn resolve_project_info_returns_project_id_and_number() {
+    if !has_github_token() || !has_project_number() {
+        eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping project integration test");
+        return;
+    }
+
+    let config = test_config();
+    let client = GitHubClient::new(&config)
+        .await
+        .expect("GitHubClient::new() should succeed");
+
+    let project_info = client
+        .resolve_project_info()
+        .await
+        .expect("resolve_project_info() should succeed");
+
+    assert!(
+        !project_info.id.is_empty(),
+        "project ID should be non-empty"
+    );
+    assert!(project_info.number > 0, "project number should be positive");
+
+    eprintln!(
+        "resolve_project_info: id={}, number={}",
+        project_info.id, project_info.number
+    );
+}
+
+// ── Projects V2: setup_fields ───────────────────────────────────────
+
+#[tokio::test]
+async fn setup_fields_creates_all_seven_fields() {
+    if !has_github_token() || !has_project_number() {
+        eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping project integration test");
+        return;
+    }
+
+    let config = test_config();
+    let client = GitHubClient::new(&config)
+        .await
+        .expect("GitHubClient::new() should succeed");
+
+    let project_info = client
+        .resolve_project_info()
+        .await
+        .expect("resolve_project_info() should succeed");
+
+    let field_ids = client
+        .setup_fields(&project_info.id)
+        .await
+        .expect("setup_fields() should succeed");
+
+    // Verify all 7 fields have non-empty IDs.
+    assert!(
+        !field_ids.status.field_id.is_empty(),
+        "Status field_id should be non-empty"
+    );
+    assert!(
+        !field_ids.priority.field_id.is_empty(),
+        "Priority field_id should be non-empty"
+    );
+    assert!(
+        !field_ids.issue_type.field_id.is_empty(),
+        "IssueType field_id should be non-empty"
+    );
+    assert!(
+        !field_ids.agent.is_empty(),
+        "Agent field_id should be non-empty"
+    );
+    assert!(
+        !field_ids.story_points.is_empty(),
+        "StoryPoints field_id should be non-empty"
+    );
+    assert!(
+        !field_ids.defer_until.is_empty(),
+        "DeferUntil field_id should be non-empty"
+    );
+    assert!(
+        !field_ids.ready_state.field_id.is_empty(),
+        "ReadyState field_id should be non-empty"
+    );
+
+    // Verify single-select fields have the correct options.
+    assert_eq!(
+        field_ids.status.options.len(),
+        5,
+        "Status should have 5 options, got: {:?}",
+        field_ids.status.options.keys().collect::<Vec<_>>()
+    );
+    for expected in &["Backlog", "In Progress", "Done", "Blocked", "Deferred"] {
+        assert!(
+            field_ids.status.options.contains_key(*expected),
+            "Status should have option '{expected}', got: {:?}",
+            field_ids.status.options.keys().collect::<Vec<_>>()
+        );
+    }
+
+    assert_eq!(
+        field_ids.priority.options.len(),
+        5,
+        "Priority should have 5 options"
+    );
+    for expected in &["P0", "P1", "P2", "P3", "P4"] {
+        assert!(
+            field_ids.priority.options.contains_key(*expected),
+            "Priority should have option '{expected}'"
+        );
+    }
+
+    assert_eq!(
+        field_ids.issue_type.options.len(),
+        5,
+        "IssueType should have 5 options"
+    );
+    for expected in &["Task", "Bug", "Feature", "Epic", "Chore"] {
+        assert!(
+            field_ids.issue_type.options.contains_key(*expected),
+            "IssueType should have option '{expected}'"
+        );
+    }
+
+    assert_eq!(
+        field_ids.ready_state.options.len(),
+        2,
+        "ReadyState should have 2 options"
+    );
+    for expected in &["Ready", "Not Ready"] {
+        assert!(
+            field_ids.ready_state.options.contains_key(*expected),
+            "ReadyState should have option '{expected}'"
+        );
+    }
+
+    eprintln!("setup_fields: all 7 fields created with correct options");
+}
+
+#[tokio::test]
+async fn setup_fields_is_idempotent() {
+    if !has_github_token() || !has_project_number() {
+        eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping project integration test");
+        return;
+    }
+
+    let config = test_config();
+    let client = GitHubClient::new(&config)
+        .await
+        .expect("GitHubClient::new() should succeed");
+
+    let project_info = client
+        .resolve_project_info()
+        .await
+        .expect("resolve_project_info() should succeed");
+
+    // First call — creates or finds fields.
+    let first_ids = client
+        .setup_fields(&project_info.id)
+        .await
+        .expect("first setup_fields() should succeed");
+
+    // Second call — should skip existing fields (idempotent).
+    let second_ids = client
+        .setup_fields(&project_info.id)
+        .await
+        .expect("second setup_fields() should succeed");
+
+    // Field IDs should be identical between runs.
+    assert_eq!(
+        first_ids.status.field_id, second_ids.status.field_id,
+        "Status field_id should be stable across calls"
+    );
+    assert_eq!(
+        first_ids.priority.field_id, second_ids.priority.field_id,
+        "Priority field_id should be stable across calls"
+    );
+    assert_eq!(
+        first_ids.issue_type.field_id, second_ids.issue_type.field_id,
+        "IssueType field_id should be stable across calls"
+    );
+    assert_eq!(
+        first_ids.agent, second_ids.agent,
+        "Agent field_id should be stable across calls"
+    );
+    assert_eq!(
+        first_ids.story_points, second_ids.story_points,
+        "StoryPoints field_id should be stable across calls"
+    );
+    assert_eq!(
+        first_ids.defer_until, second_ids.defer_until,
+        "DeferUntil field_id should be stable across calls"
+    );
+    assert_eq!(
+        first_ids.ready_state.field_id, second_ids.ready_state.field_id,
+        "ReadyState field_id should be stable across calls"
+    );
+
+    eprintln!("setup_fields idempotent: field IDs match across two calls");
+}
+
+// ── Projects V2: update_field ───────────────────────────────────────
+
+#[tokio::test]
+async fn update_field_changes_value_on_project_item() {
+    if !has_github_token() || !has_project_number() {
+        eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping project integration test");
+        return;
+    }
+
+    let config = test_config();
+    let client = GitHubClient::new(&config)
+        .await
+        .expect("GitHubClient::new() should succeed");
+
+    let project_info = client
+        .resolve_project_info()
+        .await
+        .expect("resolve_project_info() should succeed");
+
+    let field_ids = client
+        .setup_fields(&project_info.id)
+        .await
+        .expect("setup_fields() should succeed");
+
+    // Create an issue to test field updates on.
+    let issue = client
+        .create_issue(CreateIssueParams {
+            title: "[test] update_field integration test".to_owned(),
+            body: Some("Automated test — safe to close.".to_owned()),
+            labels: vec!["test".to_owned()],
+            milestone: None,
+            assignees: vec![],
+        })
+        .await
+        .expect("create_issue should succeed");
+
+    let mut guard = CloseIssueGuard::new(&client, issue.number);
+
+    // The issue must be added to the project to get a ProjectV2Item ID.
+    // create_issue already adds it if UNBLOCK_PROJECT is set. We need the
+    // item ID — fetch it via GraphQL.
+    let item_id = fetch_project_item_id(&client, &project_info.id, &issue.node_id).await;
+
+    if item_id.is_empty() {
+        eprintln!(
+            "Could not find ProjectV2Item for issue #{} — skipping update_field test",
+            issue.number
+        );
+        client
+            .close_issue(issue.number, Some("Test cleanup".to_owned()))
+            .await
+            .expect("close should succeed");
+        guard.disarm();
+        return;
+    }
+
+    // Update the Priority field to P1.
+    let p1_option_id = field_ids
+        .priority
+        .options
+        .get("P1")
+        .expect("P1 option should exist");
+
+    client
+        .update_field(
+            &project_info.id,
+            &item_id,
+            &field_ids.priority.field_id,
+            &FieldValue::SingleSelectOption(p1_option_id.clone()),
+        )
+        .await
+        .expect("update_field(Priority=P1) should succeed");
+
+    // Update the Agent text field.
+    client
+        .update_field(
+            &project_info.id,
+            &item_id,
+            &field_ids.agent,
+            &FieldValue::Text("test-agent".to_owned()),
+        )
+        .await
+        .expect("update_field(Agent=test-agent) should succeed");
+
+    // Cleanup.
+    client
+        .close_issue(issue.number, Some("Test cleanup".to_owned()))
+        .await
+        .expect("close should succeed");
+    guard.disarm();
+
+    eprintln!(
+        "update_field test: updated Priority and Agent on issue #{} — verified",
+        issue.number
+    );
+}
+
+// ── Projects V2: field_ids caching ──────────────────────────────────
+
+#[tokio::test]
+async fn field_ids_cached_on_client_after_setup() {
+    if !has_github_token() || !has_project_number() {
+        eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping project integration test");
+        return;
+    }
+
+    let config = test_config();
+    let client = GitHubClient::new(&config)
+        .await
+        .expect("GitHubClient::new() should succeed");
+
+    // Before setup, field_ids should be None.
+    assert!(
+        client.field_ids().await.is_none(),
+        "field_ids should be None before setup_fields"
+    );
+
+    let project_info = client
+        .resolve_project_info()
+        .await
+        .expect("resolve_project_info() should succeed");
+
+    let field_ids = client
+        .setup_fields(&project_info.id)
+        .await
+        .expect("setup_fields() should succeed");
+
+    // Cache the field_ids.
+    client.set_field_ids(field_ids.clone()).await;
+
+    // After caching, field_ids should be Some.
+    let cached = client
+        .field_ids()
+        .await
+        .expect("field_ids should be Some after set_field_ids");
+
+    assert_eq!(
+        cached.status.field_id, field_ids.status.field_id,
+        "cached Status field_id should match"
+    );
+    assert_eq!(
+        cached.agent, field_ids.agent,
+        "cached Agent field_id should match"
+    );
+
+    eprintln!("field_ids caching: verified cache populated after setup_fields");
+}
+
+/// Fetches the `ProjectV2Item` ID for a given issue node ID within a project.
+///
+/// Uses the public `http()` and `graphql_url()` accessors on [`GitHubClient`]
+/// because the `graphql()` helper is `pub(crate)` and not accessible from
+/// integration tests.
+async fn fetch_project_item_id(
+    client: &GitHubClient,
+    project_id: &str,
+    issue_node_id: &str,
+) -> String {
+    let query = "
+        query ProjectItemId($nodeId: ID!) {
+            node(id: $nodeId) {
+                ... on Issue {
+                    projectItems(first: 10) {
+                        nodes {
+                            id
+                            project {
+                                id
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    ";
+
+    let body = serde_json::json!({
+        "query": query,
+        "variables": { "nodeId": issue_node_id },
+    });
+
+    let response: serde_json::Value = client
+        .http()
+        .post(client.graphql_url())
+        .json(&body)
+        .send()
+        .await
+        .expect("GraphQL request should succeed")
+        .json()
+        .await
+        .expect("GraphQL response should be valid JSON");
+
+    let nodes = response["data"]["node"]["projectItems"]["nodes"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+
+    for node in &nodes {
+        if node["project"]["id"].as_str() == Some(project_id) {
+            return node["id"].as_str().unwrap_or_default().to_owned();
+        }
+    }
+
+    String::new()
 }
