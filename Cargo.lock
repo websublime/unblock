@@ -2153,6 +2153,8 @@ dependencies = [
 name = "unblock-mcp"
 version = "0.1.0"
 dependencies = [
+ "chrono",
+ "reqwest",
  "rmcp",
  "schemars",
  "serde",
