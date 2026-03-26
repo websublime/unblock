@@ -315,6 +315,10 @@ impl GitHubClient {
     /// Handles GraphQL-level errors (errors array in response) and
     /// HTTP-level errors (non-2xx status codes, rate limiting).
     ///
+    /// This is a convenience wrapper around
+    /// [`graphql_with_features()`](Self::graphql_with_features) with no
+    /// preview features enabled.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::GitHubGraphQL`] if the response contains GraphQL errors.
@@ -327,74 +331,25 @@ impl GitHubClient {
         query: &str,
         variables: serde_json::Value,
     ) -> Result<serde_json::Value, Error> {
-        let url = self.graphql_url();
-        let body = serde_json::json!({
-            "query": query,
-            "variables": variables,
-        });
-
-        debug!(url = %url, "Sending GraphQL request");
-
-        let response = self
-            .http()
-            .post(&url)
-            .json(&body)
-            .send()
-            .await
-            .context(errors::GitHubUnavailableSnafu)?;
-
-        let status = response.status();
-
-        // Handle rate limiting.
-        if status.as_u16() == 429 {
-            let reset_at = parse_rate_limit_reset(&response);
-            return Err(errors::RateLimitedSnafu { reset_at }.build());
-        }
-
-        // Handle non-2xx status codes.
-        if !status.is_success() {
-            let message = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "unknown error".to_owned());
-            return Err(errors::GitHubApiSnafu {
-                status: status.as_u16(),
-                message,
-            }
-            .build());
-        }
-
-        let json: serde_json::Value = response
-            .json()
-            .await
-            .context(errors::GitHubUnavailableSnafu)?;
-
-        // Check for GraphQL-level errors.
-        if let Some(arr) = json
-            .get("errors")
-            .and_then(serde_json::Value::as_array)
-            .filter(|a| !a.is_empty())
-        {
-            let messages: Vec<String> = arr
-                .iter()
-                .filter_map(|e| e.get("message").and_then(|m| m.as_str()))
-                .map(String::from)
-                .collect();
-            return Err(errors::GitHubGraphQLSnafu { errors: messages }.build());
-        }
-
-        Ok(json)
+        self.graphql_with_features(query, variables, &[]).await
     }
 
-    /// Sends a GraphQL query with additional `GraphQL-Features` header values.
+    /// Sends a GraphQL query with optional `GraphQL-Features` header values.
     ///
-    /// Identical to [`graphql()`](Self::graphql) but appends a
-    /// `GraphQL-Features` header with the given feature names (comma-separated).
-    /// This is required for preview API features such as `sub_issues`.
+    /// Posts the query and variables as JSON to the GraphQL endpoint.
+    /// When `features` is non-empty, appends a `GraphQL-Features` header with
+    /// the given feature names (comma-separated). This is required for preview
+    /// API features such as `sub_issues`.
+    ///
+    /// Handles GraphQL-level errors (errors array in response) and
+    /// HTTP-level errors (non-2xx status codes, rate limiting).
     ///
     /// # Errors
     ///
-    /// Returns the same error variants as [`graphql()`](Self::graphql).
+    /// Returns [`Error::GitHubGraphQL`] if the response contains GraphQL errors.
+    /// Returns [`Error::GitHubApi`] for non-2xx HTTP responses.
+    /// Returns [`Error::RateLimited`] for HTTP 429 responses.
+    /// Returns [`Error::GitHubUnavailable`] for network failures.
     #[instrument(skip(self, query, variables, features))]
     pub(crate) async fn graphql_with_features(
         &self,
@@ -408,13 +363,17 @@ impl GitHubClient {
             "variables": variables,
         });
 
-        let features_value = features.join(",");
-        debug!(url = %url, features = %features_value, "Sending GraphQL request with features");
+        let mut request = self.http().post(&url);
 
-        let response = self
-            .http()
-            .post(&url)
-            .header("GraphQL-Features", &features_value)
+        if features.is_empty() {
+            debug!(url = %url, "Sending GraphQL request");
+        } else {
+            let features_value = features.join(",");
+            debug!(url = %url, features = %features_value, "Sending GraphQL request with features");
+            request = request.header("GraphQL-Features", &features_value);
+        }
+
+        let response = request
             .json(&body)
             .send()
             .await
