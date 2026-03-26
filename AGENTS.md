@@ -114,6 +114,15 @@ Get more info from reference: https://github.com/steveyegge/beads/raw/refs/heads
 - ❌ Do NOT use external issue trackers
 - ❌ Do NOT duplicate tracking systems
 
+## Commit Conventions: Pub API Changes
+
+When a commit changes the signature of a `pub fn`, `pub struct`, `pub enum`, or `pub trait` in a **library crate** (`unblock-core`, `unblock-github`), the commit message body **must** note the change:
+
+- **Additive/non-breaking:** Add an `API:` line describing the change
+- **Incompatible:** Add a `BREAKING CHANGE:` footer per the Conventional Commits spec
+
+This enables automated changelog generation and semver tracking. The binary crate (`unblock-mcp`) is excluded since it has no downstream consumers.
+
 ## Landing the Plane (Session Completion)
 
 **When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.

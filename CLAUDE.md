@@ -130,6 +130,28 @@ GITHUB_TOKEN=ghp_... cargo run -p unblock-mcp   # run locally
 - Never commit breaking changes. Run tests before every commit.
 - No reconstructed history — commits must represent actual development order
 
+### Pub API Change Tracking
+
+When a `pub fn`, `pub struct`, `pub enum`, or `pub trait` signature changes in a **library crate** (`unblock-core`, `unblock-github`), the commit message **must** note the change for changelog/semver awareness. This applies to additions, removals, renames, and parameter changes.
+
+Use one of:
+- A `BREAKING CHANGE:` footer (per Conventional Commits spec) for incompatible changes
+- An `API:` line in the commit body for additive or non-breaking changes
+
+Examples:
+```
+feat: make GitHub URL configurable for GHE support
+
+API: parse_github_url() signature changed — added `github_url` parameter
+```
+```
+refactor: simplify graph builder interface
+
+BREAKING CHANGE: GraphBuilder::new() now requires a Config parameter
+```
+
+**Scope:** Library crates only. The binary crate (`unblock-mcp`) has no downstream consumers and is excluded from this requirement.
+
 ## Documentation
 
 - `docs/unblock-prd-github.md` — what to build (MCP)
