@@ -216,6 +216,22 @@ impl GitHubClient {
     fn resolve_project(config: &Config) -> Option<u64> {
         config.project_number
     }
+
+    /// Creates a `GitHubClient` for unit testing with a custom API base URL.
+    ///
+    /// Constructs a bare client with no auth headers, pointing at the given
+    /// `api_base_url` (typically a wiremock server URI). Available only in
+    /// `#[cfg(test)]` builds and accessible from other crate modules.
+    #[cfg(test)]
+    pub(crate) fn new_for_test(api_base_url: &str) -> Self {
+        Self {
+            http: reqwest::Client::new(),
+            api_base_url: api_base_url.to_owned(),
+            owner: "test-owner".to_owned(),
+            repo: "test-repo".to_owned(),
+            project_number: None,
+        }
+    }
 }
 
 /// Parses a GitHub URL into `(owner, repo)`.
