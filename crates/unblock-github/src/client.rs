@@ -5,10 +5,12 @@
 //! from linked Projects V2. Configurable `api_base_url` for GitHub Enterprise.
 
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
+use tokio::sync::Mutex;
 use tracing::info;
 use unblock_core::config::Config;
 
 use crate::errors::{self, Error, GitRemoteSnafu};
+use crate::projects::ProjectFieldIds;
 use snafu::ResultExt as _;
 
 /// Central struct for all GitHub API communication.
@@ -31,8 +33,12 @@ pub struct GitHubClient {
     repo: String,
     /// Optional GitHub Projects V2 number.
     project_number: Option<u64>,
-    // TODO(unblock-467.6): Add token, project_id, and field_ids fields per ARCH §8.1
-    // when extending the struct for Projects V2 field management.
+    /// Cached Projects V2 field IDs, populated by `setup_fields()`.
+    ///
+    /// Uses a `Mutex` for interior mutability because `setup_fields()` takes
+    /// `&self` (not `&mut self`) and needs to cache the result after creating
+    /// fields via async GraphQL calls.
+    field_ids: Mutex<Option<ProjectFieldIds>>,
 }
 
 impl GitHubClient {
@@ -50,7 +56,7 @@ impl GitHubClient {
     ///
     /// Returns [`Error::GitRemote`] if repo resolution fails, or
     /// [`Error::GitHubUnavailable`] if the HTTP client cannot be built.
-    #[allow(clippy::unused_async)] // Will be truly async once resolve_project does GraphQL (bead 467.6).
+    #[allow(clippy::unused_async)] // Async signature required by callers; resolve_project_info() is separate.
     pub async fn new(config: &Config) -> Result<Self, Error> {
         let mut headers = HeaderMap::new();
 
@@ -109,6 +115,7 @@ impl GitHubClient {
             owner,
             repo,
             project_number,
+            field_ids: Mutex::new(None),
         })
     }
 
@@ -140,6 +147,22 @@ impl GitHubClient {
     #[must_use]
     pub fn project_number(&self) -> Option<u64> {
         self.project_number
+    }
+
+    /// Returns a clone of the cached [`ProjectFieldIds`], if set.
+    ///
+    /// This acquires the internal mutex briefly. Returns `None` if
+    /// `setup_fields()` has not been called yet.
+    pub async fn field_ids(&self) -> Option<ProjectFieldIds> {
+        self.field_ids.lock().await.clone()
+    }
+
+    /// Caches the resolved [`ProjectFieldIds`] on this client.
+    ///
+    /// Called by `setup_fields()` after successfully resolving or creating
+    /// all 7 required fields. Subsequent calls overwrite the previous value.
+    pub async fn set_field_ids(&self, ids: ProjectFieldIds) {
+        *self.field_ids.lock().await = Some(ids);
     }
 
     /// Builds a REST API URL from a path suffix.
@@ -230,6 +253,7 @@ impl GitHubClient {
             owner: "test-owner".to_owned(),
             repo: "test-repo".to_owned(),
             project_number: None,
+            field_ids: Mutex::new(None),
         }
     }
 }
@@ -673,6 +697,7 @@ mod tests {
             owner: "owner".to_owned(),
             repo: "repo".to_owned(),
             project_number: None,
+            field_ids: Mutex::new(None),
         }
     }
 }
