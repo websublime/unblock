@@ -8,7 +8,8 @@ use chrono::{DateTime, Utc};
 use snafu::ResultExt as _;
 use tracing::{debug, instrument};
 use unblock_core::types::{
-    Issue, IssueComment, IssueState, IssueType, Priority, ReadyState, RelatedIssue, Status,
+    BlockingEdge, Issue, IssueComment, IssueState, IssueType, Priority, ReadyState, RelatedIssue,
+    Status,
 };
 
 use crate::client::GitHubClient;
@@ -107,6 +108,81 @@ query FetchIssue($owner: String!, $repo: String!, $number: Int!) {
 }
 ";
 
+/// GraphQL query for fetching all open issues with pagination.
+///
+/// Returns issues with standard fields, blocking relationships (via
+/// `trackedByIssues`), and Projects V2 field values. Does **not** include
+/// comments, parent, sub-issues, or `trackedInIssues` — those are only
+/// fetched by [`FETCH_ISSUE_QUERY`] for single-issue detail views.
+///
+/// Uses cursor-based pagination on the `issues` connection (`first: 100`,
+/// `after: $cursor`). The caller must loop until `pageInfo.hasNextPage` is
+/// false.
+const FETCH_GRAPH_DATA_QUERY: &str = "
+query FetchGraphData($owner: String!, $repo: String!, $cursor: String) {
+  repository(owner: $owner, name: $repo) {
+    issues(first: 100, states: OPEN, after: $cursor) {
+      pageInfo {
+        endCursor
+        hasNextPage
+      }
+      nodes {
+        id
+        number
+        title
+        body
+        state
+        url
+        createdAt
+        updatedAt
+        labels(first: 50) {
+          nodes {
+            name
+          }
+        }
+        milestone {
+          title
+        }
+        assignees(first: 20) {
+          nodes {
+            login
+          }
+        }
+        trackedBy: trackedByIssues(first: 50) {
+          nodes {
+            number
+          }
+        }
+        projectItems(first: 10) {
+          nodes {
+            fieldValues(first: 20) {
+              nodes {
+                ... on ProjectV2ItemFieldTextValue {
+                  field { ... on ProjectV2FieldCommon { name } }
+                  text
+                }
+                ... on ProjectV2ItemFieldNumberValue {
+                  field { ... on ProjectV2FieldCommon { name } }
+                  number
+                }
+                ... on ProjectV2ItemFieldDateValue {
+                  field { ... on ProjectV2FieldCommon { name } }
+                  date
+                }
+                ... on ProjectV2ItemFieldSingleSelectValue {
+                  field { ... on ProjectV2FieldCommon { name } }
+                  name
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+";
+
 impl GitHubClient {
     /// Fetches a single issue with full details from GitHub.
     ///
@@ -140,6 +216,103 @@ impl GitHubClient {
         }
 
         Ok(parse_issue(issue_value))
+    }
+
+    /// Fetches all open issues and blocking edges for the dependency graph.
+    ///
+    /// Returns a tuple of `(issues, edges)` where:
+    /// - `issues` contains all open issues with standard fields and Projects V2
+    ///   field values, but **not** comments, parent, sub-issues, or the
+    ///   `blocked_by`/`blocking` vectors on [`Issue`] (those remain empty).
+    /// - `edges` contains [`BlockingEdge`] entries extracted from GitHub's
+    ///   `trackedByIssues` relationship, where `source` is the blocked issue
+    ///   and `target` is the blocker.
+    ///
+    /// Paginates using GraphQL cursor pagination (100 issues per page) until
+    /// all open issues are fetched. Returns empty vectors for a repo with no
+    /// open issues.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::GitHubGraphQL`] if the GraphQL response contains errors.
+    /// Returns [`Error::GitHubApi`] for non-2xx HTTP responses.
+    /// Returns [`Error::RateLimited`] for HTTP 429 responses.
+    /// Returns [`Error::GitHubUnavailable`] for network failures.
+    #[instrument(skip(self), fields(owner = %self.owner(), repo = %self.repo()))]
+    pub async fn fetch_graph_data(&self) -> Result<(Vec<Issue>, Vec<BlockingEdge>), Error> {
+        let mut all_issues = Vec::new();
+        let mut all_edges = Vec::new();
+        let mut cursor: Option<String> = None;
+
+        loop {
+            let variables = serde_json::json!({
+                "owner": self.owner(),
+                "repo": self.repo(),
+                "cursor": cursor,
+            });
+
+            let response = self.graphql(FETCH_GRAPH_DATA_QUERY, variables).await?;
+
+            let issues_connection = &response["data"]["repository"]["issues"];
+
+            // Parse issue nodes from this page.
+            if let Some(nodes) = issues_connection
+                .get("nodes")
+                .and_then(serde_json::Value::as_array)
+            {
+                for node in nodes {
+                    let issue_number = json_u64(node, "number");
+
+                    // Extract blocking edges from trackedByIssues.
+                    // trackedBy (alias for trackedByIssues) = issues that track
+                    // this one = blockers of this issue.
+                    // Edge direction: source (this issue) blocked BY target (blocker).
+                    if let Some(blockers) = node
+                        .get("trackedBy")
+                        .and_then(|v| v.get("nodes"))
+                        .and_then(|v| v.as_array())
+                    {
+                        for blocker in blockers {
+                            let blocker_number = json_u64(blocker, "number");
+                            if blocker_number > 0 {
+                                all_edges.push(BlockingEdge {
+                                    source: issue_number,
+                                    target: blocker_number,
+                                });
+                            }
+                        }
+                    }
+
+                    // Parse issue with graph-specific parser (omits comments,
+                    // blocked_by, blocking, parent, sub_issues).
+                    all_issues.push(parse_graph_issue(node));
+                }
+            }
+
+            // Check pagination: advance cursor or break.
+            let page_info = &issues_connection["pageInfo"];
+            let has_next_page = page_info
+                .get("hasNextPage")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+
+            if !has_next_page {
+                break;
+            }
+
+            cursor = page_info
+                .get("endCursor")
+                .and_then(serde_json::Value::as_str)
+                .map(String::from);
+        }
+
+        debug!(
+            issues = all_issues.len(),
+            edges = all_edges.len(),
+            "fetch_graph_data complete"
+        );
+
+        Ok((all_issues, all_edges))
     }
 
     /// Sends a GraphQL query to the GitHub API.
@@ -304,6 +477,76 @@ fn parse_issue(value: &serde_json::Value) -> Issue {
         blocking,
         parent,
         sub_issues,
+    }
+}
+
+/// Parses a GraphQL issue JSON value into a domain [`Issue`] for bulk graph data.
+///
+/// Similar to [`parse_issue`] but leaves `comments`, `blocked_by`, `blocking`,
+/// `parent`, and `sub_issues` empty — per the [`Issue`] type contract, those
+/// fields are only populated by `fetch_issue()`. Blocking relationships are
+/// extracted separately as [`BlockingEdge`] entries by the caller.
+fn parse_graph_issue(value: &serde_json::Value) -> Issue {
+    let number = json_u64(value, "number");
+    let node_id = json_string(value, "id");
+    let title = json_string(value, "title");
+    let body = value.get("body").and_then(|v| v.as_str()).map(String::from);
+    let state = parse_issue_state(value);
+    let url = json_string(value, "url");
+    let created_at = parse_datetime(value, "createdAt");
+    let updated_at = parse_datetime(value, "updatedAt");
+
+    let labels = parse_string_nodes(value, "labels", "name");
+    let milestone = value
+        .get("milestone")
+        .and_then(|m| m.get("title"))
+        .and_then(|t| t.as_str())
+        .map(String::from);
+    let assignees = parse_string_nodes(value, "assignees", "login");
+
+    // Extract Projects V2 field values.
+    let field_values = extract_field_values(value);
+    let status = parse_status_field(&field_values);
+    let priority = parse_priority_field(&field_values);
+    let issue_type = parse_issue_type_field(&field_values);
+    let agent = field_values.get("Agent").cloned();
+    let story_points = field_values
+        .get("StoryPoints")
+        .and_then(|v| v.parse::<i32>().ok());
+    let defer_until = field_values
+        .get("DeferUntil")
+        .and_then(|v| chrono::NaiveDate::parse_from_str(v, "%Y-%m-%d").ok());
+    let ready_state = parse_ready_state_field(&field_values);
+    let claimed_at = field_values
+        .get("ClaimedAt")
+        .and_then(|v| v.parse::<DateTime<Utc>>().ok());
+
+    Issue {
+        number,
+        node_id,
+        title,
+        issue_type,
+        status,
+        priority,
+        agent,
+        claimed_at,
+        ready_state,
+        story_points,
+        defer_until,
+        labels,
+        milestone,
+        assignees,
+        state,
+        body,
+        created_at,
+        updated_at,
+        url,
+        // Graph data does not include these — populated by fetch_issue() only.
+        comments: Vec::new(),
+        blocked_by: Vec::new(),
+        blocking: Vec::new(),
+        parent: None,
+        sub_issues: Vec::new(),
     }
 }
 
@@ -965,5 +1208,263 @@ mod tests {
         assert!(issue.sub_issues.is_empty());
         assert_eq!(issue.status, Status::Open);
         assert_eq!(issue.priority, Priority::P2);
+    }
+
+    // ── parse_graph_issue ──────────────────────────────────────────────
+
+    #[test]
+    fn parse_graph_issue_extracts_standard_fields() {
+        let json = serde_json::json!({
+            "id": "MDU6SXNzdWUx",
+            "number": 42,
+            "title": "Graph issue",
+            "body": "Some body",
+            "state": "OPEN",
+            "url": "https://github.com/owner/repo/issues/42",
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-02T00:00:00Z",
+            "labels": {"nodes": [{"name": "bug"}]},
+            "milestone": {"title": "v1.0"},
+            "assignees": {"nodes": [{"login": "alice"}]},
+            "trackedBy": {
+                "nodes": [{"number": 10}]
+            },
+            "projectItems": {
+                "nodes": [{
+                    "fieldValues": {
+                        "nodes": [
+                            {"field": {"name": "Status"}, "name": "In Progress"},
+                            {"field": {"name": "Priority"}, "name": "P1"},
+                            {"field": {"name": "Agent"}, "text": "claude"},
+                            {"field": {"name": "StoryPoints"}, "number": 5.0},
+                            {"field": {"name": "DeferUntil"}, "date": "2026-06-01"}
+                        ]
+                    }
+                }]
+            }
+        });
+
+        let issue = parse_graph_issue(&json);
+        assert_eq!(issue.number, 42);
+        assert_eq!(issue.node_id, "MDU6SXNzdWUx");
+        assert_eq!(issue.title, "Graph issue");
+        assert_eq!(issue.body.as_deref(), Some("Some body"));
+        assert_eq!(issue.state, IssueState::Open);
+        assert_eq!(issue.labels, vec!["bug"]);
+        assert_eq!(issue.milestone.as_deref(), Some("v1.0"));
+        assert_eq!(issue.assignees, vec!["alice"]);
+        assert_eq!(issue.status, Status::InProgress);
+        assert_eq!(issue.priority, Priority::P1);
+        assert_eq!(issue.agent.as_deref(), Some("claude"));
+        assert_eq!(issue.story_points, Some(5));
+        assert_eq!(
+            issue.defer_until,
+            Some(chrono::NaiveDate::from_ymd_opt(2026, 6, 1).expect("valid date"))
+        );
+    }
+
+    #[test]
+    fn parse_graph_issue_leaves_detail_fields_empty() {
+        let json = serde_json::json!({
+            "id": "node1",
+            "number": 1,
+            "title": "Test",
+            "body": null,
+            "state": "OPEN",
+            "url": "",
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-01T00:00:00Z",
+            "labels": {"nodes": []},
+            "milestone": null,
+            "assignees": {"nodes": []},
+            "trackedBy": {
+                "nodes": [{"number": 5}, {"number": 10}]
+            }
+        });
+
+        let issue = parse_graph_issue(&json);
+        assert!(
+            issue.comments.is_empty(),
+            "comments should be empty for graph issues"
+        );
+        assert!(
+            issue.blocked_by.is_empty(),
+            "blocked_by should be empty for graph issues"
+        );
+        assert!(
+            issue.blocking.is_empty(),
+            "blocking should be empty for graph issues"
+        );
+        assert!(
+            issue.parent.is_none(),
+            "parent should be None for graph issues"
+        );
+        assert!(
+            issue.sub_issues.is_empty(),
+            "sub_issues should be empty for graph issues"
+        );
+    }
+
+    #[test]
+    fn parse_graph_issue_without_project_items_uses_defaults() {
+        let json = serde_json::json!({
+            "id": "node2",
+            "number": 2,
+            "title": "No project",
+            "body": null,
+            "state": "OPEN",
+            "url": "",
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-01T00:00:00Z",
+            "labels": {"nodes": []},
+            "milestone": null,
+            "assignees": {"nodes": []}
+        });
+
+        let issue = parse_graph_issue(&json);
+        assert_eq!(issue.status, Status::Open);
+        assert_eq!(issue.priority, Priority::P2);
+        assert!(issue.issue_type.is_none());
+        assert!(issue.agent.is_none());
+        assert!(issue.story_points.is_none());
+        assert!(issue.defer_until.is_none());
+        assert_eq!(issue.ready_state, ReadyState::NotReady);
+        assert!(issue.claimed_at.is_none());
+    }
+
+    // ── BlockingEdge extraction (logic tested via parse_graph_issue context) ──
+
+    #[test]
+    fn blocking_edge_direction_source_blocked_by_target() {
+        // Simulate what fetch_graph_data does: extract edges from trackedBy.
+        let node = serde_json::json!({
+            "number": 42,
+            "trackedBy": {
+                "nodes": [
+                    {"number": 10},
+                    {"number": 20}
+                ]
+            }
+        });
+
+        let issue_number = json_u64(&node, "number");
+        let mut edges = Vec::new();
+
+        if let Some(blockers) = node
+            .get("trackedBy")
+            .and_then(|v| v.get("nodes"))
+            .and_then(|v| v.as_array())
+        {
+            for blocker in blockers {
+                let blocker_number = json_u64(blocker, "number");
+                if blocker_number > 0 {
+                    edges.push(BlockingEdge {
+                        source: issue_number,
+                        target: blocker_number,
+                    });
+                }
+            }
+        }
+
+        assert_eq!(edges.len(), 2);
+        // source = blocked issue (42), target = blocker
+        assert_eq!(edges[0].source, 42);
+        assert_eq!(edges[0].target, 10);
+        assert_eq!(edges[1].source, 42);
+        assert_eq!(edges[1].target, 20);
+    }
+
+    #[test]
+    fn blocking_edge_skips_zero_number() {
+        let node = serde_json::json!({
+            "number": 42,
+            "trackedBy": {
+                "nodes": [
+                    {"number": 0},
+                    {"number": 5}
+                ]
+            }
+        });
+
+        let issue_number = json_u64(&node, "number");
+        let mut edges = Vec::new();
+
+        if let Some(blockers) = node
+            .get("trackedBy")
+            .and_then(|v| v.get("nodes"))
+            .and_then(|v| v.as_array())
+        {
+            for blocker in blockers {
+                let blocker_number = json_u64(blocker, "number");
+                if blocker_number > 0 {
+                    edges.push(BlockingEdge {
+                        source: issue_number,
+                        target: blocker_number,
+                    });
+                }
+            }
+        }
+
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].target, 5);
+    }
+
+    #[test]
+    fn blocking_edge_empty_tracked_by_yields_no_edges() {
+        let node = serde_json::json!({
+            "number": 42,
+            "trackedBy": {
+                "nodes": []
+            }
+        });
+
+        let issue_number = json_u64(&node, "number");
+        let mut edges = Vec::new();
+
+        if let Some(blockers) = node
+            .get("trackedBy")
+            .and_then(|v| v.get("nodes"))
+            .and_then(|v| v.as_array())
+        {
+            for blocker in blockers {
+                let blocker_number = json_u64(blocker, "number");
+                if blocker_number > 0 {
+                    edges.push(BlockingEdge {
+                        source: issue_number,
+                        target: blocker_number,
+                    });
+                }
+            }
+        }
+
+        assert!(edges.is_empty());
+    }
+
+    #[test]
+    fn blocking_edge_missing_tracked_by_yields_no_edges() {
+        let node = serde_json::json!({
+            "number": 42
+        });
+
+        let issue_number = json_u64(&node, "number");
+        let mut edges = Vec::new();
+
+        if let Some(blockers) = node
+            .get("trackedBy")
+            .and_then(|v| v.get("nodes"))
+            .and_then(|v| v.as_array())
+        {
+            for blocker in blockers {
+                let blocker_number = json_u64(blocker, "number");
+                if blocker_number > 0 {
+                    edges.push(BlockingEdge {
+                        source: issue_number,
+                        target: blocker_number,
+                    });
+                }
+            }
+        }
+
+        assert!(edges.is_empty());
     }
 }
