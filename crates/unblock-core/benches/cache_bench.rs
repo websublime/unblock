@@ -166,7 +166,7 @@ fn bench_concurrent_readers(c: &mut Criterion) {
                     handles.push(tokio::spawn(async move { c.get_ready_set().await }));
                 }
                 for handle in handles {
-                    let _ = handle.await;
+                    handle.await.expect("benchmark task panicked");
                 }
             });
         });
