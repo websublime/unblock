@@ -237,12 +237,12 @@ async fn fetch_graph_data_issues_have_valid_status_and_priority() {
     // Every issue should have a valid status and priority (possibly defaults).
     for issue in &issues {
         // Status must be one of the known variants.
-        let _valid = matches!(
+        let valid = matches!(
             issue.status,
             Status::Open | Status::InProgress | Status::Blocked | Status::Deferred | Status::Closed
         );
         assert!(
-            _valid,
+            valid,
             "issue #{} has unexpected status {:?}",
             issue.number, issue.status
         );
