@@ -213,10 +213,7 @@ impl GitHubClient {
                 .filter_map(|e| e.get("message").and_then(|m| m.as_str()))
                 .map(String::from)
                 .collect();
-            return Err(errors::GitHubGraphQLSnafu {
-                errors: messages.join("; "),
-            }
-            .build());
+            return Err(errors::GitHubGraphQLSnafu { errors: messages }.build());
         }
 
         Ok(json)

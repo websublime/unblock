@@ -1375,8 +1375,8 @@ pub enum Error {
     #[snafu(display("GitHub API error: {message}"))]
     GitHubApi { message: String },
 
-    #[snafu(display("GitHub GraphQL error: {errors}"))]
-    GitHubGraphQL { errors: String },
+    #[snafu(display("GitHub GraphQL error: {}", errors.join("; ")))]
+    GitHubGraphQL { errors: Vec<String> },
 
     #[snafu(display("Cannot connect to GitHub: {source}"))]
     GitHubUnavailable { source: reqwest::Error },
