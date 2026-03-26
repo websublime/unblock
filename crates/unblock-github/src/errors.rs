@@ -132,6 +132,30 @@ mod tests {
         assert_eq!(err.to_string(), "GitHub GraphQL error: Field 'x' not found");
     }
 
+    #[test]
+    fn github_graphql_display_multi_error() {
+        let err = GitHubGraphQLSnafu {
+            errors: vec![
+                "Field 'x' not found".to_owned(),
+                "Variable '$id' is not defined".to_owned(),
+            ],
+        }
+        .build();
+        assert_eq!(
+            err.to_string(),
+            "GitHub GraphQL error: Field 'x' not found; Variable '$id' is not defined"
+        );
+    }
+
+    #[test]
+    fn github_graphql_display_empty_vec() {
+        let err = GitHubGraphQLSnafu {
+            errors: Vec::<String>::new(),
+        }
+        .build();
+        assert_eq!(err.to_string(), "GitHub GraphQL error: ");
+    }
+
     #[tokio::test]
     async fn github_unavailable_display() {
         // Connect to IPv4 loopback port 1 — port 1 is reserved/privileged and
