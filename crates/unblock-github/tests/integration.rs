@@ -1283,6 +1283,77 @@ async fn setup_fields_is_idempotent() {
     eprintln!("setup_fields idempotent: field IDs match across two calls");
 }
 
+// ── Projects V2: query_setup_status (dry-run) ───────────────────────
+
+#[tokio::test]
+async fn query_setup_status_reports_fields_without_creating() {
+    if !has_github_token() || !has_project_number() {
+        eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping project integration test");
+        return;
+    }
+
+    let config = test_config();
+    let client = GitHubClient::new(&config)
+        .await
+        .expect("GitHubClient::new() should succeed");
+
+    let project_info = client
+        .resolve_project_info()
+        .await
+        .expect("resolve_project_info() should succeed");
+
+    // Ensure fields exist first (setup is idempotent).
+    let _report = client
+        .setup_fields(&project_info.id)
+        .await
+        .expect("setup_fields() should succeed");
+
+    // Now query status — should report all 7 existing, none missing.
+    let status = client
+        .query_setup_status(&project_info.id)
+        .await
+        .expect("query_setup_status() should succeed");
+
+    assert_eq!(
+        status.existing.len(),
+        7,
+        "all 7 fields should be reported as existing, got: {:?}",
+        status.existing
+    );
+    assert!(
+        status.missing.is_empty(),
+        "no fields should be missing after setup, got: {:?}",
+        status.missing
+    );
+
+    // Verify each required field name is in the existing list.
+    for name in unblock_github::projects::REQUIRED_FIELD_NAMES {
+        assert!(
+            status.existing.contains(&(*name).to_owned()),
+            "field '{name}' should be in existing list, got: {:?}",
+            status.existing
+        );
+    }
+
+    // Re-fetch to confirm query_setup_status did not mutate anything:
+    // a second call should return identical results.
+    let status2 = client
+        .query_setup_status(&project_info.id)
+        .await
+        .expect("second query_setup_status() should succeed");
+
+    assert_eq!(
+        status.existing, status2.existing,
+        "existing fields should be identical across two query_setup_status calls"
+    );
+    assert_eq!(
+        status.missing, status2.missing,
+        "missing fields should be identical across two query_setup_status calls"
+    );
+
+    eprintln!("query_setup_status: all 7 fields reported existing, re-fetch confirms no mutation");
+}
+
 // ── Projects V2: update_field ───────────────────────────────────────
 
 #[tokio::test]
