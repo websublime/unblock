@@ -1,18 +1,24 @@
-//! Projects V2 field management.
+//! Projects V2 field and view management.
 //!
 //! - `resolve_project()` — find linked project by repo
 //! - `setup_fields()` — create 7 custom fields (idempotent), returns [`SetupReport`](crate::projects::SetupReport)
 //! - `query_setup_status()` — check which fields exist without mutating (for dry-run)
 //! - `update_field()` — update a single field value on an issue
+//! - `detect_owner_type()` — determine if the repo owner is an org or a user
+//! - `list_rest_fields()` — list project fields via REST (integer IDs for view configuration)
+//! - `create_view()` — create a project view via REST
+//! - `list_views()` — list project views via GraphQL
 
 use std::collections::HashMap;
 
 use chrono::NaiveDate;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use snafu::ResultExt as _;
 use tracing::{debug, instrument, warn};
 
 use crate::client::GitHubClient;
 use crate::errors::{self, Error};
+use crate::graphql::parse_rate_limit_reset;
 
 /// Information about a resolved GitHub Projects V2 project.
 #[derive(Debug, Clone)]
@@ -113,6 +119,134 @@ pub struct SetupStatus {
     /// Field names that are missing and would be created by `setup_fields()`.
     pub missing: Vec<String>,
 }
+
+/// Whether the repository owner is a GitHub organization or a personal user.
+///
+/// Determines the REST API URL path segment (`/orgs/{owner}/` vs
+/// `/users/{owner}/`) for Projects V2 view and field endpoints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnerType {
+    /// A GitHub organization account.
+    Org,
+    /// A personal GitHub user account.
+    User,
+}
+
+impl OwnerType {
+    /// Returns the REST API path prefix for this owner type.
+    ///
+    /// - [`OwnerType::Org`] returns `"orgs"`
+    /// - [`OwnerType::User`] returns `"users"`
+    #[must_use]
+    pub fn path_segment(self) -> &'static str {
+        match self {
+            Self::Org => "orgs",
+            Self::User => "users",
+        }
+    }
+}
+
+/// Layout type for a Projects V2 view.
+///
+/// Maps to the REST API `layout` field values: `"board"`, `"table"`, `"roadmap"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewLayout {
+    /// Kanban board layout.
+    Board,
+    /// Spreadsheet table layout.
+    Table,
+    /// Timeline/roadmap layout.
+    Roadmap,
+}
+
+impl std::fmt::Display for ViewLayout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Board => write!(f, "board"),
+            Self::Table => write!(f, "table"),
+            Self::Roadmap => write!(f, "roadmap"),
+        }
+    }
+}
+
+/// An option value for a single-select REST field.
+///
+/// The REST API (version 2026-03-10) returns `options[].name` as a nested
+/// object `{"raw": "...", "html": "..."}` rather than a plain string.
+/// This struct captures the raw display name after parsing.
+#[derive(Debug, Clone)]
+pub struct RestFieldOption {
+    /// The raw display name of the option (extracted from `name.raw`).
+    pub name: String,
+    /// The option color (e.g. `"RED"`, `"BLUE"`).
+    pub color: String,
+    /// The option description.
+    pub description: String,
+}
+
+/// A Projects V2 field as returned by the REST API.
+///
+/// Unlike GraphQL field nodes which use string node IDs (`PVTF_...`), REST
+/// fields use integer `id` values. These integer IDs are required for the
+/// `visible_fields` parameter when creating views.
+#[derive(Debug, Clone)]
+pub struct RestField {
+    /// Integer field ID (used in `visible_fields` for view creation).
+    pub id: u64,
+    /// Display name of the field.
+    pub name: String,
+    /// Data type string (e.g. `"single_select"`, `"text"`, `"number"`, `"date"`,
+    /// `"title"`, `"assignees"`, etc.).
+    pub data_type: String,
+    /// Options for single-select fields. Empty for other field types.
+    pub options: Vec<RestFieldOption>,
+}
+
+/// Parameters for creating a Projects V2 view via the REST API.
+///
+/// Corresponds to the request body for `POST /orgs|users/{owner}/projectsV2/{n}/views`.
+#[derive(Debug, Clone, Serialize)]
+pub struct CreateViewParams {
+    /// View name (displayed in the project tab bar).
+    pub name: String,
+    /// View layout type.
+    pub layout: ViewLayout,
+    /// Optional filter query string (same syntax as the GitHub Projects UI filter bar).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filter: Option<String>,
+    /// Optional list of integer field IDs to show as visible columns.
+    /// Not supported for roadmap layout.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visible_fields: Option<Vec<u64>>,
+}
+
+/// A Projects V2 view, returned by both REST (create) and GraphQL (list).
+///
+/// Contains the view metadata needed for idempotency checks and reporting.
+#[derive(Debug, Clone)]
+pub struct ProjectView {
+    /// Integer view ID (from REST).
+    pub id: Option<u64>,
+    /// View number within the project.
+    pub number: u64,
+    /// View display name.
+    pub name: String,
+    /// View layout type.
+    pub layout: ViewLayout,
+    /// GraphQL global node ID (e.g. `"PVV_..."`).
+    pub node_id: Option<String>,
+    /// Optional filter query string.
+    pub filter: Option<String>,
+    /// Visible field integer IDs (from REST response).
+    pub visible_fields: Vec<u64>,
+}
+
+/// The GitHub REST API version header value for Projects V2 view and field
+/// endpoints. This version is newer than the default `2022-11-28` and must
+/// be sent as a per-request header override for `/projectsV2/*/views` and
+/// `/projectsV2/*/fields` endpoints only.
+const VIEWS_API_VERSION: &str = "2026-03-10";
 
 /// Specification for a required Projects V2 field.
 ///
@@ -669,5 +803,419 @@ impl GitHubClient {
             field_id,
             options: option_map,
         })
+    }
+}
+
+// ── REST API: views and fields ──────────────────────────────────────────
+
+/// Deserialization helper for the REST field response.
+///
+/// The REST API (version 2026-03-10) returns fields with integer IDs and
+/// a `data_type` string. Single-select fields include an `options` array
+/// where each option's `name` is a nested object `{"raw": "...", "html": "..."}`.
+#[derive(Debug, Deserialize)]
+struct RestFieldResponse {
+    id: u64,
+    name: String,
+    data_type: String,
+    #[serde(default)]
+    options: Vec<RestFieldOptionRaw>,
+}
+
+/// Raw option as returned by the REST API.
+///
+/// The `name` field is a nested object with `raw` and `html` sub-fields,
+/// not a plain string.
+#[derive(Debug, Deserialize)]
+struct RestFieldOptionRaw {
+    name: RestFieldOptionName,
+    #[serde(default)]
+    color: String,
+    #[serde(default)]
+    description: String,
+}
+
+/// Nested name object for REST field options.
+///
+/// The REST API (version 2026-03-10) returns `options[].name` as
+/// `{"raw": "string", "html": "string"}` rather than a plain string.
+#[derive(Debug, Deserialize)]
+struct RestFieldOptionName {
+    raw: String,
+    #[allow(dead_code)]
+    html: String,
+}
+
+/// Deserialization helper for the REST view creation response.
+#[derive(Debug, Deserialize)]
+struct RestViewResponse {
+    id: u64,
+    number: u64,
+    name: String,
+    layout: ViewLayout,
+    #[serde(default)]
+    node_id: Option<String>,
+    #[serde(default)]
+    filter: Option<String>,
+    #[serde(default)]
+    visible_fields: Vec<u64>,
+}
+
+/// Deserialization helper for the REST user/org type detection.
+#[derive(Debug, Deserialize)]
+struct UserTypeResponse {
+    /// The `type` field: `"Organization"` or `"User"`.
+    #[serde(rename = "type")]
+    account_type: String,
+}
+
+impl GitHubClient {
+    /// Detects whether the repository owner is a GitHub organization or a
+    /// personal user account.
+    ///
+    /// Sends `GET /users/{owner}` and inspects the `type` field in the
+    /// response. Organizations return `"Organization"`, personal accounts
+    /// return `"User"`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::RateLimited`] for HTTP 429 responses.
+    /// Returns [`Error::GitHubApi`] for other non-2xx responses.
+    /// Returns [`Error::GitHubUnavailable`] for network failures.
+    #[instrument(skip(self), fields(owner = %self.owner()))]
+    pub async fn detect_owner_type(&self) -> Result<OwnerType, Error> {
+        let url = self.rest_url(&format!("/users/{}", self.owner()));
+
+        let response = self
+            .http()
+            .get(&url)
+            .send()
+            .await
+            .context(errors::GitHubUnavailableSnafu)?;
+
+        let status = response.status();
+
+        if status.as_u16() == 429 {
+            let reset_at = parse_rate_limit_reset(&response);
+            return Err(errors::RateLimitedSnafu { reset_at }.build());
+        }
+
+        if !status.is_success() {
+            let message = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown error".to_owned());
+            return Err(errors::GitHubApiSnafu {
+                status: status.as_u16(),
+                message,
+            }
+            .build());
+        }
+
+        let user_info: UserTypeResponse = response
+            .json()
+            .await
+            .context(errors::GitHubUnavailableSnafu)?;
+
+        let owner_type = if user_info.account_type == "Organization" {
+            OwnerType::Org
+        } else {
+            OwnerType::User
+        };
+
+        debug!(
+            owner = %self.owner(),
+            account_type = %user_info.account_type,
+            owner_type = ?owner_type,
+            "Detected owner type"
+        );
+
+        Ok(owner_type)
+    }
+
+    /// Lists all fields on a Projects V2 project via the REST API.
+    ///
+    /// Sends `GET /{orgs|users}/{owner}/projectsV2/{n}/fields` with the
+    /// `X-GitHub-Api-Version: 2026-03-10` header. Returns fields with integer
+    /// IDs suitable for use in the `visible_fields` parameter of
+    /// [`create_view()`](Self::create_view).
+    ///
+    /// For single-select fields, the `options[].name` nested object is
+    /// parsed to extract the raw display name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ProjectNotConfigured`] if no project number is set.
+    /// Returns [`Error::RateLimited`] for HTTP 429 responses.
+    /// Returns [`Error::GitHubApi`] for other non-2xx responses.
+    /// Returns [`Error::GitHubUnavailable`] for network failures.
+    #[instrument(skip(self), fields(owner = %self.owner()))]
+    pub async fn list_rest_fields(&self, owner_type: OwnerType) -> Result<Vec<RestField>, Error> {
+        let project_number = self
+            .project_number()
+            .ok_or_else(|| errors::ProjectNotConfiguredSnafu.build())?;
+
+        let url = self.rest_url(&format!(
+            "/{}/{}/projectsV2/{project_number}/fields",
+            owner_type.path_segment(),
+            self.owner()
+        ));
+
+        let response = self
+            .http()
+            .get(&url)
+            .header("X-GitHub-Api-Version", VIEWS_API_VERSION)
+            .send()
+            .await
+            .context(errors::GitHubUnavailableSnafu)?;
+
+        let status = response.status();
+
+        if status.as_u16() == 429 {
+            let reset_at = parse_rate_limit_reset(&response);
+            return Err(errors::RateLimitedSnafu { reset_at }.build());
+        }
+
+        if !status.is_success() {
+            let message = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown error".to_owned());
+            return Err(errors::GitHubApiSnafu {
+                status: status.as_u16(),
+                message,
+            }
+            .build());
+        }
+
+        let raw_fields: Vec<RestFieldResponse> = response
+            .json()
+            .await
+            .context(errors::GitHubUnavailableSnafu)?;
+
+        let fields: Vec<RestField> = raw_fields
+            .into_iter()
+            .map(|f| {
+                let options = f
+                    .options
+                    .into_iter()
+                    .map(|o| RestFieldOption {
+                        name: o.name.raw,
+                        color: o.color,
+                        description: o.description,
+                    })
+                    .collect();
+
+                RestField {
+                    id: f.id,
+                    name: f.name,
+                    data_type: f.data_type,
+                    options,
+                }
+            })
+            .collect();
+
+        debug!(count = fields.len(), "Listed REST fields");
+        Ok(fields)
+    }
+
+    /// Creates a new view on a Projects V2 project via the REST API.
+    ///
+    /// Sends `POST /{orgs|users}/{owner}/projectsV2/{n}/views` with the
+    /// `X-GitHub-Api-Version: 2026-03-10` header. Returns the created
+    /// [`ProjectView`] with integer IDs and layout metadata.
+    ///
+    /// The caller is responsible for idempotency — use [`list_views()`](Self::list_views)
+    /// to check for existing views before creating.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ProjectNotConfigured`] if no project number is set.
+    /// Returns [`Error::RateLimited`] for HTTP 429 responses.
+    /// Returns [`Error::GitHubApi`] for other non-2xx responses.
+    /// Returns [`Error::GitHubUnavailable`] for network failures.
+    #[instrument(skip(self, params), fields(owner = %self.owner(), view_name = %params.name))]
+    pub async fn create_view(
+        &self,
+        owner_type: OwnerType,
+        params: &CreateViewParams,
+    ) -> Result<ProjectView, Error> {
+        let project_number = self
+            .project_number()
+            .ok_or_else(|| errors::ProjectNotConfiguredSnafu.build())?;
+
+        let url = self.rest_url(&format!(
+            "/{}/{}/projectsV2/{project_number}/views",
+            owner_type.path_segment(),
+            self.owner()
+        ));
+
+        let response = self
+            .http()
+            .post(&url)
+            .header("X-GitHub-Api-Version", VIEWS_API_VERSION)
+            .json(params)
+            .send()
+            .await
+            .context(errors::GitHubUnavailableSnafu)?;
+
+        let status = response.status();
+
+        if status.as_u16() == 429 {
+            let reset_at = parse_rate_limit_reset(&response);
+            return Err(errors::RateLimitedSnafu { reset_at }.build());
+        }
+
+        if !status.is_success() {
+            let message = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown error".to_owned());
+            return Err(errors::GitHubApiSnafu {
+                status: status.as_u16(),
+                message,
+            }
+            .build());
+        }
+
+        let view: RestViewResponse = response
+            .json()
+            .await
+            .context(errors::GitHubUnavailableSnafu)?;
+
+        let project_view = ProjectView {
+            id: Some(view.id),
+            number: view.number,
+            name: view.name,
+            layout: view.layout,
+            node_id: view.node_id,
+            filter: view.filter,
+            visible_fields: view.visible_fields,
+        };
+
+        debug!(
+            view_name = %project_view.name,
+            view_number = project_view.number,
+            layout = %project_view.layout,
+            "Created project view"
+        );
+
+        Ok(project_view)
+    }
+
+    /// Lists all views on a Projects V2 project via the GraphQL API.
+    ///
+    /// The REST API does not provide a `GET /views` endpoint, so this method
+    /// uses GraphQL to query existing views. The query routes through either
+    /// `organization` or `user` based on the `owner_type` parameter.
+    ///
+    /// Returns up to 50 views. For projects with more views, pagination
+    /// would need to be added (unlikely for typical use).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ProjectNotConfigured`] if no project number is set.
+    /// Returns [`Error::GitHubGraphQL`] for GraphQL API errors.
+    /// Returns [`Error::GitHubUnavailable`] for network failures.
+    #[instrument(skip(self), fields(owner = %self.owner()))]
+    pub async fn list_views(&self, owner_type: OwnerType) -> Result<Vec<ProjectView>, Error> {
+        let project_number = self
+            .project_number()
+            .ok_or_else(|| errors::ProjectNotConfiguredSnafu.build())?;
+
+        // Route through organization or user based on owner type.
+        // The `viewer { projectV2(number:) }` query does not work for
+        // org-owned projects per research findings.
+        let query = match owner_type {
+            OwnerType::Org => {
+                "
+                query ListViews($login: String!, $projectNumber: Int!) {
+                    organization(login: $login) {
+                        projectV2(number: $projectNumber) {
+                            views(first: 50) {
+                                nodes {
+                                    id
+                                    name
+                                    number
+                                    layout
+                                    filter
+                                }
+                            }
+                        }
+                    }
+                }
+            "
+            }
+            OwnerType::User => {
+                "
+                query ListViews($login: String!, $projectNumber: Int!) {
+                    user(login: $login) {
+                        projectV2(number: $projectNumber) {
+                            views(first: 50) {
+                                nodes {
+                                    id
+                                    name
+                                    number
+                                    layout
+                                    filter
+                                }
+                            }
+                        }
+                    }
+                }
+            "
+            }
+        };
+
+        let variables = serde_json::json!({
+            "login": self.owner(),
+            "projectNumber": project_number,
+        });
+
+        let response = self.graphql(query, variables).await?;
+
+        // The data path differs based on owner type.
+        let owner_key = match owner_type {
+            OwnerType::Org => "organization",
+            OwnerType::User => "user",
+        };
+
+        let nodes = response["data"][owner_key]["projectV2"]["views"]["nodes"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+
+        let views: Vec<ProjectView> = nodes
+            .iter()
+            .filter(|n| !n.is_null())
+            .filter_map(|node| {
+                let name = node["name"].as_str()?.to_owned();
+                let number = node["number"].as_u64()?;
+                let layout_str = node["layout"].as_str().unwrap_or("TABLE_LAYOUT");
+                let layout = match layout_str {
+                    "BOARD_LAYOUT" => ViewLayout::Board,
+                    "ROADMAP_LAYOUT" => ViewLayout::Roadmap,
+                    _ => ViewLayout::Table,
+                };
+                let node_id = node["id"].as_str().map(String::from);
+                let filter = node["filter"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(String::from);
+
+                Some(ProjectView {
+                    id: None, // GraphQL does not return integer IDs
+                    number,
+                    name,
+                    layout,
+                    node_id,
+                    filter,
+                    visible_fields: Vec::new(), // Not available from this query
+                })
+            })
+            .collect();
+
+        debug!(count = views.len(), "Listed project views via GraphQL");
+        Ok(views)
     }
 }
