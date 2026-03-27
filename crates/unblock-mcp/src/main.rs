@@ -5,15 +5,6 @@
 //! Connects to GitHub via `unblock-github`, builds a dependency graph via `unblock-core`,
 //! and exposes MCP tools over stdio transport.
 
-/// MCP server bootstrap, state, and tool registration.
-mod server;
-
-/// MCP error types and conversion from domain/infrastructure errors.
-mod errors;
-
-/// MCP tool handlers.
-mod tools;
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -24,12 +15,11 @@ use tracing_subscriber::EnvFilter;
 use unblock_core::cache::GraphCache;
 use unblock_core::config::Config;
 use unblock_github::client::GitHubClient;
-
-use crate::errors::{ClientInitSnafu, ConfigLoadSnafu, RuntimeSnafu, TransportSnafu};
-use crate::server::{ServerState, UnblockServer};
+use unblock_mcp::errors::{ClientInitSnafu, ConfigLoadSnafu, RuntimeSnafu, TransportSnafu};
+use unblock_mcp::server::{ServerState, UnblockServer};
 
 #[tokio::main]
-async fn main() -> Result<(), crate::errors::BootstrapError> {
+async fn main() -> Result<(), unblock_mcp::errors::BootstrapError> {
     // 1. Load configuration from environment variables.
     let config = Config::load().context(ConfigLoadSnafu)?;
 

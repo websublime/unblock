@@ -9,6 +9,10 @@ description = "MCP server binary for unblock — 17 tools for dependency-aware t
 [lints]
 workspace = true
 
+[lib]
+name = "unblock_mcp"
+path = "src/lib.rs"
+
 [[bin]]
 name = "unblock-mcp"
 path = "src/main.rs"

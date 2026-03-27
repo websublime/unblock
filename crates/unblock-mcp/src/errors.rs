@@ -19,7 +19,7 @@ use snafu::Snafu;
 /// message describing what went wrong, so that the operator can diagnose
 /// startup failures without reading source code.
 #[derive(Debug, Snafu)]
-#[snafu(visibility(pub(crate)))]
+#[snafu(visibility(pub))]
 pub enum BootstrapError {
     /// Failed to load configuration from environment variables.
     #[snafu(display(
