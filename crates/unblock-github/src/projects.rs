@@ -1,7 +1,8 @@
 //! Projects V2 field management.
 //!
 //! - `resolve_project()` — find linked project by repo
-//! - `setup_fields()` — create 7 custom fields (idempotent)
+//! - `setup_fields()` — create 7 custom fields (idempotent), returns [`SetupReport`]
+//! - `query_setup_status()` — check which fields exist without mutating (for dry-run)
 //! - `update_field()` — update a single field value on an issue
 
 use std::collections::HashMap;
@@ -71,6 +72,46 @@ pub enum FieldValue {
     Number(f64),
     /// A date value (serialized as ISO 8601 YYYY-MM-DD for the GraphQL API).
     Date(NaiveDate),
+}
+
+/// The canonical names of the 7 required Projects V2 custom fields.
+///
+/// Used by the setup tool to report which fields were created vs. skipped,
+/// and by the dry-run mode to check field presence without mutating.
+pub const REQUIRED_FIELD_NAMES: &[&str] = &[
+    "Status",
+    "Priority",
+    "IssueType",
+    "Agent",
+    "StoryPoints",
+    "DeferUntil",
+    "ReadyState",
+];
+
+/// Result of a `setup_fields()` call, including which fields were created
+/// vs. skipped (already existed).
+///
+/// This is the enriched return type that enables the MCP setup tool to report
+/// per-field creation status to the agent.
+#[derive(Debug, Clone)]
+pub struct SetupReport {
+    /// The resolved field IDs for all 7 required fields.
+    pub field_ids: ProjectFieldIds,
+    /// Canonical names of fields that were newly created.
+    pub created: Vec<String>,
+    /// Canonical names of fields that already existed and were skipped.
+    pub skipped: Vec<String>,
+}
+
+/// Status of the 7 required fields on a project, without mutating anything.
+///
+/// Returned by [`GitHubClient::query_setup_status`] for dry-run inspection.
+#[derive(Debug, Clone)]
+pub struct SetupStatus {
+    /// Field names that already exist on the project.
+    pub existing: Vec<String>,
+    /// Field names that are missing and would be created by `setup_fields()`.
+    pub missing: Vec<String>,
 }
 
 /// Specification for a required Projects V2 field.
@@ -239,9 +280,10 @@ impl GitHubClient {
     ///
     /// Queries existing fields first, then creates only those that are missing.
     /// For single-select fields, options are created as part of the field creation.
-    /// Returns [`ProjectFieldIds`] with all resolved field and option IDs.
+    /// Returns a [`SetupReport`] containing the resolved [`ProjectFieldIds`] along
+    /// with lists of which fields were created and which were skipped.
     ///
-    /// The caller should cache the result via [`set_field_ids`](Self::set_field_ids)
+    /// The caller should cache the field IDs via [`set_field_ids`](Self::set_field_ids)
     /// so subsequent calls to [`update_field`](Self::update_field) can resolve
     /// field/option IDs without another round-trip. This method does **not**
     /// cache automatically.
@@ -251,13 +293,15 @@ impl GitHubClient {
     /// Returns [`Error::ProjectNotConfigured`] if no project number is set.
     /// Returns [`Error::GitHubGraphQL`] for GraphQL API errors.
     #[instrument(skip(self), fields(owner = %self.owner(), repo = %self.repo()))]
-    pub async fn setup_fields(&self, project_id: &str) -> Result<ProjectFieldIds, Error> {
+    pub async fn setup_fields(&self, project_id: &str) -> Result<SetupReport, Error> {
         // Step 1: Query existing fields on the project.
         let existing = self.fetch_existing_fields(project_id).await?;
 
         // Step 2: For each required field, either resolve existing or create new.
         let mut resolved: HashMap<String, FieldMeta> = HashMap::new();
         let mut resolved_plain: HashMap<String, String> = HashMap::new();
+        let mut created: Vec<String> = Vec::new();
+        let mut skipped: Vec<String> = Vec::new();
 
         for spec in REQUIRED_FIELDS {
             if let Some(existing_field) = existing.get(spec.name) {
@@ -265,6 +309,7 @@ impl GitHubClient {
                     field = spec.name,
                     "Field already exists — skipping creation"
                 );
+                skipped.push(spec.name.to_owned());
                 if spec.options.is_empty() {
                     resolved_plain.insert(spec.name.to_owned(), existing_field.field_id.clone());
                 } else {
@@ -277,6 +322,7 @@ impl GitHubClient {
                     "Creating field"
                 );
                 let meta = self.create_field(project_id, spec).await?;
+                created.push(spec.name.to_owned());
                 if spec.options.is_empty() {
                     resolved_plain.insert(spec.name.to_owned(), meta.field_id.clone());
                 } else {
@@ -295,8 +341,53 @@ impl GitHubClient {
             ready_state: remove_field(&mut resolved, "ReadyState")?,
         };
 
-        debug!("All 7 project fields resolved");
-        Ok(field_ids)
+        debug!(
+            created_count = created.len(),
+            skipped_count = skipped.len(),
+            "All 7 project fields resolved"
+        );
+        Ok(SetupReport {
+            field_ids,
+            created,
+            skipped,
+        })
+    }
+
+    /// Queries the setup status of required fields without mutating the project.
+    ///
+    /// Returns a [`SetupStatus`] indicating which of the 7 required fields
+    /// already exist on the project and which are missing. This is used by the
+    /// MCP setup tool's dry-run mode to report what `setup_fields()` would do
+    /// without actually creating anything.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::GitHubGraphQL`] for GraphQL API errors.
+    #[instrument(skip(self), fields(owner = %self.owner(), repo = %self.repo()))]
+    pub async fn query_setup_status(&self, project_id: &str) -> Result<SetupStatus, Error> {
+        let existing = self.fetch_existing_fields(project_id).await?;
+
+        let mut existing_names = Vec::new();
+        let mut missing_names = Vec::new();
+
+        for name in REQUIRED_FIELD_NAMES {
+            if existing.contains_key(*name) {
+                existing_names.push((*name).to_owned());
+            } else {
+                missing_names.push((*name).to_owned());
+            }
+        }
+
+        debug!(
+            existing = existing_names.len(),
+            missing = missing_names.len(),
+            "Queried setup status"
+        );
+
+        Ok(SetupStatus {
+            existing: existing_names,
+            missing: missing_names,
+        })
     }
 
     /// Updates a single field value on a Projects V2 item.

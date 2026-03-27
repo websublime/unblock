@@ -1106,10 +1106,12 @@ async fn setup_fields_creates_all_seven_fields() {
         .await
         .expect("resolve_project_info() should succeed");
 
-    let field_ids = client
+    let report = client
         .setup_fields(&project_info.id)
         .await
         .expect("setup_fields() should succeed");
+
+    let field_ids = &report.field_ids;
 
     // Verify all 7 fields have non-empty IDs.
     assert!(
@@ -1139,6 +1141,15 @@ async fn setup_fields_creates_all_seven_fields() {
     assert!(
         !field_ids.ready_state.field_id.is_empty(),
         "ReadyState field_id should be non-empty"
+    );
+
+    // Verify created + skipped covers all 7 fields.
+    assert_eq!(
+        report.created.len() + report.skipped.len(),
+        7,
+        "created + skipped should total 7, got created={:?} skipped={:?}",
+        report.created,
+        report.skipped
     );
 
     // Verify single-select fields have the correct options.
@@ -1213,18 +1224,33 @@ async fn setup_fields_is_idempotent() {
         .expect("resolve_project_info() should succeed");
 
     // First call — creates or finds fields.
-    let first_ids = client
+    let first_report = client
         .setup_fields(&project_info.id)
         .await
         .expect("first setup_fields() should succeed");
 
     // Second call — should skip existing fields (idempotent).
-    let second_ids = client
+    let second_report = client
         .setup_fields(&project_info.id)
         .await
         .expect("second setup_fields() should succeed");
 
+    // Second call should have all 7 skipped, none created.
+    assert!(
+        second_report.created.is_empty(),
+        "second call should create nothing, but created: {:?}",
+        second_report.created
+    );
+    assert_eq!(
+        second_report.skipped.len(),
+        7,
+        "second call should skip all 7, but skipped: {:?}",
+        second_report.skipped
+    );
+
     // Field IDs should be identical between runs.
+    let first_ids = &first_report.field_ids;
+    let second_ids = &second_report.field_ids;
     assert_eq!(
         first_ids.status.field_id, second_ids.status.field_id,
         "Status field_id should be stable across calls"
@@ -1276,10 +1302,11 @@ async fn update_field_changes_value_on_project_item() {
         .await
         .expect("resolve_project_info() should succeed");
 
-    let field_ids = client
+    let report = client
         .setup_fields(&project_info.id)
         .await
         .expect("setup_fields() should succeed");
+    let field_ids = &report.field_ids;
 
     // Create an issue to test field updates on.
     let issue = client
@@ -1395,13 +1422,13 @@ async fn field_ids_cached_on_client_after_setup() {
         .await
         .expect("resolve_project_info() should succeed");
 
-    let field_ids = client
+    let report = client
         .setup_fields(&project_info.id)
         .await
         .expect("setup_fields() should succeed");
 
     // Cache the field_ids.
-    client.set_field_ids(field_ids.clone()).await;
+    client.set_field_ids(report.field_ids.clone()).await;
 
     // After caching, field_ids should be Some.
     let cached = client
@@ -1410,11 +1437,11 @@ async fn field_ids_cached_on_client_after_setup() {
         .expect("field_ids should be Some after set_field_ids");
 
     assert_eq!(
-        cached.status.field_id, field_ids.status.field_id,
+        cached.status.field_id, report.field_ids.status.field_id,
         "cached Status field_id should match"
     );
     assert_eq!(
-        cached.agent, field_ids.agent,
+        cached.agent, report.field_ids.agent,
         "cached Agent field_id should match"
     );
 
