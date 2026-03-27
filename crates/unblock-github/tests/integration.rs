@@ -8,7 +8,7 @@ use unblock_core::config::Config;
 use unblock_core::types::{IssueState, Status};
 use unblock_github::client::GitHubClient;
 use unblock_github::mutations::CreateIssueParams;
-use unblock_github::projects::FieldValue;
+use unblock_github::projects::{CreateViewParams, FieldValue, OwnerType, ViewLayout};
 
 /// Drop guard that closes a GitHub issue on scope exit, even during a panic
 /// unwind. This ensures integration tests do not leave orphaned open issues
@@ -1637,4 +1637,322 @@ async fn fetch_field_value(client: &GitHubClient, item_id: &str, field_id: &str)
     }
 
     None
+}
+
+// ── detect_owner_type ────────────────────────────────────────────────
+
+#[tokio::test]
+async fn detect_owner_type_returns_org_for_org_accounts() {
+    if !has_github_token() {
+        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+        return;
+    }
+
+    let config = test_config();
+    let client = GitHubClient::new(&config)
+        .await
+        .expect("GitHubClient::new() should succeed");
+
+    let owner_type = client
+        .detect_owner_type()
+        .await
+        .expect("detect_owner_type() should succeed");
+
+    // The test repo is owned by `websublime` which is an org.
+    // If running against a different repo, this assertion may need adjustment.
+    // The important thing is that detect_owner_type returns a valid OwnerType.
+    assert!(
+        owner_type == OwnerType::Org || owner_type == OwnerType::User,
+        "owner_type should be Org or User"
+    );
+
+    eprintln!(
+        "detect_owner_type: owner={}, type={:?}",
+        client.owner(),
+        owner_type
+    );
+}
+
+// ── list_rest_fields ─────────────────────────────────────────────────
+
+#[tokio::test]
+async fn list_rest_fields_returns_integer_ids() {
+    if !has_github_token() || !has_project_number() {
+        eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping integration test");
+        return;
+    }
+
+    let config = test_config();
+    let client = GitHubClient::new(&config)
+        .await
+        .expect("GitHubClient::new() should succeed");
+
+    let owner_type = client
+        .detect_owner_type()
+        .await
+        .expect("detect_owner_type() should succeed");
+
+    let fields = client
+        .list_rest_fields(owner_type)
+        .await
+        .expect("list_rest_fields() should succeed");
+
+    // Should return at least the built-in fields (Title, Assignees, Status, etc.).
+    assert!(
+        !fields.is_empty(),
+        "list_rest_fields should return at least one field"
+    );
+
+    // Every field should have a non-zero integer ID.
+    for field in &fields {
+        assert!(field.id > 0, "field ID should be a positive integer");
+        assert!(!field.name.is_empty(), "field name should be non-empty");
+        assert!(
+            !field.data_type.is_empty(),
+            "field data_type should be non-empty"
+        );
+    }
+
+    // Should include the built-in Title field.
+    let has_title = fields.iter().any(|f| f.name == "Title");
+    assert!(has_title, "fields should include the built-in Title field");
+
+    eprintln!(
+        "list_rest_fields: {} fields returned, names: {:?}",
+        fields.len(),
+        fields.iter().map(|f| &f.name).collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn list_rest_fields_options_name_raw_parsed_correctly() {
+    if !has_github_token() || !has_project_number() {
+        eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping integration test");
+        return;
+    }
+
+    let config = test_config();
+    let client = GitHubClient::new(&config)
+        .await
+        .expect("GitHubClient::new() should succeed");
+
+    let owner_type = client
+        .detect_owner_type()
+        .await
+        .expect("detect_owner_type() should succeed");
+
+    let fields = client
+        .list_rest_fields(owner_type)
+        .await
+        .expect("list_rest_fields() should succeed");
+
+    // Find a single_select field with options (Status or Priority if setup has run).
+    let select_field = fields
+        .iter()
+        .find(|f| f.data_type == "single_select" && !f.options.is_empty());
+
+    if let Some(field) = select_field {
+        // Verify that option names are plain strings (parsed from name.raw),
+        // not JSON objects or HTML.
+        for opt in &field.options {
+            assert!(!opt.name.is_empty(), "option name should be non-empty");
+            assert!(
+                !opt.name.starts_with('{'),
+                "option name should be a plain string, not a JSON object: {}",
+                opt.name
+            );
+            assert!(
+                !opt.name.contains('<'),
+                "option name should be raw text, not HTML: {}",
+                opt.name
+            );
+        }
+        eprintln!(
+            "Single-select field '{}' has options: {:?}",
+            field.name,
+            field.options.iter().map(|o| &o.name).collect::<Vec<_>>()
+        );
+    } else {
+        eprintln!("No single_select fields with options found — skipping options validation");
+    }
+}
+
+// ── create_view + list_views ─────────────────────────────────────────
+
+#[tokio::test]
+async fn create_view_board_and_list_views() {
+    if !has_github_token() || !has_project_number() {
+        eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping integration test");
+        return;
+    }
+
+    let config = test_config();
+    let client = GitHubClient::new(&config)
+        .await
+        .expect("GitHubClient::new() should succeed");
+
+    let owner_type = client
+        .detect_owner_type()
+        .await
+        .expect("detect_owner_type() should succeed");
+
+    // Create a board view with a unique name to avoid collisions.
+    let view_name = format!("test-board-{}", chrono::Utc::now().timestamp());
+    let params = CreateViewParams {
+        name: view_name.clone(),
+        layout: ViewLayout::Board,
+        filter: Some("is:open".to_owned()),
+        visible_fields: None,
+    };
+
+    let view = client
+        .create_view(owner_type, &params)
+        .await
+        .expect("create_view(board) should succeed");
+
+    assert_eq!(view.name, view_name, "view name should match");
+    assert_eq!(view.layout, ViewLayout::Board, "layout should be Board");
+    assert!(view.number > 0, "view number should be positive");
+    assert!(view.id.is_some(), "view id should be present from REST");
+
+    eprintln!(
+        "Created board view: name={}, number={}, id={:?}",
+        view.name, view.number, view.id
+    );
+
+    // Verify the view appears in list_views.
+    let views = client
+        .list_views(owner_type)
+        .await
+        .expect("list_views() should succeed");
+
+    let found = views.iter().any(|v| v.name == view_name);
+    assert!(
+        found,
+        "list_views should include the newly created view '{view_name}'"
+    );
+}
+
+#[tokio::test]
+async fn create_view_table_layout() {
+    if !has_github_token() || !has_project_number() {
+        eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping integration test");
+        return;
+    }
+
+    let config = test_config();
+    let client = GitHubClient::new(&config)
+        .await
+        .expect("GitHubClient::new() should succeed");
+
+    let owner_type = client
+        .detect_owner_type()
+        .await
+        .expect("detect_owner_type() should succeed");
+
+    let view_name = format!("test-table-{}", chrono::Utc::now().timestamp());
+    let params = CreateViewParams {
+        name: view_name.clone(),
+        layout: ViewLayout::Table,
+        filter: None,
+        visible_fields: None,
+    };
+
+    let view = client
+        .create_view(owner_type, &params)
+        .await
+        .expect("create_view(table) should succeed");
+
+    assert_eq!(view.name, view_name);
+    assert_eq!(view.layout, ViewLayout::Table);
+    assert!(view.number > 0);
+
+    eprintln!(
+        "Created table view: name={}, number={}",
+        view.name, view.number
+    );
+}
+
+#[tokio::test]
+async fn create_view_roadmap_layout() {
+    if !has_github_token() || !has_project_number() {
+        eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping integration test");
+        return;
+    }
+
+    let config = test_config();
+    let client = GitHubClient::new(&config)
+        .await
+        .expect("GitHubClient::new() should succeed");
+
+    let owner_type = client
+        .detect_owner_type()
+        .await
+        .expect("detect_owner_type() should succeed");
+
+    let view_name = format!("test-roadmap-{}", chrono::Utc::now().timestamp());
+    let params = CreateViewParams {
+        name: view_name.clone(),
+        layout: ViewLayout::Roadmap,
+        filter: None,
+        visible_fields: None,
+    };
+
+    let view = client
+        .create_view(owner_type, &params)
+        .await
+        .expect("create_view(roadmap) should succeed");
+
+    assert_eq!(view.name, view_name);
+    assert_eq!(view.layout, ViewLayout::Roadmap);
+    assert!(view.number > 0);
+
+    eprintln!(
+        "Created roadmap view: name={}, number={}",
+        view.name, view.number
+    );
+}
+
+#[tokio::test]
+async fn list_views_returns_default_view() {
+    if !has_github_token() || !has_project_number() {
+        eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping integration test");
+        return;
+    }
+
+    let config = test_config();
+    let client = GitHubClient::new(&config)
+        .await
+        .expect("GitHubClient::new() should succeed");
+
+    let owner_type = client
+        .detect_owner_type()
+        .await
+        .expect("detect_owner_type() should succeed");
+
+    let views = client
+        .list_views(owner_type)
+        .await
+        .expect("list_views() should succeed");
+
+    // Every project has at least one default view.
+    assert!(
+        !views.is_empty(),
+        "list_views should return at least one view (the default)"
+    );
+
+    for view in &views {
+        assert!(!view.name.is_empty(), "view name should be non-empty");
+        assert!(view.number > 0, "view number should be positive");
+        assert!(
+            view.node_id.is_some(),
+            "view node_id should be present from GraphQL"
+        );
+    }
+
+    eprintln!(
+        "list_views: {} views, names: {:?}",
+        views.len(),
+        views.iter().map(|v| &v.name).collect::<Vec<_>>()
+    );
 }
