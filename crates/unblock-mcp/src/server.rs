@@ -1,12 +1,16 @@
 //! MCP server bootstrap and state management.
 //!
-//! [`ServerState`] holds [`GitHubClient`](unblock_github::client::GitHubClient),
+//! [`ServerState`](crate::server::ServerState) holds
+//! [`GitHubClient`](unblock_github::client::GitHubClient),
 //! [`GraphCache`](unblock_core::cache::GraphCache), and
-//! [`Config`](unblock_core::config::Config). [`UnblockServer`] implements the rmcp
+//! [`Config`](unblock_core::config::Config).
+//! [`UnblockServer`](crate::server::UnblockServer) implements the rmcp
 //! [`ServerHandler`](rmcp::ServerHandler) trait, exposing MCP tools over stdio transport.
 //!
-//! The server is constructed via [`UnblockServer::new`], which takes ownership of a
-//! [`ServerState`] and wraps it in an [`Arc`] for shared access across tool handlers.
+//! The server is constructed via
+//! [`UnblockServer::new`](crate::server::UnblockServer::new), which takes ownership of a
+//! [`ServerState`](crate::server::ServerState) and wraps it in an
+//! [`Arc`](std::sync::Arc) for shared access across tool handlers.
 
 use std::sync::Arc;
 
@@ -14,6 +18,10 @@ use crate::tools::execute_read_tool;
 use crate::tools::execute_write_tool;
 use crate::tools::init::{InitParams, InitResult};
 use crate::tools::setup::{SetupParams, SetupResult};
+use crate::tools::show::{
+    DependencyTreeEntry, ShowBodySections, ShowComment, ShowIssue, ShowParams, ShowRelatedIssue,
+    ShowResult,
+};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::{ErrorData, Implementation, ServerInfo};
@@ -316,6 +324,136 @@ impl UnblockServer {
             fields_skipped: report.skipped,
             fields_missing: Vec::new(),
             project_id: project_info.id,
+        }))
+    }
+
+    /// Fetch full detail for a single issue.
+    ///
+    /// Returns the complete issue with parsed body sections, blocking/blocked-by
+    /// relationships, an optional dependency tree (from the cached graph up to
+    /// depth 3), and optional comments.
+    ///
+    /// This is a read tool — it does not mutate state or invalidate the cache.
+    #[tool(
+        name = "show",
+        description = "Get full details for a single issue: body sections, blocking relationships, dependency tree (from cache), and comments. Use include_comments=false or include_deps=false to skip optional sections."
+    )]
+    async fn show(
+        &self,
+        Parameters(params): Parameters<ShowParams>,
+    ) -> Result<Json<ShowResult>, ErrorData> {
+        let state = self.state();
+        let client = &state.client;
+
+        let include_comments = params.include_comments.unwrap_or(true);
+        let include_deps = params.include_deps.unwrap_or(true);
+        let issue_number = params.id;
+
+        info!(
+            issue_number,
+            include_comments, include_deps, "Show tool invoked"
+        );
+
+        // Step 1: Fetch the full issue via execute_read_tool.
+        let issue = execute_read_tool(state, || client.fetch_issue(issue_number)).await?;
+
+        // Step 2: Parse body sections.
+        let body_sections = unblock_core::types::BodySections::from_markdown(
+            issue.body.as_deref().unwrap_or_default(),
+        );
+
+        // Step 3: Extract blocking/blocked_by from the issue.
+        let blocking: Vec<ShowRelatedIssue> = issue
+            .blocking
+            .iter()
+            .map(|r| ShowRelatedIssue {
+                number: r.number,
+                title: r.title.clone(),
+                state: format!("{:?}", r.state),
+            })
+            .collect();
+
+        let blocked_by: Vec<ShowRelatedIssue> = issue
+            .blocked_by
+            .iter()
+            .map(|r| ShowRelatedIssue {
+                number: r.number,
+                title: r.title.clone(),
+                state: format!("{:?}", r.state),
+            })
+            .collect();
+
+        // Step 4: If include_deps, get dependency tree from cached graph.
+        let dependency_tree = if include_deps {
+            state.cache.get_graph().await.map(|graph| {
+                graph
+                    .dependency_tree(
+                        issue_number,
+                        unblock_core::types::TraversalDirection::Both,
+                        3,
+                    )
+                    .into_iter()
+                    .map(|(num, depth)| DependencyTreeEntry {
+                        issue_number: num,
+                        depth,
+                    })
+                    .collect()
+            })
+        } else {
+            None
+        };
+
+        // Step 5: If include_comments, include comments from the issue.
+        let comments = if include_comments {
+            Some(
+                issue
+                    .comments
+                    .iter()
+                    .map(|c| ShowComment {
+                        author: c.author.clone(),
+                        body: c.body.clone(),
+                        created_at: c.created_at.to_rfc3339(),
+                    })
+                    .collect(),
+            )
+        } else {
+            None
+        };
+
+        // Step 6: Build the ShowIssue from the fetched Issue.
+        let show_issue = ShowIssue {
+            number: issue.number,
+            node_id: issue.node_id.clone(),
+            title: issue.title.clone(),
+            issue_type: issue.issue_type.map(|it| format!("{it:?}")),
+            status: format!("{:?}", issue.status),
+            priority: format!("{:?}", issue.priority),
+            agent: issue.agent.clone(),
+            claimed_at: issue.claimed_at.map(|dt| dt.to_rfc3339()),
+            ready_state: format!("{:?}", issue.ready_state),
+            story_points: issue.story_points,
+            defer_until: issue.defer_until.map(|d| d.to_string()),
+            labels: issue.labels.clone(),
+            milestone: issue.milestone.clone(),
+            assignees: issue.assignees.clone(),
+            state: format!("{:?}", issue.state),
+            body: issue.body.clone(),
+            created_at: issue.created_at.to_rfc3339(),
+            updated_at: issue.updated_at.to_rfc3339(),
+            url: issue.url.clone(),
+        };
+
+        Ok(Json(ShowResult {
+            issue: show_issue,
+            body_sections: ShowBodySections {
+                description: body_sections.description,
+                design_notes: body_sections.design_notes,
+                acceptance_criteria: body_sections.acceptance_criteria,
+            },
+            blocking,
+            blocked_by,
+            dependency_tree,
+            comments,
         }))
     }
 }
