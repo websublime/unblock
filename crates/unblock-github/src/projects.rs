@@ -242,6 +242,26 @@ pub struct ProjectView {
     pub visible_fields: Vec<u64>,
 }
 
+/// A Projects V2 project summary returned by [`GitHubClient::list_owner_projects`].
+#[derive(Debug, Clone)]
+pub struct OwnerProject {
+    /// The project number (visible in the GitHub UI URL).
+    pub number: u64,
+    /// The project title.
+    pub title: String,
+    /// The project URL (e.g. `https://github.com/orgs/acme/projects/1`).
+    pub url: String,
+}
+
+/// Result of a successful [`GitHubClient::create_project`] call.
+#[derive(Debug, Clone)]
+pub struct CreatedProject {
+    /// The project number (visible in the GitHub UI URL).
+    pub number: u64,
+    /// The project URL.
+    pub url: String,
+}
+
 /// The GitHub REST API version header value for Projects V2 view and field
 /// endpoints. This version is newer than the default `2022-11-28` and must
 /// be sent as a per-request header override for `/projectsV2/*/views` and
@@ -1220,5 +1240,183 @@ impl GitHubClient {
 
         debug!(count = views.len(), "Listed project views via GraphQL");
         Ok(views)
+    }
+
+    /// Resolves the GraphQL global node ID for the repository owner.
+    ///
+    /// Queries `organization(login:) { id }` or `user(login:) { id }` depending
+    /// on the provided [`OwnerType`]. The returned node ID is required by the
+    /// `createProjectV2` mutation's `ownerId` input.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::GitHubGraphQL`] if the owner cannot be found.
+    /// Returns [`Error::GitHubUnavailable`] for network failures.
+    #[instrument(skip(self), fields(owner = %self.owner(), owner_type = ?owner_type))]
+    pub async fn resolve_owner_node_id(&self, owner_type: OwnerType) -> Result<String, Error> {
+        let (query, data_key) = match owner_type {
+            OwnerType::Org => (
+                "query ResolveOrgId($login: String!) { organization(login: $login) { id } }",
+                "organization",
+            ),
+            OwnerType::User => (
+                "query ResolveUserId($login: String!) { user(login: $login) { id } }",
+                "user",
+            ),
+        };
+
+        let variables = serde_json::json!({
+            "login": self.owner(),
+        });
+
+        let response = self.graphql(query, variables).await?;
+        let node_id = response["data"][data_key]["id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+
+        if node_id.is_empty() {
+            return Err(errors::GitHubGraphQLSnafu {
+                errors: vec![format!(
+                    "Could not resolve node ID for {} '{}' — check the owner name",
+                    match owner_type {
+                        OwnerType::Org => "organization",
+                        OwnerType::User => "user",
+                    },
+                    self.owner()
+                )],
+            }
+            .build());
+        }
+
+        debug!(owner = %self.owner(), node_id = %node_id, "Resolved owner node ID");
+        Ok(node_id)
+    }
+
+    /// Lists Projects V2 projects owned by the repository owner.
+    ///
+    /// Queries `organization(login:) { projectsV2(first: 20) { ... } }` or
+    /// `user(login:) { projectsV2(first: 20) { ... } }` depending on the
+    /// provided [`OwnerType`]. Returns a list of `(number, title, url)` tuples.
+    ///
+    /// **Note:** Returns at most 20 projects. Projects beyond the first page
+    /// are not returned — this is acceptable for the init tool's idempotency
+    /// check, which matches by title.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::GitHubGraphQL`] for GraphQL API errors.
+    /// Returns [`Error::GitHubUnavailable`] for network failures.
+    #[instrument(skip(self), fields(owner = %self.owner(), owner_type = ?owner_type))]
+    pub async fn list_owner_projects(
+        &self,
+        owner_type: OwnerType,
+    ) -> Result<Vec<OwnerProject>, Error> {
+        let (query, data_key) = match owner_type {
+            OwnerType::Org => (
+                "
+                query ListOrgProjects($login: String!) {
+                    organization(login: $login) {
+                        projectsV2(first: 20) {
+                            nodes { number title url }
+                        }
+                    }
+                }
+                ",
+                "organization",
+            ),
+            OwnerType::User => (
+                "
+                query ListUserProjects($login: String!) {
+                    user(login: $login) {
+                        projectsV2(first: 20) {
+                            nodes { number title url }
+                        }
+                    }
+                }
+                ",
+                "user",
+            ),
+        };
+
+        let variables = serde_json::json!({
+            "login": self.owner(),
+        });
+
+        let response = self.graphql(query, variables).await?;
+        let nodes = response["data"][data_key]["projectsV2"]["nodes"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+
+        let projects: Vec<OwnerProject> = nodes
+            .iter()
+            .filter(|n| !n.is_null())
+            .filter_map(|node| {
+                let number = node["number"].as_u64()?;
+                let title = node["title"].as_str()?.to_owned();
+                let url = node["url"].as_str()?.to_owned();
+                Some(OwnerProject { number, title, url })
+            })
+            .collect();
+
+        debug!(count = projects.len(), "Listed owner projects");
+        Ok(projects)
+    }
+
+    /// Creates a new GitHub Projects V2 project.
+    ///
+    /// Uses the `createProjectV2` GraphQL mutation with the given owner node ID,
+    /// title, and optional visibility flag. Returns the created project's number
+    /// and URL.
+    ///
+    /// **Note:** The `description` field is not supported by the `createProjectV2`
+    /// mutation input — it is accepted here for forward-compatibility but is not
+    /// sent to the API. The description can be set separately via a project update
+    /// mutation after creation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::GitHubGraphQL`] if the mutation fails (e.g. insufficient
+    /// permissions, invalid owner ID).
+    /// Returns [`Error::GitHubUnavailable`] for network failures.
+    #[instrument(skip(self), fields(owner = %self.owner(), title = %title))]
+    pub async fn create_project(
+        &self,
+        owner_node_id: &str,
+        title: &str,
+    ) -> Result<CreatedProject, Error> {
+        let mutation = "
+            mutation CreateProject($ownerId: ID!, $title: String!) {
+                createProjectV2(input: { ownerId: $ownerId, title: $title }) {
+                    projectV2 {
+                        number
+                        url
+                    }
+                }
+            }
+        ";
+
+        let variables = serde_json::json!({
+            "ownerId": owner_node_id,
+            "title": title,
+        });
+
+        let response = self.graphql(mutation, variables).await?;
+        let project = &response["data"]["createProjectV2"]["projectV2"];
+        let number = project["number"].as_u64().unwrap_or_default();
+        let url = project["url"].as_str().unwrap_or_default().to_owned();
+
+        if number == 0 || url.is_empty() {
+            return Err(errors::GitHubGraphQLSnafu {
+                errors: vec![format!(
+                    "createProjectV2 mutation returned empty project data for title '{title}'"
+                )],
+            }
+            .build());
+        }
+
+        debug!(number, url = %url, "Created project V2");
+        Ok(CreatedProject { number, url })
     }
 }
