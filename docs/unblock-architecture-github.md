@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| **Version** | 1.1.0-draft |
+| **Version** | 1.2.0-draft |
 | **Author** | Miguel Ramos |
 | **Role** | Architect |
 | **Org** | websublime |
@@ -63,7 +63,7 @@
 
 | Actor | Interface | Operations |
 |---|---|---|
-| AI Agent | MCP protocol (stdio) | All 17 tools |
+| AI Agent | MCP protocol (stdio) | All 18 tools |
 | Orchestrator | MCP protocol (stdio) | `claim --agent X`, `ready --agent X`, `blocked` |
 | Human Developer | GitHub UI, `gh` CLI | Issue CRUD, Projects boards, labels, milestones |
 
@@ -80,7 +80,7 @@
 
 - GitHub is the **single source of truth**. The MCP server stores nothing persistently.
 - The MCP server is **stateless across restarts**. In-memory cache is ephemeral and reconstructable from GitHub in a single API call.
-- **One repo = one project.** The MCP server scopes all operations to the repo detected from git remote (or configured via env var).
+- **One project per setup.** The MCP server scopes all operations to the configured project. Org-level projects can aggregate issues from multiple repos. The `init` tool creates the project, `setup` configures fields and views.
 - **No SSE/WebSocket from GitHub to MCP server.** Consistency relies on TTL-based cache invalidation and explicit invalidation after writes.
 
 ---
@@ -122,26 +122,37 @@ The graph engine (`unblock-core`) is fully testable with in-memory data. No netw
 │                   unblock-mcp                      │
 │            (binary — MCP server)                   │
 │                                                    │
-│  ┌──────────┐  ┌───────────┐  ┌────────────────┐ │
-│  │  tools/   │  │ server.rs │  │   github/      │ │
-│  │  (17)     │  │ (MCP      │  │ (API client)   │ │
-│  │           │  │  handler)  │  │                │ │
-│  └─────┬─────┘  └─────┬─────┘  └───────┬────────┘ │
-│        │               │                │          │
-│        └───────────────┼────────────────┘          │
-│                        │                           │
-└────────────────────────┼───────────────────────────┘
-                         │ depends on
-                ┌────────▼────────┐
-                │  unblock-core   │
-                │  (library)      │
-                │                 │
-                │  types.rs       │
-                │  graph.rs       │
-                │  cache.rs       │
-                │  config.rs      │
-                │  errors.rs      │
-                └─────────────────┘
+│  ┌──────────┐  ┌───────────┐                      │
+│  │  tools/   │  │ server.rs │                      │
+│  │  (18)     │  │ (MCP      │                      │
+│  │           │  │  handler)  │                      │
+│  └─────┬─────┘  └─────┬─────┘                      │
+│        │               │                           │
+│        └───────┬───────┘                           │
+│                │                                    │
+└────────────────┼───────────────────────────────────┘
+                 │ depends on
+        ┌────────▼────────┐
+        │  unblock-github │
+        │  (library)      │
+        │                 │
+        │  client.rs      │
+        │  graphql.rs     │
+        │  mutations.rs   │
+        │  projects.rs    │
+        │  errors.rs      │
+        └────────┬────────┘
+                 │ depends on
+        ┌────────▼────────┐
+        │  unblock-core   │
+        │  (library)      │
+        │                 │
+        │  types.rs       │
+        │  graph.rs       │
+        │  cache.rs       │
+        │  config.rs      │
+        │  errors.rs      │
+        └─────────────────┘
 ```
 
 ### 3.2 Module Responsibilities
@@ -155,11 +166,11 @@ The graph engine (`unblock-core`) is fully testable with in-memory data. No netw
 | `errors` | core | Domain error types (snafu) |
 | `server` | mcp | MCP protocol setup, tool registration, request routing (rmcp) |
 | `errors` | mcp | Infrastructure errors, MCP error conversion |
-| `tools/*` | mcp | 17 tool implementations, each in its own module |
-| `github/client` | mcp | HTTP client wrapper, auth, auto-detect repo |
-| `github/graphql` | mcp | Read queries: issues, blocking edges, project field values |
-| `github/mutations` | mcp | Write operations: create, update, close, reopen, addBlockedBy, comments |
-| `github/project` | mcp | Projects V2 field management: create fields, read/write field values |
+| `tools/*` | mcp | 18 tool implementations, each in its own module |
+| `client` | github | HTTP client wrapper, auth, auto-detect repo |
+| `graphql` | github | Read queries: issues, blocking edges, project field values |
+| `mutations` | github | Write operations: create, update, close, reopen, addBlockedBy, comments |
+| `projects` | github | Projects V2 field management: create fields, read/write field values |
 
 ---
 
@@ -178,17 +189,29 @@ pub mod errors;   // Error types
 
 Depends on: `serde`, `chrono`, `petgraph`, `snafu`, `tracing`. No network crates. No GitHub-specific code.
 
-### 4.2 unblock-mcp
+### 4.2 unblock-github
+
+```rust
+// crates/unblock-github/src/lib.rs
+pub mod client;
+pub mod graphql;
+pub mod mutations;
+pub mod projects;
+pub mod errors;
+```
+
+Depends on: `unblock-core`, `reqwest`, `tokio`, `serde`, `serde_json`, `snafu`, `tracing`.
+
+### 4.3 unblock-mcp
 
 ```rust
 // crates/unblock-mcp/src/main.rs
 mod server;
 mod errors;
 mod tools;
-mod github;
 ```
 
-Depends on: `unblock-core`, `rmcp`, `reqwest`, `tokio`, `schemars`.
+Depends on: `unblock-core`, `unblock-github`, `rmcp`, `tokio`, `schemars`.
 
 ---
 
@@ -203,7 +226,10 @@ All domain types are plain Rust structs. No GitHub-specific field names — the 
 /// Mapped from GitHub Issue + Projects V2 field values.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Issue {
+    pub qualified_id: QualifiedId, // Fully-qualified owner/repo#number
     pub number: u64,               // GitHub issue number (#42)
+    pub owner: String,             // Repository owner
+    pub repo: String,              // Repository name
     pub node_id: String,           // GitHub GraphQL node ID (opaque, for mutations)
     pub title: String,
     pub issue_type: Option<IssueType>,
@@ -267,8 +293,8 @@ pub enum IssueType {
 /// Mapped from GitHub's native blockedBy relationship.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BlockingEdge {
-    pub source: u64,  // Issue number that is blocked
-    pub target: u64,  // Issue number that blocks it
+    pub source: QualifiedId,  // Issue that is blocked
+    pub target: QualifiedId,  // Issue that blocks it
 }
 
 /// Summary of an issue for list/ready responses (lighter than full Issue).
@@ -308,6 +334,28 @@ impl BodySections {
 }
 ```
 
+```rust
+/// A reference to an issue, either in the current repo or cross-repo.
+pub enum IssueRef {
+    /// Issue in the current repo (just a number).
+    Local(u64),
+    /// Issue in a different repo.
+    CrossRepo {
+        owner: String,
+        repo: String,
+        number: u64,
+    },
+}
+
+impl IssueRef {
+    /// Parse from string: "123", "#123", or "owner/repo#123".
+    pub fn parse(s: &str) -> Result<Self, DomainError> { ... }
+
+    /// Returns the qualified form: "owner/repo#123".
+    pub fn qualified(&self, default_owner: &str, default_repo: &str) -> String { ... }
+}
+```
+
 **Key design notes:**
 
 - `Issue.number` is `u64`, not a custom `IssueId` struct — GitHub issue numbers are native, universal, and need no wrapper.
@@ -331,7 +379,8 @@ use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::algo::{has_path_connecting, tarjan_scc};
 use std::collections::{HashMap, HashSet};
 
-/// The dependency graph for a single repository.
+/// The dependency graph for a project. May span multiple repositories
+/// when cross-repo dependencies exist.
 /// Nodes are issue numbers, edges are blocking relationships.
 /// Edge direction: blocked_issue → blocking_issue
 /// (source depends on target)
@@ -420,6 +469,35 @@ pub struct TreeNode {
 }
 ```
 
+### 6.5 Cross-Repo Node Identifiers
+
+The graph engine uses **qualified IDs** (`owner/repo#number`) as node keys instead of plain issue numbers. This prevents collision between issue #5 in repo A and issue #5 in repo B.
+
+```rust
+/// Qualified issue identifier — unique across repositories.
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+pub struct QualifiedId {
+    pub owner: String,
+    pub repo: String,
+    pub number: u64,
+}
+
+impl QualifiedId {
+    /// Parse from "owner/repo#123" or create from components.
+    pub fn new(owner: &str, repo: &str, number: u64) -> Self { ... }
+
+    /// Display format: "owner/repo#123"
+    pub fn to_string(&self) -> String { ... }
+
+    /// Short format for local repo: "#123"
+    pub fn short(&self, local_owner: &str, local_repo: &str) -> String { ... }
+}
+```
+
+The graph becomes `DiGraph<QualifiedId, ()>` with `HashMap<QualifiedId, NodeIndex>`. All graph operations (`compute_ready_set`, `compute_unblock_cascade`, `would_create_cycle`, `dependency_tree`) use `QualifiedId`.
+
+**Relationship to `IssueRef`:** `IssueRef` is the parsed user input (may be local or cross-repo). `QualifiedId` is the resolved, fully-qualified internal representation. `IssueRef::Local(42)` resolves to `QualifiedId { owner: "websublime", repo: "unblock", number: 42 }` using the configured repo context.
+
 ---
 
 ## 7. Cache Layer
@@ -438,7 +516,7 @@ pub struct GraphCache {
 
 struct CacheEntry {
     graph: DependencyGraph,
-    ready_set: HashSet<u64>,
+    ready_set: HashSet<QualifiedId>,
     built_at: Instant,
 }
 
@@ -447,7 +525,7 @@ impl GraphCache {
 
     /// Get the cached ready set if fresh.
     #[must_use]
-    pub fn get_ready_set(&self) -> Option<HashSet<u64>> { /* ... */ }
+    pub fn get_ready_set(&self) -> Option<HashSet<QualifiedId>> { /* ... */ }
 
     /// Get the cached graph for cycle checks and cascade computation.
     #[must_use]
@@ -484,6 +562,8 @@ Read operation (ready, prime, stats)
   ├─→ Cache fresh? → return cached data (0 API calls)
   └─→ Cache stale/empty → fetch + build + cache + return (1 API call)
 ```
+
+**Cross-repo invalidation:** Any write invalidates the entire cache. Future optimization may scope invalidation per-repo.
 
 ### 7.1 Field Validation at Boot
 
@@ -544,7 +624,7 @@ Flow:
 ### 8.1 Client Architecture
 
 ```rust
-// crates/unblock-mcp/src/github/client.rs
+// crates/unblock-github/src/client.rs
 
 pub struct GitHubClient {
     http: reqwest::Client,
@@ -633,10 +713,34 @@ impl GitHubClient {
 }
 ```
 
+#### REST API Version
+
+View and field REST endpoints require API version `2026-03-10`:
+```
+X-GitHub-Api-Version: 2026-03-10
+```
+
+The client sends this header selectively for REST calls to `/projectsV2/*/views` and `/projectsV2/*/fields` endpoints. Existing REST calls continue to use `2022-11-28`.
+
+#### Cross-Repo Issue Resolution
+
+```rust
+/// Resolves an IssueRef to a GraphQL node ID.
+/// For Local refs, uses self.owner()/self.repo().
+/// For CrossRepo refs, uses the specified owner/repo.
+pub async fn resolve_issue_ref(&self, issue_ref: &IssueRef) -> Result<String, Error> {
+    let (owner, repo, number) = match issue_ref {
+        IssueRef::Local(n) => (self.owner().to_owned(), self.repo().to_owned(), *n),
+        IssueRef::CrossRepo { owner, repo, number } => (owner.clone(), repo.clone(), *number),
+    };
+    // GraphQL: repository(owner, name) { issue(number) { id } }
+}
+```
+
 ### 8.2 GraphQL Read Queries
 
 ```rust
-// crates/unblock-mcp/src/github/graphql.rs
+// crates/unblock-github/src/graphql.rs
 
 impl GitHubClient {
     /// Fetch all open issues with blocking relationships and Project field values.
@@ -647,6 +751,10 @@ impl GitHubClient {
     /// Fetch a single issue with full details (for `show` tool).
     pub async fn fetch_issue(&self, number: u64) -> Result<Issue, Error> { /* ... */ }
 
+    // **Cross-repo scope:** `fetch_issue` accepts `IssueRef` to support showing
+    // cross-repo issues. For `Local` refs, uses `self.owner()/self.repo()`.
+    // For `CrossRepo` refs, queries the specified repo.
+
     /// Low-level GraphQL request. Uses `self.graphql_url()` for endpoint resolution.
     async fn graphql(&self, query: &str, variables: serde_json::Value) -> Result<serde_json::Value, Error> { /* ... */ }
 }
@@ -655,7 +763,7 @@ impl GitHubClient {
 ### 8.3 Mutations
 
 ```rust
-// crates/unblock-mcp/src/github/mutations.rs
+// crates/unblock-github/src/mutations.rs
 
 impl GitHubClient {
     /// Create a new issue via REST API.
@@ -695,10 +803,19 @@ impl GitHubClient {
 }
 ```
 
+#### Cross-Repo Scope for Mutations
+
+| Operation | Cross-repo support | Rationale |
+|---|---|---|
+| `depends` / `dep_remove` | YES — accepts `IssueRef` | Dependencies are the core cross-repo use case |
+| `show` / `fetch_issue` | YES — accepts `IssueRef` | Need to inspect cross-repo blockers |
+| `close`, `reopen`, `update`, `claim`, `comment` | NO — current repo only | Write operations scoped to configured repo for safety |
+| `create` (`blocked_by` param) | YES — accepts `IssueRef` array | Cross-repo deps at creation time |
+
 ### 8.4 Projects V2 Field Management
 
 ```rust
-// crates/unblock-mcp/src/github/project.rs
+// crates/unblock-github/src/projects.rs
 
 impl GitHubClient {
     /// Resolve Project V2 node ID and custom field IDs.
@@ -730,6 +847,44 @@ impl GitHubClient {
 }
 ```
 
+### 8.5 REST API — Views and Fields
+
+View and field management uses the REST API (`2026-03-10`), not GraphQL.
+
+#### Endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/orgs/{org}/projectsV2/{n}/fields` | List all fields with integer IDs |
+| `GET` | `/users/{user}/projectsV2/{n}/fields` | List fields (user-owned project) |
+| `POST` | `/orgs/{org}/projectsV2/{n}/views` | Create a view |
+| `POST` | `/users/{user}/projectsV2/{n}/views` | Create a view (user-owned project) |
+
+#### API Version Header
+
+```
+X-GitHub-Api-Version: 2026-03-10
+```
+
+Sent selectively for REST calls to `/projectsV2/*/views` and `/projectsV2/*/fields`. Existing REST calls (`/repos/*/issues/*`) continue to use `2022-11-28`.
+
+#### View Create Request
+
+```json
+{
+  "name": "://ready",
+  "layout": "board",
+  "filter": "\"Ready State\":\"ready\"",
+  "visible_fields": [101, 102, 103]
+}
+```
+
+`layout`: `"board"` | `"table"` | `"roadmap"`. `visible_fields` uses integer field IDs from `GET /fields`. `group_by`, `sort_by`, `vertical_group_by` are read-only — cannot be set via API.
+
+#### Field Response Note
+
+`options[].name` returns `{"raw": "Todo", "html": "Todo"}` (nested object), not a plain string. Parse `.raw`.
+
 ---
 
 ## 9. MCP Server
@@ -746,6 +901,8 @@ async fn main() -> anyhow::Result<()> { /* ... */ }
 ```
 
 The bootstrap sequence: load config → init tracing → create GitHub client (resolves repo, project, fields) → validate fields (see §7.1) → create cache → create server → serve on stdio.
+
+If no project is detected (first-time use), the server starts in bootstrap mode. Only `init` and `setup` tools are functional; other tools return `ProjectNotConfigured` error with guidance to run `init` first.
 
 ### 9.2 Server State and Tool Registration
 
@@ -768,7 +925,7 @@ impl UnblockServer {
     pub fn new(state: ServerState) -> Self { /* ... */ }
 }
 
-// Tool registration via rmcp macros — 17 tools total.
+// Tool registration via rmcp macros — 18 tools total.
 // Pattern (representative examples):
 
 #[tool(name = "ready", description = "Find issues that can be worked on right now — no active blockers")]
@@ -786,7 +943,7 @@ async fn update(&self, params: UpdateParams) -> Result<UpdateResult, McpError> {
     tools::update::execute(&self.state, params).await
 }
 
-// ... remaining 14 tools follow the same pattern
+// ... remaining 15 tools follow the same pattern
 
 impl ServerHandler for UnblockServer {
     fn get_info(&self) -> ServerInfo { /* ... */ }
@@ -897,15 +1054,19 @@ API calls: 1 (create) + 1 (add to project) + 3-5 (field updates) + 0-2 (deps/par
 ### 10.5 `depends`
 
 ```
-Input:  DependsParams { source, target }
+Input:  DependsParams { source: IssueRef, target: IssueRef }
 Output: DependsResult { created: true }
 
 Flow:
   1. Fetch both issues (or use cache)
+  1b. Resolve source and target via resolve_issue_ref (supports owner/repo#number)
   2. Cycle detection: would_create_cycle(source, target)
   3. addBlockedBy mutation
   4. Update source fields: Status→blocked, Ready State→blocked
   5. Invalidate cache + rebuild
+
+Cross-repo: Both source and target support `owner/repo#number` format.
+GitHub's addIssueDependency works with any two Issue node IDs regardless of repo.
 
 API calls: 0-1 (cache or fetch) + 1 (mutation) + 2 (field updates) + 1 (rebuild)
 ```
@@ -913,8 +1074,10 @@ API calls: 0-1 (cache or fetch) + 1 (mutation) + 2 (field updates) + 1 (rebuild)
 ### 10.6 `show`
 
 ```
-Input:  ShowParams { id, include_comments?, include_deps? }
+Input:  ShowParams { issue: IssueRef, include_comments?, include_deps? }
 Output: ShowResult { issue with full details, parsed body sections, deps, comments }
+
+Accepts `owner/repo#number` for cross-repo issues.
 
 Flow:
   1. Single GraphQL query (fetch_issue with comments, blockedBy, blocking, parent, subIssues, fields)
@@ -934,10 +1097,14 @@ Flow:
   1. Resolve project (auto-detect or param)
   2. Query existing fields
   3. Create missing fields (7 total, skip existing)
-  4. If migrate: add existing open issues to project (see §7.4)
-  5. Report
+  4. Detect owner type (org vs user)
+  5. Query existing views (GraphQL)
+  6. Discover field IDs (REST GET /fields — integer IDs)
+  7. Create missing views (REST POST /views — up to 5)
+  8. If migrate: add existing open issues to project (see §7.4)
+  9. Report: fields + views + manual config guidance
 
-API calls: 1 (query fields) + 0-7 (create missing fields) + 0-N (migrate issues)
+API calls: 1 (query fields) + 0-7 (create fields) + 1 (query views) + 1 (list fields REST) + 0-5 (create views) + 0-N (migrate)
 Idempotent: safe to run multiple times.
 ```
 
@@ -1016,8 +1183,10 @@ API calls: 0 (cache hit) | 1+ (rebuild)
 ### 10.13 `dep_remove`
 
 ```
-Input:  DepRemoveParams { source, target }
+Input:  DepRemoveParams { source: IssueRef, target: IssueRef }
 Output: DepRemoveResult { removed: true }
+
+Cross-repo: both params accept `owner/repo#number`.
 
 Flow:
   1. Validate edge exists
@@ -1100,6 +1269,24 @@ Checks: project_linked, fields_valid, all_issues_in_project, no_cycles, no_orpha
 API calls: 2-3 (queries) + 0-N (repairs if fix=true)
 ```
 
+### 10.18 `init`
+
+```
+Input:  InitParams { scope?, title?, description?, public? }
+Output: InitResult { project_number, url, created, scope }
+
+Flow:
+  1. Detect owner type from repo owner (GET /orgs/{owner} → 200=org, 404=user)
+  2. Resolve owner node ID (GraphQL)
+  3. Query existing projects for matching title (idempotent)
+  4. If exists → return existing project info
+  5. If not → createProjectV2(ownerId, title) (GraphQL mutation)
+  6. Return project_number + URL + hint to run setup
+
+API calls: 1 (owner check) + 1 (query projects) + 0-1 (create)
+Idempotent: safe to run multiple times.
+```
+
 ---
 
 ## 11. Claude Code Plugin
@@ -1129,7 +1316,8 @@ plugin/
 │   ├── setup.md
 │   ├── update.md
 │   ├── reopen.md
-│   └── doctor.md
+│   ├── doctor.md
+│   └── init.md
 └── skills/
     └── unblock-workflow.md
 ```
@@ -1276,6 +1464,8 @@ impl Config {
 
 No config file. Environment variables only. The GitHub version is simpler — no TOML parsing, no file search, no merge logic. The `load_from` pattern avoids `unsafe` in edition 2024 and eliminates flaky tests from concurrent env-var mutation.
 
+The REST API version `2026-03-10` is hardcoded for view/field endpoints. It is not user-configurable. The default API version `2022-11-28` is used for all other REST calls.
+
 **GitHub Enterprise compatibility:** `GITHUB_API_URL` follows the convention used by `gh` CLI (`GH_HOST`) and GitHub Actions (`GITHUB_API_URL`). For GHE Server the value is `https://<host>/api/v3`; for GHE Cloud with data residency it is `https://api.<host>`. The trailing-slash normalisation avoids double-slash bugs in URL construction.
 
 **URL resolution by environment:**
@@ -1334,6 +1524,12 @@ pub enum DomainError {
 
     #[snafu(display("Validation: {message}"))]
     Validation { message: String },
+
+    #[snafu(display("Invalid issue reference: {input}"))]
+    InvalidIssueRef { input: String },
+
+    #[snafu(display("Cannot access {owner}/{repo}: insufficient permissions"))]
+    CrossRepoAccessDenied { owner: String, repo: String },
 }
 
 impl DomainError {
@@ -1357,6 +1553,8 @@ impl DomainError {
 | `DuplicateDependency` | 409 | `depends` on existing edge |
 | `FieldNotFound` | 404 | Boot validation or `update` referencing missing field |
 | `Validation` | 400 | Any input validation failure |
+| `InvalidIssueRef` | 400 | Malformed issue reference string |
+| `CrossRepoAccessDenied` | 403 | Token lacks access to cross-repo issue |
 
 ### 13.2 Infrastructure Errors (unblock-github)
 
@@ -1393,6 +1591,12 @@ pub enum Error {
 
     #[snafu(display("Failed to detect git remote: {message}"))]
     GitRemote { message: String },
+
+    #[snafu(display("View creation failed: {message}"))]
+    ViewCreationFailed { message: String },
+
+    #[snafu(display("Cannot detect owner type for {owner}"))]
+    OwnerDetectionFailed { owner: String, message: String },
 }
 
 /// Convert to MCP protocol error.

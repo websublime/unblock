@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| **Version** | 1.1.0-draft |
+| **Version** | 1.2.0-draft |
 | **Author** | Miguel Ramos |
 | **Org** | websublime |
 | **Repo** | `websublime/unblock` |
@@ -40,6 +40,9 @@ No task is done unless ALL of these pass:
 | **Idiomatic Rust** | Edition 2024. `snafu` for errors. No `unwrap()` in production code. `tracing` for logging |
 | **Unsafe** | `#![deny(unsafe_code)]` workspace-wide |
 | **CI green** | All checks pass before merge |
+| **Idempotency** | `init` and `setup` safe to re-run — verified in tests |
+| **Cross-repo** | `IssueRef::parse()` and `QualifiedId` property-tested with proptest. Graph invariant: qualified IDs unique across repos |
+| **REST API** | View/field endpoints tested with `X-GitHub-Api-Version: 2026-03-10` header |
 
 ### Phase 3 Quality Gate (cumulative)
 
@@ -56,10 +59,10 @@ No task is done unless ALL of these pass:
 
 | Phase | Version | Goal | Epics | Effort |
 |---|---|---|---|---|
-| **1 — Foundation** | v0.1.0 | Agent can find, claim, edit, complete work + see cascade | 4 | ~14 days |
+| **1 — Foundation** | v0.1.0 | Agent can find, claim, edit, complete work + see cascade | 4 | ~20 days |
 | **2 — Complete** | v0.2.0 | Full tool suite + Claude Code plugin | 3 | ~8 days |
 | **3 — Production** | v1.0.0 | Hardened, distributed, production-ready + v1.0.0 gap features | 4 | ~8 days |
-| **Total** | | | **11 epics** | **~30 days focused** |
+| **Total** | | | **11 epics** | **~36 days focused** |
 
 ---
 
@@ -92,12 +95,12 @@ No task is done unless ALL of these pass:
 
 | Task | Description | DoD | Ref |
 |---|---|---|---|
-| **1.2.1** Domain types | Implement `Issue`, `IssueState`, `Status`, `Priority`, `ReadyState`, `IssueType`, `BlockingEdge`, `IssueSummary`, `BodySections` with all derives. `Priority::as_sort_key()`. `BodySections::from_markdown()` + `to_markdown()` roundtrip | Types compile. Roundtrip test: `parse(render(x)) == x`. Property test with proptest. 100% coverage on `BodySections` | ARCH §5 |
+| **1.2.1** Domain types | Implement `Issue`, `IssueState`, `Status`, `Priority`, `ReadyState`, `IssueType`, `BlockingEdge`, `IssueSummary`, `BodySections`, `IssueRef (Local/CrossRepo)`, `QualifiedId (owner/repo#number — graph node key)` with all derives. `Priority::as_sort_key()`. `BodySections::from_markdown()` + `to_markdown()` roundtrip | Types compile. Roundtrip test: `parse(render(x)) == x`. Property test with proptest. 100% coverage on `BodySections`. `QualifiedId` roundtrip: `parse(display(x)) == x`. Property test with proptest | ARCH §5 |
 | **1.2.2** Domain errors | Implement `DomainError` enum with `snafu`: `IssueNotFound`, `AlreadyClaimed`, `IssueBlocked`, `IssueDeferred`, `IssueClosed`, `CircularDependency`, `DuplicateDependency`, `Validation`. `status_code()` method | Each variant maps to correct HTTP status code. Unit test for every variant | ARCH §13.1 |
 | **1.2.3** Configuration | Implement `Config::load()` reading env vars: `GITHUB_TOKEN` (required), `UNBLOCK_REPO`, `UNBLOCK_PROJECT`, `UNBLOCK_AGENT`, `UNBLOCK_CACHE_TTL`, `UNBLOCK_LOG_LEVEL`, `UNBLOCK_OTEL_ENDPOINT` | Missing `GITHUB_TOKEN` returns validation error. Unit tests for defaults, overrides, parsing | ARCH §12.1, PRD §7.7 |
-| **1.2.4** Graph — build + ready set | `DependencyGraph::build(issues, edges)` with petgraph DiGraph. `compute_ready_set()` — open, not closed, no active blockers. Handle missing nodes gracefully (warn + skip) | Unit test: blocked not in ready set. Open with no deps in ready set. Closed excluded. Property test: ready set never contains blocked issues (proptest, 1..100 issues, 0..200 edges) | ARCH §6.1, §6.2 |
-| **1.2.5** Graph — cascade | `compute_unblock_cascade(closed_number)` — issues unblocked when one closes. Only issues whose ALL blockers are now closed | Unit test: A blocks B+C. Close A → B+C unblocked. A+D block E. Close A → E NOT unblocked. Close D → E unblocked | ARCH §6.3 |
-| **1.2.6** Graph — cycles | `would_create_cycle(source, target)` via `has_path_connecting`. `detect_all_cycles()` via `tarjan_scc`. `dependency_tree(root, direction, max_depth)` via BFS | `would_create_cycle` catches A→B + B→A. `detect_all_cycles` finds SCCs > 1. `dependency_tree` respects max_depth. Property test: cycle detection consistent | ARCH §6.4 |
+| **1.2.4** Graph — build + ready set | `DependencyGraph::build(issues, edges)` with petgraph DiGraph using `QualifiedId` as node key. `compute_ready_set()` returns `Vec<QualifiedId>` — open, not closed, no active blockers. Handle missing nodes gracefully (warn + skip) | Unit test: blocked not in ready set. Open with no deps in ready set. Closed excluded. Property test: ready set never contains blocked issues (proptest, 1..100 issues, 0..200 edges). Cross-repo: two issues with same number but different repos are distinct nodes | ARCH §6.1, §6.2 |
+| **1.2.5** Graph — cascade | `compute_unblock_cascade(closed: &QualifiedId)` — issues unblocked when one closes. Only issues whose ALL blockers are now closed | Unit test: A blocks B+C. Close A → B+C unblocked. A+D block E. Close A → E NOT unblocked. Close D → E unblocked | ARCH §6.3 |
+| **1.2.6** Graph — cycles | `would_create_cycle(source: &QualifiedId, target: &QualifiedId)` via `has_path_connecting`. `detect_all_cycles()` via `tarjan_scc`. `dependency_tree(root, direction, max_depth)` via BFS | `would_create_cycle` catches A→B + B→A. `detect_all_cycles` finds SCCs > 1. `dependency_tree` respects max_depth. Property test: cycle detection consistent | ARCH §6.4 |
 | **1.2.7** Cache layer | `GraphCache` with `RwLock<Option<CacheEntry>>`, `get_ready_set()`, `update()`, `invalidate()`, `is_fresh()`. Configurable TTL | Fresh cache returns data. Expired returns None. Invalidate clears. Concurrent access doesn't panic | ARCH §7 |
 
 ---
@@ -112,9 +115,10 @@ No task is done unless ALL of these pass:
 | **1.3.2** fetch_graph_data | Paginated GraphQL query: open issues + blockedBy/blocking + Project fieldValues → `(Vec<Issue>, Vec<BlockingEdge>)` | Integration test: fetches real issues. Pagination works. All Projects V2 fields mapped. Missing fields handled | ARCH §8.2 |
 | **1.3.3** fetch_issue | Single issue GraphQL query with comments, blockedBy, blocking, parent, subIssues, all fields | Integration test: existing issue with full details. `IssueNotFound` for non-existent. Comments parsed | ARCH §8.2 |
 | **1.3.4** Mutations — create + close + comment | `create_issue()` (REST POST), `close_issue()` (REST PATCH), `add_comment()` (REST POST) | Integration test: create → verify exists → close → verify closed. Comment appears | ARCH §8.3 |
-| **1.3.5** Mutations — blocking | `add_blocked_by()`, `remove_blocked_by()` (GraphQL). `add_sub_issue()` (GraphQL with sub_issues feature header) | Integration test: add blocking, verify in fetch. Remove, verify removed. Sub-issue link works | ARCH §8.3 |
+| **1.3.5** Mutations — blocking | `add_blocked_by()`, `remove_blocked_by()` (GraphQL). `add_sub_issue()` (GraphQL with sub_issues feature header). Cross-repo: `IssueRef` type supports `owner/repo#number`. `resolve_issue_ref()` resolves from any repo | Integration test: add blocking, verify in fetch. Remove, verify removed. Sub-issue link works. Cross-repo blocking works between different repos | ARCH §8.3 |
 | **1.3.6** Projects V2 fields | `resolve_project()`, `setup_fields()` (7 fields, idempotent), `update_field()` with `FieldValue` enum. `ProjectFieldIds` cached | Integration test: setup creates fields. Rerun skips existing. `update_field` changes value, re-fetch confirms | ARCH §8.4 |
 | **1.3.7** Infrastructure errors | `Error` enum with snafu: `Domain`, `GitHubApi`, `GitHubGraphQL`, `GitHubUnavailable`, `RateLimited`, `CircuitBreakerOpen`, `ProjectNotConfigured`, `GitRemote`. `From<Error> for McpError` | Every variant tested for Display + status_code. MCP conversion works | ARCH §13.2 |
+| **1.3.8** REST API client (views + fields) | REST client with `X-GitHub-Api-Version: 2026-03-10` header. `list_rest_fields()` returns all fields with integer IDs. `create_view()` creates a view with name/layout/filter/visible_fields. `list_views()` via GraphQL for idempotency check. Owner type detection (org vs user) for endpoint routing | Integration: list fields returns integer IDs for built-in + custom fields. Create view succeeds with board/table/roadmap layouts. List views returns created views. API version header sent correctly. Org and user paths both work | ARCH §8.5 |
 
 ---
 
@@ -126,16 +130,17 @@ No task is done unless ALL of these pass:
 |---|---|---|---|
 | **1.4.1** Server bootstrap | `main.rs`: config → tracing (JSON stderr) → GitHubClient → GraphCache → `ServerState` → rmcp stdio. `ServerInfo` with name, version, instructions | Binary starts, logs connection, accepts MCP messages | ARCH §9.1, §9.2 |
 | **1.4.2** Tool execution pattern | Shared helper: validate → execute → if write: invalidate + rebuild + update Ready State → return result | Helper used by all write tools. Unit test for rebuild flow | ARCH §9.3 |
-| **1.4.3** `setup` tool | `#[tool]` macro. Input: `SetupParams { project?, dry_run? }`. Creates 7 fields (idempotent) | Integration: fields created. Rerun → no duplicates. Dry run reports only | PRD §6.4, ARCH §10.7 |
-| **1.4.4** `ready` tool | Input: `ReadyParams { limit?, type?, priority?, milestone?, agent?, label?, include_claimed? }`. Cache → rebuild if stale → filter → exclude deferred → sort priority ASC + created ASC → top N | Integration: 3 issues (1 blocked, 1 ready, 1 deferred) → returns only ready. Cache hit on second call. Filters work | PRD §6.1, ARCH §10.1 |
-| **1.4.5** `claim` tool | Input: `ClaimParams { id, agent? }`. Validate open + not blocked + not deferred. Fields: Status→in_progress, Agent, Claimed At, Ready State→not_ready. Comment. Rebuild | Integration: claim ready → fields updated. Claim blocked → error. Claim closed → error. Comment appears | PRD §6.1, ARCH §10.2 |
-| **1.4.6** `close` tool | Input: `CloseParams { id, reason? }`. Close → fields → comment → rebuild → cascade → update unblocked fields + comments | Integration: A blocks B. Close A → B ready. Cascade comment on B. `unblocked` contains B. Already closed → error | PRD §6.1, ARCH §10.3 |
-| **1.4.7** `create` tool | Input: `CreateParams { title, type?, priority?, body?, labels?, milestone?, blocked_by?, parent?, story_points?, defer_until? }`. Create → project → fields → deps → rebuild | Integration: create with all fields → verified. `blocked_by` creates relationship. `parent` creates sub-issue. No title → validation error | PRD §6.1, ARCH §10.4 |
-| **1.4.8** `show` tool | Input: `ShowParams { id, include_comments?, include_deps? }`. Single query → parse body sections → return | Integration: show with comments and deps. Body sections parsed. Non-existent → `IssueNotFound` | PRD §6.3, ARCH §10.6 |
-| **1.4.9** `depends` tool | Input: `DependsParams { source, target }`. Cycle check → addBlockedBy → update source fields → rebuild | Integration: depends A B → A blocked by B. Cycle A→B→A → error. Duplicate → error | PRD §6.2, ARCH §10.5 |
-| **1.4.10** `comment` tool | Input: `CommentParams { id, body }`. POST comment | Integration: comment on issue → appears. Non-existent → error | PRD §6.2, ARCH §10.8 |
-| **1.4.11** `update` tool | Input: `UpdateParams { id, priority?, status?, labels_add?, labels_remove?, body_section?, milestone?, story_points?, defer_until? }`. Validate exists. Update specified fields via REST + Project V2. Rebuild | Integration: update priority → re-fetch confirms. Update body section → section changed, rest preserved. Non-existent → error | PRD §6.1 |
-| **1.4.12** E2E workflow test | Full loop: `setup` → `create` (3 issues + deps) → `ready` → `claim` → `update` → `comment` → `close` → cascade → `ready` (newly unblocked) | All 9 tools in sequence. Graph consistent throughout. Cleanup after | PRD §8 |
+| **1.4.3** `init` tool | `#[tool]` macro. Input: `InitParams { scope?, title?, description?, public? }`. Auto-detect org vs user. Create project via `createProjectV2` mutation. Idempotent — skip if project with same title exists | Integration: init creates project with custom title/description. Rerun returns existing (idempotent). Scope auto-detection works for org and user. Public flag respected. Output includes project URL + hint to run setup | ARCH §10.18 |
+| **1.4.4** `setup` tool | `#[tool]` macro. Input: `SetupParams { project?, dry_run? }`. Creates 7 fields (idempotent). Detects owner type, queries existing views, discovers field IDs via REST, creates 5 pre-configured views via REST POST /views (://ready, ://team, ://pipeline, ://roadmap, ://timeline). Reports fields + views + manual config guidance. Depends on project existing (via `init` or pre-existing). If no project found, error with hint to run `init` | Integration: fields created. Rerun → no duplicates. Views created with correct layout/filter/visible_fields. Dry run reports only | PRD §6.4, ARCH §10.7 |
+| **1.4.5** `ready` tool | Input: `ReadyParams { limit?, type?, priority?, milestone?, agent?, label?, include_claimed? }`. Cache → rebuild if stale → filter → exclude deferred → sort priority ASC + created ASC → top N | Integration: 3 issues (1 blocked, 1 ready, 1 deferred) → returns only ready. Cache hit on second call. Filters work | PRD §6.1, ARCH §10.1 |
+| **1.4.6** `claim` tool | Input: `ClaimParams { id, agent? }`. Validate open + not blocked + not deferred. Fields: Status→in_progress, Agent, Claimed At, Ready State→not_ready. Comment. Rebuild | Integration: claim ready → fields updated. Claim blocked → error. Claim closed → error. Comment appears | PRD §6.1, ARCH §10.2 |
+| **1.4.7** `close` tool | Input: `CloseParams { id, reason? }`. Close → fields → comment → rebuild → cascade → update unblocked fields + comments | Integration: A blocks B. Close A → B ready. Cascade comment on B. `unblocked` contains B. Already closed → error | PRD §6.1, ARCH §10.3 |
+| **1.4.8** `create` tool | Input: `CreateParams { title, type?, priority?, body?, labels?, milestone?, blocked_by?, parent?, story_points?, defer_until? }`. Create → project → fields → deps → rebuild | Integration: create with all fields → verified. `blocked_by` creates relationship. `parent` creates sub-issue. No title → validation error | PRD §6.1, ARCH §10.4 |
+| **1.4.9** `show` tool | Input: `ShowParams { id, include_comments?, include_deps? }`. Single query → parse body sections → return | Integration: show with comments and deps. Body sections parsed. Non-existent → `IssueNotFound` | PRD §6.3, ARCH §10.6 |
+| **1.4.10** `depends` tool | Input accepts `IssueRef` for cross-repo support. `DependsParams { source, target }`. Cycle check → addBlockedBy → update source fields → rebuild | Integration: depends A B → A blocked by B. Cycle A→B→A → error. Duplicate → error. Cross-repo depends works with owner/repo#number format | PRD §6.2, ARCH §10.5 |
+| **1.4.11** `comment` tool | Input: `CommentParams { id, body }`. POST comment | Integration: comment on issue → appears. Non-existent → error | PRD §6.2, ARCH §10.8 |
+| **1.4.12** `update` tool | Input: `UpdateParams { id, priority?, status?, labels_add?, labels_remove?, body_section?, milestone?, story_points?, defer_until? }`. Validate exists. Update specified fields via REST + Project V2. Rebuild | Integration: update priority → re-fetch confirms. Update body section → section changed, rest preserved. Non-existent → error | PRD §6.1 |
+| **1.4.13** E2E workflow test | Full loop: `init` → `setup` → `create` (3 issues + deps) → `ready` → `claim` → `update` → `comment` → `close` → cascade → `ready` (newly unblocked) | All 10 tools in sequence. Graph consistent throughout. Cleanup after | PRD §8 |
 
 ---
 
@@ -271,6 +276,8 @@ Phase 3
 | Rate limits | Low — 120 q/hr of 5000 | Configurable TTL. Backoff on 429 |
 | High API call count per operation | Medium — latency | Batch GraphQL mutations, monitor latency |
 | Projects V2 field deletion by human | Medium — broken state | Field validation at boot, clear error messages pointing to `setup` |
+| Cross-repo token permissions | Low — requires repo scope | Token must have read access to referenced repos. Clear error message on 404 |
+| REST API version mismatch | Low | Two API versions in use: `2022-11-28` for issue endpoints, `2026-03-10` for views/fields. Version set per-request via builder method. Both version paths tested |
 
 ---
 
@@ -278,9 +285,9 @@ Phase 3
 
 | Milestone | Version | Criteria | Target |
 |---|---|---|---|
-| **MCP Foundation** | v0.1.0 | 9 tools E2E. Full agent workflow | Week 7 |
-| **MCP Complete** | v0.2.0 | Core tools + plugin. Feature-complete | Week 11 |
-| **MCP Production** | v1.0.0 | Resilient, observable, distributed, gap features | Week 17 |
+| **MCP Foundation** | v0.1.0 | 9 tools E2E. Full agent workflow | Week 10 |
+| **MCP Complete** | v0.2.0 | Core tools + plugin. Feature-complete | Week 14 |
+| **MCP Production** | v1.0.0 | Resilient, observable, distributed, gap features | Week 20 |
 
 ---
 
@@ -288,10 +295,10 @@ Phase 3
 
 | Phase | Epics | Tasks | Focused days |
 |---|---|---|---|
-| Phase 1 | 4 | 27 | ~14 |
+| Phase 1 | 4 | 34 | ~20 |
 | Phase 2 | 3 | 14 | ~8 |
 | Phase 3 | 4 | 13 | ~8 |
-| **Total** | **11** | **54** | **~30** |
+| **Total** | **11** | **61** | **~36** |
 
 ---
 

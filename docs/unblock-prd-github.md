@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| **Version** | 1.1.0-draft |
+| **Version** | 1.2.0-draft |
 | **Author** | Miguel Ramos |
 | **Org** | websublime |
 | **Repo** | `websublime/unblock` |
@@ -63,12 +63,14 @@ It reads GitHub Issues, blocking relationships, and Projects V2 custom fields vi
 - Assigns work: `claim #42 --agent reviewer`
 - Monitors: `ready --agent coder`, `blocked --agent reviewer`
 - Needs: visibility into agent allocation, ability to redirect
+- Uses org-level projects to coordinate work across multiple repositories. Tracks cross-repo dependencies.
 
 ### 4.3 Developer (Secondary)
 
 - Human who reviews agent work, creates epics, triages bugs
 - Interacts via GitHub UI (Projects boards, issue pages, `gh` CLI)
 - Needs: visibility into agent activity, ability to override, audit trail
+- Bootstraps project with `init`, configures with `setup`.
 
 ---
 
@@ -89,6 +91,9 @@ Unblock stores **zero custom data**. All state lives in GitHub Issues and Projec
 | Comments | Discussion thread, audit trail | REST |
 | Sub-issues | Parent/child hierarchy | GraphQL (header: `GraphQL-Features: sub_issues`) |
 | Blocking | Dependency edges: `blockedBy` / `blocking` | GraphQL mutations: `addBlockedBy`, `removeBlockedBy` |
+
+> **Cross-repo:** Blocking relationships work across repositories. GitHub Issue node IDs are globally unique — `addIssueDependency` accepts any two Issue IDs regardless of repository. Unblock supports `owner/repo#number` references for cross-repo dependencies.
+
 | Issue body | Markdown with structured sections | REST + GraphQL |
 | Projects V2 | Custom fields, views, automations, boards | GraphQL |
 
@@ -144,7 +149,7 @@ The MCP server reads and writes specific sections by parsing markdown headers. N
 
 **Informational links** via issue mentions: "Discovered while working on #42" in a comment or body. Human/agent readable but not machine-evaluated for blocking.
 
-**Cross-repo blocking** is supported natively by GitHub but scoped to current repo in v1.
+**Cross-repo blocking** is supported natively by GitHub. Unblock supports `owner/repo#number` references for cross-repo dependencies via the `depends` tool.
 
 ### 5.5 Relationship to Existing GitHub Features
 
@@ -156,11 +161,25 @@ The MCP server reads and writes specific sections by parsing markdown headers. N
 | GitHub CLI (`gh`) | **Complementary.** Different interface to the same data |
 | Copilot in GitHub Issues | **Complementary.** Can use Unblock's fields for context |
 
+### 5.6 Pre-configured Views
+
+Created by the `setup` tool. Five views provide opinionated board layouts for different personas:
+
+| View | Layout | Purpose |
+|---|---|---|
+| `://ready` | Board | Agent's ready queue — filtered to ready issues |
+| `://team` | Board | Tech lead view — who is working on what |
+| `://pipeline` | Board | Classic kanban — full workflow |
+| `://roadmap` | Table | Epic-level progress by milestone |
+| `://timeline` | Roadmap | Date-based timeline for sprint planning |
+
+Group-by, sort, and swimlanes are configured manually in the GitHub UI after creation (REST API limitation).
+
 ---
 
 ## 6. MCP Tools
 
-17 tools total. Each operates on the current repo.
+18 tools total. Each operates on the current repo.
 
 ### 6.1 Core Workflow Tools
 
@@ -189,6 +208,7 @@ The MCP server reads and writes specific sections by parsing markdown headers. N
 ```json
 {
   "number": 42,
+  "repo": "websublime/unblock",
   "title": "Implement auth flow",
   "type": "task",
   "priority": "P1",
@@ -234,7 +254,7 @@ The MCP server reads and writes specific sections by parsing markdown headers. N
 - `body` (optional, markdown — can include structured sections)
 - `labels` (optional, comma-separated)
 - `milestone` (optional, name or number)
-- `blocked_by` (optional, array of issue numbers — creates blocking relationships)
+- `blocked_by` (optional, array of issue references (issue numbers or `owner/repo#number`) — creates blocking relationships)
 - `parent` (optional, issue number — creates sub-issue relationship)
 - `story_points` (optional, number)
 - `defer_until` (optional, date)
@@ -381,6 +401,8 @@ The MCP server reads and writes specific sections by parsing markdown headers. N
 
 **Errors:** `CircularDependency`, `DuplicateDependency`, `IssueNotFound`
 
+**Cross-repo support:** Both `source` and `target` accept `owner/repo#number` format for cross-repo dependencies (e.g., `depends 5 blocked-by websublime/api#42`). Local references (`#123` or `123`) resolve to the configured repo.
+
 ---
 
 #### `dep_remove` — Remove blocking relationship
@@ -390,6 +412,8 @@ The MCP server reads and writes specific sections by parsing markdown headers. N
 **Input:**
 - `source` (required, issue number)
 - `target` (required, issue number)
+
+**Cross-repo support:** Both `source` and `target` accept `owner/repo#number` format, matching the `depends` tool.
 
 **Logic:**
 1. `removeBlockedBy` mutation
@@ -408,10 +432,12 @@ The MCP server reads and writes specific sections by parsing markdown headers. N
 **Output:**
 ```json
 {
-  "cycles": [["#42", "#45", "#48", "#42"]],
+  "cycles": [["websublime/api#42", "websublime/core#45", "websublime/api#48", "websublime/api#42"]],
   "count": 1
 }
 ```
+
+Local repo issues display as `#N`, cross-repo as `owner/repo#N`.
 
 ---
 
@@ -514,6 +540,36 @@ Uses GitHub's advanced search API (`ISSUE_ADVANCED` type in GraphQL).
 
 ### 6.4 Setup & Diagnostics Tools
 
+#### `init` — Bootstrap Projects V2 project
+
+**Purpose:** Create a GitHub Projects V2 project if it doesn't exist. One-time bootstrapping.
+
+**Input:**
+- `scope` (optional, default: `org`) — `org` or `user`. Where the project lives.
+- `title` (optional, default: `"Unblock — {repo}"`) — Project title.
+- `description` (optional) — Project description.
+- `public` (optional, default: false) — Project visibility.
+
+**Logic:**
+1. Detect owner type (org vs user) from repo owner
+2. Check if project with same title already exists (idempotent)
+3. If exists → return existing project number + URL
+4. If not → create project via `createProjectV2` GraphQL mutation
+5. Report project number + URL
+6. Hint: "Run `setup` to configure fields and views"
+
+**Output:**
+```json
+{
+  "project_number": 4,
+  "url": "https://github.com/orgs/websublime/projects/4",
+  "created": true,
+  "scope": "org"
+}
+```
+
+---
+
 #### `setup` — Configure Projects V2 fields
 
 **Purpose:** One-time setup of custom fields on the linked GitHub Project.
@@ -524,11 +580,20 @@ Uses GitHub's advanced search API (`ISSUE_ADVANCED` type in GraphQL).
 - `migrate` (optional, default: false — if true, iterate all open issues, add to Project, set defaults)
 
 **Logic:**
-1. Find or create a Project V2 linked to the repo
+1. Find a Project V2 linked to the repo (created by `init`). If no project found, return error: run `init` first.
 2. Create 7 custom fields (skip existing — idempotent)
 3. Optionally create seed labels
-4. If `migrate`: iterate all open issues, add each to Project, set Status=open, Priority=P2, Ready State based on blocking evaluation. Existing labels/milestones preserved. No data loss.
-5. Report success
+4. Detect owner type (org vs user) from repo owner
+5. Query existing views via GraphQL (for idempotency)
+6. Discover field IDs via REST `GET /fields` (integer IDs for visible_fields)
+7. Create 5 pre-configured views via REST `POST /views` (skip existing):
+   - `://ready` (board) — filter: `"Ready State":"ready"`, shows Priority, Agent, Story Points
+   - `://team` (board) — filter: `is:open`, shows Priority, Agent, Story Points, Claimed At
+   - `://pipeline` (board) — filter: `is:open`, shows Priority, Agent, Labels, Ready State
+   - `://roadmap` (table) — shows Type, Priority, Status, Agent, Story Points, Defer Until
+   - `://timeline` (roadmap) — date-based timeline view
+8. If `migrate`: iterate all open issues, add to Project, set defaults
+9. Report: fields created + views created + manual config guidance
 
 ---
 
@@ -628,13 +693,14 @@ websublime/unblock/
 │               ├── prime.rs
 │               ├── comment.rs
 │               ├── setup.rs
+│               ├── init.rs
 │               └── doctor.rs
 │
 ├── plugin/                        # Claude Code plugin
 │   ├── .claude-plugin/plugin.json
 │   ├── .mcp.json
 │   ├── marketplace.json
-│   ├── commands/                  # 17 slash commands
+│   ├── commands/                  # 18 slash commands
 │   └── skills/
 │       └── unblock-workflow.md
 │
@@ -668,9 +734,13 @@ The core of Unblock. Pure Rust, no network, fully testable.
 - `detect_all_cycles()` — Tarjan's SCC for full graph scan
 - `dependency_tree(root, direction, depth)` — BFS traversal
 
+Node identifiers use qualified format (`owner/repo#123`) internally to support cross-repo dependencies. Local issues display as `#123` in output.
+
 ### 7.5 Cache and Scaling Strategy
 
 **v1: In-memory pure (Strategy A).** The MCP server rebuilds the graph from GitHub on every cold start (session start). Intra-session, the graph is cached in memory with configurable TTL (default 30s). Invalidated on every write operation. Process death = cache gone.
+
+**Cross-repo invalidation:** In v1, any write operation invalidates the entire cache regardless of which repo the write targets. Future optimization may scope invalidation to affected repos only.
 
 Cold start cost: 1 GraphQL query fetching all open issues + blocking relationships. For repos with <500 issues this is sub-second. For 1000+ issues, pagination adds 2-4 seconds. This is acceptable for v1's target (developer solo + agents, repos with 50-500 issues).
 
@@ -725,6 +795,8 @@ The agent doesn't wait for the full rebuild — it gets results in milliseconds 
 | `UNBLOCK_CACHE_TTL` | No | `30` | Cache TTL seconds |
 | `UNBLOCK_LOG_LEVEL` | No | `info` | Log level |
 | `UNBLOCK_OTEL_ENDPOINT` | No | — | OpenTelemetry collector |
+
+REST view and field endpoints use `X-GitHub-Api-Version: 2026-03-10`. Other endpoints use `2022-11-28`. The version is set per-request, not globally.
 
 **Auto-detection:** Binary reads git remote for `owner/repo`. Queries linked Projects V2 for project number. Zero config for the common case.
 
@@ -786,9 +858,9 @@ On MCP server startup, after resolving the Project, the server validates all 7 c
 
 ### 7.12 Migration Path for Existing Repos
 
-- Repos with existing Issues but no Project: `setup` creates Project + fields, but existing issues are not added automatically.
+- Repos with existing Issues but no Project: run `init` to create the Project, then `setup --migrate` to configure fields and add existing issues.
 - The `setup --migrate` flag handles the full migration:
-  1. Create Project (if not exists)
+  1. Find Project (created by `init`)
   2. Create all 7 custom fields (idempotent)
   3. Iterate all open issues, add each to the Project
   4. Set Status=open, Priority=P2 (default), Ready State based on blocking relationship evaluation
@@ -818,6 +890,9 @@ On MCP server startup, after resolving the Project, the server validates all 7 c
 ### 8.1 Standard Session
 
 ```
+0. First-time setup
+   └─→ Run `init` (creates Project) then `setup` (creates fields + views). Only needed once per project.
+
 1. Session starts
    └─→ Plugin hook: SessionStart → prime → context injected
 
@@ -874,7 +949,7 @@ Backend: GitHub Issues + Projects V2
 
 | Error | Code | When |
 |---|---|---|
-| `IssueNotFound` | 404 | Issue number doesn't exist |
+| `IssueNotFound` | 404 | Issue not found in current repo or referenced repo (for cross-repo references) |
 | `AlreadyClaimed` | 409 | Status = in_progress |
 | `IssueBlocked` | 409 | Active blockers exist |
 | `IssueDeferred` | 409 | Defer Until > today |
@@ -882,11 +957,14 @@ Backend: GitHub Issues + Projects V2
 | `IssueNotClosed` | 409 | Trying to reopen an issue that is already open |
 | `CircularDependency` | 422 | `depends` would create cycle |
 | `DuplicateDependency` | 409 | Blocking relationship exists |
-| `ProjectNotConfigured` | 500 | No Project linked or fields missing — run `setup` |
+| `ProjectNotConfigured` | 500 | No Project linked (run `init`) or fields missing (run `setup`) |
 | `GitHubApiError` | 502 | GitHub API error |
 | `GitHubUnavailable` | 503 | Cannot reach api.github.com |
 | `RateLimited` | 429 | Rate limit hit |
 | `CircuitBreakerOpen` | 503 | Too many failures |
+| `InvalidIssueRef` | 400 | Cannot parse issue reference (e.g., malformed `owner/repo#number`) |
+| `CrossRepoAccessDenied` | 403 | Token lacks read access to referenced repo in cross-repo operation |
+| `ProjectCreationFailed` | 403 | Token lacks permissions to create project on org/user |
 | `ValidationError` | 400 | Invalid input |
 
 ---
@@ -897,10 +975,11 @@ Backend: GitHub Issues + Projects V2
 
 **Goal:** An agent can find work, claim it, edit it, complete it, and see the cascade. The minimum viable loop.
 
-**Scope:** 9 tools (setup + 7 core workflow + depends + comment).
+**Scope:** 10 tools (init + setup + ready + claim + create + update + close + show + depends + comment).
 
 | Tool | Rationale |
 |---|---|
+| `init` | Required first — creates Project if not exists |
 | `setup` | Required first — creates Project fields |
 | `ready` | The core question. Requires graph engine, cache |
 | `claim` | Atomic ownership. Requires Project field writes |
@@ -978,7 +1057,6 @@ See `unblock-prd-desktop.md` and `unblock-desktop-project-plan.md` for the deskt
 | Feature | Description |
 |---|---|
 | Materialised fast path | Strategy D: use Ready State field as persistent cache for cold start. Serve immediately from field, rebuild graph async. ~50-100 lines change. Trigger: cold start > 2s on target repos |
-| Cross-repo blocking | GitHub supports natively, extend MCP to handle multi-repo graphs |
 | Webhook cache invalidation | GitHub Actions → HTTP → invalidate cache for instant consistency |
 | Agent Session tracking | Structured comments or dedicated tracking issue per session |
 | `merge` tool | Duplicate issue consolidation |
@@ -998,7 +1076,7 @@ See `unblock-prd-desktop.md` and `unblock-desktop-project-plan.md` for the deskt
 | D4 | Single blocking type | GitHub native. Covers 95% of workflows. Informational deps via mentions |
 | D5 | Markdown body sections for rich fields | Three sections only (Description, Design Notes, Acceptance Criteria). Work progress lives in comments, cross-references in auto-links. Each data type in the correct GitHub primitive |
 | D6 | Ready State as convenience field | Project field for board filtering. MCP always recomputes from graph |
-| D7 | 17 tools total | Focused on what agents uniquely need. `label`, `delete` handled by GitHub UI/CLI. `update`, `comment`, `reopen` included because agents can't use UI and need full CRUD |
+| D7 | 18 tools total | Focused on what agents uniquely need. `label`, `delete` handled by GitHub UI/CLI. `update`, `comment`, `reopen` included because agents can't use UI and need full CRUD |
 | D8 | Auto-detect repo from git remote | Zero config. Override via `UNBLOCK_REPO` |
 | D9 | Plugin bundles `.mcp.json` | Only needs `GITHUB_TOKEN`. Auto-detect handles repo scoping |
 | D10 | Milestones as Epics | Native GitHub with due dates and progress. No custom entity |
@@ -1009,3 +1087,8 @@ See `unblock-prd-desktop.md` and `unblock-desktop-project-plan.md` for the deskt
 | D15 | `doctor` tool for operational health | MCP servers run unattended; agents need self-diagnosis capability |
 | D16 | Batch GraphQL mutations to reduce API call count | Multiple `updateProjectV2ItemFieldValue` mutations in a single POST body. Critical for cascade operations and `update` with multiple field changes |
 | D17 | Configurable API base URL via `GITHUB_API_URL` | Supports GitHub Enterprise Server and GHE Cloud. Follows `gh` CLI / GitHub Actions naming convention. Default `https://api.github.com` preserves zero-config for github.com users |
+| D18 | `init` separate from `setup` | Bootstrapping (create project) is a one-time decision. Configuration (fields/views) is idempotent and re-runnable. Mixing them couples different lifecycles |
+| D19 | Cross-repo refs via `owner/repo#number` | Human-readable, parseable, unambiguous. Local refs stay as plain numbers for convenience |
+| D20 | Smart views via REST API `v2026-03-10` | GraphQL has no view mutations. REST supports create with name, layout, filter, visible_fields. Group-by, sort, swimlanes are manual post-creation |
+| D21 | 5 pre-configured views | Ready (agent), Team (tech lead), Pipeline (everyone), Roadmap (planning), Timeline (visual). Cover all personas |
+| D22 | No `UNBLOCK_PROJECT_SCOPE` config | `init` receives scope as parameter, `setup` auto-detects owner type. Zero persistent config overhead |
