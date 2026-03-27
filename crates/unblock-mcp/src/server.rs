@@ -17,6 +17,7 @@ use std::sync::Arc;
 use crate::tools::execute_read_tool;
 use crate::tools::execute_write_tool;
 use crate::tools::init::{InitParams, InitResult};
+use crate::tools::ready::{ReadyParams, ReadyResult};
 use crate::tools::setup::{SetupParams, SetupResult};
 use crate::tools::show::{
     DependencyTreeEntry, ShowBodySections, ShowComment, ShowIssue, ShowParams, ShowRelatedIssue,
@@ -454,6 +455,62 @@ impl UnblockServer {
             blocked_by,
             dependency_tree,
             comments,
+        }))
+    }
+
+    /// Find issues with no active blockers that can be worked on now.
+    ///
+    /// Returns open, unblocked issues sorted by priority (P0 first) then
+    /// creation date (oldest first). The cache is rebuilt lazily if stale.
+    ///
+    /// By default, deferred issues (`defer_until > today`) and in-progress
+    /// (claimed) issues are excluded. Use `include_claimed=true` to include
+    /// claimed issues.
+    #[tool(
+        name = "ready",
+        description = "Find issues with no active blockers, sorted by priority. Filters: limit, issue_type, priority, milestone, agent, label, include_claimed. Returns from cache (rebuilds lazily if stale)."
+    )]
+    async fn ready(
+        &self,
+        Parameters(params): Parameters<ReadyParams>,
+    ) -> Result<Json<ReadyResult>, ErrorData> {
+        let state = self.state();
+
+        info!(
+            limit = params.limit,
+            issue_type = params.issue_type.as_deref(),
+            priority = params.priority.as_deref(),
+            milestone = params.milestone.as_deref(),
+            agent = params.agent.as_deref(),
+            label = params.label.as_deref(),
+            include_claimed = params.include_claimed,
+            "Ready tool invoked"
+        );
+
+        // Step 1: Check cache freshness — rebuild lazily if stale.
+        if !state.cache.is_fresh().await {
+            tracing::debug!("Cache is stale — triggering lazy rebuild");
+            crate::tools::rebuild_cache(state).await;
+        }
+
+        // Step 2: Get ready set from cache.
+        let stale;
+        let issues = if let Some(ready_set) = state.cache.get_ready_set().await {
+            stale = false;
+            crate::tools::ready::filter_ready_set(&ready_set, &params)
+        } else {
+            // Cache is still empty after rebuild attempt (e.g., fetch failed).
+            tracing::warn!("Cache still empty after rebuild — returning stale=true");
+            stale = true;
+            Vec::new()
+        };
+
+        let count = issues.len();
+
+        Ok(Json(ReadyResult {
+            issues,
+            count,
+            stale,
         }))
     }
 }
