@@ -176,6 +176,7 @@ impl DependencyGraph {
                     agent: issue.agent.clone(),
                     milestone: issue.milestone.clone(),
                     story_points: issue.story_points,
+                    defer_until: issue.defer_until,
                     labels: issue.labels.clone(),
                     created_at: issue.created_at,
                     url: issue.url.clone(),

@@ -233,6 +233,11 @@ pub struct IssueSummary {
     pub milestone: Option<String>,
     /// Story points estimate.
     pub story_points: Option<i32>,
+    /// Date until which the issue is deferred.
+    ///
+    /// Issues with `defer_until > today` are excluded from the default
+    /// ready set. Populated from [`Issue::defer_until`].
+    pub defer_until: Option<NaiveDate>,
     /// Labels attached to the issue.
     pub labels: Vec<String>,
     /// Timestamp when the issue was created.
