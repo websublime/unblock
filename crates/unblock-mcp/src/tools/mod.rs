@@ -28,8 +28,8 @@
 //! ### Query (4)
 //! `show`, `list`, `search`, `stats`
 //!
-//! ### Setup & Diagnostics (3)
-//! `setup`, `doctor`, `prime`
+//! ### Setup & Diagnostics (4)
+//! `init`, `setup`, `doctor`, `prime`
 
 pub mod init;
 pub mod setup;

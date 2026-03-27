@@ -34,16 +34,18 @@ pub const INSTRUCTIONS_STR: &str = "\
 unblock turns GitHub Issues into a dependency graph. Ask `ready` to get unblocked work.
 
 ## Workflow
-1. `setup` — Configure the target repository (run once per session)
-2. `ready` — Get issues with no active blockers (the main entry point)
-3. `claim` — Assign yourself to an issue before starting work
-4. `close` — Close a completed issue (auto-unblocks dependents)
+1. `init` — Bootstrap a new Projects V2 project (run once per repository)
+2. `setup` — Configure fields and views on the project (run once per session)
+3. `ready` — Get issues with no active blockers (the main entry point)
+4. `claim` — Assign yourself to an issue before starting work
+5. `close` — Close a completed issue (auto-unblocks dependents)
 
 ## Tools
 
 ### Core Workflow
 | Tool    | Purpose                                              | Key Params                          |
 |---------|------------------------------------------------------|-------------------------------------|
+| init    | Bootstrap a new Projects V2 project                  | scope?, title?, description?        |
 | setup   | Set target repo and project                          | owner, repo, project_number?        |
 | ready   | Find issues that can be worked on right now           | limit?, type?, priority?, agent?    |
 | claim   | Assign yourself to an issue                          | issue_number, agent?                |
@@ -59,11 +61,12 @@ unblock turns GitHub Issues into a dependency graph. Ask `ready` to get unblocke
 | update  | Update issue fields (priority, labels, body, etc.)   | issue_number, fields...             |
 
 ## Tips
+- Run `init` once to create a project, then `setup` to configure it.
 - Always call `ready` first to find unblocked work.
 - Use `claim` before starting work to prevent conflicts.
 - After `close`, dependents are automatically re-evaluated.
 - Write tools (create, close, update, comment, claim) trigger a graph rebuild.
-- Read tools (ready, show, depends) use the cache for fast responses.
+- Read tools (ready, show, depends, init) use the cache for fast responses.
 ";
 
 /// Shared state for all MCP tool handlers.
