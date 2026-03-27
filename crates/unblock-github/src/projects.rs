@@ -882,6 +882,9 @@ impl GitHubClient {
     /// Returns [`Error::RateLimited`] for HTTP 429 responses.
     /// Returns [`Error::GitHubApi`] for other non-2xx responses.
     /// Returns [`Error::GitHubUnavailable`] for network failures.
+    // TODO(unblock-45a.14): Cache the result in a OnceCell/Mutex on GitHubClient —
+    // owner type does not change during a session and the setup tool calls this
+    // before each REST call, adding unnecessary API round-trips.
     #[instrument(skip(self), fields(owner = %self.owner()))]
     pub async fn detect_owner_type(&self) -> Result<OwnerType, Error> {
         let url = self.rest_url(&format!("/users/{}", self.owner()));

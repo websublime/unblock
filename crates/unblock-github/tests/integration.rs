@@ -1658,12 +1658,12 @@ async fn detect_owner_type_returns_org_for_org_accounts() {
         .await
         .expect("detect_owner_type() should succeed");
 
-    // The test repo is owned by `websublime` which is an org.
+    // The test repo is owned by `websublime` which is a GitHub organization.
     // If running against a different repo, this assertion may need adjustment.
-    // The important thing is that detect_owner_type returns a valid OwnerType.
-    assert!(
-        owner_type == OwnerType::Org || owner_type == OwnerType::User,
-        "owner_type should be Org or User"
+    assert_eq!(
+        owner_type,
+        OwnerType::Org,
+        "owner_type for 'websublime' should be Org"
     );
 
     eprintln!(
@@ -1778,6 +1778,8 @@ async fn list_rest_fields_options_name_raw_parsed_correctly() {
 }
 
 // ── create_view + list_views ─────────────────────────────────────────
+// TODO(unblock-45a.14): Add DeleteViewGuard for test cleanup once delete_view()
+// is implemented. Views created by these tests accumulate on the test project.
 
 #[tokio::test]
 async fn create_view_board_and_list_views() {
