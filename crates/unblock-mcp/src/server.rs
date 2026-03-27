@@ -143,10 +143,16 @@ impl UnblockServer {
         // Resolve project info — use param override or configured project number.
         let client = &state.client;
 
-        // If a project number override is provided, we need to temporarily override.
-        // For now, resolve_project_info() uses the configured project number.
-        // The `project` param is reserved for future use when dynamic project
-        // selection is needed.
+        // The `project` param is accepted for forward-compatibility but not yet
+        // wired to resolve_project_info(). Warn agents so the silent ignore is
+        // not confusing.
+        if let Some(project_number) = params.project {
+            tracing::warn!(
+                project_number,
+                "setup 'project' parameter is not yet supported — using configured project number"
+            );
+        }
+
         let project_info = client
             .resolve_project_info()
             .await
@@ -169,6 +175,7 @@ impl UnblockServer {
             return Ok(Json(SetupResult {
                 fields_created: Vec::new(),
                 fields_skipped: status.existing,
+                fields_missing: status.missing,
                 project_id: project_info.id,
             }));
         }
@@ -188,6 +195,7 @@ impl UnblockServer {
         Ok(Json(SetupResult {
             fields_created: report.created,
             fields_skipped: report.skipped,
+            fields_missing: Vec::new(),
             project_id: project_info.id,
         }))
     }
