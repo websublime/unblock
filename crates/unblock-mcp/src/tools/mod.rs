@@ -32,6 +32,7 @@
 //! `init`, `setup`, `doctor`, `prime`
 
 pub mod init;
+pub mod ready;
 pub mod setup;
 pub mod show;
 
@@ -121,8 +122,7 @@ where
 /// The cache write lock is never held across the GitHub API call:
 /// `invalidate()` releases the lock, then `fetch_graph_data()` runs (network),
 /// then `update()` acquires the lock again.
-#[allow(dead_code)] // Used by execute_write_tool, which is used by tool handlers in beads 45a.3–45a.11.
-async fn rebuild_cache(state: &ServerState) {
+pub(crate) async fn rebuild_cache(state: &ServerState) {
     state.cache.invalidate().await;
 
     match state.client.fetch_graph_data().await {
