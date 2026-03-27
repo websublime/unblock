@@ -31,6 +31,7 @@
 //! ### Setup & Diagnostics (3)
 //! `setup`, `doctor`, `prime`
 
+pub mod init;
 pub mod setup;
 
 use std::future::Future;

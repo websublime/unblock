@@ -10,7 +10,9 @@
 
 use std::sync::Arc;
 
+use crate::tools::execute_read_tool;
 use crate::tools::execute_write_tool;
+use crate::tools::init::{InitParams, InitResult};
 use crate::tools::setup::{SetupParams, SetupResult};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::{Json, Parameters};
@@ -124,6 +126,119 @@ impl UnblockServer {
 /// Tool router implementation for MCP tools.
 #[tool_router]
 impl UnblockServer {
+    /// Bootstrap a new Projects V2 project for the repository (idempotent).
+    ///
+    /// Creates a project container via the `createProjectV2` GraphQL mutation.
+    /// If a project with the same title already exists, returns it with
+    /// `created: false`. This tool is functional in bootstrap mode (no project
+    /// configured) and does not affect the dependency graph.
+    #[tool(
+        name = "init",
+        description = "Bootstrap a new GitHub Projects V2 project for the repository. Idempotent — returns existing project if a matching title is found. Run this before setup on a new repository."
+    )]
+    async fn init(
+        &self,
+        Parameters(params): Parameters<InitParams>,
+    ) -> Result<Json<InitResult>, ErrorData> {
+        let state = self.state();
+        let client = &state.client;
+
+        // Step 1: Detect or use provided owner type.
+        let owner_type = if let Some(ref scope) = params.scope {
+            match scope.to_lowercase().as_str() {
+                "org" => unblock_github::projects::OwnerType::Org,
+                "user" => unblock_github::projects::OwnerType::User,
+                other => {
+                    return Err(ErrorData {
+                        code: rmcp::model::ErrorCode::INVALID_PARAMS,
+                        message: format!("Invalid scope '{other}' — must be 'org' or 'user'")
+                            .into(),
+                        data: None,
+                    });
+                }
+            }
+        } else {
+            execute_read_tool(state, || client.detect_owner_type()).await?
+        };
+
+        let scope_str = match owner_type {
+            unblock_github::projects::OwnerType::Org => "org",
+            unblock_github::projects::OwnerType::User => "user",
+        };
+
+        info!(
+            owner = %client.owner(),
+            scope = scope_str,
+            "Init tool invoked"
+        );
+
+        // Step 2: Resolve owner node ID.
+        let owner_node_id =
+            execute_read_tool(state, || client.resolve_owner_node_id(owner_type)).await?;
+
+        // Step 3: Determine project title.
+        let title = params
+            .title
+            .unwrap_or_else(|| format!("{} Tasks", client.repo()));
+
+        // Step 4: Query existing projects for matching title.
+        let existing_projects =
+            execute_read_tool(state, || client.list_owner_projects(owner_type)).await?;
+
+        if let Some(existing) = existing_projects.iter().find(|p| p.title == title) {
+            info!(
+                project_number = existing.number,
+                title = %existing.title,
+                "Found existing project with matching title"
+            );
+            return Ok(Json(InitResult {
+                project_number: existing.number,
+                url: existing.url.clone(),
+                created: false,
+                scope: scope_str.to_owned(),
+                hint: format!(
+                    "Project already exists. Run `setup` with project number {} to configure fields and views.",
+                    existing.number
+                ),
+            }));
+        }
+
+        // Log forward-compat params that are accepted but not wired.
+        if let Some(ref description) = params.description {
+            tracing::warn!(
+                description = %description,
+                "init 'description' parameter is not yet supported by createProjectV2 — ignored"
+            );
+        }
+        if let Some(public) = params.public {
+            tracing::warn!(
+                public,
+                "init 'public' parameter is not yet supported by createProjectV2 — ignored"
+            );
+        }
+
+        // Step 5: Create a new project.
+        let created =
+            execute_read_tool(state, || client.create_project(&owner_node_id, &title)).await?;
+
+        info!(
+            project_number = created.number,
+            url = %created.url,
+            "Created new project V2"
+        );
+
+        Ok(Json(InitResult {
+            project_number: created.number,
+            url: created.url,
+            created: true,
+            scope: scope_str.to_owned(),
+            hint: format!(
+                "Project created! Run `setup` with project number {} to configure fields and views.",
+                created.number
+            ),
+        }))
+    }
+
     /// Create required Projects V2 fields on the configured project (idempotent).
     ///
     /// This is typically the first tool an agent calls on a fresh repository.
