@@ -66,7 +66,8 @@ unblock turns GitHub Issues into a dependency graph. Ask `ready` to get unblocke
 - Use `claim` before starting work to prevent conflicts.
 - After `close`, dependents are automatically re-evaluated.
 - Write tools (create, close, update, comment, claim) trigger a graph rebuild.
-- Read tools (ready, show, depends, init) use the cache for fast responses.
+- Read tools (ready, show, depends) use the cache for fast responses.
+- Bootstrap tools (init, setup) manage the project itself and do not affect the dependency graph.
 ";
 
 /// Shared state for all MCP tool handlers.

@@ -1344,10 +1344,16 @@ impl GitHubClient {
         });
 
         let response = self.graphql(query, variables).await?;
-        let nodes = response["data"][data_key]["projectsV2"]["nodes"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
+        let nodes_value = &response["data"][data_key]["projectsV2"]["nodes"];
+        let nodes = if let Some(arr) = nodes_value.as_array() {
+            arr.clone()
+        } else {
+            debug!(
+                data_key,
+                "projectsV2.nodes absent or not an array in GraphQL response — returning empty list"
+            );
+            Vec::new()
+        };
 
         let projects: Vec<OwnerProject> = nodes
             .iter()
@@ -1366,9 +1372,8 @@ impl GitHubClient {
 
     /// Creates a new GitHub Projects V2 project.
     ///
-    /// Uses the `createProjectV2` GraphQL mutation with the given owner node ID,
-    /// title, and optional visibility flag. Returns the created project's number
-    /// and URL.
+    /// Uses the `createProjectV2` GraphQL mutation with the given owner node ID
+    /// and title. Returns the created project's number and URL.
     ///
     /// **Note:** The `description` field is not supported by the `createProjectV2`
     /// mutation input — it is accepted here for forward-compatibility but is not
