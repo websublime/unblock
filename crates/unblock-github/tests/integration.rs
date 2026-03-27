@@ -1958,3 +1958,188 @@ async fn list_views_returns_default_view() {
         views.iter().map(|v| &v.name).collect::<Vec<_>>()
     );
 }
+
+// ── resolve_owner_node_id ───────────────────────────────────────────
+
+#[tokio::test]
+async fn resolve_owner_node_id_returns_non_empty_id() {
+    if !has_github_token() {
+        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+        return;
+    }
+
+    let config = test_config();
+    let client = GitHubClient::new(&config)
+        .await
+        .expect("GitHubClient::new() should succeed");
+
+    let owner_type = client
+        .detect_owner_type()
+        .await
+        .expect("detect_owner_type() should succeed");
+
+    let node_id = client
+        .resolve_owner_node_id(owner_type)
+        .await
+        .expect("resolve_owner_node_id() should succeed");
+
+    // GitHub node IDs are non-empty base64-encoded strings.
+    assert!(
+        !node_id.is_empty(),
+        "resolve_owner_node_id should return a non-empty node ID"
+    );
+
+    eprintln!(
+        "resolve_owner_node_id: owner={}, type={:?}, node_id={}",
+        client.owner(),
+        owner_type,
+        node_id
+    );
+}
+
+// ── list_owner_projects ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn list_owner_projects_returns_projects_with_valid_fields() {
+    if !has_github_token() || !has_project_number() {
+        eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping integration test");
+        return;
+    }
+
+    let config = test_config();
+    let client = GitHubClient::new(&config)
+        .await
+        .expect("GitHubClient::new() should succeed");
+
+    let owner_type = client
+        .detect_owner_type()
+        .await
+        .expect("detect_owner_type() should succeed");
+
+    let projects = client
+        .list_owner_projects(owner_type)
+        .await
+        .expect("list_owner_projects() should succeed");
+
+    // At least one project should exist (the one configured via UNBLOCK_PROJECT).
+    assert!(
+        !projects.is_empty(),
+        "list_owner_projects should return at least one project"
+    );
+
+    for project in &projects {
+        assert!(
+            project.number > 0,
+            "project number should be a positive integer"
+        );
+        assert!(
+            !project.title.is_empty(),
+            "project title should be non-empty"
+        );
+        assert!(!project.url.is_empty(), "project URL should be non-empty");
+        assert!(
+            project.url.starts_with("https://"),
+            "project URL should be an HTTPS URL"
+        );
+    }
+
+    eprintln!(
+        "list_owner_projects: {} projects, titles: {:?}",
+        projects.len(),
+        projects.iter().map(|p| &p.title).collect::<Vec<_>>()
+    );
+}
+
+// ── init idempotency (create_project + list_owner_projects) ─────────
+
+#[tokio::test]
+async fn init_create_project_and_idempotency_check() {
+    if !has_github_token() {
+        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+        return;
+    }
+
+    let config = test_config();
+    let client = GitHubClient::new(&config)
+        .await
+        .expect("GitHubClient::new() should succeed");
+
+    let owner_type = client
+        .detect_owner_type()
+        .await
+        .expect("detect_owner_type() should succeed");
+
+    // Use a unique title to avoid conflicts with real projects.
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before UNIX epoch")
+        .as_secs();
+    let test_title = format!("{} Init Test {}", client.repo(), timestamp);
+
+    // Step 1: List existing projects and confirm our test title does not exist.
+    let projects_before = client
+        .list_owner_projects(owner_type)
+        .await
+        .expect("list_owner_projects() should succeed");
+
+    let existing = projects_before.iter().find(|p| p.title == test_title);
+    assert!(
+        existing.is_none(),
+        "test project should not exist before creation"
+    );
+
+    // Step 2: Resolve owner node ID.
+    let owner_node_id = client
+        .resolve_owner_node_id(owner_type)
+        .await
+        .expect("resolve_owner_node_id() should succeed");
+
+    // Step 3: Create the project.
+    let created = client
+        .create_project(&owner_node_id, &test_title)
+        .await
+        .expect("create_project() should succeed");
+
+    assert!(
+        created.number > 0,
+        "created project number should be positive"
+    );
+    assert!(
+        !created.url.is_empty(),
+        "created project URL should be non-empty"
+    );
+    assert!(
+        created.url.starts_with("https://"),
+        "created project URL should be an HTTPS URL"
+    );
+
+    eprintln!(
+        "create_project: number={}, url={}, title={}",
+        created.number, created.url, test_title
+    );
+
+    // Step 4: Idempotency — list projects again and confirm our title is found.
+    let projects_after = client
+        .list_owner_projects(owner_type)
+        .await
+        .expect("list_owner_projects() should succeed after creation");
+
+    let found = projects_after.iter().find(|p| p.title == test_title);
+    assert!(
+        found.is_some(),
+        "created project should appear in list_owner_projects"
+    );
+    let found = found.unwrap();
+    assert_eq!(
+        found.number, created.number,
+        "found project number should match created number"
+    );
+
+    // Note: cleanup (deleting the test project) requires the deleteProjectV2
+    // mutation which is not yet implemented. The project will remain but is
+    // harmless — it has a unique timestamped title.
+    eprintln!(
+        "init_create_project_and_idempotency_check: PASS (project #{} left for manual cleanup)",
+        created.number
+    );
+}
