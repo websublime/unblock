@@ -31,6 +31,8 @@
 //! ### Setup & Diagnostics (3)
 //! `setup`, `doctor`, `prime`
 
+pub mod setup;
+
 use std::future::Future;
 
 use rmcp::model::ErrorData;

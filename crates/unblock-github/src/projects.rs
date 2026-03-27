@@ -1,7 +1,7 @@
 //! Projects V2 field management.
 //!
 //! - `resolve_project()` — find linked project by repo
-//! - `setup_fields()` — create 7 custom fields (idempotent), returns [`SetupReport`]
+//! - `setup_fields()` — create 7 custom fields (idempotent), returns [`SetupReport`](crate::projects::SetupReport)
 //! - `query_setup_status()` — check which fields exist without mutating (for dry-run)
 //! - `update_field()` — update a single field value on an issue
 
