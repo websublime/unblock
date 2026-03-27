@@ -115,7 +115,7 @@ impl ReadyIssueSummary {
 /// Filters are applied in order: `issue_type`, priority, milestone, agent,
 /// label, deferred exclusion, claimed exclusion. The result preserves
 /// the input sort order (priority ASC, `created_at` ASC).
-pub(crate) fn filter_ready_set(
+pub fn filter_ready_set(
     ready_set: &[IssueSummary],
     params: &ReadyParams,
 ) -> Vec<ReadyIssueSummary> {

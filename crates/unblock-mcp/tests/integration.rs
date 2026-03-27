@@ -367,3 +367,293 @@ fn show_tool_registered_in_server() {
         "INSTRUCTIONS_STR should describe the show tool's purpose",
     );
 }
+
+// ── Ready tool: integration tests ────────────────────────────────
+
+/// Ready returns only open, unblocked, non-deferred issues from cache.
+#[tokio::test]
+async fn ready_returns_only_open_unblocked_non_deferred_issues() {
+    let cache = GraphCache::new(Duration::from_secs(300));
+
+    // Issue #1 is open and unblocked (should appear).
+    // Issue #2 is blocked by #1 (should NOT appear).
+    // Issue #3 is open but deferred until far future (should NOT appear).
+    let mut issue_1 = test_issue(1, IssueState::Open);
+    issue_1.priority = Priority::P0;
+    let issue_2 = test_issue(2, IssueState::Open);
+    let mut issue_3 = test_issue(3, IssueState::Open);
+    issue_3.defer_until = Some(chrono::NaiveDate::from_ymd_opt(2099, 12, 31).unwrap());
+
+    let issues = vec![issue_1, issue_2, issue_3];
+    let edges = vec![BlockingEdge {
+        source: 2,
+        target: 1,
+    }];
+    let graph = DependencyGraph::build(&issues, &edges);
+    let ready_set = graph.compute_ready_set(&issues);
+    cache.update(ready_set.clone(), graph).await;
+
+    // Filter using ready tool logic.
+    let params = unblock_mcp::tools::ready::ReadyParams {
+        limit: None,
+        issue_type: None,
+        priority: None,
+        milestone: None,
+        agent: None,
+        label: None,
+        include_claimed: None,
+    };
+    let result = unblock_mcp::tools::ready::filter_ready_set(&ready_set, &params);
+
+    // Only issue #1 should appear (unblocked, not deferred).
+    // Issue #3 has defer_until in far future, excluded.
+    assert_eq!(result.len(), 1, "expected 1 ready issue, got: {result:?}");
+    assert_eq!(result[0].number, 1);
+}
+
+/// Second call returns same result from cache (cache hit path).
+#[tokio::test]
+async fn ready_second_call_returns_from_cache() {
+    let cache = GraphCache::new(Duration::from_secs(300));
+
+    let issues = vec![
+        test_issue(1, IssueState::Open),
+        test_issue(2, IssueState::Open),
+    ];
+    let edges = vec![];
+    let graph = DependencyGraph::build(&issues, &edges);
+    let ready_set = graph.compute_ready_set(&issues);
+    cache.update(ready_set, graph).await;
+
+    // First call.
+    let first = cache.get_ready_set().await;
+    assert!(first.is_some(), "first call should return from cache");
+    assert!(cache.is_fresh().await, "cache should still be fresh");
+
+    // Second call — same result from cache (no rebuild).
+    let second = cache.get_ready_set().await;
+    assert!(
+        second.is_some(),
+        "second call should also return from cache"
+    );
+    assert_eq!(
+        *first.unwrap(),
+        *second.unwrap(),
+        "both calls should return identical data",
+    );
+}
+
+/// Filter by priority — only matching priority returned.
+#[tokio::test]
+async fn ready_filter_by_priority() {
+    let cache = GraphCache::new(Duration::from_secs(300));
+
+    let mut issue_1 = test_issue(1, IssueState::Open);
+    issue_1.priority = Priority::P0;
+    let mut issue_2 = test_issue(2, IssueState::Open);
+    issue_2.priority = Priority::P1;
+    let mut issue_3 = test_issue(3, IssueState::Open);
+    issue_3.priority = Priority::P0;
+
+    let issues = vec![issue_1, issue_2, issue_3];
+    let graph = DependencyGraph::build(&issues, &[]);
+    let ready_set = graph.compute_ready_set(&issues);
+    cache.update(ready_set.clone(), graph).await;
+
+    let params = unblock_mcp::tools::ready::ReadyParams {
+        limit: None,
+        issue_type: None,
+        priority: Some("P0".to_owned()),
+        milestone: None,
+        agent: None,
+        label: None,
+        include_claimed: None,
+    };
+    let result = unblock_mcp::tools::ready::filter_ready_set(&ready_set, &params);
+
+    assert_eq!(result.len(), 2, "expected 2 P0 issues, got: {result:?}");
+    assert!(
+        result.iter().all(|r| r.priority == "P0"),
+        "all results should be P0",
+    );
+}
+
+/// Filter by label — only matching label returned.
+#[tokio::test]
+async fn ready_filter_by_label() {
+    let cache = GraphCache::new(Duration::from_secs(300));
+
+    let mut issue_1 = test_issue(1, IssueState::Open);
+    issue_1.labels = vec!["urgent".to_owned(), "backend".to_owned()];
+    let mut issue_2 = test_issue(2, IssueState::Open);
+    issue_2.labels = vec!["frontend".to_owned()];
+    let issue_3 = test_issue(3, IssueState::Open);
+
+    let issues = vec![issue_1, issue_2, issue_3];
+    let graph = DependencyGraph::build(&issues, &[]);
+    let ready_set = graph.compute_ready_set(&issues);
+    cache.update(ready_set.clone(), graph).await;
+
+    let params = unblock_mcp::tools::ready::ReadyParams {
+        limit: None,
+        issue_type: None,
+        priority: None,
+        milestone: None,
+        agent: None,
+        label: Some("urgent".to_owned()),
+        include_claimed: None,
+    };
+    let result = unblock_mcp::tools::ready::filter_ready_set(&ready_set, &params);
+
+    assert_eq!(result.len(), 1, "expected 1 issue with 'urgent' label");
+    assert_eq!(result[0].number, 1);
+}
+
+/// Deferred issues excluded from default call.
+#[tokio::test]
+async fn ready_deferred_excluded() {
+    let mut issue_1 = test_issue(1, IssueState::Open);
+    issue_1.defer_until = Some(chrono::NaiveDate::from_ymd_opt(2099, 1, 1).unwrap());
+
+    let issues = vec![issue_1];
+    let graph = DependencyGraph::build(&issues, &[]);
+    let ready_set = graph.compute_ready_set(&issues);
+
+    let params = unblock_mcp::tools::ready::ReadyParams {
+        limit: None,
+        issue_type: None,
+        priority: None,
+        milestone: None,
+        agent: None,
+        label: None,
+        include_claimed: None,
+    };
+    let result = unblock_mcp::tools::ready::filter_ready_set(&ready_set, &params);
+    assert!(result.is_empty(), "deferred issue should be excluded");
+}
+
+/// `include_claimed=true` includes in-progress issues.
+#[tokio::test]
+async fn ready_include_claimed_includes_in_progress() {
+    let mut issue_1 = test_issue(1, IssueState::Open);
+    issue_1.status = Status::InProgress;
+    issue_1.agent = Some("agent-a".to_owned());
+    let issue_2 = test_issue(2, IssueState::Open);
+
+    let issues = vec![issue_1, issue_2];
+    let graph = DependencyGraph::build(&issues, &[]);
+    let ready_set = graph.compute_ready_set(&issues);
+
+    // Without include_claimed — should exclude InProgress.
+    let params_default = unblock_mcp::tools::ready::ReadyParams {
+        limit: None,
+        issue_type: None,
+        priority: None,
+        milestone: None,
+        agent: None,
+        label: None,
+        include_claimed: None,
+    };
+    let result_default = unblock_mcp::tools::ready::filter_ready_set(&ready_set, &params_default);
+    assert_eq!(
+        result_default.len(),
+        1,
+        "default should exclude InProgress issue",
+    );
+    assert_eq!(result_default[0].number, 2);
+
+    // With include_claimed=true — should include InProgress.
+    let params_claimed = unblock_mcp::tools::ready::ReadyParams {
+        limit: None,
+        issue_type: None,
+        priority: None,
+        milestone: None,
+        agent: None,
+        label: None,
+        include_claimed: Some(true),
+    };
+    let result_claimed = unblock_mcp::tools::ready::filter_ready_set(&ready_set, &params_claimed);
+    assert_eq!(
+        result_claimed.len(),
+        2,
+        "include_claimed=true should include InProgress issue",
+    );
+}
+
+/// Correct sort order: P0 before P1, same priority by `created_at`.
+#[tokio::test]
+async fn ready_sort_order() {
+    let earlier = chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2024, 1, 1, 0, 0, 0).unwrap();
+    let later = chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2024, 6, 1, 0, 0, 0).unwrap();
+
+    let mut issue_a = test_issue(1, IssueState::Open);
+    issue_a.priority = Priority::P1;
+    issue_a.created_at = earlier;
+    let mut issue_b = test_issue(2, IssueState::Open);
+    issue_b.priority = Priority::P0;
+    issue_b.created_at = later;
+    let mut issue_c = test_issue(3, IssueState::Open);
+    issue_c.priority = Priority::P1;
+    issue_c.created_at = later;
+
+    let issues = vec![issue_a, issue_b, issue_c];
+    let graph = DependencyGraph::build(&issues, &[]);
+    let ready_set = graph.compute_ready_set(&issues);
+
+    let params = unblock_mcp::tools::ready::ReadyParams {
+        limit: None,
+        issue_type: None,
+        priority: None,
+        milestone: None,
+        agent: None,
+        label: None,
+        include_claimed: None,
+    };
+    let result = unblock_mcp::tools::ready::filter_ready_set(&ready_set, &params);
+
+    assert_eq!(result.len(), 3);
+    // P0 first.
+    assert_eq!(result[0].number, 2, "P0 issue should be first");
+    // Then P1 by created_at ASC.
+    assert_eq!(result[1].number, 1, "earlier P1 issue should be second");
+    assert_eq!(result[2].number, 3, "later P1 issue should be third");
+}
+
+/// Limit respected: returns at most N items.
+#[tokio::test]
+async fn ready_limit_respected() {
+    let issues: Vec<_> = (1..=20).map(|n| test_issue(n, IssueState::Open)).collect();
+    let graph = DependencyGraph::build(&issues, &[]);
+    let ready_set = graph.compute_ready_set(&issues);
+
+    let params = unblock_mcp::tools::ready::ReadyParams {
+        limit: Some(3),
+        issue_type: None,
+        priority: None,
+        milestone: None,
+        agent: None,
+        label: None,
+        include_claimed: None,
+    };
+    let result = unblock_mcp::tools::ready::filter_ready_set(&ready_set, &params);
+    assert_eq!(result.len(), 3, "should return at most 3 items");
+}
+
+/// Ready tool is registered in the server tool list.
+///
+/// The `#[tool_router]` macro generates routing at compile time. If the
+/// `ready` handler is missing or has the wrong signature, `unblock-mcp`
+/// would fail to compile. This test additionally verifies the instructions
+/// string references the ready tool.
+#[test]
+fn ready_tool_registered_in_server() {
+    let instructions = unblock_mcp::server::INSTRUCTIONS_STR;
+    assert!(
+        instructions.contains("ready"),
+        "INSTRUCTIONS_STR should mention the 'ready' tool",
+    );
+    assert!(
+        instructions.contains("Find issues that can be worked on right now"),
+        "INSTRUCTIONS_STR should describe the ready tool's purpose",
+    );
+}
