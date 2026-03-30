@@ -55,8 +55,9 @@ pub struct CreateResult {
     pub priority: String,
     /// Whether the issue was added to a project.
     pub added_to_project: bool,
-    /// Whether project fields were set successfully.
-    pub fields_set: bool,
+    /// Whether project field assignment was attempted. Individual fields may
+    /// have failed (logged as warnings) even when this is `true`.
+    pub fields_attempted: bool,
     /// Number of blocking relationships created.
     pub blockers_added: u32,
     /// Whether a parent relationship was created.
