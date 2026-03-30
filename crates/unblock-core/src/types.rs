@@ -306,11 +306,16 @@ impl std::str::FromStr for IssueRef {
                     number,
                 });
             }
-            // Has # but no valid owner/repo prefix — try as plain number after #
-            let number = num_str
-                .parse::<u64>()
-                .map_err(|_| format!("invalid issue reference: {s}"))?;
-            return Ok(Self::Local(number));
+            // Has # but no valid owner/repo prefix
+            if prefix.is_empty() {
+                // Bare "#number" shorthand for local ref
+                let number = num_str
+                    .parse::<u64>()
+                    .map_err(|_| format!("invalid issue reference: {s}"))?;
+                return Ok(Self::Local(number));
+            }
+            // Malformed cross-repo ref (e.g. "/repo#42", "owner/#42")
+            return Err(format!("invalid issue reference: {s}"));
         }
 
         // Plain number
