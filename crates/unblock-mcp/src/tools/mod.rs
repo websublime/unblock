@@ -34,6 +34,7 @@
 pub mod claim;
 pub mod close;
 pub mod create;
+pub mod depends;
 pub mod init;
 pub mod ready;
 pub mod setup;
