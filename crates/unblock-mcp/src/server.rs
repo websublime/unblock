@@ -19,7 +19,7 @@ use crate::tools::execute_read_tool;
 use crate::tools::execute_write_tool;
 use crate::tools::init::{InitParams, InitResult};
 use crate::tools::ready::{ReadyParams, ReadyResult};
-use crate::tools::setup::{SetupParams, SetupResult};
+use crate::tools::setup::{REQUIRED_VIEWS, SetupParams, SetupResult};
 use crate::tools::show::{
     DependencyTreeEntry, ShowBodySections, ShowComment, ShowIssue, ShowParams, ShowRelatedIssue,
     ShowResult,
@@ -32,6 +32,7 @@ use tracing::info;
 use unblock_core::cache::GraphCache;
 use unblock_core::config::Config;
 use unblock_github::client::GitHubClient;
+use unblock_github::projects::{CreateViewParams, ViewLayout};
 
 /// Instructions string injected into the agent context window.
 ///
@@ -376,9 +377,6 @@ impl UnblockServer {
         &self,
         Parameters(params): Parameters<SetupParams>,
     ) -> Result<Json<SetupResult>, ErrorData> {
-        use crate::tools::setup::REQUIRED_VIEWS;
-        use unblock_github::projects::{CreateViewParams, ViewLayout};
-
         let state = self.state();
         let dry_run = params.dry_run.unwrap_or(false);
 
@@ -412,10 +410,9 @@ impl UnblockServer {
 
         if dry_run {
             // Dry-run: query which fields and views exist without creating anything.
-            let field_status = client
-                .query_setup_status(&project_info.id)
-                .await
-                .map_err(crate::errors::github_error_to_mcp)?;
+            let project_id = project_info.id.clone();
+            let field_status =
+                execute_read_tool(state, || client.query_setup_status(&project_id)).await?;
 
             // Step 5: Query existing views.
             let existing_views = execute_read_tool(state, || client.list_views(owner_type)).await?;
@@ -493,6 +490,10 @@ impl UnblockServer {
                 visible_fields,
             };
 
+            // NOTE: execute_read_tool is intentional here despite create_view being a
+            // mutating POST. Views do not affect the dependency graph, so no cache
+            // rebuild is needed. execute_read_tool provides consistent error mapping
+            // without the unnecessary cache invalidation of execute_write_tool.
             execute_read_tool(state, || client.create_view(owner_type, &view_params)).await?;
 
             views_created.push(spec.name.to_owned());
