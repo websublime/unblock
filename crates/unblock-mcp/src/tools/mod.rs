@@ -123,7 +123,7 @@ where
 /// The cache write lock is never held across the GitHub API call:
 /// `invalidate()` releases the lock, then `fetch_graph_data()` runs (network),
 /// then `update()` acquires the lock again.
-pub(crate) async fn rebuild_cache(state: &ServerState) {
+pub async fn rebuild_cache(state: &ServerState) {
     state.cache.invalidate().await;
 
     match state.client.fetch_graph_data().await {
