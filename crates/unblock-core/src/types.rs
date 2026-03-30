@@ -246,6 +246,80 @@ pub struct IssueSummary {
     pub url: String,
 }
 
+/// A reference to an issue, either local (same repo) or cross-repo.
+///
+/// Used by the `create` tool's `blocked_by` parameter to accept both local
+/// issue numbers and cross-repo references in `owner/repo#number` format.
+///
+/// # Parsing
+///
+/// The [`FromStr`] implementation accepts:
+/// - `"42"` -> `IssueRef::Local(42)`
+/// - `"owner/repo#42"` -> `IssueRef::CrossRepo { owner: "owner", repo: "repo", number: 42 }`
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum IssueRef {
+    /// A local issue number in the same repository.
+    Local(u64),
+    /// A cross-repo reference: `owner/repo#number`.
+    CrossRepo {
+        /// Repository owner (e.g. `"websublime"`).
+        owner: String,
+        /// Repository name (e.g. `"unblock"`).
+        repo: String,
+        /// Issue number in the target repository.
+        number: u64,
+    },
+}
+
+impl std::fmt::Display for IssueRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Local(n) => write!(f, "#{n}"),
+            Self::CrossRepo {
+                owner,
+                repo,
+                number,
+            } => write!(f, "{owner}/{repo}#{number}"),
+        }
+    }
+}
+
+impl std::str::FromStr for IssueRef {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.trim();
+
+        // Try cross-repo format: owner/repo#number
+        if let Some((prefix, num_str)) = s.split_once('#') {
+            if let Some((owner, repo)) = prefix.split_once('/') {
+                if !owner.is_empty() && !repo.is_empty() {
+                    let number = num_str
+                        .parse::<u64>()
+                        .map_err(|_| format!("invalid issue number in cross-repo ref: {s}"))?;
+                    return Ok(Self::CrossRepo {
+                        owner: owner.to_owned(),
+                        repo: repo.to_owned(),
+                        number,
+                    });
+                }
+            }
+            // Has # but no valid owner/repo prefix — try as plain number after #
+            let number = num_str
+                .parse::<u64>()
+                .map_err(|_| format!("invalid issue reference: {s}"))?;
+            return Ok(Self::Local(number));
+        }
+
+        // Plain number
+        let number = s
+            .parse::<u64>()
+            .map_err(|_| format!("invalid issue reference: {s}"))?;
+        Ok(Self::Local(number))
+    }
+}
+
 /// Direction for dependency tree traversal.
 ///
 /// Controls which edges are followed during BFS traversal of the
@@ -710,6 +784,62 @@ Notes here.";
             let back: Status = serde_json::from_str(&json).expect("deserialize");
             assert_eq!(*s, back);
         }
+    }
+
+    // ── IssueRef ────────────────────────────────────────────────────────
+
+    #[test]
+    fn issue_ref_parse_local_number() {
+        let r: IssueRef = "42".parse().unwrap();
+        assert_eq!(r, IssueRef::Local(42));
+    }
+
+    #[test]
+    fn issue_ref_parse_hash_prefix() {
+        let r: IssueRef = "#42".parse().unwrap();
+        assert_eq!(r, IssueRef::Local(42));
+    }
+
+    #[test]
+    fn issue_ref_parse_cross_repo() {
+        let r: IssueRef = "acme/widgets#99".parse().unwrap();
+        assert_eq!(
+            r,
+            IssueRef::CrossRepo {
+                owner: "acme".to_owned(),
+                repo: "widgets".to_owned(),
+                number: 99,
+            }
+        );
+    }
+
+    #[test]
+    fn issue_ref_display_local() {
+        assert_eq!(IssueRef::Local(42).to_string(), "#42");
+    }
+
+    #[test]
+    fn issue_ref_display_cross_repo() {
+        assert_eq!(
+            IssueRef::CrossRepo {
+                owner: "acme".to_owned(),
+                repo: "widgets".to_owned(),
+                number: 99,
+            }
+            .to_string(),
+            "acme/widgets#99"
+        );
+    }
+
+    #[test]
+    fn issue_ref_parse_invalid_returns_error() {
+        assert!("not-a-number".parse::<IssueRef>().is_err());
+    }
+
+    #[test]
+    fn issue_ref_parse_whitespace_trimmed() {
+        let r: IssueRef = "  42  ".parse().unwrap();
+        assert_eq!(r, IssueRef::Local(42));
     }
 
     // ── Proptest ────────────────────────────────────────────────────────
