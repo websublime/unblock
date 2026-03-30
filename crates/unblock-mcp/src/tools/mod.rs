@@ -31,6 +31,7 @@
 //! ### Setup & Diagnostics (4)
 //! `init`, `setup`, `doctor`, `prime`
 
+pub mod create;
 pub mod init;
 pub mod ready;
 pub mod setup;
