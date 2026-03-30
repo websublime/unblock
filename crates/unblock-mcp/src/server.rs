@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use crate::tools::create::{CreateParams, CreateResult};
 use crate::tools::execute_read_tool;
 use crate::tools::execute_write_tool;
 use crate::tools::init::{InitParams, InitResult};
@@ -512,6 +513,345 @@ impl UnblockServer {
             count,
             stale,
         }))
+    }
+
+    /// Create a new GitHub Issue with optional dependencies, project fields,
+    /// and parent linkage.
+    ///
+    /// Creates the issue via REST, adds it to the configured project, sets
+    /// custom fields (Priority, `IssueType`, `StoryPoints`, `DeferUntil`, Status,
+    /// `ReadyState`), and optionally adds blocking relationships and parent linkage.
+    ///
+    /// This is a write tool — the cache is invalidated and rebuilt after all
+    /// mutations complete.
+    #[tool(
+        name = "create",
+        description = "Create a new GitHub Issue. Set title (required), issue_type (default Task), priority (default P2), body, labels, blocked_by (local number or owner/repo#number), parent, story_points, defer_until. Labels are auto-created if missing. Triggers graph rebuild."
+    )]
+    async fn create(
+        &self,
+        Parameters(params): Parameters<CreateParams>,
+    ) -> Result<Json<CreateResult>, ErrorData> {
+        let state = self.state();
+        let client = Arc::clone(&state.client);
+
+        info!(
+            title = %params.title,
+            issue_type = params.issue_type.as_deref(),
+            priority = params.priority.as_deref(),
+            "Create tool invoked"
+        );
+
+        // Validate issue_type if provided.
+        let issue_type_str = params.issue_type.as_deref().unwrap_or("Task");
+        if !matches!(
+            issue_type_str,
+            "Task" | "Bug" | "Feature" | "Epic" | "Chore" | "Spike"
+        ) {
+            return Err(ErrorData {
+                code: rmcp::model::ErrorCode::INVALID_PARAMS,
+                message: format!(
+                    "Invalid issue_type '{issue_type_str}' — must be Task, Bug, Feature, Epic, Chore, or Spike"
+                )
+                .into(),
+                data: None,
+            });
+        }
+
+        // Validate priority if provided.
+        let priority_str = params.priority.as_deref().unwrap_or("P2");
+        if !matches!(priority_str, "P0" | "P1" | "P2" | "P3" | "P4") {
+            return Err(ErrorData {
+                code: rmcp::model::ErrorCode::INVALID_PARAMS,
+                message: format!(
+                    "Invalid priority '{priority_str}' — must be P0, P1, P2, P3, or P4"
+                )
+                .into(),
+                data: None,
+            });
+        }
+
+        // Parse defer_until if provided.
+        let defer_until = if let Some(ref date_str) = params.defer_until {
+            Some(
+                chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d").map_err(|e| ErrorData {
+                    code: rmcp::model::ErrorCode::INVALID_PARAMS,
+                    message: format!("Invalid defer_until date '{date_str}': {e}").into(),
+                    data: None,
+                })?,
+            )
+        } else {
+            None
+        };
+
+        // Parse blocked_by refs.
+        let blocked_by_refs: Vec<unblock_core::types::IssueRef> =
+            if let Some(ref refs) = params.blocked_by {
+                refs.iter()
+                    .map(|s| {
+                        s.parse::<unblock_core::types::IssueRef>()
+                            .map_err(|e| ErrorData {
+                                code: rmcp::model::ErrorCode::INVALID_PARAMS,
+                                message: format!("Invalid blocked_by reference '{s}': {e}").into(),
+                                data: None,
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            } else {
+                Vec::new()
+            };
+
+        // Build body — use provided body or generate BodySections template.
+        let body = if let Some(ref body_text) = params.body {
+            Some(body_text.clone())
+        } else {
+            let sections = unblock_core::types::BodySections {
+                description: None,
+                design_notes: None,
+                acceptance_criteria: None,
+            };
+            let md = sections.to_markdown();
+            if md.is_empty() { None } else { Some(md) }
+        };
+
+        let labels = params.labels.clone().unwrap_or_default();
+
+        // Capture params for the closure.
+        let title = params.title.clone();
+        let parent = params.parent;
+        let story_points = params.story_points;
+        let issue_type_owned = issue_type_str.to_owned();
+        let priority_owned = priority_str.to_owned();
+        let milestone_title = params.milestone.clone();
+
+        let result = execute_write_tool(state, || {
+            let client = Arc::clone(&client);
+            let title = title.clone();
+            let body = body.clone();
+            let labels = labels.clone();
+            let blocked_by_refs = blocked_by_refs.clone();
+            let issue_type_owned = issue_type_owned.clone();
+            let priority_owned = priority_owned.clone();
+            let milestone_title = milestone_title.clone();
+
+            async move {
+                // Step 1: Ensure labels exist on the repo.
+                if !labels.is_empty() {
+                    client.ensure_labels(&labels).await?;
+                }
+
+                // Step 2: Log milestone if provided (not yet resolved to ID).
+                if let Some(ref ms) = milestone_title {
+                    tracing::warn!(
+                        milestone = %ms,
+                        "Milestone resolution from title to ID is not yet implemented — milestone will not be set on the issue"
+                    );
+                }
+
+                // Step 3: Create the issue.
+                let create_params = unblock_github::mutations::CreateIssueParams {
+                    title,
+                    body,
+                    labels,
+                    milestone: None, // Milestone ID resolution not yet implemented.
+                    assignees: Vec::new(),
+                };
+
+                let issue = client.create_issue(create_params).await?;
+                let issue_number = issue.number;
+                let issue_node_id = issue.node_id.clone();
+                let issue_url = issue.url.clone();
+                let issue_title = issue.title.clone();
+
+                // Step 4: Set project fields if project is configured.
+                let mut added_to_project = false;
+                let mut fields_set = false;
+
+                if let Some(field_ids) = client.field_ids().await {
+                    // Resolve the project info to get the project ID.
+                    match client.resolve_project_info().await {
+                        Ok(project_info) => {
+                            // Get the project item ID for this issue.
+                            match client
+                                .get_project_item_id(&issue_node_id, &project_info.id)
+                                .await
+                            {
+                                Ok(item_id) => {
+                                    added_to_project = true;
+
+                                    // Set Priority.
+                                    if let Some(option_id) =
+                                        field_ids.priority.options.get(&priority_owned)
+                                        && let Err(e) = client
+                                            .update_field(
+                                                &project_info.id,
+                                                &item_id,
+                                                &field_ids.priority.field_id,
+                                                &unblock_github::projects::FieldValue::SingleSelectOption(
+                                                    option_id.clone(),
+                                                ),
+                                            )
+                                            .await
+                                    {
+                                        tracing::warn!(error = %e, "Failed to set Priority field");
+                                    }
+
+                                    // Set IssueType.
+                                    if let Some(option_id) =
+                                        field_ids.issue_type.options.get(&issue_type_owned)
+                                        && let Err(e) = client
+                                            .update_field(
+                                                &project_info.id,
+                                                &item_id,
+                                                &field_ids.issue_type.field_id,
+                                                &unblock_github::projects::FieldValue::SingleSelectOption(
+                                                    option_id.clone(),
+                                                ),
+                                            )
+                                            .await
+                                    {
+                                        tracing::warn!(error = %e, "Failed to set IssueType field");
+                                    }
+
+                                    // Set Status to Backlog.
+                                    if let Some(option_id) =
+                                        field_ids.status.options.get("Backlog")
+                                        && let Err(e) = client
+                                            .update_field(
+                                                &project_info.id,
+                                                &item_id,
+                                                &field_ids.status.field_id,
+                                                &unblock_github::projects::FieldValue::SingleSelectOption(
+                                                    option_id.clone(),
+                                                ),
+                                            )
+                                            .await
+                                    {
+                                        tracing::warn!(error = %e, "Failed to set Status field");
+                                    }
+
+                                    // Set ReadyState (Ready if unblocked, Not Ready if blocked).
+                                    let initial_ready_state = if blocked_by_refs.is_empty() {
+                                        "Ready"
+                                    } else {
+                                        "Not Ready"
+                                    };
+                                    if let Some(option_id) =
+                                        field_ids.ready_state.options.get(initial_ready_state)
+                                        && let Err(e) = client
+                                            .update_field(
+                                                &project_info.id,
+                                                &item_id,
+                                                &field_ids.ready_state.field_id,
+                                                &unblock_github::projects::FieldValue::SingleSelectOption(
+                                                    option_id.clone(),
+                                                ),
+                                            )
+                                            .await
+                                    {
+                                        tracing::warn!(error = %e, "Failed to set ReadyState field");
+                                    }
+
+                                    // Set StoryPoints if provided.
+                                    if let Some(sp) = story_points
+                                        && let Err(e) = client
+                                            .update_field(
+                                                &project_info.id,
+                                                &item_id,
+                                                &field_ids.story_points,
+                                                &unblock_github::projects::FieldValue::Number(sp),
+                                            )
+                                            .await
+                                    {
+                                        tracing::warn!(error = %e, "Failed to set StoryPoints field");
+                                    }
+
+                                    // Set DeferUntil if provided.
+                                    if let Some(du) = defer_until
+                                        && let Err(e) = client
+                                            .update_field(
+                                                &project_info.id,
+                                                &item_id,
+                                                &field_ids.defer_until,
+                                                &unblock_github::projects::FieldValue::Date(du),
+                                            )
+                                            .await
+                                    {
+                                        tracing::warn!(error = %e, "Failed to set DeferUntil field");
+                                    }
+
+                                    fields_set = true;
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "Failed to get project item ID — fields will not be set"
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "Failed to resolve project info — fields will not be set"
+                            );
+                        }
+                    }
+                } else {
+                    tracing::debug!(
+                        "No field IDs cached — run setup first to enable project field assignment"
+                    );
+                }
+
+                // Step 5: Add blocking relationships.
+                let mut blockers_added: u32 = 0;
+                for blocker in &blocked_by_refs {
+                    match client.add_blocked_by_ref(issue_number, blocker).await {
+                        Ok(()) => blockers_added += 1,
+                        Err(e) => {
+                            tracing::warn!(
+                                blocker = %blocker,
+                                error = %e,
+                                "Failed to add blocking relationship"
+                            );
+                        }
+                    }
+                }
+
+                // Step 6: Add parent relationship.
+                let mut parent_set = false;
+                if let Some(parent_number) = parent {
+                    match client.add_sub_issue(parent_number, issue_number).await {
+                        Ok(()) => parent_set = true,
+                        Err(e) => {
+                            tracing::warn!(
+                                parent_number,
+                                error = %e,
+                                "Failed to add parent relationship"
+                            );
+                        }
+                    }
+                }
+
+                Ok(CreateResult {
+                    number: issue_number,
+                    url: issue_url,
+                    title: issue_title,
+                    issue_type: issue_type_owned,
+                    priority: priority_owned,
+                    added_to_project,
+                    fields_set,
+                    blockers_added,
+                    parent_set,
+                    hint: format!(
+                        "Issue #{issue_number} created. Use `show` to verify or `ready` to check if it appears in the ready set."
+                    ),
+                })
+            }
+        })
+        .await?;
+
+        Ok(Json(result))
     }
 }
 

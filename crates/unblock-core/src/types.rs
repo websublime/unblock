@@ -253,7 +253,7 @@ pub struct IssueSummary {
 ///
 /// # Parsing
 ///
-/// The [`FromStr`] implementation accepts:
+/// The [`FromStr`](std::str::FromStr) implementation accepts:
 /// - `"42"` -> `IssueRef::Local(42)`
 /// - `"owner/repo#42"` -> `IssueRef::CrossRepo { owner: "owner", repo: "repo", number: 42 }`
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -293,17 +293,18 @@ impl std::str::FromStr for IssueRef {
 
         // Try cross-repo format: owner/repo#number
         if let Some((prefix, num_str)) = s.split_once('#') {
-            if let Some((owner, repo)) = prefix.split_once('/') {
-                if !owner.is_empty() && !repo.is_empty() {
-                    let number = num_str
-                        .parse::<u64>()
-                        .map_err(|_| format!("invalid issue number in cross-repo ref: {s}"))?;
-                    return Ok(Self::CrossRepo {
-                        owner: owner.to_owned(),
-                        repo: repo.to_owned(),
-                        number,
-                    });
-                }
+            if let Some((owner, repo)) = prefix.split_once('/')
+                && !owner.is_empty()
+                && !repo.is_empty()
+            {
+                let number = num_str
+                    .parse::<u64>()
+                    .map_err(|_| format!("invalid issue number in cross-repo ref: {s}"))?;
+                return Ok(Self::CrossRepo {
+                    owner: owner.to_owned(),
+                    repo: repo.to_owned(),
+                    number,
+                });
             }
             // Has # but no valid owner/repo prefix — try as plain number after #
             let number = num_str

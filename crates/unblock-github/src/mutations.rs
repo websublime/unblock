@@ -12,6 +12,8 @@
 //! Error handling follows the same pattern: 429 → `RateLimited`, 404 →
 //! `IssueNotFound`, other non-2xx → `GitHubApi`.
 
+use std::fmt::Write as _;
+
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt as _;
 use tracing::{debug, instrument, warn};
@@ -580,8 +582,8 @@ impl GitHubClient {
 
     /// Resolves an [`IssueRef`] to a GraphQL global node ID.
     ///
-    /// For [`IssueRef::Local`], resolves against the configured repository.
-    /// For [`IssueRef::CrossRepo`], resolves against the specified `owner/repo`.
+    /// For local refs, resolves against the configured repository.
+    /// For cross-repo refs, resolves against the specified `owner/repo`.
     ///
     /// # Errors
     ///
@@ -715,7 +717,7 @@ impl GitHubClient {
     /// # Errors
     ///
     /// Returns [`Error::GitHubApi`] if a label creation fails for reasons other
-    /// than the label already existing (HTTP 422 with "already_exists" is ignored).
+    /// than the label already existing (HTTP 422 with `already_exists` is ignored).
     #[instrument(skip(self, labels), fields(owner = %self.owner(), repo = %self.repo()))]
     pub async fn ensure_labels(&self, labels: &[String]) -> Result<(), Error> {
         for label in labels {
@@ -739,11 +741,8 @@ impl GitHubClient {
             }
 
             // Label does not exist — create it.
-            let create_url = self.rest_url(&format!(
-                "/repos/{}/{}/labels",
-                self.owner(),
-                self.repo()
-            ));
+            let create_url =
+                self.rest_url(&format!("/repos/{}/{}/labels", self.owner(), self.repo()));
 
             let color = deterministic_label_color(label);
             let body = serde_json::json!({
@@ -846,7 +845,7 @@ fn encode_path_segment(s: &str) -> String {
                 encoded.push(byte as char);
             }
             _ => {
-                encoded.push_str(&format!("%{byte:02X}"));
+                let _ = write!(encoded, "%{byte:02X}");
             }
         }
     }
