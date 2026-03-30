@@ -14,8 +14,9 @@ use unblock_core::types::{
     BlockingEdge, IssueRef, IssueState, IssueType, Priority, ReadyState, Status,
 };
 use unblock_github::client::GitHubClient;
-use unblock_github::projects::OwnerType;
+use unblock_github::projects::{CreateViewParams, OwnerType, ViewLayout};
 use unblock_mcp::server::ServerState;
+use unblock_mcp::tools::setup::REQUIRED_VIEWS;
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -1146,9 +1147,6 @@ async fn setup_creates_views_with_correct_layout() {
         return;
     }
 
-    use unblock_github::projects::{CreateViewParams, ViewLayout};
-    use unblock_mcp::tools::setup::REQUIRED_VIEWS;
-
     let state = test_server_state().await;
     let client = &state.client;
 
@@ -1213,7 +1211,7 @@ async fn setup_creates_views_with_correct_layout() {
 
 /// Views are idempotent — rerun creates no duplicate views.
 ///
-/// After the views exist, calling list_views should show all 5 required
+/// After the views exist, calling `list_views` should show all 5 required
 /// view names present.
 #[tokio::test]
 async fn setup_views_idempotent_no_duplicates() {
@@ -1221,8 +1219,6 @@ async fn setup_views_idempotent_no_duplicates() {
         eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping integration test");
         return;
     }
-
-    use unblock_mcp::tools::setup::REQUIRED_VIEWS;
 
     let state = test_server_state().await;
     let client = &state.client;
@@ -1263,8 +1259,6 @@ async fn setup_dry_run_reports_without_mutations() {
         eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping integration test");
         return;
     }
-
-    use unblock_mcp::tools::setup::REQUIRED_VIEWS;
 
     let state = test_server_state().await;
     let client = &state.client;
@@ -1383,7 +1377,7 @@ async fn setup_owner_type_detection_works() {
     }
 }
 
-/// Views use correct visible_fields integer IDs from list_rest_fields.
+/// Views use correct `visible_fields` integer IDs from `list_rest_fields`.
 ///
 /// Verifies that `list_rest_fields()` returns fields with positive integer
 /// IDs that are suitable for use as `visible_fields` in view creation.
