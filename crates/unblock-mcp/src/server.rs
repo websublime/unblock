@@ -38,6 +38,7 @@ use unblock_core::config::Config;
 use unblock_core::errors::IssueClosedSnafu;
 use unblock_core::types::IssueState;
 use unblock_github::client::GitHubClient;
+use unblock_github::projects::FieldValue;
 use unblock_github::projects::{CreateViewParams, ViewLayout};
 
 /// Instructions string injected into the agent context window.
@@ -66,7 +67,7 @@ unblock turns GitHub Issues into a dependency graph. Ask `ready` to get unblocke
 | setup   | Set target repo and project                          | owner, repo, project_number?        |
 | ready   | Find issues that can be worked on right now           | limit?, type?, priority?, agent?    |
 | claim   | Assign yourself to an issue                          | issue_number, agent?                |
-| close   | Close an issue and cascade-unblock dependents        | issue_number                        |
+| close   | Close an issue and cascade-unblock dependents        | id, reason?                         |
 | create  | Create a new issue with optional dependencies        | title, body?, blocked_by?           |
 
 ### Query & Dependencies
@@ -759,8 +760,6 @@ impl UnblockServer {
                             .get_project_item_id(&issue.node_id, &project_info.id)
                             .await
                         {
-                            use unblock_github::projects::FieldValue;
-
                             // Status -> In Progress
                             if let Some(option_id) = field_ids.status.options.get("In Progress")
                                 && let Err(e) = client
@@ -890,14 +889,14 @@ impl UnblockServer {
 
                 // Step 3: Update Projects V2 fields on the closed issue:
                 // Status → Done, ReadyState → Not Ready.
+                // TODO(unblock-b6b.79): Extract shared project field update helper to
+                // deduplicate this if-let ladder (also in claim handler and cascade below).
                 if let Some(field_ids) = client.field_ids().await {
                     if let Ok(project_info) = client.resolve_project_info().await {
                         if let Ok(item_id) = client
                             .get_project_item_id(&issue.node_id, &project_info.id)
                             .await
                         {
-                            use unblock_github::projects::FieldValue;
-
                             // Status → Done
                             if let Some(option_id) = field_ids.status.options.get("Done")
                                 && let Err(e) = client
@@ -974,6 +973,7 @@ impl UnblockServer {
 
                 // Update Projects V2 fields: ReadyState → Ready,
                 // Status → Backlog (if not already InProgress).
+                // TODO(unblock-b6b.79): Third copy of field update ladder — extract shared helper.
                 if let Some(field_ids) = client.field_ids().await
                     && let Ok(project_info) = client.resolve_project_info().await
                 {
@@ -984,8 +984,6 @@ impl UnblockServer {
                                 .get_project_item_id(&cascaded_issue.node_id, &project_info.id)
                                 .await
                             {
-                                use unblock_github::projects::FieldValue;
-
                                 // ReadyState → Ready
                                 if let Some(option_id) = field_ids.ready_state.options.get("Ready")
                                     && let Err(e) = client
