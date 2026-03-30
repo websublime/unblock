@@ -14,7 +14,9 @@
 
 use std::sync::Arc;
 
-use crate::tools::claim::{ClaimParams, ClaimResult};
+use chrono::Utc;
+
+use crate::tools::claim::{ClaimCandidate, ClaimParams, ClaimResult, validate_claimable};
 use crate::tools::create::{CreateParams, CreateResult};
 use crate::tools::execute_read_tool;
 use crate::tools::execute_write_tool;
@@ -733,9 +735,6 @@ impl UnblockServer {
             let agent_name = agent_name.clone();
 
             async move {
-                use crate::tools::claim::{ClaimCandidate, validate_claimable};
-                use chrono::Utc;
-
                 // Step 1: Fetch the issue.
                 let issue = client.fetch_issue(issue_number).await?;
 
