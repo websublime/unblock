@@ -17,6 +17,7 @@ use std::sync::Arc;
 use chrono::Utc;
 
 use crate::tools::claim::{ClaimCandidate, ClaimParams, ClaimResult, validate_claimable};
+use crate::tools::close::{CloseParams, CloseResult};
 use crate::tools::create::{CreateParams, CreateResult};
 use crate::tools::execute_read_tool;
 use crate::tools::execute_write_tool;
@@ -34,6 +35,8 @@ use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use tracing::info;
 use unblock_core::cache::GraphCache;
 use unblock_core::config::Config;
+use unblock_core::errors::IssueClosedSnafu;
+use unblock_core::types::IssueState;
 use unblock_github::client::GitHubClient;
 use unblock_github::projects::{CreateViewParams, ViewLayout};
 
@@ -831,6 +834,221 @@ impl UnblockServer {
         .await?;
 
         Ok(Json(result))
+    }
+
+    /// Close an issue and cascade-unblock dependents.
+    ///
+    /// Validates the issue is open, optionally adds a reason comment, closes it
+    /// via the GitHub API, updates Projects V2 fields (Status=Done,
+    /// ReadyState=Not Ready), rebuilds the cache, then computes the unblock
+    /// cascade. For each newly unblocked issue, updates its Projects V2 fields
+    /// (ReadyState=Ready, Status=Backlog if not already `InProgress`) and posts
+    /// an unblock comment.
+    ///
+    /// This is a write tool -- uses `execute_write_tool` for the close mutation
+    /// and cache rebuild, then performs cascade updates as a second phase.
+    #[tool(
+        name = "close",
+        description = "Close an issue and cascade-unblock dependents. Validates the issue is open, closes it, updates project fields (Status=Done, ReadyState=Not Ready), and auto-unblocks any dependent issues whose blockers are now all closed. Returns the list of newly unblocked issue numbers. Triggers graph rebuild."
+    )]
+    async fn close(
+        &self,
+        Parameters(params): Parameters<CloseParams>,
+    ) -> Result<Json<CloseResult>, ErrorData> {
+        let state = self.state();
+        let client = Arc::clone(&state.client);
+
+        let issue_number = params.id;
+        let reason = params.reason;
+
+        info!(
+            issue_number,
+            reason = reason.as_deref(),
+            "Close tool invoked"
+        );
+
+        // Phase 1: Validate, close, and rebuild cache via execute_write_tool.
+        execute_write_tool(state, || {
+            let client = Arc::clone(&client);
+            let reason = reason.clone();
+
+            async move {
+                // Step 1: Fetch the issue and validate it is open.
+                let issue = client.fetch_issue(issue_number).await?;
+
+                if issue.state == IssueState::Closed {
+                    return Err(IssueClosedSnafu {
+                        number: issue_number,
+                    }
+                    .build()
+                    .into());
+                }
+
+                // Step 2: Close the issue (this handles adding a reason comment
+                // internally if reason is Some — see mutations.rs).
+                client.close_issue(issue_number, reason).await?;
+
+                // Step 3: Update Projects V2 fields on the closed issue:
+                // Status → Done, ReadyState → Not Ready.
+                if let Some(field_ids) = client.field_ids().await {
+                    if let Ok(project_info) = client.resolve_project_info().await {
+                        if let Ok(item_id) = client
+                            .get_project_item_id(&issue.node_id, &project_info.id)
+                            .await
+                        {
+                            use unblock_github::projects::FieldValue;
+
+                            // Status → Done
+                            if let Some(option_id) = field_ids.status.options.get("Done")
+                                && let Err(e) = client
+                                    .update_field(
+                                        &project_info.id,
+                                        &item_id,
+                                        &field_ids.status.field_id,
+                                        &FieldValue::SingleSelectOption(option_id.clone()),
+                                    )
+                                    .await
+                            {
+                                tracing::warn!(error = %e, "Failed to set Status=Done on closed issue");
+                            }
+
+                            // ReadyState → Not Ready
+                            if let Some(option_id) =
+                                field_ids.ready_state.options.get("Not Ready")
+                                && let Err(e) = client
+                                    .update_field(
+                                        &project_info.id,
+                                        &item_id,
+                                        &field_ids.ready_state.field_id,
+                                        &FieldValue::SingleSelectOption(option_id.clone()),
+                                    )
+                                    .await
+                            {
+                                tracing::warn!(
+                                    error = %e,
+                                    "Failed to set ReadyState=Not Ready on closed issue"
+                                );
+                            }
+                        } else {
+                            tracing::warn!(
+                                "Failed to get project item ID for closed issue — fields will not be set"
+                            );
+                        }
+                    } else {
+                        tracing::warn!(
+                            "Failed to resolve project info — closed issue fields will not be set"
+                        );
+                    }
+                } else {
+                    tracing::debug!(
+                        "No field IDs cached — run setup first to enable project field assignment"
+                    );
+                }
+
+                Ok(())
+            }
+        })
+        .await?;
+
+        // Phase 2: Compute cascade from the freshly rebuilt cache.
+        let mut unblocked = Vec::new();
+
+        if let Some(graph) = state.cache.get_graph().await {
+            // compute_unblock_cascade's _all_issues param is currently unused —
+            // pass an empty slice (see graph.rs:215-220 for rationale).
+            let cascade = graph.compute_unblock_cascade(issue_number, &[]);
+
+            // Phase 3: For each newly unblocked issue, update project fields and
+            // post an unblock comment. Each update is best-effort — failures are
+            // logged but do not abort the cascade.
+            for &cascaded_number in &cascade {
+                // Post unblock comment.
+                let comment_body = format!("\u{2705} Unblocked by closing #{issue_number}");
+                if let Err(e) = client.add_comment(cascaded_number, comment_body).await {
+                    tracing::warn!(
+                        cascaded_number,
+                        error = %e,
+                        "Failed to post unblock comment on cascaded issue"
+                    );
+                }
+
+                // Update Projects V2 fields: ReadyState → Ready,
+                // Status → Backlog (if not already InProgress).
+                if let Some(field_ids) = client.field_ids().await
+                    && let Ok(project_info) = client.resolve_project_info().await
+                {
+                    // Fetch the cascaded issue to get its node_id and current status.
+                    match client.fetch_issue(cascaded_number).await {
+                        Ok(cascaded_issue) => {
+                            if let Ok(item_id) = client
+                                .get_project_item_id(&cascaded_issue.node_id, &project_info.id)
+                                .await
+                            {
+                                use unblock_github::projects::FieldValue;
+
+                                // ReadyState → Ready
+                                if let Some(option_id) = field_ids.ready_state.options.get("Ready")
+                                    && let Err(e) = client
+                                        .update_field(
+                                            &project_info.id,
+                                            &item_id,
+                                            &field_ids.ready_state.field_id,
+                                            &FieldValue::SingleSelectOption(option_id.clone()),
+                                        )
+                                        .await
+                                {
+                                    tracing::warn!(
+                                        cascaded_number,
+                                        error = %e,
+                                        "Failed to set ReadyState=Ready on cascaded issue"
+                                    );
+                                }
+
+                                // Status → Backlog (only if not already InProgress).
+                                if cascaded_issue.status != unblock_core::types::Status::InProgress
+                                    && let Some(option_id) = field_ids.status.options.get("Backlog")
+                                    && let Err(e) = client
+                                        .update_field(
+                                            &project_info.id,
+                                            &item_id,
+                                            &field_ids.status.field_id,
+                                            &FieldValue::SingleSelectOption(option_id.clone()),
+                                        )
+                                        .await
+                                {
+                                    tracing::warn!(
+                                        cascaded_number,
+                                        error = %e,
+                                        "Failed to set Status=Backlog on cascaded issue"
+                                    );
+                                }
+                            } else {
+                                tracing::warn!(
+                                    cascaded_number,
+                                    "Failed to get project item ID for cascaded issue"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                cascaded_number,
+                                error = %e,
+                                "Failed to fetch cascaded issue for field updates"
+                            );
+                        }
+                    }
+                }
+            }
+
+            unblocked = cascade;
+        } else {
+            tracing::warn!("Cache not available after rebuild — cascade computation skipped");
+        }
+
+        Ok(Json(CloseResult {
+            issue_number,
+            unblocked,
+        }))
     }
 
     /// Create a new GitHub Issue with optional dependencies, project fields,
