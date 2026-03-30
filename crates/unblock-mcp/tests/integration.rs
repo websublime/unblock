@@ -1243,8 +1243,11 @@ async fn setup_views_idempotent_no_duplicates() {
         }
     }
 
-    eprintln!(
-        "setup_views_idempotent: {found}/{} required views found in existing views",
+    assert_eq!(
+        found,
+        REQUIRED_VIEWS.len(),
+        "Expected all {} required views to exist after setup, but only {found} found. \
+         Missing views indicate setup did not create them or idempotency check failed.",
         REQUIRED_VIEWS.len()
     );
 }
