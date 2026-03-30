@@ -32,6 +32,7 @@
 //! `init`, `setup`, `doctor`, `prime`
 
 pub mod claim;
+pub mod close;
 pub mod create;
 pub mod init;
 pub mod ready;
