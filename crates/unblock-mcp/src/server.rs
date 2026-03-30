@@ -733,64 +733,22 @@ impl UnblockServer {
             let agent_name = agent_name.clone();
 
             async move {
+                use crate::tools::claim::{ClaimCandidate, validate_claimable};
                 use chrono::Utc;
-                use unblock_core::errors::{
-                    AlreadyClaimedSnafu, IssueBlockedSnafu, IssueClosedSnafu, IssueDeferredSnafu,
-                };
-                use unblock_core::types::IssueState;
 
                 // Step 1: Fetch the issue.
                 let issue = client.fetch_issue(issue_number).await?;
 
-                // Step 2: Validate — closed (cheapest check).
-                if issue.state == IssueState::Closed {
-                    return Err(IssueClosedSnafu {
-                        number: issue_number,
-                    }
-                    .build()
-                    .into());
-                }
-
-                // Step 3: Validate — blocked (check open blockers).
-                let open_blockers: Vec<u64> = issue
-                    .blocked_by
-                    .iter()
-                    .filter(|r| r.state == IssueState::Open)
-                    .map(|r| r.number)
-                    .collect();
-
-                if !open_blockers.is_empty() {
-                    return Err(IssueBlockedSnafu {
-                        number: issue_number,
-                        blockers: open_blockers,
-                    }
-                    .build()
-                    .into());
-                }
-
-                // Step 4: Validate — deferred.
-                if let Some(defer_until) = issue.defer_until {
-                    let today = Utc::now().date_naive();
-                    if defer_until > today {
-                        return Err(IssueDeferredSnafu {
-                            number: issue_number,
-                            until: defer_until.to_string(),
-                        }
-                        .build()
-                        .into());
-                    }
-                }
-
-                // Step 5: Validate — already claimed.
-                if issue.status == unblock_core::types::Status::InProgress && issue.agent.is_some()
-                {
-                    return Err(AlreadyClaimedSnafu {
-                        number: issue_number,
-                        agent: issue.agent.unwrap_or_default(),
-                    }
-                    .build()
-                    .into());
-                }
+                // Steps 2–5: Validate claimability (closed, blocked, deferred, already claimed).
+                let candidate = ClaimCandidate {
+                    number: issue.number,
+                    state: issue.state,
+                    status: issue.status,
+                    agent: issue.agent.clone(),
+                    blocked_by: issue.blocked_by.clone(),
+                    defer_until: issue.defer_until,
+                };
+                validate_claimable(&candidate, Utc::now().date_naive())?;
 
                 // Step 6: Update Projects V2 fields.
                 if let Some(field_ids) = client.field_ids().await {
