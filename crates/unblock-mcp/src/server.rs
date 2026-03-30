@@ -143,6 +143,10 @@ impl UnblockServer {
 /// `DeferUntil`. Each field update is best-effort: failures are logged as
 /// warnings but do not abort the remaining updates. This keeps the create flow
 /// resilient to partial project configuration (e.g. missing option values).
+///
+/// The `status` parameter controls the initial Status field value. Callers
+/// should pass `"Blocked"` when the issue has blockers, or `"Backlog"` otherwise
+/// (per PRD section 6.1 and ARCH section 10.4).
 #[allow(clippy::too_many_arguments)]
 async fn set_project_fields(
     client: &GitHubClient,
@@ -151,6 +155,7 @@ async fn set_project_fields(
     field_ids: &unblock_github::projects::ProjectFieldIds,
     priority: &str,
     issue_type: &str,
+    status: &str,
     ready_state: &str,
     story_points: Option<f64>,
     defer_until: Option<chrono::NaiveDate>,
@@ -185,8 +190,8 @@ async fn set_project_fields(
         tracing::warn!(error = %e, "Failed to set IssueType field");
     }
 
-    // Set Status to Backlog.
-    if let Some(option_id) = field_ids.status.options.get("Backlog")
+    // Set Status (Backlog when unblocked, Blocked when blocked_by is present).
+    if let Some(option_id) = field_ids.status.options.get(status)
         && let Err(e) = client
             .update_field(
                 project_id,
@@ -651,12 +656,12 @@ impl UnblockServer {
         let issue_type_str = params.issue_type.as_deref().unwrap_or("Task");
         if !matches!(
             issue_type_str,
-            "Task" | "Bug" | "Feature" | "Epic" | "Chore" | "Spike"
+            "Task" | "Bug" | "Feature" | "Epic" | "Chore"
         ) {
             return Err(ErrorData {
                 code: rmcp::model::ErrorCode::INVALID_PARAMS,
                 message: format!(
-                    "Invalid issue_type '{issue_type_str}' — must be Task, Bug, Feature, Epic, Chore, or Spike"
+                    "Invalid issue_type '{issue_type_str}' — must be Task, Bug, Feature, Epic, or Chore"
                 )
                 .into(),
                 data: None,
@@ -786,11 +791,12 @@ impl UnblockServer {
                                 Ok(item_id) => {
                                     added_to_project = true;
 
-                                    let initial_ready_state = if blocked_by_refs.is_empty() {
-                                        "Ready"
-                                    } else {
-                                        "Not Ready"
-                                    };
+                                    let (initial_status, initial_ready_state) =
+                                        if blocked_by_refs.is_empty() {
+                                            ("Backlog", "Ready")
+                                        } else {
+                                            ("Blocked", "Not Ready")
+                                        };
 
                                     set_project_fields(
                                         &client,
@@ -799,6 +805,7 @@ impl UnblockServer {
                                         &field_ids,
                                         &priority_owned,
                                         &issue_type_owned,
+                                        initial_status,
                                         initial_ready_state,
                                         story_points,
                                         defer_until,
