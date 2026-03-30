@@ -116,10 +116,12 @@ pub(crate) fn validate_claimable(
     }
 
     // Check 4: already claimed.
-    if candidate.status == Status::InProgress && candidate.agent.is_some() {
+    if let Some(ref agent) = candidate.agent
+        && candidate.status == Status::InProgress
+    {
         return Err(AlreadyClaimedSnafu {
             number: candidate.number,
-            agent: candidate.agent.clone().unwrap_or_default(),
+            agent: agent.clone(),
         }
         .build()
         .into());
