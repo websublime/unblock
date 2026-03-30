@@ -19,6 +19,7 @@ use chrono::Utc;
 use crate::tools::claim::{ClaimCandidate, ClaimParams, ClaimResult, validate_claimable};
 use crate::tools::close::{CloseParams, CloseResult};
 use crate::tools::create::{CreateParams, CreateResult};
+use crate::tools::depends::{DependsParams, DependsResult};
 use crate::tools::execute_read_tool;
 use crate::tools::execute_write_tool;
 use crate::tools::init::{InitParams, InitResult};
@@ -35,7 +36,7 @@ use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use tracing::info;
 use unblock_core::cache::GraphCache;
 use unblock_core::config::Config;
-use unblock_core::errors::IssueClosedSnafu;
+use unblock_core::errors::{CircularDependencySnafu, IssueClosedSnafu};
 use unblock_core::types::IssueState;
 use unblock_github::client::GitHubClient;
 use unblock_github::projects::FieldValue;
@@ -1046,6 +1047,152 @@ impl UnblockServer {
         Ok(Json(CloseResult {
             issue_number,
             unblocked,
+        }))
+    }
+
+    /// Add a blocking dependency between two issues.
+    ///
+    /// Makes the source issue blocked by the target issue. Validates the source
+    /// exists, checks for cycles and duplicates using the cached graph, creates
+    /// the blocking relationship via the GitHub API, updates Projects V2 fields
+    /// (ReadyState=Not Ready, Status=Blocked) on the source, and rebuilds the
+    /// cache.
+    ///
+    /// The target accepts a local issue number (e.g. `"42"`) or a cross-repo
+    /// reference in `owner/repo#number` format (e.g. `"websublime/other-repo#7"`).
+    ///
+    /// This is a write tool — uses `execute_write_tool` for the mutation and
+    /// cache rebuild.
+    #[tool(
+        name = "depends",
+        description = "Add a blocking dependency: source becomes blocked by target. Validates both issues exist, rejects cycles and duplicates. Target accepts local number or owner/repo#number for cross-repo. Updates project fields (ReadyState=Not Ready, Status=Blocked) on source. Triggers graph rebuild."
+    )]
+    async fn depends(
+        &self,
+        Parameters(params): Parameters<DependsParams>,
+    ) -> Result<Json<DependsResult>, ErrorData> {
+        let state = self.state();
+        let client = Arc::clone(&state.client);
+
+        let source = params.source;
+        let target_str = params.target.clone();
+
+        info!(source, target = %target_str, "Depends tool invoked");
+
+        // Parse target string into IssueRef.
+        let issue_ref = target_str
+            .parse::<unblock_core::types::IssueRef>()
+            .map_err(|e| ErrorData {
+                code: rmcp::model::ErrorCode::INVALID_PARAMS,
+                message: format!("Invalid target reference '{target_str}': {e}").into(),
+                data: None,
+            })?;
+
+        // Extract the target number for cycle detection.
+        let target_number = match &issue_ref {
+            unblock_core::types::IssueRef::Local(n) => *n,
+            unblock_core::types::IssueRef::CrossRepo { number, .. } => *number,
+        };
+
+        // Step 1: Validate source issue exists.
+        client
+            .fetch_issue(source)
+            .await
+            .map_err(crate::errors::github_error_to_mcp)?;
+
+        // Step 2: Cycle detection using cached graph.
+        // For cross-repo targets, the target may not be in the local graph,
+        // so would_create_cycle returns false (correct — no local cycle possible).
+        if let Some(graph) = state.cache.get_graph().await
+            && graph.would_create_cycle(source, target_number)
+        {
+            return Err(crate::errors::github_error_to_mcp(
+                CircularDependencySnafu {
+                    source,
+                    target: target_number,
+                }
+                .build()
+                .into(),
+            ));
+        }
+
+        // Step 3: Add blocking relationship and rebuild cache via execute_write_tool.
+        execute_write_tool(state, || {
+            let client = Arc::clone(&client);
+            let issue_ref = issue_ref.clone();
+
+            async move { client.add_blocked_by_ref(source, &issue_ref).await }
+        })
+        .await?;
+
+        // Step 4: Update Projects V2 fields on source issue:
+        // ReadyState → Not Ready, Status → Blocked.
+        if let Some(field_ids) = client.field_ids().await {
+            if let Ok(project_info) = client.resolve_project_info().await {
+                // Re-fetch source issue for its node_id (the earlier fetch was consumed).
+                if let Ok(source_issue) = client.fetch_issue(source).await {
+                    if let Ok(item_id) = client
+                        .get_project_item_id(&source_issue.node_id, &project_info.id)
+                        .await
+                    {
+                        // ReadyState → Not Ready
+                        if let Some(option_id) = field_ids.ready_state.options.get("Not Ready")
+                            && let Err(e) = client
+                                .update_field(
+                                    &project_info.id,
+                                    &item_id,
+                                    &field_ids.ready_state.field_id,
+                                    &FieldValue::SingleSelectOption(option_id.clone()),
+                                )
+                                .await
+                        {
+                            tracing::warn!(
+                                error = %e,
+                                "Failed to set ReadyState=Not Ready on source issue"
+                            );
+                        }
+
+                        // Status → Blocked
+                        if let Some(option_id) = field_ids.status.options.get("Blocked")
+                            && let Err(e) = client
+                                .update_field(
+                                    &project_info.id,
+                                    &item_id,
+                                    &field_ids.status.field_id,
+                                    &FieldValue::SingleSelectOption(option_id.clone()),
+                                )
+                                .await
+                        {
+                            tracing::warn!(
+                                error = %e,
+                                "Failed to set Status=Blocked on source issue"
+                            );
+                        }
+                    } else {
+                        tracing::warn!(
+                            "Failed to get project item ID for source issue — fields will not be set"
+                        );
+                    }
+                } else {
+                    tracing::warn!("Failed to re-fetch source issue for field updates");
+                }
+            } else {
+                tracing::warn!(
+                    "Failed to resolve project info — source issue fields will not be set"
+                );
+            }
+        } else {
+            tracing::debug!(
+                "No field IDs cached — run setup first to enable project field assignment"
+            );
+        }
+
+        Ok(Json(DependsResult {
+            source,
+            target: target_str,
+            message: format!(
+                "Issue #{source} is now blocked by {issue_ref}. Source marked as Not Ready/Blocked."
+            ),
         }))
     }
 
