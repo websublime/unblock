@@ -137,6 +137,111 @@ impl UnblockServer {
     }
 }
 
+/// Set project fields on a newly created issue's project item.
+///
+/// Updates Priority, `IssueType`, Status, `ReadyState`, `StoryPoints`, and
+/// `DeferUntil`. Each field update is best-effort: failures are logged as
+/// warnings but do not abort the remaining updates. This keeps the create flow
+/// resilient to partial project configuration (e.g. missing option values).
+#[allow(clippy::too_many_arguments)]
+async fn set_project_fields(
+    client: &GitHubClient,
+    project_id: &str,
+    item_id: &str,
+    field_ids: &unblock_github::projects::ProjectFieldIds,
+    priority: &str,
+    issue_type: &str,
+    ready_state: &str,
+    story_points: Option<f64>,
+    defer_until: Option<chrono::NaiveDate>,
+) {
+    use unblock_github::projects::FieldValue;
+
+    // Set Priority.
+    if let Some(option_id) = field_ids.priority.options.get(priority)
+        && let Err(e) = client
+            .update_field(
+                project_id,
+                item_id,
+                &field_ids.priority.field_id,
+                &FieldValue::SingleSelectOption(option_id.clone()),
+            )
+            .await
+    {
+        tracing::warn!(error = %e, "Failed to set Priority field");
+    }
+
+    // Set IssueType.
+    if let Some(option_id) = field_ids.issue_type.options.get(issue_type)
+        && let Err(e) = client
+            .update_field(
+                project_id,
+                item_id,
+                &field_ids.issue_type.field_id,
+                &FieldValue::SingleSelectOption(option_id.clone()),
+            )
+            .await
+    {
+        tracing::warn!(error = %e, "Failed to set IssueType field");
+    }
+
+    // Set Status to Backlog.
+    if let Some(option_id) = field_ids.status.options.get("Backlog")
+        && let Err(e) = client
+            .update_field(
+                project_id,
+                item_id,
+                &field_ids.status.field_id,
+                &FieldValue::SingleSelectOption(option_id.clone()),
+            )
+            .await
+    {
+        tracing::warn!(error = %e, "Failed to set Status field");
+    }
+
+    // Set ReadyState.
+    if let Some(option_id) = field_ids.ready_state.options.get(ready_state)
+        && let Err(e) = client
+            .update_field(
+                project_id,
+                item_id,
+                &field_ids.ready_state.field_id,
+                &FieldValue::SingleSelectOption(option_id.clone()),
+            )
+            .await
+    {
+        tracing::warn!(error = %e, "Failed to set ReadyState field");
+    }
+
+    // Set StoryPoints if provided.
+    if let Some(sp) = story_points
+        && let Err(e) = client
+            .update_field(
+                project_id,
+                item_id,
+                &field_ids.story_points,
+                &FieldValue::Number(sp),
+            )
+            .await
+    {
+        tracing::warn!(error = %e, "Failed to set StoryPoints field");
+    }
+
+    // Set DeferUntil if provided.
+    if let Some(du) = defer_until
+        && let Err(e) = client
+            .update_field(
+                project_id,
+                item_id,
+                &field_ids.defer_until,
+                &FieldValue::Date(du),
+            )
+            .await
+    {
+        tracing::warn!(error = %e, "Failed to set DeferUntil field");
+    }
+}
+
 /// Tool router implementation for MCP tools.
 #[tool_router]
 impl UnblockServer {
@@ -681,106 +786,24 @@ impl UnblockServer {
                                 Ok(item_id) => {
                                     added_to_project = true;
 
-                                    // Set Priority.
-                                    if let Some(option_id) =
-                                        field_ids.priority.options.get(&priority_owned)
-                                        && let Err(e) = client
-                                            .update_field(
-                                                &project_info.id,
-                                                &item_id,
-                                                &field_ids.priority.field_id,
-                                                &unblock_github::projects::FieldValue::SingleSelectOption(
-                                                    option_id.clone(),
-                                                ),
-                                            )
-                                            .await
-                                    {
-                                        tracing::warn!(error = %e, "Failed to set Priority field");
-                                    }
-
-                                    // Set IssueType.
-                                    if let Some(option_id) =
-                                        field_ids.issue_type.options.get(&issue_type_owned)
-                                        && let Err(e) = client
-                                            .update_field(
-                                                &project_info.id,
-                                                &item_id,
-                                                &field_ids.issue_type.field_id,
-                                                &unblock_github::projects::FieldValue::SingleSelectOption(
-                                                    option_id.clone(),
-                                                ),
-                                            )
-                                            .await
-                                    {
-                                        tracing::warn!(error = %e, "Failed to set IssueType field");
-                                    }
-
-                                    // Set Status to Backlog.
-                                    if let Some(option_id) =
-                                        field_ids.status.options.get("Backlog")
-                                        && let Err(e) = client
-                                            .update_field(
-                                                &project_info.id,
-                                                &item_id,
-                                                &field_ids.status.field_id,
-                                                &unblock_github::projects::FieldValue::SingleSelectOption(
-                                                    option_id.clone(),
-                                                ),
-                                            )
-                                            .await
-                                    {
-                                        tracing::warn!(error = %e, "Failed to set Status field");
-                                    }
-
-                                    // Set ReadyState (Ready if unblocked, Not Ready if blocked).
                                     let initial_ready_state = if blocked_by_refs.is_empty() {
                                         "Ready"
                                     } else {
                                         "Not Ready"
                                     };
-                                    if let Some(option_id) =
-                                        field_ids.ready_state.options.get(initial_ready_state)
-                                        && let Err(e) = client
-                                            .update_field(
-                                                &project_info.id,
-                                                &item_id,
-                                                &field_ids.ready_state.field_id,
-                                                &unblock_github::projects::FieldValue::SingleSelectOption(
-                                                    option_id.clone(),
-                                                ),
-                                            )
-                                            .await
-                                    {
-                                        tracing::warn!(error = %e, "Failed to set ReadyState field");
-                                    }
 
-                                    // Set StoryPoints if provided.
-                                    if let Some(sp) = story_points
-                                        && let Err(e) = client
-                                            .update_field(
-                                                &project_info.id,
-                                                &item_id,
-                                                &field_ids.story_points,
-                                                &unblock_github::projects::FieldValue::Number(sp),
-                                            )
-                                            .await
-                                    {
-                                        tracing::warn!(error = %e, "Failed to set StoryPoints field");
-                                    }
-
-                                    // Set DeferUntil if provided.
-                                    if let Some(du) = defer_until
-                                        && let Err(e) = client
-                                            .update_field(
-                                                &project_info.id,
-                                                &item_id,
-                                                &field_ids.defer_until,
-                                                &unblock_github::projects::FieldValue::Date(du),
-                                            )
-                                            .await
-                                    {
-                                        tracing::warn!(error = %e, "Failed to set DeferUntil field");
-                                    }
+                                    set_project_fields(
+                                        &client,
+                                        &project_info.id,
+                                        &item_id,
+                                        &field_ids,
+                                        &priority_owned,
+                                        &issue_type_owned,
+                                        initial_ready_state,
+                                        story_points,
+                                        defer_until,
+                                    )
+                                    .await;
 
                                     fields_attempted = true;
                                 }
