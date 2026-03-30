@@ -667,7 +667,7 @@ impl UnblockServer {
 
                 // Step 4: Set project fields if project is configured.
                 let mut added_to_project = false;
-                let mut fields_set = false;
+                let mut fields_attempted = false;
 
                 if let Some(field_ids) = client.field_ids().await {
                     // Resolve the project info to get the project ID.
@@ -782,7 +782,7 @@ impl UnblockServer {
                                         tracing::warn!(error = %e, "Failed to set DeferUntil field");
                                     }
 
-                                    fields_set = true;
+                                    fields_attempted = true;
                                 }
                                 Err(e) => {
                                     tracing::warn!(
@@ -842,7 +842,7 @@ impl UnblockServer {
                     issue_type: issue_type_owned,
                     priority: priority_owned,
                     added_to_project,
-                    fields_set,
+                    fields_attempted,
                     blockers_added,
                     parent_set,
                     hint: format!(
