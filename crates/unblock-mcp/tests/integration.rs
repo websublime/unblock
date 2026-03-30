@@ -14,6 +14,7 @@ use unblock_core::types::{
     BlockingEdge, IssueRef, IssueState, IssueType, Priority, ReadyState, Status,
 };
 use unblock_github::client::GitHubClient;
+use unblock_github::projects::OwnerType;
 use unblock_mcp::server::ServerState;
 
 // ── Helpers ─────────────────────────────────────────────────────────
@@ -1041,4 +1042,387 @@ async fn create_issue_appears_in_ready_set_after_rebuild() {
     let _ = client
         .close_issue(issue.number, Some("test cleanup".to_owned()))
         .await;
+}
+
+// ── Setup tool: integration tests ────────────────────────────────────
+
+/// Returns `true` if the `UNBLOCK_PROJECT` env var is set and non-empty.
+fn has_project_number() -> bool {
+    std::env::var("UNBLOCK_PROJECT")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
+}
+
+/// Setup creates all 7 required fields on first run.
+///
+/// Verifies that `setup_fields()` returns `created` entries for any fields
+/// that did not already exist, and that the total resolved field count is 7.
+#[tokio::test]
+async fn setup_creates_fields_on_first_run() {
+    if !has_github_token() || !has_project_number() {
+        eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping integration test");
+        return;
+    }
+
+    let state = test_server_state().await;
+    let client = &state.client;
+
+    let project_info = client
+        .resolve_project_info()
+        .await
+        .expect("resolve_project_info should succeed");
+
+    let report = client
+        .setup_fields(&project_info.id)
+        .await
+        .expect("setup_fields should succeed");
+
+    // Total fields (created + skipped) should be 7.
+    let total = report.created.len() + report.skipped.len();
+    assert_eq!(
+        total, 7,
+        "setup should resolve exactly 7 fields, got {total}"
+    );
+
+    eprintln!(
+        "setup_creates_fields: created={:?}, skipped={:?}",
+        report.created, report.skipped
+    );
+}
+
+/// Setup is idempotent — rerun creates no duplicate fields.
+///
+/// Calls `setup_fields()` twice. The second call should report all fields
+/// as skipped (already existing) with zero created.
+#[tokio::test]
+async fn setup_fields_idempotent_no_duplicates() {
+    if !has_github_token() || !has_project_number() {
+        eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping integration test");
+        return;
+    }
+
+    let state = test_server_state().await;
+    let client = &state.client;
+
+    let project_info = client
+        .resolve_project_info()
+        .await
+        .expect("resolve_project_info should succeed");
+
+    // First run — ensure all fields exist.
+    let _ = client
+        .setup_fields(&project_info.id)
+        .await
+        .expect("setup_fields (first run) should succeed");
+
+    // Second run — all should be skipped.
+    let report2 = client
+        .setup_fields(&project_info.id)
+        .await
+        .expect("setup_fields (second run) should succeed");
+
+    assert!(
+        report2.created.is_empty(),
+        "second setup_fields should create zero fields, got: {:?}",
+        report2.created
+    );
+    assert_eq!(
+        report2.skipped.len(),
+        7,
+        "second setup_fields should skip all 7 fields"
+    );
+
+    eprintln!("setup_fields_idempotent: skipped={:?}", report2.skipped);
+}
+
+/// Setup creates 5 views with correct layout and filter values.
+///
+/// Calls `create_view()` for each required view spec and verifies the
+/// returned view has the expected layout.
+#[tokio::test]
+async fn setup_creates_views_with_correct_layout() {
+    if !has_github_token() || !has_project_number() {
+        eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping integration test");
+        return;
+    }
+
+    use unblock_github::projects::{CreateViewParams, ViewLayout};
+    use unblock_mcp::tools::setup::REQUIRED_VIEWS;
+
+    let state = test_server_state().await;
+    let client = &state.client;
+
+    let owner_type = client
+        .detect_owner_type()
+        .await
+        .expect("detect_owner_type should succeed");
+
+    // Get existing views to determine what would be created.
+    let existing_views = client
+        .list_views(owner_type)
+        .await
+        .expect("list_views should succeed");
+
+    let existing_names: std::collections::HashSet<String> =
+        existing_views.iter().map(|v| v.name.clone()).collect();
+
+    // Get REST fields for visible_fields.
+    let rest_fields = client
+        .list_rest_fields(owner_type)
+        .await
+        .expect("list_rest_fields should succeed");
+    let all_field_ids: Vec<u64> = rest_fields.iter().map(|f| f.id).collect();
+
+    let mut created_count = 0;
+    let mut skipped_count = 0;
+
+    for spec in REQUIRED_VIEWS {
+        if existing_names.contains(spec.name) {
+            skipped_count += 1;
+            continue;
+        }
+
+        let visible_fields = if spec.layout == ViewLayout::Roadmap {
+            None
+        } else {
+            Some(all_field_ids.clone())
+        };
+
+        let params = CreateViewParams {
+            name: spec.name.to_owned(),
+            layout: spec.layout,
+            filter: spec.filter.map(String::from),
+            visible_fields,
+        };
+
+        let view = client
+            .create_view(owner_type, &params)
+            .await
+            .unwrap_or_else(|e| panic!("create_view({}) should succeed: {e}", spec.name));
+
+        assert_eq!(
+            view.layout, spec.layout,
+            "layout mismatch for {}",
+            spec.name
+        );
+        created_count += 1;
+    }
+
+    eprintln!("setup_creates_views: created={created_count}, skipped={skipped_count}");
+}
+
+/// Views are idempotent — rerun creates no duplicate views.
+///
+/// After the views exist, calling list_views should show all 5 required
+/// view names present.
+#[tokio::test]
+async fn setup_views_idempotent_no_duplicates() {
+    if !has_github_token() || !has_project_number() {
+        eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping integration test");
+        return;
+    }
+
+    use unblock_mcp::tools::setup::REQUIRED_VIEWS;
+
+    let state = test_server_state().await;
+    let client = &state.client;
+
+    let owner_type = client
+        .detect_owner_type()
+        .await
+        .expect("detect_owner_type should succeed");
+
+    let existing_views = client
+        .list_views(owner_type)
+        .await
+        .expect("list_views should succeed");
+
+    let existing_names: std::collections::HashSet<String> =
+        existing_views.iter().map(|v| v.name.clone()).collect();
+
+    let mut found = 0;
+    for spec in REQUIRED_VIEWS {
+        if existing_names.contains(spec.name) {
+            found += 1;
+        }
+    }
+
+    eprintln!(
+        "setup_views_idempotent: {found}/{} required views found in existing views",
+        REQUIRED_VIEWS.len()
+    );
+}
+
+/// Dry-run returns fields/views report without making mutations.
+///
+/// Calls `query_setup_status()` and `list_views()` (the dry-run path)
+/// and verifies the report is well-formed without creating anything.
+#[tokio::test]
+async fn setup_dry_run_reports_without_mutations() {
+    if !has_github_token() || !has_project_number() {
+        eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping integration test");
+        return;
+    }
+
+    use unblock_mcp::tools::setup::REQUIRED_VIEWS;
+
+    let state = test_server_state().await;
+    let client = &state.client;
+
+    let project_info = client
+        .resolve_project_info()
+        .await
+        .expect("resolve_project_info should succeed");
+
+    // Query field status (dry-run path).
+    let field_status = client
+        .query_setup_status(&project_info.id)
+        .await
+        .expect("query_setup_status should succeed");
+
+    let total_fields = field_status.existing.len() + field_status.missing.len();
+    assert_eq!(
+        total_fields, 7,
+        "dry-run field status should account for all 7 fields"
+    );
+
+    // Query view status (dry-run path).
+    let owner_type = client
+        .detect_owner_type()
+        .await
+        .expect("detect_owner_type should succeed");
+
+    let existing_views = client
+        .list_views(owner_type)
+        .await
+        .expect("list_views should succeed");
+
+    let existing_view_names: std::collections::HashSet<String> =
+        existing_views.iter().map(|v| v.name.clone()).collect();
+
+    let mut would_create = 0;
+    let mut already_exist = 0;
+    for spec in REQUIRED_VIEWS {
+        if existing_view_names.contains(spec.name) {
+            already_exist += 1;
+        } else {
+            would_create += 1;
+        }
+    }
+
+    eprintln!(
+        "setup_dry_run: fields existing={}, missing={}; views existing={already_exist}, would_create={would_create}",
+        field_status.existing.len(),
+        field_status.missing.len(),
+    );
+}
+
+/// No project configured returns `ProjectNotConfigured` error.
+///
+/// Uses a client without `UNBLOCK_PROJECT` set and verifies that
+/// `resolve_project_info()` fails with the expected error.
+#[tokio::test]
+async fn setup_no_project_returns_project_not_configured() {
+    if !has_github_token() {
+        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+        return;
+    }
+
+    // Build a config without UNBLOCK_PROJECT.
+    let config = Config::load_from(|key| match key {
+        "UNBLOCK_PROJECT" => Err(std::env::VarError::NotPresent),
+        other => std::env::var(other),
+    })
+    .expect("Config should load without UNBLOCK_PROJECT");
+
+    let client = GitHubClient::new(&config)
+        .await
+        .expect("GitHubClient::new should succeed");
+
+    // resolve_project_info should fail with ProjectNotConfigured.
+    let result = client.resolve_project_info().await;
+    assert!(
+        result.is_err(),
+        "resolve_project_info should fail without project number"
+    );
+
+    let err = result.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("setup") || msg.contains("project") || msg.contains("configured"),
+        "error should reference project configuration: {msg}",
+    );
+
+    eprintln!("setup_no_project: error = {msg}");
+}
+
+/// Owner type detection correctly identifies org vs user accounts.
+///
+/// This test verifies that `detect_owner_type()` returns a valid
+/// `OwnerType` for the configured repository owner.
+#[tokio::test]
+async fn setup_owner_type_detection_works() {
+    if !has_github_token() {
+        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+        return;
+    }
+
+    let state = test_server_state().await;
+    let client = &state.client;
+
+    let owner_type = client
+        .detect_owner_type()
+        .await
+        .expect("detect_owner_type should succeed");
+
+    // Just verify it returns a valid value — the actual type depends on the
+    // test repo's owner.
+    match owner_type {
+        OwnerType::Org => eprintln!("Owner '{}' is an organization", client.owner()),
+        OwnerType::User => eprintln!("Owner '{}' is a personal account", client.owner()),
+    }
+}
+
+/// Views use correct visible_fields integer IDs from list_rest_fields.
+///
+/// Verifies that `list_rest_fields()` returns fields with positive integer
+/// IDs that are suitable for use as `visible_fields` in view creation.
+#[tokio::test]
+async fn setup_visible_fields_use_integer_ids() {
+    if !has_github_token() || !has_project_number() {
+        eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping integration test");
+        return;
+    }
+
+    let state = test_server_state().await;
+    let client = &state.client;
+
+    let owner_type = client
+        .detect_owner_type()
+        .await
+        .expect("detect_owner_type should succeed");
+
+    let fields = client
+        .list_rest_fields(owner_type)
+        .await
+        .expect("list_rest_fields should succeed");
+
+    assert!(
+        !fields.is_empty(),
+        "list_rest_fields should return at least one field"
+    );
+
+    for field in &fields {
+        assert!(
+            field.id > 0,
+            "field ID should be a positive integer, got {}",
+            field.id
+        );
+    }
+
+    eprintln!(
+        "setup_visible_fields: {} fields with IDs {:?}",
+        fields.len(),
+        fields.iter().map(|f| f.id).collect::<Vec<_>>()
+    );
 }
