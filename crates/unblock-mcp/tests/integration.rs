@@ -791,10 +791,10 @@ async fn create_issue_with_blocked_by_local() {
     let client = &state.client;
 
     // Create blocker issue first.
-    let blocker_title = format!("[test] blocker issue {}", chrono::Utc::now().timestamp());
-    let blocker = client
+    let blocking_title = format!("[test] blocker issue {}", chrono::Utc::now().timestamp());
+    let blocking_issue = client
         .create_issue(unblock_github::mutations::CreateIssueParams {
-            title: blocker_title,
+            title: blocking_title,
             body: None,
             labels: vec!["test".to_owned()],
             milestone: None,
@@ -804,10 +804,10 @@ async fn create_issue_with_blocked_by_local() {
         .expect("create blocker issue should succeed");
 
     // Create blocked issue.
-    let blocked_title = format!("[test] blocked issue {}", chrono::Utc::now().timestamp());
-    let blocked = client
+    let dependent_title = format!("[test] blocked issue {}", chrono::Utc::now().timestamp());
+    let dependent_issue = client
         .create_issue(unblock_github::mutations::CreateIssueParams {
-            title: blocked_title,
+            title: dependent_title,
             body: None,
             labels: vec!["test".to_owned()],
             milestone: None,
@@ -818,34 +818,34 @@ async fn create_issue_with_blocked_by_local() {
 
     // Add blocking relationship.
     client
-        .add_blocked_by(blocked.number, blocker.number)
+        .add_blocked_by(dependent_issue.number, blocking_issue.number)
         .await
         .expect("add_blocked_by should succeed");
 
     // Re-fetch blocked issue and verify blocker appears.
     let refetched = client
-        .fetch_issue(blocked.number)
+        .fetch_issue(dependent_issue.number)
         .await
         .expect("fetch_issue should succeed after add_blocked_by");
-    let blocker_numbers: Vec<u64> = refetched.blocked_by.iter().map(|r| r.number).collect();
+    let blocking_numbers: Vec<u64> = refetched.blocked_by.iter().map(|r| r.number).collect();
     assert!(
-        blocker_numbers.contains(&blocker.number),
+        blocking_numbers.contains(&blocking_issue.number),
         "blocked_by should contain the blocker: blocker={}, blocked_by={:?}",
-        blocker.number,
-        blocker_numbers,
+        blocking_issue.number,
+        blocking_numbers,
     );
 
     eprintln!(
         "create_issue_with_blocked_by: blocked=#{} blocker=#{}",
-        blocked.number, blocker.number,
+        dependent_issue.number, blocking_issue.number,
     );
 
     // Cleanup.
     let _ = client
-        .close_issue(blocked.number, Some("test cleanup".to_owned()))
+        .close_issue(dependent_issue.number, Some("test cleanup".to_owned()))
         .await;
     let _ = client
-        .close_issue(blocker.number, Some("test cleanup".to_owned()))
+        .close_issue(blocking_issue.number, Some("test cleanup".to_owned()))
         .await;
 }
 
@@ -979,13 +979,13 @@ async fn ensure_labels_creates_missing_labels() {
     let label_name = format!("test-label-{}", chrono::Utc::now().timestamp());
 
     client
-        .ensure_labels(&[label_name.clone()])
+        .ensure_labels(std::slice::from_ref(&label_name))
         .await
         .expect("ensure_labels should succeed");
 
     // Calling again should be idempotent.
     client
-        .ensure_labels(&[label_name.clone()])
+        .ensure_labels(std::slice::from_ref(&label_name))
         .await
         .expect("ensure_labels should succeed on second call");
 
