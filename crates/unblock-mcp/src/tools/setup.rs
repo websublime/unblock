@@ -55,9 +55,11 @@ pub struct SetupResult {
 
 /// Specification for a required project view.
 ///
-/// Used internally by the setup handler to define the 5 pre-configured views.
+/// Defines the name, layout, and optional filter for each view that the
+/// setup tool creates on a project. The 5 required views are defined in
+/// [`REQUIRED_VIEWS`].
 #[derive(Debug, Clone)]
-pub(crate) struct ViewSpec {
+pub struct ViewSpec {
     /// View display name (e.g. `"://ready"`).
     pub name: &'static str,
     /// View layout type.
@@ -70,7 +72,7 @@ pub(crate) struct ViewSpec {
 ///
 /// Each view follows the naming convention `://name` to distinguish
 /// unblock-managed views from user-created ones.
-pub(crate) const REQUIRED_VIEWS: &[ViewSpec] = &[
+pub const REQUIRED_VIEWS: &[ViewSpec] = &[
     ViewSpec {
         name: "://ready",
         layout: ViewLayout::Board,
