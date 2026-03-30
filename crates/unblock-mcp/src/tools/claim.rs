@@ -130,6 +130,9 @@ pub(crate) fn validate_claimable(
     Ok(())
 }
 
+// TODO(unblock-45a.12): Add integration tests for claim tool (ready, blocked, closed, deferred,
+// already-claimed paths) as part of the E2E workflow integration test.
+
 #[cfg(test)]
 mod tests {
     use chrono::NaiveDate;
