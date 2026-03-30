@@ -1,18 +1,21 @@
-//! Setup tool — creates required Projects V2 custom fields (idempotent).
+//! Setup tool — configures Projects V2 fields and views (idempotent).
 //!
-//! This is typically the first tool an agent calls on a fresh repository.
-//! It ensures the 7 required Projects V2 fields exist on the configured project,
-//! and reports which fields were created vs. skipped.
+//! This is typically the first tool an agent calls on a fresh repository
+//! (after `init`). It ensures the 7 required Projects V2 fields and 5
+//! pre-configured views exist on the configured project, and reports which
+//! were created vs. already present.
 //!
-//! Supports a `dry_run` mode that queries field presence without mutating.
+//! Supports a `dry_run` mode that queries field/view presence without mutating.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use unblock_github::projects::ViewLayout;
 
 /// Input parameters for the `setup` MCP tool.
 ///
 /// Both fields are optional: `project` overrides the configured project number,
-/// and `dry_run` controls whether fields are actually created or just inspected.
+/// and `dry_run` controls whether fields/views are actually created or just
+/// inspected.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SetupParams {
     /// Optional project number override. If omitted, uses the configured
@@ -20,26 +23,77 @@ pub struct SetupParams {
     ///
     /// **Note:** This parameter is accepted but not yet wired — the configured
     /// project number is always used. If provided, a warning is logged.
-    pub project: Option<u32>,
-    /// If `true`, report which fields exist and which are missing without
+    pub project: Option<u64>,
+    /// If `true`, report which fields/views exist and which are missing without
     /// creating anything. Defaults to `false`.
     pub dry_run: Option<bool>,
 }
 
 /// Result returned by the `setup` MCP tool.
 ///
-/// Contains the canonical names of fields that were created, skipped, and
-/// (in dry-run mode) missing, plus the project's GraphQL node ID for reference.
+/// Contains the canonical names of fields and views that were created,
+/// already existed, or (in dry-run mode) are missing, plus the project number.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct SetupResult {
     /// Canonical names of fields that were newly created (e.g. `["Agent", "DeferUntil"]`).
     pub fields_created: Vec<String>,
     /// Canonical names of fields that already existed and were skipped.
-    pub fields_skipped: Vec<String>,
+    pub fields_existing: Vec<String>,
     /// Canonical names of fields that are missing and would be created by a
     /// non-dry-run call. Always empty when `dry_run` is `false` (the fields
     /// were already created).
     pub fields_missing: Vec<String>,
-    /// The GraphQL node ID of the project.
-    pub project_id: String,
+    /// Names of views that were newly created (e.g. `["://ready", "://team"]`).
+    pub views_created: Vec<String>,
+    /// Names of views that already existed and were skipped.
+    pub views_existing: Vec<String>,
+    /// The project number.
+    pub project_number: u64,
+    /// Whether this was a dry-run (no mutations were performed).
+    pub dry_run: bool,
 }
+
+/// Specification for a required project view.
+///
+/// Used internally by the setup handler to define the 5 pre-configured views.
+#[derive(Debug, Clone)]
+pub(crate) struct ViewSpec {
+    /// View display name (e.g. `"://ready"`).
+    pub name: &'static str,
+    /// View layout type.
+    pub layout: ViewLayout,
+    /// Optional filter query string.
+    pub filter: Option<&'static str>,
+}
+
+/// The 5 pre-configured views required by the setup tool.
+///
+/// Each view follows the naming convention `://name` to distinguish
+/// unblock-managed views from user-created ones.
+pub(crate) const REQUIRED_VIEWS: &[ViewSpec] = &[
+    ViewSpec {
+        name: "://ready",
+        layout: ViewLayout::Board,
+        filter: Some("\"Ready State\":\"ready\""),
+    },
+    ViewSpec {
+        name: "://team",
+        layout: ViewLayout::Board,
+        filter: None,
+    },
+    ViewSpec {
+        name: "://pipeline",
+        layout: ViewLayout::Table,
+        filter: None,
+    },
+    ViewSpec {
+        name: "://roadmap",
+        layout: ViewLayout::Roadmap,
+        filter: None,
+    },
+    ViewSpec {
+        name: "://timeline",
+        layout: ViewLayout::Roadmap,
+        filter: None,
+    },
+];
