@@ -605,10 +605,12 @@ impl UnblockServer {
         let body = if let Some(ref body_text) = params.body {
             Some(body_text.clone())
         } else {
+            // Generate a template with section headers so the issue body has
+            // a useful scaffold rather than being empty.
             let sections = unblock_core::types::BodySections {
-                description: None,
-                design_notes: None,
-                acceptance_criteria: None,
+                description: Some(String::new()),
+                design_notes: Some(String::new()),
+                acceptance_criteria: Some(String::new()),
             };
             let md = sections.to_markdown();
             if md.is_empty() { None } else { Some(md) }
