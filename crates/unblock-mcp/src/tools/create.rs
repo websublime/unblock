@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 pub struct CreateParams {
     /// Issue title (required).
     pub title: String,
-    /// Issue type: Task, Bug, Feature, Epic, Chore, Spike. Defaults to Task.
+    /// Issue type: Task, Bug, Feature, Epic, Chore. Defaults to Task.
     pub issue_type: Option<String>,
     /// Priority: P0, P1, P2, P3, P4. Defaults to P2.
     pub priority: Option<String>,
