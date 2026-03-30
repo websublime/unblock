@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use crate::tools::claim::{ClaimParams, ClaimResult};
 use crate::tools::create::{CreateParams, CreateResult};
 use crate::tools::execute_read_tool;
 use crate::tools::execute_write_tool;
@@ -694,6 +695,185 @@ impl UnblockServer {
             count,
             stale,
         }))
+    }
+
+    /// Claim an issue for an agent — marks it as in-progress.
+    ///
+    /// Validates the issue is open, unblocked, not deferred, and not already
+    /// claimed. Then updates Projects V2 fields (Status=In Progress, Agent=name,
+    /// ReadyState=Not Ready) and posts a claim comment.
+    ///
+    /// Validation order (cheapest first): closed, blocked, deferred, already claimed.
+    ///
+    /// This is a write tool — the cache is invalidated and rebuilt after all
+    /// mutations complete.
+    #[tool(
+        name = "claim",
+        description = "Claim an issue for an agent. Validates the issue is open, unblocked, not deferred, and not already claimed. Sets Status=In Progress, Agent=name, ReadyState=Not Ready, and posts a comment. Triggers graph rebuild."
+    )]
+    async fn claim(
+        &self,
+        Parameters(params): Parameters<ClaimParams>,
+    ) -> Result<Json<ClaimResult>, ErrorData> {
+        let state = self.state();
+        let client = Arc::clone(&state.client);
+        let config = Arc::clone(&state.config);
+
+        let issue_number = params.id;
+        let agent_name = params.agent.unwrap_or_else(|| config.agent.clone());
+
+        info!(
+            issue_number,
+            agent = %agent_name,
+            "Claim tool invoked"
+        );
+
+        let result = execute_write_tool(state, || {
+            let client = Arc::clone(&client);
+            let agent_name = agent_name.clone();
+
+            async move {
+                use chrono::Utc;
+                use unblock_core::errors::{
+                    AlreadyClaimedSnafu, IssueBlockedSnafu, IssueClosedSnafu, IssueDeferredSnafu,
+                };
+                use unblock_core::types::IssueState;
+
+                // Step 1: Fetch the issue.
+                let issue = client.fetch_issue(issue_number).await?;
+
+                // Step 2: Validate — closed (cheapest check).
+                if issue.state == IssueState::Closed {
+                    return Err(IssueClosedSnafu {
+                        number: issue_number,
+                    }
+                    .build()
+                    .into());
+                }
+
+                // Step 3: Validate — blocked (check open blockers).
+                let open_blockers: Vec<u64> = issue
+                    .blocked_by
+                    .iter()
+                    .filter(|r| r.state == IssueState::Open)
+                    .map(|r| r.number)
+                    .collect();
+
+                if !open_blockers.is_empty() {
+                    return Err(IssueBlockedSnafu {
+                        number: issue_number,
+                        blockers: open_blockers,
+                    }
+                    .build()
+                    .into());
+                }
+
+                // Step 4: Validate — deferred.
+                if let Some(defer_until) = issue.defer_until {
+                    let today = Utc::now().date_naive();
+                    if defer_until > today {
+                        return Err(IssueDeferredSnafu {
+                            number: issue_number,
+                            until: defer_until.to_string(),
+                        }
+                        .build()
+                        .into());
+                    }
+                }
+
+                // Step 5: Validate — already claimed.
+                if issue.status == unblock_core::types::Status::InProgress && issue.agent.is_some()
+                {
+                    return Err(AlreadyClaimedSnafu {
+                        number: issue_number,
+                        agent: issue.agent.unwrap_or_default(),
+                    }
+                    .build()
+                    .into());
+                }
+
+                // Step 6: Update Projects V2 fields.
+                if let Some(field_ids) = client.field_ids().await {
+                    if let Ok(project_info) = client.resolve_project_info().await {
+                        if let Ok(item_id) = client
+                            .get_project_item_id(&issue.node_id, &project_info.id)
+                            .await
+                        {
+                            use unblock_github::projects::FieldValue;
+
+                            // Status -> In Progress
+                            if let Some(option_id) = field_ids.status.options.get("In Progress")
+                                && let Err(e) = client
+                                    .update_field(
+                                        &project_info.id,
+                                        &item_id,
+                                        &field_ids.status.field_id,
+                                        &FieldValue::SingleSelectOption(option_id.clone()),
+                                    )
+                                    .await
+                            {
+                                tracing::warn!(error = %e, "Failed to set Status field");
+                            }
+
+                            // Agent -> agent_name
+                            if let Err(e) = client
+                                .update_field(
+                                    &project_info.id,
+                                    &item_id,
+                                    &field_ids.agent,
+                                    &FieldValue::Text(agent_name.clone()),
+                                )
+                                .await
+                            {
+                                tracing::warn!(error = %e, "Failed to set Agent field");
+                            }
+
+                            // ReadyState -> Not Ready
+                            if let Some(option_id) = field_ids.ready_state.options.get("Not Ready")
+                                && let Err(e) = client
+                                    .update_field(
+                                        &project_info.id,
+                                        &item_id,
+                                        &field_ids.ready_state.field_id,
+                                        &FieldValue::SingleSelectOption(option_id.clone()),
+                                    )
+                                    .await
+                            {
+                                tracing::warn!(error = %e, "Failed to set ReadyState field");
+                            }
+                        } else {
+                            tracing::warn!(
+                                "Failed to get project item ID — fields will not be set"
+                            );
+                        }
+                    } else {
+                        tracing::warn!("Failed to resolve project info — fields will not be set");
+                    }
+                } else {
+                    tracing::debug!(
+                        "No field IDs cached — run setup first to enable project field assignment"
+                    );
+                }
+
+                // Step 7: Post claim comment.
+                let now = Utc::now();
+                let comment_body =
+                    format!("\u{1F916} Claimed by {agent_name} at {}", now.to_rfc3339());
+                if let Err(e) = client.add_comment(issue_number, comment_body).await {
+                    tracing::warn!(error = %e, "Failed to post claim comment");
+                }
+
+                // Step 8: Return result (cache rebuild handled by execute_write_tool).
+                Ok(ClaimResult {
+                    issue_number,
+                    agent: agent_name,
+                    claimed_at: now,
+                })
+            }
+        })
+        .await?;
+
+        Ok(Json(result))
     }
 
     /// Create a new GitHub Issue with optional dependencies, project fields,
