@@ -363,19 +363,22 @@ impl UnblockServer {
         }))
     }
 
-    /// Create required Projects V2 fields on the configured project (idempotent).
+    /// Configure required Projects V2 fields and views (idempotent).
     ///
-    /// This is typically the first tool an agent calls on a fresh repository.
-    /// With `dry_run: true`, reports which fields exist and which are missing
-    /// without creating anything.
+    /// Ensures the 7 required custom fields and 5 pre-configured views exist
+    /// on the project. With `dry_run: true`, reports what would be created
+    /// without mutating anything.
     #[tool(
         name = "setup",
-        description = "Create required Projects V2 custom fields (Status, Priority, IssueType, Agent, StoryPoints, DeferUntil, ReadyState). Safe to call repeatedly — existing fields are skipped. Use dry_run=true to check without mutating."
+        description = "Configure Projects V2 fields (Status, Priority, IssueType, Agent, StoryPoints, DeferUntil, ReadyState) and views (://ready, ://team, ://pipeline, ://roadmap, ://timeline). Safe to call repeatedly — existing fields/views are skipped. Use dry_run=true to check without mutating."
     )]
     async fn setup(
         &self,
         Parameters(params): Parameters<SetupParams>,
     ) -> Result<Json<SetupResult>, ErrorData> {
+        use crate::tools::setup::REQUIRED_VIEWS;
+        use unblock_github::projects::{CreateViewParams, ViewLayout};
+
         let state = self.state();
         let dry_run = params.dry_run.unwrap_or(false);
 
@@ -404,22 +407,46 @@ impl UnblockServer {
             "Setup tool invoked"
         );
 
+        // Step 4: Detect owner type (read-only GET, safe for dry-run too).
+        let owner_type = execute_read_tool(state, || client.detect_owner_type()).await?;
+
         if dry_run {
-            // Dry-run: query which fields exist without creating anything.
-            let status = client
+            // Dry-run: query which fields and views exist without creating anything.
+            let field_status = client
                 .query_setup_status(&project_info.id)
                 .await
                 .map_err(crate::errors::github_error_to_mcp)?;
 
+            // Step 5: Query existing views.
+            let existing_views = execute_read_tool(state, || client.list_views(owner_type)).await?;
+
+            let existing_view_names: std::collections::HashSet<&str> =
+                existing_views.iter().map(|v| v.name.as_str()).collect();
+
+            let mut views_existing = Vec::new();
+            let mut views_would_create = Vec::new();
+            for spec in REQUIRED_VIEWS {
+                if existing_view_names.contains(spec.name) {
+                    views_existing.push(spec.name.to_owned());
+                } else {
+                    views_would_create.push(spec.name.to_owned());
+                }
+            }
+
             return Ok(Json(SetupResult {
                 fields_created: Vec::new(),
-                fields_skipped: status.existing,
-                fields_missing: status.missing,
-                project_id: project_info.id,
+                fields_existing: field_status.existing,
+                fields_missing: field_status.missing,
+                views_created: views_would_create,
+                views_existing,
+                project_number: u64::from(project_info.number),
+                dry_run: true,
             }));
         }
 
-        // Write path: create fields, invalidate cache, rebuild.
+        // ── Write path ──────────────────────────────────────────────────
+
+        // Step 1–3: Create fields (with cache rebuild).
         let project_id = project_info.id.clone();
         let client_clone = Arc::clone(client);
 
@@ -431,11 +458,54 @@ impl UnblockServer {
         // Cache the resolved field IDs on the client for subsequent update_field calls.
         client.set_field_ids(report.field_ids).await;
 
+        // Step 5: Query existing views.
+        let existing_views = execute_read_tool(state, || client.list_views(owner_type)).await?;
+
+        let existing_view_names: std::collections::HashSet<&str> =
+            existing_views.iter().map(|v| v.name.as_str()).collect();
+
+        // Step 6: Discover all field IDs via REST (needed for visible_fields).
+        let rest_fields = execute_read_tool(state, || client.list_rest_fields(owner_type)).await?;
+
+        let all_field_ids: Vec<u64> = rest_fields.iter().map(|f| f.id).collect();
+
+        // Step 7: Create missing views.
+        let mut views_created = Vec::new();
+        let mut views_existing = Vec::new();
+
+        for spec in REQUIRED_VIEWS {
+            if existing_view_names.contains(spec.name) {
+                views_existing.push(spec.name.to_owned());
+                continue;
+            }
+
+            // Roadmap views do not support visible_fields (ARCH §8.5).
+            let visible_fields = if spec.layout == ViewLayout::Roadmap {
+                None
+            } else {
+                Some(all_field_ids.clone())
+            };
+
+            let view_params = CreateViewParams {
+                name: spec.name.to_owned(),
+                layout: spec.layout,
+                filter: spec.filter.map(String::from),
+                visible_fields,
+            };
+
+            execute_read_tool(state, || client.create_view(owner_type, &view_params)).await?;
+
+            views_created.push(spec.name.to_owned());
+        }
+
         Ok(Json(SetupResult {
             fields_created: report.created,
-            fields_skipped: report.skipped,
+            fields_existing: report.skipped,
             fields_missing: Vec::new(),
-            project_id: project_info.id,
+            views_created,
+            views_existing,
+            project_number: u64::from(project_info.number),
+            dry_run: false,
         }))
     }
 
