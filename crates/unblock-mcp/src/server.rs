@@ -1088,28 +1088,25 @@ impl UnblockServer {
                 data: None,
             })?;
 
-        // Extract the target number for cycle detection.
-        let target_number = match &issue_ref {
-            unblock_core::types::IssueRef::Local(n) => *n,
-            unblock_core::types::IssueRef::CrossRepo { number, .. } => *number,
-        };
-
         // Step 1: Validate source issue exists.
-        client
+        let source_issue = client
             .fetch_issue(source)
             .await
             .map_err(crate::errors::github_error_to_mcp)?;
 
-        // Step 2: Cycle detection using cached graph.
-        // For cross-repo targets, the target may not be in the local graph,
-        // so would_create_cycle returns false (correct — no local cycle possible).
-        if let Some(graph) = state.cache.get_graph().await
-            && graph.would_create_cycle(source, target_number)
+        // Step 2: Cycle detection using cached graph (local targets only).
+        // Cross-repo targets are not present in the local graph, so cycle
+        // detection is skipped — no local cycle is possible. Checking with
+        // the bare number from a CrossRepo ref would incorrectly match a
+        // local issue with the same number, causing false positive rejections.
+        if let unblock_core::types::IssueRef::Local(target_number) = &issue_ref
+            && let Some(graph) = state.cache.get_graph().await
+            && graph.would_create_cycle(source, *target_number)
         {
             return Err(crate::errors::github_error_to_mcp(
                 CircularDependencySnafu {
                     source,
-                    target: target_number,
+                    target: *target_number,
                 }
                 .build()
                 .into(),
@@ -1127,54 +1124,50 @@ impl UnblockServer {
 
         // Step 4: Update Projects V2 fields on source issue:
         // ReadyState → Not Ready, Status → Blocked.
+        // TODO(unblock-b6b.79): Fourth copy of field update ladder — extract shared helper.
         if let Some(field_ids) = client.field_ids().await {
             if let Ok(project_info) = client.resolve_project_info().await {
-                // Re-fetch source issue for its node_id (the earlier fetch was consumed).
-                if let Ok(source_issue) = client.fetch_issue(source).await {
-                    if let Ok(item_id) = client
-                        .get_project_item_id(&source_issue.node_id, &project_info.id)
-                        .await
+                if let Ok(item_id) = client
+                    .get_project_item_id(&source_issue.node_id, &project_info.id)
+                    .await
+                {
+                    // ReadyState → Not Ready
+                    if let Some(option_id) = field_ids.ready_state.options.get("Not Ready")
+                        && let Err(e) = client
+                            .update_field(
+                                &project_info.id,
+                                &item_id,
+                                &field_ids.ready_state.field_id,
+                                &FieldValue::SingleSelectOption(option_id.clone()),
+                            )
+                            .await
                     {
-                        // ReadyState → Not Ready
-                        if let Some(option_id) = field_ids.ready_state.options.get("Not Ready")
-                            && let Err(e) = client
-                                .update_field(
-                                    &project_info.id,
-                                    &item_id,
-                                    &field_ids.ready_state.field_id,
-                                    &FieldValue::SingleSelectOption(option_id.clone()),
-                                )
-                                .await
-                        {
-                            tracing::warn!(
-                                error = %e,
-                                "Failed to set ReadyState=Not Ready on source issue"
-                            );
-                        }
-
-                        // Status → Blocked
-                        if let Some(option_id) = field_ids.status.options.get("Blocked")
-                            && let Err(e) = client
-                                .update_field(
-                                    &project_info.id,
-                                    &item_id,
-                                    &field_ids.status.field_id,
-                                    &FieldValue::SingleSelectOption(option_id.clone()),
-                                )
-                                .await
-                        {
-                            tracing::warn!(
-                                error = %e,
-                                "Failed to set Status=Blocked on source issue"
-                            );
-                        }
-                    } else {
                         tracing::warn!(
-                            "Failed to get project item ID for source issue — fields will not be set"
+                            error = %e,
+                            "Failed to set ReadyState=Not Ready on source issue"
+                        );
+                    }
+
+                    // Status → Blocked
+                    if let Some(option_id) = field_ids.status.options.get("Blocked")
+                        && let Err(e) = client
+                            .update_field(
+                                &project_info.id,
+                                &item_id,
+                                &field_ids.status.field_id,
+                                &FieldValue::SingleSelectOption(option_id.clone()),
+                            )
+                            .await
+                    {
+                        tracing::warn!(
+                            error = %e,
+                            "Failed to set Status=Blocked on source issue"
                         );
                     }
                 } else {
-                    tracing::warn!("Failed to re-fetch source issue for field updates");
+                    tracing::warn!(
+                        "Failed to get project item ID for source issue — fields will not be set"
+                    );
                 }
             } else {
                 tracing::warn!(
