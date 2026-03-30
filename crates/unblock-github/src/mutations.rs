@@ -148,15 +148,20 @@ impl GitHubClient {
         let node_id = created.node_id;
 
         // Best-effort: add to project if configured.
-        if let Some(project_number) = self.project_number()
-            && let Err(e) = self.add_issue_to_project(&node_id, project_number).await
-        {
-            warn!(
-                number,
-                project_number,
-                error = %e,
-                "Failed to add issue to project (best-effort)"
-            );
+        if let Some(project_number) = self.project_number() {
+            match self.add_issue_to_project(&node_id, project_number).await {
+                Ok(item_id) => {
+                    debug!(number, item_id = %item_id, "Added issue to project");
+                }
+                Err(e) => {
+                    warn!(
+                        number,
+                        project_number,
+                        error = %e,
+                        "Failed to add issue to project (best-effort)"
+                    );
+                }
+            }
         }
 
         // Re-fetch via GraphQL for full field set.
@@ -301,9 +306,16 @@ impl GitHubClient {
     /// the issue `node_id` directly (from the REST create response), avoiding
     /// an extra REST GET round-trip.
     ///
+    /// Returns the `ProjectV2Item` node ID on success, which is needed by
+    /// `update_field()` to set project field values on the item.
+    ///
     /// This is an internal helper — callers use `create_issue()` which calls
     /// this automatically when a project is configured.
-    async fn add_issue_to_project(&self, node_id: &str, project_number: u64) -> Result<(), Error> {
+    async fn add_issue_to_project(
+        &self,
+        node_id: &str,
+        project_number: u64,
+    ) -> Result<String, Error> {
         // Fetch the project's node ID via GraphQL.
         let project_query = "
             query FindProject($owner: String!, $repo: String!, $projectNumber: Int!) {
@@ -332,7 +344,7 @@ impl GitHubClient {
                 project_number,
                 "Project not found — cannot add issue to project"
             );
-            return Ok(());
+            return Err(errors::ProjectNotConfiguredSnafu.build());
         }
 
         // Add the issue to the project.
@@ -351,9 +363,14 @@ impl GitHubClient {
             "contentId": node_id,
         });
 
-        self.graphql(mutation, mutation_vars).await?;
+        let response = self.graphql(mutation, mutation_vars).await?;
+        let item_id = response["data"]["addProjectV2ItemById"]["item"]["id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
 
-        Ok(())
+        debug!(item_id = %item_id, "Added issue to project");
+        Ok(item_id)
     }
 
     /// Resolves a GitHub issue number to a GraphQL global node ID.
@@ -560,4 +577,291 @@ impl GitHubClient {
         debug!(parent_number, child_number, "Added sub-issue relationship");
         Ok(())
     }
+
+    /// Resolves an [`IssueRef`] to a GraphQL global node ID.
+    ///
+    /// For [`IssueRef::Local`], resolves against the configured repository.
+    /// For [`IssueRef::CrossRepo`], resolves against the specified `owner/repo`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Domain`] with [`DomainError::IssueNotFound`] if the
+    /// issue does not exist.
+    ///
+    /// [`IssueRef`]: unblock_core::types::IssueRef
+    /// [`DomainError::IssueNotFound`]: unblock_core::errors::DomainError::IssueNotFound
+    #[instrument(skip(self), fields(owner = %self.owner(), repo = %self.repo()))]
+    pub async fn resolve_issue_ref(
+        &self,
+        issue_ref: &unblock_core::types::IssueRef,
+    ) -> Result<String, Error> {
+        match issue_ref {
+            unblock_core::types::IssueRef::Local(number) => self.resolve_node_id(*number).await,
+            unblock_core::types::IssueRef::CrossRepo {
+                owner,
+                repo,
+                number,
+            } => {
+                let query = "
+                    query ResolveNodeId($owner: String!, $repo: String!, $number: Int!) {
+                        repository(owner: $owner, name: $repo) {
+                            issue(number: $number) {
+                                id
+                            }
+                        }
+                    }
+                ";
+
+                let variables = serde_json::json!({
+                    "owner": owner,
+                    "repo": repo,
+                    "number": number,
+                });
+
+                let response = self.graphql(query, variables).await?;
+                let node_id = response["data"]["repository"]["issue"]["id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned();
+
+                if node_id.is_empty() {
+                    return Err(unblock_core::errors::IssueNotFoundSnafu { number: *number }
+                        .build()
+                        .into());
+                }
+
+                debug!(
+                    owner,
+                    repo,
+                    number,
+                    node_id = %node_id,
+                    "Resolved cross-repo issue ref to node ID"
+                );
+                Ok(node_id)
+            }
+        }
+    }
+
+    /// Resolves the `ProjectV2Item` node ID for an issue in the configured project.
+    ///
+    /// Queries the issue's `projectItems` connection to find the item that belongs
+    /// to the specified `project_id`. Returns the item's node ID, which is needed
+    /// by [`update_field()`](crate::projects) to set field values.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Domain`] with [`DomainError::IssueNotFound`] if the issue
+    /// is not in the project.
+    ///
+    /// [`DomainError::IssueNotFound`]: unblock_core::errors::DomainError::IssueNotFound
+    #[instrument(skip(self))]
+    pub async fn get_project_item_id(
+        &self,
+        issue_node_id: &str,
+        project_id: &str,
+    ) -> Result<String, Error> {
+        let query = "
+            query GetProjectItemId($nodeId: ID!) {
+                node(id: $nodeId) {
+                    ... on Issue {
+                        projectItems(first: 20) {
+                            nodes {
+                                id
+                                project {
+                                    id
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        ";
+
+        let variables = serde_json::json!({
+            "nodeId": issue_node_id,
+        });
+
+        let response = self.graphql(query, variables).await?;
+        let items = response["data"]["node"]["projectItems"]["nodes"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+
+        for item in items {
+            let item_project_id = item["project"]["id"].as_str().unwrap_or_default();
+            if item_project_id == project_id {
+                let item_id = item["id"].as_str().unwrap_or_default().to_owned();
+                if !item_id.is_empty() {
+                    debug!(item_id = %item_id, "Resolved project item ID");
+                    return Ok(item_id);
+                }
+            }
+        }
+
+        Err(unblock_core::errors::ValidationSnafu {
+            message: format!(
+                "Issue not found in project — node_id={issue_node_id}, project_id={project_id}"
+            ),
+        }
+        .build()
+        .into())
+    }
+
+    /// Ensures that all labels in the list exist on the repository.
+    ///
+    /// For each label, checks if it exists via GET and creates it via POST if not.
+    /// Label creation uses a deterministic color derived from the label name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::GitHubApi`] if a label creation fails for reasons other
+    /// than the label already existing (HTTP 422 with "already_exists" is ignored).
+    #[instrument(skip(self, labels), fields(owner = %self.owner(), repo = %self.repo()))]
+    pub async fn ensure_labels(&self, labels: &[String]) -> Result<(), Error> {
+        for label in labels {
+            let encoded_label = encode_path_segment(label);
+            let url = self.rest_url(&format!(
+                "/repos/{}/{}/labels/{encoded_label}",
+                self.owner(),
+                self.repo(),
+            ));
+
+            let response = self
+                .http()
+                .get(&url)
+                .send()
+                .await
+                .context(errors::GitHubUnavailableSnafu)?;
+
+            if response.status().is_success() {
+                debug!(label = %label, "Label already exists");
+                continue;
+            }
+
+            // Label does not exist — create it.
+            let create_url = self.rest_url(&format!(
+                "/repos/{}/{}/labels",
+                self.owner(),
+                self.repo()
+            ));
+
+            let color = deterministic_label_color(label);
+            let body = serde_json::json!({
+                "name": label,
+                "color": color,
+            });
+
+            let create_response = self
+                .http()
+                .post(&create_url)
+                .json(&body)
+                .send()
+                .await
+                .context(errors::GitHubUnavailableSnafu)?;
+
+            let status = create_response.status();
+            if status.is_success() {
+                debug!(label = %label, color = %color, "Created label");
+            } else if status.as_u16() == 422 {
+                // 422 with "already_exists" — race condition, label was created concurrently.
+                debug!(label = %label, "Label creation returned 422 — likely already exists");
+            } else {
+                let message = create_response
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "unknown error".to_owned());
+                return Err(errors::GitHubApiSnafu {
+                    status: status.as_u16(),
+                    message,
+                }
+                .build());
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Adds a blocking relationship using an [`IssueRef`] as the blocker.
+    ///
+    /// For local refs, delegates to [`add_blocked_by()`](Self::add_blocked_by).
+    /// For cross-repo refs, resolves the blocker's node ID via the target repo
+    /// and calls `addIssueDependency` directly.
+    ///
+    /// [`IssueRef`]: unblock_core::types::IssueRef
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Domain`] with [`DomainError::IssueNotFound`] if either
+    /// issue does not exist.
+    ///
+    /// [`DomainError::IssueNotFound`]: unblock_core::errors::DomainError::IssueNotFound
+    #[instrument(skip(self), fields(owner = %self.owner(), repo = %self.repo()))]
+    pub async fn add_blocked_by_ref(
+        &self,
+        issue_number: u64,
+        blocker: &unblock_core::types::IssueRef,
+    ) -> Result<(), Error> {
+        match blocker {
+            unblock_core::types::IssueRef::Local(blocked_by_number) => {
+                self.add_blocked_by(issue_number, *blocked_by_number).await
+            }
+            unblock_core::types::IssueRef::CrossRepo { .. } => {
+                let issue_id = self.resolve_node_id(issue_number).await?;
+                let blocker_id = self.resolve_issue_ref(blocker).await?;
+
+                let mutation = "
+                    mutation AddBlockedBy($dependentId: ID!, $dependencyId: ID!) {
+                        addIssueDependency(input: {dependentId: $dependentId, dependencyId: $dependencyId}) {
+                            clientMutationId
+                        }
+                    }
+                ";
+
+                let variables = serde_json::json!({
+                    "dependentId": issue_id,
+                    "dependencyId": blocker_id,
+                });
+
+                self.graphql(mutation, variables).await?;
+
+                debug!(
+                    issue_number,
+                    blocker = %blocker,
+                    "Added cross-repo blocking relationship"
+                );
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Percent-encodes a string for use as a URL path segment.
+///
+/// Encodes all characters that are not unreserved per RFC 3986.
+fn encode_path_segment(s: &str) -> String {
+    let mut encoded = String::with_capacity(s.len() * 3);
+    for byte in s.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char);
+            }
+            _ => {
+                encoded.push_str(&format!("%{byte:02X}"));
+            }
+        }
+    }
+    encoded
+}
+
+/// Generates a deterministic 6-hex-digit color from a label name.
+///
+/// Uses a simple hash to produce visually distinct colors for different labels.
+/// The algorithm is intentionally simple — color aesthetics are not critical.
+fn deterministic_label_color(label: &str) -> String {
+    let mut hash: u32 = 5381;
+    for byte in label.bytes() {
+        hash = hash.wrapping_mul(33).wrapping_add(u32::from(byte));
+    }
+    // Mask to 24 bits for RGB.
+    format!("{:06x}", hash & 0x00FF_FFFF)
 }
