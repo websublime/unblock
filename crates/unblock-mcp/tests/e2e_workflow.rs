@@ -169,6 +169,13 @@ async fn e2e_workflow_all_10_tools() {
     // Cache the resolved field IDs on the client.
     client.set_field_ids(report.field_ids).await;
 
+    // Fail early if field_ids were not resolved — subsequent project field
+    // assignments would silently no-op and produce false-positive assertions.
+    assert!(
+        client.field_ids().await.is_some(),
+        "field_ids should be Some after setup_fields + set_field_ids"
+    );
+
     eprintln!(
         "setup: fields created={:?}, skipped={:?}",
         report.created, report.skipped
