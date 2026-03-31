@@ -18,6 +18,7 @@ use chrono::Utc;
 
 use crate::tools::claim::{ClaimCandidate, ClaimParams, ClaimResult, validate_claimable};
 use crate::tools::close::{CloseParams, CloseResult};
+use crate::tools::comment::{CommentParams, CommentResult};
 use crate::tools::create::{CreateParams, CreateResult};
 use crate::tools::depends::{DependsParams, DependsResult};
 use crate::tools::execute_read_tool;
@@ -84,8 +85,8 @@ unblock turns GitHub Issues into a dependency graph. Ask `ready` to get unblocke
 - Always call `ready` first to find unblocked work.
 - Use `claim` before starting work to prevent conflicts.
 - After `close`, dependents are automatically re-evaluated.
-- Write tools (create, close, update, comment, claim) trigger a graph rebuild.
-- Read tools (ready, show, depends) use the cache for fast responses.
+- Write tools (create, close, update, claim) trigger a graph rebuild.
+- Read tools (ready, show, depends, comment) use the cache for fast responses.
 - Bootstrap tools (init, setup) manage the project itself and do not affect the dependency graph.
 ";
 
@@ -1448,6 +1449,49 @@ impl UnblockServer {
         .await?;
 
         Ok(Json(result))
+    }
+
+    /// Post a comment on an issue.
+    ///
+    /// Validates that the body is non-empty and that the issue exists before
+    /// calling the GitHub API. This is a read tool from the graph perspective —
+    /// comments do not affect the dependency graph or ready set, so no cache
+    /// invalidation is needed.
+    #[tool(
+        name = "comment",
+        description = "Post a comment on an issue. Does not affect the dependency graph or ready set — no graph rebuild is triggered. Returns the URL of the new comment."
+    )]
+    async fn comment(
+        &self,
+        Parameters(params): Parameters<CommentParams>,
+    ) -> Result<Json<CommentResult>, ErrorData> {
+        let state = self.state();
+        let client = &state.client;
+        let issue_number = params.id;
+        let body = params.body;
+
+        info!(issue_number, "Comment tool invoked");
+
+        // Step 1: Validate body is non-empty (before any API call).
+        if body.trim().is_empty() {
+            return Err(ErrorData {
+                code: rmcp::model::ErrorCode::INVALID_PARAMS,
+                message: "Comment body must not be empty or whitespace-only".into(),
+                data: None,
+            });
+        }
+
+        // Step 2: Validate issue exists.
+        let _issue = execute_read_tool(state, || client.fetch_issue(issue_number)).await?;
+
+        // Step 3: Post the comment.
+        let comment_url =
+            execute_read_tool(state, || client.add_comment(issue_number, body.clone())).await?;
+
+        Ok(Json(CommentResult {
+            issue_number,
+            comment_url,
+        }))
     }
 }
 
