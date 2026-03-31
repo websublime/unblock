@@ -602,15 +602,19 @@ impl GitHubClient {
 
     /// Fetches existing fields from a Projects V2 project and returns them as
     /// a map of field name to [`FieldMeta`].
+    ///
+    /// Uses cursor-based pagination to traverse all pages, so projects with
+    /// more than 50 custom fields are handled correctly.
     async fn fetch_existing_fields(
         &self,
         project_id: &str,
     ) -> Result<HashMap<String, FieldMeta>, Error> {
         let query = "
-            query ProjectFields($projectId: ID!) {
+            query ProjectFields($projectId: ID!, $cursor: String) {
                 node(id: $projectId) {
                     ... on ProjectV2 {
-                        fields(first: 50) {
+                        fields(first: 50, after: $cursor) {
+                            pageInfo { endCursor hasNextPage }
                             nodes {
                                 ... on ProjectV2SingleSelectField {
                                     id
@@ -633,46 +637,88 @@ impl GitHubClient {
             }
         ";
 
-        let variables = serde_json::json!({
-            "projectId": project_id,
-        });
-
-        let response = self.graphql(query, variables).await?;
-        let nodes = response["data"]["node"]["fields"]["nodes"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
-
         let mut fields: HashMap<String, FieldMeta> = HashMap::new();
+        let mut cursor: Option<String> = None;
 
-        for node_value in nodes {
-            // Skip null entries that can appear from union types.
-            if node_value.is_null() {
-                continue;
+        loop {
+            let variables = serde_json::json!({
+                "projectId": project_id,
+                "cursor": cursor,
+            });
+
+            let response = self.graphql(query, variables).await?;
+            let fields_connection = &response["data"]["node"]["fields"];
+
+            // Parse field nodes from this page.
+            if let Some(nodes) = fields_connection
+                .get("nodes")
+                .and_then(serde_json::Value::as_array)
+            {
+                for node_value in nodes {
+                    // Skip null entries that can appear from union types.
+                    if node_value.is_null() {
+                        continue;
+                    }
+
+                    let field: FieldNode = match serde_json::from_value(node_value.clone()) {
+                        Ok(f) => f,
+                        Err(e) => {
+                            warn!(error = %e, "Skipping unparseable field node");
+                            continue;
+                        }
+                    };
+
+                    let mut option_map = HashMap::new();
+                    if let Some(options) = &field.options {
+                        for opt in options {
+                            option_map.insert(opt.name.clone(), opt.id.clone());
+                        }
+                    }
+
+                    fields.insert(
+                        field.name.clone(),
+                        FieldMeta {
+                            field_id: field.id,
+                            options: option_map,
+                        },
+                    );
+                }
+            } else {
+                debug!(
+                    "fields.nodes absent or not an array in GraphQL response — \
+                     returning accumulated fields"
+                );
+                break;
             }
 
-            let field: FieldNode = match serde_json::from_value(node_value.clone()) {
-                Ok(f) => f,
-                Err(e) => {
-                    warn!(error = %e, "Skipping unparseable field node");
-                    continue;
-                }
-            };
+            // Check pagination: advance cursor or break.
+            let page_info = &fields_connection["pageInfo"];
+            let has_next_page = page_info
+                .get("hasNextPage")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
 
-            let mut option_map = HashMap::new();
-            if let Some(options) = &field.options {
-                for opt in options {
-                    option_map.insert(opt.name.clone(), opt.id.clone());
-                }
+            if !has_next_page {
+                break;
             }
 
-            fields.insert(
-                field.name.clone(),
-                FieldMeta {
-                    field_id: field.id,
-                    options: option_map,
-                },
-            );
+            let next_cursor = page_info
+                .get("endCursor")
+                .and_then(serde_json::Value::as_str)
+                .map(String::from);
+
+            // Guard against infinite loop: if GitHub returns hasNextPage=true
+            // but endCursor is null, cursor would reset to None and re-fetch
+            // the first page forever. Break to prevent this.
+            if next_cursor.is_none() {
+                warn!(
+                    "GitHub API returned hasNextPage=true but endCursor=null; \
+                     stopping pagination to avoid infinite loop"
+                );
+                break;
+            }
+
+            cursor = next_cursor;
         }
 
         debug!(count = fields.len(), "Fetched existing project fields");
