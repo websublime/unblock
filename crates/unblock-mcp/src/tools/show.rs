@@ -36,6 +36,10 @@ pub struct ShowResult {
     pub blocking: Vec<ShowRelatedIssue>,
     /// Issues that block this issue (upstream blockers).
     pub blocked_by: Vec<ShowRelatedIssue>,
+    /// Parent issue if this is a sub-issue.
+    pub parent: Option<ShowRelatedIssue>,
+    /// Sub-issues of this issue.
+    pub sub_issues: Vec<ShowRelatedIssue>,
     /// Dependency tree from the cached graph, up to depth 3.
     /// Each entry is `(issue_number, depth)`. `None` if `include_deps`
     /// is `false` or the graph cache is empty.
@@ -88,6 +92,10 @@ pub struct ShowIssue {
     pub updated_at: String,
     /// HTML URL for linking back to GitHub.
     pub url: String,
+    /// Parent issue if this is a sub-issue.
+    pub parent: Option<ShowRelatedIssue>,
+    /// Sub-issues of this issue.
+    pub sub_issues: Vec<ShowRelatedIssue>,
 }
 
 /// Parsed body sections for the show result.
