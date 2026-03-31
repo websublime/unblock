@@ -40,6 +40,7 @@ pub mod init;
 pub mod ready;
 pub mod setup;
 pub mod show;
+pub mod update;
 
 use std::future::Future;
 

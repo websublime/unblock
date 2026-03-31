@@ -408,11 +408,7 @@ impl GitHubClient {
     ///
     /// [`DomainError::IssueNotFound`]: unblock_core::errors::DomainError::IssueNotFound
     #[instrument(skip(self, labels), fields(owner = %self.owner(), repo = %self.repo()))]
-    pub async fn add_labels_to_issue(
-        &self,
-        number: u64,
-        labels: Vec<String>,
-    ) -> Result<(), Error> {
+    pub async fn add_labels_to_issue(&self, number: u64, labels: Vec<String>) -> Result<(), Error> {
         let url = self.rest_url(&format!(
             "/repos/{}/{}/issues/{number}/labels",
             self.owner(),
@@ -473,11 +469,7 @@ impl GitHubClient {
     ///
     /// [`DomainError::IssueNotFound`]: unblock_core::errors::DomainError::IssueNotFound
     #[instrument(skip(self), fields(owner = %self.owner(), repo = %self.repo()))]
-    pub async fn remove_label_from_issue(
-        &self,
-        number: u64,
-        label: &str,
-    ) -> Result<(), Error> {
+    pub async fn remove_label_from_issue(&self, number: u64, label: &str) -> Result<(), Error> {
         let encoded_label = encode_path_segment(label);
         let url = self.rest_url(&format!(
             "/repos/{}/{}/issues/{number}/labels/{encoded_label}",
@@ -502,7 +494,10 @@ impl GitHubClient {
         if status.as_u16() == 404 {
             // 404 can mean the issue doesn't exist or the label isn't on the issue.
             // Log and treat as success — the label is not on the issue either way.
-            warn!(number, label, "Label not found on issue (404) — treating as success");
+            warn!(
+                number,
+                label, "Label not found on issue (404) — treating as success"
+            );
             return Ok(());
         }
 
