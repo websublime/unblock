@@ -461,13 +461,12 @@ impl GitHubClient {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Domain`] with [`DomainError::IssueNotFound`] if the
-    /// issue does not exist (HTTP 404).
     /// Returns [`Error::RateLimited`] for HTTP 429 responses.
-    /// Returns [`Error::GitHubApi`] for other non-2xx responses (including 404
-    /// when the label is not on the issue — caller should handle this gracefully).
+    /// Returns [`Error::GitHubApi`] for other non-2xx responses.
     ///
-    /// [`DomainError::IssueNotFound`]: unblock_core::errors::DomainError::IssueNotFound
+    /// **Note:** HTTP 404 is treated as success — the label is not on the issue
+    /// either way (the issue may not exist, or the label was never applied).
+    /// This follows the best-effort pattern used by other mutation methods.
     #[instrument(skip(self), fields(owner = %self.owner(), repo = %self.repo()))]
     pub async fn remove_label_from_issue(&self, number: u64, label: &str) -> Result<(), Error> {
         let encoded_label = encode_path_segment(label);
@@ -521,6 +520,10 @@ impl GitHubClient {
     ///
     /// Sends a REST GET to `/repos/{owner}/{repo}/milestones` with
     /// `state=open&per_page=100`. Returns a list of [`Milestone`] structs.
+    ///
+    /// **Known limitation:** fetches only the first page (up to 100 milestones).
+    /// Repos with more than 100 open milestones will silently miss entries beyond
+    /// the first page. This is acceptable for typical project sizes.
     ///
     /// # Errors
     ///

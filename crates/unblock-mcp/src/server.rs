@@ -1587,17 +1587,11 @@ impl UnblockServer {
             None
         };
 
-        // Capture params for the closure.
-        let priority = params.priority.clone();
-        let status = params.status.clone();
-        let labels_add = params.labels_add.clone();
-        let labels_remove = params.labels_remove.clone();
-        let body_section = params.body_section.clone();
-        let milestone_title = params.milestone.clone();
-        let story_points = params.story_points;
-
+        // Move params into the closure — validation above used only `ref` borrows
+        // so the struct is still fully owned here.
         let result = execute_write_tool(state, || {
             let client = Arc::clone(&client);
+            let params = params;
 
             async move {
                 // Step 1: Fetch the issue — validates existence.
@@ -1606,9 +1600,9 @@ impl UnblockServer {
                 let mut fields_updated: Vec<String> = Vec::new();
 
                 // Step 2: Update Projects V2 fields if any project fields changed.
-                let has_project_updates = priority.is_some()
-                    || status.is_some()
-                    || story_points.is_some()
+                let has_project_updates = params.priority.is_some()
+                    || params.status.is_some()
+                    || params.story_points.is_some()
                     || defer_until.is_some();
 
                 if has_project_updates {
@@ -1619,7 +1613,7 @@ impl UnblockServer {
                                 .await
                             {
                                 // Priority
-                                if let Some(ref p) = priority
+                                if let Some(ref p) = params.priority
                                     && let Some(option_id) =
                                         field_ids.priority.options.get(p.as_str())
                                 {
@@ -1639,7 +1633,7 @@ impl UnblockServer {
                                 }
 
                                 // Status
-                                if let Some(ref s) = status
+                                if let Some(ref s) = params.status
                                     && let Some(option_id) =
                                         field_ids.status.options.get(s.as_str())
                                 {
@@ -1659,7 +1653,7 @@ impl UnblockServer {
                                 }
 
                                 // StoryPoints
-                                if let Some(sp) = story_points {
+                                if let Some(sp) = params.story_points {
                                     match client
                                         .update_field(
                                             &project_info.id,
@@ -1707,7 +1701,7 @@ impl UnblockServer {
                 }
 
                 // Step 3: Add labels.
-                if let Some(ref add) = labels_add
+                if let Some(ref add) = params.labels_add
                     && !add.is_empty()
                 {
                     // Ensure labels exist on the repo first.
@@ -1719,7 +1713,7 @@ impl UnblockServer {
                 }
 
                 // Step 4: Remove labels.
-                if let Some(ref remove) = labels_remove {
+                if let Some(ref remove) = params.labels_remove {
                     for label in remove {
                         if let Err(e) = client
                             .remove_label_from_issue(issue_number, label)
@@ -1738,7 +1732,7 @@ impl UnblockServer {
                 }
 
                 // Step 5: Milestone resolution and update.
-                if let Some(ref ms_title) = milestone_title {
+                if let Some(ref ms_title) = params.milestone {
                     let milestones = client.list_milestones().await?;
                     if let Some(ms) = milestones.iter().find(|m| m.title == *ms_title) {
                         client
@@ -1754,7 +1748,7 @@ impl UnblockServer {
                 }
 
                 // Step 6: Body section update.
-                if let Some(ref section_update) = body_section {
+                if let Some(ref section_update) = params.body_section {
                     let current_body = issue.body.as_deref().unwrap_or_default();
                     let mut sections =
                         unblock_core::types::BodySections::from_markdown(current_body);
