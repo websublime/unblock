@@ -1486,7 +1486,7 @@ impl UnblockServer {
 
         // Step 3: Post the comment.
         let comment_url =
-            execute_read_tool(state, || client.add_comment(issue_number, body.clone())).await?;
+            execute_read_tool(state, || client.add_comment(issue_number, body)).await?;
 
         Ok(Json(CommentResult {
             issue_number,
