@@ -1293,15 +1293,12 @@ impl GitHubClient {
         Ok(node_id)
     }
 
-    /// Lists Projects V2 projects owned by the repository owner.
+    /// Lists all Projects V2 projects owned by the repository owner.
     ///
-    /// Queries `organization(login:) { projectsV2(first: 20) { ... } }` or
-    /// `user(login:) { projectsV2(first: 20) { ... } }` depending on the
-    /// provided [`OwnerType`]. Returns a list of `(number, title, url)` tuples.
-    ///
-    /// **Note:** Returns at most 20 projects. Projects beyond the first page
-    /// are not returned — this is acceptable for the init tool's idempotency
-    /// check, which matches by title.
+    /// Queries `organization(login:) { projectsV2(first: 100) { ... } }` or
+    /// `user(login:) { projectsV2(first: 100) { ... } }` depending on the
+    /// provided [`OwnerType`]. Uses cursor-based pagination to traverse all
+    /// pages, returning the complete list of projects.
     ///
     /// # Errors
     ///
@@ -1315,9 +1312,10 @@ impl GitHubClient {
         let (query, data_key) = match owner_type {
             OwnerType::Org => (
                 "
-                query ListOrgProjects($login: String!) {
+                query ListOrgProjects($login: String!, $cursor: String) {
                     organization(login: $login) {
-                        projectsV2(first: 20) {
+                        projectsV2(first: 100, after: $cursor) {
+                            pageInfo { endCursor hasNextPage }
                             nodes { number title url }
                         }
                     }
@@ -1327,9 +1325,10 @@ impl GitHubClient {
             ),
             OwnerType::User => (
                 "
-                query ListUserProjects($login: String!) {
+                query ListUserProjects($login: String!, $cursor: String) {
                     user(login: $login) {
-                        projectsV2(first: 20) {
+                        projectsV2(first: 100, after: $cursor) {
+                            pageInfo { endCursor hasNextPage }
                             nodes { number title url }
                         }
                     }
@@ -1339,35 +1338,79 @@ impl GitHubClient {
             ),
         };
 
-        let variables = serde_json::json!({
-            "login": self.owner(),
-        });
+        let mut all_projects = Vec::new();
+        let mut cursor: Option<String> = None;
 
-        let response = self.graphql(query, variables).await?;
-        let nodes_value = &response["data"][data_key]["projectsV2"]["nodes"];
-        let nodes = if let Some(arr) = nodes_value.as_array() {
-            arr.clone()
-        } else {
-            debug!(
-                data_key,
-                "projectsV2.nodes absent or not an array in GraphQL response — returning empty list"
-            );
-            Vec::new()
-        };
+        loop {
+            let variables = serde_json::json!({
+                "login": self.owner(),
+                "cursor": cursor,
+            });
 
-        let projects: Vec<OwnerProject> = nodes
-            .iter()
-            .filter(|n| !n.is_null())
-            .filter_map(|node| {
-                let number = node["number"].as_u64()?;
-                let title = node["title"].as_str()?.to_owned();
-                let url = node["url"].as_str()?.to_owned();
-                Some(OwnerProject { number, title, url })
-            })
-            .collect();
+            let response = self.graphql(query, variables).await?;
+            let projects_v2 = &response["data"][data_key]["projectsV2"];
 
-        debug!(count = projects.len(), "Listed owner projects");
-        Ok(projects)
+            // Parse project nodes from this page.
+            if let Some(nodes) = projects_v2
+                .get("nodes")
+                .and_then(serde_json::Value::as_array)
+            {
+                for node in nodes {
+                    if node.is_null() {
+                        continue;
+                    }
+                    if let (Some(number), Some(title), Some(url)) = (
+                        node["number"].as_u64(),
+                        node["title"].as_str(),
+                        node["url"].as_str(),
+                    ) {
+                        all_projects.push(OwnerProject {
+                            number,
+                            title: title.to_owned(),
+                            url: url.to_owned(),
+                        });
+                    }
+                }
+            } else {
+                debug!(
+                    data_key,
+                    "projectsV2.nodes absent or not an array in GraphQL response — returning empty list"
+                );
+                break;
+            }
+
+            // Check pagination: advance cursor or break.
+            let page_info = &projects_v2["pageInfo"];
+            let has_next_page = page_info
+                .get("hasNextPage")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+
+            if !has_next_page {
+                break;
+            }
+
+            let next_cursor = page_info
+                .get("endCursor")
+                .and_then(serde_json::Value::as_str)
+                .map(String::from);
+
+            // Guard against infinite loop: if GitHub returns hasNextPage=true
+            // but endCursor is null, cursor would reset to None and re-fetch
+            // the first page forever. Break to prevent this.
+            if next_cursor.is_none() {
+                warn!(
+                    "GitHub API returned hasNextPage=true but endCursor=null; \
+                     stopping pagination to avoid infinite loop"
+                );
+                break;
+            }
+
+            cursor = next_cursor;
+        }
+
+        debug!(count = all_projects.len(), "Listed owner projects");
+        Ok(all_projects)
     }
 
     /// Creates a new GitHub Projects V2 project.
