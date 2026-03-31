@@ -2,6 +2,11 @@
 //!
 //! - `create_issue()` — REST POST
 //! - `close_issue()` — REST PATCH
+//! - `update_issue_body()` — REST PATCH (update body only)
+//! - `add_labels_to_issue()` — REST POST (add labels)
+//! - `remove_label_from_issue()` — DELETE (remove single label)
+//! - `list_milestones()` — REST GET (list milestones)
+//! - `update_issue_milestone()` — REST PATCH (set milestone)
 //! - `add_comment()` — REST POST
 //! - `add_blocked_by()` — GraphQL mutation (blocking relationship)
 //! - `remove_blocked_by()` — GraphQL mutation (blocking relationship)
@@ -76,6 +81,33 @@ struct CreateIssueBody {
 struct CloseIssueBody {
     state: &'static str,
     state_reason: &'static str,
+}
+
+/// Request body for updating an issue body via REST PATCH.
+#[derive(Debug, Serialize)]
+struct UpdateIssueBodyRequest {
+    body: String,
+}
+
+/// Request body for adding labels to a GitHub issue via REST POST.
+#[derive(Debug, Serialize)]
+struct AddLabelsBody {
+    labels: Vec<String>,
+}
+
+/// Request body for setting a milestone on an issue via REST PATCH.
+#[derive(Debug, Serialize)]
+struct UpdateMilestoneBody {
+    milestone: Option<u64>,
+}
+
+/// A GitHub milestone as returned by the REST API.
+#[derive(Debug, Deserialize)]
+pub struct Milestone {
+    /// The milestone number (not the node ID).
+    pub number: u64,
+    /// The milestone title.
+    pub title: String,
 }
 
 /// Request body for adding a comment to a GitHub issue via REST API.
@@ -300,6 +332,312 @@ impl GitHubClient {
             .context(errors::GitHubUnavailableSnafu)?;
 
         Ok(comment.html_url)
+    }
+
+    /// Updates the body of a GitHub issue.
+    ///
+    /// Sends a REST PATCH to `/repos/{owner}/{repo}/issues/{number}` with the
+    /// new body content.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Domain`] with [`DomainError::IssueNotFound`] if the
+    /// issue does not exist (HTTP 404).
+    /// Returns [`Error::RateLimited`] for HTTP 429 responses.
+    /// Returns [`Error::GitHubApi`] for other non-2xx responses.
+    ///
+    /// [`DomainError::IssueNotFound`]: unblock_core::errors::DomainError::IssueNotFound
+    #[instrument(skip(self, body), fields(owner = %self.owner(), repo = %self.repo()))]
+    pub async fn update_issue_body(&self, number: u64, body: String) -> Result<(), Error> {
+        let url = self.rest_url(&format!(
+            "/repos/{}/{}/issues/{number}",
+            self.owner(),
+            self.repo()
+        ));
+
+        let request_body = UpdateIssueBodyRequest { body };
+
+        let response = self
+            .http()
+            .patch(&url)
+            .json(&request_body)
+            .send()
+            .await
+            .context(errors::GitHubUnavailableSnafu)?;
+
+        let status = response.status();
+
+        if status.as_u16() == 429 {
+            let reset_at = parse_rate_limit_reset(&response);
+            return Err(errors::RateLimitedSnafu { reset_at }.build());
+        }
+
+        if status.as_u16() == 404 {
+            return Err(unblock_core::errors::IssueNotFoundSnafu { number }
+                .build()
+                .into());
+        }
+
+        if !status.is_success() {
+            let message = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown error".to_owned());
+            return Err(errors::GitHubApiSnafu {
+                status: status.as_u16(),
+                message,
+            }
+            .build());
+        }
+
+        debug!(number, "Updated issue body");
+        Ok(())
+    }
+
+    /// Adds labels to a GitHub issue.
+    ///
+    /// Sends a REST POST to `/repos/{owner}/{repo}/issues/{number}/labels`.
+    /// Labels that already exist on the issue are silently ignored by the API.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Domain`] with [`DomainError::IssueNotFound`] if the
+    /// issue does not exist (HTTP 404).
+    /// Returns [`Error::RateLimited`] for HTTP 429 responses.
+    /// Returns [`Error::GitHubApi`] for other non-2xx responses.
+    ///
+    /// [`DomainError::IssueNotFound`]: unblock_core::errors::DomainError::IssueNotFound
+    #[instrument(skip(self, labels), fields(owner = %self.owner(), repo = %self.repo()))]
+    pub async fn add_labels_to_issue(
+        &self,
+        number: u64,
+        labels: Vec<String>,
+    ) -> Result<(), Error> {
+        let url = self.rest_url(&format!(
+            "/repos/{}/{}/issues/{number}/labels",
+            self.owner(),
+            self.repo()
+        ));
+
+        let request_body = AddLabelsBody { labels };
+
+        let response = self
+            .http()
+            .post(&url)
+            .json(&request_body)
+            .send()
+            .await
+            .context(errors::GitHubUnavailableSnafu)?;
+
+        let status = response.status();
+
+        if status.as_u16() == 429 {
+            let reset_at = parse_rate_limit_reset(&response);
+            return Err(errors::RateLimitedSnafu { reset_at }.build());
+        }
+
+        if status.as_u16() == 404 {
+            return Err(unblock_core::errors::IssueNotFoundSnafu { number }
+                .build()
+                .into());
+        }
+
+        if !status.is_success() {
+            let message = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown error".to_owned());
+            return Err(errors::GitHubApiSnafu {
+                status: status.as_u16(),
+                message,
+            }
+            .build());
+        }
+
+        debug!(number, "Added labels to issue");
+        Ok(())
+    }
+
+    /// Removes a single label from a GitHub issue.
+    ///
+    /// Sends a REST DELETE to
+    /// `/repos/{owner}/{repo}/issues/{number}/labels/{label}`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Domain`] with [`DomainError::IssueNotFound`] if the
+    /// issue does not exist (HTTP 404).
+    /// Returns [`Error::RateLimited`] for HTTP 429 responses.
+    /// Returns [`Error::GitHubApi`] for other non-2xx responses (including 404
+    /// when the label is not on the issue — caller should handle this gracefully).
+    ///
+    /// [`DomainError::IssueNotFound`]: unblock_core::errors::DomainError::IssueNotFound
+    #[instrument(skip(self), fields(owner = %self.owner(), repo = %self.repo()))]
+    pub async fn remove_label_from_issue(
+        &self,
+        number: u64,
+        label: &str,
+    ) -> Result<(), Error> {
+        let encoded_label = encode_path_segment(label);
+        let url = self.rest_url(&format!(
+            "/repos/{}/{}/issues/{number}/labels/{encoded_label}",
+            self.owner(),
+            self.repo()
+        ));
+
+        let response = self
+            .http()
+            .delete(&url)
+            .send()
+            .await
+            .context(errors::GitHubUnavailableSnafu)?;
+
+        let status = response.status();
+
+        if status.as_u16() == 429 {
+            let reset_at = parse_rate_limit_reset(&response);
+            return Err(errors::RateLimitedSnafu { reset_at }.build());
+        }
+
+        if status.as_u16() == 404 {
+            // 404 can mean the issue doesn't exist or the label isn't on the issue.
+            // Log and treat as success — the label is not on the issue either way.
+            warn!(number, label, "Label not found on issue (404) — treating as success");
+            return Ok(());
+        }
+
+        if !status.is_success() {
+            let message = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown error".to_owned());
+            return Err(errors::GitHubApiSnafu {
+                status: status.as_u16(),
+                message,
+            }
+            .build());
+        }
+
+        debug!(number, label, "Removed label from issue");
+        Ok(())
+    }
+
+    /// Lists all milestones for the configured repository.
+    ///
+    /// Sends a REST GET to `/repos/{owner}/{repo}/milestones` with
+    /// `state=open&per_page=100`. Returns a list of [`Milestone`] structs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::RateLimited`] for HTTP 429 responses.
+    /// Returns [`Error::GitHubApi`] for other non-2xx responses.
+    #[instrument(skip(self), fields(owner = %self.owner(), repo = %self.repo()))]
+    pub async fn list_milestones(&self) -> Result<Vec<Milestone>, Error> {
+        let url = self.rest_url(&format!(
+            "/repos/{}/{}/milestones?state=open&per_page=100",
+            self.owner(),
+            self.repo()
+        ));
+
+        let response = self
+            .http()
+            .get(&url)
+            .send()
+            .await
+            .context(errors::GitHubUnavailableSnafu)?;
+
+        let status = response.status();
+
+        if status.as_u16() == 429 {
+            let reset_at = parse_rate_limit_reset(&response);
+            return Err(errors::RateLimitedSnafu { reset_at }.build());
+        }
+
+        if !status.is_success() {
+            let message = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown error".to_owned());
+            return Err(errors::GitHubApiSnafu {
+                status: status.as_u16(),
+                message,
+            }
+            .build());
+        }
+
+        let milestones: Vec<Milestone> = response
+            .json()
+            .await
+            .context(errors::GitHubUnavailableSnafu)?;
+
+        debug!(count = milestones.len(), "Listed milestones");
+        Ok(milestones)
+    }
+
+    /// Updates the milestone on a GitHub issue.
+    ///
+    /// Sends a REST PATCH to `/repos/{owner}/{repo}/issues/{number}` with the
+    /// milestone number. Pass `None` to clear the milestone.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Domain`] with [`DomainError::IssueNotFound`] if the
+    /// issue does not exist (HTTP 404).
+    /// Returns [`Error::RateLimited`] for HTTP 429 responses.
+    /// Returns [`Error::GitHubApi`] for other non-2xx responses.
+    ///
+    /// [`DomainError::IssueNotFound`]: unblock_core::errors::DomainError::IssueNotFound
+    #[instrument(skip(self), fields(owner = %self.owner(), repo = %self.repo()))]
+    pub async fn update_issue_milestone(
+        &self,
+        number: u64,
+        milestone_number: Option<u64>,
+    ) -> Result<(), Error> {
+        let url = self.rest_url(&format!(
+            "/repos/{}/{}/issues/{number}",
+            self.owner(),
+            self.repo()
+        ));
+
+        let request_body = UpdateMilestoneBody {
+            milestone: milestone_number,
+        };
+
+        let response = self
+            .http()
+            .patch(&url)
+            .json(&request_body)
+            .send()
+            .await
+            .context(errors::GitHubUnavailableSnafu)?;
+
+        let status = response.status();
+
+        if status.as_u16() == 429 {
+            let reset_at = parse_rate_limit_reset(&response);
+            return Err(errors::RateLimitedSnafu { reset_at }.build());
+        }
+
+        if status.as_u16() == 404 {
+            return Err(unblock_core::errors::IssueNotFoundSnafu { number }
+                .build()
+                .into());
+        }
+
+        if !status.is_success() {
+            let message = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown error".to_owned());
+            return Err(errors::GitHubApiSnafu {
+                status: status.as_u16(),
+                message,
+            }
+            .build());
+        }
+
+        debug!(number, milestone_number, "Updated issue milestone");
+        Ok(())
     }
 
     /// Adds an issue to a GitHub Projects V2 project.
