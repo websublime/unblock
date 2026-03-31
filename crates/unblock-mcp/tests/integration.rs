@@ -825,6 +825,102 @@ async fn create_issue_with_blocked_by_local() {
         .await;
 }
 
+/// Create with `blocked_by` using cross-repo `IssueRef` — verifies the
+/// `resolve_issue_ref` + `add_blocked_by_ref` GraphQL code path for
+/// `IssueRef::CrossRepo`.
+///
+/// Uses the same configured test repo as both source and target. The
+/// `IssueRef::CrossRepo` variant triggers the owner/repo GraphQL resolution
+/// path regardless of whether the target repo differs from the configured one.
+#[tokio::test]
+async fn create_issue_with_blocked_by_cross_repo() {
+    if !has_github_token() {
+        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+        return;
+    }
+
+    let state = test_server_state().await;
+    let client = &state.client;
+
+    // Extract owner/repo from the client so we can construct a CrossRepo ref
+    // pointing at the same repo.
+    let owner = client.owner().to_owned();
+    let repo = client.repo().to_owned();
+
+    // Create blocker issue.
+    let blocking_title = format!(
+        "[test] cross-repo blocker issue {}",
+        chrono::Utc::now().timestamp()
+    );
+    let blocking_issue = client
+        .create_issue(unblock_github::mutations::CreateIssueParams {
+            title: blocking_title,
+            body: None,
+            labels: vec!["test".to_owned()],
+            milestone: None,
+            assignees: Vec::new(),
+        })
+        .await
+        .expect("create blocker issue should succeed");
+
+    // Create dependent issue.
+    let dependent_title = format!(
+        "[test] cross-repo blocked issue {}",
+        chrono::Utc::now().timestamp()
+    );
+    let dependent_issue = client
+        .create_issue(unblock_github::mutations::CreateIssueParams {
+            title: dependent_title,
+            body: None,
+            labels: vec!["test".to_owned()],
+            milestone: None,
+            assignees: Vec::new(),
+        })
+        .await
+        .expect("create blocked issue should succeed");
+
+    // Build a CrossRepo IssueRef pointing at the blocker in the same repo.
+    // This exercises the full cross-repo GraphQL resolution code path
+    // (resolve_issue_ref with owner/repo/number query → addIssueDependency).
+    let cross_repo_ref = IssueRef::CrossRepo {
+        owner: owner.clone(),
+        repo: repo.clone(),
+        number: blocking_issue.number,
+    };
+
+    // Add blocking relationship via the cross-repo path.
+    client
+        .add_blocked_by_ref(dependent_issue.number, &cross_repo_ref)
+        .await
+        .expect("add_blocked_by_ref (cross-repo) should succeed");
+
+    // Re-fetch dependent issue and verify blocker appears in blocked_by.
+    let refetched = client
+        .fetch_issue(dependent_issue.number)
+        .await
+        .expect("fetch_issue should succeed after add_blocked_by_ref");
+    let blocking_numbers: Vec<u64> = refetched.blocked_by.iter().map(|r| r.number).collect();
+    assert!(
+        blocking_numbers.contains(&blocking_issue.number),
+        "blocked_by should contain the cross-repo blocker: blocker={}, blocked_by={:?}",
+        blocking_issue.number,
+        blocking_numbers,
+    );
+
+    eprintln!(
+        "create_issue_with_blocked_by_cross_repo: blocked=#{} blocker={}/{}#{}",
+        dependent_issue.number, owner, repo, blocking_issue.number,
+    );
+
+    // Cleanup: close both issues.
+    let _ = client
+        .close_issue(dependent_issue.number, Some("test cleanup".to_owned()))
+        .await;
+    let _ = client
+        .close_issue(blocking_issue.number, Some("test cleanup".to_owned()))
+        .await;
+}
+
 /// Create with `parent` — verifies sub-issue relationship.
 #[tokio::test]
 async fn create_issue_with_parent_sub_issue() {
