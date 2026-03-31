@@ -30,6 +30,7 @@ use crate::tools::show::{
     DependencyTreeEntry, ShowBodySections, ShowComment, ShowIssue, ShowParams, ShowRelatedIssue,
     ShowResult,
 };
+use crate::tools::update::{BodySectionUpdate, SectionName, UpdateParams, UpdateResult};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::{ErrorData, Implementation, ServerInfo};
@@ -254,6 +255,28 @@ async fn set_project_fields(
             .await
     {
         tracing::warn!(error = %e, "Failed to set DeferUntil field");
+    }
+}
+
+/// Applies a [`BodySectionUpdate`] to a [`BodySections`] struct.
+///
+/// Maps the [`SectionName`] variant to the corresponding field in `BodySections`
+/// and sets it to the new content. The content is stored as `Some` unless the
+/// content string is empty or whitespace-only, in which case it is set to `None`.
+fn apply_body_section_update(
+    sections: &mut unblock_core::types::BodySections,
+    update: &BodySectionUpdate,
+) {
+    let content = if update.content.trim().is_empty() {
+        None
+    } else {
+        Some(update.content.clone())
+    };
+
+    match update.section {
+        SectionName::Description => sections.description = content,
+        SectionName::Acceptance => sections.acceptance_criteria = content,
+        SectionName::Design => sections.design_notes = content,
     }
 }
 
@@ -1492,6 +1515,281 @@ impl UnblockServer {
             issue_number,
             comment_url,
         }))
+    }
+
+    /// Update issue metadata and Projects V2 fields.
+    ///
+    /// Selectively updates only the fields provided in the input. Supports:
+    /// `priority`, `status`, `story_points`, `defer_until` (via Projects V2),
+    /// `labels_add`/`labels_remove` (via REST), `milestone` (resolved by title),
+    /// and `body_section` (read-modify-write on issue body).
+    ///
+    /// This is a write tool — the cache is invalidated and rebuilt after all
+    /// mutations complete.
+    #[tool(
+        name = "update",
+        description = "Update issue fields selectively. Supports: priority, status, labels_add, labels_remove, body_section (section: Description/Acceptance/Design, content), milestone (title), story_points, defer_until (YYYY-MM-DD). Only provided fields are changed. Triggers graph rebuild."
+    )]
+    async fn update(
+        &self,
+        Parameters(params): Parameters<UpdateParams>,
+    ) -> Result<Json<UpdateResult>, ErrorData> {
+        let state = self.state();
+        let client = Arc::clone(&state.client);
+
+        let issue_number = params.id;
+
+        info!(
+            issue_number,
+            priority = params.priority.as_deref(),
+            status = params.status.as_deref(),
+            "Update tool invoked"
+        );
+
+        // Validate priority if provided.
+        if let Some(ref p) = params.priority
+            && !matches!(p.as_str(), "P0" | "P1" | "P2" | "P3" | "P4")
+        {
+            return Err(ErrorData {
+                code: rmcp::model::ErrorCode::INVALID_PARAMS,
+                message: format!("Invalid priority '{p}' — must be P0, P1, P2, P3, or P4").into(),
+                data: None,
+            });
+        }
+
+        // Validate status if provided.
+        if let Some(ref s) = params.status
+            && !matches!(
+                s.as_str(),
+                "Backlog" | "In Progress" | "Done" | "Blocked" | "Deferred"
+            )
+        {
+            return Err(ErrorData {
+                code: rmcp::model::ErrorCode::INVALID_PARAMS,
+                message: format!(
+                    "Invalid status '{s}' — must be Backlog, In Progress, Done, Blocked, or Deferred"
+                )
+                .into(),
+                data: None,
+            });
+        }
+
+        // Parse defer_until if provided.
+        let defer_until = if let Some(ref date_str) = params.defer_until {
+            Some(
+                chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d").map_err(|e| ErrorData {
+                    code: rmcp::model::ErrorCode::INVALID_PARAMS,
+                    message: format!("Invalid defer_until date '{date_str}': {e}").into(),
+                    data: None,
+                })?,
+            )
+        } else {
+            None
+        };
+
+        // Capture params for the closure.
+        let priority = params.priority.clone();
+        let status = params.status.clone();
+        let labels_add = params.labels_add.clone();
+        let labels_remove = params.labels_remove.clone();
+        let body_section = params.body_section.clone();
+        let milestone_title = params.milestone.clone();
+        let story_points = params.story_points;
+
+        let result = execute_write_tool(state, || {
+            let client = Arc::clone(&client);
+
+            async move {
+                // Step 1: Fetch the issue — validates existence.
+                let issue = client.fetch_issue(issue_number).await?;
+
+                let mut fields_updated: Vec<String> = Vec::new();
+
+                // Step 2: Update Projects V2 fields if any project fields changed.
+                let has_project_updates = priority.is_some()
+                    || status.is_some()
+                    || story_points.is_some()
+                    || defer_until.is_some();
+
+                if has_project_updates {
+                    if let Some(field_ids) = client.field_ids().await {
+                        if let Ok(project_info) = client.resolve_project_info().await {
+                            if let Ok(item_id) = client
+                                .get_project_item_id(&issue.node_id, &project_info.id)
+                                .await
+                            {
+                                // Priority
+                                if let Some(ref p) = priority
+                                    && let Some(option_id) =
+                                        field_ids.priority.options.get(p.as_str())
+                                {
+                                    if let Err(e) = client
+                                        .update_field(
+                                            &project_info.id,
+                                            &item_id,
+                                            &field_ids.priority.field_id,
+                                            &FieldValue::SingleSelectOption(option_id.clone()),
+                                        )
+                                        .await
+                                    {
+                                        tracing::warn!(error = %e, "Failed to set Priority field");
+                                    } else {
+                                        fields_updated.push(format!("priority={p}"));
+                                    }
+                                }
+
+                                // Status
+                                if let Some(ref s) = status
+                                    && let Some(option_id) =
+                                        field_ids.status.options.get(s.as_str())
+                                {
+                                    if let Err(e) = client
+                                        .update_field(
+                                            &project_info.id,
+                                            &item_id,
+                                            &field_ids.status.field_id,
+                                            &FieldValue::SingleSelectOption(option_id.clone()),
+                                        )
+                                        .await
+                                    {
+                                        tracing::warn!(error = %e, "Failed to set Status field");
+                                    } else {
+                                        fields_updated.push(format!("status={s}"));
+                                    }
+                                }
+
+                                // StoryPoints
+                                if let Some(sp) = story_points {
+                                    match client
+                                        .update_field(
+                                            &project_info.id,
+                                            &item_id,
+                                            &field_ids.story_points,
+                                            &FieldValue::Number(sp),
+                                        )
+                                        .await
+                                    {
+                                        Ok(()) => fields_updated.push(format!("story_points={sp}")),
+                                        Err(e) => tracing::warn!(error = %e, "Failed to set StoryPoints field"),
+                                    }
+                                }
+
+                                // DeferUntil
+                                if let Some(du) = defer_until {
+                                    match client
+                                        .update_field(
+                                            &project_info.id,
+                                            &item_id,
+                                            &field_ids.defer_until,
+                                            &FieldValue::Date(du),
+                                        )
+                                        .await
+                                    {
+                                        Ok(()) => fields_updated.push(format!("defer_until={du}")),
+                                        Err(e) => tracing::warn!(error = %e, "Failed to set DeferUntil field"),
+                                    }
+                                }
+                            } else {
+                                tracing::warn!(
+                                    "Failed to get project item ID — project fields will not be set"
+                                );
+                            }
+                        } else {
+                            tracing::warn!(
+                                "Failed to resolve project info — project fields will not be set"
+                            );
+                        }
+                    } else {
+                        tracing::debug!(
+                            "No field IDs cached — run setup first to enable project field updates"
+                        );
+                    }
+                }
+
+                // Step 3: Add labels.
+                if let Some(ref add) = labels_add
+                    && !add.is_empty()
+                {
+                    // Ensure labels exist on the repo first.
+                    client.ensure_labels(add).await?;
+                    client
+                        .add_labels_to_issue(issue_number, add.clone())
+                        .await?;
+                    fields_updated.push(format!("labels_add={}", add.join(",")));
+                }
+
+                // Step 4: Remove labels.
+                if let Some(ref remove) = labels_remove {
+                    for label in remove {
+                        if let Err(e) = client
+                            .remove_label_from_issue(issue_number, label)
+                            .await
+                        {
+                            tracing::warn!(
+                                label = %label,
+                                error = %e,
+                                "Failed to remove label (best-effort)"
+                            );
+                        }
+                    }
+                    if !remove.is_empty() {
+                        fields_updated.push(format!("labels_remove={}", remove.join(",")));
+                    }
+                }
+
+                // Step 5: Milestone resolution and update.
+                if let Some(ref ms_title) = milestone_title {
+                    let milestones = client.list_milestones().await?;
+                    if let Some(ms) = milestones.iter().find(|m| m.title == *ms_title) {
+                        client
+                            .update_issue_milestone(issue_number, Some(ms.number))
+                            .await?;
+                        fields_updated.push(format!("milestone={ms_title}"));
+                    } else {
+                        tracing::warn!(
+                            milestone = %ms_title,
+                            "Milestone not found — milestone will not be set"
+                        );
+                    }
+                }
+
+                // Step 6: Body section update.
+                if let Some(ref section_update) = body_section {
+                    let current_body = issue.body.as_deref().unwrap_or_default();
+                    let mut sections =
+                        unblock_core::types::BodySections::from_markdown(current_body);
+
+                    apply_body_section_update(&mut sections, section_update);
+
+                    let new_body = sections.to_markdown();
+                    client
+                        .update_issue_body(issue_number, new_body)
+                        .await?;
+
+                    let section_label = match section_update.section {
+                        SectionName::Description => "description",
+                        SectionName::Acceptance => "acceptance_criteria",
+                        SectionName::Design => "design_notes",
+                    };
+                    fields_updated.push(format!("body_section={section_label}"));
+                }
+
+                // Step 7: Re-fetch to confirm updates.
+                let updated_issue = client.fetch_issue(issue_number).await?;
+
+                Ok(UpdateResult {
+                    number: updated_issue.number,
+                    url: updated_issue.url,
+                    fields_updated,
+                    hint: format!(
+                        "Issue #{issue_number} updated. Use `show` to verify the changes."
+                    ),
+                })
+            }
+        })
+        .await?;
+
+        Ok(Json(result))
     }
 }
 
