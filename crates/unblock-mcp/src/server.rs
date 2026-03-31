@@ -578,6 +578,7 @@ impl UnblockServer {
         );
 
         // Step 3: Extract blocking/blocked_by from the issue.
+        // TODO(unblock-b6b.62): Extract shared helper fn for RelatedIssue-to-ShowRelatedIssue mapping
         let blocking: Vec<ShowRelatedIssue> = issue
             .blocking
             .iter()
@@ -673,8 +674,6 @@ impl UnblockServer {
             created_at: issue.created_at.to_rfc3339(),
             updated_at: issue.updated_at.to_rfc3339(),
             url: issue.url.clone(),
-            parent: parent.clone(),
-            sub_issues: sub_issues.clone(),
         };
 
         Ok(Json(ShowResult {
