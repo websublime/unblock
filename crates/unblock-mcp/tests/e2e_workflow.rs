@@ -174,13 +174,60 @@ async fn e2e_workflow_all_10_tools() {
         report.created, report.skipped
     );
 
-    // Verify views exist.
+    // Create missing views — mirrors the setup tool handler in server.rs.
     let existing_views = client
         .list_views(owner_type)
         .await
         .expect("list_views should succeed");
 
-    eprintln!("setup: {} views present", existing_views.len());
+    let existing_view_names: std::collections::HashSet<&str> =
+        existing_views.iter().map(|v| v.name.as_str()).collect();
+
+    // Fetch REST field IDs needed for visible_fields on non-Roadmap views.
+    let rest_fields = client
+        .list_rest_fields(owner_type)
+        .await
+        .expect("list_rest_fields should succeed");
+    let all_field_ids: Vec<u64> = rest_fields.iter().map(|f| f.id).collect();
+
+    let mut views_created: Vec<String> = Vec::new();
+    let mut views_existing: Vec<String> = Vec::new();
+
+    use unblock_github::projects::{CreateViewParams, ViewLayout};
+    use unblock_mcp::tools::setup::REQUIRED_VIEWS;
+
+    for spec in REQUIRED_VIEWS {
+        if existing_view_names.contains(spec.name) {
+            views_existing.push(spec.name.to_owned());
+            continue;
+        }
+
+        // Roadmap views do not support visible_fields (ARCH S8.5).
+        let visible_fields = if spec.layout == ViewLayout::Roadmap {
+            None
+        } else {
+            Some(all_field_ids.clone())
+        };
+
+        let view_params = CreateViewParams {
+            name: spec.name.to_owned(),
+            layout: spec.layout,
+            filter: spec.filter.map(String::from),
+            visible_fields,
+        };
+
+        client
+            .create_view(owner_type, &view_params)
+            .await
+            .unwrap_or_else(|e| panic!("create_view({}) should succeed: {e}", spec.name));
+
+        views_created.push(spec.name.to_owned());
+    }
+
+    eprintln!(
+        "setup: views created={views_created:?}, views existing={views_existing:?} ({} total)",
+        views_created.len() + views_existing.len()
+    );
 
     // ── Step 3: create issue A (no deps, P1) ────────────────────────
     eprintln!("=== Step 3: create issue A ===");
