@@ -20,8 +20,10 @@
 
 use unblock_github::client::GitHubClient;
 use unblock_github::mutations::CreateIssueParams;
+use unblock_github::projects::{CreateViewParams, FieldValue, ViewLayout};
 use unblock_mcp::tools::ready::{ReadyParams, filter_ready_set};
 use unblock_mcp::tools::rebuild_cache;
+use unblock_mcp::tools::setup::REQUIRED_VIEWS;
 
 mod common;
 use common::{has_github_token, has_project_number, test_server_state};
@@ -105,6 +107,7 @@ impl Drop for CloseIssuesGuard<'_> {
 /// 14. `close` C — verify: C closed, B now in ready set (cascade)
 /// 15. `ready`   — final verify: B in ready set, A and C not present
 /// 16. Cleanup: close B
+#[allow(clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread")]
 async fn e2e_workflow_all_10_tools() {
     // ── Gate: skip if required env vars are not set ──────────────────
@@ -200,9 +203,6 @@ async fn e2e_workflow_all_10_tools() {
     let mut views_created: Vec<String> = Vec::new();
     let mut views_existing: Vec<String> = Vec::new();
 
-    use unblock_github::projects::{CreateViewParams, ViewLayout};
-    use unblock_mcp::tools::setup::REQUIRED_VIEWS;
-
     for spec in REQUIRED_VIEWS {
         if existing_view_names.contains(spec.name) {
             views_existing.push(spec.name.to_owned());
@@ -254,20 +254,19 @@ async fn e2e_workflow_all_10_tools() {
     if let Ok(item_id) = client
         .get_project_item_id(&issue_a.node_id, &project_info.id)
         .await
+        && let Some(field_ids) = client.field_ids().await
     {
-        if let Some(field_ids) = client.field_ids().await {
-            set_project_fields_helper(
-                client,
-                &project_info.id,
-                &item_id,
-                &field_ids,
-                "P1",
-                "Task",
-                "Backlog",
-                "Ready",
-            )
-            .await;
-        }
+        set_project_fields_helper(
+            client,
+            &project_info.id,
+            &item_id,
+            &field_ids,
+            "P1",
+            "Task",
+            "Backlog",
+            "Ready",
+        )
+        .await;
     }
 
     rebuild_cache(&state).await;
@@ -297,20 +296,19 @@ async fn e2e_workflow_all_10_tools() {
     if let Ok(item_id) = client
         .get_project_item_id(&issue_b.node_id, &project_info.id)
         .await
+        && let Some(field_ids) = client.field_ids().await
     {
-        if let Some(field_ids) = client.field_ids().await {
-            set_project_fields_helper(
-                client,
-                &project_info.id,
-                &item_id,
-                &field_ids,
-                "P2",
-                "Task",
-                "Blocked",
-                "Not Ready",
-            )
-            .await;
-        }
+        set_project_fields_helper(
+            client,
+            &project_info.id,
+            &item_id,
+            &field_ids,
+            "P2",
+            "Task",
+            "Blocked",
+            "Not Ready",
+        )
+        .await;
     }
 
     rebuild_cache(&state).await;
@@ -334,20 +332,19 @@ async fn e2e_workflow_all_10_tools() {
     if let Ok(item_id) = client
         .get_project_item_id(&issue_c.node_id, &project_info.id)
         .await
+        && let Some(field_ids) = client.field_ids().await
     {
-        if let Some(field_ids) = client.field_ids().await {
-            set_project_fields_helper(
-                client,
-                &project_info.id,
-                &item_id,
-                &field_ids,
-                "P3",
-                "Task",
-                "Backlog",
-                "Ready",
-            )
-            .await;
-        }
+        set_project_fields_helper(
+            client,
+            &project_info.id,
+            &item_id,
+            &field_ids,
+            "P3",
+            "Task",
+            "Backlog",
+            "Ready",
+        )
+        .await;
     }
 
     rebuild_cache(&state).await;
@@ -432,46 +429,43 @@ async fn e2e_workflow_all_10_tools() {
         .expect("claim comment should succeed");
 
     // Update project fields: Status -> In Progress, Agent -> test-agent.
-    if let Some(field_ids) = client.field_ids().await {
-        if let Ok(item_id) = client
+    if let Some(field_ids) = client.field_ids().await
+        && let Ok(item_id) = client
             .get_project_item_id(&issue_a.node_id, &project_info.id)
             .await
-        {
-            use unblock_github::projects::FieldValue;
-
-            // Status -> In Progress
-            if let Some(option_id) = field_ids.status.options.get("In Progress") {
-                let _ = client
-                    .update_field(
-                        &project_info.id,
-                        &item_id,
-                        &field_ids.status.field_id,
-                        &FieldValue::SingleSelectOption(option_id.clone()),
-                    )
-                    .await;
-            }
-
-            // Agent -> test-agent
+    {
+        // Status -> In Progress
+        if let Some(option_id) = field_ids.status.options.get("In Progress") {
             let _ = client
                 .update_field(
                     &project_info.id,
                     &item_id,
-                    &field_ids.agent,
-                    &FieldValue::Text(agent_name.to_owned()),
+                    &field_ids.status.field_id,
+                    &FieldValue::SingleSelectOption(option_id.clone()),
                 )
                 .await;
+        }
 
-            // ReadyState -> Not Ready
-            if let Some(option_id) = field_ids.ready_state.options.get("Not Ready") {
-                let _ = client
-                    .update_field(
-                        &project_info.id,
-                        &item_id,
-                        &field_ids.ready_state.field_id,
-                        &FieldValue::SingleSelectOption(option_id.clone()),
-                    )
-                    .await;
-            }
+        // Agent -> test-agent
+        let _ = client
+            .update_field(
+                &project_info.id,
+                &item_id,
+                &field_ids.agent,
+                &FieldValue::Text(agent_name.to_owned()),
+            )
+            .await;
+
+        // ReadyState -> Not Ready
+        if let Some(option_id) = field_ids.ready_state.options.get("Not Ready") {
+            let _ = client
+                .update_field(
+                    &project_info.id,
+                    &item_id,
+                    &field_ids.ready_state.field_id,
+                    &FieldValue::SingleSelectOption(option_id.clone()),
+                )
+                .await;
         }
     }
 
@@ -517,23 +511,20 @@ async fn e2e_workflow_all_10_tools() {
         .expect("add_labels_to_issue should succeed");
 
     // Update priority to P0 via project fields.
-    if let Some(field_ids) = client.field_ids().await {
-        if let Ok(item_id) = client
+    if let Some(field_ids) = client.field_ids().await
+        && let Ok(item_id) = client
             .get_project_item_id(&issue_a.node_id, &project_info.id)
             .await
-        {
-            use unblock_github::projects::FieldValue;
-            if let Some(option_id) = field_ids.priority.options.get("P0") {
-                let _ = client
-                    .update_field(
-                        &project_info.id,
-                        &item_id,
-                        &field_ids.priority.field_id,
-                        &FieldValue::SingleSelectOption(option_id.clone()),
-                    )
-                    .await;
-            }
-        }
+        && let Some(option_id) = field_ids.priority.options.get("P0")
+    {
+        let _ = client
+            .update_field(
+                &project_info.id,
+                &item_id,
+                &field_ids.priority.field_id,
+                &FieldValue::SingleSelectOption(option_id.clone()),
+            )
+            .await;
     }
 
     rebuild_cache(&state).await;
@@ -695,6 +686,7 @@ async fn e2e_workflow_all_10_tools() {
 /// Best-effort: failures are logged but do not cause test failure. This mirrors
 /// the `set_project_fields` function in `server.rs` but operates directly on
 /// the client without the server framework.
+#[allow(clippy::too_many_arguments)]
 async fn set_project_fields_helper(
     client: &GitHubClient,
     project_id: &str,
@@ -705,11 +697,9 @@ async fn set_project_fields_helper(
     status: &str,
     ready_state: &str,
 ) {
-    use unblock_github::projects::FieldValue;
-
     // Priority
-    if let Some(option_id) = field_ids.priority.options.get(priority) {
-        if let Err(e) = client
+    if let Some(option_id) = field_ids.priority.options.get(priority)
+        && let Err(e) = client
             .update_field(
                 project_id,
                 item_id,
@@ -717,14 +707,13 @@ async fn set_project_fields_helper(
                 &FieldValue::SingleSelectOption(option_id.clone()),
             )
             .await
-        {
-            eprintln!("set_project_fields: failed to set Priority={priority}: {e}");
-        }
+    {
+        eprintln!("set_project_fields: failed to set Priority={priority}: {e}");
     }
 
     // IssueType
-    if let Some(option_id) = field_ids.issue_type.options.get(issue_type) {
-        if let Err(e) = client
+    if let Some(option_id) = field_ids.issue_type.options.get(issue_type)
+        && let Err(e) = client
             .update_field(
                 project_id,
                 item_id,
@@ -732,14 +721,13 @@ async fn set_project_fields_helper(
                 &FieldValue::SingleSelectOption(option_id.clone()),
             )
             .await
-        {
-            eprintln!("set_project_fields: failed to set IssueType={issue_type}: {e}");
-        }
+    {
+        eprintln!("set_project_fields: failed to set IssueType={issue_type}: {e}");
     }
 
     // Status
-    if let Some(option_id) = field_ids.status.options.get(status) {
-        if let Err(e) = client
+    if let Some(option_id) = field_ids.status.options.get(status)
+        && let Err(e) = client
             .update_field(
                 project_id,
                 item_id,
@@ -747,14 +735,13 @@ async fn set_project_fields_helper(
                 &FieldValue::SingleSelectOption(option_id.clone()),
             )
             .await
-        {
-            eprintln!("set_project_fields: failed to set Status={status}: {e}");
-        }
+    {
+        eprintln!("set_project_fields: failed to set Status={status}: {e}");
     }
 
     // ReadyState
-    if let Some(option_id) = field_ids.ready_state.options.get(ready_state) {
-        if let Err(e) = client
+    if let Some(option_id) = field_ids.ready_state.options.get(ready_state)
+        && let Err(e) = client
             .update_field(
                 project_id,
                 item_id,
@@ -762,8 +749,7 @@ async fn set_project_fields_helper(
                 &FieldValue::SingleSelectOption(option_id.clone()),
             )
             .await
-        {
-            eprintln!("set_project_fields: failed to set ReadyState={ready_state}: {e}");
-        }
+    {
+        eprintln!("set_project_fields: failed to set ReadyState={ready_state}: {e}");
     }
 }
