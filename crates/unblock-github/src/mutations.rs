@@ -5,6 +5,8 @@
 //! - `update_issue_body()` — REST PATCH (update body only)
 //! - `add_labels_to_issue()` — REST POST (add labels)
 //! - `remove_label_from_issue()` — DELETE (remove single label)
+//! - `add_assignees_to_issue()` — REST POST (add assignees)
+//! - `remove_assignees_from_issue()` — REST DELETE (remove assignees)
 //! - `list_milestones()` — REST GET (list milestones)
 //! - `update_issue_milestone()` — REST PATCH (set milestone)
 //! - `add_comment()` — REST POST
@@ -93,6 +95,15 @@ struct UpdateIssueBodyRequest {
 #[derive(Debug, Serialize)]
 struct AddLabelsBody {
     labels: Vec<String>,
+}
+
+/// Request body for adding or removing assignees on a GitHub issue via REST.
+///
+/// Used by both `POST /repos/{o}/{r}/issues/{n}/assignees` (add) and
+/// `DELETE /repos/{o}/{r}/issues/{n}/assignees` (remove).
+#[derive(Debug, Serialize)]
+struct AssigneesBody {
+    assignees: Vec<String>,
 }
 
 /// Request body for setting a milestone on an issue via REST PATCH.
@@ -513,6 +524,140 @@ impl GitHubClient {
         }
 
         debug!(number, label, "Removed label from issue");
+        Ok(())
+    }
+
+    /// Adds assignees to a GitHub issue.
+    ///
+    /// Sends a REST POST to
+    /// `/repos/{owner}/{repo}/issues/{number}/assignees` with a JSON body
+    /// containing the list of GitHub usernames to add.
+    ///
+    /// Assignees that are already on the issue are silently ignored by the API.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Domain`] with [`DomainError::IssueNotFound`] if the
+    /// issue does not exist (HTTP 404).
+    /// Returns [`Error::RateLimited`] for HTTP 429 responses.
+    /// Returns [`Error::GitHubApi`] for other non-2xx responses.
+    ///
+    /// [`DomainError::IssueNotFound`]: unblock_core::errors::DomainError::IssueNotFound
+    #[instrument(skip(self, assignees), fields(owner = %self.owner(), repo = %self.repo()))]
+    pub async fn add_assignees_to_issue(
+        &self,
+        number: u64,
+        assignees: Vec<String>,
+    ) -> Result<(), Error> {
+        let url = self.rest_url(&format!(
+            "/repos/{}/{}/issues/{number}/assignees",
+            self.owner(),
+            self.repo()
+        ));
+
+        let request_body = AssigneesBody { assignees };
+
+        let response = self
+            .http()
+            .post(&url)
+            .json(&request_body)
+            .send()
+            .await
+            .context(errors::GitHubUnavailableSnafu)?;
+
+        let status = response.status();
+
+        if status.as_u16() == 429 {
+            let reset_at = parse_rate_limit_reset(&response);
+            return Err(errors::RateLimitedSnafu { reset_at }.build());
+        }
+
+        if status.as_u16() == 404 {
+            return Err(unblock_core::errors::IssueNotFoundSnafu { number }
+                .build()
+                .into());
+        }
+
+        if !status.is_success() {
+            let message = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown error".to_owned());
+            return Err(errors::GitHubApiSnafu {
+                status: status.as_u16(),
+                message,
+            }
+            .build());
+        }
+
+        debug!(number, "Added assignees to issue");
+        Ok(())
+    }
+
+    /// Removes assignees from a GitHub issue.
+    ///
+    /// Sends a REST DELETE to
+    /// `/repos/{owner}/{repo}/issues/{number}/assignees` with a JSON body
+    /// containing the list of GitHub usernames to remove.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::RateLimited`] for HTTP 429 responses.
+    /// Returns [`Error::GitHubApi`] for other non-2xx responses.
+    ///
+    /// **Note:** HTTP 404 is treated as success — the assignee may not be on
+    /// the issue, or the issue may not exist. This follows the best-effort
+    /// pattern used by `remove_label_from_issue`.
+    #[instrument(skip(self, assignees), fields(owner = %self.owner(), repo = %self.repo()))]
+    pub async fn remove_assignees_from_issue(
+        &self,
+        number: u64,
+        assignees: Vec<String>,
+    ) -> Result<(), Error> {
+        let url = self.rest_url(&format!(
+            "/repos/{}/{}/issues/{number}/assignees",
+            self.owner(),
+            self.repo()
+        ));
+
+        let request_body = AssigneesBody { assignees };
+
+        let response = self
+            .http()
+            .delete(&url)
+            .json(&request_body)
+            .send()
+            .await
+            .context(errors::GitHubUnavailableSnafu)?;
+
+        let status = response.status();
+
+        if status.as_u16() == 429 {
+            let reset_at = parse_rate_limit_reset(&response);
+            return Err(errors::RateLimitedSnafu { reset_at }.build());
+        }
+
+        if status.as_u16() == 404 {
+            warn!(
+                number,
+                "Assignees not found on issue (404) — treating as success"
+            );
+            return Ok(());
+        }
+
+        if !status.is_success() {
+            let message = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown error".to_owned());
+            return Err(errors::GitHubApiSnafu {
+                status: status.as_u16(),
+                message,
+            }
+            .build());
+        }
+
+        debug!(number, "Removed assignees from issue");
         Ok(())
     }
 

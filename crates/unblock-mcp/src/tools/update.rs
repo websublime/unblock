@@ -53,6 +53,10 @@ pub struct UpdateParams {
     pub labels_add: Option<Vec<String>>,
     /// Labels to remove from the issue.
     pub labels_remove: Option<Vec<String>>,
+    /// GitHub usernames to add as assignees.
+    pub assignees_add: Option<Vec<String>>,
+    /// GitHub usernames to remove from assignees.
+    pub assignees_remove: Option<Vec<String>>,
     /// Update a specific section of the issue body.
     pub body_section: Option<BodySectionUpdate>,
     /// Milestone title to set (resolved to milestone number via REST).

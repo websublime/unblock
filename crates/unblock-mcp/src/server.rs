@@ -1597,6 +1597,15 @@ impl UnblockServer {
                 // Step 1: Fetch the issue — validates existence.
                 let issue = client.fetch_issue(issue_number).await?;
 
+                // Step 1b: Validate the issue is open (spec 10.15 step 2).
+                if issue.state == IssueState::Closed {
+                    return Err(IssueClosedSnafu {
+                        number: issue_number,
+                    }
+                    .build()
+                    .into());
+                }
+
                 let mut fields_updated: Vec<String> = Vec::new();
 
                 // Step 2: Update Projects V2 fields if any project fields changed.
@@ -1731,7 +1740,34 @@ impl UnblockServer {
                     }
                 }
 
-                // Step 5: Milestone resolution and update.
+                // Step 5: Add assignees.
+                if let Some(ref add) = params.assignees_add
+                    && !add.is_empty()
+                {
+                    client
+                        .add_assignees_to_issue(issue_number, add.clone())
+                        .await?;
+                    fields_updated.push(format!("assignees_add={}", add.join(",")));
+                }
+
+                // Step 6: Remove assignees.
+                if let Some(ref remove) = params.assignees_remove
+                    && !remove.is_empty()
+                {
+                    if let Err(e) = client
+                        .remove_assignees_from_issue(issue_number, remove.clone())
+                        .await
+                    {
+                        tracing::warn!(
+                            error = %e,
+                            "Failed to remove assignees (best-effort)"
+                        );
+                    } else {
+                        fields_updated.push(format!("assignees_remove={}", remove.join(",")));
+                    }
+                }
+
+                // Step 7: Milestone resolution and update.
                 if let Some(ref ms_title) = params.milestone {
                     let milestones = client.list_milestones().await?;
                     if let Some(ms) = milestones.iter().find(|m| m.title == *ms_title) {
@@ -1747,7 +1783,7 @@ impl UnblockServer {
                     }
                 }
 
-                // Step 6: Body section update.
+                // Step 8: Body section update.
                 if let Some(ref section_update) = params.body_section {
                     let current_body = issue.body.as_deref().unwrap_or_default();
                     let mut sections =
@@ -1768,7 +1804,7 @@ impl UnblockServer {
                     fields_updated.push(format!("body_section={section_label}"));
                 }
 
-                // Step 7: Re-fetch to confirm updates.
+                // Step 9: Re-fetch to confirm updates.
                 let updated_issue = client.fetch_issue(issue_number).await?;
 
                 Ok(UpdateResult {
