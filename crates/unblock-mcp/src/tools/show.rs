@@ -92,10 +92,6 @@ pub struct ShowIssue {
     pub updated_at: String,
     /// HTML URL for linking back to GitHub.
     pub url: String,
-    /// Parent issue if this is a sub-issue.
-    pub parent: Option<ShowRelatedIssue>,
-    /// Sub-issues of this issue.
-    pub sub_issues: Vec<ShowRelatedIssue>,
 }
 
 /// Parsed body sections for the show result.
