@@ -1340,20 +1340,40 @@ impl UnblockServer {
                     client.ensure_labels(&labels).await?;
                 }
 
-                // Step 2: Log milestone if provided (not yet resolved to ID).
-                if let Some(ref ms) = milestone_title {
-                    tracing::warn!(
-                        milestone = %ms,
-                        "Milestone resolution from title to ID is not yet implemented — milestone will not be set on the issue"
-                    );
-                }
+                // Step 2: Resolve milestone title to milestone number.
+                let milestone_number = if let Some(ref ms_title) = milestone_title {
+                    match client.list_milestones().await {
+                        Ok(milestones) => {
+                            if let Some(ms) = milestones.iter().find(|m| m.title == *ms_title) {
+                                Some(ms.number)
+                            } else {
+                                tracing::warn!(
+                                    milestone = %ms_title,
+                                    "Milestone not found — milestone will not be set on the issue"
+                                );
+                                None
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                milestone = %ms_title,
+                                "Failed to list milestones (best-effort) — milestone will not be set on the issue"
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+                let milestone_set = milestone_number.is_some();
 
                 // Step 3: Create the issue.
                 let create_params = unblock_github::mutations::CreateIssueParams {
                     title,
                     body,
                     labels,
-                    milestone: None, // Milestone ID resolution not yet implemented.
+                    milestone: milestone_number,
                     assignees: Vec::new(),
                 };
 
@@ -1463,6 +1483,7 @@ impl UnblockServer {
                     fields_attempted,
                     blockers_added,
                     parent_set,
+                    milestone_set,
                     hint: format!(
                         "Issue #{issue_number} created. Use `show` to verify or `ready` to check if it appears in the ready set."
                     ),

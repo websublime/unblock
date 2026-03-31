@@ -24,8 +24,9 @@ pub struct CreateParams {
     pub body: Option<String>,
     /// Labels to attach. Labels that do not exist on the repo are created.
     pub labels: Option<Vec<String>>,
-    /// Milestone title. Currently accepted but not resolved to a milestone ID
-    /// (milestone resolution requires a separate API call not yet implemented).
+    /// Milestone title. Resolved to a milestone number via `list_milestones()`.
+    /// If the title is not found among open milestones, a warning is logged and
+    /// the issue is created without a milestone.
     pub milestone: Option<String>,
     /// Issues that block this new issue. Accepts local numbers (`42`) or
     /// cross-repo references (`owner/repo#42`).
@@ -41,6 +42,7 @@ pub struct CreateParams {
 /// Result returned by the `create` MCP tool.
 ///
 /// Contains the created issue number, URL, and a summary of what was set.
+#[allow(clippy::struct_excessive_bools)] // Result struct — bools report discrete outcomes.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct CreateResult {
     /// The created issue number.
@@ -62,6 +64,8 @@ pub struct CreateResult {
     pub blockers_added: u32,
     /// Whether a parent relationship was created.
     pub parent_set: bool,
+    /// Whether a milestone was successfully resolved and set on the issue.
+    pub milestone_set: bool,
     /// Hint message for next steps.
     pub hint: String,
 }
