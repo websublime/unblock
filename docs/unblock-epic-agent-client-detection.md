@@ -1,11 +1,11 @@
-# Unblock — Epic 2.4: Agent Client Detection
+# Unblock — Epic 1.5: Agent Client Detection
 
 **Dependency-aware task tracking for AI agents, powered by GitHub.**
 
 | | |
 |---|---|
-| **Epic** | 2.4 — Agent Client Detection |
-| **Version target** | v0.2.0 |
+| **Epic** | 1.5 — Agent Client Detection |
+| **Version target** | v0.1.0 (Phase 1) |
 | **Author** | Miguel Ramos |
 | **Org** | websublime |
 | **Date** | March 2026 |
@@ -42,14 +42,18 @@ polling, no storage.
 
 | Concern | Crate | Module |
 |---|---|---|
-| Domain types (`AgentKind`, `AgentClient`) | `unblock-core` | `types::client` |
-| Detection logic (`ClientDetector`) | `unblock-core` | `detection` |
-| MCP `initialize` capture | `unblock-mcp` | `server` |
+| Domain types (`AgentKind`, `AgentClient`) | `unblock-core` | `client` (standalone module) |
+| Detection logic (`ClientDetector`) | `unblock-core` | `detection` (standalone module) |
+| MCP `initialize` capture + `AgentKind` storage | `unblock-mcp` | `server` (`ServerState.agent_kind`) |
 | `SessionMeta` in `prime` output | `unblock-mcp` | `tools::prime` |
 | Span fields | `unblock-mcp` | all tool handlers |
 
 This follows the existing layering: `unblock-core` owns domain types and pure logic;
 `unblock-mcp` owns runtime behaviour, I/O, and MCP protocol integration.
+
+**File structure:** `client.rs` and `detection.rs` are standalone modules in `unblock-core/src/`,
+following the same pattern as `errors.rs`, `config.rs`, and `cache.rs`. No directory restructuring
+of `types.rs` is needed.
 
 ---
 
@@ -86,34 +90,60 @@ The `Agent` Projects V2 field keeps its current format: `username:supervisor`. A
 client kind (e.g., `miguelramos:rust-supervisor:claude-code`) would pollute the field that
 humans read in the GitHub board. Client kind belongs in logs and telemetry, not in GitHub data.
 
+### D5: Resolve once in `initialize`, store in `ServerState` via `OnceLock`
+
+rmcp's default `initialize` handler already stores `InitializeRequestParams` in
+`Peer<RoleServer>` (accessible via `peer.peer_info()`). However, we override `initialize` to:
+
+1. **Resolve `AgentKind` once** at session start (not per-tool-call)
+2. **Emit a `tracing::info!` event** with client name, version, and kind at connection time
+3. **Store in `ServerState.agent_kind: OnceLock<AgentKind>`** so tool handlers read from
+   shared state without importing rmcp-specific types
+
+This is a hybrid approach: we use rmcp's built-in peer storage for raw `clientInfo`, but
+resolve and cache the `AgentKind` ourselves for clean tool handler access.
+
+**Rejected alternative:** Using `Peer<RoleServer>` extraction directly in tool handlers.
+This couples every handler to rmcp types and resolves `AgentKind` on every call. The
+overhead is negligible, but the coupling is undesirable.
+
+### D6: `VSCODE_PID` dropped from env detection
+
+`VSCODE_PID` is set for **any** VS Code session, not specifically GitHub Copilot. Using it
+as a Copilot signal would misidentify users running Cursor in VS Code, or plain VS Code
+without Copilot. Only `GITHUB_COPILOT_TOKEN` is used for Copilot env detection.
+
+File-based signals (e.g., `~/.config/github-copilot/`) indicate installation, not runtime
+client identity. They are not suitable for detection.
+
 ---
 
 ## Tasks
 
-### Epic 2.4 — Agent Client Detection
+### Epic 1.5 — Agent Client Detection
 
 **Goal:** Identify which AI client is connected and surface this in logs, `prime` output, and
 tracing spans — without affecting tool behaviour.
 
-**Depends on:** Epic 1.4 (MCP tools foundation), Epic 2.1.1 (`prime` tool)
+**Depends on:** Epic 1.4 (MCP tools foundation), task 1.4.14 (`prime` tool)
 
 | Task | Description | Definition of Done | Ref |
 |---|---|---|---|
-| **2.4.1** `AgentKind` + `AgentClient` types | In `unblock-core/src/types/client.rs`. `AgentKind` enum: `ClaudeCode`, `Copilot`, `Cursor`, `Cline`, `Aider`, `Unknown(String)`. `AgentClient { name: String, version: String }`. `AgentKind::from_client_name(&str)` — case-insensitive substring match. `AgentKind::as_str() -> &str`. `impl Display for AgentKind`. All types derive `Debug, Clone, PartialEq` | Compiles. Unit tests: known names → correct variant. Unrecognised name → `Unknown(name)`. `Display` emits same string as `as_str()`. `cargo doc` clean | ARCH §5 |
-| **2.4.2** `ClientDetector` | In `unblock-core/src/detection.rs`. `ClientDetector::from_env() -> Option<AgentKind>` — reads `CLAUDE_CODE_ENTRYPOINT`, `VSCODE_PID`, `GITHUB_COPILOT_TOKEN`, `CURSOR_TRACE_ID`. `ClientDetector::resolve(mcp_client: Option<&AgentClient>) -> AgentKind` — MCP → env → `Unknown`. Both methods `#[must_use]` | Unit tests: each known env var → correct kind. MCP overrides env. Both absent → `Unknown`. No panics, no I/O side effects. Pure function, no `async` | — |
-| **2.4.3** MCP `initialize` capture | In `unblock-mcp/src/server.rs`. Add `client: Arc<RwLock<Option<AgentClient>>>` field to `UnblockServer`. In the `initialize` handler: extract `params.client_info`, construct `AgentClient`, store via `ClientDetector::resolve`, emit `tracing::info!` event with `client.name`, `client.version`, `client.kind` fields | Integration test: mock `initialize` with known `clientInfo` → `AgentKind::ClaudeCode` stored. Second call: missing `clientInfo` → env fallback path exercised. `tracing` event present in captured output | ARCH §9 |
-| **2.4.4** `SessionMeta` in `prime` output | In `unblock-mcp/src/tools/prime.rs`. Define `SessionMeta { agent_client: String, agent_kind: String, agent_field: Option<String>, connected_at: DateTime<Utc> }`. Add `session: SessionMeta` to `PrimeResult`. Populate from server state: `AgentClient.name` → `agent_client`, `AgentKind.as_str()` → `agent_kind`, `Config.agent` → `agent_field` | Integration test: `prime` response JSON includes `session` object. Fields populated correctly for known client. `agent_field` is `None` when `UNBLOCK_AGENT` not set | PRD §6.3, ARCH §10 |
-| **2.4.5** `agent.client` span fields | In every tool handler in `unblock-mcp/src/tools/`. Add `agent.client` and `agent.kind` as fields on the root `tracing::info_span!` for each tool call. Pull from shared server state | JSON log output includes `agent.client` and `agent.kind` fields on all tool spans. Verified by a log-capture integration test that calls `ready` and asserts field presence. Token not leaked | ARCH §14.1 |
-| **2.4.6** Tests | Unit: all `AgentKind` variants (table-driven). `ClientDetector` env + MCP paths. `from_client_name` fuzz: random strings never panic. Integration: full `initialize → prime` flow with mock client | >80% coverage on `types::client` and `detection` modules. All tests green. `cargo clippy -D warnings` clean | Quality Gate |
+| **1.5.1** `AgentKind` + `AgentClient` types | In `unblock-core/src/client.rs` (standalone module). `AgentKind` enum: `ClaudeCode`, `Copilot`, `Cursor`, `Cline`, `Aider`, `Unknown(String)`. `AgentClient { name: String, version: String }`. `AgentKind::from_client_name(&str)` — case-insensitive substring match. `AgentKind::as_str() -> &str`. `impl Display for AgentKind`. All types derive `Debug, Clone, PartialEq` | Compiles. Unit tests: known names → correct variant. Unrecognised name → `Unknown(name)`. `Display` emits same string as `as_str()`. `cargo doc` clean | ARCH §5 |
+| **1.5.2** `ClientDetector` | In `unblock-core/src/detection.rs` (standalone module). `ClientDetector::from_env() -> Option<AgentKind>` — reads `CLAUDE_CODE_ENTRYPOINT`, `GITHUB_COPILOT_TOKEN`, `CURSOR_TRACE_ID`. `ClientDetector::resolve(mcp_client: Option<&AgentClient>) -> AgentKind` — MCP → env → `Unknown`. Both methods `#[must_use]`. **Note:** `VSCODE_PID` dropped — too broad (any VS Code session, not Copilot-specific). See D6 | Unit tests: each known env var → correct kind. MCP overrides env. Both absent → `Unknown`. No panics, no I/O side effects. Pure function, no `async` | — |
+| **1.5.3** MCP `initialize` capture | In `unblock-mcp/src/server.rs`. Add `agent_kind: OnceLock<AgentKind>` to `ServerState`. Override `initialize()` to: extract `client_info`, construct `AgentClient`, resolve `AgentKind` via `ClientDetector::resolve()`, store in `OnceLock`, emit `tracing::info!` with `client.name`, `client.version`, `client.kind` fields. Delegate to rmcp default for `peer_info` storage | Integration test: mock `initialize` with known `clientInfo` → `AgentKind::ClaudeCode` stored in `OnceLock`. Missing `clientInfo` → env fallback. `tracing` event present | ARCH §9 |
+| **1.5.4** `SessionMeta` in `prime` output | In `unblock-mcp/src/tools/prime.rs`. Define `SessionMeta { agent_client: String, agent_kind: String, agent_field: Option<String>, connected_at: DateTime<Utc> }`. Add `session: SessionMeta` to `PrimeResult`. Read `AgentKind` from `ServerState.agent_kind` (`OnceLock`). Read raw client name from `Peer<RoleServer>.peer_info()` | Integration test: `prime` response JSON includes `session` object. Fields populated correctly for known client. `agent_field` is `None` when `UNBLOCK_AGENT` not set | PRD §6.3, ARCH §10 |
+| **1.5.5** `agent.client` span fields | In every tool handler in `unblock-mcp/src/tools/`. Add `agent.client` and `agent.kind` as fields on the root `tracing::info_span!` for each tool call. Read from `ServerState.agent_kind` | JSON log output includes `agent.client` and `agent.kind` fields on all tool spans. Verified by a log-capture integration test that calls `ready` and asserts field presence. Token not leaked | ARCH §14.1 |
+| **1.5.6** Tests | Unit: all `AgentKind` variants (table-driven). `ClientDetector` env + MCP paths. `from_client_name` fuzz: random strings never panic. Integration: full `initialize → prime` flow with mock client | >80% coverage on `client` and `detection` modules. All tests green. `cargo clippy -D warnings` clean | Quality Gate |
 
 ---
 
 ## Implementation Notes
 
-### 2.4.1 — Type signatures (idiomatic Rust)
+### 1.5.1 — Type signatures (idiomatic Rust)
 
 ```rust
-// unblock-core/src/types/client.rs
+// unblock-core/src/client.rs
 
 /// The kind of AI agent connected to the MCP server.
 ///
@@ -183,7 +213,7 @@ impl AgentClient {
 }
 ```
 
-### 2.4.2 — Detection logic
+### 1.5.2 — Detection logic
 
 ```rust
 // unblock-core/src/detection.rs
@@ -198,16 +228,17 @@ impl ClientDetector {
     ///
     /// This is a fallback for clients that do not populate `clientInfo` in the
     /// MCP `initialize` request, or for non-MCP invocations.
+    ///
+    /// Note: `VSCODE_PID` is intentionally excluded — it is set for any VS Code
+    /// session, not specifically GitHub Copilot. See design decision D6.
     #[must_use]
     pub fn from_env() -> Option<AgentKind> {
         // Claude Code sets this when launching sub-processes
         if std::env::var("CLAUDE_CODE_ENTRYPOINT").is_ok() {
             return Some(AgentKind::ClaudeCode);
         }
-        // GitHub Copilot runs inside VS Code; VSCODE_PID is always set
-        if std::env::var("VSCODE_PID").is_ok()
-            || std::env::var("GITHUB_COPILOT_TOKEN").is_ok()
-        {
+        // GitHub Copilot sets this token when active
+        if std::env::var("GITHUB_COPILOT_TOKEN").is_ok() {
             return Some(AgentKind::Copilot);
         }
         // Cursor sets a trace ID for its internal telemetry
@@ -231,50 +262,61 @@ impl ClientDetector {
 }
 ```
 
-### 2.4.3 — Server state and `initialize` handler
+### 1.5.3 — Server state and `initialize` handler (Approach B: OnceLock)
+
+rmcp's default `initialize` handler stores `InitializeRequestParams` in `Peer<RoleServer>`
+via `set_peer_info()`. We override it to additionally resolve and cache `AgentKind`.
 
 ```rust
 // unblock-mcp/src/server.rs (additions)
 
-pub struct UnblockServer {
-    github: Arc<GitHubClient>,
-    graph:  Arc<RwLock<DependencyGraph>>,
-    config: Arc<Config>,
-    // Populated during the MCP initialize handshake.
-    // None until the first initialize call is processed.
-    client: Arc<RwLock<Option<AgentClient>>>,
+use std::sync::OnceLock;
+use unblock_core::client::{AgentClient, AgentKind};
+use unblock_core::detection::ClientDetector;
+
+pub struct ServerState {
+    pub config: Arc<Config>,
+    pub client: Arc<GitHubClient>,
+    pub cache:  Arc<GraphCache>,
+    /// Resolved once during MCP `initialize` handshake.
+    /// `OnceLock` guarantees single write, lock-free reads.
+    pub agent_kind: OnceLock<AgentKind>,
 }
 
 impl ServerHandler for UnblockServer {
-    async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
-        let agent_client = params.client_info.map(|info| AgentClient {
-            name:    info.name,
-            version: info.version,
-        });
+    fn initialize(
+        &self,
+        request: InitializeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> impl Future<Output = Result<InitializeResult, McpError>> + Send + '_ {
+        // Build AgentClient from MCP clientInfo
+        let agent_client = AgentClient {
+            name:    request.client_info.name.clone(),
+            version: request.client_info.version.clone(),
+        };
 
-        let kind = ClientDetector::resolve(agent_client.as_ref());
+        // Resolve kind once and store in OnceLock
+        let kind = ClientDetector::resolve(Some(&agent_client));
+        let _ = self.state.agent_kind.set(kind.clone());
 
         tracing::info!(
-            client.name    = agent_client.as_ref().map(|c| c.name.as_str()).unwrap_or("unknown"),
-            client.version = agent_client.as_ref().map(|c| c.version.as_str()).unwrap_or("unknown"),
+            client.name    = &agent_client.name,
+            client.version = &agent_client.version,
             client.kind    = %kind,
             "mcp client connected"
         );
 
-        *self.client.write().await = agent_client;
+        // Delegate to rmcp default for peer_info storage
+        if context.peer.peer_info().is_none() {
+            context.peer.set_peer_info(request);
+        }
 
-        Ok(InitializeResult {
-            server_info: ServerInfo {
-                name:    "unblock".into(),
-                version: env!("CARGO_PKG_VERSION").into(),
-            },
-            ..Default::default()
-        })
+        std::future::ready(Ok(self.get_info()))
     }
 }
 ```
 
-### 2.4.4 — `SessionMeta` in `prime`
+### 1.5.4 — `SessionMeta` in `prime`
 
 ```rust
 // unblock-mcp/src/tools/prime.rs (additions)
@@ -302,41 +344,31 @@ pub struct PrimeResult {
 }
 ```
 
-### 2.4.5 — Span fields (all tool handlers)
+### 1.5.5 — Span fields (all tool handlers)
+
+Tool handlers read `AgentKind` from `ServerState.agent_kind` (lock-free via `OnceLock`).
+Raw client name is available from `Peer<RoleServer>.peer_info()` if needed, but for span
+fields the kind string is sufficient.
 
 ```rust
 // Pattern applied to every tool handler
 async fn handle_ready(&self, params: ReadyParams) -> Result<ReadyResult> {
-    let client = self.client.read().await;
-    let kind   = ClientDetector::resolve(client.as_ref());
+    let kind = self.state.agent_kind.get()
+        .map(|k| k.as_str().to_owned())
+        .unwrap_or_else(|| "unknown".into());
 
     let _span = tracing::info_span!(
         "tool.ready",
-        agent.client = client.as_ref().map(|c| c.name.as_str()).unwrap_or("unknown"),
-        agent.kind   = %kind,
-        // ... other fields
+        agent.kind = %kind,
+        // ... other tool-specific fields
     ).entered();
 
     // handler body unchanged
 }
 ```
 
-To avoid repeating this in every handler, extract a helper:
-
-```rust
-// unblock-mcp/src/server.rs
-
-impl UnblockServer {
-    /// Returns `(client_name, kind_str)` for use in tracing spans.
-    pub async fn client_span_fields(&self) -> (String, String) {
-        let guard = self.client.read().await;
-        let name  = guard.as_ref().map(|c| c.name.clone())
-                        .unwrap_or_else(|| "unknown".into());
-        let kind  = ClientDetector::resolve(guard.as_ref()).to_string();
-        (name, kind)
-    }
-}
-```
+Since `OnceLock::get()` is lock-free, no helper function is needed — the pattern above is
+cheap enough to inline in each handler (one `.get()` call + one `as_str()`).
 
 ---
 
@@ -348,13 +380,14 @@ impl UnblockServer {
 | `client_kind_unknown_passthrough` | Unit | `AgentKind::from_client_name` | Arbitrary string → `Unknown(string)` |
 | `client_kind_display_roundtrip` | Unit | `AgentKind::as_str` + `Display` | Known variants: `from_client_name(kind.as_str()) == kind` |
 | `detector_env_claude` | Unit | `ClientDetector::from_env` | Set `CLAUDE_CODE_ENTRYPOINT=1` → `Some(ClaudeCode)` |
-| `detector_env_copilot_vscode` | Unit | `ClientDetector::from_env` | Set `VSCODE_PID=1234` → `Some(Copilot)` |
+| `detector_env_copilot_token` | Unit | `ClientDetector::from_env` | Set `GITHUB_COPILOT_TOKEN=ghu_xxx` → `Some(Copilot)` |
 | `detector_env_cursor` | Unit | `ClientDetector::from_env` | Set `CURSOR_TRACE_ID=abc` → `Some(Cursor)` |
+| `detector_env_vscode_pid_ignored` | Unit | `ClientDetector::from_env` | Set only `VSCODE_PID=1234` (no `GITHUB_COPILOT_TOKEN`) → `None` (not Copilot). See D6 |
 | `detector_env_none` | Unit | `ClientDetector::from_env` | No env vars set → `None` |
-| `detector_resolve_mcp_overrides_env` | Unit | `ClientDetector::resolve` | `mcp_client = Some(AgentClient { name: "cursor", .. })` + `VSCODE_PID` set → `Cursor` (from MCP, not Copilot from env) |
+| `detector_resolve_mcp_overrides_env` | Unit | `ClientDetector::resolve` | `mcp_client = Some(AgentClient { name: "cursor", .. })` + `GITHUB_COPILOT_TOKEN` set → `Cursor` (MCP wins) |
 | `detector_resolve_unknown_fallback` | Unit | `ClientDetector::resolve` | No MCP client + no env vars → `Unknown("unknown")` |
-| `initialize_stores_client` | Integration | `UnblockServer::initialize` | Mock `InitializeParams` with `client_info = Some({ name: "claude-code", version: "1.0" })` → server state contains `AgentClient { name: "claude-code", .. }` |
-| `initialize_missing_client_info` | Integration | `UnblockServer::initialize` | `client_info = None`, no env vars → server state `None`, kind resolves to `Unknown` |
+| `initialize_stores_agent_kind` | Integration | `UnblockServer::initialize` | Mock `InitializeRequestParams` with `client_info.name = "claude-code"` → `ServerState.agent_kind` contains `AgentKind::ClaudeCode` via `OnceLock` |
+| `initialize_env_fallback` | Integration | `UnblockServer::initialize` | No `clientInfo` name match, `CURSOR_TRACE_ID` set → `AgentKind::Cursor` stored |
 | `prime_includes_session_meta` | Integration | `prime` tool | Call `prime` after initialize → response JSON has `session.agent_client`, `session.agent_kind`, `session.connected_at` fields |
 | `span_fields_present` | Integration | all tool handlers | Capture tracing output. Call `ready`. Assert JSON log contains `agent.client` and `agent.kind` fields |
 | `fuzz_from_client_name` | Property | `AgentKind::from_client_name` | `proptest`: arbitrary `String` input → never panics, always returns a valid `AgentKind` |
@@ -364,15 +397,19 @@ impl UnblockServer {
 ## Epic Dependency Graph (updated)
 
 ```
+Phase 1
+  1.1 Workspace ──► 1.2 Core ──► 1.3 GitHub API ──► 1.4 MCP Tools (includes prime as 1.4.14)
+                                                      ├──► 1.5 Detection  ◄── 1.4.14 (prime)
+                                                      └──► 1.6 Reconciliation ◄── 1.4.14 (prime)
+
 Phase 2
-  2.1 Tools      ◄── 1.4
+  2.1 Tools (remaining) ◄── 1.4
   2.2 Plugin     ◄── 2.1
   2.3 Docs       ◄── 2.1
-  2.4 Detection  ◄── 1.4 (server state) + 2.1.1 (prime tool)
 ```
 
-`2.4` has no dependents in Phase 2. It is a leaf enhancement that can be developed in
-parallel with `2.2` and `2.3` once `1.4` and `2.1.1` are complete.
+`1.5` and `1.6` are leaf epics in Phase 1 — no Phase 2 work depends on them. They can be
+developed in parallel after `1.4.14` (prime) is complete.
 
 ---
 
@@ -383,7 +420,7 @@ parallel with `2.2` and `2.3` once `1.4` and `2.1.1` are complete.
 | Client doesn't populate `clientInfo` | Low — detection silently falls back to env/Unknown | Two-level fallback. `Unknown` is a valid, non-fatal state. Server always starts |
 | `clientInfo.name` format changes across client versions | Low — substring matching is tolerant | `from_client_name` uses `contains()` not exact match. Covered by fuzz test |
 | New AI clients not in the enum | None — `Unknown(String)` captures them | Log the raw name. Enum extended via a trivial PR when a new client is validated |
-| RwLock contention on `client` field | None — `initialize` is called once; all reads are shared | Single writer (initialize), many readers (tool handlers). `RwLock` is the right primitive |
+| `OnceLock` never set (initialize not called) | Low — tool handlers fall back to `"unknown"` | `OnceLock::get()` returns `None`, handled by `.unwrap_or_else()` |
 
 ---
 
@@ -391,20 +428,22 @@ parallel with `2.2` and `2.3` once `1.4` and `2.1.1` are complete.
 
 | Task | Estimated time |
 |---|---|
-| 2.4.1 Types | 1–2 hours |
-| 2.4.2 Detector | 1 hour |
-| 2.4.3 MCP capture | 2 hours |
-| 2.4.4 `prime` enrichment | 2 hours |
-| 2.4.5 Span fields | 2 hours |
-| 2.4.6 Tests | 3 hours |
+| 1.5.1 Types | 1–2 hours |
+| 1.5.2 Detector | 1 hour |
+| 1.5.3 MCP capture (`OnceLock` + `initialize` override) | 1.5 hours |
+| 1.5.4 `prime` enrichment | 2 hours |
+| 1.5.5 Span fields | 2 hours |
+| 1.5.6 Tests | 3 hours |
 | **Total** | **~1.5 focused days** |
 
 ---
 
-## Updated Task Summary (Phase 2)
+## Updated Task Summary (Phase 1)
 
 | Phase | Epics | Tasks | Focused days |
 |---|---|---|---|
-| Phase 2 — previous | 3 | 14 | ~8 |
-| Epic 2.4 (this) | 1 | 6 | ~1.5 |
-| **Phase 2 — revised** | **4** | **20** | **~9.5** |
+| Phase 1 — previous | 4 | 34 | ~20 |
+| Epic 1.5 (this) | 1 | 6 | ~1.5 |
+| Epic 1.6 (reconciliation) | 1 | ~6 | ~1.75 |
+| Task 1.4.14 (prime) | — | 1 | ~1 |
+| **Phase 1 — revised** | **6** | **~47** | **~24.25** |

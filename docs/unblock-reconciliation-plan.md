@@ -4,7 +4,8 @@
 | | |
 |---|---|
 | **Feature** | `reconcile` tool + drift detection |
-| **Target version** | v0.2.0 (Phase 2 stretch) → promoted to core |
+| **Epic** | 1.6 — Reconciliation |
+| **Target version** | v0.1.0 (Phase 1) |
 | **Crates affected** | `unblock-core`, `unblock-mcp` |
 | **Effort estimate** | ~2 focused days |
 | **Author** | Miguel Ramos |
@@ -35,7 +36,7 @@ Other examples of external mutations that create drift:
 | External action | Effect on the system |
 |---|---|
 | Close a blocker issue via UI | Cascade never fires. Downstream issues remain artificially blocked |
-| Edit the body and remove `Blocks #X` | Edge disappears from the graph. Issue no longer appears blocked without being unblocked |
+| Remove blocking relationship via UI | Edge disappears from the graph. ReadyState field not updated |
 | Change Status field directly on the board | MCP sees status inconsistent with what it last wrote |
 | Delete a Projects V2 field | MCP fails on next write operation |
 | Manually create a dep that introduces a cycle | Graph becomes invalid, `ready` returns incorrect results |
@@ -127,10 +128,16 @@ reconcile:
 // crates/unblock-core/src/reconcile.rs
 
 /// Category of detected divergence.
+///
+/// 7 drift types covering all realistic external mutation scenarios.
+/// Note: `GhostedBlockingEdge` was evaluated and rejected — in our model,
+/// edges come from GitHub's `trackedByIssues` API (not body text), so the
+/// graph cannot contain an edge that GitHub doesn't have.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DriftKind {
-    /// Ready State field in GitHub says "ready" but graph says "blocked".
-    /// Cause: issue was closed via UI without going through the MCP (cascade did not fire).
+    /// Ready State field in GitHub diverges from what the graph computes.
+    /// Covers: external close without cascade, external reopen, manual
+    /// removal of blocking relationship via UI.
     StaleReadyState {
         issue: u64,
         field_says: ReadyState,
@@ -144,18 +151,12 @@ pub enum DriftKind {
         should_have_unblocked: Vec<u64>,
     },
 
-    /// Blocking edge referenced in body text points to an issue that does not exist.
-    /// Cause: issue was deleted, or body was edited with a wrong number.
+    /// Blocking edge references an issue that does not exist or is inaccessible.
+    /// Cause: issue was deleted (admin action), or references a cross-repo issue
+    /// the token cannot access.
     OrphanedBlockingEdge {
         source: u64,
         missing_target: u64,
-    },
-
-    /// Blocking edge exists in the graph but does not exist in the issue body text.
-    /// Cause: body manually edited, edge removed without using `dep_remove`.
-    GhostedBlockingEdge {
-        source: u64,
-        target: u64,
     },
 
     /// Agent field has invalid format (must be `username:supervisor`).
@@ -220,13 +221,21 @@ crates/
 
 The reconciliation engine is **pure** — no I/O, no GitHub calls. It receives the already-fetched graph and issues, and returns the DriftReport. Fully testable with in-memory data.
 
+**Note on API alignment:** The signatures below reference methods that may need to be added
+to `DependencyGraph` (`all_edges() -> Vec<BlockingEdge>`, `edge_count() -> usize`). Both are
+trivial wrappers over petgraph's `edge_references()` and `edge_count()`.
+
+The `compute_ready_set()` method currently returns `Vec<IssueSummary>`. The engine converts
+this to a `HashSet<u64>` for O(1) lookups. The `compute_unblock_cascade()` method takes
+`(closed_number, &[Issue])` — the second argument is currently unused but reserved.
+
 ```rust
 // crates/unblock-core/src/reconcile.rs
 
 use crate::{graph::DependencyGraph, types::*};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub struct ReconcileEngine {
     stale_claim_threshold_hours: u64,  // default: 24
@@ -239,43 +248,56 @@ impl ReconcileEngine {
 
     /// Produces a DriftReport by comparing the computed graph against stored fields.
     /// No I/O. Receives everything it needs as arguments.
+    ///
+    /// `computed_ready_set` is derived from `DependencyGraph::compute_ready_set()`
+    /// by collecting issue numbers into a HashSet.
     pub fn analyse(
         &self,
         graph: &DependencyGraph,
         issues: &HashMap<u64, Issue>,
-        computed_ready_set: &std::collections::HashSet<u64>,
+        computed_ready_set: &HashSet<u64>,
         now: DateTime<Utc>,
     ) -> DriftReport {
         let mut drift = Vec::new();
 
         // 1. Stale Ready State fields
+        // Compares all 4 ReadyState variants (Ready, Blocked, NotReady, Closed)
         for (number, issue) in issues {
-            let graph_ready = computed_ready_set.contains(number);
-            let field_ready = issue.ready_state == ReadyState::Ready;
+            if issue.state == IssueState::Closed {
+                // Closed issues should have ReadyState::Closed
+                if issue.ready_state != ReadyState::Closed {
+                    drift.push(DriftKind::StaleReadyState {
+                        issue: *number,
+                        field_says: issue.ready_state.clone(),
+                        graph_says: ReadyState::Closed,
+                    });
+                }
+                continue;
+            }
 
-            if graph_ready != field_ready {
+            let graph_ready = computed_ready_set.contains(number);
+            let expected = if graph_ready { ReadyState::Ready } else { ReadyState::Blocked };
+
+            if issue.ready_state != expected {
                 drift.push(DriftKind::StaleReadyState {
                     issue: *number,
-                    field_says: issue.ready_state,
-                    graph_says: if graph_ready {
-                        ReadyState::Ready
-                    } else {
-                        ReadyState::NotReady
-                    },
+                    field_says: issue.ready_state.clone(),
+                    graph_says: expected,
                 });
             }
         }
 
         // 2. Uncascaded closures
         // Closed issues whose downstream are still marked as blocked
+        let issues_vec: Vec<Issue> = issues.values().cloned().collect();
         for (number, issue) in issues {
             if issue.state == IssueState::Closed {
                 let should_have_unblocked: Vec<u64> = graph
-                    .compute_unblock_cascade(*number)
+                    .compute_unblock_cascade(*number, &issues_vec)
                     .into_iter()
                     .filter(|n| {
                         issues.get(n)
-                            .map(|i| i.ready_state == ReadyState::NotReady)
+                            .map(|i| i.ready_state != ReadyState::Ready && i.state == IssueState::Open)
                             .unwrap_or(false)
                     })
                     .collect();
@@ -373,14 +395,20 @@ fn default_stale_hours() -> u64 { 24 }
 
 /// Detects and optionally repairs divergences between the computed graph
 /// and the state stored in GitHub Projects V2 fields.
+///
+/// **API note:** Uses `fetch_graph_data()` (not a hypothetical `fetch_all_issues_with_edges`).
+/// Ready State repairs use the existing `update_field()` path via `ProjectFieldIds`,
+/// which requires the issue's project item ID. The handler must resolve this from the
+/// fetched data or re-fetch per issue.
 pub async fn handle_reconcile(
     params: ReconcileParams,
     state: &AppState,
 ) -> Result<ReconcileOutput, McpError> {
     // 1. Always fresh fetch — bypasses cache entirely
-    let (issues_vec, edges) = state.github
-        .fetch_all_issues_with_edges()
-        .await?;
+    let (issues_vec, edges) = state.client
+        .fetch_graph_data()
+        .await
+        .map_err(github_error_to_mcp)?;
 
     let issues: HashMap<u64, Issue> = issues_vec
         .into_iter()
@@ -388,23 +416,31 @@ pub async fn handle_reconcile(
         .collect();
 
     // 2. Build graph and compute ready set
-    let graph = DependencyGraph::build(&issues, &edges);
-    let computed_ready = graph.compute_ready_set();
+    let graph = DependencyGraph::build(
+        &issues.values().cloned().collect::<Vec<_>>(),
+        &edges,
+    );
+    let ready_summaries = graph.compute_ready_set(
+        &issues.values().cloned().collect::<Vec<_>>(),
+    );
+    let computed_ready: HashSet<u64> = ready_summaries
+        .iter()
+        .map(|s| s.number)
+        .collect();
 
     // 3. Analyse drift
     let engine = ReconcileEngine::new(params.stale_claim_hours);
     let mut report = engine.analyse(&graph, &issues, &computed_ready, Utc::now());
-    report.repo = state.github.repo.to_string();
+    report.repo = format!("{}/{}", state.client.owner(), state.client.repo());
 
     // 4. Repair if --fix
     if params.fix {
         for drift in &report.drift_found {
             match drift {
                 DriftKind::StaleReadyState { issue, graph_says, .. } => {
-                    match state.github
-                        .update_ready_state(*issue, *graph_says)
-                        .await
-                    {
+                    // Repair uses the existing field update path via ProjectFieldIds.
+                    // Requires resolving the issue's project item ID.
+                    match repair_ready_state(state, *issue, graph_says).await {
                         Ok(_) => report.repaired.push(drift.clone()),
                         Err(e) => report.errors.push(format!(
                             "Failed to repair Ready State for #{issue}: {e}"
@@ -414,19 +450,18 @@ pub async fn handle_reconcile(
 
                 DriftKind::UncascadedClosure { closed_issue, should_have_unblocked } => {
                     for unblocked in should_have_unblocked {
-                        let _ = state.github
-                            .update_ready_state(*unblocked, ReadyState::Ready)
-                            .await
-                            .map(|_| report.repaired.push(drift.clone()))
-                            .map_err(|e| report.errors.push(format!(
+                        match repair_ready_state(state, *unblocked, &ReadyState::Ready).await {
+                            Ok(_) => report.repaired.push(drift.clone()),
+                            Err(e) => report.errors.push(format!(
                                 "Cascade repair failed for #{unblocked} \
                                  (was blocked by #{closed_issue}): {e}"
-                            )));
+                            )),
+                        }
                     }
                     // Add audit comment on the closed issue
-                    let _ = state.github.add_comment(
+                    let _ = state.client.add_comment(
                         *closed_issue,
-                        &format_cascade_repair_comment(should_have_unblocked),
+                        format_cascade_repair_comment(should_have_unblocked),
                     ).await;
                 }
 
@@ -451,7 +486,7 @@ pub async fn handle_reconcile(
     }
 
     // 5. Update cache with the fresh graph we already have
-    state.cache.update(graph);
+    state.cache.update(ready_summaries, graph);
 
     Ok(ReconcileOutput { report })
 }
@@ -583,13 +618,17 @@ jobs:
 
 ### Phase positioning
 
+**Promoted to Phase 1 (Epic 1.6).** Reconciliation is a data integrity requirement for the
+core workflow loop. External mutations can break the system from day one — this cannot wait
+for Phase 2.
+
 | Phase | Task | Type | Rationale |
 |---|---|---|---|
-| **Phase 2 core** | `DriftKind` + `DriftReport` in `unblock-core` | Required | Pure types, no I/O, zero risk |
-| **Phase 2 core** | `ReconcileEngine::analyse()` | Required | Pure, testable, foundation for everything else |
-| **Phase 2 stretch** | `reconcile` tool (read-only, `fix: false`) | Recommended | Diagnosis without side-effects |
-| **Phase 2 stretch** | `reconcile --fix` repair logic | Recommended | Completes the loop |
-| **Phase 2 stretch** | Integration into `prime` (background spawn) | Recommended | Every session starts with validated state |
+| **Phase 1 (1.6)** | `DriftKind` + `DriftReport` in `unblock-core` | Required | Pure types, no I/O, zero risk |
+| **Phase 1 (1.6)** | `ReconcileEngine::analyse()` | Required | Pure, testable, foundation for everything else |
+| **Phase 1 (1.6)** | `reconcile` tool (read-only, `fix: false`) | Required | Diagnosis without side-effects |
+| **Phase 1 (1.6)** | `reconcile --fix` repair logic | Required | Completes the loop |
+| **Phase 1 (1.6)** | Integration into `prime` (background spawn) | Required | Every session starts with validated state. Depends on `prime` (1.4.14) |
 | **Phase 3** | GitHub Actions sentinel | Future | Additional infrastructure, does not block v1 |
 | **Phase 3** | `doctor` incorporates reconcile | Future | `doctor` becomes the full health check |
 
@@ -598,11 +637,11 @@ jobs:
 | Component | Estimated lines | Days |
 |---|---|---|
 | `unblock-core/src/reconcile.rs` | ~200 | 0.5 |
-| `unblock-mcp/src/tools/reconcile.rs` | ~150 | 0.5 |
+| `unblock-mcp/src/tools/reconcile.rs` | ~180 | 0.5 |
 | Integration into `prime` | ~30 | 0.25 |
 | Tests (unit + integration) | ~200 | 0.5 |
-| GitHub Actions sentinel | ~30 (YAML) | 0.25 |
-| **Total** | **~610** | **~2 days** |
+| **Total (Phase 1)** | **~610** | **~1.75 days** |
+| GitHub Actions sentinel (Phase 3) | ~30 (YAML) | 0.25 |
 
 ---
 
@@ -681,6 +720,9 @@ mod tests {
 | R5 | `prime` runs reconcile in background (non-blocking) | Synchronous reconcile in prime | P5: "agent is always one command away". Do not penalise latency |
 | R6 | `fix: false` by default | `fix: true` by default | Principle of least surprise. Diagnose before acting |
 | R7 | GitHub Actions sentinel uses native `GITHUB_TOKEN` | Dedicated PAT | Zero extra config. Token already exists on every repo |
+| R8 | `GhostedBlockingEdge` removed from taxonomy | Keep as drift type | Blocking edges come from GitHub's `trackedByIssues` API, not body text. The graph cannot contain an edge GitHub doesn't have. The scenario is impossible in our architecture |
+| R9 | 7 drift types (not 8) | Original 8-type taxonomy | Simpler, no overlaps, no impossible states. `UncascadedClosure` + `StaleReadyState` cover all edge-related semantic drift |
+| R10 | Promoted to Phase 1 (Epic 1.6) | Phase 2 stretch | Data integrity is foundational. External mutations break the system from day one |
 
 ---
 

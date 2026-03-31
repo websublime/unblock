@@ -59,16 +59,18 @@ No task is done unless ALL of these pass:
 
 | Phase | Version | Goal | Epics | Effort |
 |---|---|---|---|---|
-| **1 — Foundation** | v0.1.0 | Agent can find, claim, edit, complete work + see cascade | 4 | ~20 days |
-| **2 — Complete** | v0.2.0 | Full tool suite + Claude Code plugin | 3 | ~8 days |
+| **1 — Foundation** | v0.1.0 | Agent can find, claim, edit, complete work + see cascade. Client detection + data integrity | 6 | ~24.25 days |
+| **2 — Complete** | v0.2.0 | Full tool suite + Claude Code plugin | 3 | ~7 days |
 | **3 — Production** | v1.0.0 | Hardened, distributed, production-ready + v1.0.0 gap features | 4 | ~8 days |
-| **Total** | | | **11 epics** | **~36 days focused** |
+| **Total** | | | **13 epics** | **~39.25 days focused** |
 
 ---
 
 ## Phase 1 — Foundation (v0.1.0)
 
-**Goal:** An agent can find work, claim it, edit it, complete it, and see the cascade. The minimum viable loop.
+**Goal:** An agent can find work, claim it, edit it, complete it, and see the cascade. The
+system detects which AI client is connected, repairs data drift from external mutations, and
+provides a session entry point (`prime`) with full context.
 
 **Ref:** PRD §10 Phase 1, ARCH §1-§10
 
@@ -141,6 +143,49 @@ No task is done unless ALL of these pass:
 | **1.4.11** `comment` tool | Input: `CommentParams { id, body }`. POST comment | Integration: comment on issue → appears. Non-existent → error | PRD §6.2, ARCH §10.8 |
 | **1.4.12** `update` tool | Input: `UpdateParams { id, priority?, status?, labels_add?, labels_remove?, body_section?, milestone?, story_points?, defer_until? }`. Validate exists. Update specified fields via REST + Project V2. Rebuild | Integration: update priority → re-fetch confirms. Update body section → section changed, rest preserved. Non-existent → error | PRD §6.1 |
 | **1.4.13** E2E workflow test | Full loop: `init` → `setup` → `create` (3 issues + deps) → `ready` → `claim` → `update` → `comment` → `close` → cascade → `ready` (newly unblocked) | All 10 tools in sequence. Graph consistent throughout. Cleanup after | PRD §8 |
+| **1.4.14** `prime` tool | Session context with smart prioritization: in_progress → blocked → ready → completed → hotspots → stale claims. Configurable max_tokens. Includes `SessionMeta` (populated by Epic 1.5) and `drift_warnings` (populated by Epic 1.6). **Promoted from Phase 2** — `prime` is the session entry point, required by both detection and reconciliation | Integration: coherent summary. Hotspots identified. Stale claims flagged. `session` field populated when detection enabled. `drift_warnings` populated when reconciliation enabled | PRD §6.3 |
+
+---
+
+### Epic 1.5 — Agent Client Detection
+
+**Goal:** Identify which AI client is connected and surface this in logs, `prime` output, and
+tracing spans — without affecting tool behaviour.
+
+**Depends on:** Epic 1.4 (MCP tools foundation), task 1.4.14 (`prime` tool)
+
+**Detail document:** `unblock-epic-agent-client-detection.md`
+
+| Task | Description | DoD | Ref |
+|---|---|---|---|
+| **1.5.1** `AgentKind` + `AgentClient` types | In `unblock-core/src/client.rs` (standalone module). `AgentKind` enum with `from_client_name()`, `as_str()`, `Display`. `AgentClient { name, version }` | Unit tests: known names → correct variant. `Unknown(name)` for unrecognised. `cargo doc` clean | ARCH §5 |
+| **1.5.2** `ClientDetector` | In `unblock-core/src/detection.rs`. `from_env()`: reads `CLAUDE_CODE_ENTRYPOINT`, `GITHUB_COPILOT_TOKEN`, `CURSOR_TRACE_ID`. `resolve()`: MCP → env → Unknown. `VSCODE_PID` intentionally excluded (D6) | Unit tests: each env var → correct kind. MCP overrides env. No panics | — |
+| **1.5.3** MCP `initialize` capture | Override `initialize()` in `UnblockServer`. Resolve `AgentKind` once, store in `ServerState.agent_kind: OnceLock<AgentKind>`. Emit `tracing::info!` at connection. Delegate to rmcp default for peer storage | Integration: mock initialize → kind stored. Env fallback exercised. Tracing event present | ARCH §9 |
+| **1.5.4** `SessionMeta` in `prime` | Add `SessionMeta { agent_client, agent_kind, agent_field, connected_at }` to `PrimeResult`. Read from `OnceLock` + `Peer<RoleServer>` | Integration: `prime` JSON includes `session` object with correct fields | PRD §6.3 |
+| **1.5.5** `agent.kind` span fields | Add `agent.kind` field to tracing spans in all tool handlers. Read from `ServerState.agent_kind` (lock-free `OnceLock`) | JSON log includes `agent.kind` on all tool spans. Log-capture test | ARCH §14.1 |
+| **1.5.6** Tests | Table-driven unit tests, env detection, fuzz `from_client_name` with proptest, integration `initialize → prime` flow | >80% coverage on `client` and `detection` modules | Quality Gate |
+
+---
+
+### Epic 1.6 — Reconciliation
+
+**Goal:** Detect and repair semantic drift between the computed dependency graph and the state
+stored in GitHub Projects V2 fields. Handles external mutations (human closes issue via UI,
+removes blocking relationship, etc.).
+
+**Depends on:** Epic 1.4 (graph engine + tools), task 1.4.14 (`prime` tool for background integration)
+
+**Detail document:** `unblock-reconciliation-plan.md`
+
+| Task | Description | DoD | Ref |
+|---|---|---|---|
+| **1.6.1** `DriftKind` + `DriftReport` types | In `unblock-core/src/reconcile.rs`. 7 drift types: `StaleReadyState`, `UncascadedClosure`, `OrphanedBlockingEdge`, `MalformedAgentField`, `MissingProjectField`, `CycleDetected`, `StaleClaim`. `DriftReport` with scan/repair/error counts | Types compile. `cargo doc` clean. All 7 variants constructible in tests | — |
+| **1.6.2** `ReconcileEngine::analyse()` | Pure engine: receives graph + issues + computed ready set + now → returns `DriftReport`. No I/O | Unit tests: stale ready state detected, uncascaded closure detected, clean report when consistent, cycle detected. All with in-memory fixtures | — |
+| **1.6.3** `reconcile` tool (read-only) | MCP tool handler with `ReconcileParams { fix: bool, stale_claim_hours: u64 }`. Fresh fetch (bypasses cache), rebuild graph, analyse, return report. `fix: false` by default | Integration: drift present → report shows it. No mutations when `fix: false` | — |
+| **1.6.4** `reconcile --fix` repair logic | When `fix: true`: repair `StaleReadyState` and `UncascadedClosure` via field updates. Add audit comments. Cycles and stale claims: report only (human decision) | Integration: stale ready state repaired. Cascade repair adds comment. Cycle reported as error | — |
+| **1.6.5** Integration into `prime` | Background `tokio::spawn` of read-only reconcile during `prime`. Include `drift_warnings` in output if drift found. Non-blocking — does not penalise `prime` latency | Integration: `prime` with drift → warnings in output. `prime` without drift → no warnings | — |
+| **1.6.6** Graph helper methods | Add `all_edges() -> Vec<BlockingEdge>` and `edge_count() -> usize` to `DependencyGraph`. Trivial wrappers over petgraph | Unit tests for both methods | — |
+| **1.6.7** Tests | Unit tests for all 7 drift types. Integration: reconcile on clean repo. Reconcile with injected drift + fix. Property test: reconcile on consistent graph always returns clean | >80% coverage on `reconcile` module | Quality Gate |
 
 ---
 
@@ -158,19 +203,18 @@ No task is done unless ALL of these pass:
 
 | Task | Description | DoD | Ref |
 |---|---|---|---|
-| **2.1.1** `prime` tool | Session context with smart prioritization: in_progress → blocked → ready → completed → hotspots → stale claims. Configurable max_tokens | Integration: coherent summary. Hotspots identified. Stale claims flagged | PRD §6.3 |
-| **2.1.2** `dep_remove` tool | Remove blocking → update Ready State → rebuild | Integration: create dep, remove it. Source unblocked | PRD §6.2 |
-| **2.1.3** `reopen` tool | Reopen closed issue. Rebuild graph, evaluate blocking state. Add comment | Integration: close then reopen → status correct. Reopen with blockers → blocked | PRD §6.1 |
+| **2.1.1** `dep_remove` tool | Remove blocking → update Ready State → rebuild | Integration: create dep, remove it. Source unblocked | PRD §6.2 |
+| **2.1.2** `reopen` tool | Reopen closed issue. Rebuild graph, evaluate blocking state. Add comment | Integration: close then reopen → status correct. Reopen with blockers → blocked | PRD §6.1 |
 
 **Stretch (ship if time allows, otherwise v0.3.0):**
 
 | Task | Description | DoD | Ref |
 |---|---|---|---|
-| **2.1.4** `list` tool | Flexible query with filters and sorting | Integration: filter by status, sort by created | PRD §6.3 |
-| **2.1.5** `search` tool | GitHub ISSUE_ADVANCED search | Integration: keyword finds match | PRD §6.3 |
-| **2.1.6** `stats` tool | Aggregates + agent metrics + bottlenecks + stale claims | Integration: known dataset, counts match | PRD §6.3 |
-| **2.1.7** `dep_cycles` tool | Detect cycles, filter by id | Integration: cycle detected | PRD §6.2 |
-| **2.1.8** `doctor` tool | System health check. Fields valid, issues in project, no orphans | Integration: missing field detected. Fix mode works | PRD §6.4 |
+| **2.1.3** `list` tool | Flexible query with filters and sorting | Integration: filter by status, sort by created | PRD §6.3 |
+| **2.1.4** `search` tool | GitHub ISSUE_ADVANCED search | Integration: keyword finds match | PRD §6.3 |
+| **2.1.5** `stats` tool | Aggregates + agent metrics + bottlenecks + stale claims | Integration: known dataset, counts match | PRD §6.3 |
+| **2.1.6** `dep_cycles` tool | Detect cycles, filter by id | Integration: cycle detected | PRD §6.2 |
+| **2.1.7** `doctor` tool | System health check. Fields valid, issues in project, no orphans. Incorporates reconciliation findings from Epic 1.6 | Integration: missing field detected. Fix mode works. Drift detected | PRD §6.4 |
 
 ---
 
@@ -252,19 +296,25 @@ No task is done unless ALL of these pass:
 
 ```
 Phase 1
-  1.1 Workspace ──► 1.2 Core ──► 1.3 GitHub API (unblock-github) ──► 1.4 MCP Tools
+  1.1 Workspace ──► 1.2 Core ──► 1.3 GitHub API ──► 1.4 MCP Tools (includes prime as 1.4.14)
+                                                      ├──► 1.5 Detection  ◄── 1.4.14
+                                                      └──► 1.6 Reconciliation ◄── 1.4.14
 
 Phase 2
-  2.1 Tools ◄── 1.4
+  2.1 Tools (remaining) ◄── 1.4
   2.2 Plugin ◄── 2.1
   2.3 Docs ◄── 2.1
 
 Phase 3
   3.1 Resilience ◄── 1.3
-  3.2 Observability ◄── 1.4
+  3.2 Observability ◄── 1.4 + 1.5
   3.3 Distribution ◄── 2.1 + 3.1 + 3.2
   3.4 Gap Features ◄── 2.1
 ```
+
+> **Note:** `prime` was promoted from Phase 2 (2.1.1) to Phase 1 (1.4.14) because it is the
+> session entry point required by both Detection (1.5) and Reconciliation (1.6). The GitHub
+> Actions sentinel for reconciliation remains in Phase 3 (additional infrastructure).
 
 ---
 
@@ -285,9 +335,9 @@ Phase 3
 
 | Milestone | Version | Criteria | Target |
 |---|---|---|---|
-| **MCP Foundation** | v0.1.0 | 9 tools E2E. Full agent workflow | Week 10 |
-| **MCP Complete** | v0.2.0 | Core tools + plugin. Feature-complete | Week 14 |
-| **MCP Production** | v1.0.0 | Resilient, observable, distributed, gap features | Week 20 |
+| **MCP Foundation** | v0.1.0 | 12 tools E2E (incl. prime + reconcile). Client detection. Full agent workflow with drift repair | Week 12 |
+| **MCP Complete** | v0.2.0 | Remaining tools + plugin. Feature-complete | Week 16 |
+| **MCP Production** | v1.0.0 | Resilient, observable, distributed, gap features | Week 22 |
 
 ---
 
@@ -295,10 +345,10 @@ Phase 3
 
 | Phase | Epics | Tasks | Focused days |
 |---|---|---|---|
-| Phase 1 | 4 | 34 | ~20 |
-| Phase 2 | 3 | 14 | ~8 |
+| Phase 1 | 6 | 47 | ~24.25 |
+| Phase 2 | 3 | 12 | ~7 |
 | Phase 3 | 4 | 13 | ~8 |
-| **Total** | **11** | **61** | **~36** |
+| **Total** | **13** | **72** | **~39.25** |
 
 ---
 
