@@ -598,6 +598,23 @@ impl UnblockServer {
             })
             .collect();
 
+        // Step 3b: Extract parent and sub-issues from the issue.
+        let parent: Option<ShowRelatedIssue> = issue.parent.as_ref().map(|r| ShowRelatedIssue {
+            number: r.number,
+            title: r.title.clone(),
+            state: format!("{:?}", r.state),
+        });
+
+        let sub_issues: Vec<ShowRelatedIssue> = issue
+            .sub_issues
+            .iter()
+            .map(|r| ShowRelatedIssue {
+                number: r.number,
+                title: r.title.clone(),
+                state: format!("{:?}", r.state),
+            })
+            .collect();
+
         // Step 4: If include_deps, get dependency tree from cached graph.
         let dependency_tree = if include_deps {
             state.cache.get_graph().await.map(|graph| {
@@ -656,6 +673,8 @@ impl UnblockServer {
             created_at: issue.created_at.to_rfc3339(),
             updated_at: issue.updated_at.to_rfc3339(),
             url: issue.url.clone(),
+            parent: parent.clone(),
+            sub_issues: sub_issues.clone(),
         };
 
         Ok(Json(ShowResult {
@@ -667,6 +686,8 @@ impl UnblockServer {
             },
             blocking,
             blocked_by,
+            parent,
+            sub_issues,
             dependency_tree,
             comments,
         }))
