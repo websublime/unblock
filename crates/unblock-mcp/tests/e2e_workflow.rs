@@ -18,50 +18,13 @@
 //! fires on both success and panic unwind. This ensures the test repository is
 //! not polluted with orphaned open issues.
 
-use std::sync::Arc;
-use std::time::Duration;
-
-use unblock_core::cache::GraphCache;
-use unblock_core::config::Config;
 use unblock_github::client::GitHubClient;
 use unblock_github::mutations::CreateIssueParams;
-use unblock_mcp::server::ServerState;
 use unblock_mcp::tools::ready::{ReadyParams, filter_ready_set};
 use unblock_mcp::tools::rebuild_cache;
 
-// ── Helpers ─────────────────────────────────────────────────────────
-
-/// Returns `true` if the `GITHUB_TOKEN` env var is set and non-empty.
-fn has_github_token() -> bool {
-    std::env::var("GITHUB_TOKEN")
-        .map(|v| !v.is_empty())
-        .unwrap_or(false)
-}
-
-/// Returns `true` if the `UNBLOCK_PROJECT` env var is set and non-empty.
-fn has_project_number() -> bool {
-    std::env::var("UNBLOCK_PROJECT")
-        .map(|v| !v.is_empty())
-        .unwrap_or(false)
-}
-
-/// Builds a [`Config`] from the process environment for integration tests.
-fn test_config() -> Config {
-    Config::load().expect("Config::load() should succeed when GITHUB_TOKEN is set")
-}
-
-/// Creates a [`ServerState`] with a real client and empty cache.
-async fn test_server_state() -> ServerState {
-    let config = test_config();
-    let client = GitHubClient::new(&config)
-        .await
-        .expect("GitHubClient::new() should succeed");
-    ServerState {
-        config: Arc::new(config),
-        client: Arc::new(client),
-        cache: Arc::new(GraphCache::new(Duration::from_secs(300))),
-    }
-}
+mod common;
+use common::{has_github_token, has_project_number, test_server_state};
 
 /// Drop guard that closes multiple GitHub issues on scope exit, even during a
 /// panic unwind. Adapted from the single-issue guard in

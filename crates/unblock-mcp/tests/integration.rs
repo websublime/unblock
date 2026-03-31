@@ -4,7 +4,6 @@
 //! access to GitHub. They are skipped automatically when `GITHUB_TOKEN` is not
 //! set.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use unblock_core::cache::GraphCache;
@@ -15,35 +14,10 @@ use unblock_core::types::{
 };
 use unblock_github::client::GitHubClient;
 use unblock_github::projects::{CreateViewParams, OwnerType, ViewLayout};
-use unblock_mcp::server::ServerState;
 use unblock_mcp::tools::setup::REQUIRED_VIEWS;
 
-// ── Helpers ─────────────────────────────────────────────────────────
-
-/// Returns `true` if the `GITHUB_TOKEN` env var is set and non-empty.
-fn has_github_token() -> bool {
-    std::env::var("GITHUB_TOKEN")
-        .map(|v| !v.is_empty())
-        .unwrap_or(false)
-}
-
-/// Builds a [`Config`] from the process environment for integration tests.
-fn test_config() -> Config {
-    Config::load().expect("Config::load() should succeed when GITHUB_TOKEN is set")
-}
-
-/// Creates a [`ServerState`] with a real client and empty cache.
-async fn test_server_state() -> ServerState {
-    let config = test_config();
-    let client = GitHubClient::new(&config)
-        .await
-        .expect("GitHubClient::new() should succeed");
-    ServerState {
-        config: Arc::new(config),
-        client: Arc::new(client),
-        cache: Arc::new(GraphCache::new(Duration::from_secs(300))),
-    }
-}
+mod common;
+use common::{has_github_token, test_server_state};
 
 /// Build a minimal `Issue` for testing (used to populate the cache).
 fn test_issue(number: u64, state: IssueState) -> unblock_core::types::Issue {
