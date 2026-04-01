@@ -42,3 +42,6 @@ pub mod errors;
 
 /// Reconciliation drift types: [`reconcile::DriftKind`] and [`reconcile::DriftReport`].
 pub mod reconcile;
+
+/// Agent client domain types: [`AgentKind`](client::AgentKind) and [`AgentClient`](client::AgentClient).
+pub mod client;
