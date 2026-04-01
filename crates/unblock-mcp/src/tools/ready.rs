@@ -172,13 +172,14 @@ pub fn filter_ready_set(
 #[cfg(test)]
 mod tests {
     use chrono::{NaiveDate, TimeZone, Utc};
-    use unblock_core::types::{IssueSummary, IssueType, Priority, Status};
+    use unblock_core::types::{IssueSummary, IssueType, Priority, QualifiedId, Status};
 
     use super::*;
 
     /// Build a minimal `IssueSummary` for testing.
     fn test_summary(number: u64, priority: Priority) -> IssueSummary {
         IssueSummary {
+            qualified_id: QualifiedId::new("test", "repo", number),
             number,
             title: format!("Issue #{number}"),
             issue_type: Some(IssueType::Task),

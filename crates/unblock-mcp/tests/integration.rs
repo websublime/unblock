@@ -10,7 +10,7 @@ use unblock_core::cache::GraphCache;
 use unblock_core::config::Config;
 use unblock_core::graph::DependencyGraph;
 use unblock_core::types::{
-    BlockingEdge, IssueRef, IssueState, IssueType, Priority, ReadyState, Status,
+    BlockingEdge, IssueRef, IssueState, IssueType, Priority, QualifiedId, ReadyState, Status,
 };
 use unblock_github::client::GitHubClient;
 use unblock_github::projects::{CreateViewParams, OwnerType, ViewLayout};
@@ -19,9 +19,15 @@ use unblock_mcp::tools::setup::REQUIRED_VIEWS;
 mod common;
 use common::{has_github_token, test_server_state};
 
+/// Helper to create a QualifiedId for tests.
+fn qid(number: u64) -> QualifiedId {
+    QualifiedId::new("test", "repo", number)
+}
+
 /// Build a minimal `Issue` for testing (used to populate the cache).
 fn test_issue(number: u64, state: IssueState) -> unblock_core::types::Issue {
     unblock_core::types::Issue {
+        qualified_id: qid(number),
         number,
         node_id: format!("NODE_{number}"),
         title: format!("Issue #{number}"),
@@ -173,8 +179,8 @@ async fn show_include_deps_false_skips_graph_traversal() {
         test_issue(2, IssueState::Open),
     ];
     let edges = vec![BlockingEdge {
-        source: 2,
-        target: 1,
+        source: qid(2),
+        target: qid(1),
     }];
     let graph = DependencyGraph::build(&issues, &edges);
     let ready_set = graph.compute_ready_set(&issues);
@@ -190,11 +196,11 @@ async fn show_include_deps_false_skips_graph_traversal() {
     // should be None. We test this logic directly since calling the full
     // tool handler requires a real GitHub client.
     let include_deps = false;
-    let dependency_tree: Option<Vec<(u64, usize)>> = if include_deps {
+    let dependency_tree: Option<Vec<(QualifiedId, usize)>> = if include_deps {
         cache
             .get_graph()
             .await
-            .map(|g| g.dependency_tree(1, unblock_core::types::TraversalDirection::Both, 3))
+            .map(|g| g.dependency_tree(&qid(1), unblock_core::types::TraversalDirection::Both, 3))
     } else {
         None
     };
@@ -255,12 +261,12 @@ async fn show_dependency_tree_for_blocking_relationships() {
     ];
     let edges = vec![
         BlockingEdge {
-            source: 2,
-            target: 1,
+            source: qid(2),
+            target: qid(1),
         },
         BlockingEdge {
-            source: 3,
-            target: 2,
+            source: qid(3),
+            target: qid(2),
         },
     ];
     let graph = DependencyGraph::build(&issues, &edges);
@@ -269,11 +275,11 @@ async fn show_dependency_tree_for_blocking_relationships() {
 
     // With include_deps=true and a populated cache, dependency_tree should be Some.
     let include_deps = true;
-    let dependency_tree: Option<Vec<(u64, usize)>> = if include_deps {
+    let dependency_tree: Option<Vec<(QualifiedId, usize)>> = if include_deps {
         cache
             .get_graph()
             .await
-            .map(|g| g.dependency_tree(1, unblock_core::types::TraversalDirection::Both, 3))
+            .map(|g| g.dependency_tree(&qid(1), unblock_core::types::TraversalDirection::Both, 3))
     } else {
         None
     };
@@ -290,14 +296,14 @@ async fn show_dependency_tree_for_blocking_relationships() {
     );
 
     // Issue #2 should appear at depth 1 (directly blocked by #1).
-    let has_issue_2 = tree.iter().any(|(num, depth)| *num == 2 && *depth == 1);
+    let has_issue_2 = tree.iter().any(|(q, depth)| q.number == 2 && *depth == 1);
     assert!(
         has_issue_2,
         "dependency_tree should contain issue #2 at depth 1: {tree:?}",
     );
 
     // Issue #3 should appear at depth 2 (blocked by #2, which is blocked by #1).
-    let has_issue_3 = tree.iter().any(|(num, depth)| *num == 3 && *depth == 2);
+    let has_issue_3 = tree.iter().any(|(q, depth)| q.number == 3 && *depth == 2);
     assert!(
         has_issue_3,
         "dependency_tree should contain issue #3 at depth 2: {tree:?}",
@@ -311,11 +317,11 @@ async fn show_dependency_tree_none_when_cache_empty() {
 
     // Cache is empty — no graph.
     let include_deps = true;
-    let dependency_tree: Option<Vec<(u64, usize)>> = if include_deps {
+    let dependency_tree: Option<Vec<(QualifiedId, usize)>> = if include_deps {
         cache
             .get_graph()
             .await
-            .map(|g| g.dependency_tree(1, unblock_core::types::TraversalDirection::Both, 3))
+            .map(|g| g.dependency_tree(&qid(1), unblock_core::types::TraversalDirection::Both, 3))
     } else {
         None
     };
@@ -364,8 +370,8 @@ async fn ready_returns_only_open_unblocked_non_deferred_issues() {
 
     let issues = vec![issue_1, issue_2, issue_3];
     let edges = vec![BlockingEdge {
-        source: 2,
-        target: 1,
+        source: qid(2),
+        target: qid(1),
     }];
     let graph = DependencyGraph::build(&issues, &edges);
     let ready_set = graph.compute_ready_set(&issues);

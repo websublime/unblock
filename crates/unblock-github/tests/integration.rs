@@ -269,8 +269,8 @@ async fn fetch_graph_data_returns_issues_from_real_repo() {
     // Edges are optional — a repo might not have blocking relationships.
     // Just verify the types are correct (no panics).
     for edge in &edges {
-        assert!(edge.source > 0, "edge source should be positive");
-        assert!(edge.target > 0, "edge target should be positive");
+        assert!(edge.source.number > 0, "edge source should be positive");
+        assert!(edge.target.number > 0, "edge target should be positive");
         assert_ne!(
             edge.source, edge.target,
             "self-blocking edges should not exist"
