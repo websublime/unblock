@@ -289,8 +289,7 @@ impl ReconcileEngine {
             if issue.status == Status::InProgress
                 && let Some(claimed_at) = issue.claimed_at
             {
-                #[allow(clippy::cast_sign_loss)]
-                let hours = (now - claimed_at).num_hours() as u64;
+                let hours = (now - claimed_at).num_hours().max(0) as u64;
                 if hours > self.stale_claim_threshold_hours {
                     drift.push(DriftKind::StaleClaim {
                         issue: qid.clone(),
