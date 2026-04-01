@@ -620,6 +620,7 @@ show / fetch_issue (single issue with comments)
 | `stats` | ❌ no invalidation | Read-only |
 | `search` | ❌ no invalidation | Bypasses cache entirely (GitHub Search API) |
 | `dep_cycles` | ❌ no invalidation | Read-only |
+| `reconcile` | ❌ no invalidation | Fresh fetch bypasses cache; populates cache after analysis |
 
 **Cross-repo invalidation:** Any write invalidates the entire cache regardless of which repo the write targets. Future optimization in Phase 3 (Epic 3.2) will scope invalidation per-repo segment.
 

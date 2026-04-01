@@ -139,7 +139,7 @@ pub enum DriftKind {
     /// Covers: external close without cascade, external reopen, manual
     /// removal of blocking relationship via UI.
     StaleReadyState {
-        issue: u64,
+        issue: QualifiedId,
         field_says: ReadyState,
         graph_says: ReadyState,
     },
@@ -147,21 +147,21 @@ pub enum DriftKind {
     /// Issue closed via UI — downstream issues should have received a cascade.
     /// No cascade comment was added. Ready State was not updated.
     UncascadedClosure {
-        closed_issue: u64,
-        should_have_unblocked: Vec<u64>,
+        closed_issue: QualifiedId,
+        should_have_unblocked: Vec<QualifiedId>,
     },
 
     /// Blocking edge references an issue that does not exist or is inaccessible.
     /// Cause: issue was deleted (admin action), or references a cross-repo issue
     /// the token cannot access.
     OrphanedBlockingEdge {
-        source: u64,
-        missing_target: u64,
+        source: QualifiedId,
+        missing_target: QualifiedId,
     },
 
     /// Agent field has invalid format (must be `username:supervisor`).
     MalformedAgentField {
-        issue: u64,
+        issue: QualifiedId,
         raw_value: String,
     },
 
@@ -173,12 +173,12 @@ pub enum DriftKind {
 
     /// Cycle detected in the graph. Likely introduced by manual editing.
     CycleDetected {
-        cycle: Vec<u64>,
+        cycle: Vec<QualifiedId>,
     },
 
     /// Issue in `in_progress` state with `claimed_at` more than N hours ago without update.
     StaleClaim {
-        issue: u64,
+        issue: QualifiedId,
         claimed_at: DateTime<Utc>,
         hours_stale: u64,
     },
@@ -226,8 +226,8 @@ to `DependencyGraph` (`all_edges() -> Vec<BlockingEdge>`, `edge_count() -> usize
 trivial wrappers over petgraph's `edge_references()` and `edge_count()`.
 
 The `compute_ready_set()` method currently returns `Vec<IssueSummary>`. The engine converts
-this to a `HashSet<u64>` for O(1) lookups. The `compute_unblock_cascade()` method takes
-`(closed_number, &[Issue])` — the second argument is currently unused but reserved.
+this to a `HashSet<QualifiedId>` for O(1) lookups. The `compute_unblock_cascade()` method takes
+`(closed_id: &QualifiedId, &[Issue])` — the second argument is currently unused but reserved.
 
 ```rust
 // crates/unblock-core/src/reconcile.rs
@@ -250,24 +250,24 @@ impl ReconcileEngine {
     /// No I/O. Receives everything it needs as arguments.
     ///
     /// `computed_ready_set` is derived from `DependencyGraph::compute_ready_set()`
-    /// by collecting issue numbers into a HashSet.
+    /// by collecting qualified IDs into a HashSet.
     pub fn analyse(
         &self,
         graph: &DependencyGraph,
-        issues: &HashMap<u64, Issue>,
-        computed_ready_set: &HashSet<u64>,
+        issues: &HashMap<QualifiedId, Issue>,
+        computed_ready_set: &HashSet<QualifiedId>,
         now: DateTime<Utc>,
     ) -> DriftReport {
         let mut drift = Vec::new();
 
         // 1. Stale Ready State fields
         // Compares all 4 ReadyState variants (Ready, Blocked, NotReady, Closed)
-        for (number, issue) in issues {
+        for (qid, issue) in issues {
             if issue.state == IssueState::Closed {
                 // Closed issues should have ReadyState::Closed
                 if issue.ready_state != ReadyState::Closed {
                     drift.push(DriftKind::StaleReadyState {
-                        issue: *number,
+                        issue: qid.clone(),
                         field_says: issue.ready_state.clone(),
                         graph_says: ReadyState::Closed,
                     });
@@ -275,12 +275,12 @@ impl ReconcileEngine {
                 continue;
             }
 
-            let graph_ready = computed_ready_set.contains(number);
+            let graph_ready = computed_ready_set.contains(qid);
             let expected = if graph_ready { ReadyState::Ready } else { ReadyState::Blocked };
 
             if issue.ready_state != expected {
                 drift.push(DriftKind::StaleReadyState {
-                    issue: *number,
+                    issue: qid.clone(),
                     field_says: issue.ready_state.clone(),
                     graph_says: expected,
                 });
@@ -290,13 +290,13 @@ impl ReconcileEngine {
         // 2. Uncascaded closures
         // Closed issues whose downstream are still marked as blocked
         let issues_vec: Vec<Issue> = issues.values().cloned().collect();
-        for (number, issue) in issues {
+        for (qid, issue) in issues {
             if issue.state == IssueState::Closed {
-                let should_have_unblocked: Vec<u64> = graph
-                    .compute_unblock_cascade(*number, &issues_vec)
+                let should_have_unblocked: Vec<QualifiedId> = graph
+                    .compute_unblock_cascade(qid, &issues_vec)
                     .into_iter()
-                    .filter(|n| {
-                        issues.get(n)
+                    .filter(|id| {
+                        issues.get(id)
                             .map(|i| i.ready_state != ReadyState::Ready && i.state == IssueState::Open)
                             .unwrap_or(false)
                     })
@@ -304,7 +304,7 @@ impl ReconcileEngine {
 
                 if !should_have_unblocked.is_empty() {
                     drift.push(DriftKind::UncascadedClosure {
-                        closed_issue: *number,
+                        closed_issue: qid.clone(),
                         should_have_unblocked,
                     });
                 }
@@ -315,8 +315,8 @@ impl ReconcileEngine {
         for edge in graph.all_edges() {
             if !issues.contains_key(&edge.target) {
                 drift.push(DriftKind::OrphanedBlockingEdge {
-                    source: edge.source,
-                    missing_target: edge.target,
+                    source: edge.source.clone(),
+                    missing_target: edge.target.clone(),
                 });
             }
         }
@@ -327,13 +327,13 @@ impl ReconcileEngine {
         }
 
         // 5. Stale claims
-        for (number, issue) in issues {
+        for (qid, issue) in issues {
             if issue.status == Status::InProgress {
                 if let Some(claimed_at) = issue.claimed_at {
                     let hours = (now - claimed_at).num_hours() as u64;
                     if hours > self.stale_claim_threshold_hours {
                         drift.push(DriftKind::StaleClaim {
-                            issue: *number,
+                            issue: qid.clone(),
                             claimed_at,
                             hours_stale: hours,
                         });
@@ -343,11 +343,11 @@ impl ReconcileEngine {
         }
 
         // 6. Malformed agent fields
-        for (number, issue) in issues {
+        for (qid, issue) in issues {
             if let Some(ref agent) = issue.agent {
                 if !agent.contains(':') && !agent.is_empty() {
                     drift.push(DriftKind::MalformedAgentField {
-                        issue: *number,
+                        issue: qid.clone(),
                         raw_value: agent.clone(),
                     });
                 }
@@ -400,6 +400,10 @@ fn default_stale_hours() -> u64 { 24 }
 /// Ready State repairs use the existing `update_field()` path via `ProjectFieldIds`,
 /// which requires the issue's project item ID. The handler must resolve this from the
 /// fetched data or re-fetch per issue.
+///
+/// **Cache note:** `reconcile` always does a fresh fetch, bypassing the cache entirely.
+/// After analysis (and optional repair), it populates the cache with the fresh graph.
+/// It does NOT call `cache.invalidate()` — see ARCH §7.2 invalidation matrix.
 pub async fn handle_reconcile(
     params: ReconcileParams,
     state: &AppState,
@@ -410,9 +414,9 @@ pub async fn handle_reconcile(
         .await
         .map_err(github_error_to_mcp)?;
 
-    let issues: HashMap<u64, Issue> = issues_vec
+    let issues: HashMap<QualifiedId, Issue> = issues_vec
         .into_iter()
-        .map(|i| (i.number, i))
+        .map(|i| (i.qualified_id.clone(), i))
         .collect();
 
     // 2. Build graph and compute ready set
@@ -423,9 +427,9 @@ pub async fn handle_reconcile(
     let ready_summaries = graph.compute_ready_set(
         &issues.values().cloned().collect::<Vec<_>>(),
     );
-    let computed_ready: HashSet<u64> = ready_summaries
+    let computed_ready: HashSet<QualifiedId> = ready_summaries
         .iter()
-        .map(|s| s.number)
+        .map(|s| s.qualified_id.clone())
         .collect();
 
     // 3. Analyse drift
@@ -440,27 +444,27 @@ pub async fn handle_reconcile(
                 DriftKind::StaleReadyState { issue, graph_says, .. } => {
                     // Repair uses the existing field update path via ProjectFieldIds.
                     // Requires resolving the issue's project item ID.
-                    match repair_ready_state(state, *issue, graph_says).await {
+                    match repair_ready_state(state, issue, graph_says).await {
                         Ok(_) => report.repaired.push(drift.clone()),
                         Err(e) => report.errors.push(format!(
-                            "Failed to repair Ready State for #{issue}: {e}"
+                            "Failed to repair Ready State for {issue}: {e}"
                         )),
                     }
                 }
 
                 DriftKind::UncascadedClosure { closed_issue, should_have_unblocked } => {
                     for unblocked in should_have_unblocked {
-                        match repair_ready_state(state, *unblocked, &ReadyState::Ready).await {
+                        match repair_ready_state(state, unblocked, &ReadyState::Ready).await {
                             Ok(_) => report.repaired.push(drift.clone()),
                             Err(e) => report.errors.push(format!(
-                                "Cascade repair failed for #{unblocked} \
-                                 (was blocked by #{closed_issue}): {e}"
+                                "Cascade repair failed for {unblocked} \
+                                 (was blocked by {closed_issue}): {e}"
                             )),
                         }
                     }
                     // Add audit comment on the closed issue
                     let _ = state.client.add_comment(
-                        *closed_issue,
+                        closed_issue,
                         format_cascade_repair_comment(should_have_unblocked),
                     ).await;
                 }
@@ -486,14 +490,14 @@ pub async fn handle_reconcile(
     }
 
     // 5. Update cache with the fresh graph we already have
-    state.cache.update(ready_summaries, graph);
+    state.cache.update(graph);
 
     Ok(ReconcileOutput { report })
 }
 
-fn format_cascade_repair_comment(unblocked: &[u64]) -> String {
+fn format_cascade_repair_comment(unblocked: &[QualifiedId]) -> String {
     let list = unblocked.iter()
-        .map(|n| format!("- #{n}"))
+        .map(|qid| format!("- {qid}"))
         .collect::<Vec<_>>()
         .join("\n");
     format!(
@@ -658,12 +662,14 @@ mod tests {
     fn detects_stale_ready_state_after_external_close() {
         // Issue #1 was blocking #2. #1 was closed via UI.
         // Ready State for #2 still says "not_ready" but the graph says "ready".
-        let mut issues = fixture_issues();
-        issues.get_mut(&1).unwrap().state = IssueState::Closed;
-        issues.get_mut(&2).unwrap().ready_state = ReadyState::NotReady; // stale
+        let mut issues = fixture_issues(); // returns HashMap<QualifiedId, Issue>
+        let qid1 = qid("owner", "repo", 1);
+        let qid2 = qid("owner", "repo", 2);
+        issues.get_mut(&qid1).unwrap().state = IssueState::Closed;
+        issues.get_mut(&qid2).unwrap().ready_state = ReadyState::NotReady; // stale
 
-        let graph = DependencyGraph::build(&issues, &[edge(1, 2)]);
-        let ready = graph.compute_ready_set(); // contains 2
+        let graph = DependencyGraph::build(&issues, &[edge(&qid1, &qid2)]);
+        let ready = graph.compute_ready_set(); // contains qid2
 
         let engine = ReconcileEngine::new(24);
         let report = engine.analyse(&graph, &issues, &ready, Utc::now());
@@ -671,7 +677,7 @@ mod tests {
         assert!(!report.clean);
         assert!(report.drift_found.iter().any(|d| matches!(
             d,
-            DriftKind::UncascadedClosure { closed_issue: 1, .. }
+            DriftKind::UncascadedClosure { .. }
         )));
     }
 
@@ -691,9 +697,10 @@ mod tests {
     #[test]
     fn detects_cycle_introduced_externally() {
         // A → B → C → A introduced by manual editing
+        let (qid1, qid2, qid3) = (qid("o", "r", 1), qid("o", "r", 2), qid("o", "r", 3));
         let issues = fixture_issues_for_cycle();
         let graph = DependencyGraph::build(&issues, &[
-            edge(1, 2), edge(2, 3), edge(3, 1),
+            edge(&qid1, &qid2), edge(&qid2, &qid3), edge(&qid3, &qid1),
         ]);
         let ready = graph.compute_ready_set();
 
