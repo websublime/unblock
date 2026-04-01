@@ -39,3 +39,6 @@ pub mod config;
 
 /// Domain error types with HTTP status code mapping.
 pub mod errors;
+
+/// Reconciliation drift types: [`reconcile::DriftKind`] and [`reconcile::DriftReport`].
+pub mod reconcile;
