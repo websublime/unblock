@@ -740,7 +740,9 @@ Node identifiers use qualified format (`owner/repo#123`) internally to support c
 
 **v1: In-memory pure (Strategy A).** The MCP server rebuilds the graph from GitHub on every cold start (session start). Intra-session, the graph is cached in memory with configurable TTL (default 30s). Invalidated on every write operation. Process death = cache gone.
 
-**Cross-repo invalidation:** In v1, any write operation invalidates the entire cache regardless of which repo the write targets. Future optimization may scope invalidation to affected repos only.
+> **Design decision (validated 2026-04-01):** ETag-based conditional requests (Strategy A+) were evaluated and rejected. GitHub's GraphQL API does not return ETag headers on POST responses, and the REST issues endpoint ETag does not reflect ProjectV2 field changes (Status, Priority). Since our model relies on ProjectV2 fields, REST ETags cannot serve as a reliable freshness signal. Pure TTL-based invalidation is the simplest correct approach.
+
+**Cross-repo invalidation:** In v1, any write operation invalidates the entire cache regardless of which repo the write targets. Future optimization (Phase 3 Epic 3.2) will scope invalidation to affected repo segments only.
 
 Cold start cost: 1 GraphQL query fetching all open issues + blocking relationships. For repos with <500 issues this is sub-second. For 1000+ issues, pagination adds 2-4 seconds. This is acceptable for v1's target (developer solo + agents, repos with 50-500 issues).
 
@@ -758,13 +760,16 @@ The agent doesn't wait for the full rebuild — it gets results in milliseconds 
 
 **Why not now:** For <500 issues, A and D have identical user-perceived performance. D adds async complexity and a correctness nuance (stale data window) that isn't worth the trade-off until cold start actually becomes a problem. The design is prepared — the Ready State field write already exists — so the migration is a PR, not a redesign.
 
+**Scale path: Persistent git object cache (Phase 3 Epic 3.2).** For enterprise orgs with cross-repo projects and frequent MCP server restarts, computed subgraphs are persisted in `refs/unblock/*` (git object database, strictly local, never pushed). Cold start reads from local git objects instead of GitHub if TTL is valid. Complements Strategy D — they solve different problems (D: ready set cold start via GitHub; git objects: full graph cold start via local cache).
+
 **Alternatives evaluated and rejected:**
 
 | Alternative | Why rejected |
 |---|---|
-| Local file cache (JSON/bincode) | Two sources of truth. Freshness check = 1 API call, same cost as just rebuilding for small repos. File management complexity |
+| Local file cache (JSON/bincode) | Freshness check requires API call, same cost as rebuild for small repos. File management outside git |
 | SQLite local cache | Recreates Beads. Schema migration, sync conflicts, two sources of truth |
 | Background daemon (long-lived process) | Changes deployment model completely. Not "install binary, use". Incompatible with stdio MCP transport |
+| IssueDetailCache (caching show results) | `show` is always-fresh by design. Comments contain COMPLETED/DECISION/DEVIATION markers required for session context reconstruction — stale comments corrupt review agent output. Rate limit cost of show calls is negligible (<0.1% of 5000/hour budget) |
 
 ### 7.6 GitHub API Strategy
 

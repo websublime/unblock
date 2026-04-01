@@ -4,12 +4,12 @@
 
 | | |
 |---|---|
-| **Version** | 1.2.0-draft |
+| **Version** | 1.3.0-draft |
 | **Author** | Miguel Ramos |
 | **Role** | Architect |
 | **Org** | websublime |
 | **Repo** | `websublime/unblock` |
-| **Date** | March 2026 |
+| **Date** | April 2026 |
 | **Status** | Draft |
 | **Depends on** | unblock-prd-github.md v1.0.0-draft |
 
@@ -90,6 +90,8 @@
 ### P1: GitHub stores, Rust computes
 
 GitHub holds the data and provides the UI. The MCP server holds the intelligence: graph computation, ready-state calculation, cascade logic, cycle detection. Zero custom storage.
+
+> **Phase 3 amendment (planned):** A local git object cache (`refs/unblock/*`) will be introduced as an ephemeral, discardable layer that survives process restarts. It stores computed subgraphs — never issue content, never mutations. It is not a second source of truth: any git object can be deleted and reconstructed from GitHub with no data loss. See §7.3 for the Phase 3 design.
 
 ### P2: Every write invalidates and recomputes
 
@@ -502,6 +504,18 @@ The graph becomes `DiGraph<QualifiedId, ()>` with `HashMap<QualifiedId, NodeInde
 
 ## 7. Cache Layer
 
+### 7.0 Design Decisions
+
+Two decisions are fixed by correctness requirements, not performance:
+
+**Decision 1 — `show` is always fresh, never cached.**
+The `show --include_comments` output is used by review, QA, and rework agents to reconstruct context from structured markers (COMPLETED, DECISION, DEVIATION). Serving stale comments to a review agent produces incorrect review findings. The rate limit cost is negligible: a typical session issues 1–3 `show` calls per issue claimed, consuming <0.1% of the 5000 requests/hour budget. Introducing an issue detail cache (IssueDetailCache) would create the invalidation problem it appears to solve — specifically, `comment`, `claim`, `close`, and `reopen` all write comments internally and would all require IssueDetailCache invalidation. The current design avoids this entirely.
+
+**Decision 2 — `comment` has no cache invalidation.**
+`comment` does not affect the dependency graph. `GraphCache` stores graph topology and ready set — neither is changed by a comment. There is no IssueDetailCache. The docs statement "No cache invalidation — comments don't affect the dependency graph" is correct and complete.
+
+### 7.1 GraphCache
+
 ```rust
 // crates/unblock-core/src/cache.rs
 
@@ -514,58 +528,127 @@ pub struct GraphCache {
     inner: RwLock<Option<CacheEntry>>,
 }
 
+/// INVARIANT: Every field in CacheEntry is reconstructable from GitHub
+/// with a single fetch_graph_data() call. This is not a source of truth.
 struct CacheEntry {
     graph: DependencyGraph,
     ready_set: HashSet<QualifiedId>,
     built_at: Instant,
 }
 
+pub enum CacheResult<'a> {
+    /// Cache is within TTL and was not invalidated by a write.
+    Fresh(&'a CacheEntry),
+    /// Cache exists but is stale (expired or invalidated). Caller must rebuild unconditionally.
+    Stale(&'a CacheEntry),
+    /// No cache entry — cold start or first use.
+    Empty,
+}
+
 impl GraphCache {
     pub fn new(ttl_seconds: u64) -> Self { /* ... */ }
 
-    /// Get the cached ready set if fresh.
+    /// Get cache state. Returns Fresh, Stale, or Empty.
+    /// Callers must rebuild unconditionally for Stale or Empty.
+    #[must_use]
+    pub fn get(&self) -> CacheResult<'_> { /* ... */ }
+
+    /// Convenience: get the ready set if cache is Fresh.
     #[must_use]
     pub fn get_ready_set(&self) -> Option<HashSet<QualifiedId>> { /* ... */ }
 
-    /// Get the cached graph for cycle checks and cascade computation.
+    /// Convenience: get the graph if cache is Fresh (for cycle checks, cascade).
     #[must_use]
     pub fn get_graph(&self) -> Option<&DependencyGraph> { /* ... */ }
 
-    /// Update the cache with a freshly built graph.
+    /// Update the cache after a successful rebuild.
     pub fn update(&self, graph: DependencyGraph) { /* ... */ }
 
-    /// Invalidate the cache (after a write operation).
+    /// Mark cache as stale. Does NOT clear the entry — stale data can
+    /// still be served under P3 (fail open for reads) if the rebuild fails.
     pub fn invalidate(&self) { /* ... */ }
 
-    /// Check if cache is fresh.
+    /// Check if cache is fresh (TTL not expired, not invalidated).
     #[must_use]
     pub fn is_fresh(&self) -> bool { /* ... */ }
 }
 ```
 
-**Cache lifecycle:**
+### 7.2 Cache Lifecycle
 
 ```
-Write operation (close, depends, dep_remove, create+blocked_by, update, reopen)
+Write operation (close, claim, create, depends, dep_remove, update, reopen)
   │
   ├─→ Execute write in GitHub (mutation)
-  ├─→ Invalidate cache
-  ├─→ Fetch all open issues + blocking edges (1 GraphQL query)
+  ├─→ cache.invalidate()              ← marks stale, keeps entry for fail-open
+  ├─→ fetch_graph_data()              ← unconditional fetch
   ├─→ Build new DependencyGraph
   ├─→ Compute ready set
   ├─→ Diff against current Ready State field values
   ├─→ Batch update changed Ready State fields in GitHub
-  └─→ Update cache
+  └─→ cache.update(graph)
 
-Read operation (ready, prime, stats)
+Read operation (ready, prime, stats, list, dep_cycles)
   │
-  ├─→ Cache fresh? → return cached data (0 API calls)
-  └─→ Cache stale/empty → fetch + build + cache + return (1 API call)
+  ├─→ cache.get() == Fresh           → return cached data (0 API calls)
+  ├─→ cache.get() == Stale
+  │       └─→ fetch_graph_data()     → rebuild → cache.update(graph)
+  └─→ cache.get() == Empty           → fetch_graph_data() → rebuild → cache.update(graph)
+
+show / fetch_issue (single issue with comments)
+  └─→ ALWAYS fetches fresh from GitHub (1 API call)
+      No caching. Comments contain COMPLETED/DECISION/DEVIATION markers
+      required for session context reconstruction. Stale comments = incorrect reviews.
 ```
 
-**Cross-repo invalidation:** Any write invalidates the entire cache. Future optimization may scope invalidation per-repo.
+**Invalidation matrix:**
 
-### 7.1 Field Validation at Boot
+| Tool | GraphCache | Reason |
+|---|---|---|
+| `close` | ✅ `invalidate()` | Cascade changes topology |
+| `claim` | ✅ `invalidate()` | Status field changes |
+| `create` | ✅ `invalidate()` | New node in graph |
+| `depends` | ✅ `invalidate()` | New edge in graph |
+| `dep_remove` | ✅ `invalidate()` | Edge removed from graph |
+| `update` | ✅ `invalidate()` | Status/defer may change ready set |
+| `reopen` | ✅ `invalidate()` | Node returns to graph |
+| `comment` | ❌ no invalidation | Graph topology unchanged |
+| `show` | ❌ no invalidation | Read-only, always fresh |
+| `ready` | ❌ no invalidation | Read-only |
+| `prime` | ❌ no invalidation | Read-only |
+| `stats` | ❌ no invalidation | Read-only |
+| `search` | ❌ no invalidation | Bypasses cache entirely (GitHub Search API) |
+| `dep_cycles` | ❌ no invalidation | Read-only |
+
+**Cross-repo invalidation:** Any write invalidates the entire cache regardless of which repo the write targets. Future optimization in Phase 3 (Epic 3.2) will scope invalidation per-repo segment.
+
+### 7.3 Phase 3 — Persistent Cache (planned, Epic 3.2)
+
+> This section documents the planned Phase 3 enhancement. It does not affect Phase 1 or Phase 2 implementation.
+
+When the MCP server restarts — after a crash, a binary upgrade, or a terminal restart — it must rebuild the graph from scratch. For repos with 1000+ issues (enterprise, cross-repo orgs), this cold start cost becomes noticeable (2–4 seconds).
+
+**Phase 3 adds a git object cache** that persists computed subgraphs across restarts using the repository's own `.git/objects/` store:
+
+```
+refs/unblock/
+  graph/{owner}/{repo}    ← DependencyGraph per repo    (TTL: 30s)
+  meta/{owner}/{repo}     ← TTL + cached_at metadata per repo
+  cross-edges             ← Vec<CrossEdge> (cross-repo edges only)
+```
+
+**Why git objects and not a file cache:**
+- Namespace `refs/unblock/*` is never pushed or fetched by default git refspecs — strictly local
+- No branch management, no worktree, no subprocess needed — git2 or gix reads/writes blobs directly
+- `git gc` manages object lifecycle automatically
+- Schema versioning (`version: u32` in every blob) handles binary upgrades gracefully
+- Discardable: deleting all `refs/unblock/*` refs returns to pure in-memory behaviour with zero data loss
+
+**Scope boundary:** The git object cache stores **only computed graph data** (subgraphs, cross-edges, cache metadata). It never stores issue body content, comments, or mutation state. `show` remains always-fresh regardless of this cache.
+
+**Dependency:** Epic 3.2 requires a build spike (Task 3.2.0) to validate git2/gix/subprocess against all musl and Windows build targets before implementation begins. See Risk Register.
+
+### 7.4 Field Validation at Boot
 
 After `resolve_project()` completes, the server validates all 7 required Projects V2 fields exist with correct types and option values:
 
@@ -582,7 +665,7 @@ After `resolve_project()` completes, the server validates all 7 required Project
 - **Missing field** → hard error, server refuses to start. Directs user to run `setup`.
 - **Wrong option values** (e.g. missing "deferred" in Status) → warning logged, server continues but may fail on writes to that option.
 
-### 7.2 Concurrency Model
+### 7.5 Concurrency Model
 
 Single-process architecture. Multiple agents sharing the same MCP server instance (via separate stdio connections) share the in-memory cache. Last writer wins — no optimistic locking in v1. This is acceptable because:
 
@@ -590,7 +673,9 @@ Single-process architecture. Multiple agents sharing the same MCP server instanc
 - Write operations always invalidate + rebuild from GitHub
 - Conflicting field updates resolve via GitHub's own conflict semantics
 
-### 7.3 API Call Optimization
+**Multi-instance note:** If two MCP server instances run against the same repo (two terminals, two IDE instances), they share the same in-memory process space only within each instance. Last writer wins at the GitHub level — the same semantics as Phase 3 git object cache, which is also ephemeral. Both instances rebuild from GitHub after writes.
+
+### 7.6 API Call Optimization
 
 Write operations batch multiple Projects V2 field mutations into a single GraphQL request where possible. Target: any tool completes in <2 seconds wall-clock time.
 
@@ -605,7 +690,7 @@ impl GitHubClient {
 }
 ```
 
-### 7.4 Migration Path
+### 7.7 Migration Path
 
 `setup --migrate` adds all existing open issues in the repository to the Project V2 board. Issues already in the project are skipped (idempotent). This allows adopting Unblock on repos with existing issues.
 

@@ -103,7 +103,7 @@ provides a session entry point (`prime`) with full context.
 | **1.2.4** Graph — build + ready set | `DependencyGraph::build(issues, edges)` with petgraph DiGraph using `QualifiedId` as node key. `compute_ready_set()` returns `Vec<QualifiedId>` — open, not closed, no active blockers. Handle missing nodes gracefully (warn + skip) | Unit test: blocked not in ready set. Open with no deps in ready set. Closed excluded. Property test: ready set never contains blocked issues (proptest, 1..100 issues, 0..200 edges). Cross-repo: two issues with same number but different repos are distinct nodes | ARCH §6.1, §6.2 |
 | **1.2.5** Graph — cascade | `compute_unblock_cascade(closed: &QualifiedId)` — issues unblocked when one closes. Only issues whose ALL blockers are now closed | Unit test: A blocks B+C. Close A → B+C unblocked. A+D block E. Close A → E NOT unblocked. Close D → E unblocked | ARCH §6.3 |
 | **1.2.6** Graph — cycles | `would_create_cycle(source: &QualifiedId, target: &QualifiedId)` via `has_path_connecting`. `detect_all_cycles()` via `tarjan_scc`. `dependency_tree(root, direction, max_depth)` via BFS | `would_create_cycle` catches A→B + B→A. `detect_all_cycles` finds SCCs > 1. `dependency_tree` respects max_depth. Property test: cycle detection consistent | ARCH §6.4 |
-| **1.2.7** Cache layer | `GraphCache` with `RwLock<Option<CacheEntry>>`, `get_ready_set()`, `update()`, `invalidate()`, `is_fresh()`. Configurable TTL | Fresh cache returns data. Expired returns None. Invalidate clears. Concurrent access doesn't panic | ARCH §7 |
+| **1.2.7** Cache layer | `GraphCache` with `RwLock<Option<CacheEntry>>`. `CacheResult` enum: `Fresh`, `Stale` (expired or invalidated), `Empty`. Public API: `get()`, `get_ready_set()`, `get_graph()`, `update(graph)`, `invalidate()`, `is_fresh()`. Configurable TTL | Fresh cache returns data. Expired returns `Stale`. Invalidated returns `Stale`. `update()` stores graph and resets TTL. Concurrent access doesn't panic | ARCH §7.1 |
 
 ---
 
@@ -114,7 +114,7 @@ provides a session entry point (`prime`) with full context.
 | Task | Description | DoD | Ref |
 |---|---|---|---|
 | **1.3.1** GitHub client bootstrap | `GitHubClient::new(config)`: reqwest + auth, `resolve_repo()` from env or git remote, `resolve_project()` from linked Projects V2 | Auto-detect from git directory. `UNBLOCK_REPO` override. Unit test for `parse_github_url()` (HTTPS + SSH). Integration test: connects to real repo | ARCH §8.1 |
-| **1.3.2** fetch_graph_data | Paginated GraphQL query: open issues + blockedBy/blocking + Project fieldValues → `(Vec<Issue>, Vec<BlockingEdge>)` | Integration test: fetches real issues. Pagination works. All Projects V2 fields mapped. Missing fields handled | ARCH §8.2 |
+| **1.3.2** fetch_graph_data | `fetch_graph_data` — Paginated GraphQL query: open issues + blockedBy/blocking + Project fieldValues → `(Vec<Issue>, Vec<BlockingEdge>)`. Returns all open issues with resolved project field values. Handles pagination for repos with >100 issues | Integration test: fetches real issues. Pagination works. All Projects V2 fields mapped. Missing fields handled | ARCH §8.2 |
 | **1.3.3** fetch_issue | Single issue GraphQL query with comments, blockedBy, blocking, parent, subIssues, all fields | Integration test: existing issue with full details. `IssueNotFound` for non-existent. Comments parsed | ARCH §8.2 |
 | **1.3.4** Mutations — create + close + comment | `create_issue()` (REST POST), `close_issue()` (REST PATCH), `add_comment()` (REST POST) | Integration test: create → verify exists → close → verify closed. Comment appears | ARCH §8.3 |
 | **1.3.5** Mutations — blocking | `add_blocked_by()`, `remove_blocked_by()` (GraphQL). `add_sub_issue()` (GraphQL with sub_issues feature header). Cross-repo: `IssueRef` type supports `owner/repo#number`. `resolve_issue_ref()` resolves from any repo | Integration test: add blocking, verify in fetch. Remove, verify removed. Sub-issue link works. Cross-repo blocking works between different repos | ARCH §8.3 |
@@ -256,28 +256,49 @@ removes blocking relationship, etc.).
 
 ---
 
-### Epic 3.2 — Observability
+### Epic 3.2 — Persistent Cache
+
+**Goal:** Survive MCP server restarts without a full GitHub rebuild. Computed subgraphs persist in the repository's own git object database (`refs/unblock/*`) — strictly local, never pushed, discardable at any time.
+
+**Depends on:** Epic 3.1 (Resilience — circuit breaker and retry interact with cache rebuild). Task 3.2.0 spike must complete before any other 3.2 task begins.
+
+**Scope boundary:** Stores computed graph data only. Never stores issue body content, comments, or mutations. `show` remains always-fresh regardless of this cache. Pending mutations are explicitly out of scope — they would violate P3 (fail safe for writes).
 
 | Task | Description | DoD | Ref |
 |---|---|---|---|
-| **3.2.1** Structured logging | `tracing` JSON stderr. Tool name, duration, result count, cache hit/miss. Token redacted | JSON parseable. Token never in output | ARCH §14.1, §14.2 |
-| **3.2.2** OpenTelemetry metrics | Optional when `UNBLOCK_OTEL_ENDPOINT` set. Tool duration, GitHub duration, cache stats, graph stats | Metrics in collector when configured. No impact when absent | ARCH §14.3 |
+| **3.2.0** Build spike | Evaluate git2 (vendored libgit2), gix (pure Rust gitoxide), and subprocess git CLI against all 5 build targets. Focus on musl static linking (x86_64 + ARM64) and Windows. Produce: chosen library, confirmed CI matrix changes, benchmark of read/write latency per blob | All 5 targets compile and pass a blob round-trip test. Decision documented with rationale. Spike is a prerequisite blocker for all other 3.2 tasks and for 3.3 Distribution | Risk Register |
+| **3.2.1** `VersionedBlob` + `GitObjectStore` | `VersionedBlob<T>` wrapper with `version: u32` field — written to every blob from day one. `GitObjectStore::write_versioned()` and `read_versioned()`. Unknown version or deserialization failure → cache miss (never panic, never error). `GitObjectStore::delete()` and `list(prefix)` | Round-trip test: write v1 blob, read back. Unknown version returns None. Corrupt blob returns None. All 5 targets pass | ARCH §7.3 |
+| **3.2.2** `SegmentedGraphCache` | Per-repo subgraph blobs at `refs/unblock/graph/{owner}/{repo}`. Per-repo meta at `refs/unblock/meta/{owner}/{repo}` (TTL + cached_at). `cross-edges` blob at `refs/unblock/cross-edges`. `invalidate_repo(owner, repo)` deletes only that repo's blobs. `invalidate_all()` deletes all `refs/unblock/graph/*` blobs | Cold start reads from git objects if TTL valid (0 API calls). Segment invalidation only affects the written repo. Full invalidation removes all segments. Concurrent reads don't panic | ARCH §7.3 |
+| **3.2.3** `UnifiedGraph` composition | `UnifiedGraph` composes `Arc`-wrapped segments + cross-edges in memory. `update_segment(repo, new_graph)` replaces only the changed segment (O(1) for unchanged segments). `get_or_compose()` lazy-composes on first access after invalidation | Replacing one segment does not copy other segments. Cross-edges applied correctly. Composed graph ready set matches full rebuild | ARCH §7.3 |
+| **3.2.4** Tool integration | All write tools call `cache.invalidate_repo(owner, repo)` instead of full invalidation. `depends` / `dep_remove` with cross-repo refs call `cache.invalidate_repo()` for both repos + `cache.invalidate_cross_edges()`. Cold start path: check git objects → rebuild only stale segments in parallel | Integration: write to repo A → repo B cache unaffected. Cross-repo dep → both segments invalidated. Cold start with valid cache → 0 API calls | ARCH §7.2 |
+| **3.2.5** Tests | Unit: `VersionedBlob` round-trip and version mismatch. Unit: `SegmentedGraphCache` invalidation scope. Integration: cold start with pre-populated git objects. Integration: segment invalidation after write. Property: any sequence of writes + reads produces consistent graph | >80% coverage on `cache/` module. All integration tests pass against real repo | Quality Gate |
 
 ---
 
-### Epic 3.3 — Distribution
+### Epic 3.3 — Observability
 
 | Task | Description | DoD | Ref |
 |---|---|---|---|
-| **3.3.1** Cross-platform binaries | Release workflow with cargo-dist: 5 targets (linux x86_64/ARM64 musl, macOS x86_64/ARM64, Windows x86_64). Shell + PowerShell installers | Tag triggers build. All 5 binaries as release assets. `curl \| sh` installs correctly | ARCH §17.2 |
-| **3.3.2** npm wrapper | `@unblock/cli` on npm. Downloads platform binary on postinstall. `npx @unblock/cli` | `npx @unblock/cli ready` works. Platform detection correct | PRD §10 Phase 3 |
-| **3.3.3** v1.0.0 release | Tag `unblock-mcp-v1.0.0`, release notes, README update with badges + install + quick start | Release published. README comprehensive. Plugin listed | — |
+| **3.3.1** Structured logging | `tracing` JSON stderr. Tool name, duration, result count, cache hit/miss. Token redacted | JSON parseable. Token never in output | ARCH §14.1, §14.2 |
+| **3.3.2** OpenTelemetry metrics | Optional when `UNBLOCK_OTEL_ENDPOINT` set. Tool duration, GitHub duration, cache stats (hits/misses), graph stats | Metrics in collector when configured. No impact when absent | ARCH §14.3 |
+
+---
+
+### Epic 3.4 — Distribution
+
+**Depends on:** Epic 3.2.0 spike complete (build matrix validated before distribution workflow is locked in).
+
+| Task | Description | DoD | Ref |
+|---|---|---|---|
+| **3.4.1** Cross-platform binaries | Release workflow with cargo-dist: 5 targets (linux x86_64/ARM64 musl, macOS x86_64/ARM64, Windows x86_64). Shell + PowerShell installers | Tag triggers build. All 5 binaries as release assets. `curl \| sh` installs correctly | ARCH §17.2 |
+| **3.4.2** npm wrapper | `@unblock/cli` on npm. Downloads platform binary on postinstall. `npx @unblock/cli` | `npx @unblock/cli ready` works. Platform detection correct | PRD §10 Phase 3 |
+| **3.4.3** v1.0.0 release | Tag `unblock-mcp-v1.0.0`, release notes, README update with badges + install + quick start | Release published. README comprehensive. Plugin listed | — |
 
 > **Deferred to v1.1.0:** Homebrew tap (`websublime/homebrew-tap`) — curl installer + npm + cargo install provide sufficient coverage for v1.0.0.
 
 ---
 
-### Epic 3.4 — v1.0.0 Gap Features
+### Epic 3.5 — v1.0.0 Gap Features
 
 **Goal:** Feature gaps identified in competitive analysis that strengthen the v1.0.0 offering.
 
@@ -285,10 +306,10 @@ removes blocking relationship, etc.).
 
 | Task | Description | DoD | Ref |
 |---|---|---|---|
-| **3.4.1** Batch operations | Accept `ids: Vec<u64>` on `update`, `close`, `reopen`, `show`. Process sequentially, return results array. Rebuild graph once at end | Integration: batch close 3 issues → all closed, cascade computed once. Batch show → all returned. Partial failure → results + errors | Gap G1 |
-| **3.4.2** `dep_tree` tool | Expose `dependency_tree(root, direction, max_depth)` from graph engine as MCP tool. Returns tree structure with status annotations | Integration: dep_tree on issue with 3 levels of deps → correct tree. Direction upstream/downstream works. max_depth respected | Gap G3.5 |
-| **3.4.3** Date range filters | Add `created_after`, `created_before`, `updated_after`, `updated_before` params to `list` tool | Integration: filter by date range returns correct subset. Combinable with existing filters | Gap G6 |
-| **3.4.4** Label OR filter | Add `label_mode: "and" \| "or"` param to `list` tool (default: `and`) | Integration: `list --label bug,enhancement --label_mode or` returns issues with either label | Gap G8 |
+| **3.5.1** Batch operations | Accept `ids: Vec<u64>` on `update`, `close`, `reopen`, `show`. Process sequentially, return results array. Rebuild graph once at end | Integration: batch close 3 issues → all closed, cascade computed once. Batch show → all returned. Partial failure → results + errors | Gap G1 |
+| **3.5.2** `dep_tree` tool | Expose `dependency_tree(root, direction, max_depth)` from graph engine as MCP tool. Returns tree structure with status annotations | Integration: dep_tree on issue with 3 levels of deps → correct tree. Direction upstream/downstream works. max_depth respected | Gap G3.5 |
+| **3.5.3** Date range filters | Add `created_after`, `created_before`, `updated_after`, `updated_before` params to `list` tool | Integration: filter by date range returns correct subset. Combinable with existing filters | Gap G6 |
+| **3.5.4** Label OR filter | Add `label_mode: "and" \| "or"` param to `list` tool (default: `and`) | Integration: `list --label bug,enhancement --label_mode or` returns issues with either label | Gap G8 |
 
 ---
 
@@ -307,14 +328,20 @@ Phase 2
 
 Phase 3
   3.1 Resilience ◄── 1.3
-  3.2 Observability ◄── 1.4 + 1.5
-  3.3 Distribution ◄── 2.1 + 3.1 + 3.2
-  3.4 Gap Features ◄── 2.1
+  3.2 Persistent Cache ◄── 3.1 (spike 3.2.0 is a prerequisite gate)
+  3.3 Observability ◄── 1.4 + 1.5
+  3.4 Distribution ◄── 2.1 + 3.1 + 3.2 + 3.3 (3.2.0 spike must complete first)
+  3.5 Gap Features ◄── 2.1
 ```
 
 > **Note:** `prime` was promoted from Phase 2 (2.1.1) to Phase 1 (1.4.14) because it is the
 > session entry point required by both Detection (1.5) and Reconciliation (1.6). The GitHub
 > Actions sentinel for reconciliation remains in Phase 3 (additional infrastructure).
+>
+> **Note:** Epic 3.2 (Persistent Cache) was inserted between Resilience and Observability.
+> Its Task 3.2.0 (build spike) is a hard prerequisite for 3.4 Distribution — the musl
+> build matrix must be validated before the distribution workflow is locked in. Epics
+> previously numbered 3.2–3.4 are now 3.3–3.5.
 
 ---
 
@@ -328,6 +355,7 @@ Phase 3
 | Projects V2 field deletion by human | Medium — broken state | Field validation at boot, clear error messages pointing to `setup` |
 | Cross-repo token permissions | Low — requires repo scope | Token must have read access to referenced repos. Clear error message on 404 |
 | REST API version mismatch | Low | Two API versions in use: `2022-11-28` for issue endpoints, `2026-03-10` for views/fields. Version set per-request via builder method. Both version paths tested |
+| **git2 / gix build targets (Phase 3)** | **Medium — blocks Epic 3.2 and 3.3 Distribution** | **Spike required before Epic 3.2: validate git2 (vendored libgit2) vs gix (pure Rust) vs subprocess against all 5 build targets (Linux musl x86_64/ARM64, macOS x86_64/ARM64, Windows x86_64). musl + libgit2 static linking has known edge cases. Spike output: chosen library + confirmed CI build matrix. Blocker for 3.2 implementation and 3.3 Distribution.** |
 
 ---
 
@@ -347,8 +375,10 @@ Phase 3
 |---|---|---|---|
 | Phase 1 | 6 | 47 | ~24.25 |
 | Phase 2 | 3 | 12 | ~7 |
-| Phase 3 | 4 | 13 | ~8 |
-| **Total** | **13** | **72** | **~39.25** |
+| Phase 3 | 5 | 18 | ~11 |
+| **Total** | **14** | **77** | **~42.25** |
+
+> Phase 3 increased from 4 to 5 epics (added 3.2 Persistent Cache: 5 tasks, ~3 focused days including spike).
 
 ---
 
