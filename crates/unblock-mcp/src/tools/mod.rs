@@ -28,8 +28,8 @@
 //! ### Query (4)
 //! `show`, `list`, `search`, `stats`
 //!
-//! ### Setup & Diagnostics (4)
-//! `init`, `setup`, `doctor`, `prime`
+//! ### Setup & Diagnostics (5)
+//! `init`, `setup`, `doctor`, `prime`, `reconcile`
 
 pub mod claim;
 pub mod close;
@@ -38,6 +38,7 @@ pub mod create;
 pub mod depends;
 pub mod init;
 pub mod ready;
+pub mod reconcile;
 pub mod setup;
 pub mod show;
 pub mod update;

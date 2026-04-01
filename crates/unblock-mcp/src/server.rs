@@ -25,6 +25,7 @@ use crate::tools::execute_read_tool;
 use crate::tools::execute_write_tool;
 use crate::tools::init::{InitParams, InitResult};
 use crate::tools::ready::{ReadyParams, ReadyResult};
+use crate::tools::reconcile::{ReconcileOutput, ReconcileParams};
 use crate::tools::setup::{REQUIRED_VIEWS, SetupParams, SetupResult};
 use crate::tools::show::{
     DependencyTreeEntry, ShowBodySections, ShowComment, ShowIssue, ShowParams, ShowRelatedIssue,
@@ -80,6 +81,11 @@ unblock turns GitHub Issues into a dependency graph. Ask `ready` to get unblocke
 | depends | Show the dependency tree for an issue                | issue_number, direction?            |
 | comment | Add a comment to an issue                            | issue_number, body                  |
 | update  | Update issue fields (priority, labels, body, etc.)   | issue_number, fields...             |
+
+### Diagnostics
+| Tool      | Purpose                                            | Key Params                          |
+|-----------|-----------------------------------------------------|-------------------------------------|
+| reconcile | Detect drift between graph and GitHub state         | fix?, stale_claim_hours?            |
 
 ## Tips
 - Run `init` once to create a project, then `setup` to configure it.
@@ -1869,6 +1875,29 @@ impl UnblockServer {
         .await?;
 
         Ok(Json(result))
+    }
+
+    /// Detect and optionally repair drift between the dependency graph and GitHub.
+    ///
+    /// Performs a fresh fetch from GitHub (bypasses cache), rebuilds the graph,
+    /// and runs the reconciliation engine to detect divergence. Returns a
+    /// [`DriftReport`] with all detected drift.
+    ///
+    /// By default operates in read-only mode (`fix: false`). The `fix: true`
+    /// repair path is implemented by task 1.6.4.
+    ///
+    /// After analysis, the cache is updated with the freshly fetched graph data.
+    #[tool(
+        name = "reconcile",
+        description = "Detect drift between the computed dependency graph and GitHub state. Returns a DriftReport listing stale ready states, uncascaded closures, orphaned edges, cycles, and stale claims. Use fix=true to auto-repair (not yet implemented). Always does a fresh fetch — bypasses cache."
+    )]
+    async fn reconcile(
+        &self,
+        Parameters(params): Parameters<ReconcileParams>,
+    ) -> Result<Json<ReconcileOutput>, ErrorData> {
+        let state = self.state();
+        let output = crate::tools::reconcile::handle_reconcile(&params, state).await?;
+        Ok(Json(output))
     }
 }
 
