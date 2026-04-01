@@ -1,8 +1,8 @@
 //! Prime tool — session entry point for every agent session.
 //!
 //! Aggregates issue state into categorised lists (`in_progress`, `ready`, `blocked`,
-//! `hotspots`, `stale`) so the agent can orient itself at the start of a session
-//! without calling multiple individual tools.
+//! `completed`, `hotspots`, `stale`) so the agent can orient itself at the start of
+//! a session without calling multiple individual tools.
 //!
 //! This is a read tool that always performs a fresh fetch from GitHub (bypasses
 //! cache) because the cache only stores the ready set — categorising `in_progress`,
@@ -60,6 +60,9 @@ pub struct PrimeResult {
     pub ready: Vec<PrimeIssueSummary>,
     /// Issues that have at least one open blocker.
     pub blocked: Vec<PrimeIssueSummary>,
+    /// Issues closed within the recent window (default 24h) for continuity.
+    /// Lets agents see what was recently shipped before picking up new work.
+    pub completed: Vec<CompletedIssueSummary>,
     /// Issues that block the most other issues (most-blocking first).
     pub hotspots: Vec<HotspotSummary>,
     /// In-progress issues with `claimed_at` older than the stale threshold.
@@ -82,6 +85,8 @@ pub struct PrimeCounts {
     pub ready: usize,
     /// Total number of blocked issues (before truncation).
     pub blocked: usize,
+    /// Total number of recently completed issues (before truncation).
+    pub completed: usize,
     /// Total number of hotspot issues (before truncation).
     pub hotspots: usize,
     /// Total number of stale claims (before truncation).
@@ -175,6 +180,29 @@ pub struct StaleIssueSummary {
     pub url: String,
 }
 
+/// A recently completed issue: closed within the configurable time window.
+///
+/// Provides continuity context so agents can see what was recently shipped
+/// before picking up new work (PRD §6.3).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CompletedIssueSummary {
+    /// Fully qualified issue identifier (`owner/repo#number`).
+    pub qualified_id: String,
+    /// GitHub issue number.
+    pub number: u64,
+    /// Issue title.
+    pub title: String,
+    /// Issue type classification (e.g. "Task", "Bug").
+    pub issue_type: Option<String>,
+    /// Priority level from Projects V2.
+    pub priority: String,
+    /// Approximate close time (derived from `updated_at` since GitHub
+    /// `closedAt` is not currently fetched).
+    pub closed_at: String,
+    /// HTML URL for linking back to GitHub.
+    pub url: String,
+}
+
 /// Session metadata stub.
 ///
 /// Will be populated by Epic 1.5 (Agent Client Detection) with real client
@@ -202,7 +230,7 @@ impl Default for SessionMeta {
 ///
 /// 1. Fresh fetch via `fetch_graph_data()` — bypasses cache entirely.
 /// 2. Rebuild `DependencyGraph` from scratch.
-/// 3. Categorise all issues into `in_progress`, `blocked`, `ready`, `hotspots`, `stale`.
+/// 3. Categorise all issues into `in_progress`, `blocked`, `ready`, `completed`, `hotspots`, `stale`.
 /// 4. Update cache with the fresh graph already fetched.
 /// 5. Return `PrimeResult` with stub session and no drift warnings.
 ///
@@ -279,6 +307,7 @@ pub async fn handle_prime(
         in_progress: categories.in_progress.len(),
         ready: categories.ready.len(),
         blocked: categories.blocked.len(),
+        completed: categories.completed.len(),
         hotspots: categories.hotspots.len(),
         stale: categories.stale.len(),
     };
@@ -302,6 +331,11 @@ pub async fn handle_prime(
             .take(max_per_category)
             .map(PrimeIssueSummary::from_core)
             .collect(),
+        completed: categories
+            .completed
+            .into_iter()
+            .take(max_per_category)
+            .collect(),
         hotspots: categories
             .hotspots
             .into_iter()
@@ -323,6 +357,7 @@ struct CategorisedIssues {
     in_progress: Vec<IssueSummary>,
     ready: Vec<IssueSummary>,
     blocked: Vec<IssueSummary>,
+    completed: Vec<CompletedIssueSummary>,
     hotspots: Vec<HotspotSummary>,
     stale: Vec<StaleIssueSummary>,
 }
@@ -330,10 +365,11 @@ struct CategorisedIssues {
 /// Categorise issues into the prime result categories.
 ///
 /// - `in_progress`: `Status::InProgress` and `IssueState::Open`
-/// - **blocked**: open issues that have at least one open blocker in the graph
-/// - **ready**: from `compute_ready_set()` (open, unblocked)
-/// - **hotspots**: issues that block the most other issues (descending by count)
-/// - **stale**: in-progress issues with `claimed_at` older than the threshold
+/// - `blocked`: open issues that have at least one open blocker in the graph
+/// - `ready`: from `compute_ready_set()` (open, unblocked)
+/// - `completed`: closed issues with `updated_at` within the stale threshold window
+/// - `hotspots`: issues that block the most other issues (descending by count)
+/// - `stale`: in-progress issues with `claimed_at` older than the threshold
 fn categorise_issues(
     issues: &[Issue],
     graph: &DependencyGraph,
@@ -343,6 +379,7 @@ fn categorise_issues(
 ) -> CategorisedIssues {
     let mut in_progress = Vec::new();
     let mut blocked = Vec::new();
+    let mut completed = Vec::new();
     let mut stale = Vec::new();
 
     // Build a set of ready QualifiedIds for quick lookup.
@@ -353,9 +390,26 @@ fn categorise_issues(
     let issue_map: HashMap<&QualifiedId, &Issue> =
         issues.iter().map(|i| (&i.qualified_id, i)).collect();
 
+    // The stale threshold doubles as the "recently completed" window.
+    let completed_cutoff = now
+        - chrono::Duration::hours(i64::from(
+            u32::try_from(stale_threshold_hours).unwrap_or(u32::MAX),
+        ));
+
     for issue in issues {
-        // Skip closed issues entirely.
+        // Collect recently-closed issues into the completed category.
         if issue.state != IssueState::Open {
+            if issue.updated_at >= completed_cutoff {
+                completed.push(CompletedIssueSummary {
+                    qualified_id: issue.qualified_id.to_string(),
+                    number: issue.number,
+                    title: issue.title.clone(),
+                    issue_type: issue.issue_type.map(|it| format!("{it:?}")),
+                    priority: format!("{:?}", issue.priority),
+                    closed_at: issue.updated_at.to_rfc3339(),
+                    url: issue.url.clone(),
+                });
+            }
             continue;
         }
 
@@ -415,6 +469,9 @@ fn categorise_issues(
             .then_with(|| a.created_at.cmp(&b.created_at))
     });
 
+    // Sort completed by closed_at DESC (most recently closed first).
+    completed.sort_by(|a, b| b.closed_at.cmp(&a.closed_at));
+
     // Sort stale by hours_stale DESC (most stale first).
     stale.sort_by(|a, b| b.hours_stale.cmp(&a.hours_stale));
 
@@ -435,6 +492,7 @@ fn categorise_issues(
         in_progress,
         ready: filtered_ready,
         blocked,
+        completed,
         hotspots,
         stale,
     }
@@ -617,6 +675,7 @@ mod tests {
         assert!(result.in_progress.is_empty());
         assert!(result.ready.is_empty());
         assert!(result.blocked.is_empty());
+        assert!(result.completed.is_empty());
         assert!(result.hotspots.is_empty());
         assert!(result.stale.is_empty());
     }
@@ -778,7 +837,7 @@ mod tests {
     }
 
     #[test]
-    fn closed_issues_excluded_from_categories() {
+    fn closed_issues_excluded_from_open_categories() {
         let issue = test_issue(1, IssueState::Closed, Status::Closed);
         let issues = vec![issue];
 
@@ -790,6 +849,76 @@ mod tests {
         assert!(result.ready.is_empty());
         assert!(result.blocked.is_empty());
         assert!(result.stale.is_empty());
+        // Recently closed issue should appear in completed (updated_at is "now").
+        assert_eq!(result.completed.len(), 1);
+        assert_eq!(result.completed[0].number, 1);
+    }
+
+    #[test]
+    fn completed_excludes_old_closed_issues() {
+        let mut issue = test_issue(1, IssueState::Closed, Status::Closed);
+        // Updated 48 hours ago — outside the default 24h window.
+        issue.updated_at = Utc::now() - chrono::Duration::hours(48);
+        let issues = vec![issue];
+
+        let graph = DependencyGraph::build(&issues, &[]);
+        let ready = graph.compute_ready_set(&issues);
+        let result = categorise_issues(&issues, &graph, &ready, 24, Utc::now());
+
+        assert!(
+            result.completed.is_empty(),
+            "issues closed more than 24h ago should not appear in completed"
+        );
+    }
+
+    #[test]
+    fn completed_sorted_by_closed_at_desc() {
+        let mut issue1 = test_issue(1, IssueState::Closed, Status::Closed);
+        issue1.updated_at = Utc::now() - chrono::Duration::hours(2);
+
+        let mut issue2 = test_issue(2, IssueState::Closed, Status::Closed);
+        issue2.updated_at = Utc::now() - chrono::Duration::hours(1);
+
+        let issues = vec![issue1, issue2];
+        let graph = DependencyGraph::build(&issues, &[]);
+        let ready = graph.compute_ready_set(&issues);
+        let result = categorise_issues(&issues, &graph, &ready, 24, Utc::now());
+
+        assert_eq!(result.completed.len(), 2);
+        assert_eq!(
+            result.completed[0].number, 2,
+            "most recently closed should come first"
+        );
+        assert_eq!(
+            result.completed[1].number, 1,
+            "older closed should come second"
+        );
+    }
+
+    #[test]
+    fn completed_respects_custom_threshold() {
+        let mut issue = test_issue(1, IssueState::Closed, Status::Closed);
+        // Updated 30 hours ago — outside 24h but inside 48h.
+        issue.updated_at = Utc::now() - chrono::Duration::hours(30);
+        let issues = vec![issue];
+
+        let graph = DependencyGraph::build(&issues, &[]);
+        let ready = graph.compute_ready_set(&issues);
+
+        // With default 24h window: excluded.
+        let result_24 = categorise_issues(&issues, &graph, &ready, 24, Utc::now());
+        assert!(
+            result_24.completed.is_empty(),
+            "30h-old closure should not appear with 24h window"
+        );
+
+        // With 48h window: included.
+        let result_48 = categorise_issues(&issues, &graph, &ready, 48, Utc::now());
+        assert_eq!(
+            result_48.completed.len(),
+            1,
+            "30h-old closure should appear with 48h window"
+        );
     }
 
     #[test]
@@ -970,6 +1099,7 @@ mod tests {
             in_progress: vec![],
             ready: vec![],
             blocked: vec![],
+            completed: vec![],
             hotspots: vec![],
             stale: vec![],
             session: SessionMeta::default(),
@@ -978,6 +1108,7 @@ mod tests {
                 in_progress: 0,
                 ready: 0,
                 blocked: 0,
+                completed: 0,
                 hotspots: 0,
                 stale: 0,
             },
@@ -1031,6 +1162,9 @@ mod tests {
         assert_eq!(result.in_progress[0].number, 3);
         assert_eq!(result.stale.len(), 1);
         assert_eq!(result.stale[0].number, 3);
+        // #4 is closed recently — should appear in completed.
+        assert_eq!(result.completed.len(), 1);
+        assert_eq!(result.completed[0].number, 4);
         // #1 is a hotspot (blocks #2).
         assert_eq!(result.hotspots.len(), 1);
         assert_eq!(result.hotspots[0].number, 1);
