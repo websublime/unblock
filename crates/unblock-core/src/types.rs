@@ -689,11 +689,11 @@ mod tests {
 
     #[test]
     fn qualified_id_hash_eq_distinct_repos() {
+        use std::collections::HashSet;
         let a = QualifiedId::new("acme", "widgets", 42);
         let b = QualifiedId::new("acme", "gadgets", 42);
         assert_ne!(a, b);
         // Verify they hash differently (with high probability).
-        use std::collections::HashSet;
         let mut set = HashSet::new();
         set.insert(a.clone());
         set.insert(b.clone());

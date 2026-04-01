@@ -18,7 +18,7 @@ use tokio::runtime::Runtime;
 use unblock_core::cache::GraphCache;
 use unblock_core::graph::DependencyGraph;
 use unblock_core::types::{
-    BlockingEdge, Issue, IssueState, IssueType, Priority, ReadyState, Status,
+    BlockingEdge, Issue, IssueState, IssueType, Priority, QualifiedId, ReadyState, Status,
 };
 
 /// Node counts used across all benchmark groups.
@@ -40,6 +40,7 @@ fn generate_issues(n: usize) -> Vec<Issue> {
         .map(|i| {
             let number = (i + 1) as u64;
             Issue {
+                qualified_id: QualifiedId::new("bench", "repo", number),
                 number,
                 node_id: format!("MDExOklzc3VlTm9kZV9{number}"),
                 title: format!("Benchmark issue #{number}: implement feature {i}"),
@@ -92,8 +93,8 @@ fn generate_edges(n: usize) -> Vec<BlockingEdge> {
     (1..n)
         .filter(|i| i % 3 == 0)
         .map(|i| BlockingEdge {
-            source: (i + 1) as u64,
-            target: i as u64,
+            source: QualifiedId::new("bench", "repo", (i + 1) as u64),
+            target: QualifiedId::new("bench", "repo", i as u64),
         })
         .collect()
 }

@@ -158,7 +158,7 @@ mod tests {
 
     use crate::types::QualifiedId;
 
-    /// Helper to create a QualifiedId for tests.
+    /// Helper to create a `QualifiedId` for tests.
     fn qid(number: u64) -> QualifiedId {
         QualifiedId::new("test", "repo", number)
     }
