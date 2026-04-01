@@ -270,11 +270,21 @@ impl ReconcileEngine {
         }
 
         // 3. Orphaned blocking edges
+        // Check both endpoints: an edge is orphaned if either the source or target
+        // issue is missing from the fetched issues map. When the source is missing,
+        // we report it using the existing variant with the source as the missing
+        // endpoint in `missing_target` (the field semantically means "missing node").
         for edge in graph.all_edges() {
             if !issues.contains_key(&edge.target) {
                 drift.push(DriftKind::OrphanedBlockingEdge {
                     source: edge.source.clone(),
                     missing_target: edge.target.clone(),
+                });
+            }
+            if !issues.contains_key(&edge.source) {
+                drift.push(DriftKind::OrphanedBlockingEdge {
+                    source: edge.target.clone(),
+                    missing_target: edge.source.clone(),
                 });
             }
         }
