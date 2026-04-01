@@ -208,7 +208,8 @@ impl Default for SessionMeta {
 ///
 /// # Errors
 ///
-/// Returns [`rmcp::model::ErrorData`] if the GitHub fetch fails.
+/// Returns [`rmcp::model::ErrorData`] with `INVALID_PARAMS` if `stale_threshold_hours`
+/// or `max_per_category` is below its minimum (currently 1), or if the GitHub fetch fails.
 pub async fn handle_prime(
     params: &PrimeParams,
     state: &ServerState,
@@ -231,10 +232,8 @@ pub async fn handle_prime(
     {
         return Err(rmcp::model::ErrorData {
             code: rmcp::model::ErrorCode::INVALID_PARAMS,
-            message: format!(
-                "max_per_category must be at least {MIN_MAX_PER_CATEGORY}, got {max}"
-            )
-            .into(),
+            message: format!("max_per_category must be at least {MIN_MAX_PER_CATEGORY}, got {max}")
+                .into(),
             data: None,
         });
     }
@@ -904,14 +903,14 @@ mod tests {
     }
 
     #[test]
-    fn prime_params_zero_stale_threshold_rejected() {
+    fn prime_params_zero_stale_threshold_deserializes() {
         let json = r#"{"stale_threshold_hours": 0}"#;
         let params: PrimeParams = serde_json::from_str(json).expect("should deserialize");
         assert_eq!(params.stale_threshold_hours, Some(0));
     }
 
     #[test]
-    fn prime_params_zero_max_per_category_rejected() {
+    fn prime_params_zero_max_per_category_deserializes() {
         let json = r#"{"max_per_category": 0}"#;
         let params: PrimeParams = serde_json::from_str(json).expect("should deserialize");
         assert_eq!(params.max_per_category, Some(0));
