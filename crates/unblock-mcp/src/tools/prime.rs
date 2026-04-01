@@ -499,6 +499,7 @@ fn issue_to_summary(issue: &Issue) -> IssueSummary {
 }
 
 #[cfg(test)]
+#[allow(clippy::similar_names)]
 mod tests {
     use std::sync::Arc;
     use std::time::Duration;
