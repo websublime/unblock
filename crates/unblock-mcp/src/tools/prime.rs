@@ -331,7 +331,15 @@ fn categorise_issues(
         if issue.status == Status::InProgress {
             in_progress.push(summary.clone());
 
-            // Check for staleness.
+            // Check for staleness. Log if claimed_at is missing — may indicate
+            // a data quality issue (agent claimed work but no timestamp recorded).
+            if issue.claimed_at.is_none() {
+                tracing::debug!(
+                    number = issue.number,
+                    qualified_id = %issue.qualified_id,
+                    "InProgress issue has no claimed_at — skipped for stale detection"
+                );
+            }
             if let Some(claimed_at) = issue.claimed_at {
                 let hours_elapsed = (now - claimed_at).num_hours().unsigned_abs();
                 if hours_elapsed > stale_threshold_hours {
@@ -347,9 +355,12 @@ fn categorise_issues(
                 }
             }
         } else if !ready_set.contains(&issue.qualified_id) {
-            // Not in_progress and not ready — must be blocked (or deferred etc.).
-            // Only include if Status is Blocked or if it has open blockers in graph.
-            if issue.status == Status::Blocked || has_open_blockers(issue, graph) {
+            // Not in_progress and not ready — check if blocked.
+            // Exclude Deferred issues: they were intentionally deferred, not
+            // dependency-blocked, so showing them as "blocked" confuses agents.
+            if issue.status != Status::Deferred
+                && (issue.status == Status::Blocked || has_open_blockers(issue, graph))
+            {
                 blocked.push(summary);
             }
         }
@@ -377,9 +388,19 @@ fn categorise_issues(
     // Compute hotspots from the graph edges.
     let hotspots = compute_hotspots(graph, &issue_map);
 
+    // Filter InProgress issues out of the ready list — an issue already being
+    // worked on should not appear as "ready to pick up".
+    let in_progress_ids: std::collections::HashSet<&QualifiedId> =
+        in_progress.iter().map(|s| &s.qualified_id).collect();
+    let filtered_ready: Vec<IssueSummary> = ready_summaries
+        .iter()
+        .filter(|s| !in_progress_ids.contains(&s.qualified_id))
+        .cloned()
+        .collect();
+
     CategorisedIssues {
         in_progress,
-        ready: ready_summaries.to_vec(),
+        ready: filtered_ready,
         blocked,
         hotspots,
         stale,
@@ -430,7 +451,6 @@ fn compute_hotspots(
 
     let mut hotspots: Vec<HotspotSummary> = blocking_counts
         .into_iter()
-        .filter(|(_, count)| *count > 0)
         .filter_map(|(qid, count)| {
             // Only include open issues as hotspots.
             let issue = issue_map.get(&qid)?;
@@ -449,7 +469,7 @@ fn compute_hotspots(
         })
         .collect();
 
-    // Sort by blocking_count DESC, then priority ASC, then number ASC.
+    // Sort by blocking_count DESC, then number ASC (stable tiebreaker).
     hotspots.sort_by(|a, b| {
         b.blocking_count
             .cmp(&a.blocking_count)
@@ -739,6 +759,47 @@ mod tests {
     }
 
     #[test]
+    fn deferred_issues_excluded_from_blocked() {
+        // Issue #1 blocks issue #2 (deferred). Deferred should not appear as blocked.
+        let issue1 = test_issue(1, IssueState::Open, Status::Open);
+        let mut issue2 = test_issue(2, IssueState::Open, Status::Deferred);
+        issue2.ready_state = ReadyState::Blocked;
+        let issues = vec![issue1, issue2];
+        let edges = vec![BlockingEdge {
+            source: qid(2),
+            target: qid(1),
+        }];
+
+        let graph = DependencyGraph::build(&issues, &edges);
+        let ready = graph.compute_ready_set(&issues);
+        let result = categorise_issues(&issues, &graph, &ready, 24, Utc::now());
+
+        assert!(
+            result.blocked.is_empty(),
+            "deferred issue should not appear in blocked list"
+        );
+    }
+
+    #[test]
+    fn in_progress_excluded_from_ready() {
+        // An InProgress issue with no blockers should only appear in in_progress, not ready.
+        let mut issue = test_issue(1, IssueState::Open, Status::InProgress);
+        issue.agent = Some("agent-x".to_owned());
+        issue.claimed_at = Some(Utc::now());
+        let issues = vec![issue];
+
+        let graph = DependencyGraph::build(&issues, &[]);
+        let ready = graph.compute_ready_set(&issues);
+        let result = categorise_issues(&issues, &graph, &ready, 24, Utc::now());
+
+        assert_eq!(result.in_progress.len(), 1);
+        assert!(
+            result.ready.is_empty(),
+            "InProgress issues should not appear in the ready list"
+        );
+    }
+
+    #[test]
     fn in_progress_sorted_by_priority_then_created_at() {
         let earlier = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
         let later = Utc.with_ymd_and_hms(2024, 6, 1, 0, 0, 0).unwrap();
@@ -869,12 +930,13 @@ mod tests {
         let ready = graph.compute_ready_set(&issues);
         let result = categorise_issues(&issues, &graph, &ready, 24, Utc::now());
 
-        // #1 is ready.
+        // #1 is ready (#3 is InProgress so excluded from ready list).
         assert_eq!(
             result.ready.len(),
-            2,
-            "ready should include #1 and #3 (InProgress is unblocked)"
+            1,
+            "ready should include only #1 (InProgress #3 is excluded)"
         );
+        assert_eq!(result.ready[0].number, 1);
         // #2 is blocked.
         assert_eq!(result.blocked.len(), 1);
         assert_eq!(result.blocked[0].number, 2);
