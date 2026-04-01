@@ -24,6 +24,7 @@ use crate::tools::depends::{DependsParams, DependsResult};
 use crate::tools::execute_read_tool;
 use crate::tools::execute_write_tool;
 use crate::tools::init::{InitParams, InitResult};
+use crate::tools::prime::{PrimeParams, PrimeResult};
 use crate::tools::ready::{ReadyParams, ReadyResult};
 use crate::tools::reconcile::{ReconcileOutput, ReconcileParams};
 use crate::tools::setup::{REQUIRED_VIEWS, SetupParams, SetupResult};
@@ -1875,6 +1876,25 @@ impl UnblockServer {
         .await?;
 
         Ok(Json(result))
+    }
+
+    /// Session entry point — aggregates issue state for agent orientation.
+    ///
+    /// Returns categorised lists of issues (`in_progress`, `ready`, `blocked`,
+    /// hotspots, stale claims) from a fresh GitHub fetch. Updates the cache
+    /// with the fetched data. Includes stub session metadata and no drift
+    /// warnings until Epics 1.5 and 1.6 wire them in.
+    #[tool(
+        name = "prime",
+        description = "Session entry point for every agent session. Returns categorised issue lists: in_progress, ready, blocked, hotspots (most-blocking), and stale claims. Includes session metadata and drift warnings. Always does a fresh fetch — bypasses cache. Use stale_threshold_hours to configure stale claim detection (default 24h) and max_per_category to limit output size (default 10)."
+    )]
+    async fn prime(
+        &self,
+        Parameters(params): Parameters<PrimeParams>,
+    ) -> Result<Json<PrimeResult>, ErrorData> {
+        let state = self.state();
+        let output = crate::tools::prime::handle_prime(&params, state).await?;
+        Ok(Json(output))
     }
 
     /// Detect and optionally repair drift between the dependency graph and GitHub.
