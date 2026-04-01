@@ -23,6 +23,8 @@ use unblock_core::reconcile::{DriftKind, DriftReport, ReconcileEngine};
 use unblock_core::types::{Issue, QualifiedId, ReadyState};
 use unblock_github::projects::FieldValue;
 
+use unblock_github::projects::{ProjectFieldIds, ProjectInfo};
+
 use crate::errors::github_error_to_mcp;
 use crate::server::ServerState;
 
@@ -202,58 +204,128 @@ pub async fn handle_reconcile(
     })
 }
 
+/// Lazily resolve field IDs and project info for repair operations.
+///
+/// On first call, resolves both and caches them in `ctx`. On subsequent calls,
+/// returns the cached values. If resolution fails, pushes an error to the
+/// report and returns `None` — the caller should skip the repair.
+async fn resolve_repair_context<'a>(
+    ctx: &'a mut Option<(ProjectFieldIds, ProjectInfo)>,
+    state: &ServerState,
+    errors: &mut Vec<String>,
+) -> Option<&'a (ProjectFieldIds, ProjectInfo)> {
+    if ctx.is_some() {
+        return ctx.as_ref();
+    }
+    let Some(field_ids) = state.client.field_ids().await else {
+        errors.push("Field IDs not available — run setup first. Skipping repair.".to_owned());
+        return None;
+    };
+    let Ok(project_info) = state.client.resolve_project_info().await else {
+        errors.push("Failed to resolve project info — skipping repair.".to_owned());
+        return None;
+    };
+    *ctx = Some((field_ids, project_info));
+    ctx.as_ref()
+}
+
 /// Apply repairs for detected drift items.
 ///
 /// Iterates over `report.drift_found` and repairs `StaleReadyState` and
 /// `UncascadedClosure` drift. Other drift types are logged or pushed to
 /// `report.errors` without repair.
+///
+/// Resolves `field_ids` and `project_info` lazily on first repairable drift,
+/// then caches for subsequent repairs — avoiding redundant API calls without
+/// blocking non-repairable drift handling.
 async fn apply_repairs(
     report: &mut DriftReport,
     state: &ServerState,
     issues: &HashMap<QualifiedId, Issue>,
 ) {
-    for drift in report.drift_found.clone() {
-        match &drift {
+    // Lazily resolved on first repairable drift type encountered.
+    let mut repair_context: Option<(ProjectFieldIds, ProjectInfo)> = None;
+
+    // Take drift_found out of report to avoid cloning the entire Vec.
+    // We drain rather than clone so large drift reports don't allocate a full copy.
+    let drift_items = std::mem::take(&mut report.drift_found);
+    for drift in &drift_items {
+        match drift {
             DriftKind::StaleReadyState {
                 issue, graph_says, ..
-            } => match repair_ready_state(state, issue, graph_says, issues).await {
-                Ok(()) => report.repaired.push(drift),
-                Err(e) => report
-                    .errors
-                    .push(format!("Failed to repair Ready State for {issue}: {e}")),
-            },
+            } => {
+                // Lazily resolve repair context on first repairable drift.
+                let ctx =
+                    resolve_repair_context(&mut repair_context, state, &mut report.errors).await;
+                if let Some((field_ids, project_info)) = ctx {
+                    match repair_ready_state(
+                        state,
+                        issue,
+                        graph_says,
+                        issues,
+                        field_ids,
+                        project_info,
+                    )
+                    .await
+                    {
+                        Ok(()) => report.repaired.push(drift.clone()),
+                        Err(e) => report
+                            .errors
+                            .push(format!("Failed to repair Ready State for {issue}: {e}")),
+                    }
+                }
+            }
 
             DriftKind::UncascadedClosure {
                 closed_issue,
                 should_have_unblocked,
             } => {
-                let mut all_ok = true;
-                for unblocked_qid in should_have_unblocked {
-                    match repair_ready_state(state, unblocked_qid, &ReadyState::Ready, issues).await
-                    {
-                        Ok(()) => report.repaired.push(drift.clone()),
-                        Err(e) => {
-                            all_ok = false;
-                            report.errors.push(format!(
-                                "Cascade repair failed for {unblocked_qid} \
-                                 (was blocked by {closed_issue}): {e}"
-                            ));
+                // Lazily resolve repair context on first repairable drift.
+                let ctx =
+                    resolve_repair_context(&mut repair_context, state, &mut report.errors).await;
+                if let Some((field_ids, project_info)) = ctx {
+                    let mut repaired_qids: Vec<&QualifiedId> = Vec::new();
+                    for unblocked_qid in should_have_unblocked {
+                        match repair_ready_state(
+                            state,
+                            unblocked_qid,
+                            &ReadyState::Ready,
+                            issues,
+                            field_ids,
+                            project_info,
+                        )
+                        .await
+                        {
+                            Ok(()) => repaired_qids.push(unblocked_qid),
+                            Err(e) => {
+                                report.errors.push(format!(
+                                    "Cascade repair failed for {unblocked_qid} \
+                                     (was blocked by {closed_issue}): {e}"
+                                ));
+                            }
                         }
                     }
-                }
-                // Post audit comment on the closed issue for traceability (R4).
-                if all_ok {
-                    let comment_body = format_cascade_repair_comment(should_have_unblocked);
-                    if let Err(e) = state
-                        .client
-                        .add_comment(closed_issue.number, comment_body)
-                        .await
-                    {
-                        tracing::warn!(
-                            closed_issue = %closed_issue,
-                            error = %e,
-                            "Failed to post cascade repair audit comment"
-                        );
+                    // Push to repaired once per UncascadedClosure (not per downstream issue).
+                    if !repaired_qids.is_empty() {
+                        report.repaired.push(drift.clone());
+                    }
+                    // Post audit comment on the closed issue for traceability (R4).
+                    // When partially successful, list only the issues that were repaired.
+                    if !repaired_qids.is_empty() {
+                        let comment_qids: Vec<QualifiedId> =
+                            repaired_qids.iter().map(|q| (*q).clone()).collect();
+                        let comment_body = format_cascade_repair_comment(&comment_qids);
+                        if let Err(e) = state
+                            .client
+                            .add_comment(closed_issue.number, comment_body)
+                            .await
+                        {
+                            tracing::warn!(
+                                closed_issue = %closed_issue,
+                                error = %e,
+                                "Failed to post cascade repair audit comment"
+                            );
+                        }
                     }
                 }
             }
@@ -276,13 +348,18 @@ async fn apply_repairs(
                 ));
             }
 
-            // OrphanedBlockingEdge, MalformedAgentField, MissingProjectField:
-            // log warning only, no auto-repair.
-            _ => {
+            // Explicit arms for remaining drift types — no auto-repair, log warning only.
+            // Enumerated explicitly (instead of wildcard) so the compiler catches new
+            // DriftKind variants added in the future.
+            DriftKind::OrphanedBlockingEdge { .. }
+            | DriftKind::MalformedAgentField { .. }
+            | DriftKind::MissingProjectField { .. } => {
                 tracing::warn!(?drift, "Drift detected — not auto-repaired");
             }
         }
     }
+    // Restore drift_found so the report still contains all detected drift.
+    report.drift_found = drift_items;
 }
 
 /// Maps a [`ReadyState`] to the GitHub Projects V2 single-select option name.
@@ -299,37 +376,26 @@ fn ready_state_option_name(state: ReadyState) -> &'static str {
 
 /// Repair a single issue's Ready State field in GitHub Projects V2.
 ///
-/// Resolves the project info, project item ID, and field IDs, then updates
-/// the `ReadyState` field to the specified value.
+/// Uses pre-resolved `field_ids` and `project_info` to avoid redundant API
+/// calls when repairing multiple issues in a single reconciliation run.
+/// Only the per-issue `get_project_item_id` call is made per invocation.
 ///
 /// # Errors
 ///
-/// Returns a human-readable error string if any step fails (project not
-/// configured, field IDs not available, item not found, API error).
+/// Returns a human-readable error string if any step fails (item not found,
+/// option not found, API error).
 async fn repair_ready_state(
     state: &ServerState,
     qid: &QualifiedId,
     target_state: &ReadyState,
     issues: &HashMap<QualifiedId, Issue>,
+    field_ids: &ProjectFieldIds,
+    project_info: &ProjectInfo,
 ) -> Result<(), String> {
     // Look up the issue's node_id from the issues map.
     let issue = issues
         .get(qid)
         .ok_or_else(|| format!("Issue {qid} not found in fetched issues map"))?;
-
-    // Resolve field IDs (must have been set up via setup_fields).
-    let field_ids = state
-        .client
-        .field_ids()
-        .await
-        .ok_or_else(|| "Field IDs not available — run setup first".to_owned())?;
-
-    // Resolve project info.
-    let project_info = state
-        .client
-        .resolve_project_info()
-        .await
-        .map_err(|e| format!("Failed to resolve project info: {e}"))?;
 
     // Resolve the project item ID for this issue.
     let item_id = state
@@ -952,7 +1018,7 @@ mod tests {
     }
 
     /// Integration test: StaleReadyState repair attempt → fails gracefully
-    /// (no real GitHub connection) and pushes to report.errors.
+    /// (no field IDs set up) and pushes to report.errors.
     #[tokio::test]
     async fn fix_mode_stale_ready_state_pushes_error_on_failure() {
         use unblock_core::reconcile::DriftKind;
@@ -980,24 +1046,24 @@ mod tests {
 
         super::apply_repairs(&mut report, &state, &issues).await;
 
-        // Repair should fail (no GitHub connection) → error pushed.
+        // Repair should fail (field IDs not set up) → error pushed.
         assert!(
             report.repaired.is_empty(),
-            "repair should fail without real GitHub connection"
+            "repair should fail without field IDs configured"
         );
         assert!(
             !report.errors.is_empty(),
             "failed repair should push a descriptive error"
         );
         assert!(
-            report.errors[0].contains("Failed to repair Ready State"),
-            "error message should describe what failed: {}",
+            report.errors[0].contains("Field IDs not available"),
+            "error message should indicate missing field IDs: {}",
             report.errors[0]
         );
     }
 
     /// Integration test: UncascadedClosure repair attempt → fails gracefully
-    /// (no real GitHub connection) and pushes to report.errors.
+    /// (no field IDs set up) and pushes to report.errors.
     #[tokio::test]
     async fn fix_mode_uncascaded_closure_pushes_error_on_failure() {
         use unblock_core::reconcile::DriftKind;
@@ -1025,18 +1091,18 @@ mod tests {
 
         super::apply_repairs(&mut report, &state, &issues).await;
 
-        // Repair should fail (no GitHub connection) → error pushed.
+        // Repair should fail (field IDs not set up) → error pushed.
         assert!(
             report.repaired.is_empty(),
-            "cascade repair should fail without real GitHub connection"
+            "cascade repair should fail without field IDs configured"
         );
         assert!(
             !report.errors.is_empty(),
             "failed cascade repair should push a descriptive error"
         );
         assert!(
-            report.errors[0].contains("Cascade repair failed"),
-            "error message should describe cascade failure: {}",
+            report.errors[0].contains("Field IDs not available"),
+            "error message should indicate missing field IDs: {}",
             report.errors[0]
         );
     }
