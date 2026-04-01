@@ -45,3 +45,6 @@ pub mod reconcile;
 
 /// Agent client domain types: [`AgentKind`](client::AgentKind) and [`AgentClient`](client::AgentClient).
 pub mod client;
+
+/// Environment-based agent client detection: [`ClientDetector`](detection::ClientDetector).
+pub mod detection;
