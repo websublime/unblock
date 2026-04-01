@@ -21,6 +21,12 @@ use unblock_core::types::{Issue, IssueState, IssueSummary, QualifiedId, Status};
 use crate::errors::github_error_to_mcp;
 use crate::server::ServerState;
 
+/// Minimum allowed value for `stale_threshold_hours` (must be at least 1).
+const MIN_STALE_THRESHOLD_HOURS: u64 = 1;
+
+/// Minimum allowed value for `max_per_category` (must be at least 1).
+const MIN_MAX_PER_CATEGORY: usize = 1;
+
 /// Default number of hours before a claim is considered stale.
 const DEFAULT_STALE_THRESHOLD_HOURS: u64 = 24;
 
@@ -34,9 +40,11 @@ const DEFAULT_MAX_PER_CATEGORY: usize = 10;
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct PrimeParams {
     /// Hours without activity before considering a claim stale. Default: 24.
+    /// Must be at least 1; zero is rejected with an `INVALID_PARAMS` error.
     pub stale_threshold_hours: Option<u64>,
     /// Maximum number of items per category to return. Controls output size.
-    /// Default: 10.
+    /// Default: 10. Must be at least 1; zero is rejected with an
+    /// `INVALID_PARAMS` error.
     pub max_per_category: Option<usize>,
 }
 
@@ -205,6 +213,32 @@ pub async fn handle_prime(
     params: &PrimeParams,
     state: &ServerState,
 ) -> Result<PrimeResult, rmcp::model::ErrorData> {
+    // Validate boundary values before proceeding.
+    if let Some(hours) = params.stale_threshold_hours
+        && hours < MIN_STALE_THRESHOLD_HOURS
+    {
+        return Err(rmcp::model::ErrorData {
+            code: rmcp::model::ErrorCode::INVALID_PARAMS,
+            message: format!(
+                "stale_threshold_hours must be at least {MIN_STALE_THRESHOLD_HOURS}, got {hours}"
+            )
+            .into(),
+            data: None,
+        });
+    }
+    if let Some(max) = params.max_per_category
+        && max < MIN_MAX_PER_CATEGORY
+    {
+        return Err(rmcp::model::ErrorData {
+            code: rmcp::model::ErrorCode::INVALID_PARAMS,
+            message: format!(
+                "max_per_category must be at least {MIN_MAX_PER_CATEGORY}, got {max}"
+            )
+            .into(),
+            data: None,
+        });
+    }
+
     let stale_threshold_hours = params
         .stale_threshold_hours
         .unwrap_or(DEFAULT_STALE_THRESHOLD_HOURS);
@@ -867,6 +901,58 @@ mod tests {
         let params: PrimeParams = serde_json::from_str(json).expect("should deserialize");
         assert!(params.stale_threshold_hours.is_none());
         assert!(params.max_per_category.is_none());
+    }
+
+    #[test]
+    fn prime_params_zero_stale_threshold_rejected() {
+        let json = r#"{"stale_threshold_hours": 0}"#;
+        let params: PrimeParams = serde_json::from_str(json).expect("should deserialize");
+        assert_eq!(params.stale_threshold_hours, Some(0));
+    }
+
+    #[test]
+    fn prime_params_zero_max_per_category_rejected() {
+        let json = r#"{"max_per_category": 0}"#;
+        let params: PrimeParams = serde_json::from_str(json).expect("should deserialize");
+        assert_eq!(params.max_per_category, Some(0));
+    }
+
+    #[tokio::test]
+    async fn handle_prime_rejects_zero_stale_threshold() {
+        let state = test_state().await;
+        let params = PrimeParams {
+            stale_threshold_hours: Some(0),
+            max_per_category: None,
+        };
+
+        let err = handle_prime(&params, &state)
+            .await
+            .expect_err("stale_threshold_hours=0 should be rejected");
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert!(
+            err.message.contains("stale_threshold_hours"),
+            "error should mention the parameter name: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_prime_rejects_zero_max_per_category() {
+        let state = test_state().await;
+        let params = PrimeParams {
+            stale_threshold_hours: None,
+            max_per_category: Some(0),
+        };
+
+        let err = handle_prime(&params, &state)
+            .await
+            .expect_err("max_per_category=0 should be rejected");
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert!(
+            err.message.contains("max_per_category"),
+            "error should mention the parameter name: {}",
+            err.message,
+        );
     }
 
     #[test]
