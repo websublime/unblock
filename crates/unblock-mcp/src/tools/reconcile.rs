@@ -521,6 +521,7 @@ mod tests {
             config: Arc::new(config),
             client: Arc::new(client),
             cache: Arc::new(GraphCache::new(Duration::from_secs(300))),
+            agent_kind: std::sync::OnceLock::new(),
         }
     }
 
