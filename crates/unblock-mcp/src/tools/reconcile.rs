@@ -1,11 +1,16 @@
-//! Reconcile tool — detects drift between the dependency graph and GitHub state.
+//! Reconcile tool — detects and repairs drift between the dependency graph and
+//! GitHub state.
 //!
 //! Performs a fresh fetch from GitHub (bypasses cache entirely), rebuilds the
 //! dependency graph, and runs the pure [`ReconcileEngine`] to detect divergence.
 //! After analysis, the cache is updated with the fresh graph data.
 //!
-//! This is a read-only tool by default (`fix: false`). The `fix: true` repair
-//! path is implemented by task 1.6.4.
+//! When `fix: true`, auto-repairs two drift types:
+//! - **`StaleReadyState`** — updates the Ready State field to the correct value.
+//! - **`UncascadedClosure`** — updates downstream Ready States + posts audit comment.
+//!
+//! Other drift types are logged or pushed to `report.errors` without repair.
+//! See Design Decisions R2–R4 in the reconciliation plan.
 
 use std::collections::{HashMap, HashSet};
 
@@ -14,8 +19,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 use unblock_core::graph::DependencyGraph;
-use unblock_core::reconcile::{DriftReport, ReconcileEngine};
-use unblock_core::types::QualifiedId;
+use unblock_core::reconcile::{DriftKind, DriftReport, ReconcileEngine};
+use unblock_core::types::{Issue, QualifiedId, ReadyState};
+use unblock_github::projects::FieldValue;
 
 use crate::errors::github_error_to_mcp;
 use crate::server::ServerState;
@@ -136,10 +142,9 @@ impl ReconcileReport {
 /// 3. Compute ready set.
 /// 4. Call `ReconcileEngine::analyse()` with all 4 args.
 /// 5. Set `report.repo` from `state.client.owner()/repo()`.
-/// 6. Update cache with the fresh graph already fetched.
-/// 7. Return `ReconcileOutput { report }`.
-///
-/// The `fix: true` repair path is not implemented in this task (see task 1.6.4).
+/// 6. If `fix: true`, repair `StaleReadyState` and `UncascadedClosure` drift.
+/// 7. Update cache with the fresh graph already fetched.
+/// 8. Return `ReconcileOutput { report }`.
 ///
 /// # Errors
 ///
@@ -181,20 +186,9 @@ pub async fn handle_reconcile(
     let mut report = engine.analyse(&graph, &issues, &computed_ready, Utc::now());
     report.repo = format!("{}/{}", state.client.owner(), state.client.repo());
 
-    // 4. fix: true repair path — deferred to task 1.6.4.
-    // TODO(unblock-egf.4): implement fix=true repair logic for StaleReadyState
-    //   and UncascadedClosure drift types. Until then, fix requests fall through
-    //   to read-only mode with a warning surfaced to the MCP consumer.
+    // 4. fix: true repair path — repair StaleReadyState and UncascadedClosure.
     if params.fix {
-        tracing::warn!(
-            "reconcile --fix is not yet implemented (see task unblock-egf.4). \
-             Running in read-only mode."
-        );
-        report.errors.push(
-            "fix=true was requested but is not yet implemented. \
-             Running in read-only mode. See task unblock-egf.4."
-                .to_owned(),
-        );
+        apply_repairs(&mut report, state, &issues).await;
     }
 
     // 5. Update cache with the fresh graph we already have.
@@ -206,6 +200,187 @@ pub async fn handle_reconcile(
     Ok(ReconcileOutput {
         report: ReconcileReport::from_core(&report),
     })
+}
+
+/// Apply repairs for detected drift items.
+///
+/// Iterates over `report.drift_found` and repairs `StaleReadyState` and
+/// `UncascadedClosure` drift. Other drift types are logged or pushed to
+/// `report.errors` without repair.
+async fn apply_repairs(
+    report: &mut DriftReport,
+    state: &ServerState,
+    issues: &HashMap<QualifiedId, Issue>,
+) {
+    for drift in report.drift_found.clone() {
+        match &drift {
+            DriftKind::StaleReadyState {
+                issue, graph_says, ..
+            } => match repair_ready_state(state, issue, graph_says, issues).await {
+                Ok(()) => report.repaired.push(drift),
+                Err(e) => report
+                    .errors
+                    .push(format!("Failed to repair Ready State for {issue}: {e}")),
+            },
+
+            DriftKind::UncascadedClosure {
+                closed_issue,
+                should_have_unblocked,
+            } => {
+                let mut all_ok = true;
+                for unblocked_qid in should_have_unblocked {
+                    match repair_ready_state(state, unblocked_qid, &ReadyState::Ready, issues).await
+                    {
+                        Ok(()) => report.repaired.push(drift.clone()),
+                        Err(e) => {
+                            all_ok = false;
+                            report.errors.push(format!(
+                                "Cascade repair failed for {unblocked_qid} \
+                                 (was blocked by {closed_issue}): {e}"
+                            ));
+                        }
+                    }
+                }
+                // Post audit comment on the closed issue for traceability (R4).
+                if all_ok {
+                    let comment_body = format_cascade_repair_comment(should_have_unblocked);
+                    if let Err(e) = state
+                        .client
+                        .add_comment(closed_issue.number, comment_body)
+                        .await
+                    {
+                        tracing::warn!(
+                            closed_issue = %closed_issue,
+                            error = %e,
+                            "Failed to post cascade repair audit comment"
+                        );
+                    }
+                }
+            }
+
+            DriftKind::StaleClaim {
+                issue, hours_stale, ..
+            } => {
+                // Design Decision R2: stale claims are NOT auto-repaired.
+                tracing::warn!(
+                    issue = %issue,
+                    hours_stale,
+                    "Stale claim detected — not auto-repaired (agent/human decision)"
+                );
+            }
+
+            DriftKind::CycleDetected { .. } => {
+                // Design Decision R3: cycles require human decision.
+                report.errors.push(format!(
+                    "Cycle detected — manual resolution required: {drift:?}"
+                ));
+            }
+
+            // OrphanedBlockingEdge, MalformedAgentField, MissingProjectField:
+            // log warning only, no auto-repair.
+            _ => {
+                tracing::warn!(?drift, "Drift detected — not auto-repaired");
+            }
+        }
+    }
+}
+
+/// Maps a [`ReadyState`] to the GitHub Projects V2 single-select option name.
+///
+/// The `ReadyState` field has exactly two options: `"Ready"` and `"Not Ready"`.
+/// The Rust enum has 4 variants — `Ready` maps to `"Ready"`, everything else
+/// maps to `"Not Ready"`.
+fn ready_state_option_name(state: ReadyState) -> &'static str {
+    match state {
+        ReadyState::Ready => "Ready",
+        ReadyState::Blocked | ReadyState::NotReady | ReadyState::Closed => "Not Ready",
+    }
+}
+
+/// Repair a single issue's Ready State field in GitHub Projects V2.
+///
+/// Resolves the project info, project item ID, and field IDs, then updates
+/// the `ReadyState` field to the specified value.
+///
+/// # Errors
+///
+/// Returns a human-readable error string if any step fails (project not
+/// configured, field IDs not available, item not found, API error).
+async fn repair_ready_state(
+    state: &ServerState,
+    qid: &QualifiedId,
+    target_state: &ReadyState,
+    issues: &HashMap<QualifiedId, Issue>,
+) -> Result<(), String> {
+    // Look up the issue's node_id from the issues map.
+    let issue = issues
+        .get(qid)
+        .ok_or_else(|| format!("Issue {qid} not found in fetched issues map"))?;
+
+    // Resolve field IDs (must have been set up via setup_fields).
+    let field_ids = state
+        .client
+        .field_ids()
+        .await
+        .ok_or_else(|| "Field IDs not available — run setup first".to_owned())?;
+
+    // Resolve project info.
+    let project_info = state
+        .client
+        .resolve_project_info()
+        .await
+        .map_err(|e| format!("Failed to resolve project info: {e}"))?;
+
+    // Resolve the project item ID for this issue.
+    let item_id = state
+        .client
+        .get_project_item_id(&issue.node_id, &project_info.id)
+        .await
+        .map_err(|e| format!("Failed to get project item ID for {qid}: {e}"))?;
+
+    // Map the ReadyState to an option name and look up its option ID.
+    let option_name = ready_state_option_name(*target_state);
+    let option_id = field_ids
+        .ready_state
+        .options
+        .get(option_name)
+        .ok_or_else(|| format!("ReadyState option '{option_name}' not found in field options"))?;
+
+    // Update the field.
+    state
+        .client
+        .update_field(
+            &project_info.id,
+            &item_id,
+            &field_ids.ready_state.field_id,
+            &FieldValue::SingleSelectOption(option_id.clone()),
+        )
+        .await
+        .map_err(|e| format!("Failed to update ReadyState field for {qid}: {e}"))?;
+
+    tracing::info!(
+        issue = %qid,
+        target_state = option_name,
+        "Repaired Ready State field"
+    );
+
+    Ok(())
+}
+
+/// Format the audit comment posted on a closed issue after cascade repair.
+///
+/// Design Decision R4: cascade repair adds an audit comment for traceability.
+fn format_cascade_repair_comment(unblocked: &[QualifiedId]) -> String {
+    let list: String = unblocked
+        .iter()
+        .map(|qid| format!("- #{}", qid.number))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "\u{1f527} **Unblock reconciliation** — cascade repair\n\n\
+         This issue was closed outside the MCP server. \
+         The following issues were unblocked retroactively:\n{list}"
+    )
 }
 
 #[cfg(test)]
@@ -587,5 +762,326 @@ mod tests {
         );
         assert_eq!(output.report.repo, "test-owner/test-repo");
         assert_eq!(output.report.issues_scanned, 2);
+    }
+
+    // ── Helper function unit tests ───────────────────────────────────
+
+    #[test]
+    fn ready_state_option_name_maps_correctly() {
+        use super::ready_state_option_name;
+
+        assert_eq!(ready_state_option_name(ReadyState::Ready), "Ready");
+        assert_eq!(ready_state_option_name(ReadyState::Blocked), "Not Ready");
+        assert_eq!(ready_state_option_name(ReadyState::NotReady), "Not Ready");
+        assert_eq!(ready_state_option_name(ReadyState::Closed), "Not Ready");
+    }
+
+    #[test]
+    fn format_cascade_repair_comment_single_issue() {
+        use super::format_cascade_repair_comment;
+
+        let unblocked = vec![qid(43)];
+        let comment = format_cascade_repair_comment(&unblocked);
+
+        assert!(
+            comment.contains("cascade repair"),
+            "comment should mention cascade repair"
+        );
+        assert!(
+            comment.contains("#43"),
+            "comment should reference issue #43"
+        );
+        assert!(
+            comment.contains("closed outside the MCP server"),
+            "comment should explain the cause"
+        );
+    }
+
+    #[test]
+    fn format_cascade_repair_comment_multiple_issues() {
+        use super::format_cascade_repair_comment;
+
+        let unblocked = vec![qid(43), qid(51)];
+        let comment = format_cascade_repair_comment(&unblocked);
+
+        assert!(comment.contains("- #43"), "should list issue #43");
+        assert!(comment.contains("- #51"), "should list issue #51");
+    }
+
+    // ── fix: true integration tests ──────────────────────────────────
+    // These exercise apply_repairs with a non-functional client (no GitHub
+    // connection). Repairs that require API calls will fail and push errors,
+    // while non-repairable drift types are handled without API calls.
+
+    /// Integration test: cycle detected → pushed to report.errors, NOT repaired.
+    #[tokio::test]
+    async fn fix_mode_cycle_reported_as_error_not_repaired() {
+        use unblock_core::reconcile::DriftKind;
+
+        let state = test_state().await;
+
+        let mut report = DriftReport {
+            repo: "test-owner/test-repo".to_owned(),
+            reconciled_at: Utc::now(),
+            issues_scanned: 3,
+            edges_scanned: 3,
+            drift_found: vec![DriftKind::CycleDetected {
+                cycle: vec![qid(1), qid(2), qid(3)],
+            }],
+            repaired: vec![],
+            errors: vec![],
+            clean: false,
+        };
+
+        super::apply_repairs(&mut report, &state, &HashMap::new()).await;
+
+        assert!(report.repaired.is_empty(), "cycles should NOT be repaired");
+        assert_eq!(
+            report.errors.len(),
+            1,
+            "cycle should produce exactly one error"
+        );
+        assert!(
+            report.errors[0].contains("manual resolution required"),
+            "error message should indicate manual resolution: {}",
+            report.errors[0]
+        );
+    }
+
+    /// Integration test: stale claim → logged as warning, NOT in report.errors,
+    /// NOT in report.repaired.
+    #[tokio::test]
+    async fn fix_mode_stale_claim_not_repaired_not_in_errors() {
+        use unblock_core::reconcile::DriftKind;
+
+        let state = test_state().await;
+
+        let mut report = DriftReport {
+            repo: "test-owner/test-repo".to_owned(),
+            reconciled_at: Utc::now(),
+            issues_scanned: 1,
+            edges_scanned: 0,
+            drift_found: vec![DriftKind::StaleClaim {
+                issue: qid(1),
+                claimed_at: Utc::now() - chrono::Duration::hours(48),
+                hours_stale: 48,
+            }],
+            repaired: vec![],
+            errors: vec![],
+            clean: false,
+        };
+
+        super::apply_repairs(&mut report, &state, &HashMap::new()).await;
+
+        assert!(
+            report.repaired.is_empty(),
+            "stale claims should NOT be repaired"
+        );
+        assert!(
+            report.errors.is_empty(),
+            "stale claims should NOT be pushed to errors (Design Decision R2)"
+        );
+    }
+
+    /// Integration test: orphaned blocking edge → logged as warning, NOT in
+    /// report.errors, NOT repaired.
+    #[tokio::test]
+    async fn fix_mode_orphaned_edge_not_repaired_not_in_errors() {
+        use unblock_core::reconcile::DriftKind;
+
+        let state = test_state().await;
+
+        let mut report = DriftReport {
+            repo: "test-owner/test-repo".to_owned(),
+            reconciled_at: Utc::now(),
+            issues_scanned: 1,
+            edges_scanned: 1,
+            drift_found: vec![DriftKind::OrphanedBlockingEdge {
+                source: qid(1),
+                missing_target: qid(999),
+            }],
+            repaired: vec![],
+            errors: vec![],
+            clean: false,
+        };
+
+        super::apply_repairs(&mut report, &state, &HashMap::new()).await;
+
+        assert!(
+            report.repaired.is_empty(),
+            "orphaned edges should NOT be repaired"
+        );
+        assert!(
+            report.errors.is_empty(),
+            "orphaned edges should NOT be pushed to errors"
+        );
+    }
+
+    /// Integration test: malformed agent field → logged as warning, NOT in
+    /// report.errors, NOT repaired.
+    #[tokio::test]
+    async fn fix_mode_malformed_agent_not_repaired_not_in_errors() {
+        use unblock_core::reconcile::DriftKind;
+
+        let state = test_state().await;
+
+        let mut report = DriftReport {
+            repo: "test-owner/test-repo".to_owned(),
+            reconciled_at: Utc::now(),
+            issues_scanned: 1,
+            edges_scanned: 0,
+            drift_found: vec![DriftKind::MalformedAgentField {
+                issue: qid(7),
+                raw_value: "bad-no-colon".to_owned(),
+            }],
+            repaired: vec![],
+            errors: vec![],
+            clean: false,
+        };
+
+        super::apply_repairs(&mut report, &state, &HashMap::new()).await;
+
+        assert!(
+            report.repaired.is_empty(),
+            "malformed agent fields should NOT be repaired"
+        );
+        assert!(
+            report.errors.is_empty(),
+            "malformed agent fields should NOT be pushed to errors"
+        );
+    }
+
+    /// Integration test: StaleReadyState repair attempt → fails gracefully
+    /// (no real GitHub connection) and pushes to report.errors.
+    #[tokio::test]
+    async fn fix_mode_stale_ready_state_pushes_error_on_failure() {
+        use unblock_core::reconcile::DriftKind;
+
+        let state = test_state().await;
+
+        // The issue exists in the issues map (required for repair_ready_state).
+        let issue = test_issue(2, IssueState::Open, ReadyState::Blocked);
+        let issues: HashMap<QualifiedId, _> = [(qid(2), issue)].into_iter().collect();
+
+        let mut report = DriftReport {
+            repo: "test-owner/test-repo".to_owned(),
+            reconciled_at: Utc::now(),
+            issues_scanned: 1,
+            edges_scanned: 0,
+            drift_found: vec![DriftKind::StaleReadyState {
+                issue: qid(2),
+                field_says: ReadyState::Blocked,
+                graph_says: ReadyState::Ready,
+            }],
+            repaired: vec![],
+            errors: vec![],
+            clean: false,
+        };
+
+        super::apply_repairs(&mut report, &state, &issues).await;
+
+        // Repair should fail (no GitHub connection) → error pushed.
+        assert!(
+            report.repaired.is_empty(),
+            "repair should fail without real GitHub connection"
+        );
+        assert!(
+            !report.errors.is_empty(),
+            "failed repair should push a descriptive error"
+        );
+        assert!(
+            report.errors[0].contains("Failed to repair Ready State"),
+            "error message should describe what failed: {}",
+            report.errors[0]
+        );
+    }
+
+    /// Integration test: UncascadedClosure repair attempt → fails gracefully
+    /// (no real GitHub connection) and pushes to report.errors.
+    #[tokio::test]
+    async fn fix_mode_uncascaded_closure_pushes_error_on_failure() {
+        use unblock_core::reconcile::DriftKind;
+
+        let state = test_state().await;
+
+        // The downstream issue exists but the closed issue does not need
+        // to be in the map (only downstream issues need repair).
+        let issue43 = test_issue(43, IssueState::Open, ReadyState::Blocked);
+        let issues: HashMap<QualifiedId, _> = [(qid(43), issue43)].into_iter().collect();
+
+        let mut report = DriftReport {
+            repo: "test-owner/test-repo".to_owned(),
+            reconciled_at: Utc::now(),
+            issues_scanned: 2,
+            edges_scanned: 1,
+            drift_found: vec![DriftKind::UncascadedClosure {
+                closed_issue: qid(10),
+                should_have_unblocked: vec![qid(43)],
+            }],
+            repaired: vec![],
+            errors: vec![],
+            clean: false,
+        };
+
+        super::apply_repairs(&mut report, &state, &issues).await;
+
+        // Repair should fail (no GitHub connection) → error pushed.
+        assert!(
+            report.repaired.is_empty(),
+            "cascade repair should fail without real GitHub connection"
+        );
+        assert!(
+            !report.errors.is_empty(),
+            "failed cascade repair should push a descriptive error"
+        );
+        assert!(
+            report.errors[0].contains("Cascade repair failed"),
+            "error message should describe cascade failure: {}",
+            report.errors[0]
+        );
+    }
+
+    /// Integration test: mixed drift types in fix mode — each handled correctly.
+    #[tokio::test]
+    async fn fix_mode_mixed_drift_types_handled_correctly() {
+        use unblock_core::reconcile::DriftKind;
+
+        let state = test_state().await;
+
+        let mut report = DriftReport {
+            repo: "test-owner/test-repo".to_owned(),
+            reconciled_at: Utc::now(),
+            issues_scanned: 5,
+            edges_scanned: 3,
+            drift_found: vec![
+                DriftKind::CycleDetected {
+                    cycle: vec![qid(1), qid(2)],
+                },
+                DriftKind::StaleClaim {
+                    issue: qid(3),
+                    claimed_at: Utc::now() - chrono::Duration::hours(48),
+                    hours_stale: 48,
+                },
+                DriftKind::OrphanedBlockingEdge {
+                    source: qid(4),
+                    missing_target: qid(999),
+                },
+            ],
+            repaired: vec![],
+            errors: vec![],
+            clean: false,
+        };
+
+        super::apply_repairs(&mut report, &state, &HashMap::new()).await;
+
+        // CycleDetected → error (1 item).
+        assert_eq!(report.errors.len(), 1, "only cycle should produce an error");
+        assert!(report.errors[0].contains("manual resolution required"));
+
+        // StaleClaim → neither repaired nor error.
+        assert!(report.repaired.is_empty());
+
+        // OrphanedBlockingEdge → neither repaired nor error.
+        // (already asserted via errors.len() == 1)
     }
 }
