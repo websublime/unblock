@@ -7,12 +7,15 @@
 //! - `would_create_cycle()` — check before adding a dependency
 //! - `detect_all_cycles()` — find all circular dependencies via Tarjan's SCC
 //! - `dependency_tree()` — BFS traversal with depth limit
+//! - `all_edges()` — enumerate every blocking edge
+//! - `edge_count()` — total number of edges
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use petgraph::Direction;
 use petgraph::algo::{has_path_connecting, tarjan_scc};
 use petgraph::graph::{DiGraph, NodeIndex};
+use petgraph::visit::EdgeRef;
 
 use crate::types::{
     BlockingEdge, Issue, IssueState, IssueSummary, QualifiedId, Status, TraversalDirection,
@@ -409,6 +412,28 @@ impl DependencyGraph {
     #[must_use]
     pub fn issue_status(&self) -> &HashMap<QualifiedId, Status> {
         &self.issue_status
+    }
+
+    /// Returns all blocking edges in the graph.
+    ///
+    /// Each [`BlockingEdge`] is reconstructed from the graph's node weights
+    /// (the edge weight type is `()`, so endpoints are used). The order of
+    /// edges in the returned `Vec` is unspecified.
+    #[must_use]
+    pub fn all_edges(&self) -> Vec<BlockingEdge> {
+        self.graph
+            .edge_references()
+            .map(|e| BlockingEdge {
+                source: self.graph[e.source()].clone(),
+                target: self.graph[e.target()].clone(),
+            })
+            .collect()
+    }
+
+    /// Returns the total number of edges in the graph.
+    #[must_use]
+    pub fn edge_count(&self) -> usize {
+        self.graph.edge_count()
     }
 }
 
@@ -1433,5 +1458,48 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ── DependencyGraph::all_edges / edge_count ─────────────────────────
+
+    #[test]
+    fn all_edges_returns_correct_edges() {
+        let issues = vec![
+            make_issue(1, IssueState::Open, Priority::P2),
+            make_issue(2, IssueState::Open, Priority::P2),
+            make_issue(3, IssueState::Open, Priority::P2),
+        ];
+        // 1 blocked by 2, 1 blocked by 3
+        let edges = vec![edge(1, 2), edge(1, 3)];
+        let graph = DependencyGraph::build(&issues, &edges);
+
+        let mut result = graph.all_edges();
+        // Sort for deterministic comparison (all test issues share owner/repo)
+        result.sort_by_key(|e| (e.source.number, e.target.number));
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], edge(1, 2));
+        assert_eq!(result[1], edge(1, 3));
+    }
+
+    #[test]
+    fn edge_count_matches_expected() {
+        let issues = vec![
+            make_issue(1, IssueState::Open, Priority::P2),
+            make_issue(2, IssueState::Open, Priority::P2),
+            make_issue(3, IssueState::Open, Priority::P2),
+        ];
+        let edges = vec![edge(1, 2), edge(1, 3)];
+        let graph = DependencyGraph::build(&issues, &edges);
+
+        assert_eq!(graph.edge_count(), 2);
+    }
+
+    #[test]
+    fn all_edges_and_edge_count_empty_graph() {
+        let graph = DependencyGraph::build(&[], &[]);
+
+        assert!(graph.all_edges().is_empty());
+        assert_eq!(graph.edge_count(), 0);
     }
 }
