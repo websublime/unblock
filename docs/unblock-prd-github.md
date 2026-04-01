@@ -4,12 +4,12 @@
 
 | | |
 |---|---|
-| **Version** | 1.2.0-draft |
+| **Version** | 1.3.0-draft |
 | **Author** | Miguel Ramos |
 | **Org** | websublime |
 | **Repo** | `websublime/unblock` |
 | **License** | MIT |
-| **Date** | March 2026 |
+| **Date** | April 2026 |
 | **Backend** | GitHub Issues + Projects V2 |
 
 ---

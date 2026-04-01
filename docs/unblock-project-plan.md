@@ -61,8 +61,8 @@ No task is done unless ALL of these pass:
 |---|---|---|---|---|
 | **1 — Foundation** | v0.1.0 | Agent can find, claim, edit, complete work + see cascade. Client detection + data integrity | 6 | ~24.25 days |
 | **2 — Complete** | v0.2.0 | Full tool suite + Claude Code plugin | 3 | ~7 days |
-| **3 — Production** | v1.0.0 | Hardened, distributed, production-ready + v1.0.0 gap features | 4 | ~8 days |
-| **Total** | | | **13 epics** | **~39.25 days focused** |
+| **3 — Production** | v1.0.0 | Hardened, distributed, production-ready + v1.0.0 gap features | 5 | ~11 days |
+| **Total** | | | **14 epics** | **~42.25 days focused** |
 
 ---
 
@@ -373,10 +373,10 @@ Phase 3
 
 | Phase | Epics | Tasks | Focused days |
 |---|---|---|---|
-| Phase 1 | 6 | 47 | ~24.25 |
-| Phase 2 | 3 | 12 | ~7 |
+| Phase 1 | 6 | 48 | ~24.25 |
+| Phase 2 | 3 | 13 | ~7 |
 | Phase 3 | 5 | 18 | ~11 |
-| **Total** | **14** | **77** | **~42.25** |
+| **Total** | **14** | **79** | **~42.25** |
 
 > Phase 3 increased from 4 to 5 epics (added 3.2 Persistent Cache: 5 tasks, ~3 focused days including spike).
 

@@ -519,7 +519,7 @@ The `show --include_comments` output is used by review, QA, and rework agents to
 ```rust
 // crates/unblock-core/src/cache.rs
 
-use std::sync::RwLock;
+use tokio::sync::RwLock;
 use std::time::{Duration, Instant};
 use std::collections::HashSet;
 
