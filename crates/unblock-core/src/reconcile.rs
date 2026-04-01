@@ -601,9 +601,8 @@ mod tests {
         let q2 = qid("acme", "widgets", 2);
 
         let issue1 = make_issue("acme", "widgets", 1, IssueState::Closed, ReadyState::Closed);
-        let mut issue2 = make_issue("acme", "widgets", 2, IssueState::Open, ReadyState::Blocked);
+        let issue2 = make_issue("acme", "widgets", 2, IssueState::Open, ReadyState::Blocked);
         // issue2 still has Blocked even though its only blocker is closed.
-        issue2.ready_state = ReadyState::Blocked;
 
         let issues_vec = vec![issue1, issue2];
         let edges = vec![edge(&q2, &q1)]; // #2 is blocked by #1
