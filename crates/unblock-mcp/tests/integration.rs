@@ -19,7 +19,7 @@ use unblock_mcp::tools::setup::REQUIRED_VIEWS;
 mod common;
 use common::{has_github_token, test_server_state};
 
-/// Helper to create a QualifiedId for tests.
+/// Helper to create a `QualifiedId` for tests.
 fn qid(number: u64) -> QualifiedId {
     QualifiedId::new("test", "repo", number)
 }
