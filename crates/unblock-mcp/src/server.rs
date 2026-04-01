@@ -12,7 +12,7 @@
 //! [`ServerState`](crate::server::ServerState) and wraps it in an
 //! [`Arc`](std::sync::Arc) for shared access across tool handlers.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use chrono::Utc;
 
@@ -35,11 +35,16 @@ use crate::tools::show::{
 use crate::tools::update::{BodySectionUpdate, SectionName, UpdateParams, UpdateResult};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::{Json, Parameters};
-use rmcp::model::{ErrorData, Implementation, ServerInfo};
-use rmcp::{ServerHandler, tool, tool_handler, tool_router};
+use rmcp::model::{
+    ErrorData, Implementation, InitializeRequestParams, InitializeResult, ServerInfo,
+};
+use rmcp::service::RequestContext;
+use rmcp::{RoleServer, ServerHandler, tool, tool_handler, tool_router};
 use tracing::info;
 use unblock_core::cache::GraphCache;
+use unblock_core::client::{AgentClient, AgentKind};
 use unblock_core::config::Config;
+use unblock_core::detection::ClientDetector;
 use unblock_core::errors::{CircularDependencySnafu, IssueClosedSnafu};
 use unblock_core::types::IssueState;
 use unblock_github::client::GitHubClient;
@@ -110,6 +115,7 @@ unblock turns GitHub Issues into a dependency graph. Ask `ready` to get unblocke
 /// - [`Config`] is `Clone + Send + Sync` (plain data).
 /// - [`GitHubClient`] wraps `reqwest::Client` which is `Send + Sync`.
 /// - [`GraphCache`] uses `tokio::sync::RwLock` which is `Send + Sync`.
+/// - [`OnceLock<AgentKind>`] is `Send + Sync` because `AgentKind` is `Send + Sync`.
 #[derive(Debug)]
 pub struct ServerState {
     /// Application configuration loaded from environment variables.
@@ -119,6 +125,13 @@ pub struct ServerState {
     pub client: Arc<GitHubClient>,
     /// In-memory cache for the dependency graph and ready set.
     pub cache: Arc<GraphCache>,
+    /// Resolved once during the MCP `initialize` handshake.
+    ///
+    /// [`OnceLock`] guarantees a single write and lock-free reads thereafter.
+    /// Tool handlers access the stored value via [`OnceLock::get`], falling
+    /// back to `"unknown"` if the lock has not been set (e.g., in tests or
+    /// when `initialize` is not called).
+    pub agent_kind: OnceLock<AgentKind>,
 }
 
 /// MCP server implementation for unblock.
@@ -1931,6 +1944,41 @@ impl ServerHandler for UnblockServer {
             .with_server_info(Implementation::new("unblock", env!("CARGO_PKG_VERSION")))
             .with_instructions(INSTRUCTIONS_STR)
     }
+
+    /// Override `initialize` to capture MCP `clientInfo`, resolve [`AgentKind`],
+    /// store it in the [`OnceLock`], and emit a structured tracing event.
+    ///
+    /// Delegates to rmcp's default `peer_info` storage so downstream
+    /// `Peer<RoleServer>` usage continues to work.
+    fn initialize(
+        &self,
+        request: InitializeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<InitializeResult, ErrorData>> + Send + '_ {
+        // Build AgentClient from MCP clientInfo
+        let agent_client = AgentClient {
+            name: request.client_info.name.clone(),
+            version: request.client_info.version.clone(),
+        };
+
+        // Resolve kind once and store in OnceLock
+        let kind = ClientDetector::resolve(Some(&agent_client));
+        let _ = self.state.agent_kind.set(kind.clone());
+
+        info!(
+            client.name    = &agent_client.name,
+            client.version = &agent_client.version,
+            client.kind    = %kind,
+            "mcp client connected"
+        );
+
+        // Delegate to rmcp default for peer_info storage
+        if context.peer.peer_info().is_none() {
+            context.peer.set_peer_info(request);
+        }
+
+        std::future::ready(Ok(self.get_info()))
+    }
 }
 
 // Static assertions: ServerState must be Send + Sync.
@@ -1939,3 +1987,122 @@ const _: () = {
     assert_send_sync::<ServerState>();
     assert_send_sync::<Arc<ServerState>>();
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::OnceLock;
+    use std::time::Duration;
+    use unblock_core::cache::GraphCache;
+    use unblock_core::client::{AgentClient, AgentKind};
+    use unblock_core::detection::ClientDetector;
+
+    /// Helper: create a minimal `ServerState` for unit tests.
+    async fn test_state() -> ServerState {
+        let config = Config::load_from(|key| match key {
+            "GITHUB_TOKEN" => Ok("ghp_test_token_for_unit_tests".to_owned()),
+            "UNBLOCK_REPO" => Ok("test-owner/test-repo".to_owned()),
+            _ => Err(std::env::VarError::NotPresent),
+        })
+        .expect("test config should load");
+
+        let client = GitHubClient::new(&config)
+            .await
+            .expect("test client should initialize");
+
+        ServerState {
+            config: Arc::new(config),
+            client: Arc::new(client),
+            cache: Arc::new(GraphCache::new(Duration::from_secs(300))),
+            agent_kind: OnceLock::new(),
+        }
+    }
+
+    /// `ServerState.agent_kind` starts empty (`OnceLock` not yet set).
+    #[tokio::test]
+    async fn agent_kind_starts_empty() {
+        let state = test_state().await;
+        assert!(state.agent_kind.get().is_none());
+    }
+
+    /// Storing an `AgentKind` in the `OnceLock` makes it retrievable.
+    #[tokio::test]
+    async fn agent_kind_set_and_get() {
+        let state = test_state().await;
+        let kind = AgentKind::ClaudeCode;
+        let _ = state.agent_kind.set(kind.clone());
+        assert_eq!(state.agent_kind.get(), Some(&AgentKind::ClaudeCode));
+    }
+
+    /// `OnceLock::set` is a single write — second write is silently ignored.
+    #[tokio::test]
+    async fn agent_kind_once_lock_single_write() {
+        let state = test_state().await;
+        let _ = state.agent_kind.set(AgentKind::ClaudeCode);
+        // Second write returns Err but does not panic.
+        let result = state.agent_kind.set(AgentKind::Copilot);
+        assert!(result.is_err());
+        // Original value is retained.
+        assert_eq!(state.agent_kind.get(), Some(&AgentKind::ClaudeCode));
+    }
+
+    /// The full resolve pattern used in `initialize()`: build `AgentClient`,
+    /// call `ClientDetector::resolve`, store in `OnceLock`.
+    #[tokio::test]
+    async fn initialize_resolve_pattern_known_client() {
+        let state = test_state().await;
+        let agent_client = AgentClient {
+            name: "claude-code".into(),
+            version: "1.2.3".into(),
+        };
+        let kind = ClientDetector::resolve(Some(&agent_client));
+        let _ = state.agent_kind.set(kind.clone());
+
+        assert_eq!(state.agent_kind.get(), Some(&AgentKind::ClaudeCode));
+    }
+
+    /// When `clientInfo.name` is unrecognised, `ClientDetector::resolve` returns
+    /// `Unknown` — this is stored successfully in the `OnceLock`.
+    #[tokio::test]
+    async fn initialize_resolve_pattern_unknown_client() {
+        let state = test_state().await;
+        let agent_client = AgentClient {
+            name: "my-custom-tool".into(),
+            version: "0.1.0".into(),
+        };
+        let kind = ClientDetector::resolve(Some(&agent_client));
+        let _ = state.agent_kind.set(kind.clone());
+
+        assert_eq!(
+            state.agent_kind.get(),
+            Some(&AgentKind::Unknown("my-custom-tool".into()))
+        );
+    }
+
+    /// When no `AgentClient` is provided, `ClientDetector::resolve(None)` falls
+    /// back to env detection and ultimately `Unknown("unknown")`.
+    #[tokio::test]
+    async fn initialize_resolve_pattern_no_client() {
+        let state = test_state().await;
+        // Use resolve_with to avoid reading actual env vars in tests.
+        let kind = ClientDetector::resolve_with(None, |_| Err(std::env::VarError::NotPresent));
+        let _ = state.agent_kind.set(kind.clone());
+
+        assert_eq!(
+            state.agent_kind.get(),
+            Some(&AgentKind::Unknown("unknown".into()))
+        );
+    }
+
+    /// Tool handler fallback pattern: `OnceLock::get()` returns `None` when
+    /// initialize has not been called, and handlers fall back to `"unknown"`.
+    #[tokio::test]
+    async fn agent_kind_handler_fallback() {
+        let state = test_state().await;
+        let kind_str = state
+            .agent_kind
+            .get()
+            .map_or_else(|| "unknown".into(), |k| k.as_str().to_owned());
+        assert_eq!(kind_str, "unknown");
+    }
+}
