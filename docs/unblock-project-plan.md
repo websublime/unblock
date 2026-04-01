@@ -215,6 +215,7 @@ removes blocking relationship, etc.).
 | **2.1.5** `stats` tool | Aggregates + agent metrics + bottlenecks + stale claims | Integration: known dataset, counts match | PRD §6.3 |
 | **2.1.6** `dep_cycles` tool | Detect cycles, filter by id | Integration: cycle detected | PRD §6.2 |
 | **2.1.7** `doctor` tool | System health check. Fields valid, issues in project, no orphans. Incorporates reconciliation findings from Epic 1.6 | Integration: missing field detected. Fix mode works. Drift detected | PRD §6.4 |
+| **2.1.8** `commit_context` tool | Generate structured commit message with Git trailers (Issue, Supervisor, Blocked-by, Unblocks). Input: issue number + optional summary/body. Output: formatted message + trailers array. Uses `show` internally (always fresh) | Integration: commit_context for claimed issue returns correct trailers. Unclaimed issue omits Supervisor. Issue with resolved deps includes Blocked-by | PRD §6.4, ARCH §10.19 |
 
 ---
 
@@ -225,6 +226,7 @@ removes blocking relationship, etc.).
 | **2.2.1** Plugin structure | `plugin/`: `.claude-plugin/plugin.json`, `.mcp.json`, `marketplace.json` | Files validate. Metadata correct | PRD §7.8, ARCH §11.1-§11.3 |
 | **2.2.2** Slash commands | 14 command `.md` files with frontmatter + prompt instructions | Each triggers correct MCP tool | ARCH §11.4 |
 | **2.2.3** Workflow skill | `plugin/skills/unblock-workflow.md`: session flow, rules, CLAUDE.md integration | Agent follows workflow when skill loaded | ARCH §11.5, PRD §8 |
+| **2.2.4** Git hooks installation | `/setup-project` installs 3 git hooks to `.git/hooks/`: `post-checkout` (auto-claim on branch switch), `commit-msg` (inject Issue trailer), `pre-push` (warn if issue not claimed). Hook scripts embedded in plugin skill as heredocs. `setup-project --remove-hooks` to uninstall. Idempotent | Hooks installed after `/setup-project`. Branch `issue-42-foo` auto-claims on checkout. Commit message includes `Issue: #42` trailer. Push without claim shows warning (non-blocking). `--remove-hooks` removes all 3 | PRD Plugin §7.3, §11 |
 
 ---
 
@@ -374,9 +376,9 @@ Phase 3
 | Phase | Epics | Tasks | Focused days |
 |---|---|---|---|
 | Phase 1 | 6 | 48 | ~24.25 |
-| Phase 2 | 3 | 13 | ~7 |
+| Phase 2 | 3 | 15 | ~7 |
 | Phase 3 | 5 | 18 | ~11 |
-| **Total** | **14** | **79** | **~42.25** |
+| **Total** | **14** | **81** | **~42.25** |
 
 > Phase 3 increased from 4 to 5 epics (added 3.2 Persistent Cache: 5 tasks, ~3 focused days including spike).
 

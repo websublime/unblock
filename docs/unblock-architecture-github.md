@@ -63,7 +63,7 @@
 
 | Actor | Interface | Operations |
 |---|---|---|
-| AI Agent | MCP protocol (stdio) | All 18 tools |
+| AI Agent | MCP protocol (stdio) | All 19 tools |
 | Orchestrator | MCP protocol (stdio) | `claim --agent X`, `ready --agent X`, `blocked` |
 | Human Developer | GitHub UI, `gh` CLI | Issue CRUD, Projects boards, labels, milestones |
 
@@ -620,6 +620,7 @@ show / fetch_issue (single issue with comments)
 | `stats` | ❌ no invalidation | Read-only |
 | `search` | ❌ no invalidation | Bypasses cache entirely (GitHub Search API) |
 | `dep_cycles` | ❌ no invalidation | Read-only |
+| `commit_context` | ❌ no invalidation | Read-only |
 | `reconcile` | ❌ no invalidation | Fresh fetch bypasses cache; populates cache after analysis |
 
 **Cross-repo invalidation:** Any write invalidates the entire cache regardless of which repo the write targets. Future optimization in Phase 3 (Epic 3.2) will scope invalidation per-repo segment.
@@ -1012,7 +1013,7 @@ impl UnblockServer {
     pub fn new(state: ServerState) -> Self { /* ... */ }
 }
 
-// Tool registration via rmcp macros — 18 tools total.
+// Tool registration via rmcp macros — 19 tools total.
 // Pattern (representative examples):
 
 #[tool(name = "ready", description = "Find issues that can be worked on right now — no active blockers")]
@@ -1030,7 +1031,7 @@ async fn update(&self, params: UpdateParams) -> Result<UpdateResult, McpError> {
     tools::update::execute(&self.state, params).await
 }
 
-// ... remaining 15 tools follow the same pattern
+// ... remaining 16 tools follow the same pattern
 
 impl ServerHandler for UnblockServer {
     fn get_info(&self) -> ServerInfo { /* ... */ }
@@ -1372,6 +1373,27 @@ Flow:
 
 API calls: 1 (owner check) + 1 (query projects) + 0-1 (create)
 Idempotent: safe to run multiple times.
+```
+
+### 10.19 `commit_context`
+
+```
+Input:  CommitContextParams { issue, summary?, body? }
+Output: CommitContextResult { message: String, trailers: Vec<(String, String)> }
+
+Flow:
+  1. Fetch issue via show (title, status, agent, blocking/blockedBy)
+  2. Extract supervisor name from Agent field (format: "username:supervisor")
+  3. Build subject: summary or "type: title (#number)"
+  4. Build trailers:
+     - Issue: #N (always)
+     - Supervisor: name (if agent field set)
+     - Blocked-by: #X (closed) (for each resolved blocker)
+     - Unblocks: #Y (for each downstream issue)
+  5. Compose: subject + body + blank line + trailers
+
+API calls: 1 (show — always fresh, no cache)
+Read-only: no cache invalidation.
 ```
 
 ---

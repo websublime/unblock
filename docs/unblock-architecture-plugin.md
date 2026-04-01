@@ -369,6 +369,7 @@ The prompt MUST include:
 7. **Generate CLAUDE.md** from `templates/CLAUDE.md.template` with project-specific values
 8. **Generate AGENTS.md** from `templates/AGENTS.md.template` with core + generated supervisors
 9. **Write version file** `.claude/.unblock-plugin-version`
+10. **Install git hooks** — write 3 hook scripts to `.git/hooks/`: `post-checkout` (auto-claim), `commit-msg` (trailer injection), `pre-push` (claim warning). Scripts are embedded as heredocs in the skill. Each hook: parse branch for `issue-{N}` pattern, call `unblock-mcp` binary silently. Idempotent — overwrites existing hooks with same name. `--remove-hooks` flag deletes all 3.
 
 ### 4.4 `/start-task` — Phases
 

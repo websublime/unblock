@@ -341,7 +341,7 @@ User-invocable slash commands. Each skill orchestrates one phase of the pipeline
 
 | Skill | Command | Purpose |
 |---|---|---|
-| **setup-project** | `/setup-project` | Bootstrap: `setup` MCP tool (creates Project V2 fields), create "Review Findings" milestone, detect stack, create supervisors, install hooks and GitHub Actions |
+| **setup-project** | `/setup-project` | Bootstrap: `setup` MCP tool (creates Project V2 fields), create "Review Findings" milestone, detect stack, create supervisors, install git hooks (post-checkout, commit-msg, pre-push), install GitHub Actions, generate editor configs |
 | **add-supervisor** | `/add-supervisor [tech]` | Create a new implementation supervisor for a specific technology |
 | **update-plugin** | `/update-plugin` | Check for plugin updates, cleanup legacy local files, optionally refresh supervisors via Discovery |
 
@@ -620,6 +620,28 @@ Next steps: [what remains to be done]
 This ensures that if the session continues after compaction, the agent can reconstruct its working state from the comment trail. Combined with SessionStart's `prime` call, this provides continuity across context resets.
 
 Only triggers if there is an active `in_progress` issue claimed by the current agent. If no issue is in progress, the hook is a no-op.
+
+### 11.4 Git Hooks (installed by `/setup-project`)
+
+Three git hooks are installed to `.git/hooks/` by `/setup-project`. These are local-only scripts that call the `unblock-mcp` binary. They replace the daemon model (used by tools like Beads) with native git event handling.
+
+**`post-checkout` — auto-claim on branch switch:**
+
+Parses branch name for issue number pattern (`issue-{N}-*`). If found, calls `claim` MCP tool silently. `AlreadyClaimed` is suppressed — the hook is idempotent. Only triggers on branch checkouts (`$3 = 1`), not file checkouts.
+
+**`commit-msg` — inject Issue trailer:**
+
+Parses branch name for issue number. If found and no `Issue:` trailer already present, injects `Issue: #N` via `git interpret-trailers`. The trailer travels with `git push` and is rendered by GitHub in PR views.
+
+**`pre-push` — warn if issue not claimed:**
+
+Parses branch name for issue number. If found, checks issue status via `show`. If not `in_progress`, prints a warning to stderr. **Non-blocking** — the push proceeds regardless. This is a convenience reminder, not a gate.
+
+**Design decisions:**
+- `post-commit` hook (auto-comment on issue) was evaluated and rejected — it generates comment spam on issues with many incremental commits.
+- `pre-push` is a warning, not a blocker — agents and humans may push branches not associated with issues (docs, refactors, CI fixes).
+- Hooks require the `unblock-mcp` binary on PATH. If not found, hooks exit silently (`|| true`).
+- `/setup-project --remove-hooks` uninstalls all three hooks.
 
 ---
 

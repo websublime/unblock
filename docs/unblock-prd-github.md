@@ -179,7 +179,7 @@ Group-by, sort, and swimlanes are configured manually in the GitHub UI after cre
 
 ## 6. MCP Tools
 
-18 tools total. Each operates on the current repo.
+19 tools total. Each operates on the current repo.
 
 ### 6.1 Core Workflow Tools
 
@@ -597,6 +597,38 @@ Uses GitHub's advanced search API (`ISSUE_ADVANCED` type in GraphQL).
 
 ---
 
+#### `commit_context` — Generate commit message with trailers
+
+**Purpose:** Generate a structured commit message with Git trailers for the current issue. The agent calls this before committing to get a properly formatted message with issue attribution, supervisor, and dependency context.
+
+**Input:**
+- `issue` (required, number) — Issue number to generate context for.
+- `summary` (optional, string) — One-line summary for the commit subject. If omitted, generated from issue title.
+- `body` (optional, string) — Additional commit body text.
+
+**Logic:**
+1. Fetch issue metadata (title, type, priority, status, blocking/blockedBy)
+2. Resolve supervisor from Agent field
+3. Build commit message: subject line + optional body + trailers
+4. Trailers: `Issue: #N`, `Supervisor: name` (if claimed), `Blocked-by: #X (closed)` (for resolved deps), `Unblocks: #Y` (for downstream deps that will be unblocked)
+
+**Output:**
+```json
+{
+  "message": "implement rate limiter (#42)\n\nToken bucket algorithm.\n\nIssue: #42\nSupervisor: rust-supervisor\nBlocked-by: #38 (closed)\nUnblocks: #50",
+  "trailers": [
+    {"key": "Issue", "value": "#42"},
+    {"key": "Supervisor", "value": "rust-supervisor"},
+    {"key": "Blocked-by", "value": "#38 (closed)"},
+    {"key": "Unblocks", "value": "#50"}
+  ]
+}
+```
+
+**Cache:** No invalidation. Read-only.
+
+---
+
 #### `doctor` — Diagnose system health
 
 **Purpose:** Diagnose system health.
@@ -997,7 +1029,7 @@ Backend: GitHub Issues + Projects V2
 
 **Infrastructure:** Cargo workspace, CI, graph engine, cache, GitHub client, MCP server, integration tests, docs.
 
-**Not in Phase 1:** `list`, `search`, `stats`, `prime`, `dep_remove`, `dep_cycles`, `reopen`, `doctor`, plugin, resilience, observability. Useful but not required for the core loop.
+**Not in Phase 1:** `list`, `search`, `stats`, `prime`, `dep_remove`, `dep_cycles`, `reopen`, `doctor`, `commit_context`, plugin, resilience, observability. Useful but not required for the core loop.
 
 **Quality standards:** Quality standards for Phase 1-2 prioritize working software over exhaustive coverage. Target: >80% public API coverage, property tests for graph invariants, clippy clean. Full 100% coverage and pedantic clippy enforced from Phase 3.
 
@@ -1009,14 +1041,15 @@ Backend: GitHub Issues + Projects V2
 
 **Goal:** Full tool suite + Claude Code plugin. Feature-complete product.
 
-**Core scope:** 4 tools + plugin.
+**Core scope:** 5 tools + plugin.
 
 | Component | Rationale |
 |---|---|
 | `prime` | Session context injection — the "memory" at session start |
 | `dep_remove` | Dependency management requires both add and remove |
 | `reopen` | Agents need to recover from premature closes |
-| Plugin | Slash commands, workflow skill, marketplace, hooks (SessionStart, PreCompact) |
+| `commit_context` | Structured commit messages with trailers for audit trail |
+| Plugin | Slash commands, workflow skill, marketplace, hooks (SessionStart, PreCompact), git hooks (post-checkout, commit-msg, pre-push) |
 
 **Stretch scope:** 5 tools.
 
@@ -1081,7 +1114,7 @@ See `unblock-prd-desktop.md` and `unblock-desktop-project-plan.md` for the deskt
 | D4 | Single blocking type | GitHub native. Covers 95% of workflows. Informational deps via mentions |
 | D5 | Markdown body sections for rich fields | Three sections only (Description, Design Notes, Acceptance Criteria). Work progress lives in comments, cross-references in auto-links. Each data type in the correct GitHub primitive |
 | D6 | Ready State as convenience field | Project field for board filtering. MCP always recomputes from graph |
-| D7 | 18 tools total | Focused on what agents uniquely need. `label`, `delete` handled by GitHub UI/CLI. `update`, `comment`, `reopen` included because agents can't use UI and need full CRUD |
+| D7 | 19 tools total | Focused on what agents uniquely need. `label`, `delete` handled by GitHub UI/CLI. `update`, `comment`, `reopen` included because agents can't use UI and need full CRUD. `commit_context` provides structured commit messages with trailers for audit trail |
 | D8 | Auto-detect repo from git remote | Zero config. Override via `UNBLOCK_REPO` |
 | D9 | Plugin bundles `.mcp.json` | Only needs `GITHUB_TOKEN`. Auto-detect handles repo scoping |
 | D10 | Milestones as Epics | Native GitHub with due dates and progress. No custom entity |
