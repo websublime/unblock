@@ -618,16 +618,14 @@ impl UnblockServer {
 
         // Step 4: If include_deps, get dependency tree from cached graph.
         let dependency_tree = if include_deps {
+            let issue_qid =
+                unblock_core::types::QualifiedId::new(client.owner(), client.repo(), issue_number);
             state.cache.get_graph().await.map(|graph| {
                 graph
-                    .dependency_tree(
-                        issue_number,
-                        unblock_core::types::TraversalDirection::Both,
-                        3,
-                    )
+                    .dependency_tree(&issue_qid, unblock_core::types::TraversalDirection::Both, 3)
                     .into_iter()
-                    .map(|(num, depth)| DependencyTreeEntry {
-                        issue_number: num,
+                    .map(|(qid, depth)| DependencyTreeEntry {
+                        issue_number: qid.number,
                         depth,
                     })
                     .collect()
@@ -1000,12 +998,15 @@ impl UnblockServer {
         if let Some(graph) = state.cache.get_graph().await {
             // compute_unblock_cascade's _all_issues param is currently unused —
             // pass an empty slice (see graph.rs:215-220 for rationale).
-            let cascade = graph.compute_unblock_cascade(issue_number, &[]);
+            let issue_qid =
+                unblock_core::types::QualifiedId::new(client.owner(), client.repo(), issue_number);
+            let cascade = graph.compute_unblock_cascade(&issue_qid, &[]);
 
             // Phase 3: For each newly unblocked issue, update project fields and
             // post an unblock comment. Each update is best-effort — failures are
             // logged but do not abort the cascade.
-            for &cascaded_number in &cascade {
+            for cascaded_qid in &cascade {
+                let cascaded_number = cascaded_qid.number;
                 // Post unblock comment.
                 let comment_body = format!("\u{2705} Unblocked by closing #{issue_number}");
                 if let Err(e) = client.add_comment(cascaded_number, comment_body).await {
@@ -1083,7 +1084,7 @@ impl UnblockServer {
                 }
             }
 
-            unblocked = cascade;
+            unblocked = cascade.iter().map(|q| q.number).collect();
         } else {
             tracing::warn!("Cache not available after rebuild — cascade computation skipped");
         }
@@ -1145,7 +1146,14 @@ impl UnblockServer {
         // local issue with the same number, causing false positive rejections.
         if let unblock_core::types::IssueRef::Local(target_number) = &issue_ref
             && let Some(graph) = state.cache.get_graph().await
-            && graph.would_create_cycle(source, *target_number)
+            && graph.would_create_cycle(
+                &unblock_core::types::QualifiedId::new(client.owner(), client.repo(), source),
+                &unblock_core::types::QualifiedId::new(
+                    client.owner(),
+                    client.repo(),
+                    *target_number,
+                ),
+            )
         {
             return Err(crate::errors::github_error_to_mcp(
                 CircularDependencySnafu {

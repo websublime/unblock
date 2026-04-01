@@ -215,7 +215,7 @@ impl GitHubClient {
                 .into());
         }
 
-        Ok(parse_issue(issue_value))
+        Ok(parse_issue(issue_value, self.owner(), self.repo()))
     }
 
     /// Fetches all open issues and blocking edges for the dependency graph.
@@ -262,11 +262,11 @@ impl GitHubClient {
             {
                 for node in nodes {
                     // Extract blocking edges from trackedByIssues.
-                    all_edges.extend(extract_blocking_edges(node));
+                    all_edges.extend(extract_blocking_edges(node, self.owner(), self.repo()));
 
                     // Parse issue with graph-specific parser (omits comments,
                     // blocked_by, blocking, parent, sub_issues).
-                    all_issues.push(parse_graph_issue(node));
+                    all_issues.push(parse_graph_issue(node, self.owner(), self.repo()));
                 }
             }
 
@@ -441,7 +441,7 @@ pub(crate) fn parse_rate_limit_reset(response: &reqwest::Response) -> DateTime<U
 /// Extracts all standard fields, comments, blocking relationships,
 /// parent/sub-issue links, and Projects V2 field values from the
 /// GraphQL response. Missing fields use sensible defaults.
-fn parse_issue(value: &serde_json::Value) -> Issue {
+fn parse_issue(value: &serde_json::Value, owner: &str, repo: &str) -> Issue {
     let number = json_u64(value, "number");
     let node_id = json_string(value, "id");
     let title = json_string(value, "title");
@@ -483,6 +483,7 @@ fn parse_issue(value: &serde_json::Value) -> Issue {
         .and_then(|v| v.parse::<DateTime<Utc>>().ok());
 
     Issue {
+        qualified_id: unblock_core::types::QualifiedId::new(owner, repo, number),
         number,
         node_id,
         title,
@@ -516,7 +517,7 @@ fn parse_issue(value: &serde_json::Value) -> Issue {
 /// `parent`, and `sub_issues` empty — per the [`Issue`] type contract, those
 /// fields are only populated by `fetch_issue()`. Blocking relationships are
 /// extracted separately as [`BlockingEdge`] entries by the caller.
-fn parse_graph_issue(value: &serde_json::Value) -> Issue {
+fn parse_graph_issue(value: &serde_json::Value, owner: &str, repo: &str) -> Issue {
     let number = json_u64(value, "number");
     let node_id = json_string(value, "id");
     let title = json_string(value, "title");
@@ -552,6 +553,7 @@ fn parse_graph_issue(value: &serde_json::Value) -> Issue {
         .and_then(|v| v.parse::<DateTime<Utc>>().ok());
 
     Issue {
+        qualified_id: unblock_core::types::QualifiedId::new(owner, repo, number),
         number,
         node_id,
         title,
@@ -583,10 +585,17 @@ fn parse_graph_issue(value: &serde_json::Value) -> Issue {
 /// Extracts [`BlockingEdge`] entries from a single issue JSON node.
 ///
 /// Reads the `trackedBy` (alias for `trackedByIssues`) connection and creates
-/// one edge per blocker. Each edge has `source` = the blocked issue number and
-/// `target` = the blocker issue number. Skips entries with a zero issue number.
-fn extract_blocking_edges(node: &serde_json::Value) -> Vec<BlockingEdge> {
+/// one edge per blocker. Each edge has `source` = the blocked issue's
+/// [`QualifiedId`] and `target` = the blocker's [`QualifiedId`]. Skips entries
+/// with a zero issue number.
+///
+/// Currently all edges are within the same `owner/repo` because GitHub's
+/// `trackedByIssues` connection only returns issues in the same repository.
+/// Cross-repo blockers (added via the `depends` MCP tool) will produce edges
+/// with different `owner/repo` prefixes once the GraphQL query is extended.
+fn extract_blocking_edges(node: &serde_json::Value, owner: &str, repo: &str) -> Vec<BlockingEdge> {
     let issue_number = json_u64(node, "number");
+    let source_qid = unblock_core::types::QualifiedId::new(owner, repo, issue_number);
     let mut edges = Vec::new();
 
     if let Some(blockers) = node
@@ -598,8 +607,8 @@ fn extract_blocking_edges(node: &serde_json::Value) -> Vec<BlockingEdge> {
             let blocker_number = json_u64(blocker, "number");
             if blocker_number > 0 {
                 edges.push(BlockingEdge {
-                    source: issue_number,
-                    target: blocker_number,
+                    source: source_qid.clone(),
+                    target: unblock_core::types::QualifiedId::new(owner, repo, blocker_number),
                 });
             }
         }
@@ -1204,7 +1213,7 @@ mod tests {
             }
         });
 
-        let issue = parse_issue(&json);
+        let issue = parse_issue(&json, "test-owner", "test-repo");
         assert_eq!(issue.number, 42);
         assert_eq!(issue.node_id, "MDU6SXNzdWUx");
         assert_eq!(issue.title, "Fix the bug");
@@ -1256,7 +1265,7 @@ mod tests {
             "subIssues": {"nodes": []}
         });
 
-        let issue = parse_issue(&json);
+        let issue = parse_issue(&json, "test-owner", "test-repo");
         assert_eq!(issue.number, 1);
         assert!(issue.body.is_none());
         assert!(issue.comments.is_empty());
@@ -1305,7 +1314,7 @@ mod tests {
             }
         });
 
-        let issue = parse_graph_issue(&json);
+        let issue = parse_graph_issue(&json, "test-owner", "test-repo");
         assert_eq!(issue.number, 42);
         assert_eq!(issue.node_id, "MDU6SXNzdWUx");
         assert_eq!(issue.title, "Graph issue");
@@ -1350,7 +1359,7 @@ mod tests {
             }
         });
 
-        let issue = parse_graph_issue(&json);
+        let issue = parse_graph_issue(&json, "test-owner", "test-repo");
         assert!(
             issue.comments.is_empty(),
             "comments should be empty for graph issues"
@@ -1389,7 +1398,7 @@ mod tests {
             "assignees": {"nodes": []}
         });
 
-        let issue = parse_graph_issue(&json);
+        let issue = parse_graph_issue(&json, "test-owner", "test-repo");
         assert_eq!(issue.status, Status::Open);
         assert_eq!(issue.priority, Priority::P2);
         assert!(issue.issue_type.is_none());
@@ -1414,14 +1423,14 @@ mod tests {
             }
         });
 
-        let edges = extract_blocking_edges(&node);
+        let edges = extract_blocking_edges(&node, "test-owner", "test-repo");
 
         assert_eq!(edges.len(), 2);
         // source = blocked issue (42), target = blocker
-        assert_eq!(edges[0].source, 42);
-        assert_eq!(edges[0].target, 10);
-        assert_eq!(edges[1].source, 42);
-        assert_eq!(edges[1].target, 20);
+        assert_eq!(edges[0].source.number, 42);
+        assert_eq!(edges[0].target.number, 10);
+        assert_eq!(edges[1].source.number, 42);
+        assert_eq!(edges[1].target.number, 20);
     }
 
     #[test]
@@ -1436,10 +1445,10 @@ mod tests {
             }
         });
 
-        let edges = extract_blocking_edges(&node);
+        let edges = extract_blocking_edges(&node, "test-owner", "test-repo");
 
         assert_eq!(edges.len(), 1);
-        assert_eq!(edges[0].target, 5);
+        assert_eq!(edges[0].target.number, 5);
     }
 
     #[test]
@@ -1451,7 +1460,7 @@ mod tests {
             }
         });
 
-        let edges = extract_blocking_edges(&node);
+        let edges = extract_blocking_edges(&node, "test-owner", "test-repo");
         assert!(edges.is_empty());
     }
 
@@ -1461,7 +1470,7 @@ mod tests {
             "number": 42
         });
 
-        let edges = extract_blocking_edges(&node);
+        let edges = extract_blocking_edges(&node, "test-owner", "test-repo");
         assert!(edges.is_empty());
     }
 
@@ -1573,10 +1582,10 @@ mod tests {
 
         // Edges: issue 2 blocked by 1, issue 3 blocked by 2.
         assert_eq!(edges.len(), 2);
-        assert_eq!(edges[0].source, 2);
-        assert_eq!(edges[0].target, 1);
-        assert_eq!(edges[1].source, 3);
-        assert_eq!(edges[1].target, 2);
+        assert_eq!(edges[0].source.number, 2);
+        assert_eq!(edges[0].target.number, 1);
+        assert_eq!(edges[1].source.number, 3);
+        assert_eq!(edges[1].target.number, 2);
     }
 
     #[tokio::test]
@@ -1637,8 +1646,8 @@ mod tests {
 
         // Edge: issue 6 blocked by issue 5.
         assert_eq!(edges.len(), 1);
-        assert_eq!(edges[0].source, 6);
-        assert_eq!(edges[0].target, 5);
+        assert_eq!(edges[0].source.number, 6);
+        assert_eq!(edges[0].target.number, 5);
     }
 
     #[tokio::test]

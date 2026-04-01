@@ -166,9 +166,17 @@ mod tests {
 
     // ── Test helpers ───────────────────────────────────────────────────
 
+    use unblock_core::types::QualifiedId;
+
+    /// Helper to create a QualifiedId for tests.
+    fn qid(number: u64) -> QualifiedId {
+        QualifiedId::new("test", "repo", number)
+    }
+
     /// Build a minimal `Issue` for testing.
     fn test_issue(number: u64, state: IssueState) -> Issue {
         Issue {
+            qualified_id: qid(number),
             number,
             node_id: format!("NODE_{number}"),
             title: format!("Issue #{number}"),
@@ -204,8 +212,8 @@ mod tests {
             test_issue(2, IssueState::Open),
         ];
         let edges = vec![BlockingEdge {
-            source: 2,
-            target: 1,
+            source: qid(2),
+            target: qid(1),
         }];
         let graph = DependencyGraph::build(&issues, &edges);
         let ready_set = graph.compute_ready_set(&issues);
