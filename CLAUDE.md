@@ -89,7 +89,7 @@ Every change must pass:
 
 ```bash
 cargo fmt --check --all                    # zero diffs
-cargo clippy --workspace -- -D warnings    # zero warnings
+cargo clippy --workspace --all-targets -- -D warnings    # zero warnings
 cargo test --workspace                     # all pass
 cargo doc --no-deps --workspace            # zero warnings
 ```
@@ -107,7 +107,7 @@ cargo doc --no-deps --workspace            # zero warnings
 
 ```bash
 cargo fmt --check --all                    # format check
-cargo clippy --workspace -- -D warnings    # lint
+cargo clippy --workspace --all-targets -- -D warnings    # lint
 cargo test --workspace                     # test all
 cargo test -p unblock-core                 # test core only
 cargo build -p unblock-mcp                 # build mcp server

@@ -158,7 +158,7 @@ Cargo.toml           # Workspace root
 - Minimum quality gate before marking in-review:
   ```bash
   cargo fmt --check --all
-  cargo clippy --workspace -- -D warnings
+  cargo clippy --workspace --all-targets -- -D warnings
   cargo test --workspace
   cargo doc --no-deps --workspace
   ```
