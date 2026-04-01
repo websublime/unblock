@@ -608,10 +608,10 @@ mod tests {
         let edges = vec![edge(&q2, &q1)]; // #2 is blocked by #1
         let graph = DependencyGraph::build(&issues_vec, &edges);
         let computed_ready = ready_set(&graph, &issues_vec);
-        let issues = issue_map(&issues_vec);
+        let by_id = issue_map(&issues_vec);
 
         let engine = ReconcileEngine::new(24);
-        let report = engine.analyse(&graph, &issues, &computed_ready, Utc::now());
+        let report = engine.analyse(&graph, &by_id, &computed_ready, Utc::now());
 
         assert!(!report.clean);
         assert!(report.drift_found.iter().any(|d| matches!(
@@ -638,10 +638,10 @@ mod tests {
         let edges = vec![edge(&q2, &q1)]; // #2 is blocked by #1
         let graph = DependencyGraph::build(&issues_vec, &edges);
         let computed_ready = ready_set(&graph, &issues_vec);
-        let issues = issue_map(&issues_vec);
+        let by_id = issue_map(&issues_vec);
 
         let engine = ReconcileEngine::new(24);
-        let report = engine.analyse(&graph, &issues, &computed_ready, Utc::now());
+        let report = engine.analyse(&graph, &by_id, &computed_ready, Utc::now());
 
         assert!(!report.clean);
         assert!(
@@ -661,10 +661,10 @@ mod tests {
         let issues_vec = vec![issue1, issue2];
         let graph = DependencyGraph::build(&issues_vec, &[]);
         let computed_ready = ready_set(&graph, &issues_vec);
-        let issues = issue_map(&issues_vec);
+        let by_id = issue_map(&issues_vec);
 
         let engine = ReconcileEngine::new(24);
-        let report = engine.analyse(&graph, &issues, &computed_ready, Utc::now());
+        let report = engine.analyse(&graph, &by_id, &computed_ready, Utc::now());
 
         assert!(report.clean);
         assert!(report.drift_found.is_empty());
@@ -687,10 +687,10 @@ mod tests {
         let edges = vec![edge(&q1, &q2), edge(&q2, &q3), edge(&q3, &q1)];
         let graph = DependencyGraph::build(&issues_vec, &edges);
         let computed_ready = ready_set(&graph, &issues_vec);
-        let issues = issue_map(&issues_vec);
+        let by_id = issue_map(&issues_vec);
 
         let engine = ReconcileEngine::new(24);
-        let report = engine.analyse(&graph, &issues, &computed_ready, Utc::now());
+        let report = engine.analyse(&graph, &by_id, &computed_ready, Utc::now());
 
         assert!(!report.clean);
         assert!(
@@ -712,10 +712,10 @@ mod tests {
         let issues_vec = vec![issue1];
         let graph = DependencyGraph::build(&issues_vec, &[]);
         let computed_ready = ready_set(&graph, &issues_vec);
-        let issues = issue_map(&issues_vec);
+        let by_id = issue_map(&issues_vec);
 
         let engine = ReconcileEngine::new(24);
-        let report = engine.analyse(&graph, &issues, &computed_ready, Utc::now());
+        let report = engine.analyse(&graph, &by_id, &computed_ready, Utc::now());
 
         assert!(!report.clean);
         assert!(report.drift_found.iter().any(|d| matches!(
@@ -733,10 +733,10 @@ mod tests {
         let issues_vec = vec![issue1];
         let graph = DependencyGraph::build(&issues_vec, &[]);
         let computed_ready = ready_set(&graph, &issues_vec);
-        let issues = issue_map(&issues_vec);
+        let by_id = issue_map(&issues_vec);
 
         let engine = ReconcileEngine::new(24);
-        let report = engine.analyse(&graph, &issues, &computed_ready, Utc::now());
+        let report = engine.analyse(&graph, &by_id, &computed_ready, Utc::now());
 
         assert!(!report.clean);
         assert!(report.drift_found.iter().any(|d| matches!(
@@ -764,14 +764,14 @@ mod tests {
         let graph = DependencyGraph::build(&issues_vec, &edges);
 
         // Build the issues map with only #1 — #999 is "missing" from the fetched issues.
-        let mut issues = HashMap::new();
-        issues.insert(q1.clone(), issues_vec[0].clone());
+        let mut by_id = HashMap::new();
+        by_id.insert(q1.clone(), issues_vec[0].clone());
         // Intentionally omit #999 to simulate orphaned edge.
 
         let computed_ready: HashSet<QualifiedId> = HashSet::new();
 
         let engine = ReconcileEngine::new(24);
-        let report = engine.analyse(&graph, &issues, &computed_ready, Utc::now());
+        let report = engine.analyse(&graph, &by_id, &computed_ready, Utc::now());
 
         assert!(!report.clean);
         assert!(report.drift_found.iter().any(|d| matches!(
