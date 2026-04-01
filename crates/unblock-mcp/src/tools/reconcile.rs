@@ -1017,7 +1017,7 @@ mod tests {
         );
     }
 
-    /// Integration test: StaleReadyState repair attempt → fails gracefully
+    /// Integration test: `StaleReadyState` repair attempt → fails gracefully
     /// (no field IDs set up) and pushes to report.errors.
     #[tokio::test]
     async fn fix_mode_stale_ready_state_pushes_error_on_failure() {
@@ -1062,7 +1062,7 @@ mod tests {
         );
     }
 
-    /// Integration test: UncascadedClosure repair attempt → fails gracefully
+    /// Integration test: `UncascadedClosure` repair attempt → fails gracefully
     /// (no field IDs set up) and pushes to report.errors.
     #[tokio::test]
     async fn fix_mode_uncascaded_closure_pushes_error_on_failure() {
