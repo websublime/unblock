@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 use chrono::Utc;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use tracing::{info, warn};
 use unblock_core::graph::DependencyGraph;
 use unblock_core::reconcile::{DriftReport, ReconcileEngine};
 use unblock_core::types::QualifiedId;
@@ -92,13 +92,25 @@ impl ReconcileReport {
         let drift_found: Vec<serde_json::Value> = report
             .drift_found
             .iter()
-            .filter_map(|d| serde_json::to_value(d).ok())
+            .filter_map(|d| match serde_json::to_value(d) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    warn!(?d, error = %e, "Failed to serialize drift item — dropping from report");
+                    None
+                }
+            })
             .collect();
 
         let repaired: Vec<serde_json::Value> = report
             .repaired
             .iter()
-            .filter_map(|d| serde_json::to_value(d).ok())
+            .filter_map(|d| match serde_json::to_value(d) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    warn!(?d, error = %e, "Failed to serialize repaired item — dropping from report");
+                    None
+                }
+            })
             .collect();
 
         Self {
@@ -170,11 +182,18 @@ pub async fn handle_reconcile(
     report.repo = format!("{}/{}", state.client.owner(), state.client.repo());
 
     // 4. fix: true repair path — deferred to task 1.6.4.
-    //    For now, log a warning if fix was requested but is not yet implemented.
+    // TODO(unblock-egf.4): implement fix=true repair logic for StaleReadyState
+    //   and UncascadedClosure drift types. Until then, fix requests fall through
+    //   to read-only mode with a warning surfaced to the MCP consumer.
     if params.fix {
         tracing::warn!(
-            "reconcile --fix is not yet implemented (see task 1.6.4). \
+            "reconcile --fix is not yet implemented (see task unblock-egf.4). \
              Running in read-only mode."
+        );
+        report.errors.push(
+            "fix=true was requested but is not yet implemented. \
+             Running in read-only mode. See task unblock-egf.4."
+                .to_owned(),
         );
     }
 
@@ -417,5 +436,156 @@ mod tests {
         assert_eq!(json["report"]["clean"], false);
         assert!(json["report"]["message"].is_null());
         assert_eq!(json["report"]["drift_found"].as_array().unwrap().len(), 1);
+    }
+
+    // ── Integration tests (full pipeline) ────────────────────────────
+
+    // These tests exercise the complete reconcile pipeline end-to-end:
+    //   build issues → build graph → compute ready set → analyse → from_core → ReconcileOutput
+    // They bypass the network (no fetch_graph_data) but exercise every in-process
+    // step that handle_reconcile() performs after the fetch.
+
+    /// Integration test: drift present → report shows drift, no mutations.
+    ///
+    /// Constructs a scenario where issue #2 is blocked by issue #1, but issue
+    /// #1 is closed (simulating an external closure without cascade). The
+    /// engine should detect `StaleReadyState` drift. No mutations are made
+    /// because `fix` is false.
+    #[test]
+    fn integration_drift_present_reports_drift_no_mutations() {
+        use std::collections::HashSet;
+
+        use unblock_core::reconcile::ReconcileEngine;
+        use unblock_core::types::BlockingEdge;
+
+        // Issue #1: closed (simulates external closure via GitHub UI).
+        let issue_one = test_issue(1, IssueState::Closed, ReadyState::Ready);
+        // Issue #2: open, blocked by #1, but still marked Blocked (stale ready state).
+        let issue_two = test_issue(2, IssueState::Open, ReadyState::Blocked);
+
+        let issues_vec = vec![issue_one, issue_two];
+        let edges = vec![BlockingEdge {
+            source: qid(2),
+            target: qid(1),
+        }];
+
+        // Build HashMap (same as handle_reconcile does after fetch).
+        let issues_map: HashMap<QualifiedId, _> = issues_vec
+            .iter()
+            .map(|i| (i.qualified_id.clone(), i.clone()))
+            .collect();
+
+        // Build graph and compute ready set (steps 2-3 of handler).
+        let graph = DependencyGraph::build(&issues_vec, &edges);
+        let ready_summaries = graph.compute_ready_set(&issues_vec);
+        let computed_ready: HashSet<QualifiedId> = ready_summaries
+            .iter()
+            .map(|s| s.qualified_id.clone())
+            .collect();
+
+        // Analyse drift (step 4 of handler).
+        let engine = ReconcileEngine::new(24);
+        let mut report = engine.analyse(&graph, &issues_map, &computed_ready, Utc::now());
+        report.repo = "test-owner/test-repo".to_owned();
+
+        // Convert through MCP layer (step 6 of handler).
+        let output = ReconcileOutput {
+            report: ReconcileReport::from_core(&report),
+        };
+
+        // Assertions: drift detected, no mutations.
+        assert!(
+            !output.report.clean,
+            "report should NOT be clean when drift exists"
+        );
+        assert!(
+            !output.report.drift_found.is_empty(),
+            "drift_found should contain at least one item"
+        );
+        assert!(
+            output.report.repaired.is_empty(),
+            "repaired should be empty — fix is false, no mutations"
+        );
+        assert!(
+            output.report.errors.is_empty(),
+            "errors should be empty in read-only mode"
+        );
+        assert!(
+            output.report.message.is_none(),
+            "message should be None when drift is present"
+        );
+
+        // Verify the drift is specifically a StaleReadyState for issue #2.
+        // DriftKind uses serde's default externally-tagged representation,
+        // so the variant name is a top-level key: {"StaleReadyState": {...}}.
+        let drift_json = &output.report.drift_found[0];
+        assert!(
+            drift_json.get("StaleReadyState").is_some(),
+            "drift item should be a StaleReadyState variant, got: {drift_json}"
+        );
+    }
+
+    /// Integration test: clean repo → clean: true with message.
+    ///
+    /// Constructs a scenario with two independent open issues, both correctly
+    /// marked as `Ready`. No blocking edges exist. The engine should find no
+    /// drift and the output should have `clean: true` with the standard message.
+    #[test]
+    fn integration_clean_repo_reports_clean() {
+        use std::collections::HashSet;
+
+        use unblock_core::reconcile::ReconcileEngine;
+
+        // Two open issues, no dependencies, both correctly Ready.
+        let issue_one = test_issue(1, IssueState::Open, ReadyState::Ready);
+        let issue_two = test_issue(2, IssueState::Open, ReadyState::Ready);
+
+        let issues_vec = vec![issue_one, issue_two];
+
+        // Build HashMap (same as handle_reconcile does after fetch).
+        let issues_map: HashMap<QualifiedId, _> = issues_vec
+            .iter()
+            .map(|i| (i.qualified_id.clone(), i.clone()))
+            .collect();
+
+        // Build graph with no edges and compute ready set.
+        let graph = DependencyGraph::build(&issues_vec, &[]);
+        let ready_summaries = graph.compute_ready_set(&issues_vec);
+        let computed_ready: HashSet<QualifiedId> = ready_summaries
+            .iter()
+            .map(|s| s.qualified_id.clone())
+            .collect();
+
+        // Analyse drift — should find nothing.
+        let engine = ReconcileEngine::new(24);
+        let mut report = engine.analyse(&graph, &issues_map, &computed_ready, Utc::now());
+        report.repo = "test-owner/test-repo".to_owned();
+
+        // Convert through MCP layer.
+        let output = ReconcileOutput {
+            report: ReconcileReport::from_core(&report),
+        };
+
+        // Assertions: clean, with message.
+        assert!(
+            output.report.clean,
+            "report should be clean when no drift exists"
+        );
+        assert!(
+            output.report.drift_found.is_empty(),
+            "drift_found should be empty"
+        );
+        assert!(
+            output.report.repaired.is_empty(),
+            "repaired should be empty"
+        );
+        assert!(output.report.errors.is_empty(), "errors should be empty");
+        assert_eq!(
+            output.report.message.as_deref(),
+            Some("No drift detected. Graph is consistent."),
+            "clean report should include the standard message"
+        );
+        assert_eq!(output.report.repo, "test-owner/test-repo");
+        assert_eq!(output.report.issues_scanned, 2);
     }
 }
