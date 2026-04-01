@@ -367,7 +367,7 @@ mod tests {
     #[test]
     fn reconcile_params_defaults() {
         // Verify serde defaults work correctly.
-        let json = r#"{}"#;
+        let json = r"{}";
         let params: ReconcileParams = serde_json::from_str(json).expect("should deserialize");
         assert!(!params.fix);
         assert_eq!(params.stale_claim_hours, 24);
