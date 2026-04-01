@@ -27,6 +27,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 rmcp = { workspace = true }
+petgraph = { workspace = true }
 schemars = { workspace = true }
 snafu = { workspace = true }
 
