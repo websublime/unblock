@@ -14,28 +14,30 @@ use petgraph::Direction;
 use petgraph::algo::{has_path_connecting, tarjan_scc};
 use petgraph::graph::{DiGraph, NodeIndex};
 
-use crate::types::{BlockingEdge, Issue, IssueState, IssueSummary, Status, TraversalDirection};
+use crate::types::{
+    BlockingEdge, Issue, IssueState, IssueSummary, QualifiedId, Status, TraversalDirection,
+};
 
-/// The dependency graph for a single repository.
+/// The dependency graph for one or more repositories.
 ///
-/// Nodes are issue numbers, edges are blocking relationships.
-/// Edge direction: `blocked_issue -> blocking_issue` — a directed edge from
-/// node A to node B means "A is blocked by B".
+/// Nodes are [`QualifiedId`] values (`owner/repo#number`), edges are blocking
+/// relationships. Edge direction: `blocked_issue -> blocking_issue` — a
+/// directed edge from node A to node B means "A is blocked by B".
 ///
 /// Built via [`DependencyGraph::build()`] from a slice of issues and blocking edges.
 /// The graph stores issue state and status snapshots taken at build time, enabling
 /// purely computational queries without network access.
 #[derive(Debug, Clone)]
 pub struct DependencyGraph {
-    /// The underlying directed graph. Node weights are issue numbers, edge
-    /// weights are unit (no metadata on edges).
-    graph: DiGraph<u64, ()>,
-    /// Maps issue number to its petgraph `NodeIndex` for O(1) lookups.
-    node_map: HashMap<u64, NodeIndex>,
+    /// The underlying directed graph. Node weights are [`QualifiedId`] values,
+    /// edge weights are unit (no metadata on edges).
+    graph: DiGraph<QualifiedId, ()>,
+    /// Maps [`QualifiedId`] to its petgraph `NodeIndex` for O(1) lookups.
+    node_map: HashMap<QualifiedId, NodeIndex>,
     /// Snapshot of each issue's workflow status at build time.
-    issue_status: HashMap<u64, Status>,
+    issue_status: HashMap<QualifiedId, Status>,
     /// Snapshot of each issue's GitHub state (Open/Closed) at build time.
-    issue_state: HashMap<u64, IssueState>,
+    issue_state: HashMap<QualifiedId, IssueState>,
 }
 
 impl DependencyGraph {
@@ -45,18 +47,20 @@ impl DependencyGraph {
     /// relationships. An edge from `source` to `target` means `source` is
     /// blocked by `target`.
     ///
-    /// If an edge references an issue number not present in the `issues` slice,
+    /// If an edge references a [`QualifiedId`] not present in the `issues` slice,
     /// a warning is logged and the edge is skipped (no panic).
     ///
     /// # Examples
     ///
     /// ```
-    /// use unblock_core::types::{Issue, BlockingEdge, IssueState, Status, Priority, ReadyState};
+    /// use unblock_core::types::{Issue, BlockingEdge, IssueState, Status, Priority, ReadyState, QualifiedId};
     /// use unblock_core::graph::DependencyGraph;
     /// use chrono::Utc;
     ///
+    /// let qid = QualifiedId::new("owner", "repo", 1);
     /// let issues = vec![
     ///     Issue {
+    ///         qualified_id: qid.clone(),
     ///         number: 1, node_id: String::new(), title: "A".into(),
     ///         issue_type: None, status: Status::Open, priority: Priority::P2,
     ///         agent: None, claimed_at: None, ready_state: ReadyState::Ready,
@@ -73,17 +77,18 @@ impl DependencyGraph {
     /// ```
     #[must_use]
     pub fn build(issues: &[Issue], edges: &[BlockingEdge]) -> Self {
-        let mut graph = DiGraph::<u64, ()>::new();
+        let mut graph = DiGraph::<QualifiedId, ()>::new();
         let mut node_map = HashMap::with_capacity(issues.len());
         let mut issue_status = HashMap::with_capacity(issues.len());
         let mut issue_state = HashMap::with_capacity(issues.len());
 
-        // Create a node per issue.
+        // Create a node per issue, keyed by QualifiedId.
         for issue in issues {
-            let idx = graph.add_node(issue.number);
-            node_map.insert(issue.number, idx);
-            issue_status.insert(issue.number, issue.status);
-            issue_state.insert(issue.number, issue.state);
+            let qid = issue.qualified_id.clone();
+            let idx = graph.add_node(qid.clone());
+            node_map.insert(qid.clone(), idx);
+            issue_status.insert(qid.clone(), issue.status);
+            issue_state.insert(qid, issue.state);
         }
 
         // Add directed edges: source -> target means source is blocked by target.
@@ -97,9 +102,9 @@ impl DependencyGraph {
                 }
                 _ => {
                     tracing::warn!(
-                        source = edge.source,
-                        target = edge.target,
-                        "Skipping edge: one or both issue numbers not found in issues slice"
+                        source = %edge.source,
+                        target = %edge.target,
+                        "Skipping edge: one or both qualified IDs not found in issues slice"
                     );
                 }
             }
@@ -148,19 +153,19 @@ impl DependencyGraph {
 
             // Check if this issue has any open blockers.
             // Outgoing edges point to blockers.
-            let is_blocked = if let Some(&node_idx) = self.node_map.get(&issue.number) {
+            let is_blocked = if let Some(&node_idx) = self.node_map.get(&issue.qualified_id) {
                 self.graph
                     .neighbors_directed(node_idx, Direction::Outgoing)
                     .any(|neighbor_idx| {
-                        let neighbor_number = self.graph[neighbor_idx];
+                        let neighbor_qid = &self.graph[neighbor_idx];
                         self.issue_state
-                            .get(&neighbor_number)
+                            .get(neighbor_qid)
                             .is_some_and(|state| *state == IssueState::Open)
                     })
             } else {
                 // Issue not in graph — treat as unblocked (no edges).
                 tracing::debug!(
-                    issue = issue.number,
+                    issue = %issue.qualified_id,
                     "Issue not found in graph node_map, treating as unblocked"
                 );
                 false
@@ -168,6 +173,7 @@ impl DependencyGraph {
 
             if !is_blocked {
                 ready.push(IssueSummary {
+                    qualified_id: issue.qualified_id.clone(),
                     number: issue.number,
                     title: issue.title.clone(),
                     issue_type: issue.issue_type,
@@ -195,11 +201,12 @@ impl DependencyGraph {
         ready
     }
 
-    /// Compute which issues become fully unblocked when `closed_number` closes.
+    /// Compute which issues become fully unblocked when the issue identified
+    /// by `closed_id` closes.
     ///
-    /// Finds all issues that list `closed_number` as a blocker, then checks
+    /// Finds all issues that list `closed_id` as a blocker, then checks
     /// whether each one's **remaining** blockers are all closed. An issue is
-    /// returned only if every blocker is either `closed_number` itself or
+    /// returned only if every blocker is either `closed_id` itself or
     /// already [`IssueState::Closed`] in the graph's state snapshot.
     ///
     /// This method is purely computational — it does not mutate the graph,
@@ -207,7 +214,7 @@ impl DependencyGraph {
     /// `close` tool to determine which downstream issues need field updates
     /// (e.g., `Status → Ready`, cascade comment).
     ///
-    /// If `closed_number` is not present in the graph, an empty `Vec` is
+    /// If `closed_id` is not present in the graph, an empty `Vec` is
     /// returned without panicking.
     ///
     /// # Note on `_all_issues`
@@ -219,15 +226,19 @@ impl DependencyGraph {
     /// the complete issue list beyond what the graph topology alone provides.
     /// Including it now avoids a breaking API change later.
     #[must_use]
-    pub fn compute_unblock_cascade(&self, closed_number: u64, _all_issues: &[Issue]) -> Vec<u64> {
+    pub fn compute_unblock_cascade(
+        &self,
+        closed_id: &QualifiedId,
+        _all_issues: &[Issue],
+    ) -> Vec<QualifiedId> {
         // Look up the node for the issue being closed.
-        let Some(&closed_node) = self.node_map.get(&closed_number) else {
+        let Some(&closed_node) = self.node_map.get(closed_id) else {
             return Vec::new();
         };
 
-        // Find issues that are blocked BY closed_number.
+        // Find issues that are blocked BY closed_id.
         // Edge direction: source -> target means "source is blocked by target".
-        // So nodes with an edge TO closed_number are its Incoming neighbors.
+        // So nodes with an edge TO closed_id are its Incoming neighbors.
         let dependents = self
             .graph
             .neighbors_directed(closed_node, Direction::Incoming);
@@ -235,26 +246,26 @@ impl DependencyGraph {
         let mut unblocked = Vec::new();
 
         for dependent_idx in dependents {
-            let dependent_number = self.graph[dependent_idx];
+            let dependent_qid = self.graph[dependent_idx].clone();
 
             // Check ALL blockers of this dependent (its Outgoing neighbors).
             let all_blockers_resolved = self
                 .graph
                 .neighbors_directed(dependent_idx, Direction::Outgoing)
                 .all(|blocker_idx| {
-                    let blocker_number = self.graph[blocker_idx];
-                    // Treat closed_number as closed even if issue_state says Open.
-                    if blocker_number == closed_number {
+                    let blocker_qid = &self.graph[blocker_idx];
+                    // Treat closed_id as closed even if issue_state says Open.
+                    if blocker_qid == closed_id {
                         return true;
                     }
                     // All other blockers must already be Closed.
                     self.issue_state
-                        .get(&blocker_number)
+                        .get(blocker_qid)
                         .is_some_and(|state| *state == IssueState::Closed)
                 });
 
             if all_blockers_resolved {
-                unblocked.push(dependent_number);
+                unblocked.push(dependent_qid);
             }
         }
 
@@ -272,11 +283,11 @@ impl DependencyGraph {
     /// This is a pre-mutation check: call it **before** adding the edge. Used by
     /// the `depends` MCP tool for early rejection of circular dependencies.
     #[must_use]
-    pub fn would_create_cycle(&self, source: u64, target: u64) -> bool {
-        let Some(&source_idx) = self.node_map.get(&source) else {
+    pub fn would_create_cycle(&self, source: &QualifiedId, target: &QualifiedId) -> bool {
+        let Some(&source_idx) = self.node_map.get(source) else {
             return false;
         };
-        let Some(&target_idx) = self.node_map.get(&target) else {
+        let Some(&target_idx) = self.node_map.get(target) else {
             return false;
         };
 
@@ -288,18 +299,18 @@ impl DependencyGraph {
     /// Detect all cycles in the dependency graph.
     ///
     /// Uses Tarjan's strongly-connected-components algorithm. Returns every
-    /// SCC with more than one node — each inner `Vec` contains the issue
-    /// numbers that form a cycle. Single-node SCCs (the common case) are
-    /// filtered out. Returns an empty `Vec` when the graph is acyclic.
+    /// SCC with more than one node — each inner `Vec` contains the
+    /// [`QualifiedId`] values that form a cycle. Single-node SCCs (the common
+    /// case) are filtered out. Returns an empty `Vec` when the graph is acyclic.
     #[must_use]
-    pub fn detect_all_cycles(&self) -> Vec<Vec<u64>> {
+    pub fn detect_all_cycles(&self) -> Vec<Vec<QualifiedId>> {
         tarjan_scc(&self.graph)
             .into_iter()
             // Single-node SCCs are isolated nodes or self-loops; only multi-node
             // SCCs represent real dependency cycles. Self-loops are rejected at
             // insertion time by `add_blocked_by`.
             .filter(|scc| scc.len() > 1)
-            .map(|scc| scc.into_iter().map(|idx| self.graph[idx]).collect())
+            .map(|scc| scc.into_iter().map(|idx| self.graph[idx].clone()).collect())
             .collect()
     }
 
@@ -312,21 +323,21 @@ impl DependencyGraph {
     /// - [`TraversalDirection::Both`] follows edges in **both** directions
     ///   (upstream blockers and downstream dependents combined).
     ///
-    /// Returns `(issue_number, depth)` pairs **excluding** the root itself.
+    /// Returns `(QualifiedId, depth)` pairs **excluding** the root itself.
     /// If `root` is not in the graph the result is empty. Nodes are visited
     /// at most once (cycle-safe).
-    // DEVIATION(unblock-b6b.20): Returns Vec<(u64, usize)> instead of
+    // DEVIATION(unblock-b6b.20): Returns Vec<(QualifiedId, usize)> instead of
     // DependencyTree struct per ARCH §6.4. The richer type includes Status and
     // IssueState per node with recursive TreeNode children. Upgrade when the
     // show tool (unblock-45a.8) is implemented.
     #[must_use]
     pub fn dependency_tree(
         &self,
-        root: u64,
+        root: &QualifiedId,
         direction: TraversalDirection,
         max_depth: usize,
-    ) -> Vec<(u64, usize)> {
-        let Some(&root_idx) = self.node_map.get(&root) else {
+    ) -> Vec<(QualifiedId, usize)> {
+        let Some(&root_idx) = self.node_map.get(root) else {
             return Vec::new();
         };
 
@@ -355,9 +366,9 @@ impl DependencyGraph {
             for &dir in directions {
                 for neighbor in self.graph.neighbors_directed(node, dir) {
                     if visited.insert(neighbor) {
-                        let issue_number = self.graph[neighbor];
+                        let qid = self.graph[neighbor].clone();
                         let next_depth = depth + 1;
-                        result.push((issue_number, next_depth));
+                        result.push((qid, next_depth));
                         queue.push_back((neighbor, next_depth));
                     }
                 }
@@ -370,9 +381,9 @@ impl DependencyGraph {
     /// Returns a reference to the internal node map.
     ///
     /// Useful for downstream methods (cascade, cycle detection, tree traversal)
-    /// that need to look up nodes by issue number.
+    /// that need to look up nodes by [`QualifiedId`].
     #[must_use]
-    pub fn node_map(&self) -> &HashMap<u64, NodeIndex> {
+    pub fn node_map(&self) -> &HashMap<QualifiedId, NodeIndex> {
         &self.node_map
     }
 
@@ -380,23 +391,23 @@ impl DependencyGraph {
     ///
     /// Exposed for downstream graph algorithms (Tarjan SCC, path queries, BFS).
     #[must_use]
-    pub fn inner_graph(&self) -> &DiGraph<u64, ()> {
+    pub fn inner_graph(&self) -> &DiGraph<QualifiedId, ()> {
         &self.graph
     }
 
     /// Returns a reference to the issue state snapshot.
     ///
-    /// Maps issue numbers to their [`IssueState`] at build time.
+    /// Maps [`QualifiedId`] to their [`IssueState`] at build time.
     #[must_use]
-    pub fn issue_state(&self) -> &HashMap<u64, IssueState> {
+    pub fn issue_state(&self) -> &HashMap<QualifiedId, IssueState> {
         &self.issue_state
     }
 
     /// Returns a reference to the issue status snapshot.
     ///
-    /// Maps issue numbers to their workflow [`Status`] at build time.
+    /// Maps [`QualifiedId`] to their workflow [`Status`] at build time.
     #[must_use]
-    pub fn issue_status(&self) -> &HashMap<u64, Status> {
+    pub fn issue_status(&self) -> &HashMap<QualifiedId, Status> {
         &self.issue_status
     }
 }
@@ -408,9 +419,24 @@ mod tests {
 
     use crate::types::{Priority, ReadyState};
 
+    /// Default owner/repo used by test helpers.
+    const TEST_OWNER: &str = "test";
+    const TEST_REPO: &str = "repo";
+
+    /// Helper to create a `QualifiedId` for tests using the default test owner/repo.
+    fn qid(number: u64) -> QualifiedId {
+        QualifiedId::new(TEST_OWNER, TEST_REPO, number)
+    }
+
+    /// Helper to create a `QualifiedId` for a specific owner/repo (cross-repo tests).
+    fn qid_repo(owner: &str, repo: &str, number: u64) -> QualifiedId {
+        QualifiedId::new(owner, repo, number)
+    }
+
     /// Helper to create a minimal Issue for testing.
     fn make_issue(number: u64, state: IssueState, priority: Priority) -> Issue {
         Issue {
+            qualified_id: qid(number),
             number,
             node_id: String::new(),
             title: format!("Issue #{number}"),
@@ -438,6 +464,19 @@ mod tests {
         }
     }
 
+    /// Helper to create an issue for a specific owner/repo (cross-repo tests).
+    fn make_issue_repo(
+        owner: &str,
+        repo: &str,
+        number: u64,
+        state: IssueState,
+        priority: Priority,
+    ) -> Issue {
+        let mut issue = make_issue(number, state, priority);
+        issue.qualified_id = qid_repo(owner, repo, number);
+        issue
+    }
+
     /// Helper to create an issue with a specific `created_at` for sort testing.
     fn make_issue_at(
         number: u64,
@@ -448,6 +487,14 @@ mod tests {
         let mut issue = make_issue(number, state, priority);
         issue.created_at = created_at;
         issue
+    }
+
+    /// Helper to create a `BlockingEdge` from test issue numbers (same repo).
+    fn edge(source: u64, target: u64) -> BlockingEdge {
+        BlockingEdge {
+            source: qid(source),
+            target: qid(target),
+        }
     }
 
     // ── DependencyGraph::build ────────────────────────────────────────────
@@ -469,8 +516,8 @@ mod tests {
         let graph = DependencyGraph::build(&issues, &[]);
         assert_eq!(graph.graph.node_count(), 2);
         assert_eq!(graph.graph.edge_count(), 0);
-        assert!(graph.node_map.contains_key(&1));
-        assert!(graph.node_map.contains_key(&2));
+        assert!(graph.node_map.contains_key(&qid(1)));
+        assert!(graph.node_map.contains_key(&qid(2)));
     }
 
     #[test]
@@ -480,10 +527,7 @@ mod tests {
             make_issue(2, IssueState::Open, Priority::P1),
         ];
         // Issue 1 is blocked by issue 2.
-        let edges = vec![BlockingEdge {
-            source: 1,
-            target: 2,
-        }];
+        let edges = vec![edge(1, 2)];
         let graph = DependencyGraph::build(&issues, &edges);
         assert_eq!(graph.graph.node_count(), 2);
         assert_eq!(graph.graph.edge_count(), 1);
@@ -493,10 +537,7 @@ mod tests {
     fn build_missing_edge_node_skipped_no_panic() {
         let issues = vec![make_issue(1, IssueState::Open, Priority::P2)];
         // Edge references issue 99 which doesn't exist.
-        let edges = vec![BlockingEdge {
-            source: 1,
-            target: 99,
-        }];
+        let edges = vec![edge(1, 99)];
         let graph = DependencyGraph::build(&issues, &edges);
         assert_eq!(graph.graph.node_count(), 1);
         assert_eq!(graph.graph.edge_count(), 0);
@@ -505,10 +546,7 @@ mod tests {
     #[test]
     fn build_both_edge_nodes_missing() {
         let issues = vec![make_issue(1, IssueState::Open, Priority::P2)];
-        let edges = vec![BlockingEdge {
-            source: 88,
-            target: 99,
-        }];
+        let edges = vec![edge(88, 99)];
         let graph = DependencyGraph::build(&issues, &edges);
         assert_eq!(graph.graph.edge_count(), 0);
     }
@@ -549,10 +587,7 @@ mod tests {
             make_issue(1, IssueState::Open, Priority::P2),
             make_issue(2, IssueState::Open, Priority::P1),
         ];
-        let edges = vec![BlockingEdge {
-            source: 1,
-            target: 2,
-        }];
+        let edges = vec![edge(1, 2)];
         let graph = DependencyGraph::build(&issues, &edges);
         let ready = graph.compute_ready_set(&issues);
 
@@ -575,10 +610,7 @@ mod tests {
             make_issue(1, IssueState::Open, Priority::P2),
             make_issue(2, IssueState::Closed, Priority::P1),
         ];
-        let edges = vec![BlockingEdge {
-            source: 1,
-            target: 2,
-        }];
+        let edges = vec![edge(1, 2)];
         let graph = DependencyGraph::build(&issues, &edges);
         let ready = graph.compute_ready_set(&issues);
 
@@ -599,16 +631,7 @@ mod tests {
             make_issue(2, IssueState::Closed, Priority::P1),
             make_issue(3, IssueState::Open, Priority::P3),
         ];
-        let edges = vec![
-            BlockingEdge {
-                source: 1,
-                target: 2,
-            },
-            BlockingEdge {
-                source: 1,
-                target: 3,
-            },
-        ];
+        let edges = vec![edge(1, 2), edge(1, 3)];
         let graph = DependencyGraph::build(&issues, &edges);
         let ready = graph.compute_ready_set(&issues);
 
@@ -674,16 +697,7 @@ mod tests {
             make_issue(2, IssueState::Open, Priority::P1),
             make_issue(3, IssueState::Open, Priority::P0),
         ];
-        let edges = vec![
-            BlockingEdge {
-                source: 1,
-                target: 2,
-            },
-            BlockingEdge {
-                source: 2,
-                target: 3,
-            },
-        ];
+        let edges = vec![edge(1, 2), edge(2, 3)];
         let graph = DependencyGraph::build(&issues, &edges);
         let ready = graph.compute_ready_set(&issues);
 
@@ -702,20 +716,11 @@ mod tests {
             make_issue(3, IssueState::Open, Priority::P0),
         ];
         // B is blocked by A, C is blocked by A.
-        let edges = vec![
-            BlockingEdge {
-                source: 2,
-                target: 1,
-            },
-            BlockingEdge {
-                source: 3,
-                target: 1,
-            },
-        ];
+        let edges = vec![edge(2, 1), edge(3, 1)];
         let graph = DependencyGraph::build(&issues, &edges);
-        let mut cascade = graph.compute_unblock_cascade(1, &issues);
-        cascade.sort_unstable();
-        assert_eq!(cascade, vec![2, 3]);
+        let mut cascade = graph.compute_unblock_cascade(&qid(1), &issues);
+        cascade.sort_by_key(|q| q.number);
+        assert_eq!(cascade, vec![qid(2), qid(3)]);
     }
 
     #[test]
@@ -727,18 +732,9 @@ mod tests {
             make_issue(5, IssueState::Open, Priority::P0),
         ];
         // E is blocked by A and D.
-        let edges = vec![
-            BlockingEdge {
-                source: 5,
-                target: 1,
-            },
-            BlockingEdge {
-                source: 5,
-                target: 4,
-            },
-        ];
+        let edges = vec![edge(5, 1), edge(5, 4)];
         let graph = DependencyGraph::build(&issues, &edges);
-        let cascade = graph.compute_unblock_cascade(1, &issues);
+        let cascade = graph.compute_unblock_cascade(&qid(1), &issues);
         assert!(
             cascade.is_empty(),
             "E still has open blocker D, cascade should be empty but got {cascade:?}"
@@ -753,19 +749,10 @@ mod tests {
             make_issue(4, IssueState::Closed, Priority::P1),
             make_issue(5, IssueState::Open, Priority::P0),
         ];
-        let edges = vec![
-            BlockingEdge {
-                source: 5,
-                target: 1,
-            },
-            BlockingEdge {
-                source: 5,
-                target: 4,
-            },
-        ];
+        let edges = vec![edge(5, 1), edge(5, 4)];
         let graph = DependencyGraph::build(&issues, &edges);
-        let cascade = graph.compute_unblock_cascade(1, &issues);
-        assert_eq!(cascade, vec![5]);
+        let cascade = graph.compute_unblock_cascade(&qid(1), &issues);
+        assert_eq!(cascade, vec![qid(5)]);
     }
 
     #[test]
@@ -776,7 +763,7 @@ mod tests {
             make_issue(2, IssueState::Open, Priority::P1),
         ];
         let graph = DependencyGraph::build(&issues, &[]);
-        let cascade = graph.compute_unblock_cascade(1, &issues);
+        let cascade = graph.compute_unblock_cascade(&qid(1), &issues);
         assert!(cascade.is_empty());
     }
 
@@ -785,31 +772,28 @@ mod tests {
         // closed_number 99 doesn't exist in the graph.
         let issues = vec![make_issue(1, IssueState::Open, Priority::P2)];
         let graph = DependencyGraph::build(&issues, &[]);
-        let cascade = graph.compute_unblock_cascade(99, &issues);
+        let cascade = graph.compute_unblock_cascade(&qid(99), &issues);
         assert!(cascade.is_empty());
     }
 
     #[test]
     fn cascade_empty_graph_returns_empty() {
         let graph = DependencyGraph::build(&[], &[]);
-        let cascade = graph.compute_unblock_cascade(1, &[]);
+        let cascade = graph.compute_unblock_cascade(&qid(1), &[]);
         assert!(cascade.is_empty());
     }
 
     #[test]
-    fn cascade_returns_issue_numbers_not_summaries() {
-        // Verify the return type is Vec<u64> (compile-time check, but let's be explicit).
+    fn cascade_returns_qualified_ids() {
+        // Verify the return type is Vec<QualifiedId>.
         let issues = vec![
             make_issue(1, IssueState::Open, Priority::P2),
             make_issue(2, IssueState::Open, Priority::P1),
         ];
-        let edges = vec![BlockingEdge {
-            source: 2,
-            target: 1,
-        }];
+        let edges = vec![edge(2, 1)];
         let graph = DependencyGraph::build(&issues, &edges);
-        let cascade: Vec<u64> = graph.compute_unblock_cascade(1, &issues);
-        assert_eq!(cascade, vec![2]);
+        let cascade: Vec<QualifiedId> = graph.compute_unblock_cascade(&qid(1), &issues);
+        assert_eq!(cascade, vec![qid(2)]);
     }
 
     // ── would_create_cycle ──────────────────────────────────────────────
@@ -822,13 +806,10 @@ mod tests {
             make_issue(2, IssueState::Open, Priority::P1),
         ];
         // Edge: 2 is blocked by 1 (edge 2→1).
-        let edges = vec![BlockingEdge {
-            source: 2,
-            target: 1,
-        }];
+        let edges = vec![edge(2, 1)];
         let graph = DependencyGraph::build(&issues, &edges);
         // Adding 1→2 would create cycle: 1→2→1.
-        assert!(graph.would_create_cycle(1, 2));
+        assert!(graph.would_create_cycle(&qid(1), &qid(2)));
     }
 
     #[test]
@@ -838,21 +819,21 @@ mod tests {
             make_issue(2, IssueState::Open, Priority::P1),
         ];
         let graph = DependencyGraph::build(&issues, &[]);
-        assert!(!graph.would_create_cycle(1, 2));
+        assert!(!graph.would_create_cycle(&qid(1), &qid(2)));
     }
 
     #[test]
     fn would_create_cycle_false_when_source_unknown() {
         let issues = vec![make_issue(1, IssueState::Open, Priority::P2)];
         let graph = DependencyGraph::build(&issues, &[]);
-        assert!(!graph.would_create_cycle(99, 1));
+        assert!(!graph.would_create_cycle(&qid(99), &qid(1)));
     }
 
     #[test]
     fn would_create_cycle_false_when_target_unknown() {
         let issues = vec![make_issue(1, IssueState::Open, Priority::P2)];
         let graph = DependencyGraph::build(&issues, &[]);
-        assert!(!graph.would_create_cycle(1, 99));
+        assert!(!graph.would_create_cycle(&qid(1), &qid(99)));
     }
 
     #[test]
@@ -863,27 +844,18 @@ mod tests {
             make_issue(2, IssueState::Open, Priority::P1),
             make_issue(3, IssueState::Open, Priority::P0),
         ];
-        let edges = vec![
-            BlockingEdge {
-                source: 1,
-                target: 2,
-            },
-            BlockingEdge {
-                source: 2,
-                target: 3,
-            },
-        ];
+        let edges = vec![edge(1, 2), edge(2, 3)];
         let graph = DependencyGraph::build(&issues, &edges);
         // Path 1→2→3 exists, so adding 3→1 closes the cycle.
-        assert!(graph.would_create_cycle(3, 1));
+        assert!(graph.would_create_cycle(&qid(3), &qid(1)));
         // But adding 1→3 (parallel edge) does not create a cycle.
-        assert!(!graph.would_create_cycle(1, 3));
+        assert!(!graph.would_create_cycle(&qid(1), &qid(3)));
     }
 
     #[test]
     fn would_create_cycle_empty_graph() {
         let graph = DependencyGraph::build(&[], &[]);
-        assert!(!graph.would_create_cycle(1, 2));
+        assert!(!graph.would_create_cycle(&qid(1), &qid(2)));
     }
 
     #[test]
@@ -891,7 +863,7 @@ mod tests {
         // A node blocking itself is always a cycle, even with no existing edges.
         let issues = vec![make_issue(1, IssueState::Open, Priority::P2)];
         let graph = DependencyGraph::build(&issues, &[]);
-        assert!(graph.would_create_cycle(1, 1));
+        assert!(graph.would_create_cycle(&qid(1), &qid(1)));
     }
 
     // ── detect_all_cycles ─────────────────────────────────────────────────
@@ -902,10 +874,7 @@ mod tests {
             make_issue(1, IssueState::Open, Priority::P2),
             make_issue(2, IssueState::Open, Priority::P1),
         ];
-        let edges = vec![BlockingEdge {
-            source: 1,
-            target: 2,
-        }];
+        let edges = vec![edge(1, 2)];
         let graph = DependencyGraph::build(&issues, &edges);
         assert!(graph.detect_all_cycles().is_empty());
     }
@@ -917,22 +886,13 @@ mod tests {
             make_issue(1, IssueState::Open, Priority::P2),
             make_issue(2, IssueState::Open, Priority::P1),
         ];
-        let edges = vec![
-            BlockingEdge {
-                source: 1,
-                target: 2,
-            },
-            BlockingEdge {
-                source: 2,
-                target: 1,
-            },
-        ];
+        let edges = vec![edge(1, 2), edge(2, 1)];
         let graph = DependencyGraph::build(&issues, &edges);
         let cycles = graph.detect_all_cycles();
         assert_eq!(cycles.len(), 1);
         let mut cycle = cycles[0].clone();
-        cycle.sort_unstable();
-        assert_eq!(cycle, vec![1, 2]);
+        cycle.sort_by_key(|q| q.number);
+        assert_eq!(cycle, vec![qid(1), qid(2)]);
     }
 
     #[test]
@@ -943,26 +903,13 @@ mod tests {
             make_issue(2, IssueState::Open, Priority::P1),
             make_issue(3, IssueState::Open, Priority::P0),
         ];
-        let edges = vec![
-            BlockingEdge {
-                source: 1,
-                target: 2,
-            },
-            BlockingEdge {
-                source: 2,
-                target: 3,
-            },
-            BlockingEdge {
-                source: 3,
-                target: 1,
-            },
-        ];
+        let edges = vec![edge(1, 2), edge(2, 3), edge(3, 1)];
         let graph = DependencyGraph::build(&issues, &edges);
         let cycles = graph.detect_all_cycles();
         assert_eq!(cycles.len(), 1);
         let mut cycle = cycles[0].clone();
-        cycle.sort_unstable();
-        assert_eq!(cycle, vec![1, 2, 3]);
+        cycle.sort_by_key(|q| q.number);
+        assert_eq!(cycle, vec![qid(1), qid(2), qid(3)]);
     }
 
     #[test]
@@ -986,52 +933,34 @@ mod tests {
     #[test]
     fn dependency_tree_upstream_returns_blockers() {
         // 1 is blocked by 2, 2 is blocked by 3.
-        // Upstream from 1 should return [(2, 1), (3, 2)].
+        // Upstream from 1 should return [(qid(2), 1), (qid(3), 2)].
         let issues = vec![
             make_issue(1, IssueState::Open, Priority::P2),
             make_issue(2, IssueState::Open, Priority::P1),
             make_issue(3, IssueState::Open, Priority::P0),
         ];
-        let edges = vec![
-            BlockingEdge {
-                source: 1,
-                target: 2,
-            },
-            BlockingEdge {
-                source: 2,
-                target: 3,
-            },
-        ];
+        let edges = vec![edge(1, 2), edge(2, 3)];
         let graph = DependencyGraph::build(&issues, &edges);
-        let tree = graph.dependency_tree(1, TraversalDirection::Upstream, 10);
-        assert_eq!(tree, vec![(2, 1), (3, 2)]);
+        let tree = graph.dependency_tree(&qid(1), TraversalDirection::Upstream, 10);
+        assert_eq!(tree, vec![(qid(2), 1), (qid(3), 2)]);
     }
 
     #[test]
     fn dependency_tree_downstream_returns_blocked_issues() {
         // 2 is blocked by 1, 3 is blocked by 1.
-        // Downstream from 1 should return [(2, 1), (3, 1)] (order may vary).
+        // Downstream from 1 should return [(qid(2), 1), (qid(3), 1)] (order may vary).
         let issues = vec![
             make_issue(1, IssueState::Open, Priority::P2),
             make_issue(2, IssueState::Open, Priority::P1),
             make_issue(3, IssueState::Open, Priority::P0),
         ];
-        let edges = vec![
-            BlockingEdge {
-                source: 2,
-                target: 1,
-            },
-            BlockingEdge {
-                source: 3,
-                target: 1,
-            },
-        ];
+        let edges = vec![edge(2, 1), edge(3, 1)];
         let graph = DependencyGraph::build(&issues, &edges);
-        let mut tree = graph.dependency_tree(1, TraversalDirection::Downstream, 10);
-        tree.sort_by_key(|&(num, _)| num);
+        let mut tree = graph.dependency_tree(&qid(1), TraversalDirection::Downstream, 10);
+        tree.sort_by_key(|(q, _)| q.number);
         assert_eq!(tree.len(), 2);
-        assert_eq!(tree[0], (2, 1));
-        assert_eq!(tree[1], (3, 1));
+        assert_eq!(tree[0], (qid(2), 1));
+        assert_eq!(tree[1], (qid(3), 1));
     }
 
     #[test]
@@ -1043,25 +972,12 @@ mod tests {
             make_issue(3, IssueState::Open, Priority::P0),
             make_issue(4, IssueState::Open, Priority::P0),
         ];
-        let edges = vec![
-            BlockingEdge {
-                source: 1,
-                target: 2,
-            },
-            BlockingEdge {
-                source: 2,
-                target: 3,
-            },
-            BlockingEdge {
-                source: 3,
-                target: 4,
-            },
-        ];
+        let edges = vec![edge(1, 2), edge(2, 3), edge(3, 4)];
         let graph = DependencyGraph::build(&issues, &edges);
-        let tree = graph.dependency_tree(1, TraversalDirection::Upstream, 2);
-        assert_eq!(tree, vec![(2, 1), (3, 2)]);
+        let tree = graph.dependency_tree(&qid(1), TraversalDirection::Upstream, 2);
+        assert_eq!(tree, vec![(qid(2), 1), (qid(3), 2)]);
         // 4 is at depth 3, beyond max_depth=2.
-        assert!(!tree.iter().any(|&(num, _)| num == 4));
+        assert!(!tree.iter().any(|(q, _)| q.number == 4));
     }
 
     #[test]
@@ -1070,12 +986,9 @@ mod tests {
             make_issue(1, IssueState::Open, Priority::P2),
             make_issue(2, IssueState::Open, Priority::P1),
         ];
-        let edges = vec![BlockingEdge {
-            source: 1,
-            target: 2,
-        }];
+        let edges = vec![edge(1, 2)];
         let graph = DependencyGraph::build(&issues, &edges);
-        let tree = graph.dependency_tree(1, TraversalDirection::Upstream, 0);
+        let tree = graph.dependency_tree(&qid(1), TraversalDirection::Upstream, 0);
         assert!(tree.is_empty());
     }
 
@@ -1083,7 +996,7 @@ mod tests {
     fn dependency_tree_root_not_in_graph_returns_empty() {
         let issues = vec![make_issue(1, IssueState::Open, Priority::P2)];
         let graph = DependencyGraph::build(&issues, &[]);
-        let tree = graph.dependency_tree(99, TraversalDirection::Upstream, 10);
+        let tree = graph.dependency_tree(&qid(99), TraversalDirection::Upstream, 10);
         assert!(tree.is_empty());
     }
 
@@ -1097,28 +1010,11 @@ mod tests {
             make_issue(3, IssueState::Open, Priority::P0),
             make_issue(4, IssueState::Open, Priority::P0),
         ];
-        let edges = vec![
-            BlockingEdge {
-                source: 1,
-                target: 2,
-            },
-            BlockingEdge {
-                source: 1,
-                target: 3,
-            },
-            BlockingEdge {
-                source: 2,
-                target: 4,
-            },
-            BlockingEdge {
-                source: 3,
-                target: 4,
-            },
-        ];
+        let edges = vec![edge(1, 2), edge(1, 3), edge(2, 4), edge(3, 4)];
         let graph = DependencyGraph::build(&issues, &edges);
-        let tree = graph.dependency_tree(1, TraversalDirection::Upstream, 10);
+        let tree = graph.dependency_tree(&qid(1), TraversalDirection::Upstream, 10);
         // 4 should appear exactly once at depth 2.
-        let fours: Vec<_> = tree.iter().filter(|&&(num, _)| num == 4).collect();
+        let fours: Vec<_> = tree.iter().filter(|(q, _)| q.number == 4).collect();
         assert_eq!(fours.len(), 1);
         assert_eq!(fours[0].1, 2);
         assert_eq!(tree.len(), 3); // 2, 3, 4
@@ -1131,27 +1027,18 @@ mod tests {
             make_issue(1, IssueState::Open, Priority::P2),
             make_issue(2, IssueState::Open, Priority::P1),
         ];
-        let edges = vec![
-            BlockingEdge {
-                source: 1,
-                target: 2,
-            },
-            BlockingEdge {
-                source: 2,
-                target: 1,
-            },
-        ];
+        let edges = vec![edge(1, 2), edge(2, 1)];
         let graph = DependencyGraph::build(&issues, &edges);
-        let tree = graph.dependency_tree(1, TraversalDirection::Upstream, 10);
+        let tree = graph.dependency_tree(&qid(1), TraversalDirection::Upstream, 10);
         // Should visit 2 at depth 1, then stop (1 already visited).
-        assert_eq!(tree, vec![(2, 1)]);
+        assert_eq!(tree, vec![(qid(2), 1)]);
     }
 
     #[test]
     fn dependency_tree_excludes_root() {
         let issues = vec![make_issue(1, IssueState::Open, Priority::P2)];
         let graph = DependencyGraph::build(&issues, &[]);
-        let tree = graph.dependency_tree(1, TraversalDirection::Upstream, 10);
+        let tree = graph.dependency_tree(&qid(1), TraversalDirection::Upstream, 10);
         assert!(tree.is_empty());
     }
 
@@ -1164,23 +1051,14 @@ mod tests {
             make_issue(2, IssueState::Open, Priority::P1),
             make_issue(3, IssueState::Open, Priority::P0),
         ];
-        let edges = vec![
-            BlockingEdge {
-                source: 1,
-                target: 3,
-            },
-            BlockingEdge {
-                source: 2,
-                target: 1,
-            },
-        ];
+        let edges = vec![edge(1, 3), edge(2, 1)];
         let graph = DependencyGraph::build(&issues, &edges);
-        let mut tree = graph.dependency_tree(1, TraversalDirection::Both, 10);
-        tree.sort_by_key(|&(num, _)| num);
+        let mut tree = graph.dependency_tree(&qid(1), TraversalDirection::Both, 10);
+        tree.sort_by_key(|(q, _)| q.number);
         assert_eq!(tree.len(), 2);
         // Both neighbors at depth 1.
-        assert_eq!(tree[0], (2, 1));
-        assert_eq!(tree[1], (3, 1));
+        assert_eq!(tree[0], (qid(2), 1));
+        assert_eq!(tree[1], (qid(3), 1));
     }
 
     #[test]
@@ -1194,28 +1072,11 @@ mod tests {
             make_issue(3, IssueState::Open, Priority::P0),
             make_issue(4, IssueState::Open, Priority::P0),
         ];
-        let edges = vec![
-            BlockingEdge {
-                source: 1,
-                target: 2,
-            },
-            BlockingEdge {
-                source: 3,
-                target: 1,
-            },
-            BlockingEdge {
-                source: 2,
-                target: 4,
-            },
-            BlockingEdge {
-                source: 3,
-                target: 4,
-            },
-        ];
+        let edges = vec![edge(1, 2), edge(3, 1), edge(2, 4), edge(3, 4)];
         let graph = DependencyGraph::build(&issues, &edges);
-        let tree = graph.dependency_tree(1, TraversalDirection::Both, 10);
+        let tree = graph.dependency_tree(&qid(1), TraversalDirection::Both, 10);
         // All three nodes (2, 3, 4) reachable, 4 only once.
-        let fours: Vec<_> = tree.iter().filter(|&&(num, _)| num == 4).collect();
+        let fours: Vec<_> = tree.iter().filter(|(q, _)| q.number == 4).collect();
         assert_eq!(fours.len(), 1);
         assert_eq!(tree.len(), 3);
     }
@@ -1230,28 +1091,15 @@ mod tests {
             make_issue(3, IssueState::Open, Priority::P0),
             make_issue(4, IssueState::Open, Priority::P0),
         ];
-        let edges = vec![
-            BlockingEdge {
-                source: 1,
-                target: 3,
-            },
-            BlockingEdge {
-                source: 3,
-                target: 4,
-            },
-            BlockingEdge {
-                source: 2,
-                target: 1,
-            },
-        ];
+        let edges = vec![edge(1, 3), edge(3, 4), edge(2, 1)];
         let graph = DependencyGraph::build(&issues, &edges);
-        let mut tree = graph.dependency_tree(1, TraversalDirection::Both, 1);
-        tree.sort_by_key(|&(num, _)| num);
+        let mut tree = graph.dependency_tree(&qid(1), TraversalDirection::Both, 1);
+        tree.sort_by_key(|(q, _)| q.number);
         assert_eq!(tree.len(), 2);
-        assert_eq!(tree[0], (2, 1));
-        assert_eq!(tree[1], (3, 1));
+        assert_eq!(tree[0], (qid(2), 1));
+        assert_eq!(tree[1], (qid(3), 1));
         // 4 is at depth 2, beyond max_depth=1.
-        assert!(!tree.iter().any(|&(num, _)| num == 4));
+        assert!(!tree.iter().any(|(q, _)| q.number == 4));
     }
 
     #[test]
@@ -1261,6 +1109,45 @@ mod tests {
         assert_eq!(json, "\"Both\"");
         let deserialized: TraversalDirection = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(deserialized, TraversalDirection::Both);
+    }
+
+    // ── Cross-repo tests ────────────────────────────────────────────────
+
+    #[test]
+    fn cross_repo_same_number_different_repos_are_distinct_nodes() {
+        // Two issues with the same number (42) from different repos must be distinct.
+        let issue_a = make_issue_repo("acme", "widgets", 42, IssueState::Open, Priority::P1);
+        let issue_b = make_issue_repo("acme", "gadgets", 42, IssueState::Open, Priority::P2);
+        let issues = vec![issue_a, issue_b];
+        let graph = DependencyGraph::build(&issues, &[]);
+        assert_eq!(graph.graph.node_count(), 2);
+        assert!(
+            graph
+                .node_map
+                .contains_key(&qid_repo("acme", "widgets", 42))
+        );
+        assert!(
+            graph
+                .node_map
+                .contains_key(&qid_repo("acme", "gadgets", 42))
+        );
+    }
+
+    #[test]
+    fn cross_repo_ready_set_with_mixed_repos() {
+        // Issue acme/widgets#1 is blocked by acme/gadgets#1.
+        // acme/gadgets#1 is open, so acme/widgets#1 should NOT be ready.
+        let issue_a = make_issue_repo("acme", "widgets", 1, IssueState::Open, Priority::P1);
+        let issue_b = make_issue_repo("acme", "gadgets", 1, IssueState::Open, Priority::P2);
+        let issues = vec![issue_a, issue_b];
+        let edges = vec![BlockingEdge {
+            source: qid_repo("acme", "widgets", 1),
+            target: qid_repo("acme", "gadgets", 1),
+        }];
+        let graph = DependencyGraph::build(&issues, &edges);
+        let ready = graph.compute_ready_set(&issues);
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].qualified_id, qid_repo("acme", "gadgets", 1));
     }
 
     // ── Proptest ──────────────────────────────────────────────────────────
@@ -1307,7 +1194,7 @@ mod tests {
                 let blocking_edges: Vec<BlockingEdge> = edges
                     .into_iter()
                     .filter(|(s, t)| *s != *t && *s <= num_issues && *t <= num_issues)
-                    .map(|(s, t)| BlockingEdge { source: s, target: t })
+                    .map(|(s, t)| edge(s, t))
                     .collect();
 
                 let graph = DependencyGraph::build(&issues, &blocking_edges);
@@ -1315,15 +1202,15 @@ mod tests {
 
                 // Invariant 1: no issue in the ready set has an open blocker.
                 for summary in &ready {
-                    if let Some(&node_idx) = graph.node_map.get(&summary.number) {
+                    if let Some(&node_idx) = graph.node_map.get(&summary.qualified_id) {
                         for neighbor_idx in graph.graph.neighbors_directed(node_idx, Direction::Outgoing) {
-                            let neighbor_number = graph.graph[neighbor_idx];
-                            let neighbor_state = graph.issue_state.get(&neighbor_number);
+                            let neighbor_qid = &graph.graph[neighbor_idx];
+                            let neighbor_state = graph.issue_state.get(neighbor_qid);
                             prop_assert!(
                                 neighbor_state != Some(&IssueState::Open),
                                 "Ready issue {} has open blocker {}",
-                                summary.number,
-                                neighbor_number
+                                summary.qualified_id,
+                                neighbor_qid
                             );
                         }
                     }
@@ -1331,75 +1218,74 @@ mod tests {
 
                 // Invariant 2: every issue in the ready set must be IssueState::Open.
                 for summary in &ready {
-                    let original = issues.iter().find(|i| i.number == summary.number);
+                    let original = issues.iter().find(|i| i.qualified_id == summary.qualified_id);
                     if let Some(issue) = original {
                         prop_assert_eq!(
                             issue.state,
                             IssueState::Open,
                             "Ready issue {} should be Open, was {:?}",
-                            summary.number,
+                            summary.qualified_id,
                             issue.state
                         );
                     }
                 }
 
                 // Invariant 3: cascade result is a subset of dependents, and every
-                // returned issue has no remaining open blockers (treating closed_number
+                // returned issue has no remaining open blockers (treating closed_id
                 // as closed).
                 // Pick an arbitrary open issue to close for cascade testing.
-                let open_issues: Vec<u64> = issues
+                let open_issues: Vec<&QualifiedId> = issues
                     .iter()
                     .filter(|i| i.state == IssueState::Open)
-                    .map(|i| i.number)
+                    .map(|i| &i.qualified_id)
                     .collect();
-                if let Some(&closed_number) = open_issues.first() {
-                    let cascade = graph.compute_unblock_cascade(closed_number, &issues);
+                if let Some(closed_id) = open_issues.first() {
+                    let cascade = graph.compute_unblock_cascade(closed_id, &issues);
                     // Soundness: every returned issue has no remaining open blockers.
-                    for &unblocked_num in &cascade {
-                        if let Some(&dep_node) = graph.node_map.get(&unblocked_num) {
+                    for unblocked_qid in &cascade {
+                        if let Some(&dep_node) = graph.node_map.get(unblocked_qid) {
                             for blocker_idx in graph.graph.neighbors_directed(dep_node, Direction::Outgoing) {
-                                let blocker_num = graph.graph[blocker_idx];
-                                if blocker_num == closed_number {
+                                let blocker_qid = &graph.graph[blocker_idx];
+                                if blocker_qid == *closed_id {
                                     continue; // treated as closed
                                 }
-                                let blocker_state = graph.issue_state.get(&blocker_num);
+                                let blocker_state = graph.issue_state.get(blocker_qid);
                                 prop_assert!(
                                     blocker_state == Some(&IssueState::Closed),
                                     "Cascade returned {} but blocker {} is still open",
-                                    unblocked_num,
-                                    blocker_num
+                                    unblocked_qid,
+                                    blocker_qid
                                 );
                             }
                         }
                     }
 
-                    // Completeness: every dependent of closed_number whose blockers
+                    // Completeness: every dependent of closed_id whose blockers
                     // are all resolved MUST appear in the cascade result.
-                    let mut cascade_set =
-                        std::collections::HashSet::with_capacity(cascade.len());
-                    cascade_set.extend(cascade.iter().copied());
-                    if let Some(&closed_node) = graph.node_map.get(&closed_number) {
+                    let cascade_set: std::collections::HashSet<_> =
+                        cascade.iter().collect();
+                    if let Some(&closed_node) = graph.node_map.get(*closed_id) {
                         for dep_idx in graph.graph.neighbors_directed(closed_node, Direction::Incoming) {
-                            let dep_number = graph.graph[dep_idx];
+                            let dep_qid = &graph.graph[dep_idx];
                             let all_resolved = graph
                                 .graph
                                 .neighbors_directed(dep_idx, Direction::Outgoing)
                                 .all(|blocker_idx| {
-                                    let blocker_num = graph.graph[blocker_idx];
-                                    if blocker_num == closed_number {
+                                    let blocker_qid = &graph.graph[blocker_idx];
+                                    if blocker_qid == *closed_id {
                                         return true;
                                     }
                                     graph
                                         .issue_state
-                                        .get(&blocker_num)
+                                        .get(blocker_qid)
                                         .is_some_and(|s| *s == IssueState::Closed)
                                 });
                             if all_resolved {
                                 prop_assert!(
-                                    cascade_set.contains(&dep_number),
+                                    cascade_set.contains(dep_qid),
                                     "Issue {} has all blockers resolved after closing {} but is missing from cascade",
-                                    dep_number,
-                                    closed_number
+                                    dep_qid,
+                                    closed_id
                                 );
                             }
                         }
@@ -1439,7 +1325,7 @@ mod tests {
                 let blocking_edges: Vec<BlockingEdge> = edges
                     .into_iter()
                     .filter(|(s, t)| *s != *t && *s <= num_issues && *t <= num_issues)
-                    .map(|(s, t)| BlockingEdge { source: s, target: t })
+                    .map(|(s, t)| edge(s, t))
                     .collect();
 
                 let graph = DependencyGraph::build(&issues, &blocking_edges);
@@ -1449,26 +1335,100 @@ mod tests {
                     && probe_source <= num_issues
                     && probe_target <= num_issues
                 {
-                    let would_cycle = graph.would_create_cycle(probe_source, probe_target);
+                    let probe_source_qid = qid(probe_source);
+                    let probe_target_qid = qid(probe_target);
+                    let would_cycle = graph.would_create_cycle(&probe_source_qid, &probe_target_qid);
 
                     if !would_cycle {
                         // Add the edge and rebuild to check no new cycle containing both.
                         let mut extended_edges = blocking_edges.clone();
-                        extended_edges.push(BlockingEdge {
-                            source: probe_source,
-                            target: probe_target,
-                        });
+                        extended_edges.push(edge(probe_source, probe_target));
                         let extended_graph = DependencyGraph::build(&issues, &extended_edges);
                         let cycles = extended_graph.detect_all_cycles();
                         for cycle in &cycles {
                             prop_assert!(
-                                !(cycle.contains(&probe_source) && cycle.contains(&probe_target)),
+                                !(cycle.contains(&probe_source_qid) && cycle.contains(&probe_target_qid)),
                                 "would_create_cycle({}, {}) returned false but they are in the same SCC: {:?}",
-                                probe_source,
-                                probe_target,
+                                probe_source_qid,
+                                probe_target_qid,
                                 cycle
                             );
                         }
+                    }
+                }
+            }
+
+            /// Property: cross-repo issues with same number are distinct graph nodes.
+            ///
+            /// A graph with issues from two different repos (same numbers) should have
+            /// twice as many nodes. The ready set computation should treat them
+            /// independently.
+            #[test]
+            fn cross_repo_same_numbers_distinct_in_graph(
+                num_issues in 1_u64..30,
+                issue_states_a in proptest::collection::vec(arb_issue_state(), 1..30),
+                issue_states_b in proptest::collection::vec(arb_issue_state(), 1..30),
+                edges_within_a in proptest::collection::vec((1_u64..30, 1_u64..30), 0..50),
+                edges_within_b in proptest::collection::vec((1_u64..30, 1_u64..30), 0..50),
+            ) {
+                let repo_a_owner = "org-a";
+                let repo_a_name = "repo-a";
+                let repo_b_owner = "org-b";
+                let repo_b_name = "repo-b";
+
+                // Create issues in both repos with the same numbers.
+                let mut all_issues: Vec<Issue> = Vec::new();
+                for n in 1..=num_issues {
+                    let idx = usize::try_from(n - 1).expect("fits");
+                    let state_a = issue_states_a.get(idx).copied().unwrap_or(IssueState::Open);
+                    let state_b = issue_states_b.get(idx).copied().unwrap_or(IssueState::Open);
+                    all_issues.push(make_issue_repo(repo_a_owner, repo_a_name, n, state_a, Priority::P2));
+                    all_issues.push(make_issue_repo(repo_b_owner, repo_b_name, n, state_b, Priority::P2));
+                }
+
+                // Create edges within each repo only.
+                let mut all_edges: Vec<BlockingEdge> = Vec::new();
+                for (s, t) in &edges_within_a {
+                    if s != t && *s <= num_issues && *t <= num_issues {
+                        all_edges.push(BlockingEdge {
+                            source: qid_repo(repo_a_owner, repo_a_name, *s),
+                            target: qid_repo(repo_a_owner, repo_a_name, *t),
+                        });
+                    }
+                }
+                for (s, t) in &edges_within_b {
+                    if s != t && *s <= num_issues && *t <= num_issues {
+                        all_edges.push(BlockingEdge {
+                            source: qid_repo(repo_b_owner, repo_b_name, *s),
+                            target: qid_repo(repo_b_owner, repo_b_name, *t),
+                        });
+                    }
+                }
+
+                let graph = DependencyGraph::build(&all_issues, &all_edges);
+
+                // Invariant: node count equals 2 * num_issues (both repos' issues are distinct).
+                let expected_nodes = usize::try_from(2 * num_issues).expect("fits");
+                prop_assert_eq!(
+                    graph.graph.node_count(),
+                    expected_nodes,
+                    "Expected {} nodes (2 repos x {} issues), got {}",
+                    expected_nodes,
+                    num_issues,
+                    graph.graph.node_count()
+                );
+
+                // Invariant: ready set issues are all Open.
+                let ready = graph.compute_ready_set(&all_issues);
+                for summary in &ready {
+                    let original = all_issues.iter().find(|i| i.qualified_id == summary.qualified_id);
+                    if let Some(issue) = original {
+                        prop_assert_eq!(
+                            issue.state,
+                            IssueState::Open,
+                            "Ready issue {} should be Open",
+                            summary.qualified_id
+                        );
                     }
                 }
             }

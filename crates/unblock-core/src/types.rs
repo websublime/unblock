@@ -1,15 +1,108 @@
 //! Domain types for the unblock system.
 //!
-//! Defines the core data structures: `Issue`, `IssueComment`, `RelatedIssue`,
-//! `IssueState`, `Status`, `Priority`, `ReadyState`, `IssueType`,
+//! Defines the core data structures: `QualifiedId`, `Issue`, `IssueComment`,
+//! `RelatedIssue`, `IssueState`, `Status`, `Priority`, `ReadyState`, `IssueType`,
 //! `BlockingEdge`, `IssueSummary`, and `BodySections`.
 //!
 //! All types are backend-agnostic — the GitHub client handles mapping from
 //! GitHub-specific field names. The graph engine works identically regardless
 //! of data source.
 
+use std::fmt;
+
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
+
+/// A fully qualified issue identifier: `owner/repo#number`.
+///
+/// Used as the canonical node key in the dependency graph to prevent silent
+/// node collision when cross-repo dependencies reference issues with the
+/// same number (ARCH §5.5).
+///
+/// # Display format
+///
+/// `owner/repo#number` — e.g., `"websublime/unblock#42"`.
+///
+/// # Parsing
+///
+/// The [`FromStr`](std::str::FromStr) implementation accepts the display format:
+/// `"owner/repo#number"` → `QualifiedId { owner: "owner", repo: "repo", number: 42 }`.
+///
+/// Serialized as a flat string in `owner/repo#number` format.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct QualifiedId {
+    /// Repository owner (e.g., `"websublime"`).
+    pub owner: String,
+    /// Repository name (e.g., `"unblock"`).
+    pub repo: String,
+    /// Issue number within the repository.
+    pub number: u64,
+}
+
+impl QualifiedId {
+    /// Create a new `QualifiedId` from explicit parts.
+    #[must_use]
+    pub fn new(owner: impl Into<String>, repo: impl Into<String>, number: u64) -> Self {
+        Self {
+            owner: owner.into(),
+            repo: repo.into(),
+            number,
+        }
+    }
+}
+
+impl fmt::Display for QualifiedId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}#{}", self.owner, self.repo, self.number)
+    }
+}
+
+impl std::str::FromStr for QualifiedId {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.trim();
+        let Some((prefix, num_str)) = s.split_once('#') else {
+            return Err(format!("missing '#' in qualified id: {s}"));
+        };
+        let Some((owner, repo)) = prefix.split_once('/') else {
+            return Err(format!("missing '/' in qualified id prefix: {s}"));
+        };
+        if owner.is_empty() {
+            return Err(format!("empty owner in qualified id: {s}"));
+        }
+        if repo.is_empty() {
+            return Err(format!("empty repo in qualified id: {s}"));
+        }
+        let number = num_str
+            .parse::<u64>()
+            .map_err(|_| format!("invalid number in qualified id: {s}"))?;
+        Ok(Self {
+            owner: owner.to_owned(),
+            repo: repo.to_owned(),
+            number,
+        })
+    }
+}
+
+impl Serialize for QualifiedId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for QualifiedId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
+}
 
 /// A comment on a GitHub issue.
 ///
@@ -33,6 +126,11 @@ pub struct IssueComment {
 /// (`status`, `priority`, `agent`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Issue {
+    /// Fully qualified issue identifier (`owner/repo#number`).
+    ///
+    /// Canonical key for the graph engine. Two issues with the same `number`
+    /// but different `owner/repo` are distinct nodes.
+    pub qualified_id: QualifiedId,
     /// GitHub issue number (e.g. `#42`).
     pub number: u64,
     /// GitHub GraphQL node ID (opaque, used for mutations).
@@ -205,10 +303,10 @@ pub struct RelatedIssue {
 /// The edge direction is: `source` is blocked by `target`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BlockingEdge {
-    /// Issue number that is blocked.
-    pub source: u64,
-    /// Issue number that blocks `source`.
-    pub target: u64,
+    /// Qualified ID of the issue that is blocked.
+    pub source: QualifiedId,
+    /// Qualified ID of the issue that blocks `source`.
+    pub target: QualifiedId,
 }
 
 /// Lightweight summary of an issue for list and ready-set responses.
@@ -217,7 +315,9 @@ pub struct BlockingEdge {
 /// full weight of [`Issue`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueSummary {
-    /// GitHub issue number.
+    /// Fully qualified issue identifier (`owner/repo#number`).
+    pub qualified_id: QualifiedId,
+    /// GitHub issue number (convenience accessor, same as `qualified_id.number`).
     pub number: u64,
     /// Issue title.
     pub title: String,
@@ -270,6 +370,25 @@ pub enum IssueRef {
         /// Issue number in the target repository.
         number: u64,
     },
+}
+
+impl IssueRef {
+    /// Resolve this reference to a fully qualified ID using the given repo context.
+    ///
+    /// - `Local(n)` resolves to `owner/repo#n` using the provided `owner` and `repo`.
+    /// - `CrossRepo { owner, repo, number }` is already fully qualified and ignores
+    ///   the context parameters.
+    #[must_use]
+    pub fn resolve(&self, owner: &str, repo: &str) -> QualifiedId {
+        match self {
+            Self::Local(n) => QualifiedId::new(owner, repo, *n),
+            Self::CrossRepo {
+                owner,
+                repo,
+                number,
+            } => QualifiedId::new(owner.clone(), repo.clone(), *number),
+        }
+    }
 }
 
 impl std::fmt::Display for IssueRef {
@@ -517,6 +636,89 @@ fn non_empty_trimmed(s: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── QualifiedId ────────────────────────────────────────────────────
+
+    #[test]
+    fn qualified_id_display() {
+        let qid = QualifiedId::new("acme", "widgets", 42);
+        assert_eq!(qid.to_string(), "acme/widgets#42");
+    }
+
+    #[test]
+    fn qualified_id_parse_roundtrip() {
+        let original = QualifiedId::new("acme", "widgets", 42);
+        let s = original.to_string();
+        let parsed: QualifiedId = s.parse().unwrap();
+        assert_eq!(original, parsed);
+    }
+
+    #[test]
+    fn qualified_id_parse_invalid_no_hash() {
+        assert!("acme/widgets".parse::<QualifiedId>().is_err());
+    }
+
+    #[test]
+    fn qualified_id_parse_invalid_no_slash() {
+        assert!("acme#42".parse::<QualifiedId>().is_err());
+    }
+
+    #[test]
+    fn qualified_id_parse_invalid_empty_owner() {
+        assert!("/widgets#42".parse::<QualifiedId>().is_err());
+    }
+
+    #[test]
+    fn qualified_id_parse_invalid_empty_repo() {
+        assert!("acme/#42".parse::<QualifiedId>().is_err());
+    }
+
+    #[test]
+    fn qualified_id_parse_invalid_number() {
+        assert!("acme/widgets#abc".parse::<QualifiedId>().is_err());
+    }
+
+    #[test]
+    fn qualified_id_serde_roundtrip() {
+        let qid = QualifiedId::new("acme", "widgets", 42);
+        let json = serde_json::to_string(&qid).expect("serialize");
+        assert_eq!(json, "\"acme/widgets#42\"");
+        let back: QualifiedId = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(qid, back);
+    }
+
+    #[test]
+    fn qualified_id_hash_eq_distinct_repos() {
+        let a = QualifiedId::new("acme", "widgets", 42);
+        let b = QualifiedId::new("acme", "gadgets", 42);
+        assert_ne!(a, b);
+        // Verify they hash differently (with high probability).
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(a.clone());
+        set.insert(b.clone());
+        assert_eq!(set.len(), 2);
+    }
+
+    // ── IssueRef::resolve ──────────────────────────────────────────────
+
+    #[test]
+    fn issue_ref_resolve_local() {
+        let r = IssueRef::Local(42);
+        let qid = r.resolve("acme", "widgets");
+        assert_eq!(qid, QualifiedId::new("acme", "widgets", 42));
+    }
+
+    #[test]
+    fn issue_ref_resolve_cross_repo_ignores_context() {
+        let r = IssueRef::CrossRepo {
+            owner: "other".to_owned(),
+            repo: "stuff".to_owned(),
+            number: 7,
+        };
+        let qid = r.resolve("acme", "widgets");
+        assert_eq!(qid, QualifiedId::new("other", "stuff", 7));
+    }
 
     // ── Priority::as_sort_key ───────────────────────────────────────────
 
