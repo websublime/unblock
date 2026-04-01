@@ -641,14 +641,14 @@ refs/unblock/
 
 **Why git objects and not a file cache:**
 - Namespace `refs/unblock/*` is never pushed or fetched by default git refspecs — strictly local
-- No branch management, no worktree, no subprocess needed — git2 or gix reads/writes blobs directly
+- No branch management, no worktree, no subprocess needed — git2 (vendored libgit2) reads/writes blobs directly
 - `git gc` manages object lifecycle automatically
 - Schema versioning (`version: u32` in every blob) handles binary upgrades gracefully
 - Discardable: deleting all `refs/unblock/*` refs returns to pure in-memory behaviour with zero data loss
 
 **Scope boundary:** The git object cache stores **only computed graph data** (subgraphs, cross-edges, cache metadata). It never stores issue body content, comments, or mutation state. `show` remains always-fresh regardless of this cache.
 
-**Dependency:** Epic 3.2 requires a build spike (Task 3.2.0) to validate git2/gix/subprocess against all musl and Windows build targets before implementation begins. See Risk Register.
+**Library choice:** `git2` with `libgit2-sys` vendored (validated 2026-04-01 on macOS ARM64 — all 6 required operations: write_blob, read_blob, create_ref, read_ref, list_refs, delete_ref passed). Remaining validation: CI must confirm the 5 distribution build targets (Linux musl x86_64/ARM64, macOS x86_64/ARM64, Windows x86_64) compile and pass a blob round-trip test before Epic 3.2 implementation begins.
 
 ### 7.4 Field Validation at Boot
 
