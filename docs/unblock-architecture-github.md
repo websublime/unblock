@@ -539,9 +539,9 @@ struct CacheEntry {
 pub enum CacheResult<'a> {
     /// Cache is within TTL and was not invalidated by a write.
     Fresh(&'a CacheEntry),
-    /// Cache exists but is stale (expired or invalidated). Caller must rebuild unconditionally.
+    /// Cache exists but TTL expired. Caller must rebuild unconditionally.
     Stale(&'a CacheEntry),
-    /// No cache entry — cold start or first use.
+    /// No cache entry — cold start, first use, or post-write invalidation.
     Empty,
 }
 
@@ -564,8 +564,9 @@ impl GraphCache {
     /// Update the cache after a successful rebuild.
     pub fn update(&self, graph: DependencyGraph) { /* ... */ }
 
-    /// Mark cache as stale. Does NOT clear the entry — stale data can
-    /// still be served under P3 (fail open for reads) if the rebuild fails.
+    /// Clear the cache entry. After invalidation, `get()` returns `Empty`.
+    /// This is deliberate: after a write, cached data is objectively wrong.
+    /// An error is preferable to serving stale post-write data.
     pub fn invalidate(&self) { /* ... */ }
 
     /// Check if cache is fresh (TTL not expired, not invalidated).
@@ -580,7 +581,7 @@ impl GraphCache {
 Write operation (close, claim, create, depends, dep_remove, update, reopen)
   │
   ├─→ Execute write in GitHub (mutation)
-  ├─→ cache.invalidate()              ← marks stale, keeps entry for fail-open
+  ├─→ cache.invalidate()              ← clears entry (post-write data is wrong)
   ├─→ fetch_graph_data()              ← unconditional fetch
   ├─→ Build new DependencyGraph
   ├─→ Compute ready set
