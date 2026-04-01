@@ -179,7 +179,7 @@ Group-by, sort, and swimlanes are configured manually in the GitHub UI after cre
 
 ## 6. MCP Tools
 
-19 tools total. Each operates on the current repo.
+20 tools total. Each operates on the current repo.
 
 ### 6.1 Core Workflow Tools
 
@@ -594,6 +594,42 @@ Uses GitHub's advanced search API (`ISSUE_ADVANCED` type in GraphQL).
    - `://timeline` (roadmap) — date-based timeline view
 8. If `migrate`: iterate all open issues, add to Project, set defaults
 9. Report: fields created + views created + manual config guidance
+
+---
+
+#### `reconcile` — Detect and repair semantic drift
+
+**Purpose:** Detect semantic drift between the computed dependency graph and the state stored in GitHub Projects V2 fields. Handles external mutations (human closes issue via UI, removes blocking relationship, etc.). Optionally repairs detected drift.
+
+**Input:**
+- `fix` (optional, boolean, default: false) — When true, auto-repair repairable drift types.
+- `stale_claim_hours` (optional, number, default: 24) — Hours after which an in-progress claim is considered stale.
+
+**Logic:**
+1. Fresh fetch from GitHub (bypasses cache entirely)
+2. Rebuild `DependencyGraph` from scratch
+3. Compute ready set
+4. Run `ReconcileEngine::analyse()` — detects 7 drift types: `StaleReadyState`, `UncascadedClosure`, `OrphanedBlockingEdge`, `MalformedAgentField`, `MissingProjectField`, `CycleDetected`, `StaleClaim`
+5. If `fix: true`: auto-repair `StaleReadyState` and `UncascadedClosure` (with audit comments). Cycles and stale claims: report only (human decision)
+6. Update cache with fresh graph
+
+**Output:**
+```json
+{
+  "repo": "websublime/unblock",
+  "reconciled_at": "2026-04-01T12:00:00Z",
+  "issues_scanned": 47,
+  "edges_scanned": 23,
+  "clean": true,
+  "drift_found": [],
+  "repaired": [],
+  "errors": []
+}
+```
+
+**Cache:** Always invalidates — fresh fetch bypasses cache, then populates with fresh graph.
+
+**Detail document:** `unblock-reconciliation-plan.md`
 
 ---
 
@@ -1114,7 +1150,7 @@ See `unblock-prd-desktop.md` and `unblock-desktop-project-plan.md` for the deskt
 | D4 | Single blocking type | GitHub native. Covers 95% of workflows. Informational deps via mentions |
 | D5 | Markdown body sections for rich fields | Three sections only (Description, Design Notes, Acceptance Criteria). Work progress lives in comments, cross-references in auto-links. Each data type in the correct GitHub primitive |
 | D6 | Ready State as convenience field | Project field for board filtering. MCP always recomputes from graph |
-| D7 | 19 tools total | Focused on what agents uniquely need. `label`, `delete` handled by GitHub UI/CLI. `update`, `comment`, `reopen` included because agents can't use UI and need full CRUD. `commit_context` provides structured commit messages with trailers for audit trail |
+| D7 | 20 tools total | Focused on what agents uniquely need. `label`, `delete` handled by GitHub UI/CLI. `update`, `comment`, `reopen` included because agents can't use UI and need full CRUD. `commit_context` provides structured commit messages with trailers for audit trail. `reconcile` detects and repairs semantic drift between graph and GitHub state |
 | D8 | Auto-detect repo from git remote | Zero config. Override via `UNBLOCK_REPO` |
 | D9 | Plugin bundles `.mcp.json` | Only needs `GITHUB_TOKEN`. Auto-detect handles repo scoping |
 | D10 | Milestones as Epics | Native GitHub with due dates and progress. No custom entity |

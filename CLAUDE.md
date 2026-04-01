@@ -118,7 +118,7 @@ GITHUB_TOKEN=ghp_... cargo run -p unblock-mcp   # run locally
 
 - **unblock-core** — pure Rust. Domain types, graph engine, cache. Zero network
 - **unblock-github** — GitHub API client (GraphQL + REST). Shared across MCP and future desktop
-- **unblock-mcp** — MCP server binary. 17 tool handlers, stdio transport
+- **unblock-mcp** — MCP server binary. 10 tool handlers implemented (20 planned), stdio transport
 
 ## Commit Strategy
 

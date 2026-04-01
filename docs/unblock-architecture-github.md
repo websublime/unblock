@@ -63,7 +63,7 @@
 
 | Actor | Interface | Operations |
 |---|---|---|
-| AI Agent | MCP protocol (stdio) | All 19 tools |
+| AI Agent | MCP protocol (stdio) | All 20 tools |
 | Orchestrator | MCP protocol (stdio) | `claim --agent X`, `ready --agent X`, `blocked` |
 | Human Developer | GitHub UI, `gh` CLI | Issue CRUD, Projects boards, labels, milestones |
 
@@ -168,7 +168,7 @@ The graph engine (`unblock-core`) is fully testable with in-memory data. No netw
 | `errors` | core | Domain error types (snafu) |
 | `server` | mcp | MCP protocol setup, tool registration, request routing (rmcp) |
 | `errors` | mcp | Infrastructure errors, MCP error conversion |
-| `tools/*` | mcp | 18 tool implementations, each in its own module |
+| `tools/*` | mcp | 20 tool implementations, each in its own module |
 | `client` | github | HTTP client wrapper, auth, auto-detect repo |
 | `graphql` | github | Read queries: issues, blocking edges, project field values |
 | `mutations` | github | Write operations: create, update, close, reopen, addBlockedBy, comments |
@@ -1013,7 +1013,7 @@ impl UnblockServer {
     pub fn new(state: ServerState) -> Self { /* ... */ }
 }
 
-// Tool registration via rmcp macros — 19 tools total.
+// Tool registration via rmcp macros — 20 tools total.
 // Pattern (representative examples):
 
 #[tool(name = "ready", description = "Find issues that can be worked on right now — no active blockers")]
@@ -1394,6 +1394,32 @@ Flow:
 
 API calls: 1 (show — always fresh, no cache)
 Read-only: no cache invalidation.
+```
+
+### 10.20 `reconcile`
+
+```
+Input:  ReconcileParams { fix: bool (default false), stale_claim_hours: u64 (default 24) }
+Output: ReconcileOutput { report: DriftReport }
+
+Flow:
+  1. Fresh fetch from GitHub (bypasses cache entirely)
+  2. Rebuild DependencyGraph from scratch
+  3. Compute ready set
+  4. ReconcileEngine::analyse(graph, issues, ready_set, now) → DriftReport
+  5. If fix: true → repair StaleReadyState (field update) and UncascadedClosure
+     (field update + audit comment). Cycles and stale claims: report only
+  6. Populate cache with fresh graph
+
+DriftReport contains: repo, reconciled_at, issues_scanned, edges_scanned,
+  drift_found: Vec<DriftKind>, repaired: Vec<DriftKind>, errors: Vec<String>, clean: bool
+
+7 drift types: StaleReadyState, UncascadedClosure, OrphanedBlockingEdge,
+  MalformedAgentField, MissingProjectField, CycleDetected, StaleClaim
+
+API calls: 1 fresh fetch + N repairs (when fix: true)
+Cache: always invalidates — fresh fetch, then populate.
+Detail: unblock-reconciliation-plan.md
 ```
 
 ---
