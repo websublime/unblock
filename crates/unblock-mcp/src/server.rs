@@ -1899,7 +1899,7 @@ impl UnblockServer {
     /// warnings until Epics 1.5 and 1.6 wire them in.
     #[tool(
         name = "prime",
-        description = "Session entry point for every agent session. Returns categorised issue lists: in_progress, ready, blocked, hotspots (most-blocking), and stale claims. Includes session metadata and drift warnings. Always does a fresh fetch — bypasses cache. Use stale_threshold_hours to configure stale claim detection (default 24h) and max_per_category to limit output size (default 10)."
+        description = "Session entry point for every agent session. Returns categorised issue lists: in_progress, ready, blocked, hotspots (most-blocking), and stale claims. Includes session metadata and drift warnings. Always does a fresh fetch — bypasses cache. Use stale_threshold_hours to configure stale claim detection (default 24h), max_per_category to limit output size (default 10), and agent to filter in_progress/ready/blocked/stale by agent name (exact match; completed and hotspots are never filtered)."
     )]
     async fn prime(
         &self,

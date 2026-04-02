@@ -46,6 +46,12 @@ pub struct PrimeParams {
     /// Default: 10. Must be at least 1; zero is rejected with an
     /// `INVALID_PARAMS` error.
     pub max_per_category: Option<usize>,
+    /// Filter all categories by agent name. Exact match. When set, only
+    /// issues claimed by this agent appear in `in_progress`, `ready`,
+    /// `blocked`, and `stale`. The `completed` and `hotspots` categories
+    /// are never filtered (global continuity context and structural graph
+    /// properties respectively).
+    pub agent: Option<String>,
 }
 
 /// Output from the `prime` MCP tool.
@@ -302,31 +308,43 @@ pub async fn handle_prime(
     state.cache.update(ready_summaries, graph).await;
     tracing::debug!("Cache updated with fresh graph from prime");
 
-    // 5. Build result with truncation.
+    // 5. Apply agent filter to relevant categories (PRD §6.3).
+    //    `completed` and `hotspots` are NOT filtered — completed provides
+    //    global continuity context and hotspots are structural graph properties.
+    let mut filtered_ip = categories.in_progress;
+    let mut filtered_ready = categories.ready;
+    let mut filtered_blocked = categories.blocked;
+    let mut filtered_stale = categories.stale;
+
+    if let Some(ref agent_filter) = params.agent {
+        filtered_ip.retain(|s| s.agent.as_deref() == Some(agent_filter.as_str()));
+        filtered_ready.retain(|s| s.agent.as_deref() == Some(agent_filter.as_str()));
+        filtered_blocked.retain(|s| s.agent.as_deref() == Some(agent_filter.as_str()));
+        filtered_stale.retain(|s| s.agent.as_deref() == Some(agent_filter.as_str()));
+    }
+
+    // 6. Build result with counts computed AFTER filtering.
     let counts = PrimeCounts {
-        in_progress: categories.in_progress.len(),
-        ready: categories.ready.len(),
-        blocked: categories.blocked.len(),
+        in_progress: filtered_ip.len(),
+        ready: filtered_ready.len(),
+        blocked: filtered_blocked.len(),
         completed: categories.completed.len(),
         hotspots: categories.hotspots.len(),
-        stale: categories.stale.len(),
+        stale: filtered_stale.len(),
     };
 
     Ok(PrimeResult {
-        in_progress: categories
-            .in_progress
+        in_progress: filtered_ip
             .iter()
             .take(max_per_category)
             .map(PrimeIssueSummary::from_core)
             .collect(),
-        ready: categories
-            .ready
+        ready: filtered_ready
             .iter()
             .take(max_per_category)
             .map(PrimeIssueSummary::from_core)
             .collect(),
-        blocked: categories
-            .blocked
+        blocked: filtered_blocked
             .iter()
             .take(max_per_category)
             .map(PrimeIssueSummary::from_core)
@@ -341,11 +359,7 @@ pub async fn handle_prime(
             .into_iter()
             .take(max_per_category)
             .collect(),
-        stale: categories
-            .stale
-            .into_iter()
-            .take(max_per_category)
-            .collect(),
+        stale: filtered_stale.into_iter().take(max_per_category).collect(),
         session: SessionMeta::default(),
         drift_warnings: None,
         counts,
@@ -1052,6 +1066,7 @@ mod tests {
         let params = PrimeParams {
             stale_threshold_hours: Some(0),
             max_per_category: None,
+            agent: None,
         };
 
         let err = handle_prime(&params, &state)
@@ -1071,6 +1086,7 @@ mod tests {
         let params = PrimeParams {
             stale_threshold_hours: None,
             max_per_category: Some(0),
+            agent: None,
         };
 
         let err = handle_prime(&params, &state)
@@ -1228,5 +1244,226 @@ mod tests {
             .map(PrimeIssueSummary::from_core)
             .collect();
         assert_eq!(truncated.len(), 5);
+    }
+
+    // ── Agent filter tests ───────────────────────────────────────────
+
+    /// Helper: apply agent filter the same way `handle_prime` does, returning
+    /// filtered category lengths for assertions.
+    fn apply_agent_filter(
+        categories: &CategorisedIssues,
+        agent: Option<&str>,
+    ) -> (usize, usize, usize, usize) {
+        let count_summary = |items: &[IssueSummary]| -> usize {
+            items
+                .iter()
+                .filter(|s| agent.is_none_or(|a| s.agent.as_deref() == Some(a)))
+                .count()
+        };
+        let count_stale = categories
+            .stale
+            .iter()
+            .filter(|s| agent.is_none_or(|a| s.agent.as_deref() == Some(a)))
+            .count();
+        (
+            count_summary(&categories.in_progress),
+            count_summary(&categories.ready),
+            count_summary(&categories.blocked),
+            count_stale,
+        )
+    }
+
+    #[test]
+    fn agent_filter_none_returns_all() {
+        // Two in-progress issues with different agents.
+        let mut issue1 = test_issue(1, IssueState::Open, Status::InProgress);
+        issue1.agent = Some("agent-x".to_owned());
+        issue1.claimed_at = Some(Utc::now());
+        let mut issue2 = test_issue(2, IssueState::Open, Status::InProgress);
+        issue2.agent = Some("agent-y".to_owned());
+        issue2.claimed_at = Some(Utc::now());
+        let issues = vec![issue1, issue2];
+
+        let graph = DependencyGraph::build(&issues, &[]);
+        let ready = graph.compute_ready_set(&issues);
+        let result = categorise_issues(&issues, &graph, &ready, 24, Utc::now());
+
+        let (ip, _r, _b, _s) = apply_agent_filter(&result, None);
+        assert_eq!(ip, 2, "None agent should return all in_progress issues");
+    }
+
+    #[test]
+    fn agent_filter_matches_in_progress() {
+        let mut issue1 = test_issue(1, IssueState::Open, Status::InProgress);
+        issue1.agent = Some("agent-x".to_owned());
+        issue1.claimed_at = Some(Utc::now());
+        let mut issue2 = test_issue(2, IssueState::Open, Status::InProgress);
+        issue2.agent = Some("agent-y".to_owned());
+        issue2.claimed_at = Some(Utc::now());
+        let issues = vec![issue1, issue2];
+
+        let graph = DependencyGraph::build(&issues, &[]);
+        let ready = graph.compute_ready_set(&issues);
+        let result = categorise_issues(&issues, &graph, &ready, 24, Utc::now());
+
+        let (ip, _, _, _) = apply_agent_filter(&result, Some("agent-x"));
+        assert_eq!(ip, 1, "should filter in_progress to agent-x only");
+    }
+
+    #[test]
+    fn agent_filter_matches_ready() {
+        let mut issue1 = test_issue(1, IssueState::Open, Status::Open);
+        issue1.agent = Some("agent-x".to_owned());
+        let mut issue2 = test_issue(2, IssueState::Open, Status::Open);
+        issue2.agent = Some("agent-y".to_owned());
+        let issues = vec![issue1, issue2];
+
+        let graph = DependencyGraph::build(&issues, &[]);
+        let ready = graph.compute_ready_set(&issues);
+        let result = categorise_issues(&issues, &graph, &ready, 24, Utc::now());
+
+        let (_, r, _, _) = apply_agent_filter(&result, Some("agent-x"));
+        assert_eq!(r, 1, "should filter ready to agent-x only");
+    }
+
+    #[test]
+    fn agent_filter_matches_blocked() {
+        // #1 blocks #2 and #3. Agents assigned to the blocked issues.
+        let issue1 = test_issue(1, IssueState::Open, Status::Open);
+        let mut issue2 = test_issue(2, IssueState::Open, Status::Blocked);
+        issue2.agent = Some("agent-x".to_owned());
+        issue2.ready_state = ReadyState::Blocked;
+        let mut issue3 = test_issue(3, IssueState::Open, Status::Blocked);
+        issue3.agent = Some("agent-y".to_owned());
+        issue3.ready_state = ReadyState::Blocked;
+        let issues = vec![issue1, issue2, issue3];
+        let edges = vec![
+            BlockingEdge {
+                source: qid(2),
+                target: qid(1),
+            },
+            BlockingEdge {
+                source: qid(3),
+                target: qid(1),
+            },
+        ];
+
+        let graph = DependencyGraph::build(&issues, &edges);
+        let ready = graph.compute_ready_set(&issues);
+        let result = categorise_issues(&issues, &graph, &ready, 24, Utc::now());
+
+        let (_, _, b, _) = apply_agent_filter(&result, Some("agent-x"));
+        assert_eq!(b, 1, "should filter blocked to agent-x only");
+    }
+
+    #[test]
+    fn agent_filter_matches_stale() {
+        let mut issue1 = test_issue(1, IssueState::Open, Status::InProgress);
+        issue1.agent = Some("agent-x".to_owned());
+        issue1.claimed_at = Some(Utc::now() - chrono::Duration::hours(48));
+        let mut issue2 = test_issue(2, IssueState::Open, Status::InProgress);
+        issue2.agent = Some("agent-y".to_owned());
+        issue2.claimed_at = Some(Utc::now() - chrono::Duration::hours(48));
+        let issues = vec![issue1, issue2];
+
+        let graph = DependencyGraph::build(&issues, &[]);
+        let ready = graph.compute_ready_set(&issues);
+        let result = categorise_issues(&issues, &graph, &ready, 24, Utc::now());
+
+        let (_, _, _, s) = apply_agent_filter(&result, Some("agent-x"));
+        assert_eq!(s, 1, "should filter stale to agent-x only");
+    }
+
+    #[test]
+    fn agent_filter_does_not_affect_completed() {
+        // Completed issues should not be filtered by agent.
+        let mut issue = test_issue(1, IssueState::Closed, Status::Closed);
+        issue.agent = Some("agent-x".to_owned());
+        let issues = vec![issue];
+
+        let graph = DependencyGraph::build(&issues, &[]);
+        let ready = graph.compute_ready_set(&issues);
+        let result = categorise_issues(&issues, &graph, &ready, 24, Utc::now());
+
+        // Completed has no agent field — it should always appear regardless
+        // of what agent filter we would apply.
+        assert_eq!(
+            result.completed.len(),
+            1,
+            "completed should not be filtered by agent"
+        );
+    }
+
+    #[test]
+    fn agent_filter_does_not_affect_hotspots() {
+        // Hotspots are structural — should not be filtered by agent.
+        let mut issue1 = test_issue(1, IssueState::Open, Status::Open);
+        issue1.agent = Some("agent-x".to_owned());
+        let mut issue2 = test_issue(2, IssueState::Open, Status::Blocked);
+        issue2.agent = Some("agent-y".to_owned());
+        issue2.ready_state = ReadyState::Blocked;
+        let issues = vec![issue1, issue2];
+        let edges = vec![BlockingEdge {
+            source: qid(2),
+            target: qid(1),
+        }];
+
+        let graph = DependencyGraph::build(&issues, &edges);
+        let ready = graph.compute_ready_set(&issues);
+        let result = categorise_issues(&issues, &graph, &ready, 24, Utc::now());
+
+        // Hotspot #1 is agent-x, but even filtering for agent-y should not
+        // remove hotspots (they are not filtered).
+        assert_eq!(
+            result.hotspots.len(),
+            1,
+            "hotspots should not be filtered by agent"
+        );
+    }
+
+    #[test]
+    fn agent_filter_counts_reflect_filtered_totals() {
+        // Two in_progress issues, two ready, filter to one agent.
+        let mut issue1 = test_issue(1, IssueState::Open, Status::InProgress);
+        issue1.agent = Some("agent-x".to_owned());
+        issue1.claimed_at = Some(Utc::now());
+        let mut issue2 = test_issue(2, IssueState::Open, Status::InProgress);
+        issue2.agent = Some("agent-y".to_owned());
+        issue2.claimed_at = Some(Utc::now());
+        let mut issue3 = test_issue(3, IssueState::Open, Status::Open);
+        issue3.agent = Some("agent-x".to_owned());
+        let mut issue4 = test_issue(4, IssueState::Open, Status::Open);
+        issue4.agent = Some("agent-y".to_owned());
+        let issues = vec![issue1, issue2, issue3, issue4];
+
+        let graph = DependencyGraph::build(&issues, &[]);
+        let ready = graph.compute_ready_set(&issues);
+        let categories = categorise_issues(&issues, &graph, &ready, 24, Utc::now());
+
+        // Simulate the filtering handle_prime does.
+        let agent_filter = Some("agent-x".to_owned());
+        let mut in_progress = categories.in_progress;
+        let mut ready_list = categories.ready;
+        if let Some(ref f) = agent_filter {
+            in_progress.retain(|s| s.agent.as_deref() == Some(f.as_str()));
+            ready_list.retain(|s| s.agent.as_deref() == Some(f.as_str()));
+        }
+
+        assert_eq!(in_progress.len(), 1, "filtered in_progress count");
+        assert_eq!(ready_list.len(), 1, "filtered ready count");
+    }
+
+    #[test]
+    fn prime_params_agent_deserializes() {
+        let json = r#"{"agent": "agent-x"}"#;
+        let params: PrimeParams = serde_json::from_str(json).expect("should deserialize");
+        assert_eq!(params.agent.as_deref(), Some("agent-x"));
+    }
+
+    #[test]
+    fn prime_params_agent_defaults_to_none() {
+        let json = r"{}";
+        let params: PrimeParams = serde_json::from_str(json).expect("should deserialize");
+        assert!(params.agent.is_none());
     }
 }
