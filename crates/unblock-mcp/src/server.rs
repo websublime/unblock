@@ -155,10 +155,8 @@ impl ServerState {
     /// when the lock has not been set (e.g., in tests or when `initialize` is not
     /// called).
     #[must_use]
-    pub fn agent_kind_str(&self) -> String {
-        self.agent_kind
-            .get()
-            .map_or_else(|| "unknown".into(), |k| k.as_str().to_owned())
+    pub fn agent_kind_str(&self) -> &str {
+        self.agent_kind.get().map_or("unknown", AgentKind::as_str)
     }
 }
 
@@ -2202,7 +2200,7 @@ mod tests {
 
         // Exercise the extraction pattern inside the subscriber scope.
         tracing::subscriber::with_default(subscriber, || {
-            let kind: String = state.agent_kind_str();
+            let kind: &str = state.agent_kind_str();
             info!(agent.kind = %kind, "Ready tool invoked");
         });
 
@@ -2256,7 +2254,7 @@ mod tests {
         // Do NOT set agent_kind — test the fallback.
 
         tracing::subscriber::with_default(subscriber, || {
-            let kind: String = state.agent_kind_str();
+            let kind: &str = state.agent_kind_str();
             info!(agent.kind = %kind, "Claim tool invoked");
         });
 
