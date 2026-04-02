@@ -1219,6 +1219,10 @@ mod tests {
             .output()
             .expect("failed to spawn subprocess");
 
+        assert!(
+            output.status.success(),
+            "subprocess exited with non-zero status: {output:?}"
+        );
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
             stdout.contains("AGENT_FIELD=test-supervisor"),
@@ -1244,6 +1248,10 @@ mod tests {
             .output()
             .expect("failed to spawn subprocess");
 
+        assert!(
+            output.status.success(),
+            "subprocess exited with non-zero status: {output:?}"
+        );
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
             stdout.contains("AGENT_FIELD=NONE"),
