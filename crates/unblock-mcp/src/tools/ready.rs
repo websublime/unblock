@@ -96,7 +96,7 @@ impl ReadyIssueSummary {
         Self {
             number: summary.number,
             title: summary.title.clone(),
-            issue_type: summary.issue_type.map(|it| format!("{it:?}")),
+            issue_type: summary.issue_type.map(|it| it.to_string()),
             status: format!("{:?}", summary.status),
             priority: format!("{:?}", summary.priority),
             agent: summary.agent.clone(),
