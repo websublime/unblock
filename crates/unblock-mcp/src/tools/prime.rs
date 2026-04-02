@@ -250,10 +250,7 @@ impl SessionMeta {
             .get()
             .map_or_else(|| "unknown".to_owned(), |c| c.name.clone());
 
-        let agent_kind = state
-            .agent_kind
-            .get()
-            .map_or_else(|| "unknown".to_owned(), |k| k.as_str().to_owned());
+        let agent_kind = state.agent_kind_str();
 
         let agent_field = std::env::var("UNBLOCK_AGENT").ok();
 
