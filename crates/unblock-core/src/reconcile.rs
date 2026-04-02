@@ -782,4 +782,171 @@ mod tests {
             } if missing_target.number == 999
         )));
     }
+
+    #[test]
+    fn no_false_positives_on_clean_graph() {
+        // 5+ issues with varied topology (some edges, some standalone),
+        // all with CORRECT ReadyState. The engine must return clean: true.
+        //
+        // Topology:
+        //   #1 (open, standalone)          → Ready
+        //   #2 (open, blocked by #5 closed) → Ready (blocker is closed)
+        //   #3 (open, blocked by #4 open)   → Blocked
+        //   #4 (open, standalone)           → Ready
+        //   #5 (closed)                     → Closed
+        //   #6 (open, blocked by #5 closed) → Ready (blocker is closed)
+
+        let q2 = qid("acme", "widgets", 2);
+        let q3 = qid("acme", "widgets", 3);
+        let q4 = qid("acme", "widgets", 4);
+        let q5 = qid("acme", "widgets", 5);
+        let q6 = qid("acme", "widgets", 6);
+
+        let issue1 = make_issue("acme", "widgets", 1, IssueState::Open, ReadyState::Ready);
+        let issue2 = make_issue("acme", "widgets", 2, IssueState::Open, ReadyState::Ready);
+        let issue3 = make_issue("acme", "widgets", 3, IssueState::Open, ReadyState::Blocked);
+        let issue4 = make_issue("acme", "widgets", 4, IssueState::Open, ReadyState::Ready);
+        let issue5 = make_issue("acme", "widgets", 5, IssueState::Closed, ReadyState::Closed);
+        let issue6 = make_issue("acme", "widgets", 6, IssueState::Open, ReadyState::Ready);
+
+        let issues_vec = vec![issue1, issue2, issue3, issue4, issue5, issue6];
+        let edges = vec![
+            edge(&q2, &q5), // #2 blocked by #5 (closed — so #2 is Ready)
+            edge(&q3, &q4), // #3 blocked by #4 (open — so #3 is Blocked)
+            edge(&q6, &q5), // #6 blocked by #5 (closed — so #6 is Ready)
+        ];
+        let graph = DependencyGraph::build(&issues_vec, &edges);
+        let computed_ready = ready_set(&graph, &issues_vec);
+        let by_id = issue_map(&issues_vec);
+
+        let engine = ReconcileEngine::new(24);
+        let report = engine.analyse(&graph, &by_id, &computed_ready, Utc::now());
+
+        assert!(
+            report.clean,
+            "Expected clean graph but found drift: {:?}",
+            report.drift_found
+        );
+        assert!(report.drift_found.is_empty());
+        assert_eq!(report.issues_scanned, 6);
+        assert_eq!(report.edges_scanned, 3);
+    }
+
+    // ── Property tests (proptest) ───────────────────────────────────────
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// Strategy to generate a random `IssueState`.
+        fn arb_issue_state() -> impl Strategy<Value = IssueState> {
+            prop_oneof![Just(IssueState::Open), Just(IssueState::Closed),]
+        }
+
+        /// Strategy to generate a random `Priority`.
+        fn arb_priority() -> impl Strategy<Value = Priority> {
+            prop_oneof![
+                Just(Priority::P0),
+                Just(Priority::P1),
+                Just(Priority::P2),
+                Just(Priority::P3),
+                Just(Priority::P4),
+            ]
+        }
+
+        proptest! {
+            /// Property: a consistent graph (where every issue's ReadyState matches
+            /// what the graph computes) always produces a clean DriftReport.
+            ///
+            /// Strategy:
+            /// 1. Generate N issues with random IssueState and Priority.
+            /// 2. Generate random edges (filtering self-loops and out-of-range).
+            /// 3. Remove edges that would create cycles (to avoid CycleDetected drift).
+            /// 4. Build the graph and compute the ready set.
+            /// 5. SET each issue's ReadyState to match the graph computation:
+            ///    - Closed → ReadyState::Closed
+            ///    - Open + in ready set → ReadyState::Ready
+            ///    - Open + not in ready set → ReadyState::Blocked
+            /// 6. Assert ReconcileEngine::analyse() returns clean: true.
+            #[test]
+            fn prop_reconcile_on_consistent_graph_always_clean(
+                num_issues in 1_u64..30,
+                issue_states in proptest::collection::vec(arb_issue_state(), 1..30),
+                issue_priorities in proptest::collection::vec(arb_priority(), 1..30),
+                raw_edges in proptest::collection::vec((1_u64..30, 1_u64..30), 0..60),
+            ) {
+                // 1. Generate issues with random states and priorities.
+                let mut issues: Vec<Issue> = (1..=num_issues)
+                    .map(|n| {
+                        let idx = usize::try_from(n - 1).expect("fits in usize");
+                        let state = issue_states.get(idx).copied().unwrap_or(IssueState::Open);
+                        let priority = issue_priorities.get(idx).copied().unwrap_or(Priority::P2);
+                        let mut issue = make_issue("acme", "test", n, state, ReadyState::Ready);
+                        issue.priority = priority;
+                        issue
+                    })
+                    .collect();
+
+                // 2. Filter edges: valid range, no self-loops.
+                let candidate_edges: Vec<(u64, u64)> = raw_edges
+                    .into_iter()
+                    .filter(|(s, t)| *s != *t && *s <= num_issues && *t <= num_issues)
+                    .collect();
+
+                // 3. Remove edges that would create cycles.
+                // Add edges one at a time, checking for cycles.
+                let mut safe_edges: Vec<BlockingEdge> = Vec::new();
+                for (s, t) in candidate_edges {
+                    let source_qid = qid("acme", "test", s);
+                    let target_qid = qid("acme", "test", t);
+
+                    // Build a temporary graph with the candidate edge to check for cycles.
+                    let mut test_edges = safe_edges.clone();
+                    test_edges.push(BlockingEdge {
+                        source: source_qid,
+                        target: target_qid,
+                    });
+                    let test_graph = DependencyGraph::build(&issues, &test_edges);
+                    if test_graph.detect_all_cycles().is_empty() {
+                        safe_edges = test_edges;
+                    }
+                }
+
+                // 4. Build graph and compute ready set.
+                let graph = DependencyGraph::build(&issues, &safe_edges);
+                let computed_ready = ready_set(&graph, &issues);
+
+                // 5. Set each issue's ReadyState to match what the graph says.
+                for issue in &mut issues {
+                    if issue.state == IssueState::Closed {
+                        issue.ready_state = ReadyState::Closed;
+                    } else if computed_ready.contains(&issue.qualified_id) {
+                        issue.ready_state = ReadyState::Ready;
+                    } else {
+                        issue.ready_state = ReadyState::Blocked;
+                    }
+                }
+
+                // Rebuild graph with corrected ReadyState values (graph itself
+                // doesn't use ReadyState, but we need the same structure).
+                let graph = DependencyGraph::build(&issues, &safe_edges);
+                let computed_ready = ready_set(&graph, &issues);
+                let by_id = issue_map(&issues);
+
+                // 6. Analyse and assert clean.
+                let engine = ReconcileEngine::new(24);
+                let report = engine.analyse(&graph, &by_id, &computed_ready, chrono::Utc::now());
+
+                // The graph should be clean: no cycles (we filtered them),
+                // no stale ready states (we set them correctly), no stale claims
+                // (no agent/claimed_at set), no malformed agents (agent is None),
+                // no orphaned edges (all issues exist in the map).
+                prop_assert!(
+                    report.clean,
+                    "Expected clean report for consistent graph but got drift: {:?}",
+                    report.drift_found
+                );
+            }
+        }
+    }
 }
