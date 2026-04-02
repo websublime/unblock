@@ -271,11 +271,12 @@ impl SessionMeta {
 ///
 /// 1. Spawn a background read-only reconcile via `tokio::spawn` (Design Decision R5).
 /// 2. Fresh fetch via `fetch_graph_data()` — bypasses cache entirely.
-/// 3. Rebuild `DependencyGraph` from scratch.
+/// 3. Build `DependencyGraph` and compute the ready set.
 /// 4. Categorise all issues into `in_progress`, `blocked`, `ready`, `completed`, `hotspots`, `stale`.
 /// 5. Update cache with the fresh graph already fetched.
-/// 6. Await the drift check — if drift is found, populate `drift_warnings`.
-/// 7. Return `PrimeResult` with session metadata and drift warnings.
+/// 6. Apply agent filter to relevant categories (PRD §6.3).
+/// 7. Build result with counts computed after filtering.
+/// 8. Await the drift check — if drift is found, populate `drift_warnings` — and return `PrimeResult`.
 ///
 /// The background reconcile runs concurrently with the prime fetch and does not
 /// block the response path. If it fails or panics, `drift_warnings` is simply
@@ -393,6 +394,7 @@ pub async fn handle_prime(
         stale: filtered_stale.len(),
     };
 
+    // 8. Await drift check, assemble and return PrimeResult.
     Ok(PrimeResult {
         in_progress: filtered_ip
             .iter()
