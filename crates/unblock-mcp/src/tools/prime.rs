@@ -376,9 +376,10 @@ pub async fn handle_prime(
     // filter out all results (serde deserializes "" as Some("")).
     let agent_filter = crate::tools::normalize_filter(params.agent.as_deref());
     if let Some(agent_filter) = agent_filter {
-        filtered_ip.retain(|s| s.agent.as_deref() == Some(agent_filter));
-        filtered_ready.retain(|s| s.agent.as_deref() == Some(agent_filter));
-        filtered_blocked.retain(|s| s.agent.as_deref() == Some(agent_filter));
+        let matches_agent = |s: &IssueSummary| s.agent.as_deref() == Some(agent_filter);
+        filtered_ip.retain(matches_agent);
+        filtered_ready.retain(matches_agent);
+        filtered_blocked.retain(matches_agent);
         filtered_stale.retain(|s| s.agent.as_deref() == Some(agent_filter));
     }
 
@@ -1718,8 +1719,9 @@ mod tests {
         let mut in_progress = categories.in_progress;
         let mut ready_list = categories.ready;
         if let Some(ref f) = agent_filter {
-            in_progress.retain(|s| s.agent.as_deref() == Some(f.as_str()));
-            ready_list.retain(|s| s.agent.as_deref() == Some(f.as_str()));
+            let matches_agent = |s: &IssueSummary| s.agent.as_deref() == Some(f.as_str());
+            in_progress.retain(matches_agent);
+            ready_list.retain(matches_agent);
         }
 
         assert_eq!(in_progress.len(), 1, "filtered in_progress count");
