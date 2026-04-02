@@ -2188,4 +2188,116 @@ mod tests {
             .map_or_else(|| "unknown".into(), |k| k.as_str().to_owned());
         assert_eq!(kind_str, "unknown");
     }
+
+    /// Verify `agent.kind` field is present in tracing output when the
+    /// `OnceLock` is set. Exercises the same extraction pattern used by
+    /// every tool handler.
+    #[tokio::test]
+    async fn agent_kind_appears_in_tracing_output() {
+        use std::io;
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::fmt;
+        use tracing_subscriber::prelude::*;
+
+        // Buffer to capture JSON output.
+        #[derive(Clone)]
+        struct BufWriter(Arc<Mutex<Vec<u8>>>);
+        impl io::Write for BufWriter {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().write(buf)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                self.0.lock().unwrap().flush()
+            }
+        }
+
+        let buf = BufWriter(Arc::new(Mutex::new(Vec::new())));
+        let buf_clone = buf.clone();
+
+        let subscriber = tracing_subscriber::registry().with(
+            fmt::layer()
+                .json()
+                .with_writer(move || buf_clone.clone())
+                .with_target(false),
+        );
+
+        let state = test_state().await;
+        let _ = state.agent_kind.set(AgentKind::ClaudeCode);
+
+        // Exercise the extraction pattern inside the subscriber scope.
+        tracing::subscriber::with_default(subscriber, || {
+            let kind: String = state
+                .agent_kind
+                .get()
+                .map_or_else(|| "unknown".into(), |k| k.as_str().to_owned());
+            info!(agent.kind = %kind, "Ready tool invoked");
+        });
+
+        let output = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            output.contains("\"agent\":{\"kind\":\"claude-code\"}")
+                || output.contains("claude-code"),
+            "Expected agent.kind=claude-code in tracing output, got: {output}"
+        );
+        assert!(
+            output.contains("Ready tool invoked"),
+            "Expected message in output, got: {output}"
+        );
+        // Verify token does not appear in output.
+        assert!(
+            !output.contains("ghp_test_token"),
+            "Token must not appear in tracing output: {output}"
+        );
+    }
+
+    /// Verify `agent.kind` falls back to "unknown" when `OnceLock` is not set.
+    #[tokio::test]
+    async fn agent_kind_unknown_in_tracing_when_unset() {
+        use std::io;
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::fmt;
+        use tracing_subscriber::prelude::*;
+
+        #[derive(Clone)]
+        struct BufWriter(Arc<Mutex<Vec<u8>>>);
+        impl io::Write for BufWriter {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().write(buf)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                self.0.lock().unwrap().flush()
+            }
+        }
+
+        let buf = BufWriter(Arc::new(Mutex::new(Vec::new())));
+        let buf_clone = buf.clone();
+
+        let subscriber = tracing_subscriber::registry().with(
+            fmt::layer()
+                .json()
+                .with_writer(move || buf_clone.clone())
+                .with_target(false),
+        );
+
+        let state = test_state().await;
+        // Do NOT set agent_kind — test the fallback.
+
+        tracing::subscriber::with_default(subscriber, || {
+            let kind: String = state
+                .agent_kind
+                .get()
+                .map_or_else(|| "unknown".into(), |k| k.as_str().to_owned());
+            info!(agent.kind = %kind, "Claim tool invoked");
+        });
+
+        let output = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            output.contains("unknown"),
+            "Expected agent.kind=unknown in tracing output, got: {output}"
+        );
+        assert!(
+            output.contains("Claim tool invoked"),
+            "Expected message in output, got: {output}"
+        );
+    }
 }
