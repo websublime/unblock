@@ -147,6 +147,21 @@ pub struct ServerState {
     pub connected_at: OnceLock<chrono::DateTime<Utc>>,
 }
 
+impl ServerState {
+    /// Returns the normalised agent kind string for use in tracing spans and log fields.
+    ///
+    /// Reads [`AgentKind`] from the [`OnceLock`] (lock-free) and converts it to its
+    /// string representation via [`AgentKind::as_str`]. Falls back to `"unknown"`
+    /// when the lock has not been set (e.g., in tests or when `initialize` is not
+    /// called).
+    #[must_use]
+    pub fn agent_kind_str(&self) -> String {
+        self.agent_kind
+            .get()
+            .map_or_else(|| "unknown".into(), |k| k.as_str().to_owned())
+    }
+}
+
 /// MCP server implementation for unblock.
 ///
 /// Wraps [`ServerState`] in an [`Arc`] and provides tool routing via rmcp macros.
@@ -331,10 +346,7 @@ impl UnblockServer {
         Parameters(params): Parameters<InitParams>,
     ) -> Result<Json<InitResult>, ErrorData> {
         let state = self.state();
-        let kind = state
-            .agent_kind
-            .get()
-            .map_or_else(|| "unknown".into(), |k| k.as_str().to_owned());
+        let kind = state.agent_kind_str();
         let client = &state.client;
 
         // Step 1: Detect or use provided owner type.
@@ -448,10 +460,7 @@ impl UnblockServer {
         Parameters(params): Parameters<SetupParams>,
     ) -> Result<Json<SetupResult>, ErrorData> {
         let state = self.state();
-        let kind = state
-            .agent_kind
-            .get()
-            .map_or_else(|| "unknown".into(), |k| k.as_str().to_owned());
+        let kind = state.agent_kind_str();
         let dry_run = params.dry_run.unwrap_or(false);
 
         // Resolve project info — use param override or configured project number.
@@ -601,10 +610,7 @@ impl UnblockServer {
         Parameters(params): Parameters<ShowParams>,
     ) -> Result<Json<ShowResult>, ErrorData> {
         let state = self.state();
-        let kind = state
-            .agent_kind
-            .get()
-            .map_or_else(|| "unknown".into(), |k| k.as_str().to_owned());
+        let kind = state.agent_kind_str();
         let client = &state.client;
 
         let include_comments = params.include_comments.unwrap_or(true);
@@ -755,10 +761,7 @@ impl UnblockServer {
         Parameters(params): Parameters<ReadyParams>,
     ) -> Result<Json<ReadyResult>, ErrorData> {
         let state = self.state();
-        let kind = state
-            .agent_kind
-            .get()
-            .map_or_else(|| "unknown".into(), |k| k.as_str().to_owned());
+        let kind = state.agent_kind_str();
 
         info!(
             agent.kind = %kind,
@@ -818,10 +821,7 @@ impl UnblockServer {
         Parameters(params): Parameters<ClaimParams>,
     ) -> Result<Json<ClaimResult>, ErrorData> {
         let state = self.state();
-        let kind = state
-            .agent_kind
-            .get()
-            .map_or_else(|| "unknown".into(), |k| k.as_str().to_owned());
+        let kind = state.agent_kind_str();
         let client = Arc::clone(&state.client);
         let config = Arc::clone(&state.config);
 
@@ -956,10 +956,7 @@ impl UnblockServer {
         Parameters(params): Parameters<CloseParams>,
     ) -> Result<Json<CloseResult>, ErrorData> {
         let state = self.state();
-        let kind = state
-            .agent_kind
-            .get()
-            .map_or_else(|| "unknown".into(), |k| k.as_str().to_owned());
+        let kind = state.agent_kind_str();
         let client = Arc::clone(&state.client);
 
         let issue_number = params.id;
@@ -1180,10 +1177,7 @@ impl UnblockServer {
         Parameters(params): Parameters<DependsParams>,
     ) -> Result<Json<DependsResult>, ErrorData> {
         let state = self.state();
-        let kind = state
-            .agent_kind
-            .get()
-            .map_or_else(|| "unknown".into(), |k| k.as_str().to_owned());
+        let kind = state.agent_kind_str();
         let client = Arc::clone(&state.client);
 
         let source = params.source;
@@ -1326,10 +1320,7 @@ impl UnblockServer {
         Parameters(params): Parameters<CreateParams>,
     ) -> Result<Json<CreateResult>, ErrorData> {
         let state = self.state();
-        let kind = state
-            .agent_kind
-            .get()
-            .map_or_else(|| "unknown".into(), |k| k.as_str().to_owned());
+        let kind = state.agent_kind_str();
         let client = Arc::clone(&state.client);
 
         info!(
@@ -1610,10 +1601,7 @@ impl UnblockServer {
         Parameters(params): Parameters<CommentParams>,
     ) -> Result<Json<CommentResult>, ErrorData> {
         let state = self.state();
-        let kind = state
-            .agent_kind
-            .get()
-            .map_or_else(|| "unknown".into(), |k| k.as_str().to_owned());
+        let kind = state.agent_kind_str();
         let client = &state.client;
         let issue_number = params.id;
         let body = params.body;
@@ -1660,10 +1648,7 @@ impl UnblockServer {
         Parameters(params): Parameters<UpdateParams>,
     ) -> Result<Json<UpdateResult>, ErrorData> {
         let state = self.state();
-        let kind = state
-            .agent_kind
-            .get()
-            .map_or_else(|| "unknown".into(), |k| k.as_str().to_owned());
+        let kind = state.agent_kind_str();
         let client = Arc::clone(&state.client);
 
         let issue_number = params.id;
@@ -1967,10 +1952,7 @@ impl UnblockServer {
         Parameters(params): Parameters<PrimeParams>,
     ) -> Result<Json<PrimeResult>, ErrorData> {
         let state = self.state();
-        let kind = state
-            .agent_kind
-            .get()
-            .map_or_else(|| "unknown".into(), |k| k.as_str().to_owned());
+        let kind = state.agent_kind_str();
 
         info!(agent.kind = %kind, "Prime tool invoked");
 
@@ -1997,10 +1979,7 @@ impl UnblockServer {
         Parameters(params): Parameters<ReconcileParams>,
     ) -> Result<Json<ReconcileOutput>, ErrorData> {
         let state = self.state();
-        let kind = state
-            .agent_kind
-            .get()
-            .map_or_else(|| "unknown".into(), |k| k.as_str().to_owned());
+        let kind = state.agent_kind_str();
 
         info!(agent.kind = %kind, "Reconcile tool invoked");
 
@@ -2182,10 +2161,7 @@ mod tests {
     #[tokio::test]
     async fn agent_kind_handler_fallback() {
         let state = test_state().await;
-        let kind_str = state
-            .agent_kind
-            .get()
-            .map_or_else(|| "unknown".into(), |k| k.as_str().to_owned());
+        let kind_str = state.agent_kind_str();
         assert_eq!(kind_str, "unknown");
     }
 
@@ -2226,10 +2202,7 @@ mod tests {
 
         // Exercise the extraction pattern inside the subscriber scope.
         tracing::subscriber::with_default(subscriber, || {
-            let kind: String = state
-                .agent_kind
-                .get()
-                .map_or_else(|| "unknown".into(), |k| k.as_str().to_owned());
+            let kind: String = state.agent_kind_str();
             info!(agent.kind = %kind, "Ready tool invoked");
         });
 
@@ -2283,10 +2256,7 @@ mod tests {
         // Do NOT set agent_kind — test the fallback.
 
         tracing::subscriber::with_default(subscriber, || {
-            let kind: String = state
-                .agent_kind
-                .get()
-                .map_or_else(|| "unknown".into(), |k| k.as_str().to_owned());
+            let kind: String = state.agent_kind_str();
             info!(agent.kind = %kind, "Claim tool invoked");
         });
 
