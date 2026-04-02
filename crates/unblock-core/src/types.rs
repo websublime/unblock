@@ -650,6 +650,18 @@ fn non_empty_trimmed(s: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    // ── IssueType Display ─────────────────────────────────────────────
+
+    #[test]
+    fn issue_type_display_renders_without_quotes() {
+        assert_eq!(IssueType::Task.to_string(), "Task");
+        assert_eq!(IssueType::Bug.to_string(), "Bug");
+        assert_eq!(IssueType::Feature.to_string(), "Feature");
+        assert_eq!(IssueType::Epic.to_string(), "Epic");
+        assert_eq!(IssueType::Chore.to_string(), "Chore");
+        assert_eq!(IssueType::Spike.to_string(), "Spike");
+    }
+
     // ── QualifiedId ────────────────────────────────────────────────────
 
     #[test]
