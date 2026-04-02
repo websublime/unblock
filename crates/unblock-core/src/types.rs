@@ -282,6 +282,19 @@ pub enum IssueType {
     Spike,
 }
 
+impl fmt::Display for IssueType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Task => write!(f, "Task"),
+            Self::Bug => write!(f, "Bug"),
+            Self::Feature => write!(f, "Feature"),
+            Self::Epic => write!(f, "Epic"),
+            Self::Chore => write!(f, "Chore"),
+            Self::Spike => write!(f, "Spike"),
+        }
+    }
+}
+
 /// A lightweight reference to a related issue.
 ///
 /// Used for dependency relationships (`blockedBy`, `blocking`),
