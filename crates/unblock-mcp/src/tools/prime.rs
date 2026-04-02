@@ -372,7 +372,10 @@ pub async fn handle_prime(
     let mut filtered_blocked = categories.blocked;
     let mut filtered_stale = categories.stale;
 
-    if let Some(ref agent_filter) = params.agent {
+    // Normalize empty/whitespace agent strings to None so they don't silently
+    // filter out all results (serde deserializes "" as Some("")).
+    let agent_filter = crate::tools::normalize_filter(params.agent.clone());
+    if let Some(ref agent_filter) = agent_filter {
         filtered_ip.retain(|s| s.agent.as_deref() == Some(agent_filter.as_str()));
         filtered_ready.retain(|s| s.agent.as_deref() == Some(agent_filter.as_str()));
         filtered_blocked.retain(|s| s.agent.as_deref() == Some(agent_filter.as_str()));
@@ -1735,6 +1738,49 @@ mod tests {
         let json = r"{}";
         let params: PrimeParams = serde_json::from_str(json).expect("should deserialize");
         assert!(params.agent.is_none());
+    }
+
+    #[test]
+    fn prime_params_empty_agent_deserializes_as_some_empty() {
+        // Demonstrates the serde behavior this fix addresses: `""` becomes
+        // `Some("")`, not `None`. The normalize_filter call in handle_prime
+        // collapses this to None before filtering.
+        let json = r#"{"agent": ""}"#;
+        let params: PrimeParams = serde_json::from_str(json).expect("should deserialize");
+        assert_eq!(
+            params.agent.as_deref(),
+            Some(""),
+            "serde should deserialize empty string as Some(\"\")"
+        );
+    }
+
+    #[test]
+    fn empty_agent_filter_returns_all_categories() {
+        // Regression test: empty string agent filter should behave as no filter.
+        let mut issue1 = test_issue(1, IssueState::Open, Status::InProgress);
+        issue1.agent = Some("agent-x".to_owned());
+        issue1.claimed_at = Some(Utc::now());
+        let mut issue2 = test_issue(2, IssueState::Open, Status::InProgress);
+        issue2.agent = Some("agent-y".to_owned());
+        issue2.claimed_at = Some(Utc::now());
+        let issues = vec![issue1, issue2];
+
+        let graph = DependencyGraph::build(&issues, &[]);
+        let ready = graph.compute_ready_set(&issues);
+        let result = categorise_issues(&issues, &graph, &ready, 24, Utc::now());
+
+        // Simulate what handle_prime does: normalize then filter.
+        let agent_filter = crate::tools::normalize_filter(Some(String::new()));
+        assert!(
+            agent_filter.is_none(),
+            "empty string should normalize to None"
+        );
+
+        let (ip, _, _, _) = apply_agent_filter(&result, agent_filter.as_deref());
+        assert_eq!(
+            ip, 2,
+            "empty agent string should return all in_progress issues"
+        );
     }
 
     // ── summarise_drift tests ────────────────────────────────────────
