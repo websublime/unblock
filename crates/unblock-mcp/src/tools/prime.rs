@@ -1186,23 +1186,68 @@ mod tests {
         assert_eq!(meta.connected_at, connected);
     }
 
-    // TODO(unblock-t7l.6): This test is a tautology — it reads the current env
-    // and asserts it matches, so it can never fail. Replace with subprocess-based
-    // tests that exercise both None (UNBLOCK_AGENT unset) and Some (UNBLOCK_AGENT
-    // set) paths. Rust 2024 makes set_var/remove_var unsafe, so a child process
-    // via std::process::Command is the correct approach.
+    /// Helper test invoked by subprocess tests below. Prints the `agent_field`
+    /// value from `SessionMeta::from_state` so the parent process can assert it.
+    ///
+    /// Protocol: prints `AGENT_FIELD=<value>` or `AGENT_FIELD=NONE` to stdout.
+    #[ignore = "invoked by subprocess tests, not meant to run directly"]
     #[tokio::test]
-    async fn session_meta_agent_field_reflects_env() {
-        // NOTE: This test is a known tautology (see TODO above). It exists as a
-        // placeholder until unblock-t7l.6 adds proper subprocess-based env var
-        // tests. The Rust 2024 edition makes set_var/remove_var unsafe, and the
-        // workspace denies unsafe_code, so we cannot toggle env vars in-process.
-        let expected = std::env::var("UNBLOCK_AGENT").ok();
+    async fn subprocess_helper_print_agent_field() {
         let state = test_state().await;
         let meta = SessionMeta::from_state(&state);
-        assert_eq!(
-            meta.agent_field, expected,
-            "agent_field should reflect UNBLOCK_AGENT env var"
+        match meta.agent_field {
+            Some(val) => println!("AGENT_FIELD={val}"),
+            None => println!("AGENT_FIELD=NONE"),
+        }
+    }
+
+    /// Spawns a child process *with* `UNBLOCK_AGENT=test-supervisor` set and
+    /// asserts that `SessionMeta.agent_field` is `Some("test-supervisor")`.
+    #[test]
+    fn session_meta_agent_field_set_via_subprocess() {
+        let test_bin = std::env::current_exe().expect("should resolve test binary path");
+        let output = std::process::Command::new(&test_bin)
+            .arg("--exact")
+            .arg("tools::prime::tests::subprocess_helper_print_agent_field")
+            .arg("--include-ignored")
+            .arg("--nocapture")
+            .env("UNBLOCK_AGENT", "test-supervisor")
+            // Clear detection env vars to avoid side effects on other tests.
+            .env_remove("CLAUDE_CODE_ENTRYPOINT")
+            .env_remove("GITHUB_COPILOT_TOKEN")
+            .env_remove("CURSOR_TRACE_ID")
+            .output()
+            .expect("failed to spawn subprocess");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("AGENT_FIELD=test-supervisor"),
+            "expected AGENT_FIELD=test-supervisor in subprocess output, got:\n{stdout}"
+        );
+    }
+
+    /// Spawns a child process *without* `UNBLOCK_AGENT` and asserts that
+    /// `SessionMeta.agent_field` is `None`.
+    #[test]
+    fn session_meta_agent_field_unset_via_subprocess() {
+        let test_bin = std::env::current_exe().expect("should resolve test binary path");
+        let output = std::process::Command::new(&test_bin)
+            .arg("--exact")
+            .arg("tools::prime::tests::subprocess_helper_print_agent_field")
+            .arg("--include-ignored")
+            .arg("--nocapture")
+            .env_remove("UNBLOCK_AGENT")
+            // Clear detection env vars to avoid side effects on other tests.
+            .env_remove("CLAUDE_CODE_ENTRYPOINT")
+            .env_remove("GITHUB_COPILOT_TOKEN")
+            .env_remove("CURSOR_TRACE_ID")
+            .output()
+            .expect("failed to spawn subprocess");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("AGENT_FIELD=NONE"),
+            "expected AGENT_FIELD=NONE in subprocess output, got:\n{stdout}"
         );
     }
 

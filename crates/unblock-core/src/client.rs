@@ -237,4 +237,37 @@ mod tests {
         assert_eq!(AgentKind::Aider.as_str(), "aider");
         assert_eq!(AgentKind::Unknown("my-tool".into()).as_str(), "my-tool");
     }
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            /// Fuzz `from_client_name` with arbitrary strings: must never panic
+            /// and must always return a valid `AgentKind` variant.
+            #[test]
+            fn fuzz_from_client_name(name in "\\PC{0,256}") {
+                let kind = AgentKind::from_client_name(&name);
+
+                // Must be a valid variant — exhaustive match proves this.
+                match &kind {
+                    AgentKind::ClaudeCode
+                    | AgentKind::Copilot
+                    | AgentKind::Cursor
+                    | AgentKind::Cline
+                    | AgentKind::Aider => {
+                        // Known variant — as_str() must return a non-empty &'static str.
+                        prop_assert!(!kind.as_str().is_empty());
+                    }
+                    AgentKind::Unknown(s) => {
+                        // Unknown must preserve the original name.
+                        prop_assert_eq!(s, &name);
+                    }
+                }
+
+                // Display must not panic and must match as_str().
+                prop_assert_eq!(kind.to_string(), kind.as_str());
+            }
+        }
+    }
 }
