@@ -117,6 +117,7 @@ impl ClientDetector {
         env: impl Fn(&str) -> Result<String, VarError>,
     ) -> AgentKind {
         mcp_client
+            .filter(|c| !c.name.is_empty())
             .map(AgentClient::kind)
             .or_else(|| Self::from_env_reader(env))
             .unwrap_or_else(|| AgentKind::Unknown("unknown".into()))
@@ -275,6 +276,40 @@ mod tests {
         assert_eq!(
             ClientDetector::resolve_with(Some(&client), env),
             AgentKind::Unknown("SomeCustomTool".into()),
+        );
+    }
+
+    /// MCP client with empty name + env set → env fallback wins.
+    ///
+    /// When `clientInfo` is present but the name is empty, the MCP hint is
+    /// meaningless and should not block the env-based fallback path.
+    #[test]
+    fn resolve_with_empty_name_falls_through_to_env() {
+        let client = AgentClient {
+            name: String::new(),
+            version: "1.0.0".into(),
+        };
+        let env = make_env(&[("CLAUDE_CODE_ENTRYPOINT", "1")]);
+        assert_eq!(
+            ClientDetector::resolve_with(Some(&client), env),
+            AgentKind::ClaudeCode,
+        );
+    }
+
+    /// MCP client with empty name + no env → `Unknown("unknown")` sentinel.
+    ///
+    /// When both MCP name and environment are absent/empty, the standard
+    /// unknown sentinel is returned (not `Unknown("")`).
+    #[test]
+    fn resolve_with_empty_name_no_env_returns_unknown_sentinel() {
+        let client = AgentClient {
+            name: String::new(),
+            version: String::new(),
+        };
+        let env = make_env(&[]);
+        assert_eq!(
+            ClientDetector::resolve_with(Some(&client), env),
+            AgentKind::Unknown("unknown".into()),
         );
     }
 }
