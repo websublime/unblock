@@ -708,7 +708,7 @@ impl UnblockServer {
             number: issue.number,
             node_id: issue.node_id.clone(),
             title: issue.title.clone(),
-            issue_type: issue.issue_type.map(|it| format!("{it:?}")),
+            issue_type: issue.issue_type.map(|it| it.to_string()),
             status: format!("{:?}", issue.status),
             priority: format!("{:?}", issue.priority),
             agent: issue.agent.clone(),
