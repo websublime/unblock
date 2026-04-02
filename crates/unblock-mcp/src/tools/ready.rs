@@ -123,40 +123,45 @@ pub fn filter_ready_set(
     let limit = params.limit.unwrap_or(DEFAULT_LIMIT);
     let today = Utc::now().date_naive();
 
+    // Normalize empty/whitespace string filters to None so they behave as
+    // "no filter" rather than silently matching nothing. Serde deserializes
+    // `"agent": ""` as `Some("")`, not `None`.
+    let issue_type = crate::tools::normalize_filter(params.issue_type.clone());
+    let priority = crate::tools::normalize_filter(params.priority.clone());
+    let milestone = crate::tools::normalize_filter(params.milestone.clone());
+    let agent = crate::tools::normalize_filter(params.agent.clone());
+    let label = crate::tools::normalize_filter(params.label.clone());
+
     ready_set
         .iter()
         // Filter by issue_type (case-insensitive Debug match).
         .filter(|s| {
-            params.issue_type.as_ref().is_none_or(|filter| {
+            issue_type.as_ref().is_none_or(|filter| {
                 s.issue_type
                     .is_some_and(|it| format!("{it:?}").eq_ignore_ascii_case(filter))
             })
         })
         // Filter by priority (case-insensitive Debug match).
         .filter(|s| {
-            params
-                .priority
+            priority
                 .as_ref()
                 .is_none_or(|filter| format!("{:?}", s.priority).eq_ignore_ascii_case(filter))
         })
         // Filter by milestone (exact match).
         .filter(|s| {
-            params
-                .milestone
+            milestone
                 .as_ref()
                 .is_none_or(|filter| s.milestone.as_deref() == Some(filter.as_str()))
         })
         // Filter by agent (exact match).
         .filter(|s| {
-            params
-                .agent
+            agent
                 .as_ref()
                 .is_none_or(|filter| s.agent.as_deref() == Some(filter.as_str()))
         })
         // Filter by label (case-insensitive, any match).
         .filter(|s| {
-            params
-                .label
+            label
                 .as_ref()
                 .is_none_or(|filter| s.labels.iter().any(|l| l.eq_ignore_ascii_case(filter)))
         })
@@ -372,6 +377,100 @@ mod tests {
         let result = filter_ready_set(&set, &params);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].number, 1);
+    }
+
+    // ── Empty string filter normalization ──────────────────────────────
+
+    #[test]
+    fn empty_agent_string_treated_as_no_filter() {
+        let set = vec![test_summary(1, Priority::P0), test_summary(2, Priority::P1)];
+        let params = ReadyParams {
+            agent: Some(String::new()),
+            ..default_params()
+        };
+        let result = filter_ready_set(&set, &params);
+        assert_eq!(
+            result.len(),
+            2,
+            "empty agent string should not filter out any issues"
+        );
+    }
+
+    #[test]
+    fn whitespace_agent_string_treated_as_no_filter() {
+        let set = vec![test_summary(1, Priority::P0)];
+        let params = ReadyParams {
+            agent: Some("   ".to_owned()),
+            ..default_params()
+        };
+        let result = filter_ready_set(&set, &params);
+        assert_eq!(
+            result.len(),
+            1,
+            "whitespace-only agent string should not filter out any issues"
+        );
+    }
+
+    #[test]
+    fn empty_issue_type_string_treated_as_no_filter() {
+        let set = vec![test_summary(1, Priority::P0)];
+        let params = ReadyParams {
+            issue_type: Some(String::new()),
+            ..default_params()
+        };
+        let result = filter_ready_set(&set, &params);
+        assert_eq!(
+            result.len(),
+            1,
+            "empty issue_type string should not filter out any issues"
+        );
+    }
+
+    #[test]
+    fn empty_priority_string_treated_as_no_filter() {
+        let set = vec![test_summary(1, Priority::P0)];
+        let params = ReadyParams {
+            priority: Some(String::new()),
+            ..default_params()
+        };
+        let result = filter_ready_set(&set, &params);
+        assert_eq!(
+            result.len(),
+            1,
+            "empty priority string should not filter out any issues"
+        );
+    }
+
+    #[test]
+    fn empty_milestone_string_treated_as_no_filter() {
+        let set = vec![test_summary(1, Priority::P0)];
+        let params = ReadyParams {
+            milestone: Some(String::new()),
+            ..default_params()
+        };
+        let result = filter_ready_set(&set, &params);
+        assert_eq!(
+            result.len(),
+            1,
+            "empty milestone string should not filter out any issues"
+        );
+    }
+
+    #[test]
+    fn empty_label_string_treated_as_no_filter() {
+        let mut s1 = test_summary(1, Priority::P0);
+        s1.labels = vec!["backend".to_owned()];
+        let set = vec![s1];
+        let params = ReadyParams {
+            label: Some(String::new()),
+            ..default_params()
+        };
+        let result = filter_ready_set(&set, &params);
+        assert_eq!(
+            result.len(),
+            1,
+            "empty label string should not filter out any issues"
+        );
     }
 
     // ── Deferred exclusion ───────────────────────────────────────────

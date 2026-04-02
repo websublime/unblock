@@ -53,6 +53,17 @@ use unblock_core::graph::DependencyGraph;
 use crate::errors::github_error_to_mcp;
 use crate::server::ServerState;
 
+/// Normalize an optional string filter: empty or whitespace-only values become `None`.
+///
+/// Serde deserializes `"agent": ""` as `Some("")`, not `None`. Without
+/// normalization, an empty string silently matches nothing and returns
+/// empty results. This helper collapses empty and whitespace-only strings
+/// to `None` so filters behave as if the parameter was omitted.
+#[must_use]
+pub(crate) fn normalize_filter(value: Option<String>) -> Option<String> {
+    value.filter(|s| !s.trim().is_empty())
+}
+
 /// Executes a read-only MCP tool operation.
 ///
 /// Calls `op` and maps any `unblock_github::errors::Error` to an
@@ -245,6 +256,42 @@ mod tests {
             agent_client: std::sync::OnceLock::new(),
             connected_at: std::sync::OnceLock::new(),
         }
+    }
+
+    // ── normalize_filter tests ──────────────────────────────────────────
+
+    #[test]
+    fn normalize_filter_none_stays_none() {
+        assert_eq!(normalize_filter(None), None);
+    }
+
+    #[test]
+    fn normalize_filter_non_empty_preserved() {
+        assert_eq!(
+            normalize_filter(Some("agent-x".to_owned())),
+            Some("agent-x".to_owned())
+        );
+    }
+
+    #[test]
+    fn normalize_filter_empty_string_becomes_none() {
+        assert_eq!(normalize_filter(Some(String::new())), None);
+    }
+
+    #[test]
+    fn normalize_filter_whitespace_only_becomes_none() {
+        assert_eq!(normalize_filter(Some("   ".to_owned())), None);
+        assert_eq!(normalize_filter(Some("\t\n".to_owned())), None);
+    }
+
+    #[test]
+    fn normalize_filter_preserves_whitespace_padded_value() {
+        // A value with surrounding whitespace is preserved (not trimmed) —
+        // only purely-whitespace strings are collapsed to None.
+        assert_eq!(
+            normalize_filter(Some(" agent-x ".to_owned())),
+            Some(" agent-x ".to_owned())
+        );
     }
 
     // ── execute_read_tool tests ────────────────────────────────────────
