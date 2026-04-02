@@ -2260,7 +2260,7 @@ mod tests {
 
         let output = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
         assert!(
-            output.contains("unknown"),
+            output.contains("\"agent\":{\"kind\":\"unknown\"}") || output.contains("unknown"),
             "Expected agent.kind=unknown in tracing output, got: {output}"
         );
         assert!(
