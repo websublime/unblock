@@ -126,44 +126,32 @@ pub fn filter_ready_set(
     // Normalize empty/whitespace string filters to None so they behave as
     // "no filter" rather than silently matching nothing. Serde deserializes
     // `"agent": ""` as `Some("")`, not `None`.
-    let issue_type = crate::tools::normalize_filter(params.issue_type.clone());
-    let priority = crate::tools::normalize_filter(params.priority.clone());
-    let milestone = crate::tools::normalize_filter(params.milestone.clone());
-    let agent = crate::tools::normalize_filter(params.agent.clone());
-    let label = crate::tools::normalize_filter(params.label.clone());
+    let issue_type = crate::tools::normalize_filter(params.issue_type.as_deref());
+    let priority = crate::tools::normalize_filter(params.priority.as_deref());
+    let milestone = crate::tools::normalize_filter(params.milestone.as_deref());
+    let agent = crate::tools::normalize_filter(params.agent.as_deref());
+    let label = crate::tools::normalize_filter(params.label.as_deref());
 
     ready_set
         .iter()
         // Filter by issue_type (case-insensitive Debug match).
         .filter(|s| {
-            issue_type.as_ref().is_none_or(|filter| {
+            issue_type.is_none_or(|filter| {
                 s.issue_type
                     .is_some_and(|it| format!("{it:?}").eq_ignore_ascii_case(filter))
             })
         })
         // Filter by priority (case-insensitive Debug match).
         .filter(|s| {
-            priority
-                .as_ref()
-                .is_none_or(|filter| format!("{:?}", s.priority).eq_ignore_ascii_case(filter))
+            priority.is_none_or(|filter| format!("{:?}", s.priority).eq_ignore_ascii_case(filter))
         })
         // Filter by milestone (exact match).
-        .filter(|s| {
-            milestone
-                .as_ref()
-                .is_none_or(|filter| s.milestone.as_deref() == Some(filter.as_str()))
-        })
+        .filter(|s| milestone.is_none_or(|filter| s.milestone.as_deref() == Some(filter)))
         // Filter by agent (exact match).
-        .filter(|s| {
-            agent
-                .as_ref()
-                .is_none_or(|filter| s.agent.as_deref() == Some(filter.as_str()))
-        })
+        .filter(|s| agent.is_none_or(|filter| s.agent.as_deref() == Some(filter)))
         // Filter by label (case-insensitive, any match).
         .filter(|s| {
-            label
-                .as_ref()
-                .is_none_or(|filter| s.labels.iter().any(|l| l.eq_ignore_ascii_case(filter)))
+            label.is_none_or(|filter| s.labels.iter().any(|l| l.eq_ignore_ascii_case(filter)))
         })
         // Exclude deferred issues (defer_until > today).
         .filter(|s| s.defer_until.is_none_or(|d| d <= today))
