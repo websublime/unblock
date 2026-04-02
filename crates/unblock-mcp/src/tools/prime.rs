@@ -209,23 +209,59 @@ pub struct CompletedIssueSummary {
     pub url: String,
 }
 
-/// Session metadata stub.
+/// Session metadata populated from [`ServerState`] during each `prime` call.
 ///
-/// Will be populated by Epic 1.5 (Agent Client Detection) with real client
-/// information. Until then, reports `Unknown`.
+/// Surfaces the connected MCP client identity, the resolved agent kind,
+/// an optional operator-defined agent field (`UNBLOCK_AGENT` env var),
+/// and the session start timestamp.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct SessionMeta {
-    /// The kind of AI agent connected (e.g., "claude-code", "copilot", "unknown").
+    /// Raw MCP `clientInfo.name` (e.g., "Claude Code", "GitHub Copilot Chat").
+    pub agent_client: String,
+    /// Normalised agent kind string (e.g., "claude-code", "copilot", "unknown").
     pub agent_kind: String,
-    /// Timestamp when the session started (ISO 8601 / RFC 3339).
-    pub connected_at: String,
+    /// Value of the `UNBLOCK_AGENT` env var if set by the operator.
+    /// `None` when the variable is not present in the environment.
+    pub agent_field: Option<String>,
+    /// UTC timestamp when the MCP session was initialised (ISO 8601 / RFC 3339).
+    pub connected_at: DateTime<Utc>,
 }
 
-impl Default for SessionMeta {
-    fn default() -> Self {
+impl SessionMeta {
+    /// Build [`SessionMeta`] from the live [`ServerState`].
+    ///
+    /// Reads `agent_kind` and `agent_client` from their respective
+    /// [`OnceLock`](std::sync::OnceLock) fields (lock-free). Falls back to
+    /// `"unknown"` when the locks have not been set (e.g., in tests where
+    /// `initialize()` is not called).
+    ///
+    /// `agent_field` is read from the `UNBLOCK_AGENT` environment variable
+    /// on every call (not cached), returning `None` when unset.
+    ///
+    /// `connected_at` falls back to `Utc::now()` when the `OnceLock` has not
+    /// been set, ensuring tests that skip `initialize()` still get a valid
+    /// timestamp.
+    #[must_use]
+    pub fn from_state(state: &ServerState) -> Self {
+        let agent_client = state
+            .agent_client
+            .get()
+            .map_or_else(|| "unknown".to_owned(), |c| c.name.clone());
+
+        let agent_kind = state
+            .agent_kind
+            .get()
+            .map_or_else(|| "unknown".to_owned(), |k| k.as_str().to_owned());
+
+        let agent_field = std::env::var("UNBLOCK_AGENT").ok();
+
+        let connected_at = state.connected_at.get().copied().unwrap_or_else(Utc::now);
+
         Self {
-            agent_kind: "unknown".to_owned(),
-            connected_at: Utc::now().to_rfc3339(),
+            agent_client,
+            agent_kind,
+            agent_field,
+            connected_at,
         }
     }
 }
@@ -360,7 +396,7 @@ pub async fn handle_prime(
             .take(max_per_category)
             .collect(),
         stale: filtered_stale.into_iter().take(max_per_category).collect(),
-        session: SessionMeta::default(),
+        session: SessionMeta::from_state(state),
         drift_warnings: None,
         counts,
     })
@@ -676,6 +712,8 @@ mod tests {
             client: Arc::new(client),
             cache: Arc::new(GraphCache::new(Duration::from_secs(300))),
             agent_kind: std::sync::OnceLock::new(),
+            agent_client: std::sync::OnceLock::new(),
+            connected_at: std::sync::OnceLock::new(),
         }
     }
 
@@ -1030,10 +1068,53 @@ mod tests {
 
     // ── SessionMeta tests ─────────────────────────────────────────────
 
-    #[test]
-    fn session_meta_default_is_unknown() {
-        let meta = SessionMeta::default();
+    #[tokio::test]
+    async fn session_meta_from_state_defaults_when_uninitialised() {
+        let state = test_state().await;
+        let meta = SessionMeta::from_state(&state);
+        assert_eq!(meta.agent_client, "unknown");
         assert_eq!(meta.agent_kind, "unknown");
+        // agent_field depends on UNBLOCK_AGENT env var — not asserted here
+        // connected_at falls back to Utc::now(), just verify it's recent
+        let elapsed = Utc::now() - meta.connected_at;
+        assert!(
+            elapsed.num_seconds() < 5,
+            "connected_at should be recent, got {elapsed}"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_meta_from_state_populated() {
+        use unblock_core::client::{AgentClient, AgentKind};
+
+        let state = test_state().await;
+        let _ = state.agent_kind.set(AgentKind::ClaudeCode);
+        let _ = state.agent_client.set(AgentClient {
+            name: "Claude Code".to_owned(),
+            version: "1.2.3".to_owned(),
+        });
+        let connected = Utc::now();
+        let _ = state.connected_at.set(connected);
+
+        let meta = SessionMeta::from_state(&state);
+        assert_eq!(meta.agent_client, "Claude Code");
+        assert_eq!(meta.agent_kind, "claude-code");
+        assert_eq!(meta.connected_at, connected);
+    }
+
+    #[tokio::test]
+    async fn session_meta_agent_field_reflects_env() {
+        // We cannot safely set/remove env vars in Rust 2024 (unsafe).
+        // Instead, verify that `agent_field` reads from UNBLOCK_AGENT by
+        // checking the current env state. If UNBLOCK_AGENT is set in the
+        // test environment, agent_field should match; if not, it should be None.
+        let expected = std::env::var("UNBLOCK_AGENT").ok();
+        let state = test_state().await;
+        let meta = SessionMeta::from_state(&state);
+        assert_eq!(
+            meta.agent_field, expected,
+            "agent_field should reflect UNBLOCK_AGENT env var"
+        );
     }
 
     // ── PrimeParams deserialization tests ──────────────────────────────
@@ -1112,6 +1193,7 @@ mod tests {
 
     #[test]
     fn prime_result_serializes_clean() {
+        let connected = Utc::now();
         let result = PrimeResult {
             in_progress: vec![],
             ready: vec![],
@@ -1119,7 +1201,12 @@ mod tests {
             completed: vec![],
             hotspots: vec![],
             stale: vec![],
-            session: SessionMeta::default(),
+            session: SessionMeta {
+                agent_client: "unknown".to_owned(),
+                agent_kind: "unknown".to_owned(),
+                agent_field: None,
+                connected_at: connected,
+            },
             drift_warnings: None,
             counts: PrimeCounts {
                 in_progress: 0,
@@ -1134,7 +1221,51 @@ mod tests {
         let json = serde_json::to_value(&result).expect("should serialize");
         assert!(json["drift_warnings"].is_null());
         assert_eq!(json["session"]["agent_kind"], "unknown");
+        assert_eq!(json["session"]["agent_client"], "unknown");
+        assert!(json["session"]["agent_field"].is_null());
+        assert!(json["session"]["connected_at"].is_string());
         assert_eq!(json["counts"]["in_progress"], 0);
+    }
+
+    #[test]
+    fn prime_result_session_all_fields_present_in_json() {
+        let connected = Utc::now();
+        let result = PrimeResult {
+            in_progress: vec![],
+            ready: vec![],
+            blocked: vec![],
+            completed: vec![],
+            hotspots: vec![],
+            stale: vec![],
+            session: SessionMeta {
+                agent_client: "Claude Code".to_owned(),
+                agent_kind: "claude-code".to_owned(),
+                agent_field: Some("rust-supervisor".to_owned()),
+                connected_at: connected,
+            },
+            drift_warnings: None,
+            counts: PrimeCounts {
+                in_progress: 0,
+                ready: 0,
+                blocked: 0,
+                completed: 0,
+                hotspots: 0,
+                stale: 0,
+            },
+        };
+
+        let json = serde_json::to_value(&result).expect("should serialize");
+        let session = &json["session"];
+        assert_eq!(session["agent_client"], "Claude Code");
+        assert_eq!(session["agent_kind"], "claude-code");
+        assert_eq!(session["agent_field"], "rust-supervisor");
+        // connected_at should be a valid RFC 3339 string
+        let ts_str = session["connected_at"].as_str().expect("should be string");
+        let parsed = DateTime::parse_from_rfc3339(ts_str);
+        assert!(
+            parsed.is_ok(),
+            "connected_at should be valid RFC 3339: {ts_str}"
+        );
     }
 
     // ── Integration test: full categorise pipeline ────────────────────

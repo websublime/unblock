@@ -116,6 +116,8 @@ unblock turns GitHub Issues into a dependency graph. Ask `ready` to get unblocke
 /// - [`GitHubClient`] wraps `reqwest::Client` which is `Send + Sync`.
 /// - [`GraphCache`] uses `tokio::sync::RwLock` which is `Send + Sync`.
 /// - [`OnceLock<AgentKind>`] is `Send + Sync` because `AgentKind` is `Send + Sync`.
+/// - [`OnceLock<AgentClient>`] is `Send + Sync` because `AgentClient` is `Send + Sync`.
+/// - [`OnceLock<DateTime<Utc>>`] is `Send + Sync` because `DateTime<Utc>` is `Send + Sync`.
 #[derive(Debug)]
 pub struct ServerState {
     /// Application configuration loaded from environment variables.
@@ -132,6 +134,17 @@ pub struct ServerState {
     /// back to `"unknown"` if the lock has not been set (e.g., in tests or
     /// when `initialize` is not called).
     pub agent_kind: OnceLock<AgentKind>,
+    /// Raw MCP `clientInfo` stored once during the `initialize` handshake.
+    ///
+    /// Used by [`SessionMeta`](crate::tools::prime::SessionMeta) to surface
+    /// the raw client name in the `prime` tool output.
+    pub agent_client: OnceLock<AgentClient>,
+    /// UTC timestamp recorded when `initialize()` is called.
+    ///
+    /// Represents the session start time. Used by
+    /// [`SessionMeta`](crate::tools::prime::SessionMeta) for the
+    /// `connected_at` field.
+    pub connected_at: OnceLock<chrono::DateTime<Utc>>,
 }
 
 /// MCP server implementation for unblock.
@@ -1965,6 +1978,12 @@ impl ServerHandler for UnblockServer {
         let kind = ClientDetector::resolve(Some(&agent_client));
         let _ = self.state.agent_kind.set(kind.clone());
 
+        // Store raw AgentClient for SessionMeta (prime tool output)
+        let _ = self.state.agent_client.set(agent_client.clone());
+
+        // Record session start time
+        let _ = self.state.connected_at.set(Utc::now());
+
         info!(
             client.name    = &agent_client.name,
             client.version = &agent_client.version,
@@ -2015,6 +2034,8 @@ mod tests {
             client: Arc::new(client),
             cache: Arc::new(GraphCache::new(Duration::from_secs(300))),
             agent_kind: OnceLock::new(),
+            agent_client: OnceLock::new(),
+            connected_at: OnceLock::new(),
         }
     }
 
