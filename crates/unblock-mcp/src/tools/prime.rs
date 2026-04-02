@@ -1102,12 +1102,17 @@ mod tests {
         assert_eq!(meta.connected_at, connected);
     }
 
+    // TODO(unblock-t7l.6): This test is a tautology — it reads the current env
+    // and asserts it matches, so it can never fail. Replace with subprocess-based
+    // tests that exercise both None (UNBLOCK_AGENT unset) and Some (UNBLOCK_AGENT
+    // set) paths. Rust 2024 makes set_var/remove_var unsafe, so a child process
+    // via std::process::Command is the correct approach.
     #[tokio::test]
     async fn session_meta_agent_field_reflects_env() {
-        // We cannot safely set/remove env vars in Rust 2024 (unsafe).
-        // Instead, verify that `agent_field` reads from UNBLOCK_AGENT by
-        // checking the current env state. If UNBLOCK_AGENT is set in the
-        // test environment, agent_field should match; if not, it should be None.
+        // NOTE: This test is a known tautology (see TODO above). It exists as a
+        // placeholder until unblock-t7l.6 adds proper subprocess-based env var
+        // tests. The Rust 2024 edition makes set_var/remove_var unsafe, and the
+        // workspace denies unsafe_code, so we cannot toggle env vars in-process.
         let expected = std::env::var("UNBLOCK_AGENT").ok();
         let state = test_state().await;
         let meta = SessionMeta::from_state(&state);
