@@ -345,13 +345,13 @@ pub async fn handle_prime(
         .await
         .map_err(github_error_to_mcp)?;
 
-    // 2. Build graph and compute ready set.
+    // 3. Build graph and compute ready set.
     let graph = DependencyGraph::build(&issues_vec, &edges);
     let ready_summaries = graph.compute_ready_set(&issues_vec);
 
     let now = Utc::now();
 
-    // 3. Categorise issues.
+    // 4. Categorise issues.
     let categories = categorise_issues(
         &issues_vec,
         &graph,
@@ -360,11 +360,11 @@ pub async fn handle_prime(
         now,
     );
 
-    // 4. Update cache with the fresh graph already fetched.
+    // 5. Update cache with the fresh graph already fetched.
     state.cache.update(ready_summaries, graph).await;
     tracing::debug!("Cache updated with fresh graph from prime");
 
-    // 5. Apply agent filter to relevant categories (PRD §6.3).
+    // 6. Apply agent filter to relevant categories (PRD §6.3).
     //    `completed` and `hotspots` are NOT filtered — completed provides
     //    global continuity context and hotspots are structural graph properties.
     let mut filtered_ip = categories.in_progress;
@@ -383,7 +383,7 @@ pub async fn handle_prime(
         filtered_stale.retain(|s| s.agent.as_deref() == Some(agent_filter));
     }
 
-    // 6. Build result with counts computed AFTER filtering.
+    // 7. Build result with counts computed AFTER filtering.
     let counts = PrimeCounts {
         in_progress: filtered_ip.len(),
         ready: filtered_ready.len(),
