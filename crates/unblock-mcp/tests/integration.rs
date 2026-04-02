@@ -14,6 +14,7 @@ use unblock_core::types::{
 };
 use unblock_github::client::GitHubClient;
 use unblock_github::projects::{CreateViewParams, OwnerType, ViewLayout};
+use unblock_mcp::tools::reconcile::ReconcileParams;
 use unblock_mcp::tools::setup::REQUIRED_VIEWS;
 
 mod common;
@@ -1497,5 +1498,159 @@ async fn setup_visible_fields_use_integer_ids() {
         "setup_visible_fields: {} fields with IDs {:?}",
         fields.len(),
         fields.iter().map(|f| f.id).collect::<Vec<_>>()
+    );
+}
+
+// ── Reconcile tool: integration tests ────────────────────────────────
+
+/// Run `reconcile` in read-only mode against the real GitHub repository and
+/// verify that it completes without error.
+///
+/// This test validates that the full reconcile pipeline (fresh fetch, graph
+/// rebuild, drift analysis) works end-to-end against real GitHub data.
+/// It does NOT assert `clean: true` because the test repo may have legitimate
+/// drift — it only asserts successful execution and valid report structure.
+#[tokio::test]
+async fn reconcile_on_clean_repo() {
+    if !has_github_token() {
+        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+        return;
+    }
+
+    let state = test_server_state().await;
+
+    let params = ReconcileParams {
+        fix: false,
+        stale_claim_hours: 24,
+    };
+
+    let result = unblock_mcp::tools::reconcile::handle_reconcile(&params, &state).await;
+
+    match result {
+        Ok(output) => {
+            let report = &output.report;
+            eprintln!(
+                "reconcile_on_clean_repo: issues_scanned={}, edges_scanned={}, clean={}, drift_count={}",
+                report.issues_scanned,
+                report.edges_scanned,
+                report.clean,
+                report.drift_found.len()
+            );
+            // Structural assertions — the report must have valid data.
+            assert!(!report.repo.is_empty(), "repo field should be populated");
+            assert!(
+                !report.reconciled_at.is_empty(),
+                "reconciled_at should be populated"
+            );
+            // Read-only mode: repaired should always be empty.
+            assert!(
+                report.repaired.is_empty(),
+                "read-only reconcile should not repair anything"
+            );
+            // If clean, drift_found should be empty and message present.
+            if report.clean {
+                assert!(report.drift_found.is_empty());
+                assert!(
+                    report.message.is_some(),
+                    "clean report should include a message"
+                );
+            }
+        }
+        Err(e) => {
+            panic!("handle_reconcile failed: {e:?}");
+        }
+    }
+}
+
+/// Build a set of issues with known drift (`StaleReadyState`), run the reconcile
+/// engine to verify it detects the drift, then simulate repair by correcting
+/// the `ReadyState` and verifying the re-analysis returns clean.
+///
+/// This is a unit-level integration test — it exercises the full analyse →
+/// detect → fix → re-analyse cycle without requiring GitHub write access.
+#[tokio::test]
+async fn reconcile_with_injected_drift_and_fix() {
+    use std::collections::{HashMap, HashSet};
+    use unblock_core::reconcile::{DriftKind, ReconcileEngine};
+
+    // Setup: issue #1 (closed), issue #2 (open, blocked by #1).
+    // #2's ReadyState is Blocked but should be Ready (blocker is closed).
+    let q1 = QualifiedId::new("acme", "test", 1);
+    let q2 = QualifiedId::new("acme", "test", 2);
+
+    let issue1 = {
+        let mut i = test_issue(1, IssueState::Closed);
+        i.qualified_id = q1.clone();
+        i.ready_state = ReadyState::Closed;
+        i
+    };
+    let issue2 = {
+        let mut i = test_issue(2, IssueState::Open);
+        i.qualified_id = q2.clone();
+        i.ready_state = ReadyState::Blocked; // <-- DRIFT: should be Ready
+        i
+    };
+
+    let issues_vec = vec![issue1.clone(), issue2.clone()];
+    let edges = vec![BlockingEdge {
+        source: q2.clone(),
+        target: q1.clone(),
+    }];
+    let graph = DependencyGraph::build(&issues_vec, &edges);
+    let computed_ready: HashSet<QualifiedId> = graph
+        .compute_ready_set(&issues_vec)
+        .into_iter()
+        .map(|s| s.qualified_id)
+        .collect();
+    let by_id: HashMap<QualifiedId, _> = issues_vec
+        .iter()
+        .map(|i| (i.qualified_id.clone(), i.clone()))
+        .collect();
+
+    let engine = ReconcileEngine::new(24);
+
+    // Step 1: Detect drift.
+    let report = engine.analyse(&graph, &by_id, &computed_ready, chrono::Utc::now());
+    assert!(!report.clean, "Should detect drift");
+    let has_stale_ready = report.drift_found.iter().any(|d| {
+        matches!(
+            d,
+            DriftKind::StaleReadyState {
+                graph_says: ReadyState::Ready,
+                field_says: ReadyState::Blocked,
+                ..
+            }
+        )
+    });
+    assert!(has_stale_ready, "Should detect StaleReadyState drift");
+
+    // Step 2: Simulate repair — correct the ReadyState on issue #2.
+    let corrected_issues = {
+        let mut i2 = issue2.clone();
+        i2.ready_state = ReadyState::Ready; // Fixed!
+        vec![issue1, i2]
+    };
+    let repaired_graph = DependencyGraph::build(&corrected_issues, &edges);
+    let repaired_ready: HashSet<QualifiedId> = repaired_graph
+        .compute_ready_set(&corrected_issues)
+        .into_iter()
+        .map(|s| s.qualified_id)
+        .collect();
+    let repaired_by_id: HashMap<QualifiedId, _> = corrected_issues
+        .iter()
+        .map(|i| (i.qualified_id.clone(), i.clone()))
+        .collect();
+
+    // Step 3: Re-analyse — should be clean now.
+    let repaired_report = engine.analyse(
+        &repaired_graph,
+        &repaired_by_id,
+        &repaired_ready,
+        chrono::Utc::now(),
+    );
+    assert!(
+        repaired_report.clean,
+        "After repair, graph should be clean but found drift: {:?}",
+        repaired_report.drift_found
     );
 }
