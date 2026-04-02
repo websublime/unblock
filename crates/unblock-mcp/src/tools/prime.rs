@@ -10,6 +10,7 @@
 //! fields. After the fetch, the cache is updated with the fresh graph data.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
@@ -20,6 +21,7 @@ use unblock_core::types::{Issue, IssueState, IssueSummary, QualifiedId, Status};
 
 use crate::errors::github_error_to_mcp;
 use crate::server::ServerState;
+use crate::tools::reconcile::{ReconcileParams, ReconcileReport, handle_reconcile};
 
 /// Minimum allowed value for `stale_threshold_hours` (must be at least 1).
 const MIN_STALE_THRESHOLD_HOURS: u64 = 1;
@@ -270,19 +272,26 @@ impl SessionMeta {
 ///
 /// # Flow
 ///
-/// 1. Fresh fetch via `fetch_graph_data()` — bypasses cache entirely.
-/// 2. Rebuild `DependencyGraph` from scratch.
-/// 3. Categorise all issues into `in_progress`, `blocked`, `ready`, `completed`, `hotspots`, `stale`.
-/// 4. Update cache with the fresh graph already fetched.
-/// 5. Return `PrimeResult` with stub session and no drift warnings.
+/// 1. Spawn a background read-only reconcile via `tokio::spawn` (Design Decision R5).
+/// 2. Fresh fetch via `fetch_graph_data()` — bypasses cache entirely.
+/// 3. Rebuild `DependencyGraph` from scratch.
+/// 4. Categorise all issues into `in_progress`, `blocked`, `ready`, `completed`, `hotspots`, `stale`.
+/// 5. Update cache with the fresh graph already fetched.
+/// 6. Await the drift check — if drift is found, populate `drift_warnings`.
+/// 7. Return `PrimeResult` with session metadata and drift warnings.
+///
+/// The background reconcile runs concurrently with the prime fetch and does not
+/// block the response path. If it fails or panics, `drift_warnings` is simply
+/// `None` — prime never fails due to reconcile errors.
 ///
 /// # Errors
 ///
 /// Returns [`rmcp::model::ErrorData`] with `INVALID_PARAMS` if `stale_threshold_hours`
 /// or `max_per_category` is below its minimum (currently 1), or if the GitHub fetch fails.
+#[allow(clippy::too_many_lines)]
 pub async fn handle_prime(
     params: &PrimeParams,
-    state: &ServerState,
+    state: &Arc<ServerState>,
 ) -> Result<PrimeResult, rmcp::model::ErrorData> {
     // Validate boundary values before proceeding.
     if let Some(hours) = params.stale_threshold_hours
@@ -318,7 +327,21 @@ pub async fn handle_prime(
         max_per_category, "Prime tool invoked"
     );
 
-    // 1. Always fresh fetch — bypasses cache entirely.
+    // 1. Spawn background read-only reconcile (Design Decision R5).
+    //    Runs concurrently with the prime fetch. If it fails or panics,
+    //    drift_warnings is simply None — prime never fails due to reconcile.
+    let drift_check = tokio::spawn({
+        let state = Arc::clone(state);
+        async move {
+            let reconcile_params = ReconcileParams {
+                fix: false,
+                stale_claim_hours: 24,
+            };
+            handle_reconcile(&reconcile_params, &state).await
+        }
+    });
+
+    // 2. Always fresh fetch — bypasses cache entirely.
     let (issues_vec, edges) = state
         .client
         .fetch_graph_data()
@@ -397,9 +420,70 @@ pub async fn handle_prime(
             .collect(),
         stale: filtered_stale.into_iter().take(max_per_category).collect(),
         session: SessionMeta::from_state(state),
-        drift_warnings: None,
+        drift_warnings: resolve_drift_warnings(drift_check).await,
         counts,
     })
+}
+
+/// Await the background drift check and convert to `drift_warnings`.
+///
+/// Returns `None` if the reconcile task panicked, returned an error, or
+/// found no drift (`report.clean == true`). Returns `Some(warnings)` when
+/// drift is detected, with human-readable summary strings.
+async fn resolve_drift_warnings(
+    drift_check: tokio::task::JoinHandle<
+        Result<crate::tools::reconcile::ReconcileOutput, rmcp::model::ErrorData>,
+    >,
+) -> Option<Vec<String>> {
+    match drift_check.await {
+        Ok(Ok(reconcile_out)) if !reconcile_out.report.clean => {
+            Some(summarise_drift(&reconcile_out.report))
+        }
+        _ => None,
+    }
+}
+
+/// Convert a [`ReconcileReport`] into human-readable drift warning strings.
+///
+/// Groups drift items by type tag and produces one summary line per drift
+/// type, e.g. `"3 stale ready states"`, `"1 uncascaded closure"`.
+fn summarise_drift(report: &ReconcileReport) -> Vec<String> {
+    // Count occurrences of each drift type from the serialised JSON values.
+    // Each drift_found entry is an externally-tagged serde enum: `{"VariantName": {...}}`.
+    let mut counts: HashMap<String, usize> = HashMap::new();
+
+    for drift in &report.drift_found {
+        if let Some(obj) = drift.as_object()
+            && let Some(key) = obj.keys().next()
+        {
+            *counts.entry(key.clone()).or_insert(0) += 1;
+        }
+    }
+
+    let mut warnings: Vec<String> = counts
+        .into_iter()
+        .map(|(kind, count)| {
+            let label = match kind.as_str() {
+                "StaleReadyState" => "stale ready state",
+                "UncascadedClosure" => "uncascaded closure",
+                "OrphanedBlockingEdge" => "orphaned blocking edge",
+                "MalformedAgentField" => "malformed agent field",
+                "MissingProjectField" => "missing project field",
+                "CycleDetected" => "cycle detected",
+                "StaleClaim" => "stale claim",
+                other => other,
+            };
+            if count == 1 {
+                format!("1 {label}")
+            } else {
+                format!("{count} {label}s")
+            }
+        })
+        .collect();
+
+    // Sort for deterministic output in tests.
+    warnings.sort();
+    warnings
 }
 
 /// Intermediate result holding categorised issue lists.
@@ -1148,7 +1232,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_prime_rejects_zero_stale_threshold() {
-        let state = test_state().await;
+        let state = Arc::new(test_state().await);
         let params = PrimeParams {
             stale_threshold_hours: Some(0),
             max_per_category: None,
@@ -1168,7 +1252,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_prime_rejects_zero_max_per_category() {
-        let state = test_state().await;
+        let state = Arc::new(test_state().await);
         let params = PrimeParams {
             stale_threshold_hours: None,
             max_per_category: Some(0),
@@ -1601,5 +1685,164 @@ mod tests {
         let json = r"{}";
         let params: PrimeParams = serde_json::from_str(json).expect("should deserialize");
         assert!(params.agent.is_none());
+    }
+
+    // ── summarise_drift tests ────────────────────────────────────────
+
+    /// Build a [`ReconcileReport`] with the given `drift_found` values.
+    fn make_report(drift_found: Vec<serde_json::Value>) -> ReconcileReport {
+        ReconcileReport {
+            repo: "test-owner/test-repo".to_owned(),
+            reconciled_at: Utc::now().to_rfc3339(),
+            issues_scanned: 10,
+            edges_scanned: 5,
+            clean: drift_found.is_empty(),
+            drift_found,
+            repaired: vec![],
+            errors: vec![],
+            message: None,
+        }
+    }
+
+    #[test]
+    fn summarise_drift_empty_report_returns_empty() {
+        let report = make_report(vec![]);
+        let warnings = summarise_drift(&report);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn summarise_drift_single_stale_ready_state() {
+        let drift = serde_json::json!({
+            "StaleReadyState": {
+                "issue": "owner/repo#1",
+                "field_says": "Ready",
+                "graph_says": "Blocked"
+            }
+        });
+        let report = make_report(vec![drift]);
+        let warnings = summarise_drift(&report);
+        assert_eq!(warnings, vec!["1 stale ready state"]);
+    }
+
+    #[test]
+    fn summarise_drift_multiple_of_same_type_uses_plural() {
+        let drift1 = serde_json::json!({
+            "StaleReadyState": { "issue": "o/r#1", "field_says": "Ready", "graph_says": "Blocked" }
+        });
+        let drift2 = serde_json::json!({
+            "StaleReadyState": { "issue": "o/r#2", "field_says": "Ready", "graph_says": "Blocked" }
+        });
+        let drift3 = serde_json::json!({
+            "StaleReadyState": { "issue": "o/r#3", "field_says": "Blocked", "graph_says": "Ready" }
+        });
+        let report = make_report(vec![drift1, drift2, drift3]);
+        let warnings = summarise_drift(&report);
+        assert_eq!(warnings, vec!["3 stale ready states"]);
+    }
+
+    #[test]
+    fn summarise_drift_mixed_types_sorted() {
+        let stale_rs = serde_json::json!({
+            "StaleReadyState": { "issue": "o/r#1", "field_says": "Ready", "graph_says": "Blocked" }
+        });
+        let uncascaded = serde_json::json!({
+            "UncascadedClosure": { "closed_issue": "o/r#2", "should_have_unblocked": ["o/r#3"] }
+        });
+        let stale_claim = serde_json::json!({
+            "StaleClaim": { "issue": "o/r#4", "claimed_at": "2026-01-01T00:00:00Z", "hours_stale": 48 }
+        });
+        let report = make_report(vec![stale_rs, uncascaded, stale_claim]);
+        let warnings = summarise_drift(&report);
+        // Sorted alphabetically.
+        assert_eq!(
+            warnings,
+            vec![
+                "1 stale claim",
+                "1 stale ready state",
+                "1 uncascaded closure",
+            ]
+        );
+    }
+
+    #[test]
+    fn summarise_drift_all_seven_types() {
+        let drifts = vec![
+            serde_json::json!({"StaleReadyState": {}}),
+            serde_json::json!({"UncascadedClosure": {}}),
+            serde_json::json!({"OrphanedBlockingEdge": {}}),
+            serde_json::json!({"MalformedAgentField": {}}),
+            serde_json::json!({"MissingProjectField": {}}),
+            serde_json::json!({"CycleDetected": {}}),
+            serde_json::json!({"StaleClaim": {}}),
+        ];
+        let report = make_report(drifts);
+        let warnings = summarise_drift(&report);
+        assert_eq!(warnings.len(), 7);
+        // All present with count 1.
+        for w in &warnings {
+            assert!(w.starts_with("1 "), "each should start with '1 ': {w}");
+        }
+    }
+
+    // ── resolve_drift_warnings tests ─────────────────────────────────
+
+    #[tokio::test]
+    async fn resolve_drift_warnings_clean_report_returns_none() {
+        let handle = tokio::spawn(async {
+            Ok(crate::tools::reconcile::ReconcileOutput {
+                report: make_report(vec![]),
+            })
+        });
+        let result = resolve_drift_warnings(handle).await;
+        assert!(result.is_none(), "clean report should produce None");
+    }
+
+    #[tokio::test]
+    async fn resolve_drift_warnings_with_drift_returns_some() {
+        let drift = serde_json::json!({
+            "StaleReadyState": { "issue": "o/r#1", "field_says": "Ready", "graph_says": "Blocked" }
+        });
+        let handle = tokio::spawn(async {
+            Ok(crate::tools::reconcile::ReconcileOutput {
+                report: ReconcileReport {
+                    repo: "o/r".to_owned(),
+                    reconciled_at: Utc::now().to_rfc3339(),
+                    issues_scanned: 5,
+                    edges_scanned: 2,
+                    clean: false,
+                    drift_found: vec![drift],
+                    repaired: vec![],
+                    errors: vec![],
+                    message: None,
+                },
+            })
+        });
+        let result = resolve_drift_warnings(handle).await;
+        assert!(result.is_some(), "dirty report should produce Some");
+        let warnings = result.unwrap();
+        assert_eq!(warnings, vec!["1 stale ready state"]);
+    }
+
+    #[tokio::test]
+    async fn resolve_drift_warnings_error_returns_none() {
+        let handle = tokio::spawn(async {
+            Err(rmcp::model::ErrorData {
+                code: rmcp::model::ErrorCode::INTERNAL_ERROR,
+                message: "boom".into(),
+                data: None,
+            })
+        });
+        let result = resolve_drift_warnings(handle).await;
+        assert!(result.is_none(), "error should produce None");
+    }
+
+    #[tokio::test]
+    async fn resolve_drift_warnings_panic_returns_none() {
+        let handle: tokio::task::JoinHandle<
+            Result<crate::tools::reconcile::ReconcileOutput, rmcp::model::ErrorData>,
+        > = tokio::spawn(async { panic!("simulated reconcile panic") });
+        let result = resolve_drift_warnings(handle).await;
+        assert!(result.is_none(), "panic should produce None");
     }
 }
