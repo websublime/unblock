@@ -94,7 +94,7 @@ bd close bd-42 --reason "Completed" --json
 
 bd uses Dolt (MySQL protocol) as its database backend:
 - Data stored with full version history
-- Use `bd dolt push` / `bd dolt pull` to sync with remote
+- Don't use `bd dolt push` / `bd dolt pull` to sync with remote, we are local only
 - No manual JSONL export needed — Dolt handles versioning
 
 ### CLI Help
