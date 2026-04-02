@@ -305,13 +305,12 @@ async fn apply_repairs(
                             }
                         }
                     }
-                    // Push to repaired once per UncascadedClosure (not per downstream issue).
-                    if !repaired_qids.is_empty() {
-                        report.repaired.push(drift.clone());
-                    }
-                    // Post audit comment on the closed issue for traceability (R4).
+                    // Push to repaired once per UncascadedClosure (not per downstream issue)
+                    // and post audit comment on the closed issue for traceability (R4).
                     // When partially successful, list only the issues that were repaired.
                     if !repaired_qids.is_empty() {
+                        report.repaired.push(drift.clone());
+
                         let comment_qids: Vec<QualifiedId> =
                             repaired_qids.iter().map(|q| (*q).clone()).collect();
                         let comment_body = format_cascade_repair_comment(&comment_qids);
