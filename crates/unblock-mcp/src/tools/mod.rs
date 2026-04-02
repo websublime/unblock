@@ -60,7 +60,7 @@ use crate::server::ServerState;
 /// empty results. This helper collapses empty and whitespace-only strings
 /// to `None` so filters behave as if the parameter was omitted.
 #[must_use]
-pub(crate) fn normalize_filter(value: Option<String>) -> Option<String> {
+pub(crate) fn normalize_filter(value: Option<&str>) -> Option<&str> {
     value.filter(|s| !s.trim().is_empty())
 }
 
@@ -267,31 +267,25 @@ mod tests {
 
     #[test]
     fn normalize_filter_non_empty_preserved() {
-        assert_eq!(
-            normalize_filter(Some("agent-x".to_owned())),
-            Some("agent-x".to_owned())
-        );
+        assert_eq!(normalize_filter(Some("agent-x")), Some("agent-x"));
     }
 
     #[test]
     fn normalize_filter_empty_string_becomes_none() {
-        assert_eq!(normalize_filter(Some(String::new())), None);
+        assert_eq!(normalize_filter(Some("")), None);
     }
 
     #[test]
     fn normalize_filter_whitespace_only_becomes_none() {
-        assert_eq!(normalize_filter(Some("   ".to_owned())), None);
-        assert_eq!(normalize_filter(Some("\t\n".to_owned())), None);
+        assert_eq!(normalize_filter(Some("   ")), None);
+        assert_eq!(normalize_filter(Some("\t\n")), None);
     }
 
     #[test]
     fn normalize_filter_preserves_whitespace_padded_value() {
         // A value with surrounding whitespace is preserved (not trimmed) —
         // only purely-whitespace strings are collapsed to None.
-        assert_eq!(
-            normalize_filter(Some(" agent-x ".to_owned())),
-            Some(" agent-x ".to_owned())
-        );
+        assert_eq!(normalize_filter(Some(" agent-x ")), Some(" agent-x "));
     }
 
     // ── execute_read_tool tests ────────────────────────────────────────

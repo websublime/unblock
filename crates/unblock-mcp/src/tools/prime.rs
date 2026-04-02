@@ -374,12 +374,12 @@ pub async fn handle_prime(
 
     // Normalize empty/whitespace agent strings to None so they don't silently
     // filter out all results (serde deserializes "" as Some("")).
-    let agent_filter = crate::tools::normalize_filter(params.agent.clone());
-    if let Some(ref agent_filter) = agent_filter {
-        filtered_ip.retain(|s| s.agent.as_deref() == Some(agent_filter.as_str()));
-        filtered_ready.retain(|s| s.agent.as_deref() == Some(agent_filter.as_str()));
-        filtered_blocked.retain(|s| s.agent.as_deref() == Some(agent_filter.as_str()));
-        filtered_stale.retain(|s| s.agent.as_deref() == Some(agent_filter.as_str()));
+    let agent_filter = crate::tools::normalize_filter(params.agent.as_deref());
+    if let Some(agent_filter) = agent_filter {
+        filtered_ip.retain(|s| s.agent.as_deref() == Some(agent_filter));
+        filtered_ready.retain(|s| s.agent.as_deref() == Some(agent_filter));
+        filtered_blocked.retain(|s| s.agent.as_deref() == Some(agent_filter));
+        filtered_stale.retain(|s| s.agent.as_deref() == Some(agent_filter));
     }
 
     // 6. Build result with counts computed AFTER filtering.
@@ -1770,13 +1770,13 @@ mod tests {
         let result = categorise_issues(&issues, &graph, &ready, 24, Utc::now());
 
         // Simulate what handle_prime does: normalize then filter.
-        let agent_filter = crate::tools::normalize_filter(Some(String::new()));
+        let agent_filter = crate::tools::normalize_filter(Some(""));
         assert!(
             agent_filter.is_none(),
             "empty string should normalize to None"
         );
 
-        let (ip, _, _, _) = apply_agent_filter(&result, agent_filter.as_deref());
+        let (ip, _, _, _) = apply_agent_filter(&result, agent_filter);
         assert_eq!(
             ip, 2,
             "empty agent string should return all in_progress issues"
