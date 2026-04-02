@@ -331,6 +331,10 @@ impl UnblockServer {
         Parameters(params): Parameters<InitParams>,
     ) -> Result<Json<InitResult>, ErrorData> {
         let state = self.state();
+        let kind = state
+            .agent_kind
+            .get()
+            .map_or_else(|| "unknown".into(), |k| k.as_str().to_owned());
         let client = &state.client;
 
         // Step 1: Detect or use provided owner type.
@@ -357,6 +361,7 @@ impl UnblockServer {
         };
 
         info!(
+            agent.kind = %kind,
             owner = %client.owner(),
             scope = scope_str,
             "Init tool invoked"
@@ -443,6 +448,10 @@ impl UnblockServer {
         Parameters(params): Parameters<SetupParams>,
     ) -> Result<Json<SetupResult>, ErrorData> {
         let state = self.state();
+        let kind = state
+            .agent_kind
+            .get()
+            .map_or_else(|| "unknown".into(), |k| k.as_str().to_owned());
         let dry_run = params.dry_run.unwrap_or(false);
 
         // Resolve project info — use param override or configured project number.
@@ -464,6 +473,7 @@ impl UnblockServer {
             .map_err(crate::errors::github_error_to_mcp)?;
 
         info!(
+            agent.kind = %kind,
             project_id = %project_info.id,
             project_number = project_info.number,
             dry_run,
@@ -591,6 +601,10 @@ impl UnblockServer {
         Parameters(params): Parameters<ShowParams>,
     ) -> Result<Json<ShowResult>, ErrorData> {
         let state = self.state();
+        let kind = state
+            .agent_kind
+            .get()
+            .map_or_else(|| "unknown".into(), |k| k.as_str().to_owned());
         let client = &state.client;
 
         let include_comments = params.include_comments.unwrap_or(true);
@@ -598,6 +612,7 @@ impl UnblockServer {
         let issue_number = params.id;
 
         info!(
+            agent.kind = %kind,
             issue_number,
             include_comments, include_deps, "Show tool invoked"
         );
@@ -740,8 +755,13 @@ impl UnblockServer {
         Parameters(params): Parameters<ReadyParams>,
     ) -> Result<Json<ReadyResult>, ErrorData> {
         let state = self.state();
+        let kind = state
+            .agent_kind
+            .get()
+            .map_or_else(|| "unknown".into(), |k| k.as_str().to_owned());
 
         info!(
+            agent.kind = %kind,
             limit = params.limit,
             issue_type = params.issue_type.as_deref(),
             priority = params.priority.as_deref(),
@@ -798,6 +818,10 @@ impl UnblockServer {
         Parameters(params): Parameters<ClaimParams>,
     ) -> Result<Json<ClaimResult>, ErrorData> {
         let state = self.state();
+        let kind = state
+            .agent_kind
+            .get()
+            .map_or_else(|| "unknown".into(), |k| k.as_str().to_owned());
         let client = Arc::clone(&state.client);
         let config = Arc::clone(&state.config);
 
@@ -805,6 +829,7 @@ impl UnblockServer {
         let agent_name = params.agent.unwrap_or_else(|| config.agent.clone());
 
         info!(
+            agent.kind = %kind,
             issue_number,
             agent = %agent_name,
             "Claim tool invoked"
@@ -931,12 +956,17 @@ impl UnblockServer {
         Parameters(params): Parameters<CloseParams>,
     ) -> Result<Json<CloseResult>, ErrorData> {
         let state = self.state();
+        let kind = state
+            .agent_kind
+            .get()
+            .map_or_else(|| "unknown".into(), |k| k.as_str().to_owned());
         let client = Arc::clone(&state.client);
 
         let issue_number = params.id;
         let reason = params.reason;
 
         info!(
+            agent.kind = %kind,
             issue_number,
             reason = reason.as_deref(),
             "Close tool invoked"
@@ -1150,12 +1180,16 @@ impl UnblockServer {
         Parameters(params): Parameters<DependsParams>,
     ) -> Result<Json<DependsResult>, ErrorData> {
         let state = self.state();
+        let kind = state
+            .agent_kind
+            .get()
+            .map_or_else(|| "unknown".into(), |k| k.as_str().to_owned());
         let client = Arc::clone(&state.client);
 
         let source = params.source;
         let target_str = params.target.clone();
 
-        info!(source, target = %target_str, "Depends tool invoked");
+        info!(agent.kind = %kind, source, target = %target_str, "Depends tool invoked");
 
         // Parse target string into IssueRef.
         let issue_ref = target_str
@@ -1292,9 +1326,14 @@ impl UnblockServer {
         Parameters(params): Parameters<CreateParams>,
     ) -> Result<Json<CreateResult>, ErrorData> {
         let state = self.state();
+        let kind = state
+            .agent_kind
+            .get()
+            .map_or_else(|| "unknown".into(), |k| k.as_str().to_owned());
         let client = Arc::clone(&state.client);
 
         info!(
+            agent.kind = %kind,
             title = %params.title,
             issue_type = params.issue_type.as_deref(),
             priority = params.priority.as_deref(),
@@ -1571,11 +1610,15 @@ impl UnblockServer {
         Parameters(params): Parameters<CommentParams>,
     ) -> Result<Json<CommentResult>, ErrorData> {
         let state = self.state();
+        let kind = state
+            .agent_kind
+            .get()
+            .map_or_else(|| "unknown".into(), |k| k.as_str().to_owned());
         let client = &state.client;
         let issue_number = params.id;
         let body = params.body;
 
-        info!(issue_number, "Comment tool invoked");
+        info!(agent.kind = %kind, issue_number, "Comment tool invoked");
 
         // Step 1: Validate body is non-empty (before any API call).
         if body.trim().is_empty() {
@@ -1617,11 +1660,16 @@ impl UnblockServer {
         Parameters(params): Parameters<UpdateParams>,
     ) -> Result<Json<UpdateResult>, ErrorData> {
         let state = self.state();
+        let kind = state
+            .agent_kind
+            .get()
+            .map_or_else(|| "unknown".into(), |k| k.as_str().to_owned());
         let client = Arc::clone(&state.client);
 
         let issue_number = params.id;
 
         info!(
+            agent.kind = %kind,
             issue_number,
             priority = params.priority.as_deref(),
             status = params.status.as_deref(),
@@ -1919,6 +1967,13 @@ impl UnblockServer {
         Parameters(params): Parameters<PrimeParams>,
     ) -> Result<Json<PrimeResult>, ErrorData> {
         let state = self.state();
+        let kind = state
+            .agent_kind
+            .get()
+            .map_or_else(|| "unknown".into(), |k| k.as_str().to_owned());
+
+        info!(agent.kind = %kind, "Prime tool invoked");
+
         let output = crate::tools::prime::handle_prime(&params, state).await?;
         Ok(Json(output))
     }
@@ -1942,6 +1997,13 @@ impl UnblockServer {
         Parameters(params): Parameters<ReconcileParams>,
     ) -> Result<Json<ReconcileOutput>, ErrorData> {
         let state = self.state();
+        let kind = state
+            .agent_kind
+            .get()
+            .map_or_else(|| "unknown".into(), |k| k.as_str().to_owned());
+
+        info!(agent.kind = %kind, "Reconcile tool invoked");
+
         let output = crate::tools::reconcile::handle_reconcile(&params, state).await?;
         Ok(Json(output))
     }
