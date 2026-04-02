@@ -42,6 +42,8 @@ async fn main() -> Result<(), unblock_mcp::errors::BootstrapError> {
         client: Arc::new(client),
         cache: Arc::new(cache),
         agent_kind: std::sync::OnceLock::new(),
+        agent_client: std::sync::OnceLock::new(),
+        connected_at: std::sync::OnceLock::new(),
     };
 
     let repo_slug = format!("{}/{}", state.client.owner(), state.client.repo());
