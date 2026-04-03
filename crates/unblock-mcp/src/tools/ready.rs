@@ -134,11 +134,11 @@ pub fn filter_ready_set(
 
     ready_set
         .iter()
-        // Filter by issue_type (case-insensitive Debug match).
+        // Filter by issue_type (case-insensitive match).
         .filter(|s| {
             issue_type.is_none_or(|filter| {
                 s.issue_type
-                    .is_some_and(|it| format!("{it:?}").eq_ignore_ascii_case(filter))
+                    .is_some_and(|it| it.to_string().eq_ignore_ascii_case(filter))
             })
         })
         // Filter by priority (case-insensitive Debug match).
