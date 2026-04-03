@@ -2049,11 +2049,60 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::OnceLock;
+    use std::io;
+    use std::sync::{Mutex, OnceLock};
     use std::time::Duration;
+    use tracing_subscriber::fmt;
+    use tracing_subscriber::prelude::*;
     use unblock_core::cache::GraphCache;
     use unblock_core::client::{AgentClient, AgentKind};
     use unblock_core::detection::ClientDetector;
+
+    /// Shared buffer for capturing tracing output in tests.
+    ///
+    /// Wraps an `Arc<Mutex<Vec<u8>>>` and implements `io::Write` so it can
+    /// be used as a `tracing_subscriber` writer. Call [`TracingCapture::new`]
+    /// to create an instance, [`TracingCapture::subscriber`] to build a
+    /// JSON subscriber wired to the buffer, and [`TracingCapture::output`]
+    /// to retrieve the captured output as a `String`.
+    #[derive(Clone)]
+    struct TracingCapture(Arc<Mutex<Vec<u8>>>);
+
+    impl TracingCapture {
+        /// Create a new, empty capture buffer.
+        fn new() -> Self {
+            Self(Arc::new(Mutex::new(Vec::new())))
+        }
+
+        /// Build a JSON tracing subscriber that writes to this buffer.
+        fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync {
+            let writer = self.clone();
+            tracing_subscriber::registry().with(
+                fmt::layer()
+                    .json()
+                    .with_writer(move || writer.clone())
+                    .with_target(false),
+            )
+        }
+
+        /// Return the captured output as a UTF-8 string.
+        ///
+        /// # Panics
+        ///
+        /// Panics if the mutex is poisoned or the buffer is not valid UTF-8.
+        fn output(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+    }
+
+    impl io::Write for TracingCapture {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().write(buf)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            self.0.lock().unwrap().flush()
+        }
+    }
 
     /// Helper: create a minimal `ServerState` for unit tests.
     async fn test_state() -> ServerState {
@@ -2168,32 +2217,8 @@ mod tests {
     /// every tool handler.
     #[tokio::test]
     async fn agent_kind_appears_in_tracing_output() {
-        use std::io;
-        use std::sync::{Arc, Mutex};
-        use tracing_subscriber::fmt;
-        use tracing_subscriber::prelude::*;
-
-        // Buffer to capture JSON output.
-        #[derive(Clone)]
-        struct BufWriter(Arc<Mutex<Vec<u8>>>);
-        impl io::Write for BufWriter {
-            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-                self.0.lock().unwrap().write(buf)
-            }
-            fn flush(&mut self) -> io::Result<()> {
-                self.0.lock().unwrap().flush()
-            }
-        }
-
-        let buf = BufWriter(Arc::new(Mutex::new(Vec::new())));
-        let buf_clone = buf.clone();
-
-        let subscriber = tracing_subscriber::registry().with(
-            fmt::layer()
-                .json()
-                .with_writer(move || buf_clone.clone())
-                .with_target(false),
-        );
+        let capture = TracingCapture::new();
+        let subscriber = capture.subscriber();
 
         let state = test_state().await;
         let _ = state.agent_kind.set(AgentKind::ClaudeCode);
@@ -2204,7 +2229,7 @@ mod tests {
             info!(agent.kind = %kind, "Ready tool invoked");
         });
 
-        let output = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        let output = capture.output();
         assert!(
             output.contains("\"agent\":{\"kind\":\"claude-code\"}")
                 || output.contains("claude-code"),
@@ -2224,31 +2249,8 @@ mod tests {
     /// Verify `agent.kind` falls back to "unknown" when `OnceLock` is not set.
     #[tokio::test]
     async fn agent_kind_unknown_in_tracing_when_unset() {
-        use std::io;
-        use std::sync::{Arc, Mutex};
-        use tracing_subscriber::fmt;
-        use tracing_subscriber::prelude::*;
-
-        #[derive(Clone)]
-        struct BufWriter(Arc<Mutex<Vec<u8>>>);
-        impl io::Write for BufWriter {
-            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-                self.0.lock().unwrap().write(buf)
-            }
-            fn flush(&mut self) -> io::Result<()> {
-                self.0.lock().unwrap().flush()
-            }
-        }
-
-        let buf = BufWriter(Arc::new(Mutex::new(Vec::new())));
-        let buf_clone = buf.clone();
-
-        let subscriber = tracing_subscriber::registry().with(
-            fmt::layer()
-                .json()
-                .with_writer(move || buf_clone.clone())
-                .with_target(false),
-        );
+        let capture = TracingCapture::new();
+        let subscriber = capture.subscriber();
 
         let state = test_state().await;
         // Do NOT set agent_kind — test the fallback.
@@ -2258,7 +2260,7 @@ mod tests {
             info!(agent.kind = %kind, "Claim tool invoked");
         });
 
-        let output = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        let output = capture.output();
         assert!(
             output.contains("\"agent\":{\"kind\":\"unknown\"}") || output.contains("unknown"),
             "Expected agent.kind=unknown in tracing output, got: {output}"
