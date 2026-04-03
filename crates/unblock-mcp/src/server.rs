@@ -2050,7 +2050,7 @@ const _: () = {
 mod tests {
     use super::*;
     use std::io;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::{Mutex, MutexGuard, OnceLock};
     use std::time::Duration;
     use tracing_subscriber::fmt;
     use tracing_subscriber::prelude::*;
@@ -2064,9 +2064,31 @@ mod tests {
     /// be used as a `tracing_subscriber` writer. Call [`TracingCapture::new`]
     /// to create an instance, [`TracingCapture::subscriber`] to build a
     /// JSON subscriber wired to the buffer, and [`TracingCapture::output`]
-    /// to retrieve the captured output as a `String`.
+    /// to retrieve the captured output as a zero-copy `&str` borrow.
     #[derive(Clone)]
     struct TracingCapture(Arc<Mutex<Vec<u8>>>);
+
+    /// RAII guard that holds a [`MutexGuard`] and exposes the captured
+    /// bytes as a `&str` without cloning.
+    ///
+    /// Returned by [`TracingCapture::output`]. The guard keeps the mutex
+    /// locked while the caller inspects the output; it is released when
+    /// the guard is dropped.
+    struct CapturedOutput<'a>(MutexGuard<'a, Vec<u8>>);
+
+    impl std::ops::Deref for CapturedOutput<'_> {
+        type Target = str;
+
+        fn deref(&self) -> &str {
+            std::str::from_utf8(&self.0).expect("captured output is not valid UTF-8")
+        }
+    }
+
+    impl std::fmt::Display for CapturedOutput<'_> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self)
+        }
+    }
 
     impl TracingCapture {
         /// Create a new, empty capture buffer.
@@ -2085,13 +2107,18 @@ mod tests {
             )
         }
 
-        /// Return the captured output as a UTF-8 string.
+        /// Return the captured output as a zero-copy `&str` borrow.
+        ///
+        /// Returns a [`CapturedOutput`] guard that derefs to `&str`,
+        /// avoiding a full buffer clone. The mutex stays locked while
+        /// the guard is alive.
         ///
         /// # Panics
         ///
-        /// Panics if the mutex is poisoned or the buffer is not valid UTF-8.
-        fn output(&self) -> String {
-            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        /// Panics if the mutex is poisoned or the buffer is not valid
+        /// UTF-8.
+        fn output(&self) -> CapturedOutput<'_> {
+            CapturedOutput(self.0.lock().unwrap())
         }
     }
 
