@@ -607,6 +607,11 @@ fn categorise_issues(
     });
 
     // Sort completed by closed_at DESC (most recently closed first).
+    // String comparison is valid here because `closed_at` values are UTC
+    // RFC 3339 timestamps (e.g. "2024-03-15T12:00:00+00:00"), which sort
+    // lexicographically in the same order as chronologically. If the
+    // timestamp format ever changes, this sort must be updated to parse
+    // into a proper datetime type.
     completed.sort_by(|a, b| b.closed_at.cmp(&a.closed_at));
 
     // Sort stale by hours_stale DESC (most stale first).
