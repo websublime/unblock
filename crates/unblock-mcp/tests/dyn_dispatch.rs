@@ -223,6 +223,40 @@ async fn show_dispatches_through_dyn_vtable() {
     assert_eq!(mock.calls().fetch_issue(), 1);
 }
 
+/// Negative-path coverage: prove that an `Err` returned by the mock also
+/// crosses the `Arc<dyn GitHubApi>` vtable boundary and propagates out as an
+/// MCP `ErrorData`. Without this, only the Ok branch is exercised through
+/// dyn dispatch and a regression in the error-path call site could pass.
+#[tokio::test]
+async fn show_err_propagates_through_dyn_vtable() {
+    let mock = new_mock();
+    mock.push_fetch_issue(Err(unblock_github::errors::Error::GitHubApi {
+        status: 404,
+        message: "Not Found".to_owned(),
+    }));
+
+    let server = UnblockServer::new(state_with_mock(Arc::clone(&mock)));
+    let result = server
+        .show(Parameters(ShowParams {
+            id: 999,
+            include_comments: Some(false),
+            include_deps: Some(false),
+        }))
+        .await;
+    let Err(err) = result else {
+        panic!("show must surface mock Err through dyn dispatch");
+    };
+
+    // The vtable call must have happened exactly once even on the Err path.
+    assert_eq!(mock.calls().fetch_issue(), 1);
+    // Sanity: the propagated MCP error carries the upstream message.
+    assert!(
+        err.message.contains("Not Found") || err.message.contains("404"),
+        "expected propagated GitHub error message, got: {}",
+        err.message
+    );
+}
+
 // ── ready ──────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -424,10 +458,11 @@ async fn update_dispatches_through_dyn_vtable() {
 async fn prime_dispatches_through_dyn_vtable() {
     let mock = new_mock();
     // prime spawns a background reconcile concurrently (which also calls
-    // fetch_graph_data) and itself fetches once directly. Queue two results
-    // to cover both; counter is asserted as ≥ 1 because the background
-    // reconcile may or may not land depending on scheduling — but it
-    // typically does, so assert == 2 for determinism via join.
+    // fetch_graph_data) and itself fetches once directly. The background
+    // JoinHandle is awaited inside prime via resolve_drift_warnings(), so by
+    // the time prime returns BOTH fetches have completed deterministically.
+    // Queue two stubs and assert exactly two calls to prove both vtable
+    // traversals occurred (direct + background).
     mock.push_fetch_graph_data(Ok((vec![make_issue(1)], vec![])));
     mock.push_fetch_graph_data(Ok((vec![make_issue(1)], vec![])));
 
@@ -441,9 +476,9 @@ async fn prime_dispatches_through_dyn_vtable() {
         .await
         .expect("prime should succeed via dyn dispatch");
 
-    // Counter must show at least the direct fetch; the background spawn
-    // may or may not have completed by the time prime returns.
-    assert!(mock.calls().fetch_graph_data() >= 1);
+    // Both the direct fetch AND the awaited background reconcile fetch must
+    // have traversed the dyn vtable by now.
+    assert_eq!(mock.calls().fetch_graph_data(), 2);
     // Basic sanity on result shape.
     let _ = result.counts.ready;
 }
