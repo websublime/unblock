@@ -33,3 +33,4 @@ snafu = { workspace = true }
 
 [dev-dependencies]
 reqwest = { workspace = true }
+unblock-github = { path = "../unblock-github", features = ["test-hooks"] }
