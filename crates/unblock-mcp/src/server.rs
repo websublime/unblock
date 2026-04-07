@@ -367,7 +367,7 @@ impl UnblockServer {
         name = "init",
         description = "Bootstrap a new GitHub Projects V2 project for the repository. Idempotent — returns existing project if a matching title is found. Run this before setup on a new repository."
     )]
-    async fn init(
+    pub async fn init(
         &self,
         Parameters(params): Parameters<InitParams>,
     ) -> Result<Json<InitResult>, ErrorData> {
@@ -481,7 +481,7 @@ impl UnblockServer {
         name = "setup",
         description = "Configure Projects V2 fields (Status, Priority, IssueType, Agent, StoryPoints, DeferUntil, ReadyState) and views (://ready, ://team, ://pipeline, ://roadmap, ://timeline). Safe to call repeatedly — existing fields/views are skipped. Use dry_run=true to check without mutating."
     )]
-    async fn setup(
+    pub async fn setup(
         &self,
         Parameters(params): Parameters<SetupParams>,
     ) -> Result<Json<SetupResult>, ErrorData> {
@@ -631,7 +631,7 @@ impl UnblockServer {
         name = "show",
         description = "Get full details for a single issue: body sections, blocking relationships, dependency tree (from cache), and comments. Use include_comments=false or include_deps=false to skip optional sections."
     )]
-    async fn show(
+    pub async fn show(
         &self,
         Parameters(params): Parameters<ShowParams>,
     ) -> Result<Json<ShowResult>, ErrorData> {
@@ -782,7 +782,7 @@ impl UnblockServer {
         name = "ready",
         description = "Find issues with no active blockers, sorted by priority. Filters: limit, issue_type, priority, milestone, agent, label, include_claimed. Returns from cache (rebuilds lazily if stale)."
     )]
-    async fn ready(
+    pub async fn ready(
         &self,
         Parameters(params): Parameters<ReadyParams>,
     ) -> Result<Json<ReadyResult>, ErrorData> {
@@ -842,7 +842,7 @@ impl UnblockServer {
         name = "claim",
         description = "Claim an issue for an agent. Validates the issue is open, unblocked, not deferred, and not already claimed. Sets Status=In Progress, Agent=name, ReadyState=Not Ready, and posts a comment. Triggers graph rebuild."
     )]
-    async fn claim(
+    pub async fn claim(
         &self,
         Parameters(params): Parameters<ClaimParams>,
     ) -> Result<Json<ClaimResult>, ErrorData> {
@@ -977,7 +977,7 @@ impl UnblockServer {
         name = "close",
         description = "Close an issue and cascade-unblock dependents. Validates the issue is open, closes it, updates project fields (Status=Done, ReadyState=Not Ready), and auto-unblocks any dependent issues whose blockers are now all closed. Returns the list of newly unblocked issue numbers. Triggers graph rebuild."
     )]
-    async fn close(
+    pub async fn close(
         &self,
         Parameters(params): Parameters<CloseParams>,
     ) -> Result<Json<CloseResult>, ErrorData> {
@@ -1198,7 +1198,7 @@ impl UnblockServer {
         name = "depends",
         description = "Add a blocking dependency: source becomes blocked by target. Validates both issues exist, rejects cycles and duplicates. Target accepts local number or owner/repo#number for cross-repo. Updates project fields (ReadyState=Not Ready, Status=Blocked) on source. Triggers graph rebuild."
     )]
-    async fn depends(
+    pub async fn depends(
         &self,
         Parameters(params): Parameters<DependsParams>,
     ) -> Result<Json<DependsResult>, ErrorData> {
@@ -1341,7 +1341,7 @@ impl UnblockServer {
         name = "create",
         description = "Create a new GitHub Issue. Set title (required), issue_type (default Task), priority (default P2), body, labels, blocked_by (local number or owner/repo#number), parent, story_points, defer_until. Labels are auto-created if missing. Triggers graph rebuild."
     )]
-    async fn create(
+    pub async fn create(
         &self,
         Parameters(params): Parameters<CreateParams>,
     ) -> Result<Json<CreateResult>, ErrorData> {
@@ -1622,7 +1622,7 @@ impl UnblockServer {
         name = "comment",
         description = "Post a comment on an issue. Does not affect the dependency graph or ready set — no graph rebuild is triggered. Returns the URL of the new comment."
     )]
-    async fn comment(
+    pub async fn comment(
         &self,
         Parameters(params): Parameters<CommentParams>,
     ) -> Result<Json<CommentResult>, ErrorData> {
@@ -1669,7 +1669,7 @@ impl UnblockServer {
         name = "update",
         description = "Update issue fields selectively. Supports: priority, status, labels_add, labels_remove, body_section (section: Description/Acceptance/Design, content), milestone (title), story_points, defer_until (YYYY-MM-DD). Only provided fields are changed. Triggers graph rebuild."
     )]
-    async fn update(
+    pub async fn update(
         &self,
         Parameters(params): Parameters<UpdateParams>,
     ) -> Result<Json<UpdateResult>, ErrorData> {
@@ -1973,7 +1973,7 @@ impl UnblockServer {
         name = "prime",
         description = "Session entry point for every agent session. Returns categorised issue lists: in_progress, ready, blocked, hotspots (most-blocking), and stale claims. Includes session metadata and drift warnings. Always does a fresh fetch — bypasses cache. Use stale_threshold_hours to configure stale claim detection (default 24h), max_per_category to limit output size (default 10), and agent to filter in_progress/ready/blocked/stale by agent name (exact match; completed and hotspots are never filtered)."
     )]
-    async fn prime(
+    pub async fn prime(
         &self,
         Parameters(params): Parameters<PrimeParams>,
     ) -> Result<Json<PrimeResult>, ErrorData> {
@@ -2000,7 +2000,7 @@ impl UnblockServer {
         name = "reconcile",
         description = "Detect drift between the computed dependency graph and GitHub state. Returns a DriftReport listing stale ready states, uncascaded closures, orphaned edges, cycles, and stale claims. Use fix=true to auto-repair (not yet implemented). Always does a fresh fetch — bypasses cache."
     )]
-    async fn reconcile(
+    pub async fn reconcile(
         &self,
         Parameters(params): Parameters<ReconcileParams>,
     ) -> Result<Json<ReconcileOutput>, ErrorData> {
