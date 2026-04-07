@@ -78,6 +78,20 @@ pub enum Error {
         /// Description of the git remote detection failure.
         message: String,
     },
+
+    /// A `MockGitHubClient` method was called without a queued stub response.
+    ///
+    /// Only constructible when the `test-hooks` feature is enabled. Tests
+    /// should pre-load the relevant stub queue (e.g. via
+    /// `MockGitHubClient::push_resolve_project_info`) before exercising the
+    /// code under test, otherwise the mock returns this variant to surface
+    /// the missing setup loudly instead of silently producing a default.
+    #[cfg(feature = "test-hooks")]
+    #[snafu(display("MockGitHubClient: `{method}` was called without a queued stub response"))]
+    MockNotStubbed {
+        /// The trait method that was invoked without a stub.
+        method: &'static str,
+    },
 }
 
 impl Error {
@@ -95,6 +109,8 @@ impl Error {
             Self::RateLimited { .. } => 429,
             Self::ProjectNotConfigured => 412,
             Self::GitRemote { .. } => 500,
+            #[cfg(feature = "test-hooks")]
+            Self::MockNotStubbed { .. } => 500,
         }
     }
 }

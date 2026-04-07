@@ -29,3 +29,12 @@ pub mod errors;
 pub mod api;
 
 pub use api::GitHubApi;
+
+/// Test-only mock implementation of [`GitHubApi`] with call counters and
+/// per-method response stub queues. Gated behind the `test-hooks` feature
+/// so that production builds never compile it.
+#[cfg(feature = "test-hooks")]
+pub mod mock;
+
+#[cfg(feature = "test-hooks")]
+pub use mock::MockGitHubClient;
