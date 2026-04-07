@@ -20,6 +20,11 @@ chrono = { workspace = true }
 snafu = { workspace = true }
 async-trait = { workspace = true }
 
+[features]
+# Exposes test-only helpers (e.g. `MockGitHubClient`) for downstream test
+# crates. Off by default — production builds never compile the mock.
+test-hooks = []
+
 [dev-dependencies]
 wiremock = { workspace = true }
 tokio = { workspace = true }
