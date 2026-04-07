@@ -1409,6 +1409,10 @@ async fn setup_no_project_returns_project_not_configured() {
     })
     .expect("Config should load without UNBLOCK_PROJECT");
 
+    // Intentional concrete `GitHubClient::new` (not the `GitHubApi` trait):
+    // this test asserts the real client's project-resolution path returns
+    // `ProjectNotConfigured` when `UNBLOCK_PROJECT` is unset, which is a
+    // property of the concrete implementation, not the trait abstraction.
     let client = GitHubClient::new(&config)
         .await
         .expect("GitHubClient::new should succeed");
