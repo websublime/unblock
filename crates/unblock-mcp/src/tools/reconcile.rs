@@ -1244,4 +1244,98 @@ mod tests {
             report.errors[0]
         );
     }
+
+    /// Sibling regression test for bead unblock-b6b.147: when
+    /// `resolve_project_info()` fails (rather than `field_ids()`), the same
+    /// dedup logic must collapse repeated failures into a single error and
+    /// prevent additional API attempts. This guards the
+    /// `RepairContext::Failed` path for the second resolution branch.
+    #[tokio::test]
+    async fn fix_mode_failed_resolve_project_info_is_deduped() {
+        use std::collections::HashMap as StdHashMap;
+
+        use unblock_core::reconcile::DriftKind;
+        use unblock_github::projects::{FieldMeta, ProjectFieldIds};
+
+        let state = test_state().await;
+
+        // Pre-seed field IDs so the first resolution branch succeeds and
+        // execution reaches `resolve_project_info()`, which will fail
+        // because the test client points at a non-existent host.
+        let dummy_meta = || FieldMeta {
+            field_id: "FIELD_DUMMY".to_owned(),
+            options: StdHashMap::new(),
+        };
+        state
+            .client
+            .set_field_ids(ProjectFieldIds {
+                status: dummy_meta(),
+                priority: dummy_meta(),
+                issue_type: dummy_meta(),
+                agent: "FIELD_AGENT".to_owned(),
+                story_points: "FIELD_STORY_POINTS".to_owned(),
+                defer_until: "FIELD_DEFER_UNTIL".to_owned(),
+                ready_state: dummy_meta(),
+            })
+            .await;
+
+        // Two repairable drift items that both require repair context, plus
+        // a cascading closure — three repair attempts in total.
+        let first = test_issue(2, IssueState::Open, ReadyState::Blocked);
+        let second = test_issue(3, IssueState::Open, ReadyState::Blocked);
+        let downstream = test_issue(43, IssueState::Open, ReadyState::Blocked);
+        let issues: HashMap<QualifiedId, _> =
+            [(qid(2), first), (qid(3), second), (qid(43), downstream)]
+                .into_iter()
+                .collect();
+
+        let mut report = DriftReport {
+            repo: "test-owner/test-repo".to_owned(),
+            reconciled_at: Utc::now(),
+            issues_scanned: 3,
+            edges_scanned: 1,
+            drift_found: vec![
+                DriftKind::StaleReadyState {
+                    issue: qid(2),
+                    field_says: ReadyState::Blocked,
+                    graph_says: ReadyState::Ready,
+                },
+                DriftKind::StaleReadyState {
+                    issue: qid(3),
+                    field_says: ReadyState::Blocked,
+                    graph_says: ReadyState::Ready,
+                },
+                DriftKind::UncascadedClosure {
+                    closed_issue: qid(10),
+                    should_have_unblocked: vec![qid(43)],
+                },
+            ],
+            repaired: vec![],
+            errors: vec![],
+            clean: false,
+        };
+
+        super::apply_repairs(&mut report, &state, &issues).await;
+
+        // No repairs should succeed — resolve_project_info() failed.
+        assert!(
+            report.repaired.is_empty(),
+            "no repairs should succeed when project info cannot be resolved"
+        );
+        // Exactly ONE error — not three — despite three repairable drift items.
+        // If dedup were bypassed for the resolve_project_info() branch, each
+        // subsequent repairable item would re-attempt resolution and push
+        // another error message into the report.
+        assert_eq!(
+            report.errors.len(),
+            1,
+            "failed resolve_project_info must be deduped to a single error, got: {:?}",
+            report.errors
+        );
+        assert!(
+            report.errors[0].contains("Failed to resolve project info"),
+            "error should be the resolve-project-info failure message: {}",
+            report.errors[0]
+        );
+    }
 }
