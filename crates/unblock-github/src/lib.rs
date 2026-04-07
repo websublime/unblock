@@ -24,3 +24,8 @@ pub mod projects;
 
 /// Infrastructure error types.
 pub mod errors;
+
+/// `GitHubApi` trait abstraction over [`client::GitHubClient`].
+pub mod api;
+
+pub use api::GitHubApi;
