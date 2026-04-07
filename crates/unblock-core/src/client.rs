@@ -24,7 +24,7 @@ use std::fmt;
 ///
 /// `AgentKind` is **informational only** — it never changes tool behaviour.
 /// See design decision D2 in `docs/unblock-epic-agent-client-detection.md`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentKind {
     /// Anthropic Claude Code.
     ClaudeCode,
@@ -94,7 +94,7 @@ impl fmt::Display for AgentKind {
 ///
 /// Constructed from the `clientInfo` field of the MCP `initialize` request.
 /// Use [`AgentClient::kind`] to derive the normalised [`AgentKind`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentClient {
     /// Raw `clientInfo.name` from the MCP `initialize` request.
     pub name: String,
