@@ -18,7 +18,7 @@
 //! fires on both success and panic unwind. This ensures the test repository is
 //! not polluted with orphaned open issues.
 
-use unblock_github::client::GitHubClient;
+use unblock_github::GitHubApi;
 use unblock_github::mutations::CreateIssueParams;
 use unblock_github::projects::{CreateViewParams, FieldValue, ViewLayout};
 use unblock_mcp::tools::ready::{ReadyParams, filter_ready_set};
@@ -35,7 +35,7 @@ use common::{has_github_token, has_project_number, test_server_state};
 /// On drop, iterates over all tracked issue numbers and closes each one.
 /// Individual close failures are logged but do not abort the remaining cleanup.
 struct CloseIssuesGuard<'a> {
-    client: &'a GitHubClient,
+    client: &'a dyn GitHubApi,
     issue_numbers: Vec<u64>,
     /// Set to `true` once the test completes successfully and the caller has
     /// already cleaned up. When `true`, the guard skips cleanup in `Drop`.
@@ -44,7 +44,7 @@ struct CloseIssuesGuard<'a> {
 
 impl<'a> CloseIssuesGuard<'a> {
     /// Creates an armed guard with no issues tracked.
-    fn new(client: &'a GitHubClient) -> Self {
+    fn new(client: &'a dyn GitHubApi) -> Self {
         Self {
             client,
             issue_numbers: Vec::new(),
@@ -123,7 +123,7 @@ async fn e2e_workflow_all_10_tools() {
     let test_label = format!("e2e-test-{}", chrono::Utc::now().timestamp());
 
     // Drop guard for cleanup — tracks all created issues.
-    let mut guard = CloseIssuesGuard::new(client);
+    let mut guard = CloseIssuesGuard::new(client.as_ref());
 
     // ── Step 1: init — create or reuse project ──────────────────────
     eprintln!("=== Step 1: init ===");
@@ -257,7 +257,7 @@ async fn e2e_workflow_all_10_tools() {
         && let Some(field_ids) = client.field_ids().await
     {
         set_project_fields_helper(
-            client,
+            client.as_ref(),
             &project_info.id,
             &item_id,
             &field_ids,
@@ -299,7 +299,7 @@ async fn e2e_workflow_all_10_tools() {
         && let Some(field_ids) = client.field_ids().await
     {
         set_project_fields_helper(
-            client,
+            client.as_ref(),
             &project_info.id,
             &item_id,
             &field_ids,
@@ -335,7 +335,7 @@ async fn e2e_workflow_all_10_tools() {
         && let Some(field_ids) = client.field_ids().await
     {
         set_project_fields_helper(
-            client,
+            client.as_ref(),
             &project_info.id,
             &item_id,
             &field_ids,
@@ -688,7 +688,7 @@ async fn e2e_workflow_all_10_tools() {
 /// the client without the server framework.
 #[allow(clippy::too_many_arguments)]
 async fn set_project_fields_helper(
-    client: &GitHubClient,
+    client: &dyn GitHubApi,
     project_id: &str,
     item_id: &str,
     field_ids: &unblock_github::projects::ProjectFieldIds,

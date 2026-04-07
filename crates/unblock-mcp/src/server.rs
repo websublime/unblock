@@ -1,7 +1,7 @@
 //! MCP server bootstrap and state management.
 //!
 //! [`ServerState`](crate::server::ServerState) holds
-//! [`GitHubClient`](unblock_github::client::GitHubClient),
+//! [`GitHubClient`](unblock_github::client::GitHubClient)(unblock_github::client::GitHubClient),
 //! [`GraphCache`](unblock_core::cache::GraphCache), and
 //! [`Config`](unblock_core::config::Config).
 //! [`UnblockServer`](crate::server::UnblockServer) implements the rmcp
@@ -47,7 +47,7 @@ use unblock_core::config::Config;
 use unblock_core::detection::ClientDetector;
 use unblock_core::errors::{CircularDependencySnafu, IssueClosedSnafu};
 use unblock_core::types::IssueState;
-use unblock_github::client::GitHubClient;
+use unblock_github::GitHubApi;
 use unblock_github::projects::FieldValue;
 use unblock_github::projects::{CreateViewParams, ViewLayout};
 
@@ -113,18 +113,24 @@ unblock turns GitHub Issues into a dependency graph. Ask `ready` to get unblocke
 ///
 /// `ServerState` is `Send + Sync` because all inner types are `Send + Sync`:
 /// - [`Config`] is `Clone + Send + Sync` (plain data).
-/// - [`GitHubClient`] wraps `reqwest::Client` which is `Send + Sync`.
+/// - [`GitHubApi`] is a trait object (`dyn GitHubApi`) bounded by `Send + Sync`;
+///   the production blanket impl on [`GitHubClient`](unblock_github::client::GitHubClient) wraps `reqwest::Client`
+///   which is `Send + Sync`.
 /// - [`GraphCache`] uses `tokio::sync::RwLock` which is `Send + Sync`.
 /// - [`OnceLock<AgentKind>`] is `Send + Sync` because `AgentKind` is `Send + Sync`.
 /// - [`OnceLock<AgentClient>`] is `Send + Sync` because `AgentClient` is `Send + Sync`.
 /// - [`OnceLock<DateTime<Utc>>`] is `Send + Sync` because `DateTime<Utc>` is `Send + Sync`.
-#[derive(Debug)]
 pub struct ServerState {
     /// Application configuration loaded from environment variables.
     #[allow(dead_code)] // Used by tool handlers added in beads 45a.4–45a.11.
     pub config: Arc<Config>,
     /// GitHub API client for GraphQL and REST operations.
-    pub client: Arc<GitHubClient>,
+    ///
+    /// Stored as a [`GitHubApi`] trait object so tests and alternative
+    /// implementations (e.g. mocks introduced in sibling beads) can be
+    /// substituted for the real [`GitHubClient`](unblock_github::client::GitHubClient) without changing the handler
+    /// surface.
+    pub client: Arc<dyn GitHubApi>,
     /// In-memory cache for the dependency graph and ready set.
     pub cache: Arc<GraphCache>,
     /// Resolved once during the MCP `initialize` handshake.
@@ -145,6 +151,21 @@ pub struct ServerState {
     /// [`SessionMeta`](crate::tools::prime::SessionMeta) for the
     /// `connected_at` field.
     pub connected_at: OnceLock<chrono::DateTime<Utc>>,
+}
+
+impl std::fmt::Debug for ServerState {
+    /// Manual [`Debug`] implementation that intentionally omits the `client`
+    /// field because [`dyn GitHubApi`](GitHubApi) does not require [`Debug`].
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerState")
+            .field("config", &self.config)
+            .field("client", &"<dyn GitHubApi>")
+            .field("cache", &self.cache)
+            .field("agent_kind", &self.agent_kind)
+            .field("agent_client", &self.agent_client)
+            .field("connected_at", &self.connected_at)
+            .finish()
+    }
 }
 
 impl ServerState {
@@ -206,7 +227,7 @@ impl UnblockServer {
 /// (per PRD section 6.1 and ARCH section 10.4).
 #[allow(clippy::too_many_arguments)]
 async fn set_project_fields(
-    client: &GitHubClient,
+    client: &dyn GitHubApi,
     project_id: &str,
     item_id: &str,
     field_ids: &unblock_github::projects::ProjectFieldIds,
@@ -1496,7 +1517,7 @@ impl UnblockServer {
                                         };
 
                                     set_project_fields(
-                                        &client,
+                                        client.as_ref(),
                                         &project_info.id,
                                         &item_id,
                                         &field_ids,
@@ -2145,13 +2166,13 @@ mod tests {
         })
         .expect("test config should load");
 
-        let client = GitHubClient::new(&config)
+        let client = unblock_github::client::GitHubClient::new(&config)
             .await
             .expect("test client should initialize");
 
         ServerState {
             config: Arc::new(config),
-            client: Arc::new(client),
+            client: Arc::new(client) as Arc<dyn GitHubApi>,
             cache: Arc::new(GraphCache::new(Duration::from_secs(300))),
             agent_kind: OnceLock::new(),
             agent_client: OnceLock::new(),

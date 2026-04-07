@@ -544,7 +544,7 @@ mod tests {
 
         ServerState {
             config: Arc::new(config),
-            client: Arc::new(client),
+            client: Arc::new(client) as Arc<dyn unblock_github::GitHubApi>,
             cache: Arc::new(GraphCache::new(Duration::from_secs(300))),
             agent_kind: std::sync::OnceLock::new(),
             agent_client: std::sync::OnceLock::new(),

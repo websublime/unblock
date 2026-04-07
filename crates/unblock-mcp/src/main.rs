@@ -14,6 +14,7 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 use unblock_core::cache::GraphCache;
 use unblock_core::config::Config;
+use unblock_github::GitHubApi;
 use unblock_github::client::GitHubClient;
 use unblock_mcp::errors::{ClientInitSnafu, ConfigLoadSnafu, RuntimeSnafu, TransportSnafu};
 use unblock_mcp::server::{ServerState, UnblockServer};
@@ -39,7 +40,7 @@ async fn main() -> Result<(), unblock_mcp::errors::BootstrapError> {
     // 5. Build server state.
     let state = ServerState {
         config: Arc::new(config),
-        client: Arc::new(client),
+        client: Arc::new(client) as Arc<dyn GitHubApi>,
         cache: Arc::new(cache),
         agent_kind: std::sync::OnceLock::new(),
         agent_client: std::sync::OnceLock::new(),
