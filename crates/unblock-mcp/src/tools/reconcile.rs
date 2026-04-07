@@ -204,29 +204,55 @@ pub async fn handle_reconcile(
     })
 }
 
+/// Tri-state memoization for repair context resolution within a single
+/// reconcile run.
+///
+/// Unlike a plain `Option`, this also remembers *failed* resolution attempts
+/// so subsequent repairable drift items don't retry the failing API calls
+/// and don't push duplicate error messages into `report.errors`.
+enum RepairContext {
+    /// No attempt has been made yet.
+    Unresolved,
+    /// A previous attempt failed. The error has already been pushed to
+    /// `report.errors` exactly once; further attempts short-circuit.
+    Failed,
+    /// Successfully resolved; cached for reuse.
+    Resolved(Box<(ProjectFieldIds, ProjectInfo)>),
+}
+
 /// Lazily resolve field IDs and project info for repair operations.
 ///
-/// On first call, resolves both and caches them in `ctx`. On subsequent calls,
-/// returns the cached values. If resolution fails, pushes an error to the
-/// report and returns `None` — the caller should skip the repair.
+/// On first call (`Unresolved`), attempts resolution. On success the context
+/// transitions to `Resolved` and subsequent calls return the cached values.
+/// On failure, the error is pushed to `report.errors` exactly once, the
+/// context transitions to `Failed`, and all further calls short-circuit to
+/// `None` without re-running the API calls or pushing duplicate errors.
 async fn resolve_repair_context<'a>(
-    ctx: &'a mut Option<(ProjectFieldIds, ProjectInfo)>,
+    ctx: &'a mut RepairContext,
     state: &ServerState,
     errors: &mut Vec<String>,
 ) -> Option<&'a (ProjectFieldIds, ProjectInfo)> {
-    if ctx.is_some() {
-        return ctx.as_ref();
+    match ctx {
+        RepairContext::Resolved(_) | RepairContext::Failed => {}
+        RepairContext::Unresolved => {
+            let Some(field_ids) = state.client.field_ids().await else {
+                errors
+                    .push("Field IDs not available — run setup first. Skipping repair.".to_owned());
+                *ctx = RepairContext::Failed;
+                return None;
+            };
+            let Ok(project_info) = state.client.resolve_project_info().await else {
+                errors.push("Failed to resolve project info — skipping repair.".to_owned());
+                *ctx = RepairContext::Failed;
+                return None;
+            };
+            *ctx = RepairContext::Resolved(Box::new((field_ids, project_info)));
+        }
     }
-    let Some(field_ids) = state.client.field_ids().await else {
-        errors.push("Field IDs not available — run setup first. Skipping repair.".to_owned());
-        return None;
-    };
-    let Ok(project_info) = state.client.resolve_project_info().await else {
-        errors.push("Failed to resolve project info — skipping repair.".to_owned());
-        return None;
-    };
-    *ctx = Some((field_ids, project_info));
-    ctx.as_ref()
+    match ctx {
+        RepairContext::Resolved(boxed) => Some(&**boxed),
+        RepairContext::Failed | RepairContext::Unresolved => None,
+    }
 }
 
 /// Apply repairs for detected drift items.
@@ -244,7 +270,7 @@ async fn apply_repairs(
     issues: &HashMap<QualifiedId, Issue>,
 ) {
     // Lazily resolved on first repairable drift type encountered.
-    let mut repair_context: Option<(ProjectFieldIds, ProjectInfo)> = None;
+    let mut repair_context: RepairContext = RepairContext::Unresolved;
 
     // Take drift_found out of report to avoid cloning the entire Vec.
     // We drain rather than clone so large drift reports don't allocate a full copy.
@@ -1151,5 +1177,71 @@ mod tests {
 
         // OrphanedBlockingEdge → neither repaired nor error.
         // (already asserted via errors.len() == 1)
+    }
+
+    /// Regression test for bead unblock-b6b.124: when repair context
+    /// resolution fails, subsequent repairable drift items must NOT push
+    /// duplicate error messages into `report.errors`. Exactly one error
+    /// should appear per failed context resolution per reconcile run.
+    #[tokio::test]
+    async fn fix_mode_failed_context_resolution_is_deduped() {
+        use unblock_core::reconcile::DriftKind;
+
+        let state = test_state().await;
+
+        // Two repairable drift items that both require repair context.
+        let first = test_issue(2, IssueState::Open, ReadyState::Blocked);
+        let second = test_issue(3, IssueState::Open, ReadyState::Blocked);
+        let downstream = test_issue(43, IssueState::Open, ReadyState::Blocked);
+        let issues: HashMap<QualifiedId, _> =
+            [(qid(2), first), (qid(3), second), (qid(43), downstream)]
+                .into_iter()
+                .collect();
+
+        let mut report = DriftReport {
+            repo: "test-owner/test-repo".to_owned(),
+            reconciled_at: Utc::now(),
+            issues_scanned: 3,
+            edges_scanned: 1,
+            drift_found: vec![
+                DriftKind::StaleReadyState {
+                    issue: qid(2),
+                    field_says: ReadyState::Blocked,
+                    graph_says: ReadyState::Ready,
+                },
+                DriftKind::StaleReadyState {
+                    issue: qid(3),
+                    field_says: ReadyState::Blocked,
+                    graph_says: ReadyState::Ready,
+                },
+                DriftKind::UncascadedClosure {
+                    closed_issue: qid(10),
+                    should_have_unblocked: vec![qid(43)],
+                },
+            ],
+            repaired: vec![],
+            errors: vec![],
+            clean: false,
+        };
+
+        super::apply_repairs(&mut report, &state, &issues).await;
+
+        // All three repair attempts must be skipped.
+        assert!(
+            report.repaired.is_empty(),
+            "no repairs should succeed without field IDs"
+        );
+        // Exactly ONE error — not three — despite three repairable drift items.
+        assert_eq!(
+            report.errors.len(),
+            1,
+            "failed context resolution must be deduped to a single error, got: {:?}",
+            report.errors
+        );
+        assert!(
+            report.errors[0].contains("Field IDs not available"),
+            "error should be the field-ids failure message: {}",
+            report.errors[0]
+        );
     }
 }
