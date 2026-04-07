@@ -2050,7 +2050,7 @@ const _: () = {
 mod tests {
     use super::*;
     use std::io;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::sync::{Mutex, OnceLock};
     use std::time::Duration;
     use tracing_subscriber::fmt;
     use tracing_subscriber::prelude::*;
@@ -2064,27 +2064,29 @@ mod tests {
     /// be used as a `tracing_subscriber` writer. Call [`TracingCapture::new`]
     /// to create an instance, [`TracingCapture::subscriber`] to build a
     /// JSON subscriber wired to the buffer, and [`TracingCapture::output`]
-    /// to retrieve the captured output as a zero-copy `&str` borrow.
+    /// to retrieve a snapshot of the captured output as a `String` with
+    /// UTF-8 validated once at construction time.
     #[derive(Clone)]
     struct TracingCapture(Arc<Mutex<Vec<u8>>>);
 
-    /// RAII guard that holds a [`MutexGuard`] and exposes the captured
-    /// bytes as a `&str` without cloning.
+    /// Owned snapshot of the captured tracing output, validated as UTF-8
+    /// once at construction time.
     ///
-    /// Returned by [`TracingCapture::output`]. The guard keeps the mutex
-    /// locked while the caller inspects the output; it is released when
-    /// the guard is dropped.
-    struct CapturedOutput<'a>(MutexGuard<'a, Vec<u8>>);
+    /// Returned by [`TracingCapture::output`]. UTF-8 validation happens
+    /// exactly once when the snapshot is created; subsequent [`Deref`]
+    /// calls are zero-cost borrows. The mutex is released immediately
+    /// after the snapshot is taken.
+    struct CapturedOutput(String);
 
-    impl std::ops::Deref for CapturedOutput<'_> {
+    impl std::ops::Deref for CapturedOutput {
         type Target = str;
 
         fn deref(&self) -> &str {
-            std::str::from_utf8(&self.0).expect("captured output is not valid UTF-8")
+            &self.0
         }
     }
 
-    impl std::fmt::Display for CapturedOutput<'_> {
+    impl std::fmt::Display for CapturedOutput {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.write_str(self)
         }
@@ -2107,18 +2109,21 @@ mod tests {
             )
         }
 
-        /// Return the captured output as a zero-copy `&str` borrow.
+        /// Return a snapshot of the captured output as a validated UTF-8
+        /// string.
         ///
-        /// Returns a [`CapturedOutput`] guard that derefs to `&str`,
-        /// avoiding a full buffer clone. The mutex stays locked while
-        /// the guard is alive.
+        /// UTF-8 validation is performed exactly once when the snapshot
+        /// is created. The mutex is released immediately after copying
+        /// the buffer, so callers can inspect the output without holding
+        /// the lock.
         ///
         /// # Panics
         ///
         /// Panics if the mutex is poisoned or the buffer is not valid
         /// UTF-8.
-        fn output(&self) -> CapturedOutput<'_> {
-            CapturedOutput(self.0.lock().unwrap())
+        fn output(&self) -> CapturedOutput {
+            let bytes = self.0.lock().unwrap().clone();
+            CapturedOutput(String::from_utf8(bytes).expect("captured output is not valid UTF-8"))
         }
     }
 
