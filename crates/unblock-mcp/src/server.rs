@@ -1,7 +1,8 @@
 //! MCP server bootstrap and state management.
 //!
-//! [`ServerState`](crate::server::ServerState) holds
-//! [`GitHubClient`](unblock_github::client::GitHubClient)(unblock_github::client::GitHubClient),
+//! [`ServerState`](crate::server::ServerState) holds an
+//! [`Arc`](std::sync::Arc) over a [`GitHubApi`](unblock_github::GitHubApi) trait object
+//! (typically backed by [`GitHubClient`](unblock_github::client::GitHubClient)),
 //! [`GraphCache`](unblock_core::cache::GraphCache), and
 //! [`Config`](unblock_core::config::Config).
 //! [`UnblockServer`](crate::server::UnblockServer) implements the rmcp

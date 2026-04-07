@@ -1,3 +1,8 @@
+// TODO(unblock-paw): Full migration of this file (and tests/integration.rs, tests/common/mod.rs)
+// to the GitHubApi trait abstraction is tracked in unblock-paw. The minimal &dyn GitHubApi shim
+// applied here under unblock-uzo only exists to keep the workspace compiling after the
+// ServerState.client flip; revisit and align with unblock-paw's broader migration.
+
 //! End-to-end workflow integration test exercising all 10 Phase 1 MCP tools.
 //!
 //! This test creates real GitHub Issues and a real GitHub Project, running
