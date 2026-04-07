@@ -226,8 +226,14 @@ impl UnblockServer {
 /// The `status` parameter controls the initial Status field value. Callers
 /// should pass `"Blocked"` when the issue has blockers, or `"Backlog"` otherwise
 /// (per PRD section 6.1 and ARCH section 10.4).
+///
+/// Exposed as `#[doc(hidden)] pub` so external integration tests under
+/// `tests/` can drive project field updates through the same code path the
+/// production server uses, eliminating duplicated test helpers. Not part of
+/// the stable surface — consumers outside this crate must not depend on it.
+#[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
-async fn set_project_fields(
+pub async fn set_project_fields(
     client: &dyn GitHubApi,
     project_id: &str,
     item_id: &str,

@@ -1,8 +1,3 @@
-// TODO(unblock-paw): Full migration of this file (and tests/integration.rs, tests/common/mod.rs)
-// to the GitHubApi trait abstraction is tracked in unblock-paw. The minimal &dyn GitHubApi shim
-// applied here under unblock-uzo only exists to keep the workspace compiling after the
-// ServerState.client flip; revisit and align with unblock-paw's broader migration.
-
 //! End-to-end workflow integration test exercising all 10 Phase 1 MCP tools.
 //!
 //! This test creates real GitHub Issues and a real GitHub Project, running
@@ -26,6 +21,7 @@
 use unblock_github::GitHubApi;
 use unblock_github::mutations::CreateIssueParams;
 use unblock_github::projects::{CreateViewParams, FieldValue, ViewLayout};
+use unblock_mcp::server::set_project_fields;
 use unblock_mcp::tools::ready::{ReadyParams, filter_ready_set};
 use unblock_mcp::tools::rebuild_cache;
 use unblock_mcp::tools::setup::REQUIRED_VIEWS;
@@ -261,7 +257,7 @@ async fn e2e_workflow_all_10_tools() {
         .await
         && let Some(field_ids) = client.field_ids().await
     {
-        set_project_fields_helper(
+        set_project_fields(
             client.as_ref(),
             &project_info.id,
             &item_id,
@@ -270,6 +266,8 @@ async fn e2e_workflow_all_10_tools() {
             "Task",
             "Backlog",
             "Ready",
+            None,
+            None,
         )
         .await;
     }
@@ -303,7 +301,7 @@ async fn e2e_workflow_all_10_tools() {
         .await
         && let Some(field_ids) = client.field_ids().await
     {
-        set_project_fields_helper(
+        set_project_fields(
             client.as_ref(),
             &project_info.id,
             &item_id,
@@ -312,6 +310,8 @@ async fn e2e_workflow_all_10_tools() {
             "Task",
             "Blocked",
             "Not Ready",
+            None,
+            None,
         )
         .await;
     }
@@ -339,7 +339,7 @@ async fn e2e_workflow_all_10_tools() {
         .await
         && let Some(field_ids) = client.field_ids().await
     {
-        set_project_fields_helper(
+        set_project_fields(
             client.as_ref(),
             &project_info.id,
             &item_id,
@@ -348,6 +348,8 @@ async fn e2e_workflow_all_10_tools() {
             "Task",
             "Backlog",
             "Ready",
+            None,
+            None,
         )
         .await;
     }
@@ -684,77 +686,4 @@ async fn e2e_workflow_all_10_tools() {
     guard.disarm();
 
     eprintln!("=== E2E workflow test PASSED ===");
-}
-
-/// Helper to set project fields on an issue's project item.
-///
-/// Best-effort: failures are logged but do not cause test failure. This mirrors
-/// the `set_project_fields` function in `server.rs` but operates directly on
-/// the client without the server framework.
-#[allow(clippy::too_many_arguments)]
-async fn set_project_fields_helper(
-    client: &dyn GitHubApi,
-    project_id: &str,
-    item_id: &str,
-    field_ids: &unblock_github::projects::ProjectFieldIds,
-    priority: &str,
-    issue_type: &str,
-    status: &str,
-    ready_state: &str,
-) {
-    // Priority
-    if let Some(option_id) = field_ids.priority.options.get(priority)
-        && let Err(e) = client
-            .update_field(
-                project_id,
-                item_id,
-                &field_ids.priority.field_id,
-                &FieldValue::SingleSelectOption(option_id.clone()),
-            )
-            .await
-    {
-        eprintln!("set_project_fields: failed to set Priority={priority}: {e}");
-    }
-
-    // IssueType
-    if let Some(option_id) = field_ids.issue_type.options.get(issue_type)
-        && let Err(e) = client
-            .update_field(
-                project_id,
-                item_id,
-                &field_ids.issue_type.field_id,
-                &FieldValue::SingleSelectOption(option_id.clone()),
-            )
-            .await
-    {
-        eprintln!("set_project_fields: failed to set IssueType={issue_type}: {e}");
-    }
-
-    // Status
-    if let Some(option_id) = field_ids.status.options.get(status)
-        && let Err(e) = client
-            .update_field(
-                project_id,
-                item_id,
-                &field_ids.status.field_id,
-                &FieldValue::SingleSelectOption(option_id.clone()),
-            )
-            .await
-    {
-        eprintln!("set_project_fields: failed to set Status={status}: {e}");
-    }
-
-    // ReadyState
-    if let Some(option_id) = field_ids.ready_state.options.get(ready_state)
-        && let Err(e) = client
-            .update_field(
-                project_id,
-                item_id,
-                &field_ids.ready_state.field_id,
-                &FieldValue::SingleSelectOption(option_id.clone()),
-            )
-            .await
-    {
-        eprintln!("set_project_fields: failed to set ReadyState={ready_state}: {e}");
-    }
 }
