@@ -671,7 +671,7 @@ mod tests {
 
     #[test]
     fn rest_url_formats_correctly() {
-        let client = make_test_client("https://api.github.com");
+        let client = GitHubClient::new_for_test("https://api.github.com");
         assert_eq!(
             client.rest_url("/repos/owner/repo/issues"),
             "https://api.github.com/repos/owner/repo/issues"
@@ -680,25 +680,13 @@ mod tests {
 
     #[test]
     fn graphql_url_github_com() {
-        let client = make_test_client("https://api.github.com");
+        let client = GitHubClient::new_for_test("https://api.github.com");
         assert_eq!(client.graphql_url(), "https://api.github.com/graphql");
     }
 
     #[test]
     fn graphql_url_ghe_server() {
-        let client = make_test_client("https://ghe.example.com/api/v3");
+        let client = GitHubClient::new_for_test("https://ghe.example.com/api/v3");
         assert_eq!(client.graphql_url(), "https://ghe.example.com/api/graphql");
-    }
-
-    /// Creates a `GitHubClient` for unit testing (no network).
-    fn make_test_client(api_base_url: &str) -> GitHubClient {
-        GitHubClient {
-            http: reqwest::Client::new(),
-            api_base_url: api_base_url.to_owned(),
-            owner: "owner".to_owned(),
-            repo: "repo".to_owned(),
-            project_number: None,
-            field_ids: Mutex::new(None),
-        }
     }
 }
