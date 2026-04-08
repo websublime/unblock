@@ -986,7 +986,9 @@ impl UnblockServer {
         let client = Arc::clone(&state.client);
 
         let issue_number = params.id;
-        let reason = params.reason;
+        // Treat Some("") (or whitespace-only) the same as None to avoid posting
+        // an empty comment to the issue timeline. See unblock-b6b.85.
+        let reason = params.reason.filter(|r| !r.trim().is_empty());
 
         info!(
             agent.kind = %kind,
@@ -1176,7 +1178,7 @@ impl UnblockServer {
         }
 
         Ok(Json(CloseResult {
-            issue_number,
+            issue: issue_number,
             unblocked,
         }))
     }

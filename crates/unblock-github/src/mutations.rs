@@ -229,9 +229,15 @@ impl GitHubClient {
     /// [`DomainError::IssueNotFound`]: unblock_core::errors::DomainError::IssueNotFound
     #[instrument(skip(self), fields(owner = %self.owner(), repo = %self.repo()))]
     pub async fn close_issue(&self, number: u64, reason: Option<String>) -> Result<(), Error> {
-        // If reason is provided, add a comment first.
-        if let Some(reason_text) = reason {
-            self.add_comment(number, reason_text).await?;
+        // If reason is provided and non-empty, add a "Closed: {reason}" comment first.
+        // Per ARCH §10.3 / PRD §6.1 step 4, reason comments must be prefixed with
+        // "Closed: ". An empty reason string is treated the same as None — no comment
+        // is posted to avoid timeline noise.
+        if let Some(reason_text) = reason
+            && !reason_text.is_empty()
+        {
+            let body = format!("Closed: {reason_text}");
+            self.add_comment(number, body).await?;
         }
 
         let url = self.rest_url(&format!(

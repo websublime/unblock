@@ -332,11 +332,39 @@ async fn close_dispatches_through_dyn_vtable() {
         .await
         .expect("close should succeed via dyn dispatch");
 
-    assert_eq!(result.issue_number, 8);
+    assert_eq!(result.issue, 8);
     assert!(result.unblocked.is_empty());
     assert_eq!(mock.calls().fetch_issue(), 1);
     assert_eq!(mock.calls().close_issue(), 1);
     assert_eq!(mock.calls().fetch_graph_data(), 1);
+}
+
+#[tokio::test]
+async fn close_with_empty_reason_skips_comment() {
+    // Regression for unblock-b6b.85: Some("") and whitespace-only reason
+    // should be treated as None and NOT post an empty comment before closing.
+    let mock = new_mock();
+    mock.push_fetch_issue(Ok(make_issue(9)));
+    mock.push_close_issue(Ok(()));
+    mock.push_fetch_graph_data(Ok((vec![make_issue(9)], vec![])));
+
+    let server = UnblockServer::new(state_with_mock(Arc::clone(&mock)));
+    let Json(result) = server
+        .close(Parameters(CloseParams {
+            id: 9,
+            reason: Some("   ".to_owned()),
+        }))
+        .await
+        .expect("close should succeed via dyn dispatch");
+
+    assert_eq!(result.issue, 9);
+    assert_eq!(mock.calls().close_issue(), 1);
+    // Crucially: no comment should have been posted.
+    assert_eq!(
+        mock.calls().add_comment(),
+        0,
+        "empty/whitespace reason must not post a comment"
+    );
 }
 
 // ── depends ────────────────────────────────────────────────────────────
