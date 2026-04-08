@@ -123,7 +123,6 @@ unblock turns GitHub Issues into a dependency graph. Ask `ready` to get unblocke
 /// - [`OnceLock<DateTime<Utc>>`] is `Send + Sync` because `DateTime<Utc>` is `Send + Sync`.
 pub struct ServerState {
     /// Application configuration loaded from environment variables.
-    #[allow(dead_code)] // Used by tool handlers added in beads 45a.4–45a.11.
     pub config: Arc<Config>,
     /// GitHub API client for GraphQL and REST operations.
     ///
