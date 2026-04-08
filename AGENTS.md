@@ -114,7 +114,9 @@ Get more info from reference: https://github.com/steveyegge/beads/raw/refs/heads
 - ❌ Do NOT use external issue trackers
 - ❌ Do NOT duplicate tracking systems
 
-## Commit Conventions: Pub API Changes
+## Commit Conventions
+
+### Pub API Changes
 
 When a commit changes the signature of a `pub fn`, `pub struct`, `pub enum`, or `pub trait` in a **library crate** (`unblock-core`, `unblock-github`), the commit message body **must** note the change:
 
