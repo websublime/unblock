@@ -144,7 +144,7 @@ where
 pub async fn rebuild_cache(state: &ServerState) {
     state.cache.invalidate().await;
 
-    match state.client.fetch_graph_data().await {
+    match state.github.fetch_graph_data().await {
         Ok((issues, edges)) => {
             let graph = DependencyGraph::build(&issues, &edges);
             let ready_set = graph.compute_ready_set(&issues);
@@ -250,7 +250,7 @@ mod tests {
 
         ServerState {
             config: Arc::new(config),
-            client: Arc::new(client) as Arc<dyn unblock_github::GitHubApi>,
+            github: Arc::new(client) as Arc<dyn unblock_github::GitHubApi>,
             cache: Arc::new(GraphCache::new(Duration::from_secs(300))),
             agent_kind: std::sync::OnceLock::new(),
             agent_client: std::sync::OnceLock::new(),

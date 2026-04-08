@@ -118,7 +118,7 @@ async fn e2e_workflow_all_10_tools() {
     }
 
     let state = test_server_state().await;
-    let client = &state.client;
+    let client = &state.github;
 
     // Unique label to isolate test issues from other issues in the repo.
     let test_label = format!("e2e-test-{}", chrono::Utc::now().timestamp());

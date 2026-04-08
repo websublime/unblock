@@ -40,19 +40,19 @@ async fn main() -> Result<(), unblock_mcp::errors::BootstrapError> {
     // 5. Build server state.
     let state = ServerState {
         config: Arc::new(config),
-        client: Arc::new(client) as Arc<dyn GitHubApi>,
+        github: Arc::new(client) as Arc<dyn GitHubApi>,
         cache: Arc::new(cache),
         agent_kind: std::sync::OnceLock::new(),
         agent_client: std::sync::OnceLock::new(),
         connected_at: std::sync::OnceLock::new(),
     };
 
-    let repo_slug = format!("{}/{}", state.client.owner(), state.client.repo());
+    let repo_slug = format!("{}/{}", state.github.owner(), state.github.repo());
     info!(
         server_name = "unblock",
         version = env!("CARGO_PKG_VERSION"),
         repo = %repo_slug,
-        project = ?state.client.project_number(),
+        project = ?state.github.project_number(),
         "Starting unblock MCP server"
     );
 

@@ -143,7 +143,7 @@ impl ReconcileReport {
 /// 2. Rebuild `DependencyGraph` from scratch.
 /// 3. Compute ready set.
 /// 4. Call `ReconcileEngine::analyse()` with all 4 args.
-/// 5. Set `report.repo` from `state.client.owner()/repo()`.
+/// 5. Set `report.repo` from `state.github.owner()/repo()`.
 /// 6. If `fix: true`, repair `StaleReadyState` and `UncascadedClosure` drift.
 /// 7. Update cache with the fresh graph already fetched.
 /// 8. Return `ReconcileOutput { report }`.
@@ -163,7 +163,7 @@ pub async fn handle_reconcile(
 
     // 1. Always fresh fetch — bypasses cache entirely.
     let (issues_vec, edges) = state
-        .client
+        .github
         .fetch_graph_data()
         .await
         .map_err(github_error_to_mcp)?;
@@ -186,7 +186,7 @@ pub async fn handle_reconcile(
     // 3. Analyse drift.
     let engine = ReconcileEngine::new(params.stale_claim_hours);
     let mut report = engine.analyse(&graph, &issues, &computed_ready, Utc::now());
-    report.repo = format!("{}/{}", state.client.owner(), state.client.repo());
+    report.repo = format!("{}/{}", state.github.owner(), state.github.repo());
 
     // 4. fix: true repair path — repair StaleReadyState and UncascadedClosure.
     if params.fix {
@@ -235,13 +235,13 @@ async fn resolve_repair_context<'a>(
     match ctx {
         RepairContext::Resolved(_) | RepairContext::Failed => {}
         RepairContext::Unresolved => {
-            let Some(field_ids) = state.client.field_ids().await else {
+            let Some(field_ids) = state.github.field_ids().await else {
                 errors
                     .push("Field IDs not available — run setup first. Skipping repair.".to_owned());
                 *ctx = RepairContext::Failed;
                 return None;
             };
-            let Ok(project_info) = state.client.resolve_project_info().await else {
+            let Ok(project_info) = state.github.resolve_project_info().await else {
                 errors.push("Failed to resolve project info — skipping repair.".to_owned());
                 *ctx = RepairContext::Failed;
                 return None;
@@ -341,7 +341,7 @@ async fn apply_repairs(
                             repaired_qids.iter().map(|q| (*q).clone()).collect();
                         let comment_body = format_cascade_repair_comment(&comment_qids);
                         if let Err(e) = state
-                            .client
+                            .github
                             .add_comment(closed_issue.number, comment_body)
                             .await
                         {
@@ -424,7 +424,7 @@ async fn repair_ready_state(
 
     // Resolve the project item ID for this issue.
     let item_id = state
-        .client
+        .github
         .get_project_item_id(&issue.node_id, &project_info.id)
         .await
         .map_err(|e| format!("Failed to get project item ID for {qid}: {e}"))?;
@@ -439,7 +439,7 @@ async fn repair_ready_state(
 
     // Update the field.
     state
-        .client
+        .github
         .update_field(
             &project_info.id,
             &item_id,
@@ -545,7 +545,7 @@ mod tests {
 
         ServerState {
             config: Arc::new(config),
-            client: Arc::new(client) as Arc<dyn unblock_github::GitHubApi>,
+            github: Arc::new(client) as Arc<dyn unblock_github::GitHubApi>,
             cache: Arc::new(GraphCache::new(Duration::from_secs(300))),
             agent_kind: std::sync::OnceLock::new(),
             agent_client: std::sync::OnceLock::new(),
@@ -567,7 +567,7 @@ mod tests {
         let client: Arc<dyn unblock_github::GitHubApi> = mock;
         ServerState {
             config: Arc::new(config),
-            client,
+            github: client,
             cache: Arc::new(GraphCache::new(Duration::from_secs(300))),
             agent_kind: std::sync::OnceLock::new(),
             agent_client: std::sync::OnceLock::new(),

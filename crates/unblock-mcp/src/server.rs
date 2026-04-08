@@ -130,7 +130,7 @@ pub struct ServerState {
     /// implementations (e.g. mocks introduced in sibling beads) can be
     /// substituted for the real [`GitHubClient`](unblock_github::client::GitHubClient) without changing the handler
     /// surface.
-    pub client: Arc<dyn GitHubApi>,
+    pub github: Arc<dyn GitHubApi>,
     /// In-memory cache for the dependency graph and ready set.
     pub cache: Arc<GraphCache>,
     /// Resolved once during the MCP `initialize` handshake.
@@ -154,12 +154,12 @@ pub struct ServerState {
 }
 
 impl std::fmt::Debug for ServerState {
-    /// Manual [`Debug`] implementation that intentionally omits the `client`
+    /// Manual [`Debug`] implementation that intentionally omits the `github`
     /// field because [`dyn GitHubApi`](GitHubApi) does not require [`Debug`].
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ServerState")
             .field("config", &self.config)
-            .field("client", &"<dyn GitHubApi>")
+            .field("github", &"<dyn GitHubApi>")
             .field("cache", &self.cache)
             .field("agent_kind", &self.agent_kind)
             .field("agent_client", &self.agent_client)
@@ -372,7 +372,7 @@ impl UnblockServer {
     ) -> Result<Json<InitResult>, ErrorData> {
         let state = self.state();
         let kind = state.agent_kind_str();
-        let client = &state.client;
+        let client = &state.github;
 
         // Step 1: Detect or use provided owner type.
         let owner_type = if let Some(ref scope) = params.scope {
@@ -489,7 +489,7 @@ impl UnblockServer {
         let dry_run = params.dry_run.unwrap_or(false);
 
         // Resolve project info — use param override or configured project number.
-        let client = &state.client;
+        let client = &state.github;
 
         // The `project` param is accepted for forward-compatibility but not yet
         // wired to resolve_project_info(). Warn agents so the silent ignore is
@@ -636,7 +636,7 @@ impl UnblockServer {
     ) -> Result<Json<ShowResult>, ErrorData> {
         let state = self.state();
         let kind = state.agent_kind_str();
-        let client = &state.client;
+        let client = &state.github;
 
         let include_comments = params.include_comments.unwrap_or(true);
         let include_deps = params.include_deps.unwrap_or(true);
@@ -847,7 +847,7 @@ impl UnblockServer {
     ) -> Result<Json<ClaimResult>, ErrorData> {
         let state = self.state();
         let kind = state.agent_kind_str();
-        let client = Arc::clone(&state.client);
+        let client = Arc::clone(&state.github);
         let config = Arc::clone(&state.config);
 
         let issue_number = params.id;
@@ -986,7 +986,7 @@ impl UnblockServer {
     ) -> Result<Json<CloseResult>, ErrorData> {
         let state = self.state();
         let kind = state.agent_kind_str();
-        let client = Arc::clone(&state.client);
+        let client = Arc::clone(&state.github);
 
         let issue_number = params.id;
         // Treat Some("") (or whitespace-only) the same as None to avoid posting
@@ -1209,7 +1209,7 @@ impl UnblockServer {
     ) -> Result<Json<DependsResult>, ErrorData> {
         let state = self.state();
         let kind = state.agent_kind_str();
-        let client = Arc::clone(&state.client);
+        let client = Arc::clone(&state.github);
 
         let source = params.source;
         let target_str = params.target.clone();
@@ -1352,7 +1352,7 @@ impl UnblockServer {
     ) -> Result<Json<CreateResult>, ErrorData> {
         let state = self.state();
         let kind = state.agent_kind_str();
-        let client = Arc::clone(&state.client);
+        let client = Arc::clone(&state.github);
 
         info!(
             agent.kind = %kind,
@@ -1633,7 +1633,7 @@ impl UnblockServer {
     ) -> Result<Json<CommentResult>, ErrorData> {
         let state = self.state();
         let kind = state.agent_kind_str();
-        let client = &state.client;
+        let client = &state.github;
         let issue_number = params.id;
         let body = params.body;
 
@@ -1680,7 +1680,7 @@ impl UnblockServer {
     ) -> Result<Json<UpdateResult>, ErrorData> {
         let state = self.state();
         let kind = state.agent_kind_str();
-        let client = Arc::clone(&state.client);
+        let client = Arc::clone(&state.github);
 
         let issue_number = params.id;
 
@@ -2184,7 +2184,7 @@ mod tests {
 
         ServerState {
             config: Arc::new(config),
-            client: Arc::new(client) as Arc<dyn GitHubApi>,
+            github: Arc::new(client) as Arc<dyn GitHubApi>,
             cache: Arc::new(GraphCache::new(Duration::from_secs(300))),
             agent_kind: OnceLock::new(),
             agent_client: OnceLock::new(),
