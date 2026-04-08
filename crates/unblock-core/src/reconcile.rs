@@ -291,11 +291,13 @@ impl ReconcileEngine {
         issues: &HashMap<QualifiedId, Issue>,
         drift: &mut Vec<DriftKind>,
     ) {
-        let issues_vec: Vec<Issue> = issues.values().cloned().collect();
         for (qid, issue) in issues {
             if issue.state == IssueState::Closed {
+                // `compute_unblock_cascade` reserves an `_all_issues` slice for
+                // future use but currently ignores it; pass an empty slice to
+                // avoid cloning every issue on each reconcile cycle.
                 let should_have_unblocked: Vec<QualifiedId> = graph
-                    .compute_unblock_cascade(qid, &issues_vec)
+                    .compute_unblock_cascade(qid, &[])
                     .into_iter()
                     .filter(|id| {
                         issues.get(id).is_some_and(|i| {
