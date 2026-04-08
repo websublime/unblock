@@ -323,15 +323,16 @@ async fn claim_with_empty_agent_returns_invalid_params() {
     let server = UnblockServer::new(state_with_mock(Arc::clone(&mock)));
 
     for bad in ["", "   ", "\t \n"] {
-        let result = server
+        let err = server
             .claim(Parameters(ClaimParams {
                 id: 7,
                 agent: Some(bad.to_owned()),
             }))
-            .await;
-        let Err(err) = result else {
-            panic!("empty/whitespace agent must be rejected for {bad:?}");
-        };
+            .await
+            .map(|_| ())
+            .expect_err(&format!(
+                "empty/whitespace agent must be rejected for {bad:?}"
+            ));
         assert_eq!(
             err.code,
             rmcp::model::ErrorCode::INVALID_PARAMS,
