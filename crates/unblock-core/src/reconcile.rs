@@ -205,7 +205,6 @@ impl ReconcileEngine {
     ///   computes as ready (derived from [`DependencyGraph::compute_ready_set()`]).
     /// * `now` — Current time, injected for testability.
     #[must_use]
-    #[allow(clippy::too_many_lines)]
     pub fn analyse(
         &self,
         graph: &DependencyGraph,
@@ -215,8 +214,36 @@ impl ReconcileEngine {
     ) -> DriftReport {
         let mut drift = Vec::new();
 
-        // 1. Stale Ready State fields
-        // Compare all 4 ReadyState variants (Ready, Blocked, NotReady, Closed).
+        Self::check_stale_ready_state(issues, computed_ready_set, now, &mut drift);
+        Self::check_uncascaded_closures(graph, issues, &mut drift);
+        Self::check_orphaned_edges(graph, issues, &mut drift);
+        Self::check_cycles(graph, &mut drift);
+        self.check_stale_claims(issues, now, &mut drift);
+        Self::check_malformed_agents(issues, &mut drift);
+
+        DriftReport {
+            repo: String::new(), // Filled by the tool handler.
+            reconciled_at: now,
+            issues_scanned: issues.len(),
+            edges_scanned: graph.edge_count(),
+            clean: drift.is_empty(),
+            drift_found: drift,
+            repaired: vec![],
+            errors: vec![],
+        }
+    }
+
+    /// Pass 1 — detect stale `ReadyState` fields by comparing each issue's
+    /// stored state against the graph-computed expected state. Honours the
+    /// `defer_until` filter to avoid false positives on deferred issues
+    /// (see unblock-b6b.114).
+    fn check_stale_ready_state(
+        issues: &HashMap<QualifiedId, Issue>,
+        computed_ready_set: &HashSet<QualifiedId>,
+        now: DateTime<Utc>,
+        drift: &mut Vec<DriftKind>,
+    ) {
+        let today = now.date_naive();
         for (qid, issue) in issues {
             if issue.state == IssueState::Closed {
                 // Closed issues should have ReadyState::Closed.
@@ -235,7 +262,6 @@ impl ReconcileEngine {
             // clear. DependencyGraph::compute_ready_set does NOT apply the
             // defer filter (see its module comment), so we must handle it here
             // to avoid false StaleReadyState drift. See unblock-b6b.114.
-            let today = now.date_naive();
             let is_deferred = issue
                 .defer_until
                 .is_some_and(|defer_until| defer_until > today);
@@ -256,9 +282,15 @@ impl ReconcileEngine {
                 });
             }
         }
+    }
 
-        // 2. Uncascaded closures
-        // Closed issues whose downstream issues are still marked as blocked.
+    /// Pass 2 — detect closed issues whose downstream dependents are still
+    /// marked blocked (unblock cascade did not run).
+    fn check_uncascaded_closures(
+        graph: &DependencyGraph,
+        issues: &HashMap<QualifiedId, Issue>,
+        drift: &mut Vec<DriftKind>,
+    ) {
         let issues_vec: Vec<Issue> = issues.values().cloned().collect();
         for (qid, issue) in issues {
             if issue.state == IssueState::Closed {
@@ -280,8 +312,15 @@ impl ReconcileEngine {
                 }
             }
         }
+    }
 
-        // 3. Orphaned blocking edges
+    /// Pass 3 — detect blocking edges whose source or target issue is missing
+    /// from the fetched issue map.
+    fn check_orphaned_edges(
+        graph: &DependencyGraph,
+        issues: &HashMap<QualifiedId, Issue>,
+        drift: &mut Vec<DriftKind>,
+    ) {
         // Check both endpoints: an edge is orphaned if either the source or target
         // issue is missing from the fetched issues map. When the source is missing,
         // we report it using the existing variant with the source as the missing
@@ -300,13 +339,23 @@ impl ReconcileEngine {
                 });
             }
         }
+    }
 
-        // 4. Cycles
+    /// Pass 4 — detect cycles in the dependency graph.
+    fn check_cycles(graph: &DependencyGraph, drift: &mut Vec<DriftKind>) {
         for cycle in graph.detect_all_cycles() {
             drift.push(DriftKind::CycleDetected { cycle });
         }
+    }
 
-        // 5. Stale claims
+    /// Pass 5 — detect in-progress issues whose claim exceeds the configured
+    /// stale-claim threshold.
+    fn check_stale_claims(
+        &self,
+        issues: &HashMap<QualifiedId, Issue>,
+        now: DateTime<Utc>,
+        drift: &mut Vec<DriftKind>,
+    ) {
         for (qid, issue) in issues {
             if issue.status == Status::InProgress
                 && let Some(claimed_at) = issue.claimed_at
@@ -321,8 +370,11 @@ impl ReconcileEngine {
                 }
             }
         }
+    }
 
-        // 6. Malformed agent fields
+    /// Pass 6 — detect malformed `agent` fields (non-empty, missing the
+    /// `type:id` colon separator).
+    fn check_malformed_agents(issues: &HashMap<QualifiedId, Issue>, drift: &mut Vec<DriftKind>) {
         for (qid, issue) in issues {
             if let Some(ref agent) = issue.agent
                 && !agent.contains(':')
@@ -333,17 +385,6 @@ impl ReconcileEngine {
                     raw_value: agent.clone(),
                 });
             }
-        }
-
-        DriftReport {
-            repo: String::new(), // Filled by the tool handler.
-            reconciled_at: now,
-            issues_scanned: issues.len(),
-            edges_scanned: graph.edge_count(),
-            clean: drift.is_empty(),
-            drift_found: drift,
-            repaired: vec![],
-            errors: vec![],
         }
     }
 }
