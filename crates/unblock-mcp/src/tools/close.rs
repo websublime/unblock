@@ -29,7 +29,7 @@ pub struct CloseParams {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct CloseResult {
     /// The closed issue number.
-    pub issue_number: u64,
+    pub issue: u64,
     /// Issue numbers that were fully unblocked by closing this issue.
     /// Only includes issues where ALL blockers are now closed.
     pub unblocked: Vec<u64>,
