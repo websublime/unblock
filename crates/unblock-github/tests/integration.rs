@@ -1580,8 +1580,11 @@ async fn fetch_project_item_id(
 /// Fetches the current value of a specific field on a `ProjectV2Item` via
 /// GraphQL. Returns `Some(value)` if found, `None` otherwise.
 ///
-/// Works for both single-select fields (returns the option name) and text
-/// fields (returns the text value).
+/// Works for single-select fields (returns the option name), text fields
+/// (returns the text value), number fields (returns the number stringified
+/// via `f64::to_string`), and date fields (returns the ISO `YYYY-MM-DD`
+/// string). Return type is kept as `Option<String>` so all existing callers
+/// remain unchanged; numeric callers can parse back with `str::parse::<f64>`.
 async fn fetch_field_value(client: &GitHubClient, item_id: &str, field_id: &str) -> Option<String> {
     let query = "
         query ItemFieldValue($itemId: ID!) {
@@ -1596,6 +1599,14 @@ async fn fetch_field_value(client: &GitHubClient, item_id: &str, field_id: &str)
                             ... on ProjectV2ItemFieldTextValue {
                                 field { ... on ProjectV2Field { id } }
                                 text
+                            }
+                            ... on ProjectV2ItemFieldNumberValue {
+                                field { ... on ProjectV2Field { id } }
+                                number
+                            }
+                            ... on ProjectV2ItemFieldDateValue {
+                                field { ... on ProjectV2Field { id } }
+                                date
                             }
                         }
                     }
@@ -1626,13 +1637,23 @@ async fn fetch_field_value(client: &GitHubClient, item_id: &str, field_id: &str)
         .unwrap_or_default();
 
     for node in &nodes {
-        // Single-select field value.
         if node["field"]["id"].as_str() == Some(field_id) {
+            // Single-select field value.
             if let Some(name) = node["name"].as_str() {
                 return Some(name.to_owned());
             }
+            // Text field value.
             if let Some(text) = node["text"].as_str() {
                 return Some(text.to_owned());
+            }
+            // Number field value — JSON numeric, stringify to preserve
+            // the Option<String> return contract.
+            if let Some(number) = node["number"].as_f64() {
+                return Some(number.to_string());
+            }
+            // Date field value — ISO YYYY-MM-DD string.
+            if let Some(date) = node["date"].as_str() {
+                return Some(date.to_owned());
             }
         }
     }
