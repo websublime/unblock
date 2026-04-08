@@ -486,6 +486,7 @@ mod tests {
     use unblock_core::types::{
         Issue, IssueState, IssueType, Priority, QualifiedId, ReadyState, Status,
     };
+    use unblock_github::MockGitHubClient;
 
     use super::*;
     use crate::server::ServerState;
@@ -545,6 +546,28 @@ mod tests {
         ServerState {
             config: Arc::new(config),
             client: Arc::new(client) as Arc<dyn unblock_github::GitHubApi>,
+            cache: Arc::new(GraphCache::new(Duration::from_secs(300))),
+            agent_kind: std::sync::OnceLock::new(),
+            agent_client: std::sync::OnceLock::new(),
+            connected_at: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Build a `ServerState` backed by a [`MockGitHubClient`] for
+    /// deterministic, network-free tests. The mock uses the same
+    /// `test-owner/test-repo` coordinates as [`qid`] and [`test_issue`].
+    fn mock_state(mock: Arc<MockGitHubClient>) -> ServerState {
+        let config = Config::load_from(|key| match key {
+            "GITHUB_TOKEN" => Ok("ghp_test_token_for_unit_tests".to_owned()),
+            "UNBLOCK_REPO" => Ok("test-owner/test-repo".to_owned()),
+            _ => Err(std::env::VarError::NotPresent),
+        })
+        .expect("test config should load");
+
+        let client: Arc<dyn unblock_github::GitHubApi> = mock;
+        ServerState {
+            config: Arc::new(config),
+            client,
             cache: Arc::new(GraphCache::new(Duration::from_secs(300))),
             agent_kind: std::sync::OnceLock::new(),
             agent_client: std::sync::OnceLock::new(),
@@ -1180,14 +1203,23 @@ mod tests {
     }
 
     /// Regression test for bead unblock-b6b.124: when repair context
-    /// resolution fails, subsequent repairable drift items must NOT push
-    /// duplicate error messages into `report.errors`. Exactly one error
-    /// should appear per failed context resolution per reconcile run.
+    /// resolution fails because `field_ids()` returns `None`, subsequent
+    /// repairable drift items must NOT push duplicate error messages into
+    /// `report.errors`. Exactly one error should appear per failed context
+    /// resolution per reconcile run.
+    ///
+    /// Strengthened (bead unblock-hd9): uses [`MockGitHubClient`] call
+    /// counters to assert that `field_ids()` is invoked exactly **once**
+    /// despite two `RepairContext` entries referencing the same project,
+    /// and that `resolve_project_info()` is never reached.
     #[tokio::test]
     async fn fix_mode_failed_context_resolution_is_deduped() {
         use unblock_core::reconcile::DriftKind;
 
-        let state = test_state().await;
+        let mock = Arc::new(MockGitHubClient::new("test-owner", "test-repo", Some(1)));
+        // No field_ids stubs pushed — the mock returns None by default,
+        // which triggers the "Field IDs not available" branch.
+        let state = mock_state(mock.clone());
 
         // Two repairable drift items that both require repair context.
         let first = test_issue(2, IssueState::Open, ReadyState::Blocked);
@@ -1243,6 +1275,22 @@ mod tests {
             "error should be the field-ids failure message: {}",
             report.errors[0]
         );
+
+        // ── Call-count assertions (bead unblock-hd9) ─────────────────
+        // field_ids() must be called exactly once — the dedup logic must
+        // cache the Failed state and short-circuit on subsequent items.
+        assert_eq!(
+            mock.calls().field_ids(),
+            1,
+            "field_ids() should be invoked exactly once despite three repairable drift items"
+        );
+        // resolve_project_info() must never be reached — field_ids()
+        // returned None, so the code path exits before the second branch.
+        assert_eq!(
+            mock.calls().resolve_project_info(),
+            0,
+            "resolve_project_info() should not be invoked when field_ids() returns None"
+        );
     }
 
     /// Sibling regression test for bead unblock-b6b.147: when
@@ -1250,34 +1298,46 @@ mod tests {
     /// dedup logic must collapse repeated failures into a single error and
     /// prevent additional API attempts. This guards the
     /// `RepairContext::Failed` path for the second resolution branch.
+    ///
+    /// Strengthened (bead unblock-hd9): uses [`MockGitHubClient`] call
+    /// counters to assert that `field_ids()` is called exactly once and
+    /// `resolve_project_info()` is called exactly once, proving the dedup
+    /// cache prevents redundant API calls.
     #[tokio::test]
     async fn fix_mode_failed_resolve_project_info_is_deduped() {
         use std::collections::HashMap as StdHashMap;
 
         use unblock_core::reconcile::DriftKind;
+        use unblock_github::errors::GitHubApiSnafu;
         use unblock_github::projects::{FieldMeta, ProjectFieldIds};
 
-        let state = test_state().await;
+        let mock = Arc::new(MockGitHubClient::new("test-owner", "test-repo", Some(1)));
 
         // Pre-seed field IDs so the first resolution branch succeeds and
-        // execution reaches `resolve_project_info()`, which will fail
-        // because the test client points at a non-existent host.
+        // execution reaches `resolve_project_info()`.
         let dummy_meta = || FieldMeta {
             field_id: "FIELD_DUMMY".to_owned(),
             options: StdHashMap::new(),
         };
-        state
-            .client
-            .set_field_ids(ProjectFieldIds {
-                status: dummy_meta(),
-                priority: dummy_meta(),
-                issue_type: dummy_meta(),
-                agent: "FIELD_AGENT".to_owned(),
-                story_points: "FIELD_STORY_POINTS".to_owned(),
-                defer_until: "FIELD_DEFER_UNTIL".to_owned(),
-                ready_state: dummy_meta(),
-            })
-            .await;
+        mock.push_field_ids(Some(ProjectFieldIds {
+            status: dummy_meta(),
+            priority: dummy_meta(),
+            issue_type: dummy_meta(),
+            agent: "FIELD_AGENT".to_owned(),
+            story_points: "FIELD_STORY_POINTS".to_owned(),
+            defer_until: "FIELD_DEFER_UNTIL".to_owned(),
+            ready_state: dummy_meta(),
+        }));
+
+        // Push an explicit error for resolve_project_info().
+        let err = GitHubApiSnafu {
+            status: 502_u16,
+            message: "bad gateway".to_owned(),
+        }
+        .build();
+        mock.push_resolve_project_info(Err(err));
+
+        let state = mock_state(mock.clone());
 
         // Two repairable drift items that both require repair context, plus
         // a cascading closure — three repair attempts in total.
@@ -1336,6 +1396,22 @@ mod tests {
             report.errors[0].contains("Failed to resolve project info"),
             "error should be the resolve-project-info failure message: {}",
             report.errors[0]
+        );
+
+        // ── Call-count assertions (bead unblock-hd9) ─────────────────
+        // field_ids() must be called exactly once — the dedup cache must
+        // prevent redundant lookups on subsequent drift items.
+        assert_eq!(
+            mock.calls().field_ids(),
+            1,
+            "field_ids() should be invoked exactly once despite three repairable drift items"
+        );
+        // resolve_project_info() must be called exactly once — the Failed
+        // state prevents a second API attempt.
+        assert_eq!(
+            mock.calls().resolve_project_info(),
+            1,
+            "resolve_project_info() should be invoked exactly once despite three repairable drift items"
         );
     }
 }
