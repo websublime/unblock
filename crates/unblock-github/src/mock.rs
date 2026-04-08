@@ -298,8 +298,37 @@ impl MockGitHubClient {
     }
 }
 
-/// Generates a `push_<method>` helper for a fallible-result stub queue.
+/// Generates a `push_<method>` helper for a stub queue.
+///
+/// Two arms are supported:
+/// - `Option<$ok>` for queues that store option values directly (empty
+///   queue falls back to `None`).
+/// - `$ok` for `Result<$ok, Error>` queues (the common fallible case).
+///
+/// The `Option` arm must be listed first so that the generic arm does not
+/// shadow it by matching `Option<T>` as a single type.
 macro_rules! push_result {
+    ($name:ident, $push:ident, Option<$ok:ty>) => {
+        impl MockGitHubClient {
+            #[doc = concat!("Queues an `Option<", stringify!($ok), ">` to be returned by the next `", stringify!($name), "` call.")]
+            ///
+            /// Unlike the fallible `push_*` helpers, this queue stores the
+            /// option value directly. The empty-queue fallback is `None`.
+            ///
+            /// # Panics
+            ///
+            /// Panics only if the internal stub `Mutex` is poisoned, which
+            /// can only happen if a previous test thread panicked while
+            /// holding the lock — never in normal use.
+            pub fn $push(&self, response: Option<$ok>) {
+                self.stubs
+                    .$name
+                    .lock()
+                    .expect("mock stub mutex poisoned")
+                    .push_back(response);
+            }
+        }
+    };
     ($name:ident, $push:ident, $ok:ty) => {
         impl MockGitHubClient {
             #[doc = concat!("Queues a `Result<", stringify!($ok), ", Error>` to be returned by the next `", stringify!($name), "` call.")]
@@ -362,25 +391,7 @@ push_result!(resolve_issue_ref, push_resolve_issue_ref, String);
 push_result!(get_project_item_id, push_get_project_item_id, String);
 push_result!(ensure_labels, push_ensure_labels, ());
 push_result!(add_blocked_by_ref, push_add_blocked_by_ref, ());
-
-impl MockGitHubClient {
-    /// Queues a response for the next `field_ids` call.
-    ///
-    /// Unlike the other `push_*` helpers, `field_ids` returns
-    /// `Option<ProjectFieldIds>` rather than a `Result`, so its queue stores
-    /// the option value directly. The empty-queue fallback is `None`.
-    ///
-    /// # Panics
-    ///
-    /// Panics only if the internal stub `Mutex` is poisoned.
-    pub fn push_field_ids(&self, response: Option<ProjectFieldIds>) {
-        self.stubs
-            .field_ids
-            .lock()
-            .expect("mock stub mutex poisoned")
-            .push_back(response);
-    }
-}
+push_result!(field_ids, push_field_ids, Option<ProjectFieldIds>);
 
 /// Pops the next stub off a queue, or returns `Error::MockNotStubbed` with
 /// the supplied static method name.
