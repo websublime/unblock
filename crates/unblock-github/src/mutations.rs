@@ -231,10 +231,12 @@ impl GitHubClient {
     pub async fn close_issue(&self, number: u64, reason: Option<String>) -> Result<(), Error> {
         // If reason is provided and non-empty, add a "Closed: {reason}" comment first.
         // Per ARCH §10.3 / PRD §6.1 step 4, reason comments must be prefixed with
-        // "Closed: ". An empty reason string is treated the same as None — no comment
-        // is posted to avoid timeline noise.
+        // "Closed: ". An empty or whitespace-only reason string is treated the same
+        // as None — no comment is posted to avoid timeline noise. This mirrors the
+        // MCP handler layer's trim-based filter so direct library callers get the
+        // same defense-in-depth guarantee.
         if let Some(reason_text) = reason
-            && !reason_text.is_empty()
+            && !reason_text.trim().is_empty()
         {
             let body = format!("Closed: {reason_text}");
             self.add_comment(number, body).await?;
@@ -1350,4 +1352,49 @@ fn deterministic_label_color(label: &str) -> String {
     }
     // Mask to 24 bits for RGB.
     format!("{:06x}", hash & 0x00FF_FFFF)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::client::GitHubClient;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Regression guard for the library-level close guard: a whitespace-only
+    /// `reason` passed directly to [`GitHubClient::close_issue`] must be
+    /// treated the same as `None` and must NOT post a `"Closed:  "` comment
+    /// before closing. Mirrors the MCP handler layer's trim-based filter.
+    #[tokio::test]
+    async fn close_issue_with_whitespace_reason_skips_comment() {
+        let server = MockServer::start().await;
+        let client = GitHubClient::new_for_test(&server.uri());
+
+        // The comments endpoint MUST NOT be called. `expect(0)` on wiremock
+        // fails the test on drop if any matching request was received.
+        Mock::given(method("POST"))
+            .and(path("/repos/test-owner/test-repo/issues/42/comments"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "html_url": "https://example.invalid/should-not-be-called"
+            })))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        // The close PATCH must still be called exactly once.
+        Mock::given(method("PATCH"))
+            .and(path("/repos/test-owner/test-repo/issues/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": 42,
+                "state": "closed"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        client
+            .close_issue(42, Some("   ".to_owned()))
+            .await
+            .expect("close_issue with whitespace-only reason should succeed");
+        // MockServer's Drop verifies the expect(0) / expect(1) counters.
+    }
 }
