@@ -646,13 +646,15 @@ impl GitHubClient {
                 "cursor": cursor,
             });
 
-            let response = self.graphql(query, variables).await?;
-            let fields_connection = &response["data"]["node"]["fields"];
+            let mut response = self.graphql(query, variables).await?;
+            let fields_connection = &mut response["data"]["node"]["fields"];
 
-            // Parse field nodes from this page.
-            if let Some(nodes) = fields_connection
-                .get("nodes")
-                .and_then(serde_json::Value::as_array)
+            // Parse field nodes from this page. Take ownership of the nodes
+            // array so individual node values can be moved into
+            // `serde_json::from_value` without cloning.
+            if let Some(serde_json::Value::Array(nodes)) = fields_connection
+                .get_mut("nodes")
+                .map(serde_json::Value::take)
             {
                 for node_value in nodes {
                     // Skip null entries that can appear from union types.
@@ -660,7 +662,7 @@ impl GitHubClient {
                         continue;
                     }
 
-                    let field: FieldNode = match serde_json::from_value(node_value.clone()) {
+                    let field: FieldNode = match serde_json::from_value(node_value) {
                         Ok(f) => f,
                         Err(e) => {
                             warn!(error = %e, "Skipping unparseable field node");
@@ -668,17 +670,19 @@ impl GitHubClient {
                         }
                     };
 
+                    let FieldNode {
+                        id, name, options, ..
+                    } = field;
+
                     let mut option_map = HashMap::new();
-                    if let Some(options) = &field.options {
-                        for opt in options {
-                            option_map.insert(opt.name.clone(), opt.id.clone());
-                        }
+                    for opt in options.unwrap_or_default() {
+                        option_map.insert(opt.name, opt.id);
                     }
 
                     fields.insert(
-                        field.name.clone(),
+                        name,
                         FieldMeta {
-                            field_id: field.id,
+                            field_id: id,
                             options: option_map,
                         },
                     );
