@@ -314,6 +314,37 @@ async fn claim_dispatches_through_dyn_vtable() {
     assert_eq!(mock.calls().field_ids(), 1);
 }
 
+#[tokio::test]
+async fn claim_with_empty_agent_returns_invalid_params() {
+    // Regression for unblock-b6b.80 follow-up: Some("") and whitespace-only
+    // agent must be rejected at the handler level with INVALID_PARAMS (HTTP
+    // 400) BEFORE any GitHub API call is made.
+    let mock = new_mock();
+    let server = UnblockServer::new(state_with_mock(Arc::clone(&mock)));
+
+    for bad in ["", "   ", "\t \n"] {
+        let result = server
+            .claim(Parameters(ClaimParams {
+                id: 7,
+                agent: Some(bad.to_owned()),
+            }))
+            .await;
+        let Err(err) = result else {
+            panic!("empty/whitespace agent must be rejected for {bad:?}");
+        };
+        assert_eq!(
+            err.code,
+            rmcp::model::ErrorCode::INVALID_PARAMS,
+            "expected INVALID_PARAMS for agent={bad:?}"
+        );
+    }
+
+    // Crucially: no GitHub API calls should have been made.
+    assert_eq!(mock.calls().fetch_issue(), 0);
+    assert_eq!(mock.calls().add_comment(), 0);
+    assert_eq!(mock.calls().fetch_graph_data(), 0);
+}
+
 // ── close ──────────────────────────────────────────────────────────────
 
 #[tokio::test]
