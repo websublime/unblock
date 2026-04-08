@@ -852,6 +852,10 @@ impl UnblockServer {
         let config = Arc::clone(&state.config);
 
         let issue_number = params.id;
+        // Reject empty/whitespace-only agent strings (unblock-b6b.80). Falling
+        // through to config fallback on empty would mask caller intent.
+        crate::tools::claim::validate_agent(params.agent.as_deref())
+            .map_err(crate::errors::github_error_to_mcp)?;
         let agent_name = params.agent.unwrap_or_else(|| config.agent.clone());
 
         info!(

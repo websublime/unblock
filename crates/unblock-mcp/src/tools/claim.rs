@@ -12,7 +12,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use unblock_core::errors::{
-    AlreadyClaimedSnafu, IssueBlockedSnafu, IssueClosedSnafu, IssueDeferredSnafu,
+    AlreadyClaimedSnafu, IssueBlockedSnafu, IssueClosedSnafu, IssueDeferredSnafu, ValidationSnafu,
 };
 use unblock_core::types::{IssueState, RelatedIssue, Status};
 
@@ -127,6 +127,33 @@ pub(crate) fn validate_claimable(
         .into());
     }
 
+    Ok(())
+}
+
+/// Validates the optional `agent` parameter from [`ClaimParams`].
+///
+/// The claim handler accepts `agent` as an `Option<String>` and falls back to
+/// `Config.agent` when `None`. An empty or whitespace-only string, however,
+/// would produce a malformed claim comment like `"Claimed by  at ..."`. This
+/// validator rejects that case so callers get a clear error rather than
+/// silently-corrupt state. `None` is always accepted (the handler applies
+/// its own fallback logic).
+///
+/// # Errors
+///
+/// Returns [`unblock_github::errors::Error`] wrapping a
+/// [`DomainError::Validation`](unblock_core::errors::DomainError::Validation)
+/// (HTTP 400) when `agent` is `Some` but empty or whitespace-only.
+pub(crate) fn validate_agent(agent: Option<&str>) -> Result<(), unblock_github::errors::Error> {
+    if let Some(raw) = agent
+        && raw.trim().is_empty()
+    {
+        return Err(ValidationSnafu {
+            message: "agent parameter must not be empty or whitespace-only".to_owned(),
+        }
+        .build()
+        .into());
+    }
     Ok(())
 }
 
@@ -306,6 +333,35 @@ mod tests {
             msg.contains("blocked by"),
             "blocked should take precedence over deferred, got: {msg}"
         );
+    }
+
+    // ── Agent parameter validation ──────────────────────────────────
+
+    #[test]
+    fn validate_agent_accepts_none() {
+        assert!(validate_agent(None).is_ok());
+    }
+
+    #[test]
+    fn validate_agent_accepts_non_empty_string() {
+        assert!(validate_agent(Some("alice")).is_ok());
+    }
+
+    #[test]
+    fn validate_agent_rejects_empty_string() {
+        let err = validate_agent(Some("")).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("empty") || msg.contains("whitespace"),
+            "expected validation error, got: {msg}"
+        );
+        assert_eq!(err.status_code(), 400);
+    }
+
+    #[test]
+    fn validate_agent_rejects_whitespace_only_string() {
+        let err = validate_agent(Some("   \t ")).unwrap_err();
+        assert_eq!(err.status_code(), 400);
     }
 
     #[test]
