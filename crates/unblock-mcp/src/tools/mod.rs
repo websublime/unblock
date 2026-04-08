@@ -72,6 +72,17 @@ pub(crate) fn normalize_filter(value: Option<&str>) -> Option<&str> {
 /// Read tools do not touch the cache — they return data directly from GitHub
 /// or from the cached graph state.
 ///
+/// # Parameters
+///
+/// - `_state`: currently unused, but retained intentionally as part of the
+///   stable read-tool signature. Future read handlers will need access to
+///   [`ServerState`] to consult the cached [`DependencyGraph`] (e.g. for
+///   `ready`, `show`, and `blocked` tools that should serve cached results
+///   rather than re-fetching from GitHub). Keeping the parameter in place
+///   now avoids a breaking signature change to every read tool call site
+///   when cache-backed reads land. Do not remove it.
+/// - `op`: the async operation producing the tool result.
+///
 /// # Errors
 ///
 /// Returns [`ErrorData`] if the operation fails.
