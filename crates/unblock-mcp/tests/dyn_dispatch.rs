@@ -70,7 +70,7 @@ fn state_with_mock(mock: Arc<MockGitHubClient>) -> ServerState {
     let client: Arc<dyn GitHubApi> = mock;
     ServerState {
         config: Arc::new(config),
-        client,
+        github: client,
         cache: Arc::new(GraphCache::new(Duration::from_secs(300))),
         agent_kind: OnceLock::new(),
         agent_client: OnceLock::new(),

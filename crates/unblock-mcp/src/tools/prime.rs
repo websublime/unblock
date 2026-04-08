@@ -341,7 +341,7 @@ pub async fn handle_prime(
 
     // 2. Always fresh fetch — bypasses cache entirely.
     let (issues_vec, edges) = state
-        .client
+        .github
         .fetch_graph_data()
         .await
         .map_err(github_error_to_mcp)?;
@@ -801,7 +801,7 @@ mod tests {
 
         ServerState {
             config: Arc::new(config),
-            client: Arc::new(client) as Arc<dyn unblock_github::GitHubApi>,
+            github: Arc::new(client) as Arc<dyn unblock_github::GitHubApi>,
             cache: Arc::new(GraphCache::new(Duration::from_secs(300))),
             agent_kind: std::sync::OnceLock::new(),
             agent_client: std::sync::OnceLock::new(),

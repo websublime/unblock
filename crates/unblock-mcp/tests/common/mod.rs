@@ -38,7 +38,7 @@ pub async fn test_server_state() -> ServerState {
         .expect("GitHubClient::new() should succeed");
     ServerState {
         config: Arc::new(config),
-        client: Arc::new(client),
+        github: Arc::new(client),
         cache: Arc::new(GraphCache::new(Duration::from_secs(300))),
         agent_kind: std::sync::OnceLock::new(),
         agent_client: std::sync::OnceLock::new(),

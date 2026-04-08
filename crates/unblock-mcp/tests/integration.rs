@@ -70,7 +70,7 @@ async fn show_existing_issue_returns_all_fields_populated() {
     }
 
     let state = test_server_state().await;
-    let client = &state.client;
+    let client = &state.github;
 
     // Use issue #1, which should exist in any non-empty repo.
     let issue_number = 1;
@@ -114,7 +114,7 @@ async fn show_nonexistent_issue_returns_issue_not_found() {
     }
 
     let state = test_server_state().await;
-    let client = &state.client;
+    let client = &state.github;
 
     // Use a very large number that should not exist.
     let result = client.fetch_issue(999_999_999).await;
@@ -711,7 +711,7 @@ async fn create_issue_with_all_params_and_refetch() {
     }
 
     let state = test_server_state().await;
-    let client = &state.client;
+    let client = &state.github;
 
     let title = format!(
         "[test] create tool integration test {}",
@@ -771,7 +771,7 @@ async fn create_issue_with_blocked_by_local() {
     }
 
     let state = test_server_state().await;
-    let client = &state.client;
+    let client = &state.github;
 
     // Create blocker issue first.
     let blocking_title = format!("[test] blocker issue {}", chrono::Utc::now().timestamp());
@@ -847,7 +847,7 @@ async fn create_issue_with_blocked_by_cross_repo() {
     }
 
     let state = test_server_state().await;
-    let client = &state.client;
+    let client = &state.github;
 
     // Extract owner/repo from the client so we can construct a CrossRepo ref
     // pointing at the same repo.
@@ -937,7 +937,7 @@ async fn create_issue_with_parent_sub_issue() {
     }
 
     let state = test_server_state().await;
-    let client = &state.client;
+    let client = &state.github;
 
     // Create parent issue.
     let parent_title = format!("[test] parent issue {}", chrono::Utc::now().timestamp());
@@ -1011,7 +1011,7 @@ async fn create_issue_with_defaults() {
     }
 
     let state = test_server_state().await;
-    let client = &state.client;
+    let client = &state.github;
 
     let title = format!("[test] defaults test {}", chrono::Utc::now().timestamp());
 
@@ -1052,7 +1052,7 @@ async fn ensure_labels_creates_missing_labels() {
     }
 
     let state = test_server_state().await;
-    let client = &state.client;
+    let client = &state.github;
 
     // Use a unique label name to avoid collisions.
     let label_name = format!("test-label-{}", chrono::Utc::now().timestamp());
@@ -1085,7 +1085,7 @@ async fn create_issue_appears_in_ready_set_after_rebuild() {
     }
 
     let state = test_server_state().await;
-    let client = &state.client;
+    let client = &state.github;
 
     let title = format!("[test] ready set test {}", chrono::Utc::now().timestamp());
 
@@ -1143,7 +1143,7 @@ async fn setup_creates_fields_on_first_run() {
     }
 
     let state = test_server_state().await;
-    let client = &state.client;
+    let client = &state.github;
 
     let project_info = client
         .resolve_project_info()
@@ -1180,7 +1180,7 @@ async fn setup_fields_idempotent_no_duplicates() {
     }
 
     let state = test_server_state().await;
-    let client = &state.client;
+    let client = &state.github;
 
     let project_info = client
         .resolve_project_info()
@@ -1225,7 +1225,7 @@ async fn setup_creates_views_with_correct_layout() {
     }
 
     let state = test_server_state().await;
-    let client = &state.client;
+    let client = &state.github;
 
     let owner_type = client
         .detect_owner_type()
@@ -1298,7 +1298,7 @@ async fn setup_views_idempotent_no_duplicates() {
     }
 
     let state = test_server_state().await;
-    let client = &state.client;
+    let client = &state.github;
 
     let owner_type = client
         .detect_owner_type()
@@ -1341,7 +1341,7 @@ async fn setup_dry_run_reports_without_mutations() {
     }
 
     let state = test_server_state().await;
-    let client = &state.client;
+    let client = &state.github;
 
     let project_info = client
         .resolve_project_info()
@@ -1446,7 +1446,7 @@ async fn setup_owner_type_detection_works() {
     }
 
     let state = test_server_state().await;
-    let client = &state.client;
+    let client = &state.github;
 
     let owner_type = client
         .detect_owner_type()
@@ -1473,7 +1473,7 @@ async fn setup_visible_fields_use_integer_ids() {
     }
 
     let state = test_server_state().await;
-    let client = &state.client;
+    let client = &state.github;
 
     let owner_type = client
         .detect_owner_type()
