@@ -205,6 +205,7 @@ impl ReconcileEngine {
     ///   computes as ready (derived from [`DependencyGraph::compute_ready_set()`]).
     /// * `now` — Current time, injected for testability.
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn analyse(
         &self,
         graph: &DependencyGraph,
@@ -229,8 +230,19 @@ impl ReconcileEngine {
                 continue;
             }
 
+            // Deferred issues (defer_until > today) are intentionally excluded
+            // from the ready workflow regardless of whether their blockers are
+            // clear. DependencyGraph::compute_ready_set does NOT apply the
+            // defer filter (see its module comment), so we must handle it here
+            // to avoid false StaleReadyState drift. See unblock-b6b.114.
+            let today = now.date_naive();
+            let is_deferred = issue
+                .defer_until
+                .is_some_and(|defer_until| defer_until > today);
             let graph_ready = computed_ready_set.contains(qid);
-            let expected = if graph_ready {
+            let expected = if is_deferred {
+                ReadyState::NotReady
+            } else if graph_ready {
                 ReadyState::Ready
             } else {
                 ReadyState::Blocked
@@ -622,6 +634,44 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn deferred_issue_with_not_ready_field_does_not_drift() {
+        // Regression for unblock-b6b.114: a deferred issue (defer_until > today)
+        // with ReadyState::NotReady is correctly reconciled. Previously the
+        // engine mapped all non-ready issues to ReadyState::Blocked, producing
+        // a false StaleReadyState(NotReady, Blocked) drift for deferred issues.
+        use chrono::{Duration, NaiveDate};
+
+        let mut issue1 = make_issue("acme", "widgets", 1, IssueState::Open, ReadyState::NotReady);
+        // Defer 30 days into the future relative to `now` below.
+        let now = Utc::now();
+        let future: NaiveDate = (now + Duration::days(30)).date_naive();
+        issue1.defer_until = Some(future);
+
+        let issues_vec = vec![issue1];
+        let graph = DependencyGraph::build(&issues_vec, &[]);
+        // Deferred issues are excluded from the ready set by design.
+        let computed_ready = ready_set(&graph, &issues_vec);
+        let by_id = issue_map(&issues_vec);
+
+        let engine = ReconcileEngine::new(24);
+        let report = engine.analyse(&graph, &by_id, &computed_ready, now);
+
+        assert!(
+            report.clean,
+            "deferred issue with ReadyState::NotReady must not produce drift, got: {:?}",
+            report.drift_found
+        );
+        assert!(
+            !report
+                .drift_found
+                .iter()
+                .any(|d| matches!(d, DriftKind::StaleReadyState { .. })),
+            "deferred issue should not appear as StaleReadyState, got: {:?}",
+            report.drift_found
+        );
     }
 
     #[test]
