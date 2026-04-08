@@ -1476,15 +1476,6 @@ mod tests {
 
     // ── fetch_graph_data pagination (wiremock) ─────────────────────────
 
-    /// Creates a `GitHubClient` pointing at a custom base URL for mock testing.
-    ///
-    /// Delegates to `GitHubClient::new_for_test` which constructs a bare client
-    /// with no auth headers. The `api_base_url` should be a wiremock server URI
-    /// so that `graphql_url()` routes requests to the mock.
-    fn make_mock_client(api_base_url: &str) -> GitHubClient {
-        GitHubClient::new_for_test(api_base_url)
-    }
-
     /// Builds a mock GraphQL response page for `fetch_graph_data`.
     ///
     /// Each issue node has the minimal fields required by `parse_graph_issue`:
@@ -1540,7 +1531,7 @@ mod tests {
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
-        let client = make_mock_client(&server.uri());
+        let client = GitHubClient::new_for_test(&server.uri());
 
         // Page 1: cursor is null → returns 2 issues, hasNextPage: true.
         // The JSON body will contain `"cursor":null` for the first request.
@@ -1594,7 +1585,7 @@ mod tests {
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
-        let client = make_mock_client(&server.uri());
+        let client = GitHubClient::new_for_test(&server.uri());
 
         // Single page: hasNextPage: false on the first (and only) request.
         Mock::given(method("POST"))
@@ -1621,7 +1612,7 @@ mod tests {
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
-        let client = make_mock_client(&server.uri());
+        let client = GitHubClient::new_for_test(&server.uri());
 
         // Pathological response: hasNextPage: true but endCursor: null.
         // The infinite-loop guard (graphql.rs:289-298) should break out
@@ -1656,7 +1647,7 @@ mod tests {
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
-        let client = make_mock_client(&server.uri());
+        let client = GitHubClient::new_for_test(&server.uri());
 
         // Empty repo: no issue nodes, hasNextPage: false.
         Mock::given(method("POST"))

@@ -243,7 +243,8 @@ impl GitHubClient {
     /// Creates a `GitHubClient` for unit testing with a custom API base URL.
     ///
     /// Constructs a bare client with no auth headers, pointing at the given
-    /// `api_base_url` (typically a wiremock server URI). Available only in
+    /// `api_base_url`. The `api_base_url` should be a wiremock server URI so
+    /// that `graphql_url()` routes requests to the mock. Available only in
     /// `#[cfg(test)]` builds and accessible from other crate modules.
     #[cfg(test)]
     pub(crate) fn new_for_test(api_base_url: &str) -> Self {
