@@ -19,6 +19,7 @@ use unblock_github::projects::{CreateViewParams, FieldValue, OwnerType, ViewLayo
 /// block on the async `close_issue` call. If the close fails the error is
 /// logged to stderr but does not cause a secondary panic (which would abort
 /// the process during an unwind).
+#[derive(Debug)]
 struct CloseIssueGuard<'a> {
     client: &'a GitHubClient,
     issue_number: u64,
