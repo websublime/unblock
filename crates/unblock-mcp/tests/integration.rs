@@ -4,18 +4,25 @@
 //! access to GitHub. They are skipped automatically when `GITHUB_TOKEN` is not
 //! set.
 
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use rmcp::handler::server::wrapper::{Json, Parameters};
 use unblock_core::cache::GraphCache;
 use unblock_core::config::Config;
 use unblock_core::graph::DependencyGraph;
 use unblock_core::types::{
-    BlockingEdge, IssueRef, IssueState, IssueType, Priority, QualifiedId, ReadyState, Status,
+    BlockingEdge, IssueComment, IssueRef, IssueState, IssueType, Priority, QualifiedId, ReadyState,
+    Status,
 };
+use unblock_github::GitHubApi;
 use unblock_github::client::GitHubClient;
+use unblock_github::mock::MockGitHubClient;
 use unblock_github::projects::{CreateViewParams, OwnerType, ViewLayout};
+use unblock_mcp::server::{ServerState, UnblockServer};
 use unblock_mcp::tools::reconcile::ReconcileParams;
 use unblock_mcp::tools::setup::REQUIRED_VIEWS;
+use unblock_mcp::tools::show::ShowParams;
 
 mod common;
 use common::{has_github_token, test_server_state};
@@ -49,6 +56,72 @@ fn test_issue(number: u64, state: IssueState) -> unblock_core::types::Issue {
         updated_at: chrono::Utc::now(),
         url: format!("https://github.com/test/repo/issues/{number}"),
         comments: vec![],
+        blocked_by: vec![],
+        blocking: vec![],
+        parent: None,
+        sub_issues: vec![],
+    }
+}
+
+/// Build a `Config` without touching the environment, matching `MockGitHubClient`.
+fn mock_test_config() -> Config {
+    Config::load_from(|key| match key {
+        "GITHUB_TOKEN" => Ok("ghp_mock_token_for_integration_tests".to_owned()),
+        "UNBLOCK_REPO" => Ok("acme/widgets".to_owned()),
+        _ => Err(std::env::VarError::NotPresent),
+    })
+    .expect("mock test config should load")
+}
+
+/// Build a fresh `MockGitHubClient` with fixed coordinates `acme/widgets`.
+fn new_mock() -> Arc<MockGitHubClient> {
+    Arc::new(MockGitHubClient::new("acme", "widgets", Some(1)))
+}
+
+/// Wrap a mock in a `ServerState` whose `github` field is typed as
+/// `Arc<dyn GitHubApi>`, so handler calls traverse the dyn-dispatch vtable.
+fn state_with_mock(mock: Arc<MockGitHubClient>) -> ServerState {
+    let config = mock_test_config();
+    let client: Arc<dyn GitHubApi> = mock;
+    ServerState {
+        config: Arc::new(config),
+        github: client,
+        cache: Arc::new(GraphCache::new(Duration::from_secs(300))),
+        agent_kind: OnceLock::new(),
+        agent_client: OnceLock::new(),
+        connected_at: OnceLock::new(),
+    }
+}
+
+/// Build an `Issue` whose `QualifiedId` matches the `MockGitHubClient`
+/// coordinates (`acme/widgets`) so cache lookups find it.
+fn mock_issue(number: u64) -> unblock_core::types::Issue {
+    unblock_core::types::Issue {
+        qualified_id: QualifiedId::new("acme", "widgets", number),
+        number,
+        node_id: format!("I_{number}"),
+        title: format!("Mock issue #{number}"),
+        issue_type: Some(IssueType::Task),
+        status: Status::Open,
+        priority: Priority::P2,
+        agent: None,
+        claimed_at: None,
+        ready_state: ReadyState::Ready,
+        story_points: None,
+        defer_until: None,
+        labels: vec![],
+        milestone: None,
+        assignees: vec![],
+        state: IssueState::Open,
+        body: Some("## Description\n\nbody\n".to_owned()),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        url: format!("https://github.com/acme/widgets/issues/{number}"),
+        comments: vec![IssueComment {
+            author: "alice".to_owned(),
+            body: "Hello".to_owned(),
+            created_at: chrono::Utc::now(),
+        }],
         blocked_by: vec![],
         blocking: vec![],
         parent: None,
@@ -170,83 +243,126 @@ Design detail here.
     );
 }
 
-/// `include_deps=false` skips graph traversal — `dependency_tree` is `None`.
+/// End-to-end: `include_deps=false` skips the graph-lookup branch of the
+/// real `show` handler even when the cache contains a matching graph.
+///
+/// Uses `MockGitHubClient` behind `Arc<dyn GitHubApi>` so the handler is
+/// invoked through its production code path (no `GITHUB_TOKEN` required).
 #[tokio::test]
 async fn show_include_deps_false_skips_graph_traversal() {
-    // Set up a cache with a graph.
-    let cache = GraphCache::new(Duration::from_secs(300));
-    let issues = vec![
-        test_issue(1, IssueState::Open),
-        test_issue(2, IssueState::Open),
-    ];
+    let mock = new_mock();
+    // Two fetches: one for include_deps=false, one for include_deps=true.
+    mock.push_fetch_issue(Ok(mock_issue(1)));
+    mock.push_fetch_issue(Ok(mock_issue(1)));
+
+    let state = state_with_mock(Arc::clone(&mock));
+
+    // Seed the cache with a graph containing issue #1 → so include_deps=true
+    // would otherwise return Some(..). This proves the flag (not an empty
+    // cache) is what suppresses the tree.
+    let issues = vec![mock_issue(1), mock_issue(2)];
     let edges = vec![BlockingEdge {
-        source: qid(2),
-        target: qid(1),
+        source: QualifiedId::new("acme", "widgets", 2),
+        target: QualifiedId::new("acme", "widgets", 1),
     }];
     let graph = DependencyGraph::build(&issues, &edges);
     let ready_set = graph.compute_ready_set(&issues);
-    cache.update(ready_set, graph).await;
-
-    // Verify the cache has a graph.
+    state.cache.update(ready_set, graph).await;
     assert!(
-        cache.get_graph().await.is_some(),
-        "cache should have a graph"
+        state.cache.get_graph().await.is_some(),
+        "cache should be populated before invoking show",
     );
 
-    // With include_deps=false, even though cache has a graph, dependency_tree
-    // should be None. We test this logic directly since calling the full
-    // tool handler requires a real GitHub client.
-    let include_deps = false;
-    let dependency_tree: Option<Vec<(QualifiedId, usize)>> = if include_deps {
-        cache
-            .get_graph()
-            .await
-            .map(|g| g.dependency_tree(&qid(1), unblock_core::types::TraversalDirection::Both, 3))
-    } else {
-        None
-    };
+    let server = UnblockServer::new(state);
 
+    // include_deps=false: dependency_tree must be None despite populated cache.
+    let Json(result_false) = server
+        .show(Parameters(ShowParams {
+            id: 1,
+            include_comments: Some(true),
+            include_deps: Some(false),
+        }))
+        .await
+        .expect("show should succeed via dyn dispatch (include_deps=false)");
     assert!(
-        dependency_tree.is_none(),
-        "dependency_tree should be None when include_deps=false",
+        result_false.dependency_tree.is_none(),
+        "dependency_tree must be None when include_deps=false, got {:?}",
+        result_false.dependency_tree,
     );
+    assert_eq!(
+        mock.calls().fetch_issue(),
+        1,
+        "handler must still fetch the issue when include_deps=false",
+    );
+
+    // include_deps=true: dependency_tree must be Some on the same handler,
+    // same cache — confirming the branch is exercised end-to-end.
+    let Json(result_true) = server
+        .show(Parameters(ShowParams {
+            id: 1,
+            include_comments: Some(true),
+            include_deps: Some(true),
+        }))
+        .await
+        .expect("show should succeed via dyn dispatch (include_deps=true)");
+    assert!(
+        result_true.dependency_tree.is_some(),
+        "dependency_tree must be Some when include_deps=true and cache has graph",
+    );
+    assert_eq!(mock.calls().fetch_issue(), 2);
 }
 
-/// `include_comments=false` skips comment fetch — comments is `None`.
+/// End-to-end: `include_comments=false` on the real `show` handler returns
+/// `comments: None` even though the fetched issue has comments. The handler
+/// still performs the fetch — the flag controls projection, not fetch.
 #[tokio::test]
 async fn show_include_comments_false_skips_comments() {
-    // Test the include_comments logic directly.
-    let test_comments = vec![unblock_core::types::IssueComment {
-        author: "alice".to_owned(),
-        body: "Hello".to_owned(),
-        created_at: chrono::Utc::now(),
-    }];
+    let mock = new_mock();
+    // Two fetches: one for include_comments=false, one for =true.
+    mock.push_fetch_issue(Ok(mock_issue(7)));
+    mock.push_fetch_issue(Ok(mock_issue(7)));
 
-    let include_comments = false;
-    let comments: Option<Vec<_>> = if include_comments {
-        Some(test_comments.clone())
-    } else {
-        None
-    };
+    let server = UnblockServer::new(state_with_mock(Arc::clone(&mock)));
 
+    // include_comments=false: comments must be None even though the fixture
+    // issue carries one comment.
+    let Json(result_false) = server
+        .show(Parameters(ShowParams {
+            id: 7,
+            include_comments: Some(false),
+            include_deps: Some(false),
+        }))
+        .await
+        .expect("show should succeed via dyn dispatch (include_comments=false)");
     assert!(
-        comments.is_none(),
-        "comments should be None when include_comments=false",
+        result_false.comments.is_none(),
+        "comments must be None when include_comments=false, got {:?}",
+        result_false.comments,
+    );
+    assert_eq!(
+        mock.calls().fetch_issue(),
+        1,
+        "handler must still fetch the issue when include_comments=false",
     );
 
-    // And verify include_comments=true returns them.
-    let include_comments = true;
-    let comments: Option<Vec<_>> = if include_comments {
-        Some(test_comments.clone())
-    } else {
-        None
-    };
-
-    assert!(
-        comments.is_some(),
-        "comments should be Some when include_comments=true",
+    // include_comments=true: comments must be Some(len==1).
+    let Json(result_true) = server
+        .show(Parameters(ShowParams {
+            id: 7,
+            include_comments: Some(true),
+            include_deps: Some(false),
+        }))
+        .await
+        .expect("show should succeed via dyn dispatch (include_comments=true)");
+    let comments = result_true
+        .comments
+        .expect("comments must be Some when include_comments=true");
+    assert_eq!(
+        comments.len(),
+        1,
+        "comments must surface the single fixture comment",
     );
-    assert_eq!(comments.unwrap().len(), 1);
+    assert_eq!(mock.calls().fetch_issue(), 2);
 }
 
 /// `dependency_tree` returned for issues with blocking relationships.
