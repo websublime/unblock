@@ -657,43 +657,12 @@ impl UnblockServer {
         );
 
         // Step 3: Extract blocking/blocked_by from the issue.
-        // TODO(unblock-b6b.62): Extract shared helper fn for RelatedIssue-to-ShowRelatedIssue mapping
-        let blocking: Vec<ShowRelatedIssue> = issue
-            .blocking
-            .iter()
-            .map(|r| ShowRelatedIssue {
-                number: r.number,
-                title: r.title.clone(),
-                state: format!("{:?}", r.state),
-            })
-            .collect();
-
-        let blocked_by: Vec<ShowRelatedIssue> = issue
-            .blocked_by
-            .iter()
-            .map(|r| ShowRelatedIssue {
-                number: r.number,
-                title: r.title.clone(),
-                state: format!("{:?}", r.state),
-            })
-            .collect();
+        let blocking: Vec<ShowRelatedIssue> = issue.blocking.iter().map(Into::into).collect();
+        let blocked_by: Vec<ShowRelatedIssue> = issue.blocked_by.iter().map(Into::into).collect();
 
         // Step 3b: Extract parent and sub-issues from the issue.
-        let parent: Option<ShowRelatedIssue> = issue.parent.as_ref().map(|r| ShowRelatedIssue {
-            number: r.number,
-            title: r.title.clone(),
-            state: format!("{:?}", r.state),
-        });
-
-        let sub_issues: Vec<ShowRelatedIssue> = issue
-            .sub_issues
-            .iter()
-            .map(|r| ShowRelatedIssue {
-                number: r.number,
-                title: r.title.clone(),
-                state: format!("{:?}", r.state),
-            })
-            .collect();
+        let parent: Option<ShowRelatedIssue> = issue.parent.as_ref().map(Into::into);
+        let sub_issues: Vec<ShowRelatedIssue> = issue.sub_issues.iter().map(Into::into).collect();
 
         // Step 4: If include_deps, get dependency tree from cached graph.
         let dependency_tree = if include_deps {
