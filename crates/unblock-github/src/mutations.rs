@@ -28,7 +28,7 @@ use unblock_core::types::Issue;
 
 use crate::client::GitHubClient;
 use crate::errors::{self, Error};
-use crate::graphql::parse_rate_limit_reset;
+use crate::graphql::check_rest_response;
 
 /// Parameters for creating a new GitHub issue.
 ///
@@ -165,24 +165,7 @@ impl GitHubClient {
             .await
             .context(errors::GitHubUnavailableSnafu)?;
 
-        let status = response.status();
-
-        if status.as_u16() == 429 {
-            let reset_at = parse_rate_limit_reset(&response);
-            return Err(errors::RateLimitedSnafu { reset_at }.build());
-        }
-
-        if !status.is_success() {
-            let message = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "unknown error".to_owned());
-            return Err(errors::GitHubApiSnafu {
-                status: status.as_u16(),
-                message,
-            }
-            .build());
-        }
+        let response = check_rest_response(response).await?;
 
         let created: CreateIssueResponse = response
             .json()
@@ -261,30 +244,13 @@ impl GitHubClient {
             .await
             .context(errors::GitHubUnavailableSnafu)?;
 
-        let status = response.status();
-
-        if status.as_u16() == 429 {
-            let reset_at = parse_rate_limit_reset(&response);
-            return Err(errors::RateLimitedSnafu { reset_at }.build());
-        }
-
-        if status.as_u16() == 404 {
+        if response.status().as_u16() == 404 {
             return Err(unblock_core::errors::IssueNotFoundSnafu { number }
                 .build()
                 .into());
         }
 
-        if !status.is_success() {
-            let message = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "unknown error".to_owned());
-            return Err(errors::GitHubApiSnafu {
-                status: status.as_u16(),
-                message,
-            }
-            .build());
-        }
+        check_rest_response(response).await?;
 
         Ok(())
     }
@@ -320,30 +286,13 @@ impl GitHubClient {
             .await
             .context(errors::GitHubUnavailableSnafu)?;
 
-        let status = response.status();
-
-        if status.as_u16() == 429 {
-            let reset_at = parse_rate_limit_reset(&response);
-            return Err(errors::RateLimitedSnafu { reset_at }.build());
-        }
-
-        if status.as_u16() == 404 {
+        if response.status().as_u16() == 404 {
             return Err(unblock_core::errors::IssueNotFoundSnafu { number }
                 .build()
                 .into());
         }
 
-        if !status.is_success() {
-            let message = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "unknown error".to_owned());
-            return Err(errors::GitHubApiSnafu {
-                status: status.as_u16(),
-                message,
-            }
-            .build());
-        }
+        let response = check_rest_response(response).await?;
 
         let comment: CreateCommentResponse = response
             .json()
@@ -384,30 +333,13 @@ impl GitHubClient {
             .await
             .context(errors::GitHubUnavailableSnafu)?;
 
-        let status = response.status();
-
-        if status.as_u16() == 429 {
-            let reset_at = parse_rate_limit_reset(&response);
-            return Err(errors::RateLimitedSnafu { reset_at }.build());
-        }
-
-        if status.as_u16() == 404 {
+        if response.status().as_u16() == 404 {
             return Err(unblock_core::errors::IssueNotFoundSnafu { number }
                 .build()
                 .into());
         }
 
-        if !status.is_success() {
-            let message = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "unknown error".to_owned());
-            return Err(errors::GitHubApiSnafu {
-                status: status.as_u16(),
-                message,
-            }
-            .build());
-        }
+        check_rest_response(response).await?;
 
         debug!(number, "Updated issue body");
         Ok(())
@@ -444,30 +376,13 @@ impl GitHubClient {
             .await
             .context(errors::GitHubUnavailableSnafu)?;
 
-        let status = response.status();
-
-        if status.as_u16() == 429 {
-            let reset_at = parse_rate_limit_reset(&response);
-            return Err(errors::RateLimitedSnafu { reset_at }.build());
-        }
-
-        if status.as_u16() == 404 {
+        if response.status().as_u16() == 404 {
             return Err(unblock_core::errors::IssueNotFoundSnafu { number }
                 .build()
                 .into());
         }
 
-        if !status.is_success() {
-            let message = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "unknown error".to_owned());
-            return Err(errors::GitHubApiSnafu {
-                status: status.as_u16(),
-                message,
-            }
-            .build());
-        }
+        check_rest_response(response).await?;
 
         debug!(number, "Added labels to issue");
         Ok(())
@@ -502,14 +417,7 @@ impl GitHubClient {
             .await
             .context(errors::GitHubUnavailableSnafu)?;
 
-        let status = response.status();
-
-        if status.as_u16() == 429 {
-            let reset_at = parse_rate_limit_reset(&response);
-            return Err(errors::RateLimitedSnafu { reset_at }.build());
-        }
-
-        if status.as_u16() == 404 {
+        if response.status().as_u16() == 404 {
             // 404 can mean the issue doesn't exist or the label isn't on the issue.
             // Log and treat as success — the label is not on the issue either way.
             warn!(
@@ -519,17 +427,7 @@ impl GitHubClient {
             return Ok(());
         }
 
-        if !status.is_success() {
-            let message = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "unknown error".to_owned());
-            return Err(errors::GitHubApiSnafu {
-                status: status.as_u16(),
-                message,
-            }
-            .build());
-        }
+        check_rest_response(response).await?;
 
         debug!(number, label, "Removed label from issue");
         Ok(())
@@ -573,30 +471,13 @@ impl GitHubClient {
             .await
             .context(errors::GitHubUnavailableSnafu)?;
 
-        let status = response.status();
-
-        if status.as_u16() == 429 {
-            let reset_at = parse_rate_limit_reset(&response);
-            return Err(errors::RateLimitedSnafu { reset_at }.build());
-        }
-
-        if status.as_u16() == 404 {
+        if response.status().as_u16() == 404 {
             return Err(unblock_core::errors::IssueNotFoundSnafu { number }
                 .build()
                 .into());
         }
 
-        if !status.is_success() {
-            let message = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "unknown error".to_owned());
-            return Err(errors::GitHubApiSnafu {
-                status: status.as_u16(),
-                message,
-            }
-            .build());
-        }
+        check_rest_response(response).await?;
 
         debug!(number, "Added assignees to issue");
         Ok(())
@@ -638,14 +519,7 @@ impl GitHubClient {
             .await
             .context(errors::GitHubUnavailableSnafu)?;
 
-        let status = response.status();
-
-        if status.as_u16() == 429 {
-            let reset_at = parse_rate_limit_reset(&response);
-            return Err(errors::RateLimitedSnafu { reset_at }.build());
-        }
-
-        if status.as_u16() == 404 {
+        if response.status().as_u16() == 404 {
             warn!(
                 number,
                 "Assignees not found on issue (404) — treating as success"
@@ -653,17 +527,7 @@ impl GitHubClient {
             return Ok(());
         }
 
-        if !status.is_success() {
-            let message = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "unknown error".to_owned());
-            return Err(errors::GitHubApiSnafu {
-                status: status.as_u16(),
-                message,
-            }
-            .build());
-        }
+        check_rest_response(response).await?;
 
         debug!(number, "Removed assignees from issue");
         Ok(())
@@ -697,24 +561,7 @@ impl GitHubClient {
             .await
             .context(errors::GitHubUnavailableSnafu)?;
 
-        let status = response.status();
-
-        if status.as_u16() == 429 {
-            let reset_at = parse_rate_limit_reset(&response);
-            return Err(errors::RateLimitedSnafu { reset_at }.build());
-        }
-
-        if !status.is_success() {
-            let message = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "unknown error".to_owned());
-            return Err(errors::GitHubApiSnafu {
-                status: status.as_u16(),
-                message,
-            }
-            .build());
-        }
+        let response = check_rest_response(response).await?;
 
         let milestones: Vec<Milestone> = response
             .json()
@@ -762,30 +609,13 @@ impl GitHubClient {
             .await
             .context(errors::GitHubUnavailableSnafu)?;
 
-        let status = response.status();
-
-        if status.as_u16() == 429 {
-            let reset_at = parse_rate_limit_reset(&response);
-            return Err(errors::RateLimitedSnafu { reset_at }.build());
-        }
-
-        if status.as_u16() == 404 {
+        if response.status().as_u16() == 404 {
             return Err(unblock_core::errors::IssueNotFoundSnafu { number }
                 .build()
                 .into());
         }
 
-        if !status.is_success() {
-            let message = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "unknown error".to_owned());
-            return Err(errors::GitHubApiSnafu {
-                status: status.as_u16(),
-                message,
-            }
-            .build());
-        }
+        check_rest_response(response).await?;
 
         debug!(number, milestone_number, "Updated issue milestone");
         Ok(())
