@@ -1168,60 +1168,40 @@ impl GitHubClient {
 
         // Route through organization or user based on owner type.
         // The `viewer { projectV2(number:) }` query does not work for
-        // org-owned projects per research findings.
-        let query = match owner_type {
-            OwnerType::Org => {
-                "
-                query ListViews($login: String!, $projectNumber: Int!) {
-                    organization(login: $login) {
-                        projectV2(number: $projectNumber) {
-                            views(first: 50) {
-                                nodes {
-                                    id
-                                    name
-                                    number
-                                    layout
-                                    filter
-                                }
-                            }
-                        }
-                    }
-                }
-            "
-            }
-            OwnerType::User => {
-                "
-                query ListViews($login: String!, $projectNumber: Int!) {
-                    user(login: $login) {
-                        projectV2(number: $projectNumber) {
-                            views(first: 50) {
-                                nodes {
-                                    id
-                                    name
-                                    number
-                                    layout
-                                    filter
-                                }
-                            }
-                        }
-                    }
-                }
-            "
-            }
+        // org-owned projects per research findings. Both queries share an
+        // identical shape — only the root field differs — so we parameterize
+        // it via `owner_key` to avoid duplication.
+        let owner_key = match owner_type {
+            OwnerType::Org => "organization",
+            OwnerType::User => "user",
         };
+
+        let query = format!(
+            "
+                query ListViews($login: String!, $projectNumber: Int!) {{
+                    {owner_key}(login: $login) {{
+                        projectV2(number: $projectNumber) {{
+                            views(first: 50) {{
+                                nodes {{
+                                    id
+                                    name
+                                    number
+                                    layout
+                                    filter
+                                }}
+                            }}
+                        }}
+                    }}
+                }}
+            "
+        );
 
         let variables = serde_json::json!({
             "login": self.owner(),
             "projectNumber": project_number,
         });
 
-        let response = self.graphql(query, variables).await?;
-
-        // The data path differs based on owner type.
-        let owner_key = match owner_type {
-            OwnerType::Org => "organization",
-            OwnerType::User => "user",
-        };
+        let response = self.graphql(&query, variables).await?;
 
         let nodes = response["data"][owner_key]["projectV2"]["views"]["nodes"]
             .as_array()
