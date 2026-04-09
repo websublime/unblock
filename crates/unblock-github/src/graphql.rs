@@ -379,26 +379,7 @@ impl GitHubClient {
             .await
             .context(errors::GitHubUnavailableSnafu)?;
 
-        let status = response.status();
-
-        // Handle rate limiting.
-        if status.as_u16() == 429 {
-            let reset_at = parse_rate_limit_reset(&response);
-            return Err(errors::RateLimitedSnafu { reset_at }.build());
-        }
-
-        // Handle non-2xx status codes.
-        if !status.is_success() {
-            let message = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "unknown error".to_owned());
-            return Err(errors::GitHubApiSnafu {
-                status: status.as_u16(),
-                message,
-            }
-            .build());
-        }
+        let response = check_rest_response(response).await?;
 
         let json: serde_json::Value = response
             .json()
@@ -421,6 +402,49 @@ impl GitHubClient {
 
         Ok(json)
     }
+}
+
+/// Checks an HTTP response for rate limiting and non-2xx status codes.
+///
+/// Consumes the response on the error path (reading the body as text for the
+/// [`Error::GitHubApi`](errors::Error::GitHubApi) variant's `message` field),
+/// and passes the response through unchanged on success so callers can still
+/// deserialize the JSON body.
+///
+/// Behavior:
+/// - HTTP 429: returns [`Error::RateLimited`](errors::Error::RateLimited) with
+///   `reset_at` parsed from the `X-RateLimit-Reset` header.
+/// - Non-2xx (other than 429): reads the body as text and returns
+///   [`Error::GitHubApi`](errors::Error::GitHubApi).
+/// - 2xx: returns `Ok(response)`.
+///
+/// Callers that need to distinguish HTTP 404 (to surface
+/// [`IssueNotFound`](unblock_core::errors::DomainError::IssueNotFound)) must
+/// check `response.status()` for 404 **before** calling this helper, otherwise
+/// 404 will be collapsed into a generic `GitHubApi` error.
+pub(crate) async fn check_rest_response(
+    response: reqwest::Response,
+) -> Result<reqwest::Response, errors::Error> {
+    let status = response.status();
+
+    if status.as_u16() == 429 {
+        let reset_at = parse_rate_limit_reset(&response);
+        return Err(errors::RateLimitedSnafu { reset_at }.build());
+    }
+
+    if !status.is_success() {
+        let message = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "unknown error".to_owned());
+        return Err(errors::GitHubApiSnafu {
+            status: status.as_u16(),
+            message,
+        }
+        .build());
+    }
+
+    Ok(response)
 }
 
 /// Parses the `X-RateLimit-Reset` header from a response into a `DateTime<Utc>`.

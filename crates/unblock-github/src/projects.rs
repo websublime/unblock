@@ -18,7 +18,7 @@ use tracing::{debug, instrument, warn};
 
 use crate::client::GitHubClient;
 use crate::errors::{self, Error};
-use crate::graphql::parse_rate_limit_reset;
+use crate::graphql::check_rest_response;
 
 /// Information about a resolved GitHub Projects V2 project.
 #[derive(Debug, Clone)]
@@ -987,24 +987,7 @@ impl GitHubClient {
             .await
             .context(errors::GitHubUnavailableSnafu)?;
 
-        let status = response.status();
-
-        if status.as_u16() == 429 {
-            let reset_at = parse_rate_limit_reset(&response);
-            return Err(errors::RateLimitedSnafu { reset_at }.build());
-        }
-
-        if !status.is_success() {
-            let message = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "unknown error".to_owned());
-            return Err(errors::GitHubApiSnafu {
-                status: status.as_u16(),
-                message,
-            }
-            .build());
-        }
+        let response = check_rest_response(response).await?;
 
         let user_info: UserTypeResponse = response
             .json()
@@ -1063,24 +1046,7 @@ impl GitHubClient {
             .await
             .context(errors::GitHubUnavailableSnafu)?;
 
-        let status = response.status();
-
-        if status.as_u16() == 429 {
-            let reset_at = parse_rate_limit_reset(&response);
-            return Err(errors::RateLimitedSnafu { reset_at }.build());
-        }
-
-        if !status.is_success() {
-            let message = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "unknown error".to_owned());
-            return Err(errors::GitHubApiSnafu {
-                status: status.as_u16(),
-                message,
-            }
-            .build());
-        }
+        let response = check_rest_response(response).await?;
 
         let raw_fields: Vec<RestFieldResponse> = response
             .json()
@@ -1153,24 +1119,7 @@ impl GitHubClient {
             .await
             .context(errors::GitHubUnavailableSnafu)?;
 
-        let status = response.status();
-
-        if status.as_u16() == 429 {
-            let reset_at = parse_rate_limit_reset(&response);
-            return Err(errors::RateLimitedSnafu { reset_at }.build());
-        }
-
-        if !status.is_success() {
-            let message = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "unknown error".to_owned());
-            return Err(errors::GitHubApiSnafu {
-                status: status.as_u16(),
-                message,
-            }
-            .build());
-        }
+        let response = check_rest_response(response).await?;
 
         let view: RestViewResponse = response
             .json()
