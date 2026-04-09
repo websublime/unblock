@@ -1377,13 +1377,23 @@ Fields:
 
 Flow:
   1. Detect owner type from repo owner (GET /orgs/{owner} → 200=org, 404=user)
-  2. Resolve owner node ID (GraphQL)
+  2. Resolve owner node ID (GraphQL query on organization(login:) or user(login:))
   3. Query existing projects for matching title (idempotent)
   4. If exists → return existing project info
   5. If not → createProjectV2(ownerId, title) (GraphQL mutation)
   6. Return project_number + URL + hint to run setup
 
-API calls: 1 (owner check) + 1 (query projects) + 0-1 (create)
+API calls: 1 (owner type check, REST) + 1 (resolve owner node ID, GraphQL)
+         + 1 (query existing projects, GraphQL) + 0-1 (createProjectV2 mutation)
+         = 3 when an existing project is found, 4 when a new project is created.
+
+Note: Step 2 (resolve owner node ID) is required because the GitHub GraphQL
+  `createProjectV2` mutation accepts `ownerId` as a node ID (opaque GraphQL
+  global ID), not a login string. The REST owner-type probe in step 1 only
+  yields the login, so a separate GraphQL lookup is needed to obtain the node
+  ID before the mutation can be issued. This is an unavoidable GitHub API
+  constraint.
+
 Idempotent: safe to run multiple times.
 ```
 
