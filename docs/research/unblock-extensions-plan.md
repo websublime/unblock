@@ -57,7 +57,7 @@ The scope determines:
 | Parameter | Required | Default | Description |
 |---|---|---|---|
 | `--scope` | No | `org` | `org` or `user` — where the project lives |
-| `--title` | No | `"Unblock — {repo}"` | Project title |
+| `--title` | No | `"{repo} Tasks"` | Project title |
 | `--description` | No | `"Dependency-aware task tracking powered by ://unblock"` | Project description |
 | `--public` | No | `false` | Whether the project is publicly visible |
 
