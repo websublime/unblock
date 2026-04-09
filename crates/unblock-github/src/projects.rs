@@ -84,15 +84,23 @@ pub enum FieldValue {
 ///
 /// Used by the setup tool to report which fields were created vs. skipped,
 /// and by the dry-run mode to check field presence without mutating.
-pub const REQUIRED_FIELD_NAMES: &[&str] = &[
-    "Status",
-    "Priority",
-    "IssueType",
-    "Agent",
-    "StoryPoints",
-    "DeferUntil",
-    "ReadyState",
-];
+///
+/// Derived at compile time from [`REQUIRED_FIELDS`] so the two lists cannot
+/// drift: adding, removing, or renaming a field in `REQUIRED_FIELDS`
+/// automatically updates this slice.
+pub const REQUIRED_FIELD_NAMES: &[&str] = &required_field_names();
+
+/// Compile-time derivation of the canonical field name list from
+/// [`REQUIRED_FIELDS`]. Kept private — callers use [`REQUIRED_FIELD_NAMES`].
+const fn required_field_names() -> [&'static str; REQUIRED_FIELDS.len()] {
+    let mut names = [""; REQUIRED_FIELDS.len()];
+    let mut i = 0;
+    while i < REQUIRED_FIELDS.len() {
+        names[i] = REQUIRED_FIELDS[i].name;
+        i += 1;
+    }
+    names
+}
 
 /// Result of a `setup_fields()` call, including which fields were created
 /// vs. skipped (already existed).
