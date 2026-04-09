@@ -124,13 +124,16 @@ pub struct ShowRelatedIssue {
 impl From<&RelatedIssue> for ShowRelatedIssue {
     /// Convert a core `RelatedIssue` into the schemars-friendly wire type.
     ///
-    /// The `state` field is produced by `Debug` formatting to preserve
-    /// the exact byte shape of the MCP tool output.
+    /// The `state` field is rendered via `IssueState`'s `Display`
+    /// impl, which is locked byte-for-byte against the historical
+    /// `Debug` shape by unit tests in `unblock-core::types`. This
+    /// preserves the exact MCP wire format while decoupling the public
+    /// contract from Rust's `Debug` formatting.
     fn from(r: &RelatedIssue) -> Self {
         Self {
             number: r.number,
             title: r.title.clone(),
-            state: format!("{:?}", r.state),
+            state: r.state.to_string(),
         }
     }
 }
