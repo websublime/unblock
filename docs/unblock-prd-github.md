@@ -546,7 +546,7 @@ Uses GitHub's advanced search API (`ISSUE_ADVANCED` type in GraphQL).
 
 **Input:**
 - `scope` (optional, default: `org`) — `org` or `user`. Where the project lives.
-- `title` (optional, default: `"Unblock — {repo}"`) — Project title.
+- `title` (optional, default: `"{repo} Tasks"`) — Project title.
 - `description` (optional) — Project description.
 - `public` (optional, default: false) — Project visibility.
 
