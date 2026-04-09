@@ -284,6 +284,12 @@ struct FieldSpec {
 
 /// The 7 required Projects V2 custom fields per the bead specification.
 const REQUIRED_FIELDS: &[FieldSpec] = &[
+    // DEVIATION (unblock-467.6, unblock-b6b.49): ARCH §7.1 defines Status
+    // options as `open`, `in_progress`, `blocked`, `deferred`, `closed`. The
+    // implementation instead uses the bead specification values — `Backlog`,
+    // `In Progress`, `Done`, `Blocked`, `Deferred` — because the bead spec is
+    // the authoritative source for field values and matches what humans see in
+    // the GitHub Projects V2 board. ARCH §7.1 is stale on this point.
     FieldSpec {
         name: "Status",
         data_type: "SINGLE_SELECT",
