@@ -6,6 +6,7 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use unblock_core::types::RelatedIssue;
 
 /// Input parameters for the `show` MCP tool.
 ///
@@ -118,6 +119,20 @@ pub struct ShowRelatedIssue {
     pub title: String,
     /// GitHub native issue state: "Open" or "Closed".
     pub state: String,
+}
+
+impl From<&RelatedIssue> for ShowRelatedIssue {
+    /// Convert a core `RelatedIssue` into the schemars-friendly wire type.
+    ///
+    /// The `state` field is produced by `Debug` formatting to preserve
+    /// the exact byte shape of the MCP tool output.
+    fn from(r: &RelatedIssue) -> Self {
+        Self {
+            number: r.number,
+            title: r.title.clone(),
+            state: format!("{:?}", r.state),
+        }
+    }
 }
 
 /// A single entry in the dependency tree.
