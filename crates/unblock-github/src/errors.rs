@@ -79,6 +79,21 @@ pub enum Error {
         message: String,
     },
 
+    /// GitHub returned an account type that is not recognized as either
+    /// `Organization` or `User`.
+    ///
+    /// This guards against silent misrouting of REST calls to `/users/{owner}`
+    /// when GitHub introduces new account types (e.g., `Bot`, `Enterprise`).
+    #[snafu(display(
+        "Unknown GitHub account type '{account_type}' for owner '{owner}' — expected 'Organization' or 'User'"
+    ))]
+    UnknownOwnerType {
+        /// The GitHub login of the owner being queried.
+        owner: String,
+        /// The `type` field returned by the GitHub REST API.
+        account_type: String,
+    },
+
     /// A `MockGitHubClient` method was called without a queued stub response.
     ///
     /// Only constructible when the `test-hooks` feature is enabled. Tests
@@ -109,6 +124,7 @@ impl Error {
             Self::RateLimited { .. } => 429,
             Self::ProjectNotConfigured => 412,
             Self::GitRemote { .. } => 500,
+            Self::UnknownOwnerType { .. } => 502,
             #[cfg(feature = "test-hooks")]
             Self::MockNotStubbed { .. } => 500,
         }

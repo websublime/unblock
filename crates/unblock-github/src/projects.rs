@@ -994,10 +994,16 @@ impl GitHubClient {
             .await
             .context(errors::GitHubUnavailableSnafu)?;
 
-        let owner_type = if user_info.account_type == "Organization" {
-            OwnerType::Org
-        } else {
-            OwnerType::User
+        let owner_type = match user_info.account_type.as_str() {
+            "Organization" => OwnerType::Org,
+            "User" => OwnerType::User,
+            _ => {
+                return errors::UnknownOwnerTypeSnafu {
+                    owner: self.owner().to_owned(),
+                    account_type: user_info.account_type.clone(),
+                }
+                .fail();
+            }
         };
 
         debug!(
@@ -1466,5 +1472,90 @@ impl GitHubClient {
 
         debug!(number, url = %url, "Created project V2");
         Ok(CreatedProject { number, url })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OwnerType;
+    use crate::client::GitHubClient;
+    use crate::errors::Error;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn detect_owner_type_returns_org_for_organization_account() {
+        let server = MockServer::start().await;
+        let client = GitHubClient::new_for_test(&server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/users/test-owner"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "login": "test-owner",
+                "type": "Organization"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let owner_type = client
+            .detect_owner_type()
+            .await
+            .expect("detect_owner_type should succeed");
+        assert_eq!(owner_type, OwnerType::Org);
+    }
+
+    #[tokio::test]
+    async fn detect_owner_type_returns_user_for_user_account() {
+        let server = MockServer::start().await;
+        let client = GitHubClient::new_for_test(&server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/users/test-owner"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "login": "test-owner",
+                "type": "User"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let owner_type = client
+            .detect_owner_type()
+            .await
+            .expect("detect_owner_type should succeed");
+        assert_eq!(owner_type, OwnerType::User);
+    }
+
+    #[tokio::test]
+    async fn detect_owner_type_errors_on_unknown_account_type() {
+        let server = MockServer::start().await;
+        let client = GitHubClient::new_for_test(&server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/users/test-owner"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "login": "test-owner",
+                "type": "Bot"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let err = client
+            .detect_owner_type()
+            .await
+            .expect_err("detect_owner_type should fail for unknown account type");
+
+        match err {
+            Error::UnknownOwnerType {
+                owner,
+                account_type,
+            } => {
+                assert_eq!(owner, "test-owner");
+                assert_eq!(account_type, "Bot");
+            }
+            other => panic!("expected UnknownOwnerType, got {other:?}"),
+        }
     }
 }
