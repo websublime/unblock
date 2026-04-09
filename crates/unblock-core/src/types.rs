@@ -295,6 +295,66 @@ impl fmt::Display for IssueType {
     }
 }
 
+impl fmt::Display for IssueState {
+    /// Writes the canonical variant identifier (e.g. `"Open"`).
+    ///
+    /// Byte-identical to the current `Debug` representation so the
+    /// MCP wire format stays stable as variants evolve.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Open => write!(f, "Open"),
+            Self::Closed => write!(f, "Closed"),
+        }
+    }
+}
+
+impl fmt::Display for Status {
+    /// Writes the canonical variant identifier (e.g. `"InProgress"`).
+    ///
+    /// Byte-identical to the current `Debug` representation so the
+    /// MCP wire format stays stable as variants evolve.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Open => write!(f, "Open"),
+            Self::InProgress => write!(f, "InProgress"),
+            Self::Blocked => write!(f, "Blocked"),
+            Self::Deferred => write!(f, "Deferred"),
+            Self::Closed => write!(f, "Closed"),
+        }
+    }
+}
+
+impl fmt::Display for Priority {
+    /// Writes the canonical variant identifier (e.g. `"P0"`).
+    ///
+    /// Byte-identical to the current `Debug` representation. The
+    /// `ready` tool's priority filter depends on this exact token set.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::P0 => write!(f, "P0"),
+            Self::P1 => write!(f, "P1"),
+            Self::P2 => write!(f, "P2"),
+            Self::P3 => write!(f, "P3"),
+            Self::P4 => write!(f, "P4"),
+        }
+    }
+}
+
+impl fmt::Display for ReadyState {
+    /// Writes the canonical variant identifier (e.g. `"NotReady"`).
+    ///
+    /// Byte-identical to the current `Debug` representation so the
+    /// MCP wire format stays stable as variants evolve.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ready => write!(f, "Ready"),
+            Self::Blocked => write!(f, "Blocked"),
+            Self::NotReady => write!(f, "NotReady"),
+            Self::Closed => write!(f, "Closed"),
+        }
+    }
+}
+
 /// A lightweight reference to a related issue.
 ///
 /// Used for dependency relationships (`blockedBy`, `blocking`),
@@ -660,6 +720,73 @@ mod tests {
         assert_eq!(IssueType::Epic.to_string(), "Epic");
         assert_eq!(IssueType::Chore.to_string(), "Chore");
         assert_eq!(IssueType::Spike.to_string(), "Spike");
+    }
+
+    // ── Status/Priority/ReadyState/IssueState Display ────────────────
+    //
+    // These assertions lock the MCP wire format byte-for-byte against
+    // the historical `Debug` output. The `ready` tool's priority filter
+    // (`format!("{:?}", p).eq_ignore_ascii_case(...)`) and existing
+    // integration tests depend on these exact strings. If you change a
+    // variant name, update callers — do not silently drift these
+    // assertions.
+
+    #[test]
+    fn issue_state_display_matches_debug() {
+        for v in [IssueState::Open, IssueState::Closed] {
+            assert_eq!(v.to_string(), format!("{v:?}"));
+        }
+        assert_eq!(IssueState::Open.to_string(), "Open");
+        assert_eq!(IssueState::Closed.to_string(), "Closed");
+    }
+
+    #[test]
+    fn status_display_matches_debug() {
+        for v in [
+            Status::Open,
+            Status::InProgress,
+            Status::Blocked,
+            Status::Deferred,
+            Status::Closed,
+        ] {
+            assert_eq!(v.to_string(), format!("{v:?}"));
+        }
+        assert_eq!(Status::Open.to_string(), "Open");
+        assert_eq!(Status::InProgress.to_string(), "InProgress");
+        assert_eq!(Status::Blocked.to_string(), "Blocked");
+        assert_eq!(Status::Deferred.to_string(), "Deferred");
+        assert_eq!(Status::Closed.to_string(), "Closed");
+    }
+
+    #[test]
+    fn priority_display_matches_debug() {
+        for v in [
+            Priority::P0,
+            Priority::P1,
+            Priority::P2,
+            Priority::P3,
+            Priority::P4,
+        ] {
+            assert_eq!(v.to_string(), format!("{v:?}"));
+        }
+        assert_eq!(Priority::P0.to_string(), "P0");
+        assert_eq!(Priority::P4.to_string(), "P4");
+    }
+
+    #[test]
+    fn ready_state_display_matches_debug() {
+        for v in [
+            ReadyState::Ready,
+            ReadyState::Blocked,
+            ReadyState::NotReady,
+            ReadyState::Closed,
+        ] {
+            assert_eq!(v.to_string(), format!("{v:?}"));
+        }
+        assert_eq!(ReadyState::Ready.to_string(), "Ready");
+        assert_eq!(ReadyState::Blocked.to_string(), "Blocked");
+        assert_eq!(ReadyState::NotReady.to_string(), "NotReady");
+        assert_eq!(ReadyState::Closed.to_string(), "Closed");
     }
 
     // ── QualifiedId ────────────────────────────────────────────────────

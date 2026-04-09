@@ -97,8 +97,8 @@ impl ReadyIssueSummary {
             number: summary.number,
             title: summary.title.clone(),
             issue_type: summary.issue_type.map(|it| it.to_string()),
-            status: format!("{:?}", summary.status),
-            priority: format!("{:?}", summary.priority),
+            status: summary.status.to_string(),
+            priority: summary.priority.to_string(),
             agent: summary.agent.clone(),
             milestone: summary.milestone.clone(),
             story_points: summary.story_points,
@@ -141,9 +141,9 @@ pub fn filter_ready_set(
                     .is_some_and(|it| it.to_string().eq_ignore_ascii_case(filter))
             })
         })
-        // Filter by priority (case-insensitive Debug match).
+        // Filter by priority (case-insensitive Display match).
         .filter(|s| {
-            priority.is_none_or(|filter| format!("{:?}", s.priority).eq_ignore_ascii_case(filter))
+            priority.is_none_or(|filter| s.priority.to_string().eq_ignore_ascii_case(filter))
         })
         // Filter by milestone (exact match).
         .filter(|s| milestone.is_none_or(|filter| s.milestone.as_deref() == Some(filter)))
