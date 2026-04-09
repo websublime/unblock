@@ -67,7 +67,6 @@ pub enum BootstrapError {
 /// | other                    | `INTERNAL_ERROR` (-32603) |
 ///
 /// The error's `Display` output becomes the JSON-RPC error message.
-#[allow(dead_code)] // Used by tool handlers added in beads 45a.3–45a.11.
 #[allow(clippy::needless_pass_by_value)] // Intentional: consumes the error in a map_err chain.
 pub(crate) fn github_error_to_mcp(err: unblock_github::errors::Error) -> ErrorData {
     let code = match err.status_code() {
