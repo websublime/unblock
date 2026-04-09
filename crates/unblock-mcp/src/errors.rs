@@ -19,6 +19,18 @@ use snafu::Snafu;
 /// message describing what went wrong, so that the operator can diagnose
 /// startup failures without reading source code.
 #[derive(Debug, Snafu)]
+// `visibility(pub)` is required (not `pub(crate)`) because `unblock-mcp` has
+// both a `[lib]` and a `[[bin]]` target. `src/main.rs` is a separate crate
+// from the visibility standpoint and consumes the snafu-generated selectors
+// (`ConfigLoadSnafu`, `ClientInitSnafu`, `TransportSnafu`, `RuntimeSnafu`)
+// and `BootstrapError` itself across the lib/bin boundary via the
+// `unblock_mcp::errors` path. Narrowing to `pub(crate)` would hide these
+// items from `main.rs` and break the binary build.
+//
+// Practical leak risk is zero: `unblock-mcp` is a binary crate with no
+// external downstream consumers — no other workspace crate depends on it
+// and it is not published to crates.io. See bead unblock-b6b.65 for the
+// full investigation and rationale.
 #[snafu(visibility(pub))]
 pub enum BootstrapError {
     /// Failed to load configuration from environment variables.
