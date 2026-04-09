@@ -1361,7 +1361,19 @@ API calls: 2-3 (queries) + 0-N (repairs if fix=true)
 
 ```
 Input:  InitParams { scope?, title?, description?, public? }
-Output: InitResult { project_number, url, created, scope }
+Output: InitResult { project_number, url, created, scope, hint }
+
+Fields:
+  - project_number: u64  — project number (visible in GitHub UI URL)
+  - url: String          — canonical project URL
+  - created: bool        — true if newly created, false if an existing project with matching title was found
+  - scope: String        — resolved owner scope: "org" or "user"
+  - hint: String         — agent-facing, advisory guidance string suggesting the
+                           next step (typically recommending a `setup` invocation
+                           with the returned project_number). Emitted for both
+                           the created=true and created=false (idempotent) branches.
+                           Content is human-readable and intentionally not
+                           schema-constrained beyond being a non-empty string.
 
 Flow:
   1. Detect owner type from repo owner (GET /orgs/{owner} → 200=org, 404=user)
