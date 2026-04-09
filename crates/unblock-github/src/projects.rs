@@ -320,6 +320,13 @@ const REQUIRED_FIELDS: &[FieldSpec] = &[
         data_type: "DATE",
         options: &[],
     },
+    // DEVIATION (unblock-467.6, unblock-b6b.50): ARCH §7.1 defines ReadyState
+    // options as `ready`, `blocked`, `not_ready`, `closed` (4 options). The
+    // implementation instead uses the bead specification values — `Ready`,
+    // `Not Ready` (2 options) — because the bead spec is the authoritative
+    // source for field values. `blocked` is already represented by the Status
+    // field, and `closed` is represented by GitHub issue state, so including
+    // them on ReadyState would be redundant. ARCH §7.1 is stale on this point.
     FieldSpec {
         name: "ReadyState",
         data_type: "SINGLE_SELECT",
