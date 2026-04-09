@@ -199,9 +199,32 @@ impl GitHubClient {
     /// [`DomainError::IssueNotFound`]: unblock_core::errors::DomainError::IssueNotFound
     #[instrument(skip(self), fields(owner = %self.owner(), repo = %self.repo()))]
     pub async fn fetch_issue(&self, number: u64) -> Result<Issue, Error> {
+        self.fetch_issue_in_repo(self.owner(), self.repo(), number)
+            .await
+    }
+
+    /// Fetches a single issue by owner/repo/number.
+    ///
+    /// Like [`fetch_issue`](Self::fetch_issue), but targets an arbitrary
+    /// `owner/repo` instead of the configured repository. Used to back
+    /// [`fetch_issue_ref`](Self::fetch_issue_ref) for cross-repo reads.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Domain`] with [`DomainError::IssueNotFound`] if the
+    /// issue number does not exist in the target repository.
+    ///
+    /// [`DomainError::IssueNotFound`]: unblock_core::errors::DomainError::IssueNotFound
+    #[instrument(skip(self))]
+    pub async fn fetch_issue_in_repo(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<Issue, Error> {
         let variables = serde_json::json!({
-            "owner": self.owner(),
-            "repo": self.repo(),
+            "owner": owner,
+            "repo": repo,
             "number": number.cast_signed(),
         });
 
@@ -215,7 +238,34 @@ impl GitHubClient {
                 .into());
         }
 
-        Ok(parse_issue(issue_value, self.owner(), self.repo()))
+        Ok(parse_issue(issue_value, owner, repo))
+    }
+
+    /// Fetches a single issue identified by an [`IssueRef`].
+    ///
+    /// Resolves `Local` refs against the configured repository and
+    /// `CrossRepo` refs against the specified `owner/repo`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Domain`] with [`DomainError::IssueNotFound`] if the
+    /// referenced issue does not exist.
+    ///
+    /// [`IssueRef`]: unblock_core::types::IssueRef
+    /// [`DomainError::IssueNotFound`]: unblock_core::errors::DomainError::IssueNotFound
+    #[instrument(skip(self))]
+    pub async fn fetch_issue_ref(
+        &self,
+        issue_ref: &unblock_core::types::IssueRef,
+    ) -> Result<Issue, Error> {
+        match issue_ref {
+            unblock_core::types::IssueRef::Local(number) => self.fetch_issue(*number).await,
+            unblock_core::types::IssueRef::CrossRepo {
+                owner,
+                repo,
+                number,
+            } => self.fetch_issue_in_repo(owner, repo, *number).await,
+        }
     }
 
     /// Fetches all open issues and blocking edges for the dependency graph.

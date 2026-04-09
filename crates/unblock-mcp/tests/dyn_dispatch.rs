@@ -207,12 +207,12 @@ async fn setup_dry_run_dispatches_through_dyn_vtable() {
 #[tokio::test]
 async fn show_dispatches_through_dyn_vtable() {
     let mock = new_mock();
-    mock.push_fetch_issue(Ok(make_issue(10)));
+    mock.push_fetch_issue_ref(Ok(make_issue(10)));
 
     let server = UnblockServer::new(state_with_mock(Arc::clone(&mock)));
     let Json(result) = server
         .show(Parameters(ShowParams {
-            id: 10,
+            issue: "10".to_owned(),
             include_comments: Some(false),
             include_deps: Some(false),
         }))
@@ -220,7 +220,34 @@ async fn show_dispatches_through_dyn_vtable() {
         .expect("show should succeed via dyn dispatch");
 
     assert_eq!(result.issue.number, 10);
-    assert_eq!(mock.calls().fetch_issue(), 1);
+    assert_eq!(mock.calls().fetch_issue_ref(), 1);
+}
+
+/// Show accepts a cross-repo `owner/repo#number` reference and dispatches
+/// `fetch_issue_ref` through the trait-object vtable, confirming alignment
+/// with ARCH §10.6 (`IssueRef` input). Mirrors the cross-repo pattern used
+/// in the `depends` / `create.blocked_by` integration tests.
+#[tokio::test]
+async fn show_accepts_cross_repo_issue_ref() {
+    let mock = new_mock();
+    mock.push_fetch_issue_ref(Ok(make_issue(42)));
+
+    let server = UnblockServer::new(state_with_mock(Arc::clone(&mock)));
+    let Json(result) = server
+        .show(Parameters(ShowParams {
+            issue: "acme/widgets#42".to_owned(),
+            include_comments: Some(false),
+            include_deps: Some(false),
+        }))
+        .await
+        .expect("show should accept owner/repo#number and dispatch through dyn vtable");
+
+    assert_eq!(result.issue.number, 42);
+    assert_eq!(mock.calls().fetch_issue_ref(), 1);
+    // Cross-repo issues are not in the local cache graph — dependency tree
+    // is always absent here because include_deps=false, and additionally the
+    // handler must not have attempted a local-repo fetch_issue call.
+    assert_eq!(mock.calls().fetch_issue(), 0);
 }
 
 /// Negative-path coverage: prove that an `Err` returned by the mock also
@@ -230,7 +257,7 @@ async fn show_dispatches_through_dyn_vtable() {
 #[tokio::test]
 async fn show_err_propagates_through_dyn_vtable() {
     let mock = new_mock();
-    mock.push_fetch_issue(Err(unblock_github::errors::Error::GitHubApi {
+    mock.push_fetch_issue_ref(Err(unblock_github::errors::Error::GitHubApi {
         status: 404,
         message: "Not Found".to_owned(),
     }));
@@ -238,7 +265,7 @@ async fn show_err_propagates_through_dyn_vtable() {
     let server = UnblockServer::new(state_with_mock(Arc::clone(&mock)));
     let result = server
         .show(Parameters(ShowParams {
-            id: 999,
+            issue: "999".to_owned(),
             include_comments: Some(false),
             include_deps: Some(false),
         }))
@@ -248,7 +275,7 @@ async fn show_err_propagates_through_dyn_vtable() {
     };
 
     // The vtable call must have happened exactly once even on the Err path.
-    assert_eq!(mock.calls().fetch_issue(), 1);
+    assert_eq!(mock.calls().fetch_issue_ref(), 1);
     // Sanity: the propagated MCP error carries the upstream message.
     assert!(
         err.message.contains("Not Found") || err.message.contains("404"),

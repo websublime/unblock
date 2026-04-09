@@ -628,7 +628,7 @@ impl UnblockServer {
     /// This is a read tool — it does not mutate state or invalidate the cache.
     #[tool(
         name = "show",
-        description = "Get full details for a single issue: body sections, blocking relationships, dependency tree (from cache), and comments. Use include_comments=false or include_deps=false to skip optional sections."
+        description = "Get full details for a single issue: body sections, blocking relationships, dependency tree (from cache), and comments. The `issue` field accepts a local number (`42`), a hash-prefixed local number (`#42`), or a cross-repo reference (`owner/repo#42`). Use include_comments=false or include_deps=false to skip optional sections."
     )]
     pub async fn show(
         &self,
@@ -640,16 +640,29 @@ impl UnblockServer {
 
         let include_comments = params.include_comments.unwrap_or(true);
         let include_deps = params.include_deps.unwrap_or(true);
-        let issue_number = params.id;
+        let issue_str = params.issue.clone();
 
         info!(
             agent.kind = %kind,
-            issue_number,
+            issue = %issue_str,
             include_comments, include_deps, "Show tool invoked"
         );
 
-        // Step 1: Fetch the full issue via execute_read_tool.
-        let issue = execute_read_tool(state, || client.fetch_issue(issue_number)).await?;
+        // Parse the input string into an IssueRef. Mirrors the `depends`
+        // handler's parsing so error messages stay consistent.
+        let issue_ref = issue_str
+            .parse::<unblock_core::types::IssueRef>()
+            .map_err(|e| ErrorData {
+                code: rmcp::model::ErrorCode::INVALID_PARAMS,
+                message: format!("Invalid issue reference '{issue_str}': {e}").into(),
+                data: None,
+            })?;
+
+        // Step 1: Fetch the full issue via execute_read_tool. `fetch_issue_ref`
+        // dispatches to the local repo for `Local` refs and to the target
+        // `owner/repo` for `CrossRepo` refs.
+        let issue =
+            execute_read_tool(state, || async { client.fetch_issue_ref(&issue_ref).await }).await?;
 
         // Step 2: Parse body sections.
         let body_sections = unblock_core::types::BodySections::from_markdown(
@@ -665,9 +678,20 @@ impl UnblockServer {
         let sub_issues: Vec<ShowRelatedIssue> = issue.sub_issues.iter().map(Into::into).collect();
 
         // Step 4: If include_deps, get dependency tree from cached graph.
+        // Only local issues live in the cached graph — cross-repo targets
+        // return `None` (no tree) since the graph doesn't track them.
         let dependency_tree = if include_deps {
-            let issue_qid =
-                unblock_core::types::QualifiedId::new(client.owner(), client.repo(), issue_number);
+            let (owner, repo, number) = match &issue_ref {
+                unblock_core::types::IssueRef::Local(n) => {
+                    (client.owner().to_owned(), client.repo().to_owned(), *n)
+                }
+                unblock_core::types::IssueRef::CrossRepo {
+                    owner,
+                    repo,
+                    number,
+                } => (owner.clone(), repo.clone(), *number),
+            };
+            let issue_qid = unblock_core::types::QualifiedId::new(&owner, &repo, number);
             state.cache.get_graph().await.map(|graph| {
                 graph
                     .dependency_tree(&issue_qid, unblock_core::types::TraversalDirection::Both, 3)

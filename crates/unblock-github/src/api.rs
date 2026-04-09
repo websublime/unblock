@@ -123,6 +123,12 @@ pub trait GitHubApi: Send + Sync {
     /// Fetches a single issue by number.
     async fn fetch_issue(&self, number: u64) -> Result<Issue, Error>;
 
+    /// Fetches a single issue identified by an [`IssueRef`].
+    ///
+    /// Supports both `Local` (configured repository) and `CrossRepo`
+    /// (arbitrary `owner/repo`) references.
+    async fn fetch_issue_ref(&self, issue_ref: &IssueRef) -> Result<Issue, Error>;
+
     /// Fetches the full set of project issues and blocking edges in one pass.
     async fn fetch_graph_data(&self) -> Result<(Vec<Issue>, Vec<BlockingEdge>), Error>;
 
@@ -300,6 +306,10 @@ impl GitHubApi for GitHubClient {
 
     async fn fetch_issue(&self, number: u64) -> Result<Issue, Error> {
         GitHubClient::fetch_issue(self, number).await
+    }
+
+    async fn fetch_issue_ref(&self, issue_ref: &IssueRef) -> Result<Issue, Error> {
+        GitHubClient::fetch_issue_ref(self, issue_ref).await
     }
 
     async fn fetch_graph_data(&self) -> Result<(Vec<Issue>, Vec<BlockingEdge>), Error> {

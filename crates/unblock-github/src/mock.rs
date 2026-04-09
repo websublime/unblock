@@ -88,6 +88,7 @@ pub struct CallCounts {
     list_owner_projects: AtomicUsize,
     create_project: AtomicUsize,
     fetch_issue: AtomicUsize,
+    fetch_issue_ref: AtomicUsize,
     fetch_graph_data: AtomicUsize,
     create_issue: AtomicUsize,
     close_issue: AtomicUsize,
@@ -136,6 +137,7 @@ impl CallCounts {
         list_owner_projects,
         create_project,
         fetch_issue,
+        fetch_issue_ref,
         fetch_graph_data,
         create_issue,
         close_issue,
@@ -179,6 +181,7 @@ impl CallCounts {
             list_owner_projects,
             create_project,
             fetch_issue,
+            fetch_issue_ref,
             fetch_graph_data,
             create_issue,
             close_issue,
@@ -229,6 +232,7 @@ pub struct Stubs {
     list_owner_projects: Mutex<VecDeque<Result<Vec<OwnerProject>, Error>>>,
     create_project: Mutex<VecDeque<Result<CreatedProject, Error>>>,
     fetch_issue: Mutex<VecDeque<Result<Issue, Error>>>,
+    fetch_issue_ref: Mutex<VecDeque<Result<Issue, Error>>>,
     fetch_graph_data: Mutex<VecDeque<GraphDataResult>>,
     create_issue: Mutex<VecDeque<Result<Issue, Error>>>,
     close_issue: Mutex<VecDeque<Result<(), Error>>>,
@@ -365,6 +369,7 @@ push_result!(
 );
 push_result!(create_project, push_create_project, CreatedProject);
 push_result!(fetch_issue, push_fetch_issue, Issue);
+push_result!(fetch_issue_ref, push_fetch_issue_ref, Issue);
 push_result!(
     fetch_graph_data,
     push_fetch_graph_data,
@@ -530,6 +535,11 @@ impl GitHubApi for MockGitHubClient {
     async fn fetch_issue(&self, _number: u64) -> Result<Issue, Error> {
         self.calls.fetch_issue.fetch_add(1, Ordering::SeqCst);
         pop_or_unstubbed(&self.stubs.fetch_issue, "fetch_issue")
+    }
+
+    async fn fetch_issue_ref(&self, _issue_ref: &IssueRef) -> Result<Issue, Error> {
+        self.calls.fetch_issue_ref.fetch_add(1, Ordering::SeqCst);
+        pop_or_unstubbed(&self.stubs.fetch_issue_ref, "fetch_issue_ref")
     }
 
     async fn fetch_graph_data(&self) -> Result<(Vec<Issue>, Vec<BlockingEdge>), Error> {

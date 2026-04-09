@@ -10,12 +10,23 @@ use unblock_core::types::RelatedIssue;
 
 /// Input parameters for the `show` MCP tool.
 ///
-/// Requires the issue number. Optional flags control whether comments
-/// and the dependency tree are included in the response.
+/// Requires an [`IssueRef`](unblock_core::types::IssueRef)-compatible
+/// string identifying the target issue. Accepts:
+///
+/// - a bare number for a local issue (`"42"`),
+/// - a hash-prefixed local number (`"#42"`), or
+/// - a cross-repo reference (`"owner/repo#42"`).
+///
+/// The field is typed as `String` because `IssueRef` does not derive
+/// `JsonSchema`; the handler parses the string into an `IssueRef` and
+/// resolves it via the GitHub client, mirroring the `depends` tool.
+///
+/// Optional flags control whether comments and the dependency tree are
+/// included in the response.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ShowParams {
-    /// GitHub issue number to fetch (e.g. `42`).
-    pub id: u64,
+    /// Issue reference to fetch. Accepts `42`, `#42`, or `owner/repo#42`.
+    pub issue: String,
     /// Whether to include comments in the response. Defaults to `true`.
     pub include_comments: Option<bool>,
     /// Whether to include the dependency tree in the response. Defaults to `true`.

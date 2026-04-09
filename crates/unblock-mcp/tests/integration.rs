@@ -252,8 +252,8 @@ Design detail here.
 async fn show_include_deps_false_skips_graph_traversal() {
     let mock = new_mock();
     // Two fetches: one for include_deps=false, one for include_deps=true.
-    mock.push_fetch_issue(Ok(mock_issue(1)));
-    mock.push_fetch_issue(Ok(mock_issue(1)));
+    mock.push_fetch_issue_ref(Ok(mock_issue(1)));
+    mock.push_fetch_issue_ref(Ok(mock_issue(1)));
 
     let state = state_with_mock(Arc::clone(&mock));
 
@@ -278,7 +278,7 @@ async fn show_include_deps_false_skips_graph_traversal() {
     // include_deps=false: dependency_tree must be None despite populated cache.
     let Json(result_false) = server
         .show(Parameters(ShowParams {
-            id: 1,
+            issue: "1".to_owned(),
             include_comments: Some(true),
             include_deps: Some(false),
         }))
@@ -290,7 +290,7 @@ async fn show_include_deps_false_skips_graph_traversal() {
         result_false.dependency_tree,
     );
     assert_eq!(
-        mock.calls().fetch_issue(),
+        mock.calls().fetch_issue_ref(),
         1,
         "handler must still fetch the issue when include_deps=false",
     );
@@ -299,7 +299,7 @@ async fn show_include_deps_false_skips_graph_traversal() {
     // same cache — confirming the branch is exercised end-to-end.
     let Json(result_true) = server
         .show(Parameters(ShowParams {
-            id: 1,
+            issue: "1".to_owned(),
             include_comments: Some(true),
             include_deps: Some(true),
         }))
@@ -309,7 +309,7 @@ async fn show_include_deps_false_skips_graph_traversal() {
         result_true.dependency_tree.is_some(),
         "dependency_tree must be Some when include_deps=true and cache has graph",
     );
-    assert_eq!(mock.calls().fetch_issue(), 2);
+    assert_eq!(mock.calls().fetch_issue_ref(), 2);
 }
 
 /// End-to-end: `include_comments=false` on the real `show` handler returns
@@ -319,8 +319,8 @@ async fn show_include_deps_false_skips_graph_traversal() {
 async fn show_include_comments_false_skips_comments() {
     let mock = new_mock();
     // Two fetches: one for include_comments=false, one for =true.
-    mock.push_fetch_issue(Ok(mock_issue(7)));
-    mock.push_fetch_issue(Ok(mock_issue(7)));
+    mock.push_fetch_issue_ref(Ok(mock_issue(7)));
+    mock.push_fetch_issue_ref(Ok(mock_issue(7)));
 
     let server = UnblockServer::new(state_with_mock(Arc::clone(&mock)));
 
@@ -328,7 +328,7 @@ async fn show_include_comments_false_skips_comments() {
     // issue carries one comment.
     let Json(result_false) = server
         .show(Parameters(ShowParams {
-            id: 7,
+            issue: "7".to_owned(),
             include_comments: Some(false),
             include_deps: Some(false),
         }))
@@ -340,7 +340,7 @@ async fn show_include_comments_false_skips_comments() {
         result_false.comments,
     );
     assert_eq!(
-        mock.calls().fetch_issue(),
+        mock.calls().fetch_issue_ref(),
         1,
         "handler must still fetch the issue when include_comments=false",
     );
@@ -348,7 +348,7 @@ async fn show_include_comments_false_skips_comments() {
     // include_comments=true: comments must be Some(len==1).
     let Json(result_true) = server
         .show(Parameters(ShowParams {
-            id: 7,
+            issue: "7".to_owned(),
             include_comments: Some(true),
             include_deps: Some(false),
         }))
@@ -362,7 +362,7 @@ async fn show_include_comments_false_skips_comments() {
         1,
         "comments must surface the single fixture comment",
     );
-    assert_eq!(mock.calls().fetch_issue(), 2);
+    assert_eq!(mock.calls().fetch_issue_ref(), 2);
 }
 
 /// `dependency_tree` returned for issues with blocking relationships.
