@@ -273,6 +273,7 @@ For each unblocked issue:
 - **Partial unblock:** A depends on B and C. B is closed. A is not yet unblocked because C is still open. When C closes, cascade fires and A is unblocked.
 - **Already open:** A was marked `Status::Open` manually but was still blocked. Cascade detects it's now unblocked and updates `Ready State` → `ready`.
 - **Closed dependent:** A depends on B. A is already closed. When B closes, cascade skips A (already closed).
+- **Pre-close computation:** The cascade MUST be computed from the PRE-CLOSE graph state — before the issue is closed in GitHub and before cache invalidation. After close, `fetch_graph_data()` returns only open issues, so the closed issue is excluded from the rebuilt graph and `compute_unblock_cascade` cannot find its dependents. See spec-03 §5.2 for the corrected `close` tool flow.
 
 ---
 
@@ -402,6 +403,15 @@ The `ReconcileEngine` is pure — no I/O, no async. It receives pre-fetched data
 
 ### 8.2 Analysis algorithm
 
+**Data requirements:** The `issues` map MUST include both open AND recently-closed issues.
+`fetch_graph_data()` returns only open issues (`states: [OPEN]`). The reconcile tool handler
+must supplement this with recently-closed issues (see §8.4) so that Pass 1 can validate
+closed-issue Ready State fields and Pass 2 can detect uncascaded closures.
+
+The `graph` is built from open issues only (as usual). Closed issues in `issues` are NOT
+graph nodes — they are used for metadata checks (Passes 1, 2, 5, 6) but not for graph
+algorithms (Passes 3, 4).
+
 ```
 analyse(graph, issues, computed_ready_set, now) → DriftReport:
 
@@ -414,19 +424,28 @@ analyse(graph, issues, computed_ready_set, now) → DriftReport:
         drift.push(StaleReadyState { qid, field_says: issue.ready_state, graph_says: Closed })
       CONTINUE
 
-    expected = IF qid IN computed_ready_set THEN Ready ELSE Blocked
+    expected = compute_expected_ready_state(issue, computed_ready_set)
     IF issue.ready_state != expected:
       drift.push(StaleReadyState { qid, field_says: issue.ready_state, graph_says: expected })
 
   // Pass 2: Uncascaded closures
+  // Detects: a closed issue whose open dependents should be ready but aren't.
+  // Strategy: for each open issue that has NO open blockers in the graph,
+  // check if its Ready State is Ready. If not, it was missed by cascade.
   FOR each (qid, issue) in issues:
-    IF issue.state == Closed:
-      should_unblock = compute_unblock_cascade(graph, qid, issues)
-      should_unblock = should_unblock.filter(|id|
-        issues[id].ready_state != Ready AND issues[id].state == Open
-      )
-      IF NOT should_unblock.is_empty():
-        drift.push(UncascadedClosure { closed_issue: qid, should_have_unblocked: should_unblock })
+    IF issue.state != Open:
+      CONTINUE
+    IF issue.status == InProgress OR issue.status == Deferred:
+      CONTINUE
+    IF qid IN computed_ready_set AND issue.ready_state != Ready:
+      // This issue should be ready (all blockers closed) but isn't marked as such.
+      // Find which closed blocker(s) should have triggered the cascade.
+      closed_blockers = find_closed_blockers_for(qid, graph, issues)
+      IF NOT closed_blockers.is_empty():
+        drift.push(UncascadedClosure {
+          closed_issue: closed_blockers[0],  // primary missing cascader
+          should_have_unblocked: vec![qid],
+        })
 
   // Pass 3: Orphaned blocking edges
   FOR each edge in graph.all_edges():
@@ -475,6 +494,47 @@ analyse(graph, issues, computed_ready_set, now) → DriftReport:
 | `MissingProjectField` | ❌ | Log error — run `setup` to recreate |
 | `CycleDetected` | ❌ | Log error — manual edge removal required |
 | `StaleClaim` | ❌ | Log warning — agent or human decides (unclaim or continue) |
+
+### 8.4 Data requirements for reconcile
+
+The reconcile tool handler (not the engine) is responsible for assembling the correct `issues` map:
+
+1. **Open issues:** `fetch_graph_data()` returns all open issues with full Project field values. These are the graph nodes.
+2. **Recently-closed issues:** A separate query fetches issues closed within the stale claim threshold window (default: 24 hours). These are NOT graph nodes — they are only used for metadata analysis in Passes 1, 2, 5, and 6.
+
+```
+fetch_recently_closed(hours) → Vec<Issue>:
+  // GraphQL: issues(states: [CLOSED], filterBy: { since: now - hours })
+  // Returns issues closed within the time window, with Project field values
+```
+
+The handler merges both sets into `issues: HashMap<QualifiedId, Issue>` before calling `analyse()`. The graph is built from open issues only.
+
+**Why this separation:** `fetch_graph_data()` fetches `states: [OPEN]` for correctness — the dependency graph contains only open issues. Closed issues are needed only for drift detection metadata, not for graph computation. Fetching them separately keeps the graph construction clean and limits the query scope.
+
+### 8.5 Helper: `find_closed_blockers_for`
+
+Used by Pass 2 to identify which closed issue should have triggered a cascade.
+
+```
+find_closed_blockers_for(qid, graph, issues) → Vec<QualifiedId>:
+
+  // The issue is in the ready set (all in-graph blockers are handled).
+  // Look for closed issues in the `issues` map that were blockers.
+  // Since blocking edges from closed issues are NOT in the graph (closed
+  // issues are not graph nodes), we check the recently-closed issues
+  // to see if any were listed as blockers before closing.
+
+  closed_blockers = []
+  FOR each (other_qid, other_issue) in issues:
+    IF other_issue.state == Closed:
+      // Check if this closed issue was a blocker of qid
+      // This information comes from the trackedByIssues field on qid
+      IF qid.tracked_by_issues.contains(other_qid):
+        closed_blockers.push(other_qid)
+
+  RETURN closed_blockers
+```
 
 ---
 

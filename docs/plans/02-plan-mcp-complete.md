@@ -388,19 +388,21 @@ pub struct ReconcileOutput {
 The handler is the impure shell: fetch, analyse, repair, cache.
 
 Requirements:
-1. **Fresh fetch** — always bypasses cache. Calls `state.github.fetch_graph_data()`. Does NOT call `cache.invalidate()`
-2. **Build graph** — `DependencyGraph::build()` from fetched issues and edges
-3. **Compute ready set** — `graph.compute_ready_set()`, collect into `HashSet<QualifiedId>`
-4. **Analyse** — `ReconcileEngine::new(params.stale_claim_hours).analyse()`
-5. **Check missing project fields** — validate `state.github.field_ids()` against expected 7 fields. Missing → add `DriftKind::MissingProjectField` to report
-6. **Repair (if `fix`):**
+1. **Fresh fetch (open issues)** — always bypasses cache. Calls `state.github.fetch_graph_data()`. Does NOT call `cache.invalidate()`
+2. **Fresh fetch (recently closed)** — calls `state.github.fetch_recently_closed(params.stale_claim_hours)` to get issues closed within the threshold window. These are needed for Passes 1, 2, 5, and 6 of the reconcile engine (see spec-01 §8.4)
+3. **Merge issues** — combine open issues and recently-closed issues into a single `HashMap<QualifiedId, Issue>`. Closed issues are metadata-only — they are NOT added to the graph
+4. **Build graph** — `DependencyGraph::build()` from open issues and edges only
+5. **Compute ready set** — `graph.compute_ready_set()`, collect into `HashSet<QualifiedId>`
+6. **Analyse** — `ReconcileEngine::new(params.stale_claim_hours).analyse()` with the merged issues map
+7. **Check missing project fields** — validate `state.github.field_ids()` against expected 7 fields. Missing → add `DriftKind::MissingProjectField` to report
+8. **Repair (if `fix`):**
    - `StaleReadyState` → update Ready State field via `state.github.update_field()`
    - `UncascadedClosure` → update Ready State to `Ready` for each downstream issue + add audit comment on closed issue
    - `StaleClaim` → log warning, do NOT auto-repair (agent or human decides)
    - `CycleDetected` → add to `errors`, do NOT auto-repair (manual resolution required)
    - `OrphanedBlockingEdge`, `MalformedAgentField`, `MissingProjectField` → log warning, do NOT auto-repair
-7. **Populate cache** — `state.cache.update(graph)` with the fresh graph
-8. **Return** — `ReconcileOutput { report }`
+9. **Populate cache** — `state.cache.update(graph)` with the fresh graph
+10. **Return** — `ReconcileOutput { report }`
 
 **Cache behaviour:** `reconcile` always does a fresh fetch, bypassing the cache. After analysis and optional repair, it populates the cache with the fresh graph. It does NOT call `cache.invalidate()` — it replaces the cache directly. See SPEC §4.4 invalidation matrix.
 
@@ -421,7 +423,31 @@ pub async fn handle_reconcile(
 
 ---
 
-#### Task 02.03 — Register reconcile tool in MCP server
+#### Task 02.03 — Implement `fetch_recently_closed` query
+
+> **Priority:** P0  
+> **Depends on:** nothing  
+> **Blocked by:** nothing
+
+**File:** `unblock-github/src/graphql.rs`
+
+New GraphQL query required by the reconcile handler to detect uncascaded closures (see spec-01 §8.4 and spec-02 §5.4).
+
+Requirements:
+- `pub async fn fetch_recently_closed(&self, hours: u64) -> Result<Vec<Issue>, Error>`
+- GraphQL query: `issues(states: [CLOSED], filterBy: { since: now - hours })` with Project field values
+- Returns issues closed within the time window, with Ready State field and `trackedByIssues` data
+- Paginated same as `fetch_graph_data()`
+- Default time window: 24 hours (matches stale claim threshold)
+
+**Tests:**
+- `fetch_recently_closed_returns_closed_issues`
+- `fetch_recently_closed_respects_time_window`
+- `fetch_recently_closed_returns_empty_when_no_recent_closures`
+
+---
+
+#### Task 02.04 — Register reconcile tool in MCP server
 
 > **Priority:** P1  
 > **Depends on:** Task 02.02  
@@ -751,9 +777,10 @@ Requirements:
 - Add `circuit_breaker: CircuitBreaker` field to `GitHubClient`
 - Before every GitHub API call (GraphQL and REST): `self.circuit_breaker.check()?`
 - After successful response: `self.circuit_breaker.record_success()`
-- After network error or 5xx response: `self.circuit_breaker.record_failure()`
-- 4xx responses (except 429) are NOT circuit breaker failures — they are application errors
-- 429 (rate limit) triggers `record_failure()` because sustained rate limiting is a circuit breaker scenario
+- After network error (`GitHubUnavailable`): `self.circuit_breaker.record_failure()`
+- After 5xx response (`GitHubServerError`): `self.circuit_breaker.record_failure()`
+- After 429 (`RateLimited`): `self.circuit_breaker.record_failure()` — sustained rate limiting is a circuit breaker scenario
+- 4xx responses (except 429) map to `GitHubApi` — NOT circuit breaker failures, they are application errors
 - The circuit breaker wraps all calls in `graphql_request()` and `rest_request()` — the two lowest-level methods
 
 **Tests:**
@@ -829,7 +856,9 @@ Requirements:
 
 **Retryable conditions:**
 - `Error::RateLimited` (HTTP 429) — always retryable
-- `Error::GitHubUnavailable` where status is 503 — retryable
+- `Error::GitHubUnavailable` (network errors) — always retryable
+- `Error::GitHubServerError` where `status == 503` — retryable (service unavailable, request not processed)
+- `Error::GitHubServerError` where `status == 500 or 502` — NOT retryable (server may have partially processed)
 - All other errors — NOT retryable, propagate immediately
 
 ```rust
@@ -844,7 +873,11 @@ where
 { /* ... */ }
 
 pub fn is_retryable(error: &Error) -> bool {
-    matches!(error, Error::RateLimited | Error::GitHubUnavailable { .. })
+    matches!(error,
+        Error::RateLimited
+        | Error::GitHubUnavailable { .. }
+        | Error::GitHubServerError { status: 503, .. }
+    )
 }
 ```
 
@@ -1244,8 +1277,16 @@ Requirements:
 - Trigger: `issues` events (`closed`, `reopened`, `edited`, `deleted`) and `issue_comment.created`
 - Skip if actor is `github-actions[bot]` (prevent infinite loops)
 - Install `unblock-mcp` binary via shell installer
-- Run `unblock-mcp reconcile --fix --output json`
+- Run `unblock-mcp --run-tool reconcile '{"fix": true}'` (CLI tool mode — see below)
 - Log drift items found
+
+**CLI tool mode:** `unblock-mcp` must support a `--run-tool <name> <json-params>` flag that:
+1. Boots the server (config, auth, project resolution) — same as MCP mode
+2. Executes a single tool with the given JSON params
+3. Prints the tool result as JSON to stdout
+4. Exits with code 0 (success) or 1 (error)
+
+This avoids MCP protocol overhead in non-interactive contexts (CI, cron, scripts). The tool execution reuses the same handler code as MCP — zero duplication.
 
 ```yaml
 name: Unblock Reconcile
@@ -1266,7 +1307,7 @@ jobs:
       - name: Reconcile
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: unblock-mcp reconcile --fix --output json
+        run: unblock-mcp --run-tool reconcile '{"fix": true}'
 ```
 
 **Tests:**
@@ -1278,7 +1319,7 @@ jobs:
 
 Phase 02 is complete when:
 
-1. **All 10 epics are implemented** — reconcile engine, reconcile tool, commit_context tool, doctor tool, circuit breaker, retry, OpenTelemetry, agent detection, prime integration, Actions sentinel
+1. **All 10 epics complete** (Epics 01, 02, 08 already implemented during Phase 01 — 7 remaining) — reconcile engine, reconcile tool, commit_context tool, doctor tool, circuit breaker, retry, OpenTelemetry, agent detection, prime integration, Actions sentinel
 2. **Quality gate passes:**
    ```bash
    cargo fmt --check --all                                    # zero diffs
@@ -1287,7 +1328,7 @@ Phase 02 is complete when:
    cargo doc --no-deps --workspace                            # zero warnings
    ```
 3. **`reconcile` detects 100% of 7 drift types** in the test corpus (unit tests with synthetic drift)
-4. **Circuit breaker activates** within 60s of sustained GitHub API failure (integration test)
+4. **Circuit breaker activates** after 5 consecutive failures (integration test)
 5. **Retry with backoff** correctly handles 429 and 503, propagates other errors immediately
 6. **OpenTelemetry export** produces metrics when `UNBLOCK_OTEL_ENDPOINT` is configured (integration test with in-memory exporter)
 7. **Agent detection** correctly identifies Claude Code, Copilot, Cursor, Cline, Aider from MCP `clientInfo` and env fallback

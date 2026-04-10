@@ -302,7 +302,50 @@ query($owner: String!, $repo: String!, $number: Int!) {
 
 Resolves `IssueRef` (local or cross-repo). For `CrossRepo`, queries the referenced `owner/repo`.
 
-### 5.4 `fetch_ready_from_field()` (Phase 03)
+### 5.4 `fetch_recently_closed(hours)` (Phase 02)
+
+Fetches issues closed within a time window. Used by the reconcile tool handler to supply closed-issue data to the reconciliation engine (see spec-01 §8.4).
+
+```graphql
+query($owner: String!, $repo: String!, $cursor: String, $since: DateTime!) {
+  repository(owner: $owner, name: $repo) {
+    issues(first: 100, after: $cursor, states: [CLOSED], filterBy: { since: $since }) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        number
+        title
+        state
+        closedAt
+        trackedByIssues(first: 50) {
+          nodes { number repository { owner { login } name } state }
+        }
+        projectItems(first: 5) {
+          nodes {
+            project { number }
+            fieldValues(first: 20) {
+              nodes {
+                ... on ProjectV2ItemFieldSingleSelectValue { field { ... on ProjectV2SingleSelectField { name } } name }
+                ... on ProjectV2ItemFieldTextValue { field { ... on ProjectV2Field { name } } text }
+                ... on ProjectV2ItemFieldDateValue { field { ... on ProjectV2Field { name } } date }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+**Parameters:** `$since` = `now - hours` (ISO 8601 DateTime). Default: 24 hours (matches stale claim threshold).
+
+**Returns:** `Vec<Issue>` with Project field values and blocking edge references. Does NOT include full comments (not needed for reconciliation).
+
+**Edge cases:**
+- **Large window:** A 24h window on an active repo may return many closed issues. Paginated same as `fetch_graph_data()`.
+- **No recently closed:** Returns empty vec. Reconcile passes 1 and 2 operate only on open issues.
+
+### 5.6 `fetch_ready_from_field()` (Phase 03)
 
 Lightweight query — fetches only issues where Ready State field == `ready`.
 
@@ -328,7 +371,7 @@ query($projectId: ID!, $cursor: String) {
 
 Client-side filter: only return items where Ready State value == `"ready"` and issue state == `OPEN`.
 
-### 5.5 Edge cases
+### 5.7 Edge cases
 
 - **Pagination limit:** GitHub limits `first` to 100. For repos with >100 open issues, multiple pages required.
 - **Rate limit:** Each page is one GraphQL point. 500-issue repo = 5 pages = 5 points out of 5000/hour budget.
@@ -695,7 +738,9 @@ compute_delay(policy, attempt) → Duration:
 | Error | Retryable | Rationale |
 |---|---|---|
 | `RateLimited` (HTTP 429) | ✅ | Transient — wait and retry |
-| `GitHubUnavailable` (HTTP 503) | ✅ | Transient — service restart |
+| `GitHubUnavailable` (network) | ✅ | Transient — connection issue |
+| `GitHubServerError` (HTTP 503) | ✅ | Transient — service unavailable, request not processed |
+| `GitHubServerError` (HTTP 500, 502) | ❌ | Server may have partially processed request |
 | `GitHubApi` (HTTP 4xx except 429) | ❌ | Application error — retrying won't help |
 | `GitHubGraphQL` (GraphQL errors) | ❌ | Query error — retrying won't help |
 | `Domain` errors | ❌ | Business logic — retrying won't help |
@@ -743,9 +788,10 @@ fetch_all_pages(query_template, variables) → Result<Vec<Node>>:
 
 | Error | HTTP | Trigger | Retryable |
 |---|---|---|---|
-| `GitHubApi { message }` | 4xx | REST/GraphQL application error | ❌ |
+| `GitHubApi { message }` | 4xx (except 429) | REST/GraphQL application error | ❌ |
 | `GitHubGraphQL { errors }` | 200 | GraphQL response with errors array | ❌ |
-| `GitHubUnavailable { source }` | 503 / network | Connection failure or 503 | ✅ |
+| `GitHubUnavailable { source }` | network | Connection failure, timeout, DNS | ✅ |
+| `GitHubServerError { status, message }` | 500, 502, 503 | Server error | ✅ (503 only) |
 | `RateLimited` | 429 | Rate limit exceeded | ✅ |
 | `CircuitBreakerOpen` | — | Circuit breaker in Open state | ❌ |
 | `ProjectNotConfigured` | — | No project ID resolved | ❌ |
@@ -762,7 +808,7 @@ fetch_all_pages(query_template, variables) → Result<Vec<Node>>:
 2. **All URLs go through centralised methods.** No hardcoded `api.github.com` outside `Config::default()`. GHE Server `/v3` stripping in one place.
 3. **Circuit breaker sees final result.** After all retries are exhausted, the circuit breaker records the final outcome. Transient failures recovered by retry do not count.
 4. **Read queries are idempotent.** Any GraphQL read can be retried safely.
-5. **Write mutations are NOT retried.** Only 429 and 503 are retried. A failed REST mutation (e.g., issue creation) is not retried to prevent duplicates.
+5. **All requests (reads and writes) are retried on 429 and 503 only.** These are infrastructure-level transient errors where the server did not process the request. Application errors (4xx except 429) and GraphQL errors are never retried. HTTP 503 means "service unavailable" — the request was not processed, so retry is safe even for writes. HTTP 500/502 are NOT retried because the server may have partially processed the request.
 6. **Pagination is complete.** `fetch_graph_data()` follows all pages until `hasNextPage: false`.
 7. **Field IDs are resolved once.** `resolve_project()` caches `ProjectFieldIds`. No re-resolution per-request.
 8. **Auth token refreshed transparently.** For App auth, callers never see expired tokens — `token()` handles caching and refresh internally.
@@ -771,7 +817,7 @@ fetch_all_pages(query_template, variables) → Result<Vec<Node>>:
 
 ## 14. Open Questions
 
-1. **Write mutation retry.** Should idempotent writes (e.g., `close_issue` which is idempotent — closing a closed issue is a no-op) be retried on 503? Current answer: no — all writes are non-retryable for simplicity. Reconsider if 503 rates are high in practice.
+1. **Write mutation retry.** ~~Should idempotent writes be retried on 503?~~ **Resolved:** All requests (reads and writes) are retried on 429 and 503. HTTP 503 means "service unavailable" — the server did not process the request, making retry safe. See invariant 5.
 
 2. **GraphQL mutation batching for cascade.** When a cascade unblocks 10 issues, we currently update each issue's fields individually. Should we batch all field updates into a single GraphQL mutation? Current answer: yes, via `batch_update_fields`. But the cascade comment (one per unblocked issue) still requires individual REST calls.
 

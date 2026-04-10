@@ -307,7 +307,7 @@ Production hardening and remaining MCP capabilities. Still local binary only.
 - `reconcile` tool — detect and repair semantic drift between graph and GitHub state (7 drift types: `StaleReadyState`, `UncascadedClosure`, `OrphanedBlockingEdge`, `MalformedAgentField`, `MissingProjectField`, `CycleDetected`, `StaleClaim`)
 - `commit_context` tool — structured commit messages with git trailers for audit trail
 - `doctor` tool — operational health with self-repair capability
-- Circuit breaker — graceful degradation on GitHub outages (5 failures in 60s → fail fast for 10s)
+- Circuit breaker — graceful degradation on GitHub outages (5 consecutive failures → fail fast for 10s, reset on success)
 - Retry with exponential backoff — 429 and 503 only (500ms base, 5s max, ±25% jitter)
 - OpenTelemetry — tool duration, API duration, cache metrics, graph size
 - Agent client detection — `AgentKind`, `ClientDetector`, `SessionMeta`
@@ -479,7 +479,7 @@ Orchestration layer that composes plugin agents and skills into autonomous multi
 
 ### Phase 02 (MCP Complete)
 - `reconcile` detects 100% of 7 drift types in the test corpus
-- Circuit breaker activates within 60s of sustained GitHub API failure
+- Circuit breaker activates after 5 consecutive GitHub API failures
 - OpenTelemetry export produces actionable dashboards for tool latency and cache performance
 
 ### Phase 03 (MCP Production)
