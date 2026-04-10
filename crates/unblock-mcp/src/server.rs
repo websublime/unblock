@@ -217,83 +217,26 @@ impl UnblockServer {
 
 /// Set project fields on a newly created issue's project item.
 ///
-/// Updates Priority, `IssueType`, Status, `ReadyState`, `StoryPoints`, and
-/// `DeferUntil`. Each field update is best-effort: failures are logged as
-/// warnings but do not abort the remaining updates. This keeps the create flow
-/// resilient to partial project configuration (e.g. missing option values).
-///
-/// The `status` parameter controls the initial Status field value. Callers
-/// should pass `"Blocked"` when the issue has blockers, or `"Backlog"` otherwise
-/// (per PRD section 6.1 and ARCH section 10.4).
-///
-/// Exposed to integration tests when the `test-hooks` feature is enabled.
-/// Production builds keep this `pub(crate)` so it never appears on the
-/// library surface.
-#[allow(clippy::too_many_arguments)]
-#[cfg(feature = "test-hooks")]
-pub async fn set_project_fields(
-    client: &dyn GitHubApi,
-    project_id: &str,
-    item_id: &str,
-    field_ids: &unblock_github::projects::ProjectFieldIds,
-    priority: &str,
-    issue_type: &str,
-    status: &str,
-    ready_state: &str,
-    story_points: Option<f64>,
-    defer_until: Option<chrono::NaiveDate>,
-) {
-    set_project_fields_inner(
-        client,
-        project_id,
-        item_id,
-        field_ids,
-        priority,
-        issue_type,
-        status,
-        ready_state,
-        story_points,
-        defer_until,
-    )
-    .await;
-}
-
-/// Non-public variant compiled when `test-hooks` is disabled.
-#[allow(clippy::too_many_arguments)]
-#[cfg(not(feature = "test-hooks"))]
-pub(crate) async fn set_project_fields(
-    client: &dyn GitHubApi,
-    project_id: &str,
-    item_id: &str,
-    field_ids: &unblock_github::projects::ProjectFieldIds,
-    priority: &str,
-    issue_type: &str,
-    status: &str,
-    ready_state: &str,
-    story_points: Option<f64>,
-    defer_until: Option<chrono::NaiveDate>,
-) {
-    set_project_fields_inner(
-        client,
-        project_id,
-        item_id,
-        field_ids,
-        priority,
-        issue_type,
-        status,
-        ready_state,
-        story_points,
-        defer_until,
-    )
-    .await;
-}
-
-/// Shared implementation for [`set_project_fields`].
-///
-/// Delegates to this inner function so the two `cfg`-gated wrappers
-/// (one `pub`, one `pub(crate)`) share a single body.
-#[allow(clippy::too_many_arguments)]
-async fn set_project_fields_inner(
+/// Generates [`set_project_fields`] with the correct visibility:
+/// `pub` when the `test-hooks` feature is enabled (integration tests),
+/// `pub(crate)` otherwise (production builds).
+macro_rules! define_set_project_fields {
+    ($vis:vis) => {
+        /// Updates Priority, `IssueType`, Status, `ReadyState`, `StoryPoints`,
+        /// and `DeferUntil`. Each field update is best-effort: failures are
+        /// logged as warnings but do not abort the remaining updates. This
+        /// keeps the create flow resilient to partial project configuration
+        /// (e.g. missing option values).
+        ///
+        /// The `status` parameter controls the initial Status field value.
+        /// Callers should pass `"Blocked"` when the issue has blockers, or
+        /// `"Backlog"` otherwise (per PRD section 6.1 and ARCH section 10.4).
+        ///
+        /// Exposed to integration tests when the `test-hooks` feature is
+        /// enabled. Production builds keep this `pub(crate)` so it never
+        /// appears on the library surface.
+        #[allow(clippy::too_many_arguments)]
+        $vis async fn set_project_fields(
     client: &dyn GitHubApi,
     project_id: &str,
     item_id: &str,
@@ -391,6 +334,14 @@ async fn set_project_fields_inner(
         tracing::warn!(error = %e, "Failed to set DeferUntil field");
     }
 }
+    };
+}
+
+#[cfg(feature = "test-hooks")]
+define_set_project_fields!(pub);
+
+#[cfg(not(feature = "test-hooks"))]
+define_set_project_fields!(pub(crate));
 
 /// Applies a [`BodySectionUpdate`] to a [`BodySections`] struct.
 ///
