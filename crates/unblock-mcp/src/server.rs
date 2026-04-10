@@ -423,7 +423,7 @@ impl UnblockServer {
                 title = %existing.title,
                 "Found existing project with matching title"
             );
-            return Ok(Json(InitResult {
+            let result = InitResult {
                 project_number: existing.number,
                 url: existing.url.clone(),
                 created: false,
@@ -432,7 +432,12 @@ impl UnblockServer {
                     "Project already exists. Run `setup` with project number {} to configure fields and views.",
                     existing.number
                 ),
-            }));
+            };
+            debug_assert!(
+                !result.hint.is_empty(),
+                "InitResult hint must be non-empty per ARCH §10.18"
+            );
+            return Ok(Json(result));
         }
 
         // Log forward-compat params that are accepted but not wired.
@@ -459,7 +464,7 @@ impl UnblockServer {
             "Created new project V2"
         );
 
-        Ok(Json(InitResult {
+        let result = InitResult {
             project_number: created.number,
             url: created.url,
             created: true,
@@ -468,7 +473,12 @@ impl UnblockServer {
                 "Project created! Run `setup` with project number {} to configure fields and views.",
                 created.number
             ),
-        }))
+        };
+        debug_assert!(
+            !result.hint.is_empty(),
+            "InitResult hint must be non-empty per ARCH §10.18"
+        );
+        Ok(Json(result))
     }
 
     /// Configure required Projects V2 fields and views (idempotent).

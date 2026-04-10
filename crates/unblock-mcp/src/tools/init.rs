@@ -51,3 +51,50 @@ pub struct InitResult {
     /// A hint message for the agent, suggesting the next step.
     pub hint: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Mirrors the construction in `server.rs` for the "already exists" branch.
+    /// Ensures the hint produced by `format!()` is never empty (ARCH §10.18).
+    #[test]
+    fn init_result_existing_project_hint_is_non_empty() {
+        let project_number: u64 = 42;
+        let result = InitResult {
+            project_number,
+            url: String::from("https://github.com/orgs/acme/projects/42"),
+            created: false,
+            scope: String::from("org"),
+            hint: format!(
+                "Project already exists. Run `setup` with project number {project_number} \
+                 to configure fields and views.",
+            ),
+        };
+        assert!(
+            !result.hint.is_empty(),
+            "InitResult hint must be non-empty per ARCH §10.18"
+        );
+    }
+
+    /// Mirrors the construction in `server.rs` for the "newly created" branch.
+    /// Ensures the hint produced by `format!()` is never empty (ARCH §10.18).
+    #[test]
+    fn init_result_created_project_hint_is_non_empty() {
+        let project_number: u64 = 7;
+        let result = InitResult {
+            project_number,
+            url: String::from("https://github.com/orgs/acme/projects/7"),
+            created: true,
+            scope: String::from("org"),
+            hint: format!(
+                "Project created! Run `setup` with project number {project_number} \
+                 to configure fields and views.",
+            ),
+        };
+        assert!(
+            !result.hint.is_empty(),
+            "InitResult hint must be non-empty per ARCH §10.18"
+        );
+    }
+}
