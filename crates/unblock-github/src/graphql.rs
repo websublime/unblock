@@ -1740,4 +1740,93 @@ mod tests {
         assert!(issues.is_empty());
         assert!(edges.is_empty());
     }
+
+    // ── check_rest_response ────────────────────────────────────────────
+
+    /// Builds a `reqwest::Response` from raw parts without any network access.
+    fn mock_response(status: u16, headers: &[(&str, &str)], body: &str) -> reqwest::Response {
+        let mut builder = http::Response::builder().status(status);
+        for &(k, v) in headers {
+            builder = builder.header(k, v);
+        }
+        let http_resp = builder.body(body.to_owned()).unwrap();
+        reqwest::Response::from(http_resp)
+    }
+
+    #[tokio::test]
+    async fn check_rest_response_200_passes_through() {
+        let resp = mock_response(200, &[], "ok");
+        let result = check_rest_response(resp).await;
+        let ok_resp = result.expect("200 should return Ok");
+        assert_eq!(ok_resp.text().await.unwrap(), "ok");
+    }
+
+    #[tokio::test]
+    async fn check_rest_response_429_returns_rate_limited() {
+        // Unix timestamp 1_700_000_000 → 2023-11-14T22:13:20Z
+        let resp = mock_response(429, &[("x-ratelimit-reset", "1700000000")], "");
+        let err = check_rest_response(resp)
+            .await
+            .expect_err("429 should return Err");
+
+        match err {
+            errors::Error::RateLimited { reset_at } => {
+                let expected = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+                assert_eq!(reset_at, expected);
+            }
+            other => panic!("expected RateLimited, got: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn check_rest_response_429_missing_header_falls_back() {
+        let before = Utc::now();
+        let resp = mock_response(429, &[], "");
+        let err = check_rest_response(resp)
+            .await
+            .expect_err("429 should return Err");
+
+        match err {
+            errors::Error::RateLimited { reset_at } => {
+                let after = Utc::now();
+                assert!(
+                    reset_at >= before && reset_at <= after,
+                    "reset_at ({reset_at}) should be between {before} and {after}",
+                );
+            }
+            other => panic!("expected RateLimited, got: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn check_rest_response_500_returns_github_api() {
+        let resp = mock_response(500, &[], "Internal Server Error");
+        let err = check_rest_response(resp)
+            .await
+            .expect_err("500 should return Err");
+
+        match err {
+            errors::Error::GitHubApi { status, message } => {
+                assert_eq!(status, 500);
+                assert_eq!(message, "Internal Server Error");
+            }
+            other => panic!("expected GitHubApi, got: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn check_rest_response_404_returns_github_api() {
+        let resp = mock_response(404, &[], "Not Found");
+        let err = check_rest_response(resp)
+            .await
+            .expect_err("404 should return Err");
+
+        match err {
+            errors::Error::GitHubApi { status, message } => {
+                assert_eq!(status, 404);
+                assert_eq!(message, "Not Found");
+            }
+            other => panic!("expected GitHubApi, got: {other}"),
+        }
+    }
 }

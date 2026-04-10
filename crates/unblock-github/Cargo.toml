@@ -26,5 +26,6 @@ async-trait = { workspace = true }
 test-hooks = []
 
 [dev-dependencies]
+http = "1"
 wiremock = { workspace = true }
 tokio = { workspace = true }
