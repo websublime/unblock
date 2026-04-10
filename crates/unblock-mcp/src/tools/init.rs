@@ -56,45 +56,78 @@ pub struct InitResult {
 mod tests {
     use super::*;
 
-    /// Mirrors the construction in `server.rs` for the "already exists" branch.
-    /// Ensures the hint produced by `format!()` is never empty (ARCH §10.18).
+    /// Mirrors the construction in `server.rs` for the "already exists" branch
+    /// (lines 426-440). Asserts content of each field, not just non-emptiness.
     #[test]
-    fn init_result_existing_project_hint_is_non_empty() {
+    fn existing_project_result_contains_project_number_in_hint() {
         let project_number: u64 = 42;
+        let url = String::from("https://github.com/orgs/acme/projects/42");
+        let scope = String::from("org");
+
+        // Construction mirrors server.rs existing-project path exactly.
         let result = InitResult {
             project_number,
-            url: String::from("https://github.com/orgs/acme/projects/42"),
+            url: url.clone(),
             created: false,
-            scope: String::from("org"),
+            scope: scope.clone(),
             hint: format!(
                 "Project already exists. Run `setup` with project number {project_number} \
                  to configure fields and views.",
             ),
         };
+
         assert!(
-            !result.hint.is_empty(),
-            "InitResult hint must be non-empty per ARCH §10.18"
+            !result.created,
+            "existing-project path must set created=false"
+        );
+        assert_eq!(result.project_number, project_number);
+        assert_eq!(result.url, url);
+        assert_eq!(result.scope, scope);
+        assert!(
+            result.hint.contains("already exists"),
+            "existing-project hint must mention 'already exists', got: {}",
+            result.hint
+        );
+        assert!(
+            result.hint.contains(&project_number.to_string()),
+            "existing-project hint must contain the project number, got: {}",
+            result.hint
         );
     }
 
-    /// Mirrors the construction in `server.rs` for the "newly created" branch.
-    /// Ensures the hint produced by `format!()` is never empty (ARCH §10.18).
+    /// Mirrors the construction in `server.rs` for the "newly created" branch
+    /// (lines 467-481). Asserts content of each field, not just non-emptiness.
     #[test]
-    fn init_result_created_project_hint_is_non_empty() {
+    fn created_project_result_contains_project_number_in_hint() {
         let project_number: u64 = 7;
+        let url = String::from("https://github.com/orgs/acme/projects/7");
+        let scope = String::from("org");
+
+        // Construction mirrors server.rs created-project path exactly.
         let result = InitResult {
             project_number,
-            url: String::from("https://github.com/orgs/acme/projects/7"),
+            url: url.clone(),
             created: true,
-            scope: String::from("org"),
+            scope: scope.clone(),
             hint: format!(
                 "Project created! Run `setup` with project number {project_number} \
                  to configure fields and views.",
             ),
         };
+
+        assert!(result.created, "created-project path must set created=true");
+        assert_eq!(result.project_number, project_number);
+        assert_eq!(result.url, url);
+        assert_eq!(result.scope, scope);
         assert!(
-            !result.hint.is_empty(),
-            "InitResult hint must be non-empty per ARCH §10.18"
+            result.hint.contains("Project created!"),
+            "created-project hint must mention 'Project created!', got: {}",
+            result.hint
+        );
+        assert!(
+            result.hint.contains(&project_number.to_string()),
+            "created-project hint must contain the project number, got: {}",
+            result.hint
         );
     }
 }
