@@ -316,8 +316,8 @@ macro_rules! push_result {
         impl MockGitHubClient {
             #[doc = concat!("Queues an `Option<", stringify!($ok), ">` to be returned by the next `", stringify!($name), "` call.")]
             ///
-            /// Unlike the fallible `push_*` helpers, this queue stores the
-            /// option value directly. The empty-queue fallback is `None`.
+            /// This queue stores the option value directly; the empty-queue
+            /// fallback is `None`.
             ///
             /// # Panics
             ///
@@ -336,6 +336,9 @@ macro_rules! push_result {
     ($name:ident, $push:ident, $ok:ty) => {
         impl MockGitHubClient {
             #[doc = concat!("Queues a `Result<", stringify!($ok), ", Error>` to be returned by the next `", stringify!($name), "` call.")]
+            ///
+            /// This queue stores a `Result` value; the empty-queue fallback
+            /// is a `MethodNotMocked` error.
             ///
             /// # Panics
             ///
