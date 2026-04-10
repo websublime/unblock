@@ -710,6 +710,24 @@ fn non_empty_trimmed(s: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    // ── Exhaustive-match compile-time guards ───────────────────────────
+    //
+    // These helpers are never called.  They exist so the compiler emits a
+    // "non-exhaustive patterns" error whenever a variant is added to one
+    // of the enums below without updating the corresponding Display test
+    // array.  No wildcard (`_`) arm — that would defeat the purpose.
+
+    fn _assert_all_issue_type_variants_covered(v: IssueType) {
+        match v {
+            IssueType::Task
+            | IssueType::Bug
+            | IssueType::Feature
+            | IssueType::Epic
+            | IssueType::Chore
+            | IssueType::Spike => {}
+        }
+    }
+
     // ── IssueType Display ─────────────────────────────────────────────
 
     #[test]
@@ -731,6 +749,12 @@ mod tests {
     // variant name, update callers — do not silently drift these
     // assertions.
 
+    fn _assert_all_issue_state_variants_covered(v: IssueState) {
+        match v {
+            IssueState::Open | IssueState::Closed => {}
+        }
+    }
+
     #[test]
     fn issue_state_display_matches_debug() {
         for v in [IssueState::Open, IssueState::Closed] {
@@ -738,6 +762,16 @@ mod tests {
         }
         assert_eq!(IssueState::Open.to_string(), "Open");
         assert_eq!(IssueState::Closed.to_string(), "Closed");
+    }
+
+    fn _assert_all_status_variants_covered(v: Status) {
+        match v {
+            Status::Open
+            | Status::InProgress
+            | Status::Blocked
+            | Status::Deferred
+            | Status::Closed => {}
+        }
     }
 
     #[test]
@@ -758,6 +792,12 @@ mod tests {
         assert_eq!(Status::Closed.to_string(), "Closed");
     }
 
+    fn _assert_all_priority_variants_covered(v: Priority) {
+        match v {
+            Priority::P0 | Priority::P1 | Priority::P2 | Priority::P3 | Priority::P4 => {}
+        }
+    }
+
     #[test]
     fn priority_display_matches_debug() {
         for v in [
@@ -771,6 +811,13 @@ mod tests {
         }
         assert_eq!(Priority::P0.to_string(), "P0");
         assert_eq!(Priority::P4.to_string(), "P4");
+    }
+
+    fn _assert_all_ready_state_variants_covered(v: ReadyState) {
+        match v {
+            ReadyState::Ready | ReadyState::Blocked | ReadyState::NotReady | ReadyState::Closed => {
+            }
+        }
     }
 
     #[test]
