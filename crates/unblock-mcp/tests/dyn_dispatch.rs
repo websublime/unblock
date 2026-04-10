@@ -15,23 +15,19 @@
 #![allow(clippy::too_many_lines)]
 
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::sync::Arc;
 
 use chrono::Utc;
 use rmcp::handler::server::wrapper::{Json, Parameters};
-use unblock_core::cache::GraphCache;
-use unblock_core::config::Config;
 use unblock_core::types::{
     Issue, IssueState, IssueType, Priority, QualifiedId, ReadyState, Status,
 };
 use unblock_github::GitHubApi;
-use unblock_github::mock::MockGitHubClient;
 use unblock_github::projects::{
     CreatedProject, FieldMeta, OwnerType, ProjectFieldIds, ProjectInfo, ProjectView, SetupStatus,
     ViewLayout,
 };
-use unblock_mcp::server::{ServerState, UnblockServer};
+use unblock_mcp::server::UnblockServer;
 use unblock_mcp::tools::claim::ClaimParams;
 use unblock_mcp::tools::close::CloseParams;
 use unblock_mcp::tools::comment::CommentParams;
@@ -45,38 +41,10 @@ use unblock_mcp::tools::setup::SetupParams;
 use unblock_mcp::tools::show::ShowParams;
 use unblock_mcp::tools::update::UpdateParams;
 
+mod common;
+use common::{new_mock, state_with_mock};
+
 // ── Test fixtures ──────────────────────────────────────────────────────
-
-/// Build a minimal, deterministic `Config` without touching the environment.
-fn test_config() -> Config {
-    Config::load_from(|key| match key {
-        "GITHUB_TOKEN" => Ok("ghp_mock_token_for_dyn_dispatch_tests".to_owned()),
-        "UNBLOCK_REPO" => Ok("acme/widgets".to_owned()),
-        _ => Err(std::env::VarError::NotPresent),
-    })
-    .expect("mock test config should load")
-}
-
-/// Build a fresh `MockGitHubClient` with the same coordinates as `test_config`.
-fn new_mock() -> Arc<MockGitHubClient> {
-    Arc::new(MockGitHubClient::new("acme", "widgets", Some(1)))
-}
-
-/// Wrap a mock in a `ServerState` whose `client` is typed as
-/// `Arc<dyn GitHubApi>`. Every handler call therefore goes through the
-/// dyn-dispatch vtable.
-fn state_with_mock(mock: Arc<MockGitHubClient>) -> ServerState {
-    let config = test_config();
-    let client: Arc<dyn GitHubApi> = mock;
-    ServerState {
-        config: Arc::new(config),
-        github: client,
-        cache: Arc::new(GraphCache::new(Duration::from_secs(300))),
-        agent_kind: OnceLock::new(),
-        agent_client: OnceLock::new(),
-        connected_at: OnceLock::new(),
-    }
-}
 
 /// Build a minimal, open `Issue` suitable for most handler stubs.
 fn make_issue(number: u64) -> Issue {
