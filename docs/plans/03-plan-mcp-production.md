@@ -46,7 +46,7 @@ Phase 03 turns the MCP server into a production-grade, installable product. Phas
 - Add new crates (still 3: core, github, mcp)
 - Change the transport (still stdio only — HTTP is Phase 05)
 - Add new MCP tools beyond the 20 from Phase 02
-- Introduce persistent storage beyond git refs (Strategy D is a persistent cache using GitHub's own Projects V2 fields)
+- Introduce persistent storage (Strategy D uses GitHub's existing Projects V2 Ready State field as a warm cache for cold start — no custom storage)
 
 **Outcome:** `v1.0.0` release. Installable on any platform. Production-grade for teams with 500+ issues.
 
@@ -56,24 +56,15 @@ Phase 03 turns the MCP server into a production-grade, installable product. Phas
 
 These rules supplement the workspace-wide rules and the Phase 02 rules.
 
-### 2.1 `git2` is vendored
-
-The persistent cache (Strategy D) uses `git2` with `vendored` feature to bundle `libgit2-sys`. This avoids system-level libgit2 dependency which varies across platforms and distributions — critical for cargo-dist cross-compilation.
-
-```toml
-[dependencies]
-git2 = { version = "0.19", features = ["vendored"] }
-```
-
-### 2.2 URL construction is centralised
+### 2.1 URL construction is centralised
 
 All GitHub URL construction (REST, GraphQL, raw content) goes through `GitHubClient` methods that respect `api_base_url`. No hardcoded `api.github.com` strings outside of `Config::default()`. GHE Server URL resolution (`/api/v3` → strip for GraphQL) is in one place: `GitHubClient::graphql_url()`.
 
-### 2.3 Authentication is trait-based
+### 2.2 Authentication is trait-based
 
 `GitHubAuth` trait with two implementations: `TokenAuth` (PAT, existing) and `AppAuth` (GitHub App, new). The `GitHubClient` accepts `Box<dyn GitHubAuth>`. This keeps auth strategy swappable without modifying client internals.
 
-### 2.4 Distribution artefacts are not in the main repo
+### 2.3 Distribution artefacts are not in the main repo
 
 The Homebrew tap lives in `websublime/homebrew-tap`. The npm package lives in `websublime/unblock-npm`. cargo-dist manages the release workflow in `.github/workflows/release.yml`. These external repos are referenced but not managed by this plan — they are infrastructure.
 
@@ -101,7 +92,7 @@ unblock-github/src/
 ```
 unblock-mcp/src/
   main.rs              ← MODIFIED: auth strategy selection at startup
-  Cargo.toml           ← MODIFIED: cargo-dist metadata, git2 dependency
+  Cargo.toml           ← MODIFIED: cargo-dist metadata
 ```
 
 ### 3.4 New external repositories

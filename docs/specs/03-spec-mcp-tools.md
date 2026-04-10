@@ -115,6 +115,22 @@ bootstrap():
 
 When no project is detected (first-time use), only `init` and `setup` are functional. All other tools return `McpError` with `ProjectNotConfigured` and guidance to run `init` first.
 
+### 3.2 CLI tool mode (Phase 02)
+
+`unblock-mcp --run-tool <name> <json-params>` executes a single tool outside of MCP protocol:
+
+```
+unblock-mcp --run-tool reconcile '{"fix": true}'
+```
+
+1. Same bootstrap as MCP mode (config, auth, project resolution)
+2. Deserialise JSON params into the tool's input struct
+3. Execute the tool handler
+4. Print result JSON to stdout
+5. Exit 0 (success) or 1 (error with JSON error body)
+
+No MCP handshake, no stdio transport, no session. Used by CI workflows (GitHub Actions sentinel) and scripts. Reuses the same handler code — zero duplication.
+
 ---
 
 ## 4. Tool Specifications — Read Tools
@@ -348,18 +364,27 @@ Validation:
 
 Flow:
   1. Fetch issue, validate IssueState == Open → else IssueClosed
-  2. Close issue (REST PATCH state=closed)
-  3. Update fields: Status→closed, Ready State→closed
-  4. Add comment: "Closed: {reason}" (or "Closed" if no reason)
-  5. Invalidate cache + rebuild graph
-  6. Compute cascade: compute_unblock_cascade(id)
-  7. For each unblocked:
+  2. Compute cascade from PRE-CLOSE graph:
+     a. Ensure graph is built (from cache or fresh fetch)
+     b. compute_unblock_cascade(graph, closed_qid, issues)
+     c. Save unblocked list — the graph still contains the issue as open
+  3. Close issue (REST PATCH state=closed)
+  4. Update fields: Status→closed, Ready State→closed
+  5. Add comment: "Closed: {reason}" (or "Closed" if no reason)
+  6. Invalidate cache + rebuild graph (post-close: issue excluded from OPEN query)
+  7. For each unblocked (from step 2):
      a. Update Status→open, Ready State→ready
      b. Add comment: "Unblocked — blocker #{id} was closed"
-  8. Update cache
+  8. Update Ready State fields from new graph
+  9. Update cache
 
-API calls: 1 (fetch) + 1 (close) + 2 (fields) + 1 (comment) + 1+ (rebuild)
-           + N×3 per unblocked (2 fields + 1 comment)
+  NOTE: Cascade MUST be computed BEFORE closing the issue (step 2 before step 3).
+  After close, fetch_graph_data() returns only OPEN issues — the closed issue is
+  excluded from the rebuilt graph. compute_unblock_cascade requires the closed issue
+  to be present as a node to find its dependents via Incoming edges.
+
+API calls: 0-1 (pre-close graph) + 1 (fetch) + 1 (close) + 2 (fields) + 1 (comment)
+           + 1+ (rebuild) + N×3 per unblocked (2 fields + 1 comment)
 ```
 
 ### 5.3 `create`
@@ -711,7 +736,7 @@ merge_sections(existing_body, updates) → String:
 ### 7.4 Edge cases
 
 - **No headings in body:** Entire body is treated as description.
-- **Extra headings:** Unknown `## Foo` headings are preserved between sections but not parsed.
+- **Extra headings:** Unknown `## Foo` headings MUST be preserved during round-trip. `from_markdown` captures them as opaque `(heading, content)` pairs with their relative position. `to_markdown` emits them in original order after the three known sections. Without this, an `update` that modifies one body section would silently delete unrecognised headings added by humans or other tools.
 - **Empty sections:** A heading with no content below it → empty string for that section.
 - **Nested headings:** `### Sub-heading` within a section → treated as section content, not a new section.
 
@@ -742,6 +767,10 @@ update_ready_state_fields(state, issues, ready_set) → Result<()>:
 compute_expected_ready_state(issue, ready_set) → ReadyState:
   IF issue.state == Closed:
     RETURN Closed
+  IF issue.status == InProgress:
+    RETURN NotReady    // claimed — must not appear in ready queue
+  IF issue.status == Deferred:
+    RETURN NotReady    // deferred — must not appear in ready queue
   IF issue.qualified_id IN ready_set:
     RETURN Ready
   RETURN Blocked

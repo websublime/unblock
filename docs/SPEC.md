@@ -880,6 +880,7 @@ pub enum Error {
     GitHubApi { message: String },
     GitHubGraphQL { errors: Vec<String> },
     GitHubUnavailable { source: reqwest::Error },
+    GitHubServerError { status: u16, message: String },
     RateLimited,
     CircuitBreakerOpen,
     ProjectNotConfigured,
@@ -888,6 +889,19 @@ pub enum Error {
     OwnerDetectionFailed { owner: String, message: String },
 }
 ```
+
+**Error classification by HTTP status:**
+
+| Status | Error variant | Retryable | Circuit breaker |
+|---|---|---|---|
+| Network error | `GitHubUnavailable` | ✅ | `record_failure()` |
+| 429 | `RateLimited` | ✅ | `record_failure()` |
+| 500 | `GitHubServerError` | ❌ | `record_failure()` |
+| 502 | `GitHubServerError` | ❌ | `record_failure()` |
+| 503 | `GitHubServerError` | ✅ | `record_failure()` |
+| 4xx (except 429) | `GitHubApi` | ❌ | neither |
+
+`is_retryable()` matches `RateLimited`, `GitHubUnavailable`, and `GitHubServerError` where `status == 503`.
 
 ### 12.3 Error Code Mapping
 
