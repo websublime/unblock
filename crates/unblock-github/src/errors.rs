@@ -124,6 +124,11 @@ impl Error {
             Self::RateLimited { .. } => 429,
             Self::ProjectNotConfigured => 412,
             Self::GitRemote { .. } => 500,
+            // 502 Bad Gateway: the upstream (GitHub) returned an unexpected account
+            // type, so our server cannot produce a valid response.  This distinguishes
+            // "GitHub gave us something we don't understand" (502) from "our own logic
+            // broke" (500).  The MCP layer maps all github errors to INTERNAL_ERROR
+            // regardless, so the distinction is informational for logs/diagnostics only.
             Self::UnknownOwnerType { .. } => 502,
             #[cfg(feature = "test-hooks")]
             Self::MockNotStubbed { .. } => 500,
