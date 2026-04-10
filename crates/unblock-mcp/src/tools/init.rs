@@ -56,15 +56,14 @@ pub struct InitResult {
 mod tests {
     use super::*;
 
-    /// Mirrors the construction in `server.rs` for the "already exists" branch
-    /// (lines 426-440). Asserts content of each field, not just non-emptiness.
+    /// Constructs an `InitResult` for the "already exists" case and asserts
+    /// content of each field, not just non-emptiness.
     #[test]
     fn existing_project_result_contains_project_number_in_hint() {
         let project_number: u64 = 42;
         let url = String::from("https://github.com/orgs/acme/projects/42");
         let scope = String::from("org");
 
-        // Construction mirrors server.rs existing-project path exactly.
         let result = InitResult {
             project_number,
             url: url.clone(),
@@ -95,15 +94,14 @@ mod tests {
         );
     }
 
-    /// Mirrors the construction in `server.rs` for the "newly created" branch
-    /// (lines 467-481). Asserts content of each field, not just non-emptiness.
+    /// Constructs an `InitResult` for the "newly created" case and asserts
+    /// content of each field, not just non-emptiness.
     #[test]
     fn created_project_result_contains_project_number_in_hint() {
         let project_number: u64 = 7;
         let url = String::from("https://github.com/orgs/acme/projects/7");
         let scope = String::from("org");
 
-        // Construction mirrors server.rs created-project path exactly.
         let result = InitResult {
             project_number,
             url: url.clone(),
