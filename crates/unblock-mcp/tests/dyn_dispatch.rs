@@ -77,10 +77,15 @@ fn make_issue(number: u64) -> Issue {
     }
 }
 
-/// Helper: a minimal `ProjectFieldIds` with empty option maps. Not currently
-/// used by these tests because handlers gracefully skip project-field updates
-/// when `field_ids()` returns `None`, which keeps mocks small.
-#[allow(dead_code)]
+/// A minimal `ProjectFieldIds` with empty option maps.
+///
+/// When pushed via `mock.push_field_ids(Some(empty_field_ids()))`, handlers
+/// enter the `field_ids = Some(...)` branch and call `resolve_project_info`
+/// and `get_project_item_id`. Because the option maps are empty, no
+/// `update_field` calls are made for select-option fields (`status`,
+/// `priority`, `issue_type`, `ready_state`). Plain-text and numeric fields
+/// (`agent`, `story_points`, `defer_until`) bypass the option map and DO
+/// call `update_field`.
 fn empty_field_ids() -> ProjectFieldIds {
     let meta = || FieldMeta {
         field_id: "f".to_owned(),
@@ -284,12 +289,21 @@ async fn ready_dispatches_through_dyn_vtable() {
 async fn claim_dispatches_through_dyn_vtable() {
     let mock = new_mock();
     // claim uses execute_write_tool → fetch_issue, add_comment, rebuild via
-    // fetch_graph_data. field_ids returns None so project-field updates are
-    // skipped, keeping the stub set minimal.
+    // fetch_graph_data. field_ids returns Some so the handler enters the
+    // project-field update branch. With empty option maps, only the
+    // unconditional Agent text-field update calls update_field.
     mock.push_fetch_issue(Ok(make_issue(7)));
     mock.push_add_comment(Ok(
         "https://github.com/acme/widgets/issues/7#comment-1".to_owned()
     ));
+    mock.push_field_ids(Some(empty_field_ids()));
+    mock.push_resolve_project_info(Ok(ProjectInfo {
+        id: "PVT_1".to_owned(),
+        number: 1,
+    }));
+    mock.push_get_project_item_id(Ok("PVTI_claim".to_owned()));
+    // Agent field update is unconditional (not gated by options map).
+    mock.push_update_field(Ok(()));
     mock.push_fetch_graph_data(Ok((vec![make_issue(7)], vec![])));
 
     let server = UnblockServer::new(state_with_mock(Arc::clone(&mock)));
@@ -307,6 +321,11 @@ async fn claim_dispatches_through_dyn_vtable() {
     assert_eq!(mock.calls().add_comment(), 1);
     assert_eq!(mock.calls().fetch_graph_data(), 1);
     assert_eq!(mock.calls().field_ids(), 1);
+    assert_eq!(mock.calls().resolve_project_info(), 1);
+    assert_eq!(mock.calls().get_project_item_id(), 1);
+    // Only the Agent text-field update fires; option-gated fields (Status,
+    // ReadyState) are skipped because empty_field_ids() has empty option maps.
+    assert_eq!(mock.calls().update_field(), 1);
 }
 
 #[tokio::test]
@@ -348,6 +367,15 @@ async fn close_dispatches_through_dyn_vtable() {
     let mock = new_mock();
     mock.push_fetch_issue(Ok(make_issue(8)));
     mock.push_close_issue(Ok(()));
+    // field_ids=Some enters the project-field update branch. With empty
+    // option maps, no update_field calls are made (Status=Done and
+    // ReadyState=Not Ready are both gated by options.get()).
+    mock.push_field_ids(Some(empty_field_ids()));
+    mock.push_resolve_project_info(Ok(ProjectInfo {
+        id: "PVT_1".to_owned(),
+        number: 1,
+    }));
+    mock.push_get_project_item_id(Ok("PVTI_close".to_owned()));
     mock.push_fetch_graph_data(Ok((vec![make_issue(8)], vec![])));
 
     let server = UnblockServer::new(state_with_mock(Arc::clone(&mock)));
@@ -364,6 +392,10 @@ async fn close_dispatches_through_dyn_vtable() {
     assert_eq!(mock.calls().fetch_issue(), 1);
     assert_eq!(mock.calls().close_issue(), 1);
     assert_eq!(mock.calls().fetch_graph_data(), 1);
+    assert_eq!(mock.calls().field_ids(), 1);
+    assert_eq!(mock.calls().resolve_project_info(), 1);
+    assert_eq!(mock.calls().get_project_item_id(), 1);
+    assert_eq!(mock.calls().update_field(), 0);
 }
 
 #[tokio::test]
@@ -401,6 +433,15 @@ async fn depends_dispatches_through_dyn_vtable() {
     let mock = new_mock();
     mock.push_fetch_issue(Ok(make_issue(3))); // source
     mock.push_add_blocked_by_ref(Ok(()));
+    // field_ids=Some enters the project-field update branch. With empty
+    // option maps, no update_field calls are made (ReadyState=Not Ready
+    // and Status=Blocked are both gated by options.get()).
+    mock.push_field_ids(Some(empty_field_ids()));
+    mock.push_resolve_project_info(Ok(ProjectInfo {
+        id: "PVT_1".to_owned(),
+        number: 1,
+    }));
+    mock.push_get_project_item_id(Ok("PVTI_depends".to_owned()));
     mock.push_fetch_graph_data(Ok((vec![make_issue(3), make_issue(5)], vec![])));
 
     let server = UnblockServer::new(state_with_mock(Arc::clone(&mock)));
@@ -417,6 +458,10 @@ async fn depends_dispatches_through_dyn_vtable() {
     assert_eq!(mock.calls().fetch_issue(), 1);
     assert_eq!(mock.calls().add_blocked_by_ref(), 1);
     assert_eq!(mock.calls().fetch_graph_data(), 1);
+    assert_eq!(mock.calls().field_ids(), 1);
+    assert_eq!(mock.calls().resolve_project_info(), 1);
+    assert_eq!(mock.calls().get_project_item_id(), 1);
+    assert_eq!(mock.calls().update_field(), 0);
 }
 
 // ── create ─────────────────────────────────────────────────────────────
@@ -425,6 +470,15 @@ async fn depends_dispatches_through_dyn_vtable() {
 async fn create_dispatches_through_dyn_vtable() {
     let mock = new_mock();
     mock.push_create_issue(Ok(make_issue(100)));
+    // field_ids=Some enters the project-field update branch. With empty
+    // option maps, no update_field calls are made (all create fields —
+    // Priority, IssueType, Status, ReadyState — are gated by options.get()).
+    mock.push_field_ids(Some(empty_field_ids()));
+    mock.push_resolve_project_info(Ok(ProjectInfo {
+        id: "PVT_1".to_owned(),
+        number: 1,
+    }));
+    mock.push_get_project_item_id(Ok("PVTI_create".to_owned()));
     mock.push_fetch_graph_data(Ok((vec![make_issue(100)], vec![])));
 
     let server = UnblockServer::new(state_with_mock(Arc::clone(&mock)));
@@ -447,6 +501,10 @@ async fn create_dispatches_through_dyn_vtable() {
     assert_eq!(result.number, 100);
     assert_eq!(mock.calls().create_issue(), 1);
     assert_eq!(mock.calls().fetch_graph_data(), 1);
+    assert_eq!(mock.calls().field_ids(), 1);
+    assert_eq!(mock.calls().resolve_project_info(), 1);
+    assert_eq!(mock.calls().get_project_item_id(), 1);
+    assert_eq!(mock.calls().update_field(), 0);
 }
 
 // ── comment ────────────────────────────────────────────────────────────
@@ -505,6 +563,55 @@ async fn update_dispatches_through_dyn_vtable() {
     assert_eq!(result.number, 12);
     assert_eq!(mock.calls().fetch_issue(), 2);
     assert_eq!(mock.calls().fetch_graph_data(), 1);
+}
+
+/// Variant of the update test that passes `story_points=Some(5.0)` so
+/// `has_project_updates=true` and the handler enters the `field_ids=Some`
+/// branch. `story_points` bypasses the option map and calls `update_field`
+/// unconditionally, proving the full project-field vtable path is exercised.
+#[tokio::test]
+async fn update_with_project_fields_dispatches_through_dyn_vtable() {
+    let mock = new_mock();
+    // update handler fetches the issue twice (step 1 validate + step 9 re-fetch)
+    // and triggers a cache rebuild via execute_write_tool.
+    mock.push_fetch_issue(Ok(make_issue(13)));
+    mock.push_field_ids(Some(empty_field_ids()));
+    mock.push_resolve_project_info(Ok(ProjectInfo {
+        id: "PVT_1".to_owned(),
+        number: 1,
+    }));
+    mock.push_get_project_item_id(Ok("PVTI_update".to_owned()));
+    // story_points update_field call (bypasses option map).
+    mock.push_update_field(Ok(()));
+    mock.push_fetch_issue(Ok(make_issue(13)));
+    mock.push_fetch_graph_data(Ok((vec![make_issue(13)], vec![])));
+
+    let server = UnblockServer::new(state_with_mock(Arc::clone(&mock)));
+    let Json(result) = server
+        .update(Parameters(UpdateParams {
+            id: 13,
+            priority: None,
+            status: None,
+            labels_add: None,
+            labels_remove: None,
+            assignees_add: None,
+            assignees_remove: None,
+            body_section: None,
+            milestone: None,
+            story_points: Some(5.0),
+            defer_until: None,
+        }))
+        .await
+        .expect("update with story_points should succeed via dyn dispatch");
+
+    assert_eq!(result.number, 13);
+    assert_eq!(mock.calls().fetch_issue(), 2);
+    assert_eq!(mock.calls().fetch_graph_data(), 1);
+    assert_eq!(mock.calls().field_ids(), 1);
+    assert_eq!(mock.calls().resolve_project_info(), 1);
+    assert_eq!(mock.calls().get_project_item_id(), 1);
+    // story_points calls update_field directly (no option map gating).
+    assert_eq!(mock.calls().update_field(), 1);
 }
 
 // ── prime ──────────────────────────────────────────────────────────────
