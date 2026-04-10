@@ -596,7 +596,7 @@ Read operation (ready, prime, stats, list, dep_cycles)
   │       └─→ fetch_graph_data()     → rebuild → cache.update(graph)
   └─→ cache.get() == Empty           → fetch_graph_data() → rebuild → cache.update(graph)
 
-show / fetch_issue (single issue with comments)
+show / fetch_issue_ref (single issue with comments)
   └─→ ALWAYS fetches fresh from GitHub (1 API call)
       No caching. Comments contain COMPLETED/DECISION/DEVIATION markers
       required for session context reconstruction. Stale comments = incorrect reviews.
