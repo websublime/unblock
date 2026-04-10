@@ -4,7 +4,7 @@
 //! access to GitHub. They are skipped automatically when `GITHUB_TOKEN` is not
 //! set.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use rmcp::handler::server::wrapper::{Json, Parameters};
@@ -15,17 +15,15 @@ use unblock_core::types::{
     BlockingEdge, IssueComment, IssueRef, IssueState, IssueType, Priority, QualifiedId, ReadyState,
     Status,
 };
-use unblock_github::GitHubApi;
 use unblock_github::client::GitHubClient;
-use unblock_github::mock::MockGitHubClient;
 use unblock_github::projects::{CreateViewParams, OwnerType, ViewLayout};
-use unblock_mcp::server::{ServerState, UnblockServer};
+use unblock_mcp::server::UnblockServer;
 use unblock_mcp::tools::reconcile::ReconcileParams;
 use unblock_mcp::tools::setup::REQUIRED_VIEWS;
 use unblock_mcp::tools::show::ShowParams;
 
 mod common;
-use common::{has_github_token, test_server_state};
+use common::{has_github_token, new_mock, state_with_mock, test_server_state};
 
 /// Helper to create a `QualifiedId` for tests.
 fn qid(number: u64) -> QualifiedId {
@@ -60,36 +58,6 @@ fn test_issue(number: u64, state: IssueState) -> unblock_core::types::Issue {
         blocking: vec![],
         parent: None,
         sub_issues: vec![],
-    }
-}
-
-/// Build a `Config` without touching the environment, matching `MockGitHubClient`.
-fn mock_test_config() -> Config {
-    Config::load_from(|key| match key {
-        "GITHUB_TOKEN" => Ok("ghp_mock_token_for_integration_tests".to_owned()),
-        "UNBLOCK_REPO" => Ok("acme/widgets".to_owned()),
-        _ => Err(std::env::VarError::NotPresent),
-    })
-    .expect("mock test config should load")
-}
-
-/// Build a fresh `MockGitHubClient` with fixed coordinates `acme/widgets`.
-fn new_mock() -> Arc<MockGitHubClient> {
-    Arc::new(MockGitHubClient::new("acme", "widgets", Some(1)))
-}
-
-/// Wrap a mock in a `ServerState` whose `github` field is typed as
-/// `Arc<dyn GitHubApi>`, so handler calls traverse the dyn-dispatch vtable.
-fn state_with_mock(mock: Arc<MockGitHubClient>) -> ServerState {
-    let config = mock_test_config();
-    let client: Arc<dyn GitHubApi> = mock;
-    ServerState {
-        config: Arc::new(config),
-        github: client,
-        cache: Arc::new(GraphCache::new(Duration::from_secs(300))),
-        agent_kind: OnceLock::new(),
-        agent_client: OnceLock::new(),
-        connected_at: OnceLock::new(),
     }
 }
 
