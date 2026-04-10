@@ -173,3 +173,50 @@ pub struct ShowComment {
     /// Timestamp when the comment was created (ISO 8601 / RFC 3339).
     pub created_at: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use unblock_core::types::{IssueState, RelatedIssue};
+
+    use super::ShowRelatedIssue;
+
+    /// Helper to build a `RelatedIssue` with the given state.
+    fn related_issue(state: IssueState) -> RelatedIssue {
+        RelatedIssue {
+            number: 1,
+            title: String::from("test"),
+            state,
+        }
+    }
+
+    /// The `From<&RelatedIssue>` conversion writes `IssueState::Open` as
+    /// the literal string `"Open"` into the MCP wire response. This test
+    /// locks that value so any future change to `IssueState`'s `Display`
+    /// impl is caught before reaching MCP consumers.
+    #[test]
+    fn related_issue_state_string_open() {
+        let show = ShowRelatedIssue::from(&related_issue(IssueState::Open));
+        assert_eq!(show.state, "Open");
+    }
+
+    /// Same as [`related_issue_state_string_open`] but for the `Closed`
+    /// variant.
+    #[test]
+    fn related_issue_state_string_closed() {
+        let show = ShowRelatedIssue::from(&related_issue(IssueState::Closed));
+        assert_eq!(show.state, "Closed");
+    }
+
+    /// Verify that the conversion copies `number` and `title` unchanged.
+    #[test]
+    fn related_issue_copies_number_and_title() {
+        let ri = RelatedIssue {
+            number: 42,
+            title: String::from("Important task"),
+            state: IssueState::Open,
+        };
+        let show = ShowRelatedIssue::from(&ri);
+        assert_eq!(show.number, 42);
+        assert_eq!(show.title, "Important task");
+    }
+}
