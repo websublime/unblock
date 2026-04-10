@@ -539,13 +539,13 @@ mod tests {
         })
         .expect("test config should load");
 
-        let client = unblock_github::client::GitHubClient::new(&config)
+        let github = unblock_github::client::GitHubClient::new(&config)
             .await
             .expect("test client should initialize");
 
         ServerState {
             config: Arc::new(config),
-            github: Arc::new(client) as Arc<dyn unblock_github::GitHubApi>,
+            github: Arc::new(github) as Arc<dyn unblock_github::GitHubApi>,
             cache: Arc::new(GraphCache::new(Duration::from_secs(300))),
             agent_kind: std::sync::OnceLock::new(),
             agent_client: std::sync::OnceLock::new(),
@@ -564,10 +564,10 @@ mod tests {
         })
         .expect("test config should load");
 
-        let client: Arc<dyn unblock_github::GitHubApi> = mock;
+        let github: Arc<dyn unblock_github::GitHubApi> = mock;
         ServerState {
             config: Arc::new(config),
-            github: client,
+            github,
             cache: Arc::new(GraphCache::new(Duration::from_secs(300))),
             agent_kind: std::sync::OnceLock::new(),
             agent_client: std::sync::OnceLock::new(),
