@@ -1390,10 +1390,10 @@ API calls: 1 (owner type check, REST) + 1 (resolve owner node ID, GraphQL)
 
 Note: Step 2 (resolve owner node ID) is required because the GitHub GraphQL
   `createProjectV2` mutation accepts `ownerId` as a node ID (opaque GraphQL
-  global ID), not a login string. The REST owner-type probe in step 1 only
-  yields the login, so a separate GraphQL lookup is needed to obtain the node
-  ID before the mutation can be issued. This is an unavoidable GitHub API
-  constraint.
+  global ID), not a login string. The REST owner-type probe in step 1
+  determines only whether the owner is an organisation or a user; a separate
+  GraphQL lookup is still needed to resolve the owner node ID required by the
+  mutation. This is an unavoidable GitHub API constraint.
 
 Idempotent: safe to run multiple times.
 ```
