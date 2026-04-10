@@ -46,9 +46,9 @@ pub async fn test_server_state() -> ServerState {
         config: Arc::new(config),
         github: Arc::new(client),
         cache: Arc::new(GraphCache::new(Duration::from_secs(300))),
-        agent_kind: std::sync::OnceLock::new(),
-        agent_client: std::sync::OnceLock::new(),
-        connected_at: std::sync::OnceLock::new(),
+        agent_kind: OnceLock::new(),
+        agent_client: OnceLock::new(),
+        connected_at: OnceLock::new(),
     }
 }
 
