@@ -717,6 +717,8 @@ mod tests {
     // of the enums below without updating the corresponding Display test
     // array.  No wildcard (`_`) arm — that would defeat the purpose.
 
+    // ── IssueType Display ─────────────────────────────────────────────
+
     fn _assert_all_issue_type_variants_covered(v: IssueType) {
         match v {
             IssueType::Task
@@ -727,8 +729,6 @@ mod tests {
             | IssueType::Spike => {}
         }
     }
-
-    // ── IssueType Display ─────────────────────────────────────────────
 
     #[test]
     fn issue_type_display_renders_without_quotes() {
