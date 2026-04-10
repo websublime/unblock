@@ -5,7 +5,7 @@
 > Crates: `unblock-core`, `unblock-github`, `unblock-mcp`  
 > Depends on: Phase 01 (MCP Foundation) ✅  
 > Required by: Phase 03 (MCP Production)  
-> Status: not started  
+> Status: partially implemented (Epics 01, 02, 08 done early during Phase 01)  
 > Companion spec: [03-spec-mcp-tools.md](../specs/03-spec-mcp-tools.md)
 
 ---
@@ -33,7 +33,7 @@
 
 ## 1. Purpose
 
-Phase 02 hardens the MCP server for production use. Phase 01 delivered the complete agent workflow loop — `prime` → `ready` → `claim` → work → `close` → cascade — with 17 tools, a graph engine, and a TTL cache. Phase 02 addresses the gaps that emerge when the server operates in the real world:
+Phase 02 hardens the MCP server for production use. Phase 01 delivers the complete agent workflow loop — `prime` → `ready` → `claim` → work → `close` → cascade — with 17 tools, a graph engine, and a TTL cache. Phase 02 addresses the gaps that emerge when the server operates in the real world:
 
 1. **Semantic drift.** GitHub is an open system. A human can close an issue, remove a blocking edge, or edit a Projects V2 field via the GitHub UI. The in-memory graph diverges. The `reconcile` tool detects and repairs 7 drift types — `StaleReadyState`, `UncascadedClosure`, `OrphanedBlockingEdge`, `MalformedAgentField`, `MissingProjectField`, `CycleDetected`, `StaleClaim`.
 
@@ -145,6 +145,8 @@ Every task carries three metadata fields:
 **Goal:** A pure Rust engine that detects 7 types of semantic drift between the computed dependency graph and GitHub reality. No I/O, no async — receives pre-fetched data, returns a `DriftReport`.
 
 **Crate:** `unblock-core`
+
+**Status:** ✅ Implemented early during Phase 01. `DriftKind` (7 variants), `DriftReport`, `ReconcileEngine` with 6-pass analysis exist in `unblock-core/src/reconcile.rs`.
 
 ---
 
@@ -332,6 +334,8 @@ pub struct BlockingEdge {
 **Goal:** MCP tool handler that fetches fresh data from GitHub, runs the reconciliation engine, optionally repairs drift, and updates the cache.
 
 **Crate:** `unblock-mcp`
+
+**Status:** ✅ Implemented early during Phase 01. `ReconcileParams`, `ReconcileOutput`, and handler exist in `unblock-mcp/src/tools/reconcile.rs`. Tool registered in server. Auto-repair stubs present — repair logic needs completion.
 
 ---
 
@@ -1007,6 +1011,8 @@ Requirements:
 **Goal:** Identify which AI client is connected and surface this in logs, `prime` output, and tracing spans — without affecting tool behaviour.
 
 **Crate:** `unblock-core` (types), `unblock-mcp` (integration)
+
+**Status:** ✅ Implemented early during Phase 01. `AgentKind`, `AgentClient` in `unblock-core/src/client.rs`. `ClientDetector` in `unblock-core/src/detection.rs`. Integrated in `ServerState` via `OnceLock<AgentKind>`.
 
 ---
 
