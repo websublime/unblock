@@ -226,13 +226,74 @@ impl UnblockServer {
 /// should pass `"Blocked"` when the issue has blockers, or `"Backlog"` otherwise
 /// (per PRD section 6.1 and ARCH section 10.4).
 ///
-/// Exposed as `#[doc(hidden)] pub` so external integration tests under
-/// `tests/` can drive project field updates through the same code path the
-/// production server uses, eliminating duplicated test helpers. Not part of
-/// the stable surface — consumers outside this crate must not depend on it.
-#[doc(hidden)]
+/// Exposed to integration tests when the `test-hooks` feature is enabled.
+/// Production builds keep this `pub(crate)` so it never appears on the
+/// library surface.
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "test-hooks")]
 pub async fn set_project_fields(
+    client: &dyn GitHubApi,
+    project_id: &str,
+    item_id: &str,
+    field_ids: &unblock_github::projects::ProjectFieldIds,
+    priority: &str,
+    issue_type: &str,
+    status: &str,
+    ready_state: &str,
+    story_points: Option<f64>,
+    defer_until: Option<chrono::NaiveDate>,
+) {
+    set_project_fields_inner(
+        client,
+        project_id,
+        item_id,
+        field_ids,
+        priority,
+        issue_type,
+        status,
+        ready_state,
+        story_points,
+        defer_until,
+    )
+    .await;
+}
+
+/// Non-public variant compiled when `test-hooks` is disabled.
+#[allow(clippy::too_many_arguments)]
+#[cfg(not(feature = "test-hooks"))]
+pub(crate) async fn set_project_fields(
+    client: &dyn GitHubApi,
+    project_id: &str,
+    item_id: &str,
+    field_ids: &unblock_github::projects::ProjectFieldIds,
+    priority: &str,
+    issue_type: &str,
+    status: &str,
+    ready_state: &str,
+    story_points: Option<f64>,
+    defer_until: Option<chrono::NaiveDate>,
+) {
+    set_project_fields_inner(
+        client,
+        project_id,
+        item_id,
+        field_ids,
+        priority,
+        issue_type,
+        status,
+        ready_state,
+        story_points,
+        defer_until,
+    )
+    .await;
+}
+
+/// Shared implementation for [`set_project_fields`].
+///
+/// Delegates to this inner function so the two `cfg`-gated wrappers
+/// (one `pub`, one `pub(crate)`) share a single body.
+#[allow(clippy::too_many_arguments)]
+async fn set_project_fields_inner(
     client: &dyn GitHubApi,
     project_id: &str,
     item_id: &str,
