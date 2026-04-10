@@ -127,7 +127,7 @@ Skills are the unified entry point for both Claude Code and Copilot CLI:
 - **Quality gates** — `/ship` (pre-merge readiness check: review passed? QA passed? dependencies closed?)
 - **Setup** — `/setup` (bootstrap: GitHub labels, milestone, Projects V2, editor configs, hooks), `/need` (intent-based agent discovery and installation), `/doctor` (diagnostic: MCP health, GitHub state, local environment)
 
-Nine named agents — each a `.md` configuration file, not compiled code:
+Eight named agents — each a `.md` configuration file, not compiled code — plus dynamic implementation supervisors generated per-project by `/need`:
 
 | Agent | Name | Role | Model |
 |---|---|---|---|

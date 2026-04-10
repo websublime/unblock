@@ -3,8 +3,8 @@
 > Version: 0.1-draft  
 > Status: Working Draft  
 > Companions: [MANIFESTO.md](./MANIFESTO.md) · [PRD.md](./PRD.md)  
-> Plans: [01-mcp-foundation](./plans/01-plan-mcp-foundation.md) · [02-mcp-complete](./plans/02-plan-mcp-complete.md) · [03-mcp-production](./plans/03-plan-mcp-production.md) · [04-plugin](./plans/04-plan-plugin.md) · [05-remote-server](./plans/05-plan-remote-server.md) · [06-llm-agent](./plans/06-plan-llm-agent.md) · [07-harness](./plans/07-plan-harness.md)  
-> Specs: [01-graph-engine](./specs/01-spec-graph-engine.md) · [02-github-client](./specs/02-spec-github-client.md) · [03-mcp-tools](./specs/03-spec-mcp-tools.md) · [04-plugin-pipeline](./specs/04-spec-plugin-pipeline.md) · [05-remote-server](./specs/05-spec-remote-server.md) · [06-llm-agent](./specs/06-spec-llm-agent.md)
+> Plans: [01-mcp-foundation](./plans/01-plan-mcp-foundation.md) · [02-mcp-complete](./plans/02-plan-mcp-complete.md) · [03-mcp-production](./plans/03-plan-mcp-production.md) · 04-plugin (planned) · 05-remote-server (planned) · 06-llm-agent (planned) · 07-harness (planned)  
+> Specs: [01-graph-engine](./specs/01-spec-graph-engine.md) · [02-github-client](./specs/02-spec-github-client.md) · [03-mcp-tools](./specs/03-spec-mcp-tools.md) · 04-plugin-pipeline (planned) · 05-remote-server (planned) · 06-llm-agent (planned)
 
 ---
 
@@ -301,9 +301,15 @@ After `resolve_project()`, the server validates all 7 required Projects V2 field
 
 Single-process architecture. Multiple agents on separate stdio connections share the in-memory cache. Last writer wins — no optimistic locking. Acceptable because GitHub is the source of truth and write operations always invalidate + rebuild.
 
-### 4.7 Persistent Cache (Phase 03, planned)
+### 4.7 Materialised Fast Path (Phase 03, planned)
 
-Git object cache using `refs/unblock/*` in the repository's `.git/objects/`. Persists computed subgraphs across process restarts. Never stores issue content or mutations. Discardable — deleting all `refs/unblock/*` refs returns to pure in-memory behaviour. Library: `git2` with vendored `libgit2-sys`.
+On cold start, the server reads Ready State field values directly from Projects V2 instead of waiting for a full graph rebuild. These field values are written by the MCP server on every mutation and by `reconcile`, so they approximate the ready set. The server serves this approximate result immediately and rebuilds the full graph asynchronously in the background.
+
+Once the graph rebuild completes (typically 1-3 seconds), subsequent `ready` calls use the authoritative graph. The fast path result is marked with `source: Field` so the agent knows it is approximate.
+
+The fast path is read-only — it never writes to GitHub. No new dependencies. No persistent storage. The existing Ready State field is both the human-visible board column and the cold start cache.
+
+→ Detailed algorithm: [01-spec-graph-engine.md §10](./specs/01-spec-graph-engine.md#10-fast-path-algorithm-phase-03)
 
 ---
 

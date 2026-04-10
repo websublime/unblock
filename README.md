@@ -12,12 +12,14 @@ docs/
 ├── MANIFESTO.md          ← Soul of the product: why, beliefs, immutable laws
 ├── PRD.md                ← Requirements: personas, market, phases, metrics
 ├── SPEC.md               ← Master technical specification (all systems)
-├── plans/                ← Per-crate implementation plans (numbered)
-│   ├── 01-plan-unblock-core.md
-│   └── ...
+├── plans/                ← Per-phase implementation plans (numbered)
+│   ├── 01-plan-mcp-foundation.md
+│   ├── 02-plan-mcp-complete.md
+│   └── 03-plan-mcp-production.md
 └── specs/                ← Per-component detailed specs (numbered)
-    ├── 01-spec-core.md
-    └── ...
+    ├── 01-spec-graph-engine.md
+    ├── 02-spec-github-client.md
+    └── 03-spec-mcp-tools.md
 ```
 
 ## Document hierarchy — abstract to concrete
@@ -40,20 +42,7 @@ docs/
 
 ## Source material
 
-The `docs-old/` directory contains the original documentation written before this structure was adopted. It is being migrated into the structure above.
-
-| Original | Migration target |
-|----------|-----------------|
-| `unblock-prd-github.md` | `docs/PRD.md` |
-| `unblock-prd-plugin.md` | `docs/PRD.md` (plugin phase) |
-| `unblock-architecture-github.md` | `docs/SPEC.md` + `docs/specs/` |
-| `unblock-architecture-plugin.md` | `docs/SPEC.md` + `docs/specs/` |
-| `unblock-cicd-architecture.md` | `docs/specs/` (CI/CD spec) |
-| `unblock-project-plan.md` | `docs/plans/` |
-| `unblock-reconciliation-plan.md` | `docs/plans/` |
-| `unblock-epic-agent-client-detection.md` | `docs/plans/` |
-| `research/` | preserved as-is |
-| `specs/` | merged into `docs/specs/` |
+The `docs/archive/` directory contains the original documentation written before this structure was adopted. Preserved for reference but superseded by the documents above.
 
 ## License
 

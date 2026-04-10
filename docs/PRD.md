@@ -3,8 +3,8 @@
 > Version: 0.1-draft  
 > Status: Working Draft  
 > Companions: [MANIFESTO.md](./MANIFESTO.md) · [SPEC.md](./SPEC.md)  
-> Plans: [01-mcp-foundation](./plans/01-plan-mcp-foundation.md) · [02-mcp-complete](./plans/02-plan-mcp-complete.md) · [03-mcp-production](./plans/03-plan-mcp-production.md) · [04-plugin](./plans/04-plan-plugin.md) · [05-remote-server](./plans/05-plan-remote-server.md) · [06-llm-agent](./plans/06-plan-llm-agent.md) · [07-harness](./plans/07-plan-harness.md)  
-> Specs: [01-graph-engine](./specs/01-spec-graph-engine.md) · [02-github-client](./specs/02-spec-github-client.md) · [03-mcp-tools](./specs/03-spec-mcp-tools.md) · [04-plugin-pipeline](./specs/04-spec-plugin-pipeline.md) · [05-remote-server](./specs/05-spec-remote-server.md) · [06-llm-agent](./specs/06-spec-llm-agent.md)
+> Plans: [01-mcp-foundation](./plans/01-plan-mcp-foundation.md) · [02-mcp-complete](./plans/02-plan-mcp-complete.md) · [03-mcp-production](./plans/03-plan-mcp-production.md) · 04-plugin (planned) · 05-remote-server (planned) · 06-llm-agent (planned) · 07-harness (planned)  
+> Specs: [01-graph-engine](./specs/01-spec-graph-engine.md) · [02-github-client](./specs/02-spec-github-client.md) · [03-mcp-tools](./specs/03-spec-mcp-tools.md) · 04-plugin-pipeline (planned) · 05-remote-server (planned) · 06-llm-agent (planned)
 
 ---
 
@@ -285,11 +285,15 @@ Each phase corresponds to one plan document. Phases are sequential — a phase s
 
 ### Phase 01 — MCP Foundation (v0.1.0) → [01-plan-mcp-foundation.md](./plans/01-plan-mcp-foundation.md)
 
-**Status:** ✅ Implemented
+**Status:** In Progress (11 of 17 tools implemented, 6 remaining)
 
 The minimum viable loop. An agent can find work, claim it, create and edit issues, complete work, and see the cascade. Local binary, stdio transport.
 
-**Scope:** 17 MCP tools — `init`, `setup`, `ready`, `claim`, `create`, `update`, `close`, `reopen`, `show`, `list`, `search`, `stats`, `prime`, `comment`, `depends`, `dep_remove`, `dep_cycles`. Cargo workspace (3 crates), CI pipeline, graph engine (petgraph), TTL cache, GitHub client (GraphQL + REST), MCP server (rmcp, stdio), integration tests.
+**Scope:** 17 MCP tools — `init`, `setup`, `ready`, `claim`, `create`, `update`, `close`, `reopen`, `show`, `list`, `search`, `stats`, `prime`, `comment`, `depends`, `dep_remove`, `dep_cycles`. Cargo workspace (3 crates), CI pipeline, graph engine (petgraph), TTL cache, GitHub client (GraphQL + REST), MCP server (rmcp, stdio), `GitHubApi` trait abstraction with `MockGitHubClient`, integration tests.
+
+**Implemented:** `init`, `setup`, `ready`, `claim`, `create`, `update`, `close`, `show`, `prime`, `comment`, `depends`. Plus `reconcile` (Phase 02 early) and agent detection (Phase 02 early).
+
+**Remaining:** `reopen`, `list`, `search`, `stats`, `dep_remove`, `dep_cycles`. See [Plan 01 Epic 06](./plans/01-plan-mcp-foundation.md#epic-06--foundation-completion).
 
 **Outcome:** A working local MCP server that any MCP client can connect to via stdio. The full agent workflow loop: `prime` → `ready` → `claim` → work → `close` → cascade.
 
