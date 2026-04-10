@@ -6,6 +6,11 @@ license.workspace = true
 repository.workspace = true
 description = "MCP server binary for unblock — 17 tools for dependency-aware task tracking"
 
+[features]
+# Exposes test-only helpers (e.g. `set_project_fields`) for integration tests
+# under `tests/`. Off by default — production builds never expose them.
+test-hooks = []
+
 [lints]
 workspace = true
 
@@ -34,3 +39,7 @@ snafu = { workspace = true }
 [dev-dependencies]
 reqwest = { workspace = true }
 unblock-github = { path = "../unblock-github", features = ["test-hooks"] }
+
+[[test]]
+name = "e2e_workflow"
+required-features = ["test-hooks"]
