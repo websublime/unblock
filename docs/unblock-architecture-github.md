@@ -1169,7 +1169,7 @@ Output: ShowResult { issue with full details, parsed body sections, deps, commen
 Accepts `owner/repo#number` for cross-repo issues.
 
 Flow:
-  1. Single GraphQL query (fetch_issue with comments, blockedBy, blocking, parent, subIssues, fields)
+  1. Single GraphQL query (fetch_issue_ref with comments, blockedBy, blocking, parent, subIssues, fields)
   2. Parse body sections (BodySections::from_markdown)
   3. Return
 
