@@ -836,12 +836,13 @@ impl GitHubClient {
     /// Single GraphQL query with pagination, returns everything needed for graph construction.
     pub async fn fetch_graph_data(&self) -> Result<(Vec<Issue>, Vec<BlockingEdge>), Error> { /* ... */ }
 
-    /// Fetch a single issue with full details (for `show` tool).
+    /// Fetch a single issue by number in the configured repository (for `show` tool).
     pub async fn fetch_issue(&self, number: u64) -> Result<Issue, Error> { /* ... */ }
 
-    // **Cross-repo scope:** `fetch_issue` accepts `IssueRef` to support showing
-    // cross-repo issues. For `Local` refs, uses `self.owner()/self.repo()`.
-    // For `CrossRepo` refs, queries the specified repo.
+    /// Fetch a single issue identified by an `IssueRef`.
+    /// Resolves `Local` refs against the configured repository and
+    /// `CrossRepo` refs against the specified `owner/repo`.
+    pub async fn fetch_issue_ref(&self, issue_ref: &IssueRef) -> Result<Issue, Error> { /* ... */ }
 
     /// Low-level GraphQL request. Uses `self.graphql_url()` for endpoint resolution.
     async fn graphql(&self, query: &str, variables: serde_json::Value) -> Result<serde_json::Value, Error> { /* ... */ }
@@ -896,7 +897,7 @@ impl GitHubClient {
 | Operation | Cross-repo support | Rationale |
 |---|---|---|
 | `depends` / `dep_remove` | YES — accepts `IssueRef` | Dependencies are the core cross-repo use case |
-| `show` / `fetch_issue` | YES — accepts `IssueRef` | Need to inspect cross-repo blockers |
+| `show` / `fetch_issue_ref` | YES — accepts `&IssueRef` | Need to inspect cross-repo blockers; `fetch_issue(u64)` handles local-only numeric lookups |
 | `close`, `reopen`, `update`, `claim`, `comment` | NO — current repo only | Write operations scoped to configured repo for safety |
 | `create` (`blocked_by` param) | YES — accepts `IssueRef` array | Cross-repo deps at creation time |
 
