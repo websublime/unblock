@@ -640,21 +640,21 @@ impl UnblockServer {
 
         let include_comments = params.include_comments.unwrap_or(true);
         let include_deps = params.include_deps.unwrap_or(true);
-        let issue_str = params.issue.clone();
 
         info!(
             agent.kind = %kind,
-            issue = %issue_str,
+            issue = %params.issue,
             include_comments, include_deps, "Show tool invoked"
         );
 
         // Parse the input string into an IssueRef. Mirrors the `depends`
         // handler's parsing so error messages stay consistent.
-        let issue_ref = issue_str
+        let issue_ref = params
+            .issue
             .parse::<unblock_core::types::IssueRef>()
             .map_err(|e| ErrorData {
                 code: rmcp::model::ErrorCode::INVALID_PARAMS,
-                message: format!("Invalid issue reference '{issue_str}': {e}").into(),
+                message: format!("Invalid issue reference '{}': {e}", params.issue).into(),
                 data: None,
             })?;
 
