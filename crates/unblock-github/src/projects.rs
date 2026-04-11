@@ -85,7 +85,7 @@ pub enum FieldValue {
 /// Used by the setup tool to report which fields were created vs. skipped,
 /// and by the dry-run mode to check field presence without mutating.
 ///
-/// Derived at compile time from [`REQUIRED_FIELDS`] so the two lists cannot
+/// Derived at compile time from `REQUIRED_FIELDS` (private) so the two lists cannot
 /// drift: adding, removing, or renaming a field in `REQUIRED_FIELDS`
 /// automatically updates this slice.
 pub const REQUIRED_FIELD_NAMES: &[&str] = &required_field_names();
