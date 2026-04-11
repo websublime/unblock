@@ -91,7 +91,7 @@ pub enum FieldValue {
 pub const REQUIRED_FIELD_NAMES: &[&str] = &required_field_names();
 
 /// Compile-time derivation of the canonical field name list from
-/// [`REQUIRED_FIELDS`]. Kept private — callers use [`REQUIRED_FIELD_NAMES`].
+/// `REQUIRED_FIELDS` (private). Kept private — callers use `REQUIRED_FIELD_NAMES`.
 const fn required_field_names() -> [&'static str; REQUIRED_FIELDS.len()] {
     let mut names = [""; REQUIRED_FIELDS.len()];
     let mut i = 0;
