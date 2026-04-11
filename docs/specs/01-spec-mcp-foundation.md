@@ -1,0 +1,1829 @@
+# Spec 01 — MCP Foundation (v0.1.0)
+
+> Phase: 01
+> Crates: `unblock-core`, `unblock-github`, `unblock-mcp`
+> Source: [SPEC](../SPEC.md) · [PRD](../PRD.md) · [MANIFESTO](../MANIFESTO.md)
+> Plan: [01-plan-mcp-foundation](../plans/01-plan-mcp-foundation.md)
+> Status: draft
+> Last updated: 2026-04-11
+
+---
+
+## Table of Contents
+
+1. [Scope & Conventions](#1-scope--conventions)
+2. [Types](#2-types)
+3. [Graph Engine](#3-graph-engine)
+4. [Cache Layer](#4-cache-layer)
+5. [GitHub API Client](#5-github-api-client)
+6. [MCP Server](#6-mcp-server)
+7. [Tool Catalogue — Read Tools](#7-tool-catalogue--read-tools)
+8. [Tool Catalogue — Write Tools](#8-tool-catalogue--write-tools)
+9. [Body Section Parsing](#9-body-section-parsing)
+10. [Status Update Algorithm](#10-status-update-algorithm)
+11. [Error Model](#11-error-model)
+12. [Configuration](#12-configuration)
+13. [Testing Strategy](#13-testing-strategy)
+14. [Invariants](#14-invariants)
+
+---
+
+## 1. Scope & Conventions
+
+### 1.1 What this spec covers
+
+Everything needed to implement Phase 01 (v0.1.0): 17 MCP tools, the graph engine, cache layer, GitHub API client, error model, configuration, and testing. This is the single source of truth for implementation agents working on Phase 01.
+
+### 1.2 What this spec does NOT cover
+
+- `reconcile`, `doctor`, `commit_context` tools (Phase 02)
+- Circuit breaker and retry logic (Phase 02 — error types exist as stubs)
+- Agent client detection / `AgentKind` / `SessionMeta` (Phase 02)
+- OpenTelemetry metrics (Phase 02)
+- Materialised fast path (Phase 03)
+- Distribution, GHE testing, GitHub App auth (Phase 03)
+- Plugin pipeline, skills, agents (Phase 04)
+- Remote server, shared cache (Phase 05)
+
+### 1.3 Pseudocode conventions
+
+- Algorithms use numbered steps with plain English, not fake Rust
+- Type definitions use Rust syntax — these are the implementation contract
+- `→` means "returns"
+- Indentation indicates nesting
+- `IF`, `FOR`, `MATCH`, `RETURN` are control flow keywords
+
+### 1.4 References
+
+When this spec says "SPEC §N.N" it refers to the top-level [SPEC.md](../SPEC.md). When it says "PLAN GAP-N" it refers to the [Phase 01 Plan](../plans/01-plan-mcp-foundation.md) gap analysis.
+
+---
+
+## 2. Types
+
+> Crate: `unblock-core/src/types.rs`
+
+### 2.1 `QualifiedId`
+
+```rust
+#[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
+pub struct QualifiedId {
+    pub owner: String,
+    pub repo: String,
+    pub number: u64,
+}
+```
+
+Canonical node key. Display: `owner/repo#number`. FromStr: parses `owner/repo#42`. All graph operations use `QualifiedId` — never plain `u64`.
+
+### 2.2 `IssueState`
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IssueState {
+    Open,
+    Closed,
+}
+```
+
+GitHub's native binary state. Ground truth for whether an issue is open or closed.
+
+### 2.3 `Status`
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Status {
+    Ready,
+    InProgress,
+    Blocked,
+    Deferred,
+    Closed,
+}
+```
+
+Projects V2 custom field. Unified workflow + readiness state.
+
+**Transition rules:**
+- `Ready` ↔ `Blocked`: computed automatically by MCP server from dependency graph
+- → `InProgress`: on `claim` (agent/human set)
+- → `Deferred`: on `update` with `defer_until` (agent/human set)
+- → `Closed`: on `close` (agent/human set)
+- `Blocked`/`Ready` → re-evaluated: on `reopen` (graph-computed)
+
+**Who sets what:**
+- MCP server manages `Ready` ↔ `Blocked` transitions (graph-computed)
+- Agent/human sets `InProgress`, `Deferred`, `Closed` (preserved by server — never overridden)
+
+**Projects V2 option values:** `ready`, `in_progress`, `blocked`, `deferred`, `closed`
+
+### 2.4 `Priority`
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Priority {
+    P0,
+    P1,
+    P2,
+    P3,
+    P4,
+}
+```
+
+`as_sort_key() → u8`: P0=0, P1=1, P2=2, P3=3, P4=4. Used for deterministic ready queue sorting.
+
+**Projects V2 option values:** `P0 - Critical`, `P1 - High`, `P2 - Medium`, `P3 - Low`, `P4 - Backlog`
+
+### 2.5 `PipelineStage`
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PipelineStage {
+    Investigation,
+    Implementation,
+    Review,
+    Refactoring,
+    Qa,
+    Done,
+}
+```
+
+Development pipeline phase. Created by `setup` in Phase 01 for field existence. Agent advancement is Phase 04 (plugin). The field exists so early adopters can use it manually and views work.
+
+**Projects V2 option values:** `investigation`, `implementation`, `review`, `refactoring`, `qa`, `done`
+
+### 2.6 `IssueType`
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IssueType {
+    Task,
+    Bug,
+    Feature,
+    Epic,
+    Chore,
+    Spike,
+}
+```
+
+GitHub's native org-level issue type. **NOT a Projects V2 custom field.** Read from GraphQL `issueType { name }` on each issue. Epic issues serve as parent containers for sub-issues.
+
+### 2.7 `IssueRef`
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IssueRef {
+    Local(u64),
+    CrossRepo { owner: String, repo: String, number: u64 },
+}
+```
+
+Parsed user input. `#42` or `42` → `Local(42)`. `owner/repo#42` → `CrossRepo`. `resolve(owner, repo) → QualifiedId` converts Local to fully qualified.
+
+Implements `FromStr` and `Display`.
+
+### 2.8 `Issue`
+
+```rust
+pub struct Issue {
+    pub qualified_id: QualifiedId,
+    pub number: u64,
+    pub node_id: String,                        // GitHub GraphQL node ID
+    pub title: String,
+    pub issue_type: Option<IssueType>,          // GitHub native (NOT Projects V2)
+    pub status: Status,                         // Projects V2 field
+    pub priority: Priority,                     // Projects V2 field
+    pub pipeline_stage: Option<PipelineStage>,  // Projects V2 field
+    pub agent: Option<String>,                  // Projects V2 field
+    pub claimed_at: Option<DateTime<Utc>>,      // Projects V2 field
+    pub story_points: Option<i32>,              // Projects V2 field
+    pub defer_until: Option<NaiveDate>,         // Projects V2 field
+    pub labels: Vec<String>,
+    pub milestone: Option<String>,
+    pub assignees: Vec<String>,
+    pub state: IssueState,                      // GitHub native Open/Closed
+    pub body: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub url: String,
+    pub comments: Vec<IssueComment>,
+    pub blocked_by: Vec<RelatedIssue>,          // from trackedByIssues
+    pub blocking: Vec<RelatedIssue>,            // from trackedIssues
+    pub parent: Option<RelatedIssue>,
+    pub sub_issues: Vec<RelatedIssue>,
+}
+```
+
+### 2.9 `IssueSummary`
+
+```rust
+pub struct IssueSummary {
+    pub qualified_id: QualifiedId,
+    pub number: u64,
+    pub title: String,
+    pub issue_type: Option<IssueType>,
+    pub status: Status,
+    pub priority: Priority,
+    pub agent: Option<String>,
+    pub milestone: Option<String>,
+    pub story_points: Option<i32>,
+    pub defer_until: Option<NaiveDate>,
+    pub labels: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub url: String,
+}
+```
+
+Lightweight issue for list/ready responses. Derived from `Issue`.
+
+### 2.10 `BlockingEdge`
+
+```rust
+#[derive(Debug, Clone)]
+pub struct BlockingEdge {
+    pub source: QualifiedId,   // the blocked issue
+    pub target: QualifiedId,   // the blocking issue
+}
+```
+
+### 2.11 `IssueComment`
+
+```rust
+pub struct IssueComment {
+    pub author: String,
+    pub body: String,
+    pub created_at: DateTime<Utc>,
+}
+```
+
+### 2.12 `RelatedIssue`
+
+```rust
+pub struct RelatedIssue {
+    pub number: u64,
+    pub title: String,
+    pub state: IssueState,
+}
+```
+
+### 2.13 `TraversalDirection`
+
+```rust
+pub enum TraversalDirection {
+    Upstream,
+    Downstream,
+    Both,
+}
+```
+
+### 2.14 `TreeNode` and `DependencyTree`
+
+```rust
+pub struct TreeNode {
+    pub id: QualifiedId,
+    pub status: Status,
+    pub state: IssueState,
+    pub depth: usize,
+    pub children: Vec<TreeNode>,
+}
+
+pub struct DependencyTree {
+    pub root: QualifiedId,
+    pub upstream: Vec<TreeNode>,    // what root depends on
+    pub downstream: Vec<TreeNode>,  // what depends on root
+}
+```
+
+### 2.15 `BodySections`
+
+```rust
+pub struct BodySections {
+    pub description: Option<String>,
+    pub design_notes: Option<String>,
+    pub acceptance_criteria: Option<String>,
+}
+```
+
+With `from_markdown(&str) → BodySections` and `to_markdown() → String`. See §9 for algorithms.
+
+---
+
+## 3. Graph Engine
+
+> Crate: `unblock-core/src/graph.rs`
+> Pure Rust. No network. No async. Fully testable with in-memory data.
+
+### 3.1 `DependencyGraph`
+
+```rust
+pub struct DependencyGraph {
+    graph: DiGraph<QualifiedId, ()>,
+    node_map: HashMap<QualifiedId, NodeIndex>,
+    issue_status: HashMap<QualifiedId, Status>,
+    issue_state: HashMap<QualifiedId, IssueState>,
+}
+```
+
+Edge direction: `blocked_issue → blocking_issue` (source depends on target). Outgoing edges from a node = "what blocks me". Incoming edges to a node = "what I block".
+
+### 3.2 `build` — Graph construction
+
+```
+build(issues, edges) → DependencyGraph:
+
+  1. Create empty DiGraph, node_map, issue_status, issue_state
+
+  2. FOR each issue in issues:
+     a. Create QualifiedId from issue
+     b. Add node to graph, store index in node_map
+     c. Store issue.status in issue_status
+     d. Store issue.state in issue_state
+
+  3. FOR each edge in edges:
+     a. Look up source_idx and target_idx in node_map
+     b. IF both exist: add edge (source_idx → target_idx)
+     c. ELSE: log warning "Skipping edge with unknown node"
+        (Orphaned edge — target issue may be deleted or inaccessible)
+
+  4. RETURN DependencyGraph
+```
+
+**Edge cases:**
+- Missing target node: edge skipped with warning. `reconcile` detects as `OrphanedBlockingEdge`.
+- Duplicate edges: `DiGraph` allows parallel edges. GitHub prevents duplicates at source. If present, harmless.
+- Self-edges: A→A. Should not appear (GitHub rejects self-blocking). Cycle detection catches it.
+- Empty graph: zero issues → empty graph. `compute_ready_set()` returns empty. Valid state.
+
+### 3.3 `compute_ready_set` — Ready set calculation
+
+```
+compute_ready_set(graph, issues) → Vec<IssueSummary>:
+
+  ready = []
+
+  FOR each issue in issues:
+    // Filter 1: must be open in GitHub
+    IF issue.state == Closed:
+      CONTINUE
+
+    // Filter 2: skip preserved states (set by agent/human)
+    IF issue.status == InProgress:
+      CONTINUE
+    IF issue.status == Deferred:
+      CONTINUE
+    IF issue.status == Closed:
+      CONTINUE
+
+    // Filter 3: check all blockers via graph
+    IF issue.qualified_id IN node_map:
+      idx = node_map[issue.qualified_id]
+      blockers = graph.neighbors_directed(idx, Outgoing)
+
+      all_blockers_closed = TRUE
+      FOR each blocker_idx in blockers:
+        blocker_qid = graph[blocker_idx]
+        IF issue_state[blocker_qid] != Closed:
+          all_blockers_closed = FALSE
+          BREAK
+
+      IF NOT all_blockers_closed:
+        CONTINUE
+
+    // Issue is ready (open, not preserved, all blockers closed or no blockers)
+    ready.push(IssueSummary::from(issue))
+
+  // Deterministic sort: priority ASC (P0 first) → created_at ASC (oldest first)
+  ready.sort_by(|a, b| a.priority.as_sort_key().cmp(&b.priority.as_sort_key())
+                        .then(a.created_at.cmp(&b.created_at)))
+
+  RETURN ready
+```
+
+**Key:** The ready set computation does NOT look at the current `Status` field value to decide readiness. It computes readiness from the graph. Issues with `Status::Blocked` that now have all blockers closed WILL be in the ready set. The `update_status_fields` algorithm (§10) syncs the Status field to match.
+
+**Post-filters** (applied in tool layer, NOT in graph engine):
+- `defer_until > today` → exclude (the graph does not know about dates)
+- Agent filter, type filter, priority filter, milestone filter, label filter → applied after
+
+**Edge cases:**
+- Issue not in graph: has zero blockers → ready if not in a preserved state
+- All blockers closed: every outgoing edge leads to a closed issue → ready
+- Mixed blockers: some closed, some open → not ready (blocked)
+- Circular dependency: issues in a cycle always have an open blocker → never ready
+
+### 3.4 `compute_unblock_cascade` — Cascade on close
+
+```
+compute_unblock_cascade(graph, closed_qid, issues) → Vec<QualifiedId>:
+
+  IF closed_qid NOT IN node_map:
+    RETURN []
+
+  idx = node_map[closed_qid]
+  unblocked = []
+
+  // Find all issues that depend on the closed issue (Incoming = "what depends on me")
+  dependents = graph.neighbors_directed(idx, Incoming)
+
+  FOR each dependent_idx in dependents:
+    dependent_qid = graph[dependent_idx]
+    dependent_issue = find issue by dependent_qid
+
+    IF dependent_issue.state == Closed:
+      CONTINUE
+
+    // Check if ALL blockers of this dependent are now closed
+    blockers = graph.neighbors_directed(dependent_idx, Outgoing)
+    all_closed = TRUE
+    FOR each blocker_idx in blockers:
+      blocker_qid = graph[blocker_idx]
+      IF blocker_qid == closed_qid:
+        CONTINUE  // the just-closed issue counts as closed
+      IF issue_state[blocker_qid] != Closed:
+        all_closed = FALSE
+        BREAK
+
+    IF all_closed:
+      unblocked.push(dependent_qid)
+
+  RETURN unblocked
+```
+
+**Critical:** The cascade MUST be computed from the PRE-CLOSE graph state — before the issue is closed in GitHub and before cache invalidation. After close, `fetch_graph_data()` returns only open issues, so the closed issue is excluded from the rebuilt graph and its dependents cannot be found. See §8.2 (`close` tool flow) for correct ordering.
+
+**Edge cases:**
+- Multi-level cascade: NOT recursive. Closing A unblocks B. B becomes ready. When B is later closed, its own cascade fires.
+- Partial unblock: A depends on B and C. B is closed. A is NOT unblocked because C is still open.
+- Already-closed dependent: A depends on B. A is already closed. When B closes, cascade skips A.
+
+### 3.5 `would_create_cycle` — Pre-mutation cycle check
+
+```
+would_create_cycle(graph, source, target) → bool:
+
+  // Adding edge source → target means "source depends on target"
+  // A cycle exists if target already depends on source (path target → source)
+
+  IF source == target:
+    RETURN TRUE  // self-loop
+
+  IF source NOT IN node_map OR target NOT IN node_map:
+    RETURN FALSE  // new node, can't form cycle
+
+  RETURN has_path_connecting(graph, node_map[target], node_map[source])
+```
+
+Uses `petgraph::algo::has_path_connecting`. O(V+E). Called before `add_blocked_by` in GitHub — prevents cycles from forming.
+
+### 3.6 `detect_all_cycles` — Full cycle detection
+
+```
+detect_all_cycles(graph) → Vec<Vec<QualifiedId>>:
+
+  sccs = tarjan_scc(&graph)
+
+  cycles = []
+  FOR each scc in sccs:
+    IF scc.len() > 1:
+      // Multi-node SCC = cycle
+      cycles.push(scc mapped to QualifiedIds)
+    ELSE IF scc.len() == 1:
+      idx = scc[0]
+      IF graph.contains_edge(idx, idx):
+        // Self-loop
+        cycles.push([graph[idx]])
+
+  RETURN cycles
+```
+
+Uses `petgraph::algo::tarjan_scc`. O(V+E).
+
+### 3.7 `dependency_tree` — BFS traversal
+
+```
+dependency_tree(graph, root, direction, max_depth) → DependencyTree:
+
+  upstream = []
+  downstream = []
+
+  IF direction == Upstream OR direction == Both:
+    upstream = bfs_tree(graph, root, Outgoing, max_depth)
+    // Outgoing from root = "what does root depend on"
+
+  IF direction == Downstream OR direction == Both:
+    downstream = bfs_tree(graph, root, Incoming, max_depth)
+    // Incoming to root = "what depends on root"
+
+  RETURN DependencyTree { root, upstream, downstream }
+```
+
+**Default max_depth:** 10. Configurable per-call. `visited` set prevents infinite loops on cycles.
+
+### 3.8 Accessor methods
+
+- `node_map() → &HashMap<QualifiedId, NodeIndex>`
+- `inner_graph() → &DiGraph<QualifiedId, ()>`
+- `issue_state() → &HashMap<QualifiedId, IssueState>`
+- `issue_status() → &HashMap<QualifiedId, Status>`
+- `all_edges() → Vec<BlockingEdge>`
+- `edge_count() → usize`
+
+---
+
+## 4. Cache Layer
+
+> Crate: `unblock-core/src/cache.rs`
+
+### 4.1 `GraphCache`
+
+```rust
+pub struct GraphCache {
+    ttl: Duration,
+    inner: RwLock<Option<CacheEntry>>,
+}
+
+struct CacheEntry {
+    graph: DependencyGraph,
+    ready_set: Vec<IssueSummary>,
+    built_at: Instant,
+}
+```
+
+### 4.2 Methods
+
+| Method | Effect |
+|---|---|
+| `new(ttl)` | Create empty cache |
+| `get_ready_set() → Option<Arc<Vec<IssueSummary>>>` | Returns ready set if entry exists |
+| `get_graph() → Option<Arc<DependencyGraph>>` | Returns graph if entry exists |
+| `update(ready_set, graph)` | Replaces entry, resets `built_at` to now |
+| `invalidate()` | Clears entry → Empty |
+| `is_fresh() → bool` | `built_at + ttl > now` AND entry exists |
+
+### 4.3 State machine
+
+```
+                 invalidate()
+    ┌───────┐ ───────────────► ┌───────┐
+    │ Fresh │                  │ Empty │
+    └───┬───┘ ◄──────────────  └───┬───┘
+        │        update()          │
+        │                          │
+        │ TTL expires              │ update()
+        ▼                          ▼
+    ┌───────┐                  ┌───────┐
+    │ Stale │ ────update()───► │ Fresh │
+    └───────┘                  └───────┘
+```
+
+- **Fresh:** entry exists, `built_at + ttl > now`. Serve directly, zero API calls.
+- **Stale:** entry exists, `built_at + ttl <= now`. Caller MUST rebuild unconditionally.
+- **Empty:** no entry. Cold start, post-invalidation, or first use.
+
+Default TTL: 30 seconds. Configurable via `UNBLOCK_CACHE_TTL`.
+
+### 4.4 Invalidation matrix
+
+| Tool | Invalidates | Reason |
+|---|---|---|
+| `close` | Yes | Cascade changes topology |
+| `claim` | Yes | Status field changes |
+| `create` | Yes | New node in graph |
+| `depends` | Yes | New edge in graph |
+| `dep_remove` | Yes | Edge removed |
+| `update` | Yes | Status/defer may change ready set |
+| `reopen` | Yes | Node returns to graph |
+| `comment` | **No** | Graph topology unchanged |
+| `show` | **No** | Read-only, always fresh from GitHub |
+| `ready` | **No** | Read-only |
+| `prime` | **No** | Read-only |
+| `stats` | **No** | Read-only |
+| `list` | **No** | Read-only |
+| `search` | **No** | Bypasses cache entirely |
+| `dep_cycles` | **No** | Read-only |
+
+### 4.5 Concurrency
+
+`RwLock<Option<CacheEntry>>`. Multiple readers concurrent. Single writer exclusive. Last writer wins — no optimistic locking. Acceptable for single-process architecture.
+
+**Invariant:** Every field in `CacheEntry` is reconstructable from GitHub with a single `fetch_graph_data()` call. The cache is a performance optimisation, not a source of truth.
+
+---
+
+## 5. GitHub API Client
+
+> Crate: `unblock-github`
+
+### 5.1 `GitHubClient`
+
+```rust
+pub struct GitHubClient {
+    http: reqwest::Client,
+    token: String,
+    api_base_url: String,
+    github_url: String,
+    owner: String,
+    repo: String,
+    project_number: Option<u64>,
+    project_id: Option<String>,
+    field_ids: Option<ProjectFieldIds>,
+}
+```
+
+### 5.2 `ProjectFieldIds`
+
+```rust
+pub struct ProjectFieldIds {
+    pub status: FieldMeta,
+    pub priority: FieldMeta,
+    pub pipeline_stage: FieldMeta,
+    pub agent: String,          // text field — field_id only, no options
+    pub claimed_at: String,     // date field — field_id only
+    pub story_points: String,   // number field — field_id only
+    pub defer_until: String,    // date field — field_id only
+}
+
+pub struct FieldMeta {
+    pub field_id: String,
+    pub options: HashMap<String, String>,  // display_name → option_node_id
+}
+```
+
+**7 fields. No more, no less.** `IssueType` is NOT a Projects V2 custom field — it's GitHub's native org-level feature.
+
+### 5.3 `FieldValue`
+
+```rust
+pub enum FieldValue {
+    SingleSelectOption(String),  // option node ID
+    Text(String),
+    Date(NaiveDate),
+    Number(f64),
+}
+```
+
+### 5.4 `GitHubApi` trait
+
+Defined in `unblock-github/src/api.rs`. Abstracts all GitHub operations. `async_trait` for object safety. Blanket impl on `GitHubClient`. Tests use `MockGitHubClient` (feature-gated `test-hooks`).
+
+`ServerState` holds `Arc<dyn GitHubApi>`.
+
+**Sync accessors:** `owner()`, `repo()`, `project_number()`, `api_base_url()`, `rest_url()`, `graphql_url()`, `field_ids()`, `set_field_ids()`
+
+**GraphQL reads:**
+- `fetch_graph_data() → (Vec<Issue>, Vec<BlockingEdge>)` — all open issues with edges and field values
+- `fetch_issue(number) → Issue` — single issue with comments, always fresh
+- `fetch_issue_ref(ref) → Issue` — resolve IssueRef then fetch
+
+**Mutations:**
+- `create_issue(params) → Issue`
+- `close_issue(number, reason)`
+- `reopen_issue(number)`
+- `add_comment(number, body) → String`
+- `update_issue_body(number, body)`
+- `add_labels_to_issue(number, labels)`
+- `remove_label_from_issue(number, label)`
+- `add_assignees_to_issue(number, assignees)`
+- `remove_assignees_from_issue(number, assignees)`
+- `list_milestones() → Vec<Milestone>`
+- `update_issue_milestone(number, milestone_number)`
+- `add_blocked_by(issue_number, blocked_by_number)`
+- `add_blocked_by_ref(issue_number, blocker: &IssueRef)`
+- `remove_blocked_by(issue_number, blocked_by_number)`
+- `add_sub_issue(parent_number, child_number)`
+- `resolve_issue_ref(ref) → String` (node ID)
+- `search_issues(query, limit) → Vec<Issue>`
+
+**Projects V2:**
+- `resolve_project_info() → ProjectInfo`
+- `setup_fields(project_id) → SetupReport`
+- `query_setup_status(project_id) → SetupStatus`
+- `update_field(project_id, item_id, field_id, value)`
+- `get_project_item_id(issue_node_id, project_id) → String`
+- `detect_owner_type() → OwnerType`
+- `list_rest_fields(owner_type) → Vec<RestField>`
+- `create_view(owner_type, params) → ProjectView`
+- `list_views(owner_type) → Vec<ProjectView>`
+- `list_owner_projects(owner_type) → Vec<OwnerProject>`
+- `create_project(owner_node_id, title) → CreatedProject`
+- `ensure_labels(labels)`
+
+### 5.5 GraphQL read queries
+
+**`fetch_graph_data()`** — primary read query. Paginated (100 issues per page). Returns:
+
+```graphql
+query($owner: String!, $repo: String!, $cursor: String) {
+  repository(owner: $owner, name: $repo) {
+    issues(first: 100, after: $cursor, states: [OPEN]) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        number title state createdAt
+        labels(first: 10) { nodes { name } }
+        milestone { number title }
+        assignees(first: 5) { nodes { login } }
+        issueType { name }
+        trackedByIssues(first: 50) {
+          nodes { number repository { owner { login } name } state }
+        }
+        trackedIssues(first: 50) {
+          nodes { number repository { owner { login } name } state }
+        }
+        parent { number }
+        projectItems(first: 5) {
+          nodes {
+            project { number }
+            fieldValues(first: 20) {
+              nodes {
+                ... on ProjectV2ItemFieldSingleSelectValue {
+                  field { ... on ProjectV2SingleSelectField { name } } name
+                }
+                ... on ProjectV2ItemFieldTextValue {
+                  field { ... on ProjectV2Field { name } } text
+                }
+                ... on ProjectV2ItemFieldDateValue {
+                  field { ... on ProjectV2Field { name } } date
+                }
+                ... on ProjectV2ItemFieldNumberValue {
+                  field { ... on ProjectV2Field { name } } number
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+**Blocking edges:** extracted from `trackedByIssues` (what blocks this issue) and `trackedIssues` (what this issue blocks). Both traversed for complete edge set.
+
+**Cross-repo:** `trackedByIssues.nodes[].repository` may differ from queried repo. `QualifiedId` constructed from each node's repository context.
+
+**`fetch_issue(number)`** — single issue with full comments (first 50), blocking/blocked_by relationships, parent/sub-issues, Projects V2 field values. Always fresh, never cached.
+
+### 5.6 Mutations
+
+**REST mutations:** use `X-GitHub-Api-Version: 2022-11-28`.
+- `POST /repos/{o}/{r}/issues` — create
+- `PATCH /repos/{o}/{r}/issues/{n}` — close (`state: "closed"`), reopen (`state: "open"`), update body/labels/assignees/milestone
+- `POST /repos/{o}/{r}/issues/{n}/comments` — add comment
+
+**GraphQL mutations:**
+- `addIssueDependency` — add blocking relationship (cross-repo)
+- `removeIssueDependency` — remove blocking relationship
+- `addSubIssue` — add parent-child relationship
+- `updateProjectV2ItemFieldValue` — update Projects V2 field
+
+**Batch mutations:** Multiple `updateProjectV2ItemFieldValue` in a single GraphQL request using aliases (`update0`, `update1`, `update2`, ...).
+
+**Cross-repo scope:**
+
+| Operation | Cross-repo | Rationale |
+|---|---|---|
+| `depends` / `dep_remove` | Yes | Dependencies are the core cross-repo use case |
+| `show` / `fetch_issue_ref` | Yes | Inspect cross-repo blockers |
+| `close`, `reopen`, `update`, `claim`, `comment` | No | Scoped to configured repo for safety |
+| `create` (`blocked_by` param) | Yes | Cross-repo deps at creation time |
+
+### 5.7 Projects V2 field management
+
+**`resolve_project_info()`** — called once at startup:
+1. Find project number (from config or auto-detect first linked project)
+2. Resolve project node ID
+3. Query all fields, map to `ProjectFieldIds`
+4. Validate 7 required fields exist with correct types
+
+**`setup_fields(project_id)`** — idempotent field creation:
+1. Query existing fields
+2. For each of 7 required fields: if missing, create with correct type and options
+3. Return `SetupReport { created, skipped }`
+
+**7 required fields with their type and options:**
+
+| Field | Type | Options (for Single Select) |
+|---|---|---|
+| Status | Single Select | `ready`, `in_progress`, `blocked`, `deferred`, `closed` |
+| Priority | Single Select | `P0 - Critical`, `P1 - High`, `P2 - Medium`, `P3 - Low`, `P4 - Backlog` |
+| Pipeline Stage | Single Select | `investigation`, `implementation`, `review`, `refactoring`, `qa`, `done` |
+| Agent | Text | — |
+| Claimed At | Date | — |
+| Story Points | Number | — |
+| Defer Until | Date | — |
+
+### 5.8 View management
+
+5 views created via REST API (`X-GitHub-Api-Version: 2026-03-10`):
+
+| View | Layout | Filter |
+|---|---|---|
+| `UNBLOCK://ready` | Board | `Status:"ready"` |
+| `UNBLOCK://team` | Board | — (grouped by Agent) |
+| `UNBLOCK://pipeline` | Board | — (grouped by Pipeline Stage) |
+| `UNBLOCK://roadmap` | Table | — |
+| `UNBLOCK://timeline` | Roadmap | — |
+
+View creation requires integer field IDs (not GraphQL node IDs). Discovered via REST `GET /fields`.
+
+Owner type detection (org vs user) determines REST endpoint: `/orgs/{org}/projectsV2/{n}/views` vs `/users/{user}/projectsV2/{n}/views`.
+
+Idempotent: if view already exists (matching name), skip.
+
+### 5.9 URL resolution
+
+| Environment | `GITHUB_API_URL` | GraphQL endpoint |
+|---|---|---|
+| github.com | `https://api.github.com` | `{base}/graphql` |
+| GHE Server | `https://<host>/api/v3` | Strip `/v3` → `{base}/graphql` |
+| GHE Cloud | `https://api.<host>` | `{base}/graphql` |
+
+`graphql_url()`: if `api_base_url` ends with `/v3`, strip suffix before appending `/graphql`.
+
+Trailing slashes normalised at load time.
+
+### 5.10 Pagination
+
+Cursor-based. Loop while `hasNextPage == true`, advancing `cursor`. Each page returns up to 100 items.
+
+**Edge cases:**
+- Empty repo: zero issues → zero pages → empty result. Valid.
+- Exactly 100 issues: one page, `hasNextPage: false`.
+- Concurrent mutations mid-pagination: issue created between pages may be missed. Acceptable — next rebuild catches it.
+
+---
+
+## 6. MCP Server
+
+> Crate: `unblock-mcp`
+
+### 6.1 `ServerState`
+
+```rust
+pub struct ServerState {
+    pub config: Arc<Config>,
+    pub github: Arc<dyn GitHubApi>,
+    pub cache: Arc<GraphCache>,
+}
+```
+
+Shared across all tool invocations.
+
+**Note:** Phase 02 adds `agent_kind: OnceLock<AgentKind>` and `agent_client: OnceLock<AgentClient>`. If these already exist in code, they are excluded from Phase 01 acceptance criteria.
+
+### 6.2 Bootstrap sequence
+
+```
+1. Config::load()
+2. Init tracing (JSON format, stderr — stdout reserved for MCP stdio)
+3. GitHubClient::new(config) — resolve repo from git remote, resolve project + fields
+4. Validate 7 required fields exist (if project detected)
+5. GraphCache::new(config.cache_ttl)
+6. ServerState { config, github, cache }
+7. UnblockServer::new(state).serve(stdio())
+```
+
+**Bootstrap mode:** if no project detected (first-time use), only `init` and `setup` are functional. All other tools return `ProjectNotConfigured`.
+
+### 6.3 Tool execution pattern
+
+```rust
+// File: unblock-mcp/src/tools/mod.rs
+
+pub async fn execute_read_tool<F, R>(state, op: F) -> CallToolResult
+where F: Future<Output = Result<R, Error>>
+{
+    match op.await {
+        Ok(result) => success_response(result),
+        Err(err) => error_response(github_error_to_mcp(err)),
+    }
+}
+
+pub async fn execute_write_tool<F, R>(state, op: F) -> CallToolResult
+where F: Future<Output = Result<R, Error>>
+{
+    match op.await {
+        Ok(result) => {
+            rebuild_cache(state).await;
+            success_response(result)
+        }
+        Err(err) => error_response(github_error_to_mcp(err)),
+    }
+}
+
+pub async fn rebuild_cache(state) {
+    state.cache.invalidate();
+    let (issues, edges) = state.github.fetch_graph_data().await?;
+    let graph = DependencyGraph::build(&issues, &edges);
+    let ready_set = graph.compute_ready_set(&issues);
+    update_status_fields(state, &issues, &ready_set).await?;
+    state.cache.update(ready_set, graph);
+}
+```
+
+### 6.4 `set_project_fields` helper
+
+Extracted shared helper for setting Projects V2 fields on an issue. Used by `claim`, `close`, `create`, `update`, `reopen`, and cascade.
+
+```
+set_project_fields(state, issue_node_id, project_id, fields: Vec<(field_id, FieldValue)>):
+  1. Get project item ID: get_project_item_id(issue_node_id, project_id)
+  2. For each (field_id, value): update_field(project_id, item_id, field_id, value)
+```
+
+Prevents the field-update logic from being duplicated across tools (see PLAN GAP-13).
+
+---
+
+## 7. Tool Catalogue — Read Tools
+
+### 7.1 `ready`
+
+```rust
+pub struct ReadyParams {
+    pub limit: Option<u32>,           // default: 10, max: 100
+    pub issue_type: Option<String>,   // "task", "bug", etc.
+    pub priority: Option<String>,     // "P0", "P1", etc.
+    pub milestone: Option<String>,
+    pub agent: Option<String>,
+    pub label: Option<String>,
+    pub include_claimed: Option<bool>, // default: false
+}
+
+pub struct ReadyResult {
+    pub issues: Vec<IssueSummary>,
+    pub count: usize,
+    pub stale: bool,
+}
+```
+
+**Validation:**
+- `limit`: 1..=100 if present
+- `priority`: must be P0–P4 if present
+
+**Flow:**
+1. Check cache: Fresh → use cached ready set; Stale/Empty → fetch + rebuild
+2. Start with ready set from cache/rebuild
+3. Post-filter: exclude `defer_until > today`
+4. If NOT `include_claimed`: exclude `Status::InProgress` (already excluded from ready set, but defensive)
+5. Filter by: `issue_type`, `priority`, `milestone`, `agent`, `label`
+6. Sort: priority ASC → created_at ASC (already sorted from `compute_ready_set`)
+7. Limit to top N
+8. Set `stale = !cache.is_fresh()`
+
+**Cache:** Read-only. No invalidation.
+**API calls:** 0 (cache hit) | 1+ (rebuild)
+
+### 7.2 `show`
+
+```rust
+pub struct ShowParams {
+    pub issue: String,                // IssueRef: "#42", "42", "owner/repo#42"
+    pub include_comments: Option<bool>, // default: true
+    pub include_deps: Option<bool>,     // default: true
+}
+
+pub struct ShowResult {
+    pub issue: ShowIssue,             // full issue with parsed body sections
+    pub comments: Option<Vec<IssueComment>>,
+    pub upstream: Option<Vec<TreeNode>>,
+    pub downstream: Option<Vec<TreeNode>>,
+}
+```
+
+**Validation:**
+- `issue`: must parse as valid IssueRef
+
+**Flow:**
+1. Parse IssueRef
+2. `fetch_issue_ref(ref)` — ALWAYS fresh, never cached
+3. Parse body sections via `BodySections::from_markdown()`
+4. If `include_deps`: `dependency_tree(root, Both, max_depth=5)` (from cache or rebuild)
+5. Return
+
+**Cache:** NOT used for the issue itself. Graph cache used only for dependency tree.
+**API calls:** 1 (always)
+
+### 7.3 `prime`
+
+```rust
+pub struct PrimeParams {}
+
+pub struct PrimeResult {
+    pub context: String,  // markdown blob for agent injection
+}
+```
+
+**Flow:**
+1. Fetch graph data (or use cache)
+2. Build context summary:
+   - Repo: `owner/repo`
+   - Project: number
+   - Ready count, blocked count, in-progress count
+   - Issues with cycles (if any)
+3. Return markdown blob
+
+**Cache:** Read-only.
+**API calls:** 0 (cache hit) | 1+ (rebuild)
+
+### 7.4 `stats`
+
+```rust
+pub struct StatsParams {
+    pub milestone: Option<String>,
+}
+
+pub struct StatsResult {
+    pub total: usize,
+    pub by_status: HashMap<String, usize>,
+    pub by_priority: HashMap<String, usize>,
+    pub blocked_count: usize,
+    pub ready_count: usize,
+    pub cycle_count: usize,
+    pub agents: Vec<AgentStats>,
+}
+
+pub struct AgentStats {
+    pub name: String,
+    pub in_progress: usize,
+    pub completed: usize,
+}
+```
+
+**Flow:**
+1. Fetch graph data (or use cache)
+2. Aggregate counts across all issues (filter by milestone if provided)
+3. Cycle count from `detect_all_cycles().len()`
+
+**Cache:** Read-only.
+**API calls:** 0 (cache hit) | 1+ (rebuild)
+
+### 7.5 `list`
+
+```rust
+pub struct ListParams {
+    pub status: Option<String>,
+    pub priority: Option<String>,
+    pub issue_type: Option<String>,
+    pub milestone: Option<String>,
+    pub agent: Option<String>,
+    pub label: Option<String>,
+    pub assignee: Option<String>,
+    pub sort: Option<String>,         // "priority" (default), "created", "updated"
+    pub limit: Option<usize>,         // default: 50, max: 200
+    pub offset: Option<usize>,        // default: 0
+}
+
+pub struct ListResult {
+    pub issues: Vec<IssueSummary>,
+    pub total: usize,
+    pub stale: bool,
+}
+```
+
+**Validation:**
+- `limit`: 1..=200 if present
+- `sort`: must be "priority", "created", or "updated" if present
+- Empty/whitespace-only filter strings treated as absent
+
+**Flow:**
+1. Fetch graph data (or use cache)
+2. Filter by all params (AND logic — all filters must match)
+3. Sort by requested field (priority ASC default, created ASC, updated DESC)
+4. Record `total` before pagination
+5. Paginate: skip `offset`, take `limit`
+
+**Cache:** Read-only.
+**API calls:** 0 (cache hit) | 1+ (rebuild)
+
+### 7.6 `search`
+
+```rust
+pub struct SearchParams {
+    pub query: String,                // required, non-empty
+    pub limit: Option<u32>,           // default: 20
+}
+
+pub struct SearchResult {
+    pub issues: Vec<IssueSummary>,
+    pub count: usize,
+}
+```
+
+**Validation:**
+- `query`: non-empty
+
+**Flow:**
+1. Call `search_issues(query, limit)` — GitHub Search API
+2. Search query: `"repo:{owner}/{repo} is:issue {query}"`
+3. Map results to `IssueSummary`
+
+**Cache:** Bypassed entirely. Each search hits GitHub Search API directly.
+**API calls:** 1
+
+### 7.7 `dep_cycles`
+
+```rust
+pub struct DepCyclesParams {
+    pub id: Option<u64>,  // optional — targeted check from specific issue
+}
+
+pub struct DepCyclesResult {
+    pub cycles: Vec<Vec<u64>>,
+    pub count: usize,
+}
+```
+
+**Flow:**
+1. Fetch graph data (or use cache)
+2. If `id` provided: targeted cycle check involving that node
+3. If `id` absent: `detect_all_cycles()` on full graph
+4. Map `QualifiedId` cycles to issue number cycles
+
+**Cache:** Read-only.
+**API calls:** 0 (cache hit) | 1+ (rebuild)
+
+---
+
+## 8. Tool Catalogue — Write Tools
+
+### 8.1 `claim`
+
+```rust
+pub struct ClaimParams {
+    pub id: u64,
+    pub agent: Option<String>,  // defaults to config.agent
+}
+
+pub struct ClaimResult {
+    pub issue: IssueSummary,
+}
+```
+
+**Validation:**
+- `id`: positive integer
+- `agent`: non-empty if present
+
+**Flow:**
+1. Fetch issue (single query, always fresh)
+2. Validate:
+   a. `IssueState == Open` → else `IssueClosed`
+   b. `Status != InProgress` → else `AlreadyClaimed`
+   c. Not blocked: check graph → else `IssueBlocked { blockers }`
+   d. Not deferred: `defer_until <= today` → else `IssueDeferred`
+3. Update fields: Status → `in_progress`, Agent → name, Claimed At → now
+4. Add comment: `"Claimed by {agent} at {timestamp}"`
+5. Invalidate cache + rebuild + update Status fields
+
+**API calls:** 1 (fetch) + 3 (field updates) + 1 (comment) + 1+ (rebuild)
+**Cache:** Invalidates.
+
+### 8.2 `close`
+
+```rust
+pub struct CloseParams {
+    pub id: u64,
+    pub reason: Option<String>,
+}
+
+pub struct CloseResult {
+    pub issue: IssueSummary,
+    pub unblocked: Vec<u64>,
+}
+```
+
+**Validation:**
+- `id`: positive integer
+
+**Flow (ordering is critical):**
+1. Fetch issue, validate `IssueState == Open` → else `IssueClosed`
+2. **PRE-CLOSE cascade computation:**
+   a. Ensure graph is built (from cache or fresh fetch)
+   b. `compute_unblock_cascade(graph, closed_qid, issues)`
+   c. Save unblocked list — the graph still contains the issue as open
+3. Close issue: REST PATCH `state: "closed"`
+4. Update fields: Status → `closed`
+5. Add comment: `"Closed: {reason}"` (or `"Closed"` if no reason)
+6. Invalidate cache + rebuild graph (post-close: issue excluded from OPEN query)
+7. For each unblocked (from step 2):
+   a. Update Status → `ready`
+   b. Add comment: `"Unblocked — blocker #{id} was closed"`
+8. Update Status fields from new graph
+9. Update cache
+
+**Why step 2 before step 3:** After close, `fetch_graph_data()` returns only OPEN issues. The closed issue is excluded from the rebuilt graph. `compute_unblock_cascade` requires the closed issue to be a node to find dependents via Incoming edges.
+
+**API calls:** 0-1 (pre-close graph) + 1 (fetch) + 1 (close) + 1+ (fields) + 1 (comment) + 1+ (rebuild) + N×2 per unblocked (field + comment)
+**Cache:** Invalidates.
+
+### 8.3 `create`
+
+```rust
+pub struct CreateParams {
+    pub title: String,
+    pub issue_type: Option<String>,       // default: "task"
+    pub priority: Option<String>,         // default: "P2"
+    pub body: Option<String>,
+    pub labels: Option<Vec<String>>,
+    pub milestone: Option<String>,        // milestone title
+    pub blocked_by: Option<Vec<String>>,  // Vec<IssueRef> — local or cross-repo
+    pub parent: Option<String>,           // IssueRef
+    pub story_points: Option<u32>,
+    pub defer_until: Option<String>,      // ISO date
+}
+
+pub struct CreateResult {
+    pub issue: IssueSummary,
+}
+```
+
+**Validation:**
+- `title`: non-empty, max 500 chars
+- `priority`: P0–P4 if present
+- `issue_type`: valid IssueType name if present
+- `defer_until`: valid ISO date if present
+
+**Flow:**
+1. Create issue: REST POST
+2. Add to project: `addProjectV2Item`
+3. Set fields: Priority, Status → `ready` (or `blocked` if has blockers), Story Points, Defer Until
+4. If `blocked_by`:
+   a. For each blocker: resolve IssueRef, `would_create_cycle` check, `add_blocked_by`
+   b. Update Status → `blocked`
+5. If `parent`: resolve IssueRef, `add_sub_issue`
+6. If `labels`: `ensure_labels` (auto-create missing) + `add_labels_to_issue`
+7. If `milestone`: resolve milestone by title, `update_issue_milestone`
+8. Invalidate cache + rebuild
+
+**API calls:** 1 (create) + 1 (add to project) + 3-7 (fields) + 0-N (deps) + 0-1 (parent) + 1+ (rebuild)
+**Cache:** Invalidates.
+
+### 8.4 `depends`
+
+```rust
+pub struct DependsParams {
+    pub source: String,  // IssueRef — the issue that will be blocked
+    pub target: String,  // IssueRef — the issue that blocks
+}
+
+pub struct DependsResult {
+    pub created: bool,
+    pub source: String,
+    pub target: String,
+    pub message: String,
+}
+```
+
+**Validation:**
+- `source`: valid IssueRef
+- `target`: valid IssueRef
+- `source != target`
+
+**Flow:**
+1. Resolve both IssueRefs
+2. Cycle detection: `would_create_cycle(source, target)` → `CircularDependency` if true
+3. Duplicate check: edge already exists → `DuplicateDependency` if true
+4. `add_blocked_by` mutation (or `add_blocked_by_ref` for cross-repo)
+5. Update source fields: Status → `blocked`
+6. Invalidate cache + rebuild
+
+**Both `source` and `target` accept `IssueRef` format** (local `#42` or cross-repo `owner/repo#42`). See PLAN GAP-06.
+
+**API calls:** 0-2 (resolve) + 1 (mutation) + 0-2 (fields) + 1+ (rebuild)
+**Cache:** Invalidates.
+
+### 8.5 `dep_remove`
+
+```rust
+pub struct DepRemoveParams {
+    pub source: String,  // IssueRef — the currently blocked issue
+    pub target: String,  // IssueRef — the currently blocking issue
+}
+
+pub struct DepRemoveResult {
+    pub removed: bool,
+    pub source: String,
+    pub target: String,
+    pub message: String,
+}
+```
+
+**Validation:**
+- `source`: valid IssueRef
+- `target`: valid IssueRef
+
+**Flow:**
+1. Resolve both IssueRefs
+2. Validate edge exists in graph
+3. `remove_blocked_by` mutation
+4. Rebuild graph, recompute ready states
+5. If source now has zero open blockers: Status → `ready`
+6. Update cache
+
+**API calls:** 0-2 (resolve) + 1 (mutation) + 0-2 (fields) + 1+ (rebuild)
+**Cache:** Invalidates.
+
+### 8.6 `update`
+
+```rust
+pub struct UpdateParams {
+    pub id: u64,
+    pub title: Option<String>,
+    pub body: Option<String>,
+    pub status: Option<String>,
+    pub priority: Option<String>,
+    pub labels_add: Option<Vec<String>>,
+    pub labels_remove: Option<Vec<String>>,
+    pub assignees_add: Option<Vec<String>>,
+    pub assignees_remove: Option<Vec<String>>,
+    pub milestone: Option<String>,
+    pub story_points: Option<u32>,
+    pub defer_until: Option<String>,
+    pub agent: Option<String>,
+    pub description: Option<String>,          // body section
+    pub design_notes: Option<String>,         // body section
+    pub acceptance_criteria: Option<String>,   // body section
+}
+
+pub struct UpdateResult {
+    pub issue: IssueSummary,
+    pub updated_fields: Vec<String>,
+}
+```
+
+**Validation:**
+- `id`: positive integer
+- At least one field to update
+- `title`: non-empty, max 500 chars if present
+- `priority`: P0–P4 if present
+- `status`: valid Status variant if present
+- `defer_until`: valid ISO date if present
+
+**Flow:**
+1. Fetch issue, validate not closed (unless reopening via status)
+2. If body sections changed: parse existing body, merge sections (§9.3), write back
+3. If REST fields changed (title, body, labels, assignees, milestone): PATCH issue
+4. If Project fields changed (status, priority, agent, story_points, defer_until): `set_project_fields`
+5. Invalidate cache + rebuild
+
+**API calls:** 1 (fetch) + 0-1 (PATCH) + 0-N (field updates) + 1+ (rebuild)
+**Cache:** Invalidates.
+
+### 8.7 `reopen`
+
+```rust
+pub struct ReopenParams {
+    pub id: u64,
+}
+
+pub struct ReopenResult {
+    pub issue: u64,
+    pub blocked: bool,
+    pub status: String,
+}
+```
+
+**Validation:**
+- `id`: positive integer
+
+**Flow:**
+1. Fetch issue, validate `IssueState == Closed` → else `IssueNotClosed` or `IssueAlreadyOpen`
+2. Reopen: REST PATCH `state: "open"`
+3. Rebuild graph to evaluate blocking status
+4. If issue has open blockers: Status → `blocked`
+5. If no open blockers: Status → `ready`
+6. Update cache
+
+**API calls:** 1 (fetch) + 1 (reopen) + 1-2 (fields) + 1+ (rebuild)
+**Cache:** Invalidates.
+
+### 8.8 `comment`
+
+```rust
+pub struct CommentParams {
+    pub id: u64,
+    pub body: String,
+}
+
+pub struct CommentResult {
+    pub created: bool,
+}
+```
+
+**Validation:**
+- `id`: positive integer
+- `body`: non-empty
+
+**Flow:**
+1. `add_comment(id, body)`
+2. NO cache invalidation — comments don't affect the graph
+
+**API calls:** 1
+**Cache:** NO invalidation.
+
+### 8.9 `init`
+
+```rust
+pub struct InitParams {
+    pub title: Option<String>,  // default: "UNBLOCK://{owner}/{repo}"
+}
+
+pub struct InitResult {
+    pub project_number: u64,
+    pub created: bool,
+}
+```
+
+**Flow:**
+1. Detect owner type (org vs user)
+2. Check if project already exists (by title) → return existing if so
+3. Create Projects V2 board via GraphQL mutation
+4. Store project_id and project_number in client
+
+**API calls:** 1-2 (detect + check) + 0-1 (create)
+
+### 8.10 `setup`
+
+```rust
+pub struct SetupParams {
+    pub project: Option<u64>,
+    pub dry_run: Option<bool>,    // default: false
+    pub migrate: Option<bool>,    // default: false
+}
+
+pub struct SetupResult {
+    pub fields_created: Vec<String>,
+    pub views_created: Vec<String>,
+    pub migrated_count: Option<usize>,
+}
+```
+
+**Flow:**
+1. Resolve project (param or auto-detect)
+2. Query existing fields
+3. Create 7 missing fields (skip existing) — idempotent
+4. Detect owner type (org vs user)
+5. Query existing views (GraphQL)
+6. Discover field IDs (REST GET /fields — integer IDs)
+7. Create 5 missing views (REST POST /views) — idempotent
+8. If `migrate`: add existing open issues to project, set default field values
+9. Return report
+
+**Idempotent:** safe to run multiple times. Skips existing fields and views.
+**API calls:** 1 (field query) + 0-7 (create fields) + 1 (views query) + 1 (REST fields) + 0-5 (create views) + 0-N (migrate)
+
+---
+
+## 9. Body Section Parsing
+
+### 9.1 `from_markdown` — parse body into sections
+
+```
+from_markdown(body) → BodySections:
+
+  sections = { description: "", design_notes: "", acceptance_criteria: "" }
+  current_section = "description"  // default before first heading
+
+  FOR each line in body.lines():
+    IF line starts with "## Description":
+      current_section = "description"
+      CONTINUE
+    IF line starts with "## Design Notes":
+      current_section = "design_notes"
+      CONTINUE
+    IF line starts with "## Acceptance Criteria":
+      current_section = "acceptance_criteria"
+      CONTINUE
+    IF line starts with "## " (other heading):
+      current_section = None  // unknown section — preserved as-is
+      CONTINUE
+
+    IF current_section IS SOME:
+      sections[current_section].push(line)
+
+  RETURN BodySections {
+    description: trim(sections.description) or None if empty,
+    design_notes: trim(sections.design_notes) or None if empty,
+    acceptance_criteria: trim(sections.acceptance_criteria) or None if empty,
+  }
+```
+
+### 9.2 `to_markdown` — render sections to body
+
+```
+to_markdown(sections) → String:
+
+  parts = []
+  IF sections.description is non-empty:
+    parts.push("## Description\n\n{description}")
+  IF sections.design_notes is non-empty:
+    parts.push("## Design Notes\n\n{design_notes}")
+  IF sections.acceptance_criteria is non-empty:
+    parts.push("## Acceptance Criteria\n\n{acceptance_criteria}")
+
+  RETURN parts.join("\n\n")
+```
+
+### 9.3 Merge algorithm (for `update` tool)
+
+```
+merge_sections(existing_body, updates) → String:
+
+  current = from_markdown(existing_body)
+
+  IF updates.description IS SOME:
+    current.description = updates.description
+  IF updates.design_notes IS SOME:
+    current.design_notes = updates.design_notes
+  IF updates.acceptance_criteria IS SOME:
+    current.acceptance_criteria = updates.acceptance_criteria
+
+  RETURN to_markdown(current)
+```
+
+### 9.4 Edge cases
+
+- **No headings in body:** entire body is treated as description.
+- **Empty sections:** a heading with no content below it → None for that section.
+- **Nested headings:** `### Sub-heading` within a section → treated as section content, not a new section.
+- **Unknown headings:** `## Foo` → skipped during parsing. Content under unknown headings is lost during round-trip. This is acceptable for Phase 01.
+
+---
+
+## 10. Status Update Algorithm
+
+### 10.1 `update_status_fields` — after every write that invalidates cache
+
+```
+update_status_fields(state, issues, ready_set) → Result<()>:
+
+  updates = []
+
+  FOR each issue in issues:
+    expected = compute_expected_status(issue, ready_set)
+    IF issue.status != expected:
+      updates.push((issue.project_item_id, expected))
+
+  FOR each (item_id, new_status) in updates:
+    state.github.update_field(project_id, item_id, status_field_id,
+      SingleSelectOption(status.option_id()))
+
+  log: "{updates.len()} Status fields synchronised"
+```
+
+### 10.2 `compute_expected_status`
+
+```
+compute_expected_status(issue, ready_set) → Status:
+
+  IF issue.state == Closed:
+    RETURN Closed
+
+  // Preserved states — set by agent/human, never overridden by server
+  IF issue.status == InProgress:
+    RETURN InProgress
+  IF issue.status == Deferred:
+    RETURN Deferred
+
+  // Graph-computed states
+  IF issue.qualified_id IN ready_set:
+    RETURN Ready
+  RETURN Blocked
+```
+
+### 10.3 Edge cases
+
+- **No changes:** if all fields match, zero API calls. Common on read-heavy workloads.
+- **Issue not in project:** cannot update field. Skip with warning.
+- **Batch size:** large cascades may generate many updates. Use GraphQL aliases for batching.
+
+---
+
+## 11. Error Model
+
+### 11.1 Domain errors (`unblock-core/src/errors.rs`)
+
+```rust
+#[derive(Debug, Snafu)]
+pub enum DomainError {
+    IssueNotFound { number: u64 },
+    AlreadyClaimed { number: u64, agent: String },
+    IssueBlocked { number: u64, blockers: Vec<u64> },
+    IssueDeferred { number: u64, until: String },
+    IssueClosed { number: u64 },
+    IssueNotClosed { number: u64 },
+    IssueAlreadyOpen { number: u64 },
+    CircularDependency { source: u64, target: u64 },
+    DuplicateDependency { source: u64, target: u64 },
+    FieldNotFound { name: String },
+    Validation { message: String },
+    InvalidIssueRef { input: String },
+    CrossRepoAccessDenied { owner: String, repo: String },
+}
+```
+
+Each variant has `status_code() → u16`:
+
+| Error | HTTP Code |
+|---|---|
+| `IssueNotFound` | 404 |
+| `AlreadyClaimed` | 409 |
+| `IssueBlocked` | 409 |
+| `IssueDeferred` | 409 |
+| `IssueClosed` | 409 |
+| `IssueNotClosed` | 409 |
+| `IssueAlreadyOpen` | 409 |
+| `CircularDependency` | 422 |
+| `DuplicateDependency` | 409 |
+| `FieldNotFound` | 404 |
+| `Validation` | 400 |
+| `InvalidIssueRef` | 400 |
+| `CrossRepoAccessDenied` | 403 |
+
+### 11.2 Infrastructure errors (`unblock-github/src/errors.rs`)
+
+```rust
+#[derive(Debug, Snafu)]
+pub enum Error {
+    Domain { source: DomainError },
+    GitHubApi { message: String },
+    GitHubGraphQL { errors: Vec<String> },
+    GitHubUnavailable { source: reqwest::Error },
+    GitHubServerError { status: u16, message: String },
+    RateLimited,
+    CircuitBreakerOpen,           // stub — active in Phase 02
+    ProjectNotConfigured,
+    GitRemote { message: String },
+    ViewCreationFailed { message: String },
+    OwnerDetectionFailed { owner: String, message: String },
+}
+```
+
+**Error classification:**
+
+| HTTP Status | Error variant | Retryable (Phase 02) |
+|---|---|---|
+| Network error | `GitHubUnavailable` | Yes |
+| 429 | `RateLimited` | Yes |
+| 500 | `GitHubServerError` | No |
+| 502 | `GitHubServerError` | No |
+| 503 | `GitHubServerError` | Yes |
+| 4xx (except 429) | `GitHubApi` | No |
+
+### 11.3 MCP error mapping (`unblock-mcp/src/errors.rs`)
+
+```
+github_error_to_mcp(err) → ErrorData:
+
+  Domain errors     → code: -32602 (invalid params / business rule)
+  Infrastructure    → code: -32603 (internal error / GitHub)
+```
+
+Propagation chain: `DomainError` (core) → `Error` (github) → `McpError` (mcp).
+
+---
+
+## 12. Configuration
+
+### 12.1 Environment variables
+
+| Variable | Required | Default | Purpose |
+|---|---|---|---|
+| `GITHUB_TOKEN` | Yes | — | Authentication (PAT) |
+| `GITHUB_API_URL` | No | `https://api.github.com` | GHE support |
+| `GITHUB_URL` | No | `https://github.com` | GHE support |
+| `UNBLOCK_REPO` | No | Auto-detect from git remote | Repository `owner/repo` |
+| `UNBLOCK_PROJECT` | No | Auto-detect from linked projects | Project number |
+| `UNBLOCK_AGENT` | No | `"agent"` | Default agent name |
+| `UNBLOCK_CACHE_TTL` | No | `30` | Cache TTL in seconds |
+| `UNBLOCK_LOG_LEVEL` | No | `"info"` | Log level |
+
+### 12.2 `Config` struct
+
+```rust
+pub struct Config {
+    pub token: String,
+    pub api_base_url: String,
+    pub github_url: String,
+    pub repo: Option<String>,
+    pub project_number: Option<u64>,
+    pub agent: String,
+    pub cache_ttl: u64,
+    pub log_level: String,
+}
+```
+
+`Config::load_from(env: impl Fn(&str) → Result<String, VarError>) → Result<Self, DomainError>`
+
+No config file. Environment variables only. The `load_from` pattern accepts a custom env reader — tests supply `HashMap`-backed closures (no `std::env::set_var` — unsafe in edition 2024).
+
+### 12.3 Token handling
+
+- `GITHUB_TOKEN` loaded from environment only
+- Never logged (redacted in debug output)
+- Never included in MCP tool responses
+- Never embedded in binary
+
+### 12.4 Input validation
+
+| Field | Validation |
+|---|---|
+| Issue numbers | Positive integers |
+| Titles | Non-empty, max 500 chars |
+| Agent names | Non-empty, max 100 chars |
+| Priority | Must be P0–P4 |
+| Dates | Valid ISO format |
+
+---
+
+## 13. Testing Strategy
+
+### 13.1 Test layers
+
+| Crate | Type | What | GitHub Required |
+|---|---|---|---|
+| `unblock-core` | Unit | Graph engine, cache, types, config | No |
+| `unblock-core` | Property | Graph invariants (proptest) | No |
+| `unblock-github` | Unit | Error conversion, URL construction | No |
+| `unblock-github` | Integration | Wiremock-based API tests | No |
+| `unblock-mcp` | Unit | Body section parsing, error conversion | No |
+| `unblock-mcp` | Integration | Full tool flows with `MockGitHubClient` | No |
+| `unblock-mcp` | E2E | Full agent loop | Yes (optional) |
+
+### 13.2 Quality gate
+
+```bash
+cargo fmt --check --all                                    # zero diffs
+cargo clippy --workspace --all-targets -- -D warnings      # zero warnings
+cargo test --workspace                                     # all pass
+cargo doc --no-deps --workspace                            # zero warnings
+```
+
+Coverage target: >80% for Phase 01.
+
+### 13.3 Property tests
+
+```rust
+proptest! {
+    #[test]
+    fn ready_set_never_contains_blocked_issues(
+        issues in vec(arb_issue(), 1..100),
+        edges in vec(arb_edge(), 0..200),
+    ) {
+        let graph = DependencyGraph::build(&issues, &edges);
+        let ready = graph.compute_ready_set(&issues);
+        for issue in &ready {
+            // No issue in ready set has an open blocker
+            let blockers = graph.get_blockers(&issue.qualified_id);
+            for blocker in blockers {
+                assert_eq!(graph.issue_state()[&blocker], IssueState::Closed);
+            }
+        }
+    }
+}
+```
+
+Graph invariants:
+1. Ready set never contains blocked issues
+2. Cascade is sound (all newly unblocked dependents appear)
+3. Cycle detection is sound and complete
+4. Ready set is deterministic (same input → same output)
+5. Graph construction is idempotent
+
+### 13.4 `test-hooks` feature
+
+`#[cfg(feature = "test-hooks")]` gates test-only code paths:
+- `MockGitHubClient` in `unblock-github/src/mock.rs`
+- `set_project_fields()` helpers
+- Any test-only mutation methods
+
+Never enabled in production builds.
+
+### 13.5 Required tests per tool
+
+Every tool MUST have at least one integration test with `MockGitHubClient` covering:
+- Happy path
+- Primary error case
+
+---
+
+## 14. Invariants
+
+These invariants MUST hold at all times. Property tests validate where applicable.
+
+1. **Ready set never contains blocked issues.** No issue in the ready set has an open blocker in the graph.
+2. **Cascade is sound.** After closing an issue, every dependent whose blockers are all now closed appears in the cascade result.
+3. **Cycle detection is sound.** If `detect_all_cycles()` returns empty, no cycle exists.
+4. **Cycle detection is complete.** If a cycle exists, `detect_all_cycles()` finds it.
+5. **Ready set is deterministic.** Same input → same output. Sorting by priority ASC → created_at ASC.
+6. **Cache is reconstructable.** Deleting the cache and rebuilding produces the same graph.
+7. **Graph construction is idempotent.** Same input data → same graph.
+8. **Every write invalidates + rebuilds + updates fields.** No write tool leaves cache or Status fields inconsistent. Exception: `comment` (no graph impact).
+9. **`show` is always fresh.** Never served from cache.
+10. **`search` bypasses cache.** Uses GitHub Search API directly.
+11. **Validation before mutation.** All tools validate input before calling GitHub. No partial mutations from validation failures.
+12. **Token never logged.** Redacted in all debug output. Never in MCP responses.
+13. **Status field values match graph computation.** After every write, `update_status_fields` syncs the Projects V2 Status field with the graph-computed expected status.
+
+---
+
+*This spec defines everything needed to implement Phase 01 (v0.1.0). The governing principles are in the [MANIFESTO](../MANIFESTO.md). The product scope is in the [PRD](../PRD.md). The full technical architecture is in the [SPEC](../SPEC.md). The implementation plan and gap analysis are in the [Phase 01 Plan](../plans/01-plan-mcp-foundation.md).*

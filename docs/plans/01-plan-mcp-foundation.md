@@ -1,29 +1,30 @@
 # Plan 01 — MCP Foundation (v0.1.0)
 
-> Phase: 01  
-> Version: v0.1.0  
-> Crates: `unblock-core`, `unblock-github`, `unblock-mcp`  
-> Depends on: nothing  
-> Required by: Phase 02 (MCP Complete)  
-> Status: in progress (11 of 17 tools implemented, 6 remaining)  
-> Companion specs: [01-spec-graph-engine.md](../specs/01-spec-graph-engine.md) · [02-spec-github-client.md](../specs/02-spec-github-client.md) · [03-spec-mcp-tools.md](../specs/03-spec-mcp-tools.md)
+> Phase: 01
+> Version: v0.1.0
+> Crates: `unblock-core`, `unblock-github`, `unblock-mcp`
+> Depends on: nothing
+> Required by: Phase 02 (MCP Complete)
+> Source: [MANIFESTO](../MANIFESTO.md) · [PRD](../PRD.md) · [SPEC](../SPEC.md)
 
 ---
 
 ## Table of Contents
 
 1. [Purpose](#1-purpose)
-2. [Rust Idioms & Rules](#2-rust-idioms--rules)
-3. [Public API Surface](#3-public-api-surface)
-4. [Priority & Dependency Legend](#4-priority--dependency-legend)
-5. [Epics](#5-epics)
-   - [Epic 01 — Workspace and Infrastructure](#epic-01--workspace-and-infrastructure)
-   - [Epic 02 — Core Library (unblock-core)](#epic-02--core-library-unblock-core)
-   - [Epic 03 — GitHub API Layer (unblock-github)](#epic-03--github-api-layer-unblock-github)
-   - [Epic 04 — MCP Server + Core Tools](#epic-04--mcp-server--core-tools)
-   - [Epic 05 — GitHubApi Trait Abstraction](#epic-05--githubapi-trait-abstraction)
-   - [Epic 06 — Foundation Completion](#epic-06--foundation-completion)
-6. [Definition of Done](#6-definition-of-done)
+2. [Scope](#2-scope)
+3. [Out of Scope](#3-out-of-scope)
+4. [Crate Architecture](#4-crate-architecture)
+5. [Rust Idioms & Rules](#5-rust-idioms--rules)
+6. [Data Model](#6-data-model)
+7. [Epic 01 — Workspace & Infrastructure](#epic-01--workspace--infrastructure)
+8. [Epic 02 — Core Library (unblock-core)](#epic-02--core-library-unblock-core)
+9. [Epic 03 — GitHub API Layer (unblock-github)](#epic-03--github-api-layer-unblock-github)
+10. [Epic 04 — MCP Server + Core Tools](#epic-04--mcp-server--core-tools)
+11. [Epic 05 — GitHubApi Trait Abstraction](#epic-05--githubapi-trait-abstraction)
+12. [Epic 06 — Foundation Completion](#epic-06--foundation-completion)
+13. [Gap Analysis — Implementation vs Plan](#gap-analysis--implementation-vs-plan)
+14. [Definition of Done](#definition-of-done)
 
 ---
 
@@ -31,7 +32,23 @@
 
 Phase 01 delivers the minimum viable agent workflow loop. An agent connects via MCP (stdio), finds unblocked work, claims it, implements, closes, and sees the cascade promote newly unblocked issues to ready. The graph engine, cache, GitHub client, and 17 MCP tools form a complete local product.
 
-**Scope — 17 MCP tools:**
+**Outcome:** `v0.1.0` — agent can `prime` → `ready` → `claim` → work → `close` → cascade. Under 2 seconds on warm cache.
+
+**Governing laws** (from MANIFESTO):
+
+1. GitHub stores, Rust computes — zero custom storage
+2. Every write invalidates and recomputes — consistency after mutations
+3. The agent is always one command away from productive work
+4. Correct GitHub primitive — comments for work log, fields for typed data, body sections for prose
+5. Session isolation is architectural
+6. Cascade is structural — not optional
+7. One graph, one truth — the dependency graph is authoritative
+
+---
+
+## 2. Scope
+
+### 2.1 — 17 MCP Tools
 
 | # | Tool | Type | Purpose |
 |---|---|---|---|
@@ -53,9 +70,9 @@ Phase 01 delivers the minimum viable agent workflow loop. An agent connects via 
 | 16 | `dep_remove` | Write | Remove blocking edge |
 | 17 | `dep_cycles` | Read | Detect dependency cycles |
 
-**Supporting infrastructure:**
+### 2.2 — Infrastructure
 
-- Cargo workspace (3 crates): `unblock-core`, `unblock-github`, `unblock-mcp`
+- Cargo workspace: 3 crates (`unblock-core`, `unblock-github`, `unblock-mcp`)
 - Graph engine: petgraph `DiGraph` with `QualifiedId` nodes
 - TTL cache: `GraphCache` with async `RwLock`, invalidation after every write
 - GitHub client: `GitHubClient` with paginated GraphQL reads, REST/GraphQL mutations
@@ -63,1030 +80,691 @@ Phase 01 delivers the minimum viable agent workflow loop. An agent connects via 
 - Projects V2 field management: 7 custom fields, 5 pre-configured views
 - CI pipeline: GitHub Actions (fmt, clippy, test, doc)
 - Error model: `snafu` exclusive, three-layer hierarchy (domain → infrastructure → MCP)
-
-**Outcome:** `v0.1.0` — agent can `prime` → `ready` → `claim` → work → `close` → cascade.
+- Logging: `tracing`, JSON to stderr (stdout reserved for MCP stdio)
+- Configuration: environment variables only, `Config::load_from()` pattern
 
 ---
 
-## 2. Rust Idioms & Rules
+## 3. Out of Scope
 
-### 2.1 Edition 2024, no unsafe
+These are explicitly **not** Phase 01:
+
+| Feature | Phase | Rationale |
+|---|---|---|
+| `reconcile` tool | 02 | Drift detection requires recently-closed query |
+| `doctor` tool | 02 | Health checks build on reconcile |
+| `commit_context` tool | 02 | Structured commit messages |
+| Agent client detection (`AgentKind`) | 02 | Detection heuristics, `SessionMeta` |
+| Circuit breaker | 02 | Resilience layer |
+| Retry with exponential backoff | 02 | Resilience layer |
+| OpenTelemetry metrics | 02 | Observability layer |
+| Materialised fast path | 03 | Cold start optimisation |
+| `cargo-dist` distribution | 03 | Cross-platform binaries |
+| GitHub App authentication | 03 | Enterprise auth |
+| GHE Server testing | 03 | Enterprise support |
+| Plugin pipeline (skills, agents) | 04 | Orchestration layer |
+| Remote server (HTTP transport) | 05 | Multi-tenant |
+| LLM agent (autonomous) | 06 | Codestral integration |
+
+---
+
+## 4. Crate Architecture
+
+```
+unblock-mcp (bin, stdio)
+  ├── unblock-github (lib)
+  │     └── unblock-core (lib)
+  └── unblock-core (lib)
+```
+
+| Crate | Role | Network I/O | License |
+|---|---|---|---|
+| `unblock-core` | Domain types, graph engine, cache, config | None | MIT |
+| `unblock-github` | GitHub API client (GraphQL + REST) | Yes | MIT |
+| `unblock-mcp` | MCP server binary, tool handlers | Via unblock-github | MIT |
+
+**Principle:** Pure core, impure shell. `unblock-core` has zero network I/O. All computation is testable with in-memory data.
+
+---
+
+## 5. Rust Idioms & Rules
+
+### 5.1 — Edition 2024, no unsafe
 
 Workspace-wide `edition = "2024"` and `#![deny(unsafe_code)]`. No exceptions.
 
-### 2.2 `snafu` exclusive
+### 5.2 — `snafu` exclusive
 
-Every crate uses `snafu` for errors. No `thiserror`, no `anyhow`, no `Box<dyn Error>`. Every crate defines its error types in `src/errors.rs` and re-exports a crate-scoped `Result<T>` alias. `unwrap()` and `expect()` forbidden outside test modules.
+Every crate uses `snafu` for errors. No `thiserror`, no `anyhow`, no `Box<dyn Error>`. Every crate defines its error types in `src/errors.rs` and re-exports a crate-scoped `Result<T>`. `unwrap()` and `expect()` forbidden outside test modules.
 
-### 2.3 Pure core, impure shell
+### 5.3 — Pure core, impure shell
 
-`unblock-core` has zero network I/O. All computation is testable with in-memory data. `unblock-github` handles all GitHub API communication. `unblock-mcp` is the thin MCP shell that wires tools to state.
+`unblock-core` has zero network I/O. All computation testable with in-memory data. `unblock-github` handles all GitHub API communication. `unblock-mcp` is the thin MCP shell that wires tools to state.
 
-### 2.4 Trait abstraction for testing
+### 5.4 — Trait abstraction for testing
 
 `GitHubApi` trait in `unblock-github/src/api.rs` abstracts all GitHub operations. `ServerState` holds `Arc<dyn GitHubApi>`. Tests use `MockGitHubClient` with call counters and response stubs, feature-gated behind `test-hooks`.
 
-### 2.5 Environment-based config
+### 5.5 — Environment-based config
 
 `Config::load_from(env_reader)` accepts a closure for testability. No `std::env::set_var` in tests (unsafe in edition 2024). Tests supply `HashMap`-backed closures.
 
-### 2.6 Write-through cache
+### 5.6 — Write-through cache
 
 Every write tool: execute mutation → `cache.invalidate()` → `fetch_graph_data()` → build graph → compute ready set → `cache.update()`. Lock never held across network I/O.
 
 ---
 
-## 3. Public API Surface
+## 6. Data Model
 
-### 3.1 `unblock-core`
+> Source: SPEC §2
 
-```
-src/
-  lib.rs           ← pub mod types, graph, cache, config, errors, reconcile, client, detection
-  types.rs         ← QualifiedId, Issue, IssueState, Status, Priority, PipelineStage,
-                      IssueType, BlockingEdge, IssueSummary, IssueRef, BodySections,
-                      TraversalDirection, IssueComment, RelatedIssue
-  graph.rs         ← DependencyGraph: build(), compute_ready_set(), compute_unblock_cascade(),
-                      would_create_cycle(), detect_all_cycles(), dependency_tree(),
-                      all_edges(), edge_count()
-  cache.rs         ← GraphCache: new(), get_ready_set(), get_graph(), update(), invalidate(), is_fresh()
-  config.rs        ← Config: load(), load_from()
-  errors.rs        ← DomainError (11 variants)
-  reconcile.rs     ← DriftKind (7 variants), DriftReport, ReconcileEngine (Phase 02 early)
-  client.rs        ← AgentKind, AgentClient (Phase 02 early)
-  detection.rs     ← ClientDetector (Phase 02 early)
+### 6.1 — GitHub Primitives Used
+
+| Primitive | Purpose | API |
+|---|---|---|
+| Issue number | Issue ID (`#42`) | REST + GraphQL |
+| Issue state | Open/Closed ground truth | REST + GraphQL |
+| Issue type | Classification: `task`, `bug`, `feature`, `epic`, `chore`, `spike` | REST + GraphQL (org-level) |
+| Labels | Flexible tagging | REST + GraphQL |
+| Assignees | Human assignment | REST + GraphQL |
+| Milestones | Sprint/release grouping | REST + GraphQL |
+| Comments | Discussion thread, audit trail | REST |
+| Sub-issues | Parent/child hierarchy | GraphQL (`sub_issues` feature) |
+| Blocking | Dependency edges | GraphQL mutations |
+| Issue body | Markdown with structured sections | REST + GraphQL |
+| Projects V2 | Custom fields, views, boards | GraphQL + REST (views) |
+
+### 6.2 — Projects V2 Custom Fields (7 total)
+
+> Source: SPEC §2.2
+
+| Field | Type | Values | Purpose |
+|---|---|---|---|
+| Status | Single Select | `ready`, `in_progress`, `blocked`, `deferred`, `closed` | Unified workflow + readiness state |
+| Priority | Single Select | `P0 - Critical`, `P1 - High`, `P2 - Medium`, `P3 - Low`, `P4 - Backlog` | Sortable priority for ready queue |
+| Pipeline Stage | Single Select | `investigation`, `implementation`, `review`, `refactoring`, `qa`, `done` | Development pipeline phase |
+| Agent | Text | Free text | Which AI agent is working on this |
+| Claimed At | Date | ISO datetime | Timestamp of claim |
+| Story Points | Number | Integer | Estimation |
+| Defer Until | Date | Date | Hidden from ready queue until this date |
+
+**Status transitions managed by MCP server:**
+- `ready` ↔ `blocked`: automatic, from dependency graph computation
+- → `in_progress`: on `claim`
+- → `deferred`: on `update` with `defer_until`
+- → `closed`: on `close`
+- `blocked`/`ready` → any: on `reopen` (re-evaluated from graph)
+
+**Pipeline Stage:** Created by `setup` in Phase 01 for field existence. Agent advancement is Phase 04 (plugin). The field exists so that early adopters can use it manually.
+
+### 6.3 — Issue Body Structure
+
+> Source: SPEC §2.3
+
+Three structured sections:
+
+```markdown
+## Description
+Full issue description.
+
+## Design Notes
+Technical design decisions.
+
+## Acceptance Criteria
+- [ ] Criterion 1
 ```
 
-### 3.2 `unblock-github`
+Parsed by `BodySections::from_markdown()`. Round-trippable via `to_markdown()`.
 
-```
-src/
-  lib.rs           ← pub mod client, graphql, mutations, projects, errors, api, mock
-  client.rs        ← GitHubClient: new(), owner(), repo(), rest_url(), graphql_url(), field_ids()
-  api.rs           ← GitHubApi trait (33 methods), blanket impl on GitHubClient
-  graphql.rs       ← fetch_graph_data(), fetch_issue(), fetch_issue_ref()
-  mutations.rs     ← create_issue(), close_issue(), add_comment(), add_blocked_by(),
-                      remove_blocked_by(), add_sub_issue(), update_issue_body(), label ops
-  projects.rs      ← resolve_project_info(), setup_fields(), update_field(),
-                      ProjectFieldIds, SetupReport, view management
-  errors.rs        ← Error (9 variants + CircuitBreakerOpen stub)
-  mock.rs          ← MockGitHubClient, CallCounts, Stubs (test-hooks feature)
-```
+### 6.4 — Pre-configured Views (5 total)
 
-### 3.3 `unblock-mcp`
+> Source: SPEC §2.5
 
-```
-src/
-  lib.rs           ← pub mod server, errors, tools
-  main.rs          ← binary entrypoint, stdio transport
-  server.rs        ← ServerState, UnblockServer, tool registration (12 tools currently)
-  errors.rs        ← github_error_to_mcp() conversion
-  tools/
-    mod.rs         ← execute_read_tool(), execute_write_tool(), rebuild_cache(), normalize_filter()
-    init.rs        ← InitParams, InitResult
-    setup.rs       ← SetupParams, SetupResult
-    ready.rs       ← ReadyParams, ReadyResult, ReadyIssueSummary
-    claim.rs       ← ClaimParams, ClaimResult, ClaimCandidate, validate_claimable()
-    close.rs       ← CloseParams, CloseResult
-    create.rs      ← CreateParams, CreateResult
-    show.rs        ← ShowParams, ShowResult, ShowIssue, ShowBodySections
-    comment.rs     ← CommentParams, CommentResult
-    update.rs      ← UpdateParams, UpdateResult, BodySectionUpdate, SectionName
-    depends.rs     ← DependsParams, DependsResult
-    prime.rs       ← PrimeParams, PrimeResult, SessionMeta, ProjectMeta
-    reconcile.rs   ← ReconcileParams, ReconcileOutput (Phase 02 early)
-```
+| View | Layout | Purpose |
+|---|---|---|
+| `UNBLOCK://ready` | Board | Agent's ready queue, filtered to Status: `ready` |
+| `UNBLOCK://team` | Board | Tech lead view, grouped by Agent |
+| `UNBLOCK://pipeline` | Board | Dev pipeline, grouped by Pipeline Stage |
+| `UNBLOCK://roadmap` | Table | Epic-level progress |
+| `UNBLOCK://timeline` | Roadmap | Date-based timeline |
+
+### 6.5 — Dependency Model
+
+Single blocking type. GitHub's native `blockedBy`/`blocking`. Binary: blocks or does not. Edge direction in graph: `blocked_issue → blocking_issue` (source depends on target). Cross-repo supported via `QualifiedId`.
 
 ---
 
-## 4. Priority & Dependency Legend
-
-### Priority levels
-
-| Level | Meaning |
-|---|---|
-| **P0 - Critical** | Absolute blocker — nothing moves forward until this is done |
-| **P1 - High** | Critical for the phase to be functional — happy path |
-| **P2 - Medium** | Important but does not block the happy path |
-| **P3 - Low** | Quality, ergonomics, extra coverage |
-| **P4 - Backlog** | Nice to have — included if time permits, does not delay done |
-
-### Dependency fields
-
-Every task carries three metadata fields:
-
-- **Priority** — P0 through P4 as defined above
-- **Depends on** — task IDs within this plan that must be complete before this task starts
-- **Blocked by** — external blockers (other phases, tools, decisions outside this plan)
-
----
-
-## 5. Epics
-
----
-
-### Epic 01 — Workspace and Infrastructure
+## Epic 01 — Workspace & Infrastructure
 
 **Goal:** Cargo workspace scaffold, CI pipeline, crate skeletons, developer tooling.
 
-**Status:** ✅ Complete
-
----
-
-#### Task 01.01 — Cargo workspace scaffold
-
-> **Priority:** P0  
-> **Depends on:** nothing  
-> **Blocked by:** nothing  
-> **Status:** ✅ Done
+### Task 01.01 — Cargo workspace scaffold
 
 **Files:** `Cargo.toml` (workspace root), `crates/*/Cargo.toml`
 
-Requirements:
 - Workspace with 3 members: `unblock-core`, `unblock-github`, `unblock-mcp`
 - Edition 2024, `#![deny(unsafe_code)]` workspace-wide
 - Shared dependencies via `[workspace.dependencies]`
 - Core dependencies: `petgraph`, `rmcp`, `reqwest`, `snafu`, `tracing`, `tokio`, `serde`, `schemars`, `chrono`
 
----
-
-#### Task 01.02 — CI pipeline — GitHub Actions
-
-> **Priority:** P0  
-> **Depends on:** Task 01.01  
-> **Blocked by:** nothing  
-> **Status:** ✅ Done
+### Task 01.02 — CI pipeline
 
 **File:** `.github/workflows/ci.yml`
 
-Requirements:
-- Quality gate: `cargo fmt --check --all`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `cargo doc --no-deps --workspace`
-- Runs on: push to main, pull requests
+Quality gate: `cargo fmt --check --all`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `cargo doc --no-deps --workspace`. Runs on push to main and pull requests.
+
+### Task 01.03 — Crate skeletons
+
+**Files:** `crates/*/src/lib.rs`
+
+Each crate compiles with module declarations. Dependency graph: `unblock-mcp` → `unblock-github` → `unblock-core`.
 
 ---
 
-#### Task 01.03 — Crate skeletons
-
-> **Priority:** P0  
-> **Depends on:** Task 01.01  
-> **Blocked by:** nothing  
-> **Status:** ✅ Done
-
-**Files:** `crates/unblock-core/src/lib.rs`, `crates/unblock-github/src/lib.rs`, `crates/unblock-mcp/src/lib.rs`
-
-Requirements:
-- Each crate compiles with empty module declarations
-- Dependency graph: `unblock-mcp` → `unblock-github` → `unblock-core`
-
----
-
-#### Task 01.04 — Developer tooling
-
-> **Priority:** P1  
-> **Depends on:** Task 01.01  
-> **Blocked by:** nothing  
-> **Status:** ✅ Done
-
-**Files:** `CLAUDE.md`, `.claude/agents/`
-
-Requirements:
-- `CLAUDE.md` with project overview, coding standards, workspace commands
-- Agent definitions for `rust-supervisor` and `infra-supervisor`
-
----
-
-### Epic 02 — Core Library (unblock-core)
+## Epic 02 — Core Library (unblock-core)
 
 **Goal:** Pure Rust domain types, graph engine, cache layer, configuration. Zero network I/O.
 
-**Status:** ✅ Complete
-
----
-
-#### Task 02.01 — Domain types
-
-> **Priority:** P0  
-> **Depends on:** Task 01.03  
-> **Blocked by:** nothing  
-> **Status:** ✅ Done
+### Task 02.01 — Domain types
 
 **File:** `unblock-core/src/types.rs`
 
-Types implemented:
-- `QualifiedId` — `{owner, repo, number}`, implements `Display`, `FromStr`, `Hash`, `Eq`
-- `Issue` — full issue data with all Projects V2 fields (status, priority, pipeline_stage, agent, claimed_at, story_points, defer_until, body sections, relationships)
-- `IssueState` — `{Open, Closed}` (GitHub native)
-- `Status` — `{Ready, InProgress, Blocked, Deferred, Closed}` (Projects V2 unified workflow + readiness)
-- `Priority` — `{P0, P1, P2, P3, P4}` with `as_sort_key()`
-- `PipelineStage` — `{Investigation, Implementation, Review, Refactoring, Qa, Done}` (Projects V2 development pipeline)
-- `IssueType` — `{Task, Bug, Feature, Epic, Chore, Spike}`
-- `BlockingEdge` — `{source: QualifiedId, target: QualifiedId}`
+Types:
+- `QualifiedId { owner, repo, number }` — Display, FromStr, Hash, Eq
+- `Issue` — full issue with all Projects V2 fields: status, priority, pipeline_stage, agent, claimed_at, story_points, defer_until, body sections, relationships
+- `IssueState { Open, Closed }` — GitHub native
+- `Status { Ready, InProgress, Blocked, Deferred, Closed }` — Projects V2 unified field
+- `Priority { P0, P1, P2, P3, P4 }` — with `as_sort_key()`
+- `PipelineStage { Investigation, Implementation, Review, Refactoring, Qa, Done }`
+- `IssueType { Task, Bug, Feature, Epic, Chore, Spike }`
+- `BlockingEdge { source, target }` — both `QualifiedId`
 - `IssueSummary` — lightweight issue for list/ready responses
-- `IssueRef` — `{Local(u64), CrossRepo{owner, repo, number}}` with `resolve()`
-- `BodySections` — `{description, design_notes, acceptance_criteria}` with `from_markdown()`, `to_markdown()`
-- `TraversalDirection` — `{Upstream, Downstream, Both}`
-- `IssueComment`, `RelatedIssue`
+- `IssueRef { Local(u64), CrossRepo { owner, repo, number } }` — with `resolve()`
+- `BodySections { description, design_notes, acceptance_criteria }` — `from_markdown()`, `to_markdown()`
+- `TraversalDirection { Upstream, Downstream, Both }`
+- `IssueComment { author, body, created_at }`
+- `RelatedIssue { number, title, state }`
 
----
-
-#### Task 02.02 — Domain errors
-
-> **Priority:** P0  
-> **Depends on:** Task 02.01  
-> **Blocked by:** nothing  
-> **Status:** ✅ Done
+### Task 02.02 — Domain errors
 
 **File:** `unblock-core/src/errors.rs`
 
-11 variants: `IssueNotFound`, `AlreadyClaimed`, `IssueBlocked`, `IssueDeferred`, `IssueClosed`, `IssueNotClosed`, `IssueAlreadyOpen`, `CircularDependency`, `DuplicateDependency`, `FieldNotFound`, `Validation`. Each with `status_code() -> u16` for HTTP mapping.
+`DomainError` enum — 11+ variants: `IssueNotFound`, `AlreadyClaimed`, `IssueBlocked`, `IssueDeferred`, `IssueClosed`, `IssueNotClosed`, `IssueAlreadyOpen`, `CircularDependency`, `DuplicateDependency`, `FieldNotFound`, `Validation`, `InvalidIssueRef`, `CrossRepoAccessDenied`. Each with `status_code() -> u16`.
 
----
-
-#### Task 02.03 — Configuration
-
-> **Priority:** P0  
-> **Depends on:** Task 02.01  
-> **Blocked by:** nothing  
-> **Status:** ✅ Done
+### Task 02.03 — Configuration
 
 **File:** `unblock-core/src/config.rs`
 
-`Config` struct with fields: `token`, `api_base_url`, `github_url`, `repo`, `project_number`, `agent`, `cache_ttl`, `log_level`, `otel_endpoint`. Loaded from environment variables via `load_from(env_reader)`.
+`Config` struct: `token`, `api_base_url`, `github_url`, `repo`, `project_number`, `agent`, `cache_ttl`, `log_level`, `otel_endpoint`. Loaded from environment variables via `load_from(env_reader)`.
 
----
+| Variable | Required | Default | Purpose |
+|---|---|---|---|
+| `GITHUB_TOKEN` | Yes | — | Authentication |
+| `GITHUB_API_URL` | No | `https://api.github.com` | GHE support |
+| `GITHUB_URL` | No | `https://github.com` | GHE support |
+| `UNBLOCK_REPO` | No | Auto-detect from git remote | Repository |
+| `UNBLOCK_PROJECT` | No | Auto-detect | Project number |
+| `UNBLOCK_AGENT` | No | `"agent"` | Default agent name |
+| `UNBLOCK_CACHE_TTL` | No | `30` | Cache TTL (seconds) |
+| `UNBLOCK_LOG_LEVEL` | No | `"info"` | Log level |
 
-#### Task 02.04 — Graph engine — build and ready set
-
-> **Priority:** P0  
-> **Depends on:** Task 02.01  
-> **Blocked by:** nothing  
-> **Status:** ✅ Done
+### Task 02.04 — Graph engine — build and ready set
 
 **File:** `unblock-core/src/graph.rs`
 
 `DependencyGraph` with petgraph `DiGraph<QualifiedId, ()>`. Edge direction: blocked → blocker.
 
 Methods:
-- `build(issues, edges) -> Self` — construct from issue/edge arrays
-- `compute_ready_set(issues) -> Vec<IssueSummary>` — issues with no open blockers, sorted by priority ASC → created_at ASC
+- `build(issues, edges) -> Self`
+- `compute_ready_set(issues) -> Vec<IssueSummary>` — issue is ready if: `IssueState::Open` AND `Status::Ready` (not InProgress/Blocked/Deferred/Closed) AND all blockers have `IssueState::Closed`. Sorted: priority ASC → created_at ASC.
 
----
-
-#### Task 02.05 — Graph engine — cascade
-
-> **Priority:** P0  
-> **Depends on:** Task 02.04  
-> **Blocked by:** nothing  
-> **Status:** ✅ Done
+### Task 02.05 — Graph engine — cascade
 
 **File:** `unblock-core/src/graph.rs`
 
 - `compute_unblock_cascade(closed_id, all_issues) -> Vec<QualifiedId>` — dependents whose blockers are all now closed
 
----
-
-#### Task 02.06 — Graph engine — cycles and tree traversal
-
-> **Priority:** P0  
-> **Depends on:** Task 02.04  
-> **Blocked by:** nothing  
-> **Status:** ✅ Done
+### Task 02.06 — Graph engine — cycles and tree traversal
 
 **File:** `unblock-core/src/graph.rs`
 
 - `would_create_cycle(source, target) -> bool` — pre-mutation check via `has_path_connecting`
-- `detect_all_cycles() -> Vec<Vec<QualifiedId>>` — Tarjan's SCC algorithm
-- `dependency_tree(root, direction, max_depth) -> Vec<(QualifiedId, usize)>` — BFS traversal
+- `detect_all_cycles() -> Vec<Vec<QualifiedId>>` — Tarjan's SCC
+- `dependency_tree(root, direction, max_depth) -> DependencyTree` — BFS traversal returning `DependencyTree { root, upstream: Vec<TreeNode>, downstream: Vec<TreeNode> }`
 - `all_edges() -> Vec<BlockingEdge>`, `edge_count() -> usize`
 
----
-
-#### Task 02.07 — Cache layer
-
-> **Priority:** P0  
-> **Depends on:** Task 02.04  
-> **Blocked by:** nothing  
-> **Status:** ✅ Done
+### Task 02.07 — Cache layer
 
 **File:** `unblock-core/src/cache.rs`
 
-`GraphCache` with `RwLock<Option<CacheEntry>>` and `Duration` TTL. Methods: `new()`, `get_ready_set()`, `get_graph()`, `update()`, `invalidate()`, `is_fresh()`. Returns `Arc` handles for cheap sharing.
+`GraphCache` with `RwLock<Option<CacheEntry>>` and `Duration` TTL.
+
+```
+CacheEntry { graph, ready_set, built_at }
+CacheResult  { Fresh, Stale, Empty }
+```
+
+Methods: `new()`, `get_ready_set()`, `get_graph()`, `update()`, `invalidate()`, `is_fresh()`.
+
+**Invariant:** Every field in `CacheEntry` is reconstructable from GitHub with a single `fetch_graph_data()` call. The cache is a performance optimisation, not a source of truth.
 
 ---
 
-### Epic 03 — GitHub API Layer (unblock-github)
+## Epic 03 — GitHub API Layer (unblock-github)
 
 **Goal:** GitHub client with paginated GraphQL reads, REST/GraphQL mutations, Projects V2 field management.
 
-**Status:** ✅ Complete
-
----
-
-#### Task 03.01 — GitHub client bootstrap
-
-> **Priority:** P0  
-> **Depends on:** Task 01.03  
-> **Blocked by:** nothing  
-> **Status:** ✅ Done
+### Task 03.01 — GitHub client bootstrap
 
 **File:** `unblock-github/src/client.rs`
 
 `GitHubClient` with `reqwest::Client`, token in default headers, repo resolution from `UNBLOCK_REPO` or git remote parsing. GHE URL resolution: `graphql_url()` strips `/v3` suffix for GHE Server.
 
----
-
-#### Task 03.02 — fetch_graph_data — paginated GraphQL
-
-> **Priority:** P0  
-> **Depends on:** Task 03.01  
-> **Blocked by:** nothing  
-> **Status:** ✅ Done
+### Task 03.02 — `fetch_graph_data` — paginated GraphQL
 
 **File:** `unblock-github/src/graphql.rs`
 
 Single paginated query returns all open issues with blocking edges, sub-issues, Projects V2 field values. 100 issues per page. Cross-repo blocking edges supported.
 
----
-
-#### Task 03.03 — fetch_issue — single issue query
-
-> **Priority:** P0  
-> **Depends on:** Task 03.01  
-> **Blocked by:** nothing  
-> **Status:** ✅ Done
+### Task 03.03 — `fetch_issue` — single issue query
 
 **File:** `unblock-github/src/graphql.rs`
 
 `fetch_issue(number)` and `fetch_issue_ref(IssueRef)` — always fresh, never cached. Includes comments and full field values.
 
----
-
-#### Task 03.04 — Mutations — create, close, comment
-
-> **Priority:** P0  
-> **Depends on:** Task 03.01  
-> **Blocked by:** nothing  
-> **Status:** ✅ Done
+### Task 03.04 — Mutations (REST + GraphQL)
 
 **File:** `unblock-github/src/mutations.rs`
 
-REST mutations: `create_issue()`, `close_issue()`, `add_comment()`, `update_issue_body()`, label operations, assignee operations, milestone operations.
+REST: `create_issue()`, `close_issue()`, `reopen_issue()`, `add_comment()`, `update_issue_body()`, label ops, assignee ops, milestone ops.
+GraphQL: `add_blocked_by()`, `remove_blocked_by()`, `add_sub_issue()`.
 
----
+Cross-repo scope: dependency mutations accept any two Issue node IDs. Write mutations (close, reopen, update) scoped to configured repo.
 
-#### Task 03.05 — Mutations — blocking relationships and sub-issues
-
-> **Priority:** P0  
-> **Depends on:** Task 03.01  
-> **Blocked by:** nothing  
-> **Status:** ✅ Done
-
-**File:** `unblock-github/src/mutations.rs`
-
-GraphQL mutations: `add_blocked_by()`, `remove_blocked_by()`, `add_sub_issue()`, `add_blocked_by_ref()`. Cross-repo dependencies supported.
-
----
-
-#### Task 03.06 — Projects V2 fields — setup and update
-
-> **Priority:** P0  
-> **Depends on:** Task 03.01  
-> **Blocked by:** nothing  
-> **Status:** ✅ Done
+### Task 03.05 — Projects V2 field management
 
 **File:** `unblock-github/src/projects.rs`
 
-`resolve_project_info()`, `setup_fields()`, `update_field()`, `query_setup_status()`. 7 custom fields: Status, Priority, Pipeline Stage, Agent, Claimed At, Story Points, Defer Until. 5 pre-configured views. REST view management with integer field ID discovery.
+`ProjectFieldIds` — caches GraphQL node IDs and option IDs for all 7 fields.
+`FieldMeta { field_id, options: HashMap<String, String> }` — for single-select fields.
 
----
+Functions: `resolve_project_info()`, `setup_fields()`, `update_field()`, `batch_update_fields()`, `query_setup_status()`.
 
-#### Task 03.07 — Infrastructure errors
+7 custom fields: Status, Priority, Pipeline Stage, Agent, Claimed At, Story Points, Defer Until.
 
-> **Priority:** P0  
-> **Depends on:** Task 03.01  
-> **Blocked by:** nothing  
-> **Status:** ✅ Done
+### Task 03.06 — View management
+
+**File:** `unblock-github/src/projects.rs`
+
+5 views created via REST API (`X-GitHub-Api-Version: 2026-03-10`). Owner type detection (org vs user) for correct REST endpoint. Integer field ID discovery via REST `/fields`.
+
+### Task 03.07 — Infrastructure errors
 
 **File:** `unblock-github/src/errors.rs`
 
-`Error` enum: `Domain`, `GitHubApi`, `GitHubGraphQL`, `GitHubUnavailable`, `RateLimited`, `CircuitBreakerOpen` (stub), `ProjectNotConfigured`, `GitRemote`, `UnknownOwnerType`, `MockNotStubbed`. With `status_code()` mapping.
+`Error` enum: `Domain`, `GitHubApi`, `GitHubGraphQL`, `GitHubUnavailable`, `RateLimited`, `CircuitBreakerOpen` (stub — active in Phase 02), `ProjectNotConfigured`, `GitRemote`, `UnknownOwnerType`.
+
+`status_code() -> u16` mapping. `is_retryable()` classification (prep for Phase 02 retry logic).
 
 ---
 
-### Epic 04 — MCP Server + Core Tools
+## Epic 04 — MCP Server + Core Tools
 
 **Goal:** MCP server over stdio with tool registration, shared execution pattern, and 11 core tools.
 
-**Status:** ✅ Complete (11 of 17 tools — remaining 6 in Epic 06)
-
----
-
-#### Task 04.01 — MCP server bootstrap
-
-> **Priority:** P0  
-> **Depends on:** Task 03.06  
-> **Blocked by:** nothing  
-> **Status:** ✅ Done
+### Task 04.01 — MCP server bootstrap
 
 **Files:** `unblock-mcp/src/main.rs`, `unblock-mcp/src/server.rs`
 
-`ServerState` with `Arc<Config>`, `Arc<dyn GitHubApi>`, `Arc<GraphCache>`, `OnceLock<AgentKind>`, `OnceLock<AgentClient>`. `UnblockServer` implements `rmcp::ServerHandler`. Stdio transport via `rmcp::ServiceExt::serve`.
+`ServerState` with `Arc<Config>`, `Arc<dyn GitHubApi>`, `Arc<GraphCache>`.
 
----
+Bootstrap: load config → init tracing (JSON, stderr) → create GitHub client → resolve repo + project + fields → validate fields → create cache → create server → serve on stdio.
 
-#### Task 04.02 — Tool execution pattern
+Bootstrap mode: if no project detected, only `init` and `setup` are functional. All other tools return `ProjectNotConfigured`.
 
-> **Priority:** P0  
-> **Depends on:** Task 04.01  
-> **Blocked by:** nothing  
-> **Status:** ✅ Done
+### Task 04.02 — Tool execution pattern
 
 **File:** `unblock-mcp/src/tools/mod.rs`
 
 Shared helpers:
 - `execute_read_tool(state, op)` — maps errors to `ErrorData`, no cache invalidation
 - `execute_write_tool(state, op)` — maps errors, then `rebuild_cache(state)`
-- `rebuild_cache(state)` — invalidate → fetch_graph_data → build graph → compute ready set → update cache
+- `rebuild_cache(state)` — invalidate → fetch_graph_data → build graph → compute ready set → diff Status fields → batch update changed fields → update cache
 
----
+### Task 04.03 — `init` tool
 
-#### Task 04.03 — `init` tool
+Creates Projects V2 board. Detects owner type (org vs user). Idempotent.
 
-> **Priority:** P0  
-> **Depends on:** Task 04.02  
-> **Blocked by:** nothing  
-> **Status:** ✅ Done
-
-**File:** `unblock-mcp/src/tools/init.rs`
-
-Creates Projects V2 board. Detects owner type (org vs user). Idempotent — returns existing project if found.
-
----
-
-#### Task 04.04 — `setup` tool
-
-> **Priority:** P0  
-> **Depends on:** Task 04.03  
-> **Blocked by:** nothing  
-> **Status:** ✅ Done
-
-**File:** `unblock-mcp/src/tools/setup.rs`
+### Task 04.04 — `setup` tool
 
 Creates 7 fields and 5 views. Dry-run mode. Idempotent. REST field discovery for integer IDs.
 
----
+### Task 04.05 — `ready` tool
 
-#### Task 04.05 — `ready` tool
+Filters: `issue_type`, `priority`, `milestone`, `agent`, `label`, `include_claimed`, `limit`.
+Post-filter: `defer_until > today` excluded.
+Sort: priority ASC → created_at ASC. Default limit: 10.
+Cache-aware: Fresh → serve, Stale/Empty → rebuild.
 
-> **Priority:** P0  
-> **Depends on:** Task 04.02  
-> **Blocked by:** nothing  
-> **Status:** ✅ Done
+### Task 04.06 — `claim` tool
 
-**File:** `unblock-mcp/src/tools/ready.rs`
+Validates: open, not blocked, not deferred, not already claimed.
+Updates: Status → `in_progress`, Agent → name, Claimed At → now.
+Posts claim comment.
 
-Filters: `issue_type`, `priority`, `milestone`, `agent`, `label`, `include_claimed`. Post-filter: `defer_until > today` excluded. Sort: priority ASC → created_at ASC. Default limit: 10.
+### Task 04.07 — `close` tool
 
----
+Validates: open.
+**Critical:** Cascade must be computed BEFORE closing the issue (pre-close graph).
+Close via REST. Update Status → `closed`.
+For each unblocked dependent: update Status → `ready`, post unblock comment.
 
-#### Task 04.06 — `claim` tool
+### Task 04.08 — `create` tool
 
-> **Priority:** P0  
-> **Depends on:** Task 04.02  
-> **Blocked by:** nothing  
-> **Status:** ✅ Done
+Params: title, type, priority, body, labels, milestone, blocked_by (cross-repo), parent (sub-issue), story_points, defer_until.
+Creates issue, adds to project, sets fields. If blocked_by: cycle check + add deps + Status → `blocked`.
 
-**File:** `unblock-mcp/src/tools/claim.rs`
+### Task 04.09 — `show` tool
 
-Validates: open, no open blockers, not deferred, not already claimed. Updates: Status → InProgress, Agent, Claimed At. Posts claim comment.
+Always fresh (never cached). Full issue with parsed body sections, blocking/blocked_by, parent/sub-issues, dependency tree (BFS, max depth), comments.
 
----
+### Task 04.10 — `comment` tool
 
-#### Task 04.07 — `close` tool
+Posts comment. No cache invalidation — comments don't affect the graph.
 
-> **Priority:** P0  
-> **Depends on:** Task 04.02  
-> **Blocked by:** nothing  
-> **Status:** ✅ Done
+### Task 04.11 — `update` tool
 
-**File:** `unblock-mcp/src/tools/close.rs`
+Selective updates: priority, status, labels_add/remove, assignees_add/remove, body_section (Description/Design Notes/Acceptance Criteria), milestone, story_points, defer_until, agent.
 
-Closes issue via REST. Updates Projects V2 fields. Computes cascade: for each newly unblocked dependent, updates Status → Ready and posts unblock comment. Returns list of unblocked issue numbers.
+### Task 04.12 — `depends` tool
 
----
+Params: `source` (IssueRef — local or cross-repo), `target` (IssueRef).
+Validates both exist. Cycle check. Duplicate check.
+`add_blocked_by()` mutation. Update source Status → `blocked`.
 
-#### Task 04.08 — `create` tool
+### Task 04.13 — `prime` tool
 
-> **Priority:** P0  
-> **Depends on:** Task 04.02  
-> **Blocked by:** nothing  
-> **Status:** ✅ Done
+Context summary for agent session injection. Returns: repo, project, ready/blocked/in-progress counts, cycle warnings. Markdown blob for agent injection.
 
-**File:** `unblock-mcp/src/tools/create.rs`
+### Task 04.14 — Error mapping
 
-Creates issue with optional: `blocked_by` (cross-repo), `parent` (sub-issue), `labels` (auto-created), `milestone`, `story_points`, `defer_until`. Sets Projects V2 fields after creation.
+**File:** `unblock-mcp/src/errors.rs`
 
----
-
-#### Task 04.09 — `show` tool
-
-> **Priority:** P0  
-> **Depends on:** Task 04.02  
-> **Blocked by:** nothing  
-> **Status:** ✅ Done
-
-**File:** `unblock-mcp/src/tools/show.rs`
-
-Always fresh (never cached). Returns full issue detail with parsed body sections, blocking/blocked_by relationships, parent/sub-issues, dependency tree (BFS, max depth 3), and comments.
+`github_error_to_mcp(err) -> McpError`. Maps domain errors to `-32602` (invalid params / business rule), infrastructure errors to `-32603` (internal / GitHub).
 
 ---
 
-#### Task 04.10 — `comment` tool
+## Epic 05 — GitHubApi Trait Abstraction
 
-> **Priority:** P1  
-> **Depends on:** Task 04.02  
-> **Blocked by:** nothing  
-> **Status:** ✅ Done
+**Goal:** Extract `GitHubApi` trait for dependency injection. Enable unit testing without live GitHub.
 
-**File:** `unblock-mcp/src/tools/comment.rs`
-
-Adds comment to issue. No cache invalidation — comments don't affect the graph.
-
----
-
-#### Task 04.11 — `update` tool
-
-> **Priority:** P1  
-> **Depends on:** Task 04.02  
-> **Blocked by:** nothing  
-> **Status:** ✅ Done
-
-**File:** `unblock-mcp/src/tools/update.rs`
-
-Selective updates: `priority`, `status`, `labels_add/remove`, `assignees_add/remove`, `body_section` (read-modify-write via `BodySections`), `milestone`, `story_points`, `defer_until`. Returns list of updated fields.
-
----
-
-#### Task 04.12 — `depends` tool
-
-> **Priority:** P1  
-> **Depends on:** Task 04.02  
-> **Blocked by:** nothing  
-> **Status:** ✅ Done
-
-**File:** `unblock-mcp/src/tools/depends.rs`
-
-Adds blocking relationship: `source` (u64) is blocked by `target` (IssueRef, cross-repo). Cycle detection via `would_create_cycle()`. Updates source: Status → Blocked. Rebuilds cache.
-
-**Known deviations from spec** (tracked in beads):
-- `source` param is `u64` instead of `IssueRef` (unblock-b6b.86)
-- Output shape differs from spec `DependsResult` (unblock-b6b.87)
-
----
-
-#### Task 04.13 — `prime` tool
-
-> **Priority:** P1  
-> **Depends on:** Task 04.02  
-> **Blocked by:** nothing  
-> **Status:** ✅ Done
-
-**File:** `unblock-mcp/src/tools/prime.rs`
-
-Context summary for agent session injection. Returns structured `PrimeResult` with `SessionMeta`, `ProjectMeta`, ready/blocked/in-progress counts, cycle warnings.
-
----
-
-#### Task 04.14 — E2E workflow integration test
-
-> **Priority:** P1  
-> **Depends on:** Tasks 04.03–04.13  
-> **Blocked by:** nothing  
-> **Status:** ✅ Done
-
-**File:** `unblock-mcp/tests/e2e_workflow.rs`
-
-Full agent loop: prime → ready → claim → comment → close → verify cascade.
-
----
-
-### Epic 05 — GitHubApi Trait Abstraction
-
-**Goal:** Extract `GitHubApi` trait for dependency injection. Enable unit testing of tool handlers without live GitHub.
-
-**Status:** ✅ Complete
-
----
-
-#### Task 05.01 — Define GitHubApi trait
-
-> **Priority:** P0  
-> **Depends on:** Epic 03  
-> **Blocked by:** nothing  
-> **Status:** ✅ Done
+### Task 05.01 — Define GitHubApi trait
 
 **File:** `unblock-github/src/api.rs`
 
-`GitHubApi` trait with 33 methods (sync accessors + async operations). Blanket impl on `GitHubClient`. `async_trait` for object safety.
+Trait with all GitHub operations. Blanket impl on `GitHubClient`. `async_trait` for object safety.
+
+### Task 05.02 — MockGitHubClient
+
+**File:** `unblock-github/src/mock.rs` (feature: `test-hooks`)
+
+`MockGitHubClient` with `CallCounts` (per-method atomic counters) and `Stubs` (per-method response queues). Full `GitHubApi` trait implementation.
+
+### Task 05.03 — Migrate ServerState to trait
+
+`ServerState.github`: `Arc<GitHubClient>` → `Arc<dyn GitHubApi>`. All tool handlers operate on the trait.
 
 ---
 
-#### Task 05.02 — Implement MockGitHubClient
+## Epic 06 — Foundation Completion
 
-> **Priority:** P0  
-> **Depends on:** Task 05.01  
-> **Blocked by:** nothing  
-> **Status:** ✅ Done
+**Goal:** Implement the 6 remaining tools required for Phase 01 scope (17 tools total).
 
-**File:** `unblock-github/src/mock.rs` (feature-gated: `test-hooks`)
+### Task 06.01 — `list` tool
 
-`MockGitHubClient` with `CallCounts` (33 atomic counters) and `Stubs` (33 response queues). Full `GitHubApi` trait implementation. Macro-generated `push_*` helpers.
+Filtered, sorted, paginated access to all issues. Params: `status`, `priority`, `type`, `milestone`, `agent`, `label`, `assignee`, `sort`, `limit`, `offset`. Read tool, uses cache.
 
----
+### Task 06.02 — `search` tool
 
-#### Task 05.03 — Migrate ServerState and tools to trait
+Full-text search via GitHub Search API. Bypasses cache entirely. Params: `query`, `limit`.
 
-> **Priority:** P0  
-> **Depends on:** Task 05.02  
-> **Blocked by:** nothing  
-> **Status:** ✅ Done
+**Requires:** `search_issues()` method on `GitHubApi` trait.
 
-**File:** `unblock-mcp/src/server.rs`
+### Task 06.03 — `stats` tool
 
-`ServerState.github` changed from `Arc<GitHubClient>` to `Arc<dyn GitHubApi>`. All tool handlers operate on the trait, enabling mock-based testing.
+Aggregate counts: by_status, by_priority, blocked_count, ready_count, cycle_count, agents. Optional milestone filter. Read tool, uses cache.
 
----
+### Task 06.04 — `reopen` tool
 
-### Epic 06 — Foundation Completion
+Reopens closed issue. Evaluates blocking status from graph. Updates Status → `ready` (no blockers) or `blocked` (has blockers).
 
-**Goal:** Implement the 6 remaining tools required for Phase 01 scope (17 tools total). These tools complete the read and dependency management capabilities that Phase 02 assumes exist.
+**Requires:** `reopen_issue()` method on `GitHubApi` trait.
 
-**Status:** Not started
+### Task 06.05 — `dep_remove` tool
 
----
+Removes blocking relationship. Params: `source` (IssueRef), `target` (IssueRef). Cross-repo supported. If source now has zero open blockers: Status → `ready`.
 
-#### Task 06.01 — `list` tool
+### Task 06.06 — `dep_cycles` tool
 
-> **Priority:** P0  
-> **Depends on:** Task 04.02  
-> **Blocked by:** nothing
+Detects dependency cycles. Optional `id` param for targeted check. Read tool, uses cache.
 
-**File:** `unblock-mcp/src/tools/list.rs`
+### Task 06.07 — Register 6 new tools in MCP server
 
-The `list` tool provides filtered, sorted, paginated access to all issues. Unlike `ready` (which only returns unblocked issues), `list` returns any issue matching the filter criteria regardless of blocking status.
+Register `list`, `search`, `stats`, `reopen`, `dep_remove`, `dep_cycles` in server.rs. Total: 17 tools.
 
-→ Spec: [03-spec-mcp-tools.md §4.5](../specs/03-spec-mcp-tools.md#45-list)
+### Task 06.08 — `search_issues` and `reopen_issue` on GitHubApi
 
-Requirements:
-- `ListParams`: `status`, `priority`, `type`, `milestone`, `agent`, `label`, `assignee`, `sort` (priority|created|updated), `limit` (default: 50, max: 200), `offset` (default: 0)
-- `ListResult`: `issues: Vec<IssueSummary>`, `total: usize`, `stale: bool`
-- Read tool — uses cache, no invalidation
-- All filters are optional, combinable (AND logic)
-- Sort: `priority` ASC (default), `created` ASC, `updated` DESC
-- Pagination: offset/limit for sequential pages
-- Filter normalisation: empty/whitespace-only strings treated as absent (use `normalize_filter()`)
-
-```rust
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct ListParams {
-    pub status: Option<String>,
-    pub priority: Option<String>,
-    #[serde(rename = "type")]
-    pub issue_type: Option<String>,
-    pub milestone: Option<String>,
-    pub agent: Option<String>,
-    pub label: Option<String>,
-    pub assignee: Option<String>,
-    pub sort: Option<String>,
-    #[serde(default = "default_list_limit")]
-    pub limit: Option<usize>,
-    #[serde(default)]
-    pub offset: Option<usize>,
-}
-
-fn default_list_limit() -> Option<usize> { Some(50) }
-
-#[derive(Debug, Serialize)]
-pub struct ListResult {
-    pub issues: Vec<IssueSummary>,
-    pub total: usize,
-    pub stale: bool,
-}
-```
-
-**Tests:**
-- `list_returns_all_issues_no_filter`
-- `list_filters_by_status`
-- `list_filters_by_priority`
-- `list_filters_by_type`
-- `list_filters_by_milestone`
-- `list_filters_by_label`
-- `list_filters_by_assignee`
-- `list_combined_filters`
-- `list_sorts_by_created`
-- `list_pagination_offset_limit`
-- `list_empty_string_filter_treated_as_absent`
+Two new methods on trait + GitHubClient implementation + MockGitHubClient stubs.
 
 ---
 
-#### Task 06.02 — `search` tool
+## Gap Analysis — Implementation vs Plan
 
-> **Priority:** P1  
-> **Depends on:** Task 04.02  
-> **Blocked by:** nothing
-
-**File:** `unblock-mcp/src/tools/search.rs`
-
-Full-text search via GitHub Search API. Bypasses cache entirely — does not use the graph.
-
-→ Spec: [03-spec-mcp-tools.md §4.6](../specs/03-spec-mcp-tools.md#46-search)
-
-Requirements:
-- `SearchParams`: `query: String` (required, non-empty), `limit: Option<u32>` (default: 20)
-- `SearchResult`: `issues: Vec<IssueSummary>`, `count: usize`
-- Constructs search query: `"repo:{owner}/{repo} is:issue {query}"`
-- Maps GitHub Search API results to `IssueSummary`
-- Uses `execute_read_tool` but bypasses cache — each search hits GitHub Search API
-- Validation: `query` must be non-empty
-
-**GitHub API:** `GET /search/issues?q=repo:{owner}/{repo}+is:issue+{query}&per_page={limit}`
-
-```rust
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct SearchParams {
-    /// Search query — matched against issue title and body.
-    pub query: String,
-    /// Maximum results to return. Default: 20.
-    pub limit: Option<u32>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct SearchResult {
-    pub issues: Vec<IssueSummary>,
-    pub count: usize,
-}
-```
-
-**New method required on `GitHubApi` trait:**
-- `async fn search_issues(&self, query: &str, limit: u32) -> Result<Vec<Issue>, Error>`
-
-**Tests:**
-- `search_returns_matching_issues`
-- `search_empty_query_returns_validation_error`
-- `search_respects_limit`
+> This section compares the current codebase against this plan. Each gap is categorised:
+> - **DRIFT** — implementation diverges from what docs specify
+> - **MISSING** — not yet implemented
+> - **EXTRA** — implemented but not in Phase 01 scope
 
 ---
 
-#### Task 06.03 — `stats` tool
+### GAP-01 — `Status` enum values
 
-> **Priority:** P1  
-> **Depends on:** Task 04.02  
-> **Blocked by:** nothing
+| | Plan (from SPEC §2.2) | Implementation |
+|---|---|---|
+| Variants | `Ready, InProgress, Blocked, Deferred, Closed` | `Open, InProgress, Blocked, Deferred, Closed` |
 
-**File:** `unblock-mcp/src/tools/stats.rs`
-
-Aggregate counts across all issues. Read-only, uses cache.
-
-→ Spec: [03-spec-mcp-tools.md §4.4](../specs/03-spec-mcp-tools.md#44-stats)
-
-Requirements:
-- `StatsParams`: `milestone: Option<String>` (optional filter)
-- `StatsResult`: `total`, `by_status: HashMap<String, usize>`, `by_priority: HashMap<String, usize>`, `blocked_count`, `ready_count`, `cycle_count`, `agents: Vec<AgentStats>`
-- `AgentStats`: `name: String`, `in_progress: usize`, `completed: usize`
-- Computed from cached graph data
-- Optional milestone filter reduces scope
-- Cycle count from `detect_all_cycles().len()`
-
-```rust
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct StatsParams {
-    /// Filter stats to a specific milestone.
-    pub milestone: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct StatsResult {
-    pub total: usize,
-    pub by_status: HashMap<String, usize>,
-    pub by_priority: HashMap<String, usize>,
-    pub blocked_count: usize,
-    pub ready_count: usize,
-    pub cycle_count: usize,
-    pub agents: Vec<AgentStats>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct AgentStats {
-    pub name: String,
-    pub in_progress: usize,
-    pub completed: usize,
-}
-```
-
-**Tests:**
-- `stats_returns_correct_counts`
-- `stats_filters_by_milestone`
-- `stats_counts_agents`
-- `stats_counts_cycles`
+**Type:** DRIFT
+**Impact:** Critical — the entire system revolves around Status. The SPEC says `Ready` is a Status value. The implementation uses `Open` instead.
+**Resolution:** Code changes to `Ready` per SPEC. `Status::Open` → `Status::Ready` across all crates.
 
 ---
 
-#### Task 06.04 — `reopen` tool
+### GAP-02 — `ReadyState` field exists but is not in SPEC
 
-> **Priority:** P1  
-> **Depends on:** Task 04.02  
-> **Blocked by:** nothing
+| | Plan (from SPEC §2.2) | Implementation |
+|---|---|---|
+| Field | Does not exist | `ReadyState { Ready, Blocked, NotReady, Closed }` |
 
-**File:** `unblock-mcp/src/tools/reopen.rs`
-
-Reopens a closed issue and evaluates its blocking status.
-
-→ Spec: [03-spec-mcp-tools.md §5.7](../specs/03-spec-mcp-tools.md#57-reopen)
-
-Requirements:
-- `ReopenParams`: `id: u64` (required)
-- `ReopenResult`: `issue: u64`, `blocked: bool`, `status: String`
-- Validates: issue must be in `IssueState::Closed` → else `IssueNotClosed` or `IssueAlreadyOpen`
-- Reopens via REST PATCH `state=open`
-- Rebuilds graph to evaluate blocking status
-- If issue has open blockers: Status → Blocked
-- If no open blockers: Status → Ready
-- Write tool — invalidates cache and rebuilds
-
-**New method required on `GitHubApi` trait:**
-- `async fn reopen_issue(&self, number: u64) -> Result<(), Error>`
-
-```rust
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct ReopenParams {
-    /// Issue number to reopen.
-    pub id: u64,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ReopenResult {
-    pub issue: u64,
-    pub blocked: bool,
-    pub status: String,
-    pub pipeline_stage: Option<String>,
-}
-```
-
-**Tests:**
-- `reopen_closed_issue_sets_ready`
-- `reopen_closed_issue_with_blockers_sets_blocked`
-- `reopen_open_issue_returns_error`
+**Type:** DRIFT / EXTRA
+**Impact:** Critical — the implementation has split the concept across two fields: `Status` (workflow) and `ReadyState` (graph-computed readiness). The SPEC has a single unified `Status` field where `ready`/`blocked` are graph-computed values.
+**Resolution:** Remove `ReadyState`. Unify into single `Status` field per SPEC. The `ready`/`blocked` transitions are managed by the MCP server via graph computation — no need for a separate field.
 
 ---
 
-#### Task 06.05 — `dep_remove` tool
+### GAP-03 — `ProjectFieldIds` field mismatch
 
-> **Priority:** P1  
-> **Depends on:** Task 04.02  
-> **Blocked by:** nothing
+| | Plan (7 fields from SPEC §2.2) | Implementation (7 fields) |
+|---|---|---|
+| Field 1 | Status | Status ✅ |
+| Field 2 | Priority | Priority ✅ |
+| Field 3 | **Pipeline Stage** | **IssueType** ❌ |
+| Field 4 | Agent | Agent ✅ |
+| Field 5 | **Claimed At** | **Story Points** ❌ |
+| Field 6 | Story Points | **Defer Until** ❌ |
+| Field 7 | Defer Until | **ReadyState** ❌ |
 
-**File:** `unblock-mcp/src/tools/dep_remove.rs`
+**Type:** DRIFT
+**Impact:** Critical — 4 of 7 field slots differ.
+- `Pipeline Stage` — missing from implementation (replaced by `IssueType`)
+- `Claimed At` — missing from implementation entirely
+- `IssueType` — in implementation but not in SPEC as a Projects V2 field (IssueType is a native GitHub org-level feature, not a custom field)
+- `ReadyState` — in implementation but not in SPEC (see GAP-02)
 
-Removes a blocking relationship between two issues.
-
-→ Spec: [03-spec-mcp-tools.md §5.5](../specs/03-spec-mcp-tools.md#55-dep_remove)
-
-Requirements:
-- `DepRemoveParams`: `source: String` (IssueRef), `target: String` (IssueRef)
-- `DepRemoveResult`: `removed: bool`, `source: String`, `target: String`, `message: String`
-- Resolves both IssueRefs (supports cross-repo)
-- Validates edge exists in the graph
-- Calls `remove_blocked_by()` mutation (already exists on `GitHubApi`)
-- Rebuild graph, recompute ready states
-- If source now has zero open blockers: update Status → Ready
-- Write tool — invalidates cache and rebuilds
-
-```rust
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct DepRemoveParams {
-    /// Issue that is currently blocked (local or cross-repo IssueRef).
-    pub source: String,
-    /// Issue that is currently blocking the source (local or cross-repo IssueRef).
-    pub target: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct DepRemoveResult {
-    pub removed: bool,
-    pub source: String,
-    pub target: String,
-    pub message: String,
-}
-```
-
-**Tests:**
-- `dep_remove_removes_existing_edge`
-- `dep_remove_updates_status_when_unblocked`
-- `dep_remove_nonexistent_edge_returns_error`
-- `dep_remove_cross_repo`
+**Resolution:** Align to SPEC. Add `Pipeline Stage` + `Claimed At`. Remove `IssueType` (it's a GitHub native feature, not a Projects V2 custom field) + `ReadyState` (unified into Status per GAP-02). Final 7 fields: Status, Priority, Pipeline Stage, Agent, Claimed At, Story Points, Defer Until.
 
 ---
 
-#### Task 06.06 — `dep_cycles` tool
+### GAP-04 — Ready set computation filter
 
-> **Priority:** P1  
-> **Depends on:** Task 04.02  
-> **Blocked by:** nothing
+| | Plan (from SPEC §3.3) | Implementation |
+|---|---|---|
+| Filter | `IssueState::Open` AND `Status::Ready` | Only `IssueState::Open` checked |
 
-**File:** `unblock-mcp/src/tools/dep_cycles.rs`
-
-Detects dependency cycles in the graph. Read-only, uses cache.
-
-→ Spec: [03-spec-mcp-tools.md §4.7](../specs/03-spec-mcp-tools.md#47-dep_cycles)
-
-Requirements:
-- `DepCyclesParams`: `id: Option<u64>` (optional — targeted check from specific issue)
-- `DepCyclesResult`: `cycles: Vec<Vec<u64>>`, `count: usize`
-- If `id` provided: check for cycles involving that specific issue
-- If `id` absent: `detect_all_cycles()` on full graph
-- Read tool — uses cache, no invalidation
-- Returns cycles as vectors of issue numbers
-
-```rust
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct DepCyclesParams {
-    /// Optional issue number for targeted cycle check.
-    pub id: Option<u64>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct DepCyclesResult {
-    pub cycles: Vec<Vec<u64>>,
-    pub count: usize,
-}
-```
-
-**Tests:**
-- `dep_cycles_no_cycles_returns_empty`
-- `dep_cycles_detects_simple_cycle`
-- `dep_cycles_detects_complex_cycle`
-- `dep_cycles_targeted_check_by_id`
+**Type:** DRIFT
+**Impact:** High — the ready set may include issues with Status `InProgress`, `Blocked`, or `Deferred` because the Status filter is missing.
+**Location:** `unblock-core/src/graph.rs` (marked as TODO in code)
+**Fix:** Add `Status` filter to `compute_ready_set()`.
 
 ---
 
-#### Task 06.07 — Register 6 new tools in MCP server
+### GAP-05 — `dependency_tree` return type
 
-> **Priority:** P0  
-> **Depends on:** Tasks 06.01–06.06  
-> **Blocked by:** nothing
+| | Plan (from SPEC §3.6) | Implementation |
+|---|---|---|
+| Return type | `DependencyTree { root, upstream, downstream }` | `Vec<(QualifiedId, usize)>` |
 
-**File:** `unblock-mcp/src/server.rs`
-
-Register `list`, `search`, `stats`, `reopen`, `dep_remove`, `dep_cycles` in the `#[tool_router]` macro alongside existing 11 tools. Total: 17 tools.
-
-Also add module declarations in `tools/mod.rs`:
-```rust
-pub mod list;
-pub mod search;
-pub mod stats;
-pub mod reopen;
-pub mod dep_remove;
-pub mod dep_cycles;
-```
-
-**Tests:**
-- `server_lists_all_17_tools`
+**Type:** DRIFT
+**Impact:** Medium — no structured tree with directional separation.
+**Location:** `unblock-core/src/graph.rs` (marked as DEVIATION in code)
 
 ---
 
-#### Task 06.08 — `search_issues` and `reopen_issue` on GitHubApi trait
+### GAP-06 — `depends` tool source parameter
 
-> **Priority:** P0  
-> **Depends on:** nothing  
-> **Blocked by:** nothing
+| | Plan | Implementation |
+|---|---|---|
+| `source` param | `IssueRef` (String — local or cross-repo) | `u64` (local only) |
 
-**Files:** `unblock-github/src/api.rs`, `unblock-github/src/mutations.rs`, `unblock-github/src/mock.rs`
-
-Two new methods required by Epic 06 tools:
-
-1. `search_issues(query, limit) -> Result<Vec<Issue>, Error>` — REST `GET /search/issues`. Parse `items` array.
-2. `reopen_issue(number) -> Result<(), Error>` — REST `PATCH /repos/{o}/{r}/issues/{n}` with `{"state": "open"}`.
-
-Add to `GitHubApi` trait, implement on `GitHubClient`, add stubs to `MockGitHubClient`.
-
-**Tests:**
-- `search_issues_returns_results` (integration)
-- `reopen_issue_changes_state` (integration)
-- Mock stubs compile and function
+**Type:** DRIFT
+**Impact:** Medium — `depends` cannot accept cross-repo source. Only `target` supports `IssueRef`.
+**Location:** `unblock-mcp/src/tools/depends.rs`
 
 ---
 
-## 6. Definition of Done
+### GAP-07 — `close` tool Status values
+
+| | Plan | Implementation |
+|---|---|---|
+| Closed issue Status | → `closed` | → `Done` |
+| Unblocked dependent Status | → `ready` | → `Backlog` |
+
+**Type:** DRIFT
+**Impact:** High — Status option names don't match SPEC. Cascade sets dependents to `Backlog` instead of `ready`.
+
+---
+
+### GAP-08 — 6 tools not implemented
+
+| Tool | Status |
+|---|---|
+| `list` | MISSING |
+| `search` | MISSING |
+| `stats` | MISSING |
+| `reopen` | MISSING |
+| `dep_remove` | MISSING |
+| `dep_cycles` | MISSING |
+
+**Type:** MISSING
+**Impact:** Phase 01 requires 17 tools; only 11 are registered (+ reconcile which is Phase 02).
+
+---
+
+### GAP-09 — Phase 02 features implemented early
+
+| Feature | Phase | Status in code |
+|---|---|---|
+| `reconcile` tool | 02 | Implemented and registered |
+| `ReconcileEngine` | 02 | Implemented in `unblock-core/src/reconcile.rs` |
+| `AgentKind` / `ClientDetector` | 02 | Implemented in `unblock-core/src/client.rs`, `detection.rs` |
+| `SessionMeta` in prime | 02 | Implemented in `unblock-mcp/src/tools/prime.rs` |
+| `OnceLock<AgentKind>` in ServerState | 02 | In `server.rs` |
+| `OnceLock<AgentClient>` in ServerState | 02 | In `server.rs` |
+
+**Type:** EXTRA
+**Impact:** Low — these don't break Phase 01 but add scope beyond what the plan defines.
+**Resolution:** Keep the code in place (harmless, already tested). Exclude from Phase 01 acceptance criteria. These features are Phase 02 scope and will be formally validated then.
+
+---
+
+### GAP-10 — Status field option values in Projects V2
+
+| | Plan (from SPEC §2.2) | Implementation (projects.rs) |
+|---|---|---|
+| Options | `ready, in_progress, blocked, deferred, closed` | Needs verification — likely different given GAP-01 and GAP-07 |
+
+**Type:** DRIFT (probable)
+**Impact:** High — the `setup` tool creates these options in GitHub. If they don't match the SPEC, the entire field management is misaligned.
+
+---
+
+### GAP-11 — `FieldValue::Date` type
+
+| | Plan (from SPEC) | Implementation |
+|---|---|---|
+| Type | ISO 8601 String | `NaiveDate` (chrono) |
+
+**Type:** DRIFT
+**Impact:** Low — `NaiveDate` is typed and safer than raw String.
+**Resolution:** Keep `NaiveDate` in code. Update SPEC §5 to reflect `Date(NaiveDate)` instead of `Date(String)`. This is a SPEC improvement, not a code fix.
+
+---
+
+### GAP-12 — Missing integration tests
+
+Several tools have TODO comments for integration tests:
+- `close` tool
+- `depends` tool
+- `claim` tool
+- `comment` tool
+
+**Type:** MISSING
+**Impact:** Medium — reduces confidence in tool correctness.
+
+---
+
+### GAP-13 — Duplicated field update logic
+
+`server.rs` has the project field update logic duplicated 4 times (marked as TODO).
+
+**Type:** Technical debt
+**Impact:** Low — works but fragile.
+
+---
+
+### Summary — Decisions (Resolved)
+
+| # | Decision | Resolution |
+|---|---|---|
+| D1 | `Status` enum values | **Code changes to SPEC.** `Status::Open` → `Status::Ready` |
+| D2 | `ReadyState` field | **Remove.** Unify into single `Status` field per SPEC |
+| D3 | Projects V2 fields | **Code changes to SPEC.** Add `Pipeline Stage` + `Claimed At`, remove `IssueType` + `ReadyState` |
+| D4 | Phase 02 early features | **Keep code, exclude from F1 acceptance criteria** |
+| D5 | `FieldValue::Date` | **Keep `NaiveDate`, update SPEC** (improvement, not drift) |
+
+---
+
+## Definition of Done
 
 Phase 01 is complete when:
 
 1. **All 17 tools registered and functional** — `server_lists_all_17_tools` test passes
-2. **Quality gate green** — `cargo fmt --check --all`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `cargo doc --no-deps --workspace`
+2. **Quality gate green** — `cargo fmt`, `cargo clippy`, `cargo test`, `cargo doc` all pass
 3. **E2E workflow** — Full agent loop: `prime` → `ready` → `claim` → `close` → cascade verified
-4. **Integration tests** — Each tool has at least one integration test with `MockGitHubClient`
-5. **Agent can do productive work** — `prime` → `ready` → `claim` in under 2 seconds on warm cache
-6. **Zero data loss** — If `unblock-mcp` process dies, all state is in GitHub
-
----
-
-*This plan defines Phase 01 scope, implementation status, and remaining work. The how is in the companion specs. Phase 02 (MCP Complete) depends on all 17 tools being functional.*
+4. **Integration tests** — Each tool has at least one test with `MockGitHubClient`
+5. **Data model aligned** — All decision points (D1–D5) resolved, implementation matches plan
+6. **7 Projects V2 fields** — Created by `setup`, used by all write tools
+7. **5 Views** — Created by `setup`
+8. **Performance** — `prime` → `ready` → `claim` in under 2 seconds on warm cache
+9. **Zero data loss** — If `unblock-mcp` process dies, all state is in GitHub
+10. **Coverage** — >80% for all 3 crates
