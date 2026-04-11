@@ -16,7 +16,7 @@
 5. [Tool Specifications — Write Tools](#5-tool-specifications--write-tools)
 6. [Tool Specifications — Phase 02 Tools](#6-tool-specifications--phase-02-tools)
 7. [Body Section Parsing](#7-body-section-parsing)
-8. [Ready State Update Algorithm](#8-ready-state-update-algorithm)
+8. [Status Update Algorithm](#8-status-update-algorithm)
 9. [Error Mapping](#9-error-mapping)
 10. [Invariants](#10-invariants)
 11. [Open Questions](#11-open-questions)
@@ -27,7 +27,7 @@
 
 This spec defines the **input/output contracts, validation rules, execution flows, and edge cases** for all 20 MCP tools.
 
-**In scope:** tool parameters and validation, execution algorithms, cache interaction, error mapping to MCP protocol, body section parsing, Ready State update after writes.
+**In scope:** tool parameters and validation, execution algorithms, cache interaction, error mapping to MCP protocol, body section parsing, Status update after writes.
 
 **Out of scope:** graph algorithms (→ [01-spec-graph-engine.md](./01-spec-graph-engine.md)), GitHub API details (→ [02-spec-github-client.md](./02-spec-github-client.md)), plugin pipeline (→ Phase 04).
 
@@ -52,7 +52,7 @@ execute(state, params) → Result<R, McpError>:
     (issues, edges) = state.github.fetch_graph_data().await?
     graph = DependencyGraph::build(&issues, &edges)
     ready_set = graph.compute_ready_set(&issues)
-    update_ready_state_fields(state, &issues, &ready_set).await?
+    update_status_fields(state, &issues, &ready_set).await?
     state.cache.update(graph)
 
   // 4. Return result
@@ -343,12 +343,12 @@ Flow:
   1. Fetch issue (single query)
   2. Validate:
      - IssueState == Open → else IssueClosed
-     - Status == Open → else AlreadyClaimed (if InProgress) or IssueBlocked (if Blocked) or IssueDeferred (if Deferred)
+     - Status == Ready → else AlreadyClaimed (if InProgress) or IssueBlocked (if Blocked) or IssueDeferred (if Deferred)
      - Not blocked: check graph (cache or rebuild) → else IssueBlocked { blockers }
      - Not deferred: defer_until <= today → else IssueDeferred
-  3. Update fields: Status→in_progress, Agent→name, Claimed At→now, Ready State→not_ready
+  3. Update fields: Status→in_progress, Agent→name, Claimed At→now
   4. Add comment: "Claimed by {agent} at {timestamp}"
-  5. Invalidate cache + rebuild + update Ready State fields
+  5. Invalidate cache + rebuild + update Status fields
 
 API calls: 1 (fetch) + 4 (field updates) + 1 (comment) + 1+ (rebuild)
 ```
@@ -369,13 +369,13 @@ Flow:
      b. compute_unblock_cascade(graph, closed_qid, issues)
      c. Save unblocked list — the graph still contains the issue as open
   3. Close issue (REST PATCH state=closed)
-  4. Update fields: Status→closed, Ready State→closed
+  4. Update fields: Status→closed
   5. Add comment: "Closed: {reason}" (or "Closed" if no reason)
   6. Invalidate cache + rebuild graph (post-close: issue excluded from OPEN query)
   7. For each unblocked (from step 2):
-     a. Update Status→open, Ready State→ready
+     a. Update Status→ready
      b. Add comment: "Unblocked — blocker #{id} was closed"
-  8. Update Ready State fields from new graph
+  8. Update Status fields from new graph
   9. Update cache
 
   NOTE: Cascade MUST be computed BEFORE closing the issue (step 2 before step 3).
@@ -413,10 +413,10 @@ Validation:
 Flow:
   1. Create issue (REST POST)
   2. Add to project (addProjectV2Item)
-  3. Set fields: Priority, Status=open, Ready State=ready (or blocked), Story Points, Defer Until
+  3. Set fields: Priority, Status=ready (or blocked if has blockers), Story Points, Defer Until
   4. If blocked_by:
      a. For each blocker: resolve IssueRef, cycle check, addBlockedBy
-     b. Update Status→blocked, Ready State→blocked
+     b. Update Status→blocked
   5. If parent: resolve IssueRef, addSubIssue
   6. Invalidate cache + rebuild
 
@@ -441,7 +441,7 @@ Flow:
   3. Check duplicate: edge already exists
      → DuplicateDependency if true
   4. addBlockedBy mutation
-  5. Update source fields: Status→blocked, Ready State→blocked (if was ready)
+  5. Update source fields: Status→blocked (if was ready)
   6. Invalidate cache + rebuild
 
 API calls: 0-2 (resolve) + 1 (mutation) + 0-2 (fields) + 1+ (rebuild)
@@ -463,7 +463,7 @@ Flow:
   2. Validate edge exists
   3. removeBlockedBy mutation
   4. Rebuild graph, recompute ready states
-  5. If source now has zero open blockers: update Ready State→ready
+  5. If source now has zero open blockers: update Status→ready
   6. Update cache
 
 API calls: 0-2 (resolve) + 1 (mutation) + 0-2 (fields) + 1+ (rebuild)
@@ -524,8 +524,8 @@ Flow:
   1. Fetch issue, validate IssueState == Closed → else IssueNotClosed or IssueAlreadyOpen
   2. Reopen issue (REST PATCH state=open)
   3. Rebuild graph to evaluate blocking status
-  4. If issue has open blockers: Status→blocked, Ready State→blocked
-  5. Else: Status→open, Ready State→ready
+  4. If issue has open blockers: Status→blocked
+  5. Else: Status→ready
   6. Update cache
 
 API calls: 1 (fetch) + 1 (reopen) + 2 (fields) + 1+ (rebuild)
@@ -606,8 +606,8 @@ Flow:
   3. Check missing project fields (7 required)
   4. Run ReconcileEngine::analyse() — pure, no I/O
   5. If fix:
-     a. StaleReadyState → update Ready State field
-     b. UncascadedClosure → update downstream Ready State + audit comment
+     a. StaleStatus → update Status field
+     b. UncascadedClosure → update downstream Status to ready + audit comment
      c. StaleClaim → log warning only (no auto-repair)
      d. CycleDetected → add to errors (no auto-repair)
      e. Others → log warning (no auto-repair)
@@ -742,35 +742,35 @@ merge_sections(existing_body, updates) → String:
 
 ---
 
-## 8. Ready State Update Algorithm
+## 8. Status Update Algorithm
 
 ### 8.1 After every write that invalidates cache
 
 ```
-update_ready_state_fields(state, issues, ready_set) → Result<()>:
+update_status_fields(state, issues, ready_set) → Result<()>:
 
-  // Diff: computed ready set vs current Ready State field values
+  // Diff: computed ready set vs current Status field values
   updates = []
 
   FOR each issue in issues:
-    expected = compute_expected_ready_state(issue, ready_set)
-    IF issue.ready_state != expected:
+    expected = compute_expected_status(issue, ready_set)
+    IF issue.status != expected:
       updates.push((issue.item_id, expected))
 
   // Batch update changed fields
-  FOR each (item_id, new_state) in updates:
-    state.github.update_field(item_id, "Ready State", SingleSelect(new_state.option_id()))
+  FOR each (item_id, new_status) in updates:
+    state.github.update_field(item_id, "Status", SingleSelect(new_status.option_id()))
 
-  tracing::info!(updated = updates.len(), "Ready State fields synchronised")
+  tracing::info!(updated = updates.len(), "Status fields synchronised")
 
 
-compute_expected_ready_state(issue, ready_set) → ReadyState:
+compute_expected_status(issue, ready_set) → Status:
   IF issue.state == Closed:
     RETURN Closed
   IF issue.status == InProgress:
-    RETURN NotReady    // claimed — must not appear in ready queue
+    RETURN InProgress  // claimed — preserve, do not override
   IF issue.status == Deferred:
-    RETURN NotReady    // deferred — must not appear in ready queue
+    RETURN Deferred    // deferred — preserve, do not override
   IF issue.qualified_id IN ready_set:
     RETURN Ready
   RETURN Blocked
@@ -812,13 +812,13 @@ impl From<Error> for McpError:
 
 ## 10. Invariants
 
-1. **Every write tool invalidates + rebuilds + updates fields.** No write tool leaves the cache or Ready State fields in an inconsistent state. Exception: `comment` (no graph impact).
+1. **Every write tool invalidates + rebuilds + updates fields.** No write tool leaves the cache or Status fields in an inconsistent state. Exception: `comment` (no graph impact).
 2. **`show` is always fresh.** Never served from cache. Comments contain structured markers required for session context reconstruction.
 3. **`search` bypasses cache.** Uses GitHub Search API directly. Cache has no search index.
 4. **`reconcile` bypasses but populates cache.** Fresh fetch, analyse, optional repair, then cache gets the fresh graph.
 5. **Validation before mutation.** All tools validate input before calling GitHub. No partial mutations from validation failures.
 6. **Body sections are round-trippable.** `to_markdown(from_markdown(body))` preserves the three known sections. Unknown sections may be reordered.
-7. **Cascade is complete.** After `close`, all dependents whose blockers are now all closed appear in `unblocked` and have Ready State updated.
+7. **Cascade is complete.** After `close`, all dependents whose blockers are now all closed appear in `unblocked` and have Status updated to `ready`.
 8. **Tool responses are structured JSON.** No formatted text. Agents parse JSON, not markdown (except `prime.context` which is intentionally markdown for agent injection).
 
 ---
@@ -829,7 +829,7 @@ impl From<Error> for McpError:
 
 2. **`claim` re-claim.** Can the same agent re-claim an issue it already owns? Currently returns `AlreadyClaimed`. Should it be a no-op? Current answer: error — explicit unclaim + reclaim if needed.
 
-3. **`close` cascading field updates batching.** Large cascades (10+ unblocked issues) generate many API calls. Should we batch all Ready State updates into a single GraphQL mutation? Current answer: yes, implemented via `batch_update_fields`. Comments still require individual REST calls.
+3. **`close` cascading field updates batching.** Large cascades (10+ unblocked issues) generate many API calls. Should we batch all Status updates into a single GraphQL mutation? Current answer: yes, implemented via `batch_update_fields`. Comments still require individual REST calls.
 
 4. **`ready` result stability.** If two consecutive `ready` calls return different results (due to concurrent mutation between calls), is this a problem? Current answer: no — agents should tolerate eventual consistency. The ready set reflects GitHub's state at query time.
 

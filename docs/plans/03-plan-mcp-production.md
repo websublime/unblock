@@ -36,7 +36,7 @@ Phase 03 turns the MCP server into a production-grade, installable product. Phas
 
 1. **Distribution.** Cross-platform binaries for 5 targets via `cargo-dist`. Shell and PowerShell installer scripts. An npm wrapper for `npx @unblock/cli`. A Homebrew formula for `brew install websublime/tap/unblock`.
 
-2. **Cold start performance.** The materialised fast path (Strategy D) uses the Ready State Projects V2 field as a persistent cache. On startup, serve the ready queue immediately from field values while rebuilding the graph asynchronously. Reduces cold start from seconds to <500ms for repos with <500 issues.
+2. **Cold start performance.** The materialised fast path (Strategy D) uses the Status Projects V2 field as a persistent cache. On startup, serve the ready queue immediately from field values while rebuilding the graph asynchronously. Reduces cold start from seconds to <500ms for repos with <500 issues.
 
 3. **Enterprise readiness.** GitHub Enterprise Server support via configurable `GITHUB_API_URL` and `GITHUB_URL`. GitHub App authentication for higher rate limits (15,000/hour), org-wide installation, and bot identity.
 
@@ -46,7 +46,7 @@ Phase 03 turns the MCP server into a production-grade, installable product. Phas
 - Add new crates (still 3: core, github, mcp)
 - Change the transport (still stdio only — HTTP is Phase 05)
 - Add new MCP tools beyond the 20 from Phase 02
-- Introduce persistent storage (Strategy D uses GitHub's existing Projects V2 Ready State field as a warm cache for cold start — no custom storage)
+- Introduce persistent storage (Strategy D uses GitHub's existing Projects V2 Status field as a warm cache for cold start — no custom storage)
 
 **Outcome:** `v1.0.0` release. Installable on any platform. Production-grade for teams with 500+ issues.
 
@@ -453,7 +453,7 @@ Requirements:
 
 ### Epic 05 — Materialised Fast Path (Strategy D)
 
-**Goal:** Serve the ready queue instantly on cold start by reading Ready State field values from GitHub, while rebuilding the full graph asynchronously. Reduces cold start from seconds to <500ms.
+**Goal:** Serve the ready queue instantly on cold start by reading Status field values from GitHub, while rebuilding the full graph asynchronously. Reduces cold start from seconds to <500ms.
 
 **Crates:** `unblock-core`, `unblock-mcp`
 
@@ -468,7 +468,7 @@ Requirements:
 **File:** `unblock-core/src/fast_path.rs`
 
 Requirements:
-- `FastPathReady` struct: issues that have `ReadyState::Ready` in their Projects V2 field, served directly without graph computation
+- `FastPathReady` struct: issues that have `Status::Ready` in their Projects V2 field, served directly without graph computation
 - Contains: `issues: Vec<IssueSummary>`, `source: FastPathSource`, `stale: bool`
 - `FastPathSource` enum: `Field` (from Projects V2 field), `Graph` (from computed graph)
 - When `source == Field`, the result is approximate — it reflects the last time the MCP server (or reconcile) wrote the field. It may be stale if external mutations occurred
@@ -483,7 +483,7 @@ pub struct FastPathReady {
 
 #[derive(Debug, Clone, Serialize)]
 pub enum FastPathSource {
-    /// Served from Projects V2 Ready State field values (approximate, fast).
+    /// Served from Projects V2 Status field values (approximate, fast).
     Field,
     /// Served from computed dependency graph (authoritative, slower).
     Graph,
@@ -505,14 +505,14 @@ pub enum FastPathSource {
 **File:** `unblock-github/src/graphql.rs`
 
 Requirements:
-- New GraphQL query: fetch all issues where Ready State field == `ready`
+- New GraphQL query: fetch all issues where Status field == `ready`
 - This is a single-field filter query — much lighter than `fetch_graph_data()` which fetches everything
 - Returns `Vec<IssueSummary>` with issue number, title, priority, status
 - Query uses Projects V2 field filtering: filter items by field value
 
 ```rust
 pub async fn fetch_ready_from_field(&self) -> Result<Vec<IssueSummary>, Error> {
-    // GraphQL: query project items where ReadyState == "ready"
+    // GraphQL: query project items where Status == "ready"
     // Returns lightweight issue summaries without full graph data
 }
 ```

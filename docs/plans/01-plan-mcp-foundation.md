@@ -103,7 +103,7 @@ Every write tool: execute mutation → `cache.invalidate()` → `fetch_graph_dat
 ```
 src/
   lib.rs           ← pub mod types, graph, cache, config, errors, reconcile, client, detection
-  types.rs         ← QualifiedId, Issue, IssueState, Status, Priority, ReadyState,
+  types.rs         ← QualifiedId, Issue, IssueState, Status, Priority, PipelineStage,
                       IssueType, BlockingEdge, IssueSummary, IssueRef, BodySections,
                       TraversalDirection, IssueComment, RelatedIssue
   graph.rs         ← DependencyGraph: build(), compute_ready_set(), compute_unblock_cascade(),
@@ -165,11 +165,11 @@ src/
 
 | Level | Meaning |
 |---|---|
-| **P0** | Absolute blocker — nothing moves forward until this is done |
-| **P1** | Critical for the phase to be functional — happy path |
-| **P2** | Important but does not block the happy path |
-| **P3** | Quality, ergonomics, extra coverage |
-| **P4** | Nice to have — included if time permits, does not delay done |
+| **P0 - Critical** | Absolute blocker — nothing moves forward until this is done |
+| **P1 - High** | Critical for the phase to be functional — happy path |
+| **P2 - Medium** | Important but does not block the happy path |
+| **P3 - Low** | Quality, ergonomics, extra coverage |
+| **P4 - Backlog** | Nice to have — included if time permits, does not delay done |
 
 ### Dependency fields
 
@@ -274,11 +274,11 @@ Requirements:
 
 Types implemented:
 - `QualifiedId` — `{owner, repo, number}`, implements `Display`, `FromStr`, `Hash`, `Eq`
-- `Issue` — full issue data with all Projects V2 fields (status, priority, agent, claimed_at, ready_state, story_points, defer_until, body sections, relationships)
+- `Issue` — full issue data with all Projects V2 fields (status, priority, pipeline_stage, agent, claimed_at, story_points, defer_until, body sections, relationships)
 - `IssueState` — `{Open, Closed}` (GitHub native)
-- `Status` — `{Open, InProgress, Blocked, Deferred, Closed}` (Projects V2 workflow)
+- `Status` — `{Ready, InProgress, Blocked, Deferred, Closed}` (Projects V2 unified workflow + readiness)
 - `Priority` — `{P0, P1, P2, P3, P4}` with `as_sort_key()`
-- `ReadyState` — `{Ready, Blocked, NotReady, Closed}` (Projects V2 materialised field)
+- `PipelineStage` — `{Investigation, Implementation, Review, Refactoring, Qa, Done}` (Projects V2 development pipeline)
 - `IssueType` — `{Task, Bug, Feature, Epic, Chore, Spike}`
 - `BlockingEdge` — `{source: QualifiedId, target: QualifiedId}`
 - `IssueSummary` — lightweight issue for list/ready responses
@@ -456,7 +456,7 @@ GraphQL mutations: `add_blocked_by()`, `remove_blocked_by()`, `add_sub_issue()`,
 
 **File:** `unblock-github/src/projects.rs`
 
-`resolve_project_info()`, `setup_fields()`, `update_field()`, `query_setup_status()`. 7 custom fields: Status, Priority, Agent, Claimed At, Ready State, Story Points, Defer Until. 5 pre-configured views. REST view management with integer field ID discovery.
+`resolve_project_info()`, `setup_fields()`, `update_field()`, `query_setup_status()`. 7 custom fields: Status, Priority, Pipeline Stage, Agent, Claimed At, Story Points, Defer Until. 5 pre-configured views. REST view management with integer field ID discovery.
 
 ---
 
@@ -558,7 +558,7 @@ Filters: `issue_type`, `priority`, `milestone`, `agent`, `label`, `include_claim
 
 **File:** `unblock-mcp/src/tools/claim.rs`
 
-Validates: open, no open blockers, not deferred, not already claimed. Updates: Status → InProgress, Agent, Claimed At, Ready State → NotReady. Posts claim comment.
+Validates: open, no open blockers, not deferred, not already claimed. Updates: Status → InProgress, Agent, Claimed At. Posts claim comment.
 
 ---
 
@@ -571,7 +571,7 @@ Validates: open, no open blockers, not deferred, not already claimed. Updates: S
 
 **File:** `unblock-mcp/src/tools/close.rs`
 
-Closes issue via REST. Updates Projects V2 fields. Computes cascade: for each newly unblocked dependent, updates Ready State → Ready and posts unblock comment. Returns list of unblocked issue numbers.
+Closes issue via REST. Updates Projects V2 fields. Computes cascade: for each newly unblocked dependent, updates Status → Ready and posts unblock comment. Returns list of unblocked issue numbers.
 
 ---
 
@@ -636,7 +636,7 @@ Selective updates: `priority`, `status`, `labels_add/remove`, `assignees_add/rem
 
 **File:** `unblock-mcp/src/tools/depends.rs`
 
-Adds blocking relationship: `source` (u64) is blocked by `target` (IssueRef, cross-repo). Cycle detection via `would_create_cycle()`. Updates source: Status → Blocked, ReadyState → NotReady. Rebuilds cache.
+Adds blocking relationship: `source` (u64) is blocked by `target` (IssueRef, cross-repo). Cycle detection via `would_create_cycle()`. Updates source: Status → Blocked. Rebuilds cache.
 
 **Known deviations from spec** (tracked in beads):
 - `source` param is `u64` instead of `IssueRef` (unblock-b6b.86)
@@ -905,12 +905,12 @@ Reopens a closed issue and evaluates its blocking status.
 
 Requirements:
 - `ReopenParams`: `id: u64` (required)
-- `ReopenResult`: `issue: u64`, `blocked: bool`, `status: String`, `ready_state: String`
+- `ReopenResult`: `issue: u64`, `blocked: bool`, `status: String`
 - Validates: issue must be in `IssueState::Closed` → else `IssueNotClosed` or `IssueAlreadyOpen`
 - Reopens via REST PATCH `state=open`
 - Rebuilds graph to evaluate blocking status
-- If issue has open blockers: Status → Blocked, Ready State → Blocked
-- If no open blockers: Status → Open, Ready State → Ready
+- If issue has open blockers: Status → Blocked
+- If no open blockers: Status → Ready
 - Write tool — invalidates cache and rebuilds
 
 **New method required on `GitHubApi` trait:**
@@ -928,7 +928,7 @@ pub struct ReopenResult {
     pub issue: u64,
     pub blocked: bool,
     pub status: String,
-    pub ready_state: String,
+    pub pipeline_stage: Option<String>,
 }
 ```
 
@@ -958,7 +958,7 @@ Requirements:
 - Validates edge exists in the graph
 - Calls `remove_blocked_by()` mutation (already exists on `GitHubApi`)
 - Rebuild graph, recompute ready states
-- If source now has zero open blockers: update Ready State → Ready, Status → Open
+- If source now has zero open blockers: update Status → Ready
 - Write tool — invalidates cache and rebuilds
 
 ```rust
@@ -981,7 +981,7 @@ pub struct DepRemoveResult {
 
 **Tests:**
 - `dep_remove_removes_existing_edge`
-- `dep_remove_updates_ready_state_when_unblocked`
+- `dep_remove_updates_status_when_unblocked`
 - `dep_remove_nonexistent_edge_returns_error`
 - `dep_remove_cross_repo`
 

@@ -86,7 +86,7 @@ These are not edge cases. They are what happens every time an agent operates on 
 
 ### 2.2 GitHub Issues is necessary but insufficient
 
-GitHub Issues is the most widely adopted issue tracker in the world. It has labels, milestones, assignees, projects, and — since 2025 — native blocking relationships and sub-issues. It does not have:
+GitHub Issues is the most widely adopted issue tracker in the world. It has labels, milestones, assignees, projects, issue types, and — since 2025 — native blocking relationships and sub-issues. It does not have:
 
 - **A computable dependency graph.** Blocking relationships exist but no tool computes the transitive closure, the ready set, or the cascade.
 - **A ready queue.** There is no API call that returns "issues with no active blockers, sorted by priority."
@@ -304,7 +304,7 @@ The minimum viable loop. An agent can find work, claim it, create and edit issue
 Production hardening and remaining MCP capabilities. Still local binary only.
 
 **Scope:**
-- `reconcile` tool — detect and repair semantic drift between graph and GitHub state (7 drift types: `StaleReadyState`, `UncascadedClosure`, `OrphanedBlockingEdge`, `MalformedAgentField`, `MissingProjectField`, `CycleDetected`, `StaleClaim`)
+- `reconcile` tool — detect and repair semantic drift between graph and GitHub state (7 drift types: `StaleStatus`, `UncascadedClosure`, `OrphanedBlockingEdge`, `MalformedAgentField`, `MissingProjectField`, `CycleDetected`, `StaleClaim`)
 - `commit_context` tool — structured commit messages with git trailers for audit trail
 - `doctor` tool — operational health with self-repair capability
 - Circuit breaker — graceful degradation on GitHub outages (5 consecutive failures → fail fast for 10s, reset on success)
@@ -324,7 +324,7 @@ Distribution, scale, and enterprise readiness. The local binary becomes installa
 - Cross-platform binaries via cargo-dist — Linux x86_64/ARM64, macOS x86_64/ARM64, Windows x86_64
 - Homebrew formula — `brew install websublime/tap/unblock`
 - npm wrapper — `npx @unblock/cli`
-- Materialised fast path (Strategy D) — Ready State field as persistent cache for cold start. Serve immediately from field, rebuild graph async. ~50-100 lines change
+- Materialised fast path (Strategy D) — Status field as persistent cache for cold start. Serve immediately from field, rebuild graph async. ~50-100 lines change
 - GitHub Enterprise Server support — configurable `GITHUB_API_URL` and `GITHUB_URL`
 - GitHub App authentication — higher rate limits (15k/h), org-wide install, bot identity
 
@@ -339,7 +339,7 @@ Specialised agents and skills that turn the MCP server into a structured develop
 **Scope:**
 
 10 skills — the unified entry point for Claude Code and Copilot CLI:
-- **Setup** — `/setup` (bootstrap: GitHub labels, milestone, Projects V2, editor configs, hooks), `/need` (intent-based agent discovery and installation), `/doctor` (diagnostic: MCP health, GitHub state, local environment)
+- **Setup** — `/setup` (bootstrap: GitHub labels, milestones, Projects V2, issue types, editor configs, hooks), `/need` (intent-based agent discovery and installation), `/doctor` (diagnostic: MCP health, GitHub state, local environment)
 - **Exploration** — `/think` (free exploration — research, PRD, spec, brainstorm — no pipeline enforcement, any agent available)
 - **Planning** — `/plan` (two modes: global vision defines phases in the PRD; phase planning produces both `plans/NN-plan-{slug}.md` and `specs/NN-spec-{slug}.md` — the plan defines epics and tasks, the spec defines algorithms, invariants, and edge cases. GitHub Issues are created sequentially from the plan. Both artefacts are prerequisites for implementation)
 - **Execution** — `/do` (intent router: implementation, investigation, spec, spike, review, QA — routes to the right agent based on context), `/make` (autonomous execution: same routing, no human-in-the-loop, stricter preconditions)

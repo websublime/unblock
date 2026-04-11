@@ -35,7 +35,7 @@
 
 Phase 02 hardens the MCP server for production use. Phase 01 delivers the complete agent workflow loop — `prime` → `ready` → `claim` → work → `close` → cascade — with 17 tools, a graph engine, and a TTL cache. Phase 02 addresses the gaps that emerge when the server operates in the real world:
 
-1. **Semantic drift.** GitHub is an open system. A human can close an issue, remove a blocking edge, or edit a Projects V2 field via the GitHub UI. The in-memory graph diverges. The `reconcile` tool detects and repairs 7 drift types — `StaleReadyState`, `UncascadedClosure`, `OrphanedBlockingEdge`, `MalformedAgentField`, `MissingProjectField`, `CycleDetected`, `StaleClaim`.
+1. **Semantic drift.** GitHub is an open system. A human can close an issue, remove a blocking edge, or edit a Projects V2 field via the GitHub UI. The in-memory graph diverges. The `reconcile` tool detects and repairs 7 drift types — `StaleStatus`, `UncascadedClosure`, `OrphanedBlockingEdge`, `MalformedAgentField`, `MissingProjectField`, `CycleDetected`, `StaleClaim`.
 
 2. **Operational health.** The `doctor` tool provides health checks with self-repair capability. The `commit_context` tool produces structured commit messages with git trailers for audit trail.
 
@@ -161,7 +161,7 @@ Every task carries three metadata fields:
 Define the drift taxonomy. 7 variants cover all realistic external mutation scenarios.
 
 Requirements:
-- `DriftKind` enum with 7 variants: `StaleReadyState`, `UncascadedClosure`, `OrphanedBlockingEdge`, `MalformedAgentField`, `MissingProjectField`, `CycleDetected`, `StaleClaim`
+- `DriftKind` enum with 7 variants: `StaleStatus`, `UncascadedClosure`, `OrphanedBlockingEdge`, `MalformedAgentField`, `MissingProjectField`, `CycleDetected`, `StaleClaim`
 - Each variant carries full context for diagnosis and repair (issue IDs, field values, timestamps)
 - Derives: `Debug`, `Clone`, `Serialize`, `Deserialize`
 - `DriftReport` struct: `repo`, `reconciled_at`, `issues_scanned`, `edges_scanned`, `drift_found: Vec<DriftKind>`, `repaired: Vec<DriftKind>`, `errors: Vec<String>`, `clean: bool`
@@ -171,11 +171,11 @@ Requirements:
 ```rust
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DriftKind {
-    /// Ready State field in GitHub diverges from what the graph computes.
-    StaleReadyState {
+    /// Status field in GitHub diverges from what the graph computes.
+    StaleStatus {
         issue: QualifiedId,
-        field_says: ReadyState,
-        graph_says: ReadyState,
+        field_says: Status,
+        graph_says: Status,
     },
 
     /// Issue closed via UI — downstream issues should have received a cascade.
@@ -249,8 +249,8 @@ Requirements:
 - `ReconcileEngine::new(stale_claim_threshold_hours: u64)` — configurable threshold (default: 24)
 - `ReconcileEngine::analyse(&self, graph: &DependencyGraph, issues: &HashMap<QualifiedId, Issue>, computed_ready_set: &HashSet<QualifiedId>, now: DateTime<Utc>) -> DriftReport`
 - Detection order:
-  1. **Stale Ready State** — for each issue, compare `issue.ready_state` with graph-computed state. Closed issues must have `ReadyState::Closed`. Open issues in the ready set must have `ReadyState::Ready`. All others must have `ReadyState::Blocked`
-  2. **Uncascaded closures** — for each closed issue, call `graph.compute_unblock_cascade()`. Filter to downstream issues that are open but not marked as `ReadyState::Ready`. Non-empty → drift
+  1. **Stale Status** — for each issue, compare `issue.status` with graph-computed state. Closed issues must have `Status::Closed`. Open issues in the ready set must have `Status::Ready`. All others must have `Status::Blocked`
+  2. **Uncascaded closures** — for each closed issue, call `graph.compute_unblock_cascade()`. Filter to downstream issues that are open but not marked as `Status::Ready`. Non-empty → drift
   3. **Orphaned blocking edges** — for each edge in the graph, check target exists in `issues`. Missing → drift
   4. **Cycles** — `graph.detect_all_cycles()`. Each SCC with length > 1 → drift
   5. **Stale claims** — issues with `Status::InProgress` and `claimed_at` older than threshold
@@ -286,8 +286,8 @@ impl ReconcileEngine {
 
 **Tests:**
 - `analyse_no_drift_on_consistent_state`
-- `analyse_detects_stale_ready_state_on_closed_issue`
-- `analyse_detects_stale_ready_state_on_unblocked_issue`
+- `analyse_detects_stale_status_on_closed_issue`
+- `analyse_detects_stale_status_on_unblocked_issue`
 - `analyse_detects_uncascaded_closure`
 - `analyse_detects_orphaned_blocking_edge`
 - `analyse_detects_cycle`
@@ -396,8 +396,8 @@ Requirements:
 6. **Analyse** — `ReconcileEngine::new(params.stale_claim_hours).analyse()` with the merged issues map
 7. **Check missing project fields** — validate `state.github.field_ids()` against expected 7 fields. Missing → add `DriftKind::MissingProjectField` to report
 8. **Repair (if `fix`):**
-   - `StaleReadyState` → update Ready State field via `state.github.update_field()`
-   - `UncascadedClosure` → update Ready State to `Ready` for each downstream issue + add audit comment on closed issue
+   - `StaleStatus` → update Status field via `state.github.update_field()`
+   - `UncascadedClosure` → update Status to `Ready` for each downstream issue + add audit comment on closed issue
    - `StaleClaim` → log warning, do NOT auto-repair (agent or human decides)
    - `CycleDetected` → add to `errors`, do NOT auto-repair (manual resolution required)
    - `OrphanedBlockingEdge`, `MalformedAgentField`, `MissingProjectField` → log warning, do NOT auto-repair
@@ -415,8 +415,8 @@ pub async fn handle_reconcile(
 
 **Tests (integration):**
 - `reconcile_reports_clean_on_consistent_repo`
-- `reconcile_detects_stale_ready_state`
-- `reconcile_repairs_stale_ready_state_when_fix`
+- `reconcile_detects_stale_status`
+- `reconcile_repairs_stale_status_when_fix`
 - `reconcile_repairs_uncascaded_closure_with_audit_comment`
 - `reconcile_does_not_repair_stale_claim`
 - `reconcile_populates_cache_after_analysis`
@@ -436,7 +436,7 @@ New GraphQL query required by the reconcile handler to detect uncascaded closure
 Requirements:
 - `pub async fn fetch_recently_closed(&self, hours: u64) -> Result<Vec<Issue>, Error>`
 - GraphQL query: `issues(states: [CLOSED], filterBy: { since: now - hours })` with Project field values
-- Returns issues closed within the time window, with Ready State field and `trackedByIssues` data
+- Returns issues closed within the time window, with Status field and `trackedByIssues` data
 - Paginated same as `fetch_graph_data()`
 - Default time window: 24 hours (matches stale claim threshold)
 

@@ -13,7 +13,7 @@ An agent without a dependency graph will start coding a task that is blocked by 
 
 These are not edge cases. They are what happens every time an agent operates on a flat issue list — which is what every project management tool gives them today.
 
-GitHub Issues is the most widely adopted issue tracker in the world. It has labels, milestones, assignees, and projects. It does not have a dependency graph. It does not have a ready queue. It does not have claim semantics. It does not have cascade.
+GitHub Issues is the most widely adopted issue tracker in the world. It has labels, milestones, assignees, projects, issue types, and sub-issues. It does not have a dependency graph. It does not have a ready queue. It does not have claim semantics. It does not have cascade.
 
 unblock does not replace GitHub Issues. unblock computes what GitHub cannot — the graph, the ready set, the cascade — and exposes it through MCP so that any agent can answer the only question that matters: **"what can I work on right now?"**
 
@@ -125,7 +125,7 @@ Skills are the unified entry point for both Claude Code and Copilot CLI:
 - **Execution** — `/do` (intent router: implementation, investigation, spec, spike, review, QA — routes to the right agent based on context), `/make` (autonomous execution: same routing, no human-in-the-loop, stricter preconditions)
 - **Direct access** — `/use` (dispatch a specific agent by name), `/info` (natural language query over project state), `/trail` (structured narrative history of an issue)
 - **Quality gates** — `/ship` (pre-merge readiness check: review passed? QA passed? dependencies closed?)
-- **Setup** — `/setup` (bootstrap: GitHub labels, milestone, Projects V2, editor configs, hooks), `/need` (intent-based agent discovery and installation), `/doctor` (diagnostic: MCP health, GitHub state, local environment)
+- **Setup** — `/setup` (bootstrap: GitHub labels, milestones, Projects V2, issue types, editor configs, hooks), `/need` (intent-based agent discovery and installation), `/doctor` (diagnostic: MCP health, GitHub state, local environment)
 
 Eight named agents — each a `.md` configuration file, not compiled code — plus dynamic implementation supervisors generated per-project by `/need`:
 
