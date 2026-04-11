@@ -237,103 +237,103 @@ macro_rules! define_set_project_fields {
         /// appears on the library surface.
         #[allow(clippy::too_many_arguments)]
         $vis async fn set_project_fields(
-    client: &dyn GitHubApi,
-    project_id: &str,
-    item_id: &str,
-    field_ids: &unblock_github::projects::ProjectFieldIds,
-    priority: &str,
-    issue_type: &str,
-    status: &str,
-    ready_state: &str,
-    story_points: Option<f64>,
-    defer_until: Option<chrono::NaiveDate>,
-) {
-    use unblock_github::projects::FieldValue;
+            client: &dyn GitHubApi,
+            project_id: &str,
+            item_id: &str,
+            field_ids: &unblock_github::projects::ProjectFieldIds,
+            priority: &str,
+            issue_type: &str,
+            status: &str,
+            ready_state: &str,
+            story_points: Option<f64>,
+            defer_until: Option<chrono::NaiveDate>,
+        ) {
+            use unblock_github::projects::FieldValue;
 
-    // Set Priority.
-    if let Some(option_id) = field_ids.priority.options.get(priority)
-        && let Err(e) = client
-            .update_field(
-                project_id,
-                item_id,
-                &field_ids.priority.field_id,
-                &FieldValue::SingleSelectOption(option_id.clone()),
-            )
-            .await
-    {
-        tracing::warn!(error = %e, "Failed to set Priority field");
-    }
+            // Set Priority.
+            if let Some(option_id) = field_ids.priority.options.get(priority)
+                && let Err(e) = client
+                    .update_field(
+                        project_id,
+                        item_id,
+                        &field_ids.priority.field_id,
+                        &FieldValue::SingleSelectOption(option_id.clone()),
+                    )
+                    .await
+            {
+                tracing::warn!(error = %e, "Failed to set Priority field");
+            }
 
-    // Set IssueType.
-    if let Some(option_id) = field_ids.issue_type.options.get(issue_type)
-        && let Err(e) = client
-            .update_field(
-                project_id,
-                item_id,
-                &field_ids.issue_type.field_id,
-                &FieldValue::SingleSelectOption(option_id.clone()),
-            )
-            .await
-    {
-        tracing::warn!(error = %e, "Failed to set IssueType field");
-    }
+            // Set IssueType.
+            if let Some(option_id) = field_ids.issue_type.options.get(issue_type)
+                && let Err(e) = client
+                    .update_field(
+                        project_id,
+                        item_id,
+                        &field_ids.issue_type.field_id,
+                        &FieldValue::SingleSelectOption(option_id.clone()),
+                    )
+                    .await
+            {
+                tracing::warn!(error = %e, "Failed to set IssueType field");
+            }
 
-    // Set Status (Backlog when unblocked, Blocked when blocked_by is present).
-    if let Some(option_id) = field_ids.status.options.get(status)
-        && let Err(e) = client
-            .update_field(
-                project_id,
-                item_id,
-                &field_ids.status.field_id,
-                &FieldValue::SingleSelectOption(option_id.clone()),
-            )
-            .await
-    {
-        tracing::warn!(error = %e, "Failed to set Status field");
-    }
+            // Set Status (Backlog when unblocked, Blocked when blocked_by is present).
+            if let Some(option_id) = field_ids.status.options.get(status)
+                && let Err(e) = client
+                    .update_field(
+                        project_id,
+                        item_id,
+                        &field_ids.status.field_id,
+                        &FieldValue::SingleSelectOption(option_id.clone()),
+                    )
+                    .await
+            {
+                tracing::warn!(error = %e, "Failed to set Status field");
+            }
 
-    // Set ReadyState.
-    if let Some(option_id) = field_ids.ready_state.options.get(ready_state)
-        && let Err(e) = client
-            .update_field(
-                project_id,
-                item_id,
-                &field_ids.ready_state.field_id,
-                &FieldValue::SingleSelectOption(option_id.clone()),
-            )
-            .await
-    {
-        tracing::warn!(error = %e, "Failed to set ReadyState field");
-    }
+            // Set ReadyState.
+            if let Some(option_id) = field_ids.ready_state.options.get(ready_state)
+                && let Err(e) = client
+                    .update_field(
+                        project_id,
+                        item_id,
+                        &field_ids.ready_state.field_id,
+                        &FieldValue::SingleSelectOption(option_id.clone()),
+                    )
+                    .await
+            {
+                tracing::warn!(error = %e, "Failed to set ReadyState field");
+            }
 
-    // Set StoryPoints if provided.
-    if let Some(sp) = story_points
-        && let Err(e) = client
-            .update_field(
-                project_id,
-                item_id,
-                &field_ids.story_points,
-                &FieldValue::Number(sp),
-            )
-            .await
-    {
-        tracing::warn!(error = %e, "Failed to set StoryPoints field");
-    }
+            // Set StoryPoints if provided.
+            if let Some(sp) = story_points
+                && let Err(e) = client
+                    .update_field(
+                        project_id,
+                        item_id,
+                        &field_ids.story_points,
+                        &FieldValue::Number(sp),
+                    )
+                    .await
+            {
+                tracing::warn!(error = %e, "Failed to set StoryPoints field");
+            }
 
-    // Set DeferUntil if provided.
-    if let Some(du) = defer_until
-        && let Err(e) = client
-            .update_field(
-                project_id,
-                item_id,
-                &field_ids.defer_until,
-                &FieldValue::Date(du),
-            )
-            .await
-    {
-        tracing::warn!(error = %e, "Failed to set DeferUntil field");
-    }
-}
+            // Set DeferUntil if provided.
+            if let Some(du) = defer_until
+                && let Err(e) = client
+                    .update_field(
+                        project_id,
+                        item_id,
+                        &field_ids.defer_until,
+                        &FieldValue::Date(du),
+                    )
+                    .await
+            {
+                tracing::warn!(error = %e, "Failed to set DeferUntil field");
+            }
+        }
     };
 }
 
