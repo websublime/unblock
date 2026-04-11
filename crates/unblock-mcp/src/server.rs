@@ -2010,7 +2010,7 @@ impl UnblockServer {
     ///
     /// Performs a fresh fetch from GitHub (bypasses cache), rebuilds the graph,
     /// and runs the reconciliation engine to detect divergence. Returns a
-    /// [`DriftReport`] with all detected drift.
+    /// [`DriftReport`](unblock_core::reconcile::DriftReport) with all detected drift.
     ///
     /// By default operates in read-only mode (`fix: false`). The `fix: true`
     /// repair path is implemented by task 1.6.4.
