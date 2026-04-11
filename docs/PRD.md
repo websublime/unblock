@@ -4,7 +4,7 @@
 > Status: Working Draft  
 > Companions: [MANIFESTO.md](./MANIFESTO.md) · [SPEC.md](./SPEC.md)  
 > Plans: [01-mcp-foundation](./plans/01-plan-mcp-foundation.md) · [02-mcp-complete](./plans/02-plan-mcp-complete.md) · [03-mcp-production](./plans/03-plan-mcp-production.md) · 04-plugin (planned) · 05-remote-server (planned) · 06-llm-agent (planned) · 07-harness (planned)  
-> Specs: [01-graph-engine](./specs/01-spec-graph-engine.md) · [02-github-client](./specs/02-spec-github-client.md) · [03-mcp-tools](./specs/03-spec-mcp-tools.md) · 04-plugin-pipeline (planned) · 05-remote-server (planned) · 06-llm-agent (planned)
+> Specs: [01-mcp-foundation](./specs/01-spec-mcp-foundation.md) · 02-mcp-complete (planned) · 03-mcp-production (planned) · 04-plugin-pipeline (planned) · 05-remote-server (planned) · 06-llm-agent (planned)
 
 ---
 

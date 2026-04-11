@@ -1128,7 +1128,7 @@ pub struct DepCyclesParams {
 }
 
 pub struct DepCyclesResult {
-    pub cycles: Vec<Vec<u64>>,
+    pub cycles: Vec<Vec<u64>>,  // issue numbers scoped to configured repo; cross-repo cycle members shown as QualifiedId format in future phases
     pub count: usize,
 }
 ```
@@ -1187,7 +1187,7 @@ pub struct CloseParams {
 
 pub struct CloseResult {
     pub issue: IssueSummary,
-    pub unblocked: Vec<u64>,
+    pub unblocked: Vec<u64>,  // scoped to configured repo for Phase 01; cross-repo dependents are still cascade-updated but not returned here
 }
 ```
 
@@ -1203,11 +1203,11 @@ pub struct CloseResult {
 3. Close issue: REST PATCH `state: "closed"`
 4. Update fields: Status → `closed`
 5. Add comment: `"Closed: {reason}"` (or `"Closed"` if no reason)
-6. Invalidate cache + rebuild graph (post-close: issue excluded from OPEN query)
-7. For each unblocked (from step 2):
+6. For each unblocked (from step 2):
    a. Update Status → `ready`
    b. Add comment: `"Unblocked — blocker #{id} was closed"`
-8. Update Status fields from new graph
+7. Invalidate cache + rebuild graph (post-close: issue excluded from OPEN query)
+8. `update_status_fields` — syncs Status for issues NOT already handled in step 6 (e.g., issues whose blocker status changed but were not direct dependents of the closed issue)
 9. Update cache
 
 **Why step 2 before step 3:** After close, `fetch_graph_data()` returns only OPEN issues. The closed issue is excluded from the rebuilt graph. `compute_unblock_cascade` requires the closed issue to be a node to find dependents via Incoming edges.
@@ -1357,6 +1357,7 @@ pub struct UpdateResult {
 - `priority`: P0–P4 if present
 - `status`: valid Status variant if present
 - `defer_until`: valid ISO date if present
+- `body` and body section params (`description`, `design_notes`, `acceptance_criteria`) are **mutually exclusive**. If `body` is provided, section-level params MUST be absent — validation rejects the call otherwise. `body` replaces the entire issue body; section params merge into the existing body via §9.3
 
 **Flow:**
 1. Fetch issue, validate not closed (unless reopening via status)

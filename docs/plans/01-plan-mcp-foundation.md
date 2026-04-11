@@ -11,6 +11,7 @@
 
 ## Table of Contents
 
+0. [Implementation History](#implementation-history)
 1. [Purpose](#1-purpose)
 2. [Scope](#2-scope)
 3. [Out of Scope](#3-out-of-scope)
@@ -25,6 +26,12 @@
 12. [Epic 06 — Foundation Completion](#epic-06--foundation-completion)
 13. [Gap Analysis — Implementation vs Plan](#gap-analysis--implementation-vs-plan)
 14. [Definition of Done](#definition-of-done)
+
+---
+
+## Implementation History
+
+Phase 01 was originally implemented against an earlier plan and architecture (now archived in `docs/archive/`). The current plan and spec (this document + `specs/01-spec-mcp-foundation.md`) supersede those archived documents. The [Gap Analysis](#gap-analysis--implementation-vs-plan) section (GAPs 01–13) documents all known divergences between the existing code and this plan. Implementation work for Phase 01 completion must address these gaps before implementing the 6 remaining tools (Epic 06).
 
 ---
 
@@ -436,9 +443,13 @@ Shared helpers:
 
 Creates Projects V2 board. Detects owner type (org vs user). Idempotent.
 
+> **Spec note:** The spec (§8.9) simplifies `init` to a single optional `title` param. The original `scope`, `description`, and `public` params were removed during spec refinement as unnecessary complexity for Phase 01.
+
 ### Task 04.04 — `setup` tool
 
 Creates 7 fields and 5 views. Dry-run mode. Idempotent. REST field discovery for integer IDs.
+
+> **Spec note:** The spec (§8.10) adds a `migrate: Option<bool>` param not in the original plan. When enabled, `setup` adds existing open issues to the project with default field values.
 
 ### Task 04.05 — `ready` tool
 

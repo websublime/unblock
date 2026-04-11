@@ -4,7 +4,7 @@
 > Status: Working Draft  
 > Companions: [MANIFESTO.md](./MANIFESTO.md) · [PRD.md](./PRD.md)  
 > Plans: [01-mcp-foundation](./plans/01-plan-mcp-foundation.md) · [02-mcp-complete](./plans/02-plan-mcp-complete.md) · [03-mcp-production](./plans/03-plan-mcp-production.md) · 04-plugin (planned) · 05-remote-server (planned) · 06-llm-agent (planned) · 07-harness (planned)  
-> Specs: [01-graph-engine](./specs/01-spec-graph-engine.md) · [02-github-client](./specs/02-spec-github-client.md) · [03-mcp-tools](./specs/03-spec-mcp-tools.md) · 04-plugin-pipeline (planned) · 05-remote-server (planned) · 06-llm-agent (planned)
+> Specs: [01-mcp-foundation](./specs/01-spec-mcp-foundation.md) · 02-mcp-complete (planned) · 03-mcp-production (planned) · 04-plugin-pipeline (planned) · 05-remote-server (planned) · 06-llm-agent (planned)
 
 ---
 
@@ -61,7 +61,7 @@
 
 unblock stores zero custom data. All state lives in GitHub Issues and Projects V2 fields. The MCP server is a compute layer over existing GitHub primitives.
 
-→ Detailed algorithms and edge cases: [01-spec-graph-engine.md](./specs/01-spec-graph-engine.md)
+→ Detailed algorithms and edge cases: [01-spec-mcp-foundation.md](./specs/01-spec-mcp-foundation.md)
 
 ### 2.1 GitHub Primitives
 
@@ -160,7 +160,7 @@ Created by `setup`. Five views provide opinionated board layouts:
 
 Pure Rust, no network, fully testable with in-memory data. Lives in `unblock-core/src/graph.rs`.
 
-→ Detailed algorithms and edge cases: [01-spec-graph-engine.md](./specs/01-spec-graph-engine.md)
+→ Detailed algorithms and edge cases: [01-spec-mcp-foundation.md](./specs/01-spec-mcp-foundation.md)
 
 ### 3.1 Data Structure
 
@@ -191,9 +191,11 @@ All graph operations use `QualifiedId` — never plain `u64`. This prevents coll
 ### 3.3 Ready Set Calculation
 
 An issue is ready if:
-1. `Status == Open` (not InProgress, Blocked, Deferred, Closed)
-2. `IssueState == Open` (not Closed)
+1. `IssueState == Open` (not Closed)
+2. `Status` is not a preserved state (`InProgress`, `Deferred`, `Closed` are set by agent/human and never overridden)
 3. No active blocking dependencies (all blockers have `IssueState::Closed`)
+
+The ready set computation does NOT look at the current `Status` field value to decide readiness — it computes readiness from the graph. Issues with `Status::Blocked` whose blockers are now all closed WILL appear in the ready set. The `update_status_fields` algorithm syncs the Status field to match.
 
 `Defer Until` filtering is a post-filter in the tool layer, not in the graph engine — the graph does not know about dates.
 
@@ -226,7 +228,7 @@ pub struct DependencyTree {
 
 ## 4. Cache Layer
 
-→ Detailed algorithms and edge cases: [01-spec-graph-engine.md](./specs/01-spec-graph-engine.md)
+→ Detailed algorithms and edge cases: [01-spec-mcp-foundation.md](./specs/01-spec-mcp-foundation.md)
 
 ### 4.1 Design Decisions
 
@@ -246,7 +248,7 @@ pub struct GraphCache {
 
 struct CacheEntry {
     graph: DependencyGraph,
-    ready_set: HashSet<QualifiedId>,
+    ready_set: Vec<IssueSummary>,
     built_at: Instant,
 }
 
@@ -457,13 +459,13 @@ Load config → init tracing → create GitHub client → resolve repo + project
 
 ```rust
 pub struct ServerState {
-    pub config: Config,
-    pub github: GitHubClient,
-    pub cache: GraphCache,
+    pub config: Arc<Config>,
+    pub github: Arc<dyn GitHubApi>,
+    pub cache: Arc<GraphCache>,
 }
 ```
 
-Shared across all tool invocations. In Phase 05, `ServerState` moves to `unblock-tools` crate and is reused by both stdio and HTTP binaries.
+Shared across all tool invocations. `Arc<dyn GitHubApi>` enables dependency injection — tests use `MockGitHubClient`, production uses `GitHubClient`. Phase 02 adds `agent_kind: OnceLock<AgentKind>` and `agent_client: OnceLock<AgentClient>`. In Phase 05, `ServerState` moves to `unblock-tools` crate and is reused by both stdio and HTTP binaries.
 
 ---
 
