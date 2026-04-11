@@ -64,7 +64,7 @@ pub struct ProjectFieldIds {
     pub priority: FieldMeta,
     pub agent: String,          // text field — no options
     pub claimed_at: String,     // date field
-    pub ready_state: FieldMeta,
+    pub pipeline_stage: FieldMeta,
     pub story_points: String,   // number field
     pub defer_until: String,    // date field
 }
@@ -347,7 +347,7 @@ query($owner: String!, $repo: String!, $cursor: String, $since: DateTime!) {
 
 ### 5.6 `fetch_ready_from_field()` (Phase 03)
 
-Lightweight query — fetches only issues where Ready State field == `ready`.
+Lightweight query — fetches only issues where Status field == `ready`.
 
 ```graphql
 query($projectId: ID!, $cursor: String) {
@@ -356,7 +356,7 @@ query($projectId: ID!, $cursor: String) {
       items(first: 100, after: $cursor) {
         pageInfo { hasNextPage endCursor }
         nodes {
-          fieldValueByName(name: "Ready State") {
+          fieldValueByName(name: "Status") {
             ... on ProjectV2ItemFieldSingleSelectValue { name }
           }
           content {
@@ -369,7 +369,7 @@ query($projectId: ID!, $cursor: String) {
 }
 ```
 
-Client-side filter: only return items where Ready State value == `"ready"` and issue state == `OPEN`.
+Client-side filter: only return items where Status value == `"ready"` and issue state == `OPEN`.
 
 ### 5.7 Edge cases
 
@@ -494,7 +494,7 @@ resolve_project(client) → Result<()>:
 
   // 4. Map to ProjectFieldIds
   field_ids = map_fields(fields, EXPECTED_FIELDS)
-  // EXPECTED_FIELDS: Status, Priority, Agent, Claimed At, Ready State, Story Points, Defer Until
+  // EXPECTED_FIELDS: Status, Priority, Pipeline Stage, Agent, Claimed At, Story Points, Defer Until
 
   // 5. Validate
   FOR each expected_field in EXPECTED_FIELDS:
@@ -539,9 +539,9 @@ setup_fields(client) → Result<()>:
 
 | Field | Options |
 |---|---|
-| Status | `open`, `in_progress`, `blocked`, `deferred`, `closed` |
-| Priority | `P0`, `P1`, `P2`, `P3`, `P4` |
-| Ready State | `ready`, `blocked`, `not_ready`, `closed` |
+| Status | `ready`, `in_progress`, `blocked`, `deferred`, `closed` |
+| Priority | `P0 - Critical`, `P1 - High`, `P2 - Medium`, `P3 - Low`, `P4 - Backlog` |
+| Pipeline Stage | `investigation`, `implementation`, `review`, `refactoring`, `qa`, `done` |
 
 ---
 
@@ -551,9 +551,9 @@ setup_fields(client) → Result<()>:
 
 | View | Layout | Filter | Purpose |
 |---|---|---|---|
-| `𝍄 UNBLOCK://ready` | Board | `"Ready State":"ready"` | Agent's ready queue |
-| `𝍄 UNBLOCK://team` | Board | *(no filter)* | Who is working on what |
-| `𝍄 UNBLOCK://pipeline` | Board | *(no filter)* | Classic kanban |
+| `𝍄 UNBLOCK://ready` | Board | `"Status":"ready"` | Agent's ready queue |
+| `𝍄 UNBLOCK://team` | Board | *(no filter)* | Grouped by Agent |
+| `𝍄 UNBLOCK://pipeline` | Board | *(no filter)* | Grouped by Pipeline Stage |
 | `𝍄 UNBLOCK://roadmap` | Table | *(no filter)* | Epic-level progress |
 | `𝍄 UNBLOCK://timeline` | Roadmap | *(no filter)* | Date-based timeline |
 

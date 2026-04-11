@@ -87,12 +87,12 @@ pub struct BlockingEdge {
 ### 2.5 `Status` and `IssueState`
 
 ```rust
-pub enum Status { Open, InProgress, Blocked, Deferred, Closed }
+pub enum Status { Ready, InProgress, Blocked, Deferred, Closed }
 pub enum IssueState { Open, Closed }
-pub enum ReadyState { Ready, Blocked, NotReady, Closed }
+pub enum PipelineStage { Investigation, Implementation, Review, Refactoring, Qa, Done }
 ```
 
-`Status` is the Projects V2 custom field (workflow state). `IssueState` is GitHub's native binary state. Both are needed: an issue can have `Status::Open` and `IssueState::Open`, or `Status::InProgress` and `IssueState::Open`.
+`Status` is the Projects V2 custom field — unified workflow + readiness state. `ready`/`blocked` are computed by the MCP server from the dependency graph; `in_progress`/`deferred`/`closed` are set by agents/humans. `IssueState` is GitHub's native binary state. `PipelineStage` tracks where an issue is in the development pipeline.
 
 ### 2.6 `TreeNode`
 
@@ -202,7 +202,7 @@ compute_ready_set(graph, issues) → Vec<IssueSummary>:
 - **Agent filter:** `ready --agent coder` → only issues with matching agent field. Applied after ready set computation.
 - **Type filter:** `ready --type bug` → only bugs. Applied after.
 - **Priority filter:** `ready --priority P0` → only P0. Applied after.
-- **Milestone filter:** `ready --milestone "Sprint 1"` → only that milestone. Applied after.
+- **Milestone filter:** `ready --milestone "Sprint 1"` → only issues in that milestone (sprint/release). Applied after.
 - **Include claimed:** By default, `Status::InProgress` issues are excluded. `--include_claimed` overrides.
 
 ### 4.3 Sorting
@@ -263,15 +263,14 @@ compute_unblock_cascade(graph, closed_qid, issues) → Vec<QualifiedId>:
 ### 5.2 Cascade actions (in tool handler, not engine)
 
 For each unblocked issue:
-1. Update `Status` → `open` (if currently `blocked`)
-2. Update `Ready State` → `ready`
+1. Update `Status` → `ready` (if currently `blocked`)
 3. Add comment: "Unblocked — blocker #N was closed"
 
 ### 5.3 Edge cases
 
 - **Multi-level cascade:** Closing A unblocks B. B is already `Status::Open` but was blocked. Cascade does NOT recursively process B's dependents in the same pass. B becomes ready; when B is later closed, its own cascade fires.
 - **Partial unblock:** A depends on B and C. B is closed. A is not yet unblocked because C is still open. When C closes, cascade fires and A is unblocked.
-- **Already open:** A was marked `Status::Open` manually but was still blocked. Cascade detects it's now unblocked and updates `Ready State` → `ready`.
+- **Already ready:** A was marked `Status::Ready` manually but was still blocked. Cascade detects it's now unblocked and confirms `Status` → `ready`.
 - **Closed dependent:** A depends on B. A is already closed. When B closes, cascade skips A (already closed).
 - **Pre-close computation:** The cascade MUST be computed from the PRE-CLOSE graph state — before the issue is closed in GitHub and before cache invalidation. After close, `fetch_graph_data()` returns only open issues, so the closed issue is excluded from the rebuilt graph and `compute_unblock_cascade` cannot find its dependents. See spec-03 §5.2 for the corrected `close` tool flow.
 
@@ -406,7 +405,7 @@ The `ReconcileEngine` is pure — no I/O, no async. It receives pre-fetched data
 **Data requirements:** The `issues` map MUST include both open AND recently-closed issues.
 `fetch_graph_data()` returns only open issues (`states: [OPEN]`). The reconcile tool handler
 must supplement this with recently-closed issues (see §8.4) so that Pass 1 can validate
-closed-issue Ready State fields and Pass 2 can detect uncascaded closures.
+closed-issue Status fields and Pass 2 can detect uncascaded closures.
 
 The `graph` is built from open issues only (as usual). Closed issues in `issues` are NOT
 graph nodes — they are used for metadata checks (Passes 1, 2, 5, 6) but not for graph
@@ -417,27 +416,27 @@ analyse(graph, issues, computed_ready_set, now) → DriftReport:
 
   drift = []
 
-  // Pass 1: Stale Ready State fields
+  // Pass 1: Stale Status fields
   FOR each (qid, issue) in issues:
     IF issue.state == Closed:
-      IF issue.ready_state != Closed:
-        drift.push(StaleReadyState { qid, field_says: issue.ready_state, graph_says: Closed })
+      IF issue.status != Closed:
+        drift.push(StaleStatus { qid, field_says: issue.status, graph_says: Closed })
       CONTINUE
 
-    expected = compute_expected_ready_state(issue, computed_ready_set)
-    IF issue.ready_state != expected:
-      drift.push(StaleReadyState { qid, field_says: issue.ready_state, graph_says: expected })
+    expected = compute_expected_status(issue, computed_ready_set)
+    IF issue.status != expected:
+      drift.push(StaleStatus { qid, field_says: issue.status, graph_says: expected })
 
   // Pass 2: Uncascaded closures
   // Detects: a closed issue whose open dependents should be ready but aren't.
   // Strategy: for each open issue that has NO open blockers in the graph,
-  // check if its Ready State is Ready. If not, it was missed by cascade.
+  // check if its Status is Ready. If not, it was missed by cascade.
   FOR each (qid, issue) in issues:
     IF issue.state != Open:
       CONTINUE
     IF issue.status == InProgress OR issue.status == Deferred:
       CONTINUE
-    IF qid IN computed_ready_set AND issue.ready_state != Ready:
+    IF qid IN computed_ready_set AND issue.status != Ready:
       // This issue should be ready (all blockers closed) but isn't marked as such.
       // Find which closed blocker(s) should have triggered the cascade.
       closed_blockers = find_closed_blockers_for(qid, graph, issues)
@@ -487,8 +486,8 @@ analyse(graph, issues, computed_ready_set, now) → DriftReport:
 
 | Drift type | Auto-repairable | Repair action |
 |---|---|---|
-| `StaleReadyState` | ✅ | Update Ready State field via `update_field()` |
-| `UncascadedClosure` | ✅ | Update Ready State to `Ready` for downstream + audit comment |
+| `StaleStatus` | ✅ | Update Status field via `update_field()` |
+| `UncascadedClosure` | ✅ | Update Status to `Ready` for downstream + audit comment |
 | `OrphanedBlockingEdge` | ❌ | Log warning — edge source issue needs manual review |
 | `MalformedAgentField` | ❌ | Log warning — agent or human corrects format |
 | `MissingProjectField` | ❌ | Log error — run `setup` to recreate |

@@ -36,7 +36,7 @@
 |---|---|
 | **ready set** | The set of issues with no active blockers — all blocking dependencies are closed. The fundamental output of the graph engine. Agents work from the ready set, never from a flat list. |
 | **cascade** | The automatic recomputation that occurs when an issue is closed. Dependents whose blockers are now all resolved are promoted to ready. Cascade is structural — it is not optional. |
-| **claim** | Atomic assignment of an issue to an agent. Sets agent name, status, timestamp, and Ready State in a single operation. Two agents cannot claim the same issue. |
+| **claim** | Atomic assignment of an issue to an agent. Sets agent name, Status→`in_progress`, and timestamp in a single operation. Two agents cannot claim the same issue. |
 | **dependency graph** | The directed acyclic graph of blocking relationships between issues. Edges represent "blocked by" — the source depends on the target. The graph is the product. |
 | **qualified ID** | A fully-qualified issue identifier: `owner/repo#number`. Prevents collision between issue #5 in repo A and issue #5 in repo B. Used internally by the graph engine. |
 | **graph cache** | The in-memory cache of the computed dependency graph and ready set. Ephemeral — invalidated after every write, reconstructable from GitHub in a single API call. |
@@ -46,13 +46,13 @@
 | **comment trail** | The chronological sequence of structured comments on an issue. Reconstructable by any agent or human. The shared memory that makes session isolation possible. |
 | **enforcement layer** | One of three independent mechanisms that prevent pipeline violations: MCP validation (label transition preconditions), Inspector (Gadget — comment trail audit), agent prompt structure (BLOCK conditions). |
 | **worktree** | Isolated git worktree at `worktrees/issue-{N}-{slug}` used for implementation and refactoring. The branch is a consequence of the worktree — the worktree is the primary concept. |
-| **Projects V2 field** | Custom field on a GitHub Projects V2 board. unblock uses 7: Status, Priority, Agent, Claimed At, Ready State, Story Points, Defer Until. |
+| **Projects V2 field** | Custom field on a GitHub Projects V2 board. unblock uses 7: Status, Priority, Pipeline Stage, Agent, Claimed At, Story Points, Defer Until. |
 | **body sections** | Three structured sections in the issue body markdown: Description, Design Notes, Acceptance Criteria. Parsed and written by the MCP server. Each data type lives in the correct GitHub primitive — not duplicated. |
 | **cross-repo** | Blocking relationships that span repositories. GitHub Issue node IDs are globally unique. unblock supports `owner/repo#number` references for cross-repo dependencies. |
 | **MCP** | Model Context Protocol. The communication protocol between AI agents and tool servers. unblock uses stdio (local) and Streamable HTTP (remote). |
 | **skill** | A slash-command entry point in the plugin. Lives in `skills/{name}/SKILL.md`. Invoked as `/name`. Skills route intent to agents — they are dispatchers, not executors. |
 | **agent** | A named `.md` configuration file that defines a specialised persona with constrained tools, model, and hard boundaries. Not compiled code. |
-| **finding** | A deferrable issue created by Fernando when review (SUGGESTION) or QA (MINOR, RISK, DEVIATES, EXTRA) produces observations that do not block merge but should be tracked. Created as child of the parent epic. |
+| **finding** | A deferrable issue created by Fernando when review (SUGGESTION) or QA (MINOR, RISK, DEVIATES, EXTRA) produces observations that do not block merge but should be tracked. Created as sub-issue of the parent epic issue. |
 | **drift** | Semantic divergence between the in-memory graph and GitHub reality. Caused by external mutations (human closes an issue via GitHub UI). Detected and repaired by `reconcile`. |
 
 ---
@@ -69,10 +69,10 @@ unblock stores zero custom data. All state lives in GitHub Issues and Projects V
 |---|---|---|
 | Issue number | Issue ID (`#42`) — native, universal | REST + GraphQL |
 | Issue state | Open/Closed ground truth | REST + GraphQL |
-| Issue type | Classification (org-level): `task`, `bug`, `feature`, `epic`, `chore`, `spike` | REST + GraphQL |
+| Issue type | Classification (org-level): `task`, `bug`, `feature`, `epic`, `chore`, `spike`. Epic issues serve as parent containers for sub-issues | REST + GraphQL |
 | Labels | Flexible tagging, filterable | REST + GraphQL |
 | Assignees | Human assignment | REST + GraphQL |
-| Milestones | Epic/grouping with due date and progress | REST + GraphQL |
+| Milestones | Sprint/release grouping with due date and progress | REST + GraphQL |
 | Comments | Discussion thread, audit trail | REST |
 | Sub-issues | Parent/child hierarchy | GraphQL (`GraphQL-Features: sub_issues`) |
 | Blocking | Dependency edges: `blockedBy` / `blocking` | GraphQL mutations |
@@ -87,15 +87,25 @@ Created by the `setup` tool. These provide structured metadata that Issues alone
 
 | Field | Type | Values | Purpose |
 |---|---|---|---|
-| **Status** | Single Select | `open`, `in_progress`, `blocked`, `deferred`, `closed` | Fine-grained workflow state beyond GitHub's binary open/closed |
-| **Priority** | Single Select | `P0`, `P1`, `P2`, `P3`, `P4` | Sortable priority for the `ready` queue |
+| **Status** | Single Select | `ready`, `in_progress`, `blocked`, `deferred`, `closed` | Unified workflow + readiness state. `ready`/`blocked` computed by MCP server from graph; `in_progress`/`deferred`/`closed` set by agent/human |
+| **Priority** | Single Select | `P0 - Critical`, `P1 - High`, `P2 - Medium`, `P3 - Low`, `P4 - Backlog` | Sortable priority for the `ready` queue |
+| **Pipeline Stage** | Single Select | `investigation`, `implementation`, `review`, `refactoring`, `qa`, `done` | Development pipeline phase. Set by plugin agents on transitions. Source of truth for routing — replaces comment-trail-based inference |
 | **Agent** | Text | Free text | Which AI agent is working on this |
 | **Claimed At** | Date | ISO datetime | Timestamp of claim |
-| **Ready State** | Single Select | `ready`, `blocked`, `not_ready`, `closed` | Materialised by MCP server for human visibility in board views |
 | **Story Points** | Number | Integer | Estimation |
 | **Defer Until** | Date | Date | Hidden from ready queue until this date |
 
 Why custom fields over labels: fields are typed, filterable, sortable, and groupable in Projects V2 views. The Agent field is text — it does not pollute the label namespace.
+
+**Status state machine:** The MCP server manages `ready`↔`blocked` transitions automatically based on the dependency graph. When an agent claims an issue, Status moves to `in_progress`. When deferred, to `deferred`. When closed, to `closed`. On close cascade, newly unblocked dependents transition from `blocked` to `ready`.
+
+**Pipeline Stage state machine:** Plugin agents advance the pipeline stage as work progresses. The `/do` skill reads Pipeline Stage to determine routing — not the comment trail. Comments remain as audit trail but are no longer the source of truth for routing decisions.
+
+```
+investigation → implementation → review → refactoring → review → qa → done
+                                   ↑          │
+                                   └──────────┘ (rework cycle)
+```
 
 ### 2.3 Issue Body Structure
 
@@ -121,7 +131,8 @@ Data placement rule:
 | Related issues, PRs, discussions | **Auto-links** (mention `#N`) | GitHub creates bidirectional cross-references automatically |
 | Status, Priority, Agent, Story Points | **Projects V2 custom fields** | Typed, filterable, sortable, groupable in board views |
 | Labels | **GitHub Labels** | Native, queryable, visual on board |
-| Epic grouping | **Milestones** | Native with due dates and progress bar |
+| Epic grouping | **Issue Type `Epic`** + **Sub-Issues** | Epic is an issue with type `Epic`; tasks are sub-issues of the epic |
+| Sprint/release grouping | **Milestones** | Native with due dates and progress bar |
 | Parent-child hierarchy | **Sub-Issues** | Native API (GA 2025) |
 | Blocking relationships | **Blocking API** | `blockedBy`/`blocking` native |
 
@@ -137,10 +148,10 @@ Created by `setup`. Five views provide opinionated board layouts:
 
 | View | Layout | Purpose |
 |---|---|---|
-| `𝍄 UNBLOCK://ready` | Board | Agent's ready queue — filtered to ready issues |
-| `𝍄 UNBLOCK://team` | Board | Tech lead view — who is working on what |
-| `𝍄 UNBLOCK://pipeline` | Board | Classic kanban — full workflow |
-| `𝍄 UNBLOCK://roadmap` | Table | Epic-level progress by milestone |
+| `𝍄 UNBLOCK://ready` | Board | Agent's ready queue — filtered to `Status:"ready"` |
+| `𝍄 UNBLOCK://team` | Board | Tech lead view — grouped by Agent |
+| `𝍄 UNBLOCK://pipeline` | Board | Development pipeline — grouped by Pipeline Stage |
+| `𝍄 UNBLOCK://roadmap` | Table | Epic-level progress by issue type `Epic` |
 | `𝍄 UNBLOCK://timeline` | Roadmap | Date-based timeline for sprint planning |
 
 ---
@@ -257,8 +268,8 @@ Write operation (close, claim, create, depends, dep_remove, update, reopen)
   ├─→ fetch_graph_data()              ← unconditional fetch
   ├─→ Build new DependencyGraph
   ├─→ Compute ready set
-  ├─→ Diff against current Ready State field values
-  ├─→ Batch update changed Ready State fields in GitHub
+  ├─→ Diff against current Status field values
+  ├─→ Batch update changed Status fields in GitHub (ready↔blocked transitions)
   └─→ cache.update(graph)
 
 Read operation (ready, prime, stats, list, dep_cycles)
@@ -303,11 +314,11 @@ Single-process architecture. Multiple agents on separate stdio connections share
 
 ### 4.7 Materialised Fast Path (Phase 03, planned)
 
-On cold start, the server reads Ready State field values directly from Projects V2 instead of waiting for a full graph rebuild. These field values are written by the MCP server on every mutation and by `reconcile`, so they approximate the ready set. The server serves this approximate result immediately and rebuilds the full graph asynchronously in the background.
+On cold start, the server reads Status field values directly from Projects V2 instead of waiting for a full graph rebuild. These field values are written by the MCP server on every mutation and by `reconcile`, so they reflect the ready set. The server serves this approximate result immediately and rebuilds the full graph asynchronously in the background.
 
-Once the graph rebuild completes (typically 1-3 seconds), subsequent `ready` calls use the authoritative graph. The fast path result is marked with `source: Field` so the agent knows it is approximate.
+Once the graph rebuild completes (typically 1-3 seconds), subsequent `ready` calls use the authoritative graph. The fast path result is marked with `source: "field"` so the agent knows it is approximate.
 
-The fast path is read-only — it never writes to GitHub. No new dependencies. No persistent storage. The existing Ready State field is both the human-visible board column and the cold start cache.
+The fast path is read-only — it never writes to GitHub. No new dependencies. No persistent storage. The existing Status field is both the human-visible board column and the cold start cache.
 
 → Detailed algorithm: [01-spec-graph-engine.md §10](./specs/01-spec-graph-engine.md#10-fast-path-algorithm-phase-03)
 
@@ -389,7 +400,7 @@ View and field management uses REST API (`2026-03-10`), not GraphQL. The `X-GitH
 
 ## 6. MCP Tools
 
-20 tools total. Each operates on the configured repo. All tools follow the same execution pattern: validate input → execute business logic → if write: invalidate cache + rebuild + update Ready State fields → return result.
+20 tools total. Each operates on the configured repo. All tools follow the same execution pattern: validate input → execute business logic → if write: invalidate cache + rebuild + update Status fields → return result.
 
 → Detailed tool specifications: [03-spec-mcp-tools.md](./specs/03-spec-mcp-tools.md)
 
@@ -405,7 +416,7 @@ pub async fn execute(state: &ServerState, params: P) -> Result<R, McpError> {
         let (issues, edges) = state.github.fetch_graph_data().await?;
         let graph = DependencyGraph::build(&issues, &edges);
         let ready_set = graph.compute_ready_set();
-        update_ready_state_fields(state, &issues, &ready_set).await?;
+        update_status_fields(state, &issues, &ready_set).await?;
         state.cache.update(graph);
     }
 
@@ -472,7 +483,7 @@ Platforms: Claude Code (richest — agents, skills, hooks, `context: fork`), Git
 
 | Skill | Purpose |
 |---|---|
-| `/setup` | Bootstrap: GitHub labels, milestone, Projects V2, editor configs, hooks |
+| `/setup` | Bootstrap: GitHub labels, milestones, Projects V2, issue types, editor configs, hooks |
 | `/need` | Intent-based agent discovery and installation |
 | `/doctor` | Diagnostic: MCP health, GitHub state, local environment |
 | `/think` | Free exploration — no pipeline enforcement, no required issue |
@@ -580,7 +591,7 @@ Sequence validation:
 | NEEDS-REFACTORING | SUGGESTION only (no CRITICAL or WARNING) | `unblock:review:pending` (unchanged) |
 | NEEDS-REWORK | Any CRITICAL or WARNING | `unblock:review:rework` |
 
-**Finding action mapping:** CRITICAL and WARNING → rework (never finding issues). SUGGESTION → Fernando creates finding issue in parent epic, then applies `unblock:review:ok` label and posts a comment on the reviewed issue referencing each created finding (e.g., "SUGGESTION tracked as #123").
+**Finding action mapping:** CRITICAL and WARNING → rework (never finding issues). SUGGESTION → Fernando creates finding issue as sub-issue of the parent epic, then applies `unblock:review:ok` label and posts a comment on the reviewed issue referencing each created finding (e.g., "SUGGESTION tracked as #123").
 
 **QA verdict mapping:**
 
@@ -590,7 +601,7 @@ Sequence validation:
 | PASS+FINDINGS | No BLOCKER or MAJOR, but MINOR/RISK/DEVIATES/EXTRA | `unblock:qa:ok` + findings |
 | FAIL | Any BLOCKER or MAJOR | `unblock:qa:rework` |
 
-**QA finding action mapping:** BLOCKER and MAJOR → rework (never finding issues). MINOR, RISK, DEVIATES, EXTRA → Fernando creates finding issues in parent epic, then applies `unblock:qa:ok` label and posts a comment on the reviewed issue referencing each created finding (e.g., "MINOR tracked as #124, RISK tracked as #125").
+**QA finding action mapping:** BLOCKER and MAJOR → rework (never finding issues). MINOR, RISK, DEVIATES, EXTRA → Fernando creates finding issues as sub-issues of the parent epic, then applies `unblock:qa:ok` label and posts a comment on the reviewed issue referencing each created finding (e.g., "MINOR tracked as #124, RISK tracked as #125").
 
 After Martin (refactoring), Linus always re-reviews. Never auto-approve.
 
@@ -1012,7 +1023,7 @@ Exponential backoff with ±25% jitter. Only retries on `RateLimited` (429) and `
 | Issue numbers | Positive integers |
 | Titles | Non-empty, max 500 chars |
 | Agent names | Non-empty, max 100 chars |
-| Priority | Must be P0–P4 |
+| Priority | Must be P0–P4 (display: `P0 - Critical` through `P4 - Backlog`) |
 | Dates | Valid ISO format |
 
 ### 15.3 Transport Security
