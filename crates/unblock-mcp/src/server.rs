@@ -153,13 +153,48 @@ pub struct ServerState {
     pub connected_at: OnceLock<chrono::DateTime<Utc>>,
 }
 
+/// Local newtype that wraps a [`Config`] reference and renders it via
+/// [`Debug`](std::fmt::Debug) with the GitHub PAT replaced by a redaction
+/// marker.
+///
+/// This wrapper exists solely to keep [`ServerState`]'s [`Debug`] impl from
+/// leaking the token to logs, traces, or panic messages. It is **not** a
+/// substitute for `Config`'s derived [`Debug`] impl — other call sites that
+/// format `Config` directly remain unchanged on purpose.
+struct RedactedConfig<'a>(&'a Config);
+
+impl std::fmt::Debug for RedactedConfig<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("token", &"[REDACTED]")
+            .field("api_base_url", &self.0.api_base_url)
+            .field("github_url", &self.0.github_url)
+            .field("repo", &self.0.repo)
+            .field("project_number", &self.0.project_number)
+            .field("agent", &self.0.agent)
+            .field("cache_ttl", &self.0.cache_ttl)
+            .field("log_level", &self.0.log_level)
+            .field("otel_endpoint", &self.0.otel_endpoint)
+            .finish()
+    }
+}
+
 impl std::fmt::Debug for ServerState {
-    /// Manual [`Debug`] implementation that intentionally omits the `github`
-    /// field because [`dyn GitHubApi`](GitHubApi) does not require [`Debug`].
+    /// Manual [`Debug`] implementation that:
+    ///
+    /// - Renders [`Config`] through a private `RedactedConfig` wrapper so the
+    ///   GitHub PAT stored in `config.token` never leaks via `{:?}` formatting.
+    /// - Substitutes a meaningful identifier for the `github` field instead
+    ///   of forwarding to a [`Debug`](std::fmt::Debug) impl that does not
+    ///   exist on [`dyn GitHubApi`](GitHubApi). The label is obtained via
+    ///   [`GitHubApi::debug_label`], which defaults to
+    ///   `std::any::type_name::<Self>()` and therefore reports the concrete
+    ///   implementation type behind the trait object (e.g. `GitHubClient` or
+    ///   `MockGitHubClient`).
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ServerState")
-            .field("config", &self.config)
-            .field("github", &"<dyn GitHubApi>")
+            .field("config", &RedactedConfig(&self.config))
+            .field("github", &self.github.debug_label())
             .field("cache", &self.cache)
             .field("agent_kind", &self.agent_kind)
             .field("agent_client", &self.agent_client)
@@ -2205,6 +2240,57 @@ mod tests {
             agent_client: OnceLock::new(),
             connected_at: OnceLock::new(),
         }
+    }
+
+    /// The manual [`Debug`] impl for [`ServerState`] must:
+    ///
+    /// 1. Never leak the raw `Config.token` (a GitHub PAT) into the
+    ///    formatted output, replacing it with a `[REDACTED]` marker via
+    ///    the local `RedactedConfig` wrapper.
+    /// 2. Render the `github` trait-object field with a meaningful
+    ///    concrete-type label sourced from
+    ///    [`GitHubApi::debug_label`](unblock_github::api::GitHubApi::debug_label),
+    ///    rather than the historical `<dyn GitHubApi>` placeholder.
+    #[tokio::test]
+    async fn debug_redacts_token_and_labels_github_concrete_type() {
+        const SECRET: &str = "ghp_test_token_for_unit_tests";
+
+        let state = test_state().await;
+
+        // Sanity-check the precondition: the test fixture really did load
+        // the secret value into Config.token. Without this guard, a future
+        // refactor of `test_state` could silently turn the redaction
+        // assertion into a no-op.
+        assert_eq!(
+            state.config.token, SECRET,
+            "test fixture must keep using the documented test token"
+        );
+
+        let rendered = format!("{state:?}");
+
+        // Invariant 1: token must be absent from the Debug output.
+        assert!(
+            !rendered.contains(SECRET),
+            "ServerState Debug output leaked the GitHub PAT: {rendered}"
+        );
+        assert!(
+            rendered.contains("[REDACTED]"),
+            "ServerState Debug output should mark the token as [REDACTED]: {rendered}"
+        );
+
+        // Invariant 2: github field must surface a meaningful concrete label,
+        // not the legacy `<dyn GitHubApi>` placeholder. The default
+        // `debug_label` impl forwards to `std::any::type_name::<Self>()`,
+        // which on the production `GitHubClient` resolves to a path
+        // containing `GitHubClient`.
+        assert!(
+            !rendered.contains("<dyn GitHubApi>"),
+            "ServerState Debug output still uses the legacy placeholder: {rendered}"
+        );
+        assert!(
+            rendered.contains("GitHubClient"),
+            "ServerState Debug output should mention the concrete GitHubClient type: {rendered}"
+        );
     }
 
     /// `ServerState.agent_kind` starts empty (`OnceLock` not yet set).
