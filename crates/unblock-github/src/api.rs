@@ -41,6 +41,28 @@ use crate::projects::{
 /// `Arc<dyn GitHubApi>` and shared across tokio tasks.
 #[async_trait]
 pub trait GitHubApi: Send + Sync {
+    // ── Diagnostics ───────────────────────────────────────────────────
+
+    /// Returns a human-readable label identifying the concrete implementation
+    /// behind the trait object, for use in [`Debug`](std::fmt::Debug) output
+    /// and structured logs.
+    ///
+    /// Because [`Debug`](std::fmt::Debug) is intentionally **not** a
+    /// supertrait of `GitHubApi`, callers cannot forward formatting through
+    /// the trait object. This method gives them a stable hook for emitting a
+    /// meaningful identifier (e.g. `unblock_github::client::GitHubClient` vs.
+    /// `unblock_github::mock::MockGitHubClient`) without forcing every
+    /// implementor to derive `Debug` over its private state.
+    ///
+    /// The default implementation returns [`std::any::type_name::<Self>()`],
+    /// which resolves to the concrete impl type at each call site (the trait
+    /// object's vtable carries the right monomorphisation). The exact output
+    /// of `type_name` is not guaranteed stable across compiler versions, so
+    /// the returned string is suitable for diagnostics only — never parse it.
+    fn debug_label(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
+
     // ── Sync accessors ────────────────────────────────────────────────
 
     /// Returns the repository owner (e.g. `websublime`).
