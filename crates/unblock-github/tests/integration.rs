@@ -308,7 +308,11 @@ async fn fetch_graph_data_issues_have_valid_status_and_priority() {
         // Status must be one of the known variants.
         let valid = matches!(
             issue.status,
-            Status::Ready | Status::InProgress | Status::Blocked | Status::Deferred | Status::Closed
+            Status::Ready
+                | Status::InProgress
+                | Status::Blocked
+                | Status::Deferred
+                | Status::Closed
         );
         assert!(
             valid,
@@ -1187,7 +1191,6 @@ async fn setup_fields_creates_all_seven_fields() {
             "IssueType should have option '{expected}'"
         );
     }
-
 
     eprintln!("setup_fields: all 6 fields created with correct options");
 }
