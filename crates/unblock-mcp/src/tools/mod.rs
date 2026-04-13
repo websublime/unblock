@@ -181,9 +181,7 @@ mod tests {
     use unblock_core::cache::GraphCache;
     use unblock_core::config::Config;
     use unblock_core::graph::DependencyGraph;
-    use unblock_core::types::{
-        BlockingEdge, Issue, IssueState, IssueType, Priority, ReadyState, Status,
-    };
+    use unblock_core::types::{BlockingEdge, Issue, IssueState, IssueType, Priority, Status};
     use unblock_github::errors::{GitHubApiSnafu, ProjectNotConfiguredSnafu};
 
     use super::*;
@@ -205,11 +203,11 @@ mod tests {
             node_id: format!("NODE_{number}"),
             title: format!("Issue #{number}"),
             issue_type: Some(IssueType::Task),
-            status: Status::Open,
+            status: Status::Ready,
             priority: Priority::P1,
             agent: None,
             claimed_at: None,
-            ready_state: ReadyState::Ready,
+            pipeline_stage: None,
             story_points: None,
             defer_until: None,
             labels: vec![],

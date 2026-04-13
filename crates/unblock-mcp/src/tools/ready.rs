@@ -176,7 +176,7 @@ mod tests {
             number,
             title: format!("Issue #{number}"),
             issue_type: Some(IssueType::Task),
-            status: Status::Open,
+            status: Status::Ready,
             priority,
             agent: None,
             milestone: None,

@@ -12,8 +12,7 @@ use unblock_core::cache::GraphCache;
 use unblock_core::config::Config;
 use unblock_core::graph::DependencyGraph;
 use unblock_core::types::{
-    BlockingEdge, IssueComment, IssueRef, IssueState, IssueType, Priority, QualifiedId, ReadyState,
-    Status,
+    BlockingEdge, IssueComment, IssueRef, IssueState, IssueType, Priority, QualifiedId, Status,
 };
 use unblock_github::client::GitHubClient;
 use unblock_github::projects::{CreateViewParams, OwnerType, ViewLayout};
@@ -38,11 +37,11 @@ fn test_issue(number: u64, state: IssueState) -> unblock_core::types::Issue {
         node_id: format!("NODE_{number}"),
         title: format!("Issue #{number}"),
         issue_type: Some(IssueType::Task),
-        status: Status::Open,
+        status: Status::Ready,
         priority: Priority::P1,
         agent: None,
         claimed_at: None,
-        ready_state: ReadyState::Ready,
+        pipeline_stage: None,
         story_points: None,
         defer_until: None,
         labels: vec![],
@@ -70,11 +69,11 @@ fn mock_issue(number: u64) -> unblock_core::types::Issue {
         node_id: format!("I_{number}"),
         title: format!("Mock issue #{number}"),
         issue_type: Some(IssueType::Task),
-        status: Status::Open,
+        status: Status::Ready,
         priority: Priority::P2,
         agent: None,
         claimed_at: None,
-        ready_state: ReadyState::Ready,
+        pipeline_stage: None,
         story_points: None,
         defer_until: None,
         labels: vec![],
@@ -1650,9 +1649,9 @@ async fn reconcile_on_clean_repo() {
     }
 }
 
-/// Build a set of issues with known drift (`StaleReadyState`), run the reconcile
-/// engine to verify it detects the drift, then simulate repair by correcting
-/// the `ReadyState` and verifying the re-analysis returns clean.
+/// Build a set of issues with known drift (`UncascadedClosure`), run the
+/// reconcile engine to verify it detects the drift, then simulate repair by
+/// correcting the `Status` and verifying the re-analysis returns clean.
 ///
 /// This is a unit-level integration test — it exercises the full analyse →
 /// detect → fix → re-analyse cycle without requiring GitHub write access.
@@ -1662,20 +1661,20 @@ async fn reconcile_with_injected_drift_and_fix() {
     use unblock_core::reconcile::{DriftKind, ReconcileEngine};
 
     // Setup: issue #1 (closed), issue #2 (open, blocked by #1).
-    // #2's ReadyState is Blocked but should be Ready (blocker is closed).
+    // #2's Status is Blocked but should be Ready (blocker is closed).
     let q1 = QualifiedId::new("acme", "test", 1);
     let q2 = QualifiedId::new("acme", "test", 2);
 
     let issue1 = {
         let mut i = test_issue(1, IssueState::Closed);
         i.qualified_id = q1.clone();
-        i.ready_state = ReadyState::Closed;
+        i.status = Status::Closed;
         i
     };
     let issue2 = {
         let mut i = test_issue(2, IssueState::Open);
         i.qualified_id = q2.clone();
-        i.ready_state = ReadyState::Blocked; // <-- DRIFT: should be Ready
+        i.status = Status::Blocked; // <-- DRIFT: should be Ready
         i
     };
 
@@ -1700,22 +1699,16 @@ async fn reconcile_with_injected_drift_and_fix() {
     // Step 1: Detect drift.
     let report = engine.analyse(&graph, &by_id, &computed_ready, chrono::Utc::now());
     assert!(!report.clean, "Should detect drift");
-    let has_stale_ready = report.drift_found.iter().any(|d| {
-        matches!(
-            d,
-            DriftKind::StaleReadyState {
-                graph_says: ReadyState::Ready,
-                field_says: ReadyState::Blocked,
-                ..
-            }
-        )
-    });
-    assert!(has_stale_ready, "Should detect StaleReadyState drift");
+    let has_uncascaded = report
+        .drift_found
+        .iter()
+        .any(|d| matches!(d, DriftKind::UncascadedClosure { .. }));
+    assert!(has_uncascaded, "Should detect UncascadedClosure drift");
 
-    // Step 2: Simulate repair — correct the ReadyState on issue #2.
+    // Step 2: Simulate repair — correct the Status on issue #2.
     let corrected_issues = {
         let mut i2 = issue2.clone();
-        i2.ready_state = ReadyState::Ready; // Fixed!
+        i2.status = Status::Ready; // Fixed!
         vec![issue1, i2]
     };
     let repaired_graph = DependencyGraph::build(&corrected_issues, &edges);

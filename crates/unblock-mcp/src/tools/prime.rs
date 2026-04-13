@@ -467,7 +467,6 @@ fn summarise_drift(report: &ReconcileReport) -> Vec<String> {
         .into_iter()
         .map(|(kind, count)| {
             let label = match kind.as_str() {
-                "StaleReadyState" => "stale ready state",
                 "UncascadedClosure" => "uncascaded closure",
                 "OrphanedBlockingEdge" => "orphaned blocking edge",
                 "MalformedAgentField" => "malformed agent field",
@@ -742,7 +741,7 @@ mod tests {
     use unblock_core::config::Config;
     use unblock_core::graph::DependencyGraph;
     use unblock_core::types::{
-        BlockingEdge, Issue, IssueState, IssueType, Priority, QualifiedId, ReadyState, Status,
+        BlockingEdge, Issue, IssueState, IssueType, Priority, QualifiedId, Status,
     };
 
     use super::*;
@@ -767,7 +766,7 @@ mod tests {
             priority: Priority::P1,
             agent: None,
             claimed_at: None,
-            ready_state: ReadyState::Ready,
+            pipeline_stage: None,
             story_points: None,
             defer_until: None,
             labels: vec![],
@@ -865,9 +864,9 @@ mod tests {
     #[test]
     fn categorise_blocked_issues() {
         // Issue #1 blocks issue #2.
-        let issue1 = test_issue(1, IssueState::Open, Status::Open);
+        let issue1 = test_issue(1, IssueState::Open, Status::Ready);
         let mut issue2 = test_issue(2, IssueState::Open, Status::Blocked);
-        issue2.ready_state = ReadyState::Blocked;
+        issue2.status = Status::Blocked;
         let issues = vec![issue1, issue2];
         let edges = vec![BlockingEdge {
             source: qid(2),
@@ -888,7 +887,7 @@ mod tests {
     #[test]
     fn categorise_hotspots() {
         // Issue #1 blocks issues #2 and #3.
-        let issue1 = test_issue(1, IssueState::Open, Status::Open);
+        let issue1 = test_issue(1, IssueState::Open, Status::Ready);
         let issue2 = test_issue(2, IssueState::Open, Status::Blocked);
         let issue3 = test_issue(3, IssueState::Open, Status::Blocked);
         let issues = vec![issue1, issue2, issue3];
@@ -923,7 +922,7 @@ mod tests {
     fn hotspots_excludes_closed_issues() {
         // Issue #1 blocks #2, but #1 is closed.
         let issue1 = test_issue(1, IssueState::Closed, Status::Closed);
-        let issue2 = test_issue(2, IssueState::Open, Status::Open);
+        let issue2 = test_issue(2, IssueState::Open, Status::Ready);
         let issues = vec![issue1, issue2];
         let edges = vec![BlockingEdge {
             source: qid(2),
@@ -944,10 +943,10 @@ mod tests {
     #[test]
     fn hotspots_sorted_by_blocking_count_desc() {
         // #1 blocks 3 issues, #4 blocks 1 issue.
-        let issue1 = test_issue(1, IssueState::Open, Status::Open);
+        let issue1 = test_issue(1, IssueState::Open, Status::Ready);
         let issue2 = test_issue(2, IssueState::Open, Status::Blocked);
         let issue3 = test_issue(3, IssueState::Open, Status::Blocked);
-        let issue4 = test_issue(4, IssueState::Open, Status::Open);
+        let issue4 = test_issue(4, IssueState::Open, Status::Ready);
         let issue5 = test_issue(5, IssueState::Open, Status::Blocked);
         let issues = vec![issue1, issue2, issue3, issue4, issue5];
         let edges = vec![
@@ -1069,9 +1068,8 @@ mod tests {
     #[test]
     fn deferred_issues_excluded_from_blocked() {
         // Issue #1 blocks issue #2 (deferred). Deferred should not appear as blocked.
-        let issue1 = test_issue(1, IssueState::Open, Status::Open);
-        let mut issue2 = test_issue(2, IssueState::Open, Status::Deferred);
-        issue2.ready_state = ReadyState::Blocked;
+        let issue1 = test_issue(1, IssueState::Open, Status::Ready);
+        let issue2 = test_issue(2, IssueState::Open, Status::Deferred);
         let issues = vec![issue1, issue2];
         let edges = vec![BlockingEdge {
             source: qid(2),
@@ -1427,9 +1425,9 @@ mod tests {
         // #2: open, blocked by #1
         // #3: in_progress (claimed 48h ago — stale)
         // #4: closed
-        let issue1 = test_issue(1, IssueState::Open, Status::Open);
+        let issue1 = test_issue(1, IssueState::Open, Status::Ready);
         let mut issue2 = test_issue(2, IssueState::Open, Status::Blocked);
-        issue2.ready_state = ReadyState::Blocked;
+        issue2.status = Status::Blocked;
         let mut issue3 = test_issue(3, IssueState::Open, Status::InProgress);
         issue3.agent = Some("agent-z".to_owned());
         issue3.claimed_at = Some(Utc::now() - chrono::Duration::hours(48));
@@ -1481,8 +1479,8 @@ mod tests {
 
         // Manually update cache (simulating what handle_prime does after fetch).
         let issues = vec![
-            test_issue(1, IssueState::Open, Status::Open),
-            test_issue(2, IssueState::Open, Status::Open),
+            test_issue(1, IssueState::Open, Status::Ready),
+            test_issue(2, IssueState::Open, Status::Ready),
         ];
         let graph = DependencyGraph::build(&issues, &[]);
         let ready_set = graph.compute_ready_set(&issues);
@@ -1503,7 +1501,7 @@ mod tests {
     fn max_per_category_truncates_results() {
         let mut issues = Vec::new();
         for i in 1..=20 {
-            issues.push(test_issue(i, IssueState::Open, Status::Open));
+            issues.push(test_issue(i, IssueState::Open, Status::Ready));
         }
 
         let graph = DependencyGraph::build(&issues, &[]);
@@ -1593,9 +1591,9 @@ mod tests {
 
     #[test]
     fn agent_filter_matches_ready() {
-        let mut issue1 = test_issue(1, IssueState::Open, Status::Open);
+        let mut issue1 = test_issue(1, IssueState::Open, Status::Ready);
         issue1.agent = Some("agent-x".to_owned());
-        let mut issue2 = test_issue(2, IssueState::Open, Status::Open);
+        let mut issue2 = test_issue(2, IssueState::Open, Status::Ready);
         issue2.agent = Some("agent-y".to_owned());
         let issues = vec![issue1, issue2];
 
@@ -1610,13 +1608,13 @@ mod tests {
     #[test]
     fn agent_filter_matches_blocked() {
         // #1 blocks #2 and #3. Agents assigned to the blocked issues.
-        let issue1 = test_issue(1, IssueState::Open, Status::Open);
+        let issue1 = test_issue(1, IssueState::Open, Status::Ready);
         let mut issue2 = test_issue(2, IssueState::Open, Status::Blocked);
         issue2.agent = Some("agent-x".to_owned());
-        issue2.ready_state = ReadyState::Blocked;
+        issue2.status = Status::Blocked;
         let mut issue3 = test_issue(3, IssueState::Open, Status::Blocked);
         issue3.agent = Some("agent-y".to_owned());
-        issue3.ready_state = ReadyState::Blocked;
+        issue3.status = Status::Blocked;
         let issues = vec![issue1, issue2, issue3];
         let edges = vec![
             BlockingEdge {
@@ -1678,11 +1676,11 @@ mod tests {
     #[test]
     fn agent_filter_does_not_affect_hotspots() {
         // Hotspots are structural — should not be filtered by agent.
-        let mut issue1 = test_issue(1, IssueState::Open, Status::Open);
+        let mut issue1 = test_issue(1, IssueState::Open, Status::Ready);
         issue1.agent = Some("agent-x".to_owned());
         let mut issue2 = test_issue(2, IssueState::Open, Status::Blocked);
         issue2.agent = Some("agent-y".to_owned());
-        issue2.ready_state = ReadyState::Blocked;
+        issue2.status = Status::Blocked;
         let issues = vec![issue1, issue2];
         let edges = vec![BlockingEdge {
             source: qid(2),
@@ -1711,9 +1709,9 @@ mod tests {
         let mut issue2 = test_issue(2, IssueState::Open, Status::InProgress);
         issue2.agent = Some("agent-y".to_owned());
         issue2.claimed_at = Some(Utc::now());
-        let mut issue3 = test_issue(3, IssueState::Open, Status::Open);
+        let mut issue3 = test_issue(3, IssueState::Open, Status::Ready);
         issue3.agent = Some("agent-x".to_owned());
-        let mut issue4 = test_issue(4, IssueState::Open, Status::Open);
+        let mut issue4 = test_issue(4, IssueState::Open, Status::Ready);
         issue4.agent = Some("agent-y".to_owned());
         let issues = vec![issue1, issue2, issue3, issue4];
 
@@ -1817,63 +1815,61 @@ mod tests {
     }
 
     #[test]
-    fn summarise_drift_single_stale_ready_state() {
+    fn summarise_drift_single_uncascaded_closure() {
         let drift = serde_json::json!({
-            "StaleReadyState": {
-                "issue": "owner/repo#1",
-                "field_says": "Ready",
-                "graph_says": "Blocked"
+            "UncascadedClosure": {
+                "closed_issue": "owner/repo#1",
+                "should_have_unblocked": ["owner/repo#2"]
             }
         });
         let report = make_report(vec![drift]);
         let warnings = summarise_drift(&report);
-        assert_eq!(warnings, vec!["1 stale ready state"]);
+        assert_eq!(warnings, vec!["1 uncascaded closure"]);
     }
 
     #[test]
     fn summarise_drift_multiple_of_same_type_uses_plural() {
         let drift1 = serde_json::json!({
-            "StaleReadyState": { "issue": "o/r#1", "field_says": "Ready", "graph_says": "Blocked" }
+            "UncascadedClosure": { "closed_issue": "o/r#1", "should_have_unblocked": ["o/r#10"] }
         });
         let drift2 = serde_json::json!({
-            "StaleReadyState": { "issue": "o/r#2", "field_says": "Ready", "graph_says": "Blocked" }
+            "UncascadedClosure": { "closed_issue": "o/r#2", "should_have_unblocked": ["o/r#11"] }
         });
         let drift3 = serde_json::json!({
-            "StaleReadyState": { "issue": "o/r#3", "field_says": "Blocked", "graph_says": "Ready" }
+            "UncascadedClosure": { "closed_issue": "o/r#3", "should_have_unblocked": ["o/r#12"] }
         });
         let report = make_report(vec![drift1, drift2, drift3]);
         let warnings = summarise_drift(&report);
-        assert_eq!(warnings, vec!["3 stale ready states"]);
+        assert_eq!(warnings, vec!["3 uncascaded closures"]);
     }
 
     #[test]
     fn summarise_drift_mixed_types_sorted() {
-        let stale_rs = serde_json::json!({
-            "StaleReadyState": { "issue": "o/r#1", "field_says": "Ready", "graph_says": "Blocked" }
-        });
         let uncascaded = serde_json::json!({
             "UncascadedClosure": { "closed_issue": "o/r#2", "should_have_unblocked": ["o/r#3"] }
         });
         let stale_claim = serde_json::json!({
             "StaleClaim": { "issue": "o/r#4", "claimed_at": "2026-01-01T00:00:00Z", "hours_stale": 48 }
         });
-        let report = make_report(vec![stale_rs, uncascaded, stale_claim]);
+        let orphaned = serde_json::json!({
+            "OrphanedBlockingEdge": { "source": "o/r#5", "missing_target": "o/r#999" }
+        });
+        let report = make_report(vec![uncascaded, stale_claim, orphaned]);
         let warnings = summarise_drift(&report);
         // Sorted alphabetically.
         assert_eq!(
             warnings,
             vec![
+                "1 orphaned blocking edge",
                 "1 stale claim",
-                "1 stale ready state",
                 "1 uncascaded closure",
             ]
         );
     }
 
     #[test]
-    fn summarise_drift_all_seven_types() {
+    fn summarise_drift_all_six_types() {
         let drifts = vec![
-            serde_json::json!({"StaleReadyState": {}}),
             serde_json::json!({"UncascadedClosure": {}}),
             serde_json::json!({"OrphanedBlockingEdge": {}}),
             serde_json::json!({"MalformedAgentField": {}}),
@@ -1883,7 +1879,7 @@ mod tests {
         ];
         let report = make_report(drifts);
         let warnings = summarise_drift(&report);
-        assert_eq!(warnings.len(), 7);
+        assert_eq!(warnings.len(), 6);
         // All present with count 1.
         for w in &warnings {
             assert!(w.starts_with("1 "), "each should start with '1 ': {w}");
@@ -1906,7 +1902,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_drift_warnings_with_drift_returns_some() {
         let drift = serde_json::json!({
-            "StaleReadyState": { "issue": "o/r#1", "field_says": "Ready", "graph_says": "Blocked" }
+            "UncascadedClosure": { "issue": "o/r#1", "closed_blocker": "o/r#2" }
         });
         let handle = tokio::spawn(async {
             Ok(crate::tools::reconcile::ReconcileOutput {
@@ -1926,7 +1922,7 @@ mod tests {
         let result = resolve_drift_warnings(handle).await;
         assert!(result.is_some(), "dirty report should produce Some");
         let warnings = result.unwrap();
-        assert_eq!(warnings, vec!["1 stale ready state"]);
+        assert_eq!(warnings, vec!["1 uncascaded closure"]);
     }
 
     #[tokio::test]

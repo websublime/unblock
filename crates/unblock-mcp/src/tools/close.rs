@@ -1,10 +1,9 @@
 //! Close tool — closes an issue and triggers cascade unblock.
 //!
 //! Validates the issue is open, closes it via the GitHub API, updates Projects V2
-//! fields (Status=Done, ReadyState=Not Ready), rebuilds the cache, then computes
-//! the unblock cascade. For each newly unblocked issue, updates its Projects V2
-//! fields (ReadyState=Ready, Status=Backlog if not already `InProgress`) and posts
-//! an unblock comment.
+//! fields (Status=Done), rebuilds the cache, then computes the unblock cascade.
+//! For each newly unblocked issue, updates its Projects V2 fields
+//! (Status=Backlog if not already `InProgress`) and posts an unblock comment.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

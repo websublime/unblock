@@ -5,9 +5,8 @@
 //! dependency graph, and runs the pure [`ReconcileEngine`] to detect divergence.
 //! After analysis, the cache is updated with the fresh graph data.
 //!
-//! When `fix: true`, auto-repairs two drift types:
-//! - **`StaleReadyState`** — updates the Ready State field to the correct value.
-//! - **`UncascadedClosure`** — updates downstream Ready States + posts audit comment.
+//! When `fix: true`, auto-repairs one drift type:
+//! - **`UncascadedClosure`** — updates downstream Status fields + posts audit comment.
 //!
 //! Other drift types are logged or pushed to `report.errors` without repair.
 //! See Design Decisions R2–R4 in the reconciliation plan.
@@ -20,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 use unblock_core::graph::DependencyGraph;
 use unblock_core::reconcile::{DriftKind, DriftReport, ReconcileEngine};
-use unblock_core::types::{Issue, QualifiedId, ReadyState};
+use unblock_core::types::{Issue, QualifiedId};
 use unblock_github::projects::FieldValue;
 
 use unblock_github::projects::{ProjectFieldIds, ProjectInfo};
@@ -39,9 +38,9 @@ fn default_stale_hours() -> u64 {
 /// performs automatic repairs.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReconcileParams {
-    /// If `true`, automatically repairs detected drift (`StaleReadyState`,
-    /// `UncascadedClosure`). If `false` (default), reports only without making
-    /// any changes. Design Decision R6: diagnose before acting.
+    /// If `true`, automatically repairs detected drift (`UncascadedClosure`).
+    /// If `false` (default), reports only without making changes.
+    /// Design Decision R6: diagnose before acting.
     #[serde(default)]
     pub fix: bool,
 
@@ -144,7 +143,7 @@ impl ReconcileReport {
 /// 3. Compute ready set.
 /// 4. Call `ReconcileEngine::analyse()` with all 4 args.
 /// 5. Set `report.repo` from `state.github.owner()/repo()`.
-/// 6. If `fix: true`, repair `StaleReadyState` and `UncascadedClosure` drift.
+/// 6. If `fix: true`, repair `UncascadedClosure` drift.
 /// 7. Update cache with the fresh graph already fetched.
 /// 8. Return `ReconcileOutput { report }`.
 ///
@@ -188,7 +187,7 @@ pub async fn handle_reconcile(
     let mut report = engine.analyse(&graph, &issues, &computed_ready, Utc::now());
     report.repo = format!("{}/{}", state.github.owner(), state.github.repo());
 
-    // 4. fix: true repair path — repair StaleReadyState and UncascadedClosure.
+    // 4. fix: true repair path — repair UncascadedClosure.
     if params.fix {
         apply_repairs(&mut report, state, &issues).await;
     }
@@ -257,9 +256,8 @@ async fn resolve_repair_context<'a>(
 
 /// Apply repairs for detected drift items.
 ///
-/// Iterates over `report.drift_found` and repairs `StaleReadyState` and
-/// `UncascadedClosure` drift. Other drift types are logged or pushed to
-/// `report.errors` without repair.
+/// Iterates over `report.drift_found` and repairs `UncascadedClosure` drift.
+/// Other drift types are logged or pushed to `report.errors` without repair.
 ///
 /// Resolves `field_ids` and `project_info` lazily on first repairable drift,
 /// then caches for subsequent repairs — avoiding redundant API calls without
@@ -277,31 +275,6 @@ async fn apply_repairs(
     let drift_items = std::mem::take(&mut report.drift_found);
     for drift in &drift_items {
         match drift {
-            DriftKind::StaleReadyState {
-                issue, graph_says, ..
-            } => {
-                // Lazily resolve repair context on first repairable drift.
-                let ctx =
-                    resolve_repair_context(&mut repair_context, state, &mut report.errors).await;
-                if let Some((field_ids, project_info)) = ctx {
-                    match repair_ready_state(
-                        state,
-                        issue,
-                        graph_says,
-                        issues,
-                        field_ids,
-                        project_info,
-                    )
-                    .await
-                    {
-                        Ok(()) => report.repaired.push(drift.clone()),
-                        Err(e) => report
-                            .errors
-                            .push(format!("Failed to repair Ready State for {issue}: {e}")),
-                    }
-                }
-            }
-
             DriftKind::UncascadedClosure {
                 closed_issue,
                 should_have_unblocked,
@@ -312,10 +285,10 @@ async fn apply_repairs(
                 if let Some((field_ids, project_info)) = ctx {
                     let mut repaired_qids: Vec<&QualifiedId> = Vec::new();
                     for unblocked_qid in should_have_unblocked {
-                        match repair_ready_state(
+                        match repair_status(
                             state,
                             unblocked_qid,
-                            &ReadyState::Ready,
+                            "Backlog",
                             issues,
                             field_ids,
                             project_info,
@@ -387,19 +360,7 @@ async fn apply_repairs(
     report.drift_found = drift_items;
 }
 
-/// Maps a [`ReadyState`] to the GitHub Projects V2 single-select option name.
-///
-/// The `ReadyState` field has exactly two options: `"Ready"` and `"Not Ready"`.
-/// The Rust enum has 4 variants — `Ready` maps to `"Ready"`, everything else
-/// maps to `"Not Ready"`.
-fn ready_state_option_name(state: ReadyState) -> &'static str {
-    match state {
-        ReadyState::Ready => "Ready",
-        ReadyState::Blocked | ReadyState::NotReady | ReadyState::Closed => "Not Ready",
-    }
-}
-
-/// Repair a single issue's Ready State field in GitHub Projects V2.
+/// Repair a single issue's Status field in GitHub Projects V2.
 ///
 /// Uses pre-resolved `field_ids` and `project_info` to avoid redundant API
 /// calls when repairing multiple issues in a single reconciliation run.
@@ -409,10 +370,10 @@ fn ready_state_option_name(state: ReadyState) -> &'static str {
 ///
 /// Returns a human-readable error string if any step fails (item not found,
 /// option not found, API error).
-async fn repair_ready_state(
+async fn repair_status(
     state: &ServerState,
     qid: &QualifiedId,
-    target_state: &ReadyState,
+    target_status: &str,
     issues: &HashMap<QualifiedId, Issue>,
     field_ids: &ProjectFieldIds,
     project_info: &ProjectInfo,
@@ -429,13 +390,12 @@ async fn repair_ready_state(
         .await
         .map_err(|e| format!("Failed to get project item ID for {qid}: {e}"))?;
 
-    // Map the ReadyState to an option name and look up its option ID.
-    let option_name = ready_state_option_name(*target_state);
+    // Look up the Status option ID.
     let option_id = field_ids
-        .ready_state
+        .status
         .options
-        .get(option_name)
-        .ok_or_else(|| format!("ReadyState option '{option_name}' not found in field options"))?;
+        .get(target_status)
+        .ok_or_else(|| format!("Status option '{target_status}' not found in field options"))?;
 
     // Update the field.
     state
@@ -443,16 +403,16 @@ async fn repair_ready_state(
         .update_field(
             &project_info.id,
             &item_id,
-            &field_ids.ready_state.field_id,
+            &field_ids.status.field_id,
             &FieldValue::SingleSelectOption(option_id.clone()),
         )
         .await
-        .map_err(|e| format!("Failed to update ReadyState field for {qid}: {e}"))?;
+        .map_err(|e| format!("Failed to update Status field for {qid}: {e}"))?;
 
     tracing::info!(
         issue = %qid,
-        target_state = option_name,
-        "Repaired Ready State field"
+        target_status,
+        "Repaired Status field"
     );
 
     Ok(())
@@ -483,9 +443,7 @@ mod tests {
     use unblock_core::cache::GraphCache;
     use unblock_core::config::Config;
     use unblock_core::graph::DependencyGraph;
-    use unblock_core::types::{
-        Issue, IssueState, IssueType, Priority, QualifiedId, ReadyState, Status,
-    };
+    use unblock_core::types::{Issue, IssueState, IssueType, Priority, QualifiedId, Status};
     use unblock_github::MockGitHubClient;
 
     use super::*;
@@ -499,18 +457,18 @@ mod tests {
     }
 
     /// Build a minimal `Issue` for testing.
-    fn test_issue(number: u64, state: IssueState, ready_state: ReadyState) -> Issue {
+    fn test_issue(number: u64, state: IssueState, status: Status) -> Issue {
         Issue {
             qualified_id: qid(number),
             number,
             node_id: format!("NODE_{number}"),
             title: format!("Issue #{number}"),
             issue_type: Some(IssueType::Task),
-            status: Status::Open,
+            status,
             priority: Priority::P1,
             agent: None,
             claimed_at: None,
-            ready_state,
+            pipeline_stage: None,
             story_points: None,
             defer_until: None,
             labels: vec![],
@@ -608,10 +566,9 @@ mod tests {
             reconciled_at: Utc::now(),
             issues_scanned: 10,
             edges_scanned: 5,
-            drift_found: vec![DriftKind::StaleReadyState {
-                issue: qid(1),
-                field_says: ReadyState::Blocked,
-                graph_says: ReadyState::Ready,
+            drift_found: vec![DriftKind::UncascadedClosure {
+                closed_issue: qid(1),
+                should_have_unblocked: vec![qid(2)],
             }],
             repaired: vec![],
             errors: vec![],
@@ -638,8 +595,8 @@ mod tests {
 
         // Build test data.
         let issues = vec![
-            test_issue(1, IssueState::Open, ReadyState::Ready),
-            test_issue(2, IssueState::Open, ReadyState::Ready),
+            test_issue(1, IssueState::Open, Status::Ready),
+            test_issue(2, IssueState::Open, Status::Ready),
         ];
         let graph = DependencyGraph::build(&issues, &[]);
         let ready_set = graph.compute_ready_set(&issues);
@@ -703,10 +660,9 @@ mod tests {
     fn reconcile_output_serializes_with_drift() {
         use unblock_core::reconcile::DriftKind;
 
-        let drift = DriftKind::StaleReadyState {
-            issue: qid(42),
-            field_says: ReadyState::Blocked,
-            graph_says: ReadyState::Ready,
+        let drift = DriftKind::UncascadedClosure {
+            closed_issue: qid(42),
+            should_have_unblocked: vec![qid(43)],
         };
         let drift_json = serde_json::to_value(&drift).expect("drift should serialize");
 
@@ -741,7 +697,7 @@ mod tests {
     ///
     /// Constructs a scenario where issue #2 is blocked by issue #1, but issue
     /// #1 is closed (simulating an external closure without cascade). The
-    /// engine should detect `StaleReadyState` drift. No mutations are made
+    /// engine should detect `UncascadedClosure` drift. No mutations are made
     /// because `fix` is false.
     #[test]
     fn integration_drift_present_reports_drift_no_mutations() {
@@ -751,9 +707,9 @@ mod tests {
         use unblock_core::types::BlockingEdge;
 
         // Issue #1: closed (simulates external closure via GitHub UI).
-        let issue_one = test_issue(1, IssueState::Closed, ReadyState::Ready);
-        // Issue #2: open, blocked by #1, but still marked Blocked (stale ready state).
-        let issue_two = test_issue(2, IssueState::Open, ReadyState::Blocked);
+        let issue_one = test_issue(1, IssueState::Closed, Status::Closed);
+        // Issue #2: open, blocked by #1, but still marked Blocked (cascade did not fire).
+        let issue_two = test_issue(2, IssueState::Open, Status::Blocked);
 
         let issues_vec = vec![issue_one, issue_two];
         let edges = vec![BlockingEdge {
@@ -807,13 +763,13 @@ mod tests {
             "message should be None when drift is present"
         );
 
-        // Verify the drift is specifically a StaleReadyState for issue #2.
+        // Verify the drift is specifically an UncascadedClosure.
         // DriftKind uses serde's default externally-tagged representation,
-        // so the variant name is a top-level key: {"StaleReadyState": {...}}.
+        // so the variant name is a top-level key: {"UncascadedClosure": {...}}.
         let drift_json = &output.report.drift_found[0];
         assert!(
-            drift_json.get("StaleReadyState").is_some(),
-            "drift item should be a StaleReadyState variant, got: {drift_json}"
+            drift_json.get("UncascadedClosure").is_some(),
+            "drift item should be an UncascadedClosure variant, got: {drift_json}"
         );
     }
 
@@ -829,8 +785,8 @@ mod tests {
         use unblock_core::reconcile::ReconcileEngine;
 
         // Two open issues, no dependencies, both correctly Ready.
-        let issue_one = test_issue(1, IssueState::Open, ReadyState::Ready);
-        let issue_two = test_issue(2, IssueState::Open, ReadyState::Ready);
+        let issue_one = test_issue(1, IssueState::Open, Status::Ready);
+        let issue_two = test_issue(2, IssueState::Open, Status::Ready);
 
         let issues_vec = vec![issue_one, issue_two];
 
@@ -882,16 +838,6 @@ mod tests {
     }
 
     // ── Helper function unit tests ───────────────────────────────────
-
-    #[test]
-    fn ready_state_option_name_maps_correctly() {
-        use super::ready_state_option_name;
-
-        assert_eq!(ready_state_option_name(ReadyState::Ready), "Ready");
-        assert_eq!(ready_state_option_name(ReadyState::Blocked), "Not Ready");
-        assert_eq!(ready_state_option_name(ReadyState::NotReady), "Not Ready");
-        assert_eq!(ready_state_option_name(ReadyState::Closed), "Not Ready");
-    }
 
     #[test]
     fn format_cascade_repair_comment_single_issue() {
@@ -1068,51 +1014,6 @@ mod tests {
         );
     }
 
-    /// Integration test: `StaleReadyState` repair attempt → fails gracefully
-    /// (no field IDs set up) and pushes to report.errors.
-    #[tokio::test]
-    async fn fix_mode_stale_ready_state_pushes_error_on_failure() {
-        use unblock_core::reconcile::DriftKind;
-
-        let state = test_state().await;
-
-        // The issue exists in the issues map (required for repair_ready_state).
-        let issue = test_issue(2, IssueState::Open, ReadyState::Blocked);
-        let issues: HashMap<QualifiedId, _> = [(qid(2), issue)].into_iter().collect();
-
-        let mut report = DriftReport {
-            repo: "test-owner/test-repo".to_owned(),
-            reconciled_at: Utc::now(),
-            issues_scanned: 1,
-            edges_scanned: 0,
-            drift_found: vec![DriftKind::StaleReadyState {
-                issue: qid(2),
-                field_says: ReadyState::Blocked,
-                graph_says: ReadyState::Ready,
-            }],
-            repaired: vec![],
-            errors: vec![],
-            clean: false,
-        };
-
-        super::apply_repairs(&mut report, &state, &issues).await;
-
-        // Repair should fail (field IDs not set up) → error pushed.
-        assert!(
-            report.repaired.is_empty(),
-            "repair should fail without field IDs configured"
-        );
-        assert!(
-            !report.errors.is_empty(),
-            "failed repair should push a descriptive error"
-        );
-        assert!(
-            report.errors[0].contains("Field IDs not available"),
-            "error message should indicate missing field IDs: {}",
-            report.errors[0]
-        );
-    }
-
     /// Integration test: `UncascadedClosure` repair attempt → fails gracefully
     /// (no field IDs set up) and pushes to report.errors.
     #[tokio::test]
@@ -1123,7 +1024,7 @@ mod tests {
 
         // The downstream issue exists but the closed issue does not need
         // to be in the map (only downstream issues need repair).
-        let issue43 = test_issue(43, IssueState::Open, ReadyState::Blocked);
+        let issue43 = test_issue(43, IssueState::Open, Status::Blocked);
         let issues: HashMap<QualifiedId, _> = [(qid(43), issue43)].into_iter().collect();
 
         let mut report = DriftReport {
@@ -1221,14 +1122,17 @@ mod tests {
         // which triggers the "Field IDs not available" branch.
         let state = mock_state(mock.clone());
 
-        // Two repairable drift items that both require repair context.
-        let first = test_issue(2, IssueState::Open, ReadyState::Blocked);
-        let second = test_issue(3, IssueState::Open, ReadyState::Blocked);
-        let downstream = test_issue(43, IssueState::Open, ReadyState::Blocked);
-        let issues: HashMap<QualifiedId, _> =
-            [(qid(2), first), (qid(3), second), (qid(43), downstream)]
-                .into_iter()
-                .collect();
+        // Three repairable drift items that all require repair context.
+        let downstream1 = test_issue(43, IssueState::Open, Status::Blocked);
+        let downstream2 = test_issue(44, IssueState::Open, Status::Blocked);
+        let downstream3 = test_issue(45, IssueState::Open, Status::Blocked);
+        let issues: HashMap<QualifiedId, _> = [
+            (qid(43), downstream1),
+            (qid(44), downstream2),
+            (qid(45), downstream3),
+        ]
+        .into_iter()
+        .collect();
 
         let mut report = DriftReport {
             repo: "test-owner/test-repo".to_owned(),
@@ -1236,19 +1140,17 @@ mod tests {
             issues_scanned: 3,
             edges_scanned: 1,
             drift_found: vec![
-                DriftKind::StaleReadyState {
-                    issue: qid(2),
-                    field_says: ReadyState::Blocked,
-                    graph_says: ReadyState::Ready,
-                },
-                DriftKind::StaleReadyState {
-                    issue: qid(3),
-                    field_says: ReadyState::Blocked,
-                    graph_says: ReadyState::Ready,
-                },
                 DriftKind::UncascadedClosure {
                     closed_issue: qid(10),
                     should_have_unblocked: vec![qid(43)],
+                },
+                DriftKind::UncascadedClosure {
+                    closed_issue: qid(11),
+                    should_have_unblocked: vec![qid(44)],
+                },
+                DriftKind::UncascadedClosure {
+                    closed_issue: qid(12),
+                    should_have_unblocked: vec![qid(45)],
                 },
             ],
             repaired: vec![],
@@ -1326,7 +1228,6 @@ mod tests {
             agent: "FIELD_AGENT".to_owned(),
             story_points: "FIELD_STORY_POINTS".to_owned(),
             defer_until: "FIELD_DEFER_UNTIL".to_owned(),
-            ready_state: dummy_meta(),
         }));
 
         // Push an explicit error for resolve_project_info().
@@ -1339,15 +1240,17 @@ mod tests {
 
         let state = mock_state(mock.clone());
 
-        // Two repairable drift items that both require repair context, plus
-        // a cascading closure — three repair attempts in total.
-        let first = test_issue(2, IssueState::Open, ReadyState::Blocked);
-        let second = test_issue(3, IssueState::Open, ReadyState::Blocked);
-        let downstream = test_issue(43, IssueState::Open, ReadyState::Blocked);
-        let issues: HashMap<QualifiedId, _> =
-            [(qid(2), first), (qid(3), second), (qid(43), downstream)]
-                .into_iter()
-                .collect();
+        // Three repairable drift items that all require repair context.
+        let downstream1 = test_issue(43, IssueState::Open, Status::Blocked);
+        let downstream2 = test_issue(44, IssueState::Open, Status::Blocked);
+        let downstream3 = test_issue(45, IssueState::Open, Status::Blocked);
+        let issues: HashMap<QualifiedId, _> = [
+            (qid(43), downstream1),
+            (qid(44), downstream2),
+            (qid(45), downstream3),
+        ]
+        .into_iter()
+        .collect();
 
         let mut report = DriftReport {
             repo: "test-owner/test-repo".to_owned(),
@@ -1355,19 +1258,17 @@ mod tests {
             issues_scanned: 3,
             edges_scanned: 1,
             drift_found: vec![
-                DriftKind::StaleReadyState {
-                    issue: qid(2),
-                    field_says: ReadyState::Blocked,
-                    graph_says: ReadyState::Ready,
-                },
-                DriftKind::StaleReadyState {
-                    issue: qid(3),
-                    field_says: ReadyState::Blocked,
-                    graph_says: ReadyState::Ready,
-                },
                 DriftKind::UncascadedClosure {
                     closed_issue: qid(10),
                     should_have_unblocked: vec![qid(43)],
+                },
+                DriftKind::UncascadedClosure {
+                    closed_issue: qid(11),
+                    should_have_unblocked: vec![qid(44)],
+                },
+                DriftKind::UncascadedClosure {
+                    closed_issue: qid(12),
+                    should_have_unblocked: vec![qid(45)],
                 },
             ],
             repaired: vec![],

@@ -2,7 +2,7 @@
 //!
 //! Validates both issues exist, checks for cycles and duplicates, then creates
 //! the blocking relationship via the GitHub API. Updates Projects V2 fields on
-//! the source issue (ReadyState=Not Ready, Status=Blocked), and rebuilds the
+//! the source issue (Status=Blocked), and rebuilds the
 //! cache so the ready set reflects the new dependency.
 
 use schemars::JsonSchema;

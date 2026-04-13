@@ -82,8 +82,8 @@ pub struct ShowIssue {
     pub agent: Option<String>,
     /// Timestamp when the issue was claimed by an agent.
     pub claimed_at: Option<String>,
-    /// Ready state from Projects V2.
-    pub ready_state: String,
+    /// Pipeline stage from Projects V2.
+    pub pipeline_stage: Option<String>,
     /// Story points estimate.
     pub story_points: Option<i32>,
     /// Date until which the issue is deferred (ISO 8601 date).
