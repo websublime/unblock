@@ -8,8 +8,7 @@ use chrono::{DateTime, Utc};
 use snafu::ResultExt as _;
 use tracing::{debug, instrument, warn};
 use unblock_core::types::{
-    BlockingEdge, Issue, IssueComment, IssueState, IssueType, Priority, ReadyState, RelatedIssue,
-    Status,
+    BlockingEdge, Issue, IssueComment, IssueState, IssueType, Priority, RelatedIssue, Status,
 };
 
 use crate::client::GitHubClient;
@@ -551,7 +550,6 @@ fn parse_issue(value: &serde_json::Value, owner: &str, repo: &str) -> Issue {
     let defer_until = field_values
         .get("DeferUntil")
         .and_then(|v| chrono::NaiveDate::parse_from_str(v, "%Y-%m-%d").ok());
-    let ready_state = parse_ready_state_field(&field_values);
     let claimed_at = field_values
         .get("ClaimedAt")
         .and_then(|v| v.parse::<DateTime<Utc>>().ok());
@@ -566,7 +564,7 @@ fn parse_issue(value: &serde_json::Value, owner: &str, repo: &str) -> Issue {
         priority,
         agent,
         claimed_at,
-        ready_state,
+        pipeline_stage: None,
         story_points,
         defer_until,
         labels,
@@ -621,7 +619,6 @@ fn parse_graph_issue(value: &serde_json::Value, owner: &str, repo: &str) -> Issu
     let defer_until = field_values
         .get("DeferUntil")
         .and_then(|v| chrono::NaiveDate::parse_from_str(v, "%Y-%m-%d").ok());
-    let ready_state = parse_ready_state_field(&field_values);
     let claimed_at = field_values
         .get("ClaimedAt")
         .and_then(|v| v.parse::<DateTime<Utc>>().ok());
@@ -636,7 +633,7 @@ fn parse_graph_issue(value: &serde_json::Value, owner: &str, repo: &str) -> Issu
         priority,
         agent,
         claimed_at,
-        ready_state,
+        pipeline_stage: None,
         story_points,
         defer_until,
         labels,
@@ -870,7 +867,7 @@ fn parse_status_field(fields: &std::collections::HashMap<String, String>) -> Sta
         Some("Blocked") => Status::Blocked,
         Some("Deferred") => Status::Deferred,
         Some("Done" | "Closed") => Status::Closed,
-        _ => Status::Open,
+        _ => Status::Ready,
     }
 }
 
@@ -896,17 +893,6 @@ fn parse_issue_type_field(fields: &std::collections::HashMap<String, String>) ->
         Some("Chore") => Some(IssueType::Chore),
         Some("Spike") => Some(IssueType::Spike),
         _ => None,
-    }
-}
-
-/// Maps the `ReadyState` field value to a [`ReadyState`] enum variant.
-fn parse_ready_state_field(fields: &std::collections::HashMap<String, String>) -> ReadyState {
-    match fields.get("ReadyState").map(String::as_str) {
-        Some("Ready") => ReadyState::Ready,
-        Some("Blocked") => ReadyState::Blocked,
-        Some("Closed") => ReadyState::Closed,
-        // Default to NotReady when missing, "Not Ready", or unrecognized.
-        _ => ReadyState::NotReady,
     }
 }
 
@@ -1166,7 +1152,7 @@ mod tests {
     #[test]
     fn status_field_missing_defaults_open() {
         let fields = std::collections::HashMap::new();
-        assert_eq!(parse_status_field(&fields), Status::Open);
+        assert_eq!(parse_status_field(&fields), Status::Ready);
     }
 
     // ── parse_priority_field ────────────────────────────────────────────
@@ -1214,28 +1200,6 @@ mod tests {
     fn issue_type_field_missing_returns_none() {
         let fields = std::collections::HashMap::new();
         assert!(parse_issue_type_field(&fields).is_none());
-    }
-
-    // ── parse_ready_state_field ─────────────────────────────────────────
-
-    #[test]
-    fn ready_state_field_mapping() {
-        let mut fields = std::collections::HashMap::new();
-        for (label, expected) in [
-            ("Ready", ReadyState::Ready),
-            ("Blocked", ReadyState::Blocked),
-            ("Closed", ReadyState::Closed),
-            ("Not Ready", ReadyState::NotReady),
-        ] {
-            fields.insert("ReadyState".to_owned(), label.to_owned());
-            assert_eq!(parse_ready_state_field(&fields), expected);
-        }
-    }
-
-    #[test]
-    fn ready_state_field_missing_defaults_not_ready() {
-        let fields = std::collections::HashMap::new();
-        assert_eq!(parse_ready_state_field(&fields), ReadyState::NotReady);
     }
 
     // ── parse_issue (full roundtrip) ────────────────────────────────────
@@ -1347,7 +1311,7 @@ mod tests {
         assert!(issue.blocking.is_empty());
         assert!(issue.parent.is_none());
         assert!(issue.sub_issues.is_empty());
-        assert_eq!(issue.status, Status::Open);
+        assert_eq!(issue.status, Status::Ready);
         assert_eq!(issue.priority, Priority::P2);
     }
 
@@ -1380,7 +1344,6 @@ mod tests {
                             {"field": {"name": "StoryPoints"}, "number": 5.0},
                             {"field": {"name": "DeferUntil"}, "date": "2026-06-01"},
                             {"field": {"name": "IssueType"}, "name": "Bug"},
-                            {"field": {"name": "ReadyState"}, "name": "Ready"},
                             {"field": {"name": "ClaimedAt"}, "text": "2026-03-15T10:30:00Z"}
                         ]
                     }
@@ -1406,7 +1369,7 @@ mod tests {
             Some(chrono::NaiveDate::from_ymd_opt(2026, 6, 1).expect("valid date"))
         );
         assert_eq!(issue.issue_type, Some(IssueType::Bug));
-        assert_eq!(issue.ready_state, ReadyState::Ready);
+        assert!(issue.pipeline_stage.is_none());
         assert!(issue.claimed_at.is_some(), "ClaimedAt should be parsed");
         assert_eq!(
             issue.claimed_at.expect("just asserted").to_rfc3339(),
@@ -1473,13 +1436,13 @@ mod tests {
         });
 
         let issue = parse_graph_issue(&json, "test-owner", "test-repo");
-        assert_eq!(issue.status, Status::Open);
+        assert_eq!(issue.status, Status::Ready);
         assert_eq!(issue.priority, Priority::P2);
         assert!(issue.issue_type.is_none());
         assert!(issue.agent.is_none());
         assert!(issue.story_points.is_none());
         assert!(issue.defer_until.is_none());
-        assert_eq!(issue.ready_state, ReadyState::NotReady);
+        assert!(issue.pipeline_stage.is_none());
         assert!(issue.claimed_at.is_none());
     }
 

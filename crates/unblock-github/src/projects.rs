@@ -47,8 +47,6 @@ pub struct ProjectFieldIds {
     pub story_points: String,
     /// `DeferUntil` field — date field (node ID only).
     pub defer_until: String,
-    /// `ReadyState` field — single select: Ready, Not Ready.
-    pub ready_state: FieldMeta,
 }
 
 /// Metadata for a single-select Projects V2 field.
@@ -109,7 +107,7 @@ const fn required_field_names() -> [&'static str; REQUIRED_FIELDS.len()] {
 /// per-field creation status to the agent.
 #[derive(Debug, Clone)]
 pub struct SetupReport {
-    /// The resolved field IDs for all 7 required fields.
+    /// The resolved field IDs for all 6 required fields.
     pub field_ids: ProjectFieldIds,
     /// Canonical names of fields that were newly created.
     pub created: Vec<String>,
@@ -117,7 +115,7 @@ pub struct SetupReport {
     pub skipped: Vec<String>,
 }
 
-/// Status of the 7 required fields on a project, without mutating anything.
+/// Status of the 6 required fields on a project, without mutating anything.
 ///
 /// Returned by [`GitHubClient::query_setup_status`] for dry-run inspection.
 #[derive(Debug, Clone)]
@@ -279,7 +277,7 @@ const VIEWS_API_VERSION: &str = "2026-03-10";
 /// Specification for a required Projects V2 field.
 ///
 /// Used internally by [`setup_fields`](GitHubClient::setup_fields) to describe
-/// the 7 required fields and their expected types and options.
+/// the 6 required fields and their expected types and options.
 struct FieldSpec {
     /// Display name of the field in the project board.
     name: &'static str,
@@ -327,18 +325,6 @@ const REQUIRED_FIELDS: &[FieldSpec] = &[
         name: "DeferUntil",
         data_type: "DATE",
         options: &[],
-    },
-    // DEVIATION (unblock-467.6, unblock-b6b.50): ARCH §7.1 defines ReadyState
-    // options as `ready`, `blocked`, `not_ready`, `closed` (4 options). The
-    // implementation instead uses the bead specification values — `Ready`,
-    // `Not Ready` (2 options) — because the bead spec is the authoritative
-    // source for field values. `blocked` is already represented by the Status
-    // field, and `closed` is represented by GitHub issue state, so including
-    // them on ReadyState would be redundant. ARCH §7.1 is stale on this point.
-    FieldSpec {
-        name: "ReadyState",
-        data_type: "SINGLE_SELECT",
-        options: &["Ready", "Not Ready"],
     },
 ];
 
@@ -513,13 +499,12 @@ impl GitHubClient {
             agent: remove_plain_field(&mut resolved_plain, "Agent")?,
             story_points: remove_plain_field(&mut resolved_plain, "StoryPoints")?,
             defer_until: remove_plain_field(&mut resolved_plain, "DeferUntil")?,
-            ready_state: remove_field(&mut resolved, "ReadyState")?,
         };
 
         debug!(
             created_count = created.len(),
             skipped_count = skipped.len(),
-            "All 7 project fields resolved"
+            "All 6 project fields resolved"
         );
         Ok(SetupReport {
             field_ids,
@@ -530,7 +515,7 @@ impl GitHubClient {
 
     /// Queries the setup status of required fields without mutating the project.
     ///
-    /// Returns a [`SetupStatus`] indicating which of the 7 required fields
+    /// Returns a [`SetupStatus`] indicating which of the 6 required fields
     /// already exist on the project and which are missing. This is used by the
     /// MCP setup tool's dry-run mode to report what `setup_fields()` would do
     /// without actually creating anything.
