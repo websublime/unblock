@@ -78,7 +78,7 @@ pub enum FieldValue {
     Date(NaiveDate),
 }
 
-/// The canonical names of the 7 required Projects V2 custom fields.
+/// The canonical names of the 6 required Projects V2 custom fields.
 ///
 /// Used by the setup tool to report which fields were created vs. skipped,
 /// and by the dry-run mode to check field presence without mutating.
@@ -288,7 +288,7 @@ struct FieldSpec {
     options: &'static [&'static str],
 }
 
-/// The 7 required Projects V2 custom fields per the bead specification.
+/// The 6 required Projects V2 custom fields per the bead specification.
 const REQUIRED_FIELDS: &[FieldSpec] = &[
     // DEVIATION (unblock-467.6, unblock-b6b.49): ARCH §7.1 defines Status
     // options as `open`, `in_progress`, `blocked`, `deferred`, `closed`. The
@@ -437,7 +437,7 @@ impl GitHubClient {
         })
     }
 
-    /// Creates the 7 required custom fields on a Projects V2 project (idempotent).
+    /// Creates the 6 required custom fields on a Projects V2 project (idempotent).
     ///
     /// Queries existing fields first, then creates only those that are missing.
     /// For single-select fields, options are created as part of the field creation.
