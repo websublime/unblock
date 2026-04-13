@@ -35,14 +35,16 @@ pub struct ProjectInfo {
 /// on [`GitHubClient`] to avoid repeated GraphQL lookups.
 #[derive(Debug, Clone)]
 pub struct ProjectFieldIds {
-    /// Status field — single select: Backlog, In Progress, Done, Blocked, Deferred.
+    /// Status field — single select: ready, `in_progress`, blocked, deferred, closed.
     pub status: FieldMeta,
-    /// Priority field — single select: P0, P1, P2, P3, P4.
+    /// Priority field — single select: P0 - Critical, P1 - High, P2 - Medium, P3 - Low, P4 - Backlog.
     pub priority: FieldMeta,
-    /// `IssueType` field — single select: Task, Bug, Feature, Epic, Chore.
-    pub issue_type: FieldMeta,
+    /// `PipelineStage` field — single select: investigation, implementation, review, refactoring, qa, done.
+    pub pipeline_stage: FieldMeta,
     /// Agent field — text field (node ID only, no options).
     pub agent: String,
+    /// `ClaimedAt` field — date field (node ID only).
+    pub claimed_at: String,
     /// `StoryPoints` field — number field (node ID only).
     pub story_points: String,
     /// `DeferUntil` field — date field (node ID only).
@@ -52,14 +54,33 @@ pub struct ProjectFieldIds {
 /// Metadata for a single-select Projects V2 field.
 ///
 /// Contains the field's node ID and a map from option display name to option
-/// node ID, enabling the caller to resolve an option name (e.g. `"P1"`) to the
-/// GraphQL ID required by `updateProjectV2ItemFieldValue`.
+/// node ID, enabling the caller to resolve an option name (e.g. `"P1 - High"`)
+/// to the GraphQL ID required by `updateProjectV2ItemFieldValue`.
 #[derive(Debug, Clone)]
 pub struct FieldMeta {
     /// GraphQL node ID for the field.
     pub field_id: String,
     /// Map of option display name to option node ID.
     pub options: HashMap<String, String>,
+}
+
+impl FieldMeta {
+    /// Looks up an option ID by exact name, falling back to prefix match.
+    ///
+    /// This enables callers to pass short codes like `"P0"` which match
+    /// the full option name `"P0 - Critical"` in the Projects V2 field.
+    /// Returns `None` if no match is found.
+    #[must_use]
+    pub fn option_id_by_prefix(&self, prefix: &str) -> Option<&String> {
+        self.options.get(prefix).or_else(|| {
+            // Prefix match: find the first option whose name starts with the
+            // given prefix followed by a separator (" - ", "_", etc.).
+            self.options
+                .iter()
+                .find(|(name, _)| name.starts_with(prefix) && name.len() > prefix.len())
+                .map(|(_, id)| id)
+        })
+    }
 }
 
 /// A value to set on a Projects V2 field.
@@ -78,7 +99,7 @@ pub enum FieldValue {
     Date(NaiveDate),
 }
 
-/// The canonical names of the 6 required Projects V2 custom fields.
+/// The canonical names of the 7 required Projects V2 custom fields.
 ///
 /// Used by the setup tool to report which fields were created vs. skipped,
 /// and by the dry-run mode to check field presence without mutating.
@@ -107,7 +128,7 @@ const fn required_field_names() -> [&'static str; REQUIRED_FIELDS.len()] {
 /// per-field creation status to the agent.
 #[derive(Debug, Clone)]
 pub struct SetupReport {
-    /// The resolved field IDs for all 6 required fields.
+    /// The resolved field IDs for all 7 required fields.
     pub field_ids: ProjectFieldIds,
     /// Canonical names of fields that were newly created.
     pub created: Vec<String>,
@@ -115,7 +136,7 @@ pub struct SetupReport {
     pub skipped: Vec<String>,
 }
 
-/// Status of the 6 required fields on a project, without mutating anything.
+/// Status of the 7 required fields on a project, without mutating anything.
 ///
 /// Returned by [`GitHubClient::query_setup_status`] for dry-run inspection.
 #[derive(Debug, Clone)]
@@ -277,7 +298,7 @@ const VIEWS_API_VERSION: &str = "2026-03-10";
 /// Specification for a required Projects V2 field.
 ///
 /// Used internally by [`setup_fields`](GitHubClient::setup_fields) to describe
-/// the 6 required fields and their expected types and options.
+/// the 7 required fields and their expected types and options.
 struct FieldSpec {
     /// Display name of the field in the project board.
     name: &'static str,
@@ -288,32 +309,44 @@ struct FieldSpec {
     options: &'static [&'static str],
 }
 
-/// The 6 required Projects V2 custom fields per the bead specification.
+/// The 7 required Projects V2 custom fields per spec §5.
 const REQUIRED_FIELDS: &[FieldSpec] = &[
-    // DEVIATION (unblock-467.6, unblock-b6b.49): ARCH §7.1 defines Status
-    // options as `open`, `in_progress`, `blocked`, `deferred`, `closed`. The
-    // implementation instead uses the bead specification values — `Backlog`,
-    // `In Progress`, `Done`, `Blocked`, `Deferred` — because the bead spec is
-    // the authoritative source for field values and matches what humans see in
-    // the GitHub Projects V2 board. ARCH §7.1 is stale on this point.
     FieldSpec {
         name: "Status",
         data_type: "SINGLE_SELECT",
-        options: &["Backlog", "In Progress", "Done", "Blocked", "Deferred"],
+        options: &["ready", "in_progress", "blocked", "deferred", "closed"],
     },
     FieldSpec {
         name: "Priority",
         data_type: "SINGLE_SELECT",
-        options: &["P0", "P1", "P2", "P3", "P4"],
+        options: &[
+            "P0 - Critical",
+            "P1 - High",
+            "P2 - Medium",
+            "P3 - Low",
+            "P4 - Backlog",
+        ],
     },
     FieldSpec {
-        name: "IssueType",
+        name: "PipelineStage",
         data_type: "SINGLE_SELECT",
-        options: &["Task", "Bug", "Feature", "Epic", "Chore"],
+        options: &[
+            "investigation",
+            "implementation",
+            "review",
+            "refactoring",
+            "qa",
+            "done",
+        ],
     },
     FieldSpec {
         name: "Agent",
         data_type: "TEXT",
+        options: &[],
+    },
+    FieldSpec {
+        name: "ClaimedAt",
+        data_type: "DATE",
         options: &[],
     },
     FieldSpec {
@@ -437,7 +470,7 @@ impl GitHubClient {
         })
     }
 
-    /// Creates the 6 required custom fields on a Projects V2 project (idempotent).
+    /// Creates the 7 required custom fields on a Projects V2 project (idempotent).
     ///
     /// Queries existing fields first, then creates only those that are missing.
     /// For single-select fields, options are created as part of the field creation.
@@ -495,8 +528,9 @@ impl GitHubClient {
         let field_ids = ProjectFieldIds {
             status: remove_field(&mut resolved, "Status")?,
             priority: remove_field(&mut resolved, "Priority")?,
-            issue_type: remove_field(&mut resolved, "IssueType")?,
+            pipeline_stage: remove_field(&mut resolved, "PipelineStage")?,
             agent: remove_plain_field(&mut resolved_plain, "Agent")?,
+            claimed_at: remove_plain_field(&mut resolved_plain, "ClaimedAt")?,
             story_points: remove_plain_field(&mut resolved_plain, "StoryPoints")?,
             defer_until: remove_plain_field(&mut resolved_plain, "DeferUntil")?,
         };
@@ -504,7 +538,7 @@ impl GitHubClient {
         debug!(
             created_count = created.len(),
             skipped_count = skipped.len(),
-            "All 6 project fields resolved"
+            "All 7 project fields resolved"
         );
         Ok(SetupReport {
             field_ids,
@@ -515,7 +549,7 @@ impl GitHubClient {
 
     /// Queries the setup status of required fields without mutating the project.
     ///
-    /// Returns a [`SetupStatus`] indicating which of the 6 required fields
+    /// Returns a [`SetupStatus`] indicating which of the 7 required fields
     /// already exist on the project and which are missing. This is used by the
     /// MCP setup tool's dry-run mode to report what `setup_fields()` would do
     /// without actually creating anything.

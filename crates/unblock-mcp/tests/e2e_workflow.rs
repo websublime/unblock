@@ -259,17 +259,15 @@ async fn e2e_workflow_all_10_tools() {
     {
         // NOTE: story_points / defer_until (the trailing `None, None` args here
         // and at the analogous call sites for issues B and C below) are not
-        // exercised by this e2e test — only the priority/type/status/ready axes
-        // are validated end-to-end against the live GitHub Project.
+        // exercised by this e2e test — only the priority/status axes are
+        // validated end-to-end against the live GitHub Project.
         set_project_fields(
             client.as_ref(),
             &project_info.id,
             &item_id,
             &field_ids,
             "P1",
-            "Task",
-            "Backlog",
-            "Ready",
+            "ready",
             None,
             None,
         )
@@ -311,9 +309,7 @@ async fn e2e_workflow_all_10_tools() {
             &item_id,
             &field_ids,
             "P2",
-            "Task",
-            "Blocked",
-            "Not Ready",
+            "blocked",
             None,
             None,
         )
@@ -349,9 +345,7 @@ async fn e2e_workflow_all_10_tools() {
             &item_id,
             &field_ids,
             "P3",
-            "Task",
-            "Backlog",
-            "Ready",
+            "ready",
             None,
             None,
         )
@@ -445,8 +439,8 @@ async fn e2e_workflow_all_10_tools() {
             .get_project_item_id(&issue_a.node_id, &project_info.id)
             .await
     {
-        // Status -> In Progress
-        if let Some(option_id) = field_ids.status.options.get("In Progress") {
+        // Status -> in_progress
+        if let Some(option_id) = field_ids.status.options.get("in_progress") {
             let _ = client
                 .update_field(
                     &project_info.id,
@@ -626,7 +620,7 @@ async fn e2e_workflow_all_10_tools() {
     // For step 15, B may have project fields set to Blocked/Not Ready from step 4,
     // but the graph engine computes readiness from issue state (open/closed) and
     // blocking edges, not from project field values. So B should appear in the
-    // ready set even though its project fields say "Blocked".
+    // ready set even though its project fields say "blocked".
     let ready_params_with_claimed = ReadyParams {
         limit: None,
         issue_type: None,

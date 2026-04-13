@@ -81,9 +81,9 @@ fn make_issue(number: u64) -> Issue {
 /// enter the `field_ids = Some(...)` branch and call `resolve_project_info`
 /// and `get_project_item_id`. Because the option maps are empty, no
 /// `update_field` calls are made for select-option fields (`status`,
-/// `priority`, `issue_type`). Plain-text and numeric fields
-/// (`agent`, `story_points`, `defer_until`) bypass the option map and DO
-/// call `update_field`.
+/// `priority`, `pipeline_stage`). Plain-text, numeric, and date fields
+/// (`agent`, `claimed_at`, `story_points`, `defer_until`) bypass the option
+/// map and DO call `update_field`.
 fn empty_field_ids() -> ProjectFieldIds {
     let meta = || FieldMeta {
         field_id: "f".to_owned(),
@@ -92,8 +92,9 @@ fn empty_field_ids() -> ProjectFieldIds {
     ProjectFieldIds {
         status: meta(),
         priority: meta(),
-        issue_type: meta(),
+        pipeline_stage: meta(),
         agent: "agent".to_owned(),
+        claimed_at: "ca".to_owned(),
         story_points: "sp".to_owned(),
         defer_until: "du".to_owned(),
     }

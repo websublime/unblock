@@ -1095,6 +1095,7 @@ async fn resolve_project_info_returns_project_id_and_number() {
 // ── Projects V2: setup_fields ───────────────────────────────────────
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn setup_fields_creates_all_seven_fields() {
     if !has_github_token() || !has_project_number() {
         eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping project integration test");
@@ -1128,12 +1129,16 @@ async fn setup_fields_creates_all_seven_fields() {
         "Priority field_id should be non-empty"
     );
     assert!(
-        !field_ids.issue_type.field_id.is_empty(),
-        "IssueType field_id should be non-empty"
+        !field_ids.pipeline_stage.field_id.is_empty(),
+        "PipelineStage field_id should be non-empty"
     );
     assert!(
         !field_ids.agent.is_empty(),
         "Agent field_id should be non-empty"
+    );
+    assert!(
+        !field_ids.claimed_at.is_empty(),
+        "ClaimedAt field_id should be non-empty"
     );
     assert!(
         !field_ids.story_points.is_empty(),
@@ -1144,11 +1149,11 @@ async fn setup_fields_creates_all_seven_fields() {
         "DeferUntil field_id should be non-empty"
     );
 
-    // Verify created + skipped covers all 6 fields.
+    // Verify created + skipped covers all 7 fields.
     assert_eq!(
         report.created.len() + report.skipped.len(),
-        6,
-        "created + skipped should total 6, got created={:?} skipped={:?}",
+        7,
+        "created + skipped should total 7, got created={:?} skipped={:?}",
         report.created,
         report.skipped
     );
@@ -1160,7 +1165,7 @@ async fn setup_fields_creates_all_seven_fields() {
         "Status should have 5 options, got: {:?}",
         field_ids.status.options.keys().collect::<Vec<_>>()
     );
-    for expected in &["Backlog", "In Progress", "Done", "Blocked", "Deferred"] {
+    for expected in &["ready", "in_progress", "closed", "blocked", "deferred"] {
         assert!(
             field_ids.status.options.contains_key(*expected),
             "Status should have option '{expected}', got: {:?}",
@@ -1173,7 +1178,13 @@ async fn setup_fields_creates_all_seven_fields() {
         5,
         "Priority should have 5 options"
     );
-    for expected in &["P0", "P1", "P2", "P3", "P4"] {
+    for expected in &[
+        "P0 - Critical",
+        "P1 - High",
+        "P2 - Medium",
+        "P3 - Low",
+        "P4 - Backlog",
+    ] {
         assert!(
             field_ids.priority.options.contains_key(*expected),
             "Priority should have option '{expected}'"
@@ -1181,18 +1192,25 @@ async fn setup_fields_creates_all_seven_fields() {
     }
 
     assert_eq!(
-        field_ids.issue_type.options.len(),
-        5,
-        "IssueType should have 5 options"
+        field_ids.pipeline_stage.options.len(),
+        6,
+        "PipelineStage should have 6 options"
     );
-    for expected in &["Task", "Bug", "Feature", "Epic", "Chore"] {
+    for expected in &[
+        "investigation",
+        "implementation",
+        "review",
+        "refactoring",
+        "qa",
+        "done",
+    ] {
         assert!(
-            field_ids.issue_type.options.contains_key(*expected),
-            "IssueType should have option '{expected}'"
+            field_ids.pipeline_stage.options.contains_key(*expected),
+            "PipelineStage should have option '{expected}'"
         );
     }
 
-    eprintln!("setup_fields: all 6 fields created with correct options");
+    eprintln!("setup_fields: all 7 fields created with correct options");
 }
 
 #[tokio::test]
@@ -1249,12 +1267,16 @@ async fn setup_fields_is_idempotent() {
         "Priority field_id should be stable across calls"
     );
     assert_eq!(
-        first_ids.issue_type.field_id, second_ids.issue_type.field_id,
-        "IssueType field_id should be stable across calls"
+        first_ids.pipeline_stage.field_id, second_ids.pipeline_stage.field_id,
+        "PipelineStage field_id should be stable across calls"
     );
     assert_eq!(
         first_ids.agent, second_ids.agent,
         "Agent field_id should be stable across calls"
+    );
+    assert_eq!(
+        first_ids.claimed_at, second_ids.claimed_at,
+        "ClaimedAt field_id should be stable across calls"
     );
     assert_eq!(
         first_ids.story_points, second_ids.story_points,

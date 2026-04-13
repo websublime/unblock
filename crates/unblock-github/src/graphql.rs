@@ -861,28 +861,34 @@ fn extract_field_values(value: &serde_json::Value) -> std::collections::HashMap<
 }
 
 /// Maps the "Status" field value to a [`Status`] enum variant.
-// TODO(unblock-29p.2): Rework match arms when Status option values change to
-// lowercase spec values (ready, in_progress, blocked, deferred, closed).
-// Consider adding explicit Some("Backlog") => Status::Ready arm to document
-// the intentional mapping rather than relying on the catch-all default.
+///
+/// Handles both the current spec option names (lowercase: `ready`,
+/// `in_progress`, `blocked`, `deferred`, `closed`) and the legacy option
+/// names (`Backlog`, `In Progress`, `Done`, `Blocked`, `Deferred`) for
+/// backward compatibility with existing projects that haven't been migrated.
 fn parse_status_field(fields: &std::collections::HashMap<String, String>) -> Status {
     match fields.get("Status").map(String::as_str) {
-        Some("In Progress") => Status::InProgress,
-        Some("Blocked") => Status::Blocked,
-        Some("Deferred") => Status::Deferred,
-        Some("Done" | "Closed") => Status::Closed,
+        Some("in_progress" | "In Progress") => Status::InProgress,
+        Some("blocked" | "Blocked") => Status::Blocked,
+        Some("deferred" | "Deferred") => Status::Deferred,
+        Some("closed" | "Done" | "Closed") => Status::Closed,
+        // "ready", "Backlog", missing, or unrecognized -> Ready.
         _ => Status::Ready,
     }
 }
 
 /// Maps the "Priority" field value to a [`Priority`] enum variant.
+///
+/// Handles both the current spec option names (`P0 - Critical`, `P1 - High`,
+/// etc.) and the legacy short names (`P0`, `P1`, etc.) for backward
+/// compatibility. Uses prefix matching so `"P0 - Critical"` maps to `P0`.
 fn parse_priority_field(fields: &std::collections::HashMap<String, String>) -> Priority {
     match fields.get("Priority").map(String::as_str) {
-        Some("P0") => Priority::P0,
-        Some("P1") => Priority::P1,
-        Some("P3") => Priority::P3,
-        Some("P4") => Priority::P4,
-        // Default to medium (P2) when missing or unrecognized.
+        Some(s) if s.starts_with("P0") => Priority::P0,
+        Some(s) if s.starts_with("P1") => Priority::P1,
+        Some(s) if s.starts_with("P3") => Priority::P3,
+        Some(s) if s.starts_with("P4") => Priority::P4,
+        // Default to medium (P2) when missing, unrecognized, or "P2*".
         _ => Priority::P2,
     }
 }
@@ -1135,7 +1141,26 @@ mod tests {
     // ── parse_status_field ──────────────────────────────────────────────
 
     #[test]
-    fn status_field_mapping() {
+    fn status_field_mapping_spec_names() {
+        let mut fields = std::collections::HashMap::new();
+        fields.insert("Status".to_owned(), "in_progress".to_owned());
+        assert_eq!(parse_status_field(&fields), Status::InProgress);
+
+        fields.insert("Status".to_owned(), "blocked".to_owned());
+        assert_eq!(parse_status_field(&fields), Status::Blocked);
+
+        fields.insert("Status".to_owned(), "deferred".to_owned());
+        assert_eq!(parse_status_field(&fields), Status::Deferred);
+
+        fields.insert("Status".to_owned(), "closed".to_owned());
+        assert_eq!(parse_status_field(&fields), Status::Closed);
+
+        fields.insert("Status".to_owned(), "ready".to_owned());
+        assert_eq!(parse_status_field(&fields), Status::Ready);
+    }
+
+    #[test]
+    fn status_field_mapping_legacy_names() {
         let mut fields = std::collections::HashMap::new();
         fields.insert("Status".to_owned(), "In Progress".to_owned());
         assert_eq!(parse_status_field(&fields), Status::InProgress);
@@ -1151,6 +1176,9 @@ mod tests {
 
         fields.insert("Status".to_owned(), "Closed".to_owned());
         assert_eq!(parse_status_field(&fields), Status::Closed);
+
+        fields.insert("Status".to_owned(), "Backlog".to_owned());
+        assert_eq!(parse_status_field(&fields), Status::Ready);
     }
 
     #[test]
@@ -1162,7 +1190,22 @@ mod tests {
     // ── parse_priority_field ────────────────────────────────────────────
 
     #[test]
-    fn priority_field_mapping() {
+    fn priority_field_mapping_spec_names() {
+        let mut fields = std::collections::HashMap::new();
+        for (label, expected) in [
+            ("P0 - Critical", Priority::P0),
+            ("P1 - High", Priority::P1),
+            ("P2 - Medium", Priority::P2),
+            ("P3 - Low", Priority::P3),
+            ("P4 - Backlog", Priority::P4),
+        ] {
+            fields.insert("Priority".to_owned(), label.to_owned());
+            assert_eq!(parse_priority_field(&fields), expected);
+        }
+    }
+
+    #[test]
+    fn priority_field_mapping_legacy_names() {
         let mut fields = std::collections::HashMap::new();
         for (label, expected) in [
             ("P0", Priority::P0),

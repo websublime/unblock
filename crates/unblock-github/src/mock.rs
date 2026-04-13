@@ -790,13 +790,14 @@ mod tests {
                 field_id: "f2".to_owned(),
                 options: std::collections::HashMap::new(),
             },
-            issue_type: crate::projects::FieldMeta {
+            pipeline_stage: crate::projects::FieldMeta {
                 field_id: "f3".to_owned(),
                 options: std::collections::HashMap::new(),
             },
             agent: "f4".to_owned(),
-            story_points: "f5".to_owned(),
-            defer_until: "f6".to_owned(),
+            claimed_at: "f5".to_owned(),
+            story_points: "f6".to_owned(),
+            defer_until: "f7".to_owned(),
         };
         m.set_field_ids(ids).await;
         assert_eq!(m.calls().set_field_ids(), 1);

@@ -288,7 +288,7 @@ async fn apply_repairs(
                         match repair_status(
                             state,
                             unblocked_qid,
-                            "Backlog",
+                            "ready",
                             issues,
                             field_ids,
                             project_info,
@@ -1224,8 +1224,9 @@ mod tests {
         mock.push_field_ids(Some(ProjectFieldIds {
             status: dummy_meta(),
             priority: dummy_meta(),
-            issue_type: dummy_meta(),
+            pipeline_stage: dummy_meta(),
             agent: "FIELD_AGENT".to_owned(),
+            claimed_at: "FIELD_CLAIMED_AT".to_owned(),
             story_points: "FIELD_STORY_POINTS".to_owned(),
             defer_until: "FIELD_DEFER_UNTIL".to_owned(),
         }));
