@@ -600,7 +600,9 @@ async fn ready_deferred_excluded() {
     assert!(result.is_empty(), "deferred issue should be excluded");
 }
 
-/// `include_claimed=true` includes in-progress issues.
+/// `include_claimed=true` is a no-op on the graph-level ready set because
+/// `compute_ready_set()` already excludes `Status::InProgress` per spec §3.3.
+/// The tool-layer `include_claimed` flag is purely defensive.
 #[tokio::test]
 async fn ready_include_claimed_includes_in_progress() {
     let mut issue_1 = test_issue(1, IssueState::Open);
@@ -612,7 +614,14 @@ async fn ready_include_claimed_includes_in_progress() {
     let graph = DependencyGraph::build(&issues, &[]);
     let ready_set = graph.compute_ready_set(&issues);
 
-    // Without include_claimed — should exclude InProgress.
+    // compute_ready_set now excludes InProgress per spec §3.3.
+    assert_eq!(
+        ready_set.len(),
+        1,
+        "compute_ready_set should exclude InProgress issue at graph level",
+    );
+
+    // Without include_claimed — result matches the already-filtered ready set.
     let params_default = unblock_mcp::tools::ready::ReadyParams {
         limit: None,
         issue_type: None,
@@ -630,7 +639,8 @@ async fn ready_include_claimed_includes_in_progress() {
     );
     assert_eq!(result_default[0].number, 2);
 
-    // With include_claimed=true — should include InProgress.
+    // With include_claimed=true — still only 1 because InProgress is
+    // excluded at the graph level, not the tool-layer filter.
     let params_claimed = unblock_mcp::tools::ready::ReadyParams {
         limit: None,
         issue_type: None,
@@ -643,8 +653,8 @@ async fn ready_include_claimed_includes_in_progress() {
     let result_claimed = unblock_mcp::tools::ready::filter_ready_set(&ready_set, &params_claimed);
     assert_eq!(
         result_claimed.len(),
-        2,
-        "include_claimed=true should include InProgress issue",
+        1,
+        "include_claimed=true is no-op: InProgress excluded at graph level per spec §3.3",
     );
 }
 

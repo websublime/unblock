@@ -140,10 +140,6 @@ impl DependencyGraph {
     ///
     /// Results are sorted by priority ascending (P0 first), then by `created_at`
     /// ascending (oldest first) as a tiebreaker.
-    // TODO(unblock-45a.4): ARCH §6.2 specifies Status == Ready filter here (excluding
-    // InProgress, Blocked, Deferred, Closed). Currently only IssueState::Open is
-    // checked. The ready tool layer partially handles this (excludes InProgress),
-    // but consider adding Status::Ready filtering in the graph engine per ARCH spec.
     #[must_use]
     pub fn compute_ready_set(&self, issues: &[Issue]) -> Vec<IssueSummary> {
         let mut ready: Vec<IssueSummary> = Vec::new();
@@ -151,6 +147,21 @@ impl DependencyGraph {
         for issue in issues {
             // Only consider open issues.
             if issue.state != IssueState::Open {
+                continue;
+            }
+
+            // Skip preserved states per spec §3.3.
+            // InProgress, Deferred, and Closed are set by agent/human and must
+            // not be overwritten by the graph engine.
+            //
+            // NOTE: Status::Blocked is intentionally NOT filtered here.
+            // Per spec §3.3 key note: issues with Status::Blocked that now have
+            // all blockers closed WILL be in the ready set. The
+            // update_status_fields algorithm (§10) syncs Status afterwards.
+            if matches!(
+                issue.status,
+                Status::InProgress | Status::Deferred | Status::Closed
+            ) {
                 continue;
             }
 
@@ -730,6 +741,97 @@ mod tests {
         assert_eq!(ready[0].number, 3);
     }
 
+    #[test]
+    fn ready_set_excludes_in_progress_status() {
+        // Issue 1 is Open but Status::InProgress — should NOT be in the ready set.
+        let mut in_progress = make_issue(1, IssueState::Open, Priority::P1);
+        in_progress.status = Status::InProgress;
+        let open_ready = make_issue(2, IssueState::Open, Priority::P2);
+        let issues = vec![in_progress, open_ready];
+        let graph = DependencyGraph::build(&issues, &[]);
+        let ready = graph.compute_ready_set(&issues);
+
+        let ready_numbers: Vec<u64> = ready.iter().map(|s| s.number).collect();
+        assert!(
+            !ready_numbers.contains(&1),
+            "InProgress issue should be excluded from ready set"
+        );
+        assert!(
+            ready_numbers.contains(&2),
+            "Ready issue should be in ready set"
+        );
+    }
+
+    #[test]
+    fn ready_set_excludes_deferred_status() {
+        // Issue 1 is Open but Status::Deferred — should NOT be in the ready set.
+        let mut deferred = make_issue(1, IssueState::Open, Priority::P1);
+        deferred.status = Status::Deferred;
+        let open_ready = make_issue(2, IssueState::Open, Priority::P2);
+        let issues = vec![deferred, open_ready];
+        let graph = DependencyGraph::build(&issues, &[]);
+        let ready = graph.compute_ready_set(&issues);
+
+        let ready_numbers: Vec<u64> = ready.iter().map(|s| s.number).collect();
+        assert!(
+            !ready_numbers.contains(&1),
+            "Deferred issue should be excluded from ready set"
+        );
+        assert!(
+            ready_numbers.contains(&2),
+            "Ready issue should be in ready set"
+        );
+    }
+
+    #[test]
+    fn ready_set_excludes_closed_status_open_state() {
+        // Edge case: IssueState::Open but Status::Closed (stale field).
+        // Should be excluded from ready set per spec §3.3.
+        let mut stale_closed = make_issue(1, IssueState::Open, Priority::P1);
+        stale_closed.status = Status::Closed;
+        let open_ready = make_issue(2, IssueState::Open, Priority::P2);
+        let issues = vec![stale_closed, open_ready];
+        let graph = DependencyGraph::build(&issues, &[]);
+        let ready = graph.compute_ready_set(&issues);
+
+        let ready_numbers: Vec<u64> = ready.iter().map(|s| s.number).collect();
+        assert!(
+            !ready_numbers.contains(&1),
+            "Status::Closed issue should be excluded even when IssueState::Open"
+        );
+    }
+
+    #[test]
+    fn ready_set_includes_blocked_status_with_all_blockers_closed() {
+        // Per spec §3.3 key note: Status::Blocked with all blockers closed
+        // SHOULD be in the ready set. Status::Blocked is NOT a preserved state.
+        let mut blocked = make_issue(1, IssueState::Open, Priority::P1);
+        blocked.status = Status::Blocked;
+        let closed_blocker = make_issue(2, IssueState::Closed, Priority::P2);
+        let issues = vec![blocked, closed_blocker];
+        // Issue 1 is blocked by issue 2, but issue 2 is closed.
+        let edges = vec![edge(1, 2)];
+        let graph = DependencyGraph::build(&issues, &edges);
+        let ready = graph.compute_ready_set(&issues);
+
+        let ready_numbers: Vec<u64> = ready.iter().map(|s| s.number).collect();
+        assert!(
+            ready_numbers.contains(&1),
+            "Status::Blocked with all blockers closed should be in ready set"
+        );
+    }
+
+    #[test]
+    fn ready_set_includes_ready_status() {
+        // Status::Ready issues that are open and unblocked should be included.
+        let issues = vec![make_issue(1, IssueState::Open, Priority::P1)];
+        let graph = DependencyGraph::build(&issues, &[]);
+        let ready = graph.compute_ready_set(&issues);
+
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].number, 1);
+    }
+
     // ── compute_unblock_cascade ────────────────────────────────────────────
 
     #[test]
@@ -1197,21 +1299,36 @@ mod tests {
             ]
         }
 
+        /// Strategy to generate a random `Status`.
+        fn arb_status() -> impl Strategy<Value = Status> {
+            prop_oneof![
+                Just(Status::Ready),
+                Just(Status::InProgress),
+                Just(Status::Blocked),
+                Just(Status::Deferred),
+                Just(Status::Closed),
+            ]
+        }
+
         proptest! {
             #[test]
             fn ready_set_never_contains_issue_with_open_blocker(
                 num_issues in 1_u64..100,
                 issue_states in proptest::collection::vec(arb_issue_state(), 1..100),
                 issue_priorities in proptest::collection::vec(arb_priority(), 1..100),
+                issue_statuses in proptest::collection::vec(arb_status(), 1..100),
                 edges in proptest::collection::vec((1_u64..100, 1_u64..100), 0..200),
             ) {
-                // Generate issues with random states and priorities.
+                // Generate issues with random states, priorities, and statuses.
                 let issues: Vec<Issue> = (1..=num_issues)
                     .map(|n| {
                         let idx = usize::try_from(n - 1).expect("issue number fits in usize");
                         let state = issue_states.get(idx).copied().unwrap_or(IssueState::Open);
                         let priority = issue_priorities.get(idx).copied().unwrap_or(Priority::P2);
-                        make_issue(n, state, priority)
+                        let status = issue_statuses.get(idx).copied().unwrap_or(Status::Ready);
+                        let mut issue = make_issue(n, state, priority);
+                        issue.status = status;
+                        issue
                     })
                     .collect();
 
@@ -1251,6 +1368,20 @@ mod tests {
                             "Ready issue {} should be Open, was {:?}",
                             summary.qualified_id,
                             issue.state
+                        );
+                    }
+                }
+
+                // Invariant 2b: no issue in the ready set has a preserved Status
+                // (InProgress, Deferred, Closed).
+                for summary in &ready {
+                    let original = issues.iter().find(|i| i.qualified_id == summary.qualified_id);
+                    if let Some(issue) = original {
+                        prop_assert!(
+                            !matches!(issue.status, Status::InProgress | Status::Deferred | Status::Closed),
+                            "Ready issue {} has preserved status {:?}, should have been excluded",
+                            summary.qualified_id,
+                            issue.status
                         );
                     }
                 }
