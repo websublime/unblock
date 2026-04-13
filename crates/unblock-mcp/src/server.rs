@@ -257,15 +257,18 @@ impl UnblockServer {
 /// `pub(crate)` otherwise (production builds).
 macro_rules! define_set_project_fields {
     ($vis:vis) => {
-        /// Updates Priority, `IssueType`, Status, `StoryPoints`,
-        /// and `DeferUntil`. Each field update is best-effort: failures are
-        /// logged as warnings but do not abort the remaining updates. This
-        /// keeps the create flow resilient to partial project configuration
-        /// (e.g. missing option values).
+        /// Updates Priority, Status, `StoryPoints`, and `DeferUntil`.
+        /// Each field update is best-effort: failures are logged as warnings
+        /// but do not abort the remaining updates. This keeps the create flow
+        /// resilient to partial project configuration (e.g. missing option
+        /// values).
         ///
         /// The `status` parameter controls the initial Status field value.
-        /// Callers should pass `"Blocked"` when the issue has blockers, or
-        /// `"Backlog"` otherwise (per PRD section 6.1 and ARCH section 10.4).
+        /// Callers should pass `"blocked"` when the issue has blockers, or
+        /// `"ready"` otherwise (per spec §5.7).
+        ///
+        /// Priority uses prefix matching so callers can pass short codes
+        /// like `"P0"` which resolve to the full option name `"P0 - Critical"`.
         ///
         /// Exposed to integration tests when the `test-hooks` feature is
         /// enabled. Production builds keep this `pub(crate)` so it never
@@ -277,15 +280,14 @@ macro_rules! define_set_project_fields {
             item_id: &str,
             field_ids: &unblock_github::projects::ProjectFieldIds,
             priority: &str,
-            issue_type: &str,
             status: &str,
             story_points: Option<f64>,
             defer_until: Option<chrono::NaiveDate>,
         ) {
             use unblock_github::projects::FieldValue;
 
-            // Set Priority.
-            if let Some(option_id) = field_ids.priority.options.get(priority)
+            // Set Priority (prefix match: "P0" -> "P0 - Critical", etc.).
+            if let Some(option_id) = field_ids.priority.option_id_by_prefix(priority)
                 && let Err(e) = client
                     .update_field(
                         project_id,
@@ -298,21 +300,7 @@ macro_rules! define_set_project_fields {
                 tracing::warn!(error = %e, "Failed to set Priority field");
             }
 
-            // Set IssueType.
-            if let Some(option_id) = field_ids.issue_type.options.get(issue_type)
-                && let Err(e) = client
-                    .update_field(
-                        project_id,
-                        item_id,
-                        &field_ids.issue_type.field_id,
-                        &FieldValue::SingleSelectOption(option_id.clone()),
-                    )
-                    .await
-            {
-                tracing::warn!(error = %e, "Failed to set IssueType field");
-            }
-
-            // Set Status (Backlog when unblocked, Blocked when blocked_by is present).
+            // Set Status (ready when unblocked, blocked when blocked_by is present).
             if let Some(option_id) = field_ids.status.options.get(status)
                 && let Err(e) = client
                     .update_field(
@@ -520,7 +508,7 @@ impl UnblockServer {
     /// without mutating anything.
     #[tool(
         name = "setup",
-        description = "Configure Projects V2 fields (Status, Priority, IssueType, Agent, StoryPoints, DeferUntil) and views (://ready, ://team, ://pipeline, ://roadmap, ://timeline). Safe to call repeatedly — existing fields/views are skipped. Use dry_run=true to check without mutating."
+        description = "Configure Projects V2 fields (Status, Priority, PipelineStage, Agent, ClaimedAt, StoryPoints, DeferUntil) and views (://ready, ://team, ://pipeline, ://roadmap, ://timeline). Safe to call repeatedly — existing fields/views are skipped. Use dry_run=true to check without mutating."
     )]
     pub async fn setup(
         &self,
@@ -935,8 +923,8 @@ impl UnblockServer {
                             .get_project_item_id(&issue.node_id, &project_info.id)
                             .await
                         {
-                            // Status -> In Progress
-                            if let Some(option_id) = field_ids.status.options.get("In Progress")
+                            // Status -> in_progress
+                            if let Some(option_id) = field_ids.status.options.get("in_progress")
                                 && let Err(e) = client
                                     .update_field(
                                         &project_info.id,
@@ -1061,8 +1049,8 @@ impl UnblockServer {
                             .get_project_item_id(&issue.node_id, &project_info.id)
                             .await
                         {
-                            // Status → Done
-                            if let Some(option_id) = field_ids.status.options.get("Done")
+                            // Status → closed
+                            if let Some(option_id) = field_ids.status.options.get("closed")
                                 && let Err(e) = client
                                     .update_field(
                                         &project_info.id,
@@ -1072,7 +1060,7 @@ impl UnblockServer {
                                     )
                                     .await
                             {
-                                tracing::warn!(error = %e, "Failed to set Status=Done on closed issue");
+                                tracing::warn!(error = %e, "Failed to set Status=closed on closed issue");
                             }
 
                         } else {
@@ -1122,7 +1110,7 @@ impl UnblockServer {
                 }
 
                 // Update Projects V2 fields:
-                // Status → Backlog (if not already InProgress).
+                // Status → ready (if not already InProgress).
                 // TODO(unblock-b6b.79): Third copy of field update ladder — extract shared helper.
                 if let Some(field_ids) = client.field_ids().await
                     && let Ok(project_info) = client.resolve_project_info().await
@@ -1134,9 +1122,9 @@ impl UnblockServer {
                                 .get_project_item_id(&cascaded_issue.node_id, &project_info.id)
                                 .await
                             {
-                                // Status → Backlog (only if not already InProgress).
+                                // Status → ready (only if not already InProgress).
                                 if cascaded_issue.status != unblock_core::types::Status::InProgress
-                                    && let Some(option_id) = field_ids.status.options.get("Backlog")
+                                    && let Some(option_id) = field_ids.status.options.get("ready")
                                     && let Err(e) = client
                                         .update_field(
                                             &project_info.id,
@@ -1149,7 +1137,7 @@ impl UnblockServer {
                                     tracing::warn!(
                                         cascaded_number,
                                         error = %e,
-                                        "Failed to set Status=Backlog on cascaded issue"
+                                        "Failed to set Status=ready on cascaded issue"
                                     );
                                 }
                             } else {
@@ -1270,8 +1258,8 @@ impl UnblockServer {
                     .get_project_item_id(&source_issue.node_id, &project_info.id)
                     .await
                 {
-                    // Status → Blocked
-                    if let Some(option_id) = field_ids.status.options.get("Blocked")
+                    // Status → blocked
+                    if let Some(option_id) = field_ids.status.options.get("blocked")
                         && let Err(e) = client
                             .update_field(
                                 &project_info.id,
@@ -1283,7 +1271,7 @@ impl UnblockServer {
                     {
                         tracing::warn!(
                             error = %e,
-                            "Failed to set Status=Blocked on source issue"
+                            "Failed to set Status=blocked on source issue"
                         );
                     }
                 } else {
@@ -1306,7 +1294,7 @@ impl UnblockServer {
             source,
             target: target_str,
             message: format!(
-                "Issue #{source} is now blocked by {issue_ref}. Source marked as Blocked."
+                "Issue #{source} is now blocked by {issue_ref}. Source marked as blocked."
             ),
         }))
     }
@@ -1315,7 +1303,7 @@ impl UnblockServer {
     /// and parent linkage.
     ///
     /// Creates the issue via REST, adds it to the configured project, sets
-    /// custom fields (Priority, `IssueType`, `StoryPoints`, `DeferUntil`, Status,
+    /// custom fields (Priority, `StoryPoints`, `DeferUntil`, Status),
     /// and optionally adds blocking relationships and parent linkage.
     ///
     /// This is a write tool — the cache is invalidated and rebuilt after all
@@ -1501,9 +1489,9 @@ impl UnblockServer {
 
                                     let initial_status =
                                         if blocked_by_refs.is_empty() {
-                                            "Backlog"
+                                            "ready"
                                         } else {
-                                            "Blocked"
+                                            "blocked"
                                         };
 
                                     set_project_fields(
@@ -1512,7 +1500,6 @@ impl UnblockServer {
                                         &item_id,
                                         &field_ids,
                                         &priority_owned,
-                                        &issue_type_owned,
                                         initial_status,
                                         story_points,
                                         defer_until,
@@ -1684,13 +1671,13 @@ impl UnblockServer {
         if let Some(ref s) = params.status
             && !matches!(
                 s.as_str(),
-                "Backlog" | "In Progress" | "Done" | "Blocked" | "Deferred"
+                "ready" | "in_progress" | "blocked" | "deferred" | "closed"
             )
         {
             return Err(ErrorData {
                 code: rmcp::model::ErrorCode::INVALID_PARAMS,
                 message: format!(
-                    "Invalid status '{s}' — must be Backlog, In Progress, Done, Blocked, or Deferred"
+                    "Invalid status '{s}' — must be ready, in_progress, blocked, deferred, or closed"
                 )
                 .into(),
                 data: None,
@@ -1747,7 +1734,7 @@ impl UnblockServer {
                                 // Priority
                                 if let Some(ref p) = params.priority
                                     && let Some(option_id) =
-                                        field_ids.priority.options.get(p.as_str())
+                                        field_ids.priority.option_id_by_prefix(p.as_str())
                                 {
                                     if let Err(e) = client
                                         .update_field(

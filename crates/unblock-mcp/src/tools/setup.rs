@@ -76,7 +76,7 @@ pub const REQUIRED_VIEWS: &[ViewSpec] = &[
     ViewSpec {
         name: "://ready",
         layout: ViewLayout::Board,
-        filter: Some("\"Ready State\":\"ready\""),
+        filter: Some("\"Status\":\"ready\""),
     },
     ViewSpec {
         name: "://team",
