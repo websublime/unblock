@@ -74,7 +74,7 @@ impl FieldMeta {
     pub fn option_id_by_prefix(&self, prefix: &str) -> Option<&String> {
         self.options.get(prefix).or_else(|| {
             // Prefix match: find the first option whose name starts with the
-            // given prefix followed by a separator (" - ", "_", etc.).
+            // given prefix and is strictly longer (e.g. "P0" matches "P0 - Critical").
             self.options
                 .iter()
                 .find(|(name, _)| name.starts_with(prefix) && name.len() > prefix.len())
@@ -1511,11 +1511,90 @@ impl GitHubClient {
 
 #[cfg(test)]
 mod tests {
-    use super::OwnerType;
+    use super::{FieldMeta, OwnerType};
     use crate::client::GitHubClient;
     use crate::errors::Error;
+    use std::collections::HashMap;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn make_priority_field_meta() -> FieldMeta {
+        let mut options = HashMap::new();
+        options.insert("P0 - Critical".to_string(), "id-p0".to_string());
+        options.insert("P1 - High".to_string(), "id-p1".to_string());
+        options.insert("P2 - Medium".to_string(), "id-p2".to_string());
+        options.insert("P3 - Low".to_string(), "id-p3".to_string());
+        options.insert("P4 - Backlog".to_string(), "id-p4".to_string());
+        FieldMeta {
+            field_id: "field-priority".to_string(),
+            options,
+        }
+    }
+
+    #[test]
+    fn option_id_by_prefix_exact_match() {
+        let meta = make_priority_field_meta();
+        assert_eq!(
+            meta.option_id_by_prefix("P0 - Critical"),
+            Some(&"id-p0".to_string()),
+        );
+    }
+
+    #[test]
+    fn option_id_by_prefix_short_code_match() {
+        let meta = make_priority_field_meta();
+        assert_eq!(meta.option_id_by_prefix("P1"), Some(&"id-p1".to_string()),);
+    }
+
+    #[test]
+    fn option_id_by_prefix_no_match() {
+        let meta = make_priority_field_meta();
+        assert_eq!(meta.option_id_by_prefix("P9"), None);
+    }
+
+    #[test]
+    fn option_id_by_prefix_empty_prefix_matches_any() {
+        // An empty prefix matches any option (all names start with "" and are longer).
+        // This documents the current behavior — callers should not pass empty strings.
+        let meta = make_priority_field_meta();
+        assert!(meta.option_id_by_prefix("").is_some());
+    }
+
+    #[test]
+    fn option_id_by_prefix_full_name_not_prefix() {
+        // When the prefix equals a full option name exactly, exact match wins.
+        let meta = make_priority_field_meta();
+        assert_eq!(
+            meta.option_id_by_prefix("P2 - Medium"),
+            Some(&"id-p2".to_string()),
+        );
+    }
+
+    #[test]
+    fn option_id_by_prefix_empty_options() {
+        let meta = FieldMeta {
+            field_id: "field-empty".to_string(),
+            options: HashMap::new(),
+        };
+        assert_eq!(meta.option_id_by_prefix("P0"), None);
+    }
+
+    #[test]
+    fn option_id_by_prefix_prefers_exact_over_prefix() {
+        // If "P0" is both an exact key AND a prefix of another key,
+        // exact match wins deterministically.
+        let mut options = HashMap::new();
+        options.insert("P0".to_string(), "id-exact".to_string());
+        options.insert("P0 - Critical".to_string(), "id-prefix".to_string());
+        let meta = FieldMeta {
+            field_id: "field-mixed".to_string(),
+            options,
+        };
+        assert_eq!(
+            meta.option_id_by_prefix("P0"),
+            Some(&"id-exact".to_string()),
+        );
+    }
 
     #[tokio::test]
     async fn detect_owner_type_returns_org_for_organization_account() {
