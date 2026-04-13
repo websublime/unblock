@@ -56,7 +56,7 @@ impl DependencyGraph {
     /// # Examples
     ///
     /// ```
-    /// use unblock_core::types::{Issue, BlockingEdge, IssueState, Status, Priority, ReadyState, QualifiedId};
+    /// use unblock_core::types::{Issue, BlockingEdge, IssueState, Status, Priority, QualifiedId};
     /// use unblock_core::graph::DependencyGraph;
     /// use chrono::Utc;
     ///
@@ -65,8 +65,8 @@ impl DependencyGraph {
     ///     Issue {
     ///         qualified_id: qid.clone(),
     ///         number: 1, node_id: String::new(), title: "A".into(),
-    ///         issue_type: None, status: Status::Open, priority: Priority::P2,
-    ///         agent: None, claimed_at: None, ready_state: ReadyState::Ready,
+    ///         issue_type: None, status: Status::Ready, priority: Priority::P2,
+    ///         agent: None, claimed_at: None, pipeline_stage: None,
     ///         story_points: None, defer_until: None, labels: vec![],
     ///         milestone: None, assignees: vec![], state: IssueState::Open,
     ///         body: None, created_at: Utc::now(), updated_at: Utc::now(),
@@ -140,10 +140,10 @@ impl DependencyGraph {
     ///
     /// Results are sorted by priority ascending (P0 first), then by `created_at`
     /// ascending (oldest first) as a tiebreaker.
-    // TODO(unblock-45a.4): ARCH §6.2 specifies Status == Open filter here (excluding
+    // TODO(unblock-45a.4): ARCH §6.2 specifies Status == Ready filter here (excluding
     // InProgress, Blocked, Deferred, Closed). Currently only IssueState::Open is
     // checked. The ready tool layer partially handles this (excludes InProgress),
-    // but consider adding Status::Open filtering in the graph engine per ARCH spec.
+    // but consider adding Status::Ready filtering in the graph engine per ARCH spec.
     #[must_use]
     pub fn compute_ready_set(&self, issues: &[Issue]) -> Vec<IssueSummary> {
         let mut ready: Vec<IssueSummary> = Vec::new();
@@ -442,7 +442,7 @@ mod tests {
     use super::*;
     use chrono::Utc;
 
-    use crate::types::{Priority, ReadyState};
+    use crate::types::Priority;
 
     /// Default owner/repo used by test helpers.
     const TEST_OWNER: &str = "test";
@@ -466,11 +466,11 @@ mod tests {
             node_id: String::new(),
             title: format!("Issue #{number}"),
             issue_type: None,
-            status: Status::Open,
+            status: Status::Ready,
             priority,
             agent: None,
             claimed_at: None,
-            ready_state: ReadyState::Ready,
+            pipeline_stage: None,
             story_points: None,
             defer_until: None,
             labels: vec![],

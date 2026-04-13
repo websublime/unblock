@@ -1,6 +1,6 @@
 //! Reconciliation drift types for the unblock system.
 //!
-//! Defines `DriftKind` (7 drift variants) and `DriftReport` used by the
+//! Defines `DriftKind` (6 drift variants) and `DriftReport` used by the
 //! reconciliation engine to detect and report divergence between the computed
 //! dependency graph and the state stored in GitHub Projects V2 fields.
 //!
@@ -12,7 +12,6 @@
 //!
 //! | Variant | Cause |
 //! |---------|-------|
-//! | `StaleReadyState` | Ready State field diverges from graph computation |
 //! | `UncascadedClosure` | Issue closed via UI without cascade firing |
 //! | `OrphanedBlockingEdge` | Edge references a non-existent or inaccessible issue |
 //! | `MalformedAgentField` | Agent field has invalid format |
@@ -33,7 +32,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::graph::DependencyGraph;
-use crate::types::{Issue, IssueState, QualifiedId, ReadyState, Status};
+use crate::types::{Issue, IssueState, QualifiedId, Status};
 
 /// Category of detected divergence between the dependency graph and GitHub state.
 ///
@@ -47,19 +46,6 @@ use crate::types::{Issue, IssueState, QualifiedId, ReadyState, Status};
 /// can be returned as structured JSON to MCP tool callers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DriftKind {
-    /// Ready State field in GitHub diverges from what the graph computes.
-    ///
-    /// Covers: external close without cascade, external reopen, manual
-    /// removal of blocking relationship via UI.
-    StaleReadyState {
-        /// The issue whose Ready State field is incorrect.
-        issue: QualifiedId,
-        /// The value currently stored in the GitHub Projects V2 field.
-        field_says: ReadyState,
-        /// The value the dependency graph computes as correct.
-        graph_says: ReadyState,
-    },
-
     /// Issue closed via UI — downstream issues should have received a cascade
     /// but did not.
     ///
@@ -186,13 +172,12 @@ impl ReconcileEngine {
 
     /// Analyse the dependency graph for drift against stored GitHub field values.
     ///
-    /// Performs 6 checks in order:
-    /// 1. **Stale Ready State** — `ReadyState` field diverges from graph computation
-    /// 2. **Uncascaded Closure** — closed issue did not cascade to downstream
-    /// 3. **Orphaned Blocking Edge** — edge references a non-existent issue
-    /// 4. **Cycle Detected** — cycle in the dependency graph
-    /// 5. **Stale Claim** — `InProgress` issue past threshold
-    /// 6. **Malformed Agent Field** — agent field without `username:supervisor` format
+    /// Performs 5 checks in order:
+    /// 1. **Uncascaded Closure** — closed issue did not cascade to downstream
+    /// 2. **Orphaned Blocking Edge** — edge references a non-existent issue
+    /// 3. **Cycle Detected** — cycle in the dependency graph
+    /// 4. **Stale Claim** — `InProgress` issue past threshold
+    /// 5. **Malformed Agent Field** — agent field without `username:supervisor` format
     ///
     /// `MissingProjectField` is NOT detected here — it requires I/O to check
     /// GitHub Projects V2 field existence and is handled by the tool handler.
@@ -214,8 +199,7 @@ impl ReconcileEngine {
     ) -> DriftReport {
         let mut drift = Vec::new();
 
-        Self::check_stale_ready_state(issues, computed_ready_set, now, &mut drift);
-        Self::check_uncascaded_closures(graph, issues, &mut drift);
+        Self::check_uncascaded_closures(graph, issues, computed_ready_set, &mut drift);
         Self::check_orphaned_edges(graph, issues, &mut drift);
         Self::check_cycles(graph, &mut drift);
         self.check_stale_claims(issues, now, &mut drift);
@@ -233,62 +217,16 @@ impl ReconcileEngine {
         }
     }
 
-    /// Pass 1 — detect stale `ReadyState` fields by comparing each issue's
-    /// stored state against the graph-computed expected state. Honours the
-    /// `defer_until` filter to avoid false positives on deferred issues
-    /// (see unblock-b6b.114).
-    fn check_stale_ready_state(
-        issues: &HashMap<QualifiedId, Issue>,
-        computed_ready_set: &HashSet<QualifiedId>,
-        now: DateTime<Utc>,
-        drift: &mut Vec<DriftKind>,
-    ) {
-        let today = now.date_naive();
-        for (qid, issue) in issues {
-            if issue.state == IssueState::Closed {
-                // Closed issues should have ReadyState::Closed.
-                if issue.ready_state != ReadyState::Closed {
-                    drift.push(DriftKind::StaleReadyState {
-                        issue: qid.clone(),
-                        field_says: issue.ready_state,
-                        graph_says: ReadyState::Closed,
-                    });
-                }
-                continue;
-            }
-
-            // Deferred issues (defer_until > today) are intentionally excluded
-            // from the ready workflow regardless of whether their blockers are
-            // clear. DependencyGraph::compute_ready_set does NOT apply the
-            // defer filter (see its module comment), so we must handle it here
-            // to avoid false StaleReadyState drift. See unblock-b6b.114.
-            let is_deferred = issue
-                .defer_until
-                .is_some_and(|defer_until| defer_until > today);
-            let graph_ready = computed_ready_set.contains(qid);
-            let expected = if is_deferred {
-                ReadyState::NotReady
-            } else if graph_ready {
-                ReadyState::Ready
-            } else {
-                ReadyState::Blocked
-            };
-
-            if issue.ready_state != expected {
-                drift.push(DriftKind::StaleReadyState {
-                    issue: qid.clone(),
-                    field_says: issue.ready_state,
-                    graph_says: expected,
-                });
-            }
-        }
-    }
-
-    /// Pass 2 — detect closed issues whose downstream dependents are still
-    /// marked blocked (unblock cascade did not run).
+    /// Pass 1 — detect closed issues whose downstream dependents are still
+    /// blocked (unblock cascade did not run).
+    ///
+    /// Uses the graph-computed ready set: if a downstream issue is open, in the
+    /// ready set (all blockers resolved), but still has `Status::Blocked`, the
+    /// cascade was missed.
     fn check_uncascaded_closures(
         graph: &DependencyGraph,
         issues: &HashMap<QualifiedId, Issue>,
+        computed_ready_set: &HashSet<QualifiedId>,
         drift: &mut Vec<DriftKind>,
     ) {
         for (qid, issue) in issues {
@@ -301,7 +239,9 @@ impl ReconcileEngine {
                     .into_iter()
                     .filter(|id| {
                         issues.get(id).is_some_and(|i| {
-                            i.ready_state != ReadyState::Ready && i.state == IssueState::Open
+                            i.state == IssueState::Open
+                                && computed_ready_set.contains(&i.qualified_id)
+                                && i.status != Status::Ready
                         })
                     })
                     .collect();
@@ -395,25 +335,13 @@ impl ReconcileEngine {
 mod tests {
     use super::*;
     use crate::graph::DependencyGraph;
-    use crate::types::{
-        BlockingEdge, Issue, IssueState, Priority, QualifiedId, ReadyState, Status,
-    };
+    use crate::types::{BlockingEdge, Issue, IssueState, Priority, QualifiedId, Status};
     use chrono::{Duration, Utc};
     use std::collections::{HashMap, HashSet};
 
     /// Helper to create a test `QualifiedId`.
     fn qid(owner: &str, repo: &str, number: u64) -> QualifiedId {
         QualifiedId::new(owner, repo, number)
-    }
-
-    #[test]
-    fn construct_stale_ready_state() {
-        let drift = DriftKind::StaleReadyState {
-            issue: qid("acme", "widgets", 42),
-            field_says: ReadyState::Blocked,
-            graph_says: ReadyState::Ready,
-        };
-        assert!(matches!(drift, DriftKind::StaleReadyState { .. }));
     }
 
     #[test]
@@ -446,7 +374,7 @@ mod tests {
     #[test]
     fn construct_missing_project_field() {
         let drift = DriftKind::MissingProjectField {
-            field_name: "Ready State".to_string(),
+            field_name: "Status".to_string(),
         };
         assert!(matches!(drift, DriftKind::MissingProjectField { .. }));
     }
@@ -480,10 +408,9 @@ mod tests {
             reconciled_at: Utc::now(),
             issues_scanned: 47,
             edges_scanned: 23,
-            drift_found: vec![DriftKind::StaleReadyState {
-                issue: qid("acme", "widgets", 42),
-                field_says: ReadyState::Blocked,
-                graph_says: ReadyState::Ready,
+            drift_found: vec![DriftKind::UncascadedClosure {
+                closed_issue: qid("acme", "widgets", 42),
+                should_have_unblocked: vec![qid("acme", "widgets", 43)],
             }],
             repaired: vec![],
             errors: vec![],
@@ -514,11 +441,6 @@ mod tests {
     #[test]
     fn drift_kind_serde_round_trip() {
         let variants: Vec<DriftKind> = vec![
-            DriftKind::StaleReadyState {
-                issue: qid("acme", "widgets", 1),
-                field_says: ReadyState::Blocked,
-                graph_says: ReadyState::Ready,
-            },
             DriftKind::UncascadedClosure {
                 closed_issue: qid("acme", "widgets", 2),
                 should_have_unblocked: vec![qid("acme", "widgets", 3)],
@@ -560,19 +482,17 @@ mod tests {
             issues_scanned: 100,
             edges_scanned: 50,
             drift_found: vec![
-                DriftKind::StaleReadyState {
-                    issue: qid("acme", "widgets", 1),
-                    field_says: ReadyState::NotReady,
-                    graph_says: ReadyState::Ready,
+                DriftKind::UncascadedClosure {
+                    closed_issue: qid("acme", "widgets", 1),
+                    should_have_unblocked: vec![qid("acme", "widgets", 4)],
                 },
                 DriftKind::CycleDetected {
                     cycle: vec![qid("acme", "widgets", 2), qid("acme", "widgets", 3)],
                 },
             ],
-            repaired: vec![DriftKind::StaleReadyState {
-                issue: qid("acme", "widgets", 1),
-                field_says: ReadyState::NotReady,
-                graph_says: ReadyState::Ready,
+            repaired: vec![DriftKind::UncascadedClosure {
+                closed_issue: qid("acme", "widgets", 1),
+                should_have_unblocked: vec![qid("acme", "widgets", 4)],
             }],
             errors: vec!["CycleDetected: manual resolution required".to_string()],
             clean: false,
@@ -592,7 +512,7 @@ mod tests {
         repo: &str,
         number: u64,
         state: IssueState,
-        ready_state: ReadyState,
+        status: Status,
     ) -> Issue {
         Issue {
             qualified_id: qid(owner, repo, number),
@@ -600,11 +520,11 @@ mod tests {
             node_id: String::new(),
             title: format!("Issue #{number}"),
             issue_type: None,
-            status: Status::Open,
+            status,
             priority: Priority::P2,
             agent: None,
             claimed_at: None,
-            ready_state,
+            pipeline_stage: None,
             story_points: None,
             defer_until: None,
             labels: vec![],
@@ -649,83 +569,14 @@ mod tests {
     }
 
     #[test]
-    fn detects_stale_ready_state_after_external_close() {
-        // Issue #1 blocks #2. #1 is closed externally.
-        // #2's Ready State still says Blocked but the graph says Ready.
-        let q1 = qid("acme", "widgets", 1);
-        let q2 = qid("acme", "widgets", 2);
-
-        let issue1 = make_issue("acme", "widgets", 1, IssueState::Closed, ReadyState::Closed);
-        let issue2 = make_issue("acme", "widgets", 2, IssueState::Open, ReadyState::Blocked);
-        // issue2 still has Blocked even though its only blocker is closed.
-
-        let issues_vec = vec![issue1, issue2];
-        let edges = vec![edge(&q2, &q1)]; // #2 is blocked by #1
-        let graph = DependencyGraph::build(&issues_vec, &edges);
-        let computed_ready = ready_set(&graph, &issues_vec);
-        let by_id = issue_map(&issues_vec);
-
-        let engine = ReconcileEngine::new(24);
-        let report = engine.analyse(&graph, &by_id, &computed_ready, Utc::now());
-
-        assert!(!report.clean);
-        assert!(report.drift_found.iter().any(|d| matches!(
-            d,
-            DriftKind::StaleReadyState {
-                graph_says: ReadyState::Ready,
-                field_says: ReadyState::Blocked,
-                ..
-            }
-        )));
-    }
-
-    #[test]
-    fn deferred_issue_with_not_ready_field_does_not_drift() {
-        // Regression for unblock-b6b.114: a deferred issue (defer_until > today)
-        // with ReadyState::NotReady is correctly reconciled. Previously the
-        // engine mapped all non-ready issues to ReadyState::Blocked, producing
-        // a false StaleReadyState(NotReady, Blocked) drift for deferred issues.
-        use chrono::{Duration, NaiveDate};
-
-        let mut issue1 = make_issue("acme", "widgets", 1, IssueState::Open, ReadyState::NotReady);
-        // Defer 30 days into the future relative to `now` below.
-        let now = Utc::now();
-        let future: NaiveDate = (now + Duration::days(30)).date_naive();
-        issue1.defer_until = Some(future);
-
-        let issues_vec = vec![issue1];
-        let graph = DependencyGraph::build(&issues_vec, &[]);
-        // Deferred issues are excluded from the ready set by design.
-        let computed_ready = ready_set(&graph, &issues_vec);
-        let by_id = issue_map(&issues_vec);
-
-        let engine = ReconcileEngine::new(24);
-        let report = engine.analyse(&graph, &by_id, &computed_ready, now);
-
-        assert!(
-            report.clean,
-            "deferred issue with ReadyState::NotReady must not produce drift, got: {:?}",
-            report.drift_found
-        );
-        assert!(
-            !report
-                .drift_found
-                .iter()
-                .any(|d| matches!(d, DriftKind::StaleReadyState { .. })),
-            "deferred issue should not appear as StaleReadyState, got: {:?}",
-            report.drift_found
-        );
-    }
-
-    #[test]
     fn detects_uncascaded_closure() {
         // Issue #1 blocks #2. #1 was closed externally (no cascade).
         // #2 is still open and not marked Ready.
         let q1 = qid("acme", "widgets", 1);
         let q2 = qid("acme", "widgets", 2);
 
-        let issue1 = make_issue("acme", "widgets", 1, IssueState::Closed, ReadyState::Closed);
-        let issue2 = make_issue("acme", "widgets", 2, IssueState::Open, ReadyState::Blocked);
+        let issue1 = make_issue("acme", "widgets", 1, IssueState::Closed, Status::Closed);
+        let issue2 = make_issue("acme", "widgets", 2, IssueState::Open, Status::Blocked);
 
         let issues_vec = vec![issue1, issue2];
         let edges = vec![edge(&q2, &q1)]; // #2 is blocked by #1
@@ -748,8 +599,8 @@ mod tests {
     #[test]
     fn clean_report_when_consistent() {
         // Two open issues, no edges. Both marked Ready. Graph is consistent.
-        let issue1 = make_issue("acme", "widgets", 1, IssueState::Open, ReadyState::Ready);
-        let issue2 = make_issue("acme", "widgets", 2, IssueState::Open, ReadyState::Ready);
+        let issue1 = make_issue("acme", "widgets", 1, IssueState::Open, Status::Ready);
+        let issue2 = make_issue("acme", "widgets", 2, IssueState::Open, Status::Ready);
 
         let issues_vec = vec![issue1, issue2];
         let graph = DependencyGraph::build(&issues_vec, &[]);
@@ -772,9 +623,9 @@ mod tests {
         let q2 = qid("acme", "widgets", 2);
         let q3 = qid("acme", "widgets", 3);
 
-        let issue1 = make_issue("acme", "widgets", 1, IssueState::Open, ReadyState::Blocked);
-        let issue2 = make_issue("acme", "widgets", 2, IssueState::Open, ReadyState::Blocked);
-        let issue3 = make_issue("acme", "widgets", 3, IssueState::Open, ReadyState::Blocked);
+        let issue1 = make_issue("acme", "widgets", 1, IssueState::Open, Status::Blocked);
+        let issue2 = make_issue("acme", "widgets", 2, IssueState::Open, Status::Blocked);
+        let issue3 = make_issue("acme", "widgets", 3, IssueState::Open, Status::Blocked);
 
         let issues_vec = vec![issue1, issue2, issue3];
         let edges = vec![edge(&q1, &q2), edge(&q2, &q3), edge(&q3, &q1)];
@@ -797,7 +648,7 @@ mod tests {
     #[test]
     fn detects_stale_claim() {
         // Issue #1 is InProgress, claimed 48 hours ago (threshold = 24h).
-        let mut issue1 = make_issue("acme", "widgets", 1, IssueState::Open, ReadyState::Ready);
+        let mut issue1 = make_issue("acme", "widgets", 1, IssueState::Open, Status::Ready);
         issue1.status = Status::InProgress;
         issue1.agent = Some("agent:supervisor".to_string());
         issue1.claimed_at = Some(Utc::now() - Duration::hours(48));
@@ -820,7 +671,7 @@ mod tests {
     #[test]
     fn detects_malformed_agent_field() {
         // Issue #1 has agent "bad-format-no-colon" (missing ':').
-        let mut issue1 = make_issue("acme", "widgets", 1, IssueState::Open, ReadyState::Ready);
+        let mut issue1 = make_issue("acme", "widgets", 1, IssueState::Open, Status::Ready);
         issue1.agent = Some("bad-format-no-colon".to_string());
 
         let issues_vec = vec![issue1];
@@ -847,10 +698,10 @@ mod tests {
         let q1 = qid("acme", "widgets", 1);
         let q999 = qid("acme", "widgets", 999);
 
-        let issue1 = make_issue("acme", "widgets", 1, IssueState::Open, ReadyState::Blocked);
+        let issue1 = make_issue("acme", "widgets", 1, IssueState::Open, Status::Blocked);
         // #999 is in the graph (as a node created by the edge) but NOT in the issues map.
         // We need #999 to exist as a node in the graph for the edge to be added.
-        let issue999 = make_issue("acme", "widgets", 999, IssueState::Open, ReadyState::Ready);
+        let issue999 = make_issue("acme", "widgets", 999, IssueState::Open, Status::Ready);
 
         let issues_vec = vec![issue1, issue999.clone()];
         let edges = vec![edge(&q1, &q999)]; // #1 is blocked by #999
@@ -879,7 +730,7 @@ mod tests {
     #[test]
     fn no_false_positives_on_clean_graph() {
         // 5+ issues with varied topology (some edges, some standalone),
-        // all with CORRECT ReadyState. The engine must return clean: true.
+        // all with CORRECT Status. The engine must return clean: true.
         //
         // Topology:
         //   #1 (open, standalone)          → Ready
@@ -895,12 +746,12 @@ mod tests {
         let q5 = qid("acme", "widgets", 5);
         let q6 = qid("acme", "widgets", 6);
 
-        let issue1 = make_issue("acme", "widgets", 1, IssueState::Open, ReadyState::Ready);
-        let issue2 = make_issue("acme", "widgets", 2, IssueState::Open, ReadyState::Ready);
-        let issue3 = make_issue("acme", "widgets", 3, IssueState::Open, ReadyState::Blocked);
-        let issue4 = make_issue("acme", "widgets", 4, IssueState::Open, ReadyState::Ready);
-        let issue5 = make_issue("acme", "widgets", 5, IssueState::Closed, ReadyState::Closed);
-        let issue6 = make_issue("acme", "widgets", 6, IssueState::Open, ReadyState::Ready);
+        let issue1 = make_issue("acme", "widgets", 1, IssueState::Open, Status::Ready);
+        let issue2 = make_issue("acme", "widgets", 2, IssueState::Open, Status::Ready);
+        let issue3 = make_issue("acme", "widgets", 3, IssueState::Open, Status::Blocked);
+        let issue4 = make_issue("acme", "widgets", 4, IssueState::Open, Status::Ready);
+        let issue5 = make_issue("acme", "widgets", 5, IssueState::Closed, Status::Closed);
+        let issue6 = make_issue("acme", "widgets", 6, IssueState::Open, Status::Ready);
 
         let issues_vec = vec![issue1, issue2, issue3, issue4, issue5, issue6];
         let edges = vec![
@@ -948,7 +799,7 @@ mod tests {
         }
 
         proptest! {
-            /// Property: a consistent graph (where every issue's ReadyState matches
+            /// Property: a consistent graph (where every issue's Status matches
             /// what the graph computes) always produces a clean DriftReport.
             ///
             /// Strategy:
@@ -956,10 +807,10 @@ mod tests {
             /// 2. Generate random edges (filtering self-loops and out-of-range).
             /// 3. Remove edges that would create cycles (to avoid CycleDetected drift).
             /// 4. Build the graph and compute the ready set.
-            /// 5. SET each issue's ReadyState to match the graph computation:
-            ///    - Closed → ReadyState::Closed
-            ///    - Open + in ready set → ReadyState::Ready
-            ///    - Open + not in ready set → ReadyState::Blocked
+            /// 5. SET each issue's Status to match the graph computation:
+            ///    - Closed → Status::Closed
+            ///    - Open + in ready set → Status::Ready
+            ///    - Open + not in ready set → Status::Blocked
             /// 6. Assert ReconcileEngine::analyse() returns clean: true.
             #[test]
             fn prop_reconcile_on_consistent_graph_always_clean(
@@ -974,7 +825,7 @@ mod tests {
                         let idx = usize::try_from(n - 1).expect("fits in usize");
                         let state = issue_states.get(idx).copied().unwrap_or(IssueState::Open);
                         let priority = issue_priorities.get(idx).copied().unwrap_or(Priority::P2);
-                        let mut issue = make_issue("acme", "test", n, state, ReadyState::Ready);
+                        let mut issue = make_issue("acme", "test", n, state, Status::Ready);
                         issue.priority = priority;
                         issue
                     })
@@ -1009,19 +860,19 @@ mod tests {
                 let graph = DependencyGraph::build(&issues, &safe_edges);
                 let computed_ready = ready_set(&graph, &issues);
 
-                // 5. Set each issue's ReadyState to match what the graph says.
+                // 5. Set each issue's Status to match what the graph says.
                 for issue in &mut issues {
                     if issue.state == IssueState::Closed {
-                        issue.ready_state = ReadyState::Closed;
+                        issue.status = Status::Closed;
                     } else if computed_ready.contains(&issue.qualified_id) {
-                        issue.ready_state = ReadyState::Ready;
+                        issue.status = Status::Ready;
                     } else {
-                        issue.ready_state = ReadyState::Blocked;
+                        issue.status = Status::Blocked;
                     }
                 }
 
-                // Rebuild graph with corrected ReadyState values (graph itself
-                // doesn't use ReadyState, but we need the same structure).
+                // Rebuild graph with corrected Status values (graph itself
+                // doesn't use Status, but we need the same structure).
                 let graph = DependencyGraph::build(&issues, &safe_edges);
                 let computed_ready = ready_set(&graph, &issues);
                 let by_id = issue_map(&issues);
@@ -1031,7 +882,7 @@ mod tests {
                 let report = engine.analyse(&graph, &by_id, &computed_ready, chrono::Utc::now());
 
                 // The graph should be clean: no cycles (we filtered them),
-                // no stale ready states (we set them correctly), no stale claims
+                // no uncascaded closures (status matches graph), no stale claims
                 // (no agent/claimed_at set), no malformed agents (agent is None),
                 // no orphaned edges (all issues exist in the map).
                 prop_assert!(
