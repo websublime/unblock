@@ -861,6 +861,10 @@ fn extract_field_values(value: &serde_json::Value) -> std::collections::HashMap<
 }
 
 /// Maps the "Status" field value to a [`Status`] enum variant.
+// TODO(unblock-29p.2): Rework match arms when Status option values change to
+// lowercase spec values (ready, in_progress, blocked, deferred, closed).
+// Consider adding explicit Some("Backlog") => Status::Ready arm to document
+// the intentional mapping rather than relying on the catch-all default.
 fn parse_status_field(fields: &std::collections::HashMap<String, String>) -> Status {
     match fields.get("Status").map(String::as_str) {
         Some("In Progress") => Status::InProgress,
