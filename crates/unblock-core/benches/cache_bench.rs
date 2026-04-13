@@ -18,7 +18,7 @@ use tokio::runtime::Runtime;
 use unblock_core::cache::GraphCache;
 use unblock_core::graph::DependencyGraph;
 use unblock_core::types::{
-    BlockingEdge, Issue, IssueState, IssueType, Priority, QualifiedId, ReadyState, Status,
+    BlockingEdge, Issue, IssueState, IssueType, Priority, QualifiedId, Status,
 };
 
 /// Node counts used across all benchmark groups.
@@ -45,7 +45,7 @@ fn generate_issues(n: usize) -> Vec<Issue> {
                 node_id: format!("MDExOklzc3VlTm9kZV9{number}"),
                 title: format!("Benchmark issue #{number}: implement feature {i}"),
                 issue_type: Some(IssueType::Task),
-                status: Status::Open,
+                status: Status::Ready,
                 priority: match i % 5 {
                     0 => Priority::P0,
                     1 => Priority::P1,
@@ -59,7 +59,7 @@ fn generate_issues(n: usize) -> Vec<Issue> {
                     None
                 },
                 claimed_at: None,
-                ready_state: ReadyState::Ready,
+                pipeline_stage: None,
                 #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
                 story_points: Some((i % 8 + 1) as i32),
                 defer_until: None,

@@ -1,8 +1,8 @@
 //! Domain types for the unblock system.
 //!
 //! Defines the core data structures: `QualifiedId`, `Issue`, `IssueComment`,
-//! `RelatedIssue`, `IssueState`, `Status`, `Priority`, `ReadyState`, `IssueType`,
-//! `BlockingEdge`, `IssueSummary`, and `BodySections`.
+//! `RelatedIssue`, `IssueState`, `Status`, `Priority`, `PipelineStage`,
+//! `IssueType`, `BlockingEdge`, `IssueSummary`, and `BodySections`.
 //!
 //! All types are backend-agnostic — the GitHub client handles mapping from
 //! GitHub-specific field names. The graph engine works identically regardless
@@ -147,8 +147,8 @@ pub struct Issue {
     pub agent: Option<String>,
     /// Timestamp when the issue was claimed by an agent.
     pub claimed_at: Option<DateTime<Utc>>,
-    /// Ready state from Projects V2 custom field (MCP writes, never reads for logic).
-    pub ready_state: ReadyState,
+    /// Pipeline stage from Projects V2 custom field.
+    pub pipeline_stage: Option<PipelineStage>,
     /// Story points from Projects V2 custom field.
     pub story_points: Option<i32>,
     /// Date until which the issue is deferred.
@@ -199,8 +199,8 @@ pub enum IssueState {
 /// and MCP tools for workflow logic.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Status {
-    /// Issue is open and waiting to be picked up.
-    Open,
+    /// Issue is ready and waiting to be picked up.
+    Ready,
     /// Issue is actively being worked on.
     InProgress,
     /// Issue is blocked by one or more dependencies.
@@ -245,21 +245,25 @@ impl Priority {
     }
 }
 
-/// Ready state for an issue, stored as a Projects V2 custom field.
+/// Pipeline stage for an issue, stored as a Projects V2 single-select field.
 ///
-/// The MCP server writes this field to reflect computed readiness.
-/// The graph engine does **not** read this field for logic — it computes
-/// readiness from the dependency graph directly.
+/// Tracks the current lifecycle phase of work on an issue. Orthogonal to
+/// [`Status`] — `Status` tracks workflow readiness while `PipelineStage`
+/// tracks where in the development process the issue currently sits.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub enum ReadyState {
-    /// All blockers resolved — issue can be picked up.
-    Ready,
-    /// Issue has active blockers.
-    Blocked,
-    /// Issue is not ready for other reasons (e.g., deferred).
-    NotReady,
-    /// Issue is closed.
-    Closed,
+pub enum PipelineStage {
+    /// Requirements gathering and research.
+    Investigation,
+    /// Active coding and development.
+    Implementation,
+    /// Code review in progress.
+    Review,
+    /// Post-review cleanup and improvements.
+    Refactoring,
+    /// Quality assurance testing.
+    Qa,
+    /// Work is complete.
+    Done,
 }
 
 /// Classification of issue types.
@@ -315,7 +319,7 @@ impl fmt::Display for Status {
     /// MCP wire format stays stable as variants evolve.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Open => write!(f, "Open"),
+            Self::Ready => write!(f, "Ready"),
             Self::InProgress => write!(f, "InProgress"),
             Self::Blocked => write!(f, "Blocked"),
             Self::Deferred => write!(f, "Deferred"),
@@ -340,17 +344,19 @@ impl fmt::Display for Priority {
     }
 }
 
-impl fmt::Display for ReadyState {
-    /// Writes the canonical variant identifier (e.g. `"NotReady"`).
+impl fmt::Display for PipelineStage {
+    /// Writes the canonical variant identifier (e.g. `"Investigation"`).
     ///
     /// Byte-identical to the current `Debug` representation so the
     /// MCP wire format stays stable as variants evolve.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Ready => write!(f, "Ready"),
-            Self::Blocked => write!(f, "Blocked"),
-            Self::NotReady => write!(f, "NotReady"),
-            Self::Closed => write!(f, "Closed"),
+            Self::Investigation => write!(f, "Investigation"),
+            Self::Implementation => write!(f, "Implementation"),
+            Self::Review => write!(f, "Review"),
+            Self::Refactoring => write!(f, "Refactoring"),
+            Self::Qa => write!(f, "Qa"),
+            Self::Done => write!(f, "Done"),
         }
     }
 }
@@ -740,7 +746,7 @@ mod tests {
         assert_eq!(IssueType::Spike.to_string(), "Spike");
     }
 
-    // ── Status/Priority/ReadyState/IssueState Display ────────────────
+    // ── Status/Priority/PipelineStage/IssueState Display ──────────────
     //
     // These assertions lock the MCP wire format byte-for-byte against
     // the historical `Debug` output. The `ready` tool's priority filter
@@ -766,7 +772,7 @@ mod tests {
 
     fn _assert_all_status_variants_covered(v: Status) {
         match v {
-            Status::Open
+            Status::Ready
             | Status::InProgress
             | Status::Blocked
             | Status::Deferred
@@ -777,7 +783,7 @@ mod tests {
     #[test]
     fn status_display_matches_debug() {
         for v in [
-            Status::Open,
+            Status::Ready,
             Status::InProgress,
             Status::Blocked,
             Status::Deferred,
@@ -785,7 +791,7 @@ mod tests {
         ] {
             assert_eq!(v.to_string(), format!("{v:?}"));
         }
-        assert_eq!(Status::Open.to_string(), "Open");
+        assert_eq!(Status::Ready.to_string(), "Ready");
         assert_eq!(Status::InProgress.to_string(), "InProgress");
         assert_eq!(Status::Blocked.to_string(), "Blocked");
         assert_eq!(Status::Deferred.to_string(), "Deferred");
@@ -813,27 +819,35 @@ mod tests {
         assert_eq!(Priority::P4.to_string(), "P4");
     }
 
-    fn _assert_all_ready_state_variants_covered(v: ReadyState) {
+    fn _assert_all_pipeline_stage_variants_covered(v: PipelineStage) {
         match v {
-            ReadyState::Ready | ReadyState::Blocked | ReadyState::NotReady | ReadyState::Closed => {
-            }
+            PipelineStage::Investigation
+            | PipelineStage::Implementation
+            | PipelineStage::Review
+            | PipelineStage::Refactoring
+            | PipelineStage::Qa
+            | PipelineStage::Done => {}
         }
     }
 
     #[test]
-    fn ready_state_display_matches_debug() {
+    fn pipeline_stage_display_matches_debug() {
         for v in [
-            ReadyState::Ready,
-            ReadyState::Blocked,
-            ReadyState::NotReady,
-            ReadyState::Closed,
+            PipelineStage::Investigation,
+            PipelineStage::Implementation,
+            PipelineStage::Review,
+            PipelineStage::Refactoring,
+            PipelineStage::Qa,
+            PipelineStage::Done,
         ] {
             assert_eq!(v.to_string(), format!("{v:?}"));
         }
-        assert_eq!(ReadyState::Ready.to_string(), "Ready");
-        assert_eq!(ReadyState::Blocked.to_string(), "Blocked");
-        assert_eq!(ReadyState::NotReady.to_string(), "NotReady");
-        assert_eq!(ReadyState::Closed.to_string(), "Closed");
+        assert_eq!(PipelineStage::Investigation.to_string(), "Investigation");
+        assert_eq!(PipelineStage::Implementation.to_string(), "Implementation");
+        assert_eq!(PipelineStage::Review.to_string(), "Review");
+        assert_eq!(PipelineStage::Refactoring.to_string(), "Refactoring");
+        assert_eq!(PipelineStage::Qa.to_string(), "Qa");
+        assert_eq!(PipelineStage::Done.to_string(), "Done");
     }
 
     // ── QualifiedId ────────────────────────────────────────────────────
@@ -1181,7 +1195,7 @@ Notes here.";
     #[test]
     fn serde_roundtrip_status() {
         for s in &[
-            Status::Open,
+            Status::Ready,
             Status::InProgress,
             Status::Blocked,
             Status::Deferred,
