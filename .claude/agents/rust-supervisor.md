@@ -2,6 +2,7 @@
 name: rust-supervisor
 description: Rust implementation supervisor for the unblock workspace. Handles all Cargo crate development, graph engine work, MCP protocol, and GitHub API client code.
 model: opus
+effort: max
 tools: *
 ---
 
