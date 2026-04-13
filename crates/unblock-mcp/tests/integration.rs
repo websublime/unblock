@@ -242,7 +242,7 @@ async fn show_include_deps_false_skips_graph_traversal() {
 
     let server = UnblockServer::new(state);
 
-    // include_deps=false: dependency_tree must be None despite populated cache.
+    // include_deps=false: upstream/downstream must be None despite populated cache.
     let Json(result_false) = server
         .show(Parameters(ShowParams {
             issue: "1".to_owned(),
@@ -252,9 +252,14 @@ async fn show_include_deps_false_skips_graph_traversal() {
         .await
         .expect("show should succeed via dyn dispatch (include_deps=false)");
     assert!(
-        result_false.dependency_tree.is_none(),
-        "dependency_tree must be None when include_deps=false, got {:?}",
-        result_false.dependency_tree,
+        result_false.upstream.is_none(),
+        "upstream must be None when include_deps=false, got {:?}",
+        result_false.upstream,
+    );
+    assert!(
+        result_false.downstream.is_none(),
+        "downstream must be None when include_deps=false, got {:?}",
+        result_false.downstream,
     );
     assert_eq!(
         mock.calls().fetch_issue_ref(),
@@ -262,7 +267,7 @@ async fn show_include_deps_false_skips_graph_traversal() {
         "handler must still fetch the issue when include_deps=false",
     );
 
-    // include_deps=true: dependency_tree must be Some on the same handler,
+    // include_deps=true: upstream/downstream must be Some on the same handler,
     // same cache — confirming the branch is exercised end-to-end.
     let Json(result_true) = server
         .show(Parameters(ShowParams {
@@ -273,8 +278,12 @@ async fn show_include_deps_false_skips_graph_traversal() {
         .await
         .expect("show should succeed via dyn dispatch (include_deps=true)");
     assert!(
-        result_true.dependency_tree.is_some(),
-        "dependency_tree must be Some when include_deps=true and cache has graph",
+        result_true.upstream.is_some(),
+        "upstream must be Some when include_deps=true and cache has graph",
+    );
+    assert!(
+        result_true.downstream.is_some(),
+        "downstream must be Some when include_deps=true and cache has graph",
     );
     assert_eq!(mock.calls().fetch_issue_ref(), 2);
 }
@@ -332,12 +341,24 @@ async fn show_include_comments_false_skips_comments() {
     assert_eq!(mock.calls().fetch_issue_ref(), 2);
 }
 
+/// Flatten a `TreeNode` forest into `(QualifiedId, depth)` pairs for assertions.
+fn flatten_tree_nodes(
+    nodes: &[unblock_core::types::TreeNode],
+) -> Vec<(unblock_core::types::QualifiedId, usize)> {
+    let mut result = Vec::new();
+    for node in nodes {
+        result.push((node.id.clone(), node.depth));
+        result.extend(flatten_tree_nodes(&node.children));
+    }
+    result
+}
+
 /// `dependency_tree` returned for issues with blocking relationships.
 #[tokio::test]
 async fn show_dependency_tree_for_blocking_relationships() {
     let cache = GraphCache::new(Duration::from_secs(300));
 
-    // Issue #2 is blocked by issue #1.
+    // Issue #2 is blocked by issue #1, #3 is blocked by #2.
     let issues = vec![
         test_issue(1, IssueState::Open),
         test_issue(2, IssueState::Open),
@@ -357,40 +378,41 @@ async fn show_dependency_tree_for_blocking_relationships() {
     let ready_set = graph.compute_ready_set(&issues);
     cache.update(ready_set, graph).await;
 
-    // With include_deps=true and a populated cache, dependency_tree should be Some.
-    let include_deps = true;
-    let dependency_tree: Option<Vec<(QualifiedId, usize)>> = if include_deps {
-        cache
-            .get_graph()
-            .await
-            .map(|g| g.dependency_tree(&qid(1), unblock_core::types::TraversalDirection::Both, 3))
-    } else {
-        None
-    };
+    // With include_deps=true and a populated cache, the DependencyTree should have data.
+    let dep_tree = cache
+        .get_graph()
+        .await
+        .map(|g| g.dependency_tree(&qid(1), unblock_core::types::TraversalDirection::Both, 3));
 
     assert!(
-        dependency_tree.is_some(),
+        dep_tree.is_some(),
         "dependency_tree should be Some for an issue with blocking relationships",
     );
 
-    let tree = dependency_tree.unwrap();
+    let tree = dep_tree.unwrap();
+    assert_eq!(tree.root, qid(1));
+
+    // Downstream: #2 at depth 1 (blocked by #1), #3 at depth 2 (blocked by #2).
+    let downstream_flat = flatten_tree_nodes(&tree.downstream);
     assert!(
-        !tree.is_empty(),
-        "dependency_tree should not be empty for issue #1 which blocks #2",
+        !downstream_flat.is_empty(),
+        "downstream should not be empty for issue #1 which blocks #2",
     );
 
-    // Issue #2 should appear at depth 1 (directly blocked by #1).
-    let has_issue_2 = tree.iter().any(|(q, depth)| q.number == 2 && *depth == 1);
+    let has_issue_2 = downstream_flat
+        .iter()
+        .any(|(q, depth)| q.number == 2 && *depth == 1);
     assert!(
         has_issue_2,
-        "dependency_tree should contain issue #2 at depth 1: {tree:?}",
+        "downstream should contain issue #2 at depth 1: {downstream_flat:?}",
     );
 
-    // Issue #3 should appear at depth 2 (blocked by #2, which is blocked by #1).
-    let has_issue_3 = tree.iter().any(|(q, depth)| q.number == 3 && *depth == 2);
+    let has_issue_3 = downstream_flat
+        .iter()
+        .any(|(q, depth)| q.number == 3 && *depth == 2);
     assert!(
         has_issue_3,
-        "dependency_tree should contain issue #3 at depth 2: {tree:?}",
+        "downstream should contain issue #3 at depth 2: {downstream_flat:?}",
     );
 }
 
@@ -399,19 +421,14 @@ async fn show_dependency_tree_for_blocking_relationships() {
 async fn show_dependency_tree_none_when_cache_empty() {
     let cache = GraphCache::new(Duration::from_secs(300));
 
-    // Cache is empty — no graph.
-    let include_deps = true;
-    let dependency_tree: Option<Vec<(QualifiedId, usize)>> = if include_deps {
-        cache
-            .get_graph()
-            .await
-            .map(|g| g.dependency_tree(&qid(1), unblock_core::types::TraversalDirection::Both, 3))
-    } else {
-        None
-    };
+    // Cache is empty — no graph. dependency_tree returns None from get_graph.
+    let dep_tree: Option<unblock_core::types::DependencyTree> = cache
+        .get_graph()
+        .await
+        .map(|g| g.dependency_tree(&qid(1), unblock_core::types::TraversalDirection::Both, 3));
 
     assert!(
-        dependency_tree.is_none(),
+        dep_tree.is_none(),
         "dependency_tree should be None when cache is empty",
     );
 }

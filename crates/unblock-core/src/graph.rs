@@ -18,7 +18,8 @@ use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
 
 use crate::types::{
-    BlockingEdge, Issue, IssueState, IssueSummary, QualifiedId, Status, TraversalDirection,
+    BlockingEdge, DependencyTree, Issue, IssueState, IssueSummary, QualifiedId, Status,
+    TraversalDirection, TreeNode,
 };
 
 /// The dependency graph for one or more repositories.
@@ -334,62 +335,127 @@ impl DependencyGraph {
     ///   of `root` — "who blocks this issue?").
     /// - [`TraversalDirection::Downstream`] follows **incoming** edges
     ///   (dependents of `root` — "what does this issue block?").
-    /// - [`TraversalDirection::Both`] follows edges in **both** directions
-    ///   (upstream blockers and downstream dependents combined).
+    /// - [`TraversalDirection::Both`] performs **two separate BFS passes** —
+    ///   one upstream and one downstream — with independent visited sets.
     ///
-    /// Returns `(QualifiedId, depth)` pairs **excluding** the root itself.
-    /// If `root` is not in the graph the result is empty. Nodes are visited
-    /// at most once (cycle-safe).
-    // DEVIATION(unblock-b6b.20): Returns Vec<(QualifiedId, usize)> instead of
-    // DependencyTree struct per ARCH §6.4. The richer type includes Status and
-    // IssueState per node with recursive TreeNode children. Upgrade when the
-    // show tool (unblock-45a.8) is implemented.
+    /// Returns a [`DependencyTree`] with `root`, `upstream`, and `downstream`
+    /// sub-trees built as recursive [`TreeNode`] forests. Each node carries its
+    /// `status`, `state`, `depth`, and `children`.
+    ///
+    /// If `root` is not in the graph, both sub-trees are empty.
+    /// Nodes are visited at most once per direction (cycle-safe).
     #[must_use]
     pub fn dependency_tree(
         &self,
         root: &QualifiedId,
         direction: TraversalDirection,
         max_depth: usize,
-    ) -> Vec<(QualifiedId, usize)> {
+    ) -> DependencyTree {
+        let upstream = if matches!(
+            direction,
+            TraversalDirection::Upstream | TraversalDirection::Both
+        ) {
+            self.bfs_tree(root, Direction::Outgoing, max_depth)
+        } else {
+            Vec::new()
+        };
+
+        let downstream = if matches!(
+            direction,
+            TraversalDirection::Downstream | TraversalDirection::Both
+        ) {
+            self.bfs_tree(root, Direction::Incoming, max_depth)
+        } else {
+            Vec::new()
+        };
+
+        DependencyTree {
+            root: root.clone(),
+            upstream,
+            downstream,
+        }
+    }
+
+    /// BFS traversal in a single direction, building a recursive [`TreeNode`] forest.
+    ///
+    /// Returns the top-level children of `root` (depth 1), each of which may
+    /// contain nested children at deeper levels. A `visited` set prevents
+    /// revisiting nodes within the same pass, making the traversal cycle-safe.
+    fn bfs_tree(&self, root: &QualifiedId, dir: Direction, max_depth: usize) -> Vec<TreeNode> {
         let Some(&root_idx) = self.node_map.get(root) else {
             return Vec::new();
         };
 
-        let directions: &[Direction] = match direction {
-            // Upstream: follow outgoing edges (source → blocker).
-            TraversalDirection::Upstream => &[Direction::Outgoing],
-            // Downstream: follow incoming edges (dependent → source).
-            TraversalDirection::Downstream => &[Direction::Incoming],
-            // Both: follow edges in both directions from each node.
-            TraversalDirection::Both => &[Direction::Outgoing, Direction::Incoming],
-        };
-
+        // BFS produces a flat list of (node_idx, depth, parent_idx).
+        // We then reconstruct the tree by mapping parents to children.
         let mut visited = HashSet::new();
         visited.insert(root_idx);
 
+        // Queue entries: (node_idx, depth)
         let mut queue: VecDeque<(NodeIndex, usize)> = VecDeque::new();
         queue.push_back((root_idx, 0));
 
-        let mut result = Vec::new();
+        // Flat BFS result: (node_idx, depth, parent_idx)
+        let mut flat: Vec<(NodeIndex, usize, NodeIndex)> = Vec::new();
 
         while let Some((node, depth)) = queue.pop_front() {
             if depth >= max_depth {
                 continue;
             }
 
-            for &dir in directions {
-                for neighbor in self.graph.neighbors_directed(node, dir) {
-                    if visited.insert(neighbor) {
-                        let qid = self.graph[neighbor].clone();
-                        let next_depth = depth + 1;
-                        result.push((qid, next_depth));
-                        queue.push_back((neighbor, next_depth));
-                    }
+            for neighbor in self.graph.neighbors_directed(node, dir) {
+                if visited.insert(neighbor) {
+                    let next_depth = depth + 1;
+                    flat.push((neighbor, next_depth, node));
+                    queue.push_back((neighbor, next_depth));
                 }
             }
         }
 
-        result
+        // Build TreeNode instances bottom-up by processing deepest nodes first.
+        // Map from node_idx -> constructed TreeNode.
+        let mut node_trees: HashMap<NodeIndex, TreeNode> = HashMap::new();
+
+        // Sort by depth descending so children are built before parents.
+        flat.sort_by(|a, b| b.1.cmp(&a.1));
+
+        for &(node_idx, depth, _parent_idx) in &flat {
+            let qid = self.graph[node_idx].clone();
+            let status = self
+                .issue_status
+                .get(&qid)
+                .copied()
+                .unwrap_or(Status::Ready);
+            let state = self
+                .issue_state
+                .get(&qid)
+                .copied()
+                .unwrap_or(IssueState::Open);
+
+            // Collect children that were already built (deeper nodes).
+            let children: Vec<TreeNode> = flat
+                .iter()
+                .filter(|&&(_, _, parent)| parent == node_idx)
+                .filter_map(|&(child_idx, _, _)| node_trees.remove(&child_idx))
+                .collect();
+
+            node_trees.insert(
+                node_idx,
+                TreeNode {
+                    id: qid,
+                    status,
+                    state,
+                    depth,
+                    children,
+                },
+            );
+        }
+
+        // Top-level nodes are those whose parent is root_idx.
+        flat.iter()
+            .filter(|&&(_, _, parent)| parent == root_idx)
+            .filter_map(|&(node_idx, _, _)| node_trees.remove(&node_idx))
+            .collect()
     }
 
     /// Returns a reference to the internal node map.
@@ -1057,10 +1123,20 @@ mod tests {
 
     // ── dependency_tree ───────────────────────────────────────────────────
 
+    /// Flatten a `TreeNode` forest into `(QualifiedId, depth)` pairs for easy assertion.
+    fn flatten_tree(nodes: &[crate::types::TreeNode]) -> Vec<(QualifiedId, usize)> {
+        let mut result = Vec::new();
+        for node in nodes {
+            result.push((node.id.clone(), node.depth));
+            result.extend(flatten_tree(&node.children));
+        }
+        result
+    }
+
     #[test]
     fn dependency_tree_upstream_returns_blockers() {
         // 1 is blocked by 2, 2 is blocked by 3.
-        // Upstream from 1 should return [(qid(2), 1), (qid(3), 2)].
+        // Upstream from 1 should return qid(2) at depth 1, qid(3) at depth 2.
         let issues = vec![
             make_issue(1, IssueState::Open, Priority::P2),
             make_issue(2, IssueState::Open, Priority::P1),
@@ -1069,13 +1145,17 @@ mod tests {
         let edges = vec![edge(1, 2), edge(2, 3)];
         let graph = DependencyGraph::build(&issues, &edges);
         let tree = graph.dependency_tree(&qid(1), TraversalDirection::Upstream, 10);
-        assert_eq!(tree, vec![(qid(2), 1), (qid(3), 2)]);
+
+        assert_eq!(tree.root, qid(1));
+        assert!(tree.downstream.is_empty());
+        let flat = flatten_tree(&tree.upstream);
+        assert_eq!(flat, vec![(qid(2), 1), (qid(3), 2)]);
     }
 
     #[test]
     fn dependency_tree_downstream_returns_blocked_issues() {
         // 2 is blocked by 1, 3 is blocked by 1.
-        // Downstream from 1 should return [(qid(2), 1), (qid(3), 1)] (order may vary).
+        // Downstream from 1 should return qid(2) and qid(3) at depth 1.
         let issues = vec![
             make_issue(1, IssueState::Open, Priority::P2),
             make_issue(2, IssueState::Open, Priority::P1),
@@ -1083,11 +1163,15 @@ mod tests {
         ];
         let edges = vec![edge(2, 1), edge(3, 1)];
         let graph = DependencyGraph::build(&issues, &edges);
-        let mut tree = graph.dependency_tree(&qid(1), TraversalDirection::Downstream, 10);
-        tree.sort_by_key(|(q, _)| q.number);
-        assert_eq!(tree.len(), 2);
-        assert_eq!(tree[0], (qid(2), 1));
-        assert_eq!(tree[1], (qid(3), 1));
+        let tree = graph.dependency_tree(&qid(1), TraversalDirection::Downstream, 10);
+
+        assert_eq!(tree.root, qid(1));
+        assert!(tree.upstream.is_empty());
+        let mut flat = flatten_tree(&tree.downstream);
+        flat.sort_by_key(|(q, _)| q.number);
+        assert_eq!(flat.len(), 2);
+        assert_eq!(flat[0], (qid(2), 1));
+        assert_eq!(flat[1], (qid(3), 1));
     }
 
     #[test]
@@ -1102,9 +1186,11 @@ mod tests {
         let edges = vec![edge(1, 2), edge(2, 3), edge(3, 4)];
         let graph = DependencyGraph::build(&issues, &edges);
         let tree = graph.dependency_tree(&qid(1), TraversalDirection::Upstream, 2);
-        assert_eq!(tree, vec![(qid(2), 1), (qid(3), 2)]);
+
+        let flat = flatten_tree(&tree.upstream);
+        assert_eq!(flat, vec![(qid(2), 1), (qid(3), 2)]);
         // 4 is at depth 3, beyond max_depth=2.
-        assert!(!tree.iter().any(|(q, _)| q.number == 4));
+        assert!(!flat.iter().any(|(q, _)| q.number == 4));
     }
 
     #[test]
@@ -1116,7 +1202,7 @@ mod tests {
         let edges = vec![edge(1, 2)];
         let graph = DependencyGraph::build(&issues, &edges);
         let tree = graph.dependency_tree(&qid(1), TraversalDirection::Upstream, 0);
-        assert!(tree.is_empty());
+        assert!(tree.upstream.is_empty());
     }
 
     #[test]
@@ -1124,7 +1210,8 @@ mod tests {
         let issues = vec![make_issue(1, IssueState::Open, Priority::P2)];
         let graph = DependencyGraph::build(&issues, &[]);
         let tree = graph.dependency_tree(&qid(99), TraversalDirection::Upstream, 10);
-        assert!(tree.is_empty());
+        assert!(tree.upstream.is_empty());
+        assert!(tree.downstream.is_empty());
     }
 
     #[test]
@@ -1140,11 +1227,13 @@ mod tests {
         let edges = vec![edge(1, 2), edge(1, 3), edge(2, 4), edge(3, 4)];
         let graph = DependencyGraph::build(&issues, &edges);
         let tree = graph.dependency_tree(&qid(1), TraversalDirection::Upstream, 10);
+
+        let flat = flatten_tree(&tree.upstream);
         // 4 should appear exactly once at depth 2.
-        let fours: Vec<_> = tree.iter().filter(|(q, _)| q.number == 4).collect();
+        let fours: Vec<_> = flat.iter().filter(|(q, _)| q.number == 4).collect();
         assert_eq!(fours.len(), 1);
         assert_eq!(fours[0].1, 2);
-        assert_eq!(tree.len(), 3); // 2, 3, 4
+        assert_eq!(flat.len(), 3); // 2, 3, 4
     }
 
     #[test]
@@ -1157,8 +1246,10 @@ mod tests {
         let edges = vec![edge(1, 2), edge(2, 1)];
         let graph = DependencyGraph::build(&issues, &edges);
         let tree = graph.dependency_tree(&qid(1), TraversalDirection::Upstream, 10);
+
+        let flat = flatten_tree(&tree.upstream);
         // Should visit 2 at depth 1, then stop (1 already visited).
-        assert_eq!(tree, vec![(qid(2), 1)]);
+        assert_eq!(flat, vec![(qid(2), 1)]);
     }
 
     #[test]
@@ -1166,7 +1257,7 @@ mod tests {
         let issues = vec![make_issue(1, IssueState::Open, Priority::P2)];
         let graph = DependencyGraph::build(&issues, &[]);
         let tree = graph.dependency_tree(&qid(1), TraversalDirection::Upstream, 10);
-        assert!(tree.is_empty());
+        assert!(tree.upstream.is_empty());
     }
 
     #[test]
@@ -1180,19 +1271,27 @@ mod tests {
         ];
         let edges = vec![edge(1, 3), edge(2, 1)];
         let graph = DependencyGraph::build(&issues, &edges);
-        let mut tree = graph.dependency_tree(&qid(1), TraversalDirection::Both, 10);
-        tree.sort_by_key(|(q, _)| q.number);
-        assert_eq!(tree.len(), 2);
-        // Both neighbors at depth 1.
-        assert_eq!(tree[0], (qid(2), 1));
-        assert_eq!(tree[1], (qid(3), 1));
+        let tree = graph.dependency_tree(&qid(1), TraversalDirection::Both, 10);
+
+        // Upstream: issue 3 (blocker).
+        let upstream_flat = flatten_tree(&tree.upstream);
+        assert_eq!(upstream_flat.len(), 1);
+        assert_eq!(upstream_flat[0], (qid(3), 1));
+
+        // Downstream: issue 2 (dependent).
+        let downstream_flat = flatten_tree(&tree.downstream);
+        assert_eq!(downstream_flat.len(), 1);
+        assert_eq!(downstream_flat[0], (qid(2), 1));
     }
 
     #[test]
-    fn dependency_tree_both_deduplicates_shared_nodes() {
-        // Diamond: 1→2, 3→1, 2→4, 3→4.
-        // Both from 1: upstream gives 2→4, downstream gives 3→4.
-        // Node 4 is reachable from both directions but should appear only once.
+    fn dependency_tree_both_separates_directions() {
+        // Graph: edge(1,2) = 1 blocked by 2, edge(3,1) = 3 blocked by 1,
+        //        edge(2,4) = 2 blocked by 4, edge(3,4) = 3 blocked by 4.
+        // Both from 1:
+        //   Upstream (Outgoing): 1→2 (depth 1), 2→4 (depth 2).
+        //   Downstream (Incoming to 1): 3→1 edge, so 3 (depth 1).
+        //   Node 4 appears only in upstream — no edge targets 3 to make 4 downstream.
         let issues = vec![
             make_issue(1, IssueState::Open, Priority::P2),
             make_issue(2, IssueState::Open, Priority::P1),
@@ -1202,16 +1301,27 @@ mod tests {
         let edges = vec![edge(1, 2), edge(3, 1), edge(2, 4), edge(3, 4)];
         let graph = DependencyGraph::build(&issues, &edges);
         let tree = graph.dependency_tree(&qid(1), TraversalDirection::Both, 10);
-        // All three nodes (2, 3, 4) reachable, 4 only once.
-        let fours: Vec<_> = tree.iter().filter(|(q, _)| q.number == 4).collect();
-        assert_eq!(fours.len(), 1);
-        assert_eq!(tree.len(), 3);
+
+        // Upstream: 2 at depth 1, 4 at depth 2.
+        let upstream_flat = flatten_tree(&tree.upstream);
+        assert!(upstream_flat.iter().any(|(q, d)| q.number == 2 && *d == 1));
+        assert!(upstream_flat.iter().any(|(q, d)| q.number == 4 && *d == 2));
+        assert_eq!(upstream_flat.len(), 2);
+
+        // Downstream: only 3 at depth 1 (3 is blocked by 1, so 3→1 Incoming edge).
+        let downstream_flat = flatten_tree(&tree.downstream);
+        assert_eq!(downstream_flat.len(), 1);
+        assert!(
+            downstream_flat
+                .iter()
+                .any(|(q, d)| q.number == 3 && *d == 1)
+        );
     }
 
     #[test]
     fn dependency_tree_both_respects_max_depth() {
         // Chain: 2→1→3→4. Both from 1 with max_depth=1.
-        // Should see 2 (downstream, depth 1) and 3 (upstream, depth 1), but not 4.
+        // Should see 3 (upstream, depth 1) and 2 (downstream, depth 1), but not 4.
         let issues = vec![
             make_issue(1, IssueState::Open, Priority::P2),
             make_issue(2, IssueState::Open, Priority::P1),
@@ -1220,13 +1330,39 @@ mod tests {
         ];
         let edges = vec![edge(1, 3), edge(3, 4), edge(2, 1)];
         let graph = DependencyGraph::build(&issues, &edges);
-        let mut tree = graph.dependency_tree(&qid(1), TraversalDirection::Both, 1);
-        tree.sort_by_key(|(q, _)| q.number);
-        assert_eq!(tree.len(), 2);
-        assert_eq!(tree[0], (qid(2), 1));
-        assert_eq!(tree[1], (qid(3), 1));
+        let tree = graph.dependency_tree(&qid(1), TraversalDirection::Both, 1);
+
+        let upstream_flat = flatten_tree(&tree.upstream);
+        assert_eq!(upstream_flat.len(), 1);
+        assert_eq!(upstream_flat[0], (qid(3), 1));
+
+        let downstream_flat = flatten_tree(&tree.downstream);
+        assert_eq!(downstream_flat.len(), 1);
+        assert_eq!(downstream_flat[0], (qid(2), 1));
+
         // 4 is at depth 2, beyond max_depth=1.
-        assert!(!tree.iter().any(|(q, _)| q.number == 4));
+        let all_flat: Vec<_> = upstream_flat.iter().chain(downstream_flat.iter()).collect();
+        assert!(!all_flat.iter().any(|(q, _)| q.number == 4));
+    }
+
+    #[test]
+    fn dependency_tree_populates_status_and_state() {
+        // Verify that TreeNode carries the correct status and state from the graph.
+        let mut blocked_issue = make_issue(1, IssueState::Open, Priority::P2);
+        blocked_issue.status = Status::Blocked;
+        let closed_blocker = make_issue(2, IssueState::Closed, Priority::P1);
+        let issues = vec![blocked_issue, closed_blocker];
+        let edges = vec![edge(1, 2)];
+        let graph = DependencyGraph::build(&issues, &edges);
+        let tree = graph.dependency_tree(&qid(1), TraversalDirection::Upstream, 10);
+
+        assert_eq!(tree.upstream.len(), 1);
+        let node = &tree.upstream[0];
+        assert_eq!(node.id, qid(2));
+        assert_eq!(node.status, Status::Ready);
+        assert_eq!(node.state, IssueState::Closed);
+        assert_eq!(node.depth, 1);
+        assert!(node.children.is_empty());
     }
 
     #[test]
