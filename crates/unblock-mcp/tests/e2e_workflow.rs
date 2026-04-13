@@ -510,7 +510,7 @@ async fn e2e_workflow_all_10_tools() {
         && let Ok(item_id) = client
             .get_project_item_id(&issue_a.node_id, &project_info.id)
             .await
-        && let Some(option_id) = field_ids.priority.options.get("P0")
+        && let Some(option_id) = field_ids.priority.option_id_by_prefix("P0")
     {
         let _ = client
             .update_field(
