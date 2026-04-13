@@ -1150,7 +1150,7 @@ mod tests {
     }
 
     #[test]
-    fn status_field_missing_defaults_open() {
+    fn status_field_missing_defaults_ready() {
         let fields = std::collections::HashMap::new();
         assert_eq!(parse_status_field(&fields), Status::Ready);
     }
