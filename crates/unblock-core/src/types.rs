@@ -2,7 +2,8 @@
 //!
 //! Defines the core data structures: `QualifiedId`, `Issue`, `IssueComment`,
 //! `RelatedIssue`, `IssueState`, `Status`, `Priority`, `PipelineStage`,
-//! `IssueType`, `BlockingEdge`, `IssueSummary`, and `BodySections`.
+//! `IssueType`, `BlockingEdge`, `IssueSummary`, `TreeNode`, `DependencyTree`,
+//! and `BodySections`.
 //!
 //! All types are backend-agnostic — the GitHub client handles mapping from
 //! GitHub-specific field names. The graph engine works identically regardless
@@ -540,6 +541,43 @@ pub enum TraversalDirection {
     Downstream,
     /// Follow both directions — upstream blockers and downstream dependents.
     Both,
+}
+
+/// A node in a dependency tree traversal.
+///
+/// Represents one issue encountered during BFS with its workflow status,
+/// GitHub state, depth from the root, and any child nodes discovered at
+/// deeper levels. Built recursively by
+/// [`DependencyGraph::dependency_tree()`](crate::graph::DependencyGraph::dependency_tree).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TreeNode {
+    /// Fully qualified issue identifier (`owner/repo#number`).
+    pub id: QualifiedId,
+    /// Workflow status snapshot at graph-build time.
+    pub status: Status,
+    /// GitHub native state snapshot at graph-build time.
+    pub state: IssueState,
+    /// BFS depth from the root (1 = direct dependency).
+    pub depth: usize,
+    /// Child nodes discovered at the next depth level.
+    pub children: Vec<TreeNode>,
+}
+
+/// Structured dependency tree returned by
+/// [`DependencyGraph::dependency_tree()`](crate::graph::DependencyGraph::dependency_tree).
+///
+/// Contains separate upstream (blockers) and downstream (dependents)
+/// sub-trees rooted at the query issue. Each sub-tree is a recursive
+/// [`TreeNode`] forest built via BFS with independent visited sets per
+/// direction (spec §3.7).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DependencyTree {
+    /// The root issue used as the traversal starting point.
+    pub root: QualifiedId,
+    /// Upstream sub-tree: issues that the root depends on (outgoing edges).
+    pub upstream: Vec<TreeNode>,
+    /// Downstream sub-tree: issues that depend on the root (incoming edges).
+    pub downstream: Vec<TreeNode>,
 }
 
 /// Parsed sections from the issue body markdown.

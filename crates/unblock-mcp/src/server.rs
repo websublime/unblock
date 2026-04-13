@@ -30,8 +30,8 @@ use crate::tools::ready::{ReadyParams, ReadyResult};
 use crate::tools::reconcile::{ReconcileOutput, ReconcileParams};
 use crate::tools::setup::{REQUIRED_VIEWS, SetupParams, SetupResult};
 use crate::tools::show::{
-    DependencyTreeEntry, ShowBodySections, ShowComment, ShowIssue, ShowParams, ShowRelatedIssue,
-    ShowResult,
+    ShowBodySections, ShowComment, ShowIssue, ShowParams, ShowRelatedIssue, ShowResult,
+    ShowTreeNode,
 };
 use crate::tools::update::{BodySectionUpdate, SectionName, UpdateParams, UpdateResult};
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -722,7 +722,7 @@ impl UnblockServer {
         // Step 4: If include_deps, get dependency tree from cached graph.
         // Only local issues live in the cached graph — cross-repo targets
         // return `None` (no tree) since the graph doesn't track them.
-        let dependency_tree = if include_deps {
+        let (upstream, downstream) = if include_deps {
             let (owner, repo, number) = match &issue_ref {
                 unblock_core::types::IssueRef::Local(n) => {
                     (client.owner().to_owned(), client.repo().to_owned(), *n)
@@ -734,18 +734,27 @@ impl UnblockServer {
                 } => (owner.clone(), repo.clone(), *number),
             };
             let issue_qid = unblock_core::types::QualifiedId::new(&owner, &repo, number);
-            state.cache.get_graph().await.map(|graph| {
-                graph
-                    .dependency_tree(&issue_qid, unblock_core::types::TraversalDirection::Both, 3)
-                    .into_iter()
-                    .map(|(qid, depth)| DependencyTreeEntry {
-                        issue_number: qid.number,
-                        depth,
-                    })
-                    .collect()
-            })
+            match state.cache.get_graph().await {
+                Some(graph) => {
+                    let tree = graph.dependency_tree(
+                        &issue_qid,
+                        unblock_core::types::TraversalDirection::Both,
+                        3,
+                    );
+                    (
+                        Some(tree.upstream.iter().map(ShowTreeNode::from_core).collect()),
+                        Some(
+                            tree.downstream
+                                .iter()
+                                .map(ShowTreeNode::from_core)
+                                .collect(),
+                        ),
+                    )
+                }
+                None => (None, None),
+            }
         } else {
-            None
+            (None, None)
         };
 
         // Step 5: If include_comments, include comments from the issue.
@@ -799,7 +808,8 @@ impl UnblockServer {
             blocked_by,
             parent,
             sub_issues,
-            dependency_tree,
+            upstream,
+            downstream,
             comments,
         }))
     }

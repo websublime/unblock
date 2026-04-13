@@ -36,7 +36,8 @@ pub struct ShowParams {
 /// Result returned by the `show` MCP tool.
 ///
 /// Contains the full issue detail, parsed body sections, blocking
-/// relationships, an optional dependency tree, and optional comments.
+/// relationships, optional upstream/downstream dependency trees, and
+/// optional comments.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ShowResult {
     /// Full issue data serialized as JSON. Contains all fields from the
@@ -52,10 +53,12 @@ pub struct ShowResult {
     pub parent: Option<ShowRelatedIssue>,
     /// Sub-issues of this issue.
     pub sub_issues: Vec<ShowRelatedIssue>,
-    /// Dependency tree from the cached graph, up to depth 3.
-    /// Each entry is `(issue_number, depth)`. `None` if `include_deps`
-    /// is `false` or the graph cache is empty.
-    pub dependency_tree: Option<Vec<DependencyTreeEntry>>,
+    /// Upstream dependency tree (what this issue depends on).
+    /// `None` if `include_deps` is `false` or the graph cache is empty.
+    pub upstream: Option<Vec<ShowTreeNode>>,
+    /// Downstream dependency tree (what depends on this issue).
+    /// `None` if `include_deps` is `false` or the graph cache is empty.
+    pub downstream: Option<Vec<ShowTreeNode>>,
     /// Comments on the issue. `None` if `include_comments` is `false`.
     pub comments: Option<Vec<ShowComment>>,
 }
@@ -149,16 +152,36 @@ impl From<&RelatedIssue> for ShowRelatedIssue {
     }
 }
 
-/// A single entry in the dependency tree.
+/// A node in a dependency tree for the show result.
 ///
-/// Wraps the `(issue_number, depth)` tuple from `DependencyGraph::dependency_tree()`
-/// with named fields and `JsonSchema` support.
+/// Re-declared from `unblock_core::types::TreeNode` with `JsonSchema`
+/// derive and string-rendered enum fields for stable MCP wire format.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
-pub struct DependencyTreeEntry {
-    /// GitHub issue number of the dependency.
-    pub issue_number: u64,
+pub struct ShowTreeNode {
+    /// Fully qualified issue identifier (`owner/repo#number`).
+    pub id: String,
+    /// Workflow status at graph-build time.
+    pub status: String,
+    /// GitHub native issue state at graph-build time.
+    pub state: String,
     /// BFS depth from the root issue (1 = direct dependency).
     pub depth: usize,
+    /// Child nodes at deeper levels.
+    pub children: Vec<ShowTreeNode>,
+}
+
+impl ShowTreeNode {
+    /// Convert a core [`TreeNode`](unblock_core::types::TreeNode) into
+    /// the schemars-friendly wire type recursively.
+    pub fn from_core(node: &unblock_core::types::TreeNode) -> Self {
+        Self {
+            id: node.id.to_string(),
+            status: node.status.to_string(),
+            state: node.state.to_string(),
+            depth: node.depth,
+            children: node.children.iter().map(Self::from_core).collect(),
+        }
+    }
 }
 
 /// A comment on the issue for the show result.
