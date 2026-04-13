@@ -257,7 +257,7 @@ impl UnblockServer {
 /// `pub(crate)` otherwise (production builds).
 macro_rules! define_set_project_fields {
     ($vis:vis) => {
-        /// Updates Priority, `IssueType`, Status, `ReadyState`, `StoryPoints`,
+        /// Updates Priority, `IssueType`, Status, `StoryPoints`,
         /// and `DeferUntil`. Each field update is best-effort: failures are
         /// logged as warnings but do not abort the remaining updates. This
         /// keeps the create flow resilient to partial project configuration
@@ -279,7 +279,6 @@ macro_rules! define_set_project_fields {
             priority: &str,
             issue_type: &str,
             status: &str,
-            ready_state: &str,
             story_points: Option<f64>,
             defer_until: Option<chrono::NaiveDate>,
         ) {
@@ -325,20 +324,6 @@ macro_rules! define_set_project_fields {
                     .await
             {
                 tracing::warn!(error = %e, "Failed to set Status field");
-            }
-
-            // Set ReadyState.
-            if let Some(option_id) = field_ids.ready_state.options.get(ready_state)
-                && let Err(e) = client
-                    .update_field(
-                        project_id,
-                        item_id,
-                        &field_ids.ready_state.field_id,
-                        &FieldValue::SingleSelectOption(option_id.clone()),
-                    )
-                    .await
-            {
-                tracing::warn!(error = %e, "Failed to set ReadyState field");
             }
 
             // Set StoryPoints if provided.
@@ -535,7 +520,7 @@ impl UnblockServer {
     /// without mutating anything.
     #[tool(
         name = "setup",
-        description = "Configure Projects V2 fields (Status, Priority, IssueType, Agent, StoryPoints, DeferUntil, ReadyState) and views (://ready, ://team, ://pipeline, ://roadmap, ://timeline). Safe to call repeatedly — existing fields/views are skipped. Use dry_run=true to check without mutating."
+        description = "Configure Projects V2 fields (Status, Priority, IssueType, Agent, StoryPoints, DeferUntil) and views (://ready, ://team, ://pipeline, ://roadmap, ://timeline). Safe to call repeatedly — existing fields/views are skipped. Use dry_run=true to check without mutating."
     )]
     pub async fn setup(
         &self,
@@ -790,7 +775,7 @@ impl UnblockServer {
             priority: issue.priority.to_string(),
             agent: issue.agent.clone(),
             claimed_at: issue.claimed_at.map(|dt| dt.to_rfc3339()),
-            ready_state: issue.ready_state.to_string(),
+            pipeline_stage: issue.pipeline_stage.map(|ps| ps.to_string()),
             story_points: issue.story_points,
             defer_until: issue.defer_until.map(|d| d.to_string()),
             labels: issue.labels.clone(),
@@ -881,7 +866,7 @@ impl UnblockServer {
     ///
     /// Validates the issue is open, unblocked, not deferred, and not already
     /// claimed. Then updates Projects V2 fields (Status=In Progress, Agent=name,
-    /// ReadyState=Not Ready) and posts a claim comment.
+    /// and posts a claim comment.
     ///
     /// Validation order (cheapest first): closed, blocked, deferred, already claimed.
     ///
@@ -889,7 +874,7 @@ impl UnblockServer {
     /// mutations complete.
     #[tool(
         name = "claim",
-        description = "Claim an issue for an agent. Validates the issue is open, unblocked, not deferred, and not already claimed. Sets Status=In Progress, Agent=name, ReadyState=Not Ready, and posts a comment. Triggers graph rebuild."
+        description = "Claim an issue for an agent. Validates the issue is open, unblocked, not deferred, and not already claimed. Sets Status=In Progress, Agent=name, and posts a comment. Triggers graph rebuild."
     )]
     pub async fn claim(
         &self,
@@ -966,20 +951,6 @@ impl UnblockServer {
                             {
                                 tracing::warn!(error = %e, "Failed to set Agent field");
                             }
-
-                            // ReadyState -> Not Ready
-                            if let Some(option_id) = field_ids.ready_state.options.get("Not Ready")
-                                && let Err(e) = client
-                                    .update_field(
-                                        &project_info.id,
-                                        &item_id,
-                                        &field_ids.ready_state.field_id,
-                                        &FieldValue::SingleSelectOption(option_id.clone()),
-                                    )
-                                    .await
-                            {
-                                tracing::warn!(error = %e, "Failed to set ReadyState field");
-                            }
                         } else {
                             tracing::warn!(
                                 "Failed to get project item ID — fields will not be set"
@@ -1018,17 +989,16 @@ impl UnblockServer {
     /// Close an issue and cascade-unblock dependents.
     ///
     /// Validates the issue is open, optionally adds a reason comment, closes it
-    /// via the GitHub API, updates Projects V2 fields (Status=Done,
-    /// ReadyState=Not Ready), rebuilds the cache, then computes the unblock
-    /// cascade. For each newly unblocked issue, updates its Projects V2 fields
-    /// (ReadyState=Ready, Status=Backlog if not already `InProgress`) and posts
-    /// an unblock comment.
+    /// via the GitHub API, updates Projects V2 fields (Status=Done),
+    /// rebuilds the cache, then computes the unblock cascade. For each newly
+    /// unblocked issue, updates its Projects V2 fields (Status=Backlog if not
+    /// already `InProgress`) and posts an unblock comment.
     ///
     /// This is a write tool -- uses `execute_write_tool` for the close mutation
     /// and cache rebuild, then performs cascade updates as a second phase.
     #[tool(
         name = "close",
-        description = "Close an issue and cascade-unblock dependents. Validates the issue is open, closes it, updates project fields (Status=Done, ReadyState=Not Ready), and auto-unblocks any dependent issues whose blockers are now all closed. Returns the list of newly unblocked issue numbers. Triggers graph rebuild."
+        description = "Close an issue and cascade-unblock dependents. Validates the issue is open, closes it, updates project fields (Status=Done), and auto-unblocks any dependent issues whose blockers are now all closed. Returns the list of newly unblocked issue numbers. Triggers graph rebuild."
     )]
     pub async fn close(
         &self,
@@ -1072,7 +1042,7 @@ impl UnblockServer {
                 client.close_issue(issue_number, reason).await?;
 
                 // Step 3: Update Projects V2 fields on the closed issue:
-                // Status → Done, ReadyState → Not Ready.
+                // Status → Done.
                 // TODO(unblock-b6b.79): Extract shared project field update helper to
                 // deduplicate this if-let ladder (also in claim handler and cascade below).
                 if let Some(field_ids) = client.field_ids().await {
@@ -1095,23 +1065,6 @@ impl UnblockServer {
                                 tracing::warn!(error = %e, "Failed to set Status=Done on closed issue");
                             }
 
-                            // ReadyState → Not Ready
-                            if let Some(option_id) =
-                                field_ids.ready_state.options.get("Not Ready")
-                                && let Err(e) = client
-                                    .update_field(
-                                        &project_info.id,
-                                        &item_id,
-                                        &field_ids.ready_state.field_id,
-                                        &FieldValue::SingleSelectOption(option_id.clone()),
-                                    )
-                                    .await
-                            {
-                                tracing::warn!(
-                                    error = %e,
-                                    "Failed to set ReadyState=Not Ready on closed issue"
-                                );
-                            }
                         } else {
                             tracing::warn!(
                                 "Failed to get project item ID for closed issue — fields will not be set"
@@ -1158,7 +1111,7 @@ impl UnblockServer {
                     );
                 }
 
-                // Update Projects V2 fields: ReadyState → Ready,
+                // Update Projects V2 fields:
                 // Status → Backlog (if not already InProgress).
                 // TODO(unblock-b6b.79): Third copy of field update ladder — extract shared helper.
                 if let Some(field_ids) = client.field_ids().await
@@ -1171,24 +1124,6 @@ impl UnblockServer {
                                 .get_project_item_id(&cascaded_issue.node_id, &project_info.id)
                                 .await
                             {
-                                // ReadyState → Ready
-                                if let Some(option_id) = field_ids.ready_state.options.get("Ready")
-                                    && let Err(e) = client
-                                        .update_field(
-                                            &project_info.id,
-                                            &item_id,
-                                            &field_ids.ready_state.field_id,
-                                            &FieldValue::SingleSelectOption(option_id.clone()),
-                                        )
-                                        .await
-                                {
-                                    tracing::warn!(
-                                        cascaded_number,
-                                        error = %e,
-                                        "Failed to set ReadyState=Ready on cascaded issue"
-                                    );
-                                }
-
                                 // Status → Backlog (only if not already InProgress).
                                 if cascaded_issue.status != unblock_core::types::Status::InProgress
                                     && let Some(option_id) = field_ids.status.options.get("Backlog")
@@ -1241,7 +1176,7 @@ impl UnblockServer {
     /// Makes the source issue blocked by the target issue. Validates the source
     /// exists, checks for cycles and duplicates using the cached graph, creates
     /// the blocking relationship via the GitHub API, updates Projects V2 fields
-    /// (ReadyState=Not Ready, Status=Blocked) on the source, and rebuilds the
+    /// (Status=Blocked) on the source, and rebuilds the
     /// cache.
     ///
     /// The target accepts a local issue number (e.g. `"42"`) or a cross-repo
@@ -1251,7 +1186,7 @@ impl UnblockServer {
     /// cache rebuild.
     #[tool(
         name = "depends",
-        description = "Add a blocking dependency: source becomes blocked by target. Validates both issues exist, rejects cycles and duplicates. Target accepts local number or owner/repo#number for cross-repo. Updates project fields (ReadyState=Not Ready, Status=Blocked) on source. Triggers graph rebuild."
+        description = "Add a blocking dependency: source becomes blocked by target. Validates both issues exist, rejects cycles and duplicates. Target accepts local number or owner/repo#number for cross-repo. Updates project fields (Status=Blocked) on source. Triggers graph rebuild."
     )]
     pub async fn depends(
         &self,
@@ -1317,7 +1252,7 @@ impl UnblockServer {
         .await?;
 
         // Step 4: Update Projects V2 fields on source issue:
-        // ReadyState → Not Ready, Status → Blocked.
+        // Status → Blocked.
         // TODO(unblock-b6b.79): Fourth copy of field update ladder — extract shared helper.
         if let Some(field_ids) = client.field_ids().await {
             if let Ok(project_info) = client.resolve_project_info().await {
@@ -1325,23 +1260,6 @@ impl UnblockServer {
                     .get_project_item_id(&source_issue.node_id, &project_info.id)
                     .await
                 {
-                    // ReadyState → Not Ready
-                    if let Some(option_id) = field_ids.ready_state.options.get("Not Ready")
-                        && let Err(e) = client
-                            .update_field(
-                                &project_info.id,
-                                &item_id,
-                                &field_ids.ready_state.field_id,
-                                &FieldValue::SingleSelectOption(option_id.clone()),
-                            )
-                            .await
-                    {
-                        tracing::warn!(
-                            error = %e,
-                            "Failed to set ReadyState=Not Ready on source issue"
-                        );
-                    }
-
                     // Status → Blocked
                     if let Some(option_id) = field_ids.status.options.get("Blocked")
                         && let Err(e) = client
@@ -1378,7 +1296,7 @@ impl UnblockServer {
             source,
             target: target_str,
             message: format!(
-                "Issue #{source} is now blocked by {issue_ref}. Source marked as Not Ready/Blocked."
+                "Issue #{source} is now blocked by {issue_ref}. Source marked as Blocked."
             ),
         }))
     }
@@ -1388,7 +1306,7 @@ impl UnblockServer {
     ///
     /// Creates the issue via REST, adds it to the configured project, sets
     /// custom fields (Priority, `IssueType`, `StoryPoints`, `DeferUntil`, Status,
-    /// `ReadyState`), and optionally adds blocking relationships and parent linkage.
+    /// and optionally adds blocking relationships and parent linkage.
     ///
     /// This is a write tool — the cache is invalidated and rebuilt after all
     /// mutations complete.
@@ -1571,11 +1489,11 @@ impl UnblockServer {
                                 Ok(item_id) => {
                                     added_to_project = true;
 
-                                    let (initial_status, initial_ready_state) =
+                                    let initial_status =
                                         if blocked_by_refs.is_empty() {
-                                            ("Backlog", "Ready")
+                                            "Backlog"
                                         } else {
-                                            ("Blocked", "Not Ready")
+                                            "Blocked"
                                         };
 
                                     set_project_fields(
@@ -1586,7 +1504,6 @@ impl UnblockServer {
                                         &priority_owned,
                                         &issue_type_owned,
                                         initial_status,
-                                        initial_ready_state,
                                         story_points,
                                         defer_until,
                                     )

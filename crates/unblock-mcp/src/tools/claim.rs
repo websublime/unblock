@@ -2,7 +2,7 @@
 //!
 //! Validates the issue is open, unblocked, not deferred, and not already claimed,
 //! then updates Projects V2 fields (Status=In Progress, Agent=name,
-//! ReadyState=Not Ready) and posts a claim comment. Uses `execute_write_tool()`
+//! and posts a claim comment. Uses `execute_write_tool()`
 //! to rebuild the cache after all mutations complete.
 //!
 //! The validation logic is extracted into `validate_claimable` so it can be
@@ -172,7 +172,7 @@ mod tests {
         ClaimCandidate {
             number,
             state: IssueState::Open,
-            status: Status::Open,
+            status: Status::Ready,
             agent: None,
             blocked_by: vec![],
             defer_until: None,

@@ -467,17 +467,7 @@ async fn e2e_workflow_all_10_tools() {
             )
             .await;
 
-        // ReadyState -> Not Ready
-        if let Some(option_id) = field_ids.ready_state.options.get("Not Ready") {
-            let _ = client
-                .update_field(
-                    &project_info.id,
-                    &item_id,
-                    &field_ids.ready_state.field_id,
-                    &FieldValue::SingleSelectOption(option_id.clone()),
-                )
-                .await;
-        }
+        // (ReadyState field removed — Status field now covers ready/blocked state)
     }
 
     rebuild_cache(&state).await;

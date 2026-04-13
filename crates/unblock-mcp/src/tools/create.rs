@@ -2,7 +2,7 @@
 //!
 //! Builds the issue via REST, adds it to the Projects V2 project, sets custom
 //! fields (Priority, `IssueType`, `StoryPoints`, `DeferUntil`, Status=Backlog,
-//! ReadyState=Ready), optionally adds blocking relationships and parent linkage.
+//! optionally adds blocking relationships and parent linkage.
 //! Uses `execute_write_tool()` to rebuild the cache after all mutations complete.
 
 use schemars::JsonSchema;

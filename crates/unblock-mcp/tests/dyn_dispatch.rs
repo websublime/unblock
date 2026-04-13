@@ -19,9 +19,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use rmcp::handler::server::wrapper::{Json, Parameters};
-use unblock_core::types::{
-    Issue, IssueState, IssueType, Priority, QualifiedId, ReadyState, Status,
-};
+use unblock_core::types::{Issue, IssueState, IssueType, Priority, QualifiedId, Status};
 use unblock_github::GitHubApi;
 use unblock_github::projects::{
     CreatedProject, FieldMeta, OwnerType, ProjectFieldIds, ProjectInfo, ProjectView, SetupStatus,
@@ -54,11 +52,11 @@ fn make_issue(number: u64) -> Issue {
         node_id: format!("I_{number}"),
         title: format!("Issue #{number}"),
         issue_type: Some(IssueType::Task),
-        status: Status::Open,
+        status: Status::Ready,
         priority: Priority::P2,
         agent: None,
         claimed_at: None,
-        ready_state: ReadyState::Ready,
+        pipeline_stage: None,
         story_points: None,
         defer_until: None,
         labels: vec![],
@@ -83,7 +81,7 @@ fn make_issue(number: u64) -> Issue {
 /// enter the `field_ids = Some(...)` branch and call `resolve_project_info`
 /// and `get_project_item_id`. Because the option maps are empty, no
 /// `update_field` calls are made for select-option fields (`status`,
-/// `priority`, `issue_type`, `ready_state`). Plain-text and numeric fields
+/// `priority`, `issue_type`). Plain-text and numeric fields
 /// (`agent`, `story_points`, `defer_until`) bypass the option map and DO
 /// call `update_field`.
 fn empty_field_ids() -> ProjectFieldIds {
@@ -98,7 +96,6 @@ fn empty_field_ids() -> ProjectFieldIds {
         agent: "agent".to_owned(),
         story_points: "sp".to_owned(),
         defer_until: "du".to_owned(),
-        ready_state: meta(),
     }
 }
 
@@ -323,8 +320,8 @@ async fn claim_dispatches_through_dyn_vtable() {
     assert_eq!(mock.calls().field_ids(), 1);
     assert_eq!(mock.calls().resolve_project_info(), 1);
     assert_eq!(mock.calls().get_project_item_id(), 1);
-    // Only the Agent text-field update fires; option-gated fields (Status,
-    // ReadyState) are skipped because empty_field_ids() has empty option maps.
+    // Only the Agent text-field update fires; option-gated fields (Status)
+    // are skipped because empty_field_ids() has empty option maps.
     assert_eq!(mock.calls().update_field(), 1);
 }
 
@@ -368,8 +365,8 @@ async fn close_dispatches_through_dyn_vtable() {
     mock.push_fetch_issue(Ok(make_issue(8)));
     mock.push_close_issue(Ok(()));
     // field_ids=Some enters the project-field update branch. With empty
-    // option maps, no update_field calls are made (Status=Done and
-    // ReadyState=Not Ready are both gated by options.get()).
+    // option maps, no update_field calls are made (Status=Done is
+    // gated by options.get()).
     mock.push_field_ids(Some(empty_field_ids()));
     mock.push_resolve_project_info(Ok(ProjectInfo {
         id: "PVT_1".to_owned(),
@@ -434,8 +431,8 @@ async fn depends_dispatches_through_dyn_vtable() {
     mock.push_fetch_issue(Ok(make_issue(3))); // source
     mock.push_add_blocked_by_ref(Ok(()));
     // field_ids=Some enters the project-field update branch. With empty
-    // option maps, no update_field calls are made (ReadyState=Not Ready
-    // and Status=Blocked are both gated by options.get()).
+    // option maps, no update_field calls are made (Status=Blocked is
+    // gated by options.get()).
     mock.push_field_ids(Some(empty_field_ids()));
     mock.push_resolve_project_info(Ok(ProjectInfo {
         id: "PVT_1".to_owned(),
@@ -472,7 +469,7 @@ async fn create_dispatches_through_dyn_vtable() {
     mock.push_create_issue(Ok(make_issue(100)));
     // field_ids=Some enters the project-field update branch. With empty
     // option maps, no update_field calls are made (all create fields —
-    // Priority, IssueType, Status, ReadyState — are gated by options.get()).
+    // Priority, IssueType, Status — are gated by options.get()).
     mock.push_field_ids(Some(empty_field_ids()));
     mock.push_resolve_project_info(Ok(ProjectInfo {
         id: "PVT_1".to_owned(),
