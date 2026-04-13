@@ -308,7 +308,7 @@ async fn fetch_graph_data_issues_have_valid_status_and_priority() {
         // Status must be one of the known variants.
         let valid = matches!(
             issue.status,
-            Status::Open | Status::InProgress | Status::Blocked | Status::Deferred | Status::Closed
+            Status::Ready | Status::InProgress | Status::Blocked | Status::Deferred | Status::Closed
         );
         assert!(
             valid,
@@ -1139,16 +1139,12 @@ async fn setup_fields_creates_all_seven_fields() {
         !field_ids.defer_until.is_empty(),
         "DeferUntil field_id should be non-empty"
     );
-    assert!(
-        !field_ids.ready_state.field_id.is_empty(),
-        "ReadyState field_id should be non-empty"
-    );
 
-    // Verify created + skipped covers all 7 fields.
+    // Verify created + skipped covers all 6 fields.
     assert_eq!(
         report.created.len() + report.skipped.len(),
-        7,
-        "created + skipped should total 7, got created={:?} skipped={:?}",
+        6,
+        "created + skipped should total 6, got created={:?} skipped={:?}",
         report.created,
         report.skipped
     );
@@ -1192,19 +1188,8 @@ async fn setup_fields_creates_all_seven_fields() {
         );
     }
 
-    assert_eq!(
-        field_ids.ready_state.options.len(),
-        2,
-        "ReadyState should have 2 options"
-    );
-    for expected in &["Ready", "Not Ready"] {
-        assert!(
-            field_ids.ready_state.options.contains_key(*expected),
-            "ReadyState should have option '{expected}'"
-        );
-    }
 
-    eprintln!("setup_fields: all 7 fields created with correct options");
+    eprintln!("setup_fields: all 6 fields created with correct options");
 }
 
 #[tokio::test]
@@ -1275,10 +1260,6 @@ async fn setup_fields_is_idempotent() {
     assert_eq!(
         first_ids.defer_until, second_ids.defer_until,
         "DeferUntil field_id should be stable across calls"
-    );
-    assert_eq!(
-        first_ids.ready_state.field_id, second_ids.ready_state.field_id,
-        "ReadyState field_id should be stable across calls"
     );
 
     eprintln!("setup_fields idempotent: field IDs match across two calls");

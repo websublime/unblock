@@ -797,10 +797,6 @@ mod tests {
             agent: "f4".to_owned(),
             story_points: "f5".to_owned(),
             defer_until: "f6".to_owned(),
-            ready_state: crate::projects::FieldMeta {
-                field_id: "f7".to_owned(),
-                options: std::collections::HashMap::new(),
-            },
         };
         m.set_field_ids(ids).await;
         assert_eq!(m.calls().set_field_ids(), 1);
