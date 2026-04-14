@@ -45,10 +45,10 @@ const MAX_LIMIT: usize = 200;
 /// Canonical sort identifier for "priority" (default ordering).
 const SORT_PRIORITY: &str = "priority";
 
-/// Canonical sort identifier for "created" (created_at ASC).
+/// Canonical sort identifier for "created" (`created_at` ASC).
 const SORT_CREATED: &str = "created";
 
-/// Canonical sort identifier for "updated" (updated_at DESC).
+/// Canonical sort identifier for "updated" (`updated_at` DESC).
 const SORT_UPDATED: &str = "updated";
 
 /// Input parameters for the `list` MCP tool.
@@ -131,7 +131,8 @@ pub struct ListResult {
 /// without coupling the core crate to `schemars` and so it can carry
 /// `updated_at` and `assignees` (which are absent from `IssueSummary`)
 /// without expanding the core type. Sourced directly from
-/// [`unblock_core::types::Issue`] in [`build_list_summaries`].
+/// [`unblock_core::types::Issue`] via the internal `build_list_rows`
+/// projection.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ListIssueSummary {
     /// GitHub issue number.
@@ -287,13 +288,9 @@ fn filter_sort_paginate(
     let mut filtered: Vec<&ListRow> = rows
         .iter()
         // status: case-insensitive Display match (e.g. "ready"=="Ready").
-        .filter(|r| {
-            status_filter.is_none_or(|f| r.status.to_string().eq_ignore_ascii_case(f))
-        })
+        .filter(|r| status_filter.is_none_or(|f| r.status.to_string().eq_ignore_ascii_case(f)))
         // priority: case-insensitive Display match (e.g. "p0"=="P0").
-        .filter(|r| {
-            priority_filter.is_none_or(|f| r.priority.to_string().eq_ignore_ascii_case(f))
-        })
+        .filter(|r| priority_filter.is_none_or(|f| r.priority.to_string().eq_ignore_ascii_case(f)))
         // issue_type: case-insensitive Display match.
         .filter(|r| {
             issue_type_filter.is_none_or(|f| {
@@ -307,14 +304,10 @@ fn filter_sort_paginate(
         // agent: exact match (matching ready.rs:151).
         .filter(|r| agent_filter.is_none_or(|f| r.agent.as_deref() == Some(f)))
         // label: any label case-insensitive match (matching ready.rs:153).
-        .filter(|r| {
-            label_filter.is_none_or(|f| r.labels.iter().any(|l| l.eq_ignore_ascii_case(f)))
-        })
+        .filter(|r| label_filter.is_none_or(|f| r.labels.iter().any(|l| l.eq_ignore_ascii_case(f))))
         // assignee: any assignee exact match — GitHub stores logins as
         // canonical strings, and exact match mirrors the agent filter.
-        .filter(|r| {
-            assignee_filter.is_none_or(|f| r.assignees.iter().any(|a| a == f))
-        })
+        .filter(|r| assignee_filter.is_none_or(|f| r.assignees.iter().any(|a| a == f)))
         .collect();
 
     sort.apply(&mut filtered);
@@ -360,8 +353,7 @@ impl SortKey {
     /// canonical sort identifiers.
     fn parse(raw: Option<&str>) -> Result<Self, ErrorData> {
         match raw {
-            None => Ok(Self::Priority),
-            Some(SORT_PRIORITY) => Ok(Self::Priority),
+            None | Some(SORT_PRIORITY) => Ok(Self::Priority),
             Some(SORT_CREATED) => Ok(Self::Created),
             Some(SORT_UPDATED) => Ok(Self::Updated),
             Some(other) => Err(validation_error(format!(
@@ -450,9 +442,9 @@ fn validation_error(message: impl Into<String>) -> ErrorData {
 ///    and refresh the cache with the new snapshot — a useful side
 ///    effect that keeps subsequent ready/show calls warm without
 ///    changing what `list` itself observes.
-/// 4. Project the issues to [`ListRow`], then run `filter_sort_paginate`
-///    to produce the page of [`ListIssueSummary`] plus the
-///    pre-pagination `total`.
+/// 4. Project the issues to the internal `ListRow`, then run
+///    `filter_sort_paginate` to produce the page of
+///    [`ListIssueSummary`] plus the pre-pagination `total`.
 /// 5. On a fetch failure, fall back to an empty result with `stale =
 ///    true` (mirrors the ready handler at server.rs:847-852).
 ///
@@ -463,10 +455,7 @@ fn validation_error(message: impl Into<String>) -> ErrorData {
 /// surfaced via `stale = true` so callers receive a structured response
 /// instead of a tool error.
 #[instrument(skip_all, name = "handle_list")]
-pub async fn handle_list(
-    state: &ServerState,
-    params: ListParams,
-) -> Result<ListResult, ErrorData> {
+pub async fn handle_list(state: &ServerState, params: ListParams) -> Result<ListResult, ErrorData> {
     let kind = state.agent_kind_str();
     info!(
         agent.kind = %kind,
