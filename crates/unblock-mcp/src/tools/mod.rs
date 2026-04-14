@@ -37,6 +37,7 @@ pub mod comment;
 pub mod create;
 pub mod depends;
 pub mod init;
+pub mod list;
 pub mod prime;
 pub mod ready;
 pub mod reconcile;
