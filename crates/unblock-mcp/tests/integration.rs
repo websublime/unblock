@@ -1078,6 +1078,224 @@ async fn list_rejects_limit_out_of_range_without_fetching() {
     );
 }
 
+// ── Search tool: integration tests ────────────────────────────────
+
+/// `handle_search` drives the search pipeline against a `MockGitHubClient`
+/// — validates the query, forwards to `search_issues(query, limit)`, and
+/// maps the returned core `IssueSummary` entries to the schema-annotated
+/// `SearchIssueSummary` wire type.
+///
+/// This test also locks in the cache-bypass invariant: the cache is
+/// pre-populated with a distinct snapshot, and the test asserts that
+/// `handle_search` does not invalidate or read the cache, and that no
+/// `fetch_graph_data()` call is issued.
+///
+/// Server.rs registration is owned by sibling bead unblock-29p.12 and
+/// is intentionally not exercised here.
+#[tokio::test]
+async fn search_hits_github_and_maps_to_summary_without_touching_cache() {
+    use unblock_core::types::IssueSummary;
+    use unblock_mcp::tools::search::{SearchParams, handle_search};
+
+    // Build a small pair of IssueSummary entries with non-default
+    // fields so the wire projection has something meaningful to
+    // assert on.
+    fn search_summary(
+        number: u64,
+        title: &str,
+        labels: Vec<&str>,
+        milestone: Option<&str>,
+    ) -> IssueSummary {
+        IssueSummary {
+            qualified_id: QualifiedId::new("acme", "widgets", number),
+            number,
+            title: title.to_owned(),
+            issue_type: Some(IssueType::Task),
+            status: Status::Ready,
+            priority: Priority::P2,
+            agent: None,
+            milestone: milestone.map(str::to_owned),
+            story_points: None,
+            defer_until: None,
+            labels: labels.into_iter().map(str::to_owned).collect(),
+            created_at: chrono::Utc.with_ymd_and_hms(2026, 3, 15, 12, 0, 0).unwrap(),
+            url: format!("https://github.com/acme/widgets/issues/{number}"),
+        }
+    }
+
+    let seeded = vec![
+        search_summary(
+            101,
+            "Ship the new search tool",
+            vec!["feature", "mcp"],
+            Some("v0.1.0"),
+        ),
+        search_summary(102, "Fix flaky search test", vec!["bug"], None),
+    ];
+
+    let mock = new_mock();
+    mock.push_search_issues(Ok(seeded.clone()));
+    let state = state_with_mock(Arc::clone(&mock));
+
+    // Pre-populate the cache with a distinct snapshot so we can detect
+    // any stray read/write by the search handler.
+    let cache_issues = vec![test_issue(999, IssueState::Open)];
+    let graph = DependencyGraph::build(&cache_issues, &[]);
+    let ready_set = graph.compute_ready_set(&cache_issues);
+    state.cache.update(ready_set.clone(), graph).await;
+    assert!(
+        state.cache.is_fresh().await,
+        "cache should be fresh before search",
+    );
+    let ready_before = state
+        .cache
+        .get_ready_set()
+        .await
+        .expect("cache seeded above");
+
+    let result = handle_search(
+        &state,
+        SearchParams {
+            query: "  ship  ".to_owned(),
+            limit: Some(5),
+        },
+    )
+    .await
+    .expect("search call should succeed");
+
+    // Envelope assertions.
+    assert_eq!(result.count, 2, "count must equal issues.len()");
+    assert_eq!(result.issues.len(), 2);
+    assert!(
+        !result.stale,
+        "search bypasses the cache — stale must be false on success",
+    );
+
+    // Per-field mapping assertions — order preserved from the mock.
+    assert_eq!(result.issues[0].number, 101);
+    assert_eq!(result.issues[0].title, "Ship the new search tool");
+    assert_eq!(result.issues[0].priority, "P2");
+    assert_eq!(result.issues[0].status, "Ready");
+    assert_eq!(result.issues[0].issue_type.as_deref(), Some("Task"));
+    assert_eq!(result.issues[0].milestone.as_deref(), Some("v0.1.0"));
+    assert_eq!(result.issues[0].labels, vec!["feature", "mcp"]);
+    assert!(result.issues[0].created_at.starts_with("2026-03-15"));
+    assert!(result.issues[0].url.ends_with("/101"));
+
+    assert_eq!(result.issues[1].number, 102);
+    assert_eq!(result.issues[1].labels, vec!["bug"]);
+    assert!(result.issues[1].milestone.is_none());
+
+    // Invariant 1: exactly one search_issues call was made.
+    assert_eq!(
+        mock.calls().search_issues(),
+        1,
+        "search tool must invoke search_issues exactly once",
+    );
+
+    // Invariant 2: the cache was not consulted or invalidated — no
+    // fetch_graph_data call, cache still holds the pre-populated data.
+    assert_eq!(
+        mock.calls().fetch_graph_data(),
+        0,
+        "search must bypass the cache — no fetch_graph_data allowed",
+    );
+    assert!(
+        state.cache.is_fresh().await,
+        "cache must remain fresh — search handler cannot invalidate it",
+    );
+    let ready_after = state
+        .cache
+        .get_ready_set()
+        .await
+        .expect("cache was not invalidated");
+    assert_eq!(
+        *ready_before, *ready_after,
+        "cache contents must be identical before and after search",
+    );
+}
+
+/// `handle_search` rejects an empty query with `INVALID_PARAMS` before
+/// issuing any GitHub call.
+#[tokio::test]
+async fn search_rejects_empty_query_without_fetching() {
+    use rmcp::model::ErrorCode;
+    use unblock_mcp::tools::search::{SearchParams, handle_search};
+
+    let mock = new_mock();
+    // Deliberately do NOT push a search_issues stub — if the handler
+    // reached the trait it would fail with `MockNotStubbed`.
+    let state = state_with_mock(Arc::clone(&mock));
+
+    let err = handle_search(
+        &state,
+        SearchParams {
+            query: String::new(),
+            limit: None,
+        },
+    )
+    .await
+    .expect_err("empty query must fail validation");
+
+    assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+    assert!(
+        err.message.contains("empty") || err.message.contains("query"),
+        "validation error must explain the failure: {}",
+        err.message,
+    );
+
+    // Whitespace-only must behave identically.
+    let err2 = handle_search(
+        &state,
+        SearchParams {
+            query: "   \t\n".to_owned(),
+            limit: None,
+        },
+    )
+    .await
+    .expect_err("whitespace-only query must fail validation");
+    assert_eq!(err2.code, ErrorCode::INVALID_PARAMS);
+
+    assert_eq!(
+        mock.calls().search_issues(),
+        0,
+        "validation must short-circuit before any GitHub call",
+    );
+}
+
+/// `handle_search` rejects `limit = Some(0)` with `INVALID_PARAMS`
+/// before issuing any GitHub call (cross-ref unblock-29p.19).
+#[tokio::test]
+async fn search_rejects_zero_limit_without_fetching() {
+    use rmcp::model::ErrorCode;
+    use unblock_mcp::tools::search::{SearchParams, handle_search};
+
+    let mock = new_mock();
+    let state = state_with_mock(Arc::clone(&mock));
+
+    let err = handle_search(
+        &state,
+        SearchParams {
+            query: "anything".to_owned(),
+            limit: Some(0),
+        },
+    )
+    .await
+    .expect_err("limit=0 must fail validation");
+
+    assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+    assert!(
+        err.message.contains("limit"),
+        "validation error must mention limit: {}",
+        err.message,
+    );
+    assert_eq!(
+        mock.calls().search_issues(),
+        0,
+        "validation must short-circuit before any GitHub call",
+    );
+}
+
 // ── Create tool: integration tests ────────────────────────────────
 
 /// Create tool is registered in the server tool list.
