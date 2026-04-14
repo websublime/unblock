@@ -2,6 +2,7 @@
 //!
 //! - `create_issue()` — REST POST
 //! - `close_issue()` — REST PATCH
+//! - `reopen_issue()` — REST PATCH (reopens a closed issue)
 //! - `update_issue_body()` — REST PATCH (update body only)
 //! - `add_labels_to_issue()` — REST POST (add labels)
 //! - `remove_label_from_issue()` — DELETE (remove single label)
@@ -13,6 +14,7 @@
 //! - `add_blocked_by()` — GraphQL mutation (blocking relationship)
 //! - `remove_blocked_by()` — GraphQL mutation (blocking relationship)
 //! - `add_sub_issue()` — GraphQL mutation (sub-issue relationship, preview)
+//! - `search_issues()` — REST GET /search/issues (read-only, bypasses cache)
 //!
 //! REST mutations use the GitHub REST API for simplicity. Blocking and sub-issue
 //! mutations use GraphQL because these features are only available via GraphQL.
@@ -21,10 +23,11 @@
 
 use std::fmt::Write as _;
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt as _;
 use tracing::{debug, instrument, warn};
-use unblock_core::types::Issue;
+use unblock_core::types::{Issue, IssueSummary, IssueType, Priority, QualifiedId, Status};
 
 use crate::client::GitHubClient;
 use crate::errors::{self, Error};
@@ -83,6 +86,58 @@ struct CreateIssueBody {
 struct CloseIssueBody {
     state: &'static str,
     state_reason: &'static str,
+}
+
+/// Request body for reopening a GitHub issue via REST API.
+///
+/// Mirrors [`CloseIssueBody`] with `state = "open"` and
+/// `state_reason = "reopened"` per GitHub REST API semantics.
+#[derive(Debug, Serialize)]
+struct ReopenIssueBody {
+    state: &'static str,
+    state_reason: &'static str,
+}
+
+/// Response envelope for the `GET /search/issues` endpoint.
+///
+/// Captures only the `items` array; the `total_count` and `incomplete_results`
+/// fields from the GitHub API response are intentionally ignored since
+/// [`SearchParams::limit`] caps the page size we request and we return
+/// `issues.len()` as the caller-visible count.
+#[derive(Debug, Deserialize)]
+struct SearchIssuesResponse {
+    items: Vec<SearchIssueItem>,
+}
+
+/// A single item returned by `GET /search/issues`.
+///
+/// REST search returns a reduced issue shape — crucially it does **not**
+/// include Projects V2 custom field values (Status, Priority, Agent, etc.).
+/// Fields that are not present on the search response are mapped to their
+/// defaults when converted to [`IssueSummary`] (see
+/// [`GitHubClient::search_issues`] for the contract).
+#[derive(Debug, Deserialize)]
+struct SearchIssueItem {
+    number: u64,
+    title: String,
+    #[serde(default)]
+    labels: Vec<SearchLabel>,
+    #[serde(default)]
+    milestone: Option<SearchMilestone>,
+    html_url: String,
+    created_at: DateTime<Utc>,
+}
+
+/// Minimal label shape from the REST search response.
+#[derive(Debug, Deserialize)]
+struct SearchLabel {
+    name: String,
+}
+
+/// Minimal milestone shape from the REST search response.
+#[derive(Debug, Deserialize)]
+struct SearchMilestone {
+    title: String,
 }
 
 /// Request body for updating an issue body via REST PATCH.
@@ -1099,6 +1154,149 @@ impl GitHubClient {
         Ok(())
     }
 
+    /// Reopens a closed GitHub issue.
+    ///
+    /// Sends a REST PATCH to `/repos/{owner}/{repo}/issues/{number}` with
+    /// `state: "open"` and `state_reason: "reopened"`. The reason value
+    /// mirrors the symmetry with [`close_issue`](Self::close_issue), which
+    /// sends `state_reason: "completed"`.
+    ///
+    /// The mutation is a no-op against an issue that is already open — GitHub
+    /// returns a 200 response unchanged. Callers that need blocking
+    /// re-evaluation after reopen must perform a graph rebuild themselves; per
+    /// spec §8.7 the MCP `reopen` tool is responsible for that orchestration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Domain`] with [`DomainError::IssueNotFound`] if the
+    /// issue does not exist (HTTP 404).
+    /// Returns [`Error::RateLimited`] for HTTP 429 responses.
+    /// Returns [`Error::GitHubApi`] for other non-2xx responses.
+    ///
+    /// [`DomainError::IssueNotFound`]: unblock_core::errors::DomainError::IssueNotFound
+    #[instrument(skip(self), fields(owner = %self.owner(), repo = %self.repo()))]
+    pub async fn reopen_issue(&self, number: u64) -> Result<(), Error> {
+        let url = self.rest_url(&format!(
+            "/repos/{}/{}/issues/{number}",
+            self.owner(),
+            self.repo()
+        ));
+
+        let request_body = ReopenIssueBody {
+            state: "open",
+            state_reason: "reopened",
+        };
+
+        let response = self
+            .http()
+            .patch(&url)
+            .json(&request_body)
+            .send()
+            .await
+            .context(errors::GitHubUnavailableSnafu)?;
+
+        if response.status().as_u16() == 404 {
+            return Err(unblock_core::errors::IssueNotFoundSnafu { number }
+                .build()
+                .into());
+        }
+
+        check_rest_response(response).await?;
+
+        debug!(number, "Reopened issue");
+        Ok(())
+    }
+
+    /// Full-text search of issues in the configured repository.
+    ///
+    /// Sends a REST GET to `/search/issues` scoped to the configured
+    /// `owner/repo` with `is:issue` and the caller-supplied free-text query.
+    /// The final query string is `"repo:{owner}/{repo} is:issue {query}"` —
+    /// URL encoding is handled by `reqwest`'s `.query(...)` helper so callers
+    /// do not need to pre-escape special characters (`#`, spaces, quotes,
+    /// etc.).
+    ///
+    /// `limit` defaults to 20 when `None` per spec §7.6, and is clamped to the
+    /// GitHub Search API's maximum page size of 100 to avoid 422 responses.
+    ///
+    /// **Cache:** This method deliberately bypasses any caller-side cache.
+    /// Each invocation hits GitHub's Search API directly — this matches the
+    /// "API calls: 1" contract documented in spec §7.6.
+    ///
+    /// **Reduced issue shape.** The Search API does not return Projects V2
+    /// custom field values. Entries in the returned [`IssueSummary`] list
+    /// therefore carry default values for `status` (Ready), `priority` (P2),
+    /// and `None` for `agent`, `story_points`, and `defer_until`. GitHub-native
+    /// fields (`title`, `labels`, `milestone`, `created_at`, `url`) are
+    /// populated from the search response.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::RateLimited`] for HTTP 429 responses.
+    /// Returns [`Error::GitHubApi`] for other non-2xx responses.
+    /// Returns [`Error::GitHubUnavailable`] for network failures.
+    #[instrument(skip(self, query), fields(owner = %self.owner(), repo = %self.repo()))]
+    pub async fn search_issues(
+        &self,
+        query: &str,
+        limit: Option<u32>,
+    ) -> Result<Vec<IssueSummary>, Error> {
+        let url = self.rest_url("/search/issues");
+
+        // Compose the search query and clamp limit to GitHub's per_page max.
+        let q = format!("repo:{}/{} is:issue {query}", self.owner(), self.repo());
+        let per_page = limit.unwrap_or(20).min(100);
+
+        let response = self
+            .http()
+            .get(&url)
+            .query(&[("q", q.as_str()), ("per_page", &per_page.to_string())])
+            .send()
+            .await
+            .context(errors::GitHubUnavailableSnafu)?;
+
+        let response = check_rest_response(response).await?;
+
+        let body: SearchIssuesResponse = response
+            .json()
+            .await
+            .context(errors::GitHubUnavailableSnafu)?;
+
+        let summaries = body
+            .items
+            .into_iter()
+            .map(|item| self.search_item_to_summary(item))
+            .collect::<Vec<_>>();
+
+        debug!(count = summaries.len(), "Searched issues");
+        Ok(summaries)
+    }
+
+    /// Maps a [`SearchIssueItem`] to an [`IssueSummary`].
+    ///
+    /// Defaults Projects V2 fields to their `Default`-equivalent values (see
+    /// the `search_issues` doc comment for the full contract). The
+    /// `qualified_id` is constructed from the client's configured owner/repo
+    /// — search is scoped to the local repository so this is always correct.
+    fn search_item_to_summary(&self, item: SearchIssueItem) -> IssueSummary {
+        let labels = item.labels.into_iter().map(|l| l.name).collect::<Vec<_>>();
+        IssueSummary {
+            qualified_id: QualifiedId::new(self.owner(), self.repo(), item.number),
+            number: item.number,
+            title: item.title,
+            issue_type: None::<IssueType>,
+            status: Status::Ready,
+            priority: Priority::P2,
+            agent: None,
+            milestone: item.milestone.map(|m| m.title),
+            story_points: None,
+            defer_until: None,
+            labels,
+            created_at: item.created_at,
+            url: item.html_url,
+        }
+    }
+
     /// Adds a blocking relationship using an [`IssueRef`] as the blocker.
     ///
     /// For local refs, delegates to [`add_blocked_by()`](Self::add_blocked_by).
@@ -1187,7 +1385,10 @@ fn deterministic_label_color(label: &str) -> String {
 #[cfg(test)]
 mod tests {
     use crate::client::GitHubClient;
-    use wiremock::matchers::{method, path};
+    use crate::errors::Error;
+    use unblock_core::errors::DomainError;
+    use unblock_core::types::{Priority, Status};
+    use wiremock::matchers::{body_json, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     /// Regression guard for the library-level close guard: a whitespace-only
@@ -1226,5 +1427,219 @@ mod tests {
             .await
             .expect("close_issue with whitespace-only reason should succeed");
         // MockServer's Drop verifies the expect(0) / expect(1) counters.
+    }
+
+    /// Happy path: `reopen_issue(n)` issues a single REST PATCH with
+    /// `{"state": "open", "state_reason": "reopened"}` body and succeeds on
+    /// HTTP 200.
+    #[tokio::test]
+    async fn reopen_issue_sends_state_open_and_state_reason_reopened() {
+        let server = MockServer::start().await;
+        let client = GitHubClient::new_for_test(&server.uri());
+
+        Mock::given(method("PATCH"))
+            .and(path("/repos/test-owner/test-repo/issues/77"))
+            .and(body_json(serde_json::json!({
+                "state": "open",
+                "state_reason": "reopened",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": 77,
+                "state": "open"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        client
+            .reopen_issue(77)
+            .await
+            .expect("reopen_issue should succeed against a 200 response");
+    }
+
+    /// Failure path: a 404 on reopen surfaces as
+    /// [`DomainError::IssueNotFound`] through the infra `Error::Domain`
+    /// wrapper.
+    #[tokio::test]
+    async fn reopen_issue_returns_issue_not_found_on_404() {
+        let server = MockServer::start().await;
+        let client = GitHubClient::new_for_test(&server.uri());
+
+        Mock::given(method("PATCH"))
+            .and(path("/repos/test-owner/test-repo/issues/999"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("Not Found"))
+            .mount(&server)
+            .await;
+
+        let err = client
+            .reopen_issue(999)
+            .await
+            .expect_err("reopen_issue should return Err on 404");
+
+        match err {
+            Error::Domain {
+                source: DomainError::IssueNotFound { number },
+            } => assert_eq!(number, 999),
+            other => panic!("expected IssueNotFound, got: {other}"),
+        }
+    }
+
+    /// Happy path: `search_issues(query, Some(limit))` sends the REST search
+    /// request with the correctly formatted `q` and `per_page` query params
+    /// and maps the response items to [`IssueSummary`] with spec defaults for
+    /// Projects V2 fields.
+    #[tokio::test]
+    async fn search_issues_composes_query_and_maps_to_summary() {
+        let server = MockServer::start().await;
+        let client = GitHubClient::new_for_test(&server.uri());
+
+        let response_body = serde_json::json!({
+            "total_count": 1,
+            "incomplete_results": false,
+            "items": [
+                {
+                    "number": 42,
+                    "title": "Ship it",
+                    "labels": [
+                        { "name": "bug" },
+                        { "name": "priority-high" }
+                    ],
+                    "milestone": { "title": "v0.1.0" },
+                    "html_url": "https://github.com/test-owner/test-repo/issues/42",
+                    "created_at": "2025-01-01T00:00:00Z"
+                }
+            ]
+        });
+
+        Mock::given(method("GET"))
+            .and(path("/search/issues"))
+            .and(query_param("q", "repo:test-owner/test-repo is:issue ship"))
+            .and(query_param("per_page", "5"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(response_body))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let results = client
+            .search_issues("ship", Some(5))
+            .await
+            .expect("search_issues should succeed");
+
+        assert_eq!(results.len(), 1);
+        let s = &results[0];
+        assert_eq!(s.number, 42);
+        assert_eq!(s.title, "Ship it");
+        assert_eq!(s.qualified_id.owner, "test-owner");
+        assert_eq!(s.qualified_id.repo, "test-repo");
+        assert_eq!(s.qualified_id.number, 42);
+        assert_eq!(s.labels, vec!["bug".to_owned(), "priority-high".to_owned()]);
+        assert_eq!(s.milestone.as_deref(), Some("v0.1.0"));
+        assert_eq!(
+            s.url,
+            "https://github.com/test-owner/test-repo/issues/42".to_owned()
+        );
+        // Projects V2 defaults — not returned by REST search.
+        assert_eq!(s.status, Status::Ready);
+        assert_eq!(s.priority, Priority::P2);
+        assert!(s.issue_type.is_none());
+        assert!(s.agent.is_none());
+        assert!(s.story_points.is_none());
+        assert!(s.defer_until.is_none());
+    }
+
+    /// An empty `items` array must yield an empty `Vec<IssueSummary>` — no
+    /// 404, no error.
+    #[tokio::test]
+    async fn search_issues_empty_items_returns_empty_vec() {
+        let server = MockServer::start().await;
+        let client = GitHubClient::new_for_test(&server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/search/issues"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "total_count": 0,
+                "incomplete_results": false,
+                "items": []
+            })))
+            .mount(&server)
+            .await;
+
+        let results = client
+            .search_issues("no-hits", None)
+            .await
+            .expect("search_issues with no hits should return Ok(empty)");
+        assert!(results.is_empty());
+    }
+
+    /// `limit = None` must default to 20 (spec §7.6). The test asserts the
+    /// `per_page` query parameter sent on the wire.
+    #[tokio::test]
+    async fn search_issues_defaults_limit_to_20() {
+        let server = MockServer::start().await;
+        let client = GitHubClient::new_for_test(&server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/search/issues"))
+            .and(query_param("per_page", "20"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "total_count": 0,
+                "incomplete_results": false,
+                "items": []
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        client
+            .search_issues("anything", None)
+            .await
+            .expect("search_issues should succeed");
+    }
+
+    /// `limit > 100` must be clamped to 100 (GitHub Search API cap).
+    #[tokio::test]
+    async fn search_issues_clamps_limit_to_100() {
+        let server = MockServer::start().await;
+        let client = GitHubClient::new_for_test(&server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/search/issues"))
+            .and(query_param("per_page", "100"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "total_count": 0,
+                "incomplete_results": false,
+                "items": []
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        client
+            .search_issues("anything", Some(500))
+            .await
+            .expect("search_issues should succeed with clamp");
+    }
+
+    /// `search_issues` must surface a 429 as [`Error::RateLimited`].
+    #[tokio::test]
+    async fn search_issues_returns_rate_limited_on_429() {
+        let server = MockServer::start().await;
+        let client = GitHubClient::new_for_test(&server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/search/issues"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("x-ratelimit-reset", "1700000000")
+                    .set_body_string(""),
+            )
+            .mount(&server)
+            .await;
+
+        let err = client
+            .search_issues("q", Some(10))
+            .await
+            .expect_err("search_issues should return Err on 429");
+        assert!(matches!(err, Error::RateLimited { .. }));
     }
 }
