@@ -1349,6 +1349,127 @@ impl GitHubClient {
             }
         }
     }
+
+    /// Adds a blocking relationship using [`IssueRef`] for both endpoints.
+    ///
+    /// Spec §8.4 requires the `depends` tool to accept cross-repo references
+    /// for both `source` and `target`. This method generalises
+    /// [`add_blocked_by_ref()`](Self::add_blocked_by_ref) (which only accepts a
+    /// cross-repo blocker) to also accept a cross-repo source.
+    ///
+    /// Dispatch:
+    /// - `source = Local(n)` → delegates to
+    ///   [`add_blocked_by_ref()`](Self::add_blocked_by_ref) so the existing
+    ///   local-source fast path (single `fetch_issue` + duplicate pre-check) is
+    ///   preserved.
+    /// - `source = CrossRepo { .. }` → fetches the source via
+    ///   [`fetch_issue_ref()`](Self::fetch_issue_ref) against its own
+    ///   owner/repo, performs the duplicate pre-check against its
+    ///   `blocked_by` list, resolves the blocker via
+    ///   [`resolve_issue_ref()`](Self::resolve_issue_ref), and runs the
+    ///   `addIssueDependency` mutation with both node IDs.
+    ///
+    /// The duplicate pre-check has a TOCTOU race like
+    /// [`add_blocked_by()`](Self::add_blocked_by) — acceptable for the
+    /// single-agent MCP server use case.
+    ///
+    /// [`IssueRef`]: unblock_core::types::IssueRef
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Domain`] with [`DomainError::IssueNotFound`] if either
+    /// issue does not exist.
+    /// Returns [`Error::Domain`] with [`DomainError::DuplicateDependency`] if
+    /// the blocking relationship already exists on the source.
+    /// Returns [`Error::GitHubGraphQL`] for other GraphQL errors.
+    ///
+    /// [`DomainError::IssueNotFound`]: unblock_core::errors::DomainError::IssueNotFound
+    /// [`DomainError::DuplicateDependency`]: unblock_core::errors::DomainError::DuplicateDependency
+    #[instrument(skip(self), fields(owner = %self.owner(), repo = %self.repo()))]
+    pub async fn add_blocked_by_refs(
+        &self,
+        source: &unblock_core::types::IssueRef,
+        blocker: &unblock_core::types::IssueRef,
+    ) -> Result<(), Error> {
+        match source {
+            unblock_core::types::IssueRef::Local(source_number) => {
+                // Preserve the local-source fast path and its existing
+                // duplicate pre-check (performed inside add_blocked_by for
+                // local blockers; preserved by add_blocked_by_ref delegation
+                // for cross-repo blockers).
+                self.add_blocked_by_ref(*source_number, blocker).await
+            }
+            unblock_core::types::IssueRef::CrossRepo {
+                owner: source_owner,
+                repo: source_repo,
+                number: source_number,
+            } => {
+                // Fetch source via its own owner/repo: validates existence,
+                // gives us the node_id, and provides blocked_by for the
+                // duplicate pre-check in a single round-trip.
+                let source_issue = self.fetch_issue_ref(source).await?;
+
+                // Duplicate pre-check: GitHub's `trackedByIssues` connection
+                // only surfaces blockers within the same `owner/repo` as the
+                // source issue. Therefore the `blocked_by` list on a
+                // cross-repo source contains only entries in the source's
+                // own repo.
+                //
+                // So a duplicate match only exists when the blocker resolves
+                // to the same `owner/repo` as the source. For any other
+                // blocker (including a `Local` blocker, which lives in the
+                // configured project repo and not in the source repo), we
+                // cannot detect a duplicate client-side and rely on GitHub
+                // server-side rejection instead.
+                let blocker_number_in_source_repo = match blocker {
+                    unblock_core::types::IssueRef::CrossRepo {
+                        owner,
+                        repo,
+                        number,
+                    } if owner == source_owner && repo == source_repo => Some(*number),
+                    _ => None,
+                };
+
+                if let Some(n) = blocker_number_in_source_repo
+                    && source_issue.blocked_by.iter().any(|r| r.number == n)
+                {
+                    return Err(unblock_core::errors::DuplicateDependencySnafu {
+                        source: *source_number,
+                        target: n,
+                    }
+                    .build()
+                    .into());
+                }
+
+                let source_id = source_issue.node_id;
+                let blocker_id = self.resolve_issue_ref(blocker).await?;
+
+                let mutation = "
+                    mutation AddBlockedBy($dependentId: ID!, $dependencyId: ID!) {
+                        addIssueDependency(input: {dependentId: $dependentId, dependencyId: $dependencyId}) {
+                            clientMutationId
+                        }
+                    }
+                ";
+
+                let variables = serde_json::json!({
+                    "dependentId": source_id,
+                    "dependencyId": blocker_id,
+                });
+
+                self.graphql(mutation, variables).await?;
+
+                debug!(
+                    source_owner = %source_owner,
+                    source_repo = %source_repo,
+                    source_number,
+                    blocker = %blocker,
+                    "Added cross-repo blocking relationship (cross-repo source)"
+                );
+                Ok(())
+            }
+        }
+    }
 }
 
 /// Percent-encodes a string for use as a URL path segment.

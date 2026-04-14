@@ -429,8 +429,8 @@ async fn close_with_empty_reason_skips_comment() {
 #[tokio::test]
 async fn depends_dispatches_through_dyn_vtable() {
     let mock = new_mock();
-    mock.push_fetch_issue(Ok(make_issue(3))); // source
-    mock.push_add_blocked_by_ref(Ok(()));
+    mock.push_fetch_issue_ref(Ok(make_issue(3))); // source (local)
+    mock.push_add_blocked_by_refs(Ok(()));
     // field_ids=Some enters the project-field update branch. With empty
     // option maps, no update_field calls are made (Status=Blocked is
     // gated by options.get()).
@@ -445,21 +445,107 @@ async fn depends_dispatches_through_dyn_vtable() {
     let server = UnblockServer::new(state_with_mock(Arc::clone(&mock)));
     let Json(result) = server
         .depends(Parameters(DependsParams {
-            source: 3,
+            source: "3".to_owned(),
             target: "5".to_owned(),
         }))
         .await
         .expect("depends should succeed via dyn dispatch");
 
-    assert_eq!(result.source, 3);
-    assert_eq!(result.target, "5");
-    assert_eq!(mock.calls().fetch_issue(), 1);
-    assert_eq!(mock.calls().add_blocked_by_ref(), 1);
+    assert!(result.created, "created flag must be true on success");
+    // Both source and target render in canonical Display form: local refs
+    // use the hash-prefix shape (e.g. "#3"), matching IssueRef::Local Display.
+    assert_eq!(result.source, "#3");
+    assert_eq!(result.target, "#5");
+    assert_eq!(mock.calls().fetch_issue_ref(), 1);
+    assert_eq!(mock.calls().add_blocked_by_refs(), 1);
     assert_eq!(mock.calls().fetch_graph_data(), 1);
     assert_eq!(mock.calls().field_ids(), 1);
     assert_eq!(mock.calls().resolve_project_info(), 1);
     assert_eq!(mock.calls().get_project_item_id(), 1);
     assert_eq!(mock.calls().update_field(), 0);
+    // Old local-source entry points must NOT be called.
+    assert_eq!(mock.calls().fetch_issue(), 0);
+    assert_eq!(mock.calls().add_blocked_by_ref(), 0);
+}
+
+/// Exercises the cross-repo source path (`source: "other-owner/other-repo#7"`).
+///
+/// Verifies:
+/// - `fetch_issue_ref` is called for source (not `fetch_issue`, which is
+///   local-only).
+/// - `add_blocked_by_refs` is the mutation entry point used.
+/// - Projects V2 field update on source is SKIPPED (source is outside the
+///   configured project), so `field_ids`, `resolve_project_info`,
+///   `get_project_item_id`, and `update_field` are not called.
+/// - Cache rebuild (`fetch_graph_data`) still runs.
+/// - The result renders `source` and `target` in their canonical `IssueRef`
+///   `Display` forms.
+#[tokio::test]
+async fn depends_accepts_cross_repo_source() {
+    let mock = new_mock();
+    // Source fetch uses fetch_issue_ref for the cross-repo source.
+    // Build a shaped issue — number is 7 in other-owner/other-repo.
+    let mut source_issue = make_issue(7);
+    source_issue.qualified_id = QualifiedId::new("other-owner", "other-repo", 7);
+    source_issue.url = "https://github.com/other-owner/other-repo/issues/7".to_owned();
+    mock.push_fetch_issue_ref(Ok(source_issue));
+    mock.push_add_blocked_by_refs(Ok(()));
+    mock.push_fetch_graph_data(Ok((vec![make_issue(5)], vec![])));
+
+    let server = UnblockServer::new(state_with_mock(Arc::clone(&mock)));
+    let Json(result) = server
+        .depends(Parameters(DependsParams {
+            source: "other-owner/other-repo#7".to_owned(),
+            target: "5".to_owned(),
+        }))
+        .await
+        .expect("depends should succeed for cross-repo source");
+
+    assert!(result.created);
+    assert_eq!(result.source, "other-owner/other-repo#7");
+    assert_eq!(result.target, "#5");
+    assert_eq!(mock.calls().fetch_issue_ref(), 1);
+    assert_eq!(mock.calls().add_blocked_by_refs(), 1);
+    assert_eq!(mock.calls().fetch_graph_data(), 1);
+    // Field update path MUST be skipped for cross-repo source.
+    assert_eq!(mock.calls().field_ids(), 0);
+    assert_eq!(mock.calls().resolve_project_info(), 0);
+    assert_eq!(mock.calls().get_project_item_id(), 0);
+    assert_eq!(mock.calls().update_field(), 0);
+}
+
+/// Rejects `source == target` (spec §8.4 validation requirement).
+///
+/// The check operates on the resolved [`QualifiedId`], so local variants
+/// `"42"` and `"#42"` collapse to the same identity and are rejected. No
+/// network calls should be issued.
+#[tokio::test]
+async fn depends_rejects_self_reference() {
+    let mock = new_mock();
+
+    let server = UnblockServer::new(state_with_mock(Arc::clone(&mock)));
+    let err = server
+        .depends(Parameters(DependsParams {
+            source: "42".to_owned(),
+            target: "#42".to_owned(),
+        }))
+        .await
+        .map(|_| ())
+        .expect_err("source == target must be rejected as a validation error");
+
+    // Mapped to INVALID_PARAMS by github_error_to_mcp (HTTP 400).
+    assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert!(
+        err.message.contains("source and target"),
+        "message should mention the self-ref validation: {}",
+        err.message
+    );
+
+    // No outbound calls should have been made.
+    assert_eq!(mock.calls().fetch_issue(), 0);
+    assert_eq!(mock.calls().fetch_issue_ref(), 0);
+    assert_eq!(mock.calls().add_blocked_by_ref(), 0);
+    assert_eq!(mock.calls().add_blocked_by_refs(), 0);
 }
 
 // ── create ─────────────────────────────────────────────────────────────

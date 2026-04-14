@@ -240,6 +240,18 @@ pub trait GitHubApi: Send + Sync {
 
     /// Adds a blocking edge using an [`IssueRef`] as the blocker.
     async fn add_blocked_by_ref(&self, issue_number: u64, blocker: &IssueRef) -> Result<(), Error>;
+
+    /// Adds a blocking edge using [`IssueRef`] for both endpoints.
+    ///
+    /// Enables cross-repo `source` issues (e.g. a dependency where the
+    /// blocked issue lives outside the configured project). For `Local`
+    /// sources this delegates to
+    /// [`add_blocked_by_ref`](Self::add_blocked_by_ref) so the existing
+    /// local-source duplicate pre-check is preserved.
+    ///
+    /// See spec §8.4 (`depends` tool contract) and §5 cross-repo scope table.
+    async fn add_blocked_by_refs(&self, source: &IssueRef, blocker: &IssueRef)
+    -> Result<(), Error>;
 }
 
 // ── Blanket delegation impl on GitHubClient ──────────────────────────
@@ -450,5 +462,13 @@ impl GitHubApi for GitHubClient {
 
     async fn add_blocked_by_ref(&self, issue_number: u64, blocker: &IssueRef) -> Result<(), Error> {
         GitHubClient::add_blocked_by_ref(self, issue_number, blocker).await
+    }
+
+    async fn add_blocked_by_refs(
+        &self,
+        source: &IssueRef,
+        blocker: &IssueRef,
+    ) -> Result<(), Error> {
+        GitHubClient::add_blocked_by_refs(self, source, blocker).await
     }
 }
