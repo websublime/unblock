@@ -469,6 +469,56 @@ impl IssueRef {
             } => QualifiedId::new(owner.clone(), repo.clone(), *number),
         }
     }
+
+    /// Normalize this reference against a repository context.
+    ///
+    /// Collapses a [`CrossRepo`](Self::CrossRepo) variant that happens to
+    /// spell the context repo back to [`Local`](Self::Local), so that
+    /// callers' downstream dispatch (pattern-matching on `Local` vs.
+    /// `CrossRepo`) treats both input forms identically. A [`Local`](Self::Local)
+    /// variant is returned unchanged — it is already in canonical form
+    /// relative to any context.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use unblock_core::types::IssueRef;
+    ///
+    /// // CrossRepo pointing at the configured repo collapses to Local.
+    /// let r = IssueRef::CrossRepo {
+    ///     owner: "acme".to_owned(),
+    ///     repo: "widgets".to_owned(),
+    ///     number: 42,
+    /// };
+    /// assert_eq!(r.normalize("acme", "widgets"), IssueRef::Local(42));
+    ///
+    /// // CrossRepo pointing elsewhere is unchanged.
+    /// let r = IssueRef::CrossRepo {
+    ///     owner: "other".to_owned(),
+    ///     repo: "repo".to_owned(),
+    ///     number: 7,
+    /// };
+    /// assert_eq!(
+    ///     r.clone().normalize("acme", "widgets"),
+    ///     r
+    /// );
+    ///
+    /// // Local is always canonical.
+    /// assert_eq!(IssueRef::Local(3).normalize("acme", "widgets"), IssueRef::Local(3));
+    /// ```
+    #[must_use]
+    pub fn normalize(&self, owner: &str, repo: &str) -> Self {
+        match self {
+            Self::CrossRepo {
+                owner: ref_owner,
+                repo: ref_repo,
+                number,
+            } if ref_owner == owner && ref_repo == repo => Self::Local(*number),
+            // Local is already canonical; non-matching CrossRepo keeps
+            // its owner/repo and is returned unchanged.
+            Self::Local(_) | Self::CrossRepo { .. } => self.clone(),
+        }
+    }
 }
 
 impl std::fmt::Display for IssueRef {
@@ -969,6 +1019,57 @@ mod tests {
         };
         let qid = r.resolve("acme", "widgets");
         assert_eq!(qid, QualifiedId::new("other", "stuff", 7));
+    }
+
+    // ── IssueRef::normalize ────────────────────────────────────────────
+
+    #[test]
+    fn issue_ref_normalize_local_unchanged() {
+        let r = IssueRef::Local(42);
+        assert_eq!(r.normalize("acme", "widgets"), IssueRef::Local(42));
+    }
+
+    #[test]
+    fn issue_ref_normalize_cross_repo_aliased_to_local() {
+        let r = IssueRef::CrossRepo {
+            owner: "acme".to_owned(),
+            repo: "widgets".to_owned(),
+            number: 42,
+        };
+        assert_eq!(r.normalize("acme", "widgets"), IssueRef::Local(42));
+    }
+
+    #[test]
+    fn issue_ref_normalize_cross_repo_different_owner_unchanged() {
+        let r = IssueRef::CrossRepo {
+            owner: "other".to_owned(),
+            repo: "widgets".to_owned(),
+            number: 42,
+        };
+        assert_eq!(r.clone().normalize("acme", "widgets"), r);
+    }
+
+    #[test]
+    fn issue_ref_normalize_cross_repo_different_repo_unchanged() {
+        let r = IssueRef::CrossRepo {
+            owner: "acme".to_owned(),
+            repo: "other".to_owned(),
+            number: 42,
+        };
+        assert_eq!(r.clone().normalize("acme", "widgets"), r);
+    }
+
+    #[test]
+    fn issue_ref_normalize_preserves_resolve_identity() {
+        // Normalization must preserve the resolved QualifiedId — the two
+        // forms are equivalent identities by construction.
+        let a = IssueRef::CrossRepo {
+            owner: "acme".to_owned(),
+            repo: "widgets".to_owned(),
+            number: 42,
+        };
+        let b = a.normalize("acme", "widgets");
+        assert_eq!(a.resolve("acme", "widgets"), b.resolve("acme", "widgets"));
     }
 
     // ── Priority::as_sort_key ───────────────────────────────────────────
