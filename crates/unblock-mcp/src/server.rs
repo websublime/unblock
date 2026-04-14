@@ -1205,7 +1205,7 @@ impl UnblockServer {
         );
 
         // Parse source string into IssueRef.
-        let source_ref = source_str
+        let source_ref_raw = source_str
             .parse::<unblock_core::types::IssueRef>()
             .map_err(|e| ErrorData {
                 code: rmcp::model::ErrorCode::INVALID_PARAMS,
@@ -1214,7 +1214,7 @@ impl UnblockServer {
             })?;
 
         // Parse target string into IssueRef.
-        let target_ref = target_str
+        let target_ref_raw = target_str
             .parse::<unblock_core::types::IssueRef>()
             .map_err(|e| ErrorData {
                 code: rmcp::model::ErrorCode::INVALID_PARAMS,
@@ -1222,11 +1222,23 @@ impl UnblockServer {
                 data: None,
             })?;
 
+        // Normalize both refs against the configured repo. A
+        // `CrossRepo { owner, repo, number }` that happens to spell the
+        // configured repo collapses to `Local(number)`, so every
+        // downstream guard that dispatches on `Local` vs `CrossRepo`
+        // (fetch path, cycle detection, Projects V2 field update,
+        // mutation dispatch) treats aliased forms identically to the
+        // canonical local form. See `IssueRef::normalize` for details.
+        let source_ref = source_ref_raw.normalize(client.owner(), client.repo());
+        let target_ref = target_ref_raw.normalize(client.owner(), client.repo());
+
         // Spec §8.4: source != target is a required validation.
         // Compare on the fully-qualified id (resolved against the configured
         // repo) so that e.g. `"42"` and `"#42"` collapse to the same identity
         // and the check also rejects a Local vs. CrossRepo pointing at the
-        // same configured-repo issue.
+        // same configured-repo issue. Both `resolve` and `normalize` agree
+        // on this identity, so using the normalized refs here is equivalent
+        // to using the raw refs.
         let source_qid = source_ref.resolve(client.owner(), client.repo());
         let target_qid = target_ref.resolve(client.owner(), client.repo());
         if source_qid == target_qid {
@@ -1242,7 +1254,9 @@ impl UnblockServer {
         }
 
         // Step 1: Validate source issue exists, resolving against its own
-        // owner/repo so cross-repo sources are fetched correctly.
+        // owner/repo so cross-repo sources are fetched correctly. After
+        // normalization, a source that aliases the configured repo is
+        // `Local(n)` and `fetch_issue_ref` takes the repo-scoped fast path.
         let source_issue = client
             .fetch_issue_ref(&source_ref)
             .await
@@ -1253,7 +1267,9 @@ impl UnblockServer {
         // only detect cycles when BOTH endpoints are local to that repo.
         // When either endpoint is cross-repo, the cached graph does not
         // contain it; we skip client-side cycle detection and rely on
-        // GitHub's server-side rejection at mutation time.
+        // GitHub's server-side rejection at mutation time. Normalization
+        // above ensures that a caller spelling the configured repo as
+        // `owner/repo#n` still enters this arm.
         match (&source_ref, &target_ref) {
             (
                 unblock_core::types::IssueRef::Local(source_number),
@@ -1307,6 +1323,8 @@ impl UnblockServer {
         // Projects V2 item lookup (`get_project_item_id`) is scoped to the
         // configured project, so cross-repo sources cannot have their
         // fields updated here per spec §5 cross-repo scope table.
+        // Normalization above ensures a caller spelling the configured
+        // repo as `owner/repo#n` still takes this branch.
         // TODO(unblock-b6b.79): Fourth copy of field update ladder — extract shared helper.
         if matches!(source_ref, unblock_core::types::IssueRef::Local(_)) {
             if let Some(field_ids) = client.field_ids().await {
@@ -1353,10 +1371,12 @@ impl UnblockServer {
             );
         }
 
-        // Render source and target refs in canonical form. For a bare local
-        // number (e.g. "42"), IssueRef::Local Display writes "#42"; we
-        // preserve that shape for both endpoints so the result format is
-        // stable regardless of which accepted input form the caller used.
+        // Render source and target refs in canonical form. After
+        // normalization, `owner/repo#n` aliasing the configured repo
+        // renders as `#n` (Local), matching the `"42"` and `"#42"` input
+        // forms and fulfilling the "stable output regardless of input
+        // form" contract. Cross-repo refs that point at other repos
+        // render as `owner/repo#n`.
         let source_rendered = source_ref.to_string();
         let target_rendered = target_ref.to_string();
 

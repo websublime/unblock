@@ -19,7 +19,10 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use rmcp::handler::server::wrapper::{Json, Parameters};
-use unblock_core::types::{Issue, IssueState, IssueType, Priority, QualifiedId, Status};
+use unblock_core::graph::DependencyGraph;
+use unblock_core::types::{
+    BlockingEdge, Issue, IssueState, IssueType, Priority, QualifiedId, Status,
+};
 use unblock_github::GitHubApi;
 use unblock_github::projects::{
     CreatedProject, FieldMeta, OwnerType, ProjectFieldIds, ProjectInfo, ProjectView, SetupStatus,
@@ -546,6 +549,189 @@ async fn depends_rejects_self_reference() {
     assert_eq!(mock.calls().fetch_issue_ref(), 0);
     assert_eq!(mock.calls().add_blocked_by_ref(), 0);
     assert_eq!(mock.calls().add_blocked_by_refs(), 0);
+}
+
+/// Exercises the aliasing case for `source`: when the caller spells the
+/// configured repo explicitly as a cross-repo ref (`acme/widgets#N` where
+/// the configured repo IS `acme/widgets`), the handler must treat the ref
+/// as local for every downstream guard.
+///
+/// Verifies the normalization fix for the review [WARNING]s:
+/// 1. Cycle detection runs: a pre-populated cache with an edge
+///    `target -> source` causes `would_create_cycle` to fire, and the
+///    handler returns a `CircularDependency` error — proving it took the
+///    `(Local, Local)` arm rather than the cross-repo skip-warn arm.
+/// 2. Result rendering is the canonical Local form (`"#N"`), matching
+///    what `"N"` and `"#N"` inputs produce, fulfilling the "stable
+///    output regardless of input form" contract.
+///
+/// Notes: this test is scoped to cycle rejection, so it does NOT invoke
+/// the mutation, field update, or graph rebuild paths. A sibling test
+/// below covers the happy path and asserts the field-update call
+/// counters.
+#[tokio::test]
+async fn depends_aliased_configured_repo_source_cycle_detection() {
+    let mock = new_mock();
+    // Source (issue #3) is in the configured repo (acme/widgets). The
+    // handler must fetch it via fetch_issue_ref(Local(3)) after
+    // normalization.
+    mock.push_fetch_issue_ref(Ok(make_issue(3)));
+
+    // Pre-populate the cache with a graph containing a cycle that
+    // would_create_cycle(source=3, target=5) will detect:
+    // path target(5) -> source(3) already exists.
+    let issues = vec![make_issue(3), make_issue(5)];
+    let edges = vec![BlockingEdge {
+        source: QualifiedId::new("acme", "widgets", 5),
+        target: QualifiedId::new("acme", "widgets", 3),
+    }];
+    let graph = DependencyGraph::build(&issues, &edges);
+    let ready_set = graph.compute_ready_set(&issues);
+
+    let state = state_with_mock(Arc::clone(&mock));
+    let cache = Arc::clone(&state.cache);
+    cache.update(ready_set, graph).await;
+
+    let server = UnblockServer::new(state);
+
+    // Caller passes source as CrossRepo form pointing at the configured
+    // repo. Without normalization, the handler would take the skip-warn
+    // cross-repo arm and the mutation would proceed. With normalization,
+    // the handler enters the (Local, Local) arm, runs would_create_cycle,
+    // and rejects.
+    let err = server
+        .depends(Parameters(DependsParams {
+            source: "acme/widgets#3".to_owned(),
+            target: "5".to_owned(),
+        }))
+        .await
+        .map(|_| ())
+        .expect_err("cycle must be detected for aliased-configured-repo source");
+
+    // CircularDependency maps to 422 → INVALID_PARAMS.
+    assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert!(
+        err.message.to_lowercase().contains("circular"),
+        "error message should reference a circular dependency: {}",
+        err.message
+    );
+
+    // Source fetch happened (step 1 of the handler).
+    assert_eq!(mock.calls().fetch_issue_ref(), 1);
+    // Mutation MUST NOT run when cycle is rejected.
+    assert_eq!(mock.calls().add_blocked_by_refs(), 0);
+    assert_eq!(mock.calls().add_blocked_by_ref(), 0);
+    // Rebuild does not run when we rejected before the mutation.
+    assert_eq!(mock.calls().fetch_graph_data(), 0);
+}
+
+/// Exercises the aliasing-case happy path for `source`: `acme/widgets#N`
+/// where the configured repo IS `acme/widgets`.
+///
+/// Verifies the normalization fix for the review [WARNING]s (happy path):
+/// - The Projects V2 field update ladder runs (`field_ids`,
+///   `resolve_project_info`, `get_project_item_id` each called once). Under
+///   the aliasing bug this was skipped.
+/// - The mutation entry point is still `add_blocked_by_refs` (the
+///   `GitHubApi` trait method), invoked exactly once.
+/// - Result rendering: `source` is the canonical Local form (`"#3"`),
+///   matching the `"3"` and `"#3"` input forms — fulfills the
+///   "stable output regardless of input form" contract.
+#[tokio::test]
+async fn depends_aliased_configured_repo_source_happy_path() {
+    let mock = new_mock();
+    mock.push_fetch_issue_ref(Ok(make_issue(3))); // source (aliased as cross-repo)
+    mock.push_add_blocked_by_refs(Ok(()));
+    mock.push_field_ids(Some(empty_field_ids()));
+    mock.push_resolve_project_info(Ok(ProjectInfo {
+        id: "PVT_1".to_owned(),
+        number: 1,
+    }));
+    mock.push_get_project_item_id(Ok("PVTI_aliased".to_owned()));
+    mock.push_fetch_graph_data(Ok((vec![make_issue(3), make_issue(5)], vec![])));
+
+    let server = UnblockServer::new(state_with_mock(Arc::clone(&mock)));
+    let Json(result) = server
+        .depends(Parameters(DependsParams {
+            source: "acme/widgets#3".to_owned(),
+            target: "5".to_owned(),
+        }))
+        .await
+        .expect("depends should succeed for aliased-configured-repo source");
+
+    assert!(result.created);
+    // Source renders as the canonical Local form "#3", matching the
+    // unaliased "3" and "#3" inputs.
+    assert_eq!(result.source, "#3");
+    assert_eq!(result.target, "#5");
+
+    // Source fetch path (step 1 of the handler) ran once.
+    assert_eq!(mock.calls().fetch_issue_ref(), 1);
+    // Mutation dispatch (step 3).
+    assert_eq!(mock.calls().add_blocked_by_refs(), 1);
+    // Cache rebuild (wrap in execute_write_tool).
+    assert_eq!(mock.calls().fetch_graph_data(), 1);
+    // Projects V2 field update ladder MUST run for aliased local source.
+    // Under the aliasing bug these counters would all be 0.
+    assert_eq!(mock.calls().field_ids(), 1);
+    assert_eq!(mock.calls().resolve_project_info(), 1);
+    assert_eq!(mock.calls().get_project_item_id(), 1);
+    // Empty option maps gate the SingleSelectOption update, so
+    // update_field is not called — identical to the canonical-form test.
+    assert_eq!(mock.calls().update_field(), 0);
+    // The local-only fallbacks must NOT be called.
+    assert_eq!(mock.calls().fetch_issue(), 0);
+    assert_eq!(mock.calls().add_blocked_by_ref(), 0);
+}
+
+/// Mirrors `depends_aliased_configured_repo_source_cycle_detection` with
+/// the alias on `target` instead of `source`. Source is local (`"3"`);
+/// target is `"acme/widgets#5"` (aliased cross-repo form of the
+/// configured repo's issue #5).
+///
+/// Without normalization on `target_ref`, the cycle-detection `match` arm
+/// would skip with a warn because the `(Local, CrossRepo)` pattern falls
+/// through. With normalization, both refs are `Local`, the arm runs, and
+/// the pre-seeded cycle is detected.
+#[tokio::test]
+async fn depends_aliased_configured_repo_target_cycle_detection() {
+    let mock = new_mock();
+    mock.push_fetch_issue_ref(Ok(make_issue(3)));
+
+    let issues = vec![make_issue(3), make_issue(5)];
+    let edges = vec![BlockingEdge {
+        source: QualifiedId::new("acme", "widgets", 5),
+        target: QualifiedId::new("acme", "widgets", 3),
+    }];
+    let graph = DependencyGraph::build(&issues, &edges);
+    let ready_set = graph.compute_ready_set(&issues);
+
+    let state = state_with_mock(Arc::clone(&mock));
+    let cache = Arc::clone(&state.cache);
+    cache.update(ready_set, graph).await;
+
+    let server = UnblockServer::new(state);
+
+    let err = server
+        .depends(Parameters(DependsParams {
+            source: "3".to_owned(),
+            target: "acme/widgets#5".to_owned(),
+        }))
+        .await
+        .map(|_| ())
+        .expect_err("cycle must be detected for aliased-configured-repo target");
+
+    assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert!(
+        err.message.to_lowercase().contains("circular"),
+        "error message should reference a circular dependency: {}",
+        err.message
+    );
+
+    assert_eq!(mock.calls().fetch_issue_ref(), 1);
+    assert_eq!(mock.calls().add_blocked_by_refs(), 0);
+    assert_eq!(mock.calls().add_blocked_by_ref(), 0);
+    assert_eq!(mock.calls().fetch_graph_data(), 0);
 }
 
 // ── create ─────────────────────────────────────────────────────────────
