@@ -7,6 +7,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::TimeZone;
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use unblock_core::cache::GraphCache;
 use unblock_core::config::Config;
@@ -750,6 +751,330 @@ fn ready_tool_registered_in_server() {
     assert!(
         instructions.contains("Find issues that can be worked on right now"),
         "INSTRUCTIONS_STR should describe the ready tool's purpose",
+    );
+}
+
+// ── List tool: integration tests ──────────────────────────────────
+
+/// `handle_list` drives the full list pipeline against a `MockGitHubClient`
+/// — fetches the OPEN graph, refreshes the cache as a side effect, then
+/// applies filter + sort + pagination.
+///
+/// The mock is seeded with six issues spanning every filterable shape
+/// (statuses, priorities, types, milestones, labels, assignees, agents).
+/// The test then drives `handle_list` four times to cover:
+/// - sort=priority + label filter (returns the matching subset in P0→P3 order),
+/// - sort=created (oldest first),
+/// - sort=updated (newest first),
+/// - offset/limit pagination across the full set.
+///
+/// All assertions hit the public `pub async fn handle_list(state, params)`
+/// surface — server.rs registration is owned by sibling bead unblock-29p.12
+/// and is intentionally not exercised here.
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Single end-to-end scenario covers 4 call shapes.
+async fn list_returns_filtered_sorted_paginated_issues_via_mock_client() {
+    use unblock_mcp::tools::list::{ListParams, handle_list};
+
+    #[allow(clippy::too_many_arguments)] // Fixture ctor trades arg count for call-site clarity.
+    fn list_issue(
+        number: u64,
+        status: Status,
+        priority: Priority,
+        issue_type: IssueType,
+        milestone: Option<&str>,
+        agent: Option<&str>,
+        labels: Vec<&str>,
+        assignees: Vec<&str>,
+        created_at: chrono::DateTime<chrono::Utc>,
+        updated_at: chrono::DateTime<chrono::Utc>,
+    ) -> unblock_core::types::Issue {
+        unblock_core::types::Issue {
+            qualified_id: QualifiedId::new("acme", "widgets", number),
+            number,
+            node_id: format!("I_{number}"),
+            title: format!("List fixture #{number}"),
+            issue_type: Some(issue_type),
+            status,
+            priority,
+            agent: agent.map(str::to_owned),
+            claimed_at: None,
+            pipeline_stage: None,
+            story_points: None,
+            defer_until: None,
+            labels: labels.into_iter().map(str::to_owned).collect(),
+            milestone: milestone.map(str::to_owned),
+            assignees: assignees.into_iter().map(str::to_owned).collect(),
+            state: IssueState::Open,
+            body: None,
+            created_at,
+            updated_at,
+            url: format!("https://github.com/acme/widgets/issues/{number}"),
+            comments: vec![],
+            blocked_by: vec![],
+            blocking: vec![],
+            parent: None,
+            sub_issues: vec![],
+        }
+    }
+
+    let t1 = chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+    let t2 = chrono::Utc.with_ymd_and_hms(2026, 2, 1, 0, 0, 0).unwrap();
+    let t3 = chrono::Utc.with_ymd_and_hms(2026, 3, 1, 0, 0, 0).unwrap();
+    let t4 = chrono::Utc.with_ymd_and_hms(2026, 4, 1, 0, 0, 0).unwrap();
+    let t5 = chrono::Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap();
+    let t6 = chrono::Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
+
+    let issues = vec![
+        list_issue(
+            1,
+            Status::Ready,
+            Priority::P0,
+            IssueType::Bug,
+            Some("v1.0"),
+            None,
+            vec!["urgent"],
+            vec!["alice"],
+            t1,
+            t6,
+        ),
+        list_issue(
+            2,
+            Status::Ready,
+            Priority::P1,
+            IssueType::Task,
+            Some("v1.0"),
+            Some("agent-x"),
+            vec!["urgent", "backend"],
+            vec!["bob"],
+            t2,
+            t5,
+        ),
+        list_issue(
+            3,
+            Status::InProgress,
+            Priority::P2,
+            IssueType::Feature,
+            Some("v2.0"),
+            Some("agent-y"),
+            vec!["frontend"],
+            vec!["alice"],
+            t3,
+            t4,
+        ),
+        list_issue(
+            4,
+            Status::Blocked,
+            Priority::P3,
+            IssueType::Chore,
+            None,
+            None,
+            vec!["urgent"],
+            vec!["carol"],
+            t4,
+            t3,
+        ),
+        list_issue(
+            5,
+            Status::Deferred,
+            Priority::P2,
+            IssueType::Spike,
+            Some("v2.0"),
+            None,
+            vec!["research"],
+            vec![],
+            t5,
+            t2,
+        ),
+        list_issue(
+            6,
+            Status::Ready,
+            Priority::P4,
+            IssueType::Epic,
+            Some("v1.0"),
+            None,
+            vec!["urgent"],
+            vec!["alice", "bob"],
+            t6,
+            t1,
+        ),
+    ];
+
+    let mock = new_mock();
+    // Seed one result per planned `handle_list` call (4 total).
+    for _ in 0..4 {
+        mock.push_fetch_graph_data(Ok((issues.clone(), vec![])));
+    }
+    let state = state_with_mock(Arc::clone(&mock));
+
+    // ── Call 1: filter by label="urgent" with default priority sort ──
+    // Expected matches: issues 1, 2, 4, 6 (have "urgent" label).
+    // Sort: priority ASC, then created_at ASC, then qualified_id ASC.
+    // Order: 1 (P0), 2 (P1), 4 (P3), 6 (P4).
+    let result1 = handle_list(
+        &state,
+        ListParams {
+            status: None,
+            priority: None,
+            issue_type: None,
+            milestone: None,
+            agent: None,
+            label: Some("urgent".to_owned()),
+            assignee: None,
+            sort: None,
+            limit: None,
+            offset: None,
+        },
+    )
+    .await
+    .expect("list call 1 should succeed");
+    assert_eq!(result1.total, 4, "label='urgent' should match 4 issues");
+    assert!(!result1.stale, "fresh fetch should not be stale");
+    let numbers: Vec<u64> = result1.issues.iter().map(|i| i.number).collect();
+    assert_eq!(
+        numbers,
+        vec![1_u64, 2, 4, 6],
+        "priority sort should yield P0→P1→P3→P4 ordering"
+    );
+    assert_eq!(result1.issues[0].priority, "P0", "first item should be P0",);
+    // The list summary must surface assignees from &[Issue] (R3).
+    assert_eq!(result1.issues[0].assignees, vec!["alice".to_owned()]);
+
+    // ── Call 2: sort by created_at ASC ──
+    // Should order all 6 by created_at: 1, 2, 3, 4, 5, 6.
+    let result2 = handle_list(
+        &state,
+        ListParams {
+            status: None,
+            priority: None,
+            issue_type: None,
+            milestone: None,
+            agent: None,
+            label: None,
+            assignee: None,
+            sort: Some("created".to_owned()),
+            limit: None,
+            offset: None,
+        },
+    )
+    .await
+    .expect("list call 2 should succeed");
+    assert_eq!(result2.total, 6);
+    assert!(!result2.stale);
+    let numbers2: Vec<u64> = result2.issues.iter().map(|i| i.number).collect();
+    assert_eq!(numbers2, vec![1_u64, 2, 3, 4, 5, 6]);
+
+    // ── Call 3: sort by updated_at DESC ──
+    // Issue updated_at: 1=t6, 2=t5, 3=t4, 4=t3, 5=t2, 6=t1.
+    // Newest first: 1, 2, 3, 4, 5, 6.
+    let result3 = handle_list(
+        &state,
+        ListParams {
+            status: None,
+            priority: None,
+            issue_type: None,
+            milestone: None,
+            agent: None,
+            label: None,
+            assignee: None,
+            sort: Some("updated".to_owned()),
+            limit: None,
+            offset: None,
+        },
+    )
+    .await
+    .expect("list call 3 should succeed");
+    assert_eq!(result3.total, 6);
+    let numbers3: Vec<u64> = result3.issues.iter().map(|i| i.number).collect();
+    assert_eq!(numbers3, vec![1_u64, 2, 3, 4, 5, 6]);
+    // The list summary must surface updated_at from &[Issue] (R2).
+    assert!(
+        result3.issues[0].updated_at.starts_with("2026-06-01"),
+        "first item's updated_at should be t6 (2026-06-01), got {}",
+        result3.issues[0].updated_at,
+    );
+
+    // ── Call 4: offset/limit pagination across the default sort ──
+    // Default sort (priority): 1 (P0), 2 (P1), 3 (P2 t3), 5 (P2 t5),
+    // 4 (P3), 6 (P4). offset=2, limit=2 should yield issues 3 then 5.
+    let result4 = handle_list(
+        &state,
+        ListParams {
+            status: None,
+            priority: None,
+            issue_type: None,
+            milestone: None,
+            agent: None,
+            label: None,
+            assignee: None,
+            sort: None,
+            limit: Some(2),
+            offset: Some(2),
+        },
+    )
+    .await
+    .expect("list call 4 should succeed");
+    assert_eq!(
+        result4.total, 6,
+        "total counts the pre-pagination filter set, not the page",
+    );
+    let numbers4: Vec<u64> = result4.issues.iter().map(|i| i.number).collect();
+    assert_eq!(
+        numbers4,
+        vec![3_u64, 5],
+        "offset=2 + limit=2 should yield page 2 of the priority-sorted set",
+    );
+
+    // Final invariant: the mock saw exactly 4 fetch_graph_data calls
+    // (one per handle_list invocation) — confirms list always refetches
+    // and never short-circuits on a warm cache.
+    assert_eq!(
+        mock.calls().fetch_graph_data(),
+        4,
+        "handle_list should always issue a fresh fetch, not consult the cache",
+    );
+}
+
+/// `handle_list` rejects an out-of-range `limit` with `INVALID_PARAMS`
+/// before issuing any GitHub call.
+#[tokio::test]
+async fn list_rejects_limit_out_of_range_without_fetching() {
+    use rmcp::model::ErrorCode;
+    use unblock_mcp::tools::list::{ListParams, handle_list};
+
+    let mock = new_mock();
+    // Deliberately do NOT push a fetch_graph_data result — if the
+    // handler reached the network it would error out as "not stubbed".
+    let state = state_with_mock(Arc::clone(&mock));
+
+    let err = handle_list(
+        &state,
+        ListParams {
+            status: None,
+            priority: None,
+            issue_type: None,
+            milestone: None,
+            agent: None,
+            label: None,
+            assignee: None,
+            sort: None,
+            limit: Some(0),
+            offset: None,
+        },
+    )
+    .await
+    .expect_err("limit=0 must fail validation");
+
+    assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+    assert!(
+        err.message.contains("limit") && err.message.contains("200"),
+        "validation error must explain the bound: {}",
+        err.message,
+    );
+    assert_eq!(
+        mock.calls().fetch_graph_data(),
+        0,
+        "validation must short-circuit before any GitHub call",
     );
 }
 
