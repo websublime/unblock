@@ -84,8 +84,8 @@ unblock turns GitHub Issues into a dependency graph. Ask `ready` to get unblocke
 ### Query & Dependencies
 | Tool    | Purpose                                              | Key Params                          |
 |---------|------------------------------------------------------|-------------------------------------|
-| show    | Get full details for a single issue                  | issue_number                        |
-| depends | Show the dependency tree for an issue                | issue_number, direction?            |
+| show    | Get full details for a single issue                  | issue                               |
+| depends | Add a blocking dependency (source blocked by target) | source, target                      |
 | comment | Add a comment to an issue                            | issue_number, body                  |
 | update  | Update issue fields (priority, labels, body, etc.)   | issue_number, fields...             |
 
@@ -99,8 +99,8 @@ unblock turns GitHub Issues into a dependency graph. Ask `ready` to get unblocke
 - Always call `ready` first to find unblocked work.
 - Use `claim` before starting work to prevent conflicts.
 - After `close`, dependents are automatically re-evaluated.
-- Write tools (create, close, update, claim) trigger a graph rebuild.
-- Read tools (ready, show, depends, comment) use the cache for fast responses.
+- Write tools (create, close, update, claim, depends, comment) trigger a graph rebuild.
+- Read tools (ready, show) use the cache for fast responses.
 - Bootstrap tools (init, setup) manage the project itself and do not affect the dependency graph.
 ";
 
@@ -1184,7 +1184,7 @@ impl UnblockServer {
     /// cache rebuild.
     #[tool(
         name = "depends",
-        description = "Add a blocking dependency: source becomes blocked by target. Validates both issues exist, rejects cycles and duplicates. Target accepts local number or owner/repo#number for cross-repo. Updates project fields (Status=Blocked) on source. Triggers graph rebuild."
+        description = "Add a blocking dependency: source becomes blocked by target. Validates both issues exist, rejects cycles and duplicates, and rejects source == target. Both source and target accept a local number (42 / #42) or owner/repo#number for cross-repo. Updates project fields (Status=Blocked) on source when source is local to the configured project. Triggers graph rebuild."
     )]
     pub async fn depends(
         &self,
@@ -1194,13 +1194,27 @@ impl UnblockServer {
         let kind = state.agent_kind_str();
         let client = Arc::clone(&state.github);
 
-        let source = params.source;
+        let source_str = params.source.clone();
         let target_str = params.target.clone();
 
-        info!(agent.kind = %kind, source, target = %target_str, "Depends tool invoked");
+        info!(
+            agent.kind = %kind,
+            source = %source_str,
+            target = %target_str,
+            "Depends tool invoked"
+        );
+
+        // Parse source string into IssueRef.
+        let source_ref = source_str
+            .parse::<unblock_core::types::IssueRef>()
+            .map_err(|e| ErrorData {
+                code: rmcp::model::ErrorCode::INVALID_PARAMS,
+                message: format!("Invalid source reference '{source_str}': {e}").into(),
+                data: None,
+            })?;
 
         // Parse target string into IssueRef.
-        let issue_ref = target_str
+        let target_ref = target_str
             .parse::<unblock_core::types::IssueRef>()
             .map_err(|e| ErrorData {
                 code: rmcp::model::ErrorCode::INVALID_PARAMS,
@@ -1208,93 +1222,150 @@ impl UnblockServer {
                 data: None,
             })?;
 
-        // Step 1: Validate source issue exists.
-        let source_issue = client
-            .fetch_issue(source)
-            .await
-            .map_err(crate::errors::github_error_to_mcp)?;
-
-        // Step 2: Cycle detection using cached graph (local targets only).
-        // Cross-repo targets are not present in the local graph, so cycle
-        // detection is skipped — no local cycle is possible. Checking with
-        // the bare number from a CrossRepo ref would incorrectly match a
-        // local issue with the same number, causing false positive rejections.
-        if let unblock_core::types::IssueRef::Local(target_number) = &issue_ref
-            && let Some(graph) = state.cache.get_graph().await
-            && graph.would_create_cycle(
-                &unblock_core::types::QualifiedId::new(client.owner(), client.repo(), source),
-                &unblock_core::types::QualifiedId::new(
-                    client.owner(),
-                    client.repo(),
-                    *target_number,
-                ),
-            )
-        {
+        // Spec §8.4: source != target is a required validation.
+        // Compare on the fully-qualified id (resolved against the configured
+        // repo) so that e.g. `"42"` and `"#42"` collapse to the same identity
+        // and the check also rejects a Local vs. CrossRepo pointing at the
+        // same configured-repo issue.
+        let source_qid = source_ref.resolve(client.owner(), client.repo());
+        let target_qid = target_ref.resolve(client.owner(), client.repo());
+        if source_qid == target_qid {
             return Err(crate::errors::github_error_to_mcp(
-                CircularDependencySnafu {
-                    source,
-                    target: *target_number,
+                unblock_core::errors::ValidationSnafu {
+                    message: format!(
+                        "depends: source and target must differ (both resolved to {source_qid})"
+                    ),
                 }
                 .build()
                 .into(),
             ));
         }
 
+        // Step 1: Validate source issue exists, resolving against its own
+        // owner/repo so cross-repo sources are fetched correctly.
+        let source_issue = client
+            .fetch_issue_ref(&source_ref)
+            .await
+            .map_err(crate::errors::github_error_to_mcp)?;
+
+        // Step 2: Cycle detection using cached graph.
+        // The cache only covers the configured project's repo, so we can
+        // only detect cycles when BOTH endpoints are local to that repo.
+        // When either endpoint is cross-repo, the cached graph does not
+        // contain it; we skip client-side cycle detection and rely on
+        // GitHub's server-side rejection at mutation time.
+        match (&source_ref, &target_ref) {
+            (
+                unblock_core::types::IssueRef::Local(source_number),
+                unblock_core::types::IssueRef::Local(target_number),
+            ) => {
+                if let Some(graph) = state.cache.get_graph().await
+                    && graph.would_create_cycle(
+                        &unblock_core::types::QualifiedId::new(
+                            client.owner(),
+                            client.repo(),
+                            *source_number,
+                        ),
+                        &unblock_core::types::QualifiedId::new(
+                            client.owner(),
+                            client.repo(),
+                            *target_number,
+                        ),
+                    )
+                {
+                    return Err(crate::errors::github_error_to_mcp(
+                        CircularDependencySnafu {
+                            source: *source_number,
+                            target: *target_number,
+                        }
+                        .build()
+                        .into(),
+                    ));
+                }
+            }
+            _ => {
+                tracing::warn!(
+                    source = %source_ref,
+                    target = %target_ref,
+                    "Cross-repo endpoint: client-side cycle detection skipped (graph covers configured repo only); relying on server-side rejection."
+                );
+            }
+        }
+
         // Step 3: Add blocking relationship and rebuild cache via execute_write_tool.
         execute_write_tool(state, || {
             let client = Arc::clone(&client);
-            let issue_ref = issue_ref.clone();
+            let source_ref = source_ref.clone();
+            let target_ref = target_ref.clone();
 
-            async move { client.add_blocked_by_ref(source, &issue_ref).await }
+            async move { client.add_blocked_by_refs(&source_ref, &target_ref).await }
         })
         .await?;
 
-        // Step 4: Update Projects V2 fields on source issue:
-        // Status → Blocked.
+        // Step 4: Update Projects V2 fields on source issue (Status=Blocked).
+        // Only applies when source is local to the configured project: the
+        // Projects V2 item lookup (`get_project_item_id`) is scoped to the
+        // configured project, so cross-repo sources cannot have their
+        // fields updated here per spec §5 cross-repo scope table.
         // TODO(unblock-b6b.79): Fourth copy of field update ladder — extract shared helper.
-        if let Some(field_ids) = client.field_ids().await {
-            if let Ok(project_info) = client.resolve_project_info().await {
-                if let Ok(item_id) = client
-                    .get_project_item_id(&source_issue.node_id, &project_info.id)
-                    .await
-                {
-                    // Status → blocked
-                    if let Some(option_id) = field_ids.status.options.get("blocked")
-                        && let Err(e) = client
-                            .update_field(
-                                &project_info.id,
-                                &item_id,
-                                &field_ids.status.field_id,
-                                &FieldValue::SingleSelectOption(option_id.clone()),
-                            )
-                            .await
+        if matches!(source_ref, unblock_core::types::IssueRef::Local(_)) {
+            if let Some(field_ids) = client.field_ids().await {
+                if let Ok(project_info) = client.resolve_project_info().await {
+                    if let Ok(item_id) = client
+                        .get_project_item_id(&source_issue.node_id, &project_info.id)
+                        .await
                     {
+                        // Status → blocked
+                        if let Some(option_id) = field_ids.status.options.get("blocked")
+                            && let Err(e) = client
+                                .update_field(
+                                    &project_info.id,
+                                    &item_id,
+                                    &field_ids.status.field_id,
+                                    &FieldValue::SingleSelectOption(option_id.clone()),
+                                )
+                                .await
+                        {
+                            tracing::warn!(
+                                error = %e,
+                                "Failed to set Status=blocked on source issue"
+                            );
+                        }
+                    } else {
                         tracing::warn!(
-                            error = %e,
-                            "Failed to set Status=blocked on source issue"
+                            "Failed to get project item ID for source issue — fields will not be set"
                         );
                     }
                 } else {
                     tracing::warn!(
-                        "Failed to get project item ID for source issue — fields will not be set"
+                        "Failed to resolve project info — source issue fields will not be set"
                     );
                 }
             } else {
-                tracing::warn!(
-                    "Failed to resolve project info — source issue fields will not be set"
+                tracing::debug!(
+                    "No field IDs cached — run setup first to enable project field assignment"
                 );
             }
         } else {
             tracing::debug!(
-                "No field IDs cached — run setup first to enable project field assignment"
+                source = %source_ref,
+                "Cross-repo source: skipping Projects V2 field update (source is outside the configured project)."
             );
         }
 
+        // Render source and target refs in canonical form. For a bare local
+        // number (e.g. "42"), IssueRef::Local Display writes "#42"; we
+        // preserve that shape for both endpoints so the result format is
+        // stable regardless of which accepted input form the caller used.
+        let source_rendered = source_ref.to_string();
+        let target_rendered = target_ref.to_string();
+
         Ok(Json(DependsResult {
-            source,
-            target: target_str,
+            created: true,
+            source: source_rendered.clone(),
+            target: target_rendered.clone(),
             message: format!(
-                "Issue #{source} is now blocked by {issue_ref}. Source marked as blocked."
+                "Issue {source_rendered} is now blocked by {target_rendered}. Source marked as blocked."
             ),
         }))
     }

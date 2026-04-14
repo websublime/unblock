@@ -2,41 +2,51 @@
 //!
 //! Validates both issues exist, checks for cycles and duplicates, then creates
 //! the blocking relationship via the GitHub API. Updates Projects V2 fields on
-//! the source issue (Status=Blocked), and rebuilds the
-//! cache so the ready set reflects the new dependency.
+//! the source issue (Status=Blocked) when the source is local to the
+//! configured project; skips field updates for cross-repo sources. Rebuilds
+//! the cache so the ready set reflects the new dependency.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Input parameters for the `depends` MCP tool.
 ///
-/// The `source` issue will become blocked by the `target` issue. The source
-/// must be in the configured repository. The target can be a local issue
-/// number or a cross-repo reference in `owner/repo#number` format.
+/// The `source` issue will become blocked by the `target` issue. Both sides
+/// accept an [`IssueRef`](unblock_core::types::IssueRef)-compatible string:
+///
+/// - a bare number for a local issue (`"42"`),
+/// - a hash-prefixed local number (`"#42"`), or
+/// - a cross-repo reference (`"owner/repo#42"`).
+///
+/// Per spec §8.4, `source != target` is required. Cross-repo sources are
+/// outside the configured project, so the Projects V2 field update on the
+/// source (Status=Blocked) is skipped for them — GitHub still records the
+/// dependency edge itself cross-repo.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DependsParams {
-    /// Issue number that will be blocked (must be in the configured repo).
-    pub source: u64,
-    /// The issue that blocks source. Accepts a plain integer for local issues
-    /// (e.g. `"42"`) or `owner/repo#number` for cross-repo (e.g.
-    /// `"websublime/other-repo#7"`).
+    /// Issue that will be blocked. Accepts `42`, `#42`, or `owner/repo#42`.
+    pub source: String,
+    /// Issue that blocks `source`. Accepts `42`, `#42`, or `owner/repo#42`.
     pub target: String,
 }
 
 /// Result returned by the `depends` MCP tool.
 ///
-/// Confirms the blocking relationship was created, including the source issue
-/// number, the resolved target reference, and a human-readable message.
+/// Confirms the blocking relationship was created, including a `created` flag
+/// (spec §8.4), the resolved source and target references as strings, and a
+/// human-readable message.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct DependsResult {
-    /// The source issue number (the one that is now blocked).
-    pub source: u64,
-    /// The target reference as provided (local number or cross-repo ref).
+    /// `true` when a new blocking edge was created by this call.
+    pub created: bool,
+    /// The source issue reference as resolved (local `#n` or `owner/repo#n`).
+    pub source: String,
+    /// The target issue reference as resolved (local `#n` or `owner/repo#n`).
     pub target: String,
     /// Human-readable confirmation message.
     pub message: String,
 }
 
-// TODO(unblock-45a.12): Add integration tests for depends tool (local dep,
+// TODO(unblock-29p.13): Add integration tests for depends tool (local dep,
 // cross-repo dep, cycle detection, duplicate detection, non-existent issue)
 // as part of the E2E workflow integration test.
