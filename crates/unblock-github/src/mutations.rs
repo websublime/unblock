@@ -1433,6 +1433,12 @@ impl GitHubClient {
                 if let Some(n) = blocker_number_in_source_repo
                     && source_issue.blocked_by.iter().any(|r| r.number == n)
                 {
+                    // TODO(unblock-29p.25): DuplicateDependencySnafu's `source`
+                    // field is `u64` and loses the cross-repo source's
+                    // owner/repo context — the error message is ambiguous
+                    // with a same-numbered local issue. Tracked as a spec
+                    // §11.1 revision (extend CircularDependency /
+                    // DuplicateDependency with cross-repo context).
                     return Err(unblock_core::errors::DuplicateDependencySnafu {
                         source: *source_number,
                         target: n,
