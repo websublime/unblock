@@ -21,7 +21,7 @@
 
 use async_trait::async_trait;
 
-use unblock_core::types::{BlockingEdge, Issue, IssueRef};
+use unblock_core::types::{BlockingEdge, Issue, IssueRef, IssueSummary};
 
 use crate::client::GitHubClient;
 use crate::errors::Error;
@@ -161,6 +161,20 @@ pub trait GitHubApi: Send + Sync {
 
     /// Closes an issue with an optional state reason.
     async fn close_issue(&self, number: u64, reason: Option<String>) -> Result<(), Error>;
+
+    /// Reopens a previously closed issue.
+    async fn reopen_issue(&self, number: u64) -> Result<(), Error>;
+
+    /// Full-text search of issues via GitHub's REST Search API.
+    ///
+    /// Scoped to the configured `owner/repo`. Bypasses any caller-side cache.
+    /// Returns lightweight [`IssueSummary`] entries; Projects V2 custom fields
+    /// are populated with defaults since the Search API does not include them.
+    async fn search_issues(
+        &self,
+        query: &str,
+        limit: Option<u32>,
+    ) -> Result<Vec<IssueSummary>, Error>;
 
     /// Adds a comment to an issue; returns the comment node id.
     async fn add_comment(&self, number: u64, body: String) -> Result<String, Error>;
@@ -344,6 +358,18 @@ impl GitHubApi for GitHubClient {
 
     async fn close_issue(&self, number: u64, reason: Option<String>) -> Result<(), Error> {
         GitHubClient::close_issue(self, number, reason).await
+    }
+
+    async fn reopen_issue(&self, number: u64) -> Result<(), Error> {
+        GitHubClient::reopen_issue(self, number).await
+    }
+
+    async fn search_issues(
+        &self,
+        query: &str,
+        limit: Option<u32>,
+    ) -> Result<Vec<IssueSummary>, Error> {
+        GitHubClient::search_issues(self, query, limit).await
     }
 
     async fn add_comment(&self, number: u64, body: String) -> Result<String, Error> {

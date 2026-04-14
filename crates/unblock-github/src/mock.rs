@@ -59,7 +59,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 
-use unblock_core::types::{BlockingEdge, Issue, IssueRef};
+use unblock_core::types::{BlockingEdge, Issue, IssueRef, IssueSummary};
 
 use crate::api::GitHubApi;
 use crate::errors::Error;
@@ -92,6 +92,8 @@ pub struct CallCounts {
     fetch_graph_data: AtomicUsize,
     create_issue: AtomicUsize,
     close_issue: AtomicUsize,
+    reopen_issue: AtomicUsize,
+    search_issues: AtomicUsize,
     add_comment: AtomicUsize,
     update_issue_body: AtomicUsize,
     add_labels_to_issue: AtomicUsize,
@@ -141,6 +143,8 @@ impl CallCounts {
         fetch_graph_data,
         create_issue,
         close_issue,
+        reopen_issue,
+        search_issues,
         add_comment,
         update_issue_body,
         add_labels_to_issue,
@@ -185,6 +189,8 @@ impl CallCounts {
             fetch_graph_data,
             create_issue,
             close_issue,
+            reopen_issue,
+            search_issues,
             add_comment,
             update_issue_body,
             add_labels_to_issue,
@@ -236,6 +242,8 @@ pub struct Stubs {
     fetch_graph_data: Mutex<VecDeque<GraphDataResult>>,
     create_issue: Mutex<VecDeque<Result<Issue, Error>>>,
     close_issue: Mutex<VecDeque<Result<(), Error>>>,
+    reopen_issue: Mutex<VecDeque<Result<(), Error>>>,
+    search_issues: Mutex<VecDeque<Result<Vec<IssueSummary>, Error>>>,
     add_comment: Mutex<VecDeque<Result<String, Error>>>,
     update_issue_body: Mutex<VecDeque<Result<(), Error>>>,
     add_labels_to_issue: Mutex<VecDeque<Result<(), Error>>>,
@@ -380,6 +388,8 @@ push_result!(
 );
 push_result!(create_issue, push_create_issue, Issue);
 push_result!(close_issue, push_close_issue, ());
+push_result!(reopen_issue, push_reopen_issue, ());
+push_result!(search_issues, push_search_issues, Vec<IssueSummary>);
 push_result!(add_comment, push_add_comment, String);
 push_result!(update_issue_body, push_update_issue_body, ());
 push_result!(add_labels_to_issue, push_add_labels_to_issue, ());
@@ -558,6 +568,20 @@ impl GitHubApi for MockGitHubClient {
     async fn close_issue(&self, _number: u64, _reason: Option<String>) -> Result<(), Error> {
         self.calls.close_issue.fetch_add(1, Ordering::SeqCst);
         pop_or_unstubbed(&self.stubs.close_issue, "close_issue")
+    }
+
+    async fn reopen_issue(&self, _number: u64) -> Result<(), Error> {
+        self.calls.reopen_issue.fetch_add(1, Ordering::SeqCst);
+        pop_or_unstubbed(&self.stubs.reopen_issue, "reopen_issue")
+    }
+
+    async fn search_issues(
+        &self,
+        _query: &str,
+        _limit: Option<u32>,
+    ) -> Result<Vec<IssueSummary>, Error> {
+        self.calls.search_issues.fetch_add(1, Ordering::SeqCst);
+        pop_or_unstubbed(&self.stubs.search_issues, "search_issues")
     }
 
     async fn add_comment(&self, _number: u64, _body: String) -> Result<String, Error> {
@@ -817,5 +841,51 @@ mod tests {
     fn mock_not_stubbed_status_code_is_500() {
         let err = Error::MockNotStubbed { method: "x" };
         assert_eq!(err.status_code(), 500);
+    }
+
+    #[tokio::test]
+    async fn reopen_issue_counter_and_queue_pop() {
+        let m = mock();
+        assert_eq!(m.calls().reopen_issue(), 0);
+
+        // Empty queue → MockNotStubbed fallback.
+        let first = m.reopen_issue(123).await;
+        assert!(matches!(
+            first,
+            Err(Error::MockNotStubbed {
+                method: "reopen_issue"
+            })
+        ));
+        assert_eq!(m.calls().reopen_issue(), 1);
+
+        // Queued Ok(()) must pop.
+        m.push_reopen_issue(Ok(()));
+        m.reopen_issue(123).await.expect("queued Ok should succeed");
+        assert_eq!(m.calls().reopen_issue(), 2);
+    }
+
+    #[tokio::test]
+    async fn search_issues_counter_and_queue_pop() {
+        let m = mock();
+        assert_eq!(m.calls().search_issues(), 0);
+
+        // Empty queue → MockNotStubbed fallback.
+        let first = m.search_issues("q", Some(10)).await;
+        assert!(matches!(
+            first,
+            Err(Error::MockNotStubbed {
+                method: "search_issues"
+            })
+        ));
+        assert_eq!(m.calls().search_issues(), 1);
+
+        // Queued Ok(vec) must pop.
+        m.push_search_issues(Ok(Vec::new()));
+        let second = m
+            .search_issues("q", None)
+            .await
+            .expect("queued Ok should succeed");
+        assert!(second.is_empty());
+        assert_eq!(m.calls().search_issues(), 2);
     }
 }
