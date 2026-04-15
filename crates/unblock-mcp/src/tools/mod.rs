@@ -35,6 +35,7 @@ pub mod claim;
 pub mod close;
 pub mod comment;
 pub mod create;
+pub mod dep_remove;
 pub mod depends;
 pub mod init;
 pub mod list;
