@@ -1634,6 +1634,296 @@ async fn stats_milestone_filter_scopes_aggregation_but_not_cycles() {
     );
 }
 
+// ── Reopen tool: integration tests ────────────────────────────────
+
+/// Build a customisable reopen fixture `Issue` under the mock's
+/// `acme/widgets` coordinates. The `state` parameter is the GitHub
+/// issue state (Open/Closed); `status` is the Projects V2 workflow
+/// status snapshot (Ready/InProgress/etc).
+fn reopen_fixture_issue(
+    number: u64,
+    status: Status,
+    state: IssueState,
+) -> unblock_core::types::Issue {
+    unblock_core::types::Issue {
+        qualified_id: QualifiedId::new("acme", "widgets", number),
+        number,
+        node_id: format!("I_{number}"),
+        title: format!("Reopen fixture #{number}"),
+        issue_type: Some(IssueType::Task),
+        status,
+        priority: Priority::P2,
+        agent: None,
+        claimed_at: None,
+        pipeline_stage: None,
+        story_points: None,
+        defer_until: None,
+        labels: vec![],
+        milestone: None,
+        assignees: vec![],
+        state,
+        body: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        url: format!("https://github.com/acme/widgets/issues/{number}"),
+        comments: vec![],
+        blocked_by: vec![],
+        blocking: vec![],
+        parent: None,
+        sub_issues: vec![],
+    }
+}
+
+/// Happy path: reopen a closed issue whose rebuilt graph has no open
+/// blockers. The handler should:
+/// - call `fetch_issue` once (Phase 1),
+/// - call `reopen_issue` once (Phase 1),
+/// - call `fetch_graph_data` once (post-reopen rebuild),
+/// - return `blocked = false` / `status = "ready"` after consulting
+///   the rebuilt cache.
+///
+/// Projects V2 field-update ladder is short-circuited by the default
+/// empty `field_ids` stub (which returns `None`) — so no extra project
+/// calls are expected. The test focuses on the core re-evaluation
+/// contract.
+#[tokio::test]
+async fn reopen_closed_issue_with_no_blockers_transitions_to_ready() {
+    use unblock_mcp::tools::reopen::{ReopenParams, handle_reopen};
+
+    let mock = new_mock();
+
+    // Phase 1 stubs: fetch returns a Closed issue, reopen succeeds.
+    let closed = reopen_fixture_issue(42, Status::Closed, IssueState::Closed);
+    mock.push_fetch_issue(Ok(closed));
+    mock.push_reopen_issue(Ok(()));
+
+    // Post-reopen rebuild: issue #42 is now Open with no blockers, plus
+    // an unrelated issue #7 to make the graph non-trivial.
+    let rebuilt_42 = reopen_fixture_issue(42, Status::Ready, IssueState::Open);
+    let other = reopen_fixture_issue(7, Status::Ready, IssueState::Open);
+    mock.push_fetch_graph_data(Ok((vec![rebuilt_42, other], vec![])));
+
+    let state = state_with_mock(Arc::clone(&mock));
+
+    let result = handle_reopen(&state, ReopenParams { id: 42 })
+        .await
+        .expect("reopen call should succeed");
+
+    assert_eq!(result.issue, 42);
+    assert!(
+        !result.blocked,
+        "issue with no open blockers must not be blocked",
+    );
+    assert_eq!(
+        result.status, "ready",
+        "unblocked reopen must emit lowercase `ready` slug (R8)",
+    );
+
+    // Exactly one call to each of the three GitHub operations.
+    assert_eq!(mock.calls().fetch_issue(), 1, "Phase 1 fetches once");
+    assert_eq!(mock.calls().reopen_issue(), 1, "reopen is called once");
+    assert_eq!(
+        mock.calls().fetch_graph_data(),
+        1,
+        "post-reopen rebuild fetches graph data once",
+    );
+
+    // Cache is warm after the rebuild — a follow-up `get_issues` hits
+    // the cache without additional fetches.
+    let cached_issues = state
+        .cache
+        .get_issues()
+        .await
+        .expect("cache should be warm after reopen");
+    assert_eq!(
+        cached_issues.len(),
+        2,
+        "cache contains the rebuilt issue set",
+    );
+    assert_eq!(
+        mock.calls().fetch_graph_data(),
+        1,
+        "cache-hit read must not trigger an extra fetch",
+    );
+}
+
+/// Reopen a closed issue that has an OPEN blocker in the rebuilt graph.
+/// Verifies the handler returns `blocked = true` / `status = "blocked"`.
+/// This is the counterpart of the happy path above.
+#[tokio::test]
+async fn reopen_closed_issue_with_open_blocker_transitions_to_blocked() {
+    use unblock_mcp::tools::reopen::{ReopenParams, handle_reopen};
+
+    let mock = new_mock();
+
+    // Phase 1: closed fixture + successful reopen.
+    let closed = reopen_fixture_issue(42, Status::Closed, IssueState::Closed);
+    mock.push_fetch_issue(Ok(closed));
+    mock.push_reopen_issue(Ok(()));
+
+    // Post-reopen rebuild: issue #42 is Open and blocked by #99 (also
+    // Open). The graph edge encodes "source #42 is blocked by target
+    // #99" — the same convention used everywhere else in the test
+    // suite (see cache/stats fixtures).
+    let rebuilt_42 = reopen_fixture_issue(42, Status::Ready, IssueState::Open);
+    let blocker = reopen_fixture_issue(99, Status::Ready, IssueState::Open);
+    let edges = vec![BlockingEdge {
+        source: QualifiedId::new("acme", "widgets", 42),
+        target: QualifiedId::new("acme", "widgets", 99),
+    }];
+    mock.push_fetch_graph_data(Ok((vec![rebuilt_42, blocker], edges)));
+
+    let state = state_with_mock(Arc::clone(&mock));
+
+    let result = handle_reopen(&state, ReopenParams { id: 42 })
+        .await
+        .expect("reopen call should succeed");
+
+    assert_eq!(result.issue, 42);
+    assert!(
+        result.blocked,
+        "issue with an open blocker in the rebuilt graph must be blocked",
+    );
+    assert_eq!(
+        result.status, "blocked",
+        "blocked reopen must emit lowercase `blocked` slug (R8)",
+    );
+
+    assert_eq!(mock.calls().fetch_issue(), 1);
+    assert_eq!(mock.calls().reopen_issue(), 1);
+    assert_eq!(mock.calls().fetch_graph_data(), 1);
+}
+
+/// Reopen rejects an already-open issue with `IssueAlreadyOpen` (R2),
+/// without issuing the reopen mutation and without touching the cache.
+#[tokio::test]
+async fn reopen_rejects_already_open_issue() {
+    use unblock_mcp::tools::reopen::{ReopenParams, handle_reopen};
+
+    let mock = new_mock();
+
+    // Phase 1 stub: fetch returns an OPEN issue. The handler must
+    // error out before calling reopen_issue.
+    let already_open = reopen_fixture_issue(42, Status::Ready, IssueState::Open);
+    mock.push_fetch_issue(Ok(already_open));
+
+    let state = state_with_mock(Arc::clone(&mock));
+
+    let err = handle_reopen(&state, ReopenParams { id: 42 })
+        .await
+        .expect_err("reopen on an already-open issue must fail");
+
+    // 409 Conflict (IssueAlreadyOpen) maps to INVALID_PARAMS per
+    // errors.rs:85.
+    assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert!(
+        err.message.contains("already open"),
+        "error message must explain the failure: {}",
+        err.message,
+    );
+
+    // Invariants: reopen_issue never called; cache never rebuilt.
+    assert_eq!(mock.calls().fetch_issue(), 1);
+    assert_eq!(
+        mock.calls().reopen_issue(),
+        0,
+        "a validation failure must short-circuit before the reopen mutation",
+    );
+    assert_eq!(
+        mock.calls().fetch_graph_data(),
+        0,
+        "no rebuild is attempted when Phase 1 fails",
+    );
+}
+
+/// Reopen rejects `id = 0` before any network call (R1 — fail-fast).
+#[tokio::test]
+async fn reopen_rejects_zero_id_without_fetching() {
+    use unblock_mcp::tools::reopen::{ReopenParams, handle_reopen};
+
+    let mock = new_mock();
+    // Intentionally do NOT push fetch_issue / reopen_issue stubs. If
+    // the handler bypassed validation it would fall into the
+    // `MockNotStubbed` fallback and fail the test with a different
+    // error than the one we want to assert on.
+    let state = state_with_mock(Arc::clone(&mock));
+
+    let err = handle_reopen(&state, ReopenParams { id: 0 })
+        .await
+        .expect_err("id=0 must fail validation");
+
+    assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert!(
+        err.message.contains("id"),
+        "validation error must explain the id bound: {}",
+        err.message,
+    );
+
+    // Validation short-circuits BEFORE any network call.
+    assert_eq!(
+        mock.calls().fetch_issue(),
+        0,
+        "id=0 must fail before fetch_issue (R1 fail-fast)",
+    );
+    assert_eq!(mock.calls().reopen_issue(), 0);
+    assert_eq!(mock.calls().fetch_graph_data(), 0);
+}
+
+/// R3: when the post-reopen cache rebuild fails (e.g. transient
+/// GitHub 503), the reopen has already succeeded server-side. The
+/// handler must NOT silently default `blocked = false` — it must
+/// propagate a clear error telling the caller to re-run `show`.
+#[tokio::test]
+async fn reopen_surfaces_error_when_post_reopen_rebuild_fails() {
+    use unblock_github::errors::GitHubApiSnafu;
+    use unblock_mcp::tools::reopen::{ReopenParams, handle_reopen};
+
+    let mock = new_mock();
+
+    // Phase 1: fetch + reopen both succeed.
+    let closed = reopen_fixture_issue(42, Status::Closed, IssueState::Closed);
+    mock.push_fetch_issue(Ok(closed));
+    mock.push_reopen_issue(Ok(()));
+
+    // Post-reopen rebuild: simulate a transient 503 — `execute_write_tool`
+    // leaves the cache empty after logging the error (see
+    // `tools/mod.rs:167-173`), so the reopen handler's cache-check
+    // falls through to the R3 "surface an error" branch.
+    mock.push_fetch_graph_data(Err(GitHubApiSnafu {
+        status: 503_u16,
+        message: "upstream service unavailable".to_owned(),
+    }
+    .build()));
+
+    let state = state_with_mock(Arc::clone(&mock));
+
+    let err = handle_reopen(&state, ReopenParams { id: 42 })
+        .await
+        .expect_err("cache rebuild failure must surface as a handler error (R3)");
+
+    // The error must reference the partial-state guidance so agents
+    // know to retry `show`.
+    assert!(
+        err.message.contains("reopened") && err.message.contains("show"),
+        "error message must instruct caller to re-run `show`: {}",
+        err.message,
+    );
+
+    // Despite the rebuild failure, the reopen mutation DID land.
+    assert_eq!(
+        mock.calls().reopen_issue(),
+        1,
+        "reopen is durable: mutation persists even if rebuild fails",
+    );
+    assert_eq!(mock.calls().fetch_issue(), 1);
+    assert_eq!(mock.calls().fetch_graph_data(), 1);
+    // Cache is empty because rebuild failed.
+    assert!(
+        !state.cache.is_fresh().await,
+        "cache must be invalidated and not repopulated after rebuild failure",
+    );
+}
+
 // ── Create tool: integration tests ────────────────────────────────
 
 /// Create tool is registered in the server tool list.
