@@ -193,8 +193,11 @@ pub async fn handle_reconcile(
     }
 
     // 5. Update cache with the fresh graph we already have.
-    //    Uses real 2-arg signature: cache.update(ready_summaries, graph).
-    state.cache.update(ready_summaries, graph).await;
+    //    The full issue snapshot is moved into the cache so subsequent
+    //    cache-aware reads (e.g. `stats`, spec §7.4) can aggregate without
+    //    a follow-up fetch. `issues_vec` is no longer used after this point
+    //    — `report`/`ReconcileOutput` only depend on `report`.
+    state.cache.update(issues_vec, ready_summaries, graph).await;
     tracing::debug!("Cache updated with fresh graph from reconcile");
 
     // 6. Return output.
@@ -602,7 +605,7 @@ mod tests {
         let ready_set = graph.compute_ready_set(&issues);
 
         // Update cache (same call the handler makes).
-        state.cache.update(ready_set, graph).await;
+        state.cache.update(issues, ready_set, graph).await;
 
         assert!(
             state.cache.is_fresh().await,

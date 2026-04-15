@@ -106,7 +106,7 @@ fn build_populated_cache(rt: &Runtime, n: usize) -> Arc<GraphCache> {
     let graph = DependencyGraph::build(&issues, &edges);
     let ready_set = graph.compute_ready_set(&issues);
     let cache = Arc::new(GraphCache::new(Duration::from_secs(300)));
-    rt.block_on(cache.update(ready_set, graph));
+    rt.block_on(cache.update(issues, ready_set, graph));
     cache
 }
 

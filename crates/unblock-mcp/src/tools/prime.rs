@@ -362,7 +362,10 @@ pub async fn handle_prime(
     );
 
     // 5. Update cache with the fresh graph already fetched.
-    state.cache.update(ready_summaries, graph).await;
+    //    Categorisation above (step 4) already consumed `issues_vec` by
+    //    reference, and steps 6–8 only touch `categories`/`filtered_*`, so
+    //    the issues vec can be moved into the cache here without cloning.
+    state.cache.update(issues_vec, ready_summaries, graph).await;
     tracing::debug!("Cache updated with fresh graph from prime");
 
     // 6. Apply agent filter to relevant categories (PRD §6.3).
@@ -1484,7 +1487,7 @@ mod tests {
         ];
         let graph = DependencyGraph::build(&issues, &[]);
         let ready_set = graph.compute_ready_set(&issues);
-        state.cache.update(ready_set, graph).await;
+        state.cache.update(issues, ready_set, graph).await;
 
         assert!(
             state.cache.is_fresh().await,
