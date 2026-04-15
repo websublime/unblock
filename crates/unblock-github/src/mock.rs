@@ -110,6 +110,8 @@ pub struct CallCounts {
     ensure_labels: AtomicUsize,
     add_blocked_by_ref: AtomicUsize,
     add_blocked_by_refs: AtomicUsize,
+    remove_blocked_by_ref: AtomicUsize,
+    remove_blocked_by_refs: AtomicUsize,
 }
 
 macro_rules! count_getters {
@@ -162,6 +164,8 @@ impl CallCounts {
         ensure_labels,
         add_blocked_by_ref,
         add_blocked_by_refs,
+        remove_blocked_by_ref,
+        remove_blocked_by_refs,
     );
 
     /// Resets every counter to zero. Useful between phases of a single test.
@@ -209,6 +213,8 @@ impl CallCounts {
             ensure_labels,
             add_blocked_by_ref,
             add_blocked_by_refs,
+            remove_blocked_by_ref,
+            remove_blocked_by_refs,
         );
     }
 }
@@ -263,6 +269,8 @@ pub struct Stubs {
     ensure_labels: Mutex<VecDeque<Result<(), Error>>>,
     add_blocked_by_ref: Mutex<VecDeque<Result<(), Error>>>,
     add_blocked_by_refs: Mutex<VecDeque<Result<(), Error>>>,
+    remove_blocked_by_ref: Mutex<VecDeque<Result<(), Error>>>,
+    remove_blocked_by_refs: Mutex<VecDeque<Result<(), Error>>>,
 }
 
 /// Hand-written mock for [`GitHubApi`].
@@ -414,6 +422,8 @@ push_result!(get_project_item_id, push_get_project_item_id, String);
 push_result!(ensure_labels, push_ensure_labels, ());
 push_result!(add_blocked_by_ref, push_add_blocked_by_ref, ());
 push_result!(add_blocked_by_refs, push_add_blocked_by_refs, ());
+push_result!(remove_blocked_by_ref, push_remove_blocked_by_ref, ());
+push_result!(remove_blocked_by_refs, push_remove_blocked_by_refs, ());
 push_result!(field_ids, push_field_ids, Option<ProjectFieldIds>);
 
 /// Pops the next stub off a queue, or returns `Error::MockNotStubbed` with
@@ -719,6 +729,28 @@ impl GitHubApi for MockGitHubClient {
             .add_blocked_by_refs
             .fetch_add(1, Ordering::SeqCst);
         pop_or_unstubbed(&self.stubs.add_blocked_by_refs, "add_blocked_by_refs")
+    }
+
+    async fn remove_blocked_by_ref(
+        &self,
+        _issue_number: u64,
+        _blocker: &IssueRef,
+    ) -> Result<(), Error> {
+        self.calls
+            .remove_blocked_by_ref
+            .fetch_add(1, Ordering::SeqCst);
+        pop_or_unstubbed(&self.stubs.remove_blocked_by_ref, "remove_blocked_by_ref")
+    }
+
+    async fn remove_blocked_by_refs(
+        &self,
+        _source: &IssueRef,
+        _blocker: &IssueRef,
+    ) -> Result<(), Error> {
+        self.calls
+            .remove_blocked_by_refs
+            .fetch_add(1, Ordering::SeqCst);
+        pop_or_unstubbed(&self.stubs.remove_blocked_by_refs, "remove_blocked_by_refs")
     }
 }
 

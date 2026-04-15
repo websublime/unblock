@@ -252,6 +252,44 @@ pub trait GitHubApi: Send + Sync {
     /// See spec §8.4 (`depends` tool contract) and §5 cross-repo scope table.
     async fn add_blocked_by_refs(&self, source: &IssueRef, blocker: &IssueRef)
     -> Result<(), Error>;
+
+    /// Removes a blocking edge where the blocker is an [`IssueRef`].
+    ///
+    /// Symmetric counterpart of
+    /// [`add_blocked_by_ref`](Self::add_blocked_by_ref) for the
+    /// `dep_remove` tool (spec §8.5) — necessary because the original
+    /// [`remove_blocked_by`](Self::remove_blocked_by) only accepts local
+    /// issue numbers and resolves them against the configured repository.
+    /// For `Local` blockers this delegates to
+    /// [`remove_blocked_by`](Self::remove_blocked_by); for cross-repo
+    /// blockers it resolves each side independently and runs the
+    /// `removeIssueDependency` mutation directly with both node IDs.
+    ///
+    /// See spec §5.6 (cross-repo scope) and §8.5 (`dep_remove`).
+    async fn remove_blocked_by_ref(
+        &self,
+        issue_number: u64,
+        blocker: &IssueRef,
+    ) -> Result<(), Error>;
+
+    /// Removes a blocking edge using [`IssueRef`] for both endpoints.
+    ///
+    /// Symmetric counterpart of
+    /// [`add_blocked_by_refs`](Self::add_blocked_by_refs). Enables
+    /// cross-repo `source` issues for the `dep_remove` tool (spec §8.5);
+    /// when the source is `Local` this delegates to
+    /// [`remove_blocked_by_ref`](Self::remove_blocked_by_ref) to preserve
+    /// the local-source fast path. Cross-repo sources resolve both sides
+    /// independently and run the `removeIssueDependency` mutation with
+    /// both node IDs.
+    ///
+    /// See spec §8.5 (`dep_remove` tool contract) and §5.6 cross-repo
+    /// scope table.
+    async fn remove_blocked_by_refs(
+        &self,
+        source: &IssueRef,
+        blocker: &IssueRef,
+    ) -> Result<(), Error>;
 }
 
 // ── Blanket delegation impl on GitHubClient ──────────────────────────
@@ -470,5 +508,21 @@ impl GitHubApi for GitHubClient {
         blocker: &IssueRef,
     ) -> Result<(), Error> {
         GitHubClient::add_blocked_by_refs(self, source, blocker).await
+    }
+
+    async fn remove_blocked_by_ref(
+        &self,
+        issue_number: u64,
+        blocker: &IssueRef,
+    ) -> Result<(), Error> {
+        GitHubClient::remove_blocked_by_ref(self, issue_number, blocker).await
+    }
+
+    async fn remove_blocked_by_refs(
+        &self,
+        source: &IssueRef,
+        blocker: &IssueRef,
+    ) -> Result<(), Error> {
+        GitHubClient::remove_blocked_by_refs(self, source, blocker).await
     }
 }

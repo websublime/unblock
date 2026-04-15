@@ -1476,6 +1476,151 @@ impl GitHubClient {
             }
         }
     }
+
+    /// Removes a blocking relationship using an [`IssueRef`] as the
+    /// blocker.
+    ///
+    /// Symmetric counterpart of
+    /// [`add_blocked_by_ref()`](Self::add_blocked_by_ref). For local refs
+    /// this delegates to [`remove_blocked_by()`](Self::remove_blocked_by)
+    /// so the existing local-number fast path is preserved. For cross-repo
+    /// refs it resolves the blocker's node ID against the target repo and
+    /// runs the `removeIssueDependency` mutation directly with both node
+    /// IDs.
+    ///
+    /// See spec §5.6 (cross-repo scope) and §8.5 (`dep_remove`).
+    ///
+    /// [`IssueRef`]: unblock_core::types::IssueRef
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Domain`] with [`DomainError::IssueNotFound`] if
+    /// either issue does not exist. Returns [`Error::GitHubGraphQL`] for
+    /// other GraphQL errors.
+    ///
+    /// [`DomainError::IssueNotFound`]: unblock_core::errors::DomainError::IssueNotFound
+    #[instrument(skip(self), fields(owner = %self.owner(), repo = %self.repo()))]
+    pub async fn remove_blocked_by_ref(
+        &self,
+        issue_number: u64,
+        blocker: &unblock_core::types::IssueRef,
+    ) -> Result<(), Error> {
+        match blocker {
+            unblock_core::types::IssueRef::Local(blocked_by_number) => {
+                self.remove_blocked_by(issue_number, *blocked_by_number)
+                    .await
+            }
+            unblock_core::types::IssueRef::CrossRepo { .. } => {
+                let issue_id = self.resolve_node_id(issue_number).await?;
+                let blocker_id = self.resolve_issue_ref(blocker).await?;
+
+                let mutation = "
+                    mutation RemoveBlockedBy($dependentId: ID!, $dependencyId: ID!) {
+                        removeIssueDependency(input: {dependentId: $dependentId, dependencyId: $dependencyId}) {
+                            clientMutationId
+                        }
+                    }
+                ";
+
+                let variables = serde_json::json!({
+                    "dependentId": issue_id,
+                    "dependencyId": blocker_id,
+                });
+
+                self.graphql(mutation, variables).await?;
+
+                debug!(
+                    issue_number,
+                    blocker = %blocker,
+                    "Removed cross-repo blocking relationship"
+                );
+                Ok(())
+            }
+        }
+    }
+
+    /// Removes a blocking relationship using [`IssueRef`] for both
+    /// endpoints.
+    ///
+    /// Spec §8.5 requires the `dep_remove` tool to accept cross-repo
+    /// references for both `source` and `target`. This method generalises
+    /// [`remove_blocked_by_ref()`](Self::remove_blocked_by_ref) (which
+    /// only accepts a cross-repo blocker) to also accept a cross-repo
+    /// source.
+    ///
+    /// Dispatch:
+    /// - `source = Local(n)` → delegates to
+    ///   [`remove_blocked_by_ref()`](Self::remove_blocked_by_ref) so the
+    ///   existing local-source fast path is preserved.
+    /// - `source = CrossRepo { .. }` → resolves both the source and the
+    ///   blocker via [`resolve_issue_ref()`](Self::resolve_issue_ref)
+    ///   against their own repositories and runs the
+    ///   `removeIssueDependency` mutation directly with both node IDs.
+    ///
+    /// Unlike [`add_blocked_by_refs()`](Self::add_blocked_by_refs) this
+    /// method does not perform a client-side edge-existence pre-check:
+    /// GitHub's `removeIssueDependency` is idempotent with respect to
+    /// missing edges (no error on a non-existent edge), so an optional
+    /// pre-check here would only add a round-trip. The MCP tool layer
+    /// may still perform a cache-based pre-check when both endpoints are
+    /// local, purely to surface a more informative error to the caller.
+    ///
+    /// See spec §8.5 (`dep_remove` tool contract) and §5.6 cross-repo
+    /// scope table.
+    ///
+    /// [`IssueRef`]: unblock_core::types::IssueRef
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Domain`] with [`DomainError::IssueNotFound`] if
+    /// either issue does not exist. Returns [`Error::GitHubGraphQL`] for
+    /// other GraphQL errors.
+    ///
+    /// [`DomainError::IssueNotFound`]: unblock_core::errors::DomainError::IssueNotFound
+    #[instrument(skip(self), fields(owner = %self.owner(), repo = %self.repo()))]
+    pub async fn remove_blocked_by_refs(
+        &self,
+        source: &unblock_core::types::IssueRef,
+        blocker: &unblock_core::types::IssueRef,
+    ) -> Result<(), Error> {
+        match source {
+            unblock_core::types::IssueRef::Local(source_number) => {
+                self.remove_blocked_by_ref(*source_number, blocker).await
+            }
+            unblock_core::types::IssueRef::CrossRepo {
+                owner: source_owner,
+                repo: source_repo,
+                number: source_number,
+            } => {
+                let source_id = self.resolve_issue_ref(source).await?;
+                let blocker_id = self.resolve_issue_ref(blocker).await?;
+
+                let mutation = "
+                    mutation RemoveBlockedBy($dependentId: ID!, $dependencyId: ID!) {
+                        removeIssueDependency(input: {dependentId: $dependentId, dependencyId: $dependencyId}) {
+                            clientMutationId
+                        }
+                    }
+                ";
+
+                let variables = serde_json::json!({
+                    "dependentId": source_id,
+                    "dependencyId": blocker_id,
+                });
+
+                self.graphql(mutation, variables).await?;
+
+                debug!(
+                    source_owner = %source_owner,
+                    source_repo = %source_repo,
+                    source_number,
+                    blocker = %blocker,
+                    "Removed cross-repo blocking relationship (cross-repo source)"
+                );
+                Ok(())
+            }
+        }
+    }
 }
 
 /// Percent-encodes a string for use as a URL path segment.
