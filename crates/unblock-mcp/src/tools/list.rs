@@ -490,10 +490,12 @@ pub async fn handle_list(state: &ServerState, params: ListParams) -> Result<List
             // Step 3: refresh the cache as a useful side effect. The
             // operation is read-only from the contract perspective —
             // callers cannot tell from the response whether the cache
-            // was warm or cold.
+            // was warm or cold. `issues` is cloned because the local copy
+            // is still consumed below by `build_list_rows` for the list
+            // projection — the cache holds an independent snapshot.
             let graph = DependencyGraph::build(&issues, &edges);
             let ready_set = graph.compute_ready_set(&issues);
-            state.cache.update(ready_set, graph).await;
+            state.cache.update(issues.clone(), ready_set, graph).await;
             tracing::debug!("Cache refreshed by list handler");
             issues
         }

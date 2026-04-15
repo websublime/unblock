@@ -4,13 +4,17 @@
 //! configurable TTL. Every write operation invalidates the cache, triggering a
 //! rebuild on the next read.
 //!
-//! The cache stores both the computed ready set and the full
-//! [`DependencyGraph`](crate::graph::DependencyGraph), so callers can run ad-hoc
-//! graph queries (e.g., dependency tree, cycle detection) without a full rebuild.
+//! The cache stores the full open-issue set, the computed ready set, and the
+//! full [`DependencyGraph`](crate::graph::DependencyGraph), so callers can run
+//! ad-hoc graph queries (dependency tree, cycle detection) **and** per-issue
+//! aggregations (status/priority/agent counts) without a full rebuild. Caching
+//! the issues vector is required by the `stats` MCP tool (spec §7.4) so that
+//! the cache-hit path issues zero GitHub API calls.
 //!
 //! Cached values are wrapped in [`Arc`](std::sync::Arc) so that read accessors return
 //! reference-counted handles instead of deep-cloning the entire data structure.
-//! This makes `get_ready_set()` and `get_graph()` O(1) regardless of graph size.
+//! This makes `get_ready_set()`, `get_graph()`, and `get_issues()` O(1) regardless
+//! of graph size.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -18,19 +22,27 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 use crate::graph::DependencyGraph;
-use crate::types::IssueSummary;
+use crate::types::{Issue, IssueSummary};
 
 /// A snapshot of the computed graph state at a point in time.
 ///
 /// Crate-internal only — external consumers access cached data through
-/// [`GraphCache`] accessor methods (`get_ready_set`, `get_graph`).
+/// [`GraphCache`] accessor methods (`get_ready_set`, `get_graph`, `get_issues`).
 ///
 /// Stored inside [`GraphCache`] and replaced atomically on each update.
-/// Both `ready_set` and `graph` are wrapped in [`Arc`] so that read
-/// accessors return cheap reference-counted handles (O(1) atomic
-/// increment) instead of deep-cloning the entire data structure.
+/// All three payload fields (`issues`, `ready_set`, `graph`) are wrapped in
+/// [`Arc`] so that read accessors return cheap reference-counted handles
+/// (O(1) atomic increment) instead of deep-cloning the entire data structure.
 #[derive(Debug, Clone)]
 pub(crate) struct CacheEntry {
+    /// The full open-issue set observed when the cache was populated.
+    ///
+    /// Required for per-issue aggregations (e.g. by-status/by-priority counts
+    /// in the `stats` tool) on the cache-hit path, where no GitHub fetch is
+    /// issued. Equivalent to the `issues` slice passed into
+    /// [`DependencyGraph::build`](crate::graph::DependencyGraph::build) at
+    /// cache population time.
+    pub(crate) issues: Arc<Vec<Issue>>,
     /// The pre-computed ready set (issues with no active blockers).
     pub(crate) ready_set: Arc<Vec<IssueSummary>>,
     /// Timestamp when this entry was computed.
@@ -92,15 +104,27 @@ impl GraphCache {
             .map(|entry| Arc::clone(&entry.ready_set))
     }
 
-    /// Replace the cached entry with a new ready set and graph.
+    /// Replace the cached entry with a new issue set, ready set, and graph.
     ///
     /// The provided values are wrapped in [`Arc`] before storing, so
     /// subsequent reads return cheap reference-counted handles.
     /// Sets `computed_at` to `Instant::now()`, resetting the TTL window.
     /// This acquires an exclusive write lock.
-    pub async fn update(&self, ready_set: Vec<IssueSummary>, graph: DependencyGraph) {
+    ///
+    /// `issues` must be the full open-issue slice used to build `graph`
+    /// (same slice passed to
+    /// [`DependencyGraph::build`](crate::graph::DependencyGraph::build)).
+    /// Callers that populate the cache via a fresh `fetch_graph_data()`
+    /// result already satisfy this invariant.
+    pub async fn update(
+        &self,
+        issues: Vec<Issue>,
+        ready_set: Vec<IssueSummary>,
+        graph: DependencyGraph,
+    ) {
         let mut guard = self.inner.write().await;
         *guard = Some(CacheEntry {
+            issues: Arc::new(issues),
             ready_set: Arc::new(ready_set),
             computed_at: Instant::now(),
             graph: Arc::new(graph),
@@ -142,6 +166,23 @@ impl GraphCache {
             .as_ref()
             .filter(|entry| entry.computed_at.elapsed() < self.ttl)
             .map(|entry| Arc::clone(&entry.graph))
+    }
+
+    /// Return the cached full open-issue set if fresh, or `None` if stale
+    /// or empty.
+    ///
+    /// Enables per-issue aggregations (status/priority/agent counts) on the
+    /// cache-hit path without re-fetching from GitHub. The cached slice is
+    /// the same `Vec<Issue>` passed into [`update`](Self::update) at cache
+    /// population time, wrapped in [`Arc`] so this accessor is O(1)
+    /// regardless of issue count.
+    #[must_use]
+    pub async fn get_issues(&self) -> Option<Arc<Vec<Issue>>> {
+        let guard = self.inner.read().await;
+        guard
+            .as_ref()
+            .filter(|entry| entry.computed_at.elapsed() < self.ttl)
+            .map(|entry| Arc::clone(&entry.issues))
     }
 }
 
@@ -195,7 +236,7 @@ mod tests {
     }
 
     /// Build a `DependencyGraph` with two issues and one blocking edge.
-    fn test_graph() -> (DependencyGraph, Vec<IssueSummary>) {
+    fn test_graph() -> (Vec<Issue>, DependencyGraph, Vec<IssueSummary>) {
         let issues = vec![
             test_issue(1, IssueState::Open),
             test_issue(2, IssueState::Open),
@@ -206,7 +247,7 @@ mod tests {
         }];
         let graph = DependencyGraph::build(&issues, &edges);
         let ready_set = graph.compute_ready_set(&issues);
-        (graph, ready_set)
+        (issues, graph, ready_set)
     }
 
     // ── update → get_ready_set returns data ────────────────────────────
@@ -214,12 +255,12 @@ mod tests {
     #[tokio::test]
     async fn update_then_get_ready_set_returns_data() {
         let cache = GraphCache::new(Duration::from_secs(60));
-        let (graph, ready_set) = test_graph();
+        let (issues, graph, ready_set) = test_graph();
 
         // Before update, cache is empty.
         assert!(cache.get_ready_set().await.is_none());
 
-        cache.update(ready_set.clone(), graph).await;
+        cache.update(issues, ready_set.clone(), graph).await;
 
         let cached = cache.get_ready_set().await;
         assert!(cached.is_some());
@@ -231,9 +272,9 @@ mod tests {
     #[tokio::test]
     async fn stale_cache_returns_none() {
         let cache = GraphCache::new(Duration::from_millis(10));
-        let (graph, ready_set) = test_graph();
+        let (issues, graph, ready_set) = test_graph();
 
-        cache.update(ready_set, graph).await;
+        cache.update(issues, ready_set, graph).await;
 
         // Cache is fresh immediately after update.
         assert!(cache.is_fresh().await);
@@ -245,6 +286,7 @@ mod tests {
         assert!(!cache.is_fresh().await);
         assert!(cache.get_ready_set().await.is_none());
         assert!(cache.get_graph().await.is_none());
+        assert!(cache.get_issues().await.is_none());
     }
 
     // ── invalidate → get_ready_set returns None ────────────────────────
@@ -252,15 +294,16 @@ mod tests {
     #[tokio::test]
     async fn invalidate_clears_cache() {
         let cache = GraphCache::new(Duration::from_secs(60));
-        let (graph, ready_set) = test_graph();
+        let (issues, graph, ready_set) = test_graph();
 
-        cache.update(ready_set, graph).await;
+        cache.update(issues, ready_set, graph).await;
         assert!(cache.get_ready_set().await.is_some());
 
         cache.invalidate().await;
 
         assert!(cache.get_ready_set().await.is_none());
         assert!(cache.get_graph().await.is_none());
+        assert!(cache.get_issues().await.is_none());
         assert!(!cache.is_fresh().await);
     }
 
@@ -269,9 +312,9 @@ mod tests {
     #[tokio::test]
     async fn get_graph_returns_cached_graph() {
         let cache = GraphCache::new(Duration::from_secs(60));
-        let (graph, ready_set) = test_graph();
+        let (issues, graph, ready_set) = test_graph();
 
-        cache.update(ready_set, graph.clone()).await;
+        cache.update(issues, ready_set, graph.clone()).await;
 
         let cached_graph = cache.get_graph().await;
         assert!(cached_graph.is_some());
@@ -287,6 +330,27 @@ mod tests {
         }
     }
 
+    // ── get_issues returns cached issues ───────────────────────────────
+
+    #[tokio::test]
+    async fn get_issues_returns_cached_issues() {
+        let cache = GraphCache::new(Duration::from_secs(60));
+        let (issues, graph, ready_set) = test_graph();
+
+        // Before update, get_issues returns None.
+        assert!(cache.get_issues().await.is_none());
+
+        cache.update(issues.clone(), ready_set, graph).await;
+
+        let cached = cache.get_issues().await.expect("cache should hold issues");
+        assert_eq!(cached.len(), issues.len());
+        for (got, want) in cached.iter().zip(issues.iter()) {
+            assert_eq!(got.qualified_id, want.qualified_id);
+            assert_eq!(got.number, want.number);
+            assert_eq!(got.state, want.state);
+        }
+    }
+
     // ── is_fresh tracks state correctly ────────────────────────────────
 
     #[tokio::test]
@@ -298,18 +362,18 @@ mod tests {
     #[tokio::test]
     async fn is_fresh_after_update() {
         let cache = GraphCache::new(Duration::from_secs(60));
-        let (graph, ready_set) = test_graph();
+        let (issues, graph, ready_set) = test_graph();
 
-        cache.update(ready_set, graph).await;
+        cache.update(issues, ready_set, graph).await;
         assert!(cache.is_fresh().await);
     }
 
     #[tokio::test]
     async fn is_fresh_after_invalidate() {
         let cache = GraphCache::new(Duration::from_secs(60));
-        let (graph, ready_set) = test_graph();
+        let (issues, graph, ready_set) = test_graph();
 
-        cache.update(ready_set, graph).await;
+        cache.update(issues, ready_set, graph).await;
         cache.invalidate().await;
         assert!(!cache.is_fresh().await);
     }
@@ -319,15 +383,16 @@ mod tests {
     #[tokio::test]
     async fn zero_ttl_is_never_fresh() {
         let cache = GraphCache::new(Duration::ZERO);
-        let (graph, ready_set) = test_graph();
+        let (issues, graph, ready_set) = test_graph();
 
-        cache.update(ready_set, graph).await;
+        cache.update(issues, ready_set, graph).await;
 
         // With a zero TTL the strict `elapsed() < ttl` check can never
         // succeed — the cache is always stale immediately after population.
         assert!(!cache.is_fresh().await);
         assert!(cache.get_ready_set().await.is_none());
         assert!(cache.get_graph().await.is_none());
+        assert!(cache.get_issues().await.is_none());
     }
 
     // ── concurrent readers ─────────────────────────────────────────────
@@ -335,9 +400,9 @@ mod tests {
     #[tokio::test]
     async fn concurrent_readers_do_not_deadlock() {
         let cache = std::sync::Arc::new(GraphCache::new(Duration::from_secs(60)));
-        let (graph, ready_set) = test_graph();
+        let (issues, graph, ready_set) = test_graph();
 
-        cache.update(ready_set.clone(), graph).await;
+        cache.update(issues, ready_set.clone(), graph).await;
 
         // Spawn 10 concurrent readers via tokio::join!
         let results = tokio::join!(
@@ -403,15 +468,18 @@ mod tests {
     #[tokio::test]
     async fn update_replaces_previous_entry() {
         let cache = GraphCache::new(Duration::from_secs(60));
-        let (graph, ready_set) = test_graph();
+        let (issues, graph, ready_set) = test_graph();
 
-        cache.update(ready_set, graph.clone()).await;
+        cache.update(issues, ready_set, graph.clone()).await;
 
-        // Update with a different ready set (empty).
+        // Update with a different issue set and empty ready set.
+        let new_issues: Vec<Issue> = vec![];
         let new_ready_set: Vec<IssueSummary> = vec![];
-        cache.update(new_ready_set.clone(), graph).await;
+        cache.update(new_issues, new_ready_set.clone(), graph).await;
 
         let cached = cache.get_ready_set().await.unwrap();
         assert!(cached.is_empty());
+        let cached_issues = cache.get_issues().await.unwrap();
+        assert!(cached_issues.is_empty());
     }
 }

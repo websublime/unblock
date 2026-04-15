@@ -590,7 +590,7 @@ async fn depends_aliased_configured_repo_source_cycle_detection() {
 
     let state = state_with_mock(Arc::clone(&mock));
     let cache = Arc::clone(&state.cache);
-    cache.update(ready_set, graph).await;
+    cache.update(issues, ready_set, graph).await;
 
     let server = UnblockServer::new(state);
 
@@ -708,7 +708,7 @@ async fn depends_aliased_configured_repo_target_cycle_detection() {
 
     let state = state_with_mock(Arc::clone(&mock));
     let cache = Arc::clone(&state.cache);
-    cache.update(ready_set, graph).await;
+    cache.update(issues, ready_set, graph).await;
 
     let server = UnblockServer::new(state);
 

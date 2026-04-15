@@ -161,7 +161,7 @@ pub async fn rebuild_cache(state: &ServerState) {
         Ok((issues, edges)) => {
             let graph = DependencyGraph::build(&issues, &edges);
             let ready_set = graph.compute_ready_set(&issues);
-            state.cache.update(ready_set, graph).await;
+            state.cache.update(issues, ready_set, graph).await;
             tracing::debug!("Cache rebuilt after write tool execution");
         }
         Err(err) => {
@@ -241,7 +241,7 @@ mod tests {
         }];
         let graph = DependencyGraph::build(&issues, &edges);
         let ready_set = graph.compute_ready_set(&issues);
-        cache.update(ready_set, graph).await;
+        cache.update(issues, ready_set, graph).await;
     }
 
     /// Create a `ServerState` with a real cache but a client that points

@@ -235,7 +235,7 @@ async fn show_include_deps_false_skips_graph_traversal() {
     }];
     let graph = DependencyGraph::build(&issues, &edges);
     let ready_set = graph.compute_ready_set(&issues);
-    state.cache.update(ready_set, graph).await;
+    state.cache.update(issues, ready_set, graph).await;
     assert!(
         state.cache.get_graph().await.is_some(),
         "cache should be populated before invoking show",
@@ -377,7 +377,7 @@ async fn show_dependency_tree_for_blocking_relationships() {
     ];
     let graph = DependencyGraph::build(&issues, &edges);
     let ready_set = graph.compute_ready_set(&issues);
-    cache.update(ready_set, graph).await;
+    cache.update(issues, ready_set, graph).await;
 
     // With include_deps=true and a populated cache, the DependencyTree should have data.
     let dep_tree = cache
@@ -477,7 +477,7 @@ async fn ready_returns_only_open_unblocked_non_deferred_issues() {
     }];
     let graph = DependencyGraph::build(&issues, &edges);
     let ready_set = graph.compute_ready_set(&issues);
-    cache.update(ready_set.clone(), graph).await;
+    cache.update(issues, ready_set.clone(), graph).await;
 
     // Filter using ready tool logic.
     let params = unblock_mcp::tools::ready::ReadyParams {
@@ -509,7 +509,7 @@ async fn ready_second_call_returns_from_cache() {
     let edges = vec![];
     let graph = DependencyGraph::build(&issues, &edges);
     let ready_set = graph.compute_ready_set(&issues);
-    cache.update(ready_set, graph).await;
+    cache.update(issues, ready_set, graph).await;
 
     // First call.
     let first = cache.get_ready_set().await;
@@ -544,7 +544,7 @@ async fn ready_filter_by_priority() {
     let issues = vec![issue_1, issue_2, issue_3];
     let graph = DependencyGraph::build(&issues, &[]);
     let ready_set = graph.compute_ready_set(&issues);
-    cache.update(ready_set.clone(), graph).await;
+    cache.update(issues, ready_set.clone(), graph).await;
 
     let params = unblock_mcp::tools::ready::ReadyParams {
         limit: None,
@@ -578,7 +578,7 @@ async fn ready_filter_by_label() {
     let issues = vec![issue_1, issue_2, issue_3];
     let graph = DependencyGraph::build(&issues, &[]);
     let ready_set = graph.compute_ready_set(&issues);
-    cache.update(ready_set.clone(), graph).await;
+    cache.update(issues, ready_set.clone(), graph).await;
 
     let params = unblock_mcp::tools::ready::ReadyParams {
         limit: None,
@@ -1142,7 +1142,10 @@ async fn search_hits_github_and_maps_to_summary_without_touching_cache() {
     let cache_issues = vec![test_issue(999, IssueState::Open)];
     let graph = DependencyGraph::build(&cache_issues, &[]);
     let ready_set = graph.compute_ready_set(&cache_issues);
-    state.cache.update(ready_set.clone(), graph).await;
+    state
+        .cache
+        .update(cache_issues, ready_set.clone(), graph)
+        .await;
     assert!(
         state.cache.is_fresh().await,
         "cache should be fresh before search",
