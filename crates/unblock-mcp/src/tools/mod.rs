@@ -44,6 +44,7 @@ pub mod reconcile;
 pub mod search;
 pub mod setup;
 pub mod show;
+pub mod stats;
 pub mod update;
 
 use std::future::Future;
