@@ -1093,6 +1093,7 @@ async fn list_rejects_limit_out_of_range_without_fetching() {
 /// Server.rs registration is owned by sibling bead unblock-29p.12 and
 /// is intentionally not exercised here.
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // Comprehensive end-to-end scenario.
 async fn search_hits_github_and_maps_to_summary_without_touching_cache() {
     use unblock_core::types::IssueSummary;
     use unblock_mcp::tools::search::{SearchParams, handle_search};
