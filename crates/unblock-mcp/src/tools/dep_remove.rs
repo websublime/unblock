@@ -8,7 +8,7 @@
 //!    configured repo. Cross-repo references are supported on both sides
 //!    per spec §5.6 (cross-repo scope table).
 //! 2. (Defensive) reject `source == target` on resolved
-//!    [`QualifiedId`](unblock_core::types::QualifiedId)s. Spec §8.5 does
+//!    [`QualifiedId`]s. Spec §8.5 does
 //!    not mandate this, but §8.4 (`depends`) does — we mirror the
 //!    restriction so the two mutation tools present a symmetric surface
 //!    and an edge cannot be "removed" from an issue to itself (which
@@ -25,7 +25,7 @@
 //!    `removed=true` flag technically loose when the edge was already
 //!    absent, which spec §8.5 does not contractually forbid.
 //! 4. Call [`GitHubApi::remove_blocked_by_refs`] inside
-//!    [`execute_write_tool`] so the mutation is followed by an atomic
+//!    `execute_write_tool` so the mutation is followed by an atomic
 //!    cache invalidate + rebuild.
 //! 5. Re-evaluate the source's blocker set against the freshly rebuilt
 //!    graph. If the source is `Local` AND `has_open_blockers` returns
@@ -50,22 +50,22 @@
 //!
 //! ## R3 caveat — cache empty after rebuild
 //!
-//! If [`execute_write_tool`] fails to repopulate the cache (e.g.
+//! If `execute_write_tool` fails to repopulate the cache (e.g.
 //! transient GitHub 503 after the mutation landed), the handler cannot
 //! compute `has_open_blockers` locally. The removal itself is durable on
 //! GitHub's side, so we surface a 503-style
-//! [`GitHubApi`](unblock_github::errors::Error::GitHubApi) error with a
+//! [`unblock_github::errors::Error`] error with a
 //! message instructing the caller to re-run `show`. This matches
 //! `reopen.rs:378-395`.
 //!
 //! ## R4 caveat — duplicated helpers
 //!
-//! [`has_open_blockers`] is the **fourth** local copy of the
+//! `has_open_blockers` is the **fourth** local copy of the
 //! blocker-walk helper in `unblock-mcp/src/tools`
 //! (`prime` / `stats` / `reopen` / `dep_remove`). Extraction is tracked
 //! by bead `unblock-29p.33` — do NOT extract here.
 //!
-//! The Projects V2 Status field update ladder ([`update_status_to_ready`])
+//! The Projects V2 Status field update ladder (`update_status_to_ready`)
 //! is the **fifth** copy
 //! (`close` / `claim` / `depends` / `reopen` / `dep_remove`). Extraction
 //! is tracked by bead `unblock-29p.24` — do NOT extract here.
@@ -88,7 +88,6 @@
 //!
 //! [`GitHubApi::remove_blocked_by_refs`]: unblock_github::GitHubApi::remove_blocked_by_refs
 //! [`GitHubApi::fetch_graph_data`]: unblock_github::GitHubApi::fetch_graph_data
-//! [`execute_write_tool`]: crate::tools::execute_write_tool
 
 use std::sync::Arc;
 
@@ -383,10 +382,10 @@ async fn update_status_to_ready(client: &dyn GitHubApi, issue_node_id: &str) {
 /// 3. Pre-mutation edge-existence guard (only when both endpoints are
 ///    `Local` AND the cache is warm).
 /// 4. Run [`GitHubApi::remove_blocked_by_refs`] inside
-///    [`execute_write_tool`].
-/// 5. Re-evaluate blockers on the source via [`has_open_blockers`] and,
+///    `execute_write_tool`.
+/// 5. Re-evaluate blockers on the source via `has_open_blockers` and,
 ///    when the source is `Local` AND newly has zero open blockers, fire
-///    [`update_status_to_ready`] best-effort.
+///    `update_status_to_ready` best-effort.
 /// 6. Return [`DepRemoveResult`].
 ///
 /// # Errors
@@ -405,7 +404,6 @@ async fn update_status_to_ready(client: &dyn GitHubApi, issue_node_id: &str) {
 ///   `show` to observe the final state (R3).
 ///
 /// [`GitHubApi::remove_blocked_by_refs`]: unblock_github::GitHubApi::remove_blocked_by_refs
-/// [`execute_write_tool`]: crate::tools::execute_write_tool
 #[instrument(
     skip(state, params),
     name = "handle_dep_remove",
@@ -563,8 +561,7 @@ mod tests {
 
     #[test]
     fn parse_ref_accepts_cross_repo() {
-        let r =
-            parse_ref("target", "acme/widgets#99").expect("cross-repo reference should parse");
+        let r = parse_ref("target", "acme/widgets#99").expect("cross-repo reference should parse");
         assert_eq!(
             r,
             IssueRef::CrossRepo {

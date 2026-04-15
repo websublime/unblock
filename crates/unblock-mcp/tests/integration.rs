@@ -1924,6 +1924,356 @@ async fn reopen_surfaces_error_when_post_reopen_rebuild_fails() {
     );
 }
 
+// ── dep_remove tool: integration tests ────────────────────────────
+
+/// Build a [`ProjectFieldIds`] fixture with a populated Status-option map
+/// containing a `"ready"` slug. When supplied via
+/// `push_field_ids(Some(dep_remove_field_ids()))`, the best-effort Status
+/// update ladder in [`dep_remove`](unblock_mcp::tools::dep_remove)
+/// successfully resolves `field_ids.status.options["ready"]` and fires a
+/// real `update_field` call — which the counter-based assertions below
+/// depend on.
+///
+/// Kept local to this module so the reopen/create integration tests keep
+/// their existing no-op Status-ladder posture (empty `status.options`).
+fn dep_remove_field_ids() -> unblock_github::projects::ProjectFieldIds {
+    use std::collections::HashMap;
+    use unblock_github::projects::{FieldMeta, ProjectFieldIds};
+
+    let mut status_options = HashMap::new();
+    status_options.insert("ready".to_owned(), "OPT_READY".to_owned());
+
+    let empty_meta = || FieldMeta {
+        field_id: "f".to_owned(),
+        options: HashMap::new(),
+    };
+
+    ProjectFieldIds {
+        status: FieldMeta {
+            field_id: "status-field-id".to_owned(),
+            options: status_options,
+        },
+        priority: empty_meta(),
+        pipeline_stage: empty_meta(),
+        agent: "agent".to_owned(),
+        claimed_at: "ca".to_owned(),
+        story_points: "sp".to_owned(),
+        defer_until: "du".to_owned(),
+    }
+}
+
+/// Build a fixture issue under `acme/widgets` coordinates for
+/// `dep_remove` tests.
+fn dep_remove_fixture_issue(number: u64) -> unblock_core::types::Issue {
+    unblock_core::types::Issue {
+        qualified_id: QualifiedId::new("acme", "widgets", number),
+        number,
+        node_id: format!("I_{number}"),
+        title: format!("DepRemove fixture #{number}"),
+        issue_type: Some(IssueType::Task),
+        status: Status::Ready,
+        priority: Priority::P2,
+        agent: None,
+        claimed_at: None,
+        pipeline_stage: None,
+        story_points: None,
+        defer_until: None,
+        labels: vec![],
+        milestone: None,
+        assignees: vec![],
+        state: IssueState::Open,
+        body: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        url: format!("https://github.com/acme/widgets/issues/{number}"),
+        comments: vec![],
+        blocked_by: vec![],
+        blocking: vec![],
+        parent: None,
+        sub_issues: vec![],
+    }
+}
+
+/// Happy path (spec §8.5): local source blocked by local target, edge
+/// exists in the warm cache, `remove_blocked_by_refs` succeeds, post-
+/// mutation rebuild returns the same two issues with NO remaining edges,
+/// and the source's re-evaluation finds zero open blockers — so the
+/// handler must fire the `Status=ready` update ladder.
+///
+/// Asserts:
+/// - `removed = true`,
+/// - `message` mentions both `#42` and `#99`,
+/// - call counters: `remove_blocked_by_refs = 1`, `fetch_graph_data = 1`,
+///   `field_ids = 1`, `resolve_project_info = 1`, `get_project_item_id = 1`,
+///   `update_field = 1`,
+/// - `remove_blocked_by_ref` stays at `0` (the handler must use the
+///   two-ref variant, not the local-only one).
+#[tokio::test]
+async fn dep_remove_local_edge_transitions_source_to_ready() {
+    use unblock_github::projects::ProjectInfo;
+    use unblock_mcp::tools::dep_remove::{DepRemoveParams, handle_dep_remove};
+
+    let mock = new_mock();
+
+    // Phase 1 mutation stub.
+    mock.push_remove_blocked_by_refs(Ok(()));
+
+    // Post-mutation rebuild: source #42 and target #99, but NO remaining
+    // edges — so #42 is now unblocked after the removal.
+    let rebuilt_source = dep_remove_fixture_issue(42);
+    let rebuilt_target = dep_remove_fixture_issue(99);
+    mock.push_fetch_graph_data(Ok((vec![rebuilt_source, rebuilt_target], vec![])));
+
+    // Status-update ladder stubs (fired because the source is Local AND
+    // has zero open blockers after the rebuild).
+    mock.push_field_ids(Some(dep_remove_field_ids()));
+    mock.push_resolve_project_info(Ok(ProjectInfo {
+        id: "PVT_1".to_owned(),
+        number: 1,
+    }));
+    mock.push_get_project_item_id(Ok("PVTI_42".to_owned()));
+    mock.push_update_field(Ok(()));
+
+    // Pre-populate the cache with the source→target blocking edge so the
+    // warm-cache pre-mutation guard passes. Edge convention throughout
+    // the test suite: `source = blocked issue`, `target = blocker`.
+    let state = state_with_mock(Arc::clone(&mock));
+    let pre_source = dep_remove_fixture_issue(42);
+    let pre_target = dep_remove_fixture_issue(99);
+    let pre_edges = vec![BlockingEdge {
+        source: QualifiedId::new("acme", "widgets", 42),
+        target: QualifiedId::new("acme", "widgets", 99),
+    }];
+    let pre_issues = vec![pre_source, pre_target];
+    let pre_graph = DependencyGraph::build(&pre_issues, &pre_edges);
+    let pre_ready_set = pre_graph.compute_ready_set(&pre_issues);
+    state
+        .cache
+        .update(pre_issues, pre_ready_set, pre_graph)
+        .await;
+    assert!(
+        state.cache.is_fresh().await,
+        "cache must be warm so the pre-mutation edge guard can run",
+    );
+
+    // Act.
+    let result = handle_dep_remove(
+        &state,
+        DepRemoveParams {
+            source: "42".to_owned(),
+            target: "99".to_owned(),
+        },
+    )
+    .await
+    .expect("dep_remove should succeed on a warm-cache edge");
+
+    // Response shape.
+    assert!(result.removed, "edge must be reported as removed");
+    assert_eq!(result.source, "#42", "local source renders as `#n`");
+    assert_eq!(result.target, "#99", "local target renders as `#n`");
+    assert!(
+        result.message.contains("#42") && result.message.contains("#99"),
+        "message must mention both references: {}",
+        result.message,
+    );
+
+    // Call-counter contract. These are the load-bearing assertions — they
+    // prove the handler used the cross-repo-capable `remove_blocked_by_refs`
+    // path, rebuilt the cache exactly once, and fired the Projects V2
+    // Status update ladder through to `update_field`.
+    let calls = mock.calls();
+    assert_eq!(
+        calls.remove_blocked_by_refs(),
+        1,
+        "the cross-repo-capable mutation variant must be used",
+    );
+    assert_eq!(
+        calls.remove_blocked_by_ref(),
+        0,
+        "the single-side `_ref` variant must NOT be used by this handler",
+    );
+    assert_eq!(
+        calls.fetch_graph_data(),
+        1,
+        "post-mutation rebuild fetches graph data exactly once",
+    );
+    assert_eq!(
+        calls.field_ids(),
+        1,
+        "Status-update ladder starts with a field_ids lookup",
+    );
+    assert_eq!(
+        calls.resolve_project_info(),
+        1,
+        "Status-update ladder resolves the project exactly once",
+    );
+    assert_eq!(
+        calls.get_project_item_id(),
+        1,
+        "Status-update ladder fetches the project item id exactly once",
+    );
+    assert_eq!(
+        calls.update_field(),
+        1,
+        "zero-blocker source must flip Projects V2 Status to ready (spec §8.5 step 5)",
+    );
+
+    // Cache must be warm after the successful rebuild.
+    assert!(
+        state.cache.is_fresh().await,
+        "cache must be repopulated after the post-mutation rebuild",
+    );
+}
+
+/// Defensive `source == target` rejection (spec §8.4 parity — see the
+/// module-level docs of `dep_remove` for the rationale). The handler must
+/// fail fast BEFORE issuing any network call.
+#[tokio::test]
+async fn dep_remove_rejects_source_equals_target_without_network_calls() {
+    use unblock_mcp::tools::dep_remove::{DepRemoveParams, handle_dep_remove};
+
+    let mock = new_mock();
+    // Intentionally push no stubs — if the handler leaked past validation
+    // it would hit `MockNotStubbed` and fail the test with a noisy error
+    // instead of the clean INVALID_PARAMS we want to assert on.
+    let state = state_with_mock(Arc::clone(&mock));
+
+    let err = handle_dep_remove(
+        &state,
+        DepRemoveParams {
+            source: "7".to_owned(),
+            target: "#7".to_owned(),
+        },
+    )
+    .await
+    .expect_err("source == target must fail validation");
+
+    assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert!(
+        err.message.contains("source and target must differ"),
+        "validation message must explain the constraint: {}",
+        err.message,
+    );
+
+    // Zero network traffic — validation short-circuits first.
+    let calls = mock.calls();
+    assert_eq!(calls.remove_blocked_by_refs(), 0);
+    assert_eq!(calls.remove_blocked_by_ref(), 0);
+    assert_eq!(calls.fetch_graph_data(), 0);
+    assert_eq!(calls.update_field(), 0);
+}
+
+/// When the warm cache has no edge between `source_qid` and `target_qid`,
+/// the pre-mutation guard rejects with `INVALID_PARAMS` and no mutation
+/// is issued. Covers spec §8.5's warm-cache contract.
+#[tokio::test]
+async fn dep_remove_warm_cache_missing_edge_rejects_without_mutation() {
+    use unblock_mcp::tools::dep_remove::{DepRemoveParams, handle_dep_remove};
+
+    let mock = new_mock();
+    // No stubs — a leak past the guard must surface as `MockNotStubbed`
+    // in the counter assertions below.
+    let state = state_with_mock(Arc::clone(&mock));
+
+    // Warm cache with #42 and #99 but NO edge between them.
+    let issues = vec![dep_remove_fixture_issue(42), dep_remove_fixture_issue(99)];
+    let graph = DependencyGraph::build(&issues, &[]);
+    let ready_set = graph.compute_ready_set(&issues);
+    state.cache.update(issues, ready_set, graph).await;
+
+    let err = handle_dep_remove(
+        &state,
+        DepRemoveParams {
+            source: "42".to_owned(),
+            target: "99".to_owned(),
+        },
+    )
+    .await
+    .expect_err("missing edge in warm cache must be rejected");
+
+    assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert!(
+        err.message.contains("no blocking edge exists"),
+        "guard message must explain the missing edge: {}",
+        err.message,
+    );
+
+    // No mutation issued — guard short-circuited.
+    let calls = mock.calls();
+    assert_eq!(calls.remove_blocked_by_refs(), 0);
+    assert_eq!(calls.remove_blocked_by_ref(), 0);
+    assert_eq!(calls.fetch_graph_data(), 0);
+}
+
+/// R3 — when the post-mutation cache rebuild fails (transient GitHub
+/// 5xx), the blocking edge has already been removed server-side. The
+/// handler must propagate a 503-class error referencing both `show` and
+/// the two endpoints, NOT silently default to `removed=true, status=ready`.
+#[tokio::test]
+async fn dep_remove_surfaces_error_when_post_mutation_rebuild_fails() {
+    use unblock_github::errors::GitHubApiSnafu;
+    use unblock_mcp::tools::dep_remove::{DepRemoveParams, handle_dep_remove};
+
+    let mock = new_mock();
+
+    // Mutation succeeds on GitHub…
+    mock.push_remove_blocked_by_refs(Ok(()));
+    // …but the post-mutation rebuild fails.
+    mock.push_fetch_graph_data(Err(GitHubApiSnafu {
+        status: 503_u16,
+        message: "upstream service unavailable".to_owned(),
+    }
+    .build()));
+
+    let state = state_with_mock(Arc::clone(&mock));
+
+    // Warm cache with the edge so the pre-mutation guard passes.
+    let issues = vec![dep_remove_fixture_issue(42), dep_remove_fixture_issue(99)];
+    let edges = vec![BlockingEdge {
+        source: QualifiedId::new("acme", "widgets", 42),
+        target: QualifiedId::new("acme", "widgets", 99),
+    }];
+    let graph = DependencyGraph::build(&issues, &edges);
+    let ready_set = graph.compute_ready_set(&issues);
+    state.cache.update(issues, ready_set, graph).await;
+
+    let err = handle_dep_remove(
+        &state,
+        DepRemoveParams {
+            source: "42".to_owned(),
+            target: "99".to_owned(),
+        },
+    )
+    .await
+    .expect_err("rebuild failure must surface as a handler error (R3)");
+
+    // Must instruct the caller to re-run `show` and identify both refs.
+    assert!(
+        err.message.contains("show") && err.message.contains("#42") && err.message.contains("#99"),
+        "R3 error must reference `show` and both endpoints: {}",
+        err.message,
+    );
+
+    // Mutation landed; rebuild was attempted once; Status ladder never
+    // fired (cache was empty after the failed rebuild).
+    let calls = mock.calls();
+    assert_eq!(
+        calls.remove_blocked_by_refs(),
+        1,
+        "mutation is durable — it ran even though the rebuild failed",
+    );
+    assert_eq!(calls.fetch_graph_data(), 1);
+    assert_eq!(
+        calls.update_field(),
+        0,
+        "Status ladder must NOT fire when the cache rebuild failed",
+    );
+    assert!(
+        !state.cache.is_fresh().await,
+        "cache must be invalidated and not repopulated after rebuild failure",
+    );
+}
+
 // ── Create tool: integration tests ────────────────────────────────
 
 /// Create tool is registered in the server tool list.
