@@ -1300,6 +1300,340 @@ async fn search_rejects_zero_limit_without_fetching() {
     );
 }
 
+// ── Stats tool: integration tests ─────────────────────────────────
+
+/// Build a customisable stats fixture `Issue` — one helper per field
+/// the stats aggregator distinguishes.
+#[allow(clippy::too_many_arguments)]
+fn stats_fixture_issue(
+    number: u64,
+    status: Status,
+    priority: Priority,
+    issue_state: IssueState,
+    agent: Option<&str>,
+    milestone: Option<&str>,
+) -> unblock_core::types::Issue {
+    unblock_core::types::Issue {
+        qualified_id: QualifiedId::new("acme", "widgets", number),
+        number,
+        node_id: format!("I_{number}"),
+        title: format!("Stats fixture #{number}"),
+        issue_type: Some(IssueType::Task),
+        status,
+        priority,
+        agent: agent.map(str::to_owned),
+        claimed_at: None,
+        pipeline_stage: None,
+        story_points: None,
+        defer_until: None,
+        labels: vec![],
+        milestone: milestone.map(str::to_owned),
+        assignees: vec![],
+        state: issue_state,
+        body: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        url: format!("https://github.com/acme/widgets/issues/{number}"),
+        comments: vec![],
+        blocked_by: vec![],
+        blocking: vec![],
+        parent: None,
+        sub_issues: vec![],
+    }
+}
+
+/// End-to-end happy path: stats aggregates every bucket, blocked-count
+/// unions `Status::Blocked` with graph-open-blockers, ready-count
+/// matches `compute_ready_set`, cycle-count surfaces a 2-issue cycle,
+/// and per-agent throughput tracks `in_progress`. Verifies that after a
+/// cold start the cache was warmed (a single `fetch_graph_data()` call),
+/// and that the follow-up stats call hits the cache (still one call).
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Comprehensive end-to-end scenario.
+async fn stats_aggregates_every_bucket_and_warms_cache() {
+    use unblock_mcp::tools::stats::{StatsParams, handle_stats};
+
+    // Issue #1: Ready / P0 — ready.
+    // Issue #2: InProgress / P1 / agent=alice — in-progress, not ready.
+    // Issue #3: Blocked / P2 — Status::Blocked, bumps blocked_count.
+    // Issue #4: Deferred / P3 — deferred.
+    // Issue #5: Ready / P4 / blocked-by #1 in graph — bumps
+    //   blocked_count (open blocker), NOT ready.
+    // Issues #6 & #7: Ready / P2 — form a cycle (#6→#7, #7→#6) for
+    //   cycle_count. Because they mutually block, neither is ready.
+    // Issue #8: InProgress / P0 / agent=alice — second alice task.
+    // Issue #9: InProgress / P2 / agent=bob — bob in-progress.
+    let issues = vec![
+        stats_fixture_issue(1, Status::Ready, Priority::P0, IssueState::Open, None, None),
+        stats_fixture_issue(
+            2,
+            Status::InProgress,
+            Priority::P1,
+            IssueState::Open,
+            Some("alice"),
+            None,
+        ),
+        stats_fixture_issue(
+            3,
+            Status::Blocked,
+            Priority::P2,
+            IssueState::Open,
+            None,
+            None,
+        ),
+        stats_fixture_issue(
+            4,
+            Status::Deferred,
+            Priority::P3,
+            IssueState::Open,
+            None,
+            None,
+        ),
+        stats_fixture_issue(5, Status::Ready, Priority::P4, IssueState::Open, None, None),
+        stats_fixture_issue(6, Status::Ready, Priority::P2, IssueState::Open, None, None),
+        stats_fixture_issue(7, Status::Ready, Priority::P2, IssueState::Open, None, None),
+        stats_fixture_issue(
+            8,
+            Status::InProgress,
+            Priority::P0,
+            IssueState::Open,
+            Some("alice"),
+            None,
+        ),
+        stats_fixture_issue(
+            9,
+            Status::InProgress,
+            Priority::P2,
+            IssueState::Open,
+            Some("bob"),
+            None,
+        ),
+    ];
+    let edges = vec![
+        // Issue #5 blocked by issue #1 (open).
+        BlockingEdge {
+            source: QualifiedId::new("acme", "widgets", 5),
+            target: QualifiedId::new("acme", "widgets", 1),
+        },
+        // Cycle: #6 <-> #7.
+        BlockingEdge {
+            source: QualifiedId::new("acme", "widgets", 6),
+            target: QualifiedId::new("acme", "widgets", 7),
+        },
+        BlockingEdge {
+            source: QualifiedId::new("acme", "widgets", 7),
+            target: QualifiedId::new("acme", "widgets", 6),
+        },
+    ];
+
+    let mock = new_mock();
+    // Only the first (cold) call should trigger a fetch. The second
+    // call must be served entirely from the cache.
+    mock.push_fetch_graph_data(Ok((issues, edges)));
+    let state = state_with_mock(Arc::clone(&mock));
+
+    // ── Call 1 (cold): triggers the single rebuild fetch. ──
+    let result = handle_stats(&state, StatsParams { milestone: None })
+        .await
+        .expect("stats call should succeed on cold cache");
+
+    assert_eq!(result.total, 9);
+    // by_status — each bucket counted exactly.
+    assert_eq!(result.by_status.get("ready"), Some(&4_usize)); // #1, #5, #6, #7
+    assert_eq!(result.by_status.get("in_progress"), Some(&3_usize)); // #2, #8, #9
+    assert_eq!(result.by_status.get("blocked"), Some(&1_usize)); // #3
+    assert_eq!(result.by_status.get("deferred"), Some(&1_usize)); // #4
+    assert_eq!(result.by_status.get("closed"), Some(&0_usize)); // OPEN-only
+
+    // by_priority — one P0/P1/P3/P4, three P2s, plus another P0 (#8).
+    assert_eq!(result.by_priority.get("P0"), Some(&2_usize)); // #1, #8
+    assert_eq!(result.by_priority.get("P1"), Some(&1_usize));
+    assert_eq!(result.by_priority.get("P2"), Some(&4_usize)); // #3, #6, #7, #9
+    assert_eq!(result.by_priority.get("P3"), Some(&1_usize));
+    assert_eq!(result.by_priority.get("P4"), Some(&1_usize));
+
+    // blocked_count — #3 (Status::Blocked) + #5 (open blocker) + #6, #7
+    // (mutual blockers each see the other as an open blocker).
+    assert_eq!(result.blocked_count, 4);
+    // ready_count: per spec §3.3, `compute_ready_set` only filters
+    // InProgress / Deferred / Closed — Status::Blocked issues with no
+    // open blockers WILL appear in the ready set. So:
+    //   #1 — Ready / no blocker → ready.
+    //   #2/#8/#9 — InProgress (filtered).
+    //   #3 — Status::Blocked but no graph blocker → ready (per §3.3).
+    //   #4 — Deferred (filtered).
+    //   #5 — has open blocker (#1 is Open) → blocked.
+    //   #6/#7 — cycle partners, each blocked by the other → blocked.
+    // Expected ready set: {1, 3}.
+    assert_eq!(result.ready_count, 2);
+    assert_eq!(result.cycle_count, 1, "one SCC of size 2 = one cycle");
+
+    // agents — sorted alphabetically; alice has 2 in_progress; bob 1.
+    assert_eq!(result.agents.len(), 2);
+    assert_eq!(result.agents[0].name, "alice");
+    assert_eq!(result.agents[0].in_progress, 2);
+    assert_eq!(result.agents[0].completed, 0); // OPEN-only
+    assert_eq!(result.agents[1].name, "bob");
+    assert_eq!(result.agents[1].in_progress, 1);
+    assert_eq!(result.agents[1].completed, 0);
+
+    // Exactly one fetch should have occurred (cold-cache rebuild).
+    assert_eq!(
+        mock.calls().fetch_graph_data(),
+        1,
+        "cold stats call rebuilds the cache once",
+    );
+
+    // ── Call 2 (warm): zero new fetch calls — cache hit path. ──
+    let result2 = handle_stats(&state, StatsParams { milestone: None })
+        .await
+        .expect("stats call should succeed on warm cache");
+    assert_eq!(result2.total, 9);
+    assert_eq!(
+        mock.calls().fetch_graph_data(),
+        1,
+        "cache-hit stats call must not trigger any additional fetch (spec §7.4)",
+    );
+}
+
+/// `handle_stats` honours the `milestone` filter: `total`, `by_status`,
+/// `by_priority`, `blocked_count`, `ready_count`, and `agents` all
+/// reflect only the filtered subset. `cycle_count` remains full-graph
+/// (R5 decision) — a cycle entirely outside the milestone still counts.
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Comprehensive end-to-end scenario.
+async fn stats_milestone_filter_scopes_aggregation_but_not_cycles() {
+    use unblock_mcp::tools::stats::{StatsParams, handle_stats};
+
+    // Milestone v1.0:
+    //   #1 — Ready / P0 / no blocker.
+    //   #2 — InProgress / P2 / agent=alice.
+    // Milestone v2.0:
+    //   #3 — Ready / P1.
+    //   #4 — Ready / P1 (cycle partner with #5).
+    //   #5 — Ready / P1 (cycle partner with #4).
+    // No milestone:
+    //   #6 — Deferred / P3.
+    let issues = vec![
+        stats_fixture_issue(
+            1,
+            Status::Ready,
+            Priority::P0,
+            IssueState::Open,
+            None,
+            Some("v1.0"),
+        ),
+        stats_fixture_issue(
+            2,
+            Status::InProgress,
+            Priority::P2,
+            IssueState::Open,
+            Some("alice"),
+            Some("v1.0"),
+        ),
+        stats_fixture_issue(
+            3,
+            Status::Ready,
+            Priority::P1,
+            IssueState::Open,
+            None,
+            Some("v2.0"),
+        ),
+        stats_fixture_issue(
+            4,
+            Status::Ready,
+            Priority::P1,
+            IssueState::Open,
+            None,
+            Some("v2.0"),
+        ),
+        stats_fixture_issue(
+            5,
+            Status::Ready,
+            Priority::P1,
+            IssueState::Open,
+            None,
+            Some("v2.0"),
+        ),
+        stats_fixture_issue(
+            6,
+            Status::Deferred,
+            Priority::P3,
+            IssueState::Open,
+            None,
+            None,
+        ),
+    ];
+    // Cycle #4 <-> #5 — entirely inside milestone v2.0.
+    let edges = vec![
+        BlockingEdge {
+            source: QualifiedId::new("acme", "widgets", 4),
+            target: QualifiedId::new("acme", "widgets", 5),
+        },
+        BlockingEdge {
+            source: QualifiedId::new("acme", "widgets", 5),
+            target: QualifiedId::new("acme", "widgets", 4),
+        },
+    ];
+
+    let mock = new_mock();
+    mock.push_fetch_graph_data(Ok((issues, edges)));
+    let state = state_with_mock(Arc::clone(&mock));
+
+    // ── Filter milestone = v1.0 ──
+    let v1 = handle_stats(
+        &state,
+        StatsParams {
+            milestone: Some("v1.0".to_owned()),
+        },
+    )
+    .await
+    .expect("stats call should succeed");
+    assert_eq!(v1.total, 2, "v1.0 has 2 issues");
+    assert_eq!(v1.by_status.get("ready"), Some(&1_usize)); // #1
+    assert_eq!(v1.by_status.get("in_progress"), Some(&1_usize)); // #2
+    assert_eq!(v1.by_status.get("blocked"), Some(&0_usize));
+    assert_eq!(v1.by_priority.get("P0"), Some(&1_usize));
+    assert_eq!(v1.by_priority.get("P2"), Some(&1_usize));
+    assert_eq!(v1.by_priority.get("P1"), Some(&0_usize));
+    assert_eq!(v1.blocked_count, 0, "no blockers inside v1.0");
+    assert_eq!(v1.ready_count, 1, "#1 is ready, #2 is InProgress");
+    assert_eq!(
+        v1.cycle_count, 1,
+        "cycle count is full-graph (R5) — v2.0's cycle still counts",
+    );
+    assert_eq!(v1.agents.len(), 1);
+    assert_eq!(v1.agents[0].name, "alice");
+    assert_eq!(v1.agents[0].in_progress, 1);
+
+    // ── Filter milestone = v2.0 ──
+    let v2 = handle_stats(
+        &state,
+        StatsParams {
+            milestone: Some("v2.0".to_owned()),
+        },
+    )
+    .await
+    .expect("stats call should succeed");
+    assert_eq!(v2.total, 3);
+    assert_eq!(v2.by_status.get("ready"), Some(&3_usize));
+    // blocked_count: #4 and #5 each have an open blocker (the other).
+    assert_eq!(v2.blocked_count, 2);
+    // ready_count: #3 has no blockers; #4 and #5 mutually block.
+    assert_eq!(v2.ready_count, 1);
+    assert_eq!(
+        v2.cycle_count, 1,
+        "cycle count is full-graph and surfaces the v2.0 cycle",
+    );
+    assert!(v2.agents.is_empty(), "no agents assigned inside v2.0");
+    // Exactly one fetch — the second stats call hit the cache.
+    assert_eq!(
+        mock.calls().fetch_graph_data(),
+        1,
+        "milestone filter must be a post-filter, not a refetch",
+    );
+}
+
 // ── Create tool: integration tests ────────────────────────────────
 
 /// Create tool is registered in the server tool list.
