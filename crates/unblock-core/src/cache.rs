@@ -199,9 +199,15 @@ mod tests {
 
     use crate::types::QualifiedId;
 
+    /// Owner/repo used by cache test fixtures. Must match the values passed
+    /// to `compute_ready_set` so SPEC §3.3 Filter 3 (§14 Invariant 14(a))
+    /// admits the local issues.
+    const TEST_OWNER: &str = "test";
+    const TEST_REPO: &str = "repo";
+
     /// Helper to create a `QualifiedId` for tests.
     fn qid(number: u64) -> QualifiedId {
-        QualifiedId::new("test", "repo", number)
+        QualifiedId::new(TEST_OWNER, TEST_REPO, number)
     }
 
     /// Build a minimal `Issue` for testing.
@@ -246,7 +252,7 @@ mod tests {
             target: qid(2),
         }];
         let graph = DependencyGraph::build(&issues, &edges);
-        let ready_set = graph.compute_ready_set(&issues);
+        let ready_set = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
         (issues, graph, ready_set)
     }
 
