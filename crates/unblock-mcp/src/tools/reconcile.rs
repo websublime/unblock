@@ -175,8 +175,13 @@ pub async fn handle_reconcile(
         .collect();
 
     // 2. Build graph and compute ready set.
+    // SPEC §3.3 Filter 3 / §14 Invariant 14(a): scope sources to the
+    // configured (owner, repo) so the drift report's computed_ready set
+    // only considers configured-repo issues. The reconcile engine reads
+    // cross-repo nodes separately when chasing cycles and orphaned edges.
     let graph = DependencyGraph::build(&issues_vec, &edges);
-    let ready_summaries = graph.compute_ready_set(&issues_vec);
+    let ready_summaries =
+        graph.compute_ready_set(&issues_vec, state.github.owner(), state.github.repo());
     let computed_ready: HashSet<QualifiedId> = ready_summaries
         .iter()
         .map(|s| s.qualified_id.clone())
