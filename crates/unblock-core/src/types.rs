@@ -800,6 +800,48 @@ fn non_empty_trimmed(s: &str) -> Option<String> {
     }
 }
 
+/// Cross-repo references that participated in a response computation but
+/// were dropped from the bare-`u64` projection of that response.
+///
+/// Shared response-side type governed by the cross-repo response contract
+/// in SPEC §11.4. Populated when a tool returns issue numbers scoped to
+/// the configured repo but the underlying graph traversal touched nodes
+/// in other repositories that cannot be expressed as bare `u64`.
+///
+/// # Invariant
+///
+/// The field is `Some` iff [`omitted`](Self::omitted) is non-empty. Tools
+/// MUST wrap this type in `Option<CrossRepoRefs>` with
+/// `#[serde(skip_serializing_if = "Option::is_none")]` so clients that do
+/// not inspect the field observe no JSON surface when no cross-repo node
+/// participated.
+///
+/// # Rendering
+///
+/// Each entry in [`omitted`](Self::omitted) uses [`QualifiedId::Display`]
+/// → `"owner/repo#number"`. The vector MUST be sorted lexicographically to
+/// preserve determinism (Invariant 5 / Invariant 14 in SPEC §14).
+///
+/// # Affected tools (SPEC §11.4)
+///
+/// `ready` (§7.1), `prime` (§7.3), `dep_cycles` (§7.7), `close` (§8.2).
+///
+/// [`QualifiedId::Display`]: QualifiedId#impl-Display-for-QualifiedId
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct CrossRepoRefs {
+    /// Qualified refs omitted from the bare-`u64` projection of the
+    /// containing response, one per entry. Each entry uses
+    /// [`QualifiedId::Display`](QualifiedId) → `"owner/repo#number"`.
+    ///
+    /// Sorted lexicographically so identical graph state produces
+    /// identical responses (Invariant 5 / Invariant 14, SPEC §14).
+    pub omitted: Vec<String>,
+    /// Human-readable summary for agent consumption.
+    ///
+    /// Example: `"2 cross-repo cycle members omitted from ` + "`cycles`" + `"`.
+    pub summary: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1400,6 +1442,45 @@ Notes here.";
     fn issue_ref_parse_whitespace_trimmed() {
         let r: IssueRef = "  42  ".parse().unwrap();
         assert_eq!(r, IssueRef::Local(42));
+    }
+
+    // ── CrossRepoRefs (SPEC §2.16 / §11.4) ──────────────────────────────
+
+    #[test]
+    fn cross_repo_refs_serializes_expected_shape() {
+        let refs = CrossRepoRefs {
+            omitted: vec!["acme/widgets#42".to_owned(), "other/repo#9".to_owned()],
+            summary: Some("2 cross-repo cycle members omitted".to_owned()),
+        };
+        let json = serde_json::to_value(&refs).expect("CrossRepoRefs should serialize");
+        assert_eq!(json["omitted"].as_array().map(Vec::len), Some(2));
+        assert_eq!(json["omitted"][0], "acme/widgets#42");
+        assert_eq!(json["omitted"][1], "other/repo#9");
+        assert_eq!(json["summary"], "2 cross-repo cycle members omitted");
+    }
+
+    #[test]
+    fn cross_repo_refs_summary_none_serializes_as_null() {
+        let refs = CrossRepoRefs {
+            omitted: vec!["acme/widgets#1".to_owned()],
+            summary: None,
+        };
+        let json = serde_json::to_value(&refs).expect("CrossRepoRefs should serialize");
+        assert!(
+            json["summary"].is_null(),
+            "summary None serializes as JSON null: {json}"
+        );
+    }
+
+    #[test]
+    fn cross_repo_refs_round_trips_through_serde() {
+        let original = CrossRepoRefs {
+            omitted: vec!["a/b#1".to_owned(), "c/d#2".to_owned()],
+            summary: Some("two".to_owned()),
+        };
+        let json = serde_json::to_string(&original).expect("serialize");
+        let back: CrossRepoRefs = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(original, back);
     }
 
     // ── Proptest ────────────────────────────────────────────────────────

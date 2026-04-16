@@ -2127,6 +2127,7 @@ dependencies = [
  "criterion",
  "petgraph",
  "proptest",
+ "schemars",
  "serde",
  "serde_json",
  "snafu",
