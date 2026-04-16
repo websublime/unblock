@@ -292,6 +292,7 @@ Types:
 - `TraversalDirection { Upstream, Downstream, Both }`
 - `IssueComment { author, body, created_at }`
 - `RelatedIssue { number, title, state }`
+- `CrossRepoRefs { omitted: Vec<String>, summary: Option<String> }` — cross-repo response contract (SPEC §2.16, §11.4)
 
 ### Task 02.02 — Domain errors
 
@@ -458,6 +459,8 @@ Post-filter: `defer_until > today` excluded.
 Sort: priority ASC → created_at ASC. Default limit: 10.
 Cache-aware: Fresh → serve, Stale/Empty → rebuild.
 
+**Acceptance (additional):** `ReadyResult.cross_repo_refs: Option<CrossRepoRefs>` populated per SPEC §11.4 — surfaces any cross-repo `QualifiedId` that was an open blocker of a local issue kept out of the ready set (the agent otherwise cannot see what silently blocked the local issue). `None` when no cross-repo node influenced filtering. Integration test with `MockGitHubClient` must cover both the `Some` and `None` branches.
+
 ### Task 04.06 — `claim` tool
 
 Validates: open, not blocked, not deferred, not already claimed.
@@ -470,6 +473,8 @@ Validates: open.
 **Critical:** Cascade must be computed BEFORE closing the issue (pre-close graph).
 Close via REST. Update Status → `closed`.
 For each unblocked dependent: update Status → `ready`, post unblock comment.
+
+**Acceptance (additional):** `CloseResult.cross_repo_refs: Option<CrossRepoRefs>` populated per SPEC §11.4 — cross-repo dependents that were cascade-updated but dropped from the `unblocked: Vec<u64>` projection MUST appear in `cross_repo_refs.omitted`, sorted by `QualifiedId::Display`. Cross-repo dependents ARE still cascade-updated (same Status/comment path) — only the response shape differs. Integration test must cover the cross-repo-dependent case.
 
 ### Task 04.08 — `create` tool
 
@@ -497,6 +502,8 @@ Validates both exist. Cycle check. Duplicate check.
 ### Task 04.13 — `prime` tool
 
 Context summary for agent session injection. Returns: repo, project, ready/blocked/in-progress counts, cycle warnings. Markdown blob for agent injection.
+
+**Acceptance (additional):** Markdown output MUST include a trailing `## Cross-repo references` section per SPEC §11.4 (markdown adaptation) when the cycle summary touches cross-repo `QualifiedId` nodes. Section omitted entirely when no cross-repo node participated. Entries rendered as `owner/repo#N` (QualifiedId::Display), sorted lexicographically. Integration test must cover both branches.
 
 ### Task 04.14 — Error mapping
 
@@ -559,6 +566,8 @@ Removes blocking relationship. Params: `source` (IssueRef), `target` (IssueRef).
 ### Task 06.06 — `dep_cycles` tool
 
 Detects dependency cycles. Optional `id` param for targeted check. Read tool, uses cache.
+
+**Acceptance (additional):** `DepCyclesResult.cross_repo_refs: Option<CrossRepoRefs>` populated per SPEC §11.4 — cross-repo `QualifiedId` cycle members dropped from the `cycles: Vec<Vec<u64>>` projection MUST appear in `cross_repo_refs.omitted`. When a cycle's local-projection length drops below 2 after stripping cross-repo members, the cycle is STILL emitted as a (possibly-shorter) `Vec<u64>` so the agent knows the cycle exists; the missing members are in `cross_repo_refs`. Integration tests must cover: (a) local-only cycle (`cross_repo_refs == None`), (b) mixed cycle (`cross_repo_refs == Some`), (c) the dep_cycles bead (unblock-29p.11) can resume implementation against this acceptance as-is.
 
 ### Task 06.07 — Register 6 new tools in MCP server
 
@@ -753,6 +762,35 @@ Several tools have TODO comments for integration tests:
 
 ---
 
+### GAP-14 — Cross-repo response contract retro-migration (SPEC §11.4)
+
+SPEC §11.4 (added via unblock-9f7) introduces a uniform `cross_repo_refs: Option<CrossRepoRefs>` response field for tools whose `u64` projection drops cross-repo nodes. The contract covers 4 tools: `ready` (§7.1), `prime` (§7.3), `dep_cycles` (§7.7), `close` (§8.2).
+
+| Tool | Status in code | Retro-fit needed |
+|---|---|---|
+| `ready` | Implemented (GAP-08 satisfied via prior work) | YES — add `cross_repo_refs` to `ReadyResult` |
+| `prime` | Implemented | YES — add `## Cross-repo references` markdown section |
+| `close` | Implemented (GAP-08 satisfied via prior work) | YES — add `cross_repo_refs` to `CloseResult` |
+| `dep_cycles` | NOT yet implemented (unblock-29p.11, blocked by unblock-9f7) | NO retro-fit — spec is authoritative on first implementation |
+
+**Type:** DRIFT (for the 3 retro-fit tools) / READY (for `dep_cycles`)
+**Impact:** Medium — API shape of 3 implemented tools diverges from SPEC §11.4 until retro-fitted.
+
+**Retro-migration sequencing:**
+
+1. **This task (unblock-9f7) — spec only.** No crate edits. Both spec and plan land first. Unblocks unblock-29p.11.
+2. **unblock-29p.11 (next).** Implements `dep_cycles` against the new §11.4 contract directly — NOT a retro-fit, first implementation. No behavioural regression for downstream agents because the tool is new.
+3. **Retro-fit follow-ups (one bead per tool, tracked by orchestrator).** Each follow-up:
+   - Adds `cross_repo_refs: Option<CrossRepoRefs>` to the response struct with `#[serde(skip_serializing_if = "Option::is_none")]`.
+   - Wires population logic inside the tool handler.
+   - Adds the integration test branch (`Some` and `None`) required by the updated Task 04.05 / 04.07 / 04.13 acceptance criteria.
+   - Because `Option` + `skip_serializing_if` is additive and absent-from-JSON-on-None, this is a non-breaking change for existing MCP clients that did not inspect the new field. (API: note required per CLAUDE.md.)
+4. **Error-side siblings (unblock-29p.25, unblock-6xj) — parallel track.** Cross-referenced in §11.4. Safe to implement before, during, or after this task's retro-fits — the two halves of the cross-repo contract (response-side §11.4, error-side §11.1) are independent.
+
+**Resolution:** Land spec+plan here (unblock-9f7). Create one follow-up bead per retro-fit target (`ready`, `prime`, `close`). Implementation of each retro-fit is sibling-scope to this task, NOT part of it.
+
+---
+
 ### Summary — Decisions (Resolved)
 
 | # | Decision | Resolution |
@@ -762,6 +800,7 @@ Several tools have TODO comments for integration tests:
 | D3 | Projects V2 fields | **Code changes to SPEC.** Add `Pipeline Stage` + `Claimed At`, remove `IssueType` + `ReadyState` |
 | D4 | Phase 02 early features | **Keep code, exclude from F1 acceptance criteria** |
 | D5 | `FieldValue::Date` | **Keep `NaiveDate`, update SPEC** (improvement, not drift) |
+| D6 | Cross-repo response shape | **Uniform `cross_repo_refs: Option<CrossRepoRefs>` per SPEC §11.4.** Retro-fit `ready`, `prime`, `close` via follow-up beads; `dep_cycles` lands with contract from day one. |
 
 ---
 
@@ -773,9 +812,10 @@ Phase 01 is complete when:
 2. **Quality gate green** — `cargo fmt`, `cargo clippy`, `cargo test`, `cargo doc` all pass
 3. **E2E workflow** — Full agent loop: `prime` → `ready` → `claim` → `close` → cascade verified
 4. **Integration tests** — Each tool has at least one test with `MockGitHubClient`
-5. **Data model aligned** — All decision points (D1–D5) resolved, implementation matches plan
+5. **Data model aligned** — All decision points (D1–D6) resolved, implementation matches plan
 6. **7 Projects V2 fields** — Created by `setup`, used by all write tools
 7. **5 Views** — Created by `setup`
 8. **Performance** — `prime` → `ready` → `claim` in under 2 seconds on warm cache
 9. **Zero data loss** — If `unblock-mcp` process dies, all state is in GitHub
 10. **Coverage** — >80% for all 3 crates
+11. **Cross-repo response contract (SPEC §11.4, Invariant 14)** — `ready`, `prime`, `dep_cycles`, `close` honor the `cross_repo_refs` contract. GAP-14 retro-fits landed. Integration tests cover `Some`/`None` branches for each.
