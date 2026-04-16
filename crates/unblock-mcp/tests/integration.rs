@@ -3283,3 +3283,365 @@ async fn reconcile_with_injected_drift_and_fix() {
         repaired_report.drift_found
     );
 }
+
+// ── DepCycles tool: integration tests (SPEC §7.7, §11.4) ──────────────
+
+/// Build a fixture issue under the `MockGitHubClient` coordinates
+/// (`acme/widgets`) for `dep_cycles` tests. Every optional field is set
+/// to a minimal value — `dep_cycles` only consumes the graph topology,
+/// not the per-issue fields.
+fn dep_cycles_fixture_issue(number: u64) -> unblock_core::types::Issue {
+    unblock_core::types::Issue {
+        qualified_id: QualifiedId::new("acme", "widgets", number),
+        number,
+        node_id: format!("I_{number}"),
+        title: format!("DepCycles fixture #{number}"),
+        issue_type: Some(IssueType::Task),
+        status: Status::Ready,
+        priority: Priority::P2,
+        agent: None,
+        claimed_at: None,
+        pipeline_stage: None,
+        story_points: None,
+        defer_until: None,
+        labels: vec![],
+        milestone: None,
+        assignees: vec![],
+        state: IssueState::Open,
+        body: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        url: format!("https://github.com/acme/widgets/issues/{number}"),
+        comments: vec![],
+        blocked_by: vec![],
+        blocking: vec![],
+        parent: None,
+        sub_issues: vec![],
+    }
+}
+
+/// Build a cross-repo fixture issue for `dep_cycles` mixed-cycle tests.
+/// The resulting `QualifiedId` points OUTSIDE the configured
+/// `acme/widgets` repo so the cross-repo projection can strip it.
+fn dep_cycles_cross_repo_fixture(
+    owner: &str,
+    repo: &str,
+    number: u64,
+) -> unblock_core::types::Issue {
+    unblock_core::types::Issue {
+        qualified_id: QualifiedId::new(owner, repo, number),
+        number,
+        node_id: format!("I_{owner}_{repo}_{number}"),
+        title: format!("DepCycles cross-repo fixture {owner}/{repo}#{number}"),
+        issue_type: Some(IssueType::Task),
+        status: Status::Ready,
+        priority: Priority::P2,
+        agent: None,
+        claimed_at: None,
+        pipeline_stage: None,
+        story_points: None,
+        defer_until: None,
+        labels: vec![],
+        milestone: None,
+        assignees: vec![],
+        state: IssueState::Open,
+        body: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        url: format!("https://github.com/{owner}/{repo}/issues/{number}"),
+        comments: vec![],
+        blocked_by: vec![],
+        blocking: vec![],
+        parent: None,
+        sub_issues: vec![],
+    }
+}
+
+/// Acceptance (a): local-only cycle — `cross_repo_refs == None`, bare
+/// `cycles` populated, cache warmed exactly once across two calls.
+///
+/// Fixture: four issues, #6 ↔ #7 form a 2-node cycle, #1 / #8 are
+/// unrelated acyclic nodes. Per SPEC §7.7 the handler must:
+/// - detect one cycle of length 2,
+/// - project to `Vec<Vec<u64>>` with the local numbers {6, 7},
+/// - leave `cross_repo_refs == None` (skip-serialising to no JSON key),
+/// - serve the second call from the warm cache (no additional fetch).
+#[tokio::test]
+async fn dep_cycles_returns_all_local_cycles_from_warm_cache() {
+    use unblock_mcp::tools::dep_cycles::{DepCyclesParams, handle_dep_cycles};
+
+    let issues = vec![
+        dep_cycles_fixture_issue(1),
+        dep_cycles_fixture_issue(6),
+        dep_cycles_fixture_issue(7),
+        dep_cycles_fixture_issue(8),
+    ];
+    let edges = vec![
+        // Cycle: #6 ↔ #7.
+        BlockingEdge {
+            source: QualifiedId::new("acme", "widgets", 6),
+            target: QualifiedId::new("acme", "widgets", 7),
+        },
+        BlockingEdge {
+            source: QualifiedId::new("acme", "widgets", 7),
+            target: QualifiedId::new("acme", "widgets", 6),
+        },
+    ];
+
+    let mock = new_mock();
+    // Only the first (cold) call should trigger a fetch. The second
+    // call must be served entirely from the cache (spec §7.7 contract:
+    // "API calls: 0 (cache hit) | 1+ (rebuild)").
+    mock.push_fetch_graph_data(Ok((issues, edges)));
+    let state = state_with_mock(Arc::clone(&mock));
+
+    // ── Call 1 (cold): triggers the single rebuild fetch. ──
+    let result = handle_dep_cycles(&state, DepCyclesParams { id: None })
+        .await
+        .expect("dep_cycles should succeed on cold cache");
+
+    assert_eq!(result.count, 1, "one SCC of size 2 = one cycle");
+    assert_eq!(result.cycles.len(), 1, "count mirrors cycles.len()");
+    // Tarjan SCC order is not contractually stable across petgraph
+    // versions — assert on the member SET, not positional order.
+    let cycle_set: std::collections::HashSet<u64> = result.cycles[0].iter().copied().collect();
+    assert_eq!(
+        cycle_set,
+        std::collections::HashSet::from([6_u64, 7]),
+        "local cycle must contain issue numbers 6 and 7",
+    );
+    // Acceptance (a): local-only cycle produces cross_repo_refs == None.
+    assert!(
+        result.cross_repo_refs.is_none(),
+        "SPEC §11.4: local-only cycle → cross_repo_refs None; got: {:?}",
+        result.cross_repo_refs,
+    );
+    // The skip_serializing_if attribute must elide the key entirely.
+    let json = serde_json::to_value(&result).expect("serialize");
+    assert!(
+        json.get("cross_repo_refs").is_none(),
+        "None cross_repo_refs must be elided from JSON: {json}"
+    );
+
+    assert_eq!(
+        mock.calls().fetch_graph_data(),
+        1,
+        "cold dep_cycles call rebuilds the cache once",
+    );
+
+    // ── Call 2 (warm): zero new fetch calls — cache hit path. ──
+    let result2 = handle_dep_cycles(&state, DepCyclesParams { id: None })
+        .await
+        .expect("dep_cycles should succeed on warm cache");
+    assert_eq!(result2.count, 1);
+    assert!(result2.cross_repo_refs.is_none());
+    assert_eq!(
+        mock.calls().fetch_graph_data(),
+        1,
+        "warm dep_cycles call must not trigger any additional fetch (SPEC §7.7)",
+    );
+}
+
+/// Acceptance (b): mixed cycle — the configured-repo projection is
+/// shortened and `cross_repo_refs` surfaces the omitted members in
+/// lexicographic order with a non-empty summary.
+///
+/// Fixture: one SCC spanning three nodes —
+/// `acme/widgets#1 → zeta/repo#9 → acme/widgets#2 → acme/widgets#1`.
+/// The cycle contains two local members (#1, #2) and one cross-repo
+/// node (`zeta/repo#9`). Per SPEC §11.4:
+/// - `cycles` must contain the local members as `Vec<u64>` (possibly
+///   shorter than the true cycle length),
+/// - `cross_repo_refs.omitted` must contain `"zeta/repo#9"`,
+/// - `cross_repo_refs.summary` must be populated (agent-facing text).
+#[tokio::test]
+async fn dep_cycles_mixed_cycle_populates_cross_repo_refs() {
+    use unblock_mcp::tools::dep_cycles::{DepCyclesParams, handle_dep_cycles};
+
+    let issues = vec![
+        dep_cycles_fixture_issue(1),
+        dep_cycles_fixture_issue(2),
+        // Two cross-repo nodes pulled into the cycle so the
+        // determinism contract (lex-sorted `omitted`) is observable.
+        dep_cycles_cross_repo_fixture("alpha", "upstream", 42),
+        dep_cycles_cross_repo_fixture("zeta", "repo", 9),
+    ];
+    // 4-node cycle:
+    //   #1 → alpha/upstream#42 → zeta/repo#9 → #2 → #1
+    // After stripping cross-repo members, the local projection is {1, 2}.
+    // `alpha/upstream#42` sorts before `zeta/repo#9` lexicographically.
+    let edges = vec![
+        BlockingEdge {
+            source: QualifiedId::new("acme", "widgets", 1),
+            target: QualifiedId::new("alpha", "upstream", 42),
+        },
+        BlockingEdge {
+            source: QualifiedId::new("alpha", "upstream", 42),
+            target: QualifiedId::new("zeta", "repo", 9),
+        },
+        BlockingEdge {
+            source: QualifiedId::new("zeta", "repo", 9),
+            target: QualifiedId::new("acme", "widgets", 2),
+        },
+        BlockingEdge {
+            source: QualifiedId::new("acme", "widgets", 2),
+            target: QualifiedId::new("acme", "widgets", 1),
+        },
+    ];
+
+    let mock = new_mock();
+    mock.push_fetch_graph_data(Ok((issues, edges)));
+    let state = state_with_mock(Arc::clone(&mock));
+
+    let result = handle_dep_cycles(&state, DepCyclesParams { id: None })
+        .await
+        .expect("dep_cycles should succeed on cold cache");
+
+    // Exactly one cycle.
+    assert_eq!(result.count, 1);
+    assert_eq!(result.cycles.len(), 1);
+    // Acceptance (b): local projection contains the local members.
+    // Tarjan SCC order is not stable — assert on SET membership.
+    let local_set: std::collections::HashSet<u64> = result.cycles[0].iter().copied().collect();
+    assert_eq!(
+        local_set,
+        std::collections::HashSet::from([1_u64, 2]),
+        "mixed cycle must emit only local members in the bare-u64 projection; got: {:?}",
+        result.cycles[0],
+    );
+    // SPEC §7.7 flow step 4b: the bare-u64 projection MAY be shorter
+    // than the true cycle length. True cycle length here is 4; the
+    // projection is length 2.
+    assert!(
+        result.cycles[0].len() < 4,
+        "local projection must be shorter than true cycle length (SPEC §7.7 flow 4b)",
+    );
+
+    // Acceptance (b): cross_repo_refs is Some with the cross-repo
+    // members in lexicographic order.
+    let refs = result
+        .cross_repo_refs
+        .as_ref()
+        .expect("SPEC §11.4: mixed cycle → cross_repo_refs Some");
+    assert_eq!(
+        refs.omitted,
+        vec!["alpha/upstream#42".to_owned(), "zeta/repo#9".to_owned(),],
+        "Invariant 14: omitted MUST be sorted lexicographically",
+    );
+    let summary = refs
+        .summary
+        .as_deref()
+        .expect("SPEC §11.4: summary populated for non-empty omitted");
+    assert!(
+        summary.contains("cross-repo"),
+        "summary must describe cross-repo omission: {summary}",
+    );
+    assert!(
+        summary.contains("cycles"),
+        "summary must reference the `cycles` projection: {summary}",
+    );
+
+    // JSON serialisation includes the cross_repo_refs envelope.
+    let json = serde_json::to_value(&result).expect("serialize");
+    assert_eq!(
+        json["cross_repo_refs"]["omitted"][0], "alpha/upstream#42",
+        "JSON envelope surfaces the sorted omitted list",
+    );
+    assert_eq!(json["cross_repo_refs"]["omitted"][1], "zeta/repo#9");
+
+    // Exactly one fetch call for the cold rebuild.
+    assert_eq!(mock.calls().fetch_graph_data(), 1);
+}
+
+/// Acceptance (c): targeted `id` filter — two disjoint cycles in the
+/// graph, an `id` parameter picks exactly one.
+///
+/// Fixture: two independent 2-node cycles (#10 ↔ #11 and #20 ↔ #21).
+/// With `id = Some(10)` the handler must return only the {#10, #11}
+/// cycle, not the {#20, #21} cycle. With `id = Some(20)` the reverse.
+/// With `id = Some(999)` (absent from every cycle) the handler returns
+/// an empty `cycles` vector and `count == 0`.
+#[tokio::test]
+async fn dep_cycles_targeted_id_filters_to_scc() {
+    use unblock_mcp::tools::dep_cycles::{DepCyclesParams, handle_dep_cycles};
+
+    let issues = vec![
+        dep_cycles_fixture_issue(10),
+        dep_cycles_fixture_issue(11),
+        dep_cycles_fixture_issue(20),
+        dep_cycles_fixture_issue(21),
+    ];
+    let edges = vec![
+        // Cycle A: #10 ↔ #11.
+        BlockingEdge {
+            source: QualifiedId::new("acme", "widgets", 10),
+            target: QualifiedId::new("acme", "widgets", 11),
+        },
+        BlockingEdge {
+            source: QualifiedId::new("acme", "widgets", 11),
+            target: QualifiedId::new("acme", "widgets", 10),
+        },
+        // Cycle B: #20 ↔ #21.
+        BlockingEdge {
+            source: QualifiedId::new("acme", "widgets", 20),
+            target: QualifiedId::new("acme", "widgets", 21),
+        },
+        BlockingEdge {
+            source: QualifiedId::new("acme", "widgets", 21),
+            target: QualifiedId::new("acme", "widgets", 20),
+        },
+    ];
+
+    let mock = new_mock();
+    // One push is enough — all three calls below share the same warm
+    // cache after the first fetch.
+    mock.push_fetch_graph_data(Ok((issues, edges)));
+    let state = state_with_mock(Arc::clone(&mock));
+
+    // ── id = 10: matches cycle A only. ──
+    let r10 = handle_dep_cycles(&state, DepCyclesParams { id: Some(10) })
+        .await
+        .expect("dep_cycles(id=10) should succeed");
+    assert_eq!(r10.count, 1, "id=10 matches exactly one cycle");
+    let set10: std::collections::HashSet<u64> = r10.cycles[0].iter().copied().collect();
+    assert_eq!(
+        set10,
+        std::collections::HashSet::from([10_u64, 11]),
+        "id=10 → cycle A {{#10, #11}}",
+    );
+    assert!(r10.cross_repo_refs.is_none());
+
+    // ── id = 20: matches cycle B only. ──
+    let r20 = handle_dep_cycles(&state, DepCyclesParams { id: Some(20) })
+        .await
+        .expect("dep_cycles(id=20) should succeed");
+    assert_eq!(r20.count, 1, "id=20 matches exactly one cycle");
+    let set20: std::collections::HashSet<u64> = r20.cycles[0].iter().copied().collect();
+    assert_eq!(
+        set20,
+        std::collections::HashSet::from([20_u64, 21]),
+        "id=20 → cycle B {{#20, #21}}",
+    );
+    assert!(r20.cross_repo_refs.is_none());
+
+    // ── id = 999: matches no cycle. ──
+    let r999 = handle_dep_cycles(&state, DepCyclesParams { id: Some(999) })
+        .await
+        .expect("dep_cycles(id=999) should succeed (no match is not an error)");
+    assert_eq!(r999.count, 0);
+    assert!(r999.cycles.is_empty());
+    assert!(r999.cross_repo_refs.is_none());
+
+    // ── id = None: returns BOTH cycles. ──
+    let r_all = handle_dep_cycles(&state, DepCyclesParams { id: None })
+        .await
+        .expect("dep_cycles(id=None) should succeed");
+    assert_eq!(r_all.count, 2, "id=None → full graph produces both cycles");
+
+    // All four calls shared a single fetch (warm-cache after the first).
+    assert_eq!(
+        mock.calls().fetch_graph_data(),
+        1,
+        "SPEC §7.7 cache contract: one fetch across four calls",
+    );
+}
