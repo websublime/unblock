@@ -957,8 +957,7 @@ async fn ready_cross_repo_open_blocker_populates_cross_repo_refs() {
     // `ReadyIssueSummary` drops `qualified_id`; check the fixture-derived
     // url to pin the entry to the configured (acme, widgets) repo.
     assert!(
-        result.issues[0].url.contains("acme/widgets")
-            || result.issues[0].url.is_empty(),
+        result.issues[0].url.contains("acme/widgets") || result.issues[0].url.is_empty(),
         "Ready entry must live in the configured (acme, widgets) repo; got url={}",
         result.issues[0].url,
     );
@@ -1059,10 +1058,8 @@ async fn ready_mixed_repo_sources_excluded_per_invariant_14a() {
     // (configured-repo uses 1–3, cross-repo uses 50–52), so any leak of a
     // cross-repo source into the envelope is detectable as a forbidden
     // number OR via the url prefix. We check both.
-    let numbers: std::collections::HashSet<u64> =
-        result.issues.iter().map(|i| i.number).collect();
-    let forbidden: std::collections::HashSet<u64> =
-        std::collections::HashSet::from([50, 51, 52]);
+    let numbers: std::collections::HashSet<u64> = result.issues.iter().map(|i| i.number).collect();
+    let forbidden: std::collections::HashSet<u64> = std::collections::HashSet::from([50, 51, 52]);
     assert!(
         numbers.is_disjoint(&forbidden),
         "SPEC §14 Invariant 14(a): cross-repo source numbers {:?} leaked \
