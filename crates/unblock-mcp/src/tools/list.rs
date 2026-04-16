@@ -494,7 +494,11 @@ pub async fn handle_list(state: &ServerState, params: ListParams) -> Result<List
             // is still consumed below by `build_list_rows` for the list
             // projection — the cache holds an independent snapshot.
             let graph = DependencyGraph::build(&issues, &edges);
-            let ready_set = graph.compute_ready_set(&issues);
+            // SPEC §3.3 Filter 3 / §14 Invariant 14(a): scope the cached
+            // ready set to the configured (owner, repo) so subsequent
+            // `ready`/`prime` reads inherit the local-only guarantee.
+            let ready_set =
+                graph.compute_ready_set(&issues, state.github.owner(), state.github.repo());
             state.cache.update(issues.clone(), ready_set, graph).await;
             tracing::debug!("Cache refreshed by list handler");
             issues

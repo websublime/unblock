@@ -347,8 +347,12 @@ pub async fn handle_prime(
         .map_err(github_error_to_mcp)?;
 
     // 3. Build graph and compute ready set.
+    // SPEC §3.3 Filter 3 / §14 Invariant 14(a): engine scopes source issues
+    // to the configured (owner, repo) before the blocker filter runs. The
+    // categorisation below and the cache store inherit that guarantee.
     let graph = DependencyGraph::build(&issues_vec, &edges);
-    let ready_summaries = graph.compute_ready_set(&issues_vec);
+    let ready_summaries =
+        graph.compute_ready_set(&issues_vec, state.github.owner(), state.github.repo());
 
     let now = Utc::now();
 

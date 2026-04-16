@@ -164,7 +164,14 @@ pub async fn rebuild_cache(state: &ServerState) {
     match state.github.fetch_graph_data().await {
         Ok((issues, edges)) => {
             let graph = DependencyGraph::build(&issues, &edges);
-            let ready_set = graph.compute_ready_set(&issues);
+            // SPEC §3.3 Filter 3 / §14 Invariant 14(a): the cached ready set
+            // is guaranteed local-only by construction when the engine is
+            // passed the configured (owner, repo). This is the canonical
+            // chokepoint — downstream consumers (ready, prime,
+            // update_status_fields) inherit the guarantee without
+            // re-checking. (unblock-eos.4 / D6.a / GAP-14.b)
+            let ready_set =
+                graph.compute_ready_set(&issues, state.github.owner(), state.github.repo());
             state.cache.update(issues, ready_set, graph).await;
             tracing::debug!("Cache rebuilt after write tool execution");
         }
@@ -244,7 +251,9 @@ mod tests {
             target: qid(1),
         }];
         let graph = DependencyGraph::build(&issues, &edges);
-        let ready_set = graph.compute_ready_set(&issues);
+        // Fixture lives in ("test", "repo") — match the configured coords
+        // so SPEC §3.3 Filter 3 admits the issues.
+        let ready_set = graph.compute_ready_set(&issues, "test", "repo");
         cache.update(issues, ready_set, graph).await;
     }
 

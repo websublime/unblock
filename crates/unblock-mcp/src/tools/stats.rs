@@ -240,7 +240,18 @@ fn seed_priority_buckets() -> HashMap<String, usize> {
 /// keeps [`handle_stats`] focused on the cache orchestration and makes
 /// the aggregation logic trivially unit-testable without touching the
 /// cache layer.
-fn aggregate_stats(filtered: &[&Issue], graph: &DependencyGraph) -> StatsResult {
+///
+/// `configured_owner` / `configured_repo` are forwarded to
+/// [`DependencyGraph::compute_ready_set`] so SPEC §3.3 Filter 3
+/// (§14 Invariant 14(a)) scopes `ready_count` to the configured
+/// repository. Every caller already holds these from
+/// [`crate::server::ServerState::github`].
+fn aggregate_stats(
+    filtered: &[&Issue],
+    graph: &DependencyGraph,
+    configured_owner: &str,
+    configured_repo: &str,
+) -> StatsResult {
     let mut by_status = seed_status_buckets();
     let mut by_priority = seed_priority_buckets();
     let mut blocked_count: usize = 0;
@@ -294,7 +305,9 @@ fn aggregate_stats(filtered: &[&Issue], graph: &DependencyGraph) -> StatsResult 
     // owned clones. This allocation is bounded by `total` and only runs
     // on the cache-warm read path (once per stats call).
     let filtered_owned: Vec<Issue> = filtered.iter().copied().cloned().collect();
-    let ready_count = graph.compute_ready_set(&filtered_owned).len();
+    let ready_count = graph
+        .compute_ready_set(&filtered_owned, configured_owner, configured_repo)
+        .len();
 
     // Cycle count is always full-graph (R5). Milestone does not scope
     // cycle detection — the spec does not define a milestone-aware
@@ -390,10 +403,22 @@ pub async fn handle_stats(
         // follow-up call is warm, then aggregate against the freshly
         // fetched vectors without re-reading the cache.
         let graph_built = DependencyGraph::build(&issues_vec, &edges_vec);
-        let ready_set = graph_built.compute_ready_set(&issues_vec);
+        // SPEC §3.3 Filter 3 / §14 Invariant 14(a): pass configured coords
+        // so the cached ready set is local-only and `ready_count` in the
+        // stats envelope matches what `ready(milestone=…)` would return.
+        let ready_set = graph_built.compute_ready_set(
+            &issues_vec,
+            state.github.owner(),
+            state.github.repo(),
+        );
         let milestone = crate::tools::normalize_filter(params.milestone.as_deref());
         let filtered = filter_by_milestone(&issues_vec, milestone);
-        let result = aggregate_stats(&filtered, &graph_built);
+        let result = aggregate_stats(
+            &filtered,
+            &graph_built,
+            state.github.owner(),
+            state.github.repo(),
+        );
         state.cache.update(issues_vec, ready_set, graph_built).await;
         return Ok(result);
     };
@@ -403,8 +428,15 @@ pub async fn handle_stats(
     let milestone = crate::tools::normalize_filter(params.milestone.as_deref());
     let filtered = filter_by_milestone(issues.as_ref(), milestone);
 
-    // Step 4: aggregate.
-    Ok(aggregate_stats(&filtered, graph.as_ref()))
+    // Step 4: aggregate. SPEC §3.3 Filter 3 / §14 Invariant 14(a) —
+    // `aggregate_stats` threads configured coords into the embedded
+    // `compute_ready_set` call.
+    Ok(aggregate_stats(
+        &filtered,
+        graph.as_ref(),
+        state.github.owner(),
+        state.github.repo(),
+    ))
 }
 
 /// Filter an issue slice by exact-match milestone title.

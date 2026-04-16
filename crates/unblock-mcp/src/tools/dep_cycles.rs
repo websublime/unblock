@@ -328,7 +328,11 @@ pub async fn handle_dep_cycles(
         // follow-up call is warm, then compute cycles against the
         // freshly built graph without re-reading the cache.
         let graph_built = DependencyGraph::build(&issues_vec, &edges_vec);
-        let ready_set = graph_built.compute_ready_set(&issues_vec);
+        // SPEC §3.3 Filter 3 / §14 Invariant 14(a): scope the cached ready
+        // set to the configured (owner, repo) so downstream consumers
+        // inherit the local-only guarantee by construction.
+        let ready_set =
+            graph_built.compute_ready_set(&issues_vec, &configured_owner, &configured_repo);
         let cycles = graph_built.detect_all_cycles();
         state.cache.update(issues_vec, ready_set, graph_built).await;
         cycles
