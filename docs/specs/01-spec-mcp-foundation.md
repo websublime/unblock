@@ -5,7 +5,7 @@
 > Source: [SPEC](../SPEC.md) · [PRD](../PRD.md) · [MANIFESTO](../MANIFESTO.md)
 > Plan: [01-plan-mcp-foundation](../plans/01-plan-mcp-foundation.md)
 > Status: draft
-> Last updated: 2026-04-11
+> Last updated: 2026-04-16
 
 ---
 
@@ -304,6 +304,17 @@ pub struct BodySections {
 ```
 
 With `from_markdown(&str) → BodySections` and `to_markdown() → String`. See §9 for algorithms.
+
+### 2.16 `CrossRepoRefs`
+
+```rust
+pub struct CrossRepoRefs {
+    pub omitted: Vec<String>,       // "owner/repo#number" via QualifiedId::Display
+    pub summary: Option<String>,    // human-readable context
+}
+```
+
+Shared response-side type carrying cross-repo nodes that were dropped from a bare-`u64` projection. Governed by the cross-repo response contract in §11.4. Full rules (population, determinism, markdown adaptation, affected tools) live there.
 
 ---
 
@@ -953,6 +964,8 @@ pub struct ReadyResult {
     pub issues: Vec<IssueSummary>,
     pub count: usize,
     pub stale: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cross_repo_refs: Option<CrossRepoRefs>,  // §11.4
 }
 ```
 
@@ -969,6 +982,9 @@ pub struct ReadyResult {
 6. Sort: priority ASC → created_at ASC (already sorted from `compute_ready_set`)
 7. Limit to top N
 8. Set `stale = !cache.is_fresh()`
+9. Compute `cross_repo_refs` per §11.4: collect every cross-repo `QualifiedId` that appears as an OPEN blocker of any local issue that was filtered OUT of the ready set by step 6 of `compute_ready_set` (§3.3) due to that blocker being non-closed. These refs are not expressible in `IssueSummary.number: u64` because the local projection cannot represent them. Deduplicate, sort, attach.
+
+**Cross-repo contract (§11.4):** Cross-repo blockers silently influence ready-set filtering — a local issue can be held out of the ready set by a cross-repo dependency the agent cannot see in `issues`. The `cross_repo_refs` field surfaces those nodes. `None` when no cross-repo blocker participated in filtering.
 
 **Cache:** Read-only. No invalidation.
 **API calls:** 0 (cache hit) | 1+ (rebuild)
@@ -1020,7 +1036,10 @@ pub struct PrimeResult {
    - Project: number
    - Ready count, blocked count, in-progress count
    - Issues with cycles (if any)
-3. Return markdown blob
+3. Append cross-repo section per §11.4 (markdown adaptation): list each cross-repo `QualifiedId` that participated in the cycle summary but could not be rendered as a local `#number` reference. Omit the entire section when no such refs exist.
+4. Return markdown blob
+
+**Cross-repo contract (§11.4):** Because `prime` returns markdown rather than a typed struct, the cross-repo refs are rendered as a trailing `## Cross-repo references` section. Entries use `QualifiedId::Display` format (`owner/repo#N`), sorted lexicographically. The section is omitted entirely when no cross-repo node contributed to the cycle summary.
 
 **Cache:** Read-only.
 **API calls:** 0 (cache hit) | 1+ (rebuild)
@@ -1128,8 +1147,10 @@ pub struct DepCyclesParams {
 }
 
 pub struct DepCyclesResult {
-    pub cycles: Vec<Vec<u64>>,  // issue numbers scoped to configured repo; cross-repo cycle members shown as QualifiedId format in future phases
+    pub cycles: Vec<Vec<u64>>,  // issue numbers scoped to configured repo — cross-repo cycle members are surfaced in `cross_repo_refs` per §11.4
     pub count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cross_repo_refs: Option<CrossRepoRefs>,  // §11.4
 }
 ```
 
@@ -1137,7 +1158,13 @@ pub struct DepCyclesResult {
 1. Fetch graph data (or use cache)
 2. If `id` provided: targeted cycle check involving that node
 3. If `id` absent: `detect_all_cycles()` on full graph
-4. Map `QualifiedId` cycles to issue number cycles
+4. Project `Vec<Vec<QualifiedId>>` → `Vec<Vec<u64>>`:
+   a. For each cycle: keep only nodes whose `(owner, repo)` matches the configured repo; emit as a `Vec<u64>` of bare numbers.
+   b. A cycle whose local-projection length is `< 2` after filtering (a cycle that becomes trivial once cross-repo members are stripped) is still emitted if the original had ≥2 nodes, so the agent knows the cycle exists — the bare-`u64` vector may therefore be shorter than the true cycle length. Callers MUST consult `cross_repo_refs` for the missing members.
+   c. Collect every cross-repo `QualifiedId` that was stripped in step (a) into the `cross_repo_refs` set.
+5. Populate `cross_repo_refs` per §11.4. `summary` example: `"3 cross-repo cycle members omitted from `cycles`"`.
+
+**Cross-repo contract (§11.4):** `cycles: Vec<Vec<u64>>` cannot express cross-repo cycle members. When a detected cycle traverses at least one `QualifiedId` outside the configured repo, those nodes are omitted from the local vector and surfaced in `cross_repo_refs`. The field is `None` when no cycle touches a cross-repo node.
 
 **Cache:** Read-only.
 **API calls:** 0 (cache hit) | 1+ (rebuild)
@@ -1187,12 +1214,16 @@ pub struct CloseParams {
 
 pub struct CloseResult {
     pub issue: IssueSummary,
-    pub unblocked: Vec<u64>,  // scoped to configured repo for Phase 01; cross-repo dependents are still cascade-updated but not returned here
+    pub unblocked: Vec<u64>,  // scoped to configured repo; cross-repo dependents that were cascade-updated are surfaced in `cross_repo_refs` per §11.4
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cross_repo_refs: Option<CrossRepoRefs>,  // §11.4
 }
 ```
 
 **Validation:**
 - `id`: positive integer
+
+**Cross-repo contract (§11.4):** `compute_unblock_cascade` (§3.4) returns `Vec<QualifiedId>`. Local dependents are projected to `u64` and emitted in `unblocked`; cross-repo dependents are dropped from that projection and surfaced in `cross_repo_refs`. Cross-repo dependents ARE still cascade-updated in step 6 — only the response shape differs. `cross_repo_refs` is `None` when no cross-repo dependent was cascaded. `summary` example: `"1 cross-repo dependent cascade-updated but omitted from `unblocked`"`.
 
 **Flow (ordering is critical):**
 1. Fetch issue, validate `IssueState == Open` → else `IssueClosed`
@@ -1208,7 +1239,8 @@ pub struct CloseResult {
    b. Add comment: `"Unblocked — blocker #{id} was closed"`
 7. Invalidate cache + rebuild graph (post-close: issue excluded from OPEN query)
 8. `update_status_fields` — syncs Status for issues NOT already handled in step 6 (e.g., issues whose blocker status changed but were not direct dependents of the closed issue)
-9. Update cache
+9. Partition the cascade list from step 2 by `(owner, repo) == (config.owner, config.repo)`: local dependents go into `unblocked: Vec<u64>`; cross-repo dependents populate `cross_repo_refs` per §11.4 (deduplicated, sorted by `QualifiedId::Display`).
+10. Update cache
 
 **Why step 2 before step 3:** After close, `fetch_graph_data()` returns only OPEN issues. The closed issue is excluded from the rebuilt graph. `compute_unblock_cascade` requires the closed issue to be a node to find dependents via Incoming edges.
 
@@ -1640,6 +1672,8 @@ Each variant has `status_code() → u16`:
 | `InvalidIssueRef` | 400 |
 | `CrossRepoAccessDenied` | 403 |
 
+`InvalidIssueRef`, `CrossRepoAccessDenied`, and the cross-repo-aware forms of `CircularDependency`/`DuplicateDependency` are the **error-side** half of the cross-repo contract. The successful-response half — how responses disclose cross-repo nodes that were flattened to local numbers — is specified in §11.4.
+
 ### 11.2 Infrastructure errors (`unblock-github/src/errors.rs`)
 
 ```rust
@@ -1680,6 +1714,81 @@ github_error_to_mcp(err) → ErrorData:
 ```
 
 Propagation chain: `DomainError` (core) → `Error` (github) → `McpError` (mcp).
+
+### 11.4 Cross-Repo Response Contract
+
+The graph engine nodes are `QualifiedId { owner, repo, number }` (§2.1). Many response types project cross-repo nodes down to bare `u64` issue numbers scoped to the configured repository. When a computation touches one or more `QualifiedId` nodes whose `(owner, repo)` differs from the configured repo AND those nodes are dropped from the bare-`u64` projection of the response, the response MUST surface them in an explicit `cross_repo_refs` field. This is the dual of the error-side contract in §11.1: §11.1 governs how cross-repo failures are reported (`InvalidIssueRef`, `CrossRepoAccessDenied`, cross-repo-aware `CircularDependency`/`DuplicateDependency`); §11.4 governs how successful responses disclose cross-repo nodes that were flattened to local numbers.
+
+**Shared type** (`unblock-core/src/types.rs`):
+
+```rust
+/// Cross-repo references that participated in a response computation but were
+/// dropped from the local `u64` projection of that response.
+///
+/// Populated when a tool returns issue numbers scoped to the configured repo
+/// but the underlying graph traversal touched nodes in other repositories.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CrossRepoRefs {
+    /// Qualified refs omitted from the bare-`u64` projection, one per line.
+    /// Each entry uses `QualifiedId::Display` → `"owner/repo#number"`.
+    pub omitted: Vec<String>,
+    /// Human-readable summary for agent consumption.
+    /// Example: `"2 cross-repo cycle members omitted from `cycles`"`.
+    pub summary: Option<String>,
+}
+```
+
+**Response integration.** Every tool response affected by the contract adds:
+
+```rust
+#[serde(skip_serializing_if = "Option::is_none")]
+pub cross_repo_refs: Option<CrossRepoRefs>,
+```
+
+**Population rules.** The field is populated (i.e. `Some`) iff BOTH of the following hold:
+
+1. The computation backing the response visited ≥1 `QualifiedId` whose `(owner, repo)` differs from the configured `(config.owner, config.repo)`.
+2. That same node was NOT emitted in the bare-`u64` projection of the response (because bare `u64` cannot disambiguate across repos).
+
+When either condition fails, the field is omitted from the JSON response (`#[serde(skip_serializing_if = "Option::is_none")]`). The field is NEVER `Some` with an empty `omitted` vector.
+
+**Rendering.** `omitted` entries use `QualifiedId::Display` (§2.1): `"owner/repo#number"`. This format is stable, human-readable, and parseable back into `IssueRef::CrossRepo` (§2.7) for follow-up tool calls (e.g. `show owner/repo#42`).
+
+**Markdown adaptation (`prime`).** Tools that return markdown instead of a typed struct (§7.3 `prime`) render the same information as a trailing section:
+
+```
+## Cross-repo references
+- `owner/repo#42`
+- `owner/repo#99`
+
+_{summary}_
+```
+
+The section is omitted entirely when `cross_repo_refs` would be `None` under the typed-response rules.
+
+**Affected tools.** The following §7/§8 tools MUST implement this contract:
+
+| Tool | Section | Projection that drops cross-repo info |
+|---|---|---|
+| `ready` | §7.1 | Cross-repo blockers silently exclude local issues from the ready set |
+| `prime` | §7.3 | Cycle summary lists issue numbers |
+| `dep_cycles` | §7.7 | `cycles: Vec<Vec<u64>>` drops cross-repo cycle members |
+| `close` | §8.2 | `unblocked: Vec<u64>` drops cross-repo dependents |
+
+Tools explicitly NOT affected (documented here to pre-empt retro-adoption questions):
+
+| Tool | Rationale |
+|---|---|
+| `show` (§7.2) | `TreeNode.id: QualifiedId` already fully qualified (§2.14) |
+| `stats` (§7.4) | Aggregate counts only, no issue IDs in response |
+| `list` (§7.5) | Scoped to configured repo; cross-repo issues never enumerated |
+| `search` (§7.6) | GitHub Search query pinned to `repo:{owner}/{repo}` |
+| `claim` / `create` / `update` / `reopen` (§8.1, §8.3, §8.6, §8.7) | Mutations scoped to configured repo (§5.6 cross-repo scope table) |
+| `depends` / `dep_remove` (§8.4, §8.5) | Request and response use `IssueRef` strings; no `u64` projection |
+| `comment` (§8.8) | Boolean response only |
+| `init` / `setup` (§8.9, §8.10) | Project-level, no issue references |
+
+**Determinism.** `omitted` MUST be sorted lexicographically by `QualifiedId::Display` so identical graph state produces identical responses (per Invariant 5, §14).
 
 ---
 
@@ -1789,6 +1898,7 @@ Graph invariants:
 3. Cycle detection is sound and complete
 4. Ready set is deterministic (same input → same output)
 5. Graph construction is idempotent
+6. Cross-repo response contract is complete (§14 Invariant 14): for every §11.4-affected tool, every cross-repo node that was dropped during bare-`u64` projection appears in `cross_repo_refs.omitted`, sorted.
 
 ### 13.4 `test-hooks` feature
 
@@ -1824,6 +1934,7 @@ These invariants MUST hold at all times. Property tests validate where applicabl
 11. **Validation before mutation.** All tools validate input before calling GitHub. No partial mutations from validation failures.
 12. **Token never logged.** Redacted in all debug output. Never in MCP responses.
 13. **Status field values match graph computation.** After every write, `update_status_fields` syncs the Projects V2 Status field with the graph-computed expected status.
+14. **Cross-repo response contract is complete (§11.4).** For every tool listed in the §11.4 affected-tools table, if the computation visited a cross-repo `QualifiedId` that was NOT emitted in the bare-`u64` projection of the response, the response MUST carry that node's `QualifiedId::Display` form in `cross_repo_refs.omitted`. The field is `Some` iff `omitted` is non-empty. `omitted` is sorted lexicographically (preserves Invariant 5).
 
 ---
 
