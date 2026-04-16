@@ -235,6 +235,8 @@ pub struct IssueSummary {
 
 Lightweight issue for list/ready responses. Derived from `Issue`.
 
+**Scoping invariant (§14 Invariant 14).** `IssueSummary` is the shared shape behind both the ready-set projection (§7.1) and the filtered-list projection (§7.5). Callers of `compute_ready_set` (§3.3) receive a slice guaranteed to contain ONLY configured-repo source issues — `IssueSummary::qualified_id.(owner, repo) == (configured_owner, configured_repo)` for every element. The `list` tool (§7.5) enforces the same scope at the tool layer. No consumer may observe an `IssueSummary` whose `qualified_id` is cross-repo in either of these projections. `show` (§7.2) and `search` (§7.6) operate on bare `Issue` data and are exempt — they are explicitly allowed to surface cross-repo issues.
+
 ### 2.10 `BlockingEdge`
 
 ```rust
@@ -366,8 +368,21 @@ build(issues, edges) → DependencyGraph:
 
 ### 3.3 `compute_ready_set` — Ready set calculation
 
+**Signature (BREAKING CHANGE vs. pre-unblock-eos.4 implementation):**
+
+```rust
+pub fn compute_ready_set(
+    &self,
+    issues: &[Issue],
+    configured_owner: &str,
+    configured_repo: &str,
+) -> Vec<IssueSummary>
 ```
-compute_ready_set(graph, issues) → Vec<IssueSummary>:
+
+The engine takes `(configured_owner, configured_repo)` so that it can enforce the scoping invariant (Filter 3 below, §14 Invariant 14) at the source of truth. Prior to unblock-eos.4 the engine accepted only `issues` and allowed cross-repo source issues into the ready set; that projection was unsound — the tool-layer projections (`ready`, `prime`, cached `ready_set` consumed by `prime`) cannot represent non-local source issues in their bare-`u64` / local-only shapes (§11.4). See PLAN GAP-14 + D6 for the migration and commit discipline.
+
+```
+compute_ready_set(graph, issues, configured_owner, configured_repo) → Vec<IssueSummary>:
 
   ready = []
 
@@ -384,7 +399,22 @@ compute_ready_set(graph, issues) → Vec<IssueSummary>:
     IF issue.status == Closed:
       CONTINUE
 
-    // Filter 3: check all blockers via graph
+    // Filter 3: source issue MUST live in the configured (owner, repo).
+    //          Cross-repo source issues are never members of the local
+    //          ready-set projection (§11.4, §14 Invariant 14). Applied
+    //          BEFORE Filter 4 so cross-repo blocker traversal is never
+    //          performed for a cross-repo source. This is the scrub
+    //          introduced by unblock-eos.4 (Direction 1).
+    IF issue.qualified_id.owner != configured_owner:
+      CONTINUE
+    IF issue.qualified_id.repo != configured_repo:
+      CONTINUE
+
+    // Filter 4: check all blockers via graph (was Filter 3 pre-eos.4).
+    //           Cross-repo blockers ARE honoured here — an open
+    //           cross-repo blocker keeps the local source out of the
+    //           ready set, and the tool layer surfaces the dropped
+    //           blocker via §11.4 cross_repo_refs.
     IF issue.qualified_id IN node_map:
       idx = node_map[issue.qualified_id]
       blockers = graph.neighbors_directed(idx, Outgoing)
@@ -399,7 +429,8 @@ compute_ready_set(graph, issues) → Vec<IssueSummary>:
       IF NOT all_blockers_closed:
         CONTINUE
 
-    // Issue is ready (open, not preserved, all blockers closed or no blockers)
+    // Issue is ready (local-owned, open, not preserved, all blockers
+    // closed or no blockers)
     ready.push(IssueSummary::from(issue))
 
   // Deterministic sort: priority ASC (P0 first) → created_at ASC (oldest first)
@@ -411,13 +442,16 @@ compute_ready_set(graph, issues) → Vec<IssueSummary>:
 
 **Key:** The ready set computation does NOT look at the current `Status` field value to decide readiness. It computes readiness from the graph. Issues with `Status::Blocked` that now have all blockers closed WILL be in the ready set. The `update_status_fields` algorithm (§10) syncs the Status field to match.
 
+**Scoping invariant (Filter 3):** `compute_ready_set` is the single chokepoint that enforces `ready_set ⊆ { issue | issue.qualified_id.(owner, repo) == (configured_owner, configured_repo) }`. Every downstream consumer of the ready set (cached `ready_set` in `GraphCache`, `prime` categorisation in §7.3, `ready` tool in §7.1, `update_status_fields` in §10) inherits this guarantee without re-checking. This is §14 Invariant 14's "configured-repo source" clause.
+
 **Post-filters** (applied in tool layer, NOT in graph engine):
 - `defer_until > today` → exclude (the graph does not know about dates)
 - Agent filter, type filter, priority filter, milestone filter, label filter → applied after
 
 **Edge cases:**
-- Issue not in graph: has zero blockers → ready if not in a preserved state
-- All blockers closed: every outgoing edge leads to a closed issue → ready
+- Issue not in graph: has zero blockers → ready if local-owned and not in a preserved state
+- Cross-repo source issue: dropped by Filter 3 regardless of blocker state — never in the ready set
+- All blockers closed: every outgoing edge leads to a closed issue → ready (if local-owned)
 - Mixed blockers: some closed, some open → not ready (blocked)
 - Circular dependency: issues in a cycle always have an open blocker → never ready
 
@@ -975,14 +1009,16 @@ pub struct ReadyResult {
 
 **Flow:**
 1. Check cache: Fresh → use cached ready set; Stale/Empty → fetch + rebuild
-2. Start with ready set from cache/rebuild
+2. Start with ready set from cache/rebuild (guaranteed local-only per §3.3 Filter 3 / §14 Invariant 14 — no defensive owner/repo check required in the tool handler)
 3. Post-filter: exclude `defer_until > today`
 4. If NOT `include_claimed`: exclude `Status::InProgress` (already excluded from ready set, but defensive)
 5. Filter by: `issue_type`, `priority`, `milestone`, `agent`, `label`
 6. Sort: priority ASC → created_at ASC (already sorted from `compute_ready_set`)
 7. Limit to top N
 8. Set `stale = !cache.is_fresh()`
-9. Compute `cross_repo_refs` per §11.4: collect every cross-repo `QualifiedId` that appears as an OPEN blocker of any local issue that was filtered OUT of the ready set by step 6 of `compute_ready_set` (§3.3) due to that blocker being non-closed. These refs are not expressible in `IssueSummary.number: u64` because the local projection cannot represent them. Deduplicate, sort, attach.
+9. Compute `cross_repo_refs` per §11.4: collect every cross-repo `QualifiedId` that appears as an OPEN blocker of any local issue that was filtered OUT of the ready set by step 6 of `compute_ready_set` (§3.3) due to that blocker being non-closed. Filter 3 of §3.3 already removed any cross-repo source issue from the projection, so this step only inspects LOCAL sources and their cross-repo blockers. These refs are not expressible in `IssueSummary.number: u64` because the local projection cannot represent them. Deduplicate, sort, attach.
+
+**Source-scoping guarantee (§14 Invariant 14).** Per §3.3 Filter 3, every `IssueSummary` returned by `ready.issues` has `qualified_id.(owner, repo) == (configured_owner, configured_repo)`. The `ready` handler does NOT re-check — the graph engine is the single chokepoint. `cross_repo_refs` remains the ONLY channel through which cross-repo information surfaces in a `ReadyResult` (always as blockers, never as sources).
 
 **Cross-repo contract (§11.4):** Cross-repo blockers silently influence ready-set filtering — a local issue can be held out of the ready set by a cross-repo dependency the agent cannot see in `issues`. The `cross_repo_refs` field surfaces those nodes. `None` when no cross-repo blocker participated in filtering.
 
@@ -1770,7 +1806,7 @@ The section is omitted entirely when `cross_repo_refs` would be `None` under the
 
 | Tool | Section | Projection that drops cross-repo info |
 |---|---|---|
-| `ready` | §7.1 | Cross-repo blockers silently exclude local issues from the ready set |
+| `ready` | §7.1 | Cross-repo blockers silently exclude local issues from the ready set. Source issues are guaranteed LOCAL-ONLY by §3.3 Filter 3 (unblock-eos.4 scrub); `cross_repo_refs` carries blockers only, never cross-repo sources. |
 | `prime` | §7.3 | Cycle summary lists issue numbers |
 | `dep_cycles` | §7.7 | `cycles: Vec<Vec<u64>>` drops cross-repo cycle members |
 | `close` | §8.2 | `unblocked: Vec<u64>` drops cross-repo dependents |
@@ -1898,7 +1934,8 @@ Graph invariants:
 3. Cycle detection is sound and complete
 4. Ready set is deterministic (same input → same output)
 5. Graph construction is idempotent
-6. Cross-repo response contract is complete (§14 Invariant 14): for every §11.4-affected tool, every cross-repo node that was dropped during bare-`u64` projection appears in `cross_repo_refs.omitted`, sorted.
+6. Cross-repo response contract is complete (§14 Invariant 14(b)): for every §11.4-affected tool, every cross-repo node that was dropped during bare-`u64` projection appears in `cross_repo_refs.omitted`, sorted.
+7. Ready set is configured-repo-source-scoped (§14 Invariant 14(a)): for any input mixing issues from the configured repo with cross-repo source issues, `compute_ready_set(issues, configured_owner, configured_repo)` returns zero elements whose `qualified_id.(owner, repo)` differs from `(configured_owner, configured_repo)`. Drives the unblock-eos.4 graph-engine scrub.
 
 ### 13.4 `test-hooks` feature
 
@@ -1934,7 +1971,9 @@ These invariants MUST hold at all times. Property tests validate where applicabl
 11. **Validation before mutation.** All tools validate input before calling GitHub. No partial mutations from validation failures.
 12. **Token never logged.** Redacted in all debug output. Never in MCP responses.
 13. **Status field values match graph computation.** After every write, `update_status_fields` syncs the Projects V2 Status field with the graph-computed expected status.
-14. **Cross-repo response contract is complete (§11.4).** For every tool listed in the §11.4 affected-tools table, if the computation visited a cross-repo `QualifiedId` that was NOT emitted in the bare-`u64` projection of the response, the response MUST carry that node's `QualifiedId::Display` form in `cross_repo_refs.omitted`. The field is `Some` iff `omitted` is non-empty. `omitted` is sorted lexicographically (preserves Invariant 5).
+14. **Cross-repo response contract is complete (§11.4).** Two clauses, both MUST hold:
+    - **14(a) — Configured-repo source scoping (graph engine).** `compute_ready_set` (§3.3) returns a `Vec<IssueSummary>` in which every element satisfies `qualified_id.(owner, repo) == (configured_owner, configured_repo)`. The ready set contains only configured-repo source issues. This is enforced at the graph engine (§3.3 Filter 3) as the single chokepoint — every downstream consumer (cached `ready_set`, `ready` tool, `prime`, `update_status_fields`) inherits the guarantee. Cross-repo source issues are NEVER members of the local ready-set projection regardless of their blocker state. Property tests MUST cover: mixed-repo input → only configured-repo issues in the output.
+    - **14(b) — Affected-tools response shape.** For every tool listed in the §11.4 affected-tools table, if the computation visited a cross-repo `QualifiedId` that was NOT emitted in the bare-`u64` projection of the response, the response MUST carry that node's `QualifiedId::Display` form in `cross_repo_refs.omitted`. The field is `Some` iff `omitted` is non-empty. `omitted` is sorted lexicographically (preserves Invariant 5). For `ready` specifically, combining 14(a) with 14(b) means `cross_repo_refs` may carry cross-repo BLOCKERS only — cross-repo sources are already excluded by the graph engine.
 
 ---
 
