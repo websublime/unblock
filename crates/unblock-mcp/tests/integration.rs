@@ -923,21 +923,44 @@ async fn ready_cross_repo_open_blocker_populates_cross_repo_refs() {
         .await
         .expect("handle_ready should succeed on cold cache");
 
-    // Load-bearing assertion: local issue #1 was silently held out of the
-    // ready set by its cross-repo blocker (SPEC §7.1 flow step 9 /
-    // §3.3 step 6). This is the condition that triggers the §11.4 refs.
-    let local_numbers: std::collections::HashSet<u64> =
-        result.issues.iter().map(|i| i.number).collect();
-    assert!(
-        !local_numbers.contains(&1),
-        "SPEC §3.3 step 6: #1 MUST be filtered out by its cross-repo OPEN blocker; got: {:?}",
+    // Load-bearing assertion: only #2 survives.
+    //
+    // - #1 is a local source held out of the ready set by its open
+    //   cross-repo blocker other/repo#99 (SPEC §3.3 Filter 4).
+    // - other/repo#99 is a cross-repo source, so it is dropped by
+    //   SPEC §3.3 Filter 3 (§14 Invariant 14(a), unblock-eos.4 / D6.a /
+    //   GAP-14.b) BEFORE the blocker traversal — it can never reach the
+    //   ready set.
+    // - #2 has no blocker and lives in the configured repo, so it is the
+    //   only surviving entry.
+    //
+    // Pre-eos.4 the graph engine admitted other/repo#99 into the ready
+    // set; tool-layer post-filters may have dropped it but that was never
+    // the invariant. Post-eos.4, a strict count check pins the new
+    // invariant at the edge of the tool handler.
+    assert_eq!(
+        result.count, 1,
+        "SPEC §14 Invariant 14(a): only #2 (configured-repo, unblocked) must appear; got: {:?}",
         result.issues,
     );
-    // #2 has no blocker so it IS in the ready set.
-    assert!(
-        local_numbers.contains(&2),
-        "#2 has no blocker and must remain in the ready set; got: {:?}",
+    assert_eq!(
+        result.issues.len(),
+        1,
+        "result.issues must match result.count; got: {:?}",
         result.issues,
+    );
+    assert_eq!(
+        result.issues[0].number, 2,
+        "Ready entry must be local #2 (cross-repo #99 scrubbed by Filter 3, local #1 blocked); got: {:?}",
+        result.issues,
+    );
+    // `ReadyIssueSummary` drops `qualified_id`; check the fixture-derived
+    // url to pin the entry to the configured (acme, widgets) repo.
+    assert!(
+        result.issues[0].url.contains("acme/widgets")
+            || result.issues[0].url.is_empty(),
+        "Ready entry must live in the configured (acme, widgets) repo; got url={}",
+        result.issues[0].url,
     );
     assert!(!result.stale);
 
@@ -974,6 +997,113 @@ async fn ready_cross_repo_open_blocker_populates_cross_repo_refs() {
             .is_some_and(|s| s.contains("cross-repo")),
         "JSON envelope carries the summary: {json}",
     );
+    assert_eq!(mock.calls().fetch_graph_data(), 1);
+}
+
+/// SPEC §14 Invariant 14(a) / Plan Task 04.05 addendum / unblock-eos.5 AC #6:
+/// when `fetch_graph_data` returns a mix of configured-repo and cross-repo
+/// OPEN issues (with NO blocking edges between them), `ReadyResult.issues`
+/// MUST contain ONLY configured-repo source issues. The graph engine's
+/// Filter 3 is the single chokepoint that enforces this — the `ready` tool
+/// handler does NOT re-check.
+///
+/// Fixture:
+/// - Configured repo (acme/widgets): three OPEN unblocked issues (#1, #2, #3).
+/// - Cross-repo (other/repo): three OPEN issues (#50, #51, #52) with no edges.
+///
+/// Expected behaviour:
+/// - `result.count == 3` (only the configured-repo issues survive).
+/// - No entry in `result.issues` has `qualified_id.(owner, repo) != (acme, widgets)`.
+/// - `result.cross_repo_refs` is `None` — no cross-repo BLOCKER participated
+///   in filtering (the cross-repo nodes are sources, scrubbed by Filter 3;
+///   per SPEC §11.4 the `ready` row surfaces cross-repo BLOCKERS only).
+#[tokio::test]
+async fn ready_mixed_repo_sources_excluded_per_invariant_14a() {
+    use unblock_mcp::tools::ready::{ReadyParams, handle_ready};
+
+    let issues = vec![
+        // Configured-repo OPEN issues — all unblocked.
+        ready_fixture_issue(1),
+        ready_fixture_issue(2),
+        ready_fixture_issue(3),
+        // Cross-repo OPEN issues — not blockers of anything local.
+        ready_cross_repo_fixture("other", "repo", 50),
+        ready_cross_repo_fixture("other", "repo", 51),
+        ready_cross_repo_fixture("other", "repo", 52),
+    ];
+    // Intentionally NO edges: no cross-repo blocker participates in
+    // filtering, so `cross_repo_refs` must be None.
+    let edges: Vec<BlockingEdge> = vec![];
+
+    let mock = new_mock();
+    mock.push_fetch_graph_data(Ok((issues, edges)));
+    let state = state_with_mock(Arc::clone(&mock));
+
+    let params = ReadyParams {
+        limit: None,
+        issue_type: None,
+        priority: None,
+        milestone: None,
+        agent: None,
+        label: None,
+        include_claimed: None,
+    };
+    let result = handle_ready(&state, params)
+        .await
+        .expect("handle_ready should succeed on cold cache");
+
+    // AC #6 core: no cross-repo source leaks into `issues`.
+    //
+    // The MCP projection `ReadyIssueSummary` collapses `QualifiedId` into
+    // `number` + `url`; the two fixture families use disjoint number ranges
+    // (configured-repo uses 1–3, cross-repo uses 50–52), so any leak of a
+    // cross-repo source into the envelope is detectable as a forbidden
+    // number OR via the url prefix. We check both.
+    let numbers: std::collections::HashSet<u64> =
+        result.issues.iter().map(|i| i.number).collect();
+    let forbidden: std::collections::HashSet<u64> =
+        std::collections::HashSet::from([50, 51, 52]);
+    assert!(
+        numbers.is_disjoint(&forbidden),
+        "SPEC §14 Invariant 14(a): cross-repo source numbers {:?} leaked \
+         into ReadyResult.issues; got numbers: {:?}",
+        forbidden.intersection(&numbers).collect::<Vec<_>>(),
+        numbers,
+    );
+    for summary in &result.issues {
+        assert!(
+            summary.url.contains("acme/widgets") || summary.url.is_empty(),
+            "SPEC §14 Invariant 14(a): issue url must point at the \
+             configured (acme, widgets) repo; got url={} number={}",
+            summary.url,
+            summary.number,
+        );
+    }
+
+    // `count` must equal the configured-repo subset (three entries), not
+    // the full 6-issue input.
+    assert_eq!(
+        result.count, 3,
+        "Filter 3 must drop every other/repo#N issue; got: {:?}",
+        result.issues,
+    );
+    assert_eq!(result.issues.len(), 3);
+
+    assert_eq!(
+        numbers,
+        std::collections::HashSet::from([1, 2, 3]),
+        "Only configured-repo issues #1, #2, #3 may appear",
+    );
+
+    // No cross-repo blocker participated in filtering, so §11.4 contract
+    // requires `cross_repo_refs` to be `None`.
+    assert!(
+        result.cross_repo_refs.is_none(),
+        "SPEC §11.4: cross_repo_refs must be None when no cross-repo blocker \
+         held a local issue out of the ready set; got: {:?}",
+        result.cross_repo_refs,
+    );
+    assert!(!result.stale);
     assert_eq!(mock.calls().fetch_graph_data(), 1);
 }
 
