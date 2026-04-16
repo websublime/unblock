@@ -325,7 +325,7 @@ Types:
 
 Methods:
 - `build(issues, edges) -> Self`
-- `compute_ready_set(issues) -> Vec<IssueSummary>` — issue is ready if: `IssueState::Open` AND `Status::Ready` (not InProgress/Blocked/Deferred/Closed) AND all blockers have `IssueState::Closed`. Sorted: priority ASC → created_at ASC.
+- `compute_ready_set(issues, configured_owner, configured_repo) -> Vec<IssueSummary>` — issue is ready if: `IssueState::Open` AND `Status::Ready` (not InProgress/Blocked/Deferred/Closed) AND `qualified_id.(owner, repo) == (configured_owner, configured_repo)` (SPEC §3.3 Filter 3 / §14 Invariant 14(a), introduced by unblock-eos.4 / D6.a / GAP-14.b) AND all blockers have `IssueState::Closed`. Sorted: priority ASC → created_at ASC. BREAKING CHANGE on `unblock-core` pub API — see GAP-14.b.
 
 ### Task 02.05 — Graph engine — cascade
 
@@ -460,6 +460,8 @@ Sort: priority ASC → created_at ASC. Default limit: 10.
 Cache-aware: Fresh → serve, Stale/Empty → rebuild.
 
 **Acceptance (additional):** `ReadyResult.cross_repo_refs: Option<CrossRepoRefs>` populated per SPEC §11.4 — surfaces any cross-repo `QualifiedId` that was an open blocker of a local issue kept out of the ready set (the agent otherwise cannot see what silently blocked the local issue). `None` when no cross-repo node influenced filtering. Integration test with `MockGitHubClient` must cover both the `Some` and `None` branches.
+
+**Acceptance (additional, unblock-eos.4 / D6.a / GAP-14.b):** `ReadyResult.issues` MUST contain ONLY source issues whose `qualified_id.(owner, repo) == (configured_owner, configured_repo)` — SPEC §14 Invariant 14(a). This is enforced at the graph engine (`compute_ready_set`, SPEC §3.3 Filter 3), not re-checked at the tool layer. The tool handler MUST NOT add a redundant owner/repo filter on `ready_set`; doing so violates the "one chokepoint" design. Integration test (`crates/unblock-mcp/tests/integration.rs`) MUST add a case where `fetch_graph_data` returns a mix of configured-repo and cross-repo OPEN issues and assert that `ReadyResult.issues` contains no cross-repo source. `cross_repo_refs` remains the ONLY channel for cross-repo information in a `ReadyResult`, and it carries BLOCKERS only (never sources) post-eos.4.
 
 ### Task 04.06 — `claim` tool
 
@@ -791,6 +793,44 @@ SPEC §11.4 (added via unblock-9f7) introduces a uniform `cross_repo_refs: Optio
 
 ---
 
+### GAP-14.b — Ready-set configured-repo source scoping (unblock-eos.4, Direction 1)
+
+SPEC §3.3 Filter 3, §7.1 source-scoping guarantee, §11.4 `ready` row, and §14 Invariant 14(a) formalise a previously-unenforced scoping rule: `compute_ready_set` MUST return only issues whose `qualified_id.(owner, repo)` equals the configured repo. The existing implementation (`graph.rs:144-217`) filters on `IssueState`, `Status`, and blocker closure, but NOT on source repository — so a cross-repo source issue fed to `compute_ready_set` currently appears in `ready_set`. Direction 1 (user-chosen from the four options in the unblock-eos.4 investigation) fixes this at the graph engine itself by taking `(configured_owner, configured_repo)` as new required parameters. See D6 addendum below for the accepted direction.
+
+**Why at the graph engine (Direction 1) and not the tool layer:** The cached `ready_set` in `GraphCache::CacheEntry` is consumed by `ready` (§7.1) AND `prime` (§7.3, code reference: `prime.rs:1496`). A tool-layer scrub would duplicate the filter across consumers and make `update_status_fields` (§10) race-prone on cross-repo sources. One chokepoint, one guarantee — §14 Invariant 14(a).
+
+**Breaking change discipline (CLAUDE.md → Pub API Change Tracking):**
+
+`compute_ready_set` is `pub` on `DependencyGraph` in `unblock-core` (library crate). Signature change is INCOMPATIBLE — callers MUST pass `(configured_owner, configured_repo)`. The implementing commit's message footer MUST include:
+
+```
+BREAKING CHANGE: DependencyGraph::compute_ready_set now requires
+(configured_owner, configured_repo) parameters. Callers must pass the
+configured repository coordinates so the graph engine can enforce
+SPEC §14 Invariant 14(a). Cross-repo source issues are now filtered
+out of the ready set at the engine level (previously: tool-layer
+responsibility that was not honoured). See unblock-eos.4 / SPEC §3.3.
+```
+
+An `API:` body line is INSUFFICIENT for this change — Conventional Commits requires `BREAKING CHANGE:` for incompatible pub changes.
+
+**Migration note (consumers):**
+
+1. `crates/unblock-mcp/src/tools/mod.rs::rebuild_cache` — call site must pass `state.github.owner()` and `state.github.repo()`.
+2. `crates/unblock-mcp/src/tools/prime.rs:1496` — uses cached `ready_set`; no call-site change, but the test fixture at `prime.rs:1488-1490` DOES call `compute_ready_set` directly and must pass `"test"`-like coordinates matching the test issues.
+3. `crates/unblock-core/src/graph.rs` existing tests — `graph.rs:1399-1414` (`cross_repo_ready_set_with_mixed_repos`) and any other call-sites in the test module MUST be updated. The current `cross_repo_ready_set_with_mixed_repos` test explicitly asserts cross-repo sources are admitted (`ready[0].qualified_id == qid_repo("acme", "gadgets", 1)`); the expected behaviour post-eos.4 is to configure the engine with `"acme"/"widgets"` and assert the opposite — the cross-repo source is excluded, and the local source is filtered only by its open blocker (not by repo). This test is the concrete regression target.
+4. `crates/unblock-mcp/tests/integration.rs:896-977` — any integration tests asserting on ready set composition in the presence of cross-repo issues must be updated to the new invariant.
+
+**Retro-fit interaction with other eos siblings:**
+
+- **unblock-eos.1** — touches the same file (`crates/unblock-mcp/src/tools/ready.rs`). Must merge first OR this bead rebases on top. Add a hard `depends` edge from this bead to unblock-eos.1 IF the eos.1 work is not yet landed by the time this bead starts; otherwise document the rebase in the bead description.
+- **unblock-fah** — prime consumes cached `ready_set` (`prime.rs:1496`). After this bead lands, the cached set is guaranteed local-only, so any "cross-repo source leaked into prime categorisation" defensive paths in unblock-fah become unreachable by construction. unblock-fah does NOT need to rerun; its test surface only needs to assert the invariant is now upstream-guaranteed.
+- **unblock-iov** — sibling retro-fit close-out for the same §14 Invariant 14(a) work. Must coordinate closing order: unblock-iov closes AFTER this bead's implementation is merged AND property tests at §13.3 #7 are green.
+
+**Resolution:** Implement via new bead(s) child of `unblock-eos`. Single commit family: (1) graph-engine signature change + Filter 3 + property test, (2) all call-site updates, (3) test fixture updates for `cross_repo_ready_set_with_mixed_repos` and integration tests. Each commit compiles; the BREAKING CHANGE footer rides on the first commit that lands the signature change.
+
+---
+
 ### Summary — Decisions (Resolved)
 
 | # | Decision | Resolution |
@@ -801,6 +841,7 @@ SPEC §11.4 (added via unblock-9f7) introduces a uniform `cross_repo_refs: Optio
 | D4 | Phase 02 early features | **Keep code, exclude from F1 acceptance criteria** |
 | D5 | `FieldValue::Date` | **Keep `NaiveDate`, update SPEC** (improvement, not drift) |
 | D6 | Cross-repo response shape | **Uniform `cross_repo_refs: Option<CrossRepoRefs>` per SPEC §11.4.** Retro-fit `ready`, `prime`, `close` via follow-up beads; `dep_cycles` lands with contract from day one. |
+| D6.a | Ready-set source scoping (unblock-eos.4) | **Direction 1 — enforce `(configured_owner, configured_repo)` filter inside `compute_ready_set` at the graph engine.** `pub fn DependencyGraph::compute_ready_set` gains two new required parameters and the function drops cross-repo source issues BEFORE the blocker filter. Direction chosen over (2) tool-layer scrub, (3) fail-fast panic, and (4) soft-warn log. Single chokepoint → every downstream consumer (cached `ready_set`, `ready`, `prime`, `update_status_fields`) inherits §14 Invariant 14(a) for free. BREAKING CHANGE on `unblock-core` pub API — Conventional Commits footer MANDATORY. See GAP-14.b for full migration. |
 
 ---
 
@@ -818,4 +859,6 @@ Phase 01 is complete when:
 8. **Performance** — `prime` → `ready` → `claim` in under 2 seconds on warm cache
 9. **Zero data loss** — If `unblock-mcp` process dies, all state is in GitHub
 10. **Coverage** — >80% for all 3 crates
-11. **Cross-repo response contract (SPEC §11.4, Invariant 14)** — `ready`, `prime`, `dep_cycles`, `close` honor the `cross_repo_refs` contract. GAP-14 retro-fits landed. Integration tests cover `Some`/`None` branches for each.
+11. **Cross-repo response contract (SPEC §11.4, §14 Invariant 14)** — Both clauses MUST be green:
+    - **11(a) — Invariant 14(a) — ready-set source scoping (unblock-eos.4 / D6.a / GAP-14.b).** `DependencyGraph::compute_ready_set` takes `(configured_owner, configured_repo)` and filters cross-repo source issues at §3.3 Filter 3. A property test (§13.3 #7) asserts mixed-repo input → only configured-repo sources in the output. The BREAKING CHANGE footer per CLAUDE.md Pub API discipline has landed on the commit that changed the signature.
+    - **11(b) — Invariant 14(b) — response-shape contract (GAP-14 / D6).** `ready`, `prime`, `dep_cycles`, `close` honor the `cross_repo_refs` contract. GAP-14 retro-fits landed. Integration tests cover `Some`/`None` branches for each.
