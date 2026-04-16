@@ -13,7 +13,15 @@
       "Bash(cargo test -p unblock-mcp)",
       "Bash(cargo build --workspace)",
       "Bash(cargo build -p unblock-mcp)",
-      "Bash(cargo doc --no-deps --workspace)"
+      "Bash(cargo doc --no-deps --workspace)",
+      "Bash(bd ready:*)",
+      "Bash(bd show:*)",
+      "Bash(bd comments:*)",
+      "Bash(git checkout:*)",
+      "Bash(bd update:*)",
+      "Bash(cargo clippy:*)",
+      "Bash(cargo test:*)",
+      "Bash(git add:*)"
     ]
   },
   "model": "opus",
