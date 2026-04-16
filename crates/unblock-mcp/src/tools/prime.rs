@@ -756,9 +756,15 @@ mod tests {
 
     // ── Test helpers ───────────────────────────────────────────────────
 
+    /// Owner/repo used by prime test fixtures. Must match the values passed
+    /// to `compute_ready_set` so SPEC §3.3 Filter 3 (§14 Invariant 14(a))
+    /// admits the local issues.
+    const TEST_OWNER: &str = "test-owner";
+    const TEST_REPO: &str = "test-repo";
+
     /// Helper to create a `QualifiedId` for tests.
     fn qid(number: u64) -> QualifiedId {
-        QualifiedId::new("test-owner", "test-repo", number)
+        QualifiedId::new(TEST_OWNER, TEST_REPO, number)
     }
 
     /// Build a minimal `Issue` for testing.
@@ -820,7 +826,7 @@ mod tests {
     #[test]
     fn categorise_empty_issues_returns_empty() {
         let graph = DependencyGraph::build(&[], &[]);
-        let ready = graph.compute_ready_set(&[]);
+        let ready = graph.compute_ready_set(&[], TEST_OWNER, TEST_REPO);
         let result = categorise_issues(&[], &graph, &ready, 24, Utc::now());
 
         assert!(result.in_progress.is_empty());
@@ -839,7 +845,7 @@ mod tests {
         let issues = vec![issue];
 
         let graph = DependencyGraph::build(&issues, &[]);
-        let ready = graph.compute_ready_set(&issues);
+        let ready = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
         let result = categorise_issues(&issues, &graph, &ready, 24, Utc::now());
 
         assert_eq!(result.in_progress.len(), 1);
@@ -859,7 +865,7 @@ mod tests {
         let issues = vec![issue];
 
         let graph = DependencyGraph::build(&issues, &[]);
-        let ready = graph.compute_ready_set(&issues);
+        let ready = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
         let result = categorise_issues(&issues, &graph, &ready, 24, Utc::now());
 
         assert_eq!(result.in_progress.len(), 1);
@@ -881,7 +887,7 @@ mod tests {
         }];
 
         let graph = DependencyGraph::build(&issues, &edges);
-        let ready = graph.compute_ready_set(&issues);
+        let ready = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
         let result = categorise_issues(&issues, &graph, &ready, 24, Utc::now());
 
         // Issue #1 is ready (no blockers), issue #2 is blocked.
@@ -910,7 +916,7 @@ mod tests {
         ];
 
         let graph = DependencyGraph::build(&issues, &edges);
-        let ready = graph.compute_ready_set(&issues);
+        let ready = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
         let issue_map: HashMap<&QualifiedId, &Issue> =
             issues.iter().map(|i| (&i.qualified_id, i)).collect();
         let hotspots = compute_hotspots(&graph, &issue_map);
@@ -993,7 +999,7 @@ mod tests {
         let issues = vec![issue];
 
         let graph = DependencyGraph::build(&issues, &[]);
-        let ready = graph.compute_ready_set(&issues);
+        let ready = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
         let result = categorise_issues(&issues, &graph, &ready, 24, Utc::now());
 
         assert!(result.in_progress.is_empty());
@@ -1013,7 +1019,7 @@ mod tests {
         let issues = vec![issue];
 
         let graph = DependencyGraph::build(&issues, &[]);
-        let ready = graph.compute_ready_set(&issues);
+        let ready = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
         let result = categorise_issues(&issues, &graph, &ready, 24, Utc::now());
 
         assert!(
@@ -1032,7 +1038,7 @@ mod tests {
 
         let issues = vec![issue1, issue2];
         let graph = DependencyGraph::build(&issues, &[]);
-        let ready = graph.compute_ready_set(&issues);
+        let ready = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
         let result = categorise_issues(&issues, &graph, &ready, 24, Utc::now());
 
         assert_eq!(result.completed.len(), 2);
@@ -1054,7 +1060,7 @@ mod tests {
         let issues = vec![issue];
 
         let graph = DependencyGraph::build(&issues, &[]);
-        let ready = graph.compute_ready_set(&issues);
+        let ready = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
 
         // With default 24h window: excluded.
         let result_24 = categorise_issues(&issues, &graph, &ready, 24, Utc::now());
@@ -1084,7 +1090,7 @@ mod tests {
         }];
 
         let graph = DependencyGraph::build(&issues, &edges);
-        let ready = graph.compute_ready_set(&issues);
+        let ready = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
         let result = categorise_issues(&issues, &graph, &ready, 24, Utc::now());
 
         assert!(
@@ -1102,7 +1108,7 @@ mod tests {
         let issues = vec![issue];
 
         let graph = DependencyGraph::build(&issues, &[]);
-        let ready = graph.compute_ready_set(&issues);
+        let ready = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
         let result = categorise_issues(&issues, &graph, &ready, 24, Utc::now());
 
         assert_eq!(result.in_progress.len(), 1);
@@ -1129,7 +1135,7 @@ mod tests {
 
         let issues = vec![issue1, issue2];
         let graph = DependencyGraph::build(&issues, &[]);
-        let ready = graph.compute_ready_set(&issues);
+        let ready = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
         let result = categorise_issues(&issues, &graph, &ready, 24, Utc::now());
 
         assert_eq!(result.in_progress.len(), 2);
@@ -1149,7 +1155,7 @@ mod tests {
 
         let issues = vec![issue1, issue2];
         let graph = DependencyGraph::build(&issues, &[]);
-        let ready = graph.compute_ready_set(&issues);
+        let ready = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
         let result = categorise_issues(&issues, &graph, &ready, 24, Utc::now());
 
         assert_eq!(result.stale.len(), 2);
@@ -1447,7 +1453,7 @@ mod tests {
         }];
 
         let graph = DependencyGraph::build(&issues, &edges);
-        let ready = graph.compute_ready_set(&issues);
+        let ready = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
         let result = categorise_issues(&issues, &graph, &ready, 24, Utc::now());
 
         // #1 is ready (#3 is InProgress so excluded from ready list).
@@ -1490,7 +1496,7 @@ mod tests {
             test_issue(2, IssueState::Open, Status::Ready),
         ];
         let graph = DependencyGraph::build(&issues, &[]);
-        let ready_set = graph.compute_ready_set(&issues);
+        let ready_set = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
         state.cache.update(issues, ready_set, graph).await;
 
         assert!(
@@ -1512,7 +1518,7 @@ mod tests {
         }
 
         let graph = DependencyGraph::build(&issues, &[]);
-        let ready = graph.compute_ready_set(&issues);
+        let ready = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
         let result = categorise_issues(&issues, &graph, &ready, 24, Utc::now());
 
         assert_eq!(
@@ -1571,7 +1577,7 @@ mod tests {
         let issues = vec![issue1, issue2];
 
         let graph = DependencyGraph::build(&issues, &[]);
-        let ready = graph.compute_ready_set(&issues);
+        let ready = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
         let result = categorise_issues(&issues, &graph, &ready, 24, Utc::now());
 
         let (ip, _r, _b, _s) = apply_agent_filter(&result, None);
@@ -1589,7 +1595,7 @@ mod tests {
         let issues = vec![issue1, issue2];
 
         let graph = DependencyGraph::build(&issues, &[]);
-        let ready = graph.compute_ready_set(&issues);
+        let ready = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
         let result = categorise_issues(&issues, &graph, &ready, 24, Utc::now());
 
         let (ip, _, _, _) = apply_agent_filter(&result, Some("agent-x"));
@@ -1605,7 +1611,7 @@ mod tests {
         let issues = vec![issue1, issue2];
 
         let graph = DependencyGraph::build(&issues, &[]);
-        let ready = graph.compute_ready_set(&issues);
+        let ready = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
         let result = categorise_issues(&issues, &graph, &ready, 24, Utc::now());
 
         let (_, r, _, _) = apply_agent_filter(&result, Some("agent-x"));
@@ -1635,7 +1641,7 @@ mod tests {
         ];
 
         let graph = DependencyGraph::build(&issues, &edges);
-        let ready = graph.compute_ready_set(&issues);
+        let ready = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
         let result = categorise_issues(&issues, &graph, &ready, 24, Utc::now());
 
         let (_, _, b, _) = apply_agent_filter(&result, Some("agent-x"));
@@ -1653,7 +1659,7 @@ mod tests {
         let issues = vec![issue1, issue2];
 
         let graph = DependencyGraph::build(&issues, &[]);
-        let ready = graph.compute_ready_set(&issues);
+        let ready = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
         let result = categorise_issues(&issues, &graph, &ready, 24, Utc::now());
 
         let (_, _, _, s) = apply_agent_filter(&result, Some("agent-x"));
@@ -1668,7 +1674,7 @@ mod tests {
         let issues = vec![issue];
 
         let graph = DependencyGraph::build(&issues, &[]);
-        let ready = graph.compute_ready_set(&issues);
+        let ready = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
         let result = categorise_issues(&issues, &graph, &ready, 24, Utc::now());
 
         // Completed has no agent field — it should always appear regardless
@@ -1695,7 +1701,7 @@ mod tests {
         }];
 
         let graph = DependencyGraph::build(&issues, &edges);
-        let ready = graph.compute_ready_set(&issues);
+        let ready = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
         let result = categorise_issues(&issues, &graph, &ready, 24, Utc::now());
 
         // Hotspot #1 is agent-x, but even filtering for agent-y should not
@@ -1723,7 +1729,7 @@ mod tests {
         let issues = vec![issue1, issue2, issue3, issue4];
 
         let graph = DependencyGraph::build(&issues, &[]);
-        let ready = graph.compute_ready_set(&issues);
+        let ready = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
         let categories = categorise_issues(&issues, &graph, &ready, 24, Utc::now());
 
         // Simulate the filtering handle_prime does.
@@ -1780,7 +1786,7 @@ mod tests {
         let issues = vec![issue1, issue2];
 
         let graph = DependencyGraph::build(&issues, &[]);
-        let ready = graph.compute_ready_set(&issues);
+        let ready = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
         let result = categorise_issues(&issues, &graph, &ready, 24, Utc::now());
 
         // Simulate what handle_prime does: normalize then filter.

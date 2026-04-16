@@ -461,8 +461,14 @@ mod tests {
 
     // ── Test helpers ────────────────────────────────────────────────────
 
+    /// Owner/repo used by stats test fixtures. Must match the values passed
+    /// to `aggregate_stats` so SPEC §3.3 Filter 3 (§14 Invariant 14(a))
+    /// admits the local issues.
+    const TEST_OWNER: &str = "acme";
+    const TEST_REPO: &str = "widgets";
+
     fn qid(number: u64) -> QualifiedId {
-        QualifiedId::new("acme", "widgets", number)
+        QualifiedId::new(TEST_OWNER, TEST_REPO, number)
     }
 
     /// Minimal open [`Issue`] populated enough for aggregation tests.
@@ -599,7 +605,7 @@ mod tests {
     #[test]
     fn aggregate_stats_empty_input_yields_zeroed_envelope() {
         let g = DependencyGraph::build(&[], &[]);
-        let result = aggregate_stats(&[], &g);
+        let result = aggregate_stats(&[], &g, TEST_OWNER, TEST_REPO);
         assert_eq!(result.total, 0);
         assert_eq!(result.blocked_count, 0);
         assert_eq!(result.ready_count, 0);
@@ -647,7 +653,7 @@ mod tests {
         ];
         let g = DependencyGraph::build(&issues, &[]);
         let refs: Vec<&Issue> = issues.iter().collect();
-        let result = aggregate_stats(&refs, &g);
+        let result = aggregate_stats(&refs, &g, TEST_OWNER, TEST_REPO);
 
         assert_eq!(result.total, 5);
         assert_eq!(result.by_status.get("ready"), Some(&2_usize));
@@ -682,7 +688,7 @@ mod tests {
         }];
         let g = DependencyGraph::build(&issues, &edges);
         let refs: Vec<&Issue> = issues.iter().collect();
-        let result = aggregate_stats(&refs, &g);
+        let result = aggregate_stats(&refs, &g, TEST_OWNER, TEST_REPO);
 
         // Both #1 (Status::Blocked) and #2 (has open blocker) count.
         assert_eq!(result.blocked_count, 2);
@@ -700,7 +706,7 @@ mod tests {
         }];
         let g = DependencyGraph::build(&issues, &edges);
         let refs: Vec<&Issue> = issues.iter().collect();
-        let result = aggregate_stats(&refs, &g);
+        let result = aggregate_stats(&refs, &g, TEST_OWNER, TEST_REPO);
         assert_eq!(result.ready_count, 1);
     }
 
@@ -721,7 +727,7 @@ mod tests {
         ];
         let g = DependencyGraph::build(&issues, &edges);
         let refs: Vec<&Issue> = issues.iter().collect();
-        let result = aggregate_stats(&refs, &g);
+        let result = aggregate_stats(&refs, &g, TEST_OWNER, TEST_REPO);
         assert_eq!(result.cycle_count, 1, "one SCC of size 2 = one cycle");
     }
 
@@ -765,7 +771,7 @@ mod tests {
         ];
         let g = DependencyGraph::build(&issues, &[]);
         let refs: Vec<&Issue> = issues.iter().collect();
-        let result = aggregate_stats(&refs, &g);
+        let result = aggregate_stats(&refs, &g, TEST_OWNER, TEST_REPO);
 
         assert_eq!(result.agents.len(), 2);
         // Sort is by name ascending (alice, bob).
@@ -810,7 +816,7 @@ mod tests {
         ];
         let g = DependencyGraph::build(&issues, &[]);
         let refs: Vec<&Issue> = issues.iter().collect();
-        let result = aggregate_stats(&refs, &g);
+        let result = aggregate_stats(&refs, &g, TEST_OWNER, TEST_REPO);
         let status_sum: usize = result.by_status.values().sum();
         assert_eq!(status_sum, result.total);
     }
@@ -828,7 +834,7 @@ mod tests {
         )];
         let g = DependencyGraph::build(&issues, &[]);
         let refs: Vec<&Issue> = issues.iter().collect();
-        let result = aggregate_stats(&refs, &g);
+        let result = aggregate_stats(&refs, &g, TEST_OWNER, TEST_REPO);
         assert!(result.agents.is_empty());
     }
 

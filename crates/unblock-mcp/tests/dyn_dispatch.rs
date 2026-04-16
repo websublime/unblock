@@ -586,7 +586,7 @@ async fn depends_aliased_configured_repo_source_cycle_detection() {
         target: QualifiedId::new("acme", "widgets", 3),
     }];
     let graph = DependencyGraph::build(&issues, &edges);
-    let ready_set = graph.compute_ready_set(&issues);
+    let ready_set = graph.compute_ready_set(&issues, "acme", "widgets");
 
     let state = state_with_mock(Arc::clone(&mock));
     let cache = Arc::clone(&state.cache);
@@ -704,7 +704,7 @@ async fn depends_aliased_configured_repo_target_cycle_detection() {
         target: QualifiedId::new("acme", "widgets", 3),
     }];
     let graph = DependencyGraph::build(&issues, &edges);
-    let ready_set = graph.compute_ready_set(&issues);
+    let ready_set = graph.compute_ready_set(&issues, "acme", "widgets");
 
     let state = state_with_mock(Arc::clone(&mock));
     let cache = Arc::clone(&state.cache);

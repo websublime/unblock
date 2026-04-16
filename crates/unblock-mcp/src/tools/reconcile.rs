@@ -459,9 +459,15 @@ mod tests {
 
     // ── Test helpers ───────────────────────────────────────────────────
 
+    /// Owner/repo used by reconcile test fixtures. Must match the values
+    /// passed to `compute_ready_set` so SPEC §3.3 Filter 3
+    /// (§14 Invariant 14(a)) admits the local issues.
+    const TEST_OWNER: &str = "test-owner";
+    const TEST_REPO: &str = "test-repo";
+
     /// Helper to create a `QualifiedId` for tests.
     fn qid(number: u64) -> QualifiedId {
-        QualifiedId::new("test-owner", "test-repo", number)
+        QualifiedId::new(TEST_OWNER, TEST_REPO, number)
     }
 
     /// Build a minimal `Issue` for testing.
@@ -607,7 +613,7 @@ mod tests {
             test_issue(2, IssueState::Open, Status::Ready),
         ];
         let graph = DependencyGraph::build(&issues, &[]);
-        let ready_set = graph.compute_ready_set(&issues);
+        let ready_set = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
 
         // Update cache (same call the handler makes).
         state.cache.update(issues, ready_set, graph).await;
@@ -733,7 +739,7 @@ mod tests {
 
         // Build graph and compute ready set (steps 2-3 of handler).
         let graph = DependencyGraph::build(&issues_vec, &edges);
-        let ready_summaries = graph.compute_ready_set(&issues_vec);
+        let ready_summaries = graph.compute_ready_set(&issues_vec, TEST_OWNER, TEST_REPO);
         let computed_ready: HashSet<QualifiedId> = ready_summaries
             .iter()
             .map(|s| s.qualified_id.clone())
@@ -806,7 +812,7 @@ mod tests {
 
         // Build graph with no edges and compute ready set.
         let graph = DependencyGraph::build(&issues_vec, &[]);
-        let ready_summaries = graph.compute_ready_set(&issues_vec);
+        let ready_summaries = graph.compute_ready_set(&issues_vec, TEST_OWNER, TEST_REPO);
         let computed_ready: HashSet<QualifiedId> = ready_summaries
             .iter()
             .map(|s| s.qualified_id.clone())
