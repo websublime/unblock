@@ -13,8 +13,7 @@
 //! set by cross-repo OPEN blockers — the agent cannot see those blockers in
 //! the returned [`IssueSummary`] projection (which is scoped to the configured
 //! repository). Per SPEC §11.4 the handler surfaces those cross-repo
-//! [`QualifiedId`](unblock_core::types::QualifiedId) nodes via
-//! [`ReadyResult::cross_repo_refs`].
+//! [`QualifiedId`] nodes via [`ReadyResult::cross_repo_refs`].
 //!
 //! Population rules (SPEC §11.4 / §7.1 flow step 9, Invariant 14):
 //!
@@ -43,16 +42,17 @@
 //! `issue_type`, `defer_until`). See `compute_cross_repo_refs` (crate-internal)
 //! for the per-issue classification.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use chrono::Utc;
 use petgraph::Direction;
+use petgraph::graph::{DiGraph, NodeIndex};
 use rmcp::model::ErrorData;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracing::{info, instrument};
 use unblock_core::graph::DependencyGraph;
-use unblock_core::types::{CrossRepoRefs, Issue, IssueState, IssueSummary, Status};
+use unblock_core::types::{CrossRepoRefs, Issue, IssueState, IssueSummary, QualifiedId, Status};
 
 use crate::server::ServerState;
 
@@ -218,6 +218,66 @@ pub fn filter_ready_set(
         .collect()
 }
 
+/// Classify the outgoing (blocker) edges of a single node for the §11.4
+/// ready cross-repo computation.
+///
+/// Extracted so the missing-state fallback contract can be unit-tested
+/// directly. [`DependencyGraph::build`] (graph.rs:83-123) currently populates
+/// `issue_state` in lock-step with `node_map` for every issue, which makes
+/// the missing-state branch unreachable via the public API — but aligning
+/// the predicate with the §3.3 canonical impl in
+/// [`DependencyGraph::compute_ready_set`](unblock_core::graph::DependencyGraph::compute_ready_set)
+/// (graph.rs:171-179) pins the contract so future relaxations of that build
+/// invariant do NOT silently flip "missing-state blocker" from non-blocking
+/// (graph engine) to blocking (old ready.rs fallback). See bead
+/// `unblock-eos.1`.
+///
+/// ## Returns
+///
+/// - `any_open_blocker`: `true` iff at least one outgoing neighbour has
+///   `issue_state == Some(IssueState::Open)`. Missing or `Closed` state ⇒
+///   not blocking — mirrors `is_some_and(== Open)` at graph.rs:176-178.
+/// - `cross_repo_blockers`: for every OPEN blocker whose `(owner, repo)`
+///   differs from `(configured_owner, configured_repo)`, its
+///   [`QualifiedId::Display`](unblock_core::types::QualifiedId) rendering.
+///   Order is the petgraph iteration order — [`compute_cross_repo_refs`]
+///   feeds this into a [`BTreeSet`] which provides the §11.4 dedup + lex
+///   sort (Invariant 14).
+///
+/// Caller MUST commit `cross_repo_blockers` to the aggregate accumulator
+/// ONLY when `any_open_blocker` is `true`; a local issue whose blockers are
+/// all closed is not step-6-filtered and its (non-existent) cross-repo
+/// blockers must not pollute the refs. Pre-inserting inside this helper
+/// would regress the
+/// `cross_repo_refs_closed_cross_repo_blocker_returns_none` invariant.
+fn classify_ready_blockers(
+    node_idx: NodeIndex,
+    inner: &DiGraph<QualifiedId, ()>,
+    issue_state_map: &HashMap<QualifiedId, IssueState>,
+    configured_owner: &str,
+    configured_repo: &str,
+) -> (bool, Vec<String>) {
+    let mut any_open_blocker = false;
+    let mut cross_repo_blockers: Vec<String> = Vec::new();
+    for blocker_idx in inner.neighbors_directed(node_idx, Direction::Outgoing) {
+        let blocker_qid = &inner[blocker_idx];
+        // Canonical §3.3 semantic (graph.rs:176-178): missing state is
+        // treated as NOT blocking, same as Closed. Keeps the tool-layer
+        // and graph-engine interpretations of "blocked" in lock-step.
+        let blocker_is_open = issue_state_map
+            .get(blocker_qid)
+            .is_some_and(|state| *state == IssueState::Open);
+        if !blocker_is_open {
+            continue;
+        }
+        any_open_blocker = true;
+        if blocker_qid.owner != configured_owner || blocker_qid.repo != configured_repo {
+            cross_repo_blockers.push(blocker_qid.to_string());
+        }
+    }
+    (any_open_blocker, cross_repo_blockers)
+}
+
 /// Compute [`CrossRepoRefs`] for the `ready` response per SPEC §11.4.
 ///
 /// Walks the full open-issue set and surfaces every cross-repo OPEN
@@ -241,8 +301,15 @@ pub fn filter_ready_set(
 /// 5. Walk outgoing edges (blockers). Partition open blockers into local
 ///    vs cross-repo. If at least one OPEN blocker exists (the issue would
 ///    be dropped by step 6), add every OPEN cross-repo blocker to the
-///    accumulator. Closed blockers do not contribute — they cannot hold the
-///    issue out of the ready set.
+///    accumulator. Closed OR missing-state blockers do not contribute —
+///    mirrors the §3.3 canonical `is_some_and(== Open)` semantic (see
+///    `unblock_core::graph::DependencyGraph::compute_ready_set`,
+///    graph.rs:171-179) so the tool-layer and graph-engine interpretations
+///    of "blocked" stay in lock-step. Under the current
+///    [`DependencyGraph::build`] invariant missing-state is unreachable via
+///    the public API (graph.rs:83-123 populates `issue_state` in lock-step
+///    with `node_map`), but the alignment pins the contract so future
+///    relaxations of that invariant cannot silently flip the classification.
 ///
 /// The accumulator is a [`BTreeSet<String>`] keyed by
 /// [`QualifiedId::Display`](unblock_core::types::QualifiedId). De-duplication
@@ -288,28 +355,19 @@ pub(crate) fn compute_cross_repo_refs(
             continue;
         };
 
-        // Two-pass classification of the outgoing (blocker) edges:
-        //   a) does ANY open blocker exist? (→ issue would be step-6-filtered)
-        //   b) which of those open blockers are cross-repo?
-        // We must collect cross-repo blockers BEFORE confirming (a), so use a
-        // scratch vector and only commit to the accumulator once (a) is true.
-        let mut any_open_blocker = false;
-        let mut cross_repo_blockers_for_issue: Vec<String> = Vec::new();
-        for blocker_idx in inner.neighbors_directed(node_idx, Direction::Outgoing) {
-            let blocker_qid = &inner[blocker_idx];
-            let blocker_state = issue_state_map
-                .get(blocker_qid)
-                .copied()
-                .unwrap_or(IssueState::Open);
-            if blocker_state == IssueState::Closed {
-                // Closed blockers do not hold the issue out of the ready set.
-                continue;
-            }
-            any_open_blocker = true;
-            if blocker_qid.owner != configured_owner || blocker_qid.repo != configured_repo {
-                cross_repo_blockers_for_issue.push(blocker_qid.to_string());
-            }
-        }
+        // Two-pass classification of the outgoing (blocker) edges via the
+        // crate-internal helper: collect cross-repo blockers AND determine
+        // whether any open blocker exists. Commit to the accumulator only
+        // when the "any open blocker" predicate holds (→ the issue would be
+        // step-6-filtered). See [`classify_ready_blockers`] for the
+        // semantic contract.
+        let (any_open_blocker, cross_repo_blockers_for_issue) = classify_ready_blockers(
+            node_idx,
+            inner,
+            issue_state_map,
+            configured_owner,
+            configured_repo,
+        );
         if any_open_blocker {
             for qid_display in cross_repo_blockers_for_issue {
                 accum.insert(qid_display);
@@ -1114,6 +1172,85 @@ mod tests {
         assert!(
             refs.is_none(),
             "cross-repo source issue cannot populate local-ready-set cross-repo refs",
+        );
+    }
+
+    /// Missing-state fallback contract (bead `unblock-eos.1`): when the
+    /// graph holds a blocker edge to a node that is absent from
+    /// `issue_state`, [`classify_ready_blockers`] MUST treat that blocker as
+    /// NOT blocking — mirroring the §3.3 canonical predicate
+    /// `is_some_and(== Open)` at `crates/unblock-core/src/graph.rs:176-178`
+    /// used by [`DependencyGraph::compute_ready_set`]. The old fallback
+    /// (`unwrap_or(IssueState::Open)`) treated missing as blocking and
+    /// would have spuriously surfaced the cross-repo blocker in
+    /// `cross_repo_refs.omitted`.
+    ///
+    /// Under the current [`DependencyGraph::build`] invariant
+    /// (`crates/unblock-core/src/graph.rs:83-123` populates `issue_state`
+    /// and `node_map` in lock-step for every issue, and edges to unknown
+    /// [`QualifiedId`]s are dropped at graph.rs:107-114), this branch is
+    /// unreachable via the public API. The test constructs a divergent
+    /// state map directly to pin the contract: if the build invariant ever
+    /// loosens, this test prevents a silent flip of the classification.
+    #[test]
+    fn classify_ready_blockers_missing_blocker_state_treated_as_not_blocking() {
+        // Build a well-formed graph: issue #1 blocked by cross-repo #99,
+        // both registered as Open. Under DependencyGraph::build the
+        // issue_state map contains BOTH entries in lock-step with node_map.
+        let issues = vec![
+            issue_at("acme", "widgets", 1, IssueState::Open, Status::Ready),
+            issue_at("other", "repo", 99, IssueState::Open, Status::Ready),
+        ];
+        let edges = vec![BlockingEdge {
+            source: QualifiedId::new("acme", "widgets", 1),
+            target: QualifiedId::new("other", "repo", 99),
+        }];
+        let graph = DependencyGraph::build(&issues, &edges);
+
+        // Sanity check: with the full state map, #99 IS classified as an
+        // open cross-repo blocker (baseline behaviour — same as the
+        // `cross_repo_refs_single_cross_repo_open_blocker_returns_some`
+        // test at ready.rs:913).
+        let node_idx_1 = graph
+            .node_map()
+            .get(&QualifiedId::new("acme", "widgets", 1))
+            .copied()
+            .expect("issue #1 must be in node_map");
+        let inner = graph.inner_graph();
+        let full_state = graph.issue_state().clone();
+        let (any_blocker_full, cross_repo_full) =
+            classify_ready_blockers(node_idx_1, inner, &full_state, "acme", "widgets");
+        assert!(
+            any_blocker_full,
+            "baseline: with complete state map, the Open cross-repo blocker holds #1 out of the ready set"
+        );
+        assert_eq!(
+            cross_repo_full,
+            vec!["other/repo#99".to_owned()],
+            "baseline: cross-repo blocker is captured in the per-issue vec"
+        );
+
+        // Now construct a DIVERGENT state map with the blocker key
+        // removed. This simulates a future relaxation of the build
+        // invariant where an edge may target a node whose state has not
+        // been recorded. Per §3.3 canonical semantics, the blocker MUST
+        // NOT count as holding #1 out of the ready set.
+        let mut divergent_state = full_state.clone();
+        let removed = divergent_state.remove(&QualifiedId::new("other", "repo", 99));
+        assert!(
+            removed.is_some(),
+            "pre-condition: full state map must contain the blocker entry before we strip it"
+        );
+
+        let (any_blocker_missing, cross_repo_missing) =
+            classify_ready_blockers(node_idx_1, inner, &divergent_state, "acme", "widgets");
+        assert!(
+            !any_blocker_missing,
+            "§3.3 canonical contract: missing-state blocker is NOT blocking (graph.rs:176-178). Old ready.rs fallback would have flipped this to true and spuriously surfaced #99 in cross_repo_refs.omitted."
+        );
+        assert!(
+            cross_repo_missing.is_empty(),
+            "missing-state blocker MUST NOT be recorded as a cross-repo blocker: found {cross_repo_missing:?}"
         );
     }
 
