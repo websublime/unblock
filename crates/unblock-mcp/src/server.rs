@@ -818,46 +818,14 @@ impl UnblockServer {
         &self,
         Parameters(params): Parameters<ReadyParams>,
     ) -> Result<Json<ReadyResult>, ErrorData> {
+        // Forward to the extracted handler (SPEC §11.4 retro-fit, unblock-cjv).
+        // The #[tool] wrapper does no work beyond routing — all logic, including
+        // cache warm-up and `cross_repo_refs` computation, lives in
+        // `crate::tools::ready::handle_ready` so integration tests can drive it
+        // without booting UnblockServer (dep_cycles house style).
         let state = self.state();
-        let kind = state.agent_kind_str();
-
-        info!(
-            agent.kind = %kind,
-            limit = params.limit,
-            issue_type = params.issue_type.as_deref(),
-            priority = params.priority.as_deref(),
-            milestone = params.milestone.as_deref(),
-            agent = params.agent.as_deref(),
-            label = params.label.as_deref(),
-            include_claimed = params.include_claimed,
-            "Ready tool invoked"
-        );
-
-        // Step 1: Check cache freshness — rebuild lazily if stale.
-        if !state.cache.is_fresh().await {
-            tracing::debug!("Cache is stale — triggering lazy rebuild");
-            crate::tools::rebuild_cache(state).await;
-        }
-
-        // Step 2: Get ready set from cache.
-        let stale;
-        let issues = if let Some(ready_set) = state.cache.get_ready_set().await {
-            stale = false;
-            crate::tools::ready::filter_ready_set(&ready_set, &params)
-        } else {
-            // Cache is still empty after rebuild attempt (e.g., fetch failed).
-            tracing::warn!("Cache still empty after rebuild — returning stale=true");
-            stale = true;
-            Vec::new()
-        };
-
-        let count = issues.len();
-
-        Ok(Json(ReadyResult {
-            issues,
-            count,
-            stale,
-        }))
+        let result = crate::tools::ready::handle_ready(state, params).await?;
+        Ok(Json(result))
     }
 
     /// Claim an issue for an agent — marks it as in-progress.

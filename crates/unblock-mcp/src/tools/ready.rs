@@ -6,11 +6,55 @@
 //!
 //! This is a read tool with cache-aware logic — it checks cache freshness
 //! and triggers a rebuild if stale, but does not mutate GitHub state.
+//!
+//! ## Cross-Repo Response Contract (SPEC §11.4)
+//!
+//! The ready-set computation silently drops local issues held out of the ready
+//! set by cross-repo OPEN blockers — the agent cannot see those blockers in
+//! the returned [`IssueSummary`] projection (which is scoped to the configured
+//! repository). Per SPEC §11.4 the handler surfaces those cross-repo
+//! [`QualifiedId`](unblock_core::types::QualifiedId) nodes via
+//! [`ReadyResult::cross_repo_refs`].
+//!
+//! Population rules (SPEC §11.4 / §7.1 flow step 9, Invariant 14):
+//!
+//! - A local issue `L` (whose `(owner, repo)` matches the configured repo) is
+//!   "filtered out by step 6 of §3.3" iff it has at least one non-closed
+//!   blocker. Only such `L` issues contribute to `cross_repo_refs`.
+//! - Issues dropped by earlier filters (`IssueState::Closed`, `Status::InProgress`,
+//!   `Status::Deferred`, `Status::Closed`) are NOT "step-6-filtered" — they MUST
+//!   NOT contribute cross-repo refs (otherwise a claimed issue whose blocker is
+//!   cross-repo would spuriously populate the ref set).
+//! - Cross-repo issues (source issues themselves whose `(owner, repo)` differs
+//!   from the configured repo) are NOT in the local ready-set projection in
+//!   the first place and thus MUST NOT seed cross-repo refs.
+//! - For each contributing `L`, every OPEN (non-closed) cross-repo blocker of
+//!   `L` is recorded in a [`BTreeSet<String>`](std::collections::BTreeSet)
+//!   keyed by [`QualifiedId::Display`](unblock_core::types::QualifiedId)
+//!   (`"owner/repo#number"`). The `BTreeSet` yields free de-duplication and a
+//!   lexicographically-sorted output — Invariant 14 holds without an explicit
+//!   `sort()` call.
+//! - The field is `Some` iff the accumulator is non-empty; otherwise `None`
+//!   and elided from JSON via `#[serde(skip_serializing_if = "Option::is_none")]`.
+//!
+//! The computation runs BEFORE the tool-layer [`filter_ready_set`] call: SPEC
+//! §7.1 flow step 9 explicitly scopes the refs to the §3.3 step-6 filter, NOT
+//! to the later tool-layer filters (priority, milestone, label, agent,
+//! `issue_type`, `defer_until`). See `compute_cross_repo_refs` (crate-internal)
+//! for the per-issue classification.
+
+use std::collections::BTreeSet;
 
 use chrono::Utc;
+use petgraph::Direction;
+use rmcp::model::ErrorData;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use unblock_core::types::IssueSummary;
+use tracing::{info, instrument};
+use unblock_core::graph::DependencyGraph;
+use unblock_core::types::{CrossRepoRefs, Issue, IssueState, IssueSummary, Status};
+
+use crate::server::ServerState;
 
 /// Default number of issues returned when `limit` is not specified.
 const DEFAULT_LIMIT: usize = 10;
@@ -44,8 +88,10 @@ pub struct ReadyParams {
 
 /// Result returned by the `ready` MCP tool.
 ///
-/// Contains the filtered, sorted list of ready issues, a count, and
-/// a staleness indicator.
+/// Contains the filtered, sorted list of ready issues, a count, a
+/// staleness indicator, and the SPEC §11.4 `cross_repo_refs` envelope
+/// carrying cross-repo blockers that silently excluded local issues from
+/// the ready set.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ReadyResult {
     /// Ready issues matching the filter criteria, sorted by priority ASC
@@ -56,6 +102,16 @@ pub struct ReadyResult {
     /// `true` if the cache was empty or stale even after a rebuild attempt.
     /// Results may be incomplete or empty when stale.
     pub stale: bool,
+    /// Cross-repo `QualifiedId` blockers that held local issues out of the
+    /// ready set (SPEC §11.4, §7.1 flow step 9).
+    ///
+    /// `Some` iff at least one local issue would have entered the ready set
+    /// but was filtered by §3.3 step 6 and at least one of its OPEN blockers
+    /// was cross-repo. Otherwise `None`, in which case the field is elided
+    /// from the JSON envelope via `skip_serializing_if`. Never `Some` with
+    /// an empty `omitted` vector (Invariant 14, SPEC §14).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cross_repo_refs: Option<CrossRepoRefs>,
 }
 
 /// Lightweight issue summary for the ready result.
@@ -160,6 +216,225 @@ pub fn filter_ready_set(
         .take(limit)
         .map(ReadyIssueSummary::from_core)
         .collect()
+}
+
+/// Compute [`CrossRepoRefs`] for the `ready` response per SPEC §11.4.
+///
+/// Walks the full open-issue set and surfaces every cross-repo OPEN
+/// [`QualifiedId`](unblock_core::types::QualifiedId) that held a LOCAL issue
+/// out of the ready set at §3.3 step 6. See the module docs for the full
+/// contract; summary below.
+///
+/// ## Algorithm
+///
+/// For each `issue` in `issues`:
+///
+/// 1. Skip if `issue.state == IssueState::Closed` (filter 1 of §3.3).
+/// 2. Skip if `issue.status` is `InProgress | Deferred | Closed` (filter 2
+///    of §3.3). These issues are NOT "step-6-filtered" — they are filtered
+///    by steps 4–5 — so their blockers do not contribute to the refs.
+/// 3. Skip if `issue.qualified_id` is cross-repo (i.e. `(owner, repo)` differs
+///    from the configured repo). Cross-repo issues cannot appear in the
+///    bare-`u64` local ready-set projection regardless of their blockers.
+/// 4. Look up the node in the graph. If absent, the issue has zero blockers
+///    and is ready — skip.
+/// 5. Walk outgoing edges (blockers). Partition open blockers into local
+///    vs cross-repo. If at least one OPEN blocker exists (the issue would
+///    be dropped by step 6), add every OPEN cross-repo blocker to the
+///    accumulator. Closed blockers do not contribute — they cannot hold the
+///    issue out of the ready set.
+///
+/// The accumulator is a [`BTreeSet<String>`] keyed by
+/// [`QualifiedId::Display`](unblock_core::types::QualifiedId). De-duplication
+/// and lex ordering are free (Invariant 14, SPEC §14).
+///
+/// Returns `Some(CrossRepoRefs { omitted, summary })` iff the accumulator is
+/// non-empty; otherwise `None` — which makes the field elide from the JSON
+/// envelope via `#[serde(skip_serializing_if = "Option::is_none")]` on
+/// [`ReadyResult::cross_repo_refs`].
+#[must_use]
+pub(crate) fn compute_cross_repo_refs(
+    issues: &[Issue],
+    graph: &DependencyGraph,
+    configured_owner: &str,
+    configured_repo: &str,
+) -> Option<CrossRepoRefs> {
+    let mut accum: BTreeSet<String> = BTreeSet::new();
+    let node_map = graph.node_map();
+    let issue_state_map = graph.issue_state();
+    let inner = graph.inner_graph();
+
+    for issue in issues {
+        // Filter 1: must be open in GitHub (§3.3).
+        if issue.state == IssueState::Closed {
+            continue;
+        }
+        // Filter 2: skip preserved states (§3.3) — these are NOT step-6-filtered.
+        match issue.status {
+            Status::InProgress | Status::Deferred | Status::Closed => continue,
+            Status::Ready | Status::Blocked => {}
+        }
+        // Only LOCAL source issues can be held out of the LOCAL ready set in a
+        // meaningful cross-repo sense. Skip cross-repo sources.
+        if issue.qualified_id.owner != configured_owner
+            || issue.qualified_id.repo != configured_repo
+        {
+            continue;
+        }
+
+        let Some(node_idx) = node_map.get(&issue.qualified_id).copied() else {
+            // Issue not in the graph: zero blockers → would be ready → not
+            // filtered by step 6, contributes nothing.
+            continue;
+        };
+
+        // Two-pass classification of the outgoing (blocker) edges:
+        //   a) does ANY open blocker exist? (→ issue would be step-6-filtered)
+        //   b) which of those open blockers are cross-repo?
+        // We must collect cross-repo blockers BEFORE confirming (a), so use a
+        // scratch vector and only commit to the accumulator once (a) is true.
+        let mut any_open_blocker = false;
+        let mut cross_repo_blockers_for_issue: Vec<String> = Vec::new();
+        for blocker_idx in inner.neighbors_directed(node_idx, Direction::Outgoing) {
+            let blocker_qid = &inner[blocker_idx];
+            let blocker_state = issue_state_map
+                .get(blocker_qid)
+                .copied()
+                .unwrap_or(IssueState::Open);
+            if blocker_state == IssueState::Closed {
+                // Closed blockers do not hold the issue out of the ready set.
+                continue;
+            }
+            any_open_blocker = true;
+            if blocker_qid.owner != configured_owner || blocker_qid.repo != configured_repo {
+                cross_repo_blockers_for_issue.push(blocker_qid.to_string());
+            }
+        }
+        if any_open_blocker {
+            for qid_display in cross_repo_blockers_for_issue {
+                accum.insert(qid_display);
+            }
+        }
+    }
+
+    if accum.is_empty() {
+        return None;
+    }
+    let omitted: Vec<String> = accum.into_iter().collect();
+    // Singular/plural phrasing mirrors dep_cycles::build_cross_repo_refs.
+    let summary = Some(format!(
+        "{n} cross-repo {noun} excluded local issue(s) from ready set",
+        n = omitted.len(),
+        noun = if omitted.len() == 1 {
+            "blocker"
+        } else {
+            "blockers"
+        },
+    ));
+    Some(CrossRepoRefs { omitted, summary })
+}
+
+/// Execute the `ready` tool handler.
+///
+/// See the module-level docs for the full contract. Flow (mirrors SPEC §7.1):
+///
+/// 1. Check cache freshness — lazy rebuild via [`crate::tools::rebuild_cache`]
+///    when stale.
+/// 2. Pull the cached ready set, full issue slice, and dependency graph.
+/// 3. Compute [`CrossRepoRefs`] via the crate-internal
+///    `compute_cross_repo_refs` helper using the full issue slice and the
+///    graph — this captures only the §3.3 step-6 filter, NOT the tool-layer
+///    filters that run next.
+/// 4. Apply the tool-layer filters via [`filter_ready_set`].
+/// 5. Return [`ReadyResult`] with `count = issues.len()`, `stale` set per
+///    post-rebuild cache state, and the computed `cross_repo_refs`.
+///
+/// Extraction rationale: the tool's integration tests cannot drive the
+/// `#[tool]`-wrapped entry point directly without booting
+/// [`UnblockServer`](crate::server::UnblockServer); the extracted helper
+/// mirrors the [`handle_dep_cycles`](crate::tools::dep_cycles::handle_dep_cycles)
+/// house style adopted by sibling tools (unblock-29p.11).
+///
+/// # Errors
+///
+/// Returns [`ErrorData`] only for surfaced upstream failures. The current
+/// implementation never returns an error — cache-rebuild failures degrade to
+/// `stale = true` per SPEC §7.1 rather than surfacing an error. The return
+/// type is kept as `Result` so future spec revisions can surface errors
+/// without a breaking signature change.
+#[instrument(
+    skip(state, params),
+    name = "handle_ready",
+    fields(
+        agent.kind = state.agent_kind_str(),
+        limit = params.limit,
+        issue_type = params.issue_type.as_deref(),
+        priority = params.priority.as_deref(),
+        milestone = params.milestone.as_deref(),
+        agent = params.agent.as_deref(),
+        label = params.label.as_deref(),
+        include_claimed = params.include_claimed,
+    ),
+)]
+pub async fn handle_ready(
+    state: &ServerState,
+    params: ReadyParams,
+) -> Result<ReadyResult, ErrorData> {
+    info!("Ready tool invoked");
+
+    // Step 1: warm the cache lazily if stale. On rebuild failure the cache
+    // stays invalidated — the read-side logic below will observe `stale=true`
+    // and return an empty ready set (SPEC §7.1 cache-failure posture).
+    if !state.cache.is_fresh().await {
+        tracing::debug!("Cache is stale — triggering lazy rebuild");
+        crate::tools::rebuild_cache(state).await;
+    }
+
+    // Step 2: pull ready_set, issues, and graph from the cache. All three
+    // are written atomically by `GraphCache::update`, so observing `ready_set
+    // = Some(_)` but `issues = None` (or vice versa) would indicate a
+    // cache-layer bug — defensively treat it as stale.
+    let configured_owner = state.github.owner().to_owned();
+    let configured_repo = state.github.repo().to_owned();
+
+    let ready_set_opt = state.cache.get_ready_set().await;
+    let issues_opt = state.cache.get_issues().await;
+    let graph_opt = state.cache.get_graph().await;
+
+    let (is_stale, filtered_issues, cross_repo_refs) = match (ready_set_opt, issues_opt, graph_opt)
+    {
+        (Some(ready_set), Some(issues), Some(graph)) => {
+            // Step 3: compute cross-repo refs against the FULL issue slice
+            // and graph — scoped to §3.3 step 6 only.
+            let refs =
+                compute_cross_repo_refs(&issues, &graph, &configured_owner, &configured_repo);
+            // Step 4: tool-layer filters over the already-filtered ready set.
+            let filtered = filter_ready_set(&ready_set, &params);
+            (false, filtered, refs)
+        }
+        (Some(ready_set), _, _) => {
+            // Partial cache — should not happen in practice (see cache.rs
+            // atomicity guarantees). Surface filtered issues without refs.
+            tracing::warn!(
+                "Cache returned ready_set but not issues/graph — omitting cross_repo_refs"
+            );
+            let filtered = filter_ready_set(&ready_set, &params);
+            (false, filtered, None)
+        }
+        _ => {
+            // Cache still empty after rebuild attempt (e.g. fetch failed).
+            tracing::warn!("Cache still empty after rebuild — returning stale=true");
+            (true, Vec::new(), None)
+        }
+    };
+
+    let count = filtered_issues.len();
+    Ok(ReadyResult {
+        issues: filtered_issues,
+        count,
+        stale: is_stale,
+        cross_repo_refs,
+    })
 }
 
 #[cfg(test)]
@@ -566,5 +841,309 @@ mod tests {
         let result = filter_ready_set(&set, &default_params());
         assert_eq!(result[0].number, 1); // earlier
         assert_eq!(result[1].number, 2); // later
+    }
+
+    // ── compute_cross_repo_refs — hermetic unit tests (SPEC §11.4) ─────
+
+    use unblock_core::graph::DependencyGraph;
+    use unblock_core::types::{BlockingEdge, Issue, IssueState};
+
+    /// Build a full [`Issue`] for graph construction. `owner`/`repo` are
+    /// configurable so tests can mix local and cross-repo issues.
+    fn issue_at(owner: &str, repo: &str, number: u64, state: IssueState, status: Status) -> Issue {
+        Issue {
+            qualified_id: QualifiedId::new(owner, repo, number),
+            number,
+            node_id: format!("I_{owner}_{repo}_{number}"),
+            title: format!("{owner}/{repo}#{number}"),
+            issue_type: Some(IssueType::Task),
+            status,
+            priority: Priority::P2,
+            agent: None,
+            claimed_at: None,
+            pipeline_stage: None,
+            story_points: None,
+            defer_until: None,
+            labels: vec![],
+            milestone: None,
+            assignees: vec![],
+            state,
+            body: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            url: format!("https://github.com/{owner}/{repo}/issues/{number}"),
+            comments: vec![],
+            blocked_by: vec![],
+            blocking: vec![],
+            parent: None,
+            sub_issues: vec![],
+        }
+    }
+
+    /// Case (i): empty issue slice → `None`, never `Some` with empty omitted.
+    #[test]
+    fn cross_repo_refs_empty_issues_returns_none() {
+        let issues: Vec<Issue> = vec![];
+        let graph = DependencyGraph::build(&issues, &[]);
+        let refs = compute_cross_repo_refs(&issues, &graph, "acme", "widgets");
+        assert!(refs.is_none(), "empty issue slice → None");
+    }
+
+    /// Case (ii): local issue blocked by local open blocker → no cross-repo
+    /// member → `None`. The step-6 filter fires but contributes nothing.
+    #[test]
+    fn cross_repo_refs_all_local_blockers_returns_none() {
+        let issues = vec![
+            // Local issue #1 is open and ready but blocked by local #2 (open).
+            issue_at("acme", "widgets", 1, IssueState::Open, Status::Ready),
+            issue_at("acme", "widgets", 2, IssueState::Open, Status::Ready),
+        ];
+        let edges = vec![BlockingEdge {
+            source: QualifiedId::new("acme", "widgets", 1),
+            target: QualifiedId::new("acme", "widgets", 2),
+        }];
+        let graph = DependencyGraph::build(&issues, &edges);
+        let refs = compute_cross_repo_refs(&issues, &graph, "acme", "widgets");
+        assert!(refs.is_none(), "all-local blockers → None");
+    }
+
+    /// Case (iii): local issue blocked by cross-repo OPEN blocker → `Some`,
+    /// with `"other/repo#99"` in `omitted` and a populated summary.
+    #[test]
+    fn cross_repo_refs_single_cross_repo_open_blocker_returns_some() {
+        let issues = vec![
+            issue_at("acme", "widgets", 1, IssueState::Open, Status::Ready),
+            // Cross-repo OPEN blocker.
+            issue_at("other", "repo", 99, IssueState::Open, Status::Ready),
+        ];
+        let edges = vec![BlockingEdge {
+            source: QualifiedId::new("acme", "widgets", 1),
+            target: QualifiedId::new("other", "repo", 99),
+        }];
+        let graph = DependencyGraph::build(&issues, &edges);
+        let refs = compute_cross_repo_refs(&issues, &graph, "acme", "widgets")
+            .expect("SPEC §11.4: cross-repo OPEN blocker → Some");
+        assert_eq!(refs.omitted, vec!["other/repo#99".to_owned()]);
+        let summary = refs
+            .summary
+            .as_deref()
+            .expect("summary populated when omitted non-empty");
+        assert!(
+            summary.contains("cross-repo"),
+            "summary must describe cross-repo: {summary}"
+        );
+        assert!(
+            summary.contains("ready set"),
+            "summary must reference `ready set`: {summary}"
+        );
+    }
+
+    /// Case (iv): the cross-repo blocker is already CLOSED → does not hold
+    /// the issue out of the ready set → refs empty → `None`.
+    #[test]
+    fn cross_repo_refs_closed_cross_repo_blocker_returns_none() {
+        let issues = vec![
+            issue_at("acme", "widgets", 1, IssueState::Open, Status::Ready),
+            // Cross-repo CLOSED blocker — does not filter out #1.
+            issue_at("other", "repo", 99, IssueState::Closed, Status::Closed),
+        ];
+        let edges = vec![BlockingEdge {
+            source: QualifiedId::new("acme", "widgets", 1),
+            target: QualifiedId::new("other", "repo", 99),
+        }];
+        let graph = DependencyGraph::build(&issues, &edges);
+        let refs = compute_cross_repo_refs(&issues, &graph, "acme", "widgets");
+        assert!(
+            refs.is_none(),
+            "closed cross-repo blocker cannot hold issue out of ready set → None",
+        );
+    }
+
+    /// Case (v): the SAME cross-repo blocker participates in filtering two
+    /// distinct local issues → `BTreeSet` de-dupes → single entry in `omitted`.
+    #[test]
+    fn cross_repo_refs_duplicate_blocker_across_issues_dedupes() {
+        let issues = vec![
+            issue_at("acme", "widgets", 1, IssueState::Open, Status::Ready),
+            issue_at("acme", "widgets", 2, IssueState::Open, Status::Ready),
+            issue_at("other", "repo", 42, IssueState::Open, Status::Ready),
+        ];
+        let edges = vec![
+            BlockingEdge {
+                source: QualifiedId::new("acme", "widgets", 1),
+                target: QualifiedId::new("other", "repo", 42),
+            },
+            BlockingEdge {
+                source: QualifiedId::new("acme", "widgets", 2),
+                target: QualifiedId::new("other", "repo", 42),
+            },
+        ];
+        let graph = DependencyGraph::build(&issues, &edges);
+        let refs = compute_cross_repo_refs(&issues, &graph, "acme", "widgets")
+            .expect("two local filter-outs → Some");
+        assert_eq!(
+            refs.omitted,
+            vec!["other/repo#42".to_owned()],
+            "same cross-repo blocker must dedupe to a single omitted entry",
+        );
+        let summary = refs.summary.as_deref().expect("summary populated");
+        assert!(
+            summary.starts_with("1 "),
+            "singular-noun summary for single omitted entry: {summary}"
+        );
+        assert!(
+            summary.contains("blocker") && !summary.contains("blockers"),
+            "singular noun only: {summary}"
+        );
+    }
+
+    /// Case (vi): multiple distinct cross-repo blockers → `omitted` emerges
+    /// lex-sorted from the `BTreeSet` (Invariant 14, no explicit `sort()`).
+    #[test]
+    fn cross_repo_refs_multiple_blockers_sorted_lexicographically() {
+        let issues = vec![
+            issue_at("acme", "widgets", 1, IssueState::Open, Status::Ready),
+            issue_at("zeta", "repo", 3, IssueState::Open, Status::Ready),
+            issue_at("alpha", "repo", 1, IssueState::Open, Status::Ready),
+            issue_at("mid", "repo", 2, IssueState::Open, Status::Ready),
+        ];
+        let edges = vec![
+            BlockingEdge {
+                source: QualifiedId::new("acme", "widgets", 1),
+                target: QualifiedId::new("zeta", "repo", 3),
+            },
+            BlockingEdge {
+                source: QualifiedId::new("acme", "widgets", 1),
+                target: QualifiedId::new("alpha", "repo", 1),
+            },
+            BlockingEdge {
+                source: QualifiedId::new("acme", "widgets", 1),
+                target: QualifiedId::new("mid", "repo", 2),
+            },
+        ];
+        let graph = DependencyGraph::build(&issues, &edges);
+        let refs = compute_cross_repo_refs(&issues, &graph, "acme", "widgets")
+            .expect("three cross-repo blockers → Some");
+        assert_eq!(
+            refs.omitted,
+            vec![
+                "alpha/repo#1".to_owned(),
+                "mid/repo#2".to_owned(),
+                "zeta/repo#3".to_owned(),
+            ],
+            "Invariant 14: omitted MUST emerge lexicographically sorted from BTreeSet",
+        );
+        let summary = refs.summary.as_deref().expect("summary populated");
+        assert!(summary.contains("3 "));
+        assert!(
+            summary.contains("blockers"),
+            "plural-noun summary for multiple omitted: {summary}"
+        );
+    }
+
+    /// Risk: `InProgress` local issue MUST NOT contribute to refs even when
+    /// it has a cross-repo open blocker — such issues are filtered by step 5
+    /// (claimed), NOT step 6 (blocked). This guards against a regression
+    /// that spuriously reports blockers of claimed work.
+    #[test]
+    fn cross_repo_refs_in_progress_local_issue_does_not_contribute() {
+        let issues = vec![
+            // InProgress local issue — filtered by §3.3 step 5 (claimed),
+            // not step 6 (blocked). Its cross-repo blocker must NOT surface.
+            issue_at("acme", "widgets", 1, IssueState::Open, Status::InProgress),
+            issue_at("other", "repo", 99, IssueState::Open, Status::Ready),
+        ];
+        let edges = vec![BlockingEdge {
+            source: QualifiedId::new("acme", "widgets", 1),
+            target: QualifiedId::new("other", "repo", 99),
+        }];
+        let graph = DependencyGraph::build(&issues, &edges);
+        let refs = compute_cross_repo_refs(&issues, &graph, "acme", "widgets");
+        assert!(
+            refs.is_none(),
+            "InProgress local issue is filtered by step 5, not step 6 → no cross-repo refs",
+        );
+    }
+
+    /// Risk: `Deferred` and `Closed` local statuses follow the same rule as
+    /// `InProgress` — filtered by §3.3 step 2, NOT step 6. Their cross-repo
+    /// blockers must not appear.
+    #[test]
+    fn cross_repo_refs_deferred_and_closed_status_do_not_contribute() {
+        let issues = vec![
+            issue_at("acme", "widgets", 1, IssueState::Open, Status::Deferred),
+            issue_at("acme", "widgets", 2, IssueState::Open, Status::Closed),
+            issue_at("other", "repo", 50, IssueState::Open, Status::Ready),
+            issue_at("other", "repo", 51, IssueState::Open, Status::Ready),
+        ];
+        let edges = vec![
+            BlockingEdge {
+                source: QualifiedId::new("acme", "widgets", 1),
+                target: QualifiedId::new("other", "repo", 50),
+            },
+            BlockingEdge {
+                source: QualifiedId::new("acme", "widgets", 2),
+                target: QualifiedId::new("other", "repo", 51),
+            },
+        ];
+        let graph = DependencyGraph::build(&issues, &edges);
+        let refs = compute_cross_repo_refs(&issues, &graph, "acme", "widgets");
+        assert!(
+            refs.is_none(),
+            "Deferred/Closed-status issues are step-2-filtered, not step-6 → no refs",
+        );
+    }
+
+    /// Risk: a cross-repo SOURCE issue with a cross-repo blocker MUST NOT
+    /// contribute — it is not a member of the local ready-set projection.
+    /// Without this guard, cross-repo chains would pollute the refs.
+    #[test]
+    fn cross_repo_refs_cross_repo_source_issue_does_not_contribute() {
+        let issues = vec![
+            // Source issue lives in other/repo — not part of acme/widgets ready set.
+            issue_at("other", "repo", 10, IssueState::Open, Status::Ready),
+            // Its blocker is also cross-repo.
+            issue_at("third", "party", 20, IssueState::Open, Status::Ready),
+        ];
+        let edges = vec![BlockingEdge {
+            source: QualifiedId::new("other", "repo", 10),
+            target: QualifiedId::new("third", "party", 20),
+        }];
+        let graph = DependencyGraph::build(&issues, &edges);
+        let refs = compute_cross_repo_refs(&issues, &graph, "acme", "widgets");
+        assert!(
+            refs.is_none(),
+            "cross-repo source issue cannot populate local-ready-set cross-repo refs",
+        );
+    }
+
+    /// Determinism: re-running `compute_cross_repo_refs` on the same inputs
+    /// produces byte-identical output. `BTreeSet` iteration is stable; this
+    /// is the property-test goal (SPEC §13.3) reduced to an example-based
+    /// smoke check.
+    #[test]
+    fn cross_repo_refs_output_is_deterministic_across_runs() {
+        let issues = vec![
+            issue_at("acme", "widgets", 1, IssueState::Open, Status::Ready),
+            issue_at("z", "r", 3, IssueState::Open, Status::Ready),
+            issue_at("a", "r", 1, IssueState::Open, Status::Ready),
+        ];
+        let edges = vec![
+            BlockingEdge {
+                source: QualifiedId::new("acme", "widgets", 1),
+                target: QualifiedId::new("z", "r", 3),
+            },
+            BlockingEdge {
+                source: QualifiedId::new("acme", "widgets", 1),
+                target: QualifiedId::new("a", "r", 1),
+            },
+        ];
+        let graph = DependencyGraph::build(&issues, &edges);
+        let first = compute_cross_repo_refs(&issues, &graph, "acme", "widgets");
+        let second = compute_cross_repo_refs(&issues, &graph, "acme", "widgets");
+        assert_eq!(
+            first, second,
+            "compute_cross_repo_refs must be deterministic (Invariant 14)"
+        );
     }
 }
