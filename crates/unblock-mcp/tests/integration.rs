@@ -754,6 +754,229 @@ fn ready_tool_registered_in_server() {
     );
 }
 
+// ── Ready tool: cross-repo refs integration tests (SPEC §11.4) ─────────
+
+/// Build a fixture issue under the `MockGitHubClient` coordinates
+/// (`acme/widgets`) for ready cross-repo tests. Mirrors
+/// `dep_cycles_fixture_issue` — `ready` only consumes topology and
+/// per-issue filter fields, which stay at minimal defaults.
+fn ready_fixture_issue(number: u64) -> unblock_core::types::Issue {
+    unblock_core::types::Issue {
+        qualified_id: QualifiedId::new("acme", "widgets", number),
+        number,
+        node_id: format!("I_{number}"),
+        title: format!("Ready fixture #{number}"),
+        issue_type: Some(IssueType::Task),
+        status: Status::Ready,
+        priority: Priority::P2,
+        agent: None,
+        claimed_at: None,
+        pipeline_stage: None,
+        story_points: None,
+        defer_until: None,
+        labels: vec![],
+        milestone: None,
+        assignees: vec![],
+        state: IssueState::Open,
+        body: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        url: format!("https://github.com/acme/widgets/issues/{number}"),
+        comments: vec![],
+        blocked_by: vec![],
+        blocking: vec![],
+        parent: None,
+        sub_issues: vec![],
+    }
+}
+
+/// Build a cross-repo fixture issue whose `QualifiedId` lives OUTSIDE the
+/// configured `acme/widgets` repo, so the cross-repo projection can pick
+/// it up as an omitted blocker.
+fn ready_cross_repo_fixture(owner: &str, repo: &str, number: u64) -> unblock_core::types::Issue {
+    unblock_core::types::Issue {
+        qualified_id: QualifiedId::new(owner, repo, number),
+        number,
+        node_id: format!("I_{owner}_{repo}_{number}"),
+        title: format!("Ready cross-repo fixture {owner}/{repo}#{number}"),
+        issue_type: Some(IssueType::Task),
+        status: Status::Ready,
+        priority: Priority::P2,
+        agent: None,
+        claimed_at: None,
+        pipeline_stage: None,
+        story_points: None,
+        defer_until: None,
+        labels: vec![],
+        milestone: None,
+        assignees: vec![],
+        state: IssueState::Open,
+        body: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        url: format!("https://github.com/{owner}/{repo}/issues/{number}"),
+        comments: vec![],
+        blocked_by: vec![],
+        blocking: vec![],
+        parent: None,
+        sub_issues: vec![],
+    }
+}
+
+/// Acceptance (a): local-only graph — `cross_repo_refs == None` and
+/// `skip_serializing_if` elides the key from the JSON envelope.
+///
+/// Fixture: three local issues. Issue #1 blocks #2, so #2 is held out of
+/// the ready set by a LOCAL blocker. Issue #3 is independent. Per SPEC
+/// §11.4 this MUST yield `cross_repo_refs == None` because no cross-repo
+/// node participated in filtering.
+#[tokio::test]
+async fn ready_no_cross_repo_blockers_cross_repo_refs_is_none() {
+    use unblock_mcp::tools::ready::{ReadyParams, handle_ready};
+
+    let issues = vec![
+        ready_fixture_issue(1),
+        ready_fixture_issue(2),
+        ready_fixture_issue(3),
+    ];
+    // Local-only blocking edge: #2 is blocked by #1. Ready set = {#1, #3}.
+    let edges = vec![BlockingEdge {
+        source: QualifiedId::new("acme", "widgets", 2),
+        target: QualifiedId::new("acme", "widgets", 1),
+    }];
+
+    let mock = new_mock();
+    mock.push_fetch_graph_data(Ok((issues, edges)));
+    let state = state_with_mock(Arc::clone(&mock));
+
+    let params = ReadyParams {
+        limit: None,
+        issue_type: None,
+        priority: None,
+        milestone: None,
+        agent: None,
+        label: None,
+        include_claimed: None,
+    };
+    let result = handle_ready(&state, params)
+        .await
+        .expect("handle_ready should succeed on cold cache");
+
+    // Ready set contains only issues with no open blockers: {#1, #3}.
+    assert_eq!(result.count, 2, "local-only: ready set = {{#1, #3}}");
+    assert!(!result.stale, "stale=false on successful rebuild");
+    // Acceptance (a): local-only graph → cross_repo_refs None.
+    assert!(
+        result.cross_repo_refs.is_none(),
+        "SPEC §11.4: local-only graph → cross_repo_refs None; got: {:?}",
+        result.cross_repo_refs,
+    );
+    // skip_serializing_if MUST elide the key entirely (JSON-layer guard).
+    let json = serde_json::to_value(&result).expect("serialize");
+    assert!(
+        json.get("cross_repo_refs").is_none(),
+        "None cross_repo_refs MUST be elided from JSON: {json}",
+    );
+    assert_eq!(
+        mock.calls().fetch_graph_data(),
+        1,
+        "cold ready call rebuilds the cache once",
+    );
+}
+
+/// Acceptance (b): cross-repo OPEN blocker silently excludes a local
+/// issue from the ready set → `cross_repo_refs` populated with the
+/// omitted qualified ref and a summary containing "cross-repo" and
+/// "ready".
+///
+/// Fixture: local issue #1, local issue #2, and cross-repo blocker
+/// `other/repo#99`. Edge: #1 → other/repo#99. Ready set therefore drops
+/// #1 (open cross-repo blocker) but keeps #2.
+#[tokio::test]
+async fn ready_cross_repo_open_blocker_populates_cross_repo_refs() {
+    use unblock_mcp::tools::ready::{ReadyParams, handle_ready};
+
+    let issues = vec![
+        ready_fixture_issue(1),
+        ready_fixture_issue(2),
+        ready_cross_repo_fixture("other", "repo", 99),
+    ];
+    let edges = vec![BlockingEdge {
+        source: QualifiedId::new("acme", "widgets", 1),
+        target: QualifiedId::new("other", "repo", 99),
+    }];
+
+    let mock = new_mock();
+    mock.push_fetch_graph_data(Ok((issues, edges)));
+    let state = state_with_mock(Arc::clone(&mock));
+
+    let params = ReadyParams {
+        limit: None,
+        issue_type: None,
+        priority: None,
+        milestone: None,
+        agent: None,
+        label: None,
+        include_claimed: None,
+    };
+    let result = handle_ready(&state, params)
+        .await
+        .expect("handle_ready should succeed on cold cache");
+
+    // Load-bearing assertion: local issue #1 was silently held out of the
+    // ready set by its cross-repo blocker (SPEC §7.1 flow step 9 /
+    // §3.3 step 6). This is the condition that triggers the §11.4 refs.
+    let local_numbers: std::collections::HashSet<u64> =
+        result.issues.iter().map(|i| i.number).collect();
+    assert!(
+        !local_numbers.contains(&1),
+        "SPEC §3.3 step 6: #1 MUST be filtered out by its cross-repo OPEN blocker; got: {:?}",
+        result.issues,
+    );
+    // #2 has no blocker so it IS in the ready set.
+    assert!(
+        local_numbers.contains(&2),
+        "#2 has no blocker and must remain in the ready set; got: {:?}",
+        result.issues,
+    );
+    assert!(!result.stale);
+
+    // Acceptance (b): cross_repo_refs is Some with "other/repo#99" in
+    // omitted and a populated summary referencing "cross-repo" + "ready".
+    let refs = result
+        .cross_repo_refs
+        .as_ref()
+        .expect("SPEC §11.4: cross-repo OPEN blocker → cross_repo_refs Some");
+    assert_eq!(
+        refs.omitted,
+        vec!["other/repo#99".to_owned()],
+        "omitted carries the cross-repo blocker display form",
+    );
+    let summary = refs
+        .summary
+        .as_deref()
+        .expect("SPEC §11.4: summary populated for non-empty omitted");
+    assert!(
+        summary.contains("cross-repo"),
+        "summary must describe cross-repo omission: {summary}",
+    );
+    assert!(
+        summary.contains("ready"),
+        "summary must reference the `ready` projection: {summary}",
+    );
+
+    // JSON envelope surfaces the cross_repo_refs field (not elided).
+    let json = serde_json::to_value(&result).expect("serialize");
+    assert_eq!(json["cross_repo_refs"]["omitted"][0], "other/repo#99");
+    assert!(
+        json["cross_repo_refs"]["summary"]
+            .as_str()
+            .is_some_and(|s| s.contains("cross-repo")),
+        "JSON envelope carries the summary: {json}",
+    );
+    assert_eq!(mock.calls().fetch_graph_data(), 1);
+}
+
 // ── List tool: integration tests ──────────────────────────────────
 
 /// `handle_list` drives the full list pipeline against a `MockGitHubClient`
