@@ -234,7 +234,7 @@ async fn show_include_deps_false_skips_graph_traversal() {
         target: QualifiedId::new("acme", "widgets", 1),
     }];
     let graph = DependencyGraph::build(&issues, &edges);
-    let ready_set = graph.compute_ready_set(&issues);
+    let ready_set = graph.compute_ready_set(&issues, "acme", "widgets");
     state.cache.update(issues, ready_set, graph).await;
     assert!(
         state.cache.get_graph().await.is_some(),
@@ -376,7 +376,7 @@ async fn show_dependency_tree_for_blocking_relationships() {
         },
     ];
     let graph = DependencyGraph::build(&issues, &edges);
-    let ready_set = graph.compute_ready_set(&issues);
+    let ready_set = graph.compute_ready_set(&issues, "test", "repo");
     cache.update(issues, ready_set, graph).await;
 
     // With include_deps=true and a populated cache, the DependencyTree should have data.
@@ -476,7 +476,7 @@ async fn ready_returns_only_open_unblocked_non_deferred_issues() {
         target: qid(1),
     }];
     let graph = DependencyGraph::build(&issues, &edges);
-    let ready_set = graph.compute_ready_set(&issues);
+    let ready_set = graph.compute_ready_set(&issues, "test", "repo");
     cache.update(issues, ready_set.clone(), graph).await;
 
     // Filter using ready tool logic.
@@ -508,7 +508,7 @@ async fn ready_second_call_returns_from_cache() {
     ];
     let edges = vec![];
     let graph = DependencyGraph::build(&issues, &edges);
-    let ready_set = graph.compute_ready_set(&issues);
+    let ready_set = graph.compute_ready_set(&issues, "test", "repo");
     cache.update(issues, ready_set, graph).await;
 
     // First call.
@@ -543,7 +543,7 @@ async fn ready_filter_by_priority() {
 
     let issues = vec![issue_1, issue_2, issue_3];
     let graph = DependencyGraph::build(&issues, &[]);
-    let ready_set = graph.compute_ready_set(&issues);
+    let ready_set = graph.compute_ready_set(&issues, "test", "repo");
     cache.update(issues, ready_set.clone(), graph).await;
 
     let params = unblock_mcp::tools::ready::ReadyParams {
@@ -577,7 +577,7 @@ async fn ready_filter_by_label() {
 
     let issues = vec![issue_1, issue_2, issue_3];
     let graph = DependencyGraph::build(&issues, &[]);
-    let ready_set = graph.compute_ready_set(&issues);
+    let ready_set = graph.compute_ready_set(&issues, "test", "repo");
     cache.update(issues, ready_set.clone(), graph).await;
 
     let params = unblock_mcp::tools::ready::ReadyParams {
@@ -603,7 +603,7 @@ async fn ready_deferred_excluded() {
 
     let issues = vec![issue_1];
     let graph = DependencyGraph::build(&issues, &[]);
-    let ready_set = graph.compute_ready_set(&issues);
+    let ready_set = graph.compute_ready_set(&issues, "test", "repo");
 
     let params = unblock_mcp::tools::ready::ReadyParams {
         limit: None,
@@ -630,7 +630,7 @@ async fn ready_include_claimed_includes_in_progress() {
 
     let issues = vec![issue_1, issue_2];
     let graph = DependencyGraph::build(&issues, &[]);
-    let ready_set = graph.compute_ready_set(&issues);
+    let ready_set = graph.compute_ready_set(&issues, "test", "repo");
 
     // compute_ready_set now excludes InProgress per spec §3.3.
     assert_eq!(
@@ -694,7 +694,7 @@ async fn ready_sort_order() {
 
     let issues = vec![issue_a, issue_b, issue_c];
     let graph = DependencyGraph::build(&issues, &[]);
-    let ready_set = graph.compute_ready_set(&issues);
+    let ready_set = graph.compute_ready_set(&issues, "test", "repo");
 
     let params = unblock_mcp::tools::ready::ReadyParams {
         limit: None,
@@ -720,7 +720,7 @@ async fn ready_sort_order() {
 async fn ready_limit_respected() {
     let issues: Vec<_> = (1..=20).map(|n| test_issue(n, IssueState::Open)).collect();
     let graph = DependencyGraph::build(&issues, &[]);
-    let ready_set = graph.compute_ready_set(&issues);
+    let ready_set = graph.compute_ready_set(&issues, "test", "repo");
 
     let params = unblock_mcp::tools::ready::ReadyParams {
         limit: Some(3),
@@ -1365,7 +1365,7 @@ async fn search_hits_github_and_maps_to_summary_without_touching_cache() {
     // any stray read/write by the search handler.
     let cache_issues = vec![test_issue(999, IssueState::Open)];
     let graph = DependencyGraph::build(&cache_issues, &[]);
-    let ready_set = graph.compute_ready_set(&cache_issues);
+    let ready_set = graph.compute_ready_set(&cache_issues, "test", "repo");
     state
         .cache
         .update(cache_issues, ready_set.clone(), graph)
@@ -2269,7 +2269,7 @@ async fn dep_remove_local_edge_transitions_source_to_ready() {
     }];
     let pre_issues = vec![pre_source, pre_target];
     let pre_graph = DependencyGraph::build(&pre_issues, &pre_edges);
-    let pre_ready_set = pre_graph.compute_ready_set(&pre_issues);
+    let pre_ready_set = pre_graph.compute_ready_set(&pre_issues, "acme", "widgets");
     state
         .cache
         .update(pre_issues, pre_ready_set, pre_graph)
@@ -2401,7 +2401,7 @@ async fn dep_remove_warm_cache_missing_edge_rejects_without_mutation() {
     // Warm cache with #42 and #99 but NO edge between them.
     let issues = vec![dep_remove_fixture_issue(42), dep_remove_fixture_issue(99)];
     let graph = DependencyGraph::build(&issues, &[]);
-    let ready_set = graph.compute_ready_set(&issues);
+    let ready_set = graph.compute_ready_set(&issues, "acme", "widgets");
     state.cache.update(issues, ready_set, graph).await;
 
     let err = handle_dep_remove(
@@ -2457,7 +2457,7 @@ async fn dep_remove_surfaces_error_when_post_mutation_rebuild_fails() {
         target: QualifiedId::new("acme", "widgets", 99),
     }];
     let graph = DependencyGraph::build(&issues, &edges);
-    let ready_set = graph.compute_ready_set(&issues);
+    let ready_set = graph.compute_ready_set(&issues, "acme", "widgets");
     state.cache.update(issues, ready_set, graph).await;
 
     let err = handle_dep_remove(
@@ -3456,7 +3456,7 @@ async fn reconcile_with_injected_drift_and_fix() {
     }];
     let graph = DependencyGraph::build(&issues_vec, &edges);
     let computed_ready: HashSet<QualifiedId> = graph
-        .compute_ready_set(&issues_vec)
+        .compute_ready_set(&issues_vec, "acme", "test")
         .into_iter()
         .map(|s| s.qualified_id)
         .collect();
@@ -3484,7 +3484,7 @@ async fn reconcile_with_injected_drift_and_fix() {
     };
     let repaired_graph = DependencyGraph::build(&corrected_issues, &edges);
     let repaired_ready: HashSet<QualifiedId> = repaired_graph
-        .compute_ready_set(&corrected_issues)
+        .compute_ready_set(&corrected_issues, "acme", "test")
         .into_iter()
         .map(|s| s.qualified_id)
         .collect();
