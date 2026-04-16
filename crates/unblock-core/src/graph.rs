@@ -1820,6 +1820,102 @@ mod tests {
                     );
                 }
             }
+
+            /// SPEC §13.3 #7 / §14 Invariant 14(a) (unblock-eos.4 / D6.a /
+            /// GAP-14.b): for any input mixing configured-repo and
+            /// cross-repo source issues, `compute_ready_set` returns zero
+            /// elements whose `qualified_id.(owner, repo)` differs from
+            /// the configured `(owner, repo)`. Drives the unblock-eos.4
+            /// graph-engine scrub.
+            ///
+            /// Strategy: generate N issues with random states, priorities,
+            /// and a parallel `is_cross_repo` vector. Issues flagged
+            /// cross-repo live in `("owner-b", "repo-b")`; the rest live
+            /// in `("owner-a", "repo-a")`. Call
+            /// `compute_ready_set(&issues, "owner-a", "repo-a")` and
+            /// assert every returned summary has `owner == "owner-a"` and
+            /// `repo == "repo-a"`.
+            #[test]
+            fn ready_set_source_scoped_to_configured_repo(
+                num_issues in 1_u64..40,
+                issue_states in proptest::collection::vec(arb_issue_state(), 1..40),
+                issue_priorities in proptest::collection::vec(arb_priority(), 1..40),
+                issue_statuses in proptest::collection::vec(arb_status(), 1..40),
+                is_cross_repo in proptest::collection::vec(any::<bool>(), 1..40),
+                edges in proptest::collection::vec((1_u64..40, 1_u64..40, any::<bool>(), any::<bool>()), 0..80),
+            ) {
+                let owner_a = "owner-a";
+                let repo_a = "repo-a";
+                let owner_b = "owner-b";
+                let repo_b = "repo-b";
+
+                // Generate issues with random state/priority/status and
+                // random repo membership.
+                let issues: Vec<Issue> = (1..=num_issues)
+                    .map(|n| {
+                        let idx = usize::try_from(n - 1).expect("issue number fits in usize");
+                        let state = issue_states.get(idx).copied().unwrap_or(IssueState::Open);
+                        let priority = issue_priorities.get(idx).copied().unwrap_or(Priority::P2);
+                        let status = issue_statuses.get(idx).copied().unwrap_or(Status::Ready);
+                        let cross = is_cross_repo.get(idx).copied().unwrap_or(false);
+                        let (owner, repo) = if cross {
+                            (owner_b, repo_b)
+                        } else {
+                            (owner_a, repo_a)
+                        };
+                        let mut issue = make_issue_repo(owner, repo, n, state, priority);
+                        issue.status = status;
+                        issue
+                    })
+                    .collect();
+
+                // Build blocking edges that may point within or across
+                // repos — Filter 3 runs BEFORE Filter 4, so cross-repo
+                // source issues are dropped regardless of blocker state.
+                let blocking_edges: Vec<BlockingEdge> = edges
+                    .into_iter()
+                    .filter(|(s, t, _, _)| *s != *t && *s <= num_issues && *t <= num_issues)
+                    .map(|(s, t, src_cross, tgt_cross)| {
+                        let (src_owner, src_repo) = if src_cross { (owner_b, repo_b) } else { (owner_a, repo_a) };
+                        let (tgt_owner, tgt_repo) = if tgt_cross { (owner_b, repo_b) } else { (owner_a, repo_a) };
+                        BlockingEdge {
+                            source: qid_repo(src_owner, src_repo, s),
+                            target: qid_repo(tgt_owner, tgt_repo, t),
+                        }
+                    })
+                    .collect();
+
+                let graph = DependencyGraph::build(&issues, &blocking_edges);
+                let ready = graph.compute_ready_set(&issues, owner_a, repo_a);
+
+                // Invariant 14(a): every ready entry lives in the
+                // configured (owner_a, repo_a).
+                for summary in &ready {
+                    prop_assert_eq!(
+                        summary.qualified_id.owner.as_str(),
+                        owner_a,
+                        "Ready summary {} has non-configured owner (expected {})",
+                        summary.qualified_id,
+                        owner_a
+                    );
+                    prop_assert_eq!(
+                        summary.qualified_id.repo.as_str(),
+                        repo_a,
+                        "Ready summary {} has non-configured repo (expected {})",
+                        summary.qualified_id,
+                        repo_a
+                    );
+                    prop_assert!(
+                        summary.qualified_id.owner != owner_b
+                            || summary.qualified_id.repo != repo_b,
+                        "Cross-repo source {} leaked into ready set \
+                         configured to {}/{}",
+                        summary.qualified_id,
+                        owner_a,
+                        repo_a
+                    );
+                }
+            }
         }
     }
 
