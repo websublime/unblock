@@ -2,7 +2,8 @@
 //!
 //! Provides `DependencyGraph` with operations:
 //! - `build()` — construct graph from issues and blocking edges
-//! - `compute_ready_set()` — find issues with no active blockers
+//! - `compute_ready_set()` — find issues with no active blockers that live in
+//!   the configured `(owner, repo)` (SPEC §3.3 Filter 3 / §14 Invariant 14(a))
 //! - `compute_unblock_cascade()` — determine what unblocks when an issue closes
 //! - `would_create_cycle()` — check before adding a dependency
 //! - `detect_all_cycles()` — find all circular dependencies via Tarjan's SCC
@@ -122,36 +123,59 @@ impl DependencyGraph {
         }
     }
 
-    /// Compute the set of issues that are ready to work on.
+    /// Compute the set of issues that are ready to work on for the configured
+    /// `(owner, repo)`.
     ///
-    /// An issue is considered ready if:
-    /// 1. Its GitHub state is [`IssueState::Open`]
-    /// 2. It has no outgoing edges to issues that are still [`IssueState::Open`]
-    ///    (i.e., all of its blockers are closed)
+    /// An issue is considered ready iff all of the following hold:
+    /// 1. Its GitHub state is [`IssueState::Open`] (Filter 1).
+    /// 2. Its [`Status`] is not one of the preserved states
+    ///    [`Status::InProgress`], [`Status::Deferred`], or [`Status::Closed`]
+    ///    (Filter 2).
+    /// 3. Its `qualified_id.(owner, repo)` equals `(configured_owner, configured_repo)`
+    ///    (Filter 3 — source scoping, SPEC §3.3 / §14 Invariant 14(a)).
+    /// 4. It has no outgoing edges to issues that are still [`IssueState::Open`]
+    ///    (i.e. all of its blockers are closed — Filter 4).
+    ///
+    /// **Source scoping (Filter 3, unblock-eos.4 / D6.a / GAP-14.b).**
+    /// `compute_ready_set` is the single chokepoint that enforces
+    /// `ready_set ⊆ { i | i.qualified_id.(owner, repo) == (configured_owner, configured_repo) }`.
+    /// Every downstream consumer of the ready set (cached `ready_set` in
+    /// `GraphCache`, the `ready` tool in §7.1, `prime` categorisation in §7.3,
+    /// `update_status_fields` in §10) inherits this guarantee without
+    /// re-checking. Cross-repo source issues are dropped by Filter 3
+    /// regardless of blocker state — they are NEVER members of the local
+    /// ready-set projection. Filter 3 is applied BEFORE Filter 4 so the
+    /// cross-repo blocker traversal is never performed for a cross-repo
+    /// source.
     ///
     /// **Note:** `defer_until` filtering is intentionally not applied here.
-    /// Per ARCH section 6.2, defer-until is a post-filter at the MCP tool layer, not
-    /// in the graph engine. The graph engine remains date-free.
+    /// Per ARCH section 6.2, defer-until is a post-filter at the MCP tool
+    /// layer, not in the graph engine. The graph engine remains date-free.
     ///
-    /// **Contract:** The `issues` slice should match the issues used to build the
-    /// graph. The blocker evaluation uses the graph's internal state snapshot (built
-    /// at construction time), while open-issue filtering uses the passed-in slice.
-    /// Passing a different set of issues than what was used in `build()` may produce
-    /// inconsistent results.
+    /// **Contract:** The `issues` slice should match the issues used to build
+    /// the graph. The blocker evaluation uses the graph's internal state
+    /// snapshot (built at construction time), while open-issue filtering uses
+    /// the passed-in slice. Passing a different set of issues than what was
+    /// used in `build()` may produce inconsistent results.
     ///
-    /// Results are sorted by priority ascending (P0 first), then by `created_at`
-    /// ascending (oldest first) as a tiebreaker.
+    /// Results are sorted by priority ascending (P0 first), then by
+    /// `created_at` ascending (oldest first) as a tiebreaker.
     #[must_use]
-    pub fn compute_ready_set(&self, issues: &[Issue]) -> Vec<IssueSummary> {
+    pub fn compute_ready_set(
+        &self,
+        issues: &[Issue],
+        configured_owner: &str,
+        configured_repo: &str,
+    ) -> Vec<IssueSummary> {
         let mut ready: Vec<IssueSummary> = Vec::new();
 
         for issue in issues {
-            // Only consider open issues.
+            // Filter 1: must be open in GitHub.
             if issue.state != IssueState::Open {
                 continue;
             }
 
-            // Skip preserved states per spec §3.3.
+            // Filter 2: skip preserved states per spec §3.3.
             // InProgress, Deferred, and Closed are set by agent/human and must
             // not be overwritten by the graph engine.
             //
@@ -166,7 +190,22 @@ impl DependencyGraph {
                 continue;
             }
 
-            // Check if this issue has any open blockers.
+            // Filter 3: source issue MUST live in the configured (owner, repo).
+            // Cross-repo source issues are never members of the local
+            // ready-set projection (§11.4, §14 Invariant 14(a)). Applied
+            // BEFORE Filter 4 so the cross-repo blocker traversal is never
+            // performed for a cross-repo source. Introduced by
+            // unblock-eos.4 (Direction 1).
+            if issue.qualified_id.owner != configured_owner
+                || issue.qualified_id.repo != configured_repo
+            {
+                continue;
+            }
+
+            // Filter 4: check all blockers via graph. Cross-repo blockers
+            // ARE honoured here — an open cross-repo blocker keeps the local
+            // source out of the ready set, and the tool layer surfaces the
+            // dropped blocker via §11.4 `cross_repo_refs`.
             // Outgoing edges point to blockers.
             let is_blocked = if let Some(&node_idx) = self.node_map.get(&issue.qualified_id) {
                 self.graph
@@ -662,7 +701,7 @@ mod tests {
             make_issue(2, IssueState::Open, Priority::P1),
         ];
         let graph = DependencyGraph::build(&issues, &[]);
-        let ready = graph.compute_ready_set(&issues);
+        let ready = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
         assert_eq!(ready.len(), 2);
         // P1 (issue 2) should come first due to priority sorting.
         assert_eq!(ready[0].number, 2);
@@ -676,7 +715,7 @@ mod tests {
             make_issue(2, IssueState::Closed, Priority::P1),
         ];
         let graph = DependencyGraph::build(&issues, &[]);
-        let ready = graph.compute_ready_set(&issues);
+        let ready = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].number, 1);
     }
@@ -691,7 +730,7 @@ mod tests {
         ];
         let edges = vec![edge(1, 2)];
         let graph = DependencyGraph::build(&issues, &edges);
-        let ready = graph.compute_ready_set(&issues);
+        let ready = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
 
         let ready_numbers: Vec<u64> = ready.iter().map(|s| s.number).collect();
         assert!(
@@ -714,7 +753,7 @@ mod tests {
         ];
         let edges = vec![edge(1, 2)];
         let graph = DependencyGraph::build(&issues, &edges);
-        let ready = graph.compute_ready_set(&issues);
+        let ready = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
 
         let ready_numbers: Vec<u64> = ready.iter().map(|s| s.number).collect();
         assert!(
@@ -735,7 +774,7 @@ mod tests {
         ];
         let edges = vec![edge(1, 2), edge(1, 3)];
         let graph = DependencyGraph::build(&issues, &edges);
-        let ready = graph.compute_ready_set(&issues);
+        let ready = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
 
         let ready_numbers: Vec<u64> = ready.iter().map(|s| s.number).collect();
         assert!(
@@ -751,7 +790,7 @@ mod tests {
     #[test]
     fn ready_set_empty_inputs() {
         let graph = DependencyGraph::build(&[], &[]);
-        let ready = graph.compute_ready_set(&[]);
+        let ready = graph.compute_ready_set(&[], TEST_OWNER, TEST_REPO);
         assert!(ready.is_empty());
     }
 
@@ -765,7 +804,7 @@ mod tests {
             make_issue_at(3, IssueState::Open, Priority::P0, now),
         ];
         let graph = DependencyGraph::build(&issues, &[]);
-        let ready = graph.compute_ready_set(&issues);
+        let ready = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
 
         assert_eq!(ready.len(), 3);
         // P0 first.
@@ -781,7 +820,7 @@ mod tests {
         let issue1 = make_issue(1, IssueState::Open, Priority::P2);
         let issue2 = make_issue(2, IssueState::Open, Priority::P1);
         let graph = DependencyGraph::build(std::slice::from_ref(&issue1), &[]);
-        let ready = graph.compute_ready_set(&[issue1, issue2]);
+        let ready = graph.compute_ready_set(&[issue1, issue2], TEST_OWNER, TEST_REPO);
 
         let ready_numbers: Vec<u64> = ready.iter().map(|s| s.number).collect();
         assert!(
@@ -801,7 +840,7 @@ mod tests {
         ];
         let edges = vec![edge(1, 2), edge(2, 3)];
         let graph = DependencyGraph::build(&issues, &edges);
-        let ready = graph.compute_ready_set(&issues);
+        let ready = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
 
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].number, 3);
@@ -815,7 +854,7 @@ mod tests {
         let open_ready = make_issue(2, IssueState::Open, Priority::P2);
         let issues = vec![in_progress, open_ready];
         let graph = DependencyGraph::build(&issues, &[]);
-        let ready = graph.compute_ready_set(&issues);
+        let ready = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
 
         let ready_numbers: Vec<u64> = ready.iter().map(|s| s.number).collect();
         assert!(
@@ -836,7 +875,7 @@ mod tests {
         let open_ready = make_issue(2, IssueState::Open, Priority::P2);
         let issues = vec![deferred, open_ready];
         let graph = DependencyGraph::build(&issues, &[]);
-        let ready = graph.compute_ready_set(&issues);
+        let ready = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
 
         let ready_numbers: Vec<u64> = ready.iter().map(|s| s.number).collect();
         assert!(
@@ -858,7 +897,7 @@ mod tests {
         let open_ready = make_issue(2, IssueState::Open, Priority::P2);
         let issues = vec![stale_closed, open_ready];
         let graph = DependencyGraph::build(&issues, &[]);
-        let ready = graph.compute_ready_set(&issues);
+        let ready = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
 
         let ready_numbers: Vec<u64> = ready.iter().map(|s| s.number).collect();
         assert!(
@@ -878,7 +917,7 @@ mod tests {
         // Issue 1 is blocked by issue 2, but issue 2 is closed.
         let edges = vec![edge(1, 2)];
         let graph = DependencyGraph::build(&issues, &edges);
-        let ready = graph.compute_ready_set(&issues);
+        let ready = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
 
         let ready_numbers: Vec<u64> = ready.iter().map(|s| s.number).collect();
         assert!(
@@ -892,7 +931,7 @@ mod tests {
         // Status::Ready issues that are open and unblocked should be included.
         let issues = vec![make_issue(1, IssueState::Open, Priority::P1)];
         let graph = DependencyGraph::build(&issues, &[]);
-        let ready = graph.compute_ready_set(&issues);
+        let ready = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
 
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].number, 1);
@@ -1398,8 +1437,27 @@ mod tests {
 
     #[test]
     fn cross_repo_ready_set_with_mixed_repos() {
-        // Issue acme/widgets#1 is blocked by acme/gadgets#1.
-        // acme/gadgets#1 is open, so acme/widgets#1 should NOT be ready.
+        // Regression target for unblock-eos.4 / D6.a / GAP-14.b (SPEC §14
+        // Invariant 14(a)): the ready set MUST be scoped to the configured
+        // `(owner, repo)` at the graph engine via §3.3 Filter 3.
+        //
+        // Fixture:
+        // - Local source `acme/widgets#1` (configured repo) is blocked by the
+        //   cross-repo node `acme/gadgets#1` (same owner, different repo).
+        // - `acme/gadgets#1` is itself an OPEN issue in the input slice.
+        //
+        // Expected behaviour after eos.4:
+        // - Filter 3 drops `acme/gadgets#1` regardless of its (unblocked)
+        //   blocker state — cross-repo sources are never members of the
+        //   ready-set projection.
+        // - `acme/widgets#1` survives Filter 3 but is excluded by Filter 4
+        //   because its blocker `acme/gadgets#1` is still open.
+        // - Net ready set: empty.
+        //
+        // Pre-eos.4 behaviour admitted `acme/gadgets#1` into the ready set
+        // because the engine did not apply source-scoping. This test pins
+        // the post-eos.4 invariant and is preserved (not deleted) per bead
+        // AC #4 / plan GAP-14.b migration note #3.
         let issue_a = make_issue_repo("acme", "widgets", 1, IssueState::Open, Priority::P1);
         let issue_b = make_issue_repo("acme", "gadgets", 1, IssueState::Open, Priority::P2);
         let issues = vec![issue_a, issue_b];
@@ -1408,9 +1466,20 @@ mod tests {
             target: qid_repo("acme", "gadgets", 1),
         }];
         let graph = DependencyGraph::build(&issues, &edges);
-        let ready = graph.compute_ready_set(&issues);
-        assert_eq!(ready.len(), 1);
-        assert_eq!(ready[0].qualified_id, qid_repo("acme", "gadgets", 1));
+        let ready = graph.compute_ready_set(&issues, "acme", "widgets");
+        assert!(
+            ready.is_empty(),
+            "Ready set must be empty: acme/gadgets#1 is dropped by Filter 3 \
+             (cross-repo source) and acme/widgets#1 is dropped by Filter 4 \
+             (still blocked by open acme/gadgets#1). Got: {ready:?}"
+        );
+        assert!(
+            !ready
+                .iter()
+                .any(|s| s.qualified_id.owner == "acme" && s.qualified_id.repo == "gadgets"),
+            "Cross-repo source acme/gadgets#1 must never reach the ready set \
+             under SPEC §14 Invariant 14(a)"
+        );
     }
 
     // ── Proptest ──────────────────────────────────────────────────────────
@@ -1476,7 +1545,7 @@ mod tests {
                     .collect();
 
                 let graph = DependencyGraph::build(&issues, &blocking_edges);
-                let ready = graph.compute_ready_set(&issues);
+                let ready = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
 
                 // Invariant 1: no issue in the ready set has an open blocker.
                 for summary in &ready {
@@ -1710,8 +1779,10 @@ mod tests {
                     graph.graph.node_count()
                 );
 
-                // Invariant: ready set issues are all Open.
-                let ready = graph.compute_ready_set(&all_issues);
+                // Invariant: ready set issues are all Open AND scoped to the
+                // configured repo (repo_a). This is unblock-eos.4 / §14
+                // Invariant 14(a) — cross-repo sources must never leak.
+                let ready = graph.compute_ready_set(&all_issues, repo_a_owner, repo_a_name);
                 for summary in &ready {
                     let original = all_issues.iter().find(|i| i.qualified_id == summary.qualified_id);
                     if let Some(issue) = original {
@@ -1722,6 +1793,31 @@ mod tests {
                             summary.qualified_id
                         );
                     }
+                    // §14 Invariant 14(a): no cross-repo (org-b/repo-b) issue
+                    // can appear in the ready set configured to repo_a.
+                    prop_assert!(
+                        summary.qualified_id.owner != repo_b_owner
+                            || summary.qualified_id.repo != repo_b_name,
+                        "Cross-repo source {} leaked into ready set \
+                         configured to {}/{}",
+                        summary.qualified_id,
+                        repo_a_owner,
+                        repo_a_name
+                    );
+                    prop_assert_eq!(
+                        summary.qualified_id.owner.as_str(),
+                        repo_a_owner,
+                        "Ready issue {} has non-configured owner, expected {}",
+                        summary.qualified_id,
+                        repo_a_owner
+                    );
+                    prop_assert_eq!(
+                        summary.qualified_id.repo.as_str(),
+                        repo_a_name,
+                        "Ready issue {} has non-configured repo, expected {}",
+                        summary.qualified_id,
+                        repo_a_name
+                    );
                 }
             }
         }

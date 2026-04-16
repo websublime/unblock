@@ -560,9 +560,18 @@ mod tests {
     }
 
     /// Compute the ready set as a `HashSet<QualifiedId>` from the graph.
-    fn ready_set(graph: &DependencyGraph, issues: &[Issue]) -> HashSet<QualifiedId> {
+    ///
+    /// Takes the configured `(owner, repo)` pair so SPEC §3.3 Filter 3
+    /// (§14 Invariant 14(a)) admits the local issues — reconcile tests use
+    /// a single repo per fixture (`acme/widgets` or `acme/test`).
+    fn ready_set(
+        graph: &DependencyGraph,
+        issues: &[Issue],
+        configured_owner: &str,
+        configured_repo: &str,
+    ) -> HashSet<QualifiedId> {
         graph
-            .compute_ready_set(issues)
+            .compute_ready_set(issues, configured_owner, configured_repo)
             .into_iter()
             .map(|s| s.qualified_id)
             .collect()
@@ -581,7 +590,7 @@ mod tests {
         let issues_vec = vec![issue1, issue2];
         let edges = vec![edge(&q2, &q1)]; // #2 is blocked by #1
         let graph = DependencyGraph::build(&issues_vec, &edges);
-        let computed_ready = ready_set(&graph, &issues_vec);
+        let computed_ready = ready_set(&graph, &issues_vec, "acme", "widgets");
         let by_id = issue_map(&issues_vec);
 
         let engine = ReconcileEngine::new(24);
@@ -604,7 +613,7 @@ mod tests {
 
         let issues_vec = vec![issue1, issue2];
         let graph = DependencyGraph::build(&issues_vec, &[]);
-        let computed_ready = ready_set(&graph, &issues_vec);
+        let computed_ready = ready_set(&graph, &issues_vec, "acme", "widgets");
         let by_id = issue_map(&issues_vec);
 
         let engine = ReconcileEngine::new(24);
@@ -630,7 +639,7 @@ mod tests {
         let issues_vec = vec![issue1, issue2, issue3];
         let edges = vec![edge(&q1, &q2), edge(&q2, &q3), edge(&q3, &q1)];
         let graph = DependencyGraph::build(&issues_vec, &edges);
-        let computed_ready = ready_set(&graph, &issues_vec);
+        let computed_ready = ready_set(&graph, &issues_vec, "acme", "widgets");
         let by_id = issue_map(&issues_vec);
 
         let engine = ReconcileEngine::new(24);
@@ -655,7 +664,7 @@ mod tests {
 
         let issues_vec = vec![issue1];
         let graph = DependencyGraph::build(&issues_vec, &[]);
-        let computed_ready = ready_set(&graph, &issues_vec);
+        let computed_ready = ready_set(&graph, &issues_vec, "acme", "widgets");
         let by_id = issue_map(&issues_vec);
 
         let engine = ReconcileEngine::new(24);
@@ -676,7 +685,7 @@ mod tests {
 
         let issues_vec = vec![issue1];
         let graph = DependencyGraph::build(&issues_vec, &[]);
-        let computed_ready = ready_set(&graph, &issues_vec);
+        let computed_ready = ready_set(&graph, &issues_vec, "acme", "widgets");
         let by_id = issue_map(&issues_vec);
 
         let engine = ReconcileEngine::new(24);
@@ -760,7 +769,7 @@ mod tests {
             edge(&q6, &q5), // #6 blocked by #5 (closed — so #6 is Ready)
         ];
         let graph = DependencyGraph::build(&issues_vec, &edges);
-        let computed_ready = ready_set(&graph, &issues_vec);
+        let computed_ready = ready_set(&graph, &issues_vec, "acme", "widgets");
         let by_id = issue_map(&issues_vec);
 
         let engine = ReconcileEngine::new(24);
@@ -858,7 +867,7 @@ mod tests {
 
                 // 4. Build graph and compute ready set.
                 let graph = DependencyGraph::build(&issues, &safe_edges);
-                let computed_ready = ready_set(&graph, &issues);
+                let computed_ready = ready_set(&graph, &issues, "acme", "test");
 
                 // 5. Set each issue's Status to match what the graph says.
                 for issue in &mut issues {
@@ -874,7 +883,7 @@ mod tests {
                 // Rebuild graph with corrected Status values (graph itself
                 // doesn't use Status, but we need the same structure).
                 let graph = DependencyGraph::build(&issues, &safe_edges);
-                let computed_ready = ready_set(&graph, &issues);
+                let computed_ready = ready_set(&graph, &issues, "acme", "test");
                 let by_id = issue_map(&issues);
 
                 // 6. Analyse and assert clean.

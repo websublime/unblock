@@ -104,7 +104,9 @@ fn build_populated_cache(rt: &Runtime, n: usize) -> Arc<GraphCache> {
     let issues = generate_issues(n);
     let edges = generate_edges(n);
     let graph = DependencyGraph::build(&issues, &edges);
-    let ready_set = graph.compute_ready_set(&issues);
+    // Fixture lives in ("bench", "repo") per generate_issues/generate_edges —
+    // pass the same coords so SPEC §3.3 Filter 3 admits the issues.
+    let ready_set = graph.compute_ready_set(&issues, "bench", "repo");
     let cache = Arc::new(GraphCache::new(Duration::from_secs(300)));
     rt.block_on(cache.update(issues, ready_set, graph));
     cache
