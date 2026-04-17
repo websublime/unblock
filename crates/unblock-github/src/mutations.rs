@@ -310,10 +310,12 @@ impl GitHubClient {
         Ok(())
     }
 
-    /// Adds a comment to a GitHub issue.
+    /// Adds a comment to a GitHub issue in the configured repository.
     ///
-    /// Sends a REST POST to `/repos/{owner}/{repo}/issues/{number}/comments`.
-    /// Returns the HTML URL of the created comment.
+    /// Thin convenience wrapper over
+    /// [`add_comment_in_repo`](Self::add_comment_in_repo) — delegates to
+    /// the `(self.owner(), self.repo())` tuple so single-repo callers that
+    /// only speak in local issue numbers keep a single codepath.
     ///
     /// # Errors
     ///
@@ -325,11 +327,39 @@ impl GitHubClient {
     /// [`DomainError::IssueNotFound`]: unblock_core::errors::DomainError::IssueNotFound
     #[instrument(skip(self, body), fields(owner = %self.owner(), repo = %self.repo()))]
     pub async fn add_comment(&self, number: u64, body: String) -> Result<String, Error> {
-        let url = self.rest_url(&format!(
-            "/repos/{}/{}/issues/{number}/comments",
-            self.owner(),
-            self.repo()
-        ));
+        self.add_comment_in_repo(self.owner(), self.repo(), number, body)
+            .await
+    }
+
+    /// Adds a comment to a GitHub issue in the specified `owner/repo`.
+    ///
+    /// Sends a REST POST to `/repos/{owner}/{repo}/issues/{number}/comments`.
+    /// Returns the HTML URL of the created comment. Unlike
+    /// [`add_comment`](Self::add_comment), the target repository is
+    /// supplied by the caller instead of being read from `self` — this
+    /// is what backs [`add_comment_ref`](Self::add_comment_ref) for
+    /// cross-repo cascade side effects (see SPEC §8.2 step 6 and §11.4
+    /// row 4).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Domain`] with [`DomainError::IssueNotFound`] if the
+    /// issue does not exist in the target repository (HTTP 404).
+    /// Returns [`Error::RateLimited`] for HTTP 429 responses.
+    /// Returns [`Error::GitHubApi`] for other non-2xx responses (notably
+    /// HTTP 403 when the configured token lacks write access on a foreign
+    /// repository — the common failure mode for cross-repo cascades).
+    ///
+    /// [`DomainError::IssueNotFound`]: unblock_core::errors::DomainError::IssueNotFound
+    #[instrument(skip(self, body))]
+    pub async fn add_comment_in_repo(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+        body: String,
+    ) -> Result<String, Error> {
+        let url = self.rest_url(&format!("/repos/{owner}/{repo}/issues/{number}/comments"));
 
         let request_body = AddCommentBody { body };
 
@@ -355,6 +385,44 @@ impl GitHubClient {
             .context(errors::GitHubUnavailableSnafu)?;
 
         Ok(comment.html_url)
+    }
+
+    /// Adds a comment to an issue identified by an [`IssueRef`].
+    ///
+    /// Dispatches on the ref variant:
+    /// - [`Local`](unblock_core::types::IssueRef::Local) delegates to
+    ///   [`add_comment`](Self::add_comment) (posts against the configured
+    ///   repository), preserving the existing single-repo codepath.
+    /// - [`CrossRepo`](unblock_core::types::IssueRef::CrossRepo) delegates
+    ///   to [`add_comment_in_repo`](Self::add_comment_in_repo) with the
+    ///   ref's `(owner, repo, number)` so the comment lands on the
+    ///   correct foreign repository.
+    ///
+    /// Mirrors [`fetch_issue_ref`](Self::fetch_issue_ref) and is what
+    /// the `close` Phase-3 cascade loop (SPEC §8.2 step 6) uses to honor
+    /// the cross-repo cascade contract (§11.4 row 4 / §5.6).
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as the underlying
+    /// [`add_comment`](Self::add_comment) /
+    /// [`add_comment_in_repo`](Self::add_comment_in_repo) paths.
+    ///
+    /// [`IssueRef`]: unblock_core::types::IssueRef
+    #[instrument(skip(self, body))]
+    pub async fn add_comment_ref(
+        &self,
+        issue_ref: &unblock_core::types::IssueRef,
+        body: String,
+    ) -> Result<String, Error> {
+        match issue_ref {
+            unblock_core::types::IssueRef::Local(number) => self.add_comment(*number, body).await,
+            unblock_core::types::IssueRef::CrossRepo {
+                owner,
+                repo,
+                number,
+            } => self.add_comment_in_repo(owner, repo, *number, body).await,
+        }
     }
 
     /// Updates the body of a GitHub issue.
@@ -1913,5 +1981,157 @@ mod tests {
             .await
             .expect_err("search_issues should return Err on 429");
         assert!(matches!(err, Error::RateLimited { .. }));
+    }
+
+    // ── add_comment_in_repo / add_comment_ref (unblock-eos.13) ────────────
+    //
+    // Regression guards for the cross-repo cascade primitives introduced in
+    // unblock-eos.13 (SPEC §5.6 row `close`, §8.2 step 6, §11.4 row 4). The
+    // key contract is that `add_comment_in_repo` routes the REST POST to
+    // `/repos/{owner}/{repo}/issues/{number}/comments` using the ARGUMENTS,
+    // not the configured `self.owner()/self.repo()` — otherwise a cross-repo
+    // dependent's unblock comment silently lands on the wrong repo (the
+    // pre-fix behaviour flagged in the bead's investigation).
+
+    #[tokio::test]
+    async fn add_comment_in_repo_uses_argument_owner_and_repo_not_self() {
+        let server = MockServer::start().await;
+        let client = GitHubClient::new_for_test(&server.uri());
+
+        // Configured repo is `test-owner/test-repo` (see `new_for_test`),
+        // but we post to `other/repo#99` — the URL path MUST carry the
+        // argument tuple, NOT the configured one. `expect(1)` on the
+        // correct path + `expect(0)` on the wrong path encodes the
+        // argument-routing contract.
+        Mock::given(method("POST"))
+            .and(path("/repos/other/repo/issues/99/comments"))
+            .and(body_json(serde_json::json!({ "body": "cross-repo body" })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "html_url": "https://github.com/other/repo/issues/99#issuecomment-1"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // Wrong-target guard: if the impl incorrectly retargets the
+        // configured repo, this mock would fire and the test would fail
+        // at Drop via `expect(0)`.
+        Mock::given(method("POST"))
+            .and(path("/repos/test-owner/test-repo/issues/99/comments"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "html_url": "https://should-not-be-called.invalid"
+            })))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let url = client
+            .add_comment_in_repo("other", "repo", 99, "cross-repo body".to_owned())
+            .await
+            .expect("add_comment_in_repo should succeed");
+        assert_eq!(
+            url, "https://github.com/other/repo/issues/99#issuecomment-1",
+            "returned html_url must come from the response body"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_comment_in_repo_returns_issue_not_found_on_404() {
+        let server = MockServer::start().await;
+        let client = GitHubClient::new_for_test(&server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/repos/other/repo/issues/4242/comments"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("Not Found"))
+            .mount(&server)
+            .await;
+
+        let err = client
+            .add_comment_in_repo("other", "repo", 4242, "ignored".to_owned())
+            .await
+            .expect_err("add_comment_in_repo should fail on 404");
+        assert!(
+            matches!(
+                err,
+                Error::Domain {
+                    source: DomainError::IssueNotFound { number: 4242 },
+                }
+            ),
+            "404 MUST surface as DomainError::IssueNotFound preserving the argument number; \
+             got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_comment_ref_dispatches_local_to_configured_repo() {
+        let server = MockServer::start().await;
+        let client = GitHubClient::new_for_test(&server.uri());
+
+        // IssueRef::Local → must post against the CONFIGURED repo path.
+        Mock::given(method("POST"))
+            .and(path("/repos/test-owner/test-repo/issues/7/comments"))
+            .and(body_json(serde_json::json!({ "body": "local-path body" })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "html_url": "https://github.com/test-owner/test-repo/issues/7#issuecomment-local"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let url = client
+            .add_comment_ref(
+                &unblock_core::types::IssueRef::Local(7),
+                "local-path body".to_owned(),
+            )
+            .await
+            .expect("add_comment_ref Local should succeed");
+        assert_eq!(
+            url,
+            "https://github.com/test-owner/test-repo/issues/7#issuecomment-local"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_comment_ref_dispatches_cross_repo_to_argument_repo() {
+        let server = MockServer::start().await;
+        let client = GitHubClient::new_for_test(&server.uri());
+
+        // IssueRef::CrossRepo → must post against the REF's owner/repo,
+        // NOT the configured repo. This is the core unblock-eos.13 fix.
+        Mock::given(method("POST"))
+            .and(path("/repos/alpha/upstream/issues/42/comments"))
+            .and(body_json(serde_json::json!({ "body": "cross-repo body" })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "html_url": "https://github.com/alpha/upstream/issues/42#issuecomment-cross"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // Wrong-target guard: the configured repo MUST NOT be hit.
+        Mock::given(method("POST"))
+            .and(path("/repos/test-owner/test-repo/issues/42/comments"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "html_url": "https://should-not-be-called.invalid"
+            })))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let url = client
+            .add_comment_ref(
+                &unblock_core::types::IssueRef::CrossRepo {
+                    owner: "alpha".to_owned(),
+                    repo: "upstream".to_owned(),
+                    number: 42,
+                },
+                "cross-repo body".to_owned(),
+            )
+            .await
+            .expect("add_comment_ref CrossRepo should succeed");
+        assert_eq!(
+            url,
+            "https://github.com/alpha/upstream/issues/42#issuecomment-cross"
+        );
     }
 }

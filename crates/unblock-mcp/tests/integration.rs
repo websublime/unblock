@@ -4302,12 +4302,15 @@ async fn close_no_cross_repo_dependents_cross_repo_refs_is_none() {
     // exclude the closed issue, but that path is orthogonal to this
     // bead's scope).
     mock.push_fetch_graph_data(Ok((issues, edges)));
-    // Phase 3 loop runs 2×. Each iteration calls add_comment then
-    // field_ids. We push add_comment Ok twice and let field_ids
-    // default to None (queue empty ⇒ None) so the inner project-field
-    // ladder is skipped.
-    mock.push_add_comment(Ok("comment_id".to_owned()));
-    mock.push_add_comment(Ok("comment_id".to_owned()));
+    // Phase 3 loop runs 2×. Each iteration calls add_comment_ref then
+    // field_ids. Post unblock-eos.13 the cascade always dispatches via
+    // the *_ref primitive (SPEC §8.2 step 6 / §5.6 `close` row); local
+    // dependents normalize to `IssueRef::Local(n)`.
+    // We push add_comment_ref Ok twice and let field_ids default to
+    // None (queue empty ⇒ None) so the inner project-field ladder is
+    // skipped.
+    mock.push_add_comment_ref(Ok("comment_id".to_owned()));
+    mock.push_add_comment_ref(Ok("comment_id".to_owned()));
 
     let server = UnblockServer::new(state_with_mock(Arc::clone(&mock)));
     let Json(result) = server
@@ -4341,8 +4344,34 @@ async fn close_no_cross_repo_dependents_cross_repo_refs_is_none() {
         "None cross_repo_refs must be elided from JSON: {json}"
     );
 
-    // Both cascade members received an unblock comment.
-    assert_eq!(mock.calls().add_comment(), 2);
+    // Both cascade members received an unblock comment via the *_ref
+    // dispatch path (SPEC §8.2 step 6 — unblock-eos.13 migration).
+    assert_eq!(mock.calls().add_comment_ref(), 2);
+    // The legacy single-repo `add_comment` primitive is NOT invoked by
+    // the cascade loop anymore; all traffic flows through *_ref.
+    assert_eq!(mock.calls().add_comment(), 0);
+    // Argument-aware assertion (upgrade from pre-unblock-eos.13 call-count
+    // only). Both dependents are local → they normalize to IssueRef::Local.
+    let ref_calls = mock.add_comment_ref_calls();
+    assert_eq!(ref_calls.len(), 2);
+    let ref_numbers: std::collections::HashSet<u64> = ref_calls
+        .iter()
+        .map(|r| match r {
+            unblock_core::types::IssueRef::Local(n) => *n,
+            unblock_core::types::IssueRef::CrossRepo { number, .. } => *number,
+        })
+        .collect();
+    assert_eq!(
+        ref_numbers,
+        std::collections::HashSet::from([10_u64, 11]),
+        "all-local cascade must dispatch add_comment_ref for #10 and #11"
+    );
+    assert!(
+        ref_calls
+            .iter()
+            .all(|r| matches!(r, unblock_core::types::IssueRef::Local(_))),
+        "all-local cascade must normalize every cascaded_qid to IssueRef::Local; got: {ref_calls:?}"
+    );
     assert_eq!(mock.calls().close_issue(), 1);
     assert_eq!(mock.calls().fetch_graph_data(), 1);
 }
@@ -4396,18 +4425,19 @@ async fn close_cross_repo_dependent_populates_cross_repo_refs() {
     mock.push_field_ids(None); // Phase 1: skip project-field ladder.
     mock.push_fetch_graph_data(Ok((issues, edges)));
     // Phase 3 loop runs 3× (#10, other/repo#99, alpha/upstream#42).
-    // Each iteration posts an add_comment; field_ids defaults to None
-    // when the queue is empty, so the inner project-field ladder is
-    // skipped — no further pushes required.
+    // Each iteration posts an add_comment_ref; field_ids defaults to
+    // None when the queue is empty, so the inner project-field ladder
+    // is skipped — no further pushes required.
     //
-    // RISK #2 (close handler is not cross-repo-aware for side effects):
-    // `client.add_comment(99)` actually targets `acme/widgets#99`
-    // in production. The mock just records the call count here, so
-    // this operational limitation is invisible to the test — matches
-    // the bead's scope note.
-    mock.push_add_comment(Ok("c1".to_owned()));
-    mock.push_add_comment(Ok("c2".to_owned()));
-    mock.push_add_comment(Ok("c3".to_owned()));
+    // Post-unblock-eos.13: the cascade dispatches via `add_comment_ref`
+    // (SPEC §8.2 step 6 / §5.6 `close` row: cascade side-effects only).
+    // Local dependents normalize to `IssueRef::Local`; foreign dependents
+    // carry their qualified `(owner, repo, number)` so the REST POST
+    // lands on the correct repository. The argument-aware call log
+    // (`mock.add_comment_ref_calls()`) closes the previous RISK #2 gap.
+    mock.push_add_comment_ref(Ok("c1".to_owned()));
+    mock.push_add_comment_ref(Ok("c2".to_owned()));
+    mock.push_add_comment_ref(Ok("c3".to_owned()));
 
     let server = UnblockServer::new(state_with_mock(Arc::clone(&mock)));
     let Json(result) = server
@@ -4454,9 +4484,43 @@ async fn close_cross_repo_dependent_populates_cross_repo_refs() {
     // unblocked carries only the local member.
     assert_eq!(json["unblocked"].as_array().map(Vec::len), Some(1));
 
-    // All three cascade members received an unblock comment (SPEC §8.2
-    // flow step 6: cross-repo dependents ARE still cascade-updated).
-    assert_eq!(mock.calls().add_comment(), 3);
+    // All three cascade members received an unblock comment via the
+    // *_ref path (SPEC §8.2 flow step 6: cross-repo dependents ARE still
+    // cascade-updated — honoured by unblock-eos.13 primitives).
+    assert_eq!(mock.calls().add_comment_ref(), 3);
+    // The legacy bare-`u64` primitive is NOT invoked by the cascade.
+    assert_eq!(mock.calls().add_comment(), 0);
+
+    // Argument-aware assertion: the cross-repo members must be dispatched
+    // with their QUALIFIED refs (not coerced into the configured repo).
+    // This closes the previous RISK #2 gap — mock counters alone couldn't
+    // distinguish "add_comment(99) against acme/widgets" (wrong) from
+    // "add_comment_ref(other/repo#99)" (correct). IssueRef does not
+    // derive `Hash`, so assert on Vec containment.
+    let ref_calls = mock.add_comment_ref_calls();
+    assert_eq!(ref_calls.len(), 3);
+    assert!(
+        ref_calls.contains(&unblock_core::types::IssueRef::Local(10)),
+        "local dependent #10 MUST dispatch IssueRef::Local(10); got: {ref_calls:?}"
+    );
+    assert!(
+        ref_calls.contains(&unblock_core::types::IssueRef::CrossRepo {
+            owner: "other".to_owned(),
+            repo: "repo".to_owned(),
+            number: 99,
+        }),
+        "cross-repo dependent other/repo#99 MUST dispatch IssueRef::CrossRepo; got: {ref_calls:?}"
+    );
+    assert!(
+        ref_calls.contains(&unblock_core::types::IssueRef::CrossRepo {
+            owner: "alpha".to_owned(),
+            repo: "upstream".to_owned(),
+            number: 42,
+        }),
+        "cross-repo dependent alpha/upstream#42 MUST dispatch IssueRef::CrossRepo; \
+         got: {ref_calls:?}"
+    );
+
     assert_eq!(mock.calls().close_issue(), 1);
     assert_eq!(mock.calls().fetch_graph_data(), 1);
 }
@@ -4485,7 +4549,9 @@ async fn close_single_cross_repo_dependent_uses_singular_summary() {
     mock.push_close_issue(Ok(()));
     mock.push_field_ids(None);
     mock.push_fetch_graph_data(Ok((issues, edges)));
-    mock.push_add_comment(Ok("c1".to_owned()));
+    // Phase 3: single cross-repo dependent — dispatched through the *_ref
+    // primitive (SPEC §8.2 step 6 / §5.6 `close` row).
+    mock.push_add_comment_ref(Ok("c1".to_owned()));
 
     let server = UnblockServer::new(state_with_mock(Arc::clone(&mock)));
     let Json(result) = server
@@ -4514,5 +4580,21 @@ async fn close_single_cross_repo_dependent_uses_singular_summary() {
         refs.summary.as_deref(),
         Some("1 cross-repo dependent cascade-updated but omitted from `unblocked`"),
         "SPEC §11.4: singular phrasing must match byte-for-byte",
+    );
+
+    // Argument-aware dispatch check: the lone cascade member is cross-repo
+    // → MUST dispatch `IssueRef::CrossRepo { other, repo, 99 }` through
+    // `add_comment_ref` (closes unblock-eos.13 RISK #2 on the singular path).
+    assert_eq!(mock.calls().add_comment_ref(), 1);
+    assert_eq!(mock.calls().add_comment(), 0);
+    let ref_calls = mock.add_comment_ref_calls();
+    assert_eq!(
+        ref_calls,
+        vec![unblock_core::types::IssueRef::CrossRepo {
+            owner: "other".to_owned(),
+            repo: "repo".to_owned(),
+            number: 99,
+        }],
+        "single cross-repo cascade MUST dispatch the qualified IssueRef"
     );
 }
