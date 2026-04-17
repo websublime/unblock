@@ -298,7 +298,44 @@ Types:
 
 **File:** `unblock-core/src/errors.rs`
 
-`DomainError` enum — 11+ variants: `IssueNotFound`, `AlreadyClaimed`, `IssueBlocked`, `IssueDeferred`, `IssueClosed`, `IssueNotClosed`, `IssueAlreadyOpen`, `CircularDependency`, `DuplicateDependency`, `FieldNotFound`, `Validation`, `InvalidIssueRef`, `CrossRepoAccessDenied`. Each with `status_code() -> u16`.
+`DomainError` enum — 13 variants: `IssueNotFound`, `AlreadyClaimed`, `IssueBlocked`, `IssueDeferred`, `IssueClosed`, `IssueNotClosed`, `IssueAlreadyOpen`, `CircularDependency`, `DuplicateDependency`, `FieldNotFound`, `Validation`, `InvalidIssueRef`, `CrossRepoAccessDenied`. Each with `status_code() -> u16`.
+
+**Cross-repo-aware variant typing (SPEC §11.1 Decision 1, unblock-eos arbitration 2026-04-17).** The following three variants carry `IssueRef` (§2.7), NOT bare `u64`:
+
+- `IssueBlocked { number: u64, blockers: Vec<IssueRef> }`
+- `CircularDependency { source: IssueRef, target: IssueRef }`
+- `DuplicateDependency { source: IssueRef, target: IssueRef }`
+
+All other variants retain their current shape (bare `u64` or strings) because they refer to an issue in the configured repo only — their call sites in §5.6 never surface a cross-repo number into these error paths.
+
+**BREAKING CHANGE discipline (CLAUDE.md → Pub API Change Tracking).** The variant field-type changes above are an incompatible change to the `unblock-core` pub API (`DomainError` is `pub`, its variants are `pub`, and `Vec<IssueRef>` / `IssueRef` are not interchangeable with `Vec<u64>` / `u64` at the type level). The implementing bead (unblock-29p.25) MUST land the change with a commit message footer of the form:
+
+```
+BREAKING CHANGE: DomainError::{IssueBlocked, CircularDependency,
+DuplicateDependency} variants now carry `IssueRef` instead of bare
+`u64` for cross-repo-aware error reporting. Callers constructing
+these variants via snafu context selectors (e.g. IssueBlockedSnafu,
+CircularDependencySnafu, DuplicateDependencySnafu) must pass
+IssueRef values. Display output for the Local(n) case is preserved
+byte-for-byte; CrossRepo renders as "owner/repo#number". See SPEC
+§11.1 Decision 1 / §11.4 cross-repo contract closure.
+```
+
+An `API:` body line is INSUFFICIENT — Conventional Commits requires `BREAKING CHANGE:` for incompatible pub changes. Scope: library crate (`unblock-core`), so the rule applies per CLAUDE.md.
+
+**Display preservation (SPEC §11.1).** The existing Display tests at `crates/unblock-core/src/errors.rs:215-240` MUST continue to pass byte-for-byte for the `IssueRef::Local` case. Specifically:
+
+- `CircularDependencySnafu { source: IssueRef::Local(1), target: IssueRef::Local(2) }.build().to_string()` MUST render `"Circular dependency: adding #1 → #2 creates cycle"` (matches current test assertions on substrings `'1'`, `'2'`, `"cycle"`).
+- `DuplicateDependencySnafu { source: IssueRef::Local(4), target: IssueRef::Local(5) }.build().to_string()` MUST contain `'4'` and `'5'` (matches current test assertions).
+- `IssueBlockedSnafu { number: 10, blockers: vec![IssueRef::Local(1), IssueRef::Local(2)] }.build().to_string()` MUST contain `"10"` (matches `errors.rs:170-174`).
+- Cross-repo case: `CircularDependencySnafu { source: IssueRef::CrossRepo { owner: "acme".into(), repo: "widgets".into(), number: 1 }, target: IssueRef::Local(2) }.build().to_string()` renders with `"acme/widgets#1"` somewhere in the string. Add a new test asserting this; do NOT modify the existing Local-only tests.
+
+**Error-side wiring (SPEC §11.1 Decision 2, confirmed no shape change).**
+
+- `InvalidIssueRef { input: String }` — emitted whenever `IssueRef::from_str` fails on tool input. The tool-layer call sites (§8.4 `depends`, §8.5 `dep_remove`, §8.3 `create.blocked_by`, §7.2 `show`) MUST wrap the parse error into `InvalidIssueRefSnafu { input: <raw user string> }` and propagate. Maps to HTTP 400 → MCP `-32602` (invalid params) via §11.3.
+- `CrossRepoAccessDenied { owner: String, repo: String }` — emitted when a GraphQL fetch against a cross-repo node returns `FORBIDDEN` (or equivalent 403). Maps to HTTP 403. Per SPEC §11.3 `github_error_to_mcp` the 403 branch maps to MCP `-32602` (invalid params / business rule, same bucket as other 4xx domain errors). The `unblock-mcp/src/errors.rs` match arm MUST add the 403 → `-32602` mapping explicitly so regressions are caught by the error-mapping test.
+
+These two variants are already spec'd (§11.1 lines above in the table); the implementation bead unblock-6xj wires the propagation paths listed above. No spec shape change is needed for this task — only the wiring contract is new.
 
 ### Task 02.03 — Configuration
 
@@ -787,7 +824,7 @@ SPEC §11.4 (added via unblock-9f7) introduces a uniform `cross_repo_refs: Optio
    - Wires population logic inside the tool handler.
    - Adds the integration test branch (`Some` and `None`) required by the updated Task 04.05 / 04.07 / 04.13 acceptance criteria.
    - Because `Option` + `skip_serializing_if` is additive and absent-from-JSON-on-None, this is a non-breaking change for existing MCP clients that did not inspect the new field. (API: note required per CLAUDE.md.)
-4. **Error-side siblings (unblock-29p.25, unblock-6xj) — parallel track.** Cross-referenced in §11.4. Safe to implement before, during, or after this task's retro-fits — the two halves of the cross-repo contract (response-side §11.4, error-side §11.1) are independent.
+4. **Error-side siblings (unblock-29p.25, unblock-6xj) — parallel track.** Cross-referenced in §11.1 and §11.4. Safe to implement before, during, or after this task's retro-fits — the two halves of the cross-repo contract (response-side §11.4, error-side §11.1) are independent. See GAP-14.c for the error-side contract closure (unblock-eos Decisions 1 + 2, arbitrated 2026-04-17).
 
 **Resolution:** Land spec+plan here (unblock-9f7). Create one follow-up bead per retro-fit target (`ready`, `prime`, `close`). Implementation of each retro-fit is sibling-scope to this task, NOT part of it.
 
@@ -831,6 +868,31 @@ An `API:` body line is INSUFFICIENT for this change — Conventional Commits req
 
 ---
 
+### GAP-14.c — Error-side cross-repo contract closure (unblock-eos, Decisions 1 + 2)
+
+SPEC §11.1 (error-side half of the cross-repo contract) and SPEC §11.4 (response-side half) together form the two halves of the cross-repo contract. The response-side retro-fits are tracked by GAP-14; the ready-set source scoping is tracked by GAP-14.b. This entry closes the remaining error-side work under the unblock-eos sub-epic arbitration of 2026-04-17 (Decisions 1–4).
+
+**Decision 1 — Uniform `IssueRef` typing for cross-repo-aware domain errors (SPEC §11.1).** The variants `IssueBlocked`, `CircularDependency`, and `DuplicateDependency` change field types from bare `u64` to `IssueRef` (§2.7). Rationale is embedded in SPEC §11.1 "Cross-repo-aware variant typing — Exhaustiveness Rationale"; do not re-open. Implementation lives in unblock-29p.25 (Task 02.02 above). BREAKING CHANGE footer is MANDATORY per CLAUDE.md Pub API Change Tracking; the exact footer body is spec'd verbatim in Task 02.02. Display byte-for-byte preservation for `IssueRef::Local(n) → "#n"` is required so `crates/unblock-core/src/errors.rs:215-240` existing tests pass without edits.
+
+**Decision 2 — No shape change for `InvalidIssueRef` / `CrossRepoAccessDenied` (SPEC §11.1).** Both variants are already spec'd; the remaining work is wiring only, landed by unblock-6xj:
+
+1. `IssueRef::from_str` failures at tool-boundary call sites (§7.2 `show`, §8.3 `create.blocked_by`, §8.4 `depends`, §8.5 `dep_remove`) MUST propagate as `InvalidIssueRefSnafu { input: <raw string> }` → HTTP 400 → MCP `-32602`.
+2. GraphQL `FORBIDDEN` (or 403) on cross-repo fetch MUST propagate as `CrossRepoAccessDeniedSnafu { owner, repo }` → HTTP 403 → MCP `-32602`.
+3. `crates/unblock-mcp/src/errors.rs` `github_error_to_mcp` match-arm MUST have an explicit 403 → `-32602` branch (Task 02.02 body). Add a unit test mapping the new branch so future variant additions don't silently collapse into the catch-all.
+
+**Decision 3 — Response-shape universal pattern is documentation-only.** §11.4 affected set is frozen at `ready`, `prime`, `dep_cycles`, `close`; exhaustiveness rationale is embedded inline in SPEC §11.4 (see "Exhaustiveness Rationale — response-shape universality"). No new beads. New tools re-derive the (a)+(b) conjunction from §5.6 + their own response typing when added.
+
+**Decision 4 — No further decomposition.** The unblock-eos sub-epic closes with these spec+plan patches. Only two implementation beads consume them: unblock-6xj (error-side wiring) and unblock-29p.25 (Task 02.02 `IssueRef`-typed variants + BREAKING CHANGE commit). No new sub-beads for edge cases; fold anything discovered during implementation into inline decision memos within this GAP or the affected task, not into a new bead.
+
+**Parallel-track guarantees:**
+
+- GAP-14.c is independent of GAP-14 (response-side) and GAP-14.b (ready-set scoping) — any ordering is safe.
+- GAP-14.c's BREAKING CHANGE commit and GAP-14.b's BREAKING CHANGE commit MAY ride the same logical change family OR be landed separately; each carries its own footer text because the pub API surfaces changed are disjoint (`DomainError` variants vs. `DependencyGraph::compute_ready_set`).
+
+**Resolution:** Implementation is split across unblock-6xj (wiring for `InvalidIssueRef` / `CrossRepoAccessDenied` / MCP error mapping) and unblock-29p.25 (Task 02.02 variant shape change + BREAKING CHANGE footer + tests). No additional beads required.
+
+---
+
 ### Summary — Decisions (Resolved)
 
 | # | Decision | Resolution |
@@ -842,6 +904,10 @@ An `API:` body line is INSUFFICIENT for this change — Conventional Commits req
 | D5 | `FieldValue::Date` | **Keep `NaiveDate`, update SPEC** (improvement, not drift) |
 | D6 | Cross-repo response shape | **Uniform `cross_repo_refs: Option<CrossRepoRefs>` per SPEC §11.4.** Retro-fit `ready`, `prime`, `close` via follow-up beads; `dep_cycles` lands with contract from day one. |
 | D6.a | Ready-set source scoping (unblock-eos.4) | **Direction 1 — enforce `(configured_owner, configured_repo)` filter inside `compute_ready_set` at the graph engine.** `pub fn DependencyGraph::compute_ready_set` gains two new required parameters and the function drops cross-repo source issues BEFORE the blocker filter. Direction chosen over (2) tool-layer scrub, (3) fail-fast panic, and (4) soft-warn log. Single chokepoint → every downstream consumer (cached `ready_set`, `ready`, `prime`, `update_status_fields`) inherits §14 Invariant 14(a) for free. BREAKING CHANGE on `unblock-core` pub API — Conventional Commits footer MANDATORY. See GAP-14.b for full migration. |
+| D6.b | Error-side cross-repo variant typing (unblock-eos Decision 1) | **Uniform `IssueRef` typing for cross-repo-aware variants.** `DomainError::{IssueBlocked, CircularDependency, DuplicateDependency}` field types change from bare `u64` to `IssueRef` (§2.7). Display preserved byte-for-byte for `IssueRef::Local(n) → "#n"` so existing tests at `crates/unblock-core/src/errors.rs:215-240` pass unchanged; CrossRepo renders as `"owner/repo#number"`. BREAKING CHANGE on `unblock-core` pub API — Conventional Commits footer MANDATORY on unblock-29p.25 commit. See GAP-14.c and Task 02.02 for the full footer template. |
+| D6.c | Error-side wiring for `InvalidIssueRef` / `CrossRepoAccessDenied` (unblock-eos Decision 2) | **No shape change, wiring only.** `IssueRef::from_str` failures at tool boundary → `InvalidIssueRefSnafu` → 400 → MCP `-32602`. GraphQL `FORBIDDEN` on cross-repo fetch → `CrossRepoAccessDeniedSnafu` → 403 → MCP `-32602` (explicit match arm in `crates/unblock-mcp/src/errors.rs`). Implementation: unblock-6xj. See GAP-14.c and Task 02.02 for the wiring contract. |
+| D6.d | Response-shape universality (unblock-eos Decision 3) | **Documentation-only; frozen.** SPEC §11.4 "Exhaustiveness Rationale" derives the affected set (`ready`, `prime`, `dep_cycles`, `close`) mechanically from §5.6 + response typing. New tools re-derive (a)+(b) in their own spec entries. No new beads; no re-opening. |
+| D6.e | Meta-process (unblock-eos Decision 4) | **No further decomposition.** unblock-eos sub-epic closes with these three spec+plan patches. Only unblock-6xj and unblock-29p.25 remain as implementation beads under this sub-epic. Edge cases discovered during implementation fold into inline decision memos within GAP-14.c / Task 02.02, NOT into new beads. |
 
 ---
 
@@ -859,6 +925,7 @@ Phase 01 is complete when:
 8. **Performance** — `prime` → `ready` → `claim` in under 2 seconds on warm cache
 9. **Zero data loss** — If `unblock-mcp` process dies, all state is in GitHub
 10. **Coverage** — >80% for all 3 crates
-11. **Cross-repo response contract (SPEC §11.4, §14 Invariant 14)** — Both clauses MUST be green:
+11. **Cross-repo contract (SPEC §11.1, §11.4, §14 Invariant 14)** — All three clauses MUST be green:
     - **11(a) — Invariant 14(a) — ready-set source scoping (unblock-eos.4 / D6.a / GAP-14.b).** `DependencyGraph::compute_ready_set` takes `(configured_owner, configured_repo)` and filters cross-repo source issues at §3.3 Filter 3. A property test (§13.3 #7) asserts mixed-repo input → only configured-repo sources in the output. The BREAKING CHANGE footer per CLAUDE.md Pub API discipline has landed on the commit that changed the signature.
     - **11(b) — Invariant 14(b) — response-shape contract (GAP-14 / D6).** `ready`, `prime`, `dep_cycles`, `close` honor the `cross_repo_refs` contract. GAP-14 retro-fits landed. Integration tests cover `Some`/`None` branches for each.
+    - **11(c) — error-side contract (GAP-14.c / unblock-eos Decisions 1 + 2).** `DomainError::{IssueBlocked, CircularDependency, DuplicateDependency}` carry `IssueRef` (unblock-29p.25, Task 02.02) with Display byte-for-byte preservation for `IssueRef::Local`; `InvalidIssueRef` and `CrossRepoAccessDenied` are wired at tool-boundary parse failures and GraphQL `FORBIDDEN` respectively (unblock-6xj); `crates/unblock-mcp/src/errors.rs` explicitly maps 403 → `-32602`. BREAKING CHANGE footer per CLAUDE.md has landed on the unblock-29p.25 commit.

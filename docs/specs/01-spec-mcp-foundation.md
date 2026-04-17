@@ -1677,13 +1677,13 @@ compute_expected_status(issue, ready_set) → Status:
 pub enum DomainError {
     IssueNotFound { number: u64 },
     AlreadyClaimed { number: u64, agent: String },
-    IssueBlocked { number: u64, blockers: Vec<u64> },
+    IssueBlocked { number: u64, blockers: Vec<IssueRef> },
     IssueDeferred { number: u64, until: String },
     IssueClosed { number: u64 },
     IssueNotClosed { number: u64 },
     IssueAlreadyOpen { number: u64 },
-    CircularDependency { source: u64, target: u64 },
-    DuplicateDependency { source: u64, target: u64 },
+    CircularDependency { source: IssueRef, target: IssueRef },
+    DuplicateDependency { source: IssueRef, target: IssueRef },
     FieldNotFound { name: String },
     Validation { message: String },
     InvalidIssueRef { input: String },
@@ -1709,7 +1709,22 @@ Each variant has `status_code() → u16`:
 | `InvalidIssueRef` | 400 |
 | `CrossRepoAccessDenied` | 403 |
 
-`InvalidIssueRef`, `CrossRepoAccessDenied`, and the cross-repo-aware forms of `CircularDependency`/`DuplicateDependency` are the **error-side** half of the cross-repo contract. The successful-response half — how responses disclose cross-repo nodes that were flattened to local numbers — is specified in §11.4.
+`InvalidIssueRef`, `CrossRepoAccessDenied`, and the cross-repo-aware forms of `CircularDependency`/`DuplicateDependency`/`IssueBlocked` are the **error-side** half of the cross-repo contract. The successful-response half — how responses disclose cross-repo nodes that were flattened to local numbers — is specified in §11.4.
+
+**Cross-repo-aware variant typing — Exhaustiveness Rationale (Decision 1, 2026-04-17).**
+
+`IssueBlocked.blockers`, `CircularDependency.{source, target}`, and `DuplicateDependency.{source, target}` use `IssueRef` (§2.7) rather than bare `u64`. GitHub's native sub-issue / `trackedByIssues` / `addIssueDependency` graph has been cross-repo-aware since GA in 2024: a cross-repo blocker, a cross-repo cycle participant, and a cross-repo duplicate-edge endpoint are all observable via the API and reachable from any configured repository. Bare `u64` cannot disambiguate `#42` in `configured/repo` from `#42` in `other/repo`; an error referring to the latter would silently alias to the former and mislead the agent. `IssueRef` is the unique fully-qualified-or-local carrier already used by §8.4 `depends`, §8.5 `dep_remove`, §8.3 `create.blocked_by`, and §11.4 `cross_repo_refs::omitted` — keeping §11.1 consistent with §11.4 is the closure property of the cross-repo contract. This is a BREAKING CHANGE in the `unblock-core` pub API (`DomainError` variant field types change); the implementing commit MUST carry a `BREAKING CHANGE:` footer per CLAUDE.md "Pub API Change Tracking" discipline. This rationale closes the question: no further sub-beads are needed for per-variant re-evaluation; new `DomainError` variants that carry issue references MUST default to `IssueRef` typing by the same argument.
+
+**Display byte-for-byte preservation (local-only case).**
+
+`IssueRef::Display` MUST render `IssueRef::Local(n)` as exactly `"#n"` (e.g. `Local(42)` → `"#42"`) so every existing `Display` snapshot at `crates/unblock-core/src/errors.rs:215-240` (and equivalent assertions elsewhere) continues to pass byte-for-byte without edits. `IssueRef::CrossRepo { owner, repo, number }` renders as `"owner/repo#number"` (e.g. `"acme/widgets#42"`), matching `QualifiedId::Display` so agents can copy-paste error text into follow-up tool calls (e.g. `show acme/widgets#42`). Concretely:
+
+- `CircularDependency { source: IssueRef::Local(1), target: IssueRef::Local(2) }` → `"Circular dependency: adding #1 → #2 creates cycle"` (unchanged from today).
+- `DuplicateDependency { source: IssueRef::Local(4), target: IssueRef::Local(5) }` → `"Blocking relationship already exists: #4 → #5"` (unchanged from today).
+- `IssueBlocked { number: 10, blockers: vec![IssueRef::Local(1), IssueRef::Local(2)] }` → MUST still include the substrings `"10"`, `"1"`, and `"2"` (the existing test at `errors.rs:170-174` asserts only substring containment, so `"Issue #10 is blocked by: [#1, #2]"` and `"Issue #10 is blocked by: #1, #2"` are both acceptable formats; the implementation chooses one and commits to it with a test).
+- Cross-repo example: `IssueBlocked { number: 10, blockers: vec![IssueRef::CrossRepo { owner: "acme".into(), repo: "widgets".into(), number: 1 }] }` renders with `"acme/widgets#1"` in the blocker list.
+
+The implementation MAY route `IssueRef::Display` through `#[snafu(display(...))]` directly (via `{source}` / `{target}` interpolation that calls `Display`) or pre-format the blocker list with a helper; both satisfy the preservation contract.
 
 ### 11.2 Infrastructure errors (`unblock-github/src/errors.rs`)
 
@@ -1754,7 +1769,7 @@ Propagation chain: `DomainError` (core) → `Error` (github) → `McpError` (mcp
 
 ### 11.4 Cross-Repo Response Contract
 
-The graph engine nodes are `QualifiedId { owner, repo, number }` (§2.1). Many response types project cross-repo nodes down to bare `u64` issue numbers scoped to the configured repository. When a computation touches one or more `QualifiedId` nodes whose `(owner, repo)` differs from the configured repo AND those nodes are dropped from the bare-`u64` projection of the response, the response MUST surface them in an explicit `cross_repo_refs` field. This is the dual of the error-side contract in §11.1: §11.1 governs how cross-repo failures are reported (`InvalidIssueRef`, `CrossRepoAccessDenied`, cross-repo-aware `CircularDependency`/`DuplicateDependency`); §11.4 governs how successful responses disclose cross-repo nodes that were flattened to local numbers.
+The graph engine nodes are `QualifiedId { owner, repo, number }` (§2.1). Many response types project cross-repo nodes down to bare `u64` issue numbers scoped to the configured repository. When a computation touches one or more `QualifiedId` nodes whose `(owner, repo)` differs from the configured repo AND those nodes are dropped from the bare-`u64` projection of the response, the response MUST surface them in an explicit `cross_repo_refs` field. This is the dual of the error-side contract in §11.1: §11.1 governs how cross-repo failures are reported (`InvalidIssueRef`, `CrossRepoAccessDenied`, and the `IssueRef`-typed forms of `CircularDependency` / `DuplicateDependency` / `IssueBlocked`); §11.4 governs how successful responses disclose cross-repo nodes that were flattened to local numbers.
 
 **Shared type** (`unblock-core/src/types.rs`):
 
@@ -1824,6 +1839,17 @@ Tools explicitly NOT affected (documented here to pre-empt retro-adoption questi
 | `depends` / `dep_remove` (§8.4, §8.5) | Request and response use `IssueRef` strings; no `u64` projection |
 | `comment` (§8.8) | Boolean response only |
 | `init` / `setup` (§8.9, §8.10) | Project-level, no issue references |
+
+**Exhaustiveness Rationale — response-shape universality (Decision 3, 2026-04-17).**
+
+The `cross_repo_refs: Option<CrossRepoRefs>` field is NOT a universal response contract; it applies to exactly the four tools listed in the affected-tools table above — `ready` (§7.1), `prime` (§7.3), `dep_cycles` (§7.7), `close` (§8.2) — and no others. The axiom that derives the affected set is §5.6 "Cross-repo scope": a tool qualifies iff (a) its response projects node identity down to a bare `u64` AND (b) §5.6 permits cross-repo traversal to touch nodes that would be flattened by that projection. The exempt tools listed above each fail at least one leg of the conjunction for a structural reason documented in their row, not by accident of implementation:
+
+- `show` already emits `QualifiedId` at every level (§2.14), so (a) fails.
+- `stats` emits no issue IDs at all, so (a) fails.
+- `list` / `search` / `claim` / `create` / `update` / `reopen` / `comment` / `init` / `setup` are scoped by §5.6 to the configured repo on the traversal side, so (b) fails.
+- `depends` / `dep_remove` round-trip `IssueRef` strings (never `u64`) on both request and response, so (a) fails.
+
+Because the derivation is mechanical from §5.6 + the §7/§8 response typing, future tools inherit the exemption rule automatically: a new tool requires `cross_repo_refs` iff it independently satisfies both (a) and (b). No standalone bead is needed to audit tool-by-tool; the test is applied as tools are specified. This rationale closes the question raised during unblock-eos arbitration (2026-04-17) — the four-tool set is complete and frozen for Phase 01. Tools added in later phases re-evaluate (a)+(b) on their own spec entries and do NOT re-open this decision.
 
 **Determinism.** `omitted` MUST be sorted lexicographically by `QualifiedId::Display` so identical graph state produces identical responses (per Invariant 5, §14).
 
