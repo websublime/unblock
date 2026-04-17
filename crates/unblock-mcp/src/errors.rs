@@ -80,17 +80,24 @@ pub enum BootstrapError {
 /// Converts the HTTP status code from the error into the most appropriate
 /// JSON-RPC error code:
 ///
-/// | HTTP status              | JSON-RPC code             |
-/// |--------------------------|---------------------------|
-/// | 400, 404, 409, 412, 422  | `INVALID_PARAMS` (-32602) |
-/// | 429, 500, 503            | `INTERNAL_ERROR` (-32603) |
-/// | other                    | `INTERNAL_ERROR` (-32603) |
+/// | HTTP status                   | JSON-RPC code             |
+/// |-------------------------------|---------------------------|
+/// | 400, 403, 404, 409, 412, 422  | `INVALID_PARAMS` (-32602) |
+/// | 429, 500, 503                 | `INTERNAL_ERROR` (-32603) |
+/// | other                         | `INTERNAL_ERROR` (-32603) |
+///
+/// The 403 branch is an explicit match arm (not a catch-all fall-through)
+/// per SPEC §11.3 / plan Task 02.02 "Error-side wiring" and plan
+/// GAP-14.c Decision 2 #3 — this makes the `CrossRepoAccessDenied`
+/// mapping a named branch so regressions are caught by the error-mapping
+/// tests rather than silently collapsing into `INTERNAL_ERROR` when
+/// future variants alter the status-code table.
 ///
 /// The error's `Display` output becomes the JSON-RPC error message.
 #[allow(clippy::needless_pass_by_value)] // Intentional: consumes the error in a map_err chain.
 pub(crate) fn github_error_to_mcp(err: unblock_github::errors::Error) -> ErrorData {
     let code = match err.status_code() {
-        400 | 404 | 409 | 412 | 422 => ErrorCode::INVALID_PARAMS,
+        400 | 403 | 404 | 409 | 412 | 422 => ErrorCode::INVALID_PARAMS,
         _ => ErrorCode::INTERNAL_ERROR,
     };
     ErrorData {
@@ -105,7 +112,9 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use snafu::IntoError;
-    use unblock_core::errors::IssueNotFoundSnafu;
+    use unblock_core::errors::{
+        CrossRepoAccessDeniedSnafu, InvalidIssueRefSnafu, IssueNotFoundSnafu,
+    };
     use unblock_github::errors::{
         CircuitBreakerOpenSnafu, GitHubApiSnafu, GitHubGraphQLSnafu, GitRemoteSnafu,
         ProjectNotConfiguredSnafu, RateLimitedSnafu,
@@ -127,6 +136,54 @@ mod tests {
         assert!(
             msg.contains("42"),
             "message should contain issue number: {msg}"
+        );
+    }
+
+    #[test]
+    fn invalid_issue_ref_maps_to_invalid_params() {
+        // `InvalidIssueRef` has status_code 400; the 400 branch of
+        // `github_error_to_mcp` must route it to `INVALID_PARAMS` and
+        // preserve the raw input in the message so the agent can see
+        // what they sent. Mirrors `domain_error_maps_to_invalid_params`
+        // for the new 400 wiring added in unblock-6xj.
+        let err = unblock_github::errors::Error::from(
+            InvalidIssueRefSnafu {
+                input: "not-a-ref".to_owned(),
+            }
+            .build(),
+        );
+        let (code, msg) = convert(err);
+        assert_eq!(code, ErrorCode::INVALID_PARAMS);
+        assert!(
+            msg.contains("not-a-ref"),
+            "message should contain raw input: {msg}"
+        );
+    }
+
+    #[test]
+    fn cross_repo_access_denied_maps_to_invalid_params() {
+        // `CrossRepoAccessDenied` has status_code 403; the 403 branch of
+        // `github_error_to_mcp` MUST route it to `INVALID_PARAMS` via an
+        // explicit match arm (SPEC §11.3 / plan Task 02.02 "Error-side
+        // wiring" / GAP-14.c Decision 2 #3). This test is the
+        // regression guard: without the explicit 403 arm, 403 would
+        // silently collapse into the catch-all `INTERNAL_ERROR`.
+        let err = unblock_github::errors::Error::from(
+            CrossRepoAccessDeniedSnafu {
+                owner: "acme".to_owned(),
+                repo: "widgets".to_owned(),
+            }
+            .build(),
+        );
+        let (code, msg) = convert(err);
+        assert_eq!(code, ErrorCode::INVALID_PARAMS);
+        assert!(
+            msg.contains("acme"),
+            "message should contain owner: {msg}"
+        );
+        assert!(
+            msg.contains("widgets"),
+            "message should contain repo: {msg}"
         );
     }
 
