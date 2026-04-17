@@ -48,7 +48,15 @@ pub enum BootstrapError {
     ))]
     ClientInit {
         /// The underlying GitHub client error.
-        source: unblock_github::errors::Error,
+        ///
+        /// Boxed to keep `BootstrapError` compact. `unblock_github::errors::Error`
+        /// transitively wraps `DomainError`, which now carries `IssueRef` fields
+        /// (SPEC §11.1 Decision 1, 2026-04-17). Without boxing, `Result<(), BootstrapError>`
+        /// at `main()` exceeds the `clippy::result_large_err` threshold. This mirrors
+        /// the pattern already used by the `Transport` variant for
+        /// `rmcp::service::ServerInitializeError`.
+        #[snafu(source(from(unblock_github::errors::Error, Box::new)))]
+        source: Box<unblock_github::errors::Error>,
     },
 
     /// Failed to start the MCP stdio transport.

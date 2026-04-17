@@ -903,8 +903,8 @@ impl GitHubClient {
 
         if already_blocked {
             return Err(unblock_core::errors::DuplicateDependencySnafu {
-                source: issue_number,
-                target: blocked_by_number,
+                source: unblock_core::types::IssueRef::Local(issue_number),
+                target: unblock_core::types::IssueRef::Local(blocked_by_number),
             }
             .build()
             .into());
@@ -1501,15 +1501,21 @@ impl GitHubClient {
                 if let Some(n) = blocker_number_in_source_repo
                     && source_issue.blocked_by.iter().any(|r| r.number == n)
                 {
-                    // TODO(unblock-29p.25): DuplicateDependencySnafu's `source`
-                    // field is `u64` and loses the cross-repo source's
-                    // owner/repo context — the error message is ambiguous
-                    // with a same-numbered local issue. Tracked as a spec
-                    // §11.1 revision (extend CircularDependency /
-                    // DuplicateDependency with cross-repo context).
+                    // Both source and duplicate target live in the
+                    // source's `owner/repo` (the duplicate pre-check
+                    // above only fires when the blocker matches source's
+                    // own repo — see comment on
+                    // `blocker_number_in_source_repo`), so the error
+                    // surfaces both endpoints qualified with
+                    // `owner/repo#n`. Per SPEC §11.1 Decision 1 this
+                    // disambiguates from same-numbered local issues.
                     return Err(unblock_core::errors::DuplicateDependencySnafu {
-                        source: *source_number,
-                        target: n,
+                        source: source.clone(),
+                        target: unblock_core::types::IssueRef::CrossRepo {
+                            owner: source_owner.clone(),
+                            repo: source_repo.clone(),
+                            number: n,
+                        },
                     }
                     .build()
                     .into());

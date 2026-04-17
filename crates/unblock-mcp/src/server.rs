@@ -1313,8 +1313,8 @@ impl UnblockServer {
                 {
                     return Err(crate::errors::github_error_to_mcp(
                         CircularDependencySnafu {
-                            source: *source_number,
-                            target: *target_number,
+                            source: unblock_core::types::IssueRef::Local(*source_number),
+                            target: unblock_core::types::IssueRef::Local(*target_number),
                         }
                         .build()
                         .into(),
