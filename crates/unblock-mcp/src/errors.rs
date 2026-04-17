@@ -177,10 +177,7 @@ mod tests {
         );
         let (code, msg) = convert(err);
         assert_eq!(code, ErrorCode::INVALID_PARAMS);
-        assert!(
-            msg.contains("acme"),
-            "message should contain owner: {msg}"
-        );
+        assert!(msg.contains("acme"), "message should contain owner: {msg}");
         assert!(
             msg.contains("widgets"),
             "message should contain repo: {msg}"

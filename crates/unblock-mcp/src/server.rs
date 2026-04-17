@@ -46,7 +46,7 @@ use unblock_core::cache::GraphCache;
 use unblock_core::client::{AgentClient, AgentKind};
 use unblock_core::config::Config;
 use unblock_core::detection::ClientDetector;
-use unblock_core::errors::{CircularDependencySnafu, IssueClosedSnafu};
+use unblock_core::errors::{CircularDependencySnafu, InvalidIssueRefSnafu, IssueClosedSnafu};
 use unblock_core::types::IssueState;
 use unblock_github::GitHubApi;
 use unblock_github::projects::FieldValue;
@@ -676,15 +676,22 @@ impl UnblockServer {
             include_comments, include_deps, "Show tool invoked"
         );
 
-        // Parse the input string into an IssueRef. Mirrors the `depends`
-        // handler's parsing so error messages stay consistent.
+        // Parse the input string into an IssueRef. Per SPEC §11.1 / plan
+        // Task 02.02 "Error-side wiring", parse failures at the tool
+        // boundary MUST propagate as `InvalidIssueRefSnafu { input }`
+        // through `github_error_to_mcp` (HTTP 400 → MCP `-32602`). The
+        // raw user string flows into `input` so the agent can see
+        // exactly what they sent.
         let issue_ref = params
             .issue
             .parse::<unblock_core::types::IssueRef>()
-            .map_err(|e| ErrorData {
-                code: rmcp::model::ErrorCode::INVALID_PARAMS,
-                message: format!("Invalid issue reference '{}': {e}", params.issue).into(),
-                data: None,
+            .map_err(|_| {
+                crate::errors::github_error_to_mcp(unblock_github::errors::Error::from(
+                    InvalidIssueRefSnafu {
+                        input: params.issue.clone(),
+                    }
+                    .build(),
+                ))
             })?;
 
         // Step 1: Fetch the full issue via execute_read_tool. `fetch_issue_ref`
@@ -1226,22 +1233,32 @@ impl UnblockServer {
             "Depends tool invoked"
         );
 
-        // Parse source string into IssueRef.
+        // Parse source string into IssueRef. Per SPEC §11.1 / plan Task
+        // 02.02 "Error-side wiring", parse failures at the tool boundary
+        // MUST propagate as `InvalidIssueRefSnafu { input }` through
+        // `github_error_to_mcp` (HTTP 400 → MCP `-32602`).
         let source_ref_raw = source_str
             .parse::<unblock_core::types::IssueRef>()
-            .map_err(|e| ErrorData {
-                code: rmcp::model::ErrorCode::INVALID_PARAMS,
-                message: format!("Invalid source reference '{source_str}': {e}").into(),
-                data: None,
+            .map_err(|_| {
+                crate::errors::github_error_to_mcp(unblock_github::errors::Error::from(
+                    InvalidIssueRefSnafu {
+                        input: source_str.clone(),
+                    }
+                    .build(),
+                ))
             })?;
 
-        // Parse target string into IssueRef.
+        // Parse target string into IssueRef. See `source_ref_raw` for
+        // the wiring rationale.
         let target_ref_raw = target_str
             .parse::<unblock_core::types::IssueRef>()
-            .map_err(|e| ErrorData {
-                code: rmcp::model::ErrorCode::INVALID_PARAMS,
-                message: format!("Invalid target reference '{target_str}': {e}").into(),
-                data: None,
+            .map_err(|_| {
+                crate::errors::github_error_to_mcp(unblock_github::errors::Error::from(
+                    InvalidIssueRefSnafu {
+                        input: target_str.clone(),
+                    }
+                    .build(),
+                ))
             })?;
 
         // Normalize both refs against the configured repo. A
@@ -1483,17 +1500,19 @@ impl UnblockServer {
             None
         };
 
-        // Parse blocked_by refs.
+        // Parse blocked_by refs. Per SPEC §11.1 / plan Task 02.02
+        // "Error-side wiring", each per-element parse failure
+        // propagates as `InvalidIssueRefSnafu { input }` through
+        // `github_error_to_mcp` (HTTP 400 → MCP `-32602`).
         let blocked_by_refs: Vec<unblock_core::types::IssueRef> =
             if let Some(ref refs) = params.blocked_by {
                 refs.iter()
                     .map(|s| {
-                        s.parse::<unblock_core::types::IssueRef>()
-                            .map_err(|e| ErrorData {
-                                code: rmcp::model::ErrorCode::INVALID_PARAMS,
-                                message: format!("Invalid blocked_by reference '{s}': {e}").into(),
-                                data: None,
-                            })
+                        s.parse::<unblock_core::types::IssueRef>().map_err(|_| {
+                            crate::errors::github_error_to_mcp(unblock_github::errors::Error::from(
+                                InvalidIssueRefSnafu { input: s.clone() }.build(),
+                            ))
+                        })
                     })
                     .collect::<Result<Vec<_>, _>>()?
             } else {

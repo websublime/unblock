@@ -95,7 +95,7 @@ use rmcp::model::ErrorData;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracing::{info, instrument, warn};
-use unblock_core::errors::ValidationSnafu;
+use unblock_core::errors::{InvalidIssueRefSnafu, ValidationSnafu};
 use unblock_core::graph::DependencyGraph;
 use unblock_core::types::{Issue, IssueRef, IssueState, QualifiedId};
 use unblock_github::GitHubApi;
@@ -185,13 +185,25 @@ fn validation_error(message: impl Into<String>) -> ErrorData {
     github_error_to_mcp(github)
 }
 
-/// Parse an [`IssueRef`] from a raw string, tagging the field name in
-/// the error message so the caller can tell which side was malformed.
-fn parse_ref(field: &str, value: &str) -> Result<IssueRef, ErrorData> {
-    value.parse::<IssueRef>().map_err(|e| ErrorData {
-        code: rmcp::model::ErrorCode::INVALID_PARAMS,
-        message: format!("Invalid {field} reference '{value}': {e}").into(),
-        data: None,
+/// Parse an [`IssueRef`] from a raw string, surfacing a malformed
+/// reference as [`InvalidIssueRefSnafu`] lifted through
+/// [`github_error_to_mcp`] (HTTP 400 → MCP `-32602`).
+///
+/// Per SPEC §11.1 / plan Task 02.02 "Error-side wiring" the domain
+/// variant carries only the raw `input`, so this helper no longer
+/// tags a `source`/`target` field name in the message — the caller
+/// already knows which side they passed. Both `handle_dep_remove`
+/// call sites parse `source` first, then `target`, so on a malformed
+/// input the position (and therefore the field) is implicit in the
+/// failure ordering.
+fn parse_ref(value: &str) -> Result<IssueRef, ErrorData> {
+    value.parse::<IssueRef>().map_err(|_| {
+        github_error_to_mcp(unblock_github::errors::Error::from(
+            InvalidIssueRefSnafu {
+                input: value.to_owned(),
+            }
+            .build(),
+        ))
     })
 }
 
@@ -431,8 +443,8 @@ pub async fn handle_dep_remove(
     // `CrossRepo { owner, repo, .. }` pointing at the configured repo
     // back to `Local`, so all downstream dispatch (edge check, Status
     // update scope) treats aliased and canonical local forms identically.
-    let source_raw = parse_ref("source", &params.source)?;
-    let target_raw = parse_ref("target", &params.target)?;
+    let source_raw = parse_ref(&params.source)?;
+    let target_raw = parse_ref(&params.target)?;
     let source_ref = source_raw.normalize(&owner, &repo);
     let target_ref = target_raw.normalize(&owner, &repo);
 
@@ -549,19 +561,19 @@ mod tests {
 
     #[test]
     fn parse_ref_accepts_bare_local_number() {
-        let r = parse_ref("source", "42").expect("bare local number should parse");
+        let r = parse_ref("42").expect("bare local number should parse");
         assert_eq!(r, IssueRef::Local(42));
     }
 
     #[test]
     fn parse_ref_accepts_hash_prefixed_local() {
-        let r = parse_ref("source", "#7").expect("hash-prefixed local should parse");
+        let r = parse_ref("#7").expect("hash-prefixed local should parse");
         assert_eq!(r, IssueRef::Local(7));
     }
 
     #[test]
     fn parse_ref_accepts_cross_repo() {
-        let r = parse_ref("target", "acme/widgets#99").expect("cross-repo reference should parse");
+        let r = parse_ref("acme/widgets#99").expect("cross-repo reference should parse");
         assert_eq!(
             r,
             IssueRef::CrossRepo {
@@ -573,14 +585,17 @@ mod tests {
     }
 
     #[test]
-    fn parse_ref_rejects_garbage_with_field_tag() {
-        let err = parse_ref("source", "not-a-ref").expect_err("garbage should not parse");
+    fn parse_ref_rejects_garbage_surfaces_invalid_issue_ref() {
+        // Per SPEC §11.1 / plan Task 02.02 "Error-side wiring", a
+        // malformed IssueRef at the tool boundary MUST surface as
+        // `DomainError::InvalidIssueRef { input }` lifted through
+        // `github_error_to_mcp` — i.e. MCP `INVALID_PARAMS` with the
+        // raw input preserved in the message. The previous `field`
+        // tag (`source`/`target`) was dropped with unblock-6xj because
+        // the spec variant only carries `input`; the position is
+        // implicit in the caller's parse ordering.
+        let err = parse_ref("not-a-ref").expect_err("garbage should not parse");
         assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
-        assert!(
-            err.message.contains("source"),
-            "error should name the field: {}",
-            err.message,
-        );
         assert!(
             err.message.contains("not-a-ref"),
             "error should include the raw value: {}",
