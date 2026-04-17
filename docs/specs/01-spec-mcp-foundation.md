@@ -828,7 +828,8 @@ query($owner: String!, $repo: String!, $cursor: String) {
 |---|---|---|
 | `depends` / `dep_remove` | Yes | Dependencies are the core cross-repo use case |
 | `show` / `fetch_issue_ref` | Yes | Inspect cross-repo blockers |
-| `close`, `reopen`, `update`, `claim`, `comment` | No | Scoped to configured repo for safety |
+| `close` | Cascade side-effects only | The `closeIssue` mutation itself remains scoped to the configured repo for safety; cross-repo **dependents unblocked by the close** receive the Status → `ready` + unblock-comment side effects per §8.2 step 6 / §11.4 row 4. Cross-repo cascade side effects are best-effort: a foreign repo on which the configured token lacks write scope fails with a logged warning and does not abort the close. |
+| `reopen`, `update`, `claim`, `comment` | No | Scoped to configured repo for safety |
 | `create` (`blocked_by` param) | Yes | Cross-repo deps at creation time |
 
 ### 5.7 Projects V2 field management

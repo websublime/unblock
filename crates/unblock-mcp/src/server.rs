@@ -1065,13 +1065,47 @@ impl UnblockServer {
             // Phase 3: For each newly unblocked issue, update project fields and
             // post an unblock comment. Each update is best-effort — failures are
             // logged but do not abort the cascade.
+            //
+            // SPEC §8.2 step 6 / §11.4 row 4 / §5.6 row `close`: cross-repo
+            // dependents ARE still cascade-updated. The loop dispatches via
+            // the `*_ref` primitives so the comment and issue-fetch land on
+            // the correct `(owner, repo)` — bare-`u64` variants would silently
+            // retarget the configured repo (unblock-eos.13 finding RISK #2).
+            // Project-field updates remain scoped to the configured board
+            // because `project_id` / `item_id` are globally scoped node IDs;
+            // if a cross-repo dependent is not on the board,
+            // `get_project_item_id` fails best-effort and the comment still
+            // lands — matching the spec intent of "cascade side-effects only".
+            let configured_owner = client.owner().to_owned();
+            let configured_repo = client.repo().to_owned();
             for cascaded_qid in &cascade {
                 let cascaded_number = cascaded_qid.number;
-                // Post unblock comment.
+                // Normalize to IssueRef: a QualifiedId whose (owner, repo)
+                // matches the configured repo collapses to Local so the
+                // existing single-repo REST path (with its URL formatting)
+                // keeps running unchanged; foreign refs flow through the
+                // *_in_repo branch.
+                let cascaded_ref = if cascaded_qid.owner == configured_owner
+                    && cascaded_qid.repo == configured_repo
+                {
+                    unblock_core::types::IssueRef::Local(cascaded_number)
+                } else {
+                    unblock_core::types::IssueRef::CrossRepo {
+                        owner: cascaded_qid.owner.clone(),
+                        repo: cascaded_qid.repo.clone(),
+                        number: cascaded_number,
+                    }
+                };
+                // Post unblock comment. Stays best-effort per the pre-existing
+                // §8.2 step 6 semantics — the token may lack write scope on a
+                // foreign repo and we must not tear down the cascade for a
+                // permission error (see unblock-eos.13 investigation Risks).
+                // Qualified ID is logged so operators can distinguish
+                // local-repo failures from cross-repo permission denials.
                 let comment_body = format!("\u{2705} Unblocked by closing #{issue_number}");
-                if let Err(e) = client.add_comment(cascaded_number, comment_body).await {
+                if let Err(e) = client.add_comment_ref(&cascaded_ref, comment_body).await {
                     tracing::warn!(
-                        cascaded_number,
+                        cascaded_qid = %cascaded_qid,
                         error = %e,
                         "Failed to post unblock comment on cascaded issue"
                     );
@@ -1083,8 +1117,11 @@ impl UnblockServer {
                 if let Some(field_ids) = client.field_ids().await
                     && let Ok(project_info) = client.resolve_project_info().await
                 {
-                    // Fetch the cascaded issue to get its node_id and current status.
-                    match client.fetch_issue(cascaded_number).await {
+                    // Fetch the cascaded issue (by ref, not bare number) to
+                    // get its node_id and current status. For cross-repo
+                    // dependents this reads from the foreign repo; for local
+                    // the _ref variant delegates to the unchanged path.
+                    match client.fetch_issue_ref(&cascaded_ref).await {
                         Ok(cascaded_issue) => {
                             if let Ok(item_id) = client
                                 .get_project_item_id(&cascaded_issue.node_id, &project_info.id)
@@ -1103,21 +1140,24 @@ impl UnblockServer {
                                         .await
                                 {
                                     tracing::warn!(
-                                        cascaded_number,
+                                        cascaded_qid = %cascaded_qid,
                                         error = %e,
                                         "Failed to set Status=ready on cascaded issue"
                                     );
                                 }
                             } else {
+                                // Expected for cross-repo dependents that
+                                // were never added as ProjectV2 items on the
+                                // configured board — best-effort per §5.6.
                                 tracing::warn!(
-                                    cascaded_number,
+                                    cascaded_qid = %cascaded_qid,
                                     "Failed to get project item ID for cascaded issue"
                                 );
                             }
                         }
                         Err(e) => {
                             tracing::warn!(
-                                cascaded_number,
+                                cascaded_qid = %cascaded_qid,
                                 error = %e,
                                 "Failed to fetch cascaded issue for field updates"
                             );

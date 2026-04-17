@@ -95,6 +95,8 @@ pub struct CallCounts {
     reopen_issue: AtomicUsize,
     search_issues: AtomicUsize,
     add_comment: AtomicUsize,
+    add_comment_in_repo: AtomicUsize,
+    add_comment_ref: AtomicUsize,
     update_issue_body: AtomicUsize,
     add_labels_to_issue: AtomicUsize,
     remove_label_from_issue: AtomicUsize,
@@ -149,6 +151,8 @@ impl CallCounts {
         reopen_issue,
         search_issues,
         add_comment,
+        add_comment_in_repo,
+        add_comment_ref,
         update_issue_body,
         add_labels_to_issue,
         remove_label_from_issue,
@@ -198,6 +202,8 @@ impl CallCounts {
             reopen_issue,
             search_issues,
             add_comment,
+            add_comment_in_repo,
+            add_comment_ref,
             update_issue_body,
             add_labels_to_issue,
             remove_label_from_issue,
@@ -254,6 +260,13 @@ pub struct Stubs {
     reopen_issue: Mutex<VecDeque<Result<(), Error>>>,
     search_issues: Mutex<VecDeque<Result<Vec<IssueSummary>, Error>>>,
     add_comment: Mutex<VecDeque<Result<String, Error>>>,
+    add_comment_in_repo: Mutex<VecDeque<Result<String, Error>>>,
+    add_comment_ref: Mutex<VecDeque<Result<String, Error>>>,
+    /// Argument-aware log for `add_comment_ref` invocations — stores every
+    /// [`IssueRef`] the mock saw, in call order. Tests use this to assert
+    /// that the close cascade dispatched against the qualified refs,
+    /// covering SPEC §8.2 step 6 / §11.4 row 4.
+    add_comment_ref_calls: Mutex<Vec<IssueRef>>,
     update_issue_body: Mutex<VecDeque<Result<(), Error>>>,
     add_labels_to_issue: Mutex<VecDeque<Result<(), Error>>>,
     remove_label_from_issue: Mutex<VecDeque<Result<(), Error>>>,
@@ -319,6 +332,28 @@ impl MockGitHubClient {
     #[must_use]
     pub fn calls(&self) -> &CallCounts {
         &self.calls
+    }
+
+    /// Returns a snapshot of every [`IssueRef`] passed to
+    /// [`add_comment_ref`](GitHubApi::add_comment_ref), in call order.
+    ///
+    /// Unlike the bare counter on [`CallCounts`], this lets tests assert
+    /// that the close-cascade Phase-3 loop (spec §8.2 step 6) dispatched
+    /// the comment against the correct qualified ref — required to cover
+    /// the SPEC §11.4 row 4 contract.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the internal log `Mutex` is poisoned, which can
+    /// only happen if a previous test thread panicked while holding the
+    /// lock — never in normal use.
+    #[must_use]
+    pub fn add_comment_ref_calls(&self) -> Vec<IssueRef> {
+        self.stubs
+            .add_comment_ref_calls
+            .lock()
+            .expect("mock call-log mutex poisoned")
+            .clone()
     }
 }
 
@@ -403,6 +438,8 @@ push_result!(close_issue, push_close_issue, ());
 push_result!(reopen_issue, push_reopen_issue, ());
 push_result!(search_issues, push_search_issues, Vec<IssueSummary>);
 push_result!(add_comment, push_add_comment, String);
+push_result!(add_comment_in_repo, push_add_comment_in_repo, String);
+push_result!(add_comment_ref, push_add_comment_ref, String);
 push_result!(update_issue_body, push_update_issue_body, ());
 push_result!(add_labels_to_issue, push_add_labels_to_issue, ());
 push_result!(remove_label_from_issue, push_remove_label_from_issue, ());
@@ -602,6 +639,32 @@ impl GitHubApi for MockGitHubClient {
     async fn add_comment(&self, _number: u64, _body: String) -> Result<String, Error> {
         self.calls.add_comment.fetch_add(1, Ordering::SeqCst);
         pop_or_unstubbed(&self.stubs.add_comment, "add_comment")
+    }
+
+    async fn add_comment_in_repo(
+        &self,
+        _owner: &str,
+        _repo: &str,
+        _number: u64,
+        _body: String,
+    ) -> Result<String, Error> {
+        self.calls
+            .add_comment_in_repo
+            .fetch_add(1, Ordering::SeqCst);
+        pop_or_unstubbed(&self.stubs.add_comment_in_repo, "add_comment_in_repo")
+    }
+
+    async fn add_comment_ref(&self, issue_ref: &IssueRef, _body: String) -> Result<String, Error> {
+        self.calls.add_comment_ref.fetch_add(1, Ordering::SeqCst);
+        // Record the qualified ref for argument-aware assertions (see
+        // `MockGitHubClient::add_comment_ref_calls`). The clone keeps the
+        // log independent of the caller's borrow scope.
+        self.stubs
+            .add_comment_ref_calls
+            .lock()
+            .expect("mock call-log mutex poisoned")
+            .push(issue_ref.clone());
+        pop_or_unstubbed(&self.stubs.add_comment_ref, "add_comment_ref")
     }
 
     async fn update_issue_body(&self, _number: u64, _body: String) -> Result<(), Error> {
@@ -935,5 +998,99 @@ mod tests {
             .expect("queued Ok should succeed");
         assert!(second.is_empty());
         assert_eq!(m.calls().search_issues(), 2);
+    }
+
+    // ── add_comment_ref / add_comment_in_repo (unblock-eos.13) ────────────
+
+    #[tokio::test]
+    async fn add_comment_in_repo_counter_and_queue_pop() {
+        let m = mock();
+        assert_eq!(m.calls().add_comment_in_repo(), 0);
+
+        // Empty queue → MockNotStubbed fallback named by the method.
+        let first = m
+            .add_comment_in_repo("acme", "widgets", 42, "body".to_owned())
+            .await;
+        assert!(matches!(
+            first,
+            Err(Error::MockNotStubbed {
+                method: "add_comment_in_repo"
+            })
+        ));
+        assert_eq!(m.calls().add_comment_in_repo(), 1);
+
+        // Queued Ok pops — returns the queued html_url.
+        m.push_add_comment_in_repo(Ok("https://x.invalid/c".to_owned()));
+        let second = m
+            .add_comment_in_repo("other", "repo", 99, "body".to_owned())
+            .await
+            .expect("queued Ok should succeed");
+        assert_eq!(second, "https://x.invalid/c");
+        assert_eq!(m.calls().add_comment_in_repo(), 2);
+    }
+
+    #[tokio::test]
+    async fn add_comment_ref_records_arguments_in_order() {
+        let m = mock();
+        assert!(
+            m.add_comment_ref_calls().is_empty(),
+            "no calls yet → empty log"
+        );
+
+        // Exercise the two variants in a deterministic sequence so tests
+        // can assert the call LOG preserves insertion order.
+        m.push_add_comment_ref(Ok("h1".to_owned()));
+        m.push_add_comment_ref(Ok("h2".to_owned()));
+
+        let _ = m
+            .add_comment_ref(&IssueRef::Local(5), "body-local".to_owned())
+            .await
+            .expect("stubbed Ok");
+        let _ = m
+            .add_comment_ref(
+                &IssueRef::CrossRepo {
+                    owner: "other".to_owned(),
+                    repo: "repo".to_owned(),
+                    number: 99,
+                },
+                "body-cross".to_owned(),
+            )
+            .await
+            .expect("stubbed Ok");
+
+        // Counter reflects both dispatches.
+        assert_eq!(m.calls().add_comment_ref(), 2);
+        // Argument-aware log preserves order AND ref identity.
+        let log = m.add_comment_ref_calls();
+        assert_eq!(
+            log,
+            vec![
+                IssueRef::Local(5),
+                IssueRef::CrossRepo {
+                    owner: "other".to_owned(),
+                    repo: "repo".to_owned(),
+                    number: 99,
+                },
+            ],
+            "add_comment_ref_calls() MUST record every IssueRef in call order"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_comment_ref_empty_queue_falls_back_to_mock_not_stubbed() {
+        let m = mock();
+        let result = m
+            .add_comment_ref(&IssueRef::Local(1), "body".to_owned())
+            .await;
+        assert!(matches!(
+            result,
+            Err(Error::MockNotStubbed {
+                method: "add_comment_ref"
+            })
+        ));
+        // Even on the MockNotStubbed fallback the argument IS recorded —
+        // this guarantees argument-aware assertions work regardless of
+        // whether the test chose to stub the return value.
+        assert_eq!(m.add_comment_ref_calls(), vec![IssueRef::Local(1)]);
     }
 }

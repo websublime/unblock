@@ -179,6 +179,33 @@ pub trait GitHubApi: Send + Sync {
     /// Adds a comment to an issue; returns the comment node id.
     async fn add_comment(&self, number: u64, body: String) -> Result<String, Error>;
 
+    /// Adds a comment to an issue in the specified `owner/repo`.
+    ///
+    /// Cross-repo counterpart of [`add_comment`](Self::add_comment). The
+    /// target repository is supplied by the caller instead of being read
+    /// from the trait object's configured `(owner, repo)`. Used by the
+    /// `close` cascade (spec §8.2 step 6 / §11.4 row 4) to deliver unblock
+    /// comments to foreign dependents when the configured token has write
+    /// scope on the target repo.
+    async fn add_comment_in_repo(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+        body: String,
+    ) -> Result<String, Error>;
+
+    /// Adds a comment to an issue identified by an [`IssueRef`].
+    ///
+    /// Dispatches [`Local`](IssueRef::Local) refs to
+    /// [`add_comment`](Self::add_comment) and
+    /// [`CrossRepo`](IssueRef::CrossRepo) refs to
+    /// [`add_comment_in_repo`](Self::add_comment_in_repo). Mirrors
+    /// [`fetch_issue_ref`](Self::fetch_issue_ref) and is the primitive
+    /// behind the cross-repo close-cascade contract (spec §5.6 / §8.2
+    /// step 6 / §11.4 row 4).
+    async fn add_comment_ref(&self, issue_ref: &IssueRef, body: String) -> Result<String, Error>;
+
     /// Replaces the body of an issue.
     async fn update_issue_body(&self, number: u64, body: String) -> Result<(), Error>;
 
@@ -424,6 +451,20 @@ impl GitHubApi for GitHubClient {
 
     async fn add_comment(&self, number: u64, body: String) -> Result<String, Error> {
         GitHubClient::add_comment(self, number, body).await
+    }
+
+    async fn add_comment_in_repo(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+        body: String,
+    ) -> Result<String, Error> {
+        GitHubClient::add_comment_in_repo(self, owner, repo, number, body).await
+    }
+
+    async fn add_comment_ref(&self, issue_ref: &IssueRef, body: String) -> Result<String, Error> {
+        GitHubClient::add_comment_ref(self, issue_ref, body).await
     }
 
     async fn update_issue_body(&self, number: u64, body: String) -> Result<(), Error> {
