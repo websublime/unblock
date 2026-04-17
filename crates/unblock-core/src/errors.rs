@@ -10,6 +10,23 @@
 
 use snafu::prelude::*;
 
+use crate::types::IssueRef;
+
+/// Renders a list of [`IssueRef`] via their `Display` impl for use in
+/// `#[snafu(display(...))]` attributes.
+///
+/// Joins each ref with a comma + space so the output reads like
+/// `"#1, #2, acme/widgets#3"` — matching the `Display`-based rendering
+/// contract at SPEC §11.1 and avoiding the variant-leaking `Debug`
+/// formatter (`[Local(1), Local(2)]`).
+fn render_blockers(blockers: &[IssueRef]) -> String {
+    blockers
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Domain-level errors for the unblock system.
 ///
 /// Each variant represents a specific business-rule violation or lookup failure.
@@ -38,12 +55,20 @@ pub enum DomainError {
     },
 
     /// The issue has unresolved blocking dependencies.
-    #[snafu(display("Issue #{number} is blocked by: {blockers:?}"))]
+    ///
+    /// `blockers` carries [`IssueRef`] values so cross-repo blockers
+    /// (which are observable via GitHub's native `trackedByIssues`
+    /// connection) render with `owner/repo#n` qualification in the
+    /// error message, rather than aliasing to a same-numbered local
+    /// issue. See SPEC §11.1 Decision 1 (2026-04-17).
+    #[snafu(display("Issue #{number} is blocked by: {}", render_blockers(blockers)))]
     IssueBlocked {
         /// The issue number.
         number: u64,
-        /// Issue numbers that block this issue.
-        blockers: Vec<u64>,
+        /// Issue references that block this issue. Each entry is an
+        /// [`IssueRef`] so cross-repo blockers are disambiguated from
+        /// same-numbered local issues in the rendered message.
+        blockers: Vec<IssueRef>,
     },
 
     /// The issue is deferred until a future date.
@@ -77,23 +102,38 @@ pub enum DomainError {
     },
 
     /// Adding the dependency would create a cycle in the graph.
-    #[snafu(display("Circular dependency: adding #{source} → #{target} creates cycle"))]
+    ///
+    /// `source` / `target` carry [`IssueRef`] so cross-repo participants
+    /// render with `owner/repo#n` qualification. The literal `#` prefix
+    /// is intentionally absent from the format string because
+    /// `IssueRef::Local(n)` renders as `#n` via its own `Display` impl —
+    /// adding the prefix here would produce `##n` in the output. See
+    /// SPEC §11.1 Decision 1 (2026-04-17) and the byte-for-byte
+    /// preservation contract for the `Local`-only case.
+    #[snafu(display("Circular dependency: adding {source} → {target} creates cycle"))]
     CircularDependency {
-        /// The source issue number of the proposed edge.
+        /// The source issue reference of the proposed edge.
         #[snafu(source(false))]
-        source: u64,
-        /// The target issue number of the proposed edge.
-        target: u64,
+        source: IssueRef,
+        /// The target issue reference of the proposed edge.
+        target: IssueRef,
     },
 
     /// The blocking relationship already exists.
-    #[snafu(display("Blocking relationship already exists: #{source} → #{target}"))]
+    ///
+    /// `source` / `target` carry [`IssueRef`] so cross-repo participants
+    /// render with `owner/repo#n` qualification. The literal `#` prefix
+    /// is intentionally absent from the format string because
+    /// `IssueRef::Local(n)` renders as `#n` via its own `Display` impl —
+    /// adding the prefix here would produce `##n` in the output. See
+    /// SPEC §11.1 Decision 1 (2026-04-17).
+    #[snafu(display("Blocking relationship already exists: {source} → {target}"))]
     DuplicateDependency {
-        /// The source issue number.
+        /// The source issue reference.
         #[snafu(source(false))]
-        source: u64,
-        /// The target issue number.
-        target: u64,
+        source: IssueRef,
+        /// The target issue reference.
+        target: IssueRef,
     },
 
     /// A referenced field does not exist.
@@ -165,7 +205,7 @@ mod tests {
     fn issue_blocked_display_and_status() {
         let err = IssueBlockedSnafu {
             number: 10_u64,
-            blockers: vec![1_u64, 2],
+            blockers: vec![IssueRef::Local(1), IssueRef::Local(2)],
         }
         .build();
         let msg = err.to_string();
@@ -215,8 +255,8 @@ mod tests {
     #[test]
     fn circular_dependency_display_and_status() {
         let err = CircularDependencySnafu {
-            source: 1_u64,
-            target: 2_u64,
+            source: IssueRef::Local(1),
+            target: IssueRef::Local(2),
         }
         .build();
         let msg = err.to_string();
@@ -227,15 +267,132 @@ mod tests {
     }
 
     #[test]
+    fn circular_dependency_display_byte_for_byte_local_only() {
+        // SPEC §11.1:1722 locks the Local-only Display form:
+        // "Circular dependency: adding #1 → #2 creates cycle".
+        // This guards against format-string drift now that `IssueRef`
+        // owns the `#` prefix.
+        let err = CircularDependencySnafu {
+            source: IssueRef::Local(1),
+            target: IssueRef::Local(2),
+        }
+        .build();
+        assert_eq!(
+            err.to_string(),
+            "Circular dependency: adding #1 → #2 creates cycle"
+        );
+    }
+
+    #[test]
+    fn circular_dependency_cross_repo_display() {
+        // Cross-repo source; local target. Verifies `owner/repo#n` is
+        // surfaced in the error message (plan Task 02.02 contract).
+        let err = CircularDependencySnafu {
+            source: IssueRef::CrossRepo {
+                owner: "acme".to_owned(),
+                repo: "widgets".to_owned(),
+                number: 1,
+            },
+            target: IssueRef::Local(2),
+        }
+        .build();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("acme/widgets#1"),
+            "expected qualified source ref in message, got: {msg}"
+        );
+        assert!(msg.contains("#2"), "expected local target ref, got: {msg}");
+        assert!(msg.contains("cycle"));
+        assert_eq!(err.status_code(), 422);
+    }
+
+    #[test]
     fn duplicate_dependency_display_and_status() {
         let err = DuplicateDependencySnafu {
-            source: 4_u64,
-            target: 5_u64,
+            source: IssueRef::Local(4),
+            target: IssueRef::Local(5),
         }
         .build();
         let msg = err.to_string();
         assert!(msg.contains('4'));
         assert!(msg.contains('5'));
+        assert_eq!(err.status_code(), 409);
+    }
+
+    #[test]
+    fn duplicate_dependency_display_byte_for_byte_local_only() {
+        // SPEC §11.1:1723 locks the Local-only Display form:
+        // "Blocking relationship already exists: #4 → #5".
+        let err = DuplicateDependencySnafu {
+            source: IssueRef::Local(4),
+            target: IssueRef::Local(5),
+        }
+        .build();
+        assert_eq!(
+            err.to_string(),
+            "Blocking relationship already exists: #4 → #5"
+        );
+    }
+
+    #[test]
+    fn duplicate_dependency_cross_repo_display() {
+        // Cross-repo source AND cross-repo target (both in the same
+        // foreign repo — the shape produced by
+        // `add_blocked_by_refs` cross-repo source arm).
+        let err = DuplicateDependencySnafu {
+            source: IssueRef::CrossRepo {
+                owner: "acme".to_owned(),
+                repo: "widgets".to_owned(),
+                number: 4,
+            },
+            target: IssueRef::CrossRepo {
+                owner: "acme".to_owned(),
+                repo: "widgets".to_owned(),
+                number: 5,
+            },
+        }
+        .build();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("acme/widgets#4"),
+            "expected qualified source ref in message, got: {msg}"
+        );
+        assert!(
+            msg.contains("acme/widgets#5"),
+            "expected qualified target ref in message, got: {msg}"
+        );
+        assert_eq!(err.status_code(), 409);
+    }
+
+    #[test]
+    fn issue_blocked_cross_repo_display() {
+        // Verifies the `render_blockers` Display helper replaces the
+        // legacy `{blockers:?}` Debug formatter: variant names must NOT
+        // leak, and each cross-repo blocker must carry its
+        // `owner/repo#n` qualification.
+        let err = IssueBlockedSnafu {
+            number: 10_u64,
+            blockers: vec![
+                IssueRef::CrossRepo {
+                    owner: "acme".to_owned(),
+                    repo: "widgets".to_owned(),
+                    number: 1,
+                },
+                IssueRef::Local(2),
+            ],
+        }
+        .build();
+        let msg = err.to_string();
+        assert!(msg.contains("10"), "expected issue number, got: {msg}");
+        assert!(
+            msg.contains("acme/widgets#1"),
+            "expected qualified cross-repo blocker, got: {msg}"
+        );
+        assert!(msg.contains("#2"), "expected local blocker ref, got: {msg}");
+        assert!(
+            !msg.contains("Local(") && !msg.contains("CrossRepo"),
+            "Debug-formatted variant names must not leak into Display, got: {msg}"
+        );
         assert_eq!(err.status_code(), 409);
     }
 
@@ -273,7 +430,7 @@ mod tests {
             .build(),
             IssueBlockedSnafu {
                 number: 1_u64,
-                blockers: vec![2_u64],
+                blockers: vec![IssueRef::Local(2)],
             }
             .build(),
             IssueDeferredSnafu {
@@ -285,13 +442,13 @@ mod tests {
             IssueNotClosedSnafu { number: 1_u64 }.build(),
             IssueAlreadyOpenSnafu { number: 1_u64 }.build(),
             CircularDependencySnafu {
-                source: 1_u64,
-                target: 2_u64,
+                source: IssueRef::Local(1),
+                target: IssueRef::Local(2),
             }
             .build(),
             DuplicateDependencySnafu {
-                source: 1_u64,
-                target: 2_u64,
+                source: IssueRef::Local(1),
+                target: IssueRef::Local(2),
             }
             .build(),
             FieldNotFoundSnafu {

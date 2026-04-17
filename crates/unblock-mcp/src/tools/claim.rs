@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use unblock_core::errors::{
     AlreadyClaimedSnafu, IssueBlockedSnafu, IssueClosedSnafu, IssueDeferredSnafu, ValidationSnafu,
 };
-use unblock_core::types::{IssueState, RelatedIssue, Status};
+use unblock_core::types::{IssueRef, IssueState, RelatedIssue, Status};
 
 /// Input parameters for the `claim` MCP tool.
 ///
@@ -87,11 +87,20 @@ pub(crate) fn validate_claimable(
     }
 
     // Check 2: blocked (filter to open blockers).
-    let open_blockers: Vec<u64> = candidate
+    //
+    // GitHub's native `trackedByIssues` connection — the source of
+    // `candidate.blocked_by` — only surfaces blockers in the same
+    // `owner/repo` as the issue being claimed (see SPEC §8.2 / mutations
+    // `add_blocked_by_refs` cross-repo commentary). Since `claim`
+    // operates on a local issue, all blockers it observes live in the
+    // configured repo; we wrap each as `IssueRef::Local(r.number)`.
+    // If `RelatedIssue` is later extended to carry `owner/repo`, this
+    // mapping trivially evolves to produce `IssueRef::CrossRepo`.
+    let open_blockers: Vec<IssueRef> = candidate
         .blocked_by
         .iter()
         .filter(|r| r.state == IssueState::Open)
-        .map(|r| r.number)
+        .map(|r| IssueRef::Local(r.number))
         .collect();
 
     if !open_blockers.is_empty() {
