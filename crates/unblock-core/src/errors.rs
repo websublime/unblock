@@ -4,9 +4,10 @@
 //! Each variant carries the relevant context and maps to an HTTP status code
 //! via `DomainError::status_code`.
 //!
-//! Variants: `IssueNotFound`, `AlreadyClaimed`, `IssueBlocked`, `IssueDeferred`,
+//! 13 variants: `IssueNotFound`, `AlreadyClaimed`, `IssueBlocked`, `IssueDeferred`,
 //! `IssueClosed`, `IssueNotClosed`, `IssueAlreadyOpen`, `CircularDependency`,
-//! `DuplicateDependency`, `FieldNotFound`, `Validation`.
+//! `DuplicateDependency`, `FieldNotFound`, `Validation`, `InvalidIssueRef`,
+//! `CrossRepoAccessDenied`.
 
 use snafu::prelude::*;
 
@@ -149,6 +150,33 @@ pub enum DomainError {
         /// Description of the validation failure.
         message: String,
     },
+
+    /// An issue reference string failed to parse into an [`IssueRef`].
+    ///
+    /// Emitted whenever `IssueRef::from_str` fails on tool input at the
+    /// MCP tool boundary (`show`, `depends`, `dep_remove`,
+    /// `create.blocked_by`). Carries the raw user-provided string so
+    /// agents can see exactly what they sent. Per SPEC §11.1 this maps
+    /// to HTTP 400.
+    #[snafu(display("Invalid issue reference: '{input}'"))]
+    InvalidIssueRef {
+        /// The raw user input that failed to parse as an [`IssueRef`].
+        input: String,
+    },
+
+    /// The configured token lacks access to a referenced cross-repo issue.
+    ///
+    /// Emitted when a GraphQL fetch against a cross-repo node returns
+    /// `FORBIDDEN` (or equivalent HTTP 403). Carries the target
+    /// `owner/repo` so the agent can surface which cross-repo access
+    /// the token is missing. Per SPEC §11.1 this maps to HTTP 403.
+    #[snafu(display("Access denied to cross-repo issue {owner}/{repo}"))]
+    CrossRepoAccessDenied {
+        /// The owner of the cross-repo the token cannot access.
+        owner: String,
+        /// The repository name of the cross-repo the token cannot access.
+        repo: String,
+    },
 }
 
 impl DomainError {
@@ -162,7 +190,9 @@ impl DomainError {
             // 404 Not Found
             Self::IssueNotFound { .. } | Self::FieldNotFound { .. } => 404,
             // 400 Bad Request
-            Self::Validation { .. } => 400,
+            Self::Validation { .. } | Self::InvalidIssueRef { .. } => 400,
+            // 403 Forbidden — cross-repo access denial
+            Self::CrossRepoAccessDenied { .. } => 403,
             // 422 Unprocessable Entity
             Self::CircularDependency { .. } => 422,
             // 409 Conflict
@@ -419,6 +449,46 @@ mod tests {
     }
 
     #[test]
+    fn invalid_issue_ref_display_and_status() {
+        // SPEC §11.1 — `InvalidIssueRef { input }` surfaces the raw user
+        // input in the Display output so agents can see exactly what
+        // they sent, and maps to HTTP 400.
+        let err = InvalidIssueRefSnafu {
+            input: "not-a-ref".to_owned(),
+        }
+        .build();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not-a-ref"),
+            "expected raw input in message, got: {msg}"
+        );
+        assert_eq!(err.status_code(), 400);
+    }
+
+    #[test]
+    fn cross_repo_access_denied_display_and_status() {
+        // SPEC §11.1 — `CrossRepoAccessDenied { owner, repo }` surfaces
+        // the target `owner/repo` so agents know which cross-repo their
+        // token cannot access. Maps to HTTP 403 (first variant to claim
+        // this status code in the domain-error bucket).
+        let err = CrossRepoAccessDeniedSnafu {
+            owner: "acme".to_owned(),
+            repo: "widgets".to_owned(),
+        }
+        .build();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("acme"),
+            "expected owner in message, got: {msg}"
+        );
+        assert!(
+            msg.contains("widgets"),
+            "expected repo in message, got: {msg}"
+        );
+        assert_eq!(err.status_code(), 403);
+    }
+
+    #[test]
     fn all_variants_implement_error_trait() {
         // Verify DomainError implements std::error::Error by using it as &dyn Error
         let errors: Vec<DomainError> = vec![
@@ -457,6 +527,15 @@ mod tests {
             .build(),
             ValidationSnafu {
                 message: "bad".to_owned(),
+            }
+            .build(),
+            InvalidIssueRefSnafu {
+                input: "bad-ref".to_owned(),
+            }
+            .build(),
+            CrossRepoAccessDeniedSnafu {
+                owner: "acme".to_owned(),
+                repo: "widgets".to_owned(),
             }
             .build(),
         ];
