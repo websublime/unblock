@@ -390,6 +390,17 @@ async fn close_dispatches_through_dyn_vtable() {
 
     assert_eq!(result.issue, 8);
     assert!(result.unblocked.is_empty());
+    // SPEC §11.4 / §14 Invariant 14(b): all-local fixture → None, elided from JSON.
+    assert!(
+        result.cross_repo_refs.is_none(),
+        "all-local fixture must not populate cross_repo_refs; got: {:?}",
+        result.cross_repo_refs,
+    );
+    let json = serde_json::to_value(&result).expect("serialize");
+    assert!(
+        json.get("cross_repo_refs").is_none(),
+        "None cross_repo_refs must be elided from JSON: {json}"
+    );
     assert_eq!(mock.calls().fetch_issue(), 1);
     assert_eq!(mock.calls().close_issue(), 1);
     assert_eq!(mock.calls().fetch_graph_data(), 1);
@@ -424,6 +435,17 @@ async fn close_with_empty_reason_skips_comment() {
         mock.calls().add_comment(),
         0,
         "empty/whitespace reason must not post a comment"
+    );
+    // SPEC §11.4 / §14 Invariant 14(b): all-local fixture → None, elided from JSON.
+    assert!(
+        result.cross_repo_refs.is_none(),
+        "all-local fixture must not populate cross_repo_refs; got: {:?}",
+        result.cross_repo_refs,
+    );
+    let json = serde_json::to_value(&result).expect("serialize");
+    assert!(
+        json.get("cross_repo_refs").is_none(),
+        "None cross_repo_refs must be elided from JSON: {json}"
     );
 }
 

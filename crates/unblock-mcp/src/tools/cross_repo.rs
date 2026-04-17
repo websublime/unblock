@@ -1,14 +1,15 @@
 //! Shared primitives for SPEC §11.4 "Cross-Repo Response Contract"
 //! projection.
 //!
-//! Prior to this module, `ready.rs`, `dep_cycles.rs`, and (now) `prime.rs`
-//! each held local copies of the projection logic:
+//! Prior to this module, `ready.rs`, `dep_cycles.rs`, `prime.rs`, and
+//! (now) the `close` handler each held local copies of the projection
+//! logic:
 //!
 //! 1. Walk the source collection (cycles for `dep_cycles` / `prime`; open
-//!    issues with blockers for `ready`) and partition references into
-//!    **local** (keep the bare `u64` number in the response) vs
-//!    **cross-repo** (collect the `owner/repo#number` display string for
-//!    the §11.4 trailer).
+//!    issues with blockers for `ready`; the unblock cascade for `close`)
+//!    and partition references into **local** (keep the bare `u64`
+//!    number in the response) vs **cross-repo** (collect the
+//!    `owner/repo#number` display string for the §11.4 trailer).
 //! 2. Collect cross-repo references into a [`BTreeSet<String>`] keyed by
 //!    [`QualifiedId::Display`](unblock_core::types::QualifiedId) — the
 //!    `BTreeSet` gives us SPEC §14 Invariant 14 (a) determinism (dedup + lex
@@ -20,10 +21,10 @@
 //!
 //! The canonical primitives live here. Callers bring their own
 //! sum­mary-grammar closure so the tool-specific phrasing in SPEC §11.4 is
-//! preserved byte-for-byte — parity across all three tools is a user
+//! preserved byte-for-byte — parity across all four tools is a user
 //! non-negotiable and the summary strings are part of the public response
-//! envelope. See [`cycles_summary`] and [`ready_summary`] for the exact
-//! phrasing.
+//! envelope. See [`cycles_summary`], [`ready_summary`], and
+//! [`close_summary`] for the exact phrasing.
 //!
 //! # Non-goals
 //!
@@ -50,7 +51,7 @@
 //! - SPEC §14 Invariant 14 — response determinism.
 //! - ARCH §5.5 — cross-repo node keying via `QualifiedId`.
 //! - Beads `unblock-eos.2` (this extraction), `unblock-eos.7` (prime
-//!   adoption).
+//!   adoption), `unblock-iov` (close adoption).
 
 use std::collections::BTreeSet;
 
@@ -118,6 +119,43 @@ pub(crate) fn project_all_cycles(
         cycles.push(local);
     }
     (cycles, cross_repo_accum)
+}
+
+/// Project the unblock cascade (`Vec<QualifiedId>`) onto its local and
+/// cross-repo partitions.
+///
+/// Used by the `close` MCP tool per SPEC §8.2 flow step 9: local
+/// dependents are projected to bare `u64` numbers for
+/// `CloseResult.unblocked`; cross-repo dependents populate the
+/// [`CrossRepoRefs`] envelope per SPEC §11.4 (row 4 of the affected-tools
+/// table).
+///
+/// The local projection preserves the iteration order of `cascade`
+/// (petgraph Incoming-neighbour order, the same order the caller already
+/// iterated in Phase 3 of the close handler). The cross-repo set is a
+/// [`BTreeSet<String>`] keyed by
+/// [`QualifiedId::Display`](QualifiedId#impl-Display-for-QualifiedId)
+/// (`"owner/repo#number"`) so de-duplication is free and the final
+/// `Vec<String>` emerges lexicographically sorted — SPEC §14 Invariant
+/// 14 (b) determinism contract holds without an explicit `sort()` call.
+///
+/// Returns the local projection (may be empty if every cascade member
+/// was cross-repo) plus the cross-repo accumulator.
+pub(crate) fn project_cascade(
+    cascade: &[QualifiedId],
+    configured_owner: &str,
+    configured_repo: &str,
+) -> (Vec<u64>, BTreeSet<String>) {
+    let mut local: Vec<u64> = Vec::with_capacity(cascade.len());
+    let mut cross_repo_accum: BTreeSet<String> = BTreeSet::new();
+    for qid in cascade {
+        if qid.owner == configured_owner && qid.repo == configured_repo {
+            local.push(qid.number);
+        } else {
+            cross_repo_accum.insert(qid.to_string());
+        }
+    }
+    (local, cross_repo_accum)
 }
 
 /// Build the optional [`CrossRepoRefs`] envelope from the accumulated
@@ -197,6 +235,28 @@ pub(crate) fn ready_summary(n: usize) -> String {
     format!(
         "{n} cross-repo {noun} excluded local issue(s) from ready set",
         noun = if n == 1 { "blocker" } else { "blockers" },
+    )
+}
+
+/// Format the **close-cascade** italic summary per SPEC §11.4 (row 4
+/// of the affected-tools table at §11.4, phrasing per §8.2 line 1262).
+///
+/// Exact string (byte-for-byte — do not paraphrase):
+///
+/// - `n == 1` → ``"1 cross-repo dependent cascade-updated but omitted from `unblocked`"``
+/// - `n >= 2` → ``"{n} cross-repo dependents cascade-updated but omitted from `unblocked`"``
+///
+/// Used by `close` (JSON `cross_repo_refs.summary` field). The grammar
+/// mirrors [`cycles_summary`] / [`ready_summary`]: singular/plural noun
+/// (`dependent` / `dependents`) keyed off the count. Cross-repo
+/// dependents ARE still cascade-updated in Phase 3 of the close handler
+/// — the summary reports what the response projection omitted, not what
+/// the mutation skipped.
+#[must_use]
+pub(crate) fn close_summary(n: usize) -> String {
+    format!(
+        "{n} cross-repo {noun} cascade-updated but omitted from `unblocked`",
+        noun = if n == 1 { "dependent" } else { "dependents" },
     )
 }
 
@@ -365,6 +425,76 @@ mod tests {
         assert_eq!(
             ready_summary(7),
             "7 cross-repo blockers excluded local issue(s) from ready set"
+        );
+    }
+
+    // ── project_cascade ────────────────────────────────────────────────
+
+    #[test]
+    fn project_cascade_all_local_returns_local_numbers_no_cross_repo() {
+        let cascade = vec![qid("acme", "widgets", 10), qid("acme", "widgets", 11)];
+        let (local, accum) = project_cascade(&cascade, "acme", "widgets");
+        assert_eq!(local, vec![10, 11]);
+        assert!(accum.is_empty());
+    }
+
+    #[test]
+    fn project_cascade_all_cross_repo_returns_empty_local_populates_accum() {
+        let cascade = vec![qid("other", "repo", 99), qid("third", "repo", 1)];
+        let (local, accum) = project_cascade(&cascade, "acme", "widgets");
+        assert!(local.is_empty());
+        // BTreeSet gives lex order for free.
+        let collected: Vec<String> = accum.into_iter().collect();
+        assert_eq!(collected, vec!["other/repo#99", "third/repo#1"]);
+    }
+
+    #[test]
+    fn project_cascade_mixed_splits_local_from_cross_repo() {
+        let cascade = vec![
+            qid("acme", "widgets", 10),
+            qid("other", "repo", 99),
+            qid("acme", "widgets", 11),
+            qid("alpha", "upstream", 42),
+        ];
+        let (local, accum) = project_cascade(&cascade, "acme", "widgets");
+        // Cascade iteration order is preserved for locals.
+        assert_eq!(local, vec![10, 11]);
+        // BTreeSet iteration = lex order.
+        let collected: Vec<String> = accum.into_iter().collect();
+        assert_eq!(collected, vec!["alpha/upstream#42", "other/repo#99"]);
+    }
+
+    #[test]
+    fn project_cascade_dedups_repeated_cross_repo_nodes_via_btreeset() {
+        let cascade = vec![
+            qid("other", "repo", 99),
+            qid("other", "repo", 99),
+            qid("other", "repo", 99),
+        ];
+        let (_local, accum) = project_cascade(&cascade, "acme", "widgets");
+        assert_eq!(accum.len(), 1);
+        assert!(accum.contains("other/repo#99"));
+    }
+
+    // ── close_summary — SPEC §11.4 / §8.2 phrasing parity ──────────────
+
+    #[test]
+    fn close_summary_singular_matches_spec() {
+        assert_eq!(
+            close_summary(1),
+            "1 cross-repo dependent cascade-updated but omitted from `unblocked`"
+        );
+    }
+
+    #[test]
+    fn close_summary_plural_matches_spec() {
+        assert_eq!(
+            close_summary(2),
+            "2 cross-repo dependents cascade-updated but omitted from `unblocked`"
+        );
+        assert_eq!(
+            close_summary(5),
+            "5 cross-repo dependents cascade-updated but omitted from `unblocked`"
         );
     }
 }

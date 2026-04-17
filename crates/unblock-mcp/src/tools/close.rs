@@ -4,9 +4,19 @@
 //! fields (Status=Done), rebuilds the cache, then computes the unblock cascade.
 //! For each newly unblocked issue, updates its Projects V2 fields
 //! (Status=Backlog if not already `InProgress`) and posts an unblock comment.
+//!
+//! Cross-repo dependents (SPEC §11.4): when the cascade returned by
+//! [`compute_unblock_cascade`][`unblock_core::graph::DependencyGraph::compute_unblock_cascade`]
+//! touches a `QualifiedId` whose `(owner, repo)` differs from the configured
+//! repo, the dependent is STILL cascade-updated (same Status / comment path) —
+//! only the response shape differs. The bare-`u64` [`CloseResult::unblocked`]
+//! vector is scoped to the configured repo; cross-repo dependents are surfaced
+//! in [`CloseResult::cross_repo_refs`] (`Some` iff at least one cross-repo
+//! dependent participated in the cascade, per SPEC §14 Invariant 14(b)).
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use unblock_core::types::CrossRepoRefs;
 
 /// Input parameters for the `close` MCP tool.
 ///
@@ -25,13 +35,36 @@ pub struct CloseParams {
 ///
 /// Contains the closed issue number and the list of issue numbers that were
 /// fully unblocked by this close (the cascade).
+///
+/// Cross-repo cascade members (per SPEC §11.4) are surfaced separately in
+/// [`Self::cross_repo_refs`] rather than being flattened into
+/// [`Self::unblocked`] — bare `u64` cannot disambiguate across repositories.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct CloseResult {
     /// The closed issue number.
     pub issue: u64,
     /// Issue numbers that were fully unblocked by closing this issue.
+    ///
+    /// Scoped to the configured repo: only dependents whose
+    /// `(owner, repo) == (config.owner, config.repo)` appear here. Cross-repo
+    /// dependents that were cascade-updated are surfaced in
+    /// [`Self::cross_repo_refs`] per SPEC §11.4.
+    ///
     /// Only includes issues where ALL blockers are now closed.
     pub unblocked: Vec<u64>,
+    /// Cross-repo dependents that were cascade-updated but dropped from
+    /// the bare-`u64` projection of [`Self::unblocked`], per SPEC §11.4.
+    ///
+    /// `Some` iff at least one cascade member lived in a different
+    /// repository (i.e. its `(owner, repo)` differed from the configured
+    /// repo). `None` otherwise. Elided from the JSON envelope when
+    /// `None` via `#[serde(skip_serializing_if = "Option::is_none")]`.
+    ///
+    /// See SPEC §2.16 (shared type), §11.4 (cross-cutting contract), and
+    /// §14 Invariant 14(b) (response-shape determinism — `omitted` is
+    /// lexicographically sorted).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cross_repo_refs: Option<CrossRepoRefs>,
 }
 
 // TODO(unblock-45a.12): Add integration tests for close tool (cascade, co-blocking,
