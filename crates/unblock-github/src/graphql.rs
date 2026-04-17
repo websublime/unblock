@@ -227,7 +227,19 @@ impl GitHubClient {
             "number": number.cast_signed(),
         });
 
-        let response = self.graphql(FETCH_ISSUE_QUERY, variables).await?;
+        // Per SPEC §11.1 / plan Task 02.02 "Error-side wiring", a 403
+        // (HTTP) or a GraphQL FORBIDDEN response on a cross-repo fetch
+        // MUST be upgraded to `DomainError::CrossRepoAccessDenied`.
+        // Local fetches (owner/repo == configured) stay as the
+        // underlying infrastructure error — `CrossRepoAccessDenied`
+        // is cross-repo-semantic by name.
+        let response = match self.graphql(FETCH_ISSUE_QUERY, variables).await {
+            Ok(v) => v,
+            Err(err) if owner != self.owner() || repo != self.repo() => {
+                return Err(classify_cross_repo_fetch(err, owner, repo));
+            }
+            Err(err) => return Err(err),
+        };
 
         let issue_value = &response["data"]["repository"]["issue"];
 
@@ -436,17 +448,47 @@ impl GitHubClient {
             .context(errors::GitHubUnavailableSnafu)?;
 
         // Check for GraphQL-level errors.
+        //
+        // Inspect each error's `type` BEFORE reducing to message
+        // strings: GitHub's GraphQL API returns HTTP 200 with a typed
+        // `errors` array for permission-denied cases, and the `type`
+        // field (e.g. `"FORBIDDEN"`) is the wire-safe signal rather
+        // than the free-text `message`. Per SPEC §11.1 wiring (user
+        // decision 2026-04-17 for unblock-6xj), we partition the
+        // errors into FORBIDDEN-typed and other-typed before emitting
+        // the appropriate variant, so cross-repo classifiers can
+        // upgrade FORBIDDEN to `DomainError::CrossRepoAccessDenied`
+        // without substring-sniffing messages.
         if let Some(arr) = json
             .get("errors")
             .and_then(serde_json::Value::as_array)
             .filter(|a| !a.is_empty())
         {
-            let messages: Vec<String> = arr
-                .iter()
-                .filter_map(|e| e.get("message").and_then(|m| m.as_str()))
-                .map(String::from)
-                .collect();
-            return Err(errors::GitHubGraphQLSnafu { errors: messages }.build());
+            let mut forbidden_messages: Vec<String> = Vec::new();
+            let mut other_messages: Vec<String> = Vec::new();
+            for err in arr {
+                let message = err
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or_default()
+                    .to_owned();
+                let ty = err.get("type").and_then(|t| t.as_str()).unwrap_or_default();
+                if ty == "FORBIDDEN" {
+                    forbidden_messages.push(message);
+                } else if !message.is_empty() {
+                    other_messages.push(message);
+                }
+            }
+            if !forbidden_messages.is_empty() {
+                return Err(errors::GitHubGraphQLForbiddenSnafu {
+                    errors: forbidden_messages,
+                }
+                .build());
+            }
+            return Err(errors::GitHubGraphQLSnafu {
+                errors: other_messages,
+            }
+            .build());
         }
 
         Ok(json)
@@ -494,6 +536,39 @@ pub(crate) async fn check_rest_response(
     }
 
     Ok(response)
+}
+
+/// Upgrades a cross-repo fetch error to
+/// [`DomainError::CrossRepoAccessDenied`] when the underlying failure
+/// is an HTTP 403 ([`Error::GitHubApi`]) or a GraphQL FORBIDDEN
+/// ([`Error::GitHubGraphQLForbidden`]).
+///
+/// Other errors pass through unchanged. Per SPEC §11.1 / plan Task
+/// 02.02 "Error-side wiring" this is the cross-repo-only classifier:
+/// local-repo 403s stay as [`Error::GitHubApi`] because
+/// `CrossRepoAccessDenied` is cross-repo-semantic by name.
+///
+/// [`DomainError::CrossRepoAccessDenied`]:
+///     unblock_core::errors::DomainError::CrossRepoAccessDenied
+/// [`Error::GitHubApi`]: errors::Error::GitHubApi
+/// [`Error::GitHubGraphQLForbidden`]: errors::Error::GitHubGraphQLForbidden
+pub(crate) fn classify_cross_repo_fetch(
+    err: errors::Error,
+    owner: &str,
+    repo: &str,
+) -> errors::Error {
+    match err {
+        errors::Error::GitHubApi { status: 403, .. }
+        | errors::Error::GitHubGraphQLForbidden { .. } => {
+            unblock_core::errors::CrossRepoAccessDeniedSnafu {
+                owner: owner.to_owned(),
+                repo: repo.to_owned(),
+            }
+            .build()
+            .into()
+        }
+        other => other,
+    }
 }
 
 /// Parses the `X-RateLimit-Reset` header from a response into a `DateTime<Utc>`.
@@ -909,6 +984,103 @@ fn parse_issue_type_field(fields: &std::collections::HashMap<String, String>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── classify_cross_repo_fetch ───────────────────────────────────────
+
+    #[test]
+    fn classify_cross_repo_fetch_upgrades_403_to_cross_repo_access_denied() {
+        // SPEC §11.1 wiring: a cross-repo fetch returning HTTP 403
+        // (wrapped as `Error::GitHubApi { status: 403, .. }`) MUST
+        // upgrade to `DomainError::CrossRepoAccessDenied` carrying the
+        // known owner/repo context.
+        let api_err = errors::GitHubApiSnafu {
+            status: 403_u16,
+            message: "Must have push access to repository".to_owned(),
+        }
+        .build();
+        let upgraded = classify_cross_repo_fetch(api_err, "acme", "widgets");
+        match upgraded {
+            errors::Error::Domain { source } => {
+                let msg = source.to_string();
+                assert_eq!(source.status_code(), 403);
+                assert!(msg.contains("acme"), "expected owner in message: {msg}");
+                assert!(msg.contains("widgets"), "expected repo in message: {msg}");
+            }
+            other => panic!("expected CrossRepoAccessDenied Domain error, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_cross_repo_fetch_upgrades_graphql_forbidden() {
+        // SPEC §11.1 wiring: a cross-repo fetch returning GraphQL
+        // FORBIDDEN (wrapped as `Error::GitHubGraphQLForbidden`) MUST
+        // upgrade to `DomainError::CrossRepoAccessDenied`. The reducer
+        // emits this variant by inspecting `errors[i].type == "FORBIDDEN"`
+        // BEFORE reducing to messages.
+        let gql_err = errors::GitHubGraphQLForbiddenSnafu {
+            errors: vec!["Resource not accessible by integration".to_owned()],
+        }
+        .build();
+        let upgraded = classify_cross_repo_fetch(gql_err, "acme", "widgets");
+        match upgraded {
+            errors::Error::Domain { source } => {
+                let msg = source.to_string();
+                assert_eq!(source.status_code(), 403);
+                assert!(msg.contains("acme"), "expected owner in message: {msg}");
+                assert!(msg.contains("widgets"), "expected repo in message: {msg}");
+            }
+            other => panic!("expected CrossRepoAccessDenied Domain error, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_cross_repo_fetch_passes_through_non_403_api() {
+        // A non-403 GitHubApi error MUST stay as GitHubApi — only 403
+        // is cross-repo-access-semantic.
+        let api_err = errors::GitHubApiSnafu {
+            status: 500_u16,
+            message: "Internal Server Error".to_owned(),
+        }
+        .build();
+        let result = classify_cross_repo_fetch(api_err, "acme", "widgets");
+        match result {
+            errors::Error::GitHubApi { status, .. } => assert_eq!(status, 500),
+            other => panic!("expected GitHubApi passthrough, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_cross_repo_fetch_passes_through_non_forbidden_graphql() {
+        // A non-FORBIDDEN GraphQL error (the reducer's default bucket)
+        // MUST stay as GitHubGraphQL — only the FORBIDDEN-typed variant
+        // upgrades.
+        let gql_err = errors::GitHubGraphQLSnafu {
+            errors: vec!["Field 'x' not found".to_owned()],
+        }
+        .build();
+        let result = classify_cross_repo_fetch(gql_err, "acme", "widgets");
+        match result {
+            errors::Error::GitHubGraphQL { errors } => {
+                assert_eq!(errors, vec!["Field 'x' not found".to_owned()]);
+            }
+            other => panic!("expected GitHubGraphQL passthrough, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_cross_repo_fetch_passes_through_unrelated_errors() {
+        // A rate-limit error MUST pass through unchanged — the
+        // classifier is scoped to 403 / FORBIDDEN only.
+        let err = errors::RateLimitedSnafu {
+            reset_at: chrono::Utc::now(),
+        }
+        .build();
+        let result = classify_cross_repo_fetch(err, "acme", "widgets");
+        match result {
+            errors::Error::RateLimited { .. } => {}
+            other => panic!("expected RateLimited passthrough, got: {other:?}"),
+        }
+    }
 
     // ── parse_issue_state ───────────────────────────────────────────────
 
@@ -1837,6 +2009,227 @@ mod tests {
                 assert_eq!(message, "Not Found");
             }
             other => panic!("expected GitHubApi, got: {other}"),
+        }
+    }
+
+    // ── GraphQL reducer: FORBIDDEN partition (SPEC §11.1 wiring) ───────
+
+    #[tokio::test]
+    async fn graphql_errors_array_with_forbidden_type_emits_forbidden_variant() {
+        // When any errors[i].type == "FORBIDDEN", the reducer MUST emit
+        // `GitHubGraphQLForbidden` with the forbidden messages, rather
+        // than substring-sniffing after reducing to a `Vec<String>`.
+        // This is the wire-form partition contract per user decision
+        // 2026-04-17 (unblock-6xj).
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let client = GitHubClient::new_for_test(&server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "errors": [
+                    {
+                        "type": "FORBIDDEN",
+                        "message": "Resource not accessible by integration"
+                    }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client
+            .graphql("query { viewer { login } }", serde_json::json!({}))
+            .await
+            .expect_err("FORBIDDEN should produce Err");
+
+        match err {
+            errors::Error::GitHubGraphQLForbidden { errors } => {
+                assert_eq!(errors.len(), 1);
+                assert_eq!(errors[0], "Resource not accessible by integration");
+            }
+            other => panic!("expected GitHubGraphQLForbidden, got: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn graphql_errors_array_without_forbidden_type_emits_graphql_variant() {
+        // Non-FORBIDDEN-typed GraphQL errors MUST keep their existing
+        // `GitHubGraphQL` shape. Regression guard: the partition logic
+        // must NOT default all typed errors into the FORBIDDEN bucket.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let client = GitHubClient::new_for_test(&server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "errors": [
+                    {
+                        "type": "NOT_FOUND",
+                        "message": "Could not resolve to a Repository with the name"
+                    }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client
+            .graphql("query { viewer { login } }", serde_json::json!({}))
+            .await
+            .expect_err("error should produce Err");
+
+        match err {
+            errors::Error::GitHubGraphQL { errors } => {
+                assert_eq!(errors.len(), 1);
+                assert!(errors[0].contains("Repository"));
+            }
+            other => panic!("expected GitHubGraphQL, got: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn graphql_errors_mixed_forbidden_and_other_prefers_forbidden() {
+        // When at least one error is FORBIDDEN-typed and others are
+        // not, the reducer MUST emit `GitHubGraphQLForbidden` with
+        // ONLY the forbidden messages — FORBIDDEN is authoritative.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let client = GitHubClient::new_for_test(&server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "errors": [
+                    { "type": "NOT_FOUND", "message": "side-effect error" },
+                    { "type": "FORBIDDEN", "message": "access denied" }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client
+            .graphql("query { viewer { login } }", serde_json::json!({}))
+            .await
+            .expect_err("error should produce Err");
+
+        match err {
+            errors::Error::GitHubGraphQLForbidden { errors } => {
+                assert_eq!(errors.len(), 1);
+                assert_eq!(errors[0], "access denied");
+            }
+            other => panic!("expected GitHubGraphQLForbidden, got: {other}"),
+        }
+    }
+
+    // ── fetch_issue_in_repo: cross-repo classifier (SPEC §11.1) ────────
+
+    #[tokio::test]
+    async fn fetch_issue_in_repo_cross_repo_http_403_upgrades_to_access_denied() {
+        // A cross-repo fetch returning HTTP 403 MUST upgrade to
+        // `DomainError::CrossRepoAccessDenied` carrying the target
+        // owner/repo. Local fetches do NOT upgrade.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let client = GitHubClient::new_for_test(&server.uri());
+        // client.owner()/repo() are "test-owner"/"test-repo" — any
+        // other owner/repo is treated as cross-repo.
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("Forbidden"))
+            .mount(&server)
+            .await;
+
+        let err = client
+            .fetch_issue_in_repo("acme", "widgets", 1)
+            .await
+            .expect_err("403 should produce Err");
+
+        match err {
+            errors::Error::Domain { source } => {
+                let msg = source.to_string();
+                assert_eq!(source.status_code(), 403);
+                assert!(msg.contains("acme"), "expected owner in message: {msg}");
+                assert!(msg.contains("widgets"), "expected repo in message: {msg}");
+            }
+            other => panic!("expected CrossRepoAccessDenied Domain error, got: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_issue_in_repo_cross_repo_graphql_forbidden_upgrades_to_access_denied() {
+        // A cross-repo fetch whose GraphQL response contains
+        // errors[i].type == "FORBIDDEN" MUST upgrade to
+        // `CrossRepoAccessDenied`.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let client = GitHubClient::new_for_test(&server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "errors": [
+                    {
+                        "type": "FORBIDDEN",
+                        "message": "Resource not accessible by integration"
+                    }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client
+            .fetch_issue_in_repo("acme", "widgets", 1)
+            .await
+            .expect_err("FORBIDDEN should produce Err");
+
+        match err {
+            errors::Error::Domain { source } => {
+                let msg = source.to_string();
+                assert_eq!(source.status_code(), 403);
+                assert!(msg.contains("acme"), "expected owner in message: {msg}");
+                assert!(msg.contains("widgets"), "expected repo in message: {msg}");
+            }
+            other => panic!("expected CrossRepoAccessDenied Domain error, got: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_issue_in_repo_local_403_stays_as_github_api() {
+        // A local fetch (owner/repo == configured) returning HTTP 403
+        // MUST stay as `GitHubApi` — `CrossRepoAccessDenied` is
+        // cross-repo-semantic by name.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let client = GitHubClient::new_for_test(&server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("Forbidden"))
+            .mount(&server)
+            .await;
+
+        let err = client
+            .fetch_issue_in_repo("test-owner", "test-repo", 1)
+            .await
+            .expect_err("403 should produce Err");
+
+        match err {
+            errors::Error::GitHubApi { status, .. } => assert_eq!(status, 403),
+            other => panic!("expected GitHubApi passthrough for local 403, got: {other}"),
         }
     }
 }

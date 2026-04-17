@@ -31,7 +31,7 @@ use unblock_core::types::{Issue, IssueSummary, IssueType, Priority, QualifiedId,
 
 use crate::client::GitHubClient;
 use crate::errors::{self, Error};
-use crate::graphql::check_rest_response;
+use crate::graphql::{check_rest_response, classify_cross_repo_fetch};
 
 /// Parameters for creating a new GitHub issue.
 ///
@@ -1062,7 +1062,14 @@ impl GitHubClient {
                     "number": number,
                 });
 
-                let response = self.graphql(query, variables).await?;
+                // Per SPEC §11.1 / plan Task 02.02 "Error-side wiring",
+                // a 403 (HTTP) or GraphQL FORBIDDEN response on this
+                // cross-repo resolver MUST upgrade to
+                // `DomainError::CrossRepoAccessDenied { owner, repo }`.
+                let response = self
+                    .graphql(query, variables)
+                    .await
+                    .map_err(|err| classify_cross_repo_fetch(err, owner, repo))?;
                 let node_id = response["data"]["repository"]["issue"]["id"]
                     .as_str()
                     .unwrap_or_default()
