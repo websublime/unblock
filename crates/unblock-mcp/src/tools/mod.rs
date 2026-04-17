@@ -35,6 +35,7 @@ pub mod claim;
 pub mod close;
 pub mod comment;
 pub mod create;
+pub(crate) mod cross_repo;
 pub mod dep_cycles;
 pub mod dep_remove;
 pub mod depends;

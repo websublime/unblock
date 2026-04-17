@@ -3995,3 +3995,189 @@ async fn dep_cycles_targeted_id_filters_to_scc() {
         "SPEC §7.7 cache contract: one fetch across four calls",
     );
 }
+
+// ── prime `context` markdown — §11.4 trailer coverage (bead unblock-eos.7) ──
+//
+// The two tests below cover the SPEC §7.3 + §11.4 markdown trailer contract
+// mandated by plan Task 04.13: the `## Cross-repo references` section
+// appears iff the cycle detector visits a cross-repo node, and is omitted
+// otherwise. They reuse the `dep_cycles_*` fixtures (same topology, same
+// local `acme/widgets` coords) so the cross-repo accumulator semantics are
+// wired to the same graph shapes exercised by `dep_cycles` — this keeps
+// `prime`'s trailer rendering in lock-step with `dep_cycles`'s JSON
+// envelope (parity across tools is non-negotiable per SPEC §11.4).
+//
+// Each test queues TWO stubs because `handle_prime` spawns a background
+// read-only reconcile via `tokio::spawn` (Design Decision R5) and the
+// reconcile also calls `fetch_graph_data`. The background JoinHandle is
+// awaited inside `handle_prime` before returning, so by the time the test
+// inspects the markdown both fetches are deterministic.
+
+/// SPEC §7.3 + §11.4 (markdown adaptation): when a detected cycle touches
+/// a cross-repo `QualifiedId`, the rendered `context` MUST include a
+/// trailing `## Cross-repo references` section with the omitted member
+/// rendered as ``` `owner/repo#N` ``` and the italic singular/plural
+/// summary matching `dep_cycles` byte-for-byte.
+///
+/// Fixture: 4-node mixed cycle
+/// `acme/widgets#1 → alpha/upstream#42 → zeta/repo#9 → acme/widgets#2 → #1`.
+/// Two cross-repo members (`alpha/upstream#42`, `zeta/repo#9`) — the
+/// plural summary branch must fire.
+#[tokio::test]
+async fn prime_markdown_emits_cross_repo_section_when_cycle_touches_foreign_repo() {
+    use unblock_mcp::tools::prime::{PrimeParams, handle_prime};
+
+    let issues = vec![
+        dep_cycles_fixture_issue(1),
+        dep_cycles_fixture_issue(2),
+        dep_cycles_cross_repo_fixture("alpha", "upstream", 42),
+        dep_cycles_cross_repo_fixture("zeta", "repo", 9),
+    ];
+    let edges = vec![
+        BlockingEdge {
+            source: QualifiedId::new("acme", "widgets", 1),
+            target: QualifiedId::new("alpha", "upstream", 42),
+        },
+        BlockingEdge {
+            source: QualifiedId::new("alpha", "upstream", 42),
+            target: QualifiedId::new("zeta", "repo", 9),
+        },
+        BlockingEdge {
+            source: QualifiedId::new("zeta", "repo", 9),
+            target: QualifiedId::new("acme", "widgets", 2),
+        },
+        BlockingEdge {
+            source: QualifiedId::new("acme", "widgets", 2),
+            target: QualifiedId::new("acme", "widgets", 1),
+        },
+    ];
+
+    let mock = new_mock();
+    // Two stubs: direct fetch + background reconcile fetch.
+    mock.push_fetch_graph_data(Ok((issues.clone(), edges.clone())));
+    mock.push_fetch_graph_data(Ok((issues, edges)));
+    let state = Arc::new(state_with_mock(Arc::clone(&mock)));
+
+    let result = handle_prime(
+        &PrimeParams {
+            stale_threshold_hours: None,
+            max_per_category: None,
+            agent: None,
+        },
+        &state,
+    )
+    .await
+    .expect("handle_prime should succeed on mixed-cycle fixture");
+
+    let md = &result.context;
+
+    // Header block present + correct local coords.
+    assert!(
+        md.starts_with("# Repo: acme/widgets\n"),
+        "header must lead the blob: {md}"
+    );
+
+    // SPEC §7.3 flow step 2: `## Issues with cycles` section rendered.
+    assert!(
+        md.contains("\n## Issues with cycles\n"),
+        "cycles section required for any detected cycle: {md}"
+    );
+
+    // SPEC §11.4 (markdown adaptation): `## Cross-repo references`
+    // trailer present with BOTH omitted members rendered verbatim as
+    // inline code. The BTreeSet-backed accumulator yields lex order, so
+    // alpha/... precedes zeta/... in the rendered bullet list.
+    assert!(
+        md.contains("\n## Cross-repo references\n"),
+        "trailer required when cycle touches cross-repo node: {md}"
+    );
+    assert!(md.contains("- `alpha/upstream#42`\n"), "omitted[0]: {md}");
+    assert!(md.contains("- `zeta/repo#9`\n"), "omitted[1]: {md}");
+    let alpha_idx = md
+        .find("- `alpha/upstream#42`")
+        .expect("alpha bullet present");
+    let zeta_idx = md.find("- `zeta/repo#9`").expect("zeta bullet present");
+    assert!(
+        alpha_idx < zeta_idx,
+        "Invariant 14 determinism: omitted rendered in lex order (alpha < zeta): {md}"
+    );
+
+    // Singular/plural parity with dep_cycles — exact phrasing.
+    assert!(
+        md.contains("_2 cross-repo cycle members omitted from `cycles`_\n"),
+        "italic summary must match `dep_cycles` phrasing byte-for-byte: {md}"
+    );
+
+    // Session section present (Epic 1.5 surface preserved via Option 3).
+    assert!(md.contains("\n## Session\n"), "session section: {md}");
+
+    // Two fetches: direct + background reconcile.
+    assert_eq!(mock.calls().fetch_graph_data(), 2);
+}
+
+/// SPEC §7.3 + §11.4 dual: when every detected cycle is local, the
+/// rendered `context` MUST include the `## Issues with cycles` section
+/// AND MUST NOT emit the `## Cross-repo references` trailer.
+///
+/// Fixture: 2-node local cycle `acme/widgets#6 ↔ #7`. No cross-repo node
+/// participates, so the trailer must elide entirely (mirror of
+/// `dep_cycles_returns_all_local_cycles_from_warm_cache` Acceptance (a)).
+#[tokio::test]
+async fn prime_markdown_omits_cross_repo_section_when_all_cycles_are_local() {
+    use unblock_mcp::tools::prime::{PrimeParams, handle_prime};
+
+    let issues = vec![
+        dep_cycles_fixture_issue(1),
+        dep_cycles_fixture_issue(6),
+        dep_cycles_fixture_issue(7),
+        dep_cycles_fixture_issue(8),
+    ];
+    let edges = vec![
+        BlockingEdge {
+            source: QualifiedId::new("acme", "widgets", 6),
+            target: QualifiedId::new("acme", "widgets", 7),
+        },
+        BlockingEdge {
+            source: QualifiedId::new("acme", "widgets", 7),
+            target: QualifiedId::new("acme", "widgets", 6),
+        },
+    ];
+
+    let mock = new_mock();
+    mock.push_fetch_graph_data(Ok((issues.clone(), edges.clone())));
+    mock.push_fetch_graph_data(Ok((issues, edges)));
+    let state = Arc::new(state_with_mock(Arc::clone(&mock)));
+
+    let result = handle_prime(
+        &PrimeParams {
+            stale_threshold_hours: None,
+            max_per_category: None,
+            agent: None,
+        },
+        &state,
+    )
+    .await
+    .expect("handle_prime should succeed on local-cycle fixture");
+
+    let md = &result.context;
+
+    // Local cycle section appears — the graph DOES have a cycle.
+    assert!(
+        md.contains("\n## Issues with cycles\n"),
+        "local cycle must still be surfaced in the markdown: {md}"
+    );
+
+    // SPEC §11.4 (markdown adaptation): trailer is elided when no
+    // cross-repo node participated in any cycle. This is the mirror of
+    // `dep_cycles`'s `cross_repo_refs == None` branch.
+    assert!(
+        !md.contains("## Cross-repo references"),
+        "trailer MUST be elided when every cycle is local (SPEC §11.4): {md}"
+    );
+
+    // No stray italic summary leaking through.
+    assert!(
+        !md.contains("cross-repo cycle"),
+        "no singular/plural summary must leak when trailer is absent: {md}"
+    );
+}

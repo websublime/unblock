@@ -116,6 +116,7 @@ use unblock_core::types::{CrossRepoRefs, QualifiedId};
 
 use crate::errors::github_error_to_mcp;
 use crate::server::ServerState;
+use crate::tools::cross_repo;
 
 /// Input parameters for the `dep_cycles` MCP tool.
 ///
@@ -163,67 +164,17 @@ pub struct DepCyclesResult {
     pub cross_repo_refs: Option<CrossRepoRefs>,
 }
 
-/// Project a single cycle (`Vec<QualifiedId>`) onto its local and
-/// cross-repo partitions, feeding the cross-repo members into the shared
-/// `omitted` set.
-///
-/// The local projection preserves the relative iteration order that
-/// Tarjan returned (local-only subsequence of the original SCC). The
-/// cross-repo set is a `BTreeSet<String>` keyed by
-/// [`QualifiedId::Display`](QualifiedId#impl-Display-for-QualifiedId)
-/// (`"owner/repo#number"`) so de-duplication across cycles is free and
-/// the final `Vec<String>` emerges lexicographically sorted — the
-/// Invariant 14 determinism contract holds without an explicit
-/// `sort()` call.
-///
-/// Returns the local projection (may be empty if every member was
-/// cross-repo).
-fn project_cycle(
-    cycle: &[QualifiedId],
-    configured_owner: &str,
-    configured_repo: &str,
-    cross_repo_accum: &mut std::collections::BTreeSet<String>,
-) -> Vec<u64> {
-    let mut local = Vec::with_capacity(cycle.len());
-    for qid in cycle {
-        if qid.owner == configured_owner && qid.repo == configured_repo {
-            local.push(qid.number);
-        } else {
-            cross_repo_accum.insert(qid.to_string());
-        }
-    }
-    local
-}
-
-/// Build the optional [`CrossRepoRefs`] envelope from the accumulated
-/// cross-repo `QualifiedId` display strings.
-///
-/// Returns `None` when no cross-repo node was encountered (preserving
-/// SPEC §11.4's "`Some` iff `omitted` is non-empty" invariant) — callers
-/// can forward this directly into [`DepCyclesResult::cross_repo_refs`].
-fn build_cross_repo_refs(accum: std::collections::BTreeSet<String>) -> Option<CrossRepoRefs> {
-    if accum.is_empty() {
-        return None;
-    }
-    let omitted: Vec<String> = accum.into_iter().collect();
-    // The BTreeSet iteration already yields lexicographically sorted
-    // entries — no explicit sort call needed (Invariant 14).
-    let summary = Some(format!(
-        "{} cross-repo cycle {} omitted from `cycles`",
-        omitted.len(),
-        if omitted.len() == 1 {
-            "member"
-        } else {
-            "members"
-        },
-    ));
-    Some(CrossRepoRefs { omitted, summary })
-}
-
 /// Core projection helper: given the raw cycle set returned by
 /// [`DependencyGraph::detect_all_cycles`] (or its `id`-scoped
 /// restriction), perform the SPEC §7.7 / §11.4 projection and return the
 /// `(cycles, cross_repo_refs)` pair.
+///
+/// This is a thin facade over
+/// [`crate::tools::cross_repo::project_all_cycles`] + the `cycles`-flavoured
+/// [`crate::tools::cross_repo::cycles_summary`] closure. Kept at this
+/// layer so the handler can stay agnostic of the shared primitives and
+/// so the unit tests below continue to exercise the `(cycles,
+/// cross_repo_refs)` pairing end-to-end.
 ///
 /// Pulled out of [`handle_dep_cycles`] so it can be covered by
 /// hermetic unit tests without constructing a [`ServerState`].
@@ -232,23 +183,9 @@ fn project_all(
     configured_owner: &str,
     configured_repo: &str,
 ) -> (Vec<Vec<u64>>, Option<CrossRepoRefs>) {
-    let mut cycles: Vec<Vec<u64>> = Vec::with_capacity(raw.len());
-    let mut cross_repo_accum: std::collections::BTreeSet<String> =
-        std::collections::BTreeSet::new();
-    for cycle in raw {
-        // SPEC §7.7 flow step 4b: emit every detected cycle, even the
-        // ones whose local-projection length is < 2 (mixed cycles where
-        // all but ≤1 member are cross-repo). The agent must know the
-        // cycle exists; the missing members land in `cross_repo_refs`.
-        let local = project_cycle(
-            cycle,
-            configured_owner,
-            configured_repo,
-            &mut cross_repo_accum,
-        );
-        cycles.push(local);
-    }
-    let cross_repo_refs = build_cross_repo_refs(cross_repo_accum);
+    let (cycles, accum) = cross_repo::project_all_cycles(raw, configured_owner, configured_repo);
+    let cross_repo_refs =
+        cross_repo::build_cross_repo_refs_with_summary(accum, cross_repo::cycles_summary);
     (cycles, cross_repo_refs)
 }
 
@@ -374,105 +311,13 @@ mod tests {
         QualifiedId::new(owner, repo, number)
     }
 
-    // ── project_cycle ────────────────────────────────────────────────
-
-    #[test]
-    fn project_cycle_local_only_emits_all_numbers_and_no_cross_repo() {
-        let cycle = vec![qid("acme", "widgets", 6), qid("acme", "widgets", 7)];
-        let mut accum = std::collections::BTreeSet::new();
-        let local = project_cycle(&cycle, "acme", "widgets", &mut accum);
-        // Order preserved as Tarjan returned it.
-        assert_eq!(local, vec![6, 7]);
-        assert!(accum.is_empty());
-    }
-
-    #[test]
-    fn project_cycle_mixed_partitions_local_and_cross_repo() {
-        // Mixed cycle: one local (acme/widgets#6), one cross-repo
-        // (other/repo#99). The local projection drops the cross-repo
-        // node; the cross-repo member lands in the accumulator.
-        let cycle = vec![qid("acme", "widgets", 6), qid("other", "repo", 99)];
-        let mut accum = std::collections::BTreeSet::new();
-        let local = project_cycle(&cycle, "acme", "widgets", &mut accum);
-        assert_eq!(local, vec![6]);
-        assert_eq!(accum.len(), 1);
-        assert!(accum.contains("other/repo#99"));
-    }
-
-    #[test]
-    fn project_cycle_cross_repo_only_emits_empty_local_and_accumulates() {
-        let cycle = vec![qid("other", "repo", 1), qid("third", "party", 2)];
-        let mut accum = std::collections::BTreeSet::new();
-        let local = project_cycle(&cycle, "acme", "widgets", &mut accum);
-        assert!(
-            local.is_empty(),
-            "no local members → empty local projection"
-        );
-        assert_eq!(accum.len(), 2);
-        assert!(accum.contains("other/repo#1"));
-        assert!(accum.contains("third/party#2"));
-    }
-
-    #[test]
-    fn project_cycle_deduplicates_same_cross_repo_across_calls() {
-        // Two disjoint cycles both touching `other/repo#42`: the
-        // BTreeSet collapses the duplicate to a single entry.
-        let a = vec![qid("acme", "widgets", 1), qid("other", "repo", 42)];
-        let b = vec![qid("acme", "widgets", 2), qid("other", "repo", 42)];
-        let mut accum = std::collections::BTreeSet::new();
-        let _ = project_cycle(&a, "acme", "widgets", &mut accum);
-        let _ = project_cycle(&b, "acme", "widgets", &mut accum);
-        assert_eq!(
-            accum.len(),
-            1,
-            "same cross-repo QualifiedId must be deduped"
-        );
-        assert!(accum.contains("other/repo#42"));
-    }
-
-    // ── build_cross_repo_refs ───────────────────────────────────────
-
-    #[test]
-    fn build_cross_repo_refs_empty_accum_returns_none() {
-        let accum = std::collections::BTreeSet::new();
-        assert!(build_cross_repo_refs(accum).is_none());
-    }
-
-    #[test]
-    fn build_cross_repo_refs_single_member_singular_summary() {
-        let mut accum = std::collections::BTreeSet::new();
-        accum.insert("other/repo#7".to_owned());
-        let refs = build_cross_repo_refs(accum).expect("Some");
-        assert_eq!(refs.omitted, vec!["other/repo#7".to_owned()]);
-        let summary = refs.summary.as_deref().expect("summary set");
-        assert!(summary.starts_with("1 "), "singular form: {summary}");
-        assert!(summary.contains("member"), "singular noun: {summary}");
-        assert!(
-            !summary.contains("members"),
-            "singular noun only: {summary}"
-        );
-    }
-
-    #[test]
-    fn build_cross_repo_refs_plural_sorted_lexicographically() {
-        let mut accum = std::collections::BTreeSet::new();
-        accum.insert("zeta/repo#3".to_owned());
-        accum.insert("alpha/repo#1".to_owned());
-        accum.insert("mid/repo#2".to_owned());
-        let refs = build_cross_repo_refs(accum).expect("Some");
-        assert_eq!(
-            refs.omitted,
-            vec![
-                "alpha/repo#1".to_owned(),
-                "mid/repo#2".to_owned(),
-                "zeta/repo#3".to_owned(),
-            ],
-            "Invariant 14: omitted sorted lexicographically"
-        );
-        let summary = refs.summary.as_deref().expect("summary set");
-        assert!(summary.contains("3 "));
-        assert!(summary.contains("members"), "plural noun: {summary}");
-    }
+    // Note: the `project_cycle` and `build_cross_repo_refs` unit-level
+    // tests formerly in this block migrated to
+    // `crate::tools::cross_repo` alongside the helpers themselves when
+    // the shared module was extracted (bead `unblock-eos.2` /
+    // `unblock-eos.7`). The `project_all` tests below still exercise the
+    // facade here so the `(cycles, cross_repo_refs)` pairing specific to
+    // `dep_cycles` keeps its hermetic unit coverage.
 
     // ── project_all ──────────────────────────────────────────────────
 

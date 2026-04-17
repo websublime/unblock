@@ -142,14 +142,13 @@ pub struct ServerState {
     pub agent_kind: OnceLock<AgentKind>,
     /// Raw MCP `clientInfo` stored once during the `initialize` handshake.
     ///
-    /// Used by [`SessionMeta`](crate::tools::prime::SessionMeta) to surface
-    /// the raw client name in the `prime` tool output.
+    /// Used by the `prime` tool's internal `SessionMeta` projection to
+    /// surface the raw client name in the rendered markdown output.
     pub agent_client: OnceLock<AgentClient>,
     /// UTC timestamp recorded when `initialize()` is called.
     ///
-    /// Represents the session start time. Used by
-    /// [`SessionMeta`](crate::tools::prime::SessionMeta) for the
-    /// `connected_at` field.
+    /// Represents the session start time. Used by the `prime` tool's
+    /// internal `SessionMeta` projection for the `connected_at` field.
     pub connected_at: OnceLock<chrono::DateTime<Utc>>,
 }
 
@@ -1991,15 +1990,19 @@ impl UnblockServer {
         Ok(Json(result))
     }
 
-    /// Session entry point — aggregates issue state for agent orientation.
+    /// Session entry point — returns a markdown context blob for agent
+    /// orientation.
     ///
-    /// Returns categorised lists of issues (`in_progress`, `ready`, `blocked`,
-    /// hotspots, stale claims) from a fresh GitHub fetch. Updates the cache
-    /// with the fetched data. Includes stub session metadata and no drift
-    /// warnings until Epics 1.5 and 1.6 wire them in.
+    /// Aggregates issue state internally (`in_progress`, `ready`, `blocked`,
+    /// `completed`, `hotspots`, `stale`) and renders it as a single
+    /// `PrimeResult.context: String` markdown blob ready for injection into
+    /// the agent's session prompt. Sections: header → counts → per-category
+    /// lists → issues with cycles → session → drift → cross-repo trailer
+    /// (SPEC §7.3 + §11.4). Always does a fresh GitHub fetch; bypasses the
+    /// cache.
     #[tool(
         name = "prime",
-        description = "Session entry point for every agent session. Returns categorised issue lists: in_progress, ready, blocked, hotspots (most-blocking), and stale claims. Includes session metadata and drift warnings. Always does a fresh fetch — bypasses cache. Use stale_threshold_hours to configure stale claim detection (default 24h), max_per_category to limit output size (default 10), and agent to filter in_progress/ready/blocked/stale by agent name (exact match; completed and hotspots are never filtered)."
+        description = "Session entry point for every agent session. Returns a single markdown `context` blob for agent injection: header (repo/project), counts (ready/blocked/in-progress/completed/hotspots/stale), per-category top-N lists, `## Issues with cycles`, `## Session` (agent identity), `## Drift warnings` (background reconcile), and a trailing `## Cross-repo references` section per SPEC §11.4 when any cycle touched a cross-repo node. Always does a fresh fetch — bypasses cache. Parameters: `stale_threshold_hours` (default 24) gates the stale subsection and the completed window; `max_per_category` (default 10) caps both rendered category lists and cycle-member bullets; `agent` filters in_progress/ready/blocked/stale by exact match (completed and hotspots are never filtered)."
     )]
     pub async fn prime(
         &self,

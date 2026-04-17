@@ -55,6 +55,7 @@ use unblock_core::graph::DependencyGraph;
 use unblock_core::types::{CrossRepoRefs, Issue, IssueState, IssueSummary, QualifiedId, Status};
 
 use crate::server::ServerState;
+use crate::tools::cross_repo;
 
 /// Default number of issues returned when `limit` is not specified.
 const DEFAULT_LIMIT: usize = 10;
@@ -375,21 +376,13 @@ pub(crate) fn compute_cross_repo_refs(
         }
     }
 
-    if accum.is_empty() {
-        return None;
-    }
-    let omitted: Vec<String> = accum.into_iter().collect();
-    // Singular/plural phrasing mirrors dep_cycles::build_cross_repo_refs.
-    let summary = Some(format!(
-        "{n} cross-repo {noun} excluded local issue(s) from ready set",
-        n = omitted.len(),
-        noun = if omitted.len() == 1 {
-            "blocker"
-        } else {
-            "blockers"
-        },
-    ));
-    Some(CrossRepoRefs { omitted, summary })
+    // Delegate the final envelope + summary grammar to the shared
+    // primitive so all three cross-repo consumers (`ready`, `dep_cycles`,
+    // `prime`) share byte-for-byte-identical empty-set and
+    // singular/plural branches. See
+    // [`crate::tools::cross_repo::build_cross_repo_refs_with_summary`] +
+    // [`crate::tools::cross_repo::ready_summary`].
+    cross_repo::build_cross_repo_refs_with_summary(accum, cross_repo::ready_summary)
 }
 
 /// Execute the `ready` tool handler.

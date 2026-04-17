@@ -911,8 +911,14 @@ async fn prime_dispatches_through_dyn_vtable() {
     // Both the direct fetch AND the awaited background reconcile fetch must
     // have traversed the dyn vtable by now.
     assert_eq!(mock.calls().fetch_graph_data(), 2);
-    // Basic sanity on result shape.
-    let _ = result.counts.ready;
+    // Basic sanity on result shape — post-`unblock-eos.7` the response
+    // envelope is `{ context: String }`, so the vtable proof asserts the
+    // rendered markdown is non-empty (the handler always emits at least a
+    // header + counts block for a one-issue fixture).
+    assert!(
+        !result.context.is_empty(),
+        "context should be non-empty for one-issue fixture"
+    );
 }
 
 // ── reconcile ──────────────────────────────────────────────────────────
