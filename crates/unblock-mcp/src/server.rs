@@ -1053,6 +1053,7 @@ impl UnblockServer {
 
         // Phase 2: Compute cascade from the freshly rebuilt cache.
         let mut unblocked = Vec::new();
+        let mut cross_repo_refs: Option<unblock_core::types::CrossRepoRefs> = None;
 
         if let Some(graph) = state.cache.get_graph().await {
             // compute_unblock_cascade's _all_issues param is currently unused —
@@ -1125,7 +1126,20 @@ impl UnblockServer {
                 }
             }
 
-            unblocked = cascade.iter().map(|q| q.number).collect();
+            // SPEC §8.2 flow step 9 / §11.4 row 4: partition the cascade
+            // into local dependents (projected to `unblocked: Vec<u64>`)
+            // vs cross-repo dependents (surfaced via `cross_repo_refs`).
+            // The Phase 3 loop above intentionally does NOT gate on
+            // (owner, repo) == (config.owner, config.repo) — cross-repo
+            // dependents ARE still cascade-updated; only the response
+            // shape differs here (SPEC §11.4 affected-tools table).
+            let (local_unblocked, cross_repo_accum) =
+                crate::tools::cross_repo::project_cascade(&cascade, client.owner(), client.repo());
+            unblocked = local_unblocked;
+            cross_repo_refs = crate::tools::cross_repo::build_cross_repo_refs_with_summary(
+                cross_repo_accum,
+                crate::tools::cross_repo::close_summary,
+            );
         } else {
             tracing::warn!("Cache not available after rebuild — cascade computation skipped");
         }
@@ -1133,6 +1147,7 @@ impl UnblockServer {
         Ok(Json(CloseResult {
             issue: issue_number,
             unblocked,
+            cross_repo_refs,
         }))
     }
 

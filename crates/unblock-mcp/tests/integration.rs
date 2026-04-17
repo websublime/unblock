@@ -4181,3 +4181,338 @@ async fn prime_markdown_omits_cross_repo_section_when_all_cycles_are_local() {
         "no singular/plural summary must leak when trailer is absent: {md}"
     );
 }
+
+// ── close tool: §11.4 cross-repo response contract integration tests ──
+//
+// Hermetic `MockGitHubClient` tests for SPEC §8.2 + §11.4 row 4 +
+// §14 Invariant 14(b). Mirror `dep_cycles_returns_all_local_cycles_from_warm_cache`
+// (None branch) and `dep_cycles_mixed_cycle_populates_cross_repo_refs`
+// (Some branch). See bead `unblock-iov`.
+
+/// Build a fixture issue under the `MockGitHubClient` coordinates
+/// (`acme/widgets`) for `close` cascade tests. Every optional field is
+/// set to a minimal value — the `close` handler only consumes the graph
+/// topology (via `compute_unblock_cascade`) plus the closed issue's
+/// `node_id`.
+fn close_fixture_issue(number: u64) -> unblock_core::types::Issue {
+    unblock_core::types::Issue {
+        qualified_id: QualifiedId::new("acme", "widgets", number),
+        number,
+        node_id: format!("I_close_{number}"),
+        title: format!("Close fixture #{number}"),
+        issue_type: Some(IssueType::Task),
+        status: Status::Ready,
+        priority: Priority::P2,
+        agent: None,
+        claimed_at: None,
+        pipeline_stage: None,
+        story_points: None,
+        defer_until: None,
+        labels: vec![],
+        milestone: None,
+        assignees: vec![],
+        state: IssueState::Open,
+        body: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        url: format!("https://github.com/acme/widgets/issues/{number}"),
+        comments: vec![],
+        blocked_by: vec![],
+        blocking: vec![],
+        parent: None,
+        sub_issues: vec![],
+    }
+}
+
+/// Build a cross-repo fixture issue for `close` mixed-cascade tests.
+/// The resulting `QualifiedId` points OUTSIDE the configured
+/// `acme/widgets` repo so the §11.4 partition can strip it from
+/// `unblocked` and surface it in `cross_repo_refs.omitted`.
+fn close_cross_repo_fixture(owner: &str, repo: &str, number: u64) -> unblock_core::types::Issue {
+    unblock_core::types::Issue {
+        qualified_id: QualifiedId::new(owner, repo, number),
+        number,
+        node_id: format!("I_close_{owner}_{repo}_{number}"),
+        title: format!("Close cross-repo fixture {owner}/{repo}#{number}"),
+        issue_type: Some(IssueType::Task),
+        status: Status::Ready,
+        priority: Priority::P2,
+        agent: None,
+        claimed_at: None,
+        pipeline_stage: None,
+        story_points: None,
+        defer_until: None,
+        labels: vec![],
+        milestone: None,
+        assignees: vec![],
+        state: IssueState::Open,
+        body: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        url: format!("https://github.com/{owner}/{repo}/issues/{number}"),
+        comments: vec![],
+        blocked_by: vec![],
+        blocking: vec![],
+        parent: None,
+        sub_issues: vec![],
+    }
+}
+
+/// Acceptance (a): all local cascade — `cross_repo_refs == None`,
+/// bare `unblocked` carries both local dependents, JSON elides the key.
+///
+/// Fixture: local blocker #8 has local dependents #10 and #11
+/// (edges: #10 → #8, #11 → #8 — "#10 is blocked by #8", "#11 is
+/// blocked by #8"). Closing #8 cascades both.
+///
+/// Per SPEC §11.4 / §14 Invariant 14(b): all-local cascade → field
+/// is `None` and the JSON envelope omits `cross_repo_refs` entirely.
+#[tokio::test]
+async fn close_no_cross_repo_dependents_cross_repo_refs_is_none() {
+    use rmcp::handler::server::wrapper::{Json, Parameters};
+    use unblock_mcp::server::UnblockServer;
+    use unblock_mcp::tools::close::CloseParams;
+
+    let issues = vec![
+        close_fixture_issue(8),
+        close_fixture_issue(10),
+        close_fixture_issue(11),
+    ];
+    // Edges: #10 → #8, #11 → #8. Closing #8 unblocks both.
+    let edges = vec![
+        BlockingEdge {
+            source: QualifiedId::new("acme", "widgets", 10),
+            target: QualifiedId::new("acme", "widgets", 8),
+        },
+        BlockingEdge {
+            source: QualifiedId::new("acme", "widgets", 11),
+            target: QualifiedId::new("acme", "widgets", 8),
+        },
+    ];
+
+    let mock = new_mock();
+    // Phase 1: fetch #8, close #8, rebuild.
+    mock.push_fetch_issue(Ok(close_fixture_issue(8)));
+    mock.push_close_issue(Ok(()));
+    // Phase 1 field ladder: push None to skip Projects V2 updates.
+    mock.push_field_ids(None);
+    // Rebuild pushes the POST-close graph. We keep #8 in the fetch
+    // response so `compute_unblock_cascade` can resolve it as a node
+    // (the mock is a stub — in production fetch_graph_data would
+    // exclude the closed issue, but that path is orthogonal to this
+    // bead's scope).
+    mock.push_fetch_graph_data(Ok((issues, edges)));
+    // Phase 3 loop runs 2×. Each iteration calls add_comment then
+    // field_ids. We push add_comment Ok twice and let field_ids
+    // default to None (queue empty ⇒ None) so the inner project-field
+    // ladder is skipped.
+    mock.push_add_comment(Ok("comment_id".to_owned()));
+    mock.push_add_comment(Ok("comment_id".to_owned()));
+
+    let server = UnblockServer::new(state_with_mock(Arc::clone(&mock)));
+    let Json(result) = server
+        .close(Parameters(CloseParams {
+            id: 8,
+            reason: None,
+        }))
+        .await
+        .expect("close should succeed on all-local cascade");
+
+    assert_eq!(result.issue, 8);
+    // petgraph Incoming-neighbour iteration order is NOT contractually
+    // stable — assert on set membership, not positional order.
+    let unblocked_set: std::collections::HashSet<u64> = result.unblocked.iter().copied().collect();
+    assert_eq!(
+        unblocked_set,
+        std::collections::HashSet::from([10_u64, 11]),
+        "all-local cascade must emit both local dependents in `unblocked`; got: {:?}",
+        result.unblocked,
+    );
+    // Acceptance (a): all-local cascade produces cross_repo_refs == None.
+    assert!(
+        result.cross_repo_refs.is_none(),
+        "SPEC §11.4: all-local cascade → cross_repo_refs None; got: {:?}",
+        result.cross_repo_refs,
+    );
+    // The skip_serializing_if attribute must elide the key entirely.
+    let json = serde_json::to_value(&result).expect("serialize");
+    assert!(
+        json.get("cross_repo_refs").is_none(),
+        "None cross_repo_refs must be elided from JSON: {json}"
+    );
+
+    // Both cascade members received an unblock comment.
+    assert_eq!(mock.calls().add_comment(), 2);
+    assert_eq!(mock.calls().close_issue(), 1);
+    assert_eq!(mock.calls().fetch_graph_data(), 1);
+}
+
+/// Acceptance (b): mixed cascade — one local dependent + two cross-repo
+/// dependents. The configured-repo projection `unblocked` carries only
+/// the local member; `cross_repo_refs` surfaces the cross-repo members
+/// in lexicographic order with the singular/plural summary phrasing
+/// mandated by SPEC §11.4 row 4 (`close_summary`).
+///
+/// Fixture: local blocker #8 has:
+/// - one local dependent #10,
+/// - one cross-repo dependent `other/repo#99`,
+/// - one cross-repo dependent `alpha/upstream#42`.
+///
+/// Edges: `#10 → #8`, `other/repo#99 → #8`, `alpha/upstream#42 → #8`.
+/// Closing #8 cascades all three. `unblocked` should contain `[10]`
+/// (local set), `cross_repo_refs.omitted` should be
+/// `["alpha/upstream#42", "other/repo#99"]` (lex-sorted per
+/// Invariant 14(b) determinism).
+#[tokio::test]
+async fn close_cross_repo_dependent_populates_cross_repo_refs() {
+    use rmcp::handler::server::wrapper::{Json, Parameters};
+    use unblock_mcp::server::UnblockServer;
+    use unblock_mcp::tools::close::CloseParams;
+
+    let issues = vec![
+        close_fixture_issue(8),
+        close_fixture_issue(10),
+        close_cross_repo_fixture("other", "repo", 99),
+        close_cross_repo_fixture("alpha", "upstream", 42),
+    ];
+    let edges = vec![
+        BlockingEdge {
+            source: QualifiedId::new("acme", "widgets", 10),
+            target: QualifiedId::new("acme", "widgets", 8),
+        },
+        BlockingEdge {
+            source: QualifiedId::new("other", "repo", 99),
+            target: QualifiedId::new("acme", "widgets", 8),
+        },
+        BlockingEdge {
+            source: QualifiedId::new("alpha", "upstream", 42),
+            target: QualifiedId::new("acme", "widgets", 8),
+        },
+    ];
+
+    let mock = new_mock();
+    mock.push_fetch_issue(Ok(close_fixture_issue(8)));
+    mock.push_close_issue(Ok(()));
+    mock.push_field_ids(None); // Phase 1: skip project-field ladder.
+    mock.push_fetch_graph_data(Ok((issues, edges)));
+    // Phase 3 loop runs 3× (#10, other/repo#99, alpha/upstream#42).
+    // Each iteration posts an add_comment; field_ids defaults to None
+    // when the queue is empty, so the inner project-field ladder is
+    // skipped — no further pushes required.
+    //
+    // RISK #2 (close handler is not cross-repo-aware for side effects):
+    // `client.add_comment(99)` actually targets `acme/widgets#99`
+    // in production. The mock just records the call count here, so
+    // this operational limitation is invisible to the test — matches
+    // the bead's scope note.
+    mock.push_add_comment(Ok("c1".to_owned()));
+    mock.push_add_comment(Ok("c2".to_owned()));
+    mock.push_add_comment(Ok("c3".to_owned()));
+
+    let server = UnblockServer::new(state_with_mock(Arc::clone(&mock)));
+    let Json(result) = server
+        .close(Parameters(CloseParams {
+            id: 8,
+            reason: None,
+        }))
+        .await
+        .expect("close should succeed on mixed cascade");
+
+    assert_eq!(result.issue, 8);
+    // Only the local dependent appears in `unblocked`.
+    assert_eq!(
+        result.unblocked,
+        vec![10_u64],
+        "SPEC §8.2 flow step 9: local partition only; got: {:?}",
+        result.unblocked,
+    );
+
+    // Acceptance (b): cross_repo_refs is Some with lex-sorted omitted.
+    let refs = result
+        .cross_repo_refs
+        .as_ref()
+        .expect("SPEC §11.4: mixed cascade → cross_repo_refs Some");
+    assert_eq!(
+        refs.omitted,
+        vec!["alpha/upstream#42".to_owned(), "other/repo#99".to_owned(),],
+        "Invariant 14(b): omitted MUST be sorted lexicographically",
+    );
+    // Exact summary phrasing (byte-for-byte per SPEC §11.4 row 4).
+    assert_eq!(
+        refs.summary.as_deref(),
+        Some("2 cross-repo dependents cascade-updated but omitted from `unblocked`"),
+        "SPEC §11.4 / §8.2 line 1262: plural phrasing must match byte-for-byte",
+    );
+
+    // JSON serialisation includes the cross_repo_refs envelope.
+    let json = serde_json::to_value(&result).expect("serialize");
+    assert_eq!(
+        json["cross_repo_refs"]["omitted"][0], "alpha/upstream#42",
+        "JSON envelope surfaces the lex-sorted omitted list",
+    );
+    assert_eq!(json["cross_repo_refs"]["omitted"][1], "other/repo#99");
+    // unblocked carries only the local member.
+    assert_eq!(json["unblocked"].as_array().map(Vec::len), Some(1));
+
+    // All three cascade members received an unblock comment (SPEC §8.2
+    // flow step 6: cross-repo dependents ARE still cascade-updated).
+    assert_eq!(mock.calls().add_comment(), 3);
+    assert_eq!(mock.calls().close_issue(), 1);
+    assert_eq!(mock.calls().fetch_graph_data(), 1);
+}
+
+/// Acceptance (c): singular-form summary — a single cross-repo
+/// dependent triggers the singular `"1 cross-repo dependent …"`
+/// phrasing per SPEC §11.4 row 4 (`close_summary` — mirrors the
+/// `cycles_summary` / `ready_summary` singular/plural noun grammar).
+#[tokio::test]
+async fn close_single_cross_repo_dependent_uses_singular_summary() {
+    use rmcp::handler::server::wrapper::{Json, Parameters};
+    use unblock_mcp::server::UnblockServer;
+    use unblock_mcp::tools::close::CloseParams;
+
+    let issues = vec![
+        close_fixture_issue(8),
+        close_cross_repo_fixture("other", "repo", 99),
+    ];
+    let edges = vec![BlockingEdge {
+        source: QualifiedId::new("other", "repo", 99),
+        target: QualifiedId::new("acme", "widgets", 8),
+    }];
+
+    let mock = new_mock();
+    mock.push_fetch_issue(Ok(close_fixture_issue(8)));
+    mock.push_close_issue(Ok(()));
+    mock.push_field_ids(None);
+    mock.push_fetch_graph_data(Ok((issues, edges)));
+    mock.push_add_comment(Ok("c1".to_owned()));
+
+    let server = UnblockServer::new(state_with_mock(Arc::clone(&mock)));
+    let Json(result) = server
+        .close(Parameters(CloseParams {
+            id: 8,
+            reason: None,
+        }))
+        .await
+        .expect("close should succeed on single-cross-repo cascade");
+
+    assert_eq!(result.issue, 8);
+    // No local dependents — `unblocked` is empty.
+    assert!(
+        result.unblocked.is_empty(),
+        "all-cross-repo cascade → empty unblocked; got: {:?}",
+        result.unblocked,
+    );
+
+    let refs = result
+        .cross_repo_refs
+        .as_ref()
+        .expect("single cross-repo cascade → cross_repo_refs Some");
+    assert_eq!(refs.omitted, vec!["other/repo#99".to_owned()]);
+    // Singular grammar per SPEC §11.4 row 4 / §8.2 line 1262.
+    assert_eq!(
+        refs.summary.as_deref(),
+        Some("1 cross-repo dependent cascade-updated but omitted from `unblocked`"),
+        "SPEC §11.4: singular phrasing must match byte-for-byte",
+    );
+}
