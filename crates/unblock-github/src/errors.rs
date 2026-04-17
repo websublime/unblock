@@ -47,6 +47,31 @@ pub enum Error {
         errors: Vec<String>,
     },
 
+    /// A GitHub GraphQL response containing at least one error with
+    /// `type == "FORBIDDEN"`.
+    ///
+    /// The GraphQL spec (and GitHub's implementation) returns HTTP 200
+    /// with a typed `errors` array for permission-denied cases — the
+    /// `type` field is the wire-safe signal rather than the free-text
+    /// `message`. The GraphQL-level reducer in `graphql_with_features`
+    /// on [`crate::client::GitHubClient`] inspects `type` BEFORE
+    /// reducing to messages (per SPEC §11.1 wiring, user decision
+    /// 2026-04-17) and emits this variant when any error carries
+    /// `FORBIDDEN`. Callers that know a cross-repo `owner/repo` context
+    /// (e.g. `fetch_issue_in_repo`, `resolve_issue_ref` cross-repo arm)
+    /// upgrade this variant to [`DomainError::CrossRepoAccessDenied`].
+    ///
+    /// [`DomainError::CrossRepoAccessDenied`]:
+    ///     unblock_core::errors::DomainError::CrossRepoAccessDenied
+    #[snafu(display("GitHub GraphQL FORBIDDEN: {}", errors.join("; ")))]
+    GitHubGraphQLForbidden {
+        /// Messages from the GraphQL errors whose `type` was
+        /// `FORBIDDEN`. Non-FORBIDDEN messages from the same response
+        /// are discarded; the classifier treats any FORBIDDEN as
+        /// authoritative.
+        errors: Vec<String>,
+    },
+
     /// Network or connection failure when reaching GitHub.
     #[snafu(display("Cannot connect to GitHub: {source}"))]
     GitHubUnavailable {
@@ -120,6 +145,12 @@ impl Error {
             Self::Domain { source } => source.status_code(),
             Self::GitHubApi { status, .. } => *status,
             Self::GitHubGraphQL { .. } => 422,
+            // 403 Forbidden — GraphQL FORBIDDEN-typed error before
+            // cross-repo classification upgrades it to DomainError
+            // CrossRepoAccessDenied. An un-upgraded variant still
+            // reaches the MCP layer with the right status-code bucket
+            // so `github_error_to_mcp` maps it to INVALID_PARAMS.
+            Self::GitHubGraphQLForbidden { .. } => 403,
             Self::GitHubUnavailable { .. } | Self::CircuitBreakerOpen { .. } => 503,
             Self::RateLimited { .. } => 429,
             Self::ProjectNotConfigured => 412,
@@ -191,6 +222,30 @@ mod tests {
         }
         .build();
         assert_eq!(err.to_string(), "GitHub GraphQL error: ");
+    }
+
+    #[test]
+    fn github_graphql_forbidden_display_and_status() {
+        // The `GitHubGraphQLForbidden` variant is emitted by the
+        // GraphQL reducer when any errors[i].type == "FORBIDDEN" (per
+        // SPEC §11.1 wiring, user decision 2026-04-17). Display embeds
+        // the FORBIDDEN messages; status_code is 403 so the un-upgraded
+        // variant still reaches `github_error_to_mcp` with the right
+        // bucket (INVALID_PARAMS).
+        let err = GitHubGraphQLForbiddenSnafu {
+            errors: vec!["Resource not accessible by integration".to_owned()],
+        }
+        .build();
+        let msg = err.to_string();
+        assert!(
+            msg.starts_with("GitHub GraphQL FORBIDDEN: "),
+            "unexpected display: {msg}"
+        );
+        assert!(
+            msg.contains("Resource not accessible by integration"),
+            "display must include FORBIDDEN messages: {msg}"
+        );
+        assert_eq!(err.status_code(), 403);
     }
 
     #[tokio::test]
@@ -272,6 +327,10 @@ mod tests {
             .build(),
             GitHubGraphQLSnafu {
                 errors: vec!["err".to_owned()],
+            }
+            .build(),
+            GitHubGraphQLForbiddenSnafu {
+                errors: vec!["Resource not accessible by integration".to_owned()],
             }
             .build(),
             RateLimitedSnafu {
