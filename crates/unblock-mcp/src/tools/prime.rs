@@ -1,15 +1,69 @@
 //! Prime tool — session entry point for every agent session.
 //!
-//! Aggregates issue state into categorised lists (`in_progress`, `ready`, `blocked`,
-//! `completed`, `hotspots`, `stale`) so the agent can orient itself at the start of
-//! a session without calling multiple individual tools.
+//! Returns a single **markdown context blob** that an MCP client can inject
+//! directly into the agent's session prompt. Internally the handler still
+//! aggregates issue state into categorised lists (`in_progress`, `ready`,
+//! `blocked`, `completed`, `hotspots`, `stale`) — those lists feed a private
+//! renderer that assembles the markdown.
 //!
-//! This is a read tool that always performs a fresh fetch from GitHub (bypasses
-//! cache) because the cache only stores the ready set — categorising `in_progress`,
-//! `blocked`, and `stale` requires the full `Issue` list with status and `claimed_at`
-//! fields. After the fetch, the cache is updated with the fresh graph data.
+//! ## Response shape (SPEC §7.3)
+//!
+//! ```rust,ignore
+//! pub struct PrimeResult {
+//!     pub context: String, // markdown blob for agent injection
+//! }
+//! ```
+//!
+//! No other fields. The renderer below emits the following sections in this
+//! exact order (any absent section is elided entirely, not rendered empty):
+//!
+//! 1. **Header** — `# Repo: <owner>/<repo>` + `Project: <n>` (if set).
+//! 2. **Counts** — `## Counts` with `ready`, `blocked`, `in-progress`,
+//!    `completed (<threshold>h)`, `hotspots`, `stale` bullets.
+//! 3. **Cycles** — `## Issues with cycles` (SPEC §7.3 flow step 2) — local
+//!    members as `#N`, cross-repo members deferred to the trailer.
+//!    Individual cycle member lists are capped at `max_per_category`
+//!    entries with a `… (K more)` tail when truncated.
+//! 4. **Session** — Epic 1.5 `SessionMeta` projected as a `## Session`
+//!    block (agent kind / client / agent field / `connected_at`).
+//! 5. **Drift** — Epic 1.6 background-reconcile output as a `## Drift
+//!    warnings` block (one bullet per summarised drift kind). Absent when
+//!    the reconcile task reported `clean == true`, panicked, or errored.
+//! 6. **Cross-repo trailer** — SPEC §11.4 adaptation: `## Cross-repo
+//!    references` + bullet list of `owner/repo#N` (sorted
+//!    lexicographically via `BTreeSet`) + italic summary matching the
+//!    shared `cross_repo::cycles_summary` helper byte-for-byte.
+//!    Elided entirely when the cycle detector did not touch any
+//!    cross-repo node.
+//!
+//! The `stale_threshold_hours` parameter gates the stale-claims subsection
+//! inside `## Counts` (and its inclusion in the recently-completed window),
+//! while `max_per_category` caps both the in-memory categorised lists AND
+//! the rendered cycle-member bullet lists. Both parameters remain active
+//! — they are not cosmetic.
+//!
+//! ## Flow (SPEC §7.3)
+//!
+//! This is a read tool that always performs a fresh fetch from GitHub
+//! (bypasses cache) because the cache only stores the ready set —
+//! categorising `in_progress`, `blocked`, and `stale` requires the full
+//! `Issue` list with status and `claimed_at` fields. After the fetch, the
+//! cache is updated with the fresh graph data. A background read-only
+//! reconcile is spawned via `tokio::spawn` (Design Decision R5) and its
+//! output surfaces in the `## Drift warnings` section.
+//!
+//! ## BREAKING CHANGE note
+//!
+//! This module's `PrimeResult` shape was rewritten from a categorised
+//! typed struct (9 public fields) to `{ context: String }` per
+//! bead `unblock-eos.7`. The rich category information is now rendered as
+//! markdown — consumers that previously read `result.ready[0].title` etc.
+//! must either re-parse the markdown or adopt the per-category tools
+//! (`ready`, `list`, `show`). See the bead's `BREAKING CHANGE:` footer
+//! for the full field list.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -17,10 +71,11 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 use unblock_core::graph::DependencyGraph;
-use unblock_core::types::{Issue, IssueState, IssueSummary, QualifiedId, Status};
+use unblock_core::types::{CrossRepoRefs, Issue, IssueState, IssueSummary, QualifiedId, Status};
 
 use crate::errors::github_error_to_mcp;
 use crate::server::ServerState;
+use crate::tools::cross_repo;
 use crate::tools::reconcile::{ReconcileParams, ReconcileReport, handle_reconcile};
 
 /// Minimum allowed value for `stale_threshold_hours` (must be at least 1).
@@ -56,84 +111,103 @@ pub struct PrimeParams {
     pub agent: Option<String>,
 }
 
-/// Output from the `prime` MCP tool.
+/// Output from the `prime` MCP tool (SPEC §7.3).
 ///
-/// Provides a rich session context with smart prioritisation so agents can
-/// orient themselves at the start of every session.
+/// The response is a single markdown blob. MCP clients inject it directly
+/// into the agent's session prompt. The renderer produces a six-section
+/// markdown document in a fixed order: header → counts → cycles → session
+/// → drift → cross-repo trailer (see the module-level docs for the full
+/// contract and elision rules).
+///
+/// # Consumer guidance
+///
+/// - Treat the string as opaque markdown. Do NOT parse it to extract
+///   structured issue data — call the per-category tools (`ready`,
+///   `list`, `show`, `dep_cycles`) for machine-consumable fields.
+/// - An absent subsection indicates the absence of that class of data,
+///   not an error — e.g. no `## Issues with cycles` heading implies
+///   zero cycles were detected in the configured repo graph.
+///
+/// # Rewrite history
+///
+/// Prior to bead `unblock-eos.7` this type carried nine public fields
+/// with typed category vectors. Those fields were removed in favour of
+/// the markdown blob. Epic 1.5 `SessionMeta` and Epic 1.6 drift warnings
+/// are now rendered as markdown sections (Option 3) rather than typed
+/// fields.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct PrimeResult {
-    /// Issues currently being worked on (`Status::InProgress`, `IssueState::Open`).
-    pub in_progress: Vec<PrimeIssueSummary>,
-    /// Issues with no active blockers that can be picked up.
-    pub ready: Vec<PrimeIssueSummary>,
-    /// Issues that have at least one open blocker.
-    pub blocked: Vec<PrimeIssueSummary>,
-    /// Issues closed within the recent window (default 24h) for continuity.
-    /// Lets agents see what was recently shipped before picking up new work.
-    pub completed: Vec<CompletedIssueSummary>,
-    /// Issues that block the most other issues (most-blocking first).
-    pub hotspots: Vec<HotspotSummary>,
-    /// In-progress issues with `claimed_at` older than the stale threshold.
-    pub stale: Vec<StaleIssueSummary>,
-    /// Session metadata (populated by Epic 1.5; stub `Unknown` until then).
-    pub session: SessionMeta,
-    /// Drift warnings from background reconciliation (populated by Epic 1.6;
-    /// `None` until then).
-    pub drift_warnings: Option<Vec<String>>,
-    /// Summary counts for quick orientation.
-    pub counts: PrimeCounts,
+    /// Markdown context blob for agent injection. The rendered layout is
+    /// documented in the [module-level docs][crate::tools::prime] and
+    /// verified by the integration tests `prime_markdown_*`.
+    pub context: String,
 }
 
-/// Summary counts for the prime result.
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-pub struct PrimeCounts {
-    /// Total number of in-progress issues (before truncation).
-    pub in_progress: usize,
-    /// Total number of ready issues (before truncation).
-    pub ready: usize,
-    /// Total number of blocked issues (before truncation).
-    pub blocked: usize,
-    /// Total number of recently completed issues (before truncation).
-    pub completed: usize,
-    /// Total number of hotspot issues (before truncation).
-    pub hotspots: usize,
-    /// Total number of stale claims (before truncation).
-    pub stale: usize,
-}
-
-/// Lightweight issue summary for prime result categories.
+/// Summary counts for the prime context.
 ///
-/// Re-declared from [`IssueSummary`] with `JsonSchema` derive, since core
-/// types do not depend on `schemars`.
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-pub struct PrimeIssueSummary {
+/// Module-private since bead `unblock-eos.7` — the counts appear in the
+/// rendered markdown `## Counts` section but are not exposed as a typed
+/// response field.
+#[derive(Debug, Clone)]
+pub(super) struct PrimeCounts {
+    /// Total number of in-progress issues (before truncation).
+    pub(super) in_progress: usize,
+    /// Total number of ready issues (before truncation).
+    pub(super) ready: usize,
+    /// Total number of blocked issues (before truncation).
+    pub(super) blocked: usize,
+    /// Total number of recently completed issues (before truncation).
+    pub(super) completed: usize,
+    /// Total number of hotspot issues (before truncation).
+    pub(super) hotspots: usize,
+    /// Total number of stale claims (before truncation).
+    pub(super) stale: usize,
+}
+
+/// Lightweight issue summary used internally by the prime renderer.
+///
+/// Module-private since bead `unblock-eos.7` — issue summaries are now
+/// consumed by [`render_context`] rather than serialised as public
+/// response fields. Kept as a distinct struct (rather than forwarding
+/// [`IssueSummary`] directly) to preserve the existing unit tests that
+/// assert on RFC-3339 `created_at` strings and to keep category output
+/// pre-formatted.
+///
+/// Fields beyond the renderer's current needs (e.g. `issue_type`,
+/// `milestone`, `labels`, `created_at`, `url`) are preserved because
+/// they carry `IssueSummary` fidelity for future renderer enhancements
+/// and are asserted against by the existing unit tests via
+/// [`Self::from_core`].
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub(super) struct PrimeIssueSummary {
     /// Fully qualified issue identifier (`owner/repo#number`).
-    pub qualified_id: String,
+    pub(super) qualified_id: String,
     /// GitHub issue number.
-    pub number: u64,
+    pub(super) number: u64,
     /// Issue title.
-    pub title: String,
+    pub(super) title: String,
     /// Issue type classification (e.g. "Task", "Bug").
-    pub issue_type: Option<String>,
+    pub(super) issue_type: Option<String>,
     /// Workflow status from Projects V2.
-    pub status: String,
+    pub(super) status: String,
     /// Priority level from Projects V2.
-    pub priority: String,
+    pub(super) priority: String,
     /// Agent name if claimed.
-    pub agent: Option<String>,
+    pub(super) agent: Option<String>,
     /// Milestone title.
-    pub milestone: Option<String>,
+    pub(super) milestone: Option<String>,
     /// Labels attached to the issue.
-    pub labels: Vec<String>,
+    pub(super) labels: Vec<String>,
     /// Timestamp when the issue was created (ISO 8601 / RFC 3339).
-    pub created_at: String,
+    pub(super) created_at: String,
     /// HTML URL for linking back to GitHub.
-    pub url: String,
+    pub(super) url: String,
 }
 
 impl PrimeIssueSummary {
-    /// Convert from a core [`IssueSummary`] to a schema-annotated MCP result type.
-    fn from_core(summary: &IssueSummary) -> Self {
+    /// Convert from a core [`IssueSummary`] to a renderer-friendly summary.
+    pub(super) fn from_core(summary: &IssueSummary) -> Self {
         Self {
             qualified_id: summary.qualified_id.to_string(),
             number: summary.number,
@@ -151,82 +225,101 @@ impl PrimeIssueSummary {
 }
 
 /// A hotspot: an issue that blocks many other issues.
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-pub struct HotspotSummary {
+///
+/// Module-private since bead `unblock-eos.7`. Fields beyond the
+/// renderer's current needs (e.g. `qualified_id`, `status`, `url`) are
+/// retained because they are asserted against by the existing unit
+/// tests and preserved for future renderer enhancements.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub(super) struct HotspotSummary {
     /// Fully qualified issue identifier (`owner/repo#number`).
-    pub qualified_id: String,
+    pub(super) qualified_id: String,
     /// GitHub issue number.
-    pub number: u64,
+    pub(super) number: u64,
     /// Issue title.
-    pub title: String,
+    pub(super) title: String,
     /// Workflow status from Projects V2.
-    pub status: String,
+    pub(super) status: String,
     /// Priority level from Projects V2.
-    pub priority: String,
+    pub(super) priority: String,
     /// Number of issues this issue is blocking.
-    pub blocking_count: usize,
+    pub(super) blocking_count: usize,
     /// HTML URL for linking back to GitHub.
-    pub url: String,
+    pub(super) url: String,
 }
 
 /// A stale claim: an in-progress issue with `claimed_at` older than threshold.
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-pub struct StaleIssueSummary {
+///
+/// Module-private since bead `unblock-eos.7`. Fields beyond the
+/// renderer's current needs (e.g. `qualified_id`, `claimed_at`, `url`)
+/// are retained because they are asserted against by the existing unit
+/// tests and preserved for future renderer enhancements.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub(super) struct StaleIssueSummary {
     /// Fully qualified issue identifier (`owner/repo#number`).
-    pub qualified_id: String,
+    pub(super) qualified_id: String,
     /// GitHub issue number.
-    pub number: u64,
+    pub(super) number: u64,
     /// Issue title.
-    pub title: String,
+    pub(super) title: String,
     /// Agent name that claimed the issue.
-    pub agent: Option<String>,
+    pub(super) agent: Option<String>,
     /// Timestamp when the issue was claimed (ISO 8601 / RFC 3339).
-    pub claimed_at: String,
+    pub(super) claimed_at: String,
     /// Hours since the issue was claimed.
-    pub hours_stale: u64,
+    pub(super) hours_stale: u64,
     /// HTML URL for linking back to GitHub.
-    pub url: String,
+    pub(super) url: String,
 }
 
 /// A recently completed issue: closed within the configurable time window.
 ///
 /// Provides continuity context so agents can see what was recently shipped
-/// before picking up new work (PRD §6.3).
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-pub struct CompletedIssueSummary {
+/// before picking up new work (PRD §6.3). Module-private since bead
+/// `unblock-eos.7`. Fields beyond the renderer's current needs
+/// (e.g. `qualified_id`, `issue_type`, `url`) are retained because
+/// they are asserted against by the existing unit tests and preserved
+/// for future renderer enhancements.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub(super) struct CompletedIssueSummary {
     /// Fully qualified issue identifier (`owner/repo#number`).
-    pub qualified_id: String,
+    pub(super) qualified_id: String,
     /// GitHub issue number.
-    pub number: u64,
+    pub(super) number: u64,
     /// Issue title.
-    pub title: String,
+    pub(super) title: String,
     /// Issue type classification (e.g. "Task", "Bug").
-    pub issue_type: Option<String>,
+    pub(super) issue_type: Option<String>,
     /// Priority level from Projects V2.
-    pub priority: String,
+    pub(super) priority: String,
     /// Approximate close time (derived from `updated_at` since GitHub
     /// `closedAt` is not currently fetched).
-    pub closed_at: String,
+    pub(super) closed_at: String,
     /// HTML URL for linking back to GitHub.
-    pub url: String,
+    pub(super) url: String,
 }
 
 /// Session metadata populated from [`ServerState`] during each `prime` call.
 ///
 /// Surfaces the connected MCP client identity, the resolved agent kind,
 /// an optional operator-defined agent field (`UNBLOCK_AGENT` env var),
-/// and the session start timestamp.
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-pub struct SessionMeta {
+/// and the session start timestamp. Module-private since bead
+/// `unblock-eos.7` — rendered into the `## Session` markdown section by
+/// [`render_context`] rather than serialised as a typed response field.
+#[derive(Debug, Clone)]
+pub(super) struct SessionMeta {
     /// Raw MCP `clientInfo.name` (e.g., "Claude Code", "GitHub Copilot Chat").
-    pub agent_client: String,
+    pub(super) agent_client: String,
     /// Normalised agent kind string (e.g., "claude-code", "copilot", "unknown").
-    pub agent_kind: String,
+    pub(super) agent_kind: String,
     /// Value of the `UNBLOCK_AGENT` env var if set by the operator.
     /// `None` when the variable is not present in the environment.
-    pub agent_field: Option<String>,
+    pub(super) agent_field: Option<String>,
     /// UTC timestamp when the MCP session was initialised (ISO 8601 / RFC 3339).
-    pub connected_at: DateTime<Utc>,
+    pub(super) connected_at: DateTime<Utc>,
 }
 
 impl SessionMeta {
@@ -243,8 +336,7 @@ impl SessionMeta {
     /// `connected_at` falls back to `Utc::now()` when the `OnceLock` has not
     /// been set, ensuring tests that skip `initialize()` still get a valid
     /// timestamp.
-    #[must_use]
-    pub fn from_state(state: &ServerState) -> Self {
+    pub(super) fn from_state(state: &ServerState) -> Self {
         let agent_client = state
             .agent_client
             .get()
@@ -267,25 +359,32 @@ impl SessionMeta {
 
 /// Execute the prime tool handler.
 ///
-/// # Flow
+/// # Flow (SPEC §7.3)
 ///
-/// 1. Spawn a background read-only reconcile via `tokio::spawn` (Design Decision R5).
+/// 1. Spawn a background read-only reconcile via `tokio::spawn` (Design
+///    Decision R5).
 /// 2. Fresh fetch via `fetch_graph_data()` — bypasses cache entirely.
 /// 3. Build `DependencyGraph` and compute the ready set.
-/// 4. Categorise all issues into `in_progress`, `blocked`, `ready`, `completed`, `hotspots`, `stale`.
+/// 4. Categorise all issues into `in_progress`, `blocked`, `ready`,
+///    `completed`, `hotspots`, `stale`.
 /// 5. Update cache with the fresh graph already fetched.
 /// 6. Apply agent filter to relevant categories (PRD §6.3).
-/// 7. Build result with counts computed after filtering.
-/// 8. Await the drift check — if drift is found, populate `drift_warnings` — and return `PrimeResult`.
+/// 7. Compute counts (after filtering) and detect cycles for the `##
+///    Issues with cycles` section.
+/// 8. Await the drift check, assemble `SessionMeta` + `drift_warnings`,
+///    and hand all inputs to the internal `render_context` helper which
+///    returns the single markdown blob in [`PrimeResult::context`].
 ///
-/// The background reconcile runs concurrently with the prime fetch and does not
-/// block the response path. If it fails or panics, `drift_warnings` is simply
-/// `None` — prime never fails due to reconcile errors.
+/// The background reconcile runs concurrently with the prime fetch and
+/// does not block the response path. If it fails or panics, the `##
+/// Drift warnings` section is omitted — prime never fails due to
+/// reconcile errors.
 ///
 /// # Errors
 ///
-/// Returns [`rmcp::model::ErrorData`] with `INVALID_PARAMS` if `stale_threshold_hours`
-/// or `max_per_category` is below its minimum (currently 1), or if the GitHub fetch fails.
+/// Returns [`rmcp::model::ErrorData`] with `INVALID_PARAMS` if
+/// `stale_threshold_hours` or `max_per_category` is below its minimum
+/// (currently 1), or if the GitHub fetch fails.
 #[allow(clippy::too_many_lines)]
 pub async fn handle_prime(
     params: &PrimeParams,
@@ -391,7 +490,13 @@ pub async fn handle_prime(
         filtered_stale.retain(|s| s.agent.as_deref() == Some(agent_filter));
     }
 
-    // 7. Build result with counts computed AFTER filtering.
+    // 7. Compute counts AFTER filtering and detect cycles for the
+    //    `## Issues with cycles` section. The cache `get_graph()` clone
+    //    is O(1) (`Arc` bump) — the graph we just fed into the cache is
+    //    reused. On the astronomically unlikely race where another
+    //    invalidator clears the cache between steps 5 and 7 we fall back
+    //    to a cycle-free view (the renderer elides the section); this
+    //    matches the "no cycles" branch in SPEC §7.3 flow step 2.
     let counts = PrimeCounts {
         in_progress: filtered_ip.len(),
         ready: filtered_ready.len(),
@@ -401,38 +506,423 @@ pub async fn handle_prime(
         stale: filtered_stale.len(),
     };
 
-    // 8. Await drift check, assemble and return PrimeResult.
+    let cached_graph = state.cache.get_graph().await;
+    let raw_cycles = cached_graph
+        .as_ref()
+        .map(|g| g.detect_all_cycles())
+        .unwrap_or_default();
+
+    // Project cycles via the shared §11.4 helper so the cross-repo
+    // trailer is populated identically to `dep_cycles` (parity across
+    // tools is a non-negotiable part of the cross-repo contract).
+    let configured_owner = state.github.owner();
+    let configured_repo = state.github.repo();
+    let (cycle_projection, cross_repo_accum) =
+        cross_repo::project_all_cycles(&raw_cycles, configured_owner, configured_repo);
+    let cross_repo_refs = cross_repo::build_cross_repo_refs_with_summary(
+        cross_repo_accum,
+        cross_repo::cycles_summary,
+    );
+
+    // Truncate the categorised lists to `max_per_category`, matching the
+    // historical (pre-eos.7) truncation semantics so the rendered lists
+    // never blow up the markdown for repos with hundreds of open issues.
+    let ip_top: Vec<PrimeIssueSummary> = filtered_ip
+        .iter()
+        .take(max_per_category)
+        .map(PrimeIssueSummary::from_core)
+        .collect();
+    let ready_top: Vec<PrimeIssueSummary> = filtered_ready
+        .iter()
+        .take(max_per_category)
+        .map(PrimeIssueSummary::from_core)
+        .collect();
+    let blocked_top: Vec<PrimeIssueSummary> = filtered_blocked
+        .iter()
+        .take(max_per_category)
+        .map(PrimeIssueSummary::from_core)
+        .collect();
+    let completed_top: Vec<CompletedIssueSummary> = categories
+        .completed
+        .into_iter()
+        .take(max_per_category)
+        .collect();
+    let hotspots_top: Vec<HotspotSummary> = categories
+        .hotspots
+        .into_iter()
+        .take(max_per_category)
+        .collect();
+    let stale_top: Vec<StaleIssueSummary> =
+        filtered_stale.into_iter().take(max_per_category).collect();
+
+    // 8. Await drift check and assemble the markdown blob.
+    let drift_warnings = resolve_drift_warnings(drift_check).await;
+    let session = SessionMeta::from_state(state);
+
+    let ctx = ContextInputs {
+        owner: configured_owner,
+        repo: configured_repo,
+        project_number: state.config.project_number,
+        stale_threshold_hours,
+        max_per_category,
+        counts: &counts,
+        cycles: &cycle_projection,
+        cross_repo_refs: cross_repo_refs.as_ref(),
+        session: &session,
+        drift_warnings: drift_warnings.as_deref(),
+        in_progress: &ip_top,
+        ready: &ready_top,
+        blocked: &blocked_top,
+        completed: &completed_top,
+        hotspots: &hotspots_top,
+        stale: &stale_top,
+    };
+
     Ok(PrimeResult {
-        in_progress: filtered_ip
-            .iter()
-            .take(max_per_category)
-            .map(PrimeIssueSummary::from_core)
-            .collect(),
-        ready: filtered_ready
-            .iter()
-            .take(max_per_category)
-            .map(PrimeIssueSummary::from_core)
-            .collect(),
-        blocked: filtered_blocked
-            .iter()
-            .take(max_per_category)
-            .map(PrimeIssueSummary::from_core)
-            .collect(),
-        completed: categories
-            .completed
-            .into_iter()
-            .take(max_per_category)
-            .collect(),
-        hotspots: categories
-            .hotspots
-            .into_iter()
-            .take(max_per_category)
-            .collect(),
-        stale: filtered_stale.into_iter().take(max_per_category).collect(),
-        session: SessionMeta::from_state(state),
-        drift_warnings: resolve_drift_warnings(drift_check).await,
-        counts,
+        context: render_context(&ctx),
     })
+}
+
+/// Bundle of renderer inputs — every section of the `context` markdown
+/// reads from this struct. Avoids a function signature with a dozen
+/// positional parameters.
+///
+/// Lifetime `'a` binds the borrowed slices/refs to the call-site stack
+/// frame of [`handle_prime`]; the renderer performs no allocation
+/// outside the returned `String`.
+struct ContextInputs<'a> {
+    /// Configured repository owner (matches `state.github.owner()`).
+    owner: &'a str,
+    /// Configured repository name (matches `state.github.repo()`).
+    repo: &'a str,
+    /// Optional GitHub Projects V2 project number (from `Config`).
+    project_number: Option<u64>,
+    /// Stale threshold echoed into the `## Counts` header so the agent
+    /// can see the window used for the `completed` / `stale` buckets.
+    stale_threshold_hours: u64,
+    /// Per-category rendered-bullet cap (same value used to truncate
+    /// the lists above — passed here so the renderer can annotate
+    /// truncation with `… (K more)` and cap cycle-member bullets).
+    max_per_category: usize,
+    /// Counts computed AFTER agent filtering, rendered verbatim in
+    /// `## Counts`.
+    counts: &'a PrimeCounts,
+    /// Local-only projection of every detected cycle (SPEC §7.7 flow
+    /// step 4b — may include short/empty inner vectors for mixed or
+    /// wholly cross-repo cycles).
+    cycles: &'a [Vec<u64>],
+    /// §11.4 cross-repo trailer or `None` when no cycle touched a
+    /// cross-repo node.
+    cross_repo_refs: Option<&'a CrossRepoRefs>,
+    /// Epic 1.5 session metadata.
+    session: &'a SessionMeta,
+    /// Epic 1.6 drift warnings. `None` elides the whole section.
+    drift_warnings: Option<&'a [String]>,
+    /// Top-N in-progress summaries (already truncated).
+    in_progress: &'a [PrimeIssueSummary],
+    /// Top-N ready summaries (already truncated).
+    ready: &'a [PrimeIssueSummary],
+    /// Top-N blocked summaries (already truncated).
+    blocked: &'a [PrimeIssueSummary],
+    /// Top-N completed summaries (already truncated).
+    completed: &'a [CompletedIssueSummary],
+    /// Top-N hotspots (already truncated).
+    hotspots: &'a [HotspotSummary],
+    /// Top-N stale claims (already truncated).
+    stale: &'a [StaleIssueSummary],
+}
+
+/// Render the prime `context` markdown blob.
+///
+/// Section order (fixed — any absent section is elided, not rendered
+/// empty):
+///
+/// 1. **Header** — `# Repo:` / `Project:` lines.
+/// 2. **`## Counts`** — summary counts for quick orientation.
+/// 3. **`## In progress` / `## Ready` / `## Blocked` / `## Recently
+///    completed` / `## Hotspots` / `## Stale claims`** — truncated
+///    category lists (elided when empty).
+/// 4. **`## Issues with cycles`** — local cycle-member projection per
+///    SPEC §7.3 flow step 2. Elided when no cycle was detected OR
+///    every cycle's local projection is empty (cycles entirely
+///    composed of cross-repo members still surface via the §11.4
+///    trailer).
+/// 5. **`## Session`** — Epic 1.5 `SessionMeta`.
+/// 6. **`## Drift warnings`** — Epic 1.6 drift summaries, elided when
+///    `None` (clean report, panic, or error).
+/// 7. **`## Cross-repo references`** — SPEC §11.4 trailer, elided when
+///    no cross-repo node participated.
+///
+/// All rendering is pure-string — the function takes no
+/// `ServerState`/`ClaimHandle` handles and allocates only the returned
+/// [`String`].
+fn render_context(ctx: &ContextInputs<'_>) -> String {
+    let mut out = String::new();
+    render_header(&mut out, ctx);
+    render_counts(&mut out, ctx);
+    render_category_list_summaries(
+        &mut out,
+        "In progress",
+        ctx.in_progress,
+        ctx.counts.in_progress,
+    );
+    render_category_list_summaries(&mut out, "Ready", ctx.ready, ctx.counts.ready);
+    render_category_list_summaries(&mut out, "Blocked", ctx.blocked, ctx.counts.blocked);
+    render_completed(&mut out, ctx.completed, ctx.counts.completed);
+    render_hotspots(&mut out, ctx.hotspots, ctx.counts.hotspots);
+    render_stale(
+        &mut out,
+        ctx.stale,
+        ctx.counts.stale,
+        ctx.stale_threshold_hours,
+    );
+    render_cycles(&mut out, ctx.cycles, ctx.max_per_category);
+    render_session(&mut out, ctx.session);
+    render_drift(&mut out, ctx.drift_warnings);
+    render_cross_repo_trailer(&mut out, ctx.cross_repo_refs);
+    out
+}
+
+/// Emit `# Repo: owner/repo` + optional `Project: N` header block.
+fn render_header(out: &mut String, ctx: &ContextInputs<'_>) {
+    out.push_str("# Repo: ");
+    out.push_str(ctx.owner);
+    out.push('/');
+    out.push_str(ctx.repo);
+    out.push('\n');
+    if let Some(n) = ctx.project_number {
+        writeln!(out, "Project: {n}").expect("writing to String is infallible");
+    }
+}
+
+/// Emit the `## Counts` section with a one-bullet-per-bucket summary.
+///
+/// The `completed` and `stale` bullets include the active
+/// `stale_threshold_hours` so the agent can see the window used to
+/// derive the counts.
+fn render_counts(out: &mut String, ctx: &ContextInputs<'_>) {
+    let c = ctx.counts;
+    out.push_str("\n## Counts\n");
+    writeln!(out, "- ready: {}", c.ready).expect("writing to String is infallible");
+    writeln!(out, "- blocked: {}", c.blocked).expect("writing to String is infallible");
+    writeln!(out, "- in-progress: {}", c.in_progress).expect("writing to String is infallible");
+    writeln!(
+        out,
+        "- completed ({}h): {}",
+        ctx.stale_threshold_hours, c.completed
+    )
+    .expect("writing to String is infallible");
+    writeln!(out, "- hotspots: {}", c.hotspots).expect("writing to String is infallible");
+    writeln!(
+        out,
+        "- stale (>{}h): {}",
+        ctx.stale_threshold_hours, c.stale
+    )
+    .expect("writing to String is infallible");
+}
+
+/// Emit a `## {heading}` section for in-progress / ready / blocked
+/// categories. Each bullet shows `#N [Priority] title (owner)`.
+///
+/// When `total > visible.len()` (i.e. truncation happened) a trailing
+/// `_… (K more omitted)_` italic line informs the agent they should
+/// narrow via `ready` / `list`.
+fn render_category_list_summaries(
+    out: &mut String,
+    heading: &str,
+    visible: &[PrimeIssueSummary],
+    total: usize,
+) {
+    if visible.is_empty() {
+        return;
+    }
+    writeln!(out, "\n## {heading}").expect("writing to String is infallible");
+    for s in visible {
+        write!(
+            out,
+            "- #{num} [{prio}] {title}",
+            num = s.number,
+            prio = s.priority,
+            title = s.title,
+        )
+        .expect("writing to String is infallible");
+        if let Some(agent) = &s.agent {
+            write!(out, " (@{agent})").expect("writing to String is infallible");
+        }
+        out.push('\n');
+    }
+    if total > visible.len() {
+        let omitted = total - visible.len();
+        writeln!(out, "_… ({omitted} more omitted)_").expect("writing to String is infallible");
+    }
+}
+
+/// Emit the `## Recently completed` section.
+fn render_completed(out: &mut String, visible: &[CompletedIssueSummary], total: usize) {
+    if visible.is_empty() {
+        return;
+    }
+    out.push_str("\n## Recently completed\n");
+    for c in visible {
+        writeln!(
+            out,
+            "- #{num} [{prio}] {title}",
+            num = c.number,
+            prio = c.priority,
+            title = c.title,
+        )
+        .expect("writing to String is infallible");
+    }
+    if total > visible.len() {
+        let omitted = total - visible.len();
+        writeln!(out, "_… ({omitted} more omitted)_").expect("writing to String is infallible");
+    }
+}
+
+/// Emit the `## Hotspots` section (most-blocking issues first).
+fn render_hotspots(out: &mut String, visible: &[HotspotSummary], total: usize) {
+    if visible.is_empty() {
+        return;
+    }
+    out.push_str("\n## Hotspots\n");
+    for h in visible {
+        writeln!(
+            out,
+            "- #{num} [{prio}] {title} — blocks {count}",
+            num = h.number,
+            prio = h.priority,
+            title = h.title,
+            count = h.blocking_count,
+        )
+        .expect("writing to String is infallible");
+    }
+    if total > visible.len() {
+        let omitted = total - visible.len();
+        writeln!(out, "_… ({omitted} more omitted)_").expect("writing to String is infallible");
+    }
+}
+
+/// Emit the `## Stale claims` section.
+///
+/// The threshold is echoed in the heading so the agent sees the window
+/// used to select the claims. Elided entirely when `visible` is empty.
+fn render_stale(
+    out: &mut String,
+    visible: &[StaleIssueSummary],
+    total: usize,
+    stale_threshold_hours: u64,
+) {
+    if visible.is_empty() {
+        return;
+    }
+    writeln!(out, "\n## Stale claims (>{stale_threshold_hours}h)")
+        .expect("writing to String is infallible");
+    for s in visible {
+        write!(
+            out,
+            "- #{num} {title} — {hours}h",
+            num = s.number,
+            title = s.title,
+            hours = s.hours_stale,
+        )
+        .expect("writing to String is infallible");
+        if let Some(agent) = &s.agent {
+            write!(out, " (@{agent})").expect("writing to String is infallible");
+        }
+        out.push('\n');
+    }
+    if total > visible.len() {
+        let omitted = total - visible.len();
+        writeln!(out, "_… ({omitted} more omitted)_").expect("writing to String is infallible");
+    }
+}
+
+/// Emit the `## Issues with cycles` section (SPEC §7.3 flow step 2).
+///
+/// Each rendered cycle appears as a sub-bullet. Local members render as
+/// `#N`; cross-repo members are already stripped by
+/// [`cross_repo::project_all_cycles`] and surface in the §11.4 trailer.
+/// Per-cycle member lists are capped at `max_per_category` with a `… (K
+/// more)` tail when truncated.
+///
+/// Cycles whose local projection is empty (entirely cross-repo) are
+/// elided from the member list but their omitted members still appear
+/// in the trailer — we emit an explanatory `"- (cross-repo only — see
+/// trailer)"` sentinel so the count of cycles listed matches the count
+/// of detected cycles.
+fn render_cycles(out: &mut String, cycles: &[Vec<u64>], max_per_category: usize) {
+    if cycles.is_empty() {
+        return;
+    }
+    out.push_str("\n## Issues with cycles\n");
+    for (idx, cycle) in cycles.iter().enumerate() {
+        let heading = format!("cycle {}:", idx + 1);
+        if cycle.is_empty() {
+            writeln!(out, "- {heading} (cross-repo only — see trailer)")
+                .expect("writing to String is infallible");
+            continue;
+        }
+        let take = max_per_category.max(1);
+        let shown: Vec<String> = cycle.iter().take(take).map(|n| format!("#{n}")).collect();
+        let trailer = if cycle.len() > take {
+            format!(" … ({} more)", cycle.len() - take)
+        } else {
+            String::new()
+        };
+        writeln!(
+            out,
+            "- {heading} {members}{trailer}",
+            members = shown.join(" → "),
+        )
+        .expect("writing to String is infallible");
+    }
+}
+
+/// Emit the `## Session` section with Epic 1.5 metadata.
+fn render_session(out: &mut String, session: &SessionMeta) {
+    out.push_str("\n## Session\n");
+    writeln!(out, "- agent_kind: {}", session.agent_kind).expect("writing to String is infallible");
+    writeln!(out, "- agent_client: {}", session.agent_client)
+        .expect("writing to String is infallible");
+    if let Some(f) = &session.agent_field {
+        writeln!(out, "- agent_field: {f}").expect("writing to String is infallible");
+    }
+    writeln!(out, "- connected_at: {}", session.connected_at.to_rfc3339())
+        .expect("writing to String is infallible");
+}
+
+/// Emit the `## Drift warnings` section (Epic 1.6).
+///
+/// Elided when `None` (clean report, panic, or error from the
+/// background reconcile task). When present, `warnings` is already
+/// sorted lexicographically by [`summarise_drift`].
+fn render_drift(out: &mut String, warnings: Option<&[String]>) {
+    let Some(warnings) = warnings else { return };
+    if warnings.is_empty() {
+        return;
+    }
+    out.push_str("\n## Drift warnings\n");
+    for w in warnings {
+        writeln!(out, "- {w}").expect("writing to String is infallible");
+    }
+}
+
+/// Emit the SPEC §11.4 `## Cross-repo references` trailer.
+///
+/// Elided when `cross_repo_refs` is `None` (no cross-repo node
+/// participated in any cycle). Emitted bullets are the lexicographic
+/// `omitted: Vec<String>` from the shared `cross_repo` module; the
+/// italic summary uses the singular/plural phrasing shared with
+/// `dep_cycles` (byte-for-byte parity — non-negotiable).
+fn render_cross_repo_trailer(out: &mut String, refs: Option<&CrossRepoRefs>) {
+    let Some(refs) = refs else { return };
+    out.push_str("\n## Cross-repo references\n");
+    for entry in &refs.omitted {
+        writeln!(out, "- `{entry}`").expect("writing to String is infallible");
+    }
+    if let Some(summary) = &refs.summary {
+        writeln!(out, "\n_{summary}_").expect("writing to String is infallible");
+    }
 }
 
 /// Await the background drift check and convert to `drift_warnings`.
@@ -1350,82 +1840,291 @@ mod tests {
         assert_eq!(params.max_per_category, Some(5));
     }
 
-    // ── PrimeResult serialization tests ───────────────────────────────
+    // ── PrimeResult + renderer shape tests (post unblock-eos.7) ────────
+    //
+    // The pre-eos.7 assertions that probed typed-field serialisation no
+    // longer apply — `PrimeResult = { context: String }`. The checks
+    // below exercise the renderer end-to-end via `render_context` so
+    // the six-section contract (header → counts → cycles → session →
+    // drift → cross-repo trailer) is pinned.
 
-    #[test]
-    fn prime_result_serializes_clean() {
-        let connected = Utc::now();
-        let result = PrimeResult {
-            in_progress: vec![],
-            ready: vec![],
-            blocked: vec![],
-            completed: vec![],
-            hotspots: vec![],
-            stale: vec![],
-            session: SessionMeta {
-                agent_client: "unknown".to_owned(),
-                agent_kind: "unknown".to_owned(),
-                agent_field: None,
-                connected_at: connected,
-            },
+    /// Build a zero-count `PrimeCounts` for clean-slate renderer tests.
+    fn zero_counts() -> PrimeCounts {
+        PrimeCounts {
+            in_progress: 0,
+            ready: 0,
+            blocked: 0,
+            completed: 0,
+            hotspots: 0,
+            stale: 0,
+        }
+    }
+
+    /// Session fixture that matches the `SessionMeta::from_state`
+    /// fallback branch (no initialisation has happened).
+    fn unknown_session() -> SessionMeta {
+        SessionMeta {
+            agent_client: "unknown".to_owned(),
+            agent_kind: "unknown".to_owned(),
+            agent_field: None,
+            connected_at: Utc::now(),
+        }
+    }
+
+    /// Build a minimal `ContextInputs` for renderer tests — every
+    /// category slice is empty, no cycles, no drift.
+    fn minimal_inputs<'a>(counts: &'a PrimeCounts, session: &'a SessionMeta) -> ContextInputs<'a> {
+        ContextInputs {
+            owner: "acme",
+            repo: "widgets",
+            project_number: None,
+            stale_threshold_hours: 24,
+            max_per_category: 10,
+            counts,
+            cycles: &[],
+            cross_repo_refs: None,
+            session,
             drift_warnings: None,
-            counts: PrimeCounts {
-                in_progress: 0,
-                ready: 0,
-                blocked: 0,
-                completed: 0,
-                hotspots: 0,
-                stale: 0,
-            },
-        };
-
-        let json = serde_json::to_value(&result).expect("should serialize");
-        assert!(json["drift_warnings"].is_null());
-        assert_eq!(json["session"]["agent_kind"], "unknown");
-        assert_eq!(json["session"]["agent_client"], "unknown");
-        assert!(json["session"]["agent_field"].is_null());
-        assert!(json["session"]["connected_at"].is_string());
-        assert_eq!(json["counts"]["in_progress"], 0);
+            in_progress: &[],
+            ready: &[],
+            blocked: &[],
+            completed: &[],
+            hotspots: &[],
+            stale: &[],
+        }
     }
 
     #[test]
-    fn prime_result_session_all_fields_present_in_json() {
-        let connected = Utc::now();
-        let result = PrimeResult {
-            in_progress: vec![],
-            ready: vec![],
-            blocked: vec![],
-            completed: vec![],
-            hotspots: vec![],
-            stale: vec![],
-            session: SessionMeta {
-                agent_client: "Claude Code".to_owned(),
-                agent_kind: "claude-code".to_owned(),
-                agent_field: Some("rust-supervisor".to_owned()),
-                connected_at: connected,
-            },
-            drift_warnings: None,
-            counts: PrimeCounts {
-                in_progress: 0,
-                ready: 0,
-                blocked: 0,
-                completed: 0,
-                hotspots: 0,
-                stale: 0,
-            },
-        };
+    fn render_context_clean_emits_header_counts_session_only() {
+        let counts = zero_counts();
+        let session = unknown_session();
+        let ctx = minimal_inputs(&counts, &session);
+        let md = render_context(&ctx);
 
-        let json = serde_json::to_value(&result).expect("should serialize");
-        let session = &json["session"];
-        assert_eq!(session["agent_client"], "Claude Code");
-        assert_eq!(session["agent_kind"], "claude-code");
-        assert_eq!(session["agent_field"], "rust-supervisor");
-        // connected_at should be a valid RFC 3339 string
-        let ts_str = session["connected_at"].as_str().expect("should be string");
-        let parsed = DateTime::parse_from_rfc3339(ts_str);
+        // Header block.
+        assert!(md.starts_with("# Repo: acme/widgets\n"), "md:\n{md}");
         assert!(
-            parsed.is_ok(),
-            "connected_at should be valid RFC 3339: {ts_str}"
+            !md.contains("Project: "),
+            "Project line omitted when project_number is None"
+        );
+
+        // Counts section.
+        assert!(md.contains("\n## Counts\n"));
+        assert!(md.contains("- ready: 0\n"));
+        assert!(md.contains("- blocked: 0\n"));
+        assert!(md.contains("- in-progress: 0\n"));
+        assert!(md.contains("- completed (24h): 0\n"));
+        assert!(md.contains("- hotspots: 0\n"));
+        assert!(md.contains("- stale (>24h): 0\n"));
+
+        // Session section present (no elision path).
+        assert!(md.contains("\n## Session\n"));
+        assert!(md.contains("- agent_kind: unknown\n"));
+        assert!(md.contains("- agent_client: unknown\n"));
+        assert!(
+            !md.contains("- agent_field:"),
+            "agent_field bullet elided when None"
+        );
+        assert!(md.contains("- connected_at: "));
+
+        // No optional sections.
+        assert!(
+            !md.contains("## Issues with cycles"),
+            "cycles section elided when no cycles"
+        );
+        assert!(
+            !md.contains("## Drift warnings"),
+            "drift section elided when warnings=None"
+        );
+        assert!(
+            !md.contains("## Cross-repo references"),
+            "trailer elided when cross_repo_refs=None"
+        );
+    }
+
+    #[test]
+    fn render_context_session_emits_agent_field_bullet_when_set() {
+        let counts = zero_counts();
+        let session = SessionMeta {
+            agent_client: "Claude Code".to_owned(),
+            agent_kind: "claude-code".to_owned(),
+            agent_field: Some("rust-supervisor".to_owned()),
+            connected_at: Utc::now(),
+        };
+        let ctx = minimal_inputs(&counts, &session);
+        let md = render_context(&ctx);
+
+        assert!(md.contains("- agent_kind: claude-code\n"));
+        assert!(md.contains("- agent_client: Claude Code\n"));
+        assert!(md.contains("- agent_field: rust-supervisor\n"));
+    }
+
+    #[test]
+    fn render_context_emits_project_line_when_set() {
+        let counts = zero_counts();
+        let session = unknown_session();
+        let mut ctx = minimal_inputs(&counts, &session);
+        ctx.project_number = Some(42);
+        let md = render_context(&ctx);
+        assert!(
+            md.contains("# Repo: acme/widgets\nProject: 42\n"),
+            "md:\n{md}"
+        );
+    }
+
+    #[test]
+    fn render_context_counts_echo_stale_threshold() {
+        let counts = zero_counts();
+        let session = unknown_session();
+        let mut ctx = minimal_inputs(&counts, &session);
+        ctx.stale_threshold_hours = 72;
+        let md = render_context(&ctx);
+        assert!(md.contains("- completed (72h): 0\n"));
+        assert!(md.contains("- stale (>72h): 0\n"));
+    }
+
+    #[test]
+    fn render_context_cycles_section_elided_when_empty() {
+        let counts = zero_counts();
+        let session = unknown_session();
+        let ctx = minimal_inputs(&counts, &session);
+        assert!(!render_context(&ctx).contains("## Issues with cycles"));
+    }
+
+    #[test]
+    fn render_context_cycles_section_renders_local_projection() {
+        let counts = zero_counts();
+        let session = unknown_session();
+        let mut ctx = minimal_inputs(&counts, &session);
+        let cycles = vec![vec![6, 7, 8]];
+        ctx.cycles = &cycles;
+        let md = render_context(&ctx);
+        assert!(md.contains("## Issues with cycles"), "md:\n{md}");
+        assert!(md.contains("- cycle 1: #6 → #7 → #8\n"), "md:\n{md}");
+    }
+
+    #[test]
+    fn render_context_cycle_members_truncated_to_max_per_category() {
+        let counts = zero_counts();
+        let session = unknown_session();
+        let mut ctx = minimal_inputs(&counts, &session);
+        ctx.max_per_category = 2;
+        let cycles = vec![vec![1, 2, 3, 4, 5]];
+        ctx.cycles = &cycles;
+        let md = render_context(&ctx);
+        assert!(md.contains("- cycle 1: #1 → #2 … (3 more)\n"), "md:\n{md}");
+    }
+
+    #[test]
+    fn render_context_cross_repo_only_cycle_emits_sentinel_bullet() {
+        let counts = zero_counts();
+        let session = unknown_session();
+        let mut ctx = minimal_inputs(&counts, &session);
+        let cycles = vec![vec![]]; // fully cross-repo projection.
+        ctx.cycles = &cycles;
+        let md = render_context(&ctx);
+        assert!(
+            md.contains("- cycle 1: (cross-repo only — see trailer)\n"),
+            "md:\n{md}"
+        );
+    }
+
+    #[test]
+    fn render_context_drift_warnings_elided_when_none() {
+        let counts = zero_counts();
+        let session = unknown_session();
+        let ctx = minimal_inputs(&counts, &session);
+        assert!(!render_context(&ctx).contains("## Drift warnings"));
+    }
+
+    #[test]
+    fn render_context_drift_warnings_elided_when_empty_slice() {
+        let counts = zero_counts();
+        let session = unknown_session();
+        let mut ctx = minimal_inputs(&counts, &session);
+        let empty: [String; 0] = [];
+        ctx.drift_warnings = Some(&empty);
+        assert!(!render_context(&ctx).contains("## Drift warnings"));
+    }
+
+    #[test]
+    fn render_context_drift_warnings_rendered_verbatim() {
+        let counts = zero_counts();
+        let session = unknown_session();
+        let mut ctx = minimal_inputs(&counts, &session);
+        let warnings = vec![
+            "1 uncascaded closure".to_owned(),
+            "3 stale claims".to_owned(),
+        ];
+        ctx.drift_warnings = Some(&warnings);
+        let md = render_context(&ctx);
+        assert!(md.contains("\n## Drift warnings\n"));
+        assert!(md.contains("- 1 uncascaded closure\n"));
+        assert!(md.contains("- 3 stale claims\n"));
+    }
+
+    #[test]
+    fn render_context_cross_repo_trailer_renders_with_summary() {
+        let counts = zero_counts();
+        let session = unknown_session();
+        let mut ctx = minimal_inputs(&counts, &session);
+        let refs = CrossRepoRefs {
+            omitted: vec!["other/repo#99".to_owned()],
+            summary: Some("1 cross-repo cycle member omitted from `cycles`".to_owned()),
+        };
+        ctx.cross_repo_refs = Some(&refs);
+        let md = render_context(&ctx);
+        assert!(md.contains("\n## Cross-repo references\n"), "md:\n{md}");
+        assert!(md.contains("- `other/repo#99`\n"), "md:\n{md}");
+        assert!(
+            md.contains("_1 cross-repo cycle member omitted from `cycles`_\n"),
+            "md:\n{md}"
+        );
+    }
+
+    #[test]
+    fn render_context_section_order_matches_spec_contract() {
+        // Build inputs that exercise every section so we can compare the
+        // index order. Section headings anchor the comparison.
+        let counts = PrimeCounts {
+            in_progress: 0,
+            ready: 0,
+            blocked: 0,
+            completed: 0,
+            hotspots: 0,
+            stale: 0,
+        };
+        let session = unknown_session();
+        let mut ctx = minimal_inputs(&counts, &session);
+        let cycles = vec![vec![6_u64, 7]];
+        ctx.cycles = &cycles;
+        let refs = CrossRepoRefs {
+            omitted: vec!["other/repo#99".to_owned()],
+            summary: Some("1 cross-repo cycle member omitted from `cycles`".to_owned()),
+        };
+        ctx.cross_repo_refs = Some(&refs);
+        let drift = vec!["1 stale claim".to_owned()];
+        ctx.drift_warnings = Some(&drift);
+
+        let md = render_context(&ctx);
+        let idx_counts = md.find("\n## Counts\n").expect("counts section present");
+        let idx_cycles = md
+            .find("\n## Issues with cycles\n")
+            .expect("cycles section present");
+        let idx_session = md.find("\n## Session\n").expect("session section present");
+        let idx_drift = md
+            .find("\n## Drift warnings\n")
+            .expect("drift section present");
+        let idx_cross = md
+            .find("\n## Cross-repo references\n")
+            .expect("cross-repo trailer present");
+
+        assert!(
+            idx_counts < idx_cycles
+                && idx_cycles < idx_session
+                && idx_session < idx_drift
+                && idx_drift < idx_cross,
+            "SPEC-mandated order: header → counts → cycles → session → drift → cross-repo. md:\n{md}"
         );
     }
 
