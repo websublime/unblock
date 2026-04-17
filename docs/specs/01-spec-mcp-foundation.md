@@ -1726,6 +1726,8 @@ Each variant has `status_code() → u16`:
 
 The implementation MAY route `IssueRef::Display` through `#[snafu(display(...))]` directly (via `{source}` / `{target}` interpolation that calls `Display`) or pre-format the blocker list with a helper; both satisfy the preservation contract.
 
+**Implementer trap (Debug vs. Display in the existing `IssueBlocked` attribute).** The current `#[snafu(display(...))]` attribute at `crates/unblock-core/src/errors.rs:41` is `"Issue #{number} is blocked by: {blockers:?}"` — the `{blockers:?}` specifier is the Debug formatter, which under `Vec<u64>` renders `[1, 2]` and under `Vec<IssueRef>` renders `[Local(1), Local(2)]` (the `IssueRef` variant names leak into the output). This variant-leaking Debug output satisfies the current substring test at `crates/unblock-core/src/errors.rs:170-174` only because that test asserts `"10"` (the issue number); a future tightening of the test to assert `"#1"` or `"#2"` would silently break. The implementation of this variant MUST replace the `{blockers:?}` Debug attribute with a Display-based renderer — either a format string that interpolates `IssueRef::Display` (e.g. a joined helper) or a pre-formatted blocker list via a helper function that iterates and calls `IssueRef`'s `Display` impl. This is not a contract change; it is an implementer trap flagged so the Display-preservation contract above is not silently violated by leaving the Debug formatter in place.
+
 ### 11.2 Infrastructure errors (`unblock-github/src/errors.rs`)
 
 ```rust
@@ -1844,7 +1846,7 @@ Tools explicitly NOT affected (documented here to pre-empt retro-adoption questi
 
 The `cross_repo_refs: Option<CrossRepoRefs>` field is NOT a universal response contract; it applies to exactly the four tools listed in the affected-tools table above — `ready` (§7.1), `prime` (§7.3), `dep_cycles` (§7.7), `close` (§8.2) — and no others. The axiom that derives the affected set is §5.6 "Cross-repo scope": a tool qualifies iff (a) its response projects node identity down to a bare `u64` AND (b) §5.6 permits cross-repo traversal to touch nodes that would be flattened by that projection. The exempt tools listed above each fail at least one leg of the conjunction for a structural reason documented in their row, not by accident of implementation:
 
-- `show` already emits `QualifiedId` at every level (§2.14), so (a) fails.
+- `show` has bare-`u64` fields in the response projection — `ShowIssue.number` (`crates/unblock-mcp/src/tools/show.rs:73`) and `ShowRelatedIssue.number` (`crates/unblock-mcp/src/tools/show.rs:131`) are `u64`, so leg (a) holds. The exemption is on leg (b): per §5.6 "Cross-repo scope", `show`'s traversal (sub-issues + `trackedByIssues`) is scoped to the configured repo, so no cross-repo node ever reaches the bare-`u64` projection.
 - `stats` emits no issue IDs at all, so (a) fails.
 - `list` / `search` / `claim` / `create` / `update` / `reopen` / `comment` / `init` / `setup` are scoped by §5.6 to the configured repo on the traversal side, so (b) fails.
 - `depends` / `dep_remove` round-trip `IssueRef` strings (never `u64`) on both request and response, so (a) fails.

@@ -330,10 +330,12 @@ An `API:` body line is INSUFFICIENT — Conventional Commits requires `BREAKING 
 - `IssueBlockedSnafu { number: 10, blockers: vec![IssueRef::Local(1), IssueRef::Local(2)] }.build().to_string()` MUST contain `"10"` (matches `errors.rs:170-174`).
 - Cross-repo case: `CircularDependencySnafu { source: IssueRef::CrossRepo { owner: "acme".into(), repo: "widgets".into(), number: 1 }, target: IssueRef::Local(2) }.build().to_string()` renders with `"acme/widgets#1"` somewhere in the string. Add a new test asserting this; do NOT modify the existing Local-only tests.
 
+**Implementer trap — Debug vs. Display for `IssueBlocked.blockers`.** The current `#[snafu(display(...))]` attribute at `crates/unblock-core/src/errors.rs:41` is `"Issue #{number} is blocked by: {blockers:?}"` — `{blockers:?}` is the Debug formatter. Under `Vec<u64>` it renders `[1, 2]`; under `Vec<IssueRef>` it renders `[Local(1), Local(2)]` (variant names leak). The existing test at `errors.rs:170-174` only asserts substring `"10"` so this Debug output still passes, but any future tightening to assert `"#1"` would silently break. The implementation MUST replace the `{blockers:?}` Debug attribute with a Display-based renderer — either a format string interpolating `IssueRef::Display` via a joined helper, or a pre-formatted blocker list built by iterating and calling `IssueRef`'s `Display` impl. This is not a contract change; it is an implementer trap flagged so the Display-preservation contract above is not silently violated. See SPEC §11.1 "Implementer trap".
+
 **Error-side wiring (SPEC §11.1 Decision 2, confirmed no shape change).**
 
 - `InvalidIssueRef { input: String }` — emitted whenever `IssueRef::from_str` fails on tool input. The tool-layer call sites (§8.4 `depends`, §8.5 `dep_remove`, §8.3 `create.blocked_by`, §7.2 `show`) MUST wrap the parse error into `InvalidIssueRefSnafu { input: <raw user string> }` and propagate. Maps to HTTP 400 → MCP `-32602` (invalid params) via §11.3.
-- `CrossRepoAccessDenied { owner: String, repo: String }` — emitted when a GraphQL fetch against a cross-repo node returns `FORBIDDEN` (or equivalent 403). Maps to HTTP 403. Per SPEC §11.3 `github_error_to_mcp` the 403 branch maps to MCP `-32602` (invalid params / business rule, same bucket as other 4xx domain errors). The `unblock-mcp/src/errors.rs` match arm MUST add the 403 → `-32602` mapping explicitly so regressions are caught by the error-mapping test.
+- `CrossRepoAccessDenied { owner: String, repo: String }` — emitted when a GraphQL fetch against a cross-repo node returns `FORBIDDEN` (or equivalent 403). Maps to HTTP 403. Per SPEC §11.3 `github_error_to_mcp` the 403 branch maps to MCP `-32602` (invalid params / business rule, same bucket as other 4xx domain errors). The `unblock-mcp/src/errors.rs` match arm MUST add the 403 → `-32602` mapping explicitly so regressions are caught by the error-mapping test. Add a unit test in `unblock-mcp/src/errors.rs` that maps the new 403 branch so future variant additions don't silently collapse into the catch-all.
 
 These two variants are already spec'd (§11.1 lines above in the table); the implementation bead unblock-6xj wires the propagation paths listed above. No spec shape change is needed for this task — only the wiring contract is new.
 
@@ -878,7 +880,7 @@ SPEC §11.1 (error-side half of the cross-repo contract) and SPEC §11.4 (respon
 
 1. `IssueRef::from_str` failures at tool-boundary call sites (§7.2 `show`, §8.3 `create.blocked_by`, §8.4 `depends`, §8.5 `dep_remove`) MUST propagate as `InvalidIssueRefSnafu { input: <raw string> }` → HTTP 400 → MCP `-32602`.
 2. GraphQL `FORBIDDEN` (or 403) on cross-repo fetch MUST propagate as `CrossRepoAccessDeniedSnafu { owner, repo }` → HTTP 403 → MCP `-32602`.
-3. `crates/unblock-mcp/src/errors.rs` `github_error_to_mcp` match-arm MUST have an explicit 403 → `-32602` branch (Task 02.02 body). Add a unit test mapping the new branch so future variant additions don't silently collapse into the catch-all.
+3. `crates/unblock-mcp/src/errors.rs` `github_error_to_mcp` match-arm MUST have an explicit 403 → `-32602` branch per Task 02.02 "Error-side wiring" (single source of truth; the unit-test requirement for the new branch is hoisted into Task 02.02 to avoid drift).
 
 **Decision 3 — Response-shape universal pattern is documentation-only.** §11.4 affected set is frozen at `ready`, `prime`, `dep_cycles`, `close`; exhaustiveness rationale is embedded inline in SPEC §11.4 (see "Exhaustiveness Rationale — response-shape universality"). No new beads. New tools re-derive the (a)+(b) conjunction from §5.6 + their own response typing when added.
 
@@ -887,7 +889,7 @@ SPEC §11.1 (error-side half of the cross-repo contract) and SPEC §11.4 (respon
 **Parallel-track guarantees:**
 
 - GAP-14.c is independent of GAP-14 (response-side) and GAP-14.b (ready-set scoping) — any ordering is safe.
-- GAP-14.c's BREAKING CHANGE commit and GAP-14.b's BREAKING CHANGE commit MAY ride the same logical change family OR be landed separately; each carries its own footer text because the pub API surfaces changed are disjoint (`DomainError` variants vs. `DependencyGraph::compute_ready_set`).
+- GAP-14.c lands independently; GAP-14.b has already shipped via `unblock-eos.5` (closed). Future cross-repo BREAKING CHANGEs re-enter §11.1 via an explicit spec PR.
 
 **Resolution:** Implementation is split across unblock-6xj (wiring for `InvalidIssueRef` / `CrossRepoAccessDenied` / MCP error mapping) and unblock-29p.25 (Task 02.02 variant shape change + BREAKING CHANGE footer + tests). No additional beads required.
 
