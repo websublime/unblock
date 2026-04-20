@@ -1096,8 +1096,8 @@ impl UnblockServer {
                 // QualifiedId whose `(owner, repo)` matches the configured
                 // repo to `Local` keeps the configured-repo path tagged as
                 // such (and preserves the `add_comment` tracing span /
-                // instrumented fields) rather than routing an effectively-
-                // local ref through the CrossRepo arm.
+                // instrumented fields) rather than routing an
+                // effectively-local ref through the CrossRepo arm.
                 let cascaded_ref = if cascaded_qid.owner == configured_owner
                     && cascaded_qid.repo == configured_repo
                 {
