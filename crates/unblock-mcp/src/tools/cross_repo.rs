@@ -17,7 +17,8 @@
 //! 3. Wrap the accumulated set into an `Option<CrossRepoRefs>` (None when
 //!    the set is empty) with a singular/plural italic summary matching the
 //!    tool's semantic noun (`"cycle member(s)"` for projection-from-cycles,
-//!    `"blocker(s)"` for projection-from-ready).
+//!    `"blocker(s)"` for projection-from-ready,
+//!    `"dependent(s)"` for projection-from-close-cascade).
 //!
 //! The canonical primitives live here. Callers bring their own
 //! sum­mary-grammar closure so the tool-specific phrasing in SPEC §11.4 is
