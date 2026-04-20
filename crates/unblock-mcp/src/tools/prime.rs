@@ -577,6 +577,16 @@ fn apply_agent_filter(
 /// the §11.4 cross-repo trailer; this builder calls them exactly once
 /// and binds the result byte-for-byte identically to `dep_cycles`. See
 /// SPEC §14 Invariant 14 and [`cross_repo::cycles_summary`].
+///
+/// # Field order
+///
+/// Fields below mirror the declaration order of [`ContextInputs`]
+/// **intentionally**. `session` and `drift_warnings` are the only
+/// [`ContextInputs`] fields not owned by the builder (the orchestrator
+/// supplies them at [`Self::build`] time); every other field appears
+/// in the same position. Do not reorder either struct independently —
+/// keep the two in lock-step so maintainers can audit parity by
+/// reading top-to-bottom.
 struct ContextInputsBuilder<'a> {
     /// Configured repository owner (matches `state.github.owner()`).
     owner: &'a str,
