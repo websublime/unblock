@@ -21,7 +21,14 @@
       "Bash(bd update:*)",
       "Bash(cargo clippy:*)",
       "Bash(cargo test:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "Bash(bd label *)",
+      "Bash(bd list *)",
+      "Bash(python3 -c ' *)",
+      "Bash(bd create --title 'FORBIDDEN variant lost when error entries have empty message bodies' --type chore --parent unblock-eos --labels finding:suggestion --priority P3 --assignee rust-supervisor --deps discovered-from:unblock-eos.22 --description 'File: crates/unblock-github/src/graphql.rs, lines 483-495 *)",
+      "Bash(bd create --title 'Add clarifying comment on \\(CrossRepo, Local\\) arm skip-warn decision in cycle test' --type chore --parent unblock-eos --labels finding:suggestion --description 'File: crates/unblock-mcp/tests/dyn_dispatch.rs, line 601 *)"
     ]
   },
   "model": "opus",
