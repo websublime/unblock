@@ -467,15 +467,23 @@ impl GitHubClient {
             let mut forbidden_messages: Vec<String> = Vec::new();
             let mut other_messages: Vec<String> = Vec::new();
             for err in arr {
-                let message = err
+                // Skip entries without a non-empty `message`: a missing
+                // or empty message carries no information and would
+                // silently pollute the message vectors (previously a
+                // FORBIDDEN entry with no message body produced an
+                // empty-string entry in `forbidden_messages`).
+                let Some(message) = err
                     .get("message")
                     .and_then(|m| m.as_str())
-                    .unwrap_or_default()
-                    .to_owned();
+                    .filter(|m| !m.is_empty())
+                    .map(str::to_owned)
+                else {
+                    continue;
+                };
                 let ty = err.get("type").and_then(|t| t.as_str()).unwrap_or_default();
                 if ty == "FORBIDDEN" {
                     forbidden_messages.push(message);
-                } else if !message.is_empty() {
+                } else {
                     other_messages.push(message);
                 }
             }
@@ -2122,6 +2130,93 @@ mod tests {
         match err {
             errors::Error::GitHubGraphQLForbidden { errors } => {
                 assert_eq!(errors.len(), 1);
+                assert_eq!(errors[0], "access denied");
+            }
+            other => panic!("expected GitHubGraphQLForbidden, got: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn graphql_errors_array_skips_entries_with_missing_or_empty_message() {
+        // An `errors[i]` entry with a missing or empty `message` field
+        // MUST be skipped entirely — it carries no information for the
+        // caller. Previously the reducer used `unwrap_or_default()` and
+        // silently pushed empty strings into the message vectors,
+        // leaking through to the emitted variant (e.g. a FORBIDDEN
+        // entry without a body produced `vec![""]`). See
+        // unblock-eos.22.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let client = GitHubClient::new_for_test(&server.uri());
+
+        // Two entries: one FORBIDDEN-typed with NO message field, one
+        // FORBIDDEN-typed with an explicit empty string. Both must be
+        // dropped so `forbidden_messages` is empty and the reducer
+        // falls through to the non-FORBIDDEN bucket (also empty).
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "errors": [
+                    { "type": "FORBIDDEN" },
+                    { "type": "FORBIDDEN", "message": "" }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client
+            .graphql("query { viewer { login } }", serde_json::json!({}))
+            .await
+            .expect_err("empty-message errors array should still produce Err");
+
+        match err {
+            errors::Error::GitHubGraphQL { errors } => {
+                assert!(
+                    errors.is_empty(),
+                    "empty-message entries must not pollute the vector, got: {errors:?}"
+                );
+            }
+            errors::Error::GitHubGraphQLForbidden { errors } => panic!(
+                "FORBIDDEN variant must not be emitted with empty-string messages, got: {errors:?}"
+            ),
+            other => panic!("expected GitHubGraphQL, got: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn graphql_errors_array_drops_empty_message_but_keeps_populated_forbidden() {
+        // Mixed payload: one FORBIDDEN entry with a real message, one
+        // FORBIDDEN entry without a message body. The empty-message
+        // entry MUST be dropped, but the populated one MUST still
+        // drive the FORBIDDEN variant. Guards against over-aggressive
+        // filtering that could mask a real permission-denied signal.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let client = GitHubClient::new_for_test(&server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "errors": [
+                    { "type": "FORBIDDEN" },
+                    { "type": "FORBIDDEN", "message": "access denied" }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client
+            .graphql("query { viewer { login } }", serde_json::json!({}))
+            .await
+            .expect_err("FORBIDDEN should produce Err");
+
+        match err {
+            errors::Error::GitHubGraphQLForbidden { errors } => {
+                assert_eq!(errors.len(), 1, "empty-message entry must be dropped");
                 assert_eq!(errors[0], "access denied");
             }
             other => panic!("expected GitHubGraphQLForbidden, got: {other}"),
