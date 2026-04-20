@@ -1086,11 +1086,18 @@ impl UnblockServer {
             let configured_owner = client.owner().to_owned();
             let configured_repo = client.repo().to_owned();
             for cascaded_qid in &cascade {
-                // Normalize to IssueRef: a QualifiedId whose (owner, repo)
-                // matches the configured repo collapses to Local so the
-                // existing single-repo REST path (with its URL formatting)
-                // keeps running unchanged; foreign refs flow through the
-                // *_in_repo branch.
+                // Normalize to IssueRef so the downstream call dispatches via
+                // the `_ref` primitive: `add_comment_ref` matches on the
+                // IssueRef variant, and both arms ultimately funnel through
+                // `add_comment_in_repo` — `Local` delegates to `add_comment`
+                // (which calls `add_comment_in_repo` with the configured
+                // `(owner, repo)`), and `CrossRepo` calls `add_comment_in_repo`
+                // directly with the ref's own `(owner, repo)`. Collapsing a
+                // QualifiedId whose `(owner, repo)` matches the configured
+                // repo to `Local` keeps the configured-repo path tagged as
+                // such (and preserves the `add_comment` tracing span /
+                // instrumented fields) rather than routing an effectively-
+                // local ref through the CrossRepo arm.
                 let cascaded_ref = if cascaded_qid.owner == configured_owner
                     && cascaded_qid.repo == configured_repo
                 {
