@@ -1508,14 +1508,7 @@ impl GitHubClient {
                 if let Some(n) = blocker_number_in_source_repo
                     && source_issue.blocked_by.iter().any(|r| r.number == n)
                 {
-                    // Both source and duplicate target live in the
-                    // source's `owner/repo` (the duplicate pre-check
-                    // above only fires when the blocker matches source's
-                    // own repo — see comment on
-                    // `blocker_number_in_source_repo`), so the error
-                    // surfaces both endpoints qualified with
-                    // `owner/repo#n`. Per SPEC §11.1 Decision 1 this
-                    // disambiguates from same-numbered local issues.
+                    // See docs/specs/01-spec-mcp-foundation.md §11.1 Decision 1 for the cross-repo error context rationale.
                     return Err(unblock_core::errors::DuplicateDependencySnafu {
                         source: source.clone(),
                         target: unblock_core::types::IssueRef::CrossRepo {
