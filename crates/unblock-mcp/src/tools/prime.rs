@@ -715,8 +715,14 @@ impl<'a> ContextInputsBuilder<'a> {
         }
     }
 
-    /// Consume the builder's borrows and produce a [`ContextInputs`]
-    /// bound to `self`.
+    /// Re-borrow the builder's owned fields and assemble a
+    /// [`ContextInputs`] bound to `self`.
+    ///
+    /// This method takes `&self` — it does NOT consume the builder.
+    /// Every `Vec<_>` / `Option<_>` the builder owns is re-borrowed as
+    /// a slice or reference, so the returned `ContextInputs<'b>` is
+    /// valid only for as long as `self` (and the supplied `session` /
+    /// `drift_warnings`) remain alive.
     ///
     /// `session` and `drift_warnings` come from the orchestrator and
     /// must outlive the returned context — typically by sharing the
