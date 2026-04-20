@@ -539,6 +539,94 @@ async fn depends_accepts_cross_repo_source() {
     assert_eq!(mock.calls().update_field(), 0);
 }
 
+/// Locks the architectural decision that genuinely cross-repo sources DEFER
+/// cycle detection to the server: the `depends` handler match at
+/// `crates/unblock-mcp/src/server.rs:1341-1347` takes the `_` arm for any
+/// `(CrossRepo, _)` or `(_, CrossRepo)` pairing and emits only a
+/// `tracing::warn!` — no `CircularDependency` is constructed client-side.
+///
+/// Scenario: source = `other-owner/other-repo#7` (genuinely cross-repo —
+/// does NOT alias the configured repo `acme/widgets`); target = `#5`
+/// (local). The cache is pre-populated with a graph whose local edge
+/// `target(5) -> source-number-collision(7)` would form a cycle IF the
+/// `(Local, Local)` arm ran — but because the source is `CrossRepo`, the
+/// match falls into the skip-warn arm and the mutation proceeds to
+/// `add_blocked_by_refs` unconditionally. This mirrors
+/// [`depends_accepts_cross_repo_source`] with the additional invariant that
+/// even a cache-resident would-be cycle is IGNORED for cross-repo paths.
+///
+/// Companion to [`depends_aliased_configured_repo_source_cycle_detection`]:
+/// that test proves the aliased form DOES enter cycle detection; this test
+/// proves the non-aliased cross-repo form does NOT.
+#[tokio::test]
+async fn depends_genuine_cross_repo_source_skips_client_side_cycle_detection() {
+    let mock = new_mock();
+    // Source fetch uses fetch_issue_ref for the cross-repo source — shape
+    // the returned issue as living in other-owner/other-repo so the
+    // downstream Display renders `other-owner/other-repo#7`.
+    let mut source_issue = make_issue(7);
+    source_issue.qualified_id = QualifiedId::new("other-owner", "other-repo", 7);
+    source_issue.url = "https://github.com/other-owner/other-repo/issues/7".to_owned();
+    mock.push_fetch_issue_ref(Ok(source_issue));
+    mock.push_add_blocked_by_refs(Ok(()));
+    mock.push_fetch_graph_data(Ok((vec![make_issue(5)], vec![])));
+
+    // Pre-populate the cache with a graph containing an edge that WOULD
+    // form a cycle if the (Local, Local) arm ran against source-number 7
+    // resolved in the configured repo. Because the source is genuinely
+    // cross-repo, the handler never evaluates `would_create_cycle` and
+    // this cache contents is provably ignored — locking the skip-warn
+    // contract at server.rs:1341-1347.
+    let issues = vec![make_issue(7), make_issue(5)];
+    let edges = vec![BlockingEdge {
+        source: QualifiedId::new("acme", "widgets", 5),
+        target: QualifiedId::new("acme", "widgets", 7),
+    }];
+    let graph = DependencyGraph::build(&issues, &edges);
+    let ready_set = graph.compute_ready_set(&issues, "acme", "widgets");
+
+    let state = state_with_mock(Arc::clone(&mock));
+    let cache = Arc::clone(&state.cache);
+    cache.update(issues, ready_set, graph).await;
+
+    let server = UnblockServer::new(state);
+
+    // Genuinely cross-repo source — does NOT alias the configured repo.
+    // Handler must take the `_` arm in the cycle-detection match and
+    // proceed straight to the mutation, despite the cache-resident
+    // would-be cycle above.
+    let Json(result) = server
+        .depends(Parameters(DependsParams {
+            source: "other-owner/other-repo#7".to_owned(),
+            target: "5".to_owned(),
+        }))
+        .await
+        .expect(
+            "depends must succeed for genuine cross-repo source even with a \
+             would-be cycle in cache — client-side cycle detection is skipped",
+        );
+
+    assert!(result.created);
+    assert_eq!(result.source, "other-owner/other-repo#7");
+    assert_eq!(result.target, "#5");
+
+    // Source fetch (step 1) ran once against the cross-repo ref.
+    assert_eq!(mock.calls().fetch_issue_ref(), 1);
+    // Mutation dispatched (step 3) — the skip-warn arm did NOT block it.
+    assert_eq!(mock.calls().add_blocked_by_refs(), 1);
+    // Cache rebuild (wrap in execute_write_tool) ran after the mutation.
+    assert_eq!(mock.calls().fetch_graph_data(), 1);
+    // Field update path MUST be skipped for cross-repo source (spec §5
+    // cross-repo scope table).
+    assert_eq!(mock.calls().field_ids(), 0);
+    assert_eq!(mock.calls().resolve_project_info(), 0);
+    assert_eq!(mock.calls().get_project_item_id(), 0);
+    assert_eq!(mock.calls().update_field(), 0);
+    // The local-only fallback must NOT be used.
+    assert_eq!(mock.calls().add_blocked_by_ref(), 0);
+    assert_eq!(mock.calls().fetch_issue(), 0);
+}
+
 /// Rejects `source == target` (spec §8.4 validation requirement).
 ///
 /// The check operates on the resolved [`QualifiedId`], so local variants
@@ -632,9 +720,20 @@ async fn depends_aliased_configured_repo_source_cycle_detection() {
 
     // CircularDependency maps to 422 → INVALID_PARAMS.
     assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    // Byte-for-byte lock on the rendered `CircularDependency` Display chain:
+    // DomainError → unblock_github::errors::Error → github_error_to_mcp →
+    // rmcp ErrorData.message. The literal Unicode arrow `→` (U+2192) is
+    // copied from `crates/unblock-core/src/errors.rs:114` — any short-circuit
+    // to `Debug`, loss of normalization, or regression in the Display format
+    // will break this assertion. The configured repo alias `acme/widgets#3`
+    // normalizes to `IssueRef::Local(3)` at `server.rs:1271` BEFORE error
+    // construction, so the prefix `acme/widgets` is intentionally absent
+    // from the rendered message — see the normalization contract.
     assert!(
-        err.message.to_lowercase().contains("circular"),
-        "error message should reference a circular dependency: {}",
+        err.message
+            .contains("Circular dependency: adding #3 → #5 creates cycle"),
+        "error message should byte-for-byte contain the rendered \
+         CircularDependency Display form: {}",
         err.message
     );
 
