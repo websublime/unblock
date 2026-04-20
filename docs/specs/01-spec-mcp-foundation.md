@@ -960,7 +960,16 @@ pub async fn rebuild_cache(state) {
     state.cache.invalidate();
     let (issues, edges) = state.github.fetch_graph_data().await?;
     let graph = DependencyGraph::build(&issues, &edges);
-    let ready_set = graph.compute_ready_set(&issues);
+    // §3.3 Filter 3 / §14 Invariant 14(a): engine is the single chokepoint
+    // that scrubs cross-repo source issues from the ready-set projection.
+    // Callers pass the configured (owner, repo) so downstream consumers
+    // (cached `ready_set`, `ready`, `prime`, `update_status_fields`) inherit
+    // the guarantee without re-checking.
+    let ready_set = graph.compute_ready_set(
+        &issues,
+        state.github.owner(),
+        state.github.repo(),
+    );
     update_status_fields(state, &issues, &ready_set).await?;
     state.cache.update(ready_set, graph);
 }
@@ -1945,7 +1954,12 @@ proptest! {
         edges in vec(arb_edge(), 0..200),
     ) {
         let graph = DependencyGraph::build(&issues, &edges);
-        let ready = graph.compute_ready_set(&issues);
+        // Post-eos.4 signature (§3.3 Filter 3 / §14 Invariant 14(a)):
+        // `compute_ready_set` takes the configured (owner, repo) so that
+        // cross-repo source issues are scrubbed before blocker traversal.
+        // Generator `arb_issue()` produces issues in the configured repo so
+        // Filter 3 is a no-op here; Invariant 14(a) is exercised by #7 below.
+        let ready = graph.compute_ready_set(&issues, "owner", "repo");
         for issue in &ready {
             // No issue in ready set has an open blocker
             let blockers = graph.get_blockers(&issue.qualified_id);
