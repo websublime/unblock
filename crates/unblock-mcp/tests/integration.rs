@@ -23,7 +23,7 @@ use unblock_mcp::tools::setup::REQUIRED_VIEWS;
 use unblock_mcp::tools::show::ShowParams;
 
 mod common;
-use common::{has_github_token, new_mock, state_with_mock, test_server_state};
+use common::{TracingCapture, has_github_token, new_mock, state_with_mock, test_server_state};
 
 /// Helper to create a `QualifiedId` for tests.
 fn qid(number: u64) -> QualifiedId {
@@ -4597,4 +4597,180 @@ async fn close_single_cross_repo_dependent_uses_singular_summary() {
         }],
         "single cross-repo cascade MUST dispatch the qualified IssueRef"
     );
+}
+
+/// Acceptance (d) — unblock-eos.17 best-effort observability guard.
+///
+/// The Phase-3 cascade loop at `server.rs:1113-1119` wraps
+/// `add_comment_ref` in `if let Err(e) = ...` and swallows the failure
+/// with a `tracing::warn!` fallback. This path is purely observability
+/// but forms part of the SPEC §8.2 step 6 contract: "cross-repo
+/// dependents ARE still cascade-updated; any write-scope denial on a
+/// foreign repo MUST NOT tear down the cascade". Before this test the
+/// behavioural contract (cascade continues, response shape honored)
+/// was only asserted indirectly via the successful-dispatch tests above
+/// (`close_cross_repo_dependent_populates_cross_repo_refs`,
+/// `close_single_cross_repo_dependent_uses_singular_summary`). The
+/// `warn!` branch itself was unit-covered at `mutations.rs:1982-2137`
+/// (wiremock 403/404 on `add_comment_in_repo`) but NOT exercised at the
+/// integration level — this is the gap the unblock-eos.17 QA finding
+/// called out as RISK P3.
+///
+/// Fixture: local blocker #8 with a single cross-repo dependent
+/// `other/repo#99`. Closing #8 cascades #99. The mock queues an
+/// `Err(CrossRepoAccessDenied)` on the first (and only) `add_comment_ref`
+/// call — modelling the "token lacks write scope on foreign repo"
+/// scenario.
+///
+/// Assertions:
+/// 1. The tool returns `Ok` with a well-formed `CloseResult` — the
+///    cascade does NOT abort on a best-effort comment failure.
+/// 2. `cross_repo_refs.omitted` still carries `["other/repo#99"]` and
+///    the singular §11.4 summary is still emitted — response-shape is
+///    independent of the side-effect outcome.
+/// 3. The `warn!` log carries the `cascaded_qid` structured field with
+///    the QUALIFIED ref (`other/repo#99`), so operators can distinguish
+///    a cross-repo permission denial from a local-repo failure (the
+///    whole point of the unblock-eos.13 migration from bare `u64` to
+///    `IssueRef` dispatch — closes the last observability gap flagged
+///    by the unblock-eos.13 QA pass).
+/// 4. The failure message matches the source string emitted at
+///    `server.rs:1117`.
+#[tokio::test]
+async fn close_cross_repo_add_comment_ref_failure_warns_and_continues_cascade() {
+    use rmcp::handler::server::wrapper::{Json, Parameters};
+    use unblock_mcp::server::UnblockServer;
+    use unblock_mcp::tools::close::CloseParams;
+
+    let issues = vec![
+        close_fixture_issue(8),
+        close_cross_repo_fixture("other", "repo", 99),
+    ];
+    let edges = vec![BlockingEdge {
+        source: QualifiedId::new("other", "repo", 99),
+        target: QualifiedId::new("acme", "widgets", 8),
+    }];
+
+    let mock = new_mock();
+    mock.push_fetch_issue(Ok(close_fixture_issue(8)));
+    mock.push_close_issue(Ok(()));
+    // Phase 1 field-ladder: None skips the Projects V2 updates on #8.
+    mock.push_field_ids(None);
+    mock.push_fetch_graph_data(Ok((issues, edges)));
+    // Induced failure: the sole cascaded dependent is cross-repo, so
+    // the one `add_comment_ref` invocation in the Phase-3 loop receives
+    // this `Err`. `CrossRepoAccessDenied { owner, repo }` is the
+    // idiomatic wire-level shape a token-without-write-scope returns —
+    // see `errors.rs:174-179`. Any `Error` variant would exercise the
+    // same branch; picking the cross-repo-typed variant keeps the
+    // fixture aligned with the SPEC §11.1 HTTP-403 wiring.
+    mock.push_add_comment_ref(Err(unblock_github::errors::Error::Domain {
+        source: unblock_core::errors::DomainError::CrossRepoAccessDenied {
+            owner: "other".to_owned(),
+            repo: "repo".to_owned(),
+        },
+    }));
+
+    let server = UnblockServer::new(state_with_mock(Arc::clone(&mock)));
+
+    // Capture the Phase-3 `tracing::warn!` output. `set_default`
+    // binds a thread-local subscriber and returns a guard; the guard
+    // drops at end-of-scope and restores the previous subscriber so
+    // no other test is polluted by ours. `#[tokio::test]` defaults to
+    // `flavor = "current_thread"`, meaning the awaited future is
+    // driven on THIS thread and the thread-local subscriber stays
+    // active across the `.await`. Any thread-hop (e.g., `spawn_blocking`,
+    // multi-thread flavor) would lose the subscriber — the close
+    // handler stays on the current thread, so this is safe.
+    let capture = TracingCapture::new();
+    let subscriber = capture.subscriber();
+    let result = {
+        let _default_guard = tracing::subscriber::set_default(subscriber);
+        server
+            .close(Parameters(CloseParams {
+                id: 8,
+                reason: None,
+            }))
+            .await
+    };
+
+    let Json(result) = result.expect(
+        "close MUST return Ok when add_comment_ref fails — the warn! \
+         branch is best-effort per SPEC §8.2 step 6",
+    );
+
+    // Assertion 1: the response is still well-formed — cascade did
+    // NOT abort on the swallowed comment failure.
+    assert_eq!(result.issue, 8);
+    assert!(
+        result.unblocked.is_empty(),
+        "all-cross-repo cascade → empty unblocked; got: {:?}",
+        result.unblocked,
+    );
+
+    // Assertion 2: cross_repo_refs carries the qualified ref with
+    // byte-exact singular summary (§11.4 row 4).
+    let refs = result
+        .cross_repo_refs
+        .as_ref()
+        .expect("single cross-repo cascade → cross_repo_refs Some even when warn! fires");
+    assert_eq!(refs.omitted, vec!["other/repo#99".to_owned()]);
+    assert_eq!(
+        refs.summary.as_deref(),
+        Some("1 cross-repo dependent cascade-updated but omitted from `unblocked`"),
+        "SPEC §11.4 row 4: response-shape is independent of Phase-3 side-effect outcome",
+    );
+
+    // The cascade dispatched exactly once against the cross-repo ref.
+    assert_eq!(mock.calls().add_comment_ref(), 1);
+    assert_eq!(mock.calls().add_comment(), 0);
+    assert_eq!(
+        mock.add_comment_ref_calls(),
+        vec![unblock_core::types::IssueRef::CrossRepo {
+            owner: "other".to_owned(),
+            repo: "repo".to_owned(),
+            number: 99,
+        }],
+        "the Err was induced against the QUALIFIED ref, not a bare u64 \
+         re-targeted at the configured repo"
+    );
+
+    // Assertion 3+4: the warn! payload carries the `cascaded_qid`
+    // structured field populated with the QUALIFIED ref and the
+    // human-readable message from `server.rs:1117`. Checking the raw
+    // JSON text matches the `tracing_subscriber::fmt::json` layer's
+    // on-wire format exactly — no span/field coupling, so refactors
+    // that keep field name + Display value stable remain covered.
+    let output = capture.output();
+    assert!(
+        output.contains("\"cascaded_qid\":\"other/repo#99\""),
+        "warn! MUST include structured field `cascaded_qid=other/repo#99` \
+         so operators can distinguish cross-repo permission denials from \
+         local failures (unblock-eos.13 observability contract); got: {output}",
+    );
+    assert!(
+        output.contains("Failed to post unblock comment on cascaded issue"),
+        "warn! message at server.rs:1117 must appear verbatim; got: {output}",
+    );
+    // Surface that the error chain reached the log (Display of
+    // `CrossRepoAccessDenied` is `Access denied to cross-repo issue
+    // other/repo` per `errors.rs:173`). Matching on the owner/repo
+    // pair is sufficient — the exact wording is intentionally not
+    // locked here so error-Display tweaks don't flake this test.
+    assert!(
+        output.contains("other/repo"),
+        "warn! `error=%e` field must surface the cross-repo owner/repo \
+         from the failing `add_comment_ref` error; got: {output}",
+    );
+    // Belt-and-suspenders: the `warn` level string appears (the JSON
+    // layer writes `"level":"WARN"`). This ensures we captured the
+    // right severity bucket — `info!`/`debug!` wouldn't meet the
+    // SPEC §8.2 step 6 "surface the denial to operators" intent.
+    assert!(
+        output.contains("\"level\":\"WARN\""),
+        "Phase-3 fallback MUST log at WARN level; got: {output}",
+    );
+
+    assert_eq!(mock.calls().close_issue(), 1);
+    assert_eq!(mock.calls().fetch_graph_data(), 1);
 }
