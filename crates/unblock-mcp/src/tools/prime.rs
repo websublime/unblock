@@ -1860,14 +1860,28 @@ mod tests {
         }
     }
 
+    /// Frozen `connected_at` timestamp for byte-stable renderer snapshot
+    /// tests (unblock-eos.10). Renders as `2026-01-01T12:00:00+00:00` via
+    /// `DateTime::<Utc>::to_rfc3339` — note the explicit `+00:00` offset
+    /// (chrono does not emit the `Z` short form).
+    ///
+    /// Mirrors the `Utc.with_ymd_and_hms(...)` idiom already used at
+    /// prime.rs:1613-1614 and across the workspace (list.rs, ready.rs,
+    /// integration.rs) for deterministic timestamp fixtures.
+    fn frozen_connected_at() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap()
+    }
+
     /// Session fixture that matches the `SessionMeta::from_state`
-    /// fallback branch (no initialisation has happened).
+    /// fallback branch (no initialisation has happened). Uses
+    /// [`frozen_connected_at`] so renderer output is byte-stable for
+    /// snapshot assertions.
     fn unknown_session() -> SessionMeta {
         SessionMeta {
             agent_client: "unknown".to_owned(),
             agent_kind: "unknown".to_owned(),
             agent_field: None,
-            connected_at: Utc::now(),
+            connected_at: frozen_connected_at(),
         }
     }
 
@@ -1901,44 +1915,24 @@ mod tests {
         let ctx = minimal_inputs(&counts, &session);
         let md = render_context(&ctx);
 
-        // Header block.
-        assert!(md.starts_with("# Repo: acme/widgets\n"), "md:\n{md}");
-        assert!(
-            !md.contains("Project: "),
-            "Project line omitted when project_number is None"
-        );
+        assert_eq!(
+            md,
+            "\
+# Repo: acme/widgets
 
-        // Counts section.
-        assert!(md.contains("\n## Counts\n"));
-        assert!(md.contains("- ready: 0\n"));
-        assert!(md.contains("- blocked: 0\n"));
-        assert!(md.contains("- in-progress: 0\n"));
-        assert!(md.contains("- completed (24h): 0\n"));
-        assert!(md.contains("- hotspots: 0\n"));
-        assert!(md.contains("- stale (>24h): 0\n"));
+## Counts
+- ready: 0
+- blocked: 0
+- in-progress: 0
+- completed (24h): 0
+- hotspots: 0
+- stale (>24h): 0
 
-        // Session section present (no elision path).
-        assert!(md.contains("\n## Session\n"));
-        assert!(md.contains("- agent_kind: unknown\n"));
-        assert!(md.contains("- agent_client: unknown\n"));
-        assert!(
-            !md.contains("- agent_field:"),
-            "agent_field bullet elided when None"
-        );
-        assert!(md.contains("- connected_at: "));
-
-        // No optional sections.
-        assert!(
-            !md.contains("## Issues with cycles"),
-            "cycles section elided when no cycles"
-        );
-        assert!(
-            !md.contains("## Drift warnings"),
-            "drift section elided when warnings=None"
-        );
-        assert!(
-            !md.contains("## Cross-repo references"),
-            "trailer elided when cross_repo_refs=None"
+## Session
+- agent_kind: unknown
+- agent_client: unknown
+- connected_at: 2026-01-01T12:00:00+00:00
+"
         );
     }
 
@@ -1949,14 +1943,31 @@ mod tests {
             agent_client: "Claude Code".to_owned(),
             agent_kind: "claude-code".to_owned(),
             agent_field: Some("rust-supervisor".to_owned()),
-            connected_at: Utc::now(),
+            connected_at: frozen_connected_at(),
         };
         let ctx = minimal_inputs(&counts, &session);
         let md = render_context(&ctx);
 
-        assert!(md.contains("- agent_kind: claude-code\n"));
-        assert!(md.contains("- agent_client: Claude Code\n"));
-        assert!(md.contains("- agent_field: rust-supervisor\n"));
+        assert_eq!(
+            md,
+            "\
+# Repo: acme/widgets
+
+## Counts
+- ready: 0
+- blocked: 0
+- in-progress: 0
+- completed (24h): 0
+- hotspots: 0
+- stale (>24h): 0
+
+## Session
+- agent_kind: claude-code
+- agent_client: Claude Code
+- agent_field: rust-supervisor
+- connected_at: 2026-01-01T12:00:00+00:00
+"
+        );
     }
 
     #[test]
@@ -1966,9 +1977,26 @@ mod tests {
         let mut ctx = minimal_inputs(&counts, &session);
         ctx.project_number = Some(42);
         let md = render_context(&ctx);
-        assert!(
-            md.contains("# Repo: acme/widgets\nProject: 42\n"),
-            "md:\n{md}"
+
+        assert_eq!(
+            md,
+            "\
+# Repo: acme/widgets
+Project: 42
+
+## Counts
+- ready: 0
+- blocked: 0
+- in-progress: 0
+- completed (24h): 0
+- hotspots: 0
+- stale (>24h): 0
+
+## Session
+- agent_kind: unknown
+- agent_client: unknown
+- connected_at: 2026-01-01T12:00:00+00:00
+"
         );
     }
 
@@ -1979,8 +2007,26 @@ mod tests {
         let mut ctx = minimal_inputs(&counts, &session);
         ctx.stale_threshold_hours = 72;
         let md = render_context(&ctx);
-        assert!(md.contains("- completed (72h): 0\n"));
-        assert!(md.contains("- stale (>72h): 0\n"));
+
+        assert_eq!(
+            md,
+            "\
+# Repo: acme/widgets
+
+## Counts
+- ready: 0
+- blocked: 0
+- in-progress: 0
+- completed (72h): 0
+- hotspots: 0
+- stale (>72h): 0
+
+## Session
+- agent_kind: unknown
+- agent_client: unknown
+- connected_at: 2026-01-01T12:00:00+00:00
+"
+        );
     }
 
     #[test]
@@ -1988,7 +2034,27 @@ mod tests {
         let counts = zero_counts();
         let session = unknown_session();
         let ctx = minimal_inputs(&counts, &session);
-        assert!(!render_context(&ctx).contains("## Issues with cycles"));
+        let md = render_context(&ctx);
+
+        assert_eq!(
+            md,
+            "\
+# Repo: acme/widgets
+
+## Counts
+- ready: 0
+- blocked: 0
+- in-progress: 0
+- completed (24h): 0
+- hotspots: 0
+- stale (>24h): 0
+
+## Session
+- agent_kind: unknown
+- agent_client: unknown
+- connected_at: 2026-01-01T12:00:00+00:00
+"
+        );
     }
 
     #[test]
@@ -1999,8 +2065,29 @@ mod tests {
         let cycles = vec![vec![6, 7, 8]];
         ctx.cycles = &cycles;
         let md = render_context(&ctx);
-        assert!(md.contains("## Issues with cycles"), "md:\n{md}");
-        assert!(md.contains("- cycle 1: #6 → #7 → #8\n"), "md:\n{md}");
+
+        assert_eq!(
+            md,
+            "\
+# Repo: acme/widgets
+
+## Counts
+- ready: 0
+- blocked: 0
+- in-progress: 0
+- completed (24h): 0
+- hotspots: 0
+- stale (>24h): 0
+
+## Issues with cycles
+- cycle 1: #6 → #7 → #8
+
+## Session
+- agent_kind: unknown
+- agent_client: unknown
+- connected_at: 2026-01-01T12:00:00+00:00
+"
+        );
     }
 
     #[test]
@@ -2012,7 +2099,29 @@ mod tests {
         let cycles = vec![vec![1, 2, 3, 4, 5]];
         ctx.cycles = &cycles;
         let md = render_context(&ctx);
-        assert!(md.contains("- cycle 1: #1 → #2 … (3 more)\n"), "md:\n{md}");
+
+        assert_eq!(
+            md,
+            "\
+# Repo: acme/widgets
+
+## Counts
+- ready: 0
+- blocked: 0
+- in-progress: 0
+- completed (24h): 0
+- hotspots: 0
+- stale (>24h): 0
+
+## Issues with cycles
+- cycle 1: #1 → #2 … (3 more)
+
+## Session
+- agent_kind: unknown
+- agent_client: unknown
+- connected_at: 2026-01-01T12:00:00+00:00
+"
+        );
     }
 
     #[test]
@@ -2023,9 +2132,28 @@ mod tests {
         let cycles = vec![vec![]]; // fully cross-repo projection.
         ctx.cycles = &cycles;
         let md = render_context(&ctx);
-        assert!(
-            md.contains("- cycle 1: (cross-repo only — see trailer)\n"),
-            "md:\n{md}"
+
+        assert_eq!(
+            md,
+            "\
+# Repo: acme/widgets
+
+## Counts
+- ready: 0
+- blocked: 0
+- in-progress: 0
+- completed (24h): 0
+- hotspots: 0
+- stale (>24h): 0
+
+## Issues with cycles
+- cycle 1: (cross-repo only — see trailer)
+
+## Session
+- agent_kind: unknown
+- agent_client: unknown
+- connected_at: 2026-01-01T12:00:00+00:00
+"
         );
     }
 
@@ -2034,7 +2162,27 @@ mod tests {
         let counts = zero_counts();
         let session = unknown_session();
         let ctx = minimal_inputs(&counts, &session);
-        assert!(!render_context(&ctx).contains("## Drift warnings"));
+        let md = render_context(&ctx);
+
+        assert_eq!(
+            md,
+            "\
+# Repo: acme/widgets
+
+## Counts
+- ready: 0
+- blocked: 0
+- in-progress: 0
+- completed (24h): 0
+- hotspots: 0
+- stale (>24h): 0
+
+## Session
+- agent_kind: unknown
+- agent_client: unknown
+- connected_at: 2026-01-01T12:00:00+00:00
+"
+        );
     }
 
     #[test]
@@ -2044,7 +2192,27 @@ mod tests {
         let mut ctx = minimal_inputs(&counts, &session);
         let empty: [String; 0] = [];
         ctx.drift_warnings = Some(&empty);
-        assert!(!render_context(&ctx).contains("## Drift warnings"));
+        let md = render_context(&ctx);
+
+        assert_eq!(
+            md,
+            "\
+# Repo: acme/widgets
+
+## Counts
+- ready: 0
+- blocked: 0
+- in-progress: 0
+- completed (24h): 0
+- hotspots: 0
+- stale (>24h): 0
+
+## Session
+- agent_kind: unknown
+- agent_client: unknown
+- connected_at: 2026-01-01T12:00:00+00:00
+"
+        );
     }
 
     #[test]
@@ -2058,9 +2226,30 @@ mod tests {
         ];
         ctx.drift_warnings = Some(&warnings);
         let md = render_context(&ctx);
-        assert!(md.contains("\n## Drift warnings\n"));
-        assert!(md.contains("- 1 uncascaded closure\n"));
-        assert!(md.contains("- 3 stale claims\n"));
+
+        assert_eq!(
+            md,
+            "\
+# Repo: acme/widgets
+
+## Counts
+- ready: 0
+- blocked: 0
+- in-progress: 0
+- completed (24h): 0
+- hotspots: 0
+- stale (>24h): 0
+
+## Session
+- agent_kind: unknown
+- agent_client: unknown
+- connected_at: 2026-01-01T12:00:00+00:00
+
+## Drift warnings
+- 1 uncascaded closure
+- 3 stale claims
+"
+        );
     }
 
     #[test]
@@ -2074,11 +2263,30 @@ mod tests {
         };
         ctx.cross_repo_refs = Some(&refs);
         let md = render_context(&ctx);
-        assert!(md.contains("\n## Cross-repo references\n"), "md:\n{md}");
-        assert!(md.contains("- `other/repo#99`\n"), "md:\n{md}");
-        assert!(
-            md.contains("_1 cross-repo cycle member omitted from `cycles`_\n"),
-            "md:\n{md}"
+
+        assert_eq!(
+            md,
+            "\
+# Repo: acme/widgets
+
+## Counts
+- ready: 0
+- blocked: 0
+- in-progress: 0
+- completed (24h): 0
+- hotspots: 0
+- stale (>24h): 0
+
+## Session
+- agent_kind: unknown
+- agent_client: unknown
+- connected_at: 2026-01-01T12:00:00+00:00
+
+## Cross-repo references
+- `other/repo#99`
+
+_1 cross-repo cycle member omitted from `cycles`_
+"
         );
     }
 
@@ -2107,24 +2315,39 @@ mod tests {
         ctx.drift_warnings = Some(&drift);
 
         let md = render_context(&ctx);
-        let idx_counts = md.find("\n## Counts\n").expect("counts section present");
-        let idx_cycles = md
-            .find("\n## Issues with cycles\n")
-            .expect("cycles section present");
-        let idx_session = md.find("\n## Session\n").expect("session section present");
-        let idx_drift = md
-            .find("\n## Drift warnings\n")
-            .expect("drift section present");
-        let idx_cross = md
-            .find("\n## Cross-repo references\n")
-            .expect("cross-repo trailer present");
 
-        assert!(
-            idx_counts < idx_cycles
-                && idx_cycles < idx_session
-                && idx_session < idx_drift
-                && idx_drift < idx_cross,
-            "SPEC-mandated order: header → counts → cycles → session → drift → cross-repo. md:\n{md}"
+        // Byte-stable snapshot pins the SPEC-mandated section order
+        // (header → counts → cycles → session → drift → cross-repo)
+        // without needing separate `.find(...)` indexes.
+        assert_eq!(
+            md,
+            "\
+# Repo: acme/widgets
+
+## Counts
+- ready: 0
+- blocked: 0
+- in-progress: 0
+- completed (24h): 0
+- hotspots: 0
+- stale (>24h): 0
+
+## Issues with cycles
+- cycle 1: #6 → #7
+
+## Session
+- agent_kind: unknown
+- agent_client: unknown
+- connected_at: 2026-01-01T12:00:00+00:00
+
+## Drift warnings
+- 1 stale claim
+
+## Cross-repo references
+- `other/repo#99`
+
+_1 cross-repo cycle member omitted from `cycles`_
+"
         );
     }
 
