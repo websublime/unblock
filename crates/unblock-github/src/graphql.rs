@@ -233,13 +233,17 @@ impl GitHubClient {
         // Local fetches (owner/repo == configured) stay as the
         // underlying infrastructure error — `CrossRepoAccessDenied`
         // is cross-repo-semantic by name.
-        let response = match self.graphql(FETCH_ISSUE_QUERY, variables).await {
-            Ok(v) => v,
-            Err(err) if owner != self.owner() || repo != self.repo() => {
-                return Err(classify_cross_repo_fetch(err, owner, repo));
-            }
-            Err(err) => return Err(err),
-        };
+        let is_cross_repo = owner != self.owner() || repo != self.repo();
+        let response = self
+            .graphql(FETCH_ISSUE_QUERY, variables)
+            .await
+            .map_err(|err| {
+                if is_cross_repo {
+                    classify_cross_repo_fetch(err, owner, repo)
+                } else {
+                    err
+                }
+            })?;
 
         let issue_value = &response["data"]["repository"]["issue"];
 
