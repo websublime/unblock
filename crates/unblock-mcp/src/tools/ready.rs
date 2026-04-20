@@ -286,6 +286,26 @@ fn classify_ready_blockers(
 /// out of the ready set at §3.3 step 6. See the module docs for the full
 /// contract; summary below.
 ///
+/// ## Parameters
+///
+/// - `issues`: the UNFILTERED full issue slice as returned by
+///   [`GraphCache::get_issues`](unblock_core::cache::GraphCache::get_issues) —
+///   i.e. every open issue the cache knows about, in both the configured repo
+///   AND any cross-repo nodes the graph references. This is NOT the
+///   post-§3.3 [`IssueSummary`] ready-set projection returned by
+///   [`GraphCache::get_ready_set`](unblock_core::cache::GraphCache::get_ready_set):
+///   passing the already-filtered ready set here would silently drop the
+///   §3.3 step-6-filtered issues this helper is designed to capture,
+///   collapsing the output to `None` in every realistic scenario.
+///   The SPEC §7.1 flow step 3 / step 9 split mandates this input-shape:
+///   refs are scoped to step 6 ONLY, before the tool-layer `filter_ready_set`
+///   call narrows the projection. See also the module-level docs.
+/// - `graph`: the cached [`DependencyGraph`] — blocker edges are read from
+///   its internal petgraph.
+/// - `configured_owner`, `configured_repo`: the `(owner, repo)` tuple of the
+///   MCP server's configured repository, used to partition local vs
+///   cross-repo nodes at both source and target of each blocker edge.
+///
 /// ## Algorithm
 ///
 /// For each `issue` in `issues`:
