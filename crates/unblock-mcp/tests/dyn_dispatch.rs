@@ -603,6 +603,20 @@ async fn depends_genuine_cross_repo_source_skips_client_side_cycle_detection() {
     // Handler must take the `_` arm in the cycle-detection match and
     // proceed straight to the mutation, despite the cache-resident
     // would-be cycle above.
+    //
+    // ARM COVERED: the resolved pair here is (CrossRepo, Local) — the
+    // source resolves to `other-owner/other-repo#7` and the target `"5"`
+    // resolves to a local `acme/widgets#5`. The cycle-detection match
+    // in `server.rs:1341-1347` only enters the cycle-check branch on
+    // (Local, Local); every other combination falls through to the `_`
+    // arm which logs a `skip-warn` and proceeds. We intentionally do
+    // NOT emit a user-visible warning on (CrossRepo, Local) because
+    // the cache only indexes the configured repo, so the cross-repo
+    // source is not represented as a graph node — client-side cycle
+    // detection cannot reason about it and any "cycle" found would be
+    // a false positive on a homonymous local number. The target's
+    // locality is therefore irrelevant to the decision; the skip-warn
+    // is driven solely by the source being CrossRepo.
     let Json(result) = server
         .depends(Parameters(DependsParams {
             source: "other-owner/other-repo#7".to_owned(),
