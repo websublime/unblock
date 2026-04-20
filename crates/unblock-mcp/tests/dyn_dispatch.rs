@@ -577,6 +577,14 @@ async fn depends_genuine_cross_repo_source_skips_client_side_cycle_detection() {
     // cross-repo, the handler never evaluates `would_create_cycle` and
     // this cache contents is provably ignored — locking the skip-warn
     // contract at server.rs:1341-1347.
+    //
+    // NOTE ON NODE IDENTITY: `make_issue(7)` below creates a LOCAL issue
+    // for the configured repo (acme/widgets#7) — a distinct node from
+    // the cross-repo source `other-owner/other-repo#7` supplied to
+    // `depends()` further down. They share a bare number but live under
+    // different (owner, repo) pairs, so the would-be cycle they form in
+    // the cache is a local-only construct and must not fire against a
+    // cross-repo source.
     let issues = vec![make_issue(7), make_issue(5)];
     let edges = vec![BlockingEdge {
         source: QualifiedId::new("acme", "widgets", 5),
