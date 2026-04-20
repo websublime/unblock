@@ -1086,7 +1086,6 @@ impl UnblockServer {
             let configured_owner = client.owner().to_owned();
             let configured_repo = client.repo().to_owned();
             for cascaded_qid in &cascade {
-                let cascaded_number = cascaded_qid.number;
                 // Normalize to IssueRef: a QualifiedId whose (owner, repo)
                 // matches the configured repo collapses to Local so the
                 // existing single-repo REST path (with its URL formatting)
@@ -1095,12 +1094,12 @@ impl UnblockServer {
                 let cascaded_ref = if cascaded_qid.owner == configured_owner
                     && cascaded_qid.repo == configured_repo
                 {
-                    unblock_core::types::IssueRef::Local(cascaded_number)
+                    unblock_core::types::IssueRef::Local(cascaded_qid.number)
                 } else {
                     unblock_core::types::IssueRef::CrossRepo {
                         owner: cascaded_qid.owner.clone(),
                         repo: cascaded_qid.repo.clone(),
-                        number: cascaded_number,
+                        number: cascaded_qid.number,
                     }
                 };
                 // Post unblock comment. Stays best-effort per the pre-existing
