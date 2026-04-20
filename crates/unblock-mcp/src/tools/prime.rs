@@ -2124,6 +2124,50 @@ Project: 42
         );
     }
 
+    /// Pin the minimum-value branch of `render_cycles` truncation
+    /// (`max_per_category = 1`) against a multi-member cycle.
+    ///
+    /// Locks the boundary between the sibling truncation test
+    /// (`max_per_category = 2`) and the lower clamp inside
+    /// `render_cycles` (`max_per_category.max(1)`): at `1` exactly one
+    /// member is shown and the trailer reports `(cycle.len() - 1)`
+    /// omitted members. Added per unblock-eos.9 to lock the truncation
+    /// contract of the `## Issues with cycles` section against
+    /// regressions.
+    #[test]
+    fn render_context_cycle_members_truncated_at_max_per_category_one() {
+        let counts = zero_counts();
+        let session = unknown_session();
+        let mut ctx = minimal_inputs(&counts, &session);
+        ctx.max_per_category = 1;
+        let cycles = vec![vec![1, 2, 3, 4, 5]];
+        ctx.cycles = &cycles;
+        let md = render_context(&ctx);
+
+        assert_eq!(
+            md,
+            "\
+# Repo: acme/widgets
+
+## Counts
+- ready: 0
+- blocked: 0
+- in-progress: 0
+- completed (24h): 0
+- hotspots: 0
+- stale (>24h): 0
+
+## Issues with cycles
+- cycle 1: #1 … (4 more)
+
+## Session
+- agent_kind: unknown
+- agent_client: unknown
+- connected_at: 2026-01-01T12:00:00+00:00
+"
+        );
+    }
+
     #[test]
     fn render_context_cross_repo_only_cycle_emits_sentinel_bullet() {
         let counts = zero_counts();
