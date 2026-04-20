@@ -3245,10 +3245,15 @@ _1 cross-repo cycle member omitted from `cycles`_
         };
         let builder = ContextInputsBuilder::new("acme", "widgets", None, 24, 3, categories, &[]);
 
-        // Counts are computed BEFORE truncation (pre-filter length).
+        // Counts reflect the length of the `CategorisedIssues` lists
+        // passed into the builder — i.e. the pre-truncation length. This
+        // fixture constructs `CategorisedIssues` DIRECTLY (no agent
+        // filter applied upstream), so the six-entry ready list proves
+        // only that counts are captured BEFORE `max_per_category`
+        // truncation. Agent-filter propagation is NOT exercised here.
         assert_eq!(
             builder.counts.ready, 6,
-            "counts record the full filtered length"
+            "counts capture pre-truncation category length"
         );
         // Truncated list obeys the cap.
         assert_eq!(
