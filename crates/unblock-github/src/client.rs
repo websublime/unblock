@@ -58,10 +58,93 @@ impl GitHubClient {
     /// [`Error::GitHubUnavailable`] if the HTTP client cannot be built.
     #[allow(clippy::unused_async)] // Async signature required by callers; resolve_project_info() is separate.
     pub async fn new(config: &Config) -> Result<Self, Error> {
+        let http = Self::build_http_client(&config.token)?;
+        let (owner, repo) = Self::resolve_repo(config)?;
+        let project_number = Self::resolve_project(config);
+
+        info!(
+            owner = %owner,
+            repo = %repo,
+            project_number = ?project_number,
+            api_base_url = %config.api_base_url,
+            "GitHubClient initialized"
+        );
+
+        Ok(Self {
+            http,
+            api_base_url: config.api_base_url.clone(),
+            owner,
+            repo,
+            project_number,
+            field_ids: Mutex::new(None),
+        })
+    }
+
+    /// Creates a new `GitHubClient` with an explicitly supplied repository,
+    /// bypassing the `UNBLOCK_REPO` / git-remote resolution path used by
+    /// [`GitHubClient::new`].
+    ///
+    /// Intended for callers that already know the repository owner/name and
+    /// want to avoid any filesystem or environment lookup — for example:
+    /// - integration tests running with a CWD that does not contain
+    ///   `.git/config` (workspace-member test binaries),
+    /// - embedding contexts where the host application determines the target
+    ///   repository through its own mechanism.
+    ///
+    /// All other fields (token, `api_base_url`, `project_number`, …) are taken
+    /// from `config`, so default-header construction and `graphql_url` /
+    /// `rest_url` behaviour are identical to [`GitHubClient::new`].
+    ///
+    /// This constructor does NOT replace [`GitHubClient::new`]; production
+    /// code continues to call `new` so that `UNBLOCK_REPO` + git-remote
+    /// fallback behaviour is exercised end-to-end.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::GitHubUnavailable`] if the HTTP client cannot be
+    /// built (e.g. the token is not a valid HTTP header value).
+    #[allow(clippy::unused_async)] // Async signature kept symmetric with `new`.
+    pub async fn with_repo(
+        config: &Config,
+        owner: impl Into<String>,
+        repo: impl Into<String>,
+    ) -> Result<Self, Error> {
+        let http = Self::build_http_client(&config.token)?;
+        let owner = owner.into();
+        let repo = repo.into();
+        let project_number = Self::resolve_project(config);
+
+        info!(
+            owner = %owner,
+            repo = %repo,
+            project_number = ?project_number,
+            api_base_url = %config.api_base_url,
+            "GitHubClient initialized via with_repo"
+        );
+
+        Ok(Self {
+            http,
+            api_base_url: config.api_base_url.clone(),
+            owner,
+            repo,
+            project_number,
+            field_ids: Mutex::new(None),
+        })
+    }
+
+    /// Builds the shared `reqwest::Client` with the default headers used by
+    /// every `GitHubClient` constructor.
+    ///
+    /// Headers set:
+    /// - `Authorization: Bearer {token}`
+    /// - `User-Agent: unblock-github/{version}`
+    /// - `Accept: application/vnd.github+json`
+    /// - `X-GitHub-Api-Version: 2022-11-28`
+    fn build_http_client(token: &str) -> Result<reqwest::Client, Error> {
         let mut headers = HeaderMap::new();
 
         // Authorization header — bearer token.
-        let auth_value = format!("Bearer {}", config.token);
+        let auth_value = format!("Bearer {token}");
         headers.insert(
             AUTHORIZATION,
             HeaderValue::from_str(&auth_value).map_err(|e| {
@@ -93,30 +176,10 @@ impl GitHubClient {
             HeaderValue::from_static("2022-11-28"),
         );
 
-        let http = reqwest::Client::builder()
+        reqwest::Client::builder()
             .default_headers(headers)
             .build()
-            .context(errors::GitHubUnavailableSnafu)?;
-
-        let (owner, repo) = Self::resolve_repo(config)?;
-        let project_number = Self::resolve_project(config);
-
-        info!(
-            owner = %owner,
-            repo = %repo,
-            project_number = ?project_number,
-            api_base_url = %config.api_base_url,
-            "GitHubClient initialized"
-        );
-
-        Ok(Self {
-            http,
-            api_base_url: config.api_base_url.clone(),
-            owner,
-            repo,
-            project_number,
-            field_ids: Mutex::new(None),
-        })
+            .context(errors::GitHubUnavailableSnafu)
     }
 
     /// Returns a reference to the underlying HTTP client.
@@ -688,5 +751,65 @@ mod tests {
     fn graphql_url_ghe_server() {
         let client = GitHubClient::new_for_test("https://ghe.example.com/api/v3");
         assert_eq!(client.graphql_url(), "https://ghe.example.com/api/graphql");
+    }
+
+    // ── with_repo constructor ────────────────────────────────────────
+
+    /// `with_repo` must bypass `.git/config` resolution entirely: it takes
+    /// owner/repo from its arguments regardless of `config.repo` or the
+    /// current working directory.
+    #[tokio::test]
+    async fn with_repo_bypasses_git_config_resolution() {
+        // `config.repo` is intentionally `None` — under `new()` this would
+        // fall back to reading `.git/config`. `with_repo` must not touch
+        // that codepath.
+        let config = Config {
+            token: "ghp_test".to_owned(),
+            api_base_url: "https://api.github.com".to_owned(),
+            github_url: "https://github.com".to_owned(),
+            repo: None,
+            project_number: Some(7),
+            agent: "agent".to_owned(),
+            cache_ttl: 30,
+            log_level: "info".to_owned(),
+            otel_endpoint: None,
+        };
+
+        let client = GitHubClient::with_repo(&config, "acme", "widgets")
+            .await
+            .expect("with_repo should build a client from the config");
+
+        assert_eq!(client.owner(), "acme");
+        assert_eq!(client.repo(), "widgets");
+        assert_eq!(client.api_base_url(), "https://api.github.com");
+        assert_eq!(client.project_number(), Some(7));
+        assert_eq!(client.graphql_url(), "https://api.github.com/graphql");
+    }
+
+    /// `with_repo` must surface the same `GitHubUnavailable` error as `new`
+    /// when the token contains bytes that are not valid for an HTTP header.
+    #[tokio::test]
+    async fn with_repo_rejects_invalid_token_header() {
+        let config = Config {
+            // Newline bytes are rejected by `HeaderValue::from_str`.
+            token: "bad\ntoken".to_owned(),
+            api_base_url: "https://api.github.com".to_owned(),
+            github_url: "https://github.com".to_owned(),
+            repo: None,
+            project_number: None,
+            agent: "agent".to_owned(),
+            cache_ttl: 30,
+            log_level: "info".to_owned(),
+            otel_endpoint: None,
+        };
+
+        let err = GitHubClient::with_repo(&config, "acme", "widgets")
+            .await
+            .expect_err("invalid token header should be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid token header value"),
+            "expected invalid-header message, got: {msg}"
+        );
     }
 }
