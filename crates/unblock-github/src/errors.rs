@@ -260,18 +260,20 @@ mod tests {
         // the FORBIDDEN messages; status_code is 403 so the un-upgraded
         // variant still reaches `github_error_to_mcp` with the right
         // bucket (INVALID_PARAMS).
+        //
+        // Uses an exact-string `assert_eq!` so the Display contract is
+        // symmetric with the empty-vector companion test below
+        // (`github_graphql_forbidden_display_empty_vec_renders_no_details_sentinel`):
+        // both cases pin the full rendered string, making the contract
+        // explicit and harder to accidentally weaken (bead
+        // `unblock-eos.36`).
         let err = GitHubGraphQLForbiddenSnafu {
             errors: vec!["Resource not accessible by integration".to_owned()],
         }
         .build();
-        let msg = err.to_string();
-        assert!(
-            msg.starts_with("GitHub GraphQL FORBIDDEN: "),
-            "unexpected display: {msg}"
-        );
-        assert!(
-            msg.contains("Resource not accessible by integration"),
-            "display must include FORBIDDEN messages: {msg}"
+        assert_eq!(
+            err.to_string(),
+            "GitHub GraphQL FORBIDDEN: Resource not accessible by integration"
         );
         assert_eq!(err.status_code(), 403);
     }
