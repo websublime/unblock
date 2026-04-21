@@ -790,8 +790,14 @@ mod tests {
         assert_eq!(client.graphql_url(), "https://api.github.com/graphql");
     }
 
-    /// `with_repo` must surface the same `GitHubUnavailable` error as `new`
+    /// `with_repo` must surface the same `Error::GitRemote` error as `new`
     /// when the token contains bytes that are not valid for an HTTP header.
+    ///
+    /// Asserts BOTH the variant (`matches!`) AND the Display string — the
+    /// variant check pins the typed contract that callers pattern-match on
+    /// (`build_http_client` -> `GitRemoteSnafu`, not `GitHubUnavailable`),
+    /// while the Display check keeps the human-readable message stable for
+    /// log and error-propagation consumers.
     #[tokio::test]
     async fn with_repo_rejects_invalid_token_header() {
         let config = Config {
@@ -810,6 +816,10 @@ mod tests {
         let err = GitHubClient::with_repo(&config, "acme", "widgets")
             .await
             .expect_err("invalid token header should be rejected");
+        assert!(
+            matches!(err, Error::GitRemote { .. }),
+            "expected Error::GitRemote variant, got: {err:?}"
+        );
         let msg = err.to_string();
         assert!(
             msg.contains("invalid token header value"),
