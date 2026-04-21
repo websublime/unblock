@@ -61,14 +61,27 @@ pub enum Error {
     /// (e.g. `fetch_issue_in_repo`, `resolve_issue_ref` cross-repo arm)
     /// upgrade this variant to [`DomainError::CrossRepoAccessDenied`].
     ///
+    /// **Variant presence — not vector contents — is authoritative.**
+    /// The `errors` vector MAY be empty when every FORBIDDEN-typed entry
+    /// in the response lacked a populated `message` body (the
+    /// message-partition loop drops empty messages for hygiene per
+    /// unblock-eos.22). The emission of this variant is driven solely
+    /// by at least one response error carrying `type == "FORBIDDEN"`;
+    /// downstream classifiers (`classify_cross_repo_fetch`) pattern-
+    /// match on the variant and therefore handle the empty-vector case
+    /// transparently. The `Display` impl renders an explicit `(no
+    /// details)` sentinel when `errors.is_empty()` so log output stays
+    /// self-describing.
+    ///
     /// [`DomainError::CrossRepoAccessDenied`]:
     ///     unblock_core::errors::DomainError::CrossRepoAccessDenied
-    #[snafu(display("GitHub GraphQL FORBIDDEN: {}", errors.join("; ")))]
+    #[snafu(display("{}", format_forbidden_display(errors)))]
     GitHubGraphQLForbidden {
         /// Messages from the GraphQL errors whose `type` was
         /// `FORBIDDEN`. Non-FORBIDDEN messages from the same response
         /// are discarded; the classifier treats any FORBIDDEN as
-        /// authoritative.
+        /// authoritative. This vector MAY be empty — see the variant
+        /// docs for the `(no details)` sentinel semantics.
         errors: Vec<String>,
     },
 
@@ -132,6 +145,21 @@ pub enum Error {
         /// The trait method that was invoked without a stub.
         method: &'static str,
     },
+}
+
+/// Formats the `errors` vector of a
+/// [`Error::GitHubGraphQLForbidden`] variant for `Display`.
+///
+/// Renders a `(no details)` sentinel when the vector is empty (which
+/// happens when every FORBIDDEN-typed response entry lacked a populated
+/// `message` body; see the variant docs). Otherwise joins the messages
+/// with `"; "` to match the historical `GitHubGraphQL` format.
+fn format_forbidden_display(errors: &[String]) -> String {
+    if errors.is_empty() {
+        "GitHub GraphQL FORBIDDEN: (no details)".to_owned()
+    } else {
+        format!("GitHub GraphQL FORBIDDEN: {}", errors.join("; "))
+    }
 }
 
 impl Error {
@@ -245,6 +273,26 @@ mod tests {
             msg.contains("Resource not accessible by integration"),
             "display must include FORBIDDEN messages: {msg}"
         );
+        assert_eq!(err.status_code(), 403);
+    }
+
+    #[test]
+    fn github_graphql_forbidden_display_empty_vec_renders_no_details_sentinel() {
+        // Per unblock-eos.24: the reducer emits
+        // `GitHubGraphQLForbidden { errors: vec![] }` when every
+        // FORBIDDEN-typed response entry lacked a populated `message`
+        // body (the message-partition loop drops empty messages for
+        // hygiene per unblock-eos.22, but the variant is driven by
+        // `type` presence, not message presence). When the vector is
+        // empty, `Display` MUST render an explicit `(no details)`
+        // sentinel — not `"GitHub GraphQL FORBIDDEN: "` with a bare
+        // trailing space — so log output stays self-describing. This
+        // test pins the exact sentinel string.
+        let err = GitHubGraphQLForbiddenSnafu {
+            errors: Vec::<String>::new(),
+        }
+        .build();
+        assert_eq!(err.to_string(), "GitHub GraphQL FORBIDDEN: (no details)");
         assert_eq!(err.status_code(), 403);
     }
 
