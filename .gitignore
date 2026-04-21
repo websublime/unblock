@@ -8,3 +8,8 @@ docs/desktop
 
 # Beads / Dolt files (added by bd init)
 .beads-credential-key
+
+# Beads runtime snapshot (Dolt is the source of truth; this file mutates on
+# every bd command and creates diff noise. Local-only setup — no git-based
+# sync — so untracking is safe.)
+.beads/issues.jsonl
