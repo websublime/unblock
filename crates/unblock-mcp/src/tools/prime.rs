@@ -701,7 +701,7 @@ impl<'a> ContextInputsBuilder<'a> {
     /// optional drift warnings to obtain the borrow-based
     /// [`ContextInputs`].
     fn new(
-        repo: RepoIdentity<'a>,
+        repo_identity: RepoIdentity<'a>,
         stale_threshold_hours: u64,
         max_per_category: usize,
         filtered: CategorisedIssues,
@@ -712,11 +712,15 @@ impl<'a> ContextInputsBuilder<'a> {
         // preserving the visual field-order parity with [`ContextInputs`]
         // that the eos.32 comment at the struct definition depends on
         // (see bead `unblock-eos.34`, Option (i) trade-off).
+        //
+        // Parameter is named `repo_identity` rather than `repo` to avoid
+        // shadowing the destructured `repo: &'a str` field below (bead
+        // `unblock-eos.37`).
         let RepoIdentity {
             owner,
             repo,
             project_number,
-        } = repo;
+        } = repo_identity;
 
         // 1. Counts — computed AFTER agent filtering.
         let counts = PrimeCounts {
