@@ -55,10 +55,14 @@
 //!   blocked, i.e. `status == Status::Blocked` OR have at least one
 //!   open blocker in the graph (per the R3 decision on the bead —
 //!   mirrors [`prime`](crate::tools::prime) categorisation semantics).
-//! - **`ready_count`** — `compute_ready_set(&issues).len()` after the
-//!   milestone filter is applied (per the R4 decision). This is the
-//!   count of issues that would appear in a fresh `ready` call scoped
-//!   to the same milestone.
+//! - **`ready_count`** — `compute_ready_set(&issues, configured_owner,
+//!   configured_repo).len()` after the milestone filter is applied (per
+//!   the R4 decision). This is the count of issues that would appear in
+//!   a fresh `ready` call scoped to the same milestone. The `(owner,
+//!   repo)` arguments are the SPEC §3.3 Filter 3 source-scoping inputs
+//!   introduced by unblock-eos.4 — they drop cross-repo source issues
+//!   from the ready-set projection before the milestone filter runs
+//!   (see `aggregate_stats` below for the call site).
 //! - **`cycle_count`** — `DependencyGraph::detect_all_cycles().len()`
 //!   over the **full** graph (per the R5 decision). The milestone
 //!   filter never scopes cycle detection because an edge can cross
