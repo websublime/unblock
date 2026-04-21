@@ -2071,6 +2071,15 @@ mod tests {
         }
     }
 
+    /// Five-member cycle fixture shared by the `render_cycles`
+    /// truncation tests (`max_per_category = 2` and
+    /// `max_per_category = 1`). Gives boundary tests a single source of
+    /// truth for the cycle body so future variants can reuse the same
+    /// shape without re-asserting `[1, 2, 3, 4, 5]` verbatim.
+    fn five_member_cycle() -> Vec<u64> {
+        vec![1, 2, 3, 4, 5]
+    }
+
     /// Build a minimal `ContextInputs` for renderer tests — every
     /// category slice is empty, no cycles, no drift.
     fn minimal_inputs<'a>(counts: &'a PrimeCounts, session: &'a SessionMeta) -> ContextInputs<'a> {
@@ -2282,7 +2291,7 @@ Project: 42
         let session = unknown_session();
         let mut ctx = minimal_inputs(&counts, &session);
         ctx.max_per_category = 2;
-        let cycles = vec![vec![1, 2, 3, 4, 5]];
+        let cycles = vec![five_member_cycle()];
         ctx.cycles = &cycles;
         let md = render_context(&ctx);
 
@@ -2326,7 +2335,7 @@ Project: 42
         let session = unknown_session();
         let mut ctx = minimal_inputs(&counts, &session);
         ctx.max_per_category = 1;
-        let cycles = vec![vec![1, 2, 3, 4, 5]];
+        let cycles = vec![five_member_cycle()];
         ctx.cycles = &cycles;
         let md = render_context(&ctx);
 
