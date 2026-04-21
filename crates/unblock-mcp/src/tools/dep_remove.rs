@@ -14,19 +14,26 @@
 //!    and an edge cannot be "removed" from an issue to itself (which
 //!    would never have been creatable via `depends`). See the PR
 //!    description for the rationale; this is NOT hidden scope creep.
-//! 3. Pre-mutation edge-existence guard — **only when both endpoints are
-//!    `Local`** AND the cache is warm. The cached graph covers the
-//!    configured repo only (same rationale as the `depends` cycle check
-//!    at `server.rs:1273`), so the guard cannot apply to cross-repo
-//!    endpoints. When the cache is cold we skip the guard entirely and
-//!    rely on GitHub's server-side behaviour. GitHub's
-//!    `removeIssueDependency` is effectively idempotent on missing
-//!    edges, so skipping the guard never crashes — it just makes the
-//!    `removed=true` flag technically loose when the edge was already
-//!    absent, which spec §8.5 does not contractually forbid.
+//! 3. Pre-mutation edge-existence guard — honours spec §14 Invariant 11
+//!    ("Validation before mutation") on ALL paths. Branching, per
+//!    `unblock-29p.43`:
+//!    - **Warm cache AND both endpoints `Local`** — fast path: look up
+//!      the edge in the in-memory graph. When absent, surface
+//!      `INVALID_PARAMS` (spec §8.5 literal behaviour). No extra RTT.
+//!    - **Cold cache OR at least one endpoint cross-repo** — fetch the
+//!      source issue via [`GitHubApi::fetch_issue_ref`] (1 GraphQL RTT)
+//!      and scan its `trackedByIssues` list for the target. The
+//!      `FETCH_ISSUE_QUERY` trackedBy subselection carries
+//!      `repository { owner { login } name }` (see `graphql.rs`) so
+//!      cross-repo blockers are correctly disambiguated. When the
+//!      target is NOT present, early-return `DepRemoveResult { removed:
+//!      false, ... }` WITHOUT issuing the mutation — honours Invariant
+//!      11 (validated-absent + mutation would contradict) and saves one
+//!      wasted RTT.
 //! 4. Call [`GitHubApi::remove_blocked_by_refs`] inside
 //!    `execute_write_tool` so the mutation is followed by an atomic
-//!    cache invalidate + rebuild.
+//!    cache invalidate + rebuild. Only reached when the edge was
+//!    confirmed present.
 //! 5. Re-evaluate the source's blocker set against the freshly rebuilt
 //!    graph. If the source is `Local` AND `has_open_blockers` returns
 //!    `false` (zero open blockers remain), issue a best-effort Projects
@@ -35,8 +42,12 @@
 //!    project's `ProjectInfo` / `get_project_item_id` ladder is scoped
 //!    to the configured project, matching the cross-repo posture of the
 //!    `depends` handler (spec §5.6 footnote).
-//! 6. Return [`DepRemoveResult`] with `removed = true`, the rendered
-//!    source/target references, and a human-readable message.
+//! 6. Return [`DepRemoveResult`] with `removed = true` when the
+//!    mutation ran, or `removed = false` when the pre-mutation guard
+//!    proved the edge did not exist (cold-cache / cross-repo path
+//!    only; warm-local-local surfaces `INVALID_PARAMS` instead — see
+//!    step 3). The source/target are rendered in canonical
+//!    [`IssueRef`] form and `message` documents what happened.
 //!
 //! ## Status-transition policy when blockers remain
 //!
@@ -130,10 +141,12 @@ pub struct DepRemoveParams {
 /// `owner/repo#n` for a cross-repo reference.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct DepRemoveResult {
-    /// `true` when the blocking edge was removed. Spec §8.5 does not
-    /// contractually forbid `removed=true` for an already-absent edge
-    /// against a cold cache — see the module-level docs for the
-    /// trade-off.
+    /// `true` when the blocking edge existed and was removed;
+    /// `false` when the cold-cache / cross-repo single-issue edge-
+    /// existence check proved the edge did not exist and the
+    /// mutation was skipped (no-op early return). The warm + both-
+    /// `Local` path surfaces a `Validation` error instead of
+    /// `removed = false` — see the module-level docs.
     pub removed: bool,
     /// The source issue reference in canonical form.
     pub source: String,
@@ -207,27 +220,55 @@ fn parse_ref(value: &str) -> Result<IssueRef, ErrorData> {
     })
 }
 
-/// Warm-cache pre-mutation guard: reject when the edge from
-/// `source_qid` → `target_qid` is absent from the currently cached
-/// graph.
+/// Outcome of the pre-mutation edge-existence probe.
 ///
-/// Only meaningful when both endpoints are `Local` and the cache is
-/// warm; the caller MUST perform those checks before delegating.
-/// Returns `Ok(())` when the edge exists (or when the guard is not
-/// applicable), and a `Validation` [`ErrorData`] when the edge is
-/// absent from the current cache view.
+/// The three variants distinguish the decisions the handler must make:
+/// proceed with the mutation, early-return `removed: false`, or surface
+/// `INVALID_PARAMS` on the warm-cache fast path.
+#[derive(Debug, PartialEq, Eq)]
+enum EdgePresence {
+    /// The edge was confirmed present — proceed to
+    /// `remove_blocked_by_refs`.
+    Present,
+    /// The edge was proved absent via the single-issue probe
+    /// (cold-cache / cross-repo path). Return
+    /// `DepRemoveResult { removed: false, ... }` WITHOUT calling the
+    /// mutation (spec §14 Invariant 11 — validation before mutation;
+    /// calling the mutation after proving absence would contradict
+    /// the validation outcome).
+    MissingSkipMutation,
+}
+
+/// Warm-cache edge-existence guard: reject when the edge from
+/// `source_qid` → `target_qid` is absent from the currently cached
+/// graph. Only invoked when the cache is warm AND both endpoints are
+/// `Local` (see [`probe_edge_presence`]).
+///
+/// Returns `Ok(EdgePresence::Present)` when the edge exists, and a
+/// `Validation` [`ErrorData`] when the edge is absent — preserves the
+/// existing spec §8.5 "Validate edge exists in graph" literal behaviour
+/// (caller sees `INVALID_PARAMS`, no `removed: false` wire signal on the
+/// warm-local-local path).
 async fn guard_edge_exists(
     state: &ServerState,
     source_qid: &QualifiedId,
     target_qid: &QualifiedId,
-) -> Result<(), ErrorData> {
-    let Some(graph) = state.cache.get_graph().await else {
-        // Cache is cold — spec §8.5 warm-cache contract does not apply.
-        return Ok(());
-    };
+) -> Result<EdgePresence, ErrorData> {
+    let graph = state.cache.get_graph().await.ok_or_else(|| {
+        // Caller contract violation: `probe_edge_presence` MUST route
+        // to `fetch_issue_ref` when the cache is cold. Surface an
+        // internal error so the bug is visible in logs rather than
+        // silently bypassing the guard.
+        validation_error(
+            "dep_remove: internal invariant violated — guard_edge_exists \
+             invoked on a cold cache; expected warm-cache + both-Local fast path",
+        )
+    })?;
     let node_map = graph.node_map();
     match (node_map.get(source_qid), node_map.get(target_qid)) {
-        (Some(&s_idx), Some(&t_idx)) if graph.inner_graph().contains_edge(s_idx, t_idx) => Ok(()),
+        (Some(&s_idx), Some(&t_idx)) if graph.inner_graph().contains_edge(s_idx, t_idx) => {
+            Ok(EdgePresence::Present)
+        }
         _ => {
             // At least one endpoint is missing from the cached graph OR
             // the directed edge is not present. `fetch_graph_data`
@@ -239,6 +280,85 @@ async fn guard_edge_exists(
                 "dep_remove: no blocking edge exists from {source_qid} to {target_qid}"
             )))
         }
+    }
+}
+
+/// Single-issue edge-existence probe used by the cold-cache and cross-
+/// repo paths: call [`GitHubApi::fetch_issue_ref`] on `source_ref` and
+/// scan the returned `blocked_by` list for a blocker matching
+/// `target_qid`. The `FETCH_ISSUE_QUERY` trackedBy subselection carries
+/// `repository { owner { login } name }` so a cross-repo blocker is
+/// disambiguated from a same-repo blocker (see `unblock-29p.43`).
+///
+/// Returns:
+/// - `Ok(EdgePresence::Present)` — edge confirmed present; caller
+///   proceeds to mutation.
+/// - `Ok(EdgePresence::MissingSkipMutation)` — edge proved absent;
+///   caller MUST NOT call the mutation and instead returns
+///   `DepRemoveResult { removed: false, ... }` to honour Invariant 11.
+///
+/// Errors propagate through `github_error_to_mcp` so upstream failures
+/// (network, rate-limit, cross-repo FORBIDDEN) surface with the same
+/// classification used by the `show` tool.
+async fn probe_edge_via_fetch(
+    state: &ServerState,
+    source_ref: &IssueRef,
+    source_qid: &QualifiedId,
+    target_qid: &QualifiedId,
+) -> Result<EdgePresence, ErrorData> {
+    let issue = state
+        .github
+        .fetch_issue_ref(source_ref)
+        .await
+        .map_err(github_error_to_mcp)?;
+    let present = issue.blocked_by.iter().any(|blocker| {
+        // When the GraphQL selection omitted `repository { ... }` (e.g.
+        // same-repo blocker default today), `repo_owner` / `repo_name`
+        // are `None` — treat `None` as "same repo as the fetched source"
+        // per `RelatedIssue` contract.
+        let owner = blocker
+            .repo_owner
+            .as_deref()
+            .unwrap_or(source_qid.owner.as_str());
+        let repo = blocker
+            .repo_name
+            .as_deref()
+            .unwrap_or(source_qid.repo.as_str());
+        owner == target_qid.owner && repo == target_qid.repo && blocker.number == target_qid.number
+    });
+    if present {
+        Ok(EdgePresence::Present)
+    } else {
+        Ok(EdgePresence::MissingSkipMutation)
+    }
+}
+
+/// Pre-mutation edge-existence probe. Honours spec §14 Invariant 11 on
+/// every path (see module-level docs for the decision tree):
+///
+/// - Warm cache AND both endpoints `Local` — cache-lookup fast path
+///   via [`guard_edge_exists`]. Missing edge → `INVALID_PARAMS`.
+/// - Cold cache OR at least one endpoint cross-repo — single-issue
+///   GraphQL probe via [`probe_edge_via_fetch`]. Missing edge →
+///   `EdgePresence::MissingSkipMutation` (caller early-returns
+///   `removed: false`).
+async fn probe_edge_presence(
+    state: &ServerState,
+    source_ref: &IssueRef,
+    target_ref: &IssueRef,
+    source_qid: &QualifiedId,
+    target_qid: &QualifiedId,
+) -> Result<EdgePresence, ErrorData> {
+    let is_both_local = matches!(
+        (source_ref, target_ref),
+        (IssueRef::Local(_), IssueRef::Local(_))
+    );
+    let is_cache_warm = state.cache.is_fresh().await;
+
+    if is_both_local && is_cache_warm {
+        guard_edge_exists(state, source_qid, target_qid).await
+    } else {
+        probe_edge_via_fetch(state, source_ref, source_qid, target_qid).await
     }
 }
 
@@ -386,19 +506,26 @@ async fn update_status_to_ready(client: &dyn GitHubApi, issue_node_id: &str) {
 /// Execute the `dep_remove` tool handler.
 ///
 /// See the module-level docs for the full spec contract. Flow outline
-/// (mirrors spec §8.5):
+/// (mirrors spec §8.5 with the Invariant 11 tightening from
+/// `unblock-29p.43`):
 ///
 /// 1. Parse and normalize both references against the configured repo.
 /// 2. Reject `source == target` defensively on resolved
 ///    [`QualifiedId`]s.
-/// 3. Pre-mutation edge-existence guard (only when both endpoints are
-///    `Local` AND the cache is warm).
+/// 3. Pre-mutation edge-existence probe:
+///    - Warm cache AND both endpoints `Local` — in-memory graph
+///      lookup (fast path, 0 extra RTT). Missing edge →
+///      `INVALID_PARAMS`.
+///    - Cold cache OR cross-repo endpoints — single-issue
+///      [`GitHubApi::fetch_issue_ref`] probe (1 extra RTT). Missing
+///      edge → early-return `DepRemoveResult { removed: false, ... }`
+///      without calling the mutation.
 /// 4. Run [`GitHubApi::remove_blocked_by_refs`] inside
 ///    `execute_write_tool`.
 /// 5. Re-evaluate blockers on the source via `has_open_blockers` and,
 ///    when the source is `Local` AND newly has zero open blockers, fire
 ///    `update_status_to_ready` best-effort.
-/// 6. Return [`DepRemoveResult`].
+/// 6. Return [`DepRemoveResult`] with `removed = true`.
 ///
 /// # Errors
 ///
@@ -407,8 +534,11 @@ async fn update_status_to_ready(client: &dyn GitHubApi, issue_node_id: &str) {
 ///   `INVALID_PARAMS`.
 /// - `source == target` on resolved `QualifiedId`s → `INVALID_PARAMS`
 ///   with a `Validation` message.
-/// - (Warm-cache path only) the edge is absent from the cached graph →
-///   `INVALID_PARAMS` with a `Validation` message.
+/// - Warm cache AND both `Local` AND edge absent from the cached graph
+///   → `INVALID_PARAMS` with a `Validation` message (spec §8.5 literal
+///   behaviour preserved).
+/// - Cold cache / cross-repo single-issue probe fails (network, 403,
+///   GraphQL error) → propagated via `github_error_to_mcp`.
 /// - `remove_blocked_by_refs` fails → mapped via `github_error_to_mcp`
 ///   (e.g. 404 maps to `INVALID_PARAMS`).
 /// - Cache rebuild fails and leaves the cache empty AND the source is
@@ -416,6 +546,7 @@ async fn update_status_to_ready(client: &dyn GitHubApi, issue_node_id: &str) {
 ///   `show` to observe the final state (R3).
 ///
 /// [`GitHubApi::remove_blocked_by_refs`]: unblock_github::GitHubApi::remove_blocked_by_refs
+/// [`GitHubApi::fetch_issue_ref`]: unblock_github::GitHubApi::fetch_issue_ref
 #[instrument(
     skip(state, params),
     name = "handle_dep_remove",
@@ -461,13 +592,41 @@ pub async fn handle_dep_remove(
         )));
     }
 
-    // Step 3: warm-cache pre-mutation guard. The cached graph covers the
-    // configured repo only, so the guard only applies when BOTH
-    // endpoints are Local. If either endpoint is cross-repo, we skip
-    // the guard entirely and rely on GitHub's server-side behaviour —
-    // `removeIssueDependency` is idempotent on missing edges.
-    if let (IssueRef::Local(_), IssueRef::Local(_)) = (&source_ref, &target_ref) {
-        guard_edge_exists(state, &source_qid, &target_qid).await?;
+    // Step 3: pre-mutation edge-existence probe. Honours Invariant 11
+    // (§14 "Validation before mutation") on every path — warm cache +
+    // both-Local uses the in-memory cache lookup (preserves the spec
+    // §8.5 INVALID_PARAMS behaviour on a missing edge); cold cache OR
+    // cross-repo endpoints use a single-issue GraphQL probe via
+    // `fetch_issue_ref` on the source and scans its trackedBy list for
+    // the target (the query carries repository identity per
+    // unblock-29p.43).
+    match probe_edge_presence(state, &source_ref, &target_ref, &source_qid, &target_qid).await? {
+        EdgePresence::Present => {
+            // Fall through to the mutation in step 4.
+        }
+        EdgePresence::MissingSkipMutation => {
+            // Cold-cache / cross-repo probe proved the edge absent.
+            // Invariant 11 forbids mutating after validation failed, so
+            // we SKIP `remove_blocked_by_refs` entirely and surface a
+            // truthful `removed: false` on the wire. The warm + both-
+            // Local fast path never reaches this arm — it surfaces
+            // `INVALID_PARAMS` via `guard_edge_exists` instead.
+            let source_rendered = source_ref.to_string();
+            let target_rendered = target_ref.to_string();
+            info!(
+                source = %source_rendered,
+                target = %target_rendered,
+                "dep_remove: edge not present per single-issue probe — skipping mutation (removed=false)"
+            );
+            return Ok(DepRemoveResult {
+                removed: false,
+                source: source_rendered.clone(),
+                target: target_rendered.clone(),
+                message: format!(
+                    "No blocking edge to remove: {source_rendered} is not currently blocked by {target_rendered}"
+                ),
+            });
+        }
     }
 
     // Step 4: run the mutation inside execute_write_tool so the cache
