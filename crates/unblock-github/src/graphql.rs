@@ -468,6 +468,20 @@ impl GitHubClient {
             .and_then(serde_json::Value::as_array)
             .filter(|a| !a.is_empty())
         {
+            // Pre-scan: `type == "FORBIDDEN"` is the authoritative
+            // wire signal for the variant choice — the VARIANT (not
+            // its `errors` vector contents) is driven by type
+            // presence, independent of whether any FORBIDDEN entry
+            // carries a populated `message`. This is load-bearing:
+            // the message-partition loop below filters empty-message
+            // entries for hygiene (unblock-eos.22), and without this
+            // pre-scan an all-FORBIDDEN-with-empty-messages payload
+            // would silently fall through to the non-FORBIDDEN bucket
+            // and defeat the cross-repo 403 classifier. See
+            // unblock-eos.24.
+            let has_forbidden = arr
+                .iter()
+                .any(|e| e.get("type").and_then(serde_json::Value::as_str) == Some("FORBIDDEN"));
             let mut forbidden_messages: Vec<String> = Vec::new();
             let mut other_messages: Vec<String> = Vec::new();
             for err in arr {
@@ -491,7 +505,7 @@ impl GitHubClient {
                     other_messages.push(message);
                 }
             }
-            if !forbidden_messages.is_empty() {
+            if has_forbidden {
                 return Err(errors::GitHubGraphQLForbiddenSnafu {
                     errors: forbidden_messages,
                 }
@@ -2141,14 +2155,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn graphql_errors_array_skips_entries_with_missing_or_empty_message() {
-        // An `errors[i]` entry with a missing or empty `message` field
-        // MUST be skipped entirely — it carries no information for the
-        // caller. Previously the reducer used `unwrap_or_default()` and
-        // silently pushed empty strings into the message vectors,
-        // leaking through to the emitted variant (e.g. a FORBIDDEN
-        // entry without a body produced `vec![""]`). See
-        // unblock-eos.22.
+    async fn graphql_errors_all_forbidden_with_empty_messages_still_emits_forbidden() {
+        // An `errors` array whose every FORBIDDEN-typed entry has a
+        // missing or empty `message` field MUST still emit the
+        // `GitHubGraphQLForbidden` variant with an empty `errors`
+        // vector. The `type == "FORBIDDEN"` field is the authoritative
+        // wire signal for the variant choice (per SPEC §11.1 and the
+        // inline comment at `graphql.rs:454-465`): variant presence is
+        // driven by type presence, not by whether any FORBIDDEN entry
+        // carries a populated `message` body.
+        //
+        // The message-partition loop still drops empty-message entries
+        // for hygiene (unblock-eos.22) — so the resulting FORBIDDEN
+        // variant carries an empty `Vec<String>` — but the variant
+        // itself MUST survive so downstream classifiers
+        // (`classify_cross_repo_fetch`) can upgrade no-message-body 403
+        // payloads to `DomainError::CrossRepoAccessDenied`. Without
+        // this guarantee the cross-repo 403 signal would silently
+        // downgrade to a generic 422-bucket `GitHubGraphQL` variant.
+        //
+        // See unblock-eos.24 (this bead). Companion test
+        // `graphql_errors_array_drops_empty_message_but_keeps_populated_forbidden`
+        // guards that the message-level filter contract from
+        // unblock-eos.22 is preserved — this test guards that the
+        // variant-level decision is driven by `type`, not by message
+        // population.
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -2157,8 +2188,10 @@ mod tests {
 
         // Two entries: one FORBIDDEN-typed with NO message field, one
         // FORBIDDEN-typed with an explicit empty string. Both must be
-        // dropped so `forbidden_messages` is empty and the reducer
-        // falls through to the non-FORBIDDEN bucket (also empty).
+        // dropped by the message-partition loop (empty-message
+        // hygiene) but the pre-scan MUST still observe `type ==
+        // "FORBIDDEN"` and emit the FORBIDDEN variant with an empty
+        // vector.
         Mock::given(method("POST"))
             .and(path("/graphql"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -2173,19 +2206,70 @@ mod tests {
         let err = client
             .graphql("query { viewer { login } }", serde_json::json!({}))
             .await
-            .expect_err("empty-message errors array should still produce Err");
+            .expect_err("empty-message FORBIDDEN errors array should still produce Err");
 
         match err {
-            errors::Error::GitHubGraphQL { errors } => {
+            errors::Error::GitHubGraphQLForbidden { errors } => {
                 assert!(
                     errors.is_empty(),
                     "empty-message entries must not pollute the vector, got: {errors:?}"
                 );
             }
-            errors::Error::GitHubGraphQLForbidden { errors } => panic!(
-                "FORBIDDEN variant must not be emitted with empty-string messages, got: {errors:?}"
+            errors::Error::GitHubGraphQL { errors } => panic!(
+                "GitHubGraphQL fall-through must NOT occur when any entry has type=FORBIDDEN, got: {errors:?}"
             ),
-            other => panic!("expected GitHubGraphQL, got: {other}"),
+            other => panic!("expected GitHubGraphQLForbidden, got: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn graphql_errors_forbidden_empty_message_plus_other_typed_populated() {
+        // Mixed payload: one FORBIDDEN entry with NO message body,
+        // alongside a NOT_FOUND entry with a populated message. The
+        // FORBIDDEN variant MUST still win by type even though its
+        // message was dropped by the hygiene filter — the pre-scan's
+        // authority over mixed non-FORBIDDEN entries is the
+        // load-bearing invariant.
+        //
+        // Guards the "FORBIDDEN is authoritative regardless of peers"
+        // invariant from regressions: a future refactor that moves the
+        // variant decision back onto `!forbidden_messages.is_empty()`
+        // would cause this test to fail by emitting
+        // `GitHubGraphQL { errors: ["not found"] }` instead of the
+        // FORBIDDEN variant. See unblock-eos.24.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let client = GitHubClient::new_for_test(&server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "errors": [
+                    { "type": "FORBIDDEN" },
+                    { "type": "NOT_FOUND", "message": "not found" }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client
+            .graphql("query { viewer { login } }", serde_json::json!({}))
+            .await
+            .expect_err("mixed FORBIDDEN/NOT_FOUND should produce Err");
+
+        match err {
+            errors::Error::GitHubGraphQLForbidden { errors } => {
+                assert!(
+                    errors.is_empty(),
+                    "FORBIDDEN entry had no message body; NOT_FOUND peer's message MUST NOT leak into FORBIDDEN vector, got: {errors:?}"
+                );
+            }
+            errors::Error::GitHubGraphQL { errors } => panic!(
+                "GitHubGraphQL fall-through must NOT occur when any entry has type=FORBIDDEN, got: {errors:?}"
+            ),
+            other => panic!("expected GitHubGraphQLForbidden, got: {other}"),
         }
     }
 
