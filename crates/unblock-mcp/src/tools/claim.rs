@@ -194,6 +194,11 @@ mod tests {
             number,
             title: format!("Blocker #{number}"),
             state,
+            // Claim tests target local blockers under the configured repo —
+            // leave repo identity unset (None = same-repo-as-enclosing per
+            // `RelatedIssue` docs).
+            repo_owner: None,
+            repo_name: None,
         }
     }
 
