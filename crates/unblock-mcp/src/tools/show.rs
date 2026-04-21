@@ -209,6 +209,8 @@ mod tests {
             number: 1,
             title: String::from("test"),
             state,
+            repo_owner: None,
+            repo_name: None,
         }
     }
 
@@ -237,6 +239,8 @@ mod tests {
             number: 42,
             title: String::from("Important task"),
             state: IssueState::Open,
+            repo_owner: None,
+            repo_name: None,
         };
         let show = ShowRelatedIssue::from(&ri);
         assert_eq!(show.number, 42);

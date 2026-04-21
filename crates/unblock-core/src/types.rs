@@ -367,6 +367,19 @@ impl fmt::Display for PipelineStage {
 /// Used for dependency relationships (`blockedBy`, `blocking`),
 /// parent issues, and sub-issues returned by `fetch_issue()`.
 /// Contains only the fields available from nested GraphQL fragments.
+///
+/// # Repo identity (`repo_owner` / `repo_name`)
+///
+/// The GitHub `trackedByIssues` connection can return blockers from a
+/// different repository (cross-repo dependencies). When the GraphQL
+/// selection includes the blocker's `repository { owner { login } name }`
+/// subfields, the parser fills `repo_owner` and `repo_name` so callers
+/// can disambiguate a cross-repo blocker from a same-repo blocker.
+///
+/// For parent / sub-issues / `trackedInIssues` and for connections whose
+/// GraphQL selection omits `repository { ... }`, these fields remain
+/// `None` — the caller MUST treat `None` as "unknown / assume
+/// same-repo-as-enclosing-issue" to preserve backwards compatibility.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RelatedIssue {
     /// GitHub issue number.
@@ -375,6 +388,16 @@ pub struct RelatedIssue {
     pub title: String,
     /// GitHub native issue state.
     pub state: IssueState,
+    /// Repository owner login. `None` when the GraphQL selection did
+    /// not request `repository { owner { login } }` — callers MUST
+    /// treat `None` as "same repo as the containing issue".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_owner: Option<String>,
+    /// Repository name. `None` when the GraphQL selection did not
+    /// request `repository { name }` — callers MUST treat `None` as
+    /// "same repo as the containing issue".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_name: Option<String>,
 }
 
 /// A blocking edge in the dependency graph.

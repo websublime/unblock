@@ -64,6 +64,12 @@ query FetchIssue($owner: String!, $repo: String!, $number: Int!) {
           number
           title
           state
+          repository {
+            name
+            owner {
+              login
+            }
+          }
         }
       }
       parent {
@@ -869,6 +875,16 @@ fn parse_comments(value: &serde_json::Value) -> Vec<IssueComment> {
 
 /// Parses a related-issues connection (blockedBy, blocking, subIssues) into
 /// [`RelatedIssue`] instances.
+///
+/// When an individual node carries a `repository { owner { login } name }`
+/// subfield set, those values populate the resulting
+/// [`RelatedIssue::repo_owner`] / [`RelatedIssue::repo_name`]. The
+/// `trackedByIssues` connection inside [`FETCH_ISSUE_QUERY`] selects
+/// those fields so blocker edges can disambiguate cross-repo blockers
+/// from same-repo blockers (required by `dep_remove` single-issue edge
+/// validation on cross-repo paths — see `unblock-29p.43`). Connections
+/// that omit the `repository` selection (e.g. `subIssues`,
+/// `trackedInIssues`, `parent`) simply leave the fields as `None`.
 fn parse_related_issues(value: &serde_json::Value, key: &str) -> Vec<RelatedIssue> {
     value
         .get(key)
@@ -880,10 +896,33 @@ fn parse_related_issues(value: &serde_json::Value, key: &str) -> Vec<RelatedIssu
                     number: json_u64(node, "number"),
                     title: json_string(node, "title"),
                     state: parse_issue_state(node),
+                    repo_owner: parse_related_repo_owner(node),
+                    repo_name: parse_related_repo_name(node),
                 })
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Parses the optional `repository.owner.login` subfield of a related-
+/// issue node. Returns `None` when the GraphQL selection omitted the
+/// subfield or when the value is not a string.
+fn parse_related_repo_owner(node: &serde_json::Value) -> Option<String> {
+    node.get("repository")
+        .and_then(|r| r.get("owner"))
+        .and_then(|o| o.get("login"))
+        .and_then(|l| l.as_str())
+        .map(String::from)
+}
+
+/// Parses the optional `repository.name` subfield of a related-issue
+/// node. Returns `None` when the GraphQL selection omitted the subfield
+/// or when the value is not a string.
+fn parse_related_repo_name(node: &serde_json::Value) -> Option<String> {
+    node.get("repository")
+        .and_then(|r| r.get("name"))
+        .and_then(|n| n.as_str())
+        .map(String::from)
 }
 
 /// Parses the parent issue field into an optional [`RelatedIssue`].
@@ -896,6 +935,9 @@ fn parse_parent_issue(value: &serde_json::Value) -> Option<RelatedIssue> {
         number: json_u64(parent, "number"),
         title: json_string(parent, "title"),
         state: parse_issue_state(parent),
+        // Parent does not select `repository { ... }` — same-repo semantics.
+        repo_owner: None,
+        repo_name: None,
     })
 }
 
@@ -1477,7 +1519,19 @@ mod tests {
             },
             "trackedBy": {
                 "nodes": [
-                    {"number": 10, "title": "Dep A", "state": "OPEN"}
+                    {
+                        "number": 10,
+                        "title": "Dep A",
+                        "state": "OPEN",
+                        // `FETCH_ISSUE_QUERY` trackedBy subselection
+                        // carries `repository { owner { login } name }`
+                        // so blockers can be disambiguated as same-repo
+                        // or cross-repo (see `unblock-29p.43`).
+                        "repository": {
+                            "name": "test-repo",
+                            "owner": {"login": "test-owner"}
+                        }
+                    }
                 ]
             },
             "parent": {"number": 1, "title": "Epic", "state": "OPEN"},
@@ -1517,9 +1571,26 @@ mod tests {
 
         assert_eq!(issue.blocked_by.len(), 1);
         assert_eq!(issue.blocked_by[0].number, 10);
+        // Repo identity must propagate end-to-end from the trackedBy
+        // subselection — load-bearing for cross-repo dep_remove edge
+        // validation (see `unblock-29p.43`).
+        assert_eq!(
+            issue.blocked_by[0].repo_owner.as_deref(),
+            Some("test-owner"),
+            "trackedBy blocker must carry repository.owner.login"
+        );
+        assert_eq!(
+            issue.blocked_by[0].repo_name.as_deref(),
+            Some("test-repo"),
+            "trackedBy blocker must carry repository.name"
+        );
 
         assert_eq!(issue.blocking.len(), 1);
         assert_eq!(issue.blocking[0].number, 20);
+        // trackedInIssues does NOT request the `repository` subselection
+        // — repo identity stays `None` (same-repo by convention).
+        assert!(issue.blocking[0].repo_owner.is_none());
+        assert!(issue.blocking[0].repo_name.is_none());
 
         let parent = issue.parent.expect("should have parent");
         assert_eq!(parent.number, 1);
@@ -1558,6 +1629,86 @@ mod tests {
         assert!(issue.sub_issues.is_empty());
         assert_eq!(issue.status, Status::Ready);
         assert_eq!(issue.priority, Priority::P2);
+    }
+
+    // ── parse_related_issues + repo identity (unblock-29p.43) ───────────
+
+    /// `FETCH_ISSUE_QUERY` trackedBy emits `repository { owner { login }
+    /// name }` so cross-repo blockers can be disambiguated. Verifies the
+    /// parser round-trips those subfields into `RelatedIssue`.
+    #[test]
+    fn parse_related_issues_extracts_cross_repo_identity() {
+        let json = serde_json::json!({
+            "trackedBy": {
+                "nodes": [
+                    {
+                        "number": 99,
+                        "title": "Cross-repo blocker",
+                        "state": "OPEN",
+                        "repository": {
+                            "name": "other-repo",
+                            "owner": {"login": "other-owner"}
+                        }
+                    }
+                ]
+            }
+        });
+        let blockers = parse_related_issues(&json, "trackedBy");
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(blockers[0].number, 99);
+        assert_eq!(blockers[0].repo_owner.as_deref(), Some("other-owner"));
+        assert_eq!(blockers[0].repo_name.as_deref(), Some("other-repo"));
+    }
+
+    /// Connections whose GraphQL selection omits `repository { ... }`
+    /// (e.g. `trackedInIssues`, `subIssues`, `parent`) must leave
+    /// `repo_owner` / `repo_name` as `None`. Callers treat `None` as
+    /// "same repo as the containing issue" per `RelatedIssue` docs.
+    #[test]
+    fn parse_related_issues_without_repository_subfield_keeps_none() {
+        let json = serde_json::json!({
+            "subIssues": {
+                "nodes": [
+                    {"number": 7, "title": "Sub", "state": "OPEN"}
+                ]
+            }
+        });
+        let subs = parse_related_issues(&json, "subIssues");
+        assert_eq!(subs.len(), 1);
+        assert!(subs[0].repo_owner.is_none());
+        assert!(subs[0].repo_name.is_none());
+    }
+
+    /// A partial `repository` subfield (owner missing or name missing)
+    /// degrades the corresponding field to `None` without taking the
+    /// other side down with it — defensive parsing, matches the rest of
+    /// the graphql module's "missing field = default" posture.
+    #[test]
+    fn parse_related_issues_partial_repository_leaves_missing_field_none() {
+        let json = serde_json::json!({
+            "trackedBy": {
+                "nodes": [
+                    {
+                        "number": 11,
+                        "title": "Partial",
+                        "state": "OPEN",
+                        "repository": {"name": "only-name"}
+                    },
+                    {
+                        "number": 12,
+                        "title": "Other partial",
+                        "state": "OPEN",
+                        "repository": {"owner": {"login": "only-owner"}}
+                    }
+                ]
+            }
+        });
+        let blockers = parse_related_issues(&json, "trackedBy");
+        assert_eq!(blockers.len(), 2);
+        assert!(blockers[0].repo_owner.is_none());
+        assert_eq!(blockers[0].repo_name.as_deref(), Some("only-name"));
+        assert_eq!(blockers[1].repo_owner.as_deref(), Some("only-owner"));
+        assert!(blockers[1].repo_name.is_none());
     }
 
     // ── parse_graph_issue ──────────────────────────────────────────────
