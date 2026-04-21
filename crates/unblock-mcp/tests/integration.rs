@@ -2732,6 +2732,324 @@ async fn dep_remove_surfaces_error_when_post_mutation_rebuild_fails() {
     );
 }
 
+// ── dep_remove — cold-cache + cross-repo edge validation (unblock-29p.43)
+
+/// Build a fixture issue with a populated `blocked_by` list — the list
+/// is what `probe_edge_via_fetch` scans on the cold-cache / cross-repo
+/// path. The blocker's `repo_owner` / `repo_name` default to `None`
+/// (same-repo convention) unless the caller passes explicit values via
+/// the second argument.
+fn dep_remove_fixture_issue_with_blockers(
+    number: u64,
+    blockers: Vec<unblock_core::types::RelatedIssue>,
+) -> unblock_core::types::Issue {
+    let mut issue = dep_remove_fixture_issue(number);
+    issue.blocked_by = blockers;
+    issue
+}
+
+/// Helper: local (same-repo-as-configured) blocker — `repo_owner` /
+/// `repo_name` left as `None` so callers exercise the default-to-
+/// enclosing-repo branch in `probe_edge_via_fetch`.
+fn local_blocker(number: u64) -> unblock_core::types::RelatedIssue {
+    unblock_core::types::RelatedIssue {
+        number,
+        title: format!("Blocker #{number}"),
+        state: IssueState::Open,
+        repo_owner: None,
+        repo_name: None,
+    }
+}
+
+/// Helper: cross-repo blocker — explicit `repo_owner` / `repo_name` so
+/// the probe can distinguish a cross-repo blocker from a same-repo
+/// blocker of the same number (the `FETCH_ISSUE_QUERY` subselection
+/// extension in `unblock-29p.43`).
+fn cross_repo_blocker(owner: &str, repo: &str, number: u64) -> unblock_core::types::RelatedIssue {
+    unblock_core::types::RelatedIssue {
+        number,
+        title: format!("{owner}/{repo}#{number}"),
+        state: IssueState::Open,
+        repo_owner: Some(owner.to_owned()),
+        repo_name: Some(repo.to_owned()),
+    }
+}
+
+/// Cold cache, edge DOES exist → the handler calls `fetch_issue_ref`
+/// on the source, sees the target in `blocked_by`, proceeds to the
+/// mutation, and returns `removed: true`. Locks the cold-cache arm of
+/// `probe_edge_presence` — no cache pre-seeding, exactly one
+/// `fetch_issue_ref` call, exactly one `remove_blocked_by_refs` call.
+#[tokio::test]
+async fn dep_remove_cold_cache_validates_edge_via_single_issue_fetch() {
+    use unblock_mcp::tools::dep_remove::{DepRemoveParams, handle_dep_remove};
+
+    let mock = new_mock();
+
+    // Pre-mutation probe: source #42 reports #99 as an open blocker.
+    let source_with_blocker = dep_remove_fixture_issue_with_blockers(42, vec![local_blocker(99)]);
+    mock.push_fetch_issue_ref(Ok(source_with_blocker));
+
+    // Mutation succeeds.
+    mock.push_remove_blocked_by_refs(Ok(()));
+
+    // Post-mutation rebuild returns the two issues without any edges —
+    // source is now unblocked, so the Status-update ladder fires.
+    mock.push_fetch_graph_data(Ok((
+        vec![dep_remove_fixture_issue(42), dep_remove_fixture_issue(99)],
+        vec![],
+    )));
+    mock.push_field_ids(Some(dep_remove_field_ids()));
+    mock.push_resolve_project_info(Ok(unblock_github::projects::ProjectInfo {
+        id: "PVT_1".to_owned(),
+        number: 1,
+    }));
+    mock.push_get_project_item_id(Ok("PVTI_42".to_owned()));
+    mock.push_update_field(Ok(()));
+
+    // Cold cache — no seeding.
+    let state = state_with_mock(Arc::clone(&mock));
+    assert!(
+        !state.cache.is_fresh().await,
+        "precondition: cache must be cold"
+    );
+
+    let result = handle_dep_remove(
+        &state,
+        DepRemoveParams {
+            source: "42".to_owned(),
+            target: "99".to_owned(),
+        },
+    )
+    .await
+    .expect("cold-cache existing edge must drive a successful removal");
+
+    assert!(result.removed, "existing edge must be reported as removed");
+    assert_eq!(result.source, "#42");
+    assert_eq!(result.target, "#99");
+
+    let calls = mock.calls();
+    assert_eq!(
+        calls.fetch_issue_ref(),
+        1,
+        "cold-cache probe must call fetch_issue_ref exactly once"
+    );
+    assert_eq!(
+        calls.remove_blocked_by_refs(),
+        1,
+        "mutation must run when the edge was confirmed present"
+    );
+    assert_eq!(calls.fetch_graph_data(), 1, "one post-mutation rebuild");
+    assert_eq!(
+        calls.update_field(),
+        1,
+        "zero-blocker source must flip Status to ready"
+    );
+}
+
+/// Cold cache, edge does NOT exist → the probe reports absence and the
+/// handler MUST NOT call `remove_blocked_by_refs`. Response:
+/// `removed: false`, message explains "no blocking edge to remove".
+/// Locks Invariant 11 on the cold-cache path (spec §14 "Validation
+/// before mutation").
+#[tokio::test]
+async fn dep_remove_cold_cache_reports_false_when_edge_never_existed() {
+    use unblock_mcp::tools::dep_remove::{DepRemoveParams, handle_dep_remove};
+
+    let mock = new_mock();
+
+    // Source #42 has NO blockers — the probe returns an empty
+    // `blocked_by` so `probe_edge_via_fetch` yields MissingSkipMutation.
+    mock.push_fetch_issue_ref(Ok(dep_remove_fixture_issue_with_blockers(42, vec![])));
+
+    let state = state_with_mock(Arc::clone(&mock));
+    assert!(
+        !state.cache.is_fresh().await,
+        "precondition: cache must be cold"
+    );
+
+    let result = handle_dep_remove(
+        &state,
+        DepRemoveParams {
+            source: "42".to_owned(),
+            target: "99".to_owned(),
+        },
+    )
+    .await
+    .expect("cold-cache absent edge must early-return, not error");
+
+    assert!(
+        !result.removed,
+        "absent edge must be reported as removed=false"
+    );
+    assert_eq!(result.source, "#42");
+    assert_eq!(result.target, "#99");
+    assert!(
+        result.message.contains("No blocking edge to remove"),
+        "message must document the no-op: {}",
+        result.message,
+    );
+
+    let calls = mock.calls();
+    assert_eq!(
+        calls.fetch_issue_ref(),
+        1,
+        "cold-cache probe must call fetch_issue_ref exactly once"
+    );
+    assert_eq!(
+        calls.remove_blocked_by_refs(),
+        0,
+        "Invariant 11: mutation MUST NOT run when the probe proved absence"
+    );
+    assert_eq!(
+        calls.remove_blocked_by_ref(),
+        0,
+        "single-side variant must NOT run either"
+    );
+    assert_eq!(
+        calls.fetch_graph_data(),
+        0,
+        "no mutation → no post-mutation rebuild"
+    );
+    assert_eq!(
+        calls.update_field(),
+        0,
+        "no mutation → no Status update ladder"
+    );
+}
+
+/// Cross-repo target, edge DOES exist → the probe (triggered by the
+/// non-Local target) sees the cross-repo blocker disambiguated via
+/// `RelatedIssue.repo_owner` / `.repo_name` (fetched by the extended
+/// `FETCH_ISSUE_QUERY` subselection), proceeds to the mutation, and
+/// returns `removed: true`. Locks the cross-repo arm of
+/// `probe_edge_presence`.
+#[tokio::test]
+async fn dep_remove_cross_repo_validates_edge_via_single_issue_fetch() {
+    use unblock_mcp::tools::dep_remove::{DepRemoveParams, handle_dep_remove};
+
+    let mock = new_mock();
+
+    // Source is local #42, target is cross-repo other/repo#99. The
+    // probe fetches the source and must find a blocker whose
+    // repository.owner.login == "other" AND repository.name == "repo"
+    // AND number == 99. `cross_repo_blocker` encodes that fixture.
+    let source_with_xrepo_blocker =
+        dep_remove_fixture_issue_with_blockers(42, vec![cross_repo_blocker("other", "repo", 99)]);
+    mock.push_fetch_issue_ref(Ok(source_with_xrepo_blocker));
+
+    mock.push_remove_blocked_by_refs(Ok(()));
+
+    // Post-mutation rebuild (source is local, so the rebuild + Status
+    // ladder still fires). No in-repo edges remain after the mutation.
+    mock.push_fetch_graph_data(Ok((vec![dep_remove_fixture_issue(42)], vec![])));
+    mock.push_field_ids(Some(dep_remove_field_ids()));
+    mock.push_resolve_project_info(Ok(unblock_github::projects::ProjectInfo {
+        id: "PVT_1".to_owned(),
+        number: 1,
+    }));
+    mock.push_get_project_item_id(Ok("PVTI_42".to_owned()));
+    mock.push_update_field(Ok(()));
+
+    // Warm the cache — but with NO edge in-repo. The handler must still
+    // use the cross-repo probe path, not the warm-cache fast path
+    // (which only fires on both-Local). Validates that the branch
+    // predicate is `is_both_local && is_cache_warm`, not just warm.
+    let state = state_with_mock(Arc::clone(&mock));
+    let pre_issues = vec![dep_remove_fixture_issue(42)];
+    let pre_graph = DependencyGraph::build(&pre_issues, &[]);
+    let pre_ready = pre_graph.compute_ready_set(&pre_issues, "acme", "widgets");
+    state.cache.update(pre_issues, pre_ready, pre_graph).await;
+    assert!(state.cache.is_fresh().await);
+
+    let result = handle_dep_remove(
+        &state,
+        DepRemoveParams {
+            source: "42".to_owned(),
+            target: "other/repo#99".to_owned(),
+        },
+    )
+    .await
+    .expect("cross-repo edge present must drive a successful removal");
+
+    assert!(result.removed);
+    assert_eq!(result.source, "#42");
+    assert_eq!(result.target, "other/repo#99");
+
+    let calls = mock.calls();
+    assert_eq!(
+        calls.fetch_issue_ref(),
+        1,
+        "cross-repo probe routes through fetch_issue_ref even with a warm cache"
+    );
+    assert_eq!(calls.remove_blocked_by_refs(), 1);
+    assert_eq!(calls.fetch_graph_data(), 1);
+}
+
+/// Cross-repo target, edge does NOT exist → probe returns absence, the
+/// handler early-returns `removed: false`, and the mutation MUST NOT
+/// run. Locks Invariant 11 on the cross-repo path.
+#[tokio::test]
+async fn dep_remove_cross_repo_reports_false_when_edge_never_existed() {
+    use unblock_mcp::tools::dep_remove::{DepRemoveParams, handle_dep_remove};
+
+    let mock = new_mock();
+
+    // Source #42 blocked only by a DIFFERENT cross-repo issue — the
+    // probe must reject the lookup because (owner, repo, number) does
+    // not match the target. This also guards against a naive scan that
+    // only compares `number` and would incorrectly accept other/repo#99
+    // when only other/different-repo#99 is present.
+    let source_with_unrelated_xrepo_blocker = dep_remove_fixture_issue_with_blockers(
+        42,
+        vec![cross_repo_blocker("other", "different-repo", 99)],
+    );
+    mock.push_fetch_issue_ref(Ok(source_with_unrelated_xrepo_blocker));
+
+    let state = state_with_mock(Arc::clone(&mock));
+    assert!(
+        !state.cache.is_fresh().await,
+        "precondition: cache must be cold (also exercises cold+cross-repo)",
+    );
+
+    let result = handle_dep_remove(
+        &state,
+        DepRemoveParams {
+            source: "42".to_owned(),
+            target: "other/repo#99".to_owned(),
+        },
+    )
+    .await
+    .expect("cross-repo absent edge must early-return, not error");
+
+    assert!(!result.removed, "absent edge must yield removed=false");
+    assert_eq!(result.source, "#42");
+    assert_eq!(result.target, "other/repo#99");
+    assert!(
+        result.message.contains("No blocking edge to remove"),
+        "message must document the no-op: {}",
+        result.message,
+    );
+
+    let calls = mock.calls();
+    assert_eq!(
+        calls.fetch_issue_ref(),
+        1,
+        "cross-repo probe must call fetch_issue_ref exactly once"
+    );
+    assert_eq!(
+        calls.remove_blocked_by_refs(),
+        0,
+        "Invariant 11: mutation MUST NOT run when the probe proved absence"
+    );
+    assert_eq!(
+        calls.fetch_graph_data(),
+        0,
+        "no mutation → no post-mutation rebuild"
+    );
+    assert_eq!(calls.update_field(), 0);
+}
+
 // ── Create tool: integration tests ────────────────────────────────
 
 /// Create tool is registered in the server tool list.
