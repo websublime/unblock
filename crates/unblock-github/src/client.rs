@@ -54,8 +54,10 @@ impl GitHubClient {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::GitRemote`] if repo resolution fails, or
-    /// [`Error::GitHubUnavailable`] if the HTTP client cannot be built.
+    /// Returns [`Error::GitRemote`] if repo resolution fails, or if the HTTP
+    /// client cannot be built (e.g. the token is not a valid HTTP header
+    /// value — the invalid-header path is surfaced via `build_http_client`
+    /// as [`Error::GitRemote`] with status 500).
     #[allow(clippy::unused_async)] // Async signature required by callers; resolve_project_info() is separate.
     pub async fn new(config: &Config) -> Result<Self, Error> {
         let http = Self::build_http_client(&config.token)?;
@@ -101,8 +103,10 @@ impl GitHubClient {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::GitHubUnavailable`] if the HTTP client cannot be
-    /// built (e.g. the token is not a valid HTTP header value).
+    /// Returns [`Error::GitRemote`] if the HTTP client cannot be built
+    /// (e.g. the token is not a valid HTTP header value — the
+    /// invalid-header path is surfaced via `build_http_client` as
+    /// [`Error::GitRemote`] with status 500).
     #[allow(clippy::unused_async)] // Async signature kept symmetric with `new`.
     pub async fn with_repo(
         config: &Config,
