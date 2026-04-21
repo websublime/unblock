@@ -454,6 +454,114 @@ fn show_tool_registered_in_server() {
     );
 }
 
+/// Pin the full Phase 01 MCP tool suite (SPEC §6).
+///
+/// Asserts that the server registers every one of the 17 canonical
+/// Phase 01 tools listed in SPEC §6 (§7.1–§7.7 reads + §8.1–§8.10 writes)
+/// and that the total tool count remains stable. Fails loudly whenever a
+/// future task adds or removes a tool without updating this contract.
+///
+/// ## Count note — 17 spec tools + 1 Phase 02 early feature
+///
+/// Plan `docs/plans/01-plan-mcp-foundation.md:920` Definition of Done
+/// item 1 requires "All 17 tools registered and functional —
+/// `server_lists_all_17_tools` test passes", where the 17 refers to the
+/// SPEC §6 canonical list. `reconcile` is a Phase 02 tool that is
+/// already implemented and registered per plan decision D4 (line 905:
+/// "Keep code, exclude from F1 acceptance criteria"). This test
+/// therefore asserts (a) every name in `EXPECTED_SPEC_TOOLS` is
+/// present, AND (b) the total registered count is
+/// `EXPECTED_SPEC_TOOLS.len() + 1` so `reconcile` is pinned too — any
+/// future tool addition/removal still fails loudly.
+#[test]
+fn server_lists_all_17_tools() {
+    // SPEC §6 canonical 17-tool list, taken verbatim from the spec
+    // headings at §7.1–§7.7 (read tools) and §8.1–§8.10 (write tools).
+    // The order here follows spec section order for readability; the
+    // assertion is order-independent.
+    const EXPECTED_SPEC_TOOLS: &[&str] = &[
+        // Read tools (SPEC §7)
+        "ready",      // §7.1
+        "show",       // §7.2
+        "prime",      // §7.3
+        "stats",      // §7.4
+        "list",       // §7.5
+        "search",     // §7.6
+        "dep_cycles", // §7.7
+        // Write tools (SPEC §8)
+        "claim",      // §8.1
+        "close",      // §8.2
+        "create",     // §8.3
+        "depends",    // §8.4
+        "dep_remove", // §8.5
+        "update",     // §8.6
+        "reopen",     // §8.7
+        "comment",    // §8.8
+        "init",       // §8.9
+        "setup",      // §8.10
+    ];
+    // Phase 02 early features kept per plan D4 (line 905).
+    const PHASE_02_EARLY_FEATURES: &[&str] = &["reconcile"];
+
+    assert_eq!(
+        EXPECTED_SPEC_TOOLS.len(),
+        17,
+        "EXPECTED_SPEC_TOOLS must list exactly 17 tools per SPEC §6",
+    );
+
+    let mock = new_mock();
+    let server = UnblockServer::new(state_with_mock(Arc::clone(&mock)));
+
+    let registered: std::collections::BTreeSet<String> = server.tool_names().into_iter().collect();
+
+    // (a) Every SPEC §6 tool must be present.
+    for expected in EXPECTED_SPEC_TOOLS {
+        assert!(
+            registered.contains(*expected),
+            "SPEC §6 tool '{expected}' is missing from the MCP server tool router — \
+             registered tools: {registered:?}",
+        );
+    }
+
+    // (b) Phase 02 early features (per D4) must also remain registered so
+    //     removal trips the pin.
+    for expected in PHASE_02_EARLY_FEATURES {
+        assert!(
+            registered.contains(*expected),
+            "Phase 02 early-feature tool '{expected}' is missing from the MCP server \
+             tool router — registered tools: {registered:?}",
+        );
+    }
+
+    // (c) Exact count: 17 spec tools + N phase-02 early features.
+    //     Any future tool added or removed without updating the pinned
+    //     lists above fails this assertion — the whole point of the test.
+    let expected_total = EXPECTED_SPEC_TOOLS.len() + PHASE_02_EARLY_FEATURES.len();
+    assert_eq!(
+        registered.len(),
+        expected_total,
+        "Registered tool count mismatch. Expected {expected_total} (= 17 SPEC §6 tools + \
+         {} Phase 02 early features), got {}. Registered: {registered:?}. \
+         If you added a tool to the server router, update EXPECTED_SPEC_TOOLS (if it \
+         belongs to the Phase 01 spec) or PHASE_02_EARLY_FEATURES (otherwise).",
+        PHASE_02_EARLY_FEATURES.len(),
+        registered.len(),
+    );
+
+    // (d) Sanity: router output is sorted alphabetically (rmcp
+    //     `ToolRouter::list_all` sorts by name — see
+    //     rmcp/src/handler/server/router/tool.rs:415). A regression in
+    //     rmcp could silently break callers that rely on the ordering,
+    //     so pin it here too.
+    let observed_order = server.tool_names();
+    let mut expected_order = observed_order.clone();
+    expected_order.sort();
+    assert_eq!(
+        observed_order, expected_order,
+        "tool_names() must be alphabetically sorted per rmcp ToolRouter::list_all contract",
+    );
+}
+
 // ── Ready tool: integration tests ────────────────────────────────
 
 /// Ready returns only open, unblocked, non-deferred issues from cache.
