@@ -302,6 +302,59 @@ pub(super) struct CompletedIssueSummary {
     pub(super) url: String,
 }
 
+/// Repository identity bundle read from [`ServerState`] at the top of
+/// [`handle_prime`].
+///
+/// Groups the three values that together identify the configured
+/// repository (plus its optional GitHub Projects V2 number) so
+/// [`ContextInputsBuilder::new`] can accept a single argument instead of
+/// the three positional `&str` / `Option<u64>` parameters that
+/// previously pushed it over clippy's `too_many_arguments` threshold
+/// (see bead `unblock-eos.34`).
+///
+/// # Lifetime
+///
+/// `'a` is tied to [`ServerState`]'s accessors: `owner` and `repo` are
+/// borrowed from `state.github.owner()` / `state.github.repo()` and
+/// must outlive any use of this bundle.
+///
+/// # Scope
+///
+/// Private to this module — mirrors the [`SessionMeta`] precedent. If a
+/// second consumer (e.g., `ready.rs`, `stats.rs`) adopts the same
+/// pattern in the future, promoting this to a shared `tools/repo.rs`
+/// is an architectural decision for its own bead.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct RepoIdentity<'a> {
+    /// Configured repository owner (matches `state.github.owner()`).
+    pub(super) owner: &'a str,
+    /// Configured repository name (matches `state.github.repo()`).
+    pub(super) repo: &'a str,
+    /// Optional GitHub Projects V2 project number (from the
+    /// [`GitHubApi`](unblock_github::GitHubApi) accessor).
+    pub(super) project_number: Option<u64>,
+}
+
+impl RepoIdentity<'_> {
+    /// Build a [`RepoIdentity`] borrowing from the live [`ServerState`].
+    ///
+    /// `owner` and `repo` come from the [`GitHubApi`](unblock_github::GitHubApi)
+    /// trait accessors. `project_number` is also read from the trait
+    /// (not from `state.config.project_number` directly) so all three
+    /// fields share a single accessor surface — see the DECISION note
+    /// on bead `unblock-eos.34`. The two sources are equivalent today
+    /// (`GitHubClient::project_number` is a verbatim pass-through of
+    /// `config.project_number`), but colocating the reads here keeps
+    /// future mocks / alternate backends honest.
+    pub(super) fn from_state(state: &ServerState) -> RepoIdentity<'_> {
+        RepoIdentity {
+            owner: state.github.owner(),
+            repo: state.github.repo(),
+            project_number: state.github.project_number(),
+        }
+    }
+}
+
 /// Session metadata populated from [`ServerState`] during each `prime` call.
 ///
 /// Surfaces the connected MCP client identity, the resolved agent kind,
@@ -468,10 +521,15 @@ pub async fn handle_prime(
     let drift_warnings = resolve_drift_warnings(drift_check).await;
     let session = SessionMeta::from_state(state);
 
+    // DECISION (bead unblock-eos.34): `project_number` source migrated
+    // from `state.config.project_number` to `state.github.project_number()`
+    // (via `RepoIdentity::from_state`). Equivalent today — the
+    // `GitHubClient::project_number` accessor is a verbatim pass-through
+    // of `config.project_number` — but colocating owner / repo /
+    // project_number behind the `GitHubApi` trait keeps future mocks
+    // and alternate backends honest.
     let builder = ContextInputsBuilder::new(
-        state.github.owner(),
-        state.github.repo(),
-        state.config.project_number,
+        RepoIdentity::from_state(state),
         stale_threshold_hours,
         max_per_category,
         filtered,
@@ -642,16 +700,24 @@ impl<'a> ContextInputsBuilder<'a> {
     /// renderer needs. Call [`Self::build`] with the [`SessionMeta`] and
     /// optional drift warnings to obtain the borrow-based
     /// [`ContextInputs`].
-    #[allow(clippy::too_many_arguments)]
     fn new(
-        owner: &'a str,
-        repo: &'a str,
-        project_number: Option<u64>,
+        repo: RepoIdentity<'a>,
         stale_threshold_hours: u64,
         max_per_category: usize,
         filtered: CategorisedIssues,
         raw_cycles: &[Vec<QualifiedId>],
     ) -> Self {
+        // Destructure `RepoIdentity` immediately so the builder keeps
+        // `owner` / `repo` / `project_number` as three parallel fields —
+        // preserving the visual field-order parity with [`ContextInputs`]
+        // that the eos.32 comment at the struct definition depends on
+        // (see bead `unblock-eos.34`, Option (i) trade-off).
+        let RepoIdentity {
+            owner,
+            repo,
+            project_number,
+        } = repo;
+
         // 1. Counts — computed AFTER agent filtering.
         let counts = PrimeCounts {
             in_progress: filtered.in_progress.len(),
@@ -1879,6 +1945,67 @@ mod tests {
         assert_eq!(meta.agent_client, "Claude Code");
         assert_eq!(meta.agent_kind, "claude-code");
         assert_eq!(meta.connected_at, connected);
+    }
+
+    // ── RepoIdentity tests (bead unblock-eos.34) ──────────────────────
+    //
+    // Mirror the `SessionMeta::from_state` pair above. The "uninitialised"
+    // (no `UNBLOCK_PROJECT`) and "populated" (project number set) cases
+    // both read from `state.github` — i.e. the `GitHubApi` trait — so
+    // these tests also pin the DECISION comment at `handle_prime` that
+    // switched the `project_number` source from `state.config` to
+    // `state.github`.
+
+    /// Build a [`ServerState`] with an explicit `UNBLOCK_PROJECT` value
+    /// so the populated test can exercise the `Some(project_number)`
+    /// branch of [`RepoIdentity::from_state`]. Shape matches
+    /// [`test_state`] byte-for-byte apart from the extra env var.
+    async fn test_state_with_project(project_number: u64) -> ServerState {
+        let config = Config::load_from(|key| match key {
+            "GITHUB_TOKEN" => Ok("ghp_test_token_for_unit_tests".to_owned()),
+            "UNBLOCK_REPO" => Ok("test-owner/test-repo".to_owned()),
+            "UNBLOCK_PROJECT" => Ok(project_number.to_string()),
+            _ => Err(std::env::VarError::NotPresent),
+        })
+        .expect("test config should load");
+
+        let client = unblock_github::client::GitHubClient::new(&config)
+            .await
+            .expect("test client should initialize");
+
+        ServerState {
+            config: Arc::new(config),
+            github: Arc::new(client) as Arc<dyn unblock_github::GitHubApi>,
+            cache: Arc::new(GraphCache::new(Duration::from_secs(300))),
+            agent_kind: std::sync::OnceLock::new(),
+            agent_client: std::sync::OnceLock::new(),
+            connected_at: std::sync::OnceLock::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn repo_identity_from_state_defaults_when_uninitialised() {
+        // `test_state` sets `UNBLOCK_REPO=test-owner/test-repo` and
+        // leaves `UNBLOCK_PROJECT` unset, so `project_number` falls back
+        // to `None` via `state.github.project_number()` (the
+        // `GitHubApi` pass-through of `config.project_number`).
+        let state = test_state().await;
+        let repo = RepoIdentity::from_state(&state);
+        assert_eq!(repo.owner, "test-owner");
+        assert_eq!(repo.repo, "test-repo");
+        assert_eq!(repo.project_number, None);
+    }
+
+    #[tokio::test]
+    async fn repo_identity_from_state_populated() {
+        // Exercises the `Some(project_number)` branch — the
+        // `state.github.project_number()` accessor returns whatever
+        // `Config` parsed from `UNBLOCK_PROJECT`.
+        let state = test_state_with_project(42).await;
+        let repo = RepoIdentity::from_state(&state);
+        assert_eq!(repo.owner, "test-owner");
+        assert_eq!(repo.repo, "test-repo");
+        assert_eq!(repo.project_number, Some(42));
     }
 
     /// Helper test invoked by subprocess tests below. Prints the `agent_field`
@@ -3204,8 +3331,12 @@ _1 cross-repo cycle member omitted from `cycles`_
 
     #[test]
     fn builder_empty_inputs_produces_zero_counts_and_no_trailer() {
-        let builder =
-            ContextInputsBuilder::new("acme", "widgets", None, 24, 10, empty_categorised(), &[]);
+        let repo = RepoIdentity {
+            owner: "acme",
+            repo: "widgets",
+            project_number: None,
+        };
+        let builder = ContextInputsBuilder::new(repo, 24, 10, empty_categorised(), &[]);
 
         assert_eq!(builder.counts.in_progress, 0);
         assert_eq!(builder.counts.ready, 0);
@@ -3231,7 +3362,12 @@ _1 cross-repo cycle member omitted from `cycles`_
             hotspots: vec![],
             stale: vec![],
         };
-        let builder = ContextInputsBuilder::new("acme", "widgets", None, 24, 10, categories, &[]);
+        let repo = RepoIdentity {
+            owner: "acme",
+            repo: "widgets",
+            project_number: None,
+        };
+        let builder = ContextInputsBuilder::new(repo, 24, 10, categories, &[]);
 
         assert_eq!(builder.counts.ready, 4, "counts must reflect input lengths");
         assert_eq!(
@@ -3252,7 +3388,12 @@ _1 cross-repo cycle member omitted from `cycles`_
             hotspots: vec![],
             stale: vec![],
         };
-        let builder = ContextInputsBuilder::new("acme", "widgets", None, 24, 3, categories, &[]);
+        let repo = RepoIdentity {
+            owner: "acme",
+            repo: "widgets",
+            project_number: None,
+        };
+        let builder = ContextInputsBuilder::new(repo, 24, 3, categories, &[]);
 
         // Counts reflect the length of the `CategorisedIssues` lists
         // passed into the builder — i.e. the pre-truncation length. This
@@ -3284,15 +3425,12 @@ _1 cross-repo cycle member omitted from `cycles`_
             QualifiedId::new("acme", "other", 42),
             QualifiedId::new("acme", "widgets", 2),
         ]];
-        let builder = ContextInputsBuilder::new(
-            "acme",
-            "widgets",
-            None,
-            24,
-            10,
-            empty_categorised(),
-            &raw_cycles,
-        );
+        let repo = RepoIdentity {
+            owner: "acme",
+            repo: "widgets",
+            project_number: None,
+        };
+        let builder = ContextInputsBuilder::new(repo, 24, 10, empty_categorised(), &raw_cycles);
 
         let refs = builder
             .cross_repo_refs
@@ -3314,15 +3452,12 @@ _1 cross-repo cycle member omitted from `cycles`_
             QualifiedId::new("acme", "widgets", 1),
             QualifiedId::new("acme", "widgets", 2),
         ]];
-        let builder = ContextInputsBuilder::new(
-            "acme",
-            "widgets",
-            None,
-            24,
-            10,
-            empty_categorised(),
-            &raw_cycles,
-        );
+        let repo = RepoIdentity {
+            owner: "acme",
+            repo: "widgets",
+            project_number: None,
+        };
+        let builder = ContextInputsBuilder::new(repo, 24, 10, empty_categorised(), &raw_cycles);
 
         assert!(
             builder.cross_repo_refs.is_none(),
@@ -3348,8 +3483,12 @@ _1 cross-repo cycle member omitted from `cycles`_
             QualifiedId::new("acme", "widgets", 1),
             QualifiedId::new("acme", "widgets", 2),
         ]];
-        let builder =
-            ContextInputsBuilder::new("acme", "widgets", Some(7), 48, 5, categories, &raw_cycles);
+        let repo = RepoIdentity {
+            owner: "acme",
+            repo: "widgets",
+            project_number: Some(7),
+        };
+        let builder = ContextInputsBuilder::new(repo, 48, 5, categories, &raw_cycles);
 
         let session = unknown_session();
         let drift: &[String] = &[];
