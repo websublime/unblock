@@ -832,6 +832,8 @@ query($owner: String!, $repo: String!, $cursor: String) {
 | `reopen`, `update`, `claim`, `comment` | No | Scoped to configured repo for safety |
 | `create` (`blocked_by` param) | Yes | Cross-repo deps at creation time |
 
+**Cascade-primitive asymmetry — no `update_field_ref`.** The Phase-3 cascade ladder in §8.2 step 6 dispatches three side effects per cross-repo dependent: `fetch_issue`, Projects V2 `update_field`, and `add_comment`. Only two of these are addressed by `(owner, repo, number)` and therefore require `*_ref` variants to route cross-repo — `fetch_issue_ref` (§5.4) and `add_comment_ref`. `update_field` is intentionally NOT extended with an `update_field_ref` variant, because `updateProjectV2ItemFieldValue` operates on globally-scoped Projects V2 node IDs (`project_id` + `item_id`), not on `(owner, repo, number)`. The project item is resolved once per cascade member from the `fetch_issue_ref` result (`issue_node_id` → `get_project_item_id(issue_node_id, project_id)`), and those node IDs are fed directly to the existing `update_field`. A `*_ref` wrapper would add no routing — the node IDs already identify the correct item across repos. This keeps the `GitHubApi` surface minimal: `*_ref` variants exist only where the underlying API endpoint is addressed by `(owner, repo, number)` and cross-repo retargeting is possible.
+
 ### 5.7 Projects V2 field management
 
 **`resolve_project_info()`** — called once at startup:
@@ -1289,6 +1291,8 @@ pub struct CloseResult {
 10. Update cache
 
 **Why step 2 before step 3:** After close, `fetch_graph_data()` returns only OPEN issues. The closed issue is excluded from the rebuilt graph. `compute_unblock_cascade` requires the closed issue to be a node to find dependents via Incoming edges.
+
+**Why step 6 uses only two `*_ref` primitives:** Each cross-repo cascade member triggers three side effects — `fetch_issue` (to obtain `issue_node_id`), Projects V2 `update_field` (Status → `ready`), and `add_comment` (unblock note). Of these, only `fetch_issue` and `add_comment` are addressed by `(owner, repo, number)` and therefore need `*_ref` variants (`fetch_issue_ref`, `add_comment_ref`) to route cross-repo. `update_field` does NOT get an `update_field_ref` variant because `updateProjectV2ItemFieldValue` operates on globally-scoped node IDs (`project_id` + `item_id`), not on `(owner, repo, number)` — once `fetch_issue_ref` yields the cross-repo issue's node ID, `get_project_item_id(issue_node_id, project_id)` resolves the item on the configured project's board, and the existing `update_field(project_id, item_id, field_id, value)` applies the Status update directly. See §5.6 "Cascade-primitive asymmetry" for the routing rationale.
 
 **API calls:** 0-1 (pre-close graph) + 1 (fetch) + 1 (close) + 1+ (fields) + 1 (comment) + 1+ (rebuild) + N×2 per unblocked (field + comment)
 **Cache:** Invalidates.
