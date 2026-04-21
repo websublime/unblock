@@ -1544,11 +1544,21 @@ mod tests {
         }
     }
 
-    /// Create a `ServerState` for unit tests.
-    async fn test_state() -> ServerState {
+    /// Shared constructor for the `test_state*` fixture family.
+    ///
+    /// Builds a `ServerState` with `GITHUB_TOKEN` + `UNBLOCK_REPO`
+    /// pinned to the canonical unit-test values, optionally setting
+    /// `UNBLOCK_PROJECT` when `project_number` is `Some(_)`. Both
+    /// `test_state` (`None`) and `test_state_with_project(u64)`
+    /// (`Some(_)`) delegate here so future fixture variants can be
+    /// added without re-duplicating the setup (bead `unblock-eos.38`).
+    async fn test_state_inner(project_number: Option<u64>) -> ServerState {
         let config = Config::load_from(|key| match key {
             "GITHUB_TOKEN" => Ok("ghp_test_token_for_unit_tests".to_owned()),
             "UNBLOCK_REPO" => Ok("test-owner/test-repo".to_owned()),
+            "UNBLOCK_PROJECT" => project_number
+                .map(|n| n.to_string())
+                .ok_or(std::env::VarError::NotPresent),
             _ => Err(std::env::VarError::NotPresent),
         })
         .expect("test config should load");
@@ -1565,6 +1575,15 @@ mod tests {
             agent_client: std::sync::OnceLock::new(),
             connected_at: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Create a `ServerState` for unit tests.
+    ///
+    /// Thin wrapper over [`test_state_inner`] that leaves
+    /// `UNBLOCK_PROJECT` unset. Preserved as a zero-arg helper so the
+    /// existing call sites don't need to thread `None` through.
+    async fn test_state() -> ServerState {
+        test_state_inner(None).await
     }
 
     // ── Categorisation tests ──────────────────────────────────────────
@@ -1962,29 +1981,12 @@ mod tests {
 
     /// Build a [`ServerState`] with an explicit `UNBLOCK_PROJECT` value
     /// so the populated test can exercise the `Some(project_number)`
-    /// branch of [`RepoIdentity::from_state`]. Shape matches
-    /// [`test_state`] byte-for-byte apart from the extra env var.
+    /// branch of [`RepoIdentity::from_state`]. Thin wrapper over
+    /// [`test_state_inner`] — shares setup byte-for-byte with
+    /// [`test_state`] apart from the extra env var (bead
+    /// `unblock-eos.38`).
     async fn test_state_with_project(project_number: u64) -> ServerState {
-        let config = Config::load_from(|key| match key {
-            "GITHUB_TOKEN" => Ok("ghp_test_token_for_unit_tests".to_owned()),
-            "UNBLOCK_REPO" => Ok("test-owner/test-repo".to_owned()),
-            "UNBLOCK_PROJECT" => Ok(project_number.to_string()),
-            _ => Err(std::env::VarError::NotPresent),
-        })
-        .expect("test config should load");
-
-        let client = unblock_github::client::GitHubClient::new(&config)
-            .await
-            .expect("test client should initialize");
-
-        ServerState {
-            config: Arc::new(config),
-            github: Arc::new(client) as Arc<dyn unblock_github::GitHubApi>,
-            cache: Arc::new(GraphCache::new(Duration::from_secs(300))),
-            agent_kind: std::sync::OnceLock::new(),
-            agent_client: std::sync::OnceLock::new(),
-            connected_at: std::sync::OnceLock::new(),
-        }
+        test_state_inner(Some(project_number)).await
     }
 
     #[tokio::test]
