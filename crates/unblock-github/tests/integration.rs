@@ -1,8 +1,25 @@
 //! Integration tests for the GitHub API client.
 //!
-//! These tests require a valid `GITHUB_TOKEN` environment variable and network
-//! access to GitHub. They are skipped automatically when `GITHUB_TOKEN` is not
-//! set.
+//! ## Two test buckets
+//!
+//! The tests in this file are split into two buckets:
+//!
+//! 1. **Fixture-injected tests** — construct a [`GitHubClient`] via
+//!    [`GitHubClient::with_repo`] so they do not depend on `GITHUB_TOKEN`,
+//!    network, or `.git/config`. These run as part of the default
+//!    `cargo test --workspace` run.
+//! 2. **Live-required tests** — actually call `api.github.com`. These are
+//!    marked `#[ignore]` and opt-in via `cargo test --workspace -- --ignored`
+//!    with a real `GITHUB_TOKEN` (and `UNBLOCK_PROJECT` for the Projects V2
+//!    tests) set. Every live-required test starts with a
+//!    [`require_github_token`] / [`require_github_token_and_project`] gate so
+//!    that accidental invocation without credentials exits cleanly instead of
+//!    emitting a confusing failure.
+//!
+//! The live-required tests invoke [`GitHubClient::new`] directly so that the
+//! production `UNBLOCK_REPO` + git-remote resolution path is still exercised
+//! end-to-end when a real token is present. See bead `unblock-c4h` for the
+//! full rationale.
 
 use unblock_core::config::Config;
 use unblock_core::types::{IssueState, Status};
@@ -84,18 +101,148 @@ fn has_project_number() -> bool {
         .unwrap_or(false)
 }
 
-/// Builds a [`Config`] from the process environment for integration tests.
+/// Gate for live-required integration tests: returns `true` when
+/// `GITHUB_TOKEN` is set, otherwise prints a clear opt-in hint and returns
+/// `false` so the caller can early-return cleanly.
 ///
-/// Requires `GITHUB_TOKEN` to be set. Uses `UNBLOCK_REPO` if available,
-/// otherwise falls back to git remote detection.
+/// Live-required tests are tagged `#[ignore]` and opt-in via
+/// `cargo test --workspace -- --ignored` with `GITHUB_TOKEN` set. When a user
+/// explicitly passes `--ignored` without a token this helper keeps the test
+/// exit status clean instead of hitting a confusing assertion failure.
+fn require_github_token() -> bool {
+    if has_github_token() {
+        true
+    } else {
+        eprintln!(
+            "GITHUB_TOKEN not set — skipping live integration test (re-run with \
+             `GITHUB_TOKEN=... cargo test --workspace -- --ignored`)"
+        );
+        false
+    }
+}
+
+/// Same as [`require_github_token`] but also requires `UNBLOCK_PROJECT`. Used
+/// by Projects V2 live tests that cannot run without a configured project.
+fn require_github_token_and_project() -> bool {
+    if has_github_token() && has_project_number() {
+        true
+    } else {
+        eprintln!(
+            "GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping live project \
+             integration test (re-run with both env vars set and \
+             `cargo test --workspace -- --ignored`)"
+        );
+        false
+    }
+}
+
+/// Builds a [`Config`] from the process environment for live integration
+/// tests. Requires `GITHUB_TOKEN` to be set; uses `UNBLOCK_REPO` when
+/// available, otherwise falls back to git-remote detection.
+///
+/// Callers must gate on [`require_github_token`] (or
+/// [`require_github_token_and_project`]) before invoking this function.
 fn test_config() -> Config {
     Config::load().expect("Config::load() should succeed when GITHUB_TOKEN is set")
 }
 
+/// Builds a hermetic [`Config`] for fixture-injected tests — no env vars
+/// read, no filesystem touched. Pair with [`GitHubClient::with_repo`] to
+/// construct a client that does not require `GITHUB_TOKEN` or `.git/config`.
+///
+/// The token is a stub and the URLs point at the default github.com
+/// endpoints. Tests that actually issue HTTP requests must still be
+/// live-required and use [`test_config`] instead.
+fn fixture_config() -> Config {
+    Config {
+        token: "ghp_integration_fixture".to_owned(),
+        api_base_url: "https://api.github.com".to_owned(),
+        github_url: "https://github.com".to_owned(),
+        repo: None,
+        project_number: None,
+        agent: "integration-fixture".to_owned(),
+        cache_ttl: 30,
+        log_level: "info".to_owned(),
+        otel_endpoint: None,
+    }
+}
+
+// ── fixture-injected construction (no env / no network) ───────────
+//
+// These tests construct a client via `GitHubClient::with_repo`, so they do
+// not depend on `GITHUB_TOKEN`, `.git/config`, or network access. They run
+// on the default `cargo test --workspace` pass and guard the cross-crate
+// consumer shape of `with_repo` against regressions from the `unblock-mcp`
+// side of the workspace.
+
+/// `with_repo` (the fixture-injected constructor) must produce a client
+/// whose accessors reflect the arguments it was given, without touching
+/// `config.repo` or `.git/config`. Mirrors the shape-of-client assertions
+/// in `github_client_new_connects_to_real_repo` without the live-API
+/// dependency.
 #[tokio::test]
+async fn with_repo_builds_client_with_injected_owner_and_repo() {
+    let config = fixture_config();
+
+    let client = GitHubClient::with_repo(&config, "acme", "widgets")
+        .await
+        .expect("with_repo should succeed with a fixture config");
+
+    assert_eq!(
+        client.owner(),
+        "acme",
+        "owner should match the with_repo argument, not .git/config"
+    );
+    assert_eq!(
+        client.repo(),
+        "widgets",
+        "repo should match the with_repo argument, not .git/config"
+    );
+    assert_eq!(
+        client.api_base_url(),
+        "https://api.github.com",
+        "api_base_url should come from the fixture config"
+    );
+
+    let rest_url = client.rest_url("/repos");
+    assert!(
+        rest_url.starts_with("https://"),
+        "rest_url should be an HTTPS URL, got: {rest_url}"
+    );
+
+    let graphql_url = client.graphql_url();
+    assert!(
+        graphql_url.ends_with("/graphql"),
+        "graphql_url should end with /graphql, got: {graphql_url}"
+    );
+}
+
+/// `with_repo` must honour a GitHub Enterprise-style `api_base_url` and
+/// route `graphql_url()` to `/api/graphql` (not `/api/v3/graphql`).
+#[tokio::test]
+async fn with_repo_respects_ghe_api_base_url() {
+    let mut config = fixture_config();
+    config.api_base_url = "https://ghe.example.com/api/v3".to_owned();
+    config.github_url = "https://ghe.example.com".to_owned();
+
+    let client = GitHubClient::with_repo(&config, "acme", "widgets")
+        .await
+        .expect("with_repo should succeed against a GHE fixture");
+
+    assert_eq!(client.api_base_url(), "https://ghe.example.com/api/v3");
+    assert_eq!(
+        client.graphql_url(),
+        "https://ghe.example.com/api/graphql",
+        "GraphQL URL should strip the `/v3` REST suffix"
+    );
+}
+
+// ── live smoke test ────────────────────────────────────────────────
+
+#[tokio::test]
+#[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn github_client_new_connects_to_real_repo() {
-    if !has_github_token() {
-        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+    if !require_github_token() {
         return;
     }
 
@@ -138,9 +285,9 @@ async fn github_client_new_connects_to_real_repo() {
 // ── fetch_issue ────────────────────────────────────────────────────
 
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn fetch_issue_returns_full_details_for_existing_issue() {
-    if !has_github_token() {
-        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+    if !require_github_token() {
         return;
     }
 
@@ -167,9 +314,9 @@ async fn fetch_issue_returns_full_details_for_existing_issue() {
 }
 
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn fetch_issue_returns_issue_not_found_for_nonexistent_number() {
-    if !has_github_token() {
-        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+    if !require_github_token() {
         return;
     }
 
@@ -197,9 +344,9 @@ async fn fetch_issue_returns_issue_not_found_for_nonexistent_number() {
 // ── fetch_graph_data ───────────────────────────────────────────────
 
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn fetch_graph_data_returns_issues_from_real_repo() {
-    if !has_github_token() {
-        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+    if !require_github_token() {
         return;
     }
 
@@ -287,9 +434,9 @@ async fn fetch_graph_data_returns_issues_from_real_repo() {
 }
 
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn fetch_graph_data_issues_have_valid_status_and_priority() {
-    if !has_github_token() {
-        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+    if !require_github_token() {
         return;
     }
 
@@ -325,9 +472,9 @@ async fn fetch_graph_data_issues_have_valid_status_and_priority() {
 // ── mutations: create_issue ─────────────────────────────────────────
 
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn create_issue_returns_issue_with_correct_fields() {
-    if !has_github_token() {
-        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+    if !require_github_token() {
         return;
     }
 
@@ -383,9 +530,9 @@ async fn create_issue_returns_issue_with_correct_fields() {
 // ── mutations: close_issue ──────────────────────────────────────────
 
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn close_issue_closes_issue_and_refetch_confirms() {
-    if !has_github_token() {
-        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+    if !require_github_token() {
         return;
     }
 
@@ -436,9 +583,9 @@ async fn close_issue_closes_issue_and_refetch_confirms() {
 }
 
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn close_issue_with_reason_adds_comment_before_closing() {
-    if !has_github_token() {
-        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+    if !require_github_token() {
         return;
     }
 
@@ -509,9 +656,9 @@ async fn close_issue_with_reason_adds_comment_before_closing() {
 }
 
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn close_issue_returns_issue_not_found_for_nonexistent_number() {
-    if !has_github_token() {
-        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+    if !require_github_token() {
         return;
     }
 
@@ -539,9 +686,9 @@ async fn close_issue_returns_issue_not_found_for_nonexistent_number() {
 // ── mutations: add_comment ──────────────────────────────────────────
 
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn add_comment_posts_comment_and_returns_url() {
-    if !has_github_token() {
-        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+    if !require_github_token() {
         return;
     }
 
@@ -611,9 +758,9 @@ async fn add_comment_posts_comment_and_returns_url() {
 }
 
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn add_comment_returns_issue_not_found_for_nonexistent_number() {
-    if !has_github_token() {
-        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+    if !require_github_token() {
         return;
     }
 
@@ -643,9 +790,9 @@ async fn add_comment_returns_issue_not_found_for_nonexistent_number() {
 // ── mutations: add_blocked_by / remove_blocked_by ───────────────────
 
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn add_blocked_by_creates_blocking_relationship() {
-    if !has_github_token() {
-        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+    if !require_github_token() {
         return;
     }
 
@@ -729,9 +876,9 @@ async fn add_blocked_by_creates_blocking_relationship() {
 }
 
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn remove_blocked_by_removes_blocking_relationship() {
-    if !has_github_token() {
-        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+    if !require_github_token() {
         return;
     }
 
@@ -817,9 +964,9 @@ async fn remove_blocked_by_removes_blocking_relationship() {
 }
 
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn add_blocked_by_duplicate_returns_duplicate_dependency() {
-    if !has_github_token() {
-        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+    if !require_github_token() {
         return;
     }
 
@@ -895,9 +1042,9 @@ async fn add_blocked_by_duplicate_returns_duplicate_dependency() {
 }
 
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn add_blocked_by_returns_issue_not_found_for_nonexistent_number() {
-    if !has_github_token() {
-        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+    if !require_github_token() {
         return;
     }
 
@@ -923,9 +1070,9 @@ async fn add_blocked_by_returns_issue_not_found_for_nonexistent_number() {
 }
 
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn remove_blocked_by_returns_issue_not_found_for_nonexistent_number() {
-    if !has_github_token() {
-        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+    if !require_github_token() {
         return;
     }
 
@@ -952,9 +1099,9 @@ async fn remove_blocked_by_returns_issue_not_found_for_nonexistent_number() {
 // ── mutations: add_sub_issue ────────────────────────────────────────
 
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn add_sub_issue_creates_parent_child_relationship() {
-    if !has_github_token() {
-        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+    if !require_github_token() {
         return;
     }
 
@@ -1035,9 +1182,9 @@ async fn add_sub_issue_creates_parent_child_relationship() {
 }
 
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn add_sub_issue_returns_issue_not_found_for_nonexistent_number() {
-    if !has_github_token() {
-        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+    if !require_github_token() {
         return;
     }
 
@@ -1064,9 +1211,9 @@ async fn add_sub_issue_returns_issue_not_found_for_nonexistent_number() {
 // ── Projects V2: resolve_project_info ───────────────────────────────
 
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn resolve_project_info_returns_project_id_and_number() {
-    if !has_github_token() || !has_project_number() {
-        eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping project integration test");
+    if !require_github_token_and_project() {
         return;
     }
 
@@ -1095,10 +1242,10 @@ async fn resolve_project_info_returns_project_id_and_number() {
 // ── Projects V2: setup_fields ───────────────────────────────────────
 
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 #[allow(clippy::too_many_lines)]
 async fn setup_fields_creates_all_seven_fields() {
-    if !has_github_token() || !has_project_number() {
-        eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping project integration test");
+    if !require_github_token_and_project() {
         return;
     }
 
@@ -1214,9 +1361,9 @@ async fn setup_fields_creates_all_seven_fields() {
 }
 
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn setup_fields_is_idempotent() {
-    if !has_github_token() || !has_project_number() {
-        eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping project integration test");
+    if !require_github_token_and_project() {
         return;
     }
 
@@ -1293,9 +1440,9 @@ async fn setup_fields_is_idempotent() {
 // ── Projects V2: query_setup_status (dry-run) ───────────────────────
 
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn query_setup_status_reports_fields_without_creating() {
-    if !has_github_token() || !has_project_number() {
-        eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping project integration test");
+    if !require_github_token_and_project() {
         return;
     }
 
@@ -1364,9 +1511,9 @@ async fn query_setup_status_reports_fields_without_creating() {
 // ── Projects V2: update_field ───────────────────────────────────────
 
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn update_field_changes_value_on_project_item() {
-    if !has_github_token() || !has_project_number() {
-        eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping project integration test");
+    if !require_github_token_and_project() {
         return;
     }
 
@@ -1478,9 +1625,9 @@ async fn update_field_changes_value_on_project_item() {
 // ── Projects V2: field_ids caching ──────────────────────────────────
 
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn field_ids_cached_on_client_after_setup() {
-    if !has_github_token() || !has_project_number() {
-        eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping project integration test");
+    if !require_github_token_and_project() {
         return;
     }
 
@@ -1670,9 +1817,9 @@ async fn fetch_field_value(client: &GitHubClient, item_id: &str, field_id: &str)
 // ── detect_owner_type ────────────────────────────────────────────────
 
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn detect_owner_type_returns_org_for_org_accounts() {
-    if !has_github_token() {
-        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+    if !require_github_token() {
         return;
     }
 
@@ -1704,9 +1851,9 @@ async fn detect_owner_type_returns_org_for_org_accounts() {
 // ── list_rest_fields ─────────────────────────────────────────────────
 
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn list_rest_fields_returns_integer_ids() {
-    if !has_github_token() || !has_project_number() {
-        eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping integration test");
+    if !require_github_token_and_project() {
         return;
     }
 
@@ -1753,9 +1900,9 @@ async fn list_rest_fields_returns_integer_ids() {
 }
 
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn list_rest_fields_options_name_raw_parsed_correctly() {
-    if !has_github_token() || !has_project_number() {
-        eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping integration test");
+    if !require_github_token_and_project() {
         return;
     }
 
@@ -1810,9 +1957,9 @@ async fn list_rest_fields_options_name_raw_parsed_correctly() {
 // is implemented. Views created by these tests accumulate on the test project.
 
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn create_view_board_and_list_views() {
-    if !has_github_token() || !has_project_number() {
-        eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping integration test");
+    if !require_github_token_and_project() {
         return;
     }
 
@@ -1864,9 +2011,9 @@ async fn create_view_board_and_list_views() {
 }
 
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn create_view_table_layout() {
-    if !has_github_token() || !has_project_number() {
-        eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping integration test");
+    if !require_github_token_and_project() {
         return;
     }
 
@@ -1904,9 +2051,9 @@ async fn create_view_table_layout() {
 }
 
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn create_view_roadmap_layout() {
-    if !has_github_token() || !has_project_number() {
-        eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping integration test");
+    if !require_github_token_and_project() {
         return;
     }
 
@@ -1944,9 +2091,9 @@ async fn create_view_roadmap_layout() {
 }
 
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn list_views_returns_default_view() {
-    if !has_github_token() || !has_project_number() {
-        eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping integration test");
+    if !require_github_token_and_project() {
         return;
     }
 
@@ -1990,9 +2137,9 @@ async fn list_views_returns_default_view() {
 // ── resolve_owner_node_id ───────────────────────────────────────────
 
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn resolve_owner_node_id_returns_non_empty_id() {
-    if !has_github_token() {
-        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+    if !require_github_token() {
         return;
     }
 
@@ -2028,9 +2175,9 @@ async fn resolve_owner_node_id_returns_non_empty_id() {
 // ── list_owner_projects ─────────────────────────────────────────────
 
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn list_owner_projects_returns_projects_with_valid_fields() {
-    if !has_github_token() || !has_project_number() {
-        eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping integration test");
+    if !require_github_token_and_project() {
         return;
     }
 
@@ -2081,9 +2228,9 @@ async fn list_owner_projects_returns_projects_with_valid_fields() {
 // ── init idempotency (create_project + list_owner_projects) ─────────
 
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn init_create_project_and_idempotency_check() {
-    if !has_github_token() {
-        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+    if !require_github_token() {
         return;
     }
 
