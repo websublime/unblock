@@ -21,18 +21,24 @@ use crate::tools::claim::{ClaimCandidate, ClaimParams, ClaimResult, validate_cla
 use crate::tools::close::{CloseParams, CloseResult};
 use crate::tools::comment::{CommentParams, CommentResult};
 use crate::tools::create::{CreateParams, CreateResult};
+use crate::tools::dep_cycles::{DepCyclesParams, DepCyclesResult};
+use crate::tools::dep_remove::{DepRemoveParams, DepRemoveResult};
 use crate::tools::depends::{DependsParams, DependsResult};
 use crate::tools::execute_read_tool;
 use crate::tools::execute_write_tool;
 use crate::tools::init::{InitParams, InitResult};
+use crate::tools::list::{ListParams, ListResult};
 use crate::tools::prime::{PrimeParams, PrimeResult};
 use crate::tools::ready::{ReadyParams, ReadyResult};
 use crate::tools::reconcile::{ReconcileOutput, ReconcileParams};
+use crate::tools::reopen::{ReopenParams, ReopenResult};
+use crate::tools::search::{SearchParams, SearchResult};
 use crate::tools::setup::{REQUIRED_VIEWS, SetupParams, SetupResult};
 use crate::tools::show::{
     ShowBodySections, ShowComment, ShowIssue, ShowParams, ShowRelatedIssue, ShowResult,
     ShowTreeNode,
 };
+use crate::tools::stats::{StatsParams, StatsResult};
 use crate::tools::update::{BodySectionUpdate, SectionName, UpdateParams, UpdateResult};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::{Json, Parameters};
@@ -80,14 +86,20 @@ unblock turns GitHub Issues into a dependency graph. Ask `ready` to get unblocke
 | claim   | Assign yourself to an issue                          | issue_number, agent?                |
 | close   | Close an issue and cascade-unblock dependents        | id, reason?                         |
 | create  | Create a new issue with optional dependencies        | title, body?, blocked_by?           |
+| reopen  | Reopen a closed issue, re-evaluating blockers       | id                                  |
 
 ### Query & Dependencies
-| Tool    | Purpose                                              | Key Params                          |
-|---------|------------------------------------------------------|-------------------------------------|
-| show    | Get full details for a single issue                  | issue                               |
-| depends | Add a blocking dependency (source blocked by target) | source, target                      |
-| comment | Add a comment to an issue                            | issue_number, body                  |
-| update  | Update issue fields (priority, labels, body, etc.)   | issue_number, fields...             |
+| Tool       | Purpose                                              | Key Params                          |
+|------------|------------------------------------------------------|-------------------------------------|
+| show       | Get full details for a single issue                  | issue                               |
+| list       | Filtered, sorted, paginated open-issue view          | status?, priority?, sort?, limit?   |
+| search     | Full-text search via GitHub Search API (no cache)    | query, limit?                       |
+| stats      | Aggregate counts + per-agent throughput              | milestone?                          |
+| depends    | Add a blocking dependency (source blocked by target) | source, target                      |
+| dep_remove | Remove a blocking dependency                         | source, target                      |
+| dep_cycles | Detect dependency cycles (Tarjan SCC)                | id?                                 |
+| comment    | Add a comment to an issue                            | issue_number, body                  |
+| update     | Update issue fields (priority, labels, body, etc.)   | issue_number, fields...             |
 
 ### Diagnostics
 | Tool      | Purpose                                            | Key Params                          |
@@ -99,8 +111,11 @@ unblock turns GitHub Issues into a dependency graph. Ask `ready` to get unblocke
 - Always call `ready` first to find unblocked work.
 - Use `claim` before starting work to prevent conflicts.
 - After `close`, dependents are automatically re-evaluated.
-- Write tools (create, close, update, claim, depends, comment) trigger a graph rebuild.
-- Read tools (ready, show) use the cache for fast responses.
+- Use `list` for filtered browsing (status/priority/milestone/agent/label/assignee) with pagination; use `search` for GitHub-side full-text queries (bypasses the cache).
+- Use `stats` for dashboards and `dep_cycles` to surface circular dependencies before claiming.
+- Write tools (create, close, update, claim, depends, dep_remove, comment, reopen) trigger a graph rebuild.
+- Read tools (ready, show, list, stats, dep_cycles) use the cache for fast responses.
+- `search` bypasses the cache entirely — every call hits GitHub fresh.
 - Bootstrap tools (init, setup) manage the project itself and do not affect the dependency graph.
 ";
 
@@ -246,6 +261,25 @@ impl UnblockServer {
     #[must_use]
     pub fn state(&self) -> &Arc<ServerState> {
         &self.state
+    }
+
+    /// Returns the alphabetically-sorted list of tool names advertised by
+    /// this server.
+    ///
+    /// Backed by the same [`ToolRouter::list_all`] vector that the MCP
+    /// `list_tools` handler returns during the client handshake. Exposed
+    /// as a lightweight accessor so integration tests can pin the 17-tool
+    /// contract (SPEC §6) without spinning up an MCP transport or
+    /// fabricating a [`RequestContext`].
+    ///
+    /// [`RequestContext`]: rmcp::service::RequestContext
+    #[must_use]
+    pub fn tool_names(&self) -> Vec<String> {
+        self.tool_router
+            .list_all()
+            .into_iter()
+            .map(|tool| tool.name.into_owned())
+            .collect()
     }
 }
 
@@ -2122,6 +2156,136 @@ impl UnblockServer {
 
         let output = crate::tools::reconcile::handle_reconcile(&params, state).await?;
         Ok(Json(output))
+    }
+
+    /// Filtered, sorted, paginated view over the open issue set.
+    ///
+    /// Per SPEC §7.5. Supports filters for `status`, `priority`, `type`,
+    /// `milestone`, `agent`, `label`, `assignee`, with `sort`
+    /// (`priority`/`created`/`updated`) and `limit`/`offset` pagination.
+    ///
+    /// This is a read tool — the handler consults the cache (triggering a
+    /// lazy rebuild if stale) and never invalidates. See
+    /// [`handle_list`](crate::tools::list::handle_list) for the full flow.
+    #[tool(
+        name = "list",
+        description = "List open issues with optional filters (status, priority, issue_type, milestone, agent, label, assignee), sorted by priority (default), created, or updated, paginated via limit (1–200, default 50) and offset. Uses cache; rebuilds lazily if stale. Note: fetch_graph_data returns OPEN issues only, so status=\"Closed\" currently yields total=0 (tracked by unblock-a36)."
+    )]
+    pub async fn list(
+        &self,
+        Parameters(params): Parameters<ListParams>,
+    ) -> Result<Json<ListResult>, ErrorData> {
+        let state = self.state();
+        let result = crate::tools::list::handle_list(state, params).await?;
+        Ok(Json(result))
+    }
+
+    /// Full-text search via GitHub's Issue Search API.
+    ///
+    /// Per SPEC §7.6. Bypasses the cache entirely — each call issues a
+    /// single REST request. The transport layer prepends
+    /// `repo:{owner}/{repo} is:issue` automatically; callers can append
+    /// any GitHub search qualifier (e.g. `label:bug author:octocat`).
+    #[tool(
+        name = "search",
+        description = "Full-text search via GitHub's /search/issues endpoint, scoped automatically to repo:{owner}/{repo} is:issue. Bypasses the cache — every call hits GitHub fresh. Params: query (required, non-empty), limit (default 20, clamped to GitHub's 100/page max). Returns IssueSummary-shaped rows; Projects V2 fields fall back to defaults because /search/issues does not expose them."
+    )]
+    pub async fn search(
+        &self,
+        Parameters(params): Parameters<SearchParams>,
+    ) -> Result<Json<SearchResult>, ErrorData> {
+        let state = self.state();
+        let result = crate::tools::search::handle_search(state, params).await?;
+        Ok(Json(result))
+    }
+
+    /// Aggregate counts and metrics across the open issue set.
+    ///
+    /// Per SPEC §7.4. Returns totals by status and priority, blocked vs
+    /// ready counts, cycle count, and per-agent throughput. Optional
+    /// `milestone` filter scopes every aggregate except `cycle_count`
+    /// (which always reflects the full graph — see R5 decision).
+    ///
+    /// This is a read tool — the handler consults the cache (triggering a
+    /// lazy rebuild if stale) and never invalidates.
+    #[tool(
+        name = "stats",
+        description = "Aggregate counts and metrics across open issues: total, by_status (ready/in_progress/blocked/deferred/closed), by_priority (P0–P4), blocked_count, ready_count, cycle_count, and per-agent throughput (agents[]). Optional milestone filter (exact title match) scopes every aggregate except cycle_count. Uses cache; rebuilds lazily if stale."
+    )]
+    pub async fn stats(
+        &self,
+        Parameters(params): Parameters<StatsParams>,
+    ) -> Result<Json<StatsResult>, ErrorData> {
+        let state = self.state();
+        let result = crate::tools::stats::handle_stats(state, params).await?;
+        Ok(Json(result))
+    }
+
+    /// Reopen a closed issue and re-evaluate its blocking status.
+    ///
+    /// Per SPEC §8.7. Validates the issue is currently Closed, reopens it
+    /// via REST `PATCH state: "open"`, rebuilds the graph, and sets the
+    /// Projects V2 Status to `blocked` (when open blockers remain) or
+    /// `ready` otherwise.
+    ///
+    /// This is a write tool — the cache is invalidated and rebuilt.
+    #[tool(
+        name = "reopen",
+        description = "Reopen a closed issue. Validates IssueState == Closed, PATCHes state=open, rebuilds the graph, and sets Projects V2 Status to 'blocked' if the reopened issue still has open blockers or 'ready' otherwise. Triggers graph rebuild. Params: id (positive integer)."
+    )]
+    pub async fn reopen(
+        &self,
+        Parameters(params): Parameters<ReopenParams>,
+    ) -> Result<Json<ReopenResult>, ErrorData> {
+        let state = self.state();
+        let result = crate::tools::reopen::handle_reopen(state, params).await?;
+        Ok(Json(result))
+    }
+
+    /// Remove a blocking dependency between two issues.
+    ///
+    /// Per SPEC §8.5. Validates both refs, confirms the edge exists in
+    /// the graph, calls `remove_blocked_by`, and (when source now has
+    /// zero open blockers) sets the source's Projects V2 Status to
+    /// `ready`. Both refs accept local (`42` / `#42`) or cross-repo
+    /// (`owner/repo#42`) form.
+    ///
+    /// This is a write tool — the cache is invalidated and rebuilt.
+    #[tool(
+        name = "dep_remove",
+        description = "Remove a blocking dependency: target no longer blocks source. Validates both IssueRefs (local 42/#42 or cross-repo owner/repo#42), confirms the edge exists, and flips source Status to 'ready' when it has zero open blockers after removal. Triggers graph rebuild. Cross-repo supported per SPEC §5.6."
+    )]
+    pub async fn dep_remove(
+        &self,
+        Parameters(params): Parameters<DepRemoveParams>,
+    ) -> Result<Json<DepRemoveResult>, ErrorData> {
+        let state = self.state();
+        let result = crate::tools::dep_remove::handle_dep_remove(state, params).await?;
+        Ok(Json(result))
+    }
+
+    /// Detect dependency cycles in the graph.
+    ///
+    /// Per SPEC §7.7. With no `id`, runs `detect_all_cycles()` over the
+    /// full graph (Tarjan SCC). With `id` present, returns only cycles
+    /// that contain `(configured_owner, configured_repo, id)`. Projects
+    /// `Vec<Vec<QualifiedId>>` to `Vec<Vec<u64>>` by dropping cross-repo
+    /// members; dropped `QualifiedId`s surface in `cross_repo_refs` per
+    /// SPEC §11.4.
+    ///
+    /// This is a read tool — the handler consults the cache (triggering a
+    /// lazy rebuild if stale) and never invalidates.
+    #[tool(
+        name = "dep_cycles",
+        description = "Detect dependency cycles via Tarjan SCC. Optional id (local issue number) scopes the result to cycles containing that node; omit id for the full graph. Returns cycles: Vec<Vec<u64>> (local-projection), count, and cross_repo_refs per SPEC §11.4 when a cycle traverses cross-repo nodes (those QualifiedIds are omitted from the bare-u64 projection). Uses cache; rebuilds lazily if stale."
+    )]
+    pub async fn dep_cycles(
+        &self,
+        Parameters(params): Parameters<DepCyclesParams>,
+    ) -> Result<Json<DepCyclesResult>, ErrorData> {
+        let state = self.state();
+        let result = crate::tools::dep_cycles::handle_dep_cycles(state, params).await?;
+        Ok(Json(result))
     }
 }
 
