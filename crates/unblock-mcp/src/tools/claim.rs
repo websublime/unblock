@@ -88,19 +88,32 @@ pub(crate) fn validate_claimable(
 
     // Check 2: blocked (filter to open blockers).
     //
-    // GitHub's native `trackedByIssues` connection — the source of
-    // `candidate.blocked_by` — only surfaces blockers in the same
-    // `owner/repo` as the issue being claimed (see SPEC §8.2 / mutations
-    // `add_blocked_by_refs` cross-repo commentary). Since `claim`
-    // operates on a local issue, all blockers it observes live in the
-    // configured repo; we wrap each as `IssueRef::Local(r.number)`.
-    // If `RelatedIssue` is later extended to carry `owner/repo`, this
-    // mapping trivially evolves to produce `IssueRef::CrossRepo`.
+    // Claim reads `candidate.blocked_by` from a single-issue fetch
+    // (`fetch_issue` → `FETCH_ISSUE_QUERY`). Since unblock-29p.43 that
+    // query's `trackedBy` selection requests `repository { owner { login }
+    // name }`, so `RelatedIssue.repo_owner` / `repo_name` are populated
+    // whenever the blocker lives in a different repository than the
+    // claimed issue. Per the `RelatedIssue` repo-identity convention
+    // (see `unblock_core::types::RelatedIssue` docs), `None` means
+    // "same repo as the enclosing issue" and `Some` means the blocker's
+    // own owner/repo — so we emit `IssueRef::CrossRepo` when both are
+    // `Some`, and fall back to `IssueRef::Local` otherwise. The
+    // convention is authoritative; do not try to infer cross-repo
+    // identity from other signals.
     let open_blockers: Vec<IssueRef> = candidate
         .blocked_by
         .iter()
         .filter(|r| r.state == IssueState::Open)
-        .map(|r| IssueRef::Local(r.number))
+        .map(
+            |r| match (r.repo_owner.as_deref(), r.repo_name.as_deref()) {
+                (Some(owner), Some(repo)) => IssueRef::CrossRepo {
+                    owner: owner.to_owned(),
+                    repo: repo.to_owned(),
+                    number: r.number,
+                },
+                _ => IssueRef::Local(r.number),
+            },
+        )
         .collect();
 
     if !open_blockers.is_empty() {
