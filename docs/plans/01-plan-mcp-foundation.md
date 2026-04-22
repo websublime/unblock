@@ -781,15 +781,27 @@ Two new methods on trait + GitHubClient implementation + MockGitHubClient stubs.
 
 ---
 
-### GAP-12 — Missing integration tests
+### GAP-12 — Missing integration tests — RESOLVED (unblock-29p.13)
 
-Several tools have TODO comments for integration tests:
-- `close` tool
-- `depends` tool
-- `claim` tool
-- `comment` tool
+Previously, four tools carried `TODO` comments pointing at missing
+integration coverage:
 
-**Type:** MISSING
+- `close` tool — already-closed short-circuit (`IssueClosedSnafu`) +
+  co-blocking dependent exclusion from `unblocked` / `cross_repo_refs`
+- `depends` tool — happy-path local edge (Status=Blocked), §8.4
+  `source != target` rejection, and cycle rejection via warm cache
+- `claim` tool — happy-path open issue (two field updates +
+  claim comment) and already-claimed rejection
+- `comment` tool — happy path with cache-freshness invariant (§8.8
+  skips rebuild) and §8.8 empty-body rejection without network calls
+
+**Resolution:** Ten G5-style integration tests added against
+`MockGitHubClient` in `crates/unblock-mcp/tests/integration.rs` covering
+all four tools. The four in-code TODOs in
+`crates/unblock-mcp/src/tools/{claim,depends,comment,close}.rs` were
+deleted as part of the same change.
+
+**Type:** MISSING — RESOLVED
 **Impact:** Medium — reduces confidence in tool correctness.
 
 ---

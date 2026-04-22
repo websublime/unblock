@@ -143,24 +143,3 @@ pub struct CloseResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cross_repo_refs: Option<CrossRepoRefs>,
 }
-
-// TODO(unblock-45a.12): Extend close-tool integration coverage for the two
-// paths the §11.4 cross-repo suite did not exercise:
-//
-//   * already-closed — Phase 1 `IssueClosedSnafu` short-circuit when the
-//     fetched issue's `state == IssueState::Closed` (server.rs §`close`
-//     handler, step 1). `compute_unblock_cascade` is unit-tested at the
-//     graph-engine level but the tool boundary is not.
-//   * co-blocking — end-to-end assertion that a dependent with at least
-//     one remaining open blocker is NOT emitted in `unblocked` /
-//     `cross_repo_refs`. The graph engine's
-//     `cascade_co_blockers_returns_empty_when_other_open` covers the
-//     topology, but the MCP response projection through the tool is not.
-//
-// Already covered by the §11.4 suite in `tests/integration.rs`
-// (`close_no_cross_repo_dependents_cross_repo_refs_is_none`,
-// `close_cross_repo_dependent_populates_cross_repo_refs`,
-// `close_single_cross_repo_dependent_uses_singular_summary`,
-// `close_cross_repo_add_comment_ref_failure_warns_and_continues_cascade`):
-// the None branch, plural-dependents branch, singular-summary branch,
-// and the best-effort `add_comment_ref` failure path.

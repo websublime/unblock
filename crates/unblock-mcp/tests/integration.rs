@@ -6477,3 +6477,225 @@ async fn claim_rejects_already_claimed_issue() {
         "no mutation → no post-mutation rebuild",
     );
 }
+
+// ── close tool: residual coverage (unblock-29p.13 Phase 4) ───────────
+// The §11.4 suite above already covers cross-repo projection, the
+// best-effort add_comment_ref failure path, and R3 rebuild-failure.
+// The close.rs:147-166 TODO narrows the residual gap to:
+//   (a) Phase-1 already-closed short-circuit (`IssueClosedSnafu`)
+//   (b) Co-blocking — a dependent with another remaining open blocker
+//       MUST NOT be emitted in `unblocked`/`cross_repo_refs`.
+
+/// Residual coverage (a) — already-closed short-circuit (close.rs:147-166
+/// TODO). When `fetch_issue` returns an issue already in `IssueState::Closed`,
+/// the handler must reject with `IssueClosedSnafu` (status 409 →
+/// `INVALID_PARAMS`) from within `execute_write_tool`. The close mutation
+/// and the cascade loop must NOT run.
+///
+/// Cache is warm-primed so the Phase-0 cold-cache prime is skipped —
+/// `fetch_graph_data` fires exactly zero times (no Phase-0 prime, no
+/// post-close rebuild because the mutation short-circuited). This
+/// matches the foot-gun warning in the bead investigation: mismatching
+/// the stub count is the most common cause of spurious failures in the
+/// close suite.
+#[tokio::test]
+async fn close_rejects_already_closed_issue() {
+    use unblock_mcp::tools::close::CloseParams;
+
+    let mock = new_mock();
+    // Step 1 fetch returns an already-closed fixture. The handler sees
+    // `state == Closed` at server.rs:1130 and raises IssueClosedSnafu
+    // INSIDE `execute_write_tool`, so close_issue never runs and
+    // fetch_graph_data (the post-mutation rebuild) never runs either.
+    let mut closed_fixture = close_fixture_issue(5);
+    closed_fixture.state = IssueState::Closed;
+    mock.push_fetch_issue(Ok(closed_fixture));
+
+    let state = state_with_mock(Arc::clone(&mock));
+    // Warm-prime the cache with a single open fixture so Phase-0 cold-
+    // cache prime is SKIPPED (state.cache.get_graph() returns Some).
+    // Per the investigation: "If the test warm-primes the cache via
+    // state.cache.update(...) the Phase-0 prime is skipped and you
+    // must NOT push a fetch_graph_data stub for it". Keeping the stub
+    // queues empty ensures any leaked round-trip surfaces as a loud
+    // MockNotStubbed failure.
+    let pre_issues = vec![close_fixture_issue(5)];
+    let pre_graph = DependencyGraph::build(&pre_issues, &[]);
+    let pre_ready_set = pre_graph.compute_ready_set(&pre_issues, "acme", "widgets");
+    state
+        .cache
+        .update(pre_issues, pre_ready_set, pre_graph)
+        .await;
+
+    let server = UnblockServer::new(state);
+    let Err(err) = server
+        .close(Parameters(CloseParams {
+            id: 5,
+            reason: None,
+        }))
+        .await
+    else {
+        panic!("close must reject an already-closed issue")
+    };
+
+    // IssueClosed has status 409 → INVALID_PARAMS via `github_error_to_mcp`.
+    assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert!(
+        err.message.to_lowercase().contains("closed"),
+        "error message must document the closed state: {}",
+        err.message,
+    );
+
+    // Call-counter contract. Fetch ran once; no mutation, no rebuild,
+    // no cascade.
+    let calls = mock.calls();
+    assert_eq!(
+        calls.fetch_issue(),
+        1,
+        "step 1 validates state via fetch_issue exactly once",
+    );
+    assert_eq!(
+        calls.close_issue(),
+        0,
+        "already-closed must short-circuit BEFORE the close mutation",
+    );
+    assert_eq!(
+        calls.fetch_graph_data(),
+        0,
+        "no Phase-0 prime (warm cache) and no post-close rebuild (mutation never ran)",
+    );
+    assert_eq!(
+        calls.add_comment_ref(),
+        0,
+        "mutation never ran → cascade loop has nothing to iterate",
+    );
+}
+
+/// Residual coverage (b) — co-blocking. A dependent with at least one
+/// remaining open blocker MUST NOT be emitted in `unblocked` or
+/// `cross_repo_refs`. This validates that `compute_unblock_cascade`'s
+/// "fully-unblocked" semantics (graph.rs:300-325 — `all_blockers_resolved`)
+/// flow through to the MCP response projection.
+///
+/// Graph shape:
+/// - `#8` (target of the close)
+/// - `#7` (ANOTHER open blocker)
+/// - `#10` (blocked by BOTH `#8` and `#7`)
+/// - Edges: `#10 → #8` and `#10 → #7`
+///
+/// Closing `#8` leaves `#10` still blocked by the still-open `#7`, so
+/// the cascade list is empty; the response envelope reports
+/// `unblocked: []` and `cross_repo_refs: None`. The JSON envelope must
+/// elide `cross_repo_refs` entirely (Invariant 14(b) determinism
+/// clause — matches the acceptance (a) §11.4 template).
+#[tokio::test]
+async fn close_co_blocking_dependent_excluded_from_unblocked() {
+    use unblock_mcp::tools::close::CloseParams;
+
+    // Phase 0 PRE-close graph: #8 Open, #7 Open, #10 blocked by BOTH.
+    let pre_close_issues = vec![
+        close_fixture_issue(7),
+        close_fixture_issue(8),
+        close_fixture_issue(10),
+    ];
+    // Edge convention: source = blocked, target = blocker.
+    // #10 is blocked by #8 AND by #7.
+    let edges = vec![
+        BlockingEdge {
+            source: QualifiedId::new("acme", "widgets", 10),
+            target: QualifiedId::new("acme", "widgets", 8),
+        },
+        BlockingEdge {
+            source: QualifiedId::new("acme", "widgets", 10),
+            target: QualifiedId::new("acme", "widgets", 7),
+        },
+    ];
+    // Phase 1 POST-close rebuild: #8 EXCLUDED (production `states: OPEN`
+    // semantics — see server.rs:1069-1075), #10 and #7 remain. The edge
+    // #10 → #8 has vanished (its target is no longer an OPEN node in
+    // the rebuilt graph), but the edge #10 → #7 is still present so
+    // `ready_set` correctly excludes #10.
+    let post_close_issues = vec![close_fixture_issue(7), close_fixture_issue(10)];
+    let post_close_edges = vec![BlockingEdge {
+        source: QualifiedId::new("acme", "widgets", 10),
+        target: QualifiedId::new("acme", "widgets", 7),
+    }];
+
+    let mock = new_mock();
+    // Phase 0 cold-cache prime.
+    mock.push_fetch_graph_data(Ok((pre_close_issues, edges)));
+    // Phase 1 mutation ladder.
+    mock.push_fetch_issue(Ok(close_fixture_issue(8)));
+    mock.push_close_issue(Ok(()));
+    mock.push_field_ids(None); // skip Projects V2 ladder
+    // Phase 1 post-close rebuild.
+    mock.push_fetch_graph_data(Ok((post_close_issues, post_close_edges)));
+    // NO push_add_comment_ref stubs — the cascade list is empty
+    // (compute_unblock_cascade sees #10 still has open blocker #7)
+    // so the Phase-2 loop has zero iterations. If this test leaks
+    // past co-blocking protection, the first cascade iteration surfaces
+    // `MockNotStubbed` — that loud failure is the regression guard.
+
+    let state = state_with_mock(Arc::clone(&mock));
+    let server = UnblockServer::new(state);
+
+    let Json(result) = server
+        .close(Parameters(CloseParams {
+            id: 8,
+            reason: None,
+        }))
+        .await
+        .expect("close must succeed when the cascade is empty");
+
+    assert_eq!(result.issue, 8);
+    // Co-blocking: #10 still has #7 as an open blocker, so it is NOT
+    // emitted in the cascade. This is the load-bearing assertion — the
+    // §11.4 "fully-unblocked" semantics (spec §3.4) flow through the
+    // MCP projection.
+    assert!(
+        result.unblocked.is_empty(),
+        "co-blocking: dependent with another open blocker MUST NOT appear in unblocked; got: {:?}",
+        result.unblocked,
+    );
+    // All-local zero-cascade → cross_repo_refs is None and JSON elides it.
+    assert!(
+        result.cross_repo_refs.is_none(),
+        "empty cascade → cross_repo_refs None; got: {:?}",
+        result.cross_repo_refs,
+    );
+    let json = serde_json::to_value(&result).expect("serialize");
+    assert!(
+        json.get("cross_repo_refs").is_none(),
+        "None cross_repo_refs must be elided from JSON: {json}",
+    );
+
+    // Call-counter contract. No cascade iterations → zero add_comment_ref
+    // calls. Two fetch_graph_data round-trips: Phase-0 prime + Phase-1
+    // post-close rebuild.
+    let calls = mock.calls();
+    assert_eq!(
+        calls.fetch_issue(),
+        1,
+        "Phase 1 fetches the closed issue exactly once",
+    );
+    assert_eq!(
+        calls.close_issue(),
+        1,
+        "the close mutation runs exactly once",
+    );
+    assert_eq!(
+        calls.fetch_graph_data(),
+        2,
+        "Phase-0 cold-cache prime + Phase-1 post-close rebuild (GAP-15)",
+    );
+    assert_eq!(
+        calls.add_comment_ref(),
+        0,
+        "co-blocking: cascade is empty so the Phase-2 loop has zero iterations",
+    );
+    assert_eq!(
+        calls.add_comment(),
+        0,
+        "legacy bare-number primitive must NOT be invoked by the cascade",
+    );
+}
