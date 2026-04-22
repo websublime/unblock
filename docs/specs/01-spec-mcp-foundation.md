@@ -1482,6 +1482,16 @@ pub struct ReopenResult {
 5. If no open blockers: Status → `ready`
 6. Update cache
 
+**Post-rebuild re-evaluation failure.** If the rebuild succeeds but the
+reopened issue cannot be located in the rebuilt graph (transient 503, or
+the issue has been re-closed concurrently between steps 2 and 3), the
+tool MUST surface a 503-class error with a message instructing the
+caller to re-run `show` rather than defaulting `blocked` to `false`. The
+`reopen` mutation is durable on GitHub regardless of this failure — the
+error signals only the inability to compute the final `blocked` /
+`status` fields locally. Preserves §14 invariants 8 and 13 (no fictional
+Status/`blocked` claims when the graph cannot actually be consulted).
+
 **API calls:** 1 (fetch) + 1 (reopen) + 1-2 (fields) + 1+ (rebuild)
 **Cache:** Invalidates.
 
