@@ -5942,6 +5942,11 @@ async fn depends_local_edge_marks_source_blocked() {
     // prove the handler used the cross-repo-capable `_refs` mutation,
     // rebuilt the cache exactly once, and fired the Projects V2
     // Status-blocked ladder through to `update_field`.
+    //
+    // Per-rung ladder assertions (`field_ids`, `resolve_project_info`,
+    // `get_project_item_id`) make it possible to pinpoint WHICH rung of
+    // the server.rs:1535-1572 ladder drops if this test ever regresses —
+    // rather than diagnosing only via the terminal `update_field` count.
     let calls = mock.calls();
     assert_eq!(
         calls.fetch_issue_ref(),
@@ -5962,6 +5967,21 @@ async fn depends_local_edge_marks_source_blocked() {
         calls.fetch_graph_data(),
         1,
         "post-mutation rebuild fetches graph data exactly once",
+    );
+    assert_eq!(
+        calls.field_ids(),
+        1,
+        "ladder rung 1: field_ids must be resolved exactly once (server.rs:1535)",
+    );
+    assert_eq!(
+        calls.resolve_project_info(),
+        1,
+        "ladder rung 2: resolve_project_info must fire exactly once",
+    );
+    assert_eq!(
+        calls.get_project_item_id(),
+        1,
+        "ladder rung 3: get_project_item_id must fire exactly once",
     );
     assert_eq!(
         calls.update_field(),
@@ -6577,81 +6597,96 @@ async fn close_rejects_already_closed_issue() {
 /// "fully-unblocked" semantics (graph.rs:300-325 — `all_blockers_resolved`)
 /// flow through to the MCP response projection.
 ///
-/// Graph shape:
-/// - `#8` (target of the close)
-/// - `#7` (ANOTHER open blocker)
-/// - `#10` (blocked by BOTH `#8` and `#7`)
-/// - Edges: `#10 → #8` and `#10 → #7`
+/// Graph shape (see consts `BLOCKER_A`, `CLOSED`, `DEPENDENT` in the
+/// test body — the roles, not the numbers, carry the meaning):
+/// - `CLOSED` (target of the close)
+/// - `BLOCKER_A` (ANOTHER open blocker)
+/// - `DEPENDENT` (blocked by BOTH `CLOSED` and `BLOCKER_A`)
+/// - Edges: `DEPENDENT → CLOSED` and `DEPENDENT → BLOCKER_A`
 ///
-/// Closing `#8` leaves `#10` still blocked by the still-open `#7`, so
-/// the cascade list is empty; the response envelope reports
-/// `unblocked: []` and `cross_repo_refs: None`. The JSON envelope must
-/// elide `cross_repo_refs` entirely (Invariant 14(b) determinism
-/// clause — matches the acceptance (a) §11.4 template).
+/// Closing `CLOSED` leaves `DEPENDENT` still blocked by the still-open
+/// `BLOCKER_A`, so the cascade list is empty; the response envelope
+/// reports `unblocked: []` and `cross_repo_refs: None`. The JSON
+/// envelope must elide `cross_repo_refs` entirely (Invariant 14(b)
+/// determinism clause — matches the acceptance (a) §11.4 template).
 #[tokio::test]
 async fn close_co_blocking_dependent_excluded_from_unblocked() {
     use unblock_mcp::tools::close::CloseParams;
 
-    // Phase 0 PRE-close graph: #8 Open, #7 Open, #10 blocked by BOTH.
+    // Role-named issue numbers — the cascade topology is about roles,
+    // not the raw numbers. `DEPENDENT` is blocked by BOTH `CLOSED` and
+    // `BLOCKER_A`, and closing `CLOSED` must NOT promote `DEPENDENT`
+    // because `BLOCKER_A` remains open.
+    const BLOCKER_A: u64 = 7;
+    const CLOSED: u64 = 8;
+    const DEPENDENT: u64 = 10;
+
+    // Phase 0 PRE-close graph: CLOSED Open, BLOCKER_A Open, DEPENDENT
+    // blocked by BOTH.
     let pre_close_issues = vec![
-        close_fixture_issue(7),
-        close_fixture_issue(8),
-        close_fixture_issue(10),
+        close_fixture_issue(BLOCKER_A),
+        close_fixture_issue(CLOSED),
+        close_fixture_issue(DEPENDENT),
     ];
     // Edge convention: source = blocked, target = blocker.
-    // #10 is blocked by #8 AND by #7.
+    // DEPENDENT is blocked by CLOSED AND by BLOCKER_A.
     let edges = vec![
         BlockingEdge {
-            source: QualifiedId::new("acme", "widgets", 10),
-            target: QualifiedId::new("acme", "widgets", 8),
+            source: QualifiedId::new("acme", "widgets", DEPENDENT),
+            target: QualifiedId::new("acme", "widgets", CLOSED),
         },
         BlockingEdge {
-            source: QualifiedId::new("acme", "widgets", 10),
-            target: QualifiedId::new("acme", "widgets", 7),
+            source: QualifiedId::new("acme", "widgets", DEPENDENT),
+            target: QualifiedId::new("acme", "widgets", BLOCKER_A),
         },
     ];
-    // Phase 1 POST-close rebuild: #8 EXCLUDED (production `states: OPEN`
-    // semantics — see server.rs:1069-1075), #10 and #7 remain. The edge
-    // #10 → #8 has vanished (its target is no longer an OPEN node in
-    // the rebuilt graph), but the edge #10 → #7 is still present so
-    // `ready_set` correctly excludes #10.
-    let post_close_issues = vec![close_fixture_issue(7), close_fixture_issue(10)];
+    // Phase 1 POST-close rebuild: CLOSED EXCLUDED (production
+    // `states: OPEN` semantics — see server.rs:1069-1075), DEPENDENT
+    // and BLOCKER_A remain. The edge DEPENDENT → CLOSED has vanished
+    // (its target is no longer an OPEN node in the rebuilt graph),
+    // but the edge DEPENDENT → BLOCKER_A is still present so
+    // `ready_set` correctly excludes DEPENDENT.
+    let post_close_issues = vec![
+        close_fixture_issue(BLOCKER_A),
+        close_fixture_issue(DEPENDENT),
+    ];
     let post_close_edges = vec![BlockingEdge {
-        source: QualifiedId::new("acme", "widgets", 10),
-        target: QualifiedId::new("acme", "widgets", 7),
+        source: QualifiedId::new("acme", "widgets", DEPENDENT),
+        target: QualifiedId::new("acme", "widgets", BLOCKER_A),
     }];
 
     let mock = new_mock();
     // Phase 0 cold-cache prime.
     mock.push_fetch_graph_data(Ok((pre_close_issues, edges)));
     // Phase 1 mutation ladder.
-    mock.push_fetch_issue(Ok(close_fixture_issue(8)));
+    mock.push_fetch_issue(Ok(close_fixture_issue(CLOSED)));
     mock.push_close_issue(Ok(()));
     mock.push_field_ids(None); // skip Projects V2 ladder
     // Phase 1 post-close rebuild.
     mock.push_fetch_graph_data(Ok((post_close_issues, post_close_edges)));
     // NO push_add_comment_ref stubs — the cascade list is empty
-    // (compute_unblock_cascade sees #10 still has open blocker #7)
-    // so the Phase-2 loop has zero iterations. If this test leaks
-    // past co-blocking protection, the first cascade iteration surfaces
-    // `MockNotStubbed` — that loud failure is the regression guard.
+    // (compute_unblock_cascade sees DEPENDENT still has open blocker
+    // BLOCKER_A) so the Phase-2 loop has zero iterations. If this test
+    // leaks past co-blocking protection, the first cascade iteration
+    // surfaces `MockNotStubbed` — that loud failure is the regression
+    // guard.
 
     let state = state_with_mock(Arc::clone(&mock));
     let server = UnblockServer::new(state);
 
     let Json(result) = server
         .close(Parameters(CloseParams {
-            id: 8,
+            id: CLOSED,
             reason: None,
         }))
         .await
         .expect("close must succeed when the cascade is empty");
 
-    assert_eq!(result.issue, 8);
-    // Co-blocking: #10 still has #7 as an open blocker, so it is NOT
-    // emitted in the cascade. This is the load-bearing assertion — the
-    // §11.4 "fully-unblocked" semantics (spec §3.4) flow through the
-    // MCP projection.
+    assert_eq!(result.issue, CLOSED);
+    // Co-blocking: DEPENDENT still has BLOCKER_A as an open blocker, so
+    // it is NOT emitted in the cascade. This is the load-bearing
+    // assertion — the §11.4 "fully-unblocked" semantics (spec §3.4)
+    // flow through the MCP projection.
     assert!(
         result.unblocked.is_empty(),
         "co-blocking: dependent with another open blocker MUST NOT appear in unblocked; got: {:?}",
