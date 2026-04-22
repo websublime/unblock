@@ -1382,7 +1382,9 @@ pub struct DepRemoveParams {
 }
 
 pub struct DepRemoveResult {
-    pub removed: bool,
+    pub removed: bool,   // true iff the edge existed and was removed;
+                         // false iff the pre-mutation probe proved the
+                         // edge did not exist and the mutation was skipped
     pub source: String,
     pub target: String,
     pub message: String,
@@ -1395,7 +1397,11 @@ pub struct DepRemoveResult {
 
 **Flow:**
 1. Resolve both IssueRefs
-2. Validate edge exists in graph
+2. Validate edge exists in graph. If the edge does not exist, return
+   `DepRemoveResult { removed: false, ... }` WITHOUT running step 3
+   (honours §14 Invariant 11). This posture is uniform across all
+   paths (warm-local, warm-cross-repo, cold-local, cold-cross-repo);
+   missing-edge is never surfaced as an error.
 3. `remove_blocked_by` mutation
 4. Rebuild graph, recompute ready states
 5. If source now has zero open blockers: Status → `ready`
