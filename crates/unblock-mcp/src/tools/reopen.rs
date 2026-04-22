@@ -82,18 +82,27 @@
 //! this is not a new divergence. Once `unblock-a36` lands this caveat
 //! vanishes.
 //!
-//! ## R3 caveat — cache absent after rebuild
+//! ## R3 caveat — cannot compute `blocked` after rebuild
 //!
-//! If the `fetch_graph_data()` call inside [`crate::tools::rebuild_cache`]
-//! fails (e.g. transient GitHub 503), the cache is left invalidated and
-//! the handler cannot compute `blocked` locally. The reopen itself has
-//! already succeeded server-side, so the mutation is not lost. The
-//! handler surfaces this as a
-//! [`GitHubUnavailable`](unblock_github::errors::Error::GitHubUnavailable)-
-//! style error with a message instructing the caller to re-run `show`
-//! to observe the final status. This matches the stats R6 posture:
-//! propagate real errors rather than silently returning a
-//! degraded-but-plausible envelope.
+//! Two failure modes share a single posture:
+//!
+//! 1. **Empty cache.** If `fetch_graph_data()` inside
+//!    [`crate::tools::rebuild_cache`] fails (e.g. transient GitHub 503),
+//!    the cache is left invalidated.
+//! 2. **Missing issue (race).** If the rebuild succeeds but the
+//!    reopened issue is absent from the returned set — e.g. another
+//!    agent re-closed it between our `reopen_issue` mutation and the
+//!    `fetch_graph_data` rebuild — we cannot locate it in the cache.
+//!
+//! In both cases the reopen itself has already succeeded server-side,
+//! so the mutation is not lost. The handler surfaces a 503-class
+//! [`GitHubApi`](unblock_github::errors::Error::GitHubApi) error with a
+//! message instructing the caller to re-run `show` to observe the final
+//! status, rather than returning a fabricated `blocked = false`
+//! envelope. Matches the stats R6 posture: propagate real errors rather
+//! than silently returning a degraded-but-plausible envelope. Preserves
+//! spec §14 invariants 8 and 13 (no fictional Status/`blocked` claims
+//! when the graph cannot be consulted).
 //!
 //! ## Cache contract
 //!
@@ -300,7 +309,11 @@ async fn update_status_field(client: &dyn GitHubApi, issue_node_id: &str, slug: 
 ///    mutation is followed by a cache rebuild atomically.
 /// 3. Pull the fresh graph + issue vector from the cache; if either is
 ///    absent propagate a clear error (R3).
-/// 4. Compute `blocked` via the local `has_open_blockers` helper.
+/// 4. Locate the reopened issue in the rebuilt cache and compute
+///    `blocked` via the local `has_open_blockers` helper. If the issue
+///    is missing from the rebuilt set (short race window — another
+///    agent re-closed it between steps 2 and 3) surface a 503-class
+///    error instead of defaulting `blocked = false` (R3).
 /// 5. Best-effort Projects V2 Status update.
 /// 6. Return [`ReopenResult`].
 ///
@@ -312,7 +325,9 @@ async fn update_status_field(client: &dyn GitHubApi, issue_node_id: &str, slug: 
 /// - The fetched issue is not Closed → `IssueAlreadyOpen` (R2).
 /// - `reopen_issue` fails → mapped via `github_error_to_mcp` (e.g. 404
 ///   maps to `INVALID_PARAMS`).
-/// - Cache rebuild fails and leaves the cache empty → a
+/// - Cache rebuild fails and leaves the cache empty, or the rebuild
+///   succeeds but the reopened issue is absent from the rebuilt set
+///   (concurrent re-close race) → a 503-class
 ///   `GitHubUnavailable`-style error is surfaced so the caller re-runs
 ///   `show` to observe the final state (R3).
 #[instrument(
@@ -397,25 +412,34 @@ pub async fn handle_reopen(
     // Step 4: locate the reopened issue in the rebuilt cache and
     // compute `blocked` against the new graph. The fetch_graph_data
     // call already re-fetched the issue as Open (since reopen_issue
-    // succeeded), so the cache view is canonical.
-    let issue_ref = issues.iter().find(|i| i.number == issue_number);
-
-    let blocked = if let Some(issue) = issue_ref {
-        has_open_blockers(issue, graph.as_ref())
-    } else {
-        // The issue is missing from the rebuilt cache — this can happen
-        // if the upstream `fetch_graph_data` query loses the issue
-        // between the reopen and the rebuild (e.g. a race against
-        // another agent closing it again). Treat as unblocked; the
-        // Status update still lands since we captured the node_id
-        // above, and an agent re-running `show` observes the canonical
-        // state. Log a warning so this is observable in diagnostics.
+    // succeeded), so the cache view is canonical on the happy path.
+    //
+    // If the issue is missing from the rebuilt set — a short race
+    // window where another agent re-closed it between our
+    // `reopen_issue` mutation and the `fetch_graph_data` rebuild — we
+    // cannot compute `blocked` without consulting the graph. Surface a
+    // 503-class error (mirroring the empty-cache arm above) rather
+    // than silently defaulting to `blocked = false`, which would
+    // fabricate a ready/unblocked claim without actually evaluating
+    // the graph. Preserves spec §14 invariants 8 and 13. The reopen
+    // mutation remains durable on GitHub regardless of this failure.
+    let Some(issue) = issues.iter().find(|i| i.number == issue_number) else {
         warn!(
             issue_number,
-            "Reopened issue not present in rebuilt cache — treating as unblocked"
+            "Reopened issue not present in rebuilt cache (possible concurrent re-close) — surfacing partial-state error"
         );
-        false
+        return Err(github_error_to_mcp(
+            unblock_github::errors::GitHubApiSnafu {
+                status: 503_u16,
+                message: format!(
+                    "Issue #{issue_number} reopened successfully, but the rebuilt cache does not contain it (possible concurrent close by another agent) — please re-run `show` to observe the final blocked status"
+                ),
+            }
+            .build(),
+        ));
     };
+
+    let blocked = has_open_blockers(issue, graph.as_ref());
 
     let slug = if blocked { "blocked" } else { "ready" };
 
