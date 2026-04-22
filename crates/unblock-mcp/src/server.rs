@@ -1002,6 +1002,17 @@ impl UnblockServer {
     ///
     /// This is a write tool -- uses `execute_write_tool` for the close mutation
     /// and cache rebuild, then performs cascade updates as a second phase.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorData`] in the following cases:
+    /// - `fetch_issue` fails (e.g. 404) → mapped via `github_error_to_mcp`.
+    /// - The fetched issue is already Closed → `IssueClosed` domain error.
+    /// - `close_issue` fails → mapped via `github_error_to_mcp`.
+    /// - Cache rebuild fails and leaves the cache empty → a 503-class
+    ///   [`GitHubApi`](unblock_github::errors::Error::GitHubApi) error is
+    ///   surfaced so the caller re-runs `show` to observe the final cascade
+    ///   state (R3 — see `tools::close` module-doc).
     #[tool(
         name = "close",
         description = "Close an issue and cascade-unblock dependents. Validates the issue is open, closes it, updates project fields (Status=Done), and auto-unblocks any dependent issues whose blockers are now all closed. Returns the list of newly unblocked issue numbers. Triggers graph rebuild."
@@ -1093,48 +1104,68 @@ impl UnblockServer {
         .await?;
 
         // Phase 2: Compute cascade from the freshly rebuilt cache.
-        let mut unblocked = Vec::new();
-        let mut cross_repo_refs: Option<unblock_core::types::CrossRepoRefs> = None;
+        //
+        // R3 — honest partial state (see `tools::close` module-doc):
+        // if the rebuild inside `execute_write_tool` failed, the cache is
+        // empty. The close mutation has already succeeded server-side, but
+        // we cannot compute the cascade here. Surface a 503-class error
+        // instructing the caller to re-run `show`, rather than silently
+        // returning `unblocked = []`, `cross_repo_refs = None` — a
+        // fabricated "no cascade" claim indistinguishable from a
+        // legitimate leaf-close. Preserves §14 invariants 8 and 13.
+        let Some(graph) = state.cache.get_graph().await else {
+            tracing::warn!(
+                issue_number,
+                "Cache not available after close — rebuild failed; caller must re-run `show` to observe final cascade"
+            );
+            return Err(crate::errors::github_error_to_mcp(
+                unblock_github::errors::GitHubApiSnafu {
+                    status: 503_u16,
+                    message: format!(
+                        "Issue #{issue_number} closed successfully, but cache rebuild failed — please re-run `show` to observe the final cascade state"
+                    ),
+                }
+                .build(),
+            ));
+        };
 
-        if let Some(graph) = state.cache.get_graph().await {
-            // compute_unblock_cascade's _all_issues param is currently unused —
-            // pass an empty slice (see graph.rs:215-220 for rationale).
-            let issue_qid =
-                unblock_core::types::QualifiedId::new(client.owner(), client.repo(), issue_number);
-            let cascade = graph.compute_unblock_cascade(&issue_qid, &[]);
+        // compute_unblock_cascade's _all_issues param is currently unused —
+        // pass an empty slice (see graph.rs:215-220 for rationale).
+        let issue_qid =
+            unblock_core::types::QualifiedId::new(client.owner(), client.repo(), issue_number);
+        let cascade = graph.compute_unblock_cascade(&issue_qid, &[]);
 
-            // Phase 3: For each newly unblocked issue, update project fields and
-            // post an unblock comment. Each update is best-effort — failures are
-            // logged but do not abort the cascade.
-            //
-            // SPEC §8.2 step 6 / §11.4 row 4 / §5.6 row `close`: cross-repo
-            // dependents ARE still cascade-updated. The loop dispatches via
-            // the `*_ref` primitives so the comment and issue-fetch land on
-            // the correct `(owner, repo)` — bare-`u64` variants would silently
-            // retarget the configured repo (unblock-eos.13 finding RISK #2).
-            // Project-field updates remain scoped to the configured board
-            // because `project_id` / `item_id` are globally scoped node IDs;
-            // if a cross-repo dependent is not on the board,
-            // `get_project_item_id` fails best-effort and the comment still
-            // lands — matching the spec intent of "cascade side-effects only".
-            let configured_owner = client.owner().to_owned();
-            let configured_repo = client.repo().to_owned();
-            for cascaded_qid in &cascade {
-                // Normalize to IssueRef so the downstream call dispatches via
-                // the `_ref` primitive: `add_comment_ref` matches on the
-                // IssueRef variant, and both arms ultimately funnel through
-                // `add_comment_in_repo` — `Local` delegates to `add_comment`
-                // (which calls `add_comment_in_repo` with the configured
-                // `(owner, repo)`), and `CrossRepo` calls `add_comment_in_repo`
-                // directly with the ref's own `(owner, repo)`. Collapsing a
-                // QualifiedId whose `(owner, repo)` matches the configured
-                // repo to `Local` keeps the configured-repo path tagged as
-                // such (and preserves the `add_comment` tracing span /
-                // instrumented fields) rather than routing an
-                // effectively-local ref through the CrossRepo arm.
-                let cascaded_ref = if cascaded_qid.owner == configured_owner
-                    && cascaded_qid.repo == configured_repo
-                {
+        // Phase 3: For each newly unblocked issue, update project fields and
+        // post an unblock comment. Each update is best-effort — failures are
+        // logged but do not abort the cascade.
+        //
+        // SPEC §8.2 step 6 / §11.4 row 4 / §5.6 row `close`: cross-repo
+        // dependents ARE still cascade-updated. The loop dispatches via
+        // the `*_ref` primitives so the comment and issue-fetch land on
+        // the correct `(owner, repo)` — bare-`u64` variants would silently
+        // retarget the configured repo (unblock-eos.13 finding RISK #2).
+        // Project-field updates remain scoped to the configured board
+        // because `project_id` / `item_id` are globally scoped node IDs;
+        // if a cross-repo dependent is not on the board,
+        // `get_project_item_id` fails best-effort and the comment still
+        // lands — matching the spec intent of "cascade side-effects only".
+        let configured_owner = client.owner().to_owned();
+        let configured_repo = client.repo().to_owned();
+        for cascaded_qid in &cascade {
+            // Normalize to IssueRef so the downstream call dispatches via
+            // the `_ref` primitive: `add_comment_ref` matches on the
+            // IssueRef variant, and both arms ultimately funnel through
+            // `add_comment_in_repo` — `Local` delegates to `add_comment`
+            // (which calls `add_comment_in_repo` with the configured
+            // `(owner, repo)`), and `CrossRepo` calls `add_comment_in_repo`
+            // directly with the ref's own `(owner, repo)`. Collapsing a
+            // QualifiedId whose `(owner, repo)` matches the configured
+            // repo to `Local` keeps the configured-repo path tagged as
+            // such (and preserves the `add_comment` tracing span /
+            // instrumented fields) rather than routing an
+            // effectively-local ref through the CrossRepo arm.
+            let cascaded_ref =
+                if cascaded_qid.owner == configured_owner && cascaded_qid.repo == configured_repo {
                     unblock_core::types::IssueRef::Local(cascaded_qid.number)
                 } else {
                     unblock_core::types::IssueRef::CrossRepo {
@@ -1143,93 +1174,90 @@ impl UnblockServer {
                         number: cascaded_qid.number,
                     }
                 };
-                // Post unblock comment. Stays best-effort per the pre-existing
-                // §8.2 step 6 semantics — the token may lack write scope on a
-                // foreign repo and we must not tear down the cascade for a
-                // permission error (see unblock-eos.13 investigation Risks).
-                // Qualified ID is logged so operators can distinguish
-                // local-repo failures from cross-repo permission denials.
-                let comment_body = format!("\u{2705} Unblocked by closing #{issue_number}");
-                if let Err(e) = client.add_comment_ref(&cascaded_ref, comment_body).await {
-                    tracing::warn!(
-                        cascaded_qid = %cascaded_qid,
-                        error = %e,
-                        "Failed to post unblock comment on cascaded issue"
-                    );
-                }
+            // Post unblock comment. Stays best-effort per the pre-existing
+            // §8.2 step 6 semantics — the token may lack write scope on a
+            // foreign repo and we must not tear down the cascade for a
+            // permission error (see unblock-eos.13 investigation Risks).
+            // Qualified ID is logged so operators can distinguish
+            // local-repo failures from cross-repo permission denials.
+            let comment_body = format!("\u{2705} Unblocked by closing #{issue_number}");
+            if let Err(e) = client.add_comment_ref(&cascaded_ref, comment_body).await {
+                tracing::warn!(
+                    cascaded_qid = %cascaded_qid,
+                    error = %e,
+                    "Failed to post unblock comment on cascaded issue"
+                );
+            }
 
-                // Update Projects V2 fields:
-                // Status → ready (if not already InProgress).
-                // TODO(unblock-b6b.79): Third copy of field update ladder — extract shared helper.
-                if let Some(field_ids) = client.field_ids().await
-                    && let Ok(project_info) = client.resolve_project_info().await
-                {
-                    // Fetch the cascaded issue (by ref, not bare number) to
-                    // get its node_id and current status. For cross-repo
-                    // dependents this reads from the foreign repo; for local
-                    // the _ref variant delegates to the unchanged path.
-                    match client.fetch_issue_ref(&cascaded_ref).await {
-                        Ok(cascaded_issue) => {
-                            if let Ok(item_id) = client
-                                .get_project_item_id(&cascaded_issue.node_id, &project_info.id)
-                                .await
+            // Update Projects V2 fields:
+            // Status → ready (if not already InProgress).
+            // TODO(unblock-b6b.79): Third copy of field update ladder — extract shared helper.
+            if let Some(field_ids) = client.field_ids().await
+                && let Ok(project_info) = client.resolve_project_info().await
+            {
+                // Fetch the cascaded issue (by ref, not bare number) to
+                // get its node_id and current status. For cross-repo
+                // dependents this reads from the foreign repo; for local
+                // the _ref variant delegates to the unchanged path.
+                match client.fetch_issue_ref(&cascaded_ref).await {
+                    Ok(cascaded_issue) => {
+                        if let Ok(item_id) = client
+                            .get_project_item_id(&cascaded_issue.node_id, &project_info.id)
+                            .await
+                        {
+                            // Status → ready (only if not already InProgress).
+                            if cascaded_issue.status != unblock_core::types::Status::InProgress
+                                && let Some(option_id) = field_ids.status.options.get("ready")
+                                && let Err(e) = client
+                                    .update_field(
+                                        &project_info.id,
+                                        &item_id,
+                                        &field_ids.status.field_id,
+                                        &FieldValue::SingleSelectOption(option_id.clone()),
+                                    )
+                                    .await
                             {
-                                // Status → ready (only if not already InProgress).
-                                if cascaded_issue.status != unblock_core::types::Status::InProgress
-                                    && let Some(option_id) = field_ids.status.options.get("ready")
-                                    && let Err(e) = client
-                                        .update_field(
-                                            &project_info.id,
-                                            &item_id,
-                                            &field_ids.status.field_id,
-                                            &FieldValue::SingleSelectOption(option_id.clone()),
-                                        )
-                                        .await
-                                {
-                                    tracing::warn!(
-                                        cascaded_qid = %cascaded_qid,
-                                        error = %e,
-                                        "Failed to set Status=ready on cascaded issue"
-                                    );
-                                }
-                            } else {
-                                // Expected for cross-repo dependents that
-                                // were never added as ProjectV2 items on the
-                                // configured board — best-effort per §5.6.
                                 tracing::warn!(
                                     cascaded_qid = %cascaded_qid,
-                                    "Failed to get project item ID for cascaded issue"
+                                    error = %e,
+                                    "Failed to set Status=ready on cascaded issue"
                                 );
                             }
-                        }
-                        Err(e) => {
+                        } else {
+                            // Expected for cross-repo dependents that
+                            // were never added as ProjectV2 items on the
+                            // configured board — best-effort per §5.6.
                             tracing::warn!(
                                 cascaded_qid = %cascaded_qid,
-                                error = %e,
-                                "Failed to fetch cascaded issue for field updates"
+                                "Failed to get project item ID for cascaded issue"
                             );
                         }
                     }
+                    Err(e) => {
+                        tracing::warn!(
+                            cascaded_qid = %cascaded_qid,
+                            error = %e,
+                            "Failed to fetch cascaded issue for field updates"
+                        );
+                    }
                 }
             }
-
-            // SPEC §8.2 flow step 9 / §11.4 row 4: partition the cascade
-            // into local dependents (projected to `unblocked: Vec<u64>`)
-            // vs cross-repo dependents (surfaced via `cross_repo_refs`).
-            // The Phase 3 loop above intentionally does NOT gate on
-            // (owner, repo) == (config.owner, config.repo) — cross-repo
-            // dependents ARE still cascade-updated; only the response
-            // shape differs here (SPEC §11.4 affected-tools table).
-            let (local_unblocked, cross_repo_accum) =
-                crate::tools::cross_repo::project_cascade(&cascade, client.owner(), client.repo());
-            unblocked = local_unblocked;
-            cross_repo_refs = crate::tools::cross_repo::build_cross_repo_refs_with_summary(
-                cross_repo_accum,
-                crate::tools::cross_repo::close_summary,
-            );
-        } else {
-            tracing::warn!("Cache not available after rebuild — cascade computation skipped");
         }
+
+        // SPEC §8.2 flow step 9 / §11.4 row 4: partition the cascade
+        // into local dependents (projected to `unblocked: Vec<u64>`)
+        // vs cross-repo dependents (surfaced via `cross_repo_refs`).
+        // The Phase 3 loop above intentionally does NOT gate on
+        // (owner, repo) == (config.owner, config.repo) — cross-repo
+        // dependents ARE still cascade-updated; only the response
+        // shape differs here (SPEC §11.4 affected-tools table).
+        let (local_unblocked, cross_repo_accum) =
+            crate::tools::cross_repo::project_cascade(&cascade, client.owner(), client.repo());
+        let unblocked = local_unblocked;
+        let cross_repo_refs = crate::tools::cross_repo::build_cross_repo_refs_with_summary(
+            cross_repo_accum,
+            crate::tools::cross_repo::close_summary,
+        );
 
         Ok(Json(CloseResult {
             issue: issue_number,

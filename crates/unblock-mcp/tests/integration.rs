@@ -5416,3 +5416,90 @@ async fn close_cross_repo_add_comment_ref_failure_warns_and_continues_cascade() 
     assert_eq!(mock.calls().close_issue(), 1);
     assert_eq!(mock.calls().fetch_graph_data(), 1);
 }
+
+/// R3 empty-cache arm — when the post-close cache rebuild fails
+/// (transient 503 from GitHub GraphQL), `execute_write_tool` leaves
+/// the cache empty and `state.cache.get_graph()` returns `None`. The
+/// close handler MUST NOT silently default `unblocked = []`,
+/// `cross_repo_refs = None` (which is indistinguishable from a
+/// legitimate leaf-close with no cascade). It must surface a
+/// 503-class error instructing the caller to re-run `show` to
+/// observe the final cascade state. Preserves spec §14 invariants 8
+/// and 13 (no fictional cascade/Status claims when the graph cannot
+/// be consulted). Mirrors the reopen R3 regression guard at
+/// `reopen_surfaces_error_when_post_reopen_rebuild_fails`.
+#[tokio::test]
+async fn close_surfaces_error_when_rebuilt_cache_missing_closed_issue() {
+    use rmcp::handler::server::wrapper::Parameters;
+    use unblock_github::errors::GitHubApiSnafu;
+    use unblock_mcp::server::UnblockServer;
+    use unblock_mcp::tools::close::CloseParams;
+
+    let mock = new_mock();
+
+    // Phase 1: fetch + close both succeed.
+    mock.push_fetch_issue(Ok(close_fixture_issue(8)));
+    mock.push_close_issue(Ok(()));
+    // Phase 1 field-ladder: None skips the Projects V2 update on #8
+    // so `update_field` is not called from the write-tool closure.
+    mock.push_field_ids(None);
+    // Post-close rebuild: simulate a transient 503 — `execute_write_tool`
+    // leaves the cache empty after logging the error, so the close
+    // handler's cache-check falls through to the R3 "surface an error"
+    // early return.
+    mock.push_fetch_graph_data(Err(GitHubApiSnafu {
+        status: 503_u16,
+        message: "upstream service unavailable".to_owned(),
+    }
+    .build()));
+
+    let server = UnblockServer::new(state_with_mock(Arc::clone(&mock)));
+
+    // `rmcp::Json` does not implement `Debug`, so we can't use
+    // `expect_err` here — destructure directly with `let...else`.
+    let result = server
+        .close(Parameters(CloseParams {
+            id: 8,
+            reason: None,
+        }))
+        .await;
+    let Err(err) = result else {
+        panic!("cache rebuild failure must surface as a handler error (R3)");
+    };
+
+    // 503 → INTERNAL_ERROR per github_error_to_mcp.
+    assert_eq!(err.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
+    // Family-consistency with reopen: the error must reference both
+    // `closed` (the mutation verb) and `show` (the recovery hint) so
+    // agents recognise the "re-run show" guidance.
+    assert!(
+        err.message.contains("closed") && err.message.contains("show"),
+        "error message must instruct caller to re-run `show`: {}",
+        err.message,
+    );
+
+    // Despite the rebuild failure, the close mutation DID land — it
+    // is durable on GitHub regardless of the local cache outcome.
+    assert_eq!(
+        mock.calls().close_issue(),
+        1,
+        "close is durable: mutation persists even if rebuild fails",
+    );
+    assert_eq!(mock.calls().fetch_issue(), 1);
+    assert_eq!(mock.calls().fetch_graph_data(), 1);
+    // With `field_ids = None`, the Phase 1 Projects V2 ladder
+    // short-circuits at the `tracing::debug!` branch — no
+    // `update_field` fires for the closed issue.
+    assert_eq!(
+        mock.calls().update_field(),
+        0,
+        "status update should be skipped under error — no best-effort Phase 1 field updates fire when field_ids=None",
+    );
+    // Cache is invalidated by `execute_write_tool` on rebuild failure
+    // and not repopulated; the handler must not claim cascade-level
+    // consistency against an empty cache.
+    assert!(
+        !server.state().cache.is_fresh().await,
+        "cache must be invalidated and not repopulated after rebuild failure",
+    );
+}
