@@ -366,6 +366,13 @@ async fn claim_with_empty_agent_returns_invalid_params() {
 #[tokio::test]
 async fn close_dispatches_through_dyn_vtable() {
     let mock = new_mock();
+    // GAP-15 PRE-close ordering (unblock-29p.62): Phase 0 prime
+    // issues a `fetch_graph_data` round-trip *before* the mutation
+    // to capture the cascade against the pre-close OPEN graph.
+    // Phase 1 post-close rebuild is the second round-trip (empty
+    // graph — the closed leaf has no dependents so the post-close
+    // rebuild still matches production `states: OPEN` semantics).
+    mock.push_fetch_graph_data(Ok((vec![make_issue(8)], vec![])));
     mock.push_fetch_issue(Ok(make_issue(8)));
     mock.push_close_issue(Ok(()));
     // field_ids=Some enters the project-field update branch. With empty
@@ -377,7 +384,7 @@ async fn close_dispatches_through_dyn_vtable() {
         number: 1,
     }));
     mock.push_get_project_item_id(Ok("PVTI_close".to_owned()));
-    mock.push_fetch_graph_data(Ok((vec![make_issue(8)], vec![])));
+    mock.push_fetch_graph_data(Ok((vec![], vec![])));
 
     let server = UnblockServer::new(state_with_mock(Arc::clone(&mock)));
     let Json(result) = server
@@ -403,7 +410,8 @@ async fn close_dispatches_through_dyn_vtable() {
     );
     assert_eq!(mock.calls().fetch_issue(), 1);
     assert_eq!(mock.calls().close_issue(), 1);
-    assert_eq!(mock.calls().fetch_graph_data(), 1);
+    // PRE-close prime + POST-close rebuild = 2 round-trips (GAP-15).
+    assert_eq!(mock.calls().fetch_graph_data(), 2);
     assert_eq!(mock.calls().field_ids(), 1);
     assert_eq!(mock.calls().resolve_project_info(), 1);
     assert_eq!(mock.calls().get_project_item_id(), 1);
@@ -415,9 +423,14 @@ async fn close_with_empty_reason_skips_comment() {
     // Regression for unblock-b6b.85: Some("") and whitespace-only reason
     // should be treated as None and NOT post an empty comment before closing.
     let mock = new_mock();
+    // GAP-15 PRE-close ordering (unblock-29p.62): Phase 0 prime +
+    // Phase 1 post-close rebuild = two `fetch_graph_data` round-trips.
+    // Leaf close, no dependents — both fixtures match production
+    // `states: OPEN` semantics.
+    mock.push_fetch_graph_data(Ok((vec![make_issue(9)], vec![])));
     mock.push_fetch_issue(Ok(make_issue(9)));
     mock.push_close_issue(Ok(()));
-    mock.push_fetch_graph_data(Ok((vec![make_issue(9)], vec![])));
+    mock.push_fetch_graph_data(Ok((vec![], vec![])));
 
     let server = UnblockServer::new(state_with_mock(Arc::clone(&mock)));
     let Json(result) = server

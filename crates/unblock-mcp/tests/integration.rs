@@ -4915,7 +4915,10 @@ async fn close_no_cross_repo_dependents_cross_repo_refs_is_none() {
     use unblock_mcp::server::UnblockServer;
     use unblock_mcp::tools::close::CloseParams;
 
-    let issues = vec![
+    // Phase 0 pre-close graph: #8 is OPEN, and both #10 and #11 are
+    // blocked by it. This is the graph state the cascade captures
+    // against.
+    let pre_close_issues = vec![
         close_fixture_issue(8),
         close_fixture_issue(10),
         close_fixture_issue(11),
@@ -4931,23 +4934,32 @@ async fn close_no_cross_repo_dependents_cross_repo_refs_is_none() {
             target: QualifiedId::new("acme", "widgets", 8),
         },
     ];
+    // Phase 1 post-close rebuild: #8 is EXCLUDED (production
+    // `fetch_graph_data` uses `states: OPEN` per
+    // `unblock-github/src/graphql.rs:129`). Under PRE-close ordering
+    // the cascade is already captured; the post-close graph is only
+    // consulted for step 8 `update_status_fields` reconciliation.
+    let post_close_issues = vec![close_fixture_issue(10), close_fixture_issue(11)];
+    // Post-close the edges are dropped (both dependents are now
+    // unblocked, so there are no remaining open blockers on them).
+    let post_close_edges: Vec<BlockingEdge> = vec![];
 
     let mock = new_mock();
-    // Phase 1: fetch #8, close #8, rebuild.
+    // Phase 0 cold-cache prime — pushes the PRE-close graph so the
+    // cascade can resolve #8 as an OPEN node.
+    mock.push_fetch_graph_data(Ok((pre_close_issues, edges)));
+    // Phase 1: fetch #8 (validates it is Open), close #8.
     mock.push_fetch_issue(Ok(close_fixture_issue(8)));
     mock.push_close_issue(Ok(()));
     // Phase 1 field ladder: push None to skip Projects V2 updates.
     mock.push_field_ids(None);
-    // Rebuild pushes the POST-close graph. We keep #8 in the fetch
-    // response so `compute_unblock_cascade` can resolve it as a node
-    // (the mock is a stub — in production fetch_graph_data would
-    // exclude the closed issue, but that path is orthogonal to this
-    // bead's scope).
-    mock.push_fetch_graph_data(Ok((issues, edges)));
-    // Phase 3 loop runs 2×. Each iteration calls add_comment_ref then
-    // field_ids. Post unblock-eos.13 the cascade always dispatches via
-    // the *_ref primitive (SPEC §8.2 step 6 / §5.6 `close` row); local
-    // dependents normalize to `IssueRef::Local(n)`.
+    // Phase 1 post-close rebuild — the closed issue #8 is now
+    // excluded, faithful to production `states: OPEN` semantics.
+    mock.push_fetch_graph_data(Ok((post_close_issues, post_close_edges)));
+    // Phase 2 loop runs 2×. Each iteration calls add_comment_ref
+    // then field_ids. Post unblock-eos.13 the cascade always dispatches
+    // via the *_ref primitive (SPEC §8.2 step 6 / §5.6 `close` row);
+    // local dependents normalize to `IssueRef::Local(n)`.
     // We push add_comment_ref Ok twice and let field_ids default to
     // None (queue empty ⇒ None) so the inner project-field ladder is
     // skipped.
@@ -5015,7 +5027,12 @@ async fn close_no_cross_repo_dependents_cross_repo_refs_is_none() {
         "all-local cascade must normalize every cascaded_qid to IssueRef::Local; got: {ref_calls:?}"
     );
     assert_eq!(mock.calls().close_issue(), 1);
-    assert_eq!(mock.calls().fetch_graph_data(), 1);
+    // Under PRE-close ordering the handler issues two
+    // `fetch_graph_data` round-trips: Phase 0 cold-cache prime
+    // (captures the cascade against the OPEN graph that still
+    // contains #8) and Phase 1 post-close rebuild (faithful
+    // `states: OPEN` semantics, #8 excluded). GAP-15.
+    assert_eq!(mock.calls().fetch_graph_data(), 2);
 }
 
 /// Acceptance (b): mixed cascade — one local dependent + two cross-repo
@@ -5035,12 +5052,15 @@ async fn close_no_cross_repo_dependents_cross_repo_refs_is_none() {
 /// `["alpha/upstream#42", "other/repo#99"]` (lex-sorted per
 /// Invariant 14(b) determinism).
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // Dual pre-close/post-close fixtures + multi-ref assertions.
 async fn close_cross_repo_dependent_populates_cross_repo_refs() {
     use rmcp::handler::server::wrapper::{Json, Parameters};
     use unblock_mcp::server::UnblockServer;
     use unblock_mcp::tools::close::CloseParams;
 
-    let issues = vec![
+    // Phase 0 pre-close graph: #8 is OPEN and all three dependents
+    // are blocked by it (one local, two cross-repo).
+    let pre_close_issues = vec![
         close_fixture_issue(8),
         close_fixture_issue(10),
         close_cross_repo_fixture("other", "repo", 99),
@@ -5060,13 +5080,24 @@ async fn close_cross_repo_dependent_populates_cross_repo_refs() {
             target: QualifiedId::new("acme", "widgets", 8),
         },
     ];
+    // Phase 1 post-close rebuild: #8 excluded (production
+    // `states: OPEN` semantics).
+    let post_close_issues = vec![
+        close_fixture_issue(10),
+        close_cross_repo_fixture("other", "repo", 99),
+        close_cross_repo_fixture("alpha", "upstream", 42),
+    ];
+    let post_close_edges: Vec<BlockingEdge> = vec![];
 
     let mock = new_mock();
+    // Phase 0 cold-cache prime.
+    mock.push_fetch_graph_data(Ok((pre_close_issues, edges)));
     mock.push_fetch_issue(Ok(close_fixture_issue(8)));
     mock.push_close_issue(Ok(()));
     mock.push_field_ids(None); // Phase 1: skip project-field ladder.
-    mock.push_fetch_graph_data(Ok((issues, edges)));
-    // Phase 3 loop runs 3× (#10, other/repo#99, alpha/upstream#42).
+    // Phase 1 post-close rebuild (production-realistic: #8 excluded).
+    mock.push_fetch_graph_data(Ok((post_close_issues, post_close_edges)));
+    // Phase 2 loop runs 3× (#10, other/repo#99, alpha/upstream#42).
     // Each iteration posts an add_comment_ref; field_ids defaults to
     // None when the queue is empty, so the inner project-field ladder
     // is skipped — no further pushes required.
@@ -5164,7 +5195,8 @@ async fn close_cross_repo_dependent_populates_cross_repo_refs() {
     );
 
     assert_eq!(mock.calls().close_issue(), 1);
-    assert_eq!(mock.calls().fetch_graph_data(), 1);
+    // PRE-close prime + POST-close rebuild = 2 round-trips (GAP-15).
+    assert_eq!(mock.calls().fetch_graph_data(), 2);
 }
 
 /// Acceptance (c): singular-form summary — a single cross-repo
@@ -5177,7 +5209,8 @@ async fn close_single_cross_repo_dependent_uses_singular_summary() {
     use unblock_mcp::server::UnblockServer;
     use unblock_mcp::tools::close::CloseParams;
 
-    let issues = vec![
+    // Phase 0 pre-close graph: #8 OPEN, other/repo#99 blocked by it.
+    let pre_close_issues = vec![
         close_fixture_issue(8),
         close_cross_repo_fixture("other", "repo", 99),
     ];
@@ -5185,13 +5218,20 @@ async fn close_single_cross_repo_dependent_uses_singular_summary() {
         source: QualifiedId::new("other", "repo", 99),
         target: QualifiedId::new("acme", "widgets", 8),
     }];
+    // Phase 1 post-close rebuild: #8 excluded (production
+    // `states: OPEN` semantics).
+    let post_close_issues = vec![close_cross_repo_fixture("other", "repo", 99)];
+    let post_close_edges: Vec<BlockingEdge> = vec![];
 
     let mock = new_mock();
+    // Phase 0 cold-cache prime.
+    mock.push_fetch_graph_data(Ok((pre_close_issues, edges)));
     mock.push_fetch_issue(Ok(close_fixture_issue(8)));
     mock.push_close_issue(Ok(()));
     mock.push_field_ids(None);
-    mock.push_fetch_graph_data(Ok((issues, edges)));
-    // Phase 3: single cross-repo dependent — dispatched through the *_ref
+    // Phase 1 post-close rebuild (production-realistic: #8 excluded).
+    mock.push_fetch_graph_data(Ok((post_close_issues, post_close_edges)));
+    // Phase 2: single cross-repo dependent — dispatched through the *_ref
     // primitive (SPEC §8.2 step 6 / §5.6 `close` row).
     mock.push_add_comment_ref(Ok("c1".to_owned()));
 
@@ -5243,7 +5283,7 @@ async fn close_single_cross_repo_dependent_uses_singular_summary() {
 
 /// Acceptance (d) — unblock-eos.17 best-effort observability guard.
 ///
-/// The Phase-3 cascade loop at `server.rs:1113-1119` wraps
+/// The Phase-2 cascade loop in the close handler wraps
 /// `add_comment_ref` in `if let Err(e) = ...` and swallows the failure
 /// with a `tracing::warn!` fallback. This path is purely observability
 /// but forms part of the SPEC §8.2 step 6 contract: "cross-repo
@@ -5258,11 +5298,14 @@ async fn close_single_cross_repo_dependent_uses_singular_summary() {
 /// integration level — this is the gap the unblock-eos.17 QA finding
 /// called out as RISK P3.
 ///
-/// Fixture: local blocker #8 with a single cross-repo dependent
-/// `other/repo#99`. Closing #8 cascades #99. The mock queues an
-/// `Err(CrossRepoAccessDenied)` on the first (and only) `add_comment_ref`
-/// call — modelling the "token lacks write scope on foreign repo"
-/// scenario.
+/// Fixture (GAP-15 PRE-close ordering): local blocker #8 with a single
+/// cross-repo dependent `other/repo#99`. Phase 0 primes the graph
+/// against a PRE-close fixture containing #8 as OPEN. Phase 1 closes
+/// #8 and rebuilds from a POST-close fixture that excludes #8
+/// (production-realistic `states: OPEN` semantics). The mock queues
+/// an `Err(CrossRepoAccessDenied)` on the first (and only)
+/// `add_comment_ref` call — modelling the "token lacks write scope on
+/// foreign repo" scenario.
 ///
 /// Assertions:
 /// 1. The tool returns `Ok` with a well-formed `CloseResult` — the
@@ -5276,15 +5319,17 @@ async fn close_single_cross_repo_dependent_uses_singular_summary() {
 ///    whole point of the unblock-eos.13 migration from bare `u64` to
 ///    `IssueRef` dispatch — closes the last observability gap flagged
 ///    by the unblock-eos.13 QA pass).
-/// 4. The failure message matches the source string emitted at
-///    `server.rs:1117`.
+/// 4. The `warn!` message "Failed to post unblock comment on cascaded
+///    issue" appears verbatim — that phrasing is the observability
+///    contract for the Phase-2 best-effort fallback.
 #[tokio::test]
 async fn close_cross_repo_add_comment_ref_failure_warns_and_continues_cascade() {
     use rmcp::handler::server::wrapper::{Json, Parameters};
     use unblock_mcp::server::UnblockServer;
     use unblock_mcp::tools::close::CloseParams;
 
-    let issues = vec![
+    // Phase 0 pre-close graph: #8 OPEN, other/repo#99 blocked by it.
+    let pre_close_issues = vec![
         close_fixture_issue(8),
         close_cross_repo_fixture("other", "repo", 99),
     ];
@@ -5292,15 +5337,22 @@ async fn close_cross_repo_add_comment_ref_failure_warns_and_continues_cascade() 
         source: QualifiedId::new("other", "repo", 99),
         target: QualifiedId::new("acme", "widgets", 8),
     }];
+    // Phase 1 post-close rebuild: #8 excluded (production
+    // `states: OPEN` semantics).
+    let post_close_issues = vec![close_cross_repo_fixture("other", "repo", 99)];
+    let post_close_edges: Vec<BlockingEdge> = vec![];
 
     let mock = new_mock();
+    // Phase 0 cold-cache prime.
+    mock.push_fetch_graph_data(Ok((pre_close_issues, edges)));
     mock.push_fetch_issue(Ok(close_fixture_issue(8)));
     mock.push_close_issue(Ok(()));
     // Phase 1 field-ladder: None skips the Projects V2 updates on #8.
     mock.push_field_ids(None);
-    mock.push_fetch_graph_data(Ok((issues, edges)));
+    // Phase 1 post-close rebuild (production-realistic: #8 excluded).
+    mock.push_fetch_graph_data(Ok((post_close_issues, post_close_edges)));
     // Induced failure: the sole cascaded dependent is cross-repo, so
-    // the one `add_comment_ref` invocation in the Phase-3 loop receives
+    // the one `add_comment_ref` invocation in the Phase-2 loop receives
     // this `Err`. `CrossRepoAccessDenied { owner, repo }` is the
     // idiomatic wire-level shape a token-without-write-scope returns —
     // see `errors.rs:174-179`. Any `Error` variant would exercise the
@@ -5379,10 +5431,11 @@ async fn close_cross_repo_add_comment_ref_failure_warns_and_continues_cascade() 
 
     // Assertion 3+4: the warn! payload carries the `cascaded_qid`
     // structured field populated with the QUALIFIED ref and the
-    // human-readable message from `server.rs:1117`. Checking the raw
-    // JSON text matches the `tracing_subscriber::fmt::json` layer's
-    // on-wire format exactly — no span/field coupling, so refactors
-    // that keep field name + Display value stable remain covered.
+    // human-readable "Failed to post unblock comment on cascaded issue"
+    // message emitted by the Phase-2 loop. Checking the raw JSON text
+    // matches the `tracing_subscriber::fmt::json` layer's on-wire
+    // format exactly — no span/field coupling, so refactors that keep
+    // field name + Display value stable remain covered.
     let output = capture.output();
     assert!(
         output.contains("\"cascaded_qid\":\"other/repo#99\""),
@@ -5392,7 +5445,7 @@ async fn close_cross_repo_add_comment_ref_failure_warns_and_continues_cascade() 
     );
     assert!(
         output.contains("Failed to post unblock comment on cascaded issue"),
-        "warn! message at server.rs:1117 must appear verbatim; got: {output}",
+        "warn! message emitted by Phase-2 cascade loop must appear verbatim; got: {output}",
     );
     // Surface that the error chain reached the log (Display of
     // `CrossRepoAccessDenied` is `Access denied to cross-repo issue
@@ -5410,48 +5463,93 @@ async fn close_cross_repo_add_comment_ref_failure_warns_and_continues_cascade() 
     // SPEC §8.2 step 6 "surface the denial to operators" intent.
     assert!(
         output.contains("\"level\":\"WARN\""),
-        "Phase-3 fallback MUST log at WARN level; got: {output}",
+        "Phase-2 cascade fallback MUST log at WARN level; got: {output}",
     );
 
     assert_eq!(mock.calls().close_issue(), 1);
-    assert_eq!(mock.calls().fetch_graph_data(), 1);
+    // PRE-close prime + POST-close rebuild = 2 round-trips (GAP-15).
+    assert_eq!(mock.calls().fetch_graph_data(), 2);
 }
 
-/// R3 empty-cache arm — when the post-close cache rebuild fails
-/// (transient 503 from GitHub GraphQL), `execute_write_tool` leaves
-/// the cache empty and `state.cache.get_graph()` returns `None`. The
-/// close handler MUST NOT silently default `unblocked = []`,
-/// `cross_repo_refs = None` (which is indistinguishable from a
-/// legitimate leaf-close with no cascade). It must surface a
-/// 503-class error instructing the caller to re-run `show` to
-/// observe the final cascade state. Preserves spec §14 invariants 8
-/// and 13 (no fictional cascade/Status claims when the graph cannot
-/// be consulted). Mirrors the reopen R3 regression guard at
-/// `reopen_surfaces_error_when_post_reopen_rebuild_fails`.
+/// R3 post-close rebuild failure — refocused semantics under PRE-close
+/// ordering (GAP-15 / SPEC §8.2 "Post-rebuild field-sync failure").
+///
+/// Under PRE-close ordering the cascade list is captured in Phase 0
+/// and is durable in memory; the close mutation is durable on GitHub;
+/// the Phase 2 cascade field-updates are applied best-effort. What
+/// the post-close rebuild failure *does* break is the step 8
+/// `update_status_fields` reconciliation — cross-checking Status
+/// fields for issues NOT already handled by the Phase 2 cascade loop.
+/// This step requires the rebuilt graph and cannot run against an
+/// empty cache. The handler MUST surface a 503-class error whose
+/// message instructs the caller to re-run `show` so the Status
+/// fan-out is reconciled on the next read. Preserves spec §14
+/// invariants 8 and 13 (no fictional Status-sync claims when the
+/// graph cannot be consulted). Mirrors the reopen R3 regression
+/// guard at `reopen_surfaces_error_when_post_reopen_rebuild_fails`.
+///
+/// Fixture: Phase 0 prime succeeds (the PRE-close graph is
+/// available), Phase 1 close succeeds on GitHub, and the post-close
+/// rebuild errors with a transient 503. `execute_write_tool` leaves
+/// the cache empty after logging the error, so the close handler's
+/// post-write graph check falls through to the refocused R3 branch.
 #[tokio::test]
-async fn close_surfaces_error_when_rebuilt_cache_missing_closed_issue() {
+async fn close_surfaces_error_when_rebuild_fails_after_pre_cascade() {
     use rmcp::handler::server::wrapper::Parameters;
     use unblock_github::errors::GitHubApiSnafu;
     use unblock_mcp::server::UnblockServer;
     use unblock_mcp::tools::close::CloseParams;
 
+    // Phase 0 pre-close graph: #8 is OPEN with two local dependents
+    // (#10, #11) so the cascade list has content. This proves the
+    // cascade list survives a subsequent rebuild failure — the R3
+    // error signals only Status reconciliation loss, not cascade loss.
+    let pre_close_issues = vec![
+        close_fixture_issue(8),
+        close_fixture_issue(10),
+        close_fixture_issue(11),
+    ];
+    let edges = vec![
+        BlockingEdge {
+            source: QualifiedId::new("acme", "widgets", 10),
+            target: QualifiedId::new("acme", "widgets", 8),
+        },
+        BlockingEdge {
+            source: QualifiedId::new("acme", "widgets", 11),
+            target: QualifiedId::new("acme", "widgets", 8),
+        },
+    ];
+
     let mock = new_mock();
 
+    // Phase 0 cold-cache prime succeeds — cascade captured against
+    // the PRE-close graph while #8 is still OPEN.
+    mock.push_fetch_graph_data(Ok((pre_close_issues, edges)));
     // Phase 1: fetch + close both succeed.
     mock.push_fetch_issue(Ok(close_fixture_issue(8)));
     mock.push_close_issue(Ok(()));
     // Phase 1 field-ladder: None skips the Projects V2 update on #8
     // so `update_field` is not called from the write-tool closure.
     mock.push_field_ids(None);
-    // Post-close rebuild: simulate a transient 503 — `execute_write_tool`
-    // leaves the cache empty after logging the error, so the close
-    // handler's cache-check falls through to the R3 "surface an error"
-    // early return.
+    // Post-close rebuild: transient 503 — `execute_write_tool` leaves
+    // the cache empty after logging the error. The Phase 2 cascade
+    // field-update loop still runs (best-effort, against the
+    // captured Phase-0 list) and the response-projection step still
+    // executes. The refocused R3 branch fires at the tail to signal
+    // that the step 8 reconciliation could not run.
     mock.push_fetch_graph_data(Err(GitHubApiSnafu {
         status: 503_u16,
         message: "upstream service unavailable".to_owned(),
     }
     .build()));
+    // Phase 2 cascade field-updates for the two local dependents are
+    // attempted best-effort against the Phase-0 captured list. Queue
+    // two add_comment_ref responses so the loop doesn't trip on a
+    // mock-queue underflow; the cascade continues regardless under
+    // the best-effort contract (individual comment failures are
+    // tracing::warn!'d, not propagated).
+    mock.push_add_comment_ref(Ok("c10".to_owned()));
+    mock.push_add_comment_ref(Ok("c11".to_owned()));
 
     let server = UnblockServer::new(state_with_mock(Arc::clone(&mock)));
 
@@ -5464,42 +5562,224 @@ async fn close_surfaces_error_when_rebuilt_cache_missing_closed_issue() {
         }))
         .await;
     let Err(err) = result else {
-        panic!("cache rebuild failure must surface as a handler error (R3)");
+        panic!("post-close rebuild failure must surface as a handler error (R3 refocused)");
     };
 
     // 503 → INTERNAL_ERROR per github_error_to_mcp.
     assert_eq!(err.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
-    // Family-consistency with reopen: the error must reference both
-    // `closed` (the mutation verb) and `show` (the recovery hint) so
-    // agents recognise the "re-run show" guidance.
+    // Refocused semantics: the message must reference `closed`
+    // (mutation landed), `cascade field-updates applied` (Phase 2
+    // still ran), `Status reconciliation` (step 8 is what failed),
+    // and `show` (recovery hint). This is the contract from
+    // SPEC §8.2 "Post-rebuild field-sync failure".
     assert!(
-        err.message.contains("closed") && err.message.contains("show"),
+        err.message.contains("closed"),
+        "error message must note the close succeeded: {}",
+        err.message,
+    );
+    assert!(
+        err.message.contains("cascade field-updates"),
+        "error message must note cascade field-updates were applied best-effort: {}",
+        err.message,
+    );
+    assert!(
+        err.message.contains("Status reconciliation"),
+        "error message must identify Status reconciliation as the failed step: {}",
+        err.message,
+    );
+    assert!(
+        err.message.contains("show"),
         "error message must instruct caller to re-run `show`: {}",
         err.message,
     );
 
-    // Despite the rebuild failure, the close mutation DID land — it
-    // is durable on GitHub regardless of the local cache outcome.
+    // Despite the rebuild failure, the close mutation DID land and
+    // the Phase 2 cascade field-updates ran against the Phase-0
+    // list — the whole point of PRE-close ordering.
     assert_eq!(
         mock.calls().close_issue(),
         1,
         "close is durable: mutation persists even if rebuild fails",
     );
     assert_eq!(mock.calls().fetch_issue(), 1);
-    assert_eq!(mock.calls().fetch_graph_data(), 1);
+    // fetch_graph_data was called twice: Phase 0 prime (Ok) + Phase 1
+    // post-close rebuild (Err).
+    assert_eq!(mock.calls().fetch_graph_data(), 2);
+    // Phase 2 cascade loop still ran against the captured Phase-0
+    // list, dispatching add_comment_ref for each of #10 and #11.
+    // This is the correctness contract that PRE-close ordering
+    // buys: the cascade survives a post-close rebuild failure.
+    assert_eq!(
+        mock.calls().add_comment_ref(),
+        2,
+        "Phase 2 cascade field-updates must run against the captured Phase-0 list even when \
+         the post-close rebuild fails — this is the PRE-close correctness contract (GAP-15)",
+    );
     // With `field_ids = None`, the Phase 1 Projects V2 ladder
     // short-circuits at the `tracing::debug!` branch — no
     // `update_field` fires for the closed issue.
     assert_eq!(
         mock.calls().update_field(),
         0,
-        "status update should be skipped under error — no best-effort Phase 1 field updates fire when field_ids=None",
+        "status update should be skipped when field_ids=None — no best-effort Phase 1 field \
+         updates fire",
     );
     // Cache is invalidated by `execute_write_tool` on rebuild failure
-    // and not repopulated; the handler must not claim cascade-level
-    // consistency against an empty cache.
+    // and not repopulated; the refocused R3 error signals that the
+    // step 8 reconciliation cannot run.
     assert!(
         !server.state().cache.is_fresh().await,
         "cache must be invalidated and not repopulated after rebuild failure",
     );
+}
+
+/// GAP-15 PRE-close contract regression guard (unblock-29p.62).
+///
+/// This test locks the PRE-close cascade capture against a future
+/// refactor that might silently re-introduce POST-close lookup. It
+/// uses a production-realistic rebuilt-graph fixture that EXCLUDES
+/// the closed issue (faithful to `fetch_graph_data`'s `states: OPEN`
+/// filter at `unblock-github/src/graphql.rs:129`) and asserts the
+/// cascade list is still correctly populated from the Phase-0
+/// pre-close capture.
+///
+/// Under the legacy POST-close ordering this test would fail:
+/// `compute_unblock_cascade` would short-circuit to `Vec::new()` at
+/// `unblock-core/src/graph.rs:289-291` because the just-closed issue
+/// is absent from the rebuilt `node_map`. Under PRE-close ordering
+/// the cascade is captured in Phase 0 against the pre-close graph
+/// where #8 is still an OPEN node — the post-close rebuild's graph
+/// shape is irrelevant to the response envelope.
+///
+/// Fixture: #8 blocks #10 and #11. Phase 0 primes against
+/// `{#8 open, #10, #11}` with edges `#10 → #8`, `#11 → #8`; Phase 1
+/// closes #8 and rebuilds against `{#10, #11}` (no edges — the
+/// blocker is gone). The response MUST still carry
+/// `unblocked = [10, 11]` (set membership) and `cross_repo_refs =
+/// None`, identical to the warm-cache happy path.
+///
+/// Call-pattern assertions are intentionally duplicated with the
+/// first happy-path test — keeping them locked here guards the
+/// PRE-close contract against a regression that only manifests
+/// when the rebuild topology diverges from the prime topology.
+#[tokio::test]
+async fn close_cascade_survives_open_only_rebuild() {
+    use rmcp::handler::server::wrapper::{Json, Parameters};
+    use unblock_mcp::server::UnblockServer;
+    use unblock_mcp::tools::close::CloseParams;
+
+    // Phase 0 pre-close graph: #8 is OPEN, #10 and #11 both blocked.
+    let pre_close_issues = vec![
+        close_fixture_issue(8),
+        close_fixture_issue(10),
+        close_fixture_issue(11),
+    ];
+    let pre_close_edges = vec![
+        BlockingEdge {
+            source: QualifiedId::new("acme", "widgets", 10),
+            target: QualifiedId::new("acme", "widgets", 8),
+        },
+        BlockingEdge {
+            source: QualifiedId::new("acme", "widgets", 11),
+            target: QualifiedId::new("acme", "widgets", 8),
+        },
+    ];
+    // Phase 1 post-close rebuild: #8 is EXCLUDED (production
+    // `states: OPEN` semantics — this is the key departure from the
+    // pre-GAP-15 cheat-fixture that retained #8 in the rebuild
+    // response to artificially satisfy the POST-close lookup). Under
+    // PRE-close ordering the cascade has already been captured, so
+    // this faithful topology is the correct production model. The
+    // edges are gone too because the blocker no longer exists in the
+    // OPEN-only graph.
+    let post_close_issues = vec![close_fixture_issue(10), close_fixture_issue(11)];
+    let post_close_edges: Vec<BlockingEdge> = vec![];
+
+    let mock = new_mock();
+    // Phase 0 cold-cache prime — captures cascade against the
+    // PRE-close graph while #8 is still an OPEN node.
+    mock.push_fetch_graph_data(Ok((pre_close_issues, pre_close_edges)));
+    // Phase 1 mutation.
+    mock.push_fetch_issue(Ok(close_fixture_issue(8)));
+    mock.push_close_issue(Ok(()));
+    mock.push_field_ids(None); // Skip Projects V2 ladder.
+    // Phase 1 post-close rebuild — production-realistic fixture:
+    // #8 EXCLUDED, no edges. This is the topology where the legacy
+    // POST-close cascade would silently return Vec::new(); under
+    // PRE-close ordering it is irrelevant to the response.
+    mock.push_fetch_graph_data(Ok((post_close_issues, post_close_edges)));
+    // Phase 2 cascade field-updates for the two local dependents.
+    mock.push_add_comment_ref(Ok("c10".to_owned()));
+    mock.push_add_comment_ref(Ok("c11".to_owned()));
+
+    let server = UnblockServer::new(state_with_mock(Arc::clone(&mock)));
+    let Json(result) = server
+        .close(Parameters(CloseParams {
+            id: 8,
+            reason: None,
+        }))
+        .await
+        .expect(
+            "GAP-15 PRE-close contract: cascade MUST be captured from the pre-close graph, \
+             so the close succeeds with a fully-populated `unblocked` even when the post-close \
+             rebuild excludes the closed issue",
+        );
+
+    assert_eq!(result.issue, 8);
+
+    // THE CORE REGRESSION GUARD: despite the rebuild fixture
+    // excluding #8 (production `states: OPEN` semantics), the
+    // response carries both pre-close dependents. Under the legacy
+    // POST-close ordering this assertion would FAIL with
+    // `unblocked == []` because the rebuilt `node_map` lacks #8 and
+    // `compute_unblock_cascade` would short-circuit. GAP-15 makes
+    // this topology irrelevant to the response.
+    let unblocked_set: std::collections::HashSet<u64> = result.unblocked.iter().copied().collect();
+    assert_eq!(
+        unblocked_set,
+        std::collections::HashSet::from([10_u64, 11]),
+        "GAP-15 PRE-close contract: cascade must contain both pre-close dependents even when \
+         the post-close rebuilt graph EXCLUDES the closed issue (production `states: OPEN` \
+         semantics). Legacy POST-close ordering would silently return []; got: {:?}",
+        result.unblocked,
+    );
+    // All-local cascade → cross_repo_refs MUST be None.
+    assert!(
+        result.cross_repo_refs.is_none(),
+        "all-local cascade → cross_repo_refs None even under production-realistic rebuild; \
+         got: {:?}",
+        result.cross_repo_refs,
+    );
+
+    // Phase 2 dispatched add_comment_ref twice (once per dependent)
+    // via the *_ref primitive — both normalize to IssueRef::Local
+    // for the configured-repo dependents.
+    assert_eq!(mock.calls().add_comment_ref(), 2);
+    let ref_calls = mock.add_comment_ref_calls();
+    let ref_numbers: std::collections::HashSet<u64> = ref_calls
+        .iter()
+        .map(|r| match r {
+            unblock_core::types::IssueRef::Local(n) => *n,
+            unblock_core::types::IssueRef::CrossRepo { number, .. } => *number,
+        })
+        .collect();
+    assert_eq!(
+        ref_numbers,
+        std::collections::HashSet::from([10_u64, 11]),
+        "Phase 2 cascade MUST dispatch one add_comment_ref per captured dependent: \
+         got: {ref_calls:?}",
+    );
+    assert!(
+        ref_calls
+            .iter()
+            .all(|r| matches!(r, unblock_core::types::IssueRef::Local(_))),
+        "all dependents are configured-repo → every ref normalizes to IssueRef::Local; \
+         got: {ref_calls:?}",
+    );
+
+    assert_eq!(mock.calls().close_issue(), 1);
+    // Two fetch_graph_data round-trips: Phase 0 prime + Phase 1
+    // post-close rebuild. The second one returns a production-
+    // realistic OPEN-only graph that EXCLUDES the closed issue.
+    assert_eq!(mock.calls().fetch_graph_data(), 2);
 }
