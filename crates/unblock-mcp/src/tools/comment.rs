@@ -28,6 +28,3 @@ pub struct CommentResult {
     /// URL of the newly created comment on GitHub.
     pub comment_url: String,
 }
-
-// TODO(unblock-45a.12): Add integration tests for comment tool (existing issue,
-// non-existent issue, empty body) as part of the E2E workflow integration test.

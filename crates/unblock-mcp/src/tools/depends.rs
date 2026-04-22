@@ -46,7 +46,3 @@ pub struct DependsResult {
     /// Human-readable confirmation message.
     pub message: String,
 }
-
-// TODO(unblock-29p.13): Add integration tests for depends tool (local dep,
-// cross-repo dep, cycle detection, duplicate detection, non-existent issue)
-// as part of the E2E workflow integration test.
