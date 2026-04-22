@@ -2622,10 +2622,13 @@ async fn dep_remove_rejects_source_equals_target_without_network_calls() {
 }
 
 /// When the warm cache has no edge between `source_qid` and `target_qid`,
-/// the pre-mutation guard rejects with `INVALID_PARAMS` and no mutation
-/// is issued. Covers spec §8.5's warm-cache contract.
+/// the pre-mutation guard reports `removed: false` and skips the mutation.
+/// Covers the unified missing-edge posture from `unblock-29p.54`:
+/// warm+both-Local now surfaces the SAME wire signal as cold/cross-repo
+/// (`removed: false`, no mutation) instead of the retired
+/// `INVALID_PARAMS` error.
 #[tokio::test]
-async fn dep_remove_warm_cache_missing_edge_rejects_without_mutation() {
+async fn dep_remove_warm_cache_missing_edge_reports_false_without_mutation() {
     use unblock_mcp::tools::dep_remove::{DepRemoveParams, handle_dep_remove};
 
     let mock = new_mock();
@@ -2639,7 +2642,7 @@ async fn dep_remove_warm_cache_missing_edge_rejects_without_mutation() {
     let ready_set = graph.compute_ready_set(&issues, "acme", "widgets");
     state.cache.update(issues, ready_set, graph).await;
 
-    let err = handle_dep_remove(
+    let result = handle_dep_remove(
         &state,
         DepRemoveParams {
             source: "42".to_owned(),
@@ -2647,13 +2650,15 @@ async fn dep_remove_warm_cache_missing_edge_rejects_without_mutation() {
         },
     )
     .await
-    .expect_err("missing edge in warm cache must be rejected");
+    .expect("missing edge in warm cache must early-return removed:false");
 
-    assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert!(!result.removed, "absent edge must yield removed=false");
+    assert_eq!(result.source, "#42");
+    assert_eq!(result.target, "#99");
     assert!(
-        err.message.contains("no blocking edge exists"),
-        "guard message must explain the missing edge: {}",
-        err.message,
+        result.message.contains("No blocking edge to remove"),
+        "message must document the no-op: {}",
+        result.message,
     );
 
     // No mutation issued — guard short-circuited.
@@ -2661,6 +2666,18 @@ async fn dep_remove_warm_cache_missing_edge_rejects_without_mutation() {
     assert_eq!(calls.remove_blocked_by_refs(), 0);
     assert_eq!(calls.remove_blocked_by_ref(), 0);
     assert_eq!(calls.fetch_graph_data(), 0);
+    assert_eq!(
+        calls.update_field(),
+        0,
+        "no mutation → no Status update ladder"
+    );
+    // Warm + both-Local fast path: the in-memory guard must NOT call
+    // `fetch_issue_ref` (that's the cold/cross-repo probe path).
+    assert_eq!(
+        calls.fetch_issue_ref(),
+        0,
+        "warm + both-Local fast path must NOT call fetch_issue_ref"
+    );
 }
 
 /// R3 — when the post-mutation cache rebuild fails (transient GitHub
