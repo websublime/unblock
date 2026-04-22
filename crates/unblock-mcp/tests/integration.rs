@@ -2382,6 +2382,75 @@ async fn reopen_surfaces_error_when_post_reopen_rebuild_fails() {
     );
 }
 
+/// R3 race-window path: when the post-reopen cache rebuild succeeds
+/// (returning a non-empty issue set) but the reopened issue is absent
+/// from the rebuilt set — e.g. another agent re-closed it between our
+/// `reopen_issue` mutation and the `fetch_graph_data` rebuild — the
+/// handler MUST NOT silently default `blocked = false` and return
+/// `status = "ready"`. It must surface a 503-class error instructing
+/// the caller to re-run `show`, mirroring the empty-cache arm.
+/// Preserves spec §14 invariants 8 and 13 (no fictional Status claims
+/// when the graph cannot actually be consulted for the reopened issue).
+#[tokio::test]
+async fn reopen_surfaces_error_when_rebuilt_cache_missing_reopened_issue() {
+    use unblock_mcp::tools::reopen::{ReopenParams, handle_reopen};
+
+    let mock = new_mock();
+
+    // Phase 1: fetch + reopen both succeed.
+    let closed = reopen_fixture_issue(42, Status::Closed, IssueState::Closed);
+    mock.push_fetch_issue(Ok(closed));
+    mock.push_reopen_issue(Ok(()));
+
+    // Post-reopen rebuild SUCCEEDS but returns a set that does NOT
+    // contain the reopened issue #42. Simulates the race where another
+    // agent re-closed #42 between our mutation and the rebuild. The
+    // rebuilt graph is non-trivial (issue #7 is present) so the
+    // empty-cache arm at reopen.rs:382-410 is explicitly NOT exercised
+    // here — the missing-issue arm at :426-440 is.
+    let unrelated = reopen_fixture_issue(7, Status::Ready, IssueState::Open);
+    mock.push_fetch_graph_data(Ok((vec![unrelated], vec![])));
+
+    let state = state_with_mock(Arc::clone(&mock));
+
+    let err = handle_reopen(&state, ReopenParams { id: 42 })
+        .await
+        .expect_err(
+            "rebuilt cache missing the reopened issue must surface as a handler error (R3 race)",
+        );
+
+    // 503 → INTERNAL_ERROR per github_error_to_mcp.
+    assert_eq!(err.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
+    // The error must reference the partial-state guidance so agents
+    // know to retry `show`.
+    assert!(
+        err.message.contains("reopened") && err.message.contains("show"),
+        "error message must instruct caller to re-run `show`: {}",
+        err.message,
+    );
+
+    // Despite the race, the reopen mutation DID land — it is durable.
+    assert_eq!(
+        mock.calls().reopen_issue(),
+        1,
+        "reopen is durable: mutation persists even if the rebuilt cache races",
+    );
+    assert_eq!(mock.calls().fetch_issue(), 1);
+    assert_eq!(
+        mock.calls().fetch_graph_data(),
+        1,
+        "post-reopen rebuild is attempted exactly once",
+    );
+
+    // The rebuild itself succeeded (returned a non-empty issue set),
+    // so execute_write_tool leaves the cache in a fresh state. Only
+    // the *reopened* issue is missing from that fresh cache.
+    assert!(
+        state.cache.is_fresh().await,
+        "cache must be fresh when the rebuild succeeded — only the reopened issue is missing",
+    );
+}
+
 // ── dep_remove tool: integration tests ────────────────────────────
 
 /// Build a [`ProjectFieldIds`] fixture with a populated Status-option map
