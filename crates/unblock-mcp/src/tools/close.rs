@@ -1,39 +1,95 @@
 //! Close tool — closes an issue and triggers cascade unblock.
 //!
-//! Validates the issue is open, closes it via the GitHub API, updates Projects V2
-//! fields (Status=Done), rebuilds the cache, then computes the unblock cascade.
-//! For each newly unblocked issue, updates its Projects V2 fields
-//! (Status=Backlog if not already `InProgress`) and posts an unblock comment.
+//! ## Four-phase execution (SPEC §8.2 + §3.4 Critical, GAP-15 remediation)
 //!
-//! Cross-repo dependents (SPEC §11.4): when the cascade returned by
-//! [`compute_unblock_cascade`][`unblock_core::graph::DependencyGraph::compute_unblock_cascade`]
-//! touches a `QualifiedId` whose `(owner, repo)` differs from the configured
-//! repo, the dependent is STILL cascade-updated (same Status / comment path) —
-//! only the response shape differs. The bare-`u64` [`CloseResult::unblocked`]
-//! vector is scoped to the configured repo; cross-repo dependents are surfaced
-//! in [`CloseResult::cross_repo_refs`] (`Some` iff at least one cross-repo
-//! dependent participated in the cascade, per SPEC §14 Invariant 14(b)).
+//! The close handler runs four explicit phases — ordering is
+//! correctness-critical and MUST NOT be reordered:
 //!
-//! ## R3 caveat — cannot compute unblock cascade after rebuild
+//! 1. **Phase 0 — PRE-close cascade capture.** Ensure the graph is built
+//!    (cold-cache path calls
+//!    [`rebuild_cache`][`crate::tools::rebuild_cache`] to issue one
+//!    `fetch_graph_data` round-trip), then call
+//!    [`compute_unblock_cascade`][`unblock_core::graph::DependencyGraph::compute_unblock_cascade`]
+//!    while the closed issue is still an OPEN node in the graph. The
+//!    resulting `Vec<QualifiedId>` is captured in a handler-local
+//!    binding and used authoritatively by Phases 2 and 3 — it is NOT
+//!    re-read from the post-close cache. This ordering is mandatory
+//!    per SPEC §3.4 Critical: `fetch_graph_data` uses `states: OPEN`
+//!    filtering (see `unblock-github/src/graphql.rs:129`), so a
+//!    POST-close cascade would short-circuit to `Vec::new()` at
+//!    `unblock-core/src/graph.rs:289-291` because the just-closed
+//!    issue is absent from the rebuilt `node_map`. The defensive
+//!    `Vec::new()` branch stays as-is (it is still correct for
+//!    create-then-immediately-close races where `closed_id`
+//!    legitimately is not yet in the graph), but its trigger from the
+//!    close path disappears.
+//! 2. **Phase 1 — MUTATION.** `execute_write_tool` runs `fetch_issue`,
+//!    state validation, `close_issue`, the Projects V2 `Status → closed`
+//!    field ladder on the closed issue, and a cache rebuild. The close
+//!    mutation is durable on GitHub regardless of the rebuild outcome.
+//! 3. **Phase 2 — CASCADE FIELD-UPDATE LOOP.** Iterate the cascade
+//!    list captured in Phase 0 (not the post-close cache). For each
+//!    dependent, dispatch side effects via the `*_ref` primitives —
+//!    [`add_comment_ref`][`unblock_github::GitHubApi::add_comment_ref`]
+//!    (unblock comment) and
+//!    [`fetch_issue_ref`][`unblock_github::GitHubApi::fetch_issue_ref`]
+//!    followed by `update_field` (Projects V2 Status → `ready` if the
+//!    dependent is not already `InProgress`) — so cross-repo dependents
+//!    route to their own `(owner, repo)` rather than silently
+//!    retargeting the configured repo. Per-dependent failures are
+//!    logged and the cascade continues (best-effort per SPEC §8.2
+//!    step 6 / §5.6 `close` row).
+//! 4. **Phase 3 — RESPONSE PROJECTION.** Partition the Phase-0 cascade
+//!    into `unblocked: Vec<u64>` (local dependents) plus
+//!    `cross_repo_refs: Option<CrossRepoRefs>` (cross-repo dependents,
+//!    surfaced per SPEC §11.4) via the shared `project_cascade` and
+//!    `build_cross_repo_refs_with_summary` helpers in
+//!    `crate::tools::cross_repo`.
 //!
-//! After the close mutation lands and `execute_write_tool` rebuilds the
-//! cache, the handler reads [`GraphCache::get_graph`][`unblock_core::cache::GraphCache::get_graph`]
-//! to compute the cascade. When that read returns `None` — either because
-//! the underlying `fetch_graph_data()` call failed (e.g. transient GitHub
-//! 503) and left the cache invalidated, OR because the closed issue was
-//! excluded from the rebuilt graph in a way that makes the cascade
-//! uncomputable — the handler cannot authoritatively answer "which
-//! dependents were unblocked". The close itself has already succeeded
-//! server-side, so the mutation is not lost. The handler surfaces a
-//! 503-class [`GitHubApi`](unblock_github::errors::Error::GitHubApi)
-//! error with a message instructing the caller to re-run `show` to
-//! observe the final cascade state, rather than returning a fabricated
-//! `unblocked = []`, `cross_repo_refs = None` envelope (which would be
-//! indistinguishable from a legitimate leaf-close with no cascade).
-//! Mirrors the reopen R3 posture. Preserves spec §14 invariants 8 (no
-//! write leaves cache or Status fields inconsistent) and 13 (Status
-//! field values match graph computation — we refuse to pretend no
-//! dependents exist when we cannot consult the graph).
+//! Cross-repo dependents (SPEC §11.4): when the cascade touches a
+//! `QualifiedId` whose `(owner, repo)` differs from the configured
+//! repo, the dependent is STILL cascade-updated (same Status / comment
+//! path) — only the response shape differs. The bare-`u64`
+//! [`CloseResult::unblocked`] vector is scoped to the configured repo;
+//! cross-repo dependents are surfaced in
+//! [`CloseResult::cross_repo_refs`] (`Some` iff at least one cross-repo
+//! dependent participated in the cascade, per SPEC §14 Invariant
+//! 14(b)).
+//!
+//! ## R3 caveat — post-rebuild Status reconciliation failure
+//!
+//! Under PRE-close ordering the Phase-0 cascade list is captured
+//! before the mutation, so a post-close rebuild failure no longer
+//! invalidates the cascade list — the response envelope stays
+//! authoritative even when
+//! [`GraphCache::get_graph`][`unblock_core::cache::GraphCache::get_graph`]
+//! returns `None` after `execute_write_tool`. The close mutation is
+//! durable on GitHub and the Phase-2 cascade field-updates are applied
+//! best-effort regardless of the rebuild outcome.
+//!
+//! What a rebuild failure DOES break is the step 8
+//! `update_status_fields` reconciliation (SPEC §8.2 step 8) —
+//! cross-checking Status fields for issues NOT already handled by the
+//! Phase 2 cascade loop (e.g. issues whose blocker status changed but
+//! that were not direct dependents of the closed issue). This step
+//! requires the rebuilt graph and cannot run against an empty cache.
+//! When the rebuild fails, the handler surfaces a 503-class
+//! [`GitHubApi`](unblock_github::errors::Error::GitHubApi) error
+//! with a message instructing the caller to re-run `show` so the
+//! Status fan-out is reconciled on the next read. The cascade list
+//! in the response remains authoritative; the error signals only
+//! that the Status-field reconciliation could not complete.
+//! Preserves spec §14 invariants 8 (no write leaves cache or Status
+//! fields inconsistent) and 13 (Status field values match graph
+//! computation — we refuse to pretend reconciliation succeeded when
+//! we cannot consult the graph).
+//!
+//! A separate 503-class error is surfaced when Phase 0 cold-cache
+//! prime fails (the `fetch_graph_data` call inside `rebuild_cache`
+//! errored and the cache stayed empty). That branch is distinct from
+//! the R3 path — it fires *before* the close mutation is attempted,
+//! and the message instructs the caller to retry or run `prime`
+//! first. The close is NOT attempted on an empty graph.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

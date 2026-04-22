@@ -1000,19 +1000,44 @@ impl UnblockServer {
     /// unblocked issue, updates its Projects V2 fields (Status=Backlog if not
     /// already `InProgress`) and posts an unblock comment.
     ///
-    /// This is a write tool -- uses `execute_write_tool` for the close mutation
-    /// and cache rebuild, then performs cascade updates as a second phase.
+    /// This is a write tool. The handler runs in four explicit phases per
+    /// SPEC §8.2 + §3.4 Critical (GAP-15 remediation):
+    ///
+    /// - **Phase 0 (PRE-close cascade capture):** ensures the cache is
+    ///   primed (cold-cache path calls [`rebuild_cache`][`crate::tools::rebuild_cache`]),
+    ///   reads the graph, and calls
+    ///   [`compute_unblock_cascade`][`unblock_core::graph::DependencyGraph::compute_unblock_cascade`]
+    ///   while the closed issue is still an OPEN node. The resulting
+    ///   `Vec<QualifiedId>` is captured in a handler-local binding and
+    ///   used authoritatively by Phases 2 and 3 — it is NOT re-read from
+    ///   the post-close cache (which excludes the just-closed issue per
+    ///   `fetch_graph_data` `states: OPEN` semantics).
+    /// - **Phase 1 (MUTATION):** `execute_write_tool` runs
+    ///   `fetch_issue` + state validation + `close_issue` + Projects V2
+    ///   `Status → closed` ladder + cache rebuild.
+    /// - **Phase 2 (CASCADE FIELD-UPDATE LOOP):** iterates the Phase-0
+    ///   captured list, dispatching per-dependent side-effects via the
+    ///   `*_ref` primitives (SPEC §8.2 step 6 / §5.6 `close` row).
+    /// - **Phase 3 (RESPONSE PROJECTION):** partitions the Phase-0
+    ///   cascade into `unblocked: Vec<u64>` + `cross_repo_refs`.
     ///
     /// # Errors
     ///
     /// Returns [`ErrorData`] in the following cases:
+    /// - Phase 0 cold-cache prime fails (`fetch_graph_data` 503) → a
+    ///   503-class [`GitHubApi`](unblock_github::errors::Error::GitHubApi)
+    ///   error is surfaced *before* the close mutation. The mutation is
+    ///   NOT attempted on an empty graph.
     /// - `fetch_issue` fails (e.g. 404) → mapped via `github_error_to_mcp`.
     /// - The fetched issue is already Closed → `IssueClosed` domain error.
     /// - `close_issue` fails → mapped via `github_error_to_mcp`.
-    /// - Cache rebuild fails and leaves the cache empty → a 503-class
-    ///   [`GitHubApi`](unblock_github::errors::Error::GitHubApi) error is
-    ///   surfaced so the caller re-runs `show` to observe the final cascade
-    ///   state (R3 — see `tools::close` module-doc).
+    /// - Cache rebuild fails after Phase 1 and leaves the cache empty →
+    ///   a 503-class [`GitHubApi`](unblock_github::errors::Error::GitHubApi)
+    ///   error is surfaced. The cascade list from Phase 0 is durable in
+    ///   memory and the close mutation has already landed; the error
+    ///   signals only that the step 8 `update_status_fields`
+    ///   reconciliation could not run (R3 — see `tools::close`
+    ///   module-doc).
     #[tool(
         name = "close",
         description = "Close an issue and cascade-unblock dependents. Validates the issue is open, closes it, updates project fields (Status=Done), and auto-unblocks any dependent issues whose blockers are now all closed. Returns the list of newly unblocked issue numbers. Triggers graph rebuild."
@@ -1036,6 +1061,62 @@ impl UnblockServer {
             reason = reason.as_deref(),
             "Close tool invoked"
         );
+
+        // Phase 0: PRE-CLOSE cascade capture (SPEC §8.2 step 2 / §3.4
+        // Critical). The cascade MUST be computed against a graph that
+        // still contains the closed issue as an OPEN node — this is the
+        // only chokepoint where the cascade list can be captured soundly.
+        // `fetch_graph_data` uses `states: OPEN` filtering (see
+        // `unblock-github/src/graphql.rs:129`), so any cascade computation
+        // against a POST-close rebuild would short-circuit to `Vec::new()`
+        // at `unblock-core/src/graph.rs:289-291` (the `closed_id` node is
+        // absent from the rebuilt `node_map`), silently reporting
+        // `unblocked = []` regardless of actual dependents. GAP-15 fixed
+        // that correctness defect.
+        //
+        // Cold-cache prime: if the cache is empty (first tool after
+        // server start, or a stale invalidation from a prior write), use
+        // the existing `rebuild_cache` helper to fetch and populate the
+        // graph. If the prime itself fails (transient 503 during
+        // `fetch_graph_data`), the cache stays empty and this handler
+        // cannot proceed — surface a pre-mutation 503 so the caller
+        // knows the close was NOT attempted. Distinct from the
+        // post-close R3 path (rebuild-after-close) which fires only
+        // after `execute_write_tool` lands the mutation on GitHub.
+        let issue_qid =
+            unblock_core::types::QualifiedId::new(client.owner(), client.repo(), issue_number);
+
+        if state.cache.get_graph().await.is_none() {
+            tracing::debug!(
+                issue_number,
+                "Cache cold at Phase 0 — priming via rebuild_cache before cascade capture"
+            );
+            crate::tools::rebuild_cache(state).await;
+        }
+
+        let Some(pre_close_graph) = state.cache.get_graph().await else {
+            tracing::warn!(
+                issue_number,
+                "Cache empty after prime attempt — cannot capture pre-close cascade; aborting close"
+            );
+            return Err(crate::errors::github_error_to_mcp(
+                unblock_github::errors::GitHubApiSnafu {
+                    status: 503_u16,
+                    message: format!(
+                        "Cannot close issue #{issue_number}: failed to prime the dependency graph before cascade capture — please retry or run `prime` first"
+                    ),
+                }
+                .build(),
+            ));
+        };
+
+        // compute_unblock_cascade's _all_issues param is currently unused —
+        // pass an empty slice (see graph.rs:215-220 for rationale).
+        let cascade = pre_close_graph.compute_unblock_cascade(&issue_qid, &[]);
+        // Drop the Arc early so the write-tool rebuild's update() is not
+        // blocked on a lingering reader (cache uses RwLock — see
+        // GraphCache::update).
+        drop(pre_close_graph);
 
         // Phase 1: Validate, close, and rebuild cache via execute_write_tool.
         execute_write_tool(state, || {
@@ -1103,41 +1184,29 @@ impl UnblockServer {
         })
         .await?;
 
-        // Phase 2: Compute cascade from the freshly rebuilt cache.
-        //
-        // R3 — honest partial state (see `tools::close` module-doc):
-        // if the rebuild inside `execute_write_tool` failed, the cache is
-        // empty. The close mutation has already succeeded server-side, but
-        // we cannot compute the cascade here. Surface a 503-class error
-        // instructing the caller to re-run `show`, rather than silently
-        // returning `unblocked = []`, `cross_repo_refs = None` — a
-        // fabricated "no cascade" claim indistinguishable from a
-        // legitimate leaf-close. Preserves §14 invariants 8 and 13.
-        let Some(graph) = state.cache.get_graph().await else {
-            tracing::warn!(
-                issue_number,
-                "Cache not available after close — rebuild failed; caller must re-run `show` to observe final cascade"
-            );
-            return Err(crate::errors::github_error_to_mcp(
-                unblock_github::errors::GitHubApiSnafu {
-                    status: 503_u16,
-                    message: format!(
-                        "Issue #{issue_number} closed successfully, but cache rebuild failed — please re-run `show` to observe the final cascade state"
-                    ),
-                }
-                .build(),
-            ));
-        };
+        // R3 — honest partial state under PRE-close ordering (see
+        // `tools::close` module-doc): if the rebuild inside
+        // `execute_write_tool` failed, the cache is empty. The cascade
+        // list captured in Phase 0 is durable in memory and the close
+        // mutation has already succeeded server-side, so the response
+        // projection below is still authoritative. However, the step 8
+        // `update_status_fields` reconciliation (SPEC §8.2 step 8 —
+        // cross-check Status fields for issues NOT already handled by
+        // the Phase 2 cascade loop) requires the rebuilt graph and
+        // cannot run against an empty cache. Surface a 503-class error
+        // instructing the caller to re-run `show` so the Status
+        // fan-out is reconciled on the next read. Preserves §14
+        // invariants 8 and 13 (no fictional Status-sync claims when
+        // the graph cannot be consulted).
+        let rebuild_graph_available = state.cache.get_graph().await.is_some();
 
-        // compute_unblock_cascade's _all_issues param is currently unused —
-        // pass an empty slice (see graph.rs:215-220 for rationale).
-        let issue_qid =
-            unblock_core::types::QualifiedId::new(client.owner(), client.repo(), issue_number);
-        let cascade = graph.compute_unblock_cascade(&issue_qid, &[]);
-
-        // Phase 3: For each newly unblocked issue, update project fields and
-        // post an unblock comment. Each update is best-effort — failures are
-        // logged but do not abort the cascade.
+        // Phase 2: cascade field-update loop. Iterates the Phase-0
+        // captured list (not the post-close rebuilt cache) so the
+        // correctness contract in SPEC §8.2 step 6 holds even when the
+        // post-close rebuild fails — the dependents we must update are
+        // known at mutation time. Each per-dependent update is
+        // best-effort; individual failures are logged and the cascade
+        // continues.
         //
         // SPEC §8.2 step 6 / §11.4 row 4 / §5.6 row `close`: cross-repo
         // dependents ARE still cascade-updated. The loop dispatches via
@@ -1244,10 +1313,11 @@ impl UnblockServer {
             }
         }
 
-        // SPEC §8.2 flow step 9 / §11.4 row 4: partition the cascade
-        // into local dependents (projected to `unblocked: Vec<u64>`)
-        // vs cross-repo dependents (surfaced via `cross_repo_refs`).
-        // The Phase 3 loop above intentionally does NOT gate on
+        // Phase 3: response projection. SPEC §8.2 flow step 9 / §11.4
+        // row 4: partition the cascade list (captured Phase 0) into
+        // local dependents (projected to `unblocked: Vec<u64>`) vs
+        // cross-repo dependents (surfaced via `cross_repo_refs`).
+        // Phase 2 above intentionally does NOT gate on
         // (owner, repo) == (config.owner, config.repo) — cross-repo
         // dependents ARE still cascade-updated; only the response
         // shape differs here (SPEC §11.4 affected-tools table).
@@ -1258,6 +1328,35 @@ impl UnblockServer {
             cross_repo_accum,
             crate::tools::cross_repo::close_summary,
         );
+
+        // R3 post-close rebuild failure (refocused under PRE-close
+        // ordering per GAP-15 / SPEC §8.2 "Post-rebuild field-sync
+        // failure"): the Phase-0 cascade list is authoritative in the
+        // response envelope, the close mutation is durable on GitHub,
+        // and the Phase 2 cascade field-updates were applied
+        // best-effort. The remaining post-close step is the step 8
+        // `update_status_fields` reconciliation — cross-check Status
+        // fields for issues NOT already handled by the Phase 2
+        // cascade loop — which requires the rebuilt graph. If that
+        // graph is missing (rebuild failed), surface a 503-class
+        // error instructing the caller to re-run `show` to confirm
+        // the Status fan-out. This does NOT invalidate the cascade
+        // list returned above.
+        if !rebuild_graph_available {
+            tracing::warn!(
+                issue_number,
+                "Cache not available after close — rebuild failed; step 8 `update_status_fields` reconciliation could not run"
+            );
+            return Err(crate::errors::github_error_to_mcp(
+                unblock_github::errors::GitHubApiSnafu {
+                    status: 503_u16,
+                    message: format!(
+                        "Issue #{issue_number} closed successfully and cascade field-updates applied best-effort, but Status reconciliation could not complete — re-run `show` to confirm final Status fan-out"
+                    ),
+                }
+                .build(),
+            ));
+        }
 
         Ok(Json(CloseResult {
             issue: issue_number,
