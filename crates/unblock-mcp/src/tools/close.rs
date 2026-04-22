@@ -13,6 +13,27 @@
 //! vector is scoped to the configured repo; cross-repo dependents are surfaced
 //! in [`CloseResult::cross_repo_refs`] (`Some` iff at least one cross-repo
 //! dependent participated in the cascade, per SPEC §14 Invariant 14(b)).
+//!
+//! ## R3 caveat — cannot compute unblock cascade after rebuild
+//!
+//! After the close mutation lands and `execute_write_tool` rebuilds the
+//! cache, the handler reads [`GraphCache::get_graph`][`unblock_core::cache::GraphCache::get_graph`]
+//! to compute the cascade. When that read returns `None` — either because
+//! the underlying `fetch_graph_data()` call failed (e.g. transient GitHub
+//! 503) and left the cache invalidated, OR because the closed issue was
+//! excluded from the rebuilt graph in a way that makes the cascade
+//! uncomputable — the handler cannot authoritatively answer "which
+//! dependents were unblocked". The close itself has already succeeded
+//! server-side, so the mutation is not lost. The handler surfaces a
+//! 503-class [`GitHubApi`](unblock_github::errors::Error::GitHubApi)
+//! error with a message instructing the caller to re-run `show` to
+//! observe the final cascade state, rather than returning a fabricated
+//! `unblocked = []`, `cross_repo_refs = None` envelope (which would be
+//! indistinguishable from a legitimate leaf-close with no cascade).
+//! Mirrors the reopen R3 posture. Preserves spec §14 invariants 8 (no
+//! write leaves cache or Status fields inconsistent) and 13 (Status
+//! field values match graph computation — we refuse to pretend no
+//! dependents exist when we cannot consult the graph).
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

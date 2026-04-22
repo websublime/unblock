@@ -1290,6 +1290,18 @@ pub struct CloseResult {
 9. Partition the cascade list from step 2 by `(owner, repo) == (config.owner, config.repo)`: local dependents go into `unblocked: Vec<u64>`; cross-repo dependents populate `cross_repo_refs` per §11.4 (deduplicated, sorted by `QualifiedId::Display`).
 10. Update cache
 
+**Post-rebuild cascade-computation failure.** If the post-close rebuild
+leaves the cache empty or otherwise makes the cascade uncomputable
+(transient 503 during rebuild, or the rebuilt graph no longer exposes
+the closed issue's pre-close neighbours in a form the cascade
+computation can traverse), the tool MUST surface a 503-class error
+with a message instructing the caller to re-run `show` rather than
+defaulting `unblocked` to `[]` and `cross_repo_refs` to `None`. The
+`close` mutation is durable on GitHub regardless of this failure —
+the error signals only the inability to compute the cascade locally.
+Preserves §14 invariants 8 and 13 (no fictional cascade/Status claims
+when the graph cannot be consulted).
+
 **Why step 2 before step 3:** After close, `fetch_graph_data()` returns only OPEN issues. The closed issue is excluded from the rebuilt graph. `compute_unblock_cascade` requires the closed issue to be a node to find dependents via Incoming edges.
 
 **Why step 6 uses only two `*_ref` primitives:** Each cross-repo cascade member triggers three side effects — `fetch_issue` (to obtain `issue_node_id`), Projects V2 `update_field` (Status → `ready`), and `add_comment` (unblock note). Of these, only `fetch_issue` and `add_comment` are addressed by `(owner, repo, number)` and therefore need `*_ref` variants (`fetch_issue_ref`, `add_comment_ref`) to route cross-repo. `update_field` does NOT get an `update_field_ref` variant because `updateProjectV2ItemFieldValue` operates on globally-scoped node IDs (`project_id` + `item_id`), not on `(owner, repo, number)` — once `fetch_issue_ref` yields the cross-repo issue's node ID, `get_project_item_id(issue_node_id, project_id)` resolves the item on the configured project's board, and the existing `update_field(project_id, item_id, field_id, value)` applies the Status update directly. See §5.6 "Cascade-primitive asymmetry" for the routing rationale.
