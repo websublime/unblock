@@ -1330,7 +1330,7 @@ consulted).
 
 **Why step 6 uses only two `*_ref` primitives:** Each cross-repo cascade member triggers three side effects — `fetch_issue` (to obtain `issue_node_id`), Projects V2 `update_field` (Status → `ready`), and `add_comment` (unblock note). Of these, only `fetch_issue` and `add_comment` are addressed by `(owner, repo, number)` and therefore need `*_ref` variants (`fetch_issue_ref`, `add_comment_ref`) to route cross-repo. `update_field` does NOT get an `update_field_ref` variant because `updateProjectV2ItemFieldValue` operates on globally-scoped node IDs (`project_id` + `item_id`), not on `(owner, repo, number)` — once `fetch_issue_ref` yields the cross-repo issue's node ID, `get_project_item_id(issue_node_id, project_id)` resolves the item on the configured project's board, and the existing `update_field(project_id, item_id, field_id, value)` applies the Status update directly. See §5.6 "Cascade-primitive asymmetry" for the routing rationale.
 
-**API calls:** 0-1 (pre-close graph) + 1 (fetch) + 1 (close) + 1+ (fields) + 1 (comment) + 1+ (rebuild) + N×2 per unblocked (field + comment)
+**API calls:** 0-1 (pre-close graph: 0 if cache warm, 1 if cold) + 1 (fetch) + 1 (close) + 1+ (fields) + 1 (comment) + 1+ (rebuild) + N×2 per unblocked (field + comment)
 **Cache:** Invalidates.
 
 ### 8.3 `create`
