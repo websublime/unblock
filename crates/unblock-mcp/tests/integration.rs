@@ -5783,3 +5783,323 @@ async fn close_cascade_survives_open_only_rebuild() {
     // realistic OPEN-only graph that EXCLUDES the closed issue.
     assert_eq!(mock.calls().fetch_graph_data(), 2);
 }
+
+// ── depends tool: integration tests (unblock-29p.13) ──────────────────
+
+/// Build a [`ProjectFieldIds`] fixture with the `"blocked"` Status option
+/// populated so the `depends` handler's Status-update ladder (server.rs
+/// §`depends` handler, step 4) resolves
+/// `field_ids.status.options["blocked"]` and fires a real `update_field`
+/// call. Kept local to the `depends` suite so the `dep_remove`/reopen/
+/// create tests keep their existing option-map posture.
+fn depends_field_ids_with_blocked() -> unblock_github::projects::ProjectFieldIds {
+    use std::collections::HashMap;
+    use unblock_github::projects::{FieldMeta, ProjectFieldIds};
+
+    let mut status_options = HashMap::new();
+    status_options.insert("blocked".to_owned(), "OPT_BLOCKED".to_owned());
+
+    let empty_meta = || FieldMeta {
+        field_id: "f".to_owned(),
+        options: HashMap::new(),
+    };
+
+    ProjectFieldIds {
+        status: FieldMeta {
+            field_id: "status-field-id".to_owned(),
+            options: status_options,
+        },
+        priority: empty_meta(),
+        pipeline_stage: empty_meta(),
+        agent: "agent".to_owned(),
+        claimed_at: "ca".to_owned(),
+        story_points: "sp".to_owned(),
+        defer_until: "du".to_owned(),
+    }
+}
+
+/// Build a fixture issue under `acme/widgets` coordinates for `depends`
+/// tests. Mirrors the `dep_remove_fixture_issue` shape so the depends
+/// suite matches the `dep_remove` template called out in the bead
+/// investigation (unblock-29p.13 Phase 1 step 1).
+fn depends_fixture_issue(number: u64) -> unblock_core::types::Issue {
+    unblock_core::types::Issue {
+        qualified_id: QualifiedId::new("acme", "widgets", number),
+        number,
+        node_id: format!("I_{number}"),
+        title: format!("Depends fixture #{number}"),
+        issue_type: Some(IssueType::Task),
+        status: Status::Ready,
+        priority: Priority::P2,
+        agent: None,
+        claimed_at: None,
+        pipeline_stage: None,
+        story_points: None,
+        defer_until: None,
+        labels: vec![],
+        milestone: None,
+        assignees: vec![],
+        state: IssueState::Open,
+        body: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        url: format!("https://github.com/acme/widgets/issues/{number}"),
+        comments: vec![],
+        blocked_by: vec![],
+        blocking: vec![],
+        parent: None,
+        sub_issues: vec![],
+    }
+}
+
+/// Happy path (spec §8.4): local source blocked by local target, warm
+/// cache contains both nodes with no existing edges so the cycle check
+/// passes, `add_blocked_by_refs` succeeds, the post-mutation rebuild
+/// returns the expected edge, and the Projects V2 `Status=blocked`
+/// ladder fires because the source is local to the configured repo.
+///
+/// Asserts:
+/// - `created = true`,
+/// - `source = "#42"`, `target = "#99"` (canonical local rendering),
+/// - `message` mentions both `#42` and `#99`,
+/// - call counters: `fetch_issue_ref = 1`, `add_blocked_by_refs = 1`,
+///   `fetch_graph_data = 1`, `update_field = 1` (Status=blocked ladder),
+/// - `add_blocked_by_ref = 0` — the handler MUST use the two-sided
+///   `_refs` variant so both endpoints round-trip through a
+///   cross-repo-capable primitive.
+#[tokio::test]
+async fn depends_local_edge_marks_source_blocked() {
+    use unblock_github::projects::ProjectInfo;
+    use unblock_mcp::tools::depends::DependsParams;
+
+    let mock = new_mock();
+
+    // Step 1 fetch: the handler validates the source exists by calling
+    // `fetch_issue_ref(source_ref)` (server.rs:1466-1469). After
+    // normalization with Local input the call lands on the
+    // `fetch_issue_ref` path (same stub queue as the _ref primitive).
+    mock.push_fetch_issue_ref(Ok(depends_fixture_issue(42)));
+    // Step 3 mutation (inside execute_write_tool).
+    mock.push_add_blocked_by_refs(Ok(()));
+    // Step 3 post-mutation rebuild: source #42 is now blocked by target #99.
+    let rebuilt_source = depends_fixture_issue(42);
+    let rebuilt_target = depends_fixture_issue(99);
+    let rebuilt_edges = vec![BlockingEdge {
+        source: QualifiedId::new("acme", "widgets", 42),
+        target: QualifiedId::new("acme", "widgets", 99),
+    }];
+    mock.push_fetch_graph_data(Ok((vec![rebuilt_source, rebuilt_target], rebuilt_edges)));
+    // Step 4 Status=blocked ladder (source is Local; server.rs:1535-1572).
+    mock.push_field_ids(Some(depends_field_ids_with_blocked()));
+    mock.push_resolve_project_info(Ok(ProjectInfo {
+        id: "PVT_1".to_owned(),
+        number: 1,
+    }));
+    mock.push_get_project_item_id(Ok("PVTI_42".to_owned()));
+    mock.push_update_field(Ok(()));
+
+    // Warm-cache prime with both nodes and NO existing edges so the
+    // cycle check at server.rs:1484-1497 returns false without hitting
+    // any mocks. `would_create_cycle` only inspects `state.cache`.
+    let state = state_with_mock(Arc::clone(&mock));
+    let pre_issues = vec![depends_fixture_issue(42), depends_fixture_issue(99)];
+    let pre_graph = DependencyGraph::build(&pre_issues, &[]);
+    let pre_ready_set = pre_graph.compute_ready_set(&pre_issues, "acme", "widgets");
+    state
+        .cache
+        .update(pre_issues, pre_ready_set, pre_graph)
+        .await;
+    assert!(
+        state.cache.is_fresh().await,
+        "cache must be warm so the cycle-detection branch is exercised (server.rs:1484-1497)",
+    );
+
+    let server = UnblockServer::new(state);
+    let Json(result) = server
+        .depends(Parameters(DependsParams {
+            source: "42".to_owned(),
+            target: "99".to_owned(),
+        }))
+        .await
+        .expect("depends should succeed when no cycle exists");
+
+    // Response shape — canonical local rendering, source blocked message.
+    assert!(result.created, "a new blocking edge must be reported");
+    assert_eq!(result.source, "#42", "local source renders as `#n`");
+    assert_eq!(result.target, "#99", "local target renders as `#n`");
+    assert!(
+        result.message.contains("#42") && result.message.contains("#99"),
+        "message must mention both refs: {}",
+        result.message,
+    );
+    assert!(
+        result.message.contains("blocked"),
+        "message must document the blocked relationship: {}",
+        result.message,
+    );
+
+    // Call-counter contract. These are the load-bearing assertions: they
+    // prove the handler used the cross-repo-capable `_refs` mutation,
+    // rebuilt the cache exactly once, and fired the Projects V2
+    // Status-blocked ladder through to `update_field`.
+    let calls = mock.calls();
+    assert_eq!(
+        calls.fetch_issue_ref(),
+        1,
+        "step 1 validates the source via fetch_issue_ref (single call)",
+    );
+    assert_eq!(
+        calls.add_blocked_by_refs(),
+        1,
+        "step 3 must use the cross-repo-capable `_refs` mutation variant",
+    );
+    assert_eq!(
+        calls.add_blocked_by_ref(),
+        0,
+        "the single-side `_ref` variant must NOT be used by this handler",
+    );
+    assert_eq!(
+        calls.fetch_graph_data(),
+        1,
+        "post-mutation rebuild fetches graph data exactly once",
+    );
+    assert_eq!(
+        calls.update_field(),
+        1,
+        "local source must flip Projects V2 Status=blocked (spec §8.4 step 5)",
+    );
+}
+
+/// Primary error (spec §8.4): `source == target` is rejected BEFORE any
+/// network call. Mirrors the `dep_remove` `source == target` rejection
+/// template at integration.rs:2659-2691. This is the cheapest
+/// guaranteed-failure primary error path for the depends handler.
+///
+/// The handler normalizes both refs first (server.rs:1438-1449) so
+/// `"7"` and `"#7"` both collapse to `IssueRef::Local(7)` whose resolved
+/// `QualifiedId` (against the configured `acme/widgets` repo) compares
+/// equal, tripping the `source and target must differ` validation.
+#[tokio::test]
+async fn depends_rejects_source_equals_target_without_network_calls() {
+    use unblock_mcp::tools::depends::DependsParams;
+
+    let mock = new_mock();
+    // Intentionally push no stubs — a leak past validation would surface
+    // `MockNotStubbed` and fail the test with a noisy error rather than
+    // the clean INVALID_PARAMS we want to assert on.
+    let state = state_with_mock(Arc::clone(&mock));
+    let server = UnblockServer::new(state);
+
+    let Err(err) = server
+        .depends(Parameters(DependsParams {
+            source: "7".to_owned(),
+            target: "#7".to_owned(),
+        }))
+        .await
+    else {
+        panic!("source == target must fail validation")
+    };
+
+    assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert!(
+        err.message.contains("must differ"),
+        "validation message must explain the constraint: {}",
+        err.message,
+    );
+
+    // Zero network traffic — validation short-circuits before `fetch_issue_ref`
+    // and before any mutation or rebuild primitive.
+    let calls = mock.calls();
+    assert_eq!(
+        calls.fetch_issue_ref(),
+        0,
+        "source-equals-target must fail BEFORE step 1 fetch",
+    );
+    assert_eq!(calls.add_blocked_by_refs(), 0);
+    assert_eq!(calls.add_blocked_by_ref(), 0);
+    assert_eq!(calls.fetch_graph_data(), 0);
+    assert_eq!(calls.update_field(), 0);
+}
+
+/// Cycle detection (spec §8.4): warm cache already contains an edge
+/// `#99 → #42` (i.e. `#99` is blocked by `#42`). Trying to add
+/// `#42 → #99` would create a cycle, and the handler must reject with
+/// a `CircularDependency` error (status 422 → `INVALID_PARAMS`) BEFORE
+/// calling the mutation.
+///
+/// This is the second §8.4 primary-error variant called out in the
+/// bead investigation and exercises the local-only cycle branch
+/// (server.rs:1479-1506) — the warm-cache graph is consulted and
+/// `would_create_cycle` returns true.
+#[tokio::test]
+async fn depends_rejects_cycle_when_warm_cache_has_reverse_edge() {
+    use unblock_mcp::tools::depends::DependsParams;
+
+    let mock = new_mock();
+    // Step 1 fetch still runs before the cycle check (server.rs:1466-1469
+    // precedes the cycle branch at 1479), so we must stub it — otherwise
+    // the test would fail on `MockNotStubbed` before reaching the cycle
+    // assertion.
+    mock.push_fetch_issue_ref(Ok(depends_fixture_issue(42)));
+
+    let state = state_with_mock(Arc::clone(&mock));
+    // Warm cache with an EXISTING edge #99 → #42 (i.e. #99 is blocked
+    // by #42). Adding #42 → #99 on top of that would create the cycle
+    // #42 → #99 → #42.
+    let pre_issues = vec![depends_fixture_issue(42), depends_fixture_issue(99)];
+    let pre_edges = vec![BlockingEdge {
+        source: QualifiedId::new("acme", "widgets", 99),
+        target: QualifiedId::new("acme", "widgets", 42),
+    }];
+    let pre_graph = DependencyGraph::build(&pre_issues, &pre_edges);
+    let pre_ready_set = pre_graph.compute_ready_set(&pre_issues, "acme", "widgets");
+    state
+        .cache
+        .update(pre_issues, pre_ready_set, pre_graph)
+        .await;
+
+    let server = UnblockServer::new(state);
+    let Err(err) = server
+        .depends(Parameters(DependsParams {
+            source: "42".to_owned(),
+            target: "99".to_owned(),
+        }))
+        .await
+    else {
+        panic!("cycle #42 → #99 → #42 must be rejected")
+    };
+
+    // CircularDependency has status 422 which `github_error_to_mcp`
+    // routes to INVALID_PARAMS (see errors.rs:99-101).
+    assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert!(
+        err.message.to_lowercase().contains("cycle")
+            || err.message.to_lowercase().contains("circular"),
+        "cycle rejection message must mention the cycle: {}",
+        err.message,
+    );
+
+    // Fetch ran (step 1 precedes the cycle check), but NO mutation and
+    // NO rebuild. Status ladder must NOT fire.
+    let calls = mock.calls();
+    assert_eq!(
+        calls.fetch_issue_ref(),
+        1,
+        "step 1 fetch precedes the cycle check and must have run",
+    );
+    assert_eq!(
+        calls.add_blocked_by_refs(),
+        0,
+        "cycle detection must short-circuit BEFORE the mutation",
+    );
+    assert_eq!(
+        calls.fetch_graph_data(),
+        0,
+        "no mutation → no post-mutation rebuild",
+    );
+    assert_eq!(
+        calls.update_field(),
+        0,
+        "no mutation → no Status=blocked ladder",
+    );
+}
