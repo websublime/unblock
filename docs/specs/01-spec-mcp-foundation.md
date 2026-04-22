@@ -493,7 +493,7 @@ compute_unblock_cascade(graph, closed_qid, issues) → Vec<QualifiedId>:
   RETURN unblocked
 ```
 
-**Critical:** The cascade MUST be computed from the PRE-CLOSE graph state — before the issue is closed in GitHub and before cache invalidation. After close, `fetch_graph_data()` returns only open issues, so the closed issue is excluded from the rebuilt graph and its dependents cannot be found. See §8.2 (`close` tool flow) for correct ordering.
+**Critical (MUST):** The cascade MUST be computed from the PRE-CLOSE graph state — before the issue is closed in GitHub and before cache invalidation. After close, `fetch_graph_data()` returns only open issues (see `FETCH_GRAPH_DATA_QUERY` at `unblock-github/src/graphql.rs:129` — `states: OPEN`), so the closed issue is excluded from the rebuilt graph, `node_map.get(closed_id)` returns `None`, and this function short-circuits to `Vec::new()` at `unblock-core/src/graph.rs:289-291` regardless of whether dependents exist. A POST-close cascade computation is therefore UNSOUND by construction, not a bug in this function. See §8.2 (`close` tool flow) for the required ordering and the "Pre-close cascade MUST be captured before the mutation" paragraph for the normative prohibition.
 
 **Edge cases:**
 - Multi-level cascade: NOT recursive. Closing A unblocks B. B becomes ready. When B is later closed, its own cascade fires.
@@ -1275,34 +1275,58 @@ pub struct CloseResult {
 
 **Flow (ordering is critical):**
 1. Fetch issue, validate `IssueState == Open` → else `IssueClosed`
-2. **PRE-CLOSE cascade computation:**
-   a. Ensure graph is built (from cache or fresh fetch)
-   b. `compute_unblock_cascade(graph, closed_qid, issues)`
-   c. Save unblocked list — the graph still contains the issue as open
+2. **PRE-CLOSE cascade computation (MUST, see §3.4 + `Why step 2 before step 3` below):**
+   a. Ensure graph is built (from cache or fresh fetch) — if the cache is
+      cold, issue a `fetch_graph_data` round-trip before step 3 so the
+      cascade is computed against a graph that still contains the closed
+      issue as an OPEN node. This is the only chokepoint where the
+      cascade list can be captured soundly.
+   b. `compute_unblock_cascade(graph, closed_qid, issues)` — captures
+      the full cascade list (local + cross-repo dependents) while
+      `closed_qid ∈ graph.node_map`.
+   c. Save the unblocked list (`Vec<QualifiedId>`) for Phase 3 field
+      updates in step 6 and the response projection in step 9. The
+      graph still contains the issue as open at this point.
 3. Close issue: REST PATCH `state: "closed"`
 4. Update fields: Status → `closed`
 5. Add comment: `"Closed: {reason}"` (or `"Closed"` if no reason)
-6. For each unblocked (from step 2):
+6. For each unblocked (from step 2 — cascade list captured PRE-close):
    a. Update Status → `ready`
    b. Add comment: `"Unblocked — blocker #{id} was closed"`
-7. Invalidate cache + rebuild graph (post-close: issue excluded from OPEN query)
+7. Invalidate cache + rebuild graph (post-close: issue excluded from OPEN query per `fetch_graph_data`'s `states: OPEN` filter at `unblock-github/src/graphql.rs:129`)
 8. `update_status_fields` — syncs Status for issues NOT already handled in step 6 (e.g., issues whose blocker status changed but were not direct dependents of the closed issue)
 9. Partition the cascade list from step 2 by `(owner, repo) == (config.owner, config.repo)`: local dependents go into `unblocked: Vec<u64>`; cross-repo dependents populate `cross_repo_refs` per §11.4 (deduplicated, sorted by `QualifiedId::Display`).
 10. Update cache
 
-**Post-rebuild cascade-computation failure.** If the post-close rebuild
-leaves the cache empty or otherwise makes the cascade uncomputable
-(transient 503 during rebuild, or the rebuilt graph no longer exposes
-the closed issue's pre-close neighbours in a form the cascade
-computation can traverse), the tool MUST surface a 503-class error
-with a message instructing the caller to re-run `show` rather than
-defaulting `unblocked` to `[]` and `cross_repo_refs` to `None`. The
-`close` mutation is durable on GitHub regardless of this failure —
-the error signals only the inability to compute the cascade locally.
-Preserves §14 invariants 8 and 13 (no fictional cascade/Status claims
-when the graph cannot be consulted).
+**Pre-close cascade MUST be captured before the mutation.** The cascade list is an
+authoritative output of the tool — the agent relies on it to drive downstream
+work. Computing it POST-close against the rebuilt OPEN-only graph is UNSOUND:
+`fetch_graph_data` (graphql.rs:129) filters to `states: OPEN`, so the just-closed
+issue is NOT in the rebuilt `node_map`, and `compute_unblock_cascade`
+short-circuits on the `node_map.get(closed_id) → None` branch at
+`unblock-core/src/graph.rs:289-291`, silently returning `Vec::new()` regardless
+of whether dependents exist. Any impl that computes the cascade from the
+post-rebuild cache will always report `unblocked = []` in production, even when
+real dependents exist. The PRE-close ordering is therefore MANDATORY, not
+advisory. The POST-close → rebuild → cascade topology is a correctness defect
+and MUST NOT be reintroduced.
 
-**Why step 2 before step 3:** After close, `fetch_graph_data()` returns only OPEN issues. The closed issue is excluded from the rebuilt graph. `compute_unblock_cascade` requires the closed issue to be a node to find dependents via Incoming edges.
+**Post-rebuild field-sync failure.** Step 2's cascade list is already captured
+and durable in memory before the mutation; a later rebuild failure does NOT
+invalidate that list. The Phase 3 field-update loop in step 6 (Status → `ready`,
+unblock comment) is best-effort per the existing close semantics — individual
+failures are logged and the cascade continues. However, if the step 7 rebuild
+fails (transient 503 during `fetch_graph_data`, or similar) AND the step 8
+`update_status_fields` cross-check cannot be performed, the tool MUST surface a
+503-class error with a message instructing the caller to re-run `show` rather
+than returning a response that implies the post-close Status-field fan-out is
+synced. The cascade list in the response (from step 2) remains authoritative;
+the error signals only that the reconciliation in step 8 could not run. The
+`close` mutation is durable on GitHub regardless of this failure. Preserves §14
+invariants 8 and 13 (no fictional Status-sync claims when the graph cannot be
+consulted).
+
+**Why step 2 before step 3:** After close, `fetch_graph_data()` returns only OPEN issues. The closed issue is excluded from the rebuilt graph. `compute_unblock_cascade` requires the closed issue to be a node (via `node_map.get(closed_id)`) to find dependents via Incoming edges. See §3.4 "Critical" note.
 
 **Why step 6 uses only two `*_ref` primitives:** Each cross-repo cascade member triggers three side effects — `fetch_issue` (to obtain `issue_node_id`), Projects V2 `update_field` (Status → `ready`), and `add_comment` (unblock note). Of these, only `fetch_issue` and `add_comment` are addressed by `(owner, repo, number)` and therefore need `*_ref` variants (`fetch_issue_ref`, `add_comment_ref`) to route cross-repo. `update_field` does NOT get an `update_field_ref` variant because `updateProjectV2ItemFieldValue` operates on globally-scoped node IDs (`project_id` + `item_id`), not on `(owner, repo, number)` — once `fetch_issue_ref` yields the cross-repo issue's node ID, `get_project_item_id(issue_node_id, project_id)` resolves the item on the configured project's board, and the existing `update_field(project_id, item_id, field_id, value)` applies the Status update directly. See §5.6 "Cascade-primitive asymmetry" for the routing rationale.
 
