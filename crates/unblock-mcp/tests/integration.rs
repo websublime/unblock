@@ -3050,6 +3050,136 @@ async fn dep_remove_cross_repo_reports_false_when_edge_never_existed() {
     assert_eq!(calls.update_field(), 0);
 }
 
+// ── Claim tool: cross-repo blocker mapping (unblock-29p.55) ───────
+
+/// Armadilha (trap-test) guarding the `claim.rs` blocker-mapping fix
+/// for cross-repo blockers carried by `RelatedIssue`.
+///
+/// Since unblock-29p.43, `FETCH_ISSUE_QUERY.trackedBy` includes
+/// `repository { owner { login } name }` and the parser populates
+/// `RelatedIssue.repo_owner` / `repo_name`. unblock-29p.55 rewrites
+/// `validate_claimable`'s blocker loop to emit `IssueRef::CrossRepo`
+/// when both are `Some`, instead of always aliasing to
+/// `IssueRef::Local(r.number)`.
+///
+/// This test falsifies a regression to the pre-fix behaviour:
+/// - It stages an issue (#5) whose sole open blocker is
+///   `other/upstream#99` (different owner/repo from `acme/widgets`).
+/// - It invokes the `claim` tool through `UnblockServer`.
+/// - It asserts the surfaced error message contains the cross-repo
+///   rendering `"other/upstream#99"` (produced by `IssueRef::CrossRepo
+///   ` Display) and explicitly does NOT contain the bare
+///   `"#99"`-as-own-token rendering a `IssueRef::Local(99)` would
+///   emit instead.
+///
+/// If `validate_claimable` regresses to `IssueRef::Local(r.number)`,
+/// the `render_blockers` helper at `errors.rs:23-29` would produce
+/// `"#99"` alone in the message — the cross-repo substring assertion
+/// would fail, and the negative assertion on the bare `"#99, "` token
+/// would also fire. This makes the fix non-reversible without
+/// breaking the test.
+#[tokio::test]
+async fn claim_surfaces_cross_repo_blocker_with_repo_identity() {
+    use rmcp::model::ErrorCode;
+    use unblock_mcp::tools::claim::ClaimParams;
+
+    let mock = new_mock();
+
+    // Build a fixture issue in the configured repo (acme/widgets)
+    // whose open blocker lives in other/upstream — the GraphQL
+    // parser would populate `repo_owner` / `repo_name` on this
+    // exact shape when FETCH_ISSUE_QUERY returns a trackedBy node
+    // with a `repository { owner { login } name }` subselection
+    // (see graphql.rs:62-74 + parse_related_issues at
+    // graphql.rs:888). We reuse the existing `cross_repo_blocker`
+    // helper so this test exercises the *same* fixture shape the
+    // dep_remove cross-repo armadilhas rely on.
+    let mut target = mock_issue(5);
+    target.blocked_by = vec![cross_repo_blocker("other", "upstream", 99)];
+    mock.push_fetch_issue(Ok(target));
+
+    let state = state_with_mock(Arc::clone(&mock));
+    let server = UnblockServer::new(state);
+
+    // `rmcp::Json<ClaimResult>` does not implement `Debug`, so we
+    // use `let...else` instead of `.expect_err(...)`.
+    let Err(err) = server
+        .claim(Parameters(ClaimParams {
+            id: 5,
+            agent: Some("agent-a".to_owned()),
+        }))
+        .await
+    else {
+        panic!("claim must be rejected when issue is blocked by a cross-repo ref")
+    };
+
+    // The claim handler wraps the infrastructure error via
+    // `github_error_to_mcp`, which maps 409 (IssueBlocked) to
+    // `INVALID_PARAMS` and renders the error's `Display` as the
+    // message payload. `render_blockers` (errors.rs:23-29) joins
+    // the `Vec<IssueRef>` via `ToString::to_string`, so the
+    // variant picked by `validate_claimable` is observable on the
+    // wire:
+    //   IssueRef::Local(99)                    → "#99"
+    //   IssueRef::CrossRepo { o, r, 99 }       → "other/upstream#99"
+    assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+    assert!(
+        err.message.contains("blocked by"),
+        "expected IssueBlocked error, got: {}",
+        err.message,
+    );
+    assert!(
+        err.message.contains("other/upstream#99"),
+        "cross-repo blocker must render with owner/repo qualification \
+         (IssueRef::CrossRepo Display) — if validate_claimable regressed \
+         to IssueRef::Local(r.number) the rendering would drop the \
+         owner/repo prefix; got: {}",
+        err.message,
+    );
+    // Negative (armadilha) — if the fix regressed to `IssueRef::Local`
+    // the blocker list after "blocked by: " would be the bare local
+    // token `"#99"` instead of the qualified `"other/upstream#99"`.
+    // Check for the regression-shaped rendering explicitly: the
+    // blocker-list prefix is documented by `IssueBlocked`'s Display
+    // template at errors.rs:65 as `"Issue #{number} is blocked by: "`,
+    // so the substring `"blocked by: #99"` is a marker of a local-only
+    // regression and MUST NOT appear here.
+    assert!(
+        !err.message.contains("blocked by: #99"),
+        "cross-repo blocker MUST NOT surface as a bare local `#99` token \
+         after 'blocked by:'; if validate_claimable regressed to \
+         IssueRef::Local(99) the blocker list would drop the owner/repo \
+         prefix and render as `blocked by: #99`. got: {}",
+        err.message,
+    );
+
+    // Hermetic sanity: exactly one fetch_issue call (the single-issue
+    // path that feeds validate_claimable). No mutations, no cache
+    // rebuild — validation short-circuited before `execute_write_tool`
+    // ran the mutation ladder.
+    let calls = mock.calls();
+    assert_eq!(
+        calls.fetch_issue(),
+        1,
+        "claim validation must consult fetch_issue exactly once"
+    );
+    assert_eq!(
+        calls.update_field(),
+        0,
+        "Invariant 11: validation failure → no Projects V2 mutation",
+    );
+    assert_eq!(
+        calls.add_comment(),
+        0,
+        "Invariant 11: validation failure → no claim comment",
+    );
+    assert_eq!(
+        calls.fetch_graph_data(),
+        0,
+        "no mutation → no post-mutation rebuild",
+    );
+}
+
 // ── Create tool: integration tests ────────────────────────────────
 
 /// Create tool is registered in the server tool list.
