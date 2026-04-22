@@ -328,8 +328,9 @@ async fn update_status_field(client: &dyn GitHubApi, issue_node_id: &str, slug: 
 /// - Cache rebuild fails and leaves the cache empty, or the rebuild
 ///   succeeds but the reopened issue is absent from the rebuilt set
 ///   (concurrent re-close race) → a 503-class
-///   `GitHubUnavailable`-style error is surfaced so the caller re-runs
-///   `show` to observe the final state (R3).
+///   [`GitHubApi`](unblock_github::errors::Error::GitHubApi) error is
+///   surfaced so the caller re-runs `show` to observe the final state
+///   (R3).
 #[instrument(
     skip(state, params),
     name = "handle_reopen",
