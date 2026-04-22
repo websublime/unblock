@@ -511,7 +511,7 @@ Posts claim comment.
 ### Task 04.07 — `close` tool
 
 Validates: open.
-**Critical:** Cascade must be computed BEFORE closing the issue (pre-close graph).
+**Critical (MUST, per SPEC §8.2 step 2 and §3.4):** Cascade MUST be computed BEFORE closing the issue (pre-close graph). POST-close cascade topology is unsound by construction because `fetch_graph_data` is `states: OPEN`-only (`unblock-github/src/graphql.rs:129`) and excludes the just-closed issue from the rebuilt `node_map`; `compute_unblock_cascade` then short-circuits to `Vec::new()` at `unblock-core/src/graph.rs:289-291` regardless of whether dependents exist. See GAP-15 for the ordering-divergence remediation tracker.
 Close via REST. Update Status → `closed`.
 For each unblocked dependent: update Status → `ready`, post unblock comment.
 
@@ -895,6 +895,37 @@ SPEC §11.1 (error-side half of the cross-repo contract) and SPEC §11.4 (respon
 
 ---
 
+### GAP-15 — `close` cascade PRE vs POST ordering divergence (unblock-29p.61)
+
+**Spec source of truth:** SPEC §8.2 step 2 and §3.4 "Critical" both mandate PRE-close cascade computation. SPEC §8.2's "Pre-close cascade MUST be captured before the mutation" paragraph (added by unblock-29p.61) tightens the prescription with a normative MUST that forbids the POST-close topology.
+
+**Implementation state (pre-fix):** `crates/unblock-mcp/src/server.rs` lines ~1040-1266 implement the close handler as a two-phase flow — Phase 1 runs `execute_write_tool` (closes the issue + rebuilds the cache), Phase 2 reads `state.cache.get_graph()` and computes the cascade from the *post-close* rebuilt graph. This is the POST-close topology the spec forbids.
+
+**Why the impl currently "passes tests":** mock integration fixtures (e.g. `crates/unblock-mcp/tests/integration.rs:4941-4946` — explicit inline comment acknowledging the mismatch) retain the just-closed issue in the rebuilt graph, which diverges from production where `FETCH_GRAPH_DATA_QUERY` (`unblock-github/src/graphql.rs:129`) uses `states: OPEN` and excludes it. In real production every call to `close` currently silently returns `unblocked = []` regardless of actual downstream dependents — the cascade feature is effectively dead.
+
+**Relationship to unblock-29p.60:** The silent `Vec::new()` default in `compute_unblock_cascade` (`unblock-core/src/graph.rs:289-291`) is the *mechanism* by which the POST-close topology fails silently. Switching to PRE-close (this GAP) makes that branch unreachable from the close path because the closed issue is still in `node_map` at cascade-computation time. GAP-15 therefore **subsumes** unblock-29p.60 — the silent-default branch remains as defensive code (it is still the correct shape when `closed_id` legitimately isn't in the graph, e.g. a missing `create`-then-immediately-`close` race), but its triggering path in the close handler disappears. unblock-29p.60 should be closed as superseded once GAP-15 implementation lands.
+
+**Remediation plan (implementation bead to be dispatched by the orchestrator — out of scope for this plan patch):**
+
+1. **Refactor `close` handler in `crates/unblock-mcp/src/server.rs`** so the cascade is computed BEFORE the close mutation and BEFORE cache invalidation:
+   - Phase 0 (NEW, PRE-close): ensure the cache is primed (if cold, issue one `fetch_graph_data` — reuse `rebuild_cache` helper in `tools/mod.rs:162`). Read the graph, build `issue_qid`, call `graph.compute_unblock_cascade(&issue_qid, &[])`, and capture the cascade `Vec<QualifiedId>` into a handler-local binding.
+   - Phase 1 (MUTATION): invoke `execute_write_tool` to run `close_issue` + the existing Projects V2 `Status → closed` ladder on the closed issue + cache rebuild. Unchanged from today except the cascade is NO LONGER read back from the post-rebuild cache.
+   - Phase 2 (CASCADE FIELD-UPDATE LOOP): iterate over the cascade list *captured in Phase 0* (not re-read from the rebuilt cache). For each cascaded dependent dispatch via the `_ref` primitives (`add_comment_ref`, `fetch_issue_ref`, `update_field`) exactly as today (SPEC §8.2 step 6 / §5.6 `close` row / §11.4 row 4 — all unchanged).
+   - Phase 3 (RESPONSE PROJECTION): partition the Phase 0 cascade into `unblocked: Vec<u64>` + `cross_repo_refs: Option<CrossRepoRefs>` using the existing `crate::tools::cross_repo::project_cascade` + `build_cross_repo_refs_with_summary` helpers. Unchanged from today.
+2. **Repurpose the existing R3 503-class error posture** (`tools/close.rs:17-36` module doc + `server.rs:1116-1130` let-Some/else). Under PRE-close ordering the cascade list is captured before the mutation, so a post-close rebuild failure no longer invalidates the cascade *list* — the error now signals only that step 8 (`update_status_fields` reconciliation) could not run. Update the error message to reflect the refocused semantics ("close succeeded, cascade field-updates applied best-effort, but Status reconciliation could not complete — re-run `show` to confirm final Status fan-out"). Integration test `close_surfaces_error_when_rebuilt_cache_missing_closed_issue` must be updated or renamed to `close_surfaces_error_when_rebuild_fails_after_pre_cascade` and its assertions adjusted accordingly.
+3. **Update integration tests**:
+   - Remove the inline acknowledgement comment at `integration.rs:4941-4946` (the mock fixture no longer needs to "cheat" by keeping #8 in the rebuilt graph — under PRE-close ordering the cascade is captured from the cache BEFORE the close mutation, so the post-close rebuild fixture can faithfully emit `states: OPEN` semantics, excluding #8).
+   - Add a dedicated production-realism test `close_cascade_survives_open_only_rebuild` that uses a rebuilt-graph fixture *without* #8 and asserts that `unblocked` still contains the pre-close dependents — locks the PRE-close contract against regression.
+   - Existing 4 happy-path tests (`close_no_cross_repo_dependents_cross_repo_refs_is_none`, `close_cross_repo_dependent_populates_cross_repo_refs`, `close_single_cross_repo_dependent_uses_singular_summary`, `close_cross_repo_add_comment_ref_failure_warns_and_continues_cascade`) can either keep the existing fixture shape (which still passes under PRE-close) or be migrated to production-realistic fixtures at the supervisor's discretion.
+4. **Close unblock-29p.60 as superseded** once the implementation lands and the quality gate is green. The silent `Vec::new()` default at graph.rs:289-291 is retained as defensive code — it is the correct behaviour for a missing `closed_id`; only the code path that triggered it in production (POST-close from OPEN-only rebuild) is removed.
+
+**Type:** DRIFT (spec-vs-impl)
+**Impact:** High — P1 production correctness bug. Every close in real production silently reports `unblocked = []` regardless of actual dependents; the cascade feature is dead.
+**Concurrency/race semantics note:** PRE-close introduces no new concurrency races vs POST-close. The only window is between Phase 0 (cascade computation) and Phase 1 (close mutation); a concurrent blocker-close or edge-add in that window would be missed in either ordering (POST also fetches a stale graph, just one invalidation tick later). Soundness is strictly better under PRE — the closed issue is guaranteed present in the graph used to compute the cascade, which is not the case POST.
+**Implementation bead:** to be created by the orchestrator after this plan patch merges. Scope: `crates/unblock-mcp/src/server.rs` close handler + `crates/unblock-mcp/tests/integration.rs` cascade tests + close unblock-29p.60 as superseded.
+
+---
+
 ### Summary — Decisions (Resolved)
 
 | # | Decision | Resolution |
@@ -910,6 +941,7 @@ SPEC §11.1 (error-side half of the cross-repo contract) and SPEC §11.4 (respon
 | D6.c | Error-side wiring for `InvalidIssueRef` / `CrossRepoAccessDenied` (unblock-eos Decision 2) | **No shape change, wiring only.** `IssueRef::from_str` failures at tool boundary → `InvalidIssueRefSnafu` → 400 → MCP `-32602`. GraphQL `FORBIDDEN` on cross-repo fetch → `CrossRepoAccessDeniedSnafu` → 403 → MCP `-32602` (explicit match arm in `crates/unblock-mcp/src/errors.rs`). Implementation: unblock-6xj. See GAP-14.c and Task 02.02 for the wiring contract. |
 | D6.d | Response-shape universality (unblock-eos Decision 3) | **Documentation-only; frozen.** SPEC §11.4 "Exhaustiveness Rationale" derives the affected set (`ready`, `prime`, `dep_cycles`, `close`) mechanically from §5.6 + response typing. New tools re-derive (a)+(b) in their own spec entries. No new beads; no re-opening. |
 | D6.e | Meta-process (unblock-eos Decision 4) | **No further decomposition.** unblock-eos sub-epic closes with these three spec+plan patches. Only unblock-6xj and unblock-29p.25 remain as implementation beads under this sub-epic. Edge cases discovered during implementation fold into inline decision memos within GAP-14.c / Task 02.02, NOT into new beads. |
+| D7 | `close` cascade PRE vs POST ordering (unblock-29p.61) | **Option (a) — PRE-close cascade.** Refactor impl to match the existing SPEC §8.2 step 2 + §3.4 "Critical" prescription rather than rewriting spec to match the broken impl. PRE-close is sound by construction (closed issue still present in `node_map` at cascade computation); POST-close is unsound by construction (`FETCH_GRAPH_DATA_QUERY` is `states: OPEN`-only, closed issue absent from rebuilt `node_map`, silent `Vec::new()` short-circuit at `graph.rs:289-291` fires on every production close). Subsumes unblock-29p.60 — the silent-default branch remains as defensive code but becomes unreachable from the close path. Rejected option (b) because it would codify a production-broken impl and still require fixing .60 independently (via `fetch_graph_data` closed-issue extension or a second query round-trip). Rejected option (c) because a double-traversal is unnecessary — PRE alone yields correct cascade and the Phase 3 field-update loop already applies to the cascade targets without needing a second POST pass. See GAP-15 for the full remediation plan. |
 
 ---
 
