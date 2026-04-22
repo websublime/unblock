@@ -6237,3 +6237,243 @@ async fn comment_rejects_empty_body_without_network_calls() {
         "no call path should touch the graph",
     );
 }
+
+// ── claim tool: integration tests (unblock-29p.13) ───────────────────
+
+/// Build a [`ProjectFieldIds`] fixture with the `"in_progress"` Status
+/// option populated so the `claim` handler's Status-update ladder
+/// (server.rs:928-959) resolves `field_ids.status.options["in_progress"]`
+/// and fires a real `update_field` call for Status. The Agent field has
+/// no option map (it is a plain text field) and always fires a second
+/// `update_field` regardless of the Status option set — so the happy
+/// path expects `update_field == 2`.
+fn claim_field_ids_with_in_progress() -> unblock_github::projects::ProjectFieldIds {
+    use std::collections::HashMap;
+    use unblock_github::projects::{FieldMeta, ProjectFieldIds};
+
+    let mut status_options = HashMap::new();
+    status_options.insert("in_progress".to_owned(), "OPT_IN_PROGRESS".to_owned());
+
+    let empty_meta = || FieldMeta {
+        field_id: "f".to_owned(),
+        options: HashMap::new(),
+    };
+
+    ProjectFieldIds {
+        status: FieldMeta {
+            field_id: "status-field-id".to_owned(),
+            options: status_options,
+        },
+        priority: empty_meta(),
+        pipeline_stage: empty_meta(),
+        agent: "agent-field-id".to_owned(),
+        claimed_at: "ca".to_owned(),
+        story_points: "sp".to_owned(),
+        defer_until: "du".to_owned(),
+    }
+}
+
+/// Build a claim fixture issue under `acme/widgets` coordinates — Open,
+/// status Ready, no agent, no blockers, not deferred. This is the
+/// claim-ready shape that `validate_claimable` accepts.
+fn claim_fixture_issue(number: u64) -> unblock_core::types::Issue {
+    unblock_core::types::Issue {
+        qualified_id: QualifiedId::new("acme", "widgets", number),
+        number,
+        node_id: format!("I_claim_{number}"),
+        title: format!("Claim fixture #{number}"),
+        issue_type: Some(IssueType::Task),
+        status: Status::Ready,
+        priority: Priority::P2,
+        agent: None,
+        claimed_at: None,
+        pipeline_stage: None,
+        story_points: None,
+        defer_until: None,
+        labels: vec![],
+        milestone: None,
+        assignees: vec![],
+        state: IssueState::Open,
+        body: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        url: format!("https://github.com/acme/widgets/issues/{number}"),
+        comments: vec![],
+        blocked_by: vec![],
+        blocking: vec![],
+        parent: None,
+        sub_issues: vec![],
+    }
+}
+
+/// Happy path (spec §8.1): an open, ready, unblocked, unclaimed issue
+/// passes `validate_claimable`, the Projects V2 ladder fires TWO
+/// `update_field` calls (`Status=in_progress` + `Agent=<name>`), the
+/// claim comment is posted, and `execute_write_tool` rebuilds the
+/// cache.
+///
+/// Asserts:
+/// - `issue_number == 5`, `agent == "alice"`, `claimed_at` is recent,
+/// - call counters: `fetch_issue = 1`, `update_field = 2` (Status +
+///   Agent — RISK from the bead investigation: if only one `Ok()` is
+///   pushed the second call silently surfaces `MockNotStubbed` which
+///   the handler swallows via `tracing::warn`; stubbing two and
+///   asserting `== 2` catches that foot-gun),
+/// - `add_comment = 1`, `fetch_graph_data = 1` (rebuild).
+#[tokio::test]
+async fn claim_unblocked_open_issue_sets_in_progress_and_posts_comment() {
+    use unblock_github::projects::ProjectInfo;
+    use unblock_mcp::tools::claim::ClaimParams;
+
+    let mock = new_mock();
+
+    // Step 1 fetch: returns the ready claim fixture.
+    mock.push_fetch_issue(Ok(claim_fixture_issue(5)));
+
+    // Step 6 Projects V2 ladder — Status → in_progress AND Agent → "alice".
+    // RISK from investigation: TWO update_field calls fire; if we only
+    // queue one Ok() the second call surfaces MockNotStubbed which the
+    // handler SWALLOWS via tracing::warn at server.rs:945/958. Pushing
+    // two Ok()s and asserting the counter == 2 is the only way to
+    // detect a regression that drops the Agent write.
+    mock.push_field_ids(Some(claim_field_ids_with_in_progress()));
+    mock.push_resolve_project_info(Ok(ProjectInfo {
+        id: "PVT_1".to_owned(),
+        number: 1,
+    }));
+    mock.push_get_project_item_id(Ok("PVTI_5".to_owned()));
+    mock.push_update_field(Ok(())); // Status = in_progress
+    mock.push_update_field(Ok(())); // Agent = alice
+
+    // Step 7 claim comment.
+    mock.push_add_comment(Ok(
+        "https://github.com/acme/widgets/issues/5#issuecomment-42".to_owned(),
+    ));
+
+    // execute_write_tool rebuild — fetch_graph_data runs unconditionally
+    // after the mutation ladder. RISK from investigation: missing this
+    // stub surfaces as a cryptic MockNotStubbed on rebuild rather than
+    // a primary-assertion failure.
+    mock.push_fetch_graph_data(Ok((vec![claim_fixture_issue(5)], vec![])));
+
+    let state = state_with_mock(Arc::clone(&mock));
+    let server = UnblockServer::new(state);
+
+    let before = chrono::Utc::now();
+    let Json(result) = server
+        .claim(Parameters(ClaimParams {
+            id: 5,
+            agent: Some("alice".to_owned()),
+        }))
+        .await
+        .expect("claim must succeed on an open, ready, unblocked, unclaimed issue");
+    let after = chrono::Utc::now();
+
+    assert_eq!(result.issue_number, 5);
+    assert_eq!(result.agent, "alice");
+    // `claimed_at` is taken inside the handler between `before` and
+    // `after` — assert the handler did not stamp a fictional timestamp.
+    assert!(
+        result.claimed_at >= before && result.claimed_at <= after,
+        "claimed_at must be taken inside the handler between {before:?} and {after:?}, got {:?}",
+        result.claimed_at,
+    );
+
+    // Call-counter contract. These are the load-bearing assertions: the
+    // field ladder fires TWICE (Status + Agent), the claim comment lands
+    // exactly once, and the cache is rebuilt exactly once.
+    let calls = mock.calls();
+    assert_eq!(
+        calls.fetch_issue(),
+        1,
+        "step 1 fetches the issue exactly once for validate_claimable",
+    );
+    assert_eq!(
+        calls.update_field(),
+        2,
+        "spec §8.1 step 6 fires update_field TWICE: Status=in_progress + Agent=<name>",
+    );
+    assert_eq!(
+        calls.add_comment(),
+        1,
+        "spec §8.1 step 7 posts the claim comment exactly once",
+    );
+    assert_eq!(
+        calls.fetch_graph_data(),
+        1,
+        "execute_write_tool rebuilds the cache exactly once after the mutation ladder",
+    );
+}
+
+/// Primary error (spec §8.1): an issue that is already claimed (status
+/// `InProgress` with a non-empty agent) must be rejected with
+/// `AlreadyClaimed` (status 409 → `INVALID_PARAMS`). The validation
+/// short-circuits before any mutation, so the Projects V2 ladder, the
+/// claim comment, and the post-mutation rebuild must not fire.
+///
+/// This covers the MCP-boundary wire-through for the `AlreadyClaimed`
+/// arm — the domain-level validation is already unit-tested in
+/// claim.rs:186-407 but no test previously routed it through
+/// `execute_write_tool`.
+#[tokio::test]
+async fn claim_rejects_already_claimed_issue() {
+    use unblock_mcp::tools::claim::ClaimParams;
+
+    let mock = new_mock();
+
+    // Step 1 fetch: returns an issue already claimed by "bob".
+    let mut target = claim_fixture_issue(5);
+    target.status = Status::InProgress;
+    target.agent = Some("bob".to_owned());
+    mock.push_fetch_issue(Ok(target));
+
+    let state = state_with_mock(Arc::clone(&mock));
+    let server = UnblockServer::new(state);
+
+    let Err(err) = server
+        .claim(Parameters(ClaimParams {
+            id: 5,
+            agent: Some("alice".to_owned()),
+        }))
+        .await
+    else {
+        panic!("claim must be rejected when the issue is already claimed")
+    };
+
+    // AlreadyClaimed has status 409 → INVALID_PARAMS via `github_error_to_mcp`.
+    assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert!(
+        err.message.contains("already claimed"),
+        "error message must mention 'already claimed': {}",
+        err.message,
+    );
+    assert!(
+        err.message.contains("bob"),
+        "error message must surface the current claimant 'bob': {}",
+        err.message,
+    );
+
+    // Validation short-circuits before any mutation. Only the initial
+    // `fetch_issue` should have run.
+    let calls = mock.calls();
+    assert_eq!(
+        calls.fetch_issue(),
+        1,
+        "validation consults fetch_issue exactly once",
+    );
+    assert_eq!(
+        calls.update_field(),
+        0,
+        "validation failure → no Projects V2 mutation",
+    );
+    assert_eq!(
+        calls.add_comment(),
+        0,
+        "validation failure → no claim comment",
+    );
+    assert_eq!(
+        calls.fetch_graph_data(),
+        0,
+        "no mutation → no post-mutation rebuild",
+    );
+}
