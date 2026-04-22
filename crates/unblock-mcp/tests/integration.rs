@@ -6103,3 +6103,137 @@ async fn depends_rejects_cycle_when_warm_cache_has_reverse_edge() {
         "no mutation → no Status=blocked ladder",
     );
 }
+
+// ── comment tool: integration tests (unblock-29p.13) ─────────────────
+
+/// Happy path (spec §8.8): posting a comment on an existing issue fetches
+/// the issue (to validate it exists), posts the comment via
+/// `add_comment`, and returns the comment URL. Crucially, the `comment`
+/// tool is a READ tool from the graph perspective — spec §8.8 says "NO
+/// cache invalidation" — so the warm cache must remain fresh after the
+/// call.
+///
+/// Asserts:
+/// - `issue_number == 5`,
+/// - `comment_url` matches the stubbed URL,
+/// - call counters: `fetch_issue = 1`, `add_comment = 1`,
+///   `fetch_graph_data = 0` (spec §8.8 — no cache rebuild),
+/// - `state.cache.is_fresh()` remains true post-call (load-bearing
+///   invariant: guards against regressions where `comment` becomes a
+///   write tool).
+#[tokio::test]
+async fn comment_posts_on_existing_issue_without_cache_invalidation() {
+    use unblock_mcp::tools::comment::CommentParams;
+
+    let mock = new_mock();
+    // Step 2 fetch (server.rs:1915): validate the issue exists.
+    mock.push_fetch_issue(Ok(mock_issue(5)));
+    // Step 3 mutation: post the comment and return the URL.
+    let comment_url = "https://github.com/acme/widgets/issues/5#issuecomment-1".to_owned();
+    mock.push_add_comment(Ok(comment_url.clone()));
+
+    let state = state_with_mock(Arc::clone(&mock));
+    // Pre-populate the cache so `is_fresh()` returns true before the
+    // call — the load-bearing assertion below is that the cache is
+    // still fresh AFTER the call. Without this prime there is no
+    // baseline to compare against.
+    let pre_issues = vec![mock_issue(5)];
+    let pre_graph = DependencyGraph::build(&pre_issues, &[]);
+    let pre_ready_set = pre_graph.compute_ready_set(&pre_issues, "acme", "widgets");
+    state
+        .cache
+        .update(pre_issues, pre_ready_set, pre_graph)
+        .await;
+    assert!(
+        state.cache.is_fresh().await,
+        "cache must be warm BEFORE the call so we can assert it stays fresh afterwards",
+    );
+
+    let server = UnblockServer::new(state);
+    let Json(result) = server
+        .comment(Parameters(CommentParams {
+            id: 5,
+            body: "hello".to_owned(),
+        }))
+        .await
+        .expect("comment must succeed on an existing issue with a non-empty body");
+
+    assert_eq!(result.issue_number, 5);
+    assert_eq!(result.comment_url, comment_url);
+
+    // Call-counter contract. The critical assertion is
+    // `fetch_graph_data = 0`: spec §8.8 says comments do not invalidate
+    // the cache. If this regresses (e.g. someone routes `comment`
+    // through `execute_write_tool`), the counter jumps to 1 and this
+    // test fails loudly.
+    let calls = mock.calls();
+    assert_eq!(
+        calls.fetch_issue(),
+        1,
+        "step 2 validates existence via a single fetch_issue",
+    );
+    assert_eq!(calls.add_comment(), 1, "step 3 posts exactly one comment",);
+    assert_eq!(
+        calls.fetch_graph_data(),
+        0,
+        "spec §8.8: comments MUST NOT trigger a cache rebuild",
+    );
+
+    // Load-bearing invariant — comment is a read tool; cache stays warm.
+    // This is the regression guard for "comment becomes a write tool".
+    assert!(
+        server.state().cache.is_fresh().await,
+        "spec §8.8: cache must remain fresh after a comment (NO invalidation)",
+    );
+}
+
+/// Primary error (spec §8.8): an empty or whitespace-only body is
+/// rejected BEFORE any network call. The handler short-circuits at
+/// server.rs:1906-1912 with `INVALID_PARAMS` and the message
+/// `"must not be empty or whitespace-only"`.
+#[tokio::test]
+async fn comment_rejects_empty_body_without_network_calls() {
+    use unblock_mcp::tools::comment::CommentParams;
+
+    let mock = new_mock();
+    // Intentionally push no stubs — a leak past validation surfaces
+    // `MockNotStubbed` and fails the test with a noisy error rather
+    // than the clean INVALID_PARAMS we want to assert on.
+    let state = state_with_mock(Arc::clone(&mock));
+    let server = UnblockServer::new(state);
+
+    let Err(err) = server
+        .comment(Parameters(CommentParams {
+            id: 1,
+            body: "   ".to_owned(),
+        }))
+        .await
+    else {
+        panic!("whitespace-only body must fail validation")
+    };
+
+    assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert!(
+        err.message.contains("empty") && err.message.contains("whitespace"),
+        "validation message must document the constraint: {}",
+        err.message,
+    );
+
+    // Zero network traffic — validation short-circuits first.
+    let calls = mock.calls();
+    assert_eq!(
+        calls.fetch_issue(),
+        0,
+        "empty body must fail BEFORE the existence check",
+    );
+    assert_eq!(
+        calls.add_comment(),
+        0,
+        "empty body must fail BEFORE posting",
+    );
+    assert_eq!(
+        calls.fetch_graph_data(),
+        0,
+        "no call path should touch the graph",
+    );
+}
