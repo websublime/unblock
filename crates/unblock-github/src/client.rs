@@ -64,22 +64,13 @@ impl GitHubClient {
         let (owner, repo) = Self::resolve_repo(config)?;
         let project_number = Self::resolve_project(config);
 
-        info!(
-            owner = %owner,
-            repo = %repo,
-            project_number = ?project_number,
-            api_base_url = %config.api_base_url,
-            "GitHubClient initialized"
-        );
-
-        Ok(Self {
+        Ok(Self::from_parts(
             http,
-            api_base_url: config.api_base_url.clone(),
+            config.api_base_url.clone(),
             owner,
             repo,
             project_number,
-            field_ids: Mutex::new(None),
-        })
+        ))
     }
 
     /// Creates a new `GitHubClient` with an explicitly supplied repository,
@@ -118,22 +109,47 @@ impl GitHubClient {
         let repo = repo.into();
         let project_number = Self::resolve_project(config);
 
+        Ok(Self::from_parts(
+            http,
+            config.api_base_url.clone(),
+            owner,
+            repo,
+            project_number,
+        ))
+    }
+
+    /// Assembles a `GitHubClient` from its pre-resolved parts.
+    ///
+    /// This private helper centralises the struct-literal construction shared
+    /// by [`GitHubClient::new`] and [`GitHubClient::with_repo`], so both public
+    /// constructors route through a single code path for the `api_base_url`
+    /// field assignment, the initialisation-complete `tracing::info!` span, and
+    /// the final `Self { .. }` build. Callers are responsible for producing the
+    /// HTTP client (via [`Self::build_http_client`]) and resolving owner / repo
+    /// / project number before invoking this helper.
+    fn from_parts(
+        http: reqwest::Client,
+        api_base_url: String,
+        owner: String,
+        repo: String,
+        project_number: Option<u64>,
+    ) -> Self {
         info!(
             owner = %owner,
             repo = %repo,
             project_number = ?project_number,
-            api_base_url = %config.api_base_url,
-            "GitHubClient initialized via with_repo"
+            api_base_url = %api_base_url,
+            "GitHubClient initialized"
         );
 
-        Ok(Self {
+        Self {
             http,
-            api_base_url: config.api_base_url.clone(),
+            api_base_url,
             owner,
             repo,
             project_number,
             field_ids: Mutex::new(None),
-        })
+        }
     }
 
     /// Builds the shared `reqwest::Client` with the default headers used by
