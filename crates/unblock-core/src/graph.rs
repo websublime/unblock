@@ -1916,6 +1916,299 @@ mod tests {
                     );
                 }
             }
+
+            /// SPEC §14 Invariant 3 (cycle detection is sound).
+            ///
+            /// If `detect_all_cycles()` returns an SCC, that SCC is a real
+            /// cycle: it contains two or more distinct nodes AND every
+            /// ordered pair `(u, v)` inside the SCC has a directed path
+            /// from `u` to `v` in the graph (verified via petgraph's
+            /// `has_path_connecting`). Together with Invariant 4 below,
+            /// this gives us soundness + completeness for Tarjan SCC as
+            /// used by the graph engine.
+            ///
+            /// Strategy: generate `num_issues` open nodes plus a random
+            /// edge set filtered to non-self-loop, in-bounds pairs — the
+            /// same pattern the other cycle proptests use. For each SCC
+            /// the algorithm returns, assert both conditions.
+            #[test]
+            fn detect_all_cycles_is_sound(
+                num_issues in 2_u64..50,
+                edges in proptest::collection::vec((1_u64..50, 1_u64..50), 0..100),
+            ) {
+                let issues: Vec<Issue> = (1..=num_issues)
+                    .map(|n| make_issue(n, IssueState::Open, Priority::P2))
+                    .collect();
+
+                let blocking_edges: Vec<BlockingEdge> = edges
+                    .into_iter()
+                    .filter(|(s, t)| *s != *t && *s <= num_issues && *t <= num_issues)
+                    .map(|(s, t)| edge(s, t))
+                    .collect();
+
+                let graph = DependencyGraph::build(&issues, &blocking_edges);
+                let cycles = graph.detect_all_cycles();
+
+                for scc in &cycles {
+                    // Soundness part A: detect_all_cycles filters single-node
+                    // SCCs, so every returned group must have ≥ 2 distinct
+                    // members.
+                    prop_assert!(
+                        scc.len() >= 2,
+                        "detect_all_cycles returned an SCC with < 2 nodes: {:?}",
+                        scc
+                    );
+
+                    // Soundness part B: every ordered pair inside the SCC
+                    // must be mutually reachable in the underlying DiGraph.
+                    for u in scc {
+                        for v in scc {
+                            if u == v {
+                                continue;
+                            }
+                            let u_idx = graph.node_map.get(u)
+                                .copied()
+                                .expect("SCC node must exist in node_map");
+                            let v_idx = graph.node_map.get(v)
+                                .copied()
+                                .expect("SCC node must exist in node_map");
+                            prop_assert!(
+                                has_path_connecting(&graph.graph, u_idx, v_idx, None),
+                                "SCC {:?} claims {} reaches {} but no path exists",
+                                scc, u, v
+                            );
+                        }
+                    }
+                }
+            }
+
+            /// SPEC §14 Invariant 4 (cycle detection is complete).
+            ///
+            /// If a cycle exists in the graph, `detect_all_cycles()` finds
+            /// it. We prove this by injecting a known ring of length
+            /// `ring_len` into the graph alongside random noise edges and
+            /// asserting that some returned SCC is a superset of the ring
+            /// node set. Single-node rings (self-loops) are excluded by
+            /// construction because the graph engine filters them out at
+            /// the SCC level (see `detect_all_cycles` doc).
+            ///
+            /// Strategy: pick `ring_len ∈ [2, num_issues]`; build edges
+            /// `i → i+1 mod ring_len` among the first `ring_len` nodes;
+            /// add random noise edges; call `detect_all_cycles()`; assert
+            /// at least one returned SCC fully contains the ring nodes.
+            #[test]
+            fn detect_all_cycles_finds_injected_ring(
+                num_issues in 2_u64..50,
+                ring_len in 2_u64..50,
+                noise_edges in proptest::collection::vec((1_u64..50, 1_u64..50), 0..80),
+            ) {
+                let ring_len = ring_len.min(num_issues);
+                // With num_issues ≥ 2 and ring_len clamped to num_issues, the
+                // ring always has ≥ 2 nodes — completeness of multi-node cycles.
+
+                let issues: Vec<Issue> = (1..=num_issues)
+                    .map(|n| make_issue(n, IssueState::Open, Priority::P2))
+                    .collect();
+
+                // Inject a ring among nodes 1..=ring_len: i -> i+1, ring_len -> 1.
+                let mut blocking_edges: Vec<BlockingEdge> = (1..=ring_len)
+                    .map(|i| {
+                        let next = if i == ring_len { 1 } else { i + 1 };
+                        edge(i, next)
+                    })
+                    .collect();
+
+                // Add noise that stays in-bounds and non-self-loop.
+                for (s, t) in noise_edges {
+                    if s != t && s <= num_issues && t <= num_issues {
+                        blocking_edges.push(edge(s, t));
+                    }
+                }
+
+                let graph = DependencyGraph::build(&issues, &blocking_edges);
+                let cycles = graph.detect_all_cycles();
+
+                // Build the ring's expected node set as QualifiedIds.
+                let ring_set: std::collections::HashSet<QualifiedId> =
+                    (1..=ring_len).map(qid).collect();
+
+                // Completeness: at least one returned SCC must fully contain
+                // the injected ring. (Noise edges may merge the ring into a
+                // bigger SCC, which is fine — we only need the ring to be a
+                // subset of some SCC.)
+                let covered = cycles.iter().any(|scc| {
+                    let scc_set: std::collections::HashSet<&QualifiedId> =
+                        scc.iter().collect();
+                    ring_set.iter().all(|qid| scc_set.contains(qid))
+                });
+                prop_assert!(
+                    covered,
+                    "Injected ring of length {} was not covered by any returned SCC; cycles={:?}",
+                    ring_len, cycles
+                );
+            }
+
+            /// SPEC §14 Invariant 5 (ready set is deterministic).
+            ///
+            /// Calling `compute_ready_set` twice on the same graph with the
+            /// same issues and configured `(owner, repo)` yields the same
+            /// `Vec<IssueSummary>` — element-by-element, same order. This
+            /// generalises the existing unit test
+            /// `ready_set_sorted_by_priority_then_created_at` which only
+            /// checks a single call's ordering. Determinism across calls is
+            /// what downstream consumers (cache, `ready` tool) depend on.
+            ///
+            /// Strategy: reuse the same generator shape as the existing
+            /// Invariant 1 proptest, build the graph once, call
+            /// `compute_ready_set` twice, and compare the full result
+            /// element-wise via `prop_assert_eq!`.
+            #[test]
+            fn ready_set_is_deterministic(
+                num_issues in 1_u64..100,
+                issue_states in proptest::collection::vec(arb_issue_state(), 1..100),
+                issue_priorities in proptest::collection::vec(arb_priority(), 1..100),
+                issue_statuses in proptest::collection::vec(arb_status(), 1..100),
+                edges in proptest::collection::vec((1_u64..100, 1_u64..100), 0..200),
+            ) {
+                let issues: Vec<Issue> = (1..=num_issues)
+                    .map(|n| {
+                        let idx = usize::try_from(n - 1).expect("issue number fits in usize");
+                        let state = issue_states.get(idx).copied().unwrap_or(IssueState::Open);
+                        let priority = issue_priorities.get(idx).copied().unwrap_or(Priority::P2);
+                        let status = issue_statuses.get(idx).copied().unwrap_or(Status::Ready);
+                        let mut issue = make_issue(n, state, priority);
+                        issue.status = status;
+                        issue
+                    })
+                    .collect();
+
+                let blocking_edges: Vec<BlockingEdge> = edges
+                    .into_iter()
+                    .filter(|(s, t)| *s != *t && *s <= num_issues && *t <= num_issues)
+                    .map(|(s, t)| edge(s, t))
+                    .collect();
+
+                let graph = DependencyGraph::build(&issues, &blocking_edges);
+                let first = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
+                let second = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
+
+                prop_assert_eq!(
+                    first.len(),
+                    second.len(),
+                    "Determinism: ready set length differs across calls"
+                );
+
+                // Element-wise equality on the fields the downstream sort
+                // and tool-layer surface depend on.
+                for (a, b) in first.iter().zip(second.iter()) {
+                    prop_assert_eq!(&a.qualified_id, &b.qualified_id, "determinism: qualified_id differs");
+                    prop_assert_eq!(a.number, b.number, "determinism: number differs");
+                    prop_assert_eq!(a.priority, b.priority, "determinism: priority differs");
+                    prop_assert_eq!(a.status, b.status, "determinism: status differs");
+                    prop_assert_eq!(a.created_at, b.created_at, "determinism: created_at differs");
+                }
+            }
+
+            /// SPEC §14 Invariant 7 (graph construction is idempotent).
+            ///
+            /// Building two graphs from the exact same `(issues, edges)`
+            /// input produces structurally identical graphs. Since
+            /// `DependencyGraph` does not derive `PartialEq` and petgraph's
+            /// internal `NodeIndex` values are NOT stable across builds
+            /// (indices are allocated per `add_node` call), we compare via
+            /// the public `QualifiedId`-keyed surface: node-map keys,
+            /// edge count, `issue_state` / `issue_status` snapshots, and
+            /// the sorted edge list. This is the invariant the cache
+            /// layer relies on for reconstructability.
+            ///
+            /// Strategy: same generator as Invariant 1, build twice, assert
+            /// all surface-level equalities.
+            #[test]
+            fn graph_construction_is_idempotent(
+                num_issues in 1_u64..100,
+                issue_states in proptest::collection::vec(arb_issue_state(), 1..100),
+                issue_priorities in proptest::collection::vec(arb_priority(), 1..100),
+                issue_statuses in proptest::collection::vec(arb_status(), 1..100),
+                edges in proptest::collection::vec((1_u64..100, 1_u64..100), 0..200),
+            ) {
+                let issues: Vec<Issue> = (1..=num_issues)
+                    .map(|n| {
+                        let idx = usize::try_from(n - 1).expect("issue number fits in usize");
+                        let state = issue_states.get(idx).copied().unwrap_or(IssueState::Open);
+                        let priority = issue_priorities.get(idx).copied().unwrap_or(Priority::P2);
+                        let status = issue_statuses.get(idx).copied().unwrap_or(Status::Ready);
+                        let mut issue = make_issue(n, state, priority);
+                        issue.status = status;
+                        issue
+                    })
+                    .collect();
+
+                let blocking_edges: Vec<BlockingEdge> = edges
+                    .into_iter()
+                    .filter(|(s, t)| *s != *t && *s <= num_issues && *t <= num_issues)
+                    .map(|(s, t)| edge(s, t))
+                    .collect();
+
+                let g1 = DependencyGraph::build(&issues, &blocking_edges);
+                let g2 = DependencyGraph::build(&issues, &blocking_edges);
+
+                // (a) Same number of nodes AND same QualifiedId key set.
+                // HashMap iteration order is non-deterministic — sort to a
+                // Vec<QualifiedId> before comparing.
+                prop_assert_eq!(
+                    g1.node_map().len(),
+                    g2.node_map().len(),
+                    "idempotency: node_map length differs"
+                );
+                let mut keys_a: Vec<QualifiedId> = g1.node_map().keys().cloned().collect();
+                let mut keys_b: Vec<QualifiedId> = g2.node_map().keys().cloned().collect();
+                keys_a.sort_by(|a, b| {
+                    (a.owner.as_str(), a.repo.as_str(), a.number)
+                        .cmp(&(b.owner.as_str(), b.repo.as_str(), b.number))
+                });
+                keys_b.sort_by(|a, b| {
+                    (a.owner.as_str(), a.repo.as_str(), a.number)
+                        .cmp(&(b.owner.as_str(), b.repo.as_str(), b.number))
+                });
+                prop_assert_eq!(&keys_a, &keys_b, "idempotency: node_map key sets differ");
+
+                // (b) Same edge count.
+                prop_assert_eq!(
+                    g1.edge_count(),
+                    g2.edge_count(),
+                    "idempotency: edge_count differs"
+                );
+
+                // (c) Same issue_state / issue_status maps. HashMap<K, V>
+                // implements PartialEq on content when K: Eq + Hash and
+                // V: PartialEq, so iteration order does not matter.
+                prop_assert!(
+                    g1.issue_state() == g2.issue_state(),
+                    "idempotency: issue_state snapshots differ"
+                );
+                prop_assert!(
+                    g1.issue_status() == g2.issue_status(),
+                    "idempotency: issue_status snapshots differ"
+                );
+
+                // (d) Same edge multiset. all_edges order is unspecified,
+                // so sort both before comparing.
+                let mut edges_a = g1.all_edges();
+                let mut edges_b = g2.all_edges();
+                let edge_sort_key = |e: &BlockingEdge| {
+                    (
+                        e.source.owner.clone(),
+                        e.source.repo.clone(),
+                        e.source.number,
+                        e.target.owner.clone(),
+                        e.target.repo.clone(),
+                        e.target.number,
+                    )
+                };
+                edges_a.sort_by_key(edge_sort_key);
+                edges_b.sort_by_key(edge_sort_key);
+                prop_assert_eq!(&edges_a, &edges_b, "idempotency: edge lists differ");
+            }
         }
     }
 
