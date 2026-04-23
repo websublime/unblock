@@ -291,7 +291,7 @@ Types:
 - `BodySections { description, design_notes, acceptance_criteria }` — `from_markdown()`, `to_markdown()`
 - `TraversalDirection { Upstream, Downstream, Both }`
 - `IssueComment { author, body, created_at }`
-- `RelatedIssue { number, title, state }`
+- `RelatedIssue { number, title, state, repo_owner: Option<String>, repo_name: Option<String> }` — `#[non_exhaustive]`; construct via `RelatedIssue::local()` (same-repo-as-enclosing) or `RelatedIssue::cross_repo()` (explicit owner/name). See SPEC §2.12; hardened in unblock-29p.66.
 - `CrossRepoRefs { omitted: Vec<String>, summary: Option<String> }` — cross-repo response contract (SPEC §2.16, §11.4)
 
 ### Task 02.02 — Domain errors

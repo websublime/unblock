@@ -203,15 +203,13 @@ mod tests {
 
     use super::ShowRelatedIssue;
 
-    /// Helper to build a `RelatedIssue` with the given state.
+    /// Helper to build a same-repo `RelatedIssue` with the given state.
+    ///
+    /// Uses [`RelatedIssue::local`] — `repo_owner` / `repo_name` stay
+    /// `None` (the "same-repo-as-enclosing" convention per
+    /// `RelatedIssue` docs).
     fn related_issue(state: IssueState) -> RelatedIssue {
-        RelatedIssue {
-            number: 1,
-            title: String::from("test"),
-            state,
-            repo_owner: None,
-            repo_name: None,
-        }
+        RelatedIssue::local(1, "test", state)
     }
 
     /// The `From<&RelatedIssue>` conversion writes `IssueState::Open` as
@@ -235,13 +233,7 @@ mod tests {
     /// Verify that the conversion copies `number` and `title` unchanged.
     #[test]
     fn related_issue_copies_number_and_title() {
-        let ri = RelatedIssue {
-            number: 42,
-            title: String::from("Important task"),
-            state: IssueState::Open,
-            repo_owner: None,
-            repo_name: None,
-        };
+        let ri = RelatedIssue::local(42, "Important task", IssueState::Open);
         let show = ShowRelatedIssue::from(&ri);
         assert_eq!(show.number, 42);
         assert_eq!(show.title, "Important task");

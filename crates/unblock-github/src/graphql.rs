@@ -876,15 +876,23 @@ fn parse_comments(value: &serde_json::Value) -> Vec<IssueComment> {
 /// Parses a related-issues connection (blockedBy, blocking, subIssues) into
 /// [`RelatedIssue`] instances.
 ///
-/// When an individual node carries a `repository { owner { login } name }`
-/// subfield set, those values populate the resulting
-/// [`RelatedIssue::repo_owner`] / [`RelatedIssue::repo_name`]. The
-/// `trackedByIssues` connection inside [`FETCH_ISSUE_QUERY`] selects
-/// those fields so blocker edges can disambiguate cross-repo blockers
-/// from same-repo blockers (required by `dep_remove` single-issue edge
-/// validation on cross-repo paths — see `unblock-29p.43`). Connections
-/// that omit the `repository` selection (e.g. `subIssues`,
-/// `trackedInIssues`, `parent`) simply leave the fields as `None`.
+/// When an individual node carries a complete `repository { owner { login }
+/// name }` subfield set, those values populate the resulting
+/// [`RelatedIssue::repo_owner`] / [`RelatedIssue::repo_name`] via
+/// [`RelatedIssue::cross_repo`]. The `trackedByIssues` connection inside
+/// [`FETCH_ISSUE_QUERY`] selects those fields so blocker edges can
+/// disambiguate cross-repo blockers from same-repo blockers (required by
+/// `dep_remove` single-issue edge validation on cross-repo paths — see
+/// `unblock-29p.43`).
+///
+/// Connections that omit the `repository` selection (e.g. `subIssues`,
+/// `trackedInIssues`, `parent`) and nodes whose `repository` subfield is
+/// partial (only `owner` or only `name` present — a malformed GraphQL
+/// response) route through [`RelatedIssue::local`], leaving both repo
+/// identity fields `None`. A partial subfield cannot disambiguate a
+/// cross-repo reference (identification requires the full `(owner, name)`
+/// pair) so treating it as "no identity" is the semantically coherent
+/// fallback.
 fn parse_related_issues(value: &serde_json::Value, key: &str) -> Vec<RelatedIssue> {
     value
         .get(key)
@@ -892,12 +900,19 @@ fn parse_related_issues(value: &serde_json::Value, key: &str) -> Vec<RelatedIssu
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
-                .map(|node| RelatedIssue {
-                    number: json_u64(node, "number"),
-                    title: json_string(node, "title"),
-                    state: parse_issue_state(node),
-                    repo_owner: parse_related_repo_owner(node),
-                    repo_name: parse_related_repo_name(node),
+                .map(|node| {
+                    let number = json_u64(node, "number");
+                    let title = json_string(node, "title");
+                    let state = parse_issue_state(node);
+                    match (
+                        parse_related_repo_owner(node),
+                        parse_related_repo_name(node),
+                    ) {
+                        (Some(owner), Some(name)) => {
+                            RelatedIssue::cross_repo(number, title, state, owner, name)
+                        }
+                        _ => RelatedIssue::local(number, title, state),
+                    }
                 })
                 .collect()
         })
@@ -926,19 +941,21 @@ fn parse_related_repo_name(node: &serde_json::Value) -> Option<String> {
 }
 
 /// Parses the parent issue field into an optional [`RelatedIssue`].
+///
+/// The parent selection does not include `repository { ... }`, so the
+/// result always routes through [`RelatedIssue::local`] — callers
+/// interpret the resulting `None` `repo_owner` / `repo_name` as
+/// "same repo as the containing issue" per the `RelatedIssue` docs.
 fn parse_parent_issue(value: &serde_json::Value) -> Option<RelatedIssue> {
     let parent = value.get("parent")?;
     if parent.is_null() {
         return None;
     }
-    Some(RelatedIssue {
-        number: json_u64(parent, "number"),
-        title: json_string(parent, "title"),
-        state: parse_issue_state(parent),
-        // Parent does not select `repository { ... }` — same-repo semantics.
-        repo_owner: None,
-        repo_name: None,
-    })
+    Some(RelatedIssue::local(
+        json_u64(parent, "number"),
+        json_string(parent, "title"),
+        parse_issue_state(parent),
+    ))
 }
 
 /// Extracts all Projects V2 field values into a name-to-value map.
@@ -1679,12 +1696,22 @@ mod tests {
         assert!(subs[0].repo_name.is_none());
     }
 
-    /// A partial `repository` subfield (owner missing or name missing)
-    /// degrades the corresponding field to `None` without taking the
-    /// other side down with it — defensive parsing, matches the rest of
-    /// the graphql module's "missing field = default" posture.
+    /// A partial `repository` subfield (owner without name, or name
+    /// without owner) cannot identify a cross-repo reference — that
+    /// requires the full `(owner, name)` pair — so the parser routes
+    /// partial nodes through [`RelatedIssue::local`], normalising BOTH
+    /// repo identity fields to `None`. Callers then treat the result
+    /// as "same repo as the containing issue" per `RelatedIssue` docs.
+    ///
+    /// Behaviour change: prior to unblock-29p.66 the parser retained
+    /// the parsed half of a partial subfield (e.g. `repository:
+    /// {name: "only-name"}` → `repo_owner: None, repo_name:
+    /// Some("only-name")`). That state was incoherent because cross-
+    /// repo disambiguation needs both halves; the hardened API surface
+    /// (strict `local` / `cross_repo` helpers, see `unblock-29p.66`)
+    /// makes the normalisation explicit.
     #[test]
-    fn parse_related_issues_partial_repository_leaves_missing_field_none() {
+    fn parse_related_issues_partial_repository_normalises_to_local() {
         let json = serde_json::json!({
             "trackedBy": {
                 "nodes": [
@@ -1706,8 +1733,8 @@ mod tests {
         let blockers = parse_related_issues(&json, "trackedBy");
         assert_eq!(blockers.len(), 2);
         assert!(blockers[0].repo_owner.is_none());
-        assert_eq!(blockers[0].repo_name.as_deref(), Some("only-name"));
-        assert_eq!(blockers[1].repo_owner.as_deref(), Some("only-owner"));
+        assert!(blockers[0].repo_name.is_none());
+        assert!(blockers[1].repo_owner.is_none());
         assert!(blockers[1].repo_name.is_none());
     }
 
