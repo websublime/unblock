@@ -5926,6 +5926,198 @@ async fn close_cascade_survives_open_only_rebuild() {
     assert_eq!(mock.calls().fetch_graph_data(), 2);
 }
 
+/// GAP-15 PRE-close 503 surface regression guard (unblock-29p.63).
+///
+/// The close handler has **two** distinct 503-class error surfaces that
+/// must remain architecturally separated per SPEC §8.2 and the GAP-15
+/// design (unblock-29p.62). The QA pass on unblock-29p.62 flagged this
+/// test as a MINOR RISK: the pre-mutation Phase 0 prime-failure branch
+/// had no direct regression guard, so a refactor that collapsed the two
+/// surfaces into a single post-mutation error would not trip any test.
+///
+/// The two surfaces are:
+///
+/// 1. **Phase 0 cold-cache prime failure (PRE-mutation)** — covered by
+///    THIS test. When the cache is cold and
+///    [`crate::tools::rebuild_cache`] fails inside
+///    `fetch_graph_data` (transient 503 / network error), the cache
+///    stays invalidated and `state.cache.get_graph()` returns `None`
+///    in the `let Some(pre_close_graph) = ...` guard at
+///    `crates/unblock-mcp/src/server.rs:1127`. The handler aborts with
+///    a 503 BEFORE any mutation fires — preserving the "close not
+///    attempted on empty graph" invariant from
+///    `crates/unblock-mcp/src/tools/close.rs:87-92`.
+///
+/// 2. **Post-rebuild reconciliation failure (POST-mutation)** — covered
+///    by `close_surfaces_error_when_rebuild_fails_after_pre_cascade`
+///    above. The mutation DID land, the Phase-2 cascade field-updates
+///    applied best-effort, but the post-close rebuild failed so step 8
+///    `update_status_fields` reconciliation could not run.
+///
+/// This test locks the distinction by asserting:
+///   - The error message references `prime` (pre-mutation path), NOT
+///     `Status reconciliation` (the R3 post-mutation wording).
+///   - `close_issue()` was NEVER called — the mutation is gated behind
+///     the Phase 0 prime success.
+///   - The cache is NOT fresh after the abort — the prime-failure
+///     branch does not falsely claim a rebuild landed.
+///
+/// Fixture: cache is cold at entry (never pushed into state). The first
+/// `fetch_graph_data` stub returns a transient 503, matching the
+/// production "upstream unavailable" scenario during cold boot or after
+/// a prior write invalidated the cache.
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Dual-surface 503 regression guard: positive + negative assertions on wording, plus five mutation-gate witnesses.
+async fn close_surfaces_error_when_phase0_prime_fails() {
+    use rmcp::handler::server::wrapper::Parameters;
+    use unblock_github::errors::GitHubApiSnafu;
+    use unblock_mcp::server::UnblockServer;
+    use unblock_mcp::tools::close::CloseParams;
+
+    let mock = new_mock();
+
+    // Phase 0 cold-cache prime: push a transient 503 so
+    // `rebuild_cache` fails inside `fetch_graph_data`, leaves the cache
+    // invalidated (empty) after logging the error, and the handler's
+    // `let Some(pre_close_graph)` guard at `server.rs:1127` falls
+    // through to the pre-mutation 503 branch. NO other stubs are
+    // queued — any mutation call (fetch_issue, close_issue,
+    // update_field, add_comment_ref) would hit `MockNotStubbed` and
+    // fail the test loudly, which is exactly the behaviour we want
+    // to guard: the close MUST be gated behind the Phase 0 prime.
+    mock.push_fetch_graph_data(Err(GitHubApiSnafu {
+        status: 503_u16,
+        message: "upstream service unavailable".to_owned(),
+    }
+    .build()));
+
+    let server = UnblockServer::new(state_with_mock(Arc::clone(&mock)));
+
+    // Pre-condition: cache is cold at entry — no state pre-population.
+    assert!(
+        !server.state().cache.is_fresh().await,
+        "test prerequisite: cache must be cold so the Phase 0 prime path executes",
+    );
+
+    // `rmcp::Json` does not implement `Debug`, so destructure with
+    // `let...else` rather than `expect_err`.
+    let result = server
+        .close(Parameters(CloseParams {
+            id: 8,
+            reason: None,
+        }))
+        .await;
+    let Err(err) = result else {
+        panic!(
+            "Phase 0 cold-cache prime failure MUST surface as a pre-mutation 503 — the close \
+             cannot proceed without a primed graph (see tools/close.rs module doc, \
+             PRE-close cascade capture phase)"
+        );
+    };
+
+    // 503 → INTERNAL_ERROR per github_error_to_mcp.
+    assert_eq!(err.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
+
+    // AC3: error message wording MUST be distinct from the R3 path
+    // (`Status reconciliation`). The pre-mutation branch at
+    // `server.rs:1132-1140` references `prime the dependency graph`
+    // because the mutation was NOT attempted — this is the semantic
+    // the SPEC §8.2 ordering demands.
+    assert!(
+        err.message.contains("prime the dependency graph"),
+        "Phase 0 error message must reference `prime the dependency graph` (pre-mutation path, \
+         distinct from the R3 post-rebuild wording): {}",
+        err.message,
+    );
+    assert!(
+        err.message.contains("before cascade capture"),
+        "Phase 0 error message must reference `before cascade capture` to identify the PRE-close \
+         ordering requirement: {}",
+        err.message,
+    );
+    assert!(
+        err.message.contains("retry") || err.message.contains("`prime`"),
+        "Phase 0 error message must advise retry or running `prime` first (pre-mutation recovery \
+         hint — NOT `show` like the R3 path): {}",
+        err.message,
+    );
+    // Strict negative: the R3 post-mutation wording MUST NOT appear
+    // here — if it does, the two surfaces have collapsed, which is
+    // the regression this test guards against (AC6: distinction
+    // between the two 503 surfaces must remain visible).
+    assert!(
+        !err.message.contains("Status reconciliation"),
+        "Phase 0 prime-failure message must NOT use the R3 `Status reconciliation` wording — \
+         collapsing the two 503 surfaces breaks the SPEC §8.2 pre-vs-post-mutation contract: {}",
+        err.message,
+    );
+    assert!(
+        !err.message.contains("closed successfully"),
+        "Phase 0 prime-failure message must NOT claim the issue was closed — no mutation fired: \
+         {}",
+        err.message,
+    );
+
+    // AC2: zero mutations fired — the close is strictly gated behind
+    // the Phase 0 prime success. The `MockNotStubbed` fallback on the
+    // unstubbed queues would have tripped the handler into a generic
+    // internal error, but the `close_issue() == 0` assertion locks
+    // the pre-mutation ordering directly.
+    assert_eq!(
+        mock.calls().close_issue(),
+        0,
+        "Phase 0 prime failure MUST abort BEFORE any mutation — close_issue must not be called \
+         when the cache cannot be primed (tools/close.rs:87-92: `close is NOT attempted on an \
+         empty graph`)",
+    );
+    assert_eq!(
+        mock.calls().fetch_issue(),
+        0,
+        "Phase 0 prime failure MUST abort before Phase 1 validation — fetch_issue must not be \
+         called",
+    );
+    assert_eq!(
+        mock.calls().update_field(),
+        0,
+        "Phase 0 prime failure MUST abort before Phase 1 Projects V2 field ladder — update_field \
+         must not be called",
+    );
+    assert_eq!(
+        mock.calls().add_comment_ref(),
+        0,
+        "Phase 0 prime failure MUST abort before the Phase 2 cascade field-update loop — \
+         add_comment_ref must not be called",
+    );
+
+    // The Phase 0 prime was attempted exactly once: `rebuild_cache`
+    // invoked `fetch_graph_data`, which returned the injected Err.
+    // No post-close rebuild round-trip — the handler bailed out
+    // BEFORE reaching `execute_write_tool`.
+    assert_eq!(
+        mock.calls().fetch_graph_data(),
+        1,
+        "exactly one fetch_graph_data round-trip on the prime-failure path: the cold-cache \
+         prime attempt. No post-close rebuild can occur because no mutation was attempted.",
+    );
+
+    // AC4: cache remains invalidated/empty — `rebuild_cache`
+    // invalidates the cache BEFORE the network call, so a failed
+    // fetch leaves it empty. This is the contract of
+    // `crates/unblock-mcp/src/tools/mod.rs:162` (rebuild_cache).
+    // The prime-failure branch must NOT falsely claim a rebuild
+    // landed.
+    assert!(
+        !server.state().cache.is_fresh().await,
+        "cache must stay cold after the Phase 0 prime failure — no false rebuild claim (AC4 / \
+         §14 Invariant 8: no write leaves cache inconsistent)",
+    );
+    assert!(
+        server.state().cache.get_graph().await.is_none(),
+        "cache graph must stay None after the Phase 0 prime failure — the `let Some(pre_close_graph)` \
+         guard at server.rs:1127 is the exact branch under test",
+    );
+}
+
 // ── depends tool: integration tests (unblock-29p.13) ──────────────────
 
 /// Build a [`ProjectFieldIds`] fixture with the `"blocked"` Status option
