@@ -291,8 +291,13 @@ async fn claim_dispatches_through_dyn_vtable() {
     let mock = new_mock();
     // claim uses execute_write_tool → fetch_issue, add_comment, rebuild via
     // fetch_graph_data. field_ids returns Some so the handler enters the
-    // project-field update branch. With empty option maps, only the
-    // unconditional Agent text-field update calls update_field.
+    // project-field update branch. Under `empty_field_ids()` the Status
+    // rung is gated off (its option map is empty so `get("in_progress")`
+    // returns None), but the two UNCONDITIONAL rungs fire:
+    //   1) Agent — a plain text field, no option-map gate.
+    //   2) Claimed At — a `FieldValue::Date` field, no option-map gate,
+    //      added in unblock-29p.64 to satisfy SPEC §8.1 step 3.
+    // So `update_field` must be stubbed TWICE and the counter asserted == 2.
     mock.push_fetch_issue(Ok(make_issue(7)));
     mock.push_add_comment(Ok(
         "https://github.com/acme/widgets/issues/7#comment-1".to_owned()
@@ -304,6 +309,12 @@ async fn claim_dispatches_through_dyn_vtable() {
     }));
     mock.push_get_project_item_id(Ok("PVTI_claim".to_owned()));
     // Agent field update is unconditional (not gated by options map).
+    mock.push_update_field(Ok(()));
+    // Claimed At field update (SPEC §8.1 step 3) is unconditional as well
+    // — it serializes through `FieldValue::Date` and does not consult an
+    // option map. Without this stub the Claimed At rung would surface
+    // `MockNotStubbed` which the handler swallows via `tracing::warn`,
+    // leaving the counter at 1 and hiding a dropped ladder rung.
     mock.push_update_field(Ok(()));
     mock.push_fetch_graph_data(Ok((vec![make_issue(7)], vec![])));
 
@@ -324,9 +335,17 @@ async fn claim_dispatches_through_dyn_vtable() {
     assert_eq!(mock.calls().field_ids(), 1);
     assert_eq!(mock.calls().resolve_project_info(), 1);
     assert_eq!(mock.calls().get_project_item_id(), 1);
-    // Only the Agent text-field update fires; option-gated fields (Status)
-    // are skipped because empty_field_ids() has empty option maps.
-    assert_eq!(mock.calls().update_field(), 1);
+    // Agent (text) and Claimed At (Date) updates fire unconditionally —
+    // both bypass the option-map gate that `empty_field_ids()` would
+    // otherwise use to skip Status. This == 2 assertion pins SPEC §8.1
+    // step 3 (three writes) modulo the option-gated Status rung which
+    // is skipped here BY DESIGN because the fixture has no options.
+    assert_eq!(
+        mock.calls().update_field(),
+        2,
+        "empty_field_ids() skips Status (option-gated) but Agent + Claimed At \
+         are unconditional per SPEC §8.1 step 3 — expected 2 update_field calls",
+    );
 }
 
 #[tokio::test]

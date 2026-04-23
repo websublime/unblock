@@ -6407,8 +6407,9 @@ async fn comment_rejects_empty_body_without_network_calls() {
 /// (server.rs:928-959) resolves `field_ids.status.options["in_progress"]`
 /// and fires a real `update_field` call for Status. The Agent field has
 /// no option map (it is a plain text field) and always fires a second
-/// `update_field` regardless of the Status option set — so the happy
-/// path expects `update_field == 2`.
+/// `update_field`, and the Claimed At Date field (SPEC §8.1 step 3) fires
+/// a third unconditionally — so the happy path expects
+/// `update_field == 3`.
 fn claim_field_ids_with_in_progress() -> unblock_github::projects::ProjectFieldIds {
     use std::collections::HashMap;
     use unblock_github::projects::{FieldMeta, ProjectFieldIds};
@@ -6469,18 +6470,19 @@ fn claim_fixture_issue(number: u64) -> unblock_core::types::Issue {
 }
 
 /// Happy path (spec §8.1): an open, ready, unblocked, unclaimed issue
-/// passes `validate_claimable`, the Projects V2 ladder fires TWO
-/// `update_field` calls (`Status=in_progress` + `Agent=<name>`), the
-/// claim comment is posted, and `execute_write_tool` rebuilds the
-/// cache.
+/// passes `validate_claimable`, the Projects V2 ladder fires THREE
+/// `update_field` calls (`Status=in_progress` + `Agent=<name>` +
+/// `Claimed At=<today>`), the claim comment is posted, and
+/// `execute_write_tool` rebuilds the cache.
 ///
 /// Asserts:
 /// - `issue_number == 5`, `agent == "alice"`, `claimed_at` is recent,
-/// - call counters: `fetch_issue = 1`, `update_field = 2` (Status +
-///   Agent — RISK from the bead investigation: if only one `Ok()` is
-///   pushed the second call silently surfaces `MockNotStubbed` which
-///   the handler swallows via `tracing::warn`; stubbing two and
-///   asserting `== 2` catches that foot-gun),
+/// - call counters: `fetch_issue = 1`, `update_field = 3` (Status +
+///   Agent + Claimed At — RISK from the bead investigation: if only
+///   two `Ok()`s are pushed the third call silently surfaces
+///   `MockNotStubbed` which the handler swallows via `tracing::warn`;
+///   stubbing three and asserting `== 3` catches regressions that
+///   drop the Claimed At write — see SPEC §8.1 step 3),
 /// - `add_comment = 1`, `fetch_graph_data = 1` (rebuild).
 #[tokio::test]
 async fn claim_unblocked_open_issue_sets_in_progress_and_posts_comment() {
@@ -6492,12 +6494,13 @@ async fn claim_unblocked_open_issue_sets_in_progress_and_posts_comment() {
     // Step 1 fetch: returns the ready claim fixture.
     mock.push_fetch_issue(Ok(claim_fixture_issue(5)));
 
-    // Step 6 Projects V2 ladder — Status → in_progress AND Agent → "alice".
-    // RISK from investigation: TWO update_field calls fire; if we only
-    // queue one Ok() the second call surfaces MockNotStubbed which the
-    // handler SWALLOWS via tracing::warn at server.rs:945/958. Pushing
-    // two Ok()s and asserting the counter == 2 is the only way to
-    // detect a regression that drops the Agent write.
+    // Step 6 Projects V2 ladder — Status → in_progress, Agent → "alice",
+    // Claimed At → today (SPEC §8.1 step 3 — three writes).
+    // RISK from investigation: THREE update_field calls fire; if we
+    // only queue two Ok()s the third call surfaces MockNotStubbed which
+    // the handler SWALLOWS via tracing::warn at the Claimed-At rung.
+    // Pushing three Ok()s and asserting the counter == 3 is the only
+    // way to detect a regression that drops the Claimed At write.
     mock.push_field_ids(Some(claim_field_ids_with_in_progress()));
     mock.push_resolve_project_info(Ok(ProjectInfo {
         id: "PVT_1".to_owned(),
@@ -6506,6 +6509,7 @@ async fn claim_unblocked_open_issue_sets_in_progress_and_posts_comment() {
     mock.push_get_project_item_id(Ok("PVTI_5".to_owned()));
     mock.push_update_field(Ok(())); // Status = in_progress
     mock.push_update_field(Ok(())); // Agent = alice
+    mock.push_update_field(Ok(())); // Claimed At = <today>
 
     // Step 7 claim comment.
     mock.push_add_comment(Ok(
@@ -6542,8 +6546,9 @@ async fn claim_unblocked_open_issue_sets_in_progress_and_posts_comment() {
     );
 
     // Call-counter contract. These are the load-bearing assertions: the
-    // field ladder fires TWICE (Status + Agent), the claim comment lands
-    // exactly once, and the cache is rebuilt exactly once.
+    // field ladder fires THREE TIMES (Status + Agent + Claimed At per
+    // SPEC §8.1 step 3), the claim comment lands exactly once, and the
+    // cache is rebuilt exactly once.
     let calls = mock.calls();
     assert_eq!(
         calls.fetch_issue(),
@@ -6552,8 +6557,8 @@ async fn claim_unblocked_open_issue_sets_in_progress_and_posts_comment() {
     );
     assert_eq!(
         calls.update_field(),
-        2,
-        "spec §8.1 step 6 fires update_field TWICE: Status=in_progress + Agent=<name>",
+        3,
+        "spec §8.1 step 3 fires update_field THREE times: Status=in_progress + Agent=<name> + Claimed At=<today>",
     );
     assert_eq!(
         calls.add_comment(),
