@@ -52,7 +52,9 @@ use unblock_core::cache::GraphCache;
 use unblock_core::client::{AgentClient, AgentKind};
 use unblock_core::config::Config;
 use unblock_core::detection::ClientDetector;
-use unblock_core::errors::{CircularDependencySnafu, InvalidIssueRefSnafu, IssueClosedSnafu};
+use unblock_core::errors::{
+    CircularDependencySnafu, DuplicateDependencySnafu, InvalidIssueRefSnafu, IssueClosedSnafu,
+};
 use unblock_core::types::IssueState;
 use unblock_github::GitHubApi;
 use unblock_github::projects::FieldValue;
@@ -1542,7 +1544,77 @@ impl UnblockServer {
             }
         }
 
-        // Step 3: Add blocking relationship and rebuild cache via execute_write_tool.
+        // Step 3 (SPEC §8.4 step 3): Duplicate-edge detection using cached
+        // graph. Mirrors the Local/Local scope of the cycle-detection branch
+        // above — the cache only covers the configured project's repo, so
+        // client-side duplicate detection is only sound when BOTH endpoints
+        // are local. Cross-repo pairs fall through to GitHub's server-side
+        // rejection at mutation time, matching the cycle-detection posture.
+        //
+        // The check composes two existing public `Graph` APIs rather than
+        // adding a new `edge_exists` helper to `unblock-core`:
+        //   1. `node_map().get(&qid)` resolves both endpoints to
+        //      `NodeIndex` (same lookup `would_create_cycle` performs
+        //      internally at graph.rs:341-346).
+        //   2. `inner_graph().contains_edge(src_idx, tgt_idx)` is
+        //      petgraph's O(E)-to-O(1) edge-existence probe per edge
+        //      (constant-factor for typical project sizes).
+        // If either node is absent from the cached graph the edge cannot
+        // exist in the cache by construction, so the check short-circuits
+        // false and we fall through to the mutation — mirroring the
+        // `would_create_cycle` behaviour on unknown nodes at
+        // graph.rs:341-346.
+        match (&source_ref, &target_ref) {
+            (
+                unblock_core::types::IssueRef::Local(source_number),
+                unblock_core::types::IssueRef::Local(target_number),
+            ) => {
+                if let Some(graph) = state.cache.get_graph().await {
+                    let source_qid = unblock_core::types::QualifiedId::new(
+                        client.owner(),
+                        client.repo(),
+                        *source_number,
+                    );
+                    let target_qid = unblock_core::types::QualifiedId::new(
+                        client.owner(),
+                        client.repo(),
+                        *target_number,
+                    );
+                    if let (Some(&source_idx), Some(&target_idx)) = (
+                        graph.node_map().get(&source_qid),
+                        graph.node_map().get(&target_qid),
+                    ) && graph.inner_graph().contains_edge(source_idx, target_idx)
+                    {
+                        // Edge already exists (`source → target` — source
+                        // is already blocked by target). SPEC §8.4 step 3
+                        // mandates explicit `DuplicateDependency` rejection
+                        // so callers can distinguish legitimate retry from
+                        // erroneous double-call. `DuplicateDependency` maps
+                        // to HTTP 409 in `DomainError::status_code` →
+                        // `INVALID_PARAMS` via `github_error_to_mcp`
+                        // (errors.rs:100), consistent with the
+                        // `CircularDependency` mapping above.
+                        return Err(crate::errors::github_error_to_mcp(
+                            DuplicateDependencySnafu {
+                                source: unblock_core::types::IssueRef::Local(*source_number),
+                                target: unblock_core::types::IssueRef::Local(*target_number),
+                            }
+                            .build()
+                            .into(),
+                        ));
+                    }
+                }
+            }
+            _ => {
+                tracing::warn!(
+                    source = %source_ref,
+                    target = %target_ref,
+                    "Cross-repo endpoint: client-side duplicate-edge detection skipped (graph covers configured repo only); relying on server-side rejection."
+                );
+            }
+        }
+
+        // Step 4: Add blocking relationship and rebuild cache via execute_write_tool.
         execute_write_tool(state, || {
             let client = Arc::clone(&client);
             let source_ref = source_ref.clone();
@@ -1552,7 +1624,7 @@ impl UnblockServer {
         })
         .await?;
 
-        // Step 4: Update Projects V2 fields on source issue (Status=Blocked).
+        // Step 5: Update Projects V2 fields on source issue (Status=Blocked).
         // Only applies when source is local to the configured project: the
         // Projects V2 item lookup (`get_project_item_id`) is scoped to the
         // configured project, so cross-repo sources cannot have their
