@@ -6266,6 +6266,107 @@ async fn depends_rejects_cycle_when_warm_cache_has_reverse_edge() {
     );
 }
 
+/// Duplicate-edge detection (spec §8.4 step 3): warm cache already
+/// contains the edge `#42 → #99` (i.e. `#42` is already blocked by
+/// `#99`). Trying to add `#42 → #99` again MUST be rejected with a
+/// `DuplicateDependency` error (status 409 → `INVALID_PARAMS`) BEFORE
+/// calling the mutation. This prevents the tool from conflating a
+/// legitimate caller retry with an erroneous double-call — both of
+/// which used to return an idempotent success at the GitHub level.
+///
+/// Placed adjacent to `depends_rejects_cycle_when_warm_cache_has_
+/// reverse_edge` because the two tests share a skeleton (warm cache +
+/// stubbed `fetch_issue_ref` + assertions that no mutation or rebuild
+/// fires) and exercise the same Local/Local pre-mutation-check block
+/// in the handler (server.rs duplicate-edge branch, immediately after
+/// the cycle-detection branch).
+///
+/// DECISION: No companion entry in `dyn_dispatch.rs`. The existing
+/// `depends_dispatches_through_dyn_vtable` already covers the depends
+/// vtable dispatch path for the happy case. The duplicate-edge
+/// rejection short-circuits on the warm-cache graph BEFORE any
+/// `GitHubApi` vtable method is called (no `fetch_issue_ref`,
+/// `add_blocked_by_refs`, or `fetch_graph_data` invocation), so a
+/// rejection-path entry would add no distinct vtable exercise. The
+/// rejection path is load-bearing at the handler level and is covered
+/// here.
+#[tokio::test]
+async fn depends_rejects_duplicate_edge_when_warm_cache_has_same_edge() {
+    use unblock_mcp::tools::depends::DependsParams;
+
+    let mock = new_mock();
+    // Step 1 fetch precedes the duplicate-edge check (server.rs:1494-1497
+    // runs before the duplicate-edge branch), so we must stub it —
+    // otherwise the test would fail on `MockNotStubbed` before reaching
+    // the duplicate-edge assertion.
+    mock.push_fetch_issue_ref(Ok(depends_fixture_issue(42)));
+
+    let state = state_with_mock(Arc::clone(&mock));
+    // Warm cache with the EXISTING edge #42 → #99 (i.e. #42 is already
+    // blocked by #99). Re-issuing `depends(source=42, target=99)`
+    // attempts to add the SAME edge and must be rejected.
+    let pre_issues = vec![depends_fixture_issue(42), depends_fixture_issue(99)];
+    let pre_edges = vec![BlockingEdge {
+        source: QualifiedId::new("acme", "widgets", 42),
+        target: QualifiedId::new("acme", "widgets", 99),
+    }];
+    let pre_graph = DependencyGraph::build(&pre_issues, &pre_edges);
+    let pre_ready_set = pre_graph.compute_ready_set(&pre_issues, "acme", "widgets");
+    state
+        .cache
+        .update(pre_issues, pre_ready_set, pre_graph)
+        .await;
+
+    let server = UnblockServer::new(state);
+    let Err(err) = server
+        .depends(Parameters(DependsParams {
+            source: "42".to_owned(),
+            target: "99".to_owned(),
+        }))
+        .await
+    else {
+        panic!("duplicate edge #42 → #99 must be rejected per SPEC §8.4 step 3")
+    };
+
+    // `DuplicateDependency` has status 409 which `github_error_to_mcp`
+    // routes to `INVALID_PARAMS` (errors.rs:100-101) — same terminal
+    // error code as the cycle-detection branch (422) so agents get a
+    // consistent INVALID_PARAMS for any pre-mutation graph-state
+    // rejection.
+    assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert!(
+        err.message.to_lowercase().contains("already")
+            || err.message.to_lowercase().contains("duplicate"),
+        "duplicate rejection message must mention the pre-existing edge: {}",
+        err.message,
+    );
+
+    // Fetch ran (step 1 precedes the duplicate-edge check), but NO
+    // mutation and NO rebuild. Status ladder must NOT fire — the
+    // rejection must be purely pre-mutation.
+    let calls = mock.calls();
+    assert_eq!(
+        calls.fetch_issue_ref(),
+        1,
+        "step 1 fetch precedes the duplicate-edge check and must have run",
+    );
+    assert_eq!(
+        calls.add_blocked_by_refs(),
+        0,
+        "duplicate-edge detection must short-circuit BEFORE the mutation",
+    );
+    assert_eq!(
+        calls.fetch_graph_data(),
+        0,
+        "no mutation → no post-mutation rebuild",
+    );
+    assert_eq!(
+        calls.update_field(),
+        0,
+        "no mutation → no Status=blocked ladder",
+    );
+}
+
 // ── comment tool: integration tests (unblock-29p.13) ─────────────────
 
 /// Happy path (spec §8.8): posting a comment on an existing issue fetches
