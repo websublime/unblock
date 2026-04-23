@@ -1515,6 +1515,25 @@ mod tests {
             ]
         }
 
+        /// Strategy bundling `(IssueState, Priority, Status)` for per-issue
+        /// attribute vectors shared across proptests. Each tuple position is
+        /// drawn independently from its corresponding `arb_*` strategy, so
+        /// the per-position distribution over `(state, priority, status)` is
+        /// the cross-product of the individual oneof choices — identical to
+        /// sampling each component separately.
+        fn arb_issue_attrs() -> impl Strategy<Value = (IssueState, Priority, Status)> {
+            (arb_issue_state(), arb_priority(), arb_status())
+        }
+
+        /// Predicate filtering random `(source, target)` pairs to valid
+        /// non-self-loop edges that reference only generated issue numbers
+        /// `1..=num_issues`. Shared across proptests that build edge sets
+        /// over the `(1..100, 1..100)` (or `(1..50, 1..50)`) sample space.
+        fn is_valid_edge(edge: &(u64, u64), num_issues: u64) -> bool {
+            let (s, t) = *edge;
+            s != t && s <= num_issues && t <= num_issues
+        }
+
         proptest! {
             #[test]
             fn ready_set_never_contains_issue_with_open_blocker(
@@ -1942,7 +1961,7 @@ mod tests {
 
                 let blocking_edges: Vec<BlockingEdge> = edges
                     .into_iter()
-                    .filter(|(s, t)| *s != *t && *s <= num_issues && *t <= num_issues)
+                    .filter(|e| is_valid_edge(e, num_issues))
                     .map(|(s, t)| edge(s, t))
                     .collect();
 
@@ -1992,19 +2011,26 @@ mod tests {
             /// construction because the graph engine filters them out at
             /// the SCC level (see `detect_all_cycles` doc).
             ///
-            /// Strategy: pick `ring_len ∈ [2, num_issues]`; build edges
-            /// `i → i+1 mod ring_len` among the first `ring_len` nodes;
-            /// add random noise edges; call `detect_all_cycles()`; assert
-            /// at least one returned SCC fully contains the ring nodes.
+            /// Strategy: sample `num_issues ∈ [2, 50)` first, then
+            /// `prop_flat_map` over it to draw `ring_len ∈ [2, num_issues]`
+            /// and a noise-edge vector. Sampling `ring_len` conditionally on
+            /// `num_issues` keeps the generator space dense (no `.min()`
+            /// clamp that discards samples) and lets proptest shrink the
+            /// ring length directly. Build edges `i → i+1 mod ring_len`
+            /// among the first `ring_len` nodes; add random noise edges;
+            /// call `detect_all_cycles()`; assert at least one returned SCC
+            /// fully contains the ring nodes.
             #[test]
             fn detect_all_cycles_finds_injected_ring(
-                num_issues in 2_u64..50,
-                ring_len in 2_u64..50,
-                noise_edges in proptest::collection::vec((1_u64..50, 1_u64..50), 0..80),
+                (num_issues, ring_len, noise_edges) in (2_u64..50).prop_flat_map(|n| (
+                    Just(n),
+                    2_u64..=n,
+                    proptest::collection::vec((1_u64..50, 1_u64..50), 0..80),
+                )),
             ) {
-                let ring_len = ring_len.min(num_issues);
-                // With num_issues ≥ 2 and ring_len clamped to num_issues, the
-                // ring always has ≥ 2 nodes — completeness of multi-node cycles.
+                // `num_issues` ≥ 2 and `ring_len` is sampled from
+                // `[2, num_issues]`, so the ring always has ≥ 2 distinct
+                // nodes — the minimum for multi-node cycle completeness.
 
                 let issues: Vec<Issue> = (1..=num_issues)
                     .map(|n| make_issue(n, IssueState::Open, Priority::P2))
@@ -2019,8 +2045,9 @@ mod tests {
                     .collect();
 
                 // Add noise that stays in-bounds and non-self-loop.
-                for (s, t) in noise_edges {
-                    if s != t && s <= num_issues && t <= num_issues {
+                for pair in noise_edges {
+                    if is_valid_edge(&pair, num_issues) {
+                        let (s, t) = pair;
                         blocking_edges.push(edge(s, t));
                     }
                 }
@@ -2065,17 +2092,16 @@ mod tests {
             #[test]
             fn ready_set_is_deterministic(
                 num_issues in 1_u64..100,
-                issue_states in proptest::collection::vec(arb_issue_state(), 1..100),
-                issue_priorities in proptest::collection::vec(arb_priority(), 1..100),
-                issue_statuses in proptest::collection::vec(arb_status(), 1..100),
+                issue_attrs in proptest::collection::vec(arb_issue_attrs(), 1..100),
                 edges in proptest::collection::vec((1_u64..100, 1_u64..100), 0..200),
             ) {
                 let issues: Vec<Issue> = (1..=num_issues)
                     .map(|n| {
                         let idx = usize::try_from(n - 1).expect("issue number fits in usize");
-                        let state = issue_states.get(idx).copied().unwrap_or(IssueState::Open);
-                        let priority = issue_priorities.get(idx).copied().unwrap_or(Priority::P2);
-                        let status = issue_statuses.get(idx).copied().unwrap_or(Status::Ready);
+                        let (state, priority, status) = issue_attrs
+                            .get(idx)
+                            .copied()
+                            .unwrap_or((IssueState::Open, Priority::P2, Status::Ready));
                         let mut issue = make_issue(n, state, priority);
                         issue.status = status;
                         issue
@@ -2084,7 +2110,7 @@ mod tests {
 
                 let blocking_edges: Vec<BlockingEdge> = edges
                     .into_iter()
-                    .filter(|(s, t)| *s != *t && *s <= num_issues && *t <= num_issues)
+                    .filter(|e| is_valid_edge(e, num_issues))
                     .map(|(s, t)| edge(s, t))
                     .collect();
 
@@ -2126,17 +2152,16 @@ mod tests {
             #[test]
             fn graph_construction_is_idempotent(
                 num_issues in 1_u64..100,
-                issue_states in proptest::collection::vec(arb_issue_state(), 1..100),
-                issue_priorities in proptest::collection::vec(arb_priority(), 1..100),
-                issue_statuses in proptest::collection::vec(arb_status(), 1..100),
+                issue_attrs in proptest::collection::vec(arb_issue_attrs(), 1..100),
                 edges in proptest::collection::vec((1_u64..100, 1_u64..100), 0..200),
             ) {
                 let issues: Vec<Issue> = (1..=num_issues)
                     .map(|n| {
                         let idx = usize::try_from(n - 1).expect("issue number fits in usize");
-                        let state = issue_states.get(idx).copied().unwrap_or(IssueState::Open);
-                        let priority = issue_priorities.get(idx).copied().unwrap_or(Priority::P2);
-                        let status = issue_statuses.get(idx).copied().unwrap_or(Status::Ready);
+                        let (state, priority, status) = issue_attrs
+                            .get(idx)
+                            .copied()
+                            .unwrap_or((IssueState::Open, Priority::P2, Status::Ready));
                         let mut issue = make_issue(n, state, priority);
                         issue.status = status;
                         issue
@@ -2145,7 +2170,7 @@ mod tests {
 
                 let blocking_edges: Vec<BlockingEdge> = edges
                     .into_iter()
-                    .filter(|(s, t)| *s != *t && *s <= num_issues && *t <= num_issues)
+                    .filter(|e| is_valid_edge(e, num_issues))
                     .map(|(s, t)| edge(s, t))
                     .collect();
 
