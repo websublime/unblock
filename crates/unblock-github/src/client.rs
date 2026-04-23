@@ -54,10 +54,17 @@ impl GitHubClient {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::GitRemote`] if repo resolution fails, or if the HTTP
-    /// client cannot be built (e.g. the token is not a valid HTTP header
-    /// value — the invalid-header path is surfaced via `build_http_client`
-    /// as [`Error::GitRemote`] with status 500).
+    /// Returns one of the following, depending on which step fails:
+    ///
+    /// - [`Error::GitRemote`] if repo resolution fails (missing/invalid
+    ///   `UNBLOCK_REPO`, unreadable `.git/config`, or an origin URL that does
+    ///   not match the configured GitHub host).
+    /// - [`Error::GitRemote`] if the token bytes are not a valid HTTP header
+    ///   value — `HeaderValue::from_str` rejects the `Authorization: Bearer
+    ///   {token}` assembly inside `build_http_client`.
+    /// - [`Error::GitHubUnavailable`] if `reqwest::Client::builder().build()`
+    ///   fails inside `build_http_client` (TLS backend initialisation or other
+    ///   HTTP-client configuration error).
     #[allow(clippy::unused_async)] // Async signature required by callers; resolve_project_info() is separate.
     pub async fn new(config: &Config) -> Result<Self, Error> {
         let http = Self::build_http_client(&config.token)?;
@@ -94,10 +101,19 @@ impl GitHubClient {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::GitRemote`] if the HTTP client cannot be built
-    /// (e.g. the token is not a valid HTTP header value — the
-    /// invalid-header path is surfaced via `build_http_client` as
-    /// [`Error::GitRemote`] with status 500).
+    /// Returns one of the following, depending on which step fails inside
+    /// `build_http_client`:
+    ///
+    /// - [`Error::GitRemote`] if the token bytes are not a valid HTTP header
+    ///   value — `HeaderValue::from_str` rejects the `Authorization: Bearer
+    ///   {token}` assembly.
+    /// - [`Error::GitHubUnavailable`] if `reqwest::Client::builder().build()`
+    ///   fails (TLS backend initialisation or other HTTP-client configuration
+    ///   error).
+    ///
+    /// Unlike [`GitHubClient::new`], this constructor never touches the
+    /// repo-resolution path, so it does not surface [`Error::GitRemote`] for
+    /// missing/invalid `UNBLOCK_REPO` or unreadable `.git/config`.
     #[allow(clippy::unused_async)] // Async signature kept symmetric with `new`.
     pub async fn with_repo(
         config: &Config,
