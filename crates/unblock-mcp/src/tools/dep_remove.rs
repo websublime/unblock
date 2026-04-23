@@ -314,11 +314,28 @@ async fn probe_edge_via_fetch(
         .fetch_issue_ref(source_ref)
         .await
         .map_err(github_error_to_mcp)?;
+    let enclosing_repo = (source_qid.owner.as_str(), source_qid.repo.as_str());
     let present = issue.blocked_by.iter().any(|blocker| {
         // When the GraphQL selection omitted `repository { ... }` (e.g.
         // same-repo blocker default today), `repo_owner` / `repo_name`
         // are `None` — treat `None` as "same repo as the fetched source"
         // per `RelatedIssue` contract.
+        //
+        // Emit a structured debug trace whenever the None-means-same-repo
+        // convention is actually invoked (either side missing). This
+        // exists so ops can detect GraphQL schema drift or partial-parse
+        // failures from log aggregation without requiring a code change —
+        // silent misclassification of a cross-repo blocker as local would
+        // otherwise cause incorrect `dep_remove` decisions (bead
+        // `unblock-29p.57`).
+        if blocker.repo_owner.is_none() || blocker.repo_name.is_none() {
+            tracing::debug!(
+                target: "dep_remove.probe",
+                issue_number = blocker.number,
+                enclosing_repo = ?enclosing_repo,
+                "trackedBy entry missing repo identity — applying None-means-same-repo convention"
+            );
+        }
         let owner = blocker
             .repo_owner
             .as_deref()
