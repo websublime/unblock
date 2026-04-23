@@ -332,7 +332,8 @@ async fn probe_edge_via_fetch(
             tracing::debug!(
                 target: "dep_remove.probe",
                 issue_number = blocker.number,
-                enclosing_repo = ?enclosing_repo,
+                enclosing_owner = %enclosing_repo.0,
+                enclosing_repo = %enclosing_repo.1,
                 "trackedBy entry missing repo identity — applying None-means-same-repo convention"
             );
         }
