@@ -922,9 +922,19 @@ impl UnblockServer {
                     blocked_by: issue.blocked_by.clone(),
                     defer_until: issue.defer_until,
                 };
-                validate_claimable(&candidate, Utc::now().date_naive())?;
+                // Capture `now` once and reuse across the Projects V2 ladder,
+                // the claim comment, and the response payload. This guarantees
+                // that SPEC §8.1 step 3 "Claimed At → now", the claim-comment
+                // timestamp, and `ClaimResult::claimed_at` are byte-for-byte
+                // consistent — a single authoritative wall-clock read.
+                let now = Utc::now();
+                validate_claimable(&candidate, now.date_naive())?;
 
-                // Step 6: Update Projects V2 fields.
+                // Step 6 (SPEC §8.1 step 3): Update Projects V2 fields in the
+                // three-write ladder — Status, Agent, Claimed At. Each rung
+                // logs on failure and continues so a flaky non-Status write
+                // does not block the claim (matches the existing swallow-
+                // and-warn posture of the Status and Agent rungs).
                 if let Some(field_ids) = client.field_ids().await {
                     if let Ok(project_info) = client.resolve_project_info().await {
                         if let Ok(item_id) = client
@@ -957,6 +967,25 @@ impl UnblockServer {
                             {
                                 tracing::warn!(error = %e, "Failed to set Agent field");
                             }
+
+                            // Claimed At -> now.date_naive()
+                            // Projects V2 `Date` field — serializes to ISO
+                            // 8601 YYYY-MM-DD per `FieldValue::Date` contract
+                            // (projects.rs:98-99). Uses the same `now`
+                            // captured above so the date on the Projects V2
+                            // field matches the response payload and the
+                            // claim-comment timestamp.
+                            if let Err(e) = client
+                                .update_field(
+                                    &project_info.id,
+                                    &item_id,
+                                    &field_ids.claimed_at,
+                                    &FieldValue::Date(now.date_naive()),
+                                )
+                                .await
+                            {
+                                tracing::warn!(error = %e, "Failed to set Claimed At field");
+                            }
                         } else {
                             tracing::warn!(
                                 "Failed to get project item ID — fields will not be set"
@@ -972,7 +1001,6 @@ impl UnblockServer {
                 }
 
                 // Step 7: Post claim comment.
-                let now = Utc::now();
                 let comment_body =
                     format!("\u{1F916} Claimed by {agent_name} at {}", now.to_rfc3339());
                 if let Err(e) = client.add_comment(issue_number, comment_body).await {
