@@ -260,12 +260,35 @@ pub struct IssueComment {
 ### 2.12 `RelatedIssue`
 
 ```rust
+#[non_exhaustive]
 pub struct RelatedIssue {
     pub number: u64,
     pub title: String,
     pub state: IssueState,
+    pub repo_owner: Option<String>,
+    pub repo_name: Option<String>,
+}
+
+impl RelatedIssue {
+    pub fn local(number: u64, title: impl Into<String>, state: IssueState) -> Self;
+    pub fn cross_repo(
+        number: u64,
+        title: impl Into<String>,
+        state: IssueState,
+        owner: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Self;
 }
 ```
+
+**Construction.** `RelatedIssue` is `#[non_exhaustive]`; callers build
+instances through the `local` / `cross_repo` helpers (or via
+`..Default::default()` at extension points). `local` leaves `repo_owner`
+/ `repo_name` as `None`, which callers MUST interpret as "same repo as
+the containing issue" (the "None = same-repo-as-enclosing" convention).
+`cross_repo` takes an explicit `(owner, name)` pair for cross-repository
+relations that need to be disambiguated from same-repo relations with the
+same number (SPEC §11.4, unblock-29p.43).
 
 ### 2.13 `TraversalDirection`
 

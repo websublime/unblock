@@ -199,17 +199,13 @@ mod tests {
     }
 
     /// Build a `RelatedIssue` for testing blockers.
+    ///
+    /// Claim tests target local blockers under the configured repo, so
+    /// this uses [`RelatedIssue::local`] — leaving `repo_owner` /
+    /// `repo_name` as `None` (the "same-repo-as-enclosing" convention
+    /// per `RelatedIssue` docs).
     fn blocker(number: u64, state: IssueState) -> RelatedIssue {
-        RelatedIssue {
-            number,
-            title: format!("Blocker #{number}"),
-            state,
-            // Claim tests target local blockers under the configured repo —
-            // leave repo identity unset (None = same-repo-as-enclosing per
-            // `RelatedIssue` docs).
-            repo_owner: None,
-            repo_name: None,
-        }
+        RelatedIssue::local(number, format!("Blocker #{number}"), state)
     }
 
     fn today() -> NaiveDate {

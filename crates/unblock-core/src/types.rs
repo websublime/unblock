@@ -186,11 +186,24 @@ pub struct Issue {
 ///
 /// Separate from our workflow [`Status`] — GitHub only tracks Open/Closed,
 /// while `Status` provides finer-grained workflow states.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+///
+/// # Default
+///
+/// `Default::default()` returns [`IssueState::Closed`]. This is a fail-safe
+/// choice: if a default is accidentally produced (e.g. via serde round-trip
+/// of a partial frame or [`RelatedIssue::default()`]), treating the issue as
+/// closed prevents downstream workflow code from claiming or acting on an
+/// issue it should not. Defaulting to `Open` would risk false workflow
+/// activation.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum IssueState {
     /// The issue is open and active.
     Open,
     /// The issue has been closed.
+    ///
+    /// Chosen as the [`Default`] variant — see the enum-level docs for the
+    /// fail-safe rationale.
+    #[default]
     Closed,
 }
 
@@ -368,6 +381,22 @@ impl fmt::Display for PipelineStage {
 /// parent issues, and sub-issues returned by `fetch_issue()`.
 /// Contains only the fields available from nested GraphQL fragments.
 ///
+/// # Construction
+///
+/// This struct is `#[non_exhaustive]`, so callers cannot build it with
+/// struct-literal syntax. Use one of the provided helpers:
+///
+/// - [`RelatedIssue::local`] — same-repo-as-enclosing-issue case (leaves
+///   `repo_owner` / `repo_name` as `None`). Matches the ~90% of call
+///   sites that don't need repo disambiguation.
+/// - [`RelatedIssue::cross_repo`] — cross-repository relation with an
+///   explicit `owner` / `name` pair.
+///
+/// [`Default`] is implemented for extension points (FRU via
+/// `..Default::default()`) and for serde round-trip of partial frames.
+/// Prefer the named helpers at construction sites — `Default` is a
+/// safety net, not the recommended path.
+///
 /// # Repo identity (`repo_owner` / `repo_name`)
 ///
 /// The GitHub `trackedByIssues` connection can return blockers from a
@@ -380,7 +409,8 @@ impl fmt::Display for PipelineStage {
 /// GraphQL selection omits `repository { ... }`, these fields remain
 /// `None` — the caller MUST treat `None` as "unknown / assume
 /// same-repo-as-enclosing-issue" to preserve backwards compatibility.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RelatedIssue {
     /// GitHub issue number.
     pub number: u64,
@@ -398,6 +428,57 @@ pub struct RelatedIssue {
     /// "same repo as the containing issue".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo_name: Option<String>,
+}
+
+impl RelatedIssue {
+    /// Build a same-repo-as-enclosing-issue relation.
+    ///
+    /// Leaves `repo_owner` and `repo_name` as `None`, encoding the
+    /// "None = same repo as the containing issue" convention at the
+    /// type level. Use this for parent / sub-issue / `trackedInIssues`
+    /// relations and for any blocker whose GraphQL selection omitted
+    /// `repository { ... }`.
+    ///
+    /// For a cross-repository relation with explicit owner/name, use
+    /// [`RelatedIssue::cross_repo`] instead.
+    #[must_use]
+    pub fn local(number: u64, title: impl Into<String>, state: IssueState) -> Self {
+        Self {
+            number,
+            title: title.into(),
+            state,
+            repo_owner: None,
+            repo_name: None,
+        }
+    }
+
+    /// Build a cross-repository relation with explicit `owner` and
+    /// `name`.
+    ///
+    /// Use this when the parser observed a `repository { owner { login }
+    /// name }` subfield set on the related-issue node (e.g. a
+    /// `trackedByIssues` blocker) and the relation must be
+    /// disambiguated from a same-number same-repo relation.
+    ///
+    /// For a relation where `owner` / `name` are absent and the "same
+    /// repo as enclosing issue" convention applies, use
+    /// [`RelatedIssue::local`] instead.
+    #[must_use]
+    pub fn cross_repo(
+        number: u64,
+        title: impl Into<String>,
+        state: IssueState,
+        owner: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Self {
+        Self {
+            number,
+            title: title.into(),
+            state,
+            repo_owner: Some(owner.into()),
+            repo_name: Some(name.into()),
+        }
+    }
 }
 
 /// A blocking edge in the dependency graph.
@@ -921,6 +1002,64 @@ mod tests {
         }
         assert_eq!(IssueState::Open.to_string(), "Open");
         assert_eq!(IssueState::Closed.to_string(), "Closed");
+    }
+
+    /// `IssueState::default()` MUST return `Closed` — the fail-safe
+    /// choice documented on the enum. Defaulting to `Open` would risk
+    /// downstream workflow code claiming or acting on an issue that
+    /// was actually never populated. See unblock-29p.66.
+    #[test]
+    fn issue_state_default_is_closed() {
+        assert_eq!(IssueState::default(), IssueState::Closed);
+    }
+
+    // ── RelatedIssue construction helpers (unblock-29p.66) ─────────────
+
+    /// [`RelatedIssue::local`] MUST leave `repo_owner` / `repo_name`
+    /// as `None` — the "None = same-repo-as-enclosing-issue"
+    /// convention.
+    #[test]
+    fn related_issue_local_leaves_repo_identity_none() {
+        let ri = RelatedIssue::local(42, "Local blocker", IssueState::Open);
+        assert_eq!(ri.number, 42);
+        assert_eq!(ri.title, "Local blocker");
+        assert_eq!(ri.state, IssueState::Open);
+        assert!(ri.repo_owner.is_none());
+        assert!(ri.repo_name.is_none());
+    }
+
+    /// [`RelatedIssue::cross_repo`] MUST fill `repo_owner` /
+    /// `repo_name` with `Some(owner)` / `Some(name)` so cross-repo
+    /// relations are disambiguated from same-repo relations with
+    /// the same number.
+    #[test]
+    fn related_issue_cross_repo_sets_both_repo_identity_fields() {
+        let ri = RelatedIssue::cross_repo(
+            7,
+            "Cross-repo blocker",
+            IssueState::Open,
+            "other-owner",
+            "other-repo",
+        );
+        assert_eq!(ri.number, 7);
+        assert_eq!(ri.title, "Cross-repo blocker");
+        assert_eq!(ri.state, IssueState::Open);
+        assert_eq!(ri.repo_owner.as_deref(), Some("other-owner"));
+        assert_eq!(ri.repo_name.as_deref(), Some("other-repo"));
+    }
+
+    /// [`RelatedIssue::default`] MUST produce a fail-safe value:
+    /// `IssueState::Closed` (so `Default::default()` used via FRU at
+    /// extension points cannot accidentally advertise a reference as
+    /// open and trigger false workflow activation).
+    #[test]
+    fn related_issue_default_state_is_closed_fail_safe() {
+        let ri = RelatedIssue::default();
+        assert_eq!(ri.number, 0);
+        assert_eq!(ri.title, "");
+        assert_eq!(ri.state, IssueState::Closed);
+        assert!(ri.repo_owner.is_none());
+        assert!(ri.repo_name.is_none());
     }
 
     fn _assert_all_status_variants_covered(v: Status) {

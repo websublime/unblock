@@ -2834,31 +2834,27 @@ fn dep_remove_fixture_issue_with_blockers(
     issue
 }
 
-/// Helper: local (same-repo-as-configured) blocker — `repo_owner` /
-/// `repo_name` left as `None` so callers exercise the default-to-
+/// Helper: local (same-repo-as-configured) blocker — delegates to
+/// [`unblock_core::types::RelatedIssue::local`], leaving `repo_owner`
+/// / `repo_name` as `None` so callers exercise the default-to-
 /// enclosing-repo branch in `probe_edge_via_fetch`.
 fn local_blocker(number: u64) -> unblock_core::types::RelatedIssue {
-    unblock_core::types::RelatedIssue {
-        number,
-        title: format!("Blocker #{number}"),
-        state: IssueState::Open,
-        repo_owner: None,
-        repo_name: None,
-    }
+    unblock_core::types::RelatedIssue::local(number, format!("Blocker #{number}"), IssueState::Open)
 }
 
-/// Helper: cross-repo blocker — explicit `repo_owner` / `repo_name` so
-/// the probe can distinguish a cross-repo blocker from a same-repo
-/// blocker of the same number (the `FETCH_ISSUE_QUERY` subselection
-/// extension in `unblock-29p.43`).
+/// Helper: cross-repo blocker — delegates to
+/// [`unblock_core::types::RelatedIssue::cross_repo`] with explicit
+/// `owner` / `name` so the probe can distinguish a cross-repo blocker
+/// from a same-repo blocker of the same number (the
+/// `FETCH_ISSUE_QUERY` subselection extension in `unblock-29p.43`).
 fn cross_repo_blocker(owner: &str, repo: &str, number: u64) -> unblock_core::types::RelatedIssue {
-    unblock_core::types::RelatedIssue {
+    unblock_core::types::RelatedIssue::cross_repo(
         number,
-        title: format!("{owner}/{repo}#{number}"),
-        state: IssueState::Open,
-        repo_owner: Some(owner.to_owned()),
-        repo_name: Some(repo.to_owned()),
-    }
+        format!("{owner}/{repo}#{number}"),
+        IssueState::Open,
+        owner,
+        repo,
+    )
 }
 
 /// Cold cache, edge DOES exist → the handler calls `fetch_issue_ref`
