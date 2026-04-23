@@ -3136,6 +3136,148 @@ async fn dep_remove_cross_repo_reports_false_when_edge_never_existed() {
     assert_eq!(calls.update_field(), 0);
 }
 
+/// Armadilha (trap-test) locking the None-means-same-repo convention
+/// fallback inside `probe_edge_via_fetch` (bead `unblock-29p.58`).
+///
+/// Scenario:
+/// - MCP client is configured for `acme/widgets` (via `new_mock()`).
+/// - `dep_remove` source is a CROSS-REPO issue: `otherowner/otherrepo#42`.
+/// - The source carries a single trackedBy blocker whose `repo_owner`
+///   / `repo_name` are both `None` — i.e. the GraphQL response did NOT
+///   emit an explicit `repository { owner { login } name }` subselection
+///   for that node (same-repo default in the GitHub API).
+/// - `dep_remove` target is a DIFFERENT cross-repo issue
+///   `thirdowner/thirdrepo#99` — intentionally distinct from both the
+///   MCP-configured repo AND the source's enclosing repo.
+///
+/// The `probe_edge_via_fetch` closure MUST apply the "None means same
+/// repo as the enclosing (fetched) source" convention, deriving the
+/// blocker's identity as `otherowner/otherrepo#99`. Compared against
+/// the target `thirdowner/thirdrepo#99`, the owner mismatch forces
+/// absence → `removed: false` with the mutation skipped (Invariant 11).
+///
+/// Falsifier / regression catch: this test falsifies a swap-typo
+/// regression where the `.unwrap_or(source_qid.owner.as_str())` fallback
+/// is rewritten against `target_qid` (or any other qid) instead of the
+/// SOURCE's qid. Under that regression the None blocker would be
+/// interpreted as `thirdowner/thirdrepo#99` — a spurious match with the
+/// target — and the probe would return `Present`, driving the handler
+/// into `remove_blocked_by_refs` and surfacing `removed: true` on the
+/// wire. Assertions below pin both the wire signal (`removed: false`)
+/// AND the mock call counts (`remove_blocked_by_refs = 0`,
+/// `fetch_graph_data = 0`) so either symptom flags the regression.
+///
+/// This complements
+/// `dep_remove_cross_repo_reports_false_when_edge_never_existed`, which
+/// exercises the SAME probe path but with an EXPLICIT cross-repo blocker
+/// (non-None identity). This test specifically covers the None-fallback
+/// branch that the sibling test skips.
+#[tokio::test]
+async fn dep_remove_cross_repo_source_with_local_looking_blocker() {
+    use unblock_mcp::tools::dep_remove::{DepRemoveParams, handle_dep_remove};
+
+    let mock = new_mock();
+
+    // Build a CROSS-REPO source fixture: `otherowner/otherrepo#42` with
+    // a single blocker whose repo identity is None (same-repo-to-source
+    // convention). The source's `qualified_id` is the enclosing repo the
+    // convention must derive against.
+    let mut cross_repo_source = dep_remove_fixture_issue(42);
+    cross_repo_source.qualified_id = QualifiedId::new("otherowner", "otherrepo", 42);
+    cross_repo_source.url = "https://github.com/otherowner/otherrepo/issues/42".to_owned();
+    cross_repo_source.blocked_by = vec![local_blocker(99)];
+    mock.push_fetch_issue_ref(Ok(cross_repo_source));
+
+    // Cold cache forces the cross-repo / fetch-issue probe branch.
+    // (Either endpoint being non-Local ALSO forces the probe branch even
+    // on a warm cache — see the sibling positive test — so the cold
+    // cache here is a belt-and-braces precondition.)
+    let state = state_with_mock(Arc::clone(&mock));
+    assert!(
+        !state.cache.is_fresh().await,
+        "precondition: cache must be cold to route through probe_edge_via_fetch",
+    );
+
+    let result = handle_dep_remove(
+        &state,
+        DepRemoveParams {
+            source: "otherowner/otherrepo#42".to_owned(),
+            target: "thirdowner/thirdrepo#99".to_owned(),
+        },
+    )
+    .await
+    .expect(
+        "cross-repo source with a None-identity blocker whose convention-derived repo \
+         differs from the target must early-return with `removed: false`, not error",
+    );
+
+    // Primary wire-signal assertion: the convention derives the blocker
+    // as `otherowner/otherrepo#99`, which does NOT match the target
+    // `thirdowner/thirdrepo#99`, so the probe returns absence and the
+    // handler reports `removed: false`. If the fallback is swapped to
+    // `target_qid` or `client.owner/repo()`, the interpretation would
+    // flip to `thirdowner/thirdrepo#99` or `acme/widgets#99` — the
+    // former would spuriously MATCH the target (→ `removed: true`) and
+    // fail this assertion; the latter would still report absence but
+    // would be caught by other tests in this module.
+    assert!(
+        !result.removed,
+        "None-identity blocker must be derived against the SOURCE's enclosing repo \
+         (otherowner/otherrepo), NOT the target's repo or the MCP-configured repo; \
+         a swap-typo regression would spuriously match and report removed=true",
+    );
+    assert_eq!(
+        result.source, "otherowner/otherrepo#42",
+        "source must render in canonical cross-repo form"
+    );
+    assert_eq!(
+        result.target, "thirdowner/thirdrepo#99",
+        "target must render in canonical cross-repo form"
+    );
+    assert!(
+        result.message.contains("No blocking edge to remove"),
+        "message must document the no-op (Invariant 11 uniform posture): {}",
+        result.message,
+    );
+
+    // Secondary assertion: the mutation ladder MUST NOT have fired.
+    // Even if the wire signal somehow stayed `false` under regression
+    // (e.g. a rewrite that returns `MissingSkipMutation` after a
+    // spurious match), a false `Present` classification would trigger
+    // `remove_blocked_by_refs` before the early-return. Pinning the
+    // call count at zero catches that path directly.
+    let calls = mock.calls();
+    assert_eq!(
+        calls.fetch_issue_ref(),
+        1,
+        "cross-repo probe must call fetch_issue_ref exactly once (source lookup)",
+    );
+    assert_eq!(
+        calls.remove_blocked_by_refs(),
+        0,
+        "Invariant 11 + convention correctness: mutation MUST NOT run when the \
+         None-fallback correctly resolves the blocker outside the target's repo; \
+         a non-zero count flags a swap-typo or configured-repo-fallback regression",
+    );
+    assert_eq!(
+        calls.remove_blocked_by_ref(),
+        0,
+        "single-side variant must NOT run either",
+    );
+    assert_eq!(
+        calls.fetch_graph_data(),
+        0,
+        "no mutation → no post-mutation rebuild",
+    );
+    assert_eq!(
+        calls.update_field(),
+        0,
+        "no mutation → no Projects V2 Status update ladder; cross-repo source is \
+         outside the configured project scope (spec §5.6 footnote) and would be \
+         skipped regardless, but pinning this guards against future drift",
+    );
+}
+
 // ── Claim tool: cross-repo blocker mapping (unblock-29p.55) ───────
 
 /// Armadilha (trap-test) guarding the `claim.rs` blocker-mapping fix
