@@ -3444,6 +3444,256 @@ async fn dep_remove_cross_repo_source_with_local_looking_blocker() {
     );
 }
 
+// ── DepRemove tool: Closed-endpoint UX (unblock-a36) ──────────────
+
+/// Warm-cache path: the target endpoint is Closed in the cached graph
+/// → `handle_dep_remove` surfaces `DomainError::EndpointClosed` naming
+/// the target's `QualifiedId` instead of collapsing into the generic
+/// `removed: false` "no edge" reply. Pins the three-outcome
+/// `EdgePresence` classifier introduced in the same commit.
+///
+/// Pre-conditions:
+/// - Warm cache seeded with both endpoints AND the blocking edge, so
+///   the prior two-outcome posture would have classified this as
+///   `Present` (proceed to mutation).
+/// - Target #99 is flagged `state: IssueState::Closed` — the new
+///   `issue_state` check must detect this BEFORE the edge lookup and
+///   short-circuit to `EndpointClosed(target_qid)`.
+///
+/// Asserts:
+/// - Error code `INVALID_PARAMS` (HTTP 409 → MCP mapping).
+/// - Message names the Closed endpoint with its qualified id
+///   (`acme/widgets#99`) and references the `reopen` guidance.
+/// - Zero network traffic: `remove_blocked_by_refs`, `fetch_graph_data`,
+///   `fetch_issue_ref`, `update_field` all stay at 0 (the warm-cache
+///   probe is purely in-memory).
+#[tokio::test]
+async fn dep_remove_warm_cache_target_closed_surfaces_endpoint_closed_error() {
+    use unblock_mcp::tools::dep_remove::{DepRemoveParams, handle_dep_remove};
+
+    let mock = new_mock();
+    // Deliberately push NO stubs — any network call from the handler
+    // past the warm-cache probe is a regression.
+    let state = state_with_mock(Arc::clone(&mock));
+
+    // Seed the cache with an Open source, a Closed target, and the
+    // blocking edge between them. Under the previous two-outcome
+    // posture this would have been classified as `Present` (edge
+    // exists in the graph) and the handler would have mutated. The
+    // new `issue_state` gate short-circuits to `EndpointClosed`
+    // FIRST, naming target #99.
+    let source_open = dep_remove_fixture_issue(42);
+    let mut target_closed = dep_remove_fixture_issue(99);
+    target_closed.state = IssueState::Closed;
+    let edges = vec![BlockingEdge {
+        source: QualifiedId::new("acme", "widgets", 42),
+        target: QualifiedId::new("acme", "widgets", 99),
+    }];
+    let issues = vec![source_open, target_closed];
+    let graph = DependencyGraph::build(&issues, &edges);
+    let ready_set = graph.compute_ready_set(&issues, "acme", "widgets");
+    state.cache.update(issues, ready_set, graph).await;
+    assert!(
+        state.cache.is_fresh().await,
+        "cache must be warm so the probe runs through guard_edge_exists",
+    );
+
+    let err = handle_dep_remove(
+        &state,
+        DepRemoveParams {
+            source: "42".to_owned(),
+            target: "99".to_owned(),
+        },
+    )
+    .await
+    .expect_err("a Closed target endpoint must surface an error, not removed=false");
+
+    assert_eq!(
+        err.code,
+        rmcp::model::ErrorCode::INVALID_PARAMS,
+        "EndpointClosed maps to INVALID_PARAMS (409 → MCP mapping)",
+    );
+    assert!(
+        err.message.contains("acme/widgets#99"),
+        "error message must name the Closed endpoint's qualified id: {}",
+        err.message,
+    );
+    assert!(
+        err.message.contains("Closed"),
+        "error message must call out the Closed state: {}",
+        err.message,
+    );
+    assert!(
+        err.message.contains("reopen"),
+        "error message must tell the agent to reopen the issue: {}",
+        err.message,
+    );
+
+    // Zero network traffic — the warm-cache probe is fully in-memory.
+    let calls = mock.calls();
+    assert_eq!(
+        calls.remove_blocked_by_refs(),
+        0,
+        "mutation MUST NOT run when an endpoint is Closed",
+    );
+    assert_eq!(
+        calls.remove_blocked_by_ref(),
+        0,
+        "single-side variant MUST NOT run either",
+    );
+    assert_eq!(
+        calls.fetch_graph_data(),
+        0,
+        "no mutation → no post-mutation rebuild",
+    );
+    assert_eq!(
+        calls.fetch_issue_ref(),
+        0,
+        "warm + both-Local fast path stays in-memory — NO fetch_issue_ref",
+    );
+    assert_eq!(
+        calls.update_field(),
+        0,
+        "no mutation → no Projects V2 Status update ladder",
+    );
+}
+
+/// Warm-cache path, symmetric twin: the SOURCE endpoint is Closed in
+/// the cached graph. Source is inspected first by `guard_edge_exists`,
+/// so a Closed source surfaces `EndpointClosed(source_qid)` ahead of
+/// any target-side logic. Pins the source-first ordering inside the
+/// warm-cache probe.
+#[tokio::test]
+async fn dep_remove_warm_cache_source_closed_surfaces_endpoint_closed_error() {
+    use unblock_mcp::tools::dep_remove::{DepRemoveParams, handle_dep_remove};
+
+    let mock = new_mock();
+    let state = state_with_mock(Arc::clone(&mock));
+
+    // Closed source, Open target, blocking edge present. The source-
+    // first ordering means the probe reports the SOURCE as the
+    // closed endpoint even though the target is Open.
+    let mut source_closed = dep_remove_fixture_issue(42);
+    source_closed.state = IssueState::Closed;
+    let target_open = dep_remove_fixture_issue(99);
+    let edges = vec![BlockingEdge {
+        source: QualifiedId::new("acme", "widgets", 42),
+        target: QualifiedId::new("acme", "widgets", 99),
+    }];
+    let issues = vec![source_closed, target_open];
+    let graph = DependencyGraph::build(&issues, &edges);
+    let ready_set = graph.compute_ready_set(&issues, "acme", "widgets");
+    state.cache.update(issues, ready_set, graph).await;
+
+    let err = handle_dep_remove(
+        &state,
+        DepRemoveParams {
+            source: "42".to_owned(),
+            target: "99".to_owned(),
+        },
+    )
+    .await
+    .expect_err("a Closed source endpoint must surface an error");
+
+    assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert!(
+        err.message.contains("acme/widgets#42"),
+        "error must name the SOURCE's qualified id (source is checked first): {}",
+        err.message,
+    );
+    assert!(
+        !err.message.contains("acme/widgets#99"),
+        "error must NOT conflate the target into the message when only source is Closed: {}",
+        err.message,
+    );
+    assert!(err.message.contains("Closed"));
+
+    // Same zero-traffic invariant.
+    let calls = mock.calls();
+    assert_eq!(calls.remove_blocked_by_refs(), 0);
+    assert_eq!(calls.fetch_graph_data(), 0);
+    assert_eq!(calls.fetch_issue_ref(), 0);
+    assert_eq!(calls.update_field(), 0);
+}
+
+/// Cold-cache / cross-repo path: `probe_edge_via_fetch` fetches a
+/// cross-repo source via `fetch_issue_ref` and observes
+/// `issue.state == Closed`. The probe MUST short-circuit to
+/// `EndpointClosed(source_qid)` BEFORE scanning `blocked_by`. This
+/// exercises the cold-path's `issue.state` inspection that bead
+/// `unblock-a36` added to `probe_edge_via_fetch`.
+#[tokio::test]
+async fn dep_remove_cold_cache_cross_repo_source_closed_surfaces_endpoint_closed_error() {
+    use unblock_mcp::tools::dep_remove::{DepRemoveParams, handle_dep_remove};
+
+    let mock = new_mock();
+
+    // Seed the cross-repo source as Closed. `blocked_by` is
+    // intentionally left empty — the state check fires BEFORE the
+    // blocked_by scan, so the contents of blocked_by are irrelevant.
+    // If a future regression reorders the checks, this test would
+    // degrade to the missing-edge path (removed=false) instead of
+    // surfacing the error — which is precisely what we want to
+    // catch.
+    let mut cross_repo_source = dep_remove_fixture_issue(42);
+    cross_repo_source.qualified_id = QualifiedId::new("otherowner", "otherrepo", 42);
+    cross_repo_source.url = "https://github.com/otherowner/otherrepo/issues/42".to_owned();
+    cross_repo_source.state = IssueState::Closed;
+    cross_repo_source.blocked_by = vec![];
+    mock.push_fetch_issue_ref(Ok(cross_repo_source));
+
+    // Cold cache forces the probe_edge_via_fetch branch even without
+    // the cross-repo endpoint; with a cross-repo source, the probe
+    // would route through fetch_issue_ref regardless of cache state.
+    let state = state_with_mock(Arc::clone(&mock));
+    assert!(
+        !state.cache.is_fresh().await,
+        "precondition: cache must be cold to route through probe_edge_via_fetch",
+    );
+
+    let err = handle_dep_remove(
+        &state,
+        DepRemoveParams {
+            source: "otherowner/otherrepo#42".to_owned(),
+            target: "99".to_owned(),
+        },
+    )
+    .await
+    .expect_err("a Closed cross-repo source must surface an error, not removed=false");
+
+    assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert!(
+        err.message.contains("otherowner/otherrepo#42"),
+        "error must name the Closed cross-repo source's qualified id: {}",
+        err.message,
+    );
+    assert!(err.message.contains("Closed"));
+    assert!(err.message.contains("reopen"));
+
+    // The single probe fetch is allowed; nothing else.
+    let calls = mock.calls();
+    assert_eq!(
+        calls.fetch_issue_ref(),
+        1,
+        "probe_edge_via_fetch must call fetch_issue_ref exactly once",
+    );
+    assert_eq!(
+        calls.remove_blocked_by_refs(),
+        0,
+        "mutation MUST NOT run when the source is Closed",
+    );
+    assert_eq!(
+        calls.fetch_graph_data(),
+        0,
+        "no mutation → no post-mutation rebuild",
+    );
+    assert_eq!(
+        calls.update_field(),
+        0,
+        "no mutation → no Projects V2 Status update ladder",
+    );
+}
+
 // ── Claim tool: cross-repo blocker mapping (unblock-29p.55) ───────
 
 /// Armadilha (trap-test) guarding the `claim.rs` blocker-mapping fix
