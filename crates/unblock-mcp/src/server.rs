@@ -1039,9 +1039,14 @@ impl UnblockServer {
     ///   [`compute_unblock_cascade`][`unblock_core::graph::DependencyGraph::compute_unblock_cascade`]
     ///   while the closed issue is still an OPEN node. The resulting
     ///   `Vec<QualifiedId>` is captured in a handler-local binding and
-    ///   used authoritatively by Phases 2 and 3 — it is NOT re-read from
-    ///   the post-close cache (which excludes the just-closed issue per
-    ///   `fetch_graph_data` `states: OPEN` semantics).
+    ///   used authoritatively by Phases 2 and 3 — it is NOT re-read
+    ///   from the post-close cache. After bead `unblock-a36` the
+    ///   POST-close cache DOES include the just-closed issue (as
+    ///   `Closed`), but PRE-close ordering stays mandatory per SPEC
+    ///   §8.2 step 2 to freeze the cascade snapshot against concurrent
+    ///   blocker-state mutations and to sidestep the
+    ///   already-closed-dependent walk nuance in
+    ///   `compute_unblock_cascade` (see `tools::close` module doc).
     /// - **Phase 1 (MUTATION):** `execute_write_tool` runs
     ///   `fetch_issue` + state validation + `close_issue` + Projects V2
     ///   `Status → closed` ladder + cache rebuild.
@@ -1096,13 +1101,21 @@ impl UnblockServer {
         // Critical). The cascade MUST be computed against a graph that
         // still contains the closed issue as an OPEN node — this is the
         // only chokepoint where the cascade list can be captured soundly.
-        // `fetch_graph_data` uses `states: OPEN` filtering (see
-        // `unblock-github/src/graphql.rs:129`), so any cascade computation
-        // against a POST-close rebuild would short-circuit to `Vec::new()`
-        // at `unblock-core/src/graph.rs:289-291` (the `closed_id` node is
-        // absent from the rebuilt `node_map`), silently reporting
-        // `unblocked = []` regardless of actual dependents. GAP-15 fixed
-        // that correctness defect.
+        // After bead `unblock-a36` widened `fetch_graph_data` to
+        // `states: [OPEN, CLOSED]` (see `unblock-github/src/graphql.rs`
+        // FETCH_GRAPH_DATA_QUERY), the post-close rebuild WILL contain
+        // the just-closed node (as `IssueState::Closed`) and the
+        // `blocker_qid == closed_id` special-case at
+        // `unblock-core/src/graph.rs:312-314` would let the walk
+        // proceed. PRE-close ordering is nevertheless mandatory because
+        // already-closed dependents would enter the `Incoming`
+        // traversal on POST-close rebuild and
+        // `compute_unblock_cascade` does not filter them out on
+        // `issue_state == Closed` alone, and because any concurrent
+        // blocker mutation between the close and the rebuild could
+        // silently shift the cascade set. GAP-15 fixed the original
+        // correctness defect; bead `unblock-a36` reshapes the
+        // rationale without reordering phases.
         //
         // Cold-cache prime: if the cache is empty (first tool after
         // server start, or a stale invalidation from a prior write), use
@@ -2396,7 +2409,7 @@ impl UnblockServer {
     /// [`handle_list`](crate::tools::list::handle_list) for the full flow.
     #[tool(
         name = "list",
-        description = "List open issues with optional filters (status, priority, issue_type, milestone, agent, label, assignee), sorted by priority (default), created, or updated, paginated via limit (1–200, default 50) and offset. Uses cache; rebuilds lazily if stale. Note: fetch_graph_data returns OPEN issues only, so status=\"Closed\" currently yields total=0 (tracked by unblock-a36)."
+        description = "List issues (both OPEN and CLOSED) with optional filters (status, priority, issue_type, milestone, agent, label, assignee), sorted by priority (default), created, or updated, paginated via limit (1–200, default 50) and offset. Uses cache; rebuilds lazily if stale."
     )]
     pub async fn list(
         &self,

@@ -1,7 +1,7 @@
 //! Stats tool — aggregate counts and metrics across the issue set.
 //!
-//! Per spec §7.4 this is a read-only tool that aggregates the open issue
-//! set (and, once [`unblock-a36`] lands, the closed set too) into a
+//! Per spec §7.4 this is a read-only tool that aggregates the full
+//! issue set (both `OPEN` and `CLOSED`, per bead `unblock-a36`) into a
 //! compact snapshot: totals by status, totals by priority, how many
 //! issues are blocked vs ready, how many cycles exist in the dependency
 //! graph, and per-agent throughput.
@@ -25,20 +25,6 @@
 //!    a degraded `stale = true` envelope. The spec's `StatsResult` has
 //!    no `stale` field — this mirrors [`search`](crate::tools::search),
 //!    and the R6 decision on the bead binds this choice.
-//!
-//! ## OPEN-only scope (unblock-a36 follow-up)
-//!
-//! `fetch_graph_data` only returns OPEN GitHub issues today (tracked
-//! separately by bead `unblock-a36`). That has two visible consequences
-//! for stats:
-//!
-//! - `by_status["closed"]` is always `0`.
-//! - Every [`AgentStats::completed`] counter is always `0`.
-//!
-//! Both fields are still populated (pre-seeded) in the response so
-//! callers can differentiate "unknown" from "no data". Once `unblock-a36`
-//! extends the fetch to include closed issues, stats picks up the new
-//! data with no code change.
 //!
 //! ## Aggregation semantics
 //!
@@ -70,8 +56,7 @@
 //! - **`agents`** — one [`AgentStats`] per distinct non-empty agent
 //!   value observed in the (optionally milestone-filtered) issue set.
 //!   `in_progress` counts issues whose `status == Status::InProgress`;
-//!   `completed` counts issues with `state == IssueState::Closed`
-//!   (always `0` today — see the OPEN-only scope note above).
+//!   `completed` counts issues with `state == IssueState::Closed`.
 //!
 //! ## Validation
 //!
@@ -81,7 +66,6 @@
 //! `normalize_filter` helper, matching every other filter-accepting
 //! read tool.
 //!
-//! [`unblock-a36`]: https://example.invalid/bd/unblock-a36
 //! [`GraphCache`]: unblock_core::cache::GraphCache
 //! [`GraphCache::get_issues`]: unblock_core::cache::GraphCache::get_issues
 //! [`GraphCache::get_graph`]: unblock_core::cache::GraphCache::get_graph
@@ -146,9 +130,8 @@ pub struct StatsResult {
 
 /// Per-agent throughput snapshot.
 ///
-/// Per spec §7.4. `completed` is always `0` today because
-/// `fetch_graph_data` returns OPEN issues only (see module-level docs
-/// and `unblock-a36`).
+/// Per spec §7.4. Counts are taken against the full issue universe
+/// (both `OPEN` and `CLOSED`, per bead `unblock-a36`).
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct AgentStats {
     /// Agent name as stored on `Issue.agent`.
@@ -157,7 +140,7 @@ pub struct AgentStats {
     /// `status == Status::InProgress`.
     pub in_progress: usize,
     /// Number of issues assigned to this agent with
-    /// `state == IssueState::Closed`. Always `0` today — see module docs.
+    /// `state == IssueState::Closed`.
     pub completed: usize,
 }
 
@@ -649,7 +632,10 @@ mod tests {
                 None,
                 None,
             ),
-            // Note: state Open because fetch_graph_data is OPEN-only today.
+            // This fixture predates bead `unblock-a36`; it keeps every
+            // issue Open so the pre-existing `by_status["closed"] == 0`
+            // assertion below holds. A separate Closed-state test is
+            // added in the commit-3 integration suite.
             stats_issue(5, Status::Ready, Priority::P4, IssueState::Open, None, None),
         ];
         let g = DependencyGraph::build(&issues, &[]);

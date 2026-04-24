@@ -85,14 +85,6 @@
 //! (`close` / `claim` / `depends` / `reopen` / `dep_remove`). Extraction
 //! is tracked by bead `unblock-29p.24` — do NOT extract here.
 //!
-//! ## R6 caveat — closed-blocker blind spot
-//!
-//! [`GitHubApi::fetch_graph_data`] returns OPEN issues only today
-//! (tracked by bead `unblock-a36`), so a source whose only remaining
-//! blocker is already Closed looks unblocked *before* `dep_remove` runs;
-//! this tool will then classify as ready and flip Status accordingly.
-//! Same quirk as `reopen` — not a new divergence.
-//!
 //! ## Server registration
 //!
 //! The `#[tool]` registration on `UnblockServer` is **deliberately out
@@ -275,10 +267,8 @@ async fn guard_edge_exists(
         }
         _ => {
             // At least one endpoint is missing from the cached graph OR
-            // the directed edge is not present. `fetch_graph_data`
-            // returns OPEN issues only (R6), so this branch also fires
-            // when either side is Closed in the current cache view.
-            // Unified posture (unblock-29p.54): report absence via
+            // the directed edge is not present. Unified posture
+            // (unblock-29p.54): report absence via
             // `MissingSkipMutation` so the caller early-returns
             // `removed: false` identically to the cold/cross-repo path.
             Ok(EdgePresence::MissingSkipMutation)
@@ -825,8 +815,13 @@ mod tests {
             target: qid(1),
         }];
         let g = DependencyGraph::build(&issues, &edges);
-        // Upstream blocker is Closed → downstream looks unblocked. This
-        // is the R6 blind spot documented at the module level.
+        // Upstream blocker is Closed → downstream has no OPEN blockers,
+        // so `has_open_blockers` returns `false`. After bead
+        // `unblock-a36` widened `fetch_graph_data` to include CLOSED
+        // issues, the blocker is now explicitly carried in the graph's
+        // `issue_state` snapshot as `IssueState::Closed` — the helper
+        // correctly recognises it as not-open rather than relying on
+        // the absent-from-graph shortcut.
         assert!(!has_open_blockers(&downstream, &g));
     }
 
