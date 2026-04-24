@@ -4836,53 +4836,28 @@ async fn reconcile_with_injected_drift_and_fix() {
 
 // ── DepCycles tool: integration tests (SPEC §7.7, §11.4) ──────────────
 
-/// Build a fixture issue under the `MockGitHubClient` coordinates
-/// (`acme/widgets`) for `dep_cycles` tests. Every optional field is set
-/// to a minimal value — `dep_cycles` only consumes the graph topology,
-/// not the per-issue fields.
-fn dep_cycles_fixture_issue(number: u64) -> unblock_core::types::Issue {
-    unblock_core::types::Issue {
-        qualified_id: QualifiedId::new("acme", "widgets", number),
-        number,
-        node_id: format!("I_{number}"),
-        title: format!("DepCycles fixture #{number}"),
-        issue_type: Some(IssueType::Task),
-        status: Status::Ready,
-        priority: Priority::P2,
-        agent: None,
-        claimed_at: None,
-        pipeline_stage: None,
-        story_points: None,
-        defer_until: None,
-        labels: vec![],
-        milestone: None,
-        assignees: vec![],
-        state: IssueState::Open,
-        body: None,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
-        url: format!("https://github.com/acme/widgets/issues/{number}"),
-        comments: vec![],
-        blocked_by: vec![],
-        blocking: vec![],
-        parent: None,
-        sub_issues: vec![],
-    }
-}
-
-/// Build a cross-repo fixture issue for `dep_cycles` mixed-cycle tests.
-/// The resulting `QualifiedId` points OUTSIDE the configured
-/// `acme/widgets` repo so the cross-repo projection can strip it.
-fn dep_cycles_cross_repo_fixture(
-    owner: &str,
-    repo: &str,
-    number: u64,
-) -> unblock_core::types::Issue {
+/// Build a fixture issue for `dep_cycles` tests, parameterised by full
+/// `(owner, repo, number)` coordinates.
+///
+/// `dep_cycles` only consumes the graph topology (not per-issue fields),
+/// so every optional field is set to a minimal value. The per-issue
+/// `node_id`, `title`, and `url` strings are derived uniformly from the
+/// coordinates so the helper covers both the local (`acme/widgets`)
+/// variant used by `detect_all_cycles` over the configured repo AND the
+/// cross-repo variant that seeds SCCs with nodes OUTSIDE the configured
+/// repo for §11.4 projection coverage — see bead `unblock-29p.44`.
+///
+/// Callers should prefer the thin wrappers below
+/// ([`dep_cycles_fixture_issue`], [`dep_cycles_cross_repo_fixture`]) so
+/// call-site readability stays tight: the shorthand conveys intent
+/// (local-only topology vs. cross-repo mixing) without spelling out
+/// `"acme", "widgets"` at every call site.
+fn dep_cycles_fixture_at(owner: &str, repo: &str, number: u64) -> unblock_core::types::Issue {
     unblock_core::types::Issue {
         qualified_id: QualifiedId::new(owner, repo, number),
         number,
         node_id: format!("I_{owner}_{repo}_{number}"),
-        title: format!("DepCycles cross-repo fixture {owner}/{repo}#{number}"),
+        title: format!("DepCycles fixture {owner}/{repo}#{number}"),
         issue_type: Some(IssueType::Task),
         status: Status::Ready,
         priority: Priority::P2,
@@ -4905,6 +4880,25 @@ fn dep_cycles_cross_repo_fixture(
         parent: None,
         sub_issues: vec![],
     }
+}
+
+/// Build a fixture issue under the `MockGitHubClient` coordinates
+/// (`acme/widgets`) for `dep_cycles` tests. Thin wrapper over
+/// [`dep_cycles_fixture_at`] for local-only topology coverage.
+fn dep_cycles_fixture_issue(number: u64) -> unblock_core::types::Issue {
+    dep_cycles_fixture_at("acme", "widgets", number)
+}
+
+/// Build a cross-repo fixture issue for `dep_cycles` mixed-cycle tests.
+/// The resulting `QualifiedId` points OUTSIDE the configured
+/// `acme/widgets` repo so the cross-repo projection can strip it.
+/// Thin wrapper over [`dep_cycles_fixture_at`].
+fn dep_cycles_cross_repo_fixture(
+    owner: &str,
+    repo: &str,
+    number: u64,
+) -> unblock_core::types::Issue {
+    dep_cycles_fixture_at(owner, repo, number)
 }
 
 /// Acceptance (a): local-only cycle — `cross_repo_refs == None`, bare
