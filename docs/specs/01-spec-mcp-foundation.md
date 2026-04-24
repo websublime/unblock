@@ -1466,6 +1466,7 @@ pub struct DepRemoveResult {
 **Validation:**
 - `source`: valid IssueRef
 - `target`: valid IssueRef
+- `source != target`
 
 **Flow:**
 1. Resolve both IssueRefs
@@ -1533,7 +1534,7 @@ and the tool-handler dispatch in §8):
 | Either endpoint is `Closed` | Mutation skipped, error surfaced | `DomainError::EndpointClosed { qid }` | 409 | `INVALID_PARAMS` |
 | Edge missing (both endpoints Open) | Mutation skipped, `removed: false` | — (success) | — | — |
 | Edge present (both endpoints Open) | Mutation runs | — (success) | — | — |
-| Mutation ran + cache rebuild failed (cache empty) | 503-class error surfaced; mutation durable on GitHub | `unblock_github::errors::Error` (transport) | 503 | `INTERNAL_ERROR` |
+| Mutation ran + cache rebuild failed (cache empty) | 503-class error surfaced; mutation durable on GitHub | `unblock_github::errors::Error` (infrastructure) | 503 | `INTERNAL_ERROR` |
 
 **Post-rebuild cache-empty failure.** If the `remove_blocked_by`
 mutation in step 3 succeeds but the subsequent `execute_write_tool`
@@ -1624,6 +1625,13 @@ pub struct ReopenResult {
 4. If issue has open blockers: Status → `blocked`
 5. If no open blockers: Status → `ready`
 6. Update cache
+
+**Error-contract row** (consumed by the cross-tool error mapping in §11.1
+and the tool-handler dispatch in §8):
+
+| Condition | Outcome | Error variant | HTTP | MCP code |
+|---|---|---|---|---|
+| Post-rebuild re-evaluation failure (rebuild succeeded but reopened issue missing) | 503-class error surfaced; mutation durable on GitHub | `unblock_github::errors::Error` (infrastructure) | 503 | `INTERNAL_ERROR` |
 
 **Post-rebuild re-evaluation failure.** If the rebuild succeeds but the
 reopened issue cannot be located in the rebuilt graph (transient 503, or
