@@ -1493,6 +1493,176 @@ async fn list_returns_filtered_sorted_paginated_issues_via_mock_client() {
     );
 }
 
+/// `handle_list` exposes CLOSED issues when `status="Closed"` after the
+/// `fetch_graph_data` widening in bead `unblock-a36`.
+///
+/// Before the widening the MCP `list` tool only ever saw `OPEN` issues,
+/// so `list(status="Closed")` was documented as returning `total=0` in
+/// the tool description. The fetch now uses `states: [OPEN, CLOSED]`,
+/// and this test asserts the new contract by driving two `handle_list`
+/// calls against a single seeded mixed-state universe:
+///
+/// 1. `status="Closed"` — returns ONLY the fixtures with `Status::Closed`
+///    (and by construction `IssueState::Closed`). No Ready/InProgress
+///    issues leak in.
+/// 2. `status="Ready"` — the partition complement: returns ONLY the
+///    Ready fixtures, with the Closed fixtures correctly excluded from
+///    both `issues` and `total`. This twin assertion guards against a
+///    regression where the widening accidentally let Closed issues
+///    bleed into the default Ready projection.
+///
+/// The mixed universe seeds three Closed issues (#10/#11/#12) alongside
+/// two Ready issues (#1/#2), exercised via the default priority sort
+/// where Closed issues have `P1` (highest) so any spurious inclusion
+/// would flip the ordering in a visible way.
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // End-to-end test covers two list-call shapes in one scenario.
+async fn list_status_closed_returns_closed_issues_and_status_ready_excludes_them() {
+    use unblock_mcp::tools::list::{ListParams, handle_list};
+
+    #[allow(clippy::too_many_arguments)]
+    fn list_fixture(
+        number: u64,
+        status: Status,
+        state: IssueState,
+        priority: Priority,
+        created_at: chrono::DateTime<chrono::Utc>,
+    ) -> unblock_core::types::Issue {
+        unblock_core::types::Issue {
+            qualified_id: QualifiedId::new("acme", "widgets", number),
+            number,
+            node_id: format!("I_{number}"),
+            title: format!("List closed fixture #{number}"),
+            issue_type: Some(IssueType::Task),
+            status,
+            priority,
+            agent: None,
+            claimed_at: None,
+            pipeline_stage: None,
+            story_points: None,
+            defer_until: None,
+            labels: vec![],
+            milestone: None,
+            assignees: vec![],
+            state,
+            body: None,
+            created_at,
+            updated_at: created_at,
+            url: format!("https://github.com/acme/widgets/issues/{number}"),
+            comments: vec![],
+            blocked_by: vec![],
+            blocking: vec![],
+            parent: None,
+            sub_issues: vec![],
+        }
+    }
+
+    let t1 = chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+    let t2 = chrono::Utc.with_ymd_and_hms(2026, 2, 1, 0, 0, 0).unwrap();
+    let t3 = chrono::Utc.with_ymd_and_hms(2026, 3, 1, 0, 0, 0).unwrap();
+    let t4 = chrono::Utc.with_ymd_and_hms(2026, 4, 1, 0, 0, 0).unwrap();
+    let t5 = chrono::Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap();
+
+    let issues = vec![
+        // Two Ready issues (the pre-unblock-a36 visible set).
+        list_fixture(1, Status::Ready, IssueState::Open, Priority::P2, t1),
+        list_fixture(2, Status::Ready, IssueState::Open, Priority::P3, t2),
+        // Three Closed issues (invisible to list before the widening).
+        list_fixture(10, Status::Closed, IssueState::Closed, Priority::P1, t3),
+        list_fixture(11, Status::Closed, IssueState::Closed, Priority::P1, t4),
+        list_fixture(12, Status::Closed, IssueState::Closed, Priority::P1, t5),
+    ];
+
+    let mock = new_mock();
+    // Two handle_list calls = two fresh fetches.
+    for _ in 0..2 {
+        mock.push_fetch_graph_data(Ok((issues.clone(), vec![])));
+    }
+    let state = state_with_mock(Arc::clone(&mock));
+
+    // ── Call 1: status="Closed" returns ONLY the three Closed fixtures ──
+    // Default priority sort: all three are P1, so the deterministic
+    // qualified_id tiebreaker orders them 10 < 11 < 12.
+    let closed_result = handle_list(
+        &state,
+        ListParams {
+            status: Some("Closed".to_owned()),
+            priority: None,
+            issue_type: None,
+            milestone: None,
+            agent: None,
+            label: None,
+            assignee: None,
+            sort: None,
+            limit: None,
+            offset: None,
+        },
+    )
+    .await
+    .expect("list(status=Closed) should succeed");
+
+    assert_eq!(
+        closed_result.total, 3,
+        "status=Closed must surface all three Closed fixtures after unblock-a36",
+    );
+    let closed_numbers: Vec<u64> = closed_result.issues.iter().map(|i| i.number).collect();
+    assert_eq!(
+        closed_numbers,
+        vec![10_u64, 11, 12],
+        "status=Closed must return exactly the Closed fixtures in qualified-id order",
+    );
+    for summary in &closed_result.issues {
+        assert_eq!(
+            summary.status, "Closed",
+            "every row in the status=Closed projection must carry status='Closed'",
+        );
+    }
+
+    // ── Call 2: status="Ready" returns ONLY the two Ready fixtures ──
+    // Ensures the widening did not leak Closed issues into the default
+    // Ready projection. Priority ASC: #1 (P2) then #2 (P3).
+    let ready_result = handle_list(
+        &state,
+        ListParams {
+            status: Some("Ready".to_owned()),
+            priority: None,
+            issue_type: None,
+            milestone: None,
+            agent: None,
+            label: None,
+            assignee: None,
+            sort: None,
+            limit: None,
+            offset: None,
+        },
+    )
+    .await
+    .expect("list(status=Ready) should succeed");
+
+    assert_eq!(
+        ready_result.total, 2,
+        "status=Ready must exclude the three Closed fixtures",
+    );
+    let ready_numbers: Vec<u64> = ready_result.issues.iter().map(|i| i.number).collect();
+    assert_eq!(
+        ready_numbers,
+        vec![1_u64, 2],
+        "status=Ready must return exactly the Ready fixtures in priority order",
+    );
+    for summary in &ready_result.issues {
+        assert_eq!(
+            summary.status, "Ready",
+            "no Closed issue may leak into the status=Ready projection",
+        );
+    }
+
+    assert_eq!(
+        mock.calls().fetch_graph_data(),
+        2,
+        "each handle_list call must refetch — no cache short-circuit",
+    );
+}
+
 /// `handle_list` rejects an out-of-range `limit` with `INVALID_PARAMS`
 /// before issuing any GitHub call.
 #[tokio::test]
