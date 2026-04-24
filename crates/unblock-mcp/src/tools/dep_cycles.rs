@@ -178,11 +178,22 @@ pub struct DepCyclesResult {
 ///
 /// Pulled out of [`handle_dep_cycles`] so it can be covered by
 /// hermetic unit tests without constructing a [`ServerState`].
-fn project_all(
-    raw: &[Vec<QualifiedId>],
+///
+/// The `raw` parameter is generic over `AsRef<[QualifiedId]>` so the
+/// caller can pass either owned `Vec<QualifiedId>` SCCs (the shape of
+/// `detect_all_cycles`'s return) or borrowed `&[QualifiedId]` slices
+/// (the zero-copy shape produced by [`filter_cycles_containing`] and
+/// the `id`-less passthrough in [`handle_dep_cycles`]). Removes the
+/// owned-clone that previously bridged the two shapes — see bead
+/// `unblock-29p.45`.
+fn project_all<S>(
+    raw: &[S],
     configured_owner: &str,
     configured_repo: &str,
-) -> (Vec<Vec<u64>>, Option<CrossRepoRefs>) {
+) -> (Vec<Vec<u64>>, Option<CrossRepoRefs>)
+where
+    S: AsRef<[QualifiedId]>,
+{
     let (cycles, accum) = cross_repo::project_all_cycles(raw, configured_owner, configured_repo);
     let cross_repo_refs =
         cross_repo::build_cross_repo_refs_with_summary(accum, cross_repo::cycles_summary);
@@ -195,11 +206,20 @@ fn project_all(
 /// SPEC §7.7 flow step 2. Comparison is on full [`QualifiedId`] equality,
 /// so the caller is responsible for resolving the bare `id` against
 /// `(client.owner(), client.repo())` before calling.
+///
+/// Returns borrowed `&[QualifiedId]` slices rather than borrowed
+/// `&Vec<QualifiedId>` so callers can hand the result straight to
+/// [`project_all`] (or [`crate::tools::cross_repo::project_all_cycles`])
+/// without an intermediate clone of the SCC contents — see bead
+/// `unblock-29p.45`.
 fn filter_cycles_containing<'a>(
     raw: &'a [Vec<QualifiedId>],
     target: &QualifiedId,
-) -> Vec<&'a Vec<QualifiedId>> {
-    raw.iter().filter(|scc| scc.contains(target)).collect()
+) -> Vec<&'a [QualifiedId]> {
+    raw.iter()
+        .filter(|scc| scc.contains(target))
+        .map(Vec::as_slice)
+        .collect()
 }
 
 /// Execute the `dep_cycles` tool handler.
@@ -278,22 +298,24 @@ pub async fn handle_dep_cycles(
     // Step 3: apply the optional `id` filter. The parameter is a local
     // issue number (SPEC §7.7 types it as `u64`, not `IssueRef`), so
     // resolve it against `(configured_owner, configured_repo)` before
-    // comparing.
-    let filtered_refs: Vec<&Vec<QualifiedId>> = if let Some(id) = params.id {
+    // comparing. Both branches yield `Vec<&[QualifiedId]>` — a
+    // zero-copy slice-of-slice view over the SCCs owned by
+    // `raw_cycles`. `project_all` accepts this shape directly via its
+    // `AsRef<[QualifiedId]>` bound, so no clone of the SCC contents
+    // is required (bead `unblock-29p.45`).
+    let filtered_refs: Vec<&[QualifiedId]> = if let Some(id) = params.id {
         let target = QualifiedId::new(configured_owner.clone(), configured_repo.clone(), id);
         filter_cycles_containing(&raw_cycles, &target)
     } else {
-        raw_cycles.iter().collect()
+        raw_cycles.iter().map(Vec::as_slice).collect()
     };
 
     // Step 4: project each cycle into its (local, cross-repo) partitions
-    // per SPEC §11.4. Clone the filtered slices into owned vectors so the
-    // projection helper can consume an owned slice without lifetime
-    // gymnastics — the cost is bounded by the total cycle node count,
-    // which is small in practice (Tarjan returns disjoint SCCs).
-    let filtered_owned: Vec<Vec<QualifiedId>> = filtered_refs.into_iter().cloned().collect();
+    // per SPEC §11.4. `project_all` borrows each SCC as a `&[QualifiedId]`
+    // slice — the previous owned-Vec clone that bridged this boundary is
+    // eliminated (bead `unblock-29p.45`).
     let (cycles, cross_repo_refs) =
-        project_all(&filtered_owned, &configured_owner, &configured_repo);
+        project_all(&filtered_refs, &configured_owner, &configured_repo);
 
     let count = cycles.len();
     Ok(DepCyclesResult {
@@ -402,7 +424,9 @@ mod tests {
         let target = qid("acme", "widgets", 3);
         let hits = filter_cycles_containing(&raw, &target);
         assert_eq!(hits.len(), 1);
-        assert_eq!(*hits[0], c2);
+        // `hits[0]` is a `&[QualifiedId]` borrowed from `raw`; compare
+        // against the owned `c2` via slice equality.
+        assert_eq!(hits[0], c2.as_slice());
     }
 
     #[test]

@@ -103,16 +103,26 @@ pub(crate) fn project_cycle(
 /// local-projection length is `< 2` (mixed cycles where all but ≤1 member
 /// are cross-repo). The agent must know the cycle exists; the missing
 /// members land in `cross_repo_refs`.
-pub(crate) fn project_all_cycles(
-    raw: &[Vec<QualifiedId>],
+///
+/// The `raw` slice is generic over any element that borrows as
+/// `[QualifiedId]`. This accepts both `&[Vec<QualifiedId>]` (the
+/// cache-owned shape used by `prime`) and `&[&[QualifiedId]]` (the
+/// zero-copy shape produced by `dep_cycles`'s `filter_cycles_containing`
+/// / `id`-less passthrough) without forcing the caller to clone the
+/// SCC vectors — see bead `unblock-29p.45`.
+pub(crate) fn project_all_cycles<S>(
+    raw: &[S],
     configured_owner: &str,
     configured_repo: &str,
-) -> (Vec<Vec<u64>>, BTreeSet<String>) {
+) -> (Vec<Vec<u64>>, BTreeSet<String>)
+where
+    S: AsRef<[QualifiedId]>,
+{
     let mut cycles: Vec<Vec<u64>> = Vec::with_capacity(raw.len());
     let mut cross_repo_accum: BTreeSet<String> = BTreeSet::new();
     for cycle in raw {
         let local = project_cycle(
-            cycle,
+            cycle.as_ref(),
             configured_owner,
             configured_repo,
             &mut cross_repo_accum,
