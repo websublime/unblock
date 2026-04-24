@@ -14,15 +14,29 @@
 //!    resulting `Vec<QualifiedId>` is captured in a handler-local
 //!    binding and used authoritatively by Phases 2 and 3 — it is NOT
 //!    re-read from the post-close cache. This ordering is mandatory
-//!    per SPEC §3.4 Critical: `fetch_graph_data` uses `states: OPEN`
-//!    filtering (see `unblock-github/src/graphql.rs:129`), so a
-//!    POST-close cascade would short-circuit to `Vec::new()` at
-//!    `unblock-core/src/graph.rs:289-291` because the just-closed
-//!    issue is absent from the rebuilt `node_map`. The defensive
-//!    `Vec::new()` branch stays as-is (it is still correct for
-//!    create-then-immediately-close races where `closed_id`
-//!    legitimately is not yet in the graph), but its trigger from the
-//!    close path disappears.
+//!    per SPEC §3.4 Critical and §8.2 step 2 ("Pre-close cascade MUST
+//!    be captured before the mutation"). After bead `unblock-a36`
+//!    widened `fetch_graph_data` to `states: [OPEN, CLOSED]`, the
+//!    just-closed issue would still appear in the POST-close rebuilt
+//!    `node_map` (as `IssueState::Closed`) and the `blocker_qid ==
+//!    closed_id` special-case at
+//!    `unblock-core/src/graph.rs:312-314` would still allow cascade
+//!    participants to resolve — so the "`closed_id` absent from
+//!    `node_map`" short-circuit no longer trips from the close path.
+//!    PRE-close ordering is nevertheless MANDATORY because a
+//!    POST-close rebuild introduces subtle behaviour shifts that the
+//!    cascade walk is NOT designed to absorb: (a) already-closed
+//!    dependents would show up in the `Incoming` traversal with
+//!    `issue_state == Closed`, and `compute_unblock_cascade` does not
+//!    filter them out on that axis (contrast with the pseudocode in
+//!    SPEC §3.4 "IF `dependent_issue.state` == Closed CONTINUE"); and
+//!    (b) any race where a concurrent mutation alters a blocker's
+//!    state between close-mutation and rebuild would silently shift
+//!    the cascade set. Capturing PRE-close freezes the snapshot
+//!    against both risks. The defensive `Vec::new()` short-circuit
+//!    at `unblock-core/src/graph.rs:289-291` stays as-is (it is
+//!    still correct for create-then-immediately-close races where
+//!    `closed_id` legitimately is not yet in the graph).
 //! 2. **Phase 1 — MUTATION.** `execute_write_tool` runs `fetch_issue`,
 //!    state validation, `close_issue`, the Projects V2 `Status → closed`
 //!    field ladder on the closed issue, and a cache rebuild. The close

@@ -1,8 +1,9 @@
-//! List tool — filtered, sorted, paginated view over the open issue set.
+//! List tool — filtered, sorted, paginated view over the full issue set.
 //!
 //! Returns issues matching the requested filters in the requested sort
 //! order, with offset/limit pagination. Per spec §7.5 this is a read tool
-//! over the **full open issue set** (not just the ready set), so unlike
+//! over the **full issue set** (both `OPEN` and `CLOSED`, per the
+//! `states: [OPEN, CLOSED]` fetch — bead `unblock-a36`), so unlike
 //! [`ready`](crate::tools::ready) the cache is not directly consulted —
 //! the cache stores only the ready subset and lacks the per-issue
 //! `updated_at` and `assignees` fields the list contract advertises.
@@ -14,15 +15,6 @@
 //! perspective in the sense that callers cannot observe a difference
 //! between a list call that hit the cache and one that missed it — the
 //! data is reconstructable from a single GitHub fetch (spec §4.5).
-//!
-//! ## OPEN-only scope
-//!
-//! `fetch_graph_data()` only returns OPEN GitHub issues today, so a
-//! `list(status="Closed")` call always yields `total = 0`. The
-//! [`ListParams::status`] doc-comment and the tool description document
-//! this gap. Extending the GraphQL query to fetch CLOSED issues is
-//! tracked by a follow-up bead (R1 decision recorded on bead
-//! unblock-29p.6).
 
 use chrono::{DateTime, NaiveDate, Utc};
 use rmcp::model::ErrorData;
@@ -65,9 +57,10 @@ pub struct ListParams {
     /// Filter by workflow status (case-insensitive). Accepts `"Ready"`,
     /// `"InProgress"`, `"Blocked"`, `"Deferred"`, or `"Closed"`.
     ///
-    /// **Open-only scope:** the underlying graph fetch returns only OPEN
-    /// GitHub issues, so `status="Closed"` always yields `total = 0`
-    /// today.
+    /// After bead `unblock-a36` the underlying graph fetch uses
+    /// `states: [OPEN, CLOSED]`, so `status="Closed"` returns issues
+    /// whose GitHub native state is `CLOSED` (or whose Projects V2
+    /// Status slug is `closed` — both map to [`Status::Closed`]).
     pub status: Option<String>,
     /// Filter by priority level (case-insensitive). Accepts `"P0"`,
     /// `"P1"`, `"P2"`, `"P3"`, or `"P4"`.

@@ -69,19 +69,6 @@
 //! close (rare — close normally goes from Done) therefore resets Status
 //! to `ready | blocked`. This is spec-correct and intentional.
 //!
-//! ## R6 caveat — Closed-blocker blind spot
-//!
-//! [`GitHubApi::fetch_graph_data`] returns OPEN issues only today
-//! (tracked by bead `unblock-a36`). Post-reopen the rebuilt graph always
-//! contains the just-reopened issue (it is now Open). However, if the
-//! reopened issue has a blocker that is still Closed, that blocker is
-//! absent from the graph and `has_open_blockers` returns `false` — the
-//! reopened issue will be classified as `ready` even though an agent
-//! working through the dependency chain would hit the closed-but-still-
-//! tracked blocker. The same quirk affects the close-cascade path, so
-//! this is not a new divergence. Once `unblock-a36` lands this caveat
-//! vanishes.
-//!
 //! ## R3 caveat — cannot compute `blocked` after rebuild
 //!
 //! Two failure modes share a single posture:
