@@ -4,14 +4,14 @@
 //! Each variant carries the relevant context and maps to an HTTP status code
 //! via `DomainError::status_code`.
 //!
-//! 13 variants: `IssueNotFound`, `AlreadyClaimed`, `IssueBlocked`, `IssueDeferred`,
+//! 14 variants: `IssueNotFound`, `AlreadyClaimed`, `IssueBlocked`, `IssueDeferred`,
 //! `IssueClosed`, `IssueNotClosed`, `IssueAlreadyOpen`, `CircularDependency`,
 //! `DuplicateDependency`, `FieldNotFound`, `Validation`, `InvalidIssueRef`,
-//! `CrossRepoAccessDenied`.
+//! `CrossRepoAccessDenied`, `EndpointClosed`.
 
 use snafu::prelude::*;
 
-use crate::types::IssueRef;
+use crate::types::{IssueRef, QualifiedId};
 
 /// Renders a list of [`IssueRef`] via their `Display` impl for use in
 /// `#[snafu(display(...))]` attributes.
@@ -177,6 +177,39 @@ pub enum DomainError {
         /// The repository name of the cross-repo the token cannot access.
         repo: String,
     },
+
+    /// A mutation targeting an edge endpoint cannot proceed because the
+    /// endpoint's GitHub native state is [`IssueState::Closed`].
+    ///
+    /// Emitted by the `dep_remove` pre-mutation probe when either the
+    /// source or the target side of the blocking edge resolves to a
+    /// Closed issue. Previously such a call collapsed into the generic
+    /// `removed: false` "no edge" reply because `fetch_graph_data` hid
+    /// closed issues from the cache; after bead `unblock-a36` widened
+    /// the fetch to `states: [OPEN, CLOSED]`, closed endpoints are
+    /// observable and warrant an explicit error surface so agents know
+    /// to reopen the issue (via the `reopen` tool) before retrying —
+    /// or to accept the now-dangling edge without further action.
+    ///
+    /// Carries the [`QualifiedId`] of the Closed endpoint so the
+    /// rendered message is unambiguous across same-numbered local /
+    /// cross-repo issues (`owner/repo#n` form via
+    /// [`QualifiedId::Display`]). Per SPEC §11.1 / §8.5 this maps to
+    /// HTTP 409 Conflict, mirroring the existing
+    /// [`IssueClosed`](Self::IssueClosed) posture — both signal
+    /// "the server state contradicts the requested mutation, reopen to
+    /// proceed".
+    ///
+    /// [`IssueState::Closed`]: crate::types::IssueState::Closed
+    /// [`QualifiedId::Display`]: crate::types::QualifiedId
+    #[snafu(display(
+        "dep_remove: endpoint {qid} is Closed — reopen it first (via the `reopen` tool) or accept the dangling edge"
+    ))]
+    EndpointClosed {
+        /// The [`QualifiedId`] of the endpoint that is closed. Rendered
+        /// via `Display` (`owner/repo#n` form).
+        qid: QualifiedId,
+    },
 }
 
 impl DomainError {
@@ -202,7 +235,8 @@ impl DomainError {
             | Self::IssueClosed { .. }
             | Self::IssueNotClosed { .. }
             | Self::IssueAlreadyOpen { .. }
-            | Self::DuplicateDependency { .. } => 409,
+            | Self::DuplicateDependency { .. }
+            | Self::EndpointClosed { .. } => 409,
         }
     }
 }
@@ -489,6 +523,50 @@ mod tests {
     }
 
     #[test]
+    fn endpoint_closed_display_and_status() {
+        // SPEC §11.1 / §8.5 (bead unblock-a36): `EndpointClosed { qid }`
+        // surfaces the specific QualifiedId of the closed endpoint so
+        // same-numbered local vs cross-repo issues are disambiguated in
+        // the rendered message. Maps to 409 Conflict, mirroring
+        // IssueClosed posture.
+        let err = EndpointClosedSnafu {
+            qid: QualifiedId::new("acme", "widgets", 42),
+        }
+        .build();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("acme/widgets#42"),
+            "expected owner/repo#n form in message, got: {msg}",
+        );
+        assert!(
+            msg.contains("Closed"),
+            "expected 'Closed' keyword in message, got: {msg}",
+        );
+        assert!(
+            msg.contains("reopen"),
+            "expected 'reopen' guidance in message, got: {msg}",
+        );
+        assert_eq!(err.status_code(), 409);
+    }
+
+    #[test]
+    fn endpoint_closed_display_local_only_qid() {
+        // Guards against regressions where the qid rendering diverges
+        // from the QualifiedId::Display format (`owner/repo#n`) — even
+        // for a "local-looking" configured repo, the error message
+        // carries the fully-qualified form because DomainError does not
+        // retain the configured-repo context.
+        let err = EndpointClosedSnafu {
+            qid: QualifiedId::new("websublime", "unblock", 7),
+        }
+        .build();
+        assert_eq!(
+            err.to_string(),
+            "dep_remove: endpoint websublime/unblock#7 is Closed — reopen it first (via the `reopen` tool) or accept the dangling edge"
+        );
+    }
+
+    #[test]
     fn all_variants_implement_error_trait() {
         // Verify DomainError implements std::error::Error by using it as &dyn Error
         let errors: Vec<DomainError> = vec![
@@ -536,6 +614,10 @@ mod tests {
             CrossRepoAccessDeniedSnafu {
                 owner: "acme".to_owned(),
                 repo: "widgets".to_owned(),
+            }
+            .build(),
+            EndpointClosedSnafu {
+                qid: QualifiedId::new("acme", "widgets", 99),
             }
             .build(),
         ];
