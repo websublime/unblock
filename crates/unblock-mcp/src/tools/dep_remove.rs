@@ -490,17 +490,21 @@ async fn reevaluate_source_after_remove(
     let (Some(graph), Some(issues)) = (graph_arc, issues_arc) else {
         warn!(
             source_number,
+            %source_qid,
+            %target_qid,
             "Cache empty after dep_remove — rebuild failed; caller must re-run `show` to observe final status"
         );
         // R3: surface a 503-class error so MCP clients see INTERNAL_ERROR
         // and can retry or fall back to a `show` call. The mutation is
-        // durable on GitHub regardless.
+        // durable on GitHub regardless. The `target_qid` is logged above
+        // for diagnostics — the surfaced `Display` output names the
+        // `source_qid` (the endpoint whose Status fan-out could not be
+        // re-evaluated) and the mutation, matching the `EndpointClosed`
+        // precedent of carrying a single disambiguating QualifiedId.
         return Err(github_error_to_mcp(
-            unblock_github::errors::GitHubApiSnafu {
-                status: 503_u16,
-                message: format!(
-                    "Blocking edge removed between {source_qid} and {target_qid}, but cache rebuild failed — please re-run `show` to observe the final blocked status"
-                ),
+            unblock_github::errors::PostMutationRebuildFailedSnafu {
+                mutation: "remove_blocked_by".to_owned(),
+                qid: source_qid.clone(),
             }
             .build(),
         ));
@@ -798,10 +802,36 @@ pub async fn handle_dep_remove(
     if let IssueRef::Local(source_number) = &source_ref {
         reevaluate_source_after_remove(state, *source_number, &source_qid, &target_qid).await?;
     } else {
-        tracing::debug!(
-            source = %source_ref,
-            "Cross-repo source: skipping Projects V2 Status update after dep_remove (source is outside the configured project)."
-        );
+        // Cross-repo source: the Projects V2 Status update is
+        // intentionally skipped (spec §5.6 footnote — the field-update
+        // ladder is scoped to the configured project). Observability
+        // split:
+        //   * Cache populated after `execute_write_tool` — normal
+        //     skip path; `debug!` is enough.
+        //   * Cache empty after `execute_write_tool` — the rebuild
+        //     failed; we're returning `removed: true` with a stale
+        //     (empty) local cache and no 503 signal. Emit `warn!` so
+        //     operators can correlate this with the `rebuild_cache`
+        //     warn emitted at `tools/mod.rs:180-183`. This mirrors the
+        //     Local-source observability pattern in
+        //     `reevaluate_source_after_remove` but without surfacing a
+        //     503: cross-repo callers do not rely on the local cache
+        //     for Status, so the mutation-durability contract is
+        //     preserved and no error is warranted. Bead
+        //     `unblock-29p.38` scopes this to observability only.
+        if state.cache.get_graph().await.is_none() {
+            tracing::warn!(
+                source = %source_ref,
+                %source_qid,
+                %target_qid,
+                "dep_remove: cross-repo source cache rebuild failed — returning success with stale cache"
+            );
+        } else {
+            tracing::debug!(
+                source = %source_ref,
+                "Cross-repo source: skipping Projects V2 Status update after dep_remove (source is outside the configured project)."
+            );
+        }
     }
 
     // Step 6: render canonical forms of the normalized refs. Matches the

@@ -2530,10 +2530,17 @@ async fn reopen_surfaces_error_when_post_reopen_rebuild_fails() {
         .expect_err("cache rebuild failure must surface as a handler error (R3)");
 
     // The error must reference the partial-state guidance so agents
-    // know to retry `show`.
+    // know to retry `show`, name the preceding mutation, and include
+    // the fully-qualified issue reference. After unblock-29p.35 the
+    // surfaced message comes from
+    // `PostMutationRebuildFailed::Display`; it names the mutation
+    // (`"reopen"`) rather than the past participle `"reopened"` used by
+    // the prior synthetic message.
     assert!(
-        err.message.contains("reopened") && err.message.contains("show"),
-        "error message must instruct caller to re-run `show`: {}",
+        err.message.contains("reopen")
+            && err.message.contains("show")
+            && err.message.contains("#42"),
+        "error message must name the mutation, include the QID, and instruct re-run of `show`: {}",
         err.message,
     );
 
@@ -2592,10 +2599,16 @@ async fn reopen_surfaces_error_when_rebuilt_cache_missing_reopened_issue() {
     // 503 → INTERNAL_ERROR per github_error_to_mcp.
     assert_eq!(err.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
     // The error must reference the partial-state guidance so agents
-    // know to retry `show`.
+    // know to retry `show`, name the preceding mutation, and include
+    // the fully-qualified issue reference. Same
+    // `PostMutationRebuildFailed` surface as the empty-cache arm — the
+    // two race-window arms produce identical wire output; call-site
+    // log lines disambiguate the cause in traces.
     assert!(
-        err.message.contains("reopened") && err.message.contains("show"),
-        "error message must instruct caller to re-run `show`: {}",
+        err.message.contains("reopen")
+            && err.message.contains("show")
+            && err.message.contains("#42"),
+        "error message must name the mutation, include the QID, and instruct re-run of `show`: {}",
         err.message,
     );
 
@@ -2961,10 +2974,22 @@ async fn dep_remove_surfaces_error_when_post_mutation_rebuild_fails() {
     .await
     .expect_err("rebuild failure must surface as a handler error (R3)");
 
-    // Must instruct the caller to re-run `show` and identify both refs.
+    // Must instruct the caller to re-run `show`, name the preceding
+    // mutation, and identify the source endpoint whose Status
+    // re-evaluation was skipped. Target endpoint (`#99`) is no longer
+    // surfaced in the rendered message (the `PostMutationRebuildFailed`
+    // variant carries a single QualifiedId — the source, matching the
+    // `EndpointClosed` precedent) but is still logged via the
+    // `reevaluate_source_after_remove` `warn!` as a structured field;
+    // see `tools/dep_remove.rs:490-500`. Spec §8.5 R3 row is about the
+    // handler's ability to compute `has_open_blockers` for the source,
+    // so the source is the semantically-authoritative QualifiedId for
+    // this error.
     assert!(
-        err.message.contains("show") && err.message.contains("#42") && err.message.contains("#99"),
-        "R3 error must reference `show` and both endpoints: {}",
+        err.message.contains("show")
+            && err.message.contains("remove_blocked_by")
+            && err.message.contains("acme/widgets#42"),
+        "R3 error must reference `show`, the preceding mutation, and the source endpoint QID: {}",
         err.message,
     );
 
@@ -6122,24 +6147,27 @@ async fn close_surfaces_error_when_rebuild_fails_after_pre_cascade() {
 
     // 503 → INTERNAL_ERROR per github_error_to_mcp.
     assert_eq!(err.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
-    // Refocused semantics: the message must reference `closed`
-    // (mutation landed), `cascade field-updates applied` (Phase 2
-    // still ran), `Status reconciliation` (step 8 is what failed),
-    // and `show` (recovery hint). This is the contract from
-    // SPEC §8.2 "Post-rebuild field-sync failure".
+    // After unblock-29p.35 the post-close R3 surface uses the shared
+    // `PostMutationRebuildFailed` variant. The surfaced message is
+    // deliberately leaner than the pre-refactor wording: it names the
+    // preceding mutation (`"close_cascade"`), includes the mutated
+    // issue's fully-qualified reference (`acme/widgets#8`), and
+    // instructs the caller to re-run `show`. The pre-refactor details
+    // ("cascade field-updates applied", "Status reconciliation") are
+    // preserved as a `tracing::warn!` at `server.rs:1388-1391` for
+    // operator diagnostics — they're no longer part of the MCP wire
+    // contract. SPEC §8.2 "Post-rebuild field-sync failure" and §8.2
+    // step-8 "update_status_fields reconciliation" semantics are
+    // encoded in the preserved `warn!` plus the mutation label and
+    // unchanged 503 → INTERNAL_ERROR mapping.
     assert!(
-        err.message.contains("closed"),
-        "error message must note the close succeeded: {}",
+        err.message.contains("close_cascade"),
+        "error message must name the preceding mutation (`close_cascade`): {}",
         err.message,
     );
     assert!(
-        err.message.contains("cascade field-updates"),
-        "error message must note cascade field-updates were applied best-effort: {}",
-        err.message,
-    );
-    assert!(
-        err.message.contains("Status reconciliation"),
-        "error message must identify Status reconciliation as the failed step: {}",
+        err.message.contains("acme/widgets#8"),
+        "error message must include the mutated issue's fully-qualified reference: {}",
         err.message,
     );
     assert!(
