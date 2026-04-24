@@ -385,13 +385,19 @@ pub async fn handle_reopen(
         );
         // Surface as a 503-class error so MCP clients see INTERNAL_ERROR
         // and can retry or fall back to a `show` call. The mutation is
-        // durable on GitHub regardless of this failure.
+        // durable on GitHub regardless of this failure. `reopen` operates
+        // only on local issues (cross-repo reopen is out of scope per
+        // spec §5.6), so the QualifiedId is constructed from the
+        // configured repo's `(owner, repo)`.
+        let qid = unblock_core::types::QualifiedId::new(
+            state.github.owner(),
+            state.github.repo(),
+            issue_number,
+        );
         return Err(github_error_to_mcp(
-            unblock_github::errors::GitHubApiSnafu {
-                status: 503_u16,
-                message: format!(
-                    "Issue #{issue_number} reopened successfully, but cache rebuild failed — please re-run `show` to observe the final blocked status"
-                ),
+            unblock_github::errors::PostMutationRebuildFailedSnafu {
+                mutation: "reopen".to_owned(),
+                qid,
             }
             .build(),
         ));
@@ -416,12 +422,22 @@ pub async fn handle_reopen(
             issue_number,
             "Reopened issue not present in rebuilt cache (possible concurrent re-close) — surfacing partial-state error"
         );
+        // Same `PostMutationRebuildFailed` surface as the empty-cache
+        // arm above — the mutation is still `"reopen"` (the cause differs
+        // but the preceding mutation is the same). `Display` and
+        // `status_code` are identical; the call-site log line
+        // disambiguates "cache empty" from "cache present, issue
+        // missing" for diagnostic traces. Spec §8.7 R3 row covers both
+        // cases under the same 503 → INTERNAL_ERROR mapping.
+        let qid = unblock_core::types::QualifiedId::new(
+            state.github.owner(),
+            state.github.repo(),
+            issue_number,
+        );
         return Err(github_error_to_mcp(
-            unblock_github::errors::GitHubApiSnafu {
-                status: 503_u16,
-                message: format!(
-                    "Issue #{issue_number} reopened successfully, but the rebuilt cache does not contain it (possible concurrent close by another agent) — please re-run `show` to observe the final blocked status"
-                ),
+            unblock_github::errors::PostMutationRebuildFailedSnafu {
+                mutation: "reopen".to_owned(),
+                qid,
             }
             .build(),
         ));

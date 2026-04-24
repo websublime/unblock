@@ -1141,6 +1141,21 @@ impl UnblockServer {
                 issue_number,
                 "Cache empty after prime attempt — cannot capture pre-close cascade; aborting close"
             );
+            // This is a PRE-mutation prime failure — the close mutation
+            // has NOT been attempted yet. Intentionally stays on the
+            // synthetic `GitHubApi { status: 503 }` surface rather than
+            // migrating to `PostMutationRebuildFailed`, whose semantic
+            // ("mutation landed on GitHub but we cannot compute
+            // post-mutation fields") does not fit here: the message
+            // guides the caller to "retry or run `prime` first", which
+            // only makes sense when the close has not happened. Bead
+            // `unblock-29p.35` deliberately scoped the new variant to
+            // POST-mutation sites; introducing a sibling
+            // `PreMutationPrimeFailed` is tracked as a follow-up
+            // question on that bead. Spec §8.2 does not yet pin an
+            // explicit error-contract row for the prime-failure path
+            // (the §8.5 / §8.7 R3 rows are strictly post-mutation), so
+            // no spec drift either.
             return Err(crate::errors::github_error_to_mcp(
                 unblock_github::errors::GitHubApiSnafu {
                     status: 503_u16,
@@ -1390,11 +1405,9 @@ impl UnblockServer {
                 "Cache not available after close — rebuild failed; step 8 `update_status_fields` reconciliation could not run"
             );
             return Err(crate::errors::github_error_to_mcp(
-                unblock_github::errors::GitHubApiSnafu {
-                    status: 503_u16,
-                    message: format!(
-                        "Issue #{issue_number} closed successfully and cascade field-updates applied best-effort, but Status reconciliation could not complete — re-run `show` to confirm final Status fan-out"
-                    ),
+                unblock_github::errors::PostMutationRebuildFailedSnafu {
+                    mutation: "close_cascade".to_owned(),
+                    qid: issue_qid.clone(),
                 }
                 .build(),
             ));

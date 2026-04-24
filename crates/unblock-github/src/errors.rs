@@ -9,6 +9,7 @@
 
 use snafu::prelude::*;
 use unblock_core::errors::DomainError;
+use unblock_core::types::QualifiedId;
 
 use chrono::{DateTime, Utc};
 
@@ -106,6 +107,51 @@ pub enum Error {
         since: std::time::Instant,
     },
 
+    /// A GitHub mutation succeeded but the subsequent cache rebuild failed,
+    /// leaving the tool unable to compute post-mutation fields locally.
+    ///
+    /// Emitted by write-tool handlers (`close`, `dep_remove`, `reopen`) when
+    /// the mutation is durable on GitHub but a transient 503, rate-limit,
+    /// or network error during the `execute_write_tool` rebuild leaves the
+    /// cache empty (or — for `reopen` — present but missing the mutated
+    /// issue due to a concurrent re-close race). Preserves spec §8.5 /
+    /// §8.7 R3: the handler MUST NOT fabricate `has_open_blockers` /
+    /// `blocked` / Status claims against a missing graph; instead it
+    /// surfaces this variant and instructs the caller to re-run `show` to
+    /// observe the final post-mutation state.
+    ///
+    /// Maps to HTTP 503 via [`Error::status_code`]; `github_error_to_mcp`
+    /// in `unblock-mcp` then maps 503 → `ErrorCode::INTERNAL_ERROR`. The
+    /// `mutation` field names the preceding mutation (`"reopen"`,
+    /// `"remove_blocked_by"`, `"close_cascade"`, …) for log/trace
+    /// disambiguation; `qid` carries the [`QualifiedId`] of the mutated
+    /// issue (or the source endpoint for `dep_remove`) so same-numbered
+    /// local vs. cross-repo issues render unambiguously in the rendered
+    /// message.
+    ///
+    /// This is a transient wiring-class failure — NOT a domain-meaningful
+    /// outcome — which is why it lives on the infrastructure `Error` enum
+    /// rather than on [`DomainError`]. Matches the `infrastructure`-typed
+    /// error-contract rows at spec §8.5 / §8.7 R3.
+    ///
+    /// [`DomainError`]: unblock_core::errors::DomainError
+    #[snafu(display(
+        "{mutation} mutation on {qid} succeeded, but the post-mutation cache rebuild failed — please re-run `show` to observe the final state"
+    ))]
+    PostMutationRebuildFailed {
+        /// Identifier of the mutation that preceded the rebuild failure
+        /// (e.g. `"reopen"`, `"remove_blocked_by"`, `"close_cascade"`).
+        /// Free-form for log/trace diagnostics; no downstream code
+        /// branches on this value.
+        mutation: String,
+        /// The [`QualifiedId`] of the mutated issue (or of the source
+        /// endpoint, for `dep_remove`). Rendered via `Display`
+        /// (`owner/repo#n` form) so cross-repo vs. local same-number
+        /// collisions surface unambiguously in logs and in the message
+        /// forwarded to the MCP caller.
+        qid: QualifiedId,
+    },
+
     /// No Projects V2 project is configured or discoverable.
     #[snafu(display("Projects V2 not configured — run `setup` first"))]
     ProjectNotConfigured,
@@ -179,7 +225,9 @@ impl Error {
             // reaches the MCP layer with the right status-code bucket
             // so `github_error_to_mcp` maps it to INVALID_PARAMS.
             Self::GitHubGraphQLForbidden { .. } => 403,
-            Self::GitHubUnavailable { .. } | Self::CircuitBreakerOpen { .. } => 503,
+            Self::GitHubUnavailable { .. }
+            | Self::CircuitBreakerOpen { .. }
+            | Self::PostMutationRebuildFailed { .. } => 503,
             Self::RateLimited { .. } => 429,
             Self::ProjectNotConfigured => 412,
             Self::GitRemote { .. } => 500,
@@ -461,5 +509,47 @@ mod tests {
         }
         .build();
         assert_eq!(err.status_code(), 500);
+    }
+
+    #[test]
+    fn status_code_post_mutation_rebuild_failed() {
+        // SPEC §8.5 / §8.7 R3: post-mutation-rebuild failure is a
+        // 503-class infrastructure error (transient wiring-class
+        // failure). The MCP layer's `github_error_to_mcp` maps 503 →
+        // `ErrorCode::INTERNAL_ERROR`; pinning the status_code here
+        // guards the spec's error-contract rows against drift.
+        let err = PostMutationRebuildFailedSnafu {
+            mutation: "reopen".to_owned(),
+            qid: unblock_core::types::QualifiedId::new("acme", "widgets", 42),
+        }
+        .build();
+        assert_eq!(err.status_code(), 503);
+    }
+
+    #[test]
+    fn post_mutation_rebuild_failed_display_is_agent_actionable() {
+        // Display output MUST name the preceding mutation, render the
+        // QualifiedId unambiguously (`owner/repo#n` form), and instruct
+        // the caller to re-run `show`. This is the agent-actionable
+        // contract the `github_error_to_mcp` layer forwards to MCP
+        // clients — weakening it would regress spec §8.5 / §8.7 R3.
+        let err = PostMutationRebuildFailedSnafu {
+            mutation: "remove_blocked_by".to_owned(),
+            qid: unblock_core::types::QualifiedId::new("acme", "widgets", 42),
+        }
+        .build();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("remove_blocked_by"),
+            "display must name the mutation: {msg}"
+        );
+        assert!(
+            msg.contains("acme/widgets#42"),
+            "display must render the QualifiedId in `owner/repo#n` form: {msg}"
+        );
+        assert!(
+            msg.contains("re-run `show`"),
+            "display must guide the caller to re-run `show`: {msg}"
+        );
     }
 }
