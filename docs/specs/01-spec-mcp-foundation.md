@@ -1498,6 +1498,33 @@ pub struct DepRemoveResult {
 5. If source now has zero open blockers: Status → `ready`
 6. Update cache
 
+**Probe cache-mode branching (scope of the in-memory edge-existence
+guard).** Flow step 2 is `EdgePresence`-uniform on outcomes, but the
+mechanism that produces those outcomes is cache-mode branched and this
+branching is normative:
+
+- **Warm cache AND both endpoints `Local`** — in-memory fast path. The
+  probe consults the cached graph directly (`guard_edge_exists`); no
+  GraphQL round-trip is issued for the edge check. `IssueState` on the
+  cached nodes disambiguates Closed endpoints from absent nodes.
+- **Cold cache OR at least one endpoint cross-repo** — single-issue
+  GraphQL probe. The probe issues exactly one `fetch_issue_ref` against
+  the source and inspects the returned `state` + `trackedByIssues`
+  list (`probe_edge_via_fetch`). The `trackedBy` subselection carries
+  both `repository { owner { login } name }` and `state`, so the
+  Closed-endpoint check needs no second round-trip regardless of which
+  side is Closed.
+
+The in-memory fast path is therefore scoped to warm-cache + both-Local
+inputs; all other combinations (cold cache, cross-repo source, cross-
+repo target) bypass the in-memory guard and run the single-issue
+fetch-based probe instead. The three-outcome classification
+(`Present` / `EndpointClosed` / `MissingSkipMutation`) is identical
+across both branches — only the transport (memory vs. one GraphQL RTT)
+differs. Implementers MUST NOT conflate "the in-memory guard is scoped"
+with "the existence check is skipped": the existence check runs on
+every path; only the *zero-RTT* form of that check is warm+both-Local.
+
 **Error-contract row** (consumed by the cross-tool error mapping in §11.1
 and the tool-handler dispatch in §8):
 
@@ -1506,6 +1533,22 @@ and the tool-handler dispatch in §8):
 | Either endpoint is `Closed` | Mutation skipped, error surfaced | `DomainError::EndpointClosed { qid }` | 409 | `INVALID_PARAMS` |
 | Edge missing (both endpoints Open) | Mutation skipped, `removed: false` | — (success) | — | — |
 | Edge present (both endpoints Open) | Mutation runs | — (success) | — | — |
+| Mutation ran + cache rebuild failed (cache empty) | 503-class error surfaced; mutation durable on GitHub | `unblock_github::errors::Error` (transport) | 503 | `INTERNAL_ERROR` |
+
+**Post-rebuild cache-empty failure.** If the `remove_blocked_by`
+mutation in step 3 succeeds but the subsequent `execute_write_tool`
+cache rebuild fails (e.g. transient GitHub 503, rate-limit, or network
+error), leaving the cache empty, the handler cannot compute
+`has_open_blockers` locally and therefore cannot evaluate step 5's
+Status → `ready` transition. In that case the Local-source path MUST
+surface a 503-class error with a message instructing the caller to
+re-run `show` rather than returning a response that implies the
+post-removal Status fan-out is synced. The `remove_blocked_by`
+mutation is durable on GitHub regardless of this failure — the error
+signals only the inability to compute the final blocker set and Status
+fields locally. Preserves §14 invariants 8 and 13 (no fictional
+Status-sync claims when the graph cannot actually be consulted) and
+mirrors the `reopen` R3 posture in §8.7.
 
 **API calls:** 0-2 (resolve) + 1 (mutation, only on `Present`) + 0-2 (fields) + 1+ (rebuild). `EndpointClosed` and `MissingSkipMutation` both skip the mutation and the rebuild; the warm-cache probe is purely in-memory, while the cold-cache probe may issue one `fetch_issue_ref` for cross-repo endpoint resolution.
 **Cache:** Invalidates on `Present` only. `EndpointClosed` and `MissingSkipMutation` do not invalidate.
