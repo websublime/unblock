@@ -1,7 +1,8 @@
 //! GraphQL queries for GitHub API.
 //!
-//! - `fetch_graph_data()` — paginated query returning all open issues, blocking edges,
-//!   and Projects V2 field values in a single request
+//! - `fetch_graph_data()` — paginated query returning all issues
+//!   (`OPEN` + `CLOSED`), blocking edges, and Projects V2 field values
+//!   in a single request
 //! - `fetch_issue()` — single issue with comments, deps, parent, sub-issues, and all fields
 
 use chrono::{DateTime, Utc};
@@ -113,7 +114,8 @@ query FetchIssue($owner: String!, $repo: String!, $number: Int!) {
 }
 ";
 
-/// GraphQL query for fetching all open issues with pagination.
+/// GraphQL query for fetching all issues (both `OPEN` and `CLOSED`)
+/// with pagination.
 ///
 /// Returns issues with standard fields, blocking relationships (via
 /// `trackedByIssues`), and Projects V2 field values. Does **not** include
@@ -123,10 +125,20 @@ query FetchIssue($owner: String!, $repo: String!, $number: Int!) {
 /// Uses cursor-based pagination on the `issues` connection (`first: 100`,
 /// `after: $cursor`). The caller must loop until `pageInfo.hasNextPage` is
 /// false.
+///
+/// The `states: [OPEN, CLOSED]` filter matches SPEC §5.5 literally and
+/// ensures every downstream consumer that reads from the cache (`list`,
+/// `stats`, `dep_cycles`, `reopen`, `close`, `dep_remove`, `prime`,
+/// `reconcile`) sees the full issue universe. Issues that do not yet
+/// exist on GitHub are naturally absent from both pages. Closed issues
+/// enter the cache with `IssueState::Closed`; `compute_ready_set` still
+/// excludes them (graph Filter 1), and the cascade / cycle helpers
+/// already key on [`IssueState`] so the open/closed boundary is
+/// preserved on the graph layer.
 const FETCH_GRAPH_DATA_QUERY: &str = "
 query FetchGraphData($owner: String!, $repo: String!, $cursor: String) {
   repository(owner: $owner, name: $repo) {
-    issues(first: 100, states: OPEN, after: $cursor) {
+    issues(first: 100, states: [OPEN, CLOSED], after: $cursor) {
       pageInfo {
         endCursor
         hasNextPage
@@ -289,19 +301,25 @@ impl GitHubClient {
         }
     }
 
-    /// Fetches all open issues and blocking edges for the dependency graph.
+    /// Fetches all issues (`OPEN` + `CLOSED`) and blocking edges for the
+    /// dependency graph.
     ///
     /// Returns a tuple of `(issues, edges)` where:
-    /// - `issues` contains all open issues with standard fields and Projects V2
-    ///   field values, but **not** comments, parent, sub-issues, or the
-    ///   `blocked_by`/`blocking` vectors on [`Issue`] (those remain empty).
+    /// - `issues` contains every `OPEN` and `CLOSED` issue with standard
+    ///   fields and Projects V2 field values, but **not** comments,
+    ///   parent, sub-issues, or the `blocked_by`/`blocking` vectors on
+    ///   [`Issue`] (those remain empty). Closed issues enter the result
+    ///   with `state == IssueState::Closed` so downstream consumers can
+    ///   honour the open/closed boundary on the graph layer
+    ///   (`compute_ready_set` continues to exclude closed issues,
+    ///   `compute_unblock_cascade` keys on `issue_state`, etc.).
     /// - `edges` contains [`BlockingEdge`] entries extracted from GitHub's
     ///   `trackedByIssues` relationship, where `source` is the blocked issue
     ///   and `target` is the blocker.
     ///
     /// Paginates using GraphQL cursor pagination (100 issues per page) until
-    /// all open issues are fetched. Returns empty vectors for a repo with no
-    /// open issues.
+    /// every issue is fetched. Returns empty vectors for a repo with no
+    /// issues at all.
     ///
     /// # Errors
     ///
@@ -2125,6 +2143,132 @@ mod tests {
 
         assert!(issues.is_empty());
         assert!(edges.is_empty());
+    }
+
+    /// Builds a mock GraphQL response page that lets the caller set the
+    /// native GitHub state (`"OPEN"` / `"CLOSED"`) per issue node.
+    ///
+    /// Used by [`fetch_graph_data_parses_closed_state_round_trip`] to
+    /// verify that `states: [OPEN, CLOSED]` (per SPEC §5.5, bead
+    /// `unblock-a36`) round-trips a `CLOSED` node through
+    /// `parse_graph_issue` into `IssueState::Closed`.
+    fn make_page_response_with_states(
+        issues: &[(u64, &str, &str, Vec<u64>)],
+        has_next_page: bool,
+        end_cursor: Option<&str>,
+    ) -> serde_json::Value {
+        let nodes: Vec<serde_json::Value> = issues
+            .iter()
+            .map(|(number, title, state, blockers)| {
+                let tracked_by_nodes: Vec<serde_json::Value> = blockers
+                    .iter()
+                    .map(|n| serde_json::json!({"number": n}))
+                    .collect();
+                serde_json::json!({
+                    "id": format!("node-{number}"),
+                    "number": number,
+                    "title": title,
+                    "body": null,
+                    "state": state,
+                    "url": format!("https://github.com/test-owner/test-repo/issues/{number}"),
+                    "createdAt": "2026-01-01T00:00:00Z",
+                    "updatedAt": "2026-01-01T00:00:00Z",
+                    "labels": {"nodes": []},
+                    "milestone": null,
+                    "assignees": {"nodes": []},
+                    "trackedBy": {"nodes": tracked_by_nodes}
+                })
+            })
+            .collect();
+
+        serde_json::json!({
+            "data": {
+                "repository": {
+                    "issues": {
+                        "pageInfo": {
+                            "hasNextPage": has_next_page,
+                            "endCursor": end_cursor,
+                        },
+                        "nodes": nodes,
+                    }
+                }
+            }
+        })
+    }
+
+    /// `fetch_graph_data` must round-trip BOTH `OPEN` and `CLOSED`
+    /// nodes through `parse_graph_issue` after the SPEC §5.5 widening
+    /// (`states: [OPEN, CLOSED]`, bead `unblock-a36`).
+    ///
+    /// Seeds a single page containing one `OPEN` and one `CLOSED`
+    /// issue, and asserts:
+    /// - both are returned (no filtering happens on the client side),
+    /// - the `CLOSED` node materialises as `IssueState::Closed`,
+    /// - the `OPEN` node materialises as `IssueState::Open`,
+    /// - blocking edges are independent of `IssueState` (the `OPEN`
+    ///   issue's blocker entry references the `CLOSED` one, matching
+    ///   a real "closed blocker" scenario).
+    ///
+    /// Complements [`fetch_graph_data_multi_page_pagination`] (which
+    /// covers pagination) and the live integration test (which asserts
+    /// the `OPEN|CLOSED` invariant against a real repo).
+    #[tokio::test]
+    async fn fetch_graph_data_parses_closed_state_round_trip() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let client = GitHubClient::new_for_test(&server.uri());
+
+        // Issue #1 is CLOSED (no blockers). Issue #2 is OPEN and is
+        // blocked by #1 — the "still-tracked closed blocker" scenario
+        // that unblock-a36's Block A rehydrates in the cache.
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(make_page_response_with_states(
+                    &[
+                        (1, "Closed one", "CLOSED", vec![]),
+                        (2, "Open two", "OPEN", vec![1]),
+                    ],
+                    false,
+                    None,
+                )),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (issues, edges) = client.fetch_graph_data().await.expect("should succeed");
+
+        assert_eq!(issues.len(), 2, "both OPEN and CLOSED nodes must surface");
+
+        let closed = issues
+            .iter()
+            .find(|i| i.number == 1)
+            .expect("issue #1 must be present");
+        assert_eq!(
+            closed.state,
+            IssueState::Closed,
+            "node with state=\"CLOSED\" must map to IssueState::Closed",
+        );
+
+        let open = issues
+            .iter()
+            .find(|i| i.number == 2)
+            .expect("issue #2 must be present");
+        assert_eq!(
+            open.state,
+            IssueState::Open,
+            "node with state=\"OPEN\" must map to IssueState::Open",
+        );
+
+        // Edge #2 → #1 must be present even though the blocker (#1) is
+        // CLOSED — the graph layer is responsible for the open/closed
+        // boundary, not the GraphQL fetch.
+        assert_eq!(edges.len(), 1, "closed blockers still produce edges");
+        assert_eq!(edges[0].source.number, 2);
+        assert_eq!(edges[0].target.number, 1);
     }
 
     // ── check_rest_response ────────────────────────────────────────────
