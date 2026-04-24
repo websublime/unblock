@@ -516,7 +516,7 @@ compute_unblock_cascade(graph, closed_qid, issues) → Vec<QualifiedId>:
   RETURN unblocked
 ```
 
-**Critical (MUST):** The cascade MUST be computed from the PRE-CLOSE graph state — before the issue is closed in GitHub and before cache invalidation. After close, `fetch_graph_data()` returns only open issues (see `FETCH_GRAPH_DATA_QUERY` at `unblock-github/src/graphql.rs:129` — `states: OPEN`), so the closed issue is excluded from the rebuilt graph, `node_map.get(closed_id)` returns `None`, and this function short-circuits to `Vec::new()` at `unblock-core/src/graph.rs:289-291` regardless of whether dependents exist. A POST-close cascade computation is therefore UNSOUND by construction, not a bug in this function. See §8.2 (`close` tool flow) for the required ordering and the "Pre-close cascade MUST be captured before the mutation" paragraph for the normative prohibition.
+**Critical (MUST):** The cascade MUST be computed from the PRE-CLOSE graph state — before the issue is closed in GitHub and before cache invalidation. Since bead `unblock-a36` widened `fetch_graph_data` to `states: [OPEN, CLOSED]` (§5.5), the just-closed issue would still appear in a POST-close rebuilt `node_map` (as `IssueState::Closed`), and the `blocker_qid == closed_qid` special-case in the loop above would still resolve. But PRE-close ordering remains MANDATORY for two reasons that are NOT addressed by the widening: (a) the rebuilt `Incoming` traversal from a Closed `closed_qid` would include already-closed dependents, and this function filters them only on `dependent_issue.state == Closed` (the explicit CONTINUE above) — relying on that filter holding stable is fragile versus relying on graph shape; (b) any race where a concurrent mutation alters a blocker's state between close-mutation and rebuild would silently shift the cascade set. Capturing PRE-close freezes the snapshot against both risks. The defensive `Vec::new()` short-circuit on `node_map.get(closed_qid) → None` at `unblock-core/src/graph.rs:289-291` remains correct for create-then-immediately-close races where `closed_qid` legitimately is not yet in the graph. See §8.2 (`close` tool flow) for the required ordering and the "Pre-close cascade MUST be captured before the mutation" paragraph for the normative prohibition.
 
 **Edge cases:**
 - Multi-level cascade: NOT recursive. Closing A unblocks B. B becomes ready. When B is later closed, its own cascade fires.
@@ -738,7 +738,7 @@ Defined in `unblock-github/src/api.rs`. Abstracts all GitHub operations. `async_
 **Sync accessors:** `owner()`, `repo()`, `project_number()`, `api_base_url()`, `rest_url()`, `graphql_url()`, `field_ids()`, `set_field_ids()`
 
 **GraphQL reads:**
-- `fetch_graph_data() → (Vec<Issue>, Vec<BlockingEdge>)` — all open issues with edges and field values
+- `fetch_graph_data() → (Vec<Issue>, Vec<BlockingEdge>)` — all issues (both `Open` and `Closed`) with edges and field values; `IssueState` on each node is preserved so closed nodes can be consumed by `list(status="Closed")`, cascade walks (§3.4), and the dep_remove endpoint-Closed UX (§8.5)
 - `fetch_issue(number) → Issue` — single issue with comments, always fresh
 - `fetch_issue_ref(ref) → Issue` — resolve IssueRef then fetch
 
@@ -782,7 +782,7 @@ Defined in `unblock-github/src/api.rs`. Abstracts all GitHub operations. `async_
 ```graphql
 query($owner: String!, $repo: String!, $cursor: String) {
   repository(owner: $owner, name: $repo) {
-    issues(first: 100, after: $cursor, states: [OPEN]) {
+    issues(first: 100, after: $cursor, states: [OPEN, CLOSED]) {
       pageInfo { hasNextPage endCursor }
       nodes {
         number title state createdAt
@@ -1182,6 +1182,8 @@ pub struct ListResult {
 4. Record `total` before pagination
 5. Paginate: skip `offset`, take `limit`
 
+**`status="Closed"` visibility.** Before bead `unblock-a36`, `fetch_graph_data` filtered to `states: [OPEN]`, so `list(status="Closed")` always returned `{ issues: [], total: 0 }`. After widening `fetch_graph_data` to `states: [OPEN, CLOSED]` (§5.5), the cache is populated with both live and archived issues; `list(status="Closed")` returns the configured-repo subset in the same sorted/paginated projection as any other status filter. `status="Ready"` and the other live buckets are unaffected — the filter is applied after the cache read so closed issues are excluded from any ready-class projection.
+
 **Cache:** Read-only.
 **API calls:** 0 (cache hit) | 1+ (rebuild)
 
@@ -1316,23 +1318,34 @@ pub struct CloseResult {
 6. For each unblocked (from step 2 — cascade list captured PRE-close):
    a. Update Status → `ready`
    b. Add comment: `"Unblocked — blocker #{id} was closed"`
-7. Invalidate cache + rebuild graph (post-close: issue excluded from OPEN query per `fetch_graph_data`'s `states: OPEN` filter at `unblock-github/src/graphql.rs:129`)
+7. Invalidate cache + rebuild graph (post-close: issue appears in the rebuilt graph as `IssueState::Closed` per `fetch_graph_data`'s widened `states: [OPEN, CLOSED]` filter at `unblock-github/src/graphql.rs:129`; PRE-close cascade capture in step 2 remains MANDATORY for the reasons enumerated in §3.4 Critical — the rebuild is a rebuild, not a cascade source)
 8. `update_status_fields` — syncs Status for issues NOT already handled in step 6 (e.g., issues whose blocker status changed but were not direct dependents of the closed issue)
 9. Partition the cascade list from step 2 by `(owner, repo) == (config.owner, config.repo)`: local dependents go into `unblocked: Vec<u64>`; cross-repo dependents populate `cross_repo_refs` per §11.4 (deduplicated, sorted by `QualifiedId::Display`).
 10. Update cache
 
 **Pre-close cascade MUST be captured before the mutation.** The cascade list is an
 authoritative output of the tool — the agent relies on it to drive downstream
-work. Computing it POST-close against the rebuilt OPEN-only graph is UNSOUND:
-`fetch_graph_data` (graphql.rs:129) filters to `states: OPEN`, so the just-closed
-issue is NOT in the rebuilt `node_map`, and `compute_unblock_cascade`
-short-circuits on the `node_map.get(closed_id) → None` branch at
-`unblock-core/src/graph.rs:289-291`, silently returning `Vec::new()` regardless
-of whether dependents exist. Any impl that computes the cascade from the
-post-rebuild cache will always report `unblocked = []` in production, even when
-real dependents exist. The PRE-close ordering is therefore MANDATORY, not
-advisory. The POST-close → rebuild → cascade topology is a correctness defect
-and MUST NOT be reintroduced.
+work. PRE-close ordering is MANDATORY, not advisory. Two independent reasons,
+either of which is sufficient:
+
+1. **Traversal-set fragility.** Since `fetch_graph_data` now returns `states:
+   [OPEN, CLOSED]` (bead `unblock-a36`), a POST-close rebuild carries the
+   just-closed issue as `IssueState::Closed` and the `Incoming` traversal in
+   §3.4 enumerates already-closed dependents alongside live ones. The
+   `dependent_issue.state == Closed → CONTINUE` filter handles that on the
+   happy path, but relying on a post-filter of a widened traversal is strictly
+   fragile versus capturing the authoritative set from the pre-close graph
+   where the traversal shape is already correct.
+2. **Concurrent-mutation races.** Between the close mutation and the rebuild,
+   a concurrent write to any blocker (close, reopen, or edge change) can
+   silently shift which dependents satisfy `all_closed`. Capturing PRE-close
+   freezes the snapshot; POST-close leaves the output dependent on uncoordinated
+   races.
+
+The POST-close → rebuild → cascade topology is a correctness defect and MUST
+NOT be reintroduced. An impl that computed the cascade from the post-rebuild
+cache would silently degrade the cascade list under either of the two
+conditions above — neither is catchable from the cascade's return shape alone.
 
 **Post-rebuild field-sync failure.** Step 2's cascade list is already captured
 and durable in memory before the mutation; a later rebuild failure does NOT
@@ -1349,7 +1362,7 @@ the error signals only that the reconciliation in step 8 could not run. The
 invariants 8 and 13 (no fictional Status-sync claims when the graph cannot be
 consulted).
 
-**Why step 2 before step 3:** After close, `fetch_graph_data()` returns only OPEN issues. The closed issue is excluded from the rebuilt graph. `compute_unblock_cascade` requires the closed issue to be a node (via `node_map.get(closed_id)`) to find dependents via Incoming edges. See §3.4 "Critical" note.
+**Why step 2 before step 3:** PRE-close freezes the cascade snapshot against (a) the traversal-set fragility enumerated above — a POST-close rebuild carries the closed issue as `IssueState::Closed` under the widened `states: [OPEN, CLOSED]` query (§5.5), and the `Incoming` walk would include already-closed dependents that the `dependent_issue.state == Closed` CONTINUE then filters; and (b) concurrent blocker mutations between close and rebuild. See §3.4 "Critical" note for the full normative rationale.
 
 **Why step 6 uses only two `*_ref` primitives:** Each cross-repo cascade member triggers three side effects — `fetch_issue` (to obtain `issue_node_id`), Projects V2 `update_field` (Status → `ready`), and `add_comment` (unblock note). Of these, only `fetch_issue` and `add_comment` are addressed by `(owner, repo, number)` and therefore need `*_ref` variants (`fetch_issue_ref`, `add_comment_ref`) to route cross-repo. `update_field` does NOT get an `update_field_ref` variant because `updateProjectV2ItemFieldValue` operates on globally-scoped node IDs (`project_id` + `item_id`), not on `(owner, repo, number)` — once `fetch_issue_ref` yields the cross-repo issue's node ID, `get_project_item_id(issue_node_id, project_id)` resolves the item on the configured project's board, and the existing `update_field(project_id, item_id, field_id, value)` applies the Status update directly. See §5.6 "Cascade-primitive asymmetry" for the routing rationale.
 
@@ -1456,18 +1469,46 @@ pub struct DepRemoveResult {
 
 **Flow:**
 1. Resolve both IssueRefs
-2. Validate edge exists in graph. If the edge does not exist, return
-   `DepRemoveResult { removed: false, ... }` WITHOUT running step 3
-   (honours §14 Invariant 11). This posture is uniform across all
-   paths (warm-local, warm-cross-repo, cold-local, cold-cross-repo);
-   missing-edge is never surfaced as an error.
+2. Classify the edge via a three-outcome pre-mutation probe
+   (`EdgePresence`). Uniform across all paths (warm-local,
+   warm-cross-repo, cold-local, cold-cross-repo):
+   a. **`Present`** — edge exists in the graph AND both endpoints are
+      `IssueState::Open`. Proceed to step 3.
+   b. **`EndpointClosed(qid)`** — either endpoint's `IssueState` is
+      `Closed`. Source is inspected before target, so when both are
+      Closed the source's `QualifiedId` is reported. The mutation is
+      SKIPPED and the handler surfaces `DomainError::EndpointClosed
+      { qid }` (§11.1, 409 → `INVALID_PARAMS`). The error message
+      MUST name the endpoint's `QualifiedId` and tell the agent to
+      `reopen` it or accept the dangling edge. Rationale: the prior
+      two-outcome posture would have classified this as `Present`
+      and run the mutation, but a closed endpoint's Status field is
+      frozen and the rebuilt graph would diverge from the agent's
+      mental model of "both sides were live when I dropped the
+      edge". This is a cross-cutting contract, not just UX: it
+      prevents silent drift between the graph engine and the
+      Projects V2 Status field for closed nodes.
+   c. **`MissingSkipMutation`** — both endpoints are Open but the
+      edge does not exist. Return `DepRemoveResult { removed: false,
+      ... }` WITHOUT running step 3 (honours §14 Invariant 11).
+      Missing-edge is never surfaced as an error — only endpoint-Closed
+      is.
 3. `remove_blocked_by` mutation
 4. Rebuild graph, recompute ready states
 5. If source now has zero open blockers: Status → `ready`
 6. Update cache
 
-**API calls:** 0-2 (resolve) + 1 (mutation) + 0-2 (fields) + 1+ (rebuild)
-**Cache:** Invalidates.
+**Error-contract row** (consumed by the cross-tool error mapping in §11.1
+and the tool-handler dispatch in §8):
+
+| Condition | Outcome | Error variant | HTTP | MCP code |
+|---|---|---|---|---|
+| Either endpoint is `Closed` | Mutation skipped, error surfaced | `DomainError::EndpointClosed { qid }` | 409 | `INVALID_PARAMS` |
+| Edge missing (both endpoints Open) | Mutation skipped, `removed: false` | — (success) | — | — |
+| Edge present (both endpoints Open) | Mutation runs | — (success) | — | — |
+
+**API calls:** 0-2 (resolve) + 1 (mutation, only on `Present`) + 0-2 (fields) + 1+ (rebuild). `EndpointClosed` and `MissingSkipMutation` both skip the mutation and the rebuild; the warm-cache probe is purely in-memory, while the cold-cache probe may issue one `fetch_issue_ref` for cross-repo endpoint resolution.
+**Cache:** Invalidates on `Present` only. `EndpointClosed` and `MissingSkipMutation` do not invalidate.
 
 ### 8.6 `update`
 
@@ -1772,12 +1813,15 @@ pub enum DomainError {
     IssueAlreadyOpen { number: u64 },
     CircularDependency { source: IssueRef, target: IssueRef },
     DuplicateDependency { source: IssueRef, target: IssueRef },
+    EndpointClosed { qid: QualifiedId },
     FieldNotFound { name: String },
     Validation { message: String },
     InvalidIssueRef { input: String },
     CrossRepoAccessDenied { owner: String, repo: String },
 }
 ```
+
+`EndpointClosed` carries a `QualifiedId` (not `IssueRef`) because it is always surfaced by `dep_remove` after both endpoints have been resolved — at that point the fully-qualified `(owner, repo, number)` is known and disambiguation is required. Rendered as `"acme/widgets#42"` (configured-repo endpoint) or `"otherowner/otherrepo#42"` (cross-repo endpoint) — the `QualifiedId::Display` impl always emits the `owner/repo#number` qualified form.
 
 Each variant has `status_code() → u16`:
 
@@ -1792,6 +1836,7 @@ Each variant has `status_code() → u16`:
 | `IssueAlreadyOpen` | 409 |
 | `CircularDependency` | 422 |
 | `DuplicateDependency` | 409 |
+| `EndpointClosed` | 409 |
 | `FieldNotFound` | 404 |
 | `Validation` | 400 |
 | `InvalidIssueRef` | 400 |
