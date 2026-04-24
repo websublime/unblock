@@ -360,22 +360,26 @@ async fn fetch_graph_data_returns_issues_from_real_repo() {
         .await
         .expect("fetch_graph_data() should succeed");
 
-    // The test repo should have at least one open issue.
-    // If the repo has zero open issues this assertion will fail — that is fine,
+    // The test repo should have at least one issue (OPEN or CLOSED).
+    // If the repo has zero issues this assertion will fail — that is fine,
     // it means the test repo needs seeding.
     assert!(
         !issues.is_empty(),
-        "fetch_graph_data should return at least one open issue"
+        "fetch_graph_data should return at least one issue (OPEN or CLOSED)"
     );
 
-    // Verify all returned issues are open.
+    // Verify every returned issue has a valid IssueState. After
+    // `unblock-a36` the query uses `states: [OPEN, CLOSED]`, so BOTH
+    // states are valid — we only reject anything outside the expected
+    // set (which the parser treats as `Open` but future schema drifts
+    // could introduce). Sanity check: the pair matches the enum's
+    // closed variant set.
     for issue in &issues {
-        assert_eq!(
-            issue.state,
-            IssueState::Open,
-            "fetch_graph_data should only return open issues, but issue #{} is {:?}",
-            issue.number,
-            issue.state
+        let valid = matches!(issue.state, IssueState::Open | IssueState::Closed);
+        assert!(
+            valid,
+            "fetch_graph_data returned unexpected state for issue #{}: {:?}",
+            issue.number, issue.state
         );
     }
 
