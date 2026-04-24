@@ -2071,7 +2071,7 @@ async fn stats_aggregates_every_bucket_and_warms_cache() {
     assert_eq!(result.by_status.get("in_progress"), Some(&3_usize)); // #2, #8, #9
     assert_eq!(result.by_status.get("blocked"), Some(&1_usize)); // #3
     assert_eq!(result.by_status.get("deferred"), Some(&1_usize)); // #4
-    assert_eq!(result.by_status.get("closed"), Some(&0_usize)); // OPEN-only
+    assert_eq!(result.by_status.get("closed"), Some(&0_usize)); // fixture has no Closed issues
 
     // by_priority — one P0/P1/P3/P4, three P2s, plus another P0 (#8).
     assert_eq!(result.by_priority.get("P0"), Some(&2_usize)); // #1, #8
@@ -2100,7 +2100,7 @@ async fn stats_aggregates_every_bucket_and_warms_cache() {
     assert_eq!(result.agents.len(), 2);
     assert_eq!(result.agents[0].name, "alice");
     assert_eq!(result.agents[0].in_progress, 2);
-    assert_eq!(result.agents[0].completed, 0); // OPEN-only
+    assert_eq!(result.agents[0].completed, 0); // fixture has no Closed issues
     assert_eq!(result.agents[1].name, "bob");
     assert_eq!(result.agents[1].in_progress, 1);
     assert_eq!(result.agents[1].completed, 0);
@@ -5492,11 +5492,12 @@ async fn close_no_cross_repo_dependents_cross_repo_refs_is_none() {
             target: QualifiedId::new("acme", "widgets", 8),
         },
     ];
-    // Phase 1 post-close rebuild: #8 is EXCLUDED (production
-    // `fetch_graph_data` uses `states: OPEN` per
-    // `unblock-github/src/graphql.rs:129`). Under PRE-close ordering
-    // the cascade is already captured; the post-close graph is only
-    // consulted for step 8 `update_status_fields` reconciliation.
+    // Phase 1 post-close rebuild: #8 is EXCLUDED from the rebuild
+    // universe — this is the post-close rebuild topology divergence
+    // from the prime topology (the just-closed blocker is absent).
+    // Under PRE-close ordering the cascade is already captured; the
+    // post-close graph is only consulted for step 8
+    // `update_status_fields` reconciliation.
     let post_close_issues = vec![close_fixture_issue(10), close_fixture_issue(11)];
     // Post-close the edges are dropped (both dependents are now
     // unblocked, so there are no remaining open blockers on them).
@@ -5512,7 +5513,8 @@ async fn close_no_cross_repo_dependents_cross_repo_refs_is_none() {
     // Phase 1 field ladder: push None to skip Projects V2 updates.
     mock.push_field_ids(None);
     // Phase 1 post-close rebuild — the closed issue #8 is now
-    // excluded, faithful to production `states: OPEN` semantics.
+    // absent from the rebuild universe, modelling the post-close
+    // rebuild topology divergence from the prime topology.
     mock.push_fetch_graph_data(Ok((post_close_issues, post_close_edges)));
     // Phase 2 loop runs 2×. Each iteration calls add_comment_ref
     // then field_ids. Post unblock-eos.13 the cascade always dispatches
@@ -5587,9 +5589,9 @@ async fn close_no_cross_repo_dependents_cross_repo_refs_is_none() {
     assert_eq!(mock.calls().close_issue(), 1);
     // Under PRE-close ordering the handler issues two
     // `fetch_graph_data` round-trips: Phase 0 cold-cache prime
-    // (captures the cascade against the OPEN graph that still
-    // contains #8) and Phase 1 post-close rebuild (faithful
-    // `states: OPEN` semantics, #8 excluded). GAP-15.
+    // (captures the cascade against the prime graph that still
+    // contains #8) and Phase 1 post-close rebuild (post-close
+    // rebuild universe excludes the just-closed #8). GAP-15.
     assert_eq!(mock.calls().fetch_graph_data(), 2);
 }
 
@@ -5638,8 +5640,8 @@ async fn close_cross_repo_dependent_populates_cross_repo_refs() {
             target: QualifiedId::new("acme", "widgets", 8),
         },
     ];
-    // Phase 1 post-close rebuild: #8 excluded (production
-    // `states: OPEN` semantics).
+    // Phase 1 post-close rebuild: #8 absent from the rebuild
+    // universe (post-close rebuild topology divergence).
     let post_close_issues = vec![
         close_fixture_issue(10),
         close_cross_repo_fixture("other", "repo", 99),
@@ -5776,8 +5778,8 @@ async fn close_single_cross_repo_dependent_uses_singular_summary() {
         source: QualifiedId::new("other", "repo", 99),
         target: QualifiedId::new("acme", "widgets", 8),
     }];
-    // Phase 1 post-close rebuild: #8 excluded (production
-    // `states: OPEN` semantics).
+    // Phase 1 post-close rebuild: #8 absent from the rebuild
+    // universe (post-close rebuild topology divergence).
     let post_close_issues = vec![close_cross_repo_fixture("other", "repo", 99)];
     let post_close_edges: Vec<BlockingEdge> = vec![];
 
@@ -5787,7 +5789,7 @@ async fn close_single_cross_repo_dependent_uses_singular_summary() {
     mock.push_fetch_issue(Ok(close_fixture_issue(8)));
     mock.push_close_issue(Ok(()));
     mock.push_field_ids(None);
-    // Phase 1 post-close rebuild (production-realistic: #8 excluded).
+    // Phase 1 post-close rebuild (rebuild universe excludes the just-closed #8).
     mock.push_fetch_graph_data(Ok((post_close_issues, post_close_edges)));
     // Phase 2: single cross-repo dependent — dispatched through the *_ref
     // primitive (SPEC §8.2 step 6 / §5.6 `close` row).
@@ -5858,9 +5860,10 @@ async fn close_single_cross_repo_dependent_uses_singular_summary() {
 ///
 /// Fixture (GAP-15 PRE-close ordering): local blocker #8 with a single
 /// cross-repo dependent `other/repo#99`. Phase 0 primes the graph
-/// against a PRE-close fixture containing #8 as OPEN. Phase 1 closes
-/// #8 and rebuilds from a POST-close fixture that excludes #8
-/// (production-realistic `states: OPEN` semantics). The mock queues
+/// against a PRE-close fixture containing #8 as an active blocker.
+/// Phase 1 closes #8 and rebuilds from a POST-close fixture where the
+/// just-closed #8 is absent from the rebuild universe (post-close
+/// rebuild topology divergence from the prime topology). The mock queues
 /// an `Err(CrossRepoAccessDenied)` on the first (and only)
 /// `add_comment_ref` call — modelling the "token lacks write scope on
 /// foreign repo" scenario.
@@ -5895,8 +5898,8 @@ async fn close_cross_repo_add_comment_ref_failure_warns_and_continues_cascade() 
         source: QualifiedId::new("other", "repo", 99),
         target: QualifiedId::new("acme", "widgets", 8),
     }];
-    // Phase 1 post-close rebuild: #8 excluded (production
-    // `states: OPEN` semantics).
+    // Phase 1 post-close rebuild: #8 absent from the rebuild
+    // universe (post-close rebuild topology divergence).
     let post_close_issues = vec![close_cross_repo_fixture("other", "repo", 99)];
     let post_close_edges: Vec<BlockingEdge> = vec![];
 
@@ -6195,9 +6198,9 @@ async fn close_surfaces_error_when_rebuild_fails_after_pre_cascade() {
 ///
 /// This test locks the PRE-close cascade capture against a future
 /// refactor that might silently re-introduce POST-close lookup. It
-/// uses a production-realistic rebuilt-graph fixture that EXCLUDES
-/// the closed issue (faithful to `fetch_graph_data`'s `states: OPEN`
-/// filter at `unblock-github/src/graphql.rs:129`) and asserts the
+/// uses a rebuilt-graph fixture where the just-closed issue is
+/// absent from the rebuild universe — i.e. the post-close rebuild
+/// topology diverges from the prime topology — and asserts the
 /// cascade list is still correctly populated from the Phase-0
 /// pre-close capture.
 ///
@@ -6206,22 +6209,22 @@ async fn close_surfaces_error_when_rebuild_fails_after_pre_cascade() {
 /// `unblock-core/src/graph.rs:289-291` because the just-closed issue
 /// is absent from the rebuilt `node_map`. Under PRE-close ordering
 /// the cascade is captured in Phase 0 against the pre-close graph
-/// where #8 is still an OPEN node — the post-close rebuild's graph
-/// shape is irrelevant to the response envelope.
+/// where #8 is still an active blocker — the post-close rebuild's
+/// graph shape is irrelevant to the response envelope.
 ///
 /// Fixture: #8 blocks #10 and #11. Phase 0 primes against
-/// `{#8 open, #10, #11}` with edges `#10 → #8`, `#11 → #8`; Phase 1
+/// `{#8, #10, #11}` with edges `#10 → #8`, `#11 → #8`; Phase 1
 /// closes #8 and rebuilds against `{#10, #11}` (no edges — the
-/// blocker is gone). The response MUST still carry
-/// `unblocked = [10, 11]` (set membership) and `cross_repo_refs =
-/// None`, identical to the warm-cache happy path.
+/// blocker is gone from the rebuild universe). The response MUST
+/// still carry `unblocked = [10, 11]` (set membership) and
+/// `cross_repo_refs = None`, identical to the warm-cache happy path.
 ///
 /// Call-pattern assertions are intentionally duplicated with the
 /// first happy-path test — keeping them locked here guards the
 /// PRE-close contract against a regression that only manifests
 /// when the rebuild topology diverges from the prime topology.
 #[tokio::test]
-async fn close_cascade_survives_open_only_rebuild() {
+async fn close_cascade_survives_post_close_rebuild_topology_divergence() {
     use rmcp::handler::server::wrapper::{Json, Parameters};
     use unblock_mcp::server::UnblockServer;
     use unblock_mcp::tools::close::CloseParams;
@@ -6242,14 +6245,14 @@ async fn close_cascade_survives_open_only_rebuild() {
             target: QualifiedId::new("acme", "widgets", 8),
         },
     ];
-    // Phase 1 post-close rebuild: #8 is EXCLUDED (production
-    // `states: OPEN` semantics — this is the key departure from the
-    // pre-GAP-15 cheat-fixture that retained #8 in the rebuild
-    // response to artificially satisfy the POST-close lookup). Under
-    // PRE-close ordering the cascade has already been captured, so
-    // this faithful topology is the correct production model. The
-    // edges are gone too because the blocker no longer exists in the
-    // OPEN-only graph.
+    // Phase 1 post-close rebuild: #8 is EXCLUDED from the rebuild
+    // universe — this is the key departure from the pre-GAP-15
+    // cheat-fixture that retained #8 in the rebuild response to
+    // artificially satisfy the POST-close lookup. Under PRE-close
+    // ordering the cascade has already been captured, so this
+    // post-close rebuild topology divergence is the correct
+    // production model. The edges are gone too because the
+    // closed blocker is no longer part of the rebuild universe.
     let post_close_issues = vec![close_fixture_issue(10), close_fixture_issue(11)];
     let post_close_edges: Vec<BlockingEdge> = vec![];
 
@@ -6286,26 +6289,27 @@ async fn close_cascade_survives_open_only_rebuild() {
     assert_eq!(result.issue, 8);
 
     // THE CORE REGRESSION GUARD: despite the rebuild fixture
-    // excluding #8 (production `states: OPEN` semantics), the
-    // response carries both pre-close dependents. Under the legacy
-    // POST-close ordering this assertion would FAIL with
-    // `unblocked == []` because the rebuilt `node_map` lacks #8 and
-    // `compute_unblock_cascade` would short-circuit. GAP-15 makes
-    // this topology irrelevant to the response.
+    // excluding #8 from the rebuild universe (post-close rebuild
+    // topology divergence), the response carries both pre-close
+    // dependents. Under the legacy POST-close ordering this
+    // assertion would FAIL with `unblocked == []` because the
+    // rebuilt `node_map` lacks #8 and `compute_unblock_cascade`
+    // would short-circuit. GAP-15 makes this topology irrelevant
+    // to the response.
     let unblocked_set: std::collections::HashSet<u64> = result.unblocked.iter().copied().collect();
     assert_eq!(
         unblocked_set,
         std::collections::HashSet::from([10_u64, 11]),
         "GAP-15 PRE-close contract: cascade must contain both pre-close dependents even when \
-         the post-close rebuilt graph EXCLUDES the closed issue (production `states: OPEN` \
-         semantics). Legacy POST-close ordering would silently return []; got: {:?}",
+         the post-close rebuilt graph EXCLUDES the closed issue (post-close rebuild topology \
+         divergence). Legacy POST-close ordering would silently return []; got: {:?}",
         result.unblocked,
     );
     // All-local cascade → cross_repo_refs MUST be None.
     assert!(
         result.cross_repo_refs.is_none(),
-        "all-local cascade → cross_repo_refs None even under production-realistic rebuild; \
-         got: {:?}",
+        "all-local cascade → cross_repo_refs None even under the post-close rebuild topology \
+         divergence; got: {:?}",
         result.cross_repo_refs,
     );
 
@@ -6337,8 +6341,9 @@ async fn close_cascade_survives_open_only_rebuild() {
 
     assert_eq!(mock.calls().close_issue(), 1);
     // Two fetch_graph_data round-trips: Phase 0 prime + Phase 1
-    // post-close rebuild. The second one returns a production-
-    // realistic OPEN-only graph that EXCLUDES the closed issue.
+    // post-close rebuild. The second one returns a rebuild universe
+    // that EXCLUDES the just-closed issue (post-close rebuild
+    // topology divergence).
     assert_eq!(mock.calls().fetch_graph_data(), 2);
 }
 
@@ -7496,12 +7501,12 @@ async fn close_co_blocking_dependent_excluded_from_unblocked() {
             target: QualifiedId::new("acme", "widgets", BLOCKER_A),
         },
     ];
-    // Phase 1 POST-close rebuild: CLOSED EXCLUDED (production
-    // `states: OPEN` semantics — see server.rs:1069-1075), DEPENDENT
-    // and BLOCKER_A remain. The edge DEPENDENT → CLOSED has vanished
-    // (its target is no longer an OPEN node in the rebuilt graph),
-    // but the edge DEPENDENT → BLOCKER_A is still present so
-    // `ready_set` correctly excludes DEPENDENT.
+    // Phase 1 POST-close rebuild: CLOSED is absent from the rebuild
+    // universe (post-close rebuild topology divergence — see
+    // server.rs:1069-1075), DEPENDENT and BLOCKER_A remain. The edge
+    // DEPENDENT → CLOSED has vanished (its target is no longer part
+    // of the rebuild universe), but the edge DEPENDENT → BLOCKER_A
+    // is still present so `ready_set` correctly excludes DEPENDENT.
     let post_close_issues = vec![
         close_fixture_issue(BLOCKER_A),
         close_fixture_issue(DEPENDENT),

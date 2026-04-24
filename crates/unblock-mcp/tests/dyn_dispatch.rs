@@ -387,10 +387,10 @@ async fn close_dispatches_through_dyn_vtable() {
     let mock = new_mock();
     // GAP-15 PRE-close ordering (unblock-29p.62): Phase 0 prime
     // issues a `fetch_graph_data` round-trip *before* the mutation
-    // to capture the cascade against the pre-close OPEN graph.
-    // Phase 1 post-close rebuild is the second round-trip (empty
-    // graph — the closed leaf has no dependents so the post-close
-    // rebuild still matches production `states: OPEN` semantics).
+    // to capture the cascade against the pre-close graph. Phase 1
+    // post-close rebuild is the second round-trip (empty graph —
+    // the closed leaf has no dependents, so the post-close rebuild
+    // universe is empty after the just-closed issue is gone).
     mock.push_fetch_graph_data(Ok((vec![make_issue(8)], vec![])));
     mock.push_fetch_issue(Ok(make_issue(8)));
     mock.push_close_issue(Ok(()));
@@ -444,8 +444,8 @@ async fn close_with_empty_reason_skips_comment() {
     let mock = new_mock();
     // GAP-15 PRE-close ordering (unblock-29p.62): Phase 0 prime +
     // Phase 1 post-close rebuild = two `fetch_graph_data` round-trips.
-    // Leaf close, no dependents — both fixtures match production
-    // `states: OPEN` semantics.
+    // Leaf close, no dependents — the post-close rebuild universe
+    // is simply empty after the just-closed issue is gone.
     mock.push_fetch_graph_data(Ok((vec![make_issue(9)], vec![])));
     mock.push_fetch_issue(Ok(make_issue(9)));
     mock.push_close_issue(Ok(()));
