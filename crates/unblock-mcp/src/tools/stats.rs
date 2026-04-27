@@ -394,12 +394,8 @@ pub async fn handle_stats(
         // configured coords through the engine so the cached ready set is
         // local-only and `ready_count` in the stats envelope matches what
         // `ready(milestone=…)` would return.
-        let (graph_built, ready_set) = crate::tools::build_graph_and_ready_set(
-            &issues_vec,
-            &edges_vec,
-            state.github.owner(),
-            state.github.repo(),
-        );
+        let (graph_built, ready_set) =
+            crate::tools::build_graph_and_ready_set_in(state, &issues_vec, &edges_vec);
         let milestone = crate::tools::normalize_filter(params.milestone.as_deref());
         let filtered = filter_by_milestone(&issues_vec, milestone);
         let result = aggregate_stats(

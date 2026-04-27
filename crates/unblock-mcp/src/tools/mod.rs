@@ -106,6 +106,47 @@ pub(crate) fn build_graph_and_ready_set(
     (graph, ready_set)
 }
 
+/// Ergonomic overload of [`build_graph_and_ready_set`] that pulls the
+/// configured `(owner, repo)` from `state` and forwards to the 4-arg form.
+///
+/// Used by call sites that retain intermediate references to the freshly
+/// built graph and ready set between [`compute_ready_set`] and
+/// [`unblock_core::cache::GraphCache::update`] — i.e. they CANNOT delegate
+/// to [`refresh_cache_from`] because they need to consume the local
+/// references first (categorisation, drift analysis, aggregation, cycle
+/// detection). Today that is `prime`, `reconcile`, the `stats` retry
+/// path, and the `dep_cycles` retry path.
+///
+/// **Chokepoint contract is unchanged.** The configured `(owner, repo)`
+/// still flows through the same single
+/// [`DependencyGraph::compute_ready_set`] chokepoint that enforces SPEC
+/// §3.3 Filter 3 / §14 Invariant 14(a). This overload is purely
+/// ergonomic: it removes the four-line `(state.github.owner(),
+/// state.github.repo())` boilerplate in favour of the resolved values
+/// being threaded through `state` once. Auditors can still trace
+/// `(owner, repo)` to a single helper line — now in
+/// [`build_graph_and_ready_set`] itself, called by both forms.
+///
+/// Source of `(owner, repo)`: [`unblock_github::GitHubApi::owner`] /
+/// [`unblock_github::GitHubApi::repo`] on `state.github`, matching the
+/// sibling [`refresh_cache_from`] helper. The `Config.repo`
+/// `Option<String>` carries the unparsed `"owner/repo"` form, so using
+/// the resolved accessors avoids a parsing path the call sites do not
+/// currently exercise.
+///
+/// Pure / synchronous wrapper — no I/O of its own; defers to the 4-arg
+/// helper for all allocations and graph construction.
+///
+/// [`compute_ready_set`]: DependencyGraph::compute_ready_set
+#[must_use]
+pub(crate) fn build_graph_and_ready_set_in(
+    state: &ServerState,
+    issues: &[Issue],
+    edges: &[BlockingEdge],
+) -> (DependencyGraph, Vec<IssueSummary>) {
+    build_graph_and_ready_set(issues, edges, state.github.owner(), state.github.repo())
+}
+
 /// Refresh the cache from a freshly-fetched `(issues, edges)` pair.
 ///
 /// Builds a [`DependencyGraph`] and ready set via
@@ -124,14 +165,15 @@ pub(crate) fn build_graph_and_ready_set(
 ///   side effect of the fresh fetch the handler already needed.
 ///
 /// **Sites that retain intermediate references** (`prime`, `reconcile`, the
-/// `stats` retry path) instead call [`build_graph_and_ready_set`]
-/// directly, then invoke `state.cache.update(...)` once they have finished
-/// consuming the local references. Coupling the build/compute pair into a
-/// shared helper while leaving the cache-update line at the call site
-/// avoids both (a) double-builds (calling the full helper after a local
-/// build) and (b) post-update cache re-reads (which would introduce a new
-/// race window with concurrent invalidators relative to today's
-/// behaviour).
+/// `stats` retry path, the `dep_cycles` retry path) instead call
+/// [`build_graph_and_ready_set_in`] (or the 4-arg
+/// [`build_graph_and_ready_set`] form) directly, then invoke
+/// `state.cache.update(...)` once they have finished consuming the local
+/// references. Coupling the build/compute pair into a shared helper while
+/// leaving the cache-update line at the call site avoids both (a)
+/// double-builds (calling the full helper after a local build) and (b)
+/// post-update cache re-reads (which would introduce a new race window
+/// with concurrent invalidators relative to today's behaviour).
 ///
 /// **Observably equivalent.** Callers that adopt this helper match the
 /// pre-refactor sequence one-for-one: same allocations, same lock
