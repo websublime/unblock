@@ -52,7 +52,18 @@ const SORT_UPDATED: &str = "updated";
 ///
 /// String filters that are empty or whitespace-only are treated as
 /// absent — `{"agent": ""}` behaves identically to `{"agent": null}`.
-#[derive(Debug, Deserialize, JsonSchema)]
+///
+/// `Default` is derived so that test call-sites (and any future builder
+/// shorthand) can construct a fully-unset `ListParams` and override only
+/// the fields they care about with struct-update syntax:
+///
+/// ```ignore
+/// ListParams { assignee: Some("alice".into()), ..Default::default() }
+/// ```
+///
+/// This makes adding a new optional field additive at the call-site
+/// layer instead of mechanically breaking every literal construction.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct ListParams {
     /// Filter by workflow status (case-insensitive). Accepts `"Ready"`,
     /// `"InProgress"`, `"Blocked"`, `"Deferred"`, or `"Closed"`.
