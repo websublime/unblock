@@ -96,9 +96,10 @@
 //! by bead `unblock-29p.33` — do NOT extract here.
 //!
 //! The Projects V2 Status field update ladder previously open-coded
-//! here as `update_status_to_ready` — the fifth copy across
-//! `close` / `close-cascade` / `depends` / `reopen` / `dep_remove` — was
-//! consolidated by bead `unblock-29p.24` into the shared
+//! here as `update_status_to_ready` (deleted; consolidated under
+//! `crate::tools::update_status_field_best_effort`) — the fifth copy
+//! across `close` / `close-cascade` / `depends` / `reopen` / `dep_remove`
+//! — was consolidated by bead `unblock-29p.24` into the shared
 //! `crate::tools::update_status_field_best_effort` helper. The
 //! `dep_remove` site now passes a private `DEP_REMOVE_LOG` config to
 //! preserve the pre-refactor log message strings bit-for-bit.
@@ -558,8 +559,10 @@ async fn reevaluate_source_after_remove(
 /// [`crate::tools::update_status_field_best_effort`] helper.
 ///
 /// Preserves bit-for-bit the message text emitted by the previous private
-/// `update_status_to_ready` helper, with the helper now adding `slug` as
-/// a uniform structured field on every record. The `option_missing_warn`
+/// `update_status_to_ready` helper (deleted; consolidated under
+/// `crate::tools::update_status_field_best_effort` by `unblock-29p.24`),
+/// with the helper now adding `slug` as a uniform structured field on
+/// every record. The `option_missing_warn`
 /// arm is `Some(...)` to preserve the pre-refactor warn that fires when
 /// the configured Status field has no `ready` option — `dep_remove`
 /// surfaces this as a misconfiguration rather than a silent no-op
