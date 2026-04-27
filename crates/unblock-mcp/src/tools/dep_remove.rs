@@ -606,7 +606,8 @@ static DEP_REMOVE_LOG: crate::tools::StatusUpdateLogConfig = crate::tools::Statu
 ///    `execute_write_tool`.
 /// 5. Re-evaluate blockers on the source via `has_open_blockers` and,
 ///    when the source is `Local` AND newly has zero open blockers, fire
-///    `update_status_to_ready` best-effort.
+///    `crate::tools::update_status_field_best_effort` with the `"ready"`
+///    slug (best-effort — failures are logged but never surfaced).
 /// 6. Return [`DepRemoveResult`] with `removed = true`.
 ///
 /// # Errors
