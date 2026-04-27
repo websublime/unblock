@@ -475,12 +475,8 @@ pub async fn handle_prime(
     //    configured (owner, repo) through the engine so source issues are
     //    scoped before the blocker filter runs. The categorisation below
     //    and the cache store inherit that guarantee.
-    let (graph, ready_summaries) = crate::tools::build_graph_and_ready_set(
-        &issues_vec,
-        &edges,
-        state.github.owner(),
-        state.github.repo(),
-    );
+    let (graph, ready_summaries) =
+        crate::tools::build_graph_and_ready_set_in(state, &issues_vec, &edges);
 
     let now = Utc::now();
 

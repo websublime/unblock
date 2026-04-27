@@ -179,12 +179,8 @@ pub async fn handle_reconcile(
     //    `computed_ready` set only considers configured-repo issues. The
     //    reconcile engine reads cross-repo nodes separately when chasing
     //    cycles and orphaned edges.
-    let (graph, ready_summaries) = crate::tools::build_graph_and_ready_set(
-        &issues_vec,
-        &edges,
-        state.github.owner(),
-        state.github.repo(),
-    );
+    let (graph, ready_summaries) =
+        crate::tools::build_graph_and_ready_set_in(state, &issues_vec, &edges);
     let computed_ready: HashSet<QualifiedId> = ready_summaries
         .iter()
         .map(|s| s.qualified_id.clone())

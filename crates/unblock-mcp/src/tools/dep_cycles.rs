@@ -296,12 +296,8 @@ pub async fn handle_dep_cycles(
         // to call `detect_all_cycles()` without a double-build, deep clone,
         // or post-update cache re-read (see `crate::tools::refresh_cache_from`
         // rustdoc for the call-site taxonomy).
-        let (graph_built, ready_set) = crate::tools::build_graph_and_ready_set(
-            &issues_vec,
-            &edges_vec,
-            state.github.owner(),
-            state.github.repo(),
-        );
+        let (graph_built, ready_set) =
+            crate::tools::build_graph_and_ready_set_in(state, &issues_vec, &edges_vec);
         let cycles = graph_built.detect_all_cycles();
         state.cache.update(issues_vec, ready_set, graph_built).await;
         cycles
