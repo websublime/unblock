@@ -123,8 +123,6 @@ use tracing::{info, instrument, warn};
 use unblock_core::errors::{IssueAlreadyOpenSnafu, ValidationSnafu};
 use unblock_core::graph::DependencyGraph;
 use unblock_core::types::{Issue, IssueState};
-use unblock_github::GitHubApi;
-use unblock_github::projects::FieldValue;
 
 use crate::errors::github_error_to_mcp;
 use crate::server::ServerState;
@@ -218,73 +216,29 @@ fn validate_id(id: u64) -> Result<(), ErrorData> {
     Ok(())
 }
 
-/// Best-effort Projects V2 Status field update for the reopened issue.
+/// Reopen-specific log messages for the shared
+/// [`crate::tools::update_status_field_best_effort`] helper.
 ///
-/// Mirrors the close/claim/depends field-update ladder
-/// (`server.rs:1046-1080` and siblings). Each level of the ladder is
-/// defensive: a missing field cache, an unresolved project, or an
-/// absent project item all degrade to a `tracing::warn!` rather than an
-/// error — the reopen has already succeeded server-side and the caller
-/// can observe the final Status via a follow-up `show` if the Projects
-/// V2 integration is misconfigured.
-///
-/// The `slug` argument must be `"blocked"` or `"ready"`; other values
-/// would simply not match any option in `field_ids.status.options` and
-/// log a warning.
-///
-/// (R7 import path: `FieldValue` lives under `unblock_github::projects`,
-/// same as the close handler uses.)
-async fn update_status_field(client: &dyn GitHubApi, issue_node_id: &str, slug: &str) {
-    // TODO(unblock-b6b.79 / unblock-29p.24): Extract shared project field
-    // update helper to deduplicate this if-let ladder across close,
-    // claim, depends, and now reopen. Not in scope for this bead.
-    let Some(field_ids) = client.field_ids().await else {
-        tracing::debug!(
-            slug,
-            "No field IDs cached — run setup first to enable project Status updates after reopen"
-        );
-        return;
-    };
-
-    let project_info = match client.resolve_project_info().await {
-        Ok(info) => info,
-        Err(err) => {
-            warn!(error = %err, "Failed to resolve project info — reopened issue Status field will not be set");
-            return;
-        }
-    };
-
-    let item_id = match client
-        .get_project_item_id(issue_node_id, &project_info.id)
-        .await
-    {
-        Ok(id) => id,
-        Err(err) => {
-            warn!(error = %err, "Failed to get project item ID for reopened issue — Status field will not be set");
-            return;
-        }
-    };
-
-    let Some(option_id) = field_ids.status.options.get(slug) else {
-        warn!(
-            slug,
-            "Projects V2 Status field has no option matching slug — skipping Status update after reopen"
-        );
-        return;
-    };
-
-    if let Err(err) = client
-        .update_field(
-            &project_info.id,
-            &item_id,
-            &field_ids.status.field_id,
-            &FieldValue::SingleSelectOption(option_id.clone()),
-        )
-        .await
-    {
-        warn!(error = %err, slug, "Failed to set Status field on reopened issue");
-    }
-}
+/// Preserves bit-for-bit the message text emitted by the previous private
+/// `update_status_field` helper, including the `slug` structured field
+/// that the helper now adds to every record. The `option_missing_warn`
+/// arm is `Some(...)` to preserve the pre-refactor warn that fires when
+/// the configured Status field has no option matching the requested
+/// slug — reopen surfaces this as a misconfiguration rather than a silent
+/// no-op (unlike the close/depends sites, which deliberately swallow it).
+static REOPEN_LOG: crate::tools::StatusUpdateLogConfig = crate::tools::StatusUpdateLogConfig {
+    no_field_ids_debug: Some(
+        "No field IDs cached — run setup first to enable project Status updates after reopen",
+    ),
+    resolve_project_warn: Some(
+        "Failed to resolve project info — reopened issue Status field will not be set",
+    ),
+    item_id_warn: "Failed to get project item ID for reopened issue — Status field will not be set",
+    option_missing_warn: Some(
+        "Projects V2 Status field has no option matching slug — skipping Status update after reopen",
+    ),
+    update_field_warn: "Failed to set Status field on reopened issue",
+};
 
 /// Execute the `reopen` tool handler.
 ///
@@ -449,8 +403,16 @@ pub async fn handle_reopen(
 
     // Step 5: best-effort Projects V2 Status field update. Uses the
     // node_id captured and returned by the write-tool closure above —
-    // avoids a second fetch_issue call.
-    update_status_field(state.github.as_ref(), &node_id, slug).await;
+    // avoids a second fetch_issue call. Delegates to the shared
+    // [`crate::tools::update_status_field_best_effort`] helper
+    // (unblock-29p.24) with the reopen-specific log config above.
+    crate::tools::update_status_field_best_effort(
+        state.github.as_ref(),
+        &node_id,
+        slug,
+        &REOPEN_LOG,
+    )
+    .await;
 
     Ok(ReopenResult {
         issue: issue_number,

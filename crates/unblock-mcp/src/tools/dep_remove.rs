@@ -95,10 +95,13 @@
 //! (`prime` / `stats` / `reopen` / `dep_remove`). Extraction is tracked
 //! by bead `unblock-29p.33` — do NOT extract here.
 //!
-//! The Projects V2 Status field update ladder (`update_status_to_ready`)
-//! is the **fifth** copy
-//! (`close` / `claim` / `depends` / `reopen` / `dep_remove`). Extraction
-//! is tracked by bead `unblock-29p.24` — do NOT extract here.
+//! The Projects V2 Status field update ladder previously open-coded
+//! here as `update_status_to_ready` — the fifth copy across
+//! `close` / `close-cascade` / `depends` / `reopen` / `dep_remove` — was
+//! consolidated by bead `unblock-29p.24` into the shared
+//! `crate::tools::update_status_field_best_effort` helper. The
+//! `dep_remove` site now passes a private `DEP_REMOVE_LOG` config to
+//! preserve the pre-refactor log message strings bit-for-bit.
 //!
 //! ## Server registration
 //!
@@ -110,6 +113,7 @@
 //!
 //! [`GitHubApi::remove_blocked_by_refs`]: unblock_github::GitHubApi::remove_blocked_by_refs
 //! [`GitHubApi::fetch_graph_data`]: unblock_github::GitHubApi::fetch_graph_data
+//! [`GitHubApi::fetch_issue_ref`]: unblock_github::GitHubApi::fetch_issue_ref
 
 use std::sync::Arc;
 
@@ -120,8 +124,6 @@ use tracing::{info, instrument, warn};
 use unblock_core::errors::{EndpointClosedSnafu, InvalidIssueRefSnafu, ValidationSnafu};
 use unblock_core::graph::DependencyGraph;
 use unblock_core::types::{Issue, IssueRef, IssueState, QualifiedId};
-use unblock_github::GitHubApi;
-use unblock_github::projects::FieldValue;
 
 use crate::errors::github_error_to_mcp;
 use crate::server::ServerState;
@@ -537,79 +539,44 @@ async fn reevaluate_source_after_remove(
         );
     } else {
         // Spec §8.5 step 5: zero open blockers → Status → ready.
-        // Best-effort — never surface failures to the caller.
-        update_status_to_ready(state.github.as_ref(), &source_issue.node_id).await;
+        // Best-effort — never surface failures to the caller. Delegates
+        // to the shared
+        // [`crate::tools::update_status_field_best_effort`] helper
+        // (unblock-29p.24) with the dep_remove-specific log config above.
+        crate::tools::update_status_field_best_effort(
+            state.github.as_ref(),
+            &source_issue.node_id,
+            "ready",
+            &DEP_REMOVE_LOG,
+        )
+        .await;
     }
     Ok(())
 }
 
-/// Best-effort Projects V2 Status=ready update for the source issue.
+/// `dep_remove`-specific log messages for the shared
+/// [`crate::tools::update_status_field_best_effort`] helper.
 ///
-/// Mirrors the close/claim/depends/reopen field-update ladder. Each
-/// level is defensive: a missing field cache, an unresolved project, or
-/// an absent project item all degrade to a `tracing::warn!` / `debug!`
-/// rather than an error — the `removeIssueDependency` mutation has
-/// already succeeded server-side, and the caller can observe the final
-/// Status via a follow-up `show` if the Projects V2 integration is
-/// misconfigured.
-///
-/// **R4 note:** fifth copy of the ladder. Extraction is tracked by
-/// `unblock-29p.24` — do NOT extract here.
-async fn update_status_to_ready(client: &dyn GitHubApi, issue_node_id: &str) {
-    // TODO(unblock-29p.24): Extract shared project-field update helper to
-    // deduplicate this if-let ladder across close, claim, depends,
-    // reopen, and now dep_remove. Not in scope for this bead.
-    let Some(field_ids) = client.field_ids().await else {
-        tracing::debug!(
-            "No field IDs cached — run setup first to enable project Status updates after dep_remove"
-        );
-        return;
-    };
-
-    let project_info = match client.resolve_project_info().await {
-        Ok(info) => info,
-        Err(err) => {
-            warn!(
-                error = %err,
-                "Failed to resolve project info — source issue Status field will not be set after dep_remove"
-            );
-            return;
-        }
-    };
-
-    let item_id = match client
-        .get_project_item_id(issue_node_id, &project_info.id)
-        .await
-    {
-        Ok(id) => id,
-        Err(err) => {
-            warn!(
-                error = %err,
-                "Failed to get project item ID for source issue — Status field will not be set after dep_remove"
-            );
-            return;
-        }
-    };
-
-    let Some(option_id) = field_ids.status.options.get("ready") else {
-        warn!(
-            "Projects V2 Status field has no `ready` option — skipping Status update after dep_remove"
-        );
-        return;
-    };
-
-    if let Err(err) = client
-        .update_field(
-            &project_info.id,
-            &item_id,
-            &field_ids.status.field_id,
-            &FieldValue::SingleSelectOption(option_id.clone()),
-        )
-        .await
-    {
-        warn!(error = %err, "Failed to set Status=ready on source issue after dep_remove");
-    }
-}
+/// Preserves bit-for-bit the message text emitted by the previous private
+/// `update_status_to_ready` helper, with the helper now adding `slug` as
+/// a uniform structured field on every record. The `option_missing_warn`
+/// arm is `Some(...)` to preserve the pre-refactor warn that fires when
+/// the configured Status field has no `ready` option — `dep_remove`
+/// surfaces this as a misconfiguration rather than a silent no-op
+/// (matching `reopen`, unlike the close/depends sites).
+static DEP_REMOVE_LOG: crate::tools::StatusUpdateLogConfig = crate::tools::StatusUpdateLogConfig {
+    no_field_ids_debug: Some(
+        "No field IDs cached — run setup first to enable project Status updates after dep_remove",
+    ),
+    resolve_project_warn: Some(
+        "Failed to resolve project info — source issue Status field will not be set after dep_remove",
+    ),
+    item_id_warn: "Failed to get project item ID for source issue — Status field will not be set after dep_remove",
+    option_missing_warn: Some(
+        "Projects V2 Status field has no `ready` option — skipping Status update after dep_remove",
+    ),
+    update_field_warn: "Failed to set Status=ready on source issue after dep_remove",
+};
 
 /// Execute the `dep_remove` tool handler.
 ///
