@@ -36,8 +36,19 @@ fn render_blockers(blockers: &[IssueRef]) -> String {
 ///
 /// The [`status_code`](DomainError::status_code) method maps each variant to
 /// the appropriate HTTP status code for MCP error conversion.
+///
+/// # Forward-compat: `#[non_exhaustive]`
+///
+/// This enum is marked `#[non_exhaustive]` per idiomatic Rust posture for
+/// error enums that grow over time (`std::io::ErrorKind`, `reqwest::Error`,
+/// snafu-generated enums in mature crates). Without it, every additive
+/// variant becomes a MAJOR semver bump because downstream exhaustive
+/// `match` blocks break silently. With it, downstream consumers MUST add
+/// a `_ =>` wildcard arm, and we retain freedom to add variants in
+/// PATCH/MINOR releases. See bead `unblock-29p.70` for the rationale.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
+#[non_exhaustive]
 pub enum DomainError {
     /// The requested issue does not exist.
     #[snafu(display("Issue not found: #{number}"))]

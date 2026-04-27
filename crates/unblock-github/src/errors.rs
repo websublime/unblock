@@ -21,8 +21,19 @@ use chrono::{DateTime, Utc};
 ///
 /// Use the generated snafu context selectors (e.g. [`GitHubApiSnafu`]) to
 /// construct errors ergonomically.
+///
+/// # Forward-compat: `#[non_exhaustive]`
+///
+/// This enum is marked `#[non_exhaustive]` per idiomatic Rust posture for
+/// error enums that grow over time (`std::io::ErrorKind`, `reqwest::Error`,
+/// snafu-generated enums in mature crates). Without it, every additive
+/// variant becomes a MAJOR semver bump because downstream exhaustive
+/// `match` blocks break silently. With it, downstream consumers MUST add
+/// a `_ =>` wildcard arm, and we retain freedom to add variants in
+/// PATCH/MINOR releases. See bead `unblock-29p.70` for the rationale.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
+#[non_exhaustive]
 pub enum Error {
     /// Wraps a domain-level error from `unblock-core`.
     #[snafu(display("{source}"))]
