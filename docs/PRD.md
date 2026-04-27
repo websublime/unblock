@@ -334,39 +334,313 @@ Distribution, scale, and enterprise readiness. The local binary becomes installa
 
 ### Phase 04 — Plugin (v1.1.0) → [04-plan-plugin.md](./plans/04-plan-plugin.md)
 
-Specialised agents and skills that turn the MCP server into a structured development pipeline. Works with the local MCP binary.
+Typed Rust crate `unblock-plugin` that renders the mister-anderson workflow onto Claude Code and Copilot (local + cloud), backed by `unblock-mcp`. `/setup` is the single entry point; the data model is authoritative; renderers emit per-target artefacts.
 
-**Scope:**
+**Non-goals.** Remote MCP transport (Phase 05), HTTP server, webhooks, desktop UI, npm packaging.
 
-10 skills — the unified entry point for Claude Code and Copilot CLI:
-- **Setup** — `/setup` (bootstrap: GitHub labels, milestones, Projects V2, issue types, editor configs, hooks), `/need` (intent-based agent discovery and installation), `/doctor` (diagnostic: MCP health, GitHub state, local environment)
-- **Exploration** — `/think` (free exploration — research, PRD, spec, brainstorm — no pipeline enforcement, any agent available)
-- **Planning** — `/plan` (two modes: global vision defines phases in the PRD; phase planning produces both `plans/NN-plan-{slug}.md` and `specs/NN-spec-{slug}.md` — the plan defines epics and tasks, the spec defines algorithms, invariants, and edge cases. GitHub Issues are created sequentially from the plan. Both artefacts are prerequisites for implementation)
-- **Execution** — `/do` (intent router: implementation, investigation, spec, spike, review, QA — routes to the right agent based on context), `/make` (autonomous execution: same routing, no human-in-the-loop, stricter preconditions)
-- **Direct access** — `/use` (dispatch a specific agent by name), `/info` (natural language query over project state), `/trail` (structured narrative history of an issue)
-- **Quality gates** — `/ship` (pre-merge readiness check: review passed? QA passed? dependencies closed?)
+#### 7.4.1 Baseline
 
-8 named agents — each a `.md` configuration file, not compiled code:
+Mirrors `mister-anderson` v0.3.0. Deviations explicit in §7.4.7.
 
-| Agent | Name | Role | Model |
+#### 7.4.2 Targets
+
+| Target | Manifest | Agents | Skills | Hooks | MCP config |
+|---|---|---|---|---|---|
+| Claude Code | `.claude-plugin/plugin.json` + `marketplace.json` + `CLAUDE.md` | `.claude/agents/*.md` | `.claude/skills/<n>/SKILL.md` | `.claude/hooks/` (3) | `.claude/settings.json` |
+| Copilot cloud | `.github/copilot-instructions.md` | `.github/agents/*.md` | `.claude/skills/<n>/SKILL.md` (unified) | `.github/hooks/*.json` (3) | GitHub UI — chat guide |
+| Copilot local | `.github/copilot-instructions.md` | — | — | — | VS Code UI — chat guide |
+
+Skills directory unified at `.claude/skills/` — Copilot cloud reads both `.claude/skills` and `.github/skills`. Sub-agent dispatch: `Task()` on Claude Code, natural language on Copilot cloud.
+
+#### 7.4.3 Fixed agents (8)
+
+| Persona | Role | Model | Hooks |
 |---|---|---|---|
-| Investigator | Sherlock | Codebase analysis, root cause, approach | opus |
-| Architect | Ada | System design, specs, phase planning | opus |
-| Product Owner | Fernando | Issue creation (sequential, never batch), findings tracking | sonnet |
-| Code Reviewer | Linus | Read-only review, structured findings, verdicts | opus |
-| QA Gate | Quinn | Spec conformity, tests, build, lint — last gate before merge | opus |
-| Refactorer | Martin | Fix validated review findings, cautious, behaviour-preserving | sonnet |
-| Inspector | Gadget | Pipeline compliance — runs after every dispatch, writes AUDIT only on violations | sonnet |
-| Implementation | Dynamic | Tech-specific supervisors, generated per-project by `/need` | sonnet |
+| Grace | Product Manager | opus | — |
+| Ada | Architect + Coherence Reviewer | opus | — |
+| Smith | Research / API validator | opus | — |
+| Sherlock | Investigator | opus | — |
+| Fernando | Issue Owner | sonnet | — |
+| Linus | Code Reviewer (implementation, gaps vs spec) | opus | PreToolUse(Task), Stop |
+| Quinn | QA Gate (tests, spec conformance, acceptance) | opus | PreToolUse(Task), Stop |
+| Daphne | Discovery / supervisor installer | sonnet | — |
 
-3 enforcement layers — pipeline compliance is structurally impossible to bypass:
-1. **MCP validation** — the server rejects label transitions when preconditions are not met. No `unblock:review:ok` without a REVIEW comment containing an APPROVE verdict. No `unblock:qa:ok` without a QA comment with a PASS verdict.
-2. **Inspector (Gadget)** — runs after every agent dispatch. Verifies structured comments exist, are well-formed, and follow the correct sequence. Writes an AUDIT comment only when violations are found. Clean pipelines produce zero noise.
-3. **Agent prompt structure** — numbered steps with explicit BLOCK conditions. The agent cannot proceed past a gate without the required artefact.
+Dropped from prior PRD draft: Martin, Gadget.
 
-Session isolation via structured comment trail: INVESTIGATION → DECISION → DEVIATION → COMPLETED → REVIEW → REFACTORING → QA. Worktrees (`worktrees/issue-{N}-{slug}`) isolate implementation work. 13 labels with `unblock:` prefix. 4 hooks.
+#### 7.4.4 Dynamic supervisors (14)
 
-**Outcome:** A disciplined development pipeline where agents investigate, implement, review, and QA — with enforcement that is structurally impossible to bypass.
+All inherit shared skills `implementation`, `do`, `workflow`, `subagents-discipline` plus hooks `PreToolUse(Task)`, `Stop`. Model: `sonnet`.
+
+| Persona | Stack | Detection signal |
+|---|---|---|
+| Neo | Rust | `Cargo.toml` |
+| Nina | Node backend | `package.json` + express/fastify/nest/koa |
+| Luna | React | `package.json` + `react` |
+| Violet | Vue | `package.json` + `vue` |
+| Tessa | Python backend | `pyproject.toml` / `requirements.txt` + fastapi/django/flask |
+| Greta | Go | `go.mod` |
+| Juno | Java backend | `pom.xml` / `build.gradle` + Spring/Quarkus/Micronaut |
+| Kali | Kotlin backend | `build.gradle.kts` + Ktor/Spring (no Android SDK) |
+| Maya | Flutter | `pubspec.yaml` |
+| Isla | iOS | `*.xcodeproj` / `Package.swift` |
+| Ava | Android | `build.gradle` + Android SDK |
+| Nova | Blockchain | `hardhat.config` / `Anchor.toml` |
+| Iris | ML | `pyproject.toml` + pytorch/tensorflow/sklearn |
+| Olive | Infra / CI-CD | `*.tf` / `.github/workflows/*.yml` / `k8s/` |
+
+Daphne detects via manifest analysis **and** `docs/PRD.md` / `docs/MANIFESTO.md` / `docs/SPEC.md`. On detection failure, prompts the user for type / technology / infra.
+
+#### 7.4.5 Skills (20 user-invocable + 1 shared-only)
+
+| # | Slash | Stage | Persona / actor |
+|---|---|---|---|
+| 1 | `workflow` | Meta | (meta-orchestrator; no args ⇒ asks user) |
+| 2 | `setup` | Ops | Daphne |
+| 3 | `add-supervisor` | Ops | Daphne |
+| 4 | `product` | 1 | (orchestrator: Grace + Ada) |
+| 5 | `manifesto` | 1 | Grace |
+| 6 | `requirements` | 1 | Grace |
+| 7 | `architecture` | 1 | Ada |
+| 8 | `specification` | 2 | (orchestrator: Ada + Smith + Fernando) |
+| 9 | `plan` | 2 | Ada |
+| 10 | `research` | 2 | Smith |
+| 11 | `spec` | 2 | Ada |
+| 12 | `tasks` | 2 | Fernando |
+| 13 | `implementation` | 3 | (orchestrator: Supervisor + Sherlock + Linus + Quinn + Fernando) |
+| 14 | `investigate` | 3 | Sherlock |
+| 15 | `do` | 3 | Supervisor (dynamic) |
+| 16 | `review` | 3 | Linus + Fernando (code-level: implementation, gaps, code review) |
+| 17 | `quality` | 3 | Quinn + Fernando (output-level: tests, spec conformance, acceptance) |
+| 18 | `update` | Ops | Fernando |
+| 19 | `reconcile` | Ops | (MCP) |
+| 20 | `doctor` | Ops | (MCP) |
+
+**Shared-only (not user-invocable):** `subagents-discipline`.
+
+**Description contract (Copilot-facing).** Every slash skill's `description` MUST start with an imperative verb, name the input object, include a trigger phrase, and end with a stage tag `[product] | [spec] | [impl] | [ops]`. Lint enforced in the plugin crate `build.rs`.
+
+**`/workflow` invocation modes:**
+
+| Form | Behaviour |
+|---|---|
+| `/workflow` | Show global state and **ask the user** which stage / skill to run |
+| `/workflow product` | Delegate to `/product` |
+| `/workflow specification` | Delegate to `/specification` (asks phase NN) |
+| `/workflow implementation` | Delegate to `/implementation` (asks phase NN) |
+| `/workflow next` | Auto-determine the next pending step and dispatch |
+| `/workflow <skill>` | Verify prerequisites, warn, dispatch |
+
+#### 7.4.6 Pipeline
+
+1. **Stage 1 — Product Discovery** (`/product`) → `docs/MANIFESTO.md`, `docs/PRD.md`, `docs/SPEC.md` (project-wide, high-level).
+   - `/manifesto` (Grace) → MANIFESTO; `/requirements` (Grace) → PRD; `/architecture` (Ada) → SPEC.
+2. **Stage 2 — Specification** (`/specification NN`) → `docs/plans/NN-plan-*.md` + `docs/specs/NN-spec-*.md` + bead graph.
+   - `/plan` (Ada) → `/research` (Smith) → `/spec` (Ada) → `/tasks` (Fernando) + Coherence Review (Ada × 3).
+3. **Stage 3 — Implementation** (`/implementation NN`) — per bead: `/investigate` → `/do` → `/review` → `/quality`.
+
+#### 7.4.7 Deviations from mister-anderson
+
+| # | Dimension | m-a | unblock | Rationale |
+|---|---|---|---|---|
+| D1 | Backing store | `bd` CLI + Dolt | `unblock-mcp` tools | Phases 01–03 already shipped |
+| D2 | Isolation | Git branches | Worktrees `worktrees/issue-{N}-{slug}` | User decision |
+| D3 | KV store | `bd kv` | Dropped — `claim` + assignees are the source of truth | Simplification |
+| D4 | State dimensions | `bd set-state` | Projects V2 custom fields | Native GitHub surface |
+| D5 | Sub-agent dispatch | `Task()` everywhere | `Task()` on CC; natural language on Copilot cloud | Platform constraint |
+| D6 | Mode | Local only | Local (P04); Remote deferred to P05 | Infra phasing |
+
+#### 7.4.8 State model
+
+Three Projects V2 single-select fields:
+
+| Field | Values |
+|---|---|
+| `Unblock Impl State` | `pending`, `done` |
+| `Unblock Review State` | `pending`, `approved`, `needs-rework` |
+| `Unblock QA State` | `pending`, `passed`, `failed` |
+
+State is the source of truth; the label is derived (Option X). `derive_label(impl, review, qa)`:
+
+| impl | review | qa | Label |
+|---|---|---|---|
+| pending | — | — | (none) |
+| done | pending | — | `unblock:review:pending` |
+| done | needs-rework | — | `unblock:review:rework` |
+| done | approved | pending | `unblock:review:ok` |
+| done | approved | passed | `unblock:qa:ok` |
+| done | approved | failed | `unblock:qa:rework` |
+
+**Invariants:**
+- `set_state` reconciles labels atomically: removes the five state-bound labels and applies the derived one.
+- F2.b: writing `review=needs-rework` forces `qa=pending` in the same transaction.
+- `set_state(qa=failed)` requires the current `review=approved`; otherwise rejected.
+- After `qa=failed`, on the next supervisor `claim` the server performs an atomic reset `review=pending` + `qa=pending` and the label becomes `unblock:review:pending`.
+- Exception labels (`unblock:needs-human`, `unblock:paused`, `unblock:no-investigation`) and finding labels (`unblock:finding:*`) are orthogonal to state dimensions and applied directly.
+- Escape valve: 3 iterations of rework per gate (review OR qa) → automatic `unblock:needs-human`.
+
+#### 7.4.9 Labels
+
+13 labels, unchanged from SPEC §7.6 (formerly §540):
+
+`unblock:review:pending`, `unblock:review:ok`, `unblock:review:rework`, `unblock:qa:ok`, `unblock:qa:rework`, `unblock:needs-human`, `unblock:paused`, `unblock:no-investigation`, `unblock:finding:suggestion`, `unblock:finding:minor`, `unblock:finding:risk`, `unblock:finding:deviation`, `unblock:finding:extra`.
+
+#### 7.4.10 Crate shape
+
+```
+crates/unblock-plugin/
+└── src/
+    ├── lib.rs
+    ├── model/          # Persona, Skill, Hook, Pipeline, Label, CommentKind, TransitionRule, Supervisor, DispatchConvention, SkillHandler
+    ├── catalog/        # 8 personas, 20 skills, 3 hooks, 14 supervisors (data + templates)
+    ├── detect/         # Stack detection (manifests + docs)
+    ├── render/
+    │   ├── claude_code.rs
+    │   ├── copilot_cloud.rs
+    │   └── copilot_local.rs
+    └── cli.rs          # `unblock-plugin render --target=<t> --supervisors=<list> --out=<dir>`
+```
+
+Binary `unblock-plugin` invoked by `/setup` after the client choice. Description-contract lint runs in `build.rs`. Internal structure (XML vocabulary, token substitution, render contract) lives in SPEC §7.
+
+#### 7.4.11 Hooks (3)
+
+| Hook | Purpose | Claude Code | Copilot cloud |
+|---|---|---|---|
+| `session-start.sh` | Dashboard + `prime` | `SessionStart` | `sessionStart` |
+| `inject-discipline-reminder.sh` | Supervisor dispatch reminder | `PreToolUse` matcher=`Task` | `preToolUse` filter=sub-agent |
+| `verify-state.sh` | Enforce state dimension via `verify_agent_state` | `Stop` | `agentStop` |
+
+m-a's `stamp-pending.sh` is dropped (KV store dropped per D3). Copilot local: zero hooks.
+
+#### 7.4.12 `/setup` flow
+
+| # | Actor | Action |
+|---|---|---|
+| 1 | `/setup` | Phase 04 supports **Local mode only**; Remote mode is deferred to Phase 05 via a dedicated bead |
+| 2 | `/setup` | Collect `GITHUB_TOKEN` + `UNBLOCK_REPO` (owner/repo) |
+| 3 | `/setup` | Ask client: Claude Code / Copilot |
+| 4 | `/setup` | Call MCP `init` → 13 labels + milestones + Projects V2 + 3 state fields |
+| 5 | Daphne | Detect stack via manifests + docs |
+| 5.a | Daphne | On detection failure: ask user for type / technology / infra |
+| 6 | `/setup` | Invoke `unblock-plugin render --target=<t> --supervisors=<list> --out=.` |
+| 7 | Plugin binary | Write files per §7.4.13 |
+| 8 | `/setup` | Claude Code: write `.claude/settings.json` with MCP stdio config |
+| 8.a | `/setup` | Copilot: print **in-chat guide** with copy-pastable JSON for VS Code (local) and GitHub UI (cloud) |
+| 9 | `/setup` | Summary + next steps |
+
+#### 7.4.13 Files produced per target
+
+| File | CC | Copilot cloud | Copilot local |
+|---|---|---|---|
+| `AGENTS.md` (universal workflow) | ✅ | ✅ | ✅ |
+| `UNBLOCK-WORKFLOW.md` (universal MCP reference) | ✅ | ✅ | ✅ |
+| `CLAUDE.md` | ✅ | — | — |
+| `.github/copilot-instructions.md` | — | ✅ | ✅ |
+| `.claude-plugin/plugin.json` | ✅ | — | — |
+| `.claude-plugin/marketplace.json` | ✅ | — | — |
+| `.claude/skills/<n>/SKILL.md` | ✅ | ✅ (unified path) | — |
+| `.claude/agents/<n>.md` | ✅ | — | — |
+| `.github/agents/<n>.md` | — | ✅ | — |
+| `.claude/hooks/*.sh` + `hooks.json` | ✅ | — | — |
+| `.github/hooks/*.json` | — | ✅ | — |
+| `.claude/settings.json` | ✅ | — | — |
+
+#### 7.4.14 Dispatch convention
+
+`.github/copilot-instructions.md` carries an Agents table plus a section:
+
+> Sub-agent work is delegated by name using `@<name>: <task>`. Example: `@Smith: validate API assumptions in plan 04`. The cloud agent MUST NOT execute sub-agent work inline — delegation is structural.
+
+`CLAUDE.md` carries the same content with examples `Task(subagent_type="...")`. Both rendered from the same `DispatchConvention` struct.
+
+#### 7.4.15 New MCP tools
+
+| Tool | Purpose |
+|---|---|
+| `set_state(qualified_id, dim, value)` | Write state dim and reconcile label atomically per §7.4.8 invariants |
+| `get_state(qualified_id, dim)` | Read a single state dim |
+| `verify_agent_state(agent_id)` | Stop hook helper — exit 0 OK, exit 2 enforcement failure |
+
+#### 7.4.16 Comment trail
+
+Per-bead structured comments, in canonical order: `INVESTIGATION → DECISION → DEVIATION → COMPLETED → REVIEW → QA` plus `DEFERRED`, `PR`, `NEEDS-HUMAN`, `OVERRIDE`. Encoded as the `CommentKind` enum; `reconcile` flags out-of-order or missing kinds.
+
+#### 7.4.17 Severity thresholds
+
+| Severity | Gate | Action |
+|---|---|---|
+| CRITICAL (review) / BLOCKER (qa) | Linus / Quinn | Forces rework; never produces a finding issue |
+| WARNING (review) / MAJOR (qa) | Linus / Quinn | Individual finding bead as sub-issue of the **originating bead's parent epic** |
+| SUGGESTION (review) / MINOR, RISK, DEVIATES, EXTRA (qa) | Linus / Quinn | Batched or per-severity finding beads; label `unblock:finding:<kind>` |
+
+Findings always live in the same parent epic as the bead that originated them — there is no separate "Review Findings" epic.
+
+#### 7.4.18 Reference-only beads
+
+The bead `design` field always points to a spec section (`docs/specs/NN-spec-foo.md#section`). Content is never inlined. Enforced by Fernando's skill template and the plugin linter.
+
+#### 7.4.19 Deferred to Phase 05
+
+- Remote mode in `/setup`
+- Webhook-driven label / state reconciliation
+- Shared cache across multiple clients
+
+#### 7.4.20 Rework paths
+
+**Review NEEDS-REWORK:**
+1. Linus writes `REVIEW` (NEEDS-REWORK) + CRITICAL/WARNING findings.
+2. `set_state(review=needs-rework)` → resets `qa=pending`.
+3. Label → `unblock:review:rework`.
+4. Auto-dispatch supervisor for rework.
+5. New cycle: DECISION/DEVIATION → COMPLETED → new REVIEW.
+6. Escape valve: 3× NEEDS-REWORK → `unblock:needs-human`.
+
+**QA FAIL — three sub-options:**
+- **rework**: returns to supervisor — full cycle re-implementation + re-review + re-QA.
+- **follow-up**: Fernando creates finding beads under the parent epic; the original bead proceeds to close (degraded).
+- **override**: user prompts "do override"; Quinn requests explicit confirmation + reason (≥ 20 chars); writes `OVERRIDE:` comment; `set_state(qa=passed, override=true)`; Fernando creates a `unblock:finding:risk` bead to track the bypassed condition.
+
+#### 7.4.21 Enforcement failures
+
+- `verify_agent_state` exit 2 — orchestrator decides re-dispatch or `unblock:needs-human`. No automatic retry.
+- Label reconciliation partial — state remains authoritative; `reconcile` corrects drift on the next run.
+- Claim conflicts — second `claim` returns `CLAIM_CONFLICT`; orchestrator picks another ready bead or aborts.
+- Worktree conflicts — clean and same branch ⇒ reuse; dirty or different branch ⇒ `unblock:needs-human`.
+
+#### 7.4.22 Exception modes
+
+| Label | Source | Effect |
+|---|---|---|
+| `unblock:needs-human` | Auto (escape valve / conflict) or manual | Bead leaves `ready` until removed; `NEEDS-HUMAN:` comment required |
+| `unblock:paused` | User | Worktree preserved; remove label to resume |
+| `unblock:no-investigation` | Developer / `/plan` | Supervisor skips the investigate step |
+
+#### 7.4.23 Setup edge cases
+
+- **Previous setup detected** (marker in `.claude-plugin/plugin.json` or `copilot-instructions.md`) — offer update vs re-init.
+- **Stack detection fails + user cancels** — abort `/setup` cleanly; no partial writes.
+- **`init` MCP partial failure** — idempotent: re-run completes only what is missing.
+
+#### 7.4.24 Happy path completion
+
+| # | Action | Comment | State | Label |
+|---|---|---|---|---|
+| 1 | Bead created | — | impl=pending | (none) |
+| 2 | Becomes `ready` | — | — | (none) |
+| 3 | Supervisor `claim` | — | — | (none; agent in Projects V2) |
+| 4 | Investigation (optional) | `INVESTIGATION` | — | (none) |
+| 5 | Design decisions | `DECISION` (N×) | — | (none) |
+| 6 | Plan deviations | `DEVIATION` (N×) | — | (none) |
+| 7 | Implementation complete | `COMPLETED` | impl=done | `unblock:review:pending` |
+| 8 | Review APPROVE | `REVIEW` (APPROVE) | review=approved | `unblock:review:ok` |
+| 9 | QA PASS | `QA` (PASS / PASS+FINDINGS) | qa=passed | `unblock:qa:ok` |
+| 10 | PR opened | `PR` | — | `unblock:qa:ok` |
+| 11 | PR merged | — | — | `unblock:qa:ok` |
+| 12 | Bead closed (Fernando via `/update`) | — | — | **all labels removed on close** |
+
+**Close semantics.** All labels are removed on `close` — state-bound, exception, and finding labels alike. Historical record lives in comments and PR references. Epics do not auto-close when their children close; Fernando closes them explicitly via `/update`.
+
+**Outcome:** A disciplined development pipeline where agents investigate, implement, review, and QA — with state-driven enforcement, structurally consistent across Claude Code and Copilot.
 
 ---
 
