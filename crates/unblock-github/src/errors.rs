@@ -163,6 +163,52 @@ pub enum Error {
         qid: QualifiedId,
     },
 
+    /// A pre-mutation cache prime failed, so the tool cannot capture the
+    /// pre-mutation graph state required to proceed safely.
+    ///
+    /// Symmetric pre-mutation counterpart to
+    /// [`PostMutationRebuildFailed`](Self::PostMutationRebuildFailed).
+    /// Emitted by write-tool handlers that depend on a primed cache to
+    /// freeze a pre-mutation snapshot — currently only the `close` handler
+    /// (Phase 0 PRE-close cascade capture, SPEC §8.2 step 2 / §3.4
+    /// Critical) — when the cache is cold at entry and the cold-cache
+    /// prime via [`crate::client::GitHubClient::fetch_graph_data`] fails
+    /// (transient 503, rate-limit, or network error).
+    ///
+    /// **Distinct semantic from `PostMutationRebuildFailed`.** This
+    /// variant fires BEFORE any mutation lands on GitHub: there is no
+    /// mutation to reconcile. Using `PostMutationRebuildFailed` here
+    /// would misrepresent the contract — its `Display` instructs the
+    /// caller to re-run `show` to "observe the final state", but no
+    /// mutation has occurred. The `Display` for this variant instead
+    /// guides the caller to retry or run the `prime` tool first, which
+    /// is the correct recovery for a pre-mutation prime failure.
+    ///
+    /// `qid` carries the [`QualifiedId`] of the issue whose mutation was
+    /// gated behind the prime so same-numbered local vs. cross-repo
+    /// issues render unambiguously in logs and in the message forwarded
+    /// to the MCP caller. There is no `mutation` field — by construction,
+    /// no mutation was attempted.
+    ///
+    /// Maps to HTTP 503 via [`Error::status_code`]; `github_error_to_mcp`
+    /// in `unblock-mcp` then maps 503 → `ErrorCode::INTERNAL_ERROR`,
+    /// matching the existing wiring contract for transient
+    /// infrastructure failures.
+    ///
+    /// See bead `unblock-29p.69` for the full taxonomy rationale and
+    /// the `unblock-29p.35` DEVIATION it closes.
+    #[snafu(display(
+        "Cannot proceed with mutation on {qid}: failed to prime the dependency graph before cascade capture — please retry or run `prime` first"
+    ))]
+    PreMutationPrimeFailed {
+        /// The [`QualifiedId`] of the issue whose mutation was gated
+        /// behind the prime. Rendered via `Display` (`owner/repo#n`
+        /// form) so same-numbered local vs. cross-repo issues surface
+        /// unambiguously in logs and in the message forwarded to the
+        /// MCP caller.
+        qid: QualifiedId,
+    },
+
     /// No Projects V2 project is configured or discoverable.
     #[snafu(display("Projects V2 not configured — run `setup` first"))]
     ProjectNotConfigured,
@@ -238,7 +284,8 @@ impl Error {
             Self::GitHubGraphQLForbidden { .. } => 403,
             Self::GitHubUnavailable { .. }
             | Self::CircuitBreakerOpen { .. }
-            | Self::PostMutationRebuildFailed { .. } => 503,
+            | Self::PostMutationRebuildFailed { .. }
+            | Self::PreMutationPrimeFailed { .. } => 503,
             Self::RateLimited { .. } => 429,
             Self::ProjectNotConfigured => 412,
             Self::GitRemote { .. } => 500,
@@ -561,6 +608,59 @@ mod tests {
         assert!(
             msg.contains("re-run `show`"),
             "display must guide the caller to re-run `show`: {msg}"
+        );
+    }
+
+    #[test]
+    fn status_code_pre_mutation_prime_failed() {
+        // Bead unblock-29p.69: pre-mutation prime failure is a 503-class
+        // infrastructure error, mirroring the post-mutation rebuild
+        // failure posture (PostMutationRebuildFailed). The MCP layer's
+        // `github_error_to_mcp` maps 503 → `ErrorCode::INTERNAL_ERROR`;
+        // pinning the status_code here guards against drift.
+        let err = PreMutationPrimeFailedSnafu {
+            qid: unblock_core::types::QualifiedId::new("acme", "widgets", 42),
+        }
+        .build();
+        assert_eq!(err.status_code(), 503);
+    }
+
+    #[test]
+    fn pre_mutation_prime_failed_display_is_agent_actionable() {
+        // Bead unblock-29p.69: Display output MUST render the
+        // QualifiedId unambiguously (`owner/repo#n` form), make the
+        // pre-mutation phase clear (`failed to prime the dependency
+        // graph before cascade capture`), and guide the caller toward
+        // the correct recovery (`retry or run `prime` first`) — NOT
+        // toward the post-mutation `re-run `show`` recovery.
+        let err = PreMutationPrimeFailedSnafu {
+            qid: unblock_core::types::QualifiedId::new("acme", "widgets", 42),
+        }
+        .build();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("acme/widgets#42"),
+            "display must render the QualifiedId in `owner/repo#n` form: {msg}"
+        );
+        assert!(
+            msg.contains("prime the dependency graph"),
+            "display must reference `prime the dependency graph` (pre-mutation path): {msg}"
+        );
+        assert!(
+            msg.contains("before cascade capture"),
+            "display must reference `before cascade capture` to identify the PRE-close ordering: {msg}"
+        );
+        assert!(
+            msg.contains("retry") || msg.contains("`prime`"),
+            "display must advise retry or running `prime` first (pre-mutation recovery hint, distinct from the post-mutation `re-run `show``): {msg}"
+        );
+        // Strict negative: the post-mutation R3 recovery hint MUST NOT
+        // appear here — collapsing the two surfaces into the same
+        // wording would regress the SPEC §8.2 pre-vs-post-mutation
+        // contract that this variant exists to encode.
+        assert!(
+            !msg.contains("re-run `show`"),
+            "Pre-mutation Display must NOT use the post-mutation `re-run `show`` wording — collapsing the two 503 surfaces breaks the SPEC §8.2 pre-vs-post-mutation contract: {msg}"
         );
     }
 }

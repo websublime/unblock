@@ -1124,19 +1124,23 @@ impl UnblockServer {
     ///
     /// Returns [`ErrorData`] in the following cases:
     /// - Phase 0 cold-cache prime fails (`fetch_graph_data` 503) → a
-    ///   503-class [`GitHubApi`](unblock_github::errors::Error::GitHubApi)
+    ///   503-class [`PreMutationPrimeFailed`](unblock_github::errors::Error::PreMutationPrimeFailed)
     ///   error is surfaced *before* the close mutation. The mutation is
-    ///   NOT attempted on an empty graph.
+    ///   NOT attempted on an empty graph. Recovery: retry or run `prime`
+    ///   first. (Bead `unblock-29p.69` introduced this dedicated variant
+    ///   as the symmetric pre-mutation counterpart to
+    ///   [`PostMutationRebuildFailed`](unblock_github::errors::Error::PostMutationRebuildFailed).)
     /// - `fetch_issue` fails (e.g. 404) → mapped via `github_error_to_mcp`.
     /// - The fetched issue is already Closed → `IssueClosed` domain error.
     /// - `close_issue` fails → mapped via `github_error_to_mcp`.
     /// - Cache rebuild fails after Phase 1 and leaves the cache empty →
-    ///   a 503-class [`GitHubApi`](unblock_github::errors::Error::GitHubApi)
-    ///   error is surfaced. The cascade list from Phase 0 is durable in
-    ///   memory and the close mutation has already landed; the error
-    ///   signals only that the step 8 `update_status_fields`
-    ///   reconciliation could not run (R3 — see `tools::close`
-    ///   module-doc).
+    ///   a 503-class
+    ///   [`PostMutationRebuildFailed`](unblock_github::errors::Error::PostMutationRebuildFailed)
+    ///   (mutation `"close_cascade"`) error is surfaced. The cascade list
+    ///   from Phase 0 is durable in memory and the close mutation has
+    ///   already landed; the error signals only that the step 8
+    ///   `update_status_fields` reconciliation could not run (R3 — see
+    ///   `tools::close` module-doc). Recovery: re-run `show`.
     #[tool(
         name = "close",
         description = "Close an issue and cascade-unblock dependents. Validates the issue is open, closes it, updates project fields (Status=Done), and auto-unblocks any dependent issues whose blockers are now all closed. Returns the list of newly unblocked issue numbers. Triggers graph rebuild."
@@ -1206,29 +1210,19 @@ impl UnblockServer {
                 issue_number,
                 "Cache empty after prime attempt — cannot capture pre-close cascade; aborting close"
             );
-            // This is a PRE-mutation prime failure — the close mutation
-            // has NOT been attempted yet. Intentionally stays on the
-            // synthetic `GitHubApi { status: 503 }` surface rather than
-            // migrating to `PostMutationRebuildFailed`, whose semantic
-            // ("mutation landed on GitHub but we cannot compute
-            // post-mutation fields") does not fit here: the message
-            // guides the caller to "retry or run `prime` first", which
-            // only makes sense when the close has not happened. Bead
-            // `unblock-29p.35` deliberately scoped the new variant to
-            // POST-mutation sites; introducing a sibling
-            // `PreMutationPrimeFailed` is tracked as a follow-up
-            // question on that bead. Spec §8.2 does not yet pin an
-            // explicit error-contract row for the prime-failure path
-            // (the §8.5 / §8.7 R3 rows are strictly post-mutation), so
-            // no spec drift either.
+            // PRE-mutation prime failure — surfaces via the dedicated
+            // `Error::PreMutationPrimeFailed` variant (bead
+            // `unblock-29p.69`), the symmetric pre-mutation counterpart
+            // to `PostMutationRebuildFailed`. The variant's `Display`
+            // matches the wording previously synthesized via
+            // `GitHubApiSnafu { status: 503 }` (the `prime the
+            // dependency graph` / `before cascade capture` / `retry or
+            // run `prime` first` contract pinned by the
+            // `close_surfaces_error_when_phase0_prime_fails` regression
+            // guard), so no message-text drift. Status code stays 503;
+            // `github_error_to_mcp` maps 503 → INTERNAL_ERROR.
             return Err(crate::errors::github_error_to_mcp(
-                unblock_github::errors::GitHubApiSnafu {
-                    status: 503_u16,
-                    message: format!(
-                        "Cannot close issue #{issue_number}: failed to prime the dependency graph before cascade capture — please retry or run `prime` first"
-                    ),
-                }
-                .build(),
+                unblock_github::errors::PreMutationPrimeFailedSnafu { qid: issue_qid }.build(),
             ));
         };
 
