@@ -76,7 +76,16 @@ pub struct ListParams {
     /// Case-insensitive.
     pub label: Option<String>,
     /// Filter by assignee. Returns issues that have this GitHub login as
-    /// an assignee (any match). Exact match.
+    /// an assignee (any match).
+    ///
+    /// **Case-sensitive** exact match — `"Alice"` and `"alice"` are
+    /// treated as distinct values even though GitHub logins are
+    /// case-insensitive platform-side (so both refer to the same user).
+    /// This mirrors the [`agent`](Self::agent) filter precedent and is
+    /// covered by the `assignee_filter_is_case_sensitive` unit test in
+    /// this module. Callers should pass the canonical login casing as
+    /// it appears on the issue. A future refinement may switch to
+    /// [`str::eq_ignore_ascii_case`] once a product decision is made.
     pub assignee: Option<String>,
     /// Sort order. One of `"priority"` (default), `"created"`, or
     /// `"updated"`. Empty/whitespace-only strings normalise to the
@@ -298,8 +307,14 @@ fn filter_sort_paginate(
         .filter(|r| agent_filter.is_none_or(|f| r.agent.as_deref() == Some(f)))
         // label: any label case-insensitive match (matching ready.rs:153).
         .filter(|r| label_filter.is_none_or(|f| r.labels.iter().any(|l| l.eq_ignore_ascii_case(f))))
-        // assignee: any assignee exact match — GitHub stores logins as
-        // canonical strings, and exact match mirrors the agent filter.
+        // assignee: any assignee CASE-SENSITIVE exact match — mirrors the
+        // agent filter precedent above and intentionally diverges from
+        // GitHub's platform-side case-insensitive login semantics
+        // ("Alice" and "alice" identify the same user on GitHub but are
+        // treated as distinct here). See the doc on
+        // `ListParams::assignee` for the full rationale; if the product
+        // decision flips, swap to `eq_ignore_ascii_case` and update the
+        // `assignee_filter_is_case_sensitive` test.
         .filter(|r| assignee_filter.is_none_or(|f| r.assignees.iter().any(|a| a == f)))
         .collect();
 
