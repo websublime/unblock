@@ -470,13 +470,17 @@ pub async fn handle_prime(
         .await
         .map_err(github_error_to_mcp)?;
 
-    // 3. Build graph and compute ready set.
-    // SPEC §3.3 Filter 3 / §14 Invariant 14(a): engine scopes source issues
-    // to the configured (owner, repo) before the blocker filter runs. The
-    // categorisation below and the cache store inherit that guarantee.
-    let graph = DependencyGraph::build(&issues_vec, &edges);
-    let ready_summaries =
-        graph.compute_ready_set(&issues_vec, state.github.owner(), state.github.repo());
+    // 3. Build graph and compute ready set via the shared helper. SPEC
+    //    §3.3 Filter 3 / §14 Invariant 14(a): the helper threads the
+    //    configured (owner, repo) through the engine so source issues are
+    //    scoped before the blocker filter runs. The categorisation below
+    //    and the cache store inherit that guarantee.
+    let (graph, ready_summaries) = crate::tools::build_graph_and_ready_set(
+        &issues_vec,
+        &edges,
+        state.github.owner(),
+        state.github.repo(),
+    );
 
     let now = Utc::now();
 

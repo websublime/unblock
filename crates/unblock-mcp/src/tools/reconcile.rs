@@ -17,7 +17,6 @@ use chrono::Utc;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
-use unblock_core::graph::DependencyGraph;
 use unblock_core::reconcile::{DriftKind, DriftReport, ReconcileEngine};
 use unblock_core::types::{Issue, QualifiedId};
 use unblock_github::projects::FieldValue;
@@ -174,14 +173,18 @@ pub async fn handle_reconcile(
         .map(|i| (i.qualified_id.clone(), i.clone()))
         .collect();
 
-    // 2. Build graph and compute ready set.
-    // SPEC §3.3 Filter 3 / §14 Invariant 14(a): scope sources to the
-    // configured (owner, repo) so the drift report's computed_ready set
-    // only considers configured-repo issues. The reconcile engine reads
-    // cross-repo nodes separately when chasing cycles and orphaned edges.
-    let graph = DependencyGraph::build(&issues_vec, &edges);
-    let ready_summaries =
-        graph.compute_ready_set(&issues_vec, state.github.owner(), state.github.repo());
+    // 2. Build graph and compute ready set via the shared helper. SPEC
+    //    §3.3 Filter 3 / §14 Invariant 14(a): the helper scopes sources to
+    //    the configured (owner, repo) so the drift report's
+    //    `computed_ready` set only considers configured-repo issues. The
+    //    reconcile engine reads cross-repo nodes separately when chasing
+    //    cycles and orphaned edges.
+    let (graph, ready_summaries) = crate::tools::build_graph_and_ready_set(
+        &issues_vec,
+        &edges,
+        state.github.owner(),
+        state.github.repo(),
+    );
     let computed_ready: HashSet<QualifiedId> = ready_summaries
         .iter()
         .map(|s| s.qualified_id.clone())

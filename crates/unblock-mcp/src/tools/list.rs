@@ -22,7 +22,6 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracing::{info, instrument};
 use unblock_core::errors::ValidationSnafu;
-use unblock_core::graph::DependencyGraph;
 use unblock_core::types::{Issue, Priority, QualifiedId, Status};
 
 use crate::errors::github_error_to_mcp;
@@ -512,13 +511,12 @@ pub async fn handle_list(state: &ServerState, params: ListParams) -> Result<List
             // was warm or cold. `issues` is cloned because the local copy
             // is still consumed below by `build_list_rows` for the list
             // projection — the cache holds an independent snapshot.
-            let graph = DependencyGraph::build(&issues, &edges);
-            // SPEC §3.3 Filter 3 / §14 Invariant 14(a): scope the cached
-            // ready set to the configured (owner, repo) so subsequent
-            // `ready`/`prime` reads inherit the local-only guarantee.
-            let ready_set =
-                graph.compute_ready_set(&issues, state.github.owner(), state.github.repo());
-            state.cache.update(issues.clone(), ready_set, graph).await;
+            //
+            // SPEC §3.3 Filter 3 / §14 Invariant 14(a): the helper
+            // forwards the configured (owner, repo) to the engine so the
+            // cached ready set is scoped to local-only sources, which
+            // subsequent `ready`/`prime` reads inherit.
+            crate::tools::refresh_cache_from(state, issues.clone(), &edges).await;
             tracing::debug!("Cache refreshed by list handler");
             issues
         }
