@@ -857,6 +857,48 @@ impl GitHubClient {
         Ok(node_id)
     }
 
+    /// Executes the GraphQL `addIssueDependency` mutation.
+    ///
+    /// Single chokepoint behind every public `add_blocked_by*` entry point in
+    /// this file: the local-only [`add_blocked_by()`](Self::add_blocked_by),
+    /// the cross-repo-blocker
+    /// [`add_blocked_by_ref()`](Self::add_blocked_by_ref), and the cross-repo
+    /// source [`add_blocked_by_refs()`](Self::add_blocked_by_refs). Each
+    /// caller resolves its endpoints to GraphQL node IDs (via
+    /// [`resolve_node_id()`](Self::resolve_node_id),
+    /// [`resolve_issue_ref()`](Self::resolve_issue_ref), or
+    /// [`fetch_issue_ref()`](Self::fetch_issue_ref)) and feeds them here; the
+    /// (`owner`, `repo`) chokepoint is enforced by the resolver layer, not by
+    /// this raw mutation primitive (the `addIssueDependency` mutation itself
+    /// operates on globally-scoped Projects V2 issue node IDs and does not
+    /// take an owner/repo).
+    ///
+    /// Pure transport — no validation, no duplicate pre-check, no telemetry
+    /// beyond what [`graphql()`](Self::graphql) emits internally. Caller-side
+    /// `debug!`/duplicate-pre-check responsibilities are preserved at every
+    /// adopting site so observability is bit-for-bit unchanged.
+    async fn add_issue_dependency_raw(
+        &self,
+        dependent_id: &str,
+        dependency_id: &str,
+    ) -> Result<(), Error> {
+        let mutation = "
+            mutation AddBlockedBy($dependentId: ID!, $dependencyId: ID!) {
+                addIssueDependency(input: {dependentId: $dependentId, dependencyId: $dependencyId}) {
+                    clientMutationId
+                }
+            }
+        ";
+
+        let variables = serde_json::json!({
+            "dependentId": dependent_id,
+            "dependencyId": dependency_id,
+        });
+
+        self.graphql(mutation, variables).await?;
+        Ok(())
+    }
+
     /// Adds a blocking relationship between two issues.
     ///
     /// After this call, `issue_number` is blocked by `blocked_by_number`.
@@ -910,20 +952,8 @@ impl GitHubClient {
             .into());
         }
 
-        let mutation = "
-            mutation AddBlockedBy($dependentId: ID!, $dependencyId: ID!) {
-                addIssueDependency(input: {dependentId: $dependentId, dependencyId: $dependencyId}) {
-                    clientMutationId
-                }
-            }
-        ";
-
-        let variables = serde_json::json!({
-            "dependentId": issue_id,
-            "dependencyId": blocker_id,
-        });
-
-        self.graphql(mutation, variables).await?;
+        self.add_issue_dependency_raw(&issue_id, &blocker_id)
+            .await?;
 
         debug!(
             issue_number,
@@ -1400,20 +1430,8 @@ impl GitHubClient {
                 let issue_id = self.resolve_node_id(issue_number).await?;
                 let blocker_id = self.resolve_issue_ref(blocker).await?;
 
-                let mutation = "
-                    mutation AddBlockedBy($dependentId: ID!, $dependencyId: ID!) {
-                        addIssueDependency(input: {dependentId: $dependentId, dependencyId: $dependencyId}) {
-                            clientMutationId
-                        }
-                    }
-                ";
-
-                let variables = serde_json::json!({
-                    "dependentId": issue_id,
-                    "dependencyId": blocker_id,
-                });
-
-                self.graphql(mutation, variables).await?;
+                self.add_issue_dependency_raw(&issue_id, &blocker_id)
+                    .await?;
 
                 debug!(
                     issue_number,
@@ -1524,20 +1542,8 @@ impl GitHubClient {
                 let source_id = source_issue.node_id;
                 let blocker_id = self.resolve_issue_ref(blocker).await?;
 
-                let mutation = "
-                    mutation AddBlockedBy($dependentId: ID!, $dependencyId: ID!) {
-                        addIssueDependency(input: {dependentId: $dependentId, dependencyId: $dependencyId}) {
-                            clientMutationId
-                        }
-                    }
-                ";
-
-                let variables = serde_json::json!({
-                    "dependentId": source_id,
-                    "dependencyId": blocker_id,
-                });
-
-                self.graphql(mutation, variables).await?;
+                self.add_issue_dependency_raw(&source_id, &blocker_id)
+                    .await?;
 
                 debug!(
                     source_owner = %source_owner,
