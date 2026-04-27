@@ -165,6 +165,10 @@ pub trait GitHubApi: Send + Sync {
     /// Reopens a previously closed issue.
     async fn reopen_issue(&self, number: u64) -> Result<(), Error>;
 
+    // Note: `search_issues` is a read-only operation but is grouped under
+    // `── Mutations ──` per spec §5.4, which lists it alongside the write
+    // mutations rather than the GraphQL reads. Do not relocate it without a
+    // matching spec edit — the placement is intentional, not accidental.
     /// Full-text search of issues via GitHub's REST Search API.
     ///
     /// Scoped to the configured `owner/repo`. Bypasses any caller-side cache.

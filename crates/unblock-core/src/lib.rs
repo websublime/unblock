@@ -4,7 +4,7 @@
 //!
 //! This crate is pure Rust with zero network dependencies. It provides:
 //!
-//! - **Types** — `Issue`, `Status`, `Priority`, `PipelineStage`, `BlockingEdge`, `BodySections`
+//! - **Types** — `Issue`, `Status`, `Priority`, `PipelineStage`, `BlockingEdge`, `TreeNode`, `DependencyTree`, `BodySections`
 //! - **Graph** — petgraph-based dependency graph with ready set computation and cascade
 //! - **Cache** — in-memory graph cache with TTL and invalidation
 //! - **Config** — environment-based configuration
@@ -25,7 +25,7 @@
 /// `std::sync` import.
 pub use std::sync::Arc;
 
-/// Domain types: `Issue`, `IssueComment`, `RelatedIssue`, `Status`, `Priority`, `PipelineStage`, `BlockingEdge`, `BodySections`.
+/// Domain types: `Issue`, `IssueComment`, `RelatedIssue`, `Status`, `Priority`, `PipelineStage`, `BlockingEdge`, `TreeNode`, `DependencyTree`, `BodySections`.
 pub mod types;
 
 /// Dependency graph engine: build, ready set, cascade, cycle detection.
