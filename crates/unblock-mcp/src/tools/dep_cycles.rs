@@ -98,6 +98,7 @@
 //! data types [`DepCyclesParams`] / [`DepCyclesResult`] so the sibling
 //! bead can wire the router without touching cycle-detection logic.
 //!
+//! [`DependencyGraph`]: unblock_core::graph::DependencyGraph
 //! [`DependencyGraph::detect_all_cycles`]: unblock_core::graph::DependencyGraph::detect_all_cycles
 //! [`GraphCache::get_graph`]: unblock_core::cache::GraphCache::get_graph
 //! [`QualifiedId`]: unblock_core::types::QualifiedId
@@ -111,7 +112,6 @@ use rmcp::model::ErrorData;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracing::{info, instrument};
-use unblock_core::graph::DependencyGraph;
 use unblock_core::types::{CrossRepoRefs, QualifiedId};
 
 use crate::errors::github_error_to_mcp;
@@ -244,6 +244,9 @@ fn filter_cycles_containing<'a>(
 /// GitHub network failure). The error surface matches the
 /// [`crate::tools::stats`] R6 posture — `DepCyclesResult` has no
 /// `stale` field, so failure must be signalled via the error channel.
+///
+/// [`DependencyGraph`]: unblock_core::graph::DependencyGraph
+/// [`DependencyGraph::detect_all_cycles`]: unblock_core::graph::DependencyGraph::detect_all_cycles
 #[instrument(
     skip(state, params),
     name = "handle_dep_cycles",
@@ -284,12 +287,21 @@ pub async fn handle_dep_cycles(
         // The retry unexpectedly succeeded — populate the cache so a
         // follow-up call is warm, then compute cycles against the
         // freshly built graph without re-reading the cache.
-        let graph_built = DependencyGraph::build(&issues_vec, &edges_vec);
-        // SPEC §3.3 Filter 3 / §14 Invariant 14(a): scope the cached ready
-        // set to the configured (owner, repo) so downstream consumers
-        // inherit the local-only guarantee by construction.
-        let ready_set =
-            graph_built.compute_ready_set(&issues_vec, &configured_owner, &configured_repo);
+        //
+        // SPEC §3.3 Filter 3 / §14 Invariant 14(a): the helper threads the
+        // configured (owner, repo) through the engine so the cached ready
+        // set is local-only and downstream consumers inherit the guarantee
+        // by construction. This is a "retains references" site — we keep
+        // `&graph_built` between the build/compute pair and `cache.update`
+        // to call `detect_all_cycles()` without a double-build, deep clone,
+        // or post-update cache re-read (see `crate::tools::refresh_cache_from`
+        // rustdoc for the call-site taxonomy).
+        let (graph_built, ready_set) = crate::tools::build_graph_and_ready_set(
+            &issues_vec,
+            &edges_vec,
+            state.github.owner(),
+            state.github.repo(),
+        );
         let cycles = graph_built.detect_all_cycles();
         state.cache.update(issues_vec, ready_set, graph_built).await;
         cycles
