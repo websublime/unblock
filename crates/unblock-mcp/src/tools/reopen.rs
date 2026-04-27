@@ -39,9 +39,6 @@
 //!    to `blocked` or `ready` via the Projects V2 field ladder. Failures
 //!    are logged and swallowed; the cache already holds the fresh issue
 //!    view, so the agent can re-observe the status via `show` if needed.
-//!    (The TODO for extracting the shared field-update helper is
-//!    tracked by `unblock-b6b.79` / `unblock-29p.24` — do NOT refactor
-//!    here.)
 //! 7. **Return** [`ReopenResult`] with the issue number, the `blocked`
 //!    flag, and the lowercase status slug.
 //!
