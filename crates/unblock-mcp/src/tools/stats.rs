@@ -389,12 +389,17 @@ pub async fn handle_stats(
         // The retry unexpectedly succeeded — populate the cache so a
         // follow-up call is warm, then aggregate against the freshly
         // fetched vectors without re-reading the cache.
-        let graph_built = DependencyGraph::build(&issues_vec, &edges_vec);
-        // SPEC §3.3 Filter 3 / §14 Invariant 14(a): pass configured coords
-        // so the cached ready set is local-only and `ready_count` in the
-        // stats envelope matches what `ready(milestone=…)` would return.
-        let ready_set =
-            graph_built.compute_ready_set(&issues_vec, state.github.owner(), state.github.repo());
+        //
+        // SPEC §3.3 Filter 3 / §14 Invariant 14(a): the helper threads
+        // configured coords through the engine so the cached ready set is
+        // local-only and `ready_count` in the stats envelope matches what
+        // `ready(milestone=…)` would return.
+        let (graph_built, ready_set) = crate::tools::build_graph_and_ready_set(
+            &issues_vec,
+            &edges_vec,
+            state.github.owner(),
+            state.github.repo(),
+        );
         let milestone = crate::tools::normalize_filter(params.milestone.as_deref());
         let filtered = filter_by_milestone(&issues_vec, milestone);
         let result = aggregate_stats(

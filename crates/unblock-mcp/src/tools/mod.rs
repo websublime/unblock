@@ -56,6 +56,7 @@ use std::future::Future;
 use rmcp::model::ErrorData;
 use tracing::instrument;
 use unblock_core::graph::DependencyGraph;
+use unblock_core::types::{BlockingEdge, Issue, IssueSummary};
 
 use crate::errors::github_error_to_mcp;
 use crate::server::ServerState;
@@ -69,6 +70,80 @@ use crate::server::ServerState;
 #[must_use]
 pub(crate) fn normalize_filter(value: Option<&str>) -> Option<&str> {
     value.filter(|s| !s.trim().is_empty())
+}
+
+/// Build a fresh [`DependencyGraph`] and ready-set projection from raw
+/// `fetch_graph_data()` outputs.
+///
+/// Centralises the build → `compute_ready_set` pair that every
+/// cache-population site (the [`rebuild_cache`] success branch and the
+/// fresh-fetch sequences in `prime`, `reconcile`, `list`, and the `stats`
+/// retry path) would otherwise duplicate verbatim.
+///
+/// SPEC §3.3 Filter 3 / §14 Invariant 14(a): forwarding the configured
+/// `(owner, repo)` to [`DependencyGraph::compute_ready_set`] is the single
+/// chokepoint that scopes the cached ready set to local-only source issues.
+/// Concentrating the call here means `(owner, repo)` is threaded through
+/// the engine in exactly one place per fresh-fetch flow, making the
+/// scoping invariant easy to audit and impossible to bypass by accident.
+///
+/// Pure / synchronous: no I/O, no allocations beyond the `Vec<IssueSummary>`
+/// and the underlying `DiGraph`. Inputs are borrowed so callers retain
+/// ownership of the issue/edge slices when they need to use them again
+/// (e.g. for downstream categorisation, drift analysis, or aggregation
+/// before the cache is updated).
+#[must_use]
+pub(crate) fn build_graph_and_ready_set(
+    issues: &[Issue],
+    edges: &[BlockingEdge],
+    configured_owner: &str,
+    configured_repo: &str,
+) -> (DependencyGraph, Vec<IssueSummary>) {
+    let graph = DependencyGraph::build(issues, edges);
+    let ready_set = graph.compute_ready_set(issues, configured_owner, configured_repo);
+    (graph, ready_set)
+}
+
+/// Refresh the cache from a freshly-fetched `(issues, edges)` pair.
+///
+/// Builds a [`DependencyGraph`] and ready set via
+/// [`build_graph_and_ready_set`] (using `state.github.owner()` /
+/// `state.github.repo()` as the SPEC §3.3 Filter 3 chokepoint) and stores
+/// all three artefacts in [`crate::server::ServerState::cache`] via
+/// [`unblock_core::cache::GraphCache::update`].
+///
+/// Used by call sites that **fully delegate** the build → compute → store
+/// sequence — i.e. they do not need the freshly-built graph or ready set
+/// for any intermediate work between `compute_ready_set` and
+/// `cache.update`. Those are:
+///
+/// - [`rebuild_cache`] — post-mutation cache rebuild after `execute_write_tool`.
+/// - The success branch of the `list` handler — refreshes the cache as a
+///   side effect of the fresh fetch the handler already needed.
+///
+/// **Sites that retain intermediate references** (`prime`, `reconcile`, the
+/// `stats` retry path) instead call [`build_graph_and_ready_set`]
+/// directly, then invoke `state.cache.update(...)` once they have finished
+/// consuming the local references. Coupling the build/compute pair into a
+/// shared helper while leaving the cache-update line at the call site
+/// avoids both (a) double-builds (calling the full helper after a local
+/// build) and (b) post-update cache re-reads (which would introduce a new
+/// race window with concurrent invalidators relative to today's
+/// behaviour).
+///
+/// **Observably equivalent.** Callers that adopt this helper match the
+/// pre-refactor sequence one-for-one: same allocations, same lock
+/// acquisition order, same SPEC scoping. The site-specific `tracing::debug!`
+/// message that previously followed `cache.update` is preserved at the call
+/// site so log telemetry is unchanged.
+pub(crate) async fn refresh_cache_from(
+    state: &ServerState,
+    issues: Vec<Issue>,
+    edges: &[BlockingEdge],
+) {
+    let (graph, ready_set) =
+        build_graph_and_ready_set(&issues, edges, state.github.owner(), state.github.repo());
+    state.cache.update(issues, ready_set, graph).await;
 }
 
 /// Executes a read-only MCP tool operation.
@@ -164,16 +239,13 @@ pub async fn rebuild_cache(state: &ServerState) {
 
     match state.github.fetch_graph_data().await {
         Ok((issues, edges)) => {
-            let graph = DependencyGraph::build(&issues, &edges);
-            // SPEC §3.3 Filter 3 / §14 Invariant 14(a): the cached ready set
-            // is guaranteed local-only by construction when the engine is
-            // passed the configured (owner, repo). This is the canonical
-            // chokepoint — downstream consumers (ready, prime,
+            // SPEC §3.3 Filter 3 / §14 Invariant 14(a): `refresh_cache_from`
+            // forwards the configured (owner, repo) to the engine — the
+            // canonical chokepoint that scopes the cached ready set to
+            // local-only sources. Downstream consumers (ready, prime,
             // update_status_fields) inherit the guarantee without
             // re-checking. (unblock-eos.4 / D6.a / GAP-14.b)
-            let ready_set =
-                graph.compute_ready_set(&issues, state.github.owner(), state.github.repo());
-            state.cache.update(issues, ready_set, graph).await;
+            refresh_cache_from(state, issues, &edges).await;
             tracing::debug!("Cache rebuilt after write tool execution");
         }
         Err(err) => {
