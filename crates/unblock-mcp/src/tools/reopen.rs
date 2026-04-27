@@ -217,8 +217,10 @@ fn validate_id(id: u64) -> Result<(), ErrorData> {
 /// [`crate::tools::update_status_field_best_effort`] helper.
 ///
 /// Preserves bit-for-bit the message text emitted by the previous private
-/// `update_status_field` helper, including the `slug` structured field
-/// that the helper now adds to every record. The `option_missing_warn`
+/// `update_status_field` helper (deleted; consolidated under
+/// `crate::tools::update_status_field_best_effort` by `unblock-29p.24`),
+/// including the `slug` structured field that the helper now adds to
+/// every record. The `option_missing_warn`
 /// arm is `Some(...)` to preserve the pre-refactor warn that fires when
 /// the configured Status field has no option matching the requested
 /// slug — reopen surfaces this as a misconfiguration rather than a silent

@@ -261,10 +261,12 @@ pub(crate) struct StatusUpdateLogConfig {
 ///    `matches!(source_ref, IssueRef::Local(_))` because the configured
 ///    project's `ProjectInfo` cannot host cross-repo source items per
 ///    spec §5.6.
-/// 4. **`tools::reopen::update_status_field`** — Status → caller-supplied
+/// 4. **`tools::reopen::update_status_field`** (deleted; consolidated under
+///    `update_status_field_best_effort`) — Status → caller-supplied
 ///    slug (`"ready"` or `"blocked"`) after
 ///    [`GitHubApi::reopen_issue`]. Caller-supplied slug.
-/// 5. **`tools::dep_remove::update_status_to_ready`** — Status → `ready`
+/// 5. **`tools::dep_remove::update_status_to_ready`** (deleted; consolidated
+///    under `update_status_field_best_effort`) — Status → `ready`
 ///    when [`GitHubApi::remove_blocked_by_refs`] left the source with
 ///    zero open blockers. Hardcoded slug per spec §8.5.
 ///
