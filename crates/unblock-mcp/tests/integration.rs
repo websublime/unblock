@@ -1372,16 +1372,8 @@ async fn list_returns_filtered_sorted_paginated_issues_via_mock_client() {
     let result1 = handle_list(
         &state,
         ListParams {
-            status: None,
-            priority: None,
-            issue_type: None,
-            milestone: None,
-            agent: None,
             label: Some("urgent".to_owned()),
-            assignee: None,
-            sort: None,
-            limit: None,
-            offset: None,
+            ..Default::default()
         },
     )
     .await
@@ -1403,16 +1395,8 @@ async fn list_returns_filtered_sorted_paginated_issues_via_mock_client() {
     let result2 = handle_list(
         &state,
         ListParams {
-            status: None,
-            priority: None,
-            issue_type: None,
-            milestone: None,
-            agent: None,
-            label: None,
-            assignee: None,
             sort: Some("created".to_owned()),
-            limit: None,
-            offset: None,
+            ..Default::default()
         },
     )
     .await
@@ -1428,16 +1412,8 @@ async fn list_returns_filtered_sorted_paginated_issues_via_mock_client() {
     let result3 = handle_list(
         &state,
         ListParams {
-            status: None,
-            priority: None,
-            issue_type: None,
-            milestone: None,
-            agent: None,
-            label: None,
-            assignee: None,
             sort: Some("updated".to_owned()),
-            limit: None,
-            offset: None,
+            ..Default::default()
         },
     )
     .await
@@ -1458,16 +1434,9 @@ async fn list_returns_filtered_sorted_paginated_issues_via_mock_client() {
     let result4 = handle_list(
         &state,
         ListParams {
-            status: None,
-            priority: None,
-            issue_type: None,
-            milestone: None,
-            agent: None,
-            label: None,
-            assignee: None,
-            sort: None,
             limit: Some(2),
             offset: Some(2),
+            ..Default::default()
         },
     )
     .await
@@ -1587,15 +1556,7 @@ async fn list_status_closed_returns_closed_issues_and_status_ready_excludes_them
         &state,
         ListParams {
             status: Some("Closed".to_owned()),
-            priority: None,
-            issue_type: None,
-            milestone: None,
-            agent: None,
-            label: None,
-            assignee: None,
-            sort: None,
-            limit: None,
-            offset: None,
+            ..Default::default()
         },
     )
     .await
@@ -1625,15 +1586,7 @@ async fn list_status_closed_returns_closed_issues_and_status_ready_excludes_them
         &state,
         ListParams {
             status: Some("Ready".to_owned()),
-            priority: None,
-            issue_type: None,
-            milestone: None,
-            agent: None,
-            label: None,
-            assignee: None,
-            sort: None,
-            limit: None,
-            offset: None,
+            ..Default::default()
         },
     )
     .await
@@ -1678,16 +1631,8 @@ async fn list_rejects_limit_out_of_range_without_fetching() {
     let err = handle_list(
         &state,
         ListParams {
-            status: None,
-            priority: None,
-            issue_type: None,
-            milestone: None,
-            agent: None,
-            label: None,
-            assignee: None,
-            sort: None,
             limit: Some(0),
-            offset: None,
+            ..Default::default()
         },
     )
     .await
@@ -2730,7 +2675,17 @@ async fn dep_remove_local_edge_transitions_source_to_ready() {
 
     // Post-mutation rebuild: source #42 and target #99, but NO remaining
     // edges — so #42 is now unblocked after the removal.
-    let rebuilt_source = dep_remove_fixture_issue(42);
+    //
+    // The rebuilt source is seeded as `Status::Blocked` (rather than the
+    // generic-fixture default of `Status::Ready`) so this test asserts the
+    // Blocked→Ready transition explicitly. Per spec §8.5 step 5 the
+    // status-update ladder in `dep_remove.rs` fires unconditionally when
+    // `has_open_blockers` returns false; with a Ready source this
+    // assertion would only validate a Ready→Ready no-op. A Blocked source
+    // catches any future regression where the ladder is made conditional
+    // on the current Projects V2 Status value (see bead unblock-29p.39).
+    let mut rebuilt_source = dep_remove_fixture_issue(42);
+    rebuilt_source.status = Status::Blocked;
     let rebuilt_target = dep_remove_fixture_issue(99);
     mock.push_fetch_graph_data(Ok((vec![rebuilt_source, rebuilt_target], vec![])));
 
@@ -4615,13 +4570,26 @@ async fn setup_no_project_returns_project_not_configured() {
     })
     .expect("Config should load without UNBLOCK_PROJECT");
 
-    // Intentional concrete `GitHubClient::new` (not the `GitHubApi` trait):
+    // Intentional concrete `GitHubClient` (not the `GitHubApi` trait):
     // this test asserts the real client's project-resolution path returns
     // `ProjectNotConfigured` when `UNBLOCK_PROJECT` is unset, which is a
     // property of the concrete implementation, not the trait abstraction.
-    let client = GitHubClient::new(&config)
-        .await
-        .expect("GitHubClient::new should succeed");
+    //
+    // Prefer `with_repo` when `UNBLOCK_REPO` is set so the constructor
+    // does not depend on a reachable `.git/config` to resolve the
+    // repository (mirrors the unblock-c4h fix in `unblock-github`'s
+    // integration tests; see bead unblock-29p.51). Fall back to `new`
+    // otherwise so the production resolution path is still exercised.
+    let client = if let Some((owner, name)) = config.repo.as_deref().and_then(|r| r.split_once('/'))
+    {
+        GitHubClient::with_repo(&config, owner, name)
+            .await
+            .expect("GitHubClient::with_repo should succeed")
+    } else {
+        GitHubClient::new(&config)
+            .await
+            .expect("GitHubClient::new should succeed")
+    };
 
     // resolve_project_info should fail with ProjectNotConfigured.
     let result = client.resolve_project_info().await;

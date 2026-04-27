@@ -39,12 +39,25 @@ pub fn test_config() -> Config {
 }
 
 /// Creates a [`ServerState`] with a real client and empty cache.
+///
+/// Prefers [`GitHubClient::with_repo`] when the config carries an
+/// explicit `repo` (i.e. `UNBLOCK_REPO=owner/repo` is set) so the helper
+/// does not depend on a reachable `.git/config` to resolve the
+/// repository. This mirrors the fix in `unblock-c4h` for
+/// `crates/unblock-github/tests/integration.rs`: prior to the migration,
+/// running `cargo test -p unblock-mcp` from the member crate directory
+/// with `GITHUB_TOKEN` set but without `.git/config` reachable surfaced
+/// the same latent `.git/config` relative-path failure (masked today by
+/// the `has_github_token()` gate, but a regression vector for any test
+/// that drops the gate).
+///
+/// When `UNBLOCK_REPO` is not set, falls back to [`GitHubClient::new`]
+/// so the production `UNBLOCK_REPO` + git-remote resolution path is
+/// still exercised end-to-end when only `GITHUB_TOKEN` is provided.
 #[allow(dead_code)]
 pub async fn test_server_state() -> ServerState {
     let config = test_config();
-    let client = GitHubClient::new(&config)
-        .await
-        .expect("GitHubClient::new() should succeed");
+    let client = build_github_client(&config).await;
     ServerState {
         config: Arc::new(config),
         github: Arc::new(client),
@@ -53,6 +66,35 @@ pub async fn test_server_state() -> ServerState {
         agent_client: OnceLock::new(),
         connected_at: OnceLock::new(),
     }
+}
+
+/// Build a real [`GitHubClient`] from `config`, preferring
+/// [`GitHubClient::with_repo`] when an explicit `owner/repo` is present
+/// in `config.repo`.
+///
+/// Bypasses `.git/config` resolution whenever possible so that integration
+/// tests run from the member crate directory (`cargo test -p unblock-mcp`)
+/// do not depend on a reachable git working tree to resolve the
+/// repository. Falls back to [`GitHubClient::new`] when `config.repo` is
+/// `None`, preserving the production resolution path for callers that
+/// only set `GITHUB_TOKEN`.
+///
+/// The `owner/repo` parsing here intentionally matches
+/// [`unblock_core::config::Config::repo`]'s validation invariant — the
+/// string is guaranteed to contain exactly one `/` with non-empty
+/// segments on each side at config-load time, so `split_once('/')` is
+/// total here without further validation.
+async fn build_github_client(config: &Config) -> GitHubClient {
+    if let Some(repo) = config.repo.as_deref()
+        && let Some((owner, name)) = repo.split_once('/')
+    {
+        return GitHubClient::with_repo(config, owner, name)
+            .await
+            .expect("GitHubClient::with_repo() should succeed with parsed UNBLOCK_REPO");
+    }
+    GitHubClient::new(config)
+        .await
+        .expect("GitHubClient::new() should succeed")
 }
 
 // ── Mock helpers ──────────────────────────────────────────────────────
