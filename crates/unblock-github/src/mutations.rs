@@ -1989,6 +1989,70 @@ mod tests {
         assert!(matches!(err, Error::RateLimited { .. }));
     }
 
+    /// Envelope-field tolerance (unblock-29p.20).
+    ///
+    /// GitHub's `/search/issues` endpoint always wraps the result list in a
+    /// JSON object that carries `total_count`, `incomplete_results`, and
+    /// `items`. The crate-internal `SearchIssuesResponse` type intentionally
+    /// captures only `items` (see `SearchIssuesResponse` doc comment), and
+    /// relies on serde's default ignore-unknown-fields behaviour — there is
+    /// no `#[serde(deny_unknown_fields)]` attribute — to drop the envelope
+    /// metadata silently.
+    ///
+    /// This regression guard pins that contract: a future serde-attribute
+    /// change (e.g. globally enabling `deny_unknown_fields`, switching to a
+    /// different deserializer, or renaming the wrapper type) would flip
+    /// every real GitHub response into a deserialization error. The fixture
+    /// here mirrors the actual envelope shape — `total_count`,
+    /// `incomplete_results`, and a representative `items` array — so the
+    /// test fails loudly if the tolerance is silently broken.
+    #[tokio::test]
+    async fn search_issues_tolerates_envelope_metadata_fields() {
+        let server = MockServer::start().await;
+        let client = GitHubClient::new_for_test(&server.uri());
+
+        // Embed BOTH `total_count` and `incomplete_results` alongside the
+        // `items` array. If a future change flips `SearchIssuesResponse`
+        // into a strict-fields deserializer, this body will fail to
+        // deserialize and the test will fail with a serde error rather
+        // than a missing-field assertion — making the regression cause
+        // self-evident.
+        let response_body = serde_json::json!({
+            "total_count": 1,
+            "incomplete_results": false,
+            "items": [
+                {
+                    "number": 7,
+                    "title": "Envelope-tolerant",
+                    "labels": [],
+                    "milestone": null,
+                    "html_url": "https://github.com/test-owner/test-repo/issues/7",
+                    "created_at": "2026-04-14T00:00:00Z"
+                }
+            ]
+        });
+
+        Mock::given(method("GET"))
+            .and(path("/search/issues"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(response_body))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let results = client
+            .search_issues("anything", Some(10))
+            .await
+            .expect("search_issues must ignore total_count / incomplete_results");
+
+        // Caller-visible count comes from `items.len()`, not `total_count`
+        // — pin that contract too so a future refactor that starts honouring
+        // `total_count` (which would change the public count semantics)
+        // surfaces here.
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].number, 7);
+        assert_eq!(results[0].title, "Envelope-tolerant");
+    }
+
     // ── add_comment_in_repo / add_comment_ref (unblock-eos.13) ────────────
     //
     // Regression guards for the cross-repo cascade primitives introduced in
