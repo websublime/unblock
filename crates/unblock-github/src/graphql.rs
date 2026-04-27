@@ -9,7 +9,8 @@ use chrono::{DateTime, Utc};
 use snafu::ResultExt as _;
 use tracing::{debug, instrument, warn};
 use unblock_core::types::{
-    BlockingEdge, Issue, IssueComment, IssueState, IssueType, Priority, RelatedIssue, Status,
+    BlockingEdge, Issue, IssueComment, IssueState, IssueType, PipelineStage, Priority,
+    RelatedIssue, Status,
 };
 
 use crate::client::GitHubClient;
@@ -668,6 +669,7 @@ fn parse_issue(value: &serde_json::Value, owner: &str, repo: &str) -> Issue {
     let status = parse_status_field(&field_values);
     let priority = parse_priority_field(&field_values);
     let issue_type = parse_issue_type_field(&field_values);
+    let pipeline_stage = parse_pipeline_stage_field(&field_values);
     let agent = field_values.get("Agent").cloned();
     let story_points = field_values
         .get("StoryPoints")
@@ -689,7 +691,7 @@ fn parse_issue(value: &serde_json::Value, owner: &str, repo: &str) -> Issue {
         priority,
         agent,
         claimed_at,
-        pipeline_stage: None,
+        pipeline_stage,
         story_points,
         defer_until,
         labels,
@@ -737,6 +739,7 @@ fn parse_graph_issue(value: &serde_json::Value, owner: &str, repo: &str) -> Issu
     let status = parse_status_field(&field_values);
     let priority = parse_priority_field(&field_values);
     let issue_type = parse_issue_type_field(&field_values);
+    let pipeline_stage = parse_pipeline_stage_field(&field_values);
     let agent = field_values.get("Agent").cloned();
     let story_points = field_values
         .get("StoryPoints")
@@ -758,7 +761,7 @@ fn parse_graph_issue(value: &serde_json::Value, owner: &str, repo: &str) -> Issu
         priority,
         agent,
         claimed_at,
-        pipeline_stage: None,
+        pipeline_stage,
         story_points,
         defer_until,
         labels,
@@ -1080,6 +1083,28 @@ fn parse_issue_type_field(fields: &std::collections::HashMap<String, String>) ->
         Some("Epic") => Some(IssueType::Epic),
         Some("Chore") => Some(IssueType::Chore),
         Some("Spike") => Some(IssueType::Spike),
+        _ => None,
+    }
+}
+
+/// Maps the `PipelineStage` field value to a [`PipelineStage`] enum variant.
+///
+/// Matches the canonical lowercase option names emitted by
+/// `setup_fields` (spec §5 / spec §2.5): `investigation`, `implementation`,
+/// `review`, `refactoring`, `qa`, `done`. Missing or unrecognised values
+/// fall back to `None` — symmetric with [`parse_issue_type_field`] and
+/// consistent with the silent-fallback semantics of
+/// [`parse_status_field`] / [`parse_priority_field`].
+fn parse_pipeline_stage_field(
+    fields: &std::collections::HashMap<String, String>,
+) -> Option<PipelineStage> {
+    match fields.get("PipelineStage").map(String::as_str) {
+        Some("investigation") => Some(PipelineStage::Investigation),
+        Some("implementation") => Some(PipelineStage::Implementation),
+        Some("review") => Some(PipelineStage::Review),
+        Some("refactoring") => Some(PipelineStage::Refactoring),
+        Some("qa") => Some(PipelineStage::Qa),
+        Some("done") => Some(PipelineStage::Done),
         _ => None,
     }
 }
@@ -1524,6 +1549,59 @@ mod tests {
         assert!(parse_issue_type_field(&fields).is_none());
     }
 
+    // ── parse_pipeline_stage_field (unblock-29p.18) ─────────────────────
+
+    /// `setup_fields` (in `crates/unblock-github/src/projects.rs`) writes the
+    /// canonical lowercase option set for the `PipelineStage` Projects V2
+    /// field per spec §5 / §2.5: `investigation`, `implementation`,
+    /// `review`, `refactoring`, `qa`, `done`. The parser must round-trip
+    /// every variant.
+    #[test]
+    fn pipeline_stage_field_mapping_spec_names() {
+        let mut fields = std::collections::HashMap::new();
+        for (label, expected) in [
+            ("investigation", PipelineStage::Investigation),
+            ("implementation", PipelineStage::Implementation),
+            ("review", PipelineStage::Review),
+            ("refactoring", PipelineStage::Refactoring),
+            ("qa", PipelineStage::Qa),
+            ("done", PipelineStage::Done),
+        ] {
+            fields.insert("PipelineStage".to_owned(), label.to_owned());
+            assert_eq!(parse_pipeline_stage_field(&fields), Some(expected));
+        }
+    }
+
+    /// Missing `PipelineStage` field-value collapses to `None` — symmetric
+    /// with [`parse_issue_type_field`] silent-fallback semantics.
+    #[test]
+    fn pipeline_stage_field_missing_returns_none() {
+        let fields = std::collections::HashMap::new();
+        assert!(parse_pipeline_stage_field(&fields).is_none());
+    }
+
+    /// Unrecognised `PipelineStage` option-value collapses to `None`.
+    /// Includes case mismatches (`"Investigation"` vs canonical
+    /// `"investigation"`) — the matcher is strictly case-sensitive
+    /// against the spec lowercase taxonomy.
+    #[test]
+    fn pipeline_stage_field_unrecognised_returns_none() {
+        let mut fields = std::collections::HashMap::new();
+        for unknown in [
+            "Investigation", // wrong case (spec mandates lowercase)
+            "IMPLEMENTATION",
+            "deployed", // not in taxonomy
+            "",
+            "  ",
+        ] {
+            fields.insert("PipelineStage".to_owned(), unknown.to_owned());
+            assert!(
+                parse_pipeline_stage_field(&fields).is_none(),
+                "expected None for unrecognised PipelineStage value: {unknown:?}"
+            );
+        }
+    }
+
     // ── parse_issue (full roundtrip) ────────────────────────────────────
 
     #[test]
@@ -1785,6 +1863,7 @@ mod tests {
                             {"field": {"name": "StoryPoints"}, "number": 5.0},
                             {"field": {"name": "DeferUntil"}, "date": "2026-06-01"},
                             {"field": {"name": "IssueType"}, "name": "Bug"},
+                            {"field": {"name": "PipelineStage"}, "name": "implementation"},
                             {"field": {"name": "ClaimedAt"}, "text": "2026-03-15T10:30:00Z"}
                         ]
                     }
@@ -1810,7 +1889,13 @@ mod tests {
             Some(chrono::NaiveDate::from_ymd_opt(2026, 6, 1).expect("valid date"))
         );
         assert_eq!(issue.issue_type, Some(IssueType::Bug));
-        assert!(issue.pipeline_stage.is_none());
+        // Regression guard for unblock-29p.18: parse_graph_issue MUST
+        // round-trip the canonical lowercase PipelineStage option set
+        // emitted by setup_fields. Prior to the fix this was hardcoded
+        // to `None` and the absence of the field in the fixture masked
+        // the bug — see test commentary in
+        // `parse_graph_issue_round_trips_pipeline_stage_variants`.
+        assert_eq!(issue.pipeline_stage, Some(PipelineStage::Implementation));
         assert!(issue.claimed_at.is_some(), "ClaimedAt should be parsed");
         assert_eq!(
             issue.claimed_at.expect("just asserted").to_rfc3339(),
@@ -1883,8 +1968,109 @@ mod tests {
         assert!(issue.agent.is_none());
         assert!(issue.story_points.is_none());
         assert!(issue.defer_until.is_none());
+        // No `projectItems` connection → `extract_field_values` returns
+        // an empty map → `parse_pipeline_stage_field` correctly yields
+        // `None` (genuine absence, not the prior hardcoded-None bug).
         assert!(issue.pipeline_stage.is_none());
         assert!(issue.claimed_at.is_none());
+    }
+
+    // ── PipelineStage round-trip (unblock-29p.18) ───────────────────────
+
+    /// Helper: builds a `projectItems` fixture with a single
+    /// `PipelineStage` field-value, isolating the parser surface from
+    /// unrelated Status/Priority/etc. defaults.
+    fn pipeline_stage_fixture(option_name: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": "node-ps",
+            "number": 99,
+            "title": "Pipeline stage round-trip",
+            "body": null,
+            "state": "OPEN",
+            "url": "",
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-01T00:00:00Z",
+            "labels": {"nodes": []},
+            "milestone": null,
+            "assignees": {"nodes": []},
+            "comments": {"nodes": []},
+            "trackedInIssues": {"nodes": []},
+            "trackedBy": {"nodes": []},
+            "parent": null,
+            "subIssues": {"nodes": []},
+            "projectItems": {
+                "nodes": [{
+                    "fieldValues": {
+                        "nodes": [
+                            {"field": {"name": "PipelineStage"}, "name": option_name}
+                        ]
+                    }
+                }]
+            }
+        })
+    }
+
+    /// `parse_issue` (full roundtrip) MUST round-trip every canonical
+    /// `PipelineStage` option emitted by `setup_fields` (spec §5 / §2.5).
+    /// Prior to unblock-29p.18 this site hardcoded `None`, silently
+    /// dropping whatever value GitHub stored.
+    #[test]
+    fn parse_issue_round_trips_pipeline_stage_variants() {
+        for (label, expected) in [
+            ("investigation", PipelineStage::Investigation),
+            ("implementation", PipelineStage::Implementation),
+            ("review", PipelineStage::Review),
+            ("refactoring", PipelineStage::Refactoring),
+            ("qa", PipelineStage::Qa),
+            ("done", PipelineStage::Done),
+        ] {
+            let json = pipeline_stage_fixture(label);
+            let issue = parse_issue(&json, "test-owner", "test-repo");
+            assert_eq!(
+                issue.pipeline_stage,
+                Some(expected),
+                "parse_issue must round-trip canonical PipelineStage \
+                 option {label:?}"
+            );
+        }
+    }
+
+    /// `parse_graph_issue` (bulk graph data) MUST round-trip every
+    /// canonical `PipelineStage` option emitted by `setup_fields`. This
+    /// is the second of the two parser paths flagged in
+    /// unblock-29p.18 — both must be migrated together.
+    #[test]
+    fn parse_graph_issue_round_trips_pipeline_stage_variants() {
+        for (label, expected) in [
+            ("investigation", PipelineStage::Investigation),
+            ("implementation", PipelineStage::Implementation),
+            ("review", PipelineStage::Review),
+            ("refactoring", PipelineStage::Refactoring),
+            ("qa", PipelineStage::Qa),
+            ("done", PipelineStage::Done),
+        ] {
+            let json = pipeline_stage_fixture(label);
+            let issue = parse_graph_issue(&json, "test-owner", "test-repo");
+            assert_eq!(
+                issue.pipeline_stage,
+                Some(expected),
+                "parse_graph_issue must round-trip canonical \
+                 PipelineStage option {label:?}"
+            );
+        }
+    }
+
+    /// Unrecognised `PipelineStage` option-values collapse to `None` in
+    /// both parser paths — preserves silent-fallback symmetry with
+    /// `parse_status_field` / `parse_priority_field` (which fall back
+    /// to defaults rather than emitting a `tracing::warn!`).
+    #[test]
+    fn parse_issue_unknown_pipeline_stage_yields_none() {
+        let json = pipeline_stage_fixture("deployed");
+        let full = parse_issue(&json, "test-owner", "test-repo");
+        let graph = parse_graph_issue(&json, "test-owner", "test-repo");
+        assert!(full.pipeline_stage.is_none());
+        assert!(graph.pipeline_stage.is_none());
     }
 
     // ── BlockingEdge extraction (via extract_blocking_edges helper) ──────
