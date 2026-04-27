@@ -407,6 +407,71 @@ fn apply_body_section_update(
     }
 }
 
+/// Log-message config for the close handler's Status=closed write
+/// (unblock-29p.24 — see [`crate::tools::update_status_field_best_effort`]).
+///
+/// `option_missing_warn` is `None` to preserve the pre-refactor silent
+/// behaviour from the original `if let Some(option_id) = ... && let Err(e)
+/// = ...` chain — close did NOT warn when the configured Status field had
+/// no `closed` option (unlike `reopen` and `dep_remove`, which do).
+static CLOSE_HANDLER_STATUS_LOG: crate::tools::StatusUpdateLogConfig =
+    crate::tools::StatusUpdateLogConfig {
+        no_field_ids_debug: Some(
+            "No field IDs cached — run setup first to enable project field assignment",
+        ),
+        resolve_project_warn: Some(
+            "Failed to resolve project info — closed issue fields will not be set",
+        ),
+        item_id_warn: "Failed to get project item ID for closed issue — fields will not be set",
+        option_missing_warn: None,
+        update_field_warn: "Failed to set Status=closed on closed issue",
+    };
+
+/// Log-message config for the close-cascade Status=ready write per
+/// cascaded dependent (unblock-29p.24 — see
+/// [`crate::tools::update_status_field_best_effort`]).
+///
+/// `no_field_ids_debug` and `resolve_project_warn` are both `None` to
+/// preserve the pre-refactor outer `if let Some(field_ids) && let
+/// Ok(project_info)`-chain behaviour — the cascade iterates over many
+/// dependents and silently swallowed missing setup so logs did not flood
+/// per-iteration when the project was misconfigured.
+/// `option_missing_warn` is also `None` for the same reason (the
+/// pre-refactor `if cascaded_issue.status != ... && let Some(option_id) =
+/// ... && let Err(e) = ...` chain silently exited on a missing option).
+/// Per-iteration `cascaded_qid` context is propagated via a
+/// `tracing::info_span!` wrapping the helper invocation.
+static CLOSE_CASCADE_STATUS_LOG: crate::tools::StatusUpdateLogConfig =
+    crate::tools::StatusUpdateLogConfig {
+        no_field_ids_debug: None,
+        resolve_project_warn: None,
+        item_id_warn: "Failed to get project item ID for cascaded issue",
+        option_missing_warn: None,
+        update_field_warn: "Failed to set Status=ready on cascaded issue",
+    };
+
+/// Log-message config for the depends handler's Status=blocked write on
+/// a configured-repo source issue (unblock-29p.24 — see
+/// [`crate::tools::update_status_field_best_effort`]).
+///
+/// `option_missing_warn` is `None` to preserve the pre-refactor silent
+/// behaviour from the original `if let Some(option_id) = ... && let Err(e)
+/// = ...` chain. The cross-repo gate at the call site short-circuits
+/// before this helper is invoked, so the helper never observes
+/// cross-repo source issues here (per spec §5 cross-repo scope table).
+static DEPENDS_HANDLER_STATUS_LOG: crate::tools::StatusUpdateLogConfig =
+    crate::tools::StatusUpdateLogConfig {
+        no_field_ids_debug: Some(
+            "No field IDs cached — run setup first to enable project field assignment",
+        ),
+        resolve_project_warn: Some(
+            "Failed to resolve project info — source issue fields will not be set",
+        ),
+        item_id_warn: "Failed to get project item ID for source issue — fields will not be set",
+        option_missing_warn: None,
+        update_field_warn: "Failed to set Status=blocked on source issue",
+    };
+
 /// Tool router implementation for MCP tools.
 #[tool_router]
 impl UnblockServer {
@@ -1197,44 +1262,20 @@ impl UnblockServer {
                 client.close_issue(issue_number, reason).await?;
 
                 // Step 3: Update Projects V2 fields on the closed issue:
-                // Status → Done.
-                // TODO(unblock-b6b.79): Extract shared project field update helper to
-                // deduplicate this if-let ladder (also in claim handler and cascade below).
-                if let Some(field_ids) = client.field_ids().await {
-                    if let Ok(project_info) = client.resolve_project_info().await {
-                        if let Ok(item_id) = client
-                            .get_project_item_id(&issue.node_id, &project_info.id)
-                            .await
-                        {
-                            // Status → closed
-                            if let Some(option_id) = field_ids.status.options.get("closed")
-                                && let Err(e) = client
-                                    .update_field(
-                                        &project_info.id,
-                                        &item_id,
-                                        &field_ids.status.field_id,
-                                        &FieldValue::SingleSelectOption(option_id.clone()),
-                                    )
-                                    .await
-                            {
-                                tracing::warn!(error = %e, "Failed to set Status=closed on closed issue");
-                            }
-
-                        } else {
-                            tracing::warn!(
-                                "Failed to get project item ID for closed issue — fields will not be set"
-                            );
-                        }
-                    } else {
-                        tracing::warn!(
-                            "Failed to resolve project info — closed issue fields will not be set"
-                        );
-                    }
-                } else {
-                    tracing::debug!(
-                        "No field IDs cached — run setup first to enable project field assignment"
-                    );
-                }
+                // Status → closed. Delegated to the shared
+                // [`update_status_field_best_effort`] helper
+                // (unblock-29p.24) — see [`CLOSE_HANDLER_STATUS_LOG`] for
+                // the per-rung message strings, including the silent-on-
+                // missing-option behaviour preserved bit-for-bit from the
+                // pre-refactor `if let Some(option_id) = ... && let
+                // Err(e) = ...` chain.
+                crate::tools::update_status_field_best_effort(
+                    client.as_ref(),
+                    &issue.node_id,
+                    "closed",
+                    &CLOSE_HANDLER_STATUS_LOG,
+                )
+                .await;
 
                 Ok(())
             }
@@ -1317,55 +1358,50 @@ impl UnblockServer {
 
             // Update Projects V2 fields:
             // Status → ready (if not already InProgress).
-            // TODO(unblock-b6b.79): Third copy of field update ladder — extract shared helper.
-            if let Some(field_ids) = client.field_ids().await
-                && let Ok(project_info) = client.resolve_project_info().await
-            {
-                // Fetch the cascaded issue (by ref, not bare number) to
-                // get its node_id and current status. For cross-repo
-                // dependents this reads from the foreign repo; for local
-                // the _ref variant delegates to the unchanged path.
-                match client.fetch_issue_ref(&cascaded_ref).await {
-                    Ok(cascaded_issue) => {
-                        if let Ok(item_id) = client
-                            .get_project_item_id(&cascaded_issue.node_id, &project_info.id)
-                            .await
-                        {
-                            // Status → ready (only if not already InProgress).
-                            if cascaded_issue.status != unblock_core::types::Status::InProgress
-                                && let Some(option_id) = field_ids.status.options.get("ready")
-                                && let Err(e) = client
-                                    .update_field(
-                                        &project_info.id,
-                                        &item_id,
-                                        &field_ids.status.field_id,
-                                        &FieldValue::SingleSelectOption(option_id.clone()),
-                                    )
-                                    .await
-                            {
-                                tracing::warn!(
-                                    cascaded_qid = %cascaded_qid,
-                                    error = %e,
-                                    "Failed to set Status=ready on cascaded issue"
-                                );
-                            }
-                        } else {
-                            // Expected for cross-repo dependents that
-                            // were never added as ProjectV2 items on the
-                            // configured board — best-effort per §5.6.
-                            tracing::warn!(
-                                cascaded_qid = %cascaded_qid,
-                                "Failed to get project item ID for cascaded issue"
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(
+            //
+            // Delegated to the shared
+            // [`update_status_field_best_effort`] helper (unblock-29p.24)
+            // — see [`CLOSE_CASCADE_STATUS_LOG`] for the per-rung message
+            // strings. The cascade config silences the outer field-IDs
+            // and project-resolution rungs so per-iteration log spam
+            // from a misconfigured project does not flood the cascade
+            // loop (matching the pre-refactor outer `if let Some(field_ids)
+            // && let Ok(project_info)` chain bit-for-bit). The
+            // `fetch_issue_ref` and `cascaded_issue.status != InProgress`
+            // gate stay at this call site — the helper takes a `node_id`
+            // and a slug, not a "fetch then maybe-update" closure.
+            // Wrapping the helper future in a `tracing::info_span!`
+            // propagates `cascaded_qid` to every log record the helper
+            // emits, preserving the per-iteration structured field on
+            // the pre-refactor warns.
+            //
+            // Fetch the cascaded issue (by ref, not bare number) to get
+            // its node_id and current status. For cross-repo dependents
+            // this reads from the foreign repo; for local the _ref
+            // variant delegates to the unchanged path.
+            match client.fetch_issue_ref(&cascaded_ref).await {
+                Ok(cascaded_issue) => {
+                    if cascaded_issue.status != unblock_core::types::Status::InProgress {
+                        use tracing::Instrument as _;
+                        crate::tools::update_status_field_best_effort(
+                            client.as_ref(),
+                            &cascaded_issue.node_id,
+                            "ready",
+                            &CLOSE_CASCADE_STATUS_LOG,
+                        )
+                        .instrument(tracing::info_span!(
+                            "close_cascade_status_update",
                             cascaded_qid = %cascaded_qid,
-                            error = %e,
-                            "Failed to fetch cascaded issue for field updates"
-                        );
+                        ))
+                        .await;
                     }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        cascaded_qid = %cascaded_qid,
+                        error = %e,
+                        "Failed to fetch cascaded issue for field updates"
+                    );
                 }
             }
         }
@@ -1656,45 +1692,21 @@ impl UnblockServer {
         // fields updated here per spec §5 cross-repo scope table.
         // Normalization above ensures a caller spelling the configured
         // repo as `owner/repo#n` still takes this branch.
-        // TODO(unblock-b6b.79): Fourth copy of field update ladder — extract shared helper.
+        // Delegated to the shared
+        // [`update_status_field_best_effort`] helper (unblock-29p.24) —
+        // see [`DEPENDS_HANDLER_STATUS_LOG`] for the per-rung message
+        // strings. The cross-repo gate stays at this call site because
+        // it short-circuits before any GraphQL round-trip (per spec §5
+        // cross-repo scope table), so the helper never observes
+        // cross-repo source issues here.
         if matches!(source_ref, unblock_core::types::IssueRef::Local(_)) {
-            if let Some(field_ids) = client.field_ids().await {
-                if let Ok(project_info) = client.resolve_project_info().await {
-                    if let Ok(item_id) = client
-                        .get_project_item_id(&source_issue.node_id, &project_info.id)
-                        .await
-                    {
-                        // Status → blocked
-                        if let Some(option_id) = field_ids.status.options.get("blocked")
-                            && let Err(e) = client
-                                .update_field(
-                                    &project_info.id,
-                                    &item_id,
-                                    &field_ids.status.field_id,
-                                    &FieldValue::SingleSelectOption(option_id.clone()),
-                                )
-                                .await
-                        {
-                            tracing::warn!(
-                                error = %e,
-                                "Failed to set Status=blocked on source issue"
-                            );
-                        }
-                    } else {
-                        tracing::warn!(
-                            "Failed to get project item ID for source issue — fields will not be set"
-                        );
-                    }
-                } else {
-                    tracing::warn!(
-                        "Failed to resolve project info — source issue fields will not be set"
-                    );
-                }
-            } else {
-                tracing::debug!(
-                    "No field IDs cached — run setup first to enable project field assignment"
-                );
-            }
+            crate::tools::update_status_field_best_effort(
+                client.as_ref(),
+                &source_issue.node_id,
+                "blocked",
+                &DEPENDS_HANDLER_STATUS_LOG,
+            )
+            .await;
         } else {
             tracing::debug!(
                 source = %source_ref,

@@ -57,6 +57,8 @@ use rmcp::model::ErrorData;
 use tracing::instrument;
 use unblock_core::graph::DependencyGraph;
 use unblock_core::types::{BlockingEdge, Issue, IssueSummary};
+use unblock_github::GitHubApi;
+use unblock_github::projects::FieldValue;
 
 use crate::errors::github_error_to_mcp;
 use crate::server::ServerState;
@@ -144,6 +146,175 @@ pub(crate) async fn refresh_cache_from(
     let (graph, ready_set) =
         build_graph_and_ready_set(&issues, edges, state.github.owner(), state.github.repo());
     state.cache.update(issues, ready_set, graph).await;
+}
+
+/// Site-specific log messages for [`update_status_field_best_effort`].
+///
+/// Each adopting call site declares a `static` config literal naming the
+/// exact log message strings used pre-refactor. Optional fields (`None`)
+/// instruct the helper to silently skip the corresponding rung — preserving
+/// the byte-for-byte observability of sites that intentionally swallowed a
+/// failure mode (e.g. the close-cascade loop, which iterates over many
+/// dependents and would otherwise emit per-iteration spam when the project
+/// is misconfigured).
+///
+/// **Telemetry contract.** The helper emits at most one log record per rung
+/// of the if-let ladder. Severity (`debug!` vs `warn!`) and structured
+/// fields (`error = %e`, `slug`) are fixed by the helper; only the message
+/// text is configurable via this struct. Adopting sites that need
+/// additional structured context (e.g. the close-cascade site's
+/// `cascaded_qid`) wrap the helper call in a `tracing::Span` so the field
+/// merges into every log record automatically.
+pub(crate) struct StatusUpdateLogConfig {
+    /// `tracing::debug!` message when [`GitHubApi::field_ids`] returns
+    /// `None` (setup not run / cache cleared). `None` ⇒ silently skip the
+    /// rung — preserves the close-cascade outer-`&&`-chain behaviour where
+    /// the missing-setup case was swallowed without per-iteration log spam.
+    pub no_field_ids_debug: Option<&'static str>,
+    /// `tracing::warn!` (with `error = %e` field) message when
+    /// [`GitHubApi::resolve_project_info`] returns `Err`. `None` ⇒ silently
+    /// skip — same cascade rationale as `no_field_ids_debug`.
+    pub resolve_project_warn: Option<&'static str>,
+    /// `tracing::warn!` (with `error = %e` field) message when
+    /// [`GitHubApi::get_project_item_id`] returns `Err`. Always emitted —
+    /// no pre-refactor site silently swallowed this rung.
+    pub item_id_warn: &'static str,
+    /// `tracing::warn!` (with `slug` field) message when the configured
+    /// status slug is absent from `field_ids.status.options`. `None` ⇒
+    /// silently skip — preserves the pre-refactor `if let Some(option_id)
+    /// = ... && let Err(e) = ...` shape used by close, depends, and the
+    /// close-cascade Status=ready rung, which all silently no-op when the
+    /// option is missing rather than warn.
+    pub option_missing_warn: Option<&'static str>,
+    /// `tracing::warn!` (with `error = %e` field) message when
+    /// [`GitHubApi::update_field`] itself returns `Err`. Always emitted —
+    /// every pre-refactor site warned on this rung.
+    pub update_field_warn: &'static str,
+}
+
+/// Best-effort Projects V2 Status field update — single chokepoint for the
+/// "set Status to slug X" if-let ladder.
+///
+/// Five call sites in the workspace pre-refactor open-coded the same
+/// sequence: cached `field_ids` ⇒ `resolve_project_info` ⇒
+/// `get_project_item_id` ⇒ `field_ids.status.options.get(slug)` ⇒
+/// `update_field`. The pattern was tracked by `unblock-29p.24` (parent
+/// finding from `unblock-b6b.79`, kept open as the authoritative
+/// consolidation bead). The five sites are:
+///
+/// 1. **`server::close` handler** — Status → `closed` after
+///    [`GitHubApi::close_issue`]. Configured-repo only (caller already
+///    validated). Silent on missing-option (pre-refactor behaviour).
+/// 2. **`server::close` cascade loop** — Status → `ready` per cascaded
+///    dependent (gated outside the helper on
+///    `cascaded_issue.status != Status::InProgress` so the helper
+///    semantics stay simple). Cross-repo dependents naturally degrade via
+///    [`GitHubApi::get_project_item_id`] returning `Err` for issues that
+///    are not project items on the configured board (per spec §5.6
+///    cross-repo scope). Silent on missing field-IDs / project resolution
+///    so the per-iteration loop does not spam logs.
+/// 3. **`server::depends` handler** — Status → `blocked` on the source
+///    issue after
+///    [`GitHubApi::add_blocked_by_refs`]. Gated outside the helper on
+///    `matches!(source_ref, IssueRef::Local(_))` because the configured
+///    project's `ProjectInfo` cannot host cross-repo source items per
+///    spec §5.6.
+/// 4. **`tools::reopen::update_status_field`** — Status → caller-supplied
+///    slug (`"ready"` or `"blocked"`) after
+///    [`GitHubApi::reopen_issue`]. Caller-supplied slug.
+/// 5. **`tools::dep_remove::update_status_to_ready`** — Status → `ready`
+///    when [`GitHubApi::remove_blocked_by_refs`] left the source with
+///    zero open blockers. Hardcoded slug per spec §8.5.
+///
+/// **(`owner`, `repo`) chokepoint propagation (SPEC §3.3 Filter 3 / §14
+/// Invariant 14(a)).** Projects V2 field updates are scoped to the
+/// configured project, not to the issue's home repo. The configured
+/// `(owner, repo)` is enforced upstream by the
+/// [`GitHubApi::resolve_project_info`] / [`GitHubApi::get_project_item_id`]
+/// pair: `resolve_project_info` resolves the configured project (single
+/// project per server instance), and `get_project_item_id(node_id, project_id)`
+/// looks up the issue's project item on that exact project — returning
+/// `Err(IssueNotFound)` for any cross-repo issue that is not a member of
+/// the configured project. The helper therefore inherits the scoping
+/// invariant transparently: cross-repo nodes (e.g. cascaded dependents in
+/// site 2) degrade to a naturally-warned `item_id_warn` rather than
+/// silently writing to the wrong project. Caller-side gating (sites 2 and
+/// 3 above) is preserved because it short-circuits the no-op early and
+/// avoids an unnecessary GraphQL round-trip on the cross-repo path.
+///
+/// **Best-effort posture.** Every rung swallows its `Err`/`None` outcome
+/// and continues — no rung returns a `Result`. This matches the pre-
+/// refactor behaviour at every site: the underlying state-changing
+/// mutation (`close` / `claim` / `depends` / `reopen` / `dep_remove`) has
+/// already succeeded server-side, and the Projects V2 Status field is a
+/// reconciliation surface (`reconcile` tool re-asserts it on demand).
+///
+/// **Observable equivalence.** The helper logs the same number of records
+/// at the same severities as the pre-refactor sites, with the exact
+/// message strings supplied by the [`StatusUpdateLogConfig`] literal at
+/// the call site. Structured fields (`error`, `slug`) are uniform across
+/// adopters; site-specific structured context (e.g. `cascaded_qid`)
+/// merges in via [`tracing::Span`] propagation when the caller wraps the
+/// helper invocation in a span.
+///
+/// **Out of scope.** The `claim` handler's three-write ladder (Status +
+/// Agent + Claimed At) and the `update` handler's four-write ladder with
+/// success-tracking accumulator are NOT consolidated here — both have
+/// shapes meaningfully different from this single-Status best-effort
+/// helper. They remain candidates for a separate multi-field consolidation
+/// if uniformity across mutation surfaces is later desired.
+pub(crate) async fn update_status_field_best_effort(
+    client: &dyn GitHubApi,
+    issue_node_id: &str,
+    target_status_slug: &str,
+    log: &StatusUpdateLogConfig,
+) {
+    let Some(field_ids) = client.field_ids().await else {
+        if let Some(msg) = log.no_field_ids_debug {
+            tracing::debug!(slug = target_status_slug, "{msg}");
+        }
+        return;
+    };
+
+    let project_info = match client.resolve_project_info().await {
+        Ok(info) => info,
+        Err(err) => {
+            if let Some(msg) = log.resolve_project_warn {
+                tracing::warn!(error = %err, slug = target_status_slug, "{msg}");
+            }
+            return;
+        }
+    };
+
+    let item_id = match client
+        .get_project_item_id(issue_node_id, &project_info.id)
+        .await
+    {
+        Ok(id) => id,
+        Err(err) => {
+            tracing::warn!(error = %err, slug = target_status_slug, "{}", log.item_id_warn);
+            return;
+        }
+    };
+
+    let Some(option_id) = field_ids.status.options.get(target_status_slug) else {
+        if let Some(msg) = log.option_missing_warn {
+            tracing::warn!(slug = target_status_slug, "{msg}");
+        }
+        return;
+    };
+
+    if let Err(err) = client
+        .update_field(
+            &project_info.id,
+            &item_id,
+            &field_ids.status.field_id,
+            &FieldValue::SingleSelectOption(option_id.clone()),
+        )
+        .await
+    {
+        tracing::warn!(error = %err, slug = target_status_slug, "{}", log.update_field_warn);
+    }
 }
 
 /// Executes a read-only MCP tool operation.
