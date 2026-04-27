@@ -6687,10 +6687,14 @@ async fn close_surfaces_error_when_phase0_prime_fails() {
     assert_eq!(err.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
 
     // AC3: error message wording MUST be distinct from the R3 path
-    // (`Status reconciliation`). The pre-mutation branch at
-    // `server.rs:1132-1140` references `prime the dependency graph`
-    // because the mutation was NOT attempted — this is the semantic
-    // the SPEC §8.2 ordering demands.
+    // (`Status reconciliation`). The pre-mutation branch in the close
+    // handler references `prime the dependency graph` because the
+    // mutation was NOT attempted — this is the semantic the SPEC §8.2
+    // ordering demands. After bead unblock-29p.69, the wording is
+    // sourced from `Error::PreMutationPrimeFailed`'s `Display` impl
+    // (the symmetric pre-mutation counterpart to
+    // `PostMutationRebuildFailed`); the assertions below pin the
+    // contract bit-for-bit so a future Display drift trips this guard.
     assert!(
         err.message.contains("prime the dependency graph"),
         "Phase 0 error message must reference `prime the dependency graph` (pre-mutation path, \
@@ -6709,6 +6713,20 @@ async fn close_surfaces_error_when_phase0_prime_fails() {
          hint — NOT `show` like the R3 path): {}",
         err.message,
     );
+    // unblock-29p.69 AC5: pin the new variant's Display contract by
+    // asserting on the `QualifiedId` rendering. `PreMutationPrimeFailed`
+    // is constructed with the issue's `QualifiedId` so same-numbered
+    // local vs. cross-repo issues render unambiguously. The mock's
+    // configured repo is `acme/widgets` (see common::new_mock); issue
+    // id 8 → `acme/widgets#8`. If a future refactor strips the qid
+    // rendering from `Display`, this assertion fails loudly rather than
+    // silently regressing the disambiguation contract.
+    assert!(
+        err.message.contains("acme/widgets#8"),
+        "Phase 0 error message must render the QualifiedId in `owner/repo#n` form (sourced from \
+         `PreMutationPrimeFailed`'s `Display` impl after bead unblock-29p.69): {}",
+        err.message,
+    );
     // Strict negative: the R3 post-mutation wording MUST NOT appear
     // here — if it does, the two surfaces have collapsed, which is
     // the regression this test guards against (AC6: distinction
@@ -6717,6 +6735,18 @@ async fn close_surfaces_error_when_phase0_prime_fails() {
         !err.message.contains("Status reconciliation"),
         "Phase 0 prime-failure message must NOT use the R3 `Status reconciliation` wording — \
          collapsing the two 503 surfaces breaks the SPEC §8.2 pre-vs-post-mutation contract: {}",
+        err.message,
+    );
+    // unblock-29p.69: the post-mutation `re-run `show`` recovery hint
+    // MUST NOT appear in the pre-mutation Display either — that hint
+    // is `PostMutationRebuildFailed`'s contract and only makes sense
+    // when a mutation has landed. Collapsing the two would silently
+    // regress AC6 of unblock-29p.69 / SPEC §8.2.
+    assert!(
+        !err.message.contains("re-run `show`"),
+        "Phase 0 prime-failure message must NOT use the post-mutation `re-run `show`` recovery \
+         hint — that wording is `PostMutationRebuildFailed`'s contract (R3 path), \
+         and applies only after a mutation has landed: {}",
         err.message,
     );
     assert!(
