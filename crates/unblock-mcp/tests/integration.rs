@@ -1873,6 +1873,96 @@ async fn search_rejects_zero_limit_without_fetching() {
     );
 }
 
+/// Closes the QA RISK from unblock-29p.7 (tracked under unblock-29p.29):
+/// the upstream-error propagation pathway through `handle_search` had no
+/// end-to-end coverage — only transitive transport-layer (`wiremock`) and
+/// tool-layer unit tests. This test seeds the mock with a representative
+/// `RateLimited` (HTTP 429) response, drives `handle_search` with a valid
+/// query, and asserts:
+///
+/// 1. The handler returns `Err(ErrorData)` — the upstream error is not
+///    swallowed or fabricated into a degraded `stale = true` envelope
+///    (`SearchResult` cannot encode upstream failure; `stale` is always
+///    `false` on a successful response — see `tools/search.rs` module
+///    docs).
+/// 2. The error code is `INTERNAL_ERROR` per the `github_error_to_mcp`
+///    mapping table (`errors.rs:99`): 429 → `INTERNAL_ERROR`. This locks
+///    in the contract that transient upstream failures are NOT silently
+///    re-coded as `INVALID_PARAMS`.
+/// 3. The error message preserves the underlying `RateLimited::Display`
+///    so callers can diagnose the upstream cause without parsing the
+///    JSON-RPC code in isolation.
+/// 4. Validation has already passed and the upstream WAS hit exactly once
+///    (`mock.calls().search_issues() == 1`) — failure mapping happens
+///    AFTER the trait call, not before it.
+/// 5. The cache-bypass invariant holds even on the error path
+///    (`fetch_graph_data` count remains zero).
+#[tokio::test]
+async fn search_propagates_upstream_rate_limit_error_through_handle_search() {
+    use chrono::Utc;
+    use rmcp::model::ErrorCode;
+    use unblock_github::errors::RateLimitedSnafu;
+    use unblock_mcp::tools::search::{SearchParams, handle_search};
+
+    let mock = new_mock();
+
+    // Seed a `RateLimited` upstream error — the bead dispatch comment
+    // names this variant explicitly. `RateLimited::status_code() == 429`,
+    // and `github_error_to_mcp` maps the catch-all (non-{400,403,404,409,
+    // 412,422}) bucket to `INTERNAL_ERROR` — so this variant exercises
+    // the 429 → `INTERNAL_ERROR` lane of the mapping table.
+    let reset_at = Utc::now();
+    mock.push_search_issues(Err(RateLimitedSnafu { reset_at }.build()));
+
+    let state = state_with_mock(Arc::clone(&mock));
+
+    let err = handle_search(
+        &state,
+        SearchParams {
+            query: "ship the new thing".to_owned(),
+            limit: None,
+        },
+    )
+    .await
+    .expect_err("upstream RateLimited must propagate as ErrorData, not be swallowed");
+
+    // The 429 → `INTERNAL_ERROR` arm of `github_error_to_mcp` (errors.rs
+    // line 99) is the contract: rate-limit / 5xx / network-class errors
+    // are surfaced as `INTERNAL_ERROR`, distinguishing them from caller
+    // misuse (`INVALID_PARAMS`).
+    assert_eq!(
+        err.code,
+        ErrorCode::INTERNAL_ERROR,
+        "RateLimited must map to INTERNAL_ERROR (429 → -32603), not INVALID_PARAMS",
+    );
+    // The underlying `Display` impl is `"GitHub rate limit exceeded —
+    // resets at {reset_at}"`. The mapping must preserve that message
+    // verbatim (the `github_error_to_mcp` helper uses `err.to_string()`)
+    // so the agent can diagnose the upstream cause.
+    assert!(
+        err.message.contains("rate limit"),
+        "error message must surface the underlying RateLimited Display: {}",
+        err.message,
+    );
+
+    // The upstream WAS hit once — validation passed and the trait call
+    // executed before the error mapping. This is the spec §7.6 invariant
+    // we are guarding against regression: `handle_search` must not
+    // short-circuit on ambient state.
+    assert_eq!(
+        mock.calls().search_issues(),
+        1,
+        "search_issues must be invoked exactly once before mapping the error",
+    );
+    // Cache-bypass invariant holds on the error path too — `search`
+    // never reads or writes the cache (spec §7.6 / §9.1 invariant 10).
+    assert_eq!(
+        mock.calls().fetch_graph_data(),
+        0,
+        "search must not touch fetch_graph_data even when upstream errors",
+    );
+}
+
 // ── Stats tool: integration tests ─────────────────────────────────
 
 /// Build a customisable stats fixture `Issue` — one helper per field
@@ -2204,6 +2294,173 @@ async fn stats_milestone_filter_scopes_aggregation_but_not_cycles() {
         mock.calls().fetch_graph_data(),
         1,
         "milestone filter must be a post-filter, not a refetch",
+    );
+}
+
+/// Closes the QA RISK #1 from unblock-29p.8 (tracked under
+/// unblock-29p.32): the cache-empty fallback retry path in
+/// `tools/stats.rs:383-408` had no end-to-end coverage. The constituent
+/// steps (`fetch_graph_data`, graph build, cache update, aggregation)
+/// each have unit coverage, but no test exercises the full composed
+/// defensive path: initial rebuild fails → cache stays empty → fallback
+/// re-issues `fetch_graph_data` → graph rebuilt locally → cache warmed
+/// for follow-up reads → `StatsResult` returned to the caller.
+///
+/// Why this path exists: `StatsResult` has no `stale` field (R6 spec
+/// decision, 2026-04-15 09:28 — see bead description). When the lazy
+/// rebuild leaves the cache empty, the only way to honour the spec is to
+/// surface the underlying error. The fallback re-issues the fetch
+/// directly so a *transient* upstream failure on the rebuild path does
+/// not turn into an empty-envelope response when the network has already
+/// recovered by the time the handler dispatches the retry.
+///
+/// A regression in this path would silently drop the retry semantics —
+/// callers would receive the rebuild's stale `MockNotMocked`/network
+/// error even when the underlying data is available on the next attempt.
+///
+/// The test:
+/// 1. Configures the mock to fail the first `fetch_graph_data` (driving
+///    `rebuild_cache` into its `Err` arm — `tools/mod.rs:179-185` —
+///    which leaves the cache invalidated/empty).
+/// 2. Configures the mock to succeed on the second `fetch_graph_data`
+///    (the fallback retry inside `handle_stats`).
+/// 3. Calls `handle_stats` against a cold cache.
+/// 4. Asserts the call returns a successful, fully-populated
+///    `StatsResult` (not an error) — the retry semantics held.
+/// 5. Asserts exactly two `fetch_graph_data` calls (rebuild + fallback).
+/// 6. Asserts the cache is now warm — a subsequent `handle_stats` call
+///    does NOT trigger a third fetch (spec §7.4 cache-hit invariant).
+#[tokio::test]
+async fn stats_cache_empty_fallback_retries_fetch_graph_data() {
+    use unblock_github::errors::GitHubApiSnafu;
+    use unblock_mcp::tools::stats::{StatsParams, handle_stats};
+
+    // Build a small but representative fixture so the post-retry
+    // `StatsResult` has non-zero counts in every bucket the aggregator
+    // distinguishes — this catches regressions where the fallback path
+    // forgets to thread an input through one of the helpers (e.g.
+    // `compute_ready_set`, `detect_all_cycles`, `aggregate_stats`).
+    //
+    // Layout:
+    //   #1 — Ready / P1 / no blocker → ready, 1 P1.
+    //   #2 — InProgress / P0 / agent=alice → 1 in_progress, 1 P0,
+    //          agent.alice.in_progress = 1.
+    //   #3 — Blocked / P2 / no graph blocker → blocked_count contributor
+    //          via `Status::Blocked` (R3 union).
+    let issues = vec![
+        stats_fixture_issue(1, Status::Ready, Priority::P1, IssueState::Open, None, None),
+        stats_fixture_issue(
+            2,
+            Status::InProgress,
+            Priority::P0,
+            IssueState::Open,
+            Some("alice"),
+            None,
+        ),
+        stats_fixture_issue(
+            3,
+            Status::Blocked,
+            Priority::P2,
+            IssueState::Open,
+            None,
+            None,
+        ),
+    ];
+    let edges: Vec<BlockingEdge> = vec![];
+
+    let mock = new_mock();
+
+    // Stub #1: rebuild_cache's fetch_graph_data fails. `rebuild_cache`
+    // (tools/mod.rs:162-186) has already invalidated the cache; the
+    // failure leaves it empty. This is the precondition for the
+    // fallback retry path.
+    mock.push_fetch_graph_data(Err(GitHubApiSnafu {
+        status: 503_u16,
+        message: "transient upstream — first fetch fails".to_owned(),
+    }
+    .build()));
+    // Stub #2: the fallback retry inside `handle_stats` (stats.rs:384-388)
+    // succeeds. The handler must aggregate from the freshly-fetched
+    // vectors AND warm the cache so a follow-up call hits the cache-hit
+    // path — both behaviours are asserted below.
+    mock.push_fetch_graph_data(Ok((issues.clone(), edges.clone())));
+
+    let state = state_with_mock(Arc::clone(&mock));
+    assert!(
+        !state.cache.is_fresh().await,
+        "precondition: cache must start cold so the rebuild path is exercised",
+    );
+
+    // ── Drive the fallback retry path. ──
+    let result = handle_stats(&state, StatsParams { milestone: None })
+        .await
+        .expect("fallback retry must rescue a transient initial-rebuild failure");
+
+    // The retry semantics held: caller observes a fully-populated
+    // `StatsResult`, not an error. Per-bucket counts validate that the
+    // freshly-fetched vectors traversed every aggregation pathway
+    // (`aggregate_stats` was called, the graph was built locally, and
+    // `compute_ready_set` ran against the configured coordinates).
+    assert_eq!(result.total, 3, "all three fixture issues counted");
+    assert_eq!(result.by_status.get("ready"), Some(&1_usize));
+    assert_eq!(result.by_status.get("in_progress"), Some(&1_usize));
+    assert_eq!(result.by_status.get("blocked"), Some(&1_usize));
+    assert_eq!(result.by_priority.get("P0"), Some(&1_usize));
+    assert_eq!(result.by_priority.get("P1"), Some(&1_usize));
+    assert_eq!(result.by_priority.get("P2"), Some(&1_usize));
+    // `Status::Blocked` contributes via the R3 union even with no graph
+    // edges — `aggregate_stats` was reached.
+    assert_eq!(result.blocked_count, 1);
+    // `compute_ready_set` ran on the freshly-built graph. Per spec §3.3:
+    //   - #1 (Ready / no blocker) → ready.
+    //   - #2 (InProgress) → filtered by Filter 2.
+    //   - #3 (Status::Blocked / no graph blocker) → ready (the spec
+    //     intentionally does NOT filter `Status::Blocked` issues whose
+    //     blockers have all closed; see graph.rs:182-191 and the
+    //     existing `stats_aggregates_every_bucket_and_warms_cache`
+    //     fixture for the same assertion).
+    assert_eq!(
+        result.ready_count, 2,
+        "ready set must hold #1 (Ready/no blocker) and #3 (Status::Blocked/no graph blocker)",
+    );
+    assert_eq!(result.cycle_count, 0, "fixture has no cycles");
+    assert_eq!(result.agents.len(), 1, "alice is the only assigned agent");
+    assert_eq!(result.agents[0].name, "alice");
+    assert_eq!(result.agents[0].in_progress, 1);
+
+    // Exactly two `fetch_graph_data` calls — the failed rebuild attempt
+    // plus the fallback retry. A regression where the retry was skipped
+    // (or where the rebuild somehow consumed two stubs) would trip here.
+    assert_eq!(
+        mock.calls().fetch_graph_data(),
+        2,
+        "stats must issue: 1× rebuild_cache fetch (Err) + 1× fallback retry (Ok)",
+    );
+
+    // Cache is now warm — the fallback explicitly calls
+    // `state.cache.update(...)` (stats.rs:406) so the retry's success is
+    // not lost. A follow-up read must hit the cache-hit path with zero
+    // additional fetches.
+    assert!(
+        state.cache.is_fresh().await,
+        "fallback success path must populate the cache so subsequent reads are warm",
+    );
+    let warm_issues = state
+        .cache
+        .get_issues()
+        .await
+        .expect("cache must hold the freshly-fetched issue vector");
+    assert_eq!(warm_issues.len(), 3, "cache holds the post-retry issue set",);
+
+    // Second call: cache hit — must not trigger another fetch.
+    let result2 = handle_stats(&state, StatsParams { milestone: None })
+        .await
+        .expect("warm-cache stats call must succeed");
+    assert_eq!(result2.total, 3);
+    assert_eq!(
+        mock.calls().fetch_graph_data(),
+        2,
+        "warm-cache read must NOT trigger any additional fetch (spec §7.4)",
     );
 }
 
