@@ -420,6 +420,18 @@ impl DependencyGraph {
     /// Returns the top-level children of `root` (depth 1), each of which may
     /// contain nested children at deeper levels. A `visited` set prevents
     /// revisiting nodes within the same pass, making the traversal cycle-safe.
+    ///
+    /// **Complexity.** O(n) in the number of nodes visited (where n is the
+    /// count of distinct nodes reachable from `root` within `max_depth`).
+    /// The bottom-up tree assembly consults a precomputed `parent → children`
+    /// map keyed by the parent's `NodeIndex`, so each node is touched a
+    /// constant number of times — once during BFS, once when registered as a
+    /// child of its parent, and once during forest construction. The
+    /// `parent_children` map preserves the BFS discovery order of children
+    /// because entries are appended in the same order they are pushed onto
+    /// `flat`. (Pre-`unblock-29p.16` this assembly was O(n²) in `flat.len()`
+    /// — every node re-scanned the entire flat vector to locate its
+    /// children.)
     fn bfs_tree(&self, root: &QualifiedId, dir: Direction, max_depth: usize) -> Vec<TreeNode> {
         let Some(&root_idx) = self.node_map.get(root) else {
             return Vec::new();
@@ -451,11 +463,34 @@ impl DependencyGraph {
             }
         }
 
+        // Build a parent → children index ONCE in O(n) before the bottom-up
+        // pass. Children inherit the BFS discovery order because `flat`
+        // captures BFS order and we append into per-parent vectors in that
+        // order (no later sort touches `parent_children`). This replaces
+        // the per-node `flat.iter().filter(parent == node_idx)` re-scan
+        // that made the bottom-up pass O(n²) in `flat.len()`.
+        // (`unblock-29p.16`.)
+        //
+        // The `root_idx` bucket holds the top-level (depth-1) children of
+        // the traversal root; it falls out of the same map so the
+        // top-level assembly below also avoids the secondary O(n) filter.
+        let mut parent_children: HashMap<NodeIndex, Vec<NodeIndex>> =
+            HashMap::with_capacity(flat.len());
+        for &(node_idx, _, parent_idx) in &flat {
+            parent_children
+                .entry(parent_idx)
+                .or_default()
+                .push(node_idx);
+        }
+
         // Build TreeNode instances bottom-up by processing deepest nodes first.
         // Map from node_idx -> constructed TreeNode.
         let mut node_trees: HashMap<NodeIndex, TreeNode> = HashMap::new();
 
         // Sort by depth descending so children are built before parents.
+        // The `parent_children` map above was built BEFORE this sort, so it
+        // still reflects BFS discovery order (sorting `flat` does not
+        // touch the map).
         flat.sort_by(|a, b| b.1.cmp(&a.1));
 
         for &(node_idx, depth, _parent_idx) in &flat {
@@ -471,12 +506,17 @@ impl DependencyGraph {
                 .copied()
                 .unwrap_or(IssueState::Open);
 
-            // Collect children that were already built (deeper nodes).
-            let children: Vec<TreeNode> = flat
-                .iter()
-                .filter(|&&(_, _, parent)| parent == node_idx)
-                .filter_map(|&(child_idx, _, _)| node_trees.remove(&child_idx))
-                .collect();
+            // Collect children that were already built (deeper nodes), in
+            // BFS discovery order. O(k) where k is the immediate child
+            // count of `node_idx`.
+            let children: Vec<TreeNode> = parent_children
+                .get(&node_idx)
+                .map(|kids| {
+                    kids.iter()
+                        .filter_map(|child_idx| node_trees.remove(child_idx))
+                        .collect()
+                })
+                .unwrap_or_default();
 
             node_trees.insert(
                 node_idx,
@@ -490,11 +530,16 @@ impl DependencyGraph {
             );
         }
 
-        // Top-level nodes are those whose parent is root_idx.
-        flat.iter()
-            .filter(|&&(_, _, parent)| parent == root_idx)
-            .filter_map(|&(node_idx, _, _)| node_trees.remove(&node_idx))
-            .collect()
+        // Top-level nodes are those whose parent is `root_idx`. Look them
+        // up via the same `parent_children` index in BFS discovery order.
+        parent_children
+            .get(&root_idx)
+            .map(|kids| {
+                kids.iter()
+                    .filter_map(|node_idx| node_trees.remove(node_idx))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Returns a reference to the internal node map.
