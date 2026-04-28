@@ -3,8 +3,8 @@
 > Version: 0.1-draft  
 > Status: Working Draft  
 > Companions: [MANIFESTO.md](./MANIFESTO.md) · [PRD.md](./PRD.md)  
-> Plans: [01-mcp-foundation](./plans/01-plan-mcp-foundation.md) · [02-mcp-complete](./plans/02-plan-mcp-complete.md) · [03-mcp-production](./plans/03-plan-mcp-production.md) · 04-plugin (planned) · 05-remote-server (planned) · 06-llm-agent (planned) · 07-harness (planned)  
-> Specs: [01-mcp-foundation](./specs/01-spec-mcp-foundation.md) · 02-mcp-complete (planned) · 03-mcp-production (planned) · 04-plugin-pipeline (planned) · 05-remote-server (planned) · 06-llm-agent (planned)
+> Plans: [01-mcp-foundation](./plans/01-plan-mcp-foundation.md) · [02-mcp-complete](./plans/02-plan-mcp-complete.md) · [03-code-indexer](./plans/03-plan-code-indexer.md) · [04-mcp-production](./plans/04-plan-mcp-production.md) · 05-plugin (planned) · 06-remote-server (planned) · 07-llm-agent (planned) · 08-harness (planned)  
+> Specs: [01-mcp-foundation](./specs/01-spec-mcp-foundation.md) · 02-mcp-complete (planned) · 03-code-indexer (planned) · 04-mcp-production (planned) · 05-plugin-pipeline (planned) · 06-remote-server (planned) · 07-llm-agent (planned)
 
 ---
 
@@ -314,7 +314,7 @@ After `resolve_project()`, the server validates all 7 required Projects V2 field
 
 Single-process architecture. Multiple agents on separate stdio connections share the in-memory cache. Last writer wins — no optimistic locking. Acceptable because GitHub is the source of truth and write operations always invalidate + rebuild.
 
-### 4.7 Materialised Fast Path (Phase 03, planned)
+### 4.7 Materialised Fast Path (Phase 04, planned)
 
 On cold start, the server reads Status field values directly from Projects V2 instead of waiting for a full graph rebuild. These field values are written by the MCP server on every mutation and by `reconcile`, so they reflect the ready set. The server serves this approximate result immediately and rebuilds the full graph asynchronously in the background.
 
@@ -322,7 +322,7 @@ Once the graph rebuild completes (typically 1-3 seconds), subsequent `ready` cal
 
 The fast path is read-only — it never writes to GitHub. No new dependencies. No persistent storage. The existing Status field is both the human-visible board column and the cold start cache.
 
-→ Detailed algorithm: [01-spec-graph-engine.md §10](./specs/01-spec-graph-engine.md#10-fast-path-algorithm-phase-03)
+→ Detailed algorithm: [01-spec-graph-engine.md §10](./specs/01-spec-graph-engine.md#10-fast-path-algorithm-phase-04)
 
 ---
 
@@ -402,9 +402,13 @@ View and field management uses REST API (`2026-03-10`), not GraphQL. The `X-GitH
 
 ## 6. MCP Tools
 
-20 tools total. Each operates on the configured repo. All tools follow the same execution pattern: validate input → execute business logic → if write: invalidate cache + rebuild + update Status fields → return result.
+The `unblock-mcp` binary serves **two tool sets** from the same process:
 
-→ Detailed tool specifications: [03-spec-mcp-tools.md](./specs/03-spec-mcp-tools.md)
+1. **Issue-graph tool set** — 20 tools (Phases 01–02) backed by `unblock-tools` (extracted from `unblock-mcp` in Phase 06). Operates on the configured repo. All issue-graph tools follow the same execution pattern: validate input → execute business logic → if write: invalidate cache + rebuild + update Status fields → return result. Catalogued in §6.2.
+2. **Code-indexer tool set** — 9 tools (Phase 03) backed by `unblock-indexer` / `unblock-indexer-core`. Operates on the local filesystem (the working repo). Backed by SQLite + FTS5 with tree-sitter WASM grammars fetched at runtime. Catalogued in §6.5 (added in Phase 03).
+
+→ Detailed tool specifications (issue-graph): [03-spec-mcp-tools.md](./specs/03-spec-mcp-tools.md)
+→ Detailed tool specifications (code-indexer): `docs/specs/03-spec-code-indexer.md` (planned, after research validation)
 
 ### 6.1 Tool Execution Pattern
 
@@ -465,7 +469,33 @@ pub struct ServerState {
 }
 ```
 
-Shared across all tool invocations. `Arc<dyn GitHubApi>` enables dependency injection — tests use `MockGitHubClient`, production uses `GitHubClient`. Phase 02 adds `agent_kind: OnceLock<AgentKind>` and `agent_client: OnceLock<AgentClient>`. In Phase 05, `ServerState` moves to `unblock-tools` crate and is reused by both stdio and HTTP binaries.
+Shared across all tool invocations. `Arc<dyn GitHubApi>` enables dependency injection — tests use `MockGitHubClient`, production uses `GitHubClient`. Phase 02 adds `agent_kind: OnceLock<AgentKind>` and `agent_client: OnceLock<AgentClient>`. In Phase 06, `ServerState` moves to `unblock-tools` crate and is reused by both stdio and HTTP binaries. Phase 03 adds `indexer: Arc<IndexerHandle>` for the code-indexer tool set; the handle is independent of `GitHubApi` and operates on the local filesystem.
+
+### 6.5 Code-Indexer Tool Set (Phase 03)
+
+Authored by Phase 03. Lives in two crates:
+
+- `unblock-indexer-core` — pure Rust. Domain types (symbol kinds, span, query input/output shapes), AST traversal logic over `tree_sitter::Tree`, schema constants. Mirrors the `unblock-core` boundary — zero IO, zero async.
+- `unblock-indexer` — impure shell. SQLite (sqlx + FTS5, WAL), tree-sitter WASM runtime, grammar fetcher (reuses the Phase 02 retry / circuit-breaker / OpenTelemetry layer), file walker (`ignore` crate), file watcher (`notify-debouncer-full`), bootstrap parallelism (`rayon`).
+
+| Tool | Type | Purpose |
+|---|---|---|
+| `find_symbol` | Read | Locate symbols by name (optional kind / language / fuzzy / limit) |
+| `list_symbols` | Read | All symbols in a file or path |
+| `outline` | Read | Hierarchical tree of file/module structure |
+| `get_symbol` | Read | Full details for an opaque `symbol_id` (body read from filesystem on demand) |
+| `search_text` | Read | FTS5 matches across names, signatures, comments |
+| `find_references` | Read | Best-effort syntactic references — **explicitly marked HEURISTIC** in the tool description |
+| `list_languages` | Read | Loaded grammars for the current repo |
+| `index_status` | Read | Freshness, last update, totals |
+| `reindex` | Write (local) | Force re-parse for whole repo or a path |
+
+Storage layout: `~/.cache/unblock/repos/<repo-hash>/index.db` (SQLite + FTS5 + WAL) and `~/.cache/unblock/grammars/*.wasm` (integrity-verified WASM grammars fetched from versioned GitHub Releases). No body text stored — span-only.
+
+Initial language coverage (Top-10): Rust, TypeScript, JavaScript, Python, Go, Java, C, C++, Ruby, PHP. PR-driven expansion via the CI grammar matrix. `LanguageNotSupported` errors include a `pr_pointer` to the contribution template.
+
+→ Detailed plan: [03-plan-code-indexer.md](./plans/03-plan-code-indexer.md)
+→ Detailed spec (planned, post-research): `docs/specs/03-spec-code-indexer.md`
 
 ---
 

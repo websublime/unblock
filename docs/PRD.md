@@ -3,8 +3,8 @@
 > Version: 0.1-draft  
 > Status: Working Draft  
 > Companions: [MANIFESTO.md](./MANIFESTO.md) · [SPEC.md](./SPEC.md)  
-> Plans: [01-mcp-foundation](./plans/01-plan-mcp-foundation.md) · [02-mcp-complete](./plans/02-plan-mcp-complete.md) · [03-mcp-production](./plans/03-plan-mcp-production.md) · 04-plugin (planned) · 05-remote-server (planned) · 06-llm-agent (planned) · 07-harness (planned)  
-> Specs: [01-mcp-foundation](./specs/01-spec-mcp-foundation.md) · 02-mcp-complete (planned) · 03-mcp-production (planned) · 04-plugin-pipeline (planned) · 05-remote-server (planned) · 06-llm-agent (planned)
+> Plans: [01-mcp-foundation](./plans/01-plan-mcp-foundation.md) · [02-mcp-complete](./plans/02-plan-mcp-complete.md) · [03-code-indexer](./plans/03-plan-code-indexer.md) · [04-mcp-production](./plans/04-plan-mcp-production.md) · 05-plugin (planned) · 06-remote-server (planned) · 07-llm-agent (planned) · 08-harness (planned)  
+> Specs: [01-mcp-foundation](./specs/01-spec-mcp-foundation.md) · 02-mcp-complete (planned) · 03-code-indexer (planned) · 04-mcp-production (planned) · 05-plugin-pipeline (planned) · 06-remote-server (planned) · 07-llm-agent (planned)
 
 ---
 
@@ -194,7 +194,7 @@ unblock is implemented as a Rust workspace that grows across phases. Each crate 
 
 ### 6.1 Workspace evolution
 
-**Phases 01–03** — 3 crates (local MCP):
+**Phases 01–02** — 3 crates (local MCP):
 
 ```
 crates/
@@ -203,23 +203,40 @@ crates/
   unblock-mcp/               ← bin: MCP server binary (stdio transport)
 ```
 
-**Phase 05** — 5 crates (tools extracted, remote server added):
+**Phase 03** — 5 crates (code indexer added; same MCP binary serves both tool sets):
 
 ```
 crates/
   unblock-core/              ← zero changes
   unblock-github/            ← zero changes
+  unblock-indexer-core/      ← NEW lib: pure indexer types, AST traversal, schema constants
+  unblock-indexer/           ← NEW lib: sqlx + FTS5, tree-sitter WASM runtime, walker, watcher
+  unblock-mcp/               ← adds indexer tool handlers (9 tools) alongside issue-graph tools
+```
+
+**Phases 04–05** — 5 crates (production distribution + plugin; no new crates).
+
+**Phase 06** — 7 crates (tools extracted, remote server added):
+
+```
+crates/
+  unblock-core/              ← zero changes
+  unblock-github/            ← zero changes
+  unblock-indexer-core/      ← zero changes
+  unblock-indexer/           ← zero changes
   unblock-tools/             ← NEW lib: shared tool implementations (extracted from unblock-mcp)
   unblock-mcp/               ← becomes thin stdio bootstrap (~50 lines)
   unblock-mcp-remote/        ← NEW bin: Streamable HTTP + webhooks + SharedGraphCache (axum)
 ```
 
-**Phase 06** — 6 crates (LLM agent added to the same server):
+**Phase 07** — 8 crates (LLM agent added to the same server):
 
 ```
 crates/
   unblock-core/              ← zero changes
   unblock-github/            ← zero changes
+  unblock-indexer-core/      ← zero changes
+  unblock-indexer/           ← zero changes
   unblock-tools/             ← zero changes
   unblock-mcp/               ← zero changes
   unblock-mcp-remote/        ← zero changes — agent is a client, not a modification
@@ -230,10 +247,12 @@ crates/
 
 ```
 unblock-mcp (bin, stdio)
-  └── unblock-tools (lib)
-        ├── unblock-github (lib)
-        │     └── unblock-core (lib)
-        └── unblock-core (lib)
+  ├── unblock-tools (lib)        ← issue-graph tool set (Phase 06+)
+  │     ├── unblock-github (lib)
+  │     │     └── unblock-core (lib)
+  │     └── unblock-core (lib)
+  └── unblock-indexer (lib)      ← code-indexer tool set (Phase 03+)
+        └── unblock-indexer-core (lib)
 
 unblock-mcp-remote (bin, Streamable HTTP)
   ├── unblock-tools (lib)        ← same tools, zero duplication
@@ -259,6 +278,11 @@ unblock-agent (bin, co-deployed with remote)
 | `schemars` | MCP tool schema generation |
 | `axum` | HTTP server for remote MCP and agent webhooks |
 | `rig-core` | Rust-native LLM agent framework (OpenAI-compatible) |
+| `tree-sitter` | Multi-language parser core for the code indexer |
+| `sqlx` | SQLite + FTS5 storage for the code indexer (with `sqlite` feature) |
+| `ignore` | gitignore-aware filesystem walker (same as ripgrep) |
+| `notify-debouncer-full` | File watcher driving incremental indexer updates |
+| `rayon` | CPU-bound parallelism for indexer bootstrap |
 
 ### 6.4 Error handling convention
 
@@ -270,6 +294,8 @@ Every crate uses `snafu` exclusively. No `thiserror`, no `anyhow`, no `Box<dyn E
 |---|---|---|
 | `unblock-core` | MIT | Open-source foundation |
 | `unblock-github` | MIT | Open-source foundation |
+| `unblock-indexer-core` | MIT | Open-source foundation |
+| `unblock-indexer` | MIT | Open-source — code indexer is part of the product |
 | `unblock-tools` | MIT | Open-source — tools are the product |
 | `unblock-mcp` | MIT | Open-source — local binary for everyone |
 | `unblock-mcp-remote` | BSL 1.1 → MIT (4 years) | Pro/Enterprise — server infrastructure |
@@ -285,15 +311,11 @@ Each phase corresponds to one plan document. Phases are sequential — a phase s
 
 ### Phase 01 — MCP Foundation (v0.1.0) → [01-plan-mcp-foundation.md](./plans/01-plan-mcp-foundation.md)
 
-**Status:** In Progress (11 of 17 tools implemented, 6 remaining)
+**Status:** Complete (per bd — bd is the source of truth for execution status).
 
 The minimum viable loop. An agent can find work, claim it, create and edit issues, complete work, and see the cascade. Local binary, stdio transport.
 
 **Scope:** 17 MCP tools — `init`, `setup`, `ready`, `claim`, `create`, `update`, `close`, `reopen`, `show`, `list`, `search`, `stats`, `prime`, `comment`, `depends`, `dep_remove`, `dep_cycles`. Cargo workspace (3 crates), CI pipeline, graph engine (petgraph), TTL cache, GitHub client (GraphQL + REST), MCP server (rmcp, stdio), `GitHubApi` trait abstraction with `MockGitHubClient`, integration tests.
-
-**Implemented:** `init`, `setup`, `ready`, `claim`, `create`, `update`, `close`, `show`, `prime`, `comment`, `depends`. Plus `reconcile` (Phase 02 early) and agent detection (Phase 02 early).
-
-**Remaining:** `reopen`, `list`, `search`, `stats`, `dep_remove`, `dep_cycles`. See [Plan 01 Epic 06](./plans/01-plan-mcp-foundation.md#epic-06--foundation-completion).
 
 **Outcome:** A working local MCP server that any MCP client can connect to via stdio. The full agent workflow loop: `prime` → `ready` → `claim` → work → `close` → cascade.
 
@@ -316,7 +338,28 @@ Production hardening and remaining MCP capabilities. Still local binary only.
 
 ---
 
-### Phase 03 — MCP Production (v1.0.0) → [03-plan-mcp-production.md](./plans/03-plan-mcp-production.md)
+### Phase 03 — Code Indexer MCP (v1.0.0) → [03-plan-code-indexer.md](./plans/03-plan-code-indexer.md)
+
+Token-saving for AI agents. Instead of agents wasting tokens on Glob/Grep/Read to find symbols, definitions, and code structure, an embedded multi-language code indexer answers "where is X / what does Y export / show me Z" via fast structured MCP tool calls served from the same `unblock-mcp` binary as the issue-graph tool set.
+
+Slots after Phase 02 to leverage the OpenTelemetry, circuit breaker, and retry policies for the HTTP grammar fetch.
+
+**Scope:**
+- Two new crates: `unblock-indexer-core` (pure: domain types, AST traversal, schema constants) + `unblock-indexer` (impure: sqlx + FTS5, tree-sitter WASM runtime, grammar fetcher, file walker via `ignore`, file watcher via `notify-debouncer-full`).
+- 9 new MCP tools — `find_symbol`, `list_symbols`, `outline`, `get_symbol`, `search_text`, `find_references` (HEURISTIC), `list_languages`, `index_status`, `reindex`.
+- Pluggable from MVP day 1 — tree-sitter WASM grammars fetched at runtime from a versioned GitHub Release of `unblock-mcp`, integrity-verified, cached under `~/.cache/unblock/grammars/`.
+- Top-10 initial languages: Rust, TypeScript, JavaScript, Python, Go, Java, C, C++, Ruby, PHP. PR-driven expansion via the CI grammar matrix.
+- Persisted SQLite + FTS5 index per repo under `~/.cache/unblock/repos/<repo-hash>/index.db`. WAL mode. Span-only — no body text stored.
+- Pre-warm via `notify-debouncer-full` watcher + per-query mtime check + parallel bootstrap (`rayon`) in a single transaction.
+- `unblock-mcp setup` extends to register the indexer tool set alongside the issue-graph tool set in Claude Desktop / Claude Code / Cursor / Zed / VS Code / JetBrains — single command.
+
+**Out of scope (explicit non-goals):** dead-code analysis, cyclomatic complexity, redundancy/similarity detection, refactor suggestions, cross-file semantic resolution / type inference, issue/code correlation queries.
+
+**Outcome:** `v1.0.0` release. A single MCP binary that serves both the issue-graph and the code-indexer. Agents stop spending tokens grepping the workspace for symbols.
+
+---
+
+### Phase 04 — MCP Production (v1.1.0) → [04-plan-mcp-production.md](./plans/04-plan-mcp-production.md)
 
 Distribution, scale, and enterprise readiness. The local binary becomes installable everywhere.
 
@@ -328,21 +371,21 @@ Distribution, scale, and enterprise readiness. The local binary becomes installa
 - GitHub Enterprise Server support — configurable `GITHUB_API_URL` and `GITHUB_URL`
 - GitHub App authentication — higher rate limits (15k/h), org-wide install, bot identity
 
-**Outcome:** `v1.0.0` release. Installable on any platform. Production-grade for teams with 500+ issues.
+**Outcome:** `v1.1.0` release. Installable on any platform. Production-grade for teams with 500+ issues.
 
 ---
 
-### Phase 04 — Plugin (v1.1.0) → [04-plan-plugin.md](./plans/04-plan-plugin.md)
+### Phase 05 — Plugin (v1.2.0) → [05-plan-plugin.md](./plans/05-plan-plugin.md)
 
 Typed Rust crate `unblock-plugin` that renders the mister-anderson workflow onto Claude Code and Copilot (local + cloud), backed by `unblock-mcp`. `/setup` is the single entry point; the data model is authoritative; renderers emit per-target artefacts.
 
-**Non-goals.** Remote MCP transport (Phase 05), HTTP server, webhooks, desktop UI, npm packaging.
+**Non-goals.** Remote MCP transport (Phase 06), HTTP server, webhooks, desktop UI, npm packaging.
 
-#### 7.4.1 Baseline
+#### 7.5.1 Baseline
 
-Mirrors `mister-anderson` v0.3.0. Deviations explicit in §7.4.7.
+Mirrors `mister-anderson` v0.3.0. Deviations explicit in §7.5.7.
 
-#### 7.4.2 Targets
+#### 7.5.2 Targets
 
 | Target | Manifest | Agents | Skills | Hooks | MCP config |
 |---|---|---|---|---|---|
@@ -352,7 +395,7 @@ Mirrors `mister-anderson` v0.3.0. Deviations explicit in §7.4.7.
 
 Skills directory unified at `.claude/skills/` — Copilot cloud reads both `.claude/skills` and `.github/skills`. Sub-agent dispatch: `Task()` on Claude Code, natural language on Copilot cloud.
 
-#### 7.4.3 Fixed agents (8)
+#### 7.5.3 Fixed agents (8)
 
 | Persona | Role | Model | Hooks |
 |---|---|---|---|
@@ -367,7 +410,7 @@ Skills directory unified at `.claude/skills/` — Copilot cloud reads both `.cla
 
 Dropped from prior PRD draft: Martin, Gadget.
 
-#### 7.4.4 Dynamic supervisors (14)
+#### 7.5.4 Dynamic supervisors (14)
 
 All inherit shared skills `implementation`, `do`, `workflow`, `subagents-discipline` plus hooks `PreToolUse(Task)`, `Stop`. Model: `sonnet`.
 
@@ -390,7 +433,7 @@ All inherit shared skills `implementation`, `do`, `workflow`, `subagents-discipl
 
 Daphne detects via manifest analysis **and** `docs/PRD.md` / `docs/MANIFESTO.md` / `docs/SPEC.md`. On detection failure, prompts the user for type / technology / infra.
 
-#### 7.4.5 Skills (20 user-invocable + 1 shared-only)
+#### 7.5.5 Skills (20 user-invocable + 1 shared-only)
 
 | # | Slash | Stage | Persona / actor |
 |---|---|---|---|
@@ -430,7 +473,7 @@ Daphne detects via manifest analysis **and** `docs/PRD.md` / `docs/MANIFESTO.md`
 | `/workflow next` | Auto-determine the next pending step and dispatch |
 | `/workflow <skill>` | Verify prerequisites, warn, dispatch |
 
-#### 7.4.6 Pipeline
+#### 7.5.6 Pipeline
 
 1. **Stage 1 — Product Discovery** (`/product`) → `docs/MANIFESTO.md`, `docs/PRD.md`, `docs/SPEC.md` (project-wide, high-level).
    - `/manifesto` (Grace) → MANIFESTO; `/requirements` (Grace) → PRD; `/architecture` (Ada) → SPEC.
@@ -438,18 +481,18 @@ Daphne detects via manifest analysis **and** `docs/PRD.md` / `docs/MANIFESTO.md`
    - `/plan` (Ada) → `/research` (Smith) → `/spec` (Ada) → `/tasks` (Fernando) + Coherence Review (Ada × 3).
 3. **Stage 3 — Implementation** (`/implementation NN`) — per bead: `/investigate` → `/do` → `/review` → `/quality`.
 
-#### 7.4.7 Deviations from mister-anderson
+#### 7.5.7 Deviations from mister-anderson
 
 | # | Dimension | m-a | unblock | Rationale |
 |---|---|---|---|---|
-| D1 | Backing store | `bd` CLI + Dolt | `unblock-mcp` tools | Phases 01–03 already shipped |
+| D1 | Backing store | `bd` CLI + Dolt | `unblock-mcp` tools | Phases 01–04 already shipped |
 | D2 | Isolation | Git branches | Worktrees `worktrees/issue-{N}-{slug}` | User decision |
 | D3 | KV store | `bd kv` | Dropped — `claim` + assignees are the source of truth | Simplification |
 | D4 | State dimensions | `bd set-state` | Projects V2 custom fields | Native GitHub surface |
 | D5 | Sub-agent dispatch | `Task()` everywhere | `Task()` on CC; natural language on Copilot cloud | Platform constraint |
-| D6 | Mode | Local only | Local (P04); Remote deferred to P05 | Infra phasing |
+| D6 | Mode | Local only | Local (P05); Remote deferred to P06 | Infra phasing |
 
-#### 7.4.8 State model
+#### 7.5.8 State model
 
 Three Projects V2 single-select fields:
 
@@ -478,13 +521,13 @@ State is the source of truth; the label is derived (Option X). `derive_label(imp
 - Exception labels (`unblock:needs-human`, `unblock:paused`, `unblock:no-investigation`) and finding labels (`unblock:finding:*`) are orthogonal to state dimensions and applied directly.
 - Escape valve: 3 iterations of rework per gate (review OR qa) → automatic `unblock:needs-human`.
 
-#### 7.4.9 Labels
+#### 7.5.9 Labels
 
 13 labels, unchanged from SPEC §7.6 (formerly §540):
 
 `unblock:review:pending`, `unblock:review:ok`, `unblock:review:rework`, `unblock:qa:ok`, `unblock:qa:rework`, `unblock:needs-human`, `unblock:paused`, `unblock:no-investigation`, `unblock:finding:suggestion`, `unblock:finding:minor`, `unblock:finding:risk`, `unblock:finding:deviation`, `unblock:finding:extra`.
 
-#### 7.4.10 Crate shape
+#### 7.5.10 Crate shape
 
 ```
 crates/unblock-plugin/
@@ -502,7 +545,7 @@ crates/unblock-plugin/
 
 Binary `unblock-plugin` invoked by `/setup` after the client choice. Description-contract lint runs in `build.rs`. Internal structure (XML vocabulary, token substitution, render contract) lives in SPEC §7.
 
-#### 7.4.11 Hooks (3)
+#### 7.5.11 Hooks (3)
 
 | Hook | Purpose | Claude Code | Copilot cloud |
 |---|---|---|---|
@@ -512,23 +555,23 @@ Binary `unblock-plugin` invoked by `/setup` after the client choice. Description
 
 m-a's `stamp-pending.sh` is dropped (KV store dropped per D3). Copilot local: zero hooks.
 
-#### 7.4.12 `/setup` flow
+#### 7.5.12 `/setup` flow
 
 | # | Actor | Action |
 |---|---|---|
-| 1 | `/setup` | Phase 04 supports **Local mode only**; Remote mode is deferred to Phase 05 via a dedicated bead |
+| 1 | `/setup` | Phase 05 supports **Local mode only**; Remote mode is deferred to Phase 06 via a dedicated bead |
 | 2 | `/setup` | Collect `GITHUB_TOKEN` + `UNBLOCK_REPO` (owner/repo) |
 | 3 | `/setup` | Ask client: Claude Code / Copilot |
 | 4 | `/setup` | Call MCP `init` → 13 labels + milestones + Projects V2 + 3 state fields |
 | 5 | Daphne | Detect stack via manifests + docs |
 | 5.a | Daphne | On detection failure: ask user for type / technology / infra |
 | 6 | `/setup` | Invoke `unblock-plugin render --target=<t> --supervisors=<list> --out=.` |
-| 7 | Plugin binary | Write files per §7.4.13 |
+| 7 | Plugin binary | Write files per §7.5.13 |
 | 8 | `/setup` | Claude Code: write `.claude/settings.json` with MCP stdio config |
 | 8.a | `/setup` | Copilot: print **in-chat guide** with copy-pastable JSON for VS Code (local) and GitHub UI (cloud) |
 | 9 | `/setup` | Summary + next steps |
 
-#### 7.4.13 Files produced per target
+#### 7.5.13 Files produced per target
 
 | File | CC | Copilot cloud | Copilot local |
 |---|---|---|---|
@@ -545,27 +588,27 @@ m-a's `stamp-pending.sh` is dropped (KV store dropped per D3). Copilot local: ze
 | `.github/hooks/*.json` | — | ✅ | — |
 | `.claude/settings.json` | ✅ | — | — |
 
-#### 7.4.14 Dispatch convention
+#### 7.5.14 Dispatch convention
 
 `.github/copilot-instructions.md` carries an Agents table plus a section:
 
-> Sub-agent work is delegated by name using `@<name>: <task>`. Example: `@Smith: validate API assumptions in plan 04`. The cloud agent MUST NOT execute sub-agent work inline — delegation is structural.
+> Sub-agent work is delegated by name using `@<name>: <task>`. Example: `@Smith: validate API assumptions in plan 05`. The cloud agent MUST NOT execute sub-agent work inline — delegation is structural.
 
 `CLAUDE.md` carries the same content with examples `Task(subagent_type="...")`. Both rendered from the same `DispatchConvention` struct.
 
-#### 7.4.15 New MCP tools
+#### 7.5.15 New MCP tools
 
 | Tool | Purpose |
 |---|---|
-| `set_state(qualified_id, dim, value)` | Write state dim and reconcile label atomically per §7.4.8 invariants |
+| `set_state(qualified_id, dim, value)` | Write state dim and reconcile label atomically per §7.5.8 invariants |
 | `get_state(qualified_id, dim)` | Read a single state dim |
 | `verify_agent_state(agent_id)` | Stop hook helper — exit 0 OK, exit 2 enforcement failure |
 
-#### 7.4.16 Comment trail
+#### 7.5.16 Comment trail
 
 Per-bead structured comments, in canonical order: `INVESTIGATION → DECISION → DEVIATION → COMPLETED → REVIEW → QA` plus `DEFERRED`, `PR`, `NEEDS-HUMAN`, `OVERRIDE`. Encoded as the `CommentKind` enum; `reconcile` flags out-of-order or missing kinds.
 
-#### 7.4.17 Severity thresholds
+#### 7.5.17 Severity thresholds
 
 | Severity | Gate | Action |
 |---|---|---|
@@ -575,17 +618,17 @@ Per-bead structured comments, in canonical order: `INVESTIGATION → DECISION �
 
 Findings always live in the same parent epic as the bead that originated them — there is no separate "Review Findings" epic.
 
-#### 7.4.18 Reference-only beads
+#### 7.5.18 Reference-only beads
 
 The bead `design` field always points to a spec section (`docs/specs/NN-spec-foo.md#section`). Content is never inlined. Enforced by Fernando's skill template and the plugin linter.
 
-#### 7.4.19 Deferred to Phase 05
+#### 7.5.19 Deferred to Phase 06
 
 - Remote mode in `/setup`
 - Webhook-driven label / state reconciliation
 - Shared cache across multiple clients
 
-#### 7.4.20 Rework paths
+#### 7.5.20 Rework paths
 
 **Review NEEDS-REWORK:**
 1. Linus writes `REVIEW` (NEEDS-REWORK) + CRITICAL/WARNING findings.
@@ -600,14 +643,14 @@ The bead `design` field always points to a spec section (`docs/specs/NN-spec-foo
 - **follow-up**: Fernando creates finding beads under the parent epic; the original bead proceeds to close (degraded).
 - **override**: user prompts "do override"; Quinn requests explicit confirmation + reason (≥ 20 chars); writes `OVERRIDE:` comment; `set_state(qa=passed, override=true)`; Fernando creates a `unblock:finding:risk` bead to track the bypassed condition.
 
-#### 7.4.21 Enforcement failures
+#### 7.5.21 Enforcement failures
 
 - `verify_agent_state` exit 2 — orchestrator decides re-dispatch or `unblock:needs-human`. No automatic retry.
 - Label reconciliation partial — state remains authoritative; `reconcile` corrects drift on the next run.
 - Claim conflicts — second `claim` returns `CLAIM_CONFLICT`; orchestrator picks another ready bead or aborts.
 - Worktree conflicts — clean and same branch ⇒ reuse; dirty or different branch ⇒ `unblock:needs-human`.
 
-#### 7.4.22 Exception modes
+#### 7.5.22 Exception modes
 
 | Label | Source | Effect |
 |---|---|---|
@@ -615,13 +658,13 @@ The bead `design` field always points to a spec section (`docs/specs/NN-spec-foo
 | `unblock:paused` | User | Worktree preserved; remove label to resume |
 | `unblock:no-investigation` | Developer / `/plan` | Supervisor skips the investigate step |
 
-#### 7.4.23 Setup edge cases
+#### 7.5.23 Setup edge cases
 
 - **Previous setup detected** (marker in `.claude-plugin/plugin.json` or `copilot-instructions.md`) — offer update vs re-init.
 - **Stack detection fails + user cancels** — abort `/setup` cleanly; no partial writes.
 - **`init` MCP partial failure** — idempotent: re-run completes only what is missing.
 
-#### 7.4.24 Happy path completion
+#### 7.5.24 Happy path completion
 
 | # | Action | Comment | State | Label |
 |---|---|---|---|---|
@@ -644,9 +687,9 @@ The bead `design` field always points to a spec section (`docs/specs/NN-spec-foo
 
 ---
 
-### Phase 05 — Remote Server (v1.2.0) → [05-plan-remote-server.md](./plans/05-plan-remote-server.md)
+### Phase 06 — Remote Server (v1.3.0) → [06-plan-remote-server.md](./plans/06-plan-remote-server.md)
 
-The same MCP tools, served over HTTP from a persistent server. Shared graph cache, webhook invalidation, multi-client support. The foundation for teams and for the autonomous agent in Phase 06.
+The same MCP tools, served over HTTP from a persistent server. Shared graph cache, webhook invalidation, multi-client support. The foundation for teams and for the autonomous agent in Phase 07.
 
 **Scope:**
 
@@ -680,11 +723,11 @@ The same MCP tools, served over HTTP from a persistent server. Shared graph cach
 }
 ```
 
-**Outcome:** Teams share one server. Multiple agents and developers connect to the same graph cache. Webhooks provide instant consistency. The server is ready to host the LLM agent in Phase 06.
+**Outcome:** Teams share one server. Multiple agents and developers connect to the same graph cache. Webhooks provide instant consistency. The server is ready to host the LLM agent in Phase 07.
 
 ---
 
-### Phase 06 — LLM Agent (v1.3.0) → [06-plan-llm-agent.md](./plans/06-plan-llm-agent.md)
+### Phase 07 — LLM Agent (v1.4.0) → [07-plan-llm-agent.md](./plans/07-plan-llm-agent.md)
 
 Autonomous investigation and code review, running on the same server as the remote MCP. Triggered by GitHub webhooks, powered by Codestral. The agent is a **client** of the remote MCP — it calls `show` and `comment` via HTTP. It never claims, closes, or creates issues. It is read-only except for comments.
 
@@ -729,7 +772,7 @@ Autonomous investigation and code review, running on the same server as the remo
 
 ---
 
-### Phase 07 — Harness (v1.4.0) → [07-plan-harness.md](./plans/07-plan-harness.md)
+### Phase 08 — Harness (v1.5.0) → [08-plan-harness.md](./plans/08-plan-harness.md)
 
 Orchestration layer that composes plugin agents and skills into autonomous multi-step workflows.
 
@@ -756,29 +799,39 @@ Orchestration layer that composes plugin agents and skills into autonomous multi
 - Circuit breaker activates after 5 consecutive GitHub API failures
 - OpenTelemetry export produces actionable dashboards for tool latency and cache performance
 
-### Phase 03 (MCP Production)
+### Phase 03 (Code Indexer)
+- `find_symbol` p99 < 10ms on the medium representative repo (corpus defined by research R8)
+- `outline` p99 < 20ms on the medium representative repo
+- All Top-10 languages parse a mixed-language fixture repo without panic
+- Grammars are fetched at runtime from the unblock-mcp GitHub Releases and integrity-verified against a signed manifest
+- Adding a new language requires only a PR to the CI grammar matrix — no recompilation of `unblock-mcp`
+- File watcher (`notify-debouncer-full`) keeps the index in sync on macOS, Linux, and Windows; per-query mtime check is the safety net
+- `unblock-mcp setup` registers the indexer tool set alongside the issue-graph tool set in CC Desktop / CC Code / Cursor / Zed / VS Code / JetBrains under the same MCP server entry — single command
+- Token-saving ROI report compares baseline (Glob/Grep/Read) vs indexer tool calls for at least 3 representative agent flows before phase close
+
+### Phase 04 (MCP Production)
 - Cold start under 500ms for repos with <500 issues using materialised fast path
 - Cross-platform binaries pass CI on all 5 target platforms
 - GHE Server integration tests pass on configurable API URL
 
-### Phase 04 (Plugin)
+### Phase 05 (Plugin)
 - Zero pipeline violations in 100 consecutive agent dispatches (all 3 enforcement layers active)
 - Session isolation: no information leaks between investigation, implementation, review, and QA sessions
 - `/do` correctly routes intent to the right agent >95% of the time
 
-### Phase 05 (Remote Server)
+### Phase 06 (Remote Server)
 - Shared graph cache eliminates cold start for second+ connections to the same repo
 - Webhook-triggered cache invalidation reflects GitHub changes in <1 second
 - 10 concurrent MCP clients on the same server with no tool call failures
 
-### Phase 06 (LLM Agent)
+### Phase 07 (LLM Agent)
 - `INVESTIGATION:` format compliance >95% of runs
 - Relevant files identified (top 3 in actual implementation diff) >80% of runs
 - `REVIEW:` verdict alignment with human review >75% match
 - False APPROVE rate (misses a CRITICAL finding) <5%
 - Per-run cost <€0.002 (investigation + review combined)
 
-### Phase 07 (Harness)
+### Phase 08 (Harness)
 - End-to-end "build feature" workflow completes without human intervention for well-specified features
 - Harness-driven implementation passes the same review and QA gates as manual pipeline
 
@@ -796,7 +849,7 @@ Orchestration layer that composes plugin agents and skills into autonomous multi
 
 **Risk:** 5000 points/hour (GraphQL) + 5000 requests/hour (REST). Large cascades or frequent rebuilds could exhaust the budget.
 
-**Mitigation:** Batch GraphQL mutations (multiple `updateProjectV2ItemFieldValue` in a single POST). Cache with TTL avoids redundant reads. Phase 03 adds GitHub App authentication for 15k/h limits. Phase 05's `SharedGraphCache` eliminates redundant rebuilds across sessions. Cascade batching collects all unblocked issues and updates fields in fewer requests.
+**Mitigation:** Batch GraphQL mutations (multiple `updateProjectV2ItemFieldValue` in a single POST). Cache with TTL avoids redundant reads. Phase 04 adds GitHub App authentication for 15k/h limits. Phase 06's `SharedGraphCache` eliminates redundant rebuilds across sessions. Cascade batching collects all unblocked issues and updates fields in fewer requests.
 
 ---
 
@@ -804,7 +857,7 @@ Orchestration layer that composes plugin agents and skills into autonomous multi
 
 **Risk:** A human closes an issue via the GitHub UI. A label is changed outside unblock. The in-memory graph diverges from GitHub reality.
 
-**Mitigation:** Every write invalidates and recomputes from GitHub (Law 2). The `reconcile` tool (Phase 02) detects and repairs 7 drift types. Phase 05's webhooks provide instant invalidation on the remote server. The graph is always rebuilt from the source of truth — drift is temporary, not persistent.
+**Mitigation:** Every write invalidates and recomputes from GitHub (Law 2). The `reconcile` tool (Phase 02) detects and repairs 7 drift types. Phase 06's webhooks provide instant invalidation on the remote server. The graph is always rebuilt from the source of truth — drift is temporary, not persistent.
 
 ---
 
@@ -828,7 +881,7 @@ Orchestration layer that composes plugin agents and skills into autonomous multi
 
 **Risk:** Codestral investigation misidentifies relevant files. Codestral review false-approves a broken implementation.
 
-**Mitigation:** The autonomous agent (Phase 06) is a **first pass**, not the canonical gate. The plugin's interactive review (Linus via Claude/opus in-session) remains the gating review. The autonomous review uses `event: "COMMENT"` in the PR review API — it never APPROVE or REQUEST_CHANGES. Quality gates: format compliance >95%, file relevance >80%, verdict alignment >75%. If metrics drop, the remediation path is: improve system prompt → evaluate Mistral Small 3.1 → fine-tune on accumulated comment history.
+**Mitigation:** The autonomous agent (Phase 07) is a **first pass**, not the canonical gate. The plugin's interactive review (Linus via Claude/opus in-session) remains the gating review. The autonomous review uses `event: "COMMENT"` in the PR review API — it never APPROVE or REQUEST_CHANGES. Quality gates: format compliance >95%, file relevance >80%, verdict alignment >75%. If metrics drop, the remediation path is: improve system prompt → evaluate Mistral Small 3.1 → fine-tune on accumulated comment history.
 
 ---
 
@@ -859,7 +912,7 @@ The following are explicitly not in scope for unblock at any phase:
 - **Custom UI.** GitHub Issues and Projects V2 are the UI. The pre-configured views (`𝍄 UNBLOCK://ready`, `𝍄 UNBLOCK://team`, `𝍄 UNBLOCK://pipeline`, `𝍄 UNBLOCK://roadmap`, `𝍄 UNBLOCK://timeline`) provide opinionated board layouts. unblock does not build its own interface.
 - **Billing, auth, or user management.** Delegated entirely to GitHub. The authentication token is GitHub's. The permissions model is GitHub's.
 - **Desktop application.** unblock operates through MCP (agents) and GitHub UI (humans). There is no standalone desktop application.
-- **Code generation by the autonomous agent.** The LLM agent (Phase 06) investigates and reviews. It never writes code, creates branches, or pushes commits. Implementation is the plugin's domain.
+- **Code generation by the autonomous agent.** The LLM agent (Phase 07) investigates and reviews. It never writes code, creates branches, or pushes commits. Implementation is the plugin's domain.
 - **`anyhow` or `thiserror`.** Error handling uses `snafu` exclusively across the entire workspace.
 
 ---

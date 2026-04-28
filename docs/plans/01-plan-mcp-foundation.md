@@ -203,7 +203,7 @@ Every write tool: execute mutation → `cache.invalidate()` → `fetch_graph_dat
 - → `closed`: on `close`
 - `blocked`/`ready` → any: on `reopen` (re-evaluated from graph)
 
-**Pipeline Stage:** Created by `setup` in Phase 01 for field existence. Agent advancement is Phase 04 (plugin). The field exists so that early adopters can use it manually.
+**Pipeline Stage:** Created by `setup` in Phase 01 for field existence. Agent advancement is Phase 05 (plugin). The field exists so that early adopters can use it manually.
 
 ### 6.3 — Issue Body Structure
 

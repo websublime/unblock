@@ -40,10 +40,10 @@ Everything needed to implement Phase 01 (v0.1.0): 17 MCP tools, the graph engine
 - Circuit breaker and retry logic (Phase 02 — error types exist as stubs)
 - Agent client detection / `AgentKind` / `SessionMeta` (Phase 02)
 - OpenTelemetry metrics (Phase 02)
-- Materialised fast path (Phase 03)
-- Distribution, GHE testing, GitHub App auth (Phase 03)
-- Plugin pipeline, skills, agents (Phase 04)
-- Remote server, shared cache (Phase 05)
+- Materialised fast path (Phase 04)
+- Distribution, GHE testing, GitHub App auth (Phase 04)
+- Plugin pipeline, skills, agents (Phase 05)
+- Remote server, shared cache (Phase 06)
 
 ### 1.3 Pseudocode conventions
 
@@ -147,7 +147,7 @@ pub enum PipelineStage {
 }
 ```
 
-Development pipeline phase. Created by `setup` in Phase 01 for field existence. Agent advancement is Phase 04 (plugin). The field exists so early adopters can use it manually and views work.
+Development pipeline phase. Created by `setup` in Phase 01 for field existence. Agent advancement is Phase 05 (plugin). The field exists so early adopters can use it manually and views work.
 
 **Projects V2 option values:** `investigation`, `implementation`, `review`, `refactoring`, `qa`, `done`
 
