@@ -1154,20 +1154,23 @@ pub enum DomainError {
 
 ```rust
 #[derive(Debug, Snafu)]
+#[non_exhaustive]
 pub enum Error {
     Domain { source: DomainError },
     GitHubApi { message: String },
     GitHubGraphQL { errors: Vec<String> },
     GitHubUnavailable { source: reqwest::Error },
     GitHubServerError { status: u16, message: String },
-    RateLimited,
-    CircuitBreakerOpen,
+    RateLimited { reset_at: Option<DateTime<Utc>> },
+    CircuitBreakerOpen { since: Instant },
     ProjectNotConfigured,
     GitRemote { message: String },
     ViewCreationFailed { message: String },
     OwnerDetectionFailed { owner: String, message: String },
 }
 ```
+
+`#[non_exhaustive]` is workspace policy for public enums that are expected to grow over time — adding a variant must remain a non-breaking change for downstream consumers. The same policy applies to `DomainError` (already non-exhaustive) and to `unblock_core::reconcile::DriftKind` (becomes non-exhaustive in Phase 02 alongside the `StaleStatus` addition). See [CLAUDE.md "Coding Standards"](../CLAUDE.md#coding-standards) for the full project-wide rule.
 
 **Error classification by HTTP status:**
 
@@ -1229,47 +1232,62 @@ tracing::info!(
 | `debug` | GitHub request/response details (token redacted), graph computation |
 | `trace` | MCP protocol messages, cache operations |
 
-### 13.3 Metrics (OpenTelemetry, optional)
+### 13.3 Metrics
+
+**Phase 02 — in-memory `ServerMetrics`.** Single struct with atomic counters + `hdrhistogram` latency histograms. Exposed via the `doctor` MCP tool's `metrics_snapshot` field. No external dependencies beyond `hdrhistogram`. Provisional location: `unblock-mcp::metrics` (or `unblock-core::metrics` if the struct stays free of MCP types — finalised during Phase 02 spec authoring).
 
 | Metric | Type | Labels |
 |---|---|---|
-| `unblock.tool.duration` | Histogram | `tool`, `status` |
-| `unblock.github.request.duration` | Histogram | `api` (graphql/rest), `status` |
-| `unblock.cache.hits` | Counter | `tool` |
-| `unblock.cache.misses` | Counter | `tool` |
-| `unblock.graph.nodes` | Gauge | — |
-| `unblock.graph.edges` | Gauge | — |
-| `unblock.graph.cycles` | Gauge | — |
-| `unblock.graph.recalculations` | Counter | `trigger` (write/stale) |
+| `tool_calls` | Counter | `tool` |
+| `tool_durations` | Histogram | `tool` |
+| `api_calls` | Counter | `api` (graphql/rest) |
+| `api_durations` | Histogram | `api` |
+| `cache_hits` / `cache_misses` / `cache_evictions` / `cache_size` | Counter / Gauge | — |
+| `graph_issues` / `graph_edges` | Gauge | — |
+
+**Phase 06 — OpenTelemetry adapter.** Wraps the same `ServerMetrics` struct — no schema change, no breaking redesign. Exports to OTLP HTTP. Adapter publishes the OTel metric names previously listed in earlier drafts of this spec (`unblock.tool.duration`, `unblock.github.request.duration`, `unblock.cache.*`, `unblock.graph.*`). Phase 02 ships a forward-compat contract test that locks the snapshot serialisation shape so Phase 06 cannot regress it.
 
 ---
 
 ## 14. Resilience
 
+The resilience layer is a stand-alone crate `unblock-resilience` (Phase 02+). It has zero dependencies on other unblock crates and is consumed by both `unblock-github` (issue domain HTTP) and `unblock-indexer` (Phase 03+, code-domain grammar fetcher). See [02-plan-mcp-complete §6](./plans/02-plan-mcp-complete.md#6-public-api-surface-for-phase-03) for the public API contract.
+
 ### 14.1 Circuit Breaker
 
-```rust
-pub struct CircuitBreaker {
-    state: CircuitState,          // Closed, Open, HalfOpen
-    failure_count: usize,
-    failure_threshold: usize,     // 5
-    cooldown: Duration,           // 10s
-}
-```
+Built on the `failsafe` crate. Per-process singleton scope (Phase 06 multi-tenant scoping is a separate decision). Default config:
 
-After 5 consecutive GitHub API failures, the circuit opens — all subsequent requests fail immediately with `CircuitBreakerOpen` for 10 seconds. After cooldown, transitions to HalfOpen — one request allowed. Success → Closed. Failure → Open again.
+| Knob | Value |
+|---|---|
+| Failure threshold | 5 consecutive |
+| Cooldown | 10s |
+| State machine | Closed → Open → HalfOpen → Closed |
+
+After 5 consecutive failures, the circuit opens — subsequent requests fail immediately with `CircuitBreakerOpen` for 10 seconds. After cooldown, transitions to HalfOpen — one probe request allowed. Success → Closed. Failure → Open again.
+
+Composition: **breaker outside, retry inside**. The breaker counts only the **final** outcome of `ResiliencePolicy::execute` after retries exhaust — a successful retry records as a success.
 
 ### 14.2 Retry Policy
 
-```rust
-pub struct RetryPolicy {
-    pub max_retries: usize,       // 3
-    pub base_delay: Duration,     // 500ms
-    pub max_delay: Duration,      // 5s
-}
-```
+Built on the `backoff` crate. Exponential backoff with ±25% jitter. Default config:
 
-Exponential backoff with ±25% jitter. Only retries on `RateLimited` (429) and `GitHubUnavailable` (503). All other errors propagate immediately.
+| Knob | Default | Env var |
+|---|---|---|
+| Max attempts | 5 | `UNBLOCK_RETRY_MAX_ATTEMPTS` |
+| Total deadline | 30s | `UNBLOCK_RETRY_DEADLINE_SECS` |
+| Base delay | 500ms | (hard-coded) |
+| Max delay | 5s | (hard-coded) |
+| Retry-After cap | 30s | (hard-coded — exceeded value triggers fail-fast) |
+
+Hybrid limit: whichever of max-attempts / deadline hits first wins.
+
+Only retries on errors whose `IsRetryable::is_retryable()` returns `true`. For `unblock-github::Error` this is `RateLimited` (429), `GitHubUnavailable` (network), and `GitHubServerError { status: 503 }`. All other errors propagate immediately.
+
+### 14.3 Reuse by other crates
+
+`ResiliencePolicy::execute` is generic over any error type that implements the `IsRetryable` trait exposed by `unblock-resilience`. Phase 03's grammar fetcher (`unblock-indexer`) reuses it for the GitHub Releases asset HTTP calls. `unblock-indexer` depends directly on `unblock-resilience` — it does **not** transit through `unblock-github` (the two crates are architecturally orthogonal: code domain vs issue domain).
+
+See [02-plan-mcp-complete §6.2](./plans/02-plan-mcp-complete.md#62-reuse-mechanism--locked-extracted-unblock-resilience-crate) for the rationale.
 
 ---
 

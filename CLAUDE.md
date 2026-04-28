@@ -102,6 +102,14 @@ cargo doc --no-deps --workspace            # zero warnings
 - `///` doc comments on all `pub fn` and `pub struct`
 - `//!` module-level docs on all modules
 - Property tests with proptest for graph invariants
+- **`#[non_exhaustive]` on growable public enums.** Public enums that are expected
+  to grow over time (errors, drift kinds, status categories, anything kind/variant-
+  by-extension) MUST carry `#[non_exhaustive]`. This applies to library crates
+  (`unblock-core`, `unblock-github`, `unblock-resilience`, `unblock-indexer-core`,
+  …). Adding a variant should not require coordinating with reviewers/contributors
+  even under the pre-prod stance — the discipline is cheaper to establish now than
+  retrofit. Precedent: `unblock_github::Error`, `unblock_core::DomainError`
+  (`unblock-29p.70`); extended to `unblock_core::reconcile::DriftKind` in Phase 02.
 
 ## Workspace Commands
 

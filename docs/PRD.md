@@ -194,7 +194,7 @@ unblock is implemented as a Rust workspace that grows across phases. Each crate 
 
 ### 6.1 Workspace evolution
 
-**Phases 01–02** — 3 crates (local MCP):
+**Phase 01** — 3 crates (local MCP, minimum viable loop):
 
 ```
 crates/
@@ -203,25 +203,39 @@ crates/
   unblock-mcp/               ← bin: MCP server binary (stdio transport)
 ```
 
-**Phase 03** — 5 crates (code indexer added; same MCP binary serves both tool sets):
+**Phase 02** — 4 crates (resilience layer extracted to a neutral home):
+
+```
+crates/
+  unblock-core/              ← unchanged (gains DriftKind::StaleStatus + #[non_exhaustive])
+  unblock-github/            ← consumes unblock-resilience for HTTP breaker + retry
+  unblock-resilience/        ← NEW lib: circuit breaker + retry policy, no unblock deps
+  unblock-mcp/               ← adds doctor / commit_context tools, ServerMetrics
+```
+
+`unblock-resilience` is extracted in Phase 02 (not deferred) because Phase 03's grammar fetcher (in `unblock-indexer`) consumes it directly. Forcing `unblock-indexer` (code domain) to depend on `unblock-github` (issue domain) merely to share an HTTP resilience policy would couple two architecturally orthogonal product surfaces. See [02-plan-mcp-complete §6.2](./plans/02-plan-mcp-complete.md#62-reuse-mechanism--locked-extracted-unblock-resilience-crate).
+
+**Phase 03** — 6 crates (code indexer added; same MCP binary serves both tool sets):
 
 ```
 crates/
   unblock-core/              ← zero changes
   unblock-github/            ← zero changes
+  unblock-resilience/        ← zero changes — consumed directly by unblock-indexer
   unblock-indexer-core/      ← NEW lib: pure indexer types, AST traversal, schema constants
   unblock-indexer/           ← NEW lib: sqlx + FTS5, tree-sitter WASM runtime, walker, watcher
   unblock-mcp/               ← adds indexer tool handlers (9 tools) alongside issue-graph tools
 ```
 
-**Phases 04–05** — 5 crates (production distribution + plugin; no new crates).
+**Phases 04–05** — 6 crates (production distribution + plugin; no new crates).
 
-**Phase 06** — 7 crates (tools extracted, remote server added):
+**Phase 06** — 8 crates (tools extracted, remote server added):
 
 ```
 crates/
   unblock-core/              ← zero changes
   unblock-github/            ← zero changes
+  unblock-resilience/        ← zero changes
   unblock-indexer-core/      ← zero changes
   unblock-indexer/           ← zero changes
   unblock-tools/             ← NEW lib: shared tool implementations (extracted from unblock-mcp)
@@ -229,12 +243,13 @@ crates/
   unblock-mcp-remote/        ← NEW bin: Streamable HTTP + webhooks + SharedGraphCache (axum)
 ```
 
-**Phase 07** — 8 crates (LLM agent added to the same server):
+**Phase 07** — 9 crates (LLM agent added to the same server):
 
 ```
 crates/
   unblock-core/              ← zero changes
   unblock-github/            ← zero changes
+  unblock-resilience/        ← zero changes
   unblock-indexer-core/      ← zero changes
   unblock-indexer/           ← zero changes
   unblock-tools/             ← zero changes
@@ -249,10 +264,14 @@ crates/
 unblock-mcp (bin, stdio)
   ├── unblock-tools (lib)        ← issue-graph tool set (Phase 06+)
   │     ├── unblock-github (lib)
+  │     │     ├── unblock-resilience (lib)   ← Phase 02+
   │     │     └── unblock-core (lib)
   │     └── unblock-core (lib)
   └── unblock-indexer (lib)      ← code-indexer tool set (Phase 03+)
+        ├── unblock-resilience (lib)         ← Phase 03 grammar fetcher reuse
         └── unblock-indexer-core (lib)
+
+unblock-resilience (lib)         ← Phase 02 — no deps on other unblock crates
 
 unblock-mcp-remote (bin, Streamable HTTP)
   ├── unblock-tools (lib)        ← same tools, zero duplication
@@ -283,6 +302,9 @@ unblock-agent (bin, co-deployed with remote)
 | `ignore` | gitignore-aware filesystem walker (same as ripgrep) |
 | `notify-debouncer-full` | File watcher driving incremental indexer updates |
 | `rayon` | CPU-bound parallelism for indexer bootstrap |
+| `failsafe` | Circuit breaker for HTTP resilience (Phase 02+ in `unblock-resilience`) |
+| `backoff` | Exponential retry with jitter (Phase 02+ in `unblock-resilience`) |
+| `hdrhistogram` | Latency histograms in `ServerMetrics` (Phase 02+) |
 
 ### 6.4 Error handling convention
 
@@ -294,6 +316,7 @@ Every crate uses `snafu` exclusively. No `thiserror`, no `anyhow`, no `Box<dyn E
 |---|---|---|
 | `unblock-core` | MIT | Open-source foundation |
 | `unblock-github` | MIT | Open-source foundation |
+| `unblock-resilience` | MIT | Open-source foundation — generic HTTP resilience policy |
 | `unblock-indexer-core` | MIT | Open-source foundation |
 | `unblock-indexer` | MIT | Open-source — code indexer is part of the product |
 | `unblock-tools` | MIT | Open-source — tools are the product |
@@ -326,15 +349,19 @@ The minimum viable loop. An agent can find work, claim it, create and edit issue
 Production hardening and remaining MCP capabilities. Still local binary only.
 
 **Scope:**
-- `reconcile` tool — detect and repair semantic drift between graph and GitHub state (7 drift types: `StaleStatus`, `UncascadedClosure`, `OrphanedBlockingEdge`, `MalformedAgentField`, `MissingProjectField`, `CycleDetected`, `StaleClaim`)
-- `commit_context` tool — structured commit messages with git trailers for audit trail
-- `doctor` tool — operational health with self-repair capability
-- Circuit breaker — graceful degradation on GitHub outages (5 consecutive failures → fail fast for 10s, reset on success)
-- Retry with exponential backoff — 429 and 503 only (500ms base, 5s max, ±25% jitter)
-- OpenTelemetry — tool duration, API duration, cache metrics, graph size
-- Agent client detection — `AgentKind`, `ClientDetector`, `SessionMeta`
+- `reconcile` tool — detect and repair semantic drift between graph and GitHub state. 7 drift types total — Phase 01 shipped 6 (`UncascadedClosure`, `OrphanedBlockingEdge`, `MalformedAgentField`, `MissingProjectField`, `CycleDetected`, `StaleClaim`); Phase 02 adds the 7th (`StaleStatus`) to bring `ReconcileEngine` to completeness.
+- `commit_context` tool — structured commit messages with git trailers for audit trail. **BREAKING CHANGE** to commit convention: subject-only bd-id → subject + 6 canonical trailers (`Bd-Issue`, `Closes`, `Refs`, `Spec`, `Plan`, `Phase`). Pre-production stance permits the break. Trailer vocabulary is extensible — future phases (esp. Phase 07 LLM Agent) may add new keys without touching the canonical set; the parser round-trips unknown trailers unchanged.
+- `doctor` tool — operational health with self-repair capability. Read-only by default; `--fix` delegates to `setup`/`reconcile`; `--with-drift` opts into drift detection.
+- Circuit breaker — graceful degradation on GitHub outages (5 consecutive failures → fail fast for 10s, reset on success). Built on the `failsafe` crate.
+- Retry with exponential backoff — 429 and 503 only (500ms base, 5s max, ±25% jitter). Hybrid limit: 5 attempts OR 30s deadline, env-configurable. Built on the `backoff` crate.
+- New crate `unblock-resilience` — circuit breaker + retry policy extracted to a neutral home so Phase 03's grammar fetcher (`unblock-indexer`) can consume it without depending on `unblock-github`. See [02-plan-mcp-complete §6.2](./plans/02-plan-mcp-complete.md#62-reuse-mechanism--locked-extracted-unblock-resilience-crate).
+- In-memory `ServerMetrics` — atomic counters + `hdrhistogram` latency histograms. Captures tool durations, API durations, cache hits/misses, graph size. Exposed via the `doctor` tool's `metrics_snapshot` field.
+- Agent client detection — `AgentKind`, `ClientDetector`, `SessionMeta` (already implemented during Phase 01).
 
-**Outcome:** The MCP server handles failure gracefully, detects drift from external mutations, and provides full operational observability.
+**Deferred:**
+- **OpenTelemetry exporter — deferred to Phase 06** (alongside the remote server). Phase 02's in-memory `ServerMetrics` is forward-compatible: the Phase 06 OTel adapter wraps the same struct without redesigning it.
+
+**Outcome:** The MCP server handles failure gracefully, detects drift from external mutations across all 7 drift types, exposes its own health via `doctor`, and ships a rich commit-message convention that downstream phases (Plugin §7.5, LLM Agent Phase 07) can rely on.
 
 ---
 
@@ -342,7 +369,7 @@ Production hardening and remaining MCP capabilities. Still local binary only.
 
 Token-saving for AI agents. Instead of agents wasting tokens on Glob/Grep/Read to find symbols, definitions, and code structure, an embedded multi-language code indexer answers "where is X / what does Y export / show me Z" via fast structured MCP tool calls served from the same `unblock-mcp` binary as the issue-graph tool set.
 
-Slots after Phase 02 to leverage the OpenTelemetry, circuit breaker, and retry policies for the HTTP grammar fetch.
+Slots after Phase 02 to leverage the `unblock-resilience` crate (circuit breaker + retry) for the HTTP grammar fetch. OpenTelemetry export is deferred to Phase 06; Phase 03 instruments via the same in-memory `ServerMetrics` introduced in Phase 02.
 
 **Scope:**
 - Two new crates: `unblock-indexer-core` (pure: domain types, AST traversal, schema constants) + `unblock-indexer` (impure: sqlx + FTS5, tree-sitter WASM runtime, grammar fetcher, file walker via `ignore`, file watcher via `notify-debouncer-full`).
