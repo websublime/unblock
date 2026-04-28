@@ -196,37 +196,40 @@ Operational health orchestrator. Read-only by default; `--with-drift` opts into 
 
 ### 2.4 `commit_context` MCP tool (new)
 
-Generates a rich, structured commit message with git trailers from a bd issue. Generate-only (Decision 4.1) — validation/parsing of existing messages is deferred.
+Generates a rich, structured commit message with git trailers from the agent's active GitHub issue claim. Generate-only (Decision 4.1) — validation/parsing of existing messages is deferred.
 
-**Convention upgrade (Decision 4.2 — BREAKING CHANGE).** Pre-production stance permits the break. Old convention: bd-id-in-subject only. New convention: bd-id stays in subject AND becomes a `Bd-Issue:` trailer; additional trailers carry full provenance.
+**Convention upgrade (Decision 4.2 — BREAKING CHANGE).** Pre-production stance permits the break. The new convention adds rich git trailers in the commit footer (RFC-style key-value pairs) on top of any existing subject-line conventions. Trailers are parseable via `git interpret-trailers` and unlock GitHub auto-link / auto-close on merge.
 
 **Canonical trailer schema (Decision 4.3) — STABLE contract:**
 
 | Trailer | When emitted | Source |
 |---|---|---|
-| `Bd-Issue: <bd-id>` | Always | Input arg |
-| `Closes: <github-issue-url>` | When bd issue has linked GitHub issue | bd → GitHub mapping |
-| `Refs: <bd-id-or-url>` | Optional, repeatable | Input arg |
-| `Spec: <path>#<anchor>` | When bd's `design` field references a spec | bd issue field |
-| `Plan: <path>` | Always | Derived from bd parent epic |
-| `Phase: <NN>` | Always | Derived from bd issue's epic phase |
+| `Closes: <github-issue-url>` | When the agent has an active claim on a GitHub issue | unblock-mcp graph cache |
+| `Refs: <github-issue-url>` | Optional, repeatable | Input arg |
+| `Spec: <path>#<anchor>` | When the issue body links a spec under `docs/specs/` | issue body parsing |
+| `Plan: <path>` | When the issue body links a plan under `docs/plans/` | issue body parsing |
+| `Phase: <NN>` | Optional — when repo declares phase convention via `.unblock/commit_context.toml` | repo config |
 
-**Vocabulary is EXTENSIBLE, not closed (LOCKED — user-confirmed during plan iteration).** The 6 trailers above are the **STABLE contract** Phase 02 ships — semver-style guarantee within unblock. Future phases (especially Phase 07 LLM Agent) are FREE to add new trailer keys (e.g., `Reviewed-By`, `Investigation`, `Verdict`) without modifying the canonical set. Implementation requirements:
+**Vocabulary is EXTENSIBLE, not closed (LOCKED — user-confirmed during plan iteration).** The 5 trailers above are the **STABLE contract** Phase 02 ships — semver-style guarantee within unblock. Future phases (especially Phase 07 LLM Agent) are FREE to add new trailer keys (e.g., `Reviewed-By`, `Investigation`, `Verdict`) without modifying the canonical set. Implementation requirements:
 
-- The `commit_context` generator emits the 6 canonical trailers under their stable definitions.
+- The `commit_context` generator emits the 5 canonical trailers under their stable definitions.
 - The trailer parser (used by `--with-changes` round-trip and any future validation tooling) **accepts unknown trailer keys** — does NOT reject them, MUST round-trip them unchanged. This preserves forward-compat for downstream agents that learn new keys.
 - The Phase 02 spec (when authored) MUST specify parser behaviour for unknown keys in concrete terms (no silent drops, no normalisation).
 
-**Subject line (Decision 4.4):** tool returns `subject_template`; agent free to modify. Mapping bd type → Conventional Commits prefix:
+**Subject line (Decision 4.4):** tool returns `subject_template`; agent free to modify. Mapping GitHub issue type → Conventional Commits prefix:
 
-| bd type | CC prefix |
+| GitHub issue type | CC prefix |
 |---|---|
 | `feature` | `feat` |
 | `bug` | `fix` |
 | `task` | `chore` (agent adjusts to `refactor`/`docs`/`test`/etc.) |
 | `epic` | not directly committable — tool errors |
+| `chore` | `chore` |
+| `spike` | `chore` (agent adjusts) |
 
-**Sources (Decision 4.5):** bd primary + GitHub URL resolution + git config + opt-in scope detection.
+GitHub issue types are a native upstream feature (rolled out 2024) — works on any GitHub repo without project-specific tooling.
+
+**Sources (Decision 4.5):** unblock-mcp graph cache (active claim + issue metadata) + GitHub issue body parsing (spec/plan link extraction) + git config (author, co-authors) + opt-in scope detection from working-tree diff.
 
 **Output (Decision 4.6):**
 
@@ -234,7 +237,7 @@ Generates a rich, structured commit message with git trailers from a bd issue. G
 {
   "subject_template": "feat(scope): ...",
   "body_template": "...",
-  "trailers": [ { "key": "Bd-Issue", "value": "..." }, ... ],
+  "trailers": [ { "key": "Closes", "value": "https://github.com/<owner>/<repo>/issues/<n>" }, ... ],
   "formatted": "<full ready-to-paste commit message>",
   "warnings": [ "..." ]
 }
@@ -356,9 +359,9 @@ These 26 decisions are **CONFIRMED** through prior user iteration. Re-litigation
 |---|---|---|
 | L4.1 | Function | Generate only. Validate/parse-existing deferred |
 | L4.2 | Convention migration | BREAKING CHANGE — pre-prod permits. Subject-only → subject + trailers |
-| L4.3 | Trailer schema | 6 canonical trailers (Bd-Issue, Closes, Refs, Spec, Plan, Phase) — STABLE contract; vocabulary EXTENSIBLE for future phases; parser MUST accept and round-trip unknown trailer keys |
-| L4.4 | Subject line | Returns `subject_template`. bd type → CC prefix mapping |
-| L4.5 | Sources | bd + GitHub URL resolution + git config + opt-in scope detection |
+| L4.3 | Trailer schema | 5 canonical trailers (Closes, Refs, Spec, Plan, Phase) — STABLE contract; vocabulary EXTENSIBLE for future phases; parser MUST accept and round-trip unknown trailer keys |
+| L4.4 | Subject line | Returns `subject_template`. GitHub issue type → CC prefix mapping (native GitHub issue types) |
+| L4.5 | Sources | unblock-mcp graph cache (active claim + GitHub issue metadata) + issue body parsing + git config + opt-in scope detection |
 | L4.6 | Output format | JSON with subject_template, body_template, trailers[], formatted, warnings[] |
 | L4.7 | `--with-changes` | Opt-in working-tree diff inspection for scope / API: / BREAKING CHANGE: |
 
@@ -601,12 +604,12 @@ These are **not blockers for plan approval** but **must be validated before §11
 | RG-4 | `failsafe` crate fitness — feature set, async support, compatibility with `tokio` | Foundation of resilience layer; if unfit, Decision L1.1 reopens | Compile + unit-test prototype |
 | RG-5 | `backoff` crate fitness — same as RG-4, plus `Retry-After` header support | Same | Compile + unit-test prototype |
 | RG-6 | `hdrhistogram` overhead at MCP tool-call frequency | Atomic histogram updates on every tool call; must not regress p99 | Bench: 10k tool calls/s, measure overhead |
-| RG-7 | bd → GitHub URL resolution path for `commit_context` `Closes:` trailer | Need a stable bd field or query that yields the linked GitHub issue URL | bd CLI / API path + fallback when no link exists |
-| RG-8 | bd parent-epic → phase number derivation | `Phase: NN` trailer derivation (Decision L4.3) | Documented bd query path; fallback when epic missing |
+| ~~RG-7~~ | ~~bd → GitHub URL resolution~~ — **DROPPED**: confused unblock product runtime with our internal dev workflow. unblock-mcp's active claim is a GitHub issue (in graph cache); URL resolution is direct, no indirection. | — | — |
+| ~~RG-8~~ | ~~bd parent-epic → phase derivation~~ — **DROPPED**: same scope error as RG-7. `Phase:` trailer is opt-in via repo config (`.unblock/commit_context.toml`), not derived from any external tracker. | — | — |
 | RG-9 | Test fixtures for `StaleStatus` — minimal Projects V2 mock that supports field read+write in `MockGitHubClient` | F1–F4 fixtures (Decision L5.5) require this | Mock extension PR or pattern reuse from existing `update_project_field` tests |
 | ~~RG-10~~ | ~~`non_exhaustive` impact on `DriftKind`~~ — **CLOSED** by §2.6 lock (project-wide policy: growable public enums MUST carry `#[non_exhaustive]`). Downstream `match` audit is now part of Epic 02.E task work, not a research question. | — | — |
 
-**Open research gaps after this iteration: 8 (RG-1, RG-3, RG-4, RG-5, RG-6, RG-7, RG-8, RG-9).**
+**Open research gaps after this iteration: 6 (RG-1, RG-3, RG-4, RG-5, RG-6, RG-9).**
 
 **Plan invariant:** every open research gap above maps to at least one task in §9. Smith's findings either confirm the plan or surface contradictions that loop back to Ada for plan revision.
 
@@ -675,16 +678,18 @@ Tasks:
 Tasks:
 
 1. Choose git inspection library based on RG-3 (`git2` vs `gix`).
-2. Schema definition for input (`bd_id`, `with_changes: bool`) + output.
-3. Subject-template builder (Decision L4.4): bd-type → CC prefix mapping.
-4. Trailer collector (Decision L4.3): each of the 6 canonical trailers, with empty-omission rules.
-5. bd → GitHub URL resolution for `Closes:` (RG-7).
-6. bd → epic → phase derivation for `Phase: NN` (RG-8).
-7. `--with-changes` path: diff inspection, scope detection, `API:` line suggestion, `BREAKING CHANGE:` footer suggestion.
-8. `formatted` field: assembled commit message, ready to paste.
-9. Reject bd type `epic` with a clear error per Decision L4.4.
-10. Documentation update: `commit_context` entry in `README.md`; convention upgrade noted in CHANGELOG.
-11. Update `CLAUDE.md` "Commit Strategy" section to reference the new tool and the trailer-based convention (BREAKING CHANGE marker).
+2. Schema definition for input (no positional bd reference; tool reads active claim from graph cache; optional `with_changes: bool`, optional `refs: [<github-issue-url>]`) + output.
+3. Subject-template builder (Decision L4.4): GitHub issue type → CC prefix mapping.
+4. Trailer collector (Decision L4.3): each of the 5 canonical trailers, with empty-omission rules.
+5. `Closes:` trailer: read active claim from unblock-mcp graph cache; derive `<owner>/<repo>/issues/<n>` URL directly. No external indirection.
+6. `Spec:` / `Plan:` trailers: parse the GitHub issue body for links to `docs/specs/` / `docs/plans/`; emit if found, omit otherwise.
+7. `Phase:` trailer (optional): read repo config `.unblock/commit_context.toml`; emit if `phase` declared, omit otherwise.
+8. `--with-changes` path: diff inspection, scope detection, `API:` line suggestion, `BREAKING CHANGE:` footer suggestion.
+9. `formatted` field: assembled commit message, ready to paste.
+10. Reject GitHub issue type `epic` with a clear error per Decision L4.4.
+11. Error path: when there is no active claim, return a structured error (no `Closes:` derivable).
+12. Documentation update: `commit_context` entry in `README.md`; convention upgrade noted in CHANGELOG.
+13. Update `CLAUDE.md` "Commit Strategy" section to reference the new tool and the trailer-based convention (BREAKING CHANGE marker).
 
 ### Epic 02.E — `reconcile` Extension: `StaleStatus`
 
@@ -767,10 +772,10 @@ The phase is complete when **all** of the following hold.
 
 ### 11.4 `commit_context` tool
 
-- [ ] All 6 trailers emitted per Decision L4.3 with the right omission rules.
-- [ ] Subject template uses correct CC prefix per Decision L4.4.
+- [ ] All 5 trailers emitted per Decision L4.3 with the right omission rules.
+- [ ] Subject template uses correct CC prefix per Decision L4.4 (GitHub issue type-driven).
 - [ ] `--with-changes` produces accurate scope, suggests `API:` line and `BREAKING CHANGE:` footer when applicable.
-- [ ] bd type `epic` is rejected with a clear error.
+- [ ] GitHub issue type `epic` is rejected with a clear error.
 - [ ] `formatted` field is a valid commit message that passes `git interpret-trailers --parse` round-trip.
 
 ### 11.5 `StaleStatus` reconcile
@@ -815,7 +820,6 @@ The phase is complete when **all** of the following hold.
 | `hdrhistogram` lock contention regresses p99 | Low | High | RG-6 bench gate; fall back to lock-free `quanta` + manual buckets if it fails |
 | Per-process breaker is wrong for Phase 06 multi-tenant | High (in P06) | Medium | Decision L1.3 documents the scope; Phase 06 plan revisits explicitly |
 | `git2` C-dep breaks Phase 04 cross-platform builds | Medium | High | RG-3 audit before commit; `gix` is the fallback |
-| bd → GitHub URL resolution path is unstable | Medium | Medium | RG-7 documents the path; tool emits warning trailer if resolution fails |
 | `commit_context` BREAKING CHANGE confuses existing agents | Low | Low | Pre-prod stance — no migration needed; CHANGELOG entry + CLAUDE.md update |
 | `StaleStatus` false positives flood `reconcile` output | Medium | Medium | WARN severity in Phase 02 (Decision L5.3); Phase 04 escalation requires real-world calibration |
 | Resilience layer extraction late-discovered as wrong shape for Phase 03 | Low | Medium | Mitigated by Decision §6.2 — `unblock-resilience` extracted in Epic 02.A; smoke-test imports the public API from a Phase 03 prototype harness before Phase 03 begins |
@@ -832,7 +836,7 @@ The Phase 02 entry in PRD §7 has been rewritten to:
 
 - Drop the OpenTelemetry bullet from the in-scope feature list and add a **Deferred** subsection cross-referencing Phase 06 for the OTel adapter.
 - Mention `StaleStatus` explicitly as the 7th drift type (Phase 02 brings `ReconcileEngine` to completeness).
-- Annotate `commit_context` with the BREAKING CHANGE note (subject-only bd-id → subject + canonical trailers) and explicitly note the trailer vocabulary is **extensible** (Decision 4).
+- Annotate `commit_context` with the BREAKING CHANGE note (new git trailers convention adopted on top of any existing subject-line conventions) and explicitly note the trailer vocabulary is **extensible** (Decision 4).
 - Add the new `unblock-resilience` crate to the Phase 02 scope bullets, cross-linked to §6.2 of this plan.
 - Add `failsafe` / `backoff` library attribution.
 - Replace the `OpenTelemetry` line with the `ServerMetrics` (in-memory) line and reference the `doctor` tool snapshot delivery vehicle.

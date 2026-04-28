@@ -1006,7 +1006,7 @@ CLI flow:
 2. **GitHub Project setup**: prompt `GITHUB_TOKEN` (read from env if `UNBLOCK_TOKEN`/`GITHUB_TOKEN` set) + `owner/repo`; validate via `client.viewer()`; call `ensure_github_project()` (§13.1).
 3. **Register MCP server** in selected editors via §13.3 idempotent merge.
 4. **Print JetBrains instructions** (§13.4) if user mentioned JetBrains in their toolchain.
-5. **Print summary** + "next steps" (restart editors, try `bd ready`).
+5. **Print summary** + "next steps" (restart editors, then invoke the unblock MCP `ready` tool from inside the agent).
 
 Errors abort cleanly without partial writes; all file edits are atomic (write to `<file>.tmp`, fsync, rename).
 

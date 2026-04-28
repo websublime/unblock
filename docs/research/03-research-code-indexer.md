@@ -449,7 +449,7 @@ Three coexisting entry points:
 2. GitHub Project setup → prompt `GITHUB_TOKEN` + repo, validate, run `ensure_github_project()`
 3. Register MCP server in selected editors → idempotent merge of config files
 4. Print summary + JetBrains manual instructions (per Q9.2)
-5. Print "next steps" (restart editors, try `bd ready`)
+5. Print "next steps" (restart editors, try `unblock` MCP `ready` tool from inside the agent)
 
 **`unblock-mcp register --host=<x>` flags:**
 - `--host=<cursor|claude-code|claude-desktop|zed|vscode|jetbrains|all>`
