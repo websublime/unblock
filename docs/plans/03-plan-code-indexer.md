@@ -6,7 +6,7 @@
 > Date: 2026-04-27
 > Crates (new): `unblock-indexer-core`, `unblock-indexer`
 > Crates (modified): `unblock-mcp`
-> Depends on: Phase 02 (MCP Complete) — reuses OpenTelemetry, circuit breaker, retry policies for HTTP grammar fetch
+> Depends on: Phase 02 (MCP Complete) — consumes `unblock-resilience` (circuit breaker + retry) and instruments via the in-memory `ServerMetrics` introduced in Phase 02. OpenTelemetry export is deferred to Phase 06.
 > Required by: Phase 04 (Plugin) — supervisors and Sherlock will lean on indexer tools instead of Glob/Grep/Read
 > Source: [MANIFESTO](../MANIFESTO.md) · [PRD §7 Phase 03](../PRD.md) · [SPEC](../SPEC.md)
 
@@ -41,7 +41,7 @@ The indexer is multi-language, persisted on disk (SQLite + FTS5), pre-warmed by 
 
 **Outcome:** `v1.0.0` of the unblock MCP surface gains a code-indexer tool set served from the same binary as the issue-graph tool set. A supervisor or Sherlock investigating a bead can ask `find_symbol("DependencyGraph")` and get file/line back in milliseconds, instead of grepping the workspace.
 
-**Phase positioning.** Phase 03 slots **after** Phase 02 (MCP Complete) deliberately. The grammar fetcher is HTTP-bound, so it leans on Phase 02's retry-with-backoff, circuit breaker, and OpenTelemetry plumbing rather than reinventing them. Phase 03 ships the first installable v1.0.0 with both tool sets.
+**Phase positioning.** Phase 03 slots **after** Phase 02 (MCP Complete) deliberately. The grammar fetcher is HTTP-bound, so it leans on Phase 02's retry-with-backoff and circuit breaker via the new `unblock-resilience` crate (Plan 02 §6.2) rather than reinventing them. Observability flows through Phase 02's in-memory `ServerMetrics`; OpenTelemetry export is deferred to Phase 06. Phase 03 ships the first installable v1.0.0 with both tool sets.
 
 **Governing constraints (from MANIFESTO + global feedback):**
 

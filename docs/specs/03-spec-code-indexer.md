@@ -46,7 +46,7 @@ Everything required to implement Phase 03 (v1.0.0): two new crates (`unblock-ind
 
 ### 1.2 What this spec does NOT cover
 
-- Phase 02 functionality (retry, circuit breaker, OpenTelemetry) — *consumed* here, not redefined. See `unblock-github` / `unblock-mcp` Phase 02 surface.
+- Phase 02 functionality (retry, circuit breaker, in-memory `ServerMetrics`) — *consumed* here, not redefined. The resilience surface lives in `unblock-resilience` (per Plan 02 §6); OpenTelemetry export is deferred to Phase 06.
 - Phase 04 distribution (cargo-dist, Homebrew, GitHub App auth).
 - Plugin pipeline (Phase 05) — supervisors will consume the indexer tools but do not affect this spec.
 - Remote MCP transport (Phase 06).
@@ -1362,15 +1362,23 @@ These are the **non-negotiable** properties of the indexer subsystem. Implementa
 
 These items are **not blocking** spec approval. They are tracked here so Fernando's bead breakdown captures them as work items.
 
-### 20.1 UNRESOLVED — Phase 02 dependency surface (Research §NR2)
+### 20.1 RESOLVED — Phase 02 dependency surface
 
-**Action**: Epic 03.2 first bead must:
+**Resolution (2026-04-28, Plan 02 APPROVED).** Phase 02 plan §6 pinned the contract: the resilience layer ships as a stand-alone crate `unblock-resilience` (extracted in Epic 02.A, no transitive dep on `unblock-github`). `unblock-indexer` depends directly on `unblock-resilience`. OpenTelemetry is **deferred to Phase 06** — Phase 03 instruments via the in-memory `ServerMetrics` introduced in Phase 02 (no external collector required).
 
-1. Read the merged Phase 02 surface for retry-with-backoff + circuit-breaker + OpenTelemetry meter.
-2. Update §8.2 of this spec with concrete symbol names + crate path.
-3. Confirm the surface is stable enough for `unblock-indexer` to depend on.
+**Pinned import surface for `unblock-indexer`** (per [02-plan-mcp-complete §6.3](../plans/02-plan-mcp-complete.md#63-pinned-api-for-phase-03-consumption)):
 
-If Phase 02 has not merged when Epic 03.2 opens, Epic 03.1 (workspace setup) may proceed in parallel; Epic 03.2 blocks on the surface confirmation.
+```rust
+use unblock_resilience::{ResiliencePolicy, IsRetryable, BreakerSnapshot, RetrySnapshot, BreakerState};
+```
+
+**Action remaining for Epic 03.2 first bead:**
+
+1. Verify the merged Phase 02 surface matches §6.3 of Plan 02 byte-for-byte.
+2. Update §8.2 of this spec with the concrete `unblock_resilience::*` symbol names (replace any `unblock_github::resilience::*` placeholder text).
+3. Implement `IsRetryable` on the grammar-fetch error type.
+
+If Phase 02 has not merged when Epic 03.2 opens, Epic 03.1 (workspace setup) may proceed in parallel; Epic 03.2 blocks on the surface confirmation. The crate-extraction question is closed.
 
 ### 20.2 DEFERRED — wasmtime Engine cache (Research §R2 open question)
 
