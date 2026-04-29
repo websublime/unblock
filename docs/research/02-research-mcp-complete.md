@@ -317,9 +317,9 @@ The **bench gate (Epic 02.B Task 9)** must be re-scoped:
 **Needs-review items (carry to spec phase):**
 - The plan §11.2 bench gate language ("Per-call instrumentation overhead < 1µs (bench RG-6)") is achievable with Option A at realistic load. Spec must replace the implicit 10k/s figure with a concrete realistic-load methodology paragraph (mirroring Phase 03 research's R8/R10 methodology pattern).
 
-**Open questions (one).**
+**Open questions — RESOLVED:**
 
-- Q-6.1 — Should the spec call out a specific `Histogram::new_with_bounds(low, high, sigfig)` default per metric category, or leave it implementation-decision? **Recommendation:** spec pins defaults; implementation may override per-metric only with explicit comment justifying the deviation.
+- Q-6.1 — Resolved by user during /research adjudication: spec pins defaults `tool_durations`=`(1µs, 60s, sigfig=3)` and `api_durations`=`(1ms, 60s, sigfig=3)`. Per-metric overrides permitted only with one-line justification (in spec or as `// SAFETY: bounds widened because ...` code comment). Plan §2.2 updated with the locked defaults.
 
 ---
 
@@ -363,14 +363,14 @@ This means `Issue` already carries the Status field value as a parsed single-sel
 
 **F1–F4 fixture construction, all viable from the existing mock:**
 
-| Fixture | Setup |
-|---|---|
-| F1 (graph: closed; field: in_progress) | `Issue.state = Closed`; `Issue.project_field("Status") = Some("in_progress")` |
-| F2 (graph: blocked; field: ready) | `Issue.state = Open`, blocking-edge present; `project_field("Status") = Some("ready")` |
-| F3 (graph: ready; field: ready) | `Issue.state = Open`, no blocking edges; `project_field("Status") = Some("ready")` |
-| F4 (graph: any; field: None) | `Issue.project_field("Status") = None` — should yield `MissingProjectField`, not `StaleStatus` |
+| Fixture | Type | Setup | Assertion |
+|---|---|---|---|
+| F1 | positive | `Issue.state = Closed`; `Issue.status = InProgress` (parsed from Projects V2 single-select) | drift report **CONTAINS** `StaleStatus { issue_id, expected: Closed, actual: InProgress }` |
+| F2 | positive | `Issue.state = Open`, blocking-edge present (graph computes `Blocked`); `Issue.status = Ready` | drift report **CONTAINS** `StaleStatus { issue_id, expected: Blocked, actual: Ready }` |
+| F3 | positive (happy path) | `Issue.state = Open`, no blocking edges; `Issue.status = Ready` | drift report **DOES NOT CONTAIN** any `StaleStatus` for the issue |
+| F4 | negative (filter test) | `Issue` exists but is NOT a member of the Project V2 (no `projectItems` entry) | drift report **DOES NOT CONTAIN** any `StaleStatus` for the issue (filter removed it pre-detection) |
 
-The detection routine reads the graph (already cached) and the Status field value (from the `Issue` projection). No additional mock state is needed.
+The detection routine reads `graph.issue_status()` (existing accessor) and `Issue::status` (existing field, populated by `parse_status_field` during GraphQL fetch). No additional mock state is needed beyond what `MockGitHubClient` already supports.
 
 **Recommended decision.** Reuse the existing `update_project_field` test pattern (see `crates/unblock-github/src/projects.rs:587-641` for the production code path; `MockGitHubClient::push_update_field` for the mock). Construct F1–F4 as `Issue` fixtures, call `MockGitHubClient::push_fetch_graph_data` once with the topology, and assert the resulting `DriftReport.drift_found` contents.
 
@@ -381,14 +381,14 @@ The detection routine reads the graph (already cached) and the Status field valu
 - `crates/unblock-github/src/graphql.rs:189-193` — `ProjectV2ItemFieldSingleSelectValue` parser already in place.
 
 **Risk register.**
-- **R-9a (low):** `Issue` type's project-field representation may need verification at spec time. The `crates/unblock-core/src/types.rs` `Issue` struct should expose a `status_field()` accessor or equivalent — Epic 02.E Task 3 ("iterate graph nodes, compare `compute_status()` to Projects V2 Status field") implies this access path exists; if it doesn't, Task 3 carries a small accessor-add subtask.
-- **R-9b (low):** F4 (None field state) currently maps to `MissingProjectField` per existing detection. Spec must clarify that `MissingProjectField` is **per-project** (the field is absent from the whole project), not per-issue (the field exists but a specific issue has no value). The plan §2.5 fixture table says F4 yields `MissingProjectField (NOT StaleStatus)` — verify this matches the existing detection for the per-issue case. If not, spec must introduce a 7th vs 8th drift type distinction OR redefine F4.
+- **R-9a (low → RESOLVED):** Verified post-research: no new accessor needed. `DependencyGraph::issue_status() -> &HashMap<QualifiedId, Status>` exists at `crates/unblock-core/src/graph.rs:574` (returns the graph-computed expected status); `Issue::status: Status` exists at `crates/unblock-core/src/types.rs:144` (populated by the private `parse_status_field()` helper in `crates/unblock-github/src/graphql.rs:1050` during GraphQL fetch). Detection algorithm consumes both directly. Smith's earlier draft pseudocode used a non-existent `compute_status()` function name — plan §2.5 corrected.
+- **R-9b (low → RESOLVED):** Verified: `MissingProjectField { field_name: String }` at `crates/unblock-core/src/reconcile.rs:83` is **per-project** by design (reports "the field DEFINITION was deleted from the Project"). The plan's original F4 fixture confused per-issue field=None with per-project field deletion. F4 reformulated as a **negative filter test** (issue not in Project V2 → reconcile filters before drift detection → no `StaleStatus` emitted). No new variant needed; no widening of `MissingProjectField` needed.
 
-**Needs-review item (CARRY TO SPEC):**
-- **NR-9.1** — Verify whether the existing `MissingProjectField` is per-project or per-issue. Plan §2.5's F4 expectation requires per-issue semantics; if the existing variant is per-project, spec must either widen `MissingProjectField` or introduce a new variant.
+**Needs-review item (CARRY TO SPEC) — RESOLVED:**
+- **NR-9.1** — Resolved by user during /research adjudication: F4 reformulated as a negative test asserting that issues outside Project V2 are filtered before drift detection. Plan §2.5 fixture table and §11.5 acceptance updated. Spec must document the filter step + ordering invariant explicitly.
 
-**Open questions (one).**
-- Q-9.1 — Is `Issue::project_field("Status")` an existing accessor or does Epic 02.E Task 3 add it? Quick code-walk should answer; spec to confirm.
+**Open questions — RESOLVED:**
+- Q-9.1 — `Issue::project_field("Status")` does NOT exist as an accessor, but it is not needed: `Issue::status` already holds the parsed value. See R-9a above.
 
 ---
 
@@ -456,10 +456,16 @@ Same root cause as CC-3 / RG-8. `Phase:` trailer is opt-in via repo config, not 
 
 ## Recommendation
 
-**Proceed to spec authoring** with the following preconditions visible to the user during /spec sign-off:
+**Proceed to spec authoring.** All adjudications have been made during /research review:
 
-1. **NR-6.1** — Spec's RG-6 bench gate uses realistic load methodology, not 10k/s. (Cross-cutting CC-1.)
-2. **NR-9.1** — Verify `MissingProjectField` is per-issue vs per-project before locking F4 expectation.
-3. **CC-5** — Plan §0.2 audit correction: `is_retryable()` does not exist; Epic 02.A Task 3 implements from scratch.
+| ID | Status | Resolution |
+|---|---|---|
+| **NR-6.1** | ✅ RESOLVED | `Mutex<hdrhistogram::Histogram>` per métrica; bench load 1k/s sustained + 10k/s burst; per-call overhead <500ns uncontested / <5µs burst; soft <5% p99 regression budget. Plan §2.2, §11.2 updated. |
+| **NR-9.1** | ✅ RESOLVED | F4 reformulated as negative filter test (issues not in Project V2 → filtered before detection → no `StaleStatus` emitted). Plan §2.5, §11.5 updated. |
+| **CC-5** | ✅ RESOLVED | `is_retryable()` helper does NOT exist in workspace; Epic 02.A Task 3 implements `IsRetryable` trait in `unblock-resilience` and impl on `unblock-github::Error` from scratch. |
+| **Q-6.1** | ✅ RESOLVED | Histogram bounds defaults pinned: `tool_durations` (1µs, 60s, sigfig=3), `api_durations` (1ms, 60s, sigfig=3); override-with-justification clause. Plan §2.2 updated. |
+| **Q-9.1** | ✅ RESOLVED | `Issue::project_field("Status")` accessor does not exist and is not needed. `Issue::status` already holds the parsed value; `graph.issue_status()` provides the expected. Plan §2.5 pseudocode corrected. |
 
-NR-7.1, NR-8.1, CC-3, CC-6 dropped (scope error: confused bd-as-dev-tool with bd-as-product). RG-2 and RG-10 remain closed. RG-4 and RG-5 confirm the library choices in Decision L1.1. Spec authoring (Ada) can proceed once the user adjudicates NR-6.1 / NR-9.1 / CC-5.
+NR-7.1, NR-8.1, CC-3, CC-6 dropped (scope error: confused bd-as-dev-tool with bd-as-product). RG-2 and RG-10 closed by user during /plan iteration. RG-4 and RG-5 confirm the library choices in Decision L1.1.
+
+No locked decision in plan §4 has been invalidated. Spec authoring (Ada) can proceed.

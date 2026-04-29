@@ -147,7 +147,16 @@ Captures everything the original PRD §7.2 listed for OTel:
 
 **Forward-compat for Phase 06 (Decision 2.2).** The `ServerMetrics` struct does not change when Phase 06 adds OTel. The OTel layer is an **adapter** that reads the same atomic counters and histograms — wrap, do not replace. This contract is documented in the spec and pinned by a contract test in Phase 02 itself.
 
-**Location (research gap RG-1).** Provisional location: `unblock-mcp::metrics`. If the struct is naturally pure (no MCP types) it migrates to `unblock-core::metrics`. Decision finalised in §11 acceptance after `cargo doc --no-deps` on the candidate.
+**Histogram bounds defaults (Q-6.1, LOCKED).** Per Decision NR-6.1.1 the durations histograms use `Mutex<hdrhistogram::Histogram>` per metric. Construction is pinned to `Histogram::new_with_bounds(low, high, sigfig=3)` with the following defaults:
+
+| Histogram | low | high | sigfig | Memory ≈ |
+|---|---|---|---|---|
+| `tool_durations` (per tool) | 1 µs | 60 s | 3 (≈1% precision) | ~16-32 KB |
+| `api_durations` (per API method) | 1 ms | 60 s | 3 | ~16-32 KB |
+
+`high=60s` is set above the realistic worst case (retry budget 30s + circuit-breaker open window 10s + safety margin). `low` is tight enough to give histogram precision where measurements actually land without aggressive clamping. Per-metric overrides are permitted only when accompanied by a one-line justification (in spec or as a `// SAFETY: bounds widened because ...` comment in code) — the defaults above are the project-wide expectation.
+
+**Location (research gap RG-1, LOCKED — recommend `unblock-core::metrics`).** Per Smith's RG-1 finding the struct is naturally pure (atomics + histograms + read-only snapshot). Place it in `unblock-core::metrics`. Phase 06 OTel adapter then lives in `unblock-core` (or in a new `unblock-otel` adapter crate) without round-tripping through the `unblock-mcp` binary crate. Final placement validated by `cargo doc --no-deps` in §11 acceptance.
 
 ### 2.3 `doctor` MCP tool (new)
 
@@ -252,14 +261,18 @@ Adds the 7th drift type and brings `ReconcileEngine` to PRD §7.2 completeness.
 **Detection (Decision 5.2):**
 
 ```text
-for each issue in graph:
-    expected = compute_status(graph, issue)        // existing graph engine
-    actual   = projects_v2.status_field(issue)
-    if expected != actual:
-        drift_found.push(StaleStatus { issue_id, expected, actual })
+for (qid, expected) in graph.issue_status():           // existing graph engine accessor
+    if let Some(issue) = issues.get(qid):
+        actual = issue.status                          // already parsed during GraphQL fetch
+        if expected != actual:
+            drift_found.push(StaleStatus { issue_id: qid, expected, actual })
 ```
 
-`compute_status()` already exists in the graph engine (Phase 01). No new computation logic — only field comparison + reporting.
+Both accessors already exist in the codebase (Phase 01):
+- `DependencyGraph::issue_status() -> &HashMap<QualifiedId, Status>` at `unblock-core/src/graph.rs:574` — returns the graph-computed expected status per issue.
+- `Issue::status: Status` field at `unblock-core/src/types.rs:144` — populated by `parse_status_field()` (private helper in `unblock-github/src/graphql.rs:1050`) during GraphQL fetch from the Projects V2 single-select field.
+
+No new computation logic — only field comparison + reporting.
 
 **Severity (Decision 5.3):**
 
@@ -270,12 +283,16 @@ for each issue in graph:
 
 **Test fixtures (Decision 5.5):**
 
-| Fixture | Graph state | Field state | Expected drift |
+| Fixture | Type | Setup | Assertion |
 |---|---|---|---|
-| F1 | closed | in_progress | `StaleStatus` |
-| F2 | blocked | ready | `StaleStatus` |
-| F3 | ready | ready | none |
-| F4 | (any) | None | `MissingProjectField` (NOT `StaleStatus`) |
+| F1 | positive | graph=closed, field=in_progress | drift report **CONTAINS** `StaleStatus { issue_id, expected: closed, actual: in_progress }` |
+| F2 | positive | graph=blocked, field=ready | drift report **CONTAINS** `StaleStatus { issue_id, expected: blocked, actual: ready }` |
+| F3 | positive (happy path) | graph=ready, field=ready | drift report **DOES NOT CONTAIN** any `StaleStatus` for the issue (matched, no drift) |
+| F4 | negative (filter test) | issue exists in repo but is NOT added to Project V2 | drift report **DOES NOT CONTAIN** any `StaleStatus` for the issue (filter removed it before detection) |
+
+**Filter invariant (codified by F4):** issues that are not members of the Project V2 are filtered out **before** drift detection runs. This prevents false-positive `StaleStatus` drifts caused by `field=None` for non-member issues. The F3 and F4 fixtures both assert "no `StaleStatus`" but for different reasons — F3 confirms the detection algorithm is correct on matching state; F4 confirms the pre-detection filter is correct on non-member state.
+
+**Scope clarification:** `MissingProjectField` (existing variant) is per-project — it reports when the **field definition** is deleted from the Project V2. It is NOT used for "this issue has no value for this field". Test coverage for `MissingProjectField` already lives in the existing `reconcile.rs` test suite and is out of scope for the `StaleStatus` fixtures above.
 
 ### 2.6 `non_exhaustive` posture — locked project-wide policy
 
@@ -370,7 +387,7 @@ These 26 decisions are **CONFIRMED** through prior user iteration. Re-litigation
 | # | Decision | Locked Value |
 |---|---|---|
 | L5.1 | Enum extension | Add `StaleStatus` variant — pre-prod permits |
-| L5.2 | Detection | Reuse `compute_status()` from graph engine; field comparison only |
+| L5.2 | Detection | Iterate `graph.issue_status()` (existing accessor) and compare to `Issue::status` (existing field, populated by `parse_status_field` during GraphQL fetch); no new compute logic |
 | L5.3 | Severity | Phase 02: WARN; Phase 04 escalates to FAIL |
 | L5.4 | Repair | Existing `update_project_field` GraphQL mutation; idempotent |
 | L5.5 | Test fixtures | 4 canonical fixtures (F1–F4 in §2.5) |
@@ -700,7 +717,7 @@ Tasks:
 
 1. Add `StaleStatus { issue_id, expected, actual }` variant to `DriftKind` enum in `unblock-core::reconcile`.
 2. Apply `#[non_exhaustive]` to `DriftKind` (mandated by §2.6 project-wide policy). Audit and fix any downstream `match` site that breaks (compile-time gated).
-3. Detection routine per Decision L5.2 — iterate graph nodes, compare `compute_status()` to Projects V2 Status field.
+3. Detection routine per Decision L5.2 — iterate `graph.issue_status()` and compare against `Issue::status` (already populated by `parse_status_field()` during GraphQL fetch). No new accessor work needed; both already exist in Phase 01 code.
 4. Repair routine per Decision L5.4 — call existing `update_project_field` mutation.
 5. Severity classification: WARN in Phase 02 (Decision L5.3). Severity is a tool-output concern; the engine emits the drift, the tool flags severity.
 6. Test fixtures F1–F4 per Decision L5.5 (depends on RG-9).
@@ -759,8 +776,14 @@ The phase is complete when **all** of the following hold.
 
 - [ ] `ServerMetrics` instrumented at single dispatch points (1× for tools, 1× for API).
 - [ ] `doctor` returns full snapshot in default invocation.
-- [ ] Per-call instrumentation overhead < 1µs (bench RG-6).
+- [ ] Histograms use `Mutex<hdrhistogram::Histogram>` per metric (per Decision NR-6.1.1 — `hdrhistogram` has no concurrent variant).
+- [ ] Histogram bounds use the locked defaults (`tool_durations`: low=1µs / high=60s / sigfig=3; `api_durations`: low=1ms / high=60s / sigfig=3) per Q-6.1; overrides require a one-line justification.
+- [ ] Bench load uses realistic methodology: **1k tool calls/s sustained + 10k tool calls/s burst** (Decision NR-6.1.2) — NOT the original unrealistic 10k sustained.
+- [ ] **Hard gate**: per-call instrumentation overhead < 500ns under uncontested lock (warm sustained), < 5µs under 10k/s burst (Decision NR-6.1.3).
+- [ ] **Hard gate**: p99 of warm-cache `ready` remains < 2s post-metrics (existing Phase 01 invariant must not regress).
+- [ ] **Soft gate** (informational): < 5% p99 regression on warm-cache `ready` vs pre-metrics baseline (Decision NR-6.1.4).
 - [ ] Snapshot serialisation is stable — contract test for Phase 06 forward-compat passes.
+- [ ] `ServerMetrics` lives in `unblock-core::metrics` (RG-1 resolved); `cargo doc --no-deps` confirms no MCP-specific types leak into core.
 
 ### 11.3 `doctor` tool
 
@@ -781,7 +804,9 @@ The phase is complete when **all** of the following hold.
 ### 11.5 `StaleStatus` reconcile
 
 - [ ] `DriftKind` has 7 variants; `StaleStatus` is one of them.
-- [ ] Detection finds drift in fixtures F1, F2; not in F3; F4 yields `MissingProjectField` not `StaleStatus`.
+- [ ] Detection finds `StaleStatus` drift in fixtures F1, F2 (positive paths).
+- [ ] Detection emits NO `StaleStatus` in fixture F3 (matched state).
+- [ ] **Filter invariant:** issues not in Project V2 are filtered out before drift detection — F4 (negative test) emits NO `StaleStatus` for the non-member issue.
 - [ ] `--fix` writes the computed value via `update_project_field`; second pass yields zero drift (idempotent).
 - [ ] Severity in Phase 02 is WARN.
 - [ ] `#[non_exhaustive]` applied to `DriftKind` per §2.6 project-wide policy; downstream `match` sites compile clean.
