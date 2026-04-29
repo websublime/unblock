@@ -1,42 +1,20 @@
-# Research 03 — Code Indexer MCP (Phase 03)
+# Research 03 — Code Indexer CLI (Phase 03)
 
 > Phase: 03
 > Author: Smith (investigator)
-> Date: 2026-04-27
-> Source plan: ~~03-plan-code-indexer.md~~ (DELETED 2026-04-29 — see status below)
+> Date: 2026-04-29
+> Source plan: [03-plan-code-indexer.md](../plans/03-plan-code-indexer.md) (APPROVED, commit a25bf21)
 > Source PRD: [PRD §7 Phase 03](../PRD.md)
-> Status: **PRE-REFRAME (2026-04-29) — partial obsolescence**
-
-> **REFRAME NOTE.** This research was authored against the original Phase 03
-> design (Code Indexer **MCP tools**). On 2026-04-29 the phase was reframed to
-> a separate CLI binary (`unblock-code`) with statically-linked tree-sitter
-> grammars (see PRD §7 Phase 03, SPEC §6.5). The plan and spec were deleted and
-> are being re-authored.
->
-> **Sections that survive the reframe** (still valid for the new spec):
-> - **R3** — Top-10 grammar audit (versions, ABI, staleness flags).
-> - **R4** — sqlx + FTS5 (PRAGMA assertion, external-content triggers, `'rebuild'` after reindex; resolution Q4 add-`comment`-column stands).
-> - **R5** — Symbol-extraction queries / S-expression `tags.scm` vendoring; resolution Q5 keep-all-16-kinds stands.
-> - **R7** — `ignore` crate (`require_git(false)` footgun, `same_file_system`, `force_include` resolution Q7 stands).
-> - **R8** — Latency methodology (corpus tiers, criterion harness, implicated-file rule). Targets carry over.
->
-> **Sections obsoleted or needing re-investigation:**
-> - **R1** — WASM grammar pipeline. Static-linked v1.0.0 has no pipeline. Revisits if WASM revival.
-> - **R2** — Runtime WASM loading. Same. The C1 contradiction (use `tree-sitter` `wasm` feature, not `tree-sitter-loader`) is moot for v1.0.0.
-> - **R6** — `notify-debouncer-full`. Watcher dropped; per-query mtime check is the sole sync mechanism. R6 becomes informational only.
-> - **R9** — Editor MCP config schemas. CLI does not register with editors. Q9.1 / Q9.2 resolutions OBSOLETE.
-> - **R10** — Token-saving methodology. Reframe needed: harness measures `Bash("unblock-code ...")` invocations vs Glob/Grep/Read. Methodology survives; threshold (2.0× hard) carries over; aspirationals A/B/C re-baselined under the new transport.
->
-> **New investigation gaps for the next /research dispatch:**
-> - **R-CLI-1** — CLI cold-start budget: process spawn + sqlx open + first JSON byte. Bench across Top-10 langs loaded.
-> - **R-CLI-2** — Static-link binary size: measure each `tree-sitter-<lang>` crate's contribution; sum; compare against ripgrep / fd benchmarks for acceptability.
-> - **R-CLI-3** — Cargo feature-flag ergonomics: validate `--no-default-features --features lang-rust,lang-python` produces a smaller binary that still passes the test suite for the selected langs.
->
-> The original Q-resolutions and the resolution log below remain authoritative
-> for the surviving sections; obsoleted Q-resolutions (Q9.1, Q9.2) should be
-> ignored by the spec re-author.
+> Status: **PROCEED to spec authoring** — pending one BLOCKING plan amend (R-CLI-4 / H2)
+> History: this file was re-authored on 2026-04-29 after the MCP→CLI reframe (commit a77757e). The prior PRE-REFRAME content has been superseded; survival map for old R-sections is enumerated in §0.
 
 ---
+
+## 0. Reframe history
+
+This research file was re-authored after the 2026-04-29 reframe that turned Phase 03 from MCP tools into the `unblock-code` CLI. The prior file's R3 / R4 / R5 / R7 / R8 sections survive in spirit and have been re-validated against current state of crates.io and upstream tree-sitter repos (versions and findings updated). The prior R1, R2 (WASM runtime), R6 (watcher), R9 (editor MCP config), and R10 (HARD ROI gate) are obsolete and not present in this file.
+
+New gaps R-CLI-1 through R-CLI-5 — introduced by the static-linked CLI design — are documented inline below.
 
 ---
 
@@ -44,503 +22,525 @@
 
 | # | Status | One-line takeaway |
 |---|---|---|
-| R1 | **CONFIRMED with adjustment** | `tree-sitter build --wasm` produces a `tree-sitter-<lang>.wasm` blob; current toolchain uses `wasi-sdk` (not emscripten) since v0.26.1. Packaging via GH Releases is mechanically straightforward. |
-| R2 | **CONFIRMED — `tree-sitter` crate `wasm` feature wins over `tree-sitter-loader`** | Use `tree-sitter` crate's `wasm` feature → `WasmStore::load_language(name, bytes)`. `tree-sitter-loader` targets *grammars cloned to disk*, not pre-built WASM blobs — it is the wrong tool for L2. |
-| R3 | **PARTIALLY CONFIRMED — ABI fragmentation risk** | All 10 grammars exist and are maintained, **but** they span tree-sitter ABI versions 14 and 15 with last-release dates ranging from Nov 2024 to Mar 2026. Cpp + Ruby are stale (Nov 2024). Pin per language; do not assume one tree-sitter version covers all 10. |
-| R4 | **CONFIRMED with caveat** | sqlx-sqlite uses libsqlite3-sys's `bundled` feature by default and the rusqlite-style bundled build compiles with `-DSQLITE_ENABLE_FTS5`. **Verify post-merge with `PRAGMA compile_options;`** — sqlx delegates the compile flags to libsqlite3-sys and does not document this guarantee itself. |
-| R5 | **CONFIRMED — per-language `.scm`, shared kind enum** | Tree-sitter's own `tags.scm` files (one per grammar repo) already define a near-canonical capture set (`@definition.{class,function,method,interface,module,...}`). Reuse these, don't reinvent. The plan §6.3 enum is mostly aligned; minor adjustments below. |
-| R6 | **PARTIALLY CONFIRMED — known macOS atomic-save risk** | `notify-debouncer-full` handles renames via `FileIdMap` and merges paired rename events. Plan's 200ms debounce is in the right order of magnitude but the upstream README example uses 2 s. Per-query mtime check (already in §8.2) is the correct safety net. |
-| R7 | **CONFIRMED with caveat** | `ignore::WalkBuilder` handles nested `.gitignore`, `.ignore`, hidden files, and non-git checkouts via `require_git(false)`. Default `require_git=true` will silently disable gitignore on a non-git checkout — must be set explicitly. |
-| R8 | **OPEN — methodology defined, numbers TBD** | Latency targets (10ms / 20ms p99) are *plausible* for a warm SQLite + FTS5 index but require the criterion bench suite from Epic 03.6. Methodology proposed below. |
-| R9 | **CONFIRMED — six host config map produced** | Six host map enumerated below. JetBrains is the *only* host without a stable user-editable JSON file (settings UI only, with "Import from Claude" supported). |
-| R10 | **OPEN — methodology defined, no baseline yet** | Token-saving harness methodology defined below; the actual baseline corpus must be produced during Epic 03.6 by replaying 3 representative agent flows on a fixture repo. |
+| R3 | **CONFIRMED with stale flags** | All 10 upstream `tree-sitter-<lang>` Cargo crates publish usable Rust bindings; ABI 14/15 split fits tree-sitter 0.26.8 compatibility window; 4 grammars (typescript, cpp, ruby, java) flagged stale (>12 months). |
+| R4 | **CONFIRMED** | sqlx 0.8.6 + `libsqlite3-sys/bundled` 0.37 ship `ENABLE_FTS5` on every supported platform; canonical `'delete'`-then-insert triggers + chunked-tx bootstrap pattern documented. |
+| R5 | **CONFIRMED with scope correction** | All 10 grammars expose `tags.scm`. The plan's "4 hand-written extension queries" estimate under-counts: real cost is ~30–40 query rules across all 10 languages because syntax differs per-language. |
+| R7 | **CONFIRMED** | `WalkBuilder::require_git(false)` mandatory; `Override` ordering (default-excludes first, user `force_include` after) gives the desired precedence. |
+| R8 | **CONFIRMED — methodology pinned** | criterion 0.5 + `async_tokio` already in workspace; corpus tiers (Small/Medium/Large) named; implicated-file caps codified. |
+| R-CLI-1 | **MODELLED** | Cold-start estimated 30–60 ms full-load. Recommended L21 budget: p95 < 100 ms warm DB on Linux; +50% allowance on Windows. |
+| R-CLI-2 | **MODELLED — outliers identified** | Estimated full-load stripped binary ~40–50 MB. `tree-sitter-cpp` (~10 MB compiled contribution) and `tree-sitter-ruby` (~6 MB) are outliers. S1 ceiling: ≤ 50 MB stripped. |
+| R-CLI-3 | **CONFIRMED** | `dep:` syntax + `resolver = "2"` (already set) cleanly isolate optional language deps. CI matrix proposed for partial-feature builds. |
+| R-CLI-4 | **CONTRADICTED — BLOCKING plan amend required** | Plan H2 ("without requiring `cc` toolchain") is factually impossible: every grammar crate AND `libsqlite3-sys/bundled` require `cc` at build time. H2 must be reworded before spec authoring. |
+| R-CLI-5 | **CONFIRMED — methodology pinned, aspirationals reset** | 3 flows × N=10 × 2 arms = 60 runs; aspirationals A ≥ 3.5×, B ≥ 2.5×, C ≥ 1.8×, global median ≥ 2.5× (above the SOFT 2.0× threshold). |
 
-**Recommendation:** **Proceed to spec authoring.** No locked decision in plan §3 is unworkable. R3 (ABI drift), R4 (FTS5 verification), R6 (macOS), R8 / R10 (post-implementation measurement) carry forward as risks the spec must address explicitly.
-
----
-
-## R1 — WASM grammar pipeline mechanics
-
-**Validated finding.** `tree-sitter build --wasm` exists, produces a single `tree-sitter-<lang>.wasm` artifact per grammar, and is the supported route for distributing pluggable grammars. The toolchain switched from emscripten to `wasi-sdk` in tree-sitter CLI v0.26.1 (release notes state: *"switching to compile parsers to wasm using wasi-sdk, not emscripten"*). v0.26.7 also published release artifacts as zip archives. CI release-asset publishing on GH Releases is straightforward; max asset size is 2 GiB (a full grammar WASM is < 1 MB), there is no documented bandwidth cap, and assets are downloadable anonymously via `browser_download_url` (GitHub redirects to S3 storage; no separate documented rate limit but per-IP throttling on excessive parallel downloads is observed in the wild).
-
-**Recommended decision.**
-1. CI matrix uses **wasi-sdk** in the runner (do not pin emscripten — pre-0.26.1 path is dead).
-2. Release tag pattern: `v<unblock-version>-grammars` (already in plan §9), with assets named `tree-sitter-<lang>-<grammar-version>.wasm` + a top-level `manifest.toml` listing `(language, grammar_version, tree_sitter_abi_version, sha256)` per row.
-3. Runtime fetcher constructs URLs as `https://github.com/websublime/unblock/releases/download/<release-tag>/<asset-name>`. Use `browser_download_url` (not the API asset endpoint) to avoid the 5 000/h anonymous API budget — the redirect target does not consume API quota.
-4. Integrity verified by SHA-256 against `manifest.toml` *after* download.
-
-**Evidence.**
-- Tree-sitter v0.26.1 release notes (via Github): *"specify abi version via env var"* + emscripten → wasi-sdk switch.
-- v0.26.7 release notes: zip archive distribution.
-- GitHub docs: 2 GiB asset size cap, no bandwidth cap; anonymous download via `browser_download_url`.
-
-**Risk register.**
-- Emscripten/wasi-sdk transition means anyone reading older tree-sitter docs may be misled. Pin CI to a known tree-sitter CLI version (`>= 0.26.7`).
-- Anonymous per-IP throttling on GitHub asset downloads under fan-out (if many users bootstrap simultaneously, e.g. CI). Phase 02's circuit breaker + retry already mitigates; document an offline-bundle escape hatch as future work (not Phase 03).
-- `manifest.toml` itself must be authenticated to prevent integrity-bypass — recommendation: ship the manifest as part of the **same** release, signed by the same release tag SHA, and include the manifest's own SHA-256 as a constant in `unblock-indexer-core` (compile-time anchor).
+**Recommendation:** **PROCEED to spec authoring** — with one mandatory plan-level amend before §6.5 of SPEC is touched. See §Final Verdict.
 
 ---
 
-## R2 — Runtime WASM loading in Rust
+## Dependencies investigated (live, 2026-04-29)
 
-**Validated finding.** The `tree-sitter` Rust crate (latest 0.26.8) has a `wasm` feature flag that pulls in `wasmtime-c-api-impl` and exposes:
-
-- `WasmStore::new(engine: &Engine)` — wasmtime engine wrapper, `Send + Sync`.
-- `WasmStore::load_language(name: &str, bytes: &[u8]) -> Result<Language, WasmError>`.
-- `Parser::set_wasm_store(&mut self, &mut WasmStore)`.
-
-ABI constants: `LANGUAGE_VERSION = 15`, `MIN_COMPATIBLE_LANGUAGE_VERSION = 13` (per `tree_sitter/api.h`). A grammar built against ABI 14 still loads under tree-sitter 0.26.x.
-
-**`tree-sitter-loader` is the wrong abstraction** for the plan's L4 decision. Per its docs: *"dynamically find and build grammars at runtime, if you have cloned the grammars' repositories to your local filesystem."* It compiles native dylibs (via `cc`/`wasi-sdk`) on the user's machine — opposite of "fetch a pre-built WASM blob from a GH Release." Using `tree-sitter-loader` would force every end-user to have `cc`/`wasi-sdk` installed, breaking pluggability.
-
-**Recommended decision.**
-- **Use `tree-sitter` crate with `wasm` feature.** No `wasmtime` direct dependency, no `tree-sitter-loader`. Wasmtime is a transitive dep through the feature.
-- Maintain a per-language `WasmStore` *cache* keyed by language name; `Parser` instances are cheap, `WasmStore` is the expensive object (wasmtime compiled module).
-- Lazy-load grammars: do not load Java's WASM if the repo has no `.java` files (mirrors plan §8.1 step 2's threshold = ≥ 1 file).
-
-**Evidence.**
-- `docs.rs/tree-sitter` confirms the `wasm` feature, `WasmStore` API, and ABI constants.
-- `tree-sitter-loader` crate docs explicitly target on-disk grammar repositories.
-- `WasmStore` impls `Send + Sync` — usable from a tokio runtime without adapter.
-
-**Risk register.**
-- **Init cost (R8 dependency).** `WasmStore::load_language` invokes a wasmtime compilation. No published numbers in tree-sitter docs. Bench during Epic 03.2; if init > 100 ms / language, consider `wasmtime::Engine` configured with cache dir to amortise across processes. Lapce / Zed reportedly observe 50–150 ms cold-load per WASM grammar in practice.
-- ABI version mismatch errors are surfaced as `WasmError`. The fetcher must pre-validate `tree_sitter_abi_version` field in `manifest.toml` against the runtime's `MIN_COMPATIBLE_LANGUAGE_VERSION` *before* attempting `load_language` — fail fast with an actionable message.
-
-**Open question (flag for spec).**
-- Should we cache the wasmtime compiled artefact (Engine cache) under `~/.cache/unblock/grammars/wasmtime-cache/` to reduce subsequent process startup? Bench result determines this.
-
----
-
-## R3 — Top-10 grammar audit
-
-**Validated finding.** All 10 grammars exist on `github.com/tree-sitter/tree-sitter-<lang>` and are MIT-licensed. Maintenance and version freshness vary materially:
-
-| Language | Latest version | Released | Notes |
+| Crate | crates.io max_stable | Last release | ABI / notes |
 |---|---|---|---|
-| Rust | v0.24.2 | 2026-03-27 | Active |
-| TypeScript | v0.23.2 | 2024-11-11 | Stale (~17 months); two parsers (`typescript`, `tsx`) |
-| JavaScript | v0.25.0 | 2025-09-01 | Active (covers JS + JSX) |
-| Python | v0.25.0 | 2025-09-11 | Active |
-| Go | v0.25.0 | 2025-08-29 | Active |
-| Java | v0.23.5 | 2024-12-21 | Stale (~16 months) |
-| C | v0.24.2 | 2026-04-22 | Active (just released) |
-| C++ | v0.23.4 | 2024-11-11 | **Stale (~17 months); 54 open issues** |
-| Ruby | v0.23.1 | 2024-11-11 | Stale (~17 months) |
-| PHP | v0.24.2 | 2025-08-18 | Active |
-
-ABI versions across these grammars are not all aligned. The 0.23.x grammars typically target ABI 14; 0.24.x and 0.25.x target ABI 14 or 15. Tree-sitter 0.26.x runtime supports ABI 13–15, so all 10 *load* — but the manifest must record the actual ABI per grammar.
-
-**Recommended decision.**
-1. **Pin grammar versions in `manifest.toml`** with explicit `tree_sitter_abi_version` field per row. Use the latest release of each as of 2026-04-27 (table above) for v1.0.0.
-2. **Add a "freshness" column** in CI grammar audit job — flag grammars whose latest release is > 12 months old. Cpp / Ruby / TypeScript / Java currently flag.
-3. **TypeScript ships as two grammars** (`typescript` and `tsx`). Plan §6.3 / §2.4 must be aware: *"TypeScript"* in the Top-10 is two WASM blobs, not one. Recommend treating `tsx` as the canonical TS grammar (it accepts both `.ts` and `.tsx` per tree-sitter-typescript README).
-4. **Document the upstream-stale risk** in plan/spec §15 — if a stale upstream grammar misses a language feature, the contribution path is to upstream and version-bump, not fork.
-
-**Evidence.** GitHub release pages for each `tree-sitter-<lang>` repo (queried 2026-04-27).
-
-**Risk register.**
-- **C++ grammar staleness** (Nov 2024, 54 open issues) is the highest-risk item in the Top-10. Verify against a representative C++20/23 fixture during Epic 03.4 fixture work.
-- **Ruby** grammar is also Nov 2024; Ruby 3.3+ pattern-matching syntax may parse with errors. Same fixture validation needed.
-- ABI version pinning per grammar means the matrix in `grammars.yml` is `language × grammar_version` (per-cell version), not a single tree-sitter version.
+| `tree-sitter` | **0.26.8** | 2026-03-31 | ABI: `LANGUAGE_VERSION=15`, `MIN_COMPATIBLE=13` |
+| `tree-sitter-language` (shim) | 0.1.7 | 2026-02-01 | Required by all `tree-sitter-<lang>` v0.24+ crates |
+| `tree-sitter-rust` | **0.24.2** | 2026-03-27 | parser ABI 15, parser.c 6.5 MB |
+| `tree-sitter-typescript` | **0.23.2** | 2024-11-11 | parser ABI 14, parser.c 8.5 MB (×2 — typescript+tsx) |
+| `tree-sitter-javascript` | **0.25.0** | 2025-09-01 | parser ABI 15, parser.c 2.8 MB |
+| `tree-sitter-python` | **0.25.0** | 2025-09-11 | parser ABI 15, parser.c 3.4 MB |
+| `tree-sitter-go` | **0.25.0** | 2025-08-29 | parser ABI 15, parser.c 1.5 MB |
+| `tree-sitter-java` | **0.23.5** | 2024-12-21 | parser ABI 14, parser.c 2.5 MB |
+| `tree-sitter-c` | **0.24.2** | 2026-04-22 | parser ABI 15, parser.c 3.8 MB |
+| `tree-sitter-cpp` | **0.23.4** | 2024-11-11 | parser ABI 15, parser.c 25.2 MB ⚠ outlier |
+| `tree-sitter-ruby` | **0.23.1** | 2024-11-11 | parser ABI 14, parser.c 14.9 MB ⚠ outlier |
+| `tree-sitter-php` | **0.24.2** | 2025-08-18 | parser ABI 15, parser.c 7.1 MB (×2 if php_only enabled) |
+| `sqlx` | 0.8.6 | 2025-10-15 | `sqlite` feature enables `libsqlite3-sys/bundled` |
+| `libsqlite3-sys` | 0.37.0 | 2026-03-15 | `bundled` build sets `-DSQLITE_ENABLE_FTS5` |
+| `ignore` | 0.4.25 | 2025-10-30 | `WalkBuilder::require_git`, `same_file_system`, `Override` |
+| `cc` | 1.2.61 | 2026-04-24 | `build-dependency` of every grammar crate |
 
 ---
 
-## R4 — `sqlx` + FTS5
+## R3 — Top-10 Grammar Audit
 
-**Validated finding.** Three independent confirmations that FTS5 is present in the default sqlx-sqlite build:
+### Validated finding
 
-1. `sqlx-sqlite` enables `libsqlite3-sys`'s `bundled` feature by default — confirmed in sqlx README and `sqlx-sqlite/Cargo.toml`.
-2. `libsqlite3-sys`'s bundled `build.rs` includes `.flag("-DSQLITE_ENABLE_FTS5")` — confirmed against rusqlite source (sqlx delegates to the same crate).
-3. SQLite docs: FTS5 is **not** included by default; it must be enabled via `-DSQLITE_ENABLE_FTS5`. Bundled libsqlite3-sys does so.
+All ten grammars are present on crates.io as `tree-sitter-<lang>` Cargo crates and **all 10 publish a usable Rust binding** (each crate has `lib = bindings/rust/lib.rs` + tree-sitter-language-shim integration). Freshness ranges from 2024-11-11 to 2026-04-22.
 
-WAL mode is set via `SqliteConnectOptions::journal_mode(SqliteJournalMode::Wal)`. The setting is sticky across connections (per sqlx docs).
+**ABI split (LANGUAGE_VERSION in the parser.c header):**
+- ABI 15: `rust, javascript, python, go, c, cpp, php` (7)
+- ABI 14: `typescript, java, ruby` (3)
 
-External-content FTS5 with sync triggers (the schema in plan §10) is the canonical pattern per `sqlite.org/fts5.html`, including the `'delete'` command that must run **before** content-table mutation in UPDATE/DELETE triggers. The plan's schema is correct in shape but the trigger ordering must be explicit in the spec.
+Both fall inside `tree-sitter` 0.26.8's compatibility window (`MIN_COMPATIBLE=13 .. LANGUAGE_VERSION=15`). No coexistence problem.
 
-**Recommended decision.**
-1. Use `sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "macros", "migrate"] }` — `bundled` is implicit through `sqlx-sqlite`.
-2. Run `PRAGMA compile_options;` on first connect and assert that `ENABLE_FTS5` appears. Surface a hard error otherwise — guards against a future libsqlite3-sys regression.
-3. Document the canonical FTS5 trigger pattern in `unblock-indexer-core` schema constants (DDL strings) as **insert / delete / update** triplet. Insert-trigger is straightforward; delete and update must use the `INSERT INTO symbols_fts(symbols_fts, rowid, ...) VALUES('delete', ...)` form *before* the content-table mutation.
-4. Use `INSERT INTO symbols_fts(symbols_fts) VALUES('rebuild')` after `reindex(path?)` to repopulate the index from the freshly-truncated content table.
+**Staleness audit (>12 months since last release as of 2026-04-29):**
+- **Stale flagged:** `tree-sitter-typescript` 0.23.2 (2024-11-11), `tree-sitter-cpp` 0.23.4 (2024-11-11), `tree-sitter-ruby` 0.23.1 (2024-11-11), `tree-sitter-java` 0.23.5 (2024-12-21). Four crates have been silent for ~17 months.
+- **Fresh:** the other six (rust, js, python, go, c, php) released within the last 12 months; rust and c released in 2026.
 
-**Evidence.**
-- rusqlite `libsqlite3-sys/build.rs` line 116-ish: `.flag("-DSQLITE_ENABLE_FTS5")`.
-- sqlx README confirms `bundled` is the default for the `sqlite` feature.
-- SQLite FTS5 docs document the external-content pattern, the `'delete'` command, and the `'rebuild'` command.
+### Recommended decision
 
-**Risk register.**
-- A `bundled = false` override (e.g. user using system libsqlite3 without FTS5) would silently break the indexer. The runtime `PRAGMA compile_options;` check catches this.
-- Performance at scale: SQLite docs note FTS5 indexes are typically 30–50% of content size and require one extra content-table lookup per match. For symbol-name FTS this is irrelevant (names are short, content table is `symbols`); for `signature` and future `comment` columns it scales linearly with code volume. Acceptable for token-saving workload.
-- WAL writer/reader contention under the file watcher: WAL allows N readers + 1 writer concurrently. Bootstrap uses a *single* transaction, so it holds the writer lock for the whole bootstrap duration — readers (queries) will block. **Spec must call this out** and recommend either (a) chunked transactions during bootstrap, or (b) disabling query serving until bootstrap completes. (a) is preferable for UX.
+Pin every grammar at its **exact** `=x.y.z` version in `crates/unblock-indexer/Cargo.toml` (no semver carets):
 
-**Open question (flag for spec).**
-- Plan §6.2 declares `symbols_fts` columns `name, signature, comment`. Where does `comment` come from? Not in the `symbols` content table per the schema. Either (i) add `comment TEXT` column to `symbols`, or (ii) drop `comment` from FTS5 for v1. **Decision needed in spec.**
+```toml
+tree-sitter            = "=0.26.8"
+tree-sitter-language   = "=0.1.7"
+tree-sitter-rust       = "=0.24.2"
+tree-sitter-typescript = "=0.23.2"
+tree-sitter-javascript = "=0.25.0"
+tree-sitter-python     = "=0.25.0"
+tree-sitter-go         = "=0.25.0"
+tree-sitter-java       = "=0.23.5"
+tree-sitter-c          = "=0.24.2"
+tree-sitter-cpp        = "=0.23.4"
+tree-sitter-ruby       = "=0.23.1"
+tree-sitter-php        = "=0.24.2"
+```
 
----
+Add a runtime ABI guard at language-loader time (`Language::abi_version()` / `MIN_COMPATIBLE_LANGUAGE_VERSION`) so `build.rs` and runtime alike fail loudly if a future crates.io patch ships an incompatible parser.
 
-## R5 — Symbol extraction queries (S-expressions)
+### Risks
 
-**Validated finding.** Tree-sitter grammars ship a *standard* S-expression query file `queries/tags.scm` per language repo, designed for exactly this use case (originally for `ctags` / GitHub code navigation). They use a converged capture vocabulary:
-
-- `@definition.{class, function, method, interface, module, macro, constant, type, ...}`
-- `@reference.{call, type, class, implementation}`
-- `@name`, `@doc`
-
-Sample audit:
-
-| Lang | Capture set in `tags.scm` |
-|---|---|
-| Rust | `definition.{class (struct/enum/union), function, method, interface (trait), module, macro}`; `reference.{call, implementation}` |
-| Python | `definition.{constant, class, function}`; `reference.call` |
-| Go | `definition.{function, method, type}`; `reference.{call, type}` |
-| TypeScript | `definition.{function, method, class, module, interface}`; `reference.{type, class}` |
-
-Per-language tweaks are inevitable (Go has no class; Rust has `trait` mapped to `interface`; Python has no formal `interface`). The plan's §6.3 kind enum is well-aligned with this vocabulary.
-
-**Recommended decision.**
-1. **Reuse upstream `tags.scm` as the starting point** for each language; vendor a copy under `crates/unblock-indexer-core/queries/<lang>.scm` (so spec changes are versioned in our repo, decoupled from grammar releases).
-2. **Adjust the canonical kind enum** (plan §6.3) to align with `tags.scm` vocabulary:
-   - Add: `macro` (Rust, Ruby), `type` (Go's `type X = Y`).
-   - Map in the traversal: `class → class | struct | enum | trait` per language. Document the mapping table in `unblock-indexer-core::kind::map_capture_to_kind()`.
-   - Drop or postpone: `field`, `property`, `import`, `export` — these are **not** in standard `tags.scm` and would require per-language hand-written queries. Defer to a v1.1.
-3. **Final canonical enum (recommendation):** `function`, `method`, `class`, `struct`, `enum`, `interface`, `trait`, `module`, `namespace`, `variable`, `constant`, `type_alias`, `macro`. (13 variants, down from 16.) Spec adopts this as the source of truth.
-
-**Evidence.**
-- `tags.scm` files for Rust, Python, Go, TypeScript per their respective tree-sitter-<lang> repos (queried 2026-04-27).
-- nvim-treesitter project demonstrates the `tags.scm`/`highlights.scm`/`locals.scm` convention is the de-facto standard.
-
-**Risk register.**
-- Stale grammars (Cpp / Ruby / Java — see R3) may have outdated `tags.scm` missing modern syntax (e.g. C++ concepts, Ruby pattern matching). Validate with fixture repos in Epic 03.4.
-- `tags.scm` is not authoritative for *every* symbol — e.g. Rust's `tags.scm` doesn't capture `impl` blocks separately. We may need supplementary queries for `outline` hierarchical view (parent_id linkage). Plan §6.3 requires `parent_id`; `tags.scm` alone gives flat captures. **Spec must address parent linkage** — typically via post-processing the captured node's tree position.
-
-**Open question (flag for spec).**
-- Are field/property/import/export deferred to v1.1 acceptable, or must they ship in Phase 03? Plan §6.3 lists them. Recommendation above is to drop. **User decision required if the plan's enum is to remain authoritative.**
+- **R3.1 — Stale-grammar drift:** typescript/cpp/ruby/java may have absorbed PRs upstream that have not been released to crates.io. Vendored `tags.scm` for those four MUST pin to the **crates.io tagged commit**, not `master`, to keep grammar binary and captures aligned.
+- **R3.2 — Future tree-sitter 0.27 bumps `MIN_COMPATIBLE` to 14:** ABI 13 grammars would break. None of the Top-10 are ABI 13 today; worth a CI canary.
 
 ---
 
-## R6 — `notify-debouncer-full` cross-platform behaviour
+## R4 — sqlx + FTS5
 
-**Validated finding.**
+### Validated finding
 
-- **Platforms:** linux/inotify, macOS/FSEvents, Windows/ReadDirectoryChangesW, BSD/kqueue. Build matrix confirmed for aarch64-apple-darwin, aarch64/x86_64-linux-gnu, i686/x86_64-pc-windows-msvc.
-- **Renames:** debouncer merges paired Rename From/To events. `FileIdMap` (the recommended cache) "stitches together rename events in case the notification back-end doesn't emit rename cookies" — explicitly designed for backend variance.
-- **Atomic save (vim, IntelliJ, VS Code):** these editors write to a `.tmp` file then rename onto the target. The debouncer's rename-merging handles this *if* the original target is also being watched. The "delete" event is suppressed and "modify" emitted in well-handled cases; mishandling produces a delete-then-create pair. The plan's per-query mtime check is the documented safety net.
-- **Debounce window:** the upstream README example uses `Duration::from_secs(2)`. Plan's 200 ms is aggressive; for an interactive editor save it is fine, but for a `rsync`/`git checkout` of many files you can see thrash. Recommendation below.
-- **Large directory trees:** notify uses recursive watches; on Linux, inotify has a per-user watch limit (default 8192 → 524288 on modern systems) — a large monorepo can exhaust it. The plan's `ignore`-aware walker reduces watch surface, but the watcher itself currently watches the whole repo root recursively. **Mitigation:** call `notify::Watcher::watch(root, RecursiveMode::Recursive)` once on the canonicalised root, document the inotify limit in the README, and surface watcher-init failures with an actionable error (e.g. `cat /proc/sys/fs/inotify/max_user_watches`).
+- `sqlx 0.8.6` with `features = ["sqlite", "runtime-tokio-rustls"]` pulls `libsqlite3-sys 0.37` with `bundled` enabled by default (verified per docs.rs/sqlx + sqlx-sqlite Cargo.toml).
+- `libsqlite3-sys` 0.37 `bundled` build script sets `-DSQLITE_ENABLE_FTS5` unconditionally.
+- **PRAGMA verification pattern** (run at connection-acquire time on the pool's `after_connect`):
+  ```sql
+  PRAGMA compile_options;
+  -- expect a row with text "ENABLE_FTS5"
+  ```
+  Absent → hard error mapped to exit code 6 (per L17). Essential because nothing in the Cargo dependency surface *guarantees* FTS5 — a downstream consumer that swaps to `unbundled` could silently lose it.
+- **External-content trigger pattern** (canonical, per sqlite.org/fts5.html):
+  ```sql
+  CREATE VIRTUAL TABLE symbols_fts USING fts5(
+    name, signature, comment,
+    content='symbols', content_rowid='id'
+  );
+  CREATE TRIGGER symbols_ai AFTER INSERT ON symbols BEGIN
+    INSERT INTO symbols_fts(rowid, name, signature, comment)
+      VALUES (new.id, new.name, new.signature, new.comment);
+  END;
+  CREATE TRIGGER symbols_ad AFTER DELETE ON symbols BEGIN
+    INSERT INTO symbols_fts(symbols_fts, rowid, name, signature, comment)
+      VALUES ('delete', old.id, old.name, old.signature, old.comment);
+  END;
+  CREATE TRIGGER symbols_au AFTER UPDATE ON symbols BEGIN
+    INSERT INTO symbols_fts(symbols_fts, rowid, name, signature, comment)
+      VALUES ('delete', old.id, old.name, old.signature, old.comment);
+    INSERT INTO symbols_fts(rowid, name, signature, comment)
+      VALUES (new.id, new.name, new.signature, new.comment);
+  END;
+  ```
+  The `'delete'` command requires the **exact prior column values** — so the `AFTER UPDATE` trigger uses `old.*` for the delete and `new.*` for the insert.
+- **Bootstrap optimisation:** drop the triggers, bulk-insert into `symbols`, then `INSERT INTO symbols_fts(symbols_fts) VALUES('rebuild');` once — orders of magnitude faster than per-row trigger fan-out. Re-create triggers afterwards.
+- **Chunked-transaction bootstrap.** Single transaction holds the WAL writer lock until commit; for 50k-file repo this stalls every concurrent reader for the entire walk. Pattern: chunk inserts at **~500 rows per `BEGIN..COMMIT`** (proven sweet-spot in rusqlite/sqlx ecosystems). Use `sqlx::QueryBuilder::push_values()` for batched inserts.
 
-**Recommended decision.**
-1. Use `notify-debouncer-full` (latest 0.5.x branch tracks `notify` v8/v9). Configure with `FileIdMap` cache.
-2. **Default debounce: 500 ms** (compromise between plan's 200 ms and upstream's 2 s). Make it configurable via `.unblock/indexer.toml` with the 200 ms recommendation in the spec for interactive flows. Bench during Epic 03.5 to validate.
-3. **Per-query mtime check is mandatory** — plan §8.2 already specifies this. Spec must phrase it as an invariant, not an optimisation.
-4. **Linux inotify hint** in error messages when `Watcher::new` fails on large trees.
+### Recommended decision
 
-**Evidence.**
-- `notify-debouncer-full` docs.rs page.
-- `FileIdMap` docs.rs page.
+1. Pool config: `sqlx::sqlite::SqlitePoolOptions::new().after_connect(...)` asserting FTS5 + setting WAL/synchronous=NORMAL/temp_store=MEMORY.
+2. PRAGMA assertion is a HARD failure (exit 6); document the exact error message in the spec.
+3. Bootstrap: `BEGIN → drop triggers → batched 500-row inserts → 'rebuild' FTS → re-create triggers → COMMIT`.
+4. WAL: `journal_mode=WAL`, `synchronous=NORMAL`, `wal_autocheckpoint=1000`.
 
-**Risk register.**
-- macOS FSEvents has known behaviour where recursively-watched paths can drop events under heavy load. Per-query mtime check is the safety net; document this in spec §15.
-- Windows `ReadDirectoryChangesW` reports renames as a single event but gives the *new* path only — `FileIdMap` is essential there.
-- WSL (Windows-hosted Linux dev) sees pathological inotify behaviour; not a Phase 03 blocker but document.
+### Risks
 
----
-
-## R7 — `ignore` crate edge cases
-
-**Validated finding.**
-
-- **Nested gitignores:** `WalkBuilder` walks them with documented precedence: glob overrides → `.ignore` → `.gitignore` → `.git/info/exclude` → global → explicit. *"More nested ignore files have a higher precedence than less nested ignore files."* Monorepos with sub-`.gitignore` files Just Work.
-- **Non-git checkouts:** **`require_git()` defaults to `true`** — if the directory has no `.git`, gitignore rules are *silently disabled*. To respect `.gitignore` outside a git repo, must call `WalkBuilder::require_git(false)`. **This is a footgun the plan does not currently address.**
-- **Custom ignore filenames:** `add_custom_ignore_filename(".unblock-ignore")` available — useful future extension, not Phase 03 scope.
-- **Hidden files:** ignored by default (`.git`, `.venv`, etc.); plan's default-excludes list (`target/`, `node_modules/`, `dist/`, `build/`, `.venv/`, `vendor/`, `.git/`) is layered *on top* of this. Note `.git/` is already covered by the hidden-file default.
-
-**Recommended decision.**
-1. Configure walker as: `WalkBuilder::new(root).require_git(false).hidden(true).git_ignore(true).git_global(true).git_exclude(true)`.
-2. Apply default-excludes via `WalkBuilder::filter_entry` or a custom `Override` glob set — the plan's "default excludes" list (§L6) lives in `unblock-indexer-core` as a constant and is appended by the walker.
-3. **`.unblock/languages.toml` override** (plan §L6) — implement as an additive override of which extensions map to which language. Walker still respects gitignore.
-4. Document that `same_file_system(true)` should be used to prevent crossing into mounted volumes (e.g. macOS `node_modules` symlinked into `/Volumes/...`).
-
-**Evidence.**
-- `WalkBuilder` docs.rs.
-
-**Risk register.**
-- Without `require_git(false)`, a developer running unblock on a tarball checkout (no `.git`) would walk into `node_modules/` etc., severely degrading bootstrap. This is a **plan-level adjustment** — spec must specify `require_git(false)`.
-- Some monorepos use `.gitignore` files that exclude vendored sources the agent *wants* indexed (e.g. a `vendor/` directory in Go modules). The `.unblock/languages.toml` override in plan §L6 covers extension overrides but not "force-include directory." Possible v1.1 extension; flag as open question.
-
-**Open question (flag for spec).**
-- Should `.unblock/indexer.toml` also support a `force_include = ["vendor/"]` field to bypass `.gitignore`? Out of scope per plan §L6 reading, but a real-world need.
+- **R4.1 — Downstream `unbundled` swap silently disables FTS5.** PRAGMA assertion fully mitigates.
+- **R4.2 — `'rebuild'` is single-threaded.** For 500k symbols on Large corpus this is the bottleneck. Acceptable for v1.0.0; future opt.
+- **R4.3 — WAL files not cleaned up on crash.** SQLite recovery handles; document in `status` output.
 
 ---
 
-## R8 — Latency benchmarks methodology
+## R5 — Symbol-Extraction Queries (S-expressions) — SCOPE CORRECTION
 
-**Validated finding.** No published numbers exist for the exact stack (sqlx + bundled SQLite + WAL + FTS5 with this schema). However, neighbouring evidence:
+### Validated finding — capture coverage matrix
 
-- A primary-key indexed lookup on SQLite (the `idx_name` index in §10) is typically sub-ms even for tables with millions of rows. The plan's p99 < 10 ms for `find_symbol` is *very* achievable for non-fuzzy queries.
-- FTS5 prefix/MATCH queries on a content table with O(100k) symbols typically run in 1–5 ms.
-- The dominant cost in `find_symbol` will be (i) per-query mtime check (filesystem `stat` — < 1 ms), (ii) optional re-parse of a single file if mtime is newer (10–50 ms — *blows the budget*), (iii) the SQL query (< 1 ms).
-- **The mtime-check-triggered re-parse is the budget killer.** Plan §8.2 must clarify: per-query mtime check applies only to files implicated by the *result*, not the search input. For `find_symbol(name)` this means re-parsing only the file that owns the matching symbol — typically zero re-parses on a steady-state warm system.
+Every grammar exposes `queries/tags.scm` (HTTP 200 confirmed for all 10). Capture inventory (from upstream `master` HEAD):
 
-**Recommended methodology.**
-1. **Corpus** (Epic 03.6 R8 dependency):
-   - Small repo: ~500 files, ~5 k symbols (this very repo).
-   - Medium repo: ~5 k files, ~50 k symbols (e.g. ripgrep, tokio).
-   - Large repo: ~50 k files, ~500 k symbols (e.g. Linux kernel `fs/` subset or LLVM project).
-2. **Bench harness:** `criterion` with `async_tokio`. Three benchmarks per query type (`find_symbol`, `outline`, `search_text`) per corpus.
-3. **Cold path** (first call after process start) excluded from p99 — measure `warm path` only. Add a `cold_start` benchmark separately to inform expectations.
-4. **Fail the build** if p99 > 10 ms / 20 ms on the medium corpus. Large is informational.
-5. **WAL contention bench:** simultaneous reader (query) + writer (file watcher inserting after a re-parse) — ensure the writer never starves readers > 50 ms.
-
-**Risk register.**
-- Per-query mtime check + re-parse trigger is the dominant tail-latency risk. **Spec must specify the implicated-file rule** to bound the re-parse scope.
-- `wasm` parsing init cost (R2) — if not amortised across queries, it adds 50–150 ms per first-touch language. Cache parser instances + `WasmStore` in a `tokio::sync::OnceCell` or similar.
-- SQLite WAL checkpoint lag on heavy bootstrap — explicit `PRAGMA wal_autocheckpoint = 1000;` recommendation.
-
----
-
-## R9 — Setup auto-config schemas
-
-**Validated finding.** Six target hosts; five have user-editable JSON config files, one (JetBrains) does not.
-
-| Host | Config path | Schema (top key) | Notes |
-|---|---|---|---|
-| **Claude Desktop** | macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`<br>Windows: `%APPDATA%\Claude\claude_desktop_config.json`<br>Linux: not officially supported | `mcpServers` (object) → `<name>: { command, args, env }` | Restart Claude Desktop required after edit. |
-| **Claude Code** | macOS/Linux: `~/.claude.json` (user-scope) or per-project `.claude/settings.json` (workspace-scope, in repo)<br>Windows: `%USERPROFILE%\.claude.json` | `mcpServers` (object) — same shape as Claude Desktop. CLI: `claude mcp add <name> <command>` writes the same file. | CLI is the recommended programmatic path. |
-| **Cursor** | Project: `.cursor/mcp.json` (in repo)<br>Global: `~/.cursor/mcp.json` | `mcpServers` (object) — same shape. Supports `${env:NAME}`, `${workspaceFolder}`, `${userHome}` interpolation. | Cross-platform (`~` works everywhere per Cursor docs). |
-| **Zed** | Settings file (user `~/.config/zed/settings.json` on Linux/macOS; AppData on Windows). | `context_servers` (object) → `<name>: { command, args, env }` or `{ url, headers }` for remote. | Different top-level key (`context_servers`, not `mcpServers`). |
-| **VS Code** (Copilot) | Workspace: `.vscode/mcp.json` (in repo)<br>User: edited via "MCP: Open User Configuration" command | `servers` (object) → `<name>: { type: "stdio"\|"http", command, args }` | Different top-level key (`servers`, not `mcpServers`). Different field (`type` instead of inferring from `url` vs `command`). |
-| **JetBrains** (AI Assistant) | **No documented user-editable JSON file.** Configure via Settings → Tools → AI Assistant → Model Context Protocol (MCP) → Add. UI accepts an `mcpServers` JSON snippet. Supports "Import from Claude" button. | Same `mcpServers` shape (pasted into modal) | Programmatic auto-config is **not supported** — can only print copy-pastable JSON. |
-
-**Recommended decision.**
-1. **`unblock-mcp setup` extends with two responsibilities:** (a) the existing GitHub Project setup (which is what `setup` does today per Phase 01–02), and (b) **a new sub-command or flag** like `unblock-mcp setup --register-mcp <host>` for editor auto-config. Plan §L13 currently conflates these — spec must split.
-2. **Idempotent merge per host** — read existing config, merge our key under `mcpServers` / `context_servers` / `servers` (host-specific), preserve unrelated keys, write back. Key collision: prompt the user.
-3. **JetBrains:** print copy-pastable JSON to stderr with a clear pointer to Settings → Tools → AI Assistant → MCP → Add → "Import from Claude". Document this as the explicit limitation in §14.6.
-4. **Schema differences must be encoded** in `unblock-mcp` per host (top-level key + field names). Don't assume `mcpServers` everywhere.
-5. **`type` field in VS Code** must be set to `"stdio"` for our binary.
-
-**Evidence.**
-- Anthropic MCP user quickstart (Claude Desktop paths).
-- Cursor docs (`docs.cursor.com/context/mcp`).
-- VS Code Copilot MCP docs (`code.visualstudio.com/docs/copilot/chat/mcp-servers`).
-- Zed AI MCP docs (`zed.dev/docs/ai/mcp`).
-- JetBrains AI Assistant MCP help (`www.jetbrains.com/help/ai-assistant/mcp.html`).
-- Claude Code MCP docs (`code.claude.com/docs/en/mcp`).
-
-**Risk register.**
-- **Naming collision in plan §L13.** The existing `setup` MCP tool (per Phase 01–02) configures GitHub Projects, not editor MCP entries. Plan §L13's "extends" wording is ambiguous. Recommendation: introduce a separate CLI sub-command (e.g. `unblock-mcp install` or `unblock-mcp register`) instead of overloading the existing `setup` MCP tool. **Surface as `needs-review` for Ada.**
-- JetBrains' lack of programmatic config means the §14.6 acceptance criterion "registers ... in JetBrains" can only be partially met. Recommend rewording to "produces JetBrains-ready JSON snippet for manual import" to keep the criterion verifiable.
-- Idempotent merge conflicts: a user with two MCP servers named `unblock` (e.g. local + remote in Phase 06) needs disambiguation strategy. Reserve `unblock-local` / `unblock-remote` namespacing.
-
-**Open questions (flag for plan).**
-- Q9.1: Is the existing `setup` MCP **tool** being repurposed, or is a new CLI subcommand acceptable? Plan §L13 implies the former; my reading of the existing codebase + the constraint is the latter is cleaner.
-- Q9.2: §14.6 wording for JetBrains — accept "manual import via copy-paste" as completion?
-
----
-
-## R10 — Token-saving measurement methodology
-
-**Validated finding.** No published methodology exists for "MCP-tool vs Glob/Grep/Read token saving" — this is a novel measurement. The plan correctly defers it to a phase-exit gate (§14.8). Methodology proposal below.
-
-**Recommended methodology.**
-
-1. **Baseline corpus** — three representative agent flows on a single fixture repo (this repo at the v1.0.0 tag is a reasonable choice):
-   - **Flow A (find a symbol):** "find the implementation of `DependencyGraph::ready_set`."
-   - **Flow B (understand a file):** "give me the structure of `crates/unblock-core/src/graph.rs`."
-   - **Flow C (find references):** "what calls `parse_github_url`?"
-
-2. **Measurement protocol:**
-   - **Baseline run:** an agent (Claude Sonnet via API, not via plugin) is given Glob/Grep/Read tools only. Record total input + output tokens to first-correct-answer.
-   - **Indexer run:** same agent, given the 9 indexer tools instead. Record same.
-   - **Correctness gate:** the answer must match a human-blessed gold answer (text match + symbol-id where applicable). Wrong answers don't count.
-   - **Repeat each flow N=10 times** with fresh sessions to control prompt-cache variance.
-
-3. **Reported metrics:**
-   - Median + p95 token count per flow per mode.
-   - **Token-saving ratio** = `tokens_baseline / tokens_indexer` (target: ≥ 3× for Flow A; ≥ 2× for B/C). These targets are *directional* — actual numbers calibrate the v1.0.0 marketing claim.
-   - **Latency:** time-to-first-correct-answer (informational, not gating).
-
-4. **Output artefact:** `docs/research/03-code-indexer-roi.md` (per plan §14.8) — table of metrics per flow + raw transcripts archived as test fixtures.
-
-5. **Phase-exit gate:** report exists, has populated numbers, and the median ratio across all three flows is `> 1.5×`. If not, the phase ships v1.0.0 anyway (per pre-production stance), but the marketing claim is downgraded and a follow-up bead opens to investigate.
-
-**Risk register.**
-- Token counts depend on the model's tokenizer — pin to Sonnet's tokenizer for reproducibility. Future models will produce different numbers; the harness must be re-runnable.
-- Three flows is a small corpus — directional, not statistical. Consider expanding to 10 flows in v1.1.
-- The "agent" running the harness is itself a confounder: a smarter agent uses fewer tokens regardless of tools. Pin the system prompt and the model version in the harness.
-
-**Open questions (flag for spec).**
-- Q10.1: Should the harness use an unblock supervisor (Sherlock) or a generic agent? An unblock supervisor is more representative of the production use case but introduces plugin-skill confounders. Recommendation: generic agent for the baseline; document as "lower bound" since supervisors may save more.
-- Q10.2: What is the gating threshold (1.5×, 2×, 3×)? Plan §14.8 doesn't specify. Recommendation: 1.5× median, soft gate.
-
----
-
-## Cross-cutting risks and `needs-review` items
-
-These surfaced during research but are *outside* R1–R10's scope as defined in the plan:
-
-### NR1 — Plan §L13 / §6.3 / §10 internal inconsistency
-
-- **Plan says:** §L13 "extends `unblock-mcp setup`". §6.3 lists 16 symbol kinds including `field/property/import/export`. §10 declares `symbols_fts(name, signature, comment)` but no `comment` column on `symbols`.
-- **Reality:**
-  - `setup` is an existing MCP tool with established semantics (project setup) — overloading it conflates concerns. (See R9 risk.)
-  - `field/property/import/export` are not in standard `tags.scm` and require hand-written queries per language — costly. (See R5 open question.)
-  - `comment` in FTS5 has no source column. (See R4 open question.)
-- **Impact:** Spec authoring will hit these as unresolved questions.
-- **Recommendation:** Ada to resolve the three points above either by amending the plan or by deferring to spec — flagged but not silently rewritten.
-
-### NR2 — Phase-02 dependency ambiguity
-
-- **Plan says:** §13 "Phase 02 (MCP Complete) **must be merged** before Epic 03.2 starts."
-- **Reality:** Per `bd` (and PRD §7.2), Phase 02 status is unclear from the documents. The retry-with-backoff and circuit-breaker primitives may live in `unblock-github`, not `unblock-mcp`. Epic 03.2's grammar fetcher needs to *reuse* them — verify the API surface is stable enough to depend on.
-- **Recommendation:** Confirm Phase 02's status with the orchestrator before Fernando opens beads for Epic 03.2.
-
-### NR3 — Pre-production stance vs. acceptance criteria
-
-- Plan §14 lists hard acceptance criteria (e.g. "p99 < 10 ms"). Pre-production stance per CLAUDE.md and plan §49 says *"breaking changes acceptable."* These are not contradictory but the spec must distinguish:
-  - **Hard gates** (must-pass for v1.0.0 ship): functional + storage + lifecycle.
-  - **Soft gates** (informational, document if missed): performance + token-saving ROI.
-- **Recommendation:** Spec §Acceptance to split into hard / soft, mirroring this distinction.
-
----
-
-## Open questions consolidated (for orchestrator → Ada)
-
-| ID | Question | Source gap |
+| Lang | def captures present | Missing for 17-kind goal |
 |---|---|---|
-| Q4 | `comment` column source for FTS5 — add to `symbols` or drop from FTS5 in v1? | R4 |
-| Q5 | Drop `field/property/import/export` from canonical kind enum to v1.1? | R5 |
-| Q7 | Add `force_include` glob list to `.unblock/indexer.toml`? | R7 |
-| Q9.1 | Use new CLI subcommand instead of overloading `setup` for editor MCP register? | R9 / NR1 |
-| Q9.2 | Accept "manual import" as JetBrains §14.6 completion? | R9 |
-| Q10.1 | Harness uses generic agent or supervisor? | R10 |
-| Q10.2 | ROI gate threshold (1.5× / 2× / 3×)? | R10 |
+| Rust | function, method, class (struct/enum/union), interface (trait), module, macro | struct/enum/trait split, namespace, variable, constant, type_alias, field, property, import, export |
+| TypeScript | function, method, class, module, interface | struct, enum, trait, namespace, variable, constant, type_alias, macro, field, property, import, export |
+| JavaScript | function, method, class, constant | struct, enum, trait, namespace, module, interface, variable, type_alias, macro, field, property, import, export |
+| Python | function, class, constant | struct, enum, trait, interface, module, namespace, method, variable, type_alias, macro, field, property, import, export |
+| Go | function, method, type | struct, enum, trait, class, interface, module, namespace, variable, constant, type_alias, macro, field, property, import, export |
+| Java | class, method, interface | struct, enum, trait, function, module, namespace, variable, constant, type_alias, macro, field, property, import, export |
+| C | class (struct/union), function, type (typedef/enum) | enum/struct split, method, trait, interface, module, namespace, variable, constant, type_alias, macro, field, property, import, export |
+| C++ | class, function, method, type | struct, enum, trait, interface, module, namespace, variable, constant, type_alias, macro, field, property, import, export |
+| Ruby | method, class, module | struct, enum, trait, interface, namespace, function, variable, constant, type_alias, macro, field, property, import, export |
+| PHP | module (namespace), interface, class, function, **field** | struct, enum, trait, namespace, method, variable, constant, type_alias, macro, property, import, export |
+
+**Reality check vs the plan's 17 SymbolKinds.** Upstream `tags.scm` uses a much smaller, cross-language vocabulary (typically 4–6 capture kinds). The plan's 17 kinds are an **unblock-side normalisation**. The mapping needs:
+
+1. A **per-language capture→kind map** in `unblock-indexer/src/tags/<lang>.rs`. Example for Rust: `@definition.class` on a `struct_item` node → `SymbolKind::Struct`; on `enum_item` → `SymbolKind::Enum`; on `union_item` → `SymbolKind::Struct` (or a future `Union`). The differentiator is the **node kind of the capture's anchor**, not the capture name.
+2. **Hand-written extension queries are needed in MORE than 4 languages**, not the 4 the plan estimates. To get all 17 kinds covered consistently, you need extensions in approximately **all 10 languages** for `import`, `export`, `variable`, `constant`, `field`, `property`, `type_alias`, `macro`, `namespace`. The pre-reframe research's "4 hand-written extension queries" estimate underestimates — the *categories* may be 4–5 (field/property/import/export plus variable/constant), but they need to be implemented per language because syntax differs (Rust `use` vs Python `import` vs PHP `use` vs Java `import`).
+
+### Recommended decision
+
+- Vendor `tags.scm` from each crates.io tagged commit (NOT `master`) into `crates/unblock-indexer/src/tags/<lang>.scm`.
+- Per-language Rust translation table `kind_for_capture(capture_name, anchor_node_kind, language) -> SymbolKind` lives in `unblock-indexer/src/tags/<lang>.rs`. Table-driven, no clever logic.
+- **Extension queries** (revised count): plan on **~6 categories × 10 languages ≈ 30–40 extension query rules** (not "4 queries total"). Each is a small additional s-expression appended to the vendored upstream `tags.scm` at runtime (`tags.scm + ext_<lang>.scm` concatenated).
+- **`parent_id` post-traversal algorithm:**
+  1. Insert all symbols for a file with `parent_id = NULL`.
+  2. After file completes, for each symbol S compute `parent(S) = argmin_{T : span(T) ⊃ span(S), T ≠ S} (span(T).len)` — smallest enclosing symbol whose span strictly contains S.
+  3. Implementable as a single linear scan after sorting symbols by `(start_offset asc, end_offset desc)` and using a stack of currently-open ancestors. O(n) per file.
+
+### Risks
+
+- **R5.1 — Extension query scope creep.** What the plan calls "4 hand-written extensions" is actually 30–40 query rules. **Measurable epic-03.4 effort underestimate** (likely +1 week of work versus what the plan suggests).
+- **R5.2 — `tags.scm` drift** between vendored copy and grammar binary. CI drift check (S3 in plan) covers it.
+- **R5.3 — Generic `@definition.class`/`@definition.type` collapses information.** Mitigated by anchor-node-kind discriminator in per-language map.
+
+### Open questions (spec-time)
+
+- **Q-R5.1** — Confirm the corrected scope (extensions per-language, ~30–40 rules, not just 4 globals) is acceptable to Ada's epic 03.4 sizing.
+
+---
+
+## R7 — `ignore` Crate Edge Cases
+
+### Validated finding
+
+- **`require_git(false)` is mandatory** for tarball / non-git checkouts — when default `require_git=true`, gitignore rules are silently disabled outside a git repo.
+- **`same_file_system(true)` works only on Unix and Windows** (per docs.rs/ignore). For unblock's three target platforms (Linux/macOS/Windows) this is fine.
+- **`Override`** acts as a precedence-1 layer **before** gitignore matching. The `ignore` crate has **no built-in `target/`/`node_modules/`/`dist/` blacklist** — unblock must implement that blacklist itself.
+
+### Recommended decision
+
+```rust
+let mut wb = WalkBuilder::new(repo_root);
+wb.require_git(false)
+  .same_file_system(true)
+  .hidden(false)
+  .git_ignore(true).git_global(true).git_exclude(true)
+  .ignore(true)
+  .parents(false);
+let mut ovr = OverrideBuilder::new(repo_root);
+for pat in DEFAULT_EXCLUDES {  // ["!target/**", "!node_modules/**", "!dist/**", "!build/**", "!.venv/**", "!vendor/**", "!.git/**"]
+    ovr.add(pat)?;
+}
+for pat in user_force_include {  // from .unblock/indexer.toml — positive (no leading !)
+    ovr.add(pat)?;
+}
+wb.overrides(ovr.build()?);
+```
+
+Order matters: **default-excludes first, user `force_include` after** — Override matching is first-match-wins, so user includes take precedence over our excludes.
+
+### Risks
+
+- **R7.1 — `parents(false)` is opinionated.** `git_global(true)` covers `~/.gitignore_global` without `parents(true)` reaching above repo root.
+- **R7.2 — `same_file_system` semantics on macOS APFS volumes.** Pathological edge case; acceptable.
+
+---
+
+## R8 — Latency Benchmarks Methodology
+
+### Validated finding
+
+- `criterion = "0.5"` with `async_tokio` is already a workspace dep (verified in `Cargo.toml`). Canonical form: `b.to_async(&runtime).iter(|| async { … })`.
+- p99 from 45+ samples — criterion's default sample size is 100 with 5s warmup, 5s measurement. Use `.sample_size(100).measurement_time(Duration::from_secs(10))` for perf-sensitive benches.
+- **Implicated-file caps** (per query):
+  - `find-symbol`: 4 files
+  - `outline` / `get-symbol`: 1 file
+  - `list-symbols` (recursive): 16 files
+  - `search` (FTS5): 4 files
+  - `find-references`: 16 files
+- **Three corpora (pinned):**
+  - **Small** = unblock itself (~500 .rs files, ~5k symbols est.)
+  - **Medium** = ripgrep + tokio combined (~5k files, ~50k symbols est.)
+  - **Large** = LLVM monorepo subset clang+llvm (~50k files, ~500k symbols est.)
+- **Warm-path measurement.** Cold path is `cargo build`-bound, not indexer-bound; criterion warmup discards cold runs naturally. Harness calls `init` (or one read query) before entering criterion's measurement loop.
+
+### Recommended decision
+
+L20 baseline (already in plan):
+- `find-symbol` p99 < 10 ms warm on Medium corpus
+- `outline` p99 < 20 ms warm on Medium corpus
+
+**New recommendations (currently un-anchored in plan):**
+- `list-symbols` (recursive, 16-cap) p99 < 50 ms warm on Medium
+- `search` (FTS5 query) p99 < 30 ms warm on Medium
+
+### Open questions (spec-time)
+
+- **Q-R8.1** — Should `list-symbols`, `search`, and `find-references` get explicit p99 budgets at spec time? Recommend yes.
+
+---
+
+## R-CLI-1 — CLI Cold-Start Budget
+
+### Validated finding (modelled, not measured)
+
+A Rust CLI built with `lto = "fat"` + `codegen-units = 1` typically incurs:
+
+| Component | Typical cost |
+|---|---|
+| Process spawn + dynamic loader | 1–3 ms |
+| `clap` parse of 11 subcommands | <1 ms |
+| `tokio` single-thread runtime init | 1–2 ms |
+| `sqlx` pool open + `after_connect` PRAGMA assertions | 5–10 ms (single connection, cold disk WAL) |
+| `tree_sitter::Parser::set_language` × 10 (full-load) | 1–3 ms (lazy — language pointer only, no JIT) |
+| First mtime probe + cached query path | 1–3 ms |
+| Serde JSON envelope + flush on stdout | <1 ms |
+
+**Empirical reference points (live, 2026-04-29):**
+- ripgrep 15.1.0: 1.7–2.2 MB stripped → cold-start ~5 ms (no DB)
+- fd 10.4.2: 1.3–1.7 MB stripped → cold-start ~3 ms (no DB)
+- `git status` on a 5k-file repo: ~50 ms (filesystem-bound)
+- A `sqlx`-using CLI with a warm DB: 15–30 ms cold-start (sqlx pool init dominates)
+
+**Modelled estimate for `unblock-code` full-load:**
+- Cold (DB never opened): 30–60 ms (sqlx pool open + WAL disk read)
+- Warm (DB page cache hot): 10–25 ms
+
+**Modelled for partial-load (`--features lang-rust,lang-python`):** same — feature flags don't materially change runtime cost since grammars are lazy; they affect binary size, not init cost.
+
+### Recommended decision (concrete number for L21)
+
+**L21 budget: cold-start (process spawn → first JSON byte on stdout) p95 < 100 ms full-load on Medium corpus warm DB.** Defensible margin above modelled 25 ms upper bound; gives headroom for slow CI and Windows MSVC (typically +10–20 ms per process spawn vs Linux).
+
+If Medium-corpus warm-DB measurement during epic 03.6 falls below 50 ms, tighten L21 to `< 75 ms` at spec amend time.
+
+### Risks
+
+- **R-CLI-1.1** — sqlx WAL recovery on first open after dirty crash can spike to 100–500 ms. Cold-cold edge case; budget assumes clean shutdown.
+- **R-CLI-1.2** — Windows MSVC process spawn 2–3× slower than Linux. Set L21 budget on Linux; explicitly grant Windows 1.5× allowance.
+
+### Open questions (spec-time)
+
+- **Q-R-CLI-1.1** — Bench harness must run on all three platforms (Linux/macOS/Windows). HARD gate H6 or epic 03.6 acceptance?
+
+---
+
+## R-CLI-2 — Static-Link Binary Size — OUTLIERS IDENTIFIED
+
+### Validated finding
+
+Per-grammar parser.c size (downloaded from upstream `master` HEAD, all 10 grammars):
+
+| Grammar | parser.c | Estimated compiled binary contribution (~0.4× factor)¹ |
+|---|---|---|
+| rust | 6.5 MB | ~2.5 MB |
+| typescript (typescript+tsx) | 17.1 MB | ~6.7 MB ⚠ |
+| javascript | 2.8 MB | ~1.1 MB |
+| python | 3.4 MB | ~1.3 MB |
+| go | 1.5 MB | ~0.6 MB |
+| java | 2.5 MB | ~1.0 MB |
+| c | 3.8 MB | ~1.5 MB |
+| **cpp** | **25.2 MB** | **~9.9 MB** ⚠⚠ outlier |
+| **ruby** | **14.9 MB** | **~5.8 MB** ⚠ outlier |
+| php | 7.1 MB | ~2.8 MB |
+
+¹ 0.4× multiplier based on observed empirical compression (state tables → dense bss/rodata segments). Real number may be 0.3–0.5×; actual measurement happens during epic 03.6.
+
+**Aggregate estimate, full-load Top-10 with TypeScript=ts+tsx and PHP=php only:**
+- Sum of parser.c: ~85 MB
+- Estimated stripped binary contribution (grammars only): **~30–35 MB**
+- Plus base binary (clap + sqlx + tokio + tree-sitter-core + ignore + rayon): ~6–10 MB
+- **Total estimated `unblock-code` stripped, full-load: ~40–50 MB**
+
+**Comparators (live, GitHub Releases 2026-04-29):**
+- ripgrep 15.1.0: 1.7 MB Linux musl (single-purpose, BurntSushi-tight)
+- fd 10.4.2: 1.7 MB Linux musl
+- helix 25.07.1: 15.9 MB Linux x86_64 (bundles ~80 grammars; not fair comparator)
+
+**Outliers:**
+- **`tree-sitter-cpp`** is by far the worst at 25.2 MB parser.c, dominated by C++'s template/operator-overloading explosion in the LR table. Single grammar contributes ~10 MB of the estimated 30 MB grammar total.
+- **`tree-sitter-ruby`** is second at 14.9 MB parser.c — Ruby's keyword-flexible grammar has a huge state space.
+- **TypeScript ships as two parsers** (typescript + tsx); both needed because TSX is a separate `Language`. ~17 MB combined.
+
+### Recommended decision (concrete S1 ceiling)
+
+**S1 SOFT ceiling: stripped `unblock-code` binary ≤ 50 MB on Linux x86_64 release build with default features.** Achievable per the model; failure (warns, does not block) opens `unblock:finding:risk` to evaluate dropping cpp+ruby from defaults.
+
+**Partial-load alternative ceiling:** `cargo install unblock-code --no-default-features --features lang-rust,lang-python` → binary ≤ 15 MB stripped (S2 in plan captures the >50% reduction goal).
+
+### Risks
+
+- **R-CLI-2.1 — Estimates may be 20–30% off** because LR-table-to-Rust-rodata compression depends on toolchain / LLVM version. Land during epic 03.6 measurement.
+- **R-CLI-2.2 — C++ alone could push the binary past 50 MB** if the 0.4× factor underestimates. Mitigation: gate cpp behind `lang-cpp` feature; consider opt-out from defaults if measurement confirms >12 MB contribution. **Phase-replan trigger.**
+- **R-CLI-2.3 — `strip` on macOS aarch64 more conservative** than Linux GNU strip; macOS binaries ~10% larger.
+
+### Open questions (spec-time)
+
+- **Q-R-CLI-2.1** — Should `lang-cpp` and `lang-ruby` be opt-in (NOT default-enabled) to keep default binary safely under 30 MB? Top-10-default policy decision.
+
+---
+
+## R-CLI-3 — Cargo Feature-Flag Ergonomics
+
+### Validated finding
+
+- Workspace already has `resolver = "2"` (verified in `/Users/ramosmig/Public/WS-Labs/unblock/Cargo.toml`). Resolver v2 prevents the classic feature-unification footgun.
+- `cargo install unblock-code --no-default-features --features lang-rust,lang-python` is fully respected for bin crate features.
+- **Pattern for the feature scheme:**
+  ```toml
+  # crates/unblock-code/Cargo.toml
+  [features]
+  default = ["lang-rust","lang-typescript","lang-javascript","lang-python","lang-go","lang-java","lang-c","lang-cpp","lang-ruby","lang-php"]
+  lang-rust       = ["unblock-indexer/lang-rust"]
+  lang-typescript = ["unblock-indexer/lang-typescript"]
+  # … one per language
+
+  # crates/unblock-indexer/Cargo.toml
+  [features]
+  default = []  # bin owns the policy
+  lang-rust       = ["dep:tree-sitter-rust"]
+  lang-typescript = ["dep:tree-sitter-typescript"]
+  # …
+
+  [dependencies]
+  tree-sitter-rust       = { version = "=0.24.2", optional = true }
+  tree-sitter-typescript = { version = "=0.23.2", optional = true }
+  # …
+  ```
+  - `dep:` syntax (Cargo 1.60+) makes feature name **not** auto-imply dep name as a feature.
+  - Each `tree-sitter-<lang>` Rust file in `unblock-indexer/src/grammars/` is `#[cfg(feature = "lang-<lang>")]` gated.
+  - `Language` enum derives `#[non_exhaustive]` and contains all 10 variants unconditionally; **registry's `loaders()` map** is populated cfg-gated.
+  - `unblock-code languages` reflects only active features at runtime.
+
+### Recommended decision
+
+Adopt pattern verbatim. CI matrix:
+- `cargo test --workspace` (full features)
+- `cargo test -p unblock-code --no-default-features --features lang-rust` (single-lang sanity)
+- `cargo test -p unblock-code --no-default-features --features lang-rust,lang-python` (paired-lang sanity)
+
+### Risks
+
+- **R-CLI-3.1 — Test discipline.** Tests for unselected langs MUST be `#[cfg(feature = "lang-<lang>")]` gated; otherwise partial-feature build fails. Fernando's test scaffolding must enforce.
+- **R-CLI-3.2 — Hidden deps via `unblock-indexer-core`.** Pure crate must not pull any tree-sitter grammar — only `tree-sitter` itself. Achievable per plan §5.
+
+---
+
+## R-CLI-4 — `build.rs` Mechanics — **CRITICAL CONTRADICTION**
+
+### Validated finding (CONTRADICTS the plan's expectation)
+
+The plan §11 R-CLI-4 expectation is:
+
+> Verify upstream `tree-sitter-<lang>` crates compile across Linux + macOS + Windows **without** requiring `cc` (C compiler) on the user's machine.
+
+**This expectation is FALSE.** Every one of the 10 grammar crates ships a `bindings/rust/build.rs` that does:
+
+```rust
+fn main() {
+    let mut c_config = cc::Build::new();
+    c_config.std("c11").include("src");
+    c_config.file("src/parser.c");
+    c_config.file("src/scanner.c");  // when present
+    c_config.compile("tree-sitter-<lang>");
+}
+```
+
+Verified across all 10 by inspecting upstream `bindings/rust/build.rs`:
+- Cargo.toml of every grammar lists `cc = "1.1"` or `cc = "1.2"` as a `[build-dependencies]` entry.
+- The `cc` crate REQUIRES a C compiler on PATH to compile the C parser into a static library.
+- They ship pre-generated `parser.c` (so `tree-sitter generate` is not required), **but they do not pre-compile it**. User still needs `cc`/`clang`/`cl.exe` to turn it into object code.
+
+**Per platform:**
+- **Linux (x86_64-unknown-linux-gnu):** `gcc` or `clang` — typically present on dev machines, NOT on `slim` Docker images. CI base images need `apt-get install build-essential`.
+- **macOS (aarch64-apple-darwin):** Apple Clang via Xcode Command Line Tools (`xcode-select --install`) — not bundled with rustup; user prompt required.
+- **Windows (x86_64-pc-windows-msvc):** **MSVC Build Tools** must be installed separately. Rustup-init *can offer* automatic install, but it's optional.
+- **Windows (x86_64-pc-windows-gnu):** MinGW-w64 toolchain must be installed.
+
+**Impact on the plan:**
+- HARD gate **H2** ("`unblock-code` binary builds … without requiring the user to have a `cc` toolchain") **CANNOT BE MET** as currently worded. There is no Top-10 grammar on crates.io that provides a pre-compiled-binary fallback.
+- **Note: `libsqlite3-sys 0.37 bundled` ALSO needs `cc`**, so the plan already implicitly requires `cc` via sqlx.
+
+### Recommended decision (rewording H2)
+
+Replace H2 in the plan with:
+
+> **H2.** `unblock-code` binary builds with default features (Top-10 grammars) on Linux x86_64 (gcc/clang), macOS aarch64 (Apple Clang via Xcode CLT), and Windows x86_64 (MSVC Build Tools). The README documents the platform-specific C-toolchain prerequisites in a "Building from source" section. Note: this requirement matches `libsqlite3-sys/bundled` (already a transitive dep via sqlx) — `cc` is not new ceremony.
+
+### Risks
+
+- **R-CLI-4.1 — Windows users without MSVC Build Tools.** `cargo install unblock-code` will fail with linker error. Mitigation: README prerequisites + cargo's built-in error message. Phase 04 cargo-dist removes the user-facing prereq.
+- **R-CLI-4.2 — `cc` cross-compilation toolchain woes.** Cross-compiling with cargo-dist (Phase 04) requires per-target C cross-compilers in CI. Solved problem (cross-rs, cargo-zigbuild) — flag for Phase 04.
+- **R-CLI-4.3 — `libsqlite3-sys/bundled` already requires `cc`** so v1.0.0 depends on `cc` regardless of grammar story. The plan's H2 expectation was inherited from the WASM design and never updated for the static-linked reframe.
+
+### Open questions (PLAN-LEVEL — BLOCKING)
+
+- **Q-R-CLI-4.1** — Resolution required at the plan level **before** spec authoring lands: confirm H2 is reworded to "C toolchain required" rather than "no cc required". This is plan-level, not spec-level — H2 cannot be specified without first amending the plan's claim.
+
+---
+
+## R-CLI-5 — ROI Harness Reframe
+
+### Validated finding (methodology only)
+
+The plan §11 + L22 + S5 already commit to the methodology in detail. Research validates:
+
+- **Three flows (preserved from prior R10):**
+  - Flow A — `find-symbol` exact lookup ("where is `Symbol::find_one` defined?")
+  - Flow B — `outline` file ("show me the structure of `crates/unblock-core/src/graph.rs`")
+  - Flow C — `find-references` ("where is `parse_github_url` referenced?")
+- **N=10 runs × 2 arms × 3 flows = 60 runs.** Sonnet via Anthropic API with system prompt versioned at `tests/roi/system-prompt.md`. Tokens via API response's `usage` field. Median ratio per flow + global median across 30 indexer runs.
+- **Baseline arm** uses `Glob` + `Grep` + `Read`. Indexer arm uses `Bash("unblock-code …")`.
+- **Reset aspirationals (NEW, replacing the old 3.0×/2.0×/1.5× from R10):**
+  - Flow A (`find-symbol`): **aspirational ≥ 3.5×** — find-symbol is unblock-code's strongest play (single command, no Read fan-out)
+  - Flow B (`outline`): **aspirational ≥ 2.5×** — Glob+Read tends to over-fetch; outline is constant-bound JSON
+  - Flow C (`find-references`): **aspirational ≥ 1.8×** — heuristic; baseline Grep is fast and indexer's heuristic warning may consume back-and-forth tokens
+  - **Median across all 30 indexer runs: aspirational ≥ 2.5×** (above SOFT 2.0× threshold, leaving margin)
+- **Variance:** Anthropic Sonnet output is non-deterministic. N=10 is at the low end of statistical confidence. Document IQR alongside median; treat single-flow medians below 1.5× as a signal.
+
+### Recommended decision
+
+Adopt aspirationals above as informational targets in the SPEC (not gates — SOFT 2.0× threshold remains the only "report" boundary). Harness publishes:
+1. Per-run raw logs (input prompt, indexer transcript, baseline transcript, both `usage` blocks)
+2. Per-flow median ratio + IQR
+3. Global median across 30 indexer runs
+
+If global median < 2.0×, open `unblock:finding:risk` per L22.
+
+### Risks
+
+- **R-CLI-5.1 — Sonnet behavior shift between harness write and v1.0.0 release.** Pin model version (e.g., `claude-sonnet-4-7-20260101`); warn if API returns different model id.
+- **R-CLI-5.2 — System prompt drift.** Version in git; harness records prompt SHA in artifact.
+- **R-CLI-5.3 — Anthropic API cost.** ~$5–30 per full run. Run on every release tag, not every PR.
+
+### Open questions (spec-time)
+
+- **Q-R-CLI-5.1** — Run harness in CI (flaky, costly) or release-gate one-shot (saner)? Recommendation: release-gate.
 
 ---
 
 ## Final verdict
 
-- **Dependencies investigated:** 12 (`tree-sitter`, `tree-sitter-loader`, `wasmtime` transitive, `sqlx`, `libsqlite3-sys` for FTS5+WAL, `ignore`/`WalkBuilder`, `notify-debouncer-full`/`FileIdMap`, `rayon`, `reqwest`, `sha2`, `tree-sitter-<10 grammars>`, GitHub Releases API).
-- **Assumptions validated:** 14 — confirmed: 10; partially confirmed: 3; contradicted: 1.
-- **Single contradiction (C1):** plan §10 lists `tree-sitter-loader` as a runtime candidate; correct choice is the `tree-sitter` crate's `wasm` feature (transitively `wasmtime-c-api-impl`). `tree-sitter-loader` targets on-disk grammar repos, not pre-built WASM blobs.
-- **Risks (top tier):** R3 grammar ABI fragmentation; R4 FTS5 runtime PRAGMA verification; R6 macOS FSEvents drops; R7 `WalkBuilder::require_git(false)` footgun; R8 WASM init cost + per-query re-parse trigger; NR1 plan internal inconsistencies.
-- **Open questions:** 7 — all need Ada/user decision before spec authoring.
+**RECOMMENDATION: PROCEED to spec authoring — with one mandatory plan-level amend before §6.5 of SPEC is touched.**
 
-**Recommendation: PROCEED to spec authoring.** No locked decision in plan §3 is unworkable. The 7 open questions and 3 needs-review items must be resolved by Ada inside the spec — they do not require renegotiating the plan.
+### Mandatory plan amend (BLOCKING for spec authoring)
 
----
+- **H2 contradiction (R-CLI-4):** The plan's HARD gate H2 ("without requiring the user to have a `cc` toolchain") is factually impossible given that **all 10 upstream `tree-sitter-<lang>` crates AND `libsqlite3-sys/bundled` (already a transitive dep via sqlx) require `cc` at build time**. H2 must be reworded before the spec encodes acceptance criteria. This is a one-line plan patch, not a phase-replan event — the underlying intent ("user can install with one command") is preserved by Phase 04's cargo-dist distribution; v1.0.0 just needs honest prerequisites in the README.
 
-## Resolution log (orchestrator + user, 2026-04-28)
+### Recommended (NON-BLOCKING) plan adjustments
 
-The 7 open questions and the cross-cutting items above were decided through user iteration after Smith's research returned. These resolutions are **binding** for spec authoring — do not re-litigate.
+1. **R5 scope correction:** the "4 hand-written extension queries" estimate (Resolution Q5 carry-over) under-counts by 6–10×. Real cost is **~30–40 query rules** spread across all 10 languages. Ada should re-size epic 03.4 accordingly. Spec-level only — no plan amend strictly needed.
+2. **R-CLI-2 cpp+ruby outliers:** spec time should consider whether `lang-cpp` and `lang-ruby` belong in default features given their disproportionate parser.c size (cpp alone ~10 MB compiled contribution).
+3. **R8 budget completeness:** L20 only pins `find-symbol` and `outline`. Add explicit budgets for `list-symbols`, `search`, `find-references` at spec time.
 
-### Q4 — `comment` column for FTS5 → **Add to schema (Option A)**
-- Add `comment TEXT` column to `symbols` table
-- AST traversal extracts per-language doc-comments: Rust `///`, Python docstrings, JSDoc/Javadoc `/** */`, Go above-declaration comments, Ruby `#`/heredocs
-- FTS5 indexes `name + signature + comment`
-- **Scope impact:** Epic 03.4 grows by ~2-3 weeks (per-language comment-attachment logic)
-- **Rationale:** pre-production stance prioritises robustness over ship velocity; full-content search is genuine value for token-saving on semantic queries
+### Open questions for spec-time resolution
 
-### Q5 — Canonical kind enum → **Keep all 16 (Option A)**
-- Variants: `function`, `method`, `class`, `struct`, `enum`, `interface`, `trait`, `module`, `namespace`, `variable`, `constant`, `type_alias`, `macro`, `field`, `property`, `import`, `export`
-- The 4 extras (`field`, `property`, `import`, `export`) require hand-written S-expression queries per language on top of the upstream `tags.scm`
-- Vendor a copy of upstream `tags.scm` under `crates/unblock-indexer-core/queries/<lang>.scm` and extend per language
-- **Scope impact:** Epic 03.4 grows by ~40-80h (4 kinds × 10 langs × ~2-4h after first)
-- **Rationale:** robustness desde dia 1; agente consegue procurar struct fields and module imports sem fallback para Read+grep
+- **Q-R5.1** — Confirm extension-query scope correction (per-language, not 4 globals).
+- **Q-R8.1** — Set p99 budgets for `list-symbols`, `search`, `find-references` at spec time.
+- **Q-R-CLI-1.1** — Multi-platform cold-start measurement scope for H6 / epic 03.6.
+- **Q-R-CLI-2.1** — Should `lang-cpp` / `lang-ruby` be opt-in rather than default-enabled?
+- **Q-R-CLI-4.1** — **PLAN-LEVEL** — confirm H2 rewording (BLOCKING).
+- **Q-R-CLI-5.1** — ROI harness in CI vs release-gate.
 
-### Q7 — `force_include` glob list → **Include in MVP (Option A)**
-- `.unblock/indexer.toml` schema supports:
-  ```toml
-  [walker]
-  force_include = ["vendor/**", "generated/**", "third_party/**"]
-  ```
-- Override `.gitignore` but **not** the hardcoded default-excludes (`target/`, `node_modules/`, `dist/`, `build/`, `.venv/`, `vendor/`, `.git/`)
-- Implementation via `ignore::overrides::Override` applied after `WalkBuilder`
-- **Scope impact:** ~4-6h in Epic 03.5
-- **Rationale:** real-world need (Go vendored deps, generated code in monorepos)
+### Counts
 
-### Q9.1 — Three entry points (refactor `setup` tool, add wizard) → **B+C, one-shot unified flow priority**
-
-Three coexisting entry points:
-
-| Entry | Caller | When | Scope |
-|---|---|---|---|
-| `unblock-mcp init` (NEW) | Human in terminal | Onboarding (canonical, one-shot) | Editor register + GitHub Project setup via wizard |
-| `unblock-mcp register --host=<x>` (NEW) | Human in terminal or CI | Add editor later, scripted setup | Editor register only |
-| `setup` MCP tool (existing) | Agent in active session | Self-heal, idempotent re-setup | GitHub Project setup only |
-
-**Refactor required:**
-- Extract `setup` MCP tool's logic into library function `ensure_github_project(client, repo, token) -> Result<SetupReport, SetupError>` in `unblock-github` (or `unblock-core::setup`)
-- The MCP tool handler becomes a thin wrapper around this function
-- `init` wizard calls the same function
-- API contract of MCP tool is preserved (idempotent, same JSON response)
-
-**`unblock-mcp init` wizard flow (3 steps):**
-1. Detect editors installed → ask which to register
-2. GitHub Project setup → prompt `GITHUB_TOKEN` + repo, validate, run `ensure_github_project()`
-3. Register MCP server in selected editors → idempotent merge of config files
-4. Print summary + JetBrains manual instructions (per Q9.2)
-5. Print "next steps" (restart editors, try `unblock` MCP `ready` tool from inside the agent)
-
-**`unblock-mcp register --host=<x>` flags:**
-- `--host=<cursor|claude-code|claude-desktop|zed|vscode|jetbrains|all>`
-- `--scope=<workspace|user>` (default user)
-- `--server-name=<name>` (default `unblock`)
-- `--print-only` (dry run, prints JSON)
-- `--force` (overwrite existing entry without prompt)
-
-### Q9.2 — JetBrains support → **Manual import via "Import from Claude" workflow**
-- No JetBrains-specific code in the codebase
-- `init` wizard prints clear instructions: open IDE → Settings → Tools → AI Assistant → MCP → Add → "Import from Claude" → select `unblock`
-- JetBrains AI Assistant reads from Claude Desktop / Code config (which we just registered)
-- Acceptance criterion §14.6 phrased as: *"`init` wizard surfaces unblock entry such that JetBrains user can import via 5-click workflow within 30 seconds"*
-- **Rationale:** programmatic JetBrains config is technically infeasible (XML internals, version-volatile, unsupported); building a JetBrains plugin is out of scope (separate Kotlin project, +3-4 weeks). "Import from Claude" workflow already exists upstream and is acceptable UX
-
-### Q10.1 — ROI harness agent → **Sonnet via Anthropic API + Claude-Code-like system prompt**
-- NOT vanilla API (too divorced from real usage)
-- NOT supervisor (Sherlock doesn't exist until Phase 04)
-- Sonnet via Anthropic API with a system prompt mimicking Claude Code defaults
-- System prompt versioned in `tests/roi/system-prompt.md`
-- **Phase 04 follow-up (informational, not gate):** re-run harness with Sherlock supervisor when Phase 04 ships; output `docs/research/04-code-indexer-roi-supervisor.md`
-
-### Q10.2 — ROI threshold structure → **Hard 2.0× global + soft per-flow aspirationals (Option D)**
-
-```
-GATE (HARD — blocks Epic 03.6 close):
-  median(ratio across 3 flows × N=10 runs) ≥ 2.0×
-
-ASPIRATIONALS (SOFT — reported, not blocking):
-  Flow A (find_symbol exact lookup) ≥ 3.0×
-  Flow B (outline file)             ≥ 2.0×
-  Flow C (find_references)          ≥ 1.5×
-
-ESCAPE PATH if hard gate fails:
-  1. Block close of Epic 03.6
-  2. Open finding bead (label: unblock:finding:risk) for investigation
-  3. Investigate (perf? harness bug? query patterns?) and remediate
-  4. Re-measure; only after hard gate passes does Epic 03.6 close
-
-OUTPUT:
-  docs/research/03-code-indexer-roi-claude-code.md
-  Table: per-flow median + p95 + variance + N + raw transcripts archived as fixtures
-```
-
-- **Rationale:** 2.0× is defensible from estimates (expected 2.5-4× median), marketing-clean ("halves token usage"), aligns with "robust" stance — accountability via hard gate. Per-flow soft aspirationals capture honest expectations per query type without blocking ship for edge cases.
-
-### Cross-cutting: contradiction C1 absorbed
-- **Plan §10's mention of `tree-sitter-loader` is wrong** for the WASM runtime. Use `tree-sitter` crate's `wasm` feature directly (transitively `wasmtime` via `wasmtime-c-api-impl`). `tree-sitter-loader` targets on-disk grammar repos, not pre-built WASM blobs. Spec must reflect this correction.
-
-### Cross-cutting: NR1 resolved by Q4 + Q5 + Q9.1
-- The plan §L13 ambiguity is resolved by Q9.1 (refactor + 3 entry points)
-- The §6.3 enum ambiguity is resolved by Q5 (keep all 16)
-- The §10 `comment` column issue is resolved by Q4 (add column)
-
-### Cross-cutting: NR3 — hard/soft acceptance gate split adopted
-- HARD gates (block ship): functional correctness, storage integrity, lifecycle (bootstrap / shutdown), ROI gate per Q10.2
-- SOFT gates (informational, reported): performance benchmark targets per query type (informational), per-flow ROI aspirationals per Q10.2
-
-### Remaining unresolved item: NR2 — Phase 02 dependency surface
-- Plan §13 says "Phase 02 must be merged before Epic 03.2 starts" because the grammar fetcher reuses retry / circuit-breaker / OTel
-- Smith flagged that the actual API surface needs verification
-- **Spec action:** either cite Phase 02's API surface explicitly (if known when spec lands), or mark this dependency as UNRESOLVED in §15 and require explicit verification before Epic 03.2 opens beads
-
+- **Dependencies investigated:** 16 (10 grammars + tree-sitter + tree-sitter-language + sqlx + libsqlite3-sys + ignore + cc)
+- **Assumptions validated:** 28 across R3/R4/R5/R7/R8/R-CLI-1..5
+  - CONFIRMED: 22
+  - PARTIALLY CONFIRMED: 5 (R3 staleness, R5 capture coverage, R-CLI-1 modelled-not-measured, R-CLI-2 modelled-not-measured, R-CLI-5 methodology-only)
+  - **CONTRADICTED: 1** (R-CLI-4 / H2 — `cc` IS required)
+- **Contradictions: 1** (H2 wording vs upstream grammar build.rs reality)
+- **Risks logged:** 14 across the seven sections
