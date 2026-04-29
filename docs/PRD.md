@@ -3,8 +3,8 @@
 > Version: 0.1-draft  
 > Status: Working Draft  
 > Companions: [MANIFESTO.md](./MANIFESTO.md) · [SPEC.md](./SPEC.md)  
-> Plans: [01-mcp-foundation](./plans/01-plan-mcp-foundation.md) · [02-mcp-complete](./plans/02-plan-mcp-complete.md) · [03-code-indexer](./plans/03-plan-code-indexer.md) · [04-mcp-production](./plans/04-plan-mcp-production.md) · 05-plugin (planned) · 06-remote-server (planned) · 07-llm-agent (planned) · 08-harness (planned)  
-> Specs: [01-mcp-foundation](./specs/01-spec-mcp-foundation.md) · 02-mcp-complete (planned) · 03-code-indexer (planned) · 04-mcp-production (planned) · 05-plugin-pipeline (planned) · 06-remote-server (planned) · 07-llm-agent (planned)
+> Plans: [01-mcp-foundation](./plans/01-plan-mcp-foundation.md) · [02-mcp-complete](./plans/02-plan-mcp-complete.md) · 03-code-indexer (re-authoring after 2026-04-29 reframe) · 04-mcp-production (planned) · 05-plugin (planned) · 06-remote-server (planned) · 07-llm-agent (planned) · 08-harness (planned)  
+> Specs: [01-mcp-foundation](./specs/01-spec-mcp-foundation.md) · [02-mcp-complete](./specs/02-spec-mcp-complete.md) · 03-code-indexer (re-authoring after 2026-04-29 reframe) · 04-mcp-production (planned) · 05-plugin-pipeline (planned) · 06-remote-server (planned) · 07-llm-agent (planned)
 
 ---
 
@@ -52,6 +52,8 @@ The product has three layers, deployed in two modes:
 
 **Remote mode** — the same tools run on a server (`unblock-mcp-remote`) over Streamable HTTP. Multiple developers and agents connect to the same server. The graph cache is shared across sessions (no cold start after the first connection). GitHub webhooks invalidate the cache instantly. An autonomous LLM agent (Codestral) runs on the same server — triggered by webhooks, it performs investigation and code review without a human session.
 
+**Code analysis** — from v1.0.0, a sibling CLI binary `unblock-code` ships alongside the MCP server. Agents call it from Bash to query symbols, references, and outlines from a local SQLite + FTS5 index of the working repo. Stateless one-shot invocations, local-only, universal — any Bash-capable agent works without MCP.
+
 ```
 ┌─────────────────────────────────────────────┐
 │          unblock server (remote)            │
@@ -70,7 +72,7 @@ The product has three layers, deployed in two modes:
               GitHub API
 ```
 
-The CLI binary is `unblock-mcp`. The product brand is `://unblock`.
+The product brand is `://unblock`. From v1.0.0 the product ships two binaries: `unblock-mcp` (issue tracker MCP, stdio) and `unblock-code` (code analysis CLI, one-shot).
 
 ---
 
@@ -215,21 +217,22 @@ crates/
 
 `unblock-resilience` is extracted in Phase 02 (not deferred) because Phase 03's grammar fetcher (in `unblock-indexer`) consumes it directly. Forcing `unblock-indexer` (code domain) to depend on `unblock-github` (issue domain) merely to share an HTTP resilience policy would couple two architecturally orthogonal product surfaces. See [02-plan-mcp-complete §6.2](./plans/02-plan-mcp-complete.md#62-reuse-mechanism--locked-extracted-unblock-resilience-crate).
 
-**Phase 03** — 6 crates (code indexer added; same MCP binary serves both tool sets):
+**Phase 03** — 7 crates (code indexer libs + new CLI binary; `unblock-mcp` unchanged):
 
 ```
 crates/
   unblock-core/              ← zero changes
   unblock-github/            ← zero changes
-  unblock-resilience/        ← zero changes — consumed directly by unblock-indexer
+  unblock-resilience/        ← zero changes
+  unblock-mcp/               ← zero changes
   unblock-indexer-core/      ← NEW lib: pure indexer types, AST traversal, schema constants
-  unblock-indexer/           ← NEW lib: sqlx + FTS5, tree-sitter WASM runtime, walker, watcher
-  unblock-mcp/               ← adds indexer tool handlers (9 tools) alongside issue-graph tools
+  unblock-indexer/           ← NEW lib: sqlx + FTS5, statically-linked tree-sitter grammars (Top-10), walker
+  unblock-code/              ← NEW bin: code analysis CLI (clap-based, one-shot, JSON output)
 ```
 
-**Phases 04–05** — 6 crates (production distribution + plugin; no new crates).
+**Phases 04–05** — 7 crates (production distribution + plugin; no new crates).
 
-**Phase 06** — 8 crates (tools extracted, remote server added):
+**Phase 06** — 9 crates (tools extracted, remote server added):
 
 ```
 crates/
@@ -238,12 +241,13 @@ crates/
   unblock-resilience/        ← zero changes
   unblock-indexer-core/      ← zero changes
   unblock-indexer/           ← zero changes
+  unblock-code/              ← zero changes
   unblock-tools/             ← NEW lib: shared tool implementations (extracted from unblock-mcp)
   unblock-mcp/               ← becomes thin stdio bootstrap (~50 lines)
   unblock-mcp-remote/        ← NEW bin: Streamable HTTP + webhooks + SharedGraphCache (axum)
 ```
 
-**Phase 07** — 9 crates (LLM agent added to the same server):
+**Phase 07** — 10 crates (LLM agent added to the same server):
 
 ```
 crates/
@@ -252,6 +256,7 @@ crates/
   unblock-resilience/        ← zero changes
   unblock-indexer-core/      ← zero changes
   unblock-indexer/           ← zero changes
+  unblock-code/              ← zero changes
   unblock-tools/             ← zero changes
   unblock-mcp/               ← zero changes
   unblock-mcp-remote/        ← zero changes — agent is a client, not a modification
@@ -262,13 +267,14 @@ crates/
 
 ```
 unblock-mcp (bin, stdio)
-  ├── unblock-tools (lib)        ← issue-graph tool set (Phase 06+)
-  │     ├── unblock-github (lib)
-  │     │     ├── unblock-resilience (lib)   ← Phase 02+
-  │     │     └── unblock-core (lib)
-  │     └── unblock-core (lib)
-  └── unblock-indexer (lib)      ← code-indexer tool set (Phase 03+)
-        ├── unblock-resilience (lib)         ← Phase 03 grammar fetcher reuse
+  └── unblock-tools (lib)        ← issue-graph tool set (Phase 06+)
+        ├── unblock-github (lib)
+        │     ├── unblock-resilience (lib)   ← Phase 02+
+        │     └── unblock-core (lib)
+        └── unblock-core (lib)
+
+unblock-code (bin, CLI)          ← Phase 03+
+  └── unblock-indexer (lib)      ← statically-linked tree-sitter grammars (Top-10), sqlx + FTS5
         └── unblock-indexer-core (lib)
 
 unblock-resilience (lib)         ← Phase 02 — no deps on other unblock crates
@@ -297,11 +303,11 @@ unblock-agent (bin, co-deployed with remote)
 | `schemars` | MCP tool schema generation |
 | `axum` | HTTP server for remote MCP and agent webhooks |
 | `rig-core` | Rust-native LLM agent framework (OpenAI-compatible) |
-| `tree-sitter` | Multi-language parser core for the code indexer |
+| `tree-sitter` | Multi-language parser core for the code indexer (statically linked with Top-10 `tree-sitter-<lang>` crates) |
 | `sqlx` | SQLite + FTS5 storage for the code indexer (with `sqlite` feature) |
 | `ignore` | gitignore-aware filesystem walker (same as ripgrep) |
-| `notify-debouncer-full` | File watcher driving incremental indexer updates |
 | `rayon` | CPU-bound parallelism for indexer bootstrap |
+| `clap` | CLI parser for the `unblock-code` binary (Phase 03+) |
 | `failsafe` | Circuit breaker for HTTP resilience (Phase 02+ in `unblock-resilience`) |
 | `backoff` | Exponential retry with jitter (Phase 02+ in `unblock-resilience`) |
 | `hdrhistogram` | Latency histograms in `ServerMetrics` (Phase 02+) |
@@ -321,6 +327,7 @@ Every crate uses `snafu` exclusively. No `thiserror`, no `anyhow`, no `Box<dyn E
 | `unblock-indexer` | MIT | Open-source — code indexer is part of the product |
 | `unblock-tools` | MIT | Open-source — tools are the product |
 | `unblock-mcp` | MIT | Open-source — local binary for everyone |
+| `unblock-code` | MIT | Open-source — local CLI binary for code analysis (Phase 03+) |
 | `unblock-mcp-remote` | BSL 1.1 → MIT (4 years) | Pro/Enterprise — server infrastructure |
 | `unblock-agent` | BSL 1.1 → MIT (4 years) | Pro/Enterprise — autonomous LLM agent |
 
@@ -365,24 +372,27 @@ Production hardening and remaining MCP capabilities. Still local binary only.
 
 ---
 
-### Phase 03 — Code Indexer MCP (v1.0.0) → [03-plan-code-indexer.md](./plans/03-plan-code-indexer.md)
+### Phase 03 — Code Indexer CLI (v1.0.0) → 03-plan-code-indexer.md (re-authoring after 2026-04-29 reframe)
 
-Token-saving for AI agents. Instead of agents wasting tokens on Glob/Grep/Read to find symbols, definitions, and code structure, an embedded multi-language code indexer answers "where is X / what does Y export / show me Z" via fast structured MCP tool calls served from the same `unblock-mcp` binary as the issue-graph tool set.
-
-Slots after Phase 02 to leverage the `unblock-resilience` crate (circuit breaker + retry) for the HTTP grammar fetch. OpenTelemetry export is deferred to Phase 06; Phase 03 instruments via the same in-memory `ServerMetrics` introduced in Phase 02.
+Token-saving for AI agents. Instead of agents wasting tokens on Glob/Grep/Read to find symbols, definitions, and code structure, a sibling CLI binary `unblock-code` answers "where is X / what does Y export / show me Z" via fast structured Bash invocations backed by a local SQLite + FTS5 index. Distinct from the issue-tracker MCP: stateless one-shot, local-only, universal — any Bash-capable agent works without MCP.
 
 **Scope:**
-- Two new crates: `unblock-indexer-core` (pure: domain types, AST traversal, schema constants) + `unblock-indexer` (impure: sqlx + FTS5, tree-sitter WASM runtime, grammar fetcher, file walker via `ignore`, file watcher via `notify-debouncer-full`).
-- 9 new MCP tools — `find_symbol`, `list_symbols`, `outline`, `get_symbol`, `search_text`, `find_references` (HEURISTIC), `list_languages`, `index_status`, `reindex`.
-- Pluggable from MVP day 1 — tree-sitter WASM grammars fetched at runtime from a versioned GitHub Release of `unblock-mcp`, integrity-verified, cached under `~/.cache/unblock/grammars/`.
-- Top-10 initial languages: Rust, TypeScript, JavaScript, Python, Go, Java, C, C++, Ruby, PHP. PR-driven expansion via the CI grammar matrix.
+- Two new lib crates: `unblock-indexer-core` (pure: domain types, AST traversal, schema constants) + `unblock-indexer` (impure: sqlx + FTS5, tree-sitter parsers, walker via `ignore`).
+- New binary `unblock-code` (bin) — clap-based CLI. Default JSON output to stdout; structured logs (`tracing` JSON Lines) to stderr; exit codes by error family.
+- 10 commands: `find-symbol`, `list-symbols`, `outline`, `get-symbol`, `search`, `find-references` (HEURISTIC), `reindex`, `status`, `languages`, `init`.
+- Top-10 initial languages: Rust, TypeScript, JavaScript, Python, Go, Java, C, C++, Ruby, PHP — shipped as **statically-linked `tree-sitter-<lang>` crates from upstream**, exposed via Cargo feature flags. Adding a language = PR + version bump.
 - Persisted SQLite + FTS5 index per repo under `~/.cache/unblock/repos/<repo-hash>/index.db`. WAL mode. Span-only — no body text stored.
-- Pre-warm via `notify-debouncer-full` watcher + per-query mtime check + parallel bootstrap (`rayon`) in a single transaction.
-- `unblock-mcp setup` extends to register the indexer tool set alongside the issue-graph tool set in Claude Desktop / Claude Code / Cursor / Zed / VS Code / JetBrains — single command.
+- Per-query mtime check (mandatory invariant) keeps results fresh between one-shot CLI invocations; explicit `unblock-code reindex` for forced re-sync.
+- 16 symbol kinds: function, method, class, struct, enum, interface, trait, module, namespace, variable, constant, type_alias, macro, field, property, import, export.
 
-**Out of scope (explicit non-goals):** dead-code analysis, cyclomatic complexity, redundancy/similarity detection, refactor suggestions, cross-file semantic resolution / type inference, issue/code correlation queries.
+**Out of scope (explicit non-goals):** dead-code analysis, cyclomatic complexity, redundancy/similarity detection, refactor suggestions, cross-file semantic resolution / type inference, issue/code correlation queries, runtime grammar pluggability (deferred — see below), file watcher / daemon mode (deferred).
 
-**Outcome:** `v1.0.0` release. A single MCP binary that serves both the issue-graph and the code-indexer. Agents stop spending tokens grepping the workspace for symbols.
+**Deferred for future evaluation:**
+- **WASM grammar runtime** + runtime fetcher + integrity manifest. Static-linked is the v1.0.0 model; WASM is revisited if (a) binary size grows beyond practicality, or (b) demand for runtime pluggability materialises.
+- **Daemon mode.** v1.0.0 is one-shot. If ROI gate fails on cold-start, daemon mode revisits in v1.0.x.
+- **File watcher.** Per-query mtime check is sufficient for one-shot CLI; watcher is unjustified ceremony.
+
+**Outcome:** `v1.0.0` release. Two binaries ship: `unblock-mcp` (issue tracker MCP, unchanged from Phase 02) and `unblock-code` (code analysis CLI, new). Agents stop spending tokens grepping the workspace for symbols.
 
 ---
 
@@ -827,14 +837,13 @@ Orchestration layer that composes plugin agents and skills into autonomous multi
 - OpenTelemetry export produces actionable dashboards for tool latency and cache performance
 
 ### Phase 03 (Code Indexer)
-- `find_symbol` p99 < 10ms on the medium representative repo (corpus defined by research R8)
-- `outline` p99 < 20ms on the medium representative repo
+- `unblock-code find-symbol` p99 < 10ms on the medium representative repo (warm path; corpus defined by research re-run)
+- `unblock-code outline` p99 < 20ms on the medium representative repo
+- CLI cold-start (process spawn → first JSON byte on stdout) under a budget set during research re-run
 - All Top-10 languages parse a mixed-language fixture repo without panic
-- Grammars are fetched at runtime from the unblock-mcp GitHub Releases and integrity-verified against a signed manifest
-- Adding a new language requires only a PR to the CI grammar matrix — no recompilation of `unblock-mcp`
-- File watcher (`notify-debouncer-full`) keeps the index in sync on macOS, Linux, and Windows; per-query mtime check is the safety net
-- `unblock-mcp setup` registers the indexer tool set alongside the issue-graph tool set in CC Desktop / CC Code / Cursor / Zed / VS Code / JetBrains under the same MCP server entry — single command
-- Token-saving ROI report compares baseline (Glob/Grep/Read) vs indexer tool calls for at least 3 representative agent flows before phase close
+- All Top-10 grammars statically linked via Cargo feature flags; adding a language = PR to `Cargo.toml` + version bump
+- Per-query mtime check (invariant) keeps the index consistent between one-shot CLI invocations; `unblock-code reindex` is the explicit re-sync path
+- Token-saving ROI report compares baseline (Glob/Grep/Read) vs `Bash("unblock-code ...")` invocations for at least 3 representative agent flows; hard gate ≥ 2.0× median across flows
 
 ### Phase 04 (MCP Production)
 - Cold start under 500ms for repos with <500 issues using materialised fast path

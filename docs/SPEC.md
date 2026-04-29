@@ -402,13 +402,11 @@ View and field management uses REST API (`2026-03-10`), not GraphQL. The `X-GitH
 
 ## 6. MCP Tools
 
-The `unblock-mcp` binary serves **two tool sets** from the same process:
+The `unblock-mcp` binary serves the **issue-graph tool set** — 20 tools (Phases 01–02) backed by `unblock-tools` (extracted from `unblock-mcp` in Phase 06). Operates on the configured repo. All tools follow the same execution pattern: validate input → execute business logic → if write: invalidate cache + rebuild + update Status fields → return result. Catalogued in §6.2.
 
-1. **Issue-graph tool set** — 20 tools (Phases 01–02) backed by `unblock-tools` (extracted from `unblock-mcp` in Phase 06). Operates on the configured repo. All issue-graph tools follow the same execution pattern: validate input → execute business logic → if write: invalidate cache + rebuild + update Status fields → return result. Catalogued in §6.2.
-2. **Code-indexer tool set** — 9 tools (Phase 03) backed by `unblock-indexer` / `unblock-indexer-core`. Operates on the local filesystem (the working repo). Backed by SQLite + FTS5 with tree-sitter WASM grammars fetched at runtime. Catalogued in §6.5 (added in Phase 03).
+Code analysis is a **separate deliverable** — the `unblock-code` CLI binary (Phase 03+), distinct from the MCP server and consumed by agents via Bash. See §6.5 for the cross-link.
 
 → Detailed tool specifications (issue-graph): [03-spec-mcp-tools.md](./specs/03-spec-mcp-tools.md)
-→ Detailed tool specifications (code-indexer): `docs/specs/03-spec-code-indexer.md` (planned, after research validation)
 
 ### 6.1 Tool Execution Pattern
 
@@ -469,33 +467,37 @@ pub struct ServerState {
 }
 ```
 
-Shared across all tool invocations. `Arc<dyn GitHubApi>` enables dependency injection — tests use `MockGitHubClient`, production uses `GitHubClient`. Phase 02 adds `agent_kind: OnceLock<AgentKind>` and `agent_client: OnceLock<AgentClient>`. In Phase 06, `ServerState` moves to `unblock-tools` crate and is reused by both stdio and HTTP binaries. Phase 03 adds `indexer: Arc<IndexerHandle>` for the code-indexer tool set; the handle is independent of `GitHubApi` and operates on the local filesystem.
+Shared across all tool invocations. `Arc<dyn GitHubApi>` enables dependency injection — tests use `MockGitHubClient`, production uses `GitHubClient`. Phase 02 adds `agent_kind: OnceLock<AgentKind>` and `agent_client: OnceLock<AgentClient>`. In Phase 06, `ServerState` moves to `unblock-tools` crate and is reused by both stdio and HTTP binaries.
 
-### 6.5 Code-Indexer Tool Set (Phase 03)
+### 6.5 Code Indexer CLI (Phase 03)
 
-Authored by Phase 03. Lives in two crates:
+Phase 03 introduces a **separate CLI binary** `unblock-code`, not part of the `unblock-mcp` MCP server. Lives in three crates:
 
-- `unblock-indexer-core` — pure Rust. Domain types (symbol kinds, span, query input/output shapes), AST traversal logic over `tree_sitter::Tree`, schema constants. Mirrors the `unblock-core` boundary — zero IO, zero async.
-- `unblock-indexer` — impure shell. SQLite (sqlx + FTS5, WAL), tree-sitter WASM runtime, grammar fetcher (reuses the Phase 02 retry / circuit-breaker / OpenTelemetry layer), file walker (`ignore` crate), file watcher (`notify-debouncer-full`), bootstrap parallelism (`rayon`).
+- `unblock-indexer-core` — pure Rust lib. Domain types (symbol kinds, span, query input/output shapes), AST traversal logic over `tree_sitter::Tree`, schema constants. Mirrors the `unblock-core` boundary — zero IO, zero async.
+- `unblock-indexer` — impure lib. SQLite (sqlx + FTS5, WAL), tree-sitter parsers (statically-linked Top-10 `tree-sitter-<lang>` crates exposed via Cargo feature flags), file walker (`ignore` crate), bootstrap parallelism (`rayon`).
+- `unblock-code` — bin. clap-based CLI; one-shot stateless invocations; default JSON output to stdout; structured logs (`tracing` JSON Lines) to stderr; exit codes by error family.
 
-| Tool | Type | Purpose |
+| Command | Type | Purpose |
 |---|---|---|
-| `find_symbol` | Read | Locate symbols by name (optional kind / language / fuzzy / limit) |
-| `list_symbols` | Read | All symbols in a file or path |
+| `find-symbol` | Read | Locate symbols by name (optional kind / language / fuzzy / limit) |
+| `list-symbols` | Read | All symbols in a file or path |
 | `outline` | Read | Hierarchical tree of file/module structure |
-| `get_symbol` | Read | Full details for an opaque `symbol_id` (body read from filesystem on demand) |
-| `search_text` | Read | FTS5 matches across names, signatures, comments |
-| `find_references` | Read | Best-effort syntactic references — **explicitly marked HEURISTIC** in the tool description |
-| `list_languages` | Read | Loaded grammars for the current repo |
-| `index_status` | Read | Freshness, last update, totals |
+| `get-symbol` | Read | Full details for an opaque `symbol_id` (body read from filesystem on demand) |
+| `search` | Read | FTS5 matches across names, signatures, comments |
+| `find-references` | Read | Best-effort syntactic references — **explicitly marked HEURISTIC** in `--help` and JSON output |
+| `languages` | Read | Active grammars for the current repo |
+| `status` | Read | Index freshness, last update, totals |
 | `reindex` | Write (local) | Force re-parse for whole repo or a path |
+| `init` | Write (local) | Bootstrap the index (explicit alternative to lazy first-query bootstrap) |
 
-Storage layout: `~/.cache/unblock/repos/<repo-hash>/index.db` (SQLite + FTS5 + WAL) and `~/.cache/unblock/grammars/*.wasm` (integrity-verified WASM grammars fetched from versioned GitHub Releases). No body text stored — span-only.
+Storage layout: `~/.cache/unblock/repos/<repo-hash>/index.db` (SQLite + FTS5 + WAL). No body text stored — span-only. No grammar cache directory: grammars are statically linked into the `unblock-code` binary.
 
-Initial language coverage (Top-10): Rust, TypeScript, JavaScript, Python, Go, Java, C, C++, Ruby, PHP. PR-driven expansion via the CI grammar matrix. `LanguageNotSupported` errors include a `pr_pointer` to the contribution template.
+Initial language coverage (Top-10): Rust, TypeScript, JavaScript, Python, Go, Java, C, C++, Ruby, PHP. Adding a language = PR to `Cargo.toml` + Cargo feature flag + version bump. `LanguageNotSupported` errors include a `pr_pointer` to the contribution template.
 
-→ Detailed plan: [03-plan-code-indexer.md](./plans/03-plan-code-indexer.md)
-→ Detailed spec (planned, post-research): `docs/specs/03-spec-code-indexer.md`
+Runtime grammar pluggability via WASM is **deferred for future evaluation** (see PRD §7 Phase 03 "Deferred"). v1.0.0 is static-linked.
+
+→ Detailed plan: `docs/plans/03-plan-code-indexer.md` (re-authoring after 2026-04-29 reframe)
+→ Detailed spec: `docs/specs/03-spec-code-indexer.md` (re-authoring after 2026-04-29 reframe)
 
 ---
 

@@ -1671,16 +1671,19 @@ unchanged. The CI runs the existing bench suite plus the Phase 02 additions.
 
 ## 17. Cross-Phase Contracts
 
-### 17.1 Phase 03 — `unblock-indexer` consumes `unblock-resilience`
+### 17.1 Phase 03 — `unblock-resilience` consumption ROLLED BACK (2026-04-29)
 
-Phase 03 spec §20.1 was marked UNRESOLVED pending the Phase 02 decision; the plan
-APPROVED-time patch resolved it to "direct dep on `unblock-resilience`". This spec
-locks the API surface in §4 — Phase 03 codes against §4 verbatim.
+The original Phase 03 design had `unblock-indexer` consume `unblock-resilience`
+for the WASM grammar fetcher. The Phase 03 reframe (MCP→CLI, statically-linked
+tree-sitter grammars; see PRD §7 Phase 03) **drops this consumption in v1.0.0**.
+The `unblock-resilience` crate remains extracted; its sole consumer in Phase 02
+is `unblock-github`. The crate's orthogonal architectural justification (a
+neutral home for HTTP resilience policy) stands independently.
 
-**Acceptance gate (Epic 02.A Task 2 / §19.6):** a smoke-test prototype in
-`crates/unblock-indexer/` (or a private test harness if the crate doesn't yet
-exist) imports `ResiliencePolicy` and constructs a policy. The smoke test runs in
-CI as part of Phase 02's acceptance — not Phase 03's.
+The smoke-test prototype task (originally Epic 02.A Task 10) and the §19.6
+acceptance criterion that depended on it are OBSOLETE. The public API surface
+in §4 stands as a forward contract should a future WASM revival re-introduce
+the consumption.
 
 ### 17.2 Phase 04 — `StaleStatus` severity escalation
 
@@ -1731,9 +1734,7 @@ and the plan (per `feedback_bead_description_not_spec`).
    at the boundary.
 9. **Static-audit gate** in CI (§7.3) — `rg` for raw `self.http.*` outside the
    policy boundary.
-10. **Phase 03 smoke-test prototype** — stub `unblock-indexer` consumer compiles
-    against `ResiliencePolicy` (§17.1).
-11. **Unit + integration tests** per §15.1, §15.2.
+10. **Unit + integration tests** per §15.1, §15.2.
 
 ### 18.2 Epic 02.B — `ServerMetrics` → rust-supervisor
 
@@ -1793,15 +1794,13 @@ and the plan (per `feedback_bead_description_not_spec`).
    (§15.5, §15.8).
 7. **Update `reconcile` MCP tool description** to enumerate all 7 drift types.
 
-### 18.6 Epic 02.F — Documentation & Phase 03 Cross-Link → docs / Ada
+### 18.6 Epic 02.F — Documentation → docs / Ada
 
 1. **README.md** — add `doctor`, `commit_context`, `UNBLOCK_RETRY_*` env vars.
 2. **CLAUDE.md "Commit Strategy"** — trailer convention subsection (depends on
    Epic 02.D shipping).
 3. **CHANGELOG.md** — Phase 02 entry.
-4. **Phase 03 spec §20.1 cross-link verification** — re-read, confirm UNRESOLVED
-   → RESOLVED transition reads cleanly post-merge.
-5. **Forward-compat contract test verification** — confirm §6.5 test exists and
+4. **Forward-compat contract test verification** — confirm §6.5 test exists and
    passes.
 
 ---
@@ -1856,8 +1855,7 @@ and the plan (per `feedback_bead_description_not_spec`).
 
 ### 19.6 Cross-phase contracts
 
-- [x] Phase 03 spec §20.1 transitioned UNRESOLVED → RESOLVED at plan APPROVED time.
-- [ ] Phase 03 smoke-test prototype compiles against the Phase 02 `unblock-resilience` public surface (§17.1).
+- [x] Phase 03 `unblock-resilience` consumption — ROLLED BACK 2026-04-29 (§17.1); the crate remains extracted for `unblock-github` consumption.
 - [ ] `ServerMetrics` shape is frozen — forward-compat test (§6.5) passes.
 
 ### 19.7 Quality gates
@@ -1874,7 +1872,6 @@ and the plan (per `feedback_bead_description_not_spec`).
 - [ ] README.md updated with `doctor`, `commit_context`, `UNBLOCK_RETRY_*`.
 - [ ] CLAUDE.md "Commit Strategy" updated with trailer convention (post-Epic 02.D).
 - [ ] CHANGELOG.md Phase 02 entry includes BREAKING CHANGE marker for commit convention.
-- [ ] Phase 03 spec §20.1 cross-link reads cleanly.
 
 ---
 
@@ -1917,7 +1914,6 @@ and the plan (per `feedback_bead_description_not_spec`).
 
 ### 20.5 Forward references
 
-- **Phase 03 spec §20.1** — cross-link verification at Phase 02 merge.
 - **Phase 04 plan** — must include the `StaleStatus` severity-escalation task.
 - **Phase 06 plan** — must include the OTel adapter task that consumes the frozen
   `ServerMetrics` shape.

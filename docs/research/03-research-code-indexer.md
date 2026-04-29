@@ -3,9 +3,40 @@
 > Phase: 03
 > Author: Smith (investigator)
 > Date: 2026-04-27
-> Source plan: [03-plan-code-indexer.md](../plans/03-plan-code-indexer.md)
+> Source plan: ~~03-plan-code-indexer.md~~ (DELETED 2026-04-29 — see status below)
 > Source PRD: [PRD §7 Phase 03](../PRD.md)
-> Status: Findings ready for `/spec` consumption
+> Status: **PRE-REFRAME (2026-04-29) — partial obsolescence**
+
+> **REFRAME NOTE.** This research was authored against the original Phase 03
+> design (Code Indexer **MCP tools**). On 2026-04-29 the phase was reframed to
+> a separate CLI binary (`unblock-code`) with statically-linked tree-sitter
+> grammars (see PRD §7 Phase 03, SPEC §6.5). The plan and spec were deleted and
+> are being re-authored.
+>
+> **Sections that survive the reframe** (still valid for the new spec):
+> - **R3** — Top-10 grammar audit (versions, ABI, staleness flags).
+> - **R4** — sqlx + FTS5 (PRAGMA assertion, external-content triggers, `'rebuild'` after reindex; resolution Q4 add-`comment`-column stands).
+> - **R5** — Symbol-extraction queries / S-expression `tags.scm` vendoring; resolution Q5 keep-all-16-kinds stands.
+> - **R7** — `ignore` crate (`require_git(false)` footgun, `same_file_system`, `force_include` resolution Q7 stands).
+> - **R8** — Latency methodology (corpus tiers, criterion harness, implicated-file rule). Targets carry over.
+>
+> **Sections obsoleted or needing re-investigation:**
+> - **R1** — WASM grammar pipeline. Static-linked v1.0.0 has no pipeline. Revisits if WASM revival.
+> - **R2** — Runtime WASM loading. Same. The C1 contradiction (use `tree-sitter` `wasm` feature, not `tree-sitter-loader`) is moot for v1.0.0.
+> - **R6** — `notify-debouncer-full`. Watcher dropped; per-query mtime check is the sole sync mechanism. R6 becomes informational only.
+> - **R9** — Editor MCP config schemas. CLI does not register with editors. Q9.1 / Q9.2 resolutions OBSOLETE.
+> - **R10** — Token-saving methodology. Reframe needed: harness measures `Bash("unblock-code ...")` invocations vs Glob/Grep/Read. Methodology survives; threshold (2.0× hard) carries over; aspirationals A/B/C re-baselined under the new transport.
+>
+> **New investigation gaps for the next /research dispatch:**
+> - **R-CLI-1** — CLI cold-start budget: process spawn + sqlx open + first JSON byte. Bench across Top-10 langs loaded.
+> - **R-CLI-2** — Static-link binary size: measure each `tree-sitter-<lang>` crate's contribution; sum; compare against ripgrep / fd benchmarks for acceptability.
+> - **R-CLI-3** — Cargo feature-flag ergonomics: validate `--no-default-features --features lang-rust,lang-python` produces a smaller binary that still passes the test suite for the selected langs.
+>
+> The original Q-resolutions and the resolution log below remain authoritative
+> for the surviving sections; obsoleted Q-resolutions (Q9.1, Q9.2) should be
+> ignored by the spec re-author.
+
+---
 
 ---
 

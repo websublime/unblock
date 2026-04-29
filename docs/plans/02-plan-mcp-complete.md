@@ -811,11 +811,11 @@ The phase is complete when **all** of the following hold.
 - [ ] Severity in Phase 02 is WARN.
 - [ ] `#[non_exhaustive]` applied to `DriftKind` per §2.6 project-wide policy; downstream `match` sites compile clean.
 
-### 11.6 Phase 03 surface
+### 11.6 Phase 03 surface — ROLLED BACK 2026-04-29
 
-- [x] Phase 03 spec §20.1 updated from UNRESOLVED to RESOLVED (committed alongside this plan APPROVED).
-- [ ] `unblock-indexer` (in Phase 03) compiles with `use unblock_resilience::{ResiliencePolicy, IsRetryable}` against the merged Phase 02 surface.
-- [ ] Smoke-test imports `ResiliencePolicy` from a Phase 03 prototype harness before Phase 03 begins (per §6.2 acceptance).
+The Phase 03 reframe (MCP→CLI, statically-linked tree-sitter grammars; see PRD §7 Phase 03) eliminates the `unblock-indexer ← unblock-resilience` consumption expectation in v1.0.0. The `unblock-resilience` crate remains extracted; its sole consumer in Phase 02 is `unblock-github`.
+
+The smoke-test prototype acceptance (originally part of Epic 02.A) and the cross-link verification task (originally part of Epic 02.F) are OBSOLETE. Spec 02 §17.1 carries the canonical rollback record; Phase 03 plan/spec are being re-authored under the CLI model and will not consume the resilience surface in v1.0.0. The public API in §6.3 stands as a forward contract for any future WASM revival.
 
 ### 11.7 Quality gates (workspace)
 
