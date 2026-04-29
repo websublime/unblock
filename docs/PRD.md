@@ -383,7 +383,7 @@ Token-saving for AI agents. Instead of agents wasting tokens on Glob/Grep/Read t
 - Top-10 initial languages: Rust, TypeScript, JavaScript, Python, Go, Java, C, C++, Ruby, PHP — shipped as **statically-linked `tree-sitter-<lang>` crates from upstream**, exposed via Cargo feature flags. Adding a language = PR + version bump.
 - Persisted SQLite + FTS5 index per repo under `~/.cache/unblock/repos/<repo-hash>/index.db`. WAL mode. Span-only — no body text stored.
 - Per-query mtime check (mandatory invariant) keeps results fresh between one-shot CLI invocations; explicit `unblock-code reindex` for forced re-sync.
-- 16 symbol kinds: function, method, class, struct, enum, interface, trait, module, namespace, variable, constant, type_alias, macro, field, property, import, export.
+- 17 symbol kinds: function, method, class, struct, enum, interface, trait, module, namespace, variable, constant, type_alias, macro, field, property, import, export.
 
 **Out of scope (explicit non-goals):** dead-code analysis, cyclomatic complexity, redundancy/similarity detection, refactor suggestions, cross-file semantic resolution / type inference, issue/code correlation queries, runtime grammar pluggability (deferred — see below), file watcher / daemon mode (deferred).
 
