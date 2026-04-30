@@ -9,7 +9,7 @@
 > Depends on: Phase 01 (MCP Foundation) — complete per bd
 > Required by: Phase 03 (Code Indexer) — Epic 03.2 consumes `unblock-resilience` directly (no `unblock-github` dep)
 > Source: [MANIFESTO](../MANIFESTO.md) · [PRD §7 Phase 02](../PRD.md#phase-02--mcp-complete-v020--02-plan-mcp-completemd) · [SPEC §13–14](../SPEC.md)
-> Bd source of truth: bd is authoritative for execution status. PRD §7, PRD §6, SPEC §13.3, SPEC §14, SPEC §12.2, CLAUDE.md "Coding Standards", and Phase 03 spec §20.1 have been patched in this iteration to align with the locked decisions — see §13.
+> Bd source of truth: bd is authoritative for execution status. PRD §7, PRD §6, SPEC §13.3, SPEC §14, SPEC §12.2, and CLAUDE.md "Coding Standards" have been patched to align with the locked decisions — see §13. Phase 03 was reframed (MCP→CLI) on 2026-04-29 — see §11.6 for the rollback record.
 
 ---
 
@@ -48,8 +48,8 @@ Phase 02 partially landed during Phase 01 execution. The pre-plan audit (Fase A,
 
 | Feature | Location | Status |
 |---|---|---|
-| `Error::CircuitBreakerOpen { since }` | `crates/unblock-github/src/errors.rs` | Variant + `status_code() == 503` exist; never constructed by any code path |
-| `Error::RateLimited { reset_at }` | `crates/unblock-github/src/errors.rs` | Variant + `is_retryable()` helper exist; never used in a retry loop |
+| `Error::CircuitBreakerOpen { since }` | `crates/unblock-github/src/errors.rs` | Variant + `status_code() == 503` exist; never constructed by any code path. **H-8 decision (review 2026-04-30):** the field type changes from `Instant` to `DateTime<Utc>` (non-Option) — pre-prod permits the API change; serializable for `doctor` JSON output. |
+| `Error::RateLimited { reset_at }` | `crates/unblock-github/src/errors.rs` | Variant exists with `reset_at: DateTime<Utc>` (non-Option). The `is_retryable()` helper does **NOT** exist (per research CC-5) — Epic 02.A.7 builds it from scratch. |
 
 These stubs are forward-compatible with the chosen libraries (Decision L1, see §4) and will be **wired** rather than redesigned.
 
@@ -116,7 +116,7 @@ A wrapper inside `unblock-github` that makes circuit-breaker + retry caller-tran
 
 **State scope (Decision 1.3):** per-process singleton. GitHub rate limits are per-token, and the local MCP binary is single-process. Phase 06 (remote server) will revisit if multi-tenant token isolation is needed.
 
-**Retryable errors (existing `is_retryable()` contract):** `RateLimited`, `GitHubUnavailable`, `GitHubServerError { status: 503 }`. No change.
+**Retryable errors (NEW `IsRetryable` impl per CC-5):** `RateLimited`, `GitHubUnavailable`, `PostMutationRebuildFailed`, `PreMutationPrimeFailed`, and `GitHubApi { status }` for `status ∈ {429, 502, 503, 504}`. The `is_retryable()` helper is built from scratch in Epic 02.A.7 — research CC-5 confirmed no existing helper to wrap.
 
 ### 2.2 Observability — in-memory `ServerMetrics`
 
@@ -463,8 +463,9 @@ crates/unblock-github/src/
 ├── lib.rs
 ├── client.rs                  ← MODIFIED: holds `ResiliencePolicy`; every HTTP call
 │                                  passes through `policy.execute(...)`
-├── errors.rs                  ← MODIFIED: `impl IsRetryable for Error` (wraps existing
-│                                  `is_retryable()` helper); variants unchanged
+├── errors.rs                  ← MODIFIED: `impl IsRetryable for Error` (NEW impl,
+│                                  built from scratch per CC-5); `CircuitBreakerOpen.since`
+│                                  changes type from `Instant` to `DateTime<Utc>` per H-8
 ├── graphql.rs
 ├── mutations.rs
 └── projects.rs
@@ -505,7 +506,7 @@ Unchanged from Phase 01:
 
 ## 6. Public API Surface for Phase 03
 
-> Phase 03 (Code Indexer) Epic 03.2 reuses Phase 02's resilience layer for the WASM grammar fetcher. Phase 03 spec §20.1 marked the surface as UNRESOLVED pending this plan. This section pins the contract.
+> Phase 03 (Code Indexer) was reframed on 2026-04-29 (MCP→CLI, statically-linked tree-sitter grammars; PRD §7 Phase 03). `unblock-indexer` v1.0.0 does **not** consume `unblock-resilience` — see §11.6 for the rollback record. This section pins the public API surface as a **forward contract** for any future WASM revival.
 
 ### 6.1 What Phase 03 needs
 
@@ -547,9 +548,9 @@ unblock-indexer (Phase 03) ─── depends on ───▶ unblock-resilience
                             (NO dep from unblock-indexer ──▶ unblock-github)
 ```
 
-**License.** `unblock-resilience` ships under MIT, matching `unblock-core` / `unblock-github`. It is part of the open-source foundation.
+**License.** `unblock-resilience` inherits the workspace license `MIT OR Apache-2.0` (per H-3, review 2026-04-30) — matches `unblock-core` / `unblock-github` / `unblock-mcp` which also use `license.workspace = true`. It is part of the open-source foundation.
 
-**Phase 03 spec §20.1.** This decision **resolves** the previously UNRESOLVED `unblock-resilience` reuse question carried in Phase 03 §20.1. The Phase 03 plan/spec must be updated to reflect the resolved direct-crate-dependency model — Epic 02.F task added (§13.5).
+**Phase 03 v1.0.0 status (ROLLBACK 2026-04-29).** Phase 03 was reframed (MCP→CLI, statically-linked tree-sitter grammars) — see PRD §7 Phase 03. `unblock-indexer` v1.0.0 does **not** consume `unblock-resilience`. The crate remains extracted; its sole consumer in Phase 02 is `unblock-github`. The public API in §6.3 stands as a forward contract for any future WASM revival. See §11.6 for the canonical rollback record.
 
 **API stability.** The public surface in §6.3 is the contract Phase 03 codes against; Epic 02.A acceptance includes a smoke-test that imports `ResiliencePolicy` from a Phase 03 prototype harness before Phase 03 begins.
 
@@ -584,9 +585,9 @@ pub trait IsRetryable {
 }
 ```
 
-`unblock-github::Error::is_retryable()` already exists (Phase 01 audit); Epic 02.A wires it into a thin `impl IsRetryable for Error` in `unblock-github`. `unblock-indexer` (Phase 03) will implement `IsRetryable` on its own grammar-fetch error type. Neither crate depends on the other.
+`unblock-github::Error::is_retryable()` does **NOT** exist in the workspace (research CC-5 confirmed — `rg is_retryable crates/` returns zero matches). Epic 02.A.7 implements `impl IsRetryable for Error` in `unblock-github` from scratch. Phase 03 v1.0.0 does not consume `unblock-resilience` (rollback 2026-04-29 — see §11.6); the public API in §6.3 stands as a forward contract.
 
-**Acceptance criterion (§11.5):** Phase 03 spec §20.1 is **closed** — no UNRESOLVED markers — once this plan reaches APPROVED.
+**Acceptance criterion (§11.5):** ROLLED BACK — see §11.6 (Phase 03 no longer consumes `unblock-resilience` in v1.0.0).
 
 ---
 
@@ -645,7 +646,7 @@ Tasks:
 
 1. Add `failsafe` + `backoff` workspace deps; lock versions (depends on RG-4, RG-5).
 2. Create new crate `crates/unblock-resilience/` (per §6.2): expose `Breaker`, `RetryPolicy`, `ResiliencePolicy`, `BreakerSnapshot`, `RetrySnapshot`, `BreakerState`, `IsRetryable`, `ResilienceError<E>`. Crate has zero deps on other unblock crates.
-3. Add `unblock-github` → `unblock-resilience` dependency. Implement `IsRetryable` for `unblock_github::Error` (wraps existing `is_retryable()` helper) inside `unblock-github`.
+3. Add `unblock-github` → `unblock-resilience` dependency. Implement `IsRetryable` for `unblock_github::Error` from scratch inside `unblock-github` (no existing helper to wrap — research CC-5).
 4. Wrap every HTTP call in `GitHubClient` (graphql + REST) with `policy.execute(...)`. Caller signature unchanged. Static audit verifies zero `reqwest::Client` direct calls outside the policy boundary.
 5. Wire env-var config (`UNBLOCK_RETRY_MAX_ATTEMPTS`, `UNBLOCK_RETRY_DEADLINE_SECS`) via `Config::load_from`.
 6. Implement `Retry-After` header parsing with 30s cap; respect on 429 only.
@@ -664,7 +665,7 @@ Tasks:
 1. Decide placement — `unblock-core::metrics` vs `unblock-mcp::metrics` — based on RG-1.
 2. Implement `ServerMetrics` per §2.2 (atomics + hdrhistogram).
 3. Wire `tool_calls` + `tool_durations` recording into the MCP tool dispatch wrapper (single instrumentation point).
-4. Wire `api_calls` + `api_durations` into `ResiliencePolicy::execute` (single instrumentation point).
+4. Wire `api_calls` + `api_durations` at each `policy.execute(...)` call site **inside `unblock-github::client`** (not inside `unblock-resilience`) — preserves crate orthogonality. See spec §7.5 (SO-2, APPROVED).
 5. Wire `cache_*` counters into `GraphCache` (already invalidates on every write).
 6. Wire `graph_issues` + `graph_edges` gauges to be updated after every cache rebuild.
 7. Snapshot API: `ServerMetrics::snapshot() -> MetricsSnapshot` (cloneable, serde-friendly).
@@ -727,7 +728,7 @@ Tasks:
 ### Epic 02.F — Documentation, PRD/SPEC Patches, Phase 06 Forward-Compat
 
 **Owner:** docs / Ada (architect)
-**Output:** Remaining doc tasks after the plan-time patches in §13. The PRD §7, PRD §6, SPEC §12.2, SPEC §13.3, SPEC §14, CLAUDE.md "Coding Standards", and Phase 03 spec §20.1 patches were applied during plan APPROVED — see §13 for the canonical record.
+**Output:** Remaining doc tasks after the plan-time patches in §13. The PRD §7, PRD §6, SPEC §12.2, SPEC §13.3, SPEC §14, and CLAUDE.md "Coding Standards" patches were applied during plan APPROVED — see §13 for the canonical record.
 
 Tasks:
 
@@ -736,7 +737,7 @@ Tasks:
 3. ~~SPEC §13.3 (Metrics)~~ — APPLIED at plan APPROVED. See §13.3.
 4. ~~SPEC §14 (Resilience) + §12.2 (`#[non_exhaustive]` on Error)~~ — APPLIED at plan APPROVED. See §13.4.
 5. ~~CLAUDE.md "Coding Standards" — `#[non_exhaustive]` policy~~ — APPLIED at plan APPROVED. See §13.5.
-6. ~~Phase 03 spec §20.1 — UNRESOLVED → RESOLVED~~ — APPLIED at plan APPROVED.
+6. ~~Phase 03 spec §20.1 cross-link~~ — OBSOLETE per §11.6 (Phase 03 reframed 2026-04-29; no §20.1 in the re-authored Phase 03 spec).
 7. CLAUDE.md "Commit Strategy" subsection — point at `commit_context` and document the trailer convention. Lands when `commit_context` ships (Epic 02.D).
 8. README.md — add `doctor` and `commit_context` to the Tools section; document `UNBLOCK_RETRY_*` env vars. Lands when those tools ship.
 9. Forward-compat contract test (Phase 06): `ServerMetrics` snapshot serialises stably; structure not changed when a hypothetical OTel adapter is added. Implementation in Epic 02.B; Epic 02.F verifies the test exists and passes.
@@ -749,9 +750,10 @@ Tasks:
 Epic 02.A (resilience)         depends on RG-4, RG-5
    └── Epic 02.B (metrics)     depends on RG-1, RG-6, Epic 02.A (instrumentation point)
          └── Epic 02.C (doctor)  depends on RG-9, Epics 02.A + 02.B + 02.E
-   └── Epic 02.D (commit_context)  depends on RG-3, RG-7, RG-8 (parallel with 02.B/C)
+   └── Epic 02.D (commit_context)  depends on RG-3 (parallel with 02.B/C)
 Epic 02.E (StaleStatus)        depends on RG-9 (parallel with 02.A)
-                               (RG-10 closed; non_exhaustive application is engineering work)
+                               (RG-7, RG-8 DROPPED — see §8; RG-10 closed; non_exhaustive
+                                application is engineering work)
 Epic 02.F (docs/patches)       depends on all prior epics for accuracy
 ```
 
@@ -779,7 +781,7 @@ The phase is complete when **all** of the following hold.
 - [ ] Histograms use `Mutex<hdrhistogram::Histogram>` per metric (per Decision NR-6.1.1 — `hdrhistogram` has no concurrent variant).
 - [ ] Histogram bounds use the locked defaults (`tool_durations`: low=1µs / high=60s / sigfig=3; `api_durations`: low=1ms / high=60s / sigfig=3) per Q-6.1; overrides require a one-line justification.
 - [ ] Bench load uses realistic methodology: **1k tool calls/s sustained + 10k tool calls/s burst** (Decision NR-6.1.2) — NOT the original unrealistic 10k sustained.
-- [ ] **Hard gate**: per-call instrumentation overhead < 500ns under uncontested lock (warm sustained), < 5µs under 10k/s burst (Decision NR-6.1.3).
+- [ ] **Hard gate**: per-call instrumentation overhead < 500ns under uncontested lock (warm sustained), < 5µs under 10k/s burst (Decision NR-6.1.3 — see research §RG-6).
 - [ ] **Hard gate**: p99 of warm-cache `ready` remains < 2s post-metrics (existing Phase 01 invariant must not regress).
 - [ ] **Soft gate** (informational): < 5% p99 regression on warm-cache `ready` vs pre-metrics baseline (Decision NR-6.1.4).
 - [ ] Snapshot serialisation is stable — contract test for Phase 06 forward-compat passes.
@@ -841,7 +843,7 @@ The smoke-test prototype acceptance (originally part of Epic 02.A) and the cross
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
 | `failsafe` async support is awkward; needs adapter | Medium | Medium | RG-4 prototype; if unfit, escalate to user — Decision L1.1 reopens |
-| `backoff` does not honour `Retry-After` natively | Medium | Medium | RG-5 prototype; wrap with explicit pre-check if needed |
+| `backoff` is unmaintained (last release 2022) — research CC-4 flagged this as residual risk after RG-5 confirmed `Error::Transient { retry_after }` works | Medium | Medium | Phase 06+ revisit trigger conditions documented in spec §20.3: last release > 24 mo, security advisory, or `tokio` 2.0 incompat triggers `backon` migration evaluation |
 | `hdrhistogram` lock contention regresses p99 | Low | High | RG-6 bench gate; fall back to lock-free `quanta` + manual buckets if it fails |
 | Per-process breaker is wrong for Phase 06 multi-tenant | High (in P06) | Medium | Decision L1.3 documents the scope; Phase 06 plan revisits explicitly |
 | `git2` C-dep breaks Phase 04 cross-platform builds | Medium | High | RG-3 audit before commit; `gix` is the fallback |
@@ -853,7 +855,7 @@ The smoke-test prototype acceptance (originally part of Epic 02.A) and the cross
 
 ## 13. PRD / SPEC / CLAUDE.md Patches — APPLIED in this iteration
 
-> **Status: APPLIED 2026-04-28.** Per the orchestrator's Decision 5, the patches drafted in earlier DRAFT revisions of this plan have now been applied to the live PRD.md / SPEC.md / CLAUDE.md alongside the locking of Decisions 1–5. The patches are listed below as the canonical record of what changed; Epic 02.F's remaining work is README.md, Phase 03 plan §20.1 cross-link verification, and the forward-compat contract test.
+> **Status: APPLIED 2026-04-28.** Per the orchestrator's Decision 5, the patches drafted in earlier DRAFT revisions of this plan have now been applied to the live PRD.md / SPEC.md / CLAUDE.md alongside the locking of Decisions 1–5. The patches are listed below as the canonical record of what changed; Epic 02.F's remaining work is README.md and the forward-compat contract test. (Phase 03 cross-link verification is OBSOLETE — see §11.6 for the 2026-04-29 rollback.)
 
 ### 13.1 PRD §7 Phase 02 — APPLIED
 
@@ -904,7 +906,6 @@ Patches that are NOT yet applied (intentional — they depend on implementation)
 
 - README.md: `doctor`, `commit_context`, `UNBLOCK_RETRY_*` env-var entries (depend on the tools shipping).
 - CLAUDE.md "Commit Strategy" trailer-convention subsection (depends on `commit_context` shipping).
-- Phase 03 plan §20.1 cross-link verification — re-read after this plan flips to APPROVED to confirm the UNRESOLVED → RESOLVED transition message reads cleanly.
 - Forward-compat contract test (`ServerMetrics` snapshot serialisation) — Epic 02.B deliverable.
 
 ---
@@ -914,10 +915,10 @@ Patches that are NOT yet applied (intentional — they depend on implementation)
 The phase is **DONE** when:
 
 1. All §11 acceptance criteria are met.
-2. All **8 open** research gaps in §8 (RG-1, RG-3, RG-4, RG-5, RG-6, RG-7, RG-8, RG-9) have validated answers in `docs/research/02-*.md` (Smith). RG-2 and RG-10 are closed by Decisions 1 and 3 respectively at plan APPROVED time.
+2. All **6 open** research gaps in §8 (RG-1, RG-3, RG-4, RG-5, RG-6, RG-9) have validated answers in `docs/research/02-*.md` (Smith). RG-2 and RG-10 are closed by Decisions 1 and 3 respectively at plan APPROVED time. RG-7 and RG-8 are DROPPED (scope errors — see §8).
 3. The spec `docs/specs/02-spec-mcp-complete.md` has been authored (Ada, after research) and approved.
 4. Beads have been created for every task in §9 (Fernando), referencing this plan and the spec, with parent epics 02.A–02.F.
 5. Implementation closes all beads through the standard pipeline (investigate → do → review → quality).
-6. Remaining doc patches (README.md, CLAUDE.md "Commit Strategy" trailer subsection) merged. PRD / SPEC / CLAUDE.md "Coding Standards" / Phase 03 spec §20.1 patches were applied at plan APPROVED — see §13.
+6. Remaining doc patches (README.md, CLAUDE.md "Commit Strategy" trailer subsection) merged. PRD / SPEC / CLAUDE.md "Coding Standards" patches were applied at plan APPROVED — see §13.
 7. `unblock-mcp` v0.2.0 is tagged.
-8. Phase 03 Epic 03.2 dispatches successfully against the Phase 02 resilience surface — verified by a smoke test that imports `ResiliencePolicy` from `unblock-resilience` in a Phase 03 crate prototype before Phase 03 starts.
+8. ~~Phase 03 Epic 03.2 dispatches successfully against the Phase 02 resilience surface~~ — OBSOLETE per §11.6 (Phase 03 reframed 2026-04-29; no longer consumes `unblock-resilience` in v1.0.0). The public API in §6.3 stands as a forward contract for any future WASM revival.
