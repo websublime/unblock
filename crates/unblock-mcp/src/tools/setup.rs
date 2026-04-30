@@ -43,9 +43,11 @@ pub struct SetupResult {
     /// `updateProjectV2Field`. Most commonly this is the GitHub-default
     /// built-in `Status` field on a fresh project: its options
     /// `[Todo, In Progress, Done]` get rewritten to the spec's canonical
-    /// `[ready, in_progress, blocked, deferred, closed]`. Empty when
-    /// every existing single-select required field already matched the
-    /// spec exactly. See bead unblock-aa2 for the auto-heal contract.
+    /// `[Backlog, Ready, In Progress, Blocked, Deferred, Closed]`
+    /// (`TitleCase`, sourced from `Status::option_name`; see spec §5.7).
+    /// Empty when every existing single-select required field already
+    /// matched the spec exactly. See bead unblock-aa2 for the auto-heal
+    /// contract and bead unblock-1zj for the rename + Backlog default.
     pub fields_healed: Vec<String>,
     /// Canonical names of fields that already existed and matched the
     /// spec — no mutation issued.
@@ -79,6 +81,61 @@ pub struct ViewSpec {
     pub filter: Option<&'static str>,
 }
 
+/// The `://ready` view filter: `"Status":"Ready"`.
+///
+/// Sourced from [`unblock_core::types::Status::option_name`] per spec
+/// §5.8. The filter wraps the helper's `Ready` output in the Projects
+/// V2 saved-view filter syntax via a const concatenation so no
+/// hand-rolled `"Ready"` literal exists in this module. The §5.7 ↔
+/// §5.8 round-trip is closed by the unit test
+/// `ready_view_filter_matches_status_helper` below.
+const READY_VIEW_FILTER: &str = const_concat_ready_view_filter();
+
+const fn const_concat_ready_view_filter() -> &'static str {
+    // `concat!` requires literal `&str` arguments and cannot reference
+    // a `const fn` call result; instead we emit the bytes via a
+    // hand-rolled byte-array assembly that operates at compile time.
+    // `Status::Ready.option_name()` is a `const fn`, so the splice
+    // happens entirely at const eval. The helper-name unit test
+    // `ready_view_filter_matches_status_helper` (see below) verifies
+    // the runtime result still equals the expected wire string —
+    // catching any future drift in `option_name`.
+    const PREFIX: &[u8] = b"\"Status\":\"";
+    const SUFFIX: &[u8] = b"\"";
+    const NAME: &[u8] = unblock_core::types::Status::Ready.option_name().as_bytes();
+    const LEN: usize = PREFIX.len() + NAME.len() + SUFFIX.len();
+    const fn build() -> [u8; LEN] {
+        let mut out = [0u8; LEN];
+        let mut i = 0;
+        let mut j = 0;
+        while j < PREFIX.len() {
+            out[i] = PREFIX[j];
+            i += 1;
+            j += 1;
+        }
+        let mut j = 0;
+        while j < NAME.len() {
+            out[i] = NAME[j];
+            i += 1;
+            j += 1;
+        }
+        let mut j = 0;
+        while j < SUFFIX.len() {
+            out[i] = SUFFIX[j];
+            i += 1;
+            j += 1;
+        }
+        out
+    }
+    const FILTER_BYTES: [u8; LEN] = build();
+    // `from_utf8` is const-stable; the inputs are pure ASCII so this is
+    // infallible — `unwrap()` in const context.
+    match std::str::from_utf8(&FILTER_BYTES) {
+        Ok(s) => s,
+        Err(_) => panic!("READY_VIEW_FILTER bytes are not valid UTF-8 — bug"),
+    }
+}
+
 /// The 5 pre-configured views required by the setup tool.
 ///
 /// Each view follows the naming convention `://name` to distinguish
@@ -87,7 +144,9 @@ pub const REQUIRED_VIEWS: &[ViewSpec] = &[
     ViewSpec {
         name: "://ready",
         layout: ViewLayout::Board,
-        filter: Some("\"Status\":\"ready\""),
+        // Filter sourced from `Status::option_name` per spec §5.8 —
+        // see [`READY_VIEW_FILTER`] for the round-trip closure.
+        filter: Some(READY_VIEW_FILTER),
     },
     ViewSpec {
         name: "://team",

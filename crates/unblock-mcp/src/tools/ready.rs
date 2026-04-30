@@ -357,10 +357,15 @@ pub(crate) fn compute_cross_repo_refs(
         if issue.state == IssueState::Closed {
             continue;
         }
-        // Filter 2: skip preserved states (§3.3) — these are NOT step-6-filtered.
+        // Filter 2: skip preserved states (§3.3, Invariant 15(a)) — these
+        // are NOT step-6-filtered. `Backlog` is sticky (introduced by
+        // `unblock-1zj`): the server NEVER auto-promotes a Backlog issue
+        // out of Backlog, so it's treated as preserved here too.
+        // `#[non_exhaustive]` forward-compat: any future Status variant
+        // also defaults to "preserved" via the wildcard arm.
         match issue.status {
-            Status::InProgress | Status::Deferred | Status::Closed => continue,
             Status::Ready | Status::Blocked => {}
+            _ => continue,
         }
         // Only LOCAL source issues can be held out of the LOCAL ready set in a
         // meaningful cross-repo sense. Skip cross-repo sources.

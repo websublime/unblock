@@ -14,8 +14,11 @@
 #   - Leaves the project's built-in `Status` field intact.
 #     `setup_fields()` in the Rust code-base auto-heals the built-in
 #     Status options to the spec's canonical set
-#     (ready/in_progress/blocked/deferred/closed) on every run, so the
-#     script has nothing to do here.
+#     (Backlog/Ready/In Progress/Blocked/Deferred/Closed — TitleCase,
+#     board order; sourced from Status::option_name per spec §5.7 and
+#     bead unblock-1zj) on every run, so the script has nothing to do
+#     here. The auto-heal matcher preserves existing option IDs across
+#     the lowercase → TitleCase rename via a normalised name match.
 #
 # WHY THE BUILT-IN STATUS IS LEFT ALONE
 #   GitHub Projects V2 forbids deletion of the built-in Status field

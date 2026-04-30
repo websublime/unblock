@@ -298,8 +298,11 @@ macro_rules! define_set_project_fields {
         /// values).
         ///
         /// The `status` parameter controls the initial Status field value.
-        /// Callers should pass `"blocked"` when the issue has blockers, or
-        /// `"ready"` otherwise (per spec §5.7).
+        /// Callers MUST source the string from
+        /// [`unblock_core::types::Status::option_name`] — never a raw
+        /// literal. Per `unblock-1zj` (spec §8.3) `create` always lands
+        /// new issues in `Status::Backlog.option_name()` (= `"Backlog"`)
+        /// regardless of blocker state, because Backlog is sticky.
         ///
         /// Priority uses prefix matching so callers can pass short codes
         /// like `"P0"` which resolve to the full option name `"P0 - Critical"`.
@@ -1014,8 +1017,14 @@ impl UnblockServer {
                             .get_project_item_id(&issue.node_id, &project_info.id)
                             .await
                         {
-                            // Status -> in_progress
-                            if let Some(option_id) = field_ids.status.options.get("in_progress")
+                            // Status -> In Progress (sourced from
+                            // `Status::option_name` per spec §2.3 / §8.1
+                            // — `claim` is one of the explicit transitions
+                            // out of Backlog).
+                            if let Some(option_id) = field_ids
+                                .status
+                                .options
+                                .get(unblock_core::types::Status::InProgress.option_name())
                                 && let Err(e) = client
                                     .update_field(
                                         &project_info.id,
@@ -1273,7 +1282,7 @@ impl UnblockServer {
                 crate::tools::update_status_field_best_effort(
                     client.as_ref(),
                     &issue.node_id,
-                    "closed",
+                    unblock_core::types::Status::Closed.option_name(),
                     &CLOSE_HANDLER_STATUS_LOG,
                 )
                 .await;
@@ -1382,12 +1391,21 @@ impl UnblockServer {
             // variant delegates to the unchanged path.
             match client.fetch_issue_ref(&cascaded_ref).await {
                 Ok(cascaded_issue) => {
-                    if cascaded_issue.status != unblock_core::types::Status::InProgress {
+                    // Spec §8.2 step 6: `Backlog` is sticky — a
+                    // graph-driven cascade does NOT promote a Backlog
+                    // dependent out of Backlog. Skip the Status update
+                    // entirely; the unblock comment above still landed.
+                    // Also skip when the dependent is already InProgress
+                    // (pre-existing rule — preserves agent claims).
+                    let cascaded_status = cascaded_issue.status;
+                    if cascaded_status != unblock_core::types::Status::InProgress
+                        && cascaded_status != unblock_core::types::Status::Backlog
+                    {
                         use tracing::Instrument as _;
                         crate::tools::update_status_field_best_effort(
                             client.as_ref(),
                             &cascaded_issue.node_id,
-                            "ready",
+                            unblock_core::types::Status::Ready.option_name(),
                             &CLOSE_CASCADE_STATUS_LOG,
                         )
                         .instrument(tracing::info_span!(
@@ -1395,6 +1413,11 @@ impl UnblockServer {
                             cascaded_qid = %cascaded_qid,
                         ))
                         .await;
+                    } else if cascaded_status == unblock_core::types::Status::Backlog {
+                        tracing::debug!(
+                            cascaded_qid = %cascaded_qid,
+                            "Cascaded dependent is in Backlog — Status update skipped per §8.2 step 6 sticky-Backlog rule"
+                        );
                     }
                 }
                 Err(e) => {
@@ -1701,13 +1724,24 @@ impl UnblockServer {
         // cross-repo scope table), so the helper never observes
         // cross-repo source issues here.
         if matches!(source_ref, unblock_core::types::IssueRef::Local(_)) {
-            crate::tools::update_status_field_best_effort(
-                client.as_ref(),
-                &source_issue.node_id,
-                "blocked",
-                &DEPENDS_HANDLER_STATUS_LOG,
-            )
-            .await;
+            // Spec §8.4 step 5: `Backlog` is sticky — adding a blocker
+            // to a Backlog issue MUST NOT auto-promote it to `Blocked`.
+            // The blocker is recorded; the next explicit transition out
+            // of Backlog will land it in `Ready`/`Blocked` per the graph.
+            if source_issue.status == unblock_core::types::Status::Backlog {
+                tracing::debug!(
+                    source = %source_ref,
+                    "Source is in Backlog — Status update skipped per §8.4 step 5 sticky-Backlog rule"
+                );
+            } else {
+                crate::tools::update_status_field_best_effort(
+                    client.as_ref(),
+                    &source_issue.node_id,
+                    unblock_core::types::Status::Blocked.option_name(),
+                    &DEPENDS_HANDLER_STATUS_LOG,
+                )
+                .await;
+            }
         } else {
             tracing::debug!(
                 source = %source_ref,
@@ -1924,12 +1958,19 @@ impl UnblockServer {
                                 Ok(item_id) => {
                                     added_to_project = true;
 
+                                    // Spec §8.3 step 3: every newly
+                                    // created issue lands in
+                                    // `Status::Backlog` regardless of
+                                    // blocker state. Backlog is sticky
+                                    // (§2.3, §3.3 Filter 2, §10.2);
+                                    // explicit user/agent transitions
+                                    // (e.g. `update`, `claim`) move it
+                                    // out. The pre-`unblock-1zj` choice
+                                    // of `ready`/`blocked` based on
+                                    // `blocked_by_refs.is_empty()` is
+                                    // REMOVED.
                                     let initial_status =
-                                        if blocked_by_refs.is_empty() {
-                                            "ready"
-                                        } else {
-                                            "blocked"
-                                        };
+                                        unblock_core::types::Status::Backlog.option_name();
 
                                     set_project_fields(
                                         client.as_ref(),
@@ -2104,19 +2145,23 @@ impl UnblockServer {
             });
         }
 
-        // Validate status if provided.
+        // Validate status if provided. Accepts the canonical TitleCase
+        // option names sourced from `Status::option_name` (post-
+        // `unblock-1zj`). The validator iterates `Status::ALL` so this
+        // automatically tracks new variants.
         if let Some(ref s) = params.status
-            && !matches!(
-                s.as_str(),
-                "ready" | "in_progress" | "blocked" | "deferred" | "closed"
-            )
+            && !unblock_core::types::Status::ALL
+                .iter()
+                .any(|status| status.option_name() == s.as_str())
         {
+            let valid: Vec<&str> = unblock_core::types::Status::ALL
+                .iter()
+                .map(|status| status.option_name())
+                .collect();
             return Err(ErrorData {
                 code: rmcp::model::ErrorCode::INVALID_PARAMS,
-                message: format!(
-                    "Invalid status '{s}' — must be ready, in_progress, blocked, deferred, or closed"
-                )
-                .into(),
+                message: format!("Invalid status '{s}' — must be one of {}", valid.join(", "))
+                    .into(),
                 data: None,
             });
         }

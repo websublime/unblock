@@ -211,8 +211,34 @@ pub enum IssueState {
 ///
 /// Finer-grained than GitHub's binary Open/Closed. Used by the graph engine
 /// and MCP tools for workflow logic.
+///
+/// # Variants and board order
+///
+/// The variants below are declared in the canonical Projects V2 board order
+/// (left-to-right column order on the board view): `Backlog`, `Ready`,
+/// `InProgress`, `Blocked`, `Deferred`, `Closed`. This order is the contract
+/// consumed by the `REQUIRED_FIELDS` Status spec in `unblock-github` and the
+/// `UNBLOCK://ready` view filter.
+///
+/// `Backlog` was introduced by `unblock-1zj` as the default state at issue
+/// creation time and as a sticky-until-explicit-transition state alongside
+/// `Deferred`. See `Status::option_name` for the canonical Projects V2
+/// option strings.
+///
+/// # `#[non_exhaustive]`
+///
+/// Carries `#[non_exhaustive]` per the workspace discipline (see
+/// `CLAUDE.md` "Coding Standards"). Adding new variants is a non-breaking
+/// addition for downstream consumers.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Status {
+    /// Default state for newly created issues — unrefined work that has not
+    /// yet been promoted into the active Ready/Blocked workflow. Sticky:
+    /// the server NEVER auto-promotes a `Backlog` issue out of `Backlog`;
+    /// only explicit user/agent transitions (e.g. `update`, `claim`) move
+    /// the issue forward.
+    Backlog,
     /// Issue is ready and waiting to be picked up.
     Ready,
     /// Issue is actively being worked on.
@@ -223,6 +249,56 @@ pub enum Status {
     Deferred,
     /// Issue is completed.
     Closed,
+}
+
+impl Status {
+    /// All `Status` variants in canonical board order.
+    ///
+    /// Single source of truth for any consumer that needs to enumerate the
+    /// full set of status values. The order matches the variant declaration
+    /// order above and is the contract consumed by the `REQUIRED_FIELDS`
+    /// Status spec (`unblock-github::projects`) and the seed buckets in
+    /// `stats`.
+    pub const ALL: [Status; 6] = [
+        Status::Backlog,
+        Status::Ready,
+        Status::InProgress,
+        Status::Blocked,
+        Status::Deferred,
+        Status::Closed,
+    ];
+
+    /// Canonical Projects V2 option name (`TitleCase`, board-order matched).
+    ///
+    /// Single source of truth for every wire-format Status string produced
+    /// or consumed by the system. Consumed by:
+    ///
+    /// - The `REQUIRED_FIELDS` Status options list in
+    ///   `unblock-github::projects` (derived from [`Status::ALL`]).
+    /// - The `UNBLOCK://ready` view filter in `unblock-mcp::tools::setup`.
+    /// - `parse_status_field` in `unblock-github::graphql` (round-trip
+    ///   contract — see `CrateA` invariant 16).
+    /// - Every Status field-update site in `unblock-mcp::server`,
+    ///   `unblock-mcp::tools::reopen`, `unblock-mcp::tools::dep_remove`,
+    ///   `unblock-mcp::tools::reconcile`, and the seed buckets in
+    ///   `unblock-mcp::tools::stats`.
+    ///
+    /// **Discipline.** No literal `"Ready"`, `"In Progress"`, `"ready"`,
+    /// `"in_progress"`, `"Done"`, `"Todo"`, etc. is permitted outside this
+    /// helper's definition site and its unit tests; the canonical strings
+    /// MUST be sourced from `Status::option_name`. Enforced by a CI grep
+    /// guard introduced in `unblock-1zj`.
+    #[must_use]
+    pub const fn option_name(self) -> &'static str {
+        match self {
+            Status::Backlog => "Backlog",
+            Status::Ready => "Ready",
+            Status::InProgress => "In Progress",
+            Status::Blocked => "Blocked",
+            Status::Deferred => "Deferred",
+            Status::Closed => "Closed",
+        }
+    }
 }
 
 /// Issue priority levels.
@@ -330,9 +406,13 @@ impl fmt::Display for Status {
     /// Writes the canonical variant identifier (e.g. `"InProgress"`).
     ///
     /// Byte-identical to the current `Debug` representation so the
-    /// MCP wire format stays stable as variants evolve.
+    /// MCP wire format stays stable as variants evolve. Note that this
+    /// is **not** the Projects V2 wire string — for the on-the-wire
+    /// option name (e.g. `"In Progress"` with a space), see
+    /// [`Status::option_name`].
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Backlog => write!(f, "Backlog"),
             Self::Ready => write!(f, "Ready"),
             Self::InProgress => write!(f, "InProgress"),
             Self::Blocked => write!(f, "Blocked"),
@@ -1064,8 +1144,14 @@ mod tests {
     }
 
     fn _assert_all_status_variants_covered(v: Status) {
+        // `Status` is `#[non_exhaustive]`. Inside the defining crate
+        // `non_exhaustive` does not require a wildcard arm, so the
+        // explicit per-variant cover here remains exhaustive. Adding a
+        // new variant breaks this match at compile time — the desired
+        // single-place gate for "did we forget the new variant?".
         match v {
-            Status::Ready
+            Status::Backlog
+            | Status::Ready
             | Status::InProgress
             | Status::Blocked
             | Status::Deferred
@@ -1075,20 +1161,47 @@ mod tests {
 
     #[test]
     fn status_display_matches_debug() {
-        for v in [
-            Status::Ready,
-            Status::InProgress,
-            Status::Blocked,
-            Status::Deferred,
-            Status::Closed,
-        ] {
+        for v in Status::ALL {
             assert_eq!(v.to_string(), format!("{v:?}"));
         }
+        assert_eq!(Status::Backlog.to_string(), "Backlog");
         assert_eq!(Status::Ready.to_string(), "Ready");
         assert_eq!(Status::InProgress.to_string(), "InProgress");
         assert_eq!(Status::Blocked.to_string(), "Blocked");
         assert_eq!(Status::Deferred.to_string(), "Deferred");
         assert_eq!(Status::Closed.to_string(), "Closed");
+    }
+
+    #[test]
+    fn status_option_name_returns_canonical_titlecase_strings() {
+        // Invariant 16 (§14, Appendix A.3 obligation 1): `option_name`
+        // is the single source of truth for Projects V2 Status wire
+        // strings. Asserts every variant returns its canonical TitleCase
+        // string in board order.
+        assert_eq!(Status::Backlog.option_name(), "Backlog");
+        assert_eq!(Status::Ready.option_name(), "Ready");
+        assert_eq!(Status::InProgress.option_name(), "In Progress");
+        assert_eq!(Status::Blocked.option_name(), "Blocked");
+        assert_eq!(Status::Deferred.option_name(), "Deferred");
+        assert_eq!(Status::Closed.option_name(), "Closed");
+    }
+
+    #[test]
+    fn status_all_in_board_order() {
+        // The board order is the contract consumed by `REQUIRED_FIELDS`
+        // and the `UNBLOCK://ready` filter. Asserts the declared order
+        // matches the canonical board order documented on the enum.
+        assert_eq!(
+            Status::ALL,
+            [
+                Status::Backlog,
+                Status::Ready,
+                Status::InProgress,
+                Status::Blocked,
+                Status::Deferred,
+                Status::Closed,
+            ]
+        );
     }
 
     fn _assert_all_priority_variants_covered(v: Priority) {
@@ -1538,13 +1651,7 @@ Notes here.";
 
     #[test]
     fn serde_roundtrip_status() {
-        for s in &[
-            Status::Ready,
-            Status::InProgress,
-            Status::Blocked,
-            Status::Deferred,
-            Status::Closed,
-        ] {
+        for s in &Status::ALL {
             let json = serde_json::to_string(s).expect("serialize");
             let back: Status = serde_json::from_str(&json).expect("deserialize");
             assert_eq!(*s, back);

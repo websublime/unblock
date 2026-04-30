@@ -456,10 +456,13 @@ async fn fetch_graph_data_issues_have_valid_status_and_priority() {
 
     // Every issue should have a valid status and priority (possibly defaults).
     for issue in &issues {
-        // Status must be one of the known variants.
+        // Status must be one of the known variants. Backlog was added
+        // by `unblock-1zj` as the create-time default and is included
+        // in the valid set.
         let valid = matches!(
             issue.status,
-            Status::Ready
+            Status::Backlog
+                | Status::Ready
                 | Status::InProgress
                 | Status::Blocked
                 | Status::Deferred
@@ -1332,17 +1335,21 @@ async fn setup_fields_creates_all_seven_fields() {
         report.skipped
     );
 
-    // Verify single-select fields have the correct options.
+    // Verify single-select fields have the correct options. Post-
+    // `unblock-1zj` the canonical Status options are 6 TitleCase
+    // strings sourced from `Status::option_name`, in board order.
     assert_eq!(
         field_ids.status.options.len(),
-        5,
-        "Status should have 5 options, got: {:?}",
+        Status::ALL.len(),
+        "Status should have {} options, got: {:?}",
+        Status::ALL.len(),
         field_ids.status.options.keys().collect::<Vec<_>>()
     );
-    for expected in &["ready", "in_progress", "closed", "blocked", "deferred"] {
+    for variant in Status::ALL {
+        let expected = variant.option_name();
         assert!(
-            field_ids.status.options.contains_key(*expected),
-            "Status should have option '{expected}', got: {:?}",
+            field_ids.status.options.contains_key(expected),
+            "Status should have option {expected:?}, got: {:?}",
             field_ids.status.options.keys().collect::<Vec<_>>()
         );
     }

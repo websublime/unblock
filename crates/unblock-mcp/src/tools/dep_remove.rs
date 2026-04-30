@@ -538,8 +538,20 @@ async fn reevaluate_source_after_remove(
             source_number,
             "Source still has open blockers after dep_remove — Status left untouched per spec §8.5"
         );
+    } else if source_issue.status == unblock_core::types::Status::Backlog {
+        // Spec §8.4-style sticky-Backlog rule extended to §8.5: a
+        // Backlog source's Status is preserved by `compute_expected_status`
+        // (§10.2), so the post-`dep_remove` cross-check MUST also skip
+        // any auto-promotion. Without this guard, removing a blocker on
+        // a Backlog source would silently flip it to Ready — exactly
+        // the auto-promotion that Invariant 15(b) forbids.
+        tracing::debug!(
+            source_number,
+            "Source is in Backlog — Status update skipped after dep_remove (sticky-Backlog rule)"
+        );
     } else {
-        // Spec §8.5 step 5: zero open blockers → Status → ready.
+        // Spec §8.5 step 5: zero open blockers → Status → "Ready"
+        // (canonical TitleCase, sourced from `Status::option_name`).
         // Best-effort — never surface failures to the caller. Delegates
         // to the shared
         // [`crate::tools::update_status_field_best_effort`] helper
@@ -547,7 +559,7 @@ async fn reevaluate_source_after_remove(
         crate::tools::update_status_field_best_effort(
             state.github.as_ref(),
             &source_issue.node_id,
-            "ready",
+            unblock_core::types::Status::Ready.option_name(),
             &DEP_REMOVE_LOG,
         )
         .await;
@@ -576,9 +588,9 @@ static DEP_REMOVE_LOG: crate::tools::StatusUpdateLogConfig = crate::tools::Statu
     ),
     item_id_warn: "Failed to get project item ID for source issue — Status field will not be set after dep_remove",
     option_missing_warn: Some(
-        "Projects V2 Status field has no `ready` option — skipping Status update after dep_remove",
+        "Projects V2 Status field has no `Ready` option — skipping Status update after dep_remove",
     ),
-    update_field_warn: "Failed to set Status=ready on source issue after dep_remove",
+    update_field_warn: "Failed to set Status=Ready on source issue after dep_remove",
 };
 
 /// Execute the `dep_remove` tool handler.
@@ -608,9 +620,12 @@ static DEP_REMOVE_LOG: crate::tools::StatusUpdateLogConfig = crate::tools::Statu
 /// 4. Run [`GitHubApi::remove_blocked_by_refs`] inside
 ///    `execute_write_tool`.
 /// 5. Re-evaluate blockers on the source via `has_open_blockers` and,
-///    when the source is `Local` AND newly has zero open blockers, fire
-///    `crate::tools::update_status_field_best_effort` with the `"ready"`
-///    slug (best-effort — failures are logged but never surfaced).
+///    when the source is `Local` AND newly has zero open blockers AND
+///    its current Status is NOT `Backlog` (sticky per §10.2 / Invariant
+///    15(b)), fire `crate::tools::update_status_field_best_effort` with
+///    `unblock_core::types::Status::Ready.option_name()` (best-effort —
+///    failures are logged but never surfaced). A `Backlog` source is
+///    preserved verbatim per the sticky-Backlog rule.
 /// 6. Return [`DepRemoveResult`] with `removed = true`.
 ///
 /// # Errors

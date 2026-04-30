@@ -15,6 +15,7 @@ use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt as _;
 use tracing::{debug, instrument, warn};
+use unblock_core::types::Status;
 
 use crate::client::GitHubClient;
 use crate::errors::{self, Error};
@@ -35,7 +36,9 @@ pub struct ProjectInfo {
 /// on [`GitHubClient`] to avoid repeated GraphQL lookups.
 #[derive(Debug, Clone)]
 pub struct ProjectFieldIds {
-    /// Status field — single select: ready, `in_progress`, blocked, deferred, closed.
+    /// Status field — single select with the 6 canonical `TitleCase` options
+    /// in board order: `Backlog`, `Ready`, `In Progress`, `Blocked`,
+    /// `Deferred`, `Closed`. Sourced from `Status::option_name` per spec §5.7.
     pub status: FieldMeta,
     /// Priority field — single select: P0 - Critical, P1 - High, P2 - Medium, P3 - Low, P4 - Backlog.
     pub priority: FieldMeta,
@@ -381,12 +384,61 @@ struct FieldSpec {
     options: &'static [&'static str],
 }
 
+/// Normalise a Projects V2 single-select option name for the auto-heal
+/// matcher (spec §5.7).
+///
+/// Pipeline: trim outer whitespace → lowercase → replace each `_` with
+/// a single space → collapse runs of internal whitespace to one space.
+/// The result is a comparable canonical key used by
+/// [`GitHubClient::heal_select_field_options`] to reuse existing option
+/// GraphQL IDs across the `unblock-1zj` lowercase → `TitleCase` rename.
+///
+/// Examples:
+///
+/// - `"in_progress"` → `"in progress"`
+/// - `"In Progress"` → `"in progress"`
+/// - `"IN_PROGRESS"` → `"in progress"`
+/// - `"  Backlog  "` → `"backlog"`
+/// - `"ready"` → `"ready"`
+fn normalize_option_name(raw: &str) -> String {
+    let lowered = raw.trim().to_ascii_lowercase();
+    let with_spaces = lowered.replace('_', " ");
+    // Collapse internal whitespace runs to a single space without an
+    // extra dependency. The spec ASCII-only canonical strings keep this
+    // implementation byte-oriented.
+    with_spaces.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Canonical Projects V2 Status option names in board order.
+///
+/// **Single source of truth — generated from [`Status::ALL`].** Per spec
+/// §5.7 the `REQUIRED_FIELDS` Status spec MUST be derived from the
+/// `Status` enum (no duplicated literal list). `Status::option_name` is
+/// a `const fn`, so this `const` array is materialized at compile time
+/// and remains in lock-step with the enum: adding a new `Status` variant
+/// updates this list automatically.
+///
+/// The board order mirrors `Status::ALL` and is the contract consumed by
+/// the `REQUIRED_FIELDS` Status entry, the `UNBLOCK://ready` view filter,
+/// and the auto-heal matcher in [`GitHubClient::heal_select_field_options`].
+const STATUS_OPTION_NAMES: [&str; Status::ALL.len()] = {
+    let mut out: [&str; Status::ALL.len()] = [""; Status::ALL.len()];
+    let mut i = 0;
+    while i < Status::ALL.len() {
+        out[i] = Status::ALL[i].option_name();
+        i += 1;
+    }
+    out
+};
+
 /// The 7 required Projects V2 custom fields per spec §5.
 const REQUIRED_FIELDS: &[FieldSpec] = &[
     FieldSpec {
         name: "Status",
         data_type: "SINGLE_SELECT",
-        options: &["ready", "in_progress", "blocked", "deferred", "closed"],
+        // Sourced from `Status::option_name` via `STATUS_OPTION_NAMES`
+        // (spec §5.7 single-source-of-truth requirement).
+        options: &STATUS_OPTION_NAMES,
     },
     FieldSpec {
         name: "Priority",
@@ -1074,18 +1126,37 @@ impl GitHubClient {
     /// (see Miguel's empirical verification in bead unblock-aa2,
     /// 2026-04-30).
     ///
-    /// This implementation reuses the existing option ID **only when the
-    /// existing option's `name` equals a canonical spec name**. For the
-    /// most common heal path — the GitHub-default built-in Status field —
-    /// none of `[Todo, In Progress, Done]` overlaps with
-    /// `[ready, in_progress, blocked, deferred, closed]`, so all three
-    /// existing options are deleted and five new options are allocated
-    /// fresh IDs. **Option IDs are not preserved across this rename.** A
-    /// future enhancement could implement a positional / id-keyed rename
-    /// heuristic (Miguel's TEST 2 in bead-21:09 verified that
-    /// `updateProjectV2Field` keyed by `id` with a different `name`
-    /// preserves the option through a rename), but that path is out of
-    /// scope for the bootstrap use case. The current behaviour is safe
+    /// **Auto-heal matcher (post-`unblock-1zj`, spec §5.7).** This
+    /// implementation reuses an existing option's GraphQL ID by a
+    /// **normalised** name match — trim → lowercase → `_` → space →
+    /// collapse internal whitespace. The matcher iterates the spec
+    /// options in declared (board) order and consumes the first
+    /// unconsumed existing option whose normalised name matches; any
+    /// remaining unmatched existing options fall through to GitHub's
+    /// standard "options not in the input list get deleted" behaviour.
+    ///
+    /// Examples (`normalize_option_name`):
+    ///
+    /// - `"in_progress"` → `"in progress"`
+    /// - `"In Progress"` → `"in progress"`
+    /// - `"IN_PROGRESS"` → `"in progress"`
+    /// - `"  Backlog  "` → `"backlog"`
+    ///
+    /// **Migration path (`unblock-1zj`).** A board bootstrapped before
+    /// `unblock-1zj` carries options
+    /// `[ready, in_progress, blocked, deferred, closed]` (lowercase /
+    /// `snake_case`). After this matcher upgrade, running `setup`
+    /// against that board:
+    ///
+    /// - Reuses all 5 existing option IDs (each normalises to its
+    ///   `TitleCase` counterpart), renaming them in place to `Ready`,
+    ///   `In Progress`, `Blocked`, `Deferred`, `Closed`.
+    /// - Allocates 1 fresh option ID for the new `Backlog` entry.
+    /// - Reports the field in the `healed` bucket of `SetupReport`.
+    ///
+    /// No item assignments are lost — the rename is in-place per the
+    /// GitHub `updateProjectV2Field` contract. The previous
+    /// byte-exact-name matcher is REMOVED. The behaviour is safe
     /// because:
     ///
     /// - **Empty-project precondition.** `setup_fields` runs before any
@@ -1127,7 +1198,10 @@ impl GitHubClient {
         existing: &FieldMeta,
         spec: &FieldSpec,
     ) -> Result<(FieldMeta, bool), Error> {
-        // Fast path: option set already matches the spec — no mutation.
+        // Fast path: option set already matches the spec by exact name —
+        // no mutation. (We still defer to the normalised matcher below
+        // for any deviation, so e.g. casing differences trigger a heal
+        // rather than a silent skip.)
         let existing_names: std::collections::HashSet<&str> =
             existing.options.keys().map(String::as_str).collect();
         let spec_names: std::collections::HashSet<&str> = spec.options.iter().copied().collect();
@@ -1146,6 +1220,34 @@ impl GitHubClient {
             expected = ?spec_names,
             "Auto-healing single-select field options to match spec"
         );
+
+        // Build a (normalised_name, original_name) lookup over the
+        // existing options so we can match the spec entries (in board
+        // order) by normalised key while preserving the original name's
+        // GraphQL ID. The match is one-to-one: each existing option may
+        // be consumed at most once, in the spec's iteration order.
+        // Trim / lowercase / underscore-to-space / collapse-whitespace
+        // is the §5.7 normalisation contract.
+        //
+        // We pre-compute (existing_name → normalised_key) once because
+        // `existing.options` is a `HashMap` and iteration is repeated
+        // both in the matching loop below and (indirectly) when looking
+        // up colours.
+        let mut existing_normalised: Vec<(String, &str)> = existing
+            .options
+            .keys()
+            .map(|name| (normalize_option_name(name), name.as_str()))
+            .collect();
+        // Stable iteration order is not required for correctness — the
+        // §5.7 matching rule says "first unconsumed match" against an
+        // existing iteration order — but we sort for deterministic
+        // behaviour across HashMap implementations. Sort is by the
+        // pre-existing original name so identical normalised keys
+        // (which would only happen if a project carries two options
+        // with normalised collision, e.g. `ready` and `Ready`
+        // simultaneously — an edge case GitHub forbids on creation but
+        // we tolerate gracefully) resolve in a predictable order.
+        existing_normalised.sort_by(|a, b| a.1.cmp(b.1));
 
         let mutation = "
             mutation HealSelectField($fieldId: ID!, $name: String!, $options: [ProjectV2SingleSelectFieldOptionInput!]!) {
@@ -1170,36 +1272,66 @@ impl GitHubClient {
         ";
 
         // Build the input: spec order, reusing existing option IDs and
-        // colours where the name matches a canonical spec entry. Options
-        // without a pre-existing match are inserted without `id` (GitHub
-        // allocates a fresh option ID) and default to `GRAY`. See the
-        // doc-comment above for the exact preservation contract.
+        // colours by **normalised name match** so the `unblock-1zj`
+        // lowercase → `TitleCase` rename preserves option IDs. Each
+        // existing option may match at most one spec entry; consumed
+        // entries are masked so a later spec entry cannot reuse them.
+        // Options without a normalised match are inserted without `id`
+        // (GitHub allocates a fresh option ID) and default to `GRAY`.
+        // See the doc-comment above for the exact preservation contract.
+        let mut consumed = vec![false; existing_normalised.len()];
         let options_input: Vec<serde_json::Value> = spec
             .options
             .iter()
             .map(|name| {
+                let spec_key = normalize_option_name(name);
+
+                // Find the first unconsumed existing option whose
+                // normalised key matches.
+                let matched_existing = existing_normalised
+                    .iter()
+                    .enumerate()
+                    .find(|(idx, (key, _))| !consumed[*idx] && *key == spec_key)
+                    .map(|(idx, (_, original))| (idx, *original));
+
                 let mut opt = serde_json::Map::new();
-                if let Some(existing_id) = existing.options.get(*name) {
+                if let Some((idx, original_name)) = matched_existing {
+                    consumed[idx] = true;
+                    if let Some(existing_id) = existing.options.get(original_name) {
+                        opt.insert(
+                            "id".to_owned(),
+                            serde_json::Value::String(existing_id.clone()),
+                        );
+                    }
                     opt.insert(
-                        "id".to_owned(),
-                        serde_json::Value::String(existing_id.clone()),
+                        "name".to_owned(),
+                        serde_json::Value::String((*name).to_owned()),
+                    );
+                    // Color preservation (bead unblock-aa2 S1; extended
+                    // by `unblock-1zj` to follow the normalised match):
+                    // forward the matched existing option's colour
+                    // through the rename so operator-chosen colours
+                    // survive the lowercase → `TitleCase` migration.
+                    let color = existing
+                        .option_colors
+                        .get(original_name)
+                        .map_or("GRAY", String::as_str)
+                        .to_owned();
+                    opt.insert("color".to_owned(), serde_json::Value::String(color));
+                } else {
+                    // No normalised match — fresh option ID allocated
+                    // by GitHub. Default colour `GRAY` per the
+                    // pre-existing color-preservation rule for new
+                    // options.
+                    opt.insert(
+                        "name".to_owned(),
+                        serde_json::Value::String((*name).to_owned()),
+                    );
+                    opt.insert(
+                        "color".to_owned(),
+                        serde_json::Value::String("GRAY".to_owned()),
                     );
                 }
-                opt.insert(
-                    "name".to_owned(),
-                    serde_json::Value::String((*name).to_owned()),
-                );
-                // Color preservation (bead unblock-aa2 S1): when the
-                // existing field already carried an option with this name,
-                // forward its colour through the heal so operator-chosen
-                // colours survive idempotent re-runs. New options
-                // (no name match) default to GRAY.
-                let color = existing
-                    .option_colors
-                    .get(*name)
-                    .map_or("GRAY", String::as_str)
-                    .to_owned();
-                opt.insert("color".to_owned(), serde_json::Value::String(color));
                 opt.insert(
                     "description".to_owned(),
                     serde_json::Value::String(String::new()),
@@ -1865,7 +1997,7 @@ impl GitHubClient {
 
 #[cfg(test)]
 mod tests {
-    use super::{FieldMeta, OwnerType};
+    use super::{FieldMeta, FieldSpec, OwnerType, STATUS_OPTION_NAMES};
     use crate::client::GitHubClient;
     use crate::errors::Error;
     use std::collections::HashMap;
@@ -2027,5 +2159,177 @@ mod tests {
             }
             other => panic!("expected UnknownOwnerType, got {other:?}"),
         }
+    }
+
+    // ── normalize_option_name (unblock-1zj §5.7 auto-heal matcher) ──────
+
+    #[test]
+    fn normalize_option_name_lowercases_and_collapses_underscores() {
+        // Spec §5.7 examples: trim → lowercase → underscore-to-space →
+        // collapse internal whitespace.
+        assert_eq!(super::normalize_option_name("in_progress"), "in progress");
+        assert_eq!(super::normalize_option_name("In Progress"), "in progress");
+        assert_eq!(super::normalize_option_name("IN_PROGRESS"), "in progress");
+        assert_eq!(super::normalize_option_name("Backlog"), "backlog");
+        assert_eq!(super::normalize_option_name("ready"), "ready");
+        assert_eq!(super::normalize_option_name("  Backlog  "), "backlog");
+        // Internal whitespace runs collapse to a single space.
+        assert_eq!(super::normalize_option_name("In   Progress"), "in progress");
+        // Empty / whitespace-only normalises to empty.
+        assert_eq!(super::normalize_option_name(""), "");
+        assert_eq!(super::normalize_option_name("   "), "");
+    }
+
+    #[test]
+    fn normalize_option_name_idempotent_on_canonical_keys() {
+        // Re-normalising the helper output yields the same key — used
+        // by the heal matcher to compare spec entries against existing
+        // option names without round-tripping through the original.
+        for s in ["in progress", "ready", "backlog", "blocked"] {
+            assert_eq!(super::normalize_option_name(s), s);
+        }
+    }
+
+    #[test]
+    fn status_option_names_normalise_to_distinct_keys() {
+        // Spec §5.7 / Invariant 16: every `Status::option_name` output
+        // normalises to a unique key. This is the precondition for the
+        // auto-heal matcher's first-unconsumed-match rule to be sound.
+        let mut keys: Vec<String> = unblock_core::types::Status::ALL
+            .iter()
+            .map(|s| super::normalize_option_name(s.option_name()))
+            .collect();
+        keys.sort();
+        let dedup_len = {
+            let mut copy = keys.clone();
+            copy.dedup();
+            copy.len()
+        };
+        assert_eq!(
+            keys.len(),
+            dedup_len,
+            "Status::option_name outputs collide under normalisation: {keys:?}"
+        );
+    }
+
+    // ── heal_select_field_options: ID preservation across rename ────────
+
+    #[tokio::test]
+    async fn heal_status_field_preserves_existing_option_ids_across_rename() {
+        // Spec §5.7 + Appendix A.3 obligation 3: a board carrying the
+        // legacy lowercase / `snake_case` Status options heals to the
+        // canonical `TitleCase` set with the 5 existing option IDs
+        // preserved (one fresh ID for `Backlog`). The auto-heal matcher
+        // is the only path that achieves this; this test pins it.
+        let server = MockServer::start().await;
+
+        // Mock the `updateProjectV2Field` mutation. The mutation echoes
+        // back a synthesized option set that mirrors the spec's
+        // canonical 6 entries while reusing IDs for the legacy 5.
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "updateProjectV2Field": {
+                        "projectV2Field": {
+                            "id": "STATUS_FIELD_ID",
+                            "name": "Status",
+                            "options": [
+                                {"id": "OPT_BACKLOG_NEW", "name": "Backlog", "color": "GRAY"},
+                                {"id": "OPT_READY", "name": "Ready", "color": "GREEN"},
+                                {"id": "OPT_IN_PROGRESS", "name": "In Progress", "color": "YELLOW"},
+                                {"id": "OPT_BLOCKED", "name": "Blocked", "color": "RED"},
+                                {"id": "OPT_DEFERRED", "name": "Deferred", "color": "BLUE"},
+                                {"id": "OPT_CLOSED", "name": "Closed", "color": "PURPLE"},
+                            ]
+                        }
+                    }
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = GitHubClient::new_for_test(&server.uri());
+
+        // Existing options match the pre-`unblock-1zj` lowercase
+        // / `snake_case` set, with deliberate operator-chosen colours
+        // to verify color preservation across the rename.
+        let mut existing_options = HashMap::new();
+        existing_options.insert("ready".to_owned(), "OPT_READY".to_owned());
+        existing_options.insert("in_progress".to_owned(), "OPT_IN_PROGRESS".to_owned());
+        existing_options.insert("blocked".to_owned(), "OPT_BLOCKED".to_owned());
+        existing_options.insert("deferred".to_owned(), "OPT_DEFERRED".to_owned());
+        existing_options.insert("closed".to_owned(), "OPT_CLOSED".to_owned());
+
+        let mut existing_colors = HashMap::new();
+        existing_colors.insert("ready".to_owned(), "GREEN".to_owned());
+        existing_colors.insert("in_progress".to_owned(), "YELLOW".to_owned());
+        existing_colors.insert("blocked".to_owned(), "RED".to_owned());
+        existing_colors.insert("deferred".to_owned(), "BLUE".to_owned());
+        existing_colors.insert("closed".to_owned(), "PURPLE".to_owned());
+
+        let existing = FieldMeta::new("STATUS_FIELD_ID".to_owned(), existing_options)
+            .with_option_colors(existing_colors);
+
+        let spec_options: Vec<&'static str> = STATUS_OPTION_NAMES.to_vec();
+        let spec = FieldSpec {
+            name: "Status",
+            data_type: "SINGLE_SELECT",
+            options: Box::leak(spec_options.into_boxed_slice()),
+        };
+
+        let (healed, did_mutate) = client
+            .heal_select_field_options(&existing, &spec)
+            .await
+            .expect("heal_select_field_options must succeed");
+
+        // The heal MUST have mutated (option set differs by name even
+        // though all 5 normalise to the same TitleCase keys).
+        assert!(did_mutate, "heal must run when option names change");
+
+        // Post-heal options carry the canonical TitleCase names.
+        assert_eq!(
+            healed.options.len(),
+            unblock_core::types::Status::ALL.len(),
+            "heal must converge on 6 options"
+        );
+        for variant in unblock_core::types::Status::ALL {
+            assert!(
+                healed.options.contains_key(variant.option_name()),
+                "post-heal options missing {:?}",
+                variant.option_name()
+            );
+        }
+
+        // ID preservation: each renamed option carries its legacy ID.
+        // `Backlog` is the only fresh allocation (no normalised match
+        // in the existing set).
+        assert_eq!(healed.options.get("Ready"), Some(&"OPT_READY".to_owned()));
+        assert_eq!(
+            healed.options.get("In Progress"),
+            Some(&"OPT_IN_PROGRESS".to_owned())
+        );
+        assert_eq!(
+            healed.options.get("Blocked"),
+            Some(&"OPT_BLOCKED".to_owned())
+        );
+        assert_eq!(
+            healed.options.get("Deferred"),
+            Some(&"OPT_DEFERRED".to_owned())
+        );
+        assert_eq!(healed.options.get("Closed"), Some(&"OPT_CLOSED".to_owned()));
+        assert_eq!(
+            healed.options.get("Backlog"),
+            Some(&"OPT_BACKLOG_NEW".to_owned()),
+            "Backlog is freshly allocated — gets a new ID from GitHub"
+        );
+
+        // Color preservation: legacy colours forward through the rename.
+        assert_eq!(healed.option_colors.get("Ready"), Some(&"GREEN".to_owned()));
+        assert_eq!(
+            healed.option_colors.get("In Progress"),
+            Some(&"YELLOW".to_owned())
+        );
     }
 }

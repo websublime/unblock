@@ -31,9 +31,10 @@
 //! - **`total`** — number of issues after applying the optional
 //!   `milestone` filter.
 //! - **`by_status`** — count per [`Status`] variant, keyed by the
-//!   lowercase Projects V2 option slug (`ready`, `in_progress`,
-//!   `blocked`, `deferred`, `closed`). Every key is pre-seeded with `0`
-//!   so callers can read `map["ready"]` without null-checking.
+//!   canonical Projects V2 option name (`TitleCase`, sourced from
+//!   [`Status::option_name`]: `Backlog`, `Ready`, `In Progress`,
+//!   `Blocked`, `Deferred`, `Closed`). Every key is pre-seeded with `0`
+//!   so callers can read `map["Ready"]` without null-checking.
 //! - **`by_priority`** — count per [`Priority`] variant, keyed by the
 //!   [`Display`](Priority) form (`"P0"`..`"P4"`). All five keys are
 //!   pre-seeded with `0`.
@@ -105,10 +106,11 @@ pub struct StatsParams {
 pub struct StatsResult {
     /// Number of issues counted (after the optional milestone filter).
     pub total: usize,
-    /// Count per [`Status`] variant, keyed by lowercase Projects V2
-    /// option slug (`ready`, `in_progress`, `blocked`, `deferred`,
-    /// `closed`). All five keys are always present — absent keys are
-    /// pre-seeded to `0`.
+    /// Count per [`Status`] variant, keyed by the canonical
+    /// `TitleCase` Projects V2 option name sourced from
+    /// [`Status::option_name`] (`Backlog`, `Ready`, `In Progress`,
+    /// `Blocked`, `Deferred`, `Closed`). All six keys are always
+    /// present — absent keys are pre-seeded to `0`.
     pub by_status: HashMap<String, usize>,
     /// Count per [`Priority`] variant, keyed by the [`Display`](Priority)
     /// form (`"P0"`..`"P4"`). All five keys are always present.
@@ -144,21 +146,10 @@ pub struct AgentStats {
     pub completed: usize,
 }
 
-/// Lowercase Projects V2 slug for a [`Status`] variant.
-///
-/// Uses the same option names as the GraphQL `parse_status_field`
-/// parser in `unblock-github` (and the `projects.rs` setup helper),
-/// so the wire format is round-trip safe with the field values the
-/// server itself creates.
-fn status_slug(status: Status) -> &'static str {
-    match status {
-        Status::Ready => "ready",
-        Status::InProgress => "in_progress",
-        Status::Blocked => "blocked",
-        Status::Deferred => "deferred",
-        Status::Closed => "closed",
-    }
-}
+// `status_slug` (the prior local lowercase helper) was REMOVED by
+// `unblock-1zj` — every caller now routes through `Status::option_name`
+// so the canonical `TitleCase` wire-format strings live in exactly one
+// place (`unblock-core::types`). See spec §2.3, §5.7, and Invariant 16.
 
 /// Return `true` when `issue` has at least one blocker that is still
 /// OPEN.
@@ -189,16 +180,16 @@ fn has_open_blockers(issue: &Issue, graph: &DependencyGraph) -> bool {
 
 /// Pre-seed the `by_status` bucket with `0` for every [`Status`]
 /// variant so callers can read any key unconditionally.
+///
+/// Keys are sourced from [`Status::option_name`] — the canonical
+/// `TitleCase` Projects V2 option strings (`Backlog`, `Ready`,
+/// `In Progress`, `Blocked`, `Deferred`, `Closed`). Iteration uses
+/// [`Status::ALL`] so the bucket grows automatically as variants are
+/// added to the enum.
 fn seed_status_buckets() -> HashMap<String, usize> {
-    let mut out = HashMap::with_capacity(5);
-    for status in [
-        Status::Ready,
-        Status::InProgress,
-        Status::Blocked,
-        Status::Deferred,
-        Status::Closed,
-    ] {
-        out.insert(status_slug(status).to_owned(), 0);
+    let mut out = HashMap::with_capacity(Status::ALL.len());
+    for status in Status::ALL {
+        out.insert(status.option_name().to_owned(), 0);
     }
     out
 }
@@ -246,9 +237,10 @@ fn aggregate_stats(
     let mut agent_map: HashMap<String, (usize, usize)> = HashMap::new();
 
     for issue in filtered {
-        // by_status — lowercase slug keys match the Projects V2 option
-        // names the project is created with (unblock-github/src/projects.rs).
-        if let Some(bucket) = by_status.get_mut(status_slug(issue.status)) {
+        // by_status — `TitleCase` keys sourced from `Status::option_name`
+        // match the canonical Projects V2 option names the project is
+        // created with (`unblock-github::projects::REQUIRED_FIELDS`).
+        if let Some(bucket) = by_status.get_mut(issue.status.option_name()) {
             *bucket += 1;
         }
 
@@ -494,26 +486,24 @@ mod tests {
         }
     }
 
-    // ── status_slug / seeding ───────────────────────────────────────────
+    // ── seed_status_buckets ─────────────────────────────────────────────
+    //
+    // The `unblock-1zj` PR REMOVED the local `status_slug` helper —
+    // every caller now routes through `Status::option_name`. The seed
+    // bucket test below pins the wire-format strings produced by the
+    // helper (single source of truth) so a regression in `option_name`
+    // is caught here too.
 
     #[test]
-    fn status_slug_maps_every_variant_to_lowercase() {
-        assert_eq!(status_slug(Status::Ready), "ready");
-        assert_eq!(status_slug(Status::InProgress), "in_progress");
-        assert_eq!(status_slug(Status::Blocked), "blocked");
-        assert_eq!(status_slug(Status::Deferred), "deferred");
-        assert_eq!(status_slug(Status::Closed), "closed");
-    }
-
-    #[test]
-    fn seed_status_buckets_contains_every_slug_at_zero() {
+    fn seed_status_buckets_contains_every_canonical_option_name_at_zero() {
         let seeded = seed_status_buckets();
-        assert_eq!(seeded.len(), 5);
-        for key in ["ready", "in_progress", "blocked", "deferred", "closed"] {
+        assert_eq!(seeded.len(), Status::ALL.len());
+        for variant in Status::ALL {
+            let key = variant.option_name();
             assert_eq!(
                 seeded.get(key),
                 Some(&0_usize),
-                "missing pre-seeded slug {key}",
+                "missing pre-seeded option name {key}",
             );
         }
     }
@@ -596,8 +586,8 @@ mod tests {
         assert_eq!(result.ready_count, 0);
         assert_eq!(result.cycle_count, 0);
         assert!(result.agents.is_empty());
-        for key in ["ready", "in_progress", "blocked", "deferred", "closed"] {
-            assert_eq!(result.by_status.get(key), Some(&0_usize));
+        for variant in Status::ALL {
+            assert_eq!(result.by_status.get(variant.option_name()), Some(&0_usize));
         }
         for key in ["P0", "P1", "P2", "P3", "P4"] {
             assert_eq!(result.by_priority.get(key), Some(&0_usize));
@@ -644,11 +634,30 @@ mod tests {
         let result = aggregate_stats(&refs, &g, TEST_OWNER, TEST_REPO);
 
         assert_eq!(result.total, 5);
-        assert_eq!(result.by_status.get("ready"), Some(&2_usize));
-        assert_eq!(result.by_status.get("in_progress"), Some(&1_usize));
-        assert_eq!(result.by_status.get("blocked"), Some(&1_usize));
-        assert_eq!(result.by_status.get("deferred"), Some(&1_usize));
-        assert_eq!(result.by_status.get("closed"), Some(&0_usize));
+        assert_eq!(
+            result.by_status.get(Status::Ready.option_name()),
+            Some(&2_usize)
+        );
+        assert_eq!(
+            result.by_status.get(Status::InProgress.option_name()),
+            Some(&1_usize)
+        );
+        assert_eq!(
+            result.by_status.get(Status::Blocked.option_name()),
+            Some(&1_usize)
+        );
+        assert_eq!(
+            result.by_status.get(Status::Deferred.option_name()),
+            Some(&1_usize)
+        );
+        assert_eq!(
+            result.by_status.get(Status::Closed.option_name()),
+            Some(&0_usize)
+        );
+        assert_eq!(
+            result.by_status.get(Status::Backlog.option_name()),
+            Some(&0_usize)
+        );
 
         for key in ["P0", "P1", "P2", "P3", "P4"] {
             assert_eq!(result.by_priority.get(key), Some(&1_usize));
