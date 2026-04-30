@@ -2121,11 +2121,14 @@ async fn stats_aggregates_every_bucket_and_warms_cache() {
 
     assert_eq!(result.total, 9);
     // by_status — each bucket counted exactly.
-    assert_eq!(result.by_status.get("ready"), Some(&4_usize)); // #1, #5, #6, #7
-    assert_eq!(result.by_status.get("in_progress"), Some(&3_usize)); // #2, #8, #9
-    assert_eq!(result.by_status.get("blocked"), Some(&1_usize)); // #3
-    assert_eq!(result.by_status.get("deferred"), Some(&1_usize)); // #4
-    assert_eq!(result.by_status.get("closed"), Some(&0_usize)); // fixture has no Closed issues
+    // Post-`unblock-1zj`: `by_status` keys are canonical TitleCase
+    // option names sourced from `Status::option_name`.
+    assert_eq!(result.by_status.get("Ready"), Some(&4_usize)); // #1, #5, #6, #7
+    assert_eq!(result.by_status.get("In Progress"), Some(&3_usize)); // #2, #8, #9
+    assert_eq!(result.by_status.get("Blocked"), Some(&1_usize)); // #3
+    assert_eq!(result.by_status.get("Deferred"), Some(&1_usize)); // #4
+    assert_eq!(result.by_status.get("Closed"), Some(&0_usize)); // fixture has no Closed issues
+    assert_eq!(result.by_status.get("Backlog"), Some(&0_usize)); // fixture has no Backlog issues
 
     // by_priority — one P0/P1/P3/P4, three P2s, plus another P0 (#8).
     assert_eq!(result.by_priority.get("P0"), Some(&2_usize)); // #1, #8
@@ -2272,9 +2275,10 @@ async fn stats_milestone_filter_scopes_aggregation_but_not_cycles() {
     .await
     .expect("stats call should succeed");
     assert_eq!(v1.total, 2, "v1.0 has 2 issues");
-    assert_eq!(v1.by_status.get("ready"), Some(&1_usize)); // #1
-    assert_eq!(v1.by_status.get("in_progress"), Some(&1_usize)); // #2
-    assert_eq!(v1.by_status.get("blocked"), Some(&0_usize));
+    // Post-`unblock-1zj`: TitleCase Status keys.
+    assert_eq!(v1.by_status.get("Ready"), Some(&1_usize)); // #1
+    assert_eq!(v1.by_status.get("In Progress"), Some(&1_usize)); // #2
+    assert_eq!(v1.by_status.get("Blocked"), Some(&0_usize));
     assert_eq!(v1.by_priority.get("P0"), Some(&1_usize));
     assert_eq!(v1.by_priority.get("P2"), Some(&1_usize));
     assert_eq!(v1.by_priority.get("P1"), Some(&0_usize));
@@ -2298,7 +2302,7 @@ async fn stats_milestone_filter_scopes_aggregation_but_not_cycles() {
     .await
     .expect("stats call should succeed");
     assert_eq!(v2.total, 3);
-    assert_eq!(v2.by_status.get("ready"), Some(&3_usize));
+    assert_eq!(v2.by_status.get("Ready"), Some(&3_usize));
     // blocked_count: #4 and #5 each have an open blocker (the other).
     assert_eq!(v2.blocked_count, 2);
     // ready_count: #3 has no blockers; #4 and #5 mutually block.
@@ -2421,9 +2425,10 @@ async fn stats_cache_empty_fallback_retries_fetch_graph_data() {
     // (`aggregate_stats` was called, the graph was built locally, and
     // `compute_ready_set` ran against the configured coordinates).
     assert_eq!(result.total, 3, "all three fixture issues counted");
-    assert_eq!(result.by_status.get("ready"), Some(&1_usize));
-    assert_eq!(result.by_status.get("in_progress"), Some(&1_usize));
-    assert_eq!(result.by_status.get("blocked"), Some(&1_usize));
+    // Post-`unblock-1zj`: TitleCase Status keys.
+    assert_eq!(result.by_status.get("Ready"), Some(&1_usize));
+    assert_eq!(result.by_status.get("In Progress"), Some(&1_usize));
+    assert_eq!(result.by_status.get("Blocked"), Some(&1_usize));
     assert_eq!(result.by_priority.get("P0"), Some(&1_usize));
     assert_eq!(result.by_priority.get("P1"), Some(&1_usize));
     assert_eq!(result.by_priority.get("P2"), Some(&1_usize));
@@ -2564,8 +2569,8 @@ async fn reopen_closed_issue_with_no_blockers_transitions_to_ready() {
         "issue with no open blockers must not be blocked",
     );
     assert_eq!(
-        result.status, "ready",
-        "unblocked reopen must emit lowercase `ready` slug (R8)",
+        result.status, "Ready",
+        "unblocked reopen must emit canonical TitleCase `Ready` (post-`unblock-1zj`)",
     );
 
     // Exactly one call to each of the three GitHub operations.
@@ -2634,8 +2639,8 @@ async fn reopen_closed_issue_with_open_blocker_transitions_to_blocked() {
         "issue with an open blocker in the rebuilt graph must be blocked",
     );
     assert_eq!(
-        result.status, "blocked",
-        "blocked reopen must emit lowercase `blocked` slug (R8)",
+        result.status, "Blocked",
+        "blocked reopen must emit canonical TitleCase `Blocked` (post-`unblock-1zj`)",
     );
 
     assert_eq!(mock.calls().fetch_issue(), 1);
@@ -2872,7 +2877,12 @@ fn dep_remove_field_ids() -> unblock_github::projects::ProjectFieldIds {
     use unblock_github::projects::{FieldMeta, ProjectFieldIds};
 
     let mut status_options = HashMap::new();
-    status_options.insert("ready".to_owned(), "OPT_READY".to_owned());
+    // Post-`unblock-1zj`: canonical TitleCase option name from
+    // `Status::option_name`.
+    status_options.insert(
+        unblock_core::types::Status::Ready.option_name().to_owned(),
+        "OPT_READY".to_owned(),
+    );
 
     let empty_meta = || FieldMeta::new("f".to_owned(), HashMap::new());
 
@@ -3057,6 +3067,67 @@ async fn dep_remove_local_edge_transitions_source_to_ready() {
     assert!(
         state.cache.is_fresh().await,
         "cache must be repopulated after the post-mutation rebuild",
+    );
+}
+
+/// Sticky-Backlog (`unblock-1zj` extension of spec §8.5 / Invariant
+/// 15(b)): when the source is `Status::Backlog` and `dep_remove` would
+/// otherwise transition it to `Ready`, the handler MUST skip the Status
+/// update entirely. Backlog is sticky — `compute_expected_status`
+/// (§10.2) preserves it, so the post-mutation cross-check MUST do the
+/// same. Without this guard, dropping a blocker on a Backlog source
+/// would silently flip it to Ready.
+#[tokio::test]
+async fn dep_remove_backlog_source_skips_status_update_per_sticky_rule() {
+    use unblock_mcp::tools::dep_remove::{DepRemoveParams, handle_dep_remove};
+
+    let mock = new_mock();
+    mock.push_remove_blocked_by_refs(Ok(()));
+
+    // Post-rebuild source is in Backlog with no remaining blockers.
+    let mut rebuilt_source = dep_remove_fixture_issue(42);
+    rebuilt_source.status = Status::Backlog;
+    let rebuilt_target = dep_remove_fixture_issue(99);
+    mock.push_fetch_graph_data(Ok((vec![rebuilt_source, rebuilt_target], vec![])));
+
+    let state = state_with_mock(Arc::clone(&mock));
+    let mut pre_source = dep_remove_fixture_issue(42);
+    pre_source.status = Status::Backlog;
+    let pre_target = dep_remove_fixture_issue(99);
+    let pre_edges = vec![BlockingEdge {
+        source: QualifiedId::new("acme", "widgets", 42),
+        target: QualifiedId::new("acme", "widgets", 99),
+    }];
+    let pre_issues = vec![pre_source, pre_target];
+    let pre_graph = DependencyGraph::build(&pre_issues, &pre_edges);
+    let pre_ready_set = pre_graph.compute_ready_set(&pre_issues, "acme", "widgets");
+    state
+        .cache
+        .update(pre_issues, pre_ready_set, pre_graph)
+        .await;
+
+    let result = handle_dep_remove(
+        &state,
+        DepRemoveParams {
+            source: "42".to_owned(),
+            target: "99".to_owned(),
+        },
+    )
+    .await
+    .expect("dep_remove should succeed on a warm-cache edge");
+
+    assert!(result.removed);
+
+    let calls = mock.calls();
+    assert_eq!(
+        calls.remove_blocked_by_refs(),
+        1,
+        "the edge is still removed — sticky-Backlog only skips the Status update",
+    );
+    assert_eq!(
+        calls.update_field(),
+        0,
+        "spec §10.2 sticky-Backlog rule: NO Status update for Backlog source",
     );
 }
 
@@ -6838,7 +6909,14 @@ fn depends_field_ids_with_blocked() -> unblock_github::projects::ProjectFieldIds
     use unblock_github::projects::{FieldMeta, ProjectFieldIds};
 
     let mut status_options = HashMap::new();
-    status_options.insert("blocked".to_owned(), "OPT_BLOCKED".to_owned());
+    // Post-`unblock-1zj`: canonical TitleCase option name from
+    // `Status::option_name`.
+    status_options.insert(
+        unblock_core::types::Status::Blocked
+            .option_name()
+            .to_owned(),
+        "OPT_BLOCKED".to_owned(),
+    );
 
     let empty_meta = || FieldMeta::new("f".to_owned(), HashMap::new());
 
@@ -7022,6 +7100,81 @@ async fn depends_local_edge_marks_source_blocked() {
         calls.update_field(),
         1,
         "local source must flip Projects V2 Status=blocked (spec §8.4 step 5)",
+    );
+}
+
+/// Sticky-Backlog (spec §8.4 step 5 / `unblock-1zj`): when the source
+/// is currently in `Status::Backlog`, adding a blocker MUST NOT
+/// auto-promote it to `Blocked`. The blocker is recorded; Status stays
+/// in Backlog until an explicit user/agent transition. The Status
+/// update ladder (server.rs:1535-1572) MUST be skipped — `update_field`
+/// expects 0 calls, not 1.
+///
+/// Mirrors the happy-path test above except the source fixture carries
+/// `status: Status::Backlog`. The cycle-check, mutation, and rebuild
+/// rungs all still fire.
+#[tokio::test]
+async fn depends_backlog_source_skips_status_update_per_sticky_rule() {
+    use unblock_github::projects::ProjectInfo;
+    use unblock_mcp::tools::depends::DependsParams;
+
+    let mock = new_mock();
+
+    // Source fixture starts in Backlog (sticky default per `unblock-1zj`).
+    let mut backlog_source = depends_fixture_issue(42);
+    backlog_source.status = Status::Backlog;
+    mock.push_fetch_issue_ref(Ok(backlog_source.clone()));
+    mock.push_add_blocked_by_refs(Ok(()));
+
+    let rebuilt_source = backlog_source.clone();
+    let rebuilt_target = depends_fixture_issue(99);
+    let rebuilt_edges = vec![BlockingEdge {
+        source: QualifiedId::new("acme", "widgets", 42),
+        target: QualifiedId::new("acme", "widgets", 99),
+    }];
+    mock.push_fetch_graph_data(Ok((vec![rebuilt_source, rebuilt_target], rebuilt_edges)));
+    // Even though no Status update fires, the handler may pre-resolve
+    // field_ids / project_info / item_id under best-effort branches.
+    // Only `update_field` is the load-bearing assertion below; we stub
+    // the resolution rungs so they don't return MockNotStubbed if
+    // exercised.
+    mock.push_field_ids(Some(depends_field_ids_with_blocked()));
+    mock.push_resolve_project_info(Ok(ProjectInfo {
+        id: "PVT_1".to_owned(),
+        number: 1,
+    }));
+    mock.push_get_project_item_id(Ok("PVTI_42".to_owned()));
+
+    let state = state_with_mock(Arc::clone(&mock));
+    let pre_issues = vec![backlog_source.clone(), depends_fixture_issue(99)];
+    let pre_graph = DependencyGraph::build(&pre_issues, &[]);
+    let pre_ready_set = pre_graph.compute_ready_set(&pre_issues, "acme", "widgets");
+    state
+        .cache
+        .update(pre_issues, pre_ready_set, pre_graph)
+        .await;
+
+    let server = UnblockServer::new(state);
+    let Json(result) = server
+        .depends(Parameters(DependsParams {
+            source: "42".to_owned(),
+            target: "99".to_owned(),
+        }))
+        .await
+        .expect("depends should succeed for Backlog source");
+
+    assert!(result.created);
+
+    let calls = mock.calls();
+    assert_eq!(
+        calls.add_blocked_by_refs(),
+        1,
+        "blocker is still recorded — sticky-Backlog only suppresses Status update",
+    );
+    assert_eq!(
+        calls.update_field(),
+        0,
+        "spec §8.4 step 5 sticky-Backlog rule: NO Status field update for Backlog source",
     );
 }
 
@@ -7409,7 +7562,14 @@ fn claim_field_ids_with_in_progress() -> unblock_github::projects::ProjectFieldI
     use unblock_github::projects::{FieldMeta, ProjectFieldIds};
 
     let mut status_options = HashMap::new();
-    status_options.insert("in_progress".to_owned(), "OPT_IN_PROGRESS".to_owned());
+    // Post-`unblock-1zj`: canonical TitleCase option name from
+    // `Status::option_name` (= `"In Progress"`).
+    status_options.insert(
+        unblock_core::types::Status::InProgress
+            .option_name()
+            .to_owned(),
+        "OPT_IN_PROGRESS".to_owned(),
+    );
 
     let empty_meta = || FieldMeta::new("f".to_owned(), HashMap::new());
 

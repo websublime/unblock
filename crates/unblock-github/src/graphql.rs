@@ -1071,18 +1071,55 @@ fn extract_field_values(value: &serde_json::Value) -> std::collections::HashMap<
 
 /// Maps the "Status" field value to a [`Status`] enum variant.
 ///
-/// Handles both the current spec option names (lowercase: `ready`,
-/// `in_progress`, `blocked`, `deferred`, `closed`) and the legacy option
-/// names (`Backlog`, `In Progress`, `Done`, `Blocked`, `Deferred`) for
-/// backward compatibility with existing projects that haven't been migrated.
+/// **Canonical wire format (post-`unblock-1zj`):** the `TitleCase` strings
+/// produced by [`Status::option_name`] — `Backlog`, `Ready`, `In Progress`,
+/// `Blocked`, `Deferred`, `Closed`. These are the only values written by
+/// the system after `unblock-1zj`.
+///
+/// **Legacy aliases (parse-only, never written):** to keep boards mid-
+/// migration parsing correctly during the auto-heal window, the parser
+/// also accepts:
+///
+/// - the prior lowercase / `snake_case` set used pre-`unblock-1zj`:
+///   `ready`, `in_progress`, `blocked`, `deferred`, `closed`;
+/// - the GitHub-default built-in field's `Done` / `Todo` options that
+///   pre-existed any unblock setup pass.
+///
+/// **Round-trip contract (Invariant 16, §14, Appendix A.3 obligation 1).**
+/// For every variant `s`, `parse_status_field({"Status" -> s.option_name()})
+/// == s`. This is the single source of truth contract — wire strings written
+/// by the system (`Status::option_name`) round-trip through this parser.
+#[allow(
+    clippy::match_same_arms,
+    reason = "explicit `Todo`/missing arms document the legacy-alias contract; \
+              collapsing into the wildcard would lose intent"
+)]
 fn parse_status_field(fields: &std::collections::HashMap<String, String>) -> Status {
     match fields.get("Status").map(String::as_str) {
-        Some("in_progress" | "In Progress") => Status::InProgress,
-        Some("blocked" | "Blocked") => Status::Blocked,
-        Some("deferred" | "Deferred") => Status::Deferred,
-        Some("closed" | "Done" | "Closed") => Status::Closed,
-        // "ready", "Backlog", missing, or unrecognized -> Ready.
-        _ => Status::Ready,
+        // Canonical `TitleCase` (post-`unblock-1zj`, sourced from
+        // `Status::option_name` — see Invariant 16).
+        Some(s) if s == Status::Backlog.option_name() => Status::Backlog,
+        Some(s) if s == Status::Ready.option_name() => Status::Ready,
+        Some(s) if s == Status::InProgress.option_name() => Status::InProgress,
+        Some(s) if s == Status::Blocked.option_name() => Status::Blocked,
+        Some(s) if s == Status::Deferred.option_name() => Status::Deferred,
+        Some(s) if s == Status::Closed.option_name() => Status::Closed,
+        // Legacy lowercase / `snake_case` — pre-`unblock-1zj` boards
+        // mid-migration. Accepted for parsing only; the auto-heal pass
+        // renames them to the canonical `TitleCase` strings on the next
+        // `setup` call. The `Done` (legacy GitHub-default built-in
+        // field option, pre-any unblock setup pass) is folded into the
+        // `Closed` arm; `Todo` (the analogous default option) is the
+        // only legacy alias for `Backlog`.
+        Some("in_progress") => Status::InProgress,
+        Some("blocked") => Status::Blocked,
+        Some("deferred") => Status::Deferred,
+        Some("closed" | "Done") => Status::Closed,
+        Some("ready") => Status::Ready,
+        Some("Todo") => Status::Backlog,
+        // Missing or unrecognized -> Backlog (sticky default for unmanaged
+        // items, consistent with the create-time default).
+        _ => Status::Backlog,
     }
 }
 
@@ -1469,8 +1506,59 @@ mod tests {
     // ── parse_status_field ──────────────────────────────────────────────
 
     #[test]
-    fn status_field_mapping_spec_names() {
+    fn status_field_mapping_canonical_titlecase_names() {
+        // Canonical wire format (post-`unblock-1zj`): the TitleCase
+        // strings produced by `Status::option_name`. This is the
+        // round-trip case for Invariant 16 — exercised exhaustively in
+        // `status_option_name_round_trip_through_parse_status_field`
+        // below.
         let mut fields = std::collections::HashMap::new();
+        fields.insert("Status".to_owned(), "Backlog".to_owned());
+        assert_eq!(parse_status_field(&fields), Status::Backlog);
+
+        fields.insert("Status".to_owned(), "Ready".to_owned());
+        assert_eq!(parse_status_field(&fields), Status::Ready);
+
+        fields.insert("Status".to_owned(), "In Progress".to_owned());
+        assert_eq!(parse_status_field(&fields), Status::InProgress);
+
+        fields.insert("Status".to_owned(), "Blocked".to_owned());
+        assert_eq!(parse_status_field(&fields), Status::Blocked);
+
+        fields.insert("Status".to_owned(), "Deferred".to_owned());
+        assert_eq!(parse_status_field(&fields), Status::Deferred);
+
+        fields.insert("Status".to_owned(), "Closed".to_owned());
+        assert_eq!(parse_status_field(&fields), Status::Closed);
+    }
+
+    #[test]
+    fn status_option_name_round_trip_through_parse_status_field() {
+        // Invariant 16 / Appendix A.3 obligation 1: every variant's
+        // `option_name()` parses back to the same variant. Round-trip
+        // exhaustiveness is the contract that pins the helper as the
+        // single source of truth for wire-format Status strings.
+        for s in Status::ALL {
+            let mut fields = std::collections::HashMap::new();
+            fields.insert("Status".to_owned(), s.option_name().to_owned());
+            assert_eq!(
+                parse_status_field(&fields),
+                s,
+                "round-trip failed for {s:?} (option_name={:?})",
+                s.option_name()
+            );
+        }
+    }
+
+    #[test]
+    fn status_field_mapping_legacy_lowercase_names() {
+        // Legacy lowercase / `snake_case` set used pre-`unblock-1zj`.
+        // Accepted for parsing only; the auto-heal pass renames these
+        // to canonical `TitleCase` on the next `setup` call.
+        let mut fields = std::collections::HashMap::new();
+        fields.insert("Status".to_owned(), "ready".to_owned());
+        assert_eq!(parse_status_field(&fields), Status::Ready);
+
         fields.insert("Status".to_owned(), "in_progress".to_owned());
         assert_eq!(parse_status_field(&fields), Status::InProgress);
 
@@ -1482,37 +1570,32 @@ mod tests {
 
         fields.insert("Status".to_owned(), "closed".to_owned());
         assert_eq!(parse_status_field(&fields), Status::Closed);
-
-        fields.insert("Status".to_owned(), "ready".to_owned());
-        assert_eq!(parse_status_field(&fields), Status::Ready);
     }
 
     #[test]
-    fn status_field_mapping_legacy_names() {
+    fn status_field_mapping_legacy_github_default_names() {
+        // GitHub-default built-in single-select Status field options,
+        // pre-any unblock setup pass. Charitably mapped: `Done` →
+        // `Closed`, `Todo` → `Backlog`.
         let mut fields = std::collections::HashMap::new();
-        fields.insert("Status".to_owned(), "In Progress".to_owned());
-        assert_eq!(parse_status_field(&fields), Status::InProgress);
-
-        fields.insert("Status".to_owned(), "Blocked".to_owned());
-        assert_eq!(parse_status_field(&fields), Status::Blocked);
-
-        fields.insert("Status".to_owned(), "Deferred".to_owned());
-        assert_eq!(parse_status_field(&fields), Status::Deferred);
-
         fields.insert("Status".to_owned(), "Done".to_owned());
         assert_eq!(parse_status_field(&fields), Status::Closed);
 
-        fields.insert("Status".to_owned(), "Closed".to_owned());
-        assert_eq!(parse_status_field(&fields), Status::Closed);
-
-        fields.insert("Status".to_owned(), "Backlog".to_owned());
-        assert_eq!(parse_status_field(&fields), Status::Ready);
+        fields.insert("Status".to_owned(), "Todo".to_owned());
+        assert_eq!(parse_status_field(&fields), Status::Backlog);
     }
 
     #[test]
-    fn status_field_missing_defaults_ready() {
+    fn status_field_missing_defaults_to_backlog() {
+        // Missing or unrecognized -> Backlog (sticky default for
+        // unmanaged items, consistent with the create-time default per
+        // §2.3 sticky semantics).
         let fields = std::collections::HashMap::new();
-        assert_eq!(parse_status_field(&fields), Status::Ready);
+        assert_eq!(parse_status_field(&fields), Status::Backlog);
+
+        let mut fields = std::collections::HashMap::new();
+        fields.insert("Status".to_owned(), "something_else".to_owned());
+        assert_eq!(parse_status_field(&fields), Status::Backlog);
     }
 
     // ── parse_priority_field ────────────────────────────────────────────
@@ -1769,7 +1852,10 @@ mod tests {
         assert!(issue.blocking.is_empty());
         assert!(issue.parent.is_none());
         assert!(issue.sub_issues.is_empty());
-        assert_eq!(issue.status, Status::Ready);
+        // Post-`unblock-1zj`: missing Status defaults to `Backlog`
+        // (sticky default for unmanaged items, consistent with the
+        // create-time default per §2.3 sticky semantics).
+        assert_eq!(issue.status, Status::Backlog);
         assert_eq!(issue.priority, Priority::P2);
     }
 
@@ -1991,7 +2077,8 @@ mod tests {
         });
 
         let issue = parse_graph_issue(&json, "test-owner", "test-repo");
-        assert_eq!(issue.status, Status::Ready);
+        // Post-`unblock-1zj`: missing Status defaults to `Backlog`.
+        assert_eq!(issue.status, Status::Backlog);
         assert_eq!(issue.priority, Priority::P2);
         assert!(issue.issue_type.is_none());
         assert!(issue.agent.is_none());

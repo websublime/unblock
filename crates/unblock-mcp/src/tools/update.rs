@@ -47,7 +47,9 @@ pub struct UpdateParams {
     pub id: u64,
     /// New priority: P0, P1, P2, P3, P4.
     pub priority: Option<String>,
-    /// New status: Backlog, In Progress, Done, Blocked, Deferred.
+    /// New status: Backlog, Ready, In Progress, Blocked, Deferred, Closed
+    /// (canonical `TitleCase` Projects V2 option names sourced from
+    /// `unblock_core::types::Status::option_name`; spec §13.3, §2.3).
     pub status: Option<String>,
     /// Labels to add to the issue.
     pub labels_add: Option<Vec<String>>,

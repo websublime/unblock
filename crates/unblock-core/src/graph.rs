@@ -129,8 +129,9 @@ impl DependencyGraph {
     /// An issue is considered ready iff all of the following hold:
     /// 1. Its GitHub state is [`IssueState::Open`] (Filter 1).
     /// 2. Its [`Status`] is not one of the preserved states
-    ///    [`Status::InProgress`], [`Status::Deferred`], or [`Status::Closed`]
-    ///    (Filter 2).
+    ///    [`Status::Backlog`] (sticky create-time default — see §2.3 / §14
+    ///    Invariant 15(a)), [`Status::InProgress`], [`Status::Deferred`], or
+    ///    [`Status::Closed`] (Filter 2).
     /// 3. Its `qualified_id.(owner, repo)` equals `(configured_owner, configured_repo)`
     ///    (Filter 3 — source scoping, SPEC §3.3 / §14 Invariant 14(a)).
     /// 4. It has no outgoing edges to issues that are still [`IssueState::Open`]
@@ -176,8 +177,12 @@ impl DependencyGraph {
             }
 
             // Filter 2: skip preserved states per spec §3.3.
-            // InProgress, Deferred, and Closed are set by agent/human and must
-            // not be overwritten by the graph engine.
+            // Backlog is sticky (introduced by `unblock-1zj`): the
+            // server NEVER auto-promotes a Backlog issue out of Backlog
+            // — only explicit user/agent transitions (`update`,
+            // `claim`, etc.) move it forward. InProgress, Deferred, and
+            // Closed are set by agent/human and must not be overwritten
+            // by the graph engine.
             //
             // NOTE: Status::Blocked is intentionally NOT filtered here.
             // Per spec §3.3 key note: issues with Status::Blocked that now have
@@ -185,7 +190,7 @@ impl DependencyGraph {
             // update_status_fields algorithm (§10) syncs Status afterwards.
             if matches!(
                 issue.status,
-                Status::InProgress | Status::Deferred | Status::Closed
+                Status::Backlog | Status::InProgress | Status::Deferred | Status::Closed
             ) {
                 continue;
             }
@@ -253,6 +258,68 @@ impl DependencyGraph {
         });
 
         ready
+    }
+
+    /// Compute the [`Status`] value the server expects for `issue` given the
+    /// current `ready_set`.
+    ///
+    /// Implements spec §10.2 `compute_expected_status` as a pure function so
+    /// the §10.1 `update_status_fields` reconciliation loop can call it for
+    /// every issue at the end of a write tool. The returned variant is what
+    /// the Projects V2 Status field would carry if the server were
+    /// reconciling against the freshly rebuilt graph.
+    ///
+    /// # Algorithm (§10.2)
+    ///
+    /// 1. `state == Closed` → returns [`Status::Closed`] (degenerate guard).
+    /// 2. **Preserved states — sticky.** [`Status::Backlog`] (introduced by
+    ///    `unblock-1zj`), [`Status::InProgress`], and [`Status::Deferred`]
+    ///    are all returned verbatim. The server NEVER overrides these from
+    ///    a graph rebuild — only explicit user/agent transitions move an
+    ///    issue out of these states.
+    /// 3. Otherwise (`Ready` or `Blocked`): returns [`Status::Ready`] iff the
+    ///    issue's `qualified_id` is a member of `ready_set`, otherwise
+    ///    [`Status::Blocked`].
+    ///
+    /// **Sticky-Backlog invariant (§14 Invariant 15(b)).** §3.3 Filter 2
+    /// already excludes `Backlog` issues from `ready_set`, so the
+    /// `IN ready_set` branch above will never fire for a `Backlog` issue —
+    /// the explicit short-circuit here is defensive and documents the
+    /// contract. The two filters MUST stay in lock-step: removing one
+    /// without the other would leave `Backlog` issues either silently
+    /// promoted (Invariant 15(b) violation) or sitting in the `ready_set`
+    /// projection while the engine refuses to update their Status
+    /// (Invariant 13 violation).
+    #[must_use]
+    pub fn compute_expected_status(issue: &Issue, ready_set: &[IssueSummary]) -> Status {
+        if issue.state == IssueState::Closed {
+            return Status::Closed;
+        }
+
+        // Preserved states — set by agent/human (or sticky default). Never
+        // overridden by server. See §2.3 transition rules and §3.3 Filter 2.
+        match issue.status {
+            Status::Backlog => return Status::Backlog,
+            Status::InProgress => return Status::InProgress,
+            Status::Deferred => return Status::Deferred,
+            // Closed is reachable from `state == Open` only through drift
+            // (e.g. someone manually set Status=Closed without closing the
+            // issue). Per §10.3 the engine refuses to self-heal; preserve
+            // verbatim.
+            Status::Closed => return Status::Closed,
+            Status::Ready | Status::Blocked => {}
+        }
+
+        // Graph-computed states (only applies to issues that have ALREADY
+        // left Backlog — i.e. status is currently Ready or Blocked).
+        if ready_set
+            .iter()
+            .any(|summary| summary.qualified_id == issue.qualified_id)
+        {
+            Status::Ready
+        } else {
+            Status::Blocked
+        }
     }
 
     /// Compute which issues become fully unblocked when the issue identified
@@ -1549,9 +1616,12 @@ mod tests {
             ]
         }
 
-        /// Strategy to generate a random `Status`.
+        /// Strategy to generate a random `Status`. Covers all 6 variants
+        /// post-`unblock-1zj` (Backlog was added as the create-time
+        /// default and is sticky per spec §2.3 / Invariant 15).
         fn arb_status() -> impl Strategy<Value = Status> {
             prop_oneof![
+                Just(Status::Backlog),
                 Just(Status::Ready),
                 Just(Status::InProgress),
                 Just(Status::Blocked),
@@ -1641,13 +1711,21 @@ mod tests {
                     }
                 }
 
-                // Invariant 2b: no issue in the ready set has a preserved Status
-                // (InProgress, Deferred, Closed).
+                // Invariant 2b (Invariant 15(a) + pre-existing preserved
+                // states): no issue in the ready set has any preserved
+                // Status — Backlog (sticky default per `unblock-1zj`),
+                // InProgress, Deferred, or Closed.
                 for summary in &ready {
                     let original = issues.iter().find(|i| i.qualified_id == summary.qualified_id);
                     if let Some(issue) = original {
                         prop_assert!(
-                            !matches!(issue.status, Status::InProgress | Status::Deferred | Status::Closed),
+                            !matches!(
+                                issue.status,
+                                Status::Backlog
+                                    | Status::InProgress
+                                    | Status::Deferred
+                                    | Status::Closed
+                            ),
                             "Ready issue {} has preserved status {:?}, should have been excluded",
                             summary.qualified_id,
                             issue.status
@@ -2278,6 +2356,100 @@ mod tests {
                 edges_a.sort_by_key(edge_sort_key);
                 edges_b.sort_by_key(edge_sort_key);
                 prop_assert_eq!(&edges_a, &edges_b, "idempotency: edge lists differ");
+            }
+
+            /// Invariant 15(a) — `compute_ready_set` NEVER emits an issue
+            /// whose `status == Backlog`.
+            ///
+            /// Spec §3.3 Filter 2 / §14 Invariant 15(a) (introduced by
+            /// `unblock-1zj`). Generates issues drawn entirely from
+            /// `Status::Backlog` and asserts the resulting ready set is
+            /// empty regardless of blocker topology, IssueState, or priority.
+            #[test]
+            fn ready_set_never_contains_backlog_issues(
+                num_issues in 1_u64..50,
+                issue_states in proptest::collection::vec(arb_issue_state(), 1..50),
+                edges in proptest::collection::vec((1_u64..50, 1_u64..50), 0..100),
+            ) {
+                let issues: Vec<Issue> = (1..=num_issues)
+                    .map(|n| {
+                        let idx = usize::try_from(n - 1).expect("issue number fits in usize");
+                        let state = issue_states.get(idx).copied().unwrap_or(IssueState::Open);
+                        let mut issue = make_issue(n, state, Priority::P2);
+                        issue.status = Status::Backlog;
+                        issue
+                    })
+                    .collect();
+
+                let blocking_edges: Vec<BlockingEdge> = edges
+                    .into_iter()
+                    .filter(|e| is_valid_edge(e, num_issues))
+                    .map(|(s, t)| edge(s, t))
+                    .collect();
+
+                let graph = DependencyGraph::build(&issues, &blocking_edges);
+                let ready = graph.compute_ready_set(&issues, TEST_OWNER, TEST_REPO);
+
+                prop_assert!(
+                    ready.is_empty(),
+                    "Invariant 15(a) violated: ready set contains {} Backlog issue(s)",
+                    ready.len()
+                );
+            }
+
+            /// Invariant 15(b) — `compute_expected_status` returns
+            /// `Backlog` for any open issue whose `status == Backlog`,
+            /// regardless of `ready_set` membership.
+            ///
+            /// Spec §10.2 / §14 Invariant 15(b) (introduced by
+            /// `unblock-1zj`). Even when the property test forcibly
+            /// places a synthetic `IssueSummary` for the Backlog issue
+            /// inside `ready_set` (a configuration the engine itself
+            /// would never produce because Filter 2 forbids it), the
+            /// short-circuit MUST preserve `Backlog`.
+            #[test]
+            fn compute_expected_status_preserves_backlog(
+                num_issues in 1_u64..50,
+                forced_into_ready_set in proptest::bool::ANY,
+            ) {
+                for n in 1..=num_issues {
+                    let mut issue = make_issue(n, IssueState::Open, Priority::P2);
+                    issue.status = Status::Backlog;
+
+                    // Deliberately construct a `ready_set` projection
+                    // that violates the §3.3 Filter 2 contract by
+                    // pretending the Backlog issue *is* ready. The
+                    // §10.2 short-circuit MUST still return Backlog.
+                    let ready_set: Vec<IssueSummary> = if forced_into_ready_set {
+                        vec![IssueSummary {
+                            qualified_id: issue.qualified_id.clone(),
+                            number: issue.number,
+                            title: issue.title.clone(),
+                            issue_type: issue.issue_type,
+                            status: issue.status,
+                            priority: issue.priority,
+                            agent: issue.agent.clone(),
+                            milestone: issue.milestone.clone(),
+                            story_points: issue.story_points,
+                            defer_until: issue.defer_until,
+                            labels: issue.labels.clone(),
+                            created_at: issue.created_at,
+                            url: issue.url.clone(),
+                        }]
+                    } else {
+                        vec![]
+                    };
+
+                    let expected = DependencyGraph::compute_expected_status(&issue, &ready_set);
+                    prop_assert_eq!(
+                        expected,
+                        Status::Backlog,
+                        "Invariant 15(b) violated: Backlog issue #{} got expected={:?} (ready_set forced={})",
+                        n,
+                        expected,
+                        forced_into_ready_set
+                    );
+                }
             }
         }
     }

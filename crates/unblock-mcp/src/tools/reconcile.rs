@@ -295,7 +295,7 @@ async fn apply_repairs(
                         match repair_status(
                             state,
                             unblocked_qid,
-                            "ready",
+                            unblock_core::types::Status::Ready.option_name(),
                             issues,
                             field_ids,
                             project_info,

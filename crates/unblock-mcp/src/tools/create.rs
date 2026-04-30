@@ -1,7 +1,9 @@
 //! Create tool — creates a new GitHub Issue with all metadata.
 //!
 //! Builds the issue via REST, adds it to the Projects V2 project, sets custom
-//! fields (Priority, `StoryPoints`, `DeferUntil`, Status=ready),
+//! fields (Priority, `StoryPoints`, `DeferUntil`, Status=Backlog — the
+//! create-time default per spec §8.3 / `unblock-1zj`; Backlog is sticky and
+//! the user/agent must explicitly transition out via `update`/`claim`),
 //! optionally adds blocking relationships and parent linkage.
 //! Uses `execute_write_tool()` to rebuild the cache after all mutations complete.
 

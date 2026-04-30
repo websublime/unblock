@@ -280,7 +280,7 @@ async fn e2e_workflow_all_10_tools() {
             &item_id,
             &field_ids,
             "P1",
-            "ready",
+            unblock_core::types::Status::Ready.option_name(),
             None,
             None,
         )
@@ -322,7 +322,7 @@ async fn e2e_workflow_all_10_tools() {
             &item_id,
             &field_ids,
             "P2",
-            "blocked",
+            unblock_core::types::Status::Blocked.option_name(),
             None,
             None,
         )
@@ -358,7 +358,7 @@ async fn e2e_workflow_all_10_tools() {
             &item_id,
             &field_ids,
             "P3",
-            "ready",
+            unblock_core::types::Status::Ready.option_name(),
             None,
             None,
         )
@@ -452,8 +452,12 @@ async fn e2e_workflow_all_10_tools() {
             .get_project_item_id(&issue_a.node_id, &project_info.id)
             .await
     {
-        // Status -> in_progress
-        if let Some(option_id) = field_ids.status.options.get("in_progress") {
+        // Status -> "In Progress" (canonical TitleCase per spec §2.3).
+        if let Some(option_id) = field_ids
+            .status
+            .options
+            .get(unblock_core::types::Status::InProgress.option_name())
+        {
             let _ = client
                 .update_field(
                     &project_info.id,

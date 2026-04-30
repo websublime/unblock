@@ -6,14 +6,15 @@
 //! re-opened issue still has any open blockers, and updates its Projects
 //! V2 Status field accordingly:
 //!
-//! - **Blocked** (at least one open blocker) → `Status → blocked`
-//! - **Unblocked** (no open blockers) → `Status → ready`
+//! - **Blocked** (at least one open blocker) → `Status → "Blocked"`
+//! - **Unblocked** (no open blockers) → `Status → "Ready"`
 //!
-//! The wire format for `status` is the lowercase Projects V2 option slug
-//! (`"blocked"` or `"ready"`) so it round-trips safely with the option
+//! The wire format for `status` is the canonical Projects V2 option name
+//! produced by [`unblock_core::types::Status::option_name`]
+//! (`"Blocked"` or `"Ready"`) so it round-trips safely with the option
 //! names created by the setup flow (see `unblock-github/src/projects.rs`)
-//! and with the `by_status` keys returned by `list` and `stats` (R8
-//! decision).
+//! and with the `by_status` keys returned by `list` and `stats`. Reopen
+//! NEVER restores `Backlog` per spec §8.7.
 //!
 //! ## Flow
 //!
@@ -138,21 +139,23 @@ pub struct ReopenParams {
 
 /// Result returned by the `reopen` MCP tool.
 ///
-/// Per spec §8.7. The `status` field is the lowercase Projects V2 option
-/// slug (`"blocked"` or `"ready"`), matching the by-status keys returned
-/// by `list` and `stats` (R8 decision). It is never the
-/// [`Display`](std::fmt::Display) form of
-/// [`Status`](unblock_core::types::Status).
+/// Per spec §8.7. The `status` field is the canonical Projects V2 option
+/// name produced by [`unblock_core::types::Status::option_name`]
+/// (`"Blocked"` or `"Ready"`), matching the by-status keys returned by
+/// `list` and `stats`. It is never the [`Display`](std::fmt::Display)
+/// form of [`Status`](unblock_core::types::Status). Reopen never
+/// restores `Backlog` (§8.7).
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ReopenResult {
     /// Issue number that was reopened.
     pub issue: u64,
     /// `true` if the reopened issue still has at least one open blocker
     /// in the freshly rebuilt dependency graph. When `true`, the
-    /// Projects V2 Status field was set to `blocked`; otherwise `ready`.
+    /// Projects V2 Status field was set to `"Blocked"`; otherwise
+    /// `"Ready"`.
     pub blocked: bool,
-    /// Lowercase Projects V2 option slug for the new Status — either
-    /// `"blocked"` or `"ready"`. Derived directly from `blocked`.
+    /// Canonical Projects V2 option name for the new Status — either
+    /// `"Blocked"` or `"Ready"`. Derived directly from `blocked`.
     pub status: String,
 }
 
@@ -398,7 +401,15 @@ pub async fn handle_reopen(
 
     let blocked = has_open_blockers(issue, graph.as_ref());
 
-    let slug = if blocked { "blocked" } else { "ready" };
+    // Spec §8.7: Reopen NEVER restores `Backlog` — a closed issue that
+    // was previously in Backlog comes back as `Ready` or `Blocked` per
+    // the graph. The wire-format strings are sourced from
+    // `Status::option_name` (single source of truth, Invariant 16).
+    let slug = if blocked {
+        unblock_core::types::Status::Blocked.option_name()
+    } else {
+        unblock_core::types::Status::Ready.option_name()
+    };
 
     // Step 5: best-effort Projects V2 Status field update. Uses the
     // node_id captured and returned by the write-tool closure above —
@@ -524,27 +535,29 @@ mod tests {
     // ── ReopenResult serialization shape ────────────────────────────
 
     #[test]
-    fn reopen_result_serializes_status_as_lowercase_slug() {
-        // R8: the wire format is the lowercase Projects V2 option slug,
-        // not the Display form of Status.
+    fn reopen_result_serializes_status_as_canonical_option_name() {
+        // The wire format is the canonical TitleCase Projects V2 option
+        // name produced by `Status::option_name` (post-`unblock-1zj`),
+        // not the Display form of Status. The handler picks `Ready` /
+        // `Blocked` based on the rebuilt graph (§8.7).
         let ready = ReopenResult {
             issue: 7,
             blocked: false,
-            status: "ready".to_owned(),
+            status: Status::Ready.option_name().to_owned(),
         };
         let json = serde_json::to_value(&ready).expect("ReopenResult should serialize");
         assert_eq!(json["issue"], 7);
         assert_eq!(json["blocked"], false);
-        assert_eq!(json["status"], "ready");
+        assert_eq!(json["status"], "Ready");
 
         let blocked = ReopenResult {
             issue: 9,
             blocked: true,
-            status: "blocked".to_owned(),
+            status: Status::Blocked.option_name().to_owned(),
         };
         let json = serde_json::to_value(&blocked).expect("ReopenResult should serialize");
         assert_eq!(json["issue"], 9);
         assert_eq!(json["blocked"], true);
-        assert_eq!(json["status"], "blocked");
+        assert_eq!(json["status"], "Blocked");
     }
 }
