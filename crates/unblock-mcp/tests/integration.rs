@@ -3564,7 +3564,7 @@ async fn dep_remove_cross_repo_reports_false_when_edge_never_existed() {
 /// Scenario:
 /// - MCP client is configured for `acme/widgets` (via `new_mock()`).
 /// - `dep_remove` source is a CROSS-REPO issue: `otherowner/otherrepo#42`.
-/// - The source carries a single trackedBy blocker whose `repo_owner`
+/// - The source carries a single blockedBy blocker whose `repo_owner`
 ///   / `repo_name` are both `None` — i.e. the GraphQL response did NOT
 ///   emit an explicit `repository { owner { login } name }` subselection
 ///   for that node (same-repo default in the GitHub API).
@@ -3955,9 +3955,10 @@ async fn dep_remove_cold_cache_cross_repo_source_closed_surfaces_endpoint_closed
 /// Armadilha (trap-test) guarding the `claim.rs` blocker-mapping fix
 /// for cross-repo blockers carried by `RelatedIssue`.
 ///
-/// Since unblock-29p.43, `FETCH_ISSUE_QUERY.trackedBy` includes
-/// `repository { owner { login } name }` and the parser populates
-/// `RelatedIssue.repo_owner` / `repo_name`. unblock-29p.55 rewrites
+/// Since unblock-29p.43, `FETCH_ISSUE_QUERY.blockedBy` (schema as of
+/// 2026-04-30) includes `repository { owner { login } name }` and the
+/// parser populates `RelatedIssue.repo_owner` / `repo_name`.
+/// unblock-29p.55 rewrites
 /// `validate_claimable`'s blocker loop to emit `IssueRef::CrossRepo`
 /// when both are `Some`, instead of always aliasing to
 /// `IssueRef::Local(r.number)`.
@@ -3988,7 +3989,7 @@ async fn claim_surfaces_cross_repo_blocker_with_repo_identity() {
     // Build a fixture issue in the configured repo (acme/widgets)
     // whose open blocker lives in other/upstream — the GraphQL
     // parser would populate `repo_owner` / `repo_name` on this
-    // exact shape when FETCH_ISSUE_QUERY returns a trackedBy node
+    // exact shape when FETCH_ISSUE_QUERY returns a blockedBy node
     // with a `repository { owner { login } name }` subselection
     // (see graphql.rs:62-74 + parse_related_issues at
     // graphql.rs:888). We reuse the existing `cross_repo_blocker`
@@ -4325,7 +4326,7 @@ async fn create_issue_with_blocked_by_cross_repo() {
 
     // Build a CrossRepo IssueRef pointing at the blocker in the same repo.
     // This exercises the full cross-repo GraphQL resolution code path
-    // (resolve_issue_ref with owner/repo/number query → addIssueDependency).
+    // (resolve_issue_ref with owner/repo/number query → addBlockedBy).
     let cross_repo_ref = IssueRef::CrossRepo {
         owner: owner.clone(),
         repo: repo.clone(),

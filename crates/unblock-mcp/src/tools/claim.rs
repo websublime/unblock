@@ -90,10 +90,11 @@ pub(crate) fn validate_claimable(
     //
     // Claim reads `candidate.blocked_by` from a single-issue fetch
     // (`fetch_issue` → `FETCH_ISSUE_QUERY`). Since unblock-29p.43 that
-    // query's `trackedBy` selection requests `repository { owner { login }
-    // name }`, so `RelatedIssue.repo_owner` / `repo_name` are populated
-    // whenever the blocker lives in a different repository than the
-    // claimed issue. Per the `RelatedIssue` repo-identity convention
+    // query's `blockedBy` selection (schema as of 2026-04-30) requests
+    // `repository { owner { login } name }`, so `RelatedIssue.repo_owner`
+    // / `repo_name` are populated whenever the blocker lives in a
+    // different repository than the claimed issue. Per the
+    // `RelatedIssue` repo-identity convention
     // (see `unblock_core::types::RelatedIssue` docs), `None` means
     // "same repo as the enclosing issue" and `Some` means the blocker's
     // own owner/repo — so we emit `IssueRef::CrossRepo` when both are

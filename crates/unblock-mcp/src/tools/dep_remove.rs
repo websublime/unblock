@@ -41,12 +41,12 @@
 //!      Closed endpoints from absent nodes (no extra RTT).
 //!    - **Cold cache OR at least one endpoint cross-repo** — fetch the
 //!      source issue via [`GitHubApi::fetch_issue_ref`] (1 GraphQL RTT)
-//!      and inspect its `state` plus its `trackedByIssues` list. The
-//!      `FETCH_ISSUE_QUERY` trackedBy subselection carries both
-//!      `repository { owner { login } name }` and `state` (see
-//!      `graphql.rs`) so the Closed-endpoint check needs no second
-//!      round-trip regardless of whether the source or the target is
-//!      the Closed side.
+//!      and inspect its `state` plus its `blockedBy` list (per the
+//!      `FETCH_ISSUE_QUERY` SAFETY note in `graphql.rs`, schema as of
+//!      2026-04-30). The `blockedBy` subselection carries both
+//!      `repository { owner { login } name }` and `state` so the
+//!      Closed-endpoint check needs no second round-trip regardless of
+//!      whether the source or the target is the Closed side.
 //! 4. Call [`GitHubApi::remove_blocked_by_refs`] inside
 //!    `execute_write_tool` so the mutation is followed by an atomic
 //!    cache invalidate + rebuild. Only reached when the edge was
@@ -339,11 +339,11 @@ async fn guard_edge_exists(
 /// Single-issue edge-existence probe used by the cold-cache and cross-
 /// repo paths: call [`GitHubApi::fetch_issue_ref`] on `source_ref` and
 /// inspect its state plus its `blocked_by` list for a blocker matching
-/// `target_qid`. The `FETCH_ISSUE_QUERY` trackedBy subselection carries
-/// both `repository { owner { login } name }` (for cross-repo blocker
-/// disambiguation, see `unblock-29p.43`) and `state` (for the
-/// Closed-endpoint check added by bead `unblock-a36`) so no extra
-/// round-trip is needed to classify either endpoint.
+/// `target_qid`. The `FETCH_ISSUE_QUERY` `blockedBy` subselection
+/// (schema as of 2026-04-30) carries both `repository { owner { login }
+/// name }` (for cross-repo blocker disambiguation, see `unblock-29p.43`)
+/// and `state` (for the Closed-endpoint check added by bead `unblock-a36`)
+/// so no extra round-trip is needed to classify either endpoint.
 ///
 /// Returns:
 /// - `Ok(EdgePresence::Present)` — edge confirmed present; caller
@@ -403,7 +403,7 @@ async fn probe_edge_via_fetch(
                 issue_number = blocker.number,
                 enclosing_owner = %enclosing_repo.0,
                 enclosing_repo = %enclosing_repo.1,
-                "trackedBy entry missing repo identity — applying None-means-same-repo convention"
+                "blockedBy entry missing repo identity — applying None-means-same-repo convention"
             );
         }
         let owner = blocker
@@ -420,7 +420,7 @@ async fn probe_edge_via_fetch(
     match matched_target {
         Some(blocker) if blocker.state == IssueState::Closed => {
             // Closed-target signal (SPEC §8.5 / bead unblock-a36). The
-            // edge DOES still exist in GitHub's trackedBy projection (a
+            // edge DOES still exist in GitHub's blockedBy projection (a
             // Closed issue can legitimately appear in `blocked_by` when
             // the dependency was never cleaned up) but we refuse the
             // mutation so the caller reopens the target or accepts the
@@ -696,7 +696,7 @@ pub async fn handle_dep_remove(
     // the wire; `EndpointClosed(qid)` produces
     // `DomainError::EndpointClosed` (HTTP 409 → MCP INVALID_PARAMS)
     // naming the Closed endpoint. The cold/cross-repo probe uses
-    // `fetch_issue_ref` on the source and scans its trackedBy list
+    // `fetch_issue_ref` on the source and scans its blockedBy list
     // for the target; the query carries repository identity per
     // unblock-29p.43 AND per-entry `state` for the Closed-endpoint
     // check (see `FETCH_ISSUE_QUERY` in graphql.rs).

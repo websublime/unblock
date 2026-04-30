@@ -294,7 +294,7 @@ pub trait GitHubApi: Send + Sync {
     /// For `Local` blockers this delegates to
     /// [`remove_blocked_by`](Self::remove_blocked_by); for cross-repo
     /// blockers it resolves each side independently and runs the
-    /// `removeIssueDependency` mutation directly with both node IDs.
+    /// `removeBlockedBy` mutation directly with both node IDs.
     ///
     /// See spec §5.6 (cross-repo scope) and §8.5 (`dep_remove`).
     async fn remove_blocked_by_ref(
@@ -311,8 +311,8 @@ pub trait GitHubApi: Send + Sync {
     /// when the source is `Local` this delegates to
     /// [`remove_blocked_by_ref`](Self::remove_blocked_by_ref) to preserve
     /// the local-source fast path. Cross-repo sources resolve both sides
-    /// independently and run the `removeIssueDependency` mutation with
-    /// both node IDs.
+    /// independently and run the `removeBlockedBy` mutation with both
+    /// node IDs.
     ///
     /// See spec §8.5 (`dep_remove` tool contract) and §5.6 cross-repo
     /// scope table.

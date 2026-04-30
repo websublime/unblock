@@ -69,10 +69,11 @@ pub enum DomainError {
     /// The issue has unresolved blocking dependencies.
     ///
     /// `blockers` carries [`IssueRef`] values so cross-repo blockers
-    /// (which are observable via GitHub's native `trackedByIssues`
-    /// connection) render with `owner/repo#n` qualification in the
-    /// error message, rather than aliasing to a same-numbered local
-    /// issue. See SPEC §11.1 Decision 1 (2026-04-17).
+    /// (which are observable via GitHub's native `Issue.blockedBy`
+    /// connection — schema as of 2026-04-30) render with `owner/repo#n`
+    /// qualification in the error message, rather than aliasing to a
+    /// same-numbered local issue. See SPEC §11.1 Decision 1
+    /// (2026-04-17).
     #[snafu(display("Issue #{number} is blocked by: {}", render_blockers(blockers)))]
     IssueBlocked {
         /// The issue number.

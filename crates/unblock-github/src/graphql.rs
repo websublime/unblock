@@ -18,8 +18,18 @@ use crate::errors::{self, Error};
 
 /// GraphQL query for fetching a single issue with full details.
 ///
-/// Includes: all standard fields, comments (first 50), blockedBy, blocking,
-/// parent, subIssues, and Projects V2 field values.
+/// Includes: all standard fields, comments (first 50), `blockedBy`,
+/// `blocking`, `parent`, `subIssues`, and Projects V2 field values.
+///
+/// SAFETY: matches GitHub's public GraphQL schema as of 2026-04-30. The
+/// `blockedBy` / `blocking` connections are GA on `Issue`, return
+/// `IssueConnection!`, and require no `GraphQL-Features` preview header
+/// (verified via live introspection against `api.github.com/graphql`).
+/// `blockedBy` enumerates issues that block the current issue (= our
+/// `blocked_by`); `blocking` enumerates issues the current issue blocks
+/// (= our `blocking`). The `repository { owner { login } name }`
+/// subselection on `blockedBy` is load-bearing for cross-repo blocker
+/// disambiguation in `dep_remove` (see `unblock-29p.43`); do not drop it.
 const FETCH_ISSUE_QUERY: &str = "
 query FetchIssue($owner: String!, $repo: String!, $number: Int!) {
   repository(owner: $owner, name: $repo) {
@@ -54,14 +64,14 @@ query FetchIssue($owner: String!, $repo: String!, $number: Int!) {
           createdAt
         }
       }
-      trackedInIssues(first: 50) {
+      blocking(first: 50) {
         nodes {
           number
           title
           state
         }
       }
-      trackedBy: trackedByIssues(first: 50) {
+      blockedBy(first: 50) {
         nodes {
           number
           title
@@ -118,10 +128,21 @@ query FetchIssue($owner: String!, $repo: String!, $number: Int!) {
 /// GraphQL query for fetching all issues (both `OPEN` and `CLOSED`)
 /// with pagination.
 ///
-/// Returns issues with standard fields, blocking relationships (via
-/// `trackedByIssues`), and Projects V2 field values. Does **not** include
-/// comments, parent, sub-issues, or `trackedInIssues` — those are only
-/// fetched by [`FETCH_ISSUE_QUERY`] for single-issue detail views.
+/// Returns issues with standard fields, blocking relationships (via the
+/// `blockedBy` connection — see SAFETY note below), and Projects V2 field
+/// values. Does **not** include comments, parent, sub-issues, or the
+/// `blocking` connection — those are only fetched by [`FETCH_ISSUE_QUERY`]
+/// for single-issue detail views.
+///
+/// SAFETY: matches GitHub's public GraphQL schema as of 2026-04-30. The
+/// `blockedBy` connection is GA on `Issue`, returns `IssueConnection!`,
+/// and requires no `GraphQL-Features` preview header (verified via live
+/// introspection against `api.github.com/graphql`). The number-only node
+/// projection here is sufficient for [`extract_blocking_edges`] which
+/// only consumes `number`; per-blocker `repository { ... }` is intentionally
+/// omitted because graph edges in this query are scoped to the configured
+/// repo (cross-repo identity is reconstructed by the orchestrator from the
+/// configured `(owner, repo)` per [`BlockingEdge`]).
 ///
 /// Uses cursor-based pagination on the `issues` connection (`first: 100`,
 /// `after: $cursor`). The caller must loop until `pageInfo.hasNextPage` is
@@ -166,7 +187,7 @@ query FetchGraphData($owner: String!, $repo: String!, $cursor: String) {
             login
           }
         }
-        trackedBy: trackedByIssues(first: 50) {
+        blockedBy(first: 50) {
           nodes {
             number
           }
@@ -315,8 +336,8 @@ impl GitHubClient {
     ///   (`compute_ready_set` continues to exclude closed issues,
     ///   `compute_unblock_cascade` keys on `issue_state`, etc.).
     /// - `edges` contains [`BlockingEdge`] entries extracted from GitHub's
-    ///   `trackedByIssues` relationship, where `source` is the blocked issue
-    ///   and `target` is the blocker.
+    ///   `blockedBy` connection (schema as of 2026-04-30), where `source`
+    ///   is the blocked issue and `target` is the blocker.
     ///
     /// Paginates using GraphQL cursor pagination (100 issues per page) until
     /// every issue is fetched. Returns empty vectors for a repo with no
@@ -351,7 +372,9 @@ impl GitHubClient {
                 .and_then(serde_json::Value::as_array)
             {
                 for node in nodes {
-                    // Extract blocking edges from trackedByIssues.
+                    // Extract blocking edges from the `blockedBy` connection
+                    // (per FETCH_GRAPH_DATA_QUERY SAFETY note — schema as of
+                    // 2026-04-30).
                     all_edges.extend(extract_blocking_edges(node, self.owner(), self.repo()));
 
                     // Parse issue with graph-specific parser (omits comments,
@@ -659,8 +682,13 @@ fn parse_issue(value: &serde_json::Value, owner: &str, repo: &str) -> Issue {
     let assignees = parse_string_nodes(value, "assignees", "login");
 
     let comments = parse_comments(value);
-    let blocked_by = parse_related_issues(value, "trackedBy");
-    let blocking = parse_related_issues(value, "trackedInIssues");
+    // Response keys match the GraphQL field names selected by
+    // FETCH_ISSUE_QUERY. `blockedBy` carries cross-repo identity via the
+    // nested `repository { owner { login } name }` subselection; `blocking`
+    // omits it (intra-repo only on the read path) — consistent with the
+    // SAFETY note on FETCH_ISSUE_QUERY (schema as of 2026-04-30).
+    let blocked_by = parse_related_issues(value, "blockedBy");
+    let blocking = parse_related_issues(value, "blocking");
     let parent = parse_parent_issue(value);
     let sub_issues = parse_related_issues(value, "subIssues");
 
@@ -783,22 +811,23 @@ fn parse_graph_issue(value: &serde_json::Value, owner: &str, repo: &str) -> Issu
 
 /// Extracts [`BlockingEdge`] entries from a single issue JSON node.
 ///
-/// Reads the `trackedBy` (alias for `trackedByIssues`) connection and creates
-/// one edge per blocker. Each edge has `source` = the blocked issue's
-/// [`QualifiedId`] and `target` = the blocker's [`QualifiedId`]. Skips entries
-/// with a zero issue number.
+/// Reads the `blockedBy` connection (per `FETCH_GRAPH_DATA_QUERY` SAFETY
+/// note, schema as of 2026-04-30) and creates one edge per blocker. Each
+/// edge has `source` = the blocked issue's [`QualifiedId`] and `target` =
+/// the blocker's [`QualifiedId`]. Skips entries with a zero issue number.
 ///
-/// Currently all edges are within the same `owner/repo` because GitHub's
-/// `trackedByIssues` connection only returns issues in the same repository.
-/// Cross-repo blockers (added via the `depends` MCP tool) will produce edges
-/// with different `owner/repo` prefixes once the GraphQL query is extended.
+/// Currently all edges are within the same `owner/repo` because the bulk
+/// graph query selects only `number` on each `blockedBy` node. Cross-repo
+/// blockers (added via the `depends` MCP tool) will produce edges with
+/// different `owner/repo` prefixes once the bulk query is extended to
+/// select per-blocker `repository { ... }`.
 fn extract_blocking_edges(node: &serde_json::Value, owner: &str, repo: &str) -> Vec<BlockingEdge> {
     let issue_number = json_u64(node, "number");
     let source_qid = unblock_core::types::QualifiedId::new(owner, repo, issue_number);
     let mut edges = Vec::new();
 
     if let Some(blockers) = node
-        .get("trackedBy")
+        .get("blockedBy")
         .and_then(|v| v.get("nodes"))
         .and_then(|v| v.as_array())
     {
@@ -894,26 +923,25 @@ fn parse_comments(value: &serde_json::Value) -> Vec<IssueComment> {
         .unwrap_or_default()
 }
 
-/// Parses a related-issues connection (blockedBy, blocking, subIssues) into
-/// [`RelatedIssue`] instances.
+/// Parses a related-issues connection (`blockedBy`, `blocking`,
+/// `subIssues`) into [`RelatedIssue`] instances.
 ///
 /// When an individual node carries a complete `repository { owner { login }
 /// name }` subfield set, those values populate the resulting
 /// [`RelatedIssue::repo_owner`] / [`RelatedIssue::repo_name`] via
-/// [`RelatedIssue::cross_repo`]. The `trackedByIssues` connection inside
+/// [`RelatedIssue::cross_repo`]. The `blockedBy` connection inside
 /// [`FETCH_ISSUE_QUERY`] selects those fields so blocker edges can
 /// disambiguate cross-repo blockers from same-repo blockers (required by
 /// `dep_remove` single-issue edge validation on cross-repo paths — see
 /// `unblock-29p.43`).
 ///
 /// Connections that omit the `repository` selection (e.g. `subIssues`,
-/// `trackedInIssues`, `parent`) and nodes whose `repository` subfield is
-/// partial (only `owner` or only `name` present — a malformed GraphQL
-/// response) route through [`RelatedIssue::local`], leaving both repo
-/// identity fields `None`. A partial subfield cannot disambiguate a
-/// cross-repo reference (identification requires the full `(owner, name)`
-/// pair) so treating it as "no identity" is the semantically coherent
-/// fallback.
+/// `blocking`, `parent`) and nodes whose `repository` subfield is partial
+/// (only `owner` or only `name` present — a malformed GraphQL response)
+/// route through [`RelatedIssue::local`], leaving both repo identity
+/// fields `None`. A partial subfield cannot disambiguate a cross-repo
+/// reference (identification requires the full `(owner, name)` pair) so
+/// treating it as "no identity" is the semantically coherent fallback.
 fn parse_related_issues(value: &serde_json::Value, key: &str) -> Vec<RelatedIssue> {
     value
         .get(key)
@@ -1313,14 +1341,14 @@ mod tests {
     #[test]
     fn parse_blocked_by_issues() {
         let v = serde_json::json!({
-            "trackedInIssues": {
+            "blockedBy": {
                 "nodes": [
                     {"number": 5, "title": "Blocker", "state": "OPEN"},
                     {"number": 10, "title": "Other blocker", "state": "CLOSED"}
                 ]
             }
         });
-        let related = parse_related_issues(&v, "trackedInIssues");
+        let related = parse_related_issues(&v, "blockedBy");
         assert_eq!(related.len(), 2);
         assert_eq!(related[0].number, 5);
         assert_eq!(related[0].state, IssueState::Open);
@@ -1625,18 +1653,18 @@ mod tests {
                     "createdAt": "2026-01-01T12:00:00Z"
                 }]
             },
-            "trackedInIssues": {
+            "blocking": {
                 "nodes": [
                     {"number": 20, "title": "Blocks me", "state": "OPEN"}
                 ]
             },
-            "trackedBy": {
+            "blockedBy": {
                 "nodes": [
                     {
                         "number": 10,
                         "title": "Dep A",
                         "state": "OPEN",
-                        // `FETCH_ISSUE_QUERY` trackedBy subselection
+                        // `FETCH_ISSUE_QUERY` blockedBy subselection
                         // carries `repository { owner { login } name }`
                         // so blockers can be disambiguated as same-repo
                         // or cross-repo (see `unblock-29p.43`).
@@ -1684,24 +1712,25 @@ mod tests {
 
         assert_eq!(issue.blocked_by.len(), 1);
         assert_eq!(issue.blocked_by[0].number, 10);
-        // Repo identity must propagate end-to-end from the trackedBy
+        // Repo identity must propagate end-to-end from the blockedBy
         // subselection — load-bearing for cross-repo dep_remove edge
         // validation (see `unblock-29p.43`).
         assert_eq!(
             issue.blocked_by[0].repo_owner.as_deref(),
             Some("test-owner"),
-            "trackedBy blocker must carry repository.owner.login"
+            "blockedBy blocker must carry repository.owner.login"
         );
         assert_eq!(
             issue.blocked_by[0].repo_name.as_deref(),
             Some("test-repo"),
-            "trackedBy blocker must carry repository.name"
+            "blockedBy blocker must carry repository.name"
         );
 
         assert_eq!(issue.blocking.len(), 1);
         assert_eq!(issue.blocking[0].number, 20);
-        // trackedInIssues does NOT request the `repository` subselection
-        // — repo identity stays `None` (same-repo by convention).
+        // The `blocking` connection does NOT request the `repository`
+        // subselection — repo identity stays `None` (same-repo by
+        // convention).
         assert!(issue.blocking[0].repo_owner.is_none());
         assert!(issue.blocking[0].repo_name.is_none());
 
@@ -1726,8 +1755,8 @@ mod tests {
             "milestone": null,
             "assignees": {"nodes": []},
             "comments": {"nodes": []},
-            "trackedInIssues": {"nodes": []},
-            "trackedBy": {"nodes": []},
+            "blocking": {"nodes": []},
+            "blockedBy": {"nodes": []},
             "parent": null,
             "subIssues": {"nodes": []}
         });
@@ -1746,13 +1775,13 @@ mod tests {
 
     // ── parse_related_issues + repo identity (unblock-29p.43) ───────────
 
-    /// `FETCH_ISSUE_QUERY` trackedBy emits `repository { owner { login }
+    /// `FETCH_ISSUE_QUERY` `blockedBy` emits `repository { owner { login }
     /// name }` so cross-repo blockers can be disambiguated. Verifies the
     /// parser round-trips those subfields into `RelatedIssue`.
     #[test]
     fn parse_related_issues_extracts_cross_repo_identity() {
         let json = serde_json::json!({
-            "trackedBy": {
+            "blockedBy": {
                 "nodes": [
                     {
                         "number": 99,
@@ -1766,7 +1795,7 @@ mod tests {
                 ]
             }
         });
-        let blockers = parse_related_issues(&json, "trackedBy");
+        let blockers = parse_related_issues(&json, "blockedBy");
         assert_eq!(blockers.len(), 1);
         assert_eq!(blockers[0].number, 99);
         assert_eq!(blockers[0].repo_owner.as_deref(), Some("other-owner"));
@@ -1774,9 +1803,9 @@ mod tests {
     }
 
     /// Connections whose GraphQL selection omits `repository { ... }`
-    /// (e.g. `trackedInIssues`, `subIssues`, `parent`) must leave
-    /// `repo_owner` / `repo_name` as `None`. Callers treat `None` as
-    /// "same repo as the containing issue" per `RelatedIssue` docs.
+    /// (e.g. `blocking`, `subIssues`, `parent`) must leave `repo_owner` /
+    /// `repo_name` as `None`. Callers treat `None` as "same repo as the
+    /// containing issue" per `RelatedIssue` docs.
     #[test]
     fn parse_related_issues_without_repository_subfield_keeps_none() {
         let json = serde_json::json!({
@@ -1809,7 +1838,7 @@ mod tests {
     #[test]
     fn parse_related_issues_partial_repository_normalises_to_local() {
         let json = serde_json::json!({
-            "trackedBy": {
+            "blockedBy": {
                 "nodes": [
                     {
                         "number": 11,
@@ -1826,7 +1855,7 @@ mod tests {
                 ]
             }
         });
-        let blockers = parse_related_issues(&json, "trackedBy");
+        let blockers = parse_related_issues(&json, "blockedBy");
         assert_eq!(blockers.len(), 2);
         assert!(blockers[0].repo_owner.is_none());
         assert!(blockers[0].repo_name.is_none());
@@ -1850,7 +1879,7 @@ mod tests {
             "labels": {"nodes": [{"name": "bug"}]},
             "milestone": {"title": "v1.0"},
             "assignees": {"nodes": [{"login": "alice"}]},
-            "trackedBy": {
+            "blockedBy": {
                 "nodes": [{"number": 10}]
             },
             "projectItems": {
@@ -1917,7 +1946,7 @@ mod tests {
             "labels": {"nodes": []},
             "milestone": null,
             "assignees": {"nodes": []},
-            "trackedBy": {
+            "blockedBy": {
                 "nodes": [{"number": 5}, {"number": 10}]
             }
         });
@@ -1994,8 +2023,8 @@ mod tests {
             "milestone": null,
             "assignees": {"nodes": []},
             "comments": {"nodes": []},
-            "trackedInIssues": {"nodes": []},
-            "trackedBy": {"nodes": []},
+            "blocking": {"nodes": []},
+            "blockedBy": {"nodes": []},
             "parent": null,
             "subIssues": {"nodes": []},
             "projectItems": {
@@ -2079,7 +2108,7 @@ mod tests {
     fn blocking_edge_direction_source_blocked_by_target() {
         let node = serde_json::json!({
             "number": 42,
-            "trackedBy": {
+            "blockedBy": {
                 "nodes": [
                     {"number": 10},
                     {"number": 20}
@@ -2101,7 +2130,7 @@ mod tests {
     fn blocking_edge_skips_zero_number() {
         let node = serde_json::json!({
             "number": 42,
-            "trackedBy": {
+            "blockedBy": {
                 "nodes": [
                     {"number": 0},
                     {"number": 5}
@@ -2116,10 +2145,10 @@ mod tests {
     }
 
     #[test]
-    fn blocking_edge_empty_tracked_by_yields_no_edges() {
+    fn blocking_edge_empty_blocked_by_yields_no_edges() {
         let node = serde_json::json!({
             "number": 42,
-            "trackedBy": {
+            "blockedBy": {
                 "nodes": []
             }
         });
@@ -2129,7 +2158,7 @@ mod tests {
     }
 
     #[test]
-    fn blocking_edge_missing_tracked_by_yields_no_edges() {
+    fn blocking_edge_missing_blocked_by_yields_no_edges() {
         let node = serde_json::json!({
             "number": 42
         });
@@ -2144,7 +2173,7 @@ mod tests {
     ///
     /// Each issue node has the minimal fields required by `parse_graph_issue`:
     /// number, id, title, body, state, url, createdAt, updatedAt, labels,
-    /// milestone, assignees, and optionally trackedBy edges.
+    /// milestone, assignees, and optionally `blockedBy` edges.
     fn make_page_response(
         issues: &[(u64, &str, Vec<u64>)],
         has_next_page: bool,
@@ -2153,7 +2182,7 @@ mod tests {
         let nodes: Vec<serde_json::Value> = issues
             .iter()
             .map(|(number, title, blockers)| {
-                let tracked_by_nodes: Vec<serde_json::Value> = blockers
+                let blocked_by_nodes: Vec<serde_json::Value> = blockers
                     .iter()
                     .map(|n| serde_json::json!({"number": n}))
                     .collect();
@@ -2169,7 +2198,7 @@ mod tests {
                     "labels": {"nodes": []},
                     "milestone": null,
                     "assignees": {"nodes": []},
-                    "trackedBy": {"nodes": tracked_by_nodes}
+                    "blockedBy": {"nodes": blocked_by_nodes}
                 })
             })
             .collect();
@@ -2346,7 +2375,7 @@ mod tests {
         let nodes: Vec<serde_json::Value> = issues
             .iter()
             .map(|(number, title, state, blockers)| {
-                let tracked_by_nodes: Vec<serde_json::Value> = blockers
+                let blocked_by_nodes: Vec<serde_json::Value> = blockers
                     .iter()
                     .map(|n| serde_json::json!({"number": n}))
                     .collect();
@@ -2362,7 +2391,7 @@ mod tests {
                     "labels": {"nodes": []},
                     "milestone": null,
                     "assignees": {"nodes": []},
-                    "trackedBy": {"nodes": tracked_by_nodes}
+                    "blockedBy": {"nodes": blocked_by_nodes}
                 })
             })
             .collect();
