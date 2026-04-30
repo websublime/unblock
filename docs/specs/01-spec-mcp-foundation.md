@@ -4,8 +4,8 @@
 > Crates: `unblock-core`, `unblock-github`, `unblock-mcp`
 > Source: [SPEC](../SPEC.md) · [PRD](../PRD.md) · [MANIFESTO](../MANIFESTO.md)
 > Plan: [01-plan-mcp-foundation](../plans/01-plan-mcp-foundation.md)
-> Status: draft
-> Last updated: 2026-04-16
+> Status: APPROVED
+> Last updated: 2026-04-30
 
 ---
 
@@ -25,6 +25,7 @@
 12. [Configuration](#12-configuration)
 13. [Testing Strategy](#13-testing-strategy)
 14. [Invariants](#14-invariants)
+15. [Appendix A — `unblock-1zj` Amendment Notes](#appendix-a--unblock-1zj-amendment-notes)
 
 ---
 
@@ -93,6 +94,7 @@ GitHub's native binary state. Ground truth for whether an issue is open or close
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Status {
+    Backlog,
     Ready,
     InProgress,
     Blocked,
@@ -101,20 +103,54 @@ pub enum Status {
 }
 ```
 
-Projects V2 custom field. Unified workflow + readiness state.
+Projects V2 custom field. Unified workflow + readiness state. **Six variants** (was five pre-`unblock-1zj`); `Backlog` was added as the default state at issue creation time and as a sticky-until-explicit-transition state alongside `Deferred`.
+
+**Canonical option board order (display + serialisation order):**
+`Backlog`, `Ready`, `In Progress`, `Blocked`, `Deferred`, `Closed`. This order is the contract consumed by §5.7 (`REQUIRED_FIELDS` Status options) and the §5.8 view filters. The Projects V2 option values are the **TitleCase** strings shown in the order above (NOT lowercase / `snake_case`).
 
 **Transition rules:**
-- `Ready` ↔ `Blocked`: computed automatically by MCP server from dependency graph
-- → `InProgress`: on `claim` (agent/human set)
-- → `Deferred`: on `update` with `defer_until` (agent/human set)
-- → `Closed`: on `close` (agent/human set)
-- `Blocked`/`Ready` → re-evaluated: on `reopen` (graph-computed)
+- `Backlog` (initial) → `Ready`/`Blocked`: created issues land in `Backlog`; the server promotes them to `Ready` or `Blocked` ONLY when the user/agent explicitly transitions (e.g. via `update`, `claim`, or first edge change). The graph-computed `Ready` ↔ `Blocked` flip in §10.2 NEVER auto-promotes a `Backlog` issue.
+- `Ready` ↔ `Blocked`: computed automatically by MCP server from dependency graph (after the issue has left `Backlog`).
+- → `InProgress`: on `claim` (agent/human set; transitions out of `Backlog` if applicable).
+- → `Deferred`: on `update` with `defer_until` (agent/human set).
+- → `Closed`: on `close` (agent/human set).
+- `Blocked`/`Ready` → re-evaluated: on `reopen` (graph-computed; reopened issues do NOT go back to `Backlog` — they re-enter `Ready` or `Blocked` per the graph).
 
 **Who sets what:**
-- MCP server manages `Ready` ↔ `Blocked` transitions (graph-computed)
-- Agent/human sets `InProgress`, `Deferred`, `Closed` (preserved by server — never overridden)
+- MCP server manages `Ready` ↔ `Blocked` transitions (graph-computed) for issues that have ALREADY left `Backlog`.
+- Agent/human sets `Backlog` (implicit on create), `InProgress`, `Deferred`, `Closed` (preserved by server — never overridden).
+- `Backlog` and `Deferred` are both **sticky** preserved states — see §3.3 Filter 2 and §10.2 `compute_expected_status`.
 
-**Projects V2 option values:** `ready`, `in_progress`, `blocked`, `deferred`, `closed`
+**Projects V2 option values (TitleCase, board-order):** `Backlog`, `Ready`, `In Progress`, `Blocked`, `Deferred`, `Closed`. **No lowercase / `snake_case` variants exist on the wire.** All previous spec references to `ready`, `in_progress`, `blocked`, `deferred`, `closed` (lowercase) and to `Done`/`Todo` (legacy GitHub-default options) are obsolete; the canonical strings are owned by the helper described next.
+
+**Single source of truth — `Status::option_name`** (`unblock-core/src/types.rs`, introduced by `unblock-1zj`):
+
+```rust
+impl Status {
+    /// Canonical Projects V2 option name (TitleCase, board-order matched).
+    /// Single source of truth consumed by:
+    ///  - §5.7 REQUIRED_FIELDS Status option list (`unblock-github`)
+    ///  - `parse_status_field` in `unblock-github::graphql`
+    ///  - `status_slug` previously in `unblock-mcp/src/tools/stats.rs:147-161`
+    ///    (REMOVED — callers now route through `Status::option_name`)
+    ///  - every literal in `server.rs`, `reopen.rs`, `dep_remove.rs`,
+    ///    `setup.rs` (REMOVED — same)
+    pub const fn option_name(self) -> &'static str {
+        match self {
+            Status::Backlog    => "Backlog",
+            Status::Ready      => "Ready",
+            Status::InProgress => "In Progress",
+            Status::Blocked    => "Blocked",
+            Status::Deferred   => "Deferred",
+            Status::Closed     => "Closed",
+        }
+    }
+}
+```
+
+**Discipline (normative).** Every layer that needs a Status string MUST go through `Status::option_name`. No literal `"Ready"`, `"In Progress"`, `"ready"`, `"in_progress"`, `"Done"`, etc. is allowed in `unblock-github` (§5.7 spec list, parse_status_field), `unblock-mcp` (server.rs, reopen.rs, dep_remove.rs, setup.rs, stats.rs), or any test fixture beyond the helper's own unit tests. The previous duplicate `status_slug` helper at `crates/unblock-mcp/src/tools/stats.rs:147-161` is REMOVED — its callers route through `Status::option_name` directly. This collapses six historical literal sites into one and is enforced by a clippy-style scan in the implementation PR (the implementation supervisor adds a CI grep guard or equivalent).
+
+**API change (BREAKING — library crate `unblock-core`).** Adding `Status::Backlog` is an additive enum variant change; existing `match Status { ... }` arms in downstream code (currently only in-workspace) must add a `Backlog` arm. Per the project's `#[non_exhaustive]` discipline (CLAUDE.md "Coding Standards"), `Status` SHOULD carry `#[non_exhaustive]` as part of this change so future additions don't require coordination — this is not a behaviour change but a forward-compat hardening. The implementation PR MUST carry a `BREAKING CHANGE:` footer for the variant addition AND an `API:` line for `Status::option_name`.
 
 ### 2.4 `Priority`
 
@@ -414,7 +450,16 @@ compute_ready_set(graph, issues, configured_owner, configured_repo) → Vec<Issu
     IF issue.state == Closed:
       CONTINUE
 
-    // Filter 2: skip preserved states (set by agent/human)
+    // Filter 2: skip preserved states (set by agent/human, or sticky default)
+    //   Backlog is sticky — issues created without an explicit transition stay
+    //   in Backlog regardless of blocker state. The graph-computed
+    //   Ready ↔ Blocked flip in §10.2 NEVER auto-promotes a Backlog issue.
+    //   Deferred and InProgress are agent/human set and equally preserved.
+    //   Closed is a degenerate guard (issue.state covers it via Filter 1, but
+    //   Status==Closed without state==Closed is a drift the engine refuses to
+    //   self-heal — §10.2 leaves it Closed).
+    IF issue.status == Backlog:
+      CONTINUE
     IF issue.status == InProgress:
       CONTINUE
     IF issue.status == Deferred:
@@ -472,9 +517,10 @@ compute_ready_set(graph, issues, configured_owner, configured_repo) → Vec<Issu
 - Agent filter, type filter, priority filter, milestone filter, label filter → applied after
 
 **Edge cases:**
-- Issue not in graph: has zero blockers → ready if local-owned and not in a preserved state
+- Issue not in graph: has zero blockers → ready if local-owned AND not in a preserved state (`Backlog`/`InProgress`/`Deferred`/`Closed` all skip)
+- Backlog issue with zero blockers: NOT in ready set (Filter 2 skips). The agent/user must explicitly transition out of Backlog (e.g. via `update status=Ready`) before the engine treats the issue as ready candidate. Rationale: see §2.3 sticky semantics — Backlog is the create-time default and represents "not yet promoted into the active workflow", distinct from "Ready but waiting on blockers".
 - Cross-repo source issue: dropped by Filter 3 regardless of blocker state — never in the ready set
-- All blockers closed: every outgoing edge leads to a closed issue → ready (if local-owned)
+- All blockers closed: every outgoing edge leads to a closed issue → ready (if local-owned AND not Backlog/preserved)
 - Mixed blockers: some closed, some open → not ready (blocked)
 - Circular dependency: issues in a cycle always have an open blocker → never ready
 
@@ -876,7 +922,7 @@ query($owner: String!, $repo: String!, $cursor: String) {
 
 | Field | Type | Options (for Single Select) |
 |---|---|---|
-| Status | Single Select | `ready`, `in_progress`, `blocked`, `deferred`, `closed` |
+| Status | Single Select | `Backlog`, `Ready`, `In Progress`, `Blocked`, `Deferred`, `Closed` (board order; **6 entries**, TitleCase — sourced from `Status::option_name`, §2.3) |
 | Priority | Single Select | `P0 - Critical`, `P1 - High`, `P2 - Medium`, `P3 - Low`, `P4 - Backlog` |
 | Pipeline Stage | Single Select | `investigation`, `implementation`, `review`, `refactoring`, `qa`, `done` |
 | Agent | Text | — |
@@ -884,17 +930,50 @@ query($owner: String!, $repo: String!, $cursor: String) {
 | Story Points | Number | — |
 | Defer Until | Date | — |
 
+**Status canonical list — single source of truth.** The `Status` row above is generated from `Status::option_name` (§2.3) iterated in declaration order. The `unblock-github` crate MUST NOT carry a duplicated literal list — `REQUIRED_FIELDS`'s Status spec is built from the `Status` enum at compile time (e.g. via a `const` array of variants → `option_name`). This closes the §10.2 `compute_expected_status` contract and the §5.8 view filter against drift.
+
+**Auto-heal semantics — case-insensitive + `snake_case` → `TitleCase` normalization** (`heal_select_field_options` at `crates/unblock-github/src/projects.rs:1077-1090`).
+
+The current matcher reuses an existing option's GraphQL ID **only on byte-exact `name` match** against the canonical spec entry. As of `unblock-1zj` it MUST be upgraded to a normalised matcher so existing options carry their IDs through the §2.3 rename:
+
+1. **Normalisation function (single helper, named e.g. `normalize_option_name`):**
+   - Trim outer whitespace.
+   - Lowercase.
+   - Replace each `_` with a single space.
+   - Collapse runs of internal whitespace to a single space.
+   - Result: a comparable canonical key. Examples:
+     - `"in_progress"` → `"in progress"`
+     - `"In Progress"` → `"in progress"`
+     - `"IN_PROGRESS"` → `"in progress"`
+     - `"Backlog"` → `"backlog"`
+     - `"ready"` → `"ready"`
+2. **Matching rule (deterministic, declared-order, first-consumed).** Iterate the spec options in declared (board) order — `Backlog`, `Ready`, `In Progress`, `Blocked`, `Deferred`, `Closed`. For each spec option:
+   - Compute `normalize_option_name(spec_entry)` once.
+   - Scan `existing.options` (in their existing iteration order) for the FIRST entry whose `normalize_option_name(existing_name)` equals the spec key AND has not already been consumed by an earlier spec option in this loop. If found, reuse that existing option's GraphQL `id` (and color, per the existing color-preservation contract) but set `name` to the canonical TitleCase spec value (an in-place GitHub-side rename without losing the option ID), and mark that existing option consumed so a later spec option cannot match it.
+   - If no normalised match is found, the spec option has no `id` — GitHub assigns a fresh ID at mutation time.
+   - Existing options that remain unconsumed at the end of the loop fall through to GitHub's standard "options not in the input list get deleted" behaviour. No special handling.
+3. **Result for the `unblock-1zj` migration path.** A board bootstrapped before this change carries options `[ready, in_progress, blocked, deferred, closed]` (lowercase / `snake_case`). After this matcher upgrade, running `setup` against that board:
+   - Reuses all 5 existing option IDs (each normalises to its TitleCase counterpart), renaming them in place to `Ready`, `In Progress`, `Blocked`, `Deferred`, `Closed`.
+   - Allocates 1 fresh option ID for the new `Backlog` entry.
+   - Reports the field in the `healed` bucket of `SetupReport`.
+   - **No item assignments are lost** — the rename is in-place per the GitHub `updateProjectV2Field` contract (see existing doc-comment at `projects.rs:1063-1097`).
+4. **Color preservation.** The existing color-preservation rule (per `unblock-aa2` finding S1) continues to apply — the matched existing option's color forwards through the rename. The newly-allocated `Backlog` option defaults to `GRAY` per the existing rule.
+
+This auto-heal upgrade is the only path that preserves option IDs through the `unblock-1zj` lowercase → TitleCase migration. Without it, every healed board would lose all five existing option IDs (and silently delete every item assignment to those options) on the first post-migration `setup` run — unacceptable for any project that has already adopted `unblock` pre-`unblock-1zj`.
+
 ### 5.8 View management
 
 5 views created via REST API (`X-GitHub-Api-Version: 2026-03-10`):
 
 | View | Layout | Filter |
 |---|---|---|
-| `UNBLOCK://ready` | Board | `Status:"ready"` |
+| `UNBLOCK://ready` | Board | `Status:"Ready"` (TitleCase, sourced from `Status::Ready.option_name()` per §2.3) |
 | `UNBLOCK://team` | Board | — (grouped by Agent) |
 | `UNBLOCK://pipeline` | Board | — (grouped by Pipeline Stage) |
 | `UNBLOCK://roadmap` | Table | — |
 | `UNBLOCK://timeline` | Roadmap | — |
+
+**Filter string source (normative).** The `Status:"Ready"` filter literal MUST be produced by interpolating `Status::Ready.option_name()` (§2.3) — no hand-rolled `"ready"` or `"Ready"` literal in `unblock-github::projects` view-creation code. This closes the §5.7 ↔ §5.8 round-trip: the filter string MUST byte-match an option name created by the field-setup helper, and both ends are now derived from the same `Status` helper.
 
 View creation requires integer field IDs (not GraphQL node IDs). Discovered via REST `GET /fields`.
 
@@ -1272,7 +1351,7 @@ pub struct ClaimResult {
    b. `Status != InProgress` → else `AlreadyClaimed`
    c. Not blocked: check graph → else `IssueBlocked { blockers }`
    d. Not deferred: `defer_until <= today` → else `IssueDeferred`
-3. Update fields: Status → `in_progress`, Agent → name, Claimed At → now
+3. Update fields: Status → `Status::InProgress.option_name()` (= `"In Progress"`, TitleCase per §2.3 — supersedes the prior `in_progress` lowercase literal), Agent → name, Claimed At → now. Note: `claim` is one of the explicit transitions OUT of Backlog — there is no Backlog-stickiness skip here, by design.
 4. Add comment: `"Claimed by {agent} at {timestamp}"`
 5. Invalidate cache + rebuild + update Status fields
 
@@ -1315,11 +1394,12 @@ pub struct CloseResult {
       updates in step 6 and the response projection in step 9. The
       graph still contains the issue as open at this point.
 3. Close issue: REST PATCH `state: "closed"`
-4. Update fields: Status → `closed`
+4. Update fields: Status → `Status::Closed.option_name()` (= `"Closed"`, TitleCase per §2.3)
 5. Add comment: `"Closed: {reason}"` (or `"Closed"` if no reason)
 6. For each unblocked (from step 2 — cascade list captured PRE-close):
-   a. Update Status → `ready`
-   b. Add comment: `"Unblocked — blocker #{id} was closed"`
+   a. **If the dependent's current `status == Backlog`: SKIP the Status update.** Backlog is sticky (§2.3, §3.3 Filter 2, §10.2) — a graph-driven cascade does NOT promote a Backlog issue out of Backlog. Still emit the unblock comment (step 6.b).
+   b. Otherwise: Update Status → `Status::Ready.option_name()` (= `"Ready"`, TitleCase per §2.3).
+   c. Add comment: `"Unblocked — blocker #{id} was closed"` (always, regardless of Status update).
 7. Invalidate cache + rebuild graph (post-close: issue appears in the rebuilt graph as `IssueState::Closed` per `fetch_graph_data`'s widened `states: [OPEN, CLOSED]` filter at `unblock-github/src/graphql.rs:129`; PRE-close cascade capture in step 2 remains MANDATORY for the reasons enumerated in §3.4 Critical — the rebuild is a rebuild, not a cascade source)
 8. `update_status_fields` — syncs Status for issues NOT already handled in step 6 (e.g., issues whose blocker status changed but were not direct dependents of the closed issue)
 9. Partition the cascade list from step 2 by `(owner, repo) == (config.owner, config.repo)`: local dependents go into `unblocked: Vec<u64>`; cross-repo dependents populate `cross_repo_refs` per §11.4 (deduplicated, sorted by `QualifiedId::Display`).
@@ -1401,10 +1481,10 @@ pub struct CreateResult {
 **Flow:**
 1. Create issue: REST POST
 2. Add to project: `addProjectV2Item`
-3. Set fields: Priority, Status → `ready` (or `blocked` if has blockers), Story Points, Defer Until
+3. Set fields: Priority, Status → `Backlog` (canonical create-time default per §2.3 sticky semantics), Story Points, Defer Until. **Note:** the prior `ready` (or `blocked` if has blockers) default is REMOVED — `unblock-1zj` makes Backlog the universal create-time default. The user/agent must explicitly transition out of Backlog (via `update status=Ready`, `claim`, etc.) for the issue to participate in the ready set or the graph-computed Ready ↔ Blocked flip.
 4. If `blocked_by`:
    a. For each blocker: resolve IssueRef, `would_create_cycle` check, `add_blocked_by`
-   b. Update Status → `blocked`
+   b. **Status remains `Backlog`** — adding blockers to a freshly-created issue does NOT auto-flip it to `Blocked`, because Backlog is sticky (§2.3, §3.3 Filter 2, §10.2). The blockers are recorded; the next explicit transition out of Backlog will land the issue in `Ready` or `Blocked` per the graph at that time.
 5. If `parent`: resolve IssueRef, `add_sub_issue`
 6. If `labels`: `ensure_labels` (auto-create missing) + `add_labels_to_issue`
 7. If `milestone`: resolve milestone by title, `update_issue_milestone`
@@ -1439,7 +1519,7 @@ pub struct DependsResult {
 2. Cycle detection: `would_create_cycle(source, target)` → `CircularDependency` if true
 3. Duplicate check: edge already exists → `DuplicateDependency` if true
 4. `add_blocked_by` mutation (or `add_blocked_by_ref` for cross-repo)
-5. Update source fields: Status → `blocked`
+5. **If source's current `status == Backlog`: SKIP the Status update.** Backlog is sticky (§2.3) and adding a blocker MUST NOT auto-promote out of Backlog. Otherwise: update source Status → `Status::Blocked.option_name()` (= `"Blocked"`, TitleCase per §2.3).
 6. Invalidate cache + rebuild
 
 **Both `source` and `target` accept `IssueRef` format** (local `#42` or cross-repo `owner/repo#42`). See PLAN GAP-06.
@@ -1624,9 +1704,11 @@ pub struct ReopenResult {
 1. Fetch issue, validate `IssueState == Closed` → else `IssueNotClosed` or `IssueAlreadyOpen`
 2. Reopen: REST PATCH `state: "open"`
 3. Rebuild graph to evaluate blocking status
-4. If issue has open blockers: Status → `blocked`
-5. If no open blockers: Status → `ready`
+4. If issue has open blockers: Status → `Status::Blocked.option_name()` (= `"Blocked"`, TitleCase per §2.3)
+5. If no open blockers: Status → `Status::Ready.option_name()` (= `"Ready"`, TitleCase per §2.3)
 6. Update cache
+
+**Reopen never restores `Backlog`.** A closed issue that was previously in Backlog and then closed comes back as either `Ready` or `Blocked` per the graph, NOT Backlog. Rationale: Backlog represents "not yet promoted into the active workflow"; once an issue has been closed it has by definition left that pre-workflow state, and reopening puts it back in the active Ready/Blocked rotation. This is consistent with §2.3 "reopened issues do NOT go back to Backlog".
 
 **Error-contract row** (consumed by the cross-tool error mapping in §11.1
 and the tool-handler dispatch in §8):
@@ -1830,17 +1912,26 @@ compute_expected_status(issue, ready_set) → Status:
   IF issue.state == Closed:
     RETURN Closed
 
-  // Preserved states — set by agent/human, never overridden by server
+  // Preserved states — set by agent/human (or sticky default),
+  // never overridden by server. Backlog is the create-time default and
+  // sticky — issues stay in Backlog until an explicit user/agent transition
+  // (e.g. `update status=Ready`, `claim`, etc.) moves them out. The server
+  // NEVER auto-promotes Backlog → Ready/Blocked from a graph rebuild.
+  IF issue.status == Backlog:
+    RETURN Backlog
   IF issue.status == InProgress:
     RETURN InProgress
   IF issue.status == Deferred:
     RETURN Deferred
 
-  // Graph-computed states
+  // Graph-computed states (only applies to issues that have ALREADY left
+  // Backlog — i.e. status is currently Ready or Blocked).
   IF issue.qualified_id IN ready_set:
     RETURN Ready
   RETURN Blocked
 ```
+
+**Sticky-Backlog invariant.** §3.3 Filter 2 already excludes `Backlog` issues from the `ready_set`, so the `IN ready_set` branch above will never fire for a Backlog issue — the explicit `IF issue.status == Backlog → Backlog` short-circuit is defensive and documents the contract. The two filters MUST stay in lock-step: removing one without the other (e.g. dropping Filter 2's Backlog skip but keeping the §10.2 Backlog short-circuit) would leave Backlog issues in the ready_set projection while the engine refused to update their Status — creating exactly the silent drift §14 Invariant 13 forbids.
 
 ### 10.3 Edge cases
 
@@ -2156,6 +2247,10 @@ Graph invariants:
 5. Graph construction is idempotent
 6. Cross-repo response contract is complete (§14 Invariant 14(b)): for every §11.4-affected tool, every cross-repo node that was dropped during bare-`u64` projection appears in `cross_repo_refs.omitted`, sorted.
 7. Ready set is configured-repo-source-scoped (§14 Invariant 14(a)): for any input mixing issues from the configured repo with cross-repo source issues, `compute_ready_set(issues, configured_owner, configured_repo)` returns zero elements whose `qualified_id.(owner, repo)` differs from `(configured_owner, configured_repo)`. Drives the unblock-eos.4 graph-engine scrub.
+8. **Backlog stickiness (§2.3, §3.3 Filter 2, §10.2; introduced by `unblock-1zj`).** Two clauses:
+   a. For any input where every issue has `status == Backlog` and `state == Open`, `compute_ready_set(...)` returns the empty vector — Filter 2 skips Backlog regardless of blocker state.
+   b. For any input issue with `status == Backlog` and `state == Open`, `compute_expected_status(issue, ready_set)` returns `Backlog` regardless of `ready_set` membership — the §10.2 short-circuit prevents server-side auto-promotion.
+9. **Status helper round-trip (§2.3; introduced by `unblock-1zj`).** For every `Status` variant `s`, parsing `s.option_name()` back through `parse_status_field` yields `s`. The TitleCase canonical strings are the only wire-format Status values produced or consumed by the system.
 
 ### 13.4 `test-hooks` feature
 
@@ -2194,6 +2289,50 @@ These invariants MUST hold at all times. Property tests validate where applicabl
 14. **Cross-repo response contract is complete (§11.4).** Two clauses, both MUST hold:
     - **14(a) — Configured-repo source scoping (graph engine).** `compute_ready_set` (§3.3) returns a `Vec<IssueSummary>` in which every element satisfies `qualified_id.(owner, repo) == (configured_owner, configured_repo)`. The ready set contains only configured-repo source issues. This is enforced at the graph engine (§3.3 Filter 3) as the single chokepoint — every downstream consumer (cached `ready_set`, `ready` tool, `prime`, `update_status_fields`) inherits the guarantee. Cross-repo source issues are NEVER members of the local ready-set projection regardless of their blocker state. Property tests MUST cover: mixed-repo input → only configured-repo issues in the output.
     - **14(b) — Affected-tools response shape.** For every tool listed in the §11.4 affected-tools table, if the computation visited a cross-repo `QualifiedId` that was NOT emitted in the bare-`u64` projection of the response, the response MUST carry that node's `QualifiedId::Display` form in `cross_repo_refs.omitted`. The field is `Some` iff `omitted` is non-empty. `omitted` is sorted lexicographically (preserves Invariant 5). For `ready` specifically, combining 14(a) with 14(b) means `cross_repo_refs` may carry cross-repo BLOCKERS only — cross-repo sources are already excluded by the graph engine.
+15. **Backlog stickiness (§2.3, §3.3 Filter 2, §10.2; introduced by `unblock-1zj`).** Two clauses, both MUST hold:
+    - **15(a) — Ready-set exclusion.** `compute_ready_set` (§3.3) NEVER emits an issue whose `status == Backlog`. Filter 2 is the single chokepoint.
+    - **15(b) — No server-side promotion.** `compute_expected_status` (§10.2) returns `Backlog` for any input issue with `status == Backlog` and `state == Open`, regardless of `ready_set` membership. The server NEVER auto-flips Backlog → Ready/Blocked from a graph rebuild; only explicit user/agent transitions (e.g. `update`, `claim`) move issues out of Backlog. Property tests MUST cover both clauses.
+16. **Status helper is the single source of truth (§2.3; introduced by `unblock-1zj`).** Every Projects V2 Status string produced by the system (REQUIRED_FIELDS spec list, view filters, field-update mutations, comments referencing Status names) is sourced from `Status::option_name`. `parse_status_field(Status::X.option_name())` returns `Status::X` for every variant `X`. No literal `"Ready"`, `"In Progress"`, `"ready"`, `"in_progress"`, `"Done"`, or `"Todo"` exists outside `Status::option_name`'s definition site and its unit tests. Enforced by a CI grep guard added in the `unblock-1zj` PR.
+
+---
+
+## Appendix A — `unblock-1zj` Amendment Notes
+
+This appendix tracks the spec amendment delivered in bead `unblock-1zj` (2026-04-30) so the implementation supervisor sees the full scope of the PR in one place.
+
+### A.1 Decisions captured (user-approved)
+
+1. **Auto-heal matcher upgrade (Decision 1 / §5.7).** `heal_select_field_options` matches existing option names case-insensitively and tolerates `snake_case` ↔ `TitleCase` so the `unblock-1zj` rename preserves option IDs.
+2. **Backlog is sticky (Decision 2 / §2.3 + §3.3 Filter 2 + §10.2 + §8.3 + §8.4 + §8.2).** Backlog is the create-time default and is preserved by the engine — only explicit user/agent transitions move an issue out of Backlog. The Status canonical option list grows from 5 to 6 entries: `Backlog`, `Ready`, `In Progress`, `Blocked`, `Deferred`, `Closed` (board order).
+3. **Centralised Status name helper (Decision 3 / §2.3).** `Status::option_name` in `unblock-core/src/types.rs` is the single source of truth for the TitleCase wire-format strings. The duplicate `status_slug` helper at `crates/unblock-mcp/src/tools/stats.rs:147-161` and every literal in `server.rs`, `reopen.rs`, `dep_remove.rs`, `setup.rs`, and `parse_status_field` route through it. The `unblock-github` `REQUIRED_FIELDS` Status spec is generated from the `Status` enum (no duplicated literal list).
+
+### A.2 Drifts to close in the same PR
+
+The implementation supervisor MUST land both of these in the same commit / PR as the §2.3 / §5.7 / §10.2 spec changes — the spec amendment is not coherent without them.
+
+| Drift | Location | Fix |
+|---|---|---|
+| **DRIFT-1 (plan)** | `docs/plans/01-plan-mcp-foundation.md` GAP-07 (lines 716-724) and GAP-10 (lines 761-768) | Mark RESOLVED. GAP-07's `closed`/`Done` and `ready`/`Backlog` divergence is replaced by the canonical TitleCase 6-entry list sourced from `Status::option_name`; GAP-10's "needs verification" Status option set is now fully specified by §5.7 + §2.3. Both gaps collapse into Decisions 2 + 3 above. |
+| **DRIFT-2 (code)** | `crates/unblock-mcp/src/tools/update.rs:50` doc-comment for `pub status: Option<String>` | Currently reads `"New status: Backlog, In Progress, Done, Blocked, Deferred."` — replace with the canonical 6-entry TitleCase list `"New status: Backlog, Ready, In Progress, Blocked, Deferred, Closed."` matching `Status::option_name` for every variant. The legacy `Done` token is removed (it was a residue of the GitHub-default `[Todo, In Progress, Done]` field; `unblock` has never used `Done` as a Status value). |
+
+### A.3 Test obligations introduced
+
+In addition to existing coverage, the implementation PR MUST add:
+
+1. A `unblock-core` unit test asserting `Status::option_name` returns the exact TitleCase canonical string for every variant (round-trip via `parse_status_field` covered too — §14 Invariant 16, mirrored in §13.3 graph-invariant 9).
+2. Two `unblock-core` property tests for §14 Invariant 15 (Backlog stickiness — clauses 15(a) and 15(b)), mirrored in §13.3 graph-invariant 8.
+3. A `unblock-github` integration test (via `MockGitHubClient` or schema fixture) for the auto-heal normaliser: input field with options `[ready, in_progress, blocked, deferred, closed]` heals to `[Backlog, Ready, In Progress, Blocked, Deferred, Closed]` with the 5 existing option IDs preserved through the rename, 1 fresh ID for `Backlog`, and the field marked `healed` in `SetupReport`.
+4. A `unblock-mcp` integration test asserting `create` lands a fresh issue in `Status::Backlog` (no auto-promotion to `Ready`/`Blocked` even with blockers).
+5. A `unblock-mcp` integration test asserting the `close` cascade SKIPS the Status update for a dependent currently in `Backlog` while still emitting the unblock comment.
+
+### A.4 Scope NOT covered by this amendment
+
+This amendment is deliberately confined to the three user-decided design choices and the two named drifts. Items NOT in scope and therefore NOT changed by `unblock-1zj`:
+
+- The `IssueRef`-typed cross-repo error variants (already specified in §11.1 by `unblock-eos`).
+- The §11.4 cross-repo response contract (already complete).
+- The widened `fetch_graph_data` `states: [OPEN, CLOSED]` query (already shipped as `unblock-a36`).
+- Any new Phase 02 features (reconcile, doctor, circuit breaker — explicitly out of scope per §1.2).
 
 ---
 

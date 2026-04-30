@@ -713,15 +713,24 @@ Two new methods on trait + GitHubClient implementation + MockGitHubClient stubs.
 
 ---
 
-### GAP-07 — `close` tool Status values
+### GAP-07 — `close` tool Status values — RESOLVED (unblock-1zj)
 
-| | Plan | Implementation |
+| | Plan | Implementation (pre-fix) |
 |---|---|---|
 | Closed issue Status | → `closed` | → `Done` |
 | Unblocked dependent Status | → `ready` | → `Backlog` |
 
 **Type:** DRIFT
-**Impact:** High — Status option names don't match SPEC. Cascade sets dependents to `Backlog` instead of `ready`.
+**Impact (pre-fix):** High — Status option names didn't match SPEC. Cascade set dependents to `Backlog` instead of `ready`.
+
+**Resolution (unblock-1zj, 2026-04-30):** Collapsed into the spec-amendment Decisions 2 + 3:
+
+- The Status canonical option list is now the 6-entry TitleCase set `Backlog, Ready, In Progress, Blocked, Deferred, Closed` (spec §2.3 + §5.7), sourced from `Status::option_name` in `unblock-core`.
+- `close` writes `Status::Closed.option_name()` (= `"Closed"`) on the closed issue (spec §8.2 step 4) — `Done` was a residue of the GitHub-default `[Todo, In Progress, Done]` field that `unblock` has never used.
+- Cascade dependents that are NOT currently in `Backlog` get `Status::Ready.option_name()` (= `"Ready"`) (spec §8.2 step 6.b). Dependents already in `Backlog` are skipped per Backlog-stickiness (Decision 2; spec §2.3, §3.3 Filter 2, §10.2) — they still receive the unblock comment but stay in Backlog until the user/agent explicitly transitions them.
+- The `Backlog` post-cascade behaviour the original implementation produced was actually closer to the new sticky-Backlog semantics than the pre-`unblock-1zj` plan; the rename to TitleCase + the formalisation of stickiness make the intent explicit.
+
+The implementation PR for this resolution lands in the same commit as the spec amendment per the cross-cutting nature of the `Status::option_name` migration.
 
 ---
 
@@ -758,14 +767,18 @@ Two new methods on trait + GitHubClient implementation + MockGitHubClient stubs.
 
 ---
 
-### GAP-10 — Status field option values in Projects V2
+### GAP-10 — Status field option values in Projects V2 — RESOLVED (unblock-1zj)
 
-| | Plan (from SPEC §2.2) | Implementation (projects.rs) |
+| | Plan (pre-fix, from old SPEC §2.2) | Implementation (projects.rs, pre-fix) |
 |---|---|---|
-| Options | `ready, in_progress, blocked, deferred, closed` | Needs verification — likely different given GAP-01 and GAP-07 |
+| Options | `ready, in_progress, blocked, deferred, closed` (5 lowercase) | Needs verification — likely different given GAP-01 and GAP-07 |
 
 **Type:** DRIFT (probable)
-**Impact:** High — the `setup` tool creates these options in GitHub. If they don't match the SPEC, the entire field management is misaligned.
+**Impact (pre-fix):** High — the `setup` tool created these options in GitHub. If they didn't match the SPEC, the entire field management was misaligned.
+
+**Resolution (unblock-1zj, 2026-04-30):** The Status canonical option list is now the **6-entry TitleCase** set `Backlog, Ready, In Progress, Blocked, Deferred, Closed` (spec §2.3 + §5.7, board order). The list is sourced from the `Status` enum via `Status::option_name` (spec §2.3) — `unblock-github`'s `REQUIRED_FIELDS` Status spec is generated from the enum at compile time, not duplicated as a literal array. This collapses the "needs verification" question into a structural guarantee: there is no second copy of the list to drift against.
+
+Migration of pre-`unblock-1zj` boards is handled by the auto-heal matcher upgrade (spec §5.7 — case-insensitive + `snake_case` ↔ `TitleCase` normalisation): existing options `[ready, in_progress, blocked, deferred, closed]` are renamed in place to `[Ready, In Progress, Blocked, Deferred, Closed]` with their option IDs preserved (and color preserved per `unblock-aa2` finding S1), and one new `Backlog` option is allocated. No item assignments are lost on the migration path — verified empirically by `unblock-aa2` and now made structural by the matcher upgrade.
 
 ---
 
