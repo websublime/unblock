@@ -507,7 +507,26 @@ impl GitHubClient {
                 if spec.options.is_empty() {
                     resolved_plain.insert(spec.name.to_owned(), existing_field.field_id.clone());
                 } else {
-                    resolved.insert(spec.name.to_owned(), existing_field.clone());
+                    // Auto-heal: when a single-select required field exists
+                    // with a mismatched option set (e.g. the GitHub-default
+                    // built-in `Status` field with options
+                    // [Todo, In Progress, Done] vs. the spec's canonical
+                    // [ready, in_progress, blocked, deferred, closed]),
+                    // reconcile the options in place via
+                    // `updateProjectV2Field`. Per empirical verification
+                    // against the live GraphQL API (bead unblock-aa2,
+                    // 2026-04-30), `updateProjectV2Field` preserves option
+                    // IDs across renames keyed by id, and the existing
+                    // option IDs are reused when their name happens to
+                    // match a spec option — minimising churn for callers.
+                    //
+                    // Options NOT in the input list are deleted by GitHub.
+                    // This is safe by construction: `setup_fields` runs
+                    // before any items are placed on the board (the
+                    // canonical empty-project bootstrap path), so deleted
+                    // options have no item assignments to invalidate.
+                    let healed = self.heal_select_field_options(existing_field, spec).await?;
+                    resolved.insert(spec.name.to_owned(), healed);
                 }
             } else {
                 debug!(
@@ -907,6 +926,176 @@ impl GitHubClient {
             field_id = %field_id,
             options = ?option_map.keys().collect::<Vec<_>>(),
             "Created single-select field with options"
+        );
+
+        Ok(FieldMeta {
+            field_id,
+            options: option_map,
+        })
+    }
+
+    /// Reconciles a pre-existing single-select field's option set with the
+    /// canonical [`FieldSpec`] options.
+    ///
+    /// Compares the current option names against the spec. When they match
+    /// exactly (set equality, order-insensitive) the existing field is
+    /// returned verbatim — no GraphQL round-trip is issued. When they differ
+    /// (e.g. the GitHub-default built-in `Status` field with options
+    /// `[Todo, In Progress, Done]` vs. the spec's
+    /// `[ready, in_progress, blocked, deferred, closed]`), this method
+    /// issues `updateProjectV2Field` with the full canonical option set,
+    /// preserving option IDs whose `name` matches a spec entry.
+    ///
+    /// # Behaviour notes
+    ///
+    /// - **ID preservation by name match.** When the existing field already
+    ///   carries an option with name `X` and the spec also lists `X`, the
+    ///   existing option ID is reused — `updateProjectV2Field` recognises
+    ///   the `id` and rewrites only the `color`/`description`. Spec-only
+    ///   options are added; existing options absent from the spec are
+    ///   deleted by GitHub.
+    /// - **Safe in the empty-project bootstrap path.** Deleting an option
+    ///   on a Projects V2 single-select field invalidates any item that
+    ///   currently has that option assigned. `setup_fields` is the
+    ///   bootstrap-time path, called before any items are placed on the
+    ///   board, so deleted options have no item assignments to break.
+    /// - **Display order.** The returned `singleSelectOptions` ordering
+    ///   matches the spec — the canonical option ordering is restored on
+    ///   each heal pass.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::FieldOptionHealFailed`] if the
+    /// `updateProjectV2Field` mutation does not return the expected option
+    /// set (i.e. GitHub responded but the response shape is unparseable or
+    /// the post-heal options do not match the spec).
+    ///
+    /// Returns [`Error::GitHubGraphQL`] for transport-level GraphQL errors
+    /// (network, schema, permission). Heal-specific failures bubble through
+    /// the more specific [`FieldOptionHealFailed`](Error::FieldOptionHealFailed)
+    /// variant for diagnostic clarity.
+    #[allow(clippy::too_many_lines)]
+    async fn heal_select_field_options(
+        &self,
+        existing: &FieldMeta,
+        spec: &FieldSpec,
+    ) -> Result<FieldMeta, Error> {
+        // Fast path: option set already matches the spec — no mutation.
+        let existing_names: std::collections::HashSet<&str> =
+            existing.options.keys().map(String::as_str).collect();
+        let spec_names: std::collections::HashSet<&str> = spec.options.iter().copied().collect();
+
+        if existing_names == spec_names {
+            debug!(
+                field = spec.name,
+                "Single-select field options already match spec — no heal needed"
+            );
+            return Ok(existing.clone());
+        }
+
+        debug!(
+            field = spec.name,
+            existing = ?existing_names,
+            expected = ?spec_names,
+            "Auto-healing single-select field options to match spec"
+        );
+
+        let mutation = "
+            mutation HealSelectField($fieldId: ID!, $name: String!, $options: [ProjectV2SingleSelectFieldOptionInput!]!) {
+                updateProjectV2Field(input: {
+                    fieldId: $fieldId,
+                    name: $name,
+                    singleSelectOptions: $options
+                }) {
+                    projectV2Field {
+                        ... on ProjectV2SingleSelectField {
+                            id
+                            name
+                            options {
+                                id
+                                name
+                            }
+                        }
+                    }
+                }
+            }
+        ";
+
+        // Build the input: spec order, reusing existing option IDs where the
+        // name matches. Options without a pre-existing match are inserted
+        // without `id`, prompting GitHub to allocate a fresh option ID.
+        let options_input: Vec<serde_json::Value> = spec
+            .options
+            .iter()
+            .map(|name| {
+                let mut opt = serde_json::Map::new();
+                if let Some(existing_id) = existing.options.get(*name) {
+                    opt.insert(
+                        "id".to_owned(),
+                        serde_json::Value::String(existing_id.clone()),
+                    );
+                }
+                opt.insert(
+                    "name".to_owned(),
+                    serde_json::Value::String((*name).to_owned()),
+                );
+                opt.insert(
+                    "color".to_owned(),
+                    serde_json::Value::String("GRAY".to_owned()),
+                );
+                opt.insert(
+                    "description".to_owned(),
+                    serde_json::Value::String(String::new()),
+                );
+                serde_json::Value::Object(opt)
+            })
+            .collect();
+
+        let variables = serde_json::json!({
+            "fieldId": existing.field_id,
+            "name": spec.name,
+            "options": options_input,
+        });
+
+        let response = self.graphql(mutation, variables).await?;
+        let field_data = &response["data"]["updateProjectV2Field"]["projectV2Field"];
+        let field_id = field_data["id"].as_str().unwrap_or_default().to_owned();
+
+        if field_id.is_empty() {
+            return Err(errors::FieldOptionHealFailedSnafu {
+                field: spec.name.to_owned(),
+                reason: "updateProjectV2Field response missing field id".to_owned(),
+            }
+            .build());
+        }
+
+        let mut option_map = HashMap::new();
+        if let Some(opts) = field_data["options"].as_array() {
+            for opt in opts {
+                if let (Some(id), Some(name)) = (opt["id"].as_str(), opt["name"].as_str()) {
+                    option_map.insert(name.to_owned(), id.to_owned());
+                }
+            }
+        }
+
+        // Verify the heal actually produced the spec's option set.
+        let healed_names: std::collections::HashSet<&str> =
+            option_map.keys().map(String::as_str).collect();
+        if healed_names != spec_names {
+            return Err(errors::FieldOptionHealFailedSnafu {
+                field: spec.name.to_owned(),
+                reason: format!(
+                    "post-heal options {healed_names:?} do not match spec {spec_names:?}"
+                ),
+            }
+            .build());
+        }
+
+        debug!(
+            field = spec.name,
+            field_id = %field_id,
+            options = ?option_map.keys().collect::<Vec<_>>(),
+            "Healed single-select field — option set now matches spec"
         );
 
         Ok(FieldMeta {

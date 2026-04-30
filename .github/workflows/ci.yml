@@ -130,7 +130,14 @@ jobs:
       # per spec §13.2. `--all-features` is required so the `e2e_workflow`
       # test (which gates on `test-hooks` via Cargo `required-features`) is
       # included. See bead unblock-3lb rework decision W1.B.
-      - run: cargo tarpaulin -p unblock-core -p unblock-github -p unblock-mcp --all-features --out xml -- --ignored
+      #
+      # `--test-threads=1` serialises the live integration tests against
+      # the shared test project — multiple tests call `setup_fields` (and
+      # related Project mutations) against the same Projects V2 board, so
+      # parallel execution races on `createProjectV2Field` ('Name has
+      # already been taken') or stomps each other's option deletions. See
+      # bead unblock-aa2 — Risk 5 in the Sherlock investigation.
+      - run: cargo tarpaulin -p unblock-core -p unblock-github -p unblock-mcp --all-features --out xml -- --ignored --test-threads=1
       - uses: codecov/codecov-action@v4
         with:
           file: cobertura.xml
