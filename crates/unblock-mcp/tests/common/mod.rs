@@ -32,6 +32,47 @@ pub fn has_project_number() -> bool {
         .unwrap_or(false)
 }
 
+/// Gate for live-required integration tests: returns `true` when
+/// `GITHUB_TOKEN` is set, otherwise prints a clear opt-in hint and returns
+/// `false` so the caller can early-return cleanly.
+///
+/// Live-required tests are tagged `#[ignore]` and opt-in via
+/// `cargo test --workspace -- --ignored` with `GITHUB_TOKEN` + `UNBLOCK_REPO`
+/// set. When a user explicitly passes `--ignored` without a token this helper
+/// keeps the test exit status clean instead of hitting a confusing assertion
+/// failure.
+///
+/// Mirrors [`unblock_github::tests::integration::require_github_token`] —
+/// see bead `unblock-c4h` for the full rationale.
+#[allow(dead_code)] // Not every test binary uses this
+pub fn require_github_token() -> bool {
+    if has_github_token() {
+        true
+    } else {
+        eprintln!(
+            "GITHUB_TOKEN not set — skipping live integration test (re-run with \
+             `GITHUB_TOKEN=... UNBLOCK_REPO=owner/repo cargo test --workspace -- --ignored`)"
+        );
+        false
+    }
+}
+
+/// Same as [`require_github_token`] but also requires `UNBLOCK_PROJECT`. Used
+/// by Projects V2 live tests that cannot run without a configured project.
+#[allow(dead_code)] // Used by e2e_workflow.rs and the project-gated tests in integration.rs
+pub fn require_github_token_and_project() -> bool {
+    if has_github_token() && has_project_number() {
+        true
+    } else {
+        eprintln!(
+            "GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping live project \
+             integration test (re-run with both env vars set and \
+             `UNBLOCK_REPO=owner/repo cargo test --workspace -- --ignored`)"
+        );
+        false
+    }
+}
+
 /// Builds a [`Config`] from the process environment for integration tests.
 #[allow(dead_code)]
 pub fn test_config() -> Config {
@@ -40,20 +81,18 @@ pub fn test_config() -> Config {
 
 /// Creates a [`ServerState`] with a real client and empty cache.
 ///
-/// Prefers [`GitHubClient::with_repo`] when the config carries an
-/// explicit `repo` (i.e. `UNBLOCK_REPO=owner/repo` is set) so the helper
-/// does not depend on a reachable `.git/config` to resolve the
-/// repository. This mirrors the fix in `unblock-c4h` for
-/// `crates/unblock-github/tests/integration.rs`: prior to the migration,
-/// running `cargo test -p unblock-mcp` from the member crate directory
-/// with `GITHUB_TOKEN` set but without `.git/config` reachable surfaced
-/// the same latent `.git/config` relative-path failure (masked today by
-/// the `has_github_token()` gate, but a regression vector for any test
-/// that drops the gate).
+/// Constructs the underlying [`GitHubClient`] via [`GitHubClient::with_repo`]
+/// using the explicit `owner/repo` from `config.repo` (i.e. `UNBLOCK_REPO`).
+/// This avoids any dependency on a reachable `.git/config` so that
+/// `cargo test -p unblock-mcp` runs cleanly from the member crate directory.
 ///
-/// When `UNBLOCK_REPO` is not set, falls back to [`GitHubClient::new`]
-/// so the production `UNBLOCK_REPO` + git-remote resolution path is
-/// still exercised end-to-end when only `GITHUB_TOKEN` is provided.
+/// **Panics** if `UNBLOCK_REPO` is not set on the loaded config. Live
+/// integration tests must export `UNBLOCK_REPO=owner/repo` alongside
+/// `GITHUB_TOKEN`. The production `GitHubClient::new` git-remote resolution
+/// path remains covered by `unblock-github`'s own integration tests
+/// (`github_client_new_connects_to_real_repo`) — it is intentionally
+/// unreachable from `unblock-mcp`'s test surface to remove the
+/// `.git/config` relative-path footgun.
 #[allow(dead_code)]
 pub async fn test_server_state() -> ServerState {
     let config = test_config();
@@ -68,33 +107,33 @@ pub async fn test_server_state() -> ServerState {
     }
 }
 
-/// Build a real [`GitHubClient`] from `config`, preferring
-/// [`GitHubClient::with_repo`] when an explicit `owner/repo` is present
-/// in `config.repo`.
+/// Build a real [`GitHubClient`] from `config` via [`GitHubClient::with_repo`].
 ///
-/// Bypasses `.git/config` resolution whenever possible so that integration
-/// tests run from the member crate directory (`cargo test -p unblock-mcp`)
-/// do not depend on a reachable git working tree to resolve the
-/// repository. Falls back to [`GitHubClient::new`] when `config.repo` is
-/// `None`, preserving the production resolution path for callers that
-/// only set `GITHUB_TOKEN`.
+/// Requires `config.repo` to be set (i.e. `UNBLOCK_REPO=owner/repo` was
+/// exported). Panics with a clear message otherwise. This is intentional —
+/// live `unblock-mcp` tests must not fall back to the `.git/config`-reading
+/// [`GitHubClient::new`] path because `cargo test -p unblock-mcp` runs the
+/// test binaries from the member crate directory where `.git/config` is not
+/// reachable. The production `GitHubClient::new` resolution path is covered
+/// end-to-end by `unblock-github`'s integration tests instead.
 ///
 /// The `owner/repo` parsing here intentionally matches
 /// [`unblock_core::config::Config::repo`]'s validation invariant — the
 /// string is guaranteed to contain exactly one `/` with non-empty
 /// segments on each side at config-load time, so `split_once('/')` is
 /// total here without further validation.
-async fn build_github_client(config: &Config) -> GitHubClient {
-    if let Some(repo) = config.repo.as_deref()
-        && let Some((owner, name)) = repo.split_once('/')
-    {
-        return GitHubClient::with_repo(config, owner, name)
-            .await
-            .expect("GitHubClient::with_repo() should succeed with parsed UNBLOCK_REPO");
-    }
-    GitHubClient::new(config)
+#[allow(dead_code)]
+pub async fn build_github_client(config: &Config) -> GitHubClient {
+    let repo = config.repo.as_deref().expect(
+        "UNBLOCK_REPO must be set for unblock-mcp live integration tests \
+         (export UNBLOCK_REPO=owner/repo alongside GITHUB_TOKEN)",
+    );
+    let (owner, name) = repo
+        .split_once('/')
+        .expect("UNBLOCK_REPO must be in owner/repo form (validated at Config::load)");
+    GitHubClient::with_repo(config, owner, name)
         .await
-        .expect("GitHubClient::new() should succeed")
+        .expect("GitHubClient::with_repo() should succeed with parsed UNBLOCK_REPO")
 }
 
 // ── Mock helpers ──────────────────────────────────────────────────────

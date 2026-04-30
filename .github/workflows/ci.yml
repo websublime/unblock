@@ -3,6 +3,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+  schedule:
+    # Run live tests nightly (UTC) so the live-API contract does not silently
+    # rot between PRs that happen to skip the workflow_dispatch trigger.
+    - cron: "0 4 * * *"
 
 env:
   CARGO_TERM_COLOR: always
@@ -32,7 +37,38 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # Mock-only run — never exports GITHUB_TOKEN/UNBLOCK_REPO/UNBLOCK_PROJECT
+      # so the live-required `#[ignore]` tests stay ignored on every PR
+      # (including forked PRs). See bead unblock-3lb.
       - run: cargo test -p unblock-core -p unblock-github -p unblock-mcp
+
+  test-mcp-live:
+    name: Test MCP (live)
+    needs: test-mcp
+    runs-on: ubuntu-latest
+    # Run only on first-party events: pushes to main, scheduled nightly
+    # builds, manual dispatch, or PRs originating from this repo (not forks).
+    # Forked PRs never see the GITHUB_TOKEN secret. See bead unblock-3lb.
+    if: |
+      github.event_name == 'push'
+      || github.event_name == 'schedule'
+      || github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'pull_request'
+          && github.event.pull_request.head.repo.full_name == github.repository)
+    timeout-minutes: 20
+    env:
+      GITHUB_TOKEN: ${{ secrets.UNBLOCK_TEST_TOKEN }}
+      UNBLOCK_REPO: ${{ vars.UNBLOCK_TEST_REPO }}
+      UNBLOCK_PROJECT: ${{ vars.UNBLOCK_TEST_PROJECT }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Run only the live-required `#[ignore]` tests to keep the live job
+      # focused. The default mock-only run already executed every other test
+      # in the `test-mcp` job above. `--all-features` is required so the
+      # `e2e_workflow` test (which gates on `test-hooks`) is included.
+      - run: cargo test --workspace --all-features -- --ignored
 
   coverage:
     name: Coverage
@@ -43,7 +79,41 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cargo-tarpaulin
+      # Mock-only coverage — mirrors the test-mcp job's environment.
       - run: cargo tarpaulin -p unblock-core -p unblock-github -p unblock-mcp --out xml
       - uses: codecov/codecov-action@v4
         with:
           file: cobertura.xml
+          flags: mock
+
+  coverage-live:
+    name: Coverage (live)
+    needs: test-mcp-live
+    runs-on: ubuntu-latest
+    # Same first-party-only gate as test-mcp-live.
+    if: |
+      github.event_name == 'push'
+      || github.event_name == 'schedule'
+      || github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'pull_request'
+          && github.event.pull_request.head.repo.full_name == github.repository)
+    timeout-minutes: 30
+    env:
+      GITHUB_TOKEN: ${{ secrets.UNBLOCK_TEST_TOKEN }}
+      UNBLOCK_REPO: ${{ vars.UNBLOCK_TEST_REPO }}
+      UNBLOCK_PROJECT: ${{ vars.UNBLOCK_TEST_PROJECT }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-tarpaulin
+      # Live coverage — passes `-- --ignored` to tarpaulin so the live-required
+      # tests are exercised (codecov merges this with the mock-only report;
+      # combined coverage is the >80% target per spec §13.2). `--all-features`
+      # is required so the `e2e_workflow` test (which gates on `test-hooks`)
+      # is included.
+      - run: cargo tarpaulin -p unblock-core -p unblock-github -p unblock-mcp --all-features --out xml -- --ignored
+      - uses: codecov/codecov-action@v4
+        with:
+          file: cobertura.xml
+          flags: live
