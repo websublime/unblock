@@ -920,14 +920,17 @@ mod tests {
             status: crate::projects::FieldMeta {
                 field_id: "f1".to_owned(),
                 options: std::collections::HashMap::new(),
+                option_colors: std::collections::HashMap::new(),
             },
             priority: crate::projects::FieldMeta {
                 field_id: "f2".to_owned(),
                 options: std::collections::HashMap::new(),
+                option_colors: std::collections::HashMap::new(),
             },
             pipeline_stage: crate::projects::FieldMeta {
                 field_id: "f3".to_owned(),
                 options: std::collections::HashMap::new(),
+                option_colors: std::collections::HashMap::new(),
             },
             agent: "f4".to_owned(),
             claimed_at: "f5".to_owned(),

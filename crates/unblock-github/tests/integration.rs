@@ -1319,12 +1319,16 @@ async fn setup_fields_creates_all_seven_fields() {
         "DeferUntil field_id should be non-empty"
     );
 
-    // Verify created + skipped covers all 7 fields.
+    // Verify created + healed + skipped covers all 7 fields.
+    // (Bead unblock-aa2: heal bucket added — single-select required
+    // fields whose options diverged from spec land in `healed` instead
+    // of `skipped`. The buckets are mutually exclusive.)
     assert_eq!(
-        report.created.len() + report.skipped.len(),
+        report.created.len() + report.healed.len() + report.skipped.len(),
         7,
-        "created + skipped should total 7, got created={:?} skipped={:?}",
+        "created + healed + skipped should total 7, got created={:?} healed={:?} skipped={:?}",
         report.created,
+        report.healed,
         report.skipped
     );
 
@@ -1412,11 +1416,19 @@ async fn setup_fields_is_idempotent() {
         .await
         .expect("second setup_fields() should succeed");
 
-    // Second call should have all 7 skipped, none created.
+    // Second call should have all 7 skipped, none created and none
+    // healed (the first call left every required field in the canonical
+    // shape, so the heal fast-path runs for single-select fields and
+    // every plain field falls through the `skipped` branch).
     assert!(
         second_report.created.is_empty(),
         "second call should create nothing, but created: {:?}",
         second_report.created
+    );
+    assert!(
+        second_report.healed.is_empty(),
+        "second call should heal nothing (idempotent), but healed: {:?}",
+        second_report.healed
     );
     assert_eq!(
         second_report.skipped.len(),

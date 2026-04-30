@@ -91,10 +91,7 @@ fn make_issue(number: u64) -> Issue {
 /// (`agent`, `claimed_at`, `story_points`, `defer_until`) bypass the option
 /// map and DO call `update_field`.
 fn empty_field_ids() -> ProjectFieldIds {
-    let meta = || FieldMeta {
-        field_id: "f".to_owned(),
-        options: HashMap::new(),
-    };
+    let meta = || FieldMeta::new("f".to_owned(), HashMap::new());
     ProjectFieldIds {
         status: meta(),
         priority: meta(),

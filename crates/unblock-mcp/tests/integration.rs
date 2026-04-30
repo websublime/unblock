@@ -2874,16 +2874,10 @@ fn dep_remove_field_ids() -> unblock_github::projects::ProjectFieldIds {
     let mut status_options = HashMap::new();
     status_options.insert("ready".to_owned(), "OPT_READY".to_owned());
 
-    let empty_meta = || FieldMeta {
-        field_id: "f".to_owned(),
-        options: HashMap::new(),
-    };
+    let empty_meta = || FieldMeta::new("f".to_owned(), HashMap::new());
 
     ProjectFieldIds {
-        status: FieldMeta {
-            field_id: "status-field-id".to_owned(),
-            options: status_options,
-        },
+        status: FieldMeta::new("status-field-id".to_owned(), status_options),
         priority: empty_meta(),
         pipeline_stage: empty_meta(),
         agent: "agent".to_owned(),
@@ -4586,16 +4580,19 @@ async fn setup_creates_fields_on_first_run() {
         .await
         .expect("setup_fields should succeed");
 
-    // Total fields (created + skipped) should be 7.
-    let total = report.created.len() + report.skipped.len();
+    // Total fields (created + healed + skipped) should be 7. The heal
+    // bucket was added in bead unblock-aa2 — single-select required
+    // fields with diverging options land in `healed` instead of
+    // `skipped`. Buckets are mutually exclusive.
+    let total = report.created.len() + report.healed.len() + report.skipped.len();
     assert_eq!(
         total, 7,
         "setup should resolve exactly 7 fields, got {total}"
     );
 
     eprintln!(
-        "setup_creates_fields: created={:?}, skipped={:?}",
-        report.created, report.skipped
+        "setup_creates_fields: created={:?}, healed={:?}, skipped={:?}",
+        report.created, report.healed, report.skipped
     );
 }
 
@@ -4634,6 +4631,11 @@ async fn setup_fields_idempotent_no_duplicates() {
         report2.created.is_empty(),
         "second setup_fields should create zero fields, got: {:?}",
         report2.created
+    );
+    assert!(
+        report2.healed.is_empty(),
+        "second setup_fields should heal zero fields (idempotent), got: {:?}",
+        report2.healed
     );
     assert_eq!(
         report2.skipped.len(),
@@ -6838,16 +6840,10 @@ fn depends_field_ids_with_blocked() -> unblock_github::projects::ProjectFieldIds
     let mut status_options = HashMap::new();
     status_options.insert("blocked".to_owned(), "OPT_BLOCKED".to_owned());
 
-    let empty_meta = || FieldMeta {
-        field_id: "f".to_owned(),
-        options: HashMap::new(),
-    };
+    let empty_meta = || FieldMeta::new("f".to_owned(), HashMap::new());
 
     ProjectFieldIds {
-        status: FieldMeta {
-            field_id: "status-field-id".to_owned(),
-            options: status_options,
-        },
+        status: FieldMeta::new("status-field-id".to_owned(), status_options),
         priority: empty_meta(),
         pipeline_stage: empty_meta(),
         agent: "agent".to_owned(),
@@ -7415,16 +7411,10 @@ fn claim_field_ids_with_in_progress() -> unblock_github::projects::ProjectFieldI
     let mut status_options = HashMap::new();
     status_options.insert("in_progress".to_owned(), "OPT_IN_PROGRESS".to_owned());
 
-    let empty_meta = || FieldMeta {
-        field_id: "f".to_owned(),
-        options: HashMap::new(),
-    };
+    let empty_meta = || FieldMeta::new("f".to_owned(), HashMap::new());
 
     ProjectFieldIds {
-        status: FieldMeta {
-            field_id: "status-field-id".to_owned(),
-            options: status_options,
-        },
+        status: FieldMeta::new("status-field-id".to_owned(), status_options),
         priority: empty_meta(),
         pipeline_stage: empty_meta(),
         agent: "agent-field-id".to_owned(),
