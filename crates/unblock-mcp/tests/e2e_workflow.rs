@@ -4,13 +4,23 @@
 //! through the full tool lifecycle: `init` → `setup` → `create` → `ready` →
 //! `depends` → `claim` → `update` → `comment` → `show` → `close`.
 //!
+//! # Status — live-required, opt-in via `--ignored`
+//!
+//! The single test in this file is tagged `#[ignore]`. It only runs when
+//! invoked explicitly via `cargo test --workspace -- --ignored` with all
+//! the env vars below exported. Default `cargo test` runs do NOT execute it.
+//! See bead `unblock-3lb` for the rationale (silent skips with `eprintln!`
+//! were being counted as PASS by Cargo, masking that this test had never
+//! actually executed in CI).
+//!
 //! # Prerequisites
 //!
 //! - `GITHUB_TOKEN` — a valid GitHub PAT with repo and project scopes.
 //! - `UNBLOCK_REPO` — the `owner/repo` slug of the test repository.
 //! - `UNBLOCK_PROJECT` — the project number on the test repository.
 //!
-//! The test is skipped automatically when any of these env vars are not set.
+//! The test calls `require_github_token_and_project()` and exits cleanly
+//! if any of `GITHUB_TOKEN` / `UNBLOCK_PROJECT` are missing.
 //!
 //! # Cleanup
 //!
@@ -27,7 +37,7 @@ use unblock_mcp::tools::rebuild_cache;
 use unblock_mcp::tools::setup::REQUIRED_VIEWS;
 
 mod common;
-use common::{has_github_token, has_project_number, test_server_state};
+use common::{require_github_token_and_project, test_server_state};
 
 /// Drop guard that closes multiple GitHub issues on scope exit, even during a
 /// panic unwind. Adapted from the single-issue guard in
@@ -110,10 +120,10 @@ impl Drop for CloseIssuesGuard<'_> {
 /// 16. Cleanup: close B
 #[allow(clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "live GitHub API + Projects V2 — opt-in via cargo test --workspace -- --ignored with GITHUB_TOKEN + UNBLOCK_REPO + UNBLOCK_PROJECT"]
 async fn e2e_workflow_all_10_tools() {
     // ── Gate: skip if required env vars are not set ──────────────────
-    if !has_github_token() || !has_project_number() {
-        eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping E2E workflow test");
+    if !require_github_token_and_project() {
         return;
     }
 

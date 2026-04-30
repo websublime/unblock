@@ -7,10 +7,13 @@
 //! the call traversed the dyn-dispatch layer rather than being monomorphized
 //! away.
 //!
-//! Unlike [`integration.rs`](integration.rs) and
-//! [`e2e_workflow.rs`](e2e_workflow.rs), these tests do **not** require a
-//! `GITHUB_TOKEN` — they run unconditionally in CI and are the sole runtime
-//! signal that `Arc<dyn GitHubApi>` dispatch works end-to-end.
+//! Unlike the live-required tests in [`integration.rs`](integration.rs) and
+//! [`e2e_workflow.rs`](e2e_workflow.rs) (which are tagged `#[ignore]` and
+//! only run via `cargo test -- --ignored` with `GITHUB_TOKEN` + `UNBLOCK_REPO`
+//! exported), these tests do **not** require any environment variables — they
+//! run unconditionally on every default `cargo test --workspace` invocation
+//! and are the sole runtime signal that `Arc<dyn GitHubApi>` dispatch works
+//! end-to-end without live network.
 
 #![allow(clippy::too_many_lines)]
 

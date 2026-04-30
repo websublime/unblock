@@ -1,8 +1,25 @@
 //! Integration tests for MCP tool handlers.
 //!
-//! These tests require a valid `GITHUB_TOKEN` environment variable and network
-//! access to GitHub. They are skipped automatically when `GITHUB_TOKEN` is not
-//! set.
+//! ## Two test buckets
+//!
+//! The tests in this file are split into two buckets:
+//!
+//! 1. **Mock-backed tests** — use `MockGitHubClient` via `state_with_mock` and
+//!    do not require any environment variables, network, or `.git/config`.
+//!    These run as part of the default `cargo test --workspace` run and form
+//!    the bulk of the integration suite.
+//! 2. **Live-required tests** — actually call `api.github.com`. These are
+//!    marked `#[ignore]` and opt-in via `cargo test --workspace -- --ignored`
+//!    with a real `GITHUB_TOKEN` + `UNBLOCK_REPO` (and `UNBLOCK_PROJECT` for
+//!    the Projects V2 tests) set. Every live-required test starts with a
+//!    `require_github_token()` / `require_github_token_and_project()` gate so
+//!    that accidental invocation without credentials exits cleanly instead
+//!    of emitting a confusing failure.
+//!
+//! The contract mirrors `unblock-github`'s integration tests (see beads
+//! `unblock-c4h` and `unblock-3lb` for the full rationale): live tests are
+//! never silently skipped — they are explicit `#[ignore]` so the cargo
+//! report flags them as ignored rather than counting them as PASS.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,7 +32,6 @@ use unblock_core::graph::DependencyGraph;
 use unblock_core::types::{
     BlockingEdge, IssueComment, IssueRef, IssueState, IssueType, Priority, QualifiedId, Status,
 };
-use unblock_github::client::GitHubClient;
 use unblock_github::projects::{CreateViewParams, OwnerType, ViewLayout};
 use unblock_mcp::server::UnblockServer;
 use unblock_mcp::tools::reconcile::ReconcileParams;
@@ -23,7 +39,10 @@ use unblock_mcp::tools::setup::REQUIRED_VIEWS;
 use unblock_mcp::tools::show::ShowParams;
 
 mod common;
-use common::{TracingCapture, has_github_token, new_mock, state_with_mock, test_server_state};
+use common::{
+    TracingCapture, build_github_client, new_mock, require_github_token,
+    require_github_token_and_project, state_with_mock, test_server_state,
+};
 
 /// Helper to create a `QualifiedId` for tests.
 fn qid(number: u64) -> QualifiedId {
@@ -104,9 +123,9 @@ fn mock_issue(number: u64) -> unblock_core::types::Issue {
 /// This test calls `fetch_issue` on a known issue (issue #1 in the
 /// configured test repository) and validates the show result structure.
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via cargo test --workspace -- --ignored with GITHUB_TOKEN + UNBLOCK_REPO"]
 async fn show_existing_issue_returns_all_fields_populated() {
-    if !has_github_token() {
-        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+    if !require_github_token() {
         return;
     }
 
@@ -148,9 +167,9 @@ async fn show_existing_issue_returns_all_fields_populated() {
 
 /// Show a non-existent issue returns `IssueNotFound` error.
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via cargo test --workspace -- --ignored with GITHUB_TOKEN + UNBLOCK_REPO"]
 async fn show_nonexistent_issue_returns_issue_not_found() {
-    if !has_github_token() {
-        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+    if !require_github_token() {
         return;
     }
 
@@ -4122,9 +4141,9 @@ fn issue_ref_parse_invalid_returns_error() {
 ///
 /// Creates a real issue, verifies fields, then closes it for cleanup.
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via cargo test --workspace -- --ignored with GITHUB_TOKEN + UNBLOCK_REPO"]
 async fn create_issue_with_all_params_and_refetch() {
-    if !has_github_token() {
-        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+    if !require_github_token() {
         return;
     }
 
@@ -4182,9 +4201,9 @@ async fn create_issue_with_all_params_and_refetch() {
 
 /// Create with `blocked_by` local number — verifies blocking relationship.
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via cargo test --workspace -- --ignored with GITHUB_TOKEN + UNBLOCK_REPO"]
 async fn create_issue_with_blocked_by_local() {
-    if !has_github_token() {
-        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+    if !require_github_token() {
         return;
     }
 
@@ -4258,9 +4277,9 @@ async fn create_issue_with_blocked_by_local() {
 /// `IssueRef::CrossRepo` variant triggers the owner/repo GraphQL resolution
 /// path regardless of whether the target repo differs from the configured one.
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via cargo test --workspace -- --ignored with GITHUB_TOKEN + UNBLOCK_REPO"]
 async fn create_issue_with_blocked_by_cross_repo() {
-    if !has_github_token() {
-        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+    if !require_github_token() {
         return;
     }
 
@@ -4348,9 +4367,9 @@ async fn create_issue_with_blocked_by_cross_repo() {
 
 /// Create with `parent` — verifies sub-issue relationship.
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via cargo test --workspace -- --ignored with GITHUB_TOKEN + UNBLOCK_REPO"]
 async fn create_issue_with_parent_sub_issue() {
-    if !has_github_token() {
-        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+    if !require_github_token() {
         return;
     }
 
@@ -4422,9 +4441,9 @@ async fn create_issue_with_parent_sub_issue() {
 
 /// Create with no optional params — defaults applied (Task, P2).
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via cargo test --workspace -- --ignored with GITHUB_TOKEN + UNBLOCK_REPO"]
 async fn create_issue_with_defaults() {
-    if !has_github_token() {
-        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+    if !require_github_token() {
         return;
     }
 
@@ -4463,9 +4482,9 @@ async fn create_issue_with_defaults() {
 
 /// Ensure labels creates missing labels on the repo.
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via cargo test --workspace -- --ignored with GITHUB_TOKEN + UNBLOCK_REPO"]
 async fn ensure_labels_creates_missing_labels() {
-    if !has_github_token() {
-        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+    if !require_github_token() {
         return;
     }
 
@@ -4496,9 +4515,9 @@ async fn ensure_labels_creates_missing_labels() {
 /// 2. Verify cache rebuild includes the new issue
 /// 3. The new issue should appear in the ready set
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via cargo test --workspace -- --ignored with GITHUB_TOKEN + UNBLOCK_REPO"]
 async fn create_issue_appears_in_ready_set_after_rebuild() {
-    if !has_github_token() {
-        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+    if !require_github_token() {
         return;
     }
 
@@ -4542,21 +4561,14 @@ async fn create_issue_appears_in_ready_set_after_rebuild() {
 
 // ── Setup tool: integration tests ────────────────────────────────────
 
-/// Returns `true` if the `UNBLOCK_PROJECT` env var is set and non-empty.
-fn has_project_number() -> bool {
-    std::env::var("UNBLOCK_PROJECT")
-        .map(|v| !v.is_empty())
-        .unwrap_or(false)
-}
-
 /// Setup creates all 7 required fields on first run.
 ///
 /// Verifies that `setup_fields()` returns `created` entries for any fields
 /// that did not already exist, and that the total resolved field count is 7.
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via cargo test --workspace -- --ignored with GITHUB_TOKEN + UNBLOCK_REPO + UNBLOCK_PROJECT"]
 async fn setup_creates_fields_on_first_run() {
-    if !has_github_token() || !has_project_number() {
-        eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping integration test");
+    if !require_github_token_and_project() {
         return;
     }
 
@@ -4591,9 +4603,9 @@ async fn setup_creates_fields_on_first_run() {
 /// Calls `setup_fields()` twice. The second call should report all fields
 /// as skipped (already existing) with zero created.
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via cargo test --workspace -- --ignored with GITHUB_TOKEN + UNBLOCK_REPO + UNBLOCK_PROJECT"]
 async fn setup_fields_idempotent_no_duplicates() {
-    if !has_github_token() || !has_project_number() {
-        eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping integration test");
+    if !require_github_token_and_project() {
         return;
     }
 
@@ -4636,9 +4648,9 @@ async fn setup_fields_idempotent_no_duplicates() {
 /// Calls `create_view()` for each required view spec and verifies the
 /// returned view has the expected layout.
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via cargo test --workspace -- --ignored with GITHUB_TOKEN + UNBLOCK_REPO + UNBLOCK_PROJECT"]
 async fn setup_creates_views_with_correct_layout() {
-    if !has_github_token() || !has_project_number() {
-        eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping integration test");
+    if !require_github_token_and_project() {
         return;
     }
 
@@ -4709,9 +4721,9 @@ async fn setup_creates_views_with_correct_layout() {
 /// After the views exist, calling `list_views` should show all 5 required
 /// view names present.
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via cargo test --workspace -- --ignored with GITHUB_TOKEN + UNBLOCK_REPO + UNBLOCK_PROJECT"]
 async fn setup_views_idempotent_no_duplicates() {
-    if !has_github_token() || !has_project_number() {
-        eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping integration test");
+    if !require_github_token_and_project() {
         return;
     }
 
@@ -4752,9 +4764,9 @@ async fn setup_views_idempotent_no_duplicates() {
 /// Calls `query_setup_status()` and `list_views()` (the dry-run path)
 /// and verifies the report is well-formed without creating anything.
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via cargo test --workspace -- --ignored with GITHUB_TOKEN + UNBLOCK_REPO + UNBLOCK_PROJECT"]
 async fn setup_dry_run_reports_without_mutations() {
-    if !has_github_token() || !has_project_number() {
-        eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping integration test");
+    if !require_github_token_and_project() {
         return;
     }
 
@@ -4814,9 +4826,9 @@ async fn setup_dry_run_reports_without_mutations() {
 /// Uses a client without `UNBLOCK_PROJECT` set and verifies that
 /// `resolve_project_info()` fails with the expected error.
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via cargo test --workspace -- --ignored with GITHUB_TOKEN + UNBLOCK_REPO"]
 async fn setup_no_project_returns_project_not_configured() {
-    if !has_github_token() {
-        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+    if !require_github_token() {
         return;
     }
 
@@ -4832,21 +4844,11 @@ async fn setup_no_project_returns_project_not_configured() {
     // `ProjectNotConfigured` when `UNBLOCK_PROJECT` is unset, which is a
     // property of the concrete implementation, not the trait abstraction.
     //
-    // Prefer `with_repo` when `UNBLOCK_REPO` is set so the constructor
-    // does not depend on a reachable `.git/config` to resolve the
-    // repository (mirrors the unblock-c4h fix in `unblock-github`'s
-    // integration tests; see bead unblock-29p.51). Fall back to `new`
-    // otherwise so the production resolution path is still exercised.
-    let client = if let Some((owner, name)) = config.repo.as_deref().and_then(|r| r.split_once('/'))
-    {
-        GitHubClient::with_repo(&config, owner, name)
-            .await
-            .expect("GitHubClient::with_repo should succeed")
-    } else {
-        GitHubClient::new(&config)
-            .await
-            .expect("GitHubClient::new should succeed")
-    };
+    // The shared `build_github_client` helper resolves the client via
+    // `with_repo` and panics with a clear message if `UNBLOCK_REPO` is
+    // not set — `.git/config` is intentionally unreachable from the
+    // `unblock-mcp` test surface (bead unblock-3lb).
+    let client = build_github_client(&config).await;
 
     // resolve_project_info should fail with ProjectNotConfigured.
     let result = client.resolve_project_info().await;
@@ -4870,9 +4872,9 @@ async fn setup_no_project_returns_project_not_configured() {
 /// This test verifies that `detect_owner_type()` returns a valid
 /// `OwnerType` for the configured repository owner.
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via cargo test --workspace -- --ignored with GITHUB_TOKEN + UNBLOCK_REPO"]
 async fn setup_owner_type_detection_works() {
-    if !has_github_token() {
-        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+    if !require_github_token() {
         return;
     }
 
@@ -4897,9 +4899,9 @@ async fn setup_owner_type_detection_works() {
 /// Verifies that `list_rest_fields()` returns fields with positive integer
 /// IDs that are suitable for use as `visible_fields` in view creation.
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via cargo test --workspace -- --ignored with GITHUB_TOKEN + UNBLOCK_REPO + UNBLOCK_PROJECT"]
 async fn setup_visible_fields_use_integer_ids() {
-    if !has_github_token() || !has_project_number() {
-        eprintln!("GITHUB_TOKEN or UNBLOCK_PROJECT not set — skipping integration test");
+    if !require_github_token_and_project() {
         return;
     }
 
@@ -4946,9 +4948,9 @@ async fn setup_visible_fields_use_integer_ids() {
 /// It does NOT assert `clean: true` because the test repo may have legitimate
 /// drift — it only asserts successful execution and valid report structure.
 #[tokio::test]
+#[ignore = "live GitHub API — opt-in via cargo test --workspace -- --ignored with GITHUB_TOKEN + UNBLOCK_REPO"]
 async fn reconcile_on_clean_repo() {
-    if !has_github_token() {
-        eprintln!("GITHUB_TOKEN not set — skipping integration test");
+    if !require_github_token() {
         return;
     }
 
