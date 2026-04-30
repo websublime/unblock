@@ -44,6 +44,25 @@ docs/
 
 The `docs/archive/` directory contains the original documentation written before this structure was adopted. Preserved for reference but superseded by the documents above.
 
+## CI live tests
+
+The `test-mcp-live` job in `.github/workflows/ci.yml` exercises the live GitHub API path of `unblock-mcp` (the `#[ignore]` integration tests under `crates/unblock-mcp/tests/`). It runs only on first-party events — pushes to `main`, scheduled nightly builds, manual `workflow_dispatch`, and PRs whose head branch lives in this repository — so forked PRs never see the secret.
+
+The job has a preflight step that fails fast with an actionable error if any of the three required repository settings is missing. To configure them on a fresh clone, run (with `gh` authenticated against `websublime/unblock`):
+
+```bash
+# Repository secret — fine-grained PAT or classic PAT with `repo` + `project` scopes
+gh secret set UNBLOCK_TEST_TOKEN --body '<github-pat>'
+
+# Repository variable — the owner/repo string the live tests should hit
+gh variable set UNBLOCK_TEST_REPO --body 'websublime/unblock'
+
+# Repository variable — the GitHub Project (Projects V2) number used by the e2e_workflow test
+gh variable set UNBLOCK_TEST_PROJECT --body '<project-number>'
+```
+
+The `coverage` job (mock-only) runs on every PR and the `test-mcp-live` job covers both live execution and live coverage in a single tarpaulin pass on first-party events. Codecov merges the two reports under the `mock` and `live` flags; the >80% target in spec §13.2 applies to combined coverage.
+
 ## License
 
 Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE) at your option.

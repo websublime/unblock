@@ -86,9 +86,12 @@ pub fn test_config() -> Config {
 /// This avoids any dependency on a reachable `.git/config` so that
 /// `cargo test -p unblock-mcp` runs cleanly from the member crate directory.
 ///
-/// **Panics** if `UNBLOCK_REPO` is not set on the loaded config. Live
-/// integration tests must export `UNBLOCK_REPO=owner/repo` alongside
-/// `GITHUB_TOKEN`. The production `GitHubClient::new` git-remote resolution
+/// **Panics** if `UNBLOCK_REPO` is not set on the loaded config or if the
+/// underlying [`GitHubClient::with_repo`] call fails. Live integration tests
+/// must export `UNBLOCK_REPO=owner/repo` alongside `GITHUB_TOKEN` and gate on
+/// [`require_github_token`] / [`require_github_token_and_project`] before
+/// calling this helper, which makes the panic structurally unreachable from
+/// the test surface. The production `GitHubClient::new` git-remote resolution
 /// path remains covered by `unblock-github`'s own integration tests
 /// (`github_client_new_connects_to_real_repo`) — it is intentionally
 /// unreachable from `unblock-mcp`'s test surface to remove the
@@ -96,7 +99,9 @@ pub fn test_config() -> Config {
 #[allow(dead_code)]
 pub async fn test_server_state() -> ServerState {
     let config = test_config();
-    let client = build_github_client(&config).await;
+    let client = build_github_client(&config)
+        .await
+        .unwrap_or_else(|e| panic!("test_server_state: build_github_client failed: {e}"));
     ServerState {
         config: Arc::new(config),
         github: Arc::new(client),
@@ -109,9 +114,13 @@ pub async fn test_server_state() -> ServerState {
 
 /// Build a real [`GitHubClient`] from `config` via [`GitHubClient::with_repo`].
 ///
-/// Requires `config.repo` to be set (i.e. `UNBLOCK_REPO=owner/repo` was
-/// exported). Panics with a clear message otherwise. This is intentional —
-/// live `unblock-mcp` tests must not fall back to the `.git/config`-reading
+/// Returns [`Err`] with a descriptive message when `config.repo` is not set
+/// (i.e. `UNBLOCK_REPO=owner/repo` was not exported) or when the underlying
+/// [`GitHubClient::with_repo`] call fails. This mirrors the boolean-gate
+/// ergonomic of [`require_github_token`] / [`require_github_token_and_project`]
+/// — callers can short-circuit cleanly without a panic-unwind.
+///
+/// Live `unblock-mcp` tests must not fall back to the `.git/config`-reading
 /// [`GitHubClient::new`] path because `cargo test -p unblock-mcp` runs the
 /// test binaries from the member crate directory where `.git/config` is not
 /// reachable. The production `GitHubClient::new` resolution path is covered
@@ -123,17 +132,18 @@ pub async fn test_server_state() -> ServerState {
 /// segments on each side at config-load time, so `split_once('/')` is
 /// total here without further validation.
 #[allow(dead_code)]
-pub async fn build_github_client(config: &Config) -> GitHubClient {
-    let repo = config.repo.as_deref().expect(
+pub async fn build_github_client(config: &Config) -> Result<GitHubClient, String> {
+    let repo = config.repo.as_deref().ok_or_else(|| {
         "UNBLOCK_REPO must be set for unblock-mcp live integration tests \
-         (export UNBLOCK_REPO=owner/repo alongside GITHUB_TOKEN)",
-    );
-    let (owner, name) = repo
-        .split_once('/')
-        .expect("UNBLOCK_REPO must be in owner/repo form (validated at Config::load)");
+         (export UNBLOCK_REPO=owner/repo alongside GITHUB_TOKEN)"
+            .to_owned()
+    })?;
+    let (owner, name) = repo.split_once('/').ok_or_else(|| {
+        "UNBLOCK_REPO must be in owner/repo form (validated at Config::load)".to_owned()
+    })?;
     GitHubClient::with_repo(config, owner, name)
         .await
-        .expect("GitHubClient::with_repo() should succeed with parsed UNBLOCK_REPO")
+        .map_err(|e| format!("GitHubClient::with_repo() failed for {owner}/{name}: {e}"))
 }
 
 // ── Mock helpers ──────────────────────────────────────────────────────
