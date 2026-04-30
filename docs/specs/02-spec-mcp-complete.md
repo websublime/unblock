@@ -99,11 +99,11 @@ assumption.**
 | **RG-4 — `failsafe` fitness** | PARTIALLY CONFIRMED — no public state getter | §5.3 mandates the `Instrument`-mirror pattern; `BreakerSnapshot` is **eventually consistent**. |
 | **RG-5 — `backoff` fitness** | CONFIRMED with maintenance flag | §5.4 wraps `backoff` 0.4 behind `RetryPolicy`; §20.3 records the Phase 06+ revisit trigger for `backon`. |
 | **RG-6 — `hdrhistogram` concurrency** | PARTIALLY CONFIRMED — no atomic histogram | §6.2 mandates `Mutex<Histogram<u64>>` per metric (Option A); §16.2 re-scopes the bench to realistic load. |
-| **RG-9 — `StaleStatus` fixtures** | CONFIRMED — existing mock surface sufficient | §8.4 reuses existing `MockGitHubClient` accessors; F4 codified as a negative filter test. |
+| **RG-9 — `StaleStatus` fixtures** | CONFIRMED — existing mock surface sufficient | §8.5 reuses existing `MockGitHubClient` accessors; F4 codified as a negative filter test. |
 | **CC-5 — `is_retryable()` helper missing** | CONFIRMED — helper does NOT exist in workspace | §7.2 implements `IsRetryable for unblock_github::Error` from scratch (no "wraps existing helper" claim). |
 | **Q-6.1 — Histogram bounds** | RESOLVED at adjudication | §6.2 pins `tool_durations=(1µs, 60s, 3)`, `api_durations=(1ms, 60s, 3)`. |
 | **NR-6.1.x — bench load + gates** | RESOLVED at adjudication | §16.2 codifies 1k/s sustained + 10k/s burst, <500ns uncontested / <5µs burst, soft 5% p99 regression budget. |
-| **NR-9.1 — F4 reformulation** | RESOLVED at adjudication | §8.4 codifies the pre-detection filter invariant; F4 is a negative test. |
+| **NR-9.1 — F4 reformulation** | RESOLVED at adjudication | §8.5 codifies the pre-detection filter invariant; F4 is a negative test. The filter mechanism itself is specified in §8.2 (H-4 review 2026-04-30). |
 | **RG-7 / RG-8 / CC-3 / CC-6** | DROPPED (scope error) | No bd indirection anywhere in `commit_context`. §10 reads the active GitHub claim directly. |
 | **RG-2 / RG-10** | CLOSED at plan time | Spec applies the locked decisions (`unblock-resilience` extracted; `#[non_exhaustive]` policy project-wide). |
 
@@ -133,7 +133,7 @@ unblock-mcp ────────────────┘  (modified: doct
 
 ```
 crates/unblock-resilience/
-├── Cargo.toml          (license = "MIT", edition = "2024", deny(unsafe_code))
+├── Cargo.toml          (license.workspace = true → "MIT OR Apache-2.0", edition = "2024", deny(unsafe_code))
 └── src/
     ├── lib.rs          ← module-level docs + re-exports
     ├── traits.rs       ← `IsRetryable` trait + `ResilienceError<E>`
@@ -149,7 +149,7 @@ crates/unblock-resilience/
 |---|---|---|
 | `failsafe` | Circuit breaker primitive | `1.3` |
 | `backoff` | Retry-with-backoff primitive (with `tokio` feature) | `0.4` |
-| `tokio` | Async runtime adapter for `failsafe::futures` and `backoff::future` | `1` (workspace) |
+| `tokio` | Async runtime adapter for `failsafe::futures` and `backoff::future` | `1` with `default-features = false, features = ["time"]` (NOT inherited from workspace `full` — H-5 review 2026-04-30: minimise pegada para preservar consumability cross-domain; per-crate dep declared explicitly in `unblock-resilience/Cargo.toml`) |
 | `tracing` | Structured logging | workspace |
 | `snafu` | Error type | workspace |
 | `serde` (optional) | Snapshot serialisation for `doctor` JSON output | feature `serde` |
@@ -164,6 +164,9 @@ crates/unblock-core/src/
 ├── lib.rs                  ← module declaration: pub mod metrics;
 ├── metrics.rs              ← NEW: ServerMetrics + MetricsSnapshot
 ├── reconcile.rs            ← MODIFIED: DriftKind::StaleStatus + #[non_exhaustive]
+├── types.rs                ← MODIFIED: Issue gains `pub in_managed_project: bool`
+│                              (per §8.2 — H-4 review 2026-04-30; library API change,
+│                              note `API:` line in commit per CLAUDE.md)
 └── (unchanged)
 ```
 
@@ -174,7 +177,15 @@ crates/unblock-core/src/
 ```
 crates/unblock-github/src/
 ├── client.rs               ← MODIFIED: holds ResiliencePolicy; HTTP wrapped
-├── errors.rs               ← MODIFIED: impl IsRetryable for Error (NEW impl)
+├── errors.rs               ← MODIFIED: impl IsRetryable for Error (NEW impl);
+│                              Error::CircuitBreakerOpen { since } changes type from
+│                              Instant → DateTime<Utc> (H-8 review 2026-04-30 — library
+│                              API BREAKING CHANGE, pre-prod permits)
+├── graphql.rs              ← MODIFIED: projectItems fragment gains `project { id }`;
+│                              extract_field_values takes `project_id` param and
+│                              filters items; parse_issue / parse_graph_issue propagate
+│                              `in_managed_project` boolean to the Issue struct
+│                              (per §8.2 — H-4 review 2026-04-30)
 └── (unchanged)
 ```
 
@@ -366,7 +377,7 @@ where
 pub struct BreakerSnapshot {
     pub state: BreakerState,
     pub failure_count: usize,
-    pub last_failure_at: Option<SystemTime>,  // SystemTime, not Instant — serializable
+    pub last_failure_at: Option<DateTime<Utc>>,  // DateTime<Utc>, not Instant — serializable; matches workspace pattern (H-8)
 }
 
 /// Read-only snapshot of the retry-policy configuration.
@@ -392,12 +403,15 @@ pub enum BreakerState {
 }
 ```
 
-> **Spec note (SPEC-ORIGINAL):** the plan §6.3 carried `BreakerState::Open { since: Instant }`
-> as a struct variant. This spec replaces the embedded `Instant` with a separate
-> `last_failure_at: Option<SystemTime>` on `BreakerSnapshot`, because (a) `Instant`
-> is **not** serializable and `doctor` JSON output needs the timestamp, (b) keeping
-> `BreakerState` as a flat enum mirrors `failsafe`'s internal three-state model
-> faithfully and avoids leaking implementation detail. **User must approve.**
+> **Spec note (SO-1, APPROVED 2026-04-29; UPDATED 2026-04-30 per H-8):** the plan §6.3
+> carried `BreakerState::Open { since: Instant }` as a struct variant. This spec
+> replaces the embedded `Instant` with a separate `last_failure_at: Option<DateTime<Utc>>`
+> on `BreakerSnapshot`, because (a) `Instant` is **not** serializable and `doctor` JSON
+> output needs the timestamp, (b) keeping `BreakerState` as a flat enum mirrors
+> `failsafe`'s internal three-state model faithfully and avoids leaking implementation
+> detail, and (c) the type is `DateTime<Utc>` (not `SystemTime`) to match the existing
+> workspace pattern (`Issue::claimed_at`, `Error::RateLimited::reset_at` already use
+> `chrono::DateTime<Utc>`).
 
 ---
 
@@ -481,7 +495,7 @@ pub struct Breaker {
 struct InstrumentMirror {
     state:               AtomicU8,        // 0=Closed, 1=Open, 2=HalfOpen
     failure_count:       AtomicUsize,
-    last_failure_at:     Mutex<Option<SystemTime>>,
+    last_failure_at:     Mutex<Option<DateTime<Utc>>>,  // chrono — serializable, matches workspace pattern (H-8)
 }
 
 impl failsafe::Instrument for Arc<InstrumentMirror> {
@@ -492,7 +506,7 @@ impl failsafe::Instrument for Arc<InstrumentMirror> {
     fn on_open(&self) {
         self.state.store(1 /* Open */, Ordering::SeqCst);
         if let Ok(mut g) = self.last_failure_at.lock() {
-            *g = Some(SystemTime::now());
+            *g = Some(chrono::Utc::now());
         }
         tracing::warn!(target: "unblock_resilience", "circuit breaker opened");
     }
@@ -519,32 +533,31 @@ impl Breaker {
 **Invariants:**
 
 - `Instrument` callbacks MUST be cheap (atomics + ≤1 short mutex) per RG-4 R-4b.
-  No I/O, no allocation beyond `SystemTime::now()`.
+  No I/O, no allocation beyond `chrono::Utc::now()`.
 - `state` is the **single source of truth** for `BreakerSnapshot::state`. The
   `failsafe` private `State` enum is never exposed.
 - `failure_count` is incremented on **every** call to `on_open` (transition into
   Open). It is **not** the per-attempt failure count of the retry loop — it is the
   cumulative count of breaker-observed failures.
 
-**Failure policy (LOCKED):**
+**Failure policy (LOCKED — H-7 review 2026-04-30: flat 10 s cooldown, no jitter ceiling):**
 
 ```rust
 failsafe::Config::new()
     .failure_policy(failsafe::failure_policy::consecutive_failures(
         5,                                                       // threshold
-        failsafe::backoff::equal_jittered(
-            Duration::from_secs(10),                             // cooldown
-            Duration::from_secs(60),                             // max cooldown
-        ),
+        failsafe::backoff::constant(Duration::from_secs(10)),    // flat 10s cooldown
     ))
     .build()
 ```
 
-The 60 s upper bound on the failsafe-internal cooldown is **distinct** from the
-plan's "10 s cooldown" knob: `failsafe`'s `equal_jittered` policy uses the first
-duration as the base cooldown; the second is the jitter ceiling. The plan's
-"10 s cooldown" is the **base**; the jitter ceiling is set to 60 s so that under
-sustained outage the breaker doesn't slam GitHub every 10 s.
+Cooldown is a flat 10 s — matches plan §2.1 default table and SPEC.md §14.1.
+**Rationale for not introducing jitter or progressive ceiling in Phase 02:** single-
+process MCP binary with `failsafe` half-open admitting one probe at a time → max
+~6 probes/minute under sustained outage → no GitHub-side pressure that justifies a
+backoff schedule. Jitter for thundering-herd protection is a Phase 06+ concern when
+multi-tenant scope makes it material; opening that door here would require an
+additional SO-flagged decision and is out of scope for v0.2.0.
 
 ### 5.4 Retry module — `RetryPolicy`
 
@@ -695,10 +708,16 @@ let h = Histogram::<u64>::new_with_bounds(/* custom */)?;
 impl ServerMetrics {
     /// Build with the locked tool/API name vocabulary.
     ///
-    /// `tool_names` is the set of MCP tool names the server registers (currently:
-    /// `ready`, `claim`, `release`, `close`, `dep_add`, `dep_remove`, `reopen`,
-    /// `show`, `prime`, `setup`, `reconcile`, `doctor`, `commit_context` — 13
-    /// tools post-Phase 02).
+    /// `tool_names` is the set of MCP tool names the server registers. Post-
+    /// Phase 02, the canonical 21-tool vocabulary is the union of:
+    ///   - 19 existing tools registered in Phase 01 (per `ls crates/unblock-mcp/src/tools/`):
+    ///     `claim`, `close`, `comment`, `create`, `cross_repo`, `dep_cycles`,
+    ///     `dep_remove`, `depends`, `init`, `list`, `prime`, `ready`, `reconcile`,
+    ///     `reopen`, `search`, `setup`, `show`, `stats`, `update`
+    ///   - 2 new tools added in Phase 02: `doctor`, `commit_context`
+    /// The vocabulary is the **single source of truth** maintained alongside
+    /// `tools::mod` registration; out-of-vocab calls hit the `record_tool` guard
+    /// (see below).
     ///
     /// `api_names` is the set of GitHub API method labels the resilience layer
     /// records (e.g. `"graphql.fetch_graph_data"`, `"rest.update_field"`).
@@ -708,9 +727,20 @@ impl ServerMetrics {
     ) -> Self;
 
     /// Record a tool invocation. Increments `tool_calls[name]` and records the
-    /// duration into `tool_durations[name]`. Unknown `name` triggers a
-    /// `tracing::warn!` and is ignored (NEVER panics — out-of-vocabulary tool
-    /// names are operational, not programmer errors).
+    /// duration into `tool_durations[name]`. Unknown `name`:
+    ///   - Triggers a `debug_assert!` in dev builds (panics on `cargo test`,
+    ///     `cargo build` without `--release`) — vocabulary-registry mismatch is a
+    ///     dev-time error and MUST be caught loudly. Per H-6 review 2026-04-30.
+    ///   - In release builds, emits a `tracing::warn!` and is silently dropped —
+    ///     forgiving operational behaviour, server uptime preserved.
+    /// Implementation:
+    /// ```rust,ignore
+    /// debug_assert!(
+    ///     self.tool_calls.contains_key(name),
+    ///     "record_tool called with unregistered tool: {name}",
+    /// );
+    /// // … then warn-and-drop fall-through if not in map
+    /// ```
     pub fn record_tool(&self, name: &'static str, duration: Duration);
 
     /// Record a GitHub API call (post-resilience).
@@ -919,8 +949,8 @@ After Phase 02 the two stub variants are **constructed by real code**:
 
 | Variant | Constructed by |
 |---|---|
-| `Error::CircuitBreakerOpen { since }` | `unblock-github` translates `ResilienceError::BreakerOpen` → `Error::CircuitBreakerOpen` at the boundary; `since` is computed from `BreakerSnapshot::last_failure_at`. |
-| `Error::RateLimited { reset_at }` | `unblock-github` parses GitHub `X-RateLimit-Reset` header on 429 responses and constructs the variant before returning the error to the retry loop. |
+| `Error::CircuitBreakerOpen { since: DateTime<Utc> }` | `unblock-github` translates `ResilienceError::BreakerOpen` → `Error::CircuitBreakerOpen` at the boundary via `translate_resilience_error` (§13.2); `since` is derived from `BreakerSnapshot::last_failure_at: Option<DateTime<Utc>>`, defaulting to `chrono::Utc::now()` if the snapshot raced ahead of `on_open`. **API change (H-8 review 2026-04-30):** the variant field type changed from `std::time::Instant` to `chrono::DateTime<Utc>` to make the variant serializable for `doctor` JSON output and to align with the workspace pattern (`RateLimited::reset_at`, `Issue::claimed_at`). Pre-prod stance permits the API break — note `BREAKING CHANGE:` footer in the Epic 02.A.8 commit per CLAUDE.md. |
+| `Error::RateLimited { reset_at: DateTime<Utc> }` | `unblock-github` parses GitHub `X-RateLimit-Reset` header on 429 responses and constructs the variant before returning the error to the retry loop. (Note: existing variant uses `DateTime<Utc>` non-Option — see codebase `crates/unblock-github/src/errors.rs:108`.) |
 
 ### 7.5 Wiring metrics from inside `ResiliencePolicy::execute`
 
@@ -989,7 +1019,139 @@ pub enum DriftKind {
 }
 ```
 
-### 8.2 Detection algorithm
+### 8.2 Project V2 membership filter (PRE-REQUISITE — H-4 review 2026-04-30)
+
+**Reality check (codebase audit 2026-04-30):** the claim in earlier drafts of this
+spec that `unblock-mcp::tools::reconcile::reconcile_handler` already constructs
+`issues` only from project items is **NOT supported by Phase 01 code**. Specifically:
+
+- `fetch_graph_data` (`crates/unblock-github/src/graphql.rs:332`) fetches **all**
+  repository issues via the `repository.issues` GraphQL connection — no Project V2
+  filter is applied. The query DOES retrieve `projectItems(first: 10)` per issue,
+  but does not constrain by membership.
+- `parse_status_field` (`crates/unblock-github/src/graphql.rs:1050`) silently
+  defaults `Status::Ready` when the `Status` field is missing. This is
+  **indistinguishable** from "issue is not a Project V2 member" vs "issue is a
+  member, no Status set" vs "issue is a member, Status='ready'".
+- `Issue` struct (`crates/unblock-core/src/types.rs:129`) carries **no** membership
+  signal.
+
+Without a filter, `StaleStatus` detection generates false positives for every
+non-member issue (`graph.issue_status()` may compute `Closed`/`Blocked`, but
+`parse_status_field` returns `Ready`).
+
+**Locked design (LOCKED — H-4):**
+
+Phase 02 introduces a per-issue membership flag and a fetch-time filter.
+
+#### 8.2.1 GraphQL fragment extension
+
+Add `project { id }` to the `projectItems` selection in both query fragments
+(`fetch_graph_data` and `fetch_issue`):
+
+```graphql
+projectItems(first: 10) {
+  nodes {
+    project { id }                # NEW — needed to identify which project this item belongs to
+    fieldValues(first: 50) {
+      nodes {
+        ... on ProjectV2ItemFieldSingleSelectValue {
+          field { ... on ProjectV2FieldCommon { name } }
+          name
+        }
+        # … existing field-value variants unchanged
+      }
+    }
+  }
+}
+```
+
+#### 8.2.2 `Issue::in_managed_project: bool` (NEW field)
+
+```rust
+// crates/unblock-core/src/types.rs (modified)
+//
+// API: pub field added to Issue (library-crate API change per CLAUDE.md).
+// Pre-prod permits the addition without migration.
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Issue {
+    /* existing fields unchanged */
+
+    /// `true` when this issue is a member of the unblock-managed Project V2
+    /// (i.e. one of its `projectItems[*].project.id` matches the configured
+    /// `project_id`). `false` for issues that exist in the repository but are
+    /// not members of the managed project — typically:
+    ///   - cross-repo blocker references (other repos with their own or no project),
+    ///   - local issues created on the GitHub UI without project membership,
+    ///   - legacy issues from before the project was set up.
+    ///
+    /// Drift detection passes that depend on Project V2 custom fields (Status,
+    /// Priority, IssueType, PipelineStage, …) MUST be guarded by `in_managed_project`.
+    pub in_managed_project: bool,
+}
+```
+
+#### 8.2.3 Filter logic in `extract_field_values`
+
+The function gains a `project_id` parameter and filters `projectItems.nodes` to
+items whose `project.id == project_id` **before** extracting fields. If no items
+match, returns an empty `HashMap` and signals `in_managed_project = false`:
+
+```rust
+// crates/unblock-github/src/graphql.rs (modified)
+
+fn extract_field_values(
+    value: &serde_json::Value,
+    project_id: &str,            // NEW
+) -> (HashMap<String, String>, bool /* in_managed_project */) {
+    let project_items = value
+        .get("projectItems")
+        .and_then(|v| v.get("nodes"))
+        .and_then(|v| v.as_array());
+
+    let Some(items) = project_items else {
+        return (HashMap::new(), false);
+    };
+
+    let mut in_managed = false;
+    let mut fields    = HashMap::new();
+
+    for item in items {
+        let item_project_id = item
+            .get("project")
+            .and_then(|p| p.get("id"))
+            .and_then(|i| i.as_str());
+
+        if item_project_id != Some(project_id) {
+            continue;            // item belongs to a different project — skip
+        }
+
+        in_managed = true;
+        // … existing extraction logic unchanged: walk fieldValues, populate `fields`
+    }
+
+    (fields, in_managed)
+}
+```
+
+The two callers (`parse_issue` and `parse_graph_issue`) propagate the boolean
+into the `Issue` struct.
+
+#### 8.2.4 Detection guard
+
+`StaleStatus` detection (and any future Project-V2-field-dependent drift kind)
+MUST guard on `in_managed_project == true`. Issues with `in_managed_project ==
+false` are silently skipped — not surfaced as drift, not surfaced as warning.
+
+#### 8.2.5 Filter invariant for `setup` and `MissingProjectField`
+
+The new filter is **orthogonal** to the existing `MissingProjectField` drift
+variant: `MissingProjectField` reports per-project (the field definition was
+deleted from the project) and is unaffected by the per-issue membership filter.
+The two coexist.
+
+### 8.3 Detection algorithm
 
 Pseudocode (normative):
 
@@ -999,11 +1161,11 @@ fn detect_stale_status(graph: &DependencyGraph, issues: &HashMap<QualifiedId, Is
 {
     let mut drift = Vec::new()
 
-    // Filter invariant (codified by F4 — see §8.4):
-    // Only iterate issues that are MEMBERS of the Project V2. The reconcile
-    // engine receives `issues` already filtered by the caller.
     for (qid, expected_status) in graph.issue_status() {
         if let Some(issue) = issues.get(qid) {
+            if !issue.in_managed_project {
+                continue;            // §8.2 filter — non-member issues are silent
+            }
             if issue.status != *expected_status {
                 drift.push(DriftKind::StaleStatus {
                     issue_id: qid.clone(),
@@ -1020,12 +1182,7 @@ fn detect_stale_status(graph: &DependencyGraph, issues: &HashMap<QualifiedId, Is
 }
 ```
 
-**Filter invariant:** issues that are not Project V2 members MUST be filtered
-**before** detection. The current reconcile pipeline (`unblock-mcp::tools::reconcile::reconcile_handler`)
-already constructs `issues` only from project items; this spec does not change
-that, but it pins the invariant by F4 (§8.4).
-
-### 8.3 Repair routine
+### 8.4 Repair routine
 
 ```text
 fn repair_stale_status(client: &dyn GitHubClient, drift: &DriftKind, project: &ProjectInfo)
@@ -1042,9 +1199,9 @@ fn repair_stale_status(client: &dyn GitHubClient, drift: &DriftKind, project: &P
 ```
 
 **Idempotency:** running repair twice is safe — the second call writes the same
-value. Verified by §8.4 fixture F1 / F2 round-trip test.
+value. Verified by §8.5 fixture F1 / F2 round-trip test.
 
-### 8.4 Test fixtures (F1–F4) — LOCKED
+### 8.5 Test fixtures (F1–F4) — LOCKED
 
 All four fixtures use the **existing** `MockGitHubClient` (RG-9 confirmed).
 
@@ -1056,11 +1213,12 @@ All four fixtures use the **existing** `MockGitHubClient` (RG-9 confirmed).
 | **F4** (negative filter) | Issue exists in repo, NOT in Project V2 | **No** | n/a (filtered out) | n/a (filtered out) | `drift.iter().none(StaleStatus for qid)` |
 
 **F4 filter invariant (codified):** the test constructs an `Issue` whose
-`projectItems.fieldValues` does NOT include the Project V2 of interest, asserts that
-the reconcile pipeline filters it out **before** the detection loop runs, and asserts
-no `StaleStatus` is emitted. This is a **negative filter test** — distinct from F3
-which is a **positive happy path** confirming detection logic on member-with-matching-
-state.
+`projectItems[*].project.id` does NOT match the configured `project_id` (cross-repo
+or non-member case per §8.2.3); the fetch pipeline populates `Issue::in_managed_project
+= false`; the detection guard (§8.3) skips the issue silently. The test asserts no
+`StaleStatus` is emitted. This is a **negative filter test** — distinct from F3
+which is a **positive happy path** confirming detection logic on member-with-
+matching-state.
 
 **Repair round-trip (extension of F1, F2):**
 
@@ -1069,7 +1227,7 @@ state.
 3. Re-run `reconcile` (no fix).
 4. Assert `drift.is_empty()`.
 
-### 8.5 Severity classification
+### 8.6 Severity classification
 
 The engine emits drift as a flat `Vec<DriftKind>`. Severity is a **tool-output**
 concern (in `unblock-mcp::tools::reconcile`):
@@ -1098,8 +1256,9 @@ Phase 04 lands. The function lives in `unblock-mcp::tools::reconcile` (not in
 
 ### 9.1 Tool registration
 
-Registered in `unblock-mcp::tools::mod` alongside the existing 11 tools. Follows
-the same `JsonSchema` derivation pattern as `reconcile`.
+Registered in `unblock-mcp::tools::mod` alongside the existing 19 tools (post-
+Phase 01 — see §6.3 for the canonical vocabulary). Follows the same `JsonSchema`
+derivation pattern as `reconcile`.
 
 ### 9.2 Input schema
 
@@ -1328,19 +1487,27 @@ keys; the parser MUST round-trip unknown keys.
 
 | Trailer | When emitted | Source | Omission rule |
 |---|---|---|---|
-| `Closes` | Always when active claim exists | `qid` from graph cache | Omit only if no active claim AND tool was invoked anyway (returns `Error::NoActiveClaim`). |
-| `Refs` | When `params.refs` non-empty | Input | Repeated trailer key allowed. |
-| `Spec` | When issue body links a spec | parse issue body for `docs/specs/...md` | Omit if no spec link found. |
-| `Plan` | When issue body links a plan | parse issue body for `docs/plans/...md` | Omit if no plan link found. |
+| `Closes` | Always emitted when the tool returns success (no-active-claim path returns `Error::NoActiveClaim` per §10.11 — never reaches trailer assembly) | `qid` from graph cache | Mandatory in any successful invocation; the variant where the tool would emit a partial output without `Closes` does not exist. |
+| `Refs` | When `params.refs` non-empty | Input | Repeated trailer key allowed (one trailer per ref). |
+| `Spec` | When issue body links a spec (per §10.7 permissive regex) | parse issue body for `docs/specs/...md` | Omit if no spec link found after dedup. |
+| `Plan` | When issue body links a plan (per §10.7 permissive regex) | parse issue body for `docs/plans/...md` | Omit if no plan link found after dedup. |
 | `Phase` | When `.unblock/commit_context.toml` declares it | repo config | Omit silently if config absent or `phase` key missing. |
 
-**Issue body parsing for `Spec:` / `Plan:`:**
+**Issue body parsing for `Spec:` / `Plan:` (LOCKED — L-5 review 2026-04-30):**
 
-Regex (normative): `(?m)^\s*(docs/(?:specs|plans)/[A-Za-z0-9._/-]+\.md(?:#[A-Za-z0-9_-]+)?)\s*$`
+Regex (normative): `(docs/(?:specs|plans)/[A-Za-z0-9._/-]+\.md(?:#[A-Za-z0-9_-]+)?)`
 
-- Matches a markdown-relative path on its own line, optional `#anchor`.
-- First match wins per category; multiple matches → log a `warning` in the output
-  array (`"multiple Spec links in issue body — using first"`).
+- Permissive: matches the path **anywhere** in the body — line-form, markdown
+  link `[label](docs/specs/...)`, backtick-wrapped, prose-embedded, etc. This
+  matches how humans actually write GitHub issue bodies (markdown-heavy).
+- **Dedup mandatory:** captured paths MUST be deduplicated by exact match (path +
+  optional anchor) before trailer emission. The same path appearing in prose AND
+  inside a markdown link MUST emit a single trailer.
+- First (deduped) match wins per category; multiple **distinct** matches → log a
+  `warning` in the output array (`"multiple Spec links in issue body — using first"`)
+  and emit the first deduped path.
+- False positives (e.g. path inside a fenced codeblock) are tolerated — emitting
+  an extra valid trailer is benign and falls within the dedup discipline.
 
 **`.unblock/commit_context.toml` schema:**
 
@@ -1392,10 +1559,17 @@ Inspect working-tree status via `gix`:
 | `pub fn` / `pub struct` / `pub enum` signature changed in a library crate | `body_template` includes `API: <signature change description>` line |
 | Removed item from public API | `warnings.push("BREAKING CHANGE candidate")`; `body_template` includes `BREAKING CHANGE: <description>` footer |
 
-**Implementation detail:** the API-change detection for Phase 02 is **best-effort**
-based on textual diff inspection (`gix` provides the file list and per-file
-patches). A full AST-based detection is out of scope (Phase 03 will provide the
-indexer that makes this trivial).
+**Implementation detail:** the API-change detection for Phase 02 is **textual** —
+based on diff inspection (`gix` provides the file list and per-file patches). A
+full AST-based detection is out of scope (Phase 03 will provide the indexer that
+makes this trivial).
+
+**Acceptance gate (M-8):** the implementation MUST pass the 6 must-catch fixtures
+F-WC1..F-WC6 codified in §15.7.1. False positives outside those fixtures are
+tolerated (the agent reviews and prunes); false negatives on the canonical
+patterns are NOT — they would silently violate the CLAUDE.md `API:` line
+convention for library crates. The binary crate `unblock-mcp` is excluded per
+CLAUDE.md ("Pub API Change Tracking" — library crates only).
 
 ### 10.11 Error paths
 
@@ -1493,7 +1667,7 @@ keeps `Config` focused on GitHub credentials + project info.
 
 | Translation | Where |
 |---|---|
-| `ResilienceError<unblock_github::Error>` → `unblock_github::Error` | `unblock-github::client` (private function `translate_resilience_error`) — `BreakerOpen` → `Error::CircuitBreakerOpen { since }`; `RetryExhausted { source }` → `source` (the inner GitHub error); `Permanent { source }` → `source`. |
+| `ResilienceError<unblock_github::Error>` → `unblock_github::Error` | `unblock-github::client` — private function with pinned signature: `fn translate_resilience_error(err: ResilienceError<Error>, snapshot: &BreakerSnapshot) -> Error`. Mapping: `BreakerOpen` → `Error::CircuitBreakerOpen { since }` where `since: DateTime<Utc> = snapshot.last_failure_at.unwrap_or_else(chrono::Utc::now)` (defensive fallback — at error-emission time the breaker IS open, so `last_failure_at` is normally `Some`; the `unwrap_or_else` covers the rare race window between `on_open` callback and snapshot capture). `RetryExhausted { source }` → `source` (the inner GitHub error). `Permanent { source }` → `source`. |
 | `unblock_github::Error` → MCP `ErrorCode` | Existing `unblock-mcp::errors::github_error_to_mcp` — extended to handle `CircuitBreakerOpen` (→ `INTERNAL_ERROR`, status 503) and `RateLimited` (→ `INTERNAL_ERROR`, status 429). The variants already exist; only the construction path is new. |
 | `CommitContextError` → MCP `ErrorCode` | `unblock-mcp::errors` extension — `NoActiveClaim` → `INVALID_PARAMS`; `EpicNotCommittable` → `INVALID_PARAMS`; `NotAGitRepo` → `INVALID_PARAMS`; `InvalidRefUrl` → `INVALID_PARAMS`. |
 
@@ -1555,10 +1729,10 @@ new code.
   5 times; assert next call returns `BreakerOpen`.
 - **Breaker cools down to half-open.** After 5 failures + cooldown, next call is
   admitted (and either re-fails to Open or succeeds to Closed).
-- **Retry honours `Retry-After`.** Mock returns `RateLimited { reset_at = now + 5s }`;
-  assert the loop sleeps 5 s (not the default backoff).
-- **Retry-After cap.** Mock returns `reset_at = now + 60s`; assert immediate
-  `RetryExhausted` (fail-fast, no sleep).
+- **Retry honours `Retry-After`.** Mock returns `RateLimited { reset_at: chrono::Utc::now() + chrono::Duration::seconds(5) }`;
+  assert the loop sleeps ~5 s (not the default backoff).
+- **Retry-After cap.** Mock returns `RateLimited { reset_at: chrono::Utc::now() + chrono::Duration::seconds(60) }`;
+  assert immediate `RetryExhausted` (fail-fast, no sleep — exceeds 30 s cap).
 - **Deadline beats max-attempts.** Configure 10 attempts but 1 s deadline; assert
   loop exits on deadline before exhausting attempts.
 - **Order of operations** (property test). Run a script of N attempts with a mix
@@ -1584,7 +1758,7 @@ new code.
 
 ### 15.5 Integration tests — `reconcile` `StaleStatus`
 
-Fixtures F1–F4 per §8.4. Plus an idempotency property test: detection on the same
+Fixtures F1–F4 per §8.5. Plus an idempotency property test: detection on the same
 state twice yields the same drift set (set equality, not vec ordering).
 
 ### 15.6 Integration tests — `doctor`
@@ -1608,6 +1782,32 @@ state twice yields the same drift set (set equality, not vec ordering).
 - `formatted` round-trips through `git interpret-trailers --parse`.
 - Trailer parser preserves unknown keys (e.g. `Investigation`, `Verdict`) on
   round-trip.
+
+#### 15.7.1 `--with-changes` must-catch fixtures (LOCKED — M-8 review 2026-04-30)
+
+Per H-decision M-8 the `--with-changes` accuracy gate is **falsifiable** via a
+fixed must-catch fixture set. False positives outside the set are tolerated
+(emitting an unnecessary `API:` line is benign — the agent reviews and prunes);
+false negatives on canonical patterns are NOT (would silently violate the
+CLAUDE.md `API:` line convention for library crates).
+
+| Fixture | Diff under `gix::status` | Expected `body_template` content | Expected `warnings[]` |
+|---|---|---|---|
+| **F-WC1** | New `pub fn` in `crates/unblock-core/src/...` | Contains `API: <new function name>` line | none |
+| **F-WC2** | Modified parameter list of existing `pub fn` in `crates/unblock-github/src/...` | Contains `API: <function signature change>` line **AND** `BREAKING CHANGE: <description>` footer | `["BREAKING CHANGE candidate"]` |
+| **F-WC3** | Removed `pub enum` variant from `crates/unblock-core/src/reconcile.rs` | Contains `BREAKING CHANGE: <removed variant>` footer | `["BREAKING CHANGE candidate"]` |
+| **F-WC4** | New `pub` field added to existing `pub struct` (non-`#[non_exhaustive]`) in a library crate | Contains `API:` line **AND** `BREAKING CHANGE:` footer | `["BREAKING CHANGE candidate"]` |
+| **F-WC5** | Pure `///` doc-comment change on a `pub fn` in a library crate (no signature change) | **NO** `API:` line, **NO** `BREAKING CHANGE:` footer | none |
+| **F-WC6** | Diff touches only `crates/unblock-mcp/src/...` (binary crate — excluded per CLAUDE.md) | **NO** `API:` line | none (or scope-only warnings) |
+
+**Falsifiable acceptance:** the test suite asserts each fixture produces the
+expected outputs; false positives outside this set do not fail the suite.
+
+#### 15.7.2 Trailer dedup test (L-5)
+
+Issue body containing the same `docs/specs/02-spec-mcp-complete.md#section-10`
+path twice (once in prose, once in a markdown link) produces **a single** `Spec:`
+trailer. Asserted on the parser output of the generated commit message.
 
 ### 15.8 Property tests
 
@@ -1787,12 +1987,19 @@ and the plan (per `feedback_bead_description_not_spec`).
 1. **Add `DriftKind::StaleStatus` variant** per §8.1.
 2. **Apply `#[non_exhaustive]` to `DriftKind`** per §11. Audit downstream `match`
    sites; add `_ =>` arms or extend matches.
-3. **Detection routine** per §8.2 in `ReconcileEngine`.
-4. **Repair routine** per §8.3.
-5. **Severity classification** per §8.5 (in `unblock-mcp::tools::reconcile`).
-6. **Fixtures F1–F4** per §8.4 + repair round-trip + idempotency property test
+3. **GraphQL fragment + filter pipeline** per §8.2 — extend `projectItems` selection
+   with `project { id }`; pass `project_id` through `extract_field_values`; add
+   `Issue::in_managed_project: bool`. **3 NEW BEADS** (H-4 review 2026-04-30):
+   `unblock-amb.X1` (GraphQL fragment), `unblock-amb.X2` (Issue field + filter),
+   `unblock-amb.X3` (detection guard). API change in `unblock-core::Issue` — note
+   `API:` line per CLAUDE.md.
+4. **Detection routine** per §8.3 in `ReconcileEngine` — guarded by
+   `issue.in_managed_project`.
+5. **Repair routine** per §8.4.
+6. **Severity classification** per §8.6 (in `unblock-mcp::tools::reconcile`).
+7. **Fixtures F1–F4** per §8.5 + repair round-trip + idempotency property test
    (§15.5, §15.8).
-7. **Update `reconcile` MCP tool description** to enumerate all 7 drift types.
+8. **Update `reconcile` MCP tool description** to enumerate all 7 drift types.
 
 ### 18.6 Epic 02.F — Documentation → docs / Ada
 
@@ -1838,7 +2045,8 @@ and the plan (per `feedback_bead_description_not_spec`).
 
 - [ ] All 5 trailers emitted per §10.7 with the right omission rules.
 - [ ] Subject template uses correct CC prefix per §10.6 (GitHub issue type-driven).
-- [ ] `--with-changes` produces accurate scope, suggests `API:` line and `BREAKING CHANGE:` footer when applicable.
+- [ ] `--with-changes` passes all 6 must-catch fixtures F-WC1..F-WC6 per §15.7.1; false positives outside that set are tolerated.
+- [ ] Trailer dedup: duplicate `Spec:` / `Plan:` paths in issue body emit a single trailer (§15.7.2 — L-5).
 - [ ] GitHub issue type `epic` is rejected with `EpicNotCommittable`.
 - [ ] `formatted` field round-trips through `git interpret-trailers --parse`.
 - [ ] Trailer parser preserves unknown keys on round-trip (§15.7, §15.8).
@@ -1887,6 +2095,29 @@ and the plan (per `feedback_bead_description_not_spec`).
 | **SO-4** | `UNBLOCK_RETRY_*` env vars read directly by `RetryPolicy::from_env`, not via `Config::load_from` | §12.3 | Plan §9 Epic 02.A Task 5 routed via `Config`; spec routes direct to avoid back-reference. |
 
 **Status: ALL FOUR APPROVED by user on 2026-04-29.** SO-1 (BreakerState flat enum + last_failure_at on snapshot — Instant serialization fix), SO-2 (API metrics in unblock-github call sites — preserves crate orthogonality), SO-3 (open breaker → DEGRADED, not UNHEALTHY — semantically correct for transient state), SO-4 (RetryPolicy::from_env reads env directly — preserves no back-references from unblock-resilience to unblock-core). All four are recorded as binding spec decisions and the spec is now APPROVED.
+
+#### 20.1.1 Pre-implementation review decisions (2026-04-30)
+
+A pre-implementation review of plan + spec + research surfaced 9 questions
+(documented in the orchestrator session log). All 9 were resolved by user decision
+and patched into this spec on 2026-04-30:
+
+| ID | Topic | Decision | Spec sections updated |
+|---|---|---|---|
+| **H-3** | License of `unblock-resilience` | `license.workspace = true` (`MIT OR Apache-2.0`) — coerent with all existing crates | §3.1 |
+| **H-4** | Project V2 membership filter (pre-requisite for `StaleStatus`) | New `Issue::in_managed_project: bool`; GraphQL `project { id }` fragment; `extract_field_values(project_id)` filter; detection guard. 3 NEW BEADS inserted before `unblock-amb.3` | §3.2, §3.3, §8.2 (NEW), §8.3 (renumbered from §8.2), §8.5 (renumbered from §8.4 — F4 narrative), §18.5 |
+| **H-5** | `tokio` features in `unblock-resilience` | `default-features = false, features = ["time"]` — minimise pegada da leaf crate | §3.1 |
+| **H-6** | `record_tool` out-of-vocabulary behaviour | `debug_assert!` in dev + warn-and-drop in release — catches dev-time vocab mismatches loudly | §6.3 |
+| **H-7** | Breaker cooldown jitter ceiling | Reverted to flat 10 s (was 60 s ceiling via `equal_jittered`). Aligns with plan §2.1 and SPEC.md §14.1; jitter is a Phase 06+ concern when multi-tenant scope makes it material | §5.3 |
+| **H-8** | `Error::CircuitBreakerOpen { since }` type | Changed from `std::time::Instant` (non-Option, non-serializable) → `chrono::DateTime<Utc>` (non-Option, serializable). Snapshot field also moved from `Option<SystemTime>` → `Option<DateTime<Utc>>`. API BREAKING CHANGE — pre-prod permits | §3.3, §4.5 (SO-1 note), §5.3, §7.4, §13.2 |
+| **L-5** | Trailer regex permissiveness | Permissive regex without anchors + dedup discipline. Captures markdown-link form, prose-embedded paths; tolerates false positives | §10.7 |
+| **M-8** | `--with-changes` accuracy gate | Hybrid: 6 must-catch fixtures F-WC1..F-WC6 codified in §15.7.1; false positives outside the set tolerated | §10.10, §15.7, §19.4 |
+| **Q9** | SPEC.md §12.2 stale enum block | Full re-write aligned with current code (orchestrator/Ada applies in SPEC.md, not this spec) | (out of this spec — patches `docs/SPEC.md`) |
+
+The 9 patches do not change any LOCKED decision (L1.x..L5.x) or any SO (SO-1..SO-4) —
+they reconcile drift between plan/spec/research/codebase that surfaced during
+review, and codify two new pre-requisites (H-4 filter, M-8 fixtures) that were
+implicit but not falsifiable.
 
 ### 20.2 Deferred to Phase 04
 
