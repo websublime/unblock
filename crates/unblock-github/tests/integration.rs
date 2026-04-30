@@ -1263,6 +1263,25 @@ async fn setup_fields_creates_all_seven_fields() {
         .await
         .expect("resolve_project_info() should succeed");
 
+    // Diagnostic snapshot — pre-mutation state of the project.
+    //
+    // Per bead unblock-aa2 (Sherlock investigation, 2026-04-30): when this
+    // test fails, the most common root cause is a project that was not in
+    // the documented clean state at entry — either the 6 unblock-managed
+    // custom fields are already present (parallel races, partial previous
+    // run) or the built-in Status field's options diverge from the spec
+    // (stale renames). Printing the existing field set + Status options
+    // before the mutation makes that diagnosable from CI logs alone, with
+    // no need to re-run locally to reproduce.
+    let pre_status = client
+        .query_setup_status(&project_info.id)
+        .await
+        .expect("query_setup_status() should succeed");
+    eprintln!(
+        "setup_fields pre-mutation snapshot: existing={:?}, missing={:?}",
+        pre_status.existing, pre_status.missing
+    );
+
     let report = client
         .setup_fields(&project_info.id)
         .await

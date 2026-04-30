@@ -63,6 +63,23 @@ gh variable set UNBLOCK_TEST_PROJECT --body '<project-number>'
 
 The `coverage` job (mock-only) runs on every PR and the `test-mcp-live` job covers both live execution and live coverage in a single tarpaulin pass on first-party events. Codecov merges the two reports under the `mock` and `live` flags; the >80% target in spec §13.2 applies to combined coverage.
 
+### Clean-state contract for the test project
+
+The live test job mutates the GitHub Project pointed at by `UNBLOCK_TEST_PROJECT`. Two invariants govern its starting state on every run:
+
+1. **The 6 unblock-managed custom fields must NOT exist on the project.** They are: `Priority`, `PipelineStage`, `Agent`, `ClaimedAt`, `StoryPoints`, `DeferUntil`. The `setup_fields` flow creates them and the test asserts on the post-creation field IDs; a stale, half-configured set from a previous failed run breaks the assertion or trips a `Name has already been taken` collision under parallel test execution.
+2. **The built-in `Status` field is left in place.** GitHub Projects V2 forbids deleting the built-in Status field (`deleteProjectV2Field` returns `Only custom fields can be deleted`). `setup_fields` auto-heals the Status options to the spec's canonical set (`ready`, `in_progress`, `blocked`, `deferred`, `closed`) on every run by issuing `updateProjectV2Field` against the existing field id, so no manual surgery is required for Status.
+
+To bootstrap a fresh project (or recover from a partial run), run:
+
+```bash
+scripts/setup-test-project.sh <owner> <project-number>
+```
+
+The script is idempotent: it lists the project's fields, deletes any that match the 6-name list, and exits 0 with no changes when the project is already clean. It does not touch the built-in Status field. Requires `gh` authenticated against the target owner with `project` + `repo` scopes, and `jq`.
+
+The live test job runs `cargo tarpaulin ... -- --ignored --test-threads=1` to serialise the `#[ignore]` integration tests. Without the serialisation guard, the two test files that both call `setup_fields` against the shared test project (`crates/unblock-github/tests/integration.rs::setup_fields_creates_all_seven_fields` and `crates/unblock-mcp/tests/e2e_workflow.rs::e2e_workflow_all_10_tools`) race and either the second mutation collides on `createProjectV2Field` (`Name has already been taken`) or one test deletes options the other still needs. Local runs of `cargo test --workspace -- --ignored` should pass `--test-threads=1` for the same reason.
+
 ## License
 
 Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE) at your option.

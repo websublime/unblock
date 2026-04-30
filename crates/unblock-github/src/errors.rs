@@ -235,6 +235,51 @@ pub enum Error {
         account_type: String,
     },
 
+    /// A pre-existing single-select Projects V2 field could not be healed
+    /// to match the canonical option set defined in the spec.
+    ///
+    /// Emitted by
+    /// [`GitHubClient::setup_fields`](crate::client::GitHubClient::setup_fields)
+    /// when an existing single-select required field (e.g. the GitHub-default
+    /// built-in `Status` field with options `[Todo, In Progress, Done]`) is
+    /// detected with options that diverge from the spec
+    /// (`[ready, in_progress, blocked, deferred, closed]` for Status), and
+    /// the auto-heal `updateProjectV2Field` mutation either:
+    ///
+    /// - returned a malformed response (missing `id` or `options`); or
+    /// - completed successfully but the post-mutation option set still
+    ///   does not match the spec (set inequality, ignoring order).
+    ///
+    /// Transport-level GraphQL errors during the heal mutation surface as
+    /// the more general [`GitHubGraphQL`](Self::GitHubGraphQL) variant
+    /// instead — this variant is reserved for heal-specific contract
+    /// violations where GitHub responded but the response is wrong.
+    ///
+    /// **Diagnostic value.** The pre-existing silent-pass behaviour
+    /// returned a `FieldMeta` with the wrong options, surfacing as a
+    /// downstream test assertion failure (`Status should have 5 options,
+    /// got 3`) far from the root cause. This variant fires the alarm at
+    /// the heal call site, with the field name and the specific contract
+    /// breach in the `reason` field — agent-actionable.
+    ///
+    /// Maps to HTTP 422 via [`Error::status_code`] (Unprocessable Entity)
+    /// — the request was well-formed but the upstream state cannot be
+    /// reconciled to the requested shape.
+    ///
+    /// See bead `unblock-aa2` for the full investigation and the
+    /// empirical-verification trail.
+    #[snafu(display(
+        "Failed to heal Projects V2 field '{field}' to canonical option set: {reason}"
+    ))]
+    FieldOptionHealFailed {
+        /// The field name (e.g. `"Status"`, `"Priority"`,
+        /// `"PipelineStage"`) whose option-set heal failed.
+        field: String,
+        /// Human-readable description of the contract breach (e.g. missing
+        /// id in response, post-heal option set mismatch).
+        reason: String,
+    },
+
     /// A `MockGitHubClient` method was called without a queued stub response.
     ///
     /// Only constructible when the `test-hooks` feature is enabled. Tests
@@ -275,7 +320,7 @@ impl Error {
         match self {
             Self::Domain { source } => source.status_code(),
             Self::GitHubApi { status, .. } => *status,
-            Self::GitHubGraphQL { .. } => 422,
+            Self::GitHubGraphQL { .. } | Self::FieldOptionHealFailed { .. } => 422,
             // 403 Forbidden — GraphQL FORBIDDEN-typed error before
             // cross-repo classification upgrades it to DomainError
             // CrossRepoAccessDenied. An un-upgraded variant still
@@ -623,6 +668,30 @@ mod tests {
         }
         .build();
         assert_eq!(err.status_code(), 503);
+    }
+
+    #[test]
+    fn field_option_heal_failed_display_and_status() {
+        // Bead unblock-aa2: emitted by setup_fields when the
+        // updateProjectV2Field auto-heal cannot reconcile a pre-existing
+        // single-select required field to the spec's canonical option set.
+        // Display MUST name the field (so the operator knows which one)
+        // and surface the contract breach in `reason` so it is
+        // agent-actionable.
+        let err = FieldOptionHealFailedSnafu {
+            field: "Status".to_owned(),
+            reason: "post-heal options {\"Todo\"} do not match spec {\"ready\", \"in_progress\", \"blocked\", \"deferred\", \"closed\"}".to_owned(),
+        }
+        .build();
+        let msg = err.to_string();
+        assert!(msg.contains("Status"), "display must name the field: {msg}");
+        assert!(
+            msg.contains("do not match spec"),
+            "display must surface the contract breach: {msg}"
+        );
+        // Status code is 422 — Unprocessable Entity — the request was
+        // well-formed but the upstream state cannot be reconciled.
+        assert_eq!(err.status_code(), 422);
     }
 
     #[test]
