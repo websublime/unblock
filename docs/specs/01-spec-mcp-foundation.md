@@ -206,8 +206,8 @@ pub struct Issue {
     pub updated_at: DateTime<Utc>,
     pub url: String,
     pub comments: Vec<IssueComment>,
-    pub blocked_by: Vec<RelatedIssue>,          // from trackedByIssues
-    pub blocking: Vec<RelatedIssue>,            // from trackedIssues
+    pub blocked_by: Vec<RelatedIssue>,          // from Issue.blockedBy
+    pub blocking: Vec<RelatedIssue>,            // from Issue.blocking
     pub parent: Option<RelatedIssue>,
     pub sub_issues: Vec<RelatedIssue>,
 }
@@ -790,10 +790,10 @@ query($owner: String!, $repo: String!, $cursor: String) {
         milestone { number title }
         assignees(first: 5) { nodes { login } }
         issueType { name }
-        trackedByIssues(first: 50) {
+        blockedBy(first: 50) {
           nodes { number repository { owner { login } name } state }
         }
-        trackedIssues(first: 50) {
+        blocking(first: 50) {
           nodes { number repository { owner { login } name } state }
         }
         parent { number }
@@ -824,9 +824,11 @@ query($owner: String!, $repo: String!, $cursor: String) {
 }
 ```
 
-**Blocking edges:** extracted from `trackedByIssues` (what blocks this issue) and `trackedIssues` (what this issue blocks). Both traversed for complete edge set.
+**Blocking edges:** extracted from `Issue.blockedBy` (what blocks this issue) and `Issue.blocking` (what this issue blocks). Both traversed for complete edge set.
 
-**Cross-repo:** `trackedByIssues.nodes[].repository` may differ from queried repo. `QualifiedId` constructed from each node's repository context.
+**Schema anchor (matches GitHub public GraphQL schema as of 2026-04-30):** `Issue.blockedBy` and `Issue.blocking` are GA `IssueConnection!` fields (no `GraphQL-Features` preview header required — verified via live introspection against `api.github.com/graphql`). `Issue.blockedBy` enumerates issues that block the current issue; `Issue.blocking` enumerates issues the current issue blocks. The legacy field names `trackedByIssues` / `trackedIssues` previously referenced in this spec do NOT exist on `Issue` (HTTP 422 from the GraphQL endpoint); they were a documentation drift introduced in early phase work. See bead `unblock-741` for the post-mortem.
+
+**Cross-repo:** `blockedBy.nodes[].repository` may differ from queried repo. `QualifiedId` constructed from each node's repository context.
 
 **`fetch_issue(number)`** — single issue with full comments (first 50), blocking/blocked_by relationships, parent/sub-issues, Projects V2 field values. Always fresh, never cached.
 
@@ -837,11 +839,11 @@ query($owner: String!, $repo: String!, $cursor: String) {
 - `PATCH /repos/{o}/{r}/issues/{n}` — close (`state: "closed"`), reopen (`state: "open"`), update body/labels/assignees/milestone
 - `POST /repos/{o}/{r}/issues/{n}/comments` — add comment
 
-**GraphQL mutations:**
-- `addIssueDependency` — add blocking relationship (cross-repo)
-- `removeIssueDependency` — remove blocking relationship
-- `addSubIssue` — add parent-child relationship
-- `updateProjectV2ItemFieldValue` — update Projects V2 field
+**GraphQL mutations** (schema as of 2026-04-30; see §5.5 schema anchor — all four are GA on the public GraphQL API and require no `GraphQL-Features` preview header):
+- `addBlockedBy` — add blocking relationship (cross-repo). Input: `AddBlockedByInput { issueId, blockingIssueId, clientMutationId }`. Replaces the legacy `addIssueDependency` mutation referenced in earlier drafts of this spec.
+- `removeBlockedBy` — remove blocking relationship. Input: `RemoveBlockedByInput { issueId, blockingIssueId, clientMutationId }`. Replaces the legacy `removeIssueDependency`.
+- `addSubIssue` — add parent-child relationship.
+- `updateProjectV2ItemFieldValue` — update Projects V2 field.
 
 **Batch mutations:** Multiple `updateProjectV2ItemFieldValue` in a single GraphQL request using aliases (`update0`, `update1`, `update2`, ...).
 
@@ -1510,11 +1512,11 @@ branching is normative:
   cached nodes disambiguates Closed endpoints from absent nodes.
 - **Cold cache OR at least one endpoint cross-repo** — single-issue
   GraphQL probe. The probe issues exactly one `fetch_issue_ref` against
-  the source and inspects the returned `state` + `trackedByIssues`
-  list (`probe_edge_via_fetch`). The `trackedBy` subselection carries
-  both `repository { owner { login } name }` and `state`, so the
-  Closed-endpoint check needs no second round-trip regardless of which
-  side is Closed.
+  the source and inspects the returned `state` + `blockedBy` list
+  (`probe_edge_via_fetch`; schema as of 2026-04-30). The `blockedBy`
+  subselection carries both `repository { owner { login } name }` and
+  `state`, so the Closed-endpoint check needs no second round-trip
+  regardless of which side is Closed.
 
 The in-memory fast path is therefore scoped to warm-cache + both-Local
 inputs; all other combinations (cold cache, cross-repo source, cross-
@@ -1897,7 +1899,7 @@ Each variant has `status_code() → u16`:
 
 **Cross-repo-aware variant typing — Exhaustiveness Rationale (Decision 1, 2026-04-17).**
 
-`IssueBlocked.blockers`, `CircularDependency.{source, target}`, and `DuplicateDependency.{source, target}` use `IssueRef` (§2.7) rather than bare `u64`. GitHub's native sub-issue / `trackedByIssues` / `addIssueDependency` graph has been cross-repo-aware since GA in 2024: a cross-repo blocker, a cross-repo cycle participant, and a cross-repo duplicate-edge endpoint are all observable via the API and reachable from any configured repository. Bare `u64` cannot disambiguate `#42` in `configured/repo` from `#42` in `other/repo`; an error referring to the latter would silently alias to the former and mislead the agent. `IssueRef` is the unique fully-qualified-or-local carrier already used by §8.4 `depends`, §8.5 `dep_remove`, §8.3 `create.blocked_by`, and §11.4 `cross_repo_refs::omitted` — keeping §11.1 consistent with §11.4 is the closure property of the cross-repo contract. This is a BREAKING CHANGE in the `unblock-core` pub API (`DomainError` variant field types change); the implementing commit MUST carry a `BREAKING CHANGE:` footer per CLAUDE.md "Pub API Change Tracking" discipline. This rationale closes the question: no further sub-beads are needed for per-variant re-evaluation; new `DomainError` variants that carry issue references MUST default to `IssueRef` typing by the same argument.
+`IssueBlocked.blockers`, `CircularDependency.{source, target}`, and `DuplicateDependency.{source, target}` use `IssueRef` (§2.7) rather than bare `u64`. GitHub's native sub-issue / `blockedBy` / `addIssueDependency` graph has been cross-repo-aware since GA in 2024 (schema anchor — see §5.5): a cross-repo blocker, a cross-repo cycle participant, and a cross-repo duplicate-edge endpoint are all observable via the API and reachable from any configured repository. Bare `u64` cannot disambiguate `#42` in `configured/repo` from `#42` in `other/repo`; an error referring to the latter would silently alias to the former and mislead the agent. `IssueRef` is the unique fully-qualified-or-local carrier already used by §8.4 `depends`, §8.5 `dep_remove`, §8.3 `create.blocked_by`, and §11.4 `cross_repo_refs::omitted` — keeping §11.1 consistent with §11.4 is the closure property of the cross-repo contract. This is a BREAKING CHANGE in the `unblock-core` pub API (`DomainError` variant field types change); the implementing commit MUST carry a `BREAKING CHANGE:` footer per CLAUDE.md "Pub API Change Tracking" discipline. This rationale closes the question: no further sub-beads are needed for per-variant re-evaluation; new `DomainError` variants that carry issue references MUST default to `IssueRef` typing by the same argument.
 
 **Display byte-for-byte preservation (local-only case).**
 
@@ -2030,7 +2032,7 @@ Tools explicitly NOT affected (documented here to pre-empt retro-adoption questi
 
 The `cross_repo_refs: Option<CrossRepoRefs>` field is NOT a universal response contract; it applies to exactly the four tools listed in the affected-tools table above — `ready` (§7.1), `prime` (§7.3), `dep_cycles` (§7.7), `close` (§8.2) — and no others. The axiom that derives the affected set is §5.6 "Cross-repo scope": a tool qualifies iff (a) its response projects node identity down to a bare `u64` AND (b) §5.6 permits cross-repo traversal to touch nodes that would be flattened by that projection. The exempt tools listed above each fail at least one leg of the conjunction for a structural reason documented in their row, not by accident of implementation:
 
-- `show` has bare-`u64` fields in the response projection — `ShowIssue.number` (`crates/unblock-mcp/src/tools/show.rs:73`) and `ShowRelatedIssue.number` (`crates/unblock-mcp/src/tools/show.rs:131`) are `u64`, so leg (a) holds. The exemption is on leg (b): per §5.6 "Cross-repo scope", `show`'s traversal (sub-issues + `trackedByIssues`) is scoped to the configured repo, so no cross-repo node ever reaches the bare-`u64` projection.
+- `show` has bare-`u64` fields in the response projection — `ShowIssue.number` (`crates/unblock-mcp/src/tools/show.rs:73`) and `ShowRelatedIssue.number` (`crates/unblock-mcp/src/tools/show.rs:131`) are `u64`, so leg (a) holds. The exemption is on leg (b): per §5.6 "Cross-repo scope", `show`'s traversal (sub-issues + `Issue.blockedBy`) is scoped to the configured repo, so no cross-repo node ever reaches the bare-`u64` projection.
 - `stats` emits no issue IDs at all, so (a) fails.
 - `list` / `search` / `claim` / `create` / `update` / `reopen` / `comment` / `init` / `setup` are scoped by §5.6 to the configured repo on the traversal side, so (b) fails.
 - `depends` / `dep_remove` round-trip `IssueRef` strings (never `u64`) on both request and response, so (a) fails.
