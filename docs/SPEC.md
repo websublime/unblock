@@ -1154,21 +1154,29 @@ pub enum DomainError {
 
 ### 12.2 Infrastructure Errors (unblock-github)
 
+> **Reconciled 2026-04-30** (Q9 review decision): block re-written to match the
+> live codebase at `crates/unblock-github/src/errors.rs`. Earlier drafts listed
+> variants that never existed (`GitHubServerError`, `ProjectNotConfigured`,
+> `ViewCreationFailed`, `OwnerDetectionFailed`) and omitted variants that do
+> (`GitHubGraphQLForbidden`, `PostMutationRebuildFailed`, `PreMutationPrimeFailed`,
+> `UnknownOwnerType`).
+
 ```rust
 #[derive(Debug, Snafu)]
 #[non_exhaustive]
 pub enum Error {
     Domain { source: DomainError },
-    GitHubApi { message: String },
+    GitHubApi { status: u16, message: String, headers: Option<HeaderMap> },
     GitHubGraphQL { errors: Vec<String> },
+    GitHubGraphQLForbidden { errors: Vec<String> },
     GitHubUnavailable { source: reqwest::Error },
-    GitHubServerError { status: u16, message: String },
-    RateLimited { reset_at: Option<DateTime<Utc>> },
-    CircuitBreakerOpen { since: Instant },
-    ProjectNotConfigured,
+    RateLimited { reset_at: DateTime<Utc> },
+    CircuitBreakerOpen { since: DateTime<Utc> },         // Phase 02 (H-8): Instant → DateTime<Utc>
+    PostMutationRebuildFailed { mutation: &'static str, qid: QualifiedId, source: Box<Error> },
+    PreMutationPrimeFailed    { mutation: &'static str, qid: QualifiedId, source: Box<Error> },
     GitRemote { message: String },
-    ViewCreationFailed { message: String },
-    OwnerDetectionFailed { owner: String, message: String },
+    UnknownOwnerType { owner: String },
+    // (test-only: MockNotStubbed — gated by #[cfg(any(test, feature = "mock"))])
 }
 ```
 
@@ -1180,12 +1188,14 @@ pub enum Error {
 |---|---|---|---|
 | Network error | `GitHubUnavailable` | ✅ | `record_failure()` |
 | 429 | `RateLimited` | ✅ | `record_failure()` |
-| 500 | `GitHubServerError` | ❌ | `record_failure()` |
-| 502 | `GitHubServerError` | ❌ | `record_failure()` |
-| 503 | `GitHubServerError` | ✅ | `record_failure()` |
-| 4xx (except 429) | `GitHubApi` | ❌ | neither |
+| 4xx FORBIDDEN (cross-repo) | `GitHubGraphQLForbidden` (or upgraded by `unblock-mcp` to `DomainError::CrossRepoAccessDenied`) | ❌ | `record_failure()` |
+| 4xx (except 429, FORBIDDEN) | `GitHubApi { status, .. }` | ❌ | neither |
+| 502 / 503 / 504 | `GitHubApi { status, .. }` | ✅ | `record_failure()` |
+| 500 (other 5xx) | `GitHubApi { status, .. }` | ❌ | `record_failure()` |
+| Mutation succeeded but post-rebuild failed | `PostMutationRebuildFailed` | ✅ (transient — graph rebuild retry) | `record_failure()` |
+| Pre-mutation prime failed | `PreMutationPrimeFailed` | ✅ | `record_failure()` |
 
-`is_retryable()` matches `RateLimited`, `GitHubUnavailable`, and `GitHubServerError` where `status == 503`.
+`IsRetryable::is_retryable()` (per Phase 02 §7.2) returns `true` for: `RateLimited`, `GitHubUnavailable`, `PostMutationRebuildFailed`, `PreMutationPrimeFailed`, and `GitHubApi { status }` where `status ∈ {429, 502, 503, 504}`. All other variants propagate immediately.
 
 ### 12.3 Error Code Mapping
 
@@ -1253,7 +1263,7 @@ tracing::info!(
 
 ## 14. Resilience
 
-The resilience layer is a stand-alone crate `unblock-resilience` (Phase 02+). It has zero dependencies on other unblock crates and is consumed by both `unblock-github` (issue domain HTTP) and `unblock-indexer` (Phase 03+, code-domain grammar fetcher). See [02-plan-mcp-complete §6](./plans/02-plan-mcp-complete.md#6-public-api-surface-for-phase-03) for the public API contract.
+The resilience layer is a stand-alone crate `unblock-resilience` (Phase 02+). It has zero dependencies on other unblock crates. Phase 02 consumer: `unblock-github` (issue-domain HTTP). **Phase 03 v1.0.0 does NOT consume `unblock-resilience`** (rolled back 2026-04-29 — Phase 03 reframed as CLI binary with statically-linked tree-sitter grammars; see PRD §7 Phase 03). The crate's public API stands as a forward contract for any future WASM revival. See [02-plan-mcp-complete §11.6](./plans/02-plan-mcp-complete.md#116-phase-03-surface--rolled-back-2026-04-29) for the rollback record.
 
 ### 14.1 Circuit Breaker
 
@@ -1271,25 +1281,27 @@ Composition: **breaker outside, retry inside**. The breaker counts only the **fi
 
 ### 14.2 Retry Policy
 
-Built on the `backoff` crate. Exponential backoff with ±25% jitter. Default config:
+Built on the `backoff` crate. Exponential backoff with ±50% randomization (matches `backoff::ExponentialBackoff::default_randomization_factor`). Default config:
 
 | Knob | Default | Env var |
 |---|---|---|
 | Max attempts | 5 | `UNBLOCK_RETRY_MAX_ATTEMPTS` |
 | Total deadline | 30s | `UNBLOCK_RETRY_DEADLINE_SECS` |
-| Base delay | 500ms | (hard-coded) |
-| Max delay | 5s | (hard-coded) |
+| Base delay (initial interval) | 500ms | (hard-coded) |
+| Max delay (max interval) | 30s | (hard-coded — was 5s in earlier draft; reconciled 2026-04-30 to match Phase 02 spec §5.4) |
 | Retry-After cap | 30s | (hard-coded — exceeded value triggers fail-fast) |
 
 Hybrid limit: whichever of max-attempts / deadline hits first wins.
 
-Only retries on errors whose `IsRetryable::is_retryable()` returns `true`. For `unblock-github::Error` this is `RateLimited` (429), `GitHubUnavailable` (network), and `GitHubServerError { status: 503 }`. All other errors propagate immediately.
+Only retries on errors whose `IsRetryable::is_retryable()` returns `true`. For `unblock-github::Error` (per Phase 02 §7.2): `RateLimited` (429), `GitHubUnavailable` (network), `PostMutationRebuildFailed`, `PreMutationPrimeFailed`, and `GitHubApi { status }` where `status ∈ {429, 502, 503, 504}`. All other variants propagate immediately.
 
 ### 14.3 Reuse by other crates
 
-`ResiliencePolicy::execute` is generic over any error type that implements the `IsRetryable` trait exposed by `unblock-resilience`. Phase 03's grammar fetcher (`unblock-indexer`) reuses it for the GitHub Releases asset HTTP calls. `unblock-indexer` depends directly on `unblock-resilience` — it does **not** transit through `unblock-github` (the two crates are architecturally orthogonal: code domain vs issue domain).
+`ResiliencePolicy::execute` is generic over any error type that implements the `IsRetryable` trait exposed by `unblock-resilience`. Phase 02 consumer is `unblock-github`. **Phase 03 v1.0.0 consumption was rolled back 2026-04-29** — the original design had `unblock-indexer` consume `unblock-resilience` for a WASM grammar fetcher; the Phase 03 reframe (CLI + statically-linked grammars) eliminated this consumer. The public API in `unblock-resilience` remains stable as a **forward contract** for any future WASM revival.
 
-See [02-plan-mcp-complete §6.2](./plans/02-plan-mcp-complete.md#62-reuse-mechanism--locked-extracted-unblock-resilience-crate) for the rationale.
+The crate is generic by design: it carries zero unblock-domain knowledge and is consumable by any future crate that needs a composed circuit-breaker + retry policy on `IsRetryable` errors.
+
+See [02-plan-mcp-complete §6.2](./plans/02-plan-mcp-complete.md#62-reuse-mechanism--locked-extracted-unblock-resilience-crate) and [02-plan-mcp-complete §11.6](./plans/02-plan-mcp-complete.md#116-phase-03-surface--rolled-back-2026-04-29) for the rationale and rollback record.
 
 ---
 

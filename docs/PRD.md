@@ -215,7 +215,7 @@ crates/
   unblock-mcp/               ← adds doctor / commit_context tools, ServerMetrics
 ```
 
-`unblock-resilience` is extracted in Phase 02 (not deferred) because Phase 03's grammar fetcher (in `unblock-indexer`) consumes it directly. Forcing `unblock-indexer` (code domain) to depend on `unblock-github` (issue domain) merely to share an HTTP resilience policy would couple two architecturally orthogonal product surfaces. See [02-plan-mcp-complete §6.2](./plans/02-plan-mcp-complete.md#62-reuse-mechanism--locked-extracted-unblock-resilience-crate).
+`unblock-resilience` was extracted in Phase 02 to serve as a neutral home for the resilience policy independent of any specific consumer. The original design also had Phase 03's `unblock-indexer` consume it directly for a WASM grammar fetcher; **that consumption was rolled back on 2026-04-29** when Phase 03 was reframed as a CLI binary with statically-linked tree-sitter grammars (no remote fetcher). The crate remains extracted: its public API stands as a stable forward contract should a future WASM revival re-introduce a resilient HTTP fetcher. The crate-extraction rationale (orthogonal domain separation — issue domain vs code domain) is independent of the rollback. See [02-plan-mcp-complete §6.2](./plans/02-plan-mcp-complete.md#62-reuse-mechanism--locked-extracted-unblock-resilience-crate) and [02-plan-mcp-complete §11.6](./plans/02-plan-mcp-complete.md#116-phase-03-surface--rolled-back-2026-04-29) for the rollback record.
 
 **Phase 03** — 7 crates (code indexer libs + new CLI binary; `unblock-mcp` unchanged):
 
