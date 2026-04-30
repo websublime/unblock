@@ -399,13 +399,14 @@ impl fmt::Display for PipelineStage {
 ///
 /// # Repo identity (`repo_owner` / `repo_name`)
 ///
-/// The GitHub `trackedByIssues` connection can return blockers from a
-/// different repository (cross-repo dependencies). When the GraphQL
-/// selection includes the blocker's `repository { owner { login } name }`
-/// subfields, the parser fills `repo_owner` and `repo_name` so callers
-/// can disambiguate a cross-repo blocker from a same-repo blocker.
+/// The GitHub `Issue.blockedBy` connection (schema as of 2026-04-30) can
+/// return blockers from a different repository (cross-repo dependencies).
+/// When the GraphQL selection includes the blocker's `repository { owner
+/// { login } name }` subfields, the parser fills `repo_owner` and
+/// `repo_name` so callers can disambiguate a cross-repo blocker from a
+/// same-repo blocker.
 ///
-/// For parent / sub-issues / `trackedInIssues` and for connections whose
+/// For parent / sub-issues / `Issue.blocking` and for connections whose
 /// GraphQL selection omits `repository { ... }`, these fields remain
 /// `None` — the caller MUST treat `None` as "unknown / assume
 /// same-repo-as-enclosing-issue" to preserve backwards compatibility.
@@ -435,7 +436,7 @@ impl RelatedIssue {
     ///
     /// Leaves `repo_owner` and `repo_name` as `None`, encoding the
     /// "None = same repo as the containing issue" convention at the
-    /// type level. Use this for parent / sub-issue / `trackedInIssues`
+    /// type level. Use this for parent / sub-issue / `Issue.blocking`
     /// relations and for any blocker whose GraphQL selection omitted
     /// `repository { ... }`.
     ///
@@ -457,7 +458,7 @@ impl RelatedIssue {
     ///
     /// Use this when the parser observed a `repository { owner { login }
     /// name }` subfield set on the related-issue node (e.g. a
-    /// `trackedByIssues` blocker) and the relation must be
+    /// `Issue.blockedBy` blocker) and the relation must be
     /// disambiguated from a same-number same-repo relation.
     ///
     /// For a relation where `owner` / `name` are absent and the "same

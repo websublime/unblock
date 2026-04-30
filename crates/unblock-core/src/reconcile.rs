@@ -22,9 +22,9 @@
 //! # Design Note
 //!
 //! `GhostedBlockingEdge` is intentionally absent from the taxonomy. In our model,
-//! edges come from GitHub's `trackedByIssues` API (not body text), so the graph
-//! cannot contain an edge that GitHub does not have. See spec §4 for the full
-//! rationale.
+//! edges come from GitHub's `Issue.blockedBy` API (schema as of 2026-04-30, not
+//! body text), so the graph cannot contain an edge that GitHub does not have.
+//! See spec §4 for the full rationale.
 
 use std::collections::{HashMap, HashSet};
 

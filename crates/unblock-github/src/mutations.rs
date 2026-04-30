@@ -857,7 +857,7 @@ impl GitHubClient {
         Ok(node_id)
     }
 
-    /// Executes the GraphQL `addIssueDependency` mutation.
+    /// Executes the GraphQL `addBlockedBy` mutation.
     ///
     /// Single chokepoint behind every public `add_blocked_by*` entry point in
     /// this file: the local-only [`add_blocked_by()`](Self::add_blocked_by),
@@ -869,9 +869,24 @@ impl GitHubClient {
     /// [`resolve_issue_ref()`](Self::resolve_issue_ref), or
     /// [`fetch_issue_ref()`](Self::fetch_issue_ref)) and feeds them here; the
     /// (`owner`, `repo`) chokepoint is enforced by the resolver layer, not by
-    /// this raw mutation primitive (the `addIssueDependency` mutation itself
-    /// operates on globally-scoped Projects V2 issue node IDs and does not
-    /// take an owner/repo).
+    /// this raw mutation primitive (the `addBlockedBy` mutation itself
+    /// operates on globally-scoped issue node IDs and does not take an
+    /// owner/repo).
+    ///
+    /// SAFETY: matches GitHub's public GraphQL schema as of 2026-04-30.
+    /// `Mutation.addBlockedBy` takes `AddBlockedByInput { issueId,
+    /// blockingIssueId, clientMutationId }` and returns `AddBlockedByPayload
+    /// { issue, blockingIssue, clientMutationId }`. The legacy mutation
+    /// name `addIssueDependency` (with `dependentId` / `dependencyId`
+    /// inputs) does NOT exist on the live schema (verified via live
+    /// introspection against `api.github.com/graphql`); it was renamed in
+    /// the same wave that replaced `Issue.trackedByIssues` with
+    /// `Issue.blockedBy`. See bead `unblock-741` for the post-mortem.
+    ///
+    /// Parameter naming preserved internally as `dependent_id` / `dependency_id`
+    /// to minimise call-site churn — semantically `dependent_id` IS the
+    /// `issueId` (the blocked / dependent issue) and `dependency_id` IS the
+    /// `blockingIssueId` (the blocker).
     ///
     /// Pure transport — no validation, no duplicate pre-check, no telemetry
     /// beyond what [`graphql()`](Self::graphql) emits internally. Caller-side
@@ -883,23 +898,23 @@ impl GitHubClient {
         dependency_id: &str,
     ) -> Result<(), Error> {
         let mutation = "
-            mutation AddBlockedBy($dependentId: ID!, $dependencyId: ID!) {
-                addIssueDependency(input: {dependentId: $dependentId, dependencyId: $dependencyId}) {
+            mutation AddBlockedBy($issueId: ID!, $blockingIssueId: ID!) {
+                addBlockedBy(input: {issueId: $issueId, blockingIssueId: $blockingIssueId}) {
                     clientMutationId
                 }
             }
         ";
 
         let variables = serde_json::json!({
-            "dependentId": dependent_id,
-            "dependencyId": dependency_id,
+            "issueId": dependent_id,
+            "blockingIssueId": dependency_id,
         });
 
         self.graphql(mutation, variables).await?;
         Ok(())
     }
 
-    /// Executes the GraphQL `removeIssueDependency` mutation.
+    /// Executes the GraphQL `removeBlockedBy` mutation.
     ///
     /// Symmetric counterpart of
     /// [`add_issue_dependency_raw()`](Self::add_issue_dependency_raw).
@@ -915,9 +930,14 @@ impl GitHubClient {
     /// [`resolve_issue_ref()`](Self::resolve_issue_ref)) and feeds them
     /// here; the (`owner`, `repo`) chokepoint is enforced by the
     /// resolver layer, not by this raw mutation primitive (the
-    /// `removeIssueDependency` mutation itself operates on globally-
-    /// scoped Projects V2 issue node IDs and does not take an
-    /// owner/repo).
+    /// `removeBlockedBy` mutation itself operates on globally-scoped
+    /// issue node IDs and does not take an owner/repo).
+    ///
+    /// SAFETY: matches GitHub's public GraphQL schema as of 2026-04-30.
+    /// `Mutation.removeBlockedBy` takes `RemoveBlockedByInput { issueId,
+    /// blockingIssueId, clientMutationId }`. The legacy mutation name
+    /// `removeIssueDependency` does NOT exist on the live schema; same
+    /// rename wave as `addBlockedBy` (see bead `unblock-741`).
     ///
     /// Pure transport — no validation, no edge-existence pre-check, no
     /// telemetry beyond what [`graphql()`](Self::graphql) emits
@@ -930,16 +950,16 @@ impl GitHubClient {
         dependency_id: &str,
     ) -> Result<(), Error> {
         let mutation = "
-            mutation RemoveBlockedBy($dependentId: ID!, $dependencyId: ID!) {
-                removeIssueDependency(input: {dependentId: $dependentId, dependencyId: $dependencyId}) {
+            mutation RemoveBlockedBy($issueId: ID!, $blockingIssueId: ID!) {
+                removeBlockedBy(input: {issueId: $issueId, blockingIssueId: $blockingIssueId}) {
                     clientMutationId
                 }
             }
         ";
 
         let variables = serde_json::json!({
-            "dependentId": dependent_id,
-            "dependencyId": dependency_id,
+            "issueId": dependent_id,
+            "blockingIssueId": dependency_id,
         });
 
         self.graphql(mutation, variables).await?;
@@ -951,8 +971,9 @@ impl GitHubClient {
     /// After this call, `issue_number` is blocked by `blocked_by_number`.
     /// Both issue numbers are resolved to GraphQL node IDs internally.
     ///
-    /// Uses the GitHub GraphQL `addIssueDependency` mutation with
-    /// `dependentId` (the blocked issue) and `dependencyId` (the blocker).
+    /// Uses the GitHub GraphQL `addBlockedBy` mutation (schema as of
+    /// 2026-04-30) with `issueId` (the blocked issue) and
+    /// `blockingIssueId` (the blocker).
     ///
     /// **Note:** Cycle detection is **not** performed here — it is the
     /// responsibility of the MCP tool handler layer (see bead 1.4.9).
@@ -1015,7 +1036,8 @@ impl GitHubClient {
     /// `blocked_by_number`. Both issue numbers are resolved to GraphQL node
     /// IDs internally.
     ///
-    /// Uses the GitHub GraphQL `removeIssueDependency` mutation.
+    /// Uses the GitHub GraphQL `removeBlockedBy` mutation (schema as of
+    /// 2026-04-30).
     ///
     /// # Errors
     ///
@@ -1441,7 +1463,7 @@ impl GitHubClient {
     ///
     /// For local refs, delegates to [`add_blocked_by()`](Self::add_blocked_by).
     /// For cross-repo refs, resolves the blocker's node ID via the target repo
-    /// and calls `addIssueDependency` directly.
+    /// and calls `addBlockedBy` directly.
     ///
     /// [`IssueRef`]: unblock_core::types::IssueRef
     ///
@@ -1495,7 +1517,7 @@ impl GitHubClient {
     ///   owner/repo, performs the duplicate pre-check against its
     ///   `blocked_by` list, resolves the blocker via
     ///   [`resolve_issue_ref()`](Self::resolve_issue_ref), and runs the
-    ///   `addIssueDependency` mutation with both node IDs.
+    ///   `addBlockedBy` mutation with both node IDs.
     ///
     /// The duplicate pre-check has a TOCTOU race like
     /// [`add_blocked_by()`](Self::add_blocked_by) — acceptable for the
@@ -1537,11 +1559,11 @@ impl GitHubClient {
                 // duplicate pre-check in a single round-trip.
                 let source_issue = self.fetch_issue_ref(source).await?;
 
-                // Duplicate pre-check: GitHub's `trackedByIssues` connection
-                // only surfaces blockers within the same `owner/repo` as the
-                // source issue. Therefore the `blocked_by` list on a
-                // cross-repo source contains only entries in the source's
-                // own repo.
+                // Duplicate pre-check: GitHub's `Issue.blockedBy` connection
+                // (schema as of 2026-04-30) only surfaces blockers within the
+                // same `owner/repo` as the source issue. Therefore the
+                // `blocked_by` list on a cross-repo source contains only
+                // entries in the source's own repo.
                 //
                 // So a duplicate match only exists when the blocker resolves
                 // to the same `owner/repo` as the source. For any other
@@ -1600,8 +1622,7 @@ impl GitHubClient {
     /// this delegates to [`remove_blocked_by()`](Self::remove_blocked_by)
     /// so the existing local-number fast path is preserved. For cross-repo
     /// refs it resolves the blocker's node ID against the target repo and
-    /// runs the `removeIssueDependency` mutation directly with both node
-    /// IDs.
+    /// runs the `removeBlockedBy` mutation directly with both node IDs.
     ///
     /// See spec §5.6 (cross-repo scope) and §8.5 (`dep_remove`).
     ///
@@ -1657,13 +1678,13 @@ impl GitHubClient {
     ///   existing local-source fast path is preserved.
     /// - `source = CrossRepo { .. }` → resolves both the source and the
     ///   blocker via [`resolve_issue_ref()`](Self::resolve_issue_ref)
-    ///   against their own repositories and runs the
-    ///   `removeIssueDependency` mutation directly with both node IDs.
+    ///   against their own repositories and runs the `removeBlockedBy`
+    ///   mutation directly with both node IDs.
     ///
     /// Unlike [`add_blocked_by_refs()`](Self::add_blocked_by_refs) this
     /// method does not perform a client-side edge-existence pre-check:
-    /// GitHub's `removeIssueDependency` is idempotent with respect to
-    /// missing edges (no error on a non-existent edge), so an optional
+    /// GitHub's `removeBlockedBy` is idempotent with respect to missing
+    /// edges (no error on a non-existent edge), so an optional
     /// pre-check here would only add a round-trip. The MCP tool layer
     /// may still perform a cache-based pre-check when both endpoints are
     /// local, purely to surface a more informative error to the caller.
