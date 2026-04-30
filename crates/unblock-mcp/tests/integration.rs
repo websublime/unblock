@@ -4845,10 +4845,14 @@ async fn setup_no_project_returns_project_not_configured() {
     // property of the concrete implementation, not the trait abstraction.
     //
     // The shared `build_github_client` helper resolves the client via
-    // `with_repo` and panics with a clear message if `UNBLOCK_REPO` is
-    // not set — `.git/config` is intentionally unreachable from the
-    // `unblock-mcp` test surface (bead unblock-3lb).
-    let client = build_github_client(&config).await;
+    // `with_repo` and returns `Err` with a clear message if `UNBLOCK_REPO`
+    // is not set — `.git/config` is intentionally unreachable from the
+    // `unblock-mcp` test surface (bead unblock-3lb). The earlier
+    // `require_github_token()` gate makes the error structurally unreachable
+    // when CI is configured correctly, so `expect` here is appropriate.
+    let client = build_github_client(&config)
+        .await
+        .expect("build_github_client should succeed once require_github_token passed");
 
     // resolve_project_info should fail with ProjectNotConfigured.
     let result = client.resolve_project_info().await;

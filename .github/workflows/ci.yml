@@ -42,34 +42,6 @@ jobs:
       # (including forked PRs). See bead unblock-3lb.
       - run: cargo test -p unblock-core -p unblock-github -p unblock-mcp
 
-  test-mcp-live:
-    name: Test MCP (live)
-    needs: test-mcp
-    runs-on: ubuntu-latest
-    # Run only on first-party events: pushes to main, scheduled nightly
-    # builds, manual dispatch, or PRs originating from this repo (not forks).
-    # Forked PRs never see the GITHUB_TOKEN secret. See bead unblock-3lb.
-    if: |
-      github.event_name == 'push'
-      || github.event_name == 'schedule'
-      || github.event_name == 'workflow_dispatch'
-      || (github.event_name == 'pull_request'
-          && github.event.pull_request.head.repo.full_name == github.repository)
-    timeout-minutes: 20
-    env:
-      GITHUB_TOKEN: ${{ secrets.UNBLOCK_TEST_TOKEN }}
-      UNBLOCK_REPO: ${{ vars.UNBLOCK_TEST_REPO }}
-      UNBLOCK_PROJECT: ${{ vars.UNBLOCK_TEST_PROJECT }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      # Run only the live-required `#[ignore]` tests to keep the live job
-      # focused. The default mock-only run already executed every other test
-      # in the `test-mcp` job above. `--all-features` is required so the
-      # `e2e_workflow` test (which gates on `test-hooks`) is included.
-      - run: cargo test --workspace --all-features -- --ignored
-
   coverage:
     name: Coverage
     needs: test-mcp
@@ -86,32 +58,78 @@ jobs:
           file: cobertura.xml
           flags: mock
 
-  coverage-live:
-    name: Coverage (live)
-    needs: test-mcp-live
+  test-mcp-live:
+    name: Test MCP (live)
+    needs: test-mcp
     runs-on: ubuntu-latest
-    # Same first-party-only gate as test-mcp-live.
+    # Run only on first-party events: pushes to main, scheduled nightly
+    # builds, manual dispatch, or PRs originating from this repo (not forks).
+    # Forked PRs never see the GITHUB_TOKEN secret. See bead unblock-3lb.
     if: |
       github.event_name == 'push'
       || github.event_name == 'schedule'
       || github.event_name == 'workflow_dispatch'
       || (github.event_name == 'pull_request'
           && github.event.pull_request.head.repo.full_name == github.repository)
+    # Defensive narrow: the workflow's GITHUB_TOKEN (distinct from the
+    # UNBLOCK_TEST_TOKEN secret used for live API calls) only needs read
+    # access to clone the repo. Reduces blast radius if the workflow token
+    # ever leaks via an action. See bead unblock-3lb review.
+    permissions:
+      contents: read
+    # tarpaulin is ~2× slower than `cargo test`, so this consolidated live
+    # job (which executes AND measures coverage in one pass) keeps the
+    # 30-minute budget previously allocated to the standalone coverage-live
+    # job. See bead unblock-3lb rework decision W1.B.
     timeout-minutes: 30
     env:
       GITHUB_TOKEN: ${{ secrets.UNBLOCK_TEST_TOKEN }}
       UNBLOCK_REPO: ${{ vars.UNBLOCK_TEST_REPO }}
       UNBLOCK_PROJECT: ${{ vars.UNBLOCK_TEST_PROJECT }}
     steps:
+      # Preflight fail-fast: if any of the three required repo settings is
+      # unset, the live tests would silently hit `require_github_token()` /
+      # `require_github_token_and_project()`, eprintln a skip notice, and
+      # exit 0 — restoring the original false-green behaviour this bead set
+      # out to fix. Fail loudly here with an actionable message naming the
+      # missing setting and a `gh` CLI hint. See bead unblock-3lb rework
+      # decision W2.C(a).
+      - name: Preflight — verify live test secrets and vars
+        env:
+          UNBLOCK_TEST_TOKEN: ${{ secrets.UNBLOCK_TEST_TOKEN }}
+          UNBLOCK_TEST_REPO: ${{ vars.UNBLOCK_TEST_REPO }}
+          UNBLOCK_TEST_PROJECT: ${{ vars.UNBLOCK_TEST_PROJECT }}
+        run: |
+          missing=()
+          if [ -z "${UNBLOCK_TEST_TOKEN}" ]; then
+            missing+=("secret UNBLOCK_TEST_TOKEN — set with: gh secret set UNBLOCK_TEST_TOKEN --body '<github-pat>'")
+          fi
+          if [ -z "${UNBLOCK_TEST_REPO}" ]; then
+            missing+=("variable UNBLOCK_TEST_REPO — set with: gh variable set UNBLOCK_TEST_REPO --body 'owner/repo'")
+          fi
+          if [ -z "${UNBLOCK_TEST_PROJECT}" ]; then
+            missing+=("variable UNBLOCK_TEST_PROJECT — set with: gh variable set UNBLOCK_TEST_PROJECT --body '<project-number>'")
+          fi
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::test-mcp-live cannot run — required repository settings are missing:"
+            for m in "${missing[@]}"; do
+              echo "::error::  - $m"
+            done
+            echo "::error::See README.md § CI live tests for the full setup procedure."
+            exit 1
+          fi
+          echo "Preflight OK — UNBLOCK_TEST_TOKEN/REPO/PROJECT all configured."
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cargo-tarpaulin
-      # Live coverage — passes `-- --ignored` to tarpaulin so the live-required
-      # tests are exercised (codecov merges this with the mock-only report;
-      # combined coverage is the >80% target per spec §13.2). `--all-features`
-      # is required so the `e2e_workflow` test (which gates on `test-hooks`)
-      # is included.
+      # Run the live-required `#[ignore]` tests under tarpaulin in one pass
+      # — this is both the live test signal and the live coverage signal.
+      # Codecov merges this `live` report with the mock-only `mock` report
+      # from the `coverage` job above; combined coverage is the >80% target
+      # per spec §13.2. `--all-features` is required so the `e2e_workflow`
+      # test (which gates on `test-hooks` via Cargo `required-features`) is
+      # included. See bead unblock-3lb rework decision W1.B.
       - run: cargo tarpaulin -p unblock-core -p unblock-github -p unblock-mcp --all-features --out xml -- --ignored
       - uses: codecov/codecov-action@v4
         with:
