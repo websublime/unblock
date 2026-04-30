@@ -78,6 +78,14 @@ scripts/setup-test-project.sh <owner> <project-number>
 
 The script is idempotent: it lists the project's fields, deletes any that match the 6-name list, and exits 0 with no changes when the project is already clean. It does not touch the built-in Status field. Requires `gh` authenticated against the target owner with `project` + `repo` scopes, and `jq`.
 
+To assert the project is in the canonical clean state without mutating it (useful as a CI preflight or local sanity check), pass `--check`:
+
+```bash
+scripts/setup-test-project.sh --check <owner> <project-number>
+```
+
+`--check` (or its alias `--dry-run`) lists any stale unblock-managed custom fields and exits **non-zero (4)** when drift is present, exits 0 when the project is already clean. Re-run without `--check` to actually delete them.
+
 The live test job runs `cargo tarpaulin ... -- --ignored --test-threads=1` to serialise the `#[ignore]` integration tests. Without the serialisation guard, the two test files that both call `setup_fields` against the shared test project (`crates/unblock-github/tests/integration.rs::setup_fields_creates_all_seven_fields` and `crates/unblock-mcp/tests/e2e_workflow.rs::e2e_workflow_all_10_tools`) race and either the second mutation collides on `createProjectV2Field` (`Name has already been taken`) or one test deletes options the other still needs. Local runs of `cargo test --workspace -- --ignored` should pass `--test-threads=1` for the same reason.
 
 ## License
