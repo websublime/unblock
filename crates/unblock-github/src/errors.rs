@@ -262,6 +262,14 @@ pub enum Error {
     /// the heal call site, with the field name and the specific contract
     /// breach in the `reason` field — agent-actionable.
     ///
+    /// **Remediation hint.** The Display impl appends a pointer to
+    /// `scripts/setup-test-project.sh <owner> <project-number>` (the
+    /// cleanup script that wipes the 6 unblock-managed custom fields)
+    /// and a fallback to manual edits via the project's web UI. This
+    /// mirrors the `rerun X` nudge precedent on
+    /// [`PreMutationPrimeFailed`](Self::PreMutationPrimeFailed) and was
+    /// added per rework finding S3 in bead `unblock-aa2`.
+    ///
     /// Maps to HTTP 422 via [`Error::status_code`] (Unprocessable Entity)
     /// — the request was well-formed but the upstream state cannot be
     /// reconciled to the requested shape.
@@ -269,7 +277,10 @@ pub enum Error {
     /// See bead `unblock-aa2` for the full investigation and the
     /// empirical-verification trail.
     #[snafu(display(
-        "Failed to heal Projects V2 field '{field}' to canonical option set: {reason}"
+        "Failed to heal Projects V2 field '{field}' to canonical option set: {reason}. \
+         Run `scripts/setup-test-project.sh <owner> <project-number>` to wipe stale \
+         custom fields, or open the project in a browser and edit the field's options \
+         manually to match the spec."
     ))]
     FieldOptionHealFailed {
         /// The field name (e.g. `"Status"`, `"Priority"`,
@@ -675,9 +686,9 @@ mod tests {
         // Bead unblock-aa2: emitted by setup_fields when the
         // updateProjectV2Field auto-heal cannot reconcile a pre-existing
         // single-select required field to the spec's canonical option set.
-        // Display MUST name the field (so the operator knows which one)
-        // and surface the contract breach in `reason` so it is
-        // agent-actionable.
+        // Display MUST name the field (so the operator knows which one),
+        // surface the contract breach in `reason` so it is agent-actionable,
+        // AND point operators at the cleanup script (rework finding S3).
         let err = FieldOptionHealFailedSnafu {
             field: "Status".to_owned(),
             reason: "post-heal options {\"Todo\"} do not match spec {\"ready\", \"in_progress\", \"blocked\", \"deferred\", \"closed\"}".to_owned(),
@@ -688,6 +699,14 @@ mod tests {
         assert!(
             msg.contains("do not match spec"),
             "display must surface the contract breach: {msg}"
+        );
+        // Bead unblock-aa2 finding S3 — the message must point operators
+        // at the cleanup script so the recovery path is obvious from the
+        // error alone (precedent: PreMutationPrimeFailed includes a
+        // 'rerun X' nudge).
+        assert!(
+            msg.contains("scripts/setup-test-project.sh"),
+            "display must point operators at the cleanup script: {msg}"
         );
         // Status code is 422 — Unprocessable Entity — the request was
         // well-formed but the upstream state cannot be reconciled.
