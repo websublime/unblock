@@ -1230,10 +1230,10 @@ mod tests {
 
         // Pre-seed field IDs so the first resolution branch succeeds and
         // execution reaches `resolve_project_info()`.
-        let dummy_meta = || FieldMeta {
-            field_id: "FIELD_DUMMY".to_owned(),
-            options: StdHashMap::new(),
-        };
+        // FieldMeta is `#[non_exhaustive]` (bead unblock-aa2 W2) so we
+        // cannot use a struct literal from this crate — use the public
+        // `FieldMeta::new` constructor instead.
+        let dummy_meta = || FieldMeta::new("FIELD_DUMMY".to_owned(), StdHashMap::new());
         mock.push_field_ids(Some(ProjectFieldIds {
             status: dummy_meta(),
             priority: dummy_meta(),

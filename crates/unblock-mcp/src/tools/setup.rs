@@ -32,12 +32,23 @@ pub struct SetupParams {
 /// Result returned by the `setup` MCP tool.
 ///
 /// Contains the canonical names of fields and views that were created,
-/// already existed, or (in dry-run mode) are missing, plus the project number.
+/// healed (option-set reconciled in place), or already existed, plus
+/// (in dry-run mode) which fields are missing and the project number.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct SetupResult {
     /// Canonical names of fields that were newly created (e.g. `["Agent", "DeferUntil"]`).
     pub fields_created: Vec<String>,
-    /// Canonical names of fields that already existed and were skipped.
+    /// Canonical names of single-select required fields whose option set
+    /// diverged from the spec and was reconciled in place via
+    /// `updateProjectV2Field`. Most commonly this is the GitHub-default
+    /// built-in `Status` field on a fresh project: its options
+    /// `[Todo, In Progress, Done]` get rewritten to the spec's canonical
+    /// `[ready, in_progress, blocked, deferred, closed]`. Empty when
+    /// every existing single-select required field already matched the
+    /// spec exactly. See bead unblock-aa2 for the auto-heal contract.
+    pub fields_healed: Vec<String>,
+    /// Canonical names of fields that already existed and matched the
+    /// spec — no mutation issued.
     pub fields_existing: Vec<String>,
     /// Canonical names of fields that are missing and would be created by a
     /// non-dry-run call. Always empty when `dry_run` is `false` (the fields

@@ -56,15 +56,59 @@ pub struct ProjectFieldIds {
 /// Contains the field's node ID and a map from option display name to option
 /// node ID, enabling the caller to resolve an option name (e.g. `"P1 - High"`)
 /// to the GraphQL ID required by `updateProjectV2ItemFieldValue`.
+///
+/// `option_colors` carries the GraphQL `ProjectV2SingleSelectFieldOptionColor`
+/// value (e.g. `"BLUE"`, `"YELLOW"`, `"GRAY"`) for each option whose color
+/// the surrounding API surface produced. It exists primarily so that the
+/// auto-heal path in [`GitHubClient::setup_fields`] can preserve operator-
+/// chosen colours through an `updateProjectV2Field` rewrite instead of
+/// flattening every option to `GRAY`. Callers that don't care about colour
+/// can ignore this map — it is populated on a best-effort basis (empty for
+/// plain Text/Number/Date fields, partially populated when the upstream
+/// response omits a colour for some option).
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct FieldMeta {
     /// GraphQL node ID for the field.
     pub field_id: String,
     /// Map of option display name to option node ID.
     pub options: HashMap<String, String>,
+    /// Map of option display name to its GraphQL colour enum value
+    /// (e.g. `"BLUE"`, `"GRAY"`). Empty for non-single-select fields and
+    /// for options whose colour the upstream response did not surface.
+    pub option_colors: HashMap<String, String>,
 }
 
 impl FieldMeta {
+    /// Constructs a `FieldMeta` from just the field ID and option name → ID
+    /// map. Initialises `option_colors` to an empty map.
+    ///
+    /// This is the primary constructor for downstream crates because
+    /// `FieldMeta` is `#[non_exhaustive]` and cannot be built via a struct
+    /// literal from outside `unblock-github`. Use
+    /// [`with_option_colors`](Self::with_option_colors) if colour metadata
+    /// is also available.
+    #[must_use]
+    pub fn new(field_id: String, options: HashMap<String, String>) -> Self {
+        Self {
+            field_id,
+            options,
+            option_colors: HashMap::new(),
+        }
+    }
+
+    /// Builder-style setter that attaches an option name → colour map.
+    ///
+    /// The colour map is consumed by the auto-heal path in
+    /// [`GitHubClient::setup_fields`] when reconciling a single-select
+    /// required field's option set, so operator-chosen colours survive
+    /// idempotent re-runs (bead unblock-aa2 finding S1).
+    #[must_use]
+    pub fn with_option_colors(mut self, colors: HashMap<String, String>) -> Self {
+        self.option_colors = colors;
+        self
+    }
+
     /// Looks up an option ID by exact name, falling back to prefix match.
     ///
     /// This enables callers to pass short codes like `"P0"` which match
@@ -121,18 +165,46 @@ const fn required_field_names() -> [&'static str; REQUIRED_FIELDS.len()] {
     names
 }
 
-/// Result of a `setup_fields()` call, including which fields were created
-/// vs. skipped (already existed).
+/// Result of a `setup_fields()` call, including which fields were created,
+/// healed (option set reconciled in place), and skipped (already existed
+/// and matched the spec).
 ///
 /// This is the enriched return type that enables the MCP setup tool to report
-/// per-field creation status to the agent.
+/// per-field setup status to the agent.
+///
+/// **Buckets are mutually exclusive.** Each canonical field name appears in
+/// exactly one of `created`, `healed`, or `skipped` — `created` for fields
+/// that did not exist (fresh `createProjectV2Field`), `healed` for fields
+/// whose option set diverged from the spec and was reconciled in place via
+/// `updateProjectV2Field` (single-select required fields only), and
+/// `skipped` for fields that already matched the spec (no mutation issued).
+///
+/// Per CLAUDE.md `#[non_exhaustive]` discipline: marked `non_exhaustive` so a
+/// future bucket (e.g. `renamed` for option-rename heuristics) can be added
+/// without coordinating with downstream consumers. Construct via the
+/// fully-qualified struct literal — pre-1.0, no users, internal-only.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct SetupReport {
     /// The resolved field IDs for all 7 required fields.
     pub field_ids: ProjectFieldIds,
-    /// Canonical names of fields that were newly created.
+    /// Canonical names of fields that were newly created via
+    /// `createProjectV2Field` (the field did not exist on the project).
     pub created: Vec<String>,
-    /// Canonical names of fields that already existed and were skipped.
+    /// Canonical names of fields whose option set was reconciled in place
+    /// via `updateProjectV2Field` because the existing options diverged
+    /// from the spec (e.g. the GitHub-default built-in `Status` field with
+    /// options `[Todo, In Progress, Done]` was healed to the spec's
+    /// canonical `[ready, in_progress, blocked, deferred, closed]`). Only
+    /// single-select required fields are eligible for the heal path —
+    /// plain Text/Number/Date fields have no option drift to reconcile and
+    /// always land in `skipped` when present.
+    pub healed: Vec<String>,
+    /// Canonical names of fields that already existed and matched the
+    /// spec (no mutation issued — pure idempotent hit on the existing
+    /// field). For single-select fields this means the option set was
+    /// already an exact match; for plain fields this means the field
+    /// existed with the right `dataType`.
     pub skipped: Vec<String>,
 }
 
@@ -377,10 +449,18 @@ struct FieldNode {
 }
 
 /// Deserialization helper for single-select option nodes.
+///
+/// `color` is captured so that the auto-heal path can preserve operator-
+/// chosen colours through an `updateProjectV2Field` rewrite (bead
+/// unblock-aa2 finding S1). Older queries that don't surface `color` will
+/// yield `None` here; the heal path treats `None` as "use a sensible
+/// default" rather than "force GRAY".
 #[derive(Debug, Deserialize)]
 struct OptionNode {
     id: String,
     name: String,
+    #[serde(default)]
+    color: Option<String>,
 }
 
 /// Removes a single-select [`FieldMeta`] from the map, returning a GraphQL
@@ -497,14 +577,15 @@ impl GitHubClient {
         let mut created: Vec<String> = Vec::new();
         let mut skipped: Vec<String> = Vec::new();
 
+        let mut healed: Vec<String> = Vec::new();
+
         for spec in REQUIRED_FIELDS {
             if let Some(existing_field) = existing.get(spec.name) {
-                debug!(
-                    field = spec.name,
-                    "Field already exists — skipping creation"
-                );
-                skipped.push(spec.name.to_owned());
+                debug!(field = spec.name, "Field already exists on the project");
                 if spec.options.is_empty() {
+                    // Plain field (Text/Number/Date) — no option set to
+                    // reconcile, fall straight through to `skipped`.
+                    skipped.push(spec.name.to_owned());
                     resolved_plain.insert(spec.name.to_owned(), existing_field.field_id.clone());
                 } else {
                     // Auto-heal: when a single-select required field exists
@@ -516,17 +597,33 @@ impl GitHubClient {
                     // `updateProjectV2Field`. Per empirical verification
                     // against the live GraphQL API (bead unblock-aa2,
                     // 2026-04-30), `updateProjectV2Field` preserves option
-                    // IDs across renames keyed by id, and the existing
-                    // option IDs are reused when their name happens to
-                    // match a spec option — minimising churn for callers.
+                    // IDs that match by name and allocates fresh IDs for
+                    // options that don't — see the doc-comment on
+                    // [`heal_select_field_options`] for the exact ID
+                    // preservation contract.
                     //
                     // Options NOT in the input list are deleted by GitHub.
                     // This is safe by construction: `setup_fields` runs
                     // before any items are placed on the board (the
                     // canonical empty-project bootstrap path), so deleted
                     // options have no item assignments to invalidate.
-                    let healed = self.heal_select_field_options(existing_field, spec).await?;
-                    resolved.insert(spec.name.to_owned(), healed);
+                    //
+                    // The helper returns whether a mutation was actually
+                    // dispatched: fast-path (existing options already
+                    // match the spec) lands in `skipped`; mutation path
+                    // (GraphQL `updateProjectV2Field` issued) lands in
+                    // `healed`. Buckets are mutually exclusive and the
+                    // distinction is reflected in [`SetupReport`] so the
+                    // MCP layer can surface what actually changed to the
+                    // calling agent.
+                    let (meta, mutated) =
+                        self.heal_select_field_options(existing_field, spec).await?;
+                    if mutated {
+                        healed.push(spec.name.to_owned());
+                    } else {
+                        skipped.push(spec.name.to_owned());
+                    }
+                    resolved.insert(spec.name.to_owned(), meta);
                 }
             } else {
                 debug!(
@@ -556,12 +653,14 @@ impl GitHubClient {
 
         debug!(
             created_count = created.len(),
+            healed_count = healed.len(),
             skipped_count = skipped.len(),
             "All 7 project fields resolved"
         );
         Ok(SetupReport {
             field_ids,
             created,
+            healed,
             skipped,
         })
     }
@@ -664,6 +763,7 @@ impl GitHubClient {
     ///
     /// Uses cursor-based pagination to traverse all pages, so projects with
     /// more than 50 custom fields are handled correctly.
+    #[allow(clippy::too_many_lines)]
     async fn fetch_existing_fields(
         &self,
         project_id: &str,
@@ -682,6 +782,7 @@ impl GitHubClient {
                                     options {
                                         id
                                         name
+                                        color
                                     }
                                 }
                                 ... on ProjectV2Field {
@@ -734,7 +835,11 @@ impl GitHubClient {
                     } = field;
 
                     let mut option_map = HashMap::new();
+                    let mut color_map = HashMap::new();
                     for opt in options.unwrap_or_default() {
+                        if let Some(color) = opt.color {
+                            color_map.insert(opt.name.clone(), color);
+                        }
                         option_map.insert(opt.name, opt.id);
                     }
 
@@ -743,6 +848,7 @@ impl GitHubClient {
                         FieldMeta {
                             field_id: id,
                             options: option_map,
+                            option_colors: color_map,
                         },
                     );
                 }
@@ -848,6 +954,7 @@ impl GitHubClient {
         Ok(FieldMeta {
             field_id,
             options: HashMap::new(),
+            option_colors: HashMap::new(),
         })
     }
 
@@ -872,6 +979,7 @@ impl GitHubClient {
                             options {
                                 id
                                 name
+                                color
                             }
                         }
                     }
@@ -913,10 +1021,14 @@ impl GitHubClient {
         }
 
         let mut option_map = HashMap::new();
+        let mut color_map = HashMap::new();
         if let Some(opts) = field_data["options"].as_array() {
             for opt in opts {
                 if let (Some(id), Some(name)) = (opt["id"].as_str(), opt["name"].as_str()) {
                     option_map.insert(name.to_owned(), id.to_owned());
+                    if let Some(color) = opt["color"].as_str() {
+                        color_map.insert(name.to_owned(), color.to_owned());
+                    }
                 }
             }
         }
@@ -931,6 +1043,7 @@ impl GitHubClient {
         Ok(FieldMeta {
             field_id,
             options: option_map,
+            option_colors: color_map,
         })
     }
 
@@ -939,29 +1052,63 @@ impl GitHubClient {
     ///
     /// Compares the current option names against the spec. When they match
     /// exactly (set equality, order-insensitive) the existing field is
-    /// returned verbatim — no GraphQL round-trip is issued. When they differ
-    /// (e.g. the GitHub-default built-in `Status` field with options
+    /// returned verbatim and the second tuple element is `false` — no
+    /// GraphQL round-trip is issued. When they differ (e.g. the
+    /// GitHub-default built-in `Status` field with options
     /// `[Todo, In Progress, Done]` vs. the spec's
     /// `[ready, in_progress, blocked, deferred, closed]`), this method
-    /// issues `updateProjectV2Field` with the full canonical option set,
-    /// preserving option IDs whose `name` matches a spec entry.
+    /// issues `updateProjectV2Field` with the full canonical option set
+    /// and the second tuple element is `true`.
     ///
-    /// # Behaviour notes
+    /// # Option ID preservation contract
     ///
-    /// - **ID preservation by name match.** When the existing field already
-    ///   carries an option with name `X` and the spec also lists `X`, the
-    ///   existing option ID is reused — `updateProjectV2Field` recognises
-    ///   the `id` and rewrites only the `color`/`description`. Spec-only
-    ///   options are added; existing options absent from the spec are
-    ///   deleted by GitHub.
-    /// - **Safe in the empty-project bootstrap path.** Deleting an option
-    ///   on a Projects V2 single-select field invalidates any item that
-    ///   currently has that option assigned. `setup_fields` is the
-    ///   bootstrap-time path, called before any items are placed on the
-    ///   board, so deleted options have no item assignments to break.
-    /// - **Display order.** The returned `singleSelectOptions` ordering
-    ///   matches the spec — the canonical option ordering is restored on
-    ///   each heal pass.
+    /// `updateProjectV2Field` accepts a `singleSelectOptions` array where
+    /// each entry is either:
+    ///
+    /// - keyed by `id` — GitHub recognises the existing option and rewrites
+    ///   its `name`, `color`, and `description` in place; the option ID
+    ///   survives the mutation.
+    /// - bare (no `id`) — GitHub allocates a fresh option ID.
+    ///
+    /// Options NOT present in the input array are **deleted** by GitHub
+    /// (see Miguel's empirical verification in bead unblock-aa2,
+    /// 2026-04-30).
+    ///
+    /// This implementation reuses the existing option ID **only when the
+    /// existing option's `name` equals a canonical spec name**. For the
+    /// most common heal path — the GitHub-default built-in Status field —
+    /// none of `[Todo, In Progress, Done]` overlaps with
+    /// `[ready, in_progress, blocked, deferred, closed]`, so all three
+    /// existing options are deleted and five new options are allocated
+    /// fresh IDs. **Option IDs are not preserved across this rename.** A
+    /// future enhancement could implement a positional / id-keyed rename
+    /// heuristic (Miguel's TEST 2 in bead-21:09 verified that
+    /// `updateProjectV2Field` keyed by `id` with a different `name`
+    /// preserves the option through a rename), but that path is out of
+    /// scope for the bootstrap use case. The current behaviour is safe
+    /// because:
+    ///
+    /// - **Empty-project precondition.** `setup_fields` runs before any
+    ///   items are placed on the board, so deleted options have no item
+    ///   assignments to invalidate.
+    /// - **Diagnostic loudness.** If this contract is ever violated (heal
+    ///   runs against a populated project), the caller surfaces the
+    ///   `healed` bucket in [`SetupReport`] rather than silently passing.
+    ///
+    /// # Color preservation
+    ///
+    /// Per bead unblock-aa2 finding S1, when the existing field already
+    /// carried an option with the same name as a spec entry, the option's
+    /// previous colour (read from
+    /// [`FieldMeta::option_colors`]) is forwarded into the heal mutation
+    /// instead of being flattened to `GRAY`. Brand-new spec options
+    /// without a matching existing entry default to `GRAY`. This preserves
+    /// operator-chosen colours through idempotent re-runs.
+    ///
+    /// # Display order
+    ///
+    /// The returned `singleSelectOptions` ordering matches the spec — the
+    /// canonical option ordering is restored on each heal pass.
     ///
     /// # Errors
     ///
@@ -979,7 +1126,7 @@ impl GitHubClient {
         &self,
         existing: &FieldMeta,
         spec: &FieldSpec,
-    ) -> Result<FieldMeta, Error> {
+    ) -> Result<(FieldMeta, bool), Error> {
         // Fast path: option set already matches the spec — no mutation.
         let existing_names: std::collections::HashSet<&str> =
             existing.options.keys().map(String::as_str).collect();
@@ -990,7 +1137,7 @@ impl GitHubClient {
                 field = spec.name,
                 "Single-select field options already match spec — no heal needed"
             );
-            return Ok(existing.clone());
+            return Ok((existing.clone(), false));
         }
 
         debug!(
@@ -1014,6 +1161,7 @@ impl GitHubClient {
                             options {
                                 id
                                 name
+                                color
                             }
                         }
                     }
@@ -1021,9 +1169,11 @@ impl GitHubClient {
             }
         ";
 
-        // Build the input: spec order, reusing existing option IDs where the
-        // name matches. Options without a pre-existing match are inserted
-        // without `id`, prompting GitHub to allocate a fresh option ID.
+        // Build the input: spec order, reusing existing option IDs and
+        // colours where the name matches a canonical spec entry. Options
+        // without a pre-existing match are inserted without `id` (GitHub
+        // allocates a fresh option ID) and default to `GRAY`. See the
+        // doc-comment above for the exact preservation contract.
         let options_input: Vec<serde_json::Value> = spec
             .options
             .iter()
@@ -1039,10 +1189,17 @@ impl GitHubClient {
                     "name".to_owned(),
                     serde_json::Value::String((*name).to_owned()),
                 );
-                opt.insert(
-                    "color".to_owned(),
-                    serde_json::Value::String("GRAY".to_owned()),
-                );
+                // Color preservation (bead unblock-aa2 S1): when the
+                // existing field already carried an option with this name,
+                // forward its colour through the heal so operator-chosen
+                // colours survive idempotent re-runs. New options
+                // (no name match) default to GRAY.
+                let color = existing
+                    .option_colors
+                    .get(*name)
+                    .map_or("GRAY", String::as_str)
+                    .to_owned();
+                opt.insert("color".to_owned(), serde_json::Value::String(color));
                 opt.insert(
                     "description".to_owned(),
                     serde_json::Value::String(String::new()),
@@ -1070,10 +1227,14 @@ impl GitHubClient {
         }
 
         let mut option_map = HashMap::new();
+        let mut color_map = HashMap::new();
         if let Some(opts) = field_data["options"].as_array() {
             for opt in opts {
                 if let (Some(id), Some(name)) = (opt["id"].as_str(), opt["name"].as_str()) {
                     option_map.insert(name.to_owned(), id.to_owned());
+                    if let Some(color) = opt["color"].as_str() {
+                        color_map.insert(name.to_owned(), color.to_owned());
+                    }
                 }
             }
         }
@@ -1098,10 +1259,14 @@ impl GitHubClient {
             "Healed single-select field — option set now matches spec"
         );
 
-        Ok(FieldMeta {
-            field_id,
-            options: option_map,
-        })
+        Ok((
+            FieldMeta {
+                field_id,
+                options: option_map,
+                option_colors: color_map,
+            },
+            true,
+        ))
     }
 }
 
@@ -1717,6 +1882,7 @@ mod tests {
         FieldMeta {
             field_id: "field-priority".to_string(),
             options,
+            option_colors: HashMap::new(),
         }
     }
 
@@ -1764,6 +1930,7 @@ mod tests {
         let meta = FieldMeta {
             field_id: "field-empty".to_string(),
             options: HashMap::new(),
+            option_colors: HashMap::new(),
         };
         assert_eq!(meta.option_id_by_prefix("P0"), None);
     }
@@ -1778,6 +1945,7 @@ mod tests {
         let meta = FieldMeta {
             field_id: "field-mixed".to_string(),
             options,
+            option_colors: HashMap::new(),
         };
         assert_eq!(
             meta.option_id_by_prefix("P0"),

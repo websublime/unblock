@@ -670,6 +670,12 @@ impl UnblockServer {
 
             return Ok(Json(SetupResult {
                 fields_created: Vec::new(),
+                // Dry-run cannot detect option-set drift on existing
+                // single-select fields without dispatching the heal
+                // mutation, so we conservatively report nothing healed.
+                // The non-dry-run call path will surface real heal
+                // activity.
+                fields_healed: Vec::new(),
                 fields_existing: field_status.existing,
                 fields_missing: field_status.missing,
                 views_created: views_would_create,
@@ -739,6 +745,7 @@ impl UnblockServer {
 
         Ok(Json(SetupResult {
             fields_created: report.created,
+            fields_healed: report.healed,
             fields_existing: report.skipped,
             fields_missing: Vec::new(),
             views_created,

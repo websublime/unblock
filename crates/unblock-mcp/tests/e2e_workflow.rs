@@ -174,7 +174,10 @@ async fn e2e_workflow_all_10_tools() {
         .await
         .expect("setup_fields should succeed");
 
-    let total_fields = report.created.len() + report.skipped.len();
+    // Bead unblock-aa2: heal bucket added — single-select required
+    // fields with diverging options land in `healed` instead of
+    // `skipped`. Total of mutually exclusive buckets must still be 7.
+    let total_fields = report.created.len() + report.healed.len() + report.skipped.len();
     assert_eq!(
         total_fields, 7,
         "setup should resolve exactly 7 fields, got {total_fields}"
@@ -191,8 +194,8 @@ async fn e2e_workflow_all_10_tools() {
     );
 
     eprintln!(
-        "setup: fields created={:?}, skipped={:?}",
-        report.created, report.skipped
+        "setup: fields created={:?}, healed={:?}, skipped={:?}",
+        report.created, report.healed, report.skipped
     );
 
     // Create missing views — mirrors the setup tool handler in server.rs.
