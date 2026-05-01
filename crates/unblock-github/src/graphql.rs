@@ -1116,6 +1116,12 @@ fn parse_status_field(fields: &std::collections::HashMap<String, String>) -> Sta
         Some("deferred") => Status::Deferred,
         Some("closed" | "Done") => Status::Closed,
         Some("ready") => Status::Ready,
+        // Symmetry with the other lowercase legacy aliases above. Same
+        // mapping the wildcard arm produces, but explicit so the arm-set
+        // matches the canonical 6-entry list and a future variant
+        // addition does not accidentally fall through to the wildcard
+        // for the `backlog` lowercase form.
+        Some("backlog") => Status::Backlog,
         Some("Todo") => Status::Backlog,
         // Missing or unrecognized -> Backlog (sticky default for unmanaged
         // items, consistent with the create-time default).
@@ -1570,6 +1576,13 @@ mod tests {
 
         fields.insert("Status".to_owned(), "closed".to_owned());
         assert_eq!(parse_status_field(&fields), Status::Closed);
+
+        // `backlog` (lowercase) explicit-arm symmetry with the other
+        // legacy aliases above. Behaviour-equivalent to the wildcard
+        // fallthrough but pins the explicit map so a future variant
+        // addition does not regress this case.
+        fields.insert("Status".to_owned(), "backlog".to_owned());
+        assert_eq!(parse_status_field(&fields), Status::Backlog);
     }
 
     #[test]

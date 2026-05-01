@@ -8029,3 +8029,383 @@ async fn close_co_blocking_dependent_excluded_from_unblocked() {
         "legacy bare-number primitive must NOT be invoked by the cascade",
     );
 }
+
+// ── unblock-1zj Appendix A.3 obligations #4 + #5 ────────────────────
+//
+// These two tests pin the spec §8.3 step 4(b) and §8.2 step 6.a
+// regression classes called out in the `unblock-1zj` review of PR #283.
+// The implementations at server.rs:1972-1973 and server.rs:1394-1421
+// are spec-correct; these tests fail loudly if a future refactor
+// reintroduces the pre-`unblock-1zj` `ready` / `blocked` branching on
+// `create` or drops the cascaded-status `!= Backlog` gate on `close`.
+
+/// Build a [`ProjectFieldIds`] fixture wired so the `create` handler's
+/// `set_project_fields` Status update fires IFF the handler reads
+/// `Status::Backlog.option_name()`. The Priority option map is
+/// deliberately empty so the Priority best-effort path short-circuits
+/// at `option_id_by_prefix`, isolating `update_field` accounting to the
+/// Status field.
+///
+/// The `Ready` and `Blocked` Status options are intentionally OMITTED
+/// from `status.options` so a regression that re-introduces the
+/// pre-`unblock-1zj` `ready` / `blocked` branch in the create handler
+/// would call `field_ids.status.options.get("Ready" | "Blocked")`,
+/// receive `None`, and skip the Status update — making the
+/// `update_field == 1` assertion below fail instead of silently
+/// passing.
+fn create_field_ids_with_only_backlog() -> unblock_github::projects::ProjectFieldIds {
+    use std::collections::HashMap;
+    use unblock_github::projects::{FieldMeta, ProjectFieldIds};
+
+    let mut status_options = HashMap::new();
+    status_options.insert(
+        unblock_core::types::Status::Backlog
+            .option_name()
+            .to_owned(),
+        "OPT_BACKLOG".to_owned(),
+    );
+
+    let empty_meta = || FieldMeta::new("f".to_owned(), HashMap::new());
+
+    ProjectFieldIds {
+        status: FieldMeta::new("status-field-id".to_owned(), status_options),
+        priority: empty_meta(),
+        pipeline_stage: empty_meta(),
+        agent: "agent".to_owned(),
+        claimed_at: "ca".to_owned(),
+        story_points: "sp".to_owned(),
+        defer_until: "du".to_owned(),
+    }
+}
+
+/// Build a fixture issue under `acme/widgets` for the create-into-Backlog
+/// integration tests below. Mirrors `close_fixture_issue` shape.
+fn create_fixture_issue(number: u64) -> unblock_core::types::Issue {
+    unblock_core::types::Issue {
+        qualified_id: QualifiedId::new("acme", "widgets", number),
+        number,
+        node_id: format!("I_create_{number}"),
+        title: format!("Create fixture #{number}"),
+        issue_type: Some(IssueType::Task),
+        status: Status::Backlog,
+        priority: Priority::P2,
+        agent: None,
+        claimed_at: None,
+        pipeline_stage: None,
+        story_points: None,
+        defer_until: None,
+        labels: vec![],
+        milestone: None,
+        assignees: vec![],
+        state: IssueState::Open,
+        body: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        url: format!("https://github.com/acme/widgets/issues/{number}"),
+        comments: vec![],
+        blocked_by: vec![],
+        blocking: vec![],
+        parent: None,
+        sub_issues: vec![],
+    }
+}
+
+/// Appendix A.3 obligation #4: `create` lands a fresh issue in
+/// `Status::Backlog` regardless of whether `blocked_by` is populated.
+/// The pre-`unblock-1zj` `ready` / `blocked` branch (see spec §8.3 step
+/// 4(b) — the post-`unblock-1zj` contract is "always Backlog") is
+/// REMOVED, and a future regression that re-introduces it must trip
+/// this test.
+///
+/// Witnesses the contract via three orthogonal signals:
+///
+/// 1. The Status option-id map exposes ONLY `"Backlog"` (no `"Ready"`,
+///    no `"Blocked"`). A regression that reads `Status::Ready` or
+///    `Status::Blocked` from `option_name()` would call
+///    `field_ids.status.options.get(...)` against the missing key,
+///    hit the `None` branch in `set_project_fields`, and skip the
+///    Status update entirely — making `update_field == 1` fail.
+/// 2. The blocker is recorded via `add_blocked_by_ref`, proving the
+///    `blocked_by` pathway was exercised (so the test isn't vacuously
+///    passing on an empty-blockers fixture — the regression class the
+///    spec guards against is *blocker-driven* auto-promotion).
+/// 3. The fixture rebuild (Phase 2 / cache rebuild after
+///    `execute_write_tool`) returns the post-create issue with
+///    `status = Status::Backlog`, exercising the round-trip through the
+///    cache layer.
+#[tokio::test]
+async fn create_lands_in_backlog_even_with_blockers() {
+    use unblock_github::projects::ProjectInfo;
+    use unblock_mcp::tools::create::CreateParams;
+
+    let mock = new_mock();
+
+    // Step 3: create_issue returns the new issue (#42).
+    mock.push_create_issue(Ok(create_fixture_issue(42)));
+
+    // Step 4: Projects V2 field ladder.
+    // field_ids exposes ONLY the "Backlog" Status option — see the
+    // helper doc for the regression-trip rationale.
+    mock.push_field_ids(Some(create_field_ids_with_only_backlog()));
+    mock.push_resolve_project_info(Ok(ProjectInfo {
+        id: "PVT_1".to_owned(),
+        number: 1,
+    }));
+    mock.push_get_project_item_id(Ok("PVTI_42".to_owned()));
+    // Step 4 set_project_fields: ONE successful update_field call for
+    // Status (the Priority option map is empty so that branch
+    // short-circuits at option_id_by_prefix). story_points and
+    // defer_until are None so they don't fire.
+    mock.push_update_field(Ok(()));
+
+    // Step 5: blocker recording. We pass blocked_by = ["#999"] which
+    // parses to IssueRef::Local(999); the handler dispatches via
+    // add_blocked_by_ref (singular).
+    mock.push_add_blocked_by_ref(Ok(()));
+
+    // Post-write rebuild: cache refresh after execute_write_tool.
+    let rebuilt = create_fixture_issue(42);
+    mock.push_fetch_graph_data(Ok((vec![rebuilt], vec![])));
+
+    let server = UnblockServer::new(state_with_mock(Arc::clone(&mock)));
+    let Json(result) = server
+        .create(Parameters(CreateParams {
+            title: "test backlog default".to_owned(),
+            issue_type: None,
+            priority: None,
+            body: None,
+            labels: None,
+            milestone: None,
+            blocked_by: Some(vec!["#999".to_owned()]),
+            parent: None,
+            story_points: None,
+            defer_until: None,
+        }))
+        .await
+        .expect("create with blockers should succeed and land in Backlog");
+
+    assert_eq!(result.number, 42);
+    assert!(
+        result.added_to_project,
+        "field-ladder must enter the project-field branch (proof the Status update path ran)",
+    );
+    assert!(
+        result.fields_attempted,
+        "set_project_fields must have been invoked",
+    );
+    assert_eq!(
+        result.blockers_added, 1,
+        "the blocker must have been recorded — this test pins the regression class \
+         where blocker presence flips the create-time Status, so the test must \
+         actually exercise the blocker pathway",
+    );
+
+    let calls = mock.calls();
+    // The load-bearing assertion. Status update fires IFF the handler
+    // looked up `Status::Backlog.option_name()` in `status.options`.
+    // Any regression that reads `Status::Ready` or `Status::Blocked`
+    // hits the missing-key branch and update_field stays at 0.
+    assert_eq!(
+        calls.update_field(),
+        1,
+        "spec §8.3 step 4(b): create must land at Status::Backlog regardless of \
+         blocker presence — a regression that re-introduces ready/blocked branching \
+         would miss the option-id lookup (Ready/Blocked are NOT in the fixture map) \
+         and update_field would stay at 0",
+    );
+    assert_eq!(calls.create_issue(), 1, "exactly one issue created",);
+    assert_eq!(
+        calls.add_blocked_by_ref(),
+        1,
+        "the single blocker passed via blocked_by must be recorded",
+    );
+}
+
+/// Appendix A.3 obligation #5: `close` cascade SKIPS the Status field
+/// update for a dependent currently in `Status::Backlog` while STILL
+/// emitting the unblock comment. Spec §8.2 step 6 (Backlog sticky):
+/// a graph-driven cascade does not promote a Backlog dependent.
+///
+/// The implementation at server.rs:1394-1421 gates the
+/// `update_status_field_best_effort` call on
+/// `cascaded_status != Status::Backlog`; the unblock comment posts
+/// BEFORE the gate (server.rs:1360-1367). A future regression that
+/// drops the gate would silently re-promote Backlog dependents to
+/// `Ready` — invisible without this test.
+///
+/// Fixture: #8 blocks #10. #10 starts in `Status::Backlog`. Closing
+/// #8 cascades. The test asserts:
+///
+/// - `add_comment_ref` fires once (the unblock comment lands BEFORE
+///   the Backlog gate).
+/// - `update_field` fires exactly ONCE — for the closed issue itself
+///   (Status → Closed in Phase 1 step 3). The cascade iteration for
+///   the Backlog dependent must NOT fire `update_field`. If the gate
+///   regressed, `update_field` would be 2.
+///
+/// The fixture wires `field_ids.status.options` with BOTH `"Closed"`
+/// (so the Phase 1 step-3 Status update on the closed issue is
+/// load-bearing) AND `"Ready"` (so a regression that bypassed the
+/// Backlog gate would successfully look up the Ready `option_id` and
+/// fire a second `update_field` call — making the count == 1
+/// assertion fail). Without the `"Ready"` entry, a regression would
+/// silently short-circuit at the missing-option branch and the test
+/// would pass for the wrong reason.
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Multi-phase fixture (Phase 0 prime + Phase 1 mutation/rebuild + Phase 2 cascade) plus regression-trip ladder pre-stocking.
+async fn close_cascade_skips_status_update_for_backlog_dependent() {
+    use unblock_github::projects::ProjectInfo;
+    use unblock_mcp::tools::close::CloseParams;
+
+    // Phase 0 pre-close graph: #8 OPEN, #10 OPEN-and-Backlog,
+    // edge #10 → #8.
+    let pre_close_blocker = close_fixture_issue(8);
+    let mut pre_close_dependent = close_fixture_issue(10);
+    pre_close_dependent.status = Status::Backlog;
+    let pre_close_issues = vec![pre_close_blocker.clone(), pre_close_dependent.clone()];
+    let edges = vec![BlockingEdge {
+        source: QualifiedId::new("acme", "widgets", 10),
+        target: QualifiedId::new("acme", "widgets", 8),
+    }];
+
+    // Phase 1 post-close rebuild: #8 excluded, #10 still Backlog.
+    let post_close_dependent = pre_close_dependent.clone();
+    let post_close_issues = vec![post_close_dependent];
+
+    // Status options wired for both `Closed` (Phase 1 step 3 update on
+    // the closed issue itself) AND `Ready` (cascade target — a
+    // regression that bypasses the Backlog gate would land here).
+    let mut status_options = std::collections::HashMap::new();
+    status_options.insert(
+        Status::Closed.option_name().to_owned(),
+        "OPT_CLOSED".to_owned(),
+    );
+    status_options.insert(
+        Status::Ready.option_name().to_owned(),
+        "OPT_READY".to_owned(),
+    );
+    let empty_meta = || {
+        unblock_github::projects::FieldMeta::new("f".to_owned(), std::collections::HashMap::new())
+    };
+    let field_ids = unblock_github::projects::ProjectFieldIds {
+        status: unblock_github::projects::FieldMeta::new(
+            "status-field-id".to_owned(),
+            status_options,
+        ),
+        priority: empty_meta(),
+        pipeline_stage: empty_meta(),
+        agent: "agent".to_owned(),
+        claimed_at: "ca".to_owned(),
+        story_points: "sp".to_owned(),
+        defer_until: "du".to_owned(),
+    };
+
+    let mock = new_mock();
+    // Phase 0 cold-cache prime — captures cascade against PRE-close graph.
+    mock.push_fetch_graph_data(Ok((pre_close_issues, edges)));
+    // Phase 1: fetch + close + Status→Closed best-effort ladder.
+    mock.push_fetch_issue(Ok(close_fixture_issue(8)));
+    mock.push_close_issue(Ok(()));
+    // Phase 1 step 3: update_status_field_best_effort on closed issue
+    // (Status → Closed). Resolves field_ids → resolve_project_info →
+    // get_project_item_id → update_field.
+    mock.push_field_ids(Some(field_ids.clone()));
+    mock.push_resolve_project_info(Ok(ProjectInfo {
+        id: "PVT_1".to_owned(),
+        number: 1,
+    }));
+    mock.push_get_project_item_id(Ok("PVTI_8".to_owned()));
+    mock.push_update_field(Ok(()));
+    // Phase 1 post-close rebuild.
+    mock.push_fetch_graph_data(Ok((post_close_issues, vec![])));
+    // Phase 2 cascade iteration for #10:
+    //   1. add_comment_ref (unblock comment posts BEFORE the gate).
+    //   2. fetch_issue_ref returns #10 in Backlog → gate fires → SKIP
+    //      `update_status_field_best_effort` entirely.
+    //
+    // We push a fresh Backlog issue on the fetch_issue_ref queue.
+    //
+    // We ALSO push a full second pass of the project-field stubs
+    // (field_ids/resolve/item_id/update_field) sized for the Ready
+    // transition the regression path would take. The mock's
+    // `field_ids()` returns `None` on an empty queue (silently), and
+    // `update_status_field_best_effort` short-circuits on `None` —
+    // which would let a broken gate pass this test for the WRONG
+    // reason. Pre-stocking the queue with the full Ready ladder
+    // ensures a regression that drops the
+    // `cascaded_status != Backlog` guard would resolve the option_id
+    // for `Status::Ready` (which we wired into `status.options`
+    // above) and fire a SECOND `update_field` call, tripping the
+    // `update_field == 1` assertion below.
+    mock.push_add_comment_ref(Ok("c10".to_owned()));
+    let mut cascade_target = close_fixture_issue(10);
+    cascade_target.status = Status::Backlog;
+    mock.push_fetch_issue_ref(Ok(cascade_target));
+    // Regression-trip ladder for the cascade rung (NOT consumed under
+    // the correct gate — these stubs leave residual queue depth which
+    // we do not assert on; only `update_field` count matters).
+    mock.push_field_ids(Some(field_ids.clone()));
+    mock.push_resolve_project_info(Ok(ProjectInfo {
+        id: "PVT_1".to_owned(),
+        number: 1,
+    }));
+    mock.push_get_project_item_id(Ok("PVTI_10".to_owned()));
+    mock.push_update_field(Ok(()));
+
+    let server = UnblockServer::new(state_with_mock(Arc::clone(&mock)));
+    let Json(result) = server
+        .close(Parameters(CloseParams {
+            id: 8,
+            reason: None,
+        }))
+        .await
+        .expect("close should succeed with a Backlog dependent");
+
+    assert_eq!(result.issue, 8);
+    let unblocked_set: std::collections::HashSet<u64> = result.unblocked.iter().copied().collect();
+    assert_eq!(
+        unblocked_set,
+        std::collections::HashSet::from([10_u64]),
+        "the cascade still surfaces #10 in `unblocked` — sticky-Backlog only \
+         suppresses the Status update, not the graph-cascade projection",
+    );
+
+    let calls = mock.calls();
+    // Unblock comment landed BEFORE the Backlog gate.
+    assert_eq!(
+        calls.add_comment_ref(),
+        1,
+        "spec §8.2 step 6: unblock comment posts BEFORE the sticky-Backlog \
+         Status-update gate — Backlog dependents still receive the comment",
+    );
+    // Cascade entered the gate — fetch_issue_ref ran for #10.
+    assert_eq!(
+        calls.fetch_issue_ref(),
+        1,
+        "cascade iteration must fetch the dependent's current Status before \
+         deciding whether to update it",
+    );
+    // The load-bearing assertion. Status updates: 1 for the closed
+    // issue (Phase 1 step 3 → Closed), 0 for the Backlog dependent
+    // (cascade gate skipped). A regression that drops the
+    // `cascaded_status != Backlog` guard would call
+    // update_status_field_best_effort, look up
+    // `Status::Ready.option_name()` in the status_options map (which
+    // we deliberately populated with "Ready" → "OPT_READY"), and fire
+    // a SECOND update_field call — failing this assertion.
+    assert_eq!(
+        calls.update_field(),
+        1,
+        "spec §8.2 step 6.a sticky-Backlog rule: NO Status field update for a \
+         cascaded dependent currently in Backlog. Exactly one update_field call \
+         is allowed — Phase 1 step 3 setting the closed issue itself to \
+         Status::Closed. A regression that drops the cascaded-status != Backlog \
+         gate would fire a second update_field for the Ready transition (the \
+         fixture wires `Ready` → `OPT_READY` so the regression path successfully \
+         resolves an option_id and the test fails LOUDLY here rather than \
+         silently passing on a missing-option short-circuit).",
+    );
+    assert_eq!(calls.close_issue(), 1);
+    // Phase 0 prime + Phase 1 rebuild = 2.
+    assert_eq!(calls.fetch_graph_data(), 2);
+}
