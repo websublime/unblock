@@ -337,7 +337,14 @@ macro_rules! define_set_project_fields {
                 tracing::warn!(error = %e, "Failed to set Priority field");
             }
 
-            // Set Status (ready when unblocked, blocked when blocked_by is present).
+            // Set Status. Per `unblock-1zj` (spec §8.3 / Decision 2 — Backlog
+            // sticky), `create` lands every new issue in
+            // `Status::Backlog.option_name()` regardless of blocker state;
+            // the pre-`unblock-1zj` `ready` / `blocked` branch on
+            // `blocked_by_refs.is_empty()` is REMOVED. Other write tools
+            // (e.g. `claim`, `update`) drive Status away from `Backlog` via
+            // explicit user/agent transitions — they pass their own
+            // canonical option name through `status` here.
             if let Some(option_id) = field_ids.status.options.get(status)
                 && let Err(e) = client
                     .update_field(
