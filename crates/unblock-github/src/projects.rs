@@ -467,7 +467,8 @@ const STATUS_OPTION_NAMES: [&str; Status::ALL.len()] = {
 struct IssueTypeSpec {
     /// Canonical `TitleCase` name (e.g. `"Task"`, `"Refactor"`).
     name: &'static str,
-    /// GitHub `IssueTypeColor` enum value (e.g. `"YELLOW"`, `"PINK"`).
+    /// GitHub REST `issue-types` color (lowercase, e.g. `"yellow"`,
+    /// `"pink"`); see [`IssueType::canonical_color`] for the closed set.
     color: &'static str,
     /// Human-readable short description.
     description: &'static str,
@@ -2687,14 +2688,14 @@ mod tests {
             .iter()
             .map(|spec| (spec.name, spec.color))
             .collect();
-        assert_eq!(by_name.get("Task"), Some(&"YELLOW"));
-        assert_eq!(by_name.get("Bug"), Some(&"RED"));
-        assert_eq!(by_name.get("Feature"), Some(&"BLUE"));
-        assert_eq!(by_name.get("Spike"), Some(&"PURPLE"));
-        assert_eq!(by_name.get("Epic"), Some(&"GREEN"));
-        assert_eq!(by_name.get("Chore"), Some(&"GRAY"));
-        assert_eq!(by_name.get("Refactor"), Some(&"ORANGE"));
-        assert_eq!(by_name.get("Docs"), Some(&"PINK"));
+        assert_eq!(by_name.get("Task"), Some(&"yellow"));
+        assert_eq!(by_name.get("Bug"), Some(&"red"));
+        assert_eq!(by_name.get("Feature"), Some(&"blue"));
+        assert_eq!(by_name.get("Spike"), Some(&"purple"));
+        assert_eq!(by_name.get("Epic"), Some(&"green"));
+        assert_eq!(by_name.get("Chore"), Some(&"gray"));
+        assert_eq!(by_name.get("Refactor"), Some(&"orange"));
+        assert_eq!(by_name.get("Docs"), Some(&"pink"));
     }
 
     // ── ensure_issue_types (unblock-wgj.16) ─────────────────────────────
