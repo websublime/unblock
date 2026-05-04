@@ -79,6 +79,8 @@ pub struct CallCounts {
     resolve_project_info: AtomicUsize,
     setup_fields: AtomicUsize,
     query_setup_status: AtomicUsize,
+    query_issue_types_status: AtomicUsize,
+    ensure_issue_types: AtomicUsize,
     update_field: AtomicUsize,
     detect_owner_type: AtomicUsize,
     list_rest_fields: AtomicUsize,
@@ -136,6 +138,8 @@ impl CallCounts {
         resolve_project_info,
         setup_fields,
         query_setup_status,
+        query_issue_types_status,
+        ensure_issue_types,
         update_field,
         detect_owner_type,
         list_rest_fields,
@@ -188,6 +192,8 @@ impl CallCounts {
             resolve_project_info,
             setup_fields,
             query_setup_status,
+            query_issue_types_status,
+            ensure_issue_types,
             update_field,
             detect_owner_type,
             list_rest_fields,
@@ -247,6 +253,8 @@ pub struct Stubs {
     resolve_project_info: Mutex<VecDeque<Result<ProjectInfo, Error>>>,
     setup_fields: Mutex<VecDeque<Result<SetupReport, Error>>>,
     query_setup_status: Mutex<VecDeque<Result<SetupStatus, Error>>>,
+    query_issue_types_status: Mutex<VecDeque<Result<Vec<String>, Error>>>,
+    ensure_issue_types: Mutex<VecDeque<Result<Vec<String>, Error>>>,
     update_field: Mutex<VecDeque<Result<(), Error>>>,
     detect_owner_type: Mutex<VecDeque<Result<OwnerType, Error>>>,
     list_rest_fields: Mutex<VecDeque<Result<Vec<RestField>, Error>>>,
@@ -418,6 +426,12 @@ macro_rules! push_result {
 push_result!(resolve_project_info, push_resolve_project_info, ProjectInfo);
 push_result!(setup_fields, push_setup_fields, SetupReport);
 push_result!(query_setup_status, push_query_setup_status, SetupStatus);
+push_result!(
+    query_issue_types_status,
+    push_query_issue_types_status,
+    Vec<String>
+);
+push_result!(ensure_issue_types, push_ensure_issue_types, Vec<String>);
 push_result!(update_field, push_update_field, ());
 push_result!(detect_owner_type, push_detect_owner_type, OwnerType);
 push_result!(list_rest_fields, push_list_rest_fields, Vec<RestField>);
@@ -539,6 +553,21 @@ impl GitHubApi for MockGitHubClient {
     async fn query_setup_status(&self, _project_id: &str) -> Result<SetupStatus, Error> {
         self.calls.query_setup_status.fetch_add(1, Ordering::SeqCst);
         pop_or_unstubbed(&self.stubs.query_setup_status, "query_setup_status")
+    }
+
+    async fn query_issue_types_status(&self, _org: &str) -> Result<Vec<String>, Error> {
+        self.calls
+            .query_issue_types_status
+            .fetch_add(1, Ordering::SeqCst);
+        pop_or_unstubbed(
+            &self.stubs.query_issue_types_status,
+            "query_issue_types_status",
+        )
+    }
+
+    async fn ensure_issue_types(&self, _org: &str) -> Result<Vec<String>, Error> {
+        self.calls.ensure_issue_types.fetch_add(1, Ordering::SeqCst);
+        pop_or_unstubbed(&self.stubs.ensure_issue_types, "ensure_issue_types")
     }
 
     async fn update_field(

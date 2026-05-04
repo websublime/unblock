@@ -1680,6 +1680,15 @@ impl GitHubClient {
     /// Returns [`Error::GitHubApi`] for other non-2xx responses.
     /// Returns [`Error::GitHubUnavailable`] for network failures.
     ///
+    /// # Panics
+    ///
+    /// Unreachable in practice: the internal diff helper sources every
+    /// returned name directly from `REQUIRED_ISSUE_TYPES` (the private
+    /// canonical taxonomy), so the reverse lookup always succeeds. A
+    /// panic here would indicate a programmer error in
+    /// `diff_org_issue_types` — not a runtime surface that callers
+    /// can encounter.
+    ///
     /// # Org-only scope
     ///
     /// The caller (typically `setup_fields`) is responsible for gating
@@ -1688,47 +1697,27 @@ impl GitHubClient {
     /// surface a 404 from GitHub; this method does not pre-validate.
     #[instrument(skip(self), fields(org = %org))]
     pub async fn ensure_issue_types(&self, org: &str) -> Result<Vec<String>, Error> {
-        let list_url = self.rest_url(&format!("/orgs/{org}/issue-types"));
-
-        let list_response = self
-            .http()
-            .get(&list_url)
-            .send()
-            .await
-            .context(errors::GitHubUnavailableSnafu)?;
-
-        if list_response.status().as_u16() == 403 {
-            return errors::IssueTypeManagementForbiddenSnafu {
-                org: org.to_owned(),
-            }
-            .fail();
-        }
-
-        let list_response = check_rest_response(list_response).await?;
-        let existing_raw: Vec<OrgIssueTypeRaw> = list_response
-            .json()
-            .await
-            .context(errors::GitHubUnavailableSnafu)?;
-
-        // Normalise existing names with `normalize_option_name` so the
-        // lookup mirrors the §5.7 case-insensitive + byte-trim matcher
-        // applied to Projects V2 single-select fields.
-        let existing_normalised: std::collections::HashSet<String> = existing_raw
-            .iter()
-            .map(|raw| normalize_option_name(&raw.name))
-            .collect();
+        // Step 1: GET existing types and compute the canonical-order
+        // diff (shared with the dry-run path). Any 403 surfaces as
+        // `IssueTypeManagementForbidden` here.
+        let missing = self.diff_org_issue_types(org).await?;
 
         let mut created: Vec<String> = Vec::new();
 
-        // Iterate the canonical taxonomy in declared `IssueType::ALL`
-        // order so two independent runs against an empty org produce
-        // byte-identical creation sequences (Invariant 18, §14).
-        for spec in &REQUIRED_ISSUE_TYPES {
-            let key = normalize_option_name(spec.name);
-            if existing_normalised.contains(&key) {
-                debug!(name = spec.name, "Issue type already exists — skipping");
-                continue;
-            }
+        // Step 2: POST each missing type in the diff order (already
+        // `IssueType::ALL`-declared). Iteration matches the dry-run
+        // ordering exactly so two independent runs against an empty
+        // org produce byte-identical creation sequences (Invariant 18,
+        // §14).
+        for name in &missing {
+            // Recover the spec entry by canonical name. The diff
+            // returns `IssueType::ALL`-ordered names, so the matching
+            // spec must exist; the panic is unreachable in practice
+            // and the lookup is O(8).
+            let spec = REQUIRED_ISSUE_TYPES
+                .iter()
+                .find(|s| s.name == name.as_str())
+                .expect("missing name was sourced from REQUIRED_ISSUE_TYPES");
 
             let body = CreateOrgIssueTypeBody {
                 name: spec.name,
@@ -1764,6 +1753,96 @@ impl GitHubClient {
         }
 
         Ok(created)
+    }
+
+    /// Reads the org's existing issue types and returns the canonical
+    /// names that `ensure_issue_types` WOULD create on a write-path
+    /// run, in the declared
+    /// [`IssueType::ALL`](unblock_core::types::IssueType::ALL) order.
+    ///
+    /// This is the read-only sibling of [`Self::ensure_issue_types`] —
+    /// `setup --dry-run` calls this so operators see the diff between
+    /// the canonical taxonomy and the org's current state without
+    /// dispatching any POSTs. The method is idempotent and side
+    /// effect-free.
+    ///
+    /// Per spec §5.7 step 3 / Appendix B Decision 3: matching is
+    /// case-insensitive + byte-trim via the same `normalize_option_name`
+    /// matcher used by `heal_select_field_options` so an org that
+    /// already has `task` / `BUG` / `Feature` does not surface `Task`
+    /// / `Bug` / `Feature` in the diff.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::IssueTypeManagementForbidden`] when GitHub
+    /// returns HTTP 403 from the listing call (the configured token
+    /// lacks `read:org` to enumerate org-level issue types). The error
+    /// message points operators at upgrading the token.
+    ///
+    /// Returns [`Error::RateLimited`] for HTTP 429 responses.
+    /// Returns [`Error::GitHubApi`] for other non-2xx responses.
+    /// Returns [`Error::GitHubUnavailable`] for network failures.
+    ///
+    /// # Org-only scope
+    ///
+    /// As with [`Self::ensure_issue_types`], the caller is responsible
+    /// for gating on `OwnerType::Org`. Calling against a user account
+    /// would surface a 404 from GitHub.
+    #[instrument(skip(self), fields(org = %org))]
+    pub async fn query_issue_types_status(&self, org: &str) -> Result<Vec<String>, Error> {
+        self.diff_org_issue_types(org).await
+    }
+
+    /// Internal: GETs `/orgs/{org}/issue-types` and computes the
+    /// canonical-name diff against [`REQUIRED_ISSUE_TYPES`].
+    ///
+    /// Returned names follow [`IssueType::ALL`] declared order so both
+    /// the write path (`ensure_issue_types`) and the dry-run path
+    /// (`query_issue_types_status`) emit identical sequences. Any 403
+    /// from the GET surfaces as
+    /// [`Error::IssueTypeManagementForbidden`].
+    async fn diff_org_issue_types(&self, org: &str) -> Result<Vec<String>, Error> {
+        let list_url = self.rest_url(&format!("/orgs/{org}/issue-types"));
+
+        let list_response = self
+            .http()
+            .get(&list_url)
+            .send()
+            .await
+            .context(errors::GitHubUnavailableSnafu)?;
+
+        if list_response.status().as_u16() == 403 {
+            return errors::IssueTypeManagementForbiddenSnafu {
+                org: org.to_owned(),
+            }
+            .fail();
+        }
+
+        let list_response = check_rest_response(list_response).await?;
+        let existing_raw: Vec<OrgIssueTypeRaw> = list_response
+            .json()
+            .await
+            .context(errors::GitHubUnavailableSnafu)?;
+
+        // Normalise existing names with `normalize_option_name` so the
+        // lookup mirrors the §5.7 case-insensitive + byte-trim matcher
+        // applied to Projects V2 single-select fields.
+        let existing_normalised: std::collections::HashSet<String> = existing_raw
+            .iter()
+            .map(|raw| normalize_option_name(&raw.name))
+            .collect();
+
+        let mut missing: Vec<String> = Vec::new();
+        for spec in &REQUIRED_ISSUE_TYPES {
+            let key = normalize_option_name(spec.name);
+            if existing_normalised.contains(&key) {
+                debug!(name = spec.name, "Issue type already exists — skipping");
+                continue;
+            }
+            missing.push(spec.name.to_owned());
+        }
+
+        Ok(missing)
     }
 
     /// Lists all fields on a Projects V2 project via the REST API.
@@ -2761,5 +2840,243 @@ mod tests {
             }
             other => panic!("expected IssueTypeManagementForbidden, got: {other:?}"),
         }
+    }
+
+    // ── query_issue_types_status (parent bead unblock-wgj WARNING 2) ───
+
+    #[tokio::test]
+    async fn query_issue_types_status_returns_canonical_diff_without_posting() {
+        // Mirrors `ensure_issue_types_creates_only_missing_types` but
+        // exercises the dry-run path: GET only, no POST. The five
+        // missing canonical names are surfaced in `IssueType::ALL`
+        // declared order so write-path and dry-run output sequences
+        // match byte-for-byte (Invariant 18, §14).
+        let server = MockServer::start().await;
+        let client = GitHubClient::new_for_test(&server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/orgs/test-owner/issue-types"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                { "id": 1, "name": "task", "color": "yellow", "description": "" },
+                { "id": 2, "name": "BUG", "color": "red", "description": "" },
+                { "id": 3, "name": "Feature", "color": "blue", "description": "" }
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // No POST mock — the dry-run path MUST NOT POST. If it does
+        // wiremock will return 404 and the test will fail.
+
+        let missing = client
+            .query_issue_types_status("test-owner")
+            .await
+            .expect("query_issue_types_status should succeed");
+
+        assert_eq!(
+            missing,
+            vec![
+                "Spike".to_owned(),
+                "Epic".to_owned(),
+                "Chore".to_owned(),
+                "Refactor".to_owned(),
+                "Docs".to_owned(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn query_issue_types_status_returns_empty_when_all_eight_already_exist() {
+        let server = MockServer::start().await;
+        let client = GitHubClient::new_for_test(&server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/orgs/test-owner/issue-types"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                { "id": 1, "name": "Task" },
+                { "id": 2, "name": "Bug" },
+                { "id": 3, "name": "Feature" },
+                { "id": 4, "name": "Spike" },
+                { "id": 5, "name": "Epic" },
+                { "id": 6, "name": "Chore" },
+                { "id": 7, "name": "Refactor" },
+                { "id": 8, "name": "Docs" }
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let missing = client
+            .query_issue_types_status("test-owner")
+            .await
+            .expect("query_issue_types_status should succeed");
+
+        assert!(missing.is_empty(), "got: {missing:?}");
+    }
+
+    #[tokio::test]
+    async fn query_issue_types_status_surfaces_403_as_management_forbidden() {
+        // The dry-run path requires the same `read:org` scope as the
+        // write path's GET. A 403 surfaces typed so operators see the
+        // same actionable error in `setup --dry-run` as in `setup`.
+        let server = MockServer::start().await;
+        let client = GitHubClient::new_for_test(&server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/orgs/test-owner/issue-types"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("Forbidden"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let err = client
+            .query_issue_types_status("test-owner")
+            .await
+            .expect_err("403 should surface as IssueTypeManagementForbidden");
+
+        match err {
+            Error::IssueTypeManagementForbidden { org } => {
+                assert_eq!(org, "test-owner");
+            }
+            other => panic!("expected IssueTypeManagementForbidden, got: {other:?}"),
+        }
+    }
+
+    // ── setup_fields User-owned no-op (parent bead unblock-wgj WARNING 3,
+    //     Appendix B.3 obligation #2 second bullet) ──────────────────────
+
+    /// User-owned repo: the `setup_fields` `IssueType` ensure-and-heal
+    /// step is a no-op. The org-level `/orgs/{org}/issue-types` REST
+    /// surface does NOT exist for users, so the call MUST short-circuit
+    /// on the `OwnerType::User` branch (projects.rs §5.7 step 3, gated
+    /// at the top of `setup_fields`). The returned
+    /// `SetupReport.issue_types_created` MUST be `vec![]`.
+    ///
+    /// The test mocks:
+    ///   1. POST /graphql → returns all 7 required fields with options
+    ///      that match the spec exactly. This drives `setup_fields`
+    ///      down the fast-path (no heal, no create) so the only
+    ///      remaining decision is the `IssueType` branch.
+    ///   2. GET /users/test-owner → returns `User` so
+    ///      `detect_owner_type` picks the no-op branch.
+    ///
+    /// No `/orgs/.../issue-types` mock is mounted — if the User branch
+    /// were broken and the call dispatched anyway, wiremock would reply
+    /// 404 and the test would fail.
+    #[tokio::test]
+    async fn setup_fields_user_owner_skips_issue_type_ensure_and_returns_empty_bucket() {
+        let server = MockServer::start().await;
+
+        // GraphQL mock: return all 7 required fields with their
+        // canonical option sets so `heal_select_field_options` takes
+        // the fast-path (no mutation) on every single-select field.
+        // Plain fields (Agent/ClaimedAt/StoryPoints/DeferUntil) need
+        // only an id + name.
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "node": {
+                        "fields": {
+                            "pageInfo": { "endCursor": null, "hasNextPage": false },
+                            "nodes": [
+                                {
+                                    "id": "FIELD_STATUS",
+                                    "name": "Status",
+                                    "dataType": "SINGLE_SELECT",
+                                    "options": [
+                                        { "id": "OPT_BACKLOG", "name": "Backlog", "color": "GRAY" },
+                                        { "id": "OPT_READY", "name": "Ready", "color": "GREEN" },
+                                        { "id": "OPT_IN_PROGRESS", "name": "In Progress", "color": "YELLOW" },
+                                        { "id": "OPT_BLOCKED", "name": "Blocked", "color": "RED" },
+                                        { "id": "OPT_DEFERRED", "name": "Deferred", "color": "BLUE" },
+                                        { "id": "OPT_CLOSED", "name": "Closed", "color": "PURPLE" },
+                                    ]
+                                },
+                                {
+                                    "id": "FIELD_PRIORITY",
+                                    "name": "Priority",
+                                    "dataType": "SINGLE_SELECT",
+                                    "options": [
+                                        { "id": "OPT_P0", "name": "P0 - Critical" },
+                                        { "id": "OPT_P1", "name": "P1 - High" },
+                                        { "id": "OPT_P2", "name": "P2 - Medium" },
+                                        { "id": "OPT_P3", "name": "P3 - Low" },
+                                        { "id": "OPT_P4", "name": "P4 - Backlog" },
+                                    ]
+                                },
+                                {
+                                    "id": "FIELD_PIPELINE",
+                                    "name": "PipelineStage",
+                                    "dataType": "SINGLE_SELECT",
+                                    "options": [
+                                        { "id": "OPT_INV", "name": "investigation" },
+                                        { "id": "OPT_IMPL", "name": "implementation" },
+                                        { "id": "OPT_REV", "name": "review" },
+                                        { "id": "OPT_REF", "name": "refactoring" },
+                                        { "id": "OPT_QA", "name": "qa" },
+                                        { "id": "OPT_DONE", "name": "done" },
+                                    ]
+                                },
+                                { "id": "FIELD_AGENT", "name": "Agent", "dataType": "TEXT" },
+                                { "id": "FIELD_CLAIMED", "name": "ClaimedAt", "dataType": "DATE" },
+                                { "id": "FIELD_POINTS", "name": "StoryPoints", "dataType": "NUMBER" },
+                                { "id": "FIELD_DEFER", "name": "DeferUntil", "dataType": "DATE" }
+                            ]
+                        }
+                    }
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // detect_owner_type: User account.
+        Mock::given(method("GET"))
+            .and(path("/users/test-owner"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "login": "test-owner",
+                "type": "User"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // No /orgs/test-owner/issue-types mock. If the User branch is
+        // broken and a request is dispatched, wiremock returns 404 and
+        // the test fails.
+
+        let client = GitHubClient::new_for_test(&server.uri());
+
+        let report = client
+            .setup_fields("PROJECT_ID")
+            .await
+            .expect("setup_fields should succeed on User-owned repo");
+
+        // All 7 fields fast-pathed to skipped (no heal, no create).
+        assert!(
+            report.created.is_empty(),
+            "no fields should be created: {:?}",
+            report.created
+        );
+        assert!(
+            report.healed.is_empty(),
+            "no fields should be healed: {:?}",
+            report.healed
+        );
+        assert_eq!(
+            report.skipped.len(),
+            crate::projects::REQUIRED_FIELD_NAMES.len(),
+            "all 7 required fields should be skipped"
+        );
+
+        // The contract under test: User-owned repo MUST yield an empty
+        // `issue_types_created` bucket. Spec §5.7 step 3, Appendix B.3
+        // obligation #2 second bullet.
+        assert!(
+            report.issue_types_created.is_empty(),
+            "User-owned repo must skip org-level issue type ensure: got {:?}",
+            report.issue_types_created
+        );
     }
 }

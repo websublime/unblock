@@ -102,6 +102,23 @@ pub trait GitHubApi: Send + Sync {
     /// Queries the current setup status of the project fields.
     async fn query_setup_status(&self, project_id: &str) -> Result<SetupStatus, Error>;
 
+    /// Queries the org's existing GitHub `IssueType`s and returns the
+    /// canonical names that [`Self::ensure_issue_types`] would create
+    /// on a write-path run, in the declared
+    /// [`IssueType::ALL`](unblock_core::types::IssueType::ALL) order.
+    ///
+    /// Read-only sibling of [`Self::ensure_issue_types`]; consumed by
+    /// the MCP `setup --dry-run` path (parent bead unblock-wgj
+    /// WARNING 2). Idempotent and side effect-free.
+    async fn query_issue_types_status(&self, org: &str) -> Result<Vec<String>, Error>;
+
+    /// Ensures the eight canonical org-level GitHub `IssueType`s
+    /// exist on the configured organisation.
+    ///
+    /// Returns the list of canonical names that were CREATED by this
+    /// call (empty when all eight already existed).
+    async fn ensure_issue_types(&self, org: &str) -> Result<Vec<String>, Error>;
+
     /// Updates a single Projects V2 field value on an item.
     async fn update_field(
         &self,
@@ -383,6 +400,14 @@ impl GitHubApi for GitHubClient {
 
     async fn query_setup_status(&self, project_id: &str) -> Result<SetupStatus, Error> {
         GitHubClient::query_setup_status(self, project_id).await
+    }
+
+    async fn query_issue_types_status(&self, org: &str) -> Result<Vec<String>, Error> {
+        GitHubClient::query_issue_types_status(self, org).await
+    }
+
+    async fn ensure_issue_types(&self, org: &str) -> Result<Vec<String>, Error> {
+        GitHubClient::ensure_issue_types(self, org).await
     }
 
     async fn update_field(
