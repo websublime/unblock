@@ -259,6 +259,7 @@ async fn e2e_workflow_all_10_tools() {
             labels: vec![test_label.clone()],
             milestone: None,
             assignees: Vec::new(),
+            issue_type: None,
         })
         .await
         .expect("create issue A should succeed");
@@ -299,6 +300,7 @@ async fn e2e_workflow_all_10_tools() {
             labels: vec![test_label.clone()],
             milestone: None,
             assignees: Vec::new(),
+            issue_type: None,
         })
         .await
         .expect("create issue B should succeed");
@@ -341,6 +343,7 @@ async fn e2e_workflow_all_10_tools() {
             labels: vec![test_label.clone()],
             milestone: None,
             assignees: Vec::new(),
+            issue_type: None,
         })
         .await
         .expect("create issue C should succeed");

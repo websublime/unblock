@@ -213,6 +213,16 @@ pub trait GitHubApi: Send + Sync {
     /// Replaces the body of an issue.
     async fn update_issue_body(&self, number: u64, body: String) -> Result<(), Error>;
 
+    /// Updates an issue's native GitHub `IssueType` to the named
+    /// canonical variant (spec §2.6 / §8.6 — introduced by
+    /// `unblock-wgj`). The Projects V2 layer is NOT touched —
+    /// `IssueType` is org-level native, NOT a Projects V2 field.
+    async fn update_issue_type(
+        &self,
+        number: u64,
+        issue_type: unblock_core::types::IssueType,
+    ) -> Result<(), Error>;
+
     /// Adds labels to an issue.
     async fn add_labels_to_issue(&self, number: u64, labels: Vec<String>) -> Result<(), Error>;
 
@@ -473,6 +483,14 @@ impl GitHubApi for GitHubClient {
 
     async fn update_issue_body(&self, number: u64, body: String) -> Result<(), Error> {
         GitHubClient::update_issue_body(self, number, body).await
+    }
+
+    async fn update_issue_type(
+        &self,
+        number: u64,
+        issue_type: unblock_core::types::IssueType,
+    ) -> Result<(), Error> {
+        GitHubClient::update_issue_type(self, number, issue_type).await
     }
 
     async fn add_labels_to_issue(&self, number: u64, labels: Vec<String>) -> Result<(), Error> {

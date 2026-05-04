@@ -328,7 +328,7 @@ async fn claim_dispatches_through_dyn_vtable() {
         .expect("claim should succeed via dyn dispatch");
 
     assert_eq!(result.issue_number, 7);
-    assert_eq!(result.agent, "alice");
+    assert_eq!(result.agent.as_deref(), Some("alice"));
     assert_eq!(mock.calls().fetch_issue(), 1);
     assert_eq!(mock.calls().add_comment(), 1);
     assert_eq!(mock.calls().fetch_graph_data(), 1);
@@ -932,6 +932,7 @@ async fn create_dispatches_through_dyn_vtable() {
             title: "Test issue".to_owned(),
             issue_type: None,
             priority: None,
+            agent: None,
             body: None,
             labels: None,
             milestone: None,
@@ -993,6 +994,10 @@ async fn update_dispatches_through_dyn_vtable() {
             id: 12,
             priority: None,
             status: None,
+
+            agent: None,
+
+            issue_type: None,
             labels_add: None,
             labels_remove: None,
             assignees_add: None,
@@ -1037,6 +1042,10 @@ async fn update_with_project_fields_dispatches_through_dyn_vtable() {
             id: 13,
             priority: None,
             status: None,
+
+            agent: None,
+
+            issue_type: None,
             labels_add: None,
             labels_remove: None,
             assignees_add: None,

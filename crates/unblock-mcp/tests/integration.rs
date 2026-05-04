@@ -4227,6 +4227,7 @@ async fn create_issue_with_all_params_and_refetch() {
         labels: vec!["test".to_owned()],
         milestone: None,
         assignees: Vec::new(),
+        issue_type: None,
     };
 
     let issue = client
@@ -4285,6 +4286,7 @@ async fn create_issue_with_blocked_by_local() {
             labels: vec!["test".to_owned()],
             milestone: None,
             assignees: Vec::new(),
+            issue_type: None,
         })
         .await
         .expect("create blocker issue should succeed");
@@ -4298,6 +4300,7 @@ async fn create_issue_with_blocked_by_local() {
             labels: vec!["test".to_owned()],
             milestone: None,
             assignees: Vec::new(),
+            issue_type: None,
         })
         .await
         .expect("create blocked issue should succeed");
@@ -4369,6 +4372,7 @@ async fn create_issue_with_blocked_by_cross_repo() {
             labels: vec!["test".to_owned()],
             milestone: None,
             assignees: Vec::new(),
+            issue_type: None,
         })
         .await
         .expect("create blocker issue should succeed");
@@ -4385,6 +4389,7 @@ async fn create_issue_with_blocked_by_cross_repo() {
             labels: vec!["test".to_owned()],
             milestone: None,
             assignees: Vec::new(),
+            issue_type: None,
         })
         .await
         .expect("create blocked issue should succeed");
@@ -4451,6 +4456,7 @@ async fn create_issue_with_parent_sub_issue() {
             labels: vec!["test".to_owned()],
             milestone: None,
             assignees: Vec::new(),
+            issue_type: None,
         })
         .await
         .expect("create parent issue should succeed");
@@ -4464,6 +4470,7 @@ async fn create_issue_with_parent_sub_issue() {
             labels: vec!["test".to_owned()],
             milestone: None,
             assignees: Vec::new(),
+            issue_type: None,
         })
         .await
         .expect("create child issue should succeed");
@@ -4525,6 +4532,7 @@ async fn create_issue_with_defaults() {
             labels: Vec::new(),
             milestone: None,
             assignees: Vec::new(),
+            issue_type: None,
         })
         .await
         .expect("create_issue with defaults should succeed");
@@ -4599,6 +4607,7 @@ async fn create_issue_appears_in_ready_set_after_rebuild() {
             labels: vec!["test".to_owned()],
             milestone: None,
             assignees: Vec::new(),
+            issue_type: None,
         })
         .await
         .expect("create_issue should succeed");
@@ -7684,7 +7693,7 @@ async fn claim_unblocked_open_issue_sets_in_progress_and_posts_comment() {
     let after = chrono::Utc::now();
 
     assert_eq!(result.issue_number, 5);
-    assert_eq!(result.agent, "alice");
+    assert_eq!(result.agent.as_deref(), Some("alice"));
     // `claimed_at` is taken inside the handler between `before` and
     // `after` — assert the handler did not stamp a fictional timestamp.
     assert!(
@@ -8173,6 +8182,7 @@ async fn create_lands_in_backlog_even_with_blockers() {
             title: "test backlog default".to_owned(),
             issue_type: None,
             priority: None,
+            agent: None,
             body: None,
             labels: None,
             milestone: None,

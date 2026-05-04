@@ -49,6 +49,15 @@ pub struct CreateIssueParams {
     pub milestone: Option<u64>,
     /// GitHub usernames to assign.
     pub assignees: Vec<String>,
+    /// Native GitHub `IssueType` name (e.g. `"Task"`, `"Refactor"`).
+    /// Sent as the `type` field on the REST POST `/repos/{o}/{r}/issues`
+    /// body — GitHub resolves it against the org's issue-type catalogue.
+    /// Per spec §8.3 the `create` MCP handler defaults this to `"Task"`
+    /// (the canonical default) when the caller omits `issue_type`. When
+    /// `None`, the field is omitted from the POST body and GitHub
+    /// leaves the issue's native type unset. Introduced by
+    /// `unblock-wgj`.
+    pub issue_type: Option<String>,
 }
 
 /// Minimal response shape from the REST POST /issues endpoint.
@@ -79,6 +88,12 @@ struct CreateIssueBody {
     milestone: Option<u64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     assignees: Vec<String>,
+    /// Native GitHub `IssueType` name. Sent as `type` per the REST API
+    /// schema (see GitHub's "Create an issue" endpoint docs). Skipped
+    /// when `None` so the existing baseline behaviour for older clients
+    /// is preserved bit-for-bit.
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    issue_type: Option<String>,
 }
 
 /// Request body for closing a GitHub issue via REST API.
@@ -146,6 +161,21 @@ struct UpdateIssueBodyRequest {
     body: String,
 }
 
+/// Request body for updating an issue's native `IssueType` via REST PATCH.
+///
+/// GitHub's REST PATCH `/repos/{o}/{r}/issues/{n}` accepts a `type`
+/// field that names a canonical org-level issue type (the same names
+/// `setup_fields` allocates via `ensure_issue_types`). Sending the
+/// canonical name assigns the type; sending `null` would clear it
+/// (not currently exposed via the MCP `update` tool — the
+/// absence-leaves-unmodified rule means the field stays untouched
+/// when the caller omits `issue_type`).
+#[derive(Debug, Serialize)]
+struct UpdateIssueTypeRequest {
+    #[serde(rename = "type")]
+    issue_type: String,
+}
+
 /// Request body for adding labels to a GitHub issue via REST POST.
 #[derive(Debug, Serialize)]
 struct AddLabelsBody {
@@ -210,6 +240,7 @@ impl GitHubClient {
             labels: params.labels,
             milestone: params.milestone,
             assignees: params.assignees,
+            issue_type: params.issue_type,
         };
 
         let response = self
@@ -465,6 +496,67 @@ impl GitHubClient {
         check_rest_response(response).await?;
 
         debug!(number, "Updated issue body");
+        Ok(())
+    }
+
+    /// Updates the native `IssueType` on a GitHub issue.
+    ///
+    /// Sends a REST PATCH to `/repos/{owner}/{repo}/issues/{number}`
+    /// with a `type` field carrying the canonical issue-type name
+    /// (sourced from
+    /// [`IssueType::canonical_name`](unblock_core::types::IssueType::canonical_name)
+    /// — spec §2.6). GitHub resolves it against the org-level
+    /// issue-type catalogue (created by `setup_fields`'s
+    /// ensure-and-heal step — spec §5.7).
+    ///
+    /// Per spec §8.6 (DRIFT-3 closure, introduced by `unblock-wgj`),
+    /// the `update` MCP tool only invokes this when the caller
+    /// explicitly supplies `issue_type`; omission leaves the issue's
+    /// native type unmodified.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Domain`] with [`DomainError::IssueNotFound`] if
+    /// the issue does not exist (HTTP 404).
+    /// Returns [`Error::RateLimited`] for HTTP 429 responses.
+    /// Returns [`Error::GitHubApi`] for other non-2xx responses (e.g.
+    /// 422 when the named type does not exist on the org —
+    /// `setup_fields` should be re-run).
+    ///
+    /// [`DomainError::IssueNotFound`]: unblock_core::errors::DomainError::IssueNotFound
+    #[instrument(skip(self), fields(owner = %self.owner(), repo = %self.repo()))]
+    pub async fn update_issue_type(&self, number: u64, issue_type: IssueType) -> Result<(), Error> {
+        let url = self.rest_url(&format!(
+            "/repos/{}/{}/issues/{number}",
+            self.owner(),
+            self.repo()
+        ));
+
+        let request_body = UpdateIssueTypeRequest {
+            issue_type: issue_type.canonical_name().to_owned(),
+        };
+
+        let response = self
+            .http()
+            .patch(&url)
+            .json(&request_body)
+            .send()
+            .await
+            .context(errors::GitHubUnavailableSnafu)?;
+
+        if response.status().as_u16() == 404 {
+            return Err(unblock_core::errors::IssueNotFoundSnafu { number }
+                .build()
+                .into());
+        }
+
+        check_rest_response(response).await?;
+
+        debug!(
+            number,
+            issue_type = issue_type.canonical_name(),
+            "Updated issue type"
+        );
         Ok(())
     }
 

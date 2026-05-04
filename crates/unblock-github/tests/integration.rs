@@ -496,6 +496,7 @@ async fn create_issue_returns_issue_with_correct_fields() {
         labels: vec!["test".to_owned()],
         milestone: None,
         assignees: vec![],
+        issue_type: None,
     };
 
     let issue = client
@@ -555,6 +556,7 @@ async fn close_issue_closes_issue_and_refetch_confirms() {
         labels: vec!["test".to_owned()],
         milestone: None,
         assignees: vec![],
+        issue_type: None,
     };
 
     let issue = client
@@ -608,6 +610,7 @@ async fn close_issue_with_reason_adds_comment_before_closing() {
         labels: vec!["test".to_owned()],
         milestone: None,
         assignees: vec![],
+        issue_type: None,
     };
 
     let issue = client
@@ -711,6 +714,7 @@ async fn add_comment_posts_comment_and_returns_url() {
         labels: vec!["test".to_owned()],
         milestone: None,
         assignees: vec![],
+        issue_type: None,
     };
 
     let issue = client
@@ -816,6 +820,7 @@ async fn add_blocked_by_creates_blocking_relationship() {
             labels: vec!["test".to_owned()],
             milestone: None,
             assignees: vec![],
+            issue_type: None,
         })
         .await
         .expect("create_issue A should succeed");
@@ -829,6 +834,7 @@ async fn add_blocked_by_creates_blocking_relationship() {
             labels: vec!["test".to_owned()],
             milestone: None,
             assignees: vec![],
+            issue_type: None,
         })
         .await
         .expect("create_issue B should succeed");
@@ -902,6 +908,7 @@ async fn remove_blocked_by_removes_blocking_relationship() {
             labels: vec!["test".to_owned()],
             milestone: None,
             assignees: vec![],
+            issue_type: None,
         })
         .await
         .expect("create_issue A should succeed");
@@ -915,6 +922,7 @@ async fn remove_blocked_by_removes_blocking_relationship() {
             labels: vec!["test".to_owned()],
             milestone: None,
             assignees: vec![],
+            issue_type: None,
         })
         .await
         .expect("create_issue B should succeed");
@@ -990,6 +998,7 @@ async fn add_blocked_by_duplicate_returns_duplicate_dependency() {
             labels: vec!["test".to_owned()],
             milestone: None,
             assignees: vec![],
+            issue_type: None,
         })
         .await
         .expect("create_issue A should succeed");
@@ -1003,6 +1012,7 @@ async fn add_blocked_by_duplicate_returns_duplicate_dependency() {
             labels: vec!["test".to_owned()],
             milestone: None,
             assignees: vec![],
+            issue_type: None,
         })
         .await
         .expect("create_issue B should succeed");
@@ -1125,6 +1135,7 @@ async fn add_sub_issue_creates_parent_child_relationship() {
             labels: vec!["test".to_owned()],
             milestone: None,
             assignees: vec![],
+            issue_type: None,
         })
         .await
         .expect("create parent should succeed");
@@ -1138,6 +1149,7 @@ async fn add_sub_issue_creates_parent_child_relationship() {
             labels: vec!["test".to_owned()],
             milestone: None,
             assignees: vec![],
+            issue_type: None,
         })
         .await
         .expect("create child should succeed");
@@ -1583,6 +1595,7 @@ async fn update_field_changes_value_on_project_item() {
             labels: vec!["test".to_owned()],
             milestone: None,
             assignees: vec![],
+            issue_type: None,
         })
         .await
         .expect("create_issue should succeed");
