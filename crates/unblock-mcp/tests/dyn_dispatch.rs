@@ -149,6 +149,11 @@ async fn setup_dry_run_dispatches_through_dyn_vtable() {
         existing: vec![],
         missing: vec![],
     }));
+    // Org owner ⇒ dry-run path now also queries the canonical
+    // IssueType diff (parent bead unblock-wgj WARNING 2). Stub a
+    // representative "two missing" response so the assertion below
+    // can confirm the new bucket is plumbed end-to-end.
+    mock.push_query_issue_types_status(Ok(vec!["Refactor".to_owned(), "Docs".to_owned()]));
     mock.push_list_views(Ok(vec![ProjectView {
         id: Some(1),
         number: 1,
@@ -170,9 +175,20 @@ async fn setup_dry_run_dispatches_through_dyn_vtable() {
 
     assert_eq!(result.project_number, 1);
     assert!(result.dry_run);
+    // Dry-run now surfaces the IssueType diff in `issue_types_created`
+    // (parent bead unblock-wgj WARNING 2). The bucket is populated
+    // from `query_issue_types_status` — no POSTs are dispatched.
+    assert_eq!(
+        result.issue_types_created,
+        vec!["Refactor".to_owned(), "Docs".to_owned()]
+    );
     assert_eq!(mock.calls().resolve_project_info(), 1);
     assert_eq!(mock.calls().detect_owner_type(), 1);
     assert_eq!(mock.calls().query_setup_status(), 1);
+    assert_eq!(mock.calls().query_issue_types_status(), 1);
+    // The dry-run path MUST NOT POST org-level issue types — the
+    // ensure path is reserved for the write branch.
+    assert_eq!(mock.calls().ensure_issue_types(), 0);
     assert_eq!(mock.calls().list_views(), 1);
 }
 

@@ -58,7 +58,7 @@ use unblock_core::errors::{
 use unblock_core::types::IssueState;
 use unblock_github::GitHubApi;
 use unblock_github::projects::FieldValue;
-use unblock_github::projects::{CreateViewParams, ViewLayout};
+use unblock_github::projects::{CreateViewParams, OwnerType, ViewLayout};
 
 /// Instructions string injected into the agent context window.
 ///
@@ -705,6 +705,25 @@ impl UnblockServer {
                 }
             }
 
+            // Dry-run IssueType diff (parent bead unblock-wgj WARNING 2).
+            // Mirrors the write path's `setup_fields` org-vs-User gate
+            // (projects.rs:792-805): an Org owner gets a read-only
+            // `query_issue_types_status` call which lists existing
+            // org-level types and computes the canonical-name diff
+            // against `REQUIRED_ISSUE_TYPES` without POSTing; a User
+            // owner is a no-op (GitHub native issue types are
+            // org-level only, spec §5.7). 403 from the listing call
+            // surfaces as `IssueTypeManagementForbidden` per
+            // `query_issue_types_status` — the same error the write
+            // path produces.
+            let issue_types_would_create = match owner_type {
+                OwnerType::Org => {
+                    let owner = client.owner().to_owned();
+                    execute_read_tool(state, || client.query_issue_types_status(&owner)).await?
+                }
+                OwnerType::User => Vec::new(),
+            };
+
             return Ok(Json(SetupResult {
                 fields_created: Vec::new(),
                 // Dry-run cannot detect option-set drift on existing
@@ -715,12 +734,12 @@ impl UnblockServer {
                 fields_healed: Vec::new(),
                 fields_existing: field_status.existing,
                 fields_missing: field_status.missing,
-                // Dry-run cannot detect IssueType drift without listing
-                // org-level types and comparing to the canonical eight
-                // — `setup_fields` performs that diff in its write path
-                // (unblock-wgj). Conservatively report nothing created
-                // here; the non-dry-run path will surface real activity.
-                issue_types_created: Vec::new(),
+                // Org-level IssueType diff per parent bead unblock-wgj
+                // WARNING 2: in dry-run mode this is the list of
+                // canonical names the write path would POST to
+                // `/orgs/{org}/issue-types`. User-owned repos surface
+                // an empty list (no-op, matches the write path).
+                issue_types_created: issue_types_would_create,
                 views_created: views_would_create,
                 views_existing,
                 project_number: u64::from(project_info.number),
