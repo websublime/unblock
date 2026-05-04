@@ -284,7 +284,7 @@ Types:
 - `Status { Ready, InProgress, Blocked, Deferred, Closed }` — Projects V2 unified field
 - `Priority { P0, P1, P2, P3, P4 }` — with `as_sort_key()`
 - `PipelineStage { Investigation, Implementation, Review, Refactoring, Qa, Done }`
-- `IssueType { Task, Bug, Feature, Epic, Chore, Spike }`
+- `IssueType { Task, Bug, Feature, Epic, Chore, Spike }` — `#[non_exhaustive]` (SPEC §2.6, BREAKING CHANGE introduced by `unblock-wgj`); carries three `pub const fn` canonical helpers (`canonical_name`, `canonical_color`, `canonical_description`) sourced as the single source of truth for IssueType strings across the workspace. Mirrors the `Status::option_name` discipline from `unblock-1zj`.
 - `BlockingEdge { source, target }` — both `QualifiedId`
 - `IssueSummary` — lightweight issue for list/ready responses
 - `IssueRef { Local(u64), CrossRepo { owner, repo, number } }` — with `resolve()`
@@ -440,6 +440,8 @@ Functions: `resolve_project_info()`, `setup_fields()`, `update_field()`, `batch_
 
 7 custom fields: Status, Priority, Pipeline Stage, Agent, Claimed At, Story Points, Defer Until.
 
+**Acceptance (additional, unblock-wgj / GAP-16).** `setup_fields()` extends its idempotent posture to also ensure all six canonical `IssueType` variants (`Task`, `Bug`, `Feature`, `Epic`, `Chore`, `Spike`) exist on the org via the GraphQL org-level IssueType API — see SPEC §5.7 step 3 and Appendix B. The list is sourced from a `REQUIRED_ISSUE_TYPES` constant derived at compile time from the `IssueType` enum via `IssueType::canonical_name` / `canonical_color` / `canonical_description` (SPEC §2.6). NO duplicated literal list of issue type names, colors, or descriptions exists anywhere in the workspace. Existing types are SKIPPED via case-insensitive + byte-trim matching (color/description on the org side are user-editable and `setup` MUST NOT overwrite them). Outcome surfaced via NEW `SetupReport.issue_types_created: Vec<String>` field (additive — `API:` footer in commit body) and propagated to `SetupResult.issue_types_created` in SPEC §8.10. Org-only scope: no-op for User-owned repos with an info-level log line. Integration tests cover both branches plus the case-insensitive matcher (e.g. pre-existing `task` / `BUG` / `Feature` healed correctly).
+
 ### Task 03.06 — View management
 
 **File:** `unblock-github/src/projects.rs`
@@ -505,8 +507,10 @@ Cache-aware: Fresh → serve, Stale/Empty → rebuild.
 ### Task 04.06 — `claim` tool
 
 Validates: open, not blocked, not deferred, not already claimed.
-Updates: Status → `in_progress`, Agent → name, Claimed At → now.
+Updates: Status → `In Progress` (per `unblock-1zj` TitleCase canonical, SPEC §2.3), Agent → effective value via the §8.1 precedence chain, Claimed At → now.
 Posts claim comment.
+
+**Acceptance (additional, unblock-wgj / GAP-16).** The `agent` value written to the Projects V2 Agent field follows the three-step precedence chain in SPEC §8.1: (1) `params.agent = Some(name)` always wins; (2) `params.agent = None` AND `state.agent_kind_str() = Some(kind)` uses `kind`; (3) `params.agent = None` AND `state.agent_kind_str() = None` SKIPS the Agent field update entirely (no fallback to `config.agent`). The claim comment renders `"Claimed by {agent} at {timestamp}"` when Agent is non-empty, `"Claimed at {timestamp}"` (no `by {agent}` substring) when empty. Three integration tests with `MockGitHubClient` cover all three branches per SPEC §13.3 graph-invariant 11 / §14 Invariant 18.
 
 ### Task 04.07 — `close` tool
 
@@ -520,7 +524,9 @@ For each unblocked dependent: update Status → `ready`, post unblock comment.
 ### Task 04.08 — `create` tool
 
 Params: title, type, priority, body, labels, milestone, blocked_by (cross-repo), parent (sub-issue), story_points, defer_until.
-Creates issue, adds to project, sets fields. If blocked_by: cycle check + add deps + Status → `blocked`.
+Creates issue, adds to project, sets fields. Status → `Backlog` (per `unblock-1zj` create-time default, SPEC §2.3 + §8.3). If blocked_by: cycle check + add deps; Status REMAINS `Backlog` (Backlog is sticky — adding blockers does NOT auto-flip to `Blocked`).
+
+**Acceptance (additional, unblock-wgj / GAP-16, DRIFT-2).** The `issue_type` parameter validation MUST route through `IssueType::canonical_name` (SPEC §2.6) with case-insensitive + byte-trim matching (per the §5.7 normaliser). Unknown values are rejected with `DomainError::Validation`; canonical names case-insensitively resolve (e.g. `"task"`, `"TASK"`, `"Task"` all map to `IssueType::Task`). The validator is named generically in the spec (Appendix B DRIFT-2) — the implementation supervisor lands the fix at the exact site identified in Sherlock's investigation report on `unblock-wgj` (precise file paths in bd comments). NO duplicated literal list of issue type names exists in `unblock-mcp` after this change.
 
 ### Task 04.09 — `show` tool
 
@@ -951,6 +957,41 @@ SPEC §11.1 (error-side half of the cross-repo contract) and SPEC §11.4 (respon
 
 ---
 
+### GAP-16 — Org-level IssueType ensure-and-heal + IssueType canonical helpers (`unblock-wgj`)
+
+SPEC §2.6 (helpers + `#[non_exhaustive]`), §5.7 (`setup_fields` IssueType ensure-and-heal step + `REQUIRED_ISSUE_TYPES` compile-time derivation), §8.1 (`claim` Agent precedence chain), §8.10 (`SetupResult.issue_types_created` field), §13.3 graph-invariants 10–11, §14 Invariants 17–18, and Appendix B together formalise four user-decided design choices delivered by `unblock-wgj` (2026-04-30).
+
+**Implementation state (pre-fix):**
+
+- `IssueType` (in `unblock-core/src/types.rs`) is NOT `#[non_exhaustive]` and carries no canonical helpers. Adding a new variant is a breaking change for downstream `match` arms with no `#[non_exhaustive]` cushion. Issue type names, colors, and descriptions are inlined as literals at every call site (validation, GraphQL deserialiser, `setup_fields` if any).
+- `setup_fields` (`unblock-github/src/projects.rs`) ensures the seven Projects V2 custom fields but does NOT ensure the six canonical org-level `IssueType`s. An empty org running `setup` ends up with Projects V2 fields configured but no IssueTypes created — `create` calls subsequently fail (or fall back to `null` IssueType) with no operator-friendly remediation path.
+- `SetupReport` has no `issue_types_created` bucket. The IssueType outcome is unobservable to the caller.
+- `claim`'s Agent precedence is "use `params.agent` if set, else `config.agent`". The (Phase 02) `state.agent_kind_str()` helper is not consulted; `config.agent` always wins as a fallback even when agent kind detection has identified the calling client. Empty Agent (no field write) is not a representable outcome.
+- `create` validates `issue_type` against a literal list (or accepts any string). Sherlock's `unblock-wgj` investigation report carries the precise file path; the validator does NOT route through any `IssueType` helper.
+
+**Why all four under one GAP:** The four decisions are coupled by the `IssueType` helpers and the Agent precedence chain — the helpers require the `#[non_exhaustive]` cushion, `setup_fields` requires the helpers, the `create` validator requires the helpers, and `claim`'s precedence chain is independent but lands in the same PR per Miguel's spec-coherence direction (2026-04-30). Splitting into four GAPs would obscure the `unblock-wgj` PR shape.
+
+**Remediation plan (implementation bead — out of scope for this plan patch):**
+
+1. **`unblock-core/src/types.rs`** — `IssueType` gains `#[non_exhaustive]` (BREAKING CHANGE) and three `pub const fn` helpers (`canonical_name`, `canonical_color`, `canonical_description`) per SPEC §2.6. Unit tests assert the canonical strings round-trip via the IssueType deserialiser (case-insensitive + byte-trim).
+2. **`unblock-github/src/projects.rs`** — `REQUIRED_ISSUE_TYPES` is declared as a compile-time constant derived from the `IssueType` enum via the §2.6 helpers (NO duplicated literal list). `setup_fields` extends its idempotent posture with the IssueType ensure-and-heal step per SPEC §5.7 step 3 — query org's existing types, match case-insensitively + byte-trim against `canonical_name`, SKIP existing types (color/description on the org side are user-editable), CREATE missing types using the canonical color/description verbatim. Org-only scope: User-owned repos skip with an info-level log line. `SetupReport` gains an additive `issue_types_created: Vec<String>` field (`API:` footer). Integration tests cover org/user branches plus the case-insensitive matcher.
+3. **`unblock-mcp/src/server.rs` (or wherever `SetupResult` is assembled)** — propagate `SetupReport.issue_types_created` into `SetupResult.issue_types_created` per SPEC §8.10.
+4. **`unblock-mcp/src/tools/create.rs`** (or `server.rs`, whichever holds the validator — Sherlock's investigation report has the exact path) — replace the literal-list validator with one that routes through `IssueType::canonical_name` (case-insensitive + byte-trim), returning `DomainError::Validation` for unknown values. Integration test asserts `"task"` / `"TASK"` / `"Task"` all map to `IssueType::Task` and unknown values reject with `Validation`. (Resolves Appendix B DRIFT-2.)
+5. **`unblock-mcp/src/tools/claim.rs` + `unblock-mcp/src/server.rs`** — refactor the Agent resolution to the three-step precedence chain in SPEC §8.1: explicit `params.agent` → `state.agent_kind_str()` → SKIP the Agent field update entirely (no fallback to `config.agent`). Adjust the claim comment to omit the `"by {agent}"` substring when Agent is empty. Three integration tests cover the three branches per SPEC §13.3 graph-invariant 11 / §14 Invariant 18.
+6. **`README.md`** — document the new `admin:org` token-scope requirement for the IssueType ensure-and-heal step (only required when running `setup` against an org that does not already have all six canonical types defined). Implementation supervisor lands the README change in the same PR; the spec amendment commit body mentions it explicitly per Miguel's 2026-04-30 direction (Appendix B §B.4).
+7. **Commit footer** — the `unblock-wgj` implementation commit MUST carry both `BREAKING CHANGE:` (for `#[non_exhaustive]` on `IssueType`) and `API:` (for the additive helpers + the new `SetupReport.issue_types_created` field) per CLAUDE.md "Pub API Change Tracking". Exact footer template in Appendix B §B.6.
+
+**Type:** DRIFT (spec-vs-impl)
+**Impact:** Medium — P2 polish + correctness:
+- IssueType helpers + `#[non_exhaustive]` close a forward-compat hole and remove duplicated literals.
+- `setup_fields` IssueType ensure-and-heal makes empty-org bootstrapping coherent (`init` + `setup` + `create` works end-to-end).
+- `claim` Agent precedence makes detected-agent integration usable without forcing every caller to pass an explicit `agent` string.
+- `create` IssueType validation closes Appendix B DRIFT-2.
+
+**Resolution:** Implement via implementation bead under `unblock-wgj`. Single PR; commit family carries both the `BREAKING CHANGE:` and `API:` footers per Appendix B §B.6.
+
+---
+
 ### Summary — Decisions (Resolved)
 
 | # | Decision | Resolution |
@@ -967,6 +1008,7 @@ SPEC §11.1 (error-side half of the cross-repo contract) and SPEC §11.4 (respon
 | D6.d | Response-shape universality (unblock-eos Decision 3) | **Documentation-only; frozen.** SPEC §11.4 "Exhaustiveness Rationale" derives the affected set (`ready`, `prime`, `dep_cycles`, `close`) mechanically from §5.6 + response typing. New tools re-derive (a)+(b) in their own spec entries. No new beads; no re-opening. |
 | D6.e | Meta-process (unblock-eos Decision 4) | **No further decomposition.** unblock-eos sub-epic closes with these three spec+plan patches. Only unblock-6xj and unblock-29p.25 remain as implementation beads under this sub-epic. Edge cases discovered during implementation fold into inline decision memos within GAP-14.c / Task 02.02, NOT into new beads. |
 | D7 | `close` cascade PRE vs POST ordering (unblock-29p.61) | **Option (a) — PRE-close cascade.** Refactor impl to match the existing SPEC §8.2 step 2 + §3.4 "Critical" prescription rather than rewriting spec to match the broken impl. PRE-close is sound by construction (closed issue still present in `node_map` at cascade computation); POST-close is unsound by construction (`FETCH_GRAPH_DATA_QUERY` is `states: OPEN`-only, closed issue absent from rebuilt `node_map`, silent `Vec::new()` short-circuit at `graph.rs:289-291` fires on every production close). Subsumes unblock-29p.60 — the silent-default branch remains as defensive code but becomes unreachable from the close path. Rejected option (b) because it would codify a production-broken impl and still require fixing .60 independently (via `fetch_graph_data` closed-issue extension or a second query round-trip). Rejected option (c) because a double-traversal is unnecessary — PRE alone yields correct cascade and the Phase 3 field-update loop already applies to the cascade targets without needing a second POST pass. See GAP-15 for the full remediation plan. |
+| D8 | IssueType helpers + `#[non_exhaustive]` + org-level ensure-and-heal + `claim` Agent precedence (unblock-wgj) | **Option (a) — full closure under one PR.** `IssueType` gains `#[non_exhaustive]` (BREAKING CHANGE) and three `pub const fn` canonical helpers (`canonical_name`, `canonical_color`, `canonical_description`) in `unblock-core` (mirrors `Status::option_name` discipline from `unblock-1zj`). `unblock-github` declares `REQUIRED_ISSUE_TYPES` as a compile-time constant derived from the enum (NO duplicated literal list). `setup_fields` extends idempotent posture with org-level IssueType ensure-and-heal — case-insensitive + byte-trim match, SKIP existing types, CREATE missing types using §2.6 canonical color/description verbatim. `SetupReport` gains additive `issue_types_created` field; `SetupResult` propagates it. `create`'s IssueType validator routes through `canonical_name` (resolves Appendix B DRIFT-2). `claim`'s Agent precedence becomes a three-step chain: explicit `params.agent` → `state.agent_kind_str()` → SKIP the Agent field update (no fallback to `config.agent`). All four changes land in one PR with `BREAKING CHANGE:` + `API:` commit footers per CLAUDE.md "Pub API Change Tracking". README documents the new `admin:org` scope requirement in the same PR. See GAP-16 for the full remediation plan and Appendix B for decision history. |
 
 ---
 
@@ -988,3 +1030,9 @@ Phase 01 is complete when:
     - **11(a) — Invariant 14(a) — ready-set source scoping (unblock-eos.4 / D6.a / GAP-14.b).** `DependencyGraph::compute_ready_set` takes `(configured_owner, configured_repo)` and filters cross-repo source issues at §3.3 Filter 3. A property test (§13.3 #7) asserts mixed-repo input → only configured-repo sources in the output. The BREAKING CHANGE footer per CLAUDE.md Pub API discipline has landed on the commit that changed the signature.
     - **11(b) — Invariant 14(b) — response-shape contract (GAP-14 / D6).** `ready`, `prime`, `dep_cycles`, `close` honor the `cross_repo_refs` contract. GAP-14 retro-fits landed. Integration tests cover `Some`/`None` branches for each.
     - **11(c) — error-side contract (GAP-14.c / unblock-eos Decisions 1 + 2).** `DomainError::{IssueBlocked, CircularDependency, DuplicateDependency}` carry `IssueRef` (unblock-29p.25, Task 02.02) with Display byte-for-byte preservation for `IssueRef::Local`; `InvalidIssueRef` and `CrossRepoAccessDenied` are wired at tool-boundary parse failures and GraphQL `FORBIDDEN` respectively (unblock-6xj); `crates/unblock-mcp/src/errors.rs` explicitly maps 403 → `-32602`. BREAKING CHANGE footer per CLAUDE.md has landed on the unblock-29p.25 commit.
+12. **IssueType + Agent precedence closure (SPEC §2.6, §5.7, §8.1, §8.10, §14 Invariants 17–18; GAP-16 / D8 / unblock-wgj)** — All four clauses MUST be green:
+    - **12(a) — Invariant 17 — IssueType helpers as single source of truth.** `IssueType` carries `#[non_exhaustive]` and the three `pub const fn` canonical helpers in `unblock-core`. `REQUIRED_ISSUE_TYPES` in `unblock-github` is derived from the enum at compile time. No duplicated literal list of issue type names, colors, or descriptions exists anywhere in the workspace. CI grep guard mirrored on the `unblock-1zj` Status discipline.
+    - **12(b) — `setup_fields` ensures org-level IssueTypes.** `setup_fields` ensures the six canonical `IssueType` variants exist on the org (case-insensitive matcher, SKIP existing types, CREATE missing types using §2.6 canonical color/description verbatim). `SetupReport.issue_types_created` and `SetupResult.issue_types_created` surface the outcome. Org-only scope: User-owned repos skip with an info-level log line. Integration tests cover org/user branches plus the case-insensitive matcher.
+    - **12(c) — `create` IssueType validator routes through helpers (Appendix B DRIFT-2).** Unknown `issue_type` values reject with `DomainError::Validation`; canonical names case-insensitively resolve. Integration test covers the matcher.
+    - **12(d) — Invariant 18 — `claim` Agent precedence chain.** Three-step chain (explicit → `agent_kind_str()` → SKIP) implemented per SPEC §8.1. Three integration tests cover all three branches per SPEC §13.3 graph-invariant 11. The claim comment renders `"Claimed by {agent} at {timestamp}"` when Agent is non-empty and `"Claimed at {timestamp}"` when empty.
+    - **Commit footer (cross-cutting).** The implementation commit carries both `BREAKING CHANGE:` (for `#[non_exhaustive]` on `IssueType`) and `API:` (for the additive helpers + the new `SetupReport.issue_types_created` field) per CLAUDE.md "Pub API Change Tracking". README documents the new `admin:org` scope requirement in the same PR.
