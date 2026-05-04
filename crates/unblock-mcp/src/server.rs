@@ -291,25 +291,35 @@ impl UnblockServer {
 /// `pub(crate)` otherwise (production builds).
 macro_rules! define_set_project_fields {
     ($vis:vis) => {
-        /// Updates Priority, Status, `StoryPoints`, and `DeferUntil`.
-        /// Each field update is best-effort: failures are logged as warnings
-        /// but do not abort the remaining updates. This keeps the create flow
-        /// resilient to partial project configuration (e.g. missing option
-        /// values).
+        /// Updates Priority, Status, Agent, `StoryPoints`, and
+        /// `DeferUntil`. Each field update is best-effort: failures are
+        /// logged as warnings but do not abort the remaining updates.
+        /// This keeps the create flow resilient to partial project
+        /// configuration (e.g. missing option values).
         ///
-        /// The `status` parameter controls the initial Status field value.
-        /// Callers MUST source the string from
+        /// The `status` parameter controls the initial Status field
+        /// value. Callers MUST source the string from
         /// [`unblock_core::types::Status::option_name`] — never a raw
         /// literal. Per `unblock-1zj` (spec §8.3) `create` always lands
         /// new issues in `Status::Backlog.option_name()` (= `"Backlog"`)
         /// regardless of blocker state, because Backlog is sticky.
         ///
-        /// Priority uses prefix matching so callers can pass short codes
-        /// like `"P0"` which resolve to the full option name `"P0 - Critical"`.
+        /// Priority uses prefix matching so callers can pass short
+        /// codes like `"P0"` which resolve to the full option name
+        /// `"P0 - Critical"`.
         ///
-        /// Exposed to integration tests when the `test-hooks` feature is
-        /// enabled. Production builds keep this `pub(crate)` so it never
-        /// appears on the library surface.
+        /// **Agent (introduced by `unblock-wgj`).** When `agent` is
+        /// `Some(name)`, the Agent text field is written to `name`.
+        /// When `None`, the Agent field write is SKIPPED (no field
+        /// update mutation issued — distinct from writing an empty
+        /// string). The caller is responsible for resolving the §8.1
+        /// precedence chain (explicit > `state.agent_kind_str()` >
+        /// omit) BEFORE invoking this helper. Spec §8.3 step 4
+        /// "omit-empty rule".
+        ///
+        /// Exposed to integration tests when the `test-hooks` feature
+        /// is enabled. Production builds keep this `pub(crate)` so it
+        /// never appears on the library surface.
         #[allow(clippy::too_many_arguments)]
         $vis async fn set_project_fields(
             client: &dyn GitHubApi,
@@ -318,6 +328,7 @@ macro_rules! define_set_project_fields {
             field_ids: &unblock_github::projects::ProjectFieldIds,
             priority: &str,
             status: &str,
+            agent: Option<&str>,
             story_points: Option<f64>,
             defer_until: Option<chrono::NaiveDate>,
         ) {
@@ -356,6 +367,22 @@ macro_rules! define_set_project_fields {
                     .await
             {
                 tracing::warn!(error = %e, "Failed to set Status field");
+            }
+
+            // Set Agent — gated on §8.1 precedence chain. `None` means
+            // SKIP the Agent field write (Invariant 18, §14). The
+            // caller resolved the chain before calling this helper.
+            if let Some(agent_name) = agent
+                && let Err(e) = client
+                    .update_field(
+                        project_id,
+                        item_id,
+                        &field_ids.agent,
+                        &FieldValue::Text(agent_name.to_owned()),
+                    )
+                    .await
+            {
+                tracing::warn!(error = %e, "Failed to set Agent field");
             }
 
             // Set StoryPoints if provided.
@@ -982,25 +1009,47 @@ impl UnblockServer {
         let state = self.state();
         let kind = state.agent_kind_str();
         let client = Arc::clone(&state.github);
-        let config = Arc::clone(&state.config);
 
         let issue_number = params.id;
         // Reject empty/whitespace-only agent strings (unblock-b6b.80). Falling
-        // through to config fallback on empty would mask caller intent.
+        // through to default on empty would mask caller intent.
         crate::tools::claim::validate_agent(params.agent.as_deref())
             .map_err(crate::errors::github_error_to_mcp)?;
-        let agent_name = params.agent.unwrap_or_else(|| config.agent.clone());
+
+        // Spec §8.1 Agent precedence chain (introduced by `unblock-wgj`):
+        //   1. params.agent = Some(name)        → use name verbatim
+        //   2. params.agent = None AND
+        //      state.agent_kind has been set    → use the detected kind
+        //   3. params.agent = None AND
+        //      no agent_kind                    → SKIP the Agent field
+        //                                         (no field write,
+        //                                         claim comment renders
+        //                                         without a `by {agent}`
+        //                                         substring).
+        // Crucially: `config.agent` is NO LONGER consulted by claim's
+        // precedence — Invariant 18 / §14. The `UNBLOCK_AGENT` env var
+        // is preserved for legacy/test reasons (§12) but does NOT feed
+        // into this chain.
+        //
+        // `state.agent_kind` is an `OnceLock<AgentKind>`; we MUST
+        // inspect `.get()` directly (rather than route through
+        // `agent_kind_str()` which fails open with `"unknown"` when
+        // unset). Tests cover all three branches.
+        let effective_agent: Option<String> = match params.agent {
+            Some(explicit) => Some(explicit),
+            None => state.agent_kind.get().map(|kind| kind.as_str().to_owned()),
+        };
 
         info!(
             agent.kind = %kind,
             issue_number,
-            agent = %agent_name,
+            agent = effective_agent.as_deref(),
             "Claim tool invoked"
         );
 
         let result = execute_write_tool(state, || {
             let client = Arc::clone(&client);
-            let agent_name = agent_name.clone();
+            let effective_agent = effective_agent.clone();
 
             async move {
                 // Step 1: Fetch the issue.
@@ -1023,11 +1072,11 @@ impl UnblockServer {
                 let now = Utc::now();
                 validate_claimable(&candidate, now.date_naive())?;
 
-                // Step 6 (SPEC §8.1 step 3): Update Projects V2 fields in the
-                // three-write ladder — Status, Agent, Claimed At. Each rung
-                // logs on failure and continues so a flaky non-Status write
-                // does not block the claim (matches the existing swallow-
-                // and-warn posture of the Status and Agent rungs).
+                // Step 6 (SPEC §8.1 step 3): Update Projects V2 fields. The
+                // Agent rung is GATED on the precedence chain — when
+                // `effective_agent` is `None` the Agent field write is
+                // SKIPPED entirely (Invariant 18, §14). Status and
+                // Claimed At always run.
                 if let Some(field_ids) = client.field_ids().await {
                     if let Ok(project_info) = client.resolve_project_info().await {
                         if let Ok(item_id) = client
@@ -1054,15 +1103,19 @@ impl UnblockServer {
                                 tracing::warn!(error = %e, "Failed to set Status field");
                             }
 
-                            // Agent -> agent_name
-                            if let Err(e) = client
-                                .update_field(
-                                    &project_info.id,
-                                    &item_id,
-                                    &field_ids.agent,
-                                    &FieldValue::Text(agent_name.clone()),
-                                )
-                                .await
+                            // Agent — gated on §8.1 precedence chain.
+                            // When effective_agent is None, the field
+                            // update is SKIPPED (no field write, not even
+                            // an empty string — per Invariant 18).
+                            if let Some(ref agent_name) = effective_agent
+                                && let Err(e) = client
+                                    .update_field(
+                                        &project_info.id,
+                                        &item_id,
+                                        &field_ids.agent,
+                                        &FieldValue::Text(agent_name.clone()),
+                                    )
+                                    .await
                             {
                                 tracing::warn!(error = %e, "Failed to set Agent field");
                             }
@@ -1099,9 +1152,16 @@ impl UnblockServer {
                     );
                 }
 
-                // Step 7: Post claim comment.
-                let comment_body =
-                    format!("\u{1F916} Claimed by {agent_name} at {}", now.to_rfc3339());
+                // Step 7: Post claim comment. Comment shape is
+                // parameterised on Agent emptiness per spec §8.1:
+                // - Agent non-empty → "Claimed by {agent} at {timestamp}"
+                // - Agent empty     → "Claimed at {timestamp}"
+                //                     (no `by {agent}` substring)
+                let comment_body = if let Some(ref agent_name) = effective_agent {
+                    format!("\u{1F916} Claimed by {agent_name} at {}", now.to_rfc3339())
+                } else {
+                    format!("\u{1F916} Claimed at {}", now.to_rfc3339())
+                };
                 if let Err(e) = client.add_comment(issue_number, comment_body).await {
                     tracing::warn!(error = %e, "Failed to post claim comment");
                 }
@@ -1109,7 +1169,7 @@ impl UnblockServer {
                 // Step 8: Return result (cache rebuild handled by execute_write_tool).
                 Ok(ClaimResult {
                     issue_number,
-                    agent: agent_name,
+                    agent: effective_agent,
                     claimed_at: now,
                 })
             }
@@ -1814,23 +1874,41 @@ impl UnblockServer {
             "Create tool invoked"
         );
 
-        // Validate issue_type if provided.
-        let issue_type_str = params.issue_type.as_deref().unwrap_or("Task");
-        if !matches!(
-            issue_type_str,
-            "Task" | "Bug" | "Feature" | "Epic" | "Chore"
-        ) {
-            return Err(ErrorData {
-                code: rmcp::model::ErrorCode::INVALID_PARAMS,
-                message: format!(
-                    "Invalid issue_type '{issue_type_str}' — must be Task, Bug, Feature, Epic, or Chore"
-                )
-                .into(),
-                data: None,
-            });
-        }
+        // Spec §8.3 create-time defaults — IssueType validation +
+        // resolution. The validator routes through
+        // `IssueType::canonical_name` (case-insensitive + byte-trim per
+        // the §5.7 normaliser), accepting any of the eight canonical
+        // variants (Task, Bug, Feature, Spike, Epic, Chore, Refactor,
+        // Docs). DRIFT-2 closure: previously the literal-list match
+        // rejected `Spike` despite `IssueType::Spike` existing in the
+        // enum (Appendix B DRIFT-2). The new path is auto-extending —
+        // adding a variant to `IssueType` does not require touching
+        // this site.
+        let issue_type = match params.issue_type.as_deref() {
+            Some(raw) => {
+                unblock_core::types::IssueType::from_canonical_name(raw).ok_or_else(|| {
+                    ErrorData {
+                        code: rmcp::model::ErrorCode::INVALID_PARAMS,
+                        message: format!(
+                            "Invalid issue_type '{raw}' — must be one of {}",
+                            unblock_core::types::IssueType::ALL
+                                .iter()
+                                .map(|v| v.canonical_name())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                        .into(),
+                        data: None,
+                    }
+                })?
+            }
+            // Canonical default (spec §8.3 / Appendix B Decision 5).
+            None => unblock_core::types::IssueType::Task,
+        };
+        let issue_type_canonical = issue_type.canonical_name();
 
-        // Validate priority if provided.
+        // Validate priority if provided. Canonical default is P2
+        // (spec §8.3 — Medium).
         let priority_str = params.priority.as_deref().unwrap_or("P2");
         if !matches!(priority_str, "P0" | "P1" | "P2" | "P3" | "P4") {
             return Err(ErrorData {
@@ -1842,6 +1920,23 @@ impl UnblockServer {
                 data: None,
             });
         }
+
+        // Spec §8.3 Agent precedence (mirrors §8.1 claim chain):
+        // explicit > state.agent_kind > omit. `config.agent` is NOT
+        // consulted (Invariant 18, §14). `state.agent_kind` is an
+        // `OnceLock<AgentKind>` — inspect `.get()` directly because
+        // `agent_kind_str()` fails open with `"unknown"` when unset.
+        let effective_agent: Option<String> = match params.agent.clone() {
+            Some(explicit) if !explicit.trim().is_empty() => Some(explicit),
+            Some(_) => {
+                return Err(ErrorData {
+                    code: rmcp::model::ErrorCode::INVALID_PARAMS,
+                    message: "agent parameter must not be empty or whitespace-only".into(),
+                    data: None,
+                });
+            }
+            None => state.agent_kind.get().map(|kind| kind.as_str().to_owned()),
+        };
 
         // Parse defer_until if provided.
         let defer_until = if let Some(ref date_str) = params.defer_until {
@@ -1896,9 +1991,10 @@ impl UnblockServer {
         let title = params.title.clone();
         let parent = params.parent;
         let story_points = params.story_points;
-        let issue_type_owned = issue_type_str.to_owned();
+        let issue_type_owned = issue_type_canonical.to_owned();
         let priority_owned = priority_str.to_owned();
         let milestone_title = params.milestone.clone();
+        let effective_agent = effective_agent.clone();
 
         let result = execute_write_tool(state, || {
             let client = Arc::clone(&client);
@@ -1909,6 +2005,7 @@ impl UnblockServer {
             let issue_type_owned = issue_type_owned.clone();
             let priority_owned = priority_owned.clone();
             let milestone_title = milestone_title.clone();
+            let effective_agent = effective_agent.clone();
 
             async move {
                 // Step 1: Ensure labels exist on the repo.
@@ -1944,13 +2041,17 @@ impl UnblockServer {
                 };
                 let milestone_set = milestone_number.is_some();
 
-                // Step 3: Create the issue.
+                // Step 3: Create the issue. Per spec §8.3 step 2 the
+                // native `IssueType` is sent in the REST POST body
+                // (`type` field) so GitHub's org-level issue-type
+                // catalogue assigns it without a separate mutation.
                 let create_params = unblock_github::mutations::CreateIssueParams {
                     title,
                     body,
                     labels,
                     milestone: milestone_number,
                     assignees: Vec::new(),
+                    issue_type: Some(issue_type_owned.clone()),
                 };
 
                 let issue = client.create_issue(create_params).await?;
@@ -1996,6 +2097,7 @@ impl UnblockServer {
                                         &field_ids,
                                         &priority_owned,
                                         initial_status,
+                                        effective_agent.as_deref(),
                                         story_points,
                                         defer_until,
                                     )
@@ -2183,6 +2285,46 @@ impl UnblockServer {
             });
         }
 
+        // Validate agent if provided (non-empty after trim).
+        // Spec §8.6: explicit non-empty value flows through verbatim;
+        // empty/whitespace is rejected (matching the §8.1 claim
+        // posture so callers can't accidentally clear Agent with
+        // a malformed empty string).
+        if let Some(ref a) = params.agent
+            && a.trim().is_empty()
+        {
+            return Err(ErrorData {
+                code: rmcp::model::ErrorCode::INVALID_PARAMS,
+                message: "agent parameter must not be empty or whitespace-only".into(),
+                data: None,
+            });
+        }
+
+        // Validate issue_type if provided. DRIFT-3 closure (§8.6 /
+        // Appendix B) — routes through `IssueType::canonical_name`
+        // (case-insensitive + byte-trim per the §5.7 normaliser).
+        let validated_issue_type: Option<unblock_core::types::IssueType> =
+            match params.issue_type.as_deref() {
+                Some(raw) => Some(
+                    unblock_core::types::IssueType::from_canonical_name(raw).ok_or_else(|| {
+                        ErrorData {
+                            code: rmcp::model::ErrorCode::INVALID_PARAMS,
+                            message: format!(
+                                "Invalid issue_type '{raw}' — must be one of {}",
+                                unblock_core::types::IssueType::ALL
+                                    .iter()
+                                    .map(|v| v.canonical_name())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )
+                            .into(),
+                            data: None,
+                        }
+                    })?,
+                ),
+                None => None,
+            };
+
         // Parse defer_until if provided.
         let defer_until = if let Some(ref date_str) = params.defer_until {
             Some(
@@ -2217,9 +2359,20 @@ impl UnblockServer {
 
                 let mut fields_updated: Vec<String> = Vec::new();
 
-                // Step 2: Update Projects V2 fields if any project fields changed.
+                // Step 2 (spec §8.6 step 4 — DRIFT-3 closure): if
+                // `issue_type` was provided, dispatch the GitHub
+                // native IssueType update mutation. This is NOT a
+                // Projects V2 field — it routes through the REST
+                // PATCH `type` payload (§2.6).
+                if let Some(it) = validated_issue_type {
+                    client.update_issue_type(issue_number, it).await?;
+                    fields_updated.push(format!("issue_type={}", it.canonical_name()));
+                }
+
+                // Step 2b: Update Projects V2 fields if any project fields changed.
                 let has_project_updates = params.priority.is_some()
                     || params.status.is_some()
+                    || params.agent.is_some()
                     || params.story_points.is_some()
                     || defer_until.is_some();
 
@@ -2267,6 +2420,28 @@ impl UnblockServer {
                                         tracing::warn!(error = %e, "Failed to set Status field");
                                     } else {
                                         fields_updated.push(format!("status={s}"));
+                                    }
+                                }
+
+                                // Agent (spec §8.6 — DRIFT-3 closure).
+                                // `params.agent = Some(name)` writes
+                                // the Agent text field verbatim;
+                                // absence leaves it unmodified (no
+                                // `update_field` mutation issued).
+                                if let Some(ref a) = params.agent {
+                                    match client
+                                        .update_field(
+                                            &project_info.id,
+                                            &item_id,
+                                            &field_ids.agent,
+                                            &FieldValue::Text(a.clone()),
+                                        )
+                                        .await
+                                    {
+                                        Ok(()) => fields_updated.push(format!("agent={a}")),
+                                        Err(e) => {
+                                            tracing::warn!(error = %e, "Failed to set Agent field");
+                                        }
                                     }
                                 }
 

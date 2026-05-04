@@ -12,16 +12,34 @@ use serde::{Deserialize, Serialize};
 
 /// Input parameters for the `create` MCP tool.
 ///
-/// Only `title` is required. All other fields are optional and have sensible
-/// defaults: `issue_type` defaults to `Task`, `priority` defaults to `P2`.
+/// Only `title` is required. All other fields are optional and have
+/// canonical defaults defined by spec §8.3 (introduced by `unblock-wgj`):
+/// - `issue_type` defaults to `Task` — full taxonomy is `Task`, `Bug`,
+///   `Feature`, `Spike`, `Epic`, `Chore`, `Refactor`, `Docs` (sourced
+///   from `IssueType::canonical_name`, spec §2.6).
+/// - `priority` defaults to `P2` (Medium).
+/// - `agent` follows the §8.1 precedence chain: explicit param >
+///   `state.agent_kind_str()` (when the MCP client identifies as a
+///   known agent) > omit (no field write). `config.agent` is NOT
+///   consulted.
+/// - `Status` is server-managed and always lands in `Backlog` per the
+///   `unblock-1zj` sticky-default rule.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CreateParams {
     /// Issue title (required).
     pub title: String,
-    /// Issue type: Task, Bug, Feature, Epic, Chore. Defaults to Task.
+    /// Issue type — one of the eight canonical variants:
+    /// `Task`, `Bug`, `Feature`, `Spike`, `Epic`, `Chore`, `Refactor`,
+    /// `Docs`. Case-insensitive + byte-trim per the §5.7 normaliser.
+    /// Defaults to `Task`.
     pub issue_type: Option<String>,
-    /// Priority: P0, P1, P2, P3, P4. Defaults to P2.
+    /// Priority: `P0`, `P1`, `P2`, `P3`, `P4`. Defaults to `P2`.
     pub priority: Option<String>,
+    /// Agent name. When `Some`, written to the Agent project field
+    /// verbatim. When `None`, the §8.1 precedence chain falls through
+    /// to `state.agent_kind_str()` (the detected MCP client) and
+    /// finally to "leave the field empty" (no field write). Spec §8.3.
+    pub agent: Option<String>,
     /// Issue body in markdown. If omitted, a `BodySections` template is generated.
     pub body: Option<String>,
     /// Labels to attach. Labels that do not exist on the repo are created.

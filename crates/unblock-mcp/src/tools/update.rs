@@ -39,8 +39,12 @@ pub struct BodySectionUpdate {
 
 /// Input parameters for the `update` MCP tool.
 ///
-/// All fields except `id` are optional. Only provided fields are updated;
-/// omitted fields are left unchanged on the issue.
+/// All fields except `id` are optional. Only provided fields are
+/// updated; omitted fields are left unchanged on the issue. Per spec
+/// §8.6 (introduced by `unblock-wgj`), `agent` and `issue_type` follow
+/// a uniform "explicit param flows through unchanged; absence leaves
+/// field unmodified" rule — INTENTIONALLY DIFFERENT from `claim`
+/// (§8.1) and `create` (§8.3) which apply the precedence chain.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct UpdateParams {
     /// Issue number to update (required).
@@ -51,6 +55,22 @@ pub struct UpdateParams {
     /// (canonical `TitleCase` Projects V2 option names sourced from
     /// `unblock_core::types::Status::option_name`; spec §13.3, §2.3).
     pub status: Option<String>,
+    /// New Agent name. When `Some`, written to the Agent project field
+    /// verbatim. When `None`, the Agent field is LEFT UNMODIFIED (no
+    /// field-update mutation issued — distinct from writing an empty
+    /// string). Spec §8.6 absence-leaves-unmodified rule (introduced
+    /// by `unblock-wgj`, DRIFT-3 closure). There is NO fallback to
+    /// `state.agent_kind_str()` or any canonical default in `update` —
+    /// absence means "do not touch this field".
+    pub agent: Option<String>,
+    /// New `IssueType` — one of the eight canonical variants:
+    /// `Task`, `Bug`, `Feature`, `Spike`, `Epic`, `Chore`, `Refactor`,
+    /// `Docs`. Case-insensitive + byte-trim per the §5.7 normaliser,
+    /// routed through `IssueType::canonical_name`. When `None`, the
+    /// `IssueType` is LEFT UNMODIFIED (no native `IssueType` mutation
+    /// issued). Spec §8.6 / Appendix B DRIFT-3 closure (introduced by
+    /// `unblock-wgj`).
+    pub issue_type: Option<String>,
     /// Labels to add to the issue.
     pub labels_add: Option<Vec<String>>,
     /// Labels to remove from the issue.

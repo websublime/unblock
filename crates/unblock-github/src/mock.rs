@@ -98,6 +98,7 @@ pub struct CallCounts {
     add_comment_in_repo: AtomicUsize,
     add_comment_ref: AtomicUsize,
     update_issue_body: AtomicUsize,
+    update_issue_type: AtomicUsize,
     add_labels_to_issue: AtomicUsize,
     remove_label_from_issue: AtomicUsize,
     add_assignees_to_issue: AtomicUsize,
@@ -154,6 +155,7 @@ impl CallCounts {
         add_comment_in_repo,
         add_comment_ref,
         update_issue_body,
+        update_issue_type,
         add_labels_to_issue,
         remove_label_from_issue,
         add_assignees_to_issue,
@@ -205,6 +207,7 @@ impl CallCounts {
             add_comment_in_repo,
             add_comment_ref,
             update_issue_body,
+            update_issue_type,
             add_labels_to_issue,
             remove_label_from_issue,
             add_assignees_to_issue,
@@ -268,6 +271,7 @@ pub struct Stubs {
     /// covering SPEC §8.2 step 6 / §11.4 row 4.
     add_comment_ref_calls: Mutex<Vec<IssueRef>>,
     update_issue_body: Mutex<VecDeque<Result<(), Error>>>,
+    update_issue_type: Mutex<VecDeque<Result<(), Error>>>,
     add_labels_to_issue: Mutex<VecDeque<Result<(), Error>>>,
     remove_label_from_issue: Mutex<VecDeque<Result<(), Error>>>,
     add_assignees_to_issue: Mutex<VecDeque<Result<(), Error>>>,
@@ -441,6 +445,7 @@ push_result!(add_comment, push_add_comment, String);
 push_result!(add_comment_in_repo, push_add_comment_in_repo, String);
 push_result!(add_comment_ref, push_add_comment_ref, String);
 push_result!(update_issue_body, push_update_issue_body, ());
+push_result!(update_issue_type, push_update_issue_type, ());
 push_result!(add_labels_to_issue, push_add_labels_to_issue, ());
 push_result!(remove_label_from_issue, push_remove_label_from_issue, ());
 push_result!(add_assignees_to_issue, push_add_assignees_to_issue, ());
@@ -670,6 +675,15 @@ impl GitHubApi for MockGitHubClient {
     async fn update_issue_body(&self, _number: u64, _body: String) -> Result<(), Error> {
         self.calls.update_issue_body.fetch_add(1, Ordering::SeqCst);
         pop_or_unstubbed(&self.stubs.update_issue_body, "update_issue_body")
+    }
+
+    async fn update_issue_type(
+        &self,
+        _number: u64,
+        _issue_type: unblock_core::types::IssueType,
+    ) -> Result<(), Error> {
+        self.calls.update_issue_type.fetch_add(1, Ordering::SeqCst);
+        pop_or_unstubbed(&self.stubs.update_issue_type, "update_issue_type")
     }
 
     async fn add_labels_to_issue(&self, _number: u64, _labels: Vec<String>) -> Result<(), Error> {

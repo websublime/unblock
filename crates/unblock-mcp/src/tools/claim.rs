@@ -18,26 +18,42 @@ use unblock_core::types::{IssueRef, IssueState, RelatedIssue, Status};
 
 /// Input parameters for the `claim` MCP tool.
 ///
-/// Only `id` is required. If `agent` is not provided, falls back to
-/// `Config.agent` (from `UNBLOCK_AGENT`), then `"unknown"`.
+/// Only `id` is required. The `agent` parameter follows the spec §8.1
+/// precedence chain (introduced by `unblock-wgj`):
+/// 1. `params.agent = Some(name)` — explicit caller choice always wins.
+/// 2. `params.agent = None` AND the MCP server has a detected
+///    `agent_kind` (`AgentKind` populated during `initialize` —
+///    e.g. `claude-code`, `cursor`) — that kind is written to the
+///    Agent field.
+/// 3. `params.agent = None` AND no `agent_kind` is set — the Agent
+///    field update is SKIPPED (no fallback to `Config.agent`).
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ClaimParams {
     /// Issue number to claim (required).
     pub id: u64,
-    /// Agent name claiming the issue. Defaults to the configured agent name.
+    /// Agent name claiming the issue. When `None`, the server falls
+    /// through to `state.agent_kind` (per the §8.1 precedence chain)
+    /// and finally to "leave the Agent field empty" — see the struct
+    /// docs above for the full chain.
     pub agent: Option<String>,
 }
 
 /// Result returned by the `claim` MCP tool.
 ///
-/// Contains the claimed issue number, the resolved agent name, and the
-/// timestamp when the claim was recorded.
+/// Contains the claimed issue number, the resolved agent name (if any),
+/// and the timestamp when the claim was recorded.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ClaimResult {
     /// The claimed issue number.
     pub issue_number: u64,
-    /// The agent name that claimed the issue.
-    pub agent: String,
+    /// The agent name that claimed the issue, or `None` when the spec
+    /// §8.1 precedence chain resolved to "leave the Agent field empty"
+    /// (no `params.agent` AND no detected `agent_kind`). Mirrors the
+    /// Projects V2 Agent field — `None` here means no field write was
+    /// issued (skipped, per the precedence chain) and the claim
+    /// comment rendered without a `by {agent}` substring.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
     /// Timestamp when the claim was recorded (ISO 8601).
     pub claimed_at: DateTime<Utc>,
 }
