@@ -4216,8 +4216,9 @@ async fn create_issue_with_all_params_and_refetch() {
     let state = test_server_state().await;
     let client = &state.github;
 
+    // Realistic Bug fixture (spec Appendix B.3 — unblock-wgj.22).
     let title = format!(
-        "[test] create tool integration test {}",
+        "Fix authentication bypass in /login endpoint {}",
         chrono::Utc::now().timestamp()
     );
 
@@ -4278,7 +4279,10 @@ async fn create_issue_with_blocked_by_local() {
     let client = &state.github;
 
     // Create blocker issue first.
-    let blocking_title = format!("[test] blocker issue {}", chrono::Utc::now().timestamp());
+    let blocking_title = format!(
+        "Migrate auth middleware to async {}",
+        chrono::Utc::now().timestamp()
+    );
     let blocking_issue = client
         .create_issue(unblock_github::mutations::CreateIssueParams {
             title: blocking_title,
@@ -4292,7 +4296,10 @@ async fn create_issue_with_blocked_by_local() {
         .expect("create blocker issue should succeed");
 
     // Create blocked issue.
-    let dependent_title = format!("[test] blocked issue {}", chrono::Utc::now().timestamp());
+    let dependent_title = format!(
+        "Add OAuth callback handler {}",
+        chrono::Utc::now().timestamp()
+    );
     let dependent_issue = client
         .create_issue(unblock_github::mutations::CreateIssueParams {
             title: dependent_title,
@@ -4362,7 +4369,7 @@ async fn create_issue_with_blocked_by_cross_repo() {
 
     // Create blocker issue.
     let blocking_title = format!(
-        "[test] cross-repo blocker issue {}",
+        "Investigate flaky checkout test {}",
         chrono::Utc::now().timestamp()
     );
     let blocking_issue = client
@@ -4379,7 +4386,7 @@ async fn create_issue_with_blocked_by_cross_repo() {
 
     // Create dependent issue.
     let dependent_title = format!(
-        "[test] cross-repo blocked issue {}",
+        "Add OAuth token validation {}",
         chrono::Utc::now().timestamp()
     );
     let dependent_issue = client
@@ -4448,7 +4455,10 @@ async fn create_issue_with_parent_sub_issue() {
     let client = &state.github;
 
     // Create parent issue.
-    let parent_title = format!("[test] parent issue {}", chrono::Utc::now().timestamp());
+    let parent_title = format!(
+        "Implement OAuth login flow {}",
+        chrono::Utc::now().timestamp()
+    );
     let parent = client
         .create_issue(unblock_github::mutations::CreateIssueParams {
             title: parent_title,
@@ -4462,7 +4472,10 @@ async fn create_issue_with_parent_sub_issue() {
         .expect("create parent issue should succeed");
 
     // Create child issue.
-    let child_title = format!("[test] child issue {}", chrono::Utc::now().timestamp());
+    let child_title = format!(
+        "Add OAuth callback handler {}",
+        chrono::Utc::now().timestamp()
+    );
     let child = client
         .create_issue(unblock_github::mutations::CreateIssueParams {
             title: child_title,
@@ -4523,7 +4536,10 @@ async fn create_issue_with_defaults() {
     let state = test_server_state().await;
     let client = &state.github;
 
-    let title = format!("[test] defaults test {}", chrono::Utc::now().timestamp());
+    let title = format!(
+        "Bump dependency versions {}",
+        chrono::Utc::now().timestamp()
+    );
 
     let issue = client
         .create_issue(unblock_github::mutations::CreateIssueParams {
@@ -4598,7 +4614,10 @@ async fn create_issue_appears_in_ready_set_after_rebuild() {
     let state = test_server_state().await;
     let client = &state.github;
 
-    let title = format!("[test] ready set test {}", chrono::Utc::now().timestamp());
+    let title = format!(
+        "Document Projects V2 setup workflow {}",
+        chrono::Utc::now().timestamp()
+    );
 
     let issue = client
         .create_issue(unblock_github::mutations::CreateIssueParams {
