@@ -44,6 +44,66 @@ docs/
 
 The `docs/archive/` directory contains the original documentation written before this structure was adopted. Preserved for reference but superseded by the documents above.
 
+## Token scopes
+
+The configured `GITHUB_TOKEN` (PAT or GitHub App) drives both the live
+test job and the production MCP server. The required scopes depend on
+which `setup` operations are exercised:
+
+- `repo` — required for issue read/write, REST mutations, GraphQL
+  read queries, and Projects V2 item placement.
+- `project` — required for Projects V2 field management
+  (`createProjectV2Field`, `updateProjectV2Field`, view CRUD).
+- `read:org` — required for **reading** org-level GitHub issue types
+  during `setup_fields` (always read; idempotent diff against the
+  canonical eight `Task`, `Bug`, `Feature`, `Spike`, `Epic`, `Chore`,
+  `Refactor`, `Docs`).
+- `admin:org` — required ONLY when `setup_fields`'s `IssueType`
+  ensure-and-heal step needs to **create** missing org-level issue
+  types (`POST /orgs/{org}/issue-types`). Subsequent `setup` runs
+  against an org that already carries all eight canonical types only
+  need `read:org`. When the token lacks `admin:org` and creation is
+  needed, the server surfaces a typed
+  `IssueTypeManagementForbidden { org }` error pointing operators at
+  the upgrade path. Org admins can also pre-create the eight canonical
+  issue types in the org settings UI as a no-token-elevation alternative.
+
+See [docs/specs/01-spec-mcp-foundation.md §5.7][spec-§5.7] for the
+ensure-and-heal contract and [§12][spec-§12] for the full token-scope
+matrix.
+
+[spec-§5.7]: docs/specs/01-spec-mcp-foundation.md
+[spec-§12]: docs/specs/01-spec-mcp-foundation.md
+
+## Create-time defaults
+
+The `create` MCP tool resolves four default-bearing project fields
+deterministically before issuing any GitHub mutation. The precedence
+table below is normative — see
+[docs/specs/01-spec-mcp-foundation.md §8.3][spec-§8.3]:
+
+| Field       | If `params.<x>` is `Some`               | If `params.<x>` is `None`                                                  |
+|-------------|------------------------------------------|----------------------------------------------------------------------------|
+| `Status`    | (server-managed — no param)              | `Backlog` (sticky default per `unblock-1zj`; only explicit transitions move out) |
+| `Priority`  | use the validated value                  | `P2` — Medium                                                              |
+| `Agent`     | use the validated non-empty value        | `state.agent_kind_str()` if a known agent kind was detected, else **omit** |
+| `IssueType` | use the canonical name (case-insensitive) | `Task`                                                                     |
+
+Note: `config.agent` is NOT consulted by `claim` or `create` — the
+`UNBLOCK_AGENT` env var is preserved for legacy/test purposes only
+(see [§12][spec-§12]).
+
+The eight canonical `IssueType` variants are sourced from
+`unblock_core::types::IssueType::canonical_name`: `Task`, `Bug`,
+`Feature`, `Spike`, `Epic`, `Chore`, `Refactor`, `Docs`. The `update`
+tool's `issue_type` param accepts the same set with case-insensitive
+matching, but per [§8.6][spec-§8.6] follows an
+absence-leaves-unmodified rule (no fallback chain — explicit
+opt-in only).
+
+[spec-§8.3]: docs/specs/01-spec-mcp-foundation.md
+[spec-§8.6]: docs/specs/01-spec-mcp-foundation.md
+
 ## CI live tests
 
 The `test-mcp-live` job in `.github/workflows/ci.yml` exercises the live GitHub API path of `unblock-mcp` (the `#[ignore]` integration tests under `crates/unblock-mcp/tests/`). It runs only on first-party events — pushes to `main`, scheduled nightly builds, manual `workflow_dispatch`, and PRs whose head branch lives in this repository — so forked PRs never see the secret.
@@ -52,6 +112,8 @@ The job has a preflight step that fails fast with an actionable error if any of 
 
 ```bash
 # Repository secret — fine-grained PAT or classic PAT with `repo` + `project` scopes
+# (plus `read:org` for IssueType ensure-and-heal; add `admin:org` ONLY if the test
+#  org does not already have the eight canonical types — see Token scopes above)
 gh secret set UNBLOCK_TEST_TOKEN --body '<github-pat>'
 
 # Repository variable — the owner/repo string the live tests should hit

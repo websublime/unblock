@@ -22,7 +22,7 @@
 //! full rationale.
 
 use unblock_core::config::Config;
-use unblock_core::types::{IssueState, Status};
+use unblock_core::types::{IssueState, IssueType, Status};
 use unblock_github::client::GitHubClient;
 use unblock_github::mutations::CreateIssueParams;
 use unblock_github::projects::{CreateViewParams, FieldValue, OwnerType, ViewLayout};
@@ -490,13 +490,24 @@ async fn create_issue_returns_issue_with_correct_fields() {
         .await
         .expect("GitHubClient::new() should succeed");
 
+    // Realistic Bug fixture (spec Appendix B.3 — unblock-wgj.22).
+    // Exercises the `Bug` IssueType + canonical Bug body shape that
+    // operators see on the live board.
     let params = CreateIssueParams {
-        title: "[test] create_issue integration test".to_owned(),
-        body: Some("Automated integration test — safe to close.".to_owned()),
+        title: "Fix authentication bypass in /login endpoint".to_owned(),
+        body: Some(
+            "Automated integration test for the live `create_issue` path \
+             — safe to close. Models a high-severity auth regression."
+                .to_owned(),
+        ),
         labels: vec!["test".to_owned()],
         milestone: None,
         assignees: vec![],
-        issue_type: None,
+        issue_type: Some(
+            unblock_core::types::IssueType::Bug
+                .canonical_name()
+                .to_owned(),
+        ),
     };
 
     let issue = client
@@ -510,7 +521,7 @@ async fn create_issue_returns_issue_with_correct_fields() {
     // Verify the returned issue has the correct fields.
     assert!(issue.number > 0, "issue number should be positive");
     assert_eq!(
-        issue.title, "[test] create_issue integration test",
+        issue.title, "Fix authentication bypass in /login endpoint",
         "title should match what was provided"
     );
     assert!(!issue.node_id.is_empty(), "node_id should be non-empty");
@@ -549,14 +560,19 @@ async fn close_issue_closes_issue_and_refetch_confirms() {
         .await
         .expect("GitHubClient::new() should succeed");
 
-    // Create an issue to close.
+    // Create a Refactor fixture to close (spec Appendix B.3 —
+    // unblock-wgj.22). Exercises the `Refactor` IssueType.
     let params = CreateIssueParams {
-        title: "[test] close_issue integration test".to_owned(),
-        body: Some("Automated integration test — will be closed.".to_owned()),
+        title: "Migrate auth middleware to async".to_owned(),
+        body: Some(
+            "Automated integration test for the live `close_issue` \
+             path — will be closed."
+                .to_owned(),
+        ),
         labels: vec!["test".to_owned()],
         milestone: None,
         assignees: vec![],
-        issue_type: None,
+        issue_type: Some(IssueType::Refactor.canonical_name().to_owned()),
     };
 
     let issue = client
@@ -603,10 +619,17 @@ async fn close_issue_with_reason_adds_comment_before_closing() {
         .await
         .expect("GitHubClient::new() should succeed");
 
-    // Create an issue to close with a reason.
+    // Create a Spike fixture to close with a reason (spec Appendix
+    // B.3 — unblock-wgj.22). Exercises the `Spike` IssueType +
+    // canonical Priority default (P2 — Medium).
     let params = CreateIssueParams {
-        title: "[test] close_issue_with_reason integration test".to_owned(),
-        body: Some("Automated integration test — will be closed with reason.".to_owned()),
+        title: "Investigate flaky checkout test".to_owned(),
+        body: Some(
+            "Automated integration test for the live `close_issue` \
+             path — will be closed with a reason. Models a time-boxed \
+             investigation of an intermittent checkout test failure."
+                .to_owned(),
+        ),
         labels: vec!["test".to_owned()],
         milestone: None,
         assignees: vec![],
@@ -707,14 +730,19 @@ async fn add_comment_posts_comment_and_returns_url() {
         .await
         .expect("GitHubClient::new() should succeed");
 
-    // Create an issue to comment on.
+    // Create a Docs fixture to comment on (spec Appendix B.3 —
+    // unblock-wgj.22). Exercises the `Docs` IssueType.
     let params = CreateIssueParams {
-        title: "[test] add_comment integration test".to_owned(),
-        body: Some("Automated integration test — will receive a comment.".to_owned()),
+        title: "Document Projects V2 setup workflow".to_owned(),
+        body: Some(
+            "Automated integration test for the live `add_comment` path \
+             — will receive a comment. Models a documentation task."
+                .to_owned(),
+        ),
         labels: vec!["test".to_owned()],
         milestone: None,
         assignees: vec![],
-        issue_type: None,
+        issue_type: Some(IssueType::Docs.canonical_name().to_owned()),
     };
 
     let issue = client
@@ -812,15 +840,16 @@ async fn add_blocked_by_creates_blocking_relationship() {
         .await
         .expect("GitHubClient::new() should succeed");
 
-    // Create two issues: A will be blocked by B.
+    // Create two `Task` fixtures from the OAuth Epic family
+    // (spec Appendix B.3 — unblock-wgj.22). A will be blocked by B.
     let issue_a = client
         .create_issue(CreateIssueParams {
-            title: "[test] add_blocked_by issue A (blocked)".to_owned(),
+            title: "Add OAuth callback handler".to_owned(),
             body: Some("Automated test — safe to close.".to_owned()),
             labels: vec!["test".to_owned()],
             milestone: None,
             assignees: vec![],
-            issue_type: None,
+            issue_type: Some(IssueType::Task.canonical_name().to_owned()),
         })
         .await
         .expect("create_issue A should succeed");
@@ -829,12 +858,12 @@ async fn add_blocked_by_creates_blocking_relationship() {
 
     let issue_b = client
         .create_issue(CreateIssueParams {
-            title: "[test] add_blocked_by issue B (blocker)".to_owned(),
+            title: "Add OAuth token validation".to_owned(),
             body: Some("Automated test — safe to close.".to_owned()),
             labels: vec!["test".to_owned()],
             milestone: None,
             assignees: vec![],
-            issue_type: None,
+            issue_type: Some(IssueType::Task.canonical_name().to_owned()),
         })
         .await
         .expect("create_issue B should succeed");
@@ -900,15 +929,17 @@ async fn remove_blocked_by_removes_blocking_relationship() {
         .await
         .expect("GitHubClient::new() should succeed");
 
-    // Create two issues: A will be blocked by B, then unblocked.
+    // Create a `Chore` and a `Refactor` fixture (spec Appendix B.3 —
+    // unblock-wgj.22). Exercises both NEW IssueType variants.
+    // A will be blocked by B, then unblocked.
     let issue_a = client
         .create_issue(CreateIssueParams {
-            title: "[test] remove_blocked_by issue A".to_owned(),
+            title: "Bump dependency versions".to_owned(),
             body: Some("Automated test — safe to close.".to_owned()),
             labels: vec!["test".to_owned()],
             milestone: None,
             assignees: vec![],
-            issue_type: None,
+            issue_type: Some(IssueType::Chore.canonical_name().to_owned()),
         })
         .await
         .expect("create_issue A should succeed");
@@ -917,12 +948,12 @@ async fn remove_blocked_by_removes_blocking_relationship() {
 
     let issue_b = client
         .create_issue(CreateIssueParams {
-            title: "[test] remove_blocked_by issue B".to_owned(),
+            title: "Migrate auth middleware to async".to_owned(),
             body: Some("Automated test — safe to close.".to_owned()),
             labels: vec!["test".to_owned()],
             milestone: None,
             assignees: vec![],
-            issue_type: None,
+            issue_type: Some(IssueType::Refactor.canonical_name().to_owned()),
         })
         .await
         .expect("create_issue B should succeed");
@@ -990,15 +1021,15 @@ async fn add_blocked_by_duplicate_returns_duplicate_dependency() {
         .await
         .expect("GitHubClient::new() should succeed");
 
-    // Create two issues.
+    // Create two realistic fixtures (spec Appendix B.3 — unblock-wgj.22).
     let issue_a = client
         .create_issue(CreateIssueParams {
-            title: "[test] duplicate_dependency issue A".to_owned(),
+            title: "Investigate flaky checkout test".to_owned(),
             body: Some("Automated test — safe to close.".to_owned()),
             labels: vec!["test".to_owned()],
             milestone: None,
             assignees: vec![],
-            issue_type: None,
+            issue_type: Some(IssueType::Spike.canonical_name().to_owned()),
         })
         .await
         .expect("create_issue A should succeed");
@@ -1007,12 +1038,12 @@ async fn add_blocked_by_duplicate_returns_duplicate_dependency() {
 
     let issue_b = client
         .create_issue(CreateIssueParams {
-            title: "[test] duplicate_dependency issue B".to_owned(),
+            title: "Fix authentication bypass in /login endpoint".to_owned(),
             body: Some("Automated test — safe to close.".to_owned()),
             labels: vec!["test".to_owned()],
             milestone: None,
             assignees: vec![],
-            issue_type: None,
+            issue_type: Some(IssueType::Bug.canonical_name().to_owned()),
         })
         .await
         .expect("create_issue B should succeed");
@@ -1127,15 +1158,18 @@ async fn add_sub_issue_creates_parent_child_relationship() {
         .await
         .expect("GitHubClient::new() should succeed");
 
-    // Create parent and child issues.
+    // Spec Appendix B.3 (unblock-wgj.22): Epic + Task hierarchy
+    // exemplar — the canonical OAuth login flow Epic with one
+    // sub-Task. Exercises the `Epic` and `Task` IssueType variants
+    // and the `add_sub_issue` API path.
     let parent = client
         .create_issue(CreateIssueParams {
-            title: "[test] add_sub_issue parent".to_owned(),
+            title: "Implement OAuth login flow".to_owned(),
             body: Some("Automated test — safe to close.".to_owned()),
             labels: vec!["test".to_owned()],
             milestone: None,
             assignees: vec![],
-            issue_type: None,
+            issue_type: Some(IssueType::Epic.canonical_name().to_owned()),
         })
         .await
         .expect("create parent should succeed");
@@ -1144,12 +1178,12 @@ async fn add_sub_issue_creates_parent_child_relationship() {
 
     let child = client
         .create_issue(CreateIssueParams {
-            title: "[test] add_sub_issue child".to_owned(),
+            title: "Add OAuth callback handler".to_owned(),
             body: Some("Automated test — safe to close.".to_owned()),
             labels: vec!["test".to_owned()],
             milestone: None,
             assignees: vec![],
-            issue_type: None,
+            issue_type: Some(IssueType::Task.canonical_name().to_owned()),
         })
         .await
         .expect("create child should succeed");
@@ -1587,15 +1621,18 @@ async fn update_field_changes_value_on_project_item() {
         .expect("setup_fields() should succeed");
     let field_ids = &report.field_ids;
 
-    // Create an issue to test field updates on.
+    // Create a `Feature` fixture to test field updates on
+    // (spec Appendix B.3 — unblock-wgj.22). The OAuth login flow Epic
+    // counterpart, here written as a Feature for variety so the
+    // corpus exercises every IssueType variant at least once.
     let issue = client
         .create_issue(CreateIssueParams {
-            title: "[test] update_field integration test".to_owned(),
+            title: "Implement OAuth login flow".to_owned(),
             body: Some("Automated test — safe to close.".to_owned()),
             labels: vec!["test".to_owned()],
             milestone: None,
             assignees: vec![],
-            issue_type: None,
+            issue_type: Some(IssueType::Feature.canonical_name().to_owned()),
         })
         .await
         .expect("create_issue should succeed");

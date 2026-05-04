@@ -348,6 +348,130 @@ async fn claim_dispatches_through_dyn_vtable() {
     );
 }
 
+// ── §8.1 / §13.3 graph-invariant 11 — Agent precedence chain ──────────
+//
+// Three branches MUST be covered by integration tests over `claim`:
+//   (a) explicit caller name (`Some("alice")`) wins over `agent_kind`.
+//   (b) `None` caller AND `agent_kind = Some(ClaudeCode)` →
+//       Agent="claude-code", comment includes "by claude-code".
+//   (c) `None` caller AND no `agent_kind` → Agent SKIPPED, comment is
+//       "Claimed at {ts}" with no `by` substring.
+
+#[tokio::test]
+async fn claim_agent_precedence_explicit_wins_over_agent_kind() {
+    use unblock_core::client::AgentKind;
+
+    let mock = new_mock();
+    mock.push_fetch_issue(Ok(make_issue(101)));
+    mock.push_add_comment(Ok("https://example/c1".to_owned()));
+    mock.push_field_ids(Some(empty_field_ids()));
+    mock.push_resolve_project_info(Ok(ProjectInfo {
+        id: "PVT_1".to_owned(),
+        number: 1,
+    }));
+    mock.push_get_project_item_id(Ok("PVTI_a".to_owned()));
+    mock.push_update_field(Ok(())); // Agent
+    mock.push_update_field(Ok(())); // Claimed At
+    mock.push_fetch_graph_data(Ok((vec![make_issue(101)], vec![])));
+
+    let state = state_with_mock(Arc::clone(&mock));
+    let _ = state.agent_kind.set(AgentKind::ClaudeCode);
+    let server = UnblockServer::new(state);
+
+    let Json(result) = server
+        .claim(Parameters(ClaimParams {
+            id: 101,
+            agent: Some("alice".to_owned()),
+        }))
+        .await
+        .expect("claim should succeed");
+
+    assert_eq!(
+        result.agent.as_deref(),
+        Some("alice"),
+        "branch (a): explicit caller agent must win over agent_kind"
+    );
+    assert_eq!(mock.calls().add_comment(), 1);
+}
+
+#[tokio::test]
+async fn claim_agent_precedence_falls_through_to_agent_kind() {
+    use unblock_core::client::AgentKind;
+
+    let mock = new_mock();
+    mock.push_fetch_issue(Ok(make_issue(102)));
+    mock.push_add_comment(Ok("https://example/c2".to_owned()));
+    mock.push_field_ids(Some(empty_field_ids()));
+    mock.push_resolve_project_info(Ok(ProjectInfo {
+        id: "PVT_1".to_owned(),
+        number: 1,
+    }));
+    mock.push_get_project_item_id(Ok("PVTI_b".to_owned()));
+    mock.push_update_field(Ok(())); // Agent
+    mock.push_update_field(Ok(())); // Claimed At
+    mock.push_fetch_graph_data(Ok((vec![make_issue(102)], vec![])));
+
+    let state = state_with_mock(Arc::clone(&mock));
+    let _ = state.agent_kind.set(AgentKind::ClaudeCode);
+    let server = UnblockServer::new(state);
+
+    let Json(result) = server
+        .claim(Parameters(ClaimParams {
+            id: 102,
+            agent: None,
+        }))
+        .await
+        .expect("claim should succeed");
+
+    assert_eq!(
+        result.agent.as_deref(),
+        Some("claude-code"),
+        "branch (b): None caller falls through to agent_kind"
+    );
+}
+
+#[tokio::test]
+async fn claim_agent_precedence_skips_when_neither_set() {
+    let mock = new_mock();
+    mock.push_fetch_issue(Ok(make_issue(103)));
+    mock.push_add_comment(Ok("https://example/c3".to_owned()));
+    mock.push_field_ids(Some(empty_field_ids()));
+    mock.push_resolve_project_info(Ok(ProjectInfo {
+        id: "PVT_1".to_owned(),
+        number: 1,
+    }));
+    mock.push_get_project_item_id(Ok("PVTI_c".to_owned()));
+    // Only Claimed At fires — Agent rung is SKIPPED per §8.1 step 3
+    // (Invariant 18). No update_field for Agent.
+    mock.push_update_field(Ok(())); // Claimed At
+    mock.push_fetch_graph_data(Ok((vec![make_issue(103)], vec![])));
+
+    // No agent_kind set on state.
+    let server = UnblockServer::new(state_with_mock(Arc::clone(&mock)));
+
+    let Json(result) = server
+        .claim(Parameters(ClaimParams {
+            id: 103,
+            agent: None,
+        }))
+        .await
+        .expect("claim should succeed");
+
+    assert!(
+        result.agent.is_none(),
+        "branch (c): no caller + no agent_kind → Agent SKIPPED (Option None), got: {:?}",
+        result.agent
+    );
+
+    // Crucially: only the Claimed At rung fired — Agent was skipped.
+    assert_eq!(
+        mock.calls().update_field(),
+        1,
+        "Agent rung must be SKIPPED entirely — only Claimed At fires under \
+         empty_field_ids() (Status is option-gated and skipped too)"
+    );
+}
+
 #[tokio::test]
 async fn claim_with_empty_agent_returns_invalid_params() {
     // Regression for unblock-b6b.80 follow-up: Some("") and whitespace-only
@@ -1066,6 +1190,220 @@ async fn update_with_project_fields_dispatches_through_dyn_vtable() {
     assert_eq!(mock.calls().get_project_item_id(), 1);
     // story_points calls update_field directly (no option map gating).
     assert_eq!(mock.calls().update_field(), 1);
+}
+
+// ── update — §8.6 DRIFT-3 (agent + issue_type) ──────────────────────────
+//
+// Spec Appendix B.3 obligation 5: six integration tests covering
+// agent + issue_type Some/None/invalid scenarios.
+
+fn empty_update_params(id: u64) -> UpdateParams {
+    UpdateParams {
+        id,
+        priority: None,
+        status: None,
+        agent: None,
+        issue_type: None,
+        labels_add: None,
+        labels_remove: None,
+        assignees_add: None,
+        assignees_remove: None,
+        body_section: None,
+        milestone: None,
+        story_points: None,
+        defer_until: None,
+    }
+}
+
+#[tokio::test]
+async fn update_agent_some_writes_agent_field() {
+    // params.agent = Some("alice") → Agent field WRITTEN to "alice".
+    let mock = new_mock();
+    mock.push_fetch_issue(Ok(make_issue(20)));
+    mock.push_field_ids(Some(empty_field_ids()));
+    mock.push_resolve_project_info(Ok(ProjectInfo {
+        id: "PVT_1".to_owned(),
+        number: 1,
+    }));
+    mock.push_get_project_item_id(Ok("PVTI_20".to_owned()));
+    mock.push_update_field(Ok(())); // Agent
+    mock.push_fetch_issue(Ok(make_issue(20)));
+    mock.push_fetch_graph_data(Ok((vec![make_issue(20)], vec![])));
+
+    let server = UnblockServer::new(state_with_mock(Arc::clone(&mock)));
+    let Json(result) = server
+        .update(Parameters(UpdateParams {
+            agent: Some("alice".to_owned()),
+            ..empty_update_params(20)
+        }))
+        .await
+        .expect("update should succeed");
+
+    assert_eq!(mock.calls().update_field(), 1);
+    assert!(
+        result
+            .fields_updated
+            .iter()
+            .any(|s| s.starts_with("agent=")),
+        "fields_updated must include the `agent=` token, got: {:?}",
+        result.fields_updated
+    );
+}
+
+#[tokio::test]
+async fn update_agent_none_leaves_agent_unmodified() {
+    // params.agent = None → Agent field LEFT UNMODIFIED. No
+    // update_field call for Agent. We pass story_points to make the
+    // handler enter the project-field branch.
+    let mock = new_mock();
+    mock.push_fetch_issue(Ok(make_issue(21)));
+    mock.push_field_ids(Some(empty_field_ids()));
+    mock.push_resolve_project_info(Ok(ProjectInfo {
+        id: "PVT_1".to_owned(),
+        number: 1,
+    }));
+    mock.push_get_project_item_id(Ok("PVTI_21".to_owned()));
+    mock.push_update_field(Ok(())); // story_points
+    mock.push_fetch_issue(Ok(make_issue(21)));
+    mock.push_fetch_graph_data(Ok((vec![make_issue(21)], vec![])));
+
+    let server = UnblockServer::new(state_with_mock(Arc::clone(&mock)));
+    let Json(result) = server
+        .update(Parameters(UpdateParams {
+            story_points: Some(3.0),
+            ..empty_update_params(21)
+        }))
+        .await
+        .expect("update should succeed");
+
+    // Only the story_points rung fired — Agent skipped.
+    assert_eq!(mock.calls().update_field(), 1);
+    assert!(
+        !result
+            .fields_updated
+            .iter()
+            .any(|s| s.starts_with("agent=")),
+        "fields_updated MUST NOT include `agent=` when params.agent is None, got: {:?}",
+        result.fields_updated
+    );
+}
+
+#[tokio::test]
+async fn update_issue_type_some_dispatches_native_mutation() {
+    // params.issue_type = Some("Docs") → IssueType native mutation
+    // issued; updated_fields includes "issue_type=Docs".
+    let mock = new_mock();
+    mock.push_fetch_issue(Ok(make_issue(22)));
+    mock.push_update_issue_type(Ok(()));
+    mock.push_fetch_issue(Ok(make_issue(22)));
+    mock.push_fetch_graph_data(Ok((vec![make_issue(22)], vec![])));
+
+    let server = UnblockServer::new(state_with_mock(Arc::clone(&mock)));
+    let Json(result) = server
+        .update(Parameters(UpdateParams {
+            issue_type: Some("Docs".to_owned()),
+            ..empty_update_params(22)
+        }))
+        .await
+        .expect("update should succeed");
+
+    assert_eq!(mock.calls().update_issue_type(), 1);
+    assert!(
+        result.fields_updated.iter().any(|s| s == "issue_type=Docs"),
+        "fields_updated must include `issue_type=Docs`, got: {:?}",
+        result.fields_updated
+    );
+}
+
+#[tokio::test]
+async fn update_issue_type_case_insensitive_matches_canonical() {
+    // params.issue_type = Some("docs") → resolves to IssueType::Docs
+    // case-insensitively (§5.7 normaliser parity).
+    let mock = new_mock();
+    mock.push_fetch_issue(Ok(make_issue(23)));
+    mock.push_update_issue_type(Ok(()));
+    mock.push_fetch_issue(Ok(make_issue(23)));
+    mock.push_fetch_graph_data(Ok((vec![make_issue(23)], vec![])));
+
+    let server = UnblockServer::new(state_with_mock(Arc::clone(&mock)));
+    let Json(result) = server
+        .update(Parameters(UpdateParams {
+            issue_type: Some("docs".to_owned()),
+            ..empty_update_params(23)
+        }))
+        .await
+        .expect("update should succeed for case-insensitive `docs`");
+
+    assert_eq!(mock.calls().update_issue_type(), 1);
+    // Canonical name is rendered in the updated_fields token (Docs).
+    assert!(
+        result.fields_updated.iter().any(|s| s == "issue_type=Docs"),
+        "fields_updated must include canonical `issue_type=Docs`, got: {:?}",
+        result.fields_updated
+    );
+}
+
+#[tokio::test]
+async fn update_issue_type_invalid_returns_validation_error() {
+    // params.issue_type = Some("NotAType") → INVALID_PARAMS, no
+    // mutation issued, cache NOT invalidated (no fetch_graph_data).
+    let mock = new_mock();
+    let server = UnblockServer::new(state_with_mock(Arc::clone(&mock)));
+
+    let err = server
+        .update(Parameters(UpdateParams {
+            issue_type: Some("NotAType".to_owned()),
+            ..empty_update_params(24)
+        }))
+        .await
+        .map(|_| ())
+        .expect_err("invalid issue_type must be rejected");
+
+    assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert_eq!(mock.calls().update_issue_type(), 0);
+    assert_eq!(
+        mock.calls().fetch_graph_data(),
+        0,
+        "validation failure must NOT invalidate or rebuild the cache"
+    );
+}
+
+#[tokio::test]
+async fn update_issue_type_none_leaves_native_type_unmodified() {
+    // params.issue_type = None → IssueType LEFT UNMODIFIED, no
+    // update_issue_type call. updated_fields does NOT include
+    // `issue_type=`. We pass story_points to drive the project-field
+    // branch so the handler still has work.
+    let mock = new_mock();
+    mock.push_fetch_issue(Ok(make_issue(25)));
+    mock.push_field_ids(Some(empty_field_ids()));
+    mock.push_resolve_project_info(Ok(ProjectInfo {
+        id: "PVT_1".to_owned(),
+        number: 1,
+    }));
+    mock.push_get_project_item_id(Ok("PVTI_25".to_owned()));
+    mock.push_update_field(Ok(())); // story_points
+    mock.push_fetch_issue(Ok(make_issue(25)));
+    mock.push_fetch_graph_data(Ok((vec![make_issue(25)], vec![])));
+
+    let server = UnblockServer::new(state_with_mock(Arc::clone(&mock)));
+    let Json(result) = server
+        .update(Parameters(UpdateParams {
+            story_points: Some(2.0),
+            ..empty_update_params(25)
+        }))
+        .await
+        .expect("update should succeed");
+
+    assert_eq!(mock.calls().update_issue_type(), 0);
+    assert!(
+        !result
+            .fields_updated
+            .iter()
+            .any(|s| s.starts_with("issue_type=")),
+        "fields_updated MUST NOT include `issue_type=` when params.issue_type is None, got: {:?}",
+        result.fields_updated
+    );
 }
 
 // ── prime ──────────────────────────────────────────────────────────────

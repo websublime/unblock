@@ -250,22 +250,34 @@ async fn e2e_workflow_all_10_tools() {
         views_created.len() + views_existing.len()
     );
 
-    // ── Step 3: create issue A (no deps, P1) ────────────────────────
+    // ── Step 3: create issue A — Epic parent (spec Appendix B.3) ────
+    // Realistic OAuth login flow Epic. Exercises the `Epic` IssueType
+    // and the canonical `agent` post-creation populate path.
     eprintln!("=== Step 3: create issue A ===");
     let issue_a = client
         .create_issue(CreateIssueParams {
-            title: format!("[e2e] Issue A (no deps, P1) {test_label}"),
-            body: Some("## Description\n\nE2E test issue A.".to_owned()),
+            title: format!("Implement OAuth login flow {test_label}"),
+            body: Some(
+                "## Description\n\nEpic parent — ships the full OAuth \
+                 login flow. Sub-Tasks land the callback handler and \
+                 token validation."
+                    .to_owned(),
+            ),
             labels: vec![test_label.clone()],
             milestone: None,
             assignees: Vec::new(),
-            issue_type: None,
+            issue_type: Some(
+                unblock_core::types::IssueType::Epic
+                    .canonical_name()
+                    .to_owned(),
+            ),
         })
         .await
         .expect("create issue A should succeed");
     guard.track(issue_a.number);
 
-    // Add to project and set fields.
+    // Add to project and set fields. Agent populated to model the
+    // canonical case where the calling agent kind is recorded.
     if let Ok(item_id) = client
         .get_project_item_id(&issue_a.node_id, &project_info.id)
         .await
@@ -273,7 +285,7 @@ async fn e2e_workflow_all_10_tools() {
     {
         // NOTE: story_points / defer_until (the trailing `None, None` args here
         // and at the analogous call sites for issues B and C below) are not
-        // exercised by this e2e test — only the priority/status axes are
+        // exercised by this e2e test — only the priority/status/agent axes are
         // validated end-to-end against the live GitHub Project.
         set_project_fields(
             client.as_ref(),
@@ -282,6 +294,7 @@ async fn e2e_workflow_all_10_tools() {
             &field_ids,
             "P1",
             unblock_core::types::Status::Ready.option_name(),
+            Some("claude-code"),
             None,
             None,
         )
@@ -291,16 +304,26 @@ async fn e2e_workflow_all_10_tools() {
     rebuild_cache(&state).await;
     eprintln!("create A: #{} '{}'", issue_a.number, issue_a.title);
 
-    // ── Step 4: create issue B (blocked by A, P2) ───────────────────
+    // ── Step 4: create issue B — Task sub of A (spec Appendix B.3) ──
+    // Realistic OAuth callback handler Task; blocked by Epic A.
+    // Exercises the `Task` IssueType + `Blocked` Status branch.
     eprintln!("=== Step 4: create issue B ===");
     let issue_b = client
         .create_issue(CreateIssueParams {
-            title: format!("[e2e] Issue B (blocked by A, P2) {test_label}"),
-            body: Some("## Description\n\nE2E test issue B.".to_owned()),
+            title: format!("Add OAuth callback handler {test_label}"),
+            body: Some(
+                "## Description\n\nSub-Task of the OAuth login flow Epic — \
+                 lands the `/oauth/callback` route and exchange logic."
+                    .to_owned(),
+            ),
             labels: vec![test_label.clone()],
             milestone: None,
             assignees: Vec::new(),
-            issue_type: None,
+            issue_type: Some(
+                unblock_core::types::IssueType::Task
+                    .canonical_name()
+                    .to_owned(),
+            ),
         })
         .await
         .expect("create issue B should succeed");
@@ -325,6 +348,7 @@ async fn e2e_workflow_all_10_tools() {
             &field_ids,
             "P2",
             unblock_core::types::Status::Blocked.option_name(),
+            Some("claude-code"),
             None,
             None,
         )
@@ -334,22 +358,38 @@ async fn e2e_workflow_all_10_tools() {
     rebuild_cache(&state).await;
     eprintln!("create B: #{} '{}'", issue_b.number, issue_b.title);
 
-    // ── Step 5: create issue C (no deps, P3) ────────────────────────
+    // ── Step 5: create issue C — Docs (spec Appendix B.3 + obligation) ──
+    // Realistic Docs fixture. **Agent omitted** (spec Appendix B.3
+    // obligation): exercises the §8.3 / §8.6 absence-leaves-unmodified
+    // edge case where Agent stays unwritten on the Projects V2 board.
+    // The corresponding `set_project_fields` call passes `agent: None`
+    // so the live board renders this issue with an empty Agent column.
     eprintln!("=== Step 5: create issue C ===");
     let issue_c = client
         .create_issue(CreateIssueParams {
-            title: format!("[e2e] Issue C (no deps, P3) {test_label}"),
-            body: Some("## Description\n\nE2E test issue C.".to_owned()),
+            title: format!("Document Projects V2 setup workflow {test_label}"),
+            body: Some(
+                "## Description\n\nDocs task — captures the canonical \
+                 Projects V2 bootstrap steps for new operators. Created \
+                 with no Agent assigned to exercise the §8.3 / §8.6 \
+                 absence-leaves-unmodified edge case."
+                    .to_owned(),
+            ),
             labels: vec![test_label.clone()],
             milestone: None,
             assignees: Vec::new(),
-            issue_type: None,
+            issue_type: Some(
+                unblock_core::types::IssueType::Docs
+                    .canonical_name()
+                    .to_owned(),
+            ),
         })
         .await
         .expect("create issue C should succeed");
     guard.track(issue_c.number);
 
-    // Add to project and set fields.
+    // Add to project and set fields. Agent intentionally `None` to
+    // exercise the absence-leaves-unmodified rule (spec Appendix B.3).
     if let Ok(item_id) = client
         .get_project_item_id(&issue_c.node_id, &project_info.id)
         .await
@@ -362,6 +402,7 @@ async fn e2e_workflow_all_10_tools() {
             &field_ids,
             "P3",
             unblock_core::types::Status::Ready.option_name(),
+            None,
             None,
             None,
         )
