@@ -42,6 +42,9 @@ query FetchIssue($owner: String!, $repo: String!, $number: Int!) {
       url
       createdAt
       updatedAt
+      issueType {
+        name
+      }
       labels(first: 50) {
         nodes {
           name
@@ -174,6 +177,9 @@ query FetchGraphData($owner: String!, $repo: String!, $cursor: String) {
         url
         createdAt
         updatedAt
+        issueType {
+          name
+        }
         labels(first: 50) {
           nodes {
             name
@@ -696,7 +702,11 @@ fn parse_issue(value: &serde_json::Value, owner: &str, repo: &str) -> Issue {
     let field_values = extract_field_values(value);
     let status = parse_status_field(&field_values);
     let priority = parse_priority_field(&field_values);
-    let issue_type = parse_issue_type_field(&field_values);
+    // IssueType is GitHub native (spec §2.6) — read it off the issue
+    // node's `issueType { name }` selection rather than from a Projects
+    // V2 SingleSelect HashMap (the prior reader was a drift bug —
+    // unblock-wgj.15).
+    let issue_type = parse_issue_type_from_native(value);
     let pipeline_stage = parse_pipeline_stage_field(&field_values);
     let agent = field_values.get("Agent").cloned();
     let story_points = field_values
@@ -766,7 +776,11 @@ fn parse_graph_issue(value: &serde_json::Value, owner: &str, repo: &str) -> Issu
     let field_values = extract_field_values(value);
     let status = parse_status_field(&field_values);
     let priority = parse_priority_field(&field_values);
-    let issue_type = parse_issue_type_field(&field_values);
+    // IssueType is GitHub native (spec §2.6) — read it off the issue
+    // node's `issueType { name }` selection rather than from a Projects
+    // V2 SingleSelect HashMap (the prior reader was a drift bug —
+    // unblock-wgj.15).
+    let issue_type = parse_issue_type_from_native(value);
     let pipeline_stage = parse_pipeline_stage_field(&field_values);
     let agent = field_values.get("Agent").cloned();
     let story_points = field_values
@@ -1145,17 +1159,25 @@ fn parse_priority_field(fields: &std::collections::HashMap<String, String>) -> P
     }
 }
 
-/// Maps the `IssueType` field value to an [`IssueType`] enum variant.
-fn parse_issue_type_field(fields: &std::collections::HashMap<String, String>) -> Option<IssueType> {
-    match fields.get("IssueType").map(String::as_str) {
-        Some("Task") => Some(IssueType::Task),
-        Some("Bug") => Some(IssueType::Bug),
-        Some("Feature") => Some(IssueType::Feature),
-        Some("Epic") => Some(IssueType::Epic),
-        Some("Chore") => Some(IssueType::Chore),
-        Some("Spike") => Some(IssueType::Spike),
-        _ => None,
-    }
+/// Reads GitHub's native `issueType { name }` field off an issue JSON
+/// node and resolves it to an [`IssueType`] variant.
+///
+/// Per spec §2.6, `IssueType` is GitHub's native org-level issue type
+/// (NOT a Projects V2 custom field). The previous `HashMap`-based reader
+/// keyed on a Projects V2 `SingleSelect` option named `"IssueType"` was a
+/// drift bug — that field never exists on real boards, so
+/// `issue.issue_type` always resolved to `None` (verified empirically
+/// via `gh api graphql` against the live API).
+///
+/// Resolution routes through [`IssueType::from_canonical_name`]
+/// (case-insensitive + byte-trim per the §5.7 normaliser) so values
+/// returned by GitHub's API match canonical variants regardless of
+/// trailing whitespace or unexpected casing. Returns `None` when the
+/// `issueType` field is absent (no native type assigned), `null`, or
+/// carries a name that is not in the canonical taxonomy.
+fn parse_issue_type_from_native(value: &serde_json::Value) -> Option<IssueType> {
+    let name = value.get("issueType")?.get("name")?.as_str()?;
+    IssueType::from_canonical_name(name)
 }
 
 /// Maps the `PipelineStage` field value to a [`PipelineStage`] enum variant.
@@ -1649,28 +1671,65 @@ mod tests {
         assert_eq!(parse_priority_field(&fields), Priority::P2);
     }
 
-    // ── parse_issue_type_field ──────────────────────────────────────────
+    // ── parse_issue_type_from_native (unblock-wgj.15) ───────────────────
+    //
+    // Pre-`unblock-wgj` the IssueType was read off a Projects V2
+    // SingleSelect HashMap that NEVER materialises on real boards
+    // (verified empirically — `gh api graphql` returned `issueType: null`
+    // because no such Projects V2 field was ever provisioned). The
+    // canonical source of truth per spec §2.6 is the native
+    // `issueType { name }` selection on the issue node — see
+    // `parse_issue_type_from_native`.
 
     #[test]
-    fn issue_type_field_mapping() {
-        let mut fields = std::collections::HashMap::new();
-        for (label, expected) in [
-            ("Task", IssueType::Task),
-            ("Bug", IssueType::Bug),
-            ("Feature", IssueType::Feature),
-            ("Epic", IssueType::Epic),
-            ("Chore", IssueType::Chore),
-            ("Spike", IssueType::Spike),
-        ] {
-            fields.insert("IssueType".to_owned(), label.to_owned());
-            assert_eq!(parse_issue_type_field(&fields), Some(expected));
+    fn issue_type_from_native_round_trips_all_eight_variants() {
+        // Graph-invariant 10 (§13.3): every `IssueType::canonical_name`
+        // round-trips through `parse_issue_type_from_native`.
+        for variant in IssueType::ALL {
+            let json = serde_json::json!({
+                "issueType": { "name": variant.canonical_name() }
+            });
+            assert_eq!(parse_issue_type_from_native(&json), Some(variant));
         }
     }
 
     #[test]
-    fn issue_type_field_missing_returns_none() {
-        let fields = std::collections::HashMap::new();
-        assert!(parse_issue_type_field(&fields).is_none());
+    fn issue_type_from_native_is_case_insensitive() {
+        // §5.7 normaliser parity: GitHub's API may return the name in
+        // any case; we accept canonical variants regardless of casing.
+        let json = serde_json::json!({
+            "issueType": { "name": "BUG" }
+        });
+        assert_eq!(parse_issue_type_from_native(&json), Some(IssueType::Bug));
+
+        let json = serde_json::json!({
+            "issueType": { "name": "  refactor  " }
+        });
+        assert_eq!(
+            parse_issue_type_from_native(&json),
+            Some(IssueType::Refactor)
+        );
+    }
+
+    #[test]
+    fn issue_type_from_native_returns_none_when_field_absent() {
+        // Issues with no native type assigned have no `issueType` key
+        // (or `null`) — must collapse to `None`.
+        let json = serde_json::json!({ "number": 1 });
+        assert!(parse_issue_type_from_native(&json).is_none());
+
+        let json = serde_json::json!({ "issueType": null });
+        assert!(parse_issue_type_from_native(&json).is_none());
+    }
+
+    #[test]
+    fn issue_type_from_native_returns_none_for_unrecognised_name() {
+        // Names outside the canonical taxonomy collapse to `None` — the
+        // parser is closed against the eight variants in spec §2.6.
+        let json = serde_json::json!({
+            "issueType": { "name": "Improvement" }
+        });
+        assert!(parse_issue_type_from_native(&json).is_none());
     }
 
     // ── parse_pipeline_stage_field (unblock-29p.18) ─────────────────────
@@ -1966,6 +2025,11 @@ mod tests {
 
     #[test]
     fn parse_graph_issue_extracts_standard_fields() {
+        // Post-`unblock-wgj.15`: IssueType is read off the native
+        // `issueType { name }` field on the issue node, NOT from the
+        // Projects V2 SingleSelect HashMap. The fixture below provides
+        // the native field; the legacy `IssueType` Projects V2 field is
+        // explicitly absent.
         let json = serde_json::json!({
             "id": "MDU6SXNzdWUx",
             "number": 42,
@@ -1975,6 +2039,7 @@ mod tests {
             "url": "https://github.com/owner/repo/issues/42",
             "createdAt": "2026-01-01T00:00:00Z",
             "updatedAt": "2026-01-02T00:00:00Z",
+            "issueType": { "name": "Bug" },
             "labels": {"nodes": [{"name": "bug"}]},
             "milestone": {"title": "v1.0"},
             "assignees": {"nodes": [{"login": "alice"}]},
@@ -1990,7 +2055,6 @@ mod tests {
                             {"field": {"name": "Agent"}, "text": "claude"},
                             {"field": {"name": "StoryPoints"}, "number": 5.0},
                             {"field": {"name": "DeferUntil"}, "date": "2026-06-01"},
-                            {"field": {"name": "IssueType"}, "name": "Bug"},
                             {"field": {"name": "PipelineStage"}, "name": "implementation"},
                             {"field": {"name": "ClaimedAt"}, "text": "2026-03-15T10:30:00Z"}
                         ]

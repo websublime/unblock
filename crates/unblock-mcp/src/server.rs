@@ -688,6 +688,12 @@ impl UnblockServer {
                 fields_healed: Vec::new(),
                 fields_existing: field_status.existing,
                 fields_missing: field_status.missing,
+                // Dry-run cannot detect IssueType drift without listing
+                // org-level types and comparing to the canonical eight
+                // — `setup_fields` performs that diff in its write path
+                // (unblock-wgj). Conservatively report nothing created
+                // here; the non-dry-run path will surface real activity.
+                issue_types_created: Vec::new(),
                 views_created: views_would_create,
                 views_existing,
                 project_number: u64::from(project_info.number),
@@ -758,6 +764,10 @@ impl UnblockServer {
             fields_healed: report.healed,
             fields_existing: report.skipped,
             fields_missing: Vec::new(),
+            // Org-level IssueType ensure-and-heal outcome (spec §5.7
+            // step 3 / §8.10 / Appendix B) — populated by
+            // `setup_fields` after `unblock-wgj`.
+            issue_types_created: report.issue_types_created,
             views_created,
             views_existing,
             project_number: u64::from(project_info.number),
