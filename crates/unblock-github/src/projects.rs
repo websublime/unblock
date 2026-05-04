@@ -385,10 +385,25 @@ pub struct CreatedProject {
     pub url: String,
 }
 
-/// The GitHub REST API version header value for Projects V2 view and field
-/// endpoints. This version is newer than the default `2022-11-28` and must
-/// be sent as a per-request header override for `/projectsV2/*/views` and
-/// `/projectsV2/*/fields` endpoints only.
+/// The GitHub REST API version header value required by several modern REST
+/// surfaces.
+///
+/// This version is newer than the default `2022-11-28` and must be sent as
+/// a per-request header override for the following endpoints:
+///
+/// - `/projectsV2/*/views` (list/create views)
+/// - `/projectsV2/*/fields` (list fields)
+/// - `/orgs/{org}/issue-types` (list/create org-level issue types)
+///
+/// Empirically, the `/orgs/{org}/issue-types` endpoint returns HTTP 403
+/// "Resource not accessible by personal access token" when called with the
+/// default `2022-11-28` header even on tokens with `Issue Types: R/W` /
+/// `admin:org`; explicitly sending `X-GitHub-Api-Version: 2026-03-10`
+/// returns the expected 200 response.
+///
+/// The name `VIEWS_API_VERSION` is preserved for callsite stability — the
+/// constant now serves both Projects V2 view/field endpoints and the
+/// org-level issue-types endpoints.
 const VIEWS_API_VERSION: &str = "2026-03-10";
 
 /// Specification for a required Projects V2 field.
@@ -1663,6 +1678,13 @@ impl GitHubClient {
     /// missing types using the canonical name/color/description from
     /// `IssueType::canonical_*` helpers (§2.6).
     ///
+    /// Sends both the GET (via `diff_org_issue_types`) and the
+    /// `POST /orgs/{org}/issue-types` create call with the
+    /// `X-GitHub-Api-Version: 2026-03-10` header. The default
+    /// `2022-11-28` version returns HTTP 403 "Resource not accessible by
+    /// personal access token" against `/orgs/{org}/issue-types` even on
+    /// tokens with `Issue Types: R/W`; the newer header is required.
+    ///
     /// Returns the list of canonical names that were CREATED (not
     /// pre-existing) by this call, in the declared
     /// [`IssueType::ALL`](unblock_core::types::IssueType::ALL) order.
@@ -1731,6 +1753,7 @@ impl GitHubClient {
             let response = self
                 .http()
                 .post(&create_url)
+                .header("X-GitHub-Api-Version", VIEWS_API_VERSION)
                 .json(&body)
                 .send()
                 .await
@@ -1802,12 +1825,17 @@ impl GitHubClient {
     /// (`query_issue_types_status`) emit identical sequences. Any 403
     /// from the GET surfaces as
     /// [`Error::IssueTypeManagementForbidden`].
+    ///
+    /// Sets the `X-GitHub-Api-Version: 2026-03-10` header — the default
+    /// `2022-11-28` version returns 403 on `/orgs/{org}/issue-types`
+    /// even with sufficient token scope.
     async fn diff_org_issue_types(&self, org: &str) -> Result<Vec<String>, Error> {
         let list_url = self.rest_url(&format!("/orgs/{org}/issue-types"));
 
         let list_response = self
             .http()
             .get(&list_url)
+            .header("X-GitHub-Api-Version", VIEWS_API_VERSION)
             .send()
             .await
             .context(errors::GitHubUnavailableSnafu)?;
