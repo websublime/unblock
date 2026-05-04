@@ -295,16 +295,18 @@ impl std::fmt::Display for ViewLayout {
 
 /// An option value for a single-select REST field.
 ///
-/// The REST API (version 2026-03-10) returns `options[].name` as a nested
-/// object `{"raw": "...", "html": "..."}` rather than a plain string.
-/// This struct captures the raw display name after parsing.
+/// The REST API (version 2026-03-10) returns `options[].name` and
+/// `options[].description` as nested objects `{"raw": "...", "html": "..."}`
+/// rather than plain strings. This struct captures the raw text of each
+/// after parsing. `description` is empty when GitHub omits the key.
 #[derive(Debug, Clone)]
 pub struct RestFieldOption {
     /// The raw display name of the option (extracted from `name.raw`).
     pub name: String,
     /// The option color (e.g. `"RED"`, `"BLUE"`).
     pub color: String,
-    /// The option description.
+    /// The raw description text of the option (extracted from
+    /// `description.raw`); empty string when no description is present.
     pub description: String,
 }
 
@@ -1529,7 +1531,9 @@ impl GitHubClient {
 ///
 /// The REST API (version 2026-03-10) returns fields with integer IDs and
 /// a `data_type` string. Single-select fields include an `options` array
-/// where each option's `name` is a nested object `{"raw": "...", "html": "..."}`.
+/// where each option's `name` and `description` are nested objects shaped
+/// `{"raw": "...", "html": "..."}` rather than plain strings. The field-level
+/// `name` (top-level here) remains a plain string.
 #[derive(Debug, Deserialize)]
 struct RestFieldResponse {
     id: u64,
@@ -1541,23 +1545,28 @@ struct RestFieldResponse {
 
 /// Raw option as returned by the REST API.
 ///
-/// The `name` field is a nested object with `raw` and `html` sub-fields,
-/// not a plain string.
+/// Both `name` and `description` are nested objects with `raw` and `html`
+/// sub-fields, not plain strings. `color` remains a plain string.
+/// `description` is wrapped in [`Option`] so the deserializer is resilient
+/// to GitHub omitting the key for options without a description (the
+/// `OpenAPI` spec marks it required, but pre-prod stance prefers defensive
+/// handling — see bead `unblock-afz`).
 #[derive(Debug, Deserialize)]
 struct RestFieldOptionRaw {
-    name: RestFieldOptionName,
+    name: RestFieldRawHtml,
     #[serde(default)]
     color: String,
     #[serde(default)]
-    description: String,
+    description: Option<RestFieldRawHtml>,
 }
 
-/// Nested name object for REST field options.
+/// Nested `{raw, html}` object used by the REST API for option `name` and
+/// `description` fields.
 ///
-/// The REST API (version 2026-03-10) returns `options[].name` as
-/// `{"raw": "string", "html": "string"}` rather than a plain string.
+/// The REST API (version 2026-03-10) returns these as
+/// `{"raw": "string", "html": "string"}` rather than plain strings.
 #[derive(Debug, Deserialize)]
-struct RestFieldOptionName {
+struct RestFieldRawHtml {
     raw: String,
     #[allow(dead_code)]
     html: String,
@@ -1928,7 +1937,7 @@ impl GitHubClient {
                     .map(|o| RestFieldOption {
                         name: o.name.raw,
                         color: o.color,
-                        description: o.description,
+                        description: o.description.map(|d| d.raw).unwrap_or_default(),
                     })
                     .collect();
 
@@ -3115,5 +3124,102 @@ mod tests {
             "User-owned repo must skip org-level issue type ensure: got {:?}",
             report.issue_types_created
         );
+    }
+
+    /// Locks the REST single-select field response contract.
+    ///
+    /// This payload mirrors the `OpenAPI` example
+    /// `projects-v2-field-single-select` from
+    /// `docs/archive/research/api.github.com.json` (api version 2026-03-10):
+    /// `options[].name` and `options[].description` are nested
+    /// `{raw, html}` objects, while `color` is a plain string. Regression
+    /// guard for bead `unblock-afz` (decode error
+    /// `invalid type: map, expected a string` at the `description` key).
+    #[test]
+    fn rest_field_response_decodes_nested_name_and_description() {
+        let payload = r#"[
+            {
+                "id": 12345,
+                "name": "Priority",
+                "data_type": "single_select",
+                "options": [
+                    {
+                        "id": "option_1",
+                        "name": { "raw": "Low", "html": "Low" },
+                        "color": "GREEN",
+                        "description": {
+                            "raw": "Low priority items",
+                            "html": "Low priority items"
+                        }
+                    },
+                    {
+                        "id": "option_2",
+                        "name": { "raw": "High", "html": "High" },
+                        "color": "RED",
+                        "description": {
+                            "raw": "High priority items",
+                            "html": "High priority items"
+                        }
+                    }
+                ]
+            }
+        ]"#;
+
+        let parsed: Vec<super::RestFieldResponse> =
+            serde_json::from_str(payload).expect("payload must decode");
+        assert_eq!(parsed.len(), 1);
+        let field = &parsed[0];
+        assert_eq!(field.id, 12345);
+        assert_eq!(field.name, "Priority");
+        assert_eq!(field.data_type, "single_select");
+        assert_eq!(field.options.len(), 2);
+        assert_eq!(field.options[0].name.raw, "Low");
+        assert_eq!(field.options[0].color, "GREEN");
+        assert_eq!(
+            field.options[0]
+                .description
+                .as_ref()
+                .map(|d| d.raw.as_str()),
+            Some("Low priority items"),
+        );
+        assert_eq!(field.options[1].name.raw, "High");
+        assert_eq!(field.options[1].color, "RED");
+        assert_eq!(
+            field.options[1]
+                .description
+                .as_ref()
+                .map(|d| d.raw.as_str()),
+            Some("High priority items"),
+        );
+    }
+
+    /// Defensive: GitHub may omit `description` for options that have none.
+    /// The deserializer must not fail; the resulting `RestFieldOption`
+    /// description must be the empty string. See bead `unblock-afz` risks
+    /// section.
+    #[test]
+    fn rest_field_response_decodes_option_without_description() {
+        let payload = r#"[
+            {
+                "id": 99,
+                "name": "Status",
+                "data_type": "single_select",
+                "options": [
+                    {
+                        "id": "option_1",
+                        "name": { "raw": "Todo", "html": "Todo" },
+                        "color": "GRAY"
+                    }
+                ]
+            }
+        ]"#;
+
+        let parsed: Vec<super::RestFieldResponse> =
+            serde_json::from_str(payload).expect("payload must decode without description");
+        assert_eq!(parsed.len(), 1);
+        let opts = &parsed[0].options;
+        assert_eq!(opts.len(), 1);
+        assert_eq!(opts[0].name.raw, "Todo");
+        assert!(opts[0].description.is_none());
     }
 }
