@@ -451,22 +451,27 @@ impl IssueType {
     /// Canonical color name for the issue type.
     ///
     /// Used by the `setup_fields` `IssueType` ensure-and-heal step
-    /// (§5.7) when allocating a missing org-level issue type. Color
-    /// names are GitHub's GraphQL `IssueTypeColor` enum values
-    /// (`TitleCase` rendered as uppercase). The values are stable across
-    /// `setup` runs and never overwrite an existing org-side color
-    /// (the ensure-and-heal step skips pre-existing types).
+    /// (§5.7) when allocating a missing org-level issue type via
+    /// `POST /orgs/{org}/issue-types`. Per the GitHub REST API contract
+    /// (<https://docs.github.com/rest/orgs/issue-types#create-issue-type-for-an-organization>),
+    /// the `color` field is a **lowercase** string drawn from the closed
+    /// set `gray`, `blue`, `green`, `yellow`, `orange`, `red`, `pink`,
+    /// `purple`. Submitting the GraphQL-style uppercase form (e.g.
+    /// `"PURPLE"`) is rejected by the REST endpoint with HTTP 422
+    /// `"Invalid property /color"`. The values are stable across `setup`
+    /// runs and never overwrite an existing org-side color (the
+    /// ensure-and-heal step skips pre-existing types).
     #[must_use]
     pub const fn canonical_color(self) -> &'static str {
         match self {
-            IssueType::Task => "YELLOW",
-            IssueType::Bug => "RED",
-            IssueType::Feature => "BLUE",
-            IssueType::Spike => "PURPLE",
-            IssueType::Epic => "GREEN",
-            IssueType::Chore => "GRAY",
-            IssueType::Refactor => "ORANGE",
-            IssueType::Docs => "PINK",
+            IssueType::Task => "yellow",
+            IssueType::Bug => "red",
+            IssueType::Feature => "blue",
+            IssueType::Spike => "purple",
+            IssueType::Epic => "green",
+            IssueType::Chore => "gray",
+            IssueType::Refactor => "orange",
+            IssueType::Docs => "pink",
         }
     }
 
@@ -1225,15 +1230,17 @@ mod tests {
     #[test]
     fn issue_type_canonical_color_palette_matches_spec() {
         // Invariant 17 / Appendix B.1 Decision 1 — color palette pinned
-        // byte-for-byte against spec §2.6.
-        assert_eq!(IssueType::Task.canonical_color(), "YELLOW");
-        assert_eq!(IssueType::Bug.canonical_color(), "RED");
-        assert_eq!(IssueType::Feature.canonical_color(), "BLUE");
-        assert_eq!(IssueType::Spike.canonical_color(), "PURPLE");
-        assert_eq!(IssueType::Epic.canonical_color(), "GREEN");
-        assert_eq!(IssueType::Chore.canonical_color(), "GRAY");
-        assert_eq!(IssueType::Refactor.canonical_color(), "ORANGE");
-        assert_eq!(IssueType::Docs.canonical_color(), "PINK");
+        // byte-for-byte against spec §2.6. Lowercase per GitHub REST
+        // `POST /orgs/{org}/issue-types` contract; uppercase variants are
+        // rejected by the API with HTTP 422.
+        assert_eq!(IssueType::Task.canonical_color(), "yellow");
+        assert_eq!(IssueType::Bug.canonical_color(), "red");
+        assert_eq!(IssueType::Feature.canonical_color(), "blue");
+        assert_eq!(IssueType::Spike.canonical_color(), "purple");
+        assert_eq!(IssueType::Epic.canonical_color(), "green");
+        assert_eq!(IssueType::Chore.canonical_color(), "gray");
+        assert_eq!(IssueType::Refactor.canonical_color(), "orange");
+        assert_eq!(IssueType::Docs.canonical_color(), "pink");
     }
 
     #[test]

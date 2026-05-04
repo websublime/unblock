@@ -213,14 +213,14 @@ GitHub's native org-level issue type. **NOT a Projects V2 custom field.** Read f
 
 | Variant | Name | Color | Description |
 |---|---|---|---|
-| `Task` | `Task` | `YELLOW` | A specific piece of work |
-| `Bug` | `Bug` | `RED` | An unexpected problem or behavior |
-| `Feature` | `Feature` | `BLUE` | A request, idea, or new functionality |
-| `Spike` | `Spike` | `PURPLE` | Time-boxed investigation or research |
-| `Epic` | `Epic` | `GREEN` | A large body of work that contains sub-issues |
-| `Chore` | `Chore` | `GRAY` | Maintenance, cleanup, or non-feature work |
-| `Refactor` | `Refactor` | `ORANGE` | Internal restructuring with no behavior change |
-| `Docs` | `Docs` | `PINK` | Documentation work (README, guides, API docs) |
+| `Task` | `Task` | `yellow` | A specific piece of work |
+| `Bug` | `Bug` | `red` | An unexpected problem or behavior |
+| `Feature` | `Feature` | `blue` | A request, idea, or new functionality |
+| `Spike` | `Spike` | `purple` | Time-boxed investigation or research |
+| `Epic` | `Epic` | `green` | A large body of work that contains sub-issues |
+| `Chore` | `Chore` | `gray` | Maintenance, cleanup, or non-feature work |
+| `Refactor` | `Refactor` | `orange` | Internal restructuring with no behavior change |
+| `Docs` | `Docs` | `pink` | Documentation work (README, guides, API docs) |
 
 The Status helper precedent (§2.3) requires `#[non_exhaustive]` on this enum so future variants can be added without coordinating with downstream consumers.
 
@@ -257,21 +257,26 @@ impl IssueType {
 
     /// Canonical color name for the issue type, used by the
     /// `setup_fields` IssueType ensure-and-heal step (§5.7) when
-    /// allocating a missing org-level issue type. Color names are
-    /// GitHub's GraphQL `IssueTypeColor` enum values (TitleCase
-    /// names rendered as uppercase). The values are stable across
-    /// `setup` runs and never overwrite an existing org-side color
-    /// (the ensure-and-heal step skips pre-existing types).
+    /// allocating a missing org-level issue type via
+    /// `POST /orgs/{org}/issue-types`. Per the GitHub REST API
+    /// (<https://docs.github.com/rest/orgs/issue-types#create-issue-type-for-an-organization>),
+    /// the `color` field is a lowercase string drawn from the closed
+    /// set `gray`, `blue`, `green`, `yellow`, `orange`, `red`, `pink`,
+    /// `purple`. Submitting the GraphQL-style uppercase form is
+    /// rejected with HTTP 422 `"Invalid property /color"`. The values
+    /// are stable across `setup` runs and never overwrite an existing
+    /// org-side color (the ensure-and-heal step skips pre-existing
+    /// types).
     pub const fn canonical_color(self) -> &'static str {
         match self {
-            IssueType::Task     => "YELLOW",
-            IssueType::Bug      => "RED",
-            IssueType::Feature  => "BLUE",
-            IssueType::Spike    => "PURPLE",
-            IssueType::Epic     => "GREEN",
-            IssueType::Chore    => "GRAY",
-            IssueType::Refactor => "ORANGE",
-            IssueType::Docs     => "PINK",
+            IssueType::Task     => "yellow",
+            IssueType::Bug      => "red",
+            IssueType::Feature  => "blue",
+            IssueType::Spike    => "purple",
+            IssueType::Epic     => "green",
+            IssueType::Chore    => "gray",
+            IssueType::Refactor => "orange",
+            IssueType::Docs     => "pink",
         }
     }
 
@@ -2494,7 +2499,7 @@ This appendix tracks the spec amendment delivered in bead `unblock-wgj` (2026-04
 
 ### B.1 Decisions captured (user-approved, 2026-04-30)
 
-1. **`IssueType` is `#[non_exhaustive]` + canonical helpers + 8-variant taxonomy (Decision 1 / §2.6).** `IssueType` carries `#[non_exhaustive]` (BREAKING CHANGE on `unblock-core`), grows from 4 to **8 canonical variants** (`Task`, `Bug`, `Feature`, `Spike` pre-existing; `Epic`, `Chore`, `Refactor`, `Docs` NEW), and grows three `pub const fn` helpers — `canonical_name`, `canonical_color`, `canonical_description` — defined on the enum in `unblock-core/src/types.rs`. Same precedent as `Status::option_name` from `unblock-1zj` (§2.3). Color palette: Task=YELLOW, Bug=RED, Feature=BLUE, Spike=PURPLE, Epic=GREEN, Chore=GRAY, Refactor=ORANGE, Docs=PINK.
+1. **`IssueType` is `#[non_exhaustive]` + canonical helpers + 8-variant taxonomy (Decision 1 / §2.6).** `IssueType` carries `#[non_exhaustive]` (BREAKING CHANGE on `unblock-core`), grows from 4 to **8 canonical variants** (`Task`, `Bug`, `Feature`, `Spike` pre-existing; `Epic`, `Chore`, `Refactor`, `Docs` NEW), and grows three `pub const fn` helpers — `canonical_name`, `canonical_color`, `canonical_description` — defined on the enum in `unblock-core/src/types.rs`. Same precedent as `Status::option_name` from `unblock-1zj` (§2.3). Color palette (lowercase per GitHub REST `POST /orgs/{org}/issue-types`): Task=yellow, Bug=red, Feature=blue, Spike=purple, Epic=green, Chore=gray, Refactor=orange, Docs=pink.
 2. **`REQUIRED_ISSUE_TYPES` derived at compile time (Decision 2 / §5.7).** `unblock-github` declares `REQUIRED_ISSUE_TYPES` as a `const` array derived from the `IssueType` enum via the §2.6 helpers. NO duplicated literal list of issue type names, colors, or descriptions exists anywhere in the workspace. Adding a new `IssueType` variant is the single edit site for adding a canonical issue type.
 3. **`setup_fields` ensures + heals org-level IssueTypes (Decision 3 / §5.7 + §8.10).** `setup_fields` extends its idempotent posture to also ensure all eight canonical `IssueType` variants exist on the org (case-insensitive name match, byte-trim, SKIP existing types — color/description on the org side are user-editable and `setup` MUST NOT overwrite). Outcome surfaced via NEW `SetupReport.issue_types_created: Vec<String>` field (additive — `API:` footer in commit body) and propagated to `SetupResult.issue_types_created` in §8.10. Org-only scope: no-op for User-owned repos with an info-level log line.
 4. **`claim` Agent precedence chain (Decision 4 / §8.1).** `params.agent: Option<String>` where `None` means "use default = `state.agent_kind_str()` if present, else leave Agent empty". Three branches: explicit caller choice always wins; `None` caller falls through to `agent_kind_str()`; `None` from both yields an EMPTY Agent field (the field update is SKIPPED). `config.agent` is no longer consulted by `claim` precedence. Claim comment renders `"Claimed by {agent} at {timestamp}"` when Agent is non-empty, `"Claimed at {timestamp}"` (no `by {agent}` substring) when empty. Tests cover edge cases by running with and without `agent_kind` set on `state`.
