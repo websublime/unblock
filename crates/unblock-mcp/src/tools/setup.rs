@@ -56,6 +56,20 @@ pub struct SetupResult {
     /// non-dry-run call. Always empty when `dry_run` is `false` (the fields
     /// were already created).
     pub fields_missing: Vec<String>,
+    /// Canonical names of org-level GitHub `IssueType`s that were
+    /// CREATED (not pre-existing) by this `setup` run, e.g.
+    /// `["Spike", "Epic", "Chore", "Refactor", "Docs"]`. Sourced from
+    /// `IssueType::canonical_name` (spec §2.6).
+    ///
+    /// Empty vector when:
+    /// - All eight canonical types already existed on the org, OR
+    /// - The repo owner is a `User` (GitHub's native issue types are
+    ///   org-level only — `setup_fields` skips the step for User
+    ///   accounts and emits an info-level log line).
+    ///
+    /// Mirrors the `fields_created` / `fields_healed` / `fields_existing`
+    /// buckets above. Introduced by `unblock-wgj` per spec §8.10 + §5.7.
+    pub issue_types_created: Vec<String>,
     /// Names of views that were newly created (e.g. `["://ready", "://team"]`).
     pub views_created: Vec<String>,
     /// Names of views that already existed and were skipped.

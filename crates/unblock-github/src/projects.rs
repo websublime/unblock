@@ -15,7 +15,7 @@ use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt as _;
 use tracing::{debug, instrument, warn};
-use unblock_core::types::Status;
+use unblock_core::types::{IssueType, Status};
 
 use crate::client::GitHubClient;
 use crate::errors::{self, Error};
@@ -209,6 +209,27 @@ pub struct SetupReport {
     /// already an exact match; for plain fields this means the field
     /// existed with the right `dataType`.
     pub skipped: Vec<String>,
+    /// Canonical names of org-level GitHub `IssueTypes` that were
+    /// CREATED (not pre-existing) by the `IssueType` ensure-and-heal
+    /// step in [`GitHubClient::setup_fields`] (spec §5.7 step 3).
+    ///
+    /// Empty vector when:
+    /// - All eight canonical types (`Task`, `Bug`, `Feature`, `Spike`,
+    ///   `Epic`, `Chore`, `Refactor`, `Docs`) already existed on the
+    ///   org, OR
+    /// - The repo owner is a `User` (GitHub's native issue types are
+    ///   org-level only — the step is a no-op for user-owned repos
+    ///   and `setup_fields` emits an info-level log line in that
+    ///   branch).
+    ///
+    /// Mirrors the `created` / `skipped` / `healed` buckets above so
+    /// downstream tooling (`SetupResult` in `unblock-mcp::tools::setup`)
+    /// can disclose the `IssueType` ensure-and-heal outcome distinctly
+    /// from Projects V2 field creation.
+    ///
+    /// Introduced by `unblock-wgj` — additive `pub` API change in the
+    /// `unblock-github` crate.
+    pub issue_types_created: Vec<String>,
 }
 
 /// Status of the 7 required fields on a project, without mutating anything.
@@ -426,6 +447,66 @@ const STATUS_OPTION_NAMES: [&str; Status::ALL.len()] = {
     let mut i = 0;
     while i < Status::ALL.len() {
         out[i] = Status::ALL[i].option_name();
+        i += 1;
+    }
+    out
+};
+
+/// Specification for one canonical org-level GitHub `IssueType`.
+///
+/// Drives the `IssueType` ensure-and-heal step in
+/// [`GitHubClient::setup_fields`](super::client::GitHubClient::setup_fields).
+/// Each entry pairs a canonical name with a color and description sourced
+/// directly from the [`IssueType`] enum's compile-time helpers (spec §2.6).
+///
+/// The struct is private — callers consume the const array
+/// [`REQUIRED_ISSUE_TYPES`] which is generated from the [`IssueType`] enum
+/// at compile time. See spec §5.7 + Appendix B.1 Decision 2 for the
+/// single-source-of-truth discipline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IssueTypeSpec {
+    /// Canonical `TitleCase` name (e.g. `"Task"`, `"Refactor"`).
+    name: &'static str,
+    /// GitHub `IssueTypeColor` enum value (e.g. `"YELLOW"`, `"PINK"`).
+    color: &'static str,
+    /// Human-readable short description.
+    description: &'static str,
+}
+
+/// Canonical org-level GitHub `IssueType` taxonomy.
+///
+/// **Single source of truth — generated from `IssueType::ALL`.** Per spec
+/// §5.7 the ensure-and-heal loop in `setup_fields` MUST iterate this
+/// constant in declared order. The array is materialised at compile
+/// time from [`IssueType::ALL`] paired with the §2.6 helpers
+/// [`IssueType::canonical_name`], [`IssueType::canonical_color`], and
+/// [`IssueType::canonical_description`] — adding a new variant to
+/// [`IssueType`] (allowed by `#[non_exhaustive]`) automatically extends
+/// this list with no second-list bookkeeping.
+///
+/// Order mirrors [`IssueType::ALL`] (Task, Bug, Feature, Spike, Epic,
+/// Chore, Refactor, Docs) and is the contract consumed by
+/// `setup_fields`'s declared-order create loop.
+///
+/// **Discipline (Invariant 17, §14).** No literal `IssueType` name, color,
+/// or description string is permitted in the workspace outside the
+/// `IssueType::canonical_*` definition site and its unit tests; every
+/// consumer (this constant, the `create`/`update` validators, the
+/// GraphQL deserialiser) routes through the helpers.
+const REQUIRED_ISSUE_TYPES: [IssueTypeSpec; IssueType::ALL.len()] = {
+    let mut out: [IssueTypeSpec; IssueType::ALL.len()] = [IssueTypeSpec {
+        name: "",
+        color: "",
+        description: "",
+    }; IssueType::ALL.len()];
+    let mut i = 0;
+    while i < IssueType::ALL.len() {
+        let variant = IssueType::ALL[i];
+        out[i] = IssueTypeSpec {
+            name: variant.canonical_name(),
+            color: variant.canonical_color(),
+            description: variant.canonical_description(),
+        };
         i += 1;
     }
     out
@@ -703,17 +784,39 @@ impl GitHubClient {
             defer_until: remove_plain_field(&mut resolved_plain, "DeferUntil")?,
         };
 
+        // Step 3 (spec §5.7): IssueType ensure-and-heal at the org level.
+        // GitHub's native issue types are org-only; for user-owned
+        // repos this step is a no-op with an info-level log line and
+        // an empty `issue_types_created` bucket. Introduced by
+        // `unblock-wgj`.
+        let owner_type = self.detect_owner_type().await?;
+        let issue_types_created = match owner_type {
+            OwnerType::Org => {
+                let owner = self.owner().to_owned();
+                self.ensure_issue_types(&owner).await?
+            }
+            OwnerType::User => {
+                tracing::info!(
+                    owner = %self.owner(),
+                    "Skipping IssueType ensure-and-heal — owner is a User, not an Organization (GitHub native issue types are org-level only, spec §5.7)"
+                );
+                Vec::new()
+            }
+        };
+
         debug!(
             created_count = created.len(),
             healed_count = healed.len(),
             skipped_count = skipped.len(),
-            "All 7 project fields resolved"
+            issue_types_created_count = issue_types_created.len(),
+            "All 7 project fields resolved + IssueType ensure-and-heal complete"
         );
         Ok(SetupReport {
             field_ids,
             created,
             healed,
             skipped,
+            issue_types_created,
         })
     }
 
@@ -1465,6 +1568,30 @@ struct UserTypeResponse {
     account_type: String,
 }
 
+/// Deserialisation helper for `GET /orgs/{org}/issue-types`.
+///
+/// Each entry is one of the org's issue types. Only `name` is consumed
+/// — the `id`, `color`, `description`, and any other fields GitHub
+/// returns are intentionally ignored because the ensure-and-heal step
+/// (spec §5.7 step 3) MUST NOT overwrite operator-edited
+/// color/description on existing types.
+#[derive(Debug, Deserialize)]
+struct OrgIssueTypeRaw {
+    name: String,
+}
+
+/// Request body for `POST /orgs/{org}/issue-types`.
+///
+/// Wire format per GitHub REST API. `is_enabled` defaults to `true` —
+/// org-level types must be enabled to be assignable to issues.
+#[derive(Debug, Serialize)]
+struct CreateOrgIssueTypeBody {
+    name: &'static str,
+    color: &'static str,
+    description: &'static str,
+    is_enabled: bool,
+}
+
 impl GitHubClient {
     /// Detects whether the repository owner is a GitHub organization or a
     /// personal user account.
@@ -1519,6 +1646,124 @@ impl GitHubClient {
         );
 
         Ok(owner_type)
+    }
+
+    /// Ensures all eight canonical org-level GitHub `IssueType`s
+    /// (`Task`, `Bug`, `Feature`, `Spike`, `Epic`, `Chore`, `Refactor`,
+    /// `Docs`) exist on the configured organisation, creating any that
+    /// are missing.
+    ///
+    /// Per spec §5.7 step 3 / Appendix B Decision 3: idempotent
+    /// ensure-and-heal — list existing org issue types, match
+    /// case-insensitively + byte-trim against the canonical taxonomy
+    /// (mirrors `heal_select_field_options` semantics, §5.7), SKIP
+    /// existing types (color/description on the org side are
+    /// user-editable and `setup` MUST NOT overwrite them), and POST any
+    /// missing types using the canonical name/color/description from
+    /// `IssueType::canonical_*` helpers (§2.6).
+    ///
+    /// Returns the list of canonical names that were CREATED (not
+    /// pre-existing) by this call, in the declared
+    /// [`IssueType::ALL`](unblock_core::types::IssueType::ALL) order.
+    /// An empty vector means all eight types already existed; this is
+    /// the steady-state outcome of repeated `setup` runs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::IssueTypeManagementForbidden`] when GitHub
+    /// returns HTTP 403 from either the GET or the POST
+    /// (the configured token lacks `admin:org` to manage org-level
+    /// issue types). The error message points operators at upgrading
+    /// the token (`admin:org` scope).
+    ///
+    /// Returns [`Error::RateLimited`] for HTTP 429 responses.
+    /// Returns [`Error::GitHubApi`] for other non-2xx responses.
+    /// Returns [`Error::GitHubUnavailable`] for network failures.
+    ///
+    /// # Org-only scope
+    ///
+    /// The caller (typically `setup_fields`) is responsible for gating
+    /// this call on `OwnerType::Org` — GitHub's native issue types are
+    /// an org-level feature only. Calling against a user account would
+    /// surface a 404 from GitHub; this method does not pre-validate.
+    #[instrument(skip(self), fields(org = %org))]
+    pub async fn ensure_issue_types(&self, org: &str) -> Result<Vec<String>, Error> {
+        let list_url = self.rest_url(&format!("/orgs/{org}/issue-types"));
+
+        let list_response = self
+            .http()
+            .get(&list_url)
+            .send()
+            .await
+            .context(errors::GitHubUnavailableSnafu)?;
+
+        if list_response.status().as_u16() == 403 {
+            return errors::IssueTypeManagementForbiddenSnafu {
+                org: org.to_owned(),
+            }
+            .fail();
+        }
+
+        let list_response = check_rest_response(list_response).await?;
+        let existing_raw: Vec<OrgIssueTypeRaw> = list_response
+            .json()
+            .await
+            .context(errors::GitHubUnavailableSnafu)?;
+
+        // Normalise existing names with `normalize_option_name` so the
+        // lookup mirrors the §5.7 case-insensitive + byte-trim matcher
+        // applied to Projects V2 single-select fields.
+        let existing_normalised: std::collections::HashSet<String> = existing_raw
+            .iter()
+            .map(|raw| normalize_option_name(&raw.name))
+            .collect();
+
+        let mut created: Vec<String> = Vec::new();
+
+        // Iterate the canonical taxonomy in declared `IssueType::ALL`
+        // order so two independent runs against an empty org produce
+        // byte-identical creation sequences (Invariant 18, §14).
+        for spec in &REQUIRED_ISSUE_TYPES {
+            let key = normalize_option_name(spec.name);
+            if existing_normalised.contains(&key) {
+                debug!(name = spec.name, "Issue type already exists — skipping");
+                continue;
+            }
+
+            let body = CreateOrgIssueTypeBody {
+                name: spec.name,
+                color: spec.color,
+                description: spec.description,
+                is_enabled: true,
+            };
+
+            let create_url = self.rest_url(&format!("/orgs/{org}/issue-types"));
+            let response = self
+                .http()
+                .post(&create_url)
+                .json(&body)
+                .send()
+                .await
+                .context(errors::GitHubUnavailableSnafu)?;
+
+            if response.status().as_u16() == 403 {
+                return errors::IssueTypeManagementForbiddenSnafu {
+                    org: org.to_owned(),
+                }
+                .fail();
+            }
+
+            let _response = check_rest_response(response).await?;
+
+            debug!(
+                name = spec.name,
+                color = spec.color,
+                "Created org-level issue type"
+            );
+            created.push(spec.name.to_owned());
+        }
+
+        Ok(created)
     }
 
     /// Lists all fields on a Projects V2 project via the REST API.
@@ -1997,10 +2242,11 @@ impl GitHubClient {
 
 #[cfg(test)]
 mod tests {
-    use super::{FieldMeta, FieldSpec, OwnerType, STATUS_OPTION_NAMES};
+    use super::{FieldMeta, FieldSpec, OwnerType, REQUIRED_ISSUE_TYPES, STATUS_OPTION_NAMES};
     use crate::client::GitHubClient;
     use crate::errors::Error;
     use std::collections::HashMap;
+    use unblock_core::types::IssueType;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -2331,5 +2577,189 @@ mod tests {
             healed.option_colors.get("In Progress"),
             Some(&"YELLOW".to_owned())
         );
+    }
+
+    // ── REQUIRED_ISSUE_TYPES (unblock-wgj.14) ───────────────────────────
+
+    #[test]
+    fn required_issue_types_derived_from_enum_in_declared_order() {
+        // unblock-wgj.14: REQUIRED_ISSUE_TYPES MUST be generated from
+        // IssueType::ALL at compile time — adding a new variant is the
+        // single edit site for the canonical taxonomy.
+        assert_eq!(REQUIRED_ISSUE_TYPES.len(), IssueType::ALL.len());
+        assert_eq!(REQUIRED_ISSUE_TYPES.len(), 8);
+
+        for (i, variant) in IssueType::ALL.iter().enumerate() {
+            assert_eq!(REQUIRED_ISSUE_TYPES[i].name, variant.canonical_name());
+            assert_eq!(REQUIRED_ISSUE_TYPES[i].color, variant.canonical_color());
+            assert_eq!(
+                REQUIRED_ISSUE_TYPES[i].description,
+                variant.canonical_description()
+            );
+        }
+    }
+
+    #[test]
+    fn required_issue_types_color_palette_matches_spec() {
+        // Spec §2.6: color palette pinned byte-for-byte. Mirrors the
+        // `Status` discipline — adding a literal here would violate
+        // Invariant 17.
+        let by_name: HashMap<&str, &str> = REQUIRED_ISSUE_TYPES
+            .iter()
+            .map(|spec| (spec.name, spec.color))
+            .collect();
+        assert_eq!(by_name.get("Task"), Some(&"YELLOW"));
+        assert_eq!(by_name.get("Bug"), Some(&"RED"));
+        assert_eq!(by_name.get("Feature"), Some(&"BLUE"));
+        assert_eq!(by_name.get("Spike"), Some(&"PURPLE"));
+        assert_eq!(by_name.get("Epic"), Some(&"GREEN"));
+        assert_eq!(by_name.get("Chore"), Some(&"GRAY"));
+        assert_eq!(by_name.get("Refactor"), Some(&"ORANGE"));
+        assert_eq!(by_name.get("Docs"), Some(&"PINK"));
+    }
+
+    // ── ensure_issue_types (unblock-wgj.16) ─────────────────────────────
+
+    #[tokio::test]
+    async fn ensure_issue_types_creates_only_missing_types() {
+        // Org has three pre-existing types (mixed case) — must be matched
+        // case-insensitively (mirrors §5.7 `normalize_option_name`) and
+        // skipped. The remaining five are POST'd in declared order.
+        let server = MockServer::start().await;
+        let client = GitHubClient::new_for_test(&server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/orgs/test-owner/issue-types"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                { "id": 1, "name": "task", "color": "yellow", "description": "" },
+                { "id": 2, "name": "BUG", "color": "red", "description": "" },
+                { "id": 3, "name": "Feature", "color": "blue", "description": "" }
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/orgs/test-owner/issue-types"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 99,
+                "name": "<placeholder>"
+            })))
+            .expect(5)
+            .mount(&server)
+            .await;
+
+        let created = client
+            .ensure_issue_types("test-owner")
+            .await
+            .expect("ensure_issue_types should succeed");
+
+        // Five missing types created in IssueType::ALL declared order.
+        // The first three (Task, Bug, Feature) were pre-existing.
+        assert_eq!(
+            created,
+            vec![
+                "Spike".to_owned(),
+                "Epic".to_owned(),
+                "Chore".to_owned(),
+                "Refactor".to_owned(),
+                "Docs".to_owned(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_issue_types_returns_empty_when_all_eight_already_exist() {
+        let server = MockServer::start().await;
+        let client = GitHubClient::new_for_test(&server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/orgs/test-owner/issue-types"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                { "id": 1, "name": "Task" },
+                { "id": 2, "name": "Bug" },
+                { "id": 3, "name": "Feature" },
+                { "id": 4, "name": "Spike" },
+                { "id": 5, "name": "Epic" },
+                { "id": 6, "name": "Chore" },
+                { "id": 7, "name": "Refactor" },
+                { "id": 8, "name": "Docs" }
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // No POST mocks — any creation attempt would error out the
+        // request and the test would fail.
+
+        let created = client
+            .ensure_issue_types("test-owner")
+            .await
+            .expect("ensure_issue_types should succeed");
+
+        assert!(created.is_empty(), "got: {created:?}");
+    }
+
+    #[tokio::test]
+    async fn ensure_issue_types_surfaces_403_as_management_forbidden() {
+        // Spec §12 / §13.3: token without `admin:org` → HTTP 403 →
+        // `IssueTypeManagementForbidden { org }`. Remediation hint
+        // points at upgrading the token (unblock-wgj.21).
+        let server = MockServer::start().await;
+        let client = GitHubClient::new_for_test(&server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/orgs/test-owner/issue-types"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("Forbidden"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let err = client
+            .ensure_issue_types("test-owner")
+            .await
+            .expect_err("403 should surface as IssueTypeManagementForbidden");
+
+        match err {
+            Error::IssueTypeManagementForbidden { org } => {
+                assert_eq!(org, "test-owner");
+            }
+            other => panic!("expected IssueTypeManagementForbidden, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn ensure_issue_types_403_on_post_surfaces_as_management_forbidden() {
+        // The GET succeeds (`read:org` is enough to list) but the POST
+        // fails 403 because the token lacks `admin:org`. Same error
+        // surfaces.
+        let server = MockServer::start().await;
+        let client = GitHubClient::new_for_test(&server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/orgs/test-owner/issue-types"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/orgs/test-owner/issue-types"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("Forbidden"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let err = client
+            .ensure_issue_types("test-owner")
+            .await
+            .expect_err("POST 403 should surface as IssueTypeManagementForbidden");
+
+        match err {
+            Error::IssueTypeManagementForbidden { org } => {
+                assert_eq!(org, "test-owner");
+            }
+            other => panic!("expected IssueTypeManagementForbidden, got: {other:?}"),
+        }
     }
 }

@@ -291,6 +291,45 @@ pub enum Error {
         reason: String,
     },
 
+    /// The configured GitHub token lacks the `admin:org` scope required
+    /// to create org-level issue types via the REST endpoint
+    /// `POST /orgs/{org}/issue-types`.
+    ///
+    /// Emitted by
+    /// [`GitHubClient::ensure_issue_types`](crate::client::GitHubClient::ensure_issue_types)
+    /// (introduced by `unblock-wgj`) when GitHub returns HTTP 403 from
+    /// the issue-type-creation endpoint. The `setup_fields` `IssueType`
+    /// ensure-and-heal step (spec §5.7 step 3) needs `admin:org` to
+    /// allocate any of the eight canonical `IssueType` variants
+    /// (`Task`, `Bug`, `Feature`, `Spike`, `Epic`, `Chore`, `Refactor`,
+    /// `Docs`) that are missing on the org. Subsequent `setup` runs
+    /// only need `read:org` once all eight types already exist.
+    ///
+    /// **Remediation hint.** The Display impl follows the
+    /// [`FieldOptionHealFailed`](Self::FieldOptionHealFailed) pattern
+    /// (per `unblock-aa2` finding S3) — it points operators at the
+    /// fix: upgrade the configured `GITHUB_TOKEN` to a PAT carrying the
+    /// `admin:org` scope (or have an org admin pre-create the missing
+    /// types in the org settings UI). Agent-actionable: the message
+    /// names the affected `org` and the missing capability.
+    ///
+    /// Maps to HTTP 403 via [`Error::status_code`]; `github_error_to_mcp`
+    /// in `unblock-mcp` then maps 403 → `ErrorCode::INVALID_PARAMS`.
+    ///
+    /// See spec §12 / §13.3 / Appendix B and bead `unblock-wgj.21` for
+    /// the full taxonomy rationale.
+    #[snafu(display(
+        "Cannot manage org-level GitHub issue types for '{org}': the configured token lacks the `admin:org` scope. \
+         Upgrade the GITHUB_TOKEN to a PAT with `admin:org`, or have an org admin pre-create the eight canonical issue \
+         types (Task, Bug, Feature, Spike, Epic, Chore, Refactor, Docs) in the org settings UI. Once they exist, \
+         subsequent `setup` runs only need `read:org`."
+    ))]
+    IssueTypeManagementForbidden {
+        /// The GitHub organisation login on which the issue-type
+        /// management call was attempted (e.g. `"websublime"`).
+        org: String,
+    },
+
     /// A `MockGitHubClient` method was called without a queued stub response.
     ///
     /// Only constructible when the `test-hooks` feature is enabled. Tests
@@ -332,6 +371,7 @@ impl Error {
             Self::Domain { source } => source.status_code(),
             Self::GitHubApi { status, .. } => *status,
             Self::GitHubGraphQL { .. } | Self::FieldOptionHealFailed { .. } => 422,
+            Self::IssueTypeManagementForbidden { .. } => 403,
             // 403 Forbidden — GraphQL FORBIDDEN-typed error before
             // cross-repo classification upgrades it to DomainError
             // CrossRepoAccessDenied. An un-upgraded variant still
@@ -711,6 +751,35 @@ mod tests {
         // Status code is 422 — Unprocessable Entity — the request was
         // well-formed but the upstream state cannot be reconciled.
         assert_eq!(err.status_code(), 422);
+    }
+
+    #[test]
+    fn issue_type_management_forbidden_display_and_status() {
+        // unblock-wgj.21: emitted by ensure_issue_types when GitHub
+        // returns HTTP 403 from POST /orgs/{org}/issue-types because
+        // the configured token lacks `admin:org`. Display MUST name the
+        // org, surface the missing scope, and point operators at the
+        // fix — same pattern as FieldOptionHealFailed (unblock-aa2 S3).
+        let err = IssueTypeManagementForbiddenSnafu {
+            org: "websublime".to_owned(),
+        }
+        .build();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("websublime"),
+            "display must name the org: {msg}"
+        );
+        assert!(
+            msg.contains("admin:org"),
+            "display must surface the required scope: {msg}"
+        );
+        assert!(
+            msg.contains("GITHUB_TOKEN"),
+            "display must point operators at the token they need to upgrade: {msg}"
+        );
+        // Spec §12: maps to HTTP 403 — `github_error_to_mcp` then maps
+        // 403 → INVALID_PARAMS.
+        assert_eq!(err.status_code(), 403);
     }
 
     #[test]

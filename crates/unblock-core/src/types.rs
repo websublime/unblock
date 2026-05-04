@@ -358,34 +358,164 @@ pub enum PipelineStage {
 
 /// Classification of issue types.
 ///
-/// Used for filtering and reporting. Mapped from GitHub's issue type
-/// or a Projects V2 custom field.
+/// GitHub's native org-level issue type (NOT a Projects V2 custom field —
+/// see spec §2.6). Read from the GraphQL `issueType { name }` field on
+/// each issue. Epic issues serve as parent containers for sub-issues.
+///
+/// **`#[non_exhaustive]` (introduced by `unblock-wgj`).** Mirrors the
+/// `Status` discipline (§2.3): downstream exhaustive `match IssueType { … }`
+/// arms must add a wildcard `_` arm or per-variant arm for new entries.
+/// New variants can be added in PATCH/MINOR releases without coordinating
+/// with downstream consumers.
+///
+/// **Eight canonical variants (introduced by `unblock-wgj`).** See
+/// [`IssueType::canonical_name`], [`IssueType::canonical_color`], and
+/// [`IssueType::canonical_description`] for the single-source-of-truth
+/// helpers. The `unblock-github` `REQUIRED_ISSUE_TYPES` list is generated
+/// from this enum at compile time.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum IssueType {
-    /// A concrete unit of work.
+    /// A specific piece of work.
     Task,
-    /// A defect to be fixed.
+    /// An unexpected problem or behavior.
     Bug,
-    /// A new feature request.
+    /// A request, idea, or new functionality.
     Feature,
-    /// A collection of related issues.
-    Epic,
-    /// Maintenance or housekeeping work.
-    Chore,
-    /// A time-boxed investigation.
+    /// Time-boxed investigation or research.
     Spike,
+    /// A large body of work that contains sub-issues.
+    Epic,
+    /// Maintenance, cleanup, or non-feature work.
+    Chore,
+    /// Internal restructuring with no behavior change.
+    Refactor,
+    /// Documentation work (README, guides, API docs).
+    Docs,
+}
+
+impl IssueType {
+    /// All canonical `IssueType` variants in declared order.
+    ///
+    /// Single source of truth consumed by `REQUIRED_ISSUE_TYPES` in
+    /// `unblock-github` (compile-time derivation — see spec §5.7) and
+    /// the `IssueType` ensure-and-heal loop in `setup_fields`.
+    ///
+    /// Order matches the `IssueType` declaration order above and the
+    /// canonical color/description palette in spec §2.6 / Appendix B.
+    pub const ALL: [IssueType; 8] = [
+        IssueType::Task,
+        IssueType::Bug,
+        IssueType::Feature,
+        IssueType::Spike,
+        IssueType::Epic,
+        IssueType::Chore,
+        IssueType::Refactor,
+        IssueType::Docs,
+    ];
+
+    /// Canonical GitHub `IssueType` name (`TitleCase`, matches GitHub's
+    /// org-level issue type display).
+    ///
+    /// Single source of truth consumed by:
+    /// - `REQUIRED_ISSUE_TYPES` in `unblock-github` (compile-time
+    ///   derivation — see spec §5.7).
+    /// - The `create` tool's `issue_type` validation step in
+    ///   `crates/unblock-mcp/src/server.rs` (spec §8.3, Appendix B
+    ///   DRIFT-2).
+    /// - The `update` tool's `issue_type` validation step in
+    ///   `crates/unblock-mcp/src/server.rs` (spec §8.6, Appendix B
+    ///   DRIFT-3).
+    /// - `parse_issue_type_from_native` in `unblock-github` —
+    ///   deserialiser of the GraphQL `issueType { name }` field.
+    ///
+    /// **Discipline.** No literal `"Task"`, `"Bug"`, `"Feature"`, etc. is
+    /// permitted outside this helper's definition site and its unit
+    /// tests; the canonical strings MUST be sourced from
+    /// `IssueType::canonical_name`. Mirrors the §2.3
+    /// `Status::option_name` discipline introduced by `unblock-1zj`.
+    #[must_use]
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            IssueType::Task => "Task",
+            IssueType::Bug => "Bug",
+            IssueType::Feature => "Feature",
+            IssueType::Spike => "Spike",
+            IssueType::Epic => "Epic",
+            IssueType::Chore => "Chore",
+            IssueType::Refactor => "Refactor",
+            IssueType::Docs => "Docs",
+        }
+    }
+
+    /// Canonical color name for the issue type.
+    ///
+    /// Used by the `setup_fields` `IssueType` ensure-and-heal step
+    /// (§5.7) when allocating a missing org-level issue type. Color
+    /// names are GitHub's GraphQL `IssueTypeColor` enum values
+    /// (`TitleCase` rendered as uppercase). The values are stable across
+    /// `setup` runs and never overwrite an existing org-side color
+    /// (the ensure-and-heal step skips pre-existing types).
+    #[must_use]
+    pub const fn canonical_color(self) -> &'static str {
+        match self {
+            IssueType::Task => "YELLOW",
+            IssueType::Bug => "RED",
+            IssueType::Feature => "BLUE",
+            IssueType::Spike => "PURPLE",
+            IssueType::Epic => "GREEN",
+            IssueType::Chore => "GRAY",
+            IssueType::Refactor => "ORANGE",
+            IssueType::Docs => "PINK",
+        }
+    }
+
+    /// Canonical short description for the issue type.
+    ///
+    /// Used by the `setup_fields` `IssueType` ensure-and-heal step
+    /// (§5.7) when allocating a missing org-level issue type.
+    /// Descriptions are human-readable, terse, and stable across
+    /// `setup` runs.
+    #[must_use]
+    pub const fn canonical_description(self) -> &'static str {
+        match self {
+            IssueType::Task => "A specific piece of work",
+            IssueType::Bug => "An unexpected problem or behavior",
+            IssueType::Feature => "A request, idea, or new functionality",
+            IssueType::Spike => "Time-boxed investigation or research",
+            IssueType::Epic => "A large body of work that contains sub-issues",
+            IssueType::Chore => "Maintenance, cleanup, or non-feature work",
+            IssueType::Refactor => "Internal restructuring with no behavior change",
+            IssueType::Docs => "Documentation work (README, guides, API docs)",
+        }
+    }
+
+    /// Resolves an `IssueType` from a wire-format name.
+    ///
+    /// Matches case-insensitively with byte-trim, mirroring the
+    /// `normalize_option_name` discipline in `unblock-github`
+    /// (§5.7). Returns `None` if the input does not match any
+    /// canonical name (after trim + ASCII case-folding).
+    ///
+    /// Consumers: `create` and `update` tool validators (§8.3 / §8.6),
+    /// the GraphQL `issueType { name }` deserialiser (§5.5).
+    #[must_use]
+    pub fn from_canonical_name(raw: &str) -> Option<Self> {
+        let trimmed = raw.trim();
+        IssueType::ALL
+            .into_iter()
+            .find(|variant| variant.canonical_name().eq_ignore_ascii_case(trimmed))
+    }
 }
 
 impl fmt::Display for IssueType {
+    /// Writes the canonical `TitleCase` issue-type name (e.g. `"Task"`,
+    /// `"Refactor"`).
+    ///
+    /// Sourced from [`IssueType::canonical_name`] — the
+    /// single-source-of-truth discipline in spec §2.6.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Task => write!(f, "Task"),
-            Self::Bug => write!(f, "Bug"),
-            Self::Feature => write!(f, "Feature"),
-            Self::Epic => write!(f, "Epic"),
-            Self::Chore => write!(f, "Chore"),
-            Self::Spike => write!(f, "Spike"),
-        }
+        f.write_str(self.canonical_name())
     }
 }
 
@@ -1041,24 +1171,157 @@ mod tests {
     // ── IssueType Display ─────────────────────────────────────────────
 
     fn _assert_all_issue_type_variants_covered(v: IssueType) {
+        // `IssueType` is `#[non_exhaustive]`. Inside the defining crate
+        // `non_exhaustive` does not require a wildcard arm, so the
+        // explicit per-variant cover here remains exhaustive. Adding a
+        // new variant breaks this match at compile time — the desired
+        // single-place gate for "did we forget the new variant?".
         match v {
             IssueType::Task
             | IssueType::Bug
             | IssueType::Feature
+            | IssueType::Spike
             | IssueType::Epic
             | IssueType::Chore
-            | IssueType::Spike => {}
+            | IssueType::Refactor
+            | IssueType::Docs => {}
         }
     }
 
     #[test]
     fn issue_type_display_renders_without_quotes() {
+        // Mirrors the `Status::Display` byte-for-byte assertion. The
+        // `canonical_name` helper (spec §2.6) is the single source of
+        // truth — `Display` delegates to it. All eight canonical
+        // variants must be covered.
+        for v in IssueType::ALL {
+            assert_eq!(v.to_string(), v.canonical_name());
+        }
         assert_eq!(IssueType::Task.to_string(), "Task");
         assert_eq!(IssueType::Bug.to_string(), "Bug");
         assert_eq!(IssueType::Feature.to_string(), "Feature");
+        assert_eq!(IssueType::Spike.to_string(), "Spike");
         assert_eq!(IssueType::Epic.to_string(), "Epic");
         assert_eq!(IssueType::Chore.to_string(), "Chore");
-        assert_eq!(IssueType::Spike.to_string(), "Spike");
+        assert_eq!(IssueType::Refactor.to_string(), "Refactor");
+        assert_eq!(IssueType::Docs.to_string(), "Docs");
+    }
+
+    #[test]
+    fn issue_type_canonical_name_returns_titlecase_strings() {
+        // Invariant 17 (§14, Appendix B.3 obligation 1): every variant
+        // returns its TitleCase canonical name. Asserts the full eight-
+        // variant taxonomy byte-for-byte.
+        assert_eq!(IssueType::Task.canonical_name(), "Task");
+        assert_eq!(IssueType::Bug.canonical_name(), "Bug");
+        assert_eq!(IssueType::Feature.canonical_name(), "Feature");
+        assert_eq!(IssueType::Spike.canonical_name(), "Spike");
+        assert_eq!(IssueType::Epic.canonical_name(), "Epic");
+        assert_eq!(IssueType::Chore.canonical_name(), "Chore");
+        assert_eq!(IssueType::Refactor.canonical_name(), "Refactor");
+        assert_eq!(IssueType::Docs.canonical_name(), "Docs");
+    }
+
+    #[test]
+    fn issue_type_canonical_color_palette_matches_spec() {
+        // Invariant 17 / Appendix B.1 Decision 1 — color palette pinned
+        // byte-for-byte against spec §2.6.
+        assert_eq!(IssueType::Task.canonical_color(), "YELLOW");
+        assert_eq!(IssueType::Bug.canonical_color(), "RED");
+        assert_eq!(IssueType::Feature.canonical_color(), "BLUE");
+        assert_eq!(IssueType::Spike.canonical_color(), "PURPLE");
+        assert_eq!(IssueType::Epic.canonical_color(), "GREEN");
+        assert_eq!(IssueType::Chore.canonical_color(), "GRAY");
+        assert_eq!(IssueType::Refactor.canonical_color(), "ORANGE");
+        assert_eq!(IssueType::Docs.canonical_color(), "PINK");
+    }
+
+    #[test]
+    fn issue_type_canonical_description_palette_matches_spec() {
+        // Invariant 17 — descriptions are stable across `setup` runs and
+        // pinned byte-for-byte against spec §2.6.
+        assert_eq!(
+            IssueType::Task.canonical_description(),
+            "A specific piece of work"
+        );
+        assert_eq!(
+            IssueType::Bug.canonical_description(),
+            "An unexpected problem or behavior"
+        );
+        assert_eq!(
+            IssueType::Feature.canonical_description(),
+            "A request, idea, or new functionality"
+        );
+        assert_eq!(
+            IssueType::Spike.canonical_description(),
+            "Time-boxed investigation or research"
+        );
+        assert_eq!(
+            IssueType::Epic.canonical_description(),
+            "A large body of work that contains sub-issues"
+        );
+        assert_eq!(
+            IssueType::Chore.canonical_description(),
+            "Maintenance, cleanup, or non-feature work"
+        );
+        assert_eq!(
+            IssueType::Refactor.canonical_description(),
+            "Internal restructuring with no behavior change"
+        );
+        assert_eq!(
+            IssueType::Docs.canonical_description(),
+            "Documentation work (README, guides, API docs)"
+        );
+    }
+
+    #[test]
+    fn issue_type_from_canonical_name_round_trips() {
+        // Graph-invariant 10 (§13.3): `from_canonical_name(t.canonical_name())`
+        // round-trips for every variant.
+        for variant in IssueType::ALL {
+            let name = variant.canonical_name();
+            assert_eq!(IssueType::from_canonical_name(name), Some(variant));
+        }
+    }
+
+    #[test]
+    fn issue_type_from_canonical_name_is_case_insensitive_and_trims() {
+        // §5.7 normaliser parity: case-insensitive + byte-trim. The
+        // `create` and `update` validators rely on this.
+        assert_eq!(
+            IssueType::from_canonical_name("task"),
+            Some(IssueType::Task)
+        );
+        assert_eq!(
+            IssueType::from_canonical_name("TASK"),
+            Some(IssueType::Task)
+        );
+        assert_eq!(
+            IssueType::from_canonical_name("  Docs  "),
+            Some(IssueType::Docs)
+        );
+        assert_eq!(
+            IssueType::from_canonical_name("rEfActOr"),
+            Some(IssueType::Refactor)
+        );
+        assert!(IssueType::from_canonical_name("NotAType").is_none());
+        assert!(IssueType::from_canonical_name("").is_none());
+    }
+
+    #[test]
+    fn issue_type_all_array_matches_declaration_order() {
+        // Order is the contract consumed by `REQUIRED_ISSUE_TYPES` in
+        // `unblock-github` (spec §5.7) and the ensure-and-heal loop in
+        // `setup_fields`. Pinned byte-for-byte.
+        assert_eq!(IssueType::ALL.len(), 8);
+        assert_eq!(IssueType::ALL[0], IssueType::Task);
+        assert_eq!(IssueType::ALL[1], IssueType::Bug);
+        assert_eq!(IssueType::ALL[2], IssueType::Feature);
+        assert_eq!(IssueType::ALL[3], IssueType::Spike);
+        assert_eq!(IssueType::ALL[4], IssueType::Epic);
+        assert_eq!(IssueType::ALL[5], IssueType::Chore);
+        assert_eq!(IssueType::ALL[6], IssueType::Refactor);
+        assert_eq!(IssueType::ALL[7], IssueType::Docs);
     }
 
     // ── Status/Priority/PipelineStage/IssueState Display ──────────────
