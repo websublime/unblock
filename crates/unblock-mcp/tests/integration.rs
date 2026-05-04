@@ -4222,13 +4222,17 @@ async fn create_issue_with_all_params_and_refetch() {
         chrono::Utc::now().timestamp()
     );
 
+    // Spec Appendix B.3 — `issue_type` populated to match the realistic
+    // title (Bug — `/login` authentication bypass). Surfacing the
+    // canonical type during creation keeps the live board readable as
+    // documentation (parent bead unblock-wgj review WARNING 1).
     let params = unblock_github::mutations::CreateIssueParams {
         title: title.clone(),
         body: Some("## Description\n\nIntegration test issue.".to_owned()),
         labels: vec!["test".to_owned()],
         milestone: None,
         assignees: Vec::new(),
-        issue_type: None,
+        issue_type: Some(IssueType::Bug.canonical_name().to_owned()),
     };
 
     let issue = client
@@ -4279,6 +4283,9 @@ async fn create_issue_with_blocked_by_local() {
     let client = &state.github;
 
     // Create blocker issue first.
+    // Spec Appendix B.3 — `issue_type` matches the realistic title
+    // (Refactor — migrating the auth middleware to async). Parent bead
+    // unblock-wgj review WARNING 1.
     let blocking_title = format!(
         "Migrate auth middleware to async {}",
         chrono::Utc::now().timestamp()
@@ -4290,7 +4297,7 @@ async fn create_issue_with_blocked_by_local() {
             labels: vec!["test".to_owned()],
             milestone: None,
             assignees: Vec::new(),
-            issue_type: None,
+            issue_type: Some(IssueType::Refactor.canonical_name().to_owned()),
         })
         .await
         .expect("create blocker issue should succeed");
@@ -4368,6 +4375,9 @@ async fn create_issue_with_blocked_by_cross_repo() {
     let repo = client.repo().to_owned();
 
     // Create blocker issue.
+    // Spec Appendix B.3 — Spike fits the "investigate" semantics; this
+    // also lights up the IssueType=Spike facet on the live board
+    // (parent bead unblock-wgj review WARNING 1).
     let blocking_title = format!(
         "Investigate flaky checkout test {}",
         chrono::Utc::now().timestamp()
@@ -4379,7 +4389,7 @@ async fn create_issue_with_blocked_by_cross_repo() {
             labels: vec!["test".to_owned()],
             milestone: None,
             assignees: Vec::new(),
-            issue_type: None,
+            issue_type: Some(IssueType::Spike.canonical_name().to_owned()),
         })
         .await
         .expect("create blocker issue should succeed");
@@ -4455,6 +4465,11 @@ async fn create_issue_with_parent_sub_issue() {
     let client = &state.github;
 
     // Create parent issue.
+    // Spec Appendix B.3 — Epic+Task hierarchy. The parent "OAuth login
+    // flow" maps to IssueType::Epic, the child "OAuth callback handler"
+    // to IssueType::Task. Populating both keeps the live board legible
+    // as a worked example of the sub-issue contract (parent bead
+    // unblock-wgj review WARNING 1).
     let parent_title = format!(
         "Implement OAuth login flow {}",
         chrono::Utc::now().timestamp()
@@ -4466,7 +4481,7 @@ async fn create_issue_with_parent_sub_issue() {
             labels: vec!["test".to_owned()],
             milestone: None,
             assignees: Vec::new(),
-            issue_type: None,
+            issue_type: Some(IssueType::Epic.canonical_name().to_owned()),
         })
         .await
         .expect("create parent issue should succeed");
@@ -4483,7 +4498,7 @@ async fn create_issue_with_parent_sub_issue() {
             labels: vec!["test".to_owned()],
             milestone: None,
             assignees: Vec::new(),
-            issue_type: None,
+            issue_type: Some(IssueType::Task.canonical_name().to_owned()),
         })
         .await
         .expect("create child issue should succeed");
@@ -4619,6 +4634,9 @@ async fn create_issue_appears_in_ready_set_after_rebuild() {
         chrono::Utc::now().timestamp()
     );
 
+    // Spec Appendix B.3 — the realistic title is documentation work,
+    // so populate IssueType::Docs to keep the live board readable as
+    // documentation (parent bead unblock-wgj review WARNING 1).
     let issue = client
         .create_issue(unblock_github::mutations::CreateIssueParams {
             title: title.clone(),
@@ -4626,7 +4644,7 @@ async fn create_issue_appears_in_ready_set_after_rebuild() {
             labels: vec!["test".to_owned()],
             milestone: None,
             assignees: Vec::new(),
-            issue_type: None,
+            issue_type: Some(IssueType::Docs.canonical_name().to_owned()),
         })
         .await
         .expect("create_issue should succeed");
