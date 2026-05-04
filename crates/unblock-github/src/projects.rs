@@ -617,7 +617,7 @@ struct OptionNode {
 fn remove_field(map: &mut HashMap<String, FieldMeta>, name: &str) -> Result<FieldMeta, Error> {
     map.remove(name).ok_or_else(|| {
         errors::GitHubGraphQLSnafu {
-            errors: vec![format!("Required field '{name}' was not resolved")],
+            errors: vec![format!("Required field '{name}' was not resolved").into()],
         }
         .build()
     })
@@ -628,7 +628,7 @@ fn remove_field(map: &mut HashMap<String, FieldMeta>, name: &str) -> Result<Fiel
 fn remove_plain_field(map: &mut HashMap<String, String>, name: &str) -> Result<String, Error> {
     map.remove(name).ok_or_else(|| {
         errors::GitHubGraphQLSnafu {
-            errors: vec![format!("Required field '{name}' was not resolved")],
+            errors: vec![format!("Required field '{name}' was not resolved").into()],
         }
         .build()
     })
@@ -675,11 +675,14 @@ impl GitHubClient {
 
         if project_id.is_empty() {
             return Err(errors::GitHubGraphQLSnafu {
-                errors: vec![format!(
-                    "Project V2 #{project_number} not found on {}/{}",
-                    self.owner(),
-                    self.repo()
-                )],
+                errors: vec![
+                    format!(
+                        "Project V2 #{project_number} not found on {}/{}",
+                        self.owner(),
+                        self.repo()
+                    )
+                    .into(),
+                ],
             }
             .build());
         }
@@ -688,7 +691,7 @@ impl GitHubClient {
 
         let number = u32::try_from(project_number).map_err(|_| {
             errors::GitHubGraphQLSnafu {
-                errors: vec![format!("Project number {project_number} exceeds u32::MAX")],
+                errors: vec![format!("Project number {project_number} exceeds u32::MAX").into()],
             }
             .build()
         })?;
@@ -1115,7 +1118,7 @@ impl GitHubClient {
 
         if field_id.is_empty() {
             return Err(errors::GitHubGraphQLSnafu {
-                errors: vec![format!("Failed to create field '{}'", spec.name)],
+                errors: vec![format!("Failed to create field '{}'", spec.name).into()],
             }
             .build());
         }
@@ -1183,10 +1186,9 @@ impl GitHubClient {
 
         if field_id.is_empty() {
             return Err(errors::GitHubGraphQLSnafu {
-                errors: vec![format!(
-                    "Failed to create single-select field '{}'",
-                    spec.name
-                )],
+                errors: vec![
+                    format!("Failed to create single-select field '{}'", spec.name).into(),
+                ],
             }
             .build());
         }
@@ -2156,14 +2158,17 @@ impl GitHubClient {
 
         if node_id.is_empty() {
             return Err(errors::GitHubGraphQLSnafu {
-                errors: vec![format!(
-                    "Could not resolve node ID for {} '{}' — check the owner name",
-                    match owner_type {
-                        OwnerType::Org => "organization",
-                        OwnerType::User => "user",
-                    },
-                    self.owner()
-                )],
+                errors: vec![
+                    format!(
+                        "Could not resolve node ID for {} '{}' — check the owner name",
+                        match owner_type {
+                            OwnerType::Org => "organization",
+                            OwnerType::User => "user",
+                        },
+                        self.owner()
+                    )
+                    .into(),
+                ],
             }
             .build());
         }
@@ -2336,9 +2341,12 @@ impl GitHubClient {
 
         if number == 0 || url.is_empty() {
             return Err(errors::GitHubGraphQLSnafu {
-                errors: vec![format!(
-                    "createProjectV2 mutation returned empty project data for title '{title}'"
-                )],
+                errors: vec![
+                    format!(
+                        "createProjectV2 mutation returned empty project data for title '{title}'"
+                    )
+                    .into(),
+                ],
             }
             .build());
         }

@@ -222,7 +222,9 @@ mod tests {
     fn github_graphql_maps_to_invalid_params() {
         // GraphQL errors have status_code 422.
         let err = GitHubGraphQLSnafu {
-            errors: vec!["Field 'x' not found".to_owned()],
+            errors: vec![unblock_github::errors::GraphQLErrorEntry::message(
+                "Field 'x' not found",
+            )],
         }
         .build();
         let (code, msg) = convert(err);

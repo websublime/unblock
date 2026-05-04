@@ -13,6 +13,59 @@ use unblock_core::types::QualifiedId;
 
 use chrono::{DateTime, Utc};
 
+/// A single GraphQL error entry from a GitHub GraphQL response.
+///
+/// Carries both the human-readable `message` and the structured `error_type`
+/// (e.g. `"NOT_FOUND"`, `"FORBIDDEN"`) so downstream classifiers can route on
+/// the wire-typed signal rather than substring-sniffing free-text messages.
+///
+/// The `error_type` is `None` for synthetic entries constructed inside this
+/// crate (e.g. when a mutation response is well-formed at the transport
+/// layer but the project/field could not be resolved); the partition logic
+/// in `GitHubClient::graphql_with_features` populates it from the upstream
+/// `errors[i].type` field for real GraphQL responses.
+///
+/// See bead `unblock-drh` for the structural-classification rationale
+/// (Miguel's DECISION 2026-05-04: Option B, plumb `errors[].type` through
+/// the partition for robust `NOT_FOUND` detection).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphQLErrorEntry {
+    /// The human-readable error message.
+    pub message: String,
+    /// The structured `type` field from the upstream GraphQL response
+    /// (e.g. `"NOT_FOUND"`, `"FORBIDDEN"`), or `None` for synthetic
+    /// entries constructed inside this crate.
+    pub error_type: Option<String>,
+}
+
+impl GraphQLErrorEntry {
+    /// Constructs an entry carrying only a message (no structured type).
+    ///
+    /// Used by synthetic call sites inside this crate that need to surface
+    /// a contract violation as a [`Error::GitHubGraphQL`] without a real
+    /// upstream error type to plumb (e.g. "Required field 'X' was not
+    /// resolved").
+    #[must_use]
+    pub fn message(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            error_type: None,
+        }
+    }
+}
+
+impl From<String> for GraphQLErrorEntry {
+    fn from(message: String) -> Self {
+        Self::message(message)
+    }
+}
+
+impl From<&str> for GraphQLErrorEntry {
+    fn from(message: &str) -> Self {
+        Self::message(message.to_owned())
+    }
+}
+
 /// Infrastructure-level errors for the GitHub API client.
 ///
 /// Each variant represents a specific infrastructure failure mode. Domain errors
@@ -53,10 +106,19 @@ pub enum Error {
     },
 
     /// One or more errors in a GitHub GraphQL response.
-    #[snafu(display("GitHub GraphQL error: {}", errors.join("; ")))]
+    ///
+    /// Each entry carries both the message and the upstream `type`
+    /// (when known) so downstream classifiers can route on the wire-
+    /// typed signal — e.g. mapping `type == "NOT_FOUND"` with an issue-
+    /// scoped message to [`DomainError::IssueNotFound`] (bead
+    /// `unblock-drh`, Miguel's DECISION 2026-05-04: Option B).
+    ///
+    /// [`DomainError::IssueNotFound`]:
+    ///     unblock_core::errors::DomainError::IssueNotFound
+    #[snafu(display("GitHub GraphQL error: {}", format_graphql_display(errors)))]
     GitHubGraphQL {
-        /// Individual error messages from the GraphQL response.
-        errors: Vec<String>,
+        /// Individual error entries from the GraphQL response.
+        errors: Vec<GraphQLErrorEntry>,
     },
 
     /// A GitHub GraphQL response containing at least one error with
@@ -89,12 +151,12 @@ pub enum Error {
     ///     unblock_core::errors::DomainError::CrossRepoAccessDenied
     #[snafu(display("{}", format_forbidden_display(errors)))]
     GitHubGraphQLForbidden {
-        /// Messages from the GraphQL errors whose `type` was
-        /// `FORBIDDEN`. Non-FORBIDDEN messages from the same response
+        /// Entries from the GraphQL errors whose `type` was
+        /// `FORBIDDEN`. Non-FORBIDDEN entries from the same response
         /// are discarded; the classifier treats any FORBIDDEN as
         /// authoritative. This vector MAY be empty — see the variant
         /// docs for the `(no details)` sentinel semantics.
-        errors: Vec<String>,
+        errors: Vec<GraphQLErrorEntry>,
     },
 
     /// Network or connection failure when reaching GitHub.
@@ -352,12 +414,36 @@ pub enum Error {
 /// happens when every FORBIDDEN-typed response entry lacked a populated
 /// `message` body; see the variant docs). Otherwise joins the messages
 /// with `"; "` to match the historical `GitHubGraphQL` format.
-fn format_forbidden_display(errors: &[String]) -> String {
+fn format_forbidden_display(errors: &[GraphQLErrorEntry]) -> String {
     if errors.is_empty() {
         "GitHub GraphQL FORBIDDEN: (no details)".to_owned()
     } else {
-        format!("GitHub GraphQL FORBIDDEN: {}", errors.join("; "))
+        format!(
+            "GitHub GraphQL FORBIDDEN: {}",
+            errors
+                .iter()
+                .map(|e| e.message.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        )
     }
+}
+
+/// Formats the `errors` vector of a [`Error::GitHubGraphQL`] variant for
+/// `Display`.
+///
+/// Joins the message fields with `"; "` to preserve the historical
+/// `Vec<String>` rendering — the structured `error_type` field is
+/// observability for in-process classifiers (e.g.
+/// [`crate::graphql::classify_issue_not_found`]) and is intentionally
+/// omitted from the human-facing `Display` form to keep log output
+/// stable for downstream tooling.
+fn format_graphql_display(errors: &[GraphQLErrorEntry]) -> String {
+    errors
+        .iter()
+        .map(|e| e.message.as_str())
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 impl Error {
@@ -424,7 +510,7 @@ mod tests {
     #[test]
     fn github_graphql_display() {
         let err = GitHubGraphQLSnafu {
-            errors: vec!["Field 'x' not found".to_owned()],
+            errors: vec![GraphQLErrorEntry::message("Field 'x' not found")],
         }
         .build();
         assert_eq!(err.to_string(), "GitHub GraphQL error: Field 'x' not found");
@@ -434,8 +520,8 @@ mod tests {
     fn github_graphql_display_multi_error() {
         let err = GitHubGraphQLSnafu {
             errors: vec![
-                "Field 'x' not found".to_owned(),
-                "Variable '$id' is not defined".to_owned(),
+                GraphQLErrorEntry::message("Field 'x' not found"),
+                GraphQLErrorEntry::message("Variable '$id' is not defined"),
             ],
         }
         .build();
@@ -448,10 +534,36 @@ mod tests {
     #[test]
     fn github_graphql_display_empty_vec() {
         let err = GitHubGraphQLSnafu {
-            errors: Vec::<String>::new(),
+            errors: Vec::<GraphQLErrorEntry>::new(),
         }
         .build();
         assert_eq!(err.to_string(), "GitHub GraphQL error: ");
+    }
+
+    #[test]
+    fn graphql_error_entry_carries_structured_type() {
+        // Bead unblock-drh: structural classification (Miguel's DECISION,
+        // Option B). The partition logic populates `error_type` from the
+        // upstream `errors[i].type` so downstream classifiers can route
+        // on the typed signal rather than substring-sniffing messages.
+        let entry = GraphQLErrorEntry {
+            message: "Could not resolve to an Issue with the number of 999.".to_owned(),
+            error_type: Some("NOT_FOUND".to_owned()),
+        };
+        assert_eq!(entry.error_type.as_deref(), Some("NOT_FOUND"));
+        assert!(entry.message.contains("to an Issue"));
+    }
+
+    #[test]
+    fn graphql_error_entry_from_string_has_no_type() {
+        // Synthetic entries constructed from a bare String inside this
+        // crate (e.g. mutation-response contract violations) have no
+        // structured type to plumb — `error_type` MUST be `None` so
+        // downstream classifiers can distinguish wire-typed signals
+        // from synthetic messages.
+        let entry: GraphQLErrorEntry = "synthetic".to_owned().into();
+        assert!(entry.error_type.is_none());
+        assert_eq!(entry.message, "synthetic");
     }
 
     #[test]
@@ -470,7 +582,9 @@ mod tests {
         // explicit and harder to accidentally weaken (bead
         // `unblock-eos.36`).
         let err = GitHubGraphQLForbiddenSnafu {
-            errors: vec!["Resource not accessible by integration".to_owned()],
+            errors: vec![GraphQLErrorEntry::message(
+                "Resource not accessible by integration",
+            )],
         }
         .build();
         assert_eq!(
@@ -493,7 +607,7 @@ mod tests {
         // trailing space — so log output stays self-describing. This
         // test pins the exact sentinel string.
         let err = GitHubGraphQLForbiddenSnafu {
-            errors: Vec::<String>::new(),
+            errors: Vec::<GraphQLErrorEntry>::new(),
         }
         .build();
         assert_eq!(err.to_string(), "GitHub GraphQL FORBIDDEN: (no details)");
@@ -578,11 +692,13 @@ mod tests {
             }
             .build(),
             GitHubGraphQLSnafu {
-                errors: vec!["err".to_owned()],
+                errors: vec![GraphQLErrorEntry::message("err")],
             }
             .build(),
             GitHubGraphQLForbiddenSnafu {
-                errors: vec!["Resource not accessible by integration".to_owned()],
+                errors: vec![GraphQLErrorEntry::message(
+                    "Resource not accessible by integration",
+                )],
             }
             .build(),
             RateLimitedSnafu {
@@ -626,7 +742,7 @@ mod tests {
     #[test]
     fn status_code_github_graphql() {
         let err = GitHubGraphQLSnafu {
-            errors: vec!["bad field".to_owned()],
+            errors: vec![GraphQLErrorEntry::message("bad field")],
         }
         .build();
         assert_eq!(err.status_code(), 422);
