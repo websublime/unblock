@@ -1904,23 +1904,12 @@ impl UnblockServer {
         // adding a variant to `IssueType` does not require touching
         // this site.
         let issue_type = match params.issue_type.as_deref() {
-            Some(raw) => {
-                unblock_core::types::IssueType::from_canonical_name(raw).ok_or_else(|| {
-                    ErrorData {
-                        code: rmcp::model::ErrorCode::INVALID_PARAMS,
-                        message: format!(
-                            "Invalid issue_type '{raw}' — must be one of {}",
-                            unblock_core::types::IssueType::ALL
-                                .iter()
-                                .map(|v| v.canonical_name())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        )
-                        .into(),
-                        data: None,
-                    }
-                })?
-            }
+            // Validation routes through the shared
+            // `validate_issue_type_param` helper (parent bead unblock-wgj
+            // review SUGGESTION 2) — the same helper is used by the
+            // `update` handler so the rejection message stays uniform
+            // across both surfaces.
+            Some(raw) => crate::tools::validate_issue_type_param(raw)?,
             // Canonical default (spec §8.3 / Appendix B Decision 5).
             None => unblock_core::types::IssueType::Task,
         };
@@ -2321,26 +2310,14 @@ impl UnblockServer {
 
         // Validate issue_type if provided. DRIFT-3 closure (§8.6 /
         // Appendix B) — routes through `IssueType::canonical_name`
-        // (case-insensitive + byte-trim per the §5.7 normaliser).
+        // (case-insensitive + byte-trim per the §5.7 normaliser) via
+        // the shared `validate_issue_type_param` helper. The same
+        // helper is used by the `create` handler so the rejection
+        // message stays uniform across both surfaces (parent bead
+        // unblock-wgj review SUGGESTION 2).
         let validated_issue_type: Option<unblock_core::types::IssueType> =
             match params.issue_type.as_deref() {
-                Some(raw) => Some(
-                    unblock_core::types::IssueType::from_canonical_name(raw).ok_or_else(|| {
-                        ErrorData {
-                            code: rmcp::model::ErrorCode::INVALID_PARAMS,
-                            message: format!(
-                                "Invalid issue_type '{raw}' — must be one of {}",
-                                unblock_core::types::IssueType::ALL
-                                    .iter()
-                                    .map(|v| v.canonical_name())
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            )
-                            .into(),
-                            data: None,
-                        }
-                    })?,
-                ),
+                Some(raw) => Some(crate::tools::validate_issue_type_param(raw)?),
                 None => None,
             };
 
@@ -2383,6 +2360,21 @@ impl UnblockServer {
                 // native IssueType update mutation. This is NOT a
                 // Projects V2 field — it routes through the REST
                 // PATCH `type` payload (§2.6).
+                //
+                // Error posture: `?` propagates failures (parent bead
+                // unblock-wgj review SUGGESTION 3). This is INTENTIONALLY
+                // different from the sibling Projects V2 field updates
+                // below (Status / Priority / Agent / StoryPoints /
+                // DeferUntil), which use the match-and-warn pattern
+                // because Projects V2 writes are best-effort
+                // reconciliation surfaces (the `reconcile` tool re-asserts
+                // them on demand). `IssueType` is a native GitHub field
+                // — a 4xx from the `type` PATCH (e.g. the org has not
+                // enabled the canonical type catalogue, or the type
+                // name is unknown to GitHub) signals a real validation
+                // failure that operators MUST see and act on, typically
+                // by re-running `setup` so `ensure_issue_types` POSTs
+                // the missing types. Swallowing it would mask spec drift.
                 if let Some(it) = validated_issue_type {
                     client.update_issue_type(issue_number, it).await?;
                     fields_updated.push(format!("issue_type={}", it.canonical_name()));

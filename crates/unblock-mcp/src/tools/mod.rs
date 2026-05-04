@@ -74,6 +74,50 @@ pub(crate) fn normalize_filter(value: Option<&str>) -> Option<&str> {
     value.filter(|s| !s.trim().is_empty())
 }
 
+/// Validates an `issue_type` parameter against the canonical
+/// [`unblock_core::types::IssueType`] taxonomy.
+///
+/// Returns the resolved [`IssueType`](unblock_core::types::IssueType)
+/// on success, or an [`ErrorData`] with code `INVALID_PARAMS` whose
+/// message lists every accepted canonical name verbatim. Matching is
+/// case-insensitive + byte-trim per the §5.7 normaliser, routed
+/// through `IssueType::from_canonical_name`.
+///
+/// Used by both the `create` and `update` tool handlers so the
+/// rejection message stays uniform across the two surfaces (parent
+/// bead unblock-wgj review SUGGESTION 2 — previously the message was
+/// duplicated ~14 lines each at server.rs:1893-1918 and 2305-2326).
+///
+/// Spec §8.3 + §8.6: the eight canonical names are `Task`, `Bug`,
+/// `Feature`, `Spike`, `Epic`, `Chore`, `Refactor`, `Docs`. Adding a
+/// variant to `IssueType` does not require touching this helper —
+/// the message is built from `IssueType::ALL` at call time, so the
+/// list extends automatically.
+///
+/// # Errors
+///
+/// Returns an `ErrorData` with code `INVALID_PARAMS` when `raw` does
+/// not normalise to one of the canonical names. The message is
+/// agent-actionable: it names the offending value AND lists every
+/// accepted alternative.
+pub(crate) fn validate_issue_type_param(
+    raw: &str,
+) -> Result<unblock_core::types::IssueType, ErrorData> {
+    unblock_core::types::IssueType::from_canonical_name(raw).ok_or_else(|| ErrorData {
+        code: rmcp::model::ErrorCode::INVALID_PARAMS,
+        message: format!(
+            "Invalid issue_type '{raw}' — must be one of {}",
+            unblock_core::types::IssueType::ALL
+                .iter()
+                .map(|v| v.canonical_name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+        .into(),
+        data: None,
+    })
+}
+
 /// Build a fresh [`DependencyGraph`] and ready-set projection from raw
 /// `fetch_graph_data()` outputs.
 ///
@@ -598,6 +642,70 @@ mod tests {
         // A value with surrounding whitespace is preserved (not trimmed) —
         // only purely-whitespace strings are collapsed to None.
         assert_eq!(normalize_filter(Some(" agent-x ")), Some(" agent-x "));
+    }
+
+    // ── validate_issue_type_param tests
+    //     (parent bead unblock-wgj review SUGGESTION 2) ────────────────
+
+    #[test]
+    fn validate_issue_type_param_accepts_every_canonical_variant() {
+        // Every member of `IssueType::ALL` MUST round-trip through the
+        // shared helper. Adding a variant to the enum auto-extends
+        // this assertion (the loop iterates the enum, not a literal
+        // list).
+        for &variant in &IssueType::ALL {
+            let resolved =
+                validate_issue_type_param(variant.canonical_name()).unwrap_or_else(|err| {
+                    panic!(
+                        "canonical name {:?} should round-trip through validator: {:?}",
+                        variant.canonical_name(),
+                        err.message
+                    )
+                });
+            assert_eq!(resolved, variant);
+        }
+    }
+
+    #[test]
+    fn validate_issue_type_param_normalises_case_and_trim() {
+        // §5.7 normaliser: case-insensitive + byte-trim.
+        assert_eq!(validate_issue_type_param("bug").unwrap(), IssueType::Bug);
+        assert_eq!(validate_issue_type_param("BUG").unwrap(), IssueType::Bug);
+        assert_eq!(
+            validate_issue_type_param("  Refactor  ").unwrap(),
+            IssueType::Refactor
+        );
+        assert_eq!(validate_issue_type_param("ePiC").unwrap(), IssueType::Epic);
+    }
+
+    #[test]
+    fn validate_issue_type_param_rejects_unknown_with_actionable_message() {
+        let err = validate_issue_type_param("Sprinkles")
+            .expect_err("non-canonical name should be rejected");
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+        // Message names the offending value AND lists every accepted
+        // alternative — the contract that lets agents recover without
+        // a separate round-trip.
+        assert!(
+            err.message.contains("Sprinkles"),
+            "message must echo the bad value: {}",
+            err.message
+        );
+        for variant in IssueType::ALL {
+            assert!(
+                err.message.contains(variant.canonical_name()),
+                "message must list canonical name {:?}: {}",
+                variant.canonical_name(),
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn validate_issue_type_param_rejects_empty_string() {
+        let err = validate_issue_type_param("")
+            .expect_err("empty string is not a canonical IssueType name");
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
     }
 
     // ── execute_read_tool tests ────────────────────────────────────────
