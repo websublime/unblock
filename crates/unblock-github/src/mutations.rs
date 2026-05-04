@@ -31,7 +31,7 @@ use unblock_core::types::{Issue, IssueSummary, IssueType, Priority, QualifiedId,
 
 use crate::client::GitHubClient;
 use crate::errors::{self, Error};
-use crate::graphql::{check_rest_response, classify_cross_repo_fetch};
+use crate::graphql::{check_rest_response, classify_cross_repo_fetch, classify_issue_not_found};
 
 /// Parameters for creating a new GitHub issue.
 ///
@@ -933,7 +933,17 @@ impl GitHubClient {
             "number": number,
         });
 
-        let response = self.graphql(query, variables).await?;
+        // Bead unblock-drh: live GitHub returns the unresolvable-issue
+        // case as a GraphQL `errors` array with `type == "NOT_FOUND"`,
+        // not as a null `data.repository.issue` payload. The structural
+        // classifier translates the typed signal into
+        // [`DomainError::IssueNotFound`] before the empty-node-id
+        // fallback below — but the fallback stays as defence in depth
+        // for a hypothetical future schema variant.
+        let response = self
+            .graphql(query, variables)
+            .await
+            .map_err(|err| classify_issue_not_found(err, number))?;
         let node_id = response["data"]["repository"]["issue"]["id"]
             .as_str()
             .unwrap_or_default()
@@ -1245,10 +1255,19 @@ impl GitHubClient {
                 // a 403 (HTTP) or GraphQL FORBIDDEN response on this
                 // cross-repo resolver MUST upgrade to
                 // `DomainError::CrossRepoAccessDenied { owner, repo }`.
+                //
+                // Bead unblock-drh: compose with the
+                // NOT_FOUND→`IssueNotFound` classifier — order matters
+                // (`classify_cross_repo_fetch` consumes
+                // `GitHubGraphQLForbidden` before the structural-type
+                // classifier sees it, so the FORBIDDEN→CrossRepo
+                // upgrade always wins, matching the SPEC §11.1
+                // precedence).
                 let response = self
                     .graphql(query, variables)
                     .await
-                    .map_err(|err| classify_cross_repo_fetch(err, owner, repo))?;
+                    .map_err(|err| classify_cross_repo_fetch(err, owner, repo))
+                    .map_err(|err| classify_issue_not_found(err, *number))?;
                 let node_id = response["data"]["repository"]["issue"]["id"]
                     .as_str()
                     .unwrap_or_default()
@@ -2333,5 +2352,107 @@ mod tests {
             url,
             "https://github.com/alpha/upstream/issues/42#issuecomment-cross"
         );
+    }
+
+    // ── resolve_node_id / resolve_issue_ref: NOT_FOUND classifier (bead unblock-drh) ─
+
+    /// Bead unblock-drh: when `add_blocked_by`'s `resolve_node_id` call
+    /// for the blocker number receives the live GitHub
+    /// `errors[].type == "NOT_FOUND"` payload (the wire shape returned
+    /// for a non-existent issue number), the chain MUST surface
+    /// `DomainError::IssueNotFound { number: <blocker_number> }` —
+    /// not the generic 422 `GitHubGraphQL`. This is the
+    /// `add_blocked_by_returns_issue_not_found_for_nonexistent_number`
+    /// integration-test contract pinned at the unit layer (no
+    /// `GITHUB_TOKEN` required).
+    #[tokio::test]
+    async fn add_blocked_by_resolve_node_id_not_found_surfaces_issue_not_found() {
+        let server = MockServer::start().await;
+        let client = GitHubClient::new_for_test(&server.uri());
+
+        // First GraphQL call: fetch_issue for the (existing) primary
+        // issue. Return a populated issue payload so we proceed past
+        // it to the resolve_node_id call.
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_json_matches_query("FetchIssue"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "repository": {
+                        "issue": {
+                            "id": "I_primary",
+                            "number": 1,
+                            "title": "primary",
+                            "body": null,
+                            "state": "OPEN",
+                            "url": "https://example.invalid/1",
+                            "createdAt": "2026-04-30T00:00:00Z",
+                            "updatedAt": "2026-04-30T00:00:00Z",
+                            "issueType": null,
+                            "labels": {"nodes": []},
+                            "milestone": null,
+                            "assignees": {"nodes": []},
+                            "comments": {"nodes": []},
+                            "blocking": {"nodes": []},
+                            "blockedBy": {"nodes": []},
+                            "parent": null,
+                            "subIssues": {"nodes": []},
+                            "projectItems": {"nodes": []}
+                        }
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        // Second GraphQL call: resolve_node_id for the missing
+        // blocker. Returns the live NOT_FOUND payload.
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_json_matches_query("ResolveNodeId"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "errors": [
+                    {
+                        "type": "NOT_FOUND",
+                        "message": "Could not resolve to an Issue with the number of 999999999."
+                    }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client
+            .add_blocked_by(1, 999_999_999)
+            .await
+            .expect_err("missing blocker should produce Err");
+
+        match err {
+            Error::Domain {
+                source: DomainError::IssueNotFound { number },
+            } => {
+                assert_eq!(number, 999_999_999);
+            }
+            other => panic!("expected IssueNotFound Domain error, got: {other}"),
+        }
+    }
+
+    /// Wiremock `body_json` is too strict for our needs — we want to
+    /// match on the GraphQL operation name embedded in the JSON `query`
+    /// field. This helper returns a [`wiremock::Match`] that succeeds
+    /// when the request body's `query` field contains the given
+    /// operation name substring.
+    fn body_json_matches_query(operation: &'static str) -> impl wiremock::Match {
+        struct M(&'static str);
+        impl wiremock::Match for M {
+            fn matches(&self, request: &wiremock::Request) -> bool {
+                let Ok(body) = serde_json::from_slice::<serde_json::Value>(&request.body) else {
+                    return false;
+                };
+                body.get("query")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|q| q.contains(self.0))
+            }
+        }
+        M(operation)
     }
 }

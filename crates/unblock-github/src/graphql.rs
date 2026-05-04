@@ -283,12 +283,24 @@ impl GitHubClient {
         let response = self
             .graphql(FETCH_ISSUE_QUERY, variables)
             .await
+            // Bead unblock-drh: compose the cross-repo FORBIDDEN→
+            // `CrossRepoAccessDenied` upgrade with the new
+            // NOT_FOUND→`IssueNotFound` upgrade. Order matters:
+            // `classify_cross_repo_fetch` consumes
+            // `GitHubGraphQLForbidden`, so the structural-type
+            // classifier (`classify_issue_not_found`) sees only
+            // non-FORBIDDEN GraphQL errors and routes the
+            // `type == "NOT_FOUND"` Issue-scoped entries to
+            // [`DomainError::IssueNotFound`]. Local fetches skip the
+            // cross-repo upgrade but still benefit from the
+            // not-found classifier.
             .map_err(|err| {
-                if is_cross_repo {
+                let err = if is_cross_repo {
                     classify_cross_repo_fetch(err, owner, repo)
                 } else {
                     err
-                }
+                };
+                classify_issue_not_found(err, number)
             })?;
 
         let issue_value = &response["data"]["repository"]["issue"];
@@ -536,12 +548,17 @@ impl GitHubClient {
             let has_forbidden = arr
                 .iter()
                 .any(|e| e.get("type").and_then(serde_json::Value::as_str) == Some("FORBIDDEN"));
-            let mut forbidden_messages: Vec<String> = Vec::new();
-            let mut other_messages: Vec<String> = Vec::new();
+            // Bead unblock-drh / Miguel's DECISION 2026-05-04 (Option B):
+            // each entry now carries its structured `error_type` alongside
+            // the message so downstream classifiers (e.g.
+            // `classify_issue_not_found`) can route on the wire-typed
+            // signal rather than substring-sniffing free-text messages.
+            let mut forbidden_entries: Vec<errors::GraphQLErrorEntry> = Vec::new();
+            let mut other_entries: Vec<errors::GraphQLErrorEntry> = Vec::new();
             for err in arr {
                 // Skip entries without a non-empty `message`: a missing
                 // or empty message carries no information and would
-                // silently pollute the message vectors (previously a
+                // silently pollute the entry vectors (previously a
                 // FORBIDDEN entry with no message body produced an
                 // empty-string entry in `forbidden_messages`).
                 let Some(message) = err
@@ -552,21 +569,29 @@ impl GitHubClient {
                 else {
                     continue;
                 };
-                let ty = err.get("type").and_then(|t| t.as_str()).unwrap_or_default();
-                if ty == "FORBIDDEN" {
-                    forbidden_messages.push(message);
+                let error_type = err
+                    .get("type")
+                    .and_then(|t| t.as_str())
+                    .filter(|t| !t.is_empty())
+                    .map(str::to_owned);
+                let entry = errors::GraphQLErrorEntry {
+                    message,
+                    error_type: error_type.clone(),
+                };
+                if error_type.as_deref() == Some("FORBIDDEN") {
+                    forbidden_entries.push(entry);
                 } else {
-                    other_messages.push(message);
+                    other_entries.push(entry);
                 }
             }
             if has_forbidden {
                 return Err(errors::GitHubGraphQLForbiddenSnafu {
-                    errors: forbidden_messages,
+                    errors: forbidden_entries,
                 }
                 .build());
             }
             return Err(errors::GitHubGraphQLSnafu {
-                errors: other_messages,
+                errors: other_entries,
             }
             .build());
         }
@@ -646,6 +671,61 @@ pub(crate) fn classify_cross_repo_fetch(
             }
             .build()
             .into()
+        }
+        other => other,
+    }
+}
+
+/// Upgrades a `GitHubGraphQL` error to
+/// [`DomainError::IssueNotFound`] when the upstream GraphQL response
+/// carries an entry with `type == "NOT_FOUND"` whose message identifies
+/// the missing resource as an Issue (rather than a Repository or other
+/// resource).
+///
+/// Bead `unblock-drh`, Miguel's DECISION 2026-05-04 (Option B —
+/// structural classification): GitHub returns HTTP 200 with a typed
+/// `errors` array for non-existent issue lookups; the `type` field
+/// (`NOT_FOUND`) is the wire-safe routing signal, but the partition
+/// emits a generic `GitHubGraphQL` (HTTP 422) because it has no way to
+/// know whether the missing resource was the queried issue or some
+/// other sub-selection. This classifier sits at call sites that DO
+/// know the issue number (`fetch_issue_in_repo`, `resolve_node_id`,
+/// `resolve_issue_ref` cross-repo arm) and translates the structured
+/// signal into the spec-correct domain error.
+///
+/// **Issue-specificity guard.** The classifier additionally requires
+/// the entry's message to contain the substring `"to an Issue"` — the
+/// documented GitHub phrasing for the missing-issue case. Without this
+/// guard, a Repository-not-found entry on the same query
+/// (`"Could not resolve to a Repository with the name"`) — which can
+/// fire when `owner` or `repo` is wrong rather than `number` — would
+/// be misclassified as `IssueNotFound`. Pinned by the regression
+/// guards `graphql_errors_array_without_forbidden_type_emits_graphql_variant`
+/// (errors.rs) and the unit tests on this classifier.
+///
+/// **Composes with `classify_cross_repo_fetch`.** Cross-repo call
+/// sites apply `classify_cross_repo_fetch` FIRST so a FORBIDDEN
+/// response upgrades to `CrossRepoAccessDenied` (per SPEC §11.1)
+/// before this classifier sees it. The FORBIDDEN→CrossRepo upgrade
+/// must always win because access denial is more authoritative than
+/// not-found (an unauthorised reader sees `NOT_FOUND` for everything).
+///
+/// Other errors pass through unchanged.
+///
+/// [`DomainError::IssueNotFound`]:
+///     unblock_core::errors::DomainError::IssueNotFound
+pub(crate) fn classify_issue_not_found(err: errors::Error, number: u64) -> errors::Error {
+    match err {
+        errors::Error::GitHubGraphQL { ref errors } => {
+            if errors.iter().any(|e| {
+                e.error_type.as_deref() == Some("NOT_FOUND") && e.message.contains("to an Issue")
+            }) {
+                unblock_core::errors::IssueNotFoundSnafu { number }
+                    .build()
+                    .into()
+            } else {
+                err
+            }
         }
         other => other,
     }
@@ -1239,7 +1319,9 @@ mod tests {
         // emits this variant by inspecting `errors[i].type == "FORBIDDEN"`
         // BEFORE reducing to messages.
         let gql_err = errors::GitHubGraphQLForbiddenSnafu {
-            errors: vec!["Resource not accessible by integration".to_owned()],
+            errors: vec![errors::GraphQLErrorEntry::message(
+                "Resource not accessible by integration",
+            )],
         }
         .build();
         let upgraded = classify_cross_repo_fetch(gql_err, "acme", "widgets");
@@ -1276,13 +1358,15 @@ mod tests {
         // MUST stay as GitHubGraphQL — only the FORBIDDEN-typed variant
         // upgrades.
         let gql_err = errors::GitHubGraphQLSnafu {
-            errors: vec!["Field 'x' not found".to_owned()],
+            errors: vec![errors::GraphQLErrorEntry::message("Field 'x' not found")],
         }
         .build();
         let result = classify_cross_repo_fetch(gql_err, "acme", "widgets");
         match result {
             errors::Error::GitHubGraphQL { errors } => {
-                assert_eq!(errors, vec!["Field 'x' not found".to_owned()]);
+                assert_eq!(errors.len(), 1);
+                assert_eq!(errors[0].message, "Field 'x' not found");
+                assert!(errors[0].error_type.is_none());
             }
             other => panic!("expected GitHubGraphQL passthrough, got: {other:?}"),
         }
@@ -1300,6 +1384,151 @@ mod tests {
         match result {
             errors::Error::RateLimited { .. } => {}
             other => panic!("expected RateLimited passthrough, got: {other:?}"),
+        }
+    }
+
+    // ── classify_issue_not_found (bead unblock-drh) ────────────────────
+
+    #[test]
+    fn classify_issue_not_found_upgrades_typed_issue_not_found() {
+        // Bead unblock-drh / Miguel's DECISION 2026-05-04 (Option B):
+        // a `GitHubGraphQL` carrying `error_type == Some("NOT_FOUND")`
+        // and an Issue-scoped message MUST upgrade to
+        // `DomainError::IssueNotFound { number }` (status_code 404).
+        // This is the live-failure-mode fix: GitHub returns
+        // `Could not resolve to an Issue with the number of N.` for
+        // non-existent issue numbers.
+        let gql_err = errors::GitHubGraphQLSnafu {
+            errors: vec![errors::GraphQLErrorEntry {
+                message: "Could not resolve to an Issue with the number of 999999999.".to_owned(),
+                error_type: Some("NOT_FOUND".to_owned()),
+            }],
+        }
+        .build();
+        let upgraded = classify_issue_not_found(gql_err, 999_999_999);
+        match upgraded {
+            errors::Error::Domain { source } => {
+                assert_eq!(source.status_code(), 404);
+                let msg = source.to_string();
+                assert!(
+                    msg.contains("999999999"),
+                    "display must carry the issue number: {msg}"
+                );
+            }
+            other => panic!("expected IssueNotFound Domain error, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_issue_not_found_passes_through_repository_not_found() {
+        // The Issue-specificity guard: a Repository-not-found message
+        // (`Could not resolve to a Repository with the name`) MUST
+        // remain as `GitHubGraphQL` — the queried owner/repo is
+        // wrong, not the issue number. Without this guard, every
+        // mistyped owner would surface as `IssueNotFound`. Pinned by
+        // the existing partition test
+        // `graphql_errors_array_without_forbidden_type_emits_graphql_variant`.
+        let gql_err = errors::GitHubGraphQLSnafu {
+            errors: vec![errors::GraphQLErrorEntry {
+                message: "Could not resolve to a Repository with the name 'acme/missing'."
+                    .to_owned(),
+                error_type: Some("NOT_FOUND".to_owned()),
+            }],
+        }
+        .build();
+        let result = classify_issue_not_found(gql_err, 42);
+        match result {
+            errors::Error::GitHubGraphQL { errors } => {
+                assert_eq!(errors.len(), 1);
+                assert!(errors[0].message.contains("Repository"));
+                assert_eq!(errors[0].error_type.as_deref(), Some("NOT_FOUND"));
+            }
+            other => panic!("expected GitHubGraphQL passthrough, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_issue_not_found_passes_through_when_type_missing() {
+        // Without `error_type == Some("NOT_FOUND")`, the classifier
+        // MUST NOT upgrade — even if the message happens to contain
+        // `to an Issue` substring (defensive against synthetic
+        // entries constructed inside this crate, which carry
+        // `error_type == None`).
+        let gql_err = errors::GitHubGraphQLSnafu {
+            errors: vec![errors::GraphQLErrorEntry::message(
+                "synthetic message about an Issue with no upstream type",
+            )],
+        }
+        .build();
+        let result = classify_issue_not_found(gql_err, 42);
+        match result {
+            errors::Error::GitHubGraphQL { .. } => {}
+            other => panic!("expected GitHubGraphQL passthrough, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_issue_not_found_passes_through_forbidden_variant() {
+        // The classifier is scoped to `GitHubGraphQL` (the reducer's
+        // default bucket). A `GitHubGraphQLForbidden` MUST pass
+        // through so cross-repo call sites can let
+        // `classify_cross_repo_fetch` upgrade it to
+        // `CrossRepoAccessDenied` first — composition order matters,
+        // FORBIDDEN→CrossRepo always wins (an unauthorised reader
+        // sees `NOT_FOUND` for everything; the access-denial signal
+        // is more authoritative).
+        let gql_err = errors::GitHubGraphQLForbiddenSnafu {
+            errors: vec![errors::GraphQLErrorEntry::message("access denied")],
+        }
+        .build();
+        let result = classify_issue_not_found(gql_err, 42);
+        match result {
+            errors::Error::GitHubGraphQLForbidden { .. } => {}
+            other => panic!("expected GitHubGraphQLForbidden passthrough, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_issue_not_found_passes_through_unrelated_errors() {
+        // A rate-limit error MUST pass through unchanged — the
+        // classifier is scoped to `GitHubGraphQL` only.
+        let err = errors::RateLimitedSnafu {
+            reset_at: chrono::Utc::now(),
+        }
+        .build();
+        let result = classify_issue_not_found(err, 42);
+        match result {
+            errors::Error::RateLimited { .. } => {}
+            other => panic!("expected RateLimited passthrough, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_issue_not_found_only_one_entry_must_match() {
+        // A mixed `GitHubGraphQL` payload with at least one
+        // NOT_FOUND-typed Issue-scoped entry MUST upgrade — the
+        // classifier scans all entries and routes on the first match.
+        // Guards against a future change that accidentally requires
+        // ALL entries to match.
+        let gql_err = errors::GitHubGraphQLSnafu {
+            errors: vec![
+                errors::GraphQLErrorEntry {
+                    message: "side-effect error".to_owned(),
+                    error_type: Some("INTERNAL".to_owned()),
+                },
+                errors::GraphQLErrorEntry {
+                    message: "Could not resolve to an Issue with the number of 7.".to_owned(),
+                    error_type: Some("NOT_FOUND".to_owned()),
+                },
+            ],
+        }
+        .build();
+        let upgraded = classify_issue_not_found(gql_err, 7);
+        match upgraded {
+            errors::Error::Domain { source } => {
+                assert_eq!(source.status_code(), 404);
+            }
+            other => panic!("expected IssueNotFound Domain error, got: {other:?}"),
         }
     }
 
@@ -2775,7 +3004,8 @@ mod tests {
         match err {
             errors::Error::GitHubGraphQLForbidden { errors } => {
                 assert_eq!(errors.len(), 1);
-                assert_eq!(errors[0], "Resource not accessible by integration");
+                assert_eq!(errors[0].message, "Resource not accessible by integration");
+                assert_eq!(errors[0].error_type.as_deref(), Some("FORBIDDEN"));
             }
             other => panic!("expected GitHubGraphQLForbidden, got: {other}"),
         }
@@ -2813,7 +3043,12 @@ mod tests {
         match err {
             errors::Error::GitHubGraphQL { errors } => {
                 assert_eq!(errors.len(), 1);
-                assert!(errors[0].contains("Repository"));
+                assert!(errors[0].message.contains("Repository"));
+                // Bead unblock-drh: structural type is now plumbed
+                // through the partition — the entry MUST carry
+                // `error_type == Some("NOT_FOUND")` so downstream
+                // classifiers can route on the typed signal.
+                assert_eq!(errors[0].error_type.as_deref(), Some("NOT_FOUND"));
             }
             other => panic!("expected GitHubGraphQL, got: {other}"),
         }
@@ -2849,7 +3084,8 @@ mod tests {
         match err {
             errors::Error::GitHubGraphQLForbidden { errors } => {
                 assert_eq!(errors.len(), 1);
-                assert_eq!(errors[0], "access denied");
+                assert_eq!(errors[0].message, "access denied");
+                assert_eq!(errors[0].error_type.as_deref(), Some("FORBIDDEN"));
             }
             other => panic!("expected GitHubGraphQLForbidden, got: {other}"),
         }
@@ -3006,7 +3242,8 @@ mod tests {
         match err {
             errors::Error::GitHubGraphQLForbidden { errors } => {
                 assert_eq!(errors.len(), 1, "empty-message entry must be dropped");
-                assert_eq!(errors[0], "access denied");
+                assert_eq!(errors[0].message, "access denied");
+                assert_eq!(errors[0].error_type.as_deref(), Some("FORBIDDEN"));
             }
             other => panic!("expected GitHubGraphQLForbidden, got: {other}"),
         }
@@ -3114,6 +3351,189 @@ mod tests {
         match err {
             errors::Error::GitHubApi { status, .. } => assert_eq!(status, 403),
             other => panic!("expected GitHubApi passthrough for local 403, got: {other}"),
+        }
+    }
+
+    // ── fetch_issue_in_repo: NOT_FOUND classifier (bead unblock-drh) ───
+
+    #[tokio::test]
+    async fn fetch_issue_in_repo_local_graphql_not_found_upgrades_to_issue_not_found() {
+        // Bead unblock-drh / Miguel's DECISION 2026-05-04 (Option B):
+        // a LOCAL fetch returning the live GitHub
+        // `errors[].type == "NOT_FOUND"` payload for a non-existent
+        // issue MUST upgrade to `DomainError::IssueNotFound`
+        // (status_code 404), not surface as a generic 422
+        // `GitHubGraphQL`. This is the live-failure-mode end-to-end
+        // contract that the four `*_returns_issue_not_found_for_nonexistent_number`
+        // integration tests pin under live CI.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let client = GitHubClient::new_for_test(&server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "errors": [
+                    {
+                        "type": "NOT_FOUND",
+                        "message": "Could not resolve to an Issue with the number of 999999999."
+                    }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client
+            .fetch_issue_in_repo("test-owner", "test-repo", 999_999_999)
+            .await
+            .expect_err("NOT_FOUND issue should produce Err");
+
+        match err {
+            errors::Error::Domain { source } => {
+                assert_eq!(source.status_code(), 404);
+                let msg = source.to_string();
+                assert!(
+                    msg.contains("999999999"),
+                    "display must carry the issue number: {msg}"
+                );
+            }
+            other => panic!("expected IssueNotFound Domain error, got: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_issue_in_repo_cross_repo_graphql_not_found_upgrades_to_issue_not_found() {
+        // Bead unblock-drh: cross-repo path composes the
+        // FORBIDDEN→CrossRepoAccessDenied upgrade with the
+        // NOT_FOUND→IssueNotFound upgrade. A NOT_FOUND-typed Issue-
+        // scoped error from a cross-repo fetch MUST surface as
+        // IssueNotFound (the FORBIDDEN classifier does not match,
+        // so the issue-not-found classifier wins).
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let client = GitHubClient::new_for_test(&server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "errors": [
+                    {
+                        "type": "NOT_FOUND",
+                        "message": "Could not resolve to an Issue with the number of 7."
+                    }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client
+            .fetch_issue_in_repo("acme", "widgets", 7)
+            .await
+            .expect_err("NOT_FOUND issue should produce Err");
+
+        match err {
+            errors::Error::Domain { source } => {
+                assert_eq!(source.status_code(), 404);
+            }
+            other => panic!("expected IssueNotFound Domain error, got: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_issue_in_repo_cross_repo_forbidden_wins_over_not_found_classifier() {
+        // Composition order: when a cross-repo fetch returns
+        // FORBIDDEN, the FORBIDDEN→CrossRepoAccessDenied upgrade MUST
+        // win — the NOT_FOUND classifier never sees it because
+        // `classify_cross_repo_fetch` consumes the
+        // `GitHubGraphQLForbidden` variant first. Guards against
+        // a future refactor that swaps the composition order and
+        // would silently downgrade access-denial signals to
+        // not-found. The reasoning: an unauthorised reader of a
+        // private repo sees `NOT_FOUND` for everything; the
+        // access-denial signal (when present) is more authoritative.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let client = GitHubClient::new_for_test(&server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "errors": [
+                    {
+                        "type": "FORBIDDEN",
+                        "message": "Resource not accessible by integration"
+                    }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client
+            .fetch_issue_in_repo("acme", "widgets", 7)
+            .await
+            .expect_err("FORBIDDEN should produce Err");
+
+        match err {
+            errors::Error::Domain { source } => {
+                assert_eq!(source.status_code(), 403);
+                let msg = source.to_string();
+                assert!(msg.contains("acme"));
+                assert!(msg.contains("widgets"));
+            }
+            other => panic!("expected CrossRepoAccessDenied Domain error, got: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_issue_in_repo_local_graphql_repository_not_found_stays_as_graphql() {
+        // Issue-specificity guard: a Repository-not-found error
+        // (`Could not resolve to a Repository with the name`) MUST
+        // remain as `GitHubGraphQL` (status_code 422) even though it
+        // shares `type == "NOT_FOUND"` — the missing resource is the
+        // queried owner/repo, not the issue number. Local-fetch
+        // variant (`test-owner/test-repo` matches the configured
+        // repo) so the cross-repo classifier is bypassed and the
+        // not-found classifier is the only one in play. Mirrors the
+        // existing partition-level guard
+        // `graphql_errors_array_without_forbidden_type_emits_graphql_variant`
+        // at the call-site classification layer.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let client = GitHubClient::new_for_test(&server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "errors": [
+                    {
+                        "type": "NOT_FOUND",
+                        "message": "Could not resolve to a Repository with the name 'test-owner/test-repo'."
+                    }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let err = client
+            .fetch_issue_in_repo("test-owner", "test-repo", 1)
+            .await
+            .expect_err("NOT_FOUND repository should produce Err");
+
+        match err {
+            errors::Error::GitHubGraphQL { errors } => {
+                assert_eq!(errors.len(), 1);
+                assert!(errors[0].message.contains("Repository"));
+                assert_eq!(errors[0].error_type.as_deref(), Some("NOT_FOUND"));
+            }
+            other => panic!("expected GitHubGraphQL passthrough, got: {other}"),
         }
     }
 }
