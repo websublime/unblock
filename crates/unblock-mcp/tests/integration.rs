@@ -173,10 +173,21 @@ async fn fetch_field_value_via_graphql(
         "variables": { "itemId": item_id },
     });
 
-    let http = reqwest::Client::new();
+    // GitHub's GraphQL API rejects requests without a User-Agent and
+    // returns a non-JSON HTML error page (causing a Decode error at
+    // `.json()`). The sister helper in `unblock-github/tests/integration.rs`
+    // reuses `GitHubClient::http()`, which is built with a User-Agent in
+    // `crates/unblock-github/src/client.rs`. Mirror that contract here so
+    // the live pin assertion at `create_issue_with_all_params_and_refetch`
+    // does not panic on the API gateway's HTML response.
+    let http = reqwest::Client::builder()
+        .user_agent(concat!("unblock-mcp-tests/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .expect("reqwest client build");
     let response: serde_json::Value = http
         .post(client.graphql_url())
         .bearer_auth(&token)
+        .header("Accept", "application/vnd.github+json")
         .json(&body)
         .send()
         .await
