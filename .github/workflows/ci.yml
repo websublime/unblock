@@ -154,6 +154,28 @@ jobs:
             exit 1
           fi
           scripts/setup-test-project.sh --wipe-issues "$owner" "$UNBLOCK_TEST_PROJECT" "$repo"
+      # Pre-test wipe (labels): cycle 2 of bead unblock-1hz removed the
+      # per-run label generation that cycle 1 introduced. The historical
+      # per-run labels (`e2e-test-<ts>`, `test-label-<ts>`, the
+      # cycle-1-only `unblock-run-<millis>`) accumulated in the test repo
+      # without an upstream bulk-delete API. The `--wipe-labels` mode
+      # deletes those orphans and preserves the two canonical labels
+      # (`unblock-fixture`, `unblock-test-label`) plus any production
+      # labels (anything not matching the test glob patterns). Idempotent.
+      # Runs after the issues wipe so a CI run starting from a polluted
+      # state converges to the canonical end state in one pass.
+      - name: Pre-test wipe — clean orphan test labels
+        env:
+          UNBLOCK_TEST_REPO: ${{ vars.UNBLOCK_TEST_REPO }}
+          GH_TOKEN: ${{ secrets.UNBLOCK_TEST_TOKEN }}
+        run: |
+          owner="${UNBLOCK_TEST_REPO%%/*}"
+          repo="${UNBLOCK_TEST_REPO##*/}"
+          if [ -z "$owner" ] || [ -z "$repo" ] || [ "$owner" = "$UNBLOCK_TEST_REPO" ]; then
+            echo "::error::UNBLOCK_TEST_REPO must be in owner/repo form, got: $UNBLOCK_TEST_REPO"
+            exit 1
+          fi
+          scripts/setup-test-project.sh --wipe-labels "$owner" "$repo"
       # Run the live-required `#[ignore]` tests under tarpaulin in one pass
       # — this is both the live test signal and the live coverage signal.
       # Codecov merges this `live` report with the mock-only `mock` report
