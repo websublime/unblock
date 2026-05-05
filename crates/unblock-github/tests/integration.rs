@@ -161,6 +161,70 @@ fn test_config() -> Config {
     Config::load().expect("Config::load() should succeed when GITHUB_TOKEN is set")
 }
 
+// ── Live test fixture-label contract (bead `unblock-1hz`) ──────────
+//
+// Every issue created by a live test MUST be tagged with two labels so the
+// `scripts/setup-test-project.sh --wipe-issues` cleanup mode can identify
+// orphaned fixtures across runs:
+//
+//   * [`FIXTURE_LABEL`] — stable canonical marker (`unblock-fixture`). The
+//     wipe script enumerates issues with this label exactly. Never include
+//     a timestamp or run id here, otherwise the wipe loses its anchor.
+//   * Per-run discriminator built by [`run_label`] — `unblock-run-<millis>`
+//     using `Utc::now().timestamp_millis()` (millisecond resolution avoids
+//     collisions across two CI runs landing in the same second; bead
+//     `unblock-1hz` Risk R5).
+//
+// The two labels are independent: the canonical one drives wipe-selection
+// and the per-run one survives in the GitHub timeline as forensic
+// correlation between issues created by the same test process. Tests that
+// already attach a domain label such as `"test"` keep it — fixture labels
+// are additive.
+
+/// Canonical fixture marker label. Applied by every live test that creates
+/// an issue. The `--wipe-issues` mode in `scripts/setup-test-project.sh`
+/// selects issues by this exact name.
+pub(crate) const FIXTURE_LABEL: &str = "unblock-fixture";
+
+/// Builds the per-run discriminator label (`unblock-run-<millis>`) using
+/// `chrono::Utc::now().timestamp_millis()`. Resolution is intentionally
+/// millisecond, not second — two live test runs in CI can otherwise share a
+/// label (bead `unblock-1hz` Risk R5).
+pub(crate) fn run_label() -> String {
+    format!("unblock-run-{}", chrono::Utc::now().timestamp_millis())
+}
+
+/// Returns the canonical fixture label set: the stable `unblock-fixture`
+/// marker plus a fresh per-run discriminator. Use as the `labels` field on
+/// `CreateIssueParams` to make a live-test-created issue eligible for the
+/// `--wipe-issues` cleanup path.
+///
+/// `extra` is appended after the two fixture labels so domain-specific
+/// labels such as `"test"` stay attached to the created issue.
+pub(crate) fn fixture_labels(extra: &[&str]) -> Vec<String> {
+    let mut labels = Vec::with_capacity(2 + extra.len());
+    labels.push(FIXTURE_LABEL.to_owned());
+    labels.push(run_label());
+    labels.extend(extra.iter().map(|s| (*s).to_owned()));
+    labels
+}
+
+// ── Canonical view names for the create_view live tests ────────────
+//
+// Per bead `unblock-1hz` decision D3 (option y — reuse stable-name refactor),
+// the three create_view tests use fixed names instead of timestamp-suffixed
+// unique ones. Project views cannot be deleted via the GitHub API
+// (verified against the v2 GraphQL schema and 2026-03-10 REST OpenAPI;
+// `docs/archive/research/github-projectsv2-views-api-findings.md`), so
+// every fresh-name run was permanently polluting the live test project.
+// Each test now uses `list_views` to check for pre-existence and creates
+// only when missing — view count stays at exactly 3 fixtures across all
+// runs.
+
+const FIXTURE_VIEW_BOARD: &str = "test-board-fixture";
+const FIXTURE_VIEW_TABLE: &str = "test-table-fixture";
+const FIXTURE_VIEW_ROADMAP: &str = "test-roadmap-fixture";
+
 /// Builds a hermetic [`Config`] for fixture-injected tests — no env vars
 /// read, no filesystem touched. Pair with [`GitHubClient::with_repo`] to
 /// construct a client that does not require `GITHUB_TOKEN` or `.git/config`.
@@ -335,7 +399,7 @@ async fn fetch_issue_returns_full_details_for_existing_issue() {
              `fetch_issue_returns_full_details_for_existing_issue`."
                 .to_owned(),
         ),
-        labels: vec!["test".to_owned()],
+        labels: fixture_labels(&["test"]),
         milestone: None,
         assignees: vec![],
         issue_type: Some(IssueType::Bug.canonical_name().to_owned()),
@@ -575,7 +639,7 @@ async fn create_issue_returns_issue_with_correct_fields() {
              — safe to close. Models a high-severity auth regression."
                 .to_owned(),
         ),
-        labels: vec!["test".to_owned()],
+        labels: fixture_labels(&["test"]),
         milestone: None,
         assignees: vec![],
         issue_type: Some(
@@ -646,7 +710,7 @@ async fn close_issue_closes_issue_and_refetch_confirms() {
              path — will be closed."
                 .to_owned(),
         ),
-        labels: vec!["test".to_owned()],
+        labels: fixture_labels(&["test"]),
         milestone: None,
         assignees: vec![],
         issue_type: Some(IssueType::Refactor.canonical_name().to_owned()),
@@ -709,7 +773,7 @@ async fn close_issue_with_reason_adds_comment_before_closing() {
              investigation of an intermittent checkout test failure."
                 .to_owned(),
         ),
-        labels: vec!["test".to_owned()],
+        labels: fixture_labels(&["test"]),
         milestone: None,
         assignees: vec![],
         issue_type: None,
@@ -820,7 +884,7 @@ async fn add_comment_posts_comment_and_returns_url() {
              — will receive a comment. Models a documentation task."
                 .to_owned(),
         ),
-        labels: vec!["test".to_owned()],
+        labels: fixture_labels(&["test"]),
         milestone: None,
         assignees: vec![],
         issue_type: Some(IssueType::Docs.canonical_name().to_owned()),
@@ -929,7 +993,7 @@ async fn add_blocked_by_creates_blocking_relationship() {
         .create_issue(CreateIssueParams {
             title: "Add OAuth callback handler".to_owned(),
             body: Some("Automated test — safe to close.".to_owned()),
-            labels: vec!["test".to_owned()],
+            labels: fixture_labels(&["test"]),
             milestone: None,
             assignees: vec![],
             issue_type: Some(IssueType::Task.canonical_name().to_owned()),
@@ -943,7 +1007,7 @@ async fn add_blocked_by_creates_blocking_relationship() {
         .create_issue(CreateIssueParams {
             title: "Add OAuth token validation".to_owned(),
             body: Some("Automated test — safe to close.".to_owned()),
-            labels: vec!["test".to_owned()],
+            labels: fixture_labels(&["test"]),
             milestone: None,
             assignees: vec![],
             issue_type: Some(IssueType::Task.canonical_name().to_owned()),
@@ -1021,7 +1085,7 @@ async fn remove_blocked_by_removes_blocking_relationship() {
         .create_issue(CreateIssueParams {
             title: "Bump dependency versions".to_owned(),
             body: Some("Automated test — safe to close.".to_owned()),
-            labels: vec!["test".to_owned()],
+            labels: fixture_labels(&["test"]),
             milestone: None,
             assignees: vec![],
             issue_type: Some(IssueType::Chore.canonical_name().to_owned()),
@@ -1035,7 +1099,7 @@ async fn remove_blocked_by_removes_blocking_relationship() {
         .create_issue(CreateIssueParams {
             title: "Migrate auth middleware to async".to_owned(),
             body: Some("Automated test — safe to close.".to_owned()),
-            labels: vec!["test".to_owned()],
+            labels: fixture_labels(&["test"]),
             milestone: None,
             assignees: vec![],
             issue_type: Some(IssueType::Refactor.canonical_name().to_owned()),
@@ -1113,7 +1177,7 @@ async fn add_blocked_by_duplicate_returns_duplicate_dependency() {
         .create_issue(CreateIssueParams {
             title: "Investigate flaky checkout test".to_owned(),
             body: Some("Automated test — safe to close.".to_owned()),
-            labels: vec!["test".to_owned()],
+            labels: fixture_labels(&["test"]),
             milestone: None,
             assignees: vec![],
             issue_type: Some(IssueType::Spike.canonical_name().to_owned()),
@@ -1127,7 +1191,7 @@ async fn add_blocked_by_duplicate_returns_duplicate_dependency() {
         .create_issue(CreateIssueParams {
             title: "Fix authentication bypass in /login endpoint".to_owned(),
             body: Some("Automated test — safe to close.".to_owned()),
-            labels: vec!["test".to_owned()],
+            labels: fixture_labels(&["test"]),
             milestone: None,
             assignees: vec![],
             issue_type: Some(IssueType::Bug.canonical_name().to_owned()),
@@ -1255,7 +1319,7 @@ async fn add_sub_issue_creates_parent_child_relationship() {
         .create_issue(CreateIssueParams {
             title: "Implement OAuth login flow".to_owned(),
             body: Some("Automated test — safe to close.".to_owned()),
-            labels: vec!["test".to_owned()],
+            labels: fixture_labels(&["test"]),
             milestone: None,
             assignees: vec![],
             issue_type: Some(IssueType::Epic.canonical_name().to_owned()),
@@ -1269,7 +1333,7 @@ async fn add_sub_issue_creates_parent_child_relationship() {
         .create_issue(CreateIssueParams {
             title: "Add OAuth callback handler".to_owned(),
             body: Some("Automated test — safe to close.".to_owned()),
-            labels: vec!["test".to_owned()],
+            labels: fixture_labels(&["test"]),
             milestone: None,
             assignees: vec![],
             issue_type: Some(IssueType::Task.canonical_name().to_owned()),
@@ -1720,7 +1784,7 @@ async fn update_field_changes_value_on_project_item() {
         .create_issue(CreateIssueParams {
             title: "Implement OAuth login flow".to_owned(),
             body: Some("Automated test — safe to close.".to_owned()),
-            labels: vec!["test".to_owned()],
+            labels: fixture_labels(&["test"]),
             milestone: None,
             assignees: vec![],
             issue_type: Some(IssueType::Feature.canonical_name().to_owned()),
@@ -2143,8 +2207,44 @@ async fn list_rest_fields_options_name_raw_parsed_correctly() {
 }
 
 // ── create_view + list_views ─────────────────────────────────────────
-// TODO(unblock-45a.14): Add DeleteViewGuard for test cleanup once delete_view()
-// is implemented. Views created by these tests accumulate on the test project.
+//
+// View accumulation is an upstream constraint, not a bug we can fix:
+// GitHub Projects V2 has no public API to delete a project view. The
+// GraphQL schema exposes `deleteProjectV2Item` but no `deleteProjectV2View`
+// (verified against `docs/archive/research/schema.docs.graphql`), and the
+// REST API has no `DELETE /views` endpoint (see
+// `docs/archive/research/github-projectsv2-views-api-findings.md`). Views
+// can only be removed via the GitHub Web UI — manual operator action.
+//
+// To keep the live test project from drowning in `test-board-<ts>` /
+// `test-table-<ts>` / `test-roadmap-<ts>` orphans, the three tests below
+// reuse fixed canonical fixture names ([`FIXTURE_VIEW_BOARD`],
+// [`FIXTURE_VIEW_TABLE`], [`FIXTURE_VIEW_ROADMAP`]) and call `list_views`
+// to detect pre-existence. On the first run the fixture views are created;
+// on every subsequent run the tests verify the existing fixture's layout
+// and filter (the `create_view` call is skipped). View count stays at
+// exactly 3 fixtures across all runs (bead `unblock-1hz` decision D3,
+// option y — reuse stable-name refactor; bead Risk R1).
+//
+// Operators: if a fixture view drifts (wrong layout, accidental rename),
+// delete it manually via the GitHub Web UI and the next live test run
+// will recreate it from canonical params.
+
+/// Looks up an existing view by name on the live test project. Returns
+/// `Some(layout)` if the view exists, `None` otherwise. Used by the three
+/// `create_view_*` tests to decide whether to create the canonical
+/// fixture view or assert against the already-present one.
+async fn lookup_fixture_view_layout(
+    client: &GitHubClient,
+    owner_type: OwnerType,
+    name: &str,
+) -> Option<ViewLayout> {
+    let views = client
+        .list_views(owner_type)
+        .await
+        .expect("list_views() should succeed");
+    views.iter().find(|v| v.name == name).map(|v| v.layout)
+}
 
 #[tokio::test]
 #[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
@@ -2163,31 +2263,50 @@ async fn create_view_board_and_list_views() {
         .await
         .expect("detect_owner_type() should succeed");
 
-    // Create a board view with a unique name to avoid collisions.
-    let view_name = format!("test-board-{}", chrono::Utc::now().timestamp());
-    let params = CreateViewParams {
-        name: view_name.clone(),
-        layout: ViewLayout::Board,
-        filter: Some("is:open".to_owned()),
-        visible_fields: None,
-    };
+    let view_name = FIXTURE_VIEW_BOARD;
 
-    let view = client
-        .create_view(owner_type, &params)
-        .await
-        .expect("create_view(board) should succeed");
+    // Create the canonical board fixture view only when it is missing.
+    // Subsequent runs reuse the existing one so view count stays bounded
+    // (the GitHub API has no delete-view path; see module-level comment
+    // and bead `unblock-1hz` decision D3).
+    if let Some(existing_layout) =
+        lookup_fixture_view_layout(&client, owner_type, view_name).await
+    {
+        assert_eq!(
+            existing_layout,
+            ViewLayout::Board,
+            "fixture view '{view_name}' should be a Board view; if it has \
+             drifted, delete it manually via the GitHub Web UI and re-run"
+        );
+        eprintln!(
+            "create_view_board_and_list_views: reusing existing fixture view '{view_name}'"
+        );
+    } else {
+        let params = CreateViewParams {
+            name: view_name.to_owned(),
+            layout: ViewLayout::Board,
+            filter: Some("is:open".to_owned()),
+            visible_fields: None,
+        };
 
-    assert_eq!(view.name, view_name, "view name should match");
-    assert_eq!(view.layout, ViewLayout::Board, "layout should be Board");
-    assert!(view.number > 0, "view number should be positive");
-    assert!(view.id.is_some(), "view id should be present from REST");
+        let view = client
+            .create_view(owner_type, &params)
+            .await
+            .expect("create_view(board) should succeed");
 
-    eprintln!(
-        "Created board view: name={}, number={}, id={:?}",
-        view.name, view.number, view.id
-    );
+        assert_eq!(view.name, view_name, "view name should match");
+        assert_eq!(view.layout, ViewLayout::Board, "layout should be Board");
+        assert!(view.number > 0, "view number should be positive");
+        assert!(view.id.is_some(), "view id should be present from REST");
 
-    // Verify the view appears in list_views.
+        eprintln!(
+            "Created board fixture view: name={}, number={}, id={:?}",
+            view.name, view.number, view.id
+        );
+    }
+
+    // Verify the view appears in list_views (post-condition holds whether
+    // we just created it or reused the existing fixture).
     let views = client
         .list_views(owner_type)
         .await
@@ -2196,7 +2315,7 @@ async fn create_view_board_and_list_views() {
     let found = views.iter().any(|v| v.name == view_name);
     assert!(
         found,
-        "list_views should include the newly created view '{view_name}'"
+        "list_views should include the canonical fixture view '{view_name}'"
     );
 }
 
@@ -2217,9 +2336,23 @@ async fn create_view_table_layout() {
         .await
         .expect("detect_owner_type() should succeed");
 
-    let view_name = format!("test-table-{}", chrono::Utc::now().timestamp());
+    let view_name = FIXTURE_VIEW_TABLE;
+
+    if let Some(existing_layout) =
+        lookup_fixture_view_layout(&client, owner_type, view_name).await
+    {
+        assert_eq!(
+            existing_layout,
+            ViewLayout::Table,
+            "fixture view '{view_name}' should be a Table view; if it has \
+             drifted, delete it manually via the GitHub Web UI and re-run"
+        );
+        eprintln!("create_view_table_layout: reusing existing fixture view '{view_name}'");
+        return;
+    }
+
     let params = CreateViewParams {
-        name: view_name.clone(),
+        name: view_name.to_owned(),
         layout: ViewLayout::Table,
         filter: None,
         visible_fields: None,
@@ -2235,7 +2368,7 @@ async fn create_view_table_layout() {
     assert!(view.number > 0);
 
     eprintln!(
-        "Created table view: name={}, number={}",
+        "Created table fixture view: name={}, number={}",
         view.name, view.number
     );
 }
@@ -2257,9 +2390,23 @@ async fn create_view_roadmap_layout() {
         .await
         .expect("detect_owner_type() should succeed");
 
-    let view_name = format!("test-roadmap-{}", chrono::Utc::now().timestamp());
+    let view_name = FIXTURE_VIEW_ROADMAP;
+
+    if let Some(existing_layout) =
+        lookup_fixture_view_layout(&client, owner_type, view_name).await
+    {
+        assert_eq!(
+            existing_layout,
+            ViewLayout::Roadmap,
+            "fixture view '{view_name}' should be a Roadmap view; if it \
+             has drifted, delete it manually via the GitHub Web UI and re-run"
+        );
+        eprintln!("create_view_roadmap_layout: reusing existing fixture view '{view_name}'");
+        return;
+    }
+
     let params = CreateViewParams {
-        name: view_name.clone(),
+        name: view_name.to_owned(),
         layout: ViewLayout::Roadmap,
         filter: None,
         visible_fields: None,
@@ -2275,7 +2422,7 @@ async fn create_view_roadmap_layout() {
     assert!(view.number > 0);
 
     eprintln!(
-        "Created roadmap view: name={}, number={}",
+        "Created roadmap fixture view: name={}, number={}",
         view.name, view.number
     );
 }

@@ -41,7 +41,7 @@ use unblock_mcp::tools::show::ShowParams;
 
 mod common;
 use common::{
-    TracingCapture, build_github_client, new_mock, require_github_token,
+    TracingCapture, build_github_client, fixture_labels, new_mock, require_github_token,
     require_github_token_and_project, state_with_mock, test_server_state,
 };
 
@@ -223,7 +223,7 @@ async fn show_existing_issue_returns_all_fields_populated() {
              `show_existing_issue_returns_all_fields_populated`."
                 .to_owned(),
         ),
-        labels: vec!["test".to_owned()],
+        labels: fixture_labels(&["test"]),
         milestone: None,
         assignees: vec![],
         issue_type: Some(IssueType::Bug.canonical_name().to_owned()),
@@ -4371,7 +4371,7 @@ async fn create_issue_with_all_params_and_refetch() {
     let params = unblock_github::mutations::CreateIssueParams {
         title: title.clone(),
         body: Some("## Description\n\nIntegration test issue.".to_owned()),
-        labels: vec!["test".to_owned()],
+        labels: fixture_labels(&["test"]),
         milestone: None,
         assignees: Vec::new(),
         issue_type: Some(IssueType::Bug.canonical_name().to_owned()),
@@ -4436,7 +4436,7 @@ async fn create_issue_with_blocked_by_local() {
         .create_issue(unblock_github::mutations::CreateIssueParams {
             title: blocking_title,
             body: None,
-            labels: vec!["test".to_owned()],
+            labels: fixture_labels(&["test"]),
             milestone: None,
             assignees: Vec::new(),
             issue_type: Some(IssueType::Refactor.canonical_name().to_owned()),
@@ -4453,7 +4453,7 @@ async fn create_issue_with_blocked_by_local() {
         .create_issue(unblock_github::mutations::CreateIssueParams {
             title: dependent_title,
             body: None,
-            labels: vec!["test".to_owned()],
+            labels: fixture_labels(&["test"]),
             milestone: None,
             assignees: Vec::new(),
             issue_type: None,
@@ -4528,7 +4528,7 @@ async fn create_issue_with_blocked_by_cross_repo() {
         .create_issue(unblock_github::mutations::CreateIssueParams {
             title: blocking_title,
             body: None,
-            labels: vec!["test".to_owned()],
+            labels: fixture_labels(&["test"]),
             milestone: None,
             assignees: Vec::new(),
             issue_type: Some(IssueType::Spike.canonical_name().to_owned()),
@@ -4545,7 +4545,7 @@ async fn create_issue_with_blocked_by_cross_repo() {
         .create_issue(unblock_github::mutations::CreateIssueParams {
             title: dependent_title,
             body: None,
-            labels: vec!["test".to_owned()],
+            labels: fixture_labels(&["test"]),
             milestone: None,
             assignees: Vec::new(),
             issue_type: None,
@@ -4620,7 +4620,7 @@ async fn create_issue_with_parent_sub_issue() {
         .create_issue(unblock_github::mutations::CreateIssueParams {
             title: parent_title,
             body: None,
-            labels: vec!["test".to_owned()],
+            labels: fixture_labels(&["test"]),
             milestone: None,
             assignees: Vec::new(),
             issue_type: Some(IssueType::Epic.canonical_name().to_owned()),
@@ -4637,7 +4637,7 @@ async fn create_issue_with_parent_sub_issue() {
         .create_issue(unblock_github::mutations::CreateIssueParams {
             title: child_title,
             body: None,
-            labels: vec!["test".to_owned()],
+            labels: fixture_labels(&["test"]),
             milestone: None,
             assignees: Vec::new(),
             issue_type: Some(IssueType::Task.canonical_name().to_owned()),
@@ -4783,7 +4783,7 @@ async fn create_issue_appears_in_ready_set_after_rebuild() {
         .create_issue(unblock_github::mutations::CreateIssueParams {
             title: title.clone(),
             body: None,
-            labels: vec!["test".to_owned()],
+            labels: fixture_labels(&["test"]),
             milestone: None,
             assignees: Vec::new(),
             issue_type: Some(IssueType::Docs.canonical_name().to_owned()),

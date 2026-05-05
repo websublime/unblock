@@ -39,7 +39,7 @@ use unblock_mcp::tools::rebuild_cache;
 use unblock_mcp::tools::setup::REQUIRED_VIEWS;
 
 mod common;
-use common::{require_github_token_and_project, test_server_state};
+use common::{fixture_labels, require_github_token_and_project, test_server_state};
 
 /// Drop guard that closes multiple GitHub issues on scope exit, even during a
 /// panic unwind. Adapted from the single-issue guard in
@@ -146,8 +146,14 @@ async fn e2e_workflow_all_10_tools() {
     let state = test_server_state().await;
     let client = &state.github;
 
-    // Unique label to isolate test issues from other issues in the repo.
-    let test_label = format!("e2e-test-{}", chrono::Utc::now().timestamp());
+    // Per-test discriminator label used downstream to filter ready/list
+    // results to issues created in this run. Uses millisecond resolution
+    // so two CI runs landing in the same second do not share a label
+    // (bead `unblock-1hz` Risk R5). The canonical fixture marker
+    // (`unblock-fixture`) is added separately by [`fixture_labels`] so
+    // the wipe path remains label-deterministic — keep `test_label`
+    // distinct from the cleanup anchor.
+    let test_label = format!("e2e-test-{}", chrono::Utc::now().timestamp_millis());
 
     // Drop guard for cleanup — tracks all created issues. The guard now owns
     // an `Arc<dyn GitHubApi>` clone so the spawned cleanup task in `Drop` has
@@ -281,7 +287,7 @@ async fn e2e_workflow_all_10_tools() {
                  token validation."
                     .to_owned(),
             ),
-            labels: vec![test_label.clone()],
+            labels: fixture_labels(&[test_label.as_str()]),
             milestone: None,
             assignees: Vec::new(),
             issue_type: Some(
@@ -334,7 +340,7 @@ async fn e2e_workflow_all_10_tools() {
                  lands the `/oauth/callback` route and exchange logic."
                     .to_owned(),
             ),
-            labels: vec![test_label.clone()],
+            labels: fixture_labels(&[test_label.as_str()]),
             milestone: None,
             assignees: Vec::new(),
             issue_type: Some(
@@ -393,7 +399,7 @@ async fn e2e_workflow_all_10_tools() {
                  absence-leaves-unmodified edge case."
                     .to_owned(),
             ),
-            labels: vec![test_label.clone()],
+            labels: fixture_labels(&[test_label.as_str()]),
             milestone: None,
             assignees: Vec::new(),
             issue_type: Some(
