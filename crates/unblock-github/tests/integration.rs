@@ -2043,6 +2043,19 @@ async fn query_setup_status_reports_fields_without_creating() {
 
 // ── Projects V2: update_field ───────────────────────────────────────
 
+// This test intentionally exercises `GitHubClient::update_field` directly
+// rather than going through the `populate_project_fields` helper introduced
+// in unblock-q1c. `update_field` is the unit-under-test here: this is the
+// only live coverage that pins its single-field write contract (Priority
+// SingleSelect + Agent Text re-fetch round-trip, including the
+// `option_id_by_prefix` resolution path documented in unblock-ekf). The
+// q1c migration (set_project_fields → populate_project_fields wrapper)
+// targeted FIXTURE sites that create an issue and then leave its custom
+// fields blank — this test is not such a site; it is the dedicated
+// `update_field` regression test and must keep calling `update_field`
+// directly so a regression there fails this assertion rather than being
+// masked by the higher-level helper. Do NOT migrate this call to
+// `populate_project_fields`.
 #[tokio::test]
 #[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn update_field_changes_value_on_project_item() {
