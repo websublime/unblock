@@ -32,6 +32,7 @@ use unblock_core::graph::DependencyGraph;
 use unblock_core::types::{
     BlockingEdge, IssueComment, IssueRef, IssueState, IssueType, Priority, QualifiedId, Status,
 };
+use unblock_github::GitHubApi;
 use unblock_github::projects::{CreateViewParams, OwnerType, ViewLayout};
 use unblock_mcp::server::UnblockServer;
 use unblock_mcp::tools::reconcile::ReconcileParams;
@@ -118,10 +119,86 @@ fn mock_issue(number: u64) -> unblock_core::types::Issue {
 
 // ── Show tool: integration tests ────────────────────────────────────
 
-/// Show an existing issue and verify all fields are populated.
+/// Drop guard that closes a single GitHub issue on scope exit, even during a
+/// panic unwind. Adapted from the multi-issue `CloseIssuesGuard` in
+/// `crates/unblock-mcp/tests/e2e_workflow.rs` and the single-issue
+/// `CloseIssueGuard` in `crates/unblock-github/tests/integration.rs`.
 ///
-/// This test calls `fetch_issue` on a known issue (issue #1 in the
-/// configured test repository) and validates the show result structure.
+/// On drop, closes the tracked issue as a detached [`tokio::spawn`] task on
+/// the current runtime. This keeps the destructor runtime-agnostic — it works
+/// on both `current_thread` and `multi_thread` tokio flavors. Blocking the
+/// destructor on the runtime would require a multi-threaded flavor and abort
+/// the process via SIGABRT when an assertion panicked under `#[tokio::test]`'s
+/// `current_thread` default (see bead `unblock-ekf`).
+///
+/// Caveat: because the close runs as a detached task, it is not awaited
+/// before the test process exits. If the runtime is torn down before the
+/// task is polled, the close is silently skipped — acceptable for cleanup
+/// in a test harness.
+struct CloseIssueGuard {
+    client: Arc<dyn GitHubApi>,
+    issue_number: u64,
+    /// Set to `true` once the test completes successfully and the caller has
+    /// already cleaned up. When `true`, the guard skips the `close_issue`
+    /// call in `Drop`.
+    disarmed: bool,
+}
+
+impl CloseIssueGuard {
+    /// Creates an armed guard that will close `issue_number` on drop.
+    fn new(client: Arc<dyn GitHubApi>, issue_number: u64) -> Self {
+        Self {
+            client,
+            issue_number,
+            disarmed: false,
+        }
+    }
+
+    /// Disarms the guard so that `Drop` becomes a no-op. Call this after the
+    /// test has successfully cleaned up on its own.
+    fn disarm(&mut self) {
+        self.disarmed = true;
+    }
+}
+
+impl Drop for CloseIssueGuard {
+    fn drop(&mut self) {
+        if self.disarmed {
+            return;
+        }
+        let number = self.issue_number;
+        let client = Arc::clone(&self.client);
+        tokio::spawn(async move {
+            if let Err(e) = client
+                .close_issue(
+                    number,
+                    Some("Automated test cleanup (drop guard)".to_owned()),
+                )
+                .await
+            {
+                eprintln!("CloseIssueGuard: failed to close issue #{number}: {e}");
+            } else {
+                eprintln!("CloseIssueGuard: cleaned up issue #{number}");
+            }
+        });
+    }
+}
+
+/// Show an existing issue via the MCP `show` tool and verify all fields are
+/// populated.
+///
+/// This test provisions its own fixture issue rather than assuming any
+/// pre-existing issue number exists in the test repo. It creates a fresh
+/// issue via `create_issue`, invokes the MCP `show` tool with the new
+/// fixture's number, asserts the round-trip shape of the result, and
+/// unconditionally closes the issue on exit (via [`CloseIssueGuard`], which
+/// fires even on assertion-driven panic unwinds). The previous form
+/// hardcoded `fetch_issue(1)` and broke against repos whose lowest issue
+/// number is greater than 1, or whose issues have been deleted between live
+/// runs (see beads `unblock-mwg`, `unblock-741`).
+///
+/// The fix mirrors the cycle-1 sibling at
+/// `crates/unblock-github/tests/integration.rs::fetch_issue_returns_full_details_for_existing_issue`.
 #[tokio::test]
 #[ignore = "live GitHub API — opt-in via cargo test --workspace -- --ignored with GITHUB_TOKEN + UNBLOCK_REPO"]
 async fn show_existing_issue_returns_all_fields_populated() {
@@ -130,38 +207,103 @@ async fn show_existing_issue_returns_all_fields_populated() {
     }
 
     let state = test_server_state().await;
-    let client = &state.github;
+    let client = Arc::clone(&state.github);
 
-    // Use issue #1, which should exist in any non-empty repo.
-    let issue_number = 1;
-    let issue = client
-        .fetch_issue(issue_number)
+    // Provision a fresh fixture issue. Mirrors the canonical create-style
+    // template at `create_issue_returns_issue_with_correct_fields` (and the
+    // cycle-1 fix in `unblock-github`'s integration test) so that operators
+    // reading the board see a uniform "Automated integration test" body and
+    // `test` label across every live-required test that creates issues.
+    let fixture_title = "Fixture for show tool round-trip integration test".to_owned();
+    let create_params = unblock_github::mutations::CreateIssueParams {
+        title: fixture_title.clone(),
+        body: Some(
+            "Automated integration test for the live `show` tool path \
+             — safe to close. Provisioned by \
+             `show_existing_issue_returns_all_fields_populated`."
+                .to_owned(),
+        ),
+        labels: vec!["test".to_owned()],
+        milestone: None,
+        assignees: vec![],
+        issue_type: Some(IssueType::Bug.canonical_name().to_owned()),
+    };
+
+    let created = client
+        .create_issue(create_params)
         .await
-        .expect("fetch_issue should succeed for issue #1");
+        .expect("create_issue() fixture provision should succeed");
 
-    // Verify basic fields are populated.
-    assert_eq!(issue.number, issue_number);
-    assert!(!issue.title.is_empty(), "title should not be empty");
-    assert!(!issue.node_id.is_empty(), "node_id should not be empty");
-    assert!(!issue.url.is_empty(), "url should not be empty");
+    // Arm the drop guard *after* create succeeds (so a create failure does
+    // not panic the guard) but *before* the asserts (so an assertion panic
+    // still triggers cleanup).
+    let mut guard = CloseIssueGuard::new(Arc::clone(&client), created.number);
 
-    // Parse body sections — should not panic.
-    let body_sections =
-        unblock_core::types::BodySections::from_markdown(issue.body.as_deref().unwrap_or_default());
-    // body_sections can have None fields — that's fine for unstructured bodies.
-    eprintln!(
-        "body_sections: description={}, design_notes={}, acceptance_criteria={}",
-        body_sections.description.is_some(),
-        body_sections.design_notes.is_some(),
-        body_sections.acceptance_criteria.is_some(),
+    // Invoke the MCP `show` tool against the freshly provisioned fixture.
+    let server = UnblockServer::new(state);
+    let Json(result) = server
+        .show(Parameters(ShowParams {
+            issue: created.number.to_string(),
+            include_comments: Some(true),
+            include_deps: Some(true),
+        }))
+        .await
+        .expect("show tool should succeed for the just-created fixture");
+
+    // Verify basic fields are populated (round-trip shape on the show
+    // result's `issue` payload).
+    assert_eq!(result.issue.number, created.number);
+    assert_eq!(
+        result.issue.title, fixture_title,
+        "show.issue.title should round-trip the create input verbatim",
+    );
+    assert!(
+        !result.issue.node_id.is_empty(),
+        "show.issue.node_id should not be empty",
+    );
+    assert!(
+        !result.issue.url.is_empty(),
+        "show.issue.url should not be empty",
+    );
+    assert_eq!(
+        result.issue.state, "Open",
+        "freshly-created fixture should be in `Open` state",
     );
 
-    // Comments should be a vec (possibly empty).
-    eprintln!("comments count: {}", issue.comments.len());
+    // Parse body sections — should not panic. The fixture body has no
+    // `## Description`/`## Design Notes`/`## Acceptance Criteria` sections,
+    // so all three may be `None`; we only assert the parser ran without
+    // panicking and that the result structure is well-formed.
+    eprintln!(
+        "body_sections: description={}, design_notes={}, acceptance_criteria={}",
+        result.body_sections.description.is_some(),
+        result.body_sections.design_notes.is_some(),
+        result.body_sections.acceptance_criteria.is_some(),
+    );
+
+    // Comments should be a vec (possibly empty) when `include_comments=true`.
+    let comments = result
+        .comments
+        .as_ref()
+        .expect("comments should be Some when include_comments=true");
+    eprintln!("comments count: {}", comments.len());
 
     eprintln!(
-        "show_existing_issue: #{} '{}' state={:?}",
-        issue.number, issue.title, issue.state,
+        "show_existing_issue: #{} '{}' state={}",
+        result.issue.number, result.issue.title, result.issue.state,
+    );
+
+    // Explicit cleanup on the happy path; disarm the guard so it does not
+    // double-close.
+    client
+        .close_issue(created.number, Some("Automated test cleanup".to_owned()))
+        .await
+        .expect("close_issue() cleanup should succeed");
+    guard.disarm();
+
+    eprintln!(
+        "show tool test: created, shown, and closed issue #{}",
+        created.number
     );
 }
 
