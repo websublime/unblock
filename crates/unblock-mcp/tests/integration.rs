@@ -41,8 +41,8 @@ use unblock_mcp::tools::show::ShowParams;
 
 mod common;
 use common::{
-    TracingCapture, build_github_client, fixture_labels, new_mock, require_github_token,
-    require_github_token_and_project, state_with_mock, test_server_state,
+    TEST_LABEL, TracingCapture, build_github_client, fixture_labels, new_mock,
+    require_github_token, require_github_token_and_project, state_with_mock, test_server_state,
 };
 
 /// Helper to create a `QualifiedId` for tests.
@@ -4702,6 +4702,14 @@ async fn create_issue_with_defaults() {
         .create_issue(unblock_github::mutations::CreateIssueParams {
             title: title.clone(),
             body: None,
+            // Intentionally empty: this test exercises the
+            // empty-labels code path on `create_issue`. As a result the
+            // created issue does NOT carry the canonical `unblock-fixture`
+            // label and is therefore invisible to
+            // `scripts/setup-test-project.sh --wipe-issues`. The
+            // [`CloseIssueGuard`] below is the safety belt that closes the
+            // fixture even on a panic unwind (cycle-2 review WARNING-1
+            // for bead `unblock-1hz`).
             labels: Vec::new(),
             milestone: None,
             assignees: Vec::new(),
@@ -4709,6 +4717,13 @@ async fn create_issue_with_defaults() {
         })
         .await
         .expect("create_issue with defaults should succeed");
+
+    // Arm the drop guard *after* create succeeds (so a create failure does
+    // not panic the guard) but *before* the asserts (so an assertion panic
+    // still triggers cleanup). The guard fire-and-forgets the close on
+    // drop; on the success path we disarm and explicitly close below so
+    // the cleanup is awaited inside the test runtime.
+    let mut guard = CloseIssueGuard::new(Arc::clone(client), issue.number);
 
     assert_eq!(issue.title, title);
     assert!(issue.number > 0);
@@ -4721,7 +4736,9 @@ async fn create_issue_with_defaults() {
         issue.number, issue.title,
     );
 
-    // Cleanup.
+    // Cleanup — disarm the guard and close synchronously so the test's
+    // happy-path cleanup is awaited inside the runtime.
+    guard.disarm();
     let _ = client
         .close_issue(issue.number, Some("test cleanup".to_owned()))
         .await;
@@ -4738,21 +4755,27 @@ async fn ensure_labels_creates_missing_labels() {
     let state = test_server_state().await;
     let client = &state.github;
 
-    // Use a unique label name to avoid collisions.
-    let label_name = format!("test-label-{}", chrono::Utc::now().timestamp());
+    // Reuse the canonical [`TEST_LABEL`] (`unblock-test-label`) — bead
+    // `unblock-1hz` cycle 2 dropped per-run unique labels because they
+    // accumulated in the test repo across CI runs without a way to clean
+    // them up. The test still exercises both branches of `ensure_labels`:
+    // on a fresh repo (or after `--wipe-labels`) the first call creates
+    // the label; on subsequent runs the first call is a no-op. Either way,
+    // the second call is always idempotent (no new labels created).
+    let label_name = TEST_LABEL.to_owned();
 
     client
         .ensure_labels(std::slice::from_ref(&label_name))
         .await
-        .expect("ensure_labels should succeed");
+        .expect("ensure_labels should succeed (create-or-noop)");
 
-    // Calling again should be idempotent.
+    // Calling again must be idempotent.
     client
         .ensure_labels(std::slice::from_ref(&label_name))
         .await
-        .expect("ensure_labels should succeed on second call");
+        .expect("ensure_labels should succeed on second call (noop)");
 
-    eprintln!("ensure_labels: created '{label_name}'");
+    eprintln!("ensure_labels: ensured '{label_name}' is present (idempotent)");
 }
 
 /// After create, cache is rebuilt and new issue appears in ready set (if unblocked).
