@@ -302,29 +302,87 @@ async fn github_client_new_connects_to_real_repo() {
 #[tokio::test]
 #[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn fetch_issue_returns_full_details_for_existing_issue() {
+    // This test provisions its own fixture issue rather than assuming any
+    // pre-existing issue number exists in the test repo. It creates a fresh
+    // issue via `create_issue`, fetches it back via `fetch_issue`, asserts
+    // round-trip equality on the observable fields, and unconditionally
+    // closes the issue on exit (via `CloseIssueGuard`, which fires even on
+    // assertion-driven panic unwinds). The previous form hardcoded
+    // `fetch_issue(1)` and broke against repos whose lowest issue number is
+    // greater than 1, or whose issues have been deleted between live runs
+    // (see beads `unblock-mwg`, `unblock-741`).
     if !require_github_token() {
         return;
     }
 
     let config = test_config();
-    let client = GitHubClient::new(&config)
-        .await
-        .expect("GitHubClient::new() should succeed");
+    let client = Arc::new(
+        GitHubClient::new(&config)
+            .await
+            .expect("GitHubClient::new() should succeed"),
+    );
 
-    // Issue #1 should exist in most repos. If the test repo has no issues,
-    // this test will fail gracefully with IssueNotFound.
+    // Provision a fresh fixture issue. Mirrors the canonical create-style
+    // template at `create_issue_returns_issue_with_correct_fields` so that
+    // operators reading the board see a uniform "Automated integration test"
+    // body and `test` label across every live-required test that creates
+    // issues.
+    let create_params = CreateIssueParams {
+        title: "Fixture for fetch_issue round-trip integration test".to_owned(),
+        body: Some(
+            "Automated integration test for the live `fetch_issue` path \
+             — safe to close. Provisioned by \
+             `fetch_issue_returns_full_details_for_existing_issue`."
+                .to_owned(),
+        ),
+        labels: vec!["test".to_owned()],
+        milestone: None,
+        assignees: vec![],
+        issue_type: Some(IssueType::Bug.canonical_name().to_owned()),
+    };
+
+    let created = client
+        .create_issue(create_params)
+        .await
+        .expect("create_issue() fixture provision should succeed");
+
+    // Arm the drop guard *after* create succeeds (so a create failure does
+    // not panic the guard) but *before* the asserts (so an assertion panic
+    // still triggers cleanup).
+    let mut guard = CloseIssueGuard::new(&client, created.number);
+
     let issue = client
-        .fetch_issue(1)
+        .fetch_issue(created.number)
         .await
-        .expect("fetch_issue(1) should succeed for an existing issue");
+        .expect("fetch_issue() should succeed for the just-created fixture");
 
-    assert_eq!(issue.number, 1, "issue number should be 1");
-    assert!(!issue.title.is_empty(), "title should be non-empty");
+    // Round-trip equality on the observable surface of `Issue`.
+    assert_eq!(
+        issue.number, created.number,
+        "fetched issue number should match the created fixture"
+    );
+    assert_eq!(
+        issue.title, "Fixture for fetch_issue round-trip integration test",
+        "fetched title should round-trip the create input verbatim"
+    );
     assert!(!issue.node_id.is_empty(), "node_id should be non-empty");
     assert!(!issue.url.is_empty(), "url should be non-empty");
     assert!(
         issue.state == IssueState::Open || issue.state == IssueState::Closed,
         "state should be Open or Closed"
+    );
+
+    // Explicit cleanup on the happy path; disarm the guard so it does not
+    // double-close.
+    client
+        .close_issue(created.number, Some("Automated test cleanup".to_owned()))
+        .await
+        .expect("close_issue() cleanup should succeed");
+    guard.disarm();
+
+    eprintln!(
+        "fetch_issue test: created, fetched, and closed issue #{}",
+        created.number
     );
 }
 
