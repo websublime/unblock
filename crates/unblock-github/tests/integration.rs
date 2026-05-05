@@ -21,6 +21,8 @@
 //! end-to-end when a real token is present. See bead `unblock-c4h` for the
 //! full rationale.
 
+use std::sync::Arc;
+
 use unblock_core::config::Config;
 use unblock_core::types::{IssueState, IssueType, Status};
 use unblock_github::client::GitHubClient;
@@ -31,14 +33,24 @@ use unblock_github::projects::{CreateViewParams, FieldValue, OwnerType, ViewLayo
 /// unwind. This ensures integration tests do not leave orphaned open issues
 /// when an assertion fails before the explicit cleanup call.
 ///
-/// The guard captures a reference to the [`GitHubClient`] and the issue number
-/// at creation time. On drop it uses the current tokio runtime handle to
-/// block on the async `close_issue` call. If the close fails the error is
-/// logged to stderr but does not cause a secondary panic (which would abort
-/// the process during an unwind).
+/// The guard captures a shared [`Arc<GitHubClient>`] and the issue number at
+/// creation time. On drop it uses [`tokio::spawn`] to fire-and-forget the
+/// async `close_issue` call on the current runtime handle, which keeps the
+/// destructor runtime-agnostic — it works on both `current_thread` and
+/// `multi_thread` tokio flavors. The previous `block_in_place` strategy
+/// required a multi-threaded runtime and aborted the process via SIGABRT
+/// when an assertion panicked under `#[tokio::test]` (`current_thread` default
+/// — bead `unblock-ekf`).
+///
+/// Caveat: because the close runs as a detached task, it is not awaited
+/// before the test process exits. If the runtime is torn down before the
+/// task is polled, the close is silently skipped — acceptable for cleanup
+/// in a test harness, and the alternative (blocking the destructor) is
+/// strictly worse. The same trade-off is documented on
+/// [`crate::CloseIssuesGuard`] in `unblock-mcp/tests/e2e_workflow.rs`.
 #[derive(Debug)]
-struct CloseIssueGuard<'a> {
-    client: &'a GitHubClient,
+struct CloseIssueGuard {
+    client: Arc<GitHubClient>,
     issue_number: u64,
     /// Set to `true` once the test completes successfully and the caller has
     /// already cleaned up (or does not need cleanup). When `true`, the guard
@@ -46,11 +58,11 @@ struct CloseIssueGuard<'a> {
     disarmed: bool,
 }
 
-impl<'a> CloseIssueGuard<'a> {
+impl CloseIssueGuard {
     /// Creates an armed guard that will close `issue_number` on drop.
-    fn new(client: &'a GitHubClient, issue_number: u64) -> Self {
+    fn new(client: &Arc<GitHubClient>, issue_number: u64) -> Self {
         Self {
-            client,
+            client: Arc::clone(client),
             issue_number,
             disarmed: false,
         }
@@ -63,22 +75,25 @@ impl<'a> CloseIssueGuard<'a> {
     }
 }
 
-impl Drop for CloseIssueGuard<'_> {
+impl Drop for CloseIssueGuard {
     fn drop(&mut self) {
         if self.disarmed {
             return;
         }
-        // We are inside an async tokio test, so a runtime handle is available.
-        // `block_in_place` + `block_on` lets us run the async close from a
-        // synchronous `Drop` context without panicking about nested runtimes.
+        // Spawn a detached cleanup task on the current runtime. This avoids
+        // `block_in_place`, which requires the multi-threaded runtime flavor
+        // and aborts the process when invoked under `#[tokio::test]`'s
+        // `current_thread` default during a panic-driven unwind.
         let number = self.issue_number;
-        let client = self.client;
-        tokio::task::block_in_place(|| {
-            let handle = tokio::runtime::Handle::current();
-            if let Err(e) = handle.block_on(client.close_issue(
-                number,
-                Some("Automated test cleanup (drop guard)".to_owned()),
-            )) {
+        let client = Arc::clone(&self.client);
+        tokio::spawn(async move {
+            if let Err(e) = client
+                .close_issue(
+                    number,
+                    Some("Automated test cleanup (drop guard)".to_owned()),
+                )
+                .await
+            {
                 eprintln!("CloseIssueGuard: failed to close issue #{number}: {e}");
             } else {
                 eprintln!("CloseIssueGuard: cleaned up issue #{number}");
@@ -486,9 +501,11 @@ async fn create_issue_returns_issue_with_correct_fields() {
     }
 
     let config = test_config();
-    let client = GitHubClient::new(&config)
-        .await
-        .expect("GitHubClient::new() should succeed");
+    let client = Arc::new(
+        GitHubClient::new(&config)
+            .await
+            .expect("GitHubClient::new() should succeed"),
+    );
 
     // Realistic Bug fixture (spec Appendix B.3 — unblock-wgj.22).
     // Exercises the `Bug` IssueType + canonical Bug body shape that
@@ -556,9 +573,11 @@ async fn close_issue_closes_issue_and_refetch_confirms() {
     }
 
     let config = test_config();
-    let client = GitHubClient::new(&config)
-        .await
-        .expect("GitHubClient::new() should succeed");
+    let client = Arc::new(
+        GitHubClient::new(&config)
+            .await
+            .expect("GitHubClient::new() should succeed"),
+    );
 
     // Create a Refactor fixture to close (spec Appendix B.3 —
     // unblock-wgj.22). Exercises the `Refactor` IssueType.
@@ -615,9 +634,11 @@ async fn close_issue_with_reason_adds_comment_before_closing() {
     }
 
     let config = test_config();
-    let client = GitHubClient::new(&config)
-        .await
-        .expect("GitHubClient::new() should succeed");
+    let client = Arc::new(
+        GitHubClient::new(&config)
+            .await
+            .expect("GitHubClient::new() should succeed"),
+    );
 
     // Create a Spike fixture to close with a reason (spec Appendix
     // B.3 — unblock-wgj.22). Exercises the `Spike` IssueType +
@@ -726,9 +747,11 @@ async fn add_comment_posts_comment_and_returns_url() {
     }
 
     let config = test_config();
-    let client = GitHubClient::new(&config)
-        .await
-        .expect("GitHubClient::new() should succeed");
+    let client = Arc::new(
+        GitHubClient::new(&config)
+            .await
+            .expect("GitHubClient::new() should succeed"),
+    );
 
     // Create a Docs fixture to comment on (spec Appendix B.3 —
     // unblock-wgj.22). Exercises the `Docs` IssueType.
@@ -836,9 +859,11 @@ async fn add_blocked_by_creates_blocking_relationship() {
     }
 
     let config = test_config();
-    let client = GitHubClient::new(&config)
-        .await
-        .expect("GitHubClient::new() should succeed");
+    let client = Arc::new(
+        GitHubClient::new(&config)
+            .await
+            .expect("GitHubClient::new() should succeed"),
+    );
 
     // Create two `Task` fixtures from the OAuth Epic family
     // (spec Appendix B.3 — unblock-wgj.22). A will be blocked by B.
@@ -925,9 +950,11 @@ async fn remove_blocked_by_removes_blocking_relationship() {
     }
 
     let config = test_config();
-    let client = GitHubClient::new(&config)
-        .await
-        .expect("GitHubClient::new() should succeed");
+    let client = Arc::new(
+        GitHubClient::new(&config)
+            .await
+            .expect("GitHubClient::new() should succeed"),
+    );
 
     // Create a `Chore` and a `Refactor` fixture (spec Appendix B.3 —
     // unblock-wgj.22). Exercises both NEW IssueType variants.
@@ -1017,9 +1044,11 @@ async fn add_blocked_by_duplicate_returns_duplicate_dependency() {
     }
 
     let config = test_config();
-    let client = GitHubClient::new(&config)
-        .await
-        .expect("GitHubClient::new() should succeed");
+    let client = Arc::new(
+        GitHubClient::new(&config)
+            .await
+            .expect("GitHubClient::new() should succeed"),
+    );
 
     // Create two realistic fixtures (spec Appendix B.3 — unblock-wgj.22).
     let issue_a = client
@@ -1154,9 +1183,11 @@ async fn add_sub_issue_creates_parent_child_relationship() {
     }
 
     let config = test_config();
-    let client = GitHubClient::new(&config)
-        .await
-        .expect("GitHubClient::new() should succeed");
+    let client = Arc::new(
+        GitHubClient::new(&config)
+            .await
+            .expect("GitHubClient::new() should succeed"),
+    );
 
     // Spec Appendix B.3 (unblock-wgj.22): Epic + Task hierarchy
     // exemplar — the canonical OAuth login flow Epic with one
@@ -1606,9 +1637,11 @@ async fn update_field_changes_value_on_project_item() {
     }
 
     let config = test_config();
-    let client = GitHubClient::new(&config)
-        .await
-        .expect("GitHubClient::new() should succeed");
+    let client = Arc::new(
+        GitHubClient::new(&config)
+            .await
+            .expect("GitHubClient::new() should succeed"),
+    );
 
     let project_info = client
         .resolve_project_info()
@@ -1658,11 +1691,16 @@ async fn update_field_changes_value_on_project_item() {
     }
 
     // Update the Priority field to P1.
+    //
+    // The HashMap on `FieldMeta::options` is keyed by the canonical option
+    // name from `REQUIRED_FIELDS` (e.g. `"P1 - High"`), so a bare `"P1"`
+    // lookup never matches. Use `option_id_by_prefix` which falls back to a
+    // prefix match — robust to future REQUIRED_FIELDS option renames
+    // (bead `unblock-ekf` Bug #1, decision option (b)).
     let p1_option_id = field_ids
         .priority
-        .options
-        .get("P1")
-        .expect("P1 option should exist");
+        .option_id_by_prefix("P1")
+        .expect("P1 option should exist (prefix match against REQUIRED_FIELDS)");
 
     client
         .update_field(
@@ -1674,12 +1712,14 @@ async fn update_field_changes_value_on_project_item() {
         .await
         .expect("update_field(Priority=P1) should succeed");
 
-    // Re-fetch to confirm the Priority value was persisted.
+    // Re-fetch to confirm the Priority value was persisted. `fetch_field_value`
+    // returns the canonical option NAME from GraphQL — `"P1 - High"` per the
+    // REQUIRED_FIELDS spec — not the short code (bead `unblock-ekf` Bug #2).
     let priority_value = fetch_field_value(&client, &item_id, &field_ids.priority.field_id).await;
     assert_eq!(
         priority_value.as_deref(),
-        Some("P1"),
-        "Re-fetched Priority should be P1"
+        Some("P1 - High"),
+        "Re-fetched Priority should be the canonical name 'P1 - High'"
     );
 
     // Update the Agent text field.

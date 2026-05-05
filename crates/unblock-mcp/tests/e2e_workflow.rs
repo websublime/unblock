@@ -28,6 +28,8 @@
 //! fires on both success and panic unwind. This ensures the test repository is
 //! not polluted with orphaned open issues.
 
+use std::sync::Arc;
+
 use unblock_github::GitHubApi;
 use unblock_github::mutations::CreateIssueParams;
 use unblock_github::projects::{CreateViewParams, FieldValue, ViewLayout};
@@ -43,19 +45,29 @@ use common::{require_github_token_and_project, test_server_state};
 /// panic unwind. Adapted from the single-issue guard in
 /// `crates/unblock-github/tests/integration.rs`.
 ///
-/// On drop, iterates over all tracked issue numbers and closes each one.
-/// Individual close failures are logged but do not abort the remaining cleanup.
-struct CloseIssuesGuard<'a> {
-    client: &'a dyn GitHubApi,
+/// On drop, iterates over all tracked issue numbers and closes each one as a
+/// detached [`tokio::spawn`] task on the current runtime. This keeps the
+/// destructor runtime-agnostic — it works on both `current_thread` and
+/// `multi_thread` tokio flavors. The previous `block_in_place` strategy
+/// required a multi-threaded runtime and aborted the process via SIGABRT
+/// when an assertion panicked under `#[tokio::test]` (`current_thread` default
+/// — bead `unblock-ekf`).
+///
+/// Caveat: because the close runs as a detached task, it is not awaited
+/// before the test process exits. If the runtime is torn down before the
+/// task is polled, the close is silently skipped — acceptable for cleanup
+/// in a test harness.
+struct CloseIssuesGuard {
+    client: Arc<dyn GitHubApi>,
     issue_numbers: Vec<u64>,
     /// Set to `true` once the test completes successfully and the caller has
     /// already cleaned up. When `true`, the guard skips cleanup in `Drop`.
     disarmed: bool,
 }
 
-impl<'a> CloseIssuesGuard<'a> {
+impl CloseIssuesGuard {
     /// Creates an armed guard with no issues tracked.
-    fn new(client: &'a dyn GitHubApi) -> Self {
+    fn new(client: Arc<dyn GitHubApi>) -> Self {
         Self {
             client,
             issue_numbers: Vec::new(),
@@ -74,25 +86,29 @@ impl<'a> CloseIssuesGuard<'a> {
     }
 }
 
-impl Drop for CloseIssuesGuard<'_> {
+impl Drop for CloseIssuesGuard {
     fn drop(&mut self) {
         if self.disarmed {
             return;
         }
-        let numbers = self.issue_numbers.clone();
-        let client = self.client;
-        tokio::task::block_in_place(|| {
-            let handle = tokio::runtime::Handle::current();
-            for number in &numbers {
-                if let Err(e) = handle.block_on(
-                    client.close_issue(*number, Some("E2E test cleanup (drop guard)".to_owned())),
-                ) {
+        // Spawn a detached cleanup task per issue on the current runtime. This
+        // avoids `block_in_place`, which requires the multi-threaded runtime
+        // flavor and aborts the process when invoked under `#[tokio::test]`'s
+        // `current_thread` default during a panic-driven unwind.
+        let numbers = std::mem::take(&mut self.issue_numbers);
+        for number in numbers {
+            let client = Arc::clone(&self.client);
+            tokio::spawn(async move {
+                if let Err(e) = client
+                    .close_issue(number, Some("E2E test cleanup (drop guard)".to_owned()))
+                    .await
+                {
                     eprintln!("CloseIssuesGuard: failed to close issue #{number}: {e}");
                 } else {
                     eprintln!("CloseIssuesGuard: cleaned up issue #{number}");
                 }
-            }
-        });
+            });
+        }
     }
 }
 
@@ -133,8 +149,10 @@ async fn e2e_workflow_all_10_tools() {
     // Unique label to isolate test issues from other issues in the repo.
     let test_label = format!("e2e-test-{}", chrono::Utc::now().timestamp());
 
-    // Drop guard for cleanup — tracks all created issues.
-    let mut guard = CloseIssuesGuard::new(client.as_ref());
+    // Drop guard for cleanup — tracks all created issues. The guard now owns
+    // an `Arc<dyn GitHubApi>` clone so the spawned cleanup task in `Drop` has
+    // a `'static` future (bead `unblock-ekf`).
+    let mut guard = CloseIssuesGuard::new(Arc::clone(client));
 
     // ── Step 1: init — create or reuse project ──────────────────────
     eprintln!("=== Step 1: init ===");
