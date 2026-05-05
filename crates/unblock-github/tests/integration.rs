@@ -200,6 +200,81 @@ pub(crate) fn fixture_labels(extra: &[&str]) -> Vec<String> {
     labels
 }
 
+/// Bead `unblock-q1c`: live test fixture project-field populator.
+///
+/// Idempotently runs `setup_fields` (caches `field_ids` on the client),
+/// resolves the project's item ID for the just-created issue, and writes
+/// Priority + Status (+ optional Agent / `PipelineStage`) via
+/// [`unblock_github::projects::set_project_fields`]. Mirrors the canonical
+/// exemplar in `crates/unblock-mcp/tests/e2e_workflow.rs` so live integration
+/// fixtures populate the canonical Projects V2 fields after `create_issue`,
+/// instead of leaving the live board's Status / Priority / Agent / Pipeline
+/// columns empty (defeats the "live documentation" goal of `unblock-wgj.22`).
+///
+/// Best-effort by design: per-field failures inside `set_project_fields`
+/// are logged via `tracing::warn!` and do not return errors. If the issue
+/// has no `ProjectV2Item` yet (cross-repo, project not configured), the
+/// function returns `None` so the caller can either skip the populate step
+/// or treat the missing item as a soft failure.
+///
+/// **Gating contract.** Callers MUST gate on
+/// [`require_github_token_and_project`] before invoking this helper —
+/// `setup_fields` requires `UNBLOCK_PROJECT` to be exported and panics in
+/// the `resolve_project_info` step otherwise.
+async fn populate_project_fields(
+    client: &Arc<GitHubClient>,
+    issue_node_id: &str,
+    priority: &str,
+    status_option_name: &str,
+    agent: Option<&str>,
+    pipeline_stage: Option<&str>,
+) -> Option<String> {
+    use unblock_github::GitHubApi;
+
+    let project_info = client
+        .resolve_project_info()
+        .await
+        .expect("resolve_project_info should succeed (UNBLOCK_PROJECT exported)");
+
+    // Idempotent — safe to call once per test even if a sibling test in the
+    // same process already ran setup_fields. Cache hit short-circuits the
+    // per-field round-trips; cache miss does the canonical 7-field setup.
+    if client.field_ids().await.is_none() {
+        let report = client
+            .setup_fields(&project_info.id)
+            .await
+            .expect("setup_fields should succeed");
+        client.set_field_ids(report.field_ids).await;
+    }
+
+    let field_ids = client
+        .field_ids()
+        .await
+        .expect("field_ids should be cached after setup_fields + set_field_ids");
+
+    let item_id = client
+        .get_project_item_id(issue_node_id, &project_info.id)
+        .await
+        .ok()?;
+
+    let api: &dyn GitHubApi = client.as_ref();
+    unblock_github::projects::set_project_fields(
+        api,
+        &project_info.id,
+        &item_id,
+        &field_ids,
+        priority,
+        status_option_name,
+        agent,
+        pipeline_stage,
+        None,
+        None,
+    )
+    .await;
+
+    Some(item_id)
+}
+
 // ── Canonical view names for the create_view live tests ────────────
 //
 // Per bead `unblock-1hz` decision D3 (option y — reuse stable-name refactor),
@@ -366,7 +441,11 @@ async fn fetch_issue_returns_full_details_for_existing_issue() {
     // `fetch_issue(1)` and broke against repos whose lowest issue number is
     // greater than 1, or whose issues have been deleted between live runs
     // (see beads `unblock-mwg`, `unblock-741`).
-    if !require_github_token() {
+    //
+    // Bead `unblock-q1c`: gates on `require_github_token_and_project` so
+    // the post-create `populate_project_fields` step can write Status /
+    // Priority / Agent on the live board.
+    if !require_github_token_and_project() {
         return;
     }
 
@@ -405,6 +484,18 @@ async fn fetch_issue_returns_full_details_for_existing_issue() {
     // not panic the guard) but *before* the asserts (so an assertion panic
     // still triggers cleanup).
     let mut guard = CloseIssueGuard::new(&client, created.number);
+
+    // Bead `unblock-q1c`: populate Projects V2 fields so the live board
+    // shows clean rows. Bug fixture (Appendix B.3) — P0 default.
+    populate_project_fields(
+        &client,
+        &created.node_id,
+        "P0",
+        Status::Backlog.option_name(),
+        Some("integration-fixture"),
+        None,
+    )
+    .await;
 
     let issue = client
         .fetch_issue(created.number)
@@ -609,7 +700,12 @@ async fn fetch_graph_data_issues_have_valid_status_and_priority() {
 #[tokio::test]
 #[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn create_issue_returns_issue_with_correct_fields() {
-    if !require_github_token() {
+    // Bead `unblock-q1c`: gates on `require_github_token_and_project` so
+    // the post-create `populate_project_fields` step can write Status /
+    // Priority / Agent on the live board AND so the representative pin
+    // assertion below (`fetch_field_value` re-fetch) has a project to
+    // query.
+    if !require_github_token_and_project() {
         return;
     }
 
@@ -662,6 +758,56 @@ async fn create_issue_returns_issue_with_correct_fields() {
         "newly created issue should be Open"
     );
 
+    // Bead `unblock-q1c`: populate Projects V2 fields so the live board
+    // shows clean rows AND so this test acts as the representative
+    // fields-populated invariant pin point for the `unblock-github` live
+    // suite. Bug fixture (Appendix B.3) → P0 + Backlog (canonical
+    // create-time Status per spec §8.3) + integration-fixture agent.
+    let item_id = populate_project_fields(
+        &client,
+        &issue.node_id,
+        "P0",
+        Status::Backlog.option_name(),
+        Some("integration-fixture"),
+        None,
+    )
+    .await
+    .expect("populate_project_fields should resolve a ProjectV2Item ID");
+
+    // Re-fetch the field values via the read path used by the
+    // `update_field_changes_value_on_project_item` test. Asserts the
+    // populate path actually wrote each field — `set_project_fields` is
+    // best-effort and only logs warnings on per-field failures, so the
+    // round-trip read is the only way to fail-fast on a regression that
+    // breaks the populate flow (bead `unblock-q1c` Risks).
+    let resolved_field_ids = client
+        .field_ids()
+        .await
+        .expect("field_ids should be cached after populate_project_fields");
+
+    let priority_value =
+        fetch_field_value(&client, &item_id, &resolved_field_ids.priority.field_id).await;
+    assert_eq!(
+        priority_value.as_deref(),
+        Some("P0 - Critical"),
+        "Priority should be populated to canonical 'P0 - Critical' after populate_project_fields"
+    );
+
+    let status_value =
+        fetch_field_value(&client, &item_id, &resolved_field_ids.status.field_id).await;
+    assert_eq!(
+        status_value.as_deref(),
+        Some(Status::Backlog.option_name()),
+        "Status should be populated to canonical Backlog after populate_project_fields"
+    );
+
+    let agent_value = fetch_field_value(&client, &item_id, &resolved_field_ids.agent).await;
+    assert_eq!(
+        agent_value.as_deref(),
+        Some("integration-fixture"),
+        "Agent should be populated to 'integration-fixture' after populate_project_fields"
+    );
+
     // Explicit cleanup on the happy path; disarm the guard so it does not
     // double-close.
     client
@@ -671,7 +817,7 @@ async fn create_issue_returns_issue_with_correct_fields() {
     guard.disarm();
 
     eprintln!(
-        "create_issue test: created and closed issue #{}",
+        "create_issue test: created, populated fields, asserted re-fetch, and closed issue #{}",
         issue.number
     );
 }
@@ -681,7 +827,10 @@ async fn create_issue_returns_issue_with_correct_fields() {
 #[tokio::test]
 #[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn close_issue_closes_issue_and_refetch_confirms() {
-    if !require_github_token() {
+    // Bead `unblock-q1c`: gates on `require_github_token_and_project` so
+    // the post-create `populate_project_fields` step can write Status /
+    // Priority / Agent on the live board.
+    if !require_github_token_and_project() {
         return;
     }
 
@@ -715,6 +864,18 @@ async fn close_issue_closes_issue_and_refetch_confirms() {
     // Arm the drop guard so the issue is closed even if an assertion panics.
     let mut guard = CloseIssueGuard::new(&client, issue.number);
 
+    // Bead `unblock-q1c`: populate Projects V2 fields. Refactor fixture
+    // (Appendix B.3) → P1 + Backlog + integration-fixture agent.
+    populate_project_fields(
+        &client,
+        &issue.node_id,
+        "P1",
+        Status::Backlog.option_name(),
+        Some("integration-fixture"),
+        None,
+    )
+    .await;
+
     // Close it without a reason.
     client
         .close_issue(issue.number, None)
@@ -742,7 +903,10 @@ async fn close_issue_closes_issue_and_refetch_confirms() {
 #[tokio::test]
 #[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn close_issue_with_reason_adds_comment_before_closing() {
-    if !require_github_token() {
+    // Bead `unblock-q1c`: gates on `require_github_token_and_project` so
+    // the post-create `populate_project_fields` step can write Status /
+    // Priority / Agent on the live board.
+    if !require_github_token_and_project() {
         return;
     }
 
@@ -756,6 +920,10 @@ async fn close_issue_with_reason_adds_comment_before_closing() {
     // Create a Spike fixture to close with a reason (spec Appendix
     // B.3 — unblock-wgj.22). Exercises the `Spike` IssueType +
     // canonical Priority default (P2 — Medium).
+    //
+    // Bead `unblock-q1c` DRIFT-D closure: `issue_type` populated with
+    // canonical Spike (was `None`, contradicting Appendix B.3 "all 8
+    // IssueType variants exercised").
     let params = CreateIssueParams {
         title: "Investigate flaky checkout test".to_owned(),
         body: Some(
@@ -767,7 +935,7 @@ async fn close_issue_with_reason_adds_comment_before_closing() {
         labels: fixture_labels(&["test"]),
         milestone: None,
         assignees: vec![],
-        issue_type: None,
+        issue_type: Some(IssueType::Spike.canonical_name().to_owned()),
     };
 
     let issue = client
@@ -777,6 +945,18 @@ async fn close_issue_with_reason_adds_comment_before_closing() {
 
     // Arm the drop guard so the issue is closed even if an assertion panics.
     let mut guard = CloseIssueGuard::new(&client, issue.number);
+
+    // Bead `unblock-q1c`: populate Projects V2 fields. Spike fixture
+    // (Appendix B.3) → P2 + Backlog + integration-fixture agent.
+    populate_project_fields(
+        &client,
+        &issue.node_id,
+        "P2",
+        Status::Backlog.option_name(),
+        Some("integration-fixture"),
+        None,
+    )
+    .await;
 
     let reason_text = "Closing because the test is complete.";
 
@@ -855,7 +1035,10 @@ async fn close_issue_returns_issue_not_found_for_nonexistent_number() {
 #[tokio::test]
 #[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn add_comment_posts_comment_and_returns_url() {
-    if !require_github_token() {
+    // Bead `unblock-q1c`: gates on `require_github_token_and_project` so
+    // the post-create `populate_project_fields` step can write Status /
+    // Priority / Agent on the live board.
+    if !require_github_token_and_project() {
         return;
     }
 
@@ -888,6 +1071,20 @@ async fn add_comment_posts_comment_and_returns_url() {
 
     // Arm the drop guard so the issue is closed even if an assertion panics.
     let mut guard = CloseIssueGuard::new(&client, issue.number);
+
+    // Bead `unblock-q1c`: populate Projects V2 fields. Docs fixture
+    // (Appendix B.3) → P3 + Backlog. Agent intentionally `None` to
+    // exercise the §8.3 / §8.6 absence-leaves-unmodified edge case
+    // (matches the canonical e2e_workflow.rs pattern for issue C).
+    populate_project_fields(
+        &client,
+        &issue.node_id,
+        "P3",
+        Status::Backlog.option_name(),
+        None,
+        None,
+    )
+    .await;
 
     let comment_body = "Integration test comment — hello from add_comment!";
 
@@ -967,7 +1164,10 @@ async fn add_comment_returns_issue_not_found_for_nonexistent_number() {
 #[tokio::test]
 #[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn add_blocked_by_creates_blocking_relationship() {
-    if !require_github_token() {
+    // Bead `unblock-q1c`: gates on `require_github_token_and_project` so
+    // the post-create `populate_project_fields` step can write Status /
+    // Priority / Agent on the live board.
+    if !require_github_token_and_project() {
         return;
     }
 
@@ -994,6 +1194,18 @@ async fn add_blocked_by_creates_blocking_relationship() {
 
     let mut guard_a = CloseIssueGuard::new(&client, issue_a.number);
 
+    // Bead `unblock-q1c`: populate Projects V2 fields. Task fixture
+    // (Appendix B.3) → P2 + Backlog + integration-fixture agent.
+    populate_project_fields(
+        &client,
+        &issue_a.node_id,
+        "P2",
+        Status::Backlog.option_name(),
+        Some("integration-fixture"),
+        None,
+    )
+    .await;
+
     let issue_b = client
         .create_issue(CreateIssueParams {
             title: "Add OAuth token validation".to_owned(),
@@ -1007,6 +1219,16 @@ async fn add_blocked_by_creates_blocking_relationship() {
         .expect("create_issue B should succeed");
 
     let mut guard_b = CloseIssueGuard::new(&client, issue_b.number);
+
+    populate_project_fields(
+        &client,
+        &issue_b.node_id,
+        "P2",
+        Status::Backlog.option_name(),
+        Some("integration-fixture"),
+        None,
+    )
+    .await;
 
     // Add blocking relationship: A is blocked by B.
     client
@@ -1058,7 +1280,10 @@ async fn add_blocked_by_creates_blocking_relationship() {
 #[tokio::test]
 #[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn remove_blocked_by_removes_blocking_relationship() {
-    if !require_github_token() {
+    // Bead `unblock-q1c`: gates on `require_github_token_and_project` so
+    // the post-create `populate_project_fields` step can write Status /
+    // Priority / Agent on the live board.
+    if !require_github_token_and_project() {
         return;
     }
 
@@ -1086,6 +1311,18 @@ async fn remove_blocked_by_removes_blocking_relationship() {
 
     let mut guard_a = CloseIssueGuard::new(&client, issue_a.number);
 
+    // Bead `unblock-q1c`: populate Projects V2 fields. Chore fixture
+    // (Appendix B.3) → P4 + Backlog + integration-fixture agent.
+    populate_project_fields(
+        &client,
+        &issue_a.node_id,
+        "P4",
+        Status::Backlog.option_name(),
+        Some("integration-fixture"),
+        None,
+    )
+    .await;
+
     let issue_b = client
         .create_issue(CreateIssueParams {
             title: "Migrate auth middleware to async".to_owned(),
@@ -1099,6 +1336,17 @@ async fn remove_blocked_by_removes_blocking_relationship() {
         .expect("create_issue B should succeed");
 
     let mut guard_b = CloseIssueGuard::new(&client, issue_b.number);
+
+    // Refactor fixture (Appendix B.3) → P1 + Backlog.
+    populate_project_fields(
+        &client,
+        &issue_b.node_id,
+        "P1",
+        Status::Backlog.option_name(),
+        Some("integration-fixture"),
+        None,
+    )
+    .await;
 
     // Add, then remove the blocking relationship.
     client
@@ -1152,7 +1400,10 @@ async fn remove_blocked_by_removes_blocking_relationship() {
 #[tokio::test]
 #[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn add_blocked_by_duplicate_returns_duplicate_dependency() {
-    if !require_github_token() {
+    // Bead `unblock-q1c`: gates on `require_github_token_and_project` so
+    // the post-create `populate_project_fields` step can write Status /
+    // Priority / Agent on the live board.
+    if !require_github_token_and_project() {
         return;
     }
 
@@ -1178,6 +1429,18 @@ async fn add_blocked_by_duplicate_returns_duplicate_dependency() {
 
     let mut guard_a = CloseIssueGuard::new(&client, issue_a.number);
 
+    // Bead `unblock-q1c`: populate Projects V2 fields. Spike fixture
+    // (Appendix B.3) → P2 + Backlog + integration-fixture agent.
+    populate_project_fields(
+        &client,
+        &issue_a.node_id,
+        "P2",
+        Status::Backlog.option_name(),
+        Some("integration-fixture"),
+        None,
+    )
+    .await;
+
     let issue_b = client
         .create_issue(CreateIssueParams {
             title: "Fix authentication bypass in /login endpoint".to_owned(),
@@ -1191,6 +1454,17 @@ async fn add_blocked_by_duplicate_returns_duplicate_dependency() {
         .expect("create_issue B should succeed");
 
     let mut guard_b = CloseIssueGuard::new(&client, issue_b.number);
+
+    // Bug fixture (Appendix B.3) → P0 + Backlog.
+    populate_project_fields(
+        &client,
+        &issue_b.node_id,
+        "P0",
+        Status::Backlog.option_name(),
+        Some("integration-fixture"),
+        None,
+    )
+    .await;
 
     // First add should succeed.
     client
@@ -1291,7 +1565,10 @@ async fn remove_blocked_by_returns_issue_not_found_for_nonexistent_number() {
 #[tokio::test]
 #[ignore = "live GitHub API — opt-in via `cargo test --workspace -- --ignored` with GITHUB_TOKEN set"]
 async fn add_sub_issue_creates_parent_child_relationship() {
-    if !require_github_token() {
+    // Bead `unblock-q1c`: gates on `require_github_token_and_project` so
+    // the post-create `populate_project_fields` step can write Status /
+    // Priority / Agent on the live board.
+    if !require_github_token_and_project() {
         return;
     }
 
@@ -1320,6 +1597,19 @@ async fn add_sub_issue_creates_parent_child_relationship() {
 
     let mut guard_parent = CloseIssueGuard::new(&client, parent.number);
 
+    // Bead `unblock-q1c`: populate Projects V2 fields. Epic parent
+    // (Appendix B.3 — Implement OAuth login flow) → P1 + Backlog +
+    // integration-fixture agent.
+    populate_project_fields(
+        &client,
+        &parent.node_id,
+        "P1",
+        Status::Backlog.option_name(),
+        Some("integration-fixture"),
+        None,
+    )
+    .await;
+
     let child = client
         .create_issue(CreateIssueParams {
             title: "Add OAuth callback handler".to_owned(),
@@ -1333,6 +1623,17 @@ async fn add_sub_issue_creates_parent_child_relationship() {
         .expect("create child should succeed");
 
     let mut guard_child = CloseIssueGuard::new(&client, child.number);
+
+    // Task child (Appendix B.3) → P2 + Backlog.
+    populate_project_fields(
+        &client,
+        &child.node_id,
+        "P2",
+        Status::Backlog.option_name(),
+        Some("integration-fixture"),
+        None,
+    )
+    .await;
 
     // Add sub-issue relationship.
     client

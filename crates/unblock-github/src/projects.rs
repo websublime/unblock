@@ -636,6 +636,150 @@ fn remove_plain_field(map: &mut HashMap<String, String>, name: &str) -> Result<S
     })
 }
 
+/// Sets Projects V2 custom fields on a project item.
+///
+/// Updates Priority, Status, `PipelineStage`, Agent, `StoryPoints`, and
+/// `DeferUntil`. Each field update is best-effort: failures are logged as
+/// warnings via [`tracing::warn!`] but do not abort the remaining updates.
+/// This keeps the create flow resilient to partial project configuration
+/// (e.g. missing option values).
+///
+/// The `status` parameter controls the Status field value. Callers MUST
+/// source the string from
+/// [`unblock_core::types::Status::option_name`] — never a raw literal. Per
+/// `unblock-1zj` (spec §8.3) `create` always lands new issues in
+/// `Status::Backlog.option_name()` (= `"Backlog"`) regardless of blocker
+/// state, because Backlog is sticky.
+///
+/// `priority` and `pipeline_stage` use prefix matching (via
+/// [`FieldMeta::option_id_by_prefix`]) so callers can pass short codes like
+/// `"P0"` which resolve to the full option name `"P0 - Critical"`.
+///
+/// **Agent (introduced by `unblock-wgj`).** When `agent` is `Some(name)`,
+/// the Agent text field is written to `name`. When `None`, the Agent field
+/// write is SKIPPED (no field update mutation issued — distinct from
+/// writing an empty string). The caller is responsible for resolving the
+/// §8.1 precedence chain (explicit > `state.agent_kind_str()` > omit)
+/// BEFORE invoking this helper. Spec §8.3 step 4 "omit-empty rule".
+///
+/// `pipeline_stage` follows the same omit-on-`None` rule as Agent — when
+/// `None`, no mutation is issued.
+///
+/// # Errors
+///
+/// This helper does NOT return errors. Per-field failures are logged via
+/// [`tracing::warn!`] and the function continues with subsequent fields.
+/// Callers that need to fail-fast on a specific field write must call
+/// [`crate::api::GitHubApi::update_field`] directly.
+#[allow(clippy::too_many_arguments)]
+pub async fn set_project_fields(
+    client: &dyn crate::api::GitHubApi,
+    project_id: &str,
+    item_id: &str,
+    field_ids: &ProjectFieldIds,
+    priority: &str,
+    status: &str,
+    agent: Option<&str>,
+    pipeline_stage: Option<&str>,
+    story_points: Option<f64>,
+    defer_until: Option<NaiveDate>,
+) {
+    // Set Priority (prefix match: "P0" -> "P0 - Critical", etc.).
+    if let Some(option_id) = field_ids.priority.option_id_by_prefix(priority)
+        && let Err(e) = client
+            .update_field(
+                project_id,
+                item_id,
+                &field_ids.priority.field_id,
+                &FieldValue::SingleSelectOption(option_id.clone()),
+            )
+            .await
+    {
+        warn!(error = %e, "Failed to set Priority field");
+    }
+
+    // Set Status. Per `unblock-1zj` (spec §8.3 / Decision 2 — Backlog
+    // sticky), `create` lands every new issue in
+    // `Status::Backlog.option_name()` regardless of blocker state; the
+    // pre-`unblock-1zj` `ready` / `blocked` branch on
+    // `blocked_by_refs.is_empty()` is REMOVED. Other write tools (e.g.
+    // `claim`, `update`) drive Status away from `Backlog` via explicit
+    // user/agent transitions — they pass their own canonical option name
+    // through `status` here.
+    if let Some(option_id) = field_ids.status.options.get(status)
+        && let Err(e) = client
+            .update_field(
+                project_id,
+                item_id,
+                &field_ids.status.field_id,
+                &FieldValue::SingleSelectOption(option_id.clone()),
+            )
+            .await
+    {
+        warn!(error = %e, "Failed to set Status field");
+    }
+
+    // Set PipelineStage when Some — same prefix-match contract as Priority.
+    // None means SKIP the PipelineStage write (no mutation issued).
+    if let Some(stage) = pipeline_stage
+        && let Some(option_id) = field_ids.pipeline_stage.option_id_by_prefix(stage)
+        && let Err(e) = client
+            .update_field(
+                project_id,
+                item_id,
+                &field_ids.pipeline_stage.field_id,
+                &FieldValue::SingleSelectOption(option_id.clone()),
+            )
+            .await
+    {
+        warn!(error = %e, "Failed to set PipelineStage field");
+    }
+
+    // Set Agent — gated on §8.1 precedence chain. `None` means SKIP the
+    // Agent field write (Invariant 18, §14). The caller resolved the chain
+    // before calling this helper.
+    if let Some(agent_name) = agent
+        && let Err(e) = client
+            .update_field(
+                project_id,
+                item_id,
+                &field_ids.agent,
+                &FieldValue::Text(agent_name.to_owned()),
+            )
+            .await
+    {
+        warn!(error = %e, "Failed to set Agent field");
+    }
+
+    // Set StoryPoints if provided.
+    if let Some(sp) = story_points
+        && let Err(e) = client
+            .update_field(
+                project_id,
+                item_id,
+                &field_ids.story_points,
+                &FieldValue::Number(sp),
+            )
+            .await
+    {
+        warn!(error = %e, "Failed to set StoryPoints field");
+    }
+
+    // Set DeferUntil if provided.
+    if let Some(du) = defer_until
+        && let Err(e) = client
+            .update_field(
+                project_id,
+                item_id,
+                &field_ids.defer_until,
+                &FieldValue::Date(du),
+            )
+            .await
+    {
+        warn!(error = %e, "Failed to set DeferUntil field");
+    }
+}
+
 impl GitHubClient {
     /// Resolves the linked GitHub Projects V2 project for the configured repository.
     ///

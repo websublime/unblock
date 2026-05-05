@@ -310,10 +310,11 @@ async fn e2e_workflow_all_10_tools() {
         .await
         && let Some(field_ids) = client.field_ids().await
     {
-        // NOTE: story_points / defer_until (the trailing `None, None` args here
-        // and at the analogous call sites for issues B and C below) are not
-        // exercised by this e2e test — only the priority/status/agent axes are
-        // validated end-to-end against the live GitHub Project.
+        // NOTE: pipeline_stage / story_points / defer_until (the trailing
+        // `None, None, None` args here and at the analogous call sites for
+        // issues B and C below) are not exercised by this e2e test — only
+        // the priority/status/agent axes are validated end-to-end against
+        // the live GitHub Project.
         set_project_fields(
             client.as_ref(),
             &project_info.id,
@@ -322,6 +323,7 @@ async fn e2e_workflow_all_10_tools() {
             "P1",
             unblock_core::types::Status::Ready.option_name(),
             Some("claude-code"),
+            None,
             None,
             None,
         )
@@ -378,6 +380,7 @@ async fn e2e_workflow_all_10_tools() {
             Some("claude-code"),
             None,
             None,
+            None,
         )
         .await;
     }
@@ -429,6 +432,7 @@ async fn e2e_workflow_all_10_tools() {
             &field_ids,
             "P3",
             unblock_core::types::Status::Ready.option_name(),
+            None,
             None,
             None,
             None,
