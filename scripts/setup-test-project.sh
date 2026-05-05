@@ -23,14 +23,20 @@
 # WHAT IT DOES (--wipe-issues mode — fixture-issue wipe)
 #   - Resolves the project's GraphQL node id (required for
 #     `deleteProjectV2Item`).
-#   - Fetches every issue in <owner>/<repo> bearing the canonical
+#   - Fetches every OPEN issue in <owner>/<repo> bearing the canonical
 #     fixture label `unblock-fixture` (label applied automatically by
 #     the live tests' `fixture_labels()` helper — see bead unblock-1hz).
-#   - For each fixture issue:
-#       * If currently OPEN, closes it via `gh issue close` so live tests
-#         do not leave an orphaned-open trail when the panic-path Drop
-#         guard's tokio::spawn cleanup loses its runtime race (bead
-#         unblock-ekf documented best-effort caveat).
+#     Closed fixture issues are intentionally skipped: cycle 2 of the
+#     bead scoped the search to `is:open` because closed issues whose
+#     project items are already removed are the steady-state outcome of
+#     a successful prior wipe — there is no further work to do for them
+#     and iterating over the closed-issue tail eats CI walltime
+#     unboundedly across the project's lifetime.
+#   - For each open fixture issue:
+#       * Closes it via `gh issue close` (without `--comment`, cycle 2)
+#         so live tests do not leave an orphaned-open trail when the
+#         panic-path Drop guard's tokio::spawn cleanup loses its runtime
+#         race (bead unblock-ekf documented best-effort caveat).
 #       * Resolves the `ProjectV2Item` id corresponding to the issue node
 #         on the target project and calls `deleteProjectV2Item` so the
 #         board card disappears. `close_issue` alone leaves the closed
@@ -46,6 +52,24 @@
 #     (test-board-fixture, test-table-fixture, test-roadmap-fixture)
 #     instead of creating new timestamp-named ones each run, so the
 #     previously unbounded view accumulation is now capped at exactly 3.
+#
+# WHAT IT DOES (--wipe-labels mode — orphan-label wipe)
+#   - Lists every label on <owner>/<repo> via `gh label list`.
+#   - For each label whose name matches any of the test-orphan glob
+#     patterns (`e2e-test-*`, `test-label-*`, `unblock-run-*`):
+#       * If the label name is in CANONICAL_TEST_LABELS (`unblock-fixture`
+#         or `unblock-test-label`), it is preserved.
+#       * Otherwise, the label is deleted via `gh label delete --yes`.
+#     Production labels that do not match any of the test patterns are
+#     NEVER touched — the denylist is pattern-scoped, not allowlist-scoped,
+#     so a real label called `test` (or any other operator-managed label)
+#     is left intact. Cycle 2 of bead `unblock-1hz` introduced this mode
+#     after the test repo accumulated ~49 orphan labels (7x e2e-test-*,
+#     ~40x test-label-*, plus the cycle-1 unblock-run-* per-run labels)
+#     across CI runs. Without bulk delete the only options were the GitHub
+#     web UI (one-by-one) or a hand-rolled gh script — this mode is the
+#     scripted one-shot.
+#   - Idempotent: a no-op when no orphan labels are present.
 #
 # WHY THE BUILT-IN STATUS IS LEFT ALONE
 #   GitHub Projects V2 forbids deletion of the built-in Status field
@@ -63,15 +87,20 @@
 #     deleted; subsequent runs are no-ops.
 #   - --wipe-issues mode: when no fixture issues exist, the script is a
 #     no-op (empty issue list).
-#   - --wipe-issues mode: closes already-closed issues silently (gh issue
-#     close on a closed issue returns success); deleteProjectV2Item on a
-#     missing item returns a structured error which we log and continue.
+#   - --wipe-issues mode: deleteProjectV2Item on a missing item returns a
+#     structured error which we log and continue.
+#   - --wipe-labels mode: when no orphan labels are present, the script is
+#     a no-op. Re-running immediately after a successful wipe is also a
+#     no-op (the canonical labels are preserved by name, and the only
+#     test-pattern labels left are the ones that just survived the wipe —
+#     i.e. none).
 #   - Re-running after a successful `cargo test ... -- --ignored` round
-#     trip is safe in either mode.
+#     trip is safe in any mode.
 #
 # USAGE
 #   scripts/setup-test-project.sh [--check] <owner> <project-number>
 #   scripts/setup-test-project.sh --wipe-issues <owner> <project-number> <repo>
+#   scripts/setup-test-project.sh --wipe-labels <owner> <repo>
 #
 #   Default mode mutates the project (deletes stale custom fields).
 #
@@ -79,21 +108,29 @@
 #   only) without mutating, and exits non-zero if any unblock-managed
 #   custom fields are present (exit 4). Useful as a CI preflight
 #   assertion that the project is in the canonical clean state before
-#   live tests run. --check has no effect on issues; pair with
-#   --wipe-issues only when you intend to mutate.
+#   live tests run. --check has no effect on issues or labels; pair with
+#   --wipe-issues / --wipe-labels only when you intend to mutate.
 #
 #   --wipe-issues mode requires a 3rd positional argument <repo> (just
 #   the repository name, not owner/repo). The mode operates on the
-#   issues in <owner>/<repo> with the canonical fixture label. Default
-#   mode is NOT executed in --wipe-issues mode — to do both, run the
-#   script twice. Keeping the modes orthogonal preserves the existing
-#   --check semantics on the custom-fields path.
+#   issues in <owner>/<repo> with the canonical fixture label.
+#
+#   --wipe-labels mode takes <owner> and <repo> only (no project number —
+#   labels are repo-scoped, not project-scoped). It deletes orphan
+#   timestamp-suffixed test labels and preserves the two canonical
+#   labels plus all production labels.
+#
+#   The three mutating modes are orthogonal — to perform multiple wipes,
+#   run the script multiple times. Keeping them orthogonal preserves the
+#   existing --check semantics on the custom-fields path and avoids the
+#   ambiguity of a combined --all flag.
 #
 #   Examples:
 #     scripts/setup-test-project.sh websublime 7
 #     scripts/setup-test-project.sh --check websublime 7
 #     scripts/setup-test-project.sh --dry-run websublime 7
 #     scripts/setup-test-project.sh --wipe-issues websublime 7 unblock-test
+#     scripts/setup-test-project.sh --wipe-labels websublime unblock-test
 #
 # REQUIREMENTS
 #   - `gh` CLI authenticated against the target owner with
@@ -134,25 +171,70 @@ readonly UNBLOCK_CUSTOM_FIELDS=(
 # it exactly.
 readonly FIXTURE_LABEL="unblock-fixture"
 
+# Canonical labels created by the live tests. The `--wipe-labels` mode
+# preserves these (alongside any non-test-pattern repo labels — see
+# WIPE_LABEL_PATTERNS below) and deletes only the orphan timestamp-suffixed
+# labels accumulated by previous test runs. Cycle 2 of bead `unblock-1hz`
+# pinned the live test surface to exactly two canonical labels:
+#   * unblock-fixture   — applied to every fixture issue (wipe anchor)
+#   * unblock-test-label — per-test discriminator used by e2e_workflow's
+#                          ready/list filtering and the ensure_labels
+#                          integration test
+readonly CANONICAL_TEST_LABELS=(
+  "unblock-fixture"
+  "unblock-test-label"
+)
+
+# Patterns matched by `--wipe-labels`. A repo label is deleted iff its name
+# matches any pattern in this list AND is not present in
+# CANONICAL_TEST_LABELS. Patterns are matched against the full label name
+# with bash's `[[ == ]]` glob (so `*` is the wildcard). The list captures
+# every shape of timestamp-suffixed test label the codebase has ever
+# emitted:
+#   * e2e-test-*    — historical per-run label from e2e_workflow.rs
+#                     (`e2e-test-<seconds>` and `e2e-test-<millis>`)
+#   * test-label-*  — historical per-run label from the
+#                     `ensure_labels_creates_missing_labels` integration
+#                     test
+#   * unblock-run-* — cycle-1 per-run discriminator, dropped in cycle 2
+# Production labels that don't match any of these patterns are NEVER
+# touched. The denylist-style check (pattern match + canonical-label
+# preservation) is intentional: an allowlist would risk silently leaving
+# orphans behind whenever a future test introduces a new naming scheme.
+readonly WIPE_LABEL_PATTERNS=(
+  "e2e-test-*"
+  "test-label-*"
+  "unblock-run-*"
+)
+
 usage() {
   cat <<'EOF' >&2
 Usage:
   scripts/setup-test-project.sh [--check] <owner> <project-number>
   scripts/setup-test-project.sh --wipe-issues <owner> <project-number> <repo>
+  scripts/setup-test-project.sh --wipe-labels <owner> <repo>
 
   --check          Dry-run for default (custom-fields) mode: list
                    (without deleting) any stale unblock-managed custom
                    fields. Exits 0 when the project is already clean,
                    exits 4 when stale fields are present.
   --dry-run        Alias for --check.
-  --wipe-issues    Closes every issue in <owner>/<repo> with the
+  --wipe-issues    Closes every OPEN issue in <owner>/<repo> with the
                    `unblock-fixture` label and removes its corresponding
                    project item from <project-number>. View cleanup is
                    not automated (upstream API constraint).
-  owner            GitHub org or user that owns the test project
-  project-number   The Projects V2 project number (visible in the URL)
+  --wipe-labels    Deletes orphan timestamp-suffixed test labels from
+                   <owner>/<repo> (e2e-test-*, test-label-*,
+                   unblock-run-*). Preserves the canonical labels
+                   (`unblock-fixture`, `unblock-test-label`) and any
+                   production labels.
+  owner            GitHub org or user that owns the test project / repo
+  project-number   The Projects V2 project number (visible in the URL).
+                   Required by default and --wipe-issues; not used by
+                   --wipe-labels.
   repo             The test repository name (just the repo, not
-                   owner/repo). Required only with --wipe-issues.
+                   owner/repo). Required by --wipe-issues and
+                   --wipe-labels.
 
 Default mode removes the 6 unblock-managed custom fields from the project,
 leaving the built-in Status field intact. Idempotent — safe to re-run.
@@ -161,6 +243,7 @@ Examples:
   scripts/setup-test-project.sh websublime 7
   scripts/setup-test-project.sh --check websublime 7
   scripts/setup-test-project.sh --wipe-issues websublime 7 unblock-test
+  scripts/setup-test-project.sh --wipe-labels websublime unblock-test
 EOF
 }
 
@@ -260,7 +343,18 @@ query($search: String!, $cursor: String) {
 GRAPHQL
 )
 
-  local search="repo:$owner/$repo label:$FIXTURE_LABEL is:issue"
+  # Cycle 2 of bead `unblock-1hz` (review SUGGESTION-2): scope the search
+  # to OPEN issues only. Closed fixture issues without project items are
+  # the steady-state outcome of a successful prior wipe (`gh issue close`
+  # does a REST PATCH state=closed; GitHub does not expose a delete-issue
+  # API for non-admins) — there is nothing left to do for them and
+  # iterating over the closed-issue tail grows linearly with the project's
+  # lifetime, eating CI walltime for no work. Restricting the query to
+  # `is:open` keeps the wipe O(open fixtures) regardless of total run
+  # count. Any closed-but-still-on-board fixture from a pre-cycle-2 run
+  # is a one-time backlog that an operator can clear by hand or by
+  # widening this query temporarily.
+  local search="repo:$owner/$repo label:$FIXTURE_LABEL is:issue is:open"
   local cursor="null"
   local total=0
 
@@ -381,10 +475,14 @@ wipe_fixture_issues() {
     [[ -z "$number" ]] && continue
 
     if [[ "$state" == "OPEN" ]]; then
+      # Cycle 2 (bead `unblock-1hz` review SUGGESTION-3): no `--comment`.
+      # The forensic note ("Automated test cleanup — …") was permanent
+      # noise on every fixture issue's timeline — closure alone is
+      # sufficient signal, and `gh issue close --reason completed` is
+      # already self-documenting in the GitHub UI.
       if gh issue close "$number" \
           --repo "$owner/$repo" \
           --reason "completed" \
-          --comment "Automated test cleanup — wiped by scripts/setup-test-project.sh --wipe-issues" \
           >/dev/null 2>&1; then
         printf '  closed issue #%s\n' "$number" >&2
         closed=$((closed + 1))
@@ -410,9 +508,96 @@ wipe_fixture_issues() {
   printf 'Note: project views are NOT cleaned up (no upstream delete-view API). Live tests reuse the 3 canonical fixture views.\n' >&2
 }
 
+# Returns 0 (true) if `name` is one of the CANONICAL_TEST_LABELS, else 1.
+is_canonical_test_label() {
+  local name="$1"
+  local canonical
+  for canonical in "${CANONICAL_TEST_LABELS[@]}"; do
+    if [[ "$name" == "$canonical" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Returns 0 (true) if `name` matches any pattern in WIPE_LABEL_PATTERNS,
+# else 1. Patterns use bash's `[[ == ]]` glob (so `*` is the wildcard).
+matches_wipe_pattern() {
+  local name="$1"
+  local pattern
+  for pattern in "${WIPE_LABEL_PATTERNS[@]}"; do
+    # shellcheck disable=SC2053 # right-hand side is intentionally a glob, not a literal
+    if [[ "$name" == $pattern ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# --wipe-labels mode entry point. Deletes orphan test-pattern labels from
+# <owner>/<repo>, preserving the canonical labels and every production
+# (non-test-pattern) label. Idempotent.
+wipe_orphan_labels() {
+  local owner="$1"
+  local repo="$2"
+
+  # shellcheck disable=SC2016 # backticks are Markdown-style code, not command substitution
+  printf 'Listing labels on %s/%s for orphan-test-label cleanup...\n' "$owner" "$repo" >&2
+
+  # `gh label list` paginates by default; --limit 1000 covers any
+  # realistic test repo (the observed worst case is ~50 labels at
+  # cycle-2 cleanup time).
+  local labels_json
+  if ! labels_json=$(gh label list --repo "$owner/$repo" --limit 1000 --json name 2>&1); then
+    # shellcheck disable=SC2016 # backticks are Markdown-style code, not command substitution
+    printf 'error: `gh label list` failed:\n%s\n' "$labels_json" >&2
+    exit 3
+  fi
+
+  # Extract one label name per line.
+  local all_names
+  all_names=$(printf '%s' "$labels_json" | jq -r '.[].name')
+
+  if [[ -z "$all_names" ]]; then
+    printf 'No labels found on %s/%s.\n' "$owner" "$repo" >&2
+    return 0
+  fi
+
+  local deleted=0
+  local preserved_canonical=0
+  local preserved_production=0
+
+  while IFS= read -r name; do
+    [[ -z "$name" ]] && continue
+
+    if matches_wipe_pattern "$name"; then
+      if is_canonical_test_label "$name"; then
+        printf '  preserved canonical test label: %s\n' "$name" >&2
+        preserved_canonical=$((preserved_canonical + 1))
+        continue
+      fi
+      if gh label delete "$name" --repo "$owner/$repo" --yes >/dev/null 2>&1; then
+        printf '  deleted orphan label: %s\n' "$name" >&2
+        deleted=$((deleted + 1))
+      else
+        printf '  warning: failed to delete label %s (continuing)\n' "$name" >&2
+      fi
+    else
+      preserved_production=$((preserved_production + 1))
+    fi
+  done <<< "$all_names"
+
+  # Use `printf -- ...` so the leading '--' in the format string is not
+  # parsed as a printf flag (some `printf` implementations choke on a
+  # format that starts with two dashes).
+  printf -- '--wipe-labels complete: deleted %d orphan label(s), preserved %d canonical test label(s) and %d production label(s).\n' \
+    "$deleted" "$preserved_canonical" "$preserved_production" >&2
+}
+
 main() {
   local check_mode=0
   local wipe_issues_mode=0
+  local wipe_labels_mode=0
   local positional=()
 
   while [[ $# -gt 0 ]]; do
@@ -423,6 +608,10 @@ main() {
         ;;
       --wipe-issues)
         wipe_issues_mode=1
+        shift
+        ;;
+      --wipe-labels)
+        wipe_labels_mode=1
         shift
         ;;
       -h|--help)
@@ -448,8 +637,13 @@ main() {
     esac
   done
 
-  if [[ "$check_mode" -eq 1 && "$wipe_issues_mode" -eq 1 ]]; then
-    printf 'error: --check and --wipe-issues are mutually exclusive\n' >&2
+  # The three mutating modes (--check, --wipe-issues, --wipe-labels) are
+  # pairwise mutually exclusive. Cycle 2 of bead `unblock-1hz` keeps each
+  # mode independent rather than introducing a combined `--all` flag —
+  # see header comment for the rationale.
+  local mode_count=$((check_mode + wipe_issues_mode + wipe_labels_mode))
+  if [[ "$mode_count" -gt 1 ]]; then
+    printf 'error: --check, --wipe-issues and --wipe-labels are mutually exclusive\n' >&2
     usage
     exit 1
   fi
@@ -460,19 +654,18 @@ main() {
       usage
       exit 1
     fi
+  elif [[ "$wipe_labels_mode" -eq 1 ]]; then
+    if [[ ${#positional[@]} -ne 2 ]]; then
+      printf 'error: --wipe-labels requires <owner> <repo>\n' >&2
+      usage
+      exit 1
+    fi
   elif [[ ${#positional[@]} -ne 2 ]]; then
     usage
     exit 1
   fi
 
   local owner="${positional[0]}"
-  local project_number="${positional[1]}"
-
-  if ! [[ "$project_number" =~ ^[1-9][0-9]*$ ]]; then
-    printf 'error: project-number must be a positive integer, got %q\n' "$project_number" >&2
-    usage
-    exit 1
-  fi
 
   require_tool gh
   require_tool jq
@@ -481,6 +674,28 @@ main() {
     # shellcheck disable=SC2016 # backticks are Markdown-style code, not command substitution
     printf 'error: `gh` is not authenticated. Run `gh auth login` first.\n' >&2
     exit 3
+  fi
+
+  if [[ "$wipe_labels_mode" -eq 1 ]]; then
+    # --wipe-labels takes <owner> <repo> only. The 2nd positional is the
+    # repo (bare name), not a project number — so the project-number
+    # numeric check below is intentionally skipped on this code path.
+    local repo="${positional[1]}"
+    if [[ -z "$repo" || "$repo" == */* ]]; then
+      printf 'error: <repo> must be a bare repository name, not owner/repo (got %q)\n' "$repo" >&2
+      usage
+      exit 1
+    fi
+    wipe_orphan_labels "$owner" "$repo"
+    exit 0
+  fi
+
+  local project_number="${positional[1]}"
+
+  if ! [[ "$project_number" =~ ^[1-9][0-9]*$ ]]; then
+    printf 'error: project-number must be a positive integer, got %q\n' "$project_number" >&2
+    usage
+    exit 1
   fi
 
   if [[ "$wipe_issues_mode" -eq 1 ]]; then
