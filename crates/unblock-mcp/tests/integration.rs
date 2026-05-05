@@ -50,6 +50,166 @@ fn qid(number: u64) -> QualifiedId {
     QualifiedId::new("test", "repo", number)
 }
 
+/// Bead `unblock-q1c`: live test fixture project-field populator.
+///
+/// Idempotently runs `setup_fields` (caches `field_ids` on the client),
+/// resolves the project's item ID for the just-created issue, and writes
+/// Priority + Status (+ optional Agent / `PipelineStage`) via
+/// [`unblock_github::projects::set_project_fields`]. Mirrors the canonical
+/// exemplar in `crates/unblock-mcp/tests/e2e_workflow.rs` so live integration
+/// fixtures populate the canonical Projects V2 fields after `create_issue`,
+/// instead of leaving the live board's Status / Priority / Agent / Pipeline
+/// columns empty (defeats the "live documentation" goal of `unblock-wgj.22`).
+///
+/// Best-effort by design: per-field failures inside `set_project_fields`
+/// are logged via `tracing::warn!` and do not return errors. If the issue
+/// has no `ProjectV2Item` yet (cross-repo, project not configured), the
+/// function returns `None` so the caller can either skip the populate step
+/// or treat the missing item as a soft failure.
+///
+/// **Gating contract.** Callers MUST gate on
+/// [`require_github_token_and_project`] before invoking this helper —
+/// `setup_fields` requires `UNBLOCK_PROJECT` to be exported and panics in
+/// the `resolve_project_info` step otherwise.
+async fn populate_project_fields(
+    client: &Arc<dyn GitHubApi>,
+    issue_node_id: &str,
+    priority: &str,
+    status_option_name: &str,
+    agent: Option<&str>,
+    pipeline_stage: Option<&str>,
+) -> Option<String> {
+    let project_info = client
+        .resolve_project_info()
+        .await
+        .expect("resolve_project_info should succeed (UNBLOCK_PROJECT exported)");
+
+    // Idempotent — safe to call once per test even if a sibling test in the
+    // same process already ran setup_fields. Cache hit short-circuits the
+    // per-field round-trips; cache miss does the canonical 7-field setup.
+    if client.field_ids().await.is_none() {
+        let report = client
+            .setup_fields(&project_info.id)
+            .await
+            .expect("setup_fields should succeed");
+        client.set_field_ids(report.field_ids).await;
+    }
+
+    let field_ids = client
+        .field_ids()
+        .await
+        .expect("field_ids should be cached after setup_fields + set_field_ids");
+
+    let item_id = client
+        .get_project_item_id(issue_node_id, &project_info.id)
+        .await
+        .ok()?;
+
+    unblock_github::projects::set_project_fields(
+        client.as_ref(),
+        &project_info.id,
+        &item_id,
+        &field_ids,
+        priority,
+        status_option_name,
+        agent,
+        pipeline_stage,
+        None,
+        None,
+    )
+    .await;
+
+    Some(item_id)
+}
+
+/// Bead `unblock-q1c`: live-test re-fetch helper used by representative pin
+/// assertions to verify that `populate_project_fields` actually wrote the
+/// canonical Projects V2 field values. Mirrors the
+/// `fetch_field_value` helper in
+/// `crates/unblock-github/tests/integration.rs` but uses a fresh reqwest
+/// [`reqwest::Client`] sourced from the live `GITHUB_TOKEN` so this test
+/// crate doesn't need to reach into `GitHubClient::http()` (which is
+/// `pub(crate)` to the `unblock-github` crate).
+///
+/// Returns `Some(value)` if found, `None` otherwise.
+async fn fetch_field_value_via_graphql(
+    client: &Arc<dyn GitHubApi>,
+    item_id: &str,
+    field_id: &str,
+) -> Option<String> {
+    let token = std::env::var("GITHUB_TOKEN").ok()?;
+
+    let query = "
+        query ItemFieldValue($itemId: ID!) {
+            node(id: $itemId) {
+                ... on ProjectV2Item {
+                    fieldValues(first: 30) {
+                        nodes {
+                            ... on ProjectV2ItemFieldSingleSelectValue {
+                                field { ... on ProjectV2SingleSelectField { id } }
+                                name
+                            }
+                            ... on ProjectV2ItemFieldTextValue {
+                                field { ... on ProjectV2Field { id } }
+                                text
+                            }
+                            ... on ProjectV2ItemFieldNumberValue {
+                                field { ... on ProjectV2Field { id } }
+                                number
+                            }
+                            ... on ProjectV2ItemFieldDateValue {
+                                field { ... on ProjectV2Field { id } }
+                                date
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    ";
+
+    let body = serde_json::json!({
+        "query": query,
+        "variables": { "itemId": item_id },
+    });
+
+    let http = reqwest::Client::new();
+    let response: serde_json::Value = http
+        .post(client.graphql_url())
+        .bearer_auth(&token)
+        .json(&body)
+        .send()
+        .await
+        .expect("GraphQL request should succeed")
+        .json()
+        .await
+        .expect("GraphQL response should be valid JSON");
+
+    let nodes = response["data"]["node"]["fieldValues"]["nodes"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+
+    for node in &nodes {
+        if node["field"]["id"].as_str() == Some(field_id) {
+            if let Some(name) = node["name"].as_str() {
+                return Some(name.to_owned());
+            }
+            if let Some(text) = node["text"].as_str() {
+                return Some(text.to_owned());
+            }
+            if let Some(number) = node["number"].as_f64() {
+                return Some(number.to_string());
+            }
+            if let Some(date) = node["date"].as_str() {
+                return Some(date.to_owned());
+            }
+        }
+    }
+
+    None
+}
+
 /// Build a minimal `Issue` for testing (used to populate the cache).
 fn test_issue(number: u64, state: IssueState) -> unblock_core::types::Issue {
     unblock_core::types::Issue {
@@ -202,7 +362,10 @@ impl Drop for CloseIssueGuard {
 #[tokio::test]
 #[ignore = "live GitHub API — opt-in via cargo test --workspace -- --ignored with GITHUB_TOKEN + UNBLOCK_REPO"]
 async fn show_existing_issue_returns_all_fields_populated() {
-    if !require_github_token() {
+    // Bead `unblock-q1c`: gates on `require_github_token_and_project` so
+    // the post-create `populate_project_fields` step can write Status /
+    // Priority / Agent on the live board.
+    if !require_github_token_and_project() {
         return;
     }
 
@@ -238,6 +401,18 @@ async fn show_existing_issue_returns_all_fields_populated() {
     // not panic the guard) but *before* the asserts (so an assertion panic
     // still triggers cleanup).
     let mut guard = CloseIssueGuard::new(Arc::clone(&client), created.number);
+
+    // Bead `unblock-q1c`: populate Projects V2 fields. Bug fixture
+    // (Appendix B.3) → P0 + Backlog + integration-fixture agent.
+    populate_project_fields(
+        &client,
+        &created.node_id,
+        "P0",
+        Status::Backlog.option_name(),
+        Some("integration-fixture"),
+        None,
+    )
+    .await;
 
     // Invoke the MCP `show` tool against the freshly provisioned fixture.
     let server = UnblockServer::new(state);
@@ -4351,12 +4526,17 @@ fn issue_ref_parse_invalid_returns_error() {
 #[tokio::test]
 #[ignore = "live GitHub API — opt-in via cargo test --workspace -- --ignored with GITHUB_TOKEN + UNBLOCK_REPO"]
 async fn create_issue_with_all_params_and_refetch() {
-    if !require_github_token() {
+    // Bead `unblock-q1c`: gates on `require_github_token_and_project` so
+    // the post-create `populate_project_fields` step can write Status /
+    // Priority / Agent on the live board AND so the representative pin
+    // assertion below (re-fetch via `fetch_field_value_via_graphql`) has
+    // a project to query.
+    if !require_github_token_and_project() {
         return;
     }
 
     let state = test_server_state().await;
-    let client = &state.github;
+    let client = Arc::clone(&state.github);
 
     // Realistic Bug fixture (spec Appendix B.3 — unblock-wgj.22).
     let title = format!(
@@ -4398,6 +4578,57 @@ async fn create_issue_with_all_params_and_refetch() {
         issue.number, issue.title, issue.url
     );
 
+    // Bead `unblock-q1c`: populate Projects V2 fields. Bug fixture
+    // (Appendix B.3) → P0 + Backlog (canonical create-time Status per
+    // spec §8.3) + integration-fixture agent. This test acts as the
+    // representative fields-populated invariant pin point for the
+    // `unblock-mcp` live integration suite.
+    let item_id = populate_project_fields(
+        &client,
+        &issue.node_id,
+        "P0",
+        Status::Backlog.option_name(),
+        Some("integration-fixture"),
+        None,
+    )
+    .await
+    .expect("populate_project_fields should resolve a ProjectV2Item ID");
+
+    // Re-fetch the field values via GraphQL and assert the populate path
+    // actually wrote each field — `set_project_fields` is best-effort and
+    // only logs warnings on per-field failures, so the round-trip read is
+    // the only way to fail-fast on a regression that breaks the populate
+    // flow (bead `unblock-q1c` Risks).
+    let resolved_field_ids = client
+        .field_ids()
+        .await
+        .expect("field_ids should be cached after populate_project_fields");
+
+    let priority_value =
+        fetch_field_value_via_graphql(&client, &item_id, &resolved_field_ids.priority.field_id)
+            .await;
+    assert_eq!(
+        priority_value.as_deref(),
+        Some("P0 - Critical"),
+        "Priority should be populated to canonical 'P0 - Critical' after populate_project_fields"
+    );
+
+    let status_value =
+        fetch_field_value_via_graphql(&client, &item_id, &resolved_field_ids.status.field_id).await;
+    assert_eq!(
+        status_value.as_deref(),
+        Some(Status::Backlog.option_name()),
+        "Status should be populated to canonical Backlog after populate_project_fields"
+    );
+
+    let agent_value =
+        fetch_field_value_via_graphql(&client, &item_id, &resolved_field_ids.agent).await;
+    assert_eq!(
+        agent_value.as_deref(),
+        Some("integration-fixture"),
+        "Agent should be populated to 'integration-fixture' after populate_project_fields"
+    );
+
     // Re-fetch and verify.
     let refetched = client
         .fetch_issue(issue.number)
@@ -4417,12 +4648,15 @@ async fn create_issue_with_all_params_and_refetch() {
 #[tokio::test]
 #[ignore = "live GitHub API — opt-in via cargo test --workspace -- --ignored with GITHUB_TOKEN + UNBLOCK_REPO"]
 async fn create_issue_with_blocked_by_local() {
-    if !require_github_token() {
+    // Bead `unblock-q1c`: gates on `require_github_token_and_project` so
+    // the post-create `populate_project_fields` step can write Status /
+    // Priority / Agent on the live board.
+    if !require_github_token_and_project() {
         return;
     }
 
     let state = test_server_state().await;
-    let client = &state.github;
+    let client = Arc::clone(&state.github);
 
     // Create blocker issue first.
     // Spec Appendix B.3 — `issue_type` matches the realistic title
@@ -4444,7 +4678,24 @@ async fn create_issue_with_blocked_by_local() {
         .await
         .expect("create blocker issue should succeed");
 
+    // Bead `unblock-q1c`: populate Projects V2 fields. Refactor fixture
+    // (Appendix B.3) → P1 + Backlog + integration-fixture agent.
+    populate_project_fields(
+        &client,
+        &blocking_issue.node_id,
+        "P1",
+        Status::Backlog.option_name(),
+        Some("integration-fixture"),
+        None,
+    )
+    .await;
+
     // Create blocked issue.
+    //
+    // Bead `unblock-q1c` DRIFT-D closure: `issue_type` populated with
+    // canonical Task (was `None`, contradicting Appendix B.3 "all 8
+    // IssueType variants exercised") to match the realistic title
+    // (`Add OAuth callback handler` — Task in Appendix B.3).
     let dependent_title = format!(
         "Add OAuth callback handler {}",
         chrono::Utc::now().timestamp()
@@ -4456,10 +4707,21 @@ async fn create_issue_with_blocked_by_local() {
             labels: fixture_labels(&["test"]),
             milestone: None,
             assignees: Vec::new(),
-            issue_type: None,
+            issue_type: Some(IssueType::Task.canonical_name().to_owned()),
         })
         .await
         .expect("create blocked issue should succeed");
+
+    // Task fixture (Appendix B.3) → P2 + Backlog.
+    populate_project_fields(
+        &client,
+        &dependent_issue.node_id,
+        "P2",
+        Status::Backlog.option_name(),
+        Some("integration-fixture"),
+        None,
+    )
+    .await;
 
     // Add blocking relationship.
     client
@@ -4504,12 +4766,15 @@ async fn create_issue_with_blocked_by_local() {
 #[tokio::test]
 #[ignore = "live GitHub API — opt-in via cargo test --workspace -- --ignored with GITHUB_TOKEN + UNBLOCK_REPO"]
 async fn create_issue_with_blocked_by_cross_repo() {
-    if !require_github_token() {
+    // Bead `unblock-q1c`: gates on `require_github_token_and_project` so
+    // the post-create `populate_project_fields` step can write Status /
+    // Priority / Agent on the live board.
+    if !require_github_token_and_project() {
         return;
     }
 
     let state = test_server_state().await;
-    let client = &state.github;
+    let client = Arc::clone(&state.github);
 
     // Extract owner/repo from the client so we can construct a CrossRepo ref
     // pointing at the same repo.
@@ -4536,7 +4801,24 @@ async fn create_issue_with_blocked_by_cross_repo() {
         .await
         .expect("create blocker issue should succeed");
 
+    // Bead `unblock-q1c`: populate Projects V2 fields. Spike fixture
+    // (Appendix B.3) → P2 + Backlog + integration-fixture agent.
+    populate_project_fields(
+        &client,
+        &blocking_issue.node_id,
+        "P2",
+        Status::Backlog.option_name(),
+        Some("integration-fixture"),
+        None,
+    )
+    .await;
+
     // Create dependent issue.
+    //
+    // Bead `unblock-q1c` DRIFT-D closure: `issue_type` populated with
+    // canonical Task (was `None`, contradicting Appendix B.3 "all 8
+    // IssueType variants exercised") to match the realistic title
+    // (`Add OAuth token validation` — Task in Appendix B.3).
     let dependent_title = format!(
         "Add OAuth token validation {}",
         chrono::Utc::now().timestamp()
@@ -4548,10 +4830,21 @@ async fn create_issue_with_blocked_by_cross_repo() {
             labels: fixture_labels(&["test"]),
             milestone: None,
             assignees: Vec::new(),
-            issue_type: None,
+            issue_type: Some(IssueType::Task.canonical_name().to_owned()),
         })
         .await
         .expect("create blocked issue should succeed");
+
+    // Task fixture (Appendix B.3) → P2 + Backlog.
+    populate_project_fields(
+        &client,
+        &dependent_issue.node_id,
+        "P2",
+        Status::Backlog.option_name(),
+        Some("integration-fixture"),
+        None,
+    )
+    .await;
 
     // Build a CrossRepo IssueRef pointing at the blocker in the same repo.
     // This exercises the full cross-repo GraphQL resolution code path
@@ -4599,12 +4892,15 @@ async fn create_issue_with_blocked_by_cross_repo() {
 #[tokio::test]
 #[ignore = "live GitHub API — opt-in via cargo test --workspace -- --ignored with GITHUB_TOKEN + UNBLOCK_REPO"]
 async fn create_issue_with_parent_sub_issue() {
-    if !require_github_token() {
+    // Bead `unblock-q1c`: gates on `require_github_token_and_project` so
+    // the post-create `populate_project_fields` step can write Status /
+    // Priority / Agent on the live board.
+    if !require_github_token_and_project() {
         return;
     }
 
     let state = test_server_state().await;
-    let client = &state.github;
+    let client = Arc::clone(&state.github);
 
     // Create parent issue.
     // Spec Appendix B.3 — Epic+Task hierarchy. The parent "OAuth login
@@ -4628,6 +4924,18 @@ async fn create_issue_with_parent_sub_issue() {
         .await
         .expect("create parent issue should succeed");
 
+    // Bead `unblock-q1c`: populate Projects V2 fields. Epic parent
+    // (Appendix B.3) → P1 + Backlog + integration-fixture agent.
+    populate_project_fields(
+        &client,
+        &parent.node_id,
+        "P1",
+        Status::Backlog.option_name(),
+        Some("integration-fixture"),
+        None,
+    )
+    .await;
+
     // Create child issue.
     let child_title = format!(
         "Add OAuth callback handler {}",
@@ -4644,6 +4952,17 @@ async fn create_issue_with_parent_sub_issue() {
         })
         .await
         .expect("create child issue should succeed");
+
+    // Task child (Appendix B.3) → P2 + Backlog.
+    populate_project_fields(
+        &client,
+        &child.node_id,
+        "P2",
+        Status::Backlog.option_name(),
+        Some("integration-fixture"),
+        None,
+    )
+    .await;
 
     // Add parent relationship.
     client
@@ -4686,12 +5005,15 @@ async fn create_issue_with_parent_sub_issue() {
 #[tokio::test]
 #[ignore = "live GitHub API — opt-in via cargo test --workspace -- --ignored with GITHUB_TOKEN + UNBLOCK_REPO"]
 async fn create_issue_with_defaults() {
-    if !require_github_token() {
+    // Bead `unblock-q1c`: gates on `require_github_token_and_project` so
+    // the post-create `populate_project_fields` step can write Status /
+    // Priority / Agent on the live board.
+    if !require_github_token_and_project() {
         return;
     }
 
     let state = test_server_state().await;
-    let client = &state.github;
+    let client = Arc::clone(&state.github);
 
     let title = format!(
         "Bump dependency versions {}",
@@ -4713,6 +5035,10 @@ async fn create_issue_with_defaults() {
             labels: Vec::new(),
             milestone: None,
             assignees: Vec::new(),
+            // Intentionally `None` — this test specifically exercises the
+            // omit branch on `issue_type` (per `unblock-q1c` Sherlock
+            // investigation, this is the canonical "create-with-defaults"
+            // edge case for the §8.3 absence-leaves-unmodified rule).
             issue_type: None,
         })
         .await
@@ -4723,7 +5049,22 @@ async fn create_issue_with_defaults() {
     // still triggers cleanup). The guard fire-and-forgets the close on
     // drop; on the success path we disarm and explicitly close below so
     // the cleanup is awaited inside the test runtime.
-    let mut guard = CloseIssueGuard::new(Arc::clone(client), issue.number);
+    let mut guard = CloseIssueGuard::new(Arc::clone(&client), issue.number);
+
+    // Bead `unblock-q1c`: populate Projects V2 fields. Chore-style fixture
+    // (Appendix B.3) → P4 + Backlog. Agent intentionally `None` to
+    // exercise the §8.1 / §8.3 absence-leaves-unmodified leg of the
+    // precedence chain (matches the canonical e2e_workflow.rs pattern
+    // for issue C).
+    populate_project_fields(
+        &client,
+        &issue.node_id,
+        "P4",
+        Status::Backlog.option_name(),
+        None,
+        None,
+    )
+    .await;
 
     assert_eq!(issue.title, title);
     assert!(issue.number > 0);
@@ -4787,12 +5128,18 @@ async fn ensure_labels_creates_missing_labels() {
 #[tokio::test]
 #[ignore = "live GitHub API — opt-in via cargo test --workspace -- --ignored with GITHUB_TOKEN + UNBLOCK_REPO"]
 async fn create_issue_appears_in_ready_set_after_rebuild() {
-    if !require_github_token() {
+    // Bead `unblock-q1c`: gates on `require_github_token_and_project` so
+    // the post-create `populate_project_fields` step can write Status /
+    // Priority / Agent on the live board. Critical here because the
+    // ready-set behaviour this test depends on requires `Status::Backlog`
+    // to be recorded (per spec §8.3 — Backlog is the canonical
+    // create-time Status).
+    if !require_github_token_and_project() {
         return;
     }
 
     let state = test_server_state().await;
-    let client = &state.github;
+    let client = Arc::clone(&state.github);
 
     let title = format!(
         "Document Projects V2 setup workflow {}",
@@ -4813,6 +5160,20 @@ async fn create_issue_appears_in_ready_set_after_rebuild() {
         })
         .await
         .expect("create_issue should succeed");
+
+    // Bead `unblock-q1c`: populate Projects V2 fields. Docs fixture
+    // (Appendix B.3) → P3 + Backlog. Agent intentionally `None` to
+    // exercise the §8.3 absence-leaves-unmodified edge case (matches the
+    // canonical e2e_workflow.rs pattern for issue C).
+    populate_project_fields(
+        &client,
+        &issue.node_id,
+        "P3",
+        Status::Backlog.option_name(),
+        None,
+        None,
+    )
+    .await;
 
     // Rebuild cache.
     unblock_mcp::tools::rebuild_cache(&state).await;
