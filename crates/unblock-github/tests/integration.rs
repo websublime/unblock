@@ -2269,8 +2269,7 @@ async fn create_view_board_and_list_views() {
     // Subsequent runs reuse the existing one so view count stays bounded
     // (the GitHub API has no delete-view path; see module-level comment
     // and bead `unblock-1hz` decision D3).
-    if let Some(existing_layout) =
-        lookup_fixture_view_layout(&client, owner_type, view_name).await
+    if let Some(existing_layout) = lookup_fixture_view_layout(&client, owner_type, view_name).await
     {
         assert_eq!(
             existing_layout,
@@ -2278,9 +2277,7 @@ async fn create_view_board_and_list_views() {
             "fixture view '{view_name}' should be a Board view; if it has \
              drifted, delete it manually via the GitHub Web UI and re-run"
         );
-        eprintln!(
-            "create_view_board_and_list_views: reusing existing fixture view '{view_name}'"
-        );
+        eprintln!("create_view_board_and_list_views: reusing existing fixture view '{view_name}'");
     } else {
         let params = CreateViewParams {
             name: view_name.to_owned(),
@@ -2338,8 +2335,7 @@ async fn create_view_table_layout() {
 
     let view_name = FIXTURE_VIEW_TABLE;
 
-    if let Some(existing_layout) =
-        lookup_fixture_view_layout(&client, owner_type, view_name).await
+    if let Some(existing_layout) = lookup_fixture_view_layout(&client, owner_type, view_name).await
     {
         assert_eq!(
             existing_layout,
@@ -2392,8 +2388,7 @@ async fn create_view_roadmap_layout() {
 
     let view_name = FIXTURE_VIEW_ROADMAP;
 
-    if let Some(existing_layout) =
-        lookup_fixture_view_layout(&client, owner_type, view_name).await
+    if let Some(existing_layout) = lookup_fixture_view_layout(&client, owner_type, view_name).await
     {
         assert_eq!(
             existing_layout,

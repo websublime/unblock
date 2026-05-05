@@ -123,6 +123,37 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cargo-tarpaulin
+      # Pre-test wipe: deterministically resets the live test project to a
+      # clean state before each tarpaulin run. Closes every issue carrying
+      # the canonical `unblock-fixture` label and removes its corresponding
+      # ProjectV2 item card from the board. Runs even when zero fixtures
+      # are present (idempotent no-op). This is the safety net for the
+      # CloseIssueGuard / CloseIssuesGuard fire-and-forget tokio::spawn
+      # cleanup path documented in bead unblock-ekf — when the runtime is
+      # torn down before the spawned close task is polled, the issue is
+      # left orphaned-open. The pre-run wipe collects those orphans on
+      # the next CI invocation. View cleanup is NOT performed (no
+      # upstream API to delete a ProjectsV2 view; see bead unblock-1hz
+      # Risk R1 and the script header comment). See bead unblock-1hz for
+      # the full design.
+      #
+      # The wipe step parses UNBLOCK_TEST_REPO (`owner/repo`) into its two
+      # components for the script's positional CLI. `bash -e` ensures the
+      # parse-and-call is atomic — if the env var is malformed the step
+      # fails fast.
+      - name: Pre-test wipe — clean fixture issues + project items
+        env:
+          UNBLOCK_TEST_REPO: ${{ vars.UNBLOCK_TEST_REPO }}
+          UNBLOCK_TEST_PROJECT: ${{ vars.UNBLOCK_TEST_PROJECT }}
+          GH_TOKEN: ${{ secrets.UNBLOCK_TEST_TOKEN }}
+        run: |
+          owner="${UNBLOCK_TEST_REPO%%/*}"
+          repo="${UNBLOCK_TEST_REPO##*/}"
+          if [ -z "$owner" ] || [ -z "$repo" ] || [ "$owner" = "$UNBLOCK_TEST_REPO" ]; then
+            echo "::error::UNBLOCK_TEST_REPO must be in owner/repo form, got: $UNBLOCK_TEST_REPO"
+            exit 1
+          fi
+          scripts/setup-test-project.sh --wipe-issues "$owner" "$UNBLOCK_TEST_PROJECT" "$repo"
       # Run the live-required `#[ignore]` tests under tarpaulin in one pass
       # — this is both the live test signal and the live coverage signal.
       # Codecov merges this `live` report with the mock-only `mock` report

@@ -127,12 +127,14 @@ The `coverage` job (mock-only) runs on every PR and the `test-mcp-live` job cove
 
 ### Clean-state contract for the test project
 
-The live test job mutates the GitHub Project pointed at by `UNBLOCK_TEST_PROJECT`. Two invariants govern its starting state on every run:
+The live test job mutates the GitHub Project pointed at by `UNBLOCK_TEST_PROJECT`. Four invariants govern its starting state on every run:
 
 1. **The 6 unblock-managed custom fields must NOT exist on the project.** They are: `Priority`, `PipelineStage`, `Agent`, `ClaimedAt`, `StoryPoints`, `DeferUntil`. The `setup_fields` flow creates them and the test asserts on the post-creation field IDs; a stale, half-configured set from a previous failed run breaks the assertion or trips a `Name has already been taken` collision under parallel test execution.
 2. **The built-in `Status` field is left in place.** GitHub Projects V2 forbids deleting the built-in Status field (`deleteProjectV2Field` returns `Only custom fields can be deleted`). `setup_fields` auto-heals the Status options to the spec's canonical set (`Backlog`, `Ready`, `In Progress`, `Blocked`, `Deferred`, `Closed` — TitleCase, board order; sourced from `Status::option_name`, see spec §5.7) on every run by issuing `updateProjectV2Field` against the existing field id, so no manual surgery is required for Status. The auto-heal matcher reuses existing option IDs across the lowercase → TitleCase rename via a normalised name comparison, so item assignments survive the migration.
+3. **Fixture issues are wiped before every CI run.** Every live test attaches the canonical `unblock-fixture` label (plus a per-run `unblock-run-<millis>` discriminator) to every issue it creates via the `fixture_labels()` test helper. The CI live job invokes `scripts/setup-test-project.sh --wipe-issues` before tarpaulin starts; the wipe enumerates all `unblock-fixture` issues in the test repo, closes the open ones, and removes their `ProjectV2Item` cards from the board (close-only would leave the cards visible — `close_issue` is a REST PATCH `state: closed`, not a delete, and Projects V2 keeps closed items as cards until `deleteProjectV2Item` is called). This is the deterministic safety-net for the panic-path Drop guards in the test files, which fire-and-forget cleanup via `tokio::spawn` and silently skip when the runtime is torn down before the spawned task is polled (bead `unblock-ekf` documented best-effort caveat).
+4. **Project views are NOT auto-cleaned — they are reused instead.** GitHub Projects V2 exposes no public API to delete a project view (no `deleteProjectV2View` in GraphQL, no `DELETE /views` endpoint in REST; verified against the v2 schema and 2026-03-10 REST OpenAPI). The three view-creation tests (`create_view_board_and_list_views`, `create_view_table_layout`, `create_view_roadmap_layout`) reuse fixed canonical names — `test-board-fixture`, `test-table-fixture`, `test-roadmap-fixture` — and check for pre-existence before calling `create_view`. View count on the test project stays bounded at exactly 3 fixtures across all runs. If a fixture view drifts (wrong layout, accidental rename), an operator must delete it manually via the GitHub Web UI; the next live test run will recreate it from canonical params.
 
-To bootstrap a fresh project (or recover from a partial run), run:
+To bootstrap a fresh project (or recover from a partial run) — custom-fields wipe:
 
 ```bash
 scripts/setup-test-project.sh <owner> <project-number>
@@ -140,13 +142,23 @@ scripts/setup-test-project.sh <owner> <project-number>
 
 The script is idempotent: it lists the project's fields, deletes any that match the 6-name list, and exits 0 with no changes when the project is already clean. It does not touch the built-in Status field. Requires `gh` authenticated against the target owner with `project` + `repo` scopes, and `jq`.
 
+To wipe accumulated fixture issues + their project board cards (run before or after a manual live test session):
+
+```bash
+scripts/setup-test-project.sh --wipe-issues <owner> <project-number> <repo>
+```
+
+The third positional `<repo>` is the bare repository name (not `owner/repo`). The mode lists every issue in `<owner>/<repo>` carrying the canonical `unblock-fixture` label, closes the open ones (via `gh issue close`), and removes their corresponding `ProjectV2Item` cards from `<project-number>` (via the `deleteProjectV2Item` GraphQL mutation). Idempotent: a no-op when no fixture issues exist. View cleanup is not performed — see invariant 4 above.
+
+The two modes are orthogonal — to perform both wipes, run the script twice. `--wipe-issues` does NOT trigger custom-fields cleanup, and the default custom-fields mode does NOT touch issues. This keeps the existing `--check` semantics on the custom-fields path unchanged.
+
 To assert the project is in the canonical clean state without mutating it (useful as a CI preflight or local sanity check), pass `--check`:
 
 ```bash
 scripts/setup-test-project.sh --check <owner> <project-number>
 ```
 
-`--check` (or its alias `--dry-run`) lists any stale unblock-managed custom fields and exits **non-zero (4)** when drift is present, exits 0 when the project is already clean. Re-run without `--check` to actually delete them.
+`--check` (or its alias `--dry-run`) lists any stale unblock-managed custom fields and exits **non-zero (4)** when drift is present, exits 0 when the project is already clean. Re-run without `--check` to actually delete them. `--check` and `--wipe-issues` are mutually exclusive.
 
 The live test job runs `cargo tarpaulin ... -- --ignored --test-threads=1` to serialise the `#[ignore]` integration tests. Without the serialisation guard, the two test files that both call `setup_fields` against the shared test project (`crates/unblock-github/tests/integration.rs::setup_fields_creates_all_seven_fields` and `crates/unblock-mcp/tests/e2e_workflow.rs::e2e_workflow_all_10_tools`) race and either the second mutation collides on `createProjectV2Field` (`Name has already been taken`) or one test deletes options the other still needs. Local runs of `cargo test --workspace -- --ignored` should pass `--test-threads=1` for the same reason.
 
