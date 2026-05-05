@@ -16,6 +16,51 @@ use unblock_github::client::GitHubClient;
 use unblock_github::mock::MockGitHubClient;
 use unblock_mcp::server::ServerState;
 
+// ── Live test fixture-label contract (bead `unblock-1hz`) ──────────
+//
+// Every issue created by a live test MUST be tagged with two labels so the
+// `scripts/setup-test-project.sh --wipe-issues` cleanup mode can identify
+// orphaned fixtures across runs. See the parallel definition in
+// `crates/unblock-github/tests/integration.rs` for the full rationale —
+// this module duplicates the helper because Cargo integration test
+// binaries cannot share private modules across crates without a workspace
+// dev-dependency, and a bespoke "test-utils" crate would be heavier than
+// the ten lines duplicated here.
+
+/// Canonical fixture marker label. Applied by every live test that creates
+/// an issue. The `--wipe-issues` mode in `scripts/setup-test-project.sh`
+/// selects issues by this exact name.
+#[allow(dead_code)] // Not every test binary creates issues
+pub const FIXTURE_LABEL: &str = "unblock-fixture";
+
+/// Builds the per-run discriminator label (`unblock-run-<millis>`) using
+/// `chrono::Utc::now().timestamp_millis()`. Resolution is intentionally
+/// millisecond, not second — two live test runs in CI can otherwise share
+/// a label (bead `unblock-1hz` Risk R5).
+#[allow(dead_code)]
+#[must_use]
+pub fn run_label() -> String {
+    format!("unblock-run-{}", chrono::Utc::now().timestamp_millis())
+}
+
+/// Returns the canonical fixture label set: the stable `unblock-fixture`
+/// marker plus a fresh per-run discriminator. Use as the `labels` field on
+/// `CreateIssueParams` to make a live-test-created issue eligible for the
+/// `--wipe-issues` cleanup path.
+///
+/// `extra` is appended after the two fixture labels so domain-specific
+/// labels such as `"test"` or per-test discriminators stay attached to the
+/// created issue.
+#[allow(dead_code)]
+#[must_use]
+pub fn fixture_labels(extra: &[&str]) -> Vec<String> {
+    let mut labels = Vec::with_capacity(2 + extra.len());
+    labels.push(FIXTURE_LABEL.to_owned());
+    labels.push(run_label());
+    labels.extend(extra.iter().map(|s| (*s).to_owned()));
+    labels
+}
+
 /// Returns `true` if the `GITHUB_TOKEN` env var is set and non-empty.
 #[allow(dead_code)] // Not every test binary uses this
 pub fn has_github_token() -> bool {
