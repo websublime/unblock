@@ -163,48 +163,39 @@ fn test_config() -> Config {
 
 // ── Live test fixture-label contract (bead `unblock-1hz`) ──────────
 //
-// Every issue created by a live test MUST be tagged with two labels so the
+// Every issue created by a live test MUST be tagged with the canonical
+// [`FIXTURE_LABEL`] (`unblock-fixture`) so the
 // `scripts/setup-test-project.sh --wipe-issues` cleanup mode can identify
-// orphaned fixtures across runs:
+// orphaned fixtures across runs. The wipe script enumerates issues with
+// this label exactly — never include a timestamp or run id here, otherwise
+// the wipe loses its anchor.
 //
-//   * [`FIXTURE_LABEL`] — stable canonical marker (`unblock-fixture`). The
-//     wipe script enumerates issues with this label exactly. Never include
-//     a timestamp or run id here, otherwise the wipe loses its anchor.
-//   * Per-run discriminator built by [`run_label`] — `unblock-run-<millis>`
-//     using `Utc::now().timestamp_millis()` (millisecond resolution avoids
-//     collisions across two CI runs landing in the same second; bead
-//     `unblock-1hz` Risk R5).
+// Cycle 1 of bead `unblock-1hz` also added a per-run `unblock-run-<millis>`
+// discriminator label, but cycle 2 (Miguel decision 2026-05-05) dropped it:
+// the per-run label has the same accumulation problem that views had before
+// the stable-name refactor. The repo accumulated tens of `unblock-run-*`
+// labels across CI runs, contradicting the bead's purpose. The canonical
+// `unblock-fixture` label alone is sufficient for wipe selection; forensic
+// correlation across runs is recovered from the issue's timestamp instead.
 //
-// The two labels are independent: the canonical one drives wipe-selection
-// and the per-run one survives in the GitHub timeline as forensic
-// correlation between issues created by the same test process. Tests that
-// already attach a domain label such as `"test"` keep it — fixture labels
-// are additive.
+// Tests that already attach a domain label such as `"test"` keep it —
+// fixture labels are additive.
 
 /// Canonical fixture marker label. Applied by every live test that creates
 /// an issue. The `--wipe-issues` mode in `scripts/setup-test-project.sh`
 /// selects issues by this exact name.
 pub(crate) const FIXTURE_LABEL: &str = "unblock-fixture";
 
-/// Builds the per-run discriminator label (`unblock-run-<millis>`) using
-/// `chrono::Utc::now().timestamp_millis()`. Resolution is intentionally
-/// millisecond, not second — two live test runs in CI can otherwise share a
-/// label (bead `unblock-1hz` Risk R5).
-pub(crate) fn run_label() -> String {
-    format!("unblock-run-{}", chrono::Utc::now().timestamp_millis())
-}
-
 /// Returns the canonical fixture label set: the stable `unblock-fixture`
-/// marker plus a fresh per-run discriminator. Use as the `labels` field on
-/// `CreateIssueParams` to make a live-test-created issue eligible for the
-/// `--wipe-issues` cleanup path.
+/// marker plus any extras. Use as the `labels` field on `CreateIssueParams`
+/// to make a live-test-created issue eligible for the `--wipe-issues`
+/// cleanup path.
 ///
-/// `extra` is appended after the two fixture labels so domain-specific
+/// `extra` is appended after the canonical fixture label so domain-specific
 /// labels such as `"test"` stay attached to the created issue.
 pub(crate) fn fixture_labels(extra: &[&str]) -> Vec<String> {
-    let mut labels = Vec::with_capacity(2 + extra.len());
+    let mut labels = Vec::with_capacity(1 + extra.len());
     labels.push(FIXTURE_LABEL.to_owned());
-    labels.push(run_label());
     labels.extend(extra.iter().map(|s| (*s).to_owned()));
     labels
 }

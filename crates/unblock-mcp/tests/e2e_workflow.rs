@@ -39,7 +39,7 @@ use unblock_mcp::tools::rebuild_cache;
 use unblock_mcp::tools::setup::REQUIRED_VIEWS;
 
 mod common;
-use common::{fixture_labels, require_github_token_and_project, test_server_state};
+use common::{TEST_LABEL, fixture_labels, require_github_token_and_project, test_server_state};
 
 /// Drop guard that closes multiple GitHub issues on scope exit, even during a
 /// panic unwind. Adapted from the single-issue guard in
@@ -147,13 +147,16 @@ async fn e2e_workflow_all_10_tools() {
     let client = &state.github;
 
     // Per-test discriminator label used downstream to filter ready/list
-    // results to issues created in this run. Uses millisecond resolution
-    // so two CI runs landing in the same second do not share a label
-    // (bead `unblock-1hz` Risk R5). The canonical fixture marker
-    // (`unblock-fixture`) is added separately by [`fixture_labels`] so
-    // the wipe path remains label-deterministic — keep `test_label`
-    // distinct from the cleanup anchor.
-    let test_label = format!("e2e-test-{}", chrono::Utc::now().timestamp_millis());
+    // results to fixtures created by this test. Bead `unblock-1hz` cycle 2
+    // replaced the historical per-run `e2e-test-<millis>` label with the
+    // single canonical [`TEST_LABEL`] (`unblock-test-label`) — the
+    // pre-test `--wipe-issues` step guarantees the project is clean of
+    // prior fixture issues before this test runs, so a stable label is
+    // sufficient (there is nothing for it to collide with) and labels no
+    // longer accumulate in the test repo across CI runs. The canonical
+    // fixture marker (`unblock-fixture`) is added separately by
+    // [`fixture_labels`] so the wipe path remains label-deterministic.
+    let test_label = TEST_LABEL.to_owned();
 
     // Drop guard for cleanup — tracks all created issues. The guard now owns
     // an `Arc<dyn GitHubApi>` clone so the spawned cleanup task in `Drop` has

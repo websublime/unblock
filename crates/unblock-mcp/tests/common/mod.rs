@@ -18,14 +18,22 @@ use unblock_mcp::server::ServerState;
 
 // ── Live test fixture-label contract (bead `unblock-1hz`) ──────────
 //
-// Every issue created by a live test MUST be tagged with two labels so the
+// Every issue created by a live test MUST be tagged with the canonical
+// [`FIXTURE_LABEL`] (`unblock-fixture`) so the
 // `scripts/setup-test-project.sh --wipe-issues` cleanup mode can identify
 // orphaned fixtures across runs. See the parallel definition in
 // `crates/unblock-github/tests/integration.rs` for the full rationale —
 // this module duplicates the helper because Cargo integration test
 // binaries cannot share private modules across crates without a workspace
 // dev-dependency, and a bespoke "test-utils" crate would be heavier than
-// the ten lines duplicated here.
+// the handful of lines duplicated here.
+//
+// Cycle 1 of bead `unblock-1hz` also added a per-run `unblock-run-<millis>`
+// discriminator label, but cycle 2 (Miguel decision 2026-05-05) dropped
+// it: the per-run label was accumulating in the test repo (~7 occurrences
+// per CI run, no API to delete labels in bulk except through this script's
+// new `--wipe-labels` mode), defeating the bead's purpose. The canonical
+// `unblock-fixture` label alone is sufficient for wipe selection.
 
 /// Canonical fixture marker label. Applied by every live test that creates
 /// an issue. The `--wipe-issues` mode in `scripts/setup-test-project.sh`
@@ -33,30 +41,31 @@ use unblock_mcp::server::ServerState;
 #[allow(dead_code)] // Not every test binary creates issues
 pub const FIXTURE_LABEL: &str = "unblock-fixture";
 
-/// Builds the per-run discriminator label (`unblock-run-<millis>`) using
-/// `chrono::Utc::now().timestamp_millis()`. Resolution is intentionally
-/// millisecond, not second — two live test runs in CI can otherwise share
-/// a label (bead `unblock-1hz` Risk R5).
-#[allow(dead_code)]
-#[must_use]
-pub fn run_label() -> String {
-    format!("unblock-run-{}", chrono::Utc::now().timestamp_millis())
-}
+/// Canonical per-test discriminator label. Replaces the per-run
+/// `e2e-test-<millis>` and `test-label-<ts>` labels that accumulated across
+/// CI runs (cycle 2 of bead `unblock-1hz`). Tests that need a label distinct
+/// from the wipe anchor (e.g. to filter ready/list results to fixtures
+/// created by the current process or to exercise `ensure_labels`) reuse
+/// this single canonical name. The pre-test wipe in
+/// `scripts/setup-test-project.sh --wipe-issues` already guarantees the
+/// project is clean of prior fixture issues, so a stable label per-run is
+/// sufficient — there is nothing for it to collide with.
+#[allow(dead_code)] // Used by e2e_workflow.rs and the ensure_labels integration test
+pub const TEST_LABEL: &str = "unblock-test-label";
 
 /// Returns the canonical fixture label set: the stable `unblock-fixture`
-/// marker plus a fresh per-run discriminator. Use as the `labels` field on
-/// `CreateIssueParams` to make a live-test-created issue eligible for the
-/// `--wipe-issues` cleanup path.
+/// marker plus any extras. Use as the `labels` field on `CreateIssueParams`
+/// to make a live-test-created issue eligible for the `--wipe-issues`
+/// cleanup path.
 ///
-/// `extra` is appended after the two fixture labels so domain-specific
-/// labels such as `"test"` or per-test discriminators stay attached to the
-/// created issue.
+/// `extra` is appended after the canonical fixture label so domain-specific
+/// labels such as `"test"` or [`TEST_LABEL`] stay attached to the created
+/// issue.
 #[allow(dead_code)]
 #[must_use]
 pub fn fixture_labels(extra: &[&str]) -> Vec<String> {
-    let mut labels = Vec::with_capacity(2 + extra.len());
+    let mut labels = Vec::with_capacity(1 + extra.len());
     labels.push(FIXTURE_LABEL.to_owned());
-    labels.push(run_label());
     labels.extend(extra.iter().map(|s| (*s).to_owned()));
     labels
 }
