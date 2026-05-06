@@ -1225,18 +1225,28 @@ fn parse_status_field(fields: &std::collections::HashMap<String, String>) -> Sta
 
 /// Maps the "Priority" field value to a [`Priority`] enum variant.
 ///
-/// Handles both the current spec option names (`P0 - Critical`, `P1 - High`,
-/// etc.) and the legacy short names (`P0`, `P1`, etc.) for backward
-/// compatibility. Uses prefix matching so `"P0 - Critical"` maps to `P0`.
+/// Handles both the canonical Projects V2 option names from
+/// [`Priority::canonical_name`] (`"P0 - Critical"`, `"P1 - High"`, …) and
+/// the bare [`Priority::short_code`] form (`"P0"`, `"P1"`, …) for
+/// backward compatibility with legacy boards.
+///
+/// **Single source of truth (`unblock-q2x`).** Iterates [`Priority::ALL`]
+/// and tests `short_code` as a strict prefix of the field value — this
+/// is the contract pinned by the `priority_canonical_name_starts_with_short_code`
+/// invariant in `unblock-core::types` (spec §2.4). Adding a new
+/// `Priority` variant automatically extends the parser without an edit
+/// here. Closes the latent missing-`P2`-arm bug (`unblock-q2x` DRIFT-5)
+/// that the previous hand-rolled match papered over.
 fn parse_priority_field(fields: &std::collections::HashMap<String, String>) -> Priority {
-    match fields.get("Priority").map(String::as_str) {
-        Some(s) if s.starts_with("P0") => Priority::P0,
-        Some(s) if s.starts_with("P1") => Priority::P1,
-        Some(s) if s.starts_with("P3") => Priority::P3,
-        Some(s) if s.starts_with("P4") => Priority::P4,
-        // Default to medium (P2) when missing, unrecognized, or "P2*".
-        _ => Priority::P2,
-    }
+    let Some(raw) = fields.get("Priority").map(String::as_str) else {
+        // Default to medium (P2) when missing — preserved semantics from
+        // the prior hand-rolled match.
+        return Priority::P2;
+    };
+    Priority::ALL
+        .into_iter()
+        .find(|variant| raw.starts_with(variant.short_code()))
+        .unwrap_or(Priority::P2)
 }
 
 /// Reads GitHub's native `issueType { name }` field off an issue JSON
@@ -1262,24 +1272,25 @@ fn parse_issue_type_from_native(value: &serde_json::Value) -> Option<IssueType> 
 
 /// Maps the `PipelineStage` field value to a [`PipelineStage`] enum variant.
 ///
-/// Matches the canonical lowercase option names emitted by
-/// `setup_fields` (spec §5 / spec §2.5): `investigation`, `implementation`,
-/// `review`, `refactoring`, `qa`, `done`. Missing or unrecognised values
-/// fall back to `None` — symmetric with [`parse_issue_type_field`] and
-/// consistent with the silent-fallback semantics of
-/// [`parse_status_field`] / [`parse_priority_field`].
+/// Matches the canonical lowercase option names from
+/// [`PipelineStage::canonical_name`] (spec §2.5 / §5.7) — strictly
+/// case-sensitive against the spec lowercase taxonomy. Missing or
+/// unrecognised values fall back to `None` — symmetric with
+/// [`parse_issue_type_from_native`] and consistent with the
+/// silent-fallback semantics of [`parse_status_field`] /
+/// [`parse_priority_field`].
+///
+/// **Single source of truth (`unblock-q2x`).** Iterates
+/// [`PipelineStage::ALL`] and matches each variant's
+/// `canonical_name` byte-for-byte — adding a new `PipelineStage`
+/// variant automatically extends the parser.
 fn parse_pipeline_stage_field(
     fields: &std::collections::HashMap<String, String>,
 ) -> Option<PipelineStage> {
-    match fields.get("PipelineStage").map(String::as_str) {
-        Some("investigation") => Some(PipelineStage::Investigation),
-        Some("implementation") => Some(PipelineStage::Implementation),
-        Some("review") => Some(PipelineStage::Review),
-        Some("refactoring") => Some(PipelineStage::Refactoring),
-        Some("qa") => Some(PipelineStage::Qa),
-        Some("done") => Some(PipelineStage::Done),
-        _ => None,
-    }
+    let raw = fields.get("PipelineStage").map(String::as_str)?;
+    PipelineStage::ALL
+        .into_iter()
+        .find(|variant| variant.canonical_name() == raw)
 }
 
 #[cfg(test)]
@@ -1864,39 +1875,67 @@ mod tests {
 
     // ── parse_priority_field ────────────────────────────────────────────
 
+    /// `setup_fields` (in `crates/unblock-github/src/projects.rs`) writes
+    /// the canonical Priority option set sourced from
+    /// `Priority::canonical_name` (spec §2.4 / §5.7). The parser must
+    /// round-trip every variant against the canonical wire format.
+    /// Iterates `Priority::ALL` so a new variant automatically extends
+    /// the assertion (mirrors the `IssueType::ALL` round-trip pattern).
     #[test]
     fn priority_field_mapping_spec_names() {
         let mut fields = std::collections::HashMap::new();
-        for (label, expected) in [
-            ("P0 - Critical", Priority::P0),
-            ("P1 - High", Priority::P1),
-            ("P2 - Medium", Priority::P2),
-            ("P3 - Low", Priority::P3),
-            ("P4 - Backlog", Priority::P4),
-        ] {
-            fields.insert("Priority".to_owned(), label.to_owned());
-            assert_eq!(parse_priority_field(&fields), expected);
+        for variant in Priority::ALL {
+            fields.insert("Priority".to_owned(), variant.canonical_name().to_owned());
+            assert_eq!(parse_priority_field(&fields), variant);
         }
     }
 
+    /// Legacy short-code form (`"P0"` .. `"P4"`) — every variant must
+    /// round-trip via `Priority::short_code` so boards bootstrapped
+    /// before `unblock-q2x` keep working. Iterates `Priority::ALL` so
+    /// adding a new variant automatically extends the coverage.
+    /// Closes `unblock-q2x` DRIFT-5 (the previous hand-rolled match
+    /// was missing the explicit P2 arm).
     #[test]
-    fn priority_field_mapping_legacy_names() {
+    fn priority_field_mapping_legacy_short_codes() {
         let mut fields = std::collections::HashMap::new();
-        for (label, expected) in [
-            ("P0", Priority::P0),
-            ("P1", Priority::P1),
-            ("P2", Priority::P2),
-            ("P3", Priority::P3),
-            ("P4", Priority::P4),
-        ] {
-            fields.insert("Priority".to_owned(), label.to_owned());
-            assert_eq!(parse_priority_field(&fields), expected);
+        for variant in Priority::ALL {
+            fields.insert("Priority".to_owned(), variant.short_code().to_owned());
+            assert_eq!(parse_priority_field(&fields), variant);
         }
+    }
+
+    /// `unblock-q2x` DRIFT-5 regression: the prior `parse_priority_field`
+    /// implementation had no explicit `P2` arm — it fell through the
+    /// wildcard `_` to `Priority::P2`, which masked the bug because the
+    /// default IS P2. Pin the contract here via an explicit assertion
+    /// against the canonical and short-code wire formats so a future
+    /// rewrite that breaks only the `P2` round-trip fails fast.
+    #[test]
+    fn priority_field_p2_round_trips_explicitly() {
+        let mut fields = std::collections::HashMap::new();
+
+        fields.insert("Priority".to_owned(), "P2 - Medium".to_owned());
+        assert_eq!(parse_priority_field(&fields), Priority::P2);
+
+        fields.insert("Priority".to_owned(), "P2".to_owned());
+        assert_eq!(parse_priority_field(&fields), Priority::P2);
     }
 
     #[test]
     fn priority_field_missing_defaults_p2() {
         let fields = std::collections::HashMap::new();
+        assert_eq!(parse_priority_field(&fields), Priority::P2);
+    }
+
+    #[test]
+    fn priority_field_unrecognised_defaults_p2() {
+        // Per the silent-fallback semantics, an unrecognised priority
+        // value collapses to the canonical default (P2). Pin the
+        // contract explicitly so a future rewrite that returns `None`
+        // or panics is caught immediately.
+        let mut fields = std::collections::HashMap::new();
+        fields.insert("Priority".to_owned(), "Urgent".to_owned());
         assert_eq!(parse_priority_field(&fields), Priority::P2);
     }
 
@@ -1963,29 +2002,27 @@ mod tests {
 
     // ── parse_pipeline_stage_field (unblock-29p.18) ─────────────────────
 
-    /// `setup_fields` (in `crates/unblock-github/src/projects.rs`) writes the
-    /// canonical lowercase option set for the `PipelineStage` Projects V2
-    /// field per spec §5 / §2.5: `investigation`, `implementation`,
-    /// `review`, `refactoring`, `qa`, `done`. The parser must round-trip
-    /// every variant.
+    /// `setup_fields` (in `crates/unblock-github/src/projects.rs`) writes
+    /// the canonical lowercase option set for the `PipelineStage`
+    /// Projects V2 field per spec §2.5 / §5.7. The parser must
+    /// round-trip every variant against `PipelineStage::canonical_name`
+    /// — iterating `PipelineStage::ALL` so a new variant automatically
+    /// extends the assertion (mirrors the `IssueType::ALL` round-trip
+    /// pattern, `unblock-q2x`).
     #[test]
     fn pipeline_stage_field_mapping_spec_names() {
         let mut fields = std::collections::HashMap::new();
-        for (label, expected) in [
-            ("investigation", PipelineStage::Investigation),
-            ("implementation", PipelineStage::Implementation),
-            ("review", PipelineStage::Review),
-            ("refactoring", PipelineStage::Refactoring),
-            ("qa", PipelineStage::Qa),
-            ("done", PipelineStage::Done),
-        ] {
-            fields.insert("PipelineStage".to_owned(), label.to_owned());
-            assert_eq!(parse_pipeline_stage_field(&fields), Some(expected));
+        for variant in PipelineStage::ALL {
+            fields.insert(
+                "PipelineStage".to_owned(),
+                variant.canonical_name().to_owned(),
+            );
+            assert_eq!(parse_pipeline_stage_field(&fields), Some(variant));
         }
     }
 
     /// Missing `PipelineStage` field-value collapses to `None` — symmetric
-    /// with [`parse_issue_type_field`] silent-fallback semantics.
+    /// with [`parse_issue_type_from_native`] silent-fallback semantics.
     #[test]
     fn pipeline_stage_field_missing_returns_none() {
         let fields = std::collections::HashMap::new();

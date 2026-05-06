@@ -4620,8 +4620,9 @@ async fn create_issue_with_all_params_and_refetch() {
             .await;
     assert_eq!(
         priority_value.as_deref(),
-        Some("P0 - Critical"),
-        "Priority should be populated to canonical 'P0 - Critical' after populate_project_fields"
+        Some(Priority::P0.canonical_name()),
+        "Priority should be populated to canonical {:?} after populate_project_fields",
+        Priority::P0.canonical_name()
     );
 
     let status_value =
