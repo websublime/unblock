@@ -156,6 +156,7 @@ impl Status {
 ### 2.4 `Priority`
 
 ```rust
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Priority {
     P0,
@@ -170,9 +171,62 @@ pub enum Priority {
 
 **Projects V2 option values:** `P0 - Critical`, `P1 - High`, `P2 - Medium`, `P3 - Low`, `P4 - Backlog`
 
+**API change (BREAKING — library crate `unblock-core`).** Adding `#[non_exhaustive]` to `Priority` is the same forward-compat hardening applied to `Status` in `unblock-1zj` and `IssueType` in `unblock-wgj`. Existing exhaustive `match Priority { … }` arms in downstream code (currently only in-workspace) MUST add a wildcard `_` arm or a per-variant arm for new entries. Per CLAUDE.md "Coding Standards" `#[non_exhaustive]` is mandatory on growable public enums in library crates. The implementation PR for `unblock-q2x` MUST carry a `BREAKING CHANGE:` footer for the `#[non_exhaustive]` addition AND an `API:` footer for the additive helpers `Priority::ALL`, `Priority::canonical_name`, and `Priority::short_code` defined below.
+
+**Single source of truth — `Priority` canonical helpers** (`unblock-core/src/types.rs`, introduced by `unblock-q2x`). Mirrors the `Status::option_name` discipline (§2.3) and the `IssueType::canonical_name` discipline (§2.6): every layer that needs a Projects V2 Priority option string MUST go through these helpers. No literal `"P0 - Critical"`, `"P1 - High"`, `"P2 - Medium"`, `"P3 - Low"`, `"P4 - Backlog"`, `"P0"`, `"P1"`, `"P2"`, `"P3"`, or `"P4"` is permitted in `unblock-github` (`projects.rs` Priority entry of `REQUIRED_FIELDS`, `graphql.rs` `parse_priority_field`), `unblock-mcp` (`server.rs` `create`/`update` validators, `tools/stats.rs` `seed_priority_buckets`, `tools/list.rs` / `tools/ready.rs` / `tools/search.rs` doc-comments and fixtures), or any test fixture beyond the helpers' own unit tests.
+
+```rust
+impl Priority {
+    /// All canonical `Priority` variants in declared (sort-key) order.
+    pub const ALL: [Priority; 5] = [
+        Priority::P0,
+        Priority::P1,
+        Priority::P2,
+        Priority::P3,
+        Priority::P4,
+    ];
+
+    /// Canonical Projects V2 single-select option name (smushed
+    /// `<short_code> - <label>`). Single source of truth consumed by:
+    ///  - `REQUIRED_FIELDS` in `unblock-github` (compile-time
+    ///    derivation — see §5.7).
+    ///  - `parse_priority_field` in `unblock-github` (round-trip
+    ///    contract).
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Priority::P0 => "P0 - Critical",
+            Priority::P1 => "P1 - High",
+            Priority::P2 => "P2 - Medium",
+            Priority::P3 => "P3 - Low",
+            Priority::P4 => "P4 - Backlog",
+        }
+    }
+
+    /// Canonical short code (`"P0"` .. `"P4"`). Single source of truth
+    /// consumed by:
+    ///  - `option_id_by_prefix` lookups in `unblock-github`
+    ///    (`projects.rs`).
+    ///  - The `create` and `update` tool's priority validation step
+    ///    in `crates/unblock-mcp/src/server.rs`.
+    ///  - `tools/stats.rs::seed_priority_buckets` (HashMap key set).
+    pub const fn short_code(self) -> &'static str {
+        match self {
+            Priority::P0 => "P0",
+            Priority::P1 => "P1",
+            Priority::P2 => "P2",
+            Priority::P3 => "P3",
+            Priority::P4 => "P4",
+        }
+    }
+}
+```
+
+`Display` is preserved as-is on `Priority` and emits the `short_code` (`"P0"` .. `"P4"`) — the `ready` tool's priority filter and the `tools/stats.rs::seed_priority_buckets` HashMap-key set depend on this byte-stable token set. The split between `Display` (variant identifier) and `canonical_name` (Projects V2 wire format) mirrors §2.3 (`Status::Display` / `Status::option_name`).
+
 ### 2.5 `PipelineStage`
 
 ```rust
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PipelineStage {
     Investigation,
@@ -187,6 +241,44 @@ pub enum PipelineStage {
 Development pipeline phase. Created by `setup` in Phase 01 for field existence. Agent advancement is Phase 05 (plugin). The field exists so early adopters can use it manually and views work.
 
 **Projects V2 option values:** `investigation`, `implementation`, `review`, `refactoring`, `qa`, `done`
+
+**API change (BREAKING — library crate `unblock-core`).** Adding `#[non_exhaustive]` to `PipelineStage` is the same forward-compat hardening as §2.4 / §2.6. Existing exhaustive `match PipelineStage { … }` arms in downstream code MUST add a wildcard `_` arm. The implementation PR for `unblock-q2x` MUST carry a `BREAKING CHANGE:` footer for the `#[non_exhaustive]` addition AND an `API:` footer for the additive helpers `PipelineStage::ALL` and `PipelineStage::canonical_name` defined below.
+
+**Single source of truth — `PipelineStage` canonical helpers** (`unblock-core/src/types.rs`, introduced by `unblock-q2x`). Mirrors §2.3 / §2.4 / §2.6. Every layer that needs a Projects V2 PipelineStage option string MUST go through these helpers. No literal `"investigation"`, `"implementation"`, `"review"`, `"refactoring"`, `"qa"`, or `"done"` is permitted in `unblock-github` (`projects.rs` PipelineStage entry of `REQUIRED_FIELDS`, `graphql.rs` `parse_pipeline_stage_field`) or any test fixture beyond the helper's own unit tests.
+
+```rust
+impl PipelineStage {
+    /// All canonical `PipelineStage` variants in declared (lifecycle) order.
+    pub const ALL: [PipelineStage; 6] = [
+        PipelineStage::Investigation,
+        PipelineStage::Implementation,
+        PipelineStage::Review,
+        PipelineStage::Refactoring,
+        PipelineStage::Qa,
+        PipelineStage::Done,
+    ];
+
+    /// Canonical Projects V2 single-select option name (LOWERCASE,
+    /// per the `setup_fields` byte-exact contract — see §5.7).
+    /// Single source of truth consumed by:
+    ///  - `REQUIRED_FIELDS` in `unblock-github` (compile-time
+    ///    derivation — see §5.7).
+    ///  - `parse_pipeline_stage_field` in `unblock-github` (round-trip
+    ///    contract).
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            PipelineStage::Investigation => "investigation",
+            PipelineStage::Implementation => "implementation",
+            PipelineStage::Review        => "review",
+            PipelineStage::Refactoring   => "refactoring",
+            PipelineStage::Qa            => "qa",
+            PipelineStage::Done          => "done",
+        }
+    }
+}
+```
+
+`Display` on `PipelineStage` continues to emit the variant identifier (`"Investigation"`, `"Implementation"`, …) — it is NOT the wire format. For the on-the-wire option name (lowercase), use `PipelineStage::canonical_name`. This mirrors §2.3 (`Status::Display` vs `Status::option_name`).
 
 ### 2.6 `IssueType`
 
@@ -1040,7 +1132,11 @@ query($owner: String!, $repo: String!, $cursor: String) {
 
 **Status canonical list — single source of truth.** The `Status` row above is generated from `Status::option_name` (§2.3) iterated in declaration order. The `unblock-github` crate MUST NOT carry a duplicated literal list — `REQUIRED_FIELDS`'s Status spec is built from the `Status` enum at compile time (e.g. via a `const` array of variants → `option_name`). This closes the §10.2 `compute_expected_status` contract and the §5.8 view filter against drift.
 
-**IssueType canonical list — single source of truth (`unblock-wgj`).** Same discipline as Status. `unblock-github` declares a `REQUIRED_ISSUE_TYPES` constant whose entries are derived at compile time from the `IssueType` enum via `IssueType::canonical_name`, `canonical_color`, and `canonical_description` (§2.6) — for example, a `const` array of all `IssueType` variants paired with their helper outputs. There is NO duplicated literal list of issue type names, colors, or descriptions anywhere in the workspace. The IssueType ensure-and-heal loop in step 3 above iterates this constant in declared `IssueType` order. Adding a future variant to `IssueType` (allowed because of `#[non_exhaustive]`, §2.6) is the single edit site for adding a new canonical issue type — `REQUIRED_ISSUE_TYPES` and `setup_fields` pick it up automatically without any second-list bookkeeping.
+**Priority canonical list — single source of truth (`unblock-q2x`).** Same discipline as Status. `unblock-github` declares a `PRIORITY_OPTION_NAMES` constant whose entries are derived at compile time from the `Priority` enum via `Priority::canonical_name` (§2.4) — a `const` array materialised via `Priority::ALL` and the `const fn canonical_name` helper. The `REQUIRED_FIELDS` Priority entry references this constant directly. There is NO duplicated literal list of Priority option strings anywhere in the workspace. Adding a future variant to `Priority` (allowed because of `#[non_exhaustive]`, §2.4) is the single edit site — `PRIORITY_OPTION_NAMES` and `setup_fields` pick it up automatically.
+
+**PipelineStage canonical list — single source of truth (`unblock-q2x`).** Same discipline as Status / Priority. `unblock-github` declares a `PIPELINE_STAGE_OPTION_NAMES` constant whose entries are derived at compile time from the `PipelineStage` enum via `PipelineStage::canonical_name` (§2.5) — `const` array materialised via `PipelineStage::ALL`. The `REQUIRED_FIELDS` PipelineStage entry references this constant directly. The lowercase canonical strings are byte-stable across `setup` runs and parser invocations (`parse_pipeline_stage_field`), preserving the existing live-board contract. No duplicated literal list anywhere in the workspace.
+
+**IssueType canonical list — single source of truth (`unblock-wgj`).** Same discipline as Status / Priority / PipelineStage. `unblock-github` declares a `REQUIRED_ISSUE_TYPES` constant whose entries are derived at compile time from the `IssueType` enum via `IssueType::canonical_name`, `canonical_color`, and `canonical_description` (§2.6) — for example, a `const` array of all `IssueType` variants paired with their helper outputs. There is NO duplicated literal list of issue type names, colors, or descriptions anywhere in the workspace. The IssueType ensure-and-heal loop in step 3 above iterates this constant in declared `IssueType` order. Adding a future variant to `IssueType` (allowed because of `#[non_exhaustive]`, §2.6) is the single edit site for adding a new canonical issue type — `REQUIRED_ISSUE_TYPES` and `setup_fields` pick it up automatically without any second-list bookkeeping.
 
 **Auto-heal semantics — case-insensitive + `snake_case` → `TitleCase` normalization** (`heal_select_field_options` at `crates/unblock-github/src/projects.rs:1077-1090`).
 
