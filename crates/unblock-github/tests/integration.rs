@@ -2129,10 +2129,12 @@ async fn update_field_changes_value_on_project_item() {
     let p1_option_id = field_ids
         .priority
         .option_id_by_prefix(Priority::P1.short_code())
-        .unwrap_or_else(|| panic!(
-            "{} option should exist (prefix match against REQUIRED_FIELDS)",
-            Priority::P1.short_code()
-        ));
+        .unwrap_or_else(|| {
+            panic!(
+                "{} option should exist (prefix match against REQUIRED_FIELDS)",
+                Priority::P1.short_code()
+            )
+        });
 
     client
         .update_field(
