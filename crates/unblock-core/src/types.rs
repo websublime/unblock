@@ -305,7 +305,22 @@ impl Status {
 ///
 /// P0 is the highest priority, P4 is the lowest. Used for sorting
 /// the ready set so agents pick up the most important work first.
+///
+/// # `#[non_exhaustive]`
+///
+/// Carries `#[non_exhaustive]` per the workspace discipline (see
+/// `CLAUDE.md` "Coding Standards" and the precedents established by
+/// `Status` (`unblock-1zj`) and `IssueType` (`unblock-wgj`)). Adding new
+/// variants is a non-breaking addition for downstream consumers.
+///
+/// # Canonical helpers
+///
+/// See [`Priority::canonical_name`] for the Projects V2 single-select
+/// option string (e.g. `"P0 - Critical"`) and [`Priority::short_code`]
+/// for the bare short-code prefix (`"P0"` .. `"P4"`). Spec §2.4 pins
+/// the single-source-of-truth discipline introduced by `unblock-q2x`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Priority {
     /// Critical — drop everything.
     P0,
@@ -320,6 +335,22 @@ pub enum Priority {
 }
 
 impl Priority {
+    /// All canonical `Priority` variants in declared (sort-key) order.
+    ///
+    /// Single source of truth for any consumer that needs to enumerate
+    /// the full set of priority values. Order matches the declaration
+    /// order above and the `as_sort_key` ordering — consumed by the
+    /// `PRIORITY_OPTION_NAMES` compile-time derivation in
+    /// `unblock-github::projects` (spec §5.7) and the priority validators
+    /// in `unblock-mcp::server`.
+    pub const ALL: [Priority; 5] = [
+        Priority::P0,
+        Priority::P1,
+        Priority::P2,
+        Priority::P3,
+        Priority::P4,
+    ];
+
     /// Sort key for priority ordering (P0=0, P4=4).
     ///
     /// Lower values indicate higher priority, suitable for ascending sort.
@@ -333,6 +364,64 @@ impl Priority {
             Self::P4 => 4,
         }
     }
+
+    /// Canonical Projects V2 single-select option name (smushed
+    /// `<short_code> - <label>` form).
+    ///
+    /// Single source of truth for every wire-format Priority string
+    /// produced or consumed by the system. Consumed by:
+    ///
+    /// - The `REQUIRED_FIELDS` Priority options list in
+    ///   `unblock-github::projects` (derived from [`Priority::ALL`]).
+    /// - `parse_priority_field` in `unblock-github::graphql`
+    ///   (round-trip contract — note that the parser also tolerates the
+    ///   bare `short_code` form for backward compatibility).
+    ///
+    /// **Discipline.** No literal `"P0 - Critical"`, `"P1 - High"`,
+    /// `"P2 - Medium"`, `"P3 - Low"`, or `"P4 - Backlog"` is permitted
+    /// outside this helper's definition site and its unit tests; the
+    /// canonical strings MUST be sourced from
+    /// `Priority::canonical_name`. Mirrors the §2.3
+    /// `Status::option_name` discipline introduced by `unblock-1zj`.
+    #[must_use]
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Priority::P0 => "P0 - Critical",
+            Priority::P1 => "P1 - High",
+            Priority::P2 => "P2 - Medium",
+            Priority::P3 => "P3 - Low",
+            Priority::P4 => "P4 - Backlog",
+        }
+    }
+
+    /// Canonical short-code prefix (`"P0"` .. `"P4"`).
+    ///
+    /// Single source of truth for the bare-prefix Priority token set.
+    /// Consumed by:
+    ///
+    /// - `option_id_by_prefix` callers in `unblock-github::projects` —
+    ///   see e.g. `populate_project_fields`.
+    /// - The `create` and `update` tool's priority validation step in
+    ///   `crates/unblock-mcp/src/server.rs` (spec §8.3 / §8.6).
+    /// - `tools/stats.rs::seed_priority_buckets` (HashMap key set).
+    /// - The `Display` impl on `Priority` (which emits the short code,
+    ///   per spec §2.4 — the byte-stable token set the `ready` tool's
+    ///   priority filter depends on).
+    ///
+    /// **Discipline.** No literal `"P0"`, `"P1"`, `"P2"`, `"P3"`, or
+    /// `"P4"` is permitted outside this helper's definition site and
+    /// its unit tests; the canonical short codes MUST be sourced from
+    /// `Priority::short_code` (or the equivalent `Display` impl).
+    #[must_use]
+    pub const fn short_code(self) -> &'static str {
+        match self {
+            Priority::P0 => "P0",
+            Priority::P1 => "P1",
+            Priority::P2 => "P2",
+            Priority::P3 => "P3",
+            Priority::P4 => "P4",
+        }
+    }
 }
 
 /// Pipeline stage for an issue, stored as a Projects V2 single-select field.
@@ -340,7 +429,25 @@ impl Priority {
 /// Tracks the current lifecycle phase of work on an issue. Orthogonal to
 /// [`Status`] — `Status` tracks workflow readiness while `PipelineStage`
 /// tracks where in the development process the issue currently sits.
+///
+/// # `#[non_exhaustive]`
+///
+/// Carries `#[non_exhaustive]` per the workspace discipline (see
+/// `CLAUDE.md` "Coding Standards" and the precedents established by
+/// `Status` (`unblock-1zj`), `IssueType` (`unblock-wgj`), and `Priority`
+/// (`unblock-q2x`)). Adding new variants is a non-breaking addition for
+/// downstream consumers.
+///
+/// # Canonical helpers
+///
+/// See [`PipelineStage::canonical_name`] for the Projects V2
+/// single-select option string (lowercase, e.g. `"investigation"`).
+/// Spec §2.5 pins the single-source-of-truth discipline introduced by
+/// `unblock-q2x`. Note that `Display` continues to emit the variant
+/// identifier (`"Investigation"`) and is NOT the wire format — same
+/// split as §2.3 (`Status::Display` vs `Status::option_name`).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PipelineStage {
     /// Requirements gathering and research.
     Investigation,
@@ -354,6 +461,57 @@ pub enum PipelineStage {
     Qa,
     /// Work is complete.
     Done,
+}
+
+impl PipelineStage {
+    /// All canonical `PipelineStage` variants in declared (lifecycle) order.
+    ///
+    /// Single source of truth for any consumer that needs to enumerate
+    /// the full set of pipeline stages. Order matches the declaration
+    /// order above — consumed by the `PIPELINE_STAGE_OPTION_NAMES`
+    /// compile-time derivation in `unblock-github::projects` (spec §5.7).
+    pub const ALL: [PipelineStage; 6] = [
+        PipelineStage::Investigation,
+        PipelineStage::Implementation,
+        PipelineStage::Review,
+        PipelineStage::Refactoring,
+        PipelineStage::Qa,
+        PipelineStage::Done,
+    ];
+
+    /// Canonical Projects V2 single-select option name (LOWERCASE).
+    ///
+    /// Single source of truth for every wire-format PipelineStage string
+    /// produced or consumed by the system. Consumed by:
+    ///
+    /// - The `REQUIRED_FIELDS` PipelineStage options list in
+    ///   `unblock-github::projects` (derived from
+    ///   [`PipelineStage::ALL`]).
+    /// - `parse_pipeline_stage_field` in `unblock-github::graphql`
+    ///   (round-trip contract — strictly case-sensitive against the
+    ///   spec lowercase taxonomy).
+    ///
+    /// **Discipline.** No literal `"investigation"`, `"implementation"`,
+    /// `"review"`, `"refactoring"`, `"qa"`, or `"done"` is permitted
+    /// outside this helper's definition site and its unit tests; the
+    /// canonical strings MUST be sourced from
+    /// `PipelineStage::canonical_name`. Mirrors the §2.3
+    /// `Status::option_name` discipline introduced by `unblock-1zj`.
+    ///
+    /// Note: the lowercase form is the **wire format**; the `Display`
+    /// impl emits the variant identifier (`"Investigation"` etc.) — see
+    /// the type-level docs.
+    #[must_use]
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            PipelineStage::Investigation => "investigation",
+            PipelineStage::Implementation => "implementation",
+            PipelineStage::Review => "review",
+            PipelineStage::Refactoring => "refactoring",
+            PipelineStage::Qa => "qa",
+            PipelineStage::Done => "done",
+        }
+    }
 }
 
 /// Classification of issue types.
@@ -1475,6 +1633,11 @@ mod tests {
     }
 
     fn _assert_all_priority_variants_covered(v: Priority) {
+        // `Priority` is `#[non_exhaustive]`. Inside the defining crate
+        // `non_exhaustive` does not require a wildcard arm, so the
+        // explicit per-variant cover here remains exhaustive. Adding a
+        // new variant breaks this match at compile time — the desired
+        // single-place gate for "did we forget the new variant?".
         match v {
             Priority::P0 | Priority::P1 | Priority::P2 | Priority::P3 | Priority::P4 => {}
         }
@@ -1482,20 +1645,72 @@ mod tests {
 
     #[test]
     fn priority_display_matches_debug() {
-        for v in [
-            Priority::P0,
-            Priority::P1,
-            Priority::P2,
-            Priority::P3,
-            Priority::P4,
-        ] {
+        for v in Priority::ALL {
             assert_eq!(v.to_string(), format!("{v:?}"));
         }
         assert_eq!(Priority::P0.to_string(), "P0");
         assert_eq!(Priority::P4.to_string(), "P4");
     }
 
+    #[test]
+    fn priority_canonical_name_round_trips_all_variants() {
+        // unblock-q2x: the Projects V2 wire format is "P<n> - <Label>".
+        // Pin the byte-exact contract per spec §2.4.
+        assert_eq!(Priority::ALL.len(), 5);
+        assert_eq!(Priority::P0.canonical_name(), "P0 - Critical");
+        assert_eq!(Priority::P1.canonical_name(), "P1 - High");
+        assert_eq!(Priority::P2.canonical_name(), "P2 - Medium");
+        assert_eq!(Priority::P3.canonical_name(), "P3 - Low");
+        assert_eq!(Priority::P4.canonical_name(), "P4 - Backlog");
+        // Every variant produces a non-empty canonical name.
+        for v in Priority::ALL {
+            assert!(!v.canonical_name().is_empty());
+        }
+    }
+
+    #[test]
+    fn priority_short_code_matches_display() {
+        // unblock-q2x: short_code is the byte-stable token set the
+        // `ready` tool's priority filter depends on. The Display impl
+        // emits the same string per spec §2.4 (the helper documents
+        // the contract — the Display impl is the runtime accessor).
+        for v in Priority::ALL {
+            assert_eq!(v.short_code(), v.to_string());
+        }
+        assert_eq!(Priority::P0.short_code(), "P0");
+        assert_eq!(Priority::P1.short_code(), "P1");
+        assert_eq!(Priority::P2.short_code(), "P2");
+        assert_eq!(Priority::P3.short_code(), "P3");
+        assert_eq!(Priority::P4.short_code(), "P4");
+    }
+
+    #[test]
+    fn priority_canonical_name_starts_with_short_code() {
+        // The `option_id_by_prefix` lookup in `unblock-github::projects`
+        // depends on `short_code` being a strict prefix of
+        // `canonical_name`. Pin the contract here so a future rename of
+        // either helper keeps the prefix relation intact.
+        for v in Priority::ALL {
+            let canonical = v.canonical_name();
+            let short = v.short_code();
+            assert!(
+                canonical.starts_with(short),
+                "canonical_name {canonical:?} must start with short_code {short:?}"
+            );
+            assert!(
+                canonical.len() > short.len(),
+                "canonical_name must be strictly longer than short_code (option_id_by_prefix contract)"
+            );
+        }
+    }
+
     fn _assert_all_pipeline_stage_variants_covered(v: PipelineStage) {
+        // `PipelineStage` is `#[non_exhaustive]`. Inside the defining
+        // crate `non_exhaustive` does not require a wildcard arm, so
+        // the explicit per-variant cover here remains exhaustive.
+        // Adding a new variant breaks this match at compile time —
+        // the desired single-place gate for "did we forget the new
+        // variant?".
         match v {
             PipelineStage::Investigation
             | PipelineStage::Implementation
@@ -1508,14 +1723,7 @@ mod tests {
 
     #[test]
     fn pipeline_stage_display_matches_debug() {
-        for v in [
-            PipelineStage::Investigation,
-            PipelineStage::Implementation,
-            PipelineStage::Review,
-            PipelineStage::Refactoring,
-            PipelineStage::Qa,
-            PipelineStage::Done,
-        ] {
+        for v in PipelineStage::ALL {
             assert_eq!(v.to_string(), format!("{v:?}"));
         }
         assert_eq!(PipelineStage::Investigation.to_string(), "Investigation");
@@ -1524,6 +1732,65 @@ mod tests {
         assert_eq!(PipelineStage::Refactoring.to_string(), "Refactoring");
         assert_eq!(PipelineStage::Qa.to_string(), "Qa");
         assert_eq!(PipelineStage::Done.to_string(), "Done");
+    }
+
+    #[test]
+    fn pipeline_stage_canonical_name_round_trips_all_variants() {
+        // unblock-q2x: the Projects V2 wire format is LOWERCASE per
+        // spec §2.5 / §5.7 — pin the byte-exact contract. The live
+        // test board on websublime/unblock-test was provisioned from
+        // this list and the parser at `parse_pipeline_stage_field` is
+        // strictly case-sensitive against it.
+        assert_eq!(PipelineStage::ALL.len(), 6);
+        assert_eq!(
+            PipelineStage::Investigation.canonical_name(),
+            "investigation"
+        );
+        assert_eq!(
+            PipelineStage::Implementation.canonical_name(),
+            "implementation"
+        );
+        assert_eq!(PipelineStage::Review.canonical_name(), "review");
+        assert_eq!(PipelineStage::Refactoring.canonical_name(), "refactoring");
+        assert_eq!(PipelineStage::Qa.canonical_name(), "qa");
+        assert_eq!(PipelineStage::Done.canonical_name(), "done");
+        // Every variant produces a non-empty canonical name.
+        for v in PipelineStage::ALL {
+            assert!(!v.canonical_name().is_empty());
+        }
+    }
+
+    #[test]
+    fn pipeline_stage_canonical_name_is_lowercase() {
+        // Spec §2.5 locks the wire format to lowercase. Pin the
+        // discipline as a unit-test invariant so a future
+        // mis-edit (TitleCase typo, accidental rename) fails at
+        // compile- or test-time rather than against the live board.
+        for v in PipelineStage::ALL {
+            let canonical = v.canonical_name();
+            assert_eq!(
+                canonical,
+                canonical.to_ascii_lowercase(),
+                "PipelineStage::canonical_name must be ASCII lowercase, got {canonical:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pipeline_stage_display_differs_from_canonical_name() {
+        // Mirror the §2.3 Status::Display vs Status::option_name split:
+        // Display is the variant-identifier formatter (TitleCase),
+        // canonical_name is the wire-format formatter (lowercase).
+        // The two MUST diverge for every variant — if they ever match
+        // it means somebody collapsed the wire format back to TitleCase
+        // by accident and the live board contract is broken.
+        for v in PipelineStage::ALL {
+            assert_ne!(
+                v.to_string(),
+                v.canonical_name(),
+                "Display and canonical_name MUST diverge for {v:?} (TitleCase vs lowercase)"
+            );
+        }
     }
 
     // ── QualifiedId ────────────────────────────────────────────────────
