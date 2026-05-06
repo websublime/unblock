@@ -197,14 +197,11 @@ fn seed_status_buckets() -> HashMap<String, usize> {
 /// Pre-seed the `by_priority` bucket with `0` for every [`Priority`]
 /// variant so callers can read any key unconditionally.
 fn seed_priority_buckets() -> HashMap<String, usize> {
-    let mut out = HashMap::with_capacity(5);
-    for priority in [
-        Priority::P0,
-        Priority::P1,
-        Priority::P2,
-        Priority::P3,
-        Priority::P4,
-    ] {
+    let mut out = HashMap::with_capacity(Priority::ALL.len());
+    for priority in Priority::ALL {
+        // The `Display` impl on `Priority` emits `Priority::short_code`
+        // — the byte-stable HashMap-key set the `ready` tool's priority
+        // filter depends on (spec §2.4, `unblock-q2x`).
         out.insert(priority.to_string(), 0);
     }
     out
@@ -511,8 +508,12 @@ mod tests {
     #[test]
     fn seed_priority_buckets_contains_every_priority_at_zero() {
         let seeded = seed_priority_buckets();
-        assert_eq!(seeded.len(), 5);
-        for key in ["P0", "P1", "P2", "P3", "P4"] {
+        assert_eq!(seeded.len(), Priority::ALL.len());
+        // Sourced from `Priority::short_code` per spec §2.4
+        // single-source-of-truth (`unblock-q2x`). Adding a new variant
+        // automatically extends the assertion.
+        for variant in Priority::ALL {
+            let key = variant.short_code();
             assert_eq!(
                 seeded.get(key),
                 Some(&0_usize),
@@ -589,8 +590,8 @@ mod tests {
         for variant in Status::ALL {
             assert_eq!(result.by_status.get(variant.option_name()), Some(&0_usize));
         }
-        for key in ["P0", "P1", "P2", "P3", "P4"] {
-            assert_eq!(result.by_priority.get(key), Some(&0_usize));
+        for variant in Priority::ALL {
+            assert_eq!(result.by_priority.get(variant.short_code()), Some(&0_usize));
         }
     }
 
@@ -659,8 +660,8 @@ mod tests {
             Some(&0_usize)
         );
 
-        for key in ["P0", "P1", "P2", "P3", "P4"] {
-            assert_eq!(result.by_priority.get(key), Some(&1_usize));
+        for variant in Priority::ALL {
+            assert_eq!(result.by_priority.get(variant.short_code()), Some(&1_usize));
         }
     }
 

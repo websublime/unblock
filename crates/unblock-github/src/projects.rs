@@ -498,18 +498,18 @@ const PRIORITY_OPTION_NAMES: [&str; Priority::ALL.len()] = {
     out
 };
 
-/// Canonical Projects V2 PipelineStage option names (lowercase) in
+/// Canonical Projects V2 `PipelineStage` option names (lowercase) in
 /// declared order.
 ///
 /// **Single source of truth — generated from [`PipelineStage::ALL`].**
-/// Per spec §2.5 / §5.7 the `REQUIRED_FIELDS` PipelineStage spec MUST be
+/// Per spec §2.5 / §5.7 the `REQUIRED_FIELDS` `PipelineStage` spec MUST be
 /// derived from the `PipelineStage` enum (no duplicated literal list).
 /// `PipelineStage::canonical_name` is a `const fn` returning the
 /// lowercase wire format, so this `const` array is materialized at
 /// compile time and remains in lock-step with the enum.
 ///
 /// Order mirrors [`PipelineStage::ALL`] and is the contract consumed by
-/// the `REQUIRED_FIELDS` PipelineStage entry and the auto-heal matcher
+/// the `REQUIRED_FIELDS` `PipelineStage` entry and the auto-heal matcher
 /// in [`GitHubClient::heal_select_field_options`].
 const PIPELINE_STAGE_OPTION_NAMES: [&str; PipelineStage::ALL.len()] = {
     let mut out: [&str; PipelineStage::ALL.len()] = [""; PipelineStage::ALL.len()];
@@ -2921,17 +2921,11 @@ mod tests {
         // from PipelineStage::ALL at compile time — adding a new
         // variant is the single edit site for the canonical Projects
         // V2 PipelineStage option set.
-        assert_eq!(
-            PIPELINE_STAGE_OPTION_NAMES.len(),
-            PipelineStage::ALL.len()
-        );
+        assert_eq!(PIPELINE_STAGE_OPTION_NAMES.len(), PipelineStage::ALL.len());
         assert_eq!(PIPELINE_STAGE_OPTION_NAMES.len(), 6);
 
         for (i, variant) in PipelineStage::ALL.iter().enumerate() {
-            assert_eq!(
-                PIPELINE_STAGE_OPTION_NAMES[i],
-                variant.canonical_name()
-            );
+            assert_eq!(PIPELINE_STAGE_OPTION_NAMES[i], variant.canonical_name());
         }
     }
 

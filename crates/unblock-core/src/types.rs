@@ -403,7 +403,7 @@ impl Priority {
     ///   see e.g. `populate_project_fields`.
     /// - The `create` and `update` tool's priority validation step in
     ///   `crates/unblock-mcp/src/server.rs` (spec §8.3 / §8.6).
-    /// - `tools/stats.rs::seed_priority_buckets` (HashMap key set).
+    /// - `tools/stats.rs::seed_priority_buckets` (`HashMap` key set).
     /// - The `Display` impl on `Priority` (which emits the short code,
     ///   per spec §2.4 — the byte-stable token set the `ready` tool's
     ///   priority filter depends on).
@@ -481,10 +481,10 @@ impl PipelineStage {
 
     /// Canonical Projects V2 single-select option name (LOWERCASE).
     ///
-    /// Single source of truth for every wire-format PipelineStage string
+    /// Single source of truth for every wire-format `PipelineStage` string
     /// produced or consumed by the system. Consumed by:
     ///
-    /// - The `REQUIRED_FIELDS` PipelineStage options list in
+    /// - The `REQUIRED_FIELDS` `PipelineStage` options list in
     ///   `unblock-github::projects` (derived from
     ///   [`PipelineStage::ALL`]).
     /// - `parse_pipeline_stage_field` in `unblock-github::graphql`

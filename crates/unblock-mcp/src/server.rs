@@ -1787,13 +1787,27 @@ impl UnblockServer {
         let issue_type_canonical = issue_type.canonical_name();
 
         // Validate priority if provided. Canonical default is P2
-        // (spec §8.3 — Medium).
-        let priority_str = params.priority.as_deref().unwrap_or("P2");
-        if !matches!(priority_str, "P0" | "P1" | "P2" | "P3" | "P4") {
+        // (spec §8.3 — Medium). The validator iterates `Priority::ALL`
+        // and matches against `Priority::short_code` so this
+        // automatically tracks new variants — single-source-of-truth
+        // discipline per spec §2.4 (`unblock-q2x`).
+        let priority_str = params
+            .priority
+            .as_deref()
+            .unwrap_or_else(|| unblock_core::types::Priority::P2.short_code());
+        if !unblock_core::types::Priority::ALL
+            .iter()
+            .any(|p| p.short_code() == priority_str)
+        {
+            let valid: Vec<&str> = unblock_core::types::Priority::ALL
+                .iter()
+                .map(|p| p.short_code())
+                .collect();
             return Err(ErrorData {
                 code: rmcp::model::ErrorCode::INVALID_PARAMS,
                 message: format!(
-                    "Invalid priority '{priority_str}' — must be P0, P1, P2, P3, or P4"
+                    "Invalid priority '{priority_str}' — must be one of {}",
+                    valid.join(", ")
                 )
                 .into(),
                 data: None,
@@ -2138,13 +2152,27 @@ impl UnblockServer {
             "Update tool invoked"
         );
 
-        // Validate priority if provided.
+        // Validate priority if provided. Iterates `Priority::ALL` so
+        // new variants are picked up automatically — mirrors the
+        // create-tool validator above and the Status validator below
+        // (single-source-of-truth discipline per spec §2.4,
+        // `unblock-q2x`).
         if let Some(ref p) = params.priority
-            && !matches!(p.as_str(), "P0" | "P1" | "P2" | "P3" | "P4")
+            && !unblock_core::types::Priority::ALL
+                .iter()
+                .any(|variant| variant.short_code() == p.as_str())
         {
+            let valid: Vec<&str> = unblock_core::types::Priority::ALL
+                .iter()
+                .map(|variant| variant.short_code())
+                .collect();
             return Err(ErrorData {
                 code: rmcp::model::ErrorCode::INVALID_PARAMS,
-                message: format!("Invalid priority '{p}' — must be P0, P1, P2, P3, or P4").into(),
+                message: format!(
+                    "Invalid priority '{p}' — must be one of {}",
+                    valid.join(", ")
+                )
+                .into(),
                 data: None,
             });
         }
