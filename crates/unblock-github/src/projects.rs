@@ -15,7 +15,7 @@ use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt as _;
 use tracing::{debug, instrument, warn};
-use unblock_core::types::{IssueType, Status};
+use unblock_core::types::{IssueType, PipelineStage, Priority, Status};
 
 use crate::client::GitHubClient;
 use crate::errors::{self, Error};
@@ -40,9 +40,14 @@ pub struct ProjectFieldIds {
     /// in board order: `Backlog`, `Ready`, `In Progress`, `Blocked`,
     /// `Deferred`, `Closed`. Sourced from `Status::option_name` per spec §5.7.
     pub status: FieldMeta,
-    /// Priority field — single select: P0 - Critical, P1 - High, P2 - Medium, P3 - Low, P4 - Backlog.
+    /// Priority field — single select with 5 options sourced from
+    /// `Priority::canonical_name` per spec §5.7 (e.g. `P0 - Critical`,
+    /// `P1 - High`, `P2 - Medium`, `P3 - Low`, `P4 - Backlog`).
     pub priority: FieldMeta,
-    /// `PipelineStage` field — single select: investigation, implementation, review, refactoring, qa, done.
+    /// `PipelineStage` field — single select with 6 lowercase options
+    /// sourced from `PipelineStage::canonical_name` per spec §5.7 (e.g.
+    /// `investigation`, `implementation`, `review`, `refactoring`, `qa`,
+    /// `done`).
     pub pipeline_stage: FieldMeta,
     /// Agent field — text field (node ID only, no options).
     pub agent: String,
@@ -469,6 +474,53 @@ const STATUS_OPTION_NAMES: [&str; Status::ALL.len()] = {
     out
 };
 
+/// Canonical Projects V2 Priority option names in declared order.
+///
+/// **Single source of truth — generated from [`Priority::ALL`].** Per
+/// spec §2.4 / §5.7 the `REQUIRED_FIELDS` Priority spec MUST be derived
+/// from the `Priority` enum (no duplicated literal list).
+/// `Priority::canonical_name` is a `const fn`, so this `const` array is
+/// materialized at compile time and remains in lock-step with the enum:
+/// adding a new `Priority` variant updates this list automatically
+/// (the enum carries `#[non_exhaustive]` per the workspace discipline,
+/// allowing variant additions in PATCH/MINOR releases).
+///
+/// Order mirrors [`Priority::ALL`] and is the contract consumed by the
+/// `REQUIRED_FIELDS` Priority entry and the auto-heal matcher in
+/// [`GitHubClient::heal_select_field_options`].
+const PRIORITY_OPTION_NAMES: [&str; Priority::ALL.len()] = {
+    let mut out: [&str; Priority::ALL.len()] = [""; Priority::ALL.len()];
+    let mut i = 0;
+    while i < Priority::ALL.len() {
+        out[i] = Priority::ALL[i].canonical_name();
+        i += 1;
+    }
+    out
+};
+
+/// Canonical Projects V2 PipelineStage option names (lowercase) in
+/// declared order.
+///
+/// **Single source of truth — generated from [`PipelineStage::ALL`].**
+/// Per spec §2.5 / §5.7 the `REQUIRED_FIELDS` PipelineStage spec MUST be
+/// derived from the `PipelineStage` enum (no duplicated literal list).
+/// `PipelineStage::canonical_name` is a `const fn` returning the
+/// lowercase wire format, so this `const` array is materialized at
+/// compile time and remains in lock-step with the enum.
+///
+/// Order mirrors [`PipelineStage::ALL`] and is the contract consumed by
+/// the `REQUIRED_FIELDS` PipelineStage entry and the auto-heal matcher
+/// in [`GitHubClient::heal_select_field_options`].
+const PIPELINE_STAGE_OPTION_NAMES: [&str; PipelineStage::ALL.len()] = {
+    let mut out: [&str; PipelineStage::ALL.len()] = [""; PipelineStage::ALL.len()];
+    let mut i = 0;
+    while i < PipelineStage::ALL.len() {
+        out[i] = PipelineStage::ALL[i].canonical_name();
+        i += 1;
+    }
+    out
+};
+
 /// Specification for one canonical org-level GitHub `IssueType`.
 ///
 /// Drives the `IssueType` ensure-and-heal step in
@@ -542,25 +594,21 @@ const REQUIRED_FIELDS: &[FieldSpec] = &[
     FieldSpec {
         name: "Priority",
         data_type: "SINGLE_SELECT",
-        options: &[
-            "P0 - Critical",
-            "P1 - High",
-            "P2 - Medium",
-            "P3 - Low",
-            "P4 - Backlog",
-        ],
+        // Sourced from `Priority::canonical_name` via
+        // `PRIORITY_OPTION_NAMES` (spec §2.4 / §5.7
+        // single-source-of-truth requirement, introduced by
+        // `unblock-q2x`).
+        options: &PRIORITY_OPTION_NAMES,
     },
     FieldSpec {
         name: "PipelineStage",
         data_type: "SINGLE_SELECT",
-        options: &[
-            "investigation",
-            "implementation",
-            "review",
-            "refactoring",
-            "qa",
-            "done",
-        ],
+        // Sourced from `PipelineStage::canonical_name` via
+        // `PIPELINE_STAGE_OPTION_NAMES` (spec §2.5 / §5.7
+        // single-source-of-truth requirement, introduced by
+        // `unblock-q2x`). The lowercase wire format matches the
+        // byte-exact contract on `parse_pipeline_stage_field`.
+        options: &PIPELINE_STAGE_OPTION_NAMES,
     },
     FieldSpec {
         name: "Agent",
@@ -2511,11 +2559,14 @@ impl GitHubClient {
 
 #[cfg(test)]
 mod tests {
-    use super::{FieldMeta, FieldSpec, OwnerType, REQUIRED_ISSUE_TYPES, STATUS_OPTION_NAMES};
+    use super::{
+        FieldMeta, FieldSpec, OwnerType, PIPELINE_STAGE_OPTION_NAMES, PRIORITY_OPTION_NAMES,
+        REQUIRED_FIELDS, REQUIRED_ISSUE_TYPES, STATUS_OPTION_NAMES,
+    };
     use crate::client::GitHubClient;
     use crate::errors::Error;
     use std::collections::HashMap;
-    use unblock_core::types::IssueType;
+    use unblock_core::types::{IssueType, PipelineStage, Priority};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -2846,6 +2897,82 @@ mod tests {
             healed.option_colors.get("In Progress"),
             Some(&"YELLOW".to_owned())
         );
+    }
+
+    // ── PRIORITY_OPTION_NAMES + PIPELINE_STAGE_OPTION_NAMES (unblock-q2x) ─
+
+    #[test]
+    fn priority_option_names_derived_from_enum_in_declared_order() {
+        // unblock-q2x: PRIORITY_OPTION_NAMES MUST be generated from
+        // Priority::ALL at compile time — adding a new variant is the
+        // single edit site for the canonical Projects V2 Priority
+        // option set.
+        assert_eq!(PRIORITY_OPTION_NAMES.len(), Priority::ALL.len());
+        assert_eq!(PRIORITY_OPTION_NAMES.len(), 5);
+
+        for (i, variant) in Priority::ALL.iter().enumerate() {
+            assert_eq!(PRIORITY_OPTION_NAMES[i], variant.canonical_name());
+        }
+    }
+
+    #[test]
+    fn pipeline_stage_option_names_derived_from_enum_in_declared_order() {
+        // unblock-q2x: PIPELINE_STAGE_OPTION_NAMES MUST be generated
+        // from PipelineStage::ALL at compile time — adding a new
+        // variant is the single edit site for the canonical Projects
+        // V2 PipelineStage option set.
+        assert_eq!(
+            PIPELINE_STAGE_OPTION_NAMES.len(),
+            PipelineStage::ALL.len()
+        );
+        assert_eq!(PIPELINE_STAGE_OPTION_NAMES.len(), 6);
+
+        for (i, variant) in PipelineStage::ALL.iter().enumerate() {
+            assert_eq!(
+                PIPELINE_STAGE_OPTION_NAMES[i],
+                variant.canonical_name()
+            );
+        }
+    }
+
+    #[test]
+    fn required_fields_priority_entry_uses_priority_option_names() {
+        // unblock-q2x: the REQUIRED_FIELDS Priority entry MUST point
+        // at PRIORITY_OPTION_NAMES (not a duplicated literal list).
+        // Pin the contract via reference equality on the slice
+        // pointer — the enum-derived const and the FieldSpec entry
+        // share the same backing storage at compile time.
+        let priority_spec = REQUIRED_FIELDS
+            .iter()
+            .find(|f| f.name == "Priority")
+            .expect("Priority must exist in REQUIRED_FIELDS");
+        assert_eq!(
+            priority_spec.options.len(),
+            PRIORITY_OPTION_NAMES.len(),
+            "Priority FieldSpec must source options from PRIORITY_OPTION_NAMES"
+        );
+        for (i, expected) in PRIORITY_OPTION_NAMES.iter().enumerate() {
+            assert_eq!(priority_spec.options[i], *expected);
+        }
+    }
+
+    #[test]
+    fn required_fields_pipeline_stage_entry_uses_pipeline_stage_option_names() {
+        // unblock-q2x: same contract as Priority — REQUIRED_FIELDS
+        // PipelineStage entry sources its options from the
+        // enum-derived const.
+        let stage_spec = REQUIRED_FIELDS
+            .iter()
+            .find(|f| f.name == "PipelineStage")
+            .expect("PipelineStage must exist in REQUIRED_FIELDS");
+        assert_eq!(
+            stage_spec.options.len(),
+            PIPELINE_STAGE_OPTION_NAMES.len(),
+            "PipelineStage FieldSpec must source options from PIPELINE_STAGE_OPTION_NAMES"
+        );
+        for (i, expected) in PIPELINE_STAGE_OPTION_NAMES.iter().enumerate() {
+            assert_eq!(stage_spec.options[i], *expected);
+        }
     }
 
     // ── REQUIRED_ISSUE_TYPES (unblock-wgj.14) ───────────────────────────

@@ -24,7 +24,7 @@
 use std::sync::Arc;
 
 use unblock_core::config::Config;
-use unblock_core::types::{IssueState, IssueType, Status};
+use unblock_core::types::{IssueState, IssueType, PipelineStage, Priority, Status};
 use unblock_github::client::GitHubClient;
 use unblock_github::mutations::CreateIssueParams;
 use unblock_github::projects::{CreateViewParams, FieldValue, OwnerType, ViewLayout};
@@ -789,8 +789,9 @@ async fn create_issue_returns_issue_with_correct_fields() {
         fetch_field_value(&client, &item_id, &resolved_field_ids.priority.field_id).await;
     assert_eq!(
         priority_value.as_deref(),
-        Some("P0 - Critical"),
-        "Priority should be populated to canonical 'P0 - Critical' after populate_project_fields"
+        Some(Priority::P0.canonical_name()),
+        "Priority should be populated to canonical {:?} after populate_project_fields",
+        Priority::P0.canonical_name()
     );
 
     let status_value =
@@ -1847,38 +1848,37 @@ async fn setup_fields_creates_all_seven_fields() {
 
     assert_eq!(
         field_ids.priority.options.len(),
-        5,
-        "Priority should have 5 options"
+        Priority::ALL.len(),
+        "Priority should have {} options",
+        Priority::ALL.len()
     );
-    for expected in &[
-        "P0 - Critical",
-        "P1 - High",
-        "P2 - Medium",
-        "P3 - Low",
-        "P4 - Backlog",
-    ] {
+    // Sourced from `Priority::canonical_name` per spec §2.4 / §5.7
+    // single-source-of-truth requirement (`unblock-q2x`). Adding a
+    // new variant automatically extends the assertion.
+    for variant in Priority::ALL {
+        let expected = variant.canonical_name();
         assert!(
-            field_ids.priority.options.contains_key(*expected),
-            "Priority should have option '{expected}'"
+            field_ids.priority.options.contains_key(expected),
+            "Priority should have option {expected:?}, got: {:?}",
+            field_ids.priority.options.keys().collect::<Vec<_>>()
         );
     }
 
     assert_eq!(
         field_ids.pipeline_stage.options.len(),
-        6,
-        "PipelineStage should have 6 options"
+        PipelineStage::ALL.len(),
+        "PipelineStage should have {} options",
+        PipelineStage::ALL.len()
     );
-    for expected in &[
-        "investigation",
-        "implementation",
-        "review",
-        "refactoring",
-        "qa",
-        "done",
-    ] {
+    // Sourced from `PipelineStage::canonical_name` per spec §2.5 / §5.7
+    // single-source-of-truth requirement (`unblock-q2x`). Adding a
+    // new variant automatically extends the assertion.
+    for variant in PipelineStage::ALL {
+        let expected = variant.canonical_name();
         assert!(
-            field_ids.pipeline_stage.options.contains_key(*expected),
-            "PipelineStage should have option '{expected}'"
+            field_ids.pipeline_stage.options.contains_key(expected),
+            "PipelineStage should have option {expected:?}, got: {:?}",
+            field_ids.pipeline_stage.options.keys().collect::<Vec<_>>()
         );
     }
 
@@ -2123,11 +2123,16 @@ async fn update_field_changes_value_on_project_item() {
     // name from `REQUIRED_FIELDS` (e.g. `"P1 - High"`), so a bare `"P1"`
     // lookup never matches. Use `option_id_by_prefix` which falls back to a
     // prefix match — robust to future REQUIRED_FIELDS option renames
-    // (bead `unblock-ekf` Bug #1, decision option (b)).
+    // (bead `unblock-ekf` Bug #1, decision option (b)). The short-code
+    // prefix is sourced from `Priority::short_code` per spec §2.4
+    // single-source-of-truth (`unblock-q2x`).
     let p1_option_id = field_ids
         .priority
-        .option_id_by_prefix("P1")
-        .expect("P1 option should exist (prefix match against REQUIRED_FIELDS)");
+        .option_id_by_prefix(Priority::P1.short_code())
+        .unwrap_or_else(|| panic!(
+            "{} option should exist (prefix match against REQUIRED_FIELDS)",
+            Priority::P1.short_code()
+        ));
 
     client
         .update_field(
@@ -2140,13 +2145,16 @@ async fn update_field_changes_value_on_project_item() {
         .expect("update_field(Priority=P1) should succeed");
 
     // Re-fetch to confirm the Priority value was persisted. `fetch_field_value`
-    // returns the canonical option NAME from GraphQL — `"P1 - High"` per the
-    // REQUIRED_FIELDS spec — not the short code (bead `unblock-ekf` Bug #2).
+    // returns the canonical option NAME from GraphQL — `Priority::canonical_name`
+    // per the REQUIRED_FIELDS spec — not the short code (bead `unblock-ekf`
+    // Bug #2). Sourced via `Priority::canonical_name` per spec §2.4
+    // single-source-of-truth (`unblock-q2x`).
     let priority_value = fetch_field_value(&client, &item_id, &field_ids.priority.field_id).await;
     assert_eq!(
         priority_value.as_deref(),
-        Some("P1 - High"),
-        "Re-fetched Priority should be the canonical name 'P1 - High'"
+        Some(Priority::P1.canonical_name()),
+        "Re-fetched Priority should be the canonical name {:?}",
+        Priority::P1.canonical_name()
     );
 
     // Update the Agent text field.
