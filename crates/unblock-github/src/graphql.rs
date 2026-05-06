@@ -2475,19 +2475,13 @@ mod tests {
     /// dropping whatever value GitHub stored.
     #[test]
     fn parse_issue_round_trips_pipeline_stage_variants() {
-        for (label, expected) in [
-            ("investigation", PipelineStage::Investigation),
-            ("implementation", PipelineStage::Implementation),
-            ("review", PipelineStage::Review),
-            ("refactoring", PipelineStage::Refactoring),
-            ("qa", PipelineStage::Qa),
-            ("done", PipelineStage::Done),
-        ] {
+        for variant in PipelineStage::ALL {
+            let label = variant.canonical_name();
             let json = pipeline_stage_fixture(label);
             let issue = parse_issue(&json, "test-owner", "test-repo");
             assert_eq!(
                 issue.pipeline_stage,
-                Some(expected),
+                Some(variant),
                 "parse_issue must round-trip canonical PipelineStage \
                  option {label:?}"
             );
@@ -2500,19 +2494,13 @@ mod tests {
     /// unblock-29p.18 — both must be migrated together.
     #[test]
     fn parse_graph_issue_round_trips_pipeline_stage_variants() {
-        for (label, expected) in [
-            ("investigation", PipelineStage::Investigation),
-            ("implementation", PipelineStage::Implementation),
-            ("review", PipelineStage::Review),
-            ("refactoring", PipelineStage::Refactoring),
-            ("qa", PipelineStage::Qa),
-            ("done", PipelineStage::Done),
-        ] {
+        for variant in PipelineStage::ALL {
+            let label = variant.canonical_name();
             let json = pipeline_stage_fixture(label);
             let issue = parse_graph_issue(&json, "test-owner", "test-repo");
             assert_eq!(
                 issue.pipeline_stage,
-                Some(expected),
+                Some(variant),
                 "parse_graph_issue must round-trip canonical \
                  PipelineStage option {label:?}"
             );
