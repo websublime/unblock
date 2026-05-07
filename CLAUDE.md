@@ -137,8 +137,11 @@ The 8 fixed mister-anderson agents (Grace, Ada, Smith, Sherlock, Fernando,
 Linus, Quinn, Daphne) are workflow-level and stage-bound; the supervisors
 above are stack-bound and dispatched only by `/do`.
 
-These do not exist yet in `.claude/agents/` for the new layout — they are
-created via `/add-supervisor` when Stage 3 begins.
+Active in `.claude/agents/` (created by Daphne on 2026-05-08):
+- `rust-supervisor.md` (Neo) — covers `crates/` Rust workspace
+- `infra-supervisor.md` (Olive) — covers CI/CD and GitHub Actions
+- `go-supervisor.md` (Greta) — covers `apps/api/` Encore Go services
+- `astro-supervisor.md` (Aria) — covers `apps/web/` Astro 5 frontend
 
 ---
 
@@ -283,6 +286,7 @@ The two never overlap.
 
 ## Documentation
 
+- `ENCORE.md` - encore claude instructions (read to know more about encore framework)
 - `docs/MANIFESTO.md` — vision and laws (Stage 1 output)
 - `docs/PRD.md` — product requirements (Stage 1 output)
 - `docs/SPEC.md` — system architecture (Stage 1 output)
