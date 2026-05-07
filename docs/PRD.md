@@ -1,6 +1,6 @@
 # PRD: ://unblock — Provider-Agnostic Work-Tracking Engine for AI Agents
 
-**Status:** DRAFT
+**Status:** APPROVED
 **Author:** Grace (product-manager)
 **Date:** 2026-05-07
 **Companion:** [docs/MANIFESTO.md](./MANIFESTO.md) (APPROVED, 2026-05-07)
@@ -131,11 +131,12 @@ Human engineers who interact with the system through the web UI for ceremony tas
   - Webhook ingestion at the public `POST /webhooks/github` endpoint, signature-verified, normalising to canonical `WorkItem`.
   - Bidirectional sync, opt-in per integration: changes in `://unblock` propagate to GitHub Issues; webhook events update the canonical store.
   - Reconciliation on a schedule when webhooks are missed or the provider is offline.
-- **FR-12.** Three public Encore endpoints (the only paths reachable directly from the browser or external services):
-  - `POST /webhooks/github` — provider event sink.
-  - `GET /mcp/sse` — remote MCP for agents.
-  - `GET /auth/callback` — OAuth callback.
-  All other Encore APIs are private; the Astro BFF is the sole privileged client.
+- **FR-12.** Two public Encore endpoints at v1.0 (the only paths reachable directly from external services):
+  - `POST /webhooks/github` — provider event sink, HMAC-verified.
+  - `GET /mcp/sse` — remote MCP for AI agents, Bearer API key.
+  At v1.1, a third endpoint is added:
+  - `POST /webhooks/gitlab` — provider event sink, HMAC-verified (v1.1).
+  All other Encore APIs are private; the Astro BFF is the sole privileged client. **The OAuth callback is hosted by Astro on the web origin** (`unblock.websublime.com/auth/[provider]/callback`) — the Astro Action handles the callback and calls Encore's private `auth.exchangeOAuthCode` internally. This preserves the BFF discipline (Law 4): no auth credentials cross domain boundaries.
 - **FR-13.** Memory service:
   - 4 MCP tools: `remember`, `recall`, `memories`, `forget`.
   - 3 scopes: `org`, `project`, `user`.
@@ -258,7 +259,7 @@ A milestone has: `id` (ULID), `parent_milestone_id` (nullable self-reference FK)
 
 #### Membership (1:1)
 
-A work item can belong to **exactly one** milestone (`workitems.item_milestone` junction with PK on `item_id`). The milestone can be at **any level** of the tree:
+A work item can belong to **exactly one** milestone (modelled as a `milestone_id` column on `workitems.items`, with `milestone_assigned_at` / `milestone_assigned_by` audit columns on the same row — single source of truth, no junction table). The milestone can be at **any level** of the tree:
 
 - An epic that spans the whole quarter → `milestone_id = Q1`
 - A task assigned to a specific sprint → `milestone_id = Sprint 1.3`
@@ -385,7 +386,9 @@ Authoritative state transitions enforced at the MCP boundary (FR-14, Law 8 layer
 | `review_state=pending` | `review_state=needs_rework` | `impl_state=done`; comment trail includes `kind=review, status=warning` |
 | `qa_state=pending` | `qa_state=passed` | `review_state=approved`; comment trail includes `kind=qa, status=success` |
 | `qa_state=pending` | `qa_state=failed` | `review_state=approved`; comment trail includes `kind=qa, status=error` |
-| `Status=*` | `Status=Done` | `qa_state=passed` (or `pipeline_state=needs_human` with manual override path) |
+| `qa_state=failed` | `qa_state=passed` | **Override path** — comment trail includes `kind=override, status=warning` with `body` length ≥ 20 chars; user-confirmed via Quinn (§6.11). Sets `is_override=true` on the qa-state event audit |
+| `pipeline_state=running` | `pipeline_state=needs_human` | 3× `review_state=needs_rework` on the same item OR 3× `qa_state=failed` OR claim conflict OR worktree conflict OR explicit `mcp.flag_human` call |
+| `Status=*` | `Status=Done` | `qa_state=passed` (which is reached either via the qa PASS row above, or via the override path row above) |
 
 The state machine is a function of the three dimensions plus `pipeline_state`. Transitions are exposed as MCP tool calls (`set_state`, `claim`, `close`); the agent prompt structure (FR-16) carries the same preconditions as explicit BLOCK conditions; the post-dispatch validator (FR-15) re-validates after every dispatch.
 
@@ -522,7 +525,7 @@ Copilot local: zero hooks (no programmable hook surface). The dispatch conventio
 - **NFR-1 — Latency.** `prime → ready → claim` p99 < 2 s warm cache (Law 7). Measured end-to-end from MCP call ingress to response egress; warm cache means a Postgres connection pool already established and the agent already authenticated.
 - **NFR-2 — Tenant isolation.** Zero cross-tenant RBAC leaks. Enforced by an exhaustive security regression suite that runs against every release candidate; any failure is release-blocking.
 - **NFR-3 — Source-of-truth durability.** Postgres is the canonical store (Law 3). Provider outages must not stop the product from operating; reconciliation runs on a schedule.
-- **NFR-4 — BFF discipline.** The browser never holds backend credentials (Law 4). Astro Actions are the only privileged client; HttpOnly cookies live on the Astro origin only; the Encore API is unreachable from the browser except for the three documented public endpoints (FR-12).
+- **NFR-4 — BFF discipline.** The browser never holds backend credentials (Law 4). Astro Actions are the only privileged client; HttpOnly cookies live on the Astro origin only; the Encore API is unreachable from the browser except for the documented public endpoints (FR-12). The OAuth callback is on the Astro origin, never on Encore.
 - **NFR-5 — Graph integrity.** The dependency graph is a DAG at all times; cycle creation is rejected at write time, never tolerated and lazily detected.
 - **NFR-6 — Pipeline structural enforcement.** Bypassing the pipeline must require simultaneous bypass of all three layers (FR-14, FR-15, FR-16). A design that fails this property is wrong by definition (Law 8).
 - **NFR-7 — Memory secret sanitisation.** Always on; no opt-out at v1. Detection is best-effort; warning is mandatory; the sanitised form is what is stored.
@@ -547,7 +550,7 @@ The project ships in four sequential phases plus a renderer phase. The AST CLI s
 - Encore Go on a single Postgres (8 schemas).
 - Services: `auth`, `org`, `workitems`, `deps`, `memory`.
 - Minimal MCP server with **14 tools** over SSE.
-- Public endpoints: `POST /webhooks/github`, `GET /mcp/sse`, `GET /auth/callback`.
+- Public Encore endpoints: `POST /webhooks/github`, `GET /mcp/sse` (OAuth callback is on Astro origin per FR-12).
 - Exit criterion: an agent can authenticate via Bearer API key and complete `prime → ready → claim → close` against a manually-seeded graph; cascade fires; cycle detection rejects offending edges.
 
 ### P02 — Backend complete
@@ -719,4 +722,4 @@ None at PRD time. All eight discovery questions are resolved in §1–§12 and t
 
 ---
 
-**Status: DRAFT.** Ready for user review. Approval flips status to APPROVED and unlocks `/architecture` (Ada, the architect, consumes this PRD as input to `docs/SPEC.md`).
+**Status: APPROVED 2026-05-07.** Ready for `/architecture` (Ada — architect consumes this PRD as input to `docs/SPEC.md`).
