@@ -36,10 +36,14 @@ Three deliverables:
 2. **`apps/web/`** — Astro 5 frontend on Cloudflare Pages with `line://ui`
    headless Web Components. Astro Actions act as a BFF; the browser never
    touches Encore directly.
-3. **`crates/`** — Rust workspace producing `unblock-code`, a standalone
-   one-shot CLI that indexes source code into a local SQLite + FTS5 database
-   and answers structured queries (find-symbol, outline, search). Decoupled
-   from the backend by design.
+3. **`crates/`** — Rust workspace producing two binaries distributed via
+   cargo-dist + Homebrew + npm:
+   - `unblock-code` — standalone, one-shot CLI that indexes source code into
+     a local SQLite + FTS5 database and answers structured queries
+     (find-symbol, outline, search). Decoupled from the backend by design.
+   - `unblock-plugin` — mister-anderson workflow renderer that emits agents,
+     skills, hooks, and MCP config onto Claude Code, GitHub Copilot cloud,
+     and GitHub Copilot local from a single typed catalogue.
 
 GitHub and GitLab are **event sources** (webhooks, OAuth identity), not the
 source of truth. Postgres stores everything. Go computes everything.
@@ -53,7 +57,7 @@ unblock/
 ├── apps/
 │   ├── api/                        # Encore Go backend (8 services, 1 Postgres, 8 schemas)
 │   └── web/                        # Astro 5 + line-ui (BFF via Astro Actions)
-├── crates/                         # Rust workspace for unblock-code AST CLI
+├── crates/                         # Rust workspace: unblock-code (AST CLI) + unblock-plugin (m-a renderer)
 ├── docs/
 │   ├── MANIFESTO.md                # (to be written by Stage 1)
 │   ├── PRD.md                      # (to be written by Stage 1)
@@ -100,27 +104,38 @@ unblock/
 - **Live updates**: Encore Streaming (WebSocket-backed `StreamIn`/`Out`/`InOut`), nanostores for shared island state. **No TanStack Query** (Astro-native patterns suffice)
 - **Custom non-line-ui components**: `<DependencyGraph>` (canvas + d3-force), `<RoadmapTimeline>` (SVG Gantt), `<KanbanBoard>` (`@dnd-kit/core`), `<MarkdownEditor>` (`@tiptap/core`)
 
-### AST CLI (`crates/`)
+### Rust workspace (`crates/`)
 
 - **Language**: Rust (edition 2024)
-- **Workspace**: 3 crates planned — `unblock-indexer-core` (pure types, AST traversal), `unblock-indexer` (sqlx + FTS5 + statically-linked tree-sitter grammars), `unblock-code` (clap-based bin)
-- **Storage**: local SQLite + FTS5 + WAL at `~/.cache/unblock/repos/<repo-hash>/index.db`
-- **Grammars**: 10 statically-linked tree-sitter grammars (8 default: Rust/TS/JS/Python/Go/Java/C/PHP; opt-in: cpp/ruby)
-- **Commands**: 11 (find-symbol, list-symbols, outline, get-symbol, search, find-references, reindex, status, languages, init, parse)
-- **Distribution**: cargo-dist → cross-platform binaries; Homebrew tap; npm wrapper
-- **Decoupled from the backend by design** — `unblock-code` and the issue-tracker `mcp` service share zero runtime state. See `docs/code-cli/spec.md` §3.
+- **Workspace**: 4 crates planned, distributed as 2 binaries
+  - `unblock-indexer-core` (lib) — pure types, AST traversal, schema constants
+  - `unblock-indexer` (lib) — sqlx + FTS5 + statically-linked tree-sitter grammars + filesystem walker
+  - `unblock-code` (bin) — clap-based AST CLI
+  - `unblock-plugin` (bin) — mister-anderson workflow renderer (agents, skills, hooks, MCP config) onto Claude Code + Copilot cloud + Copilot local
+- **AST CLI storage**: local SQLite + FTS5 + WAL at `~/.cache/unblock/repos/<repo-hash>/index.db`
+- **AST CLI grammars**: 10 statically-linked tree-sitter (8 default: Rust/TS/JS/Python/Go/Java/C/PHP; opt-in: cpp/ruby)
+- **AST CLI commands**: 11 (find-symbol, list-symbols, outline, get-symbol, search, find-references, reindex, status, languages, init, parse)
+- **Plugin renderer**: typed catalogue (8 fixed personas, dynamic supervisors, 20 skills, 3 hooks) → emits `.claude/agents/`, `.claude/skills/`, `.github/agents/`, `.claude/hooks/`, `.claude/settings.json`, `.github/copilot-instructions.md` per target. CLI: `unblock-plugin render --target=<t> --supervisors=<list> --out=<dir>`.
+- **Distribution**: cargo-dist → cross-platform binaries; Homebrew tap; npm wrapper. Both binaries share the same release pipeline.
+- **AST CLI decoupling**: `unblock-code` and the issue-tracker `mcp` service share zero runtime state (Manifesto Law 6). See `docs/code-cli/spec.md` §3.
 
 ---
 
 ## Supervisors
 
 Implementation supervisors are technology-specific and dispatched per task by
-`/do`. The active set after Stage 1 will be:
+`/do`. They follow the mister-anderson dynamic-supervisor naming convention.
+The active set for `://unblock` after Stage 1:
 
-- `go-supervisor` — Encore Go services (`apps/api/`)
-- `astro-supervisor` — Astro 5 + line-ui frontend (`apps/web/`)
-- `rust-supervisor` — Rust workspace for `unblock-code` (`crates/`)
-- `infra-supervisor` — CI/CD, Cloudflare Pages, Encore Cloud deployment, secrets
+- **Greta** — Go (`apps/api/`, Encore services)
+- **Aria** — TypeScript / Astro / line-ui (`apps/web/`)
+- **Neo** — Rust (`crates/`, both `unblock-code` and `unblock-plugin`)
+- **Olive** — Infrastructure / CI-CD (Encore Cloud deployment, Cloudflare
+  Pages, GitHub Actions, secrets management)
+
+The 8 fixed mister-anderson agents (Grace, Ada, Smith, Sherlock, Fernando,
+Linus, Quinn, Daphne) are workflow-level and stage-bound; the supervisors
+above are stack-bound and dispatched only by `/do`.
 
 These do not exist yet in `.claude/agents/` for the new layout — they are
 created via `/add-supervisor` when Stage 3 begins.
