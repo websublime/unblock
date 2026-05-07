@@ -1,15 +1,41 @@
-/target
-docs/desktop
+# macOS
 .DS_Store
 
-# Dolt database files (added by bd init)
+# Beads / Dolt
+.beads-credential-key
+.beads/issues.jsonl
 .dolt/
 *.db
 
-# Beads / Dolt files (added by bd init)
-.beads-credential-key
+# Rust workspace (apps + crates)
+target/
+crates/target/
+**/target/
 
-# Beads runtime snapshot (Dolt is the source of truth; this file mutates on
-# every bd command and creates diff noise. Local-only setup — no git-based
-# sync — so untracking is safe.)
-.beads/issues.jsonl
+# Encore
+apps/api/.encore/
+apps/api/encore.gen/
+
+# Astro / Node
+node_modules/
+**/node_modules/
+apps/web/.astro/
+apps/web/dist/
+apps/web/.wrangler/
+
+# Generated TS clients (regenerated at build time)
+apps/web/src/lib/encore-client.ts
+
+# Local environment
+.env
+.env.local
+.env.*.local
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*~
+
+# Archived v1 artifacts (untracked desktop docs from rust-v1 era)
+temp

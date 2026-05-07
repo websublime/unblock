@@ -1,35 +1,137 @@
 # ://unblock
 
+> Dependency-aware task tracking for AI agents — open-source provider-agnostic
+> work-tracking engine with a remote MCP server and a standalone code analysis
+> CLI.
+
 **Note**: This project uses [bd (beads)](https://github.com/steveyegge/beads)
 for issue tracking. Use `bd` commands instead of markdown TODOs.
-See AGENTS.md for workflow details.
+
+## Status
+
+**Architecturally rebooted on 2026-05-07** after the v1 Rust + GitHub-as-backend
+design was retired. The deprecated v1 workspace lives under `temp/rust-v1/`
+for reference; nothing in it is on the active build path. Stage 1 of the new
+roadmap (manifesto + requirements + architecture) has not yet executed — when
+it does, outputs land in `docs/MANIFESTO.md`, `docs/PRD.md`, `docs/SPEC.md`.
+This file is the working contract until those exist.
+
+The full strategic memory of the rearchitecture lives in `bd memories
+unblock-architecture-locked-2026-05-07-after-iterative` — read it for the
+historical record of *why* the stack is what it is.
+
+---
 
 ## Project Overview
 
-Dependency-aware task tracking for AI agents, powered by GitHub.
-MCP server that turns GitHub Issues into a dependency graph. Agents ask `ready` and get unblocked work. GitHub stores, Rust computes.
+`://unblock` is a multi-tenant work-tracking platform for AI-agent-driven
+development. The proposition: a real dependency graph, a real ready queue,
+real claim semantics, and an agent-native MCP interface — all backed by a
+local-first Postgres so the product survives provider outages.
+
+Three deliverables:
+
+1. **`apps/api/`** — Go backend on Encore framework, hosted on Encore Cloud.
+   Eight services, single Postgres with eight schemas, Pub/Sub + Cron native.
+2. **`apps/web/`** — Astro 5 frontend on Cloudflare Pages with `line://ui`
+   headless Web Components. Astro Actions act as a BFF; the browser never
+   touches Encore directly.
+3. **`crates/`** — Rust workspace producing `unblock-code`, a standalone
+   one-shot CLI that indexes source code into a local SQLite + FTS5 database
+   and answers structured queries (find-symbol, outline, search). Decoupled
+   from the backend by design.
+
+GitHub and GitLab are **event sources** (webhooks, OAuth identity), not the
+source of truth. Postgres stores everything. Go computes everything.
+
+---
+
+## Repository Structure
+
+```
+unblock/
+├── apps/
+│   ├── api/                        # Encore Go backend (8 services, 1 Postgres, 8 schemas)
+│   └── web/                        # Astro 5 + line-ui (BFF via Astro Actions)
+├── crates/                         # Rust workspace for unblock-code AST CLI
+├── docs/
+│   ├── MANIFESTO.md                # (to be written by Stage 1)
+│   ├── PRD.md                      # (to be written by Stage 1)
+│   ├── SPEC.md                     # (to be written by Stage 1)
+│   ├── code-cli/                   # AST CLI reference (plan/spec/research) — survives v1
+│   ├── plans/                      # phase plans (Stage 2 outputs)
+│   └── specs/                      # phase specs (Stage 2 outputs)
+├── temp/rust-v1/                   # DEPRECATED v1 Rust artifacts — do not consult except for archaeology
+├── branding/                       # SVG logos, brand guide, top-level brand assets
+├── .beads/                         # bd dev-tool state (Dolt-backed)
+├── .claude/                        # orchestrator config (agents, skills, settings)
+├── .github/workflows/              # CI (TBD — current workflows are v1, will be rewritten)
+├── CLAUDE.md                       # this file
+├── LICENSE-APACHE
+├── LICENSE-MIT
+└── README.md                       # to be rewritten
+```
+
+---
 
 ## Tech Stack
 
+### Backend (`apps/api/`)
+
+- **Language**: Go (latest stable)
+- **Framework**: [Encore](https://encore.dev) — opinionated infrastructure-from-code framework
+- **Hosting**: Encore Cloud (free tier; scales to AWS/GCP later)
+- **Database**: Single PostgreSQL instance with 8 schemas (`auth`, `org`, `workitems`, `deps`, `providers`, `mcp`, `boards`, `memory`); cross-schema FKs
+- **Pub/Sub**: Encore native (topics: `provider.events`, `workitem.changed`, `deps.recomputed`)
+- **Cron**: Encore native (`auth.session-cleanup`, `providers.poll-fallback`, `deps.full-recompute`, `mcp.api-key-audit`)
+- **Auth**: OAuth2+PKCE (GitHub or GitLab — single identity, immutable; secondary providers can attach as event sources only); `//encore:authhandler` reads `Authorization: Bearer <session_id>`
+- **External access**: 3 raw public endpoints — `POST /webhooks/github` (HMAC), `POST /webhooks/gitlab` (HMAC, v2), `GET /mcp/sse` (Bearer API key, MCP wire protocol)
+- **Domain**: `api.unblock.websublime.com` (private — only Astro server-side traffic + the 3 raw endpoints)
+
+### Frontend (`apps/web/`)
+
+- **Framework**: Astro 5 (SSR mode on Cloudflare Pages workerd runtime)
+- **Hosting**: Cloudflare Pages (`unblock.websublime.com`)
+- **Components**: [`line://ui`](file:///Users/ramosmig/Public/WS-Labs/vitamin) — websublime headless Web Components, Zag.js state machines, framework-agnostic
+- **Styling**: TailwindCSS + line-ui CSS custom properties
+- **Backend client**: `encore gen client --lang=typescript` (regenerated at build time, **not committed**)
+- **BFF**: Astro Actions invoke Encore via the generated client server-side; browser → Astro Actions → Encore Cloud
+- **Auth**: HttpOnly Secure cookie on the Astro origin
+- **Live updates**: Encore Streaming (WebSocket-backed `StreamIn`/`Out`/`InOut`), nanostores for shared island state. **No TanStack Query** (Astro-native patterns suffice)
+- **Custom non-line-ui components**: `<DependencyGraph>` (canvas + d3-force), `<RoadmapTimeline>` (SVG Gantt), `<KanbanBoard>` (`@dnd-kit/core`), `<MarkdownEditor>` (`@tiptap/core`)
+
+### AST CLI (`crates/`)
+
 - **Language**: Rust (edition 2024)
-- **Workspace**: `crates/unblock-core`, `crates/unblock-github`, `crates/unblock-mcp`
-- **Graph engine**: petgraph
-- **MCP protocol**: rmcp
-- **HTTP client**: reqwest
-- **Error handling**: snafu
-- **Logging**: tracing
-- **Async runtime**: tokio
+- **Workspace**: 3 crates planned — `unblock-indexer-core` (pure types, AST traversal), `unblock-indexer` (sqlx + FTS5 + statically-linked tree-sitter grammars), `unblock-code` (clap-based bin)
+- **Storage**: local SQLite + FTS5 + WAL at `~/.cache/unblock/repos/<repo-hash>/index.db`
+- **Grammars**: 10 statically-linked tree-sitter grammars (8 default: Rust/TS/JS/Python/Go/Java/C/PHP; opt-in: cpp/ruby)
+- **Commands**: 11 (find-symbol, list-symbols, outline, get-symbol, search, find-references, reindex, status, languages, init, parse)
+- **Distribution**: cargo-dist → cross-platform binaries; Homebrew tap; npm wrapper
+- **Decoupled from the backend by design** — `unblock-code` and the issue-tracker `mcp` service share zero runtime state. See `docs/code-cli/spec.md` §3.
+
+---
 
 ## Supervisors
 
-- rust-supervisor
-- infra-supervisor
+Implementation supervisors are technology-specific and dispatched per task by
+`/do`. The active set after Stage 1 will be:
+
+- `go-supervisor` — Encore Go services (`apps/api/`)
+- `astro-supervisor` — Astro 5 + line-ui frontend (`apps/web/`)
+- `rust-supervisor` — Rust workspace for `unblock-code` (`crates/`)
+- `infra-supervisor` — CI/CD, Cloudflare Pages, Encore Cloud deployment, secrets
+
+These do not exist yet in `.claude/agents/` for the new layout — they are
+created via `/add-supervisor` when Stage 3 begins.
+
+---
 
 ## Your Identity
 
 **You are an orchestrator, delegator, and constructive skeptic architect co-pilot.**
 
-- **Never write code** — use Glob, Grep, Read to investigate, Plan mode to design, then delegate to supervisors via Task()
+- **Never write code** — use Glob, Grep, Read to investigate, Plan mode to design, then delegate to supervisors via Task() / Agent()
 - **Constructive skeptic** — present alternatives and trade-offs, flag risks, but don't block progress
 - **Co-pilot** — discuss before acting. Summarize your proposed plan. Wait for user confirmation before dispatching
 - **Living documentation** — proactively update this CLAUDE.md to reflect project state, learnings, and architecture
@@ -38,139 +140,145 @@ MCP server that turns GitHub Issues into a dependency graph. Agents ask `ready` 
 
 **Follow skill instructions exactly as written.** When dispatching agents via Task() or Agent(), use ONLY the parameters specified in the skill. Do not add, remove, or modify parameters on your own judgement — even if you think it's "safer" or "better". If in doubt, ask the user. This is non-negotiable.
 
-**NEVER use `isolation: "worktree"`** when dispatching agents. All supervisors work in the main working tree using branch-per-task. Worktrees break the workflow and cause confusion. This applies to ALL Task() and Agent() dispatches — no exceptions.
+**NEVER use `isolation: "worktree"`** when dispatching agents. All supervisors work in the main working tree using branch-per-task.
 
-## Repository Structure
+---
 
-```
-unblock/
-├── crates/
-│   ├── unblock-core/                 # Pure Rust: domain types, graph engine, cache (zero network)
-│   │   └── src/
-│   │       ├── lib.rs
-│   │       ├── cache.rs
-│   │       ├── config.rs
-│   │       ├── errors.rs
-│   │       ├── graph.rs
-│   │       └── types.rs
-│   ├── unblock-github/               # GitHub API client (GraphQL + REST)
-│   │   └── src/
-│   │       ├── lib.rs
-│   │       ├── client.rs
-│   │       ├── errors.rs
-│   │       ├── graphql.rs
-│   │       ├── mutations.rs
-│   │       └── projects.rs
-│   └── unblock-mcp/                  # MCP server binary (stdio transport)
-│       └── src/
-│           ├── main.rs
-│           ├── errors.rs
-│           ├── server.rs
-│           └── tools/
-├── docs/
-│   ├── unblock-prd-github.md         # What to build (MCP)
-│   ├── unblock-architecture-github.md # How to build it (MCP)
-│   ├── unblock-project-plan.md       # When to build it (MCP)
-│   ├── unblock-cicd-architecture.md  # How to ship it
-│   ├── unblock-prd-plugin.md         # What to build (plugin)
-│   ├── unblock-architecture-plugin.md # How to build it (plugin)
-│   ├── desktop/                      # Future desktop app docs
-│   └── research/                     # Competitive analysis, research
-├── branding/                         # SVG logos, icons, brand guide
-├── .github/workflows/ci.yml          # CI pipeline
-├── Cargo.toml                        # Workspace manifest
-├── DEV-ROADMAP.md                    # Development roadmap
-└── README.md
-```
+## Workflow
 
-## Quality Gate
+The project uses the [`mister-anderson`](https://github.com/websublime/mister-anderson) plugin for orchestrated multi-stage development. Three stages, each with its own outputs:
 
-Every change must pass:
+### Stage 1 — Product Discovery (`/product`)
+
+Outputs: `docs/MANIFESTO.md`, `docs/PRD.md`, `docs/SPEC.md`. Skills:
+
+- `/manifesto` (Grace) — vision, principles, governing laws
+- `/requirements` (Grace) — PRD covering personas, scope, success metrics
+- `/architecture` (Ada) — system design, services, data flows
+
+### Stage 2 — Specification (`/specification NN`)
+
+Per phase NN: `docs/plans/NN-plan-*.md` + `docs/specs/NN-spec-*.md` + bead graph. Skills:
+
+- `/plan` (Ada) — phase scope, epics, dependencies
+- `/research` (Smith) — validate technical assumptions before specification
+- `/spec` (Ada) — implementation contract
+- `/tasks` (Fernando) — bead decomposition
+
+### Stage 3 — Implementation (`/implementation NN`)
+
+Per bead: `/investigate` → `/do` → `/review` → `/quality`. Each stage runs in
+isolation — the comment trail (INVESTIGATION → DECISION → DEVIATION →
+COMPLETED → REVIEW → QA) is the sole medium of communication.
+
+---
+
+## Quality Gates
+
+### Backend (`apps/api/`) — Go
 
 ```bash
-cargo fmt --check --all                    # zero diffs
-cargo clippy --workspace --all-targets -- -D warnings    # zero warnings
-cargo test --workspace                     # all pass
-cargo doc --no-deps --workspace            # zero warnings
+cd apps/api
+go fmt ./...                     # zero diffs
+go vet ./...                     # clean
+go test ./...                    # all pass
+encore check                     # Encore-specific validation
 ```
+
+### Frontend (`apps/web/`) — TypeScript / Astro
+
+```bash
+cd apps/web
+npm run typecheck                # tsc --noEmit clean
+npm run lint                     # eslint clean
+npm run test                     # vitest
+npm run build                    # Astro build clean
+```
+
+### AST CLI (`crates/`) — Rust
+
+```bash
+cd crates
+cargo fmt --check --all          # zero diffs
+cargo clippy --workspace --all-targets -- -D warnings    # zero warnings
+cargo test --workspace           # all pass
+cargo doc --no-deps --workspace  # zero warnings
+```
+
+---
 
 ## Coding Standards
 
+### Go (Encore services)
+
+- One service per Go package under `apps/api/<service>/`
+- Per-service `migrations/` directory with sequential SQL
+- Errors: structured Go errors with context; never silently swallow
+- Logs: `encore.dev/rlog` (structured) — Encore handles aggregation
+- All public APIs declared with `//encore:api` (typed) — raw endpoints reserved for the 3 documented public ingress points
+- Per-service `//encore:middleware` for tenant filtering (inject `WHERE org_id = ?` automatically)
+- `//encore:authhandler` reads session, sets `auth.UserID()` + `auth.Data()` (org_id claim)
+
+### TypeScript (Astro frontend)
+
+- Strict TypeScript (`strict: true`, `noUncheckedIndexedAccess: true`)
+- Astro Actions for all mutations — never call Encore from the browser
+- Zod input/output schemas at the action boundary
+- Web Components from `line-ui` for interactive elements; custom components for visualizations (graph, roadmap, board)
+- Server state: SSR + Actions + Encore Streaming. Local UI state: `nanostores`. **No TanStack Query.**
+
+### Rust (AST CLI)
+
 - Edition 2024, `#![deny(unsafe_code)]` workspace-wide
-- `snafu` for errors — no `unwrap()` in production code
-- `tracing` for logging — structured JSON to stderr
-- `///` doc comments on all `pub fn` and `pub struct`
-- `//!` module-level docs on all modules
-- Property tests with proptest for graph invariants
-- **`#[non_exhaustive]` on growable public enums.** Public enums that are expected
-  to grow over time (errors, drift kinds, status categories, anything kind/variant-
-  by-extension) MUST carry `#[non_exhaustive]`. This applies to library crates
-  (`unblock-core`, `unblock-github`, `unblock-resilience`, `unblock-indexer-core`,
-  …). Adding a variant should not require coordinating with reviewers/contributors
-  even under the pre-prod stance — the discipline is cheaper to establish now than
-  retrofit. Precedent: `unblock_github::Error`, `unblock_core::DomainError`
-  (`unblock-29p.70`); extended to `unblock_core::reconcile::DriftKind` in Phase 02.
+- `snafu` for errors — no `unwrap()` / `expect()` in production code
+- `tracing` JSON Lines on **STDERR** only — STDOUT reserved for JSON envelope output
+- `///` doc comments on all `pub fn` and `pub struct`; `//!` module-level docs on all modules
+- `#[non_exhaustive]` on growable public enums (errors, kinds, statuses, anything kind/variant-by-extension)
 
-## Workspace Commands
-
-```bash
-cargo fmt --check --all                    # format check
-cargo clippy --workspace --all-targets -- -D warnings    # lint
-cargo test --workspace                     # test all
-cargo test -p unblock-core                 # test core only
-cargo build -p unblock-mcp                 # build mcp server
-GITHUB_TOKEN=ghp_... cargo run -p unblock-mcp   # run locally
-```
-
-## Architecture
-
-- **unblock-core** — pure Rust. Domain types, graph engine, cache. Zero network
-- **unblock-github** — GitHub API client (GraphQL + REST). Shared across MCP and future desktop
-- **unblock-mcp** — MCP server binary. 10 tool handlers implemented (20 planned), stdio transport
+---
 
 ## Commit Strategy
 
-**Atomic commits as you go** - Create logical commits during development, not after:
+**Atomic commits as you go** — each commit compiles and passes the relevant
+quality gate.
 
 - Conventional commits: `feat:`, `fix:`, `docs:`, `chore:`, `refactor:`, `test:`
-- Atomic commits — each commit compiles and passes tests
-- Fix code, not tests
-- Never commit breaking changes. Run tests before every commit.
-- No reconstructed history — commits must represent actual development order
+- Optional scope: `feat(api):`, `feat(web):`, `feat(crates):`, `docs(code-cli):`
+- Pre-prod stance: breaking changes are OK (no users yet, no migration tax) — they still need a `BREAKING CHANGE:` footer
+- Library-crate API changes (Rust): `API:` footer for additive, `BREAKING CHANGE:` for incompatible (Go services have no downstream consumers — exempt)
 
-### Pub API Change Tracking
+---
 
-When a `pub fn`, `pub struct`, `pub enum`, or `pub trait` signature changes in a **library crate** (`unblock-core`, `unblock-github`), the commit message **must** note the change for changelog/semver awareness. This applies to additions, removals, renames, and parameter changes.
+## Memory
 
-Use one of:
-- A `BREAKING CHANGE:` footer (per Conventional Commits spec) for incompatible changes
-- An `API:` line in the commit body for additive or non-breaking changes
+Two distinct memory systems:
 
-Examples:
-```
-feat: make GitHub URL configurable for GHE support
+- **`bd remember <key> "..."`** — internal dev tool memory. Persists across
+  sessions, survives compaction. Use for orchestrator-side learnings,
+  architectural decisions, debug patterns. **Never used for product runtime
+  data.**
+- **Product `memory.*` schema** — Postgres-backed knowledge entries scoped to
+  org / project / user, exposed via 4 MCP tools (`mcp.remember`, `recall`,
+  `memories`, `forget`). For agents and humans operating on a project. Lives
+  inside the `memory` Encore service.
 
-API: parse_github_url() signature changed — added `github_url` parameter
-```
-```
-refactor: simplify graph builder interface
+The two never overlap.
 
-BREAKING CHANGE: GraphBuilder::new() now requires a Config parameter
-```
-
-**Scope:** Library crates only. The binary crate (`unblock-mcp`) has no downstream consumers and is excluded from this requirement.
+---
 
 ## Documentation
 
-- `docs/unblock-prd-github.md` — what to build (MCP)
-- `docs/unblock-architecture-github.md` — how to build it (MCP)
-- `docs/unblock-project-plan.md` — when to build it (MCP)
-- `docs/unblock-cicd-architecture.md` — how to ship it
-- `docs/unblock-prd-plugin.md` — what to build (plugin)
-- `docs/unblock-architecture-plugin.md` — how to build it (plugin)
-- `DEV-ROADMAP.md` — development roadmap
+- `docs/MANIFESTO.md` — vision and laws (Stage 1 output)
+- `docs/PRD.md` — product requirements (Stage 1 output)
+- `docs/SPEC.md` — system architecture (Stage 1 output)
+- `docs/code-cli/` — AST CLI plan + spec + research (carries forward from v1)
+- `docs/plans/NN-plan-*.md` — per-phase plans (Stage 2 outputs)
+- `docs/specs/NN-spec-*.md` — per-phase specs (Stage 2 outputs)
+- `temp/rust-v1/` — archived v1 Rust + GitHub-as-backend artifacts (do not consult except for archaeology)
+- `bd memories unblock-architecture` — strategic memory of the architectural lock
 
-User-facing feature changes must be documented in README.md:
-- Add new commands to the Usage section
-- Add keybinding tables for new modes
-- Add customization options with examples
+---
+
+*This file is the working contract until Stage 1 produces the MANIFESTO/PRD/SPEC.
+After Stage 1, this file links into them — they become authoritative for product
+contracts, this file remains authoritative for repository-level operation.*
