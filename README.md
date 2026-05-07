@@ -1,176 +1,214 @@
-# ://unblock — documentation
+# ://unblock
 
-> Documentation repository for [://unblock](https://github.com/websublime/unblock).  
-> Reference project: [arc-pm](https://github.com/websublime/arc-pm)
+> **Dependency-aware work tracking for AI agents.**
+> Open-source · provider-agnostic · agent-native.
+
+[![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-blue)](#license)
+[![Status](https://img.shields.io/badge/status-pre--1.0-orange)](#status)
 
 ---
 
-## Structure
+## What is `://unblock`?
+
+A work-tracking platform built for AI-agent-driven development. The dependency
+graph is the product — agents call `ready` and get unblocked work, claim it
+atomically, close it and watch dependents cascade. No flat issue lists. No
+graph-traversal cost on the agent side. No provider lock-in.
+
+Three deliverables, three orthogonal use cases:
+
+- **Backend + remote MCP** — Encore Go services on a single Postgres with 8
+  schemas. Exposes 18 MCP tools over SSE for AI agents (Claude Code,
+  GitHub Copilot, Cursor, custom). Work items, dependency graph engine,
+  atomic claim, structured comment trail, scoped project memory, GitHub /
+  GitLab webhook ingestion, three-layer pipeline state machine.
+- **`unblock-code` AST CLI** — Rust binary that indexes source code into a
+  local SQLite + FTS5 database. 11 structured queries (`find-symbol`,
+  `outline`, `search`, …). Saves AI-agent tokens that would otherwise burn
+  on `Glob` + `Grep` + `Read` chains. Standalone — does not consume the
+  backend.
+- **Astro web client** — humans-first triage and visualisation. Kanban,
+  dependency graph (force-directed), recursive-milestone roadmap, comment
+  threads. Backend-for-Frontend pattern via Astro Actions; the browser
+  never holds Encore credentials.
+
+The system runs **fully without the web UI** — the agent-facing surface is
+canonical. The web is a humans-first layer over a system that already
+operates.
+
+---
+
+## Status
+
+**Pre-1.0. Architecture locked 2026-05-07.** The previous v1 design (Rust
+crates + GitHub Issues as source of truth) was retired after the GitHub API
+instability of 2025 / 2026 made GitHub-Issues-as-canonical-store non-viable
+for AI-agent workloads. The retired artefacts live in `temp/rust-v1/`
+(local-only, gitignored).
+
+| Stage | Status | Artifact |
+|---|---|---|
+| Stage 1 — Manifesto | APPROVED | [`docs/MANIFESTO.md`](docs/MANIFESTO.md) |
+| Stage 1 — Product Requirements | DRAFT | [`docs/PRD.md`](docs/PRD.md) |
+| Stage 1 — System Architecture | pending | `docs/SPEC.md` |
+| Stage 2 — Phase plans + specs | pending | `docs/plans/`, `docs/specs/` |
+| Stage 3 — Implementation | pending | `apps/`, `crates/` |
+
+Stage 1 (Product Discovery — manifesto + requirements + architecture) is
+driven by the [mister-anderson](https://github.com/websublime/mister-anderson)
+plugin.
+
+---
+
+## Roadmap
+
+| Phase | Deliverable | Ships at |
+|---|---|---|
+| **P01** | Backend MVP — Encore Go + Postgres + 14 MCP tools | v1.0 |
+| **P02** | Backend complete — providers (GitHub) + 18 MCP tools + Layer 1 enforcement | v1.0 |
+| **P03** | AST CLI (`unblock-code`) v1.0.0 | v1.0 |
+| **P04** | mister-anderson plugin renderer — Layer 2 + 3 enforcement | v1.0 |
+| **P05** | Astro web (kanban + dep graph + roadmap + comments) | v1.1 (line-ui blocked) |
+
+**v1.0 launches headless** — the agent-facing surface (backend MCP + AST CLI
++ plugin pipeline) is fully usable without a web UI. **v1.1** adds the web
+client once [`line-ui`](https://github.com/websublime/vitamin) (websublime's
+headless Web Components library) reaches feature-complete v1.
+
+---
+
+## Architecture (high-level)
 
 ```
-docs/
-├── MANIFESTO.md          ← Soul of the product: why, beliefs, immutable laws
-├── PRD.md                ← Requirements: personas, market, phases, metrics
-├── SPEC.md               ← Master technical specification (all systems)
-├── plans/                ← Per-phase implementation plans (numbered)
-│   ├── 01-plan-mcp-foundation.md
-│   ├── 02-plan-mcp-complete.md
-│   └── 03-plan-mcp-production.md
-└── specs/                ← Per-component detailed specs (numbered)
-    ├── 01-spec-graph-engine.md
-    ├── 02-spec-github-client.md
-    └── 03-spec-mcp-tools.md
+┌─ apps/api/ ──────────────────────────────────────┐
+│  Encore Go — 8 services, 1 Postgres / 8 schemas │
+│                                                  │
+│  auth · org · workitems · deps · providers       │
+│  mcp · boards · memory                           │
+│                                                  │
+│  3 raw public endpoints:                         │
+│    POST /webhooks/github                         │
+│    POST /webhooks/gitlab  (v1.1)                 │
+│    GET  /mcp/sse                                 │
+└──────────────────────────────────────────────────┘
+           ▲                          ▲
+           │ Astro Actions BFF        │ MCP / SSE
+           │ (server-side only)       │ (Bearer API key)
+┌──────────┴──────┐    ┌──────────────┴────────────┐
+│ apps/web/        │    │ AI agents                 │
+│ Astro 5 + line-ui│    │ (Claude Code, Copilot, …) │
+│ Cloudflare Pages │    └───────────────────────────┘
+└──────────────────┘
+
+         ┄┄ standalone, no shared state ┄┄
+┌────────────────────────────────────────┐
+│ crates/                                │
+│   unblock-code (AST CLI, Rust)         │
+│   unblock-plugin (m-a renderer, Rust)  │
+│   Local SQLite + FTS5 (CLI only)       │
+└────────────────────────────────────────┘
 ```
 
-## Document hierarchy — abstract to concrete
+---
 
-| Level | Document | Answers | Tone |
-|-------|----------|---------|------|
-| 1 | **MANIFESTO** | *Why do we exist? What do we believe?* | Philosophical, declarative, immutable |
-| 2 | **PRD** | *What to build? For whom? In what order?* | Product, strategic — links to plans/specs |
-| 3 | **SPEC** | *How does it work technically?* | Engineering, precise, all sections |
-| 4 | **plans/** | *How to implement each module?* | Epics, tasks, definition of done |
-| 5 | **specs/** | *What are the algorithms and edge cases?* | Validation, invariants, error catalogues |
+## Stack
 
-## Patterns
+- **Backend** — Go on the [Encore](https://encore.dev) framework, deployed
+  on Encore Cloud (`api.unblock.websublime.com`)
+- **Database** — Single PostgreSQL with 8 schemas (cross-schema FKs); ULID
+  primary keys; `pgcrypto` symmetric encryption for sensitive columns
+- **Async / Cron** — Encore native Pub/Sub (`provider.events`,
+  `workitem.changed`, `deps.recomputed`) and Cron primitives
+- **Frontend** — [Astro 5](https://astro.build) on Cloudflare Pages
+  (`unblock.websublime.com`) +
+  [`line-ui`](https://github.com/websublime/vitamin) (websublime headless
+  Web Components on top of Zag.js state machines)
+- **Frontend ↔ Backend** — `encore gen client --lang=typescript` (regenerated
+  at build time) consumed by Astro Actions; the browser never reaches Encore
+  directly
+- **AST CLI** — Rust (edition 2024) workspace; `tree-sitter` + 10 statically
+  linked grammars (8 default: Rust, TypeScript, JavaScript, Python, Go,
+  Java, C, PHP; opt-in: C++, Ruby); `sqlx` (sqlite + FTS5 + WAL); `clap`
+- **MCP transport** — Remote MCP over SSE; agents authenticate with
+  `Authorization: Bearer <api_key>`
+- **Auth** — OAuth2 + PKCE via GitHub or GitLab; HttpOnly Secure cookie on
+  the Astro origin
+- **Distribution** — `cargo-dist` cross-platform binaries +
+  [Homebrew](https://brew.sh) tap + npm wrapper for both Rust binaries
 
-- **MANIFESTO is the foundation** — everything else is implementation detail
-- **Cross-referencing** — PRD header links to all plans and specs
-- **Consistent numbering** — plans and specs share the same number (`01-plan-*` ↔ `01-spec-*`)
-- **Companion links** — every document links to its related plan/spec
-- **Plans have a fixed structure**: Purpose → Rust Idioms → Public API Surface → Epics → Definition of Done
+---
 
-## Source material
+## Repository structure
 
-The `docs/archive/` directory contains the original documentation written before this structure was adopted. Preserved for reference but superseded by the documents above.
-
-## Token scopes
-
-The configured `GITHUB_TOKEN` (PAT or GitHub App) drives both the live
-test job and the production MCP server. The required scopes depend on
-which `setup` operations are exercised:
-
-- `repo` — required for issue read/write, REST mutations, GraphQL
-  read queries, and Projects V2 item placement.
-- `project` — required for Projects V2 field management
-  (`createProjectV2Field`, `updateProjectV2Field`, view CRUD).
-- `read:org` — required for **reading** org-level GitHub issue types
-  during `setup_fields` (always read; idempotent diff against the
-  canonical eight `Task`, `Bug`, `Feature`, `Spike`, `Epic`, `Chore`,
-  `Refactor`, `Docs`).
-- `admin:org` — required ONLY when `setup_fields`'s `IssueType`
-  ensure-and-heal step needs to **create** missing org-level issue
-  types (`POST /orgs/{org}/issue-types`). Subsequent `setup` runs
-  against an org that already carries all eight canonical types only
-  need `read:org`. When the token lacks `admin:org` and creation is
-  needed, the server surfaces a typed
-  `IssueTypeManagementForbidden { org }` error pointing operators at
-  the upgrade path. Org admins can also pre-create the eight canonical
-  issue types in the org settings UI as a no-token-elevation alternative.
-
-See [docs/specs/01-spec-mcp-foundation.md §5.7][spec-§5.7] for the
-ensure-and-heal contract and [§12][spec-§12] for the full token-scope
-matrix.
-
-[spec-§5.7]: docs/specs/01-spec-mcp-foundation.md
-[spec-§12]: docs/specs/01-spec-mcp-foundation.md
-
-## Create-time defaults
-
-The `create` MCP tool resolves four default-bearing project fields
-deterministically before issuing any GitHub mutation. The precedence
-table below is normative — see
-[docs/specs/01-spec-mcp-foundation.md §8.3][spec-§8.3]:
-
-| Field       | If `params.<x>` is `Some`               | If `params.<x>` is `None`                                                  |
-|-------------|------------------------------------------|----------------------------------------------------------------------------|
-| `Status`    | (server-managed — no param)              | `Backlog` (sticky default per `unblock-1zj`; only explicit transitions move out) |
-| `Priority`  | use the validated value                  | `P2` — Medium                                                              |
-| `Agent`     | use the validated non-empty value        | `state.agent_kind_str()` if a known agent kind was detected, else **omit** |
-| `IssueType` | use the canonical name (case-insensitive) | `Task`                                                                     |
-
-Note: `config.agent` is NOT consulted by `claim` or `create` — the
-`UNBLOCK_AGENT` env var is preserved for legacy/test purposes only
-(see [§12][spec-§12]).
-
-The eight canonical `IssueType` variants are sourced from
-`unblock_core::types::IssueType::canonical_name`: `Task`, `Bug`,
-`Feature`, `Spike`, `Epic`, `Chore`, `Refactor`, `Docs`. The `update`
-tool's `issue_type` param accepts the same set with case-insensitive
-matching, but per [§8.6][spec-§8.6] follows an
-absence-leaves-unmodified rule (no fallback chain — explicit
-opt-in only).
-
-[spec-§8.3]: docs/specs/01-spec-mcp-foundation.md
-[spec-§8.6]: docs/specs/01-spec-mcp-foundation.md
-
-## CI live tests
-
-The `test-mcp-live` job in `.github/workflows/ci.yml` exercises the live GitHub API path of `unblock-mcp` (the `#[ignore]` integration tests under `crates/unblock-mcp/tests/`). It runs only on first-party events — pushes to `main`, scheduled nightly builds, manual `workflow_dispatch`, and PRs whose head branch lives in this repository — so forked PRs never see the secret.
-
-The job has a preflight step that fails fast with an actionable error if any of the three required repository settings is missing. To configure them on a fresh clone, run (with `gh` authenticated against `websublime/unblock`):
-
-```bash
-# Repository secret — fine-grained PAT or classic PAT with `repo` + `project` scopes
-# (plus `read:org` for IssueType ensure-and-heal; add `admin:org` ONLY if the test
-#  org does not already have the eight canonical types — see Token scopes above)
-gh secret set UNBLOCK_TEST_TOKEN --body '<github-pat>'
-
-# Repository variable — the owner/repo string the live tests should hit
-gh variable set UNBLOCK_TEST_REPO --body 'websublime/unblock'
-
-# Repository variable — the GitHub Project (Projects V2) number used by the e2e_workflow test
-gh variable set UNBLOCK_TEST_PROJECT --body '<project-number>'
+```
+unblock/
+├── apps/
+│   ├── api/                Encore Go backend (8 services)
+│   └── web/                Astro 5 + line-ui (P05, v1.1)
+├── crates/                 Rust workspace
+│   ├── unblock-indexer-core/   pure types, AST traversal
+│   ├── unblock-indexer/        sqlx + FTS5 + grammars
+│   ├── unblock-code/           AST CLI binary
+│   └── unblock-plugin/         mister-anderson renderer binary
+├── docs/
+│   ├── MANIFESTO.md            vision · principles · governing laws (immutable)
+│   ├── PRD.md                  product requirements (personas, scope, phasing)
+│   ├── SPEC.md                 system architecture (post-Stage-1)
+│   ├── code-cli/               AST CLI design (plan, spec, research)
+│   ├── plans/                  per-phase plans (Stage 2 outputs)
+│   └── specs/                  per-phase specs (Stage 2 outputs)
+├── branding/                   SVG logos, brand guide
+├── temp/rust-v1/               retired v1 artefacts (gitignored, archaeology only)
+├── CLAUDE.md                   operator manual for the Claude orchestrator
+├── LICENSE-APACHE
+├── LICENSE-MIT
+└── README.md                   this file
 ```
 
-The `coverage` job (mock-only) runs on every PR and the `test-mcp-live` job covers both live execution and live coverage in a single tarpaulin pass on first-party events. Codecov merges the two reports under the `mock` and `live` flags; the >80% target in spec §13.2 applies to combined coverage.
+---
 
-### Clean-state contract for the test project
+## Documentation
 
-The live test job mutates the GitHub Project pointed at by `UNBLOCK_TEST_PROJECT`. Five invariants govern its starting state on every run:
+| Document | Purpose |
+|---|---|
+| [`docs/MANIFESTO.md`](docs/MANIFESTO.md) | Vision, 8 principles, 8 governing laws, out-of-scope. **Immutable.** |
+| [`docs/PRD.md`](docs/PRD.md) | Product requirements — personas, functional / non-functional requirements, product catalogues (state model, milestones, comments, findings, personas, skills), phasing, metrics, risks |
+| [`docs/SPEC.md`](docs/SPEC.md) | System architecture — Postgres DDL, MCP tool signatures, service interfaces, Pub/Sub topic schemas (post-Stage-1) |
+| [`docs/code-cli/`](docs/code-cli/) | AST CLI plan, spec, research (carries forward verbatim from the v1 Phase 03 design) |
+| [`CLAUDE.md`](CLAUDE.md) | Repository operator manual — orchestrator role, supervisor map, quality gates per language, coding standards |
 
-1. **The 6 unblock-managed custom fields must NOT exist on the project.** They are: `Priority`, `PipelineStage`, `Agent`, `ClaimedAt`, `StoryPoints`, `DeferUntil`. The `setup_fields` flow creates them and the test asserts on the post-creation field IDs; a stale, half-configured set from a previous failed run breaks the assertion or trips a `Name has already been taken` collision under parallel test execution.
-2. **The built-in `Status` field is left in place.** GitHub Projects V2 forbids deleting the built-in Status field (`deleteProjectV2Field` returns `Only custom fields can be deleted`). `setup_fields` auto-heals the Status options to the spec's canonical set (`Backlog`, `Ready`, `In Progress`, `Blocked`, `Deferred`, `Closed` — TitleCase, board order; sourced from `Status::option_name`, see spec §5.7) on every run by issuing `updateProjectV2Field` against the existing field id, so no manual surgery is required for Status. The auto-heal matcher reuses existing option IDs across the lowercase → TitleCase rename via a normalised name comparison, so item assignments survive the migration.
-3. **Fixture issues are wiped before every CI run.** Every live test attaches the canonical `unblock-fixture` label to every issue it creates via the `fixture_labels()` test helper. The CI live job invokes `scripts/setup-test-project.sh --wipe-issues` before tarpaulin starts; the wipe enumerates all OPEN `unblock-fixture` issues in the test repo, closes them, and removes their `ProjectV2Item` cards from the board (close-only would leave the cards visible — `close_issue` is a REST PATCH `state: closed`, not a delete, and Projects V2 keeps closed items as cards until `deleteProjectV2Item` is called). This is the deterministic safety-net for the panic-path Drop guards in the test files, which fire-and-forget cleanup via `tokio::spawn` and silently skip when the runtime is torn down before the spawned task is polled (bead `unblock-ekf` documented best-effort caveat).
-4. **Project views are NOT auto-cleaned — they are reused instead.** GitHub Projects V2 exposes no public API to delete a project view (no `deleteProjectV2View` in GraphQL, no `DELETE /views` endpoint in REST; verified against the v2 schema and 2026-03-10 REST OpenAPI). The three view-creation tests (`create_view_board_and_list_views`, `create_view_table_layout`, `create_view_roadmap_layout`) reuse fixed canonical names — `test-board-fixture`, `test-table-fixture`, `test-roadmap-fixture` — and check for pre-existence before calling `create_view`. View count on the test project stays bounded at exactly 3 fixtures across all runs. If a fixture view drifts (wrong layout, accidental rename), an operator must delete it manually via the GitHub Web UI; the next live test run will recreate it from canonical params.
-5. **Repo labels are wiped before every CI run too.** The live test surface is pinned to exactly two canonical labels — `unblock-fixture` (the wipe anchor applied to every fixture issue) and `unblock-test-label` (the per-test discriminator used by `e2e_workflow` and the `ensure_labels` integration test). The CI live job invokes `scripts/setup-test-project.sh --wipe-labels` after the issues wipe; it enumerates all repo labels, deletes any whose name matches the orphan test patterns (`e2e-test-*`, `test-label-*`, `unblock-run-*`), and preserves the two canonical labels plus every production label that doesn't match a test pattern. Cycle 1 of bead `unblock-1hz` had introduced a per-run `unblock-run-<millis>` label; cycle 2 dropped it because the per-run label was accumulating in the test repo (~7 occurrences per CI run, no upstream bulk-delete API) — the same accumulation problem that drove the views fixed-name refactor, applied to labels.
+---
 
-To bootstrap a fresh project (or recover from a partial run) — custom-fields wipe:
+## Operating model
 
-```bash
-scripts/setup-test-project.sh <owner> <project-number>
-```
+`://unblock` is built using the
+[mister-anderson](https://github.com/websublime/mister-anderson) plugin —
+an agent-orchestrated development workflow. Three stages, each with its own
+structured artifacts and quality gates:
 
-The script is idempotent: it lists the project's fields, deletes any that match the 6-name list, and exits 0 with no changes when the project is already clean. It does not touch the built-in Status field. Requires `gh` authenticated against the target owner with `project` + `repo` scopes, and `jq`.
+1. **Stage 1 — Product Discovery** → `docs/MANIFESTO.md`, `docs/PRD.md`,
+   `docs/SPEC.md`
+2. **Stage 2 — Phase Specification** → `docs/plans/NN-plan-*.md` +
+   `docs/specs/NN-spec-*.md` per phase
+3. **Stage 3 — Implementation** → per-bead pipeline:
+   `/investigate → /do → /review → /quality`
 
-To wipe accumulated fixture issues + their project board cards (run before or after a manual live test session):
+Eight workflow personas (Grace, Ada, Smith, Sherlock, Fernando, Linus,
+Quinn, Daphne) plus stack-specific dynamic supervisors (Greta = Go, Aria
+= Astro / TypeScript, Neo = Rust, Olive = Infra / CI-CD) drive the
+pipeline. See [`CLAUDE.md`](CLAUDE.md) for the full operator manual.
 
-```bash
-scripts/setup-test-project.sh --wipe-issues <owner> <project-number> <repo>
-```
+---
 
-The third positional `<repo>` is the bare repository name (not `owner/repo`). The mode lists every OPEN issue in `<owner>/<repo>` carrying the canonical `unblock-fixture` label, closes them (via `gh issue close`), and removes their corresponding `ProjectV2Item` cards from `<project-number>` (via the `deleteProjectV2Item` GraphQL mutation). Idempotent: a no-op when no open fixture issues exist. View cleanup is not performed — see invariant 4 above.
+## Contributing
 
-To wipe accumulated orphan test labels (run before or after a manual live test session, or as a one-time backlog cleanup):
+Pre-1.0; **not currently accepting external contributions**. Architectural
+decisions are still being locked. Open issues for ideas; pull requests are
+welcome but may be deferred until v1.0 ships.
 
-```bash
-scripts/setup-test-project.sh --wipe-labels <owner> <repo>
-```
-
-The `--wipe-labels` mode lists every label in `<owner>/<repo>` and deletes those whose name matches one of the orphan test glob patterns (`e2e-test-*`, `test-label-*`, `unblock-run-*`). The two canonical labels (`unblock-fixture`, `unblock-test-label`) are preserved by name even if their name matches a pattern, and every production label that doesn't match a test pattern is preserved as well — the deletion criterion is pattern match AND not-canonical, so a real label called `test` (or any operator-managed label) is left intact. Idempotent.
-
-The three mutating modes are orthogonal — to perform multiple wipes, run the script multiple times. `--wipe-issues` does NOT trigger custom-fields cleanup or label cleanup, the default custom-fields mode does NOT touch issues or labels, and `--wipe-labels` does NOT touch issues or fields. This keeps the existing `--check` semantics on the custom-fields path unchanged and avoids the ambiguity of a combined `--all` flag.
-
-To assert the project is in the canonical clean state without mutating it (useful as a CI preflight or local sanity check), pass `--check`:
-
-```bash
-scripts/setup-test-project.sh --check <owner> <project-number>
-```
-
-`--check` (or its alias `--dry-run`) lists any stale unblock-managed custom fields and exits **non-zero (4)** when drift is present, exits 0 when the project is already clean. Re-run without `--check` to actually delete them. `--check`, `--wipe-issues` and `--wipe-labels` are pairwise mutually exclusive.
-
-The live test job runs `cargo tarpaulin ... -- --ignored --test-threads=1` to serialise the `#[ignore]` integration tests. Without the serialisation guard, the two test files that both call `setup_fields` against the shared test project (`crates/unblock-github/tests/integration.rs::setup_fields_creates_all_seven_fields` and `crates/unblock-mcp/tests/e2e_workflow.rs::e2e_workflow_all_10_tools`) race and either the second mutation collides on `createProjectV2Field` (`Name has already been taken`) or one test deletes options the other still needs. Local runs of `cargo test --workspace -- --ignored` should pass `--test-threads=1` for the same reason.
+---
 
 ## License
 
-Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE) at your option.
+Dual-licensed under either [MIT](LICENSE-MIT) or
+[Apache-2.0](LICENSE-APACHE) at your option.
