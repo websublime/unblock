@@ -1,8 +1,10 @@
 # SPEC: ://unblock — Stage 1 Product Architecture
 
-**Status:** APPROVED *(round-2 review iterations applied 2026-05-07; round-3 research applied 2026-05-08)*
+**Status:** APPROVED *(round-2 review iterations applied 2026-05-07; round-3 research applied 2026-05-08; §9.4.10 local-secrets format corrected 2026-05-08)*
 **Author:** Ada (architect)
-**Date:** 2026-05-07 (round-3 research applied 2026-05-08)
+**Date:** 2026-05-07 (round-3 research applied 2026-05-08; §9.4.10 format drift fix applied 2026-05-08)
+**Changelog:**
+- 2026-05-08 — §9.4.10 corrected the local-secrets file path/format from `.encore/local-secrets.toml` (TOML) to `apps/api/.secrets.local.cue` (CUE) per Encore official docs; added parallel mapping note (`MEMORY_DEK` → Go field `MemoryDEK`) referencing P01 spec §3.5 for the full mapping table.
 **Source PRD:** [docs/PRD.md](./PRD.md) (APPROVED, 2026-05-07)
 **Companion:** [docs/MANIFESTO.md](./MANIFESTO.md) (APPROVED, 2026-05-07)
 **Carries forward verbatim:** [docs/code-cli/plan.md](./code-cli/plan.md), [docs/code-cli/spec.md](./code-cli/spec.md), [docs/code-cli/research.md](./code-cli/research.md)
@@ -2093,7 +2095,14 @@ but the schema lands in P01 per the plan §2.1 "schema-only services" rule)
 all use the same DEK; the bootstrap migration cannot succeed without a
 provisioned secret. Olive owns the Encore secret-manager seeding as part
 of A-2 in the P01 plan; the local emulator uses a development DEK from
-`.encore/local-secrets.toml` (gitignored).
+`apps/api/.secrets.local.cue` (CUE format, per Encore official docs at
+https://encore.dev/docs/go/primitives/secrets — the file lives at the
+Encore app root next to `encore.app` and must be gitignored). The
+spec-level logical name `MEMORY_DEK` maps to the Encore Go manifest
+field `MemoryDEK`; both the secret-manager key and the CUE-file key
+must use the Go field name verbatim. Per-phase specs may pin additional
+secrets — see `docs/specs/01-spec-backend-mvp.md` §3.5 for the full P01
+mapping table.
 
 **Key rotation strategy:**
 1. Provision `MEMORY_DEK_NEXT` alongside `MEMORY_DEK`.

@@ -1,6 +1,10 @@
 # SPEC: P01 — Backend MVP Implementation Contract
 
-**Status:** APPROVED (round-2 review iterations applied 2026-05-08)
+**Status:** APPROVED (round-2 review iterations applied 2026-05-08; round-3 secrets-drift fixes applied + re-approved 2026-05-08)
+**Changelog:**
+- 2026-05-08 — DRIFT-1 (naming): clarified §3.5 that the four logical secret names are spec-level identifiers; added logical-name ↔ Go-field mapping table for the Encore Go secrets manifest.
+- 2026-05-08 — DRIFT-2 (format): corrected the local-secrets file path/format from `.encore/local-secrets.toml` (TOML) to `apps/api/.secrets.local.cue` (CUE) per Encore official docs (https://encore.dev/docs/go/primitives/secrets); updated syntax examples and gitignore guidance.
+
 **Author:** Ada (architect)
 **Date:** 2026-05-08
 **Source PRD:** [docs/PRD.md](../PRD.md) (APPROVED, 2026-05-07)
@@ -100,7 +104,7 @@ binding design decision below.
 | **AF4 — API key lifecycle for v1.0** | NEW | §4.3 — keys default `expires_at = NULL`; rotation = manual "issue new + revoke old"; no auto-rotate; revocation flips `revoked_at`. |
 | **AF5 — Cycle-detection write race** | NEW | §6.5 — `pg_advisory_xact_lock(hashtext('deps.add_dependency:' || $project_id))` acquired at transaction start; serialises racing inserts within a project. |
 | **OQ1 — Copilot transport coverage** | OPEN | §11.4 — P01 acceptance harness uses Claude Code only; Copilot coverage is P04 plugin renderer scope. |
-| **OQ2 — `MEMORY_DEK` provisioning** | OPEN | §3.5 — `MEMORY_DEK` is provisioned in P01 by Olive via Encore secret manager (the bootstrap migration would fail without it because `auth.oauth_tokens.*_enc` columns are exercised by integration tests). Local emulator uses dev DEK from `.encore/local-secrets.toml`. |
+| **OQ2 — `MEMORY_DEK` provisioning** | OPEN | §3.5 — `MEMORY_DEK` is provisioned in P01 by Olive via Encore secret manager (the bootstrap migration would fail without it because `auth.oauth_tokens.*_enc` columns are exercised by integration tests). Local emulator uses dev DEK from `apps/api/.secrets.local.cue` (CUE format, per Encore docs). |
 | **OQ3 — pgcrypto / pg_trgm availability** | OPEN | §3.1 — bootstrap migration `CREATE EXTENSION IF NOT EXISTS` for both; smoke-tested against the local Encore emulator's bundled Postgres in CI before any other migration runs. |
 | **OQ4 — `key_hash` column type** | OPEN | §4.3 — `bytea NOT NULL` (32 bytes raw HMAC output). No hex/base32 encoding ambiguity. |
 
@@ -181,14 +185,62 @@ The `search` MCP tool issues a `UNION ALL` over `items_fts_idx` and
 ### 3.5 Encore secrets required at P01
 
 Owned by Olive, provisioned via the Encore secret manager. Local emulator
-reads from `.encore/local-secrets.toml` (gitignored).
+reads from a **CUE** file at `apps/api/.secrets.local.cue` (Encore app
+root, next to `encore.app`), per Encore official docs
+(https://encore.dev/docs/go/primitives/secrets).
 
-| Secret | Purpose | Used by |
+> **DRIFT-1 — naming.** The four secret identifiers below
+> (`MEMORY_DEK`, `API_KEY_HMAC_SECRET`, `GITHUB_OAUTH_CLIENT_ID`,
+> `GITHUB_OAUTH_CLIENT_SECRET`) are **spec-level logical names**, not
+> literal manifest field names. The Encore Go secrets manifest declares
+> them as Go struct fields in PascalCase, and Encore secret-manager keys
+> + CUE-file keys must use those Go field names verbatim.
+
+**Logical-name ↔ Go-field mapping** (binding for both the secret-manager
+key and the `.secrets.local.cue` field name):
+
+| Spec-level logical name | Go struct field (manifest key + CUE key) |
+|---|---|
+| `MEMORY_DEK` | `MemoryDEK` |
+| `API_KEY_HMAC_SECRET` | `APIKeyHMACSecret` |
+| `GITHUB_OAUTH_CLIENT_ID` | `GitHubOAuthClientID` |
+| `GITHUB_OAUTH_CLIENT_SECRET` | `GitHubOAuthClientSecret` |
+
+The Encore Go secrets manifest (declared once in the `auth` service):
+
+```go
+var secrets struct {
+    MemoryDEK               string
+    APIKeyHMACSecret        string
+    GitHubOAuthClientID     string
+    GitHubOAuthClientSecret string
+}
+```
+
+Local override via `apps/api/.secrets.local.cue` uses CUE syntax with the
+Go field names verbatim:
+
+```cue
+MemoryDEK:               "dev-dek-32-bytes-base64..."
+APIKeyHMACSecret:        "dev-hmac-secret..."
+GitHubOAuthClientID:     "dev-client-id"
+GitHubOAuthClientSecret: "dev-client-secret"
+```
+
+| Secret (logical) | Purpose | Used by |
 |---|---|---|
 | `MEMORY_DEK` | pgcrypto symmetric DEK for `*_enc` columns | `auth` (oauth_tokens encryption tests in P01); fully exercised P02 |
 | `API_KEY_HMAC_SECRET` | server-side secret for `HMAC-SHA256(secret, raw_key)` per C7 | `auth` (Bearer auth check on every MCP call) |
 | `GITHUB_OAUTH_CLIENT_ID` | OAuth2+PKCE client id (test app at v1.0) | `auth.ExchangeOAuthCode` |
 | `GITHUB_OAUTH_CLIENT_SECRET` | OAuth2+PKCE client secret | `auth.ExchangeOAuthCode` |
+
+**Gitignore status (verified 2026-05-08).** The current
+`apps/api/.gitignore` ignores `/.encore` and the generated `encore.gen.*`
+artefacts but **does not** cover `apps/api/.secrets.local.cue`. Olive
+must add an explicit entry (`/.secrets.local.cue`) to `apps/api/.gitignore`
+as part of A-2 so the local-override file is never committed. The edit to
+`.gitignore` itself is owned by the implementing supervisor (Greta/Olive)
+under bead A-2 — this spec only records the requirement.
 
 **P01 exit criterion does not exercise OAuth interactively** — the seeder
 CLI inserts `auth.users` rows directly. The OAuth secrets exist so unit
