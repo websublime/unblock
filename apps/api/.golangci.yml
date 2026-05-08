@@ -12,10 +12,13 @@
 #   - no_direct_is_ready_write — rejects UPDATE statements writing
 #     workitems.items.is_ready or pipeline_stage outside the cascade
 #     subscriber package (SPEC §11.3, unblock-tv8.4).
-#   - no_rbac_dynamic_clause — rejects runtime-constructed first
-#     arguments to rbac.ScopedQuery.Where; every clause string must be
-#     a Go string literal or untyped string constant (SPEC §10.1,
-#     unblock-tv8.33).
+#   - no_rbac_dynamic_clause — rejects runtime-constructed string
+#     arguments to rbac.ScopedQuery.Where (clause, arg index 0) AND
+#     rbac.For (table, arg index 1); both MUST be a Go string literal
+#     or untyped string constant (SPEC §10.1, unblock-tv8.33,
+#     unblock-tv8.35). The file/registration name retains the
+#     historical "clause" suffix; the analyzer's authoritative scope
+#     covers both call shapes.
 #
 # Operators who want the custom linters to participate in CI must:
 #
@@ -74,10 +77,13 @@ linters:
       no_rbac_dynamic_clause:
         type: module
         description: |
-          Rejects runtime-constructed first arguments to
-          rbac.ScopedQuery.Where; every clause string MUST be a Go
-          string literal or untyped string constant. Runtime values
-          flow through args... See SPEC §10.1 / unblock-tv8.33.
+          Rejects runtime-constructed string arguments to
+          rbac.ScopedQuery.Where (clause, arg 0) AND rbac.For (table,
+          arg 1); both MUST be a Go string literal or untyped string
+          constant. Runtime values destined for Where flow through
+          args...; the table identifier of For has no runtime channel
+          (SQL identifiers cannot be bound). See SPEC §10.1 /
+          unblock-tv8.33 / unblock-tv8.35.
         original-url: encore.app/shared/lint
   exclusions:
     rules:

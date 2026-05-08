@@ -1,7 +1,8 @@
 // Fixture for analysistest: a package whose calls to
-// rbac.ScopedQuery.Where pass acceptable first arguments. The
-// analyzer must NOT fire on any call here (no "want" annotations,
-// which analysistest interprets as "expect zero diagnostics").
+// rbac.ScopedQuery.Where (clause arg) and rbac.For (table arg) pass
+// acceptable arguments. The analyzer must NOT fire on any call here
+// (no "want" annotations, which analysistest interprets as "expect
+// zero diagnostics").
 package rbacclausegood
 
 import (
@@ -13,6 +14,8 @@ import (
 type row struct {
 	ID string
 }
+
+// -- rbac.ScopedQuery.Where (clause arg, index 0) -----------------------
 
 // Plain double-quoted string literal — the canonical form.
 func goodLiteral(ctx context.Context, id rbac.Identity) ([]row, error) {
@@ -70,4 +73,71 @@ func goodUnrelatedWhere(b *unrelatedBuilder, userClause string) {
 	// userClause is runtime — would be flagged if the analyzer
 	// matched by name. Receiver-type resolution must filter this out.
 	b.Where(userClause)
+}
+
+// -- rbac.For (table arg, index 1) -------------------------------------
+//
+// Five shapes mirror the Where good cases. Each must NOT flag the
+// table argument. The analyzer's resolution path for For uses
+// pass.TypesInfo.Uses on the (unwrapped) selector ident; package-path
+// gate is `encore.app/shared/rbac`.
+
+// Plain double-quoted string literal as table — canonical form.
+func goodForLiteralTable(ctx context.Context, id rbac.Identity) ([]row, error) {
+	return rbac.For[row](id, "workitems.items").
+		Where("status = $1", "Ready").
+		Run(ctx)
+}
+
+// Back-quoted (raw) string literal as table.
+func goodForRawLiteralTable(ctx context.Context, id rbac.Identity) ([]row, error) {
+	return rbac.For[row](id, `deps.dependencies`).
+		Where("from_id = $1", "itm_x").
+		Run(ctx)
+}
+
+// Package-level untyped string constant as table.
+const itemsTable = "workitems.items"
+
+func goodForNamedConstTable(ctx context.Context, id rbac.Identity) ([]row, error) {
+	return rbac.For[row](id, itemsTable).
+		Where("status = $1", "Ready").
+		Run(ctx)
+}
+
+// Constant expression composed of two string constants as table.
+const schemaPart = "workitems"
+const tablePart = ".items"
+const composedTable = schemaPart + tablePart
+
+func goodForComposedConstTable(ctx context.Context, id rbac.Identity) ([]row, error) {
+	return rbac.For[row](id, composedTable).
+		Where("status = $1", "Ready").
+		Run(ctx)
+}
+
+// Parenthesised literal as table — unparen strips the wrapper.
+func goodForParenthesisedLiteralTable(ctx context.Context, id rbac.Identity) ([]row, error) {
+	return rbac.For[row](id, ("workitems.items")).
+		Where("status = $1", "Ready").
+		Run(ctx)
+}
+
+// A package-level generic `For` function on an UNRELATED package MUST
+// NOT false-positive — the analyzer's package-path gate is the
+// load-bearing check, name-only matching would otherwise flag any
+// `For` symbol elsewhere in the codebase.
+//
+// The fixture's local For below shares the same name and shape
+// (generic, second-arg string) as rbac.For but lives in this package
+// — pass.TypesInfo.Uses resolves it to a *types.Func whose Pkg() path
+// is `rbacclausegood`, NOT `encore.app/shared/rbac`. The resolution
+// gate filters it out.
+func For[T any](_ rbac.Identity, _ string) *T { return nil }
+
+func goodUnrelatedFor(id rbac.Identity, userTable string) {
+	// userTable is runtime — would be flagged if the analyzer matched
+	// by name on the For symbol. Package-path resolution must filter
+	// this out.
+	_ = For[row](id, userTable)
 }
