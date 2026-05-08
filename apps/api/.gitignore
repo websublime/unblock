@@ -2,3 +2,9 @@
 encore.gen.go
 encore.gen.cue
 /encore.gen
+
+# Encore local-dev secrets override (CUE format, per Encore docs).
+# Production / staging values are provisioned via `encore secret set
+# --type {prod,dev}`; this file is for local emulator runs only and
+# must never be committed. See SPEC §3.5.
+/.secrets.local.cue

@@ -1,3 +1,0 @@
-# Canonical migration directory for the entire `unblock` database.
-# All eight schemas migrate from this directory; see SPEC §3.1, §3.2.
-# 0010_bootstrap.up.sql lands in task A-2 (unblock-tv8.2).
