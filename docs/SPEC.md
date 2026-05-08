@@ -1178,7 +1178,8 @@ the schema must update this section.
 
   Filename convention: `NNNN_<descr>.up.sql` with `NNNN` strictly increasing.
   Files for different logical schemas are grouped by the §9.4.0 step number
-  (e.g. `0010_auth.up.sql`, `0020_org.up.sql`, …, `0080_memory.up.sql`) and
+  (e.g. `0010_bootstrap.up.sql` for `CREATE EXTENSION` declarations,
+  `0020_auth.up.sql`, `0030_org.up.sql`, …, `0090_memory.up.sql`) and
   share the single `auth/migrations/` directory. Adding a column to (e.g.)
   `workitems` in a later phase ships as a new file `0095_workitems_add_…
   .up.sql` under the same directory.
@@ -1602,6 +1603,19 @@ CREATE TABLE deps.cascade_events (
     -- The (event_id, triggered_by_item_id) UNIQUE constraint below is the
     -- structural mitigation for at-least-once redelivery (AR-11).
     event_id              text         NOT NULL,
+    -- Cascade kind discriminator. Added in round-2 review iterations:
+    --   'close'        — written by the cascade subscriber when a close
+    --                    event (Tool 6 / workitems.Close) arrives via
+    --                    Pub/Sub; walks the forward 'blocks' closure
+    --                    (multi-hop, possibly large affected set).
+    --   'edge_removed' — written INLINE by Tool 12 (remove_dependency)
+    --                    in the same SQL transaction as DELETE FROM
+    --                    deps.dependencies; single-hop only (the direct
+    --                    to_item is the only candidate to flip ready).
+    -- Future kinds (e.g. 'state_change' for Pub/Sub-driven state-cascade
+    -- writes deferred to P02+) extend the CHECK constraint additively in
+    -- their own phase migration.
+    kind                  text         NOT NULL,
     org_id                text         NOT NULL REFERENCES org.organizations(id) ON DELETE CASCADE,
     project_id            text         REFERENCES org.projects(id) ON DELETE SET NULL,
     triggered_by_item_id  text         REFERENCES workitems.items(id) ON DELETE SET NULL,
@@ -1613,6 +1627,8 @@ CREATE TABLE deps.cascade_events (
     cascaded_count        integer      NOT NULL DEFAULT 0,
     triggered_at          timestamptz  NOT NULL DEFAULT now(),
     trace_id              text,                                            -- correlates with mcp.tool_calls.trace_id
+    CONSTRAINT cascade_events_kind_chk
+        CHECK (kind IN ('close', 'edge_removed')),
     CONSTRAINT cascade_events_count_chk
         CHECK (cascaded_count >= 0),
     -- AR-11 idempotency key. A redelivered Pub/Sub message carries the same
@@ -2300,6 +2316,14 @@ This document moves from DRAFT to APPROVED when:
       negatives mitigation) added to §13.
 - [x] Provider-event PII retention policy stated (§9.4.5 — 90 days raw,
       then digest-only).
+
+**Round-2 P01-spec review iterations (closed 2026-05-08):**
+
+- [x] `deps.cascade_events.kind` column added (§9.4.4) with CHECK enum
+      `('close', 'edge_removed')`. `'close'` is written by the cascade
+      subscriber for Pub/Sub-driven close events; `'edge_removed'` is
+      written inline by P01 spec §6.2 Tool 12 (`remove_dependency`).
+      Future cascade kinds extend the CHECK additively per phase spec.
 
 **Status: APPROVED, 2026-05-07. Round-2 review iterations applied 2026-05-07.**
 
