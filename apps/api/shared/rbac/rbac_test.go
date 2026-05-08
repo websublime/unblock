@@ -12,12 +12,18 @@ import (
 	"strings"
 	"testing"
 
-	"encore.app/auth"
+	"encore.app/auth/types"
 )
 
 // fakeIdentity returns a deterministic identity for builder tests.
-func fakeIdentity(orgID string) auth.Identity {
-	return auth.Identity{
+//
+// Imported as `types.Identity` rather than `auth.Identity`: the latter
+// path triggers `auth.init()` (sqldb.NewDatabase) which panics outside
+// the encore CLI's cluster bring-up. The leaf `auth/types` package is
+// Encore-free by construction (bead unblock-tv8.30). The two spellings
+// alias to the same Go type — see auth.go's `type Identity = types.Identity`.
+func fakeIdentity(orgID string) types.Identity {
+	return types.Identity{
 		UserID:    "usr_test",
 		OrgID:     orgID,
 		Role:      "member",
@@ -206,28 +212,39 @@ func TestWhere_InjectionDocumentation_HostileClauseEmitsVerbatim(t *testing.T) {
 
 // TestWhere_InjectionDocumentation_NoRuntimeSanitiser is a paired
 // regression: it asserts that classic injection meta-characters (';',
-// '--', '/*') survive verbatim through build(). Pinning this
-// behaviour is the regression net if a future contributor adds a
+// '--', '/*', stray quote) survive verbatim through build(). Pinning
+// this behaviour is the regression net if a future contributor adds a
 // runtime sanitiser and silently changes the contract documented on
 // Where. Runtime sanitisation is the wrong gate for this surface; the
 // analyzer is the only acceptable defence.
+//
+// Test asserts on the meta-character bytes only — the `$N` placeholder
+// indices are renumbered by build() to keep positional args contiguous
+// (the scope predicate consumes $1, so user `$1` becomes `$2`). That
+// renumbering is orthogonal placeholder bookkeeping covered by
+// TestWhere_AppendsAndJoinsAndRenumbers; this test is concerned only
+// with non-numeric meta-character survival.
 func TestWhere_InjectionDocumentation_NoRuntimeSanitiser(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		clause string
-		want   string
+		// wantSubstr is a fragment of the hostile clause AFTER the
+		// renumbered placeholder — chosen so the assertion is robust
+		// to placeholder renumbering but still pins the meta-character
+		// survival.
+		wantSubstr string
 	}{
-		{name: "semicolon", clause: "status = $1; DROP TABLE x", want: "status = $1; DROP TABLE x"},
-		{name: "line_comment", clause: "status = $1 -- malicious", want: "status = $1 -- malicious"},
-		{name: "block_comment", clause: "status = $1 /* malicious */", want: "status = $1 /* malicious */"},
-		{name: "stray_quote", clause: "status = $1 OR title = 'oops", want: "status = $1 OR title = 'oops"},
+		{name: "semicolon", clause: "status = $1; DROP TABLE x", wantSubstr: "; DROP TABLE x"},
+		{name: "line_comment", clause: "status = $1 -- malicious", wantSubstr: " -- malicious"},
+		{name: "block_comment", clause: "status = $1 /* malicious */", wantSubstr: " /* malicious */"},
+		{name: "stray_quote", clause: "status = $1 OR title = 'oops", wantSubstr: " OR title = 'oops"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			q := For[struct{ ID string }](fakeIdentity("org_alpha"), "workitems.items").
 				Where(tc.clause, "Ready")
 			sql, _ := q.build()
-			if !strings.Contains(sql, tc.want) {
-				t.Fatalf("hostile pattern %q not found in assembled SQL — runtime sanitiser detected, see SPEC §10.1: got %q", tc.want, sql)
+			if !strings.Contains(sql, tc.wantSubstr) {
+				t.Fatalf("hostile pattern %q not found in assembled SQL — runtime sanitiser detected, see SPEC §10.1: got %q", tc.wantSubstr, sql)
 			}
 		})
 	}

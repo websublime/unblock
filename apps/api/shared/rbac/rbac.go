@@ -12,6 +12,18 @@
 //	func (q *ScopedQuery[T]) Where(clause string, args ...any) *ScopedQuery[T]
 //	func (q *ScopedQuery[T]) Run(ctx context.Context) ([]T, error)
 //
+// Identity-type plumbing (bead unblock-tv8.30): SPEC §10.1's surface
+// is documented with the literal `auth.Identity`. The implementation
+// here imports the type from its leaf-package source at
+// `encore.app/auth/types`, because importing `encore.app/auth`
+// directly would drag in the auth service's package-level
+// sqldb.NewDatabase("unblock", ...) declaration and panic any plain
+// `go test` run with "encore apps must be run using the encore
+// command". The two spellings are interchangeable: the parent `auth`
+// package declares `type Identity = types.Identity`, so a value
+// constructed in a service as `auth.Identity{...}` is the same Go
+// type as the `types.Identity` parameter accepted here.
+//
 // Usage:
 //
 //	import "encore.app/shared/rbac"
@@ -108,7 +120,7 @@ import (
 	"reflect"
 	"strings"
 
-	"encore.app/auth"
+	"encore.app/auth/types"
 	"encore.dev/storage/sqldb"
 )
 
@@ -170,7 +182,13 @@ type ScopedQuery[T any] struct {
 	// future audit hooks (e.g. logging the row-count returned per
 	// Identity for cross-tenant leak detection); not currently emitted
 	// to the SQL plan beyond the scope predicate.
-	identity auth.Identity
+	//
+	// Typed as types.Identity (the leaf-package source) rather than
+	// auth.Identity to keep this package import-clean of the auth
+	// service's init-time sqldb.NewDatabase call. The two spellings
+	// are the same Go type via the alias declared in
+	// apps/api/auth/auth.go.
+	identity types.Identity
 
 	// table is the fully-qualified target table, e.g. "workitems.items".
 	// Empty is rejected at Run time (see ErrEmptyTable).
@@ -220,7 +238,7 @@ type userClause struct {
 // is responsible for using a valid identifier; SQL-injection-safety on
 // the table parameter rests on the linter at apps/api/shared/lint/ and
 // on code review (SPEC §10.1 acceptance criterion #3).
-func For[T any](identity auth.Identity, table string) *ScopedQuery[T] {
+func For[T any](identity types.Identity, table string) *ScopedQuery[T] {
 	q := &ScopedQuery[T]{
 		identity: identity,
 		table:    table,
