@@ -25,19 +25,33 @@
 //   - The analyzer matches against raw and back-quoted string literals
 //     in any AST position (assignment RHS, function argument, struct
 //     literal). It does NOT execute the SQL or parse it as a
-//     full PostgreSQL grammar — substring matching is sufficient for
-//     the targeted anti-pattern and zero-false-positive within the
-//     unblock backend's expected SQL surface.
-//   - Pattern is case-insensitive on the SQL keywords (UPDATE / SET)
-//     because pgx tolerates either; column names are matched verbatim
-//     (`is_ready`, `pipeline_stage`) since the migration uses
-//     lower-case identifiers.
-//   - String concatenation across two `+` operands is detected: if
-//     either operand contains the trigger keyword, the analyzer
-//     conservatively flags the construction. False positives are
-//     possible but vanishingly rare in real backends; suppress with
-//     `//nolint:no_direct_is_ready_write` if the call site is a
-//     deliberate test fixture.
+//     full PostgreSQL grammar — a single regex anchored on the
+//     UPDATE…SET…<col> shape is sufficient for the targeted
+//     anti-pattern and rejects substring false positives (SELECT
+//     clauses returning is_ready, comment fragments mentioning
+//     "update items.is_ready", INSERT statements listing the column,
+//     adjacent identifiers like update_items_at).
+//   - Pattern is case-insensitive on every component (UPDATE / SET /
+//     items / column name) because pgx tolerates mixed casing and
+//     gofmt/golint-driven SQL hand-formatting in this backend has
+//     historically used both. Column names are still drawn from the
+//     `targetColumns` slice — the regex builds the alternation from
+//     that slice at package init, so adding a future spec'd column
+//     does not require touching the regex literal.
+//   - The (?s) (dotall) flag lets the regex span embedded newlines,
+//     so multi-line UPDATE…SET payloads (the common pgx style) match
+//     in a single pass without manual whitespace folding.
+//   - The regex caps both the UPDATE→items→SET and SET→column gaps
+//     with `[^;]*?`, so a literal carrying multiple statements does
+//     not stitch a forbidden pattern across an unrelated statement
+//     boundary.
+//   - String concatenation across two `+` operands is NOT detected:
+//     this analyzer walks `*ast.BasicLit` nodes only, so a
+//     deliberately split UPDATE statement bypasses it. The cost of
+//     adding BinaryExpr coverage (false positives on string-builder
+//     code that happens to contain "UPDATE" and "is_ready" in
+//     unrelated literals) outweighs the benefit; that pattern is
+//     out-of-scope for this analyzer.
 //
 // The analyzer is consumed by golangci-lint via the module-plugin
 // system; see apps/api/.golangci.yml and the plugin entry point at
@@ -46,6 +60,7 @@ package lint
 
 import (
 	"go/ast"
+	"regexp"
 	"strings"
 
 	"golang.org/x/tools/go/analysis"
@@ -71,6 +86,58 @@ var allowedAuxPackages = map[string]struct{}{
 // targetColumns is the set of write targets gated by this analyzer.
 // Adding entries is a SPEC change; do not extend without one.
 var targetColumns = []string{"is_ready", "pipeline_stage"}
+
+// isReadyUpdateRe matches an UPDATE statement on workitems.items (or
+// the unqualified `items` table) whose SET clause writes one of the
+// targetColumns columns. Anatomy:
+//
+//   - (?is) — case-insensitive (?i) for SQL keywords + identifiers,
+//     dotall (?s) so the inner [^;]*? can span embedded newlines for
+//     multi-line UPDATE…SET payloads.
+//   - \bupdate — the UPDATE keyword, word-bounded so identifiers
+//     like `update_items_at` do not match.
+//   - (?:\s|\\.)+ — one-or-more whitespace OR Go escape sequence
+//     (backslash + any char). This lets the analyzer match SQL
+//     authored as a regular Go string literal like
+//     `"UPDATE\tworkitems.items SET ..."` where the payload contains
+//     the literal two-character sequence `\t` rather than a real
+//     TAB; analysistest passes the unprocessed literal text through
+//     `unquoteSQL`, so escape bytes survive verbatim.
+//   - (?:workitems\.)?items\b — either schema-qualified
+//     `workitems.items` or the bare `items` table; the trailing \b
+//     rejects sibling tables like `dependency_items`.
+//   - [^;]*?\bset\b — guarded gap to the SET keyword; the [^;]
+//     character class prevents the regex from stitching across an
+//     unrelated statement that happens to be in the same literal.
+//   - [^;]*?\b(<col1>|<col2>)\b — final guarded gap to one of the
+//     targetColumns column names; the alternation is built from the
+//     targetColumns slice at package init via regexp.QuoteMeta.
+//
+// The regex is compiled once at package load. A per-call compile
+// would be wasted on every literal walked by the analyzer.
+var isReadyUpdateRe = buildIsReadyUpdateRe(targetColumns)
+
+// buildIsReadyUpdateRe assembles the UPDATE…SET…<col> regex from a
+// dynamic column list. Exposed as a function so the package init has
+// a single, testable construction point and so a future SPEC-driven
+// column addition is a one-line change to targetColumns.
+func buildIsReadyUpdateRe(columns []string) *regexp.Regexp {
+	if len(columns) == 0 {
+		// Defensive: an empty column list would compile to a regex
+		// that matches every UPDATE statement. The analyzer's contract
+		// is "match these exact columns or nothing"; refuse to compile
+		// a pattern with no anchors.
+		panic("lint: targetColumns must not be empty — see SPEC §11.3")
+	}
+	quoted := make([]string, len(columns))
+	for i, col := range columns {
+		quoted[i] = regexp.QuoteMeta(col)
+	}
+	pattern := `(?is)\bupdate(?:\s|\\.)+(?:workitems\.)?items\b[^;]*?\bset\b[^;]*?\b(?:` +
+		strings.Join(quoted, "|") +
+		`)\b`
+	return regexp.MustCompile(pattern)
+}
 
 // NoDirectIsReadyWriteAnalyzer is the exported analyzer instance.
 // golangci-lint's module-plugin loader picks this up via the cmd/
@@ -136,28 +203,12 @@ func unquoteSQL(value string) string {
 	return value
 }
 
-// looksLikeIsReadyUpdate is the substring matcher: it returns true
-// when the payload contains an `UPDATE … workitems.items` (or
-// `UPDATE … items`) clause AND a write target hit on
-// `is_ready` or `pipeline_stage`. The match is intentionally loose
-// on whitespace: a single contiguous payload is enough; multi-line
-// SQL is folded into one logical pass.
+// looksLikeIsReadyUpdate is the regex-anchored matcher: it returns
+// true when the payload contains an UPDATE statement on workitems.items
+// (or the bare `items` table) whose SET clause writes one of the
+// targetColumns columns. The regex is built once at package init from
+// the targetColumns slice; this function is a thin wrapper so the
+// run() loop reads naturally and the package surface stays stable.
 func looksLikeIsReadyUpdate(payload string) bool {
-	lower := strings.ToLower(payload)
-	if !strings.Contains(lower, "update ") {
-		return false
-	}
-	hasItemsTable := strings.Contains(lower, "workitems.items") ||
-		strings.Contains(lower, " items ") ||
-		strings.HasSuffix(lower, " items") ||
-		strings.Contains(lower, "\titems")
-	if !hasItemsTable {
-		return false
-	}
-	for _, col := range targetColumns {
-		if strings.Contains(lower, col) {
-			return true
-		}
-	}
-	return false
+	return isReadyUpdateRe.MatchString(payload)
 }
