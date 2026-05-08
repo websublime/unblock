@@ -1,0 +1,3 @@
+# Schema-only service in P01 — no Go files yet.
+# Service code lands in P05. Schema DDL ships via auth/migrations/0080_boards.up.sql.
+# See SPEC §4.6.
