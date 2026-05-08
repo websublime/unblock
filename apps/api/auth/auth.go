@@ -17,6 +17,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"encore.app/auth/types"
 )
 
 // errNotImplemented is the sentinel returned by every P01 A-1 skeleton
@@ -25,12 +27,18 @@ var errNotImplemented = errors.New("auth: not implemented in P01 A-1 skeleton")
 
 // Identity is the resolved caller record carried inside the Encore mesh.
 // Locked shape per SPEC §4.1.
-type Identity struct {
-	UserID    string // ULID
-	OrgID     string // ULID — primary org binding for this auth event
-	Role      string // "owner" | "admin" | "member" | "viewer"
-	AgentKind string // empty for human sessions; AgentKind value for API-key callers
-}
+//
+// Re-exported as a type alias from the leaf `auth/types` sub-package
+// (bead unblock-tv8.30). The alias preserves SPEC §10.1's literal
+// spelling `auth.Identity` at every consumer call site (org, rbac,
+// future B-1..D-3 / E-*) while letting Encore-free test paths import
+// the pure-value definition directly via `encore.app/auth/types`.
+//
+// Do NOT redeclare Identity as a non-alias type here — that breaks
+// the structural identity guarantee that lets `auth.Identity{...}`
+// literals interoperate with `types.Identity{...}` in code that
+// crosses both spellings.
+type Identity = types.Identity
 
 // ValidateRequest is the input to Validate. SPEC §4.1.
 type ValidateRequest struct {
