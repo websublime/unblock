@@ -4,11 +4,13 @@
 // (auth, org, workitems, deps, providers, mcp, boards, memory). Other
 // services consume the database via sqldb.Named("unblock"); see SPEC §3.1.
 //
-// In P01 task A-1 this package only declares the //encore:api skeletons
-// for the four private RPCs (Validate, ExchangeOAuthCode, IssueAPIKey,
-// RevokeAPIKey) so Encore recognises auth as a service. Bodies return
-// errNotImplemented; the bootstrap migration and sqldb.NewDatabase call
-// land in task A-2 (unblock-tv8.2) — see SPEC §3.2.
+// In P01 task A-2 this package declares the package-level `db` handle via
+// sqldb.NewDatabase("unblock", ...) (see db.go) and the Encore secrets
+// manifest (see secrets.go). The bootstrap migration installing pgcrypto
+// and pg_trgm ships in migrations/0010_bootstrap.up.sql. The full
+// per-schema DDL (0020_auth..0090_memory) lands in task A-3
+// (unblock-tv8.3) — see SPEC §3.2. RPC bodies still return
+// errNotImplemented; real implementations land in beads B-1..D-3.
 package auth
 
 import (
