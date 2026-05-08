@@ -43,6 +43,37 @@
 //     and means a service that does not declare access to the unblock
 //     database fails at `encore check` time, not at runtime.
 //
+// Injection-safety invariant (SPEC §10.1, unblock-tv8.33):
+//
+//   - The first argument to Where MUST be a Go string literal or an
+//     untyped string constant — i.e. a value that is fixed at compile
+//     time. Every runtime value (request body, URL parameter, header,
+//     row from the database, anything user-controlled) MUST flow through
+//     the args... variadic, never through string concatenation into the
+//     clause text.
+//   - The clause string is concatenated verbatim into the assembled SQL
+//     statement (see build). There is no runtime validation, escaping,
+//     or sanitisation — the SQL string is opaque to Go. A clause
+//     fragment that contains user-controlled data fragments the WHERE
+//     predicate and silently bypasses the org_id scope guard installed
+//     by For. For a tenant-isolation gate this is fatal.
+//   - The project-local static analyzer
+//     `apps/api/shared/lint/no_rbac_dynamic_clause.go` is the
+//     enforcement gate: it rejects any call to ScopedQuery.Where whose
+//     first argument is not a compile-time string constant. The
+//     analyzer is wired into `apps/api/.golangci.yml` and is also
+//     runnable directly via
+//     `go run ./shared/lint/cmd/no_rbac_dynamic_clause ./...`.
+//   - Runtime detection is fundamentally impossible: by the time the
+//     SQL string reaches build, Go has erased the difference between a
+//     literal and a runtime-constructed string. The analyzer is the
+//     only gate. Reviewers asking "why no runtime check" should consult
+//     this paragraph.
+//   - The same caller-trust model applies to the `table` argument of
+//     For — see its doc-comment and unblock-tv8.33's risk note on the
+//     table parameter (out of scope for that bead but called out here
+//     for completeness).
+//
 // Compile-time property (SPEC §10.1, AC-1).
 //
 // AC-1 reads "ScopedQuery[T].Run fails to compile when no scope filter is
@@ -212,6 +243,30 @@ func For[T any](identity auth.Identity, table string) *ScopedQuery[T] {
 //
 // An empty clause is recorded as an error and surfaces at Run time;
 // the receiver is still returned so fluent chains do not crash.
+//
+// SECURITY (SPEC §10.1, unblock-tv8.33).
+//
+// The clause argument MUST be a Go string literal or an untyped string
+// constant fixed at compile time. Every runtime value MUST flow through
+// args... — never through string concatenation, fmt.Sprintf, or any
+// other operation that produces the clause text at runtime.
+//
+//	// CORRECT — constants and placeholders:
+//	q.Where("status = $1 AND priority = $2", status, prio)
+//
+//	const filter = "is_archived = false"
+//	q.Where(filter)
+//
+//	// WRONG — runtime construction breaches scope:
+//	q.Where("status = '" + userInput + "'")              // injection
+//	q.Where(fmt.Sprintf("status = '%s'", userInput))     // injection
+//	clause := buildClause(req); q.Where(clause)          // injection
+//
+// The analyzer at `apps/api/shared/lint/no_rbac_dynamic_clause.go`
+// rejects every non-literal first argument at lint time. Runtime
+// validation is impossible — the SQL string is opaque to Go by the
+// time it reaches build. Bypassing the analyzer (e.g. //nolint
+// suppression) on this method is forbidden and a code-review failure.
 func (q *ScopedQuery[T]) Where(clause string, args ...any) *ScopedQuery[T] {
 	if q == nil {
 		// nil receiver should not happen via the supported path (For

@@ -154,6 +154,85 @@ func TestRenumberPlaceholders_DollarNotFollowedByDigits(t *testing.T) {
 	}
 }
 
+// TestWhere_InjectionDocumentation pins the runtime behaviour of
+// Where in the presence of a hostile, dynamically-constructed clause
+// string. These tests EXIST TO DOCUMENT THE INVARIANT, not to exercise
+// a defence: the rbac builder has no runtime gate against SQL
+// injection, by design — see the SECURITY block on Where (SPEC §10.1,
+// unblock-tv8.33).
+//
+// The production-grade gate is the static analyzer at
+// `apps/api/shared/lint/no_rbac_dynamic_clause.go`, which rejects any
+// non-literal first argument at lint time. These tests confirm that:
+//
+//  1. If the analyzer is bypassed (e.g. //nolint suppression, which is
+//     forbidden but possible), a hostile clause is concatenated
+//     verbatim into the assembled SQL — i.e. the leak is real.
+//  2. The scope predicate (org_id = $1) is still emitted, but it sits
+//     before the hostile clause and an attacker can use SQL
+//     meta-characters to neutralise it (close the predicate with a
+//     comment, OR-true, etc).
+//
+// If either assertion ever flips (e.g. a future runtime sanitiser is
+// added), the test must be re-evaluated — runtime sanitisation of
+// arbitrary SQL is brittle and has historically been the wrong gate
+// for tenant isolation. The analyzer remains the contractual gate.
+func TestWhere_InjectionDocumentation_HostileClauseEmitsVerbatim(t *testing.T) {
+	// A clause that pretends to filter on status but trails SQL that
+	// neutralises the org_id predicate by injecting OR 1=1 and a
+	// line-comment marker.
+	//
+	// The analyzer would reject this at lint time because the value
+	// is a `var hostile := ...` — but the runtime builder has no
+	// such gate. We construct the clause via a literal here only so
+	// the test itself compiles cleanly; the assertion is that
+	// build() emits the bytes verbatim regardless of source.
+	q := For[struct{ ID string }](fakeIdentity("org_alpha"), "workitems.items").
+		Where("status = $1 OR 1=1 -- ", "Ready")
+	sql, _ := q.build()
+
+	// The hostile bytes survive into the assembled SQL.
+	if !strings.Contains(sql, "OR 1=1 -- ") {
+		t.Fatalf("hostile clause did NOT appear verbatim in assembled SQL — runtime sanitiser detected, contract changed: %q", sql)
+	}
+	// The scope predicate is still emitted at $1, but the AND-join
+	// places it BEFORE the hostile clause. Combined with `OR 1=1`
+	// the org_id filter is neutralised at the SQL semantic level —
+	// hence the analyzer-only gate.
+	if !strings.Contains(sql, "workitems.items.org_id = $1") {
+		t.Errorf("scope predicate missing from assembled SQL: %q", sql)
+	}
+}
+
+// TestWhere_InjectionDocumentation_NoRuntimeSanitiser is a paired
+// regression: it asserts that classic injection meta-characters (';',
+// '--', '/*') survive verbatim through build(). Pinning this
+// behaviour is the regression net if a future contributor adds a
+// runtime sanitiser and silently changes the contract documented on
+// Where. Runtime sanitisation is the wrong gate for this surface; the
+// analyzer is the only acceptable defence.
+func TestWhere_InjectionDocumentation_NoRuntimeSanitiser(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		clause string
+		want   string
+	}{
+		{name: "semicolon", clause: "status = $1; DROP TABLE x", want: "status = $1; DROP TABLE x"},
+		{name: "line_comment", clause: "status = $1 -- malicious", want: "status = $1 -- malicious"},
+		{name: "block_comment", clause: "status = $1 /* malicious */", want: "status = $1 /* malicious */"},
+		{name: "stray_quote", clause: "status = $1 OR title = 'oops", want: "status = $1 OR title = 'oops"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q := For[struct{ ID string }](fakeIdentity("org_alpha"), "workitems.items").
+				Where(tc.clause, "Ready")
+			sql, _ := q.build()
+			if !strings.Contains(sql, tc.want) {
+				t.Fatalf("hostile pattern %q not found in assembled SQL — runtime sanitiser detected, see SPEC §10.1: got %q", tc.want, sql)
+			}
+		})
+	}
+}
+
 // TestExportedFields_StructLayout confirms the reflection helper
 // returns exported fields in declaration order and skips unexported
 // ones. Exercises the same code path scanAll uses against generic T.

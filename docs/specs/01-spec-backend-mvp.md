@@ -2035,6 +2035,14 @@ seeded fixture and asserts:
   rule under `apps/api/shared/lint/no_direct_is_ready_write.go` rejects
   any UPDATE statement targeting `workitems.items.is_ready` or
   `pipeline_stage` outside `apps/api/deps/cascade_subscriber.go`.)
+- [ ] `rbac.ScopedQuery.Where` is never called with a runtime-constructed
+  clause string — every first argument MUST be a Go string literal or
+  untyped string constant; runtime values flow through `args...`
+  exclusively. (Static analysis: `golangci-lint` custom linter rule
+  under `apps/api/shared/lint/no_rbac_dynamic_clause.go` rejects any
+  non-literal first argument across the unblock backend. Locked SPEC
+  §10.1 surface is unchanged; the analyzer is a meta-guard.
+  unblock-tv8.33.)
 - [ ] `deps.cascade_events` insert is idempotent on re-delivery (property
   test: re-deliver every `CascadeRequested` event twice; assert post-state
   is byte-identical and exactly one row exists per `(event_id,

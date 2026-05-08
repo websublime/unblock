@@ -5,14 +5,22 @@
 #
 # Custom linter wiring:
 #
-# `no_direct_is_ready_write` is a project-local analyzer at
-# apps/api/shared/lint/. It is consumed via the module-plugin system
-# of golangci-lint v1.57+ (see https://golangci-lint.run/plugins/module-plugins/).
+# Two project-local analyzers live at apps/api/shared/lint/. Both are
+# consumed via the module-plugin system of golangci-lint v1.57+
+# (see https://golangci-lint.run/plugins/module-plugins/):
 #
-# Operators who want the custom linter to participate in CI must:
+#   - no_direct_is_ready_write — rejects UPDATE statements writing
+#     workitems.items.is_ready or pipeline_stage outside the cascade
+#     subscriber package (SPEC §11.3, unblock-tv8.4).
+#   - no_rbac_dynamic_clause — rejects runtime-constructed first
+#     arguments to rbac.ScopedQuery.Where; every clause string must be
+#     a Go string literal or untyped string constant (SPEC §10.1,
+#     unblock-tv8.33).
 #
-#   1. Build a custom golangci-lint binary that includes the
-#      analyzer module:
+# Operators who want the custom linters to participate in CI must:
+#
+#   1. Build a custom golangci-lint binary that includes BOTH analyzer
+#      modules (a single .custom-gcl.yml registers the whole module):
 #
 #        cd apps/api
 #        cat > .custom-gcl.yml <<'EOF'
@@ -29,9 +37,10 @@
 #
 # Local development without a custom binary is still useful: every
 # core linter below runs against the standard golangci-lint binary,
-# and the analyzer is independently runnable via:
+# and each analyzer is independently runnable via:
 #
 #   cd apps/api && go run ./shared/lint/cmd/no_direct_is_ready_write ./...
+#   cd apps/api && go run ./shared/lint/cmd/no_rbac_dynamic_clause ./...
 #
 # The custom linter section below is therefore declared but only
 # consumed when a custom-built binary loads it.
@@ -61,6 +70,14 @@ linters:
           Rejects UPDATE statements writing workitems.items.is_ready or
           pipeline_stage outside encore.app/deps (the cascade subscriber
           package). See SPEC §11.3 lines 2034-2037.
+        original-url: encore.app/shared/lint
+      no_rbac_dynamic_clause:
+        type: module
+        description: |
+          Rejects runtime-constructed first arguments to
+          rbac.ScopedQuery.Where; every clause string MUST be a Go
+          string literal or untyped string constant. Runtime values
+          flow through args... See SPEC §10.1 / unblock-tv8.33.
         original-url: encore.app/shared/lint
   exclusions:
     rules:
