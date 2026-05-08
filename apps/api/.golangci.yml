@@ -1,0 +1,80 @@
+# golangci-lint configuration for the unblock backend (apps/api/).
+#
+# Invocation: `cd apps/api && golangci-lint run --max-warnings 0`
+# (per SPEC §11.2 NFR-10).
+#
+# Custom linter wiring:
+#
+# `no_direct_is_ready_write` is a project-local analyzer at
+# apps/api/shared/lint/. It is consumed via the module-plugin system
+# of golangci-lint v1.57+ (see https://golangci-lint.run/plugins/module-plugins/).
+#
+# Operators who want the custom linter to participate in CI must:
+#
+#   1. Build a custom golangci-lint binary that includes the
+#      analyzer module:
+#
+#        cd apps/api
+#        cat > .custom-gcl.yml <<'EOF'
+#        version: v1.61.0
+#        plugins:
+#          - module: encore.app
+#            path: ./shared/lint
+#        EOF
+#        golangci-lint custom
+#
+#   2. Use the resulting `./custom-gcl` binary in CI in place of the
+#      stock `golangci-lint`. Olive (infra-supervisor) wires this into
+#      the GitHub Actions workflow under bead A-6 (unblock-tv8.6).
+#
+# Local development without a custom binary is still useful: every
+# core linter below runs against the standard golangci-lint binary,
+# and the analyzer is independently runnable via:
+#
+#   cd apps/api && go run ./shared/lint/cmd/no_direct_is_ready_write ./...
+#
+# The custom linter section below is therefore declared but only
+# consumed when a custom-built binary loads it.
+
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+  # Exclude analysistest fixtures: they intentionally contain forbidden
+  # SQL strings and are not part of the production build.
+  modules-download-mode: readonly
+
+linters:
+  default: standard
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+  settings:
+    custom:
+      no_direct_is_ready_write:
+        type: module
+        description: |
+          Rejects UPDATE statements writing workitems.items.is_ready or
+          pipeline_stage outside encore.app/deps (the cascade subscriber
+          package). See SPEC §11.3 lines 2034-2037.
+        original-url: encore.app/shared/lint
+  exclusions:
+    rules:
+      # analysistest fixtures intentionally contain the forbidden
+      # pattern; they must not trigger the linter against themselves.
+      - path: shared/lint/testdata/
+        linters:
+          - all
+      # rbac unit tests probe internal helpers; the test file uses
+      # patterns (deliberate zero-value, naked literals) that some
+      # linters flag.
+      - path: shared/rbac/rbac_test.go
+        text: "(unused|deadcode)"
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
