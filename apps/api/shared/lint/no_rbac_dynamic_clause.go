@@ -1,9 +1,21 @@
 // no_rbac_dynamic_clause.go — second project-local analyzer for the
 // unblock backend. Enforces SPEC §10.1's injection-safety invariant on
-// the rbac typed query builder: the first argument to
-// `(*encore.app/shared/rbac.ScopedQuery[T]).Where` MUST be a compile-time
-// string constant. Every runtime value flows through the `args...`
-// variadic; the clause text is never user-controlled.
+// the rbac typed query builder against TWO call shapes:
+//
+//   - `(*encore.app/shared/rbac.ScopedQuery[T]).Where(clause, args...)`
+//     — first argument (clause, index 0) MUST be a compile-time string
+//     constant (unblock-tv8.33).
+//   - `encore.app/shared/rbac.For[T](identity, table)` — second
+//     argument (table, index 1) MUST be a compile-time string constant
+//     (unblock-tv8.35). The table identifier is concatenated verbatim
+//     into the FROM clause AND interpolated into the canonical scope
+//     predicate (`<table>.org_id = $1`); a runtime value rewrites both
+//     sinks and silently bypasses tenant isolation, exactly the same
+//     class of footgun Where guards against.
+//
+// Every runtime value flows through args... (Where) or is forbidden
+// outright (For has no positional bind channel for table — table is a
+// SQL identifier, not a value).
 //
 // Why a static analyzer (and not a runtime check, and not a wrapper
 // type):
@@ -17,13 +29,13 @@
 //     missed escape leaks across orgs. The only correctness-preserving
 //     gate is "no runtime construction permitted at all", which is a
 //     compile-time property the analyzer enforces.
-//   - Wrapper type (a `SafeClause string` type with package-private
-//     constructor): would require a SPEC §10.1 amendment because it
-//     changes the locked Where signature. Investigation
-//     (unblock-tv8.33) explicitly recommended the analyzer path
-//     instead.
+//   - Wrapper type (a `SafeClause string` or `SafeTable string` type
+//     with package-private constructor): would require a SPEC §10.1
+//     amendment because it changes the locked Where/For signature.
+//     Investigation (unblock-tv8.33, unblock-tv8.35) explicitly
+//     recommended the analyzer path instead.
 //
-// Detection rules (the only acceptable forms for the FIRST argument):
+// Detection rules (the only acceptable forms for the guarded argument):
 //
 //   - `*ast.BasicLit` of `token.STRING` kind — covers regular ("…") and
 //     back-quoted (`…`) Go string literals.
@@ -45,14 +57,27 @@
 //     are applied; everything else passes through verbatim and fails
 //     the "is constant" check.
 //
-// Receiver-type resolution: the analyzer uses `pass.TypesInfo.Selections`
-// to extract the receiver's type, then walks through *types.Pointer and
-// *types.Named to land on the underlying generic type. The match
-// requires (a) the receiver type's package import path is exactly
-// `encore.app/shared/rbac` and (b) the method's name is `Where`.
-// Name-only matching is explicitly avoided — a `Where` method on an
-// unrelated query builder elsewhere in the backend would otherwise
-// false-positive.
+// Resolution paths (two distinct go/types maps):
+//
+//   - Where (method-call): `pass.TypesInfo.Selections` records selectors
+//     that resolve to a method or field on a typed receiver. The
+//     analyzer walks Selection.Recv() through *types.Pointer / *types.Named
+//     to confirm the receiver's package path is `encore.app/shared/rbac`
+//     and method name is `Where`. Name-only matching is explicitly
+//     avoided — a `Where` method on an unrelated query builder elsewhere
+//     in the backend would otherwise false-positive.
+//   - For (package-level generic func): `Selections` does NOT capture
+//     package-qualified identifier resolution; `pass.TypesInfo.Uses`
+//     (equivalently `ObjectOf`) is the correct map. The analyzer
+//     resolves the SelectorExpr's selector ident to a *types.Func and
+//     asserts its package path is `encore.app/shared/rbac` and name is
+//     `For`. Critical AST nuance: `rbac.For[row](id, table)` parses as
+//     CallExpr{Fun: IndexExpr{X: SelectorExpr{rbac.For}, Index: row},
+//     Args: [id, table]} (single type arg) or IndexListExpr (multiple
+//     type args, Go 1.18+). The walker MUST unwrap *ast.IndexExpr and
+//     *ast.IndexListExpr before reaching the SelectorExpr; a naive
+//     match on call.Fun.(*ast.SelectorExpr) silently misses every For
+//     call site because the IndexExpr wraps it.
 package lint
 
 import (
@@ -75,30 +100,49 @@ const rbacPackagePath = "encore.app/shared/rbac"
 // rbac.ScopedQuery[T] whose first argument the analyzer guards.
 const rbacWhereMethod = "Where"
 
+// rbacForFunc is the locked SPEC §10.1 package-level constructor name on
+// rbac whose SECOND argument (table) the analyzer guards. For is
+// generic, so the AST shape at the call site is
+// CallExpr{Fun: IndexExpr|IndexListExpr{X: SelectorExpr{rbac.For}}}.
+const rbacForFunc = "For"
+
 // NoRbacDynamicClauseAnalyzer is the exported analyzer instance. The
 // golangci-lint module-plugin loader picks this up via the cmd/
-// entry point.
+// entry point. Despite the file/registration name retaining the
+// historical "clause" suffix (kept stable to avoid churning the
+// golangci-lint custom-binary registration), the analyzer guards both
+// `rbac.ScopedQuery.Where` (clause, arg index 0) and `rbac.For` (table,
+// arg index 1). The Doc string is the authoritative scope.
 var NoRbacDynamicClauseAnalyzer = &analysis.Analyzer{
 	Name:     "no_rbac_dynamic_clause",
-	Doc:      "rejects runtime-constructed first arguments to rbac.ScopedQuery.Where; clause must be a Go string literal or untyped string constant (SPEC §10.1, unblock-tv8.33)",
+	Doc:      "rejects runtime-constructed string arguments to rbac.ScopedQuery.Where (clause, arg 0) and rbac.For (table, arg 1); both MUST be a Go string literal or untyped string constant (SPEC §10.1, unblock-tv8.33, unblock-tv8.35)",
 	Run:      runNoRbacDynamicClause,
 	URL:      "https://github.com/websublime/unblock/blob/main/docs/specs/01-spec-backend-mvp.md#101-rbac-pkgrbac-nfr-2",
 	Requires: nil,
 }
 
 // runNoRbacDynamicClause implements analysis.Analyzer.Run. Walks every
-// CallExpr in every file, filters to calls whose selector resolves to
-// (*encore.app/shared/rbac.ScopedQuery[T]).Where via go/types, and
-// verifies the FIRST argument is a compile-time string constant.
+// CallExpr in every file and applies two parallel detection paths:
+//
+//   - Method calls whose selector resolves to
+//     (*encore.app/shared/rbac.ScopedQuery[T]).Where via
+//     pass.TypesInfo.Selections — guards arg index 0 (clause).
+//   - Package-level generic calls whose selector resolves (after
+//     unwrapping *ast.IndexExpr / *ast.IndexListExpr for the type-arg
+//     wrapper) to encore.app/shared/rbac.For via pass.TypesInfo.Uses —
+//     guards arg index 1 (table).
+//
+// Both paths share isCompileTimeStringConstant as the gate.
 func runNoRbacDynamicClause(pass *analysis.Pass) (interface{}, error) {
 	if pass.Pkg == nil {
 		return nil, nil //nolint:nilnil // analyzer convention
 	}
-	// The rbac package's own tests call Where with literals, but they
-	// also exercise internal helpers. Skip the package itself so the
-	// analyzer never analyses its own subject — false positives would
-	// be confusing and the package's own correctness is governed by
-	// the doc-hardening pass (rbac.go SECURITY block on Where).
+	// The rbac package's own tests call Where/For with literals, but
+	// they also exercise internal helpers. Skip the package itself so
+	// the analyzer never analyses its own subject — false positives
+	// would be confusing and the package's own correctness is governed
+	// by the doc-hardening pass (rbac.go SECURITY blocks on Where and
+	// For).
 	if pass.Pkg.Path() == rbacPackagePath {
 		return nil, nil //nolint:nilnil
 	}
@@ -109,30 +153,111 @@ func runNoRbacDynamicClause(pass *analysis.Pass) (interface{}, error) {
 			if !ok {
 				return true
 			}
-			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok {
-				return true
+
+			// Detection path A: method call on
+			// (*rbac.ScopedQuery[T]).Where. The Fun is a bare
+			// SelectorExpr (no IndexExpr wrapper — Where is not
+			// generic).
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+				if sel.Sel != nil && sel.Sel.Name == rbacWhereMethod &&
+					isRbacScopedQueryReceiver(pass.TypesInfo, sel) {
+					if len(call.Args) == 0 {
+						// Wrong arity — go/types complains
+						// elsewhere; this analyzer is only concerned
+						// with the safety contract.
+						return true
+					}
+					first := call.Args[0]
+					if !isCompileTimeStringConstant(pass.TypesInfo, first) {
+						pass.ReportRangef(first, "rbac.Where: first argument must be a Go string literal or untyped string constant; runtime values MUST flow through args... — see SPEC §10.1 / unblock-tv8.33")
+					}
+					return true
+				}
 			}
-			if sel.Sel == nil || sel.Sel.Name != rbacWhereMethod {
-				return true
+
+			// Detection path B: package-level generic call to rbac.For.
+			// AST shape: CallExpr{Fun: IndexExpr|IndexListExpr{X:
+			// SelectorExpr{rbac.For}}, Args: [identity, table]}. The
+			// SelectorExpr is wrapped in the type-argument node and
+			// must be unwrapped first.
+			if sel := unwrapForSelector(call.Fun); sel != nil {
+				if sel.Sel != nil && sel.Sel.Name == rbacForFunc &&
+					isRbacForFunc(pass.TypesInfo, sel) {
+					// For has signature For[T](identity, table) — table
+					// is the SECOND positional arg. Require len > 1.
+					if len(call.Args) < 2 {
+						return true
+					}
+					second := call.Args[1]
+					if !isCompileTimeStringConstant(pass.TypesInfo, second) {
+						pass.ReportRangef(second, "rbac.For: second argument (table) must be a Go string literal or untyped string constant; runtime values would breach tenant isolation by rewriting the FROM clause and scope predicate — see SPEC §10.1 / unblock-tv8.35")
+					}
+					return true
+				}
 			}
-			if !isRbacScopedQueryReceiver(pass.TypesInfo, sel) {
-				return true
-			}
-			if len(call.Args) == 0 {
-				// Wrong arity — go/types will complain elsewhere; this
-				// analyzer is only concerned with the safety contract.
-				return true
-			}
-			first := call.Args[0]
-			if isCompileTimeStringConstant(pass.TypesInfo, first) {
-				return true
-			}
-			pass.ReportRangef(first, "rbac.Where: first argument must be a Go string literal or untyped string constant; runtime values MUST flow through args... — see SPEC §10.1 / unblock-tv8.33")
+
 			return true
 		})
 	}
 	return nil, nil //nolint:nilnil
+}
+
+// unwrapForSelector returns the underlying *ast.SelectorExpr for a
+// (potentially generic) call's Fun expression, or nil when the shape
+// does not match.
+//
+// Three accepted shapes:
+//
+//   - *ast.SelectorExpr — non-generic call (kept for symmetry; rbac.For
+//     is generic so this branch never hits in production but is cheap
+//     and keeps the helper composable).
+//   - *ast.IndexExpr{X: *ast.SelectorExpr} — single type-argument
+//     instantiation, e.g. `rbac.For[Item](id, "items")`.
+//   - *ast.IndexListExpr{X: *ast.SelectorExpr} — multi type-argument
+//     instantiation (Go 1.18+), kept for forward compatibility.
+//
+// Anything else returns nil so the caller short-circuits the For
+// detection branch cleanly.
+func unwrapForSelector(fun ast.Expr) *ast.SelectorExpr {
+	switch f := fun.(type) {
+	case *ast.SelectorExpr:
+		return f
+	case *ast.IndexExpr:
+		if sel, ok := f.X.(*ast.SelectorExpr); ok {
+			return sel
+		}
+	case *ast.IndexListExpr:
+		if sel, ok := f.X.(*ast.SelectorExpr); ok {
+			return sel
+		}
+	}
+	return nil
+}
+
+// isRbacForFunc returns true when sel resolves to the package-level
+// generic function encore.app/shared/rbac.For. Resolution uses
+// pass.TypesInfo.Uses (equivalently ObjectOf) on the selector ident:
+// Selections is the wrong map for package-qualified identifiers — it
+// records typed-receiver selectors, while a package-level func's
+// SelectorExpr resolves through Uses. Mismatch silently fails:
+// Selections.Lookup on a package-qualified ident returns no entry, so
+// using Selections here would make the rule a no-op for For.
+func isRbacForFunc(info *types.Info, sel *ast.SelectorExpr) bool {
+	if info == nil || sel == nil || sel.Sel == nil {
+		return false
+	}
+	obj := info.ObjectOf(sel.Sel)
+	if obj == nil {
+		return false
+	}
+	fn, ok := obj.(*types.Func)
+	if !ok {
+		return false
+	}
+	if fn.Pkg() == nil {
+		return false
+	}
+	return fn.Pkg().Path() == rbacPackagePath && fn.Name() == rbacForFunc
 }
 
 // isRbacScopedQueryReceiver returns true when sel resolves to a method

@@ -250,6 +250,97 @@ func TestWhere_InjectionDocumentation_NoRuntimeSanitiser(t *testing.T) {
 	}
 }
 
+// TestFor_TableInjectionDocumentation pins the runtime behaviour of
+// For in the presence of a hostile, dynamically-constructed table
+// identifier. These tests EXIST TO DOCUMENT THE INVARIANT, not to
+// exercise a defence: the rbac builder has no runtime gate against SQL
+// injection on the table argument, by design — see the SECURITY block
+// on For (SPEC §10.1, unblock-tv8.35).
+//
+// The production-grade gate is the static analyzer at
+// `apps/api/shared/lint/no_rbac_dynamic_clause.go`, which rejects any
+// non-literal SECOND argument to rbac.For at lint time (alongside the
+// same gate on Where's first argument). These tests confirm that:
+//
+//  1. If the analyzer is bypassed (e.g. //nolint suppression, which is
+//     forbidden but possible), a hostile table value is concatenated
+//     verbatim into BOTH the assembled FROM clause and the canonical
+//     scope predicate `<table>.org_id = $1` — i.e. the leak is real,
+//     and a single hostile string can rewrite both sinks at once.
+//  2. The scope predicate is still emitted in shape, but its target
+//     identifier is now caller-controlled and an attacker can use SQL
+//     meta-characters (semicolon, line-comment, OR-true) to neutralise
+//     the org_id filter, bypass tenant isolation, or terminate the
+//     statement and append arbitrary SQL.
+//
+// If either assertion ever flips (e.g. a future runtime sanitiser is
+// added on the table argument), the test must be re-evaluated —
+// runtime sanitisation of arbitrary SQL identifiers is brittle and has
+// historically been the wrong gate for tenant isolation. The analyzer
+// remains the contractual gate.
+func TestFor_TableInjectionDocumentation_HostileTableEmitsVerbatim(t *testing.T) {
+	// A hostile table value that closes the scope predicate with a
+	// line-comment marker, terminates the statement with a semicolon,
+	// and appends arbitrary DDL. The analyzer would reject this at
+	// lint time because the value is a `var hostile := ...` — but the
+	// runtime builder has no such gate. We construct the value via a
+	// literal here only so the test itself compiles cleanly; the
+	// assertion is that build() emits the bytes verbatim regardless of
+	// source.
+	const hostileTable = "workitems.items; DROP TABLE x --"
+
+	q := For[struct{ ID string }](fakeIdentity("org_alpha"), hostileTable)
+	sql, _ := q.build()
+
+	// The hostile bytes survive into the assembled FROM clause
+	// verbatim.
+	if !strings.Contains(sql, "FROM "+hostileTable+" WHERE") {
+		t.Fatalf("hostile table did NOT appear verbatim in FROM clause — runtime sanitiser detected on table arg, contract changed: %q", sql)
+	}
+	// The scope predicate is also rewritten with the hostile bytes,
+	// because For interpolates `<table>.org_id = $1` via fmt.Sprintf.
+	// The line-comment marker (` -- `) inside hostileTable now sits
+	// inside the predicate and (with PostgreSQL's line-comment
+	// semantics in the assembled statement) neutralises everything
+	// downstream — the org_id filter is gone in the SQL parse tree.
+	if !strings.Contains(sql, hostileTable+".org_id = $1") {
+		t.Errorf("scope predicate not interpolated with hostile table verbatim: %q", sql)
+	}
+}
+
+// TestFor_TableInjectionDocumentation_NoRuntimeSanitiser is a paired
+// regression: it asserts that classic injection meta-characters (';',
+// '--', '/*', stray quote, OR-true) survive verbatim through For ->
+// build() on the table argument. Pinning this behaviour is the
+// regression net if a future contributor adds a runtime sanitiser and
+// silently changes the contract documented on For. Runtime
+// sanitisation is the wrong gate for this surface; the analyzer is the
+// only acceptable defence.
+func TestFor_TableInjectionDocumentation_NoRuntimeSanitiser(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		table string
+		// wantSubstr is a fragment of the hostile table chosen so the
+		// assertion pins meta-character survival in BOTH the FROM
+		// clause and the interpolated scope predicate.
+		wantSubstr string
+	}{
+		{name: "semicolon", table: "workitems.items; DROP TABLE x", wantSubstr: "; DROP TABLE x"},
+		{name: "line_comment", table: "workitems.items -- malicious", wantSubstr: " -- malicious"},
+		{name: "block_comment", table: "workitems.items /* malicious */", wantSubstr: " /* malicious */"},
+		{name: "stray_quote", table: "workitems.items OR title = 'oops", wantSubstr: " OR title = 'oops"},
+		{name: "or_true", table: "workitems.items WHERE 1=1 OR ", wantSubstr: " WHERE 1=1 OR "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q := For[struct{ ID string }](fakeIdentity("org_alpha"), tc.table)
+			sql, _ := q.build()
+			if !strings.Contains(sql, tc.wantSubstr) {
+				t.Fatalf("hostile pattern %q not found in assembled SQL — runtime sanitiser detected on table arg, see SPEC §10.1: got %q", tc.wantSubstr, sql)
+			}
+		})
+	}
+}
+
 // TestExportedFields_StructLayout confirms the reflection helper
 // returns exported fields in declaration order and skips unexported
 // ones. Exercises the same code path scanAll uses against generic T.

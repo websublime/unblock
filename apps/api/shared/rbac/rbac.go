@@ -55,36 +55,37 @@
 //     and means a service that does not declare access to the unblock
 //     database fails at `encore check` time, not at runtime.
 //
-// Injection-safety invariant (SPEC §10.1, unblock-tv8.33):
+// Injection-safety invariant (SPEC §10.1, unblock-tv8.33, unblock-tv8.35):
 //
-//   - The first argument to Where MUST be a Go string literal or an
-//     untyped string constant — i.e. a value that is fixed at compile
-//     time. Every runtime value (request body, URL parameter, header,
-//     row from the database, anything user-controlled) MUST flow through
-//     the args... variadic, never through string concatenation into the
-//     clause text.
-//   - The clause string is concatenated verbatim into the assembled SQL
-//     statement (see build). There is no runtime validation, escaping,
-//     or sanitisation — the SQL string is opaque to Go. A clause
-//     fragment that contains user-controlled data fragments the WHERE
-//     predicate and silently bypasses the org_id scope guard installed
-//     by For. For a tenant-isolation gate this is fatal.
+//   - The first argument to Where (clause) AND the second argument to
+//     For (table) MUST each be a Go string literal or an untyped string
+//     constant — i.e. a value that is fixed at compile time. Every
+//     runtime value (request body, URL parameter, header, row from the
+//     database, anything user-controlled) is forbidden in either
+//     position; values destined for Where flow through the args...
+//     variadic, and the table identifier of For has no runtime channel
+//     at all (it is a SQL identifier, not a value).
+//   - Both strings are concatenated verbatim into the assembled SQL
+//     statement (see build): the clause into the WHERE chain, and the
+//     table into the FROM clause AND into the canonical scope predicate
+//     `<table>.org_id = $1`. There is no runtime validation, escaping,
+//     or sanitisation — the SQL string is opaque to Go. A runtime value
+//     in either position fragments the WHERE predicate and silently
+//     bypasses the org_id scope guard installed by For. For a
+//     tenant-isolation gate this is fatal.
 //   - The project-local static analyzer
 //     `apps/api/shared/lint/no_rbac_dynamic_clause.go` is the
-//     enforcement gate: it rejects any call to ScopedQuery.Where whose
-//     first argument is not a compile-time string constant. The
-//     analyzer is wired into `apps/api/.golangci.yml` and is also
-//     runnable directly via
-//     `go run ./shared/lint/cmd/no_rbac_dynamic_clause ./...`.
+//     enforcement gate for BOTH call shapes: it rejects any call to
+//     ScopedQuery.Where whose first argument is not a compile-time
+//     string constant, and any call to rbac.For whose second argument
+//     (table) is not a compile-time string constant. The analyzer is
+//     wired into `apps/api/.golangci.yml` and is also runnable directly
+//     via `go run ./shared/lint/cmd/no_rbac_dynamic_clause ./...`.
 //   - Runtime detection is fundamentally impossible: by the time the
 //     SQL string reaches build, Go has erased the difference between a
 //     literal and a runtime-constructed string. The analyzer is the
 //     only gate. Reviewers asking "why no runtime check" should consult
 //     this paragraph.
-//   - The same caller-trust model applies to the `table` argument of
-//     For — see its doc-comment and unblock-tv8.33's risk note on the
-//     table parameter (out of scope for that bead but called out here
-//     for completeness).
 //
 // Compile-time property (SPEC §10.1, AC-1).
 //
@@ -234,10 +235,37 @@ type userClause struct {
 // library's database/sql.DB.Prepare. This keeps the fluent surface
 // chainable without panic-paths.
 //
-// table must be a fully-qualified `<schema>.<table>` identifier. Caller
-// is responsible for using a valid identifier; SQL-injection-safety on
-// the table parameter rests on the linter at apps/api/shared/lint/ and
-// on code review (SPEC §10.1 acceptance criterion #3).
+// table must be a fully-qualified `<schema>.<table>` identifier.
+//
+// SECURITY (SPEC §10.1, unblock-tv8.35).
+//
+// The table argument MUST be a Go string literal or an untyped string
+// constant fixed at compile time. SQL identifiers have NO bind-parameter
+// channel in PostgreSQL — table cannot be passed via args... like a
+// value. A runtime-constructed table string is concatenated verbatim
+// into BOTH the FROM clause (build at line ~370) and the canonical
+// scope predicate `fmt.Sprintf("%s.org_id = $1", table)` (For body
+// below). A user-controlled table value rewrites both sinks and
+// silently bypasses tenant isolation — exactly the same class of
+// footgun unblock-tv8.33 closed for Where.
+//
+//	// CORRECT — string literals and named constants:
+//	rbac.For[Item](id, "workitems.items").Where(...).Run(ctx)
+//
+//	const itemsTable = "workitems.items"
+//	rbac.For[Item](id, itemsTable).Where(...).Run(ctx)
+//
+//	// WRONG — runtime construction breaches scope:
+//	rbac.For[Item](id, req.Table)                       // injection
+//	rbac.For[Item](id, schema + ".items")               // injection
+//	rbac.For[Item](id, fmt.Sprintf("%s.items", schema)) // injection
+//
+// The analyzer at `apps/api/shared/lint/no_rbac_dynamic_clause.go`
+// rejects every non-literal second argument to For at lint time,
+// alongside the same gate on Where's first argument. Runtime validation
+// is impossible — the SQL string is opaque to Go by the time it reaches
+// build. Bypassing the analyzer (e.g. //nolint suppression) on this
+// function is forbidden and a code-review failure.
 func For[T any](identity types.Identity, table string) *ScopedQuery[T] {
 	q := &ScopedQuery[T]{
 		identity: identity,
