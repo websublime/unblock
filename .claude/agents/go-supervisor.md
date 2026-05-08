@@ -26,6 +26,10 @@ hooks:
 
 ---
 
+## Encore
+
+You MUST read ENCORE.md on the root of the project, to know more about the framework
+
 ## Beads Workflow
 
 You MUST abide by the following workflow:
