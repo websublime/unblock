@@ -52,6 +52,18 @@
 //     code that happens to contain "UPDATE" and "is_ready" in
 //     unrelated literals) outweighs the benefit; that pattern is
 //     out-of-scope for this analyzer.
+//   - SQL comments (`--` line comments, `/* … */` block comments) are
+//     NOT parsed: the analyzer scans raw BasicLit text without a SQL
+//     lexer, so a string literal containing a syntactically complete
+//     fake UPDATE inside a comment (e.g. `-- UPDATE workitems.items
+//     SET is_ready = true`) will still false-positive. This is a
+//     known-and-accepted residual: comment-aware parsing would
+//     require a real SQL grammar, the false-positive cost of the
+//     current heuristic is bounded (literals carrying full fake DML
+//     in comments are vanishingly rare in production code), and the
+//     escape hatch is to relocate the example out of an executable
+//     literal (e.g. into a Go-source `//` comment, which the analyzer
+//     does not scan).
 //
 // The analyzer is consumed by golangci-lint via the module-plugin
 // system; see apps/api/.golangci.yml and the plugin entry point at
@@ -103,9 +115,17 @@ var targetColumns = []string{"is_ready", "pipeline_stage"}
 //     the literal two-character sequence `\t` rather than a real
 //     TAB; analysistest passes the unprocessed literal text through
 //     `unquoteSQL`, so escape bytes survive verbatim.
-//   - (?:workitems\.)?items\b — either schema-qualified
-//     `workitems.items` or the bare `items` table; the trailing \b
-//     rejects sibling tables like `dependency_items`.
+//   - (?:workitems\.items|items)\b — explicit alternation of the
+//     two accepted table forms: schema-qualified `workitems.items`
+//     or the bare `items` table. Written as an explicit alternation
+//     rather than the equivalent factored form `(?:workitems\.)?items`
+//     so the segment self-documents the closed set of accepted
+//     prefixes — only `workitems.` is allowed; an unrelated schema
+//     like `auth.items` cannot land on the bare branch because the
+//     preceding `(?:\s|\\.)+` separator does not span letters, so
+//     after a non-`workitems` schema-qualifier the regex has no path
+//     forward. The trailing \b rejects sibling tables like
+//     `dependency_items`.
 //   - [^;]*?\bset\b — guarded gap to the SET keyword; the [^;]
 //     character class prevents the regex from stitching across an
 //     unrelated statement that happens to be in the same literal.
@@ -133,7 +153,7 @@ func buildIsReadyUpdateRe(columns []string) *regexp.Regexp {
 	for i, col := range columns {
 		quoted[i] = regexp.QuoteMeta(col)
 	}
-	pattern := `(?is)\bupdate(?:\s|\\.)+(?:workitems\.)?items\b[^;]*?\bset\b[^;]*?\b(?:` +
+	pattern := `(?is)\bupdate(?:\s|\\.)+(?:workitems\.items|items)\b[^;]*?\bset\b[^;]*?\b(?:` +
 		strings.Join(quoted, "|") +
 		`)\b`
 	return regexp.MustCompile(pattern)
