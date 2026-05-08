@@ -1,8 +1,8 @@
 # SPEC: ://unblock — Stage 1 Product Architecture
 
-**Status:** APPROVED *(round-2 review iterations applied 2026-05-07)*
+**Status:** APPROVED *(round-2 review iterations applied 2026-05-07; round-3 research applied 2026-05-08)*
 **Author:** Ada (architect)
-**Date:** 2026-05-07
+**Date:** 2026-05-07 (round-3 research applied 2026-05-08)
 **Source PRD:** [docs/PRD.md](./PRD.md) (APPROVED, 2026-05-07)
 **Companion:** [docs/MANIFESTO.md](./MANIFESTO.md) (APPROVED, 2026-05-07)
 **Carries forward verbatim:** [docs/code-cli/plan.md](./code-cli/plan.md), [docs/code-cli/spec.md](./code-cli/spec.md), [docs/code-cli/research.md](./code-cli/research.md)
@@ -97,11 +97,13 @@ from the Manifesto, the PRD, or the locked code-cli artefacts.
 
 - Single Postgres database with **8 schemas**: `auth`, `org`, `workitems`,
   `deps`, `providers`, `mcp`, `boards`, `memory` (FR-1).
-- **18 MCP tools** at v1.0 over SSE with `Bearer <api-key>` auth (FR-8). 14
-  ship in P01, +4 memory tools in P02, plus the providers/sync tooling
-  required for FR-11.
+- **18 MCP tools** at v1.0 over **Streamable HTTP** (per MCP spec 2025-06-18)
+  with `Bearer <api-key>` auth (FR-8). 14 ship in P01, +4 memory tools in
+  P02, plus the providers/sync tooling required for FR-11.
 - **Two public Encore endpoints at v1.0** (`POST /webhooks/github`,
-  `GET /mcp/sse`) and **+1 at v1.1** (`POST /webhooks/gitlab`). The OAuth
+  `POST /mcp` + `GET /mcp` — the latter pair is **one logical endpoint at
+  one path** per the Streamable HTTP convention) and **+1 at v1.1**
+  (`POST /webhooks/gitlab`). The OAuth
   callback is an **Astro Action on the Astro origin**, not an Encore endpoint
   (FR-12, NFR-4).
 - **Three orthogonal state dimensions** plus `pipeline_state` exception column
@@ -146,17 +148,19 @@ detection, atomic claim transaction) inform the Go re-implementation.
                      │                  AI Agent                   │
                      │   (Claude Code / Copilot / Cursor / …)      │
                      └────────────────┬────────────────────────────┘
-                                      │ MCP over SSE
+                                      │ MCP over Streamable HTTP
                                       │ Bearer <api-key>
+                                      │ POST /mcp + GET /mcp
                                       │
    ┌────────────────────────┐    ┌────▼─────────────────────┐    ┌────────────────────────┐
    │       Browser          │    │    Encore Go Backend     │◄───┤   GitHub (provider)    │
    │   (Astro web, P05)     │    │  ┌────────────────────┐  │    │   webhooks + REST/GQL  │
    │                        │    │  │   Public surface   │  │    └────────────────────────┘
-   │  Astro Actions BFF     │    │  │  /mcp/sse          │  │
-   │  HttpOnly cookie       │    │  │  /webhooks/github  │  │
-   │  on Astro origin       │    │  │  (gitlab @ v1.1)   │  │
-   │  /auth/[provider]/     │    │  └─────────┬──────────┘  │
+   │  Astro Actions BFF     │    │  │  POST /mcp         │  │
+   │  HttpOnly cookie       │    │  │  GET  /mcp         │  │
+   │  on Astro origin       │    │  │  /webhooks/github  │  │
+   │  /auth/[provider]/     │    │  │  (gitlab @ v1.1)   │  │
+   │                        │    │  └─────────┬──────────┘  │
    │   callback             │    │            │             │
    │  (Astro Action,        │    │  ┌─────────▼──────────┐  │
    │   not Encore)          │◄───┼─►│ Private services   │  │
@@ -206,7 +210,7 @@ runtime coupling is permitted (Manifesto Law 6).
 
 | Contract | Producer | Consumer | Surface |
 |---|---|---|---|
-| **MCP wire protocol** (rmcp / SSE / JSON-RPC) | Encore backend | AI agents | `GET /mcp/sse`, Bearer auth, 18 tools at v1.0 |
+| **MCP wire protocol** (`modelcontextprotocol/go-sdk`, JSON-RPC over Streamable HTTP) | Encore backend | AI agents | Bearer auth, 18 tools at v1.0; transport per MCP 2025-06-18 spec — see §5.3 |
 | **Astro Actions ↔ Encore RPC** (private API) | Encore backend (private services) | Astro Actions BFF | Encore-generated TypeScript clients; not reachable from the browser; auth via forwarded session id (`Authorization: Bearer <session_id>` + `X-Unblock-BFF-Origin: astro`) per §5.3.1 |
 | **GitHub webhook payload** | GitHub | Encore backend `providers` service | `POST /webhooks/github`, signature-verified |
 | **OAuth callback (Astro origin)** | GitHub / GitLab | Astro Action `auth/[provider]/callback` → private RPC `auth.exchangeOAuthCode` | Browser redirect target on `unblock.websublime.com`; PKCE-validated; HttpOnly cookie set on Astro origin |
@@ -333,12 +337,62 @@ Postgres if Encore ever blocks us.
 
 ### 5.2 Service decomposition (8 services, 8 schemas, 1 database)
 
-Encore enforces the convention "one service owns one Postgres schema". The
-eight services map 1:1 to the eight schemas declared in FR-1. **This 8:8
+The eight services map 1:1 to the eight schemas declared in FR-1 (logical
+ownership: each service is the only writer to its schema). **This 8:8 logical
 mapping is locked** (Manifesto Principle 4: orthogonal deliverables applies
 intra-backend too — `boards`, `mcp`, and `memory` stay separate). Cross-service
 queries happen via Encore RPC; **no service reads another service's tables
 directly** (this is enforced by Encore's per-service DB binding).
+
+**Migration ownership (research C2, CONTRADICTED — corrected).** Encore's
+database primitive is **per-service, not per-schema**: per the Encore docs,
+"Each database is defined within a service" and the migrations directory
+belongs to **one** owning service. Other services consume via
+`sqldb.Named("name")` (read/write through Encore's DB binding) but cannot
+contribute migration files. Therefore the eight schemas cannot ship as eight
+service-local migrations directories — they must live under a single
+**migration-owner service**.
+
+We designate **`auth` as the migration-owner service**. Rationale:
+
+- `auth` is the bottom of the dependency graph in §9.4.0 — every other schema
+  has FKs into `auth.users` (or transitively via `org`), and no schema has a
+  FK pointing **into** `auth`. Migrations starting from `auth` therefore
+  satisfy FK ordering naturally.
+- `auth` is small and stable; piggy-backing the canonical migrations on it
+  does not couple migration cadence to a high-churn service.
+- It is the lowest service Encore must deploy first regardless, so the
+  deploy-ordering implication (below) costs nothing extra.
+
+**Concrete shape.** All canonical-ordered SQL migration files for **all
+eight schemas** in §9.4.0 order live under
+`apps/api/auth/migrations/NNNN_<descr>.up.sql`. The `auth` service is the
+only caller of `sqldb.NewDatabase("unblock", sqldb.DatabaseConfig{Migrations:
+"./migrations"})` — it owns the named handle. The other seven services
+(`org`, `workitems`, `deps`, `providers`, `mcp`, `boards`, `memory`)
+declare `var db = sqldb.Named("unblock")` to obtain the same DB handle for
+their queries. Each service still writes only to its logical schema; Encore's
+per-service DB binding plus the `pkg/rbac` typed query helper (§5.6) reject
+cross-schema writes at compile time.
+
+**Deploy-ordering implication (new architectural risk AR-15).** Because
+`auth` owns migrations and every other service depends on schemas created
+by those migrations, **`auth` must reach a healthy state (migrations applied)
+before any other service that runs queries against `org`, `workitems`,
+`deps`, `providers`, `mcp`, `boards`, or `memory` can serve traffic**.
+Encore handles this automatically through its dependency graph: a service
+that calls `sqldb.Named("unblock")` implicitly depends on the service that
+defined `unblock`, and Encore deploys in dependency order. The architecture
+records this as AR-15 in §13 so future contributors do not collapse the
+ordering guarantee into a "best effort" assumption.
+
+**Why not the alternative of one DB per service.** Encore's native pattern
+is one DB per service; we deliberately reject it because FR-1 mandates "a
+single Postgres database with 8 schemas". Cross-schema FKs (every
+`workitems.items.org_id → org.organizations(id)` reference) require a
+single database — they cannot span Encore-managed databases. The
+single-migration-owner pattern is the correct way to honour both FR-1 and
+Encore's per-service DB ownership.
 
 | Service | Schema | Owns | Public APIs | Private RPCs (sample) |
 |---|---|---|---|---|
@@ -347,7 +401,7 @@ directly** (this is enforced by Encore's per-service DB binding).
 | `workitems` | `workitems` | Work items, comments, labels, milestones (recursive), findings | — | `workitems.Create / Update / GetTrail / ListByMilestone` |
 | `deps` | `deps` | Dependency edges, ready set materialisation, cycle detection, cascade subscriber | — | `deps.AddEdge / RemoveEdge / IsReady / Closure` |
 | `providers` | `providers` | Provider integrations (GitHub at v1.0, +GitLab at v1.1), webhook signature verification, normalisation, bidirectional sync state | `POST /webhooks/github` (v1.0), `POST /webhooks/gitlab` (v1.1) | `providers.LinkRepo / Sync / Reconcile` |
-| `mcp` | `mcp` | MCP transport (SSE), tool registry, state-transition validator (Law 8 layer 1), `verify_can_transition`, `meta.catalogue` | `GET /mcp/sse` | (the MCP tool handlers themselves are the API; they call other services' private RPCs) |
+| `mcp` | `mcp` | MCP transport (Streamable HTTP per spec 2025-06-18), tool registry, state-transition validator (Law 8 layer 1), `verify_can_transition`, `meta.catalogue` | `POST /mcp` + `GET /mcp` (single path, two methods) | (the MCP tool handlers themselves are the API; they call other services' private RPCs) |
 | `boards` | `boards` | Kanban / saved view persistence, per-user view preferences | — | `boards.Save / Load / List` |
 | `memory` | `memory` | Scoped memory entries (`org` / `project` / `user`), tsvector + tag index, secret sanitiser | — | `memory.Remember / Recall / List / Forget` |
 
@@ -452,18 +506,52 @@ phase specs; this section pins names and intent only.
 
 Per FR-12, the following endpoints are reachable from the public Internet:
 
-**v1.0 — two endpoints:**
+**v1.0 — two logical endpoints (both transports, same path):**
 
 | Endpoint | Service | Purpose | Auth |
 |---|---|---|---|
 | `POST /webhooks/github` | `providers` | Provider event sink — webhook signature is verified, payload deduplicated via the `events_delivery_uniq UNIQUE (provider, delivery_id)` constraint (AR-12), then normalised to canonical `WorkItem` | HMAC signature header (no Bearer) |
-| `GET /mcp/sse` | `mcp` | Remote MCP for agents over SSE | `Bearer <api-key>` |
+| `POST /mcp` + `GET /mcp` | `mcp` | Remote MCP for agents over **Streamable HTTP** per the MCP 2025-06-18 spec — single endpoint path supports both `POST` (client → server JSON-RPC requests; may return either a single JSON-RPC response or a server-sent-events stream of incremental responses for long-running tools) and `GET` (server → client SSE stream for server-initiated messages, used for resumable / long-lived sessions). One logical endpoint at one path; two HTTP methods per the spec | `Bearer <api-key>` on every request; `Mcp-Session-Id` response header on `initialize`, echoed by the client on subsequent requests |
 
 **v1.1 — adds one endpoint:**
 
 | Endpoint | Service | Purpose | Auth |
 |---|---|---|---|
 | `POST /webhooks/gitlab` | `providers` | GitLab event sink (parallel to GitHub) | HMAC signature header |
+
+**MCP transport choice (research C6, CONTRADICTED — corrected).** The
+2024-11-05 MCP spec defined an HTTP+SSE transport with **two endpoints** —
+a `GET /mcp/sse` SSE stream emitting an `endpoint` event to direct the
+client to a separate `POST /mcp/messages` URL. The 2025-06-18 spec
+**replaces** that with **Streamable HTTP**: a single endpoint path that
+supports both `POST` (client → server) and `GET` (server-initiated
+streaming). We ship Streamable HTTP from P01 — the legacy SSE+POST shape
+is deprecated and we incur the migration cost now rather than on the
+v1.0 → v1.1 boundary.
+
+Streamable HTTP supports two response modes per `POST /mcp` invocation:
+
+- **Classic JSON-RPC response.** The server returns a single
+  `application/json` body containing the JSON-RPC response. Used for fast
+  tools (e.g. `prime`, `ready`, `claim`, `get_state`).
+- **Server-side event stream.** The server returns `text/event-stream` and
+  emits incremental JSON-RPC responses, progress notifications, and
+  log/diagnostic events as the tool runs. Used for tools whose execution
+  may exceed conventional request budgets (none required at v1.0 — but the
+  shape is supported because the spec mandates it; future tools that fan
+  out into Pub/Sub-driven work can use it without a transport change).
+
+Server-initiated streaming via `GET /mcp` is reserved for the resumable
+session model (the server pushes `notifications/*` JSON-RPC frames to the
+client when state mutates outside the client's request flow — e.g. a
+cascade event reaches an agent's project). It is **not** required for the
+P01 exit criterion; the P01 spec pins whether `GET /mcp` is implemented
+at v1.0 or deferred to a later phase.
+
+Backwards-compatibility: modern clients (Claude Code, Cursor) support
+Streamable HTTP first and fall back to the legacy SSE+POST transport on
+4xx. We do **not** ship the legacy fallback — clients pinned to the
+2024-11-05 shape must upgrade.
 
 **The OAuth callback is NOT an Encore endpoint.** It is an Astro Action at
 `unblock.websublime.com/auth/[provider]/callback` (P05, v1.1). The Astro
@@ -500,7 +588,8 @@ holding a separate service credential. Concretely:
 3. The Astro deploy environment carries **no** separate Encore credential.
    There is no service token, no shared secret, no mTLS handshake. The auth
    surface for private RPCs is identical to what `auth.Validate` already
-   knows how to do for the public `mcp/sse` endpoint — the only difference
+   knows how to do for the public `POST /mcp` + `GET /mcp` endpoint — the
+   only difference
    is the `X-Unblock-BFF-Origin: astro` header tells Encore "this request was
    proxied through the BFF, not initiated by the browser".
 
@@ -559,9 +648,35 @@ see the same `deps.cascade.requested` event twice. The subscriber is
 idempotent **by construction**: the closure CTE produces the same target set
 for the same input graph, the `UPDATE … SET is_ready = …` is a value-equality
 write (idempotent on a stable graph), and `deps.cascade_events` rows are
-written once per (delivery_id, triggered_by_item_id) — see AR-11 in §13. The
-delivery id is propagated from the Pub/Sub envelope into the audit row to
-support replay-safe inserts.
+written once per `(event_id, triggered_by_item_id)` — see AR-11 in §13.
+
+**Event ID provenance (research C1, CONTRADICTED — corrected).** The Encore Go
+Pub/Sub SDK's subscriber handler signature is
+`func(ctx context.Context, msg T) error` — it does **not** expose any envelope
+metadata (no message id, no attempt count, no delivery headers) to the
+handler. We therefore **cannot** propagate a provider-supplied delivery id
+from the Pub/Sub envelope. Instead, the **publisher** generates a ULID at
+emit time and embeds it as a typed field on the message struct:
+
+```go
+type CascadeRequested struct {
+    EventID            string // ULID, generated at publish time
+    TriggeredByItemID  string
+    OrgID              string
+    ProjectID          string
+    TraceID            string
+    // ... other fields
+}
+```
+
+The subscriber reads `msg.EventID` from the typed payload and uses it as the
+idempotency key. Encore's at-least-once redelivery resends the same payload
+bytes (including `EventID`), so duplicate deliveries collide on the
+`(event_id, triggered_by_item_id)` UNIQUE constraint on
+`deps.cascade_events` (§9.4.4). The constraint is enforced at the database
+level via `INSERT … ON CONFLICT (event_id, triggered_by_item_id) DO NOTHING`,
+so a second delivery is a no-op insert plus an idempotent UPDATE pass over
+`is_ready` and `pipeline_stage`.
 
 ### 5.5 Atomic claim (Manifesto Law 5)
 
@@ -1048,7 +1163,10 @@ the schema must update this section.
   re-encrypt rows in batches in a background job, swap the secrets, drop the
   old one. Documented as AR-7 in §13.
 - **Migration ordering:** schemas migrate in this order due to cross-schema
-  FK direction:
+  FK direction. **All eight schemas migrate from a single owner directory**
+  (`apps/api/auth/migrations/`, see §5.2 for the rationale — Encore's
+  database primitive is per-service, so one service owns the migrations
+  directory for the whole DB):
   1. `auth` (no incoming FKs from other schemas).
   2. `org` (FKs into `auth` only).
   3. `workitems` (FKs into `org` and `auth`).
@@ -1057,6 +1175,13 @@ the schema must update this section.
   6. `mcp` (FKs into `auth`, `org`).
   7. `boards` (FKs into `org`, `auth`).
   8. `memory` (FKs into `auth`, `org`).
+
+  Filename convention: `NNNN_<descr>.up.sql` with `NNNN` strictly increasing.
+  Files for different logical schemas are grouped by the §9.4.0 step number
+  (e.g. `0010_auth.up.sql`, `0020_org.up.sql`, …, `0080_memory.up.sql`) and
+  share the single `auth/migrations/` directory. Adding a column to (e.g.)
+  `workitems` in a later phase ships as a new file `0095_workitems_add_…
+  .up.sql` under the same directory.
 - **Required Postgres extensions** (declared once, in the bootstrap migration):
   ```sql
   CREATE EXTENSION IF NOT EXISTS pgcrypto;   -- symmetric encryption for *_enc columns
@@ -1307,7 +1432,14 @@ CREATE TABLE workitems.items (
                 AND discovered_from_id IS NOT NULL
                 AND parent_id IS NOT NULL)
         ),
-    -- A claim implies status InProgress.
+    -- A claim implies status InProgress or Done. The (claimed_by_id NULL,
+    -- status Done) combination is also legal: closing an item via the
+    -- override path or via cascade promotion may finalise an item that was
+    -- never claimed. Conversely, once claimed, an item's claim audit is
+    -- preserved through close — `claimed_by_id` and `claimed_at` are NOT
+    -- nulled on close. (Research AF3: the asymmetry is intentional; close
+    -- preserves the claim history so the audit trail of who completed the
+    -- work survives indefinitely.)
     CONSTRAINT items_claim_status_chk
         CHECK (
             (claimed_by_id IS NULL AND claimed_at IS NULL)
@@ -1325,6 +1457,16 @@ CREATE INDEX items_claimed_by_idx        ON workitems.items (claimed_by_id);
 CREATE INDEX items_ready_partial_idx
     ON workitems.items (org_id, project_id, priority)
     WHERE is_ready = true AND status = 'Ready' AND closed_at IS NULL;
+-- Full-text search backing the `search` MCP tool (research AF1). Generated
+-- column over title + body; GIN-indexed. Multi-table search at query time
+-- uses UNION ALL across this index and `comments_fts_idx` (PG GIN cannot
+-- span two tables); per-row trigram fallback covers fuzzy match.
+ALTER TABLE workitems.items ADD COLUMN fts tsvector
+    GENERATED ALWAYS AS (
+        setweight(to_tsvector('english', coalesce(title, '')), 'A') ||
+        setweight(to_tsvector('english', coalesce(body,  '')), 'B')
+    ) STORED;
+CREATE INDEX items_fts_idx ON workitems.items USING GIN (fts);
 -- Partial index: in-progress board view.
 CREATE INDEX items_in_progress_idx
     ON workitems.items (org_id, project_id, claimed_at DESC)
@@ -1398,6 +1540,10 @@ CREATE INDEX comments_item_created_idx ON workitems.comments (item_id, created_a
 CREATE INDEX comments_parent_idx       ON workitems.comments (parent_id);
 CREATE INDEX comments_status_idx       ON workitems.comments (status);
 CREATE INDEX comments_kind_status_idx  ON workitems.comments (kind, status);
+-- Full-text search backing the `search` MCP tool (research AF1).
+ALTER TABLE workitems.comments ADD COLUMN fts tsvector
+    GENERATED ALWAYS AS (to_tsvector('english', coalesce(body, ''))) STORED;
+CREATE INDEX comments_fts_idx ON workitems.comments USING GIN (fts);
 ```
 
 #### 9.4.4 Schema `deps`
@@ -1448,7 +1594,14 @@ CREATE INDEX cycles_detected_idx ON deps.cycles (detected_at DESC);
 -- have rolled over. The table is also used as a forensic record when a
 -- cascade affects a surprising set of items.
 CREATE TABLE deps.cascade_events (
-    id                    text         PRIMARY KEY,                       -- ULID
+    id                    text         PRIMARY KEY,                       -- ULID (audit row id)
+    -- Publisher-generated event id (ULID) carried as a typed field on the
+    -- Pub/Sub message payload. Encore Go's subscriber handler signature does
+    -- NOT expose envelope metadata (research C1), so the publisher embeds
+    -- this id at emit time and the subscriber reads it from the payload.
+    -- The (event_id, triggered_by_item_id) UNIQUE constraint below is the
+    -- structural mitigation for at-least-once redelivery (AR-11).
+    event_id              text         NOT NULL,
     org_id                text         NOT NULL REFERENCES org.organizations(id) ON DELETE CASCADE,
     project_id            text         REFERENCES org.projects(id) ON DELETE SET NULL,
     triggered_by_item_id  text         REFERENCES workitems.items(id) ON DELETE SET NULL,
@@ -1461,7 +1614,13 @@ CREATE TABLE deps.cascade_events (
     triggered_at          timestamptz  NOT NULL DEFAULT now(),
     trace_id              text,                                            -- correlates with mcp.tool_calls.trace_id
     CONSTRAINT cascade_events_count_chk
-        CHECK (cascaded_count >= 0)
+        CHECK (cascaded_count >= 0),
+    -- AR-11 idempotency key. A redelivered Pub/Sub message carries the same
+    -- payload bytes (including event_id), so the second insert is rejected
+    -- by this constraint and the subscriber's UPDATE pass is a no-op on a
+    -- stable graph.
+    CONSTRAINT cascade_events_event_trigger_uniq
+        UNIQUE (event_id, triggered_by_item_id)
 );
 -- Hot-path index for the M-5 metric query (per-org, by day).
 CREATE INDEX cascade_events_org_triggered_idx
@@ -1571,6 +1730,19 @@ CREATE INDEX mappings_drift_idx
 
 #### 9.4.6 Schema `mcp`
 
+> **Migration / DB-handle ownership note (research C2).** The `mcp` service
+> does **not** own the migration files for its schema. Per §5.2, **all eight
+> schemas' migrations live under `apps/api/auth/migrations/`** because
+> Encore's database primitive is per-service and only one service can own
+> the migrations directory for a DB. The `mcp` service obtains its DB
+> handle by calling `sqldb.Named("unblock")` (the database name `auth`
+> registered in §5.2's migration-owner discussion) and writes only to the
+> `mcp.*` tables defined below. Writes to `mcp.api_keys.expires_at` and
+> `mcp.api_keys.revoked_at` etc. are mediated by the `pkg/rbac` typed query
+> helper (§5.6); cross-schema writes from `mcp` to (e.g.) `workitems.*`
+> are compile-time rejected. The same share pattern applies to every other
+> service in §9.4.2 — §9.4.5 and §9.4.7 — §9.4.8.
+
 ```sql
 CREATE SCHEMA IF NOT EXISTS mcp;
 
@@ -1581,11 +1753,31 @@ CREATE TABLE mcp.api_keys (
     issued_to_user  text         REFERENCES auth.users(id) ON DELETE SET NULL,
     label           text         NOT NULL,                                 -- e.g. 'claude-code-laptop'
     agent_kind      text         NOT NULL,                                 -- AgentKind value
-    key_hash        bytea        NOT NULL,                                 -- argon2id of the actual key
+    key_hash        bytea        NOT NULL,                                 -- HMAC-SHA256(server_secret, key); 32 bytes raw.
+                                                                           -- Argon2id is the wrong primitive here: keys are
+                                                                           -- 32-byte URL-safe random with 256 bits of entropy,
+                                                                           -- so brute force is mathematically infeasible
+                                                                           -- regardless of hash speed; argon2id's per-call
+                                                                           -- ~50ms cost would directly threaten NFR-1 (the
+                                                                           -- p99 < 2s budget is hot-path Bearer auth).
+                                                                           -- HMAC with a server-side secret prevents lookup
+                                                                           -- table attacks against a leaked key_hash dump
+                                                                           -- (research C7).
     key_prefix      text         NOT NULL,                                 -- first 8 chars for hint UI
     scopes          text[]       NOT NULL DEFAULT '{}',                    -- coarse scopes; tool-level RBAC is in mcp service
     created_at      timestamptz  NOT NULL DEFAULT now(),
     last_used_at    timestamptz,
+    -- Optional natural expiry. NULL means "never expires by default" — at
+    -- v1 we do not auto-rotate API keys. Lifecycle is operator-driven:
+    -- (a) issuance happens via the seeder CLI (P01) or the future web admin
+    --     surface (P05+); each issuance creates a row.
+    -- (b) Rotation is a manual two-step: issue a new key (new prefix), wait
+    --     for the agent operator to switch over, then set `revoked_at` on
+    --     the old row. Both rows coexist during the rollover window.
+    -- (c) There is no auto-refresh, no auto-rotate, and no key-expiry
+    --     scheduler in v1. `expires_at` is honoured if set (auth.Validate
+    --     refuses keys past `expires_at`) but the column defaults to NULL
+    --     and operators rarely set it. See research AF4.
     expires_at      timestamptz,
     revoked_at      timestamptz,
     CONSTRAINT api_keys_agent_chk
@@ -1775,27 +1967,45 @@ Bound by **M-INV-6 (max depth = 4)**, so the CTE walks at most 4 levels.
 time):
 
 ```sql
-WITH RECURSIVE reachable(id) AS (
-    SELECT $2::text                                               -- the proposed to_item
+WITH RECURSIVE reachable(id, depth) AS (
+    SELECT $2::text, 0                                            -- the proposed to_item
     UNION ALL
-    SELECT d.to_item
+    SELECT d.to_item, r.depth + 1
       FROM deps.dependencies d
       JOIN reachable r ON d.from_item = r.id
       WHERE d.kind = 'blocks'
+        AND r.depth < 256                                         -- hard cap on traversal depth (AR-8)
 )
 SELECT 1 FROM reachable WHERE id = $1                             -- the proposed from_item
 LIMIT 1;
 ```
 
 If this returns a row, inserting `(from=$1, to=$2, blocks)` would create a
-cycle. The `deps` service runs this CTE inside the same transaction as the
-insert, with `SELECT ... FOR UPDATE` on `deps.dependencies` rows touching
-either endpoint to prevent racing inserts.
+cycle.
 
-**Risk:** unbounded depth on a deeply chained graph. Mitigation: a hard cap
-on chain length (configurable; default 256) raised as `LIMIT 256` inside the
-recursive term and a pre-write health check that monitors the longest chain
-across the org. See AR-8 in §13.
+**Concurrency-safe write protocol for `add_dependency`** (research AF5 —
+`SELECT FOR UPDATE` does not block racing INSERTs of brand-new edges, only
+touched existing rows; an advisory lock is required to serialise concurrent
+edge writes that share a project):
+
+```sql
+-- 1. Acquire a per-project advisory lock for the duration of the transaction
+SELECT pg_advisory_xact_lock(hashtext('deps.add_dependency:' || $project_id));
+-- 2. Run the depth-bounded reachability CTE above
+-- 3. If empty result: INSERT INTO deps.dependencies (...)
+-- 4. Transaction commits; advisory lock is released automatically
+```
+
+The advisory lock scope is the project (deps live inside a project), so
+cross-project edge writes do not contend with each other.
+
+**Why a depth counter instead of `LIMIT` in the recursive term:** Postgres
+documents `LIMIT` as a parent-query construct; using it inside a recursive
+term has undocumented semantics and the PG manual itself notes the trick
+"is not recommended" for production (research C5). The depth counter
+pattern is the standard approach: terminates the recursive term once
+depth exceeds 256, returns a structured error pointing at the offending
+edge. See AR-8 in §13.
 
 **Closure for `is_ready` materialisation** (Law 1 cascade):
 
@@ -1856,6 +2066,18 @@ SELECT pgp_sym_decrypt(value_enc, $dek)::text AS value
 The DEK never leaves the Encore service mesh; the database connection user
 does not have shell access; the secret is supplied via Encore Cloud's secret
 manager.
+
+**P01 provisioning (research OQ2).** `MEMORY_DEK` must be provisioned in
+P01, even though the `memory` service has no runtime code until P02. The
+P01 schemas `auth.oauth_tokens.access_token_enc` /
+`auth.oauth_tokens.refresh_token_enc` and
+`providers.installations.installation_id_enc` /
+`providers.installations.webhook_secret_enc` (the latter is a P02 service
+but the schema lands in P01 per the plan §2.1 "schema-only services" rule)
+all use the same DEK; the bootstrap migration cannot succeed without a
+provisioned secret. Olive owns the Encore secret-manager seeding as part
+of A-2 in the P01 plan; the local emulator uses a development DEK from
+`.encore/local-secrets.toml` (gitignored).
 
 **Key rotation strategy:**
 1. Provision `MEMORY_DEK_NEXT` alongside `MEMORY_DEK`.
@@ -1952,7 +2174,7 @@ release candidate must additionally pass the cross gates.
 
 | Phase | Components touched | Manifesto coverage | Exit criterion (per PRD §8) |
 |---|---|---|---|
-| **P01 — Backend MVP** | `apps/api/auth`, `org`, `workitems`, `deps`, `memory`, `mcp` (14 tools), `public/`; migrations §9.4.1–§9.4.4 + §9.4.6 + §9.4.8 | L1, L2, L3 (foundations), L5, L7 | Agent completes `prime → ready → claim → close` against a manually-seeded graph; cascade fires; cycle detection rejects offending edges |
+| **P01 — Backend MVP** | `apps/api/auth` (incl. **migrations directory for all 8 schemas**, see §5.2), `org`, `workitems`, `deps`, `memory` (schema-only stub), `providers` (schema-only stub), `boards` (schema-only stub), `mcp` (14 tools, Streamable HTTP transport per MCP spec 2025-06-18), `public/`; migrations §9.4.1–§9.4.8 (all eight schemas land in P01 per the plan resolution; service code for `providers`/`boards`/`memory` is deferred to later phases per plan §2.1) | L1, L2, L3 (foundations), L5, L7 | Agent completes `prime → ready → claim → close` against a manually-seeded graph; cascade fires; cycle detection rejects offending edges |
 | **P02 — Backend complete** | `apps/api/providers` (webhook + sync), `apps/api/boards`, `mcp` (+4 memory tools = 18 total), Layer 1 state-transition validator, **`mcp.meta_catalogue` v1 + `verify_can_transition` v1** (operational primitives, §5.2.2); migrations §9.4.5 + §9.4.7 | L3 (provider events), L8 layer 1 | A GitHub repo can be linked, webhooks normalise into canonical work items, attempts to mark `done` without the required comment trail are rejected at the MCP boundary; `mcp.meta_catalogue` returns the live catalogue.json; `verify_can_transition` validates a candidate transition against the same Layer-1 validator |
 | **P03 — AST CLI v1.0.0** | `crates/unblock-indexer-core`, `unblock-indexer`, `unblock-code` | L6 | All 9 HARD gates in code-cli/plan §14.1 pass on a fresh clone; ROI harness publishes raw logs + per-flow medians as a release artefact |
 | **P04 — Plugin renderer** | `crates/unblock-plugin` **consumes the P02-shipped `mcp.meta_catalogue` v1** at build time (and embeds `crates/unblock-plugin/data/catalogue.json` via `include_str!`); registers the `verify-state` hook against `mcp.verify_can_transition` (also shipped in P02) | L8 layer 2 + 3 (full Law 8) | Pipeline-bypass attempt is rejected by MCP (Layer 1, P02), flagged by the post-dispatch hook (Layer 2), and refused by the agent prompt's BLOCK condition (Layer 3); all three layers agree; catalogue drift CI test green |
@@ -2004,13 +2226,15 @@ section calls out the ones the architecture choices specifically introduce).
 | AR-5 | **AST CLI zero-coupling tempts duplication.** With no shared types, both binaries may re-implement similar utilities. | Acceptable; Manifesto Law 6 is strict precisely because the cost of duplication is lower than the cost of cross-binary coupling. |
 | AR-6 | **BFF discipline at v1.0 (no web yet).** Until P05 ships, no BFF exists; all clients of private APIs are internal. | Until v1.1, the public surface is just two FR-12 endpoints; private APIs remain truly private (no browser path at all). When P05 lands, the BFF discipline is enforced from day one of v1.1. |
 | AR-7 | **`pgcrypto` symmetric DEK rotation cost.** Three schemas hold `_enc` columns; rotation requires re-encrypting every row of `auth.oauth_tokens`, `providers.installations`, and `memory.entries`. | Rotation is offline-batchable. The rotation strategy (§9.4.10) introduces `MEMORY_DEK_NEXT`, re-encrypts in batches, then swaps. At v1 scale (low row counts) the operation completes in minutes; at scale it remains a background job. The DEK is supplied via Encore secret only — application code never logs it. |
-| AR-8 | **Recursive CTE depth on dependency cycle / closure / milestone walks.** Postgres recursive CTEs are bounded by available memory; a deeply chained dependency graph could cost more than the latency budget. | Three mitigations: (a) milestone tree is structurally bounded by M-INV-6 (depth ≤ 4); (b) dependency cycle CTE is bounded by a `LIMIT 256` clause inside the recursive term — a hard cap raised in writes only on cycle check, never on read paths; (c) `is_ready` is materialised, not computed at read time, so the closure CTE runs only inside the cascade subscriber, asynchronously. The hard cap means a 257-node chain refuses new edges with a structured error pointing at the offending chain. |
+| AR-8 | **Recursive CTE depth on dependency cycle / closure / milestone walks.** Postgres recursive CTEs are bounded by available memory; a deeply chained dependency graph could cost more than the latency budget. | Three mitigations: (a) milestone tree is structurally bounded by M-INV-6 (depth ≤ 4); (b) dependency cycle CTE uses an explicit **depth-counter pattern** (`WHERE depth < 256` inside the recursive term, see §9.4.9) — `LIMIT` inside a recursive term has undocumented PG semantics (research C5) so a counter is the standard approach; (c) `is_ready` is materialised, not computed at read time, so the closure CTE runs only inside the cascade subscriber, asynchronously. The depth cap means a 257-node chain refuses new edges with a structured error pointing at the offending chain. Concurrency: `add_dependency` acquires `pg_advisory_xact_lock(hashtext('deps.add_dependency:' || $project_id))` to serialise concurrent edge writes within a project (research AF5). |
 | AR-9 | **GIN index cost on `memory.entries`** (FTS + tags + key trigram). At scale GIN indices have high write amplification. | Memory write rate is low (entries are atomic facts, not chat logs). At v1 scale GIN cost is dominated by read-side fan-out, which is what we want. The 8 KB hard cap on `value_size` keeps `ts_doc` bounded. If write amplification ever becomes an issue, per-scope partitioning of `memory.entries` is the documented step-up. |
 | AR-10 | **`tsvector` leakage surface.** `memory.entries.ts_doc` is built from plaintext, stored unencrypted (it must be GIN-indexable). | Tradeoff is explicit: search requires unencrypted indexable terms. Mitigation: secret sanitiser (NFR-7) runs **before** tokenisation, so any sniffable terms in `ts_doc` have already been redacted. Audit: `ts_doc` is only readable by the `memory` service connection user; no other Encore service has SELECT access to that schema. |
-| AR-11 | **Pub/Sub at-least-once delivery.** Encore Pub/Sub delivers `deps.cascade.requested` (and any future cascade-driving event) at least once. A subscriber that is not idempotent risks double-counting cascade audit rows or flipping `is_ready` twice with different intermediate observations. | The cascade subscriber is idempotent **by construction** (§5.4): the closure CTE produces a deterministic target set, the UPDATE is a value-equality write on a stable graph, and `deps.cascade_events` rows are written once per `(delivery_id, triggered_by_item_id)` (the delivery id is propagated from the Pub/Sub envelope and used as a uniqueness check before insert). The subscriber maintains both `is_ready` and `pipeline_stage` (§5.7.1) in the same UPDATE, so re-delivery converges to the same row state. New subscribers added in future phases must declare an idempotency key in their phase spec. |
+| AR-11 | **Pub/Sub at-least-once delivery.** Encore Pub/Sub delivers `deps.cascade.requested` (and any future cascade-driving event) at least once. A subscriber that is not idempotent risks double-counting cascade audit rows or flipping `is_ready` twice with different intermediate observations. | The cascade subscriber is idempotent **by construction** (§5.4): the closure CTE produces a deterministic target set, the UPDATE is a value-equality write on a stable graph, and `deps.cascade_events` rows are written once per `(event_id, triggered_by_item_id)`. **Event id provenance (research C1).** Encore Go's subscriber handler signature does not expose envelope metadata, so the **publisher** generates a ULID `EventID` at emit time and embeds it as a typed field on the message payload. The subscriber reads it from the payload and uses it as the idempotency key; the UNIQUE constraint on `deps.cascade_events (event_id, triggered_by_item_id)` (§9.4.4) is the structural mitigation. Encore's redelivery resends the same payload bytes (including `EventID`), so duplicates collide deterministically. The subscriber maintains both `is_ready` and `pipeline_stage` (§5.7.1) in the same UPDATE, so re-delivery converges to the same row state. New subscribers added in future phases must declare an idempotency key — generated by the publisher and carried as a typed payload field — in their phase spec. |
 | AR-12 | **Webhook replay protection.** GitHub may re-deliver the same `X-GitHub-Delivery` id (manual replay, partition retry). Without dedup the `providers.events` audit grows unbounded and the normaliser may produce duplicate work-item updates. | The `events_delivery_uniq UNIQUE (provider, delivery_id)` constraint on `providers.events` (§9.4.5) is the structural mitigation — duplicate inserts fail at the database, the webhook handler returns 200 OK on a recognised duplicate so GitHub stops retrying, and the normaliser is never called twice for the same delivery id. The HMAC signature check (FR-12) gates whether we accept the payload at all; the unique constraint gates whether we process it. Both layers must hold for a webhook to mutate state. |
 | AR-13 | **Encore Cloud free-tier ceiling (PRD R-1 cross-reference).** v1.0 launches on the free tier; concrete ceilings affect the M-1 latency target. | Documented ceilings the architecture must respect: **Pub/Sub message rate** (rate limited per project on the free tier — measured ceiling lands in the P02 capacity-planning gate before scale-out); **Postgres connection cap** (free-tier shared-cluster connection limit; `auth.Validate` and the cascade subscriber are the two largest pool consumers — both must use Encore's pooled DB binding rather than a fresh connection per call); **cold-start latency** (free-tier scale-to-zero behaviour can add seconds to a cold MCP `prime` call — mitigated by a synthetic warmer hitting `mcp.meta_catalogue` every N minutes from the same project). The Encore-lock-in exit (AR-1) presupposes that any of these ceilings becomes binding before scale-out is possible. M-1 is measured warm; cold-start is documented as an outlier class for the launch period. |
 | AR-14 | **Memory secret-sanitiser false negatives (PRD R-6 architectural mitigation).** The sanitiser is best-effort regex; novel credential shapes will slip through. | Three-part mitigation. (a) **Audit-on-detect:** every sanitiser hit (positive or warning-only) is recorded in a `memory.sanitiser_events` audit table (added in P02 alongside the memory service) so we can review what *was* caught and tune patterns; (b) **periodic re-scan:** a background job re-runs the current pattern set against existing `value_enc` rows on every pattern-set update — re-encrypting any row whose decrypted plaintext now matches a pattern; (c) **scoped re-encryption:** the re-scan operates per-scope (org/project/user) so it can be paused for a tenant if the cost is too high in one project. The sanitiser remains best-effort by design (NFR-7); these mitigations ensure that a missed pattern today is recoverable tomorrow. |
+| AR-15 | **Migration-owner service deploy ordering (research C2).** All eight schemas' migrations are owned by the `auth` service (§5.2). Any service whose handlers query a schema other than its own depends on `auth` having reached a healthy state first; if Encore deploys an out-of-order subset (e.g. `workitems` boots before `auth` finishes its bootstrap migration), queries fail with `relation does not exist` errors. | Encore handles this automatically through its dependency graph: a service that calls `sqldb.Named("unblock")` implicitly depends on the service that defined the database (`auth`), and Encore's deployer sequences services in dependency order. The architecture pins `auth` as the migration-owner explicitly (§5.2) so the dependency graph is deterministic. CI gate: a "migrations only" job runs `auth` to completion against an empty database before any service-test job starts (P01 plan A-6). The deploy-ordering invariant is asserted in the exit-criterion harness (E-4) by booting the local Encore emulator from a clean state and confirming `auth` reaches healthy first. |
+| AR-16 | **Streamable HTTP cold-start latency on Encore Cloud edge proxy (research C6 + AR-13).** The MCP transport is `POST /mcp` + `GET /mcp` (Streamable HTTP per the 2025-06-18 spec). On Encore Cloud's free tier, the edge proxy may scale to zero between requests; the first MCP `POST /mcp` after an idle period adds cold-start latency (potentially seconds) on top of the warm-cache budget — directly threatening NFR-1 / M-1 (`prime → ready → claim` p99 < 2 s). The legacy SSE transport had the same risk; Streamable HTTP does not introduce a new class of risk but the per-call shape (a fresh `POST` for every tool call rather than a single long-lived SSE stream) means more cold-start opportunities. | Three-part mitigation. (a) **NFR-1 measured warm only.** The latency harness (P01 plan E-2) explicitly carves out cold-start outliers; warm-cache means: pool established, identity validated, no scale-to-zero rehydration in the budget. Documented as part of the M-1 measurement methodology. (b) **Synthetic warmer.** A small Encore cron (`mcp-warmer`, every N minutes) hits `mcp.meta_catalogue` from the same project to keep the MCP service warm during business hours; the same warmer pre-establishes a Postgres pooled connection. (c) **Server-side event-stream response mode.** For long-running tools (none required at v1.0), Streamable HTTP's `text/event-stream` response shape lets a single `POST /mcp` keep the connection open while the tool runs — the cold-start cost is amortised over the tool's full execution. The P01 spec pins which tools (if any) opt into the streaming response mode and documents the keep-alive heartbeat interval for `GET /mcp` long-poll connections. Cold-start under Encore Cloud is a P02 ops measurement task (P01 acceptance is local-emulator only per plan §6 Q6). |
 
 ---
 
@@ -2024,7 +2248,7 @@ section calls out the ones the architecture choices specifically introduce).
 | 2 | 8 services × 8 schemas (1:1) vs collapsing some | **CONFIRMED 8:8** — see §5.2.1. Isolation > RPC overhead (Manifesto Principle 4 applies intra-backend). |
 | 3 | Encore Cloud lock-in | **CONFIRMED** — locked from prior strategic discussion. AR-1 accepted with NATS + standard Postgres exit path. |
 | 4 | Plugin catalogue export shape | **CONFIRMED** — JSON checked-in at `crates/unblock-plugin/data/catalogue.json` + compile-time embed via `include_str!`. Backend MCP `meta.catalogue` tool exposes the same catalogue live. CI drift test enforces equality. See §7.2. |
-| 5 | Public endpoint paths | **CONFIRMED + CORRECTED** — `/auth/callback` was a PRD bug; OAuth callback is on the **Astro origin** as an Astro Action, not Encore. v1.0 Encore public surface = 2 endpoints (`/webhooks/github`, `/mcp/sse`). v1.1 adds `/webhooks/gitlab`. See §5.3, §10.1. |
+| 5 | Public endpoint paths | **CONFIRMED + CORRECTED** — `/auth/callback` was a PRD bug; OAuth callback is on the **Astro origin** as an Astro Action, not Encore. v1.0 Encore public surface = 2 logical endpoints (`/webhooks/github`, `/mcp` over Streamable HTTP per the 2025-06-18 spec — `POST` and `GET` on the same path). v1.1 adds `/webhooks/gitlab`. See §5.3, §10.1. (Round-3 correction: round-2 referenced `GET /mcp/sse`, the deprecated 2024-11-05 transport; round-3 research C6 contradicted that and Streamable HTTP is now the canonical shape.) |
 | 6 | Drop Rust `unblock-mcp` crate | **CONFIRMED** — fully archived under `temp/rust-v1/` (gitignored). New MCP server is the Encore Go service in `apps/api/mcp/`. |
 | 7 | Plugin renderer install UX | **CONFIRMED** — `unblock-plugin render --target=<target> --supervisors=<list> --out=<dir> [--apply]`. Carries v1 design pattern verbatim. See §7.1. |
 | 8 | Web UI graph rendering library | **CONFIRMED** — deferred to P05 spec. Architectural commitment is "force-directed dependency graph rendered as canvas / SVG"; library locked at Stage 2. |

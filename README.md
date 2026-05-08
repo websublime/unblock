@@ -18,7 +18,7 @@ graph-traversal cost on the agent side. No provider lock-in.
 Three deliverables, three orthogonal use cases:
 
 - **Backend + remote MCP** — Encore Go services on a single Postgres with 8
-  schemas. Exposes 18 MCP tools over SSE for AI agents (Claude Code,
+  schemas. Exposes 18 MCP tools over Streamable HTTP for AI agents (Claude Code,
   GitHub Copilot, Cursor, custom). Work items, dependency graph engine,
   atomic claim, structured comment trail, scoped project memory, GitHub /
   GitLab webhook ingestion, three-layer pipeline state machine.
@@ -129,7 +129,7 @@ headless Web Components library) reaches feature-complete v1.
 - **AST CLI** — Rust (edition 2024) workspace; `tree-sitter` + 10 statically
   linked grammars (8 default: Rust, TypeScript, JavaScript, Python, Go,
   Java, C, PHP; opt-in: C++, Ruby); `sqlx` (sqlite + FTS5 + WAL); `clap`
-- **MCP transport** — Remote MCP over SSE; agents authenticate with
+- **MCP transport** — Remote MCP over Streamable HTTP per spec 2025-06-18 (`POST /mcp` + `GET /mcp`); agents authenticate with
   `Authorization: Bearer <api_key>`
 - **Auth** — OAuth2 + PKCE via GitHub or GitLab; HttpOnly Secure cookie on
   the Astro origin

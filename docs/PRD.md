@@ -115,7 +115,7 @@ Human engineers who interact with the system through the web UI for ceremony tas
 - **FR-5.** Dependency graph stored as edges in `deps`; computed views for ready set, dependency closure, cycle detection. Recomputation on every mutation.
 - **FR-6.** Cascade on close: a successful close emits a Pub/Sub event whose subscriber promotes newly unblocked dependents to `ready` in the same logical operation.
 - **FR-7.** Atomic claim: `SELECT FOR UPDATE` transaction; exactly one agent wins; loser receives structured rejection.
-- **FR-8.** MCP server over SSE: `GET /mcp/sse` with `Bearer <api-key>` auth, exposing 18 tools at v1.0:
+- **FR-8.** MCP server over **Streamable HTTP** per the MCP 2025-06-18 spec — single endpoint at `/mcp` accepting both `POST /mcp` (client requests; response can be a single JSON-RPC reply or an SSE stream of incremental responses for long-running tools) and `GET /mcp` (server-initiated SSE stream for resumable / long-lived sessions). Bearer `<api-key>` auth on every request, `Mcp-Session-Id` response header on `initialize`. Implementation uses `github.com/modelcontextprotocol/go-sdk` (the canonical Go SDK; not `rmcp` which is Rust-only). Exposing 18 tools at v1.0:
   - 14 in P01 (work-item CRUD, dependencies, ready, claim, close, comment trail, prime, etc.)
   - +4 memory tools in P02 (`remember`, `recall`, `memories`, `forget`)
   - Plus the providers/sync tooling needed for bidirectional GitHub sync.
@@ -131,9 +131,9 @@ Human engineers who interact with the system through the web UI for ceremony tas
   - Webhook ingestion at the public `POST /webhooks/github` endpoint, signature-verified, normalising to canonical `WorkItem`.
   - Bidirectional sync, opt-in per integration: changes in `://unblock` propagate to GitHub Issues; webhook events update the canonical store.
   - Reconciliation on a schedule when webhooks are missed or the provider is offline.
-- **FR-12.** Two public Encore endpoints at v1.0 (the only paths reachable directly from external services):
+- **FR-12.** Public Encore endpoints at v1.0 (the only paths reachable directly from external services):
   - `POST /webhooks/github` — provider event sink, HMAC-verified.
-  - `GET /mcp/sse` — remote MCP for AI agents, Bearer API key.
+  - `POST /mcp` + `GET /mcp` — remote MCP for AI agents over Streamable HTTP per the 2025-06-18 spec. Single logical endpoint at one path, two HTTP methods. Bearer `<api-key>` on every request.
   At v1.1, a third endpoint is added:
   - `POST /webhooks/gitlab` — provider event sink, HMAC-verified (v1.1).
   All other Encore APIs are private; the Astro BFF is the sole privileged client. **The OAuth callback is hosted by Astro on the web origin** (`unblock.websublime.com/auth/[provider]/callback`) — the Astro Action handles the callback and calls Encore's private `auth.exchangeOAuthCode` internally. This preserves the BFF discipline (Law 4): no auth credentials cross domain boundaries.
@@ -179,7 +179,7 @@ The AST CLI carries forward verbatim from the approved `docs/code-cli/{plan,spec
 | FR-5 (dependency graph + cycle detection) | H | H | H | Must-have |
 | FR-6 (cascade on close) | H | H | M | Must-have |
 | FR-7 (atomic claim) | H | H | L | Must-have |
-| FR-8 (MCP SSE, 18 tools) | H | H | H | Must-have |
+| FR-8 (MCP Streamable HTTP, 18 tools) | H | H | H | Must-have |
 | FR-9 (state-transition validation, layer 1) | H | H | M | Must-have |
 | FR-11 (GitHub webhooks + bidirectional sync) | H | M | H | Must-have |
 | FR-13 (memory service) | H | M | M | Performance |
@@ -549,8 +549,8 @@ The project ships in four sequential phases plus a renderer phase. The AST CLI s
 
 - Encore Go on a single Postgres (8 schemas).
 - Services: `auth`, `org`, `workitems`, `deps`, `memory`.
-- Minimal MCP server with **14 tools** over SSE.
-- Public Encore endpoints: `POST /webhooks/github`, `GET /mcp/sse` (OAuth callback is on Astro origin per FR-12).
+- Minimal MCP server with **14 tools** over Streamable HTTP (per FR-8).
+- Public Encore endpoints: `POST /webhooks/github`, `POST /mcp` + `GET /mcp` (single logical MCP endpoint, Streamable HTTP per FR-12). OAuth callback is on Astro origin per FR-12.
 - Exit criterion: an agent can authenticate via Bearer API key and complete `prime → ready → claim → close` against a manually-seeded graph; cascade fires; cycle detection rejects offending edges.
 
 ### P02 — Backend complete
@@ -636,7 +636,7 @@ The project ships in four sequential phases plus a renderer phase. The AST CLI s
 - **Backend:** Encore Go on a single Postgres (8 schemas). No additional persistent stores. No Redis. No local SQLite inside the API service.
 - **Web (P05, v1.1):** Astro 5 + line-ui (websublime-internal headless Web Components on top of Zag.js, vitamin repo). BFF via Astro Actions; HttpOnly cookie on the Astro origin only. P05 is gated on line-ui v1 — see §10.1.
 - **AST CLI:** Rust (edition 2024) workspace with `tree-sitter` + `sqlx` (sqlite + FTS5 + WAL) + `ignore` + `clap`. Statically-linked grammars; build requires a host C toolchain (gcc/clang/Apple Clang/MSVC).
-- **MCP transport:** Remote MCP over SSE, `GET /mcp/sse` with `Bearer <api-key>`.
+- **MCP transport:** Remote MCP over **Streamable HTTP** per the MCP 2025-06-18 spec (single endpoint `/mcp`, two methods `POST` + `GET`), with `Bearer <api-key>`. Go SDK: `github.com/modelcontextprotocol/go-sdk`.
 
 ### 10.3 Architectural constraints (Manifesto Laws)
 
@@ -699,8 +699,8 @@ None at PRD time. All eight discovery questions are resolved in §1–§12 and t
 
 | Persona | Primary surface | Pain solved |
 |---|---|---|
-| AI agent | MCP over SSE | No graph traversal cost; one call to ready work; structured pipeline; scoped memory. |
-| Orchestrator | MCP over SSE + web | Dispatch by readiness, see cycle violations, observe cascades. |
+| AI agent | MCP over Streamable HTTP | No graph traversal cost; one call to ready work; structured pipeline; scoped memory. |
+| Orchestrator | MCP over Streamable HTTP + web | Dispatch by readiness, see cycle violations, observe cascades. |
 | Developer | Astro web + AST CLI | Graph visualisation, comment review, fast code navigation without `Glob/Grep/Read` chains. |
 
 ### 14.3 Phase / deliverable cross-reference

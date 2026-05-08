@@ -52,8 +52,8 @@ Per SPEC §5.2 (8 services × 8 schemas, 1:1 mapping locked).
 | `org` | Org / project CRUD, RBAC role bindings, `org.Authorize(identity, resource, action)` | Required because every `workitems`, `deps`, and `mcp` call is org-scoped (NFR-2). |
 | `workitems` | Items, comments, labels, milestones (recursive), findings; private RPCs `Create / Update / GetTrail / ListByMilestone / AppendComment / SetStateColumns` | Comments append-only; milestone tree depth ≤ 4; findings are first-class child items. |
 | `deps` | Edges, cycle detection at write time, ready-set materialisation, cascade subscriber, `deps.cascade_events` audit table; private RPCs `AddEdge / RemoveEdge / IsReady / Closure` | The cascade subscriber **also maintains `pipeline_stage`** (SPEC §5.7.1). |
-| `mcp` | SSE transport (`GET /mcp/sse`), tool registry, the 14 P01 tools, Bearer API key auth via `auth.Validate`, structured error envelope | **No state-machine BLOCK conditions** in P01 — see §3.4 below for the explicit deferral. |
-| **public** | The two FR-12 v1.0 endpoints' wiring (`GET /mcp/sse` only — `POST /webhooks/github` is P02) | Only one of the two public endpoints in P01. |
+| `mcp` | Streamable HTTP transport (`POST /mcp` + `GET /mcp` per MCP spec 2025-06-18), Go SDK `github.com/modelcontextprotocol/go-sdk`, tool registry, the 14 P01 tools, Bearer API key auth via `auth.Validate`, structured error envelope | **No state-machine BLOCK conditions** in P01 — see §3.4 below for the explicit deferral. |
+| **public** | FR-12 v1.0 endpoints' wiring (`POST /mcp` + `GET /mcp` Streamable HTTP only — `POST /webhooks/github` is P02) | Only the MCP endpoint in P01. |
 
 Services whose **schema** ships in P01 but whose **runtime surface is empty**:
 
@@ -86,7 +86,7 @@ sequence, which the §9.4.0 ordering rules already pin independently.
 | 8 | `list` | Filters: status, pipeline_stage, claimed-by, milestone, labels. RBAC-scoped. |
 | 9 | `search` | FTS over titles + bodies + comment bodies. RBAC-scoped. |
 | 10 | `comment` | Append `(kind, status, body)`; both axes per FR-10. Append-only. |
-| 11 | `add_dependency` | `from blocks to`. Cycle-checked at write time using the recursive CTE in SPEC §9.4.9 with the `LIMIT 256` cap (AR-8). |
+| 11 | `add_dependency` | `from blocks to`. Cycle-checked at write time using the depth-counter recursive CTE in SPEC §9.4.9 (depth ≤ 256, AR-8). Acquires per-project `pg_advisory_xact_lock` to serialise racing edge writes (research AF5). |
 | 12 | `remove_dependency` | Removes edge; emits `deps.cascade.requested`; the `to` side may flip `is_ready=true`. |
 | 13 | `set_state` | Writes one or more of `impl_state`, `review_state`, `qa_state`, `pipeline_state`. **In P01, this is a write-through with structural invariants only** (e.g. `impl_state=done` requires `claimed_by_id IS NOT NULL`); the **comment-trail-driven BLOCK conditions are P02** — see §3.4. |
 | 14 | `get_state` | Returns the four state columns + materialised `pipeline_stage` + most recent `(kind, status)` per kind from the comment trail. |
@@ -101,7 +101,7 @@ sequence, which the §9.4.0 ordering rules already pin independently.
   locks, no compare-and-swap.
 - **Cycle detection (NFR-5)** — at write time inside `add_dependency`
   and inside `create` when dependencies are inlined; recursive CTE per
-  SPEC §9.4.9 with `LIMIT 256` cap; structured error pointing at the
+  SPEC §9.4.9 with depth-counter cap (≤ 256); structured error pointing at the
   offending chain.
 - **RBAC (NFR-2)** — `pkg/rbac` typed query helper + per-service DB
   binding so cross-service direct reads are impossible. The exhaustive
@@ -251,7 +251,7 @@ into bd.
 | ID | Task | Owner |
 |---|---|---|
 | C-1 | `workitems` service: items + comments + labels + milestones; CRUD private RPCs | go-supervisor (Greta) |
-| C-2 | `deps` service: edges, cycle detection (CTE + LIMIT 256) at write time | go-supervisor (Greta) |
+| C-2 | `deps` service: edges, cycle detection (depth-counter CTE ≤ 256 + per-project advisory lock) at write time | go-supervisor (Greta) |
 | C-3 | Cascade subsystem: `deps.cascade.requested` topic, subscriber that maintains `is_ready` + `pipeline_stage`, `deps.cascade_events` idempotent insert (AR-11) | go-supervisor (Greta) |
 | C-4 | Atomic claim transaction (SPEC §5.5) | go-supervisor (Greta) |
 | C-5 | `pipeline_stage` derivation table integration tests (SPEC §5.7.1) | go-supervisor (Greta) |
@@ -261,7 +261,7 @@ into bd.
 
 | ID | Task | Owner |
 |---|---|---|
-| D-1 | `mcp` service skeleton: SSE transport (`GET /mcp/sse`), Bearer API key auth via `auth.Validate`, tool registry, structured error envelope, `mcp.tool_calls` audit row per call | go-supervisor (Greta) |
+| D-1 | `mcp` service skeleton: Streamable HTTP transport (`POST /mcp` + `GET /mcp` per MCP 2025-06-18 spec) using `github.com/modelcontextprotocol/go-sdk`, Bearer API key auth via `auth.Validate` (HMAC-SHA256 lookup per §9.4.6), tool registry, structured JSON-RPC error envelope, `mcp.tool_calls` audit row per call | go-supervisor (Greta) |
 | D-2 | Tools 1–4: `prime`, `ready`, `claim`, `create` | go-supervisor (Greta) |
 | D-3 | Tools 5–8: `update`, `close`, `show`, `list` | go-supervisor (Greta) |
 | D-4 | Tools 9–10: `search`, `comment` | go-supervisor (Greta) |
@@ -308,14 +308,14 @@ cannot be verified by reading internal docs alone.
 |---|---|---|
 | R-P01-1 | Encore Go `Pub/Sub` typed-topic API at the version we will pin: does `at-least-once delivery` give us a `delivery_id` we can use for AR-11 idempotency, or do we need to hash the payload? | The cascade subscriber's idempotent insert depends on this. SPEC §5.4 / AR-11 references "the delivery id is propagated from the Pub/Sub envelope". Confirm the SDK exposes it. |
 | R-P01-2 | Encore Go `sqldb.Database` migration runner: can it run cross-schema migrations in our ordering (§9.4.0), and how does it handle `pgcrypto` + `pg_trgm` extension declarations? | Migration order must match SPEC §9.4.0. If Encore's runner reorders or batches, we must adapt. |
-| R-P01-3 | Encore Go SSE support for `GET /mcp/sse`: native or do we hand-roll the SSE response? rmcp Go bindings or do we implement the JSON-RPC framing ourselves? | The MCP SSE transport is the only public agent-facing endpoint. The choice (use rmcp Go vs. roll our own) decides D-1's effort and the wire-protocol-conformance test plan. |
+| R-P01-3 | MCP transport stack: `modelcontextprotocol/go-sdk` (Go SDK, separate from Rust `rmcp`) over Streamable HTTP per MCP spec 2025-06-18 — do we use the SDK directly, or roll the JSON-RPC framing ourselves? | The MCP transport is the only public agent-facing endpoint. **CONTRADICTED in research C3+C6**: rmcp is Rust-only; SSE is the deprecated transport. Architectural fix in Round 2 (Ada). |
 | R-P01-4 | Encore Cloud free-tier ceilings (per AR-13): connection cap, Pub/Sub rate, cold-start behaviour. Are the documented ceilings compatible with the NFR-1 budget on a synthetic warmer? | If the free-tier cold-start outliers are seconds, NFR-1 measurement methodology must explicitly carve them out. |
 
 ### 5.2 Postgres mechanics (R-P01-5 through R-P01-7)
 
 | ID | Question |
 |---|---|
-| R-P01-5 | `LIMIT 256` inside a recursive CTE (SPEC AR-8): exact PG semantics — does it bound the working set, the result set, or both? Does PG 15 vs PG 16 differ? Confirm the cap actually prevents 257-node cycle attempts from completing the CTE. |
+| R-P01-5 | Cycle-detection CTE depth bound. **Research C5 CONTRADICTED the original `LIMIT 256` proposal** — `LIMIT` inside a recursive term has undocumented PG semantics ("not recommended" per PG manual). Replaced with explicit depth counter (`WHERE depth < 256`). SPEC §9.4.9 + AR-8 updated. |
 | R-P01-6 | `SELECT FOR UPDATE` behaviour under Encore's connection pooler: does it preserve transactional locking semantics, or does the pooler ever break the transaction? (Pgbouncer transaction pooling vs. session pooling matters here.) |
 | R-P01-7 | `tsvector` GIN performance over `workitems.items.title + body` plus `workitems.comments.body` for the `search` tool at the v1 fixture size — is there a multi-table FTS pattern Encore prefers (materialised view vs. per-table indices joined at query time)? |
 
@@ -323,14 +323,14 @@ cannot be verified by reading internal docs alone.
 
 | ID | Question |
 |---|---|
-| R-P01-8 | rmcp / MCP SSE wire protocol version compatibility for Claude Code, GitHub Copilot CLI, Cursor, and a vanilla Anthropic SDK harness — confirm the JSON-RPC error envelope shape we need to emit, and the keep-alive / reconnect semantics over SSE on Encore Cloud's edge proxy. |
+| R-P01-8 | MCP wire protocol version compatibility for Claude Code, GitHub Copilot CLI, Cursor, and a vanilla Anthropic SDK harness — confirm the JSON-RPC error envelope shape we need to emit, and the Streamable HTTP keep-alive / reconnect semantics on Encore Cloud's edge proxy. **Research C6 confirmed Streamable HTTP per 2025-06-18 spec** — SSE is the deprecated transport. Round 2 (Ada) updates the transport choice. |
 
 ### 5.4 OAuth + API key (R-P01-9, R-P01-10)
 
 | ID | Question |
 |---|---|
 | R-P01-9 | GitHub OAuth2+PKCE: required scopes for v1.0 (read user, read repo metadata for the future P02 webhook subscription, no write at v1.0)? Is there a recommended PKCE flow library in Go we should pin? |
-| R-P01-10 | API key format and entropy for MCP Bearer auth: 32-byte URL-safe random with a `unblock_pat_` prefix? `pgcrypto` storage format? Rotation / revocation approach for v1.0 (the SPEC defers the lifecycle to "the P01 spec", §10.1). |
+| R-P01-10 | API key format and storage. **Research C7 CONTRADICTED the original argon2id choice** — argon2id is the wrong primitive for 256-bit-entropy random keys (brute force is mathematically infeasible regardless of hash speed; the ~50ms per-call cost would breach NFR-1). Replaced with **HMAC-SHA256(server_secret, key)** stored as `bytea` raw 32 bytes. Server secret rotates via Encore secret swap; lookup by `key_prefix` first, then HMAC compare. Rotation: no auto-rotation in v1.0 — manual revoke (`revoked_at`) + new key issuance. SPEC §9.4.6 updated. |
 
 These ten research items become **R-P01-1 through R-P01-10** in
 `docs/research/01-research-backend-mvp.md` (Smith's output, gating the
@@ -507,7 +507,7 @@ These are P01-level risks (SPEC §13 covers architecture-wide risks; PRD
 |---|---|---|
 | RP01-1 | **NFR-1 (`prime → ready → claim` < 2 s p99) misses on the local emulator harness.** The materialised `is_ready` plus the `claimed_by_id IS NULL` filter are O(index lookup); the budget is reachable, but only if `prime` does not fan out to N+1 RPCs. | E-2 wires the latency harness early so `prime` is profiled while D-2 is being written. If we miss, we batch the RPCs out of `prime` into one `workitems` private RPC that returns the bundle. |
 | RP01-2 | **Cascade subscriber idempotency regression.** AR-11 promises the subscriber is idempotent; a sloppy implementation that flips `is_ready` twice or double-counts `cascade_events` rows is a Law 1 violation. | Property test: re-deliver every test event twice; assert post-state is byte-identical. The `(delivery_id, triggered_by_item_id)` uniqueness check is asserted at the DB level. |
-| RP01-3 | **Cycle detection CTE exceeds the LIMIT 256 cap on a legitimate (non-cyclic) deep chain at v1 scale.** AR-8 sets the cap; a 200-node legitimate chain plus a new edge-write would error misleadingly. | Document the cap as a v1 product constraint; surface it in the `add_dependency` error envelope; revisit the cap based on the first-month data. |
+| RP01-3 | **Cycle detection CTE depth-counter cap (256) refuses a legitimate non-cyclic 257+ node chain at v1 scale.** AR-8 sets the cap; a 200-node legitimate chain plus a new edge-write would error misleadingly. | Document the cap as a v1 product constraint; surface it in the `add_dependency` error envelope; revisit based on the first-month data. |
 | RP01-4 | **Encore SSE long-lived connection drops under Encore Cloud edge proxy.** Free-tier proxies often kill idle connections. Agent reconnect logic must handle this gracefully. | R-P01-3 / R-P01-8 close this in research before D-1 starts. Heartbeat ping every 15s; client reconnect on close. |
 | RP01-5 | **API key entropy / storage chosen wrong.** Once the key format is locked, rotating to a different format is a public-surface migration. | R-P01-10 closes this in research; the spec pins the format before D-1 ships. |
 | RP01-6 | **`pkg/rbac` typed query helper is bypassable by a future supervisor.** If a contributor hand-rolls a SQL query against another service's schema, RBAC silently regresses. | Encore's per-service DB binding makes cross-schema reads compile-fail; CI lint enforces no `WithDB(otherSchema)` calls outside the owner. |
@@ -521,7 +521,7 @@ This phase is **DONE** when all of the following are demonstrably true.
 
 ### 8.1 Functional acceptance (PRD §8 P01 exit criterion)
 
-- [ ] An agent authenticates via `Bearer <api-key>` against `GET /mcp/sse`.
+- [ ] An agent authenticates via `Bearer <api-key>` against the Streamable HTTP MCP endpoint (`POST /mcp` for tool calls; `GET /mcp` for server-initiated SSE).
 - [ ] The agent calls `prime` and receives a non-empty ready set summary,
       claimed-by-me list (initially empty), and recent cascade events
       list (initially populated by the seeder).

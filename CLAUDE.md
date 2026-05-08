@@ -89,7 +89,7 @@ unblock/
 - **Pub/Sub**: Encore native (topics: `provider.events`, `workitem.changed`, `deps.recomputed`)
 - **Cron**: Encore native (`auth.session-cleanup`, `providers.poll-fallback`, `deps.full-recompute`, `mcp.api-key-audit`)
 - **Auth**: OAuth2+PKCE (GitHub or GitLab — single identity, immutable; secondary providers can attach as event sources only); `//encore:authhandler` reads `Authorization: Bearer <session_id>`
-- **External access**: 3 raw public endpoints — `POST /webhooks/github` (HMAC), `POST /webhooks/gitlab` (HMAC, v2), `GET /mcp/sse` (Bearer API key, MCP wire protocol)
+- **External access**: public endpoints — `POST /webhooks/github` (HMAC), `POST /webhooks/gitlab` (HMAC, v1.1), and `POST /mcp` + `GET /mcp` (single Streamable HTTP MCP endpoint per spec 2025-06-18, Bearer API key)
 - **Domain**: `api.unblock.websublime.com` (private — only Astro server-side traffic + the 3 raw endpoints)
 
 ### Frontend (`apps/web/`)
