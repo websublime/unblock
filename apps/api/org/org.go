@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	"encore.app/auth"
 	"encore.app/shared/rbac"
@@ -387,15 +388,20 @@ func GetProject(ctx context.Context, id string) (*Project, error) {
 // Schema column order (migration 0030_org.up.sql lines 34-43):
 //
 //	id, org_id, slug, name, description, archived_at, created_at, updated_at
+//
+// archived_at / created_at / updated_at are `timestamptz` in the DDL —
+// pgx scans timestamptz natively into time.Time and rejects *string
+// targets with a scan error. Mirror auth.go's time.Time usage for the
+// same column type.
 type projectRow struct {
 	ID          string
 	OrgID       string
 	Slug        string
 	Name        string
 	Description *string
-	ArchivedAt  *string
-	CreatedAt   string
-	UpdatedAt   string
+	ArchivedAt  *time.Time
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
 // AddMember inserts an org.members row. Role is validated client-side
@@ -479,12 +485,19 @@ func AddMember(ctx context.Context, req *AddMemberRequest) error {
 //     This is the load-bearing tenant gate AC-1 names.
 //  2. Validate Resource and Action against the closed allow-lists.
 //     Unknown values fail closed (InvalidArgument).
-//  3. Agent branch. If Identity.Role == "agent", permit same-org
+//  3. Cross-project containment. When req.ProjectID is set, the
+//     project MUST belong to req.OrgID — otherwise deny. This runs
+//     BEFORE the agent branch so an agent caller cannot bypass the
+//     containment check by passing a ProjectID owned by a different
+//     org. Practical impact would be bounded (data access still goes
+//     through rbac.For which scopes by org_id), but Authorize's own
+//     predicate must be consistent across human and agent callers.
+//  4. Agent branch. If Identity.Role == "agent", permit same-org
 //     read/write on the agentReadWriteResources set; deny everything
 //     else (SPEC §10.1).
-//  4. Compute effective role = max(org_role, project_role). When
+//  5. Compute effective role = max(org_role, project_role). When
 //     req.ProjectID is empty, fall back to org_role.
-//  5. Apply the role-action matrix.
+//  6. Apply the role-action matrix.
 //
 //encore:api private method=POST path=/org.Authorize
 func Authorize(ctx context.Context, req *AuthorizeRequest) error {
@@ -518,20 +531,10 @@ func Authorize(ctx context.Context, req *AuthorizeRequest) error {
 		}
 	}
 
-	// Step 3: agent identity. Authorised via tool-scope at MCP, not
-	// org.members rows. Permit same-org read/write on a closed set
-	// of resources; deny everything else.
-	if req.Identity.Role == roleAgent {
-		if _, ok := agentReadWriteResources[req.Resource]; !ok {
-			return denyError(req, "agents may not access this resource")
-		}
-		if req.Action == actionDelete {
-			return denyError(req, "agents may not delete")
-		}
-		return nil
-	}
-
-	// Step 4: cross-project validation + effective-role derivation.
+	// Step 3: cross-project containment. Runs before the agent branch
+	// so the predicate is consistent across human and agent callers —
+	// any caller passing a ProjectID owned by another org is denied
+	// at the gate, not just downstream at the data layer.
 	if req.ProjectID != "" {
 		ok, err := projectBelongsToOrg(ctx, req.ProjectID, req.OrgID)
 		if err != nil {
@@ -546,6 +549,20 @@ func Authorize(ctx context.Context, req *AuthorizeRequest) error {
 		}
 	}
 
+	// Step 4: agent identity. Authorised via tool-scope at MCP, not
+	// org.members rows. Permit same-org read/write on a closed set
+	// of resources; deny everything else.
+	if req.Identity.Role == roleAgent {
+		if _, ok := agentReadWriteResources[req.Resource]; !ok {
+			return denyError(req, "agents may not access this resource")
+		}
+		if req.Action == actionDelete {
+			return denyError(req, "agents may not delete")
+		}
+		return nil
+	}
+
+	// Step 5: effective-role derivation.
 	effective, err := effectiveRole(ctx, req.OrgID, req.ProjectID, req.Identity.UserID)
 	if err != nil {
 		rlog.Error("org: authorize role lookup failed", "err", err, "org_id", req.OrgID, "user_id", req.Identity.UserID)
@@ -555,7 +572,7 @@ func Authorize(ctx context.Context, req *AuthorizeRequest) error {
 		return denyError(req, "caller is not a member of the target org")
 	}
 
-	// Step 5: role-action matrix.
+	// Step 6: role-action matrix.
 	if !rolePermits(effective, req.Action) {
 		return denyError(req, fmt.Sprintf("role %q may not %s", effective, req.Action))
 	}
@@ -684,7 +701,14 @@ func callerIdentity(_ context.Context) (auth.Identity, bool) {
 	// Fallback: UserID present but no AuthData payload — shouldn't
 	// happen in production (auth.AuthHandler always returns AuthData
 	// when uid is non-empty). Return a minimal identity so callers
-	// don't crash.
+	// don't crash; the partial Identity has empty OrgID so any
+	// downstream Authorize call hits the cross-tenant short-circuit
+	// (Identity.OrgID != req.OrgID) and denies — fail-safe by
+	// construction. We log a Warn so the corruption signal is visible
+	// in production (this branch is a "should never happen" canary).
+	rlog.Warn("org: caller identity has UserID but no *auth.AuthData payload — returning partial identity (downstream Authorize will deny on empty OrgID)",
+		"user_id", string(uid),
+	)
 	return auth.Identity{UserID: string(uid)}, true
 }
 

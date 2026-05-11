@@ -48,9 +48,13 @@ package types
 //   - UserID:    ULID — the auth.users row this Identity was minted for.
 //   - OrgID:     ULID — the primary org binding for this auth event;
 //     used by the rbac scope predicate (`<table>.org_id = $1`).
-//   - Role:      one of "owner" | "admin" | "member" | "viewer" — see
-//     SPEC §4.2 RBAC matrix. Unspecified values are rejected at
-//     org.Authorize.
+//   - Role:      one of "owner" | "admin" | "member" | "viewer" for
+//     human sessions (org.members.role CHECK enforces the four-role
+//     enum); plus the synthetic "agent" runtime role minted by auth's
+//     API-key Bearer hot path (auth.go const roleAgent — never a
+//     member-table value, never accepted by org.AddMember). See SPEC
+//     §4.2 RBAC matrix and §4.3.2 step 8. Unspecified values are
+//     rejected at org.Authorize.
 //   - AgentKind: empty for human sessions; an AgentKind enum value
 //     (SPEC §4.3) for API-key callers (Bearer-key auth path).
 //
