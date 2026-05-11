@@ -251,7 +251,7 @@ Go 1.21+, standard library, gofmt, golangci-lint, pprof, OpenTelemetry, gRPC, Pr
 - Explicit error handling at every call site — no ignored errors
 - Wrap errors with context using `fmt.Errorf("... %w", err)`
 - Table-driven tests with subtests for all non-trivial logic
-- Race detector must pass: `go test -race ./...`
+- Race detector must pass: `encore test -race ./...` for Encore service packages, `go test -race ./...` only for leaf packages with zero Encore imports (e.g. `apps/api/shared/*`, `apps/api/auth/types/`). Plain `go test` panics at package init when the package declares `sqldb.NewDatabase`/`pubsub.NewTopic`/etc. — always use `encore test` for service packages.
 - Documentation on all exported identifiers
 - Channels for orchestration, mutexes for state protection
 - Goroutine lifecycle always bounded — no leak-prone patterns
