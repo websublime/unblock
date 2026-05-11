@@ -199,9 +199,13 @@ COMPLETED → REVIEW → QA) is the sole medium of communication.
 cd apps/api
 go fmt ./...                     # zero diffs
 go vet ./...                     # clean
-go test ./...                    # all pass
+encore test ./...                # all pass — see note below
 encore check                     # Encore-specific validation
 ```
+
+**Why `encore test`, not `go test`:** Encore service packages declare `sqldb.NewDatabase`, `pubsub.NewTopic`, etc. at package level. Plain `go test ./...` panics at package init outside the Encore runtime. `encore test` wraps the run with the runtime and brings up the local Docker cluster + migrations.
+
+`go test` remains valid for leaf packages with zero Encore imports (e.g. `apps/api/shared/ulid/`, `apps/api/shared/rbac/`, `apps/api/auth/types/`).
 
 ### Frontend (`apps/web/`) — TypeScript / Astro
 
