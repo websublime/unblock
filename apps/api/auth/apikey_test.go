@@ -73,8 +73,14 @@ func TestPrefixOf(t *testing.T) {
 		wantErr bool
 	}{
 		{
+			// Body is the full 32-char base32 alphabet
+			// (abcdefghijklmnopqrstuvwxyz234567) followed by the
+			// first 20 chars of the same alphabet, yielding the
+			// locked 52-char body (SPEC §4.3.2 lines 453-460).
+			// Total length is rawKeyTotalLen (64). First 8 chars of
+			// the body are "abcdefgh" — the asserted `want`.
 			name:  "well-formed key returns first 8 chars after the brand prefix",
-			input: "unblock_pat_abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnop",
+			input: "unblock_pat_abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrst",
 			want:  "abcdefgh",
 		},
 		{
@@ -95,6 +101,14 @@ func TestPrefixOf(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			// Defensive guard against fixture drift: well-formed
+			// fixtures MUST match the locked rawKeyTotalLen (SPEC
+			// §4.3.2 lines 453-460). Drift here is precisely what
+			// produced bead unblock-t47 — a 60-char fixture that
+			// silently violated the contract for B-1 (tv8.7).
+			if !tc.wantErr && len(tc.input) != rawKeyTotalLen {
+				t.Fatalf("fixture %q has len %d, want %d (rawKeyTotalLen) — fixture drift from SPEC §4.3.2", tc.input, len(tc.input), rawKeyTotalLen)
+			}
 			got, err := prefixOf(tc.input)
 			if tc.wantErr {
 				if err == nil {
