@@ -1,9 +1,10 @@
 # SPEC: P01 — Backend MVP Implementation Contract
 
-**Status:** APPROVED (round-2 review iterations applied 2026-05-08; round-3 secrets-drift fixes applied + re-approved 2026-05-08)
+**Status:** APPROVED (round-4 auth-drift fixes applied 2026-05-11)
 **Changelog:**
 - 2026-05-08 — DRIFT-1 (naming): clarified §3.5 that the four logical secret names are spec-level identifiers; added logical-name ↔ Go-field mapping table for the Encore Go secrets manifest.
 - 2026-05-08 — DRIFT-2 (format): corrected the local-secrets file path/format from `.encore/local-secrets.toml` (TOML) to `apps/api/.secrets.local.cue` (CUE) per Encore official docs (https://encore.dev/docs/go/primitives/secrets); updated syntax examples and gitignore guidance.
+- 2026-05-11 — round-4 (auth drift fixes from Sherlock's investigation on bead unblock-tv8.7): §4.3.2 step 2 aligned with locked key-format note (DRIFT-A); §4.3.3 AuthHandler signature corrected to Encore structured-params form for header dispatch (DRIFT-B); §12 task table cell for B-1 corrected from §6.4 to §4.3.3 (DRIFT-C); session-path P01 contract pinned (returns errs.Unimplemented; multi-org disambiguation deferred to BFF phase).
 
 **Author:** Ada (architect)
 **Date:** 2026-05-08
@@ -440,7 +441,7 @@ Auth: every `POST /mcp` and `GET /mcp` request must carry
 On every MCP request:
 
 1. Parse `Authorization: Bearer <raw_key>`.
-2. Extract `key_prefix = raw_key[:8]`.
+2. Extract `key_prefix = base32_portion[:8]` (i.e. `raw_key[12:20]` for inputs of the form `unblock_pat_<base32>`). *key_prefix is the first 8 chars of the random base32 portion, **after** stripping the literal `unblock_pat_` (12 chars) — see the locked key-format note below.*
 3. `SELECT id, org_id, key_hash, agent_kind, revoked_at, expires_at FROM mcp.api_keys WHERE key_prefix = $1` (uses `api_keys_prefix_uniq` UNIQUE index — O(1) lookup).
 4. Reject if `revoked_at IS NOT NULL` or `expires_at IS NOT NULL AND expires_at < now()`.
 5. Compute `expected = HMAC-SHA256(API_KEY_HMAC_SECRET, raw_key)`.
@@ -461,18 +462,31 @@ brand prefix.
 #### 4.3.3 Auth handler
 
 ```go
+// AuthParams is the structured auth-handler input. The simple-token form
+// (`func AuthHandler(ctx, token string)`) cannot read request headers, and
+// this handler MUST inspect `X-Unblock-BFF-Origin` to dispatch between the
+// MCP API-key path and the BFF session path. Per Encore's documented
+// auth-handler contract (ENCORE.md lines 388-398) the structured-params
+// form is the only variant that exposes incoming headers via `header:"…"`
+// struct tags, so it is required here.
+type AuthParams struct {
+    Authorization string `header:"Authorization"`
+    BFFOrigin     string `header:"X-Unblock-BFF-Origin"`
+}
+
 //encore:authhandler
-func AuthHandler(ctx context.Context, token string) (auth.UID, *AuthData, error) {
-    // token is from Authorization: Bearer <token>
-    // For MCP: token is a raw API key (handled by §4.3.2 above)
-    // For BFF: token is a session_id (handled by auth.Validate(TokenKind="session"))
-    // The handler dispatches by header "X-Unblock-BFF-Origin" presence.
+func AuthHandler(ctx context.Context, p *AuthParams) (auth.UID, *AuthData, error) {
+    // Parse Bearer from p.Authorization, dispatch on p.BFFOrigin presence:
+    //   - p.BFFOrigin == ""  → MCP path: raw API key (handled by §4.3.2 above)
+    //   - p.BFFOrigin != ""  → BFF path: session_id (handled by auth.Validate(TokenKind="session"))
 }
 
 type AuthData struct {
     Identity auth.Identity
 }
 ```
+
+> **P01 contract (session-path deferral).** `Validate(TokenKind="session", token=...)` returns `errs.Unimplemented` in P01. The session token path is exercised only by the future BFF (Astro Actions) and the multi-org disambiguation rule (because `auth.sessions` has no `org_id` column and `Identity.OrgID` would require a lookup in `org.members` that is undefined when a user belongs to multiple orgs) will be defined as part of the BFF phase. The seeder bypasses OAuth (§3.5) and the MCP transport (D-1) authenticates via API key only, so this deferral does not affect any P01 acceptance criterion.
 
 ### 4.4 `workitems` service
 
@@ -2095,7 +2109,7 @@ section that locks its contract:
 | A-4 (`pkg/rbac`) | Greta | §10.1 |
 | A-5 (Tracing scaffold) | Greta | §10.2 |
 | A-6 (CI gates) | Olive | §11.2 (NFR-10 commands) |
-| B-1 (`auth` service) | Greta | §4.1, §4.3.2 (API key hot path), §6.4 |
+| B-1 (`auth` service) | Greta | §4.1, §4.3.2 (API key hot path), §4.3.3 |
 | B-2 (`org` service) | Greta | §4.2 |
 | B-3 (RBAC suite) | Greta | §10.1, §11.2 (NFR-2) |
 | C-1 (`workitems` service) | Greta | §4.4, §4.4.1 (milestone RPCs — round-2 D1) |
