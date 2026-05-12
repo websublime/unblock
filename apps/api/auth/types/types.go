@@ -33,7 +33,16 @@
 //     value-type package.
 //   - SPEC §3.1 invariant: the auth service remains the sole
 //     migration-owner; sqldb.NewDatabase("unblock", ...) is still called
-//     exactly once across the workspace, in `apps/api/auth/db.go`.
+//     exactly once across the workspace, in
+//     `apps/api/auth/dbhandle/dbhandle.go`. Bead unblock-xuk relocated
+//     the call from the historical apps/api/auth/db.go (where
+//     unblock-tv8.30 originally pointed) into the dbhandle leaf
+//     sub-package so plain `go test ./auth/...` no longer panics on
+//     package init — see dbhandle's package doc-comment for the full
+//     reasoning. The auth root package retains the late-bound
+//     *sqldb.Database handle (`var db *sqldb.Database` in
+//     apps/api/auth/db.go); dbhandle.init populates it via
+//     auth.BindDB.
 //   - SPEC §10.1 invariant: consumer call sites continue to spell the
 //     type as `auth.Identity` (literal). They MUST NOT be re-spelled to
 //     `types.Identity` or `authtypes.Identity`. The parent `auth`
