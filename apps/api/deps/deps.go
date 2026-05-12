@@ -143,17 +143,24 @@ func AddEdge(ctx context.Context, req *AddEdgeRequest) (*Edge, error) {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// Resolve both endpoints' project_id inside the tx — the advisory
-	// lock key is the to_item's project_id (review L6-W8), and the
-	// cross-project rejection per §6.2 Tool 11 line 1417 needs both.
+	// Resolve both endpoints' (org_id, project_id) inside the tx — the
+	// advisory lock key is the to_item's project_id (review L6-W8), the
+	// cross-project rejection per §6.2 Tool 11 line 1417 needs both
+	// project_ids, and the post-commit CascadeRequested publish uses the
+	// DB-resolved (org_id, project_id) — NOT the request values — so the
+	// trust boundary of this private RPC stays narrow even if a caller
+	// upstream of the MCP gate ever slipped through (review L6-W1).
 	// Two QueryRow calls keep the error mapping unambiguous: missing
 	// endpoint becomes a per-field NotFound, not a generic empty
 	// result set.
-	var fromProject, toProject string
+	var (
+		fromProject, toProject string
+		fromOrg, toOrg         string
+	)
 	if err := tx.QueryRow(ctx,
-		`SELECT COALESCE(project_id, '') FROM workitems.items WHERE id = $1`,
+		`SELECT org_id, COALESCE(project_id, '') FROM workitems.items WHERE id = $1`,
 		req.FromItem,
-	).Scan(&fromProject); err != nil {
+	).Scan(&fromOrg, &fromProject); err != nil {
 		if errors.Is(err, sqldb.ErrNoRows) {
 			return nil, &errs.Error{
 				Code:    errs.NotFound,
@@ -164,9 +171,9 @@ func AddEdge(ctx context.Context, req *AddEdgeRequest) (*Edge, error) {
 		return nil, &errs.Error{Code: errs.Internal, Message: "from_item lookup failed"}
 	}
 	if err := tx.QueryRow(ctx,
-		`SELECT COALESCE(project_id, '') FROM workitems.items WHERE id = $1`,
+		`SELECT org_id, COALESCE(project_id, '') FROM workitems.items WHERE id = $1`,
 		req.ToItem,
-	).Scan(&toProject); err != nil {
+	).Scan(&toOrg, &toProject); err != nil {
 		if errors.Is(err, sqldb.ErrNoRows) {
 			return nil, &errs.Error{
 				Code:    errs.NotFound,
@@ -175,6 +182,20 @@ func AddEdge(ctx context.Context, req *AddEdgeRequest) (*Edge, error) {
 			}
 		}
 		return nil, &errs.Error{Code: errs.Internal, Message: "to_item lookup failed"}
+	}
+	// Cross-org edges are caught by the cross-project guard below in the
+	// common case (org_id partitions projects), but check explicitly so
+	// a corrupted row never leaks across orgs in the publish.
+	if fromOrg != toOrg {
+		return nil, &errs.Error{
+			Code:    errs.InvalidArgument,
+			Message: "cross-org edges are not allowed",
+			Meta: errs.Metadata{
+				"field":       "to_item_id",
+				"from_org_id": fromOrg,
+				"to_org_id":   toOrg,
+			},
+		}
 	}
 	if fromProject != toProject {
 		// Round-6 §6.2 Tool 11: cross-project edges are explicitly
@@ -308,9 +329,12 @@ func AddEdge(ctx context.Context, req *AddEdgeRequest) (*Edge, error) {
 
 	// Regime B: post-commit publish drives the multi-hop pipeline_stage
 	// recompute on the forward closure from to_item per §6.3.0 + §6.5
-	// post-commit block. Best-effort: a publish failure does NOT roll
-	// back the edge (already committed); the warn-log is the breadcrumb.
-	publishCascadeRequested(ctx, req.OrgID, req.ProjectID, req.ToItem, "edge_added", "")
+	// post-commit block. Uses the DB-resolved (toOrg, toProject) — NOT
+	// the request values — so the publish never widens the trust
+	// boundary of this private RPC (review L6-W1). Best-effort: a
+	// publish failure does NOT roll back the edge (already committed);
+	// the warn-log is the breadcrumb.
+	publishCascadeRequested(ctx, toOrg, toProject, req.ToItem, "edge_added", "")
 
 	createdByOut := ""
 	if retCreatedBy != nil {
@@ -468,11 +492,16 @@ func RemoveEdge(ctx context.Context, req *RemoveEdgeRequest) (*RemoveEdgeRespons
 		t := tid
 		traceColumn = &t
 	}
+	// ON CONFLICT (event_id, triggered_by_item_id) DO NOTHING mirrors
+	// the subscriber's collapse clause (§6.3.2) — defence-in-depth so a
+	// future caller-driven retry that reuses the same event_id can
+	// never mint a duplicate audit row (review L6-W2).
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO deps.cascade_events
 		   (id, event_id, kind, org_id, project_id,
 		    triggered_by_item_id, affected_item_ids, cascaded_count, trace_id)
-		 VALUES ($1, $2, 'edge_removed', $3, $4, $5, $6, 1, $7)`,
+		 VALUES ($1, $2, 'edge_removed', $3, $4, $5, $6, 1, $7)
+		 ON CONFLICT (event_id, triggered_by_item_id) DO NOTHING`,
 		auditID, eventID, orgID, projectColumn, toItem, []string{toItem}, traceColumn,
 	); err != nil {
 		rlog.Error("deps: cascade_events insert failed", "err", err, "event_id", eventID)
@@ -574,40 +603,10 @@ func Closure(ctx context.Context, req *ClosureRequest) (*ClosureResponse, error)
 		}
 	}
 
-	// The two directions only differ in which column joins on r.id
-	// and which column is projected. Inlined alternation in two
-	// distinct prepared statements — no runtime string concat into SQL.
-	var (
-		sql string
-	)
-	switch req.Direction {
-	case "outgoing":
-		sql = `WITH RECURSIVE reachable(id, depth) AS (
-		         SELECT $1::text, 0
-		         UNION ALL
-		         SELECT d.to_item, r.depth + 1
-		           FROM deps.dependencies d
-		           JOIN reachable r ON d.from_item = r.id
-		          WHERE d.kind = 'blocks'
-		            AND r.depth < $2
-		       )
-		       SELECT DISTINCT id FROM reachable WHERE id <> $1
-		       ORDER BY id`
-	case "incoming":
-		sql = `WITH RECURSIVE reachable(id, depth) AS (
-		         SELECT $1::text, 0
-		         UNION ALL
-		         SELECT d.from_item, r.depth + 1
-		           FROM deps.dependencies d
-		           JOIN reachable r ON d.to_item = r.id
-		          WHERE d.kind = 'blocks'
-		            AND r.depth < $2
-		       )
-		       SELECT DISTINCT id FROM reachable WHERE id <> $1
-		       ORDER BY id`
-	}
-
-	rows, err := db.Query(ctx, sql, req.ItemID, depth)
+	// The two directions only differ in which column joins on r.id and
+	// which column is projected. closureSQL(direction) returns one of
+	// two constant SQL strings — no runtime string concat into SQL.
+	rows, err := db.Query(ctx, closureSQL(req.Direction), req.ItemID, depth)
 	if err != nil {
 		return nil, &errs.Error{Code: errs.Internal, Message: "closure query failed"}
 	}
@@ -624,6 +623,41 @@ func Closure(ctx context.Context, req *ClosureRequest) (*ClosureResponse, error)
 		return nil, &errs.Error{Code: errs.Internal, Message: "closure iter failed"}
 	}
 	return &ClosureResponse{ItemIDs: out}, nil
+}
+
+// closureSQL returns the recursive-CTE SQL for the requested Closure
+// direction. Two constant strings — no runtime interpolation of the
+// direction into the SQL text (review L6-S1). The caller passes a value
+// that has already been validated against allowedClosureDirections;
+// any other value collapses to the outgoing form by default but the
+// caller is responsible for the validation gate.
+func closureSQL(direction string) string {
+	switch direction {
+	case "incoming":
+		return `WITH RECURSIVE reachable(id, depth) AS (
+		         SELECT $1::text, 0
+		         UNION ALL
+		         SELECT d.from_item, r.depth + 1
+		           FROM deps.dependencies d
+		           JOIN reachable r ON d.to_item = r.id
+		          WHERE d.kind = 'blocks'
+		            AND r.depth < $2
+		       )
+		       SELECT DISTINCT id FROM reachable WHERE id <> $1
+		       ORDER BY id`
+	default: // "outgoing"
+		return `WITH RECURSIVE reachable(id, depth) AS (
+		         SELECT $1::text, 0
+		         UNION ALL
+		         SELECT d.to_item, r.depth + 1
+		           FROM deps.dependencies d
+		           JOIN reachable r ON d.from_item = r.id
+		          WHERE d.kind = 'blocks'
+		            AND r.depth < $2
+		       )
+		       SELECT DISTINCT id FROM reachable WHERE id <> $1
+		       ORDER BY id`
+	}
 }
 
 // RecentCascadeEventsRequest is the input to RecentCascadeEvents. SPEC §4.5.
