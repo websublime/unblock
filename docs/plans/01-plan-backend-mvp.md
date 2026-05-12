@@ -251,9 +251,9 @@ into bd.
 | ID | Task | Owner |
 |---|---|---|
 | C-1 | `workitems` service: items + comments + labels + milestones; CRUD private RPCs | go-supervisor (Greta) |
-| C-2 | `deps` service: edges, cycle detection (depth-counter CTE ≤ 256 + per-project advisory lock) at write time | go-supervisor (Greta) |
-| C-3 | Cascade subsystem: `deps.cascade.requested` topic, subscriber that maintains `is_ready` + `pipeline_stage`, `deps.cascade_events` idempotent insert (AR-11) | go-supervisor (Greta) |
-| C-4 | Atomic claim transaction (SPEC §5.5) | go-supervisor (Greta) |
+| C-2 | `deps` service: edges, cycle detection (depth-counter CTE ≤ 256 + per-project advisory lock) at write time; publishes `CascadeRequested{Reason:'edge_added'}` after AddEdge commit and `Reason:'edge_removed'` after RemoveEdge commit (reusing the inline audit row's `event_id`) per spec §6.3.0 | go-supervisor (Greta) |
+| C-3 | Cascade subsystem: `deps.cascade.requested` topic, subscriber that maintains `pipeline_stage` (multi-hop) only; `is_ready` is writer-inline (single-hop) per spec §6.3.0; `deps.cascade_events` idempotent insert (AR-11); handles all four `Reason` kinds: `close \| edge_added \| edge_removed \| state_change` | go-supervisor (Greta) |
+| C-4 | Atomic claim transaction (SPEC §5.5); publishes `CascadeRequested{Reason:'state_change'}` post-commit ONLY when the I-3 reset path fires (current `qa_state='failed'` triggers the in-transaction reset to `pending/pending`) per spec §6.3.0 + §6.4 | go-supervisor (Greta) |
 | C-5 | `pipeline_stage` derivation table integration tests (SPEC §5.7.1) | go-supervisor (Greta) |
 | C-6 | RBAC regression suite extended to `workitems` + `deps` | go-supervisor (Greta) |
 

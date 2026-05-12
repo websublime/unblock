@@ -1,8 +1,10 @@
 -- Schema `deps` — dependencies, cycles, cascade_events.
 -- Canonical DDL: docs/SPEC.md § 9.4.4.
 -- FK direction: deps -> workitems, org, auth (already migrated).
--- cascade_events.kind discriminator ('close' | 'edge_removed') ships here
--- per docs/specs/01-spec-backend-mvp.md § 6.3.2 (round-2 review).
+-- cascade_events.kind discriminator ships here with the round-6
+-- cascade-symmetry CHECK list:
+--   'close' | 'edge_added' | 'edge_removed' | 'state_change'
+-- per docs/specs/01-spec-backend-mvp.md § 6.3.0 (round-6 review).
 
 CREATE SCHEMA IF NOT EXISTS deps;
 
@@ -57,18 +59,41 @@ CREATE TABLE deps.cascade_events (
     -- The (event_id, triggered_by_item_id) UNIQUE constraint below is the
     -- structural mitigation for at-least-once redelivery (AR-11).
     event_id              text         NOT NULL,
-    -- Cascade kind discriminator. Added in round-2 review iterations:
-    --   'close'        — written by the cascade subscriber when a close
-    --                    event (Tool 6 / workitems.Close) arrives via
-    --                    Pub/Sub; walks the forward 'blocks' closure
-    --                    (multi-hop, possibly large affected set).
+    -- Cascade kind discriminator. Round-6 cascade-symmetry rewrites the
+    -- writer model (see docs/specs/01-spec-backend-mvp.md § 6.3.0):
+    -- `is_ready` is maintained inline by the writer that mutated the
+    -- row/edge (single-hop, Regime A); `pipeline_stage` is maintained
+    -- exclusively by the cascade subscriber (multi-hop, Regime B).
+    -- Every Regime-B-affecting write publishes CascadeRequested with a
+    -- Reason matching one of the four values here; the subscriber
+    -- writes the audit row with `kind = msg.Reason`.
+    --
+    --   'close'        — published by workitems.Close (Tool 6) on
+    --                    status flip to Done. Subscriber walks the
+    --                    forward 'blocks' closure and recomputes
+    --                    pipeline_stage on every reachable item.
+    --   'edge_added'   — published by deps.AddEdge (Tool 11 / § 6.5)
+    --                    after the new edge commits. Subscriber walks
+    --                    the forward closure from to_item (a new
+    --                    upstream blocker can push downstream stages
+    --                    backward per § 5.7.1).
     --   'edge_removed' — written INLINE by Tool 12 (remove_dependency)
     --                    in the same SQL transaction as DELETE FROM
-    --                    deps.dependencies; single-hop only (the direct
-    --                    to_item is the only candidate to flip ready).
-    -- Future kinds (e.g. 'state_change' for Pub/Sub-driven state-cascade
-    -- writes deferred to P02+) extend the CHECK constraint additively in
-    -- their own phase migration.
+    --                    deps.dependencies; Tool 12 then publishes
+    --                    post-commit with the SAME event_id, and the
+    --                    subscriber's re-insert collapses to no-op via
+    --                    the ON CONFLICT clause below. The subscriber
+    --                    still runs its pipeline_stage recompute pass.
+    --   'state_change' — published by workitems.SetStateColumns
+    --                    (Tool 13) when the write changes
+    --                    (impl_state, review_state, qa_state)
+    --                    materially per § 5.7.1; AND by
+    --                    workitems.Claim on the I-3 reset path only
+    --                    (current qa_state='failed' triggers the
+    --                    in-transaction reset to pending/pending).
+    --
+    -- Future kinds extend the CHECK constraint additively in their own
+    -- phase migration.
     kind                  text         NOT NULL,
     org_id                text         NOT NULL REFERENCES org.organizations(id) ON DELETE CASCADE,
     project_id            text         REFERENCES org.projects(id) ON DELETE SET NULL,
@@ -82,7 +107,7 @@ CREATE TABLE deps.cascade_events (
     triggered_at          timestamptz  NOT NULL DEFAULT now(),
     trace_id              text,                                            -- correlates with mcp.tool_calls.trace_id
     CONSTRAINT cascade_events_kind_chk
-        CHECK (kind IN ('close', 'edge_removed')),
+        CHECK (kind IN ('close', 'edge_added', 'edge_removed', 'state_change')),
     CONSTRAINT cascade_events_count_chk
         CHECK (cascaded_count >= 0),
     -- AR-11 idempotency key. A redelivered Pub/Sub message carries the same

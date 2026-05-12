@@ -1,11 +1,12 @@
 # SPEC: P01 — Backend MVP Implementation Contract
 
-**Status:** APPROVED (round-5 tracing-contract clarification applied 2026-05-12)
+**Status:** APPROVED (round-6 cascade-symmetry applied 2026-05-12; round-5 tracing applied 2026-05-12; round-4 auth applied 2026-05-11; DRIFT-1/-2 applied 2026-05-08; round-2 applied 2026-05-08; round-3 research applied 2026-05-08; original APPROVED 2026-05-07)
 **Changelog:**
 - 2026-05-08 — DRIFT-1 (naming): clarified §3.5 that the four logical secret names are spec-level identifiers; added logical-name ↔ Go-field mapping table for the Encore Go secrets manifest.
 - 2026-05-08 — DRIFT-2 (format): corrected the local-secrets file path/format from `.encore/local-secrets.toml` (TOML) to `apps/api/.secrets.local.cue` (CUE) per Encore official docs (https://encore.dev/docs/go/primitives/secrets); updated syntax examples and gitignore guidance.
 - 2026-05-11 — round-4 (auth drift fixes from Sherlock's investigation on bead unblock-tv8.7): §4.3.2 step 2 aligned with locked key-format note (DRIFT-A); §4.3.3 AuthHandler signature corrected to Encore structured-params form for header dispatch (DRIFT-B); §12 task table cell for B-1 corrected from §6.4 to §4.3.3 (DRIFT-C); session-path P01 contract pinned (returns errs.Unimplemented; multi-org disambiguation deferred to BFF phase).
 - 2026-05-12 — round-5 (tracing contract from Sherlock's investigation on bead `unblock-tv8.5`): §10.2 picks Option B — ULID minted at MCP entry, propagated via `context.Context` only; removed the spurious `X-Unblock-Trace-Id` outgoing-RPC header (Encore's generated client carries `ctx` across private RPCs for free, and Pub/Sub embeds the id in the payload). §7, §8.1, §8.2, §4.5, and §6.3.1 reworded to reference Option B. Encore's runtime `req.Trace.TraceID` is observability-only and not persisted. DDL frozen — no schema change.
+- 2026-05-12 — round-6 (cascade-symmetry): the cascade subsystem is split into two regimes (new §6.3.0). `is_ready` is maintained inline by the writer that mutated the row/edge (single-hop); `pipeline_stage` is maintained exclusively by the cascade subscriber (multi-hop). `deps.cascade_events.kind` CHECK is extended from 2 values (`'close' | 'edge_removed'`) to 4 values (`'close' | 'edge_added' | 'edge_removed' | 'state_change'`). Tools 6 (close), 11 (add_dependency), 12 (remove_dependency), 13 (set_state — narrow rule for §5.7.1-affecting writes), and `workitems.Claim` (only on the I-3 reset path) post-commit publish `CascadeRequested` with the matching `Reason`. Tool 12 reuses the inline audit row's `event_id` on its post-commit publish; the subscriber's `ON CONFLICT (event_id, triggered_by_item_id) DO NOTHING` collapses the second insert to no-op. The §11.3 single-writer invariant is fractured: (a) `pipeline_stage` single-writer = cascade subscriber; (b) `is_ready` single-writer = the mutating call site (Tool 6 close, §6.5 add_edge, Tool 12 remove_edge, internal helper `deps.recomputeReady`); the linter rule scope tightens to `pipeline_stage` only with an explicit allowlist for `is_ready`. DDL migration `0050_deps.up.sql` updated in lockstep (CHECK list + doc comments).
 
 **Author:** Ada (architect)
 **Date:** 2026-05-08
@@ -24,9 +25,9 @@ findings closed in this round:
 - L7-W2 — `MCPHandler` raw endpoint pinned to a single `//encore:api`
   annotation with `method=*` wildcard (one annotation per function, per
   Encore convention); HTTP-method dispatch lives inside the handler.
-- `deps.cascade_events.kind` column added (CHECK enum: `'close' |
-  'edge_removed'`) — used by Tool 12 inline path and the cascade
-  subscriber. Reflected in SPEC §9.4.4 + §3.2 + §6.3.
+- `deps.cascade_events.kind` column added (CHECK enum extended to 4
+  values per §6.3.0); used by every `CascadeRequested` consumer.
+  Reflected in SPEC §9.4.4 + §3.2 + §6.3.
 
 > Stage 2 deliverable. This document is the **JSON-locked, RPC-locked,
 > migration-locked implementation contract** for P01. Every field type,
@@ -199,7 +200,7 @@ in steps of 10. Step numbering matches §9.4.0 ordering:
 | `0020_auth.up.sql` | Schema `auth` per SPEC §9.4.1 (tables `users`, `oauth_tokens`, `sessions` + indexes) |
 | `0030_org.up.sql` | Schema `org` per SPEC §9.4.2 (tables `organizations`, `members`, `projects`, `project_members` + indexes) |
 | `0040_workitems.up.sql` | Schema `workitems` per SPEC §9.4.3 (tables `milestones` (recursive, self-referential `parent_milestone_id`, scope-XOR + date-range CHECK constraints; M-INV-2/3/5/6/7 enforced in app code per SPEC §9.4.3 note), `items`, `labels`, `item_labels`, `comments` + all indexes including FTS GIN per AF1) |
-| `0050_deps.up.sql` | Schema `deps` per SPEC §9.4.4 (tables `dependencies`, `cycles`, `cascade_events` + indexes; `cascade_events_event_trigger_uniq` for AR-11 idempotency; `cascade_events.kind` column with CHECK `IN ('close','edge_removed')` — see §6.3) |
+| `0050_deps.up.sql` | Schema `deps` per SPEC §9.4.4 (tables `dependencies`, `cycles`, `cascade_events` + indexes; `cascade_events_event_trigger_uniq` for AR-11 idempotency; `cascade_events.kind` column with CHECK `IN ('close','edge_added','edge_removed','state_change')` — see §6.3.0 for the symmetric writer model that introduced the 4-value enum) |
 | `0060_providers.up.sql` | Schema `providers` per SPEC §9.4.5 (tables `installations`, `events`, `mappings` + indexes). **Schema-only in P01** — no service code consumes it until P02. |
 | `0070_mcp.up.sql` | Schema `mcp` per SPEC §9.4.6 (tables `api_keys`, `tool_calls` + indexes; `key_hash bytea`, `key_prefix UNIQUE` per C7) |
 | `0080_boards.up.sql` | Schema `boards` per SPEC §9.4.7 (tables `boards`, `columns` + indexes). **Schema-only in P01** — no service code until P05. |
@@ -966,10 +967,20 @@ type Edge struct {
 }
 
 //encore:api private method=POST path=/deps.RemoveEdge
-// Removes edge; sync-inline recomputes is_ready for to_item via the
-// shared deps.recomputeReady helper; writes a cascade_events audit row
-// (kind='edge_removed') in the same transaction. Does NOT publish a
-// Pub/Sub event (single-hop, no transitive walk needed). See §6.2 Tool 12.
+// Removes edge; sync-inline recomputes is_ready for the direct to_item
+// via the shared deps.recomputeReady helper; writes a cascade_events
+// audit row (kind='edge_removed') in the same transaction. Then, after
+// the transaction commits, publishes CascadeRequested{Reason:"edge_removed"}
+// reusing the SAME event_id as the inline audit row (round-6 §6.3.0
+// tension #1). The subscriber's INSERT ... ON CONFLICT
+// (event_id, triggered_by_item_id) DO NOTHING collapses to no-op for
+// the audit row, but the subscriber still walks the forward closure to
+// recompute pipeline_stage on transitively affected items.
+// `ToItemNowReady` in the response is documented as the SINGLE-HOP view —
+// the direct to_item's new is_ready value. Transitive pipeline_stage
+// updates downstream of that to_item are eventually consistent (driven
+// by the post-commit publish, not by this RPC's return value). See §6.2
+// Tool 12 and §6.3.0.
 func RemoveEdge(ctx context.Context, req RemoveEdgeRequest) (*RemoveEdgeResponse, error)
 
 type RemoveEdgeRequest struct {
@@ -1270,7 +1281,24 @@ Does NOT touch state dimensions — use `set_state` for those.
 `claimed_by_id IS NULL`. The full Layer-1 BLOCK conditions
 (`qa_state=passed` etc.) ship in P02.
 
-Side-effects: emits `deps.cascade.requested{TriggeredByItemID = item_id}`.
+Side-effects (round-6 §6.3.0 symmetric writer model):
+
+(a) **Inline (Regime A — `is_ready`).** In the same transaction as the
+status flip to Done, the handler recomputes `is_ready` for the closed
+item's direct `blocks` neighbours via the shared
+`deps.recomputeReady(ctx, tx, neighbour_id)` helper. This covers the
+single-hop view — the immediate dependents may now flip ready.
+
+(b) **Post-commit (Regime B — `pipeline_stage`).** After the
+transaction commits, the handler publishes
+`CascadeRequested{Reason:"close", TriggeredByItemID: item_id, …}` on
+`deps.cascade.requested`. The subscriber walks the forward `blocks`
+closure and recomputes `pipeline_stage` per §5.7.1 on every
+transitively affected item; it writes one `deps.cascade_events` row
+with `kind='close'`.
+
+Cross-reference: §6.3.0 (propagation regimes), §6.3.2 (subscriber
+dispatch).
 
 #### Tool 7 — `show`
 
@@ -1399,6 +1427,16 @@ is allowed (findings can block other items) but the
 row must already be satisfied — the spec relies on the DDL CHECK
 having been enforced at finding creation time.
 
+**Side-effects (round-6 §6.3.0 symmetric writer model).** After the
+transaction in §6.5 commits, the handler publishes
+`CascadeRequested{Reason:"edge_added", TriggeredByItemID: to_item_id,
+EventID: ulid.New(), TraceID: tracectx.From(ctx), EmittedAt: time.Now()}`
+on `deps.cascade.requested`. The inline §6.5 UPDATE covers the
+single-hop `is_ready` recompute for `to_item`; the publish drives the
+multi-hop `pipeline_stage` recompute on the forward closure (Regime B).
+The subscriber writes one `deps.cascade_events` row with
+`kind='edge_added'`.
+
 #### Tool 12 — `remove_dependency`
 
 ```jsonc
@@ -1414,47 +1452,73 @@ having been enforced at finding creation time.
 }
 ```
 
-**Implementation (review D3 resolution — sync inline with shared
-helper).** `remove_dependency` does NOT publish a Pub/Sub event and does
-NOT wait on the cascade subscriber. The whole flow runs in one Postgres
-transaction:
+**Implementation (round-6 §6.3.0 symmetric writer model).** The
+single-hop `is_ready` recompute on the direct `to_item` runs inline in
+the same Postgres transaction as the `DELETE` (Regime A); the
+multi-hop `pipeline_stage` recompute is driven by a post-commit
+`CascadeRequested` publish (Regime B). The inline audit row's
+`event_id` is **reused** as the publish envelope's `EventID` so the
+subscriber's later insert collapses to no-op via the `ON CONFLICT
+(event_id, triggered_by_item_id) DO NOTHING` clause (tension #1
+ruling — exactly one `deps.cascade_events` row per logical edge
+remove). The whole inline flow:
 
 ```
+event_id := ulid.New()  -- captured before BEGIN so it can be reused
+                           -- on the post-commit publish below
 BEGIN;
   DELETE FROM deps.dependencies WHERE id = $edge_id (or composite);
-  -- shared helper: deps.recomputeReady(ctx, tx, item_id)
-  --   recomputes is_ready for the affected to_item via the closure CTE
+  -- Regime A: shared helper deps.recomputeReady(ctx, tx, item_id)
+  --   recomputes is_ready for the direct to_item via the closure CTE
   --   (§6.5) and writes UPDATE workitems.items SET is_ready = $new
   to_item_now_ready := deps.recomputeReady(ctx, tx, $to_item_id);
-  -- Audit row written inline. `event_id` is generated locally (ULID) —
-  -- the row is structurally indistinguishable from a subscriber-written
-  -- row, which keeps the (event_id, triggered_by_item_id) UNIQUE
-  -- constraint useful as an idempotency key even for inline writes.
-  -- `kind='edge_removed'` is the discriminant (see SPEC §9.4.4 +
-  -- §3.2 — round-2: the column is part of the cascade_events DDL).
+  -- Audit row written inline; event_id is the ULID captured above.
+  -- `kind='edge_removed'` is the discriminant (see §9.4.4 + §3.2).
   INSERT INTO deps.cascade_events (id, event_id, kind,
     triggered_by_item_id, affected_item_ids, cascaded_count, ...)
-    VALUES (ulid(), ulid(), 'edge_removed', $to_item_id,
+    VALUES (ulid(), event_id, 'edge_removed', $to_item_id,
             ARRAY[$to_item_id], 1, ...);
 COMMIT;
+-- Regime B: post-commit publish, REUSING event_id.
+deps.CascadeRequestedTopic.Publish(ctx, &deps.CascadeRequested{
+    EventID:           event_id,                -- reused (tension #1)
+    OrgID:             $org_id,
+    ProjectID:         $project_id,
+    TriggeredByItemID: $to_item_id,
+    Reason:            "edge_removed",
+    TraceID:           tracectx.From(ctx),
+    EmittedAt:         time.Now(),
+})
 return { removed: true, to_item_now_ready };
 ```
 
-**Why sync inline (review D3 rationale).** Removing an edge can only
-unblock the **direct** `to_item` (single-hop) — unlike `close`, which
-walks the transitive closure (multi-hop). Inline compute is cheap (one
-CTE, one UPDATE, one audit row), all in the same transaction, no
-Pub/Sub round-trip. The shared `deps.recomputeReady(ctx, tx, item_id)`
-helper is also called by the cascade subscriber when handling `close`
-events — single source of truth, no drift between the two paths.
+**`to_item_now_ready` is the single-hop view.** The boolean returned
+in the RPC response reflects ONLY the direct `to_item`'s
+`is_ready` value after the inline recompute. Transitive
+`pipeline_stage` updates on items downstream of `to_item` are
+**eventually consistent** — they are applied by the cascade
+subscriber after the publish above is delivered. Callers that need
+the transitively-consistent view should poll `get_state` or read
+`workitems.items.pipeline_stage` after observing the corresponding
+`deps.cascade_events` row land.
 
-**Why no Pub/Sub publish from this tool.** The cascade subscriber for
-the `close` flow does heavy lifting (closure CTE walk, multi-row
-UPDATE, audit insert). Re-publishing for `remove_dependency` would
-require the subscriber to discriminate event kinds and run a no-op
-heavy path — added complexity without observability gain. The audit
-row is written inline above; future subscribers (telemetry, webhooks)
-can subscribe to `cascade_events` change-data-capture if needed.
+**Exactly one audit row per logical remove (tension #1).** The inline
+INSERT lands first (during the transaction) and the subscriber's
+attempted INSERT collapses via the UNIQUE
+`(event_id, triggered_by_item_id)` constraint and the
+`ON CONFLICT … DO NOTHING` clause in §6.3.2 step 5. The subscriber
+still performs its `pipeline_stage` recompute pass; the no-op only
+applies to the audit-row insert.
+
+**Why a publish at all (round-6 rationale).** Pre-round-6, this tool
+ran fully sync inline and did not publish. The round-6 cascade-symmetry
+review observed that removing an edge can flip the `pipeline_stage`
+of items transitively downstream of `to_item` per §5.7.1 (the
+upstream chain's readiness changes). The single-hop inline UPDATE
+covers `is_ready` for `to_item` but cannot cover transitive
+`pipeline_stage` changes without doing the subscriber's work twice.
+Symmetric writer model (§6.3.0): single-hop inline, multi-hop via
+publish — uniform across the four cascade kinds.
 
 #### Tool 13 — `set_state`
 
@@ -1547,6 +1611,19 @@ in P02** per Plan §3.4 and PRD §8 P02 exit criterion. P01 implementation
 of `set_state` writes the `intent_comment` (if present) atomically with
 the state mutation but does NOT verify any comment-trail-based precondition.
 
+**Side-effects (round-6 §6.3.0 symmetric writer model — tension #3
+narrow rule).** After the validating UPDATE commits, the handler
+publishes `CascadeRequested{Reason:"state_change", TriggeredByItemID:
+item_id, …}` ONLY when the write changes `(impl_state, review_state,
+qa_state)` in a way that materially affects §5.7.1 `pipeline_stage`
+derivation. Pure `pipe_state` mutations (with no change to the other
+three columns) do NOT publish — §5.7.1 derives `pipeline_stage` from
+the upstream chain's readiness/closure, not from a downstream item's
+own `pipe_state`. The publish drives the multi-hop `pipeline_stage`
+recompute on the forward `blocks` closure (Regime B). Note: this tool
+writes no `is_ready`-affecting state directly; Regime A is not invoked
+here.
+
 **AR-18 (new — round-2).** State-invariant interaction with concurrent
 `Claim`. Invariant I-3 is enforced in `workitems.Claim` (not in
 `SetStateColumns`); a racing `SetStateColumns(qa_state=failed)` and
@@ -1595,6 +1672,66 @@ observes `qa_state='failed'`, it resets both review and qa to
 
 ### 6.3 Cascade subsystem (Manifesto Law 1)
 
+#### 6.3.0 Propagation regimes (round-6 cascade-symmetry)
+
+The cascade subsystem maintains two materialised columns on
+`workitems.items`: `is_ready` (single-hop derivation; depends only on
+the direct incoming `blocks` edges) and `pipeline_stage` (multi-hop
+derivation; depends on the upstream chain's readiness/closure per
+§5.7.1). Round-6 splits the writer responsibility along that natural
+boundary.
+
+**Regime A — `is_ready` (single-hop, writer-inline).** Every call site
+that mutates a row or edge in a way that can flip `is_ready` for the
+**directly** affected item recomputes `is_ready` synchronously inside
+the same SQL transaction as the mutation, via the shared helper
+`deps.recomputeReady(ctx, tx, item_id)`. The cascade subscriber never
+writes `is_ready`. Allowed writers:
+
+- `workitems.Close` (Tool 6) — recomputes `is_ready` for the closed
+  item's direct `blocks` neighbours inline.
+- `deps.AddEdge` (Tool 11 / §6.5 cycle-detect block) — recomputes
+  `is_ready` for `to_item` inline (the new edge may now block it).
+- `deps.RemoveEdge` (Tool 12) — recomputes `is_ready` for the direct
+  `to_item` inline.
+- `deps.recomputeReady` — the shared helper itself (internal).
+
+**Regime B — `pipeline_stage` (multi-hop, subscriber-only).** The
+cascade subscriber is the **sole writer** of `pipeline_stage`. Every
+call site that materially mutates §5.7.1 derivation inputs publishes
+`CascadeRequested{Reason:<kind>, TriggeredByItemID:<id>, …}` after its
+transaction commits. The subscriber walks the forward `blocks` closure
+from `TriggeredByItemID` and recomputes `pipeline_stage` (only) for the
+affected items.
+
+**Who emits which Reason, what the subscriber does:**
+
+| `Reason` | Emitted by | Trigger | Subscriber behaviour |
+|---|---|---|---|
+| `"close"` | `workitems.Close` (Tool 6) post-commit | Status flipped to Done. | Walk forward `blocks` closure from the closed item; recompute `pipeline_stage` on every reachable item per §5.7.1. |
+| `"edge_added"` | `deps.AddEdge` (Tool 11 / §6.5) post-commit | New `blocks` edge committed. | Walk forward `blocks` closure from `to_item`; recompute `pipeline_stage` (the new upstream blocker may push downstream stages backward). |
+| `"edge_removed"` | `deps.RemoveEdge` (Tool 12) post-commit, with `event_id` REUSED from the inline audit row | Edge deleted. | Walk forward `blocks` closure from `to_item`; recompute `pipeline_stage` on transitively reachable items. The audit-row insert collapses to no-op via `ON CONFLICT (event_id, triggered_by_item_id) DO NOTHING` (the inline path already wrote it). |
+| `"state_change"` | `workitems.SetStateColumns` (Tool 13) post-commit when the write changes `(impl_state, review_state, qa_state)` materially per §5.7.1; AND `workitems.Claim` post-commit ONLY on the I-3 reset path (current `qa_state='failed'` triggers the in-transaction reset of `review_state` and `qa_state` to `pending`). | State-column mutation that affects §5.7.1 derivation. | Walk forward `blocks` closure from the mutated item; recompute `pipeline_stage` (downstream items may transition between Implementation / Review / QA stages). |
+
+**Explicit non-publishers (round-6 tensions, resolved).**
+
+- `workitems.SetStateColumns` writes that affect ONLY `pipe_state`
+  (with no change to `impl_state`/`review_state`/`qa_state`) do NOT
+  publish — §5.7.1 derives `pipeline_stage` from the upstream chain's
+  readiness/closure, not from a downstream item's own `pipe_state`
+  (tension #3 ruling).
+- `workitems.Claim` in the normal Ready→InProgress path (no I-3 reset
+  fires) does NOT publish — the claimed item was non-Done before and
+  remains non-Done; no §5.7.1 downstream re-derivation is needed
+  (tension #2 ruling). Only the I-3 reset path publishes.
+
+**Audit-row kind reuse.** `deps.cascade_events.kind` carries the same
+discriminant value as the `Reason` field of the originating
+`CascadeRequested`. The CHECK constraint enumerates all four kinds
+(see §9.4.4 + the `0050_deps.up.sql` migration). The
+`(event_id, triggered_by_item_id)` UNIQUE constraint remains the
+AR-11 idempotency mechanism across both regimes.
+
 #### 6.3.1 Pub/Sub topics
 
 ```go
@@ -1637,23 +1774,62 @@ var _ = pubsub.NewSubscription(CascadeRequestedTopic, "deps-cascade-subscriber",
     })
 
 func handleCascadeRequested(ctx context.Context, msg *CascadeRequested) error {
-    // 1. Compute affected closure: BFS from msg.TriggeredByItemID forward
-    //    along blocks edges, collecting items where readiness might flip.
-    // 2. For each affected item, recompute is_ready via the closure CTE
-    //    (SPEC §9.4.9 "Closure for is_ready materialisation").
-    // 3. UPDATE workitems.items SET is_ready = $new WHERE id = $id AND is_ready <> $new
-    //    (idempotent via the value-equality clause).
-    // 4. Recompute pipeline_stage for each affected item per §5.7.1
-    //    derivation table; UPDATE workitems.items SET pipeline_stage = $new.
-    // 5. INSERT INTO deps.cascade_events (id, event_id, kind, org_id, project_id,
-    //    triggered_by_item_id, affected_item_ids, cascaded_count, ...)
-    //    VALUES (..., 'close', ...) ON CONFLICT (event_id, triggered_by_item_id) DO NOTHING.
-    //    `kind='close'` is set by the subscriber for cascade events
-    //    arriving via Pub/Sub (the only Pub/Sub-driven cascade kind in
-    //    P01); 'edge_removed' is set by Tool 12's inline path (§6.2).
-    //    The ON CONFLICT clause is the AR-11 idempotency mechanism (C1).
-    // 6. Publish CascadeCompleted with the affected set (best-effort; the
-    //    subscriber's commit is the source of truth).
+    // Round-6 §6.3.0: the subscriber maintains pipeline_stage ONLY
+    // (Regime B). is_ready is writer-inline and never touched here.
+    // Dispatch over the four documented Reason kinds — direction is
+    // forward (along outgoing 'blocks' edges) in all four branches;
+    // only the semantic justification differs per kind.
+    switch msg.Reason {
+    case "close":
+        // Triggered by workitems.Close (Tool 6) post-commit. The closed
+        // item's neighbours have already had is_ready flipped inline;
+        // walk the forward closure to propagate pipeline_stage per
+        // §5.7.1 (downstream items may now move forward stages).
+    case "edge_added":
+        // Triggered by deps.AddEdge (Tool 11 / §6.5) post-commit. The
+        // direct to_item's is_ready has already been recomputed inline;
+        // walk the forward closure from to_item — a new upstream
+        // blocker can push downstream stages backward per §5.7.1.
+    case "edge_removed":
+        // Triggered by deps.RemoveEdge (Tool 12) post-commit, with the
+        // event_id REUSED from the inline audit row (tension #1). The
+        // ON CONFLICT clause on the audit INSERT below collapses the
+        // second insert to no-op; the pipeline_stage recompute pass
+        // still runs. is_ready was recomputed inline for the direct
+        // to_item; walk the forward closure to propagate pipeline_stage.
+    case "state_change":
+        // Triggered by workitems.SetStateColumns (Tool 13) post-commit
+        // when (impl_state, review_state, qa_state) changed materially
+        // per §5.7.1, OR by workitems.Claim post-commit ONLY on the
+        // I-3 reset path (tension #2 narrow rule). Walk the forward
+        // closure; pipeline_stage may transition on downstream items.
+    default:
+        // Unknown Reason — log + drop (defensive; the publisher set
+        // is closed, but a malformed redelivery should not crash the
+        // subscriber).
+        return nil
+    }
+    // Shared body across all four Reasons:
+    // 1. BFS from msg.TriggeredByItemID forward along 'blocks' edges,
+    //    collecting items where pipeline_stage might change. Max depth
+    //    256 per AR-8.
+    // 2. For each affected item, recompute pipeline_stage per §5.7.1
+    //    derivation; UPDATE workitems.items SET pipeline_stage = $new
+    //    WHERE id = $id AND pipeline_stage <> $new (idempotent).
+    //    The subscriber MUST NOT write is_ready (Regime A invariant
+    //    — see §11.3 linter rule).
+    // 3. INSERT INTO deps.cascade_events (id, event_id, kind, org_id,
+    //    project_id, triggered_by_item_id, affected_item_ids,
+    //    cascaded_count, trace_id, ...)
+    //    VALUES (..., msg.Reason, ..., msg.TraceID, ...)
+    //    ON CONFLICT (event_id, triggered_by_item_id) DO NOTHING.
+    //    `kind = msg.Reason` (one of 'close','edge_added',
+    //    'edge_removed','state_change' — see §9.4.4 CHECK). The
+    //    ON CONFLICT clause is the AR-11 idempotency mechanism (C1)
+    //    AND the tension #1 mechanism for edge_removed (the inline
+    //    audit row already exists with the same event_id).
+    // 4. Publish CascadeCompleted with the affected set (best-effort;
+    //    the subscriber's commit is the source of truth).
     return nil
 }
 ```
@@ -1663,21 +1839,26 @@ forward 'blocks' closure of the triggered item (max depth 256 per AR-8).
 The `(event_id, triggered_by_item_id)` UNIQUE constraint guarantees a
 duplicate delivery is a no-op insert.
 
-**`cascade_events.kind` enum (round-2).** SPEC §9.4.4 declares the
-column with `CHECK (kind IN ('close','edge_removed'))`:
+**`cascade_events.kind` enum (round-6).** SPEC §9.4.4 declares the
+column with `CHECK (kind IN ('close','edge_added','edge_removed','state_change'))`:
 
-- `'close'` — written by the cascade subscriber when a `close` event
-  (Tool 6 / `workitems.Close`) arrives via Pub/Sub. This is the only
-  multi-hop cascade kind at v1.0 (it walks the forward `blocks` closure).
-- `'edge_removed'` — written **inline** by Tool 12 (`remove_dependency`)
-  in the same SQL transaction as the `DELETE FROM deps.dependencies`
-  call. Single-hop only — `remove_dependency` cannot unblock anything
-  beyond the direct `to_item` per the rationale in §6.2 Tool 12.
+- `'close'` — Tool 6 publish; subscriber writes the audit row during
+  its `pipeline_stage` recompute pass.
+- `'edge_added'` — Tool 11 / §6.5 publish; subscriber writes the audit
+  row during its `pipeline_stage` recompute pass.
+- `'edge_removed'` — Tool 12 writes the audit row INLINE in the same
+  transaction as `DELETE FROM deps.dependencies`; Tool 12 also
+  publishes post-commit with the SAME `event_id`, and the subscriber's
+  re-insert collapses to no-op via the ON CONFLICT clause (tension #1).
+  The subscriber's `pipeline_stage` recompute pass still runs.
+- `'state_change'` — Tool 13 publish on §5.7.1-affecting writes; AND
+  `workitems.Claim` publish on the I-3 reset path only (tensions #2
+  and #3 narrow rules). Subscriber writes the audit row during its
+  `pipeline_stage` recompute pass.
 
-P01 ships exactly these two kinds. Future Pub/Sub-driven cascade kinds
-(e.g. `'state_change'` for the cascade-on-`set_state` path that Plan §3
-defers) extend the enum in their own phase spec — adding a value is an
-additive migration that updates the CHECK constraint.
+P01 ships all four kinds (round-6 cascade-symmetry). Subsequent phases
+that introduce new cascade kinds extend the enum in their own phase
+migration — adding a value is an additive CHECK rewrite.
 
 ### 6.4 Atomic claim transaction (Manifesto Law 5)
 
@@ -1713,6 +1894,24 @@ Pool-mode safety (R-P01-6 closure): the entire critical section lives in
 one transaction, so PgBouncer transaction-mode and session-mode both
 preserve the lock. The spec **does not pin** Encore Cloud's pool mode —
 both modes work.
+
+**Side-effects on I-3 path (round-6 §6.3.0 — tension #2 narrow rule).**
+Normal `Claim` (Ready → InProgress with no I-3 reset) does NOT publish
+any `CascadeRequested` — the claimed item was non-Done before the
+claim and remains non-Done; downstream `pipeline_stage` is unaffected
+per §5.7.1, and a publish would burn one cascade pass against the
+NFR-1 budget for no observable effect.
+
+`Claim` publishes `CascadeRequested{Reason:"state_change",
+TriggeredByItemID: item_id, …}` **only when the I-3 reset path fires**
+— that is, the locked row carried `qa_state='failed'` at the start of
+the transaction, and the transaction therefore writes
+`(review_state, qa_state) = ('pending', 'pending')` atomically with
+the claim. In that case the state-column write materially affects
+§5.7.1 derivation and the multi-hop `pipeline_stage` recompute is
+required (Regime B). The publish happens after the transaction
+commits; the subscriber writes one `deps.cascade_events` row with
+`kind='state_change'`.
 
 ### 6.5 Cycle detection at write time (NFR-5)
 
@@ -1754,10 +1953,20 @@ BEGIN;
      )
    WHERE id = $2;
 
-  -- The cascade subscriber is also notified for the closure (e.g. if the
-  -- new edge changes downstream readiness):
-  -- (publisher emits deps.cascade.requested with EventID = $event_ulid)
 COMMIT;
+
+-- Round-6 §6.3.0: post-commit publish drives the multi-hop
+-- pipeline_stage recompute on the forward closure. The inline UPDATE
+-- above is single-hop (is_ready on to_item only — Regime A).
+deps.CascadeRequestedTopic.Publish(ctx, &deps.CascadeRequested{
+    EventID:           ulid.New(),
+    OrgID:             $org_id,
+    ProjectID:         $project_id,
+    TriggeredByItemID: $to_item_id,
+    Reason:            "edge_added",
+    TraceID:           tracectx.From(ctx),
+    EmittedAt:         time.Now(),
+})
 ```
 
 The 256 cap is a v1.0 product constraint (RP01-3 risk in plan §7); error
@@ -1861,6 +2070,15 @@ Every successful cascade subscriber pass writes one row (idempotent on
 `(event_id, triggered_by_item_id)` per AR-11). Drives PRD M-5
 (cascade-events-per-day metric) without touching observability stack
 retention windows.
+
+**Round-6 (cascade-symmetry).** The `kind` column now carries all four
+values — `'close'`, `'edge_added'`, `'edge_removed'`, `'state_change'`
+— per §6.3.0. `'edge_removed'` rows are written INLINE by Tool 12 in
+the same transaction as the `DELETE` (the subscriber's later attempted
+INSERT collapses to no-op via the `ON CONFLICT (event_id,
+triggered_by_item_id) DO NOTHING` clause, since the publish reuses the
+inline event_id — tension #1). The other three kinds are written by
+the subscriber during its `pipeline_stage` recompute pass.
 
 ---
 
@@ -2158,6 +2376,22 @@ seeded fixture and asserts:
 - [ ] After cascade, `prime` reflects newly unblocked dependents (`itm_c`, `itm_d` flip to ready).
 - [ ] `add_dependency(from=itm_e, to=itm_a)` is rejected with `CYCLE_DETECTED` (would form `itm_a → itm_b → … → itm_e → itm_a`; the seeder includes such an edge configuration).
 - [ ] `deps.cascade_events` has one row per fired cascade with a populated `event_id` and the affected set; `kind='close'` for the cascade triggered by Tool 6 above.
+- [ ] **Cascade-symmetry kinds (round-6 §6.3.0).** The exit-criterion
+  harness exercises each of the four `kind` values and asserts exactly
+  one `deps.cascade_events` row materialises per logical trigger:
+  - `'close'` — from the Tool 6 close above.
+  - `'edge_added'` — issue `add_dependency(from=itm_c, to=itm_d)` after
+    setup; assert a row with `kind='edge_added'` and
+    `triggered_by_item_id=itm_d`.
+  - `'edge_removed'` — issue `remove_dependency` on the edge above and
+    assert a single row with `kind='edge_removed'` (tension #1: the
+    inline INSERT and the post-commit subscriber re-insert collapse
+    via the reused `event_id` + `ON CONFLICT` clause).
+  - `'state_change'` — issue `set_state(qa_state=failed)` on an item
+    with `review_state='approved'`, then `claim` it (different agent);
+    the Claim fires the I-3 reset path and publishes
+    `state_change`. Assert a row with `kind='state_change'` and
+    `triggered_by_item_id` = the claimed item id.
 - [ ] **Milestones (round-2 D1).** The seeder calls `workitems.CreateMilestone`
   twice — once for a parent (depth=1) and once for a child whose
   `parent_milestone_id` references the parent (depth=2) — then calls
@@ -2222,12 +2456,29 @@ seeded fixture and asserts:
 
 - [ ] All eight Postgres schemas exist with the canonical SPEC §9.4 DDL
   after running migrations 0010..0090.
-- [ ] `is_ready` and `pipeline_stage` are written by exactly one writer
-  (the cascade subscriber) — integration test asserts no other code path
-  UPDATEs either column. (Static analysis: `golangci-lint` custom linter
-  rule under `apps/api/shared/lint/no_direct_is_ready_write.go` rejects
-  any UPDATE statement targeting `workitems.items.is_ready` or
-  `pipeline_stage` outside `apps/api/deps/cascade_subscriber.go`.)
+- [ ] **Single-writer invariants (round-6 §6.3.0 — fractured).** The
+  materialised columns on `workitems.items` have distinct, asymmetric
+  writers:
+  - (a) **`pipeline_stage` single-writer = the cascade subscriber.**
+    Integration test asserts no other code path UPDATEs
+    `workitems.items.pipeline_stage`. The
+    `apps/api/shared/lint/no_direct_is_ready_write.go` linter rule
+    enforces this statically — its scope tightens (round-6) to
+    `pipeline_stage` writes only; any UPDATE targeting
+    `workitems.items.pipeline_stage` outside
+    `apps/api/deps/cascade_subscriber.go` is rejected.
+  - (b) **`is_ready` single-writer = the mutating call site
+    (Regime A).** `is_ready` is recomputed inline by the call site
+    that mutated the row/edge — the cascade subscriber MUST NOT write
+    `is_ready`. Explicit allowlist of permitted writers:
+    `workitems.Close` (Tool 6 — inline recompute on direct `blocks`
+    neighbours), `deps.AddEdge` (Tool 11 / §6.5 — inline recompute on
+    `to_item`), `deps.RemoveEdge` (Tool 12 — inline recompute on
+    direct `to_item`), and the internal shared helper
+    `deps.recomputeReady` (called by the above sites). Integration
+    test asserts the cascade subscriber never UPDATEs `is_ready`; an
+    additional static check in the linter rule asserts the allowlist
+    above is exhaustive.
 - [ ] `rbac.For` and `rbac.ScopedQuery.Where` are never called with
   runtime-constructed string arguments — every table identifier (For
   arg 2) AND every clause string (Where arg 1) MUST be a Go string
@@ -2293,10 +2544,10 @@ section that locks its contract:
 | B-2 (`org` service) | Greta | §4.2 |
 | B-3 (RBAC suite) | Greta | §10.1, §11.2 (NFR-2) |
 | C-1 (`workitems` service) | Greta | §4.4, §4.4.1 (milestone RPCs — round-2 D1) |
-| C-2 (`deps` service + cycle CTE) | Greta | §4.5, §6.5 |
-| C-3 (Cascade subsystem) | Greta | §6.3 |
-| C-4 (Atomic claim) | Greta | §6.4 |
-| C-5 (`pipeline_stage` derivation tests) | Greta | §6.3.2 + SPEC §5.7.1 |
+| C-2 (`deps` service + cycle CTE) | Greta | §4.5, §6.5, §6.3.0 (post-commit publishes for `edge_added` and `edge_removed`) |
+| C-3 (Cascade subsystem) | Greta | §6.3, §6.3.0 (four-Reason dispatch; `pipeline_stage`-only writer) |
+| C-4 (Atomic claim) | Greta | §6.4 (incl. I-3-reset `state_change` publish per §6.3.0) |
+| C-5 (`pipeline_stage` derivation tests) | Greta | §6.3.2, §6.3.0, SPEC §5.7.1 |
 | C-6 (RBAC suite extensions) | Greta | §10.1 |
 | D-1 (MCP transport skeleton) | Greta | §5, §4.3.1, §4.3.2 |
 | D-2 (Tools 1–4) | Greta | §6.2 (tools 1–4) |
