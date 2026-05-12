@@ -66,11 +66,32 @@ type CascadeRequested struct {
 	TriggeredByItemID string
 
 	// Reason categorises the trigger. Allowed: "close" |
-	// "edge_added" | "edge_removed" | "state_change". P01 ships
-	// only "close" through the Pub/Sub path; "edge_removed" is
-	// written inline by deps.RemoveEdge (Tool 12) without going
-	// through Pub/Sub. "edge_added" and "state_change" are
-	// reserved for downstream phases.
+	// "edge_added" | "edge_removed" | "state_change".
+	//
+	// Round-6 cascade-symmetry (SPEC §6.3.0 — 2026-05-12) ships
+	// all four kinds through the symmetric writer model:
+	//
+	//   - "close":        workitems.Close (Tool 6) post-commit.
+	//   - "edge_added":   deps.AddEdge (Tool 11 / §6.5) post-commit.
+	//   - "edge_removed": deps.RemoveEdge (Tool 12) post-commit,
+	//                     REUSING the event_id captured before BEGIN
+	//                     for the inline audit row — the subscriber's
+	//                     ON CONFLICT (event_id, triggered_by_item_id)
+	//                     DO NOTHING collapses to no-op (exactly one
+	//                     audit row per logical remove). The
+	//                     subscriber's pipeline_stage recompute pass
+	//                     still runs.
+	//   - "state_change": workitems.SetStateColumns (Tool 13) on
+	//                     §5.7.1-affecting writes, plus workitems.Claim
+	//                     on the I-3 reset path only.
+	//
+	// Regime split (SPEC §6.3.0): is_ready is single-hop and writer-
+	// inline (Regime A); pipeline_stage is multi-hop and subscriber-
+	// only (Regime B). The subscriber MUST NOT write is_ready for any
+	// Reason value — that invariant is enforced by
+	// shared/lint/no_direct_is_ready_write with a scope-tightened
+	// allow-list (encore.app/deps writes is_ready inline; subscriber
+	// in the same package writes pipeline_stage only).
 	Reason string
 
 	// TraceID is the ULID minted by the mcp raw endpoint

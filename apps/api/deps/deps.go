@@ -2,25 +2,66 @@
 // cascade-publishing primitives. See SPEC §4.5 for the full RPC surface
 // and §6.5 for the cycle-detection CTE.
 //
-// In P01 task A-1 this package only declares the //encore:api skeletons so
-// Encore recognises deps as a service. Bodies return errNotImplemented;
-// real wiring lands in C-1, C-2, C-3: cycle CTE, advisory locks, cascade
-// Pub/Sub publisher. The DB handle follows the canonical BindDB late-bind
-// pattern (a nil *sqldb.Database pointer + exported BindDB hook in
-// apps/api/deps/db.go, registered in apps/api/db/db.go's init — see
-// apps/api/db/db.go's CONSUMER PATTERN). Direct `sqldb.Named("unblock")`
-// at package init is forbidden (panics outside the encore CLI in
-// encore.dev v1.52.1).
+// In P01 task C-2 (bead unblock-tv8.11) this package lands the bodies
+// of the five //encore:api endpoints declared in A-1 (AddEdge,
+// RemoveEdge, IsReady, Closure, RecentCascadeEvents) plus the shared
+// inline helper recomputeReady. Round-6 cascade-symmetry (SPEC §6.3.0)
+// drives the writer split: is_ready is Regime A (single-hop, writer-
+// inline) and pipeline_stage is Regime B (multi-hop, subscriber-only).
+// Every Regime-B-affecting write here publishes CascadeRequested with
+// the matching Reason after the transaction commits.
+//
+// Database wiring follows the canonical BindDB late-bind pattern (see
+// db.go) — a nil *sqldb.Database pointer populated by the dedicated
+// apps/api/db/ service's init via deps.BindDB(DB). RPC bodies read
+// `db` directly after process bootstrap.
+//
+// Authorisation: deps RPCs are private and called from the MCP tool
+// layer (D-5 / unblock-tv8.20) which gates via org.Authorize at the
+// session→org boundary BEFORE dispatching here. The deps RPCs trust
+// that gate the same way workitems write-side RPCs do (see
+// workitems.go file header for the layered model). RecentCascadeEvents
+// scopes by explicit (org_id, project_id) inputs so the SQL filter is
+// explicit on every read.
 package deps
 
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
+
+	"encore.app/auth"
+	"encore.app/shared/tracectx"
+	encoreauth "encore.dev/beta/auth"
+	"encore.dev/beta/errs"
+	"encore.dev/rlog"
+	"encore.dev/storage/sqldb"
 )
 
-// errNotImplemented is the sentinel returned by every P01 A-1 skeleton body.
-var errNotImplemented = errors.New("deps: not implemented in P01 A-1 skeleton")
+// allowedEdgeKinds is the closed set of edge kinds accepted by AddEdge.
+// The deps.dependencies CHECK constraint enforces the same set; we
+// reject early so the caller gets a structured InvalidArgument instead
+// of a CHECK violation under errs.Internal.
+var allowedEdgeKinds = map[string]struct{}{
+	"blocks":  {},
+	"related": {},
+}
+
+// allowedClosureDirections is the closed set of Closure directions.
+var allowedClosureDirections = map[string]struct{}{
+	"incoming": {},
+	"outgoing": {},
+}
+
+// closureMaxDepth caps both the Closure RPC's depth and the cycle CTE
+// (AR-8). 256 is the v1.0 product constraint (SPEC §6.5 / RP01-3).
+const closureMaxDepth = 256
+
+// recentCascadeEventsLimitCap caps the RecentCascadeEvents response
+// size per AF2 / SPEC §4.5 line 1015.
+const recentCascadeEventsLimitCap = 50
 
 // Edge is the canonical dependency edge row shape. SPEC §4.5.
 type Edge struct {
@@ -42,12 +83,247 @@ type AddEdgeRequest struct {
 }
 
 // AddEdge acquires the per-project advisory lock (AF5), runs the
-// depth-counter reachability CTE (C5), inserts the edge, and emits
-// deps.cascade.requested when the to_item's readiness flips. SPEC §4.5.
+// depth-counter reachability CTE (C5) extended to project the cycle
+// path, inserts the edge, recomputes is_ready for to_item inline
+// (Regime A — single-hop), and publishes CascadeRequested with
+// Reason="edge_added" post-commit (Regime B — multi-hop pipeline_stage
+// recompute on the forward closure). SPEC §4.5 + §6.5 + §6.3.0.
+//
+// Cross-project edges are rejected with InvalidArgument
+// Meta{"field":"to_item_id"} per §6.2 Tool 11 (round-6 L6-W8).
+//
+// Cycle violations return FailedPrecondition Meta{"kind":"CYCLE_DETECTED",
+// "from","to","cycle_path"} — the MCP layer (D-5) translates this Meta
+// payload into the JSON-RPC error envelope's data field per §7.
 //
 //encore:api private method=POST path=/deps.AddEdge
 func AddEdge(ctx context.Context, req *AddEdgeRequest) (*Edge, error) {
-	return nil, errNotImplemented
+	if req == nil {
+		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "missing request"}
+	}
+	if req.OrgID == "" {
+		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "missing org_id", Meta: errs.Metadata{"field": "org_id"}}
+	}
+	if req.ProjectID == "" {
+		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "missing project_id", Meta: errs.Metadata{"field": "project_id"}}
+	}
+	if req.FromItem == "" {
+		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "missing from_item", Meta: errs.Metadata{"field": "from_item_id"}}
+	}
+	if req.ToItem == "" {
+		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "missing to_item", Meta: errs.Metadata{"field": "to_item_id"}}
+	}
+	if req.FromItem == req.ToItem {
+		// dependencies_no_self_loop_chk would also reject this; surface a
+		// clearer error than the CHECK violation.
+		return nil, &errs.Error{
+			Code:    errs.InvalidArgument,
+			Message: "self-loop edges are forbidden",
+			Meta:    errs.Metadata{"field": "to_item_id"},
+		}
+	}
+	kind := req.Kind
+	if kind == "" {
+		kind = "blocks"
+	}
+	if _, ok := allowedEdgeKinds[kind]; !ok {
+		return nil, &errs.Error{
+			Code:    errs.InvalidArgument,
+			Message: fmt.Sprintf("invalid edge kind %q (allowed: blocks, related)", kind),
+			Meta:    errs.Metadata{"field": "kind"},
+		}
+	}
+
+	// Open the cycle-checked transaction. Round-6 §6.3.0 keeps the
+	// inline is_ready recompute (Regime A) inside this tx; the
+	// post-commit publish drives Regime B.
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return nil, &errs.Error{Code: errs.Internal, Message: "db begin failed"}
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Resolve both endpoints' project_id inside the tx — the advisory
+	// lock key is the to_item's project_id (review L6-W8), and the
+	// cross-project rejection per §6.2 Tool 11 line 1417 needs both.
+	// Two QueryRow calls keep the error mapping unambiguous: missing
+	// endpoint becomes a per-field NotFound, not a generic empty
+	// result set.
+	var fromProject, toProject string
+	if err := tx.QueryRow(ctx,
+		`SELECT COALESCE(project_id, '') FROM workitems.items WHERE id = $1`,
+		req.FromItem,
+	).Scan(&fromProject); err != nil {
+		if errors.Is(err, sqldb.ErrNoRows) {
+			return nil, &errs.Error{
+				Code:    errs.NotFound,
+				Message: "from_item not found",
+				Meta:    errs.Metadata{"field": "from_item_id", "id": req.FromItem},
+			}
+		}
+		return nil, &errs.Error{Code: errs.Internal, Message: "from_item lookup failed"}
+	}
+	if err := tx.QueryRow(ctx,
+		`SELECT COALESCE(project_id, '') FROM workitems.items WHERE id = $1`,
+		req.ToItem,
+	).Scan(&toProject); err != nil {
+		if errors.Is(err, sqldb.ErrNoRows) {
+			return nil, &errs.Error{
+				Code:    errs.NotFound,
+				Message: "to_item not found",
+				Meta:    errs.Metadata{"field": "to_item_id", "id": req.ToItem},
+			}
+		}
+		return nil, &errs.Error{Code: errs.Internal, Message: "to_item lookup failed"}
+	}
+	if fromProject != toProject {
+		// Round-6 §6.2 Tool 11: cross-project edges are explicitly
+		// out-of-scope at v1.0. Error code is VALIDATION per spec; the
+		// internal Encore code is InvalidArgument and the MCP layer
+		// maps it to JSON-RPC kind="VALIDATION".
+		return nil, &errs.Error{
+			Code:    errs.InvalidArgument,
+			Message: "cross-project edges are not allowed",
+			Meta: errs.Metadata{
+				"field":           "to_item_id",
+				"from_project_id": fromProject,
+				"to_project_id":   toProject,
+			},
+		}
+	}
+	if toProject == "" {
+		// Defensive: workitems.items.project_id is nullable in the DDL
+		// but P01 always populates it. An edge between two
+		// project-less items would skip the advisory lock partitioning
+		// — reject explicitly so the gap is visible.
+		return nil, &errs.Error{
+			Code:    errs.InvalidArgument,
+			Message: "endpoints have no project_id",
+			Meta:    errs.Metadata{"field": "to_item_id"},
+		}
+	}
+
+	// AF5: per-project advisory lock serialises concurrent edge writes
+	// within one project. Verbatim §6.5 line 1924.
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtext('deps.add_dependency:' || $1))`,
+		toProject,
+	); err != nil {
+		return nil, &errs.Error{Code: errs.Internal, Message: "advisory lock failed"}
+	}
+
+	// Cycle check: depth-counter recursive CTE extended to project the
+	// walk path so we can populate data.cycle_path on rejection (AC #1)
+	// and write deps.cycles forensics with a real path.
+	cyclePath, err := checkCycle(ctx, tx, req.FromItem, req.ToItem)
+	if err != nil {
+		return nil, &errs.Error{Code: errs.Internal, Message: "cycle check failed"}
+	}
+	if cyclePath != nil {
+		// The §6.5 transaction is rolled back (defer above) so no edge
+		// is written. The forensic deps.cycles INSERT runs as a
+		// separate top-level statement after the rollback so the audit
+		// row survives the rejection.
+		_ = tx.Rollback()
+		var rejectedBy string
+		if id, ok := callerUserID(ctx); ok {
+			rejectedBy = id
+		}
+		if err := recordCycle(ctx, req.FromItem, req.ToItem, cyclePath, rejectedBy); err != nil {
+			rlog.Warn("deps: cycles forensic insert failed", "err", err,
+				"from", req.FromItem, "to", req.ToItem)
+		}
+		// errs.Metadata is gob-encoded across the Encore RPC boundary;
+		// gob cannot encode a bare []interface{}. We store the cycle
+		// path as a comma-joined string and as a typed []string under
+		// distinct keys — the MCP layer (D-5) picks the typed slice
+		// for the JSON-RPC data.cycle_path array per §7 and falls
+		// back to splitting the joined form when the typed slice is
+		// not registered (e.g. across a gob round-trip).
+		return nil, &errs.Error{
+			Code:    errs.FailedPrecondition,
+			Message: "edge would create a cycle",
+			Meta: errs.Metadata{
+				"kind":            "CYCLE_DETECTED",
+				"from":            req.FromItem,
+				"to":              req.ToItem,
+				"cycle_path":      strings.Join(cyclePath, ","),
+				"cycle_path_list": cyclePath,
+			},
+		}
+	}
+
+	// Insert the edge.
+	edgeID, err := newULID()
+	if err != nil {
+		return nil, &errs.Error{Code: errs.Internal, Message: "ulid generation failed"}
+	}
+	var createdBy *string
+	if id, ok := callerUserID(ctx); ok {
+		c := id
+		createdBy = &c
+	}
+	var (
+		retID        string
+		retFrom      string
+		retTo        string
+		retKind      string
+		retCreatedAt time.Time
+		retCreatedBy *string
+	)
+	if err := tx.QueryRow(ctx,
+		`INSERT INTO deps.dependencies (id, from_item, to_item, kind, created_by)
+		 VALUES ($1, $2, $3, $4, $5)
+		 RETURNING id, from_item, to_item, kind, created_at, created_by`,
+		edgeID, req.FromItem, req.ToItem, kind, createdBy,
+	).Scan(&retID, &retFrom, &retTo, &retKind, &retCreatedAt, &retCreatedBy); err != nil {
+		if isUniqueViolation(err, "dependencies_pair_uniq") {
+			return nil, &errs.Error{
+				Code:    errs.AlreadyExists,
+				Message: "edge already exists",
+				Meta: errs.Metadata{
+					"from": req.FromItem,
+					"to":   req.ToItem,
+					"kind": kind,
+				},
+			}
+		}
+		rlog.Warn("deps: dependency insert failed", "err", err,
+			"from", req.FromItem, "to", req.ToItem, "kind", kind)
+		return nil, &errs.Error{Code: errs.Internal, Message: "dependency insert failed"}
+	}
+
+	// Regime A: recompute is_ready for to_item inline. Only 'blocks'
+	// edges affect readiness, but recomputeReady is unconditional for
+	// safety (the SQL filters by kind='blocks' in the NOT EXISTS
+	// subquery, so a 'related' edge's recompute is a no-op).
+	if _, err := recomputeReady(ctx, tx, req.ToItem); err != nil {
+		rlog.Error("deps: AddEdge recomputeReady failed", "err", err, "to_item", req.ToItem)
+		return nil, &errs.Error{Code: errs.Internal, Message: "is_ready recompute failed"}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, &errs.Error{Code: errs.Internal, Message: "commit failed"}
+	}
+
+	// Regime B: post-commit publish drives the multi-hop pipeline_stage
+	// recompute on the forward closure from to_item per §6.3.0 + §6.5
+	// post-commit block. Best-effort: a publish failure does NOT roll
+	// back the edge (already committed); the warn-log is the breadcrumb.
+	publishCascadeRequested(ctx, req.OrgID, req.ProjectID, req.ToItem, "edge_added", "")
+
+	createdByOut := ""
+	if retCreatedBy != nil {
+		createdByOut = *retCreatedBy
+	}
+	return &Edge{
+		ID:        retID,
+		FromItem:  retFrom,
+		ToItem:    retTo,
+		Kind:      retKind,
+		CreatedAt: retCreatedAt,
+		CreatedBy: createdByOut,
+	}, nil
 }
 
 // RemoveEdgeRequest is the input to RemoveEdge. SPEC §4.5. Pass either
@@ -66,37 +342,194 @@ type RemoveEdgeResponse struct {
 	ToItemID       string
 }
 
-// RemoveEdge deletes the edge, sync-inline recomputes is_ready for the
-// to_item, and writes a kind='edge_removed' cascade_events audit row in
-// the same transaction. Does NOT publish a Pub/Sub event. SPEC §4.5 / §6.2
-// Tool 12.
+// RemoveEdge deletes the edge, recomputes is_ready for the direct
+// to_item inline (Regime A — single-hop), writes a cascade_events row
+// with kind='edge_removed' INLINE in the same transaction, then
+// post-commit publishes CascadeRequested REUSING the same event_id so
+// the subscriber's ON CONFLICT (event_id, triggered_by_item_id) DO
+// NOTHING collapses to no-op (exactly one cascade_events row per
+// logical remove — round-6 tension #1).
+//
+// Returns to_item_now_ready as the SINGLE-HOP view. Transitive
+// pipeline_stage updates downstream of to_item are eventually
+// consistent — driven by the post-commit publish.
 //
 //encore:api private method=POST path=/deps.RemoveEdge
 func RemoveEdge(ctx context.Context, req *RemoveEdgeRequest) (*RemoveEdgeResponse, error) {
-	return nil, errNotImplemented
+	if req == nil {
+		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "missing request"}
+	}
+	// Exactly-one selection: EdgeID XOR (FromItem+ToItem+Kind).
+	haveEdgeID := req.EdgeID != ""
+	haveComposite := req.FromItem != "" && req.ToItem != "" && req.Kind != ""
+	switch {
+	case haveEdgeID && haveComposite:
+		return nil, &errs.Error{
+			Code:    errs.InvalidArgument,
+			Message: "pass either edge_id OR (from_item, to_item, kind), not both",
+		}
+	case !haveEdgeID && !haveComposite:
+		return nil, &errs.Error{
+			Code:    errs.InvalidArgument,
+			Message: "pass either edge_id OR (from_item, to_item, kind)",
+		}
+	}
+	if haveComposite {
+		if _, ok := allowedEdgeKinds[req.Kind]; !ok {
+			return nil, &errs.Error{
+				Code:    errs.InvalidArgument,
+				Message: fmt.Sprintf("invalid edge kind %q (allowed: blocks, related)", req.Kind),
+				Meta:    errs.Metadata{"field": "kind"},
+			}
+		}
+	}
+
+	// Round-6 HIGH-risk: event_id MUST be minted BEFORE BEGIN so the
+	// inline audit row and the post-commit publish share the SAME
+	// ulid. If a serialisation conflict triggers a retry path inside
+	// the tx, we keep using THIS event_id — never re-mint, otherwise
+	// the subscriber's ON CONFLICT collapse breaks and we write two
+	// rows per logical remove.
+	eventID, err := newULID()
+	if err != nil {
+		return nil, &errs.Error{Code: errs.Internal, Message: "ulid generation failed"}
+	}
+
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return nil, &errs.Error{Code: errs.Internal, Message: "db begin failed"}
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Resolve (edge_id, to_item, org_id, project_id) for the audit
+	// row and the post-commit publish. Both composite and EdgeID paths
+	// converge here.
+	var (
+		edgeID    string
+		toItem    string
+		orgID     string
+		projectID string
+	)
+	if haveEdgeID {
+		err = tx.QueryRow(ctx,
+			`SELECT d.id, d.to_item, i.org_id, COALESCE(i.project_id, '')
+			   FROM deps.dependencies d
+			   JOIN workitems.items i ON i.id = d.to_item
+			  WHERE d.id = $1
+			  FOR UPDATE OF d`,
+			req.EdgeID,
+		).Scan(&edgeID, &toItem, &orgID, &projectID)
+	} else {
+		err = tx.QueryRow(ctx,
+			`SELECT d.id, d.to_item, i.org_id, COALESCE(i.project_id, '')
+			   FROM deps.dependencies d
+			   JOIN workitems.items i ON i.id = d.to_item
+			  WHERE d.from_item = $1 AND d.to_item = $2 AND d.kind = $3
+			  FOR UPDATE OF d`,
+			req.FromItem, req.ToItem, req.Kind,
+		).Scan(&edgeID, &toItem, &orgID, &projectID)
+	}
+	if err != nil {
+		if errors.Is(err, sqldb.ErrNoRows) {
+			return nil, &errs.Error{Code: errs.NotFound, Message: "edge not found"}
+		}
+		return nil, &errs.Error{Code: errs.Internal, Message: "edge lookup failed"}
+	}
+
+	// Delete the edge.
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM deps.dependencies WHERE id = $1`,
+		edgeID,
+	); err != nil {
+		return nil, &errs.Error{Code: errs.Internal, Message: "edge delete failed"}
+	}
+
+	// Regime A: recompute is_ready inline for the direct to_item.
+	toNowReady, err := recomputeReady(ctx, tx, toItem)
+	if err != nil {
+		rlog.Error("deps: RemoveEdge recomputeReady failed", "err", err, "to_item", toItem)
+		return nil, &errs.Error{Code: errs.Internal, Message: "is_ready recompute failed"}
+	}
+
+	// Inline audit row. event_id was captured BEFORE BEGIN (tension #1).
+	auditID, err := newULID()
+	if err != nil {
+		return nil, &errs.Error{Code: errs.Internal, Message: "ulid generation failed"}
+	}
+	var (
+		projectColumn *string
+		traceColumn   *string
+	)
+	if projectID != "" {
+		p := projectID
+		projectColumn = &p
+	}
+	if tid := tracectx.TraceID(ctx); tid != "" {
+		t := tid
+		traceColumn = &t
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO deps.cascade_events
+		   (id, event_id, kind, org_id, project_id,
+		    triggered_by_item_id, affected_item_ids, cascaded_count, trace_id)
+		 VALUES ($1, $2, 'edge_removed', $3, $4, $5, $6, 1, $7)`,
+		auditID, eventID, orgID, projectColumn, toItem, []string{toItem}, traceColumn,
+	); err != nil {
+		rlog.Error("deps: cascade_events insert failed", "err", err, "event_id", eventID)
+		return nil, &errs.Error{Code: errs.Internal, Message: "audit insert failed"}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, &errs.Error{Code: errs.Internal, Message: "commit failed"}
+	}
+
+	// Regime B: post-commit publish REUSING the same event_id. The
+	// subscriber attempts an INSERT and collapses to no-op via the
+	// UNIQUE (event_id, triggered_by_item_id) ON CONFLICT clause —
+	// the inline row above already exists.
+	publishCascadeRequested(ctx, orgID, projectID, toItem, "edge_removed", eventID)
+
+	return &RemoveEdgeResponse{
+		Removed:        true,
+		ToItemNowReady: toNowReady,
+		ToItemID:       toItem,
+	}, nil
 }
 
-// IsReadyRequest is the input to IsReady. SPEC §4.5 wrote the signature as
-// `func IsReady(ctx, itemID string) (bool, error)`, but Encore requires
-// API request types to be named structs (E1354). This skeleton wraps
-// itemID in a request struct; the wire-shape (single item lookup) is
+// IsReadyRequest is the input to IsReady. SPEC §4.5 wrote the signature
+// as `func IsReady(ctx, itemID string) (bool, error)`; Encore requires
+// API request types to be named structs (E1354). The wire-shape is
 // unchanged. See DEVIATION trail on bead unblock-tv8.1.
 type IsReadyRequest struct {
 	ItemID string
 }
 
-// IsReadyResponse is the output of IsReady. Encore also requires API
-// response types to be named structs (a bare `bool` is rejected).
+// IsReadyResponse is the output of IsReady.
 type IsReadyResponse struct {
 	IsReady bool
 }
 
-// IsReady is a read-side helper that returns the current is_ready value
-// (read directly from workitems.items, not recomputed). SPEC §4.5.
+// IsReady returns the current is_ready value for itemID (read directly
+// from workitems.items, NOT recomputed). Smoke-test helper; production
+// readers query workitems.items directly. SPEC §4.5.
 //
 //encore:api private method=POST path=/deps.IsReady
 func IsReady(ctx context.Context, req *IsReadyRequest) (*IsReadyResponse, error) {
-	return nil, errNotImplemented
+	if req == nil || req.ItemID == "" {
+		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "missing item_id"}
+	}
+	var ready bool
+	err := db.QueryRow(ctx,
+		`SELECT is_ready FROM workitems.items WHERE id = $1`,
+		req.ItemID,
+	).Scan(&ready)
+	if err != nil {
+		if errors.Is(err, sqldb.ErrNoRows) {
+			return nil, &errs.Error{Code: errs.NotFound, Message: "item not found"}
+		}
+		return nil, &errs.Error{Code: errs.Internal, Message: "is_ready read failed"}
+	}
+	return &IsReadyResponse{IsReady: ready}, nil
 }
 
 // ClosureRequest is the input to Closure. SPEC §4.5.
@@ -111,11 +544,86 @@ type ClosureResponse struct {
 	ItemIDs []string
 }
 
-// Closure returns the transitive 'blocks' closure for an item. SPEC §4.5.
+// Closure returns the transitive 'blocks' closure for an item.
+// Direction="outgoing" walks d.from_item=r.id projecting d.to_item
+// (items reachable from itemID). Direction="incoming" walks
+// d.to_item=r.id projecting d.from_item (items that reach itemID).
+// Excludes the seed itself. Depth capped at 256 per AR-8. SPEC §4.5.
 //
 //encore:api private method=POST path=/deps.Closure
 func Closure(ctx context.Context, req *ClosureRequest) (*ClosureResponse, error) {
-	return nil, errNotImplemented
+	if req == nil || req.ItemID == "" {
+		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "missing item_id"}
+	}
+	if _, ok := allowedClosureDirections[req.Direction]; !ok {
+		return nil, &errs.Error{
+			Code:    errs.InvalidArgument,
+			Message: fmt.Sprintf("invalid direction %q (allowed: incoming, outgoing)", req.Direction),
+			Meta:    errs.Metadata{"field": "direction"},
+		}
+	}
+	depth := req.MaxDepth
+	if depth <= 0 {
+		depth = closureMaxDepth
+	}
+	if depth > closureMaxDepth {
+		return nil, &errs.Error{
+			Code:    errs.InvalidArgument,
+			Message: fmt.Sprintf("max_depth must be <= %d", closureMaxDepth),
+			Meta:    errs.Metadata{"field": "max_depth"},
+		}
+	}
+
+	// The two directions only differ in which column joins on r.id
+	// and which column is projected. Inlined alternation in two
+	// distinct prepared statements — no runtime string concat into SQL.
+	var (
+		sql string
+	)
+	switch req.Direction {
+	case "outgoing":
+		sql = `WITH RECURSIVE reachable(id, depth) AS (
+		         SELECT $1::text, 0
+		         UNION ALL
+		         SELECT d.to_item, r.depth + 1
+		           FROM deps.dependencies d
+		           JOIN reachable r ON d.from_item = r.id
+		          WHERE d.kind = 'blocks'
+		            AND r.depth < $2
+		       )
+		       SELECT DISTINCT id FROM reachable WHERE id <> $1
+		       ORDER BY id`
+	case "incoming":
+		sql = `WITH RECURSIVE reachable(id, depth) AS (
+		         SELECT $1::text, 0
+		         UNION ALL
+		         SELECT d.from_item, r.depth + 1
+		           FROM deps.dependencies d
+		           JOIN reachable r ON d.to_item = r.id
+		          WHERE d.kind = 'blocks'
+		            AND r.depth < $2
+		       )
+		       SELECT DISTINCT id FROM reachable WHERE id <> $1
+		       ORDER BY id`
+	}
+
+	rows, err := db.Query(ctx, sql, req.ItemID, depth)
+	if err != nil {
+		return nil, &errs.Error{Code: errs.Internal, Message: "closure query failed"}
+	}
+	defer rows.Close()
+	out := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, &errs.Error{Code: errs.Internal, Message: "closure scan failed"}
+		}
+		out = append(out, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, &errs.Error{Code: errs.Internal, Message: "closure iter failed"}
+	}
+	return &ClosureResponse{ItemIDs: out}, nil
 }
 
 // RecentCascadeEventsRequest is the input to RecentCascadeEvents. SPEC §4.5.
@@ -141,11 +649,106 @@ type RecentCascadeEventsResponse struct {
 	Events []CascadeEventRow
 }
 
-// RecentCascadeEvents returns the last 50 deps.cascade_events rows for the
-// org/project, ordered by triggered_at DESC. AF2 closure — used by the
-// prime MCP tool. SPEC §4.5.
+// RecentCascadeEvents returns the last N (≤50) deps.cascade_events rows
+// for the org/project, ordered by triggered_at DESC. AF2 closure — used
+// by the prime MCP tool. SPEC §4.5.
+//
+// Authorisation: this RPC is private and called from the MCP layer
+// which gates via org.Authorize at the session→org boundary BEFORE
+// dispatching here. The SQL filter is explicit on (org_id, project_id)
+// so the scope is auditable.
 //
 //encore:api private method=POST path=/deps.RecentCascadeEvents
 func RecentCascadeEvents(ctx context.Context, req *RecentCascadeEventsRequest) (*RecentCascadeEventsResponse, error) {
-	return nil, errNotImplemented
+	if req == nil || req.OrgID == "" {
+		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "missing org_id", Meta: errs.Metadata{"field": "org_id"}}
+	}
+	limit := req.Limit
+	if limit <= 0 || limit > recentCascadeEventsLimitCap {
+		limit = recentCascadeEventsLimitCap
+	}
+
+	rows, err := db.Query(ctx,
+		`SELECT id, event_id, COALESCE(triggered_by_item_id, ''),
+		        affected_item_ids, cascaded_count, triggered_at,
+		        COALESCE(trace_id, '')
+		   FROM deps.cascade_events
+		  WHERE org_id = $1
+		    AND ($2 = '' OR project_id = $2)
+		  ORDER BY triggered_at DESC
+		  LIMIT $3`,
+		req.OrgID, req.ProjectID, limit,
+	)
+	if err != nil {
+		return nil, &errs.Error{Code: errs.Internal, Message: "cascade events query failed"}
+	}
+	defer rows.Close()
+	out := make([]CascadeEventRow, 0, limit)
+	for rows.Next() {
+		var row CascadeEventRow
+		if err := rows.Scan(
+			&row.ID, &row.EventID, &row.TriggeredByItemID,
+			&row.AffectedItemIDs, &row.CascadedCount, &row.TriggeredAt,
+			&row.TraceID,
+		); err != nil {
+			return nil, &errs.Error{Code: errs.Internal, Message: "cascade events scan failed"}
+		}
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, &errs.Error{Code: errs.Internal, Message: "cascade events iter failed"}
+	}
+	return &RecentCascadeEventsResponse{Events: out}, nil
+}
+
+// publishCascadeRequested emits a CascadeRequested for the §6.3.0
+// Regime-B (multi-hop pipeline_stage) recompute pass.
+//
+// reuseEventID, when non-empty, is used verbatim as the publish
+// envelope's EventID (the "tension #1" pattern: deps.RemoveEdge writes
+// the inline audit row with this id, then publishes with the same id
+// so the subscriber's ON CONFLICT clause collapses to no-op). An empty
+// reuseEventID mints a fresh ulid (the AddEdge case, where no inline
+// audit row exists and the subscriber writes the kind='edge_added'
+// row during its recompute pass).
+//
+// Publish failure is logged as a warning, not returned: the underlying
+// transaction has already committed and the cascade is best-effort
+// (idempotency / replay handles the rare delivery loss).
+func publishCascadeRequested(ctx context.Context, orgID, projectID, triggeredBy, reason, reuseEventID string) {
+	eventID := reuseEventID
+	if eventID == "" {
+		id, err := newULID()
+		if err != nil {
+			rlog.Warn("deps: cascade event id generation failed", "err", err, "reason", reason)
+			return
+		}
+		eventID = id
+	}
+	if _, err := CascadeRequestedTopic.Publish(ctx, &CascadeRequested{
+		EventID:           eventID,
+		OrgID:             orgID,
+		ProjectID:         projectID,
+		TriggeredByItemID: triggeredBy,
+		Reason:            reason,
+		TraceID:           tracectx.TraceID(ctx),
+		EmittedAt:         time.Now().UTC(),
+	}); err != nil {
+		rlog.Warn("deps: cascade publish failed (transaction already committed)",
+			"err", err, "reason", reason, "triggered_by", triggeredBy)
+	}
+}
+
+// callerUserID returns the caller's user id from the Encore auth
+// context, when available. Returns ("", false) when no identity is
+// bound (e.g. seeder runs, tests without auth setup).
+func callerUserID(_ context.Context) (string, bool) {
+	uid, ok := encoreauth.UserID()
+	if !ok || uid == "" {
+		return "", false
+	}
+	if data, ok := encoreauth.Data().(*auth.AuthData); ok && data != nil && data.Identity.UserID != "" {
+		return data.Identity.UserID, true
+	}
+	return string(uid), true
 }
