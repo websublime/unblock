@@ -1,0 +1,355 @@
+// seed.go provisions the fixture two-org cross-membership graph the
+// matrix sweep asserts isolation against. The seed runs once from
+// TestMain and is torn down once at exit; per-subtest cleanup is
+// avoided because the matrix subtests are read-only on the fixture.
+//
+// Fixture shape (B-3 scope — auth + org schemas):
+//
+//   - Two org.organizations rows (Org A, Org B).
+//   - Per side: four auth.users rows, one per non-agent role
+//     (owner/admin/member/viewer). The agent identity is constructed
+//     in-memory only — never an auth.users or org.members row, per
+//     SPEC §4.3.2 step 8.
+//   - Per side: one org.members row per non-agent user, binding the
+//     user to its home org with the matching role. Authorize's
+//     effective-role derivation reads these rows.
+//   - Per side: one org.projects row (the canonical project under
+//     each org). Used as KindOrgScoped row-leak bait for org.projects
+//     and as the parent of project_members rows below.
+//   - Per side: one org.project_members row binding the project's
+//     home-org owner user to the project. project_members has no
+//     org_id column — Authorize gates it via the parent project's
+//     org_id (apps/api/org/org.go step 3 containment check).
+//   - Per side: leak-bait rows in the org_id-free auth schema
+//     (auth.users with a side-specific email; auth.oauth_tokens
+//     bound to that user; auth.sessions bound to that user). These
+//     never have an org_id of their own — the suite asserts
+//     Authorize denies cross-org reads on the resource identifier,
+//     not on the row itself.
+//   - Per side: one mcp.api_keys row. Foreshadows the E-3
+//     (unblock-tv8.25) matrix extension; the B-3 sweep does NOT
+//     assert on this row but seeding it now means the FK chain is
+//     exercised end-to-end and the C-6/E-3 follow-up bead adds
+//     assertions without re-touching seed.go.
+//
+// Constraints:
+//
+//   - Every id is a freshly-minted ULID via apps/api/shared/ulid.
+//     Hard-coded ids would clash on the schema's UNIQUE constraints
+//     across encore-test invocations that share a long-lived dev
+//     cluster. A clean teardown is still done at exit (best-effort);
+//     the ULID prefix is the safety net.
+//   - The org_id-free auth schema is seeded with leak-bait rows
+//     whose `primary_provider_id` carries the side label so the
+//     suite can identify which side a given auth.users row belongs
+//     to without inventing a synthetic org_id column.
+//   - All rows go through direct sqldb.Exec, NOT through the
+//     auth/org RPCs. The RPC surfaces require an Encore auth context
+//     the test cannot easily fabricate (the authhandler reads a
+//     real `Authorization: Bearer …` header). Direct INSERT lets
+//     the seed install the rows without dancing through the auth
+//     mesh, and the suite still drives Authorize / rbac.For through
+//     the production code paths — only the fixture provisioning
+//     bypasses the RPC layer.
+
+package rbactest
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+
+	"encore.app/shared/ulid"
+	"encore.dev/storage/sqldb"
+)
+
+// Fixture is the materialised seed graph. Held in memory between
+// TestMain seed-in and the matrix sweep so individual subtests can
+// reference role-tagged ids without re-querying the DB.
+type Fixture struct {
+	// Orgs maps the OrgA / OrgB label to the persisted ULID.
+	Orgs map[string]string
+
+	// Users maps (org-label, role) -> auth.users.id. Populated for
+	// the four non-agent roles only; the agent role is constructed
+	// in-memory by Identity helpers (see matrix_test.go).
+	Users map[userKey]string
+
+	// Projects maps the OrgA / OrgB label to the persisted ULID for
+	// the canonical project row under each org.
+	Projects map[string]string
+
+	// APIKeyRows maps the OrgA / OrgB label to the persisted ULID for
+	// the mcp.api_keys row seeded under each org. B-3 does not
+	// assert on these rows; the seed exists so the FK chain is
+	// validated end-to-end and the C-6/E-3 extensions inherit a
+	// non-empty mcp.api_keys table.
+	APIKeyRows map[string]string
+}
+
+// userKey is the composite key for Fixture.Users. Declared as a
+// struct (not a string) so a typo on either dimension is caught at
+// compile time.
+type userKey struct {
+	OrgLabel string // OrgA | OrgB
+	Role     string // RoleOwner | RoleAdmin | RoleMember | RoleViewer
+}
+
+// SeedFixture installs the two-org cross-membership graph described
+// in the file header. Returns the materialised Fixture on success.
+// Any DB error is fatal to the test process — the matrix sweep is
+// meaningless without a healthy seed.
+//
+// The seed is idempotent only in the sense that it ALWAYS mints new
+// ULIDs; running it twice in the same process produces two disjoint
+// fixtures. TestMain calls it exactly once. The matching Teardown
+// function below removes the rows the seed installed.
+func SeedFixture(ctx context.Context, db *sqldb.Database) (*Fixture, error) {
+	if db == nil {
+		return nil, fmt.Errorf("rbactest: SeedFixture called with nil *sqldb.Database — the dedicated apps/api/db/ service must have bound the handle before TestMain ran; check that encore test ./... is being used (NOT plain go test)")
+	}
+
+	fx := &Fixture{
+		Orgs:       make(map[string]string, 2),
+		Users:      make(map[userKey]string, 8),
+		Projects:   make(map[string]string, 2),
+		APIKeyRows: make(map[string]string, 2),
+	}
+
+	// Per-side seeding. Both sides get the identical row complement;
+	// the side label is folded into slugs / emails / labels so the
+	// rows are distinguishable when something leaks.
+	for _, orgLabel := range AllOrgs {
+		if err := seedSide(ctx, db, fx, orgLabel); err != nil {
+			return nil, fmt.Errorf("seed side %q: %w", orgLabel, err)
+		}
+	}
+
+	return fx, nil
+}
+
+// seedSide installs the rows for a single side (OrgA or OrgB).
+// Order matters because of the FK chain: users before tokens/sessions,
+// orgs before members/projects, projects before project_members and
+// api_keys.
+func seedSide(ctx context.Context, db *sqldb.Database, fx *Fixture, orgLabel string) error {
+	// 1. The org row itself.
+	orgID, err := ulid.New()
+	if err != nil {
+		return fmt.Errorf("org ulid: %w", err)
+	}
+	orgSlug := strings.ToLower(fmt.Sprintf("rbactest-%s-%s", orgLabel, shortULID(orgID)))
+	if _, err := db.Exec(ctx,
+		`INSERT INTO org.organizations (id, slug, name) VALUES ($1, $2, $3)`,
+		orgID, orgSlug, fmt.Sprintf("rbactest org %s", orgLabel),
+	); err != nil {
+		return fmt.Errorf("insert org.organizations: %w", err)
+	}
+	fx.Orgs[orgLabel] = orgID
+
+	// 2. Per-role user rows. Each role gets its own auth.users row
+	//    so the role-action matrix sweep can resolve a stable user
+	//    per (orgLabel, role) tuple.
+	for _, role := range []string{RoleOwner, RoleAdmin, RoleMember, RoleViewer} {
+		userID, err := ulid.New()
+		if err != nil {
+			return fmt.Errorf("user ulid (%s/%s): %w", orgLabel, role, err)
+		}
+		// primary_provider_id carries the side+role label so the
+		// auth.users row is identifiable without an org_id column.
+		// The (primary_provider, primary_provider_id) UNIQUE
+		// constraint expects a stable identifier; the ULID suffix
+		// keeps it unique across repeated runs.
+		providerID := fmt.Sprintf("rbactest-%s-%s-%s", orgLabel, role, shortULID(userID))
+		email := fmt.Sprintf("%s.%s+%s@rbactest.local", strings.ToLower(orgLabel), role, shortULID(userID))
+		display := fmt.Sprintf("rbactest %s %s", orgLabel, role)
+
+		if _, err := db.Exec(ctx,
+			`INSERT INTO auth.users
+			   (id, primary_provider, primary_provider_id, email, display_name)
+			 VALUES ($1, 'github', $2, $3, $4)`,
+			userID, providerID, email, display,
+		); err != nil {
+			return fmt.Errorf("insert auth.users (%s/%s): %w", orgLabel, role, err)
+		}
+		fx.Users[userKey{OrgLabel: orgLabel, Role: role}] = userID
+
+		// 2a. auth.oauth_tokens row for this user. The *_enc columns
+		//     are bytea — direct INSERT of a literal byte string is
+		//     fine; the suite never reads these back.
+		tokID, err := ulid.New()
+		if err != nil {
+			return fmt.Errorf("oauth ulid (%s/%s): %w", orgLabel, role, err)
+		}
+		if _, err := db.Exec(ctx,
+			`INSERT INTO auth.oauth_tokens
+			   (id, user_id, provider, access_token_enc, refresh_token_enc, scopes)
+			 VALUES ($1, $2, 'github', $3, $4, $5)`,
+			tokID, userID,
+			[]byte("rbactest-access"), []byte("rbactest-refresh"),
+			[]string{"repo"},
+		); err != nil {
+			return fmt.Errorf("insert auth.oauth_tokens (%s/%s): %w", orgLabel, role, err)
+		}
+
+		// 2b. auth.sessions row for this user. expires_at must be
+		//     strictly greater than issued_at per
+		//     sessions_expiry_chk.
+		sessID, err := ulid.New()
+		if err != nil {
+			return fmt.Errorf("session ulid (%s/%s): %w", orgLabel, role, err)
+		}
+		issuedAt := time.Now().UTC()
+		expiresAt := issuedAt.Add(24 * time.Hour)
+		if _, err := db.Exec(ctx,
+			`INSERT INTO auth.sessions
+			   (id, user_id, issued_at, last_seen_at, expires_at, user_agent)
+			 VALUES ($1, $2, $3, $3, $4, $5)`,
+			sessID, userID, issuedAt, expiresAt, "rbactest",
+		); err != nil {
+			return fmt.Errorf("insert auth.sessions (%s/%s): %w", orgLabel, role, err)
+		}
+
+		// 2c. org.members row binding the user to its home org with
+		//     the matching role. Authorize's effective-role
+		//     derivation (max(org_role, project_role)) reads this.
+		memberID, err := ulid.New()
+		if err != nil {
+			return fmt.Errorf("member ulid (%s/%s): %w", orgLabel, role, err)
+		}
+		if _, err := db.Exec(ctx,
+			`INSERT INTO org.members (id, org_id, user_id, role)
+			 VALUES ($1, $2, $3, $4)`,
+			memberID, orgID, userID, role,
+		); err != nil {
+			return fmt.Errorf("insert org.members (%s/%s): %w", orgLabel, role, err)
+		}
+	}
+
+	// 3. The canonical org.projects row under this org. Used both
+	//    as KindOrgScoped row-leak bait and as the parent for the
+	//    project_members row below.
+	projectID, err := ulid.New()
+	if err != nil {
+		return fmt.Errorf("project ulid: %w", err)
+	}
+	projectSlug := strings.ToLower(fmt.Sprintf("default-%s", shortULID(projectID)))
+	if _, err := db.Exec(ctx,
+		`INSERT INTO org.projects (id, org_id, slug, name)
+		 VALUES ($1, $2, $3, $4)`,
+		projectID, orgID, projectSlug, fmt.Sprintf("rbactest project %s", orgLabel),
+	); err != nil {
+		return fmt.Errorf("insert org.projects: %w", err)
+	}
+	fx.Projects[orgLabel] = projectID
+
+	// 4. One org.project_members row binding the owner user to the
+	//    project. project_members has no org_id column — the
+	//    Authorize gate for this resource is the cross-tenant
+	//    containment check (apps/api/org/org.go step 3), not a
+	//    rbac.For scope predicate.
+	ownerID := fx.Users[userKey{OrgLabel: orgLabel, Role: RoleOwner}]
+	pmID, err := ulid.New()
+	if err != nil {
+		return fmt.Errorf("project_member ulid: %w", err)
+	}
+	if _, err := db.Exec(ctx,
+		`INSERT INTO org.project_members (id, project_id, user_id, role)
+		 VALUES ($1, $2, $3, $4)`,
+		pmID, projectID, ownerID, RoleOwner,
+	); err != nil {
+		return fmt.Errorf("insert org.project_members: %w", err)
+	}
+
+	// 5. mcp.api_keys row foreshadowing the C-6 / E-3 extension. Not
+	//    asserted on in B-3; seed only so the FK chain is exercised
+	//    and the follow-up beads inherit a non-empty table.
+	apiKeyID, err := ulid.New()
+	if err != nil {
+		return fmt.Errorf("api_key ulid: %w", err)
+	}
+	// Last 8 chars of the ULID give a high-entropy unique prefix; the
+	// random tail dominates so two seeded keys never collide on the
+	// UNIQUE index even if both ULIDs were minted in the same
+	// millisecond (the timestamp-based prefix would).
+	keyPrefix := apiKeyID[len(apiKeyID)-8:]
+	if _, err := db.Exec(ctx,
+		`INSERT INTO mcp.api_keys
+		   (id, org_id, label, agent_kind, key_hash, key_prefix, scopes)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		apiKeyID, orgID,
+		fmt.Sprintf("rbactest-%s-key", orgLabel),
+		"claude-code",
+		[]byte("rbactest-key-hash-placeholder"),
+		keyPrefix,
+		[]string{},
+	); err != nil {
+		return fmt.Errorf("insert mcp.api_keys: %w", err)
+	}
+	fx.APIKeyRows[orgLabel] = apiKeyID
+
+	return nil
+}
+
+// Teardown removes every row this Fixture installed. Called from
+// TestMain on the way out. The org.organizations rows cascade-delete
+// everything reachable (members, projects, project_members,
+// api_keys, tool_calls, …) per the schema's ON DELETE CASCADE
+// chain. auth.users / auth.oauth_tokens / auth.sessions are NOT
+// reachable via the org_id cascade — they are deleted separately,
+// keyed by the ids the fixture installed.
+//
+// Teardown is best-effort: failures are reported but do not abort.
+// The unique-by-ULID safety net in SeedFixture ensures a partial
+// teardown does not poison subsequent test runs.
+func (f *Fixture) Teardown(ctx context.Context, db *sqldb.Database) {
+	if db == nil || f == nil {
+		return
+	}
+
+	// 1. Org cascade — kills org.members, org.projects,
+	//    org.project_members, mcp.api_keys (and downstream tool_calls
+	//    on FK SET NULL).
+	for _, orgID := range f.Orgs {
+		if _, err := db.Exec(ctx, `DELETE FROM org.organizations WHERE id = $1`, orgID); err != nil {
+			// Log and continue — teardown is best-effort.
+			fmt.Printf("rbactest teardown: delete org %q: %v\n", orgID, err)
+		}
+	}
+
+	// 2. auth.users rows installed by the seed. ON DELETE CASCADE on
+	//    auth.oauth_tokens.user_id and auth.sessions.user_id
+	//    handles the dependent rows.
+	for _, userID := range f.Users {
+		if _, err := db.Exec(ctx, `DELETE FROM auth.users WHERE id = $1`, userID); err != nil {
+			fmt.Printf("rbactest teardown: delete user %q: %v\n", userID, err)
+		}
+	}
+}
+
+// shortULID returns the first 8 chars of a ULID. Used as a uniqueness
+// salt on slugs / emails / provider ids so repeated SeedFixture calls
+// in the same dev cluster do not collide on UNIQUE constraints. Not
+// security-sensitive — the truncation is cosmetic.
+func shortULID(s string) string {
+	if len(s) < 8 {
+		return s
+	}
+	return s[:8]
+}
+
+// fatalIf is a tiny helper for the seed path inside TestMain. The
+// caller passes t == nil (TestMain has no *testing.T), in which case
+// the function panics; otherwise it calls t.Fatal. Centralised so
+// callers don't sprinkle the nil-check.
+func fatalIf(t *testing.T, err error, msg string) {
+	if err == nil {
+		return
+	}
+	if t == nil {
+		panic(fmt.Sprintf("%s: %v", msg, err))
+	}
+	t.Fatalf("%s: %v", msg, err)
+}

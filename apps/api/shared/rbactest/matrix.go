@@ -1,0 +1,188 @@
+// matrix.go declares the test-matrix vocabulary: the role axis, the
+// action axis, and the per-table classification (org_id-scoped vs
+// Authorize-only) that selects the assertion shape. The exhaustive
+// matrix sweep in rbactest_test.go iterates these.
+//
+// The constants here are intentionally re-declared instead of re-using
+// the org package's unexported `resource*` / `role*` / `action*`
+// values. SPEC §10.1's matrix is a contract — the suite asserts the
+// contract, so the contract values live here in plain sight. If a
+// drift ever emerges between the org service's closed-set constants
+// and this file, the divergence is a finding the suite is meant to
+// surface, not a sync target.
+
+package rbactest
+
+// Role axis (SPEC §10.1, §4.2 role-action matrix; org.Authorize
+// branches on Identity.Role).
+//
+// owner/admin/member/viewer are seeded as org.members rows so the
+// Authorize effective-role derivation (max(org_role, project_role))
+// reads the persisted policy state.
+//
+// agent is the synthetic API-key runtime identity per SPEC §4.3.2
+// step 8: never an org.members row, constructed in-memory only.
+// Authorize's agent branch (apps/api/org/org.go step 4) is the
+// production code path that must answer same-org permit / cross-org
+// deny / delete-everywhere deny / non-agent-resource deny.
+const (
+	RoleOwner  = "owner"
+	RoleAdmin  = "admin"
+	RoleMember = "member"
+	RoleViewer = "viewer"
+	RoleAgent  = "agent"
+)
+
+// AllRoles is the canonical iteration order for the role axis. Order
+// is policy-strength descending plus agent last, which keeps the
+// subtest tree readable in --verbose output.
+var AllRoles = []string{
+	RoleOwner,
+	RoleAdmin,
+	RoleMember,
+	RoleViewer,
+	RoleAgent,
+}
+
+// Action axis (SPEC §4.2 RBAC matrix).
+const (
+	ActionRead   = "read"
+	ActionWrite  = "write"
+	ActionDelete = "delete"
+)
+
+// AllActions is the canonical iteration order for the action axis.
+var AllActions = []string{
+	ActionRead,
+	ActionWrite,
+	ActionDelete,
+}
+
+// Org/User axis labels. The suite seeds exactly two orgs. The names
+// are short to keep the generated subtest names parse-friendly.
+const (
+	OrgA = "A"
+	OrgB = "B"
+)
+
+// AllOrgs is the canonical iteration order for the caller-org / target-org
+// axes. The full sweep iterates the cross-product so every
+// (caller, target) pairing — including same-org permits — is asserted.
+var AllOrgs = []string{OrgA, OrgB}
+
+// TableKind classifies a table by how cross-tenant isolation is
+// enforced. Each kind selects a different assertion shape inside the
+// matrix sweep — see doc.go for the rationale.
+type TableKind int
+
+const (
+	// KindOrgScoped tables carry an `org_id` column AND are reached
+	// through rbac.For[T] in production code. The assertion shape is
+	// row-level: the suite seeds a row in both orgs and asserts a
+	// caller-org reader sees zero rows whose org_id != caller-org.
+	// rbac.For is read-only, so the action axis collapses to
+	// {ActionRead} for this kind; the write/delete halves of the policy
+	// matrix for the same table go through org.Authorize and are
+	// covered by KindAuthorizeOnly assertions on that table identifier.
+	KindOrgScoped TableKind = iota + 1
+
+	// KindAuthorizeOnly tables do NOT carry an `org_id` column. Their
+	// cross-tenant gate is the org.Authorize predicate, not a SQL scope
+	// filter. The assertion shape is permit-level: the suite calls
+	// Authorize for every (caller-role × action) and asserts:
+	//   - cross-org deny on every tuple
+	//   - same-org permit/deny per the policy matrix
+	// The action axis covers all of {read, write, delete} for this
+	// kind because Authorize answers all three.
+	KindAuthorizeOnly
+)
+
+// TableSpec is a single row of the table-classification matrix. The
+// rbac builder always reads tables with their fully-qualified
+// `<schema>.<table>` identifier; the Resource string used by
+// org.Authorize matches that identifier verbatim by convention
+// (apps/api/org/org.go constants). This struct keeps the two
+// spellings together so the matrix sweep never has to guess which
+// surface a given table belongs to.
+type TableSpec struct {
+	// Name is the fully-qualified `<schema>.<table>` identifier. Used
+	// both as the rbac.For[T] table argument (KindOrgScoped) and the
+	// Authorize Resource value (KindAuthorizeOnly).
+	Name string
+
+	// Kind selects the assertion shape — see TableKind.
+	Kind TableKind
+}
+
+// AuthOrgTables is the closed set of P01 auth + org schema tables this
+// bead (B-3 / unblock-tv8.9) sweeps. C-6 / unblock-tv8.15 appends
+// workitems.* + deps.* entries; E-3 / unblock-tv8.25 appends mcp.* +
+// memory.* + boards.* entries. The slice is exported and additive so
+// the two follow-up beads only add lines.
+//
+// Classification rationale (verified against migrations
+// apps/api/db/migrations/0020_auth.up.sql lines 11-66 and
+// 0030_org.up.sql lines 7-62):
+//
+//   - auth.users / auth.oauth_tokens / auth.sessions — no org_id column;
+//     rbac.For would emit `<table>.org_id = $1` which Postgres rejects
+//     with "column does not exist". Authorize gates these via step 1's
+//     cross-tenant short-circuit on Identity.OrgID vs req.OrgID.
+//   - org.organizations — no org_id column; the row's id IS the org_id
+//     (apps/api/org/org.go GetOrganization at line ~322 enforces
+//     id==identity.OrgID directly).
+//   - org.project_members — no org_id column (scoped via the project's
+//     org_id). Same Authorize-gate treatment.
+//   - org.projects — has org_id column; rbac.For-scoped.
+//   - org.members — has org_id column; rbac.For-scoped.
+var AuthOrgTables = []TableSpec{
+	{Name: "auth.users", Kind: KindAuthorizeOnly},
+	{Name: "auth.oauth_tokens", Kind: KindAuthorizeOnly},
+	{Name: "auth.sessions", Kind: KindAuthorizeOnly},
+	{Name: "org.organizations", Kind: KindAuthorizeOnly},
+	{Name: "org.project_members", Kind: KindAuthorizeOnly},
+	{Name: "org.projects", Kind: KindOrgScoped},
+	{Name: "org.members", Kind: KindOrgScoped},
+}
+
+// agentPermittedResources mirrors the org.agentReadWriteResources map
+// (apps/api/org/org.go ~line 193). The suite uses this to predict
+// Authorize's policy decision for agent callers — same-org permit on
+// this set (read/write only, never delete); deny on every other
+// resource. Re-declared here, not imported, so the suite asserts the
+// policy contract rather than the policy implementation: a drift
+// between this set and the org-package set is exactly the kind of
+// silent regression the suite must surface.
+var agentPermittedResources = map[string]struct{}{
+	"workitems.items":    {},
+	"workitems.comments": {},
+	"workitems.trail":    {},
+	"deps.dependencies":  {},
+	"mcp.tool_calls":     {},
+	"memory.entries":     {},
+}
+
+// rolePermitsAction encodes the SPEC §4.2 role-action matrix:
+//
+//	owner:  read, write, delete
+//	admin:  read, write, delete
+//	member: read, write
+//	viewer: read
+//
+// agent is excluded from this matrix — agent callers go through the
+// agent branch (agentPermittedResources above) before this function is
+// consulted. The suite uses this to predict Authorize's same-org
+// policy decision for non-agent callers. Re-declared, not imported,
+// for the same drift-detection reason as agentPermittedResources.
+func rolePermitsAction(role, action string) bool {
+	switch role {
+	case RoleOwner, RoleAdmin:
+		return action == ActionRead || action == ActionWrite || action == ActionDelete
+	case RoleMember:
+		return action == ActionRead || action == ActionWrite
+	case RoleViewer:
+		return action == ActionRead
+	default:
+		return false
+	}
+}

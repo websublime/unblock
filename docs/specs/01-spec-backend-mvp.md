@@ -1999,9 +1999,46 @@ mechanism. Plan §2.3's wording is non-normative on this; spec §10.1 is
 the authoritative pin.
 
 The exhaustive RBAC regression suite under `apps/api/shared/rbactest/`
-(NFR-2) fires one test per (caller-org, target-org, table, action)
-combination across the schemas P01 exposes. CI gates release on zero
-cross-tenant leaks.
+(NFR-2) fires one test per (caller-org, target-org, caller-role, table,
+action) combination across the schemas P01 exposes. The role axis is
+first-class — `org.Authorize` branches on `Identity.Role` ({owner,
+admin, member, viewer, agent}; the synthetic `agent` is the API-key
+runtime role per §4.3.2 step 8) before the role-action matrix, so a
+matrix that omits role fails to exercise the actual policy. CI gates
+release on zero cross-tenant leaks.
+
+**Suite scope is split across three phase tasks, not delivered in one
+bead:**
+
+- **B-3 (this bead, `unblock-tv8.9`)** — auth + org schemas only.
+  Concretely: `auth.users`, `auth.oauth_tokens`, `auth.sessions`,
+  `org.organizations`, `org.projects`, `org.members`,
+  `org.project_members`. Lays down the seed/cleanup scaffolding,
+  the matrix-axis vocabulary, and the `t.Run`-per-tuple driver that
+  the two follow-up tasks extend. The scope here is the surface the
+  two live P01 services (auth, org) actually touch; everything beyond
+  is reserved for the tasks below so each bead has independent
+  acceptance criteria.
+- **C-6 (`unblock-tv8.15`)** — extends the matrix to `workitems.items`,
+  `workitems.comments`, `workitems.trail`, `deps.dependencies`. Lands
+  after the C-group RPCs that introduce those tables.
+- **E-3 (`unblock-tv8.25`)** — final P01 gate. Closes the remaining
+  `mcp.tool_calls`, `mcp.api_keys`, `memory.entries`, `boards.boards`
+  surfaces and is the release-blocking exhaustive sweep across every
+  P01-exposed schema.
+
+**Mechanism within each task.** Tables with an `org_id` column are
+driven through `rbac.For[T]` (the read-side scope predicate is what's
+under test). Tables without an `org_id` column —
+`auth.users`, `auth.oauth_tokens`, `auth.sessions`,
+`org.organizations`, `org.project_members` — are driven through
+`org.Authorize` directly (their cross-tenant gate is the Authorize
+predicate, not a `WHERE … org_id = $1` filter). The suite seeds two
+orgs with a full role complement per side, runs without `t.Parallel`
+(rbac.Bind is not goroutine-safe; bead `unblock-tv8.34` tracks the
+hardening), and is discoverable as `encore test
+./apps/api/shared/rbactest/...` so the A-6 CI bead (`unblock-tv8.6`)
+can wire the gate without touching the suite.
 
 ### 10.2 Tracing (NFR-12)
 
