@@ -1,10 +1,11 @@
 # SPEC: ://unblock — Stage 1 Product Architecture
 
-**Status:** APPROVED *(round-2 review iterations applied 2026-05-07; round-3 research applied 2026-05-08; §9.4.10 local-secrets format corrected 2026-05-08)*
+**Status:** APPROVED *(round-6 cascade-symmetry sync applied 2026-05-12; previously APPROVED 2026-05-07 with round-2 iterations applied 2026-05-07, round-3 research applied 2026-05-08, and §9.4.10 local-secrets format corrected 2026-05-08)*
 **Author:** Ada (architect)
-**Date:** 2026-05-07 (round-3 research applied 2026-05-08; §9.4.10 format drift fix applied 2026-05-08)
+**Date:** 2026-05-07 (round-3 research applied 2026-05-08; §9.4.10 format drift fix applied 2026-05-08; round-6 cascade-symmetry sync applied 2026-05-12)
 **Changelog:**
 - 2026-05-08 — §9.4.10 corrected the local-secrets file path/format from `.encore/local-secrets.toml` (TOML) to `apps/api/.secrets.local.cue` (CUE) per Encore official docs; added parallel mapping note (`MEMORY_DEK` → Go field `MemoryDEK`) referencing P01 spec §3.5 for the full mapping table.
+- 2026-05-12 — §9.4.4 `deps.cascade_events.kind` CHECK enum extended to four first-class values (`'close'`, `'edge_added'`, `'edge_removed'`, `'state_change'`); the round-2 framing of two kinds with a "future" `state_change` was retired. The four kinds are P01-active and partition the cascade write path into two propagation regimes (Regime A: writer-inline `is_ready` writes by Tool 12; Regime B: subscriber-only `pipeline_stage` writes plus subscriber-driven `is_ready` writes for `close` / `edge_added` / `state_change`). Canonical model lives in phase spec [§6.3.0 "Propagation regimes"](./specs/01-spec-backend-mvp.md); this document records *what exists* at architectural level, the phase spec records *how it is implemented*. Status flipped to DRAFT pending re-approval.
 **Source PRD:** [docs/PRD.md](./PRD.md) (APPROVED, 2026-05-07)
 **Companion:** [docs/MANIFESTO.md](./MANIFESTO.md) (APPROVED, 2026-05-07)
 **Carries forward verbatim:** [docs/code-cli/plan.md](./code-cli/plan.md), [docs/code-cli/spec.md](./code-cli/spec.md), [docs/code-cli/research.md](./code-cli/research.md)
@@ -1605,18 +1606,40 @@ CREATE TABLE deps.cascade_events (
     -- The (event_id, triggered_by_item_id) UNIQUE constraint below is the
     -- structural mitigation for at-least-once redelivery (AR-11).
     event_id              text         NOT NULL,
-    -- Cascade kind discriminator. Added in round-2 review iterations:
-    --   'close'        — written by the cascade subscriber when a close
-    --                    event (Tool 6 / workitems.Close) arrives via
+    -- Cascade kind discriminator. Four first-class values, all P01-active.
+    -- The cascade subsystem maintains TWO propagation regimes; the canonical
+    -- model lives in phase spec §6.3.0 ("Propagation regimes") at
+    -- docs/specs/01-spec-backend-mvp.md. Regime A is writer-inline (the
+    -- mutation transaction writes both the audit row and the `is_ready`
+    -- flip in the same SQL transaction); Regime B is subscriber-only (the
+    -- mutation publishes to Pub/Sub and the cascade subscriber materialises
+    -- `is_ready` and `pipeline_stage`). Per-kind provenance:
+    --   'close'        — Regime B. Written by the cascade subscriber when a
+    --                    close event (Tool 6 / workitems.Close) arrives via
     --                    Pub/Sub; walks the forward 'blocks' closure
     --                    (multi-hop, possibly large affected set).
-    --   'edge_removed' — written INLINE by Tool 12 (remove_dependency)
-    --                    in the same SQL transaction as DELETE FROM
-    --                    deps.dependencies; single-hop only (the direct
-    --                    to_item is the only candidate to flip ready).
-    -- Future kinds (e.g. 'state_change' for Pub/Sub-driven state-cascade
-    -- writes deferred to P02+) extend the CHECK constraint additively in
-    -- their own phase migration.
+    --   'edge_added'   — Regime B. Written by the cascade subscriber when
+    --                    Tool 11 (add_dependency) publishes; a new incoming
+    --                    edge may flip the `to_item` out of ready, so the
+    --                    subscriber re-evaluates the single-hop predicate.
+    --   'edge_removed' — Regime A. Written INLINE by Tool 12
+    --                    (remove_dependency) in the same SQL transaction as
+    --                    DELETE FROM deps.dependencies; single-hop only (the
+    --                    direct to_item is the only candidate to flip ready).
+    --                    The subscriber also receives the corresponding
+    --                    Pub/Sub event and its INSERT collapses via
+    --                    ON CONFLICT (event_id, triggered_by_item_id) DO
+    --                    NOTHING — the writer-inline row is authoritative.
+    --   'state_change' — Regime B. Written by the cascade subscriber for
+    --                    Pub/Sub-driven state cascades; in P01 the only
+    --                    emitters are Tool 13 (review/qa state writes that
+    --                    can flip `pipeline_stage` for downstream items)
+    --                    and `workitems.Claim` on the I-3 reset path (a
+    --                    claim that resets `impl_state` from `done` back to
+    --                    `in_progress` invalidates derived `pipeline_stage`
+    --                    on the same row, and the subscriber rematerialises).
+    -- New cascade kinds added in future phases extend this CHECK additively
+    -- via their own phase migration and update phase spec §6.3.0.
     kind                  text         NOT NULL,
     org_id                text         NOT NULL REFERENCES org.organizations(id) ON DELETE CASCADE,
     project_id            text         REFERENCES org.projects(id) ON DELETE SET NULL,
@@ -1630,7 +1653,7 @@ CREATE TABLE deps.cascade_events (
     triggered_at          timestamptz  NOT NULL DEFAULT now(),
     trace_id              text,                                            -- correlates with mcp.tool_calls.trace_id
     CONSTRAINT cascade_events_kind_chk
-        CHECK (kind IN ('close', 'edge_removed')),
+        CHECK (kind IN ('close', 'edge_added', 'edge_removed', 'state_change')),
     CONSTRAINT cascade_events_count_chk
         CHECK (cascaded_count >= 0),
     -- AR-11 idempotency key. A redelivered Pub/Sub message carries the same
@@ -2334,7 +2357,30 @@ This document moves from DRAFT to APPROVED when:
       written inline by P01 spec §6.2 Tool 12 (`remove_dependency`).
       Future cascade kinds extend the CHECK additively per phase spec.
 
-**Status: APPROVED, 2026-05-07. Round-2 review iterations applied 2026-05-07.**
+**Round-6 cascade-symmetry sync (in progress, opened 2026-05-12):**
+
+- [x] §9.4.4 `deps.cascade_events.kind` CHECK enum extended from two values
+      to four first-class values: `('close', 'edge_added', 'edge_removed',
+      'state_change')`. All four kinds are P01-active; the round-2 framing
+      of `state_change` as "deferred to P02+" is retired.
+- [x] §9.4.4 `kind` column doc-block rewritten to describe the symmetric
+      writer model and per-kind provenance: `'close'` and `'edge_added'`
+      are written by the cascade subscriber (Regime B); `'edge_removed'`
+      is written inline by Tool 12 (Regime A) with the subscriber's
+      duplicate insert collapsed via `ON CONFLICT … DO NOTHING`;
+      `'state_change'` is written by the cascade subscriber, emitted by
+      Tool 13 (review/qa state writes) and by `workitems.Claim` on the
+      I-3 reset path only.
+- [x] Cross-reference pinned: the cascade subsystem maintains two
+      propagation regimes (Regime A writer-inline `is_ready`; Regime B
+      subscriber-only `pipeline_stage` plus subscriber-driven `is_ready`
+      for `close` / `edge_added` / `state_change`). Canonical model and
+      implementation contract live in phase spec
+      [§6.3.0 "Propagation regimes"](../docs/specs/01-spec-backend-mvp.md).
+      This Stage-1 document owns *what exists* at the architecture level;
+      the phase spec owns *how it is implemented*.
+
+**Status: APPROVED. Approved 2026-05-07 (Stage-1 canonical); round-2 applied 2026-05-08; round-6 cascade-symmetry sync applied 2026-05-12.**
 
 This document is the input to:
 
