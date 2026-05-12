@@ -176,6 +176,7 @@ package db
 import (
 	"encore.app/auth"
 	"encore.app/deps"
+	"encore.app/mcp"
 	"encore.app/org"
 	"encore.app/shared/rbac"
 	"encore.app/workitems"
@@ -241,6 +242,7 @@ var DB = sqldb.NewDatabase("unblock", sqldb.DatabaseConfig{
 //   - org.BindDB(DB)
 //   - workitems.BindDB(DB)  — pre-wired ahead of B-1+ bodies
 //   - deps.BindDB(DB)       — pre-wired ahead of C-1+ bodies
+//   - mcp.BindDB(DB)        — consumed by recordToolCall (A-5)
 //
 // Plus the cross-cutting shared-rbac bind:
 //
@@ -267,5 +269,6 @@ func init() {
 	org.BindDB(DB)
 	workitems.BindDB(DB)
 	deps.BindDB(DB)
+	mcp.BindDB(DB)
 	rbac.Bind(DB)
 }
