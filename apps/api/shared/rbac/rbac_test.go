@@ -17,11 +17,21 @@ import (
 
 // fakeIdentity returns a deterministic identity for builder tests.
 //
-// Imported as `types.Identity` rather than `auth.Identity`: the latter
-// path triggers `auth.init()` (sqldb.NewDatabase) which panics outside
-// the encore CLI's cluster bring-up. The leaf `auth/types` package is
-// Encore-free by construction (bead unblock-tv8.30). The two spellings
-// alias to the same Go type — see auth.go's `type Identity = types.Identity`.
+// Imported as `types.Identity` rather than `auth.Identity`: the
+// `auth.Identity` path would drag in the auth root package, which
+// imports encore.dev/storage/sqldb. Before bead unblock-bne the auth
+// package called sqldb.NewDatabase at init and panicked any plain
+// `go test` run with "encore apps must be run using the encore
+// command". After bead unblock-bne the auth package no longer calls
+// sqldb.NewDatabase (the canonical call moved to apps/api/db/db.go)
+// AND no longer calls sqldb.Named at init either (it keeps the
+// unblock-xuk late-bind shape: a nil pointer + BindDB hook), so
+// importing auth from here is technically safe today. The leaf
+// `auth/types` package nevertheless remains the canonical home for
+// the Identity shape per bead unblock-tv8.30: it has zero
+// encore.dev/* imports of any kind, which is what static analyzers
+// and pure-Go test runners rely on. The two spellings alias to the
+// same Go type — see auth.go's `type Identity = types.Identity`.
 func fakeIdentity(orgID string) types.Identity {
 	return types.Identity{
 		UserID:    "usr_test",

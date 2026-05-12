@@ -3,10 +3,11 @@ package org
 import "encore.dev/storage/sqldb"
 
 // db is the consumer-side handle for the canonical `unblock` Postgres
-// database. The auth service is the sole migration-owner per SPEC §3.1
-// (apps/api/auth/db.go calls sqldb.NewDatabase) — every other service,
-// including org, obtains its handle via sqldb.Named and never declares
-// migration directories.
+// database. The dedicated apps/api/db/ service is the sole
+// migration-owner per SPEC §3.1 (apps/api/db/db.go calls
+// sqldb.NewDatabase exactly once across the workspace) — every domain
+// service, including org, obtains its handle via sqldb.Named and never
+// declares migration directories.
 //
 // The handle is created at package init and used by:
 //   - org.go RPC bodies (CreateOrganization, CreateProject, AddMember,

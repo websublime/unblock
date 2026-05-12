@@ -4,10 +4,17 @@
 //
 //   - Pure-helper unit tests for input validation, role rank, and the
 //     role-action matrix. These would compile under plain `go test`
-//     except that this package transitively imports `encore.app/auth`
-//     whose init runs `sqldb.NewDatabase("unblock", ...)` and panics
-//     outside the encore CLI's cluster bring-up. So in practice every
-//     test in this file is run via `encore test ./org/...`.
+//     except that this package declares
+//     `var db = sqldb.Named("unblock")` at package scope (db.go) and
+//     `sqldb.Named` panics outside the encore CLI exactly like
+//     `sqldb.NewDatabase` — both call doPanic at package-load time
+//     in the v1.52.1 runtime. So in practice every test in this file
+//     is run via `encore test ./org/...`. (Bead unblock-bne moved
+//     the canonical `sqldb.NewDatabase` call out of the auth package
+//     into apps/api/db/, which fixes the auth-tree's plain-go-test
+//     load path; the equivalent fix for org would require a
+//     dbhandle-style late-bind shape on org/db.go and is out of
+//     scope for unblock-bne.)
 //
 //   - Integration tests for the six private RPCs against the real
 //     Encore-managed Postgres cluster. Each test resets the relevant
