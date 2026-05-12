@@ -13,8 +13,8 @@
 // (see authorizeAgent below).
 //
 // Database wiring: this package consumes via sqldb.Named("unblock")
-// (see db.go). The auth service remains the sole migration-owner per
-// SPEC §3.1.
+// (see db.go). The dedicated apps/api/db/ service is the sole
+// migration-owner per SPEC §3.1.
 package org
 
 import (

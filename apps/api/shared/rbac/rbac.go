@@ -16,13 +16,19 @@
 // is documented with the literal `auth.Identity`. The implementation
 // here imports the type from its leaf-package source at
 // `encore.app/auth/types`, because importing `encore.app/auth`
-// directly would drag in the auth service's package-level
+// directly used to drag in the auth service's package-level
 // sqldb.NewDatabase("unblock", ...) declaration and panic any plain
 // `go test` run with "encore apps must be run using the encore
-// command". The two spellings are interchangeable: the parent `auth`
-// package declares `type Identity = types.Identity`, so a value
-// constructed in a service as `auth.Identity{...}` is the same Go
-// type as the `types.Identity` parameter accepted here.
+// command". After bead unblock-bne that NewDatabase call lives in the
+// dedicated apps/api/db/ service rather than auth, but the import-
+// the-leaf-types-package convention stays: it keeps the rbac builder
+// dependency-graph clean (no domain-service imports at all) and is
+// the contract the static analyzer at apps/api/shared/lint/ relies on
+// for its package-scope checks. The two spellings remain
+// interchangeable: the parent `auth` package declares
+// `type Identity = types.Identity`, so a value constructed in a
+// service as `auth.Identity{...}` is the same Go type as the
+// `types.Identity` parameter accepted here.
 //
 // Usage:
 //
@@ -136,9 +142,10 @@ import (
 // import of auth's db var. Encore's parser does not allow that — see
 // the build-time error path noted above. Bind preserves the spirit of
 // the guidance: the handle is owned by the calling service (each
-// service still calls sqldb.Named in its own package) and rbac itself
-// imports nothing service-specific. SPEC §10.1's locked surface
-// (For/Where/Run) is unchanged.
+// service calls sqldb.Named in its own package, with the dedicated
+// apps/api/db/ service holding the canonical NewDatabase declaration
+// per SPEC §3.1) and rbac itself imports nothing service-specific.
+// SPEC §10.1's locked surface (For/Where/Run) is unchanged.
 var db *sqldb.Database
 
 // Bind installs the unblock-database handle that Run will dispatch

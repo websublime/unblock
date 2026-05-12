@@ -1,13 +1,18 @@
-// Package auth owns the auth schema and is the sole migration-owner service
-// for the unblock database. The canonical migration directory at
-// apps/api/auth/migrations/ holds the migration set for every schema
-// (auth, org, workitems, deps, providers, mcp, boards, memory). Other
-// services consume the database via sqldb.Named("unblock"); see SPEC §3.1.
+// Package auth owns ONLY the auth schema and is one of eight equal
+// consumer services on the canonical `unblock` Postgres database.
+// Migrations for all eight schemas (auth, org, workitems, deps,
+// providers, mcp, boards, memory) live in apps/api/db/migrations/ and
+// are owned by the dedicated apps/api/db/ service per SPEC §3.1; this
+// package — like every other domain service — consumes the database
+// via sqldb.Named("unblock") (see db.go).
 //
 // In P01 task B-1 (bead unblock-tv8.7) this package lands the four
 // private RPC bodies (Validate, ExchangeOAuthCode, IssueAPIKey,
 // RevokeAPIKey) and the //encore:authhandler. Wiring of the shared
-// rbac builder happens in init() — see initbind.go.
+// rbac builder happens centrally in the dedicated apps/api/db/
+// service's init (which calls auth.BindDB to populate this package's
+// db var and rbac.Bind to install the shared rbac handle); the auth
+// package itself owns no init() function.
 //
 // SPEC anchors: §4.1 (locked signatures), §4.3.2 (Bearer hot path),
 // §4.3.3 (auth handler), §3.5 (secrets manifest), §11.1 P01 contract.
