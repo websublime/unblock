@@ -24,6 +24,46 @@
 // FORBIDDEN here (those columns are maintained by the cascade
 // subscriber per SPEC §5.7.1 — encore.app/deps owns the write path,
 // enforced by apps/api/shared/lint/no_direct_is_ready_write.go).
+//
+// # Authorisation model — layered gate (read-side vs write-side)
+//
+// The workitems service uses a deliberately asymmetric authorisation
+// pattern that callers MUST respect:
+//
+//   - Read-side RPCs (Get, GetTrail, List, Search) self-gate via
+//     rbac.For[T](identity, table). The rbac builder injects the
+//     tenant predicate (org_id = $caller_org) directly into every
+//     emitted SQL clause, so a misbehaving or compromised caller can
+//     never read across orgs through these RPCs — the tenant gate is
+//     enforced by the SQL itself, not by a callable check.
+//
+//   - Write-side RPCs (Create, Update, AppendComment, SetStateColumns,
+//     Close, Claim, CreateMilestone, UpdateMilestone, AssignItem) do
+//     NOT call org.Authorize internally. They trust that the MCP tool
+//     handler invoked org.Authorize against the caller's session +
+//     the request's org_id BEFORE dispatching to the private RPC. The
+//     MCP layer is the single authoritative gate for the write path
+//     because it owns the session→identity resolution and the role
+//     resolution that org.Authorize requires. Layering Authorize
+//     inside every private write RPC would duplicate that
+//     resolution, double-bill the auth schema, and split the audit
+//     trail between two layers.
+//
+// This is consistent with the org service's own private writes
+// (org.CreateProject etc.) and matches SPEC §10.1's gate model: read
+// gates live in the SQL, write gates live at the MCP boundary. If a
+// new caller outside the MCP layer (e.g. another internal service)
+// needs to invoke a write RPC here, the caller is responsible for
+// calling org.Authorize first; the RPC's pre-validation (field
+// validation, enum allow-listing, FK checks) is NOT a substitute for
+// the org gate.
+//
+// Belt-and-suspenders defence-in-depth (a second org.Authorize call
+// inside each write RPC) was considered and rejected during round-2
+// review of bead unblock-tv8.10 — the duplicate gate would obscure
+// the layered model without adding a meaningful security property,
+// since the only callers in P01 are the MCP layer and the test
+// harness (which uses the same rbac.For gate on the read side).
 package workitems
 
 import (
@@ -1132,6 +1172,11 @@ func Claim(ctx context.Context, req *ClaimRequest) (*Item, error) {
 
 	// I-3: when claimed item has qa_state='failed', reset
 	// review_state and qa_state to pending in the same transaction.
+	// Scope is exactly review_state + qa_state per SPEC §6.2 line 1505 —
+	// impl_state is deliberately NOT touched here (a re-claimed item
+	// still carries its prior impl_state and the worker drives any
+	// subsequent impl_state mutation through SetStateColumns, which
+	// enforces I-4 and I-5 against the rework path).
 	resetRework := qaState == qaFailed
 
 	if resetRework {
@@ -1143,7 +1188,6 @@ func Claim(ctx context.Context, req *ClaimRequest) (*Item, error) {
 			        status           = 'InProgress',
 			        review_state     = 'pending',
 			        qa_state         = 'pending',
-			        impl_state       = 'pending',
 			        updated_at       = now()
 			  WHERE id = $1`,
 			req.ItemID, req.ClaimerUserID, req.ClaimerAgent,
@@ -1243,35 +1287,52 @@ func List(ctx context.Context, req *ListRequest) (*ListResponse, error) {
 	}
 
 	// Labels filter is applied post-fetch because labels live in a
-	// junction table; using a SQL EXISTS subquery with array containment
-	// works for small label sets but adds an extra projection. P01 keeps
-	// the simpler path: filter in Go.
-	hasLabel := func(itemID string, want []string) (bool, error) {
-		if len(want) == 0 {
-			return true, nil
+	// junction table. To avoid an N+1 round-trip (one SELECT per row
+	// for the limit+1 window), we batch-load every item's labels for
+	// the entire window in a single query keyed by item_id = ANY($1),
+	// then filter in Go.
+	itemLabels := map[string]map[string]struct{}{}
+	if len(req.Labels) > 0 && len(rows) > 0 {
+		ids := make([]string, 0, len(rows))
+		for _, r := range rows {
+			ids = append(ids, r.ID)
 		}
-		rows, err := db.Query(ctx,
-			`SELECT label_id FROM workitems.item_labels WHERE item_id = $1`,
-			itemID,
+		lrows, err := db.Query(ctx,
+			`SELECT item_id, label_id
+			   FROM workitems.item_labels
+			  WHERE item_id = ANY($1)`,
+			ids,
 		)
 		if err != nil {
-			return false, err
+			rlog.Error("workitems: list label batch fetch failed", "err", err)
+			return nil, &errs.Error{Code: errs.Internal, Message: "list label check failed"}
 		}
-		defer rows.Close()
-		got := make(map[string]struct{})
-		for rows.Next() {
-			var lid string
-			if err := rows.Scan(&lid); err != nil {
-				return false, err
+		for lrows.Next() {
+			var itemID, labelID string
+			if err := lrows.Scan(&itemID, &labelID); err != nil {
+				lrows.Close()
+				return nil, &errs.Error{Code: errs.Internal, Message: "list label scan failed"}
 			}
-			got[lid] = struct{}{}
+			set, ok := itemLabels[itemID]
+			if !ok {
+				set = make(map[string]struct{})
+				itemLabels[itemID] = set
+			}
+			set[labelID] = struct{}{}
 		}
+		lrows.Close()
+	}
+	hasAllLabels := func(itemID string, want []string) bool {
+		if len(want) == 0 {
+			return true
+		}
+		got := itemLabels[itemID]
 		for _, w := range want {
 			if _, ok := got[w]; !ok {
-				return false, nil
+				return false
 			}
 		}
-		return true, nil
+		return true
 	}
 
 	var items []Item
@@ -1283,14 +1344,8 @@ func List(ctx context.Context, req *ListRequest) (*ListResponse, error) {
 			nextCursor = r.ID
 			break
 		}
-		if len(req.Labels) > 0 {
-			ok, err := hasLabel(r.ID, req.Labels)
-			if err != nil {
-				return nil, &errs.Error{Code: errs.Internal, Message: "list label check failed"}
-			}
-			if !ok {
-				continue
-			}
+		if len(req.Labels) > 0 && !hasAllLabels(r.ID, req.Labels) {
+			continue
 		}
 		item, err := itemFromRow(ctx, r)
 		if err != nil {
