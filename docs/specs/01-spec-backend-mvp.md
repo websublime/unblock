@@ -1,10 +1,11 @@
 # SPEC: P01 — Backend MVP Implementation Contract
 
-**Status:** APPROVED (round-4 auth-drift fixes applied 2026-05-11)
+**Status:** APPROVED (round-5 tracing-contract clarification applied 2026-05-12)
 **Changelog:**
 - 2026-05-08 — DRIFT-1 (naming): clarified §3.5 that the four logical secret names are spec-level identifiers; added logical-name ↔ Go-field mapping table for the Encore Go secrets manifest.
 - 2026-05-08 — DRIFT-2 (format): corrected the local-secrets file path/format from `.encore/local-secrets.toml` (TOML) to `apps/api/.secrets.local.cue` (CUE) per Encore official docs (https://encore.dev/docs/go/primitives/secrets); updated syntax examples and gitignore guidance.
 - 2026-05-11 — round-4 (auth drift fixes from Sherlock's investigation on bead unblock-tv8.7): §4.3.2 step 2 aligned with locked key-format note (DRIFT-A); §4.3.3 AuthHandler signature corrected to Encore structured-params form for header dispatch (DRIFT-B); §12 task table cell for B-1 corrected from §6.4 to §4.3.3 (DRIFT-C); session-path P01 contract pinned (returns errs.Unimplemented; multi-org disambiguation deferred to BFF phase).
+- 2026-05-12 — round-5 (tracing contract from Sherlock's investigation on bead `unblock-tv8.5`): §10.2 picks Option B — ULID minted at MCP entry, propagated via `context.Context` only; removed the spurious `X-Unblock-Trace-Id` outgoing-RPC header (Encore's generated client carries `ctx` across private RPCs for free, and Pub/Sub embeds the id in the payload). §7, §8.1, §8.2, §4.5, and §6.3.1 reworded to reference Option B. Encore's runtime `req.Trace.TraceID` is observability-only and not persisted. DDL frozen — no schema change.
 
 **Author:** Ada (architect)
 **Date:** 2026-05-08
@@ -1023,7 +1024,7 @@ type CascadeEventRow struct {
     AffectedItemIDs     []string
     CascadedCount       int
     TriggeredAt         time.Time
-    TraceID             string
+    TraceID             string // ULID minted by the mcp raw endpoint that triggered the cascade; mirrors deps.cascade_events.trace_id (§10.2 Option B).
 }
 ```
 
@@ -1607,7 +1608,7 @@ type CascadeRequested struct {
     ProjectID          string
     TriggeredByItemID  string
     Reason             string // "close" | "edge_added" | "edge_removed" | "state_change"
-    TraceID            string
+    TraceID            string // ULID minted by the mcp raw endpoint, copied from ctx into the payload at publish time (Encore Pub/Sub does not propagate context across the topic boundary). Persisted on deps.cascade_events.trace_id by the subscriber. See §10.2 Option B.
     EmittedAt          time.Time
 }
 
@@ -1797,10 +1798,15 @@ All MCP tool errors return a JSON-RPC 2.0 error object:
 | `CONFLICT` | Optimistic concurrency or unique constraint violation | `{ "constraint": "<name>" }` |
 | `INTERNAL` | Unhandled server error (logged with full trace_id) | `{}` |
 
-`trace_id` is the same ULID stored in `mcp.tool_calls.trace_id` and
-propagated through Encore's distributed tracing into Pub/Sub event
-payloads (`CascadeRequested.TraceID`). NFR-12 logging emits the same
-trace_id on every JSON-Lines log line for correlation.
+`trace_id` is the ULID minted by the `mcp` raw endpoint at request
+entry (§10.2 Option B). It is stored verbatim in
+`mcp.tool_calls.trace_id`, embedded in the Pub/Sub payload
+`CascadeRequested.TraceID` (Encore Pub/Sub does not carry
+`context.Context` across the topic boundary — the publisher copies the
+id into the message explicitly), and re-emitted as the
+`trace_id` structured field on every JSON-Lines log line for
+correlation. Encore's runtime trace id is observability-only and is
+not surfaced here.
 
 ---
 
@@ -1822,7 +1828,11 @@ func recordToolCall(ctx context.Context, call ToolCall) {
 ```
 
 `result_kind` ∈ `{ok, rejected, error}`; `rejection_reason` populated on
-PRECONDITION_NOT_MET (canonically named for analysis).
+PRECONDITION_NOT_MET (canonically named for analysis). `trace_id` is the
+ULID minted by `MCPHandler` at request entry (§10.2 Option B), pulled
+from `ctx` by `recordToolCall`. The `mcp.tool_calls.trace_id` DDL column
+is `text` (frozen in `0070_mcp.up.sql`) and accepts the ULID string
+verbatim — no schema change required.
 
 ### 8.2 Logging (NFR-12)
 
@@ -1831,10 +1841,19 @@ JSON-RPC payloads only (per Manifesto / NFR-12). Mixing is a quality-gate
 failure.
 
 Required structured fields per log line:
-- `trace_id` — ULID from MCP request
+- `trace_id` — ULID minted by the `mcp` raw endpoint at request
+  entry and bound on `context.Context` via `rlog.With` (§10.2
+  Option B). This is the audit/business correlation id and is the
+  same value persisted on `mcp.tool_calls.trace_id`,
+  `deps.cascade_events.trace_id`, and emitted in the §7 error
+  envelope.
 - `org_id`, `project_id`, `user_id`, `agent_kind` — when known
 - `tool` — tool name on MCP-path logs
 - `service` — Encore service name
+
+Encore's runtime trace id (`req.Trace.TraceID`) is **not** emitted
+on application log lines; Encore Cloud's observability stack records
+it separately at the infrastructure layer.
 
 ### 8.3 `deps.cascade_events` (ships in `0050_deps.up.sql`)
 
@@ -2042,18 +2061,51 @@ can wire the gate without touching the suite.
 
 ### 10.2 Tracing (NFR-12)
 
-Every `//encore:api` handler receives a `context.Context` carrying
-Encore's distributed trace id. The `mcp` service's request entry generates
-a ULID for `trace_id`, propagates it via:
+**Decision (round-5, 2026-05-12 — closes contradiction blocking
+`unblock-tv8.5`): Option B — single ULID minted at MCP entry, propagated
+via `context.Context` only.**
 
-- Context value used by `rlog`
-- Header `X-Unblock-Trace-Id` on outgoing private RPCs
-- `mcp.tool_calls.trace_id` column
-- `deps.CascadeRequested.TraceID` field
-- `deps.cascade_events.trace_id` column
+Rationale: keeps a single id format across the public surface
+(matches the §7 error-envelope `trace_id: "<ULID>"` contract,
+`mcp.tool_calls.trace_id`, and `CascadeRequested.TraceID`), preserves
+ULID consistency with workitem identifiers, avoids leaking
+Encore-runtime-format strings into stored audit data, and requires
+zero custom inter-service header plumbing because Encore's generated
+client carries `context.Context` across private RPCs automatically.
+Encore's own `req.Trace.TraceID` (per `encore.CurrentRequest()`)
+remains available for runtime observability only and is **not**
+persisted.
 
-This makes a single MCP call traceable across services and through
-Pub/Sub.
+Contract:
+
+- The `mcp` raw endpoint (`MCPHandler`, §5.3) mints a ULID
+  `trace_id` at request entry, before dispatching any tool. This is
+  the canonical audit/business correlation id.
+- The id is attached to the request `context.Context` (`rlog.With`
+  binds it as the `trace_id` structured field on every log line for
+  the remainder of the request).
+- Cross-service propagation rides the standard Encore generated
+  client: handlers call e.g. `workitems.Claim(ctx, params)` and
+  the framework carries `ctx` (including the bound `trace_id`)
+  into the callee. **No `X-Unblock-Trace-Id` header is set or
+  required** — that mechanism is not part of the supported Encore
+  surface and is explicitly removed from this spec.
+- The id is written to `mcp.tool_calls.trace_id` at request end
+  (§8.1; column type is `text`, accepts the ULID string verbatim).
+- The id is copied into `CascadeRequested.TraceID` (§4.5 / §6.3.1)
+  at publish time so Pub/Sub subscribers can persist it on
+  `deps.cascade_events.trace_id` (§8.3) — Encore Pub/Sub does not
+  surface context across the topic boundary, so the publisher
+  explicitly embeds it in the payload (the same pattern used for
+  `EventID` per C1 closure).
+- The id is echoed in the JSON-RPC error envelope `data.trace_id`
+  (§7).
+
+Encore's runtime trace id (`req.Trace.TraceID`) is **not** stored in
+any persisted column or pushed onto the public surface; it is left
+to the Encore Cloud observability dashboard as the
+infrastructure-level correlation id and is independent of
+`trace_id` above.
 
 ### 10.3 Catalogue authoring (Plan §2.3 / Q4)
 

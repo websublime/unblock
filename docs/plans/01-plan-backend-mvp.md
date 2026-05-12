@@ -235,7 +235,7 @@ into bd.
 | A-2 | Bootstrap migration: `pgcrypto`, `pg_trgm`, eight schemas declared (per SPEC §9.4.0) | go-supervisor (Greta) |
 | A-3 | Migrations §9.4.1–§9.4.8 in canonical order | go-supervisor (Greta) |
 | A-4 | `pkg/rbac` typed query helper + per-service DB binding | go-supervisor (Greta) |
-| A-5 | Tracing + JSON-Lines logging scaffold (NFR-12) | go-supervisor (Greta) |
+| A-5 | Tracing + JSON-Lines logging scaffold (NFR-12) — ULID `trace_id` minted at MCP entry, propagated via `context.Context` per SPEC §10.2 Option B (no `X-Unblock-Trace-Id` header) | go-supervisor (Greta) |
 | A-6 | CI workflow + lint gates + NFR-1 latency harness scaffold + NFR-2 RBAC suite scaffold (per-language gates wired into `.github/workflows/`) | infra-supervisor (Olive) |
 
 ### 4.2 Track B — auth + org (depends on A-1, A-3, A-4)
