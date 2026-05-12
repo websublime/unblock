@@ -27,9 +27,11 @@
 //	func BindDB(d *sqldb.Database) { db = d }
 //
 // Then add the corresponding `<service>.BindDB(DB)` call to this
-// package's init() below. Future P01/P0n services (workitems, deps,
-// mcp, providers, boards, memory) that touch the database MUST
-// follow this pattern and MUST be registered here — no exceptions.
+// package's init() below. The workitems and deps services already
+// carry their skeleton db.go + BindDB hook ahead of DB-touching code
+// landing in B-1+ / C-1+ — they are pre-wired here. Future P01/P0n
+// services (mcp, providers, boards, memory) that touch the database
+// MUST follow this pattern and MUST be registered here — no exceptions.
 //
 // Why this package exists (bead unblock-bne).
 //
@@ -90,6 +92,15 @@
 //     fixes that and standardises every domain service on the same
 //     consumer pattern.
 //
+//   - workitems.BindDB(DB) and deps.BindDB(DB) populate the workitems
+//     and deps services' nil handles. In P01 A-1 their RPC bodies
+//     return errNotImplemented and do not yet read `db`; the
+//     pre-wiring lands now so beads B-1+ (workitems bodies, FTS,
+//     milestones, claim transaction) and C-1+ (cycle CTE, advisory
+//     locks, cascade Pub/Sub publisher) inherit a non-nil handle the
+//     instant they start touching the database. The skeleton db.go
+//     in each service mirrors auth/db.go and org/db.go verbatim.
+//
 //   - rbac.Bind(DB) installs the shared rbac builder's handle. The
 //     previous defense-in-depth pattern (each service called
 //     rbac.Bind from its own initbind.go) is gone: with apps/api/db/
@@ -103,16 +114,17 @@
 // Init-order analysis.
 //
 // Go guarantees imported packages' init runs before the importer's
-// init. db imports encore.app/auth, encore.app/org, and
-// encore.app/shared/rbac; auth.init, org.init, and rbac.init therefore
-// all complete before db.init. Encore loads infrastructure-resource
-// consumers (db.init) during process bootstrap, before any
-// //encore:api handler dispatches. The dbhandle.init precedent
-// (shipped to PROD under unblock-tv8.7 before bead unblock-bne)
-// proves the runtime contract; this package relocates the same init
-// from apps/api/auth/dbhandle/ to apps/api/db/ and (post-bne
-// pre-review) extends it to bind every domain service's handle from
-// a single central wiring point.
+// init. db imports encore.app/auth, encore.app/org,
+// encore.app/workitems, encore.app/deps, and encore.app/shared/rbac;
+// auth.init, org.init, workitems.init, deps.init, and rbac.init
+// therefore all complete before db.init. Encore loads
+// infrastructure-resource consumers (db.init) during process
+// bootstrap, before any //encore:api handler dispatches. The
+// dbhandle.init precedent (shipped to PROD under unblock-tv8.7
+// before bead unblock-bne) proves the runtime contract; this package
+// relocates the same init from apps/api/auth/dbhandle/ to
+// apps/api/db/ and (post-bne pre-review) extends it to bind every
+// domain service's handle from a single central wiring point.
 //
 // Constraints (DO NOT VIOLATE):
 //
@@ -150,22 +162,23 @@
 //     apps/api/db/migrations/, not at any historical location.
 //
 //   - This package MAY import every domain service whose handle it
-//     binds (encore.app/auth, encore.app/org today; future
-//     workitems / deps / mcp / providers / boards / memory when those
-//     services land DB-touching code) and encore.app/shared/rbac
-//     (for rbac.Bind). It MUST NOT import any other package. This
-//     keeps the migration owner tightly scoped to "owns NewDatabase
-//
-//   - migrations, binds every consumer's handle, period". A new
-//     service that needs the DB MUST add its own BindDB hook (see
-//     CONSUMER PATTERN above) and add the corresponding bind line
-//     to init() below — no shortcuts.
+//     binds (encore.app/auth, encore.app/org, encore.app/workitems,
+//     encore.app/deps today; future mcp / providers / boards / memory
+//     when those services land DB-touching code) and
+//     encore.app/shared/rbac (for rbac.Bind). It MUST NOT import any
+//     other package. This keeps the migration owner tightly scoped to
+//     "owns NewDatabase + migrations, binds every consumer's handle,
+//     period". A new service that needs the DB MUST add its own
+//     BindDB hook (see CONSUMER PATTERN above) and add the
+//     corresponding bind line to init() below — no shortcuts.
 package db
 
 import (
 	"encore.app/auth"
+	"encore.app/deps"
 	"encore.app/org"
 	"encore.app/shared/rbac"
+	"encore.app/workitems"
 	"encore.dev/storage/sqldb"
 )
 
@@ -196,11 +209,11 @@ func initService() (*Service, error) {
 // DB is the canonical *sqldb.Database for the `unblock` Postgres
 // database. Consumer services receive the handle exclusively via
 // the canonical BindDB late-bind hook (auth.BindDB(DB),
-// org.BindDB(DB), and future <service>.BindDB(DB) entries) plus the
-// rbac.Bind(DB) cross-cutting call, all invoked from this package's
-// init() below. DB is exported only so future tooling (linters,
-// audits) can spot-check that the same handle is registered
-// everywhere.
+// org.BindDB(DB), workitems.BindDB(DB), deps.BindDB(DB), and future
+// <service>.BindDB(DB) entries) plus the rbac.Bind(DB) cross-cutting
+// call, all invoked from this package's init() below. DB is exported
+// only so future tooling (linters, audits) can spot-check that the
+// same handle is registered everywhere.
 //
 // The package-level form is mandated by sqldb.NewDatabase's
 // doc-comment: "a call to NewDatabase can only be made when declaring
@@ -216,8 +229,9 @@ var DB = sqldb.NewDatabase("unblock", sqldb.DatabaseConfig{
 
 // init binds the unblock database handle into every consumer that
 // needs it. After bead unblock-bne's pre-review scope expansion this
-// is the SOLE binding authority for the auth.db, org.db, and rbac.db
-// handles — no domain service carries its own initbind.go.
+// is the SOLE binding authority for the auth.db, org.db,
+// workitems.db, deps.db, and rbac.db handles — no domain service
+// carries its own initbind.go.
 //
 // Per-service binds (one BindDB call per domain service that touches
 // the database; add new entries here when new services land
@@ -225,6 +239,8 @@ var DB = sqldb.NewDatabase("unblock", sqldb.DatabaseConfig{
 //
 //   - auth.BindDB(DB)
 //   - org.BindDB(DB)
+//   - workitems.BindDB(DB)  — pre-wired ahead of B-1+ bodies
+//   - deps.BindDB(DB)       — pre-wired ahead of C-1+ bodies
 //
 // Plus the cross-cutting shared-rbac bind:
 //
@@ -232,21 +248,24 @@ var DB = sqldb.NewDatabase("unblock", sqldb.DatabaseConfig{
 //
 // Encore's process-bootstrap import order guarantees this init runs
 // before any //encore:api handler dispatches; Go's import-order
-// guarantee additionally guarantees auth.init, org.init, and
-// rbac.init all complete before db.init fires, so each BindDB sets a
-// package-level pointer that is then read by every subsequent RPC
-// invocation without further synchronisation.
+// guarantee additionally guarantees auth.init, org.init,
+// workitems.init, deps.init, and rbac.init all complete before
+// db.init fires, so each BindDB sets a package-level pointer that is
+// then read by every subsequent RPC invocation without further
+// synchronisation.
 //
-// Concurrency: auth.BindDB, org.BindDB, and rbac.Bind are not
-// goroutine-safe. The single-init contract is shared across all
-// three setters; bead unblock-tv8.34 tracks the parallel hardening
-// discussion. Until that lands, the runtime guarantee is "Encore
-// process init runs serially and completes before the first
-// handler".
+// Concurrency: auth.BindDB, org.BindDB, workitems.BindDB,
+// deps.BindDB, and rbac.Bind are not goroutine-safe. The single-init
+// contract is shared across all five setters; bead unblock-tv8.34
+// tracks the parallel hardening discussion. Until that lands, the
+// runtime guarantee is "Encore process init runs serially and
+// completes before the first handler".
 //
 //nolint:gochecknoinits
 func init() {
 	auth.BindDB(DB)
 	org.BindDB(DB)
+	workitems.BindDB(DB)
+	deps.BindDB(DB)
 	rbac.Bind(DB)
 }

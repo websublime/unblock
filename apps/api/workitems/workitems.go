@@ -5,12 +5,12 @@
 // In P01 task A-1 this package only declares the //encore:api skeletons so
 // Encore recognises workitems as a service. Bodies return errNotImplemented;
 // real wiring lands in B-1, B-2, and following: bodies, FTS, milestones,
-// claim transaction, state-machine invariants. The DB handle MUST follow
-// the canonical BindDB late-bind pattern (a nil *sqldb.Database pointer +
-// exported BindDB hook in db.go, registered in apps/api/db/db.go's init —
-// see apps/api/db/db.go's CONSUMER PATTERN). Direct
-// `sqldb.Named("unblock")` at package init is forbidden (panics outside
-// the encore CLI in encore.dev v1.52.1).
+// claim transaction, state-machine invariants. The DB handle follows the
+// canonical BindDB late-bind pattern (a nil *sqldb.Database pointer +
+// exported BindDB hook in apps/api/workitems/db.go, registered in
+// apps/api/db/db.go's init — see apps/api/db/db.go's CONSUMER PATTERN).
+// Direct `sqldb.Named("unblock")` at package init is forbidden (panics
+// outside the encore CLI in encore.dev v1.52.1).
 package workitems
 
 import (
