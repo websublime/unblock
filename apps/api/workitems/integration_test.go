@@ -430,9 +430,16 @@ func TestClaimResetsReworkOnQAFailed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
-	if got.ReviewState != "pending" || got.QAState != "pending" || got.ImplState != "pending" {
-		t.Fatalf("I-3 reset: impl=%q review=%q qa=%q (want pending/pending/pending)",
-			got.ImplState, got.ReviewState, got.QAState)
+	// SPEC §6.2 I-3 line 1505: Claim resets review_state + qa_state to
+	// pending. impl_state is deliberately preserved (the worker drives
+	// any impl_state mutation through SetStateColumns, which enforces
+	// I-4/I-5 against the rework path).
+	if got.ReviewState != "pending" || got.QAState != "pending" {
+		t.Fatalf("I-3 reset: review=%q qa=%q (want pending/pending)",
+			got.ReviewState, got.QAState)
+	}
+	if got.ImplState != "done" {
+		t.Fatalf("I-3 must NOT touch impl_state: got impl=%q (want done — preserved across the re-claim)", got.ImplState)
 	}
 }
 
@@ -878,6 +885,165 @@ func TestMilestoneTreeAssemblesNestedStructure(t *testing.T) {
 	if c1.Children[0].Milestone.ID != grandchild.ID {
 		t.Fatalf("grandchild id = %q, want %q", c1.Children[0].Milestone.ID, grandchild.ID)
 	}
+}
+
+// TestClaimVsSetStateColumnsRaceAR18 covers SPEC §6.2 AR-18 (round-2).
+//
+// AR-18 asserts that concurrent Claim and SetStateColumns(qa_state=failed)
+// transactions on the same item serialise correctly via SELECT FOR UPDATE
+// (no torn read of the state-column quartet), and that whenever a
+// subsequent Claim observes qa_state='failed' it MUST reset
+// review_state + qa_state to 'pending' atomically (I-3, SPEC §6.2 line
+// 1505 — scoped to review+qa; impl_state is preserved).
+//
+// Architectural constraint that shapes this test:
+// SetStateColumns enforces the structural rule
+// `impl_done_requires_claim` (workitems.go — newImpl='done' AND
+// claimed_by_id IS NULL is rejected), and Claim's SELECT FOR UPDATE
+// only acquires rows where status='Ready' AND claimed_by_id IS NULL.
+// The two preconditions are mutually exclusive on the same row at any
+// instant. The race we model is therefore the AR-18 sequence:
+//
+//	(phase 1, racing) Item is claimed and InProgress with
+//	  impl=done/review=approved/qa=passed.  N goroutine pairs race:
+//	    G1: SetStateColumns(qa=failed) — succeeds (flips qa to failed)
+//	    G2: Claim — fails with ALREADY_CLAIMED (loser path)
+//	  Both ops take FOR UPDATE on the same row, so the contended
+//	  lock serialises them.  Verify no error other than ALREADY_CLAIMED
+//	  on the Claim and no torn read of the four state columns.
+//
+//	(phase 2, sequential) SQL-level rework reset:
+//	  status='Ready', claimed_by_id=NULL, claimed_at=NULL.  State
+//	  columns are preserved: impl=done, review=approved, qa=failed.
+//
+//	(phase 3, sequential) Claim — observes qa='failed' and applies
+//	  I-3 atomically, resetting review_state + qa_state to 'pending'.
+//	  impl_state MUST remain 'done' (I-3 scope is review+qa only,
+//	  matching SPEC §6.2 line 1505 verbatim).
+//
+// Iterating phases 1+2+3 N times stresses both the SELECT FOR UPDATE
+// serialisation (phase 1) and the I-3 atomic reset (phase 3) under
+// scheduler pressure. A flaky failure mode (torn read of the four
+// state columns) would manifest as an impossible combination after
+// phase 1 — e.g. qa='failed' with impl != 'done' or review != 'approved'.
+func TestClaimVsSetStateColumnsRaceAR18(t *testing.T) {
+	ctx := context.Background()
+	fx := seedFixture(t, ctx)
+
+	const iterations = 50
+	var serialisationViolations, i3Violations int
+
+	for it := 0; it < iterations; it++ {
+		// Fresh item per iteration so we don't depend on cross-iteration
+		// state — only on the concurrent ordering within one iteration.
+		itemID := createReadyItem(t, ctx, fx)
+		// Seed phase-1 posture directly via SQL: InProgress, claimed,
+		// impl=done, review=approved, qa=passed.  setItemState sets
+		// status='InProgress' when claimedBy is non-empty.
+		setItemState(t, ctx, itemID, "done", "approved", "passed", fx.UserID)
+
+		// ----- Phase 1: race SetStateColumns(qa=failed) vs Claim. -----
+		var (
+			wg          sync.WaitGroup
+			claimErr    error
+			setStateErr error
+		)
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_, err := workitems.Claim(ctx, &workitems.ClaimRequest{
+				ItemID:        itemID,
+				ClaimerUserID: fx.UserID,
+				ClaimerAgent:  "claude-code",
+			})
+			claimErr = err
+		}()
+		go func() {
+			defer wg.Done()
+			newQA := "failed"
+			_, err := workitems.SetStateColumns(ctx, &workitems.SetStateRequest{
+				ItemID:  itemID,
+				QAState: &newQA,
+			})
+			setStateErr = err
+		}()
+		wg.Wait()
+
+		// SetStateColumns MUST succeed: the row is claimed, impl=done,
+		// review=approved — every invariant is satisfied.  A failure
+		// here means SELECT FOR UPDATE serialisation interacted badly
+		// with the structural / state checks.
+		if setStateErr != nil {
+			serialisationViolations++
+			t.Fatalf("iter %d phase 1: SetStateColumns(qa=failed) failed: %v", it, setStateErr)
+		}
+		// Claim MUST lose with ALREADY_CLAIMED: the row is already
+		// claimed, so the FOR UPDATE on `status='Ready' AND
+		// claimed_by_id IS NULL` returns zero rows.  Any other error
+		// code (Internal, FailedPrecondition, etc.) indicates a race
+		// pathology in Claim's transaction.
+		if claimErr == nil {
+			serialisationViolations++
+			t.Fatalf("iter %d phase 1: Claim succeeded against a claimed item", it)
+		}
+		if errs.Code(claimErr) != errs.AlreadyExists {
+			serialisationViolations++
+			t.Fatalf("iter %d phase 1: Claim returned %v (code=%v), want AlreadyExists",
+				it, claimErr, errs.Code(claimErr))
+		}
+
+		// Verify no torn read: the committed row must have
+		// impl=done (unchanged), review=approved (unchanged),
+		// qa=failed (flipped by SetStateColumns).
+		impl, review, qa, _ := readItemStateColumns(t, ctx, itemID)
+		if impl != "done" || review != "approved" || qa != "failed" {
+			serialisationViolations++
+			t.Fatalf("iter %d phase 1 torn read: impl=%q review=%q qa=%q (want done/approved/failed)",
+				it, impl, review, qa)
+		}
+
+		// ----- Phase 2: SQL-level rework reset (mirrors the manual
+		// reset documented at TestClaimResetsReworkOnQAFailed).  This
+		// is what an external operator / future Tool would do between
+		// rework cycles. -----
+		if _, err := encoredb.DB.Exec(ctx,
+			`UPDATE workitems.items
+			    SET status        = 'Ready',
+			        claimed_by_id = NULL,
+			        claimed_at    = NULL,
+			        updated_at    = now()
+			  WHERE id = $1`,
+			itemID,
+		); err != nil {
+			t.Fatalf("iter %d phase 2 reset: %v", it, err)
+		}
+
+		// ----- Phase 3: re-Claim observes qa='failed' and applies I-3. -----
+		got, err := workitems.Claim(ctx, &workitems.ClaimRequest{
+			ItemID:        itemID,
+			ClaimerUserID: fx.UserID,
+			ClaimerAgent:  "claude-code",
+		})
+		if err != nil {
+			t.Fatalf("iter %d phase 3 re-Claim: %v", it, err)
+		}
+		// I-3: review_state + qa_state both reset to 'pending';
+		// impl_state preserved (scope is review+qa only per SPEC §6.2
+		// line 1505).
+		if got.ReviewState != "pending" || got.QAState != "pending" {
+			i3Violations++
+			t.Fatalf("iter %d phase 3 I-3 reset: review=%q qa=%q (want pending/pending)",
+				it, got.ReviewState, got.QAState)
+		}
+		if got.ImplState != "done" {
+			i3Violations++
+			t.Fatalf("iter %d phase 3 I-3 must NOT touch impl_state: got impl=%q (want done)",
+				it, got.ImplState)
+		}
+	}
+
+	t.Logf("AR-18 race coverage: %d iterations, serialisation violations=%d, I-3 violations=%d",
+		iterations, serialisationViolations, i3Violations)
 }
 
 func TestReadItemStateColumnsAfterSetState(t *testing.T) {
