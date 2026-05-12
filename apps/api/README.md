@@ -27,10 +27,15 @@ encore app create unblock --runtime=go
 Plus a dedicated infrastructure service:
 
 - `db` — schema-only migration-owner service (no API surface). Declares
-  the canonical `sqldb.NewDatabase("unblock", ...)` and holds the
-  migration set for every schema. Every domain service consumes via
-  `sqldb.Named("unblock")` and is an equal database consumer; no
-  domain service owns DDL for schemas it does not consume.
+  the canonical `sqldb.NewDatabase("unblock", ...)` exactly once across
+  the workspace, holds the migration set for every schema, and is the
+  SOLE binding authority for every consumer's database handle. Every
+  domain service consumes via the canonical BindDB late-bind pattern
+  (a nil `*sqldb.Database` pointer + exported `BindDB` hook in the
+  service's `db.go`, populated from `apps/api/db/db.go`'s `init` — see
+  SPEC §3.1) and is an equal database consumer; no domain service owns
+  DDL for schemas it does not consume, and no domain service declares
+  `sqldb.Named("unblock")` at package init.
 
 Single Postgres database with 8 schemas (one per domain service), cross-schema FKs.
 

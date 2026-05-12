@@ -55,11 +55,12 @@
 //     outside this package compiles (Go zero values are always available)
 //     but Run on such a value returns a structured error. See the
 //     "compile-time" property below for the precise contract.
-//   - Run dispatches against `sqldb.Named("unblock")`, never via
-//     cross-package imports of another service's package-level db var.
-//     This preserves Encore's per-service DB binding contract (SPEC §3.1)
-//     and means a service that does not declare access to the unblock
-//     database fails at `encore check` time, not at runtime.
+//   - Run dispatches against the Bind-installed unblock handle (sourced
+//     from apps/api/db/), never via cross-package imports of another
+//     service's package-level db var. This preserves Encore's per-service
+//     DB binding contract (SPEC §3.1) and means a service that does not
+//     declare access to the unblock database fails at `encore check`
+//     time, not at runtime.
 //
 // Injection-safety invariant (SPEC §10.1, unblock-tv8.33, unblock-tv8.35):
 //
@@ -105,9 +106,11 @@
 //     that has not declared `unblock` as a dependency from compiling. This
 //     prevents cross-schema reads from services that do not own the data.
 //   - Runtime: the typed builder injects the scope filter on every Run
-//     against `sqldb.Named("unblock")`. The scope filter is never empty
-//     for a builder produced by For; a builder produced by a naked struct
-//     literal has an empty scope and Run returns ErrMissingScope.
+//     against the Bind-installed unblock handle (sourced from
+//     apps/api/db/ via rbac.Bind at process bootstrap). The scope filter
+//     is never empty for a builder produced by For; a builder produced
+//     by a naked struct literal has an empty scope and Run returns
+//     ErrMissingScope.
 //
 // rbac.For is the only *exported constructor* for *ScopedQuery[T]; the
 // type's fields are unexported, so any caller outside this package

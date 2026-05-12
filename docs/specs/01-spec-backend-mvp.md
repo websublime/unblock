@@ -561,10 +561,12 @@ type AuthData struct {
 ### 4.4 `workitems` service
 
 Owns: schema `workitems` only. Consumes the unblock database via the
-canonical BindDB late-bind pattern (§3.1) when DB-touching code lands
-(P01 B-1+): a nil `*sqldb.Database` pointer + exported `BindDB` hook
-in `apps/api/workitems/db.go`, registered in `apps/api/db/db.go`'s
-`init`. No per-service `initbind.go`.
+canonical BindDB late-bind pattern (§3.1) in `apps/api/workitems/db.go`:
+a nil `*sqldb.Database` pointer + exported `BindDB` hook, registered
+in `apps/api/db/db.go`'s `init`. The skeleton hook is pre-wired in
+P01 A-1; RPC bodies start reading `db` in beads B-1+ when DB-touching
+code lands (bodies, FTS, milestones, claim transaction, state-machine
+invariants). No per-service `initbind.go`.
 
 Private RPCs (called by MCP tool handlers; never directly by clients):
 
@@ -927,9 +929,11 @@ would exceed 4 levels.
 ### 4.5 `deps` service
 
 Owns: schema `deps` only. Consumes the unblock database via the
-canonical BindDB late-bind pattern (§3.1) when DB-touching code lands
-(P01 C-1+): a nil `*sqldb.Database` pointer + exported `BindDB` hook
-in `apps/api/deps/db.go`, registered in `apps/api/db/db.go`'s `init`.
+canonical BindDB late-bind pattern (§3.1) in `apps/api/deps/db.go`:
+a nil `*sqldb.Database` pointer + exported `BindDB` hook, registered
+in `apps/api/db/db.go`'s `init`. The skeleton hook is pre-wired in
+P01 A-1; RPC bodies start reading `db` in beads C-1+ when DB-touching
+code lands (cycle CTE, advisory locks, cascade Pub/Sub publisher).
 No per-service `initbind.go`.
 
 Private RPCs:
