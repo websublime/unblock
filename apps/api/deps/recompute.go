@@ -67,3 +67,74 @@ func recomputeReady(ctx context.Context, tx *sqldb.Tx, itemID string) (bool, err
 	}
 	return newReady, nil
 }
+
+// RecomputeReadyForBlocksDownstream is the exported Regime A helper for
+// the workitems.Close (Tool 6) call site. It recomputes is_ready for
+// every direct 'blocks' downstream neighbour of fromItemID inside the
+// supplied transaction and returns the subset of those neighbours that
+// flipped to is_ready=true as a result.
+//
+// SPEC §6.3.0 line 1691-1692 mandates workitems.Close inline-recompute
+// is_ready for the closed item's direct blocks neighbours. The lint
+// allow-list at apps/api/shared/lint/no_direct_is_ready_write.go gates
+// is_ready UPDATEs to encore.app/deps — so workitems.Close cannot inline
+// the UPDATE itself and must call this exported helper instead. The
+// helper accepts a *sqldb.Tx so workitems.Close can run the recompute
+// in the SAME transaction as the status='Done' write (Regime A
+// invariant: the writer's transaction holds the readiness flip).
+//
+// Direction: forward along outgoing 'blocks' edges. A row
+// `(from_item=fromItemID, to_item=X, kind='blocks')` in deps.dependencies
+// means "fromItemID blocks X". When fromItemID flips to status='Done',
+// X may now satisfy the NOT EXISTS closure (§6.5) and become ready —
+// hence we recompute X. We do NOT walk multi-hop here; that is Regime B
+// (pipeline_stage only) and runs in the cascade subscriber.
+//
+// Returns the list of neighbour ids whose is_ready value was true AFTER
+// the recompute (i.e. items that are now ready). An empty list is a
+// valid result — the closed item may have had no 'blocks' downstream,
+// or none of the downstream items became ready (other blockers remain).
+// The caller logs the result via rlog and never fails on emptiness.
+//
+// Idempotency: the underlying recomputeReady UPDATE is value-equality
+// idempotent. Calling this helper twice in the same transaction for
+// the same fromItemID returns the same list (no double-flip).
+func RecomputeReadyForBlocksDownstream(ctx context.Context, tx *sqldb.Tx, fromItemID string) ([]string, error) {
+	if fromItemID == "" {
+		return nil, fmt.Errorf("deps: RecomputeReadyForBlocksDownstream: empty fromItemID")
+	}
+	rows, err := tx.Query(ctx,
+		`SELECT to_item FROM deps.dependencies
+		  WHERE from_item = $1 AND kind = 'blocks'`,
+		fromItemID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("deps: RecomputeReadyForBlocksDownstream select: %w", err)
+	}
+	neighbours := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("deps: RecomputeReadyForBlocksDownstream scan: %w", err)
+		}
+		neighbours = append(neighbours, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("deps: RecomputeReadyForBlocksDownstream iter: %w", err)
+	}
+	rows.Close()
+
+	flipped := make([]string, 0, len(neighbours))
+	for _, id := range neighbours {
+		ready, err := recomputeReady(ctx, tx, id)
+		if err != nil {
+			return nil, fmt.Errorf("deps: RecomputeReadyForBlocksDownstream recompute %s: %w", id, err)
+		}
+		if ready {
+			flipped = append(flipped, id)
+		}
+	}
+	return flipped, nil
+}

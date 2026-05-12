@@ -756,6 +756,14 @@ func TestPropertyNoCyclesAfter100Mutations(t *testing.T) {
 		addOK, addReject, removeOK, removeMiss)
 }
 
+// Cascade subscriber tests for C-3 live in the internal-package file
+// apps/api/deps/cascade_subscriber_handler_test.go. Encore's pubsub
+// testing implementation does NOT fire subscriptions during
+// `encore test` (https://encore.dev/docs/go/primitives/pubsub#testing-pubsub),
+// so the subscriber is exercised by calling handleCascadeRequested
+// directly from an internal-package test. See the DEVIATION comment on
+// bead unblock-tv8.12 for the full reasoning.
+
 // assertAcyclic seeds the same depth-counter CTE the cycle detector
 // uses, but starts from every node in the pool. If any node reaches
 // itself via a 'blocks' walk, the graph has a cycle — fail the test

@@ -1097,8 +1097,33 @@ func Close(ctx context.Context, req *CloseRequest) (*Item, error) {
 		}
 	}
 
+	// Regime A (SPEC §6.3.0 lines 1691-1692): recompute is_ready inline
+	// for the closed item's DIRECT 'blocks' downstream neighbours, in
+	// the SAME transaction as the status='Done' write. The cascade
+	// subscriber maintains pipeline_stage multi-hop (Regime B) but the
+	// single-hop is_ready flip is the writer's responsibility — Postgres
+	// holds the transaction's view consistent with the readiness flip,
+	// so downstream readers never observe Done-but-unblocker-not-ready
+	// state. The helper is the SOLE exported Regime A write path; the
+	// is_ready UPDATE itself lives in encore.app/deps (gated by the
+	// no_direct_is_ready_write lint analyzer to that single package).
+	flipped, err := deps.RecomputeReadyForBlocksDownstream(ctx, tx, req.ItemID)
+	if err != nil {
+		rlog.Error("workitems: close inline is_ready recompute failed",
+			"err", err, "item_id", req.ItemID)
+		return nil, &errs.Error{Code: errs.Internal, Message: "is_ready recompute failed"}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return nil, &errs.Error{Code: errs.Internal, Message: "close commit failed"}
+	}
+
+	// Log the neighbours that became ready as a result of this close.
+	// An empty list is normal (no direct blocks downstream, or other
+	// blockers remain on every neighbour) — never fail on it.
+	if len(flipped) > 0 {
+		rlog.Info("workitems: close flipped is_ready on direct blocks downstream",
+			"item_id", req.ItemID, "flipped", flipped, "count", len(flipped))
 	}
 
 	// Publish cascade event. Encore Pub/Sub does not carry ctx across
