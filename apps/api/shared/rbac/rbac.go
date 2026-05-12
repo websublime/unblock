@@ -134,24 +134,31 @@ import (
 // db is the shared handle for the canonical `unblock` Postgres database.
 // Encore's parser refuses `sqldb.Named("unblock")` at this top-level
 // non-service package (E1814: "Infrastructure resources can only be
-// referenced within services"). The handle must therefore be injected by
-// each calling service at init time via Bind.
+// referenced within services"). The handle must therefore be injected
+// by Bind from the dedicated apps/api/db/ migration-owner service.
 //
 // Investigation guidance (bead unblock-tv8.4) advised obtaining the
 // handle directly via sqldb.Named here and avoiding any cross-package
 // import of auth's db var. Encore's parser does not allow that — see
 // the build-time error path noted above. Bind preserves the spirit of
-// the guidance: the handle is owned by the calling service (each
-// service calls sqldb.Named in its own package, with the dedicated
-// apps/api/db/ service holding the canonical NewDatabase declaration
-// per SPEC §3.1) and rbac itself imports nothing service-specific.
-// SPEC §10.1's locked surface (For/Where/Run) is unchanged.
+// the guidance: every domain service that touches the unblock
+// database uses the canonical BindDB late-bind hook (per SPEC §3.1
+// and the apps/api/db/db.go file header), and the dedicated
+// apps/api/db/ service is the SOLE binding authority — its single
+// init() invokes auth.BindDB(DB), org.BindDB(DB), rbac.Bind(DB), and
+// every future-service BindDB. rbac itself imports nothing
+// service-specific. SPEC §10.1's locked surface (For/Where/Run) is
+// unchanged. Per-service `initbind.go` files were retired in bead
+// unblock-bne's pre-review scope expansion; the central bind in
+// apps/api/db/db.go is now sufficient.
 var db *sqldb.Database
 
 // Bind installs the unblock-database handle that Run will dispatch
-// against. Services call Bind exactly once from a package-level init
-// (or service init) before any RPC handler invokes For. Subsequent
-// calls overwrite the handle; tests rely on this for swap-in of fakes.
+// against. Called exactly once at process start by the dedicated
+// apps/api/db/ migration-owner service's init (the sole binding
+// authority for every consumer's handle, post bead unblock-bne
+// pre-review). Subsequent calls overwrite the handle; tests rely on
+// this for swap-in of fakes.
 //
 // Concurrency: Bind is not goroutine-safe; the contract is that it
 // runs during Encore service initialisation, before any handler can

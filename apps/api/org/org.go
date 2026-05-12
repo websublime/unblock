@@ -12,9 +12,12 @@
 // org.members and are authorised through a separate predicate branch
 // (see authorizeAgent below).
 //
-// Database wiring: this package consumes via sqldb.Named("unblock")
-// (see db.go). The dedicated apps/api/db/ service is the sole
-// migration-owner per SPEC §3.1.
+// Database wiring: this package uses the canonical BindDB late-bind
+// hook (see db.go) — a nil *sqldb.Database pointer populated by the
+// dedicated apps/api/db/ service's init via org.BindDB(DB). The
+// dedicated apps/api/db/ service is the sole migration-owner per
+// SPEC §3.1 and the sole binding authority for every domain
+// service's database handle. There is no per-service initbind.go.
 package org
 
 import (

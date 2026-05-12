@@ -234,10 +234,21 @@ cargo doc --no-deps --workspace  # zero warnings
 ### Go (Encore services)
 
 - One service per Go package under `apps/api/<service>/`
-- Single migration owner: `apps/api/db/` (a dedicated zero-API Encore
-  service) holds all sequential SQL migrations for the `unblock`
-  database. Domain services declare `var db = sqldb.Named("unblock")`
-  and never write their own `migrations/` subdirectory.
+- Single migration owner AND single binding authority: `apps/api/db/`
+  (a dedicated zero-API Encore service) holds all sequential SQL
+  migrations for the `unblock` database AND owns the only
+  `sqldb.NewDatabase("unblock", ...)` call in the workspace. Its
+  `init()` binds every domain service's handle via the canonical
+  BindDB late-bind pattern: each service declares
+  `var db *sqldb.Database` + `func BindDB(d *sqldb.Database) { db = d }`
+  in its own `db.go` (see SPEC §3.1), and `apps/api/db/db.go`'s `init`
+  calls `<service>.BindDB(DB)` for every consumer. Domain services
+  MUST NOT declare `sqldb.Named("unblock")` at package init
+  (`sqldb.Named` panics at package-load outside the encore CLI in
+  encore.dev v1.52.1 just like `sqldb.NewDatabase` — breaks plain
+  `go test ./apps/api/<service>/...`). No domain service writes its
+  own `migrations/` subdirectory and no domain service carries its
+  own `initbind.go`.
 - Errors: structured Go errors with context; never silently swallow
 - Logs: `encore.dev/rlog` (structured) — Encore handles aggregation
 - All public APIs declared with `//encore:api` (typed) — raw endpoints reserved for the 3 documented public ingress points

@@ -4,7 +4,12 @@
 // providers, mcp, boards, memory) live in apps/api/db/migrations/ and
 // are owned by the dedicated apps/api/db/ service per SPEC §3.1; this
 // package — like every other domain service — consumes the database
-// via sqldb.Named("unblock") (see db.go).
+// via the canonical BindDB late-bind hook in db.go (a nil
+// *sqldb.Database pointer populated by apps/api/db/db.go's init).
+// Direct `sqldb.Named("unblock")` at package init is forbidden — the
+// v1.52.1 runtime panics outside the encore CLI on every call to
+// either sqldb.NewDatabase or sqldb.Named, breaking plain
+// `go test ./apps/api/<service>/...`.
 //
 // In P01 task B-1 (bead unblock-tv8.7) this package lands the four
 // private RPC bodies (Validate, ExchangeOAuthCode, IssueAPIKey,
