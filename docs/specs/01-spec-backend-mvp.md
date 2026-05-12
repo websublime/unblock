@@ -50,7 +50,8 @@ P01 ships the agent-facing core of `://unblock`:
 - Three schema-only services (`providers`, `boards`, `memory` — DDL ships,
   service code ships in P02 / P05).
 - Single Postgres database with **all eight schemas** migrating from a
-  single migration-owner directory at `apps/api/auth/migrations/`.
+  single migration-owner directory at `apps/api/db/migrations/`, owned
+  by a dedicated zero-API `db` service.
 - Streamable HTTP MCP transport (per MCP spec 2025-06-18) at `POST /mcp` +
   `GET /mcp` exposing **14 tools** with Bearer API key auth.
 - Cascade subsystem on Encore Pub/Sub maintaining `is_ready` and
@@ -89,7 +90,7 @@ binding design decision below.
 | Research finding | Status in research | How this spec resolves it |
 |---|---|---|
 | **C1 — Pub/Sub envelope `delivery_id`** | CONTRADICTED | §6.4 — publisher generates `event_id` (ULID) at emit; subscriber reads it from typed payload; idempotency key `(event_id, triggered_by_item_id)` enforced by DDL UNIQUE on `deps.cascade_events`. |
-| **C2 — Encore DB ownership / multi-schema** | CONTRADICTED | §3.1, §5.1 — `auth` is the migration-owner service. All eight schemas' migrations live under `apps/api/auth/migrations/`. Other services consume via `sqldb.Named("unblock")`. |
+| **C2 — Encore DB ownership / multi-schema** | CONTRADICTED | §3.1, §5.1 — a dedicated `apps/api/db/` service is the sole migration-owner; all eight schemas' migrations live under `apps/api/db/migrations/`. Every domain service (auth included) consumes via `sqldb.Named("unblock")`. |
 | **C3 — "rmcp Go bindings" misnomer** | CONTRADICTED | §6.1 — pinned dependency: `github.com/modelcontextprotocol/go-sdk` v0.5.0 (or latest stable at implementation start; pinned by Greta in `go.mod` under task D-1). |
 | **C4 — Encore Cloud edge-proxy timeout** | PARTIAL | §11.2 — NFR-1 measurement methodology declares "warm cache, local emulator only"; cloud SSE behaviour is a P02 ops item owned by Olive. P01 spec does not target Cloud. |
 | **C5 — Recursive CTE `LIMIT 256` semantics** | CONTRADICTED | §6.5 — cycle CTE uses an explicit `depth` counter with `WHERE depth < 256`. The exact CTE is reproduced verbatim from SPEC §9.4.9. |
@@ -115,13 +116,28 @@ binding design decision below.
 
 ### 3.1 Migration owner and ordering
 
-Per SPEC §5.2 / research C2: **`auth` is the sole migration-owner service**.
-The directory `apps/api/auth/migrations/` holds the canonical migration set
-for the entire `unblock` database. Other services declare
-`var db = sqldb.Named("unblock")` and never write migration files.
+Per SPEC §5.2 / research C2: **a dedicated `apps/api/db/` service is the
+sole migration-owner**. It is a zero-API Encore service whose only purpose
+is to declare `sqldb.NewDatabase("unblock", ...)` and ship the canonical
+migration set; it owns no business logic, no RPCs, and no domain schema.
+The directory `apps/api/db/migrations/` holds the migration set for the
+entire `unblock` database.
 
-The seven other services (`org`, `workitems`, `deps`, `providers`, `mcp`,
-`boards`, `memory`) get their DB handle via:
+Every domain service (`auth`, `org`, `workitems`, `deps`, `mcp`,
+`providers`, `boards`, `memory`) declares
+`var db = sqldb.Named("unblock")` and never writes migration files.
+
+Rationale: this decouples `auth` from owning DDL for schemas it does not
+consume. Every domain service is an equal consumer of the database, and
+the migration-owner role lives in a single piece of infrastructure
+wiring rather than being grafted onto a domain service. The historical
+auth-as-owner pattern (lifted from the C2 closure at spec approval
+time) accidentally coupled the auth service's surface to the lifecycle
+of org / workitems / deps / etc. DDL — bead `unblock-bne` corrected
+that. The `var db = sqldb.NewDatabase(...)` call still happens in
+exactly one place across the workspace; only its location changed.
+
+The eight domain services get their DB handle via:
 
 ```go
 package <service>
@@ -254,8 +270,11 @@ have a place to read fixtures from.
 
 ### 4.1 `auth` service
 
-Owns: schema `auth`, `apps/api/auth/migrations/` (the canonical migrations
-directory for the whole DB).
+Owns: schema `auth` only. The canonical migrations directory lives at
+`apps/api/db/migrations/` and is owned by the dedicated `db` service
+(§3.1). The auth service consumes the database via
+`sqldb.Named("unblock")` in `apps/api/auth/db.go`, the same pattern as
+every other domain service.
 
 Public APIs: **none** (the OAuth callback lives on the Astro origin per
 PRD FR-12; in P01 it is exercised only by integration tests).
@@ -2083,7 +2102,8 @@ seeded fixture and asserts:
 - [ ] README.md updated with P01 user surface (MCP Bearer auth, the 14
   tools' one-liners, `unblock-seed` invocation).
 - [ ] `apps/api/README.md` documents service decomposition and migration
-  ownership (the `auth`-as-migration-owner pattern is non-obvious).
+  ownership (the dedicated `db`-service migration-owner pattern is
+  non-obvious — every domain service is an equal consumer).
 
 ### 11.5 Open Question carry-overs
 
@@ -2140,7 +2160,7 @@ break a contract pinned in this document.
 | # | Risk | Mitigation |
 |---|---|---|
 | RS01-1 | Go MCP SDK API changes during P01 (the SDK is "in collaboration with Google" but new) | Pin exact version in `go.mod`; vendor-allowlist in CI (no auto-bump on `go.mod`); update path in P02 if SDK breaks. |
-| RS01-2 | Encore adds new constraints on multi-schema use that break the `auth`-as-migration-owner pattern | Smoke test in CI: `encore check` on every PR; if Encore's behaviour ever splits the migration runner, escalate to a `rebase` plan. |
+| RS01-2 | Encore adds new constraints on multi-schema use that break the dedicated-`db`-service migration-owner pattern | Smoke test in CI: `encore check` on every PR; if Encore's behaviour ever splits the migration runner, escalate to a `rebase` plan. |
 | RS01-3 | The `Mcp-Session-Id` header semantics change between MCP spec revisions before P01 ships | Pin to MCP spec 2025-06-18 (current canonical); migration to a future spec is a P02+ task. |
 | RS01-4 | The `subtle.ConstantTimeCompare` cost on the API-key hot path (§4.3.2) is unexpectedly high under Encore's request handler | Benchmark inline as part of E-2 latency harness; if budget pressure emerges, introduce a 1-minute in-process LRU cache keyed by `key_prefix` + `revoked_at,expires_at` snapshot (eviction on revoke event). |
 | RS01-5 | Cascade subscriber re-delivery storm on a degenerate fixture | The `(event_id, triggered_by_item_id)` UNIQUE constraint absorbs duplicates structurally; a load test with N=10k re-deliveries asserts zero duplicate inserts, zero `is_ready` flips beyond the first one. |

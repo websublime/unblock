@@ -13,7 +13,7 @@ encore app create unblock --runtime=go
 
 ## Planned services
 
-8 Encore services backing `://unblock`:
+8 domain Encore services backing `://unblock`:
 
 - `auth` — OAuth2+PKCE GitHub/GitLab, JWT, sessions, RBAC primitives
 - `org` — organizations, members, projects, project visibility
@@ -24,7 +24,15 @@ encore app create unblock --runtime=go
 - `boards` — Kanban + Roadmap + columns + views
 - `memory` — org/project/user-scoped knowledge entries
 
-Single Postgres database with 8 schemas (one per service), cross-schema FKs.
+Plus a dedicated infrastructure service:
+
+- `db` — schema-only migration-owner service (no API surface). Declares
+  the canonical `sqldb.NewDatabase("unblock", ...)` and holds the
+  migration set for every schema. Every domain service consumes via
+  `sqldb.Named("unblock")` and is an equal database consumer; no
+  domain service owns DDL for schemas it does not consume.
+
+Single Postgres database with 8 schemas (one per domain service), cross-schema FKs.
 
 See the project root `CLAUDE.md` and `docs/SPEC.md` (post-Stage-1) for the architecture
 contract.
