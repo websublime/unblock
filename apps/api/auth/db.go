@@ -37,20 +37,30 @@
 // at this package's init); the difference is which package now owns
 // the NewDatabase call.
 //
-// Why the BindDB shape stays (unblock-xuk invariant preserved).
+// Why the BindDB shape stays (unblock-xuk invariant preserved) —
+// and why it is now the CANONICAL pattern for every domain service.
 //
 // An alternative shape considered during unblock-bne was to convert
-// this file to `var db = sqldb.Named("unblock")` (mirroring
-// apps/api/org/db.go) and have the new apps/api/db/ service ship
-// only the NewDatabase declaration + migrations. Empirical encore-CLI
-// check disproved the premise: `sqldb.Named` is NOT a benign runtime
-// lookup — its v1.52.1 implementation calls doPanic at package-load
-// time exactly like NewDatabase. Plain `go test ./auth/...` against
-// that shape panics at package init the same way the original
-// unblock-xuk-broken shape did. The dbhandle late-bind pattern is
-// therefore the only shape that preserves the xuk goal while moving
-// migration ownership out of auth — see the DECISION comment on
-// bead unblock-bne for the full empirical trace.
+// this file to `var db = sqldb.Named("unblock")` (mirroring the
+// then-current apps/api/org/db.go) and have the new apps/api/db/
+// service ship only the NewDatabase declaration + migrations.
+// Empirical encore-CLI check disproved the premise: `sqldb.Named` is
+// NOT a benign runtime lookup — its v1.52.1 implementation calls
+// doPanic at package-load time exactly like NewDatabase. Plain
+// `go test ./auth/...` against that shape panics at package init
+// the same way the original unblock-xuk-broken shape did. See the
+// DECISION comment on bead unblock-bne for the full empirical
+// trace.
+//
+// bne's pre-review scope expansion completed the symmetry: the org
+// service was converted from the eager `sqldb.Named("unblock")`
+// shape to the same BindDB late-bind hook documented here, and
+// every future domain service that touches the unblock database
+// (workitems, deps, mcp, providers, boards, memory) MUST follow the
+// same shape. The dedicated apps/api/db/ service binds every domain
+// service's nil handle from its single central init, eliminating
+// per-service initbind.go files and standardising the consumer
+// pattern across the codebase.
 //
 // SPEC §3.1 invariant preserved: there is still exactly ONE
 // `sqldb.NewDatabase("unblock", ...)` call across the workspace —

@@ -3,18 +3,18 @@
 // Scope:
 //
 //   - Pure-helper unit tests for input validation, role rank, and the
-//     role-action matrix. These would compile under plain `go test`
-//     except that this package declares
-//     `var db = sqldb.Named("unblock")` at package scope (db.go) and
-//     `sqldb.Named` panics outside the encore CLI exactly like
-//     `sqldb.NewDatabase` — both call doPanic at package-load time
-//     in the v1.52.1 runtime. So in practice every test in this file
-//     is run via `encore test ./org/...`. (Bead unblock-bne moved
-//     the canonical `sqldb.NewDatabase` call out of the auth package
-//     into apps/api/db/, which fixes the auth-tree's plain-go-test
-//     load path; the equivalent fix for org would require a
-//     dbhandle-style late-bind shape on org/db.go and is out of
-//     scope for unblock-bne.)
+//     role-action matrix. After bead unblock-bne's pre-review scope
+//     expansion converted org/db.go to the canonical BindDB
+//     late-bind shape (a nil *sqldb.Database pointer populated by
+//     apps/api/db/db.go's init), this package loads under plain
+//     `go test ./apps/api/org/...` without panicking — the org root
+//     no longer calls `sqldb.Named("unblock")` at package init.
+//     Pure-helper tests therefore execute under plain `go test`;
+//     tests that exercise the real RPC bodies still need the Encore
+//     runtime (the `db` pointer is nil outside `encore test`, so
+//     real query execution panics inside sqldb.Database.QueryRow /
+//     QueryContext — that is expected and is the same shape every
+//     domain service shares).
 //
 //   - Integration tests for the six private RPCs against the real
 //     Encore-managed Postgres cluster. Each test resets the relevant

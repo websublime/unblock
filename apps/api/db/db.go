@@ -2,11 +2,34 @@
 // canonical `unblock` Postgres database. It declares
 // `sqldb.NewDatabase("unblock", ...)` exactly once across the workspace,
 // ships the canonical migration set under apps/api/db/migrations/, and
-// binds the constructed handle into every consumer that needs it at
-// package init (the auth service via auth.BindDB; the shared rbac
-// builder via rbac.Bind). Every domain service (auth, org, workitems,
-// deps, mcp, providers, boards, memory) is an equal database consumer;
-// no domain service owns DDL for schemas it does not consume.
+// is the SOLE binding authority for every domain-service database
+// handle. Its package init() invokes:
+//
+//   - auth.BindDB(DB)  — populates the auth service's nil handle
+//   - org.BindDB(DB)   — populates the org service's nil handle
+//   - rbac.Bind(DB)    — installs the shared rbac builder's handle
+//
+// Every domain service (auth, org, workitems, deps, mcp, providers,
+// boards, memory) is an equal database consumer; no domain service
+// owns DDL for schemas it does not consume, and no domain service
+// declares `sqldb.Named("unblock")` at package init (such a call
+// panics outside the encore CLI; see CONSUMER PATTERN below).
+//
+// CONSUMER PATTERN — required for every domain service that touches
+// the unblock database (canonical post bead unblock-bne pre-review):
+//
+//	package <service>
+//
+//	import "encore.dev/storage/sqldb"
+//
+//	var db *sqldb.Database
+//
+//	func BindDB(d *sqldb.Database) { db = d }
+//
+// Then add the corresponding `<service>.BindDB(DB)` call to this
+// package's init() below. Future P01/P0n services (workitems, deps,
+// mcp, providers, boards, memory) that touch the database MUST
+// follow this pattern and MUST be registered here — no exceptions.
 //
 // Why this package exists (bead unblock-bne).
 //
@@ -38,46 +61,58 @@
 // the package location and the implied ownership story have changed.
 //
 // Wiring shape (Shape A from the bead investigation, validated
-// empirically against the encore CLI).
+// empirically against the encore CLI; pre-review scope expansion
+// extended the same shape to org and made it the canonical pattern
+// for every future service).
 //
-// db.init() centralises the cross-cutting binds:
+// db.init() centralises ALL cross-cutting binds. Domain services do
+// NOT carry their own initbind.go anymore; the single central wiring
+// point in this package is now the sole binding authority.
 //
 //   - auth.BindDB(DB) populates the auth service's nil *sqldb.Database
-//     handle. Auth keeps the unblock-xuk late-bind shape (a nil
-//     package-level pointer + an exported BindDB hook) because the
-//     auth root package MUST NOT import any package that calls
-//     sqldb.NewDatabase or sqldb.Named at its own package init —
+//     handle. The auth root package MUST NOT import any package that
+//     calls sqldb.NewDatabase or sqldb.Named at its own package init —
 //     either call panics under plain `go test ./auth/...` outside the
 //     encore CLI (sqldb.Named is NOT a benign runtime lookup; its
 //     v1.52.1 implementation calls doPanic the same way NewDatabase
-//     does). The BindDB hook is the only shape that preserves the
-//     xuk goal (plain `go test ./auth/...` loads without panic) while
-//     moving the NewDatabase declaration out of the auth tree.
+//     does). The BindDB late-bind hook is the only shape that
+//     preserves the xuk goal (plain `go test ./auth/...` loads
+//     without panic) while moving the NewDatabase declaration out of
+//     the auth tree.
 //
-//   - rbac.Bind(DB) installs the shared rbac builder's handle. Every
-//     consumer service also calls rbac.Bind in its own initbind.go
-//     (apps/api/org/initbind.go today; future workitems / deps / mcp
-//     initbind files when those services land). The double-bind is
-//     documented-safe (rbac.go's Bind contract: "Subsequent calls
-//     overwrite the handle; tests rely on this for swap-in of
-//     fakes") and gives defense-in-depth: db's bind is the single
-//     central wiring point; each service's local bind closes the
-//     cross-service init-order gap that org/initbind.go's header
-//     describes ("Encore guarantees per-service init() runs before
-//     any //encore:api dispatch, but cross-service initialisation
-//     order is not specified").
+//   - org.BindDB(DB) populates the org service's nil handle. The org
+//     service was converted from the eager `var db =
+//     sqldb.Named("unblock")` shape to the same BindDB late-bind
+//     pattern as part of bead unblock-bne's pre-review scope
+//     expansion. The motivation is identical: sqldb.Named panics at
+//     package init outside the encore CLI, so the eager form broke
+//     `go test ./apps/api/org/...` at load time. The BindDB shape
+//     fixes that and standardises every domain service on the same
+//     consumer pattern.
+//
+//   - rbac.Bind(DB) installs the shared rbac builder's handle. The
+//     previous defense-in-depth pattern (each service called
+//     rbac.Bind from its own initbind.go) is gone: with apps/api/db/
+//     as the single binding authority, the central Bind here is
+//     sufficient and the cross-service init-order race that
+//     org/initbind.go was originally created to close is now
+//     subsumed by Go's import-order guarantee. db imports every
+//     consumer service, so every consumer service's init runs before
+//     db's init, and rbac.Bind fires before any handler dispatches.
 //
 // Init-order analysis.
 //
 // Go guarantees imported packages' init runs before the importer's
-// init. db imports encore.app/auth and encore.app/shared/rbac;
-// auth.init and rbac.init therefore complete before db.init. Encore
-// loads infrastructure-resource consumers (db.init) during process
-// bootstrap, before any //encore:api handler dispatches. The
-// dbhandle.init precedent (shipped to PROD under unblock-tv8.7
-// before bead unblock-bne) proves the runtime contract; this package
-// only relocates the same init from apps/api/auth/dbhandle/ to
-// apps/api/db/ and adopts the same wiring shape.
+// init. db imports encore.app/auth, encore.app/org, and
+// encore.app/shared/rbac; auth.init, org.init, and rbac.init therefore
+// all complete before db.init. Encore loads infrastructure-resource
+// consumers (db.init) during process bootstrap, before any
+// //encore:api handler dispatches. The dbhandle.init precedent
+// (shipped to PROD under unblock-tv8.7 before bead unblock-bne)
+// proves the runtime contract; this package relocates the same init
+// from apps/api/auth/dbhandle/ to apps/api/db/ and (post-bne
+// pre-review) extends it to bind every domain service's handle from
+// a single central wiring point.
 //
 // Constraints (DO NOT VIOLATE):
 //
@@ -92,17 +127,20 @@
 //     from this path.
 //
 //   - This package MUST NOT acquire other responsibilities. Beyond
-//     the NewDatabase declaration and the two bind calls below,
-//     nothing belongs here. No domain logic, no //encore:api
+//     the NewDatabase declaration and the bind calls in init()
+//     below, nothing belongs here. No domain logic, no //encore:api
 //     surface, no exported helpers outside DB. Keep db leaf-shaped
 //     so the "every domain service is an equal consumer" invariant
-//     is obvious to a reader.
+//     is obvious to a reader. When a new domain service lands
+//     DB-touching code, add ONLY a new `<service>.BindDB(DB)` line
+//     to init() — nothing else.
 //
 //   - The first argument to sqldb.NewDatabase MUST stay the literal
-//     `"unblock"`. It is the registered database name every consumer
-//     service binds to via `sqldb.Named("unblock")` (org,
-//     workitems, deps, mcp, providers, boards, memory; SPEC §3.1).
-//     Renaming would silently break every cross-service handle.
+//     `"unblock"`. It is the registered database name; Encore's
+//     parser uses it to wire this NewDatabase declaration to every
+//     consumer service's per-service DB binding (SPEC §3.1).
+//     Renaming would silently break every cross-service handle and
+//     leave every BindDB hook bound to a nil pointer.
 //
 //   - The Migrations path MUST stay `./migrations` (relative to this
 //     package directory). Encore's parser rejects sqldb.NewDatabase
@@ -111,16 +149,22 @@
 //     unblock-xuk). The migration files therefore live at
 //     apps/api/db/migrations/, not at any historical location.
 //
-//   - This package MAY import encore.app/auth (for BindDB) and
-//     encore.app/shared/rbac (for Bind). It MUST NOT import any
-//     other domain service. Any extra import would re-couple the
-//     migration owner to a domain service it has no business owning
-//     and risk a package import cycle if that service ever needs to
-//     reach a db-package symbol.
+//   - This package MAY import every domain service whose handle it
+//     binds (encore.app/auth, encore.app/org today; future
+//     workitems / deps / mcp / providers / boards / memory when those
+//     services land DB-touching code) and encore.app/shared/rbac
+//     (for rbac.Bind). It MUST NOT import any other package. This
+//     keeps the migration owner tightly scoped to "owns NewDatabase
+//
+//   - migrations, binds every consumer's handle, period". A new
+//     service that needs the DB MUST add its own BindDB hook (see
+//     CONSUMER PATTERN above) and add the corresponding bind line
+//     to init() below — no shortcuts.
 package db
 
 import (
 	"encore.app/auth"
+	"encore.app/org"
 	"encore.app/shared/rbac"
 	"encore.dev/storage/sqldb"
 )
@@ -143,17 +187,18 @@ type Service struct{}
 //
 // The init() function below is the real bootstrap wiring: it fires
 // at Go package init (before Encore calls initService) and centralises
-// the auth.BindDB / rbac.Bind calls. initService is required by
-// Encore's //encore:service form but does no useful work here.
+// every consumer's BindDB call plus rbac.Bind. initService is required
+// by Encore's //encore:service form but does no useful work here.
 func initService() (*Service, error) {
 	return &Service{}, nil
 }
 
 // DB is the canonical *sqldb.Database for the `unblock` Postgres
-// database. Consumer services receive the handle via auth.BindDB(DB)
-// (for the auth service's late-bind path) or via the
-// service-local `sqldb.Named("unblock")` lookup at their own
-// initbind.go — DB is exported only so future tooling (linters,
+// database. Consumer services receive the handle exclusively via
+// the canonical BindDB late-bind hook (auth.BindDB(DB),
+// org.BindDB(DB), and future <service>.BindDB(DB) entries) plus the
+// rbac.Bind(DB) cross-cutting call, all invoked from this package's
+// init() below. DB is exported only so future tooling (linters,
 // audits) can spot-check that the same handle is registered
 // everywhere.
 //
@@ -169,31 +214,39 @@ var DB = sqldb.NewDatabase("unblock", sqldb.DatabaseConfig{
 	Migrations: "./migrations",
 })
 
-// init binds the unblock database handle into both the auth service
-// (auth.BindDB) and the shared rbac builder (rbac.Bind) so the auth
-// package's `db` variable and the rbac package's internal handle are
-// both non-nil before any //encore:authhandler dispatches or any
-// rbac.For caller runs. Encore's process-bootstrap import order
-// guarantees this init runs before any handler can call Validate /
-// IssueAPIKey / RevokeAPIKey / ExchangeOAuthCode or any cross-service
-// consumer (org, workitems via apps/api/shared/rbac) reaches a
-// rbac.For call site.
+// init binds the unblock database handle into every consumer that
+// needs it. After bead unblock-bne's pre-review scope expansion this
+// is the SOLE binding authority for the auth.db, org.db, and rbac.db
+// handles — no domain service carries its own initbind.go.
 //
-// Concurrency: BindDB and rbac.Bind are not goroutine-safe. The
-// single-init contract was previously documented on
-// apps/api/auth/dbhandle/dbhandle.go (now deleted) and on
-// apps/api/shared/rbac/rbac.go; bead unblock-tv8.34 tracks the
-// parallel hardening discussion for both setters. Until that lands,
-// the runtime guarantee is "Encore process init runs serially and
-// completes before the first handler".
+// Per-service binds (one BindDB call per domain service that touches
+// the database; add new entries here when new services land
+// DB-touching code):
 //
-// init is the central service-bootstrap wiring point for the
-// unblock database handle; the pattern mirrors the historical
-// apps/api/auth/dbhandle/dbhandle.go init (relocated here as part of
-// bead unblock-bne) and is tracked on bead unblock-tv8.34.
+//   - auth.BindDB(DB)
+//   - org.BindDB(DB)
+//
+// Plus the cross-cutting shared-rbac bind:
+//
+//   - rbac.Bind(DB)
+//
+// Encore's process-bootstrap import order guarantees this init runs
+// before any //encore:api handler dispatches; Go's import-order
+// guarantee additionally guarantees auth.init, org.init, and
+// rbac.init all complete before db.init fires, so each BindDB sets a
+// package-level pointer that is then read by every subsequent RPC
+// invocation without further synchronisation.
+//
+// Concurrency: auth.BindDB, org.BindDB, and rbac.Bind are not
+// goroutine-safe. The single-init contract is shared across all
+// three setters; bead unblock-tv8.34 tracks the parallel hardening
+// discussion. Until that lands, the runtime guarantee is "Encore
+// process init runs serially and completes before the first
+// handler".
 //
 //nolint:gochecknoinits
 func init() {
 	auth.BindDB(DB)
+	org.BindDB(DB)
 	rbac.Bind(DB)
 }

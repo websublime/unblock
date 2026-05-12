@@ -4,8 +4,12 @@
 //
 // In P01 task A-1 this package only declares the //encore:api skeletons so
 // Encore recognises deps as a service. Bodies return errNotImplemented;
-// real wiring (sqldb.Named("unblock"), cycle CTE, advisory locks, cascade
-// Pub/Sub publisher) lands in C-1, C-2, C-3.
+// real wiring lands in C-1, C-2, C-3: cycle CTE, advisory locks, cascade
+// Pub/Sub publisher. The DB handle MUST follow the canonical BindDB
+// late-bind pattern (a nil *sqldb.Database pointer + exported BindDB hook
+// in db.go, registered in apps/api/db/db.go's init — see apps/api/db/db.go's
+// CONSUMER PATTERN). Direct `sqldb.Named("unblock")` at package init is
+// forbidden (panics outside the encore CLI in encore.dev v1.52.1).
 package deps
 
 import (

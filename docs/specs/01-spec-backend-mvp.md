@@ -117,35 +117,75 @@ binding design decision below.
 ### 3.1 Migration owner and ordering
 
 Per SPEC §5.2 / research C2: **a dedicated `apps/api/db/` service is the
-sole migration-owner**. It is a zero-API Encore service whose only purpose
-is to declare `sqldb.NewDatabase("unblock", ...)` and ship the canonical
-migration set; it owns no business logic, no RPCs, and no domain schema.
-The directory `apps/api/db/migrations/` holds the migration set for the
-entire `unblock` database.
+sole migration-owner AND the sole binding authority for every domain
+service's database handle**. It is a zero-API Encore service whose only
+responsibilities are:
+
+- declare `sqldb.NewDatabase("unblock", ...)` exactly once across the
+  workspace,
+- ship the canonical migration set under `apps/api/db/migrations/`,
+- bind every consumer's nil `*sqldb.Database` handle from its single
+  central `init()`.
+
+It owns no business logic, no RPCs, and no domain schema. The directory
+`apps/api/db/migrations/` holds the migration set for the entire
+`unblock` database.
 
 Every domain service (`auth`, `org`, `workitems`, `deps`, `mcp`,
-`providers`, `boards`, `memory`) declares
-`var db = sqldb.Named("unblock")` and never writes migration files.
+`providers`, `boards`, `memory`) follows the **canonical BindDB
+late-bind consumer pattern** described below; no domain service writes
+migration files, and no domain service declares
+`sqldb.Named("unblock")` at package init.
 
-Rationale: this decouples `auth` from owning DDL for schemas it does not
-consume. Every domain service is an equal consumer of the database, and
-the migration-owner role lives in a single piece of infrastructure
-wiring rather than being grafted onto a domain service. The historical
-auth-as-owner pattern (lifted from the C2 closure at spec approval
-time) accidentally coupled the auth service's surface to the lifecycle
-of org / workitems / deps / etc. DDL — bead `unblock-bne` corrected
-that. The `var db = sqldb.NewDatabase(...)` call still happens in
-exactly one place across the workspace; only its location changed.
+Rationale (decoupling): this decouples `auth` from owning DDL for
+schemas it does not consume. Every domain service is an equal consumer
+of the database, and the migration-owner role lives in a single piece
+of infrastructure wiring rather than being grafted onto a domain
+service. The historical auth-as-owner pattern (lifted from the C2
+closure at spec approval time) accidentally coupled the auth service's
+surface to the lifecycle of org / workitems / deps / etc. DDL — bead
+`unblock-bne` corrected that. The `var db = sqldb.NewDatabase(...)`
+call still happens in exactly one place across the workspace; only its
+location changed.
 
-The eight domain services get their DB handle via:
+Rationale (consumer pattern, BindDB late-bind): empirical check
+against `encore.dev/storage/sqldb` v1.52.1 disproved the assumption
+that `sqldb.Named("unblock")` is a benign runtime lookup — its
+implementation calls `doPanic` at package-load time exactly like
+`sqldb.NewDatabase` (`pkgfn.go:182-192`). Every domain service that
+declared `var db = sqldb.Named("unblock")` at package init therefore
+panicked any plain `go test ./apps/api/<service>/...` invocation with
+"encore apps must be run using the encore command", breaking the
+unblock-xuk goal (plain-`go test`-loads-without-panic) for that
+service. The BindDB late-bind shape — a nil `*sqldb.Database` pointer
+populated by `apps/api/db/db.go`'s `init` — is the only shape that
+preserves the xuk goal across every domain service. Bead
+`unblock-bne`'s pre-review scope expansion converted the org service
+from the eager `sqldb.Named` shape to BindDB and made BindDB the
+canonical pattern for every current and future domain service.
+
+Canonical consumer pattern (mandatory for every domain service that
+touches the unblock database):
 
 ```go
 package <service>
 
 import "encore.dev/storage/sqldb"
 
-var db = sqldb.Named("unblock")
+// db is populated exactly once at process start by
+// apps/api/db/db.go's init via <service>.BindDB(DB).
+var db *sqldb.Database
+
+// BindDB installs the unblock-database handle. The companion
+// apps/api/db package owns the sqldb.NewDatabase call and invokes
+// BindDB from its package init.
+func BindDB(d *sqldb.Database) { db = d }
 ```
+
+Then add a `<service>.BindDB(DB)` line to `apps/api/db/db.go`'s
+`init()` so the dedicated db service binds the new handle at process
+bootstrap. There is no per-service `initbind.go`; the central bind in
+`apps/api/db/` is the sole binding authority.
 
 ### 3.2 Migration files (locked filenames)
 
@@ -272,9 +312,10 @@ have a place to read fixtures from.
 
 Owns: schema `auth` only. The canonical migrations directory lives at
 `apps/api/db/migrations/` and is owned by the dedicated `db` service
-(§3.1). The auth service consumes the database via
-`sqldb.Named("unblock")` in `apps/api/auth/db.go`, the same pattern as
-every other domain service.
+(§3.1). The auth service consumes the database via the canonical
+BindDB late-bind pattern (§3.1) in `apps/api/auth/db.go`: a nil
+`*sqldb.Database` pointer plus an exported `BindDB(d *sqldb.Database)`
+hook populated by `apps/api/db/db.go`'s `init`.
 
 Public APIs: **none** (the OAuth callback lives on the Astro origin per
 PRD FR-12; in P01 it is exercised only by integration tests).
@@ -360,6 +401,12 @@ type RevokeAPIKeyRequest struct {
 
 ### 4.2 `org` service
 
+Owns: schema `org` only. Consumes the unblock database via the
+canonical BindDB late-bind pattern (§3.1) in `apps/api/org/db.go`:
+a nil `*sqldb.Database` pointer plus an exported
+`BindDB(d *sqldb.Database)` hook populated by `apps/api/db/db.go`'s
+`init`. No per-service `initbind.go`.
+
 Public APIs: **none**.
 
 Private RPCs:
@@ -402,7 +449,11 @@ type AuthorizeRequest struct {
 ### 4.3 `mcp` service
 
 Owns: schema `mcp` (writes only), the public Streamable HTTP endpoint, the
-14 P01 tool handlers.
+14 P01 tool handlers. Consumes the unblock database via the canonical
+BindDB late-bind pattern (§3.1) when DB-touching code lands (P01 D-1+):
+a nil `*sqldb.Database` pointer + exported `BindDB` hook in
+`apps/api/mcp/db.go`, registered in `apps/api/db/db.go`'s `init`. No
+per-service `initbind.go`.
 
 #### 4.3.1 Public endpoint (Streamable HTTP per MCP 2025-06-18 spec)
 
@@ -508,6 +559,12 @@ type AuthData struct {
 > **P01 contract (session-path deferral).** `Validate(TokenKind="session", token=...)` returns `errs.Unimplemented` in P01. The session token path is exercised only by the future BFF (Astro Actions) and the multi-org disambiguation rule (because `auth.sessions` has no `org_id` column and `Identity.OrgID` would require a lookup in `org.members` that is undefined when a user belongs to multiple orgs) will be defined as part of the BFF phase. The seeder bypasses OAuth (§3.5) and the MCP transport (D-1) authenticates via API key only, so this deferral does not affect any P01 acceptance criterion.
 
 ### 4.4 `workitems` service
+
+Owns: schema `workitems` only. Consumes the unblock database via the
+canonical BindDB late-bind pattern (§3.1) when DB-touching code lands
+(P01 B-1+): a nil `*sqldb.Database` pointer + exported `BindDB` hook
+in `apps/api/workitems/db.go`, registered in `apps/api/db/db.go`'s
+`init`. No per-service `initbind.go`.
 
 Private RPCs (called by MCP tool handlers; never directly by clients):
 
@@ -869,6 +926,12 @@ would exceed 4 levels.
 
 ### 4.5 `deps` service
 
+Owns: schema `deps` only. Consumes the unblock database via the
+canonical BindDB late-bind pattern (§3.1) when DB-touching code lands
+(P01 C-1+): a nil `*sqldb.Database` pointer + exported `BindDB` hook
+in `apps/api/deps/db.go`, registered in `apps/api/db/db.go`'s `init`.
+No per-service `initbind.go`.
+
 Private RPCs:
 
 ```go
@@ -967,11 +1030,15 @@ in P01 (per Plan §2.1 + Q2 resolution) but no `//encore:api` declarations
 exist in their directories until P02 (`providers`, `memory`) and P05
 (`boards`).
 
-To prevent the `sqldb.Named("unblock")` consumer pattern from referencing
+To prevent the canonical BindDB consumer pattern (§3.1) from referencing
 non-existent services, P01 leaves these directories empty (no `.go` files
 under `apps/api/providers/`, `apps/api/boards/`, `apps/api/memory/`).
 Encore treats absent service directories as non-services; the schemas
-exist purely as DB-side artifacts maintained by `auth`'s migration runner.
+exist purely as DB-side artifacts maintained by the dedicated
+`apps/api/db/` service's migration runner. When P02 lands `providers`
+and `memory` and P05 lands `boards`, each will add its own
+`BindDB` hook per §3.1 and a corresponding bind line in
+`apps/api/db/db.go`'s `init`.
 
 ---
 
