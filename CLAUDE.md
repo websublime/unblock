@@ -234,7 +234,10 @@ cargo doc --no-deps --workspace  # zero warnings
 ### Go (Encore services)
 
 - One service per Go package under `apps/api/<service>/`
-- Per-service `migrations/` directory with sequential SQL
+- Single migration owner: `apps/api/db/` (a dedicated zero-API Encore
+  service) holds all sequential SQL migrations for the `unblock`
+  database. Domain services declare `var db = sqldb.Named("unblock")`
+  and never write their own `migrations/` subdirectory.
 - Errors: structured Go errors with context; never silently swallow
 - Logs: `encore.dev/rlog` (structured) — Encore handles aggregation
 - All public APIs declared with `//encore:api` (typed) — raw endpoints reserved for the 3 documented public ingress points
