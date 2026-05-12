@@ -35,6 +35,7 @@ package deps_test
 
 import (
 	"context"
+	"errors"
 	"math/rand"
 	"strings"
 	"testing"
@@ -48,6 +49,7 @@ import (
 	"encore.app/deps"
 	"encore.app/shared/ulid"
 	"encore.dev/beta/errs"
+	"encore.dev/storage/sqldb"
 )
 
 // fixture seeds the org / project / user rows each test depends on.
@@ -183,6 +185,52 @@ func TestAddEdgeHappyPath(t *testing.T) {
 	// Regime A: to is now blocked by a non-Done from → is_ready=false.
 	if readIsReady(t, ctx, to) {
 		t.Fatalf("to_item is_ready = true, want false after blocking edge from non-Done item")
+	}
+}
+
+// TestAddEdgeDuplicateRejected exercises the dependencies_pair_uniq
+// branch in AddEdge — the second insert with the same
+// (from_item, to_item, kind) MUST return errs.AlreadyExists with
+// Meta{from, to, kind}, not a generic Internal error. Locks the
+// pgconn.PgError SQLSTATE 23505 path in helpers.isUniqueViolation
+// (review L6-S3).
+func TestAddEdgeDuplicateRejected(t *testing.T) {
+	ctx := context.Background()
+	fx := seedFixture(t, ctx)
+	from := createItem(t, ctx, fx, "Backlog")
+	to := createItem(t, ctx, fx, "Backlog")
+
+	if _, err := deps.AddEdge(ctx, &deps.AddEdgeRequest{
+		OrgID:     fx.OrgID,
+		ProjectID: fx.ProjectID,
+		FromItem:  from,
+		ToItem:    to,
+	}); err != nil {
+		t.Fatalf("AddEdge (first): %v", err)
+	}
+
+	_, err := deps.AddEdge(ctx, &deps.AddEdgeRequest{
+		OrgID:     fx.OrgID,
+		ProjectID: fx.ProjectID,
+		FromItem:  from,
+		ToItem:    to,
+		Kind:      "blocks",
+	})
+	if err == nil {
+		t.Fatalf("expected AlreadyExists on duplicate (from,to,kind), got nil")
+	}
+	if errs.Code(err) != errs.AlreadyExists {
+		t.Fatalf("code = %v, want AlreadyExists", errs.Code(err))
+	}
+	meta := errs.Meta(err)
+	if got := meta["from"]; got != from {
+		t.Fatalf("meta[from] = %v, want %q", got, from)
+	}
+	if got := meta["to"]; got != to {
+		t.Fatalf("meta[to] = %v, want %q", got, to)
+	}
+	if got := meta["kind"]; got != "blocks" {
+		t.Fatalf("meta[kind] = %v, want \"blocks\"", got)
 	}
 }
 
@@ -731,8 +779,10 @@ func assertAcyclic(t *testing.T, ctx context.Context, pool []string) {
 	if err != nil {
 		// sqldb.ErrNoRows = no cycle (the QueryRow path uses pgx's
 		// scanner, which surfaces ErrNoRows as the only "clean" empty
-		// case). Treat anything else as a fatal harness error.
-		if err.Error() == "sql: no rows in result set" || strings.Contains(err.Error(), "no rows") {
+		// case). Use the typed sentinel via errors.Is — substring
+		// matching on the English message is locale-fragile (review
+		// L6-W3). Treat anything else as a fatal harness error.
+		if errors.Is(err, sqldb.ErrNoRows) {
 			return
 		}
 		t.Fatalf("acyclic check: %v", err)
