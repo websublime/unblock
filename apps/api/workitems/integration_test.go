@@ -43,10 +43,41 @@ import (
 	// isolation and leaves workitems.db == nil — every RPC body would
 	// then panic on a nil *sqldb.Database inside encore.dev/storage/sqldb.
 	encoredb "encore.app/db"
+	"encore.app/deps"
 	"encore.app/shared/ulid"
 	"encore.app/workitems"
 	"encore.dev/beta/errs"
+	"encore.dev/et"
 )
+
+// cascadeRequestedMessagesFor returns the subset of CascadeRequested
+// messages published during the current test whose TriggeredByItemID
+// matches the given itemID and Reason matches the given reason.
+//
+// Encore's pubsub testing implementation (et.Topic) records all
+// messages published during the test scope — subscriptions are NOT
+// fired during `encore test` (deps/cascade_subscriber_handler_test.go
+// file header documents the official quote), but the publish itself
+// is observable via et.Topic. This is the canonical way to assert
+// "Tool X publishes CascadeRequested" without relying on subscriber
+// side-effects.
+//
+// Filtering by itemID is essential because TestClaimPropertyHalfFailedHalfNotN100
+// creates N=100 items and we must distinguish the failed half from
+// the normal half within a single test scope.
+func cascadeRequestedMessagesFor(itemID, reason string) []*deps.CascadeRequested {
+	all := et.Topic(deps.CascadeRequestedTopic).PublishedMessages()
+	out := make([]*deps.CascadeRequested, 0, len(all))
+	for _, msg := range all {
+		if msg == nil {
+			continue
+		}
+		if msg.TriggeredByItemID == itemID && msg.Reason == reason {
+			out = append(out, msg)
+		}
+	}
+	return out
+}
 
 // fixture seeds the org / project / user rows each test depends on.
 type fixture struct {
@@ -384,6 +415,23 @@ func TestClaimHappyPath(t *testing.T) {
 	if got.ClaimedAt == nil {
 		t.Fatalf("claimed_at should be non-nil")
 	}
+
+	// SPEC §6.3.0 tension #2 narrow rule (lines 1723-1726) + §6.4
+	// lines 1898-1903: normal Ready→InProgress claim with no I-3 reset
+	// MUST NOT publish CascadeRequested. The claimed item was non-Done
+	// before the claim and remains non-Done; downstream pipeline_stage
+	// is unaffected per §5.7.1, and a publish would burn one cascade
+	// pass against NFR-1 budget for no observable effect.
+	//
+	// We observe the publish surface directly via et.Topic — Encore's
+	// pubsub testing implementation does NOT fire subscribers during
+	// `encore test` (see cascadeRequestedMessagesFor docstring), so we
+	// assert on PublishedMessages rather than the subscriber-written
+	// deps.cascade_events row.
+	if got := cascadeRequestedMessagesFor(itemID, "state_change"); len(got) != 0 {
+		t.Fatalf("normal Claim must NOT publish state_change cascade: got %d publish(es) for item=%q (want 0)",
+			len(got), itemID)
+	}
 }
 
 func TestClaimLoserPath(t *testing.T) {
@@ -440,6 +488,32 @@ func TestClaimResetsReworkOnQAFailed(t *testing.T) {
 	}
 	if got.ImplState != "done" {
 		t.Fatalf("I-3 must NOT touch impl_state: got impl=%q (want done — preserved across the re-claim)", got.ImplState)
+	}
+
+	// SPEC §6.3.0 tension #2 + §6.4 lines 1905-1914: Claim publishes
+	// CascadeRequested{Reason:"state_change", ...} after commit ONLY
+	// when the I-3 reset path fires. The subscriber walks the forward
+	// 'blocks' closure to recompute pipeline_stage per §5.7.1 and
+	// writes one deps.cascade_events row with kind='state_change', but
+	// during `encore test` the subscriber does NOT fire — we assert on
+	// the publish itself via et.Topic.
+	msgs := cascadeRequestedMessagesFor(itemID, "state_change")
+	if len(msgs) != 1 {
+		t.Fatalf("I-3 reset Claim must publish exactly 1 state_change cascade for item=%q: got %d (want 1)",
+			itemID, len(msgs))
+	}
+	msg := msgs[0]
+	if msg.EventID == "" {
+		t.Fatalf("I-3 reset cascade: EventID empty (ULID must be minted by publisher per C1)")
+	}
+	if msg.OrgID != fx.OrgID {
+		t.Fatalf("I-3 reset cascade: OrgID=%q, want %q (captured at SELECT FOR UPDATE time)", msg.OrgID, fx.OrgID)
+	}
+	if msg.ProjectID != fx.ProjectID {
+		t.Fatalf("I-3 reset cascade: ProjectID=%q, want %q", msg.ProjectID, fx.ProjectID)
+	}
+	if msg.EmittedAt.IsZero() {
+		t.Fatalf("I-3 reset cascade: EmittedAt zero (must be wall-clock at publish time)")
 	}
 }
 
@@ -1056,4 +1130,136 @@ func TestReadItemStateColumnsAfterSetState(t *testing.T) {
 	if impl != "done" || review != "approved" || qa != "passed" || pipeline != "running" {
 		t.Fatalf("state columns: impl=%q review=%q qa=%q pipeline=%q", impl, review, qa, pipeline)
 	}
+}
+
+// TestClaimPropertyHalfFailedHalfNotN100 is the round-6 cascade-symmetry
+// property test required by bead unblock-tv8.13 NOTES (SPEC §6.3.0
+// tension #2 narrow rule + §6.4 lines 1905-1914).
+//
+// Setup: create N=100 Ready items. On exactly half (50), set
+// impl=done, review=approved, qa=failed via setItemState (which also
+// claims the item), then SQL-reset status='Ready' + claimed_by_id=NULL
+// to obtain a Ready item carrying qa_state='failed' (mirrors the
+// AR-18 race phase-2 reset pattern). The other half remain in their
+// default Ready state (qa_state='pending').
+//
+// Action: Claim all 100 items. The 50 with qa_state='failed' hit the
+// I-3 reset path and MUST publish CascadeRequested{Reason:"state_change"}
+// (exactly one each). The other 50 take the normal Ready→InProgress
+// path and MUST NOT publish (zero CascadeRequested messages for those
+// item IDs).
+//
+// Assertion: et.Topic(deps.CascadeRequestedTopic).PublishedMessages()
+// — Encore's pubsub test harness records every publish from the
+// current test. Subscribers do NOT fire during `encore test`, so we
+// observe the publish surface directly. We count messages whose
+// TriggeredByItemID is in failedIDs (expect exactly 50) and in
+// normalIDs (expect exactly 0).
+func TestClaimPropertyHalfFailedHalfNotN100(t *testing.T) {
+	ctx := context.Background()
+	fx := seedFixture(t, ctx)
+
+	const N = 100
+	const halfFailed = N / 2
+
+	failedIDs := make([]string, 0, halfFailed)
+	normalIDs := make([]string, 0, N-halfFailed)
+	failedIDSet := make(map[string]struct{}, halfFailed)
+	normalIDSet := make(map[string]struct{}, N-halfFailed)
+
+	// Phase 1: create N=100 Ready items and prepare half of them with
+	// qa_state='failed'. The other half remain at the default
+	// (impl=pending, review=pending, qa=pending) — they will take the
+	// normal Ready→InProgress claim path.
+	for i := 0; i < N; i++ {
+		id := createReadyItem(t, ctx, fx)
+		if i < halfFailed {
+			// Set the rework posture: impl=done, review=approved,
+			// qa=failed satisfies I-2 (qa_failed_requires_review_approved).
+			// setItemState also claims the item — we then reset to Ready
+			// so the Claim() call hits the SELECT FOR UPDATE successfully.
+			setItemState(t, ctx, id, "done", "approved", "failed", fx.UserID)
+			if _, err := encoredb.DB.Exec(ctx,
+				`UPDATE workitems.items
+				    SET status        = 'Ready',
+				        claimed_by_id = NULL,
+				        claimed_at    = NULL,
+				        updated_at    = now()
+				  WHERE id = $1`,
+				id,
+			); err != nil {
+				t.Fatalf("reset failed item %d: %v", i, err)
+			}
+			failedIDs = append(failedIDs, id)
+			failedIDSet[id] = struct{}{}
+		} else {
+			normalIDs = append(normalIDs, id)
+			normalIDSet[id] = struct{}{}
+		}
+	}
+
+	// Phase 2: claim all 100 items. Sequential is sufficient — the
+	// bead NOTES describes a property assertion, not a concurrency
+	// assertion (TestClaimConcurrentSingleWinner + AR-18 cover the
+	// race surface). Each Claim must succeed; the failed-half ones
+	// take the I-3 reset path and publish, the normal half do not.
+	for _, id := range failedIDs {
+		got, err := workitems.Claim(ctx, &workitems.ClaimRequest{
+			ItemID:        id,
+			ClaimerUserID: fx.UserID,
+			ClaimerAgent:  "claude-code",
+		})
+		if err != nil {
+			t.Fatalf("Claim failed item %q: %v", id, err)
+		}
+		// Sanity: I-3 reset is observable on the returned item.
+		if got.ReviewState != "pending" || got.QAState != "pending" {
+			t.Fatalf("I-3 reset failed for item %q: review=%q qa=%q (want pending/pending)",
+				id, got.ReviewState, got.QAState)
+		}
+	}
+	for _, id := range normalIDs {
+		got, err := workitems.Claim(ctx, &workitems.ClaimRequest{
+			ItemID:        id,
+			ClaimerUserID: fx.UserID,
+			ClaimerAgent:  "claude-code",
+		})
+		if err != nil {
+			t.Fatalf("Claim normal item %q: %v", id, err)
+		}
+		// Sanity: normal claim leaves qa_state at 'pending' (which it
+		// already was) — no I-3 reset triggered.
+		if got.QAState != "pending" {
+			t.Fatalf("normal Claim item %q: qa_state=%q (want pending)", id, got.QAState)
+		}
+	}
+
+	// Phase 3: count publishes via et.Topic. Synchronous — Publish
+	// returns after the message is recorded by the test harness.
+	all := et.Topic(deps.CascadeRequestedTopic).PublishedMessages()
+	var failedHits, normalHits int
+	for _, msg := range all {
+		if msg == nil || msg.Reason != "state_change" {
+			continue
+		}
+		if _, ok := failedIDSet[msg.TriggeredByItemID]; ok {
+			failedHits++
+			continue
+		}
+		if _, ok := normalIDSet[msg.TriggeredByItemID]; ok {
+			normalHits++
+		}
+	}
+
+	if failedHits != halfFailed {
+		t.Fatalf("failed half: %d state_change publishes (want %d) — I-3 reset path must publish exactly once per claim",
+			failedHits, halfFailed)
+	}
+	if normalHits != 0 {
+		t.Fatalf("normal half: %d state_change publishes (want 0) — normal Ready→InProgress claim must NOT publish (SPEC §6.3.0 tension #2)",
+			normalHits)
+	}
+
+	t.Logf("N=100 split (failed=%d, normal=%d): state_change publishes: failed=%d, normal=%d",
+		halfFailed, N-halfFailed, failedHits, normalHits)
 }
