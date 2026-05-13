@@ -33,7 +33,10 @@
 
 package mcp
 
-import "context"
+import (
+	"context"
+	"net/http"
+)
 
 // WriteToolCallForTest is the integration-test-only re-export of
 // recordToolCall. See the file-level doc-comment for the rationale.
@@ -41,4 +44,22 @@ import "context"
 // directly.
 func WriteToolCallForTest(ctx context.Context, call ToolCall) {
 	recordToolCall(ctx, call)
+}
+
+// ServeMCPForTest is the integration-test-only re-export of
+// serveMCP. The natural test path — HTTP against
+// encore.Meta().APIBaseURL + "/mcp" — does not work under
+// `encore test` (the A-5 DEVIATION recorded in
+// apps/api/shared/mcpaudittest/mcpaudittest_test.go:62-75: encore's
+// in-process test listener does not route raw //encore:api routes;
+// E1387/E1389 forbid in-process references to MCPHandler). The
+// test suite wraps ServeMCPForTest in httptest.NewServer to drive
+// the transport behaviour end-to-end on a real http.Handler.
+//
+// Production callers MUST NOT use this — the parsed
+// //encore:api public raw path=/mcp is the only public route.
+// Lint convention: any non-test reference to ServeMCPForTest is a
+// smell — the suffix is the audit trail.
+func ServeMCPForTest(w http.ResponseWriter, r *http.Request) {
+	serveMCP(w, r)
 }

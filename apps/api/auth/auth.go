@@ -92,8 +92,21 @@ type ValidateRequest struct {
 }
 
 // ValidateResponse is the output of Validate. SPEC §4.1.
+//
+// APIKeyID is an additive field (bead unblock-tv8.16 / D-1 DECISION 2)
+// over SPEC §4.1's locked struct. It carries the mcp.api_keys.id ULID
+// when TokenKind="api_key" succeeds; it is empty for any other path
+// (session-token path returns Unimplemented in P01; failure paths
+// return an error and no ValidateResponse). The MCP transport requires
+// the id to populate mcp.tool_calls.api_key_id (SPEC §8.1, FK + NOT
+// NULL surface) without a second DB round-trip — auth.go:165 already
+// SELECTs the column, so surfacing it on the response is the
+// zero-cost path that preserves the <5 ms p99 hot-path budget
+// (SPEC §4.3.2). Pre-prod stance allows additive struct fields
+// per CLAUDE.md.
 type ValidateResponse struct {
 	Identity Identity
+	APIKeyID string
 }
 
 // Validate accepts an opaque token (session id OR raw API key) and resolves
@@ -208,12 +221,19 @@ func validateAPIKey(ctx context.Context, rawKey string) (*ValidateResponse, erro
 	if issuedToUser != nil {
 		uid = *issuedToUser
 	}
-	return &ValidateResponse{Identity: Identity{
-		UserID:    uid,
-		OrgID:     orgID,
-		Role:      roleAgent,
-		AgentKind: agentKind,
-	}}, nil
+	return &ValidateResponse{
+		Identity: Identity{
+			UserID:    uid,
+			OrgID:     orgID,
+			Role:      roleAgent,
+			AgentKind: agentKind,
+		},
+		// APIKeyID populated for the api_key path so the MCP
+		// transport's deferred audit row can write
+		// mcp.tool_calls.api_key_id without a second DB lookup
+		// (DECISION 2 on bead unblock-tv8.16).
+		APIKeyID: id,
+	}, nil
 }
 
 // touchLastUsedAt issues a fire-and-forget UPDATE on
