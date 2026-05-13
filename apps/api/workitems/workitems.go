@@ -1177,16 +1177,17 @@ func Claim(ctx context.Context, req *ClaimRequest) (*Item, error) {
 	defer func() { _ = tx.Rollback() }()
 
 	// SELECT FOR UPDATE: only succeeds if status='Ready' AND not yet
-	// claimed. Zero rows means the loser path.
-	var lockedID string
-	var qaState string
+	// claimed. Zero rows means the loser path. We also project org_id
+	// and project_id here so the I-3-path cascade publish (post-commit,
+	// below) has the scope fields it needs without a second read.
+	var lockedID, orgID, projectID, qaState string
 	err = tx.QueryRow(ctx,
-		`SELECT id, qa_state
+		`SELECT id, org_id, COALESCE(project_id, ''), qa_state
 		   FROM workitems.items
 		  WHERE id = $1 AND status = 'Ready' AND claimed_by_id IS NULL
 		  FOR UPDATE`,
 		req.ItemID,
-	).Scan(&lockedID, &qaState)
+	).Scan(&lockedID, &orgID, &projectID, &qaState)
 	if err != nil {
 		if errors.Is(err, sqldb.ErrNoRows) {
 			// Loser path — fetch winner info.
@@ -1239,6 +1240,41 @@ func Claim(ctx context.Context, req *ClaimRequest) (*Item, error) {
 
 	if err := tx.Commit(); err != nil {
 		return nil, &errs.Error{Code: errs.Internal, Message: "claim commit failed"}
+	}
+
+	// Round-6 §6.3.0 tension #2 narrow rule (SPEC §6.4 lines 1898-1914):
+	// Claim publishes CascadeRequested{Reason:"state_change", ...} ONLY
+	// on the I-3 reset path — that is, when the locked row carried
+	// qa_state='failed' at the start of the transaction and the
+	// transaction therefore wrote (review_state, qa_state) =
+	// ('pending', 'pending') atomically with the claim. Normal
+	// Ready→InProgress claim does NOT publish: the claimed item was
+	// non-Done before the claim and remains non-Done, so §5.7.1
+	// downstream pipeline_stage is unaffected. Encore Pub/Sub does
+	// not carry ctx across the topic boundary; we copy TraceID from
+	// tracectx into the payload explicitly (mirrors Close above).
+	if resetRework {
+		eventID, err := ulid.New()
+		if err != nil {
+			// Best-effort publish — the claim is already committed.
+			// A missing audit row is preferred to failing a committed
+			// claim. Matches Close's error handling above.
+			rlog.Warn("workitems: claim cascade event id generation failed",
+				"err", err, "item_id", req.ItemID)
+		} else {
+			if _, err := deps.CascadeRequestedTopic.Publish(ctx, &deps.CascadeRequested{
+				EventID:           eventID,
+				OrgID:             orgID,
+				ProjectID:         projectID,
+				TriggeredByItemID: req.ItemID,
+				Reason:            "state_change",
+				TraceID:           tracectx.TraceID(ctx),
+				EmittedAt:         time.Now().UTC(),
+			}); err != nil {
+				rlog.Warn("workitems: claim cascade publish failed (claim already committed)",
+					"err", err, "item_id", req.ItemID)
+			}
+		}
 	}
 
 	return readItem(ctx, req.ItemID)
