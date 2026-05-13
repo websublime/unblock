@@ -17,9 +17,14 @@
 //     (BEFORE auth runs — AC #3).
 //  2. Bearer parse + auth.Validate() in-package call (DECISION 1 on
 //     the bead — shape (b) from the investigation): keep
-//     `//encore:api public raw method=*`, do the auth manually
-//     inside the handler so the 405 path can bypass auth and the
-//     §4.3.1 sample reads verbatim.
+//     `//encore:api public raw path=/mcp` (Encore v1.52.1 rejects
+//     the literal `method=*` from SPEC §4.3.1's sample with E1371
+//     "Invalid endpoint method"; the raw-endpoint default per
+//     ENCORE.md is to match every HTTP method when `method=` is
+//     omitted — functionally identical to the `method=*` intent),
+//     do the auth manually inside the handler so the 405 path can
+//     bypass auth and the §4.3.1 sample's dispatch logic reads
+//     verbatim.
 //  3. On auth success: bind Identity onto tracectx and the deferred
 //     ToolCall, then ServeHTTP() against the SDK handler.
 //  4. On auth failure: write §7 error envelope with kind=UNAUTHENTICATED
@@ -29,10 +34,14 @@
 //     synthesize a sentinel without a schema change).
 //
 // Per round-2 review (L7-W2 closure) the endpoint uses a single
-// //encore:api annotation with `method=*` so HTTP-method routing
-// happens inside the function body. Encore's raw-endpoint convention
-// is one annotation per function; stacked POST+GET annotations are
-// not supported by the Encore parser.
+// //encore:api annotation so HTTP-method routing happens inside the
+// function body. Encore's raw-endpoint convention is one annotation
+// per function; stacked POST+GET annotations are not supported by
+// the Encore parser. The conceptual `method=*` from SPEC §4.3.1's
+// sample is elided in the literal annotation because the Encore
+// v1.52.1 parser rejects it with E1371; the raw-endpoint default
+// (per ENCORE.md) is to match every HTTP method when `method=` is
+// omitted, which is identical to the `method=*` intent.
 package mcp
 
 import (

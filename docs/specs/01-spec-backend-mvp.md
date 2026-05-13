@@ -23,8 +23,10 @@ findings closed in this round:
 - D2 — PRD §6.2 five structural state-machine invariants enforced at MCP
   layer in P01 (§6.2 Tool 13, §4.4 SetStateColumns + Claim).
 - L7-W2 — `MCPHandler` raw endpoint pinned to a single `//encore:api`
-  annotation with `method=*` wildcard (one annotation per function, per
-  Encore convention); HTTP-method dispatch lives inside the handler.
+  annotation with the elided-method form (raw-endpoint default per
+  ENCORE.md §raw_endpoints; functionally equivalent to a conceptual
+  `method=*` wildcard, which Encore v1.52.1 rejects with E1371);
+  HTTP-method dispatch lives inside the handler.
 - `deps.cascade_events.kind` column added (CHECK enum extended to 4
   values per §6.3.0); used by every `CascadeRequested` consumer.
   Reflected in SPEC §9.4.4 + §3.2 + §6.3.
@@ -467,12 +469,16 @@ package mcp
 // raw-endpoint convention is one //encore:api annotation per function
 // (https://encore.dev/docs/go/primitives/raw-endpoints): paired
 // POST+GET annotations on a single function are NOT supported by the
-// Encore parser. P01 uses the wildcard `method=*` form so the same
-// handler receives every HTTP method on `/mcp`; the handler rejects
-// methods other than POST/GET with a 405 reply produced via the Go MCP
-// SDK's transport adapter.
+// Encore parser. P01 uses the elided-method form (no `method=` token)
+// so the same handler receives every HTTP method on `/mcp`; this is
+// the documented raw-endpoint default (ENCORE.md §raw_endpoints) and
+// is functionally equivalent to the conceptual `method=*` wildcard
+// (Encore v1.52.1 rejects the literal `method=*` with E1371
+// "Invalid endpoint method"). The handler rejects methods other than
+// POST/GET with a 405 reply produced via the Go MCP SDK's transport
+// adapter.
 //
-//encore:api public raw method=* path=/mcp
+//encore:api public raw path=/mcp
 func MCPHandler(w http.ResponseWriter, r *http.Request) {
     switch r.Method {
     case http.MethodPost:
@@ -490,9 +496,12 @@ func MCPHandler(w http.ResponseWriter, r *http.Request) {
 `//encore:api public raw` annotations stacked on a single function (one
 per HTTP method). Per Encore's documented raw-endpoint syntax that form
 is unsupported — the parser binds at most one annotation per function.
-The wildcard `method=*` form delegates routing to the function body and
-matches the MCP 2025-06-18 spec, which intentionally puts both methods
-on the same path. (Alternative considered: split into `MCPPostHandler`
+The elided-method form (no `method=` token) is the raw-endpoint
+default and delegates routing to the function body — functionally
+identical to the conceptual `method=*` wildcard but compatible with
+the Encore v1.52.1 parser (the literal `method=*` is rejected with
+E1371). This matches the MCP 2025-06-18 spec, which intentionally
+puts both methods on the same path. (Alternative considered: split into `MCPPostHandler`
 + `MCPGetHandler` with two separate `//encore:api` declarations and let
 Encore's path multiplexer route. Rejected because the Go MCP SDK is
 designed around a single transport adapter that owns both methods —
@@ -1072,7 +1081,7 @@ Per FR-12, P01 exposes **one logical public endpoint**: `POST /mcp` +
 | `Accept` (client) | `application/json, text/event-stream` |
 | `Authorization` | `Bearer <api-key>` — required on **every** request |
 | `Mcp-Session-Id` | Returned by server on `initialize`; echoed by client on subsequent requests |
-| Heartbeat | Server emits SSE `:keepalive\n\n` every 15s on long-lived `GET /mcp` streams (mitigates Encore Cloud edge-proxy idle close per RP01-4) |
+| Heartbeat | Server emits an MCP-protocol-native JSON-RPC `ping` request over the open session every 15s on long-lived `GET /mcp` streams. On SSE streams the ping surfaces as an `event: message\ndata: {…ping…}` frame, which is what the modelcontextprotocol/go-sdk (v1.6.0, pinned by D-1) emits when its `ServerOptions.KeepAlive` is set per MCP spec 2025-06-18. The earlier `:keepalive\n\n` SSE-comment literal was a pre-SDK placeholder; the JSON-RPC `ping` is the protocol-canonical form and produces the same anti-idle effect at the wire level (mitigates Encore Cloud edge-proxy idle close per RP01-4). |
 | Error envelope | JSON-RPC 2.0 error object (see §7) |
 
 ### 5.2 What is NOT exposed in P01
@@ -2357,6 +2366,44 @@ does not exist until P04). It activates as load-bearing in P04.
 
 `mcp.meta_catalogue` MCP tool itself is **not** exposed in P01 — it ships
 in P02 once the BLOCK conditions are authored.
+
+### 10.4 Security boundary / threat model (D-1 transport addendum)
+
+The public `POST /mcp` + `GET /mcp` surface (§5) is exposed only on
+Encore Cloud's public hostname (`api.unblock.websublime.com` per
+`apps/api/README.md` and the project CLAUDE.md). The Bearer API-key hot
+path (§4.3.2) is the canonical authentication gate; every successful
+request resolves to a tenant-scoped `Identity` before any tool body
+runs, and every method other than `POST` / `GET` returns `405 Allow:
+POST, GET` *before* auth fires (§5.1, AC #3).
+
+The modelcontextprotocol/go-sdk Streamable HTTP handler exposes a
+defense-in-depth setting `StreamableHTTPOptions.DisableLocalhostProtection`
+that, when left at its default (`false`), refuses requests whose
+`Host` header is not loopback while the listener is bound to
+loopback — a DNS-rebinding mitigation aimed at single-binary
+desktop / dev deployments. P01 sets it to `true` (apps/api/mcp/transport.go).
+Rationale:
+
+- Encore Cloud's public hostname is the same as the listening interface
+  in production; the SDK's loopback check would refuse every legitimate
+  request and is therefore inapplicable to the deployment target.
+- The Bearer hot path (§4.3.2) + Encore Cloud's TLS-terminating edge
+  proxy are the real security boundary; an unauthenticated cross-origin
+  caller cannot reach a tool body regardless of `Host` header value.
+- The acceptance test suite (`apps/api/shared/mcpaudittest/`) runs
+  against `httptest.NewServer`, which emits `Host: 127.0.0.1:<port>`
+  in some cases and other host strings in others; the SDK's localhost
+  guard would refuse the very tests that prove the Bearer gate works.
+- The trade-off is explicit: P01 does **not** support running the
+  Encore binary on a developer laptop as a localhost-only MCP server
+  for un-trusted local web pages to call. That deployment shape is out
+  of scope; the `unblock-code` Rust binary serves that local-dev role
+  via its own stdio MCP transport (Plan §1.2).
+
+If a future phase introduces a localhost-binding deployment shape
+(e.g. an on-prem appliance), the setting must be re-evaluated and the
+threat model patched accordingly.
 
 ---
 
