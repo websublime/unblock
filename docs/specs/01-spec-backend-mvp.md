@@ -6,6 +6,7 @@
 - 2026-05-08 — DRIFT-2 (format): corrected the local-secrets file path/format from `.encore/local-secrets.toml` (TOML) to `apps/api/.secrets.local.cue` (CUE) per Encore official docs (https://encore.dev/docs/go/primitives/secrets); updated syntax examples and gitignore guidance.
 - 2026-05-11 — round-4 (auth drift fixes from Sherlock's investigation on bead unblock-tv8.7): §4.3.2 step 2 aligned with locked key-format note (DRIFT-A); §4.3.3 AuthHandler signature corrected to Encore structured-params form for header dispatch (DRIFT-B); §12 task table cell for B-1 corrected from §6.4 to §4.3.3 (DRIFT-C); session-path P01 contract pinned (returns errs.Unimplemented; multi-org disambiguation deferred to BFF phase).
 - 2026-05-12 — round-5 (tracing contract from Sherlock's investigation on bead `unblock-tv8.5`): §10.2 picks Option B — ULID minted at MCP entry, propagated via `context.Context` only; removed the spurious `X-Unblock-Trace-Id` outgoing-RPC header (Encore's generated client carries `ctx` across private RPCs for free, and Pub/Sub embeds the id in the payload). §7, §8.1, §8.2, §4.5, and §6.3.1 reworded to reference Option B. Encore's runtime `req.Trace.TraceID` is observability-only and not persisted. DDL frozen — no schema change.
+- 2026-05-14 — round-7 (cursor keyset pagination, P01): Tools 2 (`ready`), 8 (`list`), and 9 (`search`) now share a cursor keyset pagination contract pinned in the new §6.2.0. Tool 2's "No pagination at v1.0" paragraph is removed; the §6.2 contracts for Tools 2/9 gain `cursor` argument + `next_cursor` result (Tool 8 already carried both). Cursors are opaque base64url-encoded JSON tuples HMAC-signed with `API_KEY_HMAC_SECRET`; the per-tool tuples are `{priority, created_at_unix_us, id}` (Tool 2), `{id}` (Tool 8), `{rank, item_id, comment_id}` (Tool 9). Invalid cursors → §7 `VALIDATION` envelope with `data.field = "cursor"`. No schema change — migration `0100` already covers the Tool 2 ORDER BY.
 - 2026-05-12 — round-6 (cascade-symmetry): the cascade subsystem is split into two regimes (new §6.3.0). `is_ready` is maintained inline by the writer that mutated the row/edge (single-hop); `pipeline_stage` is maintained exclusively by the cascade subscriber (multi-hop). `deps.cascade_events.kind` CHECK is extended from 2 values (`'close' | 'edge_removed'`) to 4 values (`'close' | 'edge_added' | 'edge_removed' | 'state_change'`). Tools 6 (close), 11 (add_dependency), 12 (remove_dependency), 13 (set_state — narrow rule for §5.7.1-affecting writes), and `workitems.Claim` (only on the I-3 reset path) post-commit publish `CascadeRequested` with the matching `Reason`. Tool 12 reuses the inline audit row's `event_id` on its post-commit publish; the subscriber's `ON CONFLICT (event_id, triggered_by_item_id) DO NOTHING` collapses the second insert to no-op. The §11.3 single-writer invariant is fractured: (a) `pipeline_stage` single-writer = cascade subscriber; (b) `is_ready` single-writer = the mutating call site (Tool 6 close, §6.5 add_edge, Tool 12 remove_edge, internal helper `deps.recomputeReady`); the linter rule scope tightens to `pipeline_stage` only with an explicit allowlist for `is_ready`. DDL migration `0050_deps.up.sql` updated in lockstep (CHECK list + doc comments).
 
 **Author:** Ada (architect)
@@ -1137,6 +1138,44 @@ P01 uses `structuredContent` for typed payload (introduced in MCP
 2025-06-18 spec) and replicates the JSON in `content[0].text` for clients
 that have not adopted `structuredContent` parsing.
 
+### 6.2.0 Cursor keyset pagination
+
+Tools 2 (`ready`), 8 (`list`), and 9 (`search`) expose cursor keyset
+pagination over their respective canonical sort tuples. The contract is
+identical across all three read surfaces:
+
+- **Argument.** `cursor` is an OPTIONAL opaque string. When absent the
+  server returns the first page. When present, the server decodes +
+  verifies it and returns rows strictly after the encoded anchor.
+- **Result.** `next_cursor` is a string OR `null`. When `null` the
+  caller has reached the end of the stream — the response is the final
+  page. When a string, passing it back as the next request's `cursor`
+  yields the next page with zero duplicates and zero skips.
+- **Encoding.** Cursors are `base64url`-encoded JSON tuples followed by
+  an HMAC-SHA256 tag computed with the deployment's
+  `API_KEY_HMAC_SECRET` (re-used; no new secret is introduced in P01).
+  Tuple shape per tool:
+  - Tool 2 `ready`: `{priority, created_at_unix_us, id}`.
+  - Tool 8 `list`: `{id}` (List orders by `id ASC` only — see §4.4).
+  - Tool 9 `search`: `{rank, item_id, comment_id}`.
+- **Validation errors.** Any of (decode failure, HMAC mismatch, wrong
+  tuple shape, tuple field type mismatch) MUST return the §7
+  `VALIDATION` envelope with `data.field = "cursor"`. Cursors are NOT
+  cross-tool portable — a Tool 2 cursor presented to Tool 8 is a
+  shape mismatch and is rejected.
+- **Lifetime.** Cursors are NOT persisted server-side. They survive
+  process restarts (signed by the secret) but a secret rotation
+  invalidates every outstanding cursor — a pre-prod-acceptable
+  operational tradeoff identical to the API-key contract (§4.3.2).
+
+Rationale: after migration `0100` (Tool 2's covering index) the keyset
+ORDER BY for the three read tools is served from a pure index scan.
+Filters (`priority_min`, `project_id`, `claimed_by`, `labels`,
+FTS predicate) compose with the cursor predicate as additional WHERE
+clauses — they narrow the result set but do NOT substitute for
+pagination when an agent legitimately needs to consume the full set
+in chunks.
+
 ### 6.2 Tool-by-tool contracts
 
 > **Round-2 D1 deferral note.** Milestone CRUD MCP tools
@@ -1180,14 +1219,16 @@ Returns the dashboard for a fresh agent session.
 // arguments
 {
   "project_id": "<ULID; optional>",
-  "limit": 10,        // 1..200; default 10
-  "priority_min": "P3" // optional; "P0".."P4"
+  "limit": 10,         // 1..200; default 10
+  "priority_min": "P3", // optional; "P0".."P4"
+  "cursor": "<opaque>"  // optional; first page when absent
 }
 
 // structuredContent
 {
   "items": [ /* Item objects ordered by (priority asc, created_at asc, id asc) */ ],
-  "total_ready": 0   // total count for the org/project, may exceed `limit`
+  "total_ready": 0,        // total count for the org/project, may exceed `limit`
+  "next_cursor": "<opaque|null>"  // null when this is the last page
 }
 ```
 
@@ -1195,15 +1236,19 @@ Read implementation: filtered scan of `workitems.items` using
 `items_ready_partial_idx` (`WHERE is_ready = true AND status = 'Ready' AND
 closed_at IS NULL`). Deterministic ordering is guaranteed by the
 `(priority, created_at, id)` composite sort; `id` is a ULID so it serves
-as a stable tiebreaker.
+as a stable tiebreaker. After migration `0100` the index covers
+`(org_id, project_id, priority, created_at, id)` so the ORDER BY +
+keyset pagination is served from a pure index scan.
 
-**No pagination at v1.0** (review L6-W7). The `limit` argument caps the
-returned page; `total_ready` indicates whether more exist. Agents that
-need more should narrow filters (`priority_min`, `project_id`) rather
-than paginate. Cursor pagination is a P02+ enhancement if real-world
-ready-set sizes exceed practical hint values; v1 expectation is that
-Stage-3-disciplined work tracking keeps the ready set small (< 100
-items typical).
+**Cursor keyset pagination.** `cursor` is an opaque, server-signed token
+that encodes the last-row position on the canonical sort tuple
+`(priority, created_at, id)`. On request, the server decodes + verifies
+the token and emits the page strictly after that anchor; on response,
+`next_cursor` is the token for the row that would start the next page
+(or `null` when no more rows exist). Token shape, signing, and error
+contract are pinned in §6.2.0 (Cursor keyset pagination) below. Agents
+MUST NOT manufacture or mutate cursor values — invalid cursors are
+rejected with the §7 `VALIDATION` envelope (`data.field = "cursor"`).
 
 #### Tool 3 — `claim`
 
@@ -1359,7 +1404,8 @@ dispatch).
 {
   "project_id": "<ULID; optional>",
   "query": "ready handler",   // websearch_to_tsquery format
-  "limit": 25                  // 1..100; default 25
+  "limit": 25,                 // 1..100; default 25
+  "cursor": "<opaque>"         // optional; first page when absent
 }
 
 // structuredContent
@@ -1372,13 +1418,17 @@ dispatch).
       "rank": 0.87,
       "snippet": "<ts_headline output, ≤ 200 chars>"
     }
-  ]
+  ],
+  "next_cursor": "<opaque|null>"  // null when this is the last page
 }
 ```
 
 Query plan: `UNION ALL` over `items_fts_idx` and `comments_fts_idx`
 (per AF1 / R-P01-7), filtered by `org_id` (and `project_id` if supplied)
-via the RBAC helper, ranked by `ts_rank_cd` desc, limited to N.
+via the RBAC helper, ranked by `ts_rank_cd` desc, limited to N. Keyset
+pagination uses the canonical FTS sort tuple `(rank desc, item_id asc,
+comment_id asc)` — see §6.2.0 for the cursor contract; `comment_id` is
+the empty string for `source="item"` rows so the tiebreaker is total.
 
 #### Tool 10 — `comment`
 

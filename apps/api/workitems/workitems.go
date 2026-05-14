@@ -236,7 +236,8 @@ type ListResponse struct {
 	NextCursor string
 }
 
-// ReadyRequest is the input to Ready. SPEC §6.2 Tool 2 (lines 1177-1206).
+// ReadyRequest is the input to Ready. SPEC §6.2 Tool 2 (lines 1177-1206)
+// + §6.2.0 (cursor keyset pagination).
 //
 // Empty ProjectID means org-wide scope (caller has no "primary project"
 // concept in P01 — see SPEC §6.2 line 1161 "defaults to caller's
@@ -244,21 +245,50 @@ type ListResponse struct {
 // layer collapses missing project_id to org-wide). PriorityMin is the
 // lowest priority included in results, "P0".."P4" lexicographic
 // (P0 highest, P4 lowest); empty string = no filter.
+//
+// Cursor fields (CursorPriority, CursorCreatedAt, CursorID) carry the
+// anchor of the previous page, encoded by the MCP layer and decoded
+// before this RPC is called. The RPC itself is cursor-token-agnostic
+// — the MCP layer owns the §6.2.0 HMAC/opacity contract; this RPC
+// only sees the resolved keyset tuple. All three fields are present
+// or all three are zero (the MCP boundary enforces this); a partially
+// populated triple is an invalid call and Ready will return no
+// next-cursor predicate.
 type ReadyRequest struct {
-	OrgID       string
+	// OrgID is intentionally absent — Ready pins scope to
+	// identity.OrgID via rbac.For per the §10.1 canonical pattern.
+	// The rework S1 removed the field so confused-deputy callers
+	// cannot pass a mismatched org_id; the org gate is the
+	// authenticated identity, period.
 	ProjectID   string
 	Limit       int
 	PriorityMin string
+
+	// Cursor anchor (§6.2.0 keyset tuple for Tool 2). When CursorID
+	// is non-empty, Ready emits rows STRICTLY AFTER
+	// (CursorPriority, CursorCreatedAt, CursorID) on the canonical
+	// (priority ASC, created_at ASC, id ASC) order.
+	CursorPriority  string
+	CursorCreatedAt time.Time
+	CursorID        string
 }
 
-// ReadyResponse is the output of Ready. SPEC §6.2 Tool 2.
+// ReadyResponse is the output of Ready. SPEC §6.2 Tool 2 + §6.2.0.
 //
-// TotalReady is the count of ready items across the same scope (no
-// pagination at v1.0 — review L6-W7) so the caller can decide whether
-// more exist behind the Limit cap.
+// TotalReady is the count of ready items across the same scope so the
+// caller can decide whether more exist behind the Limit cap.
+// NextCursor* carries the keyset anchor of the row that would START
+// the next page. All three NextCursor* fields are populated together;
+// they are zero when this is the final page. The MCP layer encodes
+// the triple into the opaque §6.2.0 cursor token (or null) before
+// surfacing on the wire.
 type ReadyResponse struct {
 	Items      []Item
 	TotalReady int
+
+	NextCursorPriority  string
+	NextCursorCreatedAt time.Time
+	NextCursorID        string
 }
 
 // SearchRequest is the input to Search. SPEC §4.4.
@@ -1465,10 +1495,13 @@ func List(ctx context.Context, req *ListRequest) (*ListResponse, error) {
 }
 
 // readyDefaultLimit / readyMaxLimit cap the §6.2 Tool 2 page size.
-// Spec: limit 1..50; default 10 (lines 1183-1184).
+// Spec §6.2 Tool 2 line 1183: limit 1..200; default 10. (Round-7
+// rework: prior implementation truncated downstream at 50 — a contract
+// violation per Linus REVIEW S2; corrected here to honour the full
+// 1..200 range so the spec-mandated ceiling is reachable.)
 const (
 	readyDefaultLimit = 10
-	readyMaxLimit     = 50
+	readyMaxLimit     = 200
 )
 
 // Ready returns the ready set for the §6.2 Tool 2 MCP `ready` tool.
@@ -1476,16 +1509,23 @@ const (
 // strings — P0 is highest, P4 lowest — so priority_min = "P3"
 // means "include P0..P3" (priority <= 'P3' on the SQL side).
 //
-// Filters: org_id (required), project_id (optional — empty = org-wide
-// scope), priority_min (optional — "P0".."P4" lexicographic). Ordering
-// is deterministic on (priority asc, created_at asc, id asc) and
-// covered by items_ready_partial_idx (migration 0040 + 0100 — see the
-// 0100 file header for the index extension that lets the planner serve
-// the ORDER BY from a pure index scan).
+// Authorisation: scope is pinned to identity.OrgID via rbac.For per
+// the §10.1 canonical pattern. req.OrgID is ignored — the MCP layer
+// already trusts identity; carrying an org_id field on the request
+// would only invite confused-deputy seams.
+//
+// Filters: project_id (optional — empty = org-wide scope),
+// priority_min (optional — "P0".."P4" lexicographic). Ordering is
+// deterministic on (priority asc, created_at asc, id asc) and covered
+// by items_ready_partial_idx (migration 0040 + 0100). After migration
+// 0100 the index columns are (org_id, project_id, priority,
+// created_at, id) so the ORDER BY + keyset pagination serve entirely
+// from a pure index scan.
 //
 // total_ready counts every ready item in the same scope so the caller
-// can detect overflow past `limit` without paginating (v1.0 has NO
-// pagination on this endpoint — review L6-W7).
+// has a denominator even when paginating; the cursor anchor on the
+// response carries the keyset for the next page (or zero when this is
+// the last page).
 //
 //encore:api private method=POST path=/workitems.Ready
 func Ready(ctx context.Context, req *ReadyRequest) (*ReadyResponse, error) {
@@ -1495,21 +1535,6 @@ func Ready(ctx context.Context, req *ReadyRequest) (*ReadyResponse, error) {
 	identity, ok := callerIdentity(ctx)
 	if !ok {
 		return nil, &errs.Error{Code: errs.Unauthenticated, Message: "no caller identity"}
-	}
-
-	// MCP layer is the authoritative caller of this RPC. We do NOT
-	// trust req.OrgID at face value — pin it to identity.OrgID so a
-	// confused upstream cannot leak across orgs. (Same posture as
-	// workitems.List which uses rbac.For for the same guarantee.)
-	if req.OrgID == "" {
-		req.OrgID = identity.OrgID
-	}
-	if req.OrgID != identity.OrgID {
-		return nil, &errs.Error{
-			Code:    errs.PermissionDenied,
-			Message: "cross-org ready read is not allowed",
-			Meta:    errs.Metadata{"field": "org_id"},
-		}
 	}
 
 	limit := req.Limit
@@ -1531,38 +1556,67 @@ func Ready(ctx context.Context, req *ReadyRequest) (*ReadyResponse, error) {
 		}
 	}
 
-	// Hot-path read against items_ready_partial_idx. The partial
+	// Hot-path read against items_ready_partial_idx, gated by rbac.For
+	// so the org_id predicate is the rbac builder's canonical scope
+	// clause (style-only refactor; rework S1). The partial-index
 	// predicate (is_ready = true AND status = 'Ready' AND closed_at
 	// IS NULL) MUST match the index definition verbatim — drift here
-	// would force the planner off the index. After migration 0100 the
-	// index columns are (org_id, project_id, priority, created_at, id)
-	// so the ORDER BY below serves entirely from the index. Empty
-	// project_id ($2 = '') skips the project filter for org-wide
-	// scope per the §6.2 Tool 1/2 "primary project" P01 contract.
-	rows, err := db.Query(ctx,
-		`SELECT `+itemColumnList+`
-		   FROM workitems.items
-		  WHERE org_id = $1
-		    AND is_ready = true
-		    AND status = 'Ready'
-		    AND closed_at IS NULL
-		    AND ($2 = '' OR project_id = $2)
-		    AND ($3 = '' OR priority <= $3)
-		  ORDER BY priority ASC, created_at ASC, id ASC
-		  LIMIT $4`,
-		req.OrgID, req.ProjectID, priorityMin, limit,
-	)
+	// would force the planner off the index. Empty project_id skips
+	// the project filter for org-wide scope per the §6.2 Tool 1/2
+	// "primary project" P01 contract.
+	//
+	// The ORDER BY + LIMIT clause is smuggled through Where("1 = 1
+	// ORDER BY ...") because rbac.For's SELECT * shape pins the
+	// builder to filter predicates only; this mirrors the same trick
+	// used by workitems.List for its own ORDER BY.
+	q := rbac.For[itemRow](identity, "workitems.items").
+		Where("is_ready = true").
+		Where("status = 'Ready'").
+		Where("closed_at IS NULL")
+	if req.ProjectID != "" {
+		q = q.Where("project_id = $1", req.ProjectID)
+	}
+	if priorityMin != "" {
+		q = q.Where("priority <= $1", priorityMin)
+	}
+	// §6.2.0 keyset pagination. The anchor tuple is (priority,
+	// created_at, id) — all three fields populated together by the
+	// MCP cursor decoder, all three zero on a first-page request.
+	// We compare against the lexicographic tuple via the canonical
+	// `(a, b, c) > (x, y, z)` row-constructor form so the partial
+	// index serves the predicate as an index range scan.
+	if req.CursorID != "" {
+		q = q.Where(
+			"(priority, created_at, id) > ($1, $2, $3)",
+			req.CursorPriority, req.CursorCreatedAt, req.CursorID,
+		)
+	}
+	// We fetch limit+1 to detect whether a next page exists; the
+	// extra row's anchor becomes the next cursor and is NOT
+	// returned to the caller.
+	q = q.Where("1 = 1 ORDER BY priority ASC, created_at ASC, id ASC LIMIT $1", limit+1)
+	rows, err := q.Run(ctx)
 	if err != nil {
-		rlog.Error("workitems: ready query failed", "err", err, "org_id", req.OrgID)
+		rlog.Error("workitems: ready query failed", "err", err, "org_id", identity.OrgID)
 		return nil, &errs.Error{Code: errs.Internal, Message: "ready query failed"}
 	}
-	defer rows.Close()
 
 	out := make([]Item, 0, limit)
-	for rows.Next() {
-		var r itemRow
-		if err := scanItemRow(rows, &r); err != nil {
-			return nil, &errs.Error{Code: errs.Internal, Message: "ready scan failed"}
+	var nextCursorPriority, nextCursorID string
+	var nextCursorCreatedAt time.Time
+	for i, r := range rows {
+		if i >= limit {
+			// limit+1 hit — a next page exists. Encode the cursor as
+			// the LAST row of the CURRENT page (rows[limit-1]); the
+			// next request will emit rows STRICTLY AFTER that anchor
+			// via the (priority, created_at, id) > (cursor) predicate.
+			// Encoding the limit+1 row itself would skip it on the
+			// next page (it is the start, not the anchor before it).
+			last := rows[limit-1]
+			nextCursorPriority = last.Priority
+			nextCursorCreatedAt = last.CreatedAt
+			nextCursorID = last.ID
+			break
 		}
 		item, err := itemFromRow(ctx, r)
 		if err != nil {
@@ -1570,15 +1624,15 @@ func Ready(ctx context.Context, req *ReadyRequest) (*ReadyResponse, error) {
 		}
 		out = append(out, *item)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, &errs.Error{Code: errs.Internal, Message: "ready iter failed"}
-	}
 
-	// Second query for the total count across the same predicate. The
-	// partial index serves this as an index-only scan with no rows
-	// returned. We intentionally do NOT inline this as a window
+	// Second query for the total count across the same predicate.
+	// The partial index serves this as an index-only scan with no
+	// rows returned. We intentionally do NOT inline this as a window
 	// function on the first query — that would force the planner off
-	// the partial index for the LIMIT path.
+	// the partial index for the LIMIT path. Identity is the scope
+	// gate (org_id = identity.OrgID), matching the rbac.For query
+	// above; cursor and limit are NOT applied here (total_ready is
+	// the unpaginated count).
 	var totalReady int
 	if err := db.QueryRow(ctx,
 		`SELECT COUNT(*)
@@ -1589,13 +1643,19 @@ func Ready(ctx context.Context, req *ReadyRequest) (*ReadyResponse, error) {
 		    AND closed_at IS NULL
 		    AND ($2 = '' OR project_id = $2)
 		    AND ($3 = '' OR priority <= $3)`,
-		req.OrgID, req.ProjectID, priorityMin,
+		identity.OrgID, req.ProjectID, priorityMin,
 	).Scan(&totalReady); err != nil {
-		rlog.Error("workitems: ready count failed", "err", err, "org_id", req.OrgID)
+		rlog.Error("workitems: ready count failed", "err", err, "org_id", identity.OrgID)
 		return nil, &errs.Error{Code: errs.Internal, Message: "ready count failed"}
 	}
 
-	return &ReadyResponse{Items: out, TotalReady: totalReady}, nil
+	return &ReadyResponse{
+		Items:               out,
+		TotalReady:          totalReady,
+		NextCursorPriority:  nextCursorPriority,
+		NextCursorCreatedAt: nextCursorCreatedAt,
+		NextCursorID:        nextCursorID,
+	}, nil
 }
 
 // Search performs multi-table FTS (UNION ALL over items_fts_idx and
