@@ -1137,8 +1137,16 @@ func Close(ctx context.Context, req *CloseRequest) (*Item, error) {
 		return nil, &errs.Error{Code: errs.Internal, Message: "close read failed"}
 	}
 	if claimedBy == nil || *claimedBy == "" {
-		// AF3 defensive check.
-		return nil, preconditionError("claimed_by_id_required", "close requires claimed_by_id IS NOT NULL")
+		// AF3 defensive check. SPEC §6.2 Tool 6 line 1334 mandates the §7
+		// envelope carry `data.missing = "claimed_by_id"` on this path;
+		// preconditionErrorMissing sets BOTH Meta["invariant"] (for
+		// rejection_reason on the audit row) AND Meta["missing"] (for the
+		// envelope's data.missing) so the MCP layer never has to retrofit
+		// the field at the wire boundary.
+		return nil, preconditionErrorMissing(
+			"claimed_by_id_required", "claimed_by_id",
+			"close requires claimed_by_id IS NOT NULL",
+		)
 	}
 	if currentStatus == statusDone {
 		// Idempotent close — read back and return.
@@ -1476,9 +1484,18 @@ func List(ctx context.Context, req *ListRequest) (*ListResponse, error) {
 	var nextCursor string
 	for i, r := range rows {
 		if i >= limit {
-			// We fetched limit+1 to know if a next page exists. The
-			// extra row's id becomes the next cursor.
-			nextCursor = r.ID
+			// Sentinel row (rows[limit]) — we fetched limit+1 just to
+			// detect "more pages exist". The cursor anchor is the LAST
+			// row of the CURRENT page (rows[limit-1]); the strict-
+			// greater-than predicate (`id > $1`) on the next request
+			// resumes at the sentinel without duplicating the anchor
+			// AND without skipping the sentinel. This mirrors Ready's
+			// cursor model (workitems.Ready :: nextCursorID =
+			// rows[limit-1].ID) — both tools share the §6.2.0
+			// "zero duplicates, zero skips" invariant. Setting
+			// nextCursor to the sentinel itself (rows[limit].ID) would
+			// drop one row per page under `id > $1`.
+			nextCursor = rows[limit-1].ID
 			break
 		}
 		if len(req.Labels) > 0 && !hasAllLabels(r.ID, req.Labels) {
@@ -2305,6 +2322,29 @@ func preconditionError(invariant, message string) error {
 		Code:    errs.FailedPrecondition,
 		Message: message,
 		Meta:    errs.Metadata{"invariant": invariant},
+	}
+}
+
+// preconditionErrorMissing builds a FailedPrecondition error that
+// additionally carries a `missing` field naming the column / argument
+// whose absence triggered the precondition. The MCP errmap projects
+// Meta["missing"] into the §7 PRECONDITION_NOT_MET envelope's
+// `data.missing` per SPEC §7 (line 2061) and §6.2 Tool 6 (line 1334:
+// "PRECONDITION_NOT_MET and data.missing = \"claimed_by_id\"").
+//
+// Use this builder when the precondition is a "<column> IS NOT NULL"
+// gate; for invariants that have no single missing-input scalar (e.g.
+// the I-3 / I-4 / I-5 transitions in SetStateColumns) keep
+// preconditionError above — Meta["invariant"] alone surfaces as
+// `data.rejection_reason` per errmap's classifyEnvelopeError.
+func preconditionErrorMissing(invariant, missing, message string) error {
+	return &errs.Error{
+		Code:    errs.FailedPrecondition,
+		Message: message,
+		Meta: errs.Metadata{
+			"invariant": invariant,
+			"missing":   missing,
+		},
 	}
 }
 
