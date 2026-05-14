@@ -32,6 +32,12 @@ const (
 	// connection scope.
 	flagged4 = `UPDATE items SET is_ready = true WHERE id = $1` // want `direct UPDATE on workitems.items.is_ready or pipeline_stage outside encore.app/deps`
 
+	// Positive: pipeline_stage-specific case with mixed-case SQL keywords
+	// and inline SET clause. Locks the pipeline_stage column gate for
+	// unblock-tv8.14 (§5.7.1 / §11.3 single-writer invariant) as a
+	// belt-and-braces complement to flagged2's multi-line variant.
+	flagged5 = `Update Workitems.Items Set pipeline_stage = 'Quality' Where id = $1` // want `direct UPDATE on workitems.items.is_ready or pipeline_stage outside encore.app/deps`
+
 	// Negative: a clean UPDATE on a different column must NOT fire.
 	cleanColumn = `UPDATE workitems.items SET status = 'Done' WHERE id = $1`
 
@@ -71,6 +77,6 @@ const (
 
 // Reference the consts so go vet does not complain about unused
 // package-level identifiers in the analysistest run.
-var _ = flagged1 + flagged2 + flagged3 + flagged4 +
+var _ = flagged1 + flagged2 + flagged3 + flagged4 + flagged5 +
 	cleanColumn + cleanSelect + cleanComment + cleanInsert +
 	cleanIdentifier + cleanDelete + cleanSiblingTable
