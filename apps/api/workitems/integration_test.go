@@ -610,6 +610,17 @@ func TestCloseHappyPath(t *testing.T) {
 	if commentCount != 1 {
 		t.Fatalf("close-reason comment count = %d, want 1", commentCount)
 	}
+
+	// AC for bead unblock-tv8.18 D-3 Tool 6: close emits exactly one
+	// CascadeRequested{Reason:"close"} publish on the deps topic. Same
+	// observation pattern as TestClaimResetsReworkOnQAFailed above —
+	// `encore test` does not fire subscribers, but the publish itself
+	// is observable via et.Topic when publisher and observer share the
+	// same test goroutine.
+	msgs := cascadeRequestedMessagesFor(itemID, "close")
+	if len(msgs) != 1 {
+		t.Fatalf("CascadeRequested{Reason=close, item=%s} publish count = %d, want 1", itemID, len(msgs))
+	}
 }
 
 // -----------------------------------------------------------------------------
