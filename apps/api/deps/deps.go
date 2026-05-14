@@ -98,25 +98,92 @@ type AddEdgeRequest struct {
 //
 //encore:api private method=POST path=/deps.AddEdge
 func AddEdge(ctx context.Context, req *AddEdgeRequest) (*Edge, error) {
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return nil, &errs.Error{Code: errs.Internal, Message: "db begin failed"}
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	edge, postCommit, err := AddEdgeInTx(ctx, tx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, &errs.Error{Code: errs.Internal, Message: "commit failed"}
+	}
+
+	postCommit(ctx)
+	return edge, nil
+}
+
+// AddEdgeInTxPostCommit is the post-commit work the caller of
+// AddEdgeInTx MUST invoke AFTER successfully committing the caller's
+// transaction. It performs the §6.3.0 Regime-B publish on
+// `deps.cascade.requested` so the multi-hop pipeline_stage recompute
+// fires on the forward closure from to_item.
+//
+// The function takes ctx so the publisher can pull trace_id from
+// tracectx (Encore Pub/Sub does not carry ctx across the topic
+// boundary; the publisher copies TraceID into the message payload
+// explicitly). Best-effort: a publish failure does NOT roll back the
+// edge — the transaction is already committed by the time this is
+// invoked.
+type AddEdgeInTxPostCommit func(ctx context.Context)
+
+// AddEdgeInTx runs the §4.5 AddEdge body inside the caller-provided
+// transaction. The caller is responsible for tx.Begin / tx.Commit /
+// tx.Rollback and for invoking the returned post-commit hook
+// (CascadeRequested publish) AFTER a successful commit.
+//
+// Use this helper when multiple writes must be atomic with the edge
+// insert — for example, workitems.Create's combined item+labels+edges
+// transaction (orchestrator DECISION on bead unblock-tv8.17 / D-2,
+// 2026-05-14, decision #1).
+//
+// Standalone callers should invoke the AddEdge //encore:api endpoint
+// which wraps this helper in its own transaction and is on the public
+// RPC surface.
+//
+// Concurrency: this helper acquires the §6.5 per-project advisory
+// lock via pg_advisory_xact_lock. The caller's transaction holds the
+// lock for the rest of the tx's lifetime — keep the tx short.
+//
+// Errors mirror AddEdge's contract verbatim:
+//
+//   - InvalidArgument for missing/invalid fields, self-loop, bad
+//     kind, cross-org or cross-project endpoints.
+//   - NotFound when either endpoint is missing.
+//   - AlreadyExists on duplicate (from, to, kind) (UNIQUE
+//     dependencies_pair_uniq).
+//   - FailedPrecondition with Meta.kind="CYCLE_DETECTED" + cycle_path
+//     when the edge would close a cycle. The cycle forensic row in
+//     deps.cycles is written via a SEPARATE top-level statement BEFORE
+//     this helper returns, so it survives the caller's tx.Rollback —
+//     same contract as AddEdge's standalone path.
+//   - Internal for any unexpected DB error.
+//
+// SPEC: §4.5 + §6.5.
+func AddEdgeInTx(ctx context.Context, tx *sqldb.Tx, req *AddEdgeRequest) (*Edge, AddEdgeInTxPostCommit, error) {
 	if req == nil {
-		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "missing request"}
+		return nil, nil, &errs.Error{Code: errs.InvalidArgument, Message: "missing request"}
 	}
 	if req.OrgID == "" {
-		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "missing org_id", Meta: errs.Metadata{"field": "org_id"}}
+		return nil, nil, &errs.Error{Code: errs.InvalidArgument, Message: "missing org_id", Meta: errs.Metadata{"field": "org_id"}}
 	}
 	if req.ProjectID == "" {
-		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "missing project_id", Meta: errs.Metadata{"field": "project_id"}}
+		return nil, nil, &errs.Error{Code: errs.InvalidArgument, Message: "missing project_id", Meta: errs.Metadata{"field": "project_id"}}
 	}
 	if req.FromItem == "" {
-		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "missing from_item", Meta: errs.Metadata{"field": "from_item_id"}}
+		return nil, nil, &errs.Error{Code: errs.InvalidArgument, Message: "missing from_item", Meta: errs.Metadata{"field": "from_item_id"}}
 	}
 	if req.ToItem == "" {
-		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "missing to_item", Meta: errs.Metadata{"field": "to_item_id"}}
+		return nil, nil, &errs.Error{Code: errs.InvalidArgument, Message: "missing to_item", Meta: errs.Metadata{"field": "to_item_id"}}
 	}
 	if req.FromItem == req.ToItem {
 		// dependencies_no_self_loop_chk would also reject this; surface a
 		// clearer error than the CHECK violation.
-		return nil, &errs.Error{
+		return nil, nil, &errs.Error{
 			Code:    errs.InvalidArgument,
 			Message: "self-loop edges are forbidden",
 			Meta:    errs.Metadata{"field": "to_item_id"},
@@ -127,21 +194,12 @@ func AddEdge(ctx context.Context, req *AddEdgeRequest) (*Edge, error) {
 		kind = "blocks"
 	}
 	if _, ok := allowedEdgeKinds[kind]; !ok {
-		return nil, &errs.Error{
+		return nil, nil, &errs.Error{
 			Code:    errs.InvalidArgument,
 			Message: fmt.Sprintf("invalid edge kind %q (allowed: blocks, related)", kind),
 			Meta:    errs.Metadata{"field": "kind"},
 		}
 	}
-
-	// Open the cycle-checked transaction. Round-6 §6.3.0 keeps the
-	// inline is_ready recompute (Regime A) inside this tx; the
-	// post-commit publish drives Regime B.
-	tx, err := db.Begin(ctx)
-	if err != nil {
-		return nil, &errs.Error{Code: errs.Internal, Message: "db begin failed"}
-	}
-	defer func() { _ = tx.Rollback() }()
 
 	// Resolve both endpoints' (org_id, project_id) inside the tx — the
 	// advisory lock key is the to_item's project_id (review L6-W8), the
@@ -162,32 +220,32 @@ func AddEdge(ctx context.Context, req *AddEdgeRequest) (*Edge, error) {
 		req.FromItem,
 	).Scan(&fromOrg, &fromProject); err != nil {
 		if errors.Is(err, sqldb.ErrNoRows) {
-			return nil, &errs.Error{
+			return nil, nil, &errs.Error{
 				Code:    errs.NotFound,
 				Message: "from_item not found",
 				Meta:    errs.Metadata{"field": "from_item_id", "id": req.FromItem},
 			}
 		}
-		return nil, &errs.Error{Code: errs.Internal, Message: "from_item lookup failed"}
+		return nil, nil, &errs.Error{Code: errs.Internal, Message: "from_item lookup failed"}
 	}
 	if err := tx.QueryRow(ctx,
 		`SELECT org_id, COALESCE(project_id, '') FROM workitems.items WHERE id = $1`,
 		req.ToItem,
 	).Scan(&toOrg, &toProject); err != nil {
 		if errors.Is(err, sqldb.ErrNoRows) {
-			return nil, &errs.Error{
+			return nil, nil, &errs.Error{
 				Code:    errs.NotFound,
 				Message: "to_item not found",
 				Meta:    errs.Metadata{"field": "to_item_id", "id": req.ToItem},
 			}
 		}
-		return nil, &errs.Error{Code: errs.Internal, Message: "to_item lookup failed"}
+		return nil, nil, &errs.Error{Code: errs.Internal, Message: "to_item lookup failed"}
 	}
 	// Cross-org edges are caught by the cross-project guard below in the
 	// common case (org_id partitions projects), but check explicitly so
 	// a corrupted row never leaks across orgs in the publish.
 	if fromOrg != toOrg {
-		return nil, &errs.Error{
+		return nil, nil, &errs.Error{
 			Code:    errs.InvalidArgument,
 			Message: "cross-org edges are not allowed",
 			Meta: errs.Metadata{
@@ -202,7 +260,7 @@ func AddEdge(ctx context.Context, req *AddEdgeRequest) (*Edge, error) {
 		// out-of-scope at v1.0. Error code is VALIDATION per spec; the
 		// internal Encore code is InvalidArgument and the MCP layer
 		// maps it to JSON-RPC kind="VALIDATION".
-		return nil, &errs.Error{
+		return nil, nil, &errs.Error{
 			Code:    errs.InvalidArgument,
 			Message: "cross-project edges are not allowed",
 			Meta: errs.Metadata{
@@ -217,7 +275,7 @@ func AddEdge(ctx context.Context, req *AddEdgeRequest) (*Edge, error) {
 		// but P01 always populates it. An edge between two
 		// project-less items would skip the advisory lock partitioning
 		// — reject explicitly so the gap is visible.
-		return nil, &errs.Error{
+		return nil, nil, &errs.Error{
 			Code:    errs.InvalidArgument,
 			Message: "endpoints have no project_id",
 			Meta:    errs.Metadata{"field": "to_item_id"},
@@ -230,7 +288,7 @@ func AddEdge(ctx context.Context, req *AddEdgeRequest) (*Edge, error) {
 		`SELECT pg_advisory_xact_lock(hashtext('deps.add_dependency:' || $1))`,
 		toProject,
 	); err != nil {
-		return nil, &errs.Error{Code: errs.Internal, Message: "advisory lock failed"}
+		return nil, nil, &errs.Error{Code: errs.Internal, Message: "advisory lock failed"}
 	}
 
 	// Cycle check: depth-counter recursive CTE extended to project the
@@ -238,14 +296,14 @@ func AddEdge(ctx context.Context, req *AddEdgeRequest) (*Edge, error) {
 	// and write deps.cycles forensics with a real path.
 	cyclePath, err := checkCycle(ctx, tx, req.FromItem, req.ToItem)
 	if err != nil {
-		return nil, &errs.Error{Code: errs.Internal, Message: "cycle check failed"}
+		return nil, nil, &errs.Error{Code: errs.Internal, Message: "cycle check failed"}
 	}
 	if cyclePath != nil {
-		// The §6.5 transaction is rolled back (defer above) so no edge
-		// is written. The forensic deps.cycles INSERT runs as a
-		// separate top-level statement after the rollback so the audit
-		// row survives the rejection.
-		_ = tx.Rollback()
+		// Caller's transaction will be rolled back by its deferred
+		// tx.Rollback when this error returns — no edge is written. The
+		// forensic deps.cycles INSERT runs as a separate top-level
+		// statement (the db handle, NOT tx) so the audit row survives
+		// the rollback. Same shape as AddEdge's standalone path.
 		var rejectedBy string
 		if id, ok := callerUserID(ctx); ok {
 			rejectedBy = id
@@ -261,7 +319,7 @@ func AddEdge(ctx context.Context, req *AddEdgeRequest) (*Edge, error) {
 		// for the JSON-RPC data.cycle_path array per §7 and falls
 		// back to splitting the joined form when the typed slice is
 		// not registered (e.g. across a gob round-trip).
-		return nil, &errs.Error{
+		return nil, nil, &errs.Error{
 			Code:    errs.FailedPrecondition,
 			Message: "edge would create a cycle",
 			Meta: errs.Metadata{
@@ -277,7 +335,7 @@ func AddEdge(ctx context.Context, req *AddEdgeRequest) (*Edge, error) {
 	// Insert the edge.
 	edgeID, err := newULID()
 	if err != nil {
-		return nil, &errs.Error{Code: errs.Internal, Message: "ulid generation failed"}
+		return nil, nil, &errs.Error{Code: errs.Internal, Message: "ulid generation failed"}
 	}
 	var createdBy *string
 	if id, ok := callerUserID(ctx); ok {
@@ -299,7 +357,7 @@ func AddEdge(ctx context.Context, req *AddEdgeRequest) (*Edge, error) {
 		edgeID, req.FromItem, req.ToItem, kind, createdBy,
 	).Scan(&retID, &retFrom, &retTo, &retKind, &retCreatedAt, &retCreatedBy); err != nil {
 		if isUniqueViolation(err, "dependencies_pair_uniq") {
-			return nil, &errs.Error{
+			return nil, nil, &errs.Error{
 				Code:    errs.AlreadyExists,
 				Message: "edge already exists",
 				Meta: errs.Metadata{
@@ -311,7 +369,7 @@ func AddEdge(ctx context.Context, req *AddEdgeRequest) (*Edge, error) {
 		}
 		rlog.Warn("deps: dependency insert failed", "err", err,
 			"from", req.FromItem, "to", req.ToItem, "kind", kind)
-		return nil, &errs.Error{Code: errs.Internal, Message: "dependency insert failed"}
+		return nil, nil, &errs.Error{Code: errs.Internal, Message: "dependency insert failed"}
 	}
 
 	// Regime A: recompute is_ready for to_item inline. Only 'blocks'
@@ -320,26 +378,25 @@ func AddEdge(ctx context.Context, req *AddEdgeRequest) (*Edge, error) {
 	// subquery, so a 'related' edge's recompute is a no-op).
 	if _, err := recomputeReady(ctx, tx, req.ToItem); err != nil {
 		rlog.Error("deps: AddEdge recomputeReady failed", "err", err, "to_item", req.ToItem)
-		return nil, &errs.Error{Code: errs.Internal, Message: "is_ready recompute failed"}
+		return nil, nil, &errs.Error{Code: errs.Internal, Message: "is_ready recompute failed"}
 	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, &errs.Error{Code: errs.Internal, Message: "commit failed"}
-	}
-
-	// Regime B: post-commit publish drives the multi-hop pipeline_stage
-	// recompute on the forward closure from to_item per §6.3.0 + §6.5
-	// post-commit block. Uses the DB-resolved (toOrg, toProject) — NOT
-	// the request values — so the publish never widens the trust
-	// boundary of this private RPC (review L6-W1). Best-effort: a
-	// publish failure does NOT roll back the edge (already committed);
-	// the warn-log is the breadcrumb.
-	publishCascadeRequested(ctx, toOrg, toProject, req.ToItem, "edge_added", "")
 
 	createdByOut := ""
 	if retCreatedBy != nil {
 		createdByOut = *retCreatedBy
 	}
+
+	// Capture publish scope under the DB-resolved (toOrg, toProject)
+	// — NOT the request values — so the post-commit publish never
+	// widens the trust boundary of this helper even when the caller
+	// passes request values that drift from the DB row (review L6-W1).
+	publishOrg := toOrg
+	publishProject := toProject
+	publishToItem := req.ToItem
+	postCommit := func(publishCtx context.Context) {
+		publishCascadeRequested(publishCtx, publishOrg, publishProject, publishToItem, "edge_added", "")
+	}
+
 	return &Edge{
 		ID:        retID,
 		FromItem:  retFrom,
@@ -347,7 +404,7 @@ func AddEdge(ctx context.Context, req *AddEdgeRequest) (*Edge, error) {
 		Kind:      retKind,
 		CreatedAt: retCreatedAt,
 		CreatedBy: createdByOut,
-	}, nil
+	}, postCommit, nil
 }
 
 // RemoveEdgeRequest is the input to RemoveEdge. SPEC §4.5. Pass either

@@ -84,6 +84,29 @@ var sdkServer *sdkmcp.Server
 // JSON-RPC dispatch).
 var sdkStreamableHandler *sdkmcp.StreamableHTTPHandler
 
+// toolRegistrar is one entry in the per-tool registration table.
+// Each tool handler file (handler_prime.go, handler_ready.go,
+// handler_claim.go, handler_create.go, …) exposes a registerXxx
+// function that calls sdkmcp.AddTool against the constructed
+// sdkServer. We collect them here so the package init order is:
+//
+//  1. transport.go init runs first (alphabetically first file with
+//     an init() in this package is errenvelope.go which has none;
+//     transport.go has the only init that constructs sdkServer).
+//
+// To avoid the Go-alphabetical-file init hazard (where handler_*.go
+// inits fire BEFORE transport.go's init and crash on a nil
+// sdkServer), every handler file exposes its registration as a
+// regular package-level function and transport.go's init calls them
+// AFTER sdkServer is constructed. This is the canonical "one init,
+// many registrations" pattern.
+var toolRegistrars = []func(*sdkmcp.Server){
+	registerHandlePrime,
+	registerHandleReady,
+	registerHandleClaim,
+	registerHandleCreate,
+}
+
 func init() {
 	sdkServer = sdkmcp.NewServer(&sdkmcp.Implementation{
 		Name:    sdkServerName,
@@ -96,6 +119,14 @@ func init() {
 		// names a 15s keepalive cadence.
 		KeepAlive: sdkKeepAliveInterval,
 	})
+
+	// Register the D-2..D-6 tool handlers against the freshly-built
+	// server. Order is not load-bearing — the SDK keeps tools in an
+	// unordered map keyed by name — but we keep the slice in spec
+	// order for readability.
+	for _, register := range toolRegistrars {
+		register(sdkServer)
+	}
 
 	sdkStreamableHandler = sdkmcp.NewStreamableHTTPHandler(
 		// getServer returns the singleton server for every request.
