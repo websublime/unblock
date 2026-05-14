@@ -36,6 +36,15 @@ const primeReadyLimitDefault = 10
 // is a single-line edit here.
 const primeReadyLimitMax = 50
 
+// primeClaimedPageSize is the cursor page size used by the
+// claimed_by_me fan-out loop. Matches workitems.listMaxLimit (the
+// hard ceiling enforced inside workitems.List) so each round-trip
+// fetches the maximum allowed page without overshoot. Rework S3
+// (Linus REVIEW): SPEC §6.2 Tool 1 line 1171 mandates no limit —
+// we page until the cursor terminates rather than silently
+// truncating.
+const primeClaimedPageSize = 200
+
 // primeIn is the §6.2 Tool 1 argument shape. Field tags map to the
 // JSON schema the SDK derives from the struct via reflection; spec
 // names use snake_case (project_id, ready_limit) so we override the
@@ -161,8 +170,11 @@ func handlePrime(ctx context.Context, req *sdkmcp.CallToolRequest, in primeIn) (
 	}
 
 	// 1) ready_summary — wraps workitems.Ready under the same scope.
+	// OrgID is no longer carried on the request (rework S1): the RPC
+	// pins org scope to identity.OrgID via rbac.For, so a request-side
+	// org_id field would only invite confused-deputy seams. The
+	// caller identity flows through mcpCtx via withIdentityFromReq.
 	readyResp, err := workitems.Ready(mcpCtx, &workitems.ReadyRequest{
-		OrgID:     identity.OrgID,
 		ProjectID: in.ProjectID,
 		Limit:     readyLimit,
 	})
@@ -172,14 +184,36 @@ func handlePrime(ctx context.Context, req *sdkmcp.CallToolRequest, in primeIn) (
 
 	// 2) claimed_by_me — workitems.List filtered by claimed_by =
 	// Identity.UserID. List orders by id ASC which is acceptable
-	// here (claimed_by_me is informational; no ordering invariant in
-	// the §6.2 contract).
-	claimedResp, err := workitems.List(mcpCtx, &workitems.ListRequest{
-		ProjectID: in.ProjectID,
-		ClaimedBy: identity.UserID,
-	})
-	if err != nil {
-		return nil, primeOut{}, mapError(state, tool, err)
+	// here (claimed_by_me is informational; no ordering invariant
+	// in the §6.2 contract).
+	//
+	// Rework S3 (Linus REVIEW): SPEC §6.2 Tool 1 line 1171 does NOT
+	// mandate a limit on claimed_by_me — the prior implementation
+	// silently truncated to listDefaultLimit (50) by omitting the
+	// Limit field. We now page through every claim via the List
+	// cursor surface so a caller with >50 in-flight claims sees the
+	// full set rather than a misleading dashboard. The page size is
+	// pinned at the List ceiling (200); a pathological caller with
+	// thousands of claims pays one round-trip per 200-row page,
+	// which is acceptable for P01 (and is itself a Stage-3
+	// discipline signal — surfaced rather than hidden).
+	var claimed []workitems.Item
+	listCursor := ""
+	for {
+		claimedResp, err := workitems.List(mcpCtx, &workitems.ListRequest{
+			ProjectID: in.ProjectID,
+			ClaimedBy: identity.UserID,
+			Limit:     primeClaimedPageSize,
+			Cursor:    listCursor,
+		})
+		if err != nil {
+			return nil, primeOut{}, mapError(state, tool, err)
+		}
+		claimed = append(claimed, claimedResp.Items...)
+		if claimedResp.NextCursor == "" {
+			break
+		}
+		listCursor = claimedResp.NextCursor
 	}
 
 	// 3) recent_cascade_events — AF2 cap of 50 enforced inside
@@ -197,7 +231,7 @@ func handlePrime(ctx context.Context, req *sdkmcp.CallToolRequest, in primeIn) (
 			CountTotal: readyResp.TotalReady,
 			Items:      itemsToPrime(readyResp.Items),
 		},
-		ClaimedByMe:         itemsToPrime(claimedResp.Items),
+		ClaimedByMe:         itemsToPrime(claimed),
 		RecentCascadeEvents: cascadeRowsToPrime(cascadeResp.Events),
 		MemoryHints:         []primeMemoryHint{},
 	}

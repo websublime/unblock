@@ -659,3 +659,302 @@ func TestD2_AuditRowsCarryToolName(t *testing.T) {
 		}
 	}
 }
+
+// TestD2_ReadyCursorRoundTrip exercises the round-7 §6.2.0 cursor
+// keyset pagination contract: page 1 → next_cursor → page 2 →
+// next_cursor → page 3 returns the full ordered set with ZERO
+// duplicates and ZERO skips, then page 3 yields next_cursor="" to
+// signal end-of-stream.
+//
+// Setup: 5 Ready items at distinct created_at offsets so the
+// (priority asc, created_at asc, id asc) order is total. All
+// items share priority P1 so the cursor must lean on the
+// (created_at, id) tiebreakers — that is the load-bearing
+// invariant the pagination contract preserves.
+func TestD2_ReadyCursorRoundTrip(t *testing.T) {
+	resetToolCalls(t)
+	fx := seedD2Fixture(t)
+
+	ids := make([]string, 0, 5)
+	for i := 0; i < 5; i++ {
+		ids = append(ids, seedReadyItem(t, fx.OrgID, fx.ProjectID, "P1", time.Duration(i)*time.Second))
+	}
+
+	// Page 1: limit=2 → expect [ids[0], ids[1]] + a non-empty
+	// next_cursor.
+	env1 := callTool(t, fx.RawKey, "ready", map[string]any{
+		"project_id": fx.ProjectID,
+		"limit":      2,
+	})
+	res1 := assertStructuredEchoesText(t, env1)
+	page1 := decodeReadyPage(t, res1.StructuredContent)
+	if len(page1.Items) != 2 {
+		t.Fatalf("page1 len = %d, want 2", len(page1.Items))
+	}
+	if page1.Items[0].ID != ids[0] || page1.Items[1].ID != ids[1] {
+		t.Fatalf("page1 ids = [%s, %s], want [%s, %s]",
+			page1.Items[0].ID, page1.Items[1].ID, ids[0], ids[1])
+	}
+	if page1.NextCursor == "" {
+		t.Fatalf("page1.next_cursor empty — expected more pages")
+	}
+	if page1.TotalReady != 5 {
+		t.Fatalf("page1.total_ready = %d, want 5", page1.TotalReady)
+	}
+
+	// Page 2: cursor=page1.next_cursor → [ids[2], ids[3]] +
+	// another non-empty next_cursor.
+	env2 := callTool(t, fx.RawKey, "ready", map[string]any{
+		"project_id": fx.ProjectID,
+		"limit":      2,
+		"cursor":     page1.NextCursor,
+	})
+	res2 := assertStructuredEchoesText(t, env2)
+	page2 := decodeReadyPage(t, res2.StructuredContent)
+	if len(page2.Items) != 2 {
+		t.Fatalf("page2 len = %d, want 2", len(page2.Items))
+	}
+	if page2.Items[0].ID != ids[2] || page2.Items[1].ID != ids[3] {
+		t.Fatalf("page2 ids = [%s, %s], want [%s, %s]",
+			page2.Items[0].ID, page2.Items[1].ID, ids[2], ids[3])
+	}
+	if page2.NextCursor == "" {
+		t.Fatalf("page2.next_cursor empty — expected one more page")
+	}
+
+	// Page 3: cursor=page2.next_cursor → [ids[4]] + EMPTY
+	// next_cursor (end-of-stream).
+	env3 := callTool(t, fx.RawKey, "ready", map[string]any{
+		"project_id": fx.ProjectID,
+		"limit":      2,
+		"cursor":     page2.NextCursor,
+	})
+	res3 := assertStructuredEchoesText(t, env3)
+	page3 := decodeReadyPage(t, res3.StructuredContent)
+	if len(page3.Items) != 1 {
+		t.Fatalf("page3 len = %d, want 1", len(page3.Items))
+	}
+	if page3.Items[0].ID != ids[4] {
+		t.Fatalf("page3 id = %s, want %s", page3.Items[0].ID, ids[4])
+	}
+	if page3.NextCursor != "" {
+		t.Fatalf("page3.next_cursor = %q, want empty (end-of-stream)", page3.NextCursor)
+	}
+
+	// Invariant: concatenation matches the full deterministic
+	// order with zero duplicates and zero skips.
+	got := append(append(append([]string{}, idsOf(page1.Items)...), idsOf(page2.Items)...), idsOf(page3.Items)...)
+	if len(got) != 5 {
+		t.Fatalf("concatenated pages have %d rows, want 5", len(got))
+	}
+	for i, want := range ids {
+		if got[i] != want {
+			t.Fatalf("concatenated[%d] = %s, want %s", i, got[i], want)
+		}
+	}
+}
+
+// TestD2_ReadyCursorEmptyPage: an empty result set returns
+// next_cursor="" (end-of-stream sentinel) and items=[].
+func TestD2_ReadyCursorEmptyPage(t *testing.T) {
+	resetToolCalls(t)
+	fx := seedD2Fixture(t)
+	// No items seeded — the page is empty by construction.
+
+	env := callTool(t, fx.RawKey, "ready", map[string]any{
+		"project_id": fx.ProjectID,
+		"limit":      10,
+	})
+	res := assertStructuredEchoesText(t, env)
+	page := decodeReadyPage(t, res.StructuredContent)
+	if len(page.Items) != 0 {
+		t.Fatalf("items len = %d, want 0", len(page.Items))
+	}
+	if page.NextCursor != "" {
+		t.Fatalf("next_cursor = %q, want empty on empty page", page.NextCursor)
+	}
+	if page.TotalReady != 0 {
+		t.Fatalf("total_ready = %d, want 0", page.TotalReady)
+	}
+}
+
+// TestD2_ReadyCursorInvalid: every shape of malformed cursor
+// (decode failure, HMAC mismatch, version mismatch) surfaces as a
+// §7 VALIDATION envelope with data.field = "cursor". Per round-7
+// §6.2.0 this is the contract; the failures must be indistinguishable
+// at the wire so a caller cannot fingerprint the encoder.
+func TestD2_ReadyCursorInvalid(t *testing.T) {
+	resetToolCalls(t)
+	fx := seedD2Fixture(t)
+
+	cases := map[string]string{
+		"malformed":          "not-a-cursor",
+		"only separator":     ".",
+		"bad payload base64": "@@@.AAAA",
+		"tampered tag":       "YWJj.AAAAAAAAAAAA", // valid b64, wrong HMAC
+	}
+	for name, tok := range cases {
+		t.Run(name, func(t *testing.T) {
+			env := callTool(t, fx.RawKey, "ready", map[string]any{
+				"project_id": fx.ProjectID,
+				"cursor":     tok,
+			})
+			if env.Error == nil {
+				t.Fatalf("expected §7 VALIDATION envelope; got success result=%s", string(env.Result))
+			}
+			if env.Error.Code != -32000 {
+				t.Fatalf("error.code = %d, want -32000", env.Error.Code)
+			}
+			var data envelopeData
+			if err := json.Unmarshal(env.Error.Data, &data); err != nil {
+				t.Fatalf("unmarshal error.data: %v", err)
+			}
+			if data.Kind != "VALIDATION" {
+				t.Fatalf("error.data.kind = %q, want VALIDATION", data.Kind)
+			}
+			if v, _ := data.Details["field"].(string); v != "cursor" {
+				t.Fatalf("error.data.details.field = %q, want \"cursor\"", v)
+			}
+		})
+	}
+}
+
+// TestD2_ReadyLimitOutOfRange asserts the round-7 S2 contract:
+// limit > 200 is a VALIDATION error (no more silent truncation).
+// The spec range is 1..200; passing 201 must surface VALIDATION
+// with data.field = "limit".
+func TestD2_ReadyLimitOutOfRange(t *testing.T) {
+	resetToolCalls(t)
+	fx := seedD2Fixture(t)
+
+	env := callTool(t, fx.RawKey, "ready", map[string]any{
+		"project_id": fx.ProjectID,
+		"limit":      201,
+	})
+	if env.Error == nil {
+		t.Fatalf("expected VALIDATION envelope on limit=201; got success result=%s", string(env.Result))
+	}
+	var data envelopeData
+	if err := json.Unmarshal(env.Error.Data, &data); err != nil {
+		t.Fatalf("unmarshal error.data: %v", err)
+	}
+	if data.Kind != "VALIDATION" {
+		t.Fatalf("error.data.kind = %q, want VALIDATION", data.Kind)
+	}
+	if v, _ := data.Details["field"].(string); v != "limit" {
+		t.Fatalf("error.data.details.field = %q, want \"limit\"", v)
+	}
+}
+
+// TestD2_ReadyLimitZeroDefaultsTo10 asserts the round-7 S4 contract:
+// limit <= 0 coerces to the spec default (10) — NOT to the prior
+// "negative-then-zero" indirection. Seed 12 items, request limit=0,
+// expect exactly 10 items returned + total_ready=12 + a non-empty
+// next_cursor (more pages exist).
+func TestD2_ReadyLimitZeroDefaultsTo10(t *testing.T) {
+	resetToolCalls(t)
+	fx := seedD2Fixture(t)
+	for i := 0; i < 12; i++ {
+		seedReadyItem(t, fx.OrgID, fx.ProjectID, "P1", time.Duration(i)*time.Second)
+	}
+
+	// limit=0 → coerced to readyLimitDefault (10).
+	env := callTool(t, fx.RawKey, "ready", map[string]any{
+		"project_id": fx.ProjectID,
+		"limit":      0,
+	})
+	res := assertStructuredEchoesText(t, env)
+	page := decodeReadyPage(t, res.StructuredContent)
+	if len(page.Items) != 10 {
+		t.Fatalf("items len = %d, want 10 (spec default)", len(page.Items))
+	}
+	if page.TotalReady != 12 {
+		t.Fatalf("total_ready = %d, want 12", page.TotalReady)
+	}
+	if page.NextCursor == "" {
+		t.Fatalf("next_cursor empty — 2 more rows exist")
+	}
+}
+
+// TestD2_PrimeClaimedByMeNoCap asserts the round-7 S3 contract:
+// claimed_by_me has NO implicit cap. The prior implementation
+// silently truncated to 50; the fix pages through all claims. We
+// seed 60 claimed items (above the old 50-cap) and assert prime
+// returns all 60.
+//
+// Setup: insert 60 items with claimed_by_id = caller — bypasses
+// the Claim happy path because (a) the Claim cascade publish
+// timing under encore test is racy and (b) we only need the read
+// shape, not the write semantics.
+func TestD2_PrimeClaimedByMeNoCap(t *testing.T) {
+	resetToolCalls(t)
+	fx := seedD2Fixture(t)
+	ctx := context.Background()
+	wantCount := 60
+	for i := 0; i < wantCount; i++ {
+		id, err := ulid.New()
+		if err != nil {
+			t.Fatalf("ulid: %v", err)
+		}
+		if _, err := db.Exec(ctx,
+			`INSERT INTO workitems.items
+			   (id, org_id, project_id, type, title, status, priority,
+			    claimed_by_id, claimed_at, claimed_by_agent,
+			    created_at, updated_at)
+			 VALUES ($1, $2, $3, 'task', $4, 'InProgress', 'P2',
+			         $5, now(), 'claude-code', now(), now())`,
+			id, fx.OrgID, fx.ProjectID,
+			fmt.Sprintf("claimed-%d", i),
+			fx.UserID,
+		); err != nil {
+			t.Fatalf("insert claimed item: %v", err)
+		}
+		t.Cleanup(func() { _, _ = db.Exec(ctx, `DELETE FROM workitems.items WHERE id = $1`, id) })
+	}
+
+	env := callTool(t, fx.RawKey, "prime", map[string]any{
+		"project_id": fx.ProjectID,
+	})
+	res := assertStructuredEchoesText(t, env)
+	var structured struct {
+		ClaimedByMe []map[string]any `json:"claimed_by_me"`
+	}
+	if err := json.Unmarshal(res.StructuredContent, &structured); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(structured.ClaimedByMe) != wantCount {
+		t.Fatalf("claimed_by_me len = %d, want %d (S3: no implicit cap)",
+			len(structured.ClaimedByMe), wantCount)
+	}
+}
+
+// readyPage is the test-side view of the §6.2 Tool 2 structured
+// result post round-7 (items + total_ready + next_cursor).
+type readyPage struct {
+	Items []struct {
+		ID       string `json:"id"`
+		Priority string `json:"priority"`
+	} `json:"items"`
+	TotalReady int    `json:"total_ready"`
+	NextCursor string `json:"next_cursor"`
+}
+
+func decodeReadyPage(t *testing.T, raw json.RawMessage) readyPage {
+	t.Helper()
+	var p readyPage
+	if err := json.Unmarshal(raw, &p); err != nil {
+		t.Fatalf("decodeReadyPage: %v; raw=%s", err, string(raw))
+	}
+	return p
+}
+
+func idsOf(items []struct {
+	ID       string `json:"id"`
+	Priority string `json:"priority"`
+}) []string {
+	out := make([]string, 0, len(items))
+	for _, it := range items {
+		out = append(out, it.ID)
+	}
+	return out
+}
