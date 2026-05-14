@@ -137,11 +137,11 @@ The 8 fixed mister-anderson agents (Grace, Ada, Smith, Sherlock, Fernando,
 Linus, Quinn, Daphne) are workflow-level and stage-bound; the supervisors
 above are stack-bound and dispatched only by `/do`.
 
-Active in `.claude/agents/` (created by Daphne on 2026-05-08):
+Active in `.claude/agents/` (created by Daphne on 2026-05-14):
 - `rust-supervisor.md` (Neo) — covers `crates/` Rust workspace
-- `infra-supervisor.md` (Olive) — covers CI/CD and GitHub Actions
 - `go-supervisor.md` (Greta) — covers `apps/api/` Encore Go services
 - `astro-supervisor.md` (Aria) — covers `apps/web/` Astro 5 frontend
+- `infra-supervisor.md` (Olive) — covers CI/CD, GitHub Actions, Encore Cloud, Cloudflare Pages
 
 ---
 
