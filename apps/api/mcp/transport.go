@@ -108,6 +108,27 @@ var toolRegistrars = []func(*sdkmcp.Server){
 }
 
 func init() {
+	// Boot-time fail-fast on missing cursor signing material (round-2
+	// review S3 — Linus). The §6.2.0 cursor encoder reads
+	// `secrets.APIKeyHMACSecret` at every encode/decode call; if the
+	// secret was never provisioned (empty string), every paginated
+	// tool response would silently produce un-verifiable cursors and
+	// the first follow-up request would fail with a confusing
+	// `cursor signature invalid` VALIDATION error.
+	//
+	// Encore secret resolution is synchronous at process bootstrap,
+	// so by the time this init runs the value is either populated or
+	// definitively empty. Panicking here surfaces the
+	// misconfiguration at deploy time (visible in the service logs as
+	// a startup crash) rather than at first-cursor traffic.
+	//
+	// Local emulator: the secret is read from
+	// `apps/api/.secrets.local.cue` — running `encore run` against a
+	// missing/empty value will fail the service immediately.
+	if secrets.APIKeyHMACSecret == "" {
+		panic("mcp: APIKeyHMACSecret is empty — provision via `encore secret set` (or apps/api/.secrets.local.cue) before boot; required for §6.2.0 cursor signing")
+	}
+
 	sdkServer = sdkmcp.NewServer(&sdkmcp.Implementation{
 		Name:    sdkServerName,
 		Version: sdkServerVersion,

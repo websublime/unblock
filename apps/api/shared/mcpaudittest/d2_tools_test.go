@@ -695,19 +695,19 @@ func TestD2_ReadyCursorRoundTrip(t *testing.T) {
 		t.Fatalf("page1 ids = [%s, %s], want [%s, %s]",
 			page1.Items[0].ID, page1.Items[1].ID, ids[0], ids[1])
 	}
-	if page1.NextCursor == "" {
-		t.Fatalf("page1.next_cursor empty — expected more pages")
+	if page1.NextCursor == nil {
+		t.Fatalf("page1.next_cursor nil — expected more pages")
 	}
 	if page1.TotalReady != 5 {
 		t.Fatalf("page1.total_ready = %d, want 5", page1.TotalReady)
 	}
 
 	// Page 2: cursor=page1.next_cursor → [ids[2], ids[3]] +
-	// another non-empty next_cursor.
+	// another non-nil next_cursor.
 	env2 := callTool(t, fx.RawKey, "ready", map[string]any{
 		"project_id": fx.ProjectID,
 		"limit":      2,
-		"cursor":     page1.NextCursor,
+		"cursor":     *page1.NextCursor,
 	})
 	res2 := assertStructuredEchoesText(t, env2)
 	page2 := decodeReadyPage(t, res2.StructuredContent)
@@ -718,16 +718,16 @@ func TestD2_ReadyCursorRoundTrip(t *testing.T) {
 		t.Fatalf("page2 ids = [%s, %s], want [%s, %s]",
 			page2.Items[0].ID, page2.Items[1].ID, ids[2], ids[3])
 	}
-	if page2.NextCursor == "" {
-		t.Fatalf("page2.next_cursor empty — expected one more page")
+	if page2.NextCursor == nil {
+		t.Fatalf("page2.next_cursor nil — expected one more page")
 	}
 
-	// Page 3: cursor=page2.next_cursor → [ids[4]] + EMPTY
-	// next_cursor (end-of-stream).
+	// Page 3: cursor=page2.next_cursor → [ids[4]] + nil
+	// next_cursor (end-of-stream, surfaces as literal JSON null).
 	env3 := callTool(t, fx.RawKey, "ready", map[string]any{
 		"project_id": fx.ProjectID,
 		"limit":      2,
-		"cursor":     page2.NextCursor,
+		"cursor":     *page2.NextCursor,
 	})
 	res3 := assertStructuredEchoesText(t, env3)
 	page3 := decodeReadyPage(t, res3.StructuredContent)
@@ -737,9 +737,14 @@ func TestD2_ReadyCursorRoundTrip(t *testing.T) {
 	if page3.Items[0].ID != ids[4] {
 		t.Fatalf("page3 id = %s, want %s", page3.Items[0].ID, ids[4])
 	}
-	if page3.NextCursor != "" {
-		t.Fatalf("page3.next_cursor = %q, want empty (end-of-stream)", page3.NextCursor)
+	if page3.NextCursor != nil {
+		t.Fatalf("page3.next_cursor = %q, want nil (end-of-stream)", *page3.NextCursor)
 	}
+	// Round-2 W1: the spec mandates "string OR null" — assert the
+	// raw JSON on the final page literally contains `"next_cursor":
+	// null` (not absent, not empty string). Strict-schema clients
+	// distinguish null from missing.
+	assertNextCursorNullOnWire(t, res3.StructuredContent)
 
 	// Invariant: concatenation matches the full deterministic
 	// order with zero duplicates and zero skips.
@@ -770,12 +775,14 @@ func TestD2_ReadyCursorEmptyPage(t *testing.T) {
 	if len(page.Items) != 0 {
 		t.Fatalf("items len = %d, want 0", len(page.Items))
 	}
-	if page.NextCursor != "" {
-		t.Fatalf("next_cursor = %q, want empty on empty page", page.NextCursor)
+	if page.NextCursor != nil {
+		t.Fatalf("next_cursor = %q, want nil on empty page", *page.NextCursor)
 	}
 	if page.TotalReady != 0 {
 		t.Fatalf("total_ready = %d, want 0", page.TotalReady)
 	}
+	// Round-2 W1: empty page also surfaces null literal on the wire.
+	assertNextCursorNullOnWire(t, res.StructuredContent)
 }
 
 // TestD2_ReadyCursorInvalid: every shape of malformed cursor
@@ -871,8 +878,8 @@ func TestD2_ReadyLimitZeroDefaultsTo10(t *testing.T) {
 	if page.TotalReady != 12 {
 		t.Fatalf("total_ready = %d, want 12", page.TotalReady)
 	}
-	if page.NextCursor == "" {
-		t.Fatalf("next_cursor empty — 2 more rows exist")
+	if page.NextCursor == nil {
+		t.Fatalf("next_cursor nil — 2 more rows exist")
 	}
 }
 
@@ -929,14 +936,17 @@ func TestD2_PrimeClaimedByMeNoCap(t *testing.T) {
 }
 
 // readyPage is the test-side view of the §6.2 Tool 2 structured
-// result post round-7 (items + total_ready + next_cursor).
+// result post round-7 (items + total_ready + next_cursor). After
+// round-2 W1 rework next_cursor is "string OR null" on the wire —
+// modelled here as *string so the test can distinguish "more pages"
+// (non-nil pointer to a token) from "end-of-stream" (nil).
 type readyPage struct {
 	Items []struct {
 		ID       string `json:"id"`
 		Priority string `json:"priority"`
 	} `json:"items"`
-	TotalReady int    `json:"total_ready"`
-	NextCursor string `json:"next_cursor"`
+	TotalReady int     `json:"total_ready"`
+	NextCursor *string `json:"next_cursor"`
 }
 
 func decodeReadyPage(t *testing.T, raw json.RawMessage) readyPage {
@@ -946,6 +956,28 @@ func decodeReadyPage(t *testing.T, raw json.RawMessage) readyPage {
 		t.Fatalf("decodeReadyPage: %v; raw=%s", err, string(raw))
 	}
 	return p
+}
+
+// assertNextCursorNullOnWire enforces the round-2 W1 wire-shape
+// invariant: on end-of-stream the structured response carries an
+// explicit `"next_cursor": null` token, NOT a missing key and NOT an
+// empty string. The check uses a raw json.RawMessage decode so the
+// assertion fires on the literal JSON shape (typed *string would
+// decode `""` to a non-nil pointer to empty, masking the deviation).
+// Per SPEC §6.2.0 line 1150 and §6.2 Tool 2 line 1231.
+func assertNextCursorNullOnWire(t *testing.T, raw json.RawMessage) {
+	t.Helper()
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatalf("assertNextCursorNullOnWire: unmarshal: %v; raw=%s", err, string(raw))
+	}
+	tok, ok := fields["next_cursor"]
+	if !ok {
+		t.Fatalf("assertNextCursorNullOnWire: next_cursor key absent; raw=%s", string(raw))
+	}
+	if string(tok) != "null" {
+		t.Fatalf("assertNextCursorNullOnWire: next_cursor = %s, want literal `null`; raw=%s", string(tok), string(raw))
+	}
 }
 
 func idsOf(items []struct {
