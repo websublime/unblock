@@ -38,6 +38,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"sync"
 
 	"encore.app/shared/tracectx"
 	"encore.app/shared/ulid"
@@ -274,4 +275,98 @@ func nullable(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+// requestState is the per-request data block tool handlers need to
+// reach from inside the SDK's session-based dispatch. It carries:
+//
+//   - Call: pointer to the deferred audit record so handlers can
+//     mutate ToolName / ResultKind / ItemID / ProjectID.
+//   - TraceID: ULID minted at request entry; the §7 envelope writer
+//     and the deferred recordToolCall both stamp this verbatim.
+//   - Identity: the auth.Identity{OrgID, UserID, AgentKind} resolved
+//     from the Bearer key — passed by value so the handler does NOT
+//     accidentally hold a pointer into a per-request stack slot.
+//
+// Why a process-wide registry instead of context.Context value
+// propagation: the Go MCP SDK uses stateful sessions where the tool
+// handler runs under the CONNECT-time context (i.e. the original
+// initialize request's ctx — streamable.go:488 "Pass req.Context()
+// here"), NOT under the subsequent tools/call request's ctx. Any
+// ctx-bound state therefore only works for the initialize request
+// and is stale for every subsequent dispatch. The SDK does plumb
+// each request's HTTP headers through RequestExtra
+// (streamable.go:1163-1166), which is the canonical per-request
+// channel. We use the trace_id ULID as the registry key (injected
+// as an X-Unblock-Trace-Id header by serveMCP).
+//
+// Cleanup: serveMCP MUST defer release(); the map otherwise leaks
+// one entry per authenticated request.
+
+// requestState bundles the per-request data tool handlers need.
+type requestState struct {
+	Call     *ToolCall
+	TraceID  string
+	Identity requestIdentity
+}
+
+// requestIdentity is the narrow tuple of Identity fields the
+// handlers consume — mirrors auth.Identity but lives in this
+// package so the recordtoolcall.go primitives stay self-contained
+// (importing auth would form a dependency edge purely for the
+// shape of a value type).
+type requestIdentity struct {
+	UserID    string
+	OrgID     string
+	AgentKind string
+}
+
+//nolint:gochecknoglobals // process-wide lookup table by design.
+var requestStateRegistry sync.Map // map[string]*requestState
+
+// traceIDHeader is the canonical HTTP header serveMCP uses to
+// propagate the request trace_id into the SDK handler dispatch.
+// The header is internal to the MCP transport boundary — clients
+// MUST NOT set it (the value is overwritten in serveMCP) and the
+// public observability surface uses the §7 envelope / log-line
+// fields. Named X-Unblock- to follow the existing X-Unblock-BFF-
+// Origin convention.
+const traceIDHeader = "X-Unblock-Trace-Id"
+
+// registerRequestState stores state under traceID. Returns a
+// release func the caller MUST invoke (typically via defer) to
+// clear the entry once the request has completed.
+func registerRequestState(traceID string, state *requestState) (release func()) {
+	if traceID == "" || state == nil {
+		return func() {}
+	}
+	requestStateRegistry.Store(traceID, state)
+	return func() { requestStateRegistry.Delete(traceID) }
+}
+
+// requestStateFromHeaders returns the *requestState registered
+// under the trace_id carried in the headers. Returns nil when no
+// header is set or no entry is registered (the latter signals a
+// handler invoked outside serveMCP — unit tests, future stdio
+// transport — and the handler degrades gracefully).
+func requestStateFromHeaders(headers map[string][]string) *requestState {
+	if headers == nil {
+		return nil
+	}
+	vals, ok := headers[traceIDHeader]
+	if !ok {
+		// HTTP headers are case-insensitive but Go's http.Header
+		// normalises via textproto.CanonicalMIMEHeaderKey. The map
+		// handed via RequestExtra is the http.Header itself so this
+		// fallback should not fire — kept defensively.
+		vals = headers["X-Unblock-Trace-Id"]
+	}
+	if len(vals) == 0 {
+		return nil
+	}
+	v, _ := requestStateRegistry.Load(vals[0])
+	if v == nil {
+		return nil
+	}
+	return v.(*requestState)
 }

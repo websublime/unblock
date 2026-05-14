@@ -236,6 +236,31 @@ type ListResponse struct {
 	NextCursor string
 }
 
+// ReadyRequest is the input to Ready. SPEC §6.2 Tool 2 (lines 1177-1206).
+//
+// Empty ProjectID means org-wide scope (caller has no "primary project"
+// concept in P01 — see SPEC §6.2 line 1161 "defaults to caller's
+// primary project"; until a primary-project column ships, the MCP
+// layer collapses missing project_id to org-wide). PriorityMin is the
+// lowest priority included in results, "P0".."P4" lexicographic
+// (P0 highest, P4 lowest); empty string = no filter.
+type ReadyRequest struct {
+	OrgID       string
+	ProjectID   string
+	Limit       int
+	PriorityMin string
+}
+
+// ReadyResponse is the output of Ready. SPEC §6.2 Tool 2.
+//
+// TotalReady is the count of ready items across the same scope (no
+// pagination at v1.0 — review L6-W7) so the caller can decide whether
+// more exist behind the Limit cap.
+type ReadyResponse struct {
+	Items      []Item
+	TotalReady int
+}
+
 // SearchRequest is the input to Search. SPEC §4.4.
 type SearchRequest struct {
 	OrgID     string
@@ -566,6 +591,19 @@ func Create(ctx context.Context, req *CreateRequest) (*Item, error) {
 		return nil, &errs.Error{Code: errs.Internal, Message: "item id generation failed"}
 	}
 
+	// Atomicity contract (orchestrator DECISION on bead unblock-tv8.17,
+	// 2026-05-14, decision #1): the item INSERT, label attaches, AND any
+	// dependencies[] edge inserts run inside a SINGLE transaction so a
+	// failure on any later edge rolls back the item row (SPEC § 6.2
+	// Tool 4 line 1255: "the entire create is rejected"). Pre-D-2 the
+	// Create path committed the item before the edges loop and could
+	// leave phantom rows on FK / validation / network failure. The
+	// mathematical note on the DECISION recognises that a Tool 4 create
+	// only adds INCOMING edges to a brand-new node so cycle is
+	// impossible by construction — the cycle-check remains as defensive
+	// code matching SPEC § 6.2 line 1254 ("Cycle check (C5/AF5) runs
+	// inline") but the real value of this refactor is atomicity against
+	// FK / validation / advisory-lock contention failures.
 	tx, err := db.Begin(ctx)
 	if err != nil {
 		return nil, &errs.Error{Code: errs.Internal, Message: "db begin failed"}
@@ -601,36 +639,44 @@ func Create(ctx context.Context, req *CreateRequest) (*Item, error) {
 
 	// Attach labels in the same transaction.
 	if len(req.Labels) > 0 {
-		if err := attachLabels(ctx, tx, id, req.Labels); err != nil {
+		if err := attachLabelsTx(ctx, tx, id, req.Labels); err != nil {
 			return nil, err
 		}
+	}
+
+	// Cycle-checked edges via deps.AddEdgeInTx (the package-internal
+	// helper introduced under D-2 / unblock-tv8.17 — see
+	// deps/deps.go::AddEdgeInTx doc-comment). Each edge runs inside the
+	// CURRENT tx with the §6.5 per-project advisory lock + depth-counter
+	// CTE; any error rolls the entire create back (item row included).
+	postCommits := make([]deps.AddEdgeInTxPostCommit, 0, len(req.Dependencies))
+	for _, edge := range req.Dependencies {
+		kind := edge.Kind
+		if kind == "" {
+			kind = "blocks"
+		}
+		_, postCommit, err := deps.AddEdgeInTx(ctx, tx, &deps.AddEdgeRequest{
+			OrgID:     req.OrgID,
+			ProjectID: req.ProjectID,
+			FromItem:  edge.FromItem,
+			ToItem:    id,
+			Kind:      kind,
+		})
+		if err != nil {
+			return nil, err
+		}
+		postCommits = append(postCommits, postCommit)
 	}
 
 	if err := tx.Commit(); err != nil {
 		return nil, &errs.Error{Code: errs.Internal, Message: "create commit failed"}
 	}
 
-	// Cycle-checked edges via deps.AddEdge. Per SPEC §4.4 line 591, each
-	// edge runs through deps.AddEdge which owns the advisory lock +
-	// depth-counter CTE (SPEC §6.5). C-2 (unblock-tv8.11) lands the
-	// deps.AddEdge body; until then, this returns errNotImplemented and
-	// the create RPC propagates the error to the caller (the row is
-	// already committed — the caller can retry the edge-less path or
-	// wait for C-2). The Dependencies-less Create path works fully.
-	for _, edge := range req.Dependencies {
-		kind := edge.Kind
-		if kind == "" {
-			kind = "blocks"
-		}
-		if _, err := deps.AddEdge(ctx, &deps.AddEdgeRequest{
-			OrgID:     req.OrgID,
-			ProjectID: req.ProjectID,
-			FromItem:  edge.FromItem,
-			ToItem:    id,
-			Kind:      kind,
-		}); err != nil {
-			return nil, err
-		}
+	// Regime B post-commit publishes for each newly created edge. Same
+	// best-effort semantics as deps.AddEdge's standalone path: a publish
+	// failure does NOT roll back the edge (already committed).
+	for _, postCommit := range postCommits {
+		postCommit(ctx)
 	}
 
 	return readItem(ctx, id)
@@ -1416,6 +1462,140 @@ func List(ctx context.Context, req *ListRequest) (*ListResponse, error) {
 	}
 
 	return &ListResponse{Items: items, NextCursor: nextCursor}, nil
+}
+
+// readyDefaultLimit / readyMaxLimit cap the §6.2 Tool 2 page size.
+// Spec: limit 1..50; default 10 (lines 1183-1184).
+const (
+	readyDefaultLimit = 10
+	readyMaxLimit     = 50
+)
+
+// Ready returns the ready set for the §6.2 Tool 2 MCP `ready` tool.
+// Priority comparison is lexicographic on the literal "P0".."P4"
+// strings — P0 is highest, P4 lowest — so priority_min = "P3"
+// means "include P0..P3" (priority <= 'P3' on the SQL side).
+//
+// Filters: org_id (required), project_id (optional — empty = org-wide
+// scope), priority_min (optional — "P0".."P4" lexicographic). Ordering
+// is deterministic on (priority asc, created_at asc, id asc) and
+// covered by items_ready_partial_idx (migration 0040 + 0100 — see the
+// 0100 file header for the index extension that lets the planner serve
+// the ORDER BY from a pure index scan).
+//
+// total_ready counts every ready item in the same scope so the caller
+// can detect overflow past `limit` without paginating (v1.0 has NO
+// pagination on this endpoint — review L6-W7).
+//
+//encore:api private method=POST path=/workitems.Ready
+func Ready(ctx context.Context, req *ReadyRequest) (*ReadyResponse, error) {
+	if req == nil {
+		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "missing request body"}
+	}
+	identity, ok := callerIdentity(ctx)
+	if !ok {
+		return nil, &errs.Error{Code: errs.Unauthenticated, Message: "no caller identity"}
+	}
+
+	// MCP layer is the authoritative caller of this RPC. We do NOT
+	// trust req.OrgID at face value — pin it to identity.OrgID so a
+	// confused upstream cannot leak across orgs. (Same posture as
+	// workitems.List which uses rbac.For for the same guarantee.)
+	if req.OrgID == "" {
+		req.OrgID = identity.OrgID
+	}
+	if req.OrgID != identity.OrgID {
+		return nil, &errs.Error{
+			Code:    errs.PermissionDenied,
+			Message: "cross-org ready read is not allowed",
+			Meta:    errs.Metadata{"field": "org_id"},
+		}
+	}
+
+	limit := req.Limit
+	if limit <= 0 {
+		limit = readyDefaultLimit
+	}
+	if limit > readyMaxLimit {
+		limit = readyMaxLimit
+	}
+
+	priorityMin := req.PriorityMin
+	if priorityMin != "" {
+		if _, ok := priorityAllowed[priorityMin]; !ok {
+			return nil, &errs.Error{
+				Code:    errs.InvalidArgument,
+				Message: fmt.Sprintf("invalid priority_min %q (allowed: P0..P4)", priorityMin),
+				Meta:    errs.Metadata{"field": "priority_min"},
+			}
+		}
+	}
+
+	// Hot-path read against items_ready_partial_idx. The partial
+	// predicate (is_ready = true AND status = 'Ready' AND closed_at
+	// IS NULL) MUST match the index definition verbatim — drift here
+	// would force the planner off the index. After migration 0100 the
+	// index columns are (org_id, project_id, priority, created_at, id)
+	// so the ORDER BY below serves entirely from the index. Empty
+	// project_id ($2 = '') skips the project filter for org-wide
+	// scope per the §6.2 Tool 1/2 "primary project" P01 contract.
+	rows, err := db.Query(ctx,
+		`SELECT `+itemColumnList+`
+		   FROM workitems.items
+		  WHERE org_id = $1
+		    AND is_ready = true
+		    AND status = 'Ready'
+		    AND closed_at IS NULL
+		    AND ($2 = '' OR project_id = $2)
+		    AND ($3 = '' OR priority <= $3)
+		  ORDER BY priority ASC, created_at ASC, id ASC
+		  LIMIT $4`,
+		req.OrgID, req.ProjectID, priorityMin, limit,
+	)
+	if err != nil {
+		rlog.Error("workitems: ready query failed", "err", err, "org_id", req.OrgID)
+		return nil, &errs.Error{Code: errs.Internal, Message: "ready query failed"}
+	}
+	defer rows.Close()
+
+	out := make([]Item, 0, limit)
+	for rows.Next() {
+		var r itemRow
+		if err := scanItemRow(rows, &r); err != nil {
+			return nil, &errs.Error{Code: errs.Internal, Message: "ready scan failed"}
+		}
+		item, err := itemFromRow(ctx, r)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, &errs.Error{Code: errs.Internal, Message: "ready iter failed"}
+	}
+
+	// Second query for the total count across the same predicate. The
+	// partial index serves this as an index-only scan with no rows
+	// returned. We intentionally do NOT inline this as a window
+	// function on the first query — that would force the planner off
+	// the partial index for the LIMIT path.
+	var totalReady int
+	if err := db.QueryRow(ctx,
+		`SELECT COUNT(*)
+		   FROM workitems.items
+		  WHERE org_id = $1
+		    AND is_ready = true
+		    AND status = 'Ready'
+		    AND closed_at IS NULL
+		    AND ($2 = '' OR project_id = $2)
+		    AND ($3 = '' OR priority <= $3)`,
+		req.OrgID, req.ProjectID, priorityMin,
+	).Scan(&totalReady); err != nil {
+		rlog.Error("workitems: ready count failed", "err", err, "org_id", req.OrgID)
+		return nil, &errs.Error{Code: errs.Internal, Message: "ready count failed"}
+	}
+
+	return &ReadyResponse{Items: out, TotalReady: totalReady}, nil
 }
 
 // Search performs multi-table FTS (UNION ALL over items_fts_idx and

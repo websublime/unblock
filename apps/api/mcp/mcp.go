@@ -230,11 +230,34 @@ func serveMCP(w http.ResponseWriter, r *http.Request) {
 
 	// Populate the deferred ToolCall with the auth-resolved fields
 	// so the audit row writes the correct api_key_id + org_id.
-	// ToolName/ResultKind/ItemID/ProjectID stay as defaults (or
-	// get overwritten by D-2+ tool handlers inside the SDK
-	// dispatch).
+	// ToolName/ResultKind/ItemID/ProjectID get overwritten by tool
+	// handlers (D-2+) via the per-request state in
+	// requestStateRegistry, keyed by trace_id. The SDK plumbs each
+	// request's HTTP headers into RequestExtra so the handlers
+	// retrieve the state through requestStateFromHeaders(
+	// req.Extra.Header) — see recordtoolcall.go's
+	// requestStateRegistry doc-comment for the per-request channel
+	// rationale (the SDK's stateful session model means
+	// context.Context values bound on the initialize request do NOT
+	// reach handlers dispatched from subsequent tools/call
+	// requests).
 	call.APIKeyID = resp.APIKeyID
 	call.OrgID = resp.Identity.OrgID
+	release := registerRequestState(traceID, &requestState{
+		Call:    &call,
+		TraceID: traceID,
+		Identity: requestIdentity{
+			UserID:    resp.Identity.UserID,
+			OrgID:     resp.Identity.OrgID,
+			AgentKind: resp.Identity.AgentKind,
+		},
+	})
+	defer release()
+
+	// Surface trace_id as an HTTP header so the SDK plumbs it into
+	// RequestExtra.Header — that is the canonical per-request
+	// channel the handler reads.
+	r.Header.Set(traceIDHeader, traceID)
 
 	// 9. Delegate to the SDK adapter. The SDK owns:
 	//    - JSON-RPC parsing + dispatch (initialize, tools/list,
