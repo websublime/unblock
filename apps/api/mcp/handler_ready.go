@@ -41,14 +41,20 @@ type readyIn struct {
 type readyOut struct {
 	Items      []primeItem `json:"items"`
 	TotalReady int         `json:"total_ready"`
-	// NextCursor is an opaque, server-signed token (§6.2.0). Empty
-	// string when end-of-stream. The JSON tag uses an empty `,omitempty`
-	// pair so the field marshals as the literal empty string on the
-	// final page rather than disappearing — the spec contract is
-	// "string OR null" and we surface null as "" on the wire to keep
-	// the type strict. (Clients distinguish "" / null identically
-	// since both signal end-of-stream.)
-	NextCursor string `json:"next_cursor"`
+	// NextCursor is an opaque, server-signed token (§6.2.0). The wire
+	// contract per SPEC §6.2.0 line 1150 and §6.2 Tool 2 line 1231 is
+	// "string OR null" — clients MUST be able to distinguish "more
+	// pages" from "end-of-stream" without inspecting the string value.
+	//
+	// Round-2 review rework W1 (Linus): a pointer-to-string lets us
+	// marshal nil as JSON `null` and an encoded token as a JSON string,
+	// matching the spec literally. The JSON tag has NO `omitempty` so
+	// the final page's response always carries an explicit
+	// `"next_cursor": null` rather than omitting the field — strict
+	// schema validators on the client side would reject the missing
+	// key. Same shape will be inherited by Tools 8 (list) and 9
+	// (search) when D-3/D-4 land.
+	NextCursor *string `json:"next_cursor"`
 }
 
 // registerHandleReady is invoked by transport.go's init — see the
@@ -125,9 +131,10 @@ func handleReady(ctx context.Context, req *sdkmcp.CallToolRequest, in readyIn) (
 
 	// Encode next_cursor when the underlying RPC produced one
 	// (i.e. when there is at least one more row past the current
-	// page). The encoder is total: we only call it when ID is set
-	// so the empty-cursor path stays string-equal "".
-	var nextCursor string
+	// page). On end-of-stream `nextCursor` stays nil so the field
+	// marshals to JSON `null` per the §6.2.0 wire contract (round-2
+	// W1).
+	var nextCursor *string
 	if resp.NextCursorID != "" {
 		tok, err := encodeCursor(readyCursor{
 			V:               cursorVersionReady,
@@ -141,7 +148,7 @@ func handleReady(ctx context.Context, req *sdkmcp.CallToolRequest, in readyIn) (
 				Message: "cursor encode failed",
 			})
 		}
-		nextCursor = tok
+		nextCursor = &tok
 	}
 
 	out := readyOut{

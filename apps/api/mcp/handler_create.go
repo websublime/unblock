@@ -89,8 +89,14 @@ func handleCreate(ctx context.Context, req *sdkmcp.CallToolRequest, in createIn)
 	}
 
 	// dependencies[].blocker_item_id → deps.Edge.FromItem (the new
-	// item is the to_item). Kind defaults to "blocks" per SPEC §6.2
-	// Tool 4 line 1243.
+	// item is the to_item). Kind defaulting to "blocks" per SPEC
+	// §6.2 Tool 4 line 1243 is enforced by deps.AddEdgeInTx
+	// (deps/deps.go:192-195) — single source of truth. Round-2
+	// review S1 (Linus): the MCP layer used to substitute "blocks"
+	// itself, which duplicated the helper's logic and invited drift
+	// if a future spec amendment changed the canonical default.
+	// Passing `d.Kind` through verbatim — including the empty string
+	// — lets the in-tx helper own the default.
 	depEdges := make([]deps.Edge, 0, len(in.Dependencies))
 	for _, d := range in.Dependencies {
 		if d.BlockerItemID == "" {
@@ -100,13 +106,9 @@ func handleCreate(ctx context.Context, req *sdkmcp.CallToolRequest, in createIn)
 				Meta:    errs.Metadata{"field": "dependencies[].blocker_item_id"},
 			})
 		}
-		kind := d.Kind
-		if kind == "" {
-			kind = "blocks"
-		}
 		depEdges = append(depEdges, deps.Edge{
 			FromItem: d.BlockerItemID,
-			Kind:     kind,
+			Kind:     d.Kind,
 		})
 	}
 

@@ -1591,9 +1591,19 @@ func Ready(ctx context.Context, req *ReadyRequest) (*ReadyResponse, error) {
 			req.CursorPriority, req.CursorCreatedAt, req.CursorID,
 		)
 	}
-	// We fetch limit+1 to detect whether a next page exists; the
-	// extra row's anchor becomes the next cursor and is NOT
-	// returned to the caller.
+	// Keyset "fetch limit+1 to peek next page" pattern.
+	//
+	// We request `limit+1` rows from the partial index so we can detect
+	// whether a next page exists WITHOUT issuing a second COUNT query.
+	// The extra (limit+1) row is treated as a sentinel: its mere
+	// presence proves `len(rows) > limit`, but the row itself is
+	// DISCARDED — it never enters `out`, it never reaches the caller,
+	// and the loop body below breaks BEFORE the materialisation step
+	// (`itemFromRow`) ever sees it. Cursor anchor = `rows[limit-1]`
+	// (the last row of the current page); the next request emits rows
+	// STRICTLY AFTER that anchor via the `(priority, created_at, id) >
+	// (cursor)` row-constructor predicate, so the sentinel re-appears
+	// as the FIRST row of the next page (correctly, no skip).
 	q = q.Where("1 = 1 ORDER BY priority ASC, created_at ASC, id ASC LIMIT $1", limit+1)
 	rows, err := q.Run(ctx)
 	if err != nil {
@@ -1606,12 +1616,12 @@ func Ready(ctx context.Context, req *ReadyRequest) (*ReadyResponse, error) {
 	var nextCursorCreatedAt time.Time
 	for i, r := range rows {
 		if i >= limit {
-			// limit+1 hit — a next page exists. Encode the cursor as
-			// the LAST row of the CURRENT page (rows[limit-1]); the
-			// next request will emit rows STRICTLY AFTER that anchor
-			// via the (priority, created_at, id) > (cursor) predicate.
-			// Encoding the limit+1 row itself would skip it on the
-			// next page (it is the start, not the anchor before it).
+			// Sentinel row (rows[limit], i.e. the (limit+1)th). We never
+			// materialise it. The cursor anchor is rows[limit-1] — the
+			// last row of the CURRENT page — so the next request resumes
+			// at the sentinel position via the strict-greater-than
+			// predicate. break immediately so itemFromRow is never
+			// called on the sentinel.
 			last := rows[limit-1]
 			nextCursorPriority = last.Priority
 			nextCursorCreatedAt = last.CreatedAt
