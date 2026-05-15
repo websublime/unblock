@@ -109,6 +109,8 @@ var toolRegistrars = []func(*sdkmcp.Server){
 	registerHandleClose,
 	registerHandleShow,
 	registerHandleList,
+	registerHandleSearch,
+	registerHandleComment,
 }
 
 func init() {

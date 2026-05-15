@@ -291,12 +291,26 @@ type ReadyResponse struct {
 	NextCursorID        string
 }
 
-// SearchRequest is the input to Search. SPEC §4.4.
+// SearchRequest is the input to Search. SPEC §4.4 (round-8: typed
+// keyset cursor fields added so the §6.2.0 / §6.2 Tool 9 contract is
+// satisfied without an opaque blob in the RPC layer — the MCP layer
+// owns the opaque envelope; here we carry the decoded tuple).
 type SearchRequest struct {
 	OrgID     string
 	ProjectID string
 	Query     string
 	Limit     int
+
+	// CursorRank / CursorItemID / CursorCommentID are populated together
+	// by the MCP cursor decoder when paginating; all three zero values
+	// signal "first page". The keyset predicate uses the canonical FTS
+	// sort tuple `(rank desc, item_id asc, comment_id asc)` — see SPEC
+	// §6.2 Tool 9 lines 1449-1452. Mirrors the Ready RPC pattern at the
+	// top of this file; the spec §4.4 SearchRequest type was extended
+	// in round-8 to align with the §6.2.0 cursor contract.
+	CursorRank      float64
+	CursorItemID    string
+	CursorCommentID string
 }
 
 // SearchHit is one row of a Search response. SPEC §4.4.
@@ -308,9 +322,20 @@ type SearchHit struct {
 	Snippet   string
 }
 
-// SearchResponse is the output of Search. SPEC §4.4.
+// SearchResponse is the output of Search. SPEC §4.4 (round-8: typed
+// next-cursor fields). The MCP layer encodes the triple into the
+// opaque §6.2.0 cursor token (or null) before surfacing on the wire.
 type SearchResponse struct {
 	Hits []SearchHit
+
+	// NextCursorRank / NextCursorItemID / NextCursorCommentID carry the
+	// keyset anchor of the row that would START the next page on the
+	// canonical FTS sort tuple. All three populated together when more
+	// rows exist; all three zero on end-of-stream. Search over-fetches
+	// LIMIT+1 to detect end-of-stream — same pattern as Ready.
+	NextCursorRank      float64
+	NextCursorItemID    string
+	NextCursorCommentID string
 }
 
 // Milestone is the canonical milestone row shape. SPEC §4.4.1.
@@ -1688,6 +1713,13 @@ func Ready(ctx context.Context, req *ReadyRequest) (*ReadyResponse, error) {
 // Search performs multi-table FTS (UNION ALL over items_fts_idx and
 // comments_fts_idx) per SPEC §4.4 + AF1. Query uses websearch_to_tsquery.
 //
+// Pagination: keyset over `(rank desc, item_id asc, comment_id asc)`
+// per SPEC §6.2.0 + §6.2 Tool 9. Over-fetch is LIMIT+1; the sentinel
+// row supplies the next-cursor anchor without a second COUNT query —
+// mirrors the Ready RPC pattern earlier in this file. `comment_id` is
+// the empty string for source="item" rows, which keeps the 3-tuple
+// total per SPEC §6.2 Tool 9 line 1451.
+//
 //encore:api private method=POST path=/workitems.Search
 func Search(ctx context.Context, req *SearchRequest) (*SearchResponse, error) {
 	if req == nil {
@@ -1706,47 +1738,94 @@ func Search(ctx context.Context, req *SearchRequest) (*SearchResponse, error) {
 		limit = searchDefaultLimit
 	}
 	if limit > searchMaxLimit {
-		limit = searchMaxLimit
+		return nil, &errs.Error{
+			Code:    errs.InvalidArgument,
+			Message: "limit out of range (1..100)",
+			Meta:    errs.Metadata{"field": "limit"},
+		}
 	}
 
 	// Project filter is enforced inside the SQL when set; org_id is
 	// always the scope gate. We use direct SQL here (rather than
 	// rbac.For) because the query shape is a UNION ALL across two
 	// tables — the rbac builder is single-table-only.
-	args := []any{identity.OrgID, req.Query, limit}
+	//
+	// Param plan:
+	//   $1 = identity.OrgID
+	//   $2 = req.Query (websearch_to_tsquery input)
+	//   $3 = limit + 1 (over-fetch sentinel)
+	//   $4..$6 = cursor anchor (rank, item_id, comment_id)
+	//   $7    = req.ProjectID (only when projectFilter is non-empty)
+	//
+	// Cursor anchor params are ALWAYS bound (zero values on first
+	// page); the predicate evaluates to TRUE when the anchor is zero
+	// because no FTS row has rank > any-real-float that is greater
+	// than the all-zero anchor — see the boolean guard below ($4=0 AND
+	// $5='' AND $6='' short-circuits the keyset predicate).
+	args := []any{
+		identity.OrgID,
+		req.Query,
+		limit + 1,
+		req.CursorRank,
+		req.CursorItemID,
+		req.CursorCommentID,
+	}
 	projectFilter := ""
 	if req.ProjectID != "" {
-		projectFilter = ` AND project_id = $4`
+		projectFilter = ` AND project_id = $7`
 		args = append(args, req.ProjectID)
 	}
 
-	// SPEC §10.1 forbids runtime-constructed SQL clauses where a
-	// tenant gate is involved. The org_id predicate IS the gate and
-	// is parameterised at $1 — the only string concatenation below
-	// is the static projectFilter ON/OFF, which carries no
-	// user-controlled value (req.ProjectID flows through $4).
-	sql := `SELECT id            AS item_id,
-	               'item'        AS source,
-	               ''            AS comment_id,
-	               ts_rank_cd(fts, websearch_to_tsquery('english', $2))::float8 AS rank,
-	               ts_headline('english', body, websearch_to_tsquery('english', $2),
-	                           'MaxFragments=1,MaxWords=20,MinWords=5')  AS snippet
-	          FROM workitems.items
-	         WHERE org_id = $1` + projectFilter + `
-	           AND fts @@ websearch_to_tsquery('english', $2)
-	         UNION ALL
-	         SELECT i.id            AS item_id,
-	                'comment'       AS source,
-	                c.id            AS comment_id,
-	                ts_rank_cd(c.fts, websearch_to_tsquery('english', $2))::float8 AS rank,
-	                ts_headline('english', c.body, websearch_to_tsquery('english', $2),
-	                            'MaxFragments=1,MaxWords=20,MinWords=5') AS snippet
-	          FROM workitems.comments c
-	          JOIN workitems.items i ON i.id = c.item_id
-	         WHERE i.org_id = $1` + strings.ReplaceAll(projectFilter, "project_id", "i.project_id") + `
-	           AND c.fts @@ websearch_to_tsquery('english', $2)
-	         ORDER BY rank DESC
-	         LIMIT $3`
+	// Canonical sort tuple: (rank desc, item_id asc, comment_id asc).
+	// Keyset predicate in row-constructor form, inverted on rank
+	// (descending) and ascending on (item_id, comment_id). The
+	// first-page short-circuit lives in the `OR (... = '' ...)`
+	// branch so the planner can fold the predicate to TRUE when no
+	// cursor was supplied.
+	//
+	// SPEC §10.1: no user-controlled string concatenation. The only
+	// dynamic SQL fragment is the static `projectFilter` ON/OFF; both
+	// `req.ProjectID` and the cursor anchors flow through parameter
+	// placeholders.
+	const sqlTpl = `WITH ranked AS (
+	    SELECT id            AS item_id,
+	           'item'        AS source,
+	           ''            AS comment_id,
+	           ts_rank_cd(fts, websearch_to_tsquery('english', $2))::float8 AS rank,
+	           ts_headline('english', body, websearch_to_tsquery('english', $2),
+	                       'MaxFragments=1,MaxWords=20,MinWords=5')  AS snippet
+	      FROM workitems.items
+	     WHERE org_id = $1{{PROJECT_ITEMS}}
+	       AND fts @@ websearch_to_tsquery('english', $2)
+	    UNION ALL
+	    SELECT i.id            AS item_id,
+	           'comment'       AS source,
+	           c.id            AS comment_id,
+	           ts_rank_cd(c.fts, websearch_to_tsquery('english', $2))::float8 AS rank,
+	           ts_headline('english', c.body, websearch_to_tsquery('english', $2),
+	                       'MaxFragments=1,MaxWords=20,MinWords=5') AS snippet
+	      FROM workitems.comments c
+	      JOIN workitems.items i ON i.id = c.item_id
+	     WHERE i.org_id = $1{{PROJECT_COMMENTS}}
+	       AND c.fts @@ websearch_to_tsquery('english', $2)
+	)
+	SELECT item_id, source, comment_id, rank, snippet
+	  FROM ranked
+	 WHERE ($5 = '' AND $6 = '')
+	    OR rank < $4
+	    OR (rank = $4 AND item_id > $5)
+	    OR (rank = $4 AND item_id = $5 AND comment_id > $6)
+	 ORDER BY rank DESC, item_id ASC, comment_id ASC
+	 LIMIT $3`
+
+	projectItems := ""
+	projectComments := ""
+	if projectFilter != "" {
+		projectItems = projectFilter
+		projectComments = strings.ReplaceAll(projectFilter, "project_id", "i.project_id")
+	}
+	sql := strings.ReplaceAll(sqlTpl, "{{PROJECT_ITEMS}}", projectItems)
+	sql = strings.ReplaceAll(sql, "{{PROJECT_COMMENTS}}", projectComments)
 
 	rows, err := db.Query(ctx, sql, args...)
 	if err != nil {
@@ -1755,7 +1834,13 @@ func Search(ctx context.Context, req *SearchRequest) (*SearchResponse, error) {
 	}
 	defer rows.Close()
 
-	var hits []SearchHit
+	// Materialise up to `limit` hits plus the sentinel (limit+1). The
+	// sentinel — if present — provides the next-cursor anchor; we
+	// DISCARD it from the response. Anchor is rows[limit-1] (the last
+	// row of the CURRENT page), matching the Ready RPC's pattern at the
+	// top of this file. A future request emits rows STRICTLY AFTER that
+	// anchor via the keyset predicate above.
+	all := make([]SearchHit, 0, limit+1)
 	for rows.Next() {
 		var h SearchHit
 		if err := rows.Scan(&h.ItemID, &h.Source, &h.CommentID, &h.Rank, &h.Snippet); err != nil {
@@ -1765,12 +1850,24 @@ func Search(ctx context.Context, req *SearchRequest) (*SearchResponse, error) {
 		if len(h.Snippet) > 200 {
 			h.Snippet = h.Snippet[:200]
 		}
-		hits = append(hits, h)
+		all = append(all, h)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, &errs.Error{Code: errs.Internal, Message: "search iter failed"}
 	}
-	return &SearchResponse{Hits: hits}, nil
+
+	resp := &SearchResponse{}
+	if len(all) > limit {
+		// Sentinel detected — page is full and there are more rows.
+		last := all[limit-1]
+		resp.NextCursorRank = last.Rank
+		resp.NextCursorItemID = last.ItemID
+		resp.NextCursorCommentID = last.CommentID
+		resp.Hits = all[:limit]
+	} else {
+		resp.Hits = all
+	}
+	return resp, nil
 }
 
 // -----------------------------------------------------------------------------
