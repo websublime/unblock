@@ -16,9 +16,33 @@ package auth
 //	GITHUB_OAUTH_CLIENT_ID  ↔ GitHubOAuthClientID
 //	GITHUB_OAUTH_CLIENT_SECRET ↔ GitHubOAuthClientSecret
 //
-// Production values are seeded by Olive via `encore secret set --type prod`
-// before deploy; staging via `--type dev`. Local emulator reads the four
-// fields from `apps/api/.secrets.local.cue` (gitignored).
+// Provisioning policy across Encore Cloud env types (per tv8.56):
+//
+//	--type prod   — real production values (Olive seeds before prod deploy).
+//	                MemoryDEK + APIKeyHMACSecret carry real long-lived
+//	                values; rotating either is a destructive operation
+//	                (invalidates issued API keys, paginated cursors, or
+//	                encrypted oauth_tokens rows). GitHubOAuth* must be
+//	                rotated to the real GitHub OAuth app credentials
+//	                before the prod OAuth flow is first exercised.
+//	--type dev    — staging values (Olive seeds before staging deploy).
+//	--type pr     — CI placeholder values. Required so Encore Cloud's
+//	                pre-deploy `encore test` step on PR / preview-env
+//	                builds boots without tripping the mcp/transport.go
+//	                fail-fast on APIKeyHMACSecret. Internal mapping:
+//	                ephemeral → preview (encoredev/encore set.go:179).
+//	--type local  — CI placeholder values. Provisioned defensively
+//	                because Encore Cloud does not document which env type
+//	                its pre-deploy CI test runner queries; covering all
+//	                four documented types eliminates the variable.
+//
+// Local emulator (`encore run`) reads the four fields from
+// `apps/api/.secrets.local.cue` (gitignored), which overlays on top of
+// whatever the platform returns for `--type dev`.
+//
+// All four secrets MUST be set across all four types before deploy. Missing
+// values surface as: APIKeyHMACSecret → boot panic (mcp/transport.go:114);
+// MemoryDEK, GitHubOAuth* → runtime panic when their code path fires.
 //
 //nolint:unused // referenced by RPC bodies starting in beads B-1..D-3.
 var secrets struct {
