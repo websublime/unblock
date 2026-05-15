@@ -8,6 +8,7 @@
 - 2026-05-12 — round-5 (tracing contract from Sherlock's investigation on bead `unblock-tv8.5`): §10.2 picks Option B — ULID minted at MCP entry, propagated via `context.Context` only; removed the spurious `X-Unblock-Trace-Id` outgoing-RPC header (Encore's generated client carries `ctx` across private RPCs for free, and Pub/Sub embeds the id in the payload). §7, §8.1, §8.2, §4.5, and §6.3.1 reworded to reference Option B. Encore's runtime `req.Trace.TraceID` is observability-only and not persisted. DDL frozen — no schema change.
 - 2026-05-14 — round-7 (cursor keyset pagination, P01): Tools 2 (`ready`), 8 (`list`), and 9 (`search`) now share a cursor keyset pagination contract pinned in the new §6.2.0. Tool 2's "No pagination at v1.0" paragraph is removed; the §6.2 contracts for Tools 2/9 gain `cursor` argument + `next_cursor` result (Tool 8 already carried both). Cursors are opaque base64url-encoded JSON tuples HMAC-signed with `API_KEY_HMAC_SECRET`; the per-tool tuples are `{priority, created_at_unix_us, id}` (Tool 2), `{id}` (Tool 8), `{rank, item_id, comment_id}` (Tool 9). Invalid cursors → §7 `VALIDATION` envelope with `data.field = "cursor"`. No schema change — migration `0100` already covers the Tool 2 ORDER BY.
 - 2026-05-12 — round-6 (cascade-symmetry): the cascade subsystem is split into two regimes (new §6.3.0). `is_ready` is maintained inline by the writer that mutated the row/edge (single-hop); `pipeline_stage` is maintained exclusively by the cascade subscriber (multi-hop). `deps.cascade_events.kind` CHECK is extended from 2 values (`'close' | 'edge_removed'`) to 4 values (`'close' | 'edge_added' | 'edge_removed' | 'state_change'`). Tools 6 (close), 11 (add_dependency), 12 (remove_dependency), 13 (set_state — narrow rule for §5.7.1-affecting writes), and `workitems.Claim` (only on the I-3 reset path) post-commit publish `CascadeRequested` with the matching `Reason`. Tool 12 reuses the inline audit row's `event_id` on its post-commit publish; the subscriber's `ON CONFLICT (event_id, triggered_by_item_id) DO NOTHING` collapses the second insert to no-op. The §11.3 single-writer invariant is fractured: (a) `pipeline_stage` single-writer = cascade subscriber; (b) `is_ready` single-writer = the mutating call site (Tool 6 close, §6.5 add_edge, Tool 12 remove_edge, internal helper `deps.recomputeReady`); the linter rule scope tightens to `pipeline_stage` only with an explicit allowlist for `is_ready`. DDL migration `0050_deps.up.sql` updated in lockstep (CHECK list + doc comments).
+- 2026-05-15 — Round 8 — D-4 drift cleanup (targeted clarifications surfaced during `/investigate` on bead unblock-tv8.19; status remains APPROVED): (1) §4.4 `SearchRequest` / `SearchResponse` gain typed cursor fields (`CursorRank`, `CursorItemID`, `CursorCommentID` + matching `NextCursor*`) and a doc-note pinning the keyset tuple `(rank desc, item_id asc, comment_id asc)` and `LIMIT+1` over-fetch semantics — mirrors the Ready RPC pattern in `apps/api/workitems/workitems.go` and aligns §4.4 with the §6.2.0 / §6.2 Tool 9 cursor contract. `SearchHit` and §3.4 FTS DDL unchanged. (2) §6.2 Tool 10 (`comment`) gains a one-line note documenting the body-length enforcement boundary: handler enforces 1..16384 chars at the MCP boundary; `workitems.AppendComment` enforces the non-empty floor. (3) §2 C3 row and §4.3.1 SDK-pin paragraph updated from `github.com/modelcontextprotocol/go-sdk v0.5.0` to `v1.6.0` with a D-1 rationale ("v1.6.0 is the latest stable as of phase-01 implementation; v0.5.0 was the original pin during planning"); aligns the spec with `apps/api/mcp/transport.go:18-22` and `go.mod`. Clarification patch only — no re-approval round.
 
 **Author:** Ada (architect)
 **Date:** 2026-05-08
@@ -96,7 +97,7 @@ binding design decision below.
 |---|---|---|
 | **C1 — Pub/Sub envelope `delivery_id`** | CONTRADICTED | §6.4 — publisher generates `event_id` (ULID) at emit; subscriber reads it from typed payload; idempotency key `(event_id, triggered_by_item_id)` enforced by DDL UNIQUE on `deps.cascade_events`. |
 | **C2 — Encore DB ownership / multi-schema** | CONTRADICTED | §3.1, §5.1 — a dedicated `apps/api/db/` service is the sole migration-owner AND single binding authority; all eight schemas' migrations live under `apps/api/db/migrations/`. Every domain service receives its `*sqldb.Database` handle via the canonical BindDB late-bind pattern (each service declares `var db *sqldb.Database` + `func BindDB(d *sqldb.Database) { db = d }`; `apps/api/db/db.go::init` calls `<service>.BindDB(DB)` for every consumer). Domain services MUST NOT declare `sqldb.Named("unblock")` at package init — it panics outside the Encore runtime and breaks plain `go test` for leaf packages. |
-| **C3 — "rmcp Go bindings" misnomer** | CONTRADICTED | §6.1 — pinned dependency: `github.com/modelcontextprotocol/go-sdk` v0.5.0 (or latest stable at implementation start; pinned by Greta in `go.mod` under task D-1). |
+| **C3 — "rmcp Go bindings" misnomer** | CONTRADICTED | §6.1 — pinned dependency: `github.com/modelcontextprotocol/go-sdk` v1.6.0 (D-1 decision: v1.6.0 is the latest stable as of phase-01 implementation; v0.5.0 was the original pin during planning). Pinned by Greta in `go.mod` under task D-1. |
 | **C4 — Encore Cloud edge-proxy timeout** | PARTIAL | §11.2 — NFR-1 measurement methodology declares "warm cache, local emulator only"; cloud SSE behaviour is a P02 ops item owned by Olive. P01 spec does not target Cloud. |
 | **C5 — Recursive CTE `LIMIT 256` semantics** | CONTRADICTED | §6.5 — cycle CTE uses an explicit `depth` counter with `WHERE depth < 256`. The exact CTE is reproduced verbatim from SPEC §9.4.9. |
 | **C6 — `GET /mcp/sse` is deprecated transport** | CONTRADICTED | §5 — Streamable HTTP per MCP 2025-06-18: single endpoint at `/mcp` supporting both `POST` (client → server, may stream) and `GET` (server-initiated SSE). No legacy SSE+POST fallback. |
@@ -509,10 +510,12 @@ designed around a single transport adapter that owns both methods —
 splitting forces a session-store seam between the two handlers that
 adds nothing.)
 
-Implementation pinned to `github.com/modelcontextprotocol/go-sdk` (version
-chosen at task D-1 implementation start; pinned in `go.mod`; documented in
-the PR description). Per research C3 the dependency is the canonical Go MCP
-SDK; **`rmcp` (Rust SDK) is not used in the Go backend.**
+Implementation pinned to `github.com/modelcontextprotocol/go-sdk` v1.6.0
+(D-1 decision: v1.6.0 is the latest stable as of phase-01 implementation;
+v0.5.0 was the original pin during planning. Pinned in `go.mod`; documented
+in the PR description and in `apps/api/mcp/transport.go:18-22`). Per research
+C3 the dependency is the canonical Go MCP SDK; **`rmcp` (Rust SDK) is not
+used in the Go backend.**
 
 Auth: every `POST /mcp` and `GET /mcp` request must carry
 `Authorization: Bearer <api-key>`. `Mcp-Session-Id` header is set on the
@@ -792,9 +795,27 @@ type SearchRequest struct {
     ProjectID string
     Query     string // websearch_to_tsquery format
     Limit     int    // 1..100; default 25
+    // Cursor anchor for keyset pagination (§6.2.0). All three Cursor*
+    // fields are populated together; the typed tuple mirrors the Ready
+    // RPC pattern (separate typed cursor fields rather than an opaque
+    // blob — Encore's wire format carries them transparently). When
+    // CursorItemID is "" the server returns the first page.
+    CursorRank      float64
+    CursorItemID    string
+    CursorCommentID string
 }
 type SearchResponse struct {
     Hits []SearchHit
+    // NextCursor* carries the keyset anchor of the row that would
+    // START the next page on the canonical FTS sort tuple
+    // (rank desc, item_id asc, comment_id asc). All three NextCursor*
+    // fields are populated together when more rows exist; all three
+    // are zero values when this is the final page. The handler
+    // over-fetches LIMIT+1 to detect end-of-stream — same pattern as
+    // the Ready RPC.
+    NextCursorRank      float64
+    NextCursorItemID    string
+    NextCursorCommentID string
 }
 type SearchHit struct {
     ItemID    string
@@ -1449,6 +1470,9 @@ the empty string for `source="item"` rows so the tiebreaker is total.
 ```
 
 Append-only by construction (no update/delete tool ships in P01).
+
+**Body length enforcement boundary.** Handler enforces 1..16384 chars at
+the MCP boundary; `workitems.AppendComment` enforces the non-empty floor.
 
 #### Tool 11 — `add_dependency`
 
