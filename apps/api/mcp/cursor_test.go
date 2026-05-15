@@ -18,6 +18,7 @@
 package mcp
 
 import (
+	"crypto/rand"
 	"encoding/base64"
 	"errors"
 	"strings"
@@ -128,26 +129,57 @@ func TestCursor_MalformedToken(t *testing.T) {
 }
 
 // TestCursor_HMACMismatch: a token signed with one secret cannot
-// be verified with a different secret. We simulate this by
-// minting a token, then flipping a tag byte before decode.
+// be verified with a tampered tag. We simulate this by minting a
+// token, then flipping a *raw* byte of the HMAC tag (decode →
+// XOR 0x01 → re-encode) before passing it to decodeCursor.
+//
+// Why raw-byte flip and not base64-char flip: the HMAC-SHA256 tag
+// is 32 bytes = 256 bits, which RawURLEncoding emits as 43 base64
+// chars. The 43rd char carries only 4 meaningful bits + 2
+// don't-care padding bits, and Go's *Encoding decodes non-Strict
+// by default — so a single-char flip can land on a char whose
+// 4 MSB match the original and decode to identical bytes,
+// silently passing HMAC verify (~25% probability per random
+// secret). See unblock-tv8.58 for the CI symptom.
+//
+// To guard against regressions across secret values, we sweep
+// 100 cryptographically-random 32-byte secrets, signing under
+// each and asserting tamper detection every time.
 func TestCursor_HMACMismatch(t *testing.T) {
-	original := readyCursor{V: cursorVersionReady, ID: "01HZZZ1234567890ABCDEFGHJK"}
-	token, err := encodeCursor(original)
-	if err != nil {
-		t.Fatalf("encodeCursor: %v", err)
+	const iterations = 100
+	// Save and restore the package-level secret so we do not leak
+	// state into adjacent tests in the same binary.
+	orig := secrets.APIKeyHMACSecret
+	t.Cleanup(func() { secrets.APIKeyHMACSecret = orig })
+
+	for i := 0; i < iterations; i++ {
+		// 32 random bytes — full entropy across the SHA-256 keyspace.
+		var key [32]byte
+		if _, err := rand.Read(key[:]); err != nil {
+			t.Fatalf("rand.Read: %v", err)
+		}
+		secrets.APIKeyHMACSecret = string(key[:])
+
+		original := readyCursor{V: cursorVersionReady, ID: "01HZZZ1234567890ABCDEFGHJK"}
+		token, err := encodeCursor(original)
+		if err != nil {
+			t.Fatalf("iter=%d encodeCursor: %v", i, err)
+		}
+		tampered, err := tamperTag(token)
+		if err != nil {
+			t.Fatalf("iter=%d tamperTag: %v", i, err)
+		}
+		if tampered == token {
+			t.Fatalf("iter=%d tamperTag returned unchanged token: %q", i, token)
+		}
+		var dst readyCursor
+		err = decodeCursor(tampered, cursorVersionReady, &dst)
+		if err == nil {
+			t.Fatalf("iter=%d expected HMAC mismatch error; got nil (secret=%x token=%q tampered=%q)",
+				i, key, token, tampered)
+		}
+		assertCursorValidationErr(t, err)
 	}
-	// Flip the last byte of the tag (the segment after the dot).
-	dot := strings.LastIndex(token, ".")
-	if dot < 0 {
-		t.Fatalf("token missing separator: %q", token)
-	}
-	tampered := token[:dot+1] + flipLastByte(token[dot+1:])
-	var dst readyCursor
-	err = decodeCursor(tampered, cursorVersionReady, &dst)
-	if err == nil {
-		t.Fatalf("expected HMAC mismatch error; got nil (token=%q tampered=%q)", token, tampered)
-	}
-	assertCursorValidationErr(t, err)
 }
 
 // TestCursor_VersionMismatch: a Tool 2 cursor presented to Tool 8
@@ -201,25 +233,27 @@ func assertCursorValidationErr(t *testing.T, err error) {
 	}
 }
 
-func flipLastByte(s string) string {
-	if s == "" {
-		return s
+// tamperTag returns a copy of `token` (payload.tag) with the HMAC
+// tag bytes mutated by XOR-ing 0x01 into the first byte. The
+// mutation is applied in raw-byte space (decode → mutate → re-
+// encode), which guarantees the re-encoded tag differs from the
+// original by at least one byte regardless of secret value — in
+// contrast to a base64-char flip, which can be a no-op under
+// non-Strict decoding when the flipped char shares its 4 MSB
+// with the original (see unblock-tv8.58).
+func tamperTag(token string) (string, error) {
+	dot := strings.LastIndex(token, ".")
+	if dot < 0 {
+		return "", errors.New("token missing separator")
 	}
-	b := []byte(s)
-	// Flip case on the last byte (cheap perturbation that keeps it
-	// in the base64url alphabet but changes the decoded value).
-	last := b[len(b)-1]
-	switch {
-	case last >= 'A' && last <= 'Z':
-		b[len(b)-1] = last - 'A' + 'a'
-	case last >= 'a' && last <= 'z':
-		b[len(b)-1] = last - 'a' + 'A'
-	case last >= '0' && last <= '8':
-		b[len(b)-1] = last + 1
-	case last == '9':
-		b[len(b)-1] = '0'
-	default:
-		b[len(b)-1] = 'A'
+	tagB64 := token[dot+1:]
+	rawTag, err := base64.RawURLEncoding.DecodeString(tagB64)
+	if err != nil {
+		return "", err
 	}
-	return string(b)
+	if len(rawTag) == 0 {
+		return "", errors.New("empty tag")
+	}
+	rawTag[0] ^= 0x01
+	return token[:dot+1] + base64.RawURLEncoding.EncodeToString(rawTag), nil
 }
