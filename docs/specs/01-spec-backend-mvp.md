@@ -95,7 +95,7 @@ binding design decision below.
 | Research finding | Status in research | How this spec resolves it |
 |---|---|---|
 | **C1 — Pub/Sub envelope `delivery_id`** | CONTRADICTED | §6.4 — publisher generates `event_id` (ULID) at emit; subscriber reads it from typed payload; idempotency key `(event_id, triggered_by_item_id)` enforced by DDL UNIQUE on `deps.cascade_events`. |
-| **C2 — Encore DB ownership / multi-schema** | CONTRADICTED | §3.1, §5.1 — a dedicated `apps/api/db/` service is the sole migration-owner; all eight schemas' migrations live under `apps/api/db/migrations/`. Every domain service (auth included) consumes via `sqldb.Named("unblock")`. |
+| **C2 — Encore DB ownership / multi-schema** | CONTRADICTED | §3.1, §5.1 — a dedicated `apps/api/db/` service is the sole migration-owner AND single binding authority; all eight schemas' migrations live under `apps/api/db/migrations/`. Every domain service receives its `*sqldb.Database` handle via the canonical BindDB late-bind pattern (each service declares `var db *sqldb.Database` + `func BindDB(d *sqldb.Database) { db = d }`; `apps/api/db/db.go::init` calls `<service>.BindDB(DB)` for every consumer). Domain services MUST NOT declare `sqldb.Named("unblock")` at package init — it panics outside the Encore runtime and breaks plain `go test` for leaf packages. |
 | **C3 — "rmcp Go bindings" misnomer** | CONTRADICTED | §6.1 — pinned dependency: `github.com/modelcontextprotocol/go-sdk` v0.5.0 (or latest stable at implementation start; pinned by Greta in `go.mod` under task D-1). |
 | **C4 — Encore Cloud edge-proxy timeout** | PARTIAL | §11.2 — NFR-1 measurement methodology declares "warm cache, local emulator only"; cloud SSE behaviour is a P02 ops item owned by Olive. P01 spec does not target Cloud. |
 | **C5 — Recursive CTE `LIMIT 256` semantics** | CONTRADICTED | §6.5 — cycle CTE uses an explicit `depth` counter with `WHERE depth < 256`. The exact CTE is reproduced verbatim from SPEC §9.4.9. |
@@ -292,7 +292,7 @@ GitHubOAuthClientSecret: "dev-client-secret"
 | Secret (logical) | Purpose | Used by |
 |---|---|---|
 | `MEMORY_DEK` | pgcrypto symmetric DEK for `*_enc` columns | `auth` (oauth_tokens encryption tests in P01); fully exercised P02 |
-| `API_KEY_HMAC_SECRET` | server-side secret for `HMAC-SHA256(secret, raw_key)` per C7 | `auth` (Bearer auth check on every MCP call) |
+| `API_KEY_HMAC_SECRET` | server-side secret for `HMAC-SHA256(secret, raw_key)` per C7 (Bearer auth) AND `HMAC-SHA256(secret, cursor_payload)` per §6.2.0 (paginated cursor signing — re-uses the same key, no new secret) | `auth` (Bearer auth check on every MCP call; API key issuance); `mcp` (paginated cursor encode/decode per §6.2.0) |
 | `GITHUB_OAUTH_CLIENT_ID` | OAuth2+PKCE client id (test app at v1.0) | `auth.ExchangeOAuthCode` |
 | `GITHUB_OAUTH_CLIENT_SECRET` | OAuth2+PKCE client secret | `auth.ExchangeOAuthCode` |
 
