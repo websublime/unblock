@@ -204,6 +204,42 @@ type SetStateRequest struct {
 	PipelineState *string
 }
 
+// GetStateRequest is the input to GetState. SPEC §6.2 Tool 14 line
+// 1730-1733.
+type GetStateRequest struct {
+	ItemID string
+}
+
+// RecentKindRow is a single (kind, status, comment_id, created_at) tuple
+// returned by GetState's `recent_kinds` aggregate. SPEC §6.2 Tool 14
+// lines 1745-1750: one row per distinct comment kind on the item,
+// carrying the most recent (status, comment_id, created_at) for that
+// kind. Ordered by `kind` ASC for deterministic wire output.
+type RecentKindRow struct {
+	Kind      string
+	Status    string
+	CommentID string
+	CreatedAt time.Time
+}
+
+// GetStateResponse is the output of GetState. SPEC §6.2 Tool 14 lines
+// 1736-1751: every state dimension on the item plus the per-kind
+// `recent_kinds` aggregate from workitems.comments. The four state
+// columns surface as plain strings (never pointers) because every item
+// row has them populated via column defaults — the empty string here
+// would indicate a corrupted row.
+type GetStateResponse struct {
+	ImplState     string
+	ReviewState   string
+	QAState       string
+	PipelineState string
+	PipelineStage string
+	IsReady       bool
+	ClaimedByID   string
+	ClaimedAt     *time.Time
+	RecentKinds   []RecentKindRow
+}
+
 // CloseRequest is the input to Close. SPEC §4.4.
 type CloseRequest struct {
 	ItemID string
@@ -838,6 +874,100 @@ func Get(ctx context.Context, id string) (*Item, error) {
 		return nil, err
 	}
 	return item, nil
+}
+
+// GetState returns the four state dimensions + materialised
+// pipeline_stage + is_ready + claim columns + the per-kind
+// `recent_kinds` aggregate from workitems.comments. SPEC §6.2 Tool 14
+// (lines 1727-1754).
+//
+// Read-side org gate: the item lookup uses rbac.For (same pattern as
+// Get), so a cross-org item_id surfaces as NotFound to the caller. The
+// recent_kinds query is scoped to the resolved item_id — no separate
+// org predicate is required because the item lookup above already
+// validated the caller's org owns the row, and workitems.comments.item_id
+// is a FK to workitems.items.id (cross-org comments are impossible by
+// construction).
+//
+// `recent_kinds` SQL shape: `SELECT DISTINCT ON (kind) kind, status,
+// id, created_at FROM workitems.comments WHERE item_id = $1 ORDER BY
+// kind ASC, created_at DESC`. Postgres' DISTINCT ON returns the FIRST
+// row per `kind` partition under the supplied ORDER BY, so the
+// secondary `created_at DESC` term picks the most recent comment per
+// kind. The outer ordering also drives wire stability (kind ASC) so
+// downstream consumers see a deterministic sequence.
+//
+// No covering index on (kind, created_at DESC) ships in P01 — the
+// query plan against a small comment table per item is acceptable.
+// Index addition is deferred to the NFR-1 latency harness (bead
+// unblock-tv8.24) per the D-6 INVESTIGATION risk R6.
+//
+//encore:api private method=POST path=/workitems.GetState
+func GetState(ctx context.Context, req *GetStateRequest) (*GetStateResponse, error) {
+	if req == nil || req.ItemID == "" {
+		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "missing item_id"}
+	}
+	identity, ok := callerIdentity(ctx)
+	if !ok {
+		return nil, &errs.Error{Code: errs.Unauthenticated, Message: "no caller identity"}
+	}
+
+	// Item read via rbac.For pins the org gate at the SQL layer; an
+	// item_id from another org surfaces as NotFound here, never as a
+	// stale row leak to the MCP wire.
+	itemRows, err := rbac.For[itemRow](identity, "workitems.items").
+		Where("id = $1", req.ItemID).
+		Run(ctx)
+	if err != nil {
+		rlog.Error("workitems: get_state item fetch failed", "err", err, "item_id", req.ItemID)
+		return nil, &errs.Error{Code: errs.Internal, Message: "get_state fetch failed"}
+	}
+	if len(itemRows) == 0 {
+		return nil, &errs.Error{Code: errs.NotFound, Message: "item not found"}
+	}
+	item, err := itemFromRow(ctx, itemRows[0])
+	if err != nil {
+		return nil, err
+	}
+
+	// recent_kinds: one row per distinct comment kind on this item, with
+	// the most recent (status, comment_id, created_at) per kind. Ordered
+	// by kind ASC for deterministic wire output.
+	kindRows, err := db.Query(ctx,
+		`SELECT DISTINCT ON (kind) kind, status, id, created_at
+		   FROM workitems.comments
+		  WHERE item_id = $1
+		  ORDER BY kind ASC, created_at DESC`,
+		req.ItemID,
+	)
+	if err != nil {
+		rlog.Error("workitems: get_state recent_kinds query failed", "err", err, "item_id", req.ItemID)
+		return nil, &errs.Error{Code: errs.Internal, Message: "get_state recent_kinds fetch failed"}
+	}
+	defer kindRows.Close()
+	var recent []RecentKindRow
+	for kindRows.Next() {
+		var r RecentKindRow
+		if err := kindRows.Scan(&r.Kind, &r.Status, &r.CommentID, &r.CreatedAt); err != nil {
+			return nil, &errs.Error{Code: errs.Internal, Message: "get_state recent_kinds scan failed"}
+		}
+		recent = append(recent, r)
+	}
+	if err := kindRows.Err(); err != nil {
+		return nil, &errs.Error{Code: errs.Internal, Message: "get_state recent_kinds iter failed"}
+	}
+
+	return &GetStateResponse{
+		ImplState:     item.ImplState,
+		ReviewState:   item.ReviewState,
+		QAState:       item.QAState,
+		PipelineState: item.PipelineState,
+		PipelineStage: item.PipelineStage,
+		IsReady:       item.IsReady,
+		ClaimedByID:   item.ClaimedByID,
+		ClaimedAt:     item.ClaimedAt,
+		RecentKinds:   recent,
+	}, nil
 }
 
 // GetTrail returns the item + its comments + incoming/outgoing edges +
