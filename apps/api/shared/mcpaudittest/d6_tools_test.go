@@ -158,15 +158,20 @@ func decodeSetStateOut(t *testing.T, raw json.RawMessage) setStateWireOut {
 }
 
 // getStateWireOut models the §6.2 Tool 14 structuredContent shape.
+// pipeline_stage / claimed_by_id / claimed_at are *string because the
+// wire contract (post-review DECISION 2026-05-18, S1) emits explicit
+// JSON `null` when the underlying field is unset — a value-typed
+// `string` with `omitempty` would silently swallow that distinction.
 type getStateWireOut struct {
-	ImplState     string `json:"impl_state"`
-	ReviewState   string `json:"review_state"`
-	QAState       string `json:"qa_state"`
-	PipelineState string `json:"pipeline_state"`
-	PipelineStage string `json:"pipeline_stage,omitempty"`
-	IsReady       bool   `json:"is_ready"`
-	ClaimedByID   string `json:"claimed_by_id,omitempty"`
-	ClaimedAt     string `json:"claimed_at,omitempty"`
+	ProjectID     string  `json:"project_id"`
+	ImplState     string  `json:"impl_state"`
+	ReviewState   string  `json:"review_state"`
+	QAState       string  `json:"qa_state"`
+	PipelineState string  `json:"pipeline_state"`
+	PipelineStage *string `json:"pipeline_stage"`
+	IsReady       bool    `json:"is_ready"`
+	ClaimedByID   *string `json:"claimed_by_id"`
+	ClaimedAt     *string `json:"claimed_at"`
 	RecentKinds   []struct {
 		Kind      string `json:"kind"`
 		Status    string `json:"status"`
@@ -481,11 +486,14 @@ func TestD6_GetStateReturnsAllStateDimensions(t *testing.T) {
 	if got.PipelineState != "running" {
 		t.Fatalf("pipeline_state = %q, want running", got.PipelineState)
 	}
-	if got.ClaimedByID != fx.UserID {
-		t.Fatalf("claimed_by_id = %q, want %q", got.ClaimedByID, fx.UserID)
+	if got.ClaimedByID == nil || *got.ClaimedByID != fx.UserID {
+		t.Fatalf("claimed_by_id = %v, want %q", got.ClaimedByID, fx.UserID)
 	}
-	if got.ClaimedAt == "" {
-		t.Fatalf("claimed_at empty on claimed item")
+	if got.ClaimedAt == nil || *got.ClaimedAt == "" {
+		t.Fatalf("claimed_at = %v, want non-empty on claimed item", got.ClaimedAt)
+	}
+	if got.ProjectID != fx.ProjectID {
+		t.Fatalf("project_id = %q, want %q", got.ProjectID, fx.ProjectID)
 	}
 	if got.RecentKinds == nil {
 		t.Fatalf("recent_kinds nil (must be [] when no comments)")
@@ -538,14 +546,159 @@ func TestD6_GetStateRecentKindsOneRowPerKind(t *testing.T) {
 	}
 }
 
+// TestD6_GetStateUnclaimedItemEmitsExplicitNulls asserts the
+// post-review wire-shape contract (DECISION 2026-05-18, S1): for an
+// unclaimed item, the §6.2 Tool 14 structuredContent envelope MUST
+// contain the keys `claimed_by_id` and `claimed_at` with literal JSON
+// `null` value — NOT omit them. pipeline_stage is also pointer-
+// encoded; since the DDL default 'Investigation' means it's never
+// empty in practice, we only assert the key is present at the wire
+// (`null` would require a corrupted row).
+//
+// The check is done on the raw structuredContent JSON map so we catch
+// the "key absent" failure mode that a value-typed `string` +
+// `omitempty` decoding would silently mask.
+func TestD6_GetStateUnclaimedItemEmitsExplicitNulls(t *testing.T) {
+	resetToolCalls(t)
+	fx := seedD2Fixture(t)
+	// Unclaimed item: empty claimedBy → claimed_by_id and claimed_at
+	// both must surface as JSON `null` on the wire envelope.
+	itemID := seedItemForState(t, fx.OrgID, fx.ProjectID,
+		"pending", "pending", "pending", "running", "")
+
+	env := callTool(t, fx.RawKey, "get_state", map[string]any{
+		"item_id": itemID,
+	})
+	res := assertStructuredEchoesText(t, env)
+
+	// Decode into a generic map so we can inspect KEY PRESENCE
+	// independently of Go zero-value semantics — a missing key is
+	// indistinguishable from a JSON null after typed unmarshalling,
+	// but `_, ok := m[k]` discriminates the two.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(res.StructuredContent, &raw); err != nil {
+		t.Fatalf("unmarshal raw structuredContent: %v; raw=%s", err, string(res.StructuredContent))
+	}
+
+	for _, key := range []string{"claimed_by_id", "claimed_at", "pipeline_stage"} {
+		v, ok := raw[key]
+		if !ok {
+			t.Fatalf("structuredContent missing key %q; want present (with null for unclaimed); raw=%s",
+				key, string(res.StructuredContent))
+		}
+		// For the two claim fields we expect literal null; for
+		// pipeline_stage the DDL default means it's a non-null
+		// string. Either way the key MUST be present.
+		if key == "pipeline_stage" {
+			continue
+		}
+		if string(v) != "null" {
+			t.Fatalf("structuredContent[%q] = %s, want literal null on unclaimed item", key, string(v))
+		}
+	}
+}
+
 // =============================================================================
 // audit rows
 // =============================================================================
+
+// TestD6_SetStateIntentCommentInvalidKindRejected asserts the
+// post-review enum-validation contract (DECISION 2026-05-18, S2): an
+// intent_comment.kind outside SPEC §6.5's allow-list surfaces §7
+// VALIDATION with `details.field="intent_comment.kind"` BEFORE the
+// state mutation runs — DB state columns unchanged.
+func TestD6_SetStateIntentCommentInvalidKindRejected(t *testing.T) {
+	resetToolCalls(t)
+	fx := seedD2Fixture(t)
+	itemID := seedItemForState(t, fx.OrgID, fx.ProjectID,
+		"done", "approved", "passed", "running", fx.UserID)
+
+	env := callTool(t, fx.RawKey, "set_state", map[string]any{
+		"item_id":      itemID,
+		"review_state": "needs_rework",
+		"intent_comment": map[string]any{
+			"kind":   "not-a-real-kind", // not in §6.5 allow-list
+			"status": "warning",
+			"body":   "should never land",
+		},
+	})
+	if env.Error == nil {
+		t.Fatalf("expected VALIDATION on invalid intent_comment.kind; got success result=%s", string(env.Result))
+	}
+	var data envelopeData
+	if err := json.Unmarshal(env.Error.Data, &data); err != nil {
+		t.Fatalf("unmarshal error.data: %v", err)
+	}
+	if data.Kind != "VALIDATION" {
+		t.Fatalf("error.data.kind = %q, want VALIDATION", data.Kind)
+	}
+	if got, _ := data.Details["field"].(string); got != "intent_comment.kind" {
+		t.Fatalf("error.data.details.field = %q, want intent_comment.kind", got)
+	}
+
+	// DB read-back: state columns unchanged — SetStateColumns was
+	// never called because validation ran first.
+	_, review, qa, _ := readItemStateColumns(t, itemID)
+	if review != "approved" {
+		t.Fatalf("DB review_state = %q after rejection, want approved (unchanged)", review)
+	}
+	if qa != "passed" {
+		t.Fatalf("DB qa_state = %q after rejection, want passed (unchanged)", qa)
+	}
+}
+
+// TestD6_SetStateIntentCommentInvalidStatusRejected: same contract as
+// the invalid-kind test, applied to intent_comment.status.
+func TestD6_SetStateIntentCommentInvalidStatusRejected(t *testing.T) {
+	resetToolCalls(t)
+	fx := seedD2Fixture(t)
+	itemID := seedItemForState(t, fx.OrgID, fx.ProjectID,
+		"done", "approved", "passed", "running", fx.UserID)
+
+	env := callTool(t, fx.RawKey, "set_state", map[string]any{
+		"item_id":      itemID,
+		"review_state": "needs_rework",
+		"intent_comment": map[string]any{
+			"kind":   "review",
+			"status": "not-a-real-status", // not in §6.5 allow-list
+			"body":   "should never land",
+		},
+	})
+	if env.Error == nil {
+		t.Fatalf("expected VALIDATION on invalid intent_comment.status; got success result=%s", string(env.Result))
+	}
+	var data envelopeData
+	if err := json.Unmarshal(env.Error.Data, &data); err != nil {
+		t.Fatalf("unmarshal error.data: %v", err)
+	}
+	if data.Kind != "VALIDATION" {
+		t.Fatalf("error.data.kind = %q, want VALIDATION", data.Kind)
+	}
+	if got, _ := data.Details["field"].(string); got != "intent_comment.status" {
+		t.Fatalf("error.data.details.field = %q, want intent_comment.status", got)
+	}
+
+	// DB read-back: state columns unchanged.
+	_, review, qa, _ := readItemStateColumns(t, itemID)
+	if review != "approved" {
+		t.Fatalf("DB review_state = %q after rejection, want approved (unchanged)", review)
+	}
+	if qa != "passed" {
+		t.Fatalf("DB qa_state = %q after rejection, want passed (unchanged)", qa)
+	}
+}
 
 // TestD6_AuditRowsCarryToolName: each set_state + get_state dispatch
 // writes one mcp.tool_calls row with the matching tool_name. SPEC
 // §8.1 — completes the audit coverage matrix alongside D-2, D-3,
 // D-4, and D-5.
+//
+// Post-review extension (DECISION 2026-05-18, S3): the get_state
+// audit row's project_id MUST be populated from the item's resolved
+// project scope (sourced from the same row already loaded by the
+// rbac.For org gate inside workitems.GetState). This pins the
+// audit-dashboard filterability contract: every tool call that
+// resolves an item knows its project.
 func TestD6_AuditRowsCarryToolName(t *testing.T) {
 	resetToolCalls(t)
 	fx := seedD2Fixture(t)
@@ -562,12 +715,25 @@ func TestD6_AuditRowsCarryToolName(t *testing.T) {
 
 	rows := selectToolCalls(t)
 	have := map[string]int{}
+	getStateProjectID := ""
 	for _, r := range rows {
 		have[r.ToolName]++
+		if r.ToolName == "get_state" && r.ProjectID != nil {
+			getStateProjectID = *r.ProjectID
+		}
 	}
 	for _, want := range []string{"set_state", "get_state"} {
 		if have[want] < 1 {
 			t.Fatalf("audit row for tool_name=%q: count=%d, want >=1; rows=%+v", want, have[want], rows)
 		}
+	}
+	// S3 contract: the get_state audit row carries the resolved
+	// project_id (sourced from the item's row via the rbac.For org
+	// gate). Non-empty + matches the seeded project.
+	if getStateProjectID == "" {
+		t.Fatalf("get_state audit row project_id is empty; want %q", fx.ProjectID)
+	}
+	if getStateProjectID != fx.ProjectID {
+		t.Fatalf("get_state audit row project_id = %q, want %q", getStateProjectID, fx.ProjectID)
 	}
 }

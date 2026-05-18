@@ -46,19 +46,28 @@ type getStateRecentKind struct {
 }
 
 // getStateOut mirrors SPEC §6.2 Tool 14 lines 1735-1751. Every state
-// dimension is serialised verbatim (no omitempty on the four state
-// columns + pipeline_stage + is_ready — they are always present per
-// the schema defaults). claimed_by_id and claimed_at are omitempty so
-// an unclaimed item produces a compact wire response.
+// dimension is serialised verbatim — pipeline_stage, claimed_by_id,
+// and claimed_at are POINTER types (not value+omitempty) so the JSON
+// encoder emits explicit `null` rather than omitting the key when the
+// underlying item has no claim and/or no pipeline_stage. This honors
+// the spec's literal reading ("<ULID|null>", "<ts|null>", state
+// dimensions are always present in the response) and prevents clients
+// from confusing "key absent" with "field unset".
+//
+// project_id is exposed as a top-level field per the orchestrator's
+// post-review DECISION 2026-05-18: the state surface is contextually
+// scoped to a project; mirrors set_state's structuredContent.item.
+// project_id presence.
 type getStateOut struct {
+	ProjectID     string               `json:"project_id"`
 	ImplState     string               `json:"impl_state"`
 	ReviewState   string               `json:"review_state"`
 	QAState       string               `json:"qa_state"`
 	PipelineState string               `json:"pipeline_state"`
-	PipelineStage string               `json:"pipeline_stage,omitempty"`
+	PipelineStage *string              `json:"pipeline_stage"`
 	IsReady       bool                 `json:"is_ready"`
-	ClaimedByID   string               `json:"claimed_by_id,omitempty"`
-	ClaimedAt     string               `json:"claimed_at,omitempty"`
+	ClaimedByID   *string              `json:"claimed_by_id"`
+	ClaimedAt     *string              `json:"claimed_at"`
 	RecentKinds   []getStateRecentKind `json:"recent_kinds"`
 }
 
@@ -104,28 +113,39 @@ func handleGetState(ctx context.Context, req *sdkmcp.CallToolRequest, in getStat
 	}
 
 	out := getStateOut{
+		ProjectID:     resp.ProjectID,
 		ImplState:     resp.ImplState,
 		ReviewState:   resp.ReviewState,
 		QAState:       resp.QAState,
 		PipelineState: resp.PipelineState,
-		PipelineStage: resp.PipelineStage,
 		IsReady:       resp.IsReady,
-		ClaimedByID:   resp.ClaimedByID,
 		RecentKinds:   recentKindsToWire(resp.RecentKinds),
 	}
+	// pipeline_stage / claimed_by_id / claimed_at: pointer-encode as
+	// non-nil when the underlying value is present, nil (→ JSON `null`)
+	// otherwise. Honors the spec's "always-present, explicit null"
+	// shape per the orchestrator's post-review DECISION 2026-05-18.
+	if resp.PipelineStage != "" {
+		ps := resp.PipelineStage
+		out.PipelineStage = &ps
+	}
+	if resp.ClaimedByID != "" {
+		cb := resp.ClaimedByID
+		out.ClaimedByID = &cb
+	}
 	if resp.ClaimedAt != nil {
-		out.ClaimedAt = resp.ClaimedAt.UTC().Format(time.RFC3339Nano)
+		ca := resp.ClaimedAt.UTC().Format(time.RFC3339Nano)
+		out.ClaimedAt = &ca
 	}
 
 	if state != nil && state.Call != nil {
 		state.Call.ResultKind = ResultOK
-		// ProjectID is not directly exposed by GetState's narrow
-		// response (the spec contract is the state surface, not the
-		// full Item). Leaving it unset on the audit row matches the
-		// SetStateColumns RPC's own behaviour for tools that don't
-		// resolve project scope at the boundary — non-fatal for the
-		// audit dashboard (per-tool tool_name + item_id remain the
-		// load-bearing fields).
+		// ProjectID stamped on the audit row per orchestrator's
+		// post-review DECISION 2026-05-18 (S3): the row is sourced
+		// from the same item already loaded for the rbac.For org
+		// gate inside workitems.GetState, so this is a pure
+		// projection — no extra query.
+		state.Call.ProjectID = resp.ProjectID
 	}
 	return nil, out, nil
 }

@@ -228,7 +228,15 @@ type RecentKindRow struct {
 // columns surface as plain strings (never pointers) because every item
 // row has them populated via column defaults — the empty string here
 // would indicate a corrupted row.
+//
+// ProjectID is the item's project scope, sourced from the same row
+// already loaded by the rbac.For org gate. It is exposed so the MCP
+// handler can stamp `state.Call.ProjectID` on the audit row (SPEC §8.1
+// requires per-call project_id for dashboard filtering) and surface a
+// top-level `project_id` field on the §6.2 Tool 14 wire envelope (the
+// state surface is contextually scoped to a project).
 type GetStateResponse struct {
+	ProjectID     string
 	ImplState     string
 	ReviewState   string
 	QAState       string
@@ -958,6 +966,7 @@ func GetState(ctx context.Context, req *GetStateRequest) (*GetStateResponse, err
 	}
 
 	return &GetStateResponse{
+		ProjectID:     item.ProjectID,
 		ImplState:     item.ImplState,
 		ReviewState:   item.ReviewState,
 		QAState:       item.QAState,

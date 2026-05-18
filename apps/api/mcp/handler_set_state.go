@@ -49,11 +49,20 @@
 //
 // # intent_comment validation
 //
-// Mirrors handler_comment.go (kind ∈ §6.5 allow-list, status ∈ §6.5
-// allow-list, body 1..16384 chars). Validation runs at the MCP
-// boundary before SetStateColumns is invoked, so a malformed
-// intent_comment surfaces as §7 VALIDATION without leaving a stale
-// state-only mutation behind.
+// Validation runs at the MCP boundary BEFORE SetStateColumns is
+// invoked, so a malformed intent_comment surfaces as §7 VALIDATION
+// without leaving a stale state-only mutation behind:
+//
+//   - kind ∈ SPEC §6.5 allow-list (mirrors comments_kind_chk DDL).
+//   - status ∈ SPEC §6.5 allow-list (mirrors comments_status_chk).
+//   - body 1..16384 chars.
+//
+// Each rejection returns InvalidArgument with `details["field"]`
+// identifying the offending sub-field (e.g. `intent_comment.kind`,
+// `intent_comment.status`, `intent_comment.body`). The downstream
+// workitems.AppendComment RPC + DDL CHECK constraints re-enforce
+// kind/status independently — boundary enforcement is the wire-UX
+// improvement (post-review DECISION 2026-05-18, S2).
 //
 // # Cascade publication
 //
@@ -118,6 +127,38 @@ type setStateOut struct {
 // Tool 13's intent_comment cap) is a single-line edit here without
 // affecting the plain `comment` tool.
 const setStateCommentBodyMax = 16384
+
+// intentCommentAllowedKinds mirrors SPEC §6.5 / migration
+// 0040_workitems.up.sql comments_kind_chk: the canonical kind enum the
+// DDL accepts for workitems.comments.kind. Enforced at the MCP
+// boundary (post-review DECISION 2026-05-18, S2) so an invalid kind
+// inside intent_comment surfaces as §7 VALIDATION
+// (details.field="intent_comment.kind") BEFORE the state mutation
+// commits — preventing a stale state-only mutation behind a malformed
+// comment retry.
+var intentCommentAllowedKinds = map[string]struct{}{
+	"investigation": {},
+	"decision":      {},
+	"deviation":     {},
+	"completed":     {},
+	"review":        {},
+	"qa":            {},
+	"deferred":      {},
+	"pr":            {},
+	"needs-human":   {},
+	"override":      {},
+	"general":       {},
+}
+
+// intentCommentAllowedStatuses mirrors SPEC §6.5 / migration
+// 0040_workitems.up.sql comments_status_chk. Same boundary-validation
+// rationale as intentCommentAllowedKinds above.
+var intentCommentAllowedStatuses = map[string]struct{}{
+	"error":   {},
+	"warning": {},
+	"info":    {},
+	"success": {},
+}
 
 // registerHandleSetState is invoked by transport.go's init — see the
 // toolRegistrars rationale there.
@@ -218,15 +259,21 @@ func handleSetState(ctx context.Context, req *sdkmcp.CallToolRequest, in setStat
 	return nil, out, nil
 }
 
-// validateIntentComment enforces the same boundary contract
-// handler_comment.go applies to the plain `comment` tool: kind is
-// required (no default substitution at the MCP layer for the
-// intent_comment block — the spec explicitly enumerates the field as
-// a required member when the block is present), status is required,
-// and body is 1..16384 chars. The downstream workitems.AppendComment
-// RPC re-validates everything; this surfaces the §7 VALIDATION
-// envelope with the right `data.field` BEFORE the state mutation
-// commits.
+// validateIntentComment enforces the MCP-boundary validation contract
+// for the optional intent_comment block:
+//
+//   - kind ∈ SPEC §6.5 allow-list (matches workitems.comments
+//     comments_kind_chk CHECK in migration 0040_workitems.up.sql).
+//   - status ∈ SPEC §6.5 allow-list (matches comments_status_chk).
+//   - body length ∈ 1..16384 chars.
+//
+// Validation runs BEFORE workitems.SetStateColumns is invoked so a
+// malformed intent_comment never leaves a stale state-only mutation
+// behind. The downstream workitems.AppendComment RPC + DDL CHECK
+// constraints re-enforce kind/status independently; surfacing
+// VALIDATION at the boundary with `data.field` identifying the
+// offending sub-field is the meaningful UX win (post-review DECISION
+// 2026-05-18, S2).
 func validateIntentComment(c *setStateIntentComment) error {
 	if c.Kind == "" {
 		return &errs.Error{
@@ -235,10 +282,24 @@ func validateIntentComment(c *setStateIntentComment) error {
 			Meta:    errs.Metadata{"field": "intent_comment.kind"},
 		}
 	}
+	if _, ok := intentCommentAllowedKinds[c.Kind]; !ok {
+		return &errs.Error{
+			Code:    errs.InvalidArgument,
+			Message: "intent_comment.kind not in allowed enum (SPEC §6.5)",
+			Meta:    errs.Metadata{"field": "intent_comment.kind"},
+		}
+	}
 	if c.Status == "" {
 		return &errs.Error{
 			Code:    errs.InvalidArgument,
 			Message: "intent_comment.status is required",
+			Meta:    errs.Metadata{"field": "intent_comment.status"},
+		}
+	}
+	if _, ok := intentCommentAllowedStatuses[c.Status]; !ok {
+		return &errs.Error{
+			Code:    errs.InvalidArgument,
+			Message: "intent_comment.status not in allowed enum (SPEC §6.5)",
 			Meta:    errs.Metadata{"field": "intent_comment.status"},
 		}
 	}
