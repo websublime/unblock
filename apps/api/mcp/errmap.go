@@ -69,8 +69,18 @@ func mapError(state *requestState, tool string, err error) error {
 				// Spec §8.1: rejection_reason carries the canonical
 				// name of the failed precondition. Pull it from the
 				// details map (set by classifyEnvelopeError for the
-				// PRECONDITION path).
+				// PRECONDITION path). Preference order:
+				//   1. `missing` — column/argument absence cases (Close
+				//      with claimed_by_id IS NULL, etc).
+				//   2. `invariant` — set_state I-1..I-5 cases (added in
+				//      bead unblock-tv8.21 alongside the envelope
+				//      `data.invariant` surface).
+				//   3. `rejection_reason` — legacy mirror, kept as a
+				//      fallback for any future precondition that
+				//      surfaces only this key.
 				if v, ok := envErr.details["missing"].(string); ok && v != "" {
+					call.RejectionReason = v
+				} else if v, ok := envErr.details["invariant"].(string); ok && v != "" {
 					call.RejectionReason = v
 				} else if v, ok := envErr.details["rejection_reason"].(string); ok && v != "" {
 					call.RejectionReason = v
@@ -235,7 +245,15 @@ func classifyEnvelopeError(err error) envelopeError {
 		if v, ok := e.Meta["missing"].(string); ok && v != "" {
 			details["missing"] = v
 		}
+		// SPEC §6.2 Tool 13 line 1645-1646 + bead unblock-tv8.21 AC: surface
+		// the canonical invariant name as `data.invariant` (kebab-case) for
+		// machine-readability. The legacy `rejection_reason` mirror is
+		// preserved so existing clients (and the per-call audit-row
+		// RejectionReason population above) see the same value at both
+		// keys — semantically equivalent in P01, but `invariant` is the
+		// machine-targeted field per the spec/bead contract.
 		if v, ok := e.Meta["invariant"].(string); ok && v != "" {
+			details["invariant"] = v
 			details["rejection_reason"] = v
 		}
 		if v, ok := e.Meta["rejection_reason"].(string); ok && v != "" {
