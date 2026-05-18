@@ -569,6 +569,10 @@ func TestD5_RemoveDependencyWritesCascadeEvent(t *testing.T) {
 		t.Fatalf("cascade_events kind='edge_removed' rows for to=%s: count = %d, want 1", to, count)
 	}
 	// Clean up the audit row so cross-test isolation is preserved.
+	// A single DELETE is race-free even if the cascade subscriber fires
+	// concurrently: its INSERT carries ON CONFLICT (event_id, triggered_by_item_id)
+	// DO NOTHING, so any subscriber-side re-insert of the same audit row
+	// collapses to a no-op against the unique key.
 	t.Cleanup(func() {
 		_, _ = db.Exec(ctx,
 			`DELETE FROM deps.cascade_events WHERE triggered_by_item_id = $1 AND kind = 'edge_removed'`,
