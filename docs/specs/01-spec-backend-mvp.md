@@ -1734,6 +1734,7 @@ observes `qa_state='failed'`, it resets both review and qa to
 
 // structuredContent
 {
+  "project_id":     "<ULID>",   // project owning this work item (for audit correlation and client-side scoping)
   "impl_state":     "...",
   "review_state":   "...",
   "qa_state":       "...",
