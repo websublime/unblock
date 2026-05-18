@@ -73,6 +73,31 @@ const mcpInitializeBody = `{
 	}
 }`
 
+// mcpInitializeTimeout bounds the wall-clock budget for a single
+// MCP `initialize` round-trip in the D-1 suite. The 5s default that
+// peer auth-only tests use is too tight here: the initialize path
+// pays the full cold-start cost the first time it runs in the suite
+// — Docker Postgres warmup, migrations, seedOrg INSERT, the
+// auth.IssueAPIKey path (HMAC + INSERT into mcp.api_keys), the SDK
+// Connect() handshake, and the in-process Bearer hot path lookup.
+// On a CPU-throttled or contended host that easily exceeds 5s, which
+// surfaces as `read body: context deadline exceeded` at io.ReadAll
+// (the client cancels the request ctx, the deferred recordToolCall
+// then runs against the canceled ctx and emits a fire-and-forget
+// `recordToolCall: insert failed err="canceled: context canceled"`
+// log line — symptom, not cause).
+//
+// 30s is the spec-aligned headroom: SPEC §11.2 NFR-1 measures
+// latency on a warm local emulator, so the integration test that
+// includes the seed work is explicitly outside that budget. The
+// peer test `callTool` at d2_tools_test.go:199 uses 10s for a
+// session-resuming tools/call; the initialize variant runs first
+// and pays the higher cold-start cost, so it gets the wider margin.
+// If a future regression actually causes the server to hang, the
+// test still bounds the suite — it just gives the cold path room
+// to land first.
+const mcpInitializeTimeout = 30 * time.Second
+
 // mcpTestServer is a process-wide httptest.Server wrapping
 // mcp.ServeMCPForTest. Created lazily on first use so test packages
 // that exercise only the audit writer (TestRecordToolCallPersistsRow
@@ -167,7 +192,7 @@ func TestD1_POSTInitializeReturnsSessionID(t *testing.T) {
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set("Authorization", "Bearer "+rawKey)
 
-	resp := httpDo(t, req, 5*time.Second)
+	resp := httpDo(t, req, mcpInitializeTimeout)
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
@@ -250,7 +275,10 @@ func TestD1_GETOpensSSEStream(t *testing.T) {
 	postReq.Header.Set("Accept", "application/json, text/event-stream")
 	postReq.Header.Set("Authorization", "Bearer "+rawKey)
 
-	postResp := httpDo(t, postReq, 5*time.Second)
+	// Use the same wide budget as the dedicated initialize test —
+	// this POST pays the same cold-start cost (seedOrg + IssueAPIKey
+	// + SDK Connect) and was a coupled flake source.
+	postResp := httpDo(t, postReq, mcpInitializeTimeout)
 	sessionID := postResp.Header.Get("Mcp-Session-Id")
 	postResp.Body.Close()
 	if sessionID == "" {
