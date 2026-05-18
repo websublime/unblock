@@ -219,6 +219,7 @@ func TestRecordToolCallNullableFields(t *testing.T) {
 type toolCallRow struct {
 	ID         string
 	OrgID      string
+	ProjectID  *string
 	ToolName   string
 	ResultKind string
 	ErrorCode  *string
@@ -244,7 +245,7 @@ func selectToolCalls(t *testing.T) []toolCallRow {
 	t.Helper()
 	ctx := context.Background()
 	rows, err := db.Query(ctx, `
-		SELECT id, org_id, tool_name, result_kind, error_code, duration_ms, trace_id
+		SELECT id, org_id, project_id, tool_name, result_kind, error_code, duration_ms, trace_id
 		FROM mcp.tool_calls
 		ORDER BY called_at ASC, id ASC
 	`)
@@ -256,7 +257,7 @@ func selectToolCalls(t *testing.T) []toolCallRow {
 	var out []toolCallRow
 	for rows.Next() {
 		var r toolCallRow
-		if err := rows.Scan(&r.ID, &r.OrgID, &r.ToolName, &r.ResultKind, &r.ErrorCode, &r.DurationMs, &r.TraceID); err != nil {
+		if err := rows.Scan(&r.ID, &r.OrgID, &r.ProjectID, &r.ToolName, &r.ResultKind, &r.ErrorCode, &r.DurationMs, &r.TraceID); err != nil {
 			t.Fatalf("scan tool_calls: %v", err)
 		}
 		out = append(out, r)
