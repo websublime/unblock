@@ -114,15 +114,16 @@ type TableSpec struct {
 	Kind TableKind
 }
 
-// AuthOrgTables is the closed set of P01 auth + org schema tables this
-// bead (B-3 / unblock-tv8.9) sweeps. C-6 / unblock-tv8.15 appends
-// workitems.* + deps.* entries; E-3 / unblock-tv8.25 appends mcp.* +
-// memory.* + boards.* entries. The slice is exported and additive so
-// the two follow-up beads only add lines.
+// AuthOrgTables is the closed set of auth + org + workitems + deps
+// schema tables the B-3 (unblock-tv8.9) + C-6 (unblock-tv8.15) sweeps
+// cover. E-3 / unblock-tv8.25 appends the remaining
+// deps.cascade_events + mcp.* + memory.* + boards.* entries. The
+// slice is exported and additive so the final bead only adds lines.
 //
 // Classification rationale (verified against migrations
-// apps/api/db/migrations/0020_auth.up.sql lines 11-66 and
-// 0030_org.up.sql lines 7-62):
+// apps/api/db/migrations/0020_auth.up.sql lines 11-66,
+// 0030_org.up.sql lines 7-62, 0040_workitems.up.sql lines 46-225,
+// and 0050_deps.up.sql lines 13-26):
 //
 //   - auth.users / auth.oauth_tokens / auth.sessions — no org_id column;
 //     rbac.For would emit `<table>.org_id = $1` which Postgres rejects
@@ -135,6 +136,21 @@ type TableSpec struct {
 //     org_id). Same Authorize-gate treatment.
 //   - org.projects — has org_id column; rbac.For-scoped.
 //   - org.members — has org_id column; rbac.For-scoped.
+//   - workitems.items — has org_id column AND is reached through both
+//     surfaces: rbac.For for row-leak reads (workitems.go:870, 926,
+//     996, 1569, 1753) AND org.Authorize for write/delete gating
+//     (deps.AddEdge, workitems.SetStateColumns). The matrix carries
+//     TWO TableSpec entries on the same Name: one KindOrgScoped (read
+//     row-leak only) and one KindAuthorizeOnly (read/write/delete
+//     policy decision). SPEC §10.1 line 2356-2361 names exactly this
+//     dual treatment.
+//   - workitems.comments — no org_id column (scoped via parent
+//     items.org_id; workitems.go:1010-1020). Authorize-only gate.
+//   - workitems.trail — virtual resource (no SQL table; resource
+//     identifier at apps/api/org/org.go:111 gating workitems.GetTrail).
+//     Authorize-only.
+//   - deps.dependencies — no org_id column (gated at the MCP layer via
+//     org.Authorize; deps.go:18-25 header doc). Authorize-only.
 var AuthOrgTables = []TableSpec{
 	{Name: "auth.users", Kind: KindAuthorizeOnly},
 	{Name: "auth.oauth_tokens", Kind: KindAuthorizeOnly},
@@ -143,6 +159,12 @@ var AuthOrgTables = []TableSpec{
 	{Name: "org.project_members", Kind: KindAuthorizeOnly},
 	{Name: "org.projects", Kind: KindOrgScoped},
 	{Name: "org.members", Kind: KindOrgScoped},
+	// C-6 (unblock-tv8.15): workitems + deps surfaces.
+	{Name: "workitems.items", Kind: KindOrgScoped},
+	{Name: "workitems.items", Kind: KindAuthorizeOnly},
+	{Name: "workitems.comments", Kind: KindAuthorizeOnly},
+	{Name: "workitems.trail", Kind: KindAuthorizeOnly},
+	{Name: "deps.dependencies", Kind: KindAuthorizeOnly},
 }
 
 // agentPermittedResources mirrors the org.agentReadWriteResources map

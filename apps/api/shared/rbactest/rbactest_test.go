@@ -167,14 +167,29 @@ func expectAuthorizeOK(role, resource, action string) bool {
 // shapes. The subtest tree is deliberately deep so a CI failure
 // reads as a navigable path.
 //
-// Tuple count under B-3 (auth + org schemas):
+// Tuple count under B-3 + C-6 (auth + org + workitems + deps
+// schemas):
 //   - org axes:      2 * 2 = 4 (caller × target)
 //   - role axis:     5
-//   - tables:        7 (5 KindAuthorizeOnly + 2 KindOrgScoped)
+//   - tables:        12 entries in AuthOrgTables (9 KindAuthorizeOnly +
+//     3 KindOrgScoped). Note: workitems.items appears TWICE — once
+//     under each kind — because the production code reaches the
+//     table through BOTH surfaces (rbac.For for read row-leak;
+//     org.Authorize for write/delete policy gating). SPEC §10.1 line
+//     2356-2361 names the dual treatment explicitly.
 //   - actions:       3 (read/write/delete) for KindAuthorizeOnly,
 //     1 (read only) for KindOrgScoped
 //
-// = 4 * 5 * (5*3 + 2*1) = 4 * 5 * 17 = 340 subtests.
+// = 4 * 5 * (9*3 + 3*1) = 4 * 5 * 30 = 600 subtests.
+//
+// Naming note: workitems.items appears under both kinds, so for that
+// table the read-action subtest exists in two shapes. The OrgScoped
+// read asserts row-level leak (rbac.For); the AuthorizeOnly read
+// asserts the policy-decision (org.Authorize). The subtest names
+// collide on action=read; Go's testing package auto-disambiguates
+// duplicates with a "#01" suffix on the second occurrence. Both
+// assertions remain independent — they exercise different code
+// paths against the same table.
 func TestRBACMatrix(t *testing.T) {
 	if fixture == nil {
 		t.Fatalf("rbactest: fixture is nil; SeedFixture must run from TestMain before this test fires")
@@ -393,6 +408,61 @@ type orgMembersRow struct {
 	CreatedAt time.Time
 }
 
+// workitemsItemsRow mirrors workitems.items column order verbatim
+// per migration 0040_workitems.up.sql lines 46-135 + the trailing
+// `fts` tsvector column added by ALTER TABLE at lines 151-155
+// (28 fields total). rbac.For emits `SELECT *` and scans by ordinal
+// (apps/api/shared/rbac/rbac.go line 413), so the field count and
+// declaration order MUST match the schema's column declaration
+// order EXACTLY — including the trailing fts column. Field shapes
+// (text vs *text vs time.Time vs *time.Time vs []byte) match
+// apps/api/workitems/helpers.go's itemRow type verbatim; the type
+// is re-declared here (not imported) so a drift between the suite
+// and the production scanner surfaces as a test failure instead of
+// a silent compile-time sync.
+//
+// The suite reads only OrgID off this struct for the row-leak
+// assertion; the other fields exist purely to keep the column
+// count aligned with the rbac builder's reflection scanner.
+type workitemsItemsRow struct {
+	ID                  string
+	OrgID               string
+	ProjectID           *string
+	MilestoneID         *string
+	ParentID            *string
+	DiscoveredFromID    *string
+	Type                string
+	Title               string
+	Body                string
+	Status              string
+	Priority            string
+	PipelineStage       string
+	AgentKind           *string
+	ImplState           string
+	ReviewState         string
+	QAState             string
+	PipelineState       string
+	Severity            *string
+	KindOfFinding       *string
+	ClaimedByID         *string
+	ClaimedByAgent      *string
+	ClaimedAt           *time.Time
+	IsReady             bool
+	MilestoneAssignedAt *time.Time
+	MilestoneAssignedBy *string
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+	ClosedAt            *time.Time
+	// FTS is the generated tsvector column appended by ALTER TABLE
+	// in 0040_workitems.up.sql line 151-155. pgx v5.7 has no
+	// registered tsvector type, so the driver delivers the text
+	// representation as a raw byte slice. The field is unused
+	// downstream — it exists only to keep ordinal positions aligned
+	// with the migration so rbac.For's reflection scanner does not
+	// error on column count.
+	FTS []byte
+}
+
 // selectScopedOrgIDs issues a rbac.For[T] read against the named
 // table and returns the org_id of every row the caller sees. The
 // per-table T shape is selected by the switch below; the only
@@ -412,6 +482,17 @@ func selectScopedOrgIDs(ctx context.Context, id auth.Identity, table string) ([]
 
 	case "org.members":
 		rows, err := rbac.For[orgMembersRow](id, "org.members").Run(ctx)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]string, 0, len(rows))
+		for _, r := range rows {
+			out = append(out, r.OrgID)
+		}
+		return out, nil
+
+	case "workitems.items":
+		rows, err := rbac.For[workitemsItemsRow](id, "workitems.items").Run(ctx)
 		if err != nil {
 			return nil, err
 		}

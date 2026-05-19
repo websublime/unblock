@@ -87,6 +87,21 @@ type Fixture struct {
 	// validated end-to-end and the C-6/E-3 extensions inherit a
 	// non-empty mcp.api_keys table.
 	APIKeyRows map[string]string
+
+	// Items maps the OrgA / OrgB label to the persisted ULID for the
+	// canonical workitems.items row seeded under each org. Used by
+	// C-6 (unblock-tv8.15) as KindOrgScoped row-leak bait for
+	// workitems.items (rbac.For path) and as the parent of the
+	// workitems.comments row below.
+	Items map[string]string
+
+	// Comments maps the OrgA / OrgB label to the persisted ULID for
+	// the canonical workitems.comments row seeded under each org.
+	// The comments table has no org_id column; its cross-tenant gate
+	// is org.Authorize on the parent item's org. Seeded so the FK
+	// chain (comments.item_id → items.id → items.org_id) is
+	// exercised end-to-end.
+	Comments map[string]string
 }
 
 // userKey is the composite key for Fixture.Users. Declared as a
@@ -116,6 +131,8 @@ func SeedFixture(ctx context.Context, db *sqldb.Database) (*Fixture, error) {
 		Users:      make(map[userKey]string, 8),
 		Projects:   make(map[string]string, 2),
 		APIKeyRows: make(map[string]string, 2),
+		Items:      make(map[string]string, 2),
+		Comments:   make(map[string]string, 2),
 	}
 
 	// Per-side seeding. Both sides get the identical row complement;
@@ -263,6 +280,56 @@ func seedSide(ctx context.Context, db *sqldb.Database, fx *Fixture, orgLabel str
 		return fmt.Errorf("insert org.project_members: %w", err)
 	}
 
+	// 4a. workitems.items row (C-6 / unblock-tv8.15). Seeds the
+	//     KindOrgScoped row-leak bait for workitems.items reads
+	//     through rbac.For AND the parent row for the
+	//     workitems.comments seed below. Constraints:
+	//       - type='task' keeps items_finding_required_fields_chk
+	//         vacuous (severity/kind_of_finding/discovered_from_id/
+	//         parent_id all NULL is legal for non-findings).
+	//       - status='Backlog' + claimed_by_id NULL + claimed_at NULL
+	//         satisfies items_claim_status_chk's first leg.
+	//       - is_ready=false is the schema DEFAULT; written explicit
+	//         here so a future ALTER never silently flips the seed.
+	itemID, err := ulid.New()
+	if err != nil {
+		return fmt.Errorf("item ulid: %w", err)
+	}
+	if _, err := db.Exec(ctx,
+		`INSERT INTO workitems.items
+		   (id, org_id, project_id, type, title, status, is_ready)
+		 VALUES ($1, $2, $3, 'task', $4, 'Backlog', false)`,
+		itemID, orgID, projectID, fmt.Sprintf("rbactest item %s", orgLabel),
+	); err != nil {
+		return fmt.Errorf("insert workitems.items: %w", err)
+	}
+	fx.Items[orgLabel] = itemID
+
+	// 4b. workitems.comments row (C-6 / unblock-tv8.15). The
+	//     comments table has no org_id column — its cross-tenant
+	//     gate is org.Authorize on the parent item's org. Seeded
+	//     primarily so the FK chain
+	//     (comments.item_id → items.id → items.org_id) is exercised
+	//     end-to-end and future C-6 KindOrgScoped extensions (if
+	//     workitems.comments ever grows an org_id column) inherit a
+	//     non-empty fixture. Constraints:
+	//       - kind='general' is in the comments_kind_chk allow-list.
+	//       - author_id NOT NULL satisfies comments_author_chk.
+	commentID, err := ulid.New()
+	if err != nil {
+		return fmt.Errorf("comment ulid: %w", err)
+	}
+	if _, err := db.Exec(ctx,
+		`INSERT INTO workitems.comments
+		   (id, item_id, author_id, kind, body)
+		 VALUES ($1, $2, $3, 'general', $4)`,
+		commentID, itemID, ownerID,
+		fmt.Sprintf("rbactest comment %s", orgLabel),
+	); err != nil {
+		return fmt.Errorf("insert workitems.comments: %w", err)
+	}
+	fx.Comments[orgLabel] = commentID
+
 	// 5. mcp.api_keys row foreshadowing the C-6 / E-3 extension. Not
 	//    asserted on in B-3; seed only so the FK chain is exercised
 	//    and the follow-up beads inherit a non-empty table.
@@ -296,10 +363,12 @@ func seedSide(ctx context.Context, db *sqldb.Database, fx *Fixture, orgLabel str
 // Teardown removes every row this Fixture installed. Called from
 // TestMain on the way out. The org.organizations rows cascade-delete
 // everything reachable (members, projects, project_members,
-// api_keys, tool_calls, …) per the schema's ON DELETE CASCADE
-// chain. auth.users / auth.oauth_tokens / auth.sessions are NOT
-// reachable via the org_id cascade — they are deleted separately,
-// keyed by the ids the fixture installed.
+// api_keys, tool_calls, workitems.items via items.org_id +
+// items.project_id, workitems.comments via comments.item_id, …)
+// per the schema's ON DELETE CASCADE chain. auth.users /
+// auth.oauth_tokens / auth.sessions are NOT reachable via the
+// org_id cascade — they are deleted separately, keyed by the ids
+// the fixture installed.
 //
 // Teardown is best-effort: failures are reported but do not abort.
 // The unique-by-ULID safety net in SeedFixture ensures a partial
