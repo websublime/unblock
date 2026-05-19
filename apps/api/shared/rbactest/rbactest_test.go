@@ -523,7 +523,7 @@ type mcpAPIKeysRow struct {
 }
 
 // memoryEntriesRow mirrors memory.entries column order verbatim per
-// migration 0090_memory.up.sql lines 13-45 (13 columns). The TSDoc
+// migration 0090_memory.up.sql lines 13-45 (15 columns). The TSDoc
 // field at position 11 is the `ts_doc tsvector` column — pgx v5.7
 // has no registered tsvector codec, so it is typed as []byte (same
 // pattern as workitemsItemsRow.FTS). The value_enc bytea column at
