@@ -227,28 +227,55 @@ type toolCallRow struct {
 	TraceID    *string
 }
 
+// rbactestToolNamePrefix is the side-tag carried by every
+// mcp.tool_calls row seeded by apps/api/shared/rbactest (E-3 /
+// unblock-tv8.25). rbactest's seed inserts rows with tool_name =
+// "rbactest-tool-<orgLabel>" as RBAC row-leak bait; those rows are
+// invariants of the RBAC matrix run and MUST NOT be wiped or
+// observed by audittest. When `encore test ./...` runs both
+// packages in the same shared encore-test cluster, an unscoped
+// DELETE FROM mcp.tool_calls in audittest's reset wipes rbactest's
+// seed mid-flight, producing "same-org read on \"mcp.tool_calls\"
+// returned zero rows" failures inside TestRBACMatrix (~50% flake
+// rate when both packages share the cluster). Symmetrically, an
+// unscoped SELECT here would surface rbactest rows in audittest's
+// assertions, inflating row counts. Both helpers are scoped via
+// this prefix to keep the two suites isolated. Pre-prod stance:
+// this is a test-harness contract, not a product invariant — see
+// QA report on unblock-tv8.25 (BLOCKER finding).
+const rbactestToolNamePrefix = "rbactest-tool-"
+
 // resetToolCalls clears mcp.tool_calls so test cases run
 // deterministically. Uses DELETE rather than TRUNCATE because the
 // encore-test Postgres user lacks the TRUNCATE privilege on
-// schema-owned tables.
+// schema-owned tables. Excludes rbactest's seeded rows (see
+// rbactestToolNamePrefix) so the two suites can coexist in the
+// same shared encore-test cluster.
 func resetToolCalls(t *testing.T) {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := db.Exec(ctx, `DELETE FROM mcp.tool_calls`); err != nil {
+	if _, err := db.Exec(ctx,
+		`DELETE FROM mcp.tool_calls WHERE tool_name NOT LIKE $1`,
+		rbactestToolNamePrefix+"%",
+	); err != nil {
 		t.Fatalf("delete tool_calls: %v", err)
 	}
 }
 
 // selectToolCalls returns every row in mcp.tool_calls ordered by
-// called_at ASC.
+// called_at ASC. Excludes rbactest's seeded rows (see
+// rbactestToolNamePrefix) so audittest assertions are not
+// inflated by the RBAC matrix's row-leak bait when both suites
+// share the encore-test cluster.
 func selectToolCalls(t *testing.T) []toolCallRow {
 	t.Helper()
 	ctx := context.Background()
 	rows, err := db.Query(ctx, `
 		SELECT id, org_id, project_id, tool_name, result_kind, error_code, duration_ms, trace_id
 		FROM mcp.tool_calls
+		WHERE tool_name NOT LIKE $1
 		ORDER BY called_at ASC, id ASC
-	`)
+	`, rbactestToolNamePrefix+"%")
 	if err != nil {
 		t.Fatalf("select tool_calls: %v", err)
 	}
