@@ -137,7 +137,16 @@ func handleCascadeRequested(ctx context.Context, msg *CascadeRequested) error {
 	//    collecting affected ids. The seed itself is INCLUDED so its
 	//    own pipeline_stage is recomputed (a status='Done' flip can
 	//    move the triggered item's pipeline_stage to 'Done').
-	affected, err := bfsForwardBlocksClosure(ctx, msg.TriggeredByItemID)
+	//
+	//    Tenant defence-in-depth (unblock-tv8.50): the BFS is gated on
+	//    msg.OrgID and msg.ProjectID via a JOIN against workitems.items
+	//    in both the anchor and the recursive step. Cross-tenant edges
+	//    are already rejected upstream by deps.AddEdge (deps.go §6.5),
+	//    so in practice the walk stays within one tenant; the JOIN
+	//    enforces the property structurally so a future regression in
+	//    the writer path or a direct DDL bypass cannot leak a cascade
+	//    across orgs/projects.
+	affected, err := bfsForwardBlocksClosure(ctx, msg.TriggeredByItemID, msg.OrgID, msg.ProjectID)
 	if err != nil {
 		rlog.Error("deps: cascade subscriber BFS failed",
 			"err", err, "reason", msg.Reason,
@@ -147,8 +156,11 @@ func handleCascadeRequested(ctx context.Context, msg *CascadeRequested) error {
 
 	// 2. Recompute pipeline_stage per §5.7.1 for every affected item.
 	//    Idempotent UPDATE: WHERE pipeline_stage <> $new short-circuits
-	//    a no-op write on re-delivery.
-	if err := recomputePipelineStageForAffected(ctx, affected); err != nil {
+	//    a no-op write on re-delivery. The derivation reads are also
+	//    tenant-gated (unblock-tv8.50) — symmetric defence-in-depth so a
+	//    tampered `affected` set (e.g. a tenant-bypassing id injected
+	//    between BFS and derivation read) cannot pull another org's row.
+	if err := recomputePipelineStageForAffected(ctx, affected, msg.OrgID, msg.ProjectID); err != nil {
 		rlog.Error("deps: cascade subscriber pipeline_stage recompute failed",
 			"err", err, "reason", msg.Reason,
 			"event_id", msg.EventID, "triggered_by", msg.TriggeredByItemID)
@@ -196,23 +208,59 @@ func handleCascadeRequested(ctx context.Context, msg *CascadeRequested) error {
 // — Postgres's `WHERE r.depth < $N` terminates the recursion at the
 // declared cap. The subscriber emits a Warn on truncation and proceeds
 // with the bounded prefix (the cap is locked at 256 per RP01-3).
-func bfsForwardBlocksClosure(ctx context.Context, seedID string) ([]string, error) {
+//
+// Tenant predicate (unblock-tv8.50 / defence-in-depth): both the
+// anchor and the recursive step JOIN workitems.items and gate on
+// (i.org_id = orgID AND ($projectID = ” OR i.project_id = projectID)).
+// Cross-tenant rows in deps.dependencies are impossible today because
+// deps.AddEdge (§6.5) rejects them upstream, but a future writer-path
+// regression or a direct DDL bypass would otherwise leak a cascade
+// across orgs/projects via the recursive walk. The JOIN closes that
+// gap structurally — its cost is one items_pk index probe per edge
+// row, well inside the AR-8 (256) depth cap and Law 7's < 2s envelope.
+//
+// The deps.dependencies schema has no org_id / project_id columns
+// (see apps/api/db/migrations/0050_deps.up.sql), so tenant filtering
+// MUST be expressed via JOIN against workitems.items. The same
+// shape is used by deps.recomputeReady (recompute.go:50-69).
+//
+// projectID may be empty: workitems.items.project_id is nullable
+// (org-scoped items are permitted by §9.4.2). The `$N = ” OR
+// project_id = $N` shape mirrors deps.go:767-768 (CascadeEvents read
+// path) — when projectID is empty the predicate degrades to org_id
+// alone, when non-empty it narrows to that project.
+//
+// If the publisher's (orgID, projectID) disagrees with the seed's
+// actual row, the anchor SELECT returns no rows, the recursive step
+// has no seed to walk from, and the function returns an empty slice.
+// The audit row INSERT in insertCascadeEventRow still writes with
+// msg.OrgID as authoritative — the audit captures what was REQUESTED,
+// not what was REACHABLE. This is intentional: the publisher's claim
+// must remain visible in the audit even when the walk yields nothing.
+func bfsForwardBlocksClosure(ctx context.Context, seedID, orgID, projectID string) ([]string, error) {
 	// Read up to cascadeBFSMaxDepth+1 rows so we can detect cap hits
 	// — when the result count exceeds the cap, we know the walk
 	// terminated on depth rather than exhaustion of the graph.
 	rows, err := db.Query(ctx,
 		`WITH RECURSIVE reachable(id, depth) AS (
-		         SELECT $1::text, 0
+		         SELECT i.id, 0
+		           FROM workitems.items i
+		          WHERE i.id = $1
+		            AND i.org_id = $3
+		            AND ($4 = '' OR i.project_id = $4)
 		         UNION ALL
 		         SELECT d.to_item, r.depth + 1
 		           FROM deps.dependencies d
 		           JOIN reachable r ON d.from_item = r.id
+		           JOIN workitems.items i ON i.id = d.to_item
 		          WHERE d.kind = 'blocks'
 		            AND r.depth < $2
+		            AND i.org_id = $3
+		            AND ($4 = '' OR i.project_id = $4)
 		       )
 		       SELECT DISTINCT id FROM reachable
 		       ORDER BY id`,
-		seedID, cascadeBFSMaxDepth,
+		seedID, cascadeBFSMaxDepth, orgID, projectID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("bfs query: %w", err)
@@ -267,24 +315,39 @@ type itemDerivationInputs struct {
 // bounded at 256. The per-item UPDATE includes the value-equality
 // guard so repeated delivery converges to the same row state.
 //
+// Tenant predicate (unblock-tv8.50 / defence-in-depth): both reads are
+// gated by (org_id = orgID AND ($projectID = ” OR project_id =
+// projectID)). Today the BFS already filters the input set by the same
+// predicate, so the predicate here is redundant in the happy path —
+// but it is essential for symmetric defence-in-depth: a tampered
+// `affected` slice (a tenant-bypassing id injected between BFS and
+// derivation read by future code, or a debug-path call that bypasses
+// the BFS) cannot pull another org's row. workitems.comments has no
+// org_id column, so the predicate is enforced via a sub-SELECT against
+// workitems.items keyed on item_id. The per-item UPDATE WHERE clause
+// adds the same predicate so a write cannot escape the publisher's
+// tenant either.
+//
 // The is_ready column is NEVER written here. The lint analyzer
 // (apps/api/shared/lint/no_direct_is_ready_write.go) enforces that
 // every UPDATE in this file targets pipeline_stage only.
-func recomputePipelineStageForAffected(ctx context.Context, affected []string) error {
+func recomputePipelineStageForAffected(ctx context.Context, affected []string, orgID, projectID string) error {
 	if len(affected) == 0 {
 		return nil
 	}
 
 	// Fetch the four state columns + status + closed_at for every
-	// affected item.
+	// affected item. Tenant-gated read (unblock-tv8.50).
 	rowMap := make(map[string]*itemDerivationInputs, len(affected))
 	rows, err := db.Query(ctx,
 		`SELECT id, status, pipeline_stage,
 		        impl_state, review_state, qa_state, pipeline_state,
 		        (closed_at IS NOT NULL)
 		   FROM workitems.items
-		  WHERE id = ANY($1::text[])`,
-		affected,
+		  WHERE id = ANY($1::text[])
+		    AND org_id = $2
+		    AND ($3 = '' OR project_id = $3)`,
+		affected, orgID, projectID,
 	)
 	if err != nil {
 		return fmt.Errorf("affected state read: %w", err)
@@ -308,14 +371,19 @@ func recomputePipelineStageForAffected(ctx context.Context, affected []string) e
 	rows.Close()
 
 	// Batched comment existence predicate (SPEC §5.7.1 line 781-787).
+	// workitems.comments has no org_id column — gate via sub-SELECT
+	// against workitems.items keyed on item_id (unblock-tv8.50).
 	commentRows, err := db.Query(ctx,
-		`SELECT item_id,
-		        max(CASE WHEN kind = 'review'        THEN 1 ELSE 0 END) AS has_review,
-		        max(CASE WHEN kind = 'investigation' THEN 1 ELSE 0 END) AS has_investigation
-		   FROM workitems.comments
-		  WHERE item_id = ANY($1::text[])
-		  GROUP BY item_id`,
-		affected,
+		`SELECT c.item_id,
+		        max(CASE WHEN c.kind = 'review'        THEN 1 ELSE 0 END) AS has_review,
+		        max(CASE WHEN c.kind = 'investigation' THEN 1 ELSE 0 END) AS has_investigation
+		   FROM workitems.comments c
+		   JOIN workitems.items i ON i.id = c.item_id
+		  WHERE c.item_id = ANY($1::text[])
+		    AND i.org_id = $2
+		    AND ($3 = '' OR i.project_id = $3)
+		  GROUP BY c.item_id`,
+		affected, orgID, projectID,
 	)
 	if err != nil {
 		return fmt.Errorf("affected comments read: %w", err)
@@ -344,8 +412,19 @@ func recomputePipelineStageForAffected(ctx context.Context, affected []string) e
 	for _, id := range affected {
 		inp, ok := rowMap[id]
 		if !ok {
-			// Item disappeared between BFS and derivation read
-			// (FK ON DELETE CASCADE on org/project) — skip silently.
+			// Item not present in the tenant-filtered derivation read.
+			// Two reasons this can happen:
+			//   (a) the row was deleted between BFS and derivation
+			//       read (FK ON DELETE CASCADE on org/project); the
+			//       BFS predicate would also drop it on a fresh walk,
+			//       but the BFS already committed its snapshot.
+			//   (b) (post unblock-tv8.50) the row's tenant disagrees
+			//       with msg.OrgID / msg.ProjectID. This is now also
+			//       blocked at the BFS layer for happy-path cascades,
+			//       but a future caller that bypasses the BFS and
+			//       feeds this function a tampered slice still cannot
+			//       reach a cross-tenant row.
+			// Either way: skip silently. No write occurs.
 			continue
 		}
 		newStage := derivePipelineStage(inp)
@@ -353,11 +432,18 @@ func recomputePipelineStageForAffected(ctx context.Context, affected []string) e
 			// Idempotent no-op. Skip the UPDATE.
 			continue
 		}
+		// Tenant-gated UPDATE (unblock-tv8.50): the WHERE clause
+		// repeats the org_id / project_id predicate so a write cannot
+		// escape the publisher's tenant even if the rowMap lookup
+		// above were ever defeated by a future refactor.
 		if _, err := db.Exec(ctx,
 			`UPDATE workitems.items
 			    SET pipeline_stage = $2
-			  WHERE id = $1 AND pipeline_stage <> $2`,
-			id, newStage,
+			  WHERE id = $1
+			    AND pipeline_stage <> $2
+			    AND org_id = $3
+			    AND ($4 = '' OR project_id = $4)`,
+			id, newStage, orgID, projectID,
 		); err != nil {
 			return fmt.Errorf("pipeline_stage update %s: %w", id, err)
 		}

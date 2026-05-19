@@ -458,3 +458,162 @@ func TestHandleCascadeRequested_DerivesPipelineStage(t *testing.T) {
 		t.Fatalf("pipeline_stage = %q, want %q (rule 9)", got, "Review")
 	}
 }
+
+// TestHandleCascadeRequested_BFS_TenantIsolation locks the
+// defence-in-depth tenant predicate added in unblock-tv8.50.
+//
+// Setup: two distinct orgs (alpha, beta). Each org has one item.
+// We bypass deps.AddEdge (which rejects cross-org edges upstream)
+// and INSERT a cross-tenant 'blocks' row directly into
+// deps.dependencies via raw SQL: alpha_seed → beta_neighbour.
+//
+// Trigger: publish CascadeRequested with OrgID = alpha, ProjectID =
+// alpha's project, TriggeredByItemID = alpha_seed, Reason = close.
+//
+// Assertions:
+//  1. The audit row's affected_item_ids contains alpha_seed but does
+//     NOT contain beta_neighbour. The BFS dropped the cross-tenant
+//     edge in the recursive step because the JOIN to workitems.items
+//     filters on (i.org_id = alpha.org_id).
+//  2. beta_neighbour's pipeline_stage is unchanged (the subscriber
+//     never wrote it — recomputePipelineStageForAffected's tenant
+//     predicate would also reject it even if the BFS had leaked).
+//
+// This test would FAIL before unblock-tv8.50 — the BFS would walk
+// the cross-tenant edge and leak alpha's cascade into beta. The
+// fix gates the BFS by msg.OrgID via JOIN workitems.items and
+// re-validates the tenant in the derivation read.
+func TestHandleCascadeRequested_BFS_TenantIsolation(t *testing.T) {
+	ctx := context.Background()
+	alpha := seedFixtureInternal(t, ctx)
+	beta := seedFixtureInternal(t, ctx)
+
+	alphaSeed := createItemInternal(t, ctx, alpha, "Backlog")
+	betaNeighbour := createItemInternal(t, ctx, beta, "Backlog")
+
+	// Capture beta_neighbour's pipeline_stage BEFORE the cascade so
+	// we can confirm the subscriber never wrote it.
+	betaStageBefore := readPipelineStageInternal(t, ctx, betaNeighbour)
+
+	// Raw SQL bypass: deps.AddEdge would reject this with
+	// "cross-org edges are not allowed" (deps.go:247-257). The
+	// test's whole point is to simulate the latent gap — a row that
+	// somehow exists in deps.dependencies spanning two tenants
+	// (e.g. via a future writer-path regression or a direct DDL
+	// bypass).
+	edgeID := mustULIDInternal(t)
+	if _, err := db.Exec(ctx,
+		`INSERT INTO deps.dependencies (id, from_item, to_item, kind)
+		 VALUES ($1, $2, $3, 'blocks')`,
+		edgeID, alphaSeed, betaNeighbour,
+	); err != nil {
+		t.Fatalf("insert cross-tenant edge: %v", err)
+	}
+
+	eventID := mustULIDInternal(t)
+	msg := &CascadeRequested{
+		EventID:           eventID,
+		OrgID:             alpha.OrgID,
+		ProjectID:         alpha.ProjectID,
+		TriggeredByItemID: alphaSeed,
+		Reason:            "close",
+		EmittedAt:         time.Now().UTC(),
+	}
+	if err := handleCascadeRequested(ctx, msg); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+
+	// Read the audit row's affected_item_ids.
+	var affected []string
+	if err := db.QueryRow(ctx,
+		`SELECT affected_item_ids FROM deps.cascade_events
+		  WHERE event_id = $1 AND triggered_by_item_id = $2`,
+		eventID, alphaSeed,
+	).Scan(&affected); err != nil {
+		t.Fatalf("read affected_item_ids: %v", err)
+	}
+
+	// Assertion 1: alpha_seed must be IN the set (BFS includes the
+	// seed when its tenant matches the publisher).
+	seenAlpha := false
+	for _, id := range affected {
+		if id == alphaSeed {
+			seenAlpha = true
+		}
+		if id == betaNeighbour {
+			t.Fatalf("BFS leaked across tenants: affected_item_ids contains beta_neighbour %q; alpha=%q, affected=%v",
+				betaNeighbour, alphaSeed, affected)
+		}
+	}
+	if !seenAlpha {
+		t.Fatalf("alpha_seed %q missing from affected_item_ids: %v", alphaSeed, affected)
+	}
+
+	// Assertion 2: beta_neighbour's pipeline_stage must be unchanged.
+	betaStageAfter := readPipelineStageInternal(t, ctx, betaNeighbour)
+	if betaStageAfter != betaStageBefore {
+		t.Fatalf("subscriber wrote beta_neighbour.pipeline_stage across tenants: %q → %q",
+			betaStageBefore, betaStageAfter)
+	}
+}
+
+// TestHandleCascadeRequested_BFS_TenantMismatch covers the symmetric
+// edge case: publisher's OrgID disagrees with the seed item's actual
+// org_id. The anchor SELECT in the recursive CTE filters on
+// i.org_id = msg.OrgID, so the BFS returns an empty result. The
+// audit row is still written (the publisher's claim is preserved
+// for forensics) but affected_item_ids is empty and no pipeline_stage
+// write occurs anywhere.
+//
+// This locks the documented behaviour in bfsForwardBlocksClosure's
+// doc comment: "If the publisher's (orgID, projectID) disagrees with
+// the seed's actual row, the anchor SELECT returns no rows ... The
+// audit row INSERT in insertCascadeEventRow still writes with
+// msg.OrgID as authoritative — the audit captures what was REQUESTED,
+// not what was REACHABLE."
+func TestHandleCascadeRequested_BFS_TenantMismatch(t *testing.T) {
+	ctx := context.Background()
+	alpha := seedFixtureInternal(t, ctx)
+	beta := seedFixtureInternal(t, ctx)
+
+	// Seed lives in alpha; publisher claims beta.
+	seed := createItemInternal(t, ctx, alpha, "Backlog")
+	stageBefore := readPipelineStageInternal(t, ctx, seed)
+
+	eventID := mustULIDInternal(t)
+	msg := &CascadeRequested{
+		EventID:           eventID,
+		OrgID:             beta.OrgID, // disagrees with seed's actual org
+		ProjectID:         beta.ProjectID,
+		TriggeredByItemID: seed,
+		Reason:            "close",
+		EmittedAt:         time.Now().UTC(),
+	}
+	if err := handleCascadeRequested(ctx, msg); err != nil {
+		t.Fatalf("handle (tenant mismatch): %v", err)
+	}
+
+	// Audit row exists, kind = 'close', affected_item_ids is empty.
+	var kind string
+	var affected []string
+	if err := db.QueryRow(ctx,
+		`SELECT kind, affected_item_ids FROM deps.cascade_events
+		  WHERE event_id = $1 AND triggered_by_item_id = $2`,
+		eventID, seed,
+	).Scan(&kind, &affected); err != nil {
+		t.Fatalf("read cascade_events: %v", err)
+	}
+	if kind != "close" {
+		t.Fatalf("kind = %q, want %q (audit captures what was requested)", kind, "close")
+	}
+	if len(affected) != 0 {
+		t.Fatalf("affected_item_ids non-empty under tenant mismatch: %v", affected)
+	}
+
+	// Seed's pipeline_stage must be unchanged — the subscriber's
+	// derivation read filtered it out too.
+	stageAfter := readPipelineStageInternal(t, ctx, seed)
+	if stageAfter != stageBefore {
+		t.Fatalf("subscriber wrote across tenant mismatch: pipeline_stage %q → %q", stageBefore, stageAfter)
+	}
+}
