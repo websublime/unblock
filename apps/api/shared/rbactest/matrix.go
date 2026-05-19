@@ -117,8 +117,11 @@ type TableSpec struct {
 // AuthOrgTables is the closed set of auth + org + workitems + deps
 // schema tables the B-3 (unblock-tv8.9) + C-6 (unblock-tv8.15) sweeps
 // cover. E-3 / unblock-tv8.25 appends the remaining
-// deps.cascade_events + mcp.* + memory.* + boards.* entries. The
-// slice is exported and additive so the final bead only adds lines.
+// deps.cascade_events + mcp.* + memory.* + boards.* entries.
+// KindAuthorizeOnly additions are pure append-only on this slice;
+// KindOrgScoped additions also require a paired typed row struct
+// plus a new case in rbactest_test.go's selectScopedOrgIDs switch
+// mirroring the table's column shape.
 //
 // Classification rationale (verified against migrations
 // apps/api/db/migrations/0020_auth.up.sql lines 11-66,
