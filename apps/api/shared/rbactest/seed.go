@@ -102,6 +102,36 @@ type Fixture struct {
 	// chain (comments.item_id → items.id → items.org_id) is
 	// exercised end-to-end.
 	Comments map[string]string
+
+	// CascadeEvents maps the OrgA / OrgB label to the persisted ULID
+	// for the canonical deps.cascade_events row seeded under each
+	// org (E-3 / unblock-tv8.25). Carries org_id NOT NULL; serves as
+	// KindOrgScoped row-leak bait for the rbac.For path and as a
+	// concrete row so the FK chain (cascade_events.org_id →
+	// org.organizations.id, cascade_events.triggered_by_item_id →
+	// workitems.items.id) is exercised end-to-end.
+	CascadeEvents map[string]string
+
+	// ToolCalls maps the OrgA / OrgB label to the persisted ULID for
+	// the canonical mcp.tool_calls row seeded under each org (E-3).
+	// Production code writes via mcp/recordtoolcall.go; the suite
+	// seeds directly so the KindOrgScoped row-leak path has a row
+	// to surface.
+	ToolCalls map[string]string
+
+	// MemoryEntries maps the OrgA / OrgB label to the persisted ULID
+	// for the canonical memory.entries row seeded under each org
+	// (E-3). scope='org' so org_id is non-NULL and rbac.For's
+	// `org_id = $1` predicate hits the row. The schema is
+	// service-less in P01 (no apps/api/memory/*.go); the row exists
+	// purely as KindOrgScoped row-leak bait.
+	MemoryEntries map[string]string
+
+	// Boards maps the OrgA / OrgB label to the persisted ULID for
+	// the canonical boards.boards row seeded under each org (E-3).
+	// Service-less in P01 (no apps/api/boards/*.go); the row exists
+	// purely as KindOrgScoped row-leak bait.
+	Boards map[string]string
 }
 
 // userKey is the composite key for Fixture.Users. Declared as a
@@ -127,12 +157,16 @@ func SeedFixture(ctx context.Context, db *sqldb.Database) (*Fixture, error) {
 	}
 
 	fx := &Fixture{
-		Orgs:       make(map[string]string, 2),
-		Users:      make(map[userKey]string, 8),
-		Projects:   make(map[string]string, 2),
-		APIKeyRows: make(map[string]string, 2),
-		Items:      make(map[string]string, 2),
-		Comments:   make(map[string]string, 2),
+		Orgs:          make(map[string]string, 2),
+		Users:         make(map[userKey]string, 8),
+		Projects:      make(map[string]string, 2),
+		APIKeyRows:    make(map[string]string, 2),
+		Items:         make(map[string]string, 2),
+		Comments:      make(map[string]string, 2),
+		CascadeEvents: make(map[string]string, 2),
+		ToolCalls:     make(map[string]string, 2),
+		MemoryEntries: make(map[string]string, 2),
+		Boards:        make(map[string]string, 2),
 	}
 
 	// Per-side seeding. Both sides get the identical row complement;
@@ -357,6 +391,130 @@ func seedSide(ctx context.Context, db *sqldb.Database, fx *Fixture, orgLabel str
 	}
 	fx.APIKeyRows[orgLabel] = apiKeyID
 
+	// 6. deps.cascade_events row (E-3 / unblock-tv8.25). KindOrgScoped
+	//    row-leak bait for the rbac.For path. Constraints:
+	//      - event_id is a fresh ULID so the
+	//        cascade_events_event_trigger_uniq UNIQUE (event_id,
+	//        triggered_by_item_id) holds across repeated seeds.
+	//      - kind='close' is in the cascade_events_kind_chk allow-list
+	//        (round-6 widened the set to 4 values; 'close' is the
+	//        historical baseline).
+	//      - triggered_by_item_id references the workitems.items row
+	//        seeded above (FK ON DELETE SET NULL — non-NULL satisfies
+	//        the suite's row-leak intent).
+	//      - cascaded_count=0 satisfies cascade_events_count_chk
+	//        (>=0).
+	cascadeID, err := ulid.New()
+	if err != nil {
+		return fmt.Errorf("cascade_event ulid: %w", err)
+	}
+	cascadeEventID, err := ulid.New()
+	if err != nil {
+		return fmt.Errorf("cascade_event event_id ulid: %w", err)
+	}
+	if _, err := db.Exec(ctx,
+		`INSERT INTO deps.cascade_events
+		   (id, event_id, kind, org_id, project_id, triggered_by_item_id,
+		    affected_item_ids, cascaded_count)
+		 VALUES ($1, $2, 'close', $3, $4, $5, '{}', 0)`,
+		cascadeID, cascadeEventID, orgID, projectID, itemID,
+	); err != nil {
+		return fmt.Errorf("insert deps.cascade_events: %w", err)
+	}
+	fx.CascadeEvents[orgLabel] = cascadeID
+
+	// 7. mcp.tool_calls row (E-3 / unblock-tv8.25). KindOrgScoped
+	//    row-leak bait. Constraints:
+	//      - api_key_id references the mcp.api_keys row seeded above
+	//        (FK ON DELETE SET NULL — non-NULL keeps the audit row
+	//        well-formed).
+	//      - tool_name='prime' is the canonical AF2 read path; any
+	//        string is legal at the schema level.
+	//      - result_kind='ok' is in the tool_calls_result_chk
+	//        allow-list ('ok' | 'rejected' | 'error').
+	//      - duration_ms=0 is legal (no NOT-NULL constraint on
+	//        non-negativity; the column is NOT NULL only on
+	//        presence).
+	toolCallID, err := ulid.New()
+	if err != nil {
+		return fmt.Errorf("tool_call ulid: %w", err)
+	}
+	if _, err := db.Exec(ctx,
+		`INSERT INTO mcp.tool_calls
+		   (id, api_key_id, org_id, project_id, tool_name,
+		    arguments, result_kind, duration_ms)
+		 VALUES ($1, $2, $3, $4, $5, '{}'::jsonb, 'ok', 0)`,
+		toolCallID, apiKeyID, orgID, projectID,
+		fmt.Sprintf("rbactest-tool-%s", orgLabel),
+	); err != nil {
+		return fmt.Errorf("insert mcp.tool_calls: %w", err)
+	}
+	fx.ToolCalls[orgLabel] = toolCallID
+
+	// 8. memory.entries row (E-3 / unblock-tv8.25). KindOrgScoped
+	//    row-leak bait. Constraints:
+	//      - scope='org' satisfies entries_scope_chk AND the
+	//        entries_scope_target_chk first leg (org_id NOT NULL,
+	//        project_id NULL, user_id NULL).
+	//      - key is side-tagged to satisfy the entries_org_key_uniq
+	//        partial UNIQUE index (org_id, key) WHERE scope='org'
+	//        across repeated seed runs in the same dev cluster.
+	//      - author_id references the seeded owner user (satisfies
+	//        entries_author_chk's NOT NULL alternation).
+	//      - value_enc is a placeholder bytea; value_size=8 matches
+	//        the byte length and stays within the 1..8192 bound of
+	//        entries_size_chk.
+	//      - ts_doc is computed via to_tsvector('english', $N) in
+	//        the INSERT so pgx never needs a tsvector codec on the
+	//        bind side. The SELECT-side codec gap is handled by the
+	//        []byte typing of memoryEntriesRow.TSDoc (see
+	//        rbactest_test.go).
+	memEntryID, err := ulid.New()
+	if err != nil {
+		return fmt.Errorf("memory_entry ulid: %w", err)
+	}
+	memEntryKey := fmt.Sprintf("rbactest-%s-%s", orgLabel, shortULID(memEntryID))
+	memValue := []byte("rbactest")
+	if _, err := db.Exec(ctx,
+		`INSERT INTO memory.entries
+		   (id, scope, org_id, author_id, key, value_enc, value_size,
+		    ts_doc)
+		 VALUES ($1, 'org', $2, $3, $4, $5, $6,
+		         to_tsvector('english', $7))`,
+		memEntryID, orgID, ownerID, memEntryKey,
+		memValue, len(memValue), "rbactest",
+	); err != nil {
+		return fmt.Errorf("insert memory.entries: %w", err)
+	}
+	fx.MemoryEntries[orgLabel] = memEntryID
+
+	// 9. boards.boards row (E-3 / unblock-tv8.25). KindOrgScoped
+	//    row-leak bait. Constraints:
+	//      - org_id NOT NULL; user_id NOT NULL FK to auth.users.
+	//        Owner user is reused (already seeded above).
+	//      - layout='kanban' is in the boards_layout_chk allow-list
+	//        ({'kanban', 'list', 'graph', 'roadmap'}).
+	//      - is_default=false sidesteps the
+	//        boards_default_per_user_project_uniq partial UNIQUE
+	//        index (user_id, COALESCE(project_id, '')) WHERE
+	//        is_default=true — the seed only installs one board per
+	//        side, so the partial UNIQUE is satisfied trivially with
+	//        is_default=false.
+	boardID, err := ulid.New()
+	if err != nil {
+		return fmt.Errorf("board ulid: %w", err)
+	}
+	if _, err := db.Exec(ctx,
+		`INSERT INTO boards.boards
+		   (id, org_id, project_id, user_id, name, layout, is_default)
+		 VALUES ($1, $2, $3, $4, $5, 'kanban', false)`,
+		boardID, orgID, projectID, ownerID,
+		fmt.Sprintf("rbactest board %s", orgLabel),
+	); err != nil {
+		return fmt.Errorf("insert boards.boards: %w", err)
+	}
+	fx.Boards[orgLabel] = boardID
+
 	return nil
 }
 
@@ -364,7 +522,11 @@ func seedSide(ctx context.Context, db *sqldb.Database, fx *Fixture, orgLabel str
 // TestMain on the way out. The org.organizations rows cascade-delete
 // everything reachable (members, projects, project_members,
 // api_keys, tool_calls, workitems.items via items.org_id +
-// items.project_id, workitems.comments via comments.item_id, …)
+// items.project_id, workitems.comments via comments.item_id,
+// deps.cascade_events via cascade_events.org_id ON DELETE CASCADE,
+// memory.entries via entries.org_id ON DELETE CASCADE [scope='org'
+// rows only — project/user-scoped entries fall through other FK
+// branches], boards.boards via boards.org_id ON DELETE CASCADE)
 // per the schema's ON DELETE CASCADE chain. auth.users /
 // auth.oauth_tokens / auth.sessions are NOT reachable via the
 // org_id cascade — they are deleted separately, keyed by the ids

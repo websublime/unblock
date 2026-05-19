@@ -110,6 +110,18 @@ const (
 	resourceWorkitemsComments = "workitems.comments"
 	resourceWorkitemsTrail    = "workitems.trail"
 	resourceDepsDependencies  = "deps.dependencies"
+	// resourceDepsCascadeEvents — added round-10 (E-3 / unblock-tv8.25).
+	// deps.cascade_events is the AF2 / Tool 1 `prime` read-side audit
+	// stream. It carries org_id (deps.cascade_events.org_id NOT NULL,
+	// migration 0050_deps.up.sql line 98) and is read by
+	// deps.RecentCascadeEvents (deps/deps.go:753). Writes are
+	// closed-loop — only the cascade subscriber emits rows
+	// server-side, server-identity — so the Authorize gate covers
+	// agent reads exclusively. Without this entry the
+	// KindAuthorizeOnly axis of the rbactest matrix would
+	// short-circuit to InvalidArgument instead of asserting the
+	// intended PermissionDenied contract (SPEC §10.1 round-10).
+	resourceDepsCascadeEvents = "deps.cascade_events"
 	resourceMCPToolCalls      = "mcp.tool_calls"
 	resourceMCPAPIKeys        = "mcp.api_keys"
 	resourceAuthSessions      = "auth.sessions"
@@ -167,6 +179,7 @@ var resourceAllowed = map[string]struct{}{
 	resourceWorkitemsComments: {},
 	resourceWorkitemsTrail:    {},
 	resourceDepsDependencies:  {},
+	resourceDepsCascadeEvents: {},
 	resourceMCPToolCalls:      {},
 	resourceMCPAPIKeys:        {},
 	resourceAuthSessions:      {},
@@ -195,6 +208,7 @@ var agentReadWriteResources = map[string]struct{}{
 	resourceWorkitemsComments: {},
 	resourceWorkitemsTrail:    {},
 	resourceDepsDependencies:  {},
+	resourceDepsCascadeEvents: {},
 	resourceMCPToolCalls:      {},
 	resourceMemoryEntries:     {},
 }

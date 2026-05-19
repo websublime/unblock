@@ -167,29 +167,32 @@ func expectAuthorizeOK(role, resource, action string) bool {
 // shapes. The subtest tree is deliberately deep so a CI failure
 // reads as a navigable path.
 //
-// Tuple count under B-3 + C-6 (auth + org + workitems + deps
+// Tuple count under the final P01 release-gate matrix (B-3 + C-6 +
+// E-3 — auth + org + workitems + deps + mcp + memory + boards
 // schemas):
 //   - org axes:      2 * 2 = 4 (caller × target)
 //   - role axis:     5
-//   - tables:        12 entries in AuthOrgTables (9 KindAuthorizeOnly +
-//     3 KindOrgScoped). Note: workitems.items appears TWICE — once
-//     under each kind — because the production code reaches the
-//     table through BOTH surfaces (rbac.For for read row-leak;
-//     org.Authorize for write/delete policy gating). SPEC §10.1 line
-//     2356-2361 names the dual treatment explicitly.
+//   - tables:        22 entries in AuthOrgTables (14 KindAuthorizeOnly +
+//     8 KindOrgScoped). Six tables appear TWICE — once under each
+//     kind — because the production code reaches them through BOTH
+//     surfaces (rbac.For for read row-leak; org.Authorize for the
+//     policy gate). The dual entries are: workitems.items (C-6),
+//     deps.cascade_events (E-3 round-10), mcp.tool_calls (E-3),
+//     mcp.api_keys (E-3), memory.entries (E-3), boards.boards (E-3).
+//     SPEC §10.1 line 2356-2369 (post-round-10) names this dual
+//     treatment explicitly for deps.cascade_events.
 //   - actions:       3 (read/write/delete) for KindAuthorizeOnly,
 //     1 (read only) for KindOrgScoped
 //
-// = 4 * 5 * (9*3 + 3*1) = 4 * 5 * 30 = 600 subtests.
+// = 4 * 5 * (14*3 + 8*1) = 4 * 5 * 50 = 1000 subtests.
 //
-// Naming note: workitems.items appears under both kinds, so for that
-// table the read-action subtest exists in two shapes. The OrgScoped
-// read asserts row-level leak (rbac.For); the AuthorizeOnly read
-// asserts the policy-decision (org.Authorize). The subtest names
-// collide on action=read; Go's testing package auto-disambiguates
-// duplicates with a "#01" suffix on the second occurrence. Both
-// assertions remain independent — they exercise different code
-// paths against the same table.
+// Naming note: every table that appears under both kinds produces
+// two read-action subtests. The OrgScoped read asserts row-level
+// leak (rbac.For); the AuthorizeOnly read asserts the policy-decision
+// (org.Authorize). The subtest names collide on action=read; Go's
+// testing package auto-disambiguates duplicates with a "#01" suffix
+// on the second occurrence. Both assertions remain independent —
+// they exercise different code paths against the same table.
 func TestRBACMatrix(t *testing.T) {
 	if fixture == nil {
 		t.Fatalf("rbactest: fixture is nil; SeedFixture must run from TestMain before this test fires")
@@ -463,6 +466,103 @@ type workitemsItemsRow struct {
 	FTS []byte
 }
 
+// depsCascadeEventsRow mirrors deps.cascade_events column order
+// verbatim per migration 0050_deps.up.sql lines 53-119 (10 columns).
+// The suite reads only OrgID for the row-leak assertion; the other
+// fields exist purely to keep ordinal positions aligned with the
+// migration so rbac.For's reflection scanner does not error on
+// column count.
+type depsCascadeEventsRow struct {
+	ID                string
+	EventID           string
+	Kind              string
+	OrgID             string
+	ProjectID         *string
+	TriggeredByItemID *string
+	AffectedItemIDs   []string
+	CascadedCount     int
+	TriggeredAt       time.Time
+	TraceID           *string
+}
+
+// mcpToolCallsRow mirrors mcp.tool_calls column order verbatim per
+// migration 0070_mcp.up.sql lines 52-68 (13 columns). pgx v5 scans
+// the `arguments jsonb` column into a []byte natively (no jsonb
+// codec registration required).
+type mcpToolCallsRow struct {
+	ID              string
+	APIKeyID        *string
+	OrgID           string
+	ProjectID       *string
+	ItemID          *string
+	ToolName        string
+	Arguments       []byte
+	ResultKind      string
+	RejectionReason *string
+	ErrorCode       *string
+	DurationMs      int
+	TraceID         *string
+	CalledAt        time.Time
+}
+
+// mcpAPIKeysRow mirrors mcp.api_keys column order verbatim per
+// migration 0070_mcp.up.sql lines 9-44 (12 columns).
+type mcpAPIKeysRow struct {
+	ID           string
+	OrgID        string
+	IssuedToUser *string
+	Label        string
+	AgentKind    string
+	KeyHash      []byte
+	KeyPrefix    string
+	Scopes       []string
+	CreatedAt    time.Time
+	LastUsedAt   *time.Time
+	ExpiresAt    *time.Time
+	RevokedAt    *time.Time
+}
+
+// memoryEntriesRow mirrors memory.entries column order verbatim per
+// migration 0090_memory.up.sql lines 13-45 (13 columns). The TSDoc
+// field at position 11 is the `ts_doc tsvector` column — pgx v5.7
+// has no registered tsvector codec, so it is typed as []byte (same
+// pattern as workitemsItemsRow.FTS). The value_enc bytea column at
+// position 9 is also []byte.
+type memoryEntriesRow struct {
+	ID          string
+	Scope       string
+	OrgID       *string
+	ProjectID   *string
+	UserID      *string
+	AuthorID    *string
+	AuthorAgent *string
+	Key         string
+	ValueEnc    []byte
+	ValueSize   int
+	Tags        []string
+	TSDoc       []byte
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+	ExpiresAt   *time.Time
+}
+
+// boardsBoardsRow mirrors boards.boards column order verbatim per
+// migration 0080_boards.up.sql lines 8-22 (11 columns). The
+// `filters jsonb` column at position 7 is scanned into []byte.
+type boardsBoardsRow struct {
+	ID          string
+	OrgID       string
+	ProjectID   *string
+	UserID      string
+	Name        string
+	Description *string
+	Filters     []byte
+	Layout      string
+	IsDefault   bool
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
 // selectScopedOrgIDs issues a rbac.For[T] read against the named
 // table and returns the org_id of every row the caller sees. The
 // per-table T shape is selected by the switch below; the only
@@ -493,6 +593,65 @@ func selectScopedOrgIDs(ctx context.Context, id auth.Identity, table string) ([]
 
 	case "workitems.items":
 		rows, err := rbac.For[workitemsItemsRow](id, "workitems.items").Run(ctx)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]string, 0, len(rows))
+		for _, r := range rows {
+			out = append(out, r.OrgID)
+		}
+		return out, nil
+
+	case "deps.cascade_events":
+		rows, err := rbac.For[depsCascadeEventsRow](id, "deps.cascade_events").Run(ctx)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]string, 0, len(rows))
+		for _, r := range rows {
+			out = append(out, r.OrgID)
+		}
+		return out, nil
+
+	case "mcp.tool_calls":
+		rows, err := rbac.For[mcpToolCallsRow](id, "mcp.tool_calls").Run(ctx)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]string, 0, len(rows))
+		for _, r := range rows {
+			out = append(out, r.OrgID)
+		}
+		return out, nil
+
+	case "mcp.api_keys":
+		rows, err := rbac.For[mcpAPIKeysRow](id, "mcp.api_keys").Run(ctx)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]string, 0, len(rows))
+		for _, r := range rows {
+			out = append(out, r.OrgID)
+		}
+		return out, nil
+
+	case "memory.entries":
+		rows, err := rbac.For[memoryEntriesRow](id, "memory.entries").Run(ctx)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]string, 0, len(rows))
+		for _, r := range rows {
+			// scope='org' rows always have org_id non-NULL per
+			// entries_scope_target_chk; deref the pointer.
+			if r.OrgID != nil {
+				out = append(out, *r.OrgID)
+			}
+		}
+		return out, nil
+
+	case "boards.boards":
+		rows, err := rbac.For[boardsBoardsRow](id, "boards.boards").Run(ctx)
 		if err != nil {
 			return nil, err
 		}
