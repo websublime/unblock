@@ -10,6 +10,7 @@
 - 2026-05-12 — round-6 (cascade-symmetry): the cascade subsystem is split into two regimes (new §6.3.0). `is_ready` is maintained inline by the writer that mutated the row/edge (single-hop); `pipeline_stage` is maintained exclusively by the cascade subscriber (multi-hop). `deps.cascade_events.kind` CHECK is extended from 2 values (`'close' | 'edge_removed'`) to 4 values (`'close' | 'edge_added' | 'edge_removed' | 'state_change'`). Tools 6 (close), 11 (add_dependency), 12 (remove_dependency), 13 (set_state — narrow rule for §5.7.1-affecting writes), and `workitems.Claim` (only on the I-3 reset path) post-commit publish `CascadeRequested` with the matching `Reason`. Tool 12 reuses the inline audit row's `event_id` on its post-commit publish; the subscriber's `ON CONFLICT (event_id, triggered_by_item_id) DO NOTHING` collapses the second insert to no-op. The §11.3 single-writer invariant is fractured: (a) `pipeline_stage` single-writer = cascade subscriber; (b) `is_ready` single-writer = the mutating call site (Tool 6 close, §6.5 add_edge, Tool 12 remove_edge, internal helper `deps.recomputeReady`); the linter rule scope tightens to `pipeline_stage` only with an explicit allowlist for `is_ready`. DDL migration `0050_deps.up.sql` updated in lockstep (CHECK list + doc comments).
 - 2026-05-15 — Round 8 — D-4 drift cleanup (targeted clarifications surfaced during `/investigate` on bead unblock-tv8.19; status remains APPROVED): (1) §4.4 `SearchRequest` / `SearchResponse` gain typed cursor fields (`CursorRank`, `CursorItemID`, `CursorCommentID` + matching `NextCursor*`) and a doc-note pinning the keyset tuple `(rank desc, item_id asc, comment_id asc)` and `LIMIT+1` over-fetch semantics — mirrors the Ready RPC pattern in `apps/api/workitems/workitems.go` and aligns §4.4 with the §6.2.0 / §6.2 Tool 9 cursor contract. `SearchHit` and §3.4 FTS DDL unchanged. (2) §6.2 Tool 10 (`comment`) gains a one-line note documenting the body-length enforcement boundary: handler enforces 1..16384 chars at the MCP boundary; `workitems.AppendComment` enforces the non-empty floor. (3) §2 C3 row and §4.3.1 SDK-pin paragraph updated from `github.com/modelcontextprotocol/go-sdk v0.5.0` to `v1.6.0` with a D-1 rationale ("v1.6.0 is the latest stable as of phase-01 implementation; v0.5.0 was the original pin during planning"); aligns the spec with `apps/api/mcp/transport.go:18-22` and `go.mod`. Clarification patch only — no re-approval round.
 - 2026-05-19 — round-9 (rbac-coverage): §10.1 — added deps.cascade_events to E-3 RBAC suite scope (closes coverage gap on the AF2 read path via Tool 1 prime). C-6 scope unchanged.
+- 2026-05-19 — round-10 (rbac-coverage closure for E-3 dual-shape): §10.1 — `deps.cascade_events` joins `org.resourceAllowed` and `org.agentReadWriteResources` so the Authorize-gate `KindAuthorizeOnly` axis can be exercised alongside the existing `KindOrgScoped` row-leak axis. Agents read the table through Tool 1 `prime`'s AF2 path (read-side); writes remain closed-loop (only the cascade subscriber emits rows server-side). Without this allow-list extension, an `KindAuthorizeOnly` tuple short-circuits to `InvalidArgument` instead of asserting the intended `PermissionDenied` contract. CI separate-report wiring (E-3 bead AC #3) is reassigned to A-6 (`unblock-tv8.6`, infra-supervisor) and gated by an explicit `tv8.25 → tv8.6` dependency edge; E-3 ships the suite discoverable as `encore test ./apps/api/shared/rbactest/...`, A-6 wires the separate gate.
 
 **Author:** Ada (architect)
 **Date:** 2026-05-08
@@ -2352,6 +2353,20 @@ bead:**
   `deps.RecentCascadeEvents` (AF2 / Tool 1 `prime`) and carries
   `org_id`, so it requires both row-leak (`rbac.For`-style) and
   Authorize-gate coverage; deferring to E-3 keeps C-6 scope minimal.
+  The E-3 worker MUST extend `org.resourceAllowed` to include
+  `deps.cascade_events` (resource constant `resourceDepsCascadeEvents
+  = "deps.cascade_events"`) and `org.agentReadWriteResources` to
+  include the same — agents read the table through Tool 1 `prime`'s
+  AF2 path, while writes remain closed-loop (only the cascade
+  subscriber emits rows server-side, server-identity). Without these
+  two additions, the `KindAuthorizeOnly` axis in the matrix would
+  short-circuit to `InvalidArgument` instead of asserting the
+  intended `PermissionDenied` contract (round-10 closure). The
+  release-blocking CI separate-report wiring referenced under §11.2
+  NFR-2 is reassigned to A-6 (`unblock-tv8.6`, infra-supervisor) —
+  E-3 ships the suite discoverable as `encore test
+  ./apps/api/shared/rbactest/...` and A-6 wires the gate
+  (`tv8.25 → tv8.6` dependency edge, round-10).
 
 **Mechanism within each task.** Tables with an `org_id` column are
 driven through `rbac.For[T]` (the read-side scope predicate is what's
