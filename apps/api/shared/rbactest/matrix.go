@@ -114,10 +114,14 @@ type TableSpec struct {
 	Kind TableKind
 }
 
-// AuthOrgTables is the closed set of auth + org + workitems + deps
-// schema tables the B-3 (unblock-tv8.9) + C-6 (unblock-tv8.15) sweeps
-// cover. E-3 / unblock-tv8.25 appends the remaining
-// deps.cascade_events + mcp.* + memory.* + boards.* entries.
+// AuthOrgTables is the closed set of P01-exposed schema tables the
+// release-gate matrix asserts isolation against. B-3 (unblock-tv8.9)
+// laid down the auth + org coverage; C-6 (unblock-tv8.15) extended to
+// workitems + deps.dependencies; E-3 (unblock-tv8.25) closes the
+// remaining deps.cascade_events + mcp.* + memory.* + boards.* surfaces.
+// This is the final P01 release-gate matrix — every P01-exposed table
+// with cross-tenant semantics is represented below.
+//
 // KindAuthorizeOnly additions are pure append-only on this slice;
 // KindOrgScoped additions also require a paired typed row struct
 // plus a new case in rbactest_test.go's selectScopedOrgIDs switch
@@ -126,7 +130,8 @@ type TableSpec struct {
 // Classification rationale (verified against migrations
 // apps/api/db/migrations/0020_auth.up.sql lines 11-66,
 // 0030_org.up.sql lines 7-62, 0040_workitems.up.sql lines 46-225,
-// and 0050_deps.up.sql lines 13-26):
+// 0050_deps.up.sql lines 13-130, 0070_mcp.up.sql lines 9-74,
+// 0080_boards.up.sql lines 8-27, 0090_memory.up.sql lines 13-45):
 //
 //   - auth.users / auth.oauth_tokens / auth.sessions — no org_id column;
 //     rbac.For would emit `<table>.org_id = $1` which Postgres rejects
@@ -154,6 +159,37 @@ type TableSpec struct {
 //     Authorize-only.
 //   - deps.dependencies — no org_id column (gated at the MCP layer via
 //     org.Authorize; deps.go:18-25 header doc). Authorize-only.
+//   - deps.cascade_events — has org_id NOT NULL (0050_deps.up.sql:98);
+//     read by deps.RecentCascadeEvents (AF2 / Tool 1 `prime`) via
+//     direct db.Query with explicit org-scope WHERE clause. Round-10
+//     adds resourceDepsCascadeEvents to org.resourceAllowed AND
+//     agentReadWriteResources (apps/api/org/org.go); the matrix
+//     carries BOTH TableSpec shapes — KindOrgScoped (row-leak via
+//     rbac.For[T]) AND KindAuthorizeOnly (policy-gate assertion). The
+//     dual coverage mirrors workitems.items.
+//   - mcp.tool_calls — has org_id NOT NULL (0070_mcp.up.sql:55).
+//     Written by mcp/recordtoolcall.go via direct db.Exec; never read
+//     through rbac.For in production. Carried as BOTH shapes so the
+//     row-leak axis covers any future read-side rbac.For wiring (e.g.
+//     audit-tab UI) and the Authorize axis asserts the policy
+//     contract (agents permitted, no delete).
+//   - mcp.api_keys — has org_id NOT NULL (0070_mcp.up.sql:11). Read
+//     by auth.Validate via direct db.Query (key_prefix lookup);
+//     written by auth.IssueAPIKey / IssueOrgKey via direct db.Exec.
+//     Agents are NOT in the agent permit set — key issuance is an
+//     org-admin operation. Carried as BOTH shapes for defensive
+//     coverage.
+//   - memory.entries — has org_id NULLABLE (0090_memory.up.sql:16) as
+//     scope discriminator. SCHEMA-ONLY in P01. The seed uses
+//     scope='org' rows so rbac.For's `org_id = $1` predicate hits
+//     non-NULL rows; project/user-scoped entries are invisible to
+//     rbac.For by design (when memory service ships in P02 it must
+//     route project/user reads through a different predicate).
+//     Carried as BOTH shapes.
+//   - boards.boards — has org_id NOT NULL (0080_boards.up.sql:10).
+//     SCHEMA-ONLY in P01. Agents are NOT in the agent permit set —
+//     board management is a user-driven UI operation. Carried as
+//     BOTH shapes.
 var AuthOrgTables = []TableSpec{
 	{Name: "auth.users", Kind: KindAuthorizeOnly},
 	{Name: "auth.oauth_tokens", Kind: KindAuthorizeOnly},
@@ -168,6 +204,21 @@ var AuthOrgTables = []TableSpec{
 	{Name: "workitems.comments", Kind: KindAuthorizeOnly},
 	{Name: "workitems.trail", Kind: KindAuthorizeOnly},
 	{Name: "deps.dependencies", Kind: KindAuthorizeOnly},
+	// E-3 (unblock-tv8.25): deps.cascade_events + mcp.* + memory.* +
+	// boards.* dual-shape coverage. Every table here is in
+	// org.resourceAllowed (post-round-10 for deps.cascade_events) so
+	// the KindAuthorizeOnly axis asserts PermissionDenied, not the
+	// InvalidArgument fail-closed default.
+	{Name: "deps.cascade_events", Kind: KindOrgScoped},
+	{Name: "deps.cascade_events", Kind: KindAuthorizeOnly},
+	{Name: "mcp.tool_calls", Kind: KindOrgScoped},
+	{Name: "mcp.tool_calls", Kind: KindAuthorizeOnly},
+	{Name: "mcp.api_keys", Kind: KindOrgScoped},
+	{Name: "mcp.api_keys", Kind: KindAuthorizeOnly},
+	{Name: "memory.entries", Kind: KindOrgScoped},
+	{Name: "memory.entries", Kind: KindAuthorizeOnly},
+	{Name: "boards.boards", Kind: KindOrgScoped},
+	{Name: "boards.boards", Kind: KindAuthorizeOnly},
 }
 
 // agentPermittedResources mirrors the org.agentReadWriteResources map
@@ -179,12 +230,13 @@ var AuthOrgTables = []TableSpec{
 // between this set and the org-package set is exactly the kind of
 // silent regression the suite must surface.
 var agentPermittedResources = map[string]struct{}{
-	"workitems.items":    {},
-	"workitems.comments": {},
-	"workitems.trail":    {},
-	"deps.dependencies":  {},
-	"mcp.tool_calls":     {},
-	"memory.entries":     {},
+	"workitems.items":     {},
+	"workitems.comments":  {},
+	"workitems.trail":     {},
+	"deps.dependencies":   {},
+	"deps.cascade_events": {}, // E-3 round-10: AF2 / Tool 1 prime read path.
+	"mcp.tool_calls":      {},
+	"memory.entries":      {},
 }
 
 // rolePermitsAction encodes the SPEC §4.2 role-action matrix:
