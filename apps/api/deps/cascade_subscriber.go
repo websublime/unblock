@@ -315,6 +315,45 @@ type itemDerivationInputs struct {
 // bounded at 256. The per-item UPDATE includes the value-equality
 // guard so repeated delivery converges to the same row state.
 //
+// Concurrency / LWW race fix (unblock-tv8.51): the items SELECT, the
+// comments SELECT, and the per-item UPDATE pass all run inside a single
+// short transaction. The items SELECT acquires `FOR NO KEY UPDATE`
+// row locks with a deterministic `ORDER BY id` so two concurrent
+// subscriber invocations on overlapping closures SERIALISE rather than
+// interleave a read-derive-write race:
+//
+//   - Without the tx + row lock, handler A could SELECT state S_A,
+//     derive stage A in Go memory, and meanwhile handler B (publishing
+//     from a state-column write that committed between A's SELECT and
+//     A's UPDATE) reads the newer state S_B and derives stage B.
+//     If B's UPDATE commits first, A's UPDATE then clobbers B with the
+//     stale A derivation. The pre-existing `WHERE pipeline_stage <> $2`
+//     value-equality guard only short-circuits the no-op case; it does
+//     not close this race.
+//   - With FOR NO KEY UPDATE + ORDER BY id, handler B blocks on the
+//     row lock until A commits, then re-reads the fresh state and
+//     derives correctly. ORDER BY id (lexicographic) guarantees the
+//     same lock-acquisition order across handlers, eliminating the
+//     classic deadlock-on-overlapping-sets pathology.
+//   - FOR NO KEY UPDATE (rather than plain FOR UPDATE) is the softer
+//     lock that suffices here: we mutate only pipeline_stage which is
+//     not part of any unique key, so blocking FK references to this
+//     row (e.g. workitems.comments inserts) is unnecessary. Same
+//     concurrency guarantee, narrower contention footprint.
+//   - The audit INSERT (insertCascadeEventRow) stays OUTSIDE this tx —
+//     its idempotency mechanism is the (event_id, triggered_by_item_id)
+//     UNIQUE constraint, not the tx, and bundling it would extend the
+//     row-lock window without changing correctness.
+//   - The forward BFS (bfsForwardBlocksClosure) also stays outside —
+//     it is a read-only topology walk and including it would
+//     unnecessarily extend the lock hold time.
+//
+// Encore Pub/Sub MaxConcurrency cannot be relied upon as a serialiser:
+// encore.dev v1.52.1 documents that the setting has no effect on
+// Encore Cloud environments, so concurrent handler dispatch across
+// instances is possible on the target deploy platform. The DB-side
+// fix above is the only correct closure.
+//
 // Tenant predicate (unblock-tv8.50 / defence-in-depth): both reads are
 // gated by (org_id = orgID AND ($projectID = ” OR project_id =
 // projectID)). Today the BFS already filters the input set by the same
@@ -336,17 +375,31 @@ func recomputePipelineStageForAffected(ctx context.Context, affected []string, o
 		return nil
 	}
 
+	// Open the short transaction that frames the items SELECT, the
+	// comments SELECT, and the per-item UPDATE pass. See the function
+	// doc comment for the LWW-race rationale (unblock-tv8.51).
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("pipeline_stage tx begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	// Fetch the four state columns + status + closed_at for every
-	// affected item. Tenant-gated read (unblock-tv8.50).
+	// affected item. Tenant-gated read (unblock-tv8.50). Row-locked
+	// `FOR NO KEY UPDATE` with deterministic `ORDER BY id` to serialise
+	// concurrent subscriber invocations on overlapping closures
+	// (unblock-tv8.51).
 	rowMap := make(map[string]*itemDerivationInputs, len(affected))
-	rows, err := db.Query(ctx,
+	rows, err := tx.Query(ctx,
 		`SELECT id, status, pipeline_stage,
 		        impl_state, review_state, qa_state, pipeline_state,
 		        (closed_at IS NOT NULL)
 		   FROM workitems.items
 		  WHERE id = ANY($1::text[])
 		    AND org_id = $2
-		    AND ($3 = '' OR project_id = $3)`,
+		    AND ($3 = '' OR project_id = $3)
+		  ORDER BY id
+		  FOR NO KEY UPDATE`,
 		affected, orgID, projectID,
 	)
 	if err != nil {
@@ -372,8 +425,10 @@ func recomputePipelineStageForAffected(ctx context.Context, affected []string, o
 
 	// Batched comment existence predicate (SPEC §5.7.1 line 781-787).
 	// workitems.comments has no org_id column — gate via sub-SELECT
-	// against workitems.items keyed on item_id (unblock-tv8.50).
-	commentRows, err := db.Query(ctx,
+	// against workitems.items keyed on item_id (unblock-tv8.50). Read
+	// inside the same tx as the locked items SELECT so the derivation
+	// inputs come from one consistent snapshot (unblock-tv8.51).
+	commentRows, err := tx.Query(ctx,
 		`SELECT c.item_id,
 		        max(CASE WHEN c.kind = 'review'        THEN 1 ELSE 0 END) AS has_review,
 		        max(CASE WHEN c.kind = 'investigation' THEN 1 ELSE 0 END) AS has_investigation
@@ -408,7 +463,9 @@ func recomputePipelineStageForAffected(ctx context.Context, affected []string, o
 
 	// Per-item derive + idempotent UPDATE. Affected set is bounded at
 	// AR-8 (256) so the per-row UPDATE is O(N) bounded — well inside
-	// Law 7's < 2s envelope.
+	// Law 7's < 2s envelope. Writes go through tx (the same lock-
+	// holding transaction as the items SELECT above) so the
+	// read-derive-update sequence is atomic per cascade pass.
 	for _, id := range affected {
 		inp, ok := rowMap[id]
 		if !ok {
@@ -436,7 +493,7 @@ func recomputePipelineStageForAffected(ctx context.Context, affected []string, o
 		// repeats the org_id / project_id predicate so a write cannot
 		// escape the publisher's tenant even if the rowMap lookup
 		// above were ever defeated by a future refactor.
-		res, err := db.Exec(ctx,
+		res, err := tx.Exec(ctx,
 			`UPDATE workitems.items
 			    SET pipeline_stage = $2
 			  WHERE id = $1
@@ -467,6 +524,10 @@ func recomputePipelineStageForAffected(ctx context.Context, affected []string, o
 				"event_id", eventID,
 			)
 		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("pipeline_stage tx commit: %w", err)
 	}
 	return nil
 }
