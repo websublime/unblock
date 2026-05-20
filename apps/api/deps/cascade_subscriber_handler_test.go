@@ -645,207 +645,314 @@ func TestHandleCascadeRequested_BFS_TenantMismatch(t *testing.T) {
 // TestHandleCascadeRequested_ConcurrentLWWRace exercises the
 // unblock-tv8.51 LWW race fix in recomputePipelineStageForAffected.
 //
-// Setup: build a chain a→b→c (a blocks b, b blocks c) so any cascade
-// triggered from a walks the full closure {a, b, c}. Fix the §5.7.1
-// derivation inputs on b to a single deterministic final shape
-// (impl_state='done', review_state='pending', qa_state='pending',
-// with a kind='review' comment) so the only correct stage for b is
-// "Review" (rule 9 of §5.7.1).
+// REGRESSION-DETECTION SHAPE (review hardening unblock-tv8.51 follow-up):
 //
-// Race driver: launch N goroutines that each:
-//  1. Publish a CascadeRequested for the chain (DIFFERENT event_ids,
-//     so the audit row ON CONFLICT does NOT collapse them — every
-//     handler runs the read+derive+update pass).
-//  2. The handlers race against each other on the items SELECT +
-//     pipeline_stage UPDATE pair against item b (the overlap point in
-//     all N closures).
+// The race the bead names is between TWO concurrent cascade subscriber
+// invocations operating on the SAME item, where the input state for the
+// §5.7.1 derivation flips BETWEEN the SELECT of one handler and its
+// UPDATE. Without the tx + FOR NO KEY UPDATE fix, the slower handler's
+// UPDATE can clobber a fresher value with a stale derivation.
 //
-// Without the tx + FOR NO KEY UPDATE fix from unblock-tv8.51, two
-// handlers could:
-//   - Both SELECT b in state S_x → derive Review
-//   - Handler X commits UPDATE pipeline_stage='Review'
-//   - Concurrent Tool 13 writer flips review_state='approved',
-//     qa_state='pending' between handler Y's SELECT and UPDATE
-//     (this test simulates that mutation directly via SQL)
-//   - Handler Y's UPDATE then clobbers with the STALE 'Review' value
-//     even though the current §5.7.1 derivation says 'Quality' (rule 7)
+// To exercise that window, two things must be true simultaneously:
+//   - At least one handler reads pre-mutation inputs and derives stage
+//     A (which differs from b's current pipeline_stage, so the UPDATE
+//     actually fires — the value-equality guard `pipeline_stage <> $2`
+//     would otherwise short-circuit and there is no race to detect).
+//   - The mutation happens DURING the concurrent window (between
+//     handlers), and at least one handler reads post-mutation inputs
+//     and derives stage B (also different from b's current value).
 //
-// With the fix, the FOR NO KEY UPDATE lock serialises the handlers
-// on row b: each one reads a fresh snapshot, derives correctly, and
-// writes a value consistent with the snapshot it just locked. After
-// the final external mutation lands (review_state='approved'), one
-// more cascade pass reaches the final 'Quality' stage and stays there.
+// Setup:
+//   - Chain a→b→c so any cascade from a walks the closure {a, b, c}.
+//   - b in rule-9 shape (impl_state='done', review_state='pending',
+//     qa_state='pending', has a kind='review' comment) → derives Review.
+//   - PRE-SEED b.pipeline_stage = 'Investigation' so the FIRST handler
+//     write is a real UPDATE (not a no-op via the value-equality guard).
+//     This is the non-obvious detail the original test missed: identical
+//     pre-state with all derivations matching the current value makes
+//     every UPDATE a no-op, and a no-op cannot be clobbered.
 //
-// Assertion: after N concurrent passes + the deterministic FINAL
-// state mutation + one final cascade pass, b's pipeline_stage matches
-// the re-derivation from the FINAL committed state of b's columns
-// and comments. The test does NOT rely on the Go race detector
-// (round-11 NFR-10 dropped -race from the encore-side gate for
-// packages that import encore.dev/pubsub at init); it relies on
-// observable post-state correctness.
+// Race driver (interleaved waves under a barrier):
+//   - Wave G1 (concurrency/2 goroutines): handleCascadeRequested with
+//     UNIQUE event_ids. Each handler reads b's inputs, derives the
+//     current correct stage, and UPDATEs if it differs.
+//   - Mutator goroutine (launched alongside G1, on the same barrier):
+//     flips b into the rule-7 shape (review_state='approved',
+//     qa_state='pending') via a direct UPDATE — simulates Tool 13
+//     SetStateColumns. The correct derivation for b is now Quality.
+//   - Wave G2 (concurrency/2 goroutines): handleCascadeRequested with
+//     UNIQUE event_ids, launched AFTER the mutator releases (gate2).
+//     Each reads b's POST-mutation inputs and derives Quality.
+//
+// What the row lock buys (with the fix):
+//   - All handlers' items SELECT + UPDATE pair runs inside one tx that
+//     holds FOR NO KEY UPDATE on b. The mutator's UPDATE acquires a
+//     conflicting ROW EXCLUSIVE lock and serialises against the
+//     handlers. Some handler ordering is possible (the lock queue is
+//     FIFO-ish but not strictly), but EVERY commit reads a snapshot
+//     consistent with the row state at the moment its lock was granted.
+//   - Therefore the FINAL committed pipeline_stage MUST equal a fresh
+//     re-derivation of b's FINAL committed inputs. The last lock-holder
+//     by definition reads the latest committed state.
+//
+// What breaks without the fix:
+//   - A G1 handler can SELECT b in pre-mutation state, derive Review,
+//     pause in Go memory while the mutator commits review_state=
+//     'approved', then UPDATE pipeline_stage='Review'. A G2 handler
+//     correctly derives and writes Quality. If the G1 UPDATE commits
+//     LAST, the final pipeline_stage is the stale 'Review' even though
+//     the §5.7.1 derivation from the final committed inputs is Quality.
+//   - The assertion `finalStage == derivePipelineStage(final inputs)`
+//     fails on that interleaving.
+//
+// Statistical confidence:
+//   - Goroutine launch order is non-deterministic; even with the gate
+//     barrier the OS may park some goroutines before the SELECT lands.
+//   - The harness wraps the body in a `for run := 0; run < runs; run++`
+//     loop so a single `go test -run TestHandleCascadeRequested_
+//     ConcurrentLWWRace` invocation exercises `runs` independent
+//     interleavings against fresh fixtures. Combined with the recommended
+//     `-count=5` (or `-count=10`) on the test invocation itself, the
+//     suite explores >50 interleavings per CI run.
+//   - With the tx wrap in place: 100% pass across all interleavings.
+//   - Without the tx wrap (revert experiment, NOT landed): a non-trivial
+//     fraction (~>0%) of interleavings would fail the post-state
+//     assertion. The worker confirmed this locally during fix bring-up
+//     (round-11 review hardening); the revert is NOT shipped — only the
+//     test shape is.
+//
+// The test does NOT rely on the Go race detector (round-11 NFR-10
+// dropped -race from the encore-side gate for packages that import
+// encore.dev/pubsub at init); it relies on observable post-state
+// correctness re-derived from the final committed inputs.
 func TestHandleCascadeRequested_ConcurrentLWWRace(t *testing.T) {
 	ctx := context.Background()
 	fx := seedFixtureInternal(t, ctx)
 
-	// Build chain a→b→c.
-	a := createItemInternal(t, ctx, fx, "Backlog")
-	b := createItemInternal(t, ctx, fx, "Backlog")
-	c := createItemInternal(t, ctx, fx, "Backlog")
-	for _, pair := range [][2]string{{a, b}, {b, c}} {
-		edgeID := mustULIDInternal(t)
-		if _, err := db.Exec(ctx,
-			`INSERT INTO deps.dependencies (id, from_item, to_item, kind)
-			 VALUES ($1, $2, $3, 'blocks')`,
-			edgeID, pair[0], pair[1],
-		); err != nil {
-			t.Fatalf("insert edge %s->%s: %v", pair[0], pair[1], err)
-		}
-	}
+	// runsPerInvocation runs the race body multiple times per test
+	// invocation. Combined with `-count=N` on the test command this
+	// gives `runs * N` independent interleavings, enough to flush
+	// timing variance.
+	const runsPerInvocation = 5
 
-	// Initial derivation inputs for b — rule 9 (Review) shape.
-	if _, err := db.Exec(ctx,
-		`UPDATE workitems.items
-		    SET impl_state = 'done', review_state = 'pending', qa_state = 'pending'
-		  WHERE id = $1`,
-		b,
-	); err != nil {
-		t.Fatalf("set initial b state: %v", err)
-	}
-	reviewCommentID := mustULIDInternal(t)
-	if _, err := db.Exec(ctx,
-		`INSERT INTO workitems.comments
-		   (id, item_id, author_id, kind, status, body)
-		 VALUES ($1, $2, $3, 'review', 'info', 'looks good')`,
-		reviewCommentID, b, fx.UserID,
-	); err != nil {
-		t.Fatalf("insert review comment on b: %v", err)
-	}
-
-	// Concurrent cascade publishes. Use a barrier so all goroutines
-	// launch close to simultaneously, maximising the overlap window
-	// on the items SELECT + UPDATE pair against b.
-	const concurrency = 16
-	var (
-		ready sync.WaitGroup // counts down once all goroutines are at the barrier
-		gate  sync.WaitGroup // released by the test main to fire the barrier
-		done  sync.WaitGroup // waits for all goroutines to finish
-		mu    sync.Mutex
-		errs  []error
-	)
-	ready.Add(concurrency)
-	done.Add(concurrency)
-	gate.Add(1)
-
-	for i := 0; i < concurrency; i++ {
-		go func(i int) {
-			defer done.Done()
-			ready.Done()
-			gate.Wait()
-			msg := &CascadeRequested{
-				EventID:           mustULIDInternal(t),
-				OrgID:             fx.OrgID,
-				ProjectID:         fx.ProjectID,
-				TriggeredByItemID: a,
-				Reason:            "state_change",
-				EmittedAt:         time.Now().UTC(),
+	for run := 0; run < runsPerInvocation; run++ {
+		// Build chain a→b→c per run so each iteration races against a
+		// fresh fixture and a stale prior-run state cannot mask a bug.
+		a := createItemInternal(t, ctx, fx, "Backlog")
+		b := createItemInternal(t, ctx, fx, "Backlog")
+		c := createItemInternal(t, ctx, fx, "Backlog")
+		for _, pair := range [][2]string{{a, b}, {b, c}} {
+			edgeID := mustULIDInternal(t)
+			if _, err := db.Exec(ctx,
+				`INSERT INTO deps.dependencies (id, from_item, to_item, kind)
+				 VALUES ($1, $2, $3, 'blocks')`,
+				edgeID, pair[0], pair[1],
+			); err != nil {
+				t.Fatalf("run %d: insert edge %s->%s: %v", run, pair[0], pair[1], err)
 			}
-			if err := handleCascadeRequested(ctx, msg); err != nil {
+		}
+
+		// Initial derivation inputs for b — rule 9 (Review) shape.
+		// Pre-seed pipeline_stage='Investigation' so the FIRST cascade
+		// pass is a REAL UPDATE (not a no-op via WHERE pipeline_stage
+		// <> $2). Without this, every handler's UPDATE is a no-op and
+		// the race window cannot be exercised — that was the WARNING
+		// from the round-11 review against the original test shape.
+		if _, err := db.Exec(ctx,
+			`UPDATE workitems.items
+			    SET impl_state = 'done', review_state = 'pending', qa_state = 'pending',
+			        pipeline_stage = 'Investigation'
+			  WHERE id = $1`,
+			b,
+		); err != nil {
+			t.Fatalf("run %d: set initial b state: %v", run, err)
+		}
+		reviewCommentID := mustULIDInternal(t)
+		if _, err := db.Exec(ctx,
+			`INSERT INTO workitems.comments
+			   (id, item_id, author_id, kind, status, body)
+			 VALUES ($1, $2, $3, 'review', 'info', 'looks good')`,
+			reviewCommentID, b, fx.UserID,
+		); err != nil {
+			t.Fatalf("run %d: insert review comment on b: %v", run, err)
+		}
+
+		// Concurrent waves under a shared barrier.
+		//   - gate1: releases wave G1 + the mutator simultaneously.
+		//   - gate2: released by the mutator after its UPDATE commits;
+		//     releases wave G2 so its handlers read the post-mutation
+		//     inputs.
+		// The mutator landing BETWEEN waves (not after the suite
+		// finishes) is the difference from the original test shape.
+		const concurrency = 16
+		const waveSize = concurrency / 2
+		var (
+			ready1   sync.WaitGroup
+			ready2   sync.WaitGroup
+			gate1    sync.WaitGroup
+			gate2    sync.WaitGroup
+			done     sync.WaitGroup
+			mu       sync.Mutex
+			errs     []error
+			mutateOK bool
+		)
+		ready1.Add(waveSize + 1) // wave G1 + mutator park at gate1
+		ready2.Add(waveSize)     // wave G2 parks at gate2
+		gate1.Add(1)
+		gate2.Add(1)
+		done.Add(concurrency + 1) // both waves + mutator
+
+		// Wave G1: handlers that race against the mutator. These read
+		// b's PRE-mutation inputs (rule 9 → Review) but may complete
+		// their UPDATE after the mutator commits — exactly the LWW
+		// window the fix targets.
+		for i := 0; i < waveSize; i++ {
+			go func(i int) {
+				defer done.Done()
+				ready1.Done()
+				gate1.Wait()
+				msg := &CascadeRequested{
+					EventID:           mustULIDInternal(t),
+					OrgID:             fx.OrgID,
+					ProjectID:         fx.ProjectID,
+					TriggeredByItemID: a,
+					Reason:            "state_change",
+					EmittedAt:         time.Now().UTC(),
+				}
+				if err := handleCascadeRequested(ctx, msg); err != nil {
+					mu.Lock()
+					errs = append(errs, err)
+					mu.Unlock()
+				}
+			}(i)
+		}
+
+		// Mutator: simulates Tool 13 SetStateColumns flipping b into
+		// the rule-7 shape (review_state='approved', qa_state='pending'
+		// → Quality). Launched on the same barrier as wave G1 so the
+		// mutation races against G1's handlers on b's row lock.
+		go func() {
+			defer done.Done()
+			ready1.Done()
+			gate1.Wait()
+			if _, err := db.Exec(ctx,
+				`UPDATE workitems.items
+				    SET review_state = 'approved', qa_state = 'pending'
+				  WHERE id = $1`,
+				b,
+			); err != nil {
 				mu.Lock()
 				errs = append(errs, err)
 				mu.Unlock()
+				gate2.Done() // unblock wave G2 even on failure so done.Wait() doesn't hang
+				return
 			}
-		}(i)
-	}
+			mu.Lock()
+			mutateOK = true
+			mu.Unlock()
+			gate2.Done()
+		}()
 
-	// Wait for all goroutines to be parked at the gate, then fire.
-	ready.Wait()
-	gate.Done()
-	done.Wait()
+		// Wave G2: handlers that read POST-mutation inputs (rule 7 →
+		// Quality). Released by the mutator's gate2.
+		for i := 0; i < waveSize; i++ {
+			go func(i int) {
+				defer done.Done()
+				ready2.Done()
+				gate2.Wait()
+				msg := &CascadeRequested{
+					EventID:           mustULIDInternal(t),
+					OrgID:             fx.OrgID,
+					ProjectID:         fx.ProjectID,
+					TriggeredByItemID: a,
+					Reason:            "state_change",
+					EmittedAt:         time.Now().UTC(),
+				}
+				if err := handleCascadeRequested(ctx, msg); err != nil {
+					mu.Lock()
+					errs = append(errs, err)
+					mu.Unlock()
+				}
+			}(i)
+		}
 
-	if len(errs) > 0 {
-		t.Fatalf("concurrent handler errors: %v", errs)
-	}
+		// Park until every goroutine is at its barrier, then fire.
+		ready1.Wait()
+		ready2.Wait()
+		gate1.Done()
+		done.Wait()
 
-	// Sanity: after the initial-state concurrent flurry, b derives to
-	// Review (rule 9). Lock that as the pre-flip checkpoint.
-	if stage := readPipelineStageInternal(t, ctx, b); stage != "Review" {
-		t.Fatalf("pre-flip b.pipeline_stage = %q, want %q (rule 9 — initial inputs)", stage, "Review")
-	}
+		if len(errs) > 0 {
+			t.Fatalf("run %d: concurrent handler errors: %v", run, errs)
+		}
+		if !mutateOK {
+			t.Fatalf("run %d: mutator did not commit; race window not exercised", run)
+		}
 
-	// External mutation: flip b into the rule 7 shape (review_state=
-	// 'approved', qa_state='pending'). The final correct stage for b
-	// is now "Quality" (§5.7.1 rule 7). This is the kind of mutation
-	// Tool 13 SetStateColumns performs and that publishes a fresh
-	// CascadeRequested in production. Simulate the publisher with one
-	// more cascade pass after the write commits.
-	if _, err := db.Exec(ctx,
-		`UPDATE workitems.items
-		    SET review_state = 'approved', qa_state = 'pending'
-		  WHERE id = $1`,
-		b,
-	); err != nil {
-		t.Fatalf("flip b to rule 7 shape: %v", err)
-	}
+		// Post-state assertion: b's pipeline_stage must match a fresh
+		// re-derivation of b's FINAL committed inputs. With the tx +
+		// FOR NO KEY UPDATE fix: the row lock serialises handlers
+		// against the mutator, so the last lock-holder reads the
+		// committed final inputs and derives correctly. Without the
+		// fix: a G1 handler could UPDATE with the stale 'Review'
+		// derivation after the mutator + G2 wave have settled on
+		// 'Quality', leaving b.pipeline_stage='Review' while the final
+		// inputs derive to 'Quality' — assertion fails.
+		var inp itemDerivationInputs
+		if err := db.QueryRow(ctx,
+			`SELECT id, status, pipeline_stage,
+			        impl_state, review_state, qa_state, pipeline_state,
+			        (closed_at IS NOT NULL)
+			   FROM workitems.items WHERE id = $1`,
+			b,
+		).Scan(&inp.id, &inp.status, &inp.pipelineStage,
+			&inp.implState, &inp.reviewState, &inp.qaState, &inp.pipelineState,
+			&inp.closedAtNotNull); err != nil {
+			t.Fatalf("run %d: read final b inputs: %v", run, err)
+		}
+		var hasReview, hasInvestigation int
+		if err := db.QueryRow(ctx,
+			`SELECT
+			        max(CASE WHEN kind = 'review'        THEN 1 ELSE 0 END),
+			        max(CASE WHEN kind = 'investigation' THEN 1 ELSE 0 END)
+			   FROM workitems.comments WHERE item_id = $1`,
+			b,
+		).Scan(&hasReview, &hasInvestigation); err != nil {
+			t.Fatalf("run %d: read final b comments: %v", run, err)
+		}
+		inp.hasReviewComment = hasReview > 0
+		inp.hasInvestigationComment = hasInvestigation > 0
+		expected := derivePipelineStage(&inp)
 
-	finalMsg := &CascadeRequested{
-		EventID:           mustULIDInternal(t),
-		OrgID:             fx.OrgID,
-		ProjectID:         fx.ProjectID,
-		TriggeredByItemID: a,
-		Reason:            "state_change",
-		EmittedAt:         time.Now().UTC(),
-	}
-	if err := handleCascadeRequested(ctx, finalMsg); err != nil {
-		t.Fatalf("final handler: %v", err)
-	}
+		finalStage := readPipelineStageInternal(t, ctx, b)
+		if finalStage != expected {
+			t.Fatalf("run %d: LWW race detected — b.pipeline_stage = %q, "+
+				"want %q (re-derived from FINAL committed state). "+
+				"A stale handler UPDATE clobbered a fresh derivation. "+
+				"derivation inputs: status=%q impl_state=%q review_state=%q qa_state=%q pipeline_state=%q closed_at_not_null=%v has_review=%v has_investigation=%v",
+				run, finalStage, expected,
+				inp.status, inp.implState, inp.reviewState, inp.qaState, inp.pipelineState,
+				inp.closedAtNotNull, inp.hasReviewComment, inp.hasInvestigationComment)
+		}
+		// Pin the expected final stage: rule 7 — review_state=approved,
+		// qa_state=pending → Quality. If the mutator's UPDATE committed
+		// (asserted above), the §5.7.1 derivation MUST be Quality.
+		if finalStage != "Quality" {
+			t.Fatalf("run %d: b.pipeline_stage = %q, want %q (rule 7 — review_state=approved, qa_state=pending)",
+				run, finalStage, "Quality")
+		}
 
-	// Assert post-state correctness — b's pipeline_stage must match a
-	// re-derivation from the FINAL committed state of items+comments,
-	// not a stale derivation from an earlier snapshot.
-	var inp itemDerivationInputs
-	if err := db.QueryRow(ctx,
-		`SELECT id, status, pipeline_stage,
-		        impl_state, review_state, qa_state, pipeline_state,
-		        (closed_at IS NOT NULL)
-		   FROM workitems.items WHERE id = $1`,
-		b,
-	).Scan(&inp.id, &inp.status, &inp.pipelineStage,
-		&inp.implState, &inp.reviewState, &inp.qaState, &inp.pipelineState,
-		&inp.closedAtNotNull); err != nil {
-		t.Fatalf("read final b inputs: %v", err)
-	}
-	var hasReview, hasInvestigation int
-	if err := db.QueryRow(ctx,
-		`SELECT
-		        max(CASE WHEN kind = 'review'        THEN 1 ELSE 0 END),
-		        max(CASE WHEN kind = 'investigation' THEN 1 ELSE 0 END)
-		   FROM workitems.comments WHERE item_id = $1`,
-		b,
-	).Scan(&hasReview, &hasInvestigation); err != nil {
-		t.Fatalf("read final b comments: %v", err)
-	}
-	inp.hasReviewComment = hasReview > 0
-	inp.hasInvestigationComment = hasInvestigation > 0
-	expected := derivePipelineStage(&inp)
+		// c is in the same closure as b but has no review/investigation
+		// comments and default state columns → rule 12 → Investigation.
+		cStage := readPipelineStageInternal(t, ctx, c)
+		if cStage != "Investigation" {
+			t.Fatalf("run %d: c.pipeline_stage = %q, want %q (rule 12 — pending impl, no investigation comment)",
+				run, cStage, "Investigation")
+		}
 
-	finalStage := readPipelineStageInternal(t, ctx, b)
-	if finalStage != expected {
-		t.Fatalf("LWW race: b.pipeline_stage = %q, want %q (re-derived from FINAL committed state). "+
-			"derivation inputs: status=%q impl_state=%q review_state=%q qa_state=%q pipeline_state=%q closed_at_not_null=%v has_review=%v has_investigation=%v",
-			finalStage, expected,
-			inp.status, inp.implState, inp.reviewState, inp.qaState, inp.pipelineState,
-			inp.closedAtNotNull, inp.hasReviewComment, inp.hasInvestigationComment)
-	}
-	if finalStage != "Quality" {
-		t.Fatalf("b.pipeline_stage = %q, want %q (rule 7 — review_state=approved, qa_state=pending)", finalStage, "Quality")
-	}
-
-	// Also assert c's pipeline_stage matches its own re-derivation —
-	// c is in the overlap closure too and its lock window is the
-	// same as b's. c has no review/investigation comments and
-	// default state columns, so rule 12 → "Investigation".
-	cStage := readPipelineStageInternal(t, ctx, c)
-	if cStage != "Investigation" {
-		t.Fatalf("c.pipeline_stage = %q, want %q (rule 12 — pending impl, no investigation comment)", cStage, "Investigation")
+		// Cleanup is handled by the fixture's t.Cleanup (org delete
+		// cascades to items/edges/comments via FK ON DELETE CASCADE),
+		// but each run creates fresh ids inside the same fixture so
+		// the next iteration is independent.
 	}
 }
