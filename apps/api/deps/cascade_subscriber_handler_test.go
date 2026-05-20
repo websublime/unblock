@@ -21,6 +21,7 @@ package deps
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -638,5 +639,213 @@ func TestHandleCascadeRequested_BFS_TenantMismatch(t *testing.T) {
 	stageAfter := readPipelineStageInternal(t, ctx, seed)
 	if stageAfter != stageBefore {
 		t.Fatalf("subscriber wrote across tenant mismatch: pipeline_stage %q → %q", stageBefore, stageAfter)
+	}
+}
+
+// TestHandleCascadeRequested_ConcurrentLWWRace exercises the
+// unblock-tv8.51 LWW race fix in recomputePipelineStageForAffected.
+//
+// Setup: build a chain a→b→c (a blocks b, b blocks c) so any cascade
+// triggered from a walks the full closure {a, b, c}. Fix the §5.7.1
+// derivation inputs on b to a single deterministic final shape
+// (impl_state='done', review_state='pending', qa_state='pending',
+// with a kind='review' comment) so the only correct stage for b is
+// "Review" (rule 9 of §5.7.1).
+//
+// Race driver: launch N goroutines that each:
+//  1. Publish a CascadeRequested for the chain (DIFFERENT event_ids,
+//     so the audit row ON CONFLICT does NOT collapse them — every
+//     handler runs the read+derive+update pass).
+//  2. The handlers race against each other on the items SELECT +
+//     pipeline_stage UPDATE pair against item b (the overlap point in
+//     all N closures).
+//
+// Without the tx + FOR NO KEY UPDATE fix from unblock-tv8.51, two
+// handlers could:
+//   - Both SELECT b in state S_x → derive Review
+//   - Handler X commits UPDATE pipeline_stage='Review'
+//   - Concurrent Tool 13 writer flips review_state='approved',
+//     qa_state='pending' between handler Y's SELECT and UPDATE
+//     (this test simulates that mutation directly via SQL)
+//   - Handler Y's UPDATE then clobbers with the STALE 'Review' value
+//     even though the current §5.7.1 derivation says 'Quality' (rule 7)
+//
+// With the fix, the FOR NO KEY UPDATE lock serialises the handlers
+// on row b: each one reads a fresh snapshot, derives correctly, and
+// writes a value consistent with the snapshot it just locked. After
+// the final external mutation lands (review_state='approved'), one
+// more cascade pass reaches the final 'Quality' stage and stays there.
+//
+// Assertion: after N concurrent passes + the deterministic FINAL
+// state mutation + one final cascade pass, b's pipeline_stage matches
+// the re-derivation from the FINAL committed state of b's columns
+// and comments. The test does NOT rely on the Go race detector
+// (round-11 NFR-10 dropped -race from the encore-side gate for
+// packages that import encore.dev/pubsub at init); it relies on
+// observable post-state correctness.
+func TestHandleCascadeRequested_ConcurrentLWWRace(t *testing.T) {
+	ctx := context.Background()
+	fx := seedFixtureInternal(t, ctx)
+
+	// Build chain a→b→c.
+	a := createItemInternal(t, ctx, fx, "Backlog")
+	b := createItemInternal(t, ctx, fx, "Backlog")
+	c := createItemInternal(t, ctx, fx, "Backlog")
+	for _, pair := range [][2]string{{a, b}, {b, c}} {
+		edgeID := mustULIDInternal(t)
+		if _, err := db.Exec(ctx,
+			`INSERT INTO deps.dependencies (id, from_item, to_item, kind)
+			 VALUES ($1, $2, $3, 'blocks')`,
+			edgeID, pair[0], pair[1],
+		); err != nil {
+			t.Fatalf("insert edge %s->%s: %v", pair[0], pair[1], err)
+		}
+	}
+
+	// Initial derivation inputs for b — rule 9 (Review) shape.
+	if _, err := db.Exec(ctx,
+		`UPDATE workitems.items
+		    SET impl_state = 'done', review_state = 'pending', qa_state = 'pending'
+		  WHERE id = $1`,
+		b,
+	); err != nil {
+		t.Fatalf("set initial b state: %v", err)
+	}
+	reviewCommentID := mustULIDInternal(t)
+	if _, err := db.Exec(ctx,
+		`INSERT INTO workitems.comments
+		   (id, item_id, author_id, kind, status, body)
+		 VALUES ($1, $2, $3, 'review', 'info', 'looks good')`,
+		reviewCommentID, b, fx.UserID,
+	); err != nil {
+		t.Fatalf("insert review comment on b: %v", err)
+	}
+
+	// Concurrent cascade publishes. Use a barrier so all goroutines
+	// launch close to simultaneously, maximising the overlap window
+	// on the items SELECT + UPDATE pair against b.
+	const concurrency = 16
+	var (
+		ready sync.WaitGroup // counts down once all goroutines are at the barrier
+		gate  sync.WaitGroup // released by the test main to fire the barrier
+		done  sync.WaitGroup // waits for all goroutines to finish
+		mu    sync.Mutex
+		errs  []error
+	)
+	ready.Add(concurrency)
+	done.Add(concurrency)
+	gate.Add(1)
+
+	for i := 0; i < concurrency; i++ {
+		go func(i int) {
+			defer done.Done()
+			ready.Done()
+			gate.Wait()
+			msg := &CascadeRequested{
+				EventID:           mustULIDInternal(t),
+				OrgID:             fx.OrgID,
+				ProjectID:         fx.ProjectID,
+				TriggeredByItemID: a,
+				Reason:            "state_change",
+				EmittedAt:         time.Now().UTC(),
+			}
+			if err := handleCascadeRequested(ctx, msg); err != nil {
+				mu.Lock()
+				errs = append(errs, err)
+				mu.Unlock()
+			}
+		}(i)
+	}
+
+	// Wait for all goroutines to be parked at the gate, then fire.
+	ready.Wait()
+	gate.Done()
+	done.Wait()
+
+	if len(errs) > 0 {
+		t.Fatalf("concurrent handler errors: %v", errs)
+	}
+
+	// Sanity: after the initial-state concurrent flurry, b derives to
+	// Review (rule 9). Lock that as the pre-flip checkpoint.
+	if stage := readPipelineStageInternal(t, ctx, b); stage != "Review" {
+		t.Fatalf("pre-flip b.pipeline_stage = %q, want %q (rule 9 — initial inputs)", stage, "Review")
+	}
+
+	// External mutation: flip b into the rule 7 shape (review_state=
+	// 'approved', qa_state='pending'). The final correct stage for b
+	// is now "Quality" (§5.7.1 rule 7). This is the kind of mutation
+	// Tool 13 SetStateColumns performs and that publishes a fresh
+	// CascadeRequested in production. Simulate the publisher with one
+	// more cascade pass after the write commits.
+	if _, err := db.Exec(ctx,
+		`UPDATE workitems.items
+		    SET review_state = 'approved', qa_state = 'pending'
+		  WHERE id = $1`,
+		b,
+	); err != nil {
+		t.Fatalf("flip b to rule 7 shape: %v", err)
+	}
+
+	finalMsg := &CascadeRequested{
+		EventID:           mustULIDInternal(t),
+		OrgID:             fx.OrgID,
+		ProjectID:         fx.ProjectID,
+		TriggeredByItemID: a,
+		Reason:            "state_change",
+		EmittedAt:         time.Now().UTC(),
+	}
+	if err := handleCascadeRequested(ctx, finalMsg); err != nil {
+		t.Fatalf("final handler: %v", err)
+	}
+
+	// Assert post-state correctness — b's pipeline_stage must match a
+	// re-derivation from the FINAL committed state of items+comments,
+	// not a stale derivation from an earlier snapshot.
+	var inp itemDerivationInputs
+	if err := db.QueryRow(ctx,
+		`SELECT id, status, pipeline_stage,
+		        impl_state, review_state, qa_state, pipeline_state,
+		        (closed_at IS NOT NULL)
+		   FROM workitems.items WHERE id = $1`,
+		b,
+	).Scan(&inp.id, &inp.status, &inp.pipelineStage,
+		&inp.implState, &inp.reviewState, &inp.qaState, &inp.pipelineState,
+		&inp.closedAtNotNull); err != nil {
+		t.Fatalf("read final b inputs: %v", err)
+	}
+	var hasReview, hasInvestigation int
+	if err := db.QueryRow(ctx,
+		`SELECT
+		        max(CASE WHEN kind = 'review'        THEN 1 ELSE 0 END),
+		        max(CASE WHEN kind = 'investigation' THEN 1 ELSE 0 END)
+		   FROM workitems.comments WHERE item_id = $1`,
+		b,
+	).Scan(&hasReview, &hasInvestigation); err != nil {
+		t.Fatalf("read final b comments: %v", err)
+	}
+	inp.hasReviewComment = hasReview > 0
+	inp.hasInvestigationComment = hasInvestigation > 0
+	expected := derivePipelineStage(&inp)
+
+	finalStage := readPipelineStageInternal(t, ctx, b)
+	if finalStage != expected {
+		t.Fatalf("LWW race: b.pipeline_stage = %q, want %q (re-derived from FINAL committed state). "+
+			"derivation inputs: status=%q impl_state=%q review_state=%q qa_state=%q pipeline_state=%q closed_at_not_null=%v has_review=%v has_investigation=%v",
+			finalStage, expected,
+			inp.status, inp.implState, inp.reviewState, inp.qaState, inp.pipelineState,
+			inp.closedAtNotNull, inp.hasReviewComment, inp.hasInvestigationComment)
+	}
+	if finalStage != "Quality" {
+		t.Fatalf("b.pipeline_stage = %q, want %q (rule 7 — review_state=approved, qa_state=pending)", finalStage, "Quality")
+	}
+
+	// Also assert c's pipeline_stage matches its own re-derivation —
+	// c is in the overlap closure too and its lock window is the
+	// same as b's. c has no review/investigation comments and
+	// default state columns, so rule 12 → "Investigation".
+	cStage := readPipelineStageInternal(t, ctx, c)
+	if cStage != "Investigation" {
+		t.Fatalf("c.pipeline_stage = %q, want %q (rule 12 — pending impl, no investigation comment)", cStage, "Investigation")
 	}
 }
