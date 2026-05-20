@@ -378,8 +378,20 @@ func recomputePipelineStageForAffected(ctx context.Context, affected []string, o
 	// Open the short transaction that frames the items SELECT, the
 	// comments SELECT, and the per-item UPDATE pass. See the function
 	// doc comment for the LWW-race rationale (unblock-tv8.51).
+	//
+	// Tx-lifecycle rlog (unblock-tv8.51 review hardening): log
+	// Begin/Commit failures locally for finer-grained ops visibility.
+	// The caller (handleCascadeRequested) also wraps the returned
+	// error with rlog.Error, but the local log carries the tx_phase
+	// field so ops dashboards can split begin-vs-commit failure rates
+	// (commit failures usually indicate row-lock contention or
+	// serialisation conflicts, begin failures indicate pool starvation
+	// or connection issues — different remediation paths).
 	tx, err := db.Begin(ctx)
 	if err != nil {
+		rlog.Error("deps: cascade pipeline_stage tx failed",
+			"err", err, "event_id", eventID,
+			"org_id", orgID, "tx_phase", "begin")
 		return fmt.Errorf("pipeline_stage tx begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
@@ -527,6 +539,9 @@ func recomputePipelineStageForAffected(ctx context.Context, affected []string, o
 	}
 
 	if err := tx.Commit(); err != nil {
+		rlog.Error("deps: cascade pipeline_stage tx failed",
+			"err", err, "event_id", eventID,
+			"org_id", orgID, "tx_phase", "commit")
 		return fmt.Errorf("pipeline_stage tx commit: %w", err)
 	}
 	return nil
