@@ -160,7 +160,7 @@ func handleCascadeRequested(ctx context.Context, msg *CascadeRequested) error {
 	//    tenant-gated (unblock-tv8.50) — symmetric defence-in-depth so a
 	//    tampered `affected` set (e.g. a tenant-bypassing id injected
 	//    between BFS and derivation read) cannot pull another org's row.
-	if err := recomputePipelineStageForAffected(ctx, affected, msg.OrgID, msg.ProjectID); err != nil {
+	if err := recomputePipelineStageForAffected(ctx, affected, msg.OrgID, msg.ProjectID, msg.EventID); err != nil {
 		rlog.Error("deps: cascade subscriber pipeline_stage recompute failed",
 			"err", err, "reason", msg.Reason,
 			"event_id", msg.EventID, "triggered_by", msg.TriggeredByItemID)
@@ -331,7 +331,7 @@ type itemDerivationInputs struct {
 // The is_ready column is NEVER written here. The lint analyzer
 // (apps/api/shared/lint/no_direct_is_ready_write.go) enforces that
 // every UPDATE in this file targets pipeline_stage only.
-func recomputePipelineStageForAffected(ctx context.Context, affected []string, orgID, projectID string) error {
+func recomputePipelineStageForAffected(ctx context.Context, affected []string, orgID, projectID, eventID string) error {
 	if len(affected) == 0 {
 		return nil
 	}
@@ -436,7 +436,7 @@ func recomputePipelineStageForAffected(ctx context.Context, affected []string, o
 		// repeats the org_id / project_id predicate so a write cannot
 		// escape the publisher's tenant even if the rowMap lookup
 		// above were ever defeated by a future refactor.
-		if _, err := db.Exec(ctx,
+		res, err := db.Exec(ctx,
 			`UPDATE workitems.items
 			    SET pipeline_stage = $2
 			  WHERE id = $1
@@ -444,8 +444,28 @@ func recomputePipelineStageForAffected(ctx context.Context, affected []string, o
 			    AND org_id = $3
 			    AND ($4 = '' OR project_id = $4)`,
 			id, newStage, orgID, projectID,
-		); err != nil {
+		)
+		if err != nil {
 			return fmt.Errorf("pipeline_stage update %s: %w", id, err)
+		}
+		// Defence-in-depth surfacing (unblock-tv8.50): the rowMap entry
+		// existed (passed the `!ok` guard above) and the in-memory
+		// derivation produced a stage that differs from the row's
+		// current value (passed the `newStage == inp.pipelineStage`
+		// guard above). The only way the tenant-gated UPDATE can write
+		// zero rows is if the row's org_id / project_id disagree with
+		// the publisher's claim — i.e. a future bypass-caller fed this
+		// function a mismatched (orgID, projectID) against an item that
+		// the BFS tenant predicate would also have dropped. Warn so the
+		// regression is visible instead of silently skipped.
+		if res.RowsAffected() == 0 {
+			rlog.Warn(
+				"pipeline_stage UPDATE no-op on tenant-mismatched item — possible cross-tenant publisher regression",
+				"item_id", id,
+				"org_id", orgID,
+				"project_id", projectID,
+				"event_id", eventID,
+			)
 		}
 	}
 	return nil

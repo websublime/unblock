@@ -594,20 +594,43 @@ func TestHandleCascadeRequested_BFS_TenantMismatch(t *testing.T) {
 	}
 
 	// Audit row exists, kind = 'close', affected_item_ids is empty.
-	var kind string
-	var affected []string
+	// Lock the "audit captures REQUESTED, not REACHABLE" contract
+	// (cascade_subscriber.go:415-427 invariant + bfsForwardBlocksClosure
+	// doc comment): the audit row's org_id MUST be the publisher's
+	// claim (beta.OrgID), NOT the seed item's actual org_id (alpha.OrgID).
+	type auditRow struct {
+		kind      string
+		orgID     string
+		projectID string
+		affected  []string
+	}
+	var got auditRow
 	if err := db.QueryRow(ctx,
-		`SELECT kind, affected_item_ids FROM deps.cascade_events
+		`SELECT kind, org_id, project_id, affected_item_ids
+		   FROM deps.cascade_events
 		  WHERE event_id = $1 AND triggered_by_item_id = $2`,
 		eventID, seed,
-	).Scan(&kind, &affected); err != nil {
+	).Scan(&got.kind, &got.orgID, &got.projectID, &got.affected); err != nil {
 		t.Fatalf("read cascade_events: %v", err)
 	}
-	if kind != "close" {
-		t.Fatalf("kind = %q, want %q (audit captures what was requested)", kind, "close")
+	if got.kind != "close" {
+		t.Fatalf("kind = %q, want %q (audit captures what was requested)", got.kind, "close")
 	}
-	if len(affected) != 0 {
-		t.Fatalf("affected_item_ids non-empty under tenant mismatch: %v", affected)
+	if len(got.affected) != 0 {
+		t.Fatalf("affected_item_ids non-empty under tenant mismatch: %v", got.affected)
+	}
+	// Audit org_id must equal publisher's claim (beta), not seed's
+	// actual tenant (alpha). This is the locked contract: the audit
+	// captures REQUESTED, not REACHABLE — the publisher's claim
+	// remains visible in the audit even when the BFS walk yields
+	// nothing because the seed lives in a different tenant.
+	if got.orgID != beta.OrgID {
+		t.Fatalf("audit org_id = %q, want publisher's claim %q (NOT seed's actual org %q) — audit must capture REQUESTED, not REACHABLE",
+			got.orgID, beta.OrgID, alpha.OrgID)
+	}
+	if got.orgID == alpha.OrgID {
+		t.Fatalf("audit org_id leaked seed's actual tenant %q — contract violated, audit must reflect publisher's claim %q",
+			alpha.OrgID, beta.OrgID)
 	}
 
 	// Seed's pipeline_stage must be unchanged — the subscriber's
