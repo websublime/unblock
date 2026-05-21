@@ -204,10 +204,13 @@ func handleCascadeRequested(ctx context.Context, msg *CascadeRequested) error {
 // the seed because its callers (Closure RPC) want neighbours-only;
 // the cascade pass wants both.
 //
-// On depth overflow (cap hit at row 257+), the CTE silently truncates
-// — Postgres's `WHERE r.depth < $N` terminates the recursion at the
-// declared cap. The subscriber emits a Warn on truncation and proceeds
-// with the bounded prefix (the cap is locked at 256 per RP01-3).
+// On depth overflow (depth 256+ would be reached), the CTE silently
+// truncates — Postgres's `WHERE r.depth < $N` terminates the recursion
+// at the declared cap. The subscriber emits a Warn on truncation and
+// proceeds with the bounded prefix (the cap is locked at 256 per
+// RP01-3). The warning predicate compares the observed MAX(depth) from
+// the recursive CTE against cascadeBFSMaxDepth-1 — NOT len(out), which
+// conflates closure SIZE with closure DEPTH (unblock-tv8.49).
 //
 // Tenant predicate (unblock-tv8.50 / defence-in-depth): both the
 // anchor and the recursive step JOIN workitems.items and gate on
@@ -238,9 +241,18 @@ func handleCascadeRequested(ctx context.Context, msg *CascadeRequested) error {
 // not what was REACHABLE. This is intentional: the publisher's claim
 // must remain visible in the audit even when the walk yields nothing.
 func bfsForwardBlocksClosure(ctx context.Context, seedID, orgID, projectID string) ([]string, error) {
-	// Read up to cascadeBFSMaxDepth+1 rows so we can detect cap hits
-	// — when the result count exceeds the cap, we know the walk
-	// terminated on depth rather than exhaustion of the graph.
+	// The recursive CTE is referenced by two top-level SELECTs so the
+	// depth-cap diagnostic compares the actual MAX(depth) observed in
+	// the walk against the cap — NOT len(out), which conflates closure
+	// SIZE with closure DEPTH (a wide-but-shallow graph would otherwise
+	// emit a false 'BFS hit depth cap' warning per unblock-tv8.49).
+	//
+	// The first SELECT returns the DISTINCT id list (unchanged contract
+	// — public signature still returns []string and the audit row's
+	// affected_item_ids depends on it). The second SELECT extracts the
+	// scalar MAX(depth); COALESCE(max(depth), -1) maps an empty reachable
+	// set (e.g. tenant mismatch — see header comment) to a sentinel that
+	// the warning predicate treats as 'no overflow'.
 	rows, err := db.Query(ctx,
 		`WITH RECURSIVE reachable(id, depth) AS (
 		         SELECT i.id, 0
@@ -278,11 +290,64 @@ func bfsForwardBlocksClosure(ctx context.Context, seedID, orgID, projectID strin
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("bfs iter: %w", err)
 	}
-	if len(out) >= cascadeBFSMaxDepth {
+
+	// Second round-trip: extract MAX(depth) from the same recursive
+	// definition. This is bounded by AR-8 (cascadeBFSMaxDepth=256) so
+	// the extra trip is negligible vs Law 7's < 2s envelope (see
+	// DECISION on unblock-tv8.49). COALESCE → -1 when reachable is
+	// empty (tenant mismatch or seed absent) so the scanner never
+	// faces a NULL.
+	var maxDepth int
+	if err := db.QueryRow(ctx,
+		`WITH RECURSIVE reachable(id, depth) AS (
+		         SELECT i.id, 0
+		           FROM workitems.items i
+		          WHERE i.id = $1
+		            AND i.org_id = $3
+		            AND ($4 = '' OR i.project_id = $4)
+		         UNION ALL
+		         SELECT d.to_item, r.depth + 1
+		           FROM deps.dependencies d
+		           JOIN reachable r ON d.from_item = r.id
+		           JOIN workitems.items i ON i.id = d.to_item
+		          WHERE d.kind = 'blocks'
+		            AND r.depth < $2
+		            AND i.org_id = $3
+		            AND ($4 = '' OR i.project_id = $4)
+		       )
+		       SELECT COALESCE(MAX(depth), -1) FROM reachable`,
+		seedID, cascadeBFSMaxDepth, orgID, projectID,
+	).Scan(&maxDepth); err != nil {
+		return nil, fmt.Errorf("bfs max-depth: %w", err)
+	}
+
+	if shouldEmitDepthCapWarning(maxDepth) {
 		rlog.Warn("deps: cascade BFS hit depth cap",
-			"seed", seedID, "cap", cascadeBFSMaxDepth, "collected", len(out))
+			"seed", seedID, "cap", cascadeBFSMaxDepth,
+			"max_depth", maxDepth, "collected", len(out))
 	}
 	return out, nil
+}
+
+// shouldEmitDepthCapWarning returns true when the observed maximum
+// depth from bfsForwardBlocksClosure's recursive CTE indicates the
+// walk terminated on the AR-8 depth cap rather than on graph
+// exhaustion.
+//
+// CTE invariant: `WHERE r.depth < cascadeBFSMaxDepth` admits depth
+// values 0..(cascadeBFSMaxDepth-1). When the cap fires, the highest
+// depth collected in `reachable` is exactly cascadeBFSMaxDepth-1
+// (=255). Strictly lower observed depths mean the recursion ran out
+// of edges before hitting the cap.
+//
+// Sentinel: -1 (from COALESCE(max(depth), -1) on an empty reachable
+// set — e.g. tenant mismatch on the anchor SELECT) is treated as
+// 'no overflow', matching the case where the BFS returns no rows.
+//
+// Pure function — extracted for unit testability (the rlog warning
+// itself has no test-capture harness). See unblock-tv8.49.
+func shouldEmitDepthCapWarning(maxDepth int) bool {
+	return maxDepth >= cascadeBFSMaxDepth-1
 }
 
 // itemDerivationInputs captures the fields the §5.7.1 derivation table
