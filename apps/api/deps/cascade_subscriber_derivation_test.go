@@ -31,14 +31,17 @@
 // org/user/project per top-level test) but each rule case mints a new
 // item id.
 //
-// Encore test runtime caveat: SetStateColumns currently has zero
-// publishes to CascadeRequestedTopic (tracked by unblock-tv8.53). The
-// state_change Reason can only enter the subscriber via Claim's I-3
-// reset path today. To decouple these tests from publisher status
-// (and from tv8.53's eventual fix), we invoke the handler DIRECTLY
-// for all four Reasons. The subscriber body is identical across
-// Reasons — only the audit row's kind discriminator differs — so the
-// derivation coverage holds for every Reason equivalently.
+// Encore test runtime caveat: SetStateColumns now publishes
+// state_change for (impl, review, qa) material changes per
+// SPEC §6.3.0 tension #3 (shipped on unblock-tv8.53). The
+// state_change Reason can therefore enter the subscriber via
+// SetStateColumns or via Claim's I-3 reset path. To decouple these
+// tests from publisher state and from the Encore test runtime's
+// non-firing-subscribers caveat, we still invoke the subscriber
+// handler DIRECTLY for all four Reasons. The subscriber body is
+// identical across Reasons — only the audit row's kind discriminator
+// differs — so the derivation coverage holds for every Reason
+// equivalently.
 //
 // Per the bead's DECISION comment: this is NOT a workaround, it is
 // the canonical test pattern under the Encore test runtime (cf.

@@ -83,13 +83,22 @@ type itemRow struct {
 }
 
 // stateRow is the lightweight projection used by SetStateColumns to
-// pull just the columns required for invariant validation.
+// pull just the columns required for invariant validation AND the
+// scope fields (OrgID, ProjectID) consumed by the post-commit
+// state_change cascade publish per SPEC §6.3.0 (Regime B). The scope
+// fields are projected unconditionally so the predicate logic stays
+// uniform across publishing and non-publishing branches; only the
+// publishing branch reads them. Mirrors the FOR UPDATE projection
+// pattern used in Close (workitems.go:1287-1296) and Claim
+// (workitems.go:1431-1438).
 type stateRow struct {
 	Impl      string
 	Review    string
 	QA        string
 	Pipeline  string
 	ClaimedBy *string
+	OrgID     string
+	ProjectID string
 }
 
 // scanItemRow is the canonical scanner for the itemColumnList projection
