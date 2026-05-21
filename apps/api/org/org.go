@@ -44,46 +44,46 @@ import (
 
 // Organization is the canonical org row shape. SPEC §4.2.
 type Organization struct {
-	ID   string // ULID
-	Name string
-	Slug string
+	ID   string `json:"id"` // ULID
+	Name string `json:"name"`
+	Slug string `json:"slug"`
 }
 
 // Project is the canonical project row shape. SPEC §4.2.
 type Project struct {
-	ID    string // ULID
-	OrgID string // ULID
-	Name  string
-	Slug  string
+	ID    string `json:"id"`     // ULID
+	OrgID string `json:"org_id"` // ULID
+	Name  string `json:"name"`
+	Slug  string `json:"slug"`
 }
 
 // CreateOrganizationRequest is the input to CreateOrganization. SPEC §4.2.
 type CreateOrganizationRequest struct {
-	Name string
-	Slug string
+	Name string `json:"name"`
+	Slug string `json:"slug"`
 }
 
 // CreateProjectRequest is the input to CreateProject. SPEC §4.2.
 type CreateProjectRequest struct {
-	OrgID string
-	Name  string
-	Slug  string
+	OrgID string `json:"org_id"`
+	Name  string `json:"name"`
+	Slug  string `json:"slug"`
 }
 
 // AddMemberRequest is the input to AddMember. SPEC §4.2.
 type AddMemberRequest struct {
-	OrgID  string
-	UserID string
-	Role   string // "owner" | "admin" | "member" | "viewer"
+	OrgID  string `json:"org_id"`
+	UserID string `json:"user_id"`
+	Role   string `json:"role"` // "owner" | "admin" | "member" | "viewer"
 }
 
 // AuthorizeRequest is the input to Authorize. SPEC §4.2.
 type AuthorizeRequest struct {
-	Identity  auth.Identity
-	Resource  string // see resource* consts below
-	Action    string // "read" | "write" | "delete"
-	OrgID     string
-	ProjectID string // optional
+	Identity  auth.Identity `json:"identity"`
+	Resource  string        `json:"resource"` // see resource* consts below
+	Action    string        `json:"action"`   // "read" | "write" | "delete"
+	OrgID     string        `json:"org_id"`
+	ProjectID string        `json:"project_id"` // optional
 }
 
 // -----------------------------------------------------------------------------
@@ -411,14 +411,14 @@ func GetProject(ctx context.Context, id string) (*Project, error) {
 // targets with a scan error. Mirror auth.go's time.Time usage for the
 // same column type.
 type projectRow struct {
-	ID          string
-	OrgID       string
-	Slug        string
-	Name        string
-	Description *string
-	ArchivedAt  *time.Time
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	ID          string     `json:"id"`
+	OrgID       string     `json:"org_id"`
+	Slug        string     `json:"slug"`
+	Name        string     `json:"name"`
+	Description *string    `json:"description"`
+	ArchivedAt  *time.Time `json:"archived_at"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
 }
 
 // AddMember inserts an org.members row. Role is validated client-side

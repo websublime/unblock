@@ -54,16 +54,16 @@ type CascadeRequested struct {
 	// EventID is a ULID minted by the publisher. The subscriber
 	// uses (EventID, TriggeredByItemID) as the idempotency key
 	// (UNIQUE constraint on deps.cascade_events).
-	EventID string
+	EventID string `json:"event_id"`
 
 	// OrgID, ProjectID scope the cascade to the org-tenant that
 	// triggered it.
-	OrgID     string
-	ProjectID string
+	OrgID     string `json:"org_id"`
+	ProjectID string `json:"project_id"`
 
 	// TriggeredByItemID is the item whose change initiated the
 	// cascade (e.g. the item being closed in workitems.Close).
-	TriggeredByItemID string
+	TriggeredByItemID string `json:"triggered_by_item_id"`
 
 	// Reason categorises the trigger. Allowed: "close" |
 	// "edge_added" | "edge_removed" | "state_change".
@@ -92,7 +92,7 @@ type CascadeRequested struct {
 	// shared/lint/no_direct_is_ready_write with a scope-tightened
 	// allow-list (encore.app/deps writes is_ready inline; subscriber
 	// in the same package writes pipeline_stage only).
-	Reason string
+	Reason string `json:"reason"`
 
 	// TraceID is the ULID minted by the mcp raw endpoint
 	// (§10.2 Option B). The publisher copies it from
@@ -107,13 +107,13 @@ type CascadeRequested struct {
 	// publish cascades — e.g. an admin script — without an
 	// originating MCP request; the subscriber tolerates a
 	// missing trace id by writing NULL to the column).
-	TraceID string
+	TraceID string `json:"trace_id"`
 
 	// EmittedAt is the publisher's wall clock at publish time.
 	// Distinct from Encore Pub/Sub's own delivery timestamps so
 	// the audit row can record "when did the cascade start in
 	// the publisher's view".
-	EmittedAt time.Time
+	EmittedAt time.Time `json:"emitted_at"`
 }
 
 // CascadeCompleted is the Pub/Sub payload published by the cascade
@@ -130,24 +130,24 @@ type CascadeRequested struct {
 type CascadeCompleted struct {
 	// EventID matches the EventID of the CascadeRequested that
 	// triggered this completion.
-	EventID string
+	EventID string `json:"event_id"`
 
 	// TriggeredByItemID matches the originating
 	// CascadeRequested.TriggeredByItemID.
-	TriggeredByItemID string
+	TriggeredByItemID string `json:"triggered_by_item_id"`
 
 	// AffectedItemIDs is the closure of items whose is_ready /
 	// pipeline_stage was recomputed by this pass. May be empty
 	// if no readiness flip occurred (the subscriber still emits
 	// CascadeCompleted for the audit-trail completeness).
-	AffectedItemIDs []string
+	AffectedItemIDs []string `json:"affected_item_ids"`
 
 	// CascadedCount is len(AffectedItemIDs); duplicated on the
 	// wire so simple consumers don't have to walk the slice.
-	CascadedCount int
+	CascadedCount int `json:"cascaded_count"`
 
 	// CompletedAt is the subscriber's wall clock at commit time.
-	CompletedAt time.Time
+	CompletedAt time.Time `json:"completed_at"`
 }
 
 // CascadeRequestedTopic is the Pub/Sub topic carrying

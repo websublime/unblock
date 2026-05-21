@@ -254,6 +254,7 @@ cargo doc --no-deps --workspace  # zero warnings
 - All public APIs declared with `//encore:api` (typed) — raw endpoints reserved for the 3 documented public ingress points
 - Per-service `//encore:middleware` for tenant filtering (inject `WHERE org_id = ?` automatically)
 - `//encore:authhandler` reads session, sets `auth.UserID()` + `auth.Data()` (org_id claim)
+- JSON wire convention (SPEC §3.6): every exported field of every Go struct in `apps/api/` that may transit JSON (Encore `//encore:api` request/response, Pub/Sub payloads, MCP tool I/O, error envelopes, internal helper types that may be marshalled) MUST declare an explicit `json:"snake_case_name"` tag. Go's default PascalCase wire serialisation is forbidden. Exception: third-party HTTP unmarshal structs may mirror the third-party wire format (see `apps/api/auth/oauth.go` `githubUserResponse` / `githubAccessTokenResponse`). MCP SDK / JSON-RPC protocol fields (`jsonrpc`, `protocolVersion`, `structuredContent`, `isError`) follow the MCP 2025-06-18 spec verbatim. Quality gate: `grep -rnE 'json:"[A-Z]' apps/api/` must return zero matches.
 
 ### TypeScript (Astro frontend)
 

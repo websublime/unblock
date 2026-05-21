@@ -96,118 +96,118 @@ import (
 
 // Item is the canonical work-item row shape. SPEC §4.4.
 type Item struct {
-	ID                  string
-	OrgID               string
-	ProjectID           string
-	MilestoneID         string
-	ParentID            string
-	DiscoveredFromID    string
-	Type                string
-	Title               string
-	Body                string
-	Status              string
-	Priority            string
-	PipelineStage       string
-	AgentKind           string
-	ImplState           string
-	ReviewState         string
-	QAState             string
-	PipelineState       string
-	Severity            string
-	KindOfFinding       string
-	ClaimedByID         string
-	ClaimedByAgent      string
-	ClaimedAt           *time.Time
-	IsReady             bool
-	MilestoneAssignedAt *time.Time
-	MilestoneAssignedBy string
-	Labels              []string
-	CreatedAt           time.Time
-	UpdatedAt           time.Time
-	ClosedAt            *time.Time
+	ID                  string     `json:"id"`
+	OrgID               string     `json:"org_id"`
+	ProjectID           string     `json:"project_id"`
+	MilestoneID         string     `json:"milestone_id"`
+	ParentID            string     `json:"parent_id"`
+	DiscoveredFromID    string     `json:"discovered_from_id"`
+	Type                string     `json:"type"`
+	Title               string     `json:"title"`
+	Body                string     `json:"body"`
+	Status              string     `json:"status"`
+	Priority            string     `json:"priority"`
+	PipelineStage       string     `json:"pipeline_stage"`
+	AgentKind           string     `json:"agent_kind"`
+	ImplState           string     `json:"impl_state"`
+	ReviewState         string     `json:"review_state"`
+	QAState             string     `json:"qa_state"`
+	PipelineState       string     `json:"pipeline_state"`
+	Severity            string     `json:"severity"`
+	KindOfFinding       string     `json:"kind_of_finding"`
+	ClaimedByID         string     `json:"claimed_by_id"`
+	ClaimedByAgent      string     `json:"claimed_by_agent"`
+	ClaimedAt           *time.Time `json:"claimed_at"`
+	IsReady             bool       `json:"is_ready"`
+	MilestoneAssignedAt *time.Time `json:"milestone_assigned_at"`
+	MilestoneAssignedBy string     `json:"milestone_assigned_by"`
+	Labels              []string   `json:"labels"`
+	CreatedAt           time.Time  `json:"created_at"`
+	UpdatedAt           time.Time  `json:"updated_at"`
+	ClosedAt            *time.Time `json:"closed_at"`
 }
 
 // CreateRequest is the input to Create. SPEC §4.4.
 type CreateRequest struct {
-	OrgID            string
-	ProjectID        string
-	ParentID         string
-	DiscoveredFromID string
-	Type             string
-	Title            string
-	Body             string
-	Priority         string
-	MilestoneID      string
-	Labels           []string
-	Dependencies     []deps.Edge
-	Severity         string
-	KindOfFinding    string
+	OrgID            string      `json:"org_id"`
+	ProjectID        string      `json:"project_id"`
+	ParentID         string      `json:"parent_id"`
+	DiscoveredFromID string      `json:"discovered_from_id"`
+	Type             string      `json:"type"`
+	Title            string      `json:"title"`
+	Body             string      `json:"body"`
+	Priority         string      `json:"priority"`
+	MilestoneID      string      `json:"milestone_id"`
+	Labels           []string    `json:"labels"`
+	Dependencies     []deps.Edge `json:"dependencies"`
+	Severity         string      `json:"severity"`
+	KindOfFinding    string      `json:"kind_of_finding"`
 }
 
 // Comment is the canonical comment row shape. SPEC §4.4.
 type Comment struct {
-	ID          string
-	ItemID      string
-	ParentID    string
-	AuthorID    string
-	AuthorAgent string
-	Kind        string
-	Status      string
-	Body        string
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	ID          string    `json:"id"`
+	ItemID      string    `json:"item_id"`
+	ParentID    string    `json:"parent_id"`
+	AuthorID    string    `json:"author_id"`
+	AuthorAgent string    `json:"author_agent"`
+	Kind        string    `json:"kind"`
+	Status      string    `json:"status"`
+	Body        string    `json:"body"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 // UpdateRequest is the input to Update. SPEC §4.4.
 type UpdateRequest struct {
-	ItemID      string
-	Title       *string
-	Body        *string
-	Priority    *string
-	MilestoneID *string
-	Labels      *[]string
+	ItemID      string    `json:"item_id"`
+	Title       *string   `json:"title"`
+	Body        *string   `json:"body"`
+	Priority    *string   `json:"priority"`
+	MilestoneID *string   `json:"milestone_id"`
+	Labels      *[]string `json:"labels"`
 }
 
 // GetTrailRequest is the input to GetTrail. SPEC §4.4.
 type GetTrailRequest struct {
-	ItemID string
+	ItemID string `json:"item_id"`
 }
 
 // Trail is the comment + edges + findings bundle returned by GetTrail.
 // SPEC §4.4. DependenciesIn / DependenciesOut use deps.Edge (post C-1
 // reconciliation, bead unblock-tv8.10).
 type Trail struct {
-	Item            *Item
-	Comments        []Comment
-	DependenciesIn  []deps.Edge
-	DependenciesOut []deps.Edge
-	Findings        []Item
+	Item            *Item       `json:"item"`
+	Comments        []Comment   `json:"comments"`
+	DependenciesIn  []deps.Edge `json:"dependencies_in"`
+	DependenciesOut []deps.Edge `json:"dependencies_out"`
+	Findings        []Item      `json:"findings"`
 }
 
 // AppendCommentRequest is the input to AppendComment. SPEC §4.4.
 type AppendCommentRequest struct {
-	ItemID      string
-	AuthorID    string
-	AuthorAgent string
-	ParentID    string
-	Kind        string
-	Status      string
-	Body        string
+	ItemID      string `json:"item_id"`
+	AuthorID    string `json:"author_id"`
+	AuthorAgent string `json:"author_agent"`
+	ParentID    string `json:"parent_id"`
+	Kind        string `json:"kind"`
+	Status      string `json:"status"`
+	Body        string `json:"body"`
 }
 
 // SetStateRequest is the input to SetStateColumns. SPEC §4.4.
 type SetStateRequest struct {
-	ItemID        string
-	ImplState     *string
-	ReviewState   *string
-	QAState       *string
-	PipelineState *string
+	ItemID        string  `json:"item_id"`
+	ImplState     *string `json:"impl_state"`
+	ReviewState   *string `json:"review_state"`
+	QAState       *string `json:"qa_state"`
+	PipelineState *string `json:"pipeline_state"`
 }
 
 // GetStateRequest is the input to GetState. SPEC §6.2 Tool 14 line
 // 1730-1733.
 type GetStateRequest struct {
-	ItemID string
+	ItemID string `json:"item_id"`
 }
 
 // RecentKindRow is a single (kind, status, comment_id, created_at) tuple
@@ -216,10 +216,10 @@ type GetStateRequest struct {
 // carrying the most recent (status, comment_id, created_at) for that
 // kind. Ordered by `kind` ASC for deterministic wire output.
 type RecentKindRow struct {
-	Kind      string
-	Status    string
-	CommentID string
-	CreatedAt time.Time
+	Kind      string    `json:"kind"`
+	Status    string    `json:"status"`
+	CommentID string    `json:"comment_id"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // GetStateResponse is the output of GetState. SPEC §6.2 Tool 14 lines
@@ -236,48 +236,48 @@ type RecentKindRow struct {
 // top-level `project_id` field on the §6.2 Tool 14 wire envelope (the
 // state surface is contextually scoped to a project).
 type GetStateResponse struct {
-	ProjectID     string
-	ImplState     string
-	ReviewState   string
-	QAState       string
-	PipelineState string
-	PipelineStage string
-	IsReady       bool
-	ClaimedByID   string
-	ClaimedAt     *time.Time
-	RecentKinds   []RecentKindRow
+	ProjectID     string          `json:"project_id"`
+	ImplState     string          `json:"impl_state"`
+	ReviewState   string          `json:"review_state"`
+	QAState       string          `json:"qa_state"`
+	PipelineState string          `json:"pipeline_state"`
+	PipelineStage string          `json:"pipeline_stage"`
+	IsReady       bool            `json:"is_ready"`
+	ClaimedByID   string          `json:"claimed_by_id"`
+	ClaimedAt     *time.Time      `json:"claimed_at"`
+	RecentKinds   []RecentKindRow `json:"recent_kinds"`
 }
 
 // CloseRequest is the input to Close. SPEC §4.4.
 type CloseRequest struct {
-	ItemID string
-	Reason string
+	ItemID string `json:"item_id"`
+	Reason string `json:"reason"`
 }
 
 // ClaimRequest is the input to Claim. SPEC §4.4.
 type ClaimRequest struct {
-	ItemID        string
-	ClaimerUserID string
-	ClaimerAgent  string
+	ItemID        string `json:"item_id"`
+	ClaimerUserID string `json:"claimer_user_id"`
+	ClaimerAgent  string `json:"claimer_agent"`
 }
 
 // ListRequest is the input to List. SPEC §4.4.
 type ListRequest struct {
-	OrgID         string
-	ProjectID     string
-	MilestoneID   string
-	Status        []string
-	PipelineStage []string
-	ClaimedBy     string
-	Labels        []string
-	Limit         int
-	Cursor        string
+	OrgID         string   `json:"org_id"`
+	ProjectID     string   `json:"project_id"`
+	MilestoneID   string   `json:"milestone_id"`
+	Status        []string `json:"status"`
+	PipelineStage []string `json:"pipeline_stage"`
+	ClaimedBy     string   `json:"claimed_by"`
+	Labels        []string `json:"labels"`
+	Limit         int      `json:"limit"`
+	Cursor        string   `json:"cursor"`
 }
 
 // ListResponse is the output of List. SPEC §4.4.
 type ListResponse struct {
-	Items      []Item
-	NextCursor string
+	Items      []Item `json:"items"`
+	NextCursor string `json:"next_cursor"`
 }
 
 // ReadyRequest is the input to Ready. SPEC §6.2 Tool 2 (lines 1177-1206)
@@ -304,17 +304,17 @@ type ReadyRequest struct {
 	// The rework S1 removed the field so confused-deputy callers
 	// cannot pass a mismatched org_id; the org gate is the
 	// authenticated identity, period.
-	ProjectID   string
-	Limit       int
-	PriorityMin string
+	ProjectID   string `json:"project_id"`
+	Limit       int    `json:"limit"`
+	PriorityMin string `json:"priority_min"`
 
 	// Cursor anchor (§6.2.0 keyset tuple for Tool 2). When CursorID
 	// is non-empty, Ready emits rows STRICTLY AFTER
 	// (CursorPriority, CursorCreatedAt, CursorID) on the canonical
 	// (priority ASC, created_at ASC, id ASC) order.
-	CursorPriority  string
-	CursorCreatedAt time.Time
-	CursorID        string
+	CursorPriority  string    `json:"cursor_priority"`
+	CursorCreatedAt time.Time `json:"cursor_created_at"`
+	CursorID        string    `json:"cursor_id"`
 }
 
 // ReadyResponse is the output of Ready. SPEC §6.2 Tool 2 + §6.2.0.
@@ -327,12 +327,12 @@ type ReadyRequest struct {
 // the triple into the opaque §6.2.0 cursor token (or null) before
 // surfacing on the wire.
 type ReadyResponse struct {
-	Items      []Item
-	TotalReady int
+	Items      []Item `json:"items"`
+	TotalReady int    `json:"total_ready"`
 
-	NextCursorPriority  string
-	NextCursorCreatedAt time.Time
-	NextCursorID        string
+	NextCursorPriority  string    `json:"next_cursor_priority"`
+	NextCursorCreatedAt time.Time `json:"next_cursor_created_at"`
+	NextCursorID        string    `json:"next_cursor_id"`
 }
 
 // SearchRequest is the input to Search. SPEC §4.4 (round-8: typed
@@ -340,10 +340,10 @@ type ReadyResponse struct {
 // satisfied without an opaque blob in the RPC layer — the MCP layer
 // owns the opaque envelope; here we carry the decoded tuple).
 type SearchRequest struct {
-	OrgID     string
-	ProjectID string
-	Query     string
-	Limit     int
+	OrgID     string `json:"org_id"`
+	ProjectID string `json:"project_id"`
+	Query     string `json:"query"`
+	Limit     int    `json:"limit"`
 
 	// CursorRank / CursorItemID / CursorCommentID are populated together
 	// by the MCP cursor decoder when paginating; all three zero values
@@ -352,95 +352,95 @@ type SearchRequest struct {
 	// §6.2 Tool 9 lines 1449-1452. Mirrors the Ready RPC pattern at the
 	// top of this file; the spec §4.4 SearchRequest type was extended
 	// in round-8 to align with the §6.2.0 cursor contract.
-	CursorRank      float64
-	CursorItemID    string
-	CursorCommentID string
+	CursorRank      float64 `json:"cursor_rank"`
+	CursorItemID    string  `json:"cursor_item_id"`
+	CursorCommentID string  `json:"cursor_comment_id"`
 }
 
 // SearchHit is one row of a Search response. SPEC §4.4.
 type SearchHit struct {
-	ItemID    string
-	Source    string
-	CommentID string
-	Rank      float64
-	Snippet   string
+	ItemID    string  `json:"item_id"`
+	Source    string  `json:"source"`
+	CommentID string  `json:"comment_id"`
+	Rank      float64 `json:"rank"`
+	Snippet   string  `json:"snippet"`
 }
 
 // SearchResponse is the output of Search. SPEC §4.4 (round-8: typed
 // next-cursor fields). The MCP layer encodes the triple into the
 // opaque §6.2.0 cursor token (or null) before surfacing on the wire.
 type SearchResponse struct {
-	Hits []SearchHit
+	Hits []SearchHit `json:"hits"`
 
 	// NextCursorRank / NextCursorItemID / NextCursorCommentID carry the
 	// keyset anchor of the row that would START the next page on the
 	// canonical FTS sort tuple. All three populated together when more
 	// rows exist; all three zero on end-of-stream. Search over-fetches
 	// LIMIT+1 to detect end-of-stream — same pattern as Ready.
-	NextCursorRank      float64
-	NextCursorItemID    string
-	NextCursorCommentID string
+	NextCursorRank      float64 `json:"next_cursor_rank"`
+	NextCursorItemID    string  `json:"next_cursor_item_id"`
+	NextCursorCommentID string  `json:"next_cursor_comment_id"`
 }
 
 // Milestone is the canonical milestone row shape. SPEC §4.4.1.
 type Milestone struct {
-	ID                string
-	ParentMilestoneID string
-	OrgID             string
-	ProjectID         string
-	Name              string
-	Description       string
-	StartDate         string
-	EndDate           string
-	CancelledAt       *time.Time
-	CancelledReason   string
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
+	ID                string     `json:"id"`
+	ParentMilestoneID string     `json:"parent_milestone_id"`
+	OrgID             string     `json:"org_id"`
+	ProjectID         string     `json:"project_id"`
+	Name              string     `json:"name"`
+	Description       string     `json:"description"`
+	StartDate         string     `json:"start_date"`
+	EndDate           string     `json:"end_date"`
+	CancelledAt       *time.Time `json:"cancelled_at"`
+	CancelledReason   string     `json:"cancelled_reason"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
 }
 
 // CreateMilestoneRequest is the input to CreateMilestone. SPEC §4.4.1.
 type CreateMilestoneRequest struct {
-	OrgID             string
-	ProjectID         string
-	ParentMilestoneID string
-	Name              string
-	Description       string
-	StartDate         string
-	EndDate           string
+	OrgID             string `json:"org_id"`
+	ProjectID         string `json:"project_id"`
+	ParentMilestoneID string `json:"parent_milestone_id"`
+	Name              string `json:"name"`
+	Description       string `json:"description"`
+	StartDate         string `json:"start_date"`
+	EndDate           string `json:"end_date"`
 }
 
 // UpdateMilestoneRequest is the input to UpdateMilestone. SPEC §4.4.1.
 type UpdateMilestoneRequest struct {
-	MilestoneID     string
-	Name            *string
-	Description     *string
-	StartDate       *string
-	EndDate         *string
-	CancelledAt     *time.Time
-	CancelledReason *string
+	MilestoneID     string     `json:"milestone_id"`
+	Name            *string    `json:"name"`
+	Description     *string    `json:"description"`
+	StartDate       *string    `json:"start_date"`
+	EndDate         *string    `json:"end_date"`
+	CancelledAt     *time.Time `json:"cancelled_at"`
+	CancelledReason *string    `json:"cancelled_reason"`
 }
 
 // AssignItemRequest is the input to AssignItem. SPEC §4.4.1.
 type AssignItemRequest struct {
-	ItemID         string
-	MilestoneID    string
-	AssignedByUser string
+	ItemID         string `json:"item_id"`
+	MilestoneID    string `json:"milestone_id"`
+	AssignedByUser string `json:"assigned_by_user"`
 }
 
 // MilestoneTreeRequest is the input to MilestoneTree. SPEC §4.4.1.
 type MilestoneTreeRequest struct {
-	OrgID            string
-	ProjectID        string
-	RootMilestoneID  string
-	IncludeCancelled bool
+	OrgID            string `json:"org_id"`
+	ProjectID        string `json:"project_id"`
+	RootMilestoneID  string `json:"root_milestone_id"`
+	IncludeCancelled bool   `json:"include_cancelled"`
 }
 
 // MilestoneNode is one node in the recursive milestone tree response.
 // SPEC §4.4.1.
 type MilestoneNode struct {
-	Milestone Milestone
-	Depth     int
-	Children  []MilestoneNode
+	Milestone Milestone       `json:"milestone"`
+	Depth     int             `json:"depth"`
+	Children  []MilestoneNode `json:"children"`
 }
 
 // MilestoneTreeResponse is the output of MilestoneTree. SPEC §4.4.1.
@@ -451,7 +451,7 @@ type MilestoneNode struct {
 // Encore serialises by field, not by type name. See DECISION trail on
 // bead unblock-tv8.1.)
 type MilestoneTreeResponse struct {
-	Roots []MilestoneNode
+	Roots []MilestoneNode `json:"roots"`
 }
 
 // -----------------------------------------------------------------------------

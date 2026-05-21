@@ -46,7 +46,7 @@ type AuthParams struct {
 // AuthData is what downstream handlers receive via auth.Data(). Wraps
 // the resolved Identity per SPEC §4.3.3.
 type AuthData struct {
-	Identity Identity
+	Identity Identity `json:"identity"`
 }
 
 // bearerPrefix is the case-sensitive scheme prefix the
