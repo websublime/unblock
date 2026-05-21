@@ -87,8 +87,8 @@ type Identity = types.Identity
 
 // ValidateRequest is the input to Validate. SPEC §4.1.
 type ValidateRequest struct {
-	Token     string // either auth.sessions.id (browser BFF) or raw API key
-	TokenKind string // "session" | "api_key"
+	Token     string `json:"token"`      // either auth.sessions.id (browser BFF) or raw API key
+	TokenKind string `json:"token_kind"` // "session" | "api_key"
 }
 
 // ValidateResponse is the output of Validate. SPEC §4.1.
@@ -105,8 +105,8 @@ type ValidateRequest struct {
 // (SPEC §4.3.2). Pre-prod stance allows additive struct fields
 // per CLAUDE.md.
 type ValidateResponse struct {
-	Identity Identity
-	APIKeyID string
+	Identity Identity `json:"identity"`
+	APIKeyID string   `json:"api_key_id"`
 }
 
 // Validate accepts an opaque token (session id OR raw API key) and resolves
@@ -257,11 +257,11 @@ func touchLastUsedAt(keyID string) {
 
 // ExchangeOAuthCodeRequest is the input to ExchangeOAuthCode. SPEC §4.1.
 type ExchangeOAuthCodeRequest struct {
-	Provider     string // "github" | "gitlab"
-	Code         string
-	PKCEVerifier string
-	UserAgent    string
-	IPAddress    string
+	Provider     string `json:"provider"` // "github" | "gitlab"
+	Code         string `json:"code"`
+	PKCEVerifier string `json:"pkce_verifier"`
+	UserAgent    string `json:"user_agent"`
+	IPAddress    string `json:"ip_address"`
 
 	// PKCEChallenge is the S256 challenge the client originally sent
 	// to /authorize. SPEC §4.1's locked struct does not include it —
@@ -273,14 +273,14 @@ type ExchangeOAuthCodeRequest struct {
 	// not set it fall through to the legacy (verifier-only)
 	// validation pattern documented at the field. See DECISION on
 	// the bead.
-	PKCEChallenge string
+	PKCEChallenge string `json:"pkce_challenge"`
 }
 
 // ExchangeOAuthCodeResponse is the output of ExchangeOAuthCode. SPEC §4.1.
 type ExchangeOAuthCodeResponse struct {
-	SessionID string // ULID; opaque; used as Bearer for private RPCs
-	UserID    string // ULID
-	ExpiresAt time.Time
+	SessionID string    `json:"session_id"` // ULID; opaque; used as Bearer for private RPCs
+	UserID    string    `json:"user_id"`    // ULID
+	ExpiresAt time.Time `json:"expires_at"`
 }
 
 // ExchangeOAuthCode is called by the Astro Action /auth/[provider]/callback
@@ -484,19 +484,19 @@ func splitScopes(raw string) []string {
 
 // IssueAPIKeyRequest is the input to IssueAPIKey. SPEC §4.1.
 type IssueAPIKeyRequest struct {
-	OrgID        string // ULID
-	IssuedToUser string // ULID; nullable (org-level service key)
-	Label        string // human-readable, e.g. "claude-code-laptop"
-	AgentKind    string // AgentKind value
-	Scopes       []string
-	ExpiresAt    *time.Time // nullable; default: never
+	OrgID        string     `json:"org_id"`         // ULID
+	IssuedToUser string     `json:"issued_to_user"` // ULID; nullable (org-level service key)
+	Label        string     `json:"label"`          // human-readable, e.g. "claude-code-laptop"
+	AgentKind    string     `json:"agent_kind"`     // AgentKind value
+	Scopes       []string   `json:"scopes"`
+	ExpiresAt    *time.Time `json:"expires_at"` // nullable; default: never
 }
 
 // IssueAPIKeyResponse is the output of IssueAPIKey. SPEC §4.1.
 type IssueAPIKeyResponse struct {
-	KeyID     string // ULID (mcp.api_keys.id)
-	KeyPrefix string // first 8 chars of the random base32 portion
-	RawKey    string // FULL raw key — returned ONCE; never persisted in clear
+	KeyID     string `json:"key_id"`     // ULID (mcp.api_keys.id)
+	KeyPrefix string `json:"key_prefix"` // first 8 chars of the random base32 portion
+	RawKey    string `json:"raw_key"`    // FULL raw key — returned ONCE; never persisted in clear
 }
 
 // IssueAPIKey creates a new mcp.api_keys row. Called by the seeder CLI
@@ -572,7 +572,7 @@ func IssueAPIKey(ctx context.Context, req *IssueAPIKeyRequest) (*IssueAPIKeyResp
 
 // RevokeAPIKeyRequest is the input to RevokeAPIKey. SPEC §4.1.
 type RevokeAPIKeyRequest struct {
-	KeyID string // ULID
+	KeyID string `json:"key_id"` // ULID
 }
 
 // RevokeAPIKey flips revoked_at; idempotent.

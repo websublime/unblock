@@ -78,8 +78,8 @@ package types
 // any package, including plain `go test` consumers under
 // `apps/api/shared/*`.
 type Identity struct {
-	UserID    string // ULID
-	OrgID     string // ULID — primary org binding for this auth event
-	Role      string // "owner" | "admin" | "member" | "viewer"
-	AgentKind string // empty for human sessions; AgentKind value for API-key callers
+	UserID    string `json:"user_id"`    // ULID
+	OrgID     string `json:"org_id"`     // ULID — primary org binding for this auth event
+	Role      string `json:"role"`       // "owner" | "admin" | "member" | "viewer"
+	AgentKind string `json:"agent_kind"` // empty for human sessions; AgentKind value for API-key callers
 }

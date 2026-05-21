@@ -65,21 +65,21 @@ const recentCascadeEventsLimitCap = 50
 
 // Edge is the canonical dependency edge row shape. SPEC §4.5.
 type Edge struct {
-	ID        string
-	FromItem  string
-	ToItem    string
-	Kind      string // "blocks" | "related"
-	CreatedAt time.Time
-	CreatedBy string
+	ID        string    `json:"id"`
+	FromItem  string    `json:"from_item"`
+	ToItem    string    `json:"to_item"`
+	Kind      string    `json:"kind"` // "blocks" | "related"
+	CreatedAt time.Time `json:"created_at"`
+	CreatedBy string    `json:"created_by"`
 }
 
 // AddEdgeRequest is the input to AddEdge. SPEC §4.5.
 type AddEdgeRequest struct {
-	OrgID     string
-	ProjectID string
-	FromItem  string
-	ToItem    string
-	Kind      string // "blocks" | "related"; default "blocks"
+	OrgID     string `json:"org_id"`
+	ProjectID string `json:"project_id"`
+	FromItem  string `json:"from_item"`
+	ToItem    string `json:"to_item"`
+	Kind      string `json:"kind"` // "blocks" | "related"; default "blocks"
 }
 
 // AddEdge acquires the per-project advisory lock (AF5), runs the
@@ -410,17 +410,17 @@ func AddEdgeInTx(ctx context.Context, tx *sqldb.Tx, req *AddEdgeRequest) (*Edge,
 // RemoveEdgeRequest is the input to RemoveEdge. SPEC §4.5. Pass either
 // EdgeID OR (FromItem + ToItem + Kind), exactly one path.
 type RemoveEdgeRequest struct {
-	EdgeID   string
-	FromItem string
-	ToItem   string
-	Kind     string
+	EdgeID   string `json:"edge_id"`
+	FromItem string `json:"from_item"`
+	ToItem   string `json:"to_item"`
+	Kind     string `json:"kind"`
 }
 
 // RemoveEdgeResponse is the output of RemoveEdge. SPEC §4.5.
 type RemoveEdgeResponse struct {
-	Removed        bool
-	ToItemNowReady bool
-	ToItemID       string
+	Removed        bool   `json:"removed"`
+	ToItemNowReady bool   `json:"to_item_now_ready"`
+	ToItemID       string `json:"to_item_id"`
 }
 
 // RemoveEdge deletes the edge, recomputes is_ready for the direct
@@ -587,12 +587,12 @@ func RemoveEdge(ctx context.Context, req *RemoveEdgeRequest) (*RemoveEdgeRespons
 // API request types to be named structs (E1354). The wire-shape is
 // unchanged. See DEVIATION trail on bead unblock-tv8.1.
 type IsReadyRequest struct {
-	ItemID string
+	ItemID string `json:"item_id"`
 }
 
 // IsReadyResponse is the output of IsReady.
 type IsReadyResponse struct {
-	IsReady bool
+	IsReady bool `json:"is_ready"`
 }
 
 // IsReady returns the current is_ready value for itemID (read directly
@@ -620,14 +620,14 @@ func IsReady(ctx context.Context, req *IsReadyRequest) (*IsReadyResponse, error)
 
 // ClosureRequest is the input to Closure. SPEC §4.5.
 type ClosureRequest struct {
-	ItemID    string
-	Direction string // "incoming" | "outgoing"
-	MaxDepth  int    // 1..256; default 256
+	ItemID    string `json:"item_id"`
+	Direction string `json:"direction"` // "incoming" | "outgoing"
+	MaxDepth  int    `json:"max_depth"` // 1..256; default 256
 }
 
 // ClosureResponse is the output of Closure. SPEC §4.5.
 type ClosureResponse struct {
-	ItemIDs []string
+	ItemIDs []string `json:"item_ids"`
 }
 
 // Closure returns the transitive 'blocks' closure for an item.
@@ -719,25 +719,25 @@ func closureSQL(direction string) string {
 
 // RecentCascadeEventsRequest is the input to RecentCascadeEvents. SPEC §4.5.
 type RecentCascadeEventsRequest struct {
-	OrgID     string
-	ProjectID string
-	Limit     int // capped at 50; default 50
+	OrgID     string `json:"org_id"`
+	ProjectID string `json:"project_id"`
+	Limit     int    `json:"limit"` // capped at 50; default 50
 }
 
 // CascadeEventRow is one row of a RecentCascadeEvents response. SPEC §4.5.
 type CascadeEventRow struct {
-	ID                string
-	EventID           string
-	TriggeredByItemID string
-	AffectedItemIDs   []string
-	CascadedCount     int
-	TriggeredAt       time.Time
-	TraceID           string
+	ID                string    `json:"id"`
+	EventID           string    `json:"event_id"`
+	TriggeredByItemID string    `json:"triggered_by_item_id"`
+	AffectedItemIDs   []string  `json:"affected_item_ids"`
+	CascadedCount     int       `json:"cascaded_count"`
+	TriggeredAt       time.Time `json:"triggered_at"`
+	TraceID           string    `json:"trace_id"`
 }
 
 // RecentCascadeEventsResponse is the output of RecentCascadeEvents. SPEC §4.5.
 type RecentCascadeEventsResponse struct {
-	Events []CascadeEventRow
+	Events []CascadeEventRow `json:"events"`
 }
 
 // RecentCascadeEvents returns the last N (≤50) deps.cascade_events rows

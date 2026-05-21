@@ -313,6 +313,49 @@ CLI inserts `auth.users` rows directly. The OAuth secrets exist so unit
 tests that exercise `auth.ExchangeOAuthCode` against a stubbed provider
 have a place to read fixtures from.
 
+### 3.6 JSON wire convention (snake_case lock)
+
+Every exported field of every Go struct in `apps/api/` that may transit
+JSON — Encore `//encore:api` request/response types, Pub/Sub payloads,
+MCP tool I/O DTOs, error envelopes, and internal helper structs that
+may be passed to `encoding/json` — MUST declare an explicit
+`json:"snake_case_name"` struct tag. Go's default field-name
+serialisation (PascalCase on the wire) is forbidden — explicit tags
+are the only sanctioned form.
+
+Rationale: §6.2 (MCP tool wire) and §7 (error envelope) already lock
+snake_case for the public agent-facing surface, and
+`apps/api/mcp/**` already implements it verbatim. Extending the same
+convention to the private Encore RPC surface and Pub/Sub payloads
+collapses the project to a single rule, aligns the JSON wire with
+Postgres column names (zero impedance between DB rows and the JSON
+shape an agent observes), and matches `://unblock`'s agent-native
+MCP-first focus. The TypeScript-client cost is absorbed at the
+Astro BFF (Zod schemas at the Astro Actions boundary handle the
+snake_case ↔ camelCase rename if the frontend wants idiomatic JS
+property names).
+
+Exception (third-party HTTP unmarshal): structs that decode a
+third-party HTTP response MAY mirror the third-party wire format —
+the project does not control that shape. See
+`apps/api/auth/oauth.go`'s `githubUserResponse` and
+`githubAccessTokenResponse` (coincidentally already snake_case;
+unmodified).
+
+JSON-RPC protocol fields (`jsonrpc`, `protocolVersion`,
+`structuredContent`, `isError`) follow the MCP 2025-06-18 transport
+specification verbatim — they are not under this project's wire
+convention.
+
+Query-string serialisation (Encore default snake_case per ENCORE.md)
+remains unchanged; the rule above applies to JSON bodies, not URL
+query parameters.
+
+Quality gate (NFR-10): `grep -rnE 'json:"[A-Z]' apps/api/` MUST
+return zero matches. Cross-references:
+[§6.2 (MCP tool wire — snake_case already locked)](#62-tool-by-tool-contracts) /
+[§7 (error envelope — snake_case already locked)](#7-error-envelope-locked).
+
 ---
 
 ## 4. Service Surfaces
@@ -1126,6 +1169,11 @@ object or a JSON-RPC error object per §7.
 
 The arguments and result schemas below are **canonical** for P01. Phase 02
 may add fields (additive only); existing fields are immutable.
+
+> **Wire convention** (cross-ref §3.6): every JSON key in this section is
+> snake_case. §3.6 generalises the same convention to the private Encore
+> RPC surface and Pub/Sub payloads; the rules quoted in this section are
+> the original lock and remain authoritative for MCP.
 
 ### 6.1 MCP framing
 
@@ -2062,6 +2110,11 @@ envelope on overflow includes the offending chain prefix.
 ---
 
 ## 7. Error Envelope (locked)
+
+> **Wire convention** (cross-ref §3.6): every JSON key in this section is
+> snake_case. §3.6 generalises the same convention to the private Encore
+> RPC surface and Pub/Sub payloads; the envelope quoted here remains the
+> authoritative lock for MCP tool errors.
 
 All MCP tool errors return a JSON-RPC 2.0 error object:
 
