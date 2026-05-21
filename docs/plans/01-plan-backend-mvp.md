@@ -429,6 +429,13 @@ v0 (the 14 P01 tools, no BLOCK conditions section) ships in P01. The
 codegen target wait until P02, after the BLOCK-conditions section is
 authored.
 
+**SUPERSEDED 2026-05-21 by D-7 (bead unblock-tv8.22):** the codegen
+half of this resolution is reversed. Per §2.3 (lines 118-125) and Spec
+§10.3 (lines 2508-2510), `apps/api/mcp/catalogue.gen.go` ships in P01
+as a `go generate` target; CI fails on a stale generated file. The
+`mcp.meta_catalogue` MCP-level endpoint still waits until P02 (that
+half of the original resolution stands).
+
 ### Q5. Supervisor mapping for P01
 
 **Question.** This project's CLAUDE.md lists `rust-supervisor` and
