@@ -182,3 +182,64 @@ func TestDerivePipelineStage_Rules(t *testing.T) {
 		})
 	}
 }
+
+// TestShouldEmitDepthCapWarning is the regression gate for
+// unblock-tv8.49 — the depth-cap warning predicate must compare
+// observed MAX(depth) against cascadeBFSMaxDepth-1, NOT len(out).
+//
+// CTE contract (cascade_subscriber.go bfsForwardBlocksClosure):
+// `WHERE r.depth < cascadeBFSMaxDepth` admits depth values
+// 0..(cascadeBFSMaxDepth-1). When the cap fires, the highest depth
+// observed in `reachable` is exactly cascadeBFSMaxDepth-1 (=255).
+//
+// Sentinel: -1 (from COALESCE(max(depth), -1) on an empty reachable
+// set — e.g. tenant mismatch on the anchor SELECT) is treated as
+// 'no overflow'.
+//
+// Pure function — no DB, no fixtures. Each subtest names the depth
+// boundary it pins so a future regression points at the exact
+// off-by-one risk (DECISION R1 on unblock-tv8.49).
+func TestShouldEmitDepthCapWarning(t *testing.T) {
+	tests := []struct {
+		name     string
+		maxDepth int
+		want     bool
+	}{
+		// Empty reachable set (tenant mismatch / seed absent): the
+		// COALESCE sentinel maps to -1; the predicate must NOT
+		// emit a warning — there was no walk at all.
+		{"sentinel_empty_reachable", -1, false},
+		// Single-node closure (seed only, no edges): max depth 0.
+		{"depth_0_seed_only", 0, false},
+		// Shallow walks: 1 and 10 are the canonical 'wide-but-shallow'
+		// shapes the bead names. len(out) may exceed the cap (false
+		// trip under the OLD heuristic) but maxDepth is well below
+		// — no warning.
+		{"depth_1_wide_shallow", 1, false},
+		{"depth_10_existing_test_coverage", 10, false},
+		// Just below the cap: 254 is the last depth before the
+		// terminal step. The recursion would still add another row
+		// at depth 255, so the cap has NOT yet fired.
+		{"depth_254_just_below_cap", 254, false},
+		// Cap fires: maxDepth = cascadeBFSMaxDepth-1 = 255 is the
+		// boundary the CTE produces on overflow. Predicate MUST
+		// return true here — getting this wrong silently disables
+		// the warning entirely (DECISION R1 risk).
+		{"depth_255_cap_boundary", cascadeBFSMaxDepth - 1, true},
+		// Defensive over-cap: depth >= cap should never appear under
+		// the current CTE (the `r.depth < $2` clause rejects it),
+		// but the predicate is robust to it.
+		{"depth_256_defensive_over_cap", cascadeBFSMaxDepth, true},
+		{"depth_1000_defensive_far_over_cap", 1000, true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := shouldEmitDepthCapWarning(tc.maxDepth)
+			if got != tc.want {
+				t.Fatalf("shouldEmitDepthCapWarning(%d) = %v, want %v",
+					tc.maxDepth, got, tc.want)
+			}
+		})
+	}
+}
