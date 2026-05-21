@@ -888,7 +888,7 @@ runs at **build time only** and reads the **checked-in** JSON via
 endpoint is **not** consulted by the renderer in production — its only job
 is to give CI a "live" reference to diff against the checked-in copy.
 
-**Drift mitigation:** a CI test (`infra/github/workflows/catalogue-drift.yml`)
+**Drift mitigation:** a CI test (`.github/workflows/catalogue-drift.yml`)
 boots the local Encore emulator, calls `mcp.meta_catalogue`, diffs against
 `crates/unblock-plugin/data/catalogue.json`, and fails on mismatch. **CI is
 the only point at which the two copies are reconciled** — there is no

@@ -2509,9 +2509,12 @@ placeholders** for every transition:
 containing the embedded JSON as a `[]byte` constant + helper getters. CI
 fails if `go generate` produces a diff against the committed file.
 
-The catalogue-drift CI workflow (`infra/github/workflows/catalogue-drift.yml`)
+The catalogue-drift CI workflow (`.github/workflows/catalogue-drift.yml`)
 is **scaffolded** in P01 but is a no-op (the `unblock-plugin` consumer
-does not exist until P04). It activates as load-bearing in P04.
+does not exist until P04). It activates as load-bearing in P04. (Path
+correction per D-7 bead unblock-tv8.22 — pre-D-7 spec referenced
+`infra/github/workflows/`, which is not the GitHub Actions workflow
+discovery path.)
 
 `mcp.meta_catalogue` MCP tool itself is **not** exposed in P01 — it ships
 in P02 once the BLOCK conditions are authored.

@@ -1,0 +1,56 @@
+# catalogue-drift.yml — scaffolded in P01 per D-7 (bead unblock-tv8.22)
+# acceptance criterion #4 ("catalogue-drift.yml exists and exits 0
+# unconditionally in P01"). The workflow is a no-op until P04 when
+# crates/unblock-plugin/data/catalogue.json (the Rust plugin's checked-
+# in copy of the MCP tool catalogue) starts being consumed by the
+# build-time renderer.
+#
+# P04 activation: this workflow will boot the local Encore emulator,
+# call the mcp.meta_catalogue MCP tool, and diff its response against
+# crates/unblock-plugin/data/catalogue.json. On mismatch the workflow
+# fails and the PR is blocked until the two copies are reconciled. See
+# docs/SPEC.md §7.2 (dual-location catalogue contract) for the full
+# rationale.
+#
+# Path note (D-7 spec drift #3 resolution per orchestrator DECISION
+# 2026-05-21): the spec text at docs/specs/01-spec-backend-mvp.md
+# §10.3 line 2512 and docs/SPEC.md §7.2 line 891 originally read
+# `infra/github/workflows/catalogue-drift.yml`. That path is corrected
+# to `.github/workflows/catalogue-drift.yml` in the same PR as this
+# file (one-line edits each) — GitHub Actions only discovers workflows
+# under `.github/workflows/`.
+#
+# Coordinate this file's lifecycle with A-6 (bead unblock-tv8.6, Olive
+# scope), which is the canonical owner of the .github/workflows/
+# scaffolding for the Go backend CI lane.
+
+name: catalogue-drift
+
+on:
+  pull_request:
+    paths:
+      - 'apps/api/mcp/catalogue.json'
+      - 'apps/api/mcp/catalogue.gen.go'
+      - 'crates/unblock-plugin/data/catalogue.json'
+      - '.github/workflows/catalogue-drift.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'apps/api/mcp/catalogue.json'
+      - 'apps/api/mcp/catalogue.gen.go'
+      - 'crates/unblock-plugin/data/catalogue.json'
+      - '.github/workflows/catalogue-drift.yml'
+  workflow_dispatch:
+
+jobs:
+  catalogue-drift:
+    name: catalogue-drift (no-op in P01)
+    runs-on: ubuntu-latest
+    steps:
+      - name: P01 placeholder — activates in P04
+        run: |
+          echo "catalogue-drift CI is scaffolded in P01 and exits 0 unconditionally."
+          echo "Becomes load-bearing in P04 once crates/unblock-plugin consumes"
+          echo "the checked-in catalogue. See docs/SPEC.md §7.2 + bead unblock-tv8.22."
+          exit 0
