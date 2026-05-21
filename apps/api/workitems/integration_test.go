@@ -1274,3 +1274,230 @@ func TestClaimPropertyHalfFailedHalfNotN100(t *testing.T) {
 	t.Logf("N=100 split (failed=%d, normal=%d): state_change publishes: failed=%d, normal=%d",
 		halfFailed, N-halfFailed, failedHits, normalHits)
 }
+
+// -----------------------------------------------------------------------------
+// SetStateColumns cascade publish (bead unblock-tv8.53 / SPEC §6.3.0
+// tension #3 narrow rule). The four tests below cover acceptance
+// criteria #1-#4: §5.7.1-affecting writes publish exactly one
+// CascadeRequested{Reason:"state_change"}, pipe-only writes do NOT
+// publish, I-1's auto-reset of qa_state counts as a material change,
+// and the N=100 half-changing/half-pipe-only property assertion.
+// -----------------------------------------------------------------------------
+
+// TestSetStateImplChangePublishesStateChange — happy path AC #1.
+// setItemState seeds (impl=pending, review=pending, qa=pending,
+// claimed). SetStateColumns(impl_state=done) is §5.7.1-affecting
+// (impl_state moves from pending to done); the post-commit publish
+// MUST fire exactly once, carrying EventID, OrgID, ProjectID, and
+// EmittedAt populated from the locked row's scope + the publisher's
+// wall clock. Mirrors TestClaimResetsReworkOnQAFailed's field-by-field
+// assertion shape (lines 462-518).
+func TestSetStateImplChangePublishesStateChange(t *testing.T) {
+	ctx := context.Background()
+	fx := seedFixture(t, ctx)
+	itemID := createReadyItem(t, ctx, fx)
+	// Seed: claimed item at (impl=pending, review=pending, qa=pending).
+	// claimed_by_id=fx.UserID is required by the impl_done_requires_claim
+	// structural invariant before we can flip impl_state to done.
+	setItemState(t, ctx, itemID, "pending", "pending", "pending", fx.UserID)
+
+	newImpl := "done"
+	got, err := workitems.SetStateColumns(ctx, &workitems.SetStateRequest{
+		ItemID:    itemID,
+		ImplState: &newImpl,
+	})
+	if err != nil {
+		t.Fatalf("SetStateColumns: %v", err)
+	}
+	if got.ImplState != "done" {
+		t.Fatalf("impl_state = %q, want done", got.ImplState)
+	}
+
+	msgs := cascadeRequestedMessagesFor(itemID, "state_change")
+	if len(msgs) != 1 {
+		t.Fatalf("SetStateColumns(impl=done) must publish exactly 1 state_change cascade for item=%q: got %d (want 1)",
+			itemID, len(msgs))
+	}
+	msg := msgs[0]
+	if msg.EventID == "" {
+		t.Fatalf("state_change cascade: EventID empty (ULID must be minted before tx.Begin per AC #3)")
+	}
+	if msg.OrgID != fx.OrgID {
+		t.Fatalf("state_change cascade: OrgID=%q, want %q (captured at SELECT FOR UPDATE time)", msg.OrgID, fx.OrgID)
+	}
+	if msg.ProjectID != fx.ProjectID {
+		t.Fatalf("state_change cascade: ProjectID=%q, want %q", msg.ProjectID, fx.ProjectID)
+	}
+	if msg.EmittedAt.IsZero() {
+		t.Fatalf("state_change cascade: EmittedAt zero (must be wall-clock at publish time)")
+	}
+	if msg.Reason != "state_change" {
+		t.Fatalf("state_change cascade: Reason=%q, want state_change", msg.Reason)
+	}
+}
+
+// TestSetStatePipeStateOnlyDoesNotPublish — negative path AC #2.
+// SPEC §6.3.0 explicit non-publishers (lines 1803-1809, tension #3
+// ruling): writes that affect ONLY pipeline_state (with no change to
+// impl/review/qa) MUST NOT publish. §5.7.1 derives pipeline_stage from
+// the upstream chain's readiness/closure, not from a downstream item's
+// own pipe_state.
+func TestSetStatePipeStateOnlyDoesNotPublish(t *testing.T) {
+	ctx := context.Background()
+	fx := seedFixture(t, ctx)
+	itemID := createReadyItem(t, ctx, fx)
+	setItemState(t, ctx, itemID, "pending", "pending", "pending", fx.UserID)
+
+	// pipeline_state default is 'running'; move it to 'paused' with no
+	// impl/review/qa change.
+	newPipeline := "paused"
+	got, err := workitems.SetStateColumns(ctx, &workitems.SetStateRequest{
+		ItemID:        itemID,
+		PipelineState: &newPipeline,
+	})
+	if err != nil {
+		t.Fatalf("SetStateColumns: %v", err)
+	}
+	if got.PipelineState != "paused" {
+		t.Fatalf("pipeline_state = %q, want paused", got.PipelineState)
+	}
+
+	if msgs := cascadeRequestedMessagesFor(itemID, "state_change"); len(msgs) != 0 {
+		t.Fatalf("pipe_state-only SetStateColumns must NOT publish state_change cascade for item=%q: got %d publish(es) (want 0)",
+			itemID, len(msgs))
+	}
+}
+
+// TestSetStateI1AutoResetPublishes — AC #3 (I-1 ordering, R2).
+// I-1: review_state=needs_rework auto-resets qa_state to pending. The
+// predicate runs AFTER I-1, so the qa transition from passed→pending
+// counts as a material §5.7.1-affecting change even though the caller
+// only passed review_state. Confirms the predicate's post-I-1
+// placement.
+func TestSetStateI1AutoResetPublishes(t *testing.T) {
+	ctx := context.Background()
+	fx := seedFixture(t, ctx)
+	itemID := createReadyItem(t, ctx, fx)
+	// Seed: claimed item with (impl=done, review=approved, qa=passed)
+	// — the I-1 path requires impl=done to satisfy I-4 on review change.
+	setItemState(t, ctx, itemID, "done", "approved", "passed", fx.UserID)
+
+	newReview := "needs_rework"
+	got, err := workitems.SetStateColumns(ctx, &workitems.SetStateRequest{
+		ItemID:      itemID,
+		ReviewState: &newReview,
+	})
+	if err != nil {
+		t.Fatalf("SetStateColumns: %v", err)
+	}
+	if got.ReviewState != "needs_rework" || got.QAState != "pending" {
+		t.Fatalf("I-1: review=%q qa=%q (want needs_rework/pending)", got.ReviewState, got.QAState)
+	}
+
+	msgs := cascadeRequestedMessagesFor(itemID, "state_change")
+	if len(msgs) != 1 {
+		t.Fatalf("I-1 auto-reset must publish exactly 1 state_change cascade for item=%q: got %d (want 1)",
+			itemID, len(msgs))
+	}
+}
+
+// TestSetStatePropertyHalfChangeHalfPipeOnlyN100 — AC #4 property test.
+// Create N=100 claimed items in the (impl=pending, review=pending,
+// qa=pending) posture. First half: SetStateColumns(impl_state=done)
+// — §5.7.1-affecting, MUST publish exactly one state_change each.
+// Second half: SetStateColumns(pipeline_state=paused) — pipe-only,
+// MUST NOT publish.
+//
+// Per DECISION comment on the bead: AC #4's "50 deps.cascade_events
+// rows" reads as "50 et.Topic publishes whose Reason=state_change"
+// because the Encore test runtime does not fire subscribers during
+// `encore test`. The publish surface is the observable contract and
+// matches the canonical pattern from
+// TestClaimPropertyHalfFailedHalfNotN100.
+func TestSetStatePropertyHalfChangeHalfPipeOnlyN100(t *testing.T) {
+	ctx := context.Background()
+	fx := seedFixture(t, ctx)
+
+	const N = 100
+	const halfChange = N / 2
+
+	changeIDs := make([]string, 0, halfChange)
+	pipeIDs := make([]string, 0, N-halfChange)
+	changeIDSet := make(map[string]struct{}, halfChange)
+	pipeIDSet := make(map[string]struct{}, N-halfChange)
+
+	// Phase 1: create N=100 items seeded as claimed at the
+	// (impl=pending, review=pending, qa=pending) posture. setItemState
+	// writes the workitems.items row directly and therefore does NOT
+	// fire the SetStateColumns cascade publish — the publish count is
+	// clean before Phase 2 begins. Mirrors TestClaimProperty's pattern
+	// at lines 1185-1209.
+	for i := 0; i < N; i++ {
+		id := createReadyItem(t, ctx, fx)
+		setItemState(t, ctx, id, "pending", "pending", "pending", fx.UserID)
+		if i < halfChange {
+			changeIDs = append(changeIDs, id)
+			changeIDSet[id] = struct{}{}
+		} else {
+			pipeIDs = append(pipeIDs, id)
+			pipeIDSet[id] = struct{}{}
+		}
+	}
+
+	// Phase 2: call SetStateColumns per item.
+	newImpl := "done"
+	for _, id := range changeIDs {
+		got, err := workitems.SetStateColumns(ctx, &workitems.SetStateRequest{
+			ItemID:    id,
+			ImplState: &newImpl,
+		})
+		if err != nil {
+			t.Fatalf("SetStateColumns change item %q: %v", id, err)
+		}
+		if got.ImplState != "done" {
+			t.Fatalf("change item %q impl_state=%q (want done)", id, got.ImplState)
+		}
+	}
+	newPipeline := "paused"
+	for _, id := range pipeIDs {
+		got, err := workitems.SetStateColumns(ctx, &workitems.SetStateRequest{
+			ItemID:        id,
+			PipelineState: &newPipeline,
+		})
+		if err != nil {
+			t.Fatalf("SetStateColumns pipe item %q: %v", id, err)
+		}
+		if got.PipelineState != "paused" {
+			t.Fatalf("pipe item %q pipeline_state=%q (want paused)", id, got.PipelineState)
+		}
+	}
+
+	// Phase 3: count publishes via et.Topic. Synchronous — Publish
+	// returns after the message is recorded by the test harness.
+	all := et.Topic(deps.CascadeRequestedTopic).PublishedMessages()
+	var changeHits, pipeHits int
+	for _, msg := range all {
+		if msg == nil || msg.Reason != "state_change" {
+			continue
+		}
+		if _, ok := changeIDSet[msg.TriggeredByItemID]; ok {
+			changeHits++
+			continue
+		}
+		if _, ok := pipeIDSet[msg.TriggeredByItemID]; ok {
+			pipeHits++
+		}
+	}
+
+	if changeHits != halfChange {
+		t.Fatalf("change half: %d state_change publishes (want %d) — §5.7.1-affecting writes must publish exactly once",
+			changeHits, halfChange)
+	}
+	if pipeHits != 0 {
+		t.Fatalf("pipe-only half: %d state_change publishes (want 0) — pipe_state-only writes must NOT publish (SPEC §6.3.0 tension #3)",
+			pipeHits)
+	}
+
+	t.Logf("N=100 split (change=%d, pipe=%d): state_change publishes: change=%d, pipe=%d",
+		halfChange, N-halfChange, changeHits, pipeHits)
+}

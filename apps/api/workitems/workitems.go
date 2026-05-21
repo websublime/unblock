@@ -1167,6 +1167,18 @@ func AppendComment(ctx context.Context, req *AppendCommentRequest) (*Comment, er
 // Claim). On violation, returns errs.FailedPrecondition with
 // Meta["invariant"] populated per SPEC §6.2 Tool 13.
 //
+// Side-effects (round-6 §6.3.0 symmetric writer model — tension #3
+// narrow rule, SPEC lines 1700-1711 + 1801): after the validating
+// UPDATE commits, publishes CascadeRequested{Reason:"state_change",
+// TriggeredByItemID:item_id, …} when the write changes one or more
+// of (impl_state, review_state, qa_state) — including I-1's
+// auto-reset of qa_state. Pure pipe_state mutations (no change to
+// the other three) do NOT publish (SPEC §6.3.0 explicit
+// non-publishers, tension #3 ruling). The publish drives the
+// multi-hop pipeline_stage recompute on the forward 'blocks' closure
+// (Regime B; the cascade subscriber is the sole writer of
+// pipeline_stage).
+//
 //encore:api private method=POST path=/workitems.SetStateColumns
 func SetStateColumns(ctx context.Context, req *SetStateRequest) (*Item, error) {
 	if req == nil || req.ItemID == "" {
@@ -1176,21 +1188,39 @@ func SetStateColumns(ctx context.Context, req *SetStateRequest) (*Item, error) {
 		return nil, err
 	}
 
+	// Mint the cascade event id BEFORE tx.Begin per the round-6
+	// retry-safe dedup pattern (deps.RemoveEdge:468-477). On
+	// ulid.New() failure we proceed with the state mutation and skip
+	// the publish — the AR-11 UNIQUE constraint on
+	// (event_id, triggered_by_item_id) makes the audit row's absence
+	// preferable to failing a committed state change. Mirrors Close's
+	// best-effort handling at workitems.go:1380-1385.
+	eventID, eventIDErr := ulid.New()
+	if eventIDErr != nil {
+		rlog.Warn("workitems: set_state cascade event id generation failed", "err", eventIDErr, "item_id", req.ItemID)
+	}
+
 	tx, err := db.Begin(ctx)
 	if err != nil {
 		return nil, &errs.Error{Code: errs.Internal, Message: "db begin failed"}
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// Lock the row and read current state columns.
+	// Lock the row and read current state columns + scope (org_id,
+	// project_id). Scope is projected unconditionally so the
+	// predicate-evaluation branch stays uniform; only the publishing
+	// branch consumes it. COALESCE(project_id,'') mirrors the Close
+	// pattern at workitems.go:1290-1296.
 	var cur stateRow
 	err = tx.QueryRow(ctx,
-		`SELECT impl_state, review_state, qa_state, pipeline_state, claimed_by_id
+		`SELECT impl_state, review_state, qa_state, pipeline_state, claimed_by_id,
+		        org_id, COALESCE(project_id, '')
 		   FROM workitems.items
 		  WHERE id = $1
 		  FOR UPDATE`,
 		req.ItemID,
-	).Scan(&cur.Impl, &cur.Review, &cur.QA, &cur.Pipeline, &cur.ClaimedBy)
+	).Scan(&cur.Impl, &cur.Review, &cur.QA, &cur.Pipeline, &cur.ClaimedBy,
+		&cur.OrgID, &cur.ProjectID)
 	if err != nil {
 		if errors.Is(err, sqldb.ErrNoRows) {
 			return nil, &errs.Error{Code: errs.NotFound, Message: "item not found"}
@@ -1239,6 +1269,17 @@ func SetStateColumns(ctx context.Context, req *SetStateRequest) (*Item, error) {
 		return nil, preconditionError("review_change_requires_impl_done", "review_state change requires impl_state=done")
 	}
 
+	// Compute the §6.3.0 tension #3 "materially changed" predicate
+	// BEFORE the UPDATE so the publish gate captures the state
+	// transition post-I-1-auto-reset (R2 of the bead investigation).
+	// Pure pipe_state writes leave newImpl/newReview/newQA equal to
+	// cur and evaluate to false (AC #2). Over-publishing is acceptable
+	// (subscriber's idempotent UPDATE guard absorbs it); under-publishing
+	// would be a correctness bug — hence the simple any-of-three form.
+	publishStateChange := (newImpl != cur.Impl) ||
+		(newReview != cur.Review) ||
+		(newQA != cur.QA)
+
 	// All invariants validated. Apply the update.
 	_, err = tx.Exec(ctx,
 		`UPDATE workitems.items
@@ -1257,6 +1298,31 @@ func SetStateColumns(ctx context.Context, req *SetStateRequest) (*Item, error) {
 
 	if err := tx.Commit(); err != nil {
 		return nil, &errs.Error{Code: errs.Internal, Message: "set_state commit failed"}
+	}
+
+	// Round-6 §6.3.0 tension #3 narrow rule (SPEC §6.2 Tool 13 lines
+	// 1700-1711 + §6.3.0 line 1801): publish CascadeRequested with
+	// Reason="state_change" ONLY when the write changed at least one
+	// of (impl_state, review_state, qa_state) — including I-1's
+	// auto-reset of qa_state. Pipe-only writes do NOT publish. Encore
+	// Pub/Sub does not carry ctx across the topic boundary; TraceID is
+	// copied from tracectx into the payload explicitly (mirrors Close
+	// at workitems.go:1377-1397 + Claim at 1492-1526). Best-effort:
+	// log.Warn on publish failure, do not return error — the state
+	// mutation is already committed.
+	if publishStateChange && eventIDErr == nil {
+		if _, err := deps.CascadeRequestedTopic.Publish(ctx, &deps.CascadeRequested{
+			EventID:           eventID,
+			OrgID:             cur.OrgID,
+			ProjectID:         cur.ProjectID,
+			TriggeredByItemID: req.ItemID,
+			Reason:            "state_change",
+			TraceID:           tracectx.TraceID(ctx),
+			EmittedAt:         time.Now().UTC(),
+		}); err != nil {
+			rlog.Warn("workitems: set_state cascade publish failed (set_state already committed)",
+				"err", err, "item_id", req.ItemID)
+		}
 	}
 
 	return readItem(ctx, req.ItemID)

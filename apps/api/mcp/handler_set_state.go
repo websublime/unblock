@@ -68,10 +68,14 @@
 //
 // The §6.3.0 `state_change` cascade publish (post-commit publish to
 // deps.CascadeRequestedTopic when (impl, review, qa) materially
-// change) is tracked SEPARATELY as bead unblock-tv8.53 — NOT in
-// scope for this handler. SetStateColumns currently does not publish
-// state_change; D-6 ships without it per bead unblock-tv8.21
-// INVESTIGATION risk R3.
+// change) lives INSIDE workitems.SetStateColumns (shipped on bead
+// unblock-tv8.53). This MCP handler is unaware of the publish — it
+// calls SetStateColumns and trusts the RPC to fire the cascade per
+// SPEC §6.3.0 tension #3. The handler still appends the
+// intent_comment AFTER SetStateColumns returns; if the comment append
+// fails the cascade has already fired (best-effort post-state per
+// bead unblock-tv8.21 D-6 INVESTIGATION risk R3 — the existing
+// architectural decision is unchanged).
 //
 // SPEC: docs/specs/01-spec-backend-mvp.md § 6.2 Tool 13 (lines
 // 1606-1725) + § 4.4 (workitems.SetStateColumns + AppendComment) +
