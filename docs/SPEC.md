@@ -1810,8 +1810,14 @@ CREATE TABLE mcp.api_keys (
     last_used_at    timestamptz,
     -- Optional natural expiry. NULL means "never expires by default" — at
     -- v1 we do not auto-rotate API keys. Lifecycle is operator-driven:
-    -- (a) issuance happens via the seeder CLI (P01) or the future web admin
-    --     surface (P05+); each issuance creates a row.
+    -- (a) issuance happens via `auth.IssueAPIKey` — called from test seeds
+    --     via direct INSERT in P01 (round-12 — see
+    --     docs/specs/01-spec-backend-mvp.md §11.1.1; the E2E test
+    --     `apps/api/exitcriteriontest/` writes the row straight to
+    --     mcp.api_keys with `key_hash` computed via
+    --     `secrets.APIKeyHMACSecret` per
+    --     apps/api/auth/apikey.go:103-111). Operator-facing surfaces
+    --     (CLI / web admin) ship in a future phase (P05+).
     -- (b) Rotation is a manual two-step: issue a new key (new prefix), wait
     --     for the agent operator to switch over, then set `revoked_at` on
     --     the old row. Both rows coexist during the rollover window.

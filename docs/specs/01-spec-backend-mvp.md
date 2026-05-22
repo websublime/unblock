@@ -12,6 +12,7 @@
 - 2026-05-19 — round-9 (rbac-coverage): §10.1 — added deps.cascade_events to E-3 RBAC suite scope (closes coverage gap on the AF2 read path via Tool 1 prime). C-6 scope unchanged.
 - 2026-05-19 — round-10 (rbac-coverage closure for E-3 dual-shape): §10.1 — `deps.cascade_events` joins `org.resourceAllowed` and `org.agentReadWriteResources` so the Authorize-gate `KindAuthorizeOnly` axis can be exercised alongside the existing `KindOrgScoped` row-leak axis. Agents read the table through Tool 1 `prime`'s AF2 path (read-side); writes remain closed-loop (only the cascade subscriber emits rows server-side). Without this allow-list extension, an `KindAuthorizeOnly` tuple short-circuits to `InvalidArgument` instead of asserting the intended `PermissionDenied` contract. CI separate-report wiring (E-3 bead AC #3) is reassigned to A-6 (`unblock-tv8.6`, infra-supervisor) and gated by an explicit `tv8.25 → tv8.6` dependency edge; E-3 ships the suite discoverable as `encore test ./apps/api/shared/rbactest/...`, A-6 wires the separate gate.
 - 2026-05-19 — round-11 (`-race` removed from §11.2 NFR-10 gate set, encore upstream bug closure): §11.2 NFR-10 — `go test ./... -race` dropped from the gate set and replaced with a split between Encore service packages (use `encore test ./...`, no `-race`) and leaf packages without `encore.dev` imports (use `go test -race`, native Go toolchain). Reason: [encoredev/encore#1943](https://github.com/encoredev/encore/issues/1943) — `encore test ... -race` reproducibly SIGSEGVs inside the encore-go runtime's `lazyTraceInit.initStream` goroutine spawn (cross-platform: confirmed on macOS arm64 and Linux amd64 ubuntu-24.04 GHA runner). Bug filed 2025-05-27, no maintainer triage, no fix PR. Toolchain footprint: encore v1.57.0, encore-go go1.26.2-encore (verified no race-related fixes in v1.57.1..v1.57.5). The rbactest suite is single-threaded by design (`rbac.Bind` not goroutine-safe; no `t.Parallel`), so dropping `-race` removes no real coverage on the encore-side gate. Leaf-package race coverage remains via native `go test -race` on `apps/api/shared/ulid/`, `apps/api/shared/rbac/`, `apps/api/shared/lint/` (packages without `encore.dev` imports). E-3 bead AC #1 (tv8.25) and A-6 bead AC (tv8.6) are patched in lockstep with this round.
+- 2026-05-22 — round-12 (seeder CLI deleted from P01 scope; spec-drift closure from `/investigate` on bead `unblock-tv8.23`): the one-shot `apps/api/cmd/unblock-seed/` Go CLI is removed from P01 entirely. Four blockers triggered the deletion — (DRIFT-1) no `auth.users` private RPC exists for the seeder to call; (DRIFT-2) the state-machine does not allow the canonical fixture's `Done`/`Ready` end-states via RPC; (DRIFT-3) `--issue-key` lacks operand flags; (DRIFT-4) Encore parser invariant E1388 forbids `package main` under `cmd/` from calling private RPCs, making "tiny CLI that calls private RPCs" architecturally impossible without scope inflation (new public RPCs or promoting the binary to an Encore service — both compromise design). Seeding responsibility moves to the E2E test package (`apps/api/exitcriteriontest/`) which owns a `TestMain` + direct-SQL seed mirroring `apps/api/shared/rbactest/seed.go:46-53` ("All rows go through direct `sqldb.Exec`, NOT through the auth/org RPCs"); fixture data lives as Go constants/structs in `apps/api/exitcriteriontest/fixture.go` (no YAML, no `gopkg.in/yaml.v3` dependency). The canonical 5-item graph topology (former §9.2: `itm_a`..`itm_e` with chain `a→b`, `b→c`, `b→d`, `d→e` plus the cycle-attempt edge closing the loop) is relocated verbatim into §11.1 as the authoritative exit-criterion fixture description. `--issue-key` is deferred entirely from P01 — no operator-key CLI in scope; in-test key issuance happens via direct `INSERT INTO mcp.api_keys` (computing `key_hash` with `secrets.APIKeyHMACSecret` per `apps/api/auth/apikey.go:103-111`); dev exploration outside tests uses `psql`. No new migrations, no DDL change, no `go.mod` additions. Patches in lockstep: §1 overview seeder bullet removed; §4.1 `IssueAPIKey` doc-comment updated; §4.4 / §4.4.1 / §6.2 Tool 4 seeder consumer notes rewritten; §9 deleted (tombstone retained to preserve §10..§14 numbering and the 30 cross-references that depend on it); §11.1 exit-criterion fixture relocation + E2E seed ownership note added; §11.4 docs and §14 approval checklist seeder mentions removed; §12 task-table E-1 row deleted (bead `unblock-tv8.23` cancelled in lockstep, post-spec, by the orchestrator); plan §2.1/§2.4/§4.5/§6 Q3 and root SPEC §9.4.6 / research AF4 / `apps/api/auth/auth.go` / `apps/api/db/migrations/0070_mcp.up.sql` updated. Spec status remains APPROVED — this is a scope reduction, not a re-architecting.
 
 **Author:** Ada (architect)
 **Date:** 2026-05-08
@@ -68,8 +69,13 @@ P01 ships the agent-facing core of `://unblock`:
 - Atomic claim transaction (`SELECT FOR UPDATE`).
 - Cycle detection at write time using a depth-counter recursive CTE
   guarded by a per-project advisory lock.
-- One-shot Go CLI seeder under `apps/api/cmd/unblock-seed/` that
-  bootstraps the exit-criterion fixture.
+- **Exit-criterion fixture seeding (round-12).** Owned by the E2E test
+  package `apps/api/exitcriteriontest/` itself — `TestMain` runs a
+  direct-SQL seed mirroring the `apps/api/shared/rbactest/seed.go`
+  pattern; fixture data lives as Go constants in
+  `apps/api/exitcriteriontest/fixture.go`. No standalone CLI binary
+  (former §9 deleted; see §11.1 for the canonical fixture topology
+  and round-12 changelog for the rationale).
 - **Milestones (round-2 D1).** Recursive milestones (PRD §6.3 + SPEC
   §9.4.3) ship in P01 as **private RPCs** (`workitems.CreateMilestone`,
   `UpdateMilestone`, `AssignItem`, `MilestoneTree` — §4.4); the four
@@ -308,9 +314,10 @@ as part of A-2 so the local-override file is never committed. The edit to
 `.gitignore` itself is owned by the implementing supervisor (Greta/Olive)
 under bead A-2 — this spec only records the requirement.
 
-**P01 exit criterion does not exercise OAuth interactively** — the seeder
-CLI inserts `auth.users` rows directly. The OAuth secrets exist so unit
-tests that exercise `auth.ExchangeOAuthCode` against a stubbed provider
+**P01 exit criterion does not exercise OAuth interactively** — the E2E
+test seed (`apps/api/exitcriteriontest/`, round-12) inserts `auth.users`
+rows via direct `sqldb.Exec`. The OAuth secrets exist so unit tests that
+exercise `auth.ExchangeOAuthCode` against a stubbed provider
 have a place to read fixtures from.
 
 ### 3.6 JSON wire convention (snake_case lock)
@@ -420,9 +427,14 @@ type ExchangeOAuthCodeResponse struct {
     ExpiresAt time.Time
 }
 
-// IssueAPIKey creates a new mcp.api_keys row. Called by the seeder CLI
-// (P01) and by future operator surfaces. Returns the raw key ONCE — the
-// caller stores it; subsequent reads return only the prefix and metadata.
+// IssueAPIKey creates a new mcp.api_keys row. In P01 it is called from
+// test seeds via direct INSERT (round-12: see §11.1 — the E2E test
+// `apps/api/exitcriteriontest/` issues its own key by writing the row
+// straight to `mcp.api_keys` with `key_hash` computed via
+// `secrets.APIKeyHMACSecret` per `apps/api/auth/apikey.go:103-111`).
+// Operator-facing surfaces (CLI or web admin) are deferred to a future
+// phase. Returns the raw key ONCE — the caller stores it; subsequent
+// reads return only the prefix and metadata.
 //
 //encore:api private method=POST path=/auth.IssueAPIKey
 func IssueAPIKey(ctx context.Context, req IssueAPIKeyRequest) (*IssueAPIKeyResponse, error)
@@ -617,7 +629,7 @@ type AuthData struct {
 }
 ```
 
-> **P01 contract (session-path deferral).** `Validate(TokenKind="session", token=...)` returns `errs.Unimplemented` in P01. The session token path is exercised only by the future BFF (Astro Actions) and the multi-org disambiguation rule (because `auth.sessions` has no `org_id` column and `Identity.OrgID` would require a lookup in `org.members` that is undefined when a user belongs to multiple orgs) will be defined as part of the BFF phase. The seeder bypasses OAuth (§3.5) and the MCP transport (D-1) authenticates via API key only, so this deferral does not affect any P01 acceptance criterion.
+> **P01 contract (session-path deferral).** `Validate(TokenKind="session", token=...)` returns `errs.Unimplemented` in P01. The session token path is exercised only by the future BFF (Astro Actions) and the multi-org disambiguation rule (because `auth.sessions` has no `org_id` column and `Identity.OrgID` would require a lookup in `org.members` that is undefined when a user belongs to multiple orgs) will be defined as part of the BFF phase. The E2E test seed bypasses OAuth (§3.5, round-12 — direct `sqldb.Exec` writes to `auth.users` mirror the rbactest pattern) and the MCP transport (D-1) authenticates via API key only, so this deferral does not affect any P01 acceptance criterion.
 
 ### 4.4 `workitems` service
 
@@ -877,8 +889,10 @@ type SearchHit struct {
 Milestones (PRD §6.3 + SPEC §9.4.3) ship in P01 as **private RPCs only**.
 Agent-facing MCP tools defer to P02 alongside memory tools (see §1
 overview / round-2 D1: option (c) preserves FR-8 "18 tools at v1.0").
-The seeder CLI (§9) and the future Astro client (P05) call these RPCs
-directly through Encore's private mesh.
+P01 consumers of these RPCs: the E2E exit-criterion test
+(`apps/api/exitcriteriontest/` — see §11.1, round-12) drives them from
+its `TestMain` through Encore's private mesh to assert the
+milestone-tree shape; the future Astro client (P05) calls them too.
 
 ```go
 package workitems
@@ -972,7 +986,8 @@ type AssignItemRequest struct {
 // UpdateMilestone for ancestor / depth checks).
 //
 // Used by:
-//  - the seeder CLI to verify post-seed shape;
+//  - the E2E exit-criterion test (`apps/api/exitcriteriontest/`,
+//    round-12) to verify post-seed milestone-tree shape;
 //  - P05 Astro roadmap view (when the milestone MCP tools land in P02
 //    they delegate to this RPC).
 func MilestoneTree(ctx context.Context, req MilestoneTreeRequest) (*MilestoneTree, error)
@@ -1257,10 +1272,11 @@ in chunks.
 > "18 tools at v1.0"). The `workitems.CreateMilestone`,
 > `workitems.UpdateMilestone`, `workitems.AssignItem`, and
 > `workitems.MilestoneTree` private RPCs (§4.4.1) ARE available in P01
-> for the seeder CLI (§9) and the future Astro client (P05). Tool 4
-> (`create`) and Tool 5 (`update`) accept a `milestone_id` field that
-> references an existing milestone — they do not create or modify
-> milestone rows. Tool 8 (`list`) accepts `milestone_id` as a filter.
+> for the E2E exit-criterion test (`apps/api/exitcriteriontest/`,
+> round-12) and the future Astro client (P05). Tool 4 (`create`) and
+> Tool 5 (`update`) accept a `milestone_id` field that references an
+> existing milestone — they do not create or modify milestone rows.
+> Tool 8 (`list`) accepts `milestone_id` as a filter.
 
 #### Tool 1 — `prime`
 
@@ -2222,109 +2238,24 @@ the subscriber during its `pipeline_stage` recompute pass.
 
 ---
 
-## 9. Seeder CLI (`apps/api/cmd/unblock-seed/`)
+## 9. [Removed — round-12]
 
-Per Plan §6 Q3 resolution: a one-shot Go CLI that bootstraps the
-exit-criterion fixture. Owned by Greta.
+The one-shot Go CLI seeder previously specified here
+(`apps/api/cmd/unblock-seed/`) was deleted from P01 scope on 2026-05-22
+after `/investigate` on bead `unblock-tv8.23` surfaced four blockers
+(DRIFT-1..4 — see round-12 changelog at the top of this spec).
 
-### 9.1 Surface
+Replacement: the E2E exit-criterion test (`apps/api/exitcriteriontest/`)
+owns its own seed via `TestMain` + direct `encore.dev/storage/sqldb`
+writes, mirroring the `apps/api/shared/rbactest/seed.go` pattern. The
+canonical 5-item graph fixture topology that used to live here is
+relocated to §11.1 as the authoritative exit-criterion fixture
+description. Fixture data lives as Go constants/structs in
+`apps/api/exitcriteriontest/fixture.go` — no YAML, no
+`gopkg.in/yaml.v3` dependency.
 
-```
-unblock-seed [--config <path>] [--exit-criterion-fixture] [--issue-key]
-```
-
-| Flag | Purpose |
-|---|---|
-| `--config <path>` | YAML fixture file describing org/projects/users/items/edges to seed |
-| `--exit-criterion-fixture` | Loads the canonical `apps/api/cmd/unblock-seed/fixtures/exit-criterion.yaml` (a 5-item dependency graph used by the E2E test) |
-| `--issue-key <args>` | Issues an API key (calls `auth.IssueAPIKey` private RPC); prints the raw key to STDOUT once, never persists it |
-
-### 9.2 Fixture schema (`exit-criterion.yaml`)
-
-```yaml
-organizations:
-  - id: org_exit_criterion
-    slug: exit-criterion
-    name: P01 Exit Criterion
-projects:
-  - id: prj_exit
-    org_id: org_exit_criterion
-    slug: default
-    name: Default
-users:
-  - id: usr_alice
-    primary_provider: github
-    primary_provider_id: "1"
-    email: alice@example.com
-    display_name: Alice
-api_keys:
-  - issued_to_user: usr_alice
-    org_id: org_exit_criterion
-    label: alice-claude-code
-    agent_kind: claude-code
-items:
-  - id: itm_a
-    project_id: prj_exit
-    type: task
-    title: Bootstrap (already done)
-    status: Done
-    impl_state: done
-    review_state: approved
-    qa_state: passed
-    closed_at: now
-  - id: itm_b
-    project_id: prj_exit
-    type: task
-    title: Implement core (ready)
-    status: Ready
-    is_ready: true
-  - id: itm_c
-    project_id: prj_exit
-    type: task
-    title: Depends on B
-  - id: itm_d
-    project_id: prj_exit
-    type: task
-    title: Depends on B
-  - id: itm_e
-    project_id: prj_exit
-    type: task
-    title: Cycle attempt target
-    status: Ready
-    is_ready: true
-dependencies:
-  - from: itm_a
-    to: itm_b
-    kind: blocks
-  - from: itm_b
-    to: itm_c
-    kind: blocks
-  - from: itm_b
-    to: itm_d
-    kind: blocks
-  - from: itm_d
-    to: itm_e
-    kind: blocks    # added so itm_e → itm_a (cycle attempt) closes the chain
-                    # itm_a → itm_b → itm_d → itm_e → itm_a (review L10-C1)
-```
-
-### 9.3 Behaviour
-
-The seeder operates by calling the documented private RPCs (it does NOT
-write to Postgres directly). This guarantees the seed exercises the same
-RBAC and validation paths as production, and forces the seeder to evolve
-in lockstep with the API.
-
-For `--issue-key`, the raw key is printed once to STDOUT in the form:
-
-```
-KEY_ID=01HQ...
-KEY_PREFIX=abc123de
-RAW_KEY=unblock_pat_abc123de4f5g6h7i8j9k...
-```
-
-The raw key is never persisted to disk. Operators capture STDOUT, paste
-into their agent's secret store, and discard.
+Section number 9 is retained as a tombstone to preserve the §10..§14
+numbering used by 30+ cross-references throughout this spec.
 
 ---
 
@@ -2563,17 +2494,81 @@ threat model patched accordingly.
 
 ### 11.1 Functional acceptance (PRD §8 P01 exit criterion)
 
+#### 11.1.0 Exit-criterion fixture (relocated from former §9.2, round-12)
+
+The fixture is the canonical 5-item dependency graph the E2E test
+materialises and asserts against. Topology preserved verbatim from
+former §9.2:
+
+| Item | Project | Type | Title | Status | impl_state | review_state | qa_state | is_ready | closed_at |
+|---|---|---|---|---|---|---|---|---|---|
+| `itm_a` | `prj_exit` | task | Bootstrap (already done) | `Done` | `done` | `approved` | `passed` | — | `now` |
+| `itm_b` | `prj_exit` | task | Implement core (ready)   | `Ready` | (default) | (default) | (default) | `true` | — |
+| `itm_c` | `prj_exit` | task | Depends on B             | (default) | (default) | (default) | (default) | (default) | — |
+| `itm_d` | `prj_exit` | task | Depends on B             | (default) | (default) | (default) | (default) | (default) | — |
+| `itm_e` | `prj_exit` | task | Cycle attempt target     | `Ready` | (default) | (default) | (default) | `true` | — |
+
+Dependency edges (all `kind = 'blocks'`):
+
+- `itm_a → itm_b`
+- `itm_b → itm_c`
+- `itm_b → itm_d`
+- `itm_d → itm_e` (added so `itm_e → itm_a` closes the chain — review L10-C1: `itm_a → itm_b → itm_d → itm_e → itm_a`)
+
+Org / project / user / API-key scaffolding the fixture seeds alongside
+the graph:
+
+- One `org.organizations` row: id=`org_exit_criterion`, slug=`exit-criterion`, name=`P01 Exit Criterion`.
+- One `org.projects` row: id=`prj_exit`, org=`org_exit_criterion`, slug=`default`, name=`Default`.
+- One `auth.users` row: id=`usr_alice`, primary_provider=`github`, primary_provider_id=`"1"`, email=`alice@example.com`, display_name=`Alice`.
+- One `mcp.api_keys` row: issued_to_user=`usr_alice`, org=`org_exit_criterion`, label=`alice-claude-code`, agent_kind=`claude-code`.
+
+The displayed ids above are illustrative labels — the actual seed mints
+ULIDs at runtime via `apps/api/shared/ulid` (same constraint as
+`apps/api/shared/rbactest/seed.go`: hard-coded ids would clash on UNIQUE
+constraints across long-lived dev clusters).
+
+#### 11.1.1 Seed ownership (round-12)
+
+The E2E test in `apps/api/exitcriteriontest/` owns its own seed via
+`TestMain` + direct `encore.dev/storage/sqldb` writes, mirroring
+`apps/api/shared/rbactest/seed.go:46-53` ("All rows go through direct
+`sqldb.Exec`, NOT through the auth/org RPCs. The RPC surfaces require
+an Encore auth context the test cannot easily fabricate"). Fixture
+data lives as Go constants/structs in
+`apps/api/exitcriteriontest/fixture.go` — no YAML file, no
+`gopkg.in/yaml.v3` dependency in `go.mod`.
+
+The `mcp.api_keys` row is inserted via direct SQL with `key_hash`
+computed using `secrets.APIKeyHMACSecret` per the production hashing
+in `apps/api/auth/apikey.go:103-111` (HMAC-SHA256 over the raw key,
+32-byte digest stored as `bytea`); the raw key value is held in
+memory by the test goroutine and used as the `Bearer` token in the
+RPC assertions below. The test never calls `auth.IssueAPIKey` —
+direct INSERT is the seed contract (DRIFT-4 round-12: Encore parser
+invariant E1388 forbids `package main` under `cmd/` from calling
+private RPCs).
+
+Milestone rows seeded for the round-2 D1 milestone assertions (see
+below) ARE created through Encore's private mesh by calling
+`workitems.CreateMilestone` / `workitems.AssignItem` directly from
+the test goroutine — milestone RPCs work from a test-internal Encore
+context (the test is part of an Encore service, not `package main`
+under `cmd/`).
+
+#### 11.1.2 Functional assertions (PRD §8 P01 exit criterion)
+
 The end-to-end harness in `apps/api/exitcriteriontest/` runs against the
 seeded fixture and asserts:
 
-- [ ] `auth_handler` accepts a `Bearer <api-key>` from `unblock-seed --issue-key` and resolves to the correct `Identity`.
-- [ ] `prime` returns a non-empty `ready_summary` (the seeder placed `itm_b` and `itm_e` in ready state) and an empty `claimed_by_me`.
+- [ ] `auth_handler` accepts a `Bearer <api-key>` derived from the `mcp.api_keys` row inserted by the test seed (§11.1.1) and resolves to the correct `Identity`.
+- [ ] `prime` returns a non-empty `ready_summary` (the test seed placed `itm_b` and `itm_e` in ready state per §11.1.0) and an empty `claimed_by_me`.
 - [ ] `ready --limit 1` returns one item, deterministically.
 - [ ] `claim` on the returned item succeeds; a second concurrent `claim` from a different agent receives `{ "kind": "ALREADY_CLAIMED", ... }`.
 - [ ] `set_state(impl_state=done)` on the claimed item is accepted (structural invariant only — `claimed_by_id` is set).
 - [ ] `close` on the same item succeeds (P01 relaxation: `claimed_by_id IS NOT NULL` is the only precondition); cascade subscriber fires.
 - [ ] After cascade, `prime` reflects newly unblocked dependents (`itm_c`, `itm_d` flip to ready).
-- [ ] `add_dependency(from=itm_e, to=itm_a)` is rejected with `CYCLE_DETECTED` (would form `itm_a → itm_b → … → itm_e → itm_a`; the seeder includes such an edge configuration).
+- [ ] `add_dependency(from=itm_e, to=itm_a)` is rejected with `CYCLE_DETECTED` (would form `itm_a → itm_b → … → itm_e → itm_a`; the §11.1.0 fixture includes the `itm_d → itm_e` edge that closes the chain when the cycle-attempt edge is added).
 - [ ] `deps.cascade_events` has one row per fired cascade with a populated `event_id` and the affected set; `kind='close'` for the cascade triggered by Tool 6 above.
 - [ ] **Cascade-symmetry kinds (round-6 §6.3.0).** The exit-criterion
   harness exercises each of the four `kind` values and asserts exactly
@@ -2591,9 +2586,10 @@ seeded fixture and asserts:
     the Claim fires the I-3 reset path and publishes
     `state_change`. Assert a row with `kind='state_change'` and
     `triggered_by_item_id` = the claimed item id.
-- [ ] **Milestones (round-2 D1).** The seeder calls `workitems.CreateMilestone`
-  twice — once for a parent (depth=1) and once for a child whose
-  `parent_milestone_id` references the parent (depth=2) — then calls
+- [ ] **Milestones (round-2 D1).** The E2E test (`apps/api/exitcriteriontest/`, round-12)
+  calls `workitems.CreateMilestone` twice via Encore's private mesh — once
+  for a parent (depth=1) and once for a child whose `parent_milestone_id`
+  references the parent (depth=2) — then calls
   `workitems.AssignItem(itm_b, child_milestone_id)`; `MilestoneTree` returns
   the parent with the child nested, and `workitems.Get(itm_b)` returns the
   expected `MilestoneID`. M-INV-7 is exercised: assigning an item to a
@@ -2711,7 +2707,10 @@ seeded fixture and asserts:
 - [ ] `docs/specs/01-spec-backend-mvp.md` is **APPROVED** before
   implementation starts (this document).
 - [ ] README.md updated with P01 user surface (MCP Bearer auth, the 14
-  tools' one-liners, `unblock-seed` invocation).
+  tools' one-liners). The former `unblock-seed` invocation deliverable
+  is dropped (round-12 — seeder CLI deleted from P01 scope; the
+  exit-criterion fixture is now seeded by the E2E test itself per
+  §11.1.1).
 - [ ] `apps/api/README.md` documents service decomposition and migration
   ownership (the dedicated `db`-service migration-owner pattern is
   non-obvious — every domain service is an equal consumer).
@@ -2756,10 +2755,15 @@ section that locks its contract:
 | D-5 (Tools 11–12) | Greta | §6.2 (tools 11–12), §6.5 |
 | D-6 (Tools 13–14) | Greta | §6.2 (tools 13–14) |
 | D-7 (Catalogue v0) | Greta | §10.3 |
-| E-1 (Seeder CLI) | Greta | §9 |
 | E-2 (NFR-1 latency harness) | Greta | §11.2 (warm-cache definition) |
 | E-3 (NFR-2 RBAC suite) | Greta | §10.1, §11.2 |
-| E-4 (Exit-criterion E2E test) | Greta | §11.1, §9 (fixture), §6.3 (cascade), §6.5 (cycle) |
+| E-4 (Exit-criterion E2E test) | Greta | §11.1 (incl. §11.1.0 fixture topology + §11.1.1 seed ownership), §6.3 (cascade), §6.5 (cycle) |
+
+> **Round-12 note.** The former E-1 row (Seeder CLI) is removed — bead
+> `unblock-tv8.23` is cancelled in lockstep, post-spec, by the
+> orchestrator. The exit-criterion fixture is now owned by E-4 itself
+> per §11.1.1 (the E2E test runs its own `TestMain` seed via direct
+> `sqldb.Exec`, mirroring `apps/api/shared/rbactest/seed.go`).
 
 ---
 
@@ -2793,7 +2797,6 @@ confirms:
 - [ ] Migration filenames and numbering are agreed.
 - [ ] Error envelope kinds and `data` shapes cover every failure mode the
   exit-criterion harness exercises.
-- [ ] The seeder CLI surface is sufficient for both ops and the E2E test.
 - [ ] No simplification has been smuggled in — every plan §2 / §6 / §3
   resolution is preserved.
 

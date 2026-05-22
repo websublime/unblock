@@ -48,9 +48,9 @@ Per SPEC §5.2 (8 services × 8 schemas, 1:1 mapping locked).
 
 | Service | Surface delivered in P01 | Notes |
 |---|---|---|
-| `auth` | OAuth2+PKCE flow (private `auth.ExchangeOAuthCode`), session validation (private `auth.Validate`), API key issuance + validation (MCP Bearer auth), `Identity` resolution | OAuth callback **lives on the Astro origin** in P05; in P01 the callback is exercised by integration tests only. API key issuance ships **as a private RPC** since there is no web UI to drive it; tests and operators use it via Encore's local dashboard or a one-shot CLI seeder (§4.4). |
+| `auth` | OAuth2+PKCE flow (private `auth.ExchangeOAuthCode`), session validation (private `auth.Validate`), API key issuance + validation (MCP Bearer auth), `Identity` resolution | OAuth callback **lives on the Astro origin** in P05; in P01 the callback is exercised by integration tests only. API key issuance ships **as a private RPC** (`auth.IssueAPIKey`) since there is no web UI to drive it; **the E2E exit-criterion test issues its API key via direct INSERT into `mcp.api_keys`** (round-12 — see spec §11.1.1; the seeder CLI originally planned for this is deleted). Dev exploration outside tests uses `psql` against the local Postgres or Encore's local dashboard. |
 | `org` | Org / project CRUD, RBAC role bindings, `org.Authorize(identity, resource, action)` | Required because every `workitems`, `deps`, and `mcp` call is org-scoped (NFR-2). |
-| `workitems` | Items, comments, labels, milestones (recursive), findings; private RPCs `Create / Update / GetTrail / ListByMilestone / AppendComment / SetStateColumns` plus the four milestone RPCs `CreateMilestone / UpdateMilestone / AssignItem / MilestoneTree` (round-2 D1 — see SPEC §4.4.1). | Comments append-only; milestone tree depth ≤ 4 (M-INV-6); findings are first-class child items. **Milestone CRUD is reachable only via private RPC in P01** — agent-facing milestone MCP tools defer to P02 to preserve PRD FR-8 "18 tools at v1.0" (option (c) in round-2 D1). The seeder CLI and the future Astro client (P05) drive milestone creation through the private RPCs. |
+| `workitems` | Items, comments, labels, milestones (recursive), findings; private RPCs `Create / Update / GetTrail / ListByMilestone / AppendComment / SetStateColumns` plus the four milestone RPCs `CreateMilestone / UpdateMilestone / AssignItem / MilestoneTree` (round-2 D1 — see SPEC §4.4.1). | Comments append-only; milestone tree depth ≤ 4 (M-INV-6); findings are first-class child items. **Milestone CRUD is reachable only via private RPC in P01** — agent-facing milestone MCP tools defer to P02 to preserve PRD FR-8 "18 tools at v1.0" (option (c) in round-2 D1). The E2E exit-criterion test (`apps/api/exitcriteriontest/`, round-12) and the future Astro client (P05) drive milestone creation through the private RPCs. |
 | `deps` | Edges, cycle detection at write time, ready-set materialisation, cascade subscriber, `deps.cascade_events` audit table; private RPCs `AddEdge / RemoveEdge / IsReady / Closure` | The cascade subscriber **also maintains `pipeline_stage`** (SPEC §5.7.1). |
 | `mcp` | Streamable HTTP transport (`POST /mcp` + `GET /mcp` per MCP spec 2025-06-18), Go SDK `github.com/modelcontextprotocol/go-sdk`, tool registry, the 14 P01 tools, Bearer API key auth via `auth.Validate`, structured error envelope | **No state-machine BLOCK conditions** in P01 — see §3.4 below for the explicit deferral. |
 | **public** | FR-12 v1.0 endpoints' wiring (`POST /mcp` + `GET /mcp` Streamable HTTP only — `POST /webhooks/github` is P02) | Only the MCP endpoint in P01. |
@@ -133,11 +133,15 @@ sequence, which the §9.4.0 ordering rules already pin independently.
   schemas** per §2.1 above, ordered per SPEC §9.4.0.
 - `infra/github/` CI workflow runs Greta's gate set (Go) plus the
   cross-cutting NFR-1 + NFR-2 gates. (Infra supervisor scope.)
-- A one-shot Go CLI seeder under `apps/api/cmd/unblock-seed/` capable
-  of (a) bootstrapping an `auth.users` + `org.organizations` + project
-  + API key fixture and (b) loading a manually-seeded dependency graph
-  from a YAML fixture for the exit-criterion harness. **See §6 OPEN
-  QUESTION 3** — the user may prefer Encore's local dashboard for this.
+- **Exit-criterion fixture seeding (round-12 — replaces former seeder
+  CLI bullet).** The E2E test package `apps/api/exitcriteriontest/`
+  owns its own `TestMain` seed using direct `encore.dev/storage/sqldb`
+  writes, mirroring `apps/api/shared/rbactest/seed.go`. Fixture data
+  lives as Go constants/structs in `apps/api/exitcriteriontest/fixture.go`
+  — no YAML, no `gopkg.in/yaml.v3` dependency. No standalone CLI
+  binary ships in P01 (`apps/api/cmd/unblock-seed/` is deleted from
+  scope). See §6 Q3 (resolved 2026-05-22) and spec §11.1.1 for the
+  rationale and the seed contract.
 
 ---
 
@@ -273,10 +277,15 @@ into bd.
 
 | ID | Task | Owner |
 |---|---|---|
-| E-1 | Seeder CLI under `apps/api/cmd/unblock-seed/` (per §6 Q3) | go-supervisor (Greta) |
 | E-2 | NFR-1 latency harness: warm-cache `prime → ready → claim` p99 < 2 s integration test | go-supervisor (Greta) |
 | E-3 | NFR-2 RBAC regression suite — release-blocking gate | go-supervisor (Greta) |
-| E-4 | End-to-end exit-criterion test: agent authenticates, completes `prime → ready → claim → close`, cascade fires, second agent observes the new ready set, cycle attempt is rejected | go-supervisor (Greta) |
+| E-4 | End-to-end exit-criterion test: agent authenticates, completes `prime → ready → claim → close`, cascade fires, second agent observes the new ready set, cycle attempt is rejected. **Owns the fixture seed in `TestMain` via direct `sqldb.Exec` (round-12; mirrors `apps/api/shared/rbactest/seed.go`); fixture data lives as Go constants in `apps/api/exitcriteriontest/fixture.go`.** See spec §11.1.0 (fixture topology) + §11.1.1 (seed ownership). | go-supervisor (Greta) |
+
+> **Round-12 note (2026-05-22).** The former E-1 (Seeder CLI) row is
+> removed. The seeder CLI is deleted from P01 scope; bead `unblock-tv8.23`
+> is cancelled in lockstep by the orchestrator. See spec round-12
+> changelog + §6 Q3 update below for the rationale (4 spec-drift
+> blockers, including Encore parser invariant E1388).
 
 ### 4.6 Inter-track dependencies (summary)
 
@@ -406,6 +415,29 @@ for issuing the first API key. Three options, in order of effort:
 `apps/api/cmd/unblock-seed/`. Reusable by the exit-criterion harness;
 ops-repeatable; no public-surface widening.
 
+**SUPERSEDED 2026-05-22 (round-12, post-`/investigate` on bead
+`unblock-tv8.23`):** the seeder CLI is **deleted from P01 entirely**.
+Four spec-drift blockers surfaced during investigation —
+(DRIFT-1) no `auth.users` private RPC exists for a CLI consumer;
+(DRIFT-2) the state-machine doesn't allow the canonical fixture's
+`Done`/`Ready` end-states via RPC; (DRIFT-3) `--issue-key` lacked
+operand flags; (DRIFT-4) Encore parser invariant E1388 forbids
+`package main` under `cmd/` from calling private RPCs (making "tiny
+CLI calling private RPCs" architecturally impossible without scope
+inflation: new public RPCs OR promoting the binary to an Encore
+service — both compromise design). **New resolution:** the
+exit-criterion fixture lives inside the E2E test package
+(`apps/api/exitcriteriontest/`) as Go constants/structs in
+`fixture.go` and is loaded via direct `encore.dev/storage/sqldb`
+writes in `TestMain`, mirroring `apps/api/shared/rbactest/seed.go`.
+No separate CLI binary in P01. `--issue-key` is deferred entirely —
+in-test API-key issuance happens via direct `INSERT INTO mcp.api_keys`
+(computing `key_hash` with `secrets.APIKeyHMACSecret` per
+`apps/api/auth/apikey.go:103-111`); dev exploration outside tests
+uses `psql`. If an operator-key CLI ever becomes necessary it earns
+its own plan/spec entry in a future phase. See spec §11.1.0 (fixture
+topology) + §11.1.1 (seed ownership) + spec round-12 changelog.
+
 ### Q4. `mcp.meta_catalogue` and `verify_can_transition` in P01 vs. P02
 
 **Question.** SPEC §5.2.2 / §11 places `mcp.meta_catalogue` v1 and
@@ -531,7 +563,8 @@ This phase is **DONE** when all of the following are demonstrably true.
 - [ ] An agent authenticates via `Bearer <api-key>` against the Streamable HTTP MCP endpoint (`POST /mcp` for tool calls; `GET /mcp` for server-initiated SSE).
 - [ ] The agent calls `prime` and receives a non-empty ready set summary,
       claimed-by-me list (initially empty), and recent cascade events
-      list (initially populated by the seeder).
+      list (initially populated by the E2E test seed in `TestMain` —
+      round-12; see spec §11.1.1).
 - [ ] The agent calls `ready --limit 1` and receives one item ordered
       deterministically.
 - [ ] The agent calls `claim` on that item and is granted the claim;
@@ -584,7 +617,10 @@ This phase is **DONE** when all of the following are demonstrably true.
 - [ ] `docs/research/01-research-backend-mvp.md` closes R-P01-1 through
       R-P01-10 with verified findings before the spec is approved.
 - [ ] README.md updated with P01 user surface (MCP Bearer auth, the 14
-      tools' one-liners, the seeder CLI invocation).
+      tools' one-liners). The former seeder CLI invocation deliverable
+      is dropped (round-12 — seeder CLI deleted from P01 scope; the
+      exit-criterion fixture is now seeded by the E2E test itself per
+      spec §11.1.1).
 - [ ] AGENTS.md / CLAUDE.md updated to reflect the Go backend reality
       (Greta provisioning if §6 Q5 lands that way; Rust v1 archive note).
 

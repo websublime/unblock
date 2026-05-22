@@ -499,9 +499,14 @@ type IssueAPIKeyResponse struct {
 	RawKey    string `json:"raw_key"`    // FULL raw key — returned ONCE; never persisted in clear
 }
 
-// IssueAPIKey creates a new mcp.api_keys row. Called by the seeder CLI
-// (P01) and by future operator surfaces. Returns the raw key ONCE — the
-// caller stores it; subsequent reads return only the prefix and metadata.
+// IssueAPIKey creates a new mcp.api_keys row. In P01 it is invoked from
+// test seeds via direct INSERT (the E2E test under
+// apps/api/exitcriteriontest/ writes the row straight to mcp.api_keys
+// with key_hash computed via secrets.APIKeyHMACSecret per
+// apps/api/auth/apikey.go:103-111 — see spec §11.1.1, round-12).
+// Operator-facing surfaces (CLI or web admin) are deferred to a future
+// phase. Returns the raw key ONCE — the caller stores it; subsequent
+// reads return only the prefix and metadata.
 //
 //encore:api private method=POST path=/auth.IssueAPIKey
 func IssueAPIKey(ctx context.Context, req *IssueAPIKeyRequest) (*IssueAPIKeyResponse, error) {

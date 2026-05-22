@@ -263,7 +263,7 @@
 
 - **SPEC §10.1:** "Exact key lifecycle and rotation policy land in the P01 spec."
 - **Plan §5 R-P01-10:** "Rotation / revocation approach for v1.0". The plan does not have a Q-resolution for this.
-- **Recommendation:** spec pins: keys never expire by default (`expires_at NULL`); rotation is opt-in via the seeder CLI; revocation flips `revoked_at`; no automatic refresh.
+- **Recommendation:** spec pins: keys never expire by default (`expires_at NULL`); rotation is RPC-driven (`auth.IssueAPIKey` mints a fresh row, operator/test then sets `revoked_at` on the old row after the rollover window — manual two-step, no auto-rotate); revocation flips `revoked_at` via `auth.RevokeAPIKey`; no automatic refresh. (Round-12 2026-05-22: the originally-recommended seeder-CLI surface for rotation is dropped; rotation/revocation remain RPC-driven and the in-test seed exercises issuance via direct INSERT — see spec §11.1.1.)
 
 ### AF5 — Cycle-detection CTE wraps in transaction with `SELECT ... FOR UPDATE` on edges
 
