@@ -8,3 +8,8 @@ encore.gen.cue
 # --type {prod,dev}`; this file is for local emulator runs only and
 # must never be committed. See SPEC §3.5.
 /.secrets.local.cue
+
+# Go build artifacts from cmd/<tool> tools.
+# `go build ./cmd/<tool>` emits the binary at apps/api/<tool> by default.
+# Add new entries here when new cmd/ tools are introduced.
+/gen-catalogue
