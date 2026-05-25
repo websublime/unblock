@@ -12,6 +12,7 @@
 - 2026-05-19 — round-9 (rbac-coverage): §10.1 — added deps.cascade_events to E-3 RBAC suite scope (closes coverage gap on the AF2 read path via Tool 1 prime). C-6 scope unchanged.
 - 2026-05-19 — round-10 (rbac-coverage closure for E-3 dual-shape): §10.1 — `deps.cascade_events` joins `org.resourceAllowed` and `org.agentReadWriteResources` so the Authorize-gate `KindAuthorizeOnly` axis can be exercised alongside the existing `KindOrgScoped` row-leak axis. Agents read the table through Tool 1 `prime`'s AF2 path (read-side); writes remain closed-loop (only the cascade subscriber emits rows server-side). Without this allow-list extension, an `KindAuthorizeOnly` tuple short-circuits to `InvalidArgument` instead of asserting the intended `PermissionDenied` contract. CI separate-report wiring (E-3 bead AC #3) is reassigned to A-6 (`unblock-tv8.6`, infra-supervisor) and gated by an explicit `tv8.25 → tv8.6` dependency edge; E-3 ships the suite discoverable as `encore test ./apps/api/shared/rbactest/...`, A-6 wires the separate gate.
 - 2026-05-19 — round-11 (`-race` removed from §11.2 NFR-10 gate set, encore upstream bug closure): §11.2 NFR-10 — `go test ./... -race` dropped from the gate set and replaced with a split between Encore service packages (use `encore test ./...`, no `-race`) and leaf packages without `encore.dev` imports (use `go test -race`, native Go toolchain). Reason: [encoredev/encore#1943](https://github.com/encoredev/encore/issues/1943) — `encore test ... -race` reproducibly SIGSEGVs inside the encore-go runtime's `lazyTraceInit.initStream` goroutine spawn (cross-platform: confirmed on macOS arm64 and Linux amd64 ubuntu-24.04 GHA runner). Bug filed 2025-05-27, no maintainer triage, no fix PR. Toolchain footprint: encore v1.57.0, encore-go go1.26.2-encore (verified no race-related fixes in v1.57.1..v1.57.5). The rbactest suite is single-threaded by design (`rbac.Bind` not goroutine-safe; no `t.Parallel`), so dropping `-race` removes no real coverage on the encore-side gate. Leaf-package race coverage remains via native `go test -race` on `apps/api/shared/ulid/`, `apps/api/shared/rbac/`, `apps/api/shared/lint/` (packages without `encore.dev` imports). E-3 bead AC #1 (tv8.25) and A-6 bead AC (tv8.6) are patched in lockstep with this round.
+- 2026-05-25 — round-13 (cascade-subscriber test invocation; spec-drift closure from `/investigate` on bead `unblock-tv8.26`): §11.1.2 and §11.3 require row-level assertions on `deps.cascade_events` for kinds `'close'`, `'edge_added'`, and `'state_change'`, but those rows are only written by the cascade subscriber (`apps/api/deps/cascade_subscriber.go::handleCascadeRequested`) and two facts make the assertions unreachable in-test by construction: (1) Encore Pub/Sub subscriptions DO NOT fire under `encore test` (the test harness simulates publishes but does not consume them — `et.Topic(...).PublishedMessages()` is publish-side only), and (2) `handleCascadeRequested` is package-private to `deps` with no exported test hook. Resolution: a thin exported wrapper `deps.HandleCascadeRequestedForTest(ctx context.Context, msg *deps.CascadeRequested) error` is added (file location is implementor's call — either `apps/api/deps/cascade_subscriber.go` or a new `apps/api/deps/export_test_handler.go`), pass-through to `handleCascadeRequested` with no behavioural divergence from production. The exit-criterion harness in `apps/api/exitcriteriontest/` (and any future Encore test needing cascade row materialisation) publishes via the producing RPC, captures published messages via `et.Topic(deps.CascadeRequestedTopic).PublishedMessages()`, then invokes `deps.HandleCascadeRequestedForTest` once per captured publish to drive the subscriber. This mirrors the established `mcp.ServeMCPForTest` precedent (`apps/api/mcp/export_test_writer.go:49-65`) — a thin exported wrapper around a package-private handler whose `ForTest` suffix is the audit trail. The wrapper is exported on the production import path BUT does not appear on Encore's API surface (plain Go function, not an `//encore:api`), so the public RPC catalogue is unaffected. §11.1.1 (round-12) gains a "Cascade subscriber test invocation" paragraph codifying the contract; §11.3 gains a one-line cross-reference under the single-writer invariant block. No DDL change, no migration, no public API change, no `go.mod` addition. Spec status remains APPROVED — this is a test-harness contract clarification, not a re-architecting.
 - 2026-05-22 — round-12 (seeder CLI deleted from P01 scope; spec-drift closure from `/investigate` on bead `unblock-tv8.23`): the one-shot `apps/api/cmd/unblock-seed/` Go CLI is removed from P01 entirely. Four blockers triggered the deletion — (DRIFT-1) no `auth.users` private RPC exists for the seeder to call; (DRIFT-2) the state-machine does not allow the canonical fixture's `Done`/`Ready` end-states via RPC; (DRIFT-3) `--issue-key` lacks operand flags; (DRIFT-4) Encore parser invariant E1388 forbids `package main` under `cmd/` from calling private RPCs, making "tiny CLI that calls private RPCs" architecturally impossible without scope inflation (new public RPCs or promoting the binary to an Encore service — both compromise design). Seeding responsibility moves to the E2E test package (`apps/api/exitcriteriontest/`) which owns a `TestMain` + direct-SQL seed mirroring `apps/api/shared/rbactest/seed.go:46-53` ("All rows go through direct `sqldb.Exec`, NOT through the auth/org RPCs"); fixture data lives as Go constants/structs in `apps/api/exitcriteriontest/fixture.go` (no YAML, no `gopkg.in/yaml.v3` dependency). The canonical 5-item graph topology (former §9.2: `itm_a`..`itm_e` with chain `a→b`, `b→c`, `b→d`, `d→e` plus the cycle-attempt edge closing the loop) is relocated verbatim into §11.1 as the authoritative exit-criterion fixture description. `--issue-key` is deferred entirely from P01 — no operator-key CLI in scope; in-test key issuance happens via direct `INSERT INTO mcp.api_keys` (computing `key_hash` with `secrets.APIKeyHMACSecret` per `apps/api/auth/apikey.go:103-111`); dev exploration outside tests uses `psql`. No new migrations, no DDL change, no `go.mod` additions. Patches in lockstep: §1 overview seeder bullet removed; §4.1 `IssueAPIKey` doc-comment updated; §4.4 / §4.4.1 / §6.2 Tool 4 seeder consumer notes rewritten; §9 deleted (tombstone retained to preserve §10..§14 numbering and the 30 cross-references that depend on it); §11.1 exit-criterion fixture relocation + E2E seed ownership note added; §11.4 docs and §14 approval checklist seeder mentions removed; §12 task-table E-1 row deleted (bead `unblock-tv8.23` cancelled in lockstep, post-spec, by the orchestrator); plan §2.1/§2.4/§4.5/§6 Q3 and root SPEC §9.4.6 / research AF4 / `apps/api/auth/auth.go` / `apps/api/db/migrations/0070_mcp.up.sql` updated. Spec status remains APPROVED — this is a scope reduction, not a re-architecting.
 
 **Author:** Ada (architect)
@@ -2556,6 +2557,54 @@ the test goroutine — milestone RPCs work from a test-internal Encore
 context (the test is part of an Encore service, not `package main`
 under `cmd/`).
 
+**Cascade subscriber test invocation (round-13).** The cascade
+subscriber (`apps/api/deps/cascade_subscriber.go::handleCascadeRequested`)
+is the SOLE writer of `deps.cascade_events` rows for kinds `'close'`,
+`'edge_added'`, `'edge_removed'`, and `'state_change'` (per the round-6
+§6.3.0 cascade-symmetry split — `pipeline_stage` single-writer is the
+subscriber, `is_ready` single-writer is the inline mutating call site).
+Encore Pub/Sub subscriptions DO NOT fire under `encore test`: the test
+harness records published messages but does not consume them, so a
+publish from `workitems.Close` / `deps.AddEdge` / `deps.RemoveEdge` /
+`workitems.SetStateColumns` / `workitems.Claim` (I-3 reset path) never
+reaches `handleCascadeRequested` and no row materialises. To make the
+§11.1.2 and §11.3 row-level assertions reachable, the subscriber is
+invoked directly via the exported wrapper
+`deps.HandleCascadeRequestedForTest(ctx context.Context, msg *deps.CascadeRequested) error`
+— a thin pass-through to `handleCascadeRequested` with no behavioural
+divergence from production. The wrapper mirrors the established
+`mcp.ServeMCPForTest` precedent (`apps/api/mcp/export_test_writer.go:49-65`):
+exported on the production import path, `ForTest` suffix is the audit
+trail, production callers MUST NOT invoke it. The wrapper is a plain
+Go function, NOT an `//encore:api` — Encore's public API surface is
+unaffected.
+
+Test ordering contract for the exit-criterion harness and any future
+Encore test needing cascade row materialisation:
+
+1. Invoke the producing RPC through the normal MCP / private-mesh path
+   (`workitems.Close`, `deps.AddEdge`, `deps.RemoveEdge`,
+   `workitems.SetStateColumns`, or `workitems.Claim` on the I-3 reset
+   path) — this performs the inline `is_ready` recompute (Regime A)
+   and publishes `CascadeRequested` for the multi-hop work.
+2. Capture the published messages via
+   `et.Topic(deps.CascadeRequestedTopic).PublishedMessages()` (or the
+   Encore-generated equivalent on the typed topic handle).
+3. For each captured message, invoke
+   `deps.HandleCascadeRequestedForTest(ctx, &msg)` exactly once to
+   materialise the `deps.cascade_events` row(s) and apply the
+   `pipeline_stage` updates (Regime B).
+4. Assert the row(s) per §11.1.2.
+
+Idempotency assertions (§11.3 — re-delivery property test) re-invoke
+`deps.HandleCascadeRequestedForTest` with the same `event_id` and
+assert the `ON CONFLICT (event_id, triggered_by_item_id) DO NOTHING`
+clause collapses the second insert to no-op, yielding byte-identical
+post-state and exactly one row per `(event_id, triggered_by_item_id)`.
+The Tool 12 (`remove_dependency`) inline-INSERT + post-commit
+subscriber re-INSERT collapse via reused `event_id` (round-6 changelog,
+§6.3.0 tension #1) is exercised through the same wrapper.
+
 #### 11.1.2 Functional assertions (PRD §8 P01 exit criterion)
 
 The end-to-end harness in `apps/api/exitcriteriontest/` runs against the
@@ -2689,7 +2738,11 @@ seeded fixture and asserts:
 - [ ] `deps.cascade_events` insert is idempotent on re-delivery (property
   test: re-deliver every `CascadeRequested` event twice; assert post-state
   is byte-identical and exactly one row exists per `(event_id,
-  triggered_by_item_id)`).
+  triggered_by_item_id)`). Re-delivery under `encore test` is driven by
+  invoking `deps.HandleCascadeRequestedForTest` twice with the same
+  message (Encore Pub/Sub subscriptions do not fire under `encore test`
+  — see §11.1.1 "Cascade subscriber test invocation" for the wrapper
+  contract and the `mcp.ServeMCPForTest` precedent).
 - [ ] Atomic claim is a single transaction with `SELECT FOR UPDATE`
   (property test: N=100 concurrent claim attempts on the same item;
   assert exactly one winner and N-1 `ALREADY_CLAIMED` errors).
