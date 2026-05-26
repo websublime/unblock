@@ -230,7 +230,19 @@ jobs:
         # working directory; the recipe under apps/api/.custom-gcl.yml
         # builds the binary to ./custom-gcl (its `destination: .` plus
         # `name: custom-gcl`).
-        run: golangci-lint custom
+        #
+        # `-v` (verbose) is essential in CI: the underlying `git clone`
+        # is invoked with `-q` by golangci-lint so any clone failure
+        # otherwise surfaces only as a bare `exit status 128` with no
+        # stderr. Verbose mode reveals the actual git error message
+        # for diagnosis.
+        #
+        # `GIT_TERMINAL_PROMPT=0` prevents git from blocking on an
+        # interactive credential prompt if the clone unexpectedly hits
+        # a 401 — fail fast instead of timing out the runner.
+        env:
+          GIT_TERMINAL_PROMPT: "0"
+        run: golangci-lint custom -v
 
       - name: golangci-lint run (custom-gcl)
         # SPEC §11.2 NFR-10 says `golangci-lint run --max-warnings 0`.
