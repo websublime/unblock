@@ -40,7 +40,7 @@
 //
 // See:
 //   - apps/api/.custom-gcl.yml (CI binary build recipe — pinned to
-//     v2.5.0 per the orchestrator DECISION on unblock-tv8.6 dated
+//     v2.7.2 per the orchestrator DECISION on unblock-tv8.6 dated
 //     2026-05-26).
 //   - apps/api/.golangci.yml lines 82-101 (linters.settings.custom
 //     wiring; the names below match those keys verbatim).
