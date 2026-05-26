@@ -1258,7 +1258,7 @@ func SetStateColumns(ctx context.Context, req *SetStateRequest) (*Item, error) {
 		reqReviewIsNeedsRework := req.ReviewState != nil && *req.ReviewState == reviewNeedsRework
 		reqQAIsFailed := req.QAState != nil && *req.QAState == qaFailed
 		currentQAFailedAndUnchanged := cur.QA == qaFailed && req.QAState == nil
-		if !(reqReviewIsNeedsRework || reqQAIsFailed || currentQAFailedAndUnchanged) {
+		if !reqReviewIsNeedsRework && !reqQAIsFailed && !currentQAFailedAndUnchanged {
 			return nil, preconditionError("impl_done_to_pending_requires_rework_path",
 				"impl_state=done → pending requires review_state=needs_rework or qa_state=failed")
 		}

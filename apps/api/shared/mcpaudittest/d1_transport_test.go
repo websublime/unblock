@@ -193,7 +193,7 @@ func TestD1_POSTInitializeReturnsSessionID(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+rawKey)
 
 	resp := httpDo(t, req, mcpInitializeTimeout)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -280,7 +280,7 @@ func TestD1_GETOpensSSEStream(t *testing.T) {
 	// + SDK Connect) and was a coupled flake source.
 	postResp := httpDo(t, postReq, mcpInitializeTimeout)
 	sessionID := postResp.Header.Get("Mcp-Session-Id")
-	postResp.Body.Close()
+	_ = postResp.Body.Close()
 	if sessionID == "" {
 		t.Fatalf("initialize must return Mcp-Session-Id; got empty")
 	}
@@ -300,7 +300,7 @@ func TestD1_GETOpensSSEStream(t *testing.T) {
 	// client closes. We close it after reading the response
 	// headers; the deadline only fires on a stuck handshake.
 	resp := httpDo(t, getReq, 10*time.Second)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
@@ -334,7 +334,7 @@ func TestD1_NonPOSTGETReturns405(t *testing.T) {
 			}
 
 			resp := httpDo(t, req, 5*time.Second)
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 
 			if resp.StatusCode != http.StatusMethodNotAllowed {
 				body, _ := io.ReadAll(resp.Body)
@@ -370,7 +370,7 @@ func TestD1_POSTNoAuthReturnsUnauthenticated(t *testing.T) {
 	// Deliberately no Authorization header.
 
 	resp := httpDo(t, req, 5*time.Second)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)

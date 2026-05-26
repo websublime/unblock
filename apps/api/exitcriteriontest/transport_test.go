@@ -114,7 +114,7 @@ func initializeSession(t *testing.T, rawKey string) string {
 	req.Header.Set("Authorization", "Bearer "+rawKey)
 
 	resp := httpDo(t, req, mcpInitializeTimeout)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -206,7 +206,7 @@ func callTool(t *testing.T, rawKey, sessionID, toolName string, arguments any) j
 	req.Header.Set("Mcp-Session-Id", sessionID)
 
 	resp := httpDo(t, req, mcpToolCallTimeout)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		t.Fatalf("tools/call %q status = %d, want 200; body=%s", toolName, resp.StatusCode, string(body))
