@@ -1,0 +1,267 @@
+# apps-api-ci.yml — Greta-gate CI for the apps/api/ Encore Go backend.
+#
+# Source of truth for the gate set: docs/specs/01-spec-backend-mvp.md
+# §11.2 NFR-10 (post-round-11 split shape). Bead unblock-tv8.6 is the
+# canonical owner of this workflow.
+#
+# Gate composition (each line is a separate GitHub Actions step so the
+# Checks-tab report row identifies which gate failed without parsing
+# logs):
+#
+#   1. go fmt ./...          (zero diffs)
+#   2. go vet ./...
+#   3. golangci-lint run     (custom-gcl binary — both project-local
+#                             module-plugin analyzers must load)
+#   4. encore check
+#   5. encore test ./...     (NO -race — see round-11 changelog and
+#                             https://github.com/encoredev/encore/issues/1943:
+#                             encore-go's lazyTraceInit.initStream
+#                             SIGSEGVs cross-platform under -race;
+#                             leaf-package race coverage takes the place
+#                             of an encore-side race signal.)
+#   6. encore test ./shared/rbactest/...
+#                             (Separate report row for the NFR-2
+#                             RBAC final-gate matrix. Spec §10.1
+#                             round-10 reassigns the release-blocking
+#                             separate-report wiring from E-3 / tv8.25
+#                             to this bead.)
+#   7. go test -race ./shared/ulid/... ./shared/rbac/... ./shared/lint/...
+#                             (Leaf packages whose init does NOT panic
+#                             under the native Go toolchain — this step
+#                             carries the gate's race signal per §11.2.)
+#
+# Toolchain pins:
+#
+#   - Runner: ubuntu-24.04. Round-11 spec changelog reproduced
+#     encoredev/encore#1943 on this image — pinning matches the spec's
+#     verified environment.
+#   - Go: read from apps/api/go.mod via setup-go's `go-version-file`.
+#     Today that resolves to 1.26.2; bumping go.mod auto-bumps CI.
+#   - Encore CLI: v1.57.0 explicit pin. Round-11 spec changelog
+#     identifies this as the reproduced-on CLI version; pinning
+#     eliminates version skew between local dev and CI (Olive's tv8.56
+#     evidence shows CLI version diffs change behaviour).
+#   - golangci-lint: v2.5.0. Matches apps/api/.custom-gcl.yml `version:`
+#     and apps/api/.golangci.yml line 36 narrative pin. v2 schema in
+#     .golangci.yml mandates a v2 binary.
+#
+# Secrets:
+#
+#   `encore test` boots the local Encore emulator, which reads four
+#   secrets declared in apps/api/auth/secrets.go (MemoryDEK,
+#   APIKeyHMACSecret, GitHubOAuthClientID, GitHubOAuthClientSecret).
+#   apps/api/mcp/transport.go fail-fasts at boot if APIKeyHMACSecret
+#   is empty (tv8.56 closure 2026-05-15); every package importing
+#   mcp/transport.go would panic before any test runs without it. CI
+#   writes a placeholder apps/api/.secrets.local.cue (CUE format, per
+#   Encore docs at https://encore.dev/docs/go/primitives/secrets)
+#   ahead of any `encore test` invocation. The file is .gitignored
+#   (apps/api/.gitignore "/.secrets.local.cue") so writing it in CI
+#   leaves no trace. Values mirror the dev placeholders shipped by
+#   developers — they are NEVER production credentials.
+#
+# Catalogue-drift workflow:
+#
+#   .github/workflows/catalogue-drift.yml is the no-op P01 scaffold
+#   owned by bead unblock-tv8.22 (D-7). This workflow does NOT touch
+#   it — bead AC #3 ("catalogue-drift.yml is present but exits 0
+#   unconditionally in P01") is satisfied by the existing file's
+#   shape; A-6 must not regress it. The two workflows have disjoint
+#   `paths:` filters and run independently.
+
+name: apps-api-ci
+
+on:
+  pull_request:
+    paths:
+      - 'apps/api/**'
+      - '.github/workflows/apps-api-ci.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'apps/api/**'
+      - '.github/workflows/apps-api-ci.yml'
+  workflow_dispatch:
+
+# Cancel superseded runs on the same PR to save minutes. Push-to-main
+# runs are NOT cancelled (each merge is a separate event of record).
+concurrency:
+  group: apps-api-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  greta-gate:
+    name: greta-gate (apps/api)
+    # ubuntu-24.04 matches the spec round-11 reproduction platform for
+    # encoredev/encore#1943. Docker daemon ships preinstalled and
+    # running, which `encore test`'s emulator (Postgres + Pub/Sub +
+    # Cron containers) needs.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: apps/api
+    env:
+      # Encore CLI version pin. Sourced once here, consumed by the
+      # install step below. Bump in lockstep with the encore.dev
+      # library version in apps/api/go.mod when the library bumps.
+      ENCORE_CLI_VERSION: v1.57.0
+      # golangci-lint version pin. MUST equal apps/api/.custom-gcl.yml
+      # `version:` and apps/api/.golangci.yml line 36 narrative pin.
+      GOLANGCI_LINT_VERSION: v2.5.0
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: setup-go
+        uses: actions/setup-go@v5
+        with:
+          # Resolve toolchain from apps/api/go.mod (today: 1.26.2).
+          # Resilient to future Go bumps without editing this file.
+          go-version-file: apps/api/go.mod
+          # Default cache key keys off go.sum, which is sufficient for
+          # apps/api's single-module workspace.
+          cache: true
+          cache-dependency-path: apps/api/go.sum
+
+      - name: install encore cli
+        # No upstream `encoredev/setup-encore` GitHub Action exists
+        # (verified across the repo and ENCORE.md). The official
+        # install path is the curl one-liner; the script supports a
+        # `bash -s -- <version>` argument to pin the release.
+        run: |
+          curl -L https://encore.dev/install.sh | bash -s -- "${ENCORE_CLI_VERSION}"
+          echo "${HOME}/.encore/bin" >> "${GITHUB_PATH}"
+        # Sanity-check the install succeeded and the pinned version
+        # landed before any consumer step runs.
+        shell: bash
+        working-directory: ${{ github.workspace }}
+
+      - name: verify encore cli version
+        run: encore version
+        working-directory: ${{ github.workspace }}
+
+      - name: provision local secrets for encore emulator
+        # Every `encore test` invocation boots the local emulator and
+        # therefore needs the four secrets declared at apps/api/auth/
+        # secrets.go to be non-empty (mcp/transport.go fail-fasts on
+        # APIKeyHMACSecret == ""; mirrors the values shipped to
+        # developers via the local .secrets.local.cue template). This
+        # file is .gitignored and is NEVER persisted past the runner.
+        run: |
+          cat > .secrets.local.cue <<'CUE'
+          // CI-only placeholder secrets. Mirrors the dev template
+          // shape declared at apps/api/auth/secrets.go. NEVER
+          // production values. Written fresh on every CI run.
+          MemoryDEK:               "ci-memory-dek-32-bytes-of-zeroes-for-tests-only"
+          APIKeyHMACSecret:        "ci-api-key-hmac-secret-32-bytes-of-zeroes-tests"
+          GitHubOAuthClientID:     "ci-github-oauth-client-id"
+          GitHubOAuthClientSecret: "ci-github-oauth-client-secret"
+          CUE
+
+      # ------------------------------------------------------------------
+      # Gate 1 — go fmt
+      # ------------------------------------------------------------------
+      - name: go fmt (zero diffs)
+        # `go fmt ./...` exits 0 even when it rewrites files; the diff
+        # is what we want to assert against. Capture its stdout and
+        # fail if any path was rewritten.
+        run: |
+          changed="$(gofmt -l .)"
+          if [ -n "${changed}" ]; then
+            echo "::error::gofmt would rewrite the following files:"
+            echo "${changed}"
+            exit 1
+          fi
+
+      # ------------------------------------------------------------------
+      # Gate 2 — go vet
+      # ------------------------------------------------------------------
+      - name: go vet
+        run: go vet ./...
+
+      # ------------------------------------------------------------------
+      # Gate 3 — golangci-lint (custom binary)
+      #
+      # Per orchestrator DECISION 2026-05-26 on bead unblock-tv8.6,
+      # stock golangci-lint is NOT acceptable: P01 must gate the two
+      # project-local module-plugin analyzers
+      # (no_direct_is_ready_write, no_rbac_dynamic_clause) that guard
+      # SPEC §11.3 invariants. `golangci-lint custom` reads
+      # apps/api/.custom-gcl.yml and emits ./custom-gcl with both
+      # analyzers compiled in.
+      # ------------------------------------------------------------------
+      - name: install golangci-lint
+        # Official install script. The version pin here MUST match the
+        # `version:` field of apps/api/.custom-gcl.yml so the schema
+        # (declared `version: "2"` in apps/api/.golangci.yml) and the
+        # binary used to build custom-gcl stay consistent.
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh \
+            | sh -s -- -b "$(go env GOPATH)/bin" "${GOLANGCI_LINT_VERSION}"
+          echo "$(go env GOPATH)/bin" >> "${GITHUB_PATH}"
+        working-directory: ${{ github.workspace }}
+
+      - name: build custom-gcl (loads project-local analyzers)
+        # `golangci-lint custom` reads .custom-gcl.yml from the current
+        # working directory; the recipe under apps/api/.custom-gcl.yml
+        # builds the binary to ./custom-gcl (its `destination: .` plus
+        # `name: custom-gcl`).
+        run: golangci-lint custom
+
+      - name: golangci-lint run (custom-gcl)
+        # SPEC §11.2 NFR-10 says `golangci-lint run --max-warnings 0`.
+        # That flag exists only on golangci-lint v1.x; in v2 (the
+        # binary the v2 schema in apps/api/.golangci.yml mandates)
+        # the equivalent semantics are native — any issue exits 1
+        # and `max-issues-per-linter: 0` + `max-same-issues: 0` in
+        # apps/api/.golangci.yml (lines 116-117) disable the
+        # truncation that previously made `--max-warnings 0` a
+        # required addition. No flag substitution needed: a clean
+        # run still exits 0; any issue still exits 1.
+        run: ./custom-gcl run
+
+      # ------------------------------------------------------------------
+      # Gate 4 — encore check
+      # ------------------------------------------------------------------
+      - name: encore check
+        # Encore-specific static analysis (RPC signatures, secret
+        # declarations, Pub/Sub topic registrations, etc.). Runs
+        # before any test step so any structural break is reported
+        # before Docker spends time booting the emulator.
+        run: encore check
+
+      # ------------------------------------------------------------------
+      # Gate 5 — encore test ./...
+      #
+      # Boots Postgres + Pub/Sub + Cron emulators automatically.
+      # NO -race per round-11 (encoredev/encore#1943 SIGSEGV).
+      # ------------------------------------------------------------------
+      - name: encore test (full suite)
+        run: encore test ./...
+
+      # ------------------------------------------------------------------
+      # Gate 6 — RBAC suite separate report
+      #
+      # Per SPEC §10.1 round-10 closure, the release-blocking
+      # NFR-2 RBAC final-gate is owned by A-6 (this bead) — invoke
+      # the rbactest package as its own step so a regression here
+      # shows up as a discrete Checks-tab row labelled "rbac-suite".
+      # ------------------------------------------------------------------
+      - name: encore test (rbac-suite, separate report)
+        run: encore test ./shared/rbactest/...
+
+      # ------------------------------------------------------------------
+      # Gate 7 — leaf-package race coverage
+      #
+      # `go test -race` on three packages whose init does NOT panic
+      # under the native toolchain (no Encore framework imports that
+      # touch sqldb.NewDatabase / pubsub.NewTopic at package init).
+      # This is where the gate's race signal lives — see round-11.
+      # ------------------------------------------------------------------
+      - name: go test -race (leaf packages)
+        run: go test -race ./shared/ulid/... ./shared/rbac/... ./shared/lint/...
