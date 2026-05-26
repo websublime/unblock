@@ -33,7 +33,7 @@
 #
 #        cd apps/api
 #        cat > .custom-gcl.yml <<'EOF'
-#        version: v2.5.0
+#        version: v2.7.2
 #        plugins:
 #          - module: encore.app
 #            path: ./shared/lint

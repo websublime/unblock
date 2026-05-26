@@ -46,7 +46,13 @@
 #   golangci-lint custom               # builds ./custom-gcl
 #   ./custom-gcl run --max-warnings 0  # runs with both custom rules
 
-version: v2.5.0
+# v2.7.2 (NOT v2.5.0): v2.5.0's `golangci-lint custom` builder
+# passes `-c " advice.detachedHead=false"` (single arg with a
+# leading space) to git clone. git 2.54+ rejects this — fatal:
+# 'invalid key:  advice.detachedHead'. Fixed in v2.7.0 upstream
+# (commit 101ccaca, PR #6206). v2.7.2 is the minimum-viable patch
+# line containing the fix and keeps linter policy stable vs v2.5.x.
+version: v2.7.2
 
 name: custom-gcl
 
