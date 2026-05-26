@@ -1505,6 +1505,28 @@ func Claim(ctx context.Context, req *ClaimRequest) (*Item, error) {
 	if err != nil {
 		if errors.Is(err, sqldb.ErrNoRows) {
 			// Loser path — fetch winner info.
+			//
+			// Concurrency hazard: we MUST release the SELECT FOR
+			// UPDATE transaction (and its underlying pgxpool conn)
+			// BEFORE calling alreadyClaimedError, which opens a
+			// fresh pool conn via db.QueryRow. The deferred
+			// tx.Rollback above runs only at function-return, which
+			// is too late: at function entry under high concurrent
+			// claim load (N > pgxpool MaxConns), every goroutine
+			// already holds one conn for its own losing SELECT FOR
+			// UPDATE tx and the pool has zero free conns. Each
+			// loser would then queue forever for the second conn
+			// alreadyClaimedError needs, deadlocking N-way on the
+			// pool (no losers can release their first conn until
+			// they've returned from Claim, but they can't return
+			// until alreadyClaimedError completes, which can't run
+			// without a second conn). Explicit early-rollback here
+			// frees the conn back to the pool BEFORE the second
+			// acquisition is attempted, so the loser path scales
+			// linearly with N under any pool size. The deferred
+			// rollback is harmless after an explicit one — pgx
+			// treats double-rollback as a no-op (ErrTxClosed).
+			_ = tx.Rollback()
 			return nil, alreadyClaimedError(ctx, req.ItemID)
 		}
 		return nil, &errs.Error{Code: errs.Internal, Message: "claim lock failed"}
