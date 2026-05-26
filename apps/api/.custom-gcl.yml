@@ -15,10 +15,13 @@
 # Schema notes:
 #
 #   - `version` pins the golangci-lint release the custom binary is
-#     compiled against. The same tag MUST appear in the workflow's
-#     `golangci/golangci-lint-action@v8` step's `version:` input so
-#     the schema (v2) and binary stay consistent. See apps/api/
-#     .golangci.yml lines 30-32 ("a v2 schema requires a v2 binary").
+#     compiled against. The same tag MUST appear in the
+#     `GOLANGCI_LINT_VERSION` env var of
+#     .github/workflows/apps-api-ci.yml (the workflow installs the
+#     stock binary via the official install.sh, then runs
+#     `golangci-lint custom` against this file). Schema (v2) and
+#     binary must stay consistent — see apps/api/.golangci.yml
+#     lines 30-32 ("a v2 schema requires a v2 binary").
 #
 #   - `name: custom-gcl` is the default — kept explicit because the
 #     CI workflow invokes the binary by this name.
