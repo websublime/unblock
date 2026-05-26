@@ -109,7 +109,15 @@ jobs:
       # Encore CLI version pin. Sourced once here, consumed by the
       # install step below. Bump in lockstep with the encore.dev
       # library version in apps/api/go.mod when the library bumps.
-      ENCORE_CLI_VERSION: v1.57.0
+      #
+      # NO leading 'v' — the upstream install.sh constructs the
+      # download URL as
+      #   https://d2f391esomvqpi.cloudfront.net/encore-${version}-${target}.tar.gz
+      # and the published artifacts at that CDN are named without
+      # the 'v' prefix (script's own example uses '1.50.0'). Passing
+      # 'v1.57.0' yields a 403 and the install fails before any gate
+      # step runs.
+      ENCORE_CLI_VERSION: 1.57.0
       # golangci-lint version pin. MUST equal apps/api/.custom-gcl.yml
       # `version:` and apps/api/.golangci.yml line 36 narrative pin.
       GOLANGCI_LINT_VERSION: v2.5.0
