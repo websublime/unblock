@@ -178,6 +178,38 @@ jobs:
         run: encore version
         working-directory: ${{ github.workspace }}
 
+      - name: unlink encore.app from cloud project for CI
+        # The committed apps/api/encore.app links the workspace to the
+        # Encore Cloud app `unblock-sco2`. With that linkage, every
+        # `encore check` / `encore test` invocation attempts to fetch
+        # secrets from https://api.encore.cloud/apps/unblock-sco2/
+        # secrets:values?kind=development BEFORE merging the local
+        # .secrets.local.cue overrides — and on a fresh GHA runner
+        # there is no logged-in user, so the fetch fails with
+        # 'not logged in: run encore auth login first' and the app
+        # never finishes starting up.
+        #
+        # CI gates only ever exercise the LOCAL emulator (Postgres +
+        # Pub/Sub + Cron in containers) with placeholder secrets. We
+        # do NOT need cloud-side secrets to validate the build; the
+        # `.secrets.local.cue` written in the next step is the sole
+        # source of secret values for the run. Replacing encore.app
+        # with `{}` detaches the CI run from the cloud project for
+        # the duration of this job; the original file on disk lives
+        # only on the runner (never committed, never persisted past
+        # job cleanup), so this is safe.
+        #
+        # Path forward when cloud-side validation is desired (e.g.
+        # preview-environment deploys for PRs): add an
+        # ENCORE_AUTH_KEY repo secret (generated from Encore Cloud
+        # dashboard, https://encore.dev/docs/platform/integrations/
+        # auth-keys) and call `encore auth login --auth-key=...`
+        # before the gate steps instead of unlinking. P01 scope is
+        # local-emulator gates only, so the unlink path is the
+        # minimal surface needed today.
+        run: |
+          echo '{}' > encore.app
+
       - name: provision local secrets for encore emulator
         # Every `encore test` invocation boots the local emulator and
         # therefore needs the four secrets declared at apps/api/auth/
