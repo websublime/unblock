@@ -120,7 +120,21 @@ jobs:
       ENCORE_CLI_VERSION: 1.57.0
       # golangci-lint version pin. MUST equal apps/api/.custom-gcl.yml
       # `version:` and apps/api/.golangci.yml line 36 narrative pin.
-      GOLANGCI_LINT_VERSION: v2.5.0
+      #
+      # v2.7.2 (NOT v2.5.0): v2.5.0 ships a `golangci-lint custom`
+      # builder that calls
+      #   git clone … -c " advice.detachedHead=false" -q …
+      # — i.e. it passes the `-c key=value` pair as a single argument
+      # with a leading space inside the key. git 2.54+ (the version
+      # on ubuntu-24.04 runners as of April 2026) rejects this with
+      # 'error: invalid key:  advice.detachedHead / fatal: unable to
+      # write parameters to config file', surfacing as bare 'git
+      # clone … exit status 128' because the `-q` flag swallowed
+      # stderr. Fixed upstream in commit 101ccaca ('fix: clone args
+      # used by custom command' PR #6206), first released in v2.7.0.
+      # Bumping to v2.7.2 (minimum-viable patch line containing the
+      # fix) keeps the linter policy stable while unblocking CI.
+      GOLANGCI_LINT_VERSION: v2.7.2
     steps:
       - name: checkout
         uses: actions/checkout@v4
