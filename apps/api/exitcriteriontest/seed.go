@@ -67,6 +67,7 @@ import (
 	"time"
 
 	"encore.app/shared/ulid"
+	"encore.dev/rlog"
 	"encore.dev/storage/sqldb"
 )
 
@@ -348,10 +349,11 @@ func titleFor(label string) string {
 // DELETE CASCADE on workitems.items, etc.). auth.users is NOT
 // reachable via the org_id cascade — deleted separately.
 //
-// Teardown is best-effort: failures are reported via the returned
-// error but never abort the test process (TestMain logs and
-// continues). The unique-by-ULID safety net in SeedFixture ensures
-// a partial teardown does not poison subsequent runs.
+// Teardown is best-effort: failures are surfaced via rlog.Error
+// (consistent with the rest of the backend's logging convention) but
+// never abort the test process (TestMain logs and continues). The
+// unique-by-ULID safety net in SeedFixture ensures a partial
+// teardown does not poison subsequent runs.
 func (f *Fixture) Teardown(ctx context.Context, db *sqldb.Database) {
 	if db == nil || f == nil {
 		return
@@ -359,12 +361,12 @@ func (f *Fixture) Teardown(ctx context.Context, db *sqldb.Database) {
 
 	if f.OrgID != "" {
 		if _, err := db.Exec(ctx, `DELETE FROM org.organizations WHERE id = $1`, f.OrgID); err != nil {
-			fmt.Printf("exitcriteriontest teardown: delete org %q: %v\n", f.OrgID, err)
+			rlog.Error("exitcriteriontest: teardown delete org failed", "err", err, "org_id", f.OrgID)
 		}
 	}
 	if f.UserID != "" {
 		if _, err := db.Exec(ctx, `DELETE FROM auth.users WHERE id = $1`, f.UserID); err != nil {
-			fmt.Printf("exitcriteriontest teardown: delete user %q: %v\n", f.UserID, err)
+			rlog.Error("exitcriteriontest: teardown delete user failed", "err", err, "user_id", f.UserID)
 		}
 	}
 }
