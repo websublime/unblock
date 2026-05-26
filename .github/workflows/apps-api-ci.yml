@@ -124,6 +124,17 @@ jobs:
     steps:
       - name: checkout
         uses: actions/checkout@v4
+        with:
+          # Do NOT persist the auto-injected GITHUB_TOKEN extraheader
+          # in this repo's local git config. `golangci-lint custom`
+          # invokes `git clone https://github.com/golangci/golangci-lint`
+          # in a temp dir during its build step; when the workspace
+          # checkout leaves an `http.https://github.com/.extraheader`
+          # behind, that header leaks into the custom build's clone
+          # and GitHub returns 401, surfacing as `git clone … exit
+          # status 128`. Disabling persistence keeps the workflow
+          # auth-clean for sub-process git operations.
+          persist-credentials: false
 
       - name: setup-go
         uses: actions/setup-go@v5
