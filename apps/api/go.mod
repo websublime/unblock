@@ -10,6 +10,7 @@ require (
 )
 
 require (
+	github.com/golangci/plugin-module-register v0.1.2 // indirect
 	github.com/google/jsonschema-go v0.4.3 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect

@@ -13,3 +13,8 @@ encore.gen.cue
 # `go build ./cmd/<tool>` emits the binary at apps/api/<tool> by default.
 # Add new entries here when new cmd/ tools are introduced.
 /gen-catalogue
+
+# Custom golangci-lint binary built by `golangci-lint custom` from
+# apps/api/.custom-gcl.yml. Built in CI for every workflow run; local
+# developers may rebuild on demand. Never committed.
+/custom-gcl
