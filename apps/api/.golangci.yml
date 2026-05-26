@@ -111,6 +111,18 @@ linters:
       # linters flag.
       - path: shared/rbac/rbac_test.go
         text: "(unused|deadcode)"
+      # initService is the Encore runtime service-init hook auto-invoked
+      # by the framework at service boot — see
+      # https://encore.dev/docs/go/primitives/services#service-structs.
+      # The stock `unused` analyzer doesn't know about the Encore code
+      # generator's wiring and flags the function as dead code.
+      # Removing it would break the runtime (Encore's generated
+      # __etype_service_init__ calls initService directly), so we
+      # exclude the false positive for every package that declares a
+      # service struct via //encore:service.
+      - linters:
+          - unused
+        text: "func initService is unused"
 
 issues:
   max-issues-per-linter: 0

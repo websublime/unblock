@@ -168,7 +168,7 @@ func callTool(t *testing.T, rawKey, toolName string, arguments any) jsonRPCEnvel
 	initResp := httpDo(t, postReq, 5*time.Second)
 	sessionID := initResp.Header.Get("Mcp-Session-Id")
 	_, _ = io.Copy(io.Discard, initResp.Body)
-	initResp.Body.Close()
+	_ = initResp.Body.Close()
 	if sessionID == "" {
 		t.Fatalf("initialize did not return Mcp-Session-Id")
 	}
@@ -197,7 +197,7 @@ func callTool(t *testing.T, rawKey, toolName string, arguments any) jsonRPCEnvel
 	req.Header.Set("Mcp-Session-Id", sessionID)
 
 	resp := httpDo(t, req, 10*time.Second)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		t.Fatalf("tools/call status = %d, want 200; body=%s", resp.StatusCode, string(body))
