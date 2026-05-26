@@ -28,7 +28,7 @@
 #      The `version:` field below pins the BUILT BINARY version (the
 #      tag of golangci-lint to compile against) — NOT the config-file
 #      schema version (that is the top-level `version: "2"` declared
-#      below, line 52). The two must remain consistent: a v2 schema
+#      below, line 65). The two must remain consistent: a v2 schema
 #      requires a v2 binary.
 #
 #        cd apps/api
