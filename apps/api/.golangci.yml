@@ -6,8 +6,9 @@
 # Custom linter wiring:
 #
 # Two project-local analyzers live at apps/api/shared/lint/. Both are
-# consumed via the module-plugin system of golangci-lint v1.57+
-# (see https://golangci-lint.run/plugins/module-plugins/):
+# consumed via the module-plugin system carried into golangci-lint v2.x
+# (see https://golangci-lint.run/plugins/module-plugins/ and the v2
+# migration guide at https://golangci-lint.run/usage/migration-guide/):
 #
 #   - no_direct_is_ready_write — rejects UPDATE statements writing
 #     workitems.items.is_ready or pipeline_stage outside the cascade
@@ -23,11 +24,16 @@
 # Operators who want the custom linters to participate in CI must:
 #
 #   1. Build a custom golangci-lint binary that includes BOTH analyzer
-#      modules (a single .custom-gcl.yml registers the whole module):
+#      modules (a single .custom-gcl.yml registers the whole module).
+#      The `version:` field below pins the BUILT BINARY version (the
+#      tag of golangci-lint to compile against) — NOT the config-file
+#      schema version (that is the top-level `version: "2"` declared
+#      below, line 52). The two must remain consistent: a v2 schema
+#      requires a v2 binary.
 #
 #        cd apps/api
 #        cat > .custom-gcl.yml <<'EOF'
-#        version: v1.61.0
+#        version: v2.5.0
 #        plugins:
 #          - module: encore.app
 #            path: ./shared/lint
@@ -36,7 +42,15 @@
 #
 #   2. Use the resulting `./custom-gcl` binary in CI in place of the
 #      stock `golangci-lint`. Olive (infra-supervisor) wires this into
-#      the GitHub Actions workflow under bead A-6 (unblock-tv8.6).
+#      the GitHub Actions workflow under bead A-6 (unblock-tv8.6); the
+#      exact v2 tag installed in the GHA runner image MUST match the
+#      `version:` pin above.
+#
+# Local developers: this config requires golangci-lint v2.x. If your
+# local binary is v1.x (`golangci-lint --version` reports v1.*), upgrade
+# via `brew upgrade golangci-lint` (or your package manager equivalent)
+# before running the gate. Go 1.26+ source is not reliably typecheckable
+# under v1.x.
 #
 # Local development without a custom binary is still useful: every
 # core linter below runs against the standard golangci-lint binary,
