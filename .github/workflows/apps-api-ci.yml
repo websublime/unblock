@@ -41,7 +41,7 @@
 #     identifies this as the reproduced-on CLI version; pinning
 #     eliminates version skew between local dev and CI (Olive's tv8.56
 #     evidence shows CLI version diffs change behaviour).
-#   - golangci-lint: v2.5.0. Matches apps/api/.custom-gcl.yml `version:`
+#   - golangci-lint: v2.7.2. Matches apps/api/.custom-gcl.yml `version:`
 #     and apps/api/.golangci.yml line 36 narrative pin. v2 schema in
 #     .golangci.yml mandates a v2 binary.
 #
