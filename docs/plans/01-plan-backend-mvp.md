@@ -277,7 +277,7 @@ into bd.
 
 | ID | Task | Owner |
 |---|---|---|
-| E-2 | NFR-1 latency harness: warm-cache `prime → ready → claim` p99 < 2 s integration test | go-supervisor (Greta) |
+| E-2 | NFR-1 latency harness: warm-cache `prime → ready → claim` p99 < 2 s integration test in a new test-only Encore package `apps/api/perftest/`. **Also folds in the two cross-linked B-1 WARNINGs (round-14): W3 — sibling §4.3.2 negative-auth-path coverage; W4 — `runtime.NumGoroutine` drain check on the `touchLastUsedAt` per-request goroutine. Gated hard-fail via `UNBLOCK_PERF_GATE=1`.** See spec §11.2 NFR-1 for the full contract. | go-supervisor (Greta) |
 | E-3 | NFR-2 RBAC regression suite — release-blocking gate | go-supervisor (Greta) |
 | E-4 | End-to-end exit-criterion test: agent authenticates, completes `prime → ready → claim → close`, cascade fires, second agent observes the new ready set, cycle attempt is rejected. **Owns the fixture seed in `TestMain` via direct `sqldb.Exec` (round-12; mirrors `apps/api/shared/rbactest/seed.go`); fixture data lives as Go constants in `apps/api/exitcriteriontest/fixture.go`.** See spec §11.1.0 (fixture topology) + §11.1.1 (seed ownership). | go-supervisor (Greta) |
 
