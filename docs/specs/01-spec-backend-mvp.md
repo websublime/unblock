@@ -1,6 +1,6 @@
 # SPEC: P01 — Backend MVP Implementation Contract
 
-**Status:** APPROVED (round-14 NFR-1 latency-harness scope applied 2026-05-29; round-6 cascade-symmetry applied 2026-05-12; round-5 tracing applied 2026-05-12; round-4 auth applied 2026-05-11; DRIFT-1/-2 applied 2026-05-08; round-2 applied 2026-05-08; round-3 research applied 2026-05-08; original APPROVED 2026-05-07)
+**Status:** APPROVED (round-15 NFR-1 harness test-isolation + mcpaudittest hardening applied 2026-05-29; round-14 NFR-1 latency-harness scope applied 2026-05-29; round-6 cascade-symmetry applied 2026-05-12; round-5 tracing applied 2026-05-12; round-4 auth applied 2026-05-11; DRIFT-1/-2 applied 2026-05-08; round-2 applied 2026-05-08; round-3 research applied 2026-05-08; original APPROVED 2026-05-07)
 **Changelog:**
 - 2026-05-08 — DRIFT-1 (naming): clarified §3.5 that the four logical secret names are spec-level identifiers; added logical-name ↔ Go-field mapping table for the Encore Go secrets manifest.
 - 2026-05-08 — DRIFT-2 (format): corrected the local-secrets file path/format from `.encore/local-secrets.toml` (TOML) to `apps/api/.secrets.local.cue` (CUE) per Encore official docs (https://encore.dev/docs/go/primitives/secrets); updated syntax examples and gitignore guidance.
@@ -13,6 +13,7 @@
 - 2026-05-19 — round-10 (rbac-coverage closure for E-3 dual-shape): §10.1 — `deps.cascade_events` joins `org.resourceAllowed` and `org.agentReadWriteResources` so the Authorize-gate `KindAuthorizeOnly` axis can be exercised alongside the existing `KindOrgScoped` row-leak axis. Agents read the table through Tool 1 `prime`'s AF2 path (read-side); writes remain closed-loop (only the cascade subscriber emits rows server-side). Without this allow-list extension, an `KindAuthorizeOnly` tuple short-circuits to `InvalidArgument` instead of asserting the intended `PermissionDenied` contract. CI separate-report wiring (E-3 bead AC #3) is reassigned to A-6 (`unblock-tv8.6`, infra-supervisor) and gated by an explicit `tv8.25 → tv8.6` dependency edge; E-3 ships the suite discoverable as `encore test ./apps/api/shared/rbactest/...`, A-6 wires the separate gate.
 - 2026-05-19 — round-11 (`-race` removed from §11.2 NFR-10 gate set, encore upstream bug closure): §11.2 NFR-10 — `go test ./... -race` dropped from the gate set and replaced with a split between Encore service packages (use `encore test ./...`, no `-race`) and leaf packages without `encore.dev` imports (use `go test -race`, native Go toolchain). Reason: [encoredev/encore#1943](https://github.com/encoredev/encore/issues/1943) — `encore test ... -race` reproducibly SIGSEGVs inside the encore-go runtime's `lazyTraceInit.initStream` goroutine spawn (cross-platform: confirmed on macOS arm64 and Linux amd64 ubuntu-24.04 GHA runner). Bug filed 2025-05-27, no maintainer triage, no fix PR. Toolchain footprint: encore v1.57.0, encore-go go1.26.2-encore (verified no race-related fixes in v1.57.1..v1.57.5). The rbactest suite is single-threaded by design (`rbac.Bind` not goroutine-safe; no `t.Parallel`), so dropping `-race` removes no real coverage on the encore-side gate. Leaf-package race coverage remains via native `go test -race` on `apps/api/shared/ulid/`, `apps/api/shared/rbac/`, `apps/api/shared/lint/` (packages without `encore.dev` imports). E-3 bead AC #1 (tv8.25) and A-6 bead AC (tv8.6) are patched in lockstep with this round.
 - 2026-05-25 — round-13 (cascade-subscriber test invocation; spec-drift closure from `/investigate` on bead `unblock-tv8.26`): §11.1.2 and §11.3 require row-level assertions on `deps.cascade_events` for kinds `'close'`, `'edge_added'`, and `'state_change'`, but those rows are only written by the cascade subscriber (`apps/api/deps/cascade_subscriber.go::handleCascadeRequested`) and two facts make the assertions unreachable in-test by construction: (1) Encore Pub/Sub subscriptions DO NOT fire under `encore test` (the test harness simulates publishes but does not consume them — `et.Topic(...).PublishedMessages()` is publish-side only), and (2) `handleCascadeRequested` is package-private to `deps` with no exported test hook. Resolution: a thin exported wrapper `deps.HandleCascadeRequestedForTest(ctx context.Context, msg *deps.CascadeRequested) error` is added (file location is implementor's call — either `apps/api/deps/cascade_subscriber.go` or a new `apps/api/deps/export_test_handler.go`), pass-through to `handleCascadeRequested` with no behavioural divergence from production. The exit-criterion harness in `apps/api/exitcriteriontest/` (and any future Encore test needing cascade row materialisation) publishes via the producing RPC, captures published messages via `et.Topic(deps.CascadeRequestedTopic).PublishedMessages()`, then invokes `deps.HandleCascadeRequestedForTest` once per captured publish to drive the subscriber. This mirrors the established `mcp.ServeMCPForTest` precedent (`apps/api/mcp/export_test_writer.go:49-65`) — a thin exported wrapper around a package-private handler whose `ForTest` suffix is the audit trail. The wrapper is exported on the production import path BUT does not appear on Encore's API surface (plain Go function, not an `//encore:api`), so the public RPC catalogue is unaffected. §11.1.1 (round-12) gains a "Cascade subscriber test invocation" paragraph codifying the contract; §11.3 gains a one-line cross-reference under the single-writer invariant block. No DDL change, no migration, no public API change, no `go.mod` addition. Spec status remains APPROVED — this is a test-harness contract clarification, not a re-architecting.
+- 2026-05-29 — round-15 (NFR-1 harness test-isolation + mcpaudittest hardening; CI-failure closure on bead `unblock-tv8.24` rework, CI run 26633703926): the round-14 gate-semantics assumption — that the harness could live in the default `encore test ./...` suite with `UNBLOCK_PERF_GATE` merely controlling assertion fatality — was proven incomplete by CI. Under the default full-suite run, the perftest package co-schedules with ~15 other test packages against ONE shared local Postgres: warm-cache `Validate`/`Claim`/`Ready` calls ballooned from a local ~87 ms p99 to 5–16 s; one measurement-loop response returned an empty body and tripped a hard `t.Fatalf` ("no SSE data" at `harness_test.go:220`) that the gate does NOT guard (it guards only the p99/goroutine assertions, not transport errors); and the harness's ~630 concurrent `mcp.tool_calls` audit-row writes broke `mcpaudittest`'s `TestD1_POSTNoAuthReturnsUnauthenticated` global-count assertion (`tool_calls rows = 1, want 0`). §11.2 NFR-1 gains two paragraphs: (1) **Test isolation** — the harness MUST be excluded from the default suite (Gate 5) and run ONLY in a dedicated isolated CI step under `UNBLOCK_PERF_GATE=1`; with the gate unset the package MUST contribute zero DB load and zero `mcp.tool_calls` rows (no seed, no loops — not merely log-and-pass); mechanism (build tag `//go:build perf` vs `UNBLOCK_PERF_GATE`-gated `t.Skip`/`TestMain` short-circuit) is the implementer's choice, validated by `encore check` + both suite runs; dedicated CI step owned by Olive. (2) **mcpaudittest hardening** — `selectToolCalls` (global `mcp.tool_calls` query) MUST be scoped to the test's own org/session so the D1 audit-row assertions are robust to any concurrent writer; a pre-existing latent test-isolation defect that the perftest load made deterministic, fixed in the same rework. Additionally the W3 paragraph's assertion wording is corrected from "asserts 401 / errs.Unauthenticated" to the actual MCP transport signal (HTTP 200 + JSON-RPC envelope `code -32000`, `data.kind=UNAUTHENTICATED`), ratifying the DEVIATION logged on the bead and confirmed at code review. No DDL / migration / public-API / `go.mod` change. Spec status remains APPROVED — test-harness isolation + sibling-test correctness, not re-architecting. Bead `unblock-tv8.24` reopened to rework in lockstep.
 - 2026-05-29 — round-14 (NFR-1 latency-harness scope codification; spec-drift closure from `/investigate` on bead `unblock-tv8.24`): §11.2 NFR-1 expanded from a single latency line into the full E-2 harness contract, folding in the two cross-linked WARNINGs from the closed B-1 review (`unblock-tv8.7`) that were recorded on the bead but absent from the spec. (DRIFT-A) seeding doctrine pinned — harness owns its fixture via direct `sqldb.Exec` per the §11.1.1 round-12 doctrine, shortULID-salted slug, in-test key issuance via direct `INSERT INTO mcp.api_keys`, seed `N = 2 × iterations` ready rows. (DRIFT-B) W3 negative-auth-path coverage promoted from cross-link note to acceptance scope — the harness package ships a sibling test covering the §4.3.2 negative paths (revoked / expired / unknown-prefix / bad-HMAC / missing-prefix), each asserting `401` / `errs.Unauthenticated`, closing the inspection-only gap from B-1. (DRIFT-C) W4 goroutine-leak detection given a concrete contract — three `runtime.NumGoroutine` samples (`baseline` / `peak` / `drained` after a 2 s post-loop sleep) with assertion `drained - baseline ≤ 20` (drain-window check, not a per-iteration ratio). Gate semantics pinned — harness always logs samples + p99 + goroutine deltas as JSON-Lines via `t.Logf`; hard-fail (`t.Fatalf`) gated by `UNBLOCK_PERF_GATE=1` to keep CI advisory on slow runners, release-blocking wiring deferred to P02 (Olive). The cold-start exclusion is sharpened to "M ≥ 10 warm-up iterations discarded". No DDL change, no migration, no public API change, no `go.mod` addition, no production-code-path change — the harness is a new test-only Encore package (`apps/api/perftest/`) mirroring `apps/api/exitcriteriontest/`. Spec status remains APPROVED — this is a test-harness contract codification, not a re-architecting. Bead `unblock-tv8.24` AC patched in lockstep.
 - 2026-05-22 — round-12 (seeder CLI deleted from P01 scope; spec-drift closure from `/investigate` on bead `unblock-tv8.23`): the one-shot `apps/api/cmd/unblock-seed/` Go CLI is removed from P01 entirely. Four blockers triggered the deletion — (DRIFT-1) no `auth.users` private RPC exists for the seeder to call; (DRIFT-2) the state-machine does not allow the canonical fixture's `Done`/`Ready` end-states via RPC; (DRIFT-3) `--issue-key` lacks operand flags; (DRIFT-4) Encore parser invariant E1388 forbids `package main` under `cmd/` from calling private RPCs, making "tiny CLI that calls private RPCs" architecturally impossible without scope inflation (new public RPCs or promoting the binary to an Encore service — both compromise design). Seeding responsibility moves to the E2E test package (`apps/api/exitcriteriontest/`) which owns a `TestMain` + direct-SQL seed mirroring `apps/api/shared/rbactest/seed.go:46-53` ("All rows go through direct `sqldb.Exec`, NOT through the auth/org RPCs"); fixture data lives as Go constants/structs in `apps/api/exitcriteriontest/fixture.go` (no YAML, no `gopkg.in/yaml.v3` dependency). The canonical 5-item graph topology (former §9.2: `itm_a`..`itm_e` with chain `a→b`, `b→c`, `b→d`, `d→e` plus the cycle-attempt edge closing the loop) is relocated verbatim into §11.1 as the authoritative exit-criterion fixture description. `--issue-key` is deferred entirely from P01 — no operator-key CLI in scope; in-test key issuance happens via direct `INSERT INTO mcp.api_keys` (computing `key_hash` with `secrets.APIKeyHMACSecret` per `apps/api/auth/apikey.go:103-111`); dev exploration outside tests uses `psql`. No new migrations, no DDL change, no `go.mod` additions. Patches in lockstep: §1 overview seeder bullet removed; §4.1 `IssueAPIKey` doc-comment updated; §4.4 / §4.4.1 / §6.2 Tool 4 seeder consumer notes rewritten; §9 deleted (tombstone retained to preserve §10..§14 numbering and the 30 cross-references that depend on it); §11.1 exit-criterion fixture relocation + E2E seed ownership note added; §11.4 docs and §14 approval checklist seeder mentions removed; §12 task-table E-1 row deleted (bead `unblock-tv8.23` cancelled in lockstep, post-spec, by the orchestrator); plan §2.1/§2.4/§4.5/§6 Q3 and root SPEC §9.4.6 / research AF4 / `apps/api/auth/auth.go` / `apps/api/db/migrations/0070_mcp.up.sql` updated. Spec status remains APPROVED — this is a scope reduction, not a re-architecting.
 
@@ -2683,10 +2684,15 @@ seeded fixture and asserts:
   **W3 closure (negative auth paths).** The harness MUST include sibling
   coverage of the §4.3.2 negative paths against the same `httptest` server:
   revoked key, expired key, unknown prefix, bad HMAC, and missing
-  `unblock_pat_` prefix. Each path asserts `401` / `errs.Unauthenticated`.
-  This closes the W3 gap carried forward from the closed B-1 review
-  (cross-linked on bead `unblock-tv8.24`): the four DB-bound auth RPC
-  bodies were verified only by inspection in B-1.
+  `unblock_pat_` prefix. Each path asserts the MCP transport's
+  auth-rejection wire signal — **HTTP 200 + a JSON-RPC error envelope
+  (`error.code == -32000`, `error.data.kind == "UNAUTHENTICATED"`)**, which
+  is the faithful realisation of `errs.Unauthenticated` at the Streamable
+  HTTP edge (the transport never emits a bare HTTP 401; precedent
+  `apps/api/shared/mcpaudittest/d1_transport_test.go`). This closes the W3
+  gap carried forward from the closed B-1 review (cross-linked on bead
+  `unblock-tv8.24`): the four DB-bound auth RPC bodies were verified only by
+  inspection in B-1.
 
   **W4 closure (goroutine drain check).** The Bearer hot path fires
   `go touchLastUsedAt(id)` per request with a 1 s context cap
@@ -2698,13 +2704,52 @@ seeded fixture and asserts:
   runtime/SDK overhead). The harness is the leak alarm; the RS01-4 LRU-cache
   mitigation remains the fix and is tracked separately.
 
-  **Gate semantics.** The harness ALWAYS logs per-call latency samples, the
-  computed p99, and the goroutine deltas as JSON-Lines via `t.Logf`
-  (informative on every run — aligns with the bead AC verb "reports"). A
-  hard-fail (`t.Fatalf` on `p99 ≥ 2 s` OR `drained - baseline > 20`) is
-  gated by the `UNBLOCK_PERF_GATE=1` environment variable so CI stays
-  advisory on slow shared GH Actions runners. Release-blocking pipeline
-  wiring is a P02 ops item owned by Olive.
+  **Gate semantics.** When the harness runs, it ALWAYS logs per-call latency
+  samples, the computed p99, and the goroutine deltas as JSON-Lines via
+  `t.Logf` (informative on every run — aligns with the bead AC verb
+  "reports"). A hard-fail (`t.Fatalf` on `p99 ≥ 2 s` OR
+  `drained - baseline > 20`) is gated by the `UNBLOCK_PERF_GATE=1`
+  environment variable. Release-blocking pipeline wiring is a P02 ops item
+  owned by Olive.
+
+  **Test isolation (round-15 — CI-failure closure).** The harness MUST be
+  **excluded from the default `apps/api` full test suite (§11.2 NFR-10
+  Gate 5, `encore test ./...`)** and MUST run ONLY in a dedicated, isolated
+  CI step under `UNBLOCK_PERF_GATE=1`. Rationale (empirical, CI run
+  [26633703926](https://github.com/websublime/unblock/actions/runs/26633703926)):
+  a latency harness cannot co-schedule with the full functional suite on a
+  single shared local Postgres and produce either meaningful measurements or
+  a reliable verdict. Under concurrent load the warm-cache `Validate` /
+  `Claim` / `Ready` calls ballooned from a local ~87 ms p99 to 5–16 s per
+  call; one measurement-loop response returned an empty body, tripping a
+  hard `t.Fatalf` ("no SSE data") that the gate does NOT guard (the gate
+  guards only the p99/goroutine assertions, not transport errors); and the
+  harness's ~630 concurrent `mcp.tool_calls` audit-row writes broke a
+  sibling package's global-count assertion (see mcpaudittest hardening
+  below). **Default-suite contract:** with `UNBLOCK_PERF_GATE` unset the
+  harness package MUST contribute **zero database load and zero
+  `mcp.tool_calls` rows** — it must not merely log-and-pass, it must not
+  execute its seed or its measurement/negative-auth loops at all. **The
+  exclusion mechanism is the implementer's choice** — a `//go:build perf`
+  build tag (compile-time exclusion) or an `UNBLOCK_PERF_GATE`-gated
+  `t.Skip` / `TestMain` short-circuit (run-time exclusion that also skips
+  the seed) are both acceptable — but it MUST be validated against the
+  Encore parser with `encore check` and against the default suite with
+  `encore test ./...` (perftest contributes nothing) AND the gated step
+  (`UNBLOCK_PERF_GATE=1`, perftest runs in isolation). The dedicated CI
+  step is owned by Olive.
+
+  **mcpaudittest hardening (round-15 — coupled correctness fix).** The
+  `apps/api/shared/mcpaudittest` audit-row assertions
+  (`d1_transport_test.go`'s `selectToolCalls`) query
+  `mcp.tool_calls` **globally** (filtered only by `tool_name NOT LIKE
+  'rbactest%'`), so the "0 rows on auth-failure" contract
+  (`TestD1_POSTNoAuthReturnsUnauthenticated`) is fragile to ANY concurrent
+  writer of non-rbactest audit rows. `selectToolCalls` MUST be scoped to the
+  test's own org (and/or session) so the D1 audit-row assertions are robust
+  to concurrent writers regardless of the perftest isolation above. This is
+  a pre-existing latent test-isolation defect that the perftest load made
+  deterministic; it is fixed in the same rework.
 - [ ] **NFR-2 — RBAC.** `apps/api/shared/rbactest/` green; zero
   cross-tenant leaks across every P01 read and write surface.
 - [ ] **NFR-5 — Cycle integrity.** Cycle creation is rejected at write
