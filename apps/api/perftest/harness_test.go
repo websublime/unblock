@@ -231,6 +231,14 @@ func TestNFR1_PrimeReadyClaimP99(t *testing.T) {
 	// W4 peak: sample immediately after the measurement loop, before
 	// the drain sleep. This is when the touchLastUsedAt fire-and-forget
 	// goroutines are most likely still in flight.
+	//
+	// NOTE: peak is diagnostic/observability-only — it is recorded in the
+	// summary line and the human-readable log for visibility into in-flight
+	// goroutine pressure, but it is deliberately NOT asserted. The sole W4
+	// leak gate is the post-drain window below (drained - baseline <=
+	// GoroutineDrainMargin); a transient peak during fire-and-forget work is
+	// expected and is not a leak. Do not mistake the missing peak assertion
+	// for a bug.
 	peak := runtime.NumGoroutine()
 
 	// W4 drained: sleep 2 s (two cycles of the 1 s touchLastUsedAt
