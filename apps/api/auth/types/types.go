@@ -44,11 +44,19 @@
 //     late-bind shape (`var db *sqldb.Database` in
 //     apps/api/auth/db.go + an exported `BindDB` hook); the
 //     dedicated db service's init() calls auth.BindDB to populate
-//     it. This shape is the only one that preserves the xuk
-//     plain-`go test`-loads invariant: sqldb.Named is NOT a benign
-//     runtime lookup, it panics at package init outside the encore
-//     CLI exactly like sqldb.NewDatabase (see DECISION on bead
-//     unblock-bne for the empirical trace).
+//     it. This shape is the only one that keeps the DB handle out of
+//     the auth root's init path: sqldb.Named is NOT a benign runtime
+//     lookup, it panics at package init outside the encore CLI exactly
+//     like sqldb.NewDatabase (see DECISION on bead unblock-bne for the
+//     empirical trace). NOTE: the auth ROOT package is itself no longer
+//     plain-`go test`-loadable as of bead unblock-tv8.57 — its
+//     secrets.go init() now boot-fail-fasts on empty auth secrets
+//     (mirroring mcp). That does NOT affect THIS leaf package: `types`
+//     imports neither the auth root nor any encore.dev package, so it
+//     remains plain-`go test`-clean (the whole reason it exists). The
+//     DB-handle invariant above still matters for the canonical
+//     `encore test ./auth/...` runner; see apps/api/auth/db.go for the
+//     supersession note.
 //   - SPEC §10.1 invariant: consumer call sites continue to spell the
 //     type as `auth.Identity` (literal). They MUST NOT be re-spelled to
 //     `types.Identity` or `authtypes.Identity`. The parent `auth`

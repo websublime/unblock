@@ -77,10 +77,16 @@
 //     either call panics under plain `go test ./auth/...` outside the
 //     encore CLI (sqldb.Named is NOT a benign runtime lookup; its
 //     v1.52.1 implementation calls doPanic the same way NewDatabase
-//     does). The BindDB late-bind hook is the only shape that
-//     preserves the xuk goal (plain `go test ./auth/...` loads
-//     without panic) while moving the NewDatabase declaration out of
-//     the auth tree.
+//     does). The BindDB late-bind hook is the only shape that keeps the
+//     DB-handle binding out of the auth root's init path while moving
+//     the NewDatabase declaration out of the auth tree. NOTE: as of
+//     bead unblock-tv8.57 the auth root package is no longer plain-
+//     `go test`-loadable for a separate reason — auth/secrets.go's
+//     init() now panics on empty auth secrets (boot fail-fast mirroring
+//     mcp). The DB-handle invariant guarded here is still load-bearing
+//     (it must hold so the canonical `encore test ./auth/...` runner
+//     binds correctly), but it no longer translates to a plain-go-test
+//     guarantee; see apps/api/auth/db.go for the supersession note.
 //
 //   - org.BindDB(DB) populates the org service's nil handle. The org
 //     service was converted from the eager `var db =

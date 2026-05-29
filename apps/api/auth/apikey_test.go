@@ -6,10 +6,12 @@
 //     (raw_key[12:20], NOT raw_key[:8]).
 //   - hashRawKey is deterministic (HMAC-SHA256 with the secrets-manifest secret).
 //
-// These tests do NOT require Docker / encore CLI — `go test ./auth/...`
-// runs them directly because none of the helpers touch sqldb at unit
-// time (the package-level `db` var registers an Encore resource but no
-// connection is opened until a Database method is invoked).
+// These helpers touch no sqldb or secret at unit time. However, as of bead
+// unblock-tv8.57 the auth root package panics at init() when the auth
+// secrets are empty (boot fail-fast in secrets.go, mirroring mcp). Plain
+// `go test ./auth/...` therefore panics on package load by design — run
+// these under `encore test ./auth/...`, which populates secrets from
+// apps/api/.secrets.local.cue. See apps/api/auth/db.go for the rationale.
 
 package auth
 

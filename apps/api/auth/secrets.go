@@ -41,8 +41,12 @@ package auth
 // whatever the platform returns for `--type dev`.
 //
 // All four secrets MUST be set across all four types before deploy. Missing
-// values surface as: APIKeyHMACSecret → boot panic (mcp/transport.go:114);
-// MemoryDEK, GitHubOAuth* → runtime panic when their code path fires.
+// values now surface uniformly as boot-time panics (bead unblock-tv8.57):
+// APIKeyHMACSecret → boot panic in mcp/transport.go's init; MemoryDEK,
+// GitHubOAuthClientID, GitHubOAuthClientSecret → boot panic in this file's
+// init (below). The prior asymmetry — where the latter three resolved to ""
+// and failed late on the OAuth/encrypt call path (auth.go:326,459) — is
+// eliminated.
 //
 //nolint:unused // referenced by RPC bodies starting in beads B-1..D-3.
 var secrets struct {
@@ -69,4 +73,53 @@ var secrets struct {
 	// GitHubOAuthClientID. Read by auth.ExchangeOAuthCode. Logical name:
 	// GITHUB_OAUTH_CLIENT_SECRET.
 	GitHubOAuthClientSecret string
+}
+
+// init enforces boot-time fail-fast on the three auth secrets that were
+// previously only validated at runtime (bead unblock-tv8.57). It mirrors
+// the unconditional fail-fast the mcp service applies to its own secret at
+// mcp/transport.go (the APIKeyHMACSecret cursor-signing guard): if Encore's
+// synchronous secret resolution leaves any required value empty at process
+// bootstrap, the process crashes immediately with an actionable message
+// rather than limping into traffic and failing deep on a hot call path.
+//
+// Before this guard, the asymmetry documented in secrets.go was:
+//   - APIKeyHMACSecret  → boot panic (mcp/transport.go) — fail-fast.
+//   - MemoryDEK         → runtime panic at the first pgcrypto encrypt of an
+//     oauth_tokens row (auth.go:459) — fails late, on the
+//     OAuth callback path.
+//   - GitHubOAuthClientID / GitHubOAuthClientSecret → silently resolve to ""
+//     and produce a malformed/unauthorized GitHub code
+//     exchange (auth.go:326) — fails late, with a remote
+//     400/401 that masks the real cause (empty secret).
+//
+// Exercising the OAuth → token-exchange → encrypt path (e.g. the unblock-tv8
+// exit-criterion E2E) would have surfaced those as confusing downstream
+// failures. Panicking here makes every empty-secret misconfiguration surface
+// uniformly at deploy time, visible in the service logs as a startup crash —
+// the same operator experience the mcp guard already provides.
+//
+// Trade-off accepted (bead unblock-tv8.57): this guard supersedes the
+// unblock-xuk invariant that plain `go test ./apps/api/auth/...` loaded the
+// auth root package without Docker. With these secrets empty under plain
+// `go test`, auth.init() now panics by design. The canonical gate for the
+// auth root package is `encore test` (which populates secrets from
+// apps/api/.secrets.local.cue and brings up the Docker cluster), so deploy-
+// time fail-fast is the correct trade against go-test-without-Docker
+// ergonomics. The leaf sub-package apps/api/auth/types/ does NOT import the
+// auth root and so remains plain-`go test`-clean. See apps/api/auth/db.go
+// for the full invariant-supersession note.
+//
+// Encore secret resolution is synchronous at process bootstrap, so by the
+// time this init runs each value is either populated or definitively empty.
+func init() {
+	if secrets.MemoryDEK == "" {
+		panic("auth: MemoryDEK is empty — provision via `encore secret set` (or apps/api/.secrets.local.cue) before boot; required for pgcrypto encryption of auth.oauth_tokens.*_enc (auth.go:459)")
+	}
+	if secrets.GitHubOAuthClientID == "" {
+		panic("auth: GitHubOAuthClientID is empty — provision via `encore secret set` (or apps/api/.secrets.local.cue) before boot; required for the OAuth2+PKCE code exchange (auth.go:326)")
+	}
+	if secrets.GitHubOAuthClientSecret == "" {
+		panic("auth: GitHubOAuthClientSecret is empty — provision via `encore secret set` (or apps/api/.secrets.local.cue) before boot; required for the OAuth2+PKCE code exchange (auth.go:326)")
+	}
 }

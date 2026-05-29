@@ -76,21 +76,52 @@
 // / ExchangeOAuthCode invocation reads `db` as a plain Go variable.
 // SPEC §4.3.2's <5 ms p99 budget is unaffected.
 //
-// Test-time consequences (unblock-xuk invariant preserved through
-// unblock-bne):
-//   - `go test ./apps/api/auth/...` loads the package without
-//     panicking and runs the leaf-package tests (apikey, oauth, ulid,
-//     AuthHandler input-error subtests of authhandler_test.go; Bearer
-//     parsing moved to apps/api/shared/httpauth). The auth root
-//     package never imports apps/api/db/, so its NewDatabase call
-//     does not fire during plain-go-test bring-up.
-//   - `go test ./apps/api/db/...` would panic if apps/api/db/
-//     contained any tests — it does not, by design (apps/api/db/ is
-//     pure infrastructure wiring with no logic worth unit-testing in
-//     isolation; see its package doc-comment).
-//   - `encore test ./auth/...` continues to work under the Encore
-//     CLI's Docker-backed test runner (the cluster bring-up satisfies
-//     sqldb.NewDatabase's runtime requirement).
+// Test-time consequences (unblock-xuk DB-handle invariant preserved;
+// secret invariant DELIBERATELY SUPERSEDED by unblock-tv8.57):
+//
+// The unblock-xuk fix kept the `sqldb.NewDatabase` panic out of the auth
+// root package's init path: the auth root never imports apps/api/db/, so
+// the (now relocated) NewDatabase call does not fire during plain-go-test
+// bring-up. That DB-handle invariant is still intact — BindDB late-bind is
+// unchanged.
+//
+// However, the auth root package is NO LONGER plain-`go test`-loadable.
+// unblock-tv8.57 added a boot-time fail-fast init() in auth/secrets.go that
+// panics when secrets.MemoryDEK, GitHubOAuthClientID, or
+// GitHubOAuthClientSecret are empty — mirroring the unconditional secret
+// guard the mcp service applies in mcp/transport.go's init. Under plain
+// `go test ./apps/api/auth/...` those Encore secrets resolve to "" (no
+// cluster, no .secrets.local.cue overlay), so auth.init() panics by design.
+//
+// WHY this trade was made (bead unblock-tv8.57): deploy-time fail-fast is
+// worth more than go-test-without-Docker ergonomics. Before the guard, an
+// empty MemoryDEK / GitHubOAuth* secret resolved silently and failed deep on
+// a hot path — MemoryDEK at the first pgcrypto encrypt of an oauth_tokens
+// row (auth.go:459), the GitHubOAuth* pair as an opaque remote 400/401 in
+// the code exchange (auth.go:326). Those late, confusing failure modes are
+// exactly what the unblock-tv8 exit-criterion OAuth E2E would have hit. The
+// init() makes all four required secrets surface uniformly as a startup
+// crash with an actionable message, which is the operator experience the
+// mcp guard already provides. The go-test-loads convenience for the auth
+// ROOT package was the accepted casualty.
+//
+// Consequences in practice:
+//   - `encore test ./auth/...` is the canonical gate for the auth root
+//     package. The Encore CLI populates the secrets from
+//     apps/api/.secrets.local.cue and brings up the Docker cluster, so the
+//     new init() does NOT fire and sqldb.NewDatabase's runtime requirement
+//     is satisfied. The apikey, oauth, and AuthHandler input-error subtests
+//     run there. (Bearer parsing moved to apps/api/shared/httpauth.)
+//   - `go test ./apps/api/auth/...` now panics at package init on the empty
+//     secret — this is the intended, accepted outcome, NOT a regression.
+//   - The leaf sub-package `apps/api/auth/types/` REMAINS plain-`go test`-
+//     clean: it imports neither the auth root nor any encore.dev package,
+//     so neither the NewDatabase call nor the new secret-guard init() is in
+//     its load path. Consumers needing only auth.Identity import
+//     `encore.app/auth/types` and stay Docker-free. Do not weaken that.
+//   - `go test ./apps/api/db/...` would panic if apps/api/db/ contained any
+//     tests — it does not, by design (pure infrastructure wiring; see its
+//     package doc-comment).
 //
 // Tracked risk: BindDB is not goroutine-safe. The contract is
 // identical to rbac.Bind (apps/api/shared/rbac/rbac.go): it runs

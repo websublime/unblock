@@ -12,10 +12,15 @@
 // unconditionally with "encore apps must be run using the encore
 // command" when invoked outside the Encore CLI's process bootstrap.
 // AuthHandler returns a concrete *errs.Error in every input-error
-// branch (see authhandler.go), so the assertion is safe — and it lets
-// these tests run under plain `go test ./auth/...` without Docker,
-// which is the whole point of the package-load fix unblock-xuk
-// landed.
+// branch (see authhandler.go), so the assertion is safe (it avoids the
+// errs.Code runtime-stub panic regardless of runner).
+//
+// Runner note (bead unblock-tv8.57): the auth root package now panics at
+// init() on empty auth secrets (boot fail-fast in secrets.go, mirroring
+// mcp), superseding the unblock-xuk plain-`go test`-loads invariant for
+// this package. Run these under `encore test ./auth/...`, which populates
+// secrets from apps/api/.secrets.local.cue. See apps/api/auth/db.go for the
+// full rationale.
 
 package auth
 
