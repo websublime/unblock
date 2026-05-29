@@ -420,7 +420,20 @@ func TestD1_POSTNoAuthReturnsUnauthenticated(t *testing.T) {
 	// Audit-row contract: no mcp.tool_calls row for an auth-failure
 	// dispatch (DECISION 3). The pre-auth recordToolCall path
 	// short-circuits on the empty OrgID.
-	rows := selectToolCalls(t)
+	//
+	// Round-15 hardening (SPEC §11.2 mcpaudittest hardening): the
+	// assertion is scoped to a sentinel org this test owns but never
+	// writes to. The auth-failure dispatch produces NO audit row under
+	// ANY org (recordToolCall short-circuits on the empty OrgID), so the
+	// count for our sentinel org is provably 0 regardless of concurrent
+	// writers. Previously selectToolCalls counted GLOBALLY, so the
+	// perftest harness's ~630 concurrent prime/ready/claim audit rows
+	// (written under its OWN org) made this assertion fail
+	// non-deterministically ("tool_calls rows = 1, want 0", CI run
+	// 26633703926). A fresh ULID guarantees no foreign writer can land a
+	// row under it.
+	sentinelOrgID := seedOrg(t)
+	rows := selectToolCalls(t, sentinelOrgID)
 	if len(rows) != 0 {
 		t.Fatalf("tool_calls rows = %d, want 0 (no audit row on auth-failure)", len(rows))
 	}

@@ -713,7 +713,7 @@ func TestD6_AuditRowsCarryToolName(t *testing.T) {
 		"item_id": itemID,
 	})
 
-	rows := selectToolCalls(t)
+	rows := selectToolCalls(t, fx.OrgID)
 	have := map[string]int{}
 	getStateProjectID := ""
 	for _, r := range rows {
