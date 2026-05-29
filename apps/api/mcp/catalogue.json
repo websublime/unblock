@@ -21,17 +21,12 @@
             "required": ["count_total", "items"],
             "properties": {
               "count_total": { "type": "integer" },
-              "items": { "type": "array", "items": { "$ref": "#/$defs/Item" } }
+              "items": { "type": "array", "items": { "$ref": "#/$shared/Item" } }
             }
           },
-          "claimed_by_me": { "type": "array", "items": { "$ref": "#/$defs/Item" } },
-          "recent_cascade_events": { "type": "array", "items": { "$ref": "#/$defs/CascadeEventRow" } },
-          "memory_hints": { "type": "array", "items": { "$ref": "#/$defs/MemoryHint" } }
-        },
-        "$defs": {
-          "Item": { "$ref": "#/$shared/Item" },
-          "CascadeEventRow": { "$ref": "#/$shared/CascadeEventRow" },
-          "MemoryHint": { "$ref": "#/$shared/MemoryHint" }
+          "claimed_by_me": { "type": "array", "items": { "$ref": "#/$shared/Item" } },
+          "recent_cascade_events": { "type": "array", "items": { "$ref": "#/$shared/CascadeEventRow" } },
+          "memory_hints": { "type": "array", "items": { "$ref": "#/$shared/MemoryHint" } }
         }
       }
     },
