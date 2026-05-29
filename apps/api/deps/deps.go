@@ -421,6 +421,13 @@ type RemoveEdgeResponse struct {
 	Removed        bool   `json:"removed"`
 	ToItemNowReady bool   `json:"to_item_now_ready"`
 	ToItemID       string `json:"to_item_id"`
+	// ProjectID is the to_item's project (empty for org-scoped items).
+	// Resolved from the to_item row inside RemoveEdge so the
+	// remove_dependency MCP handler can stamp it on the tool-call audit
+	// row, mirroring the add_dependency symmetry (AddEdgeResponse carries
+	// the project via the request; RemoveEdge has no request project so it
+	// surfaces the resolved value here). Review cleanup unblock-tv8.62.
+	ProjectID string `json:"project_id"`
 }
 
 // RemoveEdge deletes the edge, recomputes is_ready for the direct
@@ -579,6 +586,7 @@ func RemoveEdge(ctx context.Context, req *RemoveEdgeRequest) (*RemoveEdgeRespons
 		Removed:        true,
 		ToItemNowReady: toNowReady,
 		ToItemID:       toItem,
+		ProjectID:      projectID,
 	}, nil
 }
 
