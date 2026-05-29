@@ -42,6 +42,7 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"encore.app/deps"
@@ -140,8 +141,11 @@ func handleAddDependency(ctx context.Context, req *sdkmcp.CallToolRequest, in ad
 	if err != nil {
 		// workitems.Get returns NotFound with no Meta — adapt the
 		// envelope to NOT_FOUND data.kind="item" / id=to_item_id so
-		// the wire payload is self-describing.
-		if errsErr, ok := err.(*errs.Error); ok && errsErr.Code == errs.NotFound {
+		// the wire payload is self-describing. errors.As unwraps any
+		// wrapping chain (a direct *errs.Error assertion would miss a
+		// wrapped error) — review cleanup unblock-tv8.61.
+		var errsErr *errs.Error
+		if errors.As(err, &errsErr) && errsErr.Code == errs.NotFound {
 			return nil, addDependencyOut{}, mapError(state, tool, &errs.Error{
 				Code:    errs.NotFound,
 				Message: "to_item not found",
