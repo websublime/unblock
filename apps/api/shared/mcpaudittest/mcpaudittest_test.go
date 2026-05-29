@@ -104,7 +104,7 @@ func TestRecordToolCallPersistsRow(t *testing.T) {
 		DurationMs: 7,
 	})
 
-	rows := selectToolCalls(t)
+	rows := selectToolCalls(t, orgID)
 	if len(rows) != 1 {
 		t.Fatalf("tool_calls rows = %d, want 1", len(rows))
 	}
@@ -163,7 +163,7 @@ func TestRecordToolCallProducesUniqueIDs(t *testing.T) {
 		})
 	}
 
-	rows := selectToolCalls(t)
+	rows := selectToolCalls(t, orgID)
 	if len(rows) != 2 {
 		t.Fatalf("tool_calls rows = %d, want 2", len(rows))
 	}
@@ -198,7 +198,7 @@ func TestRecordToolCallNullableFields(t *testing.T) {
 		ResultKind: mcp.ResultOK,
 	})
 
-	rows := selectToolCalls(t)
+	rows := selectToolCalls(t, orgID)
 	if len(rows) != 1 {
 		t.Fatalf("tool_calls rows = %d, want 1", len(rows))
 	}
@@ -262,20 +262,31 @@ func resetToolCalls(t *testing.T) {
 	}
 }
 
-// selectToolCalls returns every row in mcp.tool_calls ordered by
-// called_at ASC. Excludes rbactest's seeded rows (see
-// rbactestToolNamePrefix) so audittest assertions are not
-// inflated by the RBAC matrix's row-leak bait when both suites
-// share the encore-test cluster.
-func selectToolCalls(t *testing.T) []toolCallRow {
+// selectToolCalls returns the mcp.tool_calls rows owned by orgID,
+// ordered by called_at ASC. Scoping by org_id (round-15 hardening, SPEC
+// §11.2 mcpaudittest hardening) makes the audit-row assertions robust to
+// ANY concurrent writer of non-rbactest rows — e.g. the perftest harness,
+// whose ~630 concurrent prime/ready/claim audit rows under the shared
+// encore-test cluster deterministically broke the previous GLOBAL count
+// (CI run 26633703926: "tool_calls rows = 1, want 0"). Each caller passes
+// the org it owns (its seeded fixture's OrgID, or the sentinel org it
+// minted for an auth-failure path that writes no row at all), so a foreign
+// writer's rows never enter the result set.
+//
+// The rbactestToolNamePrefix exclusion is retained as belt-and-braces:
+// rbactest seeds under its own orgs so org scoping already excludes them,
+// but keeping the filter documents the contract and guards against a
+// caller that ever passes an rbactest org id.
+func selectToolCalls(t *testing.T, orgID string) []toolCallRow {
 	t.Helper()
 	ctx := context.Background()
 	rows, err := db.Query(ctx, `
 		SELECT id, org_id, project_id, tool_name, result_kind, error_code, duration_ms, trace_id
 		FROM mcp.tool_calls
-		WHERE tool_name NOT LIKE $1
+		WHERE org_id = $1
+		  AND tool_name NOT LIKE $2
 		ORDER BY called_at ASC, id ASC
-	`, rbactestToolNamePrefix+"%")
+	`, orgID, rbactestToolNamePrefix+"%")
 	if err != nil {
 		t.Fatalf("select tool_calls: %v", err)
 	}

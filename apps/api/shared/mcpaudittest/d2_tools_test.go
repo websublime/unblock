@@ -350,7 +350,7 @@ func TestD2_PrimeReturnsFullDashboard(t *testing.T) {
 	// Audit row: one for the initialize handshake's authenticated POST
 	// (tool_name="transport" baseline since the SDK's initialize does
 	// not dispatch a tool), one for tools/call → tool_name="prime".
-	rows := selectToolCalls(t)
+	rows := selectToolCalls(t, fx.OrgID)
 	primeRows := 0
 	for _, r := range rows {
 		if r.ToolName == "prime" {
@@ -648,7 +648,7 @@ func TestD2_AuditRowsCarryToolName(t *testing.T) {
 	claimable := seedReadyItem(t, fx.OrgID, fx.ProjectID, "P1", 2*time.Second)
 	_ = callTool(t, fx.RawKey, "claim", map[string]any{"item_id": claimable})
 
-	rows := selectToolCalls(t)
+	rows := selectToolCalls(t, fx.OrgID)
 	have := map[string]int{}
 	for _, r := range rows {
 		have[r.ToolName]++

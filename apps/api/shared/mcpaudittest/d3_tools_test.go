@@ -803,7 +803,7 @@ func TestD3_AuditRowsCarryToolName(t *testing.T) {
 	_ = callTool(t, fx.RawKey, "list", map[string]any{"project_id": fx.ProjectID})
 	_ = callTool(t, fx.RawKey, "close", map[string]any{"item_id": claimedID})
 
-	rows := selectToolCalls(t)
+	rows := selectToolCalls(t, fx.OrgID)
 	have := map[string]int{}
 	for _, r := range rows {
 		have[r.ToolName]++

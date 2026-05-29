@@ -24,6 +24,52 @@
 // Cloud measurement is explicitly a P02 ops item — this harness only
 // covers the local emulator.
 //
+// Test isolation — UNBLOCK_PERF_GATE-gated TestMain (SPEC §11.2 NFR-1,
+// round-15).
+//
+// The harness is EXCLUDED from the default `encore test ./...` suite
+// (Gate 5) by a TestMain short-circuit keyed on the UNBLOCK_PERF_GATE
+// environment variable (main_test.go). When the gate is NOT "1" — the
+// default-suite case — TestMain returns immediately with exit 0 BEFORE
+// calling SeedFixture and BEFORE calling m.Run(): no seed, no
+// measurement loop, no negative-auth loop. The default-suite contract
+// from SPEC §11.2 round-15 — "zero database load and zero
+// mcp.tool_calls rows, not merely log-and-pass" — is therefore
+// satisfied at the earliest runtime point (no test function and no seed
+// ever executes).
+//
+// Mechanism choice — why run-time gate, not a `//go:build perf` tag.
+// The compile-time build-tag approach was attempted first and is
+// empirically incompatible with `encore test`: Encore's test codegen
+// does NOT propagate custom Go build tags to its generated runtime-shim
+// packages (rlog, the secrets loader), so `encore test -tags=perf`
+// fails to build the WHOLE app with undefined rlog.Error /
+// __encore_secrets.Load across auth.go and the generated
+// gen_auth__secrets.go — not just this package. The env-var TestMain
+// short-circuit keeps every file in the package always-compiling (so
+// `encore check` and the default suite stay green and the //encore:service
+// anchor is always parsed) while still guaranteeing zero side effects
+// when the gate is off.
+//
+// Empirical justification (CI run 26633703926): under the shared local
+// Postgres the harness's ~630 concurrent MCP calls ballooned warm-cache
+// latency from ~87 ms to 5–16 s, tripped a non-gated "no SSE data"
+// t.Fatalf, and broke a sibling package's global tool_calls count
+// assertion. The harness fundamentally cannot co-schedule with the full
+// functional suite on shared infra.
+//
+// The harness runs ONLY in a dedicated isolated CI step (owned by
+// Olive) with the gate set — NO build tag required:
+//
+//	cd apps/api && UNBLOCK_PERF_GATE=1 encore test ./perftest/...
+//
+// UNBLOCK_PERF_GATE serves a single, unified purpose under this
+// mechanism: it both ADMITS the package into the run (TestMain
+// short-circuit) AND arms the hard-fail assertions (p99 / goroutine
+// gate in harness_test.go). When the gate is unset the package is
+// inert; when it is "1" the package runs and its budget assertions are
+// fatal. There is no separate build-tag dimension.
+//
 // Seeding doctrine (SPEC §11.2 + §11.1.1 round-12).
 //
 // The harness owns its fixture via direct `encore.dev/storage/sqldb`

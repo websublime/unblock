@@ -661,7 +661,7 @@ func TestD4_AuditRowsCarryToolName(t *testing.T) {
 		"body":    "audit-row body",
 	})
 
-	rows := selectToolCalls(t)
+	rows := selectToolCalls(t, fx.OrgID)
 	have := map[string]int{}
 	for _, r := range rows {
 		have[r.ToolName]++
