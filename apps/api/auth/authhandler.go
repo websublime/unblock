@@ -19,8 +19,8 @@ package auth
 
 import (
 	"context"
-	"strings"
 
+	"encore.app/shared/httpauth"
 	"encore.dev/beta/auth"
 	"encore.dev/beta/errs"
 )
@@ -49,14 +49,6 @@ type AuthData struct {
 	Identity Identity `json:"identity"`
 }
 
-// bearerPrefix is the case-sensitive scheme prefix the
-// `Authorization` header must begin with. RFC 6750 says Bearer is
-// case-insensitive, but the GitHub Copilot, Claude Code, Cursor,
-// Codex, and Aider clients all emit `Bearer` literally — accepting
-// case variations would be free permissiveness for no upstream
-// benefit. We compare with EqualFold for resilience.
-const bearerPrefix = "Bearer "
-
 // AuthHandler is the //encore:authhandler invoked by Encore on every
 // request to an //encore:api with `auth: true`. Returns
 // errs.Unauthenticated for any token failure; downstream services
@@ -75,7 +67,7 @@ func AuthHandler(ctx context.Context, p *AuthParams) (auth.UID, *AuthData, error
 		}
 	}
 
-	token, ok := parseBearer(p.Authorization)
+	token, ok := httpauth.ParseBearer(p.Authorization)
 	if !ok {
 		return "", nil, &errs.Error{
 			Code:    errs.Unauthenticated,
@@ -106,23 +98,4 @@ func AuthHandler(ctx context.Context, p *AuthParams) (auth.UID, *AuthData, error
 	// `mcp.api_keys.issued_to_user` value (nullable in the schema; an
 	// empty string is acceptable for org-level service keys).
 	return auth.UID(resp.Identity.UserID), &AuthData{Identity: resp.Identity}, nil
-}
-
-// parseBearer extracts the token portion of an `Authorization:
-// Bearer <token>` header. Returns ("", false) on any deviation from
-// the expected shape. We accept case-insensitive `Bearer` for
-// resilience but reject leading/trailing whitespace inside the token
-// itself (callers that emit `Bearer  <token>` have a bug).
-func parseBearer(authzHeader string) (string, bool) {
-	if len(authzHeader) <= len(bearerPrefix) {
-		return "", false
-	}
-	if !strings.EqualFold(authzHeader[:len(bearerPrefix)], bearerPrefix) {
-		return "", false
-	}
-	tok := authzHeader[len(bearerPrefix):]
-	if tok == "" || tok != strings.TrimSpace(tok) {
-		return "", false
-	}
-	return tok, true
 }

@@ -8,9 +8,13 @@
 //
 // SPEC anchors:
 //
-//   - §4.3.1 — single //encore:api public raw method=* path=/mcp;
-//     HTTP-method dispatch inside the function body; SDK adapter is
-//     a singleton owned by this file.
+//   - §4.3.1 — single //encore:api public raw path=/mcp (the SPEC
+//     sample's literal `method=*` is elided because Encore v1.52.1
+//     rejects it with E1371; the raw-endpoint default matches every
+//     HTTP method, which is identical to the `method=*` intent — see
+//     mcp.go's package doc for the full rationale); HTTP-method
+//     dispatch happens inside the function body; the SDK adapter is a
+//     singleton owned by this file.
 //   - §5.1 — transport contract: POST + GET, Mcp-Session-Id returned
 //     on initialize, SSE keepalive every 15s. The SDK's KeepAlive
 //     option emits ping requests at the protocol level — over the
