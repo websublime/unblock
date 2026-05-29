@@ -21,14 +21,15 @@
 // The handler accepts both shapes verbatim and forwards.
 //
 // Audit row convention: the handler stamps state.Call.ItemID =
-// resp.ToItemID after the deps call succeeds (deps.RemoveEdgeResponse
-// carries the resolved to_item identifier regardless of which
-// selection shape the caller used). The to_item is the natural
-// single-item handle — it is the only item whose is_ready flag is
-// mutated inline. state.Call.ProjectID stays unset because
-// RemoveEdgeResponse does not surface project_id and a pre-lookup
-// would add a round-trip for a value already carried in the inline
-// audit row.
+// resp.ToItemID and state.Call.ProjectID = resp.ProjectID after the
+// deps call succeeds (deps.RemoveEdgeResponse carries both the resolved
+// to_item identifier and its project regardless of which selection
+// shape the caller used). The to_item is the natural single-item
+// handle — it is the only item whose is_ready flag is mutated inline.
+// RemoveEdge resolves project_id from the to_item row it already locks
+// (deps/deps.go), so surfacing it on the response costs no extra
+// round-trip and mirrors the add_dependency symmetry (review cleanup
+// unblock-tv8.62).
 //
 // to_item_now_ready is the SINGLE-HOP view per SPEC §6.2 Tool 12
 // lines 1578-1586: the boolean reflects ONLY the direct to_item's
@@ -111,6 +112,7 @@ func handleRemoveDependency(ctx context.Context, req *sdkmcp.CallToolRequest, in
 	if state != nil && state.Call != nil {
 		state.Call.ResultKind = ResultOK
 		state.Call.ItemID = resp.ToItemID
+		state.Call.ProjectID = resp.ProjectID
 	}
 	return nil, out, nil
 }
