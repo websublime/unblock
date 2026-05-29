@@ -16,15 +16,11 @@
 //     other methods short-circuit with 405 + Allow: POST, GET
 //     (BEFORE auth runs — AC #3).
 //  2. Bearer parse + auth.Validate() in-package call (DECISION 1 on
-//     the bead — shape (b) from the investigation): keep
-//     `//encore:api public raw path=/mcp` (Encore v1.52.1 rejects
-//     the literal `method=*` from SPEC §4.3.1's sample with E1371
-//     "Invalid endpoint method"; the raw-endpoint default per
-//     ENCORE.md is to match every HTTP method when `method=` is
-//     omitted — functionally identical to the `method=*` intent),
-//     do the auth manually inside the handler so the 405 path can
-//     bypass auth and the §4.3.1 sample's dispatch logic reads
-//     verbatim.
+//     the bead — shape (b) from the investigation): do the auth
+//     manually inside the handler so the 405 path can bypass auth and
+//     the §4.3.1 sample's dispatch logic reads verbatim. (The single
+//     //encore:api annotation that makes this possible is explained
+//     in the annotation note below.)
 //  3. On auth success: bind Identity onto tracectx and the deferred
 //     ToolCall, then ServeHTTP() against the SDK handler.
 //  4. On auth failure: write §7 error envelope with kind=UNAUTHENTICATED
@@ -33,35 +29,32 @@
 //     bead — mcp.tool_calls.org_id is FK + NOT NULL and we cannot
 //     synthesize a sentinel without a schema change).
 //
-// Per round-2 review (L7-W2 closure) the endpoint uses a single
-// //encore:api annotation so HTTP-method routing happens inside the
-// function body. Encore's raw-endpoint convention is one annotation
-// per function; stacked POST+GET annotations are not supported by
-// the Encore parser. The conceptual `method=*` from SPEC §4.3.1's
-// sample is elided in the literal annotation because the Encore
-// v1.52.1 parser rejects it with E1371; the raw-endpoint default
-// (per ENCORE.md) is to match every HTTP method when `method=` is
-// omitted, which is identical to the `method=*` intent.
+// Annotation note (round-2 review L7-W2 closure) — the single
+// authoritative rationale for the endpoint's annotation shape:
+// the endpoint uses ONE `//encore:api public raw path=/mcp`
+// annotation so HTTP-method routing happens inside the function body.
+// Encore's raw-endpoint convention is one annotation per function;
+// stacked POST+GET annotations are not supported by the parser. The
+// conceptual `method=*` from SPEC §4.3.1's sample is elided in the
+// literal annotation because Encore v1.52.1 rejects it with E1371
+// "Invalid endpoint method"; the raw-endpoint default (per ENCORE.md)
+// is to match every HTTP method when `method=` is omitted, which is
+// identical to the `method=*` intent.
 package mcp
 
 import (
 	"bytes"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 
 	"encore.app/auth"
+	"encore.app/shared/httpauth"
 	"encore.app/shared/tracectx"
 	"encore.app/shared/ulid"
 	"encore.dev/beta/errs"
 	"encore.dev/rlog"
 )
-
-// bearerPrefix mirrors auth/authhandler.go's constant. We accept it
-// case-insensitively (RFC 6750 says Bearer is case-insensitive) and
-// reject any deviation from `Bearer <token>` with UNAUTHENTICATED.
-const bearerPrefix = "Bearer "
 
 // maxJSONRPCBodyForIDProbe caps how much of the inbound POST body we
 // buffer to extract the JSON-RPC `id` field for the §7 error
@@ -180,7 +173,7 @@ func serveMCP(w http.ResponseWriter, r *http.Request) {
 		writeUnauthenticated(w, r, "missing Authorization header")
 		return
 	}
-	token, ok := parseBearer(authzHeader)
+	token, ok := httpauth.ParseBearer(authzHeader)
 	if !ok {
 		writeUnauthenticated(w, r, "Authorization header must be \"Bearer <token>\"")
 		return
@@ -345,27 +338,4 @@ func errCodeOf(err error) errs.ErrCode {
 		return errs.Unknown
 	}
 	return e.Code
-}
-
-// parseBearer extracts the token portion of an `Authorization:
-// Bearer <token>` header. Mirrors auth/authhandler.go's parseBearer
-// but lives here as an unexported helper because exporting the auth
-// version would surface an internal helper across the service
-// boundary for no gain (the implementation is six lines).
-//
-// Returns ("", false) on any deviation from the expected shape.
-// Accepts case-insensitive `Bearer` for resilience (RFC 6750
-// §2.1).
-func parseBearer(authzHeader string) (string, bool) {
-	if len(authzHeader) <= len(bearerPrefix) {
-		return "", false
-	}
-	if !strings.EqualFold(authzHeader[:len(bearerPrefix)], bearerPrefix) {
-		return "", false
-	}
-	tok := authzHeader[len(bearerPrefix):]
-	if tok == "" || tok != strings.TrimSpace(tok) {
-		return "", false
-	}
-	return tok, true
 }

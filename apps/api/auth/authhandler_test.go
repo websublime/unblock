@@ -1,7 +1,9 @@
 // Unit tests for the //encore:authhandler input parsing.
 //
-// Scope: parseBearer + AuthHandler dispatch (input validation only).
-// Validate's DB path is exercised at integration time (encore test).
+// Scope: AuthHandler dispatch (input validation only). Bearer-header
+// parsing now lives in apps/api/shared/httpauth and is covered by
+// httpauth_test.go. Validate's DB path is exercised at integration
+// time (encore test).
 //
 // Test-runtime constraint (bead unblock-xuk follow-on): we read
 // err.Code by direct type assertion on *errs.Error rather than calling
@@ -40,35 +42,6 @@ func errCode(err error) errs.ErrCode {
 		return e.Code
 	}
 	return errs.Unknown
-}
-
-func TestParseBearer(t *testing.T) {
-	tests := []struct {
-		name    string
-		input   string
-		wantTok string
-		wantOK  bool
-	}{
-		{name: "canonical form", input: "Bearer abc", wantTok: "abc", wantOK: true},
-		{name: "case-insensitive scheme", input: "bearer xyz", wantTok: "xyz", wantOK: true},
-		{name: "empty", input: "", wantOK: false},
-		{name: "scheme only", input: "Bearer ", wantOK: false},
-		{name: "no scheme", input: "abc", wantOK: false},
-		{name: "trailing space", input: "Bearer abc ", wantOK: false},
-		{name: "leading space (after scheme)", input: "Bearer  abc", wantOK: false},
-		{name: "wrong scheme", input: "Basic abc", wantOK: false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got, ok := parseBearer(tc.input)
-			if ok != tc.wantOK {
-				t.Fatalf("parseBearer(%q) ok=%v, want %v", tc.input, ok, tc.wantOK)
-			}
-			if got != tc.wantTok {
-				t.Fatalf("parseBearer(%q) tok=%q, want %q", tc.input, got, tc.wantTok)
-			}
-		})
-	}
 }
 
 // TestAuthHandlerInputErrors verifies the input-validation paths of

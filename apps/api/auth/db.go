@@ -80,7 +80,8 @@
 // unblock-bne):
 //   - `go test ./apps/api/auth/...` loads the package without
 //     panicking and runs the leaf-package tests (apikey, oauth, ulid,
-//     parseBearer subtests of authhandler_test.go). The auth root
+//     AuthHandler input-error subtests of authhandler_test.go; Bearer
+//     parsing moved to apps/api/shared/httpauth). The auth root
 //     package never imports apps/api/db/, so its NewDatabase call
 //     does not fire during plain-go-test bring-up.
 //   - `go test ./apps/api/db/...` would panic if apps/api/db/
