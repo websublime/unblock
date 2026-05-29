@@ -342,3 +342,61 @@ jobs:
       # ------------------------------------------------------------------
       - name: go test -race (leaf packages)
         run: go test -race ./shared/ulid/... ./shared/rbac/... ./shared/lint/...
+
+      # ------------------------------------------------------------------
+      # Gate 8 — NFR-1 latency harness (ISOLATED, advisory)
+      #
+      # Owner: bead unblock-tv8.24 (E-2). Authoritative contract:
+      # docs/specs/01-spec-backend-mvp.md §11.2 NFR-1 "Test isolation
+      # (round-15)" + "Gate semantics" paragraphs.
+      #
+      # WHY A DEDICATED ISOLATED STEP (round-15 CI-failure closure,
+      # CI run 26633703926):
+      #   A latency harness CANNOT co-schedule with the full functional
+      #   suite (Gate 5, `encore test ./...`) on a single shared local
+      #   Postgres and produce meaningful numbers or a reliable verdict.
+      #   Under concurrent load the warm-cache Validate/Claim/Ready calls
+      #   ballooned from a local ~87 ms p99 to 5-16 s, and one
+      #   measurement-loop response returned an empty body that tripped a
+      #   transport-level t.Fatalf the gate does not guard. The harness
+      #   therefore runs ALONE in this step, never co-scheduled with the
+      #   other apps/api packages. Gate 5 stays unchanged: with
+      #   UNBLOCK_PERF_GATE unset, perftest's TestMain short-circuits
+      #   (os.Exit(0) before SeedFixture and m.Run()) so the default
+      #   suite carries zero perftest DB load and zero mcp.tool_calls
+      #   rows — see Greta's isolation DECISION on the bead.
+      #
+      # EXACT COMMAND (Greta's empirically-validated infra contract):
+      #   UNBLOCK_PERF_GATE=1 encore test ./perftest/...
+      #   - UNBLOCK_PERF_GATE=1 BOTH admits the package into the run (the
+      #     TestMain gate) AND arms the p99 (< 2 s) and goroutine-drain
+      #     (drained - baseline <= 20) hard-fail assertions.
+      #   - NO `-tags=perf`: the build-tag mechanism was rejected because
+      #     `-tags=perf` does NOT propagate to Encore's generated
+      #     runtime-shim packages, breaking the whole-app build with
+      #     `undefined: rlog.Error` / `undefined: __encore_secrets.Load`.
+      #     Encore's codegen overlay does not apply custom Go build tags.
+      #
+      # WHY ADVISORY (continue-on-error: true), NOT release-blocking:
+      #   Spec §11.2 NFR-1 "Gate semantics" states verbatim:
+      #   "Release-blocking pipeline wiring is a P02 ops item owned by
+      #   Olive." The round-15 isolation paragraph mandates ONLY that the
+      #   harness run in a dedicated isolated step under
+      #   UNBLOCK_PERF_GATE=1 — it does NOT promote the budget to a merge
+      #   blocker. Empirically the 2 s budget is environment-sensitive
+      #   (risk R5 on the bead): GH Actions free-tier shared runners can
+      #   be 2-3x slower than a dev laptop, so a transient noisy-neighbour
+      #   spike could breach 2 s with no real regression and wrongly block
+      #   an unrelated merge. continue-on-error keeps the verdict visible
+      #   as its own Checks-tab row (the JSON-Lines samples + p99 +
+      #   goroutine deltas are always logged via t.Logf, and a budget
+      #   breach turns the step red) while leaving the merge gate to the
+      #   P02 ops promotion. Reuses this job's emulator setup (Postgres +
+      #   Docker, the .secrets.local.cue placeholders, the unlinked
+      #   encore.app) — no second job spins the cluster up again.
+      # ------------------------------------------------------------------
+      - name: encore test (NFR-1 latency harness, isolated, advisory)
+        continue-on-error: true
+        env:
+          UNBLOCK_PERF_GATE: "1"
+        run: encore test ./perftest/...
