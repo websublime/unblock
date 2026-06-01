@@ -186,6 +186,12 @@ func runNoRbacDynamicClause(pass *analysis.Pass) (interface{}, error) {
 					// For has signature For[T](identity, table) — table
 					// is the SECOND positional arg. Require len > 1.
 					if len(call.Args) < 2 {
+						// Wrong arity — a call with fewer than two
+						// arguments cannot type-check, so go/types
+						// complains elsewhere; this analyzer is only
+						// concerned with the safety contract (the table
+						// argument being a compile-time constant) and has
+						// nothing to assert when the table arg is absent.
 						return true
 					}
 					second := call.Args[1]
