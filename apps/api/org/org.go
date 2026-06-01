@@ -35,6 +35,7 @@ import (
 	"encore.dev/beta/errs"
 	"encore.dev/rlog"
 	"encore.dev/storage/sqldb"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // -----------------------------------------------------------------------------
@@ -773,24 +774,52 @@ func denyError(req *AuthorizeRequest, reason string) error {
 	}
 }
 
+// pgUniqueViolationCode is the Postgres SQLSTATE for unique_violation
+// and pgForeignKeyViolationCode for foreign_key_violation (Class 23 —
+// integrity constraint violation). See
+// https://www.postgresql.org/docs/current/errcodes-appendix.html.
+const (
+	pgUniqueViolationCode     = "23505"
+	pgForeignKeyViolationCode = "23503"
+)
+
 // isUniqueViolation returns true when err is a Postgres UNIQUE
-// violation on the named constraint. We match by substring on the
-// constraint name to stay framework-agnostic (pgx's error vs sqldb's
-// wrapped error vary by Encore version).
+// violation on the named constraint. Prefers typed matching via
+// pgconn.PgError (SQLSTATE 23505 + ConstraintName) — pgx/v5 is
+// transitively present through Encore's sqldb wrapping. Falls back to
+// the SQLSTATE-token / "duplicate key" substring match when the error
+// has been re-wrapped through a path that hides the typed
+// *pgconn.PgError (defence in depth). Mirrors deps.isUniqueViolation.
 func isUniqueViolation(err error, constraint string) bool {
 	if err == nil {
 		return false
 	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolationCode {
+		return pgErr.ConstraintName == constraint
+	}
+	// Fallback: typed unwrap missed it. Match on the SQLSTATE token
+	// rather than English prose so locale changes can't silently break
+	// the predicate.
 	msg := err.Error()
-	return strings.Contains(msg, "duplicate key") && strings.Contains(msg, constraint)
+	return (strings.Contains(msg, "SQLSTATE "+pgUniqueViolationCode) ||
+		strings.Contains(msg, "duplicate key")) &&
+		strings.Contains(msg, constraint)
 }
 
 // isForeignKeyViolation returns true when err is a Postgres FK
-// violation. Matched by substring as above.
+// violation. Prefers typed matching via pgconn.PgError (SQLSTATE
+// 23503), falling back to the SQLSTATE-token / substring match for
+// re-wrapped errors. Mirrors isUniqueViolation's strategy.
 func isForeignKeyViolation(err error) bool {
 	if err == nil {
 		return false
 	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == pgForeignKeyViolationCode
+	}
 	msg := err.Error()
-	return strings.Contains(msg, "foreign key") || strings.Contains(msg, "violates foreign key")
+	return strings.Contains(msg, "SQLSTATE "+pgForeignKeyViolationCode) ||
+		strings.Contains(msg, "violates foreign key")
 }
