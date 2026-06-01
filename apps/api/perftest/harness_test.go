@@ -158,9 +158,13 @@ func percentile(sorted []time.Duration, p float64) time.Duration {
 	return sorted[rank-1]
 }
 
-// latencySampleLine is one JSON-Lines record per measured sequence.
+// latencySampleLine is one JSON-Lines record per measured sequence —
+// LatencyMs is the wall-clock duration of one full prime → ready →
+// claim sequence, NOT one individual MCP call.
 // Emitted via t.Logf so a CI parser can lift the samples (SPEC §11.2:
-// "logs per-call latency samples … as JSON-Lines"). record="sample".
+// "logs per-call latency samples … as JSON-Lines"; the spec's "per-call"
+// wording predates the sequence-level measurement and is realised here
+// as per-sequence — see doc.go's NFR-1 sample-unit note). record="sample".
 type latencySampleLine struct {
 	Record    string `json:"record"`
 	Iteration int    `json:"iteration"`

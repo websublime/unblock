@@ -12,10 +12,17 @@
 //     established, (b) the API key is validated once before the timer
 //     starts, and (c) no first-request cold-start outliers — M ≥ 10
 //     warm-up iterations are discarded before measurement begins.
-//   - The harness ALWAYS logs the per-call latency samples, the
-//     computed p99, and the goroutine deltas as JSON-Lines via
-//     t.Logf (informative on every run — aligns with the AC verb
-//     "reports").
+//   - The harness ALWAYS logs the latency samples, the computed p99,
+//     and the goroutine deltas as JSON-Lines via t.Logf (informative on
+//     every run — aligns with the AC verb "reports"). Each latency
+//     sample is the wall-clock duration of ONE FULL `prime → ready →
+//     claim` SEQUENCE (three chained MCP round-trips), NOT one
+//     individual MCP call: the p99 budget in SPEC §11.2 NFR-1 is
+//     defined over the end-to-end sequence, so the per-sample unit is
+//     per-sequence. (The AC and SPEC prose say "per-call latency
+//     samples"; that wording predates the sequence-level measurement
+//     and is read here as "per measured sequence" — see
+//     harness_test.go's latencySampleLine doc.)
 //   - A hard-fail (t.Fatalf on p99 ≥ 2 s OR drained-baseline > 20) is
 //     gated by the UNBLOCK_PERF_GATE=1 environment variable so CI
 //     stays advisory on slow shared GH Actions runners. Release-
