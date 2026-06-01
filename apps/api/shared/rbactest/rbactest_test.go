@@ -242,32 +242,19 @@ func runOrgScopedTuple(t *testing.T, fx *Fixture, callerOrg, targetOrg, role, ta
 		id := identityFor(fx, callerOrg, role)
 		targetOrgID := fx.Orgs[targetOrg]
 
-		// Run a scoped read. T = scopedRow is a minimal projection
-		// over (id, org_id) — the scanner reads exported fields in
-		// declaration order, which matches `SELECT * FROM <table>`
-		// only if T's field count matches the table's column count.
-		// We therefore use rbac.For[scopedRow] only when the table's
-		// row shape begins with (id, org_id, ...) — true for
-		// org.projects and org.members (verified against
-		// migrations 0030_org.up.sql lines 19-43).
+		// Run a scoped read via selectScopedOrgIDs. rbac.For issues an
+		// implicit `SELECT *` (apps/api/shared/rbac rbac.go), so the
+		// reflection scanner expects T's exported-field count to equal
+		// the table's column count. The suite therefore uses one
+		// full-column row type per KindOrgScoped table — orgProjectsRow
+		// and orgMembersRow, declared below — each mirroring its table's
+		// exact layout from migration 0030_org.up.sql. We only read the
+		// OrgID field for the leak assertion; the remaining fields exist
+		// solely so the field count matches `SELECT *`.
 		//
-		// For C-6/E-3 extensions the table shapes diverge and the
-		// suite will need per-table row types (or an explicit
-		// SELECT). Within B-3 the minimal projection is sufficient
-		// because both KindOrgScoped tables share the (id, org_id,
-		// ...) prefix and we discard every column after org_id by
-		// declaring only those two fields and pairing them with an
-		// explicit SELECT via a Where that is a no-op…
-		//
-		// Reality: rbac.For uses `SELECT *` (apps/api/shared/rbac
-		// rbac.go ~line 413). The scanner expects T's field count
-		// to equal the column count. Declaring scopedRow as a
-		// full-column shape per table is overkill for the row-leak
-		// assertion (we only need org_id). The suite instead uses
-		// a separate, raw SQL probe that selects just `org_id` for
-		// the leak check and exercises rbac.For with a typed-row T
-		// matching the actual table layout. See selectScopedOrgIDs
-		// below.
+		// For C-6/E-3 extensions the table shapes diverge further; add a
+		// matching per-table row type and a switch case in
+		// selectScopedOrgIDs (see its doc-comment below).
 		gotOrgIDs, err := selectScopedOrgIDs(context.Background(), id, table)
 		if err != nil {
 			// Same-org callers may legitimately see rows; cross-org
@@ -367,19 +354,20 @@ func runAuthorizeOnlyTuple(t *testing.T, fx *Fixture, callerOrg, targetOrg, role
 	})
 }
 
-// scopedRow is the minimal projection used by selectScopedOrgIDs to
-// read just `(id, org_id)` from each KindOrgScoped table. The
-// rbac.For builder issues `SELECT *` (apps/api/shared/rbac.go
-// ~line 413), so the suite cannot directly use rbac.For with a
-// two-field T over a many-column table — the scanner would mismatch
-// column count vs field count.
+// The per-table row types below (orgProjectsRow, orgMembersRow) are the
+// typed projections used by selectScopedOrgIDs to read each
+// KindOrgScoped table. The rbac.For builder issues `SELECT *`
+// (apps/api/shared/rbac rbac.go), so the suite cannot use a two-field
+// (id, org_id) row over a many-column table — the reflection scanner
+// would mismatch column count vs field count. Each row type therefore
+// mirrors its table's full column layout; the suite reads only OrgID and
+// the remaining fields exist solely to balance the column count.
 //
-// Workaround: use a typed row shape that matches each table's full
-// column layout. Both KindOrgScoped tables in B-3 (org.projects,
-// org.members) share the (id, org_id, ...) prefix but diverge in
-// the suffix; we therefore declare per-table row types below.
+// (Earlier rounds described a single `scopedRow` projection here; that
+// type was inlined into the per-table row types below and no longer
+// exists.)
 //
-// This is a row-shape helper, not part of the policy contract.
+// These are row-shape helpers, not part of the policy contract.
 // When C-6 / E-3 add new KindOrgScoped tables, add a matching row
 // type and extend the switch in selectScopedOrgIDs.
 
