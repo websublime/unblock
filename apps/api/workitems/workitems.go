@@ -72,6 +72,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"encore.app/auth"
 	"encore.app/deps"
@@ -2073,9 +2074,14 @@ func Search(ctx context.Context, req *SearchRequest) (*SearchResponse, error) {
 		if err := rows.Scan(&h.ItemID, &h.Source, &h.CommentID, &h.Rank, &h.Snippet); err != nil {
 			return nil, &errs.Error{Code: errs.Internal, Message: "search scan failed"}
 		}
-		// Trim snippet to 200 chars (SPEC §4.4 line 793 cap).
-		if len(h.Snippet) > 200 {
-			h.Snippet = h.Snippet[:200]
+		// Trim snippet to 200 chars (SPEC §4.4 cap). Rune-aware: a
+		// naive byte-slice (Snippet[:200]) can sever a multi-byte
+		// UTF-8 sequence — or a ts_headline <b>…</b> markup tag —
+		// mid-codepoint, yielding invalid UTF-8 on the wire. Count
+		// runes and slice on a rune boundary instead.
+		if utf8.RuneCountInString(h.Snippet) > 200 {
+			runes := []rune(h.Snippet)
+			h.Snippet = string(runes[:200])
 		}
 		all = append(all, h)
 	}
@@ -2372,7 +2378,7 @@ func AssignItem(ctx context.Context, req *AssignItemRequest) error {
 
 	if req.MilestoneID == "" {
 		// Unassign: clear all three columns.
-		_, err := tx.Exec(ctx,
+		res, err := tx.Exec(ctx,
 			`UPDATE workitems.items
 			    SET milestone_id          = NULL,
 			        milestone_assigned_at = NULL,
@@ -2383,6 +2389,13 @@ func AssignItem(ctx context.Context, req *AssignItemRequest) error {
 		)
 		if err != nil {
 			return &errs.Error{Code: errs.Internal, Message: "milestone unassign failed"}
+		}
+		// A WHERE id = $1 UPDATE that matches no row silently succeeds.
+		// Surface a non-existent item as NotFound instead of a bogus
+		// 200 — the assign branch already returns NotFound for the same
+		// condition via its SELECT guard, so mirror that contract here.
+		if res.RowsAffected() == 0 {
+			return &errs.Error{Code: errs.NotFound, Message: "item not found"}
 		}
 	} else {
 		// M-INV-7: scope reachability check.
