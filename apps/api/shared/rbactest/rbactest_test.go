@@ -18,8 +18,10 @@
 //     the policy contract (cross-org deny everywhere; same-org per
 //     the role matrix and the agent-resource set).
 //
-// Concurrency: no t.Parallel anywhere — rbac.Bind is not goroutine-
-// safe; bead unblock-tv8.34 tracks the hardening.
+// Concurrency: no t.Parallel anywhere. rbac.Bind is goroutine-safe as
+// of bead unblock-tv8.34 (single-write via atomic.Pointer.CompareAndSwap
+// from nil — first non-nil handle wins); the suite stays sequential
+// regardless, since the matrix shares one bound handle.
 
 package rbactest
 

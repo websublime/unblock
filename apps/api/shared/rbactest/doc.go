@@ -86,9 +86,11 @@
 //
 // Concurrency.
 //
-// The suite does NOT call t.Parallel anywhere. rbac.Bind (and the
-// per-service BindDB hooks) are not goroutine-safe; bead
-// unblock-tv8.34 tracks the hardening discussion. The single-binding
+// The suite does NOT call t.Parallel anywhere. rbac.Bind is
+// goroutine-safe as of bead unblock-tv8.34: the handle lives in an
+// atomic.Pointer and Bind installs it via CompareAndSwap from nil, so
+// the first non-nil handle wins and any later or racing Bind (or a nil
+// argument) is a no-op. The single-binding
 // contract is shared with the wider domain-service tree (auth, org,
 // workitems, deps); rbactest takes the same guarantee Encore's process
 // init provides ("BindDB completes before any handler dispatches") and
