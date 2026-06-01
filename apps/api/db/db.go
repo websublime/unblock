@@ -99,13 +99,13 @@
 //     consumer pattern.
 //
 //   - workitems.BindDB(DB) and deps.BindDB(DB) populate the workitems
-//     and deps services' nil handles. In P01 A-1 their RPC bodies
-//     return errNotImplemented and do not yet read `db`; the
-//     pre-wiring lands now so beads B-1+ (workitems bodies, FTS,
-//     milestones, claim transaction) and C-1+ (cycle CTE, advisory
-//     locks, cascade Pub/Sub publisher) inherit a non-nil handle the
-//     instant they start touching the database. The skeleton db.go
-//     in each service mirrors auth/db.go and org/db.go verbatim.
+//     and deps services' nil handles. Their RPC bodies now read `db`
+//     directly — B-1+ (workitems bodies, FTS, milestones, claim
+//     transaction) and C-1+ (cycle CTE, advisory locks, cascade
+//     Pub/Sub publisher) have landed — and inherited a non-nil handle
+//     the instant they started touching the database thanks to this
+//     pre-wiring. The db.go in each service mirrors auth/db.go and
+//     org/db.go verbatim.
 //
 //   - rbac.Bind(DB) installs the shared rbac builder's handle. The
 //     previous defense-in-depth pattern (each service called
