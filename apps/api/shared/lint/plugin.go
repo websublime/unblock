@@ -21,11 +21,19 @@
 //     verbatim — no per-invocation construction — so behaviour is
 //     identical between the `go run ./shared/lint/cmd/<name>` direct
 //     path and the custom-gcl path.
-//   - LinterPlugin.GetLoadMode pins LoadModeSyntax: both analyzers
-//     inspect AST literals and import paths only (no type-information
-//     queries, no SSA), so the lighter syntax-only load mode is the
-//     correct match. Switching to LoadModeTypesInfo would force
-//     golangci-lint to populate go/types info we do not consume.
+//   - LinterPlugin.GetLoadMode diverges by analyzer ON PURPOSE: each
+//     plugin pins the lightest load mode it can actually run under, so
+//     the two implementations below return different modes.
+//     no_direct_is_ready_write pins register.LoadModeSyntax because it
+//     inspects AST literals and import paths only (no type-info queries,
+//     no SSA); forcing LoadModeTypesInfo there would make golangci-lint
+//     populate go/types info that analyzer never consumes.
+//     no_rbac_dynamic_clause pins register.LoadModeTypesInfo because it
+//     reads pass.TypesInfo (receiver-type checks via .Selections,
+//     package-qualified resolution via .Uses), and those maps are only
+//     populated under the type-info load mode — syntax-only would leave
+//     them nil and break the analyzer. The per-method GetLoadMode
+//     comments below name the exact call sites each mode is dictated by.
 //   - register.Plugin is called from init() so the registration fires
 //     the moment the custom binary's main package blank-imports
 //     encore.app/shared/lint via the module-plugin loader's generated
