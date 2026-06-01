@@ -769,6 +769,7 @@ func Create(ctx context.Context, req *CreateRequest) (*Item, error) {
 	}
 
 	if err := tx.Commit(); err != nil {
+		rlog.Error("workitems: create commit failed", "err", err)
 		return nil, &errs.Error{Code: errs.Internal, Message: "create commit failed"}
 	}
 
@@ -850,6 +851,7 @@ func Update(ctx context.Context, req *UpdateRequest) (*Item, error) {
 	}
 
 	if err := tx.Commit(); err != nil {
+		rlog.Error("workitems: update commit failed", "err", err)
 		return nil, &errs.Error{Code: errs.Internal, Message: "update commit failed"}
 	}
 
@@ -1298,6 +1300,7 @@ func SetStateColumns(ctx context.Context, req *SetStateRequest) (*Item, error) {
 	}
 
 	if err := tx.Commit(); err != nil {
+		rlog.Error("workitems: set_state commit failed", "err", err)
 		return nil, &errs.Error{Code: errs.Internal, Message: "set_state commit failed"}
 	}
 
@@ -1430,6 +1433,7 @@ func Close(ctx context.Context, req *CloseRequest) (*Item, error) {
 	}
 
 	if err := tx.Commit(); err != nil {
+		rlog.Error("workitems: close commit failed", "err", err)
 		return nil, &errs.Error{Code: errs.Internal, Message: "close commit failed"}
 	}
 
@@ -1576,6 +1580,7 @@ func Claim(ctx context.Context, req *ClaimRequest) (*Item, error) {
 	}
 
 	if err := tx.Commit(); err != nil {
+		rlog.Error("workitems: claim commit failed", "err", err)
 		return nil, &errs.Error{Code: errs.Internal, Message: "claim commit failed"}
 	}
 
@@ -2233,6 +2238,7 @@ func CreateMilestone(ctx context.Context, req *CreateMilestoneRequest) (*Milesto
 	}
 
 	if err := tx.Commit(); err != nil {
+		rlog.Error("workitems: milestone create commit failed", "err", err)
 		return nil, &errs.Error{Code: errs.Internal, Message: "milestone commit failed"}
 	}
 
@@ -2355,6 +2361,7 @@ func UpdateMilestone(ctx context.Context, req *UpdateMilestoneRequest) (*Milesto
 	}
 
 	if err := tx.Commit(); err != nil {
+		rlog.Error("workitems: milestone update commit failed", "err", err)
 		return nil, &errs.Error{Code: errs.Internal, Message: "milestone update commit failed"}
 	}
 	return readMilestone(ctx, req.MilestoneID)
@@ -2451,6 +2458,7 @@ func AssignItem(ctx context.Context, req *AssignItemRequest) error {
 	}
 
 	if err := tx.Commit(); err != nil {
+		rlog.Error("workitems: milestone assign commit failed", "err", err)
 		return &errs.Error{Code: errs.Internal, Message: "milestone assign commit failed"}
 	}
 	return nil
