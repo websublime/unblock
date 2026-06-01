@@ -26,6 +26,15 @@ type ScopedQuery[T any] struct {
 
 // Identity is a stand-in for auth.Identity; the analyzer doesn't
 // inspect it.
+//
+// DRIFT NOTE (unblock-tv8.37): this is a deliberately minimal mirror of
+// the real auth/types.Identity (apps/api/auth/types/types.go). Post bead
+// unblock-tv8.30 that real type carries four fields
+// (UserID/OrgID/Role/AgentKind); only OrgID is reproduced here because
+// the analyzer resolves Identity solely by its package path, never by
+// its field set. Do NOT chase the real type's fields here — keep this
+// stand-in minimal. It exists only so the fixture's For()/Where() chain
+// type-checks under the analysistest GOPATH overlay.
 type Identity struct {
 	OrgID string
 }
