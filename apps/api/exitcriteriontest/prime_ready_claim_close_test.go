@@ -6,9 +6,12 @@
 //   - claim on the returned item succeeds.
 //   - set_state(impl_state=done) on the claimed item is accepted.
 //   - close on the same item succeeds (P01 relaxation: claimed_by_id
-//     IS NOT NULL is the only precondition); cascade subscriber
-//     fires (driven via deps.HandleCascadeRequestedForTest per the
-//     SPEC §11.1.1 round-13 contract).
+//     IS NOT NULL is the only precondition); the close is driven via
+//     the private-mesh workitems.Close so its CascadeRequested publish
+//     is observable in this test scope (see step 5 DEVIATION), and the
+//     cascade subscriber is then driven via
+//     deps.HandleCascadeRequestedForTest on that REAL captured message
+//     per the SPEC §11.1.1 round-13 contract.
 //   - After cascade, prime reflects newly-unblocked dependents
 //     (itm_c, itm_d flip to ready — this is Regime-A-inline per
 //     workitems.Close → deps.RecomputeReadyForBlocksDownstream; the
@@ -36,7 +39,7 @@ import (
 
 	encoredb "encore.app/db"
 	"encore.app/deps"
-	"encore.app/shared/ulid"
+	"encore.app/workitems"
 	"encore.dev/et"
 )
 
@@ -201,33 +204,37 @@ func TestExitCriterion_PrimeReadyClaimCloseCascadeFlow(t *testing.T) {
 		t.Fatalf("post-set_state claimed_by_id is empty — close's precondition would fail")
 	}
 
-	// --- 5) close itm_b ---
+	// --- 5) close itm_b (private mesh) ---
 	//
-	// Tracker for the cascade publish: et.Topic.PublishedMessages
-	// records messages emitted in the current test scope. We capture
-	// the slice AFTER the close call so the filter sees the new
-	// publish; the slice's order is publish order, so the close
-	// publish is the most recent matching entry.
-	closeEnv := callTool(t, f.RawKey, sessionID, "close", map[string]any{
-		"item_id": itemB,
-		"reason":  "exit-criterion-e2e",
+	// DEVIATION (round-15, bead unblock-tv8.66): the close is driven
+	// through the private-mesh //encore:api workitems.Close rather than
+	// the MCP `close` tool surface. SPEC §11.1.1 (round-13) endorses
+	// EITHER path ("Invoke the producing RPC through the normal MCP /
+	// private-mesh path"); we choose the mesh path here for the SAME
+	// reason cascade_kinds_test.go does (see that file's file-level
+	// DEVIATION block): et.Topic(...).PublishedMessages() only observes
+	// publishes emitted in the test goroutine's request-manager scope.
+	// The MCP transport runs inside an httptest.NewServer goroutine that
+	// bypasses Encore's request manager, so an MCP-surface close
+	// publishes CascadeRequested correctly on the production side but the
+	// publish is INVISIBLE to cascadeMessagesFor from this scope. Driving
+	// the mesh API preserves every production semantic (same inline
+	// is_ready Regime-A recompute, same post-commit Publish via the same
+	// code path) while making the real publish — and its real event_id —
+	// observable. The MCP `close` tool surface is exercised end-to-end in
+	// apps/api/shared/mcpaudittest/d3_tools_test.go.
+	closedItem, err := workitems.Close(ctx, &workitems.CloseRequest{
+		ItemID: itemB,
+		Reason: "exit-criterion-e2e",
 	})
-	closeRaw := expectSuccess(t, closeEnv)
-	var closeStruct struct {
-		Item struct {
-			ID       string `json:"id"`
-			Status   string `json:"status"`
-			ClosedAt string `json:"closed_at"`
-		} `json:"item"`
+	if err != nil {
+		t.Fatalf("workitems.Close: %v", err)
 	}
-	if err := json.Unmarshal(closeRaw, &closeStruct); err != nil {
-		t.Fatalf("unmarshal close: %v", err)
+	if closedItem.Status != "Done" {
+		t.Fatalf("post-close status = %q, want Done", closedItem.Status)
 	}
-	if closeStruct.Item.Status != "Done" {
-		t.Fatalf("post-close status = %q, want Done", closeStruct.Item.Status)
-	}
-	if closeStruct.Item.ClosedAt == "" {
-		t.Fatalf("post-close closed_at is empty")
+	if closedItem.ClosedAt == nil {
+		t.Fatalf("post-close closed_at is nil")
 	}
 
 	// --- 6) After close (Regime A inline recompute): itm_c, itm_d are is_ready=true ---
@@ -285,37 +292,31 @@ func TestExitCriterion_PrimeReadyClaimCloseCascadeFlow(t *testing.T) {
 	})
 	_ = expectSuccess(t, postCloseEnv)
 
-	// --- 7) Drive the cascade subscriber to materialise the row ---
+	// --- 7) Capture the REAL close publish, then drive the subscriber ---
 	//
 	// Per SPEC §11.1.1 round-13: Encore Pub/Sub subscriptions do not
-	// fire under encore test. The §11.1.1 four-step pattern wants us
-	// to capture via et.Topic.PublishedMessages() then drive the
-	// subscriber. However, et.Topic.PublishedMessages() is empty here
-	// because workitems.Close fired from the httptest-server goroutine
-	// (the MCP transport path) which is outside Encore's request
-	// manager scope — see the cascade_kinds_test.go file-level
-	// DEVIATION block for the full rationale. We synthesise the
-	// CascadeRequested message in-test with a fresh event_id and
-	// invoke HandleCascadeRequestedForTest directly. The production
-	// publish DID occur (visible in the workitems.Close trace log);
-	// the row materialisation contract under test is independent of
-	// the publish-side observation.
-	synthEventID, err := ulid.New()
-	if err != nil {
-		t.Fatalf("ulid for synthesized cascade event: %v", err)
+	// fire under encore test, so the four-step pattern is (1) invoke the
+	// producing RPC, (2) capture et.Topic.PublishedMessages() filtered to
+	// that close, (3) invoke HandleCascadeRequestedForTest on the
+	// captured message, (4) assert the row. Because step 5 above drove
+	// workitems.Close through the private mesh (in THIS test goroutine's
+	// request-manager scope), the publish IS observable here — so we
+	// assert the production-generated event_id end-to-end rather than a
+	// test-fabricated one.
+	msgs := cascadeMessagesFor(itemB, "close")
+	if len(msgs) != 1 {
+		t.Fatalf("CascadeRequested{kind=close, item=%s} publish count = %d, want 1", itemB, len(msgs))
 	}
-	synthMsg := &deps.CascadeRequested{
-		EventID:           synthEventID,
-		OrgID:             f.OrgID,
-		ProjectID:         f.ProjectID,
-		TriggeredByItemID: itemB,
-		Reason:            "close",
+	closeMsg := msgs[0]
+	if closeMsg.EventID == "" {
+		t.Fatalf("captured close CascadeRequested has empty event_id")
 	}
-	if err := deps.HandleCascadeRequestedForTest(ctx, synthMsg); err != nil {
+
+	if err := deps.HandleCascadeRequestedForTest(ctx, closeMsg); err != nil {
 		t.Fatalf("HandleCascadeRequestedForTest: %v", err)
 	}
 
-	// --- 8) Assert exactly one deps.cascade_events row with kind='close' ---
+	// --- 8) Assert exactly one deps.cascade_events row carrying the REAL event_id ---
 	var (
 		rowCount int
 		eventID  string
@@ -324,15 +325,15 @@ func TestExitCriterion_PrimeReadyClaimCloseCascadeFlow(t *testing.T) {
 		`SELECT count(*), COALESCE(max(event_id), '')
 		   FROM deps.cascade_events
 		  WHERE triggered_by_item_id = $1 AND kind = 'close' AND event_id = $2`,
-		itemB, synthEventID,
+		itemB, closeMsg.EventID,
 	).Scan(&rowCount, &eventID); err != nil {
 		t.Fatalf("cascade_events count query: %v", err)
 	}
 	if rowCount != 1 {
-		t.Fatalf("cascade_events (event=%s kind=close item=%s): %d rows, want 1", synthEventID, itemB, rowCount)
+		t.Fatalf("cascade_events (event=%s kind=close item=%s): %d rows, want 1", closeMsg.EventID, itemB, rowCount)
 	}
-	if eventID != synthEventID {
-		t.Fatalf("cascade_events.event_id = %q, want %q (the synthesised event id)", eventID, synthEventID)
+	if eventID != closeMsg.EventID {
+		t.Fatalf("cascade_events.event_id = %q, want %q (the real publish event id)", eventID, closeMsg.EventID)
 	}
 }
 
