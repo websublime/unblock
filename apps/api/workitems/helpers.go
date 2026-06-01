@@ -215,18 +215,6 @@ func loadLabels(ctx context.Context, itemID string) ([]string, error) {
 	return labels, nil
 }
 
-// attachLabels inserts (item_id, label_id) rows inside a fresh tx
-// borrowed from the package-level db handle. Used by Create's
-// non-transactional path when labels are attached after the row insert.
-// (Currently unused — Create always wraps the insert + labels in a
-// single tx via attachLabelsTx. Retained for completeness should a
-// future caller need it.)
-//
-//nolint:unused
-func attachLabels(ctx context.Context, tx *sqldb.Tx, itemID string, labels []string) error {
-	return attachLabelsTx(ctx, tx, itemID, labels)
-}
-
 // attachLabelsTx inserts (item_id, label_id) rows using the caller's
 // transaction handle. Errors map FK violations to NotFound and unique
 // violations to AlreadyExists.
