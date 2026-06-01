@@ -28,11 +28,11 @@
 // centralised in apps/api/db/. See the DECISION trail on bead
 // unblock-bne for the empirical trace.
 //
-// In P01 A-1 this file is a skeleton: db is declared (and tagged
-// //nolint:unused) and BindDB is exported. The handle is registered
-// in apps/api/db/db.go's init so the wiring is live from day one;
-// RPC bodies in workitems.go currently return errNotImplemented and
-// will start reading `db` in beads B-1+ when DB-touching code lands.
+// db is declared here (tagged //nolint:unused for the rare build that
+// excludes the RPC bodies) and BindDB is exported. The handle is
+// registered in apps/api/db/db.go's init so the wiring is live from
+// day one; the RPC bodies in workitems.go read `db` directly now that
+// the B-1+ DB-touching code has landed.
 //
 // Hot-path impact: zero. After apps/api/db/db.go's init() runs (once,
 // during Encore process bootstrap) `db` is a non-nil *sqldb.Database
@@ -53,9 +53,9 @@ import "encore.dev/storage/sqldb"
 // a package-level pointer that starts nil and is populated exactly once
 // by BindDB during process bootstrap (called from apps/api/db/db.go's
 // init function — the dedicated migration-owner service per SPEC §3.1).
-// RPC bodies in workitems.go will read `db` directly starting in beads
-// B-1+ when DB-touching code lands; the skeleton bodies in P01 A-1
-// return errNotImplemented and do not touch `db`.
+// RPC bodies in workitems.go read `db` directly now that the B-1+
+// DB-touching code (workitems bodies, FTS, milestones, claim
+// transaction) has landed.
 //
 //nolint:unused // referenced by RPC bodies starting in beads B-1+ and by apps/api/db's init.
 var db *sqldb.Database
