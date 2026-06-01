@@ -347,7 +347,16 @@ func ExchangeOAuthCode(ctx context.Context, req *ExchangeOAuthCodeRequest) (*Exc
 	if err != nil {
 		return nil, &errs.Error{Code: errs.Internal, Message: "db begin failed"}
 	}
-	defer func() { _ = tx.Rollback() }()
+	// Roll back on any early return. The `committed` flag suppresses the
+	// rollback once Commit succeeds: pgx would swallow the post-Commit
+	// ErrTxClosed as a no-op anyway, but gating it keeps the intent
+	// explicit and avoids the cosmetically-loose double-finalize.
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
 
 	// Upsert auth.users on (primary_provider, primary_provider_id).
 	// We mint a fresh ULID only when no existing row matches.
@@ -383,6 +392,7 @@ func ExchangeOAuthCode(ctx context.Context, req *ExchangeOAuthCodeRequest) (*Exc
 	if err := tx.Commit(); err != nil {
 		return nil, &errs.Error{Code: errs.Internal, Message: fmt.Sprintf("commit: %v", err)}
 	}
+	committed = true
 
 	return &ExchangeOAuthCodeResponse{
 		SessionID: sessionID,
@@ -408,6 +418,12 @@ func upsertGitHubUser(ctx context.Context, tx *sqldb.Tx, gh *githubUserResponse)
 		displayName = gh.Login
 	}
 
+	// newID is always minted, but only consumed on the INSERT path: the
+	// $1 binding becomes the row id when no conflict fires. On the
+	// ON CONFLICT DO UPDATE path Postgres keeps the existing row's id and
+	// RETURNING yields that, so this freshly-minted ULID is discarded. A
+	// wasted ULID per repeat login is cheaper than a pre-flight SELECT to
+	// decide whether to mint one.
 	newID, err := newULID()
 	if err != nil {
 		return "", err
