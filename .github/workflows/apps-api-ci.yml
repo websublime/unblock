@@ -163,11 +163,22 @@ jobs:
 
       - name: install encore cli
         # No upstream `encoredev/setup-encore` GitHub Action exists
-        # (verified across the repo and ENCORE.md). The official
-        # install path is the curl one-liner; the script supports a
-        # `bash -s -- <version>` argument to pin the release.
+        # (verified across the repo and ENCORE.md). The official install
+        # path is `curl -L https://encore.dev/install.sh | bash`, but that
+        # pipes a live, mutable script from Encore's CDN into a shell —
+        # the moving supply-chain surface tv8.67 set out to eliminate.
+        # encore.dev/install.sh is NOT a GitHub-hosted file (served as
+        # application/x-sh from Encore's own site), so there is no commit
+        # SHA to pin it against the way we pin golangci-lint's installer.
+        # We therefore VENDOR the installer at .github/scripts/encore-install.sh
+        # (captured 2026-06-01; upstream sha256
+        # 3e8344b509dac145165498c53aeb4b9eaeac050eaeab404cbca86014b27f4ba5)
+        # and run the committed, reviewable copy. The CLI *binary* version
+        # is still pinned via the ${ENCORE_CLI_VERSION} argument — the
+        # script consumes it to build the exact CloudFront tarball URL.
+        # Refresh procedure is documented in the vendored script header.
         run: |
-          curl -L https://encore.dev/install.sh | bash -s -- "${ENCORE_CLI_VERSION}"
+          bash .github/scripts/encore-install.sh "${ENCORE_CLI_VERSION}"
           echo "${HOME}/.encore/bin" >> "${GITHUB_PATH}"
         # Sanity-check the install succeeded and the pinned version
         # landed before any consumer step runs.
@@ -217,15 +228,50 @@ jobs:
         # APIKeyHMACSecret == ""; mirrors the values shipped to
         # developers via the local .secrets.local.cue template). This
         # file is .gitignored and is NEVER persisted past the runner.
+        #
+        # SOURCING (tv8.67): the values are now SOURCED from GitHub
+        # Actions secrets rather than baked inline as plaintext. The
+        # previous heredoc printed the literal placeholders into the
+        # workflow file (and thus into any log capture / `set -x` trace
+        # of the step verbatim). By piping them through `env:` from
+        # `${{ secrets.* }}`, GitHub masks them in logs (`***`) and the
+        # SOURCE of truth moves out of the committed YAML.
+        #
+        # These remain NEVER-production placeholders (the local emulator
+        # only needs non-empty, well-shaped values), so to keep CI green
+        # BEFORE the repo secrets exist, each var falls back to the
+        # documented placeholder default via `${VAR:-<default>}`. Once a
+        # human adds the four repo/Org secrets listed below, those values
+        # take over with zero workflow change. Repo secrets the workflow
+        # now reads (add via Settings → Secrets and variables → Actions,
+        # or `gh secret set <NAME>`):
+        #   CI_MEMORY_DEK
+        #   CI_API_KEY_HMAC_SECRET
+        #   CI_GITHUB_OAUTH_CLIENT_ID
+        #   CI_GITHUB_OAUTH_CLIENT_SECRET
+        # If unset, the placeholders below are used and CI still passes.
+        env:
+          CI_MEMORY_DEK: ${{ secrets.CI_MEMORY_DEK }}
+          CI_API_KEY_HMAC_SECRET: ${{ secrets.CI_API_KEY_HMAC_SECRET }}
+          CI_GITHUB_OAUTH_CLIENT_ID: ${{ secrets.CI_GITHUB_OAUTH_CLIENT_ID }}
+          CI_GITHUB_OAUTH_CLIENT_SECRET: ${{ secrets.CI_GITHUB_OAUTH_CLIENT_SECRET }}
         run: |
-          cat > .secrets.local.cue <<'CUE'
-          // CI-only placeholder secrets. Mirrors the dev template
-          // shape declared at apps/api/auth/secrets.go. NEVER
-          // production values. Written fresh on every CI run.
-          MemoryDEK:               "ci-memory-dek-32-bytes-of-zeroes-for-tests-only"
-          APIKeyHMACSecret:        "ci-api-key-hmac-secret-32-bytes-of-zeroes-tests"
-          GitHubOAuthClientID:     "ci-github-oauth-client-id"
-          GitHubOAuthClientSecret: "ci-github-oauth-client-secret"
+          # CUE string values must be quoted; build the file from masked
+          # env vars with documented placeholder fallbacks. The here-doc
+          # is NOT quoted ('CUE' → CUE) so ${...:-default} expands.
+          mem_dek="${CI_MEMORY_DEK:-ci-memory-dek-32-bytes-of-zeroes-for-tests-only}"
+          api_hmac="${CI_API_KEY_HMAC_SECRET:-ci-api-key-hmac-secret-32-bytes-of-zeroes-tests}"
+          gh_id="${CI_GITHUB_OAUTH_CLIENT_ID:-ci-github-oauth-client-id}"
+          gh_secret="${CI_GITHUB_OAUTH_CLIENT_SECRET:-ci-github-oauth-client-secret}"
+          cat > .secrets.local.cue <<CUE
+          // CI-only secrets. Mirrors the dev template shape declared at
+          // apps/api/auth/secrets.go. NEVER production values. Sourced
+          // from GitHub Actions secrets (masked) with placeholder
+          // fallbacks; written fresh on every CI run; .gitignored.
+          MemoryDEK:               "${mem_dek}"
+          APIKeyHMACSecret:        "${api_hmac}"
+          GitHubOAuthClientID:     "${gh_id}"
+          GitHubOAuthClientSecret: "${gh_secret}"
           CUE
 
       # ------------------------------------------------------------------
@@ -261,12 +307,26 @@ jobs:
       # analyzers compiled in.
       # ------------------------------------------------------------------
       - name: install golangci-lint
-        # Official install script. The version pin here MUST match the
-        # `version:` field of apps/api/.custom-gcl.yml so the schema
-        # (declared `version: "2"` in apps/api/.golangci.yml) and the
-        # binary used to build custom-gcl stay consistent.
+        # Official install script — pinned to a commit SHA, NOT `master`
+        # (tv8.67 supply-chain hygiene). Previously this curled
+        #   raw.githubusercontent.com/golangci/golangci-lint/master/install.sh
+        # which re-fetches whatever HEAD of master happens to be at run
+        # time — a moving, attacker-influenceable surface for PRs from
+        # forks. We pin to the install.sh as it shipped at the v2.7.2 tag
+        # commit 9f61b0f53f80672872fced07b6874397c3ed197b (the v2.7.2 tag
+        # is a lightweight tag pointing directly at that commit; verified
+        # 2026-06-01). The script still takes the same `[-b <bindir>]
+        # <tag>` arguments, so it downloads the GOLANGCI_LINT_VERSION
+        # release tarball exactly as before — only the script's own
+        # provenance is now frozen.
+        #
+        # The binary version pin (${GOLANGCI_LINT_VERSION} = v2.7.2) MUST
+        # match the `version:` field of apps/api/.custom-gcl.yml so the
+        # schema (declared `version: "2"` in apps/api/.golangci.yml) and
+        # the binary used to build custom-gcl stay consistent. Keep this
+        # commit SHA in lockstep with GOLANGCI_LINT_VERSION on any bump.
         run: |
-          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh \
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/9f61b0f53f80672872fced07b6874397c3ed197b/install.sh \
             | sh -s -- -b "$(go env GOPATH)/bin" "${GOLANGCI_LINT_VERSION}"
           echo "$(go env GOPATH)/bin" >> "${GITHUB_PATH}"
         working-directory: ${{ github.workspace }}

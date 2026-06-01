@@ -118,9 +118,20 @@ linters:
       # generator's wiring and flags the function as dead code.
       # Removing it would break the runtime (Encore's generated
       # __etype_service_init__ calls initService directly), so we
-      # exclude the false positive for every package that declares a
-      # service struct via //encore:service.
-      - linters:
+      # exclude the false positive — but ONLY in the packages that
+      # actually declare an //encore:service-anchored initService today:
+      #   apps/api/db/db.go               (the single migration/bind owner)
+      #   apps/api/exitcriteriontest/      (integration harness)
+      #   apps/api/perftest/               (NFR-1 latency harness)
+      #   apps/api/shared/mcpaudittest/    (MCP audit integration harness)
+      #   apps/api/shared/rbactest/        (NFR-2 RBAC final-gate harness)
+      # All five sit under either `db/` or a `*test/` directory, so the
+      # `path:` regex below scopes the suppression to exactly those trees
+      # (tv8.67). An unused `func initService` appearing anywhere ELSE —
+      # e.g. a real dead service hook in a domain package — is NO LONGER
+      # silenced and will fail the gate as a genuine `unused` finding.
+      - path: (db|.*test)/.*\.go
+        linters:
           - unused
         text: "func initService is unused"
 
