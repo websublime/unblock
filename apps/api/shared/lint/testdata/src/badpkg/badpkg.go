@@ -74,9 +74,3 @@ const (
 	// fire. Pins the \bitems\b word boundary on the table name.
 	cleanSiblingTable = `UPDATE workitems.dependency_items SET created_at = now() WHERE parent_id = $1`
 )
-
-// Reference the consts so go vet does not complain about unused
-// package-level identifiers in the analysistest run.
-var _ = flagged1 + flagged2 + flagged3 + flagged4 + flagged5 +
-	cleanColumn + cleanSelect + cleanComment + cleanInsert +
-	cleanIdentifier + cleanDelete + cleanSiblingTable
