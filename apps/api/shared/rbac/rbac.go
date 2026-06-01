@@ -129,6 +129,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync/atomic"
 
 	"encore.app/auth/types"
 	"encore.dev/storage/sqldb"
@@ -154,20 +155,36 @@ import (
 // unchanged. Per-service `initbind.go` files were retired in bead
 // unblock-bne's pre-review scope expansion; the central bind in
 // apps/api/db/db.go is now sufficient.
-var db *sqldb.Database
+//
+// The handle is held in an atomic.Pointer rather than a plain
+// *sqldb.Database so the single-write contract is enforced by the
+// memory model, not merely documented: Bind's store and every Run-time
+// load are synchronised, so a concurrent reader can never observe a
+// torn or partially published handle even if the bind/read ordering is
+// ever violated. The first non-nil Bind wins; later Bind calls are
+// no-ops (see Bind).
+var db atomic.Pointer[sqldb.Database]
 
 // Bind installs the unblock-database handle that Run will dispatch
 // against. Called exactly once at process start by the dedicated
 // apps/api/db/ migration-owner service's init (the sole binding
 // authority for every consumer's handle, post bead unblock-bne
-// pre-review). Subsequent calls overwrite the handle; tests rely on
-// this for swap-in of fakes.
+// pre-review).
 //
-// Concurrency: Bind is not goroutine-safe; the contract is that it
-// runs during Encore service initialisation, before any handler can
-// observe a partially constructed builder.
+// Single-write enforcement: only the first non-nil handle is accepted.
+// CompareAndSwap from the nil zero value guarantees that any later Bind
+// call (e.g. an accidental second wiring, or a racing parallel test
+// setup) leaves the originally-installed handle untouched rather than
+// silently overwriting it. A nil argument is ignored.
+//
+// Concurrency: Bind is goroutine-safe. Concurrent Bind callers race
+// only to install the first handle; all but the winner observe the
+// already-bound handle and return without mutating it.
 func Bind(database *sqldb.Database) {
-	db = database
+	if database == nil {
+		return
+	}
+	db.CompareAndSwap(nil, database)
 }
 
 // ErrMissingScope is returned by Run when the *ScopedQuery[T] receiver
@@ -383,13 +400,14 @@ func (q *ScopedQuery[T]) Run(ctx context.Context) ([]T, error) {
 		return nil, ErrEmptyTable
 	}
 
-	if db == nil {
+	database := db.Load()
+	if database == nil {
 		return nil, ErrNotBound
 	}
 
 	sql, args := q.build()
 
-	rows, err := db.Query(ctx, sql, args...)
+	rows, err := database.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, fmt.Errorf("rbac: query %q: %w", q.table, err)
 	}
