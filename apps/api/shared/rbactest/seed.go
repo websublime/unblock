@@ -62,6 +62,7 @@ import (
 	"time"
 
 	"encore.app/shared/ulid"
+	"encore.dev/rlog"
 	"encore.dev/storage/sqldb"
 )
 
@@ -546,7 +547,7 @@ func (f *Fixture) Teardown(ctx context.Context, db *sqldb.Database) {
 	for _, orgID := range f.Orgs {
 		if _, err := db.Exec(ctx, `DELETE FROM org.organizations WHERE id = $1`, orgID); err != nil {
 			// Log and continue — teardown is best-effort.
-			fmt.Printf("rbactest teardown: delete org %q: %v\n", orgID, err)
+			rlog.Error("rbactest teardown: delete org failed", "org_id", orgID, "err", err)
 		}
 	}
 
@@ -555,7 +556,7 @@ func (f *Fixture) Teardown(ctx context.Context, db *sqldb.Database) {
 	//    handles the dependent rows.
 	for _, userID := range f.Users {
 		if _, err := db.Exec(ctx, `DELETE FROM auth.users WHERE id = $1`, userID); err != nil {
-			fmt.Printf("rbactest teardown: delete user %q: %v\n", userID, err)
+			rlog.Error("rbactest teardown: delete user failed", "user_id", userID, "err", err)
 		}
 	}
 }
