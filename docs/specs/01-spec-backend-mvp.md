@@ -2386,24 +2386,28 @@ INSERT (mirroring the `arguments` jsonb handling); a nil/empty slice
 serialises to `'[]'`. The INSERT column list in §8.1 gains
 `warning_codes`.
 
-**Migration — NEW sequential migration `0071_mcp_warning_codes.up.sql`
+**Migration — NEW sequential migration `0110_mcp_warning_codes.up.sql`
 (pinned), NOT an amend of `0070`.** Even though pre-production permits
 breaking changes (no users, no migration tax), `apps/api/db/migrations/`
 is append-only sequential and `0070` already shipped and ran in CI /
 local clusters; editing an applied migration in place desyncs any
 environment that already ran it and violates the single-migration-owner
-append discipline (`apps/api/db/` owns all migrations). The additive
+append discipline (`apps/api/db/` owns all migrations). The new migration
+takes the next sequential 10-step number ABOVE the current highest applied
+migration (0100 at implementation time → 0110), because golang-migrate only
+applies versions strictly greater than the current max and a lower number
+(e.g. `0071`) would silently never run. The additive
 column is a clean forward migration:
 
 ```sql
--- 0071_mcp_warning_codes.up.sql  (owner: apps/api/db/)
+-- 0110_mcp_warning_codes.up.sql  (owner: apps/api/db/)
 ALTER TABLE mcp.tool_calls
     ADD COLUMN warning_codes jsonb NOT NULL DEFAULT '[]'::jsonb;
 CREATE INDEX tool_calls_warning_codes_gin_idx
     ON mcp.tool_calls USING gin (warning_codes);
 ```
 
-(Up-only — no `0071_mcp_warning_codes.down.sql`, per the §3.3 "No
+(Up-only — no `0110_mcp_warning_codes.down.sql`, per the §3.3 "No
 `down.sql` files in P01" convention.) The `result_kind` CHECK constraint
 (`tool_calls_result_chk`) is **untouched** — confirming §7.1 / §8.1.1's
 invariant that the partial-success path remains `result_kind='ok'`.
