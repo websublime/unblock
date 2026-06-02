@@ -366,6 +366,19 @@ Query-string serialisation (Encore default snake_case per ENCORE.md)
 remains unchanged; the rule above applies to JSON bodies, not URL
 query parameters.
 
+Success-side warnings (§7.1, added unblock-tv8.63) are in scope: the
+`Warning`/`WithWarnings` Out-struct fields carry explicit snake_case
+tags (`json:"code"`, `json:"message"`, `json:"warnings,omitempty"`,
+`json:"details,omitempty"`) and any `details` map keys are snake_case
+(e.g. `intent_comment_kind`). Routing warnings through a declared
+`structuredContent` Out-struct field — rather than the rejected `_meta`
+route — is what keeps the `grep -rnE 'json:"[A-Z]' apps/api/` gate
+(NFR-10) meaningful: the warning channel is a real tagged Go field the
+gate inspects, whereas an untyped `_meta` map would have escaped the
+struct-tag gate entirely. The additive audit column
+`mcp.tool_calls.warning_codes` (§8.1.1) is snake_case, consistent with
+the existing column naming.
+
 Quality gate (NFR-10): `grep -rnE 'json:"[A-Z]' apps/api/` MUST
 return zero matches. Cross-references:
 [§6.2 (MCP tool wire — snake_case already locked)](#62-tool-by-tool-contracts) /
@@ -795,11 +808,18 @@ type SetStateRequest struct {
     ReviewState   *string
     QAState       *string
     PipelineState *string
-    // The MCP layer attaches a (kind, status, body) comment trail entry as
-    // part of the same logical mutation when the agent calls set_state with
-    // an intent_comment field. workitems.SetStateColumns DOES NOT write
-    // comments — that is AppendComment's job. The MCP tool handler
-    // composes both calls in one transaction (§6.2 Tool 13).
+    // The MCP layer attaches a (kind, status, body) comment trail entry
+    // when the agent calls set_state with an intent_comment field.
+    // workitems.SetStateColumns DOES NOT write comments — that is
+    // AppendComment's job. The MCP tool handler composes the two RPCs
+    // sequentially, NOT in one transaction: SetStateColumns commits
+    // first, then AppendComment runs best-effort (orchestrator DECISION
+    // 2026-05-18 on bead unblock-tv8.21 — cross-RPC Postgres
+    // transactions are out of architectural scope for P01). An
+    // AppendComment failure does NOT roll back the committed state
+    // mutation; it surfaces as a non-fatal warning on the SUCCESS
+    // result (code=intent_comment_dropped) per §6.2 Tool 13 and the §7
+    // success-side warnings contract.
 }
 
 //encore:api private method=POST path=/workitems.Close
@@ -1697,7 +1717,14 @@ publish — uniform across the four cascade kinds.
 
 // structuredContent
 {
-  "item": { /* Item with the new state columns + recomputed pipeline_stage */ }
+  "item": { /* Item with the new state columns + recomputed pipeline_stage */ },
+  "warnings": [                          // optional; omitempty when empty (§7 success-side contract)
+    {
+      "code": "intent_comment_dropped",
+      "message": "state mutation committed; intent_comment append failed and was dropped",
+      "details": { "intent_comment_kind": "completed", "intent_comment_status": "success" }
+    }
+  ]
 }
 ```
 
@@ -1766,8 +1793,47 @@ validated AS (
 **Layer-1 BLOCK conditions (comment-trail-driven preconditions, e.g.
 `qa_state → passed` requires a `(kind=qa, status=success)` comment) ship
 in P02** per Plan §3.4 and PRD §8 P02 exit criterion. P01 implementation
-of `set_state` writes the `intent_comment` (if present) atomically with
-the state mutation but does NOT verify any comment-trail-based precondition.
+of `set_state` writes the `intent_comment` (if present) on a best-effort
+basis AFTER the state mutation commits, and does NOT verify any
+comment-trail-based precondition.
+
+**`intent_comment` partial-failure behaviour (best-effort, non-atomic —
+DECISION 2026-05-18 bead unblock-tv8.21, contract activated by
+unblock-tv8.63).** The handler is deliberately two-phase and
+NON-transactional across the two RPCs (cross-RPC Postgres transactions
+are out of P01 architectural scope):
+
+1. `workitems.SetStateColumns` runs and **commits** the state mutation
+   (within its own single-RPC transaction — the five I-1..I-5
+   invariants above are still enforced atomically *inside* that RPC).
+2. If `intent_comment` was supplied, the handler then calls
+   `workitems.AppendComment` **best-effort**. This call is NOT part of
+   the SetStateColumns transaction and CANNOT roll it back.
+
+On AppendComment failure the tool **returns SUCCESS** — the state was
+genuinely mutated and `structuredContent.item` carries the new state
+columns + recomputed `pipeline_stage`. The dropped comment is surfaced
+two ways, never as an error:
+
+- **Caller-visible:** `structuredContent.warnings[]` carries exactly one
+  entry `{ code: "intent_comment_dropped", message, details }` per the
+  §7 success-side warnings contract. `details` echoes the
+  `intent_comment_kind` and `intent_comment_status` (snake_case, §3.6) so
+  the agent can decide whether to re-issue a standalone `comment` call;
+  the comment **body is never echoed** into `details` (it may be large /
+  sensitive — only its length + sha256 land in diagnostics, below).
+- **Operator-visible:** the existing `rlog.Error` diagnostic on the
+  failure path records `item_id`, `intent_comment_kind`,
+  `intent_comment_status`, `intent_comment_body_sha256`, and
+  `intent_comment_body_len` (NOT the body text — keeps the comment
+  payload out of the observability surface) and the additive
+  `mcp.tool_calls.warning_codes` audit column records
+  `["intent_comment_dropped"]` per §8.1. `result_kind` STAYS `ok` on
+  this path — the call succeeded; the audit widening is the warning
+  column, NOT a new `result_kind` value.
+
+This is the ONLY warning producer wired in P01/P02 today; the §7 code
+registry is extensible for future cases without a result-shape change.
 
 **Side-effects (round-6 §6.3.0 symmetric writer model — tension #3
 narrow rule).** After the validating UPDATE commits, the handler
@@ -2181,6 +2247,84 @@ id into the message explicitly), and re-emitted as the
 correlation. Encore's runtime trace id is observability-only and is
 not surfaced here.
 
+### 7.1 Success-side warnings (locked — added unblock-tv8.63)
+
+> **(locked)** This subsection is an intentional, rationale-backed
+> *addition* to the §7 contract; it does not relax any existing error
+> rule. Origin: bead unblock-tv8.63 (REVIEW SUGGESTION[semantic] §2 on
+> unblock-tv8.21). It exists because a tool can fully **succeed** in its
+> primary mutation yet leave a non-fatal residue (the dropped
+> `intent_comment` on `set_state`) that the caller deserves to observe
+> without it being modelled as an error. Modelling it as a §7 error
+> would be semantically wrong (the call succeeded) and would force the
+> agent down the failure path; widening `result_kind` would be a
+> breaking audit-schema change for the same wrong reason. A typed,
+> optional `warnings` array on the **success** result is the correct
+> home. Labelled a **P02-activated contract addition** even though it
+> patches the P01 spec (per unblock-tv8.63 AC#1) — the contract lives
+> where §6.2/§7 live, and the one wired producer is `set_state`.
+
+A successful MCP tool result MAY carry an optional `warnings` array
+**inside `structuredContent`** (NOT in `_meta`, NOT as a top-level
+`CallToolResult` sibling — go-sdk v1.6.0's `CallToolResult` does not
+expose a custom top-level slot, and jsonschema-go infers
+`additionalProperties: false`, so a warning channel MUST be a declared
+field of the tool's typed Out struct). When no warnings are present the
+field is **omitted entirely** (`omitempty`):
+
+```jsonc
+// structuredContent (success)  — example: set_state with a dropped intent_comment
+{
+  "item": { /* tool-specific success payload */ },
+  "warnings": [                         // optional; omitempty when empty
+    {
+      "code": "intent_comment_dropped", // see registry below
+      "message": "state mutation committed; intent_comment append failed and was dropped",
+      "details": {                      // optional; snake_case (§3.6); shape is per-code
+        "intent_comment_kind": "completed",
+        "intent_comment_status": "success"
+      }
+    }
+  ]
+}
+```
+
+**Warning object** (every key snake_case per §3.6):
+
+| field | type | required | meaning |
+|---|---|---|---|
+| `code` | string (enum, registry below) | yes | machine-stable warning identifier |
+| `message` | string | yes | one-line human-readable summary |
+| `details` | object (snake_case keys) | optional (`omitempty`) | code-specific structured context; shape defined per code; never carries large/sensitive payloads (e.g. comment bodies) |
+
+**Warning `code` registry** — extensible; a code is listed ONLY once a
+producer exists (no speculative codes):
+
+| `code` | Emitted by | Condition | `details` shape |
+|---|---|---|---|
+| `intent_comment_dropped` | Tool 13 `set_state` (§6.2) | State mutation committed but the best-effort `intent_comment` AppendComment failed (DECISION 2026-05-18, unblock-tv8.21) | `{ "intent_comment_kind": "<kind>", "intent_comment_status": "<status>" }` — kind/status only; the comment body is excluded (length + sha256 go to rlog diagnostics, never the wire) |
+
+Future P02 cases (e.g. a `cascade_delayed` warning) attach here by
+adding a registry row plus an Out-struct producer; no result-shape
+change is required.
+
+**Implementation shape (pinned decision — shared embedded struct, one
+wired producer).** Two alternatives were weighed:
+
+- *(A) Per-tool `Warnings` field re-declared on each Out struct.* Rejected:
+  duplicates the Warning object definition N times and invites drift in
+  the json tags / omitempty behaviour across tools.
+- *(B, PINNED) A single shared `WithWarnings` struct embedded into the
+  Out structs that can emit warnings.* One canonical
+  `type Warning struct { Code string \`json:"code"\`; Message string \`json:"message"\`; Details map[string]any \`json:"details,omitempty"\` }`
+  and `type WithWarnings struct { Warnings []Warning \`json:"warnings,omitempty"\` }`,
+  embedded into `setStateOut`. jsonschema-go promotes the embedded
+  field into the tool's output schema as a sibling of `item`, preserving
+  the single-object shape and `additionalProperties:false`. Only
+  `setStateOut` embeds it in P01/P02 (one wired producer); the type is
+  reusable for the next producer with zero re-definition. Cross-ref §3.6
+  (snake_case) and §8.1 (audit column).
+
 ---
 
 ## 8. Observability and Audit
@@ -2195,8 +2339,8 @@ func recordToolCall(ctx context.Context, call ToolCall) {
       INSERT INTO mcp.tool_calls
         (id, api_key_id, org_id, project_id, item_id, tool_name,
          arguments, result_kind, rejection_reason, error_code,
-         duration_ms, trace_id, called_at)
-      VALUES (...)`, ...)
+         warning_codes, duration_ms, trace_id, called_at)
+      VALUES (...)`, ...)   // warning_codes: jsonb array, default [] (§8.1.1)
 }
 ```
 
@@ -2206,6 +2350,63 @@ ULID minted by `MCPHandler` at request entry (§10.2 Option B), pulled
 from `ctx` by `recordToolCall`. The `mcp.tool_calls.trace_id` DDL column
 is `text` (frozen in `0070_mcp.up.sql`) and accepts the ULID string
 verbatim — no schema change required.
+
+#### 8.1.1 `warning_codes` audit column (additive — added unblock-tv8.63)
+
+The success-side warnings of §7.1 are audited via a new **additive**
+column on `mcp.tool_calls`:
+
+| column | type | nullable | default | stores |
+|---|---|---|---|---|
+| `warning_codes` | `jsonb` | NOT NULL | `'[]'::jsonb` | JSON array of the `code` strings present on the tool's success-result `warnings[]` (empty array when none) |
+
+**Type — `jsonb`, NOT `text` (pinned).** Rationale: it is a true list
+(0..N codes), it is queryable for the FR-9 rejection/quality analytics
+(`WHERE warning_codes @> '["intent_comment_dropped"]'`, GIN-indexable —
+matching the existing `arguments` jsonb + `tool_calls_arguments_gin_idx`
+precedent), and `jsonb` normalises/validates the array on write. A `text`
+column would force string-matching and lose array semantics. A separate
+`mcp.tool_call_warnings` child table was considered and rejected as
+over-engineered for a bounded enum that is read in aggregate (the parent
+row already has the org/tool/trace correlation keys).
+
+**What it stores on the partial-failure path.** On `set_state` with a
+dropped `intent_comment`, `result_kind` STAYS `'ok'` (the call
+succeeded — NEVER widen the `result_kind` enum / CHECK) and
+`warning_codes` is `["intent_comment_dropped"]`. On every other
+call (no warnings) it is the default `[]`.
+
+**How `recordToolCall` populates it.** The handler sets a
+`WarningCodes []string` field on the `ToolCall` record (alongside the
+existing `ResultKind`, `RejectionReason`, `ErrorCode`); `set_state`
+appends `"intent_comment_dropped"` to it on the AppendComment-failure
+branch (the same branch that already emits the rlog diagnostic and the
+§7.1 `warnings[]`). `recordToolCall` marshals the slice to jsonb in the
+INSERT (mirroring the `arguments` jsonb handling); a nil/empty slice
+serialises to `'[]'`. The INSERT column list in §8.1 gains
+`warning_codes`.
+
+**Migration — NEW sequential migration `0071_mcp_warning_codes.up.sql`
+(pinned), NOT an amend of `0070`.** Even though pre-production permits
+breaking changes (no users, no migration tax), `apps/api/db/migrations/`
+is append-only sequential and `0070` already shipped and ran in CI /
+local clusters; editing an applied migration in place desyncs any
+environment that already ran it and violates the single-migration-owner
+append discipline (`apps/api/db/` owns all migrations). The additive
+column is a clean forward migration:
+
+```sql
+-- 0071_mcp_warning_codes.up.sql  (owner: apps/api/db/)
+ALTER TABLE mcp.tool_calls
+    ADD COLUMN warning_codes jsonb NOT NULL DEFAULT '[]'::jsonb;
+CREATE INDEX tool_calls_warning_codes_gin_idx
+    ON mcp.tool_calls USING gin (warning_codes);
+```
+
+(With a paired `0071_mcp_warning_codes.down.sql` dropping the index +
+column.) The `result_kind` CHECK constraint
+(`tool_calls_result_chk`) is **untouched** — confirming §7.1 / §8.1.1's
+invariant that the partial-success path remains `result_kind='ok'`.
 
 ### 8.2 Logging (NFR-12)
 
