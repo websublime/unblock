@@ -47,9 +47,10 @@
 #
 # Secrets:
 #
-#   `encore test` boots the local Encore emulator, which reads four
+#   `encore test` boots the local Encore emulator, which reads five
 #   secrets declared in apps/api/auth/secrets.go (MemoryDEK,
-#   APIKeyHMACSecret, GitHubOAuthClientID, GitHubOAuthClientSecret).
+#   APIKeyHMACSecret, GitHubOAuthClientID, GitHubOAuthClientSecret,
+#   GitHubOAuthRedirectURI).
 #   apps/api/mcp/transport.go fail-fasts at boot if APIKeyHMACSecret
 #   is empty (tv8.56 closure 2026-05-15); every package importing
 #   mcp/transport.go would panic before any test runs without it. CI
@@ -223,9 +224,10 @@ jobs:
 
       - name: provision local secrets for encore emulator
         # Every `encore test` invocation boots the local emulator and
-        # therefore needs the four secrets declared at apps/api/auth/
+        # therefore needs the five secrets declared at apps/api/auth/
         # secrets.go to be non-empty (mcp/transport.go fail-fasts on
-        # APIKeyHMACSecret == ""; mirrors the values shipped to
+        # APIKeyHMACSecret == ""; auth/secrets.go init() fail-fasts on
+        # GitHubOAuthRedirectURI == ""; mirrors the values shipped to
         # developers via the local .secrets.local.cue template). This
         # file is .gitignored and is NEVER persisted past the runner.
         #
@@ -241,7 +243,7 @@ jobs:
         # only needs non-empty, well-shaped values), so to keep CI green
         # BEFORE the repo secrets exist, each var falls back to the
         # documented placeholder default via `${VAR:-<default>}`. Once a
-        # human adds the four repo/Org secrets listed below, those values
+        # human adds the repo/Org secrets listed below, those values
         # take over with zero workflow change. Repo secrets the workflow
         # now reads (add via Settings → Secrets and variables → Actions,
         # or `gh secret set <NAME>`):
@@ -249,12 +251,16 @@ jobs:
         #   CI_API_KEY_HMAC_SECRET
         #   CI_GITHUB_OAUTH_CLIENT_ID
         #   CI_GITHUB_OAUTH_CLIENT_SECRET
+        #   CI_GITHUB_OAUTH_REDIRECT_URI  (optional — falls back to the
+        #     http://localhost:4321/auth/callback placeholder when the
+        #     repo secret is absent, so no new secret is required for CI)
         # If unset, the placeholders below are used and CI still passes.
         env:
           CI_MEMORY_DEK: ${{ secrets.CI_MEMORY_DEK }}
           CI_API_KEY_HMAC_SECRET: ${{ secrets.CI_API_KEY_HMAC_SECRET }}
           CI_GITHUB_OAUTH_CLIENT_ID: ${{ secrets.CI_GITHUB_OAUTH_CLIENT_ID }}
           CI_GITHUB_OAUTH_CLIENT_SECRET: ${{ secrets.CI_GITHUB_OAUTH_CLIENT_SECRET }}
+          CI_GITHUB_OAUTH_REDIRECT_URI: ${{ secrets.CI_GITHUB_OAUTH_REDIRECT_URI }}
         run: |
           # CUE string values must be quoted; build the file from masked
           # env vars with documented placeholder fallbacks. The here-doc
@@ -263,6 +269,7 @@ jobs:
           api_hmac="${CI_API_KEY_HMAC_SECRET:-ci-api-key-hmac-secret-32-bytes-of-zeroes-tests}"
           gh_id="${CI_GITHUB_OAUTH_CLIENT_ID:-ci-github-oauth-client-id}"
           gh_secret="${CI_GITHUB_OAUTH_CLIENT_SECRET:-ci-github-oauth-client-secret}"
+          gh_redirect="${CI_GITHUB_OAUTH_REDIRECT_URI:-http://localhost:4321/auth/callback}"
           cat > .secrets.local.cue <<CUE
           // CI-only secrets. Mirrors the dev template shape declared at
           // apps/api/auth/secrets.go. NEVER production values. Sourced
@@ -272,6 +279,7 @@ jobs:
           APIKeyHMACSecret:        "${api_hmac}"
           GitHubOAuthClientID:     "${gh_id}"
           GitHubOAuthClientSecret: "${gh_secret}"
+          GitHubOAuthRedirectURI:  "${gh_redirect}"
           CUE
 
       # ------------------------------------------------------------------
