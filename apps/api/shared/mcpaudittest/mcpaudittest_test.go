@@ -223,8 +223,12 @@ type toolCallRow struct {
 	ToolName   string
 	ResultKind string
 	ErrorCode  *string
-	DurationMs int
-	TraceID    *string
+	// WarningCodes is the raw jsonb of the §8.1.1 warning_codes
+	// column (array of §7.1 warning `code` strings; `[]` when none).
+	// Read as a string so assertions can check the exact jsonb shape.
+	WarningCodes string
+	DurationMs   int
+	TraceID      *string
 }
 
 // rbactestToolNamePrefix is the side-tag carried by every
@@ -281,7 +285,7 @@ func selectToolCalls(t *testing.T, orgID string) []toolCallRow {
 	t.Helper()
 	ctx := context.Background()
 	rows, err := db.Query(ctx, `
-		SELECT id, org_id, project_id, tool_name, result_kind, error_code, duration_ms, trace_id
+		SELECT id, org_id, project_id, tool_name, result_kind, error_code, warning_codes::text, duration_ms, trace_id
 		FROM mcp.tool_calls
 		WHERE org_id = $1
 		  AND tool_name NOT LIKE $2
@@ -295,7 +299,7 @@ func selectToolCalls(t *testing.T, orgID string) []toolCallRow {
 	var out []toolCallRow
 	for rows.Next() {
 		var r toolCallRow
-		if err := rows.Scan(&r.ID, &r.OrgID, &r.ProjectID, &r.ToolName, &r.ResultKind, &r.ErrorCode, &r.DurationMs, &r.TraceID); err != nil {
+		if err := rows.Scan(&r.ID, &r.OrgID, &r.ProjectID, &r.ToolName, &r.ResultKind, &r.ErrorCode, &r.WarningCodes, &r.DurationMs, &r.TraceID); err != nil {
 			t.Fatalf("scan tool_calls: %v", err)
 		}
 		out = append(out, r)
