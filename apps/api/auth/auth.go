@@ -28,6 +28,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -313,6 +314,19 @@ func ExchangeOAuthCode(ctx context.Context, req *ExchangeOAuthCodeRequest) (*Exc
 		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "missing pkce_verifier"}
 	}
 
+	// IP address guard (BFF-readiness, bead unblock-tv8.38 W2). The
+	// session INSERT below coerces IPAddress with NULLIF($6, '')::inet.
+	// An empty string is allowed (maps to NULL via NULLIF). A non-empty
+	// but unparseable value (e.g. an upstream-controlled X-Forwarded-For
+	// the BFF forwards) would otherwise fail the entire pgx transaction
+	// with an opaque Postgres ::inet cast error surfaced as errs.Internal
+	// (a generic 500 / DoS surface). Reject it here with InvalidArgument
+	// before any DB or provider work. net.ParseIP accepts both IPv4 and
+	// IPv6, matching the ::inet column's domain — no narrowing needed.
+	if req.IPAddress != "" && net.ParseIP(req.IPAddress) == nil {
+		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "malformed ip_address"}
+	}
+
 	// PKCE verification. The BFF supplies `PKCEChallenge` from its
 	// per-request store (or, for the integration-test surface, inline
 	// on this request). When unset we skip the check (legacy path
@@ -323,7 +337,7 @@ func ExchangeOAuthCode(ctx context.Context, req *ExchangeOAuthCodeRequest) (*Exc
 	}
 
 	// Exchange the code for a GitHub access token.
-	tok, err := exchangeGitHubCode(ctx, req.Code, secrets.GitHubOAuthClientID, secrets.GitHubOAuthClientSecret)
+	tok, err := exchangeGitHubCode(ctx, req.Code, secrets.GitHubOAuthClientID, secrets.GitHubOAuthClientSecret, secrets.GitHubOAuthRedirectURI)
 	if err != nil {
 		rlog.Error("auth: github code exchange failed", "err", err)
 		return nil, &errs.Error{Code: errs.Unauthenticated, Message: "oauth exchange failed"}

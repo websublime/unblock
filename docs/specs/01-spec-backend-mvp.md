@@ -1,6 +1,6 @@
 # SPEC: P01 — Backend MVP Implementation Contract
 
-**Status:** APPROVED (round-15 NFR-1 harness test-isolation + mcpaudittest hardening applied 2026-05-29; round-14 NFR-1 latency-harness scope applied 2026-05-29; round-6 cascade-symmetry applied 2026-05-12; round-5 tracing applied 2026-05-12; round-4 auth applied 2026-05-11; DRIFT-1/-2 applied 2026-05-08; round-2 applied 2026-05-08; round-3 research applied 2026-05-08; original APPROVED 2026-05-07)
+**Status:** APPROVED (§3.5 fifth-secret addition applied 2026-06-02; round-15 NFR-1 harness test-isolation + mcpaudittest hardening applied 2026-05-29; round-14 NFR-1 latency-harness scope applied 2026-05-29; round-6 cascade-symmetry applied 2026-05-12; round-5 tracing applied 2026-05-12; round-4 auth applied 2026-05-11; DRIFT-1/-2 applied 2026-05-08; round-2 applied 2026-05-08; round-3 research applied 2026-05-08; original APPROVED 2026-05-07)
 **Changelog:**
 - 2026-05-08 — DRIFT-1 (naming): clarified §3.5 that the four logical secret names are spec-level identifiers; added logical-name ↔ Go-field mapping table for the Encore Go secrets manifest.
 - 2026-05-08 — DRIFT-2 (format): corrected the local-secrets file path/format from `.encore/local-secrets.toml` (TOML) to `apps/api/.secrets.local.cue` (CUE) per Encore official docs (https://encore.dev/docs/go/primitives/secrets); updated syntax examples and gitignore guidance.
@@ -16,6 +16,7 @@
 - 2026-05-29 — round-15 (NFR-1 harness test-isolation + mcpaudittest hardening; CI-failure closure on bead `unblock-tv8.24` rework, CI run 26633703926): the round-14 gate-semantics assumption — that the harness could live in the default `encore test ./...` suite with `UNBLOCK_PERF_GATE` merely controlling assertion fatality — was proven incomplete by CI. Under the default full-suite run, the perftest package co-schedules with ~15 other test packages against ONE shared local Postgres: warm-cache `Validate`/`Claim`/`Ready` calls ballooned from a local ~87 ms p99 to 5–16 s; one measurement-loop response returned an empty body and tripped a hard `t.Fatalf` ("no SSE data" at `harness_test.go:220`) that the gate does NOT guard (it guards only the p99/goroutine assertions, not transport errors); and the harness's ~630 concurrent `mcp.tool_calls` audit-row writes broke `mcpaudittest`'s `TestD1_POSTNoAuthReturnsUnauthenticated` global-count assertion (`tool_calls rows = 1, want 0`). §11.2 NFR-1 gains two paragraphs: (1) **Test isolation** — the harness MUST be excluded from the default suite (Gate 5) and run ONLY in a dedicated isolated CI step under `UNBLOCK_PERF_GATE=1`; with the gate unset the package MUST contribute zero DB load and zero `mcp.tool_calls` rows (no seed, no loops — not merely log-and-pass); mechanism (build tag `//go:build perf` vs `UNBLOCK_PERF_GATE`-gated `t.Skip`/`TestMain` short-circuit) is the implementer's choice, validated by `encore check` + both suite runs; dedicated CI step owned by Olive. (2) **mcpaudittest hardening** — `selectToolCalls` (global `mcp.tool_calls` query) MUST be scoped to the test's own org/session so the D1 audit-row assertions are robust to any concurrent writer; a pre-existing latent test-isolation defect that the perftest load made deterministic, fixed in the same rework. Additionally the W3 paragraph's assertion wording is corrected from "asserts 401 / errs.Unauthenticated" to the actual MCP transport signal (HTTP 200 + JSON-RPC envelope `code -32000`, `data.kind=UNAUTHENTICATED`), ratifying the DEVIATION logged on the bead and confirmed at code review. No DDL / migration / public-API / `go.mod` change. Spec status remains APPROVED — test-harness isolation + sibling-test correctness, not re-architecting. Bead `unblock-tv8.24` reopened to rework in lockstep.
 - 2026-05-29 — round-14 (NFR-1 latency-harness scope codification; spec-drift closure from `/investigate` on bead `unblock-tv8.24`): §11.2 NFR-1 expanded from a single latency line into the full E-2 harness contract, folding in the two cross-linked WARNINGs from the closed B-1 review (`unblock-tv8.7`) that were recorded on the bead but absent from the spec. (DRIFT-A) seeding doctrine pinned — harness owns its fixture via direct `sqldb.Exec` per the §11.1.1 round-12 doctrine, shortULID-salted slug, in-test key issuance via direct `INSERT INTO mcp.api_keys`, seed `N = 2 × iterations` ready rows. (DRIFT-B) W3 negative-auth-path coverage promoted from cross-link note to acceptance scope — the harness package ships a sibling test covering the §4.3.2 negative paths (revoked / expired / unknown-prefix / bad-HMAC / missing-prefix), each asserting `401` / `errs.Unauthenticated`, closing the inspection-only gap from B-1. (DRIFT-C) W4 goroutine-leak detection given a concrete contract — three `runtime.NumGoroutine` samples (`baseline` / `peak` / `drained` after a 2 s post-loop sleep) with assertion `drained - baseline ≤ 20` (drain-window check, not a per-iteration ratio). Gate semantics pinned — harness always logs samples + p99 + goroutine deltas as JSON-Lines via `t.Logf`; hard-fail (`t.Fatalf`) gated by `UNBLOCK_PERF_GATE=1` to keep CI advisory on slow runners, release-blocking wiring deferred to P02 (Olive). The cold-start exclusion is sharpened to "M ≥ 10 warm-up iterations discarded". No DDL change, no migration, no public API change, no `go.mod` addition, no production-code-path change — the harness is a new test-only Encore package (`apps/api/perftest/`) mirroring `apps/api/exitcriteriontest/`. Spec status remains APPROVED — this is a test-harness contract codification, not a re-architecting. Bead `unblock-tv8.24` AC patched in lockstep.
 - 2026-05-22 — round-12 (seeder CLI deleted from P01 scope; spec-drift closure from `/investigate` on bead `unblock-tv8.23`): the one-shot `apps/api/cmd/unblock-seed/` Go CLI is removed from P01 entirely. Four blockers triggered the deletion — (DRIFT-1) no `auth.users` private RPC exists for the seeder to call; (DRIFT-2) the state-machine does not allow the canonical fixture's `Done`/`Ready` end-states via RPC; (DRIFT-3) `--issue-key` lacks operand flags; (DRIFT-4) Encore parser invariant E1388 forbids `package main` under `cmd/` from calling private RPCs, making "tiny CLI that calls private RPCs" architecturally impossible without scope inflation (new public RPCs or promoting the binary to an Encore service — both compromise design). Seeding responsibility moves to the E2E test package (`apps/api/exitcriteriontest/`) which owns a `TestMain` + direct-SQL seed mirroring `apps/api/shared/rbactest/seed.go:46-53` ("All rows go through direct `sqldb.Exec`, NOT through the auth/org RPCs"); fixture data lives as Go constants/structs in `apps/api/exitcriteriontest/fixture.go` (no YAML, no `gopkg.in/yaml.v3` dependency). The canonical 5-item graph topology (former §9.2: `itm_a`..`itm_e` with chain `a→b`, `b→c`, `b→d`, `d→e` plus the cycle-attempt edge closing the loop) is relocated verbatim into §11.1 as the authoritative exit-criterion fixture description. `--issue-key` is deferred entirely from P01 — no operator-key CLI in scope; in-test key issuance happens via direct `INSERT INTO mcp.api_keys` (computing `key_hash` with `secrets.APIKeyHMACSecret` per `apps/api/auth/apikey.go:103-111`); dev exploration outside tests uses `psql`. No new migrations, no DDL change, no `go.mod` additions. Patches in lockstep: §1 overview seeder bullet removed; §4.1 `IssueAPIKey` doc-comment updated; §4.4 / §4.4.1 / §6.2 Tool 4 seeder consumer notes rewritten; §9 deleted (tombstone retained to preserve §10..§14 numbering and the 30 cross-references that depend on it); §11.1 exit-criterion fixture relocation + E2E seed ownership note added; §11.4 docs and §14 approval checklist seeder mentions removed; §12 task-table E-1 row deleted (bead `unblock-tv8.23` cancelled in lockstep, post-spec, by the orchestrator); plan §2.1/§2.4/§4.5/§6 Q3 and root SPEC §9.4.6 / research AF4 / `apps/api/auth/auth.go` / `apps/api/db/migrations/0070_mcp.up.sql` updated. Spec status remains APPROVED — this is a scope reduction, not a re-architecting.
+- 2026-06-02 — fifth-secret addition (§3.5; spec-drift closure from `/investigate` on bead `unblock-tv8.38` W1): §3.5 expands the locked secret set from four to **five**, adding `GITHUB_OAUTH_REDIRECT_URI` / `GitHubOAuthRedirectURI` — the OAuth2+PKCE registered callback URL sent as the `redirect_uri` parameter in the GitHub token-exchange POST body, preventing `redirect_uri_mismatch` once the BFF wires a real GitHub OAuth app. Consumer is `auth.ExchangeOAuthCode` (same call site as the other two GitHub OAuth secrets). Patched in lockstep: the DRIFT-1 naming note (four→five), the logical-name ↔ Go-field mapping table, the Go manifest struct, the `.secrets.local.cue` example, and the purpose table. This is a lockstep additive contract change — the auth service's boot fail-fast init MUST include the new secret, and every env type + `.secrets.local.cue` MUST provision it (per Olive). Spec status remains APPROVED — this is an additive contract clarification, not a re-architecting.
 
 **Author:** Ada (architect)
 **Date:** 2026-05-08
@@ -264,9 +265,9 @@ reads from a **CUE** file at `apps/api/.secrets.local.cue` (Encore app
 root, next to `encore.app`), per Encore official docs
 (https://encore.dev/docs/go/primitives/secrets).
 
-> **DRIFT-1 — naming.** The four secret identifiers below
+> **DRIFT-1 — naming.** The five secret identifiers below
 > (`MEMORY_DEK`, `API_KEY_HMAC_SECRET`, `GITHUB_OAUTH_CLIENT_ID`,
-> `GITHUB_OAUTH_CLIENT_SECRET`) are **spec-level logical names**, not
+> `GITHUB_OAUTH_CLIENT_SECRET`, `GITHUB_OAUTH_REDIRECT_URI`) are **spec-level logical names**, not
 > literal manifest field names. The Encore Go secrets manifest declares
 > them as Go struct fields in PascalCase, and Encore secret-manager keys
 > + CUE-file keys must use those Go field names verbatim.
@@ -280,6 +281,7 @@ key and the `.secrets.local.cue` field name):
 | `API_KEY_HMAC_SECRET` | `APIKeyHMACSecret` |
 | `GITHUB_OAUTH_CLIENT_ID` | `GitHubOAuthClientID` |
 | `GITHUB_OAUTH_CLIENT_SECRET` | `GitHubOAuthClientSecret` |
+| `GITHUB_OAUTH_REDIRECT_URI` | `GitHubOAuthRedirectURI` |
 
 The Encore Go secrets manifest (declared once in the `auth` service):
 
@@ -289,6 +291,7 @@ var secrets struct {
     APIKeyHMACSecret        string
     GitHubOAuthClientID     string
     GitHubOAuthClientSecret string
+    GitHubOAuthRedirectURI  string
 }
 ```
 
@@ -300,6 +303,7 @@ MemoryDEK:               "dev-dek-32-bytes-base64..."
 APIKeyHMACSecret:        "dev-hmac-secret..."
 GitHubOAuthClientID:     "dev-client-id"
 GitHubOAuthClientSecret: "dev-client-secret"
+GitHubOAuthRedirectURI:  "http://localhost:4321/auth/callback"
 ```
 
 | Secret (logical) | Purpose | Used by |
@@ -308,6 +312,7 @@ GitHubOAuthClientSecret: "dev-client-secret"
 | `API_KEY_HMAC_SECRET` | server-side secret for `HMAC-SHA256(secret, raw_key)` per C7 (Bearer auth) AND `HMAC-SHA256(secret, cursor_payload)` per §6.2.0 (paginated cursor signing — re-uses the same key, no new secret) | `auth` (Bearer auth check on every MCP call; API key issuance); `mcp` (paginated cursor encode/decode per §6.2.0) |
 | `GITHUB_OAUTH_CLIENT_ID` | OAuth2+PKCE client id (test app at v1.0) | `auth.ExchangeOAuthCode` |
 | `GITHUB_OAUTH_CLIENT_SECRET` | OAuth2+PKCE client secret | `auth.ExchangeOAuthCode` |
+| `GITHUB_OAUTH_REDIRECT_URI` | OAuth2+PKCE registered callback URL included in the token-exchange POST body (prevents `redirect_uri_mismatch` once the BFF wires real GitHub) | `auth.ExchangeOAuthCode` |
 
 **Gitignore status (verified 2026-05-08).** The current
 `apps/api/.gitignore` ignores `/.encore` and the generated `encore.gen.*`

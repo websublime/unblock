@@ -96,6 +96,13 @@ func TestExchangeGitHubCode(t *testing.T) {
 			if got := r.Form.Get("code"); got != "abc123" {
 				t.Errorf("code = %q, want abc123", got)
 			}
+			// W1 (bead unblock-tv8.38): redirect_uri MUST be present in
+			// the token-exchange body, sourced from GitHubOAuthRedirectURI.
+			// GitHub OAuth apps with a registered callback return
+			// redirect_uri_mismatch when it is omitted.
+			if got := r.Form.Get("redirect_uri"); got != "https://app.example.com/auth/callback" {
+				t.Errorf("redirect_uri = %q, want https://app.example.com/auth/callback", got)
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"access_token":"gho_xxx","token_type":"bearer","scope":"repo user:email"}`))
 		}))
@@ -109,7 +116,7 @@ func TestExchangeGitHubCode(t *testing.T) {
 			oauthHTTPClient = oldClient
 		})
 
-		got, err := exchangeGitHubCode(context.Background(), "abc123", "test-id", "test-secret")
+		got, err := exchangeGitHubCode(context.Background(), "abc123", "test-id", "test-secret", "https://app.example.com/auth/callback")
 		if err != nil {
 			t.Fatalf("exchangeGitHubCode: %v", err)
 		}
@@ -136,7 +143,7 @@ func TestExchangeGitHubCode(t *testing.T) {
 			oauthHTTPClient = oldClient
 		})
 
-		_, err := exchangeGitHubCode(context.Background(), "expired", "id", "secret")
+		_, err := exchangeGitHubCode(context.Background(), "expired", "id", "secret", "https://app.example.com/auth/callback")
 		if err == nil {
 			t.Fatalf("expected error for github error response")
 		}
@@ -159,9 +166,43 @@ func TestExchangeGitHubCode(t *testing.T) {
 			oauthHTTPClient = oldClient
 		})
 
-		_, err := exchangeGitHubCode(context.Background(), "code", "id", "secret")
+		_, err := exchangeGitHubCode(context.Background(), "code", "id", "secret", "https://app.example.com/auth/callback")
 		if err == nil {
 			t.Fatalf("expected error for 500 response")
+		}
+	})
+
+	t.Run("redirect_uri key is always present even when empty", func(t *testing.T) {
+		// Defense-in-depth (bead unblock-tv8.38 W1): exchangeGitHubCode
+		// sets the redirect_uri form key unconditionally. An empty value
+		// is still sent so the failure surfaces as GitHub's
+		// redirect_uri_mismatch rather than a silent omission. The boot
+		// fail-fast in secrets.go guarantees a non-empty value in
+		// production, but the helper itself must not drop the key.
+		var hasKey bool
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if err := r.ParseForm(); err != nil {
+				t.Fatalf("ParseForm: %v", err)
+			}
+			_, hasKey = r.Form["redirect_uri"]
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"access_token":"gho_xxx","token_type":"bearer"}`))
+		}))
+		defer srv.Close()
+
+		oldEndpoint, oldClient := githubTokenEndpoint, oauthHTTPClient
+		githubTokenEndpoint = srv.URL
+		oauthHTTPClient = srv.Client()
+		t.Cleanup(func() {
+			githubTokenEndpoint = oldEndpoint
+			oauthHTTPClient = oldClient
+		})
+
+		if _, err := exchangeGitHubCode(context.Background(), "code", "id", "secret", ""); err != nil {
+			t.Fatalf("exchangeGitHubCode: %v", err)
+		}
+		if !hasKey {
+			t.Errorf("redirect_uri key absent from form body; want present (even when empty)")
 		}
 	})
 }

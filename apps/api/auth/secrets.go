@@ -15,6 +15,7 @@ package auth
 //	API_KEY_HMAC_SECRET     ↔ APIKeyHMACSecret
 //	GITHUB_OAUTH_CLIENT_ID  ↔ GitHubOAuthClientID
 //	GITHUB_OAUTH_CLIENT_SECRET ↔ GitHubOAuthClientSecret
+//	GITHUB_OAUTH_REDIRECT_URI  ↔ GitHubOAuthRedirectURI
 //
 // Provisioning policy across Encore Cloud env types (per tv8.56):
 //
@@ -36,15 +37,16 @@ package auth
 //	                its pre-deploy CI test runner queries; covering all
 //	                four documented types eliminates the variable.
 //
-// Local emulator (`encore run`) reads the four fields from
+// Local emulator (`encore run`) reads the five fields from
 // `apps/api/.secrets.local.cue` (gitignored), which overlays on top of
 // whatever the platform returns for `--type dev`.
 //
-// All four secrets MUST be set across all four types before deploy. Missing
-// values now surface uniformly as boot-time panics (bead unblock-tv8.57):
-// APIKeyHMACSecret → boot panic in mcp/transport.go's init; MemoryDEK,
-// GitHubOAuthClientID, GitHubOAuthClientSecret → boot panic in this file's
-// init (below). The prior asymmetry — where the latter three resolved to ""
+// All five secrets MUST be set across all four types before deploy. Missing
+// values now surface uniformly as boot-time panics (bead unblock-tv8.57,
+// extended for GitHubOAuthRedirectURI by unblock-tv8.38): APIKeyHMACSecret →
+// boot panic in mcp/transport.go's init; MemoryDEK, GitHubOAuthClientID,
+// GitHubOAuthClientSecret, GitHubOAuthRedirectURI → boot panic in this file's
+// init (below). The prior asymmetry — where the OAuth secrets resolved to ""
 // and failed late on the OAuth/encrypt call path (auth.go:326,459) — is
 // eliminated.
 //
@@ -73,6 +75,15 @@ var secrets struct {
 	// GitHubOAuthClientID. Read by auth.ExchangeOAuthCode. Logical name:
 	// GITHUB_OAUTH_CLIENT_SECRET.
 	GitHubOAuthClientSecret string
+
+	// GitHubOAuthRedirectURI is the OAuth2+PKCE registered callback URL for
+	// the `://unblock` GitHub OAuth app. Sent as the `redirect_uri`
+	// parameter in the code → token exchange POST body (auth/oauth.go
+	// exchangeGitHubCode); GitHub OAuth apps with a registered callback URL
+	// return `redirect_uri_mismatch` on the token exchange when it is
+	// omitted. Read by auth.ExchangeOAuthCode. Logical name:
+	// GITHUB_OAUTH_REDIRECT_URI.
+	GitHubOAuthRedirectURI string
 }
 
 // init enforces boot-time fail-fast on the three auth secrets that were
@@ -88,10 +99,11 @@ var secrets struct {
 //   - MemoryDEK         → runtime panic at the first pgcrypto encrypt of an
 //     oauth_tokens row (auth.go:459) — fails late, on the
 //     OAuth callback path.
-//   - GitHubOAuthClientID / GitHubOAuthClientSecret → silently resolve to ""
-//     and produce a malformed/unauthorized GitHub code
+//   - GitHubOAuthClientID / GitHubOAuthClientSecret / GitHubOAuthRedirectURI →
+//     silently resolve to "" and produce a malformed/unauthorized GitHub code
 //     exchange (auth.go:326) — fails late, with a remote
-//     400/401 that masks the real cause (empty secret).
+//     400/401 (or a `redirect_uri_mismatch` for the empty
+//     redirect URI) that masks the real cause (empty secret).
 //
 // Exercising the OAuth → token-exchange → encrypt path (e.g. the unblock-tv8
 // exit-criterion E2E) would have surfaced those as confusing downstream
@@ -121,5 +133,8 @@ func init() {
 	}
 	if secrets.GitHubOAuthClientSecret == "" {
 		panic("auth: GitHubOAuthClientSecret is empty — provision via `encore secret set` (or apps/api/.secrets.local.cue) before boot; required for the OAuth2+PKCE code exchange (auth.go:326)")
+	}
+	if secrets.GitHubOAuthRedirectURI == "" {
+		panic("auth: GitHubOAuthRedirectURI is empty — provision via `encore secret set` (or apps/api/.secrets.local.cue) before boot; required as the redirect_uri parameter in the OAuth2+PKCE code exchange (auth.go:326) to avoid redirect_uri_mismatch")
 	}
 }
