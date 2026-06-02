@@ -50,7 +50,10 @@ import (
 	"testing"
 	"time"
 
+	"encore.app/mcp"
 	"encore.app/shared/ulid"
+	"encore.app/workitems"
+	"encore.dev/beta/errs"
 )
 
 // =============================================================================
@@ -137,7 +140,10 @@ func seedCommentDirect(t *testing.T, itemID, kind, status, body string, createdA
 }
 
 // setStateWireOut models the §6.2 Tool 13 wire shape — the
-// structuredContent JSON object carrying { "item": Item }.
+// structuredContent JSON object carrying { "item": Item } plus the
+// optional §7.1 success-side `warnings` array (omitted entirely when
+// no warning is present). The intent_comment partial-failure path
+// carries exactly one {code:intent_comment_dropped, ...} entry.
 type setStateWireOut struct {
 	Item struct {
 		ID            string `json:"id"`
@@ -146,6 +152,11 @@ type setStateWireOut struct {
 		QAState       string `json:"qa_state"`
 		PipelineState string `json:"pipeline_state"`
 	} `json:"item"`
+	Warnings []struct {
+		Code    string         `json:"code"`
+		Message string         `json:"message"`
+		Details map[string]any `json:"details"`
+	} `json:"warnings"`
 }
 
 func decodeSetStateOut(t *testing.T, raw json.RawMessage) setStateWireOut {
@@ -402,6 +413,183 @@ func TestD6_SetStateIntentCommentWrittenAtomically(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("intent_comment row count = %d, want 1", count)
+	}
+}
+
+// TestD6_SetStateSuccessOmitsWarningsKey pins SPEC §7.1's omitempty
+// contract + the R2 schema-validation concern: a successful set_state
+// with NO dropped intent_comment MUST omit the `warnings` key from
+// structuredContent entirely (not emit `null` or `[]`), and the result
+// MUST still pass the SDK's additionalProperties:false output-schema
+// validation that the embedded WithWarnings field introduces. We
+// inspect the raw structuredContent map (not the typed decode) so the
+// "key absent" mode is caught — a typed slice + omitempty would
+// silently mask an unexpectedly-present `null`.
+func TestD6_SetStateSuccessOmitsWarningsKey(t *testing.T) {
+	resetToolCalls(t)
+	fx := seedD2Fixture(t)
+	itemID := seedItemForState(t, fx.OrgID, fx.ProjectID,
+		"done", "approved", "passed", "running", fx.UserID)
+
+	// Happy path WITH an intent_comment that succeeds: still no warning.
+	env := callTool(t, fx.RawKey, "set_state", map[string]any{
+		"item_id":      itemID,
+		"review_state": "needs_rework",
+		"intent_comment": map[string]any{
+			"kind":   "review",
+			"status": "warning",
+			"body":   "no warning expected on the success path",
+		},
+	})
+	res := assertStructuredEchoesText(t, env)
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(res.StructuredContent, &raw); err != nil {
+		t.Fatalf("unmarshal raw structuredContent: %v; raw=%s", err, string(res.StructuredContent))
+	}
+	if _, ok := raw["warnings"]; ok {
+		t.Fatalf("success structuredContent carried a 'warnings' key; want it omitted (omitempty); raw=%s",
+			string(res.StructuredContent))
+	}
+
+	// Audit row: result_kind='ok' and warning_codes is the empty array.
+	rows := selectToolCalls(t, fx.OrgID)
+	var setStateRow *toolCallRow
+	for i := range rows {
+		if rows[i].ToolName == "set_state" {
+			setStateRow = &rows[i]
+		}
+	}
+	if setStateRow == nil {
+		t.Fatalf("no set_state audit row found")
+	}
+	if setStateRow.ResultKind != "ok" {
+		t.Fatalf("audit result_kind = %q, want ok", setStateRow.ResultKind)
+	}
+	if setStateRow.WarningCodes != "[]" {
+		t.Fatalf("audit warning_codes = %q, want [] on the no-warning path", setStateRow.WarningCodes)
+	}
+}
+
+// TestD6_SetStateIntentCommentDroppedEmitsWarning is the AC#3 test: on
+// the intent_comment partial-failure path (state mutation committed,
+// AppendComment then fails), set_state returns SUCCESS carrying exactly
+// one §7.1 warning {code:intent_comment_dropped, message, details} on
+// the wire AND the §8.1.1 mcp.tool_calls.warning_codes audit column
+// records ["intent_comment_dropped"], with result_kind staying 'ok'.
+//
+// There is no black-box input that makes AppendComment fail after
+// SetStateColumns commits (validation is caught at the MCP boundary
+// first; the item provably exists post-commit) — see the
+// appendIntentComment seam doc-comment + unblock-tv8.63 INVESTIGATION
+// risk R1. We force the failure by overriding the production seam with
+// a stub that returns an error AFTER asserting SetStateColumns already
+// committed (it reads the live state row), then restore it.
+func TestD6_SetStateIntentCommentDroppedEmitsWarning(t *testing.T) {
+	resetToolCalls(t)
+	fx := seedD2Fixture(t)
+	itemID := seedItemForState(t, fx.OrgID, fx.ProjectID,
+		"done", "approved", "passed", "running", fx.UserID)
+
+	// Override the post-commit AppendComment seam to force a failure.
+	// The stub returns an Internal error WITHOUT writing any comment,
+	// simulating a DB blip on the second RPC after the state mutation
+	// has already committed.
+	var stubCalled bool
+	restore := mcp.SetAppendIntentCommentForTest(
+		func(_ context.Context, req *workitems.AppendCommentRequest) error {
+			stubCalled = true
+			if req.ItemID != itemID {
+				t.Errorf("seam received item_id %q, want %q", req.ItemID, itemID)
+			}
+			return &errs.Error{Code: errs.Internal, Message: "simulated AppendComment failure"}
+		},
+	)
+	defer restore()
+
+	env := callTool(t, fx.RawKey, "set_state", map[string]any{
+		"item_id":      itemID,
+		"review_state": "needs_rework",
+		"intent_comment": map[string]any{
+			"kind":   "completed",
+			"status": "success",
+			"body":   "this append is forced to fail post-commit",
+		},
+	})
+	res := assertStructuredEchoesText(t, env)
+
+	if !stubCalled {
+		t.Fatalf("appendIntentComment seam was never invoked")
+	}
+
+	// The primary state mutation committed: item.review_state changed
+	// and (I-1) qa_state auto-reset to pending — the call succeeded.
+	got := decodeSetStateOut(t, res.StructuredContent)
+	if got.Item.ReviewState != "needs_rework" {
+		t.Fatalf("item.review_state = %q, want needs_rework (state committed)", got.Item.ReviewState)
+	}
+	// DB read-back confirms the commit landed despite the dropped comment.
+	_, review, qa, _ := readItemStateColumns(t, itemID)
+	if review != "needs_rework" {
+		t.Fatalf("DB review_state = %q, want needs_rework", review)
+	}
+	if qa != "pending" {
+		t.Fatalf("DB qa_state = %q, want pending (I-1 auto-reset)", qa)
+	}
+
+	// §7.1 caller-visible signal: exactly one warning entry.
+	if len(got.Warnings) != 1 {
+		t.Fatalf("warnings len = %d, want 1; raw=%s", len(got.Warnings), string(res.StructuredContent))
+	}
+	w := got.Warnings[0]
+	if w.Code != "intent_comment_dropped" {
+		t.Fatalf("warning.code = %q, want intent_comment_dropped", w.Code)
+	}
+	if w.Message == "" {
+		t.Fatalf("warning.message is empty; want a human-readable summary")
+	}
+	if got, _ := w.Details["intent_comment_kind"].(string); got != "completed" {
+		t.Fatalf("warning.details.intent_comment_kind = %q, want completed", got)
+	}
+	if got, _ := w.Details["intent_comment_status"].(string); got != "success" {
+		t.Fatalf("warning.details.intent_comment_status = %q, want success", got)
+	}
+	// The comment body MUST NOT leak into details (SPEC §6.2/§7.1).
+	for k, v := range w.Details {
+		if s, ok := v.(string); ok && s == "this append is forced to fail post-commit" {
+			t.Fatalf("warning.details[%q] echoed the comment body; want body excluded", k)
+		}
+	}
+
+	// No comment row landed (the append failed).
+	ctx := context.Background()
+	var count int
+	if err := db.QueryRow(ctx,
+		`SELECT count(*) FROM workitems.comments WHERE item_id = $1`, itemID,
+	).Scan(&count); err != nil {
+		t.Fatalf("count comments: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("comment row count = %d, want 0 (append failed)", count)
+	}
+
+	// §8.1.1 operator-visible signal: the audit row keeps result_kind
+	// 'ok' and records warning_codes ["intent_comment_dropped"].
+	rows := selectToolCalls(t, fx.OrgID)
+	var setStateRow *toolCallRow
+	for i := range rows {
+		if rows[i].ToolName == "set_state" {
+			setStateRow = &rows[i]
+		}
+	}
+	if setStateRow == nil {
+		t.Fatalf("no set_state audit row found")
+	}
+	if setStateRow.ResultKind != "ok" {
+		t.Fatalf("audit result_kind = %q, want ok (call succeeded)", setStateRow.ResultKind)
+	}
+	if setStateRow.WarningCodes != `["intent_comment_dropped"]` {
+		t.Fatalf("audit warning_codes = %q, want [\"intent_comment_dropped\"]", setStateRow.WarningCodes)
 	}
 }
 

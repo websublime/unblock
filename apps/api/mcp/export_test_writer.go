@@ -36,6 +36,8 @@ package mcp
 import (
 	"context"
 	"net/http"
+
+	"encore.app/workitems"
 )
 
 // WriteToolCallForTest is the integration-test-only re-export of
@@ -62,4 +64,24 @@ func WriteToolCallForTest(ctx context.Context, call ToolCall) {
 // smell — the suffix is the audit trail.
 func ServeMCPForTest(w http.ResponseWriter, r *http.Request) {
 	serveMCP(w, r)
+}
+
+// SetAppendIntentCommentForTest overrides the package-level
+// appendIntentComment seam (handler_set_state.go) and returns a restore
+// func the caller MUST invoke (typically via defer) to reinstate the
+// production binding. It exists so the cross-package mcpaudittest suite
+// can force the post-commit AppendComment to fail and exercise the
+// §6.2 Tool 13 intent_comment partial-failure path — the §7.1
+// warnings[] + §8.1.1 warning_codes dropped-path that AC#3 of
+// unblock-tv8.63 requires. There is NO black-box input that makes
+// AppendComment fail after SetStateColumns commits (see the seam's
+// doc-comment + INVESTIGATION risk R1), so a test double is the only
+// honest way to cover this branch.
+//
+// Production callers MUST NOT use this — the suffix is the audit trail;
+// the only caller is the partial-failure integration test.
+func SetAppendIntentCommentForTest(fn func(ctx context.Context, req *workitems.AppendCommentRequest) error) (restore func()) {
+	prev := appendIntentComment
+	appendIntentComment = fn
+	return func() { appendIntentComment = prev }
 }

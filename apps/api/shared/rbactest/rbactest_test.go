@@ -476,9 +476,12 @@ type depsCascadeEventsRow struct {
 }
 
 // mcpToolCallsRow mirrors mcp.tool_calls column order verbatim per
-// migration 0070_mcp.up.sql lines 52-68 (13 columns). pgx v5 scans
-// the `arguments jsonb` column into a []byte natively (no jsonb
-// codec registration required).
+// migration 0070_mcp.up.sql lines 52-68 plus the appended
+// warning_codes column from 0110_mcp_warning_codes.up.sql
+// (14 columns). pgx v5 scans the `arguments` / `warning_codes` jsonb
+// columns into []byte natively (no jsonb codec registration required).
+// The fields map positionally to `SELECT *`, so WarningCodes MUST stay
+// last to match the ADD COLUMN ordinal (14, after called_at).
 type mcpToolCallsRow struct {
 	ID              string
 	APIKeyID        *string
@@ -493,6 +496,7 @@ type mcpToolCallsRow struct {
 	DurationMs      int
 	TraceID         *string
 	CalledAt        time.Time
+	WarningCodes    []byte
 }
 
 // mcpAPIKeysRow mirrors mcp.api_keys column order verbatim per

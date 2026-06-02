@@ -9,7 +9,11 @@
 //   - §8.1 — locked column set:
 //     (id, api_key_id, org_id, project_id, item_id, tool_name,
 //     arguments, result_kind, rejection_reason, error_code,
-//     duration_ms, trace_id, called_at).
+//     warning_codes, duration_ms, trace_id, called_at). The
+//     warning_codes jsonb column is the §8.1.1 additive audit
+//     channel for the §7.1 success-side warnings (added
+//     unblock-tv8.63); a nil / empty WarningCodes slice serialises
+//     to the '[]'::jsonb default.
 //   - §10.2 Option B — trace_id is the ULID minted by MCPHandler
 //     at request entry, propagated via context.Context and pulled
 //     here via tracectx.TraceID(ctx). The column type is `text`
@@ -138,6 +142,15 @@ type ToolCall struct {
 	// NOT_FOUND, VALIDATION, CONFLICT, INTERNAL, …).
 	ErrorCode string
 
+	// WarningCodes carries the §7.1 success-side warning `code`
+	// strings present on the tool's success-result warnings[]
+	// (§8.1.1 mcp.tool_calls.warning_codes). The only P01/P02
+	// producer is set_state's intent_comment_dropped on the
+	// AppendComment-failure branch; result_kind STAYS "ok" on that
+	// path. A nil / empty slice serialises to the jsonb default '[]'
+	// (see recordToolCall). Mirrors the Arguments jsonb handling.
+	WarningCodes []string
+
 	// DurationMs is the elapsed wall-clock millisecond count
 	// from MCPHandler entry to the deferred call.
 	DurationMs int
@@ -221,6 +234,26 @@ func recordToolCall(ctx context.Context, call ToolCall) {
 		args = json.RawMessage(`{}`)
 	}
 
+	// Marshal WarningCodes ([]string) to a jsonb array. A nil /
+	// empty slice MUST serialise to the literal `[]` (the §8.1.1
+	// column is NOT NULL DEFAULT '[]'::jsonb) — json.Marshal(nil
+	// []string) yields "null", so collapse that to "[]" explicitly,
+	// mirroring the Arguments `{}` default above. A marshal error is
+	// effectively impossible for a []string but is handled defensively
+	// by falling back to the empty array so the audit row still lands.
+	warningCodes := []byte(`[]`)
+	if len(call.WarningCodes) > 0 {
+		if encoded, marshalErr := json.Marshal(call.WarningCodes); marshalErr == nil {
+			warningCodes = encoded
+		} else {
+			rlog.Error("mcp: recordToolCall: warning_codes marshal failed; defaulting to []",
+				"err", marshalErr,
+				"trace_id", tracectx.TraceID(ctx),
+				"tool", call.ToolName,
+			)
+		}
+	}
+
 	// Nullable string columns: collapse empties to (*string)(nil)
 	// so the SQL driver emits NULL. encore.dev/storage/sqldb
 	// forwards (*string)(nil) as NULL on the wire.
@@ -235,9 +268,9 @@ func recordToolCall(ctx context.Context, call ToolCall) {
 		INSERT INTO mcp.tool_calls
 			(id, api_key_id, org_id, project_id, item_id,
 			 tool_name, arguments, result_kind, rejection_reason,
-			 error_code, duration_ms, trace_id)
+			 error_code, warning_codes, duration_ms, trace_id)
 		VALUES
-			($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+			($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 	`,
 		id,
 		apiKeyID,
@@ -249,6 +282,7 @@ func recordToolCall(ctx context.Context, call ToolCall) {
 		string(call.ResultKind),
 		rejectionReason,
 		errorCode,
+		warningCodes,
 		call.DurationMs,
 		traceIDArg,
 	)
