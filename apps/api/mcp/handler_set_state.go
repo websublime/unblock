@@ -150,7 +150,7 @@ type setStateOut struct {
 // post-commit workitems.AppendComment call. Production binds it to the
 // real RPC (initialised below); the integration test for the
 // §6.2 Tool 13 intent_comment partial-failure path overrides it via
-// setAppendIntentCommentForTest to force a post-commit failure.
+// SetAppendIntentCommentForTest to force a post-commit failure.
 //
 // The seam exists because there is NO black-box input that makes
 // AppendComment fail AFTER SetStateColumns has committed: malformed
