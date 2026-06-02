@@ -66,6 +66,36 @@ import (
 // path because auth-failure short-circuits before that).
 const maxJSONRPCBodyForIDProbe = 64 * 1024
 
+// TraceIDMintFailedSentinel is the trace_id bound onto the request
+// context when ulid.New() fails at MCP entry (crypto/rand exhaustion —
+// extremely rare). It is 26 chars of "0", which is a valid
+// Crockford-base32 string (0 is in ulid.Alphabet()) and therefore a
+// well-formed ULID-shaped value per SPEC §10.2, so it satisfies the §7
+// error-envelope `trace_id` contract ("<ULID or empty>") without
+// emitting an empty string. Being lexicographically minimal it sorts
+// before every real ULID and is trivially recognisable in logs and in
+// mcp.tool_calls.trace_id as the mint-failure marker.
+//
+// Binding this sentinel (rather than "") at the mint site means the
+// downstream consumers — tracectx.With, the §7 envelope (errenvelope.go),
+// and recordToolCall (recordtoolcall.go, which collapses "" to SQL NULL)
+// — all carry a non-empty, correlatable trace_id for the mint-failure
+// request. See bead unblock-tv8.45.
+const TraceIDMintFailedSentinel = "00000000000000000000000000"
+
+// mintTraceID returns a fresh ULID trace_id, or TraceIDMintFailedSentinel
+// when ulid.New() fails. The boolean reports whether the mint failed so
+// the caller can emit a diagnostic rlog line. Factored out of serveMCP so
+// the sentinel-fallback branch is unit-testable without a forced
+// crypto/rand failure (ulid.New has no entropy-injection seam).
+func mintTraceID() (traceID string, mintFailed bool) {
+	id, err := ulid.New()
+	if err != nil {
+		return TraceIDMintFailedSentinel, true
+	}
+	return id, false
+}
+
 // MCPHandler is the single MCP entry point. Both POST and GET hit
 // the same handler; HTTP-method dispatch happens inside the function
 // body. The Go MCP SDK adapter (transport.go) owns the JSON-RPC and
@@ -118,12 +148,19 @@ func serveMCP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 2. Mint trace_id (SPEC §10.2 Option B). On the extremely
-	//    rare crypto/rand failure path we log + continue with an
-	//    empty trace_id; the audit row's trace_id column is
-	//    nullable so the request still completes.
-	traceID, err := ulid.New()
-	if err != nil {
-		rlog.Error("mcp: trace_id mint failed", "err", err)
+	//    rare crypto/rand failure path mintTraceID returns
+	//    TraceIDMintFailedSentinel so every downstream consumer
+	//    (the §7 error envelope, every rlog line, and the
+	//    mcp.tool_calls.trace_id audit column) carries a non-empty,
+	//    correlatable marker rather than an orphaned NULL/empty value
+	//    (bead unblock-tv8.45). The diagnostic log line below carries
+	//    the same "trace_id" structured field name used elsewhere in
+	//    this handler so the sentinel is greppable.
+	traceID, mintFailed := mintTraceID()
+	if mintFailed {
+		rlog.Error("mcp: trace_id mint failed; using sentinel",
+			"trace_id", traceID,
+		)
 	}
 
 	// 3. Bind ctx with trace_id + service. Identity fields are
