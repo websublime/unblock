@@ -2403,8 +2403,8 @@ CREATE INDEX tool_calls_warning_codes_gin_idx
     ON mcp.tool_calls USING gin (warning_codes);
 ```
 
-(With a paired `0071_mcp_warning_codes.down.sql` dropping the index +
-column.) The `result_kind` CHECK constraint
+(Up-only — no `0071_mcp_warning_codes.down.sql`, per the §3.3 "No
+`down.sql` files in P01" convention.) The `result_kind` CHECK constraint
 (`tool_calls_result_chk`) is **untouched** — confirming §7.1 / §8.1.1's
 invariant that the partial-success path remains `result_kind='ok'`.
 
