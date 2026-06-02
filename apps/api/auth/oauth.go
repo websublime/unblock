@@ -108,13 +108,22 @@ type githubUserResponse struct {
 // responsible for translating non-200 responses into errs.* codes
 // (typically Unauthenticated for 401, Internal for 5xx).
 //
+// `redirectURI` is the OAuth app's registered callback URL, sourced from
+// the `GitHubOAuthRedirectURI` secret. GitHub OAuth apps that have a
+// registered redirect_uri return `redirect_uri_mismatch` on the token
+// exchange when it is omitted, so it is always sent in the form body
+// (RFC 6749 §4.1.3). An empty value is still set explicitly so the
+// failure mode is GitHub's `redirect_uri_mismatch` rather than a silent
+// omission that some app configurations tolerate.
+//
 // The function uses the package-level oauthHTTPClient so tests can
 // inject an httptest server without monkey-patching.
-func exchangeGitHubCode(ctx context.Context, code, clientID, clientSecret string) (*githubAccessTokenResponse, error) {
+func exchangeGitHubCode(ctx context.Context, code, clientID, clientSecret, redirectURI string) (*githubAccessTokenResponse, error) {
 	form := url.Values{}
 	form.Set("client_id", clientID)
 	form.Set("client_secret", clientSecret)
 	form.Set("code", code)
+	form.Set("redirect_uri", redirectURI)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, githubTokenEndpoint, strings.NewReader(form.Encode()))
 	if err != nil {
