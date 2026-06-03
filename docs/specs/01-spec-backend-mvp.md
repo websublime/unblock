@@ -265,6 +265,17 @@ reads from a **CUE** file at `apps/api/.secrets.local.cue` (Encore app
 root, next to `encore.app`), per Encore official docs
 (https://encore.dev/docs/go/primitives/secrets).
 
+> **Coherence (bead `unblock-f6z`).** The non-production placeholder
+> values for these secrets live in a single committed source of truth,
+> `apps/api/secrets.nonprod.cue`, with the Go field names below as keys.
+> CI (`apps-api-ci.yml`) copies it to `.secrets.local.cue` and a
+> drift-check gate fails the build if any `secrets.go` field is missing
+> from it; `apps/api/scripts/secrets-provision.sh` pushes it to the
+> platform `local`+`pr` env types. Real `prod`/`dev` values stay human-set
+> on the Encore Platform and are NEVER committed. The split GitHub `CI_*`
+> repo-secret registry is retired. Full runbook + the Encore↔GitHub name
+> mapping: `apps/api/SECRETS.md`.
+
 > **DRIFT-1 — naming.** The five secret identifiers below
 > (`MEMORY_DEK`, `API_KEY_HMAC_SECRET`, `GITHUB_OAUTH_CLIENT_ID`,
 > `GITHUB_OAUTH_CLIENT_SECRET`, `GITHUB_OAUTH_REDIRECT_URI`) are **spec-level logical names**, not
