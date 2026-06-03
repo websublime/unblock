@@ -240,27 +240,50 @@ jobs:
         run: |
           echo '{}' > encore.app
 
-      - name: secrets SoT drift-check (secrets.go ↔ secrets.nonprod.cue)
-        # Bead unblock-f6z deliverable #4 (+ follow-up: BIDIRECTIONAL).
-        # Assert an EXACT BIJECTION between the fields of `var secrets struct`
-        # in apps/api/auth/secrets.go and the keys of the committed source of
-        # truth, apps/api/secrets.nonprod.cue. Two failure modes, BOTH a hard
-        # FAIL (no soft warnings — an ignorable check would re-open the same
+      - name: secrets SoT drift-check (all apps/api secret structs ↔ secrets.nonprod.cue)
+        # Bead unblock-f6z deliverable #4 (+ follow-ups: BIDIRECTIONAL, then
+        # ALL-PACKAGES). Assert an EXACT BIJECTION between the UNION of the
+        # fields of EVERY `var secrets struct` declared anywhere in apps/api
+        # and the keys of the committed source of truth,
+        # apps/api/secrets.nonprod.cue. Two failure modes, BOTH a hard FAIL
+        # (no soft warnings — an ignorable check would re-open the same
         # false-green gap that crashed the deploy):
-        #   Direction 1 (comm -23): a secrets.go field MISSING from the SoT —
+        #   Direction 1 (comm -23): a declared field MISSING from the SoT —
         #     "added the Go field + boot guard but forgot to provision" (the
         #     failure mode that left GitHubOAuthRedirectURI unprovisioned and
         #     crashed the deploy).
-        #   Direction 2 (comm -13): a SoT key NOT declared in secrets.go —
+        #   Direction 2 (comm -13): a SoT key NOT declared in ANY struct —
         #     a STALE/EXTRA SoT entry (e.g. a placeholder left behind after a
         #     Go secret was removed). This would silently over-provision a
         #     dead secret and rot the SoT.
         #
-        # WHY auth/secrets.go IS THE CANONICAL SET: per SPEC §3.5 and the
-        # secrets.go doc-comment, the auth service is the canonical consumer
-        # and declares the SUPERSET of all secrets. Other packages (e.g.
-        # mcp/transport.go) declare their own SUBSET `var secrets struct`. The
-        # SoT must therefore be an exact bijection with auth/secrets.go.
+        # WHY THE UNION OF ALL PACKAGES, not just auth/secrets.go: SPEC §3.5
+        # treats auth as the canonical consumer that SHOULD declare the
+        # superset, and today it does (mcp/cursor.go, exitcriteriontest/
+        # secrets.go, perftest/secrets.go each declare only the
+        # APIKeyHMACSecret subset). But "auth is the superset" is an
+        # INVARIANT we must ENFORCE, not assume: if a future secret were added
+        # to a non-auth struct ONLY (e.g. an mcp-only secret) and not to auth,
+        # parsing auth alone would make it invisible to BOTH the SoT and this
+        # check — re-opening a narrower version of the masking gap. Discovering
+        # every struct and unioning closes that hole: any secret declared
+        # anywhere in apps/api must have a SoT placeholder, period. NB: the
+        # superset invariant itself (every non-auth field ⊆ auth) is NOT
+        # asserted here — the bijection guarantees union ↔ SoT, which is the
+        # property that actually prevents an unprovisioned secret.
+        #
+        # DISCOVERY (robust, package-agnostic): we do NOT hardcode the four
+        # files known today. We walk every NON-`_test.go` Go file under
+        # apps/api and, per file, awk out the fields inside each
+        # `var secrets struct { … }` block, then sort -u the union. Scoping to
+        # non-`_test.go` files avoids picking up mock/fixture structs from unit
+        # tests; the four real secret structs (auth, mcp, exitcriteriontest,
+        # perftest) all live in plain `.go` files (the *test packages are
+        # Encore test-HELPER packages on the normal build path, not `_test.go`
+        # files), so they are correctly in scope. If a legitimate secret is
+        # ever declared in a `_test.go` file, this check would not see it —
+        # declare Encore secrets in a non-`_test.go` file (the existing
+        # convention) so the boot guards and this gate both apply.
         #
         # BOUNDARY (honest scope): this validates the code ↔ SoT contract
         # ONLY. It does NOT and CANNOT validate the Encore Platform secret
@@ -271,49 +294,56 @@ jobs:
         # Extraction is text-based (no Go build needed, runs before any
         # compile step):
         #   - struct fields: leading PascalCase identifier of each
-        #     `<Field> string` line inside the `var secrets struct { … }`
-        #     block of auth/secrets.go (the canonical superset).
+        #     `<Field> string` line inside any `var secrets struct { … }`
+        #     block, unioned across every discovered file.
         #   - SoT fields: leading identifier of each `<Field>: "…"` line
         #     (comment lines start with `//` and never match).
         run: |
-          go_fields="$(awk '
-            /^var secrets struct \{/ { f=1; next }
-            f && /^\}/             { f=0 }
-            f && /^[[:space:]]+[A-Z][A-Za-z0-9_]*[[:space:]]+string/ { print $1 }
-          ' auth/secrets.go | sort -u)"
+          # Union the fields of every `var secrets struct` across all
+          # non-_test.go Go files under apps/api. -print0/-0 is filename-safe;
+          # awk receives many files and resets its in-block flag per file via
+          # FNR==1 so a struct left "open" at EOF cannot bleed into the next.
+          go_fields="$(find . -type f -name '*.go' ! -name '*_test.go' -print0 \
+            | xargs -0 awk '
+                FNR==1                  { f=0 }
+                /^var secrets struct \{/ { f=1; next }
+                f && /^\}/              { f=0 }
+                f && /^[[:space:]]+[A-Z][A-Za-z0-9_]*[[:space:]]+string/ { print $1 }
+              ' \
+            | sort -u)"
 
           sot_fields="$(grep -oE '^[A-Za-z_][A-Za-z0-9_]*[[:space:]]*:[[:space:]]*"[^"]*"' \
             secrets.nonprod.cue | sed -E 's/[[:space:]]*:.*//' | sort -u)"
 
           if [ -z "${go_fields}" ]; then
-            echo "::error::could not parse any fields from 'var secrets struct' in auth/secrets.go"
+            echo "::error::could not parse any fields from any 'var secrets struct' under apps/api"
             exit 1
           fi
 
           fail=0
 
-          # Direction 1: every Go field MUST be present in the SoT.
+          # Direction 1: every declared field MUST be present in the SoT.
           missing="$(comm -23 <(printf '%s\n' "${go_fields}") <(printf '%s\n' "${sot_fields}"))"
           if [ -n "${missing}" ]; then
-            echo "::error::secrets.go declares fields absent from apps/api/secrets.nonprod.cue:"
+            echo "::error::a 'var secrets struct' under apps/api declares fields absent from apps/api/secrets.nonprod.cue:"
             echo "${missing}"
             echo "Add a placeholder line for each to secrets.nonprod.cue and run scripts/secrets-provision.sh (see apps/api/SECRETS.md)."
             fail=1
           fi
 
-          # Direction 2: every SoT key MUST be declared in secrets.go.
+          # Direction 2: every SoT key MUST be declared in some struct.
           extra="$(comm -13 <(printf '%s\n' "${go_fields}") <(printf '%s\n' "${sot_fields}"))"
           if [ -n "${extra}" ]; then
-            echo "::error::apps/api/secrets.nonprod.cue declares keys absent from 'var secrets struct' in auth/secrets.go:"
+            echo "::error::apps/api/secrets.nonprod.cue declares keys absent from every 'var secrets struct' under apps/api:"
             echo "${extra}"
-            echo "Remove the stale placeholder line(s) from secrets.nonprod.cue, or add the missing field + boot guard to auth/secrets.go (see apps/api/SECRETS.md)."
+            echo "Remove the stale placeholder line(s) from secrets.nonprod.cue, or add the missing field + boot guard to a service's secret struct (see apps/api/SECRETS.md)."
             fail=1
           fi
 
           if [ "${fail}" -ne 0 ]; then
             exit 1
           fi
-          echo "secrets SoT drift-check OK — exact bijection: all $(printf '%s\n' "${go_fields}" | grep -c .) secrets.go field(s) ↔ secrets.nonprod.cue key(s)"
+          echo "secrets SoT drift-check OK — exact bijection: all $(printf '%s\n' "${go_fields}" | grep -c .) declared secret field(s) (unioned across every apps/api secret struct) ↔ secrets.nonprod.cue key(s)"
 
       - name: provision local secrets for encore emulator
         # Bead unblock-f6z: the local emulator needs the five secrets
