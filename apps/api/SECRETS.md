@@ -51,19 +51,27 @@ values straight from the committed `secrets.nonprod.cue`.
 ### Boundary (be honest about what is enforced where)
 
 - **CI drift-check** (`apps-api-ci.yml` "secrets SoT drift-check" gate)
-  validates `secrets.go` ↔ `secrets.nonprod.cue` **only**. CI unlinks
-  `encore.app` and has no platform auth, so it **cannot** see the Encore
-  Platform secret matrix. The check is **bidirectional** — it enforces an
-  exact bijection and hard-FAILs on either drift direction:
-  - a `secrets.go` field missing from the SoT (forgot to provision), and
-  - a SoT key not declared in `secrets.go` (a stale/extra placeholder left
+  validates the Go secret structs ↔ `secrets.nonprod.cue` **only**. CI
+  unlinks `encore.app` and has no platform auth, so it **cannot** see the
+  Encore Platform secret matrix. The check is **bidirectional** — it enforces
+  an exact bijection and hard-FAILs on either drift direction:
+  - a declared struct field missing from the SoT (forgot to provision), and
+  - a SoT key not declared in any struct (a stale/extra placeholder left
     behind after a Go secret was removed).
 
-  `auth/secrets.go` is the canonical set: per SPEC §3.5 the auth service
-  declares the **superset** of every secret, while other packages (e.g.
-  `mcp/transport.go`) declare a subset. Both directions are a hard failure,
-  never a warning — an ignorable check would re-open the same false-green gap
-  that crashed the deploy.
+  The check scans **every `var secrets struct` in every (non-`_test.go`)
+  package under `apps/api`** — today `auth/secrets.go`, `mcp/cursor.go`,
+  `exitcriteriontest/secrets.go`, and `perftest/secrets.go` — discovering
+  them dynamically (no hardcoded file list) and **unioning** their field
+  names before comparing against the SoT. Per SPEC §3.5 the `auth` service is
+  the canonical consumer and *should* declare the superset (the other three
+  declare only the `APIKeyHMACSecret` subset today), but the check does not
+  rely on that: it unions all packages so that a secret added to a non-`auth`
+  struct **only** still must have a SoT placeholder. That closes the gap where
+  a future non-`auth`-only secret would otherwise be invisible to both the SoT
+  and the check. Both directions are a hard failure, never a warning — an
+  ignorable check would re-open the same false-green gap that crashed the
+  deploy.
 - **Platform parity** (prod / dev / local / pr all populated) relies on:
   1. `scripts/secrets-provision.sh` for the `local` + `pr` placeholders,
   2. a human setting real `prod` + `dev` values on the platform,
