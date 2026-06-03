@@ -45,21 +45,39 @@
 #     and apps/api/.golangci.yml line 36 narrative pin. v2 schema in
 #     .golangci.yml mandates a v2 binary.
 #
-# Secrets:
+# Secrets (bead unblock-f6z — single committed source of truth):
 #
 #   `encore test` boots the local Encore emulator, which reads five
 #   secrets declared in apps/api/auth/secrets.go (MemoryDEK,
 #   APIKeyHMACSecret, GitHubOAuthClientID, GitHubOAuthClientSecret,
 #   GitHubOAuthRedirectURI).
 #   apps/api/mcp/transport.go fail-fasts at boot if APIKeyHMACSecret
-#   is empty (tv8.56 closure 2026-05-15); every package importing
-#   mcp/transport.go would panic before any test runs without it. CI
-#   writes a placeholder apps/api/.secrets.local.cue (CUE format, per
-#   Encore docs at https://encore.dev/docs/go/primitives/secrets)
-#   ahead of any `encore test` invocation. The file is .gitignored
-#   (apps/api/.gitignore "/.secrets.local.cue") so writing it in CI
-#   leaves no trace. Values mirror the dev placeholders shipped by
-#   developers — they are NEVER production credentials.
+#   is empty (tv8.56 closure 2026-05-15); auth/secrets.go init()
+#   fail-fasts on the four auth secrets; every package importing them
+#   would panic before any test runs without the values.
+#
+#   The non-prod placeholder values are committed ONCE at
+#   apps/api/secrets.nonprod.cue (the SOURCE OF TRUTH). CI copies that
+#   file to apps/api/.secrets.local.cue ahead of any `encore test`
+#   invocation (the SoT is already valid CUE in the exact shape Encore
+#   expects). The destination is .gitignored
+#   (apps/api/.gitignore "/.secrets.local.cue") so copying it in CI
+#   leaves no trace. These are NEVER production credentials — they are
+#   deterministic, public placeholders safe to commit and log.
+#
+#   This REVERSES tv8.67's split GitHub `CI_*` repo-secret registry:
+#   there are no `${{ secrets.CI_* }}` reads and no `${VAR:-default}`
+#   fallbacks here anymore. A missing/mismatched secret can no longer be
+#   masked into a green build — the drift-check gate below catches a
+#   secrets.go field that is absent from the SoT at PR time.
+#
+#   HONESTY / BOUNDARY: CI runs against the LOCAL emulator only (it
+#   unlinks encore.app via `echo '{}' > encore.app`, so it has no
+#   platform auth). The drift-check therefore validates
+#   secrets.go ↔ secrets.nonprod.cue ONLY. It CANNOT see the Encore
+#   Platform secret matrix. Platform parity (prod/dev/local/pr) relies
+#   on apps/api/scripts/secrets-provision.sh + the SECRETS.md runbook +
+#   the deploy-time boot fail-fast — not on this workflow.
 #
 # Catalogue-drift workflow:
 #
@@ -222,65 +240,69 @@ jobs:
         run: |
           echo '{}' > encore.app
 
-      - name: provision local secrets for encore emulator
-        # Every `encore test` invocation boots the local emulator and
-        # therefore needs the five secrets declared at apps/api/auth/
-        # secrets.go to be non-empty (mcp/transport.go fail-fasts on
-        # APIKeyHMACSecret == ""; auth/secrets.go init() fail-fasts on
-        # GitHubOAuthRedirectURI == ""; mirrors the values shipped to
-        # developers via the local .secrets.local.cue template). This
-        # file is .gitignored and is NEVER persisted past the runner.
+      - name: secrets SoT drift-check (secrets.go ↔ secrets.nonprod.cue)
+        # Bead unblock-f6z deliverable #4. Assert that EVERY field of
+        # `var secrets struct` in apps/api/auth/secrets.go has a matching
+        # entry in the committed source of truth, apps/api/
+        # secrets.nonprod.cue. This catches "added the Go field + boot
+        # guard but forgot to provision" at PR time — the failure mode
+        # that left GitHubOAuthRedirectURI unprovisioned and crashed the
+        # deploy.
         #
-        # SOURCING (tv8.67): the values are now SOURCED from GitHub
-        # Actions secrets rather than baked inline as plaintext. The
-        # previous heredoc printed the literal placeholders into the
-        # workflow file (and thus into any log capture / `set -x` trace
-        # of the step verbatim). By piping them through `env:` from
-        # `${{ secrets.* }}`, GitHub masks them in logs (`***`) and the
-        # SOURCE of truth moves out of the committed YAML.
+        # BOUNDARY (honest scope): this validates the code ↔ SoT contract
+        # ONLY. It does NOT and CANNOT validate the Encore Platform secret
+        # matrix — CI unlinks encore.app and has no platform auth. Platform
+        # parity is enforced by scripts/secrets-provision.sh + SECRETS.md +
+        # the deploy-time boot fail-fast.
         #
-        # These remain NEVER-production placeholders (the local emulator
-        # only needs non-empty, well-shaped values), so to keep CI green
-        # BEFORE the repo secrets exist, each var falls back to the
-        # documented placeholder default via `${VAR:-<default>}`. Once a
-        # human adds the repo/Org secrets listed below, those values
-        # take over with zero workflow change. Repo secrets the workflow
-        # now reads (add via Settings → Secrets and variables → Actions,
-        # or `gh secret set <NAME>`):
-        #   CI_MEMORY_DEK
-        #   CI_API_KEY_HMAC_SECRET
-        #   CI_GITHUB_OAUTH_CLIENT_ID
-        #   CI_GITHUB_OAUTH_CLIENT_SECRET
-        #   CI_GITHUB_OAUTH_REDIRECT_URI  (optional — falls back to the
-        #     http://localhost:4321/auth/callback placeholder when the
-        #     repo secret is absent, so no new secret is required for CI)
-        # If unset, the placeholders below are used and CI still passes.
-        env:
-          CI_MEMORY_DEK: ${{ secrets.CI_MEMORY_DEK }}
-          CI_API_KEY_HMAC_SECRET: ${{ secrets.CI_API_KEY_HMAC_SECRET }}
-          CI_GITHUB_OAUTH_CLIENT_ID: ${{ secrets.CI_GITHUB_OAUTH_CLIENT_ID }}
-          CI_GITHUB_OAUTH_CLIENT_SECRET: ${{ secrets.CI_GITHUB_OAUTH_CLIENT_SECRET }}
-          CI_GITHUB_OAUTH_REDIRECT_URI: ${{ secrets.CI_GITHUB_OAUTH_REDIRECT_URI }}
+        # Extraction is text-based (no Go build needed, runs before any
+        # compile step):
+        #   - struct fields: leading PascalCase identifier of each
+        #     `<Field> string` line inside the `var secrets struct { … }`
+        #     block.
+        #   - SoT fields: leading identifier of each `<Field>: "…"` line
+        #     (comment lines start with `//` and never match).
         run: |
-          # CUE string values must be quoted; build the file from masked
-          # env vars with documented placeholder fallbacks. The here-doc
-          # is NOT quoted ('CUE' → CUE) so ${...:-default} expands.
-          mem_dek="${CI_MEMORY_DEK:-ci-memory-dek-32-bytes-of-zeroes-for-tests-only}"
-          api_hmac="${CI_API_KEY_HMAC_SECRET:-ci-api-key-hmac-secret-32-bytes-of-zeroes-tests}"
-          gh_id="${CI_GITHUB_OAUTH_CLIENT_ID:-ci-github-oauth-client-id}"
-          gh_secret="${CI_GITHUB_OAUTH_CLIENT_SECRET:-ci-github-oauth-client-secret}"
-          gh_redirect="${CI_GITHUB_OAUTH_REDIRECT_URI:-http://localhost:4321/auth/callback}"
-          cat > .secrets.local.cue <<CUE
-          // CI-only secrets. Mirrors the dev template shape declared at
-          // apps/api/auth/secrets.go. NEVER production values. Sourced
-          // from GitHub Actions secrets (masked) with placeholder
-          // fallbacks; written fresh on every CI run; .gitignored.
-          MemoryDEK:               "${mem_dek}"
-          APIKeyHMACSecret:        "${api_hmac}"
-          GitHubOAuthClientID:     "${gh_id}"
-          GitHubOAuthClientSecret: "${gh_secret}"
-          GitHubOAuthRedirectURI:  "${gh_redirect}"
-          CUE
+          go_fields="$(awk '
+            /^var secrets struct \{/ { f=1; next }
+            f && /^\}/             { f=0 }
+            f && /^[[:space:]]+[A-Z][A-Za-z0-9_]*[[:space:]]+string/ { print $1 }
+          ' auth/secrets.go | sort -u)"
+
+          sot_fields="$(grep -oE '^[A-Za-z_][A-Za-z0-9_]*[[:space:]]*:[[:space:]]*"[^"]*"' \
+            secrets.nonprod.cue | sed -E 's/[[:space:]]*:.*//' | sort -u)"
+
+          if [ -z "${go_fields}" ]; then
+            echo "::error::could not parse any fields from 'var secrets struct' in auth/secrets.go"
+            exit 1
+          fi
+
+          # Every Go field MUST be present in the SoT. (Extra SoT fields are
+          # allowed in principle, but `comm -23` below reports any Go field
+          # with no SoT match — that is the drift we fail on.)
+          missing="$(comm -23 <(printf '%s\n' "${go_fields}") <(printf '%s\n' "${sot_fields}"))"
+          if [ -n "${missing}" ]; then
+            echo "::error::secrets.go declares fields absent from apps/api/secrets.nonprod.cue:"
+            echo "${missing}"
+            echo "Add a placeholder line for each to secrets.nonprod.cue and run scripts/secrets-provision.sh (see apps/api/SECRETS.md)."
+            exit 1
+          fi
+          echo "secrets SoT drift-check OK — all $(printf '%s\n' "${go_fields}" | grep -c .) secrets.go field(s) present in secrets.nonprod.cue"
+
+      - name: provision local secrets for encore emulator
+        # Bead unblock-f6z: the local emulator needs the five secrets
+        # declared at apps/api/auth/secrets.go to be non-empty (mcp/
+        # transport.go fail-fasts on APIKeyHMACSecret == ""; auth/
+        # secrets.go init() fail-fasts on the four auth secrets). The
+        # values come from the SINGLE committed source of truth,
+        # apps/api/secrets.nonprod.cue, which is already valid CUE in the
+        # exact `<GoField>: "<value>"` shape Encore expects — so we copy
+        # it verbatim to the .gitignored .secrets.local.cue. No CI_*
+        # GitHub secrets, no `${VAR:-default}` fallback, no inline
+        # plaintext: one source of truth, zero masking. The destination
+        # is .gitignored and NEVER persisted past the runner.
+        run: |
+          cp secrets.nonprod.cue .secrets.local.cue
 
       # ------------------------------------------------------------------
       # Gate 1 — go fmt

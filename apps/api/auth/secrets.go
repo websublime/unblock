@@ -17,6 +17,15 @@ package auth
 //	GITHUB_OAUTH_CLIENT_SECRET ↔ GitHubOAuthClientSecret
 //	GITHUB_OAUTH_REDIRECT_URI  ↔ GitHubOAuthRedirectURI
 //
+// SOURCE OF TRUTH (bead unblock-f6z): the NON-PRODUCTION placeholder
+// values for every field below live ONCE at apps/api/secrets.nonprod.cue
+// (committed). CI copies it to .secrets.local.cue; apps/api/scripts/
+// secrets-provision.sh pushes it to the platform `local`+`pr` env types.
+// Real prod/dev values are human-set on the Encore Platform and NEVER
+// committed. A CI drift-check (apps-api-ci.yml) fails the build if any
+// field here is absent from secrets.nonprod.cue. Full runbook + the
+// Encore↔GitHub name mapping: apps/api/SECRETS.md. See SPEC §3.5.
+//
 // Provisioning policy across Encore Cloud env types (per tv8.56):
 //
 //	--type prod   — real production values (Olive seeds before prod deploy).
