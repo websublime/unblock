@@ -375,10 +375,15 @@ type itemDerivationInputs struct {
 // per SPEC §5.7.1 line 781-787: a single GROUP BY scan over the
 // affected set is bounded by len(affected) rather than N+1.
 //
-// The UPDATE is per-item — Postgres has no clean "update many distinct
-// values" path without unnest+VALUES, and the affected set in P01 is
-// bounded at 256. The per-item UPDATE includes the value-equality
-// guard so repeated delivery converges to the same row state.
+// The UPDATE is a SINGLE batched statement (unblock-tv8.70): the
+// derivation runs per-item in Go (pure §5.7.1, no DB I/O) to build the
+// (id, newStage) pairs that differ from the current value, then one
+// `UPDATE … FROM unnest($ids, $stages)` writes them all in one
+// round-trip. This replaces the prior per-item UPDATE loop (up to 256
+// round-trips on a full closure). The batched UPDATE carries the same
+// value-equality guard (`pipeline_stage <> v.stage`) so repeated
+// delivery converges to the same row state, and RETURNING id preserves
+// per-item attribution for the cross-tenant defence-in-depth warn.
 //
 // Concurrency / LWW race fix (unblock-tv8.51): the items SELECT, the
 // comments SELECT, and the per-item UPDATE pass all run inside a single
@@ -538,11 +543,22 @@ func recomputePipelineStageForAffected(ctx context.Context, affected []string, o
 	}
 	commentRows.Close()
 
-	// Per-item derive + idempotent UPDATE. Affected set is bounded at
-	// AR-8 (256) so the per-row UPDATE is O(N) bounded — well inside
-	// Law 7's < 2s envelope. Writes go through tx (the same lock-
-	// holding transaction as the items SELECT above) so the
-	// read-derive-update sequence is atomic per cascade pass.
+	// Per-item derive in Go, then a SINGLE batched UPDATE for the whole
+	// affected set (unblock-tv8.70 perf rewrite). The affected set is
+	// bounded at AR-8 (256), so the prior per-item loop issued up to 256
+	// round-trips; this collapses them into one. derivePipelineStage
+	// stays per-item in Go (it is a pure §5.7.1 derivation, no DB I/O);
+	// only the WRITE is batched.
+	//
+	// Build the (id, newStage) pairs for rows whose derived stage
+	// differs from the current value. Rows absent from rowMap (deleted
+	// between BFS and derivation read, or — post unblock-tv8.50 — a
+	// tenant that disagrees with the publisher's claim) and rows whose
+	// derived stage equals the current value (idempotent no-op) are
+	// skipped here, exactly as the old per-item `!ok` / value-equality
+	// guards did.
+	intendedIDs := make([]string, 0, len(affected))
+	intendedStages := make([]string, 0, len(affected))
 	for _, id := range affected {
 		inp, ok := rowMap[id]
 		if !ok {
@@ -566,33 +582,71 @@ func recomputePipelineStageForAffected(ctx context.Context, affected []string, o
 			// Idempotent no-op. Skip the UPDATE.
 			continue
 		}
-		// Tenant-gated UPDATE (unblock-tv8.50): the WHERE clause
-		// repeats the org_id / project_id predicate so a write cannot
-		// escape the publisher's tenant even if the rowMap lookup
-		// above were ever defeated by a future refactor.
-		res, err := tx.Exec(ctx,
-			`UPDATE workitems.items
-			    SET pipeline_stage = $2
-			  WHERE id = $1
-			    AND pipeline_stage <> $2
-			    AND org_id = $3
-			    AND ($4 = '' OR project_id = $4)`,
-			id, newStage, orgID, projectID,
+		intendedIDs = append(intendedIDs, id)
+		intendedStages = append(intendedStages, newStage)
+	}
+
+	if len(intendedIDs) > 0 {
+		// Single batched, tenant-gated UPDATE (unblock-tv8.50 +
+		// unblock-tv8.70). unnest($1::text[], $2::text[]) zips the two
+		// parallel arrays into (id, stage) rows; the join key `id =
+		// v.id` plus the value-equality guard `pipeline_stage <> v.stage`
+		// reproduce the per-item WHERE clause exactly. The org_id /
+		// project_id predicate repeats here so a write cannot escape the
+		// publisher's tenant even if the rowMap lookup above were ever
+		// defeated by a future refactor. RETURNING id surfaces exactly
+		// which rows were written, preserving per-item attribution for
+		// the defence-in-depth warn below (no aggregate-warn downgrade).
+		//
+		// Runs in the SAME tx as the FOR NO KEY UPDATE items SELECT
+		// above, so the LWW row-lock ordering guarantee (unblock-tv8.51)
+		// is intact: the locks are held from the SELECT through this
+		// write to Commit.
+		updatedIDs := make(map[string]struct{}, len(intendedIDs))
+		rows, err := tx.Query(ctx,
+			`UPDATE workitems.items AS t
+			    SET pipeline_stage = v.stage
+			   FROM unnest($1::text[], $2::text[]) AS v(id, stage)
+			  WHERE t.id = v.id
+			    AND t.pipeline_stage <> v.stage
+			    AND t.org_id = $3
+			    AND ($4 = '' OR t.project_id = $4)
+			RETURNING t.id`,
+			intendedIDs, intendedStages, orgID, projectID,
 		)
 		if err != nil {
-			return fmt.Errorf("pipeline_stage update %s: %w", id, err)
+			return fmt.Errorf("pipeline_stage batched update: %w", err)
 		}
-		// Defence-in-depth surfacing (unblock-tv8.50): the rowMap entry
-		// existed (passed the `!ok` guard above) and the in-memory
-		// derivation produced a stage that differs from the row's
-		// current value (passed the `newStage == inp.pipelineStage`
-		// guard above). The only way the tenant-gated UPDATE can write
-		// zero rows is if the row's org_id / project_id disagree with
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return fmt.Errorf("pipeline_stage batched update scan: %w", err)
+			}
+			updatedIDs[id] = struct{}{}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return fmt.Errorf("pipeline_stage batched update iter: %w", err)
+		}
+		rows.Close()
+
+		// Defence-in-depth surfacing (unblock-tv8.50), preserved
+		// per-item under the batched form (unblock-tv8.70): every id in
+		// intendedIDs passed the `!ok` guard (present in the
+		// tenant-filtered read) AND the value-equality guard (derived
+		// stage differs from current), so each one SHOULD have been
+		// written. The only way an intended id is absent from the
+		// RETURNING set is if the row's org_id / project_id disagree with
 		// the publisher's claim — i.e. a future bypass-caller fed this
 		// function a mismatched (orgID, projectID) against an item that
-		// the BFS tenant predicate would also have dropped. Warn so the
-		// regression is visible instead of silently skipped.
-		if res.RowsAffected() == 0 {
+		// the BFS tenant predicate would also have dropped. Warn per
+		// missing id so the regression is visible instead of silently
+		// skipped, identical to the old per-item RowsAffected()==0 warn.
+		for _, id := range intendedIDs {
+			if _, ok := updatedIDs[id]; ok {
+				continue
+			}
 			rlog.Warn(
 				"pipeline_stage UPDATE no-op on tenant-mismatched item — possible cross-tenant publisher regression",
 				"item_id", id,
