@@ -72,7 +72,7 @@ while IFS= read -r line; do
   if [[ "${line}" =~ ^([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*:[[:space:]]*\"(.*)\"[[:space:]]*$ ]]; then
     field="${BASH_REMATCH[1]}"
     value="${BASH_REMATCH[2]}"
-    echo "→ encore secret set --type ${types} ${field}"
+    echo "-> encore secret set --type ${types} ${field}"
     # printf (no trailing newline) — encore strips trailing newlines anyway,
     # but this keeps the piped value byte-exact with the SoT.
     printf '%s' "${value}" | encore secret set --type "${types}" "${field}"
@@ -85,5 +85,5 @@ if [[ "${count}" -eq 0 ]]; then
   exit 1
 fi
 
-echo "✓ provisioned ${count} non-prod secret(s) for types: ${types}"
+echo "[ok] provisioned ${count} non-prod secret(s) for types: ${types}"
 echo "  (prod/dev untouched — set those on the Encore Platform manually)"
