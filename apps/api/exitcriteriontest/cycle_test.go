@@ -8,42 +8,51 @@
 //   - Cycle property test (N=100 random graph mutations): zero
 //     cycles ever materialise in the DB.
 //
-// The cycle assertion is driven via the MCP `add_dependency` tool
-// surface (not deps.AddEdge directly) so the public agent-facing
-// path is exercised end-to-end. The advisory-lock contract (SPEC
-// §11.3 — pg_advisory_xact_lock under deps.add_dependency:project_id)
-// is exercised inside deps.AddEdge regardless of caller; the
-// property test gives the lock real concurrent contention via
-// goroutines.
+// Both the cycle assertion AND the N=100 property test are driven via
+// the MCP `add_dependency` tool surface (not deps.AddEdge directly) so
+// the public agent-facing path is exercised end-to-end. The
+// advisory-lock contract (SPEC §11.3 — pg_advisory_xact_lock under
+// deps.add_dependency:project_id) is exercised inside deps.AddEdge
+// regardless of caller; the property test gives the lock real
+// concurrent contention via goroutines, each on its own MCP session.
+//
+// Property-test isolation (unblock-tv8.70). The N=100 property test
+// (TestExitCriterion_CycleProperty_N100Mutations) is GATED behind
+// UNBLOCK_PERF_GATE=1 and t.Skips in the default `encore test ./...`
+// suite. Rationale: a single MCP add_dependency round-trip is ~15 ms in
+// isolation, but under the default full-suite shared-local-Postgres
+// contention warm-cache calls balloon to seconds (SPEC §11.2 NFR-1
+// round-15). 100 calls across 8 goroutines on a fresh-connection-
+// per-call HTTP client would exceed the 10 s per-call timeout and flake
+// CI when co-scheduled with the rest of the suite. So the MCP-routed
+// property test runs ONLY in the dedicated isolated CI step under
+// UNBLOCK_PERF_GATE=1 (owned by Olive), mirroring the perftest
+// round-15 isolation doctrine (apps/api/perftest/main_test.go). The
+// §11.1.2 acceptance test (TestExitCriterion_CycleDetected, a single
+// MCP call) stays in the default suite. The gate is at the property
+// test FUNCTION level — not TestMain — because this package's TestMain
+// also hosts the §11.1.2 acceptance tests that MUST run in the default
+// suite.
 
 package exitcriteriontest_test
 
 import (
 	"context"
 	"math/rand"
+	"os"
 	"sync"
 	"testing"
 
 	encoredb "encore.app/db"
-	"encore.app/deps"
 )
 
-// DEVIATION (cycle property test transport): TestExitCriterion_CycleDetected
-// (the §11.1.2 acceptance test) drives `add_dependency` via the MCP tool
-// surface as the spec mandates. The §11.3 / NFR-5 N=100 property test
-// (TestExitCriterion_CycleProperty_N100Mutations) drives deps.AddEdge
-// directly via the private mesh — the property under test is "no cycle
-// ever materialises in deps.dependencies" which is a DB-state property
-// independent of the transport. Direct invocation avoids the
-// httptest-server / SDK / per-session serialization overhead that
-// otherwise makes N=100 concurrent mutations exceed the 10s
-// per-request client timeout — see the per-AddEdge latency observation
-// (2-9 s per call under MCP transport vs <50 ms direct) recorded in
-// the COMPLETED comment for unblock-tv8.26. The advisory-lock /
-// cycle-CTE production code paths are identical regardless of caller
-// (the MCP add_dependency handler ultimately calls deps.AddEdge); the
-// MCP layer adds only Bearer auth + JSON-RPC framing, neither of which
-// participate in the property invariant.
+// perfGateEnv is the environment variable that admits the latency-
+// sensitive property test into a run. Matches perftest.PerfGateEnv
+// ("UNBLOCK_PERF_GATE"); kept as a local literal so this external test
+// package does not import the perftest support package. When unset, the
+// property test t.Skips before seeding (zero added DB load on the
+// default suite). See the file-header isolation note.
+const perfGateEnv = "UNBLOCK_PERF_GATE"
 
 // cyclePropertyN is the random-mutation cardinality per SPEC §11.3 /
 // NFR-5 ("property test N=100 random graph mutations").
@@ -124,11 +133,22 @@ func TestExitCriterion_CycleDetected(t *testing.T) {
 // per-test subgraph; assert no cycles in the DB after the run.
 //
 // Mutations are restricted to add_dependency calls on a 6-node
-// random-DAG seed; each goroutine attempts a random edge, and the
-// test relies on deps.AddEdge's per-project advisory lock + cycle
-// CTE to reject every cycle-forming attempt. The post-state
-// assertion is the canonical SPEC §11.3 promise.
+// random-DAG seed driven through the MCP `add_dependency` tool surface
+// (unblock-tv8.70); each goroutine attempts a random edge on its own
+// MCP session, and the test relies on deps.AddEdge's per-project
+// advisory lock + cycle CTE (reached via the MCP handler) to reject
+// every cycle-forming attempt. The post-state assertion is the
+// canonical SPEC §11.3 promise.
+//
+// Gated behind UNBLOCK_PERF_GATE=1 (see file-header isolation note):
+// the MCP transport under the default full-suite shared-Postgres
+// contention exceeds the 10 s per-call timeout and flakes CI, so this
+// test runs only in the dedicated isolated CI step.
 func TestExitCriterion_CycleProperty_N100Mutations(t *testing.T) {
+	if os.Getenv(perfGateEnv) != "1" {
+		t.Skipf("skipping MCP-routed N=100 cycle property test in default suite; set %s=1 to run (isolated CI step, SPEC §11.2 NFR-1 round-15)", perfGateEnv)
+	}
+
 	f := fx(t)
 	ctx := t.Context()
 
@@ -173,27 +193,38 @@ func TestExitCriterion_CycleProperty_N100Mutations(t *testing.T) {
 	}
 	close(jobs)
 
+	// Pre-mint one MCP session per goroutine on the MAIN goroutine
+	// (mirrors concurrent_claim_test.go:79-82). initializeSession
+	// t.Fatalf-s on failure, which is only safe on the test goroutine;
+	// pre-minting keeps that off the worker goroutines. Each worker
+	// then owns a distinct Mcp-Session-Id so concurrent tools/call
+	// invocations never share the SDK's stateful session map. The
+	// Bearer key (f.RawKey) is shared; auth is per-request.
+	sessions := make([]string, fanout)
+	for i := 0; i < fanout; i++ {
+		sessions[i] = initializeSession(t, f.RawKey)
+	}
+
 	var wg sync.WaitGroup
 	wg.Add(fanout)
 	for w := 0; w < fanout; w++ {
+		sessionID := sessions[w]
 		go func() {
 			defer wg.Done()
 			for p := range jobs {
-				// Direct deps.AddEdge call (private mesh) — see
-				// file-level DEVIATION block on why the property
-				// test bypasses the MCP transport.
-				_, _ = deps.AddEdge(ctx, &deps.AddEdgeRequest{
-					OrgID:     f.OrgID,
-					ProjectID: f.ProjectID,
-					FromItem:  nodes[p.from],
-					ToItem:    nodes[p.to],
-					Kind:      "blocks",
+				// MCP `add_dependency` tool call (unblock-tv8.70):
+				// exercises the full end-to-end agent-facing path
+				// (Bearer auth + JSON-RPC framing + handler →
+				// deps.AddEdge advisory lock + cycle CTE).
+				_ = callTool(t, f.RawKey, sessionID, "add_dependency", map[string]any{
+					"from_item_id": nodes[p.from],
+					"to_item_id":   nodes[p.to],
+					"kind":         "blocks",
 				})
-				// We intentionally ignore the error: success,
-				// AlreadyExists, and CYCLE_DETECTED (FailedPrecondition)
-				// are all legitimate outcomes per the property test
-				// contract. The structural invariant is checked after
-				// the loop.
+				// We intentionally ignore the envelope: success,
+				// ALREADY_EXISTS, and CYCLE_DETECTED are all legitimate
+				// outcomes per the property test contract. The
+				// structural invariant is checked after the loop.
 			}
 		}()
 	}
