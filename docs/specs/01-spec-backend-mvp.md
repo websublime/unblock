@@ -1,7 +1,8 @@
 # SPEC: P01 — Backend MVP Implementation Contract
 
-**Status:** APPROVED (§3.5 fifth-secret addition applied 2026-06-02; round-15 NFR-1 harness test-isolation + mcpaudittest hardening applied 2026-05-29; round-14 NFR-1 latency-harness scope applied 2026-05-29; round-6 cascade-symmetry applied 2026-05-12; round-5 tracing applied 2026-05-12; round-4 auth applied 2026-05-11; DRIFT-1/-2 applied 2026-05-08; round-2 applied 2026-05-08; round-3 research applied 2026-05-08; original APPROVED 2026-05-07)
+**Status:** APPROVED (round-16 P01 tool-surface scope amendment applied 2026-06-04; §3.5 fifth-secret addition applied 2026-06-02; round-15 NFR-1 harness test-isolation + mcpaudittest hardening applied 2026-05-29; round-14 NFR-1 latency-harness scope applied 2026-05-29; round-6 cascade-symmetry applied 2026-05-12; round-5 tracing applied 2026-05-12; round-4 auth applied 2026-05-11; DRIFT-1/-2 applied 2026-05-08; round-2 applied 2026-05-08; round-3 research applied 2026-05-08; original APPROVED 2026-05-07)
 **Changelog:**
+- 2026-06-04 — round-16 (P01 MCP tool-surface scope amendment; surfaced by the 2026-06-03 local-MCP demo + 2026-06-04 review; covers epic `unblock-tv8` beads .71/.72/.73/.74/.75/.76): the P01 agent-facing tool inventory grows from **14 to 23** and the v1.0 inventory from **18 to 27** (still + the 4 memory tools at P02). Five contract changes land in lockstep. (1) **`promote` keystone (.71)** — a new Tool 15 `promote` transitions an item Backlog→Ready, precondition `status='Backlog' AND is_ready=true`; the not-ready rejection reuses the EXISTING §7 `PRECONDITION_NOT_MET` kind, extended ADDITIVELY with a `{status, required}` pair alongside the existing `{missing}`/`{rejection_reason}` shapes. .71 also closes round-12 DRIFT-2 ("the state-machine does not allow the canonical fixture's Done/Ready end-states via RPC") by pinning the FULL Backlog/Ready/InProgress/Blocked/Done transition map (§6.6) incl. the Ready→Blocked demotion that fires when a `blocks` edge is later added to a Ready item. .71 further pins the **`is_ready`-on-create rule**: a freshly-created item with no incoming `blocks` edges MUST get `is_ready=true` INLINE at create time inside `workitems.Create`'s own transaction (today `recomputeReady` never fires on the create path, so such items are stranded non-ready); `workitems.Create` joins the §6.3.0 Regime A `is_ready` single-writer allow-list and the §11.3 `no_direct_is_ready_write` allow-list, and the misleading create doc-comment is corrected. (2) **`issued_to_user` REQUIRED (.73)** — the column becomes NOT NULL on every MCP API key; all "nullable / org-level service key" wording is removed; a new up-only migration `0110_mcp_issued_to_user_notnull.up.sql` runs `ALTER … SET NOT NULL` and swaps the FK from `ON DELETE SET NULL` to `ON DELETE CASCADE` (deleting a user deletes their keys; `mcp.tool_calls` audit rows survive via their own `ON DELETE SET NULL`); `IssueAPIKey` rejects empty `IssuedToUser` with `InvalidArgument`; the §4.3.2 validate path never constructs an empty-UID identity. (3) **Milestone MCP tools (.74)** — OVERRIDES the §6.2 round-2 D1 deferral note + the §1 / §4.4.1 P02-deferral wording: the four milestone tools `create_milestone` / `update_milestone` / `assign_item` (incl. unassign via empty `milestone_id`) / `milestone_tree` are exposed NOW (Tools 16–19), thin MCP facades over the already-shipping `workitems.CreateMilestone`/`UpdateMilestone`/`AssignItem`/`MilestoneTree` private RPCs (§4.4.1). (4) **Label-registry MCP tools (.75)** — four NEW org-scoped, RBAC-gated tools `create_label` / `list_labels` / `update_label` (rename + recolor) / `delete_label` (Tools 20–23) over the existing `workitems.labels` table; four new `workitems` private RPCs back them. (5) **`show` resolves references (.76)** — Tool 7 `show` resolves the parent and the direct in/out dependency targets to `{id, title, status}` objects (one level deep, payload bounded) instead of bare IDs. The §7 `PRECONDITION_NOT_MET {status, required}` extension defined by .71 is the SAME taxonomy reused by .72 (the `claim`-on-not-Ready error) — .72 carries no separate spec text; its error is satisfied by the .71 §7 design. Patches in lockstep: §1 overview (tool-count bullets + milestone P02-defer wording) … §3.2 (new migration `0110`) … §4.1 (`IssueAPIKeyRequest.IssuedToUser` REQUIRED + doc-comment) … §4.3.2 step 8 (no empty-UID identity) … §4.4.1 (milestone-tools-now wording) … §5.2 (NOT-exposed list trimmed) … §6 header ("The 23 P01 MCP Tools") … §6.2 deferral note (rewritten: milestone + label + promote tools now in P01) … §6.2 Tool 7 `show` (reference resolution) … new §6.2 Tools 15–23 … new §6.6 (status transition map) … §6.3.0 Regime A allow-list (+`workitems.Create`) … §7 (`PRECONDITION_NOT_MET {status, required}` extension) … §10.3 (catalogue tool count 14→23) … §11.1.2 (promote assertion) … §11.3 `is_ready` allow-list (+`workitems.Create`) … §12 task table (D-2 promote, D-8 milestone+label tools, A-3 migration 0110) … §14 approval checklist (14→23). Cross-doc reconciliation (CONFIRMED by Miguel, no doc left stale): docs/PRD.md FR-8 + priority row, docs/SPEC.md §5.2.2 inventory + the "18 tools" mentions, and docs/plans/01-plan-backend-mvp.md tool table are all updated to the identical P01=23 / v1.0=27 counts, each carrying a P01-round-16 provenance note. Spec status remains APPROVED — this is a scope amendment, not a re-architecting.
 - 2026-05-08 — DRIFT-1 (naming): clarified §3.5 that the four logical secret names are spec-level identifiers; added logical-name ↔ Go-field mapping table for the Encore Go secrets manifest.
 - 2026-05-08 — DRIFT-2 (format): corrected the local-secrets file path/format from `.encore/local-secrets.toml` (TOML) to `apps/api/.secrets.local.cue` (CUE) per Encore official docs (https://encore.dev/docs/go/primitives/secrets); updated syntax examples and gitignore guidance.
 - 2026-05-11 — round-4 (auth drift fixes from Sherlock's investigation on bead unblock-tv8.7): §4.3.2 step 2 aligned with locked key-format note (DRIFT-A); §4.3.3 AuthHandler signature corrected to Encore structured-params form for header dispatch (DRIFT-B); §12 task table cell for B-1 corrected from §6.4 to §4.3.3 (DRIFT-C); session-path P01 contract pinned (returns errs.Unimplemented; multi-org disambiguation deferred to BFF phase).
@@ -67,7 +68,10 @@ P01 ships the agent-facing core of `://unblock`:
   single migration-owner directory at `apps/api/db/migrations/`, owned
   by a dedicated zero-API `db` service.
 - Streamable HTTP MCP transport (per MCP spec 2025-06-18) at `POST /mcp` +
-  `GET /mcp` exposing **14 tools** with Bearer API key auth.
+  `GET /mcp` exposing **23 tools** with Bearer API key auth (round-16:
+  the 14 core tools + the new `promote` tool + the four milestone tools
+  + the four label-registry tools — see §6.2). The v1.0 inventory is
+  **27** (these 23 P01 tools + the 4 memory tools added in P02).
 - Cascade subsystem on Encore Pub/Sub maintaining `is_ready` and
   `pipeline_stage` materialised columns.
 - Atomic claim transaction (`SELECT FOR UPDATE`).
@@ -80,18 +84,31 @@ P01 ships the agent-facing core of `://unblock`:
   `apps/api/exitcriteriontest/fixture.go`. No standalone CLI binary
   (former §9 deleted; see §11.1 for the canonical fixture topology
   and round-12 changelog for the rationale).
-- **Milestones (round-2 D1).** Recursive milestones (PRD §6.3 + SPEC
-  §9.4.3) ship in P01 as **private RPCs** (`workitems.CreateMilestone`,
-  `UpdateMilestone`, `AssignItem`, `MilestoneTree` — §4.4); the four
-  M-INV-2 / M-INV-3 / M-INV-6 / M-INV-7 invariants are enforced in app
-  code per the SPEC §9.4.3 DDL note. **Milestone MCP tools defer to P02**
-  alongside the memory tools (preserves FR-8 "18 tools at v1.0"); P01
-  agents do not see milestone tools.
+- **Milestones (round-2 D1; round-16 amendment).** Recursive milestones
+  (PRD §6.3 + SPEC §9.4.3) ship in P01 as **private RPCs**
+  (`workitems.CreateMilestone`, `UpdateMilestone`, `AssignItem`,
+  `MilestoneTree` — §4.4); the four M-INV-2 / M-INV-3 / M-INV-6 / M-INV-7
+  invariants are enforced in app code per the SPEC §9.4.3 DDL note.
+  **Round-16 (bead `unblock-tv8.74`) OVERRIDES the original D1 deferral:**
+  the four milestone MCP tools (`create_milestone`, `update_milestone`,
+  `assign_item`, `milestone_tree` — Tools 16–19, §6.2) ARE exposed in P01,
+  as thin facades over the private RPCs above. P01 agents see them now.
 
 P01 explicitly **defers** Layer-1 BLOCK conditions (P02), the four memory
-tools (P02), the four milestone MCP tools (P02 — see D1 above), GitHub
-webhook ingestion (P02), the Astro frontend (P05), the plugin renderer
-(P04), and `unblock-code` (P03) — see Plan §3.
+tools (P02), GitHub webhook ingestion (P02), the Astro frontend (P05),
+the plugin renderer (P04), and `unblock-code` (P03) — see Plan §3.
+
+> **Round-16 amendment (2026-06-04).** The original round-2 D1 deferral —
+> "the four milestone MCP tools defer to P02 to preserve FR-8 '18 tools at
+> v1.0'" — is **OVERRIDDEN** by bead `unblock-tv8.74`. The milestone MCP
+> tools (`create_milestone`, `update_milestone`, `assign_item`,
+> `milestone_tree`) ship in P01 as thin facades over the milestone private
+> RPCs (§4.4.1) that already exist. In the same round, `promote`
+> (`unblock-tv8.71`) and four label-registry tools (`unblock-tv8.75`) are
+> added. P01 now exposes **23** agent-facing tools (was 14); v1.0 is **27**
+> (was 18). The FR-8 "18 tools" figure is reconciled to 27 across PRD §5.1
+> FR-8, SPEC §5.2.2, this spec, and Plan §2.2 in lockstep (see the
+> round-16 changelog).
 
 **P01 Exit criterion (PRD §8 verbatim):** an agent authenticates via
 Bearer API key and completes `prime → ready → claim → close` against a
@@ -222,6 +239,12 @@ in steps of 10. Step numbering matches §9.4.0 ordering:
 | `0070_mcp.up.sql` | Schema `mcp` per SPEC §9.4.6 (tables `api_keys`, `tool_calls` + indexes; `key_hash bytea`, `key_prefix UNIQUE` per C7) |
 | `0080_boards.up.sql` | Schema `boards` per SPEC §9.4.7 (tables `boards`, `columns` + indexes). **Schema-only in P01** — no service code until P05. |
 | `0090_memory.up.sql` | Schema `memory` per SPEC §9.4.8 (tables `entries`, `entry_refs` + indexes). **Schema-only in P01** — no service code until P02. |
+| `0110_mcp_issued_to_user_notnull.up.sql` (round-16, bead `unblock-tv8.73`) | Tighten `mcp.api_keys.issued_to_user`: (1) `ALTER TABLE mcp.api_keys ALTER COLUMN issued_to_user SET NOT NULL;` (2) drop the existing FK and re-add it as `FOREIGN KEY (issued_to_user) REFERENCES auth.users(id) ON DELETE CASCADE` (was `ON DELETE SET NULL`). Every MCP API key is now owned by exactly one user; deleting that user deletes their keys. `mcp.tool_calls.issued_to_user` (the audit FK) is unaffected and KEEPS its `ON DELETE SET NULL` so audit rows survive a user deletion. Up-only, pre-prod — no rows exist yet, so the `SET NOT NULL` cannot fail on existing data; the migration is additive to the §3.2 sequence and does not renumber 0010..0090. |
+
+> **Migration `0100`** is the Tool-2 covering index pinned in round-7
+> (§6.2.0 / §6.2 Tool 2). It is referenced but its row is documented at
+> its point of use; the round-16 `0110` migration follows it in the
+> sequence.
 
 **No `down.sql` files in P01.** Pre-prod (no users, no migration tax per
 `feedback_pre_production`). Down migrations re-introduce risk without
@@ -468,12 +491,20 @@ type ExchangeOAuthCodeResponse struct {
 // phase. Returns the raw key ONCE — the caller stores it; subsequent
 // reads return only the prefix and metadata.
 //
+// **Round-16 (bead `unblock-tv8.73`): IssuedToUser is REQUIRED.** Every
+// MCP API key is owned by exactly one user — there is no org-level
+// "service key" without an owning user. IssueAPIKey rejects an empty
+// IssuedToUser with `errs.InvalidArgument` (kind=VALIDATION at the MCP
+// boundary, data.field="issued_to_user") BEFORE any INSERT runs. The
+// underlying `mcp.api_keys.issued_to_user` column is NOT NULL with an
+// `ON DELETE CASCADE` FK to `auth.users(id)` per migration `0110`.
+//
 //encore:api private method=POST path=/auth.IssueAPIKey
 func IssueAPIKey(ctx context.Context, req IssueAPIKeyRequest) (*IssueAPIKeyResponse, error)
 
 type IssueAPIKeyRequest struct {
     OrgID         string // ULID
-    IssuedToUser  string // ULID; nullable (org-level service key)
+    IssuedToUser  string // ULID; REQUIRED (round-16 / tv8.73) — empty is rejected with InvalidArgument; there is no nullable org-level service key
     Label         string // human-readable, e.g. "claude-code-laptop"
     AgentKind     string // AgentKind value
     Scopes        []string
@@ -545,7 +576,7 @@ type AuthorizeRequest struct {
 ### 4.3 `mcp` service
 
 Owns: schema `mcp` (writes only), the public Streamable HTTP endpoint, the
-14 P01 tool handlers. Consumes the unblock database via the canonical
+23 P01 tool handlers (round-16). Consumes the unblock database via the canonical
 BindDB late-bind pattern (§3.1) when DB-touching code lands (P01 D-1+):
 a nil `*sqldb.Database` pointer + exported `BindDB` hook in
 `apps/api/mcp/db.go`, registered in `apps/api/db/db.go`'s `init`. No
@@ -622,7 +653,7 @@ On every MCP request:
 5. Compute `expected = HMAC-SHA256(API_KEY_HMAC_SECRET, raw_key)`.
 6. `if !subtle.ConstantTimeCompare(stored_key_hash, expected) { reject }`.
 7. `UPDATE mcp.api_keys SET last_used_at = now() WHERE id = $1` (fire-and-forget).
-8. Construct `auth.Identity{UserID: issued_to_user, OrgID: org_id, Role: "agent", AgentKind: agent_kind}` and inject via Encore's auth handler.
+8. Construct `auth.Identity{UserID: issued_to_user, OrgID: org_id, Role: "agent", AgentKind: agent_kind}` and inject via Encore's auth handler. **Round-16 (bead `unblock-tv8.73`):** `issued_to_user` is NOT NULL on every `mcp.api_keys` row (migration `0110`), so this path NEVER constructs an empty-UID identity. If a row with an empty `issued_to_user` were somehow observed (it cannot be, given the NOT NULL constraint), the request is rejected as `UNAUTHENTICATED` rather than yielding an unscoped identity — defence in depth against a malformed row.
 
 Total budget for this path: <5 ms p99 on warm cache (no Argon2 cost per C7).
 
@@ -679,6 +710,18 @@ Private RPCs (called by MCP tool handlers; never directly by clients):
 package workitems
 
 //encore:api private method=POST path=/workitems.Create
+// Creates a work item in status=Backlog.
+//
+// **is_ready-on-create (round-16, bead unblock-tv8.71).** Create sets
+// `is_ready` INLINE inside its own transaction (it is a Regime A is_ready
+// writer per §6.3.0 / §11.3). A new item with no incoming `blocks` edges
+// gets `is_ready=true`. **Do NOT** rely on the cascade subscriber to
+// materialise readiness for a newly-created item: the subscriber maintains
+// `pipeline_stage` only (round-6 §6.3.0) and `recomputeReady` never fires
+// for a create with no edge mutation — without the inline write the item
+// would be stranded non-ready. (This corrects the pre-round-16 doc-comment
+// that implied readiness was subscriber-materialised on create.) `status`
+// stays `Backlog`; an unblocked item is then `promote`-able via Tool 15.
 func Create(ctx context.Context, req CreateRequest) (*Item, error)
 
 type CreateRequest struct {
@@ -758,10 +801,21 @@ type GetTrailRequest struct {
 }
 type Trail struct {
     Item              *Item
+    Parent            *ResolvedRef     // round-16 / tv8.76: resolved parent {id,title,status}; nil when no parent
     Comments          []Comment        // ordered by created_at asc
-    DependenciesIn    []Edge           // edges where to_item == Item.ID
-    DependenciesOut   []Edge           // edges where from_item == Item.ID
+    DependenciesIn    []ResolvedRef    // round-16 / tv8.76: edges where to_item == Item.ID, target resolved to {id,title,status,kind}
+    DependenciesOut   []ResolvedRef    // round-16 / tv8.76: edges where from_item == Item.ID, target resolved to {id,title,status,kind}
     Findings          []Item           // children with type=finding
+}
+
+// ResolvedRef is a one-level-deep resolution of a related item (parent or
+// dependency target) to its identity + display fields. Bounded by design:
+// no body, no comments, no nested neighbours (round-16 / tv8.76).
+type ResolvedRef struct {
+    ID     string // target item ULID
+    Title  string // target item title
+    Status string // target item Status enum (§6.1)
+    Kind   string // edge kind ("blocks" | "related"); empty for the parent ref
 }
 
 //encore:api private method=POST path=/workitems.AppendComment
@@ -920,6 +974,71 @@ type SearchHit struct {
     CommentID string // populated when Source="comment"
     Rank      float64
     Snippet   string // ts_headline output, ≤ 200 chars
+}
+
+// --- Label-registry RPCs (round-16, bead unblock-tv8.75) ---
+// Back the label MCP tools (§6.2 Tools 20–23) over the EXISTING
+// workitems.labels / workitems.item_labels tables (SPEC §9.4.3). No new
+// migration — the tables already exist. Org-scoped, RBAC-gated.
+
+//encore:api private method=POST path=/workitems.CreateLabel
+func CreateLabel(ctx context.Context, req CreateLabelRequest) (*Label, error)
+
+type CreateLabelRequest struct {
+    OrgID       string // ULID; XOR ProjectID (labels_scope_xor_chk)
+    ProjectID   string // ULID; XOR OrgID
+    Name        string // 1..64 chars; unique within scope
+    Color       string // "#RRGGBB"
+    Description  string // optional
+}
+
+type Label struct {
+    ID          string
+    OrgID       string // empty when project-scoped
+    ProjectID   string // empty when org-scoped
+    Name        string
+    Color       string
+    Description  string
+    CreatedAt   time.Time
+    UpdatedAt   time.Time
+}
+
+//encore:api private method=POST path=/workitems.ListLabels
+// Returns labels in scope; project-scope calls also return inherited org
+// labels with PRD §6.4 "project wins on identical name" applied.
+func ListLabels(ctx context.Context, req ListLabelsRequest) (*ListLabelsResponse, error)
+
+type ListLabelsRequest struct {
+    OrgID     string // optional
+    ProjectID string // optional; when set, returns project + inherited org labels
+}
+type ListLabelsResponse struct {
+    Labels []Label
+}
+
+//encore:api private method=POST path=/workitems.UpdateLabel
+// Renames and/or recolors. Scope (OrgID/ProjectID) is immutable.
+func UpdateLabel(ctx context.Context, req UpdateLabelRequest) (*Label, error)
+
+type UpdateLabelRequest struct {
+    LabelID     string
+    Name        *string // rename
+    Color       *string // recolor "#RRGGBB"
+    Description  *string
+}
+
+//encore:api private method=POST path=/workitems.DeleteLabel
+// Deletes the label; the workitems.item_labels junction rows cascade
+// (ON DELETE CASCADE per SPEC §9.4.3). Items are not deleted.
+func DeleteLabel(ctx context.Context, req DeleteLabelRequest) (*DeleteLabelResponse, error)
+
+type DeleteLabelRequest struct {
+    LabelID string
+}
+type DeleteLabelResponse struct {
+    Deleted           bool
+    LabelID           string
+    DetachedItemCount int // number of item_labels rows removed by the cascade
 }
 ```
 
@@ -1216,10 +1335,19 @@ Per FR-12, P01 exposes **one logical public endpoint**: `POST /mcp` +
 
 ---
 
-## 6. The 14 P01 MCP Tools (JSON-locked)
+## 6. The 23 P01 MCP Tools (JSON-locked)
 
 Tool names match SPEC §5.2.2. Every tool returns either a typed result
 object or a JSON-RPC error object per §7.
+
+> **Round-16 inventory (2026-06-04).** P01 exposes **23** agent-facing
+> tools (was 14). Tools 1–14 are the original core set; round-16 adds
+> Tool 15 `promote` (bead `unblock-tv8.71`), Tools 16–19 milestone tools
+> (`create_milestone` / `update_milestone` / `assign_item` /
+> `milestone_tree`, bead `unblock-tv8.74`), and Tools 20–23 label-registry
+> tools (`create_label` / `list_labels` / `update_label` / `delete_label`,
+> bead `unblock-tv8.75`). The v1.0 total is **27** (these 23 + the 4 memory
+> tools at P02). See §6.6 for the status transition map `promote` closes.
 
 The arguments and result schemas below are **canonical** for P01. Phase 02
 may add fields (additive only); existing fields are immutable.
@@ -1304,18 +1432,22 @@ in chunks.
 
 ### 6.2 Tool-by-tool contracts
 
-> **Round-2 D1 deferral note.** Milestone CRUD MCP tools
-> (`create_milestone`, `update_milestone`, `assign_item`,
-> `milestone_tree`) are **NOT** in the P01 14-tool inventory. They ship
-> in P02 alongside the four memory tools (option (c) preserves PRD FR-8
-> "18 tools at v1.0"). The `workitems.CreateMilestone`,
+> **Round-16 milestone-tools note (OVERRIDES the round-2 D1 deferral).**
+> The original round-2 D1 deferral note read: "Milestone CRUD MCP tools
+> are NOT in the P01 14-tool inventory; they ship in P02 alongside the
+> memory tools (option (c) preserves PRD FR-8 '18 tools at v1.0')." Bead
+> `unblock-tv8.74` **reverses** that deferral. The four milestone MCP
+> tools `create_milestone` / `update_milestone` / `assign_item` (incl.
+> unassign) / `milestone_tree` ship in P01 as **Tools 16–19** (§6.2),
+> thin MCP facades over the `workitems.CreateMilestone`,
 > `workitems.UpdateMilestone`, `workitems.AssignItem`, and
-> `workitems.MilestoneTree` private RPCs (§4.4.1) ARE available in P01
-> for the E2E exit-criterion test (`apps/api/exitcriteriontest/`,
-> round-12) and the future Astro client (P05). Tool 4 (`create`) and
-> Tool 5 (`update`) accept a `milestone_id` field that references an
-> existing milestone — they do not create or modify milestone rows.
-> Tool 8 (`list`) accepts `milestone_id` as a filter.
+> `workitems.MilestoneTree` private RPCs (§4.4.1) that already exist. The
+> FR-8 figure is reconciled from "18 tools at v1.0" to "27 tools at v1.0"
+> (P01=23, +4 memory at P02) across PRD / SPEC / plan in lockstep (round-16
+> changelog). Tool 4 (`create`) and Tool 5 (`update`) still accept a
+> `milestone_id` field that references an existing milestone — they do not
+> create or modify milestone rows; Tool 8 (`list`) still accepts
+> `milestone_id` as a filter.
 
 #### Tool 1 — `prime`
 
@@ -1495,12 +1627,41 @@ dispatch).
 // structuredContent
 {
   "item": { /* Item */ },
+  "parent": { "id": "<ULID>", "title": "...", "status": "..." },  // null when item has no parent (round-16 / tv8.76)
   "comments": [ /* Comment[] ordered by created_at asc */ ],
-  "dependencies_in":  [ /* Edge[] where to_item = item_id */ ],
-  "dependencies_out": [ /* Edge[] where from_item = item_id */ ],
+  "dependencies_in":  [ /* ResolvedRef[] — see below; one per Edge where to_item = item_id */ ],
+  "dependencies_out": [ /* ResolvedRef[] — see below; one per Edge where from_item = item_id */ ],
   "findings":         [ /* Item[] of children with type=finding */ ]
 }
+
+// ResolvedRef shape (round-16 / tv8.76)
+{
+  "id":     "<ULID>",   // the dependency edge's target item id
+  "title":  "...",      // the target item's title
+  "status": "...",      // the target item's Status enum (§6.1)
+  "kind":   "blocks"    // the edge kind ("blocks" | "related") — carried so the agent keeps edge semantics
+}
 ```
+
+**Reference resolution (round-16, bead `unblock-tv8.76`).** `show` now
+resolves the parent and the direct in/out dependency targets to
+`{id, title, status}` objects instead of returning bare IDs, so an agent
+can render the immediate neighbourhood without N follow-up `show`/`get`
+calls. Resolution is **bounded to exactly one level** — the resolved
+neighbours' OWN parents and dependencies are NOT walked; `dependencies_in`
+/ `dependencies_out` carry one `ResolvedRef` per direct edge and nothing
+transitive. `parent` is `null` when the item has no parent epic.
+Payload is bounded: the direct in/out edge sets are already capped by the
+per-project graph degree at v1 scale, and each `ResolvedRef` carries only
+the four scalar fields above (no body, no comment trail, no nested
+findings) — the full neighbour record is reachable via a follow-up
+`show(<neighbour-id>)`. Resolution joins `workitems.items` once per
+direction inside `workitems.GetTrail` (the backing RPC); all resolved
+rows are RBAC-scoped identically to the root item, so a cross-tenant or
+unauthorised neighbour is omitted rather than leaked. The §4.4 `Trail`
+struct's `DependenciesIn` / `DependenciesOut` are widened from `[]Edge`
+to a resolved form in lockstep (the `Edge.ToItem`/`Edge.FromItem` ids are
+joined to the target item's `title` + `status` at query time).
 
 #### Tool 8 — `list`
 
@@ -1906,6 +2067,239 @@ observes `qa_state='failed'`, it resets both review and qa to
 `recent_kinds[]` returns the most recent `(kind, status)` per `kind`
 (grouped, ordered by `created_at desc`, one row per kind).
 
+#### Tool 15 — `promote` (round-16, bead `unblock-tv8.71`)
+
+Transitions a Backlog item to Ready. This is the canonical Ready writer
+that round-12 DRIFT-2 observed was missing ("the state-machine does not
+allow the canonical fixture's Done/Ready end-states via RPC"). `promote`
+plus the full §6.6 transition map close that gap.
+
+```jsonc
+// arguments
+{
+  "item_id": "<ULID>"
+}
+
+// structuredContent (success)
+{
+  "item": { /* Item with status=Ready */ }
+}
+```
+
+**Precondition.** `status = 'Backlog' AND is_ready = true`. The item must
+already be in Backlog AND have no unresolved incoming `blocks` edges
+(i.e. `is_ready` is `true` — every blocker is `Done`). Recall `is_ready`
+is a single-writer materialised column (§6.3.0 Regime A); `promote` READS
+it and does NOT recompute it.
+
+**Rejections (§7 error envelope).**
+
+- Not in Backlog OR not ready → `PRECONDITION_NOT_MET` with the round-16
+  `{status, required}` extension (defined once in §7): `data.status`
+  carries the item's CURRENT `status` and `data.required = "Ready"`. When
+  the block is specifically "still has open blockers", the handler also
+  sets `data.missing = "is_ready"` so the agent can disambiguate "wrong
+  status" from "blocked". Example:
+  `{ "kind": "PRECONDITION_NOT_MET", "status": "Backlog", "required": "Ready", "missing": "is_ready" }`.
+- Item not found / not visible → `NOT_FOUND`.
+
+**Transition performed.** Inside a single `SELECT … FOR UPDATE`
+transaction: re-check the precondition against the locked row, then
+`UPDATE workitems.items SET status = 'Ready' WHERE id = $item_id`.
+`promote` writes NO state-dimension columns (`impl_state` etc.) and
+does NOT touch `is_ready` or `claimed_by_*`.
+
+**Side-effects.** None on the cascade subsystem: moving an item
+Backlog→Ready does not change any OTHER item's `is_ready` (it has no
+effect on items that depend on it — `is_ready` of a dependent flips only
+when ITS blocker becomes `Done`, not merely Ready) and does not change
+§5.7.1 `pipeline_stage` derivation inputs. `promote` therefore publishes
+no `CascadeRequested` and is not a Regime A `is_ready` writer.
+
+#### Tool 16 — `create_milestone` (round-16, bead `unblock-tv8.74`)
+
+Thin MCP facade over `workitems.CreateMilestone` (§4.4.1). Org- or
+project-scoped (XOR); RBAC-gated (`org.Authorize` on
+`workitems.milestones`, action `write`). Enforces M-INV-1/2/3/5/6 per the
+backing RPC.
+
+```jsonc
+// arguments — mirrors workitems.CreateMilestoneRequest
+{
+  "org_id": "<ULID; XOR project_id>",
+  "project_id": "<ULID; XOR org_id>",
+  "parent_milestone_id": "<ULID; optional>",
+  "name": "Q1",
+  "description": "...",
+  "start_date": "2026-01-01",   // ISO date
+  "end_date":   "2026-03-31"    // ISO date; >= start_date
+}
+
+// structuredContent
+{ "milestone": { /* Milestone (§4.4.1) */ } }
+```
+
+Invariant violations surface as `PRECONDITION_NOT_MET` with
+`data.invariant` (`"M-INV-2"` … `"M-INV-6"`) per §4.4.1; scope/date CHECK
+failures surface as `VALIDATION`.
+
+#### Tool 17 — `update_milestone` (round-16, bead `unblock-tv8.74`)
+
+Thin MCP facade over `workitems.UpdateMilestone` (§4.4.1). Updates name,
+description, start/end dates, and cancellation. **Reparenting is rejected**
+in P01 (`VALIDATION`) exactly as the backing RPC specifies. RBAC-gated.
+
+```jsonc
+// arguments — mirrors workitems.UpdateMilestoneRequest
+{
+  "milestone_id": "<ULID>",
+  "name": "<string; optional>",
+  "description": "<string; optional>",
+  "start_date": "<ISO date; optional>",
+  "end_date": "<ISO date; optional>",
+  "cancelled_at": "<ts; optional>",
+  "cancelled_reason": "<string; optional>"
+}
+
+// structuredContent
+{ "milestone": { /* Milestone */ } }
+```
+
+#### Tool 18 — `assign_item` (round-16, bead `unblock-tv8.74`)
+
+Thin MCP facade over `workitems.AssignItem` (§4.4.1). Assigns a work item
+to a milestone, or **unassigns** when `milestone_id` is the empty string
+(clears `milestone_id` + `milestone_assigned_at` + `milestone_assigned_by`).
+Enforces M-INV-7. RBAC-gated on `workitems.items` (action `write`).
+
+```jsonc
+// arguments — mirrors workitems.AssignItemRequest
+{
+  "item_id": "<ULID>",
+  "milestone_id": "<ULID; empty string = unassign>"
+}
+
+// structuredContent
+{ "assigned": true, "item_id": "<ULID>", "milestone_id": "<ULID|null>" }
+```
+
+`assigned_by_user` is taken from the caller's resolved `Identity`
+(not a client-supplied argument). M-INV-7 violation →
+`PRECONDITION_NOT_MET` with `data.invariant = "M-INV-7"`.
+
+#### Tool 19 — `milestone_tree` (round-16, bead `unblock-tv8.74`)
+
+Thin MCP facade over `workitems.MilestoneTree` (§4.4.1). Returns the
+recursive milestone tree (depth bounded at M-INV-6 = 4). RBAC-gated
+(action `read`).
+
+```jsonc
+// arguments — mirrors workitems.MilestoneTreeRequest
+{
+  "org_id": "<ULID; required when root_milestone_id empty, XOR project_id>",
+  "project_id": "<ULID; required when root_milestone_id empty, XOR org_id>",
+  "root_milestone_id": "<ULID; optional>",
+  "include_cancelled": false
+}
+
+// structuredContent
+{ "roots": [ /* MilestoneNode[] (§4.4.1) */ ] }
+```
+
+#### Tool 20 — `create_label` (round-16, bead `unblock-tv8.75`)
+
+Label-registry management over the existing `workitems.labels` table
+(PRD §6.4). Org- or project-scoped (XOR, enforced by the existing
+`labels_scope_xor_chk` CHECK). RBAC-gated (`org.Authorize` on
+`workitems.labels`, action `write`). Backed by a new private RPC
+`workitems.CreateLabel`.
+
+```jsonc
+// arguments
+{
+  "org_id": "<ULID; XOR project_id>",
+  "project_id": "<ULID; XOR org_id>",
+  "name": "bug",            // 1..64 chars; unique within scope
+  "color": "#d73a4a",       // hex color; validated #RRGGBB
+  "description": "<string; optional>"
+}
+
+// structuredContent
+{ "label": { "id": "<ULID>", "org_id": "<ULID|null>", "project_id": "<ULID|null>", "name": "bug", "color": "#d73a4a", "description": "..." } }
+```
+
+A duplicate `name` within the same scope → `CONFLICT` with
+`data.constraint` naming the UNIQUE index; malformed color/name →
+`VALIDATION`.
+
+#### Tool 21 — `list_labels` (round-16, bead `unblock-tv8.75`)
+
+Lists labels visible to the caller within a scope. Project labels and the
+org labels reachable from that project are both returned; the PRD §6.4
+"project wins on identical name" resolution is applied at query time.
+RBAC-gated (action `read`). Backed by `workitems.ListLabels`.
+
+```jsonc
+// arguments
+{
+  "org_id": "<ULID; optional>",
+  "project_id": "<ULID; optional — when set, returns project labels + inherited org labels>"
+}
+
+// structuredContent
+{ "labels": [ /* Label objects (same shape as create_label result) */ ] }
+```
+
+#### Tool 22 — `update_label` (round-16, bead `unblock-tv8.75`)
+
+Renames and/or recolors an existing label. Cannot change a label's scope
+(`org_id` / `project_id` are immutable — a scope change is a
+delete-then-create). RBAC-gated (action `write`). Backed by
+`workitems.UpdateLabel`.
+
+```jsonc
+// arguments
+{
+  "label_id": "<ULID>",
+  "name": "<string; optional>",       // rename
+  "color": "<#RRGGBB; optional>",     // recolor
+  "description": "<string; optional>"
+}
+
+// structuredContent
+{ "label": { /* updated Label */ } }
+```
+
+A rename that collides with an existing label in the same scope →
+`CONFLICT`.
+
+#### Tool 23 — `delete_label` (round-16, bead `unblock-tv8.75`)
+
+Deletes a label from the registry. The many-to-many
+`workitems.item_labels` rows referencing it are removed in the same
+transaction (the existing junction-table FK is `ON DELETE CASCADE` per
+SPEC §9.4.3) — deleting a label detaches it from every item; it does NOT
+delete the items. RBAC-gated (action `delete`). Backed by
+`workitems.DeleteLabel`.
+
+```jsonc
+// arguments
+{ "label_id": "<ULID>" }
+
+// structuredContent
+{ "deleted": true, "label_id": "<ULID>", "detached_item_count": 0 }
+```
+
+Label not found / not visible → `NOT_FOUND`.
+
+> **Label private RPCs (round-16).** Tools 20–23 are backed by four new
+> `workitems` private RPCs — `CreateLabel`, `ListLabels`, `UpdateLabel`,
+> `DeleteLabel` — added to §4.4 in lockstep. They operate over the
+> existing `workitems.labels` / `workitems.item_labels` DDL (SPEC §9.4.3);
+> **no new migration** is required for labels (the tables already exist).
+> Each RPC is org-scoped and routed through `org.Authorize` exactly like
+> the item RPCs.
+
 ### 6.3 Cascade subsystem (Manifesto Law 1)
 
 #### 6.3.0 Propagation regimes (round-6 cascade-symmetry)
@@ -1924,6 +2318,14 @@ the same SQL transaction as the mutation, via the shared helper
 `deps.recomputeReady(ctx, tx, item_id)`. The cascade subscriber never
 writes `is_ready`. Allowed writers:
 
+- `workitems.Create` (Tool 4) — **round-16, bead `unblock-tv8.71`:** sets
+  `is_ready` INLINE at row insert. A freshly-created item with no incoming
+  `blocks` edges is `is_ready=true` (no blocker can be open); a create that
+  ever inlines an incoming blocker recomputes via the same `NOT EXISTS`
+  predicate. Before round-16 nothing set `is_ready` on the create path and
+  such items were stranded non-ready — see §6.6 for the rule and the
+  corrected create doc-comment. `status` remains `Backlog` at create;
+  `is_ready=true` makes the item immediately `promote`-able (Tool 15).
 - `workitems.Close` (Tool 6) — recomputes `is_ready` for the closed
   item's direct `blocks` neighbours inline.
 - `deps.AddEdge` (Tool 11 / §6.5 cycle-detect block) — recomputes
@@ -2208,6 +2610,74 @@ deps.CascadeRequestedTopic.Publish(ctx, &deps.CascadeRequested{
 The 256 cap is a v1.0 product constraint (RP01-3 risk in plan §7); error
 envelope on overflow includes the offending chain prefix.
 
+### 6.6 Status transition map (round-16, bead `unblock-tv8.71`)
+
+`workitems.items.Status` (§6.1 enum: `Backlog`, `Ready`, `InProgress`,
+`Blocked`, `Done`) is governed by the transition map below. Round-12
+DRIFT-2 recorded that P01 had **no Ready writer** — nothing moved an item
+into `Ready` via RPC, so the canonical fixture's Ready end-states were
+unreachable through the API. `promote` (Tool 15) is that writer; this map
+makes the full lifecycle explicit and closes DRIFT-2.
+
+| From | To | Trigger (writer) | Precondition | Notes |
+|---|---|---|---|---|
+| (create) | `Backlog` | `workitems.Create` (Tool 4) | — | Default landing status for a new item. `is_ready` is set inline at create per the rule below. |
+| `Backlog` | `Ready` | `promote` (Tool 15) | `status='Backlog' AND is_ready=true` | The new Ready writer. Rejects with §7 `PRECONDITION_NOT_MET {status, required:'Ready'}` otherwise. |
+| `Ready` | `InProgress` | `claim` (Tool 3) / `workitems.Claim` | `status='Ready' AND claimed_by_id IS NULL` | Atomic `SELECT FOR UPDATE` per §6.4. Loser → `ALREADY_CLAIMED`. |
+| `Ready` | `Blocked` | `add_dependency` (Tool 11) / `deps.AddEdge` | a new incoming `blocks` edge whose `from_item` is not `Done` is committed against a `Ready` item | **Demotion (`Ready`-only).** The §6.5 inline `is_ready` recompute flips `is_ready=false`. The demotion writer sets `status='Blocked'` ONLY when the affected item was `Ready` (unclaimed); for an `InProgress` (claimed) item it writes `is_ready=false` and LEAVES `status='InProgress'` untouched (see the note below the table). This is the inverse of `promote`: a dependency added to a Ready item demotes it. |
+| `Blocked` | `Ready` | cascade subscriber → inline `is_ready` recompute on the blocker's `close`/`remove_dependency` | every incoming `blocks` blocker is `Done` (`is_ready` flips back to `true`) | When the last blocker closes (Tool 6) or its edge is removed (Tool 12), the Regime A inline recompute (§6.3.0) flips `is_ready=true`; an item that was `Blocked` and is not yet claimed returns to `Ready` in the same write. A claimed item is never `Blocked` (see the note below), so there is no claim to preserve here; an already-`InProgress`/`Done` item is NOT re-promoted. |
+| `InProgress` | `Done` | `close` (Tool 6) / `workitems.Close` | P01: `claimed_by_id IS NOT NULL` (AF3). P02 tightens to `qa_state='passed'`. | Fires the cascade (§6.3.0 Regime A inline + Regime B publish). |
+
+**`InProgress` is never demoted (round-16, DECISION by Miguel).** Demotion
+to `Blocked` applies ONLY to `Ready` (unclaimed) items. When an
+`InProgress` (claimed) item gains a new unmet incoming `blocks` edge, the
+§6.5 inline recompute flips `is_ready=false` but the item keeps
+`status='InProgress'` — `status` is NOT changed and the claimant stays on
+the item so they can resolve the blocker. There is no `InProgress→Blocked`
+transition. When the blocker later resolves, the Regime A inline recompute
+flips `is_ready=true` and the item is simply still `InProgress` (no
+transition needed). Consequently a claimed item is NEVER `Blocked`, so no
+"Blocked-with-claim" state exists and the `Blocked→Ready` recovery row
+above never has a claim to retain.
+
+**`is_ready`-on-create rule (round-16, bead `unblock-tv8.71`).** Today
+`deps.recomputeReady` is invoked only by `close` / `add_dependency` /
+`remove_dependency` (§6.3.0 Regime A allow-list), and the cascade
+subscriber maintains `pipeline_stage` only — so a freshly-created item
+with NO incoming `blocks` edges never has its `is_ready` set by any path
+and is stranded at the column default. P01's create doc-comment implying
+"readiness is materialised by the cascade subscriber" is **misleading for
+the create case** and is corrected.
+
+Pinned rule: `workitems.Create` (Tool 4) MUST set `is_ready` INLINE,
+inside its own transaction, at the moment the item row is inserted:
+
+- If the new item is created with NO incoming `blocks` dependencies (the
+  `dependencies[]` argument contains no edge where the new item is the
+  `to_item`, which in P01 it never does — `create`'s inline edges make the
+  NEW item the `from_item`/blocker side per §4.4 `DependencyEdge`), then
+  `is_ready = true` is written inline.
+- If a future create path ever inlines an incoming `blocks` edge, the same
+  inline recompute (`NOT EXISTS (open blocker)`, identical to the §6.5
+  UPDATE predicate) decides `is_ready`.
+
+This makes `workitems.Create` a **Regime A `is_ready` writer**:
+§6.3.0's Regime A allow-list and §11.3's `no_direct_is_ready_write`
+allow-list are both extended to include `workitems.Create` (in lockstep —
+see those sections). The status at create remains `Backlog`; `is_ready`
+may be `true` (no blockers) while `status='Backlog'`, which is exactly the
+`promote` precondition — a created item with no blockers is immediately
+`promote`-able. `create` does NOT itself set `status='Ready'`; promotion
+is an explicit agent action (Tool 15) so the agent controls when a Backlog
+item enters the ready queue.
+
+**Relationship to `set_state` / `pipeline_state`.** This map governs the
+`Status` enum (the ready-queue dimension). It is orthogonal to the three
+PRD §6.2 state dimensions (`impl_state` / `review_state` / `qa_state`) and
+the `pipeline_state` exception column, which are governed by §6.2 Tool 13
+(`set_state`) and its I-1..I-5 invariants. `promote` writes ONLY `status`;
+`set_state` never writes `status`.
+
 ---
 
 ## 7. Error Envelope (locked)
@@ -2244,7 +2714,7 @@ All MCP tool errors return a JSON-RPC 2.0 error object:
 | `VALIDATION` | Argument shape / type / range violation | `{ "field": "title", "reason": "must be 1..200 chars" }` |
 | `ALREADY_CLAIMED` | `claim` loser path | `{ "winner_user_id": "...", "winner_agent": "...", "claimed_at": "..." }` |
 | `CYCLE_DETECTED` | `add_dependency` / `create` cycle reject | `{ "from": "...", "to": "...", "cycle_path": ["...", "..."] }` |
-| `PRECONDITION_NOT_MET` | Structural precondition violated (P01) or BLOCK condition (P02+) | `{ "missing": "claimed_by_id" }` or `{ "rejection_reason": "..." }` |
+| `PRECONDITION_NOT_MET` | Structural precondition violated (P01) or BLOCK condition (P02+) | `{ "missing": "claimed_by_id" }` or `{ "rejection_reason": "..." }` or (round-16) `{ "status": "Backlog", "required": "Ready" }` — see the §7.2 status-precondition extension |
 | `CONFLICT` | Optimistic concurrency or unique constraint violation | `{ "constraint": "<name>" }` |
 | `INTERNAL` | Unhandled server error (logged with full trace_id) | `{}` |
 
@@ -2335,6 +2805,61 @@ wired producer).** Two alternatives were weighed:
   `setStateOut` embeds it in P01/P02 (one wired producer); the type is
   reusable for the next producer with zero re-definition. Cross-ref §3.6
   (snake_case) and §8.1 (audit column).
+
+### 7.2 `PRECONDITION_NOT_MET` status extension (locked — round-16, owned by `unblock-tv8.71`)
+
+> **(locked, additive)** This subsection ADDS an optional `data` shape to
+> the existing `PRECONDITION_NOT_MET` kind (§7 table). It does not change
+> any existing shape — `{ "missing": … }` and `{ "rejection_reason": … }`
+> remain valid verbatim. The extension is defined ONCE here and reused by
+> every status-precondition rejection.
+
+When a tool rejects because the subject item is in the WRONG `Status`
+(§6.1 enum) for the requested operation, the `data` object carries two
+additional optional fields:
+
+```jsonc
+{
+  "kind": "PRECONDITION_NOT_MET",
+  "tool": "promote",
+  "trace_id": "<ULID>",
+  "status":   "Backlog",   // the item's CURRENT Status enum value
+  "required": "Ready",     // the Status the operation requires
+  "missing":  "is_ready"   // OPTIONAL; present when the blocker is specifically an unmet readiness/structural precondition
+}
+```
+
+- **`status`** — the item's current `Status` at the moment of rejection.
+- **`required`** — the `Status` (or readiness condition) the operation
+  demanded. For `promote`, `required = "Ready"`.
+- **`missing`** — OPTIONAL, additive to the existing `{missing}` shape;
+  when present it names the specific unmet structural precondition
+  (e.g. `"is_ready"` when a Backlog item still has open blockers, or
+  `"claimed_by_id"` for the §6.2 Tool 6 close precondition).
+
+`status` and `required` are present together or not at all. A rejection
+that is purely structural (e.g. close's `claimed_by_id IS NULL`) MAY omit
+`status`/`required` and carry only `missing`, exactly as today.
+
+**Owned by `promote` (Tool 15 / `unblock-tv8.71`); reused by:**
+
+- **`claim` (Tool 3) — bead `unblock-tv8.72`.** The
+  `claim`-on-not-Ready rejection (when an item is targeted by `claim`
+  but its `Status <> 'Ready'`, distinct from the `ALREADY_CLAIMED`
+  loser path which still uses its own kind) MUST emit
+  `PRECONDITION_NOT_MET` with `{ status: <current>, required: 'Ready' }`.
+  `unblock-tv8.72` carries no separate spec text — its error contract IS
+  this extension. (The `ALREADY_CLAIMED` kind continues to cover the
+  concurrent-claim loser path unchanged; the status extension covers the
+  "item never was Ready" path.)
+- **Milestone tools (Tools 16–19 / `unblock-tv8.74`)** — invariant
+  rejections continue to use `data.invariant` (§4.4.1); any status-shaped
+  precondition reuses this same `{status, required}` shape.
+- **`show` (Tool 7 / `unblock-tv8.76`)** — no new rejection kind; resolved
+  references that are not visible are omitted (RBAC), not error-flagged.
+
+This keeps the taxonomy consistent across `promote` and `claim`: a
+machine reading `data.required = "Ready"` handles both identically.
 
 ---
 
@@ -2640,9 +3165,11 @@ infrastructure-level correlation id and is independent of
 
 ### 10.3 Catalogue authoring (Plan §2.3 / Q4)
 
-`apps/api/mcp/catalogue.json` is **created in P01** with the 14 P01 tools'
-tool definitions, but the `block_conditions[]` arrays are **empty
-placeholders** for every transition:
+`apps/api/mcp/catalogue.json` is **created in P01** with the **23** P01
+tools' tool definitions (round-16: the 14 core tools + `promote` + the
+four milestone tools + the four label tools — see §6.2), but the
+`block_conditions[]` arrays are **empty placeholders** for every
+transition:
 
 ```jsonc
 {
@@ -2654,7 +3181,7 @@ placeholders** for every transition:
       "input_schema": { /* JSON Schema */ },
       "output_schema": { /* JSON Schema */ }
     },
-    /* ... 13 more ... */
+    /* ... 22 more (round-16: 23 tools total) ... */
   ],
   "transitions": []  // empty; populated in P02
 }
@@ -2839,7 +3366,13 @@ seeded fixture and asserts:
 - [ ] `claim` on the returned item succeeds; a second concurrent `claim` from a different agent receives `{ "kind": "ALREADY_CLAIMED", ... }`.
 - [ ] `set_state(impl_state=done)` on the claimed item is accepted (structural invariant only — `claimed_by_id` is set).
 - [ ] `close` on the same item succeeds (P01 relaxation: `claimed_by_id IS NOT NULL` is the only precondition); cascade subscriber fires.
-- [ ] After cascade, `prime` reflects newly unblocked dependents (`itm_c`, `itm_d` flip to ready).
+- [ ] After cascade, `prime` reflects newly unblocked dependents (`itm_c`, `itm_d` flip `is_ready=true`); they remain `status='Backlog'` until promoted.
+- [ ] **`promote` (round-16, bead `unblock-tv8.71`).** `promote(item_id=itm_c)` — where `itm_c` is `status='Backlog' AND is_ready=true` after the cascade above — succeeds and returns the item with `status='Ready'`; a subsequent `ready` lists `itm_c`. `promote` on an item that is still blocked (e.g. an item with an open `blocks` parent, `is_ready=false`) is rejected with `{ "kind": "PRECONDITION_NOT_MET", "status": "Backlog", "required": "Ready", "missing": "is_ready" }` per §7.2; `promote` on an already-`Ready` item is rejected with `{ "kind": "PRECONDITION_NOT_MET", "status": "Ready", "required": "Ready" }`.
+- [ ] **`is_ready`-on-create (round-16, bead `unblock-tv8.71`).** A `create` of a fresh `type=task` item with no inline dependencies returns an item whose `is_ready=true` and `status='Backlog'` (asserts the inline create-path write, not subscriber materialisation); the item is immediately `promote`-able.
+- [ ] **`claim`-on-not-Ready (round-16, bead `unblock-tv8.72`).** `claim` on an item whose `Status <> 'Ready'` (e.g. a Backlog item that was never promoted) is rejected with `{ "kind": "PRECONDITION_NOT_MET", "status": "Backlog", "required": "Ready" }` per §7.2 — the SAME extension `promote` defines (distinct from the `ALREADY_CLAIMED` concurrent-loser path).
+- [ ] **`issued_to_user` REQUIRED (round-16, bead `unblock-tv8.73`).** `auth.IssueAPIKey` with an empty `issued_to_user` is rejected with `InvalidArgument`; a successfully-issued key resolves (§4.3.2) to an `Identity` whose `UserID` is non-empty. (DDL-level: the `0110` migration makes `mcp.api_keys.issued_to_user` NOT NULL.)
+- [ ] **`show` reference resolution (round-16, bead `unblock-tv8.76`).** `show(itm_b)` returns `parent` (or `null`), and `dependencies_in` / `dependencies_out` as `ResolvedRef[]` each carrying `{id, title, status, kind}` for the DIRECT neighbours only — assert the neighbour's `title` + `status` are populated and that the resolution is one level deep (the neighbour's own dependencies are NOT present in the payload).
+- [ ] **Milestone + label MCP tools reachable (round-16, beads `unblock-tv8.74` / `unblock-tv8.75`).** The harness drives `create_milestone` → `assign_item` → `milestone_tree` through the MCP boundary (not just the private RPCs) and asserts the tree shape; and drives `create_label` → `list_labels` → `update_label` → `delete_label`, asserting the registry round-trips and `delete_label` detaches the label from any items it was applied to.
 - [ ] `add_dependency(from=itm_e, to=itm_a)` is rejected with `CYCLE_DETECTED` (would form `itm_a → itm_b → … → itm_e → itm_a`; the §11.1.0 fixture includes the `itm_d → itm_e` edge that closes the chain when the cycle-attempt edge is added).
 - [ ] `deps.cascade_events` has one row per fired cascade with a populated `event_id` and the affected set; `kind='close'` for the cascade triggered by Tool 6 above.
 - [ ] **Cascade-symmetry kinds (round-6 §6.3.0).** The exit-criterion
@@ -3019,6 +3552,8 @@ seeded fixture and asserts:
     (Regime A).** `is_ready` is recomputed inline by the call site
     that mutated the row/edge — the cascade subscriber MUST NOT write
     `is_ready`. Explicit allowlist of permitted writers:
+    `workitems.Create` (Tool 4 — **round-16, bead `unblock-tv8.71`:**
+    inline `is_ready` set at row insert per §6.6),
     `workitems.Close` (Tool 6 — inline recompute on direct `blocks`
     neighbours), `deps.AddEdge` (Tool 11 / §6.5 — inline recompute on
     `to_item`), `deps.RemoveEdge` (Tool 12 — inline recompute on
@@ -3026,7 +3561,9 @@ seeded fixture and asserts:
     `deps.recomputeReady` (called by the above sites). Integration
     test asserts the cascade subscriber never UPDATEs `is_ready`; an
     additional static check in the linter rule asserts the allowlist
-    above is exhaustive.
+    above is exhaustive. The `apps/api/shared/lint/no_direct_is_ready_write.go`
+    allowlist gains the `workitems.Create` insert site in lockstep with
+    this round.
 - [ ] `rbac.For` and `rbac.ScopedQuery.Where` are never called with
   runtime-constructed string arguments — every table identifier (For
   arg 2) AND every clause string (Where arg 1) MUST be a Go string
@@ -3062,8 +3599,8 @@ seeded fixture and asserts:
 
 - [ ] `docs/specs/01-spec-backend-mvp.md` is **APPROVED** before
   implementation starts (this document).
-- [ ] README.md updated with P01 user surface (MCP Bearer auth, the 14
-  tools' one-liners). The former `unblock-seed` invocation deliverable
+- [ ] README.md updated with P01 user surface (MCP Bearer auth, the 23
+  tools' one-liners — round-16). The former `unblock-seed` invocation deliverable
   is dropped (round-12 — seeder CLI deleted from P01 scope; the
   exit-criterion fixture is now seeded by the E2E test itself per
   §11.1.1).
@@ -3091,26 +3628,27 @@ section that locks its contract:
 |---|---|---|
 | A-1 (Encore app init) | Greta | §3.1 (migration owner), §4 (service skeletons) |
 | A-2 (Bootstrap migration) | Greta | §3.2 (`0010_bootstrap.up.sql`), §3.5 (secrets) |
-| A-3 (Migrations §9.4.1–§9.4.8) | Greta | §3.2 (migrations 0020..0090), §3.4 (FTS DDL) |
+| A-3 (Migrations §9.4.1–§9.4.8 + round-16 `0110`) | Greta | §3.2 (migrations 0020..0090; round-16 `0110_mcp_issued_to_user_notnull` per bead `unblock-tv8.73`), §3.4 (FTS DDL) |
 | A-4 (`pkg/rbac`) | Greta | §10.1 |
 | A-5 (Tracing scaffold) | Greta | §10.2 |
 | A-6 (CI gates) | Olive | §11.2 (NFR-10 commands) |
-| B-1 (`auth` service) | Greta | §4.1, §4.3.2 (API key hot path), §4.3.3 |
+| B-1 (`auth` service; round-16 `issued_to_user` REQUIRED) | Greta | §4.1 (`IssueAPIKey` rejects empty `IssuedToUser`), §4.3.2 step 8 (no empty-UID identity), §4.3.3 — bead `unblock-tv8.73` |
 | B-2 (`org` service) | Greta | §4.2 |
 | B-3 (RBAC suite) | Greta | §10.1, §11.2 (NFR-2) |
-| C-1 (`workitems` service) | Greta | §4.4, §4.4.1 (milestone RPCs — round-2 D1) |
+| C-1 (`workitems` service; round-16 label RPCs) | Greta | §4.4 (incl. round-16 `CreateLabel`/`ListLabels`/`UpdateLabel`/`DeleteLabel` private RPCs per bead `unblock-tv8.75`; `is_ready`-on-create per §6.6), §4.4.1 (milestone RPCs — round-2 D1) |
 | C-2 (`deps` service + cycle CTE) | Greta | §4.5, §6.5, §6.3.0 (post-commit publishes for `edge_added` and `edge_removed`) |
 | C-3 (Cascade subsystem) | Greta | §6.3, §6.3.0 (four-Reason dispatch; `pipeline_stage`-only writer) |
 | C-4 (Atomic claim) | Greta | §6.4 (incl. I-3-reset `state_change` publish per §6.3.0) |
 | C-5 (`pipeline_stage` derivation tests) | Greta | §6.3.2, §6.3.0, SPEC §5.7.1 |
 | C-6 (RBAC suite extensions) | Greta | §10.1 |
 | D-1 (MCP transport skeleton) | Greta | §5, §4.3.1, §4.3.2 |
-| D-2 (Tools 1–4) | Greta | §6.2 (tools 1–4) |
-| D-3 (Tools 5–8) | Greta | §6.2 (tools 5–8) |
+| D-2 (Tools 1–4 + round-16 `promote` + `is_ready`-on-create) | Greta | §6.2 (tools 1–4 + Tool 15 `promote`), §6.6 (status transition map + `is_ready`-on-create rule, beads `unblock-tv8.71`/`unblock-tv8.72`), §7.2 (`{status,required}` extension) |
+| D-3 (Tools 5–8; round-16 `show` reference resolution) | Greta | §6.2 (tools 5–8, incl. Tool 7 `show` `{id,title,status}` resolution per bead `unblock-tv8.76`), §4.4 (`Trail` / `ResolvedRef` widening) |
 | D-4 (Tools 9–10) | Greta | §6.2 (tools 9–10), §3.4 (FTS), §6.2 #9 |
 | D-5 (Tools 11–12) | Greta | §6.2 (tools 11–12), §6.5 |
 | D-6 (Tools 13–14) | Greta | §6.2 (tools 13–14) |
-| D-7 (Catalogue v0) | Greta | §10.3 |
+| D-7 (Catalogue v0; round-16 23 tools) | Greta | §10.3 (catalogue carries all 23 P01 tool definitions) |
+| D-8 (round-16 milestone + label MCP tools — Tools 16–23) | Greta | §6.2 (Tools 16–19 milestone facades per bead `unblock-tv8.74`; Tools 20–23 label tools per bead `unblock-tv8.75`), §4.4 (label RPCs), §4.4.1 (milestone RPCs) |
 | E-2 (NFR-1 latency harness) | Greta | §11.2 (warm-cache definition) |
 | E-3 (NFR-2 RBAC suite) | Greta | §10.1, §11.2 |
 | E-4 (Exit-criterion E2E test) | Greta | §11.1 (incl. §11.1.0 fixture topology + §11.1.1 seed ownership), §6.3 (cascade), §6.5 (cycle) |
@@ -3148,8 +3686,10 @@ confirms:
 
 - [ ] All seven research contradictions (C1, C2, C3, C5, C6, C7 + AF1/AF5)
   are honoured in the design above.
-- [ ] The 14 MCP tool contracts are signature-locked and no field is
-  ambiguous (every "optional" / "default" stated explicitly).
+- [ ] The 23 MCP tool contracts (round-16: 14 core + `promote` + 4
+  milestone + 4 label) are signature-locked and no field is ambiguous
+  (every "optional" / "default" stated explicitly). v1.0 total is 27
+  (+4 memory at P02).
 - [ ] Migration filenames and numbering are agreed.
 - [ ] Error envelope kinds and `data` shapes cover every failure mode the
   exit-criterion harness exercises.
