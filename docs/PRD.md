@@ -115,11 +115,11 @@ Human engineers who interact with the system through the web UI for ceremony tas
 - **FR-5.** Dependency graph stored as edges in `deps`; computed views for ready set, dependency closure, cycle detection. Recomputation on every mutation.
 - **FR-6.** Cascade on close: a successful close emits a Pub/Sub event whose subscriber promotes newly unblocked dependents to `ready` in the same logical operation.
 - **FR-7.** Atomic claim: `SELECT FOR UPDATE` transaction; exactly one agent wins; loser receives structured rejection.
-- **FR-8.** MCP server over **Streamable HTTP** per the MCP 2025-06-18 spec — single endpoint at `/mcp` accepting both `POST /mcp` (client requests; response can be a single JSON-RPC reply or an SSE stream of incremental responses for long-running tools) and `GET /mcp` (server-initiated SSE stream for resumable / long-lived sessions). Bearer `<api-key>` auth on every request, `Mcp-Session-Id` response header on `initialize`. Implementation uses `github.com/modelcontextprotocol/go-sdk` (the canonical Go SDK; not `rmcp` which is Rust-only). Exposing 18 tools at v1.0:
-  - 14 in P01 (work-item CRUD, dependencies, ready, claim, close, comment trail, prime, etc.)
+- **FR-8.** MCP server over **Streamable HTTP** per the MCP 2025-06-18 spec — single endpoint at `/mcp` accepting both `POST /mcp` (client requests; response can be a single JSON-RPC reply or an SSE stream of incremental responses for long-running tools) and `GET /mcp` (server-initiated SSE stream for resumable / long-lived sessions). Bearer `<api-key>` auth on every request, `Mcp-Session-Id` response header on `initialize`. Implementation uses `github.com/modelcontextprotocol/go-sdk` (the canonical Go SDK; not `rmcp` which is Rust-only). Exposing 27 tools at v1.0 (reconciled from the original "18 tools" figure by the P01 round-16 amendment — see `docs/specs/01-spec-backend-mvp.md` round-16 changelog):
+  - 23 in P01 (work-item CRUD, dependencies, ready, claim, **promote**, close, comment trail, prime, state accessors, the four **milestone** management tools, and the four **label-registry** tools)
   - +4 memory tools in P02 (`remember`, `recall`, `memories`, `forget`)
   - Plus the providers/sync tooling needed for bidirectional GitHub sync.
-  Exact tool inventory is pinned by the architect in `docs/SPEC.md`.
+  Exact tool inventory is pinned by the architect in `docs/SPEC.md` §5.2.2. (P01 round-16 raised P01 from 14→23 and v1.0 from 18→27: `promote` + 4 milestone tools + 4 label tools moved into P01 / were newly added.)
 - **FR-9.** State-transition validation at the MCP layer: every status change is checked against the pipeline state machine; invalid transitions are rejected with a structured error citing the missing precondition (Law 8, layer 1).
 - **FR-10.** Comment trail with **two orthogonal axes**, designed so agents can act on signal without parsing free-form text (Manifesto Principle 6):
   - **`kind`** — semantic category. Eleven values: `investigation`, `decision`, `deviation`, `completed`, `review`, `qa`, `deferred`, `pr`, `needs-human`, `override`, `general`.
@@ -179,7 +179,7 @@ The AST CLI carries forward verbatim from the approved `docs/code-cli/{plan,spec
 | FR-5 (dependency graph + cycle detection) | H | H | H | Must-have |
 | FR-6 (cascade on close) | H | H | M | Must-have |
 | FR-7 (atomic claim) | H | H | L | Must-have |
-| FR-8 (MCP Streamable HTTP, 18 tools) | H | H | H | Must-have |
+| FR-8 (MCP Streamable HTTP, 27 tools — P01 round-16; was 18) | H | H | H | Must-have |
 | FR-9 (state-transition validation, layer 1) | H | H | M | Must-have |
 | FR-11 (GitHub webhooks + bidirectional sync) | H | M | H | Must-have |
 | FR-13 (memory service) | H | M | M | Performance |
@@ -549,14 +549,14 @@ The project ships in four sequential phases plus a renderer phase. The AST CLI s
 
 - Encore Go on a single Postgres (8 schemas).
 - Services: `auth`, `org`, `workitems`, `deps`, `memory`.
-- Minimal MCP server with **14 tools** over Streamable HTTP (per FR-8).
+- MCP server with **23 tools** over Streamable HTTP (per FR-8; P01 round-16 raised this from 14 — adds `promote`, the four milestone tools, and the four label-registry tools).
 - Public Encore endpoints: `POST /webhooks/github`, `POST /mcp` + `GET /mcp` (single logical MCP endpoint, Streamable HTTP per FR-12). OAuth callback is on Astro origin per FR-12.
 - Exit criterion: an agent can authenticate via Bearer API key and complete `prime → ready → claim → close` against a manually-seeded graph; cascade fires; cycle detection rejects offending edges.
 
 ### P02 — Backend complete
 
 - `providers` service: GitHub webhook ingestion + bidirectional sync.
-- Remaining MCP tools, totalling **18 tools** at end of P02 (including the 4 memory tools).
+- Remaining MCP tools, totalling **27 tools** at end of P02 (the 23 P01 tools + the 4 memory tools; figure reconciled from the original 18 by the P01 round-16 amendment).
 - Pipeline enforcement layer 1: MCP state-transition validation per Manifesto Law 8.
 - Exit criterion: a GitHub repository can be linked, webhooks normalise events into canonical work items, and an attempt to mark a work item `done` without the required comment trail is rejected at the MCP boundary.
 
@@ -707,8 +707,8 @@ None at PRD time. All eight discovery questions are resolved in §1–§12 and t
 
 | Phase | Deliverable | Ships at | Carries forward verbatim from |
 |---|---|---|---|
-| P01 | Backend MVP (Encore Go + Postgres + 14 MCP tools) | v1.0 | New work, `docs/SPEC.md` (architect) |
-| P02 | Backend complete (providers + 18 MCP tools + Layer 1 enforcement) | v1.0 | New work, `docs/SPEC.md` (architect) |
+| P01 | Backend MVP (Encore Go + Postgres + 23 MCP tools — P01 round-16; was 14) | v1.0 | New work, `docs/SPEC.md` (architect) |
+| P02 | Backend complete (providers + 27 MCP tools total + Layer 1 enforcement) | v1.0 | New work, `docs/SPEC.md` (architect) |
 | P03 | AST CLI v1.0.0 | v1.0 | `docs/code-cli/{plan,spec,research}.md` |
 | P04 | mister-anderson plugin renderer (Layer 2 + 3) | v1.0 | New work, `docs/SPEC.md` (architect) |
 | P05 | Astro web (kanban + graph + roadmap + comments) | **v1.1** (line-ui-blocked) | New work, `docs/SPEC.md` (architect) |

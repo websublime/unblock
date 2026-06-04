@@ -1,8 +1,18 @@
-# PLAN: P01 — Backend MVP (Encore Go + Postgres + 14 MCP Tools)
+# PLAN: P01 — Backend MVP (Encore Go + Postgres + 23 MCP Tools)
 
 **Status:** APPROVED
 **Author:** Ada (architect)
-**Date:** 2026-05-07 (resolutions applied 2026-05-08)
+**Date:** 2026-05-07 (resolutions applied 2026-05-08; P01 round-16 tool-surface amendment reconciled 2026-06-04)
+
+> **P01 round-16 amendment (2026-06-04).** The P01 MCP tool surface grows
+> from **14 → 23** and v1.0 from **18 → 27** per the phase spec round-16
+> changelog (`docs/specs/01-spec-backend-mvp.md`, beads `unblock-tv8.71`
+> `promote` + `is_ready`-on-create, `.74` milestone tools now in P01,
+> `.75` label tools, `.73` `issued_to_user` NOT NULL, `.76` `show`
+> reference resolution). This plan's tool table (§2.2) and the milestone
+> P02-deferral wording (§2.1) are reconciled below; the track structure
+> (§4) is unchanged except that Track D now also delivers the milestone +
+> label tools and `promote`.
 **Source PRD:** [docs/PRD.md](../PRD.md) (APPROVED, 2026-05-07)
 **Source SPEC:** [docs/SPEC.md](../SPEC.md) (APPROVED 2026-05-07, round-2 review applied)
 **Companion:** [docs/MANIFESTO.md](../MANIFESTO.md) (APPROVED, 2026-05-07)
@@ -27,9 +37,10 @@ cycle detection rejecting offending edges at write time.
 
 P01 is the **agent-facing core** — work-item CRUD, dependency graph,
 ready-set materialisation, atomic claim, comment trail, structured state
-columns, and the SSE MCP transport with 14 tools. Provider integration,
-the four memory tools, and Layer-1 state-transition validation are
-deferred to P02 by design (PRD §8). P01 lays down the schemas that P02
+columns, and the Streamable HTTP MCP transport with 23 tools (round-16:
+the 14 core tools + `promote` + four milestone tools + four label tools).
+Provider integration, the four memory tools, and Layer-1 state-transition
+validation are deferred to P02 by design (PRD §8). P01 lays down the schemas that P02
 fills in — including `providers`, `boards`, `mcp`, and `memory` — but
 exposes only the surfaces required for the P01 exit criterion.
 
@@ -50,9 +61,9 @@ Per SPEC §5.2 (8 services × 8 schemas, 1:1 mapping locked).
 |---|---|---|
 | `auth` | OAuth2+PKCE flow (private `auth.ExchangeOAuthCode`), session validation (private `auth.Validate`), API key issuance + validation (MCP Bearer auth), `Identity` resolution | OAuth callback **lives on the Astro origin** in P05; in P01 the callback is exercised by integration tests only. API key issuance ships **as a private RPC** (`auth.IssueAPIKey`) since there is no web UI to drive it; **the E2E exit-criterion test issues its API key via direct INSERT into `mcp.api_keys`** (round-12 — see spec §11.1.1; the seeder CLI originally planned for this is deleted). Dev exploration outside tests uses `psql` against the local Postgres or Encore's local dashboard. |
 | `org` | Org / project CRUD, RBAC role bindings, `org.Authorize(identity, resource, action)` | Required because every `workitems`, `deps`, and `mcp` call is org-scoped (NFR-2). |
-| `workitems` | Items, comments, labels, milestones (recursive), findings; private RPCs `Create / Update / GetTrail / ListByMilestone / AppendComment / SetStateColumns` plus the four milestone RPCs `CreateMilestone / UpdateMilestone / AssignItem / MilestoneTree` (round-2 D1 — see SPEC §4.4.1). | Comments append-only; milestone tree depth ≤ 4 (M-INV-6); findings are first-class child items. **Milestone CRUD is reachable only via private RPC in P01** — agent-facing milestone MCP tools defer to P02 to preserve PRD FR-8 "18 tools at v1.0" (option (c) in round-2 D1). The E2E exit-criterion test (`apps/api/exitcriteriontest/`, round-12) and the future Astro client (P05) drive milestone creation through the private RPCs. |
+| `workitems` | Items, comments, labels, milestones (recursive), findings; private RPCs `Create / Update / GetTrail / ListByMilestone / AppendComment / SetStateColumns` plus the four milestone RPCs `CreateMilestone / UpdateMilestone / AssignItem / MilestoneTree` (round-2 D1 — see SPEC §4.4.1) plus the four label-registry RPCs `CreateLabel / ListLabels / UpdateLabel / DeleteLabel` (round-16, bead `unblock-tv8.75`). | Comments append-only; milestone tree depth ≤ 4 (M-INV-6); findings are first-class child items. **Round-16 amendment:** the original round-2 D1 decision ("milestone MCP tools defer to P02 to preserve FR-8 '18 tools at v1.0'") is OVERRIDDEN by bead `unblock-tv8.74` — the milestone MCP tools (and the new label tools) ship in P01 as facades over these RPCs; v1.0 is reconciled to 27 tools. `workitems.Create` also gains the `is_ready`-on-create inline write (bead `unblock-tv8.71`, spec §6.6). |
 | `deps` | Edges, cycle detection at write time, ready-set materialisation, cascade subscriber, `deps.cascade_events` audit table; private RPCs `AddEdge / RemoveEdge / IsReady / Closure` | The cascade subscriber **also maintains `pipeline_stage`** (SPEC §5.7.1). |
-| `mcp` | Streamable HTTP transport (`POST /mcp` + `GET /mcp` per MCP spec 2025-06-18), Go SDK `github.com/modelcontextprotocol/go-sdk`, tool registry, the 14 P01 tools, Bearer API key auth via `auth.Validate`, structured error envelope | **No state-machine BLOCK conditions** in P01 — see §3.4 below for the explicit deferral. |
+| `mcp` | Streamable HTTP transport (`POST /mcp` + `GET /mcp` per MCP spec 2025-06-18), Go SDK `github.com/modelcontextprotocol/go-sdk`, tool registry, the 23 P01 tools (round-16: 14 core + `promote` + 4 milestone + 4 label), Bearer API key auth via `auth.Validate`, structured error envelope | **No state-machine BLOCK conditions** in P01 — see §3.4 below for the explicit deferral. `promote` (Tool 15) IS shipped — it is a `Status`-enum writer, not a Layer-1 comment-trail gate. |
 | **public** | FR-12 v1.0 endpoints' wiring (`POST /mcp` + `GET /mcp` Streamable HTTP only — `POST /webhooks/github` is P02) | Only the MCP endpoint in P01. |
 
 Services whose **schema** ships in P01 but whose **runtime surface is empty**:
@@ -72,7 +83,7 @@ alternative (gradual migrations) was considered and rejected because
 splitting DDL across phases couples the migration order to the phase
 sequence, which the §9.4.0 ordering rules already pin independently.
 
-### 2.2 The 14 MCP tools (SPEC §5.2.2)
+### 2.2 The 23 MCP tools (SPEC §5.2.2; P01 round-16 raised from 14)
 
 | # | Tool | P01 contract notes |
 |---|---|---|
@@ -90,6 +101,26 @@ sequence, which the §9.4.0 ordering rules already pin independently.
 | 12 | `remove_dependency` | Removes edge; emits `deps.cascade.requested`; the `to` side may flip `is_ready=true`. |
 | 13 | `set_state` | Writes one or more of `impl_state`, `review_state`, `qa_state`, `pipeline_state`. **In P01, this enforces structural invariants AND the five PRD §6.2 state-machine invariants (round-2 D2)** — pure column-value rules with no comment-trail dependency (e.g. writing `qa_state=failed` requires `review_state=approved`; writing `review_state=needs_rework` resets `qa_state=pending` atomically). The **comment-trail-driven Layer-1 BLOCK conditions are P02** — see §3.4. |
 | 14 | `get_state` | Returns the four state columns + materialised `pipeline_stage` + most recent `(kind, status)` per kind from the comment trail. |
+| 15 | `promote` | **(round-16, bead `unblock-tv8.71`)** Backlog→Ready; precondition `status='Backlog' AND is_ready=true`. The canonical Ready writer (closes round-12 DRIFT-2). Also pins the `is_ready`-on-create rule + the full §6.6 status transition map. |
+| 16 | `create_milestone` | **(round-16, bead `unblock-tv8.74`)** Facade over `workitems.CreateMilestone`. |
+| 17 | `update_milestone` | **(round-16, bead `unblock-tv8.74`)** Facade over `workitems.UpdateMilestone`. |
+| 18 | `assign_item` | **(round-16, bead `unblock-tv8.74`)** Facade over `workitems.AssignItem` (incl. unassign). |
+| 19 | `milestone_tree` | **(round-16, bead `unblock-tv8.74`)** Facade over `workitems.MilestoneTree`. |
+| 20 | `create_label` | **(round-16, bead `unblock-tv8.75`)** Create a label over the existing `workitems.labels` table; org-scoped + RBAC. |
+| 21 | `list_labels` | **(round-16, bead `unblock-tv8.75`)** List labels in scope (project + inherited org). |
+| 22 | `update_label` | **(round-16, bead `unblock-tv8.75`)** Rename + recolor a label. |
+| 23 | `delete_label` | **(round-16, bead `unblock-tv8.75`)** Delete a label; junction rows cascade. |
+
+> **Round-16 note.** Tools 15–23 were added by the P01 round-16 amendment.
+> `promote` (15) and the `is_ready`-on-create rule are owned by bead
+> `unblock-tv8.71`; the milestone tools (16–19) by `unblock-tv8.74` (which
+> OVERRIDES the original §2.1 / round-2 D1 "milestone tools defer to P02"
+> decision); the label tools (20–23) by `unblock-tv8.75`. Two further
+> round-16 beads change contracts without adding tools: `unblock-tv8.73`
+> (`issued_to_user` NOT NULL + new migration `0110`) and `unblock-tv8.76`
+> (`show` resolves parent + direct deps to `{id,title,status}`).
+> `unblock-tv8.72` reuses the new §7 `PRECONDITION_NOT_MET {status,required}`
+> taxonomy for the `claim`-on-not-Ready error. See spec §6.2 / §6.6 / §7.2.
 
 ### 2.3 Cross-cutting machinery in P01
 
@@ -116,7 +147,8 @@ sequence, which the §9.4.0 ordering rules already pin independently.
   zero. Plus the NFR-1 latency check (`prime → ready → claim` p99 < 2 s)
   on the warm-cache integration harness.
 - **Catalogue source file** — `apps/api/mcp/catalogue.json` is **created
-  in P01** with the 14 P01 tools' tool definitions, but the
+  in P01** with the 23 P01 tools' tool definitions (round-16: 14→23, see
+  spec §10.3), but the
   state-machine section is left as a placeholder (the BLOCK conditions
   catalogue is finalised in P02). `go generate` runs in P01 and emits
   `apps/api/mcp/catalogue.gen.go`. SPEC §7.2 / AR-4 drift CI is
@@ -237,7 +269,7 @@ into bd.
 |---|---|---|
 | A-1 | Initialise Encore app at `apps/api/encore.app` (Go module, build, dev-loop sanity) | go-supervisor (Greta) |
 | A-2 | Bootstrap migration: `pgcrypto`, `pg_trgm`, eight schemas declared (per SPEC §9.4.0) | go-supervisor (Greta) |
-| A-3 | Migrations §9.4.1–§9.4.8 in canonical order | go-supervisor (Greta) |
+| A-3 | Migrations §9.4.1–§9.4.8 in canonical order; **round-16: + `0110_mcp_issued_to_user_notnull.up.sql`** (`issued_to_user` NOT NULL + FK `ON DELETE CASCADE`, bead `unblock-tv8.73`, spec §3.2) | go-supervisor (Greta) |
 | A-4 | `pkg/rbac` typed query helper + per-service DB binding | go-supervisor (Greta) |
 | A-5 | Tracing + JSON-Lines logging scaffold (NFR-12) — ULID `trace_id` minted at MCP entry, propagated via `context.Context` per SPEC §10.2 Option B (no `X-Unblock-Trace-Id` header) | go-supervisor (Greta) |
 | A-6 | CI workflow + lint gates + NFR-1 latency harness scaffold + NFR-2 RBAC suite scaffold (per-language gates wired into `.github/workflows/`) | infra-supervisor (Olive) |
@@ -246,7 +278,7 @@ into bd.
 
 | ID | Task | Owner |
 |---|---|---|
-| B-1 | `auth` service: `Validate`, `ExchangeOAuthCode`, API key issuance + validation, session lifecycle | go-supervisor (Greta) |
+| B-1 | `auth` service: `Validate`, `ExchangeOAuthCode`, API key issuance + validation, session lifecycle. **Round-16:** `IssueAPIKey` rejects empty `issued_to_user` (InvalidArgument); validate path never builds an empty-UID identity (bead `unblock-tv8.73`, spec §4.1 / §4.3.2). | go-supervisor (Greta) |
 | B-2 | `org` service: orgs/projects CRUD, role bindings, `Authorize` | go-supervisor (Greta) |
 | B-3 | RBAC regression suite for `auth` + `org` surfaces | go-supervisor (Greta) |
 
@@ -261,17 +293,18 @@ into bd.
 | C-5 | `pipeline_stage` derivation table integration tests (SPEC §5.7.1) | go-supervisor (Greta) |
 | C-6 | RBAC regression suite extended to `workitems` + `deps` | go-supervisor (Greta) |
 
-### 4.4 Track D — MCP server + 14 tools (depends on Track C)
+### 4.4 Track D — MCP server + 23 tools (depends on Track C; round-16)
 
 | ID | Task | Owner |
 |---|---|---|
 | D-1 | `mcp` service skeleton: Streamable HTTP transport (`POST /mcp` + `GET /mcp` per MCP 2025-06-18 spec) using `github.com/modelcontextprotocol/go-sdk`, Bearer API key auth via `auth.Validate` (HMAC-SHA256 lookup per §9.4.6), tool registry, structured JSON-RPC error envelope, `mcp.tool_calls` audit row per call | go-supervisor (Greta) |
-| D-2 | Tools 1–4: `prime`, `ready`, `claim`, `create` | go-supervisor (Greta) |
-| D-3 | Tools 5–8: `update`, `close`, `show`, `list` | go-supervisor (Greta) |
+| D-2 | Tools 1–4: `prime`, `ready`, `claim`, `create`. **Round-16:** + Tool 15 `promote` + the `is_ready`-on-create inline write (bead `unblock-tv8.71`, spec §6.6); + the §7.2 `PRECONDITION_NOT_MET {status,required}` extension reused by `claim` (bead `unblock-tv8.72`). | go-supervisor (Greta) |
+| D-3 | Tools 5–8: `update`, `close`, `show`, `list`. **Round-16:** Tool 7 `show` resolves parent + direct deps to `{id,title,status}` (bead `unblock-tv8.76`). | go-supervisor (Greta) |
 | D-4 | Tools 9–10: `search`, `comment` | go-supervisor (Greta) |
 | D-5 | Tools 11–12: `add_dependency`, `remove_dependency` | go-supervisor (Greta) |
 | D-6 | Tools 13–14: `set_state` (structural invariants only — §3.4), `get_state` | go-supervisor (Greta) |
-| D-7 | `apps/api/mcp/catalogue.json` v0 (P01 tools, no BLOCK conditions yet) + `go generate` + `catalogue.gen.go` committed | go-supervisor (Greta) |
+| D-7 | `apps/api/mcp/catalogue.json` v0 (all 23 P01 tools, no BLOCK conditions yet) + `go generate` + `catalogue.gen.go` committed | go-supervisor (Greta) |
+| D-8 | **(round-16)** Tools 16–19 milestone MCP facades (`create_milestone`/`update_milestone`/`assign_item`/`milestone_tree`, bead `unblock-tv8.74`) + Tools 20–23 label-registry tools (`create_label`/`list_labels`/`update_label`/`delete_label`, bead `unblock-tv8.75`, backed by new `workitems` label RPCs) | go-supervisor (Greta) |
 
 ### 4.5 Track E — Exit-criterion harness + ops
 
@@ -293,7 +326,7 @@ into bd.
 A (foundations)
   ├─► B (auth + org)
   │     └─► C (workitems + deps + cascade + claim)
-  │           └─► D (mcp + 14 tools)
+  │           └─► D (mcp + 23 tools)
   │                 └─► E (exit-criterion harness + gates)
   └─► CI/lint gates (run on every track's PRs)
 ```
@@ -461,6 +494,12 @@ v0 (the 14 P01 tools, no BLOCK conditions section) ships in P01. The
 codegen target wait until P02, after the BLOCK-conditions section is
 authored.
 
+**Round-16 note (2026-06-04, beads `unblock-tv8.74`/`.75`):** the
+catalogue v0 tool count is reconciled from 14 to 23 (the historical
+"14 P01 tools" figures above are preserved as written). The
+`meta_catalogue` endpoint / codegen interplay is unchanged — they still
+wait for P02 (modulo the D-7 supersession below).
+
 **SUPERSEDED 2026-05-21 by D-7 (bead unblock-tv8.22):** the codegen
 half of this resolution is reversed. Per §2.3 (lines 118-125) and Spec
 §10.3 (lines 2508-2510), `apps/api/mcp/catalogue.gen.go` ships in P01
@@ -616,7 +655,7 @@ This phase is **DONE** when all of the following are demonstrably true.
       implementation starts.
 - [ ] `docs/research/01-research-backend-mvp.md` closes R-P01-1 through
       R-P01-10 with verified findings before the spec is approved.
-- [ ] README.md updated with P01 user surface (MCP Bearer auth, the 14
+- [ ] README.md updated with P01 user surface (MCP Bearer auth, the 23
       tools' one-liners). The former seeder CLI invocation deliverable
       is dropped (round-12 — seeder CLI deleted from P01 scope; the
       exit-criterion fixture is now seeded by the E2E test itself per
@@ -647,7 +686,7 @@ This phase is **DONE** when all of the following are demonstrably true.
 - PRD §1, §4 (US-1 through US-9), §5.1 (FR-1 through FR-13), §8 (P01
   exit criterion), §10 (deps + constraints), §11 (M-1 through M-5).
 - SPEC §3.1 (component diagram), §5.2 (8-service decomposition), §5.2.2
-  (the 14 P01 tools), §5.3 (public surface), §5.4 (cascade), §5.5
+  (the 23 P01 tools; round-16: 14→23), §5.3 (public surface), §5.4 (cascade), §5.5
   (atomic claim), §5.6 (RBAC), §5.7 (state machine, P02 deferral),
   §5.7.1 (`pipeline_stage` derivation), §9.4.0–§9.4.10 (canonical DDL),
   §11 (P01 traceability), §13 AR-8 / AR-11 / AR-13.

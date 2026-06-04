@@ -6,6 +6,7 @@
 **Changelog:**
 - 2026-05-08 — §9.4.10 corrected the local-secrets file path/format from `.encore/local-secrets.toml` (TOML) to `apps/api/.secrets.local.cue` (CUE) per Encore official docs; added parallel mapping note (`MEMORY_DEK` → Go field `MemoryDEK`) referencing P01 spec §3.5 for the full mapping table.
 - 2026-05-12 — §9.4.4 `deps.cascade_events.kind` CHECK enum extended to four first-class values (`'close'`, `'edge_added'`, `'edge_removed'`, `'state_change'`); the round-2 framing of two kinds with a "future" `state_change` was retired. The four kinds are P01-active and partition the cascade write path into two propagation regimes (Regime A: writer-inline `is_ready` writes by Tool 12; Regime B: subscriber-only `pipeline_stage` writes plus subscriber-driven `is_ready` writes for `close` / `edge_added` / `state_change`). Canonical model lives in phase spec [§6.3.0 "Propagation regimes"](./specs/01-spec-backend-mvp.md); this document records *what exists* at architectural level, the phase spec records *how it is implemented*. Status flipped to DRAFT pending re-approval.
+- 2026-06-04 — §5.2.2 + §1 + §6.2 contracts table + §3.x repo-tree + §11 traceability: the v1.0 MCP tool inventory is reconciled from **18 → 27** in lockstep with the **P01 round-16 amendment** (`docs/specs/01-spec-backend-mvp.md`, beads `unblock-tv8.71` / `.74` / `.75`). P01 grows from 14 → 23 (adds `promote`, four milestone tools, four label tools); v1.0 grows to 27 (23 P01 + 4 memory at P02). Provenance: this edit exists solely to keep the Stage-1 architecture inventory identical to the P01 phase spec — no architectural decision changed, only the tool count and names. The P01-round-16 `0110_mcp_issued_to_user_notnull` migration is noted in the §11 P01 row.
 **Source PRD:** [docs/PRD.md](./PRD.md) (APPROVED, 2026-05-07)
 **Companion:** [docs/MANIFESTO.md](./MANIFESTO.md) (APPROVED, 2026-05-07)
 **Carries forward verbatim:** [docs/code-cli/plan.md](./code-cli/plan.md), [docs/code-cli/spec.md](./code-cli/spec.md), [docs/code-cli/research.md](./code-cli/research.md)
@@ -100,9 +101,11 @@ from the Manifesto, the PRD, or the locked code-cli artefacts.
 
 - Single Postgres database with **8 schemas**: `auth`, `org`, `workitems`,
   `deps`, `providers`, `mcp`, `boards`, `memory` (FR-1).
-- **18 MCP tools** at v1.0 over **Streamable HTTP** (per MCP spec 2025-06-18)
-  with `Bearer <api-key>` auth (FR-8). 14 ship in P01, +4 memory tools in
-  P02, plus the providers/sync tooling required for FR-11.
+- **27 MCP tools** at v1.0 over **Streamable HTTP** (per MCP spec 2025-06-18)
+  with `Bearer <api-key>` auth (FR-8; raised from 18 by the P01 round-16
+  amendment). 23 ship in P01 (incl. `promote`, four milestone tools, four
+  label tools), +4 memory tools in P02, plus the providers/sync tooling
+  required for FR-11.
 - **Two public Encore endpoints at v1.0** (`POST /webhooks/github`,
   `POST /mcp` + `GET /mcp` — the latter pair is **one logical endpoint at
   one path** per the Streamable HTTP convention) and **+1 at v1.1**
@@ -213,7 +216,7 @@ runtime coupling is permitted (Manifesto Law 6).
 
 | Contract | Producer | Consumer | Surface |
 |---|---|---|---|
-| **MCP wire protocol** (`modelcontextprotocol/go-sdk`, JSON-RPC over Streamable HTTP) | Encore backend | AI agents | Bearer auth, 18 tools at v1.0; transport per MCP 2025-06-18 spec — see §5.3 |
+| **MCP wire protocol** (`modelcontextprotocol/go-sdk`, JSON-RPC over Streamable HTTP) | Encore backend | AI agents | Bearer auth, 27 tools at v1.0 (P01 round-16; was 18); transport per MCP 2025-06-18 spec — see §5.3 |
 | **Astro Actions ↔ Encore RPC** (private API) | Encore backend (private services) | Astro Actions BFF | Encore-generated TypeScript clients; not reachable from the browser; auth via forwarded session id (`Authorization: Bearer <session_id>` + `X-Unblock-BFF-Origin: astro`) per §5.3.1 |
 | **GitHub webhook payload** | GitHub | Encore backend `providers` service | `POST /webhooks/github`, signature-verified |
 | **OAuth callback (Astro origin)** | GitHub / GitLab | Astro Action `auth/[provider]/callback` → private RPC `auth.exchangeOAuthCode` | Browser redirect target on `unblock.websublime.com`; PKCE-validated; HttpOnly cookie set on Astro origin |
@@ -244,7 +247,7 @@ unblock/
 │   │   ├── workitems/              # work items, comments, labels, milestones
 │   │   ├── deps/                   # dependency graph engine, ready/cycle/cascade
 │   │   ├── providers/              # GitHub webhook ingestion + bidirectional sync
-│   │   ├── mcp/                    # MCP server (SSE transport, 18 tools)
+│   │   ├── mcp/                    # MCP server (Streamable HTTP transport, 27 tools at v1.0 — 23 in P01 per round-16)
 │   │   │   └── catalogue.json      # canonical state-machine + tool catalogue export
 │   │   ├── boards/                 # kanban / saved-view persistence
 │   │   ├── memory/                 # scoped memory service (4 MCP tools)
@@ -437,18 +440,27 @@ The user reviewed and locked this 8:8 decomposition. Isolation > RPC overhead:
   stop the rest of the product. A separate service isolates webhook-handler
   failures and reconciliation jobs from the hot path.
 
-#### 5.2.2 18-tool MCP inventory at v1.0 (CONFIRMED)
+#### 5.2.2 27-tool MCP inventory at v1.0 (CONFIRMED — P01 round-16 reconciliation)
 
-PRD FR-8 promises 18 tools at v1.0. The inventory below pins names and
-one-line descriptions. P01 ships **14**, P02 adds the **4** memory tools.
+> **P01 round-16 reconciliation (2026-06-04).** The original "18-tool"
+> inventory was raised to **27** by the P01 round-16 amendment
+> (`docs/specs/01-spec-backend-mvp.md` round-16 changelog, beads
+> `unblock-tv8.71` / `.74` / `.75`): P01 grows from **14 → 23** by adding
+> `promote`, the four milestone management tools, and the four
+> label-registry tools; v1.0 grows from 18 → **27** (23 P01 + 4 memory at
+> P02). The inventory below is updated to match.
+
+PRD FR-8 promises 27 tools at v1.0. The inventory below pins names and
+one-line descriptions. P01 ships **23**, P02 adds the **4** memory tools.
 The state-machine accessors (`set_state`, `get_state`, `verify_can_transition`)
 and `meta_catalogue` are **operational primitives** that count as part of
-the 18 — they are first-class agent-facing tools, not internal helpers.
+the inventory — they are first-class agent-facing tools, not internal helpers.
 Reconciliation note: PRD FR-8 lists the categories ("work-item CRUD,
-dependencies, ready, claim, close, comment trail, prime, etc.") and PRD §8
-P02 says "+4 memory tools = 18 total". This list reconciles the two.
+dependencies, ready, claim, close, comment trail, prime, etc.") plus the
+round-16 additions; PRD §8 P02 says "+4 memory tools = 27 total". This list
+reconciles the two.
 
-##### P01 — 14 tools (work item core, graph, claim, comments, state, prime)
+##### P01 — 23 tools (work item core, graph, claim, promote, comments, state, prime, milestones, labels)
 
 | # | Tool | One-liner |
 |---|---|---|
@@ -466,32 +478,42 @@ P02 says "+4 memory tools = 18 total". This list reconciles the two.
 | 12 | `remove_dependency` | Remove an edge; fires cascade subscriber (the "to" side may flip to ready) |
 | 13 | `set_state` | Mutate one or more of `impl_state`, `review_state`, `qa_state`, `pipeline_state` — **gated by Layer-1 BLOCK conditions** (§7.5) |
 | 14 | `get_state` | Return the four state columns + the derived `pipeline_stage` + the most recent `(kind, status)` per the comment trail |
+| 15 | `promote` | (P01 round-16, bead `unblock-tv8.71`) Transition a Backlog item to Ready; precondition `status='Backlog' AND is_ready=true`. The canonical Ready writer (closes round-12 DRIFT-2) |
+| 16 | `create_milestone` | (P01 round-16, bead `unblock-tv8.74`) Create a milestone (org- or project-scoped); facade over `workitems.CreateMilestone` |
+| 17 | `update_milestone` | (P01 round-16, bead `unblock-tv8.74`) Update a milestone's name/description/dates/cancellation; reparenting rejected in P01 |
+| 18 | `assign_item` | (P01 round-16, bead `unblock-tv8.74`) Assign an item to a milestone (or unassign via empty `milestone_id`); enforces M-INV-7 |
+| 19 | `milestone_tree` | (P01 round-16, bead `unblock-tv8.74`) Return the recursive milestone tree (depth bound M-INV-6 = 4) |
+| 20 | `create_label` | (P01 round-16, bead `unblock-tv8.75`) Create a user-facing label (org- or project-scoped) over `workitems.labels` |
+| 21 | `list_labels` | (P01 round-16, bead `unblock-tv8.75`) List labels in scope (project labels + inherited org labels; project wins on name) |
+| 22 | `update_label` | (P01 round-16, bead `unblock-tv8.75`) Rename and/or recolor an existing label (scope immutable) |
+| 23 | `delete_label` | (P01 round-16, bead `unblock-tv8.75`) Delete a label; `item_labels` junction rows cascade (items are not deleted) |
 
 ##### P02 — adds 4 memory tools (FR-13)
 
 | # | Tool | One-liner |
 |---|---|---|
-| 15 | `remember` | Write a scoped memory entry (`org` / `project` / `user`); secret sanitiser runs before encryption (NFR-7); 8 KB cap |
-| 16 | `recall` | Read memory entries by scope + key; supports tag and full-text filters |
-| 17 | `memories` | List memory entries by scope with pagination; cheap dashboard read |
-| 18 | `forget` | Soft-delete a memory entry (audit-trail preserved via `deleted_at`-equivalent) |
+| 24 | `remember` | Write a scoped memory entry (`org` / `project` / `user`); secret sanitiser runs before encryption (NFR-7); 8 KB cap |
+| 25 | `recall` | Read memory entries by scope + key; supports tag and full-text filters |
+| 26 | `memories` | List memory entries by scope with pagination; cheap dashboard read |
+| 27 | `forget` | Soft-delete a memory entry (audit-trail preserved via `deleted_at`-equivalent) |
 
-##### Operational primitives (counted within the 18 above; cross-references)
+##### Operational primitives (counted within the 27 above; cross-references)
 
 - `set_state` (#13) and `get_state` (#14) are the canonical state-machine
   accessors. `set_state` is the one tool subject to all of Layer 1's BLOCK
   conditions (§7.5).
 - `verify_can_transition` is **not** a separate top-level MCP tool — it is a
   read-only sub-call exposed via the same SSE channel for the Layer-2 hook
-  (§7.4). It does not count as one of the 18; it is a thin facade over the
+  (§7.4). It does not count as one of the 27; it is a thin facade over the
   same Layer-1 validator that backs `set_state`. (PRD FR-8 reconciliation:
-  the FR-8 sentence "exposing 18 tools at v1.0" refers to the agent-facing
-  inventory above; `verify_can_transition` is a hook-facing primitive shared
-  with the Layer-2 enforcement path.)
+  the FR-8 sentence "exposing 27 tools at v1.0" — raised from 18 by the P01
+  round-16 amendment — refers to the agent-facing inventory above;
+  `verify_can_transition` is a hook-facing primitive shared with the
+  Layer-2 enforcement path.)
 - `meta_catalogue` is **not** a separate top-level MCP tool either — it is a
   read-only catalogue endpoint served by the `mcp` service over the same SSE
   channel for the Layer-3 build-time renderer to verify against the
-  checked-in `catalogue.json` (§7.2). It does not count toward the 18 for
+  checked-in `catalogue.json` (§7.2). It does not count toward the 27 for
   the same reason: it is an operational read primitive consumed by tooling,
   not by agents in their workflow.
 
@@ -2228,8 +2250,8 @@ release candidate must additionally pass the cross gates.
 
 | Phase | Components touched | Manifesto coverage | Exit criterion (per PRD §8) |
 |---|---|---|---|
-| **P01 — Backend MVP** | `apps/api/auth` (incl. **migrations directory for all 8 schemas**, see §5.2), `org`, `workitems`, `deps`, `memory` (schema-only stub), `providers` (schema-only stub), `boards` (schema-only stub), `mcp` (14 tools, Streamable HTTP transport per MCP spec 2025-06-18), `public/`; migrations §9.4.1–§9.4.8 (all eight schemas land in P01 per the plan resolution; service code for `providers`/`boards`/`memory` is deferred to later phases per plan §2.1) | L1, L2, L3 (foundations), L5, L7 | Agent completes `prime → ready → claim → close` against a manually-seeded graph; cascade fires; cycle detection rejects offending edges |
-| **P02 — Backend complete** | `apps/api/providers` (webhook + sync), `apps/api/boards`, `mcp` (+4 memory tools = 18 total), Layer 1 state-transition validator, **`mcp.meta_catalogue` v1 + `verify_can_transition` v1** (operational primitives, §5.2.2); migrations §9.4.5 + §9.4.7 | L3 (provider events), L8 layer 1 | A GitHub repo can be linked, webhooks normalise into canonical work items, attempts to mark `done` without the required comment trail are rejected at the MCP boundary; `mcp.meta_catalogue` returns the live catalogue.json; `verify_can_transition` validates a candidate transition against the same Layer-1 validator |
+| **P01 — Backend MVP** | `apps/api/auth` (incl. **migrations directory for all 8 schemas**, see §5.2), `org`, `workitems`, `deps`, `memory` (schema-only stub), `providers` (schema-only stub), `boards` (schema-only stub), `mcp` (23 tools per P01 round-16 — was 14; adds `promote`, four milestone tools, four label tools; Streamable HTTP transport per MCP spec 2025-06-18), `public/`; migrations §9.4.1–§9.4.8 + round-16 `0110_mcp_issued_to_user_notnull` (all eight schemas land in P01 per the plan resolution; service code for `providers`/`boards`/`memory` is deferred to later phases per plan §2.1) | L1, L2, L3 (foundations), L5, L7 | Agent completes `prime → ready → claim → close` against a manually-seeded graph; cascade fires; cycle detection rejects offending edges |
+| **P02 — Backend complete** | `apps/api/providers` (webhook + sync), `apps/api/boards`, `mcp` (+4 memory tools = 27 total; P01 round-16 carried P01 to 23), Layer 1 state-transition validator, **`mcp.meta_catalogue` v1 + `verify_can_transition` v1** (operational primitives, §5.2.2); migrations §9.4.5 + §9.4.7 | L3 (provider events), L8 layer 1 | A GitHub repo can be linked, webhooks normalise into canonical work items, attempts to mark `done` without the required comment trail are rejected at the MCP boundary; `mcp.meta_catalogue` returns the live catalogue.json; `verify_can_transition` validates a candidate transition against the same Layer-1 validator |
 | **P03 — AST CLI v1.0.0** | `crates/unblock-indexer-core`, `unblock-indexer`, `unblock-code` | L6 | All 9 HARD gates in code-cli/plan §14.1 pass on a fresh clone; ROI harness publishes raw logs + per-flow medians as a release artefact |
 | **P04 — Plugin renderer** | `crates/unblock-plugin` **consumes the P02-shipped `mcp.meta_catalogue` v1** at build time (and embeds `crates/unblock-plugin/data/catalogue.json` via `include_str!`); registers the `verify-state` hook against `mcp.verify_can_transition` (also shipped in P02) | L8 layer 2 + 3 (full Law 8) | Pipeline-bypass attempt is rejected by MCP (Layer 1, P02), flagged by the post-dispatch hook (Layer 2), and refused by the agent prompt's BLOCK condition (Layer 3); all three layers agree; catalogue drift CI test green |
 | **P05 — Astro web (v1.1)** | `apps/web/` (Astro Actions BFF including `auth/[provider]/callback`, kanban, graph, roadmap, comments) | L4 | A developer authenticates, sees the same graph the agent sees, and acts on it through the BFF without the browser ever obtaining Encore credentials |
@@ -2340,10 +2362,10 @@ This document moves from DRAFT to APPROVED when:
 - [x] BLOCK condition schema pinned (§7.5) — typed shape, single
       `catalogue.json` source consumed by Layer 1 (Go codegen), Layer 2
       (`verify_can_transition` re-validates), and Layer 3 (Rust renderer).
-- [x] 18 MCP tool inventory pinned (§5.2.2) — 14 in P01, +4 memory in P02;
-      `verify_can_transition` and `meta_catalogue` are operational
-      primitives outside the agent-facing 18 (PRD FR-8 reconciliation
-      noted inline).
+- [x] 27 MCP tool inventory pinned (§5.2.2; P01 round-16: 18→27) — 23 in
+      P01, +4 memory in P02; `verify_can_transition` and `meta_catalogue`
+      are operational primitives outside the agent-facing 27 (PRD FR-8
+      reconciliation noted inline).
 - [x] Diagram + traceability cleanup (§3.1 catalogue arrow added; §11
       P02 ships `meta_catalogue` v1, P04 consumes it; §5.7 codegen route
       named — `apps/api/mcp/catalogue.gen.go` via `go generate`; §7.2
