@@ -2,6 +2,7 @@
 
 **Status:** APPROVED (round-16 P01 tool-surface scope amendment applied 2026-06-04; §3.5 fifth-secret addition applied 2026-06-02; round-15 NFR-1 harness test-isolation + mcpaudittest hardening applied 2026-05-29; round-14 NFR-1 latency-harness scope applied 2026-05-29; round-6 cascade-symmetry applied 2026-05-12; round-5 tracing applied 2026-05-12; round-4 auth applied 2026-05-11; DRIFT-1/-2 applied 2026-05-08; round-2 applied 2026-05-08; round-3 research applied 2026-05-08; original APPROVED 2026-05-07)
 **Changelog:**
+- 2026-06-11 — round-16 lockstep-completion drift-closure (spec-drift surfaced by `/investigate` on bead `unblock-tv8.74`; status remains APPROVED): two mechanical prose corrections, no design change. (1) **§4.4.1 milestone P02-deferral stragglers corrected** — the 2026-06-04 round-16 changelog claimed §4.4.1 "milestone-tools-now wording" was patched, but three prose lines escaped and still said the milestone MCP tools defer to P02 (the §4.4.1 intro paragraph, the `UpdateMilestone` reparenting doc-comment cross-reference, and the `MilestoneTree` "Used by" note); all three now state the tools ship NOW in P01 as MCP Tools 16–19 (§6.2), in lockstep with the round-16 §1/§6 override. The genuinely-deferred reparenting feature and the 4 P02 memory tools are untouched. (2) **§6.2 Tools 16–19 authorization wording aligned with the established Bearer-Identity org-scoping pattern** — the round-16 Tool 16/18 contracts mentioned a literal `org.Authorize` call, but NO shipped MCP handler (all 15) calls `org.Authorize` directly; the established pattern is org scoping via the Bearer-resolved org-scoped `Identity` (`withIdentityFromReq` + `identity.OrgID` on the write path; `rbac.For` SQL-injected tenant predicate on the read path), with the backing `workitems` write RPCs not self-gating (auth-model doc-comment at `apps/api/workitems/workitems.go:28-66`). Tools 16/17/18 (write) and 19 (read) reworded accordingly. Scoped to milestone tools only; the label Tools 20–23 (sibling bead `unblock-tv8.75`) carry the same `org.Authorize` phrasing and are deliberately left for .75's flow. No DDL / migration / public-API / `go.mod` change — the implementation bead `unblock-tv8.74` owns the catalogue + handler code. Spec status remains APPROVED.
 - 2026-06-11 — round-16 drift-closure (spec-drift closure from `/investigate` on bead `unblock-tv8.73`; status remains APPROVED): four mechanical lockstep corrections to the 2026-06-04 round-16 amendment, no design change. (1) **Migration renumbered `0110` → `0120`** — the round-16 text named the new up-only migration `0110_mcp_issued_to_user_notnull.up.sql`, but slot `0110` is already taken by the committed `0110_mcp_warning_codes.up.sql` (bead `unblock-tv8.63`); renamed to `0120_mcp_issued_to_user_notnull.up.sql` at every reference (round-16 changelog bullet, §3.2 table row + sequence note, §4.3.2 step 8, §11.1.2, §12 A-3 row). (2) **Root `docs/SPEC.md` §9.4.6 brought into lockstep** — the `mcp.api_keys.issued_to_user` DDL there still declared the column nullable with `ON DELETE SET NULL`; corrected to NOT NULL / `ON DELETE CASCADE` with the audit-survival note, and the §11 P01 row + changelog migration name renumbered to `0120`. (3) **§3.2 prose column fix** — the audit-survival FK was mis-named `mcp.tool_calls.issued_to_user` (no such column); corrected to `mcp.tool_calls.api_key_id` (already `ON DELETE SET NULL`). (4) **§4.3.2 step 3 SELECT aligned with code** — the documented `validateAPIKey` SELECT omitted `issued_to_user`; the column is added to match `apps/api/auth/auth.go`. No DDL semantics change, no public-API change, no `go.mod` change — the implementation bead `unblock-tv8.73` owns the migration file + code. Spec status remains APPROVED.
 - 2026-06-04 — round-16 (P01 MCP tool-surface scope amendment; surfaced by the 2026-06-03 local-MCP demo + 2026-06-04 review; covers epic `unblock-tv8` beads .71/.72/.73/.74/.75/.76): the P01 agent-facing tool inventory grows from **14 to 23** and the v1.0 inventory from **18 to 27** (still + the 4 memory tools at P02). Five contract changes land in lockstep. (1) **`promote` keystone (.71)** — a new Tool 15 `promote` transitions an item Backlog→Ready, precondition `status='Backlog' AND is_ready=true`; the not-ready rejection reuses the EXISTING §7 `PRECONDITION_NOT_MET` kind, extended ADDITIVELY with a `{status, required}` pair alongside the existing `{missing}`/`{rejection_reason}` shapes. .71 also closes round-12 DRIFT-2 ("the state-machine does not allow the canonical fixture's Done/Ready end-states via RPC") by pinning the FULL Backlog/Ready/InProgress/Blocked/Done transition map (§6.6) incl. the Ready→Blocked demotion that fires when a `blocks` edge is later added to a Ready item. .71 further pins the **`is_ready`-on-create rule**: a freshly-created item with no incoming `blocks` edges MUST get `is_ready=true` INLINE at create time inside `workitems.Create`'s own transaction (today `recomputeReady` never fires on the create path, so such items are stranded non-ready); `workitems.Create` joins the §6.3.0 Regime A `is_ready` single-writer allow-list and the §11.3 `no_direct_is_ready_write` allow-list, and the misleading create doc-comment is corrected. (2) **`issued_to_user` REQUIRED (.73)** — the column becomes NOT NULL on every MCP API key; all "nullable / org-level service key" wording is removed; a new up-only migration `0120_mcp_issued_to_user_notnull.up.sql` runs `ALTER … SET NOT NULL` and swaps the FK from `ON DELETE SET NULL` to `ON DELETE CASCADE` (deleting a user deletes their keys; `mcp.tool_calls` audit rows survive via their own `ON DELETE SET NULL`); `IssueAPIKey` rejects empty `IssuedToUser` with `InvalidArgument`; the §4.3.2 validate path never constructs an empty-UID identity. (3) **Milestone MCP tools (.74)** — OVERRIDES the §6.2 round-2 D1 deferral note + the §1 / §4.4.1 P02-deferral wording: the four milestone tools `create_milestone` / `update_milestone` / `assign_item` (incl. unassign via empty `milestone_id`) / `milestone_tree` are exposed NOW (Tools 16–19), thin MCP facades over the already-shipping `workitems.CreateMilestone`/`UpdateMilestone`/`AssignItem`/`MilestoneTree` private RPCs (§4.4.1). (4) **Label-registry MCP tools (.75)** — four NEW org-scoped, RBAC-gated tools `create_label` / `list_labels` / `update_label` (rename + recolor) / `delete_label` (Tools 20–23) over the existing `workitems.labels` table; four new `workitems` private RPCs back them. (5) **`show` resolves references (.76)** — Tool 7 `show` resolves the parent and the direct in/out dependency targets to `{id, title, status}` objects (one level deep, payload bounded) instead of bare IDs. The §7 `PRECONDITION_NOT_MET {status, required}` extension defined by .71 is the SAME taxonomy reused by .72 (the `claim`-on-not-Ready error) — .72 carries no separate spec text; its error is satisfied by the .71 §7 design. Patches in lockstep: §1 overview (tool-count bullets + milestone P02-defer wording) … §3.2 (new migration `0120`) … §4.1 (`IssueAPIKeyRequest.IssuedToUser` REQUIRED + doc-comment) … §4.3.2 step 8 (no empty-UID identity) … §4.4.1 (milestone-tools-now wording) … §5.2 (NOT-exposed list trimmed) … §6 header ("The 23 P01 MCP Tools") … §6.2 deferral note (rewritten: milestone + label + promote tools now in P01) … §6.2 Tool 7 `show` (reference resolution) … new §6.2 Tools 15–23 … new §6.6 (status transition map) … §6.3.0 Regime A allow-list (+`workitems.Create`) … §7 (`PRECONDITION_NOT_MET {status, required}` extension) … §10.3 (catalogue tool count 14→23) … §11.1.2 (promote assertion) … §11.3 `is_ready` allow-list (+`workitems.Create`) … §12 task table (D-2 promote, D-8 milestone+label tools, A-3 migration 0120) … §14 approval checklist (14→23). Cross-doc reconciliation (CONFIRMED by Miguel, no doc left stale): docs/PRD.md FR-8 + priority row, docs/SPEC.md §5.2.2 inventory + the "18 tools" mentions, and docs/plans/01-plan-backend-mvp.md tool table are all updated to the identical P01=23 / v1.0=27 counts, each carrying a P01-round-16 provenance note. Spec status remains APPROVED — this is a scope amendment, not a re-architecting.
 - 2026-05-08 — DRIFT-1 (naming): clarified §3.5 that the four logical secret names are spec-level identifiers; added logical-name ↔ Go-field mapping table for the Encore Go secrets manifest.
@@ -1046,10 +1047,14 @@ type DeleteLabelResponse struct {
 
 #### 4.4.1 Milestone RPCs (round-2 D1)
 
-Milestones (PRD §6.3 + SPEC §9.4.3) ship in P01 as **private RPCs only**.
-Agent-facing MCP tools defer to P02 alongside memory tools (see §1
-overview / round-2 D1: option (c) preserves FR-8 "18 tools at v1.0").
-P01 consumers of these RPCs: the E2E exit-criterion test
+Milestones (PRD §6.3 + SPEC §9.4.3) ship in P01. **Round-16 (bead
+`unblock-tv8.74`) OVERRIDES the original round-2 D1 deferral:** these
+private RPCs are now also exposed agent-facing as MCP **Tools 16–19**
+(`create_milestone` / `update_milestone` / `assign_item` /
+`milestone_tree`, §6.2) — thin MCP facades over the RPCs below. Only the
+4 memory tools remain deferred to P02 (see §1 overview / round-16
+amendment). P01 consumers of these RPCs: the MCP tool handlers (Tools
+16–19, §6.2) AND the E2E exit-criterion test
 (`apps/api/exitcriteriontest/` — see §11.1, round-12) drives them from
 its `TestMain` through Encore's private mesh to assert the
 milestone-tree shape; the future Astro client (P05) calls them too.
@@ -1106,7 +1111,8 @@ type Milestone struct {
 // parent range AND against any existing children (a date-range narrowing
 // that violates a child's range is rejected). Reparenting is NOT
 // supported in P01 — change parent_milestone_id is rejected with
-// kind=VALIDATION (deferred to P02 alongside the milestone MCP tools).
+// kind=VALIDATION (reparenting itself is deferred to P02; the milestone
+// MCP tools ship NOW in P01 as Tools 16–19, §6.2).
 func UpdateMilestone(ctx context.Context, req UpdateMilestoneRequest) (*Milestone, error)
 
 type UpdateMilestoneRequest struct {
@@ -1146,10 +1152,11 @@ type AssignItemRequest struct {
 // UpdateMilestone for ancestor / depth checks).
 //
 // Used by:
+//  - MCP Tool 19 `milestone_tree` (§6.2, round-16) — the agent-facing
+//    facade delegates to this RPC;
 //  - the E2E exit-criterion test (`apps/api/exitcriteriontest/`,
 //    round-12) to verify post-seed milestone-tree shape;
-//  - P05 Astro roadmap view (when the milestone MCP tools land in P02
-//    they delegate to this RPC).
+//  - P05 Astro roadmap view (delegates to this RPC).
 func MilestoneTree(ctx context.Context, req MilestoneTreeRequest) (*MilestoneTree, error)
 
 type MilestoneTreeRequest struct {
@@ -2121,9 +2128,13 @@ no `CascadeRequested` and is not a Regime A `is_ready` writer.
 #### Tool 16 — `create_milestone` (round-16, bead `unblock-tv8.74`)
 
 Thin MCP facade over `workitems.CreateMilestone` (§4.4.1). Org- or
-project-scoped (XOR); RBAC-gated (`org.Authorize` on
-`workitems.milestones`, action `write`). Enforces M-INV-1/2/3/5/6 per the
-backing RPC.
+project-scoped (XOR). Org scoping is enforced by the Bearer-resolved
+org-scoped `Identity` — the handler resolves the caller via
+`withIdentityFromReq` and passes `identity.OrgID` into the backing RPC,
+matching every other write tool on the surface; the backing
+`workitems` write RPC does not self-gate (see the auth-model
+doc-comment at `apps/api/workitems/workitems.go`). Enforces
+M-INV-1/2/3/5/6 per the backing RPC.
 
 ```jsonc
 // arguments — mirrors workitems.CreateMilestoneRequest
@@ -2149,7 +2160,9 @@ failures surface as `VALIDATION`.
 
 Thin MCP facade over `workitems.UpdateMilestone` (§4.4.1). Updates name,
 description, start/end dates, and cancellation. **Reparenting is rejected**
-in P01 (`VALIDATION`) exactly as the backing RPC specifies. RBAC-gated.
+in P01 (`VALIDATION`) exactly as the backing RPC specifies. Org scoping
+is enforced by the Bearer-resolved org-scoped `Identity` (`identity.OrgID`
+via `withIdentityFromReq`), matching the rest of the tool surface.
 
 ```jsonc
 // arguments — mirrors workitems.UpdateMilestoneRequest
@@ -2172,7 +2185,9 @@ in P01 (`VALIDATION`) exactly as the backing RPC specifies. RBAC-gated.
 Thin MCP facade over `workitems.AssignItem` (§4.4.1). Assigns a work item
 to a milestone, or **unassigns** when `milestone_id` is the empty string
 (clears `milestone_id` + `milestone_assigned_at` + `milestone_assigned_by`).
-Enforces M-INV-7. RBAC-gated on `workitems.items` (action `write`).
+Enforces M-INV-7. Org scoping is enforced by the Bearer-resolved
+org-scoped `Identity` (`identity.OrgID` via `withIdentityFromReq`),
+matching the rest of the tool surface.
 
 ```jsonc
 // arguments — mirrors workitems.AssignItemRequest
@@ -2192,8 +2207,10 @@ Enforces M-INV-7. RBAC-gated on `workitems.items` (action `write`).
 #### Tool 19 — `milestone_tree` (round-16, bead `unblock-tv8.74`)
 
 Thin MCP facade over `workitems.MilestoneTree` (§4.4.1). Returns the
-recursive milestone tree (depth bounded at M-INV-6 = 4). RBAC-gated
-(action `read`).
+recursive milestone tree (depth bounded at M-INV-6 = 4). Read-side org
+scoping is enforced by the Bearer-resolved org-scoped `Identity` — the
+backing RPC self-gates via `rbac.For` (the tenant predicate is injected
+into the SQL), matching the rest of the read-side tool surface.
 
 ```jsonc
 // arguments — mirrors workitems.MilestoneTreeRequest
