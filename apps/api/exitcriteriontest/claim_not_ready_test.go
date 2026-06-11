@@ -38,6 +38,12 @@ func TestExitCriterion_ClaimNotReady(t *testing.T) {
 	// Create a fresh item. With no inline dependencies it is is_ready=true
 	// but status='Backlog' (§6.6 is_ready-on-create). We deliberately do
 	// NOT promote it, so its Status stays 'Backlog'.
+	//
+	// NOTE: this MCP create path yields is_ready=true, whereas the
+	// workitems-level createBacklogItem helper seeds is_ready=false. Both
+	// are intentional — is_ready is irrelevant to claim's status gate, which
+	// keys only on Status<>'Ready', so either is_ready value drives the same
+	// PRECONDITION_NOT_MET rejection asserted below.
 	createEnv := callTool(t, f.RawKey, sessionID, "create", map[string]any{
 		"project_id": f.ProjectID,
 		"type":       "task",
