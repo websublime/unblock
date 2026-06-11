@@ -119,6 +119,10 @@ var toolRegistrars = []func(*sdkmcp.Server){
 	registerHandleRemoveDependency,
 	registerHandleSetState,
 	registerHandleGetState,
+	// round-16, bead unblock-tv8.71: promote (Tool 15) is the canonical
+	// Backlog→Ready writer (§6.2 Tool 15 / §6.6). Appended at position 15
+	// per the spec tool order.
+	registerHandlePromote,
 }
 
 func init() {

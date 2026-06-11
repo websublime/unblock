@@ -1,6 +1,6 @@
 // gen-catalogue is the codegen entry point for the §10.3 MCP tool
 // catalogue. It reads apps/api/mcp/catalogue.json, validates its
-// structural invariants (14 tool entries, transitions[] empty, every
+// structural invariants (15 tool entries, transitions[] empty, every
 // tool carries the four mandatory fields), then emits a deterministic
 // catalogue.gen.go file containing:
 //
@@ -45,10 +45,13 @@ import (
 )
 
 // expectedToolCount pins the §10.3 / SPEC.md 5.2.2 P01 inventory at
-// 14. A future Pxx revision that adds tools must update this constant
+// 15. A future Pxx revision that adds tools must update this constant
 // and the catalogue.json source in the same commit; the structural
 // check below is the single boundary that enforces the count.
-const expectedToolCount = 14
+//
+// round-16, bead unblock-tv8.71: 14 → 15 with the addition of `promote`
+// (Tool 15, the Backlog→Ready writer per §6.2 Tool 15 / §6.6).
+const expectedToolCount = 15
 
 // catalogueDoc mirrors the top-level JSON shape. Only the fields that
 // the generator reasons about structurally appear here; the per-tool
@@ -233,7 +236,7 @@ var tmpl = template.Must(template.New("catalogue.gen.go").Parse(`// Code generat
 //   - §10.3 (catalogue authoring + go generate wiring)
 //   - SPEC.md §7.2 (dual-location catalogue contract; D-7 ships the
 //     backend half, the Rust unblock-plugin half lands in P04)
-//   - SPEC.md §5.2.2 (14 P01 tools inventory)
+//   - SPEC.md §5.2.2 (15 P01 tools inventory; +promote round-16)
 
 package mcp
 

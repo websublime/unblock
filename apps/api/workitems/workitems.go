@@ -710,18 +710,32 @@ func Create(ctx context.Context, req *CreateRequest) (*Item, error) {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// Initial status / pipeline_stage are defaults. is_ready starts false
-	// (cascade subscriber recomputes; for items with no incoming
-	// 'blocks' edges deps.AddEdge / subscriber will flip to true).
-	// pipeline_state defaults to 'running'.
+	// Initial status is 'Backlog'; pipeline_stage / pipeline_state are
+	// schema defaults. is_ready is set INLINE here (round-16, bead
+	// unblock-tv8.71, §6.6 is_ready-on-create rule + §6.3.0 Regime A).
+	//
+	// A freshly-created item has no incoming 'blocks' edges yet, so it is
+	// ready by construction — is_ready=true. (The column DEFAULT is false;
+	// before round-16 nothing on the create path set it, and an item with
+	// no incoming blockers never triggered deps.recomputeReady — the sole
+	// is_ready writer runs only from AddEdge/RemoveEdge/Close — so such
+	// items were stranded non-ready and thus never promote-able.) If the
+	// dependencies[] argument inlines an incoming 'blocks' edge (the new
+	// item as to_item), the AddEdgeInTx loop below recomputes is_ready for
+	// the new item via the §6.5 NOT EXISTS predicate inside this same
+	// transaction, correcting the initial true to the proper value.
+	//
+	// status stays 'Backlog' — is_ready=true makes the item immediately
+	// promote-able (Tool 15 / §6.6), but promotion is an explicit agent
+	// action, not an implicit side-effect of create.
 	_, err = tx.Exec(ctx,
 		`INSERT INTO workitems.items
 		   (id, org_id, project_id, milestone_id, parent_id, discovered_from_id,
 		    type, title, body, priority,
-		    severity, kind_of_finding)
+		    severity, kind_of_finding, is_ready)
 		 VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), NULLIF($5, ''), NULLIF($6, ''),
 		         $7, $8, $9, $10,
-		         NULLIF($11, ''), NULLIF($12, ''))`,
+		         NULLIF($11, ''), NULLIF($12, ''), true)`,
 		id, req.OrgID, req.ProjectID, req.MilestoneID, req.ParentID, req.DiscoveredFromID,
 		itemType, title, req.Body, priority,
 		req.Severity, req.KindOfFinding,
@@ -1617,6 +1631,115 @@ func Claim(ctx context.Context, req *ClaimRequest) (*Item, error) {
 					"err", err, "item_id", req.ItemID)
 			}
 		}
+	}
+
+	return readItem(ctx, req.ItemID)
+}
+
+// PromoteRequest is the input to Promote. SPEC §6.2 Tool 15.
+type PromoteRequest struct {
+	ItemID string `json:"item_id"`
+}
+
+// Promote transitions a Backlog item to Ready (SPEC §6.2 Tool 15 / §6.6
+// status transition map / round-16, bead unblock-tv8.71). This is the
+// canonical Ready writer that round-12 DRIFT-2 observed was missing —
+// before promote nothing moved an item into Ready via RPC, so the ready
+// queue and claim (which require status='Ready') were inert for any item
+// created through the create tool.
+//
+// Precondition: status='Backlog' AND is_ready=true. The item must already
+// be in Backlog (only a Backlog item is promotable; an already-Ready,
+// InProgress, Blocked, or Done item is rejected) AND have no unresolved
+// incoming 'blocks' edges (is_ready=true — every blocker is Done).
+// is_ready is a single-writer materialised column (§6.3.0 Regime A);
+// promote READS it and does NOT recompute it.
+//
+// Rejections (§7 error envelope):
+//   - Not in Backlog OR not ready → PRECONDITION_NOT_MET with the §7.2
+//     {status, required} extension: data.status carries the item's CURRENT
+//     status and data.required="Ready". When the block is specifically
+//     "still has open blockers" (status='Backlog' but is_ready=false) the
+//     handler also sets data.missing="is_ready" so the agent can
+//     disambiguate "wrong status" from "blocked".
+//   - Item not found / not visible → NOT_FOUND.
+//
+// Side-effects: NONE on the cascade subsystem. Moving an item
+// Backlog→Ready does not change any OTHER item's is_ready (a dependent's
+// is_ready flips only when ITS blocker becomes Done, not merely Ready) and
+// does not change §5.7.1 pipeline_stage derivation inputs. promote
+// therefore publishes no CascadeRequested and is NOT a Regime A is_ready
+// writer (it writes only status). It writes NO state-dimension columns
+// (impl_state etc.) and does NOT touch is_ready or claimed_by_*.
+//
+//encore:api private method=POST path=/workitems.Promote
+func Promote(ctx context.Context, req *PromoteRequest) (*Item, error) {
+	if req == nil || req.ItemID == "" {
+		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "missing item_id"}
+	}
+
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return nil, &errs.Error{Code: errs.Internal, Message: "db begin failed"}
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Lock the row and read its current status + is_ready. We re-check the
+	// precondition against the LOCKED row (not a prior read) so a
+	// concurrent add_dependency that flips is_ready false cannot race the
+	// promotion (TOCTOU): the FOR UPDATE serialises promote against the
+	// §6.5 inline is_ready recompute.
+	var currentStatus string
+	var isReady bool
+	err = tx.QueryRow(ctx,
+		`SELECT status, is_ready
+		   FROM workitems.items
+		  WHERE id = $1
+		  FOR UPDATE`,
+		req.ItemID,
+	).Scan(&currentStatus, &isReady)
+	if err != nil {
+		if errors.Is(err, sqldb.ErrNoRows) {
+			return nil, &errs.Error{Code: errs.NotFound, Message: "item not found"}
+		}
+		return nil, &errs.Error{Code: errs.Internal, Message: "promote lock failed"}
+	}
+
+	// Precondition: status='Backlog' AND is_ready=true. On failure emit
+	// PRECONDITION_NOT_MET with the §7.2 {status, required} extension
+	// (errmap surfaces these inside data.details). data.missing="is_ready"
+	// is added only when the item IS in Backlog but still blocked, so the
+	// agent distinguishes "wrong status" from "blocked".
+	if currentStatus != statusBacklog || !isReady {
+		meta := errs.Metadata{
+			"invariant": "promote_requires_ready_backlog",
+			"status":    currentStatus,
+			"required":  statusReady,
+		}
+		if currentStatus == statusBacklog && !isReady {
+			meta["missing"] = "is_ready"
+		}
+		return nil, &errs.Error{
+			Code:    errs.FailedPrecondition,
+			Message: "promote requires status='Backlog' AND is_ready=true",
+			Meta:    meta,
+		}
+	}
+
+	if _, err := tx.Exec(ctx,
+		`UPDATE workitems.items
+		    SET status     = 'Ready',
+		        updated_at = now()
+		  WHERE id = $1`,
+		req.ItemID,
+	); err != nil {
+		rlog.Error("workitems: promote update failed", "err", err, "item_id", req.ItemID)
+		return nil, &errs.Error{Code: errs.Internal, Message: "promote update failed"}
+	}
+
+	if err := tx.Commit(); err != nil {
+		rlog.Error("workitems: promote commit failed", "err", err)
+		return nil, &errs.Error{Code: errs.Internal, Message: "promote commit failed"}
 	}
 
 	return readItem(ctx, req.ItemID)

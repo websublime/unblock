@@ -384,6 +384,25 @@
           }
         }
       }
+    },
+    {
+      "name": "promote",
+      "description": "Promote a Backlog item to Ready so it enters the ready queue and becomes claimable. Precondition: status=Backlog AND is_ready=true (no open blockers). Rejects with PRECONDITION_NOT_MET carrying data.status (current Status), data.required=Ready, and data.missing=is_ready when the item is Backlog but still blocked. Side-effect free on the cascade subsystem.",
+      "input_schema": {
+        "type": "object",
+        "required": ["item_id"],
+        "properties": {
+          "item_id": { "type": "string" }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "required": ["item"],
+        "properties": {
+          "item": { "$ref": "#/$shared/Item" }
+        }
+      }
     }
   ],
   "transitions": [],

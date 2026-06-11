@@ -2815,17 +2815,22 @@ wired producer).** Two alternatives were weighed:
 > every status-precondition rejection.
 
 When a tool rejects because the subject item is in the WRONG `Status`
-(§6.1 enum) for the requested operation, the `data` object carries two
-additional optional fields:
+(§6.1 enum) for the requested operation, the `data.details` object carries
+two additional optional fields. They live INSIDE `data.details` (the
+locked §7 base-table lists `{ "status": "Backlog", "required": "Ready" }`
+in the `details` shape column), alongside the existing `missing` /
+`rejection_reason` keys — NOT as siblings of `kind` / `tool` / `trace_id`:
 
 ```jsonc
 {
   "kind": "PRECONDITION_NOT_MET",
   "tool": "promote",
   "trace_id": "<ULID>",
-  "status":   "Backlog",   // the item's CURRENT Status enum value
-  "required": "Ready",     // the Status the operation requires
-  "missing":  "is_ready"   // OPTIONAL; present when the blocker is specifically an unmet readiness/structural precondition
+  "details": {
+    "status":   "Backlog",   // the item's CURRENT Status enum value
+    "required": "Ready",     // the Status the operation requires
+    "missing":  "is_ready"   // OPTIONAL; present when the blocker is specifically an unmet readiness/structural precondition
+  }
 }
 ```
 
@@ -2837,9 +2842,10 @@ additional optional fields:
   (e.g. `"is_ready"` when a Backlog item still has open blockers, or
   `"claimed_by_id"` for the §6.2 Tool 6 close precondition).
 
-`status` and `required` are present together or not at all. A rejection
-that is purely structural (e.g. close's `claimed_by_id IS NULL`) MAY omit
-`status`/`required` and carry only `missing`, exactly as today.
+`data.details.status` and `data.details.required` are present together or
+not at all. A rejection that is purely structural (e.g. close's
+`claimed_by_id IS NULL`) MAY omit `status`/`required` and carry only
+`missing`, exactly as today.
 
 **Owned by `promote` (Tool 15 / `unblock-tv8.71`); reused by:**
 
@@ -3367,9 +3373,9 @@ seeded fixture and asserts:
 - [ ] `set_state(impl_state=done)` on the claimed item is accepted (structural invariant only — `claimed_by_id` is set).
 - [ ] `close` on the same item succeeds (P01 relaxation: `claimed_by_id IS NOT NULL` is the only precondition); cascade subscriber fires.
 - [ ] After cascade, `prime` reflects newly unblocked dependents (`itm_c`, `itm_d` flip `is_ready=true`); they remain `status='Backlog'` until promoted.
-- [ ] **`promote` (round-16, bead `unblock-tv8.71`).** `promote(item_id=itm_c)` — where `itm_c` is `status='Backlog' AND is_ready=true` after the cascade above — succeeds and returns the item with `status='Ready'`; a subsequent `ready` lists `itm_c`. `promote` on an item that is still blocked (e.g. an item with an open `blocks` parent, `is_ready=false`) is rejected with `{ "kind": "PRECONDITION_NOT_MET", "status": "Backlog", "required": "Ready", "missing": "is_ready" }` per §7.2; `promote` on an already-`Ready` item is rejected with `{ "kind": "PRECONDITION_NOT_MET", "status": "Ready", "required": "Ready" }`.
+- [ ] **`promote` (round-16, bead `unblock-tv8.71`).** `promote(item_id=itm_c)` — where `itm_c` is `status='Backlog' AND is_ready=true` after the cascade above — succeeds and returns the item with `status='Ready'`; a subsequent `ready` lists `itm_c`. `promote` on an item that is still blocked (e.g. an item with an open `blocks` parent, `is_ready=false`) is rejected with `{ "kind": "PRECONDITION_NOT_MET", "details": { "status": "Backlog", "required": "Ready", "missing": "is_ready" } }` per §7.2; `promote` on an already-`Ready` item is rejected with `{ "kind": "PRECONDITION_NOT_MET", "details": { "status": "Ready", "required": "Ready" } }`.
 - [ ] **`is_ready`-on-create (round-16, bead `unblock-tv8.71`).** A `create` of a fresh `type=task` item with no inline dependencies returns an item whose `is_ready=true` and `status='Backlog'` (asserts the inline create-path write, not subscriber materialisation); the item is immediately `promote`-able.
-- [ ] **`claim`-on-not-Ready (round-16, bead `unblock-tv8.72`).** `claim` on an item whose `Status <> 'Ready'` (e.g. a Backlog item that was never promoted) is rejected with `{ "kind": "PRECONDITION_NOT_MET", "status": "Backlog", "required": "Ready" }` per §7.2 — the SAME extension `promote` defines (distinct from the `ALREADY_CLAIMED` concurrent-loser path).
+- [ ] **`claim`-on-not-Ready (round-16, bead `unblock-tv8.72`).** `claim` on an item whose `Status <> 'Ready'` (e.g. a Backlog item that was never promoted) is rejected with `{ "kind": "PRECONDITION_NOT_MET", "details": { "status": "Backlog", "required": "Ready" } }` per §7.2 — the SAME extension `promote` defines (distinct from the `ALREADY_CLAIMED` concurrent-loser path).
 - [ ] **`issued_to_user` REQUIRED (round-16, bead `unblock-tv8.73`).** `auth.IssueAPIKey` with an empty `issued_to_user` is rejected with `InvalidArgument`; a successfully-issued key resolves (§4.3.2) to an `Identity` whose `UserID` is non-empty. (DDL-level: the `0110` migration makes `mcp.api_keys.issued_to_user` NOT NULL.)
 - [ ] **`show` reference resolution (round-16, bead `unblock-tv8.76`).** `show(itm_b)` returns `parent` (or `null`), and `dependencies_in` / `dependencies_out` as `ResolvedRef[]` each carrying `{id, title, status, kind}` for the DIRECT neighbours only — assert the neighbour's `title` + `status` are populated and that the resolution is one level deep (the neighbour's own dependencies are NOT present in the payload).
 - [ ] **Milestone + label MCP tools reachable (round-16, beads `unblock-tv8.74` / `unblock-tv8.75`).** The harness drives `create_milestone` → `assign_item` → `milestone_tree` through the MCP boundary (not just the private RPCs) and asserts the tree shape; and drives `create_label` → `list_labels` → `update_label` → `delete_label`, asserting the registry round-trips and `delete_label` detaches the label from any items it was applied to.

@@ -1501,3 +1501,299 @@ func TestSetStatePropertyHalfChangeHalfPipeOnlyN100(t *testing.T) {
 	t.Logf("N=100 split (change=%d, pipe=%d): state_change publishes: change=%d, pipe=%d",
 		halfChange, N-halfChange, changeHits, pipeHits)
 }
+
+// -----------------------------------------------------------------------------
+// Promote (Tool 15) + is_ready-on-create + status⇄is_ready reconciliation
+// (round-16, bead unblock-tv8.71 — SPEC §6.2 Tool 15, §6.6, §7.2).
+// -----------------------------------------------------------------------------
+
+// readStatusIsReady fetches (status, is_ready) by id for assertions.
+func readStatusIsReady(t *testing.T, ctx context.Context, id string) (status string, isReady bool) {
+	t.Helper()
+	if err := encoredb.DB.QueryRow(ctx,
+		`SELECT status, is_ready FROM workitems.items WHERE id = $1`, id,
+	).Scan(&status, &isReady); err != nil {
+		t.Fatalf("readStatusIsReady %s: %v", id, err)
+	}
+	return
+}
+
+// TestCreateSetsIsReadyInline asserts the §6.6 is_ready-on-create rule:
+// a fresh create with NO incoming blockers comes back is_ready=true and
+// status='Backlog' (the inline write, not subscriber materialisation).
+func TestCreateSetsIsReadyInline(t *testing.T) {
+	ctx := context.Background()
+	fx := seedFixture(t, ctx)
+
+	item, err := workitems.Create(ctx, &workitems.CreateRequest{
+		OrgID: fx.OrgID, ProjectID: fx.ProjectID, Type: "task", Title: "fresh",
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if !item.IsReady {
+		t.Fatalf("Create: is_ready = false, want true (§6.6 inline create-path write)")
+	}
+	if item.Status != "Backlog" {
+		t.Fatalf("Create: status = %q, want Backlog", item.Status)
+	}
+	// Assert against the column directly, not just the returned struct.
+	status, isReady := readStatusIsReady(t, ctx, item.ID)
+	if status != "Backlog" || !isReady {
+		t.Fatalf("Create persisted (status=%q, is_ready=%v), want (Backlog, true)", status, isReady)
+	}
+}
+
+// TestCreateWithBlockerIsNotReady asserts that a create inlining an
+// incoming 'blocks' edge whose blocker is NOT Done comes back
+// is_ready=false (the create edge loop's §6.5 recompute corrects the
+// initial inline true).
+func TestCreateWithBlockerIsNotReady(t *testing.T) {
+	ctx := context.Background()
+	fx := seedFixture(t, ctx)
+
+	blocker, err := workitems.Create(ctx, &workitems.CreateRequest{
+		OrgID: fx.OrgID, ProjectID: fx.ProjectID, Type: "task", Title: "blocker",
+	})
+	if err != nil {
+		t.Fatalf("Create blocker: %v", err)
+	}
+	dependent, err := workitems.Create(ctx, &workitems.CreateRequest{
+		OrgID: fx.OrgID, ProjectID: fx.ProjectID, Type: "task", Title: "dependent",
+		Dependencies: []deps.Edge{{FromItem: blocker.ID, Kind: "blocks"}},
+	})
+	if err != nil {
+		t.Fatalf("Create dependent: %v", err)
+	}
+	if dependent.IsReady {
+		t.Fatalf("Create with open blocker: is_ready = true, want false")
+	}
+}
+
+// TestPromoteHappyPath asserts Backlog→Ready via promote on a fresh
+// (is_ready=true) item.
+func TestPromoteHappyPath(t *testing.T) {
+	ctx := context.Background()
+	fx := seedFixture(t, ctx)
+
+	item, err := workitems.Create(ctx, &workitems.CreateRequest{
+		OrgID: fx.OrgID, ProjectID: fx.ProjectID, Type: "task", Title: "promote-me",
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	got, err := workitems.Promote(ctx, &workitems.PromoteRequest{ItemID: item.ID})
+	if err != nil {
+		t.Fatalf("Promote: %v", err)
+	}
+	if got.Status != "Ready" {
+		t.Fatalf("Promote: status = %q, want Ready", got.Status)
+	}
+	if !got.IsReady {
+		t.Fatalf("Promote: is_ready = false, want true (promote reads, never recomputes)")
+	}
+}
+
+// TestPromoteRejectsAlreadyReady asserts the §7.2 {status, required}
+// rejection (no `missing`) when the target is already Ready.
+func TestPromoteRejectsAlreadyReady(t *testing.T) {
+	ctx := context.Background()
+	fx := seedFixture(t, ctx)
+	itemID := createReadyItem(t, ctx, fx) // status=Ready, is_ready=true
+
+	_, err := workitems.Promote(ctx, &workitems.PromoteRequest{ItemID: itemID})
+	if err == nil {
+		t.Fatalf("expected FailedPrecondition, got nil")
+	}
+	if errs.Code(err) != errs.FailedPrecondition {
+		t.Fatalf("err code = %v, want FailedPrecondition", errs.Code(err))
+	}
+	e := err.(*errs.Error)
+	if e.Meta["status"] != "Ready" {
+		t.Fatalf("meta[status] = %v, want Ready", e.Meta["status"])
+	}
+	if e.Meta["required"] != "Ready" {
+		t.Fatalf("meta[required] = %v, want Ready", e.Meta["required"])
+	}
+	if _, present := e.Meta["missing"]; present {
+		t.Fatalf("meta[missing] present (%v), want absent for a wrong-status (not blocked) rejection", e.Meta["missing"])
+	}
+}
+
+// TestPromoteRejectsBlocked asserts the §7.2 rejection with
+// missing="is_ready" when the Backlog target still has an open blocker.
+func TestPromoteRejectsBlocked(t *testing.T) {
+	ctx := context.Background()
+	fx := seedFixture(t, ctx)
+
+	blocker, err := workitems.Create(ctx, &workitems.CreateRequest{
+		OrgID: fx.OrgID, ProjectID: fx.ProjectID, Type: "task", Title: "blocker",
+	})
+	if err != nil {
+		t.Fatalf("Create blocker: %v", err)
+	}
+	dependent, err := workitems.Create(ctx, &workitems.CreateRequest{
+		OrgID: fx.OrgID, ProjectID: fx.ProjectID, Type: "task", Title: "dependent",
+		Dependencies: []deps.Edge{{FromItem: blocker.ID, Kind: "blocks"}},
+	})
+	if err != nil {
+		t.Fatalf("Create dependent: %v", err)
+	}
+
+	_, err = workitems.Promote(ctx, &workitems.PromoteRequest{ItemID: dependent.ID})
+	if err == nil {
+		t.Fatalf("expected FailedPrecondition, got nil")
+	}
+	e := err.(*errs.Error)
+	if e.Meta["status"] != "Backlog" {
+		t.Fatalf("meta[status] = %v, want Backlog", e.Meta["status"])
+	}
+	if e.Meta["required"] != "Ready" {
+		t.Fatalf("meta[required] = %v, want Ready", e.Meta["required"])
+	}
+	if e.Meta["missing"] != "is_ready" {
+		t.Fatalf("meta[missing] = %v, want is_ready", e.Meta["missing"])
+	}
+}
+
+// TestPromoteNotFound asserts NOT_FOUND on an unknown id.
+func TestPromoteNotFound(t *testing.T) {
+	ctx := context.Background()
+	_ = seedFixture(t, ctx)
+	missing, err := ulid.New()
+	if err != nil {
+		t.Fatalf("ulid: %v", err)
+	}
+	_, err = workitems.Promote(ctx, &workitems.PromoteRequest{ItemID: missing})
+	if err == nil {
+		t.Fatalf("expected NotFound, got nil")
+	}
+	if errs.Code(err) != errs.NotFound {
+		t.Fatalf("err code = %v, want NotFound", errs.Code(err))
+	}
+}
+
+// TestAddEdgeDemotesReadyToBlocked asserts the §6.6 Ready→Blocked
+// demotion: adding an open incoming 'blocks' edge to a Ready (unclaimed)
+// item flips is_ready=false AND status='Blocked' in the same write.
+func TestAddEdgeDemotesReadyToBlocked(t *testing.T) {
+	ctx := context.Background()
+	fx := seedFixture(t, ctx)
+
+	// Promote a fresh item to Ready, then add a fresh non-Done blocker.
+	dependent, err := workitems.Create(ctx, &workitems.CreateRequest{
+		OrgID: fx.OrgID, ProjectID: fx.ProjectID, Type: "task", Title: "to-demote",
+	})
+	if err != nil {
+		t.Fatalf("Create dependent: %v", err)
+	}
+	if _, err := workitems.Promote(ctx, &workitems.PromoteRequest{ItemID: dependent.ID}); err != nil {
+		t.Fatalf("Promote: %v", err)
+	}
+	blocker, err := workitems.Create(ctx, &workitems.CreateRequest{
+		OrgID: fx.OrgID, ProjectID: fx.ProjectID, Type: "task", Title: "new-blocker",
+	})
+	if err != nil {
+		t.Fatalf("Create blocker: %v", err)
+	}
+
+	if _, err := deps.AddEdge(ctx, &deps.AddEdgeRequest{
+		OrgID: fx.OrgID, ProjectID: fx.ProjectID,
+		FromItem: blocker.ID, ToItem: dependent.ID, Kind: "blocks",
+	}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+
+	status, isReady := readStatusIsReady(t, ctx, dependent.ID)
+	if isReady {
+		t.Fatalf("post-AddEdge: is_ready = true, want false (open blocker)")
+	}
+	if status != "Blocked" {
+		t.Fatalf("post-AddEdge: status = %q, want Blocked (§6.6 Ready→Blocked demotion)", status)
+	}
+}
+
+// TestAddEdgeDoesNotDemoteInProgress asserts the §6.6 rule that an
+// InProgress (claimed) item is NEVER demoted: a new open blocker flips
+// is_ready=false but LEAVES status='InProgress'.
+func TestAddEdgeDoesNotDemoteInProgress(t *testing.T) {
+	ctx := context.Background()
+	fx := seedFixture(t, ctx)
+
+	// A Ready item, claimed → InProgress.
+	itemID := createReadyItem(t, ctx, fx)
+	if _, err := workitems.Claim(ctx, &workitems.ClaimRequest{
+		ItemID: itemID, ClaimerUserID: fx.UserID, ClaimerAgent: "claude-code",
+	}); err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	blocker, err := workitems.Create(ctx, &workitems.CreateRequest{
+		OrgID: fx.OrgID, ProjectID: fx.ProjectID, Type: "task", Title: "ip-blocker",
+	})
+	if err != nil {
+		t.Fatalf("Create blocker: %v", err)
+	}
+
+	if _, err := deps.AddEdge(ctx, &deps.AddEdgeRequest{
+		OrgID: fx.OrgID, ProjectID: fx.ProjectID,
+		FromItem: blocker.ID, ToItem: itemID, Kind: "blocks",
+	}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+
+	status, isReady := readStatusIsReady(t, ctx, itemID)
+	if isReady {
+		t.Fatalf("post-AddEdge on InProgress: is_ready = true, want false")
+	}
+	if status != "InProgress" {
+		t.Fatalf("post-AddEdge on InProgress: status = %q, want InProgress (never demoted per §6.6)", status)
+	}
+}
+
+// TestCloseRecoversBlockedToReady asserts the §6.6 Blocked→Ready
+// recovery: when the last open blocker closes, the inline is_ready
+// recompute flips is_ready=true AND the demoted Blocked item returns to
+// Ready in the same write.
+func TestCloseRecoversBlockedToReady(t *testing.T) {
+	ctx := context.Background()
+	fx := seedFixture(t, ctx)
+
+	// dependent → Ready, then demoted to Blocked by a new blocker.
+	dependent, err := workitems.Create(ctx, &workitems.CreateRequest{
+		OrgID: fx.OrgID, ProjectID: fx.ProjectID, Type: "task", Title: "to-recover",
+	})
+	if err != nil {
+		t.Fatalf("Create dependent: %v", err)
+	}
+	if _, err := workitems.Promote(ctx, &workitems.PromoteRequest{ItemID: dependent.ID}); err != nil {
+		t.Fatalf("Promote: %v", err)
+	}
+	blocker := createReadyItem(t, ctx, fx) // Ready, claimable
+	if _, err := deps.AddEdge(ctx, &deps.AddEdgeRequest{
+		OrgID: fx.OrgID, ProjectID: fx.ProjectID,
+		FromItem: blocker, ToItem: dependent.ID, Kind: "blocks",
+	}); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if status, _ := readStatusIsReady(t, ctx, dependent.ID); status != "Blocked" {
+		t.Fatalf("pre-close: dependent status = %q, want Blocked", status)
+	}
+
+	// Claim then close the blocker (close requires claimed_by_id).
+	if _, err := workitems.Claim(ctx, &workitems.ClaimRequest{
+		ItemID: blocker, ClaimerUserID: fx.UserID, ClaimerAgent: "claude-code",
+	}); err != nil {
+		t.Fatalf("Claim blocker: %v", err)
+	}
+	if _, err := workitems.Close(ctx, &workitems.CloseRequest{ItemID: blocker}); err != nil {
+		t.Fatalf("Close blocker: %v", err)
+	}
+
+	status, isReady := readStatusIsReady(t, ctx, dependent.ID)
+	if !isReady {
+		t.Fatalf("post-close: dependent is_ready = false, want true (last blocker Done)")
+	}
+	if status != "Ready" {
+		t.Fatalf("post-close: dependent status = %q, want Ready (§6.6 Blocked→Ready recovery)", status)
+	}
+}

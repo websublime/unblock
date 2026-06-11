@@ -245,6 +245,23 @@ func classifyEnvelopeError(err error) envelopeError {
 		if v, ok := e.Meta["missing"].(string); ok && v != "" {
 			details["missing"] = v
 		}
+		// SPEC §7.2 (round-16, bead unblock-tv8.71): the status-precondition
+		// extension. When a tool rejects because the subject item is in the
+		// WRONG Status (§6.1 enum) for the requested operation, the backing
+		// RPC sets Meta["status"] (the item's CURRENT Status) and
+		// Meta["required"] (the Status the operation demands). They are
+		// surfaced INSIDE data.details (the locked §7 base-table shape lists
+		// them in the `details` column — the §7.2 example block draws them at
+		// the wrong level and is corrected in the same PR). status/required
+		// are present together or not at all; a purely-structural rejection
+		// (e.g. close's claimed_by_id) carries only `missing` as before.
+		// Reused identically by claim (Tool 3 / bead unblock-tv8.72).
+		if v, ok := e.Meta["status"].(string); ok && v != "" {
+			details["status"] = v
+		}
+		if v, ok := e.Meta["required"].(string); ok && v != "" {
+			details["required"] = v
+		}
 		// SPEC §6.2 Tool 13 line 1645-1646 + bead unblock-tv8.21 AC: surface
 		// the canonical invariant name as `data.invariant` (kebab-case) for
 		// machine-readability. The legacy `rejection_reason` mirror is
