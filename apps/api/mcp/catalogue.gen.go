@@ -14,7 +14,7 @@
 //   - §10.3 (catalogue authoring + go generate wiring)
 //   - SPEC.md §7.2 (dual-location catalogue contract; D-7 ships the
 //     backend half, the Rust unblock-plugin half lands in P04)
-//   - SPEC.md §5.2.2 (19 P01 tools inventory; +promote +milestone round-16)
+//   - SPEC.md §5.2.2 (23 P01 tools inventory; +promote +milestone +label round-16)
 
 package mcp
 

@@ -1,6 +1,6 @@
 // gen-catalogue is the codegen entry point for the §10.3 MCP tool
 // catalogue. It reads apps/api/mcp/catalogue.json, validates its
-// structural invariants (19 tool entries, transitions[] empty, every
+// structural invariants (23 tool entries, transitions[] empty, every
 // tool carries the four mandatory fields), then emits a deterministic
 // catalogue.gen.go file containing:
 //
@@ -242,7 +242,7 @@ var tmpl = template.Must(template.New("catalogue.gen.go").Parse(`// Code generat
 //   - §10.3 (catalogue authoring + go generate wiring)
 //   - SPEC.md §7.2 (dual-location catalogue contract; D-7 ships the
 //     backend half, the Rust unblock-plugin half lands in P04)
-//   - SPEC.md §5.2.2 (19 P01 tools inventory; +promote +milestone round-16)
+//   - SPEC.md §5.2.2 (23 P01 tools inventory; +promote +milestone +label round-16)
 
 package mcp
 
