@@ -18,9 +18,9 @@
 //     authoritative source; the Rust `crates/unblock-plugin/data/catalogue.json`
 //     copy lands in P04 and the catalogue-drift CI test boots the
 //     emulator + diffs them).
-//   - SPEC.md §5.2.2 — 15 P01 tools inventory (round-16: +promote,
-//     Tool 15; mirrored in the gen-catalogue tool's expectedToolCount
-//     constant).
+//   - SPEC.md §5.2.2 — 19 P01 tools inventory (round-16: +promote,
+//     Tool 15, then +milestone Tools 16–19; mirrored in the
+//     gen-catalogue tool's expectedToolCount constant).
 //
 // The `mcp.meta_catalogue` MCP tool that serves Catalogue over the wire
 // is **not** registered in P01 — it ships in P02 alongside the BLOCK

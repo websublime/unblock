@@ -26,7 +26,8 @@
 //     file's package import.
 //
 // In D-1 (this bead, unblock-tv8.16) no tools are registered on the
-// SDK server — the 14 P01 tools land in D-2..D-6. The transport
+// SDK server — the P01 tools land in D-2..D-6 (the inventory has since
+// grown to 19 with the round-16 promote + milestone tools). The transport
 // adapter is functional for the initialize / list_tools handshake
 // (initialize returns server capabilities + Mcp-Session-Id; ListTools
 // returns an empty tool list; an unknown tools/call returns a §7
@@ -123,6 +124,14 @@ var toolRegistrars = []func(*sdkmcp.Server){
 	// Backlog→Ready writer (§6.2 Tool 15 / §6.6). Appended at position 15
 	// per the spec tool order.
 	registerHandlePromote,
+	// round-16, bead unblock-tv8.74: milestone management (Tools 16–19).
+	// Thin MCP facades over the workitems milestone RPCs (§4.4.1 / §6.2
+	// Tools 16–19). Appended in spec order; order is not load-bearing
+	// (the SDK keys tools by name).
+	registerHandleCreateMilestone,
+	registerHandleUpdateMilestone,
+	registerHandleAssignItem,
+	registerHandleMilestoneTree,
 }
 
 func init() {

@@ -1,7 +1,7 @@
 // catalogue_test.go exercises the §10.3 MCP tool catalogue invariants
 // pinned by D-7 (unblock-tv8.22):
 //
-//  - catalogue.json contains exactly 14 P01 tool entries (AC #1)
+//  - catalogue.json contains exactly 19 P01 tool entries (AC #1)
 //  - every tool carries name, description, input_schema, output_schema
 //    (AC #1)
 //  - transitions[] is an empty array (AC #2)
@@ -33,12 +33,15 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// expectedP01ToolNames mirrors SPEC.md §5.2.2 (15 P01 tools) in the
+// expectedP01ToolNames mirrors SPEC.md §5.2.2 (19 P01 tools) in the
 // canonical spec order. Kept local to this test so a future spec edit
 // that re-orders or adds tools shows up as a single-file diff.
 //
 // round-16, bead unblock-tv8.71: +promote (Tool 15, the Backlog→Ready
 // writer per §6.2 Tool 15 / §6.6) appended at position 15.
+// round-16, bead unblock-tv8.74: +milestone management (Tools 16–19:
+// create_milestone / update_milestone / assign_item / milestone_tree
+// per §6.2) appended at positions 16–19.
 var expectedP01ToolNames = []string{
 	"prime",
 	"ready",
@@ -55,6 +58,10 @@ var expectedP01ToolNames = []string{
 	"set_state",
 	"get_state",
 	"promote",
+	"create_milestone",
+	"update_milestone",
+	"assign_item",
+	"milestone_tree",
 }
 
 // catalogueFileDoc mirrors the on-disk JSON shape — kept independent of
@@ -119,10 +126,11 @@ func TestCatalogueTransitionsEmpty(t *testing.T) {
 	}
 }
 
-// TestCataloguePxxToolCount pins AC #1 first half: exactly 15 entries
-// in tools[] (round-16: +promote). A 16th tool means either a later
-// round has shipped (in which case expectedToolCount in the generator +
-// this test both bump) or the catalogue and the SPEC have drifted.
+// TestCataloguePxxToolCount pins AC #1 first half: exactly 19 entries
+// in tools[] (round-16: +promote, then +milestone Tools 16–19). A 20th
+// tool means either a later round has shipped (in which case
+// expectedToolCount in the generator + this test both bump) or the
+// catalogue and the SPEC have drifted.
 func TestCataloguePxxToolCount(t *testing.T) {
 	doc := loadCatalogueFromDisk(t)
 	if got := len(doc.Tools); got != len(expectedP01ToolNames) {

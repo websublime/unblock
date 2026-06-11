@@ -40,12 +40,16 @@
 //   - Write-side RPCs (Create, Update, AppendComment, SetStateColumns,
 //     Close, Claim, CreateMilestone, UpdateMilestone, AssignItem) do
 //     NOT call org.Authorize internally. They trust that the MCP tool
-//     handler invoked org.Authorize against the caller's session +
-//     the request's org_id BEFORE dispatching to the private RPC. The
-//     MCP layer is the single authoritative gate for the write path
-//     because it owns the session→identity resolution and the role
-//     resolution that org.Authorize requires. Layering Authorize
-//     inside every private write RPC would duplicate that
+//     handler resolved the caller's org-scoped Identity from the Bearer
+//     hot path and pinned org scope to identity.OrgID BEFORE dispatching
+//     to the private RPC — no handler in P01 calls org.Authorize
+//     directly; the org gate is the Bearer-resolved Identity injected
+//     via the mcp withIdentityFromReq bridge (the write RPCs read
+//     auth.UserID()/auth.Data() and trust identity.OrgID; org_id is
+//     never accepted from the wire on the write tools). The MCP layer is
+//     the single authoritative gate for the write path because it owns
+//     the session→identity resolution. Layering an explicit Authorize
+//     call inside every private write RPC would duplicate that
 //     resolution, double-bill the auth schema, and split the audit
 //     trail between two layers.
 //
