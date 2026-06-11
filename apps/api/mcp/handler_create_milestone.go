@@ -8,9 +8,14 @@
 // it is org-scoped using identity.OrgID. This matches the rest of the
 // write surface (handler_create pins OrgID=identity.OrgID; handler_prime
 // / handler_ready dropped the request-side org_id in rework S1 to close
-// confused-deputy seams). The backing workitems write RPC does not
-// self-gate — the MCP handler is the authoritative write gate
-// (workitems.go auth-model doc-comment).
+// confused-deputy seams). The handler ALSO pins CallerOrgID=identity.OrgID;
+// the backing workitems.CreateMilestone RPC self-gates its parent-read
+// seam on it (round-16 / bead unblock-tv8.77, §10.1.1) — a foreign
+// parent_milestone_id yields NOT_FOUND rather than leaking a cross-tenant
+// parent's scope/dates. The empty-CallerOrgID no-op covers trusted
+// internal callers (the §11.1.1 E2E seed); the MCP handler always pins it,
+// so the no-op is unreachable from the agent surface (workitems.go
+// auth-model doc-comment).
 //
 // Invariant violations (M-INV-2/3/5/6) surface from the backing RPC as
 // FailedPrecondition with Meta["invariant"]; mapError projects them into
