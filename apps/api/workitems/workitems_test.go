@@ -272,6 +272,129 @@ func TestMilestoneTreeRequiresScope(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------------
+// Label-registry RPC input rejection (round-16, bead unblock-tv8.75).
+// These hit the pre-DB validation paths only — every case returns before
+// any db.Exec, so they run under plain `go test` without the Encore
+// runtime. Persistence + CONFLICT + cascade-detach are covered by the
+// §11.4 E2E harness (exitcriteriontest/labels_mcp_test.go).
+// -----------------------------------------------------------------------------
+
+func TestCreateLabelRejectsBadInput(t *testing.T) {
+	longName := strings.Repeat("x", labelNameMaxLen+1)
+	cases := []struct {
+		name string
+		req  *CreateLabelRequest
+	}{
+		{"nil", nil},
+		{"missing scope", &CreateLabelRequest{Name: "bug", Color: "#d73a4a"}},
+		{"both scope", &CreateLabelRequest{OrgID: "o", ProjectID: "p", Name: "bug", Color: "#d73a4a"}},
+		{"empty name", &CreateLabelRequest{OrgID: "o", Name: "", Color: "#d73a4a"}},
+		{"name too long", &CreateLabelRequest{OrgID: "o", Name: longName, Color: "#d73a4a"}},
+		{"bad color no hash", &CreateLabelRequest{OrgID: "o", Name: "bug", Color: "d73a4a"}},
+		{"bad color short", &CreateLabelRequest{OrgID: "o", Name: "bug", Color: "#fff"}},
+		{"bad color non-hex", &CreateLabelRequest{OrgID: "o", Name: "bug", Color: "#gggggg"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := CreateLabel(context.Background(), tc.req)
+			if err == nil {
+				t.Fatalf("expected InvalidArgument, got nil")
+			}
+			if errs.Code(err) != errs.InvalidArgument {
+				t.Fatalf("err code = %v, want InvalidArgument", errs.Code(err))
+			}
+		})
+	}
+}
+
+func TestListLabelsRequiresOrgScope(t *testing.T) {
+	cases := []struct {
+		name string
+		req  *ListLabelsRequest
+	}{
+		{"nil", nil},
+		{"empty org", &ListLabelsRequest{}},
+		{"project without org", &ListLabelsRequest{ProjectID: "p"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ListLabels(context.Background(), tc.req)
+			if err == nil {
+				t.Fatalf("expected InvalidArgument, got nil")
+			}
+			if errs.Code(err) != errs.InvalidArgument {
+				t.Fatalf("err code = %v, want InvalidArgument", errs.Code(err))
+			}
+		})
+	}
+}
+
+func TestUpdateLabelRejectsBadInput(t *testing.T) {
+	longName := strings.Repeat("x", labelNameMaxLen+1)
+	badName := longName
+	badColor := "not-a-color"
+	cases := []struct {
+		name string
+		req  *UpdateLabelRequest
+	}{
+		{"nil", nil},
+		{"empty label_id", &UpdateLabelRequest{}},
+		{"name too long", &UpdateLabelRequest{LabelID: "l", Name: &badName}},
+		{"bad color", &UpdateLabelRequest{LabelID: "l", Color: &badColor}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := UpdateLabel(context.Background(), tc.req)
+			if err == nil {
+				t.Fatalf("expected InvalidArgument, got nil")
+			}
+			if errs.Code(err) != errs.InvalidArgument {
+				t.Fatalf("err code = %v, want InvalidArgument", errs.Code(err))
+			}
+		})
+	}
+}
+
+func TestDeleteLabelRejectsBadInput(t *testing.T) {
+	cases := []struct {
+		name string
+		req  *DeleteLabelRequest
+	}{
+		{"nil", nil},
+		{"empty label_id", &DeleteLabelRequest{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := DeleteLabel(context.Background(), tc.req)
+			if err == nil {
+				t.Fatalf("expected InvalidArgument, got nil")
+			}
+			if errs.Code(err) != errs.InvalidArgument {
+				t.Fatalf("err code = %v, want InvalidArgument", errs.Code(err))
+			}
+		})
+	}
+}
+
+// TestLabelColorPatternMatchesDDL pins the Go-side color guard to the
+// labels_color_chk DDL regex (#RRGGBB) so the early VALIDATION matches the
+// DB's last-line-of-defence CHECK exactly.
+func TestLabelColorPatternMatchesDDL(t *testing.T) {
+	good := []string{"#d73a4a", "#FFFFFF", "#000000", "#AbCdEf"}
+	bad := []string{"", "d73a4a", "#fff", "#1234567", "#gggggg", "#12 456"}
+	for _, c := range good {
+		if !labelColorPattern.MatchString(c) {
+			t.Errorf("color %q should match #RRGGBB", c)
+		}
+	}
+	for _, c := range bad {
+		if labelColorPattern.MatchString(c) {
+			t.Errorf("color %q should NOT match #RRGGBB", c)
+		}
+	}
+}
+
+// -----------------------------------------------------------------------------
 // preconditionError shape.
 // -----------------------------------------------------------------------------
 

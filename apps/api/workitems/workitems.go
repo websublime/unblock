@@ -74,6 +74,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -459,6 +460,84 @@ type MilestoneTreeResponse struct {
 	Roots []MilestoneNode `json:"roots"`
 }
 
+// --- Label-registry types (round-16, bead unblock-tv8.75) ---
+// Back the label MCP tools (§6.2 Tools 20–23) over the EXISTING
+// workitems.labels / workitems.item_labels tables (SPEC §9.4.3). Migration
+// 0130_workitems_labels_updated_at.up.sql (§3.2) adds the updated_at column
+// declared by Label below. Org scoping follows the Bearer-Identity pattern
+// (§6.2 closing note): the write RPCs (CreateLabel / UpdateLabel /
+// DeleteLabel) trust the org-scoped Identity pinned by the MCP handler
+// (identity.OrgID) and do NOT call org.Authorize; the read RPC (ListLabels)
+// self-gates via an explicit tenant predicate scoped to the caller's org.
+
+// Label is one workitems.labels row. OrgID is empty when project-scoped;
+// ProjectID is empty when org-scoped (the labels_scope_xor_chk CHECK
+// enforces exactly-one). SPEC §4.4.
+type Label struct {
+	ID          string    `json:"id"`
+	OrgID       string    `json:"org_id"`
+	ProjectID   string    `json:"project_id"`
+	Name        string    `json:"name"`
+	Color       string    `json:"color"`
+	Description string    `json:"description"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// CreateLabelRequest is the input to CreateLabel. SPEC §4.4.
+//
+// OrgID is NOT a wire argument — the MCP handler pins it from the
+// Bearer-resolved org-scoped Identity (identity.OrgID) and passes it
+// RPC-side (mirrors CreateMilestoneRequest). ProjectID is the XOR
+// selector: empty → org-scoped to OrgID; non-empty → project-scoped.
+type CreateLabelRequest struct {
+	OrgID       string `json:"org_id"`
+	ProjectID   string `json:"project_id"`
+	Name        string `json:"name"`
+	Color       string `json:"color"`
+	Description string `json:"description"`
+}
+
+// ListLabelsRequest is the input to ListLabels. SPEC §4.4.
+//
+// OrgID is NOT a wire argument — the read RPC scopes to the caller's org
+// via an explicit tenant predicate (org from identity.OrgID, pinned by the
+// MCP handler). When ProjectID is set the RPC returns the project's labels
+// PLUS the inherited org labels, applying PRD §6.4 "project wins on
+// identical name".
+type ListLabelsRequest struct {
+	OrgID     string `json:"org_id"`
+	ProjectID string `json:"project_id"`
+}
+
+// ListLabelsResponse is the output of ListLabels. SPEC §4.4.
+type ListLabelsResponse struct {
+	Labels []Label `json:"labels"`
+}
+
+// UpdateLabelRequest is the input to UpdateLabel. Renames and/or recolors;
+// the label's scope (OrgID / ProjectID) is immutable. SPEC §4.4.
+type UpdateLabelRequest struct {
+	LabelID     string  `json:"label_id"`
+	Name        *string `json:"name"`
+	Color       *string `json:"color"`
+	Description *string `json:"description"`
+}
+
+// DeleteLabelRequest is the input to DeleteLabel. SPEC §4.4.
+type DeleteLabelRequest struct {
+	LabelID string `json:"label_id"`
+}
+
+// DeleteLabelResponse is the output of DeleteLabel. DetachedItemCount is
+// the number of workitems.item_labels rows removed by the FK cascade.
+// SPEC §4.4.
+type DeleteLabelResponse struct {
+	Deleted           bool   `json:"deleted"`
+	LabelID           string `json:"label_id"`
+	DetachedItemCount int    `json:"detached_item_count"`
+}
+
 // -----------------------------------------------------------------------------
 // Internal vocabularies.
 // -----------------------------------------------------------------------------
@@ -619,7 +698,16 @@ const (
 	searchMaxLimit     = 100
 
 	milestoneMaxDepth = 4 // M-INV-6
+
+	// Label name window (SPEC §6.2 Tool 20: "1..64 chars").
+	labelNameMinLen = 1
+	labelNameMaxLen = 64
 )
+
+// labelColorPattern mirrors the labels_color_chk DB CHECK (#RRGGBB).
+// Validating in Go first surfaces a clean §7 VALIDATION error before the
+// INSERT/UPDATE reaches the DB CHECK (which is the last line of defence).
+var labelColorPattern = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
 
 // -----------------------------------------------------------------------------
 // Core RPC bodies.
@@ -2804,6 +2892,264 @@ func MilestoneTree(ctx context.Context, req *MilestoneTreeRequest) (*MilestoneTr
 	}
 
 	return &MilestoneTreeResponse{Roots: roots}, nil
+}
+
+// -----------------------------------------------------------------------------
+// Label-registry RPCs (round-16, bead unblock-tv8.75). Back §6.2 Tools
+// 20–23 over the EXISTING workitems.labels / workitems.item_labels DDL
+// (SPEC §9.4.3) + migration 0130 (updated_at). Org scoping follows the
+// Bearer-Identity write/read split (see the package auth-model
+// doc-comment): the write RPCs trust identity.OrgID pinned by the MCP
+// handler and do NOT self-gate; ListLabels scopes via an explicit
+// tenant predicate. SPEC §4.4.
+// -----------------------------------------------------------------------------
+
+// CreateLabel inserts a label into the registry, org- XOR project-scoped.
+// OrgID is pinned by the MCP handler from identity.OrgID (never wire). A
+// duplicate name within the same scope (case-insensitive per the
+// lower(name) UNIQUE indexes) → AlreadyExists with Meta["constraint"]
+// naming the violated index, which errmap projects into the §7 CONFLICT
+// envelope's data.constraint. SPEC §4.4 / §6.2 Tool 20.
+//
+//encore:api private method=POST path=/workitems.CreateLabel
+func CreateLabel(ctx context.Context, req *CreateLabelRequest) (*Label, error) {
+	if req == nil {
+		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "missing request body"}
+	}
+	// Scope XOR: exactly one of OrgID or ProjectID must be set. The DB
+	// labels_scope_xor_chk is the last line of defence; reject early here
+	// so the error is a clean VALIDATION rather than a CHECK violation.
+	if (req.OrgID == "" && req.ProjectID == "") || (req.OrgID != "" && req.ProjectID != "") {
+		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "label scope must be exactly one of org_id or project_id"}
+	}
+	name := strings.TrimSpace(req.Name)
+	if l := len(name); l < labelNameMinLen || l > labelNameMaxLen {
+		return nil, &errs.Error{Code: errs.InvalidArgument, Message: fmt.Sprintf("label name must be %d..%d chars", labelNameMinLen, labelNameMaxLen), Meta: errs.Metadata{"field": "name"}}
+	}
+	if !labelColorPattern.MatchString(req.Color) {
+		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "color must be #RRGGBB", Meta: errs.Metadata{"field": "color"}}
+	}
+
+	id, err := ulid.New()
+	if err != nil {
+		return nil, &errs.Error{Code: errs.Internal, Message: "label id generation failed"}
+	}
+
+	_, err = db.Exec(ctx,
+		`INSERT INTO workitems.labels (id, org_id, project_id, name, color, description)
+		 VALUES ($1, NULLIF($2, ''), NULLIF($3, ''), $4, $5, NULLIF($6, ''))`,
+		id, req.OrgID, req.ProjectID, name, req.Color, req.Description,
+	)
+	if err != nil {
+		// Case-insensitive uniqueness is enforced by the lower(name) UNIQUE
+		// indexes — a "Bug" vs "bug" duplicate trips the same index. Surface
+		// the violated index name in Meta["constraint"] for §7 CONFLICT.
+		if isUniqueViolation(err, "labels_org_name_uniq") {
+			return nil, &errs.Error{Code: errs.AlreadyExists, Message: "label name already exists in this org", Meta: errs.Metadata{"constraint": "labels_org_name_uniq"}}
+		}
+		if isUniqueViolation(err, "labels_project_name_uniq") {
+			return nil, &errs.Error{Code: errs.AlreadyExists, Message: "label name already exists in this project", Meta: errs.Metadata{"constraint": "labels_project_name_uniq"}}
+		}
+		if isCheckViolation(err, "labels_color_chk") {
+			return nil, &errs.Error{Code: errs.InvalidArgument, Message: "color must be #RRGGBB", Meta: errs.Metadata{"field": "color"}}
+		}
+		if isCheckViolation(err, "labels_scope_xor_chk") {
+			return nil, &errs.Error{Code: errs.InvalidArgument, Message: "label scope XOR violation"}
+		}
+		if isForeignKeyViolation(err) {
+			return nil, &errs.Error{Code: errs.NotFound, Message: "label org/project does not exist"}
+		}
+		rlog.Error("workitems: label insert failed", "err", err)
+		return nil, &errs.Error{Code: errs.Internal, Message: "label insert failed"}
+	}
+
+	return readLabel(ctx, id)
+}
+
+// ListLabels returns the labels visible within the caller's scope. When
+// ProjectID is empty the result is the org's own labels (org_id = OrgID).
+// When ProjectID is set the result is the project's labels PLUS the
+// inherited org labels, with PRD §6.4 "project wins on identical name"
+// applied at query time: an org label is suppressed when the project
+// defines a label with the same lower(name). Org scope is always the
+// caller's OrgID (pinned by the MCP handler); the predicate is a
+// hard tenant gate. SPEC §4.4 / §6.2 Tool 21.
+//
+//encore:api private method=POST path=/workitems.ListLabels
+func ListLabels(ctx context.Context, req *ListLabelsRequest) (*ListLabelsResponse, error) {
+	if req == nil {
+		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "missing request body"}
+	}
+	if req.OrgID == "" {
+		// The MCP handler always pins OrgID from identity.OrgID; an empty
+		// OrgID here is a programmer error (no trusted-internal no-op is
+		// defined for labels, unlike MilestoneTree).
+		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "ListLabels requires org scope"}
+	}
+
+	var rows *sqldb.Rows
+	var err error
+	if req.ProjectID == "" {
+		// Org-scoped: the caller's own org labels only.
+		rows, err = db.Query(ctx,
+			`SELECT id, COALESCE(org_id, ''), COALESCE(project_id, ''),
+			        name, color, COALESCE(description, ''), created_at, updated_at
+			   FROM workitems.labels
+			  WHERE org_id = $1
+			  ORDER BY lower(name), id`,
+			req.OrgID,
+		)
+	} else {
+		// Project-scoped: the project's labels UNION the inherited org
+		// labels, the org label suppressed when the project shadows it on
+		// lower(name) (PRD §6.4 "project wins on identical name"). The
+		// project must belong to the caller's org — a project that is not
+		// owned by $1 yields no project rows AND no org-inheritance leak
+		// because the org branch is still gated on org_id = $1.
+		// The UNION ALL is wrapped in a subquery so the outer ORDER BY can
+		// reference lower(name): Postgres rejects an expression ORDER BY
+		// applied directly to a set operation (SQLSTATE 0A000 "invalid
+		// UNION/INTERSECT/EXCEPT ORDER BY clause").
+		rows, err = db.Query(ctx,
+			`SELECT id, org_id, project_id, name, color, description, created_at, updated_at
+			   FROM (
+			       SELECT id, COALESCE(org_id, '') AS org_id, COALESCE(project_id, '') AS project_id,
+			              name, color, COALESCE(description, '') AS description, created_at, updated_at
+			         FROM workitems.labels
+			        WHERE project_id = $2
+			          AND project_id IN (SELECT id FROM org.projects WHERE org_id = $1)
+			       UNION ALL
+			       SELECT id, COALESCE(o.org_id, '') AS org_id, COALESCE(o.project_id, '') AS project_id,
+			              o.name, o.color, COALESCE(o.description, '') AS description, o.created_at, o.updated_at
+			         FROM workitems.labels o
+			        WHERE o.org_id = $1
+			          AND NOT EXISTS (
+			              SELECT 1 FROM workitems.labels p
+			               WHERE p.project_id = $2
+			                 AND lower(p.name) = lower(o.name)
+			          )
+			   ) merged
+			  ORDER BY lower(name), id`,
+			req.OrgID, req.ProjectID,
+		)
+	}
+	if err != nil {
+		rlog.Error("workitems: list labels failed", "err", err)
+		return nil, &errs.Error{Code: errs.Internal, Message: "list labels failed"}
+	}
+	defer rows.Close()
+
+	labels := make([]Label, 0)
+	for rows.Next() {
+		var l Label
+		if err := rows.Scan(&l.ID, &l.OrgID, &l.ProjectID, &l.Name, &l.Color, &l.Description, &l.CreatedAt, &l.UpdatedAt); err != nil {
+			return nil, &errs.Error{Code: errs.Internal, Message: "label scan failed"}
+		}
+		labels = append(labels, l)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, &errs.Error{Code: errs.Internal, Message: "label iter failed"}
+	}
+	return &ListLabelsResponse{Labels: labels}, nil
+}
+
+// UpdateLabel renames and/or recolors an existing label and bumps
+// updated_at on every successful write. Scope (org_id / project_id) is
+// immutable — a scope change is a delete-then-create. A rename that
+// collides with an existing label in the same scope (case-insensitive) →
+// AlreadyExists with Meta["constraint"] → §7 CONFLICT. SPEC §4.4 / §6.2
+// Tool 22.
+//
+//encore:api private method=POST path=/workitems.UpdateLabel
+func UpdateLabel(ctx context.Context, req *UpdateLabelRequest) (*Label, error) {
+	if req == nil || req.LabelID == "" {
+		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "missing label_id"}
+	}
+	if req.Name != nil {
+		n := strings.TrimSpace(*req.Name)
+		if l := len(n); l < labelNameMinLen || l > labelNameMaxLen {
+			return nil, &errs.Error{Code: errs.InvalidArgument, Message: fmt.Sprintf("label name must be %d..%d chars", labelNameMinLen, labelNameMaxLen), Meta: errs.Metadata{"field": "name"}}
+		}
+		req.Name = &n
+	}
+	if req.Color != nil && !labelColorPattern.MatchString(*req.Color) {
+		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "color must be #RRGGBB", Meta: errs.Metadata{"field": "color"}}
+	}
+
+	tag, err := db.Exec(ctx,
+		`UPDATE workitems.labels
+		    SET name        = COALESCE($2, name),
+		        color       = COALESCE($3, color),
+		        description  = CASE WHEN $4::boolean THEN NULLIF($5, '') ELSE description END,
+		        updated_at   = now()
+		  WHERE id = $1`,
+		req.LabelID, req.Name, req.Color, req.Description != nil, ptrToString(req.Description),
+	)
+	if err != nil {
+		if isUniqueViolation(err, "labels_org_name_uniq") {
+			return nil, &errs.Error{Code: errs.AlreadyExists, Message: "label name already exists in this org", Meta: errs.Metadata{"constraint": "labels_org_name_uniq"}}
+		}
+		if isUniqueViolation(err, "labels_project_name_uniq") {
+			return nil, &errs.Error{Code: errs.AlreadyExists, Message: "label name already exists in this project", Meta: errs.Metadata{"constraint": "labels_project_name_uniq"}}
+		}
+		if isCheckViolation(err, "labels_color_chk") {
+			return nil, &errs.Error{Code: errs.InvalidArgument, Message: "color must be #RRGGBB", Meta: errs.Metadata{"field": "color"}}
+		}
+		rlog.Error("workitems: label update failed", "err", err, "label_id", req.LabelID)
+		return nil, &errs.Error{Code: errs.Internal, Message: "label update failed"}
+	}
+	if tag.RowsAffected() == 0 {
+		return nil, &errs.Error{Code: errs.NotFound, Message: "label not found"}
+	}
+
+	return readLabel(ctx, req.LabelID)
+}
+
+// DeleteLabel removes a label from the registry. The workitems.item_labels
+// junction rows referencing it cascade away in the SAME transaction (the
+// FK is ON DELETE CASCADE per SPEC §9.4.3) — deleting a label detaches it
+// from every item without deleting the items. DetachedItemCount is the
+// number of junction rows removed. SPEC §4.4 / §6.2 Tool 23.
+//
+//encore:api private method=POST path=/workitems.DeleteLabel
+func DeleteLabel(ctx context.Context, req *DeleteLabelRequest) (*DeleteLabelResponse, error) {
+	if req == nil || req.LabelID == "" {
+		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "missing label_id"}
+	}
+
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return nil, &errs.Error{Code: errs.Internal, Message: "db begin failed"}
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Count the junction rows BEFORE the delete so DetachedItemCount
+	// reflects exactly what the FK cascade will remove. Done inside the
+	// transaction so a concurrent attach/detach cannot skew the count
+	// relative to the delete.
+	var detached int
+	if err := tx.QueryRow(ctx,
+		`SELECT COUNT(*) FROM workitems.item_labels WHERE label_id = $1`,
+		req.LabelID,
+	).Scan(&detached); err != nil {
+		return nil, &errs.Error{Code: errs.Internal, Message: "label detach count failed"}
+	}
+
+	tag, err := tx.Exec(ctx, `DELETE FROM workitems.labels WHERE id = $1`, req.LabelID)
+	if err != nil {
+		rlog.Error("workitems: label delete failed", "err", err, "label_id", req.LabelID)
+		return nil, &errs.Error{Code: errs.Internal, Message: "label delete failed"}
+	}
+	if tag.RowsAffected() == 0 {
+		return nil, &errs.Error{Code: errs.NotFound, Message: "label not found"}
+	}
+
+	if err := tx.Commit(); err != nil {
+		rlog.Error("workitems: label delete commit failed", "err", err)
+		return nil, &errs.Error{Code: errs.Internal, Message: "label delete commit failed"}
+	}
+
+	return &DeleteLabelResponse{Deleted: true, LabelID: req.LabelID, DetachedItemCount: detached}, nil
 }
 
 // -----------------------------------------------------------------------------

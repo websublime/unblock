@@ -45,7 +45,7 @@ import (
 )
 
 // expectedToolCount pins the §10.3 / SPEC.md 5.2.2 P01 inventory at
-// 19. A future Pxx revision that adds tools must update this constant
+// 23. A future Pxx revision that adds tools must update this constant
 // and the catalogue.json source in the same commit; the structural
 // check below is the single boundary that enforces the count.
 //
@@ -54,7 +54,10 @@ import (
 // round-16, bead unblock-tv8.74: 15 → 19 with the milestone management
 // tools (Tools 16–19: create_milestone / update_milestone / assign_item /
 // milestone_tree per §6.2).
-const expectedToolCount = 19
+// round-16, bead unblock-tv8.75: 19 → 23 with the label-registry
+// management tools (Tools 20–23: create_label / list_labels / update_label
+// / delete_label per §6.2).
+const expectedToolCount = 23
 
 // catalogueDoc mirrors the top-level JSON shape. Only the fields that
 // the generator reasons about structurally appear here; the per-tool

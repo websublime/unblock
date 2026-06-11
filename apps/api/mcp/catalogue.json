@@ -1067,6 +1067,141 @@
           }
         }
       }
+    },
+    {
+      "name": "create_label",
+      "description": "Create a label in the registry, scoped to the caller's org or to a project (pass project_id to project-scope; omit it to org-scope). name is 1..64 chars and unique within scope (case-insensitive); color is #RRGGBB. A duplicate name rejects with CONFLICT carrying data.constraint.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "name",
+          "color"
+        ],
+        "properties": {
+          "project_id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "color": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "required": [
+          "label"
+        ],
+        "properties": {
+          "label": {
+            "$ref": "#/$shared/Label"
+          }
+        }
+      }
+    },
+    {
+      "name": "list_labels",
+      "description": "List labels visible to the caller within a scope. Without project_id, returns the caller's org labels. With project_id, returns the project's labels plus the inherited org labels (project wins on identical name).",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "required": [
+          "labels"
+        ],
+        "properties": {
+          "labels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$shared/Label"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "update_label",
+      "description": "Rename and/or recolor an existing label. Only the supplied fields change; the label's scope is immutable. A rename that collides with an existing label in the same scope rejects with CONFLICT.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "label_id"
+        ],
+        "properties": {
+          "label_id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "color": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "required": [
+          "label"
+        ],
+        "properties": {
+          "label": {
+            "$ref": "#/$shared/Label"
+          }
+        }
+      }
+    },
+    {
+      "name": "delete_label",
+      "description": "Delete a label from the registry. Detaches it from every item it was applied to (the items are not deleted); detached_item_count reports how many attachments were removed. A missing label rejects with NOT_FOUND.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "label_id"
+        ],
+        "properties": {
+          "label_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "required": [
+          "deleted",
+          "label_id",
+          "detached_item_count"
+        ],
+        "properties": {
+          "deleted": {
+            "type": "boolean"
+          },
+          "label_id": {
+            "type": "string"
+          },
+          "detached_item_count": {
+            "type": "integer"
+          }
+        }
+      }
     }
   ],
   "transitions": [],
@@ -1379,6 +1514,42 @@
           "items": {
             "$ref": "#/$shared/MilestoneNode"
           }
+        }
+      }
+    },
+    "Label": {
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "color",
+        "created_at",
+        "updated_at"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "org_id": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "color": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string"
         }
       }
     }
