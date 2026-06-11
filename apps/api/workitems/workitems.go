@@ -2871,6 +2871,15 @@ func UpdateMilestone(ctx context.Context, req *UpdateMilestoneRequest) (*Milesto
 // enforcement: the target milestone's scope must be reachable from the
 // item's project (same project OR org-wide milestone in the same org).
 //
+// Row-level tenant gate (§10.1.1): BOTH the target-item read/unassign UPDATE
+// AND the assign-branch milestone read + final UPDATE are predicated on the
+// CallerOrgID channel ($caller = ” OR <tenant predicate>). A foreign item_id
+// OR a foreign milestone_id therefore yields NOT_FOUND — the foreign milestone
+// is invisible BEFORE the M-INV-7 reachability check, so a cross-tenant
+// milestone never leaks its existence via PRECONDITION_NOT_MET. The empty-
+// CallerOrgID no-op keeps trusted internal (non-MCP) callers operating
+// unscoped; the MCP handler always pins CallerOrgID from identity.OrgID.
+//
 //encore:api private method=POST path=/workitems.AssignItem
 func AssignItem(ctx context.Context, req *AssignItemRequest) error {
 	if req == nil || req.ItemID == "" {
@@ -2933,10 +2942,24 @@ func AssignItem(ctx context.Context, req *AssignItemRequest) error {
 			}
 			return &errs.Error{Code: errs.Internal, Message: "item read failed"}
 		}
+		// Row-level tenant gate (bead unblock-tv8.77 pre-QA cleanup,
+		// §10.1.1): the milestone read is predicated on
+		// ($2 = '' OR org_id = $2 OR project_id IN caller-org projects) —
+		// the milestone org-XOR-project form. A foreign MilestoneID matches
+		// no row → ErrNoRows → NOT_FOUND, so a cross-tenant milestone never
+		// reaches the M-INV-7 reachability check (which would otherwise
+		// disclose its existence via PRECONDITION_NOT_MET). The empty-
+		// CallerOrgID no-op keeps trusted internal callers operating
+		// unscoped; the MCP handler always pins CallerOrgID from
+		// identity.OrgID.
 		var msOrg, msProject *string
 		err = tx.QueryRow(ctx,
-			`SELECT org_id, project_id FROM workitems.milestones WHERE id = $1`,
-			req.MilestoneID,
+			`SELECT org_id, project_id FROM workitems.milestones
+			  WHERE id = $1
+			    AND ($2 = ''
+			         OR org_id = $2
+			         OR project_id IN (SELECT id FROM org.projects WHERE org_id = $2))`,
+			req.MilestoneID, req.CallerOrgID,
 		).Scan(&msOrg, &msProject)
 		if err != nil {
 			if errors.Is(err, sqldb.ErrNoRows) {
@@ -2956,14 +2979,23 @@ func AssignItem(ctx context.Context, req *AssignItemRequest) error {
 			return preconditionError("M-INV-7", "milestone scope is not reachable in item's project")
 		}
 
+		// Row-level tenant gate (bead unblock-tv8.77 pre-QA cleanup,
+		// §10.1.1): the final assign UPDATE carries the same
+		// ($4 = '' OR org_id = $4) predicate as the unassign branch and the
+		// gated read above. The preceding read is a plain QueryRow (not FOR
+		// UPDATE), so — unlike Close/Claim/SetState — there is no row lock
+		// bridging read→write; gating the UPDATE statement itself makes the
+		// mutating write self-contained and defense-in-depth symmetric with
+		// the unassign branch.
 		_, err = tx.Exec(ctx,
 			`UPDATE workitems.items
 			    SET milestone_id          = $2,
 			        milestone_assigned_at = now(),
 			        milestone_assigned_by = NULLIF($3, ''),
 			        updated_at            = now()
-			  WHERE id = $1`,
-			req.ItemID, req.MilestoneID, req.AssignedByUser,
+			  WHERE id = $1
+			    AND ($4 = '' OR org_id = $4)`,
+			req.ItemID, req.MilestoneID, req.AssignedByUser, req.CallerOrgID,
 		)
 		if err != nil {
 			if isForeignKeyViolation(err) {
