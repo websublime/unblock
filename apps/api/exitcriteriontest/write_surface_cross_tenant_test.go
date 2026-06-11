@@ -19,7 +19,9 @@
 //   - close             (workitems.Close)
 //   - claim             (workitems.Claim — NOT_FOUND, never ALREADY_CLAIMED)
 //   - promote           (workitems.Promote)
-//   - assign_item       (workitems.AssignItem)
+//   - assign_item       (workitems.AssignItem — foreign item AND, post
+//                         pre-QA cleanup, foreign milestone_id ⇒ NOT_FOUND
+//                         not M-INV-7 PRECONDITION_NOT_MET)
 //   - update_milestone  (workitems.UpdateMilestone)
 //   - create_milestone  (workitems.CreateMilestone parent-read seam)
 //   - add_dependency    (deps.AddEdge — foreign endpoint)
@@ -279,6 +281,31 @@ func TestExitCriterion_WriteSurface_CrossTenantRejected(t *testing.T) {
 		}
 		if milestoneID != nil {
 			t.Fatalf("cross-tenant assign_item set foreign milestone_id to %q, want NULL", *milestoneID)
+		}
+	})
+
+	// --- assign_item: OWNED item, FOREIGN milestone_id ⇒ NOT_FOUND --------
+	// The caller owns itm_a; it passes a FOREIGN milestone_id. The milestone
+	// read is now CallerOrgID-gated (bead unblock-tv8.77 pre-QA cleanup,
+	// §10.1.1), so the foreign milestone is invisible and the tool returns
+	// NOT_FOUND — it MUST NOT surface as M-INV-7 PRECONDITION_NOT_MET, which
+	// would disclose the foreign milestone's existence/scope via error
+	// discrimination. The owned item's milestone_id must stay NULL.
+	t.Run("assign_item_foreign_milestone", func(t *testing.T) {
+		ownedItem := f.ItemID("itm_a")
+		env := callTool(t, f.RawKey, sessionID, "assign_item", map[string]any{
+			"item_id":      ownedItem,
+			"milestone_id": ft.MilestoneID,
+		})
+		assertNotFound(t, env, "assign_item (owned item, foreign milestone)")
+		var milestoneID *string
+		if err := encoredb.DB.QueryRow(ctx,
+			`SELECT milestone_id FROM workitems.items WHERE id = $1`, ownedItem,
+		).Scan(&milestoneID); err != nil {
+			t.Fatalf("read owned item milestone_id: %v", err)
+		}
+		if milestoneID != nil {
+			t.Fatalf("assign_item with foreign milestone set owned milestone_id to %q, want NULL", *milestoneID)
 		}
 	})
 
