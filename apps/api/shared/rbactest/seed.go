@@ -377,11 +377,14 @@ func seedSide(ctx context.Context, db *sqldb.Database, fx *Fixture, orgLabel str
 	// UNIQUE index even if both ULIDs were minted in the same
 	// millisecond (the timestamp-based prefix would).
 	keyPrefix := apiKeyID[len(apiKeyID)-8:]
+	// issued_to_user is NOT NULL (bead unblock-tv8.73): every key is
+	// owned by exactly one user. Bind to the org owner already seeded
+	// above (also the comment author_id) so the FK chain is satisfied.
 	if _, err := db.Exec(ctx,
 		`INSERT INTO mcp.api_keys
-		   (id, org_id, label, agent_kind, key_hash, key_prefix, scopes)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		apiKeyID, orgID,
+		   (id, org_id, issued_to_user, label, agent_kind, key_hash, key_prefix, scopes)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		apiKeyID, orgID, ownerID,
 		fmt.Sprintf("rbactest-%s-key", orgLabel),
 		"claude-code",
 		[]byte("rbactest-key-hash-placeholder"),

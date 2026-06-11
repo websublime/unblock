@@ -9,7 +9,7 @@ CREATE SCHEMA IF NOT EXISTS mcp;
 CREATE TABLE mcp.api_keys (
     id              text         PRIMARY KEY,                              -- ULID
     org_id          text         NOT NULL REFERENCES org.organizations(id) ON DELETE CASCADE,
-    issued_to_user  text         REFERENCES auth.users(id) ON DELETE SET NULL,
+    issued_to_user  text         REFERENCES auth.users(id) ON DELETE SET NULL, -- tightened to NOT NULL + ON DELETE CASCADE by 0120_mcp_issued_to_user_notnull (bead unblock-tv8.73)
     label           text         NOT NULL,                                 -- e.g. 'claude-code-laptop'
     agent_kind      text         NOT NULL,                                 -- AgentKind value
     key_hash        bytea        NOT NULL,                                 -- HMAC-SHA256(server_secret, key); 32 bytes raw.

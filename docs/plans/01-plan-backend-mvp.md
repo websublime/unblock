@@ -269,7 +269,7 @@ into bd.
 |---|---|---|
 | A-1 | Initialise Encore app at `apps/api/encore.app` (Go module, build, dev-loop sanity) | go-supervisor (Greta) |
 | A-2 | Bootstrap migration: `pgcrypto`, `pg_trgm`, eight schemas declared (per SPEC §9.4.0) | go-supervisor (Greta) |
-| A-3 | Migrations §9.4.1–§9.4.8 in canonical order; **round-16: + `0110_mcp_issued_to_user_notnull.up.sql`** (`issued_to_user` NOT NULL + FK `ON DELETE CASCADE`, bead `unblock-tv8.73`, spec §3.2) | go-supervisor (Greta) |
+| A-3 | Migrations §9.4.1–§9.4.8 in canonical order; **round-16: + `0120_mcp_issued_to_user_notnull.up.sql`** (`issued_to_user` NOT NULL + FK `ON DELETE CASCADE`, bead `unblock-tv8.73`, spec §3.2; slot `0110` is held by the committed `0110_mcp_warning_codes`) | go-supervisor (Greta) |
 | A-4 | `pkg/rbac` typed query helper + per-service DB binding | go-supervisor (Greta) |
 | A-5 | Tracing + JSON-Lines logging scaffold (NFR-12) — ULID `trace_id` minted at MCP entry, propagated via `context.Context` per SPEC §10.2 Option B (no `X-Unblock-Trace-Id` header) | go-supervisor (Greta) |
 | A-6 | CI workflow + lint gates + NFR-1 latency harness scaffold + NFR-2 RBAC suite scaffold (per-language gates wired into `.github/workflows/`) | infra-supervisor (Olive) |
