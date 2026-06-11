@@ -799,3 +799,91 @@ func assertAcyclic(t *testing.T, ctx context.Context, pool []string) {
 		t.Fatalf("cycle detected via node %q after recent mutation", *hit)
 	}
 }
+
+// -----------------------------------------------------------------------------
+// Write-surface row-level tenant gate (round-16 / bead unblock-tv8.77,
+// §10.1.1). AddEdge / RemoveEdge resolve their endpoints' org from the DB
+// and reject with NOT_FOUND when any resolved endpoint org differs from a
+// NON-EMPTY CallerOrgID. EMPTY CallerOrgID is the trusted-internal no-op
+// (the workitems.Create combined-tx path + these tests rely on it).
+// -----------------------------------------------------------------------------
+
+func TestDepsWriteSurfaceTenantGate_CallerOrgID(t *testing.T) {
+	ctx := context.Background()
+	fx := seedFixture(t, ctx)
+	from := createItem(t, ctx, fx, "Backlog")
+	to := createItem(t, ctx, fx, "Backlog")
+
+	foreignOrg := mustULID(t)
+
+	// 1. AddEdge with a NON-EMPTY CallerOrgID that does NOT own the
+	//    endpoints ⇒ NOT_FOUND, no edge created.
+	_, err := deps.AddEdge(ctx, &deps.AddEdgeRequest{
+		OrgID:       fx.OrgID,
+		ProjectID:   fx.ProjectID,
+		CallerOrgID: foreignOrg,
+		FromItem:    from,
+		ToItem:      to,
+	})
+	if err == nil {
+		t.Fatalf("cross-tenant AddEdge (CallerOrgID=foreign) succeeded, want NOT_FOUND")
+	}
+	if errs.Code(err) != errs.NotFound {
+		t.Fatalf("cross-tenant AddEdge code = %v, want NotFound", errs.Code(err))
+	}
+	var n int
+	if err := encoredb.DB.QueryRow(ctx,
+		`SELECT COUNT(*) FROM deps.dependencies WHERE from_item = $1 AND to_item = $2`, from, to,
+	).Scan(&n); err != nil {
+		t.Fatalf("count edges: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("cross-tenant AddEdge created %d edge(s), want 0", n)
+	}
+
+	// 2. AddEdge with the OWNING CallerOrgID ⇒ gate passes, edge created.
+	edge, err := deps.AddEdge(ctx, &deps.AddEdgeRequest{
+		OrgID:       fx.OrgID,
+		ProjectID:   fx.ProjectID,
+		CallerOrgID: fx.OrgID,
+		FromItem:    from,
+		ToItem:      to,
+	})
+	if err != nil {
+		t.Fatalf("same-org AddEdge (CallerOrgID=fx.OrgID) failed: %v", err)
+	}
+
+	// 3. RemoveEdge with a NON-EMPTY foreign CallerOrgID ⇒ NOT_FOUND, edge
+	//    survives.
+	_, err = deps.RemoveEdge(ctx, &deps.RemoveEdgeRequest{
+		EdgeID:      edge.ID,
+		CallerOrgID: foreignOrg,
+	})
+	if err == nil {
+		t.Fatalf("cross-tenant RemoveEdge (CallerOrgID=foreign) succeeded, want NOT_FOUND")
+	}
+	if errs.Code(err) != errs.NotFound {
+		t.Fatalf("cross-tenant RemoveEdge code = %v, want NotFound", errs.Code(err))
+	}
+	if err := encoredb.DB.QueryRow(ctx,
+		`SELECT COUNT(*) FROM deps.dependencies WHERE id = $1`, edge.ID,
+	).Scan(&n); err != nil {
+		t.Fatalf("count edge after cross-tenant remove: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("cross-tenant RemoveEdge deleted the edge (count=%d, want 1)", n)
+	}
+
+	// 4. EMPTY CallerOrgID is the trusted-internal NO-OP: RemoveEdge removes
+	//    the edge with no org context (the path workitems.Create relies on).
+	resp, err := deps.RemoveEdge(ctx, &deps.RemoveEdgeRequest{
+		EdgeID:      edge.ID,
+		CallerOrgID: "", // no-op gate
+	})
+	if err != nil {
+		t.Fatalf("empty-CallerOrgID RemoveEdge (no-op path) failed: %v", err)
+	}
+	if !resp.Removed {
+		t.Fatalf("empty-CallerOrgID RemoveEdge removed = false")
+	}
+}

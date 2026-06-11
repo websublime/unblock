@@ -1879,3 +1879,95 @@ func TestCloseRecoversBlockedToReady(t *testing.T) {
 		t.Fatalf("post-close: dependent status = %q, want Ready (§6.6 Blocked→Ready recovery)", status)
 	}
 }
+
+// -----------------------------------------------------------------------------
+// Write-surface row-level tenant gate (round-16 / bead unblock-tv8.77,
+// §10.1.1). RPC-level proof of the CallerOrgID channel's two behaviours:
+//
+//   - NON-EMPTY CallerOrgID is a HARD tenant gate: a CallerOrgID that does
+//     not match the target row's org_id yields NOT_FOUND (the row is
+//     invisible), never a cross-tenant mutation. This is the behaviour the
+//     MCP handlers always exercise (they pin CallerOrgID from identity.OrgID).
+//   - EMPTY CallerOrgID is the deliberate NO-OP for trusted internal callers
+//     (the §11.1.1 seed + these integration tests): the gate predicate
+//     ($caller = '' OR org_id = $caller) short-circuits, so the write
+//     proceeds unscoped. Every OTHER test in this file relies on this no-op
+//     (they pass no CallerOrgID); this test pins the contract explicitly.
+//
+// The exitcriteriontest cross-tenant suite proves the gate end-to-end
+// THROUGH the MCP boundary; this is the RPC-level companion documenting the
+// no-op-vs-hard-gate divergence ratified in §10.1.1.
+// -----------------------------------------------------------------------------
+
+func TestWriteSurfaceTenantGate_CallerOrgID(t *testing.T) {
+	ctx := context.Background()
+	fx := seedFixture(t, ctx)
+	itemID := createReadyItem(t, ctx, fx)
+
+	foreignOrg, err := ulid.New()
+	if err != nil {
+		t.Fatalf("ulid foreign org: %v", err)
+	}
+
+	// 1. NON-EMPTY CallerOrgID that does NOT own the item ⇒ NOT_FOUND, no
+	//    mutation. The item is in fx.OrgID; a Claim pinned to foreignOrg must
+	//    not see it.
+	_, err = workitems.Claim(ctx, &workitems.ClaimRequest{
+		ItemID:        itemID,
+		CallerOrgID:   foreignOrg,
+		ClaimerUserID: fx.UserID,
+		ClaimerAgent:  "claude-code",
+	})
+	if err == nil {
+		t.Fatalf("cross-tenant Claim (CallerOrgID=foreign) succeeded, want NOT_FOUND")
+	}
+	if errs.Code(err) != errs.NotFound {
+		t.Fatalf("cross-tenant Claim err code = %v, want NotFound", errs.Code(err))
+	}
+	if st := claimedStatus(t, ctx, itemID); st != "Ready" {
+		t.Fatalf("cross-tenant Claim mutated status to %q, want Ready (untouched)", st)
+	}
+
+	// 2. NON-EMPTY CallerOrgID that DOES own the item ⇒ gate passes, claim
+	//    succeeds.
+	if _, err := workitems.Claim(ctx, &workitems.ClaimRequest{
+		ItemID:        itemID,
+		CallerOrgID:   fx.OrgID,
+		ClaimerUserID: fx.UserID,
+		ClaimerAgent:  "claude-code",
+	}); err != nil {
+		t.Fatalf("same-org Claim (CallerOrgID=fx.OrgID) failed: %v", err)
+	}
+	if st := claimedStatus(t, ctx, itemID); st != "InProgress" {
+		t.Fatalf("same-org Claim left status %q, want InProgress", st)
+	}
+
+	// 3. EMPTY CallerOrgID is the trusted-internal NO-OP: a fresh Ready item
+	//    claims successfully with no org context (the path every other test
+	//    in this file depends on).
+	noopItem := createReadyItem(t, ctx, fx)
+	if _, err := workitems.Claim(ctx, &workitems.ClaimRequest{
+		ItemID:        noopItem,
+		CallerOrgID:   "", // no-op gate
+		ClaimerUserID: fx.UserID,
+		ClaimerAgent:  "claude-code",
+	}); err != nil {
+		t.Fatalf("empty-CallerOrgID Claim (no-op path) failed: %v", err)
+	}
+	if st := claimedStatus(t, ctx, noopItem); st != "InProgress" {
+		t.Fatalf("empty-CallerOrgID Claim left status %q, want InProgress", st)
+	}
+}
+
+// claimedStatus reads an item's status column by id for tenant-gate
+// assertions.
+func claimedStatus(t *testing.T, ctx context.Context, id string) string {
+	t.Helper()
+	var s string
+	if err := encoredb.DB.QueryRow(ctx,
+		`SELECT status FROM workitems.items WHERE id = $1`, id,
+	).Scan(&s); err != nil {
+		t.Fatalf("read status for %s: %v", id, err)
+	}
+	return s
+}

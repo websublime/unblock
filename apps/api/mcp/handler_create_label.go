@@ -7,13 +7,13 @@
 // passes project_id the label is project-scoped; otherwise it is
 // org-scoped using identity.OrgID. This matches the rest of the write
 // surface (handler_create_milestone pins OrgID=identity.OrgID). The
-// backing workitems write RPC does not self-gate on the org-scoped branch
-// — the MCP handler is the authoritative write gate (workitems.go
-// auth-model doc-comment) — BUT on the project-scoped branch the RPC
-// applies a row-level tenant gate: identity.OrgID is passed as CallerOrgID
-// and the insert proceeds only when the project belongs to that org, so a
-// foreign project_id yields NOT_FOUND rather than a cross-tenant write
-// (DRIFT-2c locked decision).
+// handler ALWAYS pins CallerOrgID=identity.OrgID; the backing
+// workitems.CreateLabel RPC self-gates on it (round-16 / bead
+// unblock-tv8.77, §10.1.1): an empty CallerOrgID is HARD-REJECTED with
+// VALIDATION (CreateLabel is MCP-only, no trusted-internal no-op), and on
+// the project-scoped branch the insert proceeds only when the project
+// belongs to CallerOrgID, so a foreign project_id yields NOT_FOUND rather
+// than a cross-tenant write (DRIFT-2c locked decision).
 //
 // A duplicate name within the same scope (case-insensitive per the
 // lower(name) UNIQUE indexes) surfaces from the backing RPC as
