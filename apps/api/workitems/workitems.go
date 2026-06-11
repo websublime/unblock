@@ -2647,6 +2647,15 @@ func AssignItem(ctx context.Context, req *AssignItemRequest) error {
 // RootMilestoneID OR all roots within (OrgID, ProjectID). SPEC §4.4.1 +
 // §9.4.9 (depth-bounded by M-INV-6).
 //
+// Tenant scoping: when OrgID is non-empty it gates BOTH walks — the roots
+// walk selects only roots reachable from that org, and the rooted walk
+// (RootMilestoneID set) requires the root milestone itself to be reachable
+// from OrgID (directly org-scoped, or in a project owned by OrgID). A
+// foreign root therefore yields an empty result rather than leaking a
+// cross-tenant subtree. When OrgID is empty (trusted internal callers) the
+// gate is a no-op. The agent-facing milestone_tree MCP tool always passes
+// identity.OrgID on both paths.
+//
 //encore:api private method=POST path=/workitems.MilestoneTree
 func MilestoneTree(ctx context.Context, req *MilestoneTreeRequest) (*MilestoneTreeResponse, error) {
 	if req == nil {
@@ -2660,6 +2669,16 @@ func MilestoneTree(ctx context.Context, req *MilestoneTreeRequest) (*MilestoneTr
 	var err error
 	switch {
 	case req.RootMilestoneID != "":
+		// Rooted walk. The recursive-anchor WHERE clause gates the root
+		// milestone by tenant reachability from req.OrgID: the root must be
+		// directly org-scoped to $4 OR project-scoped to a project owned by
+		// $4. When $4 is the empty string (trusted internal callers — the
+		// E2E exit-criterion test, the P05 roadmap RPC) the predicate is a
+		// no-op and the walk is unscoped. The agent-facing milestone_tree
+		// MCP tool ALWAYS passes identity.OrgID, so a foreign root_milestone_id
+		// yields an empty anchor (no rows) — closing the cross-tenant /
+		// IDOR read seam on the rooted path (SPEC §4.4.1 line 1165 "OrgID
+		// derived from it"; §6.2 Tool 19 tenant-predicate-injected read).
 		rows, err = db.Query(ctx,
 			`WITH RECURSIVE tree(id, parent_milestone_id, org_id, project_id, name, description,
 			                     start_date, end_date, cancelled_at, cancelled_reason,
@@ -2669,6 +2688,7 @@ func MilestoneTree(ctx context.Context, req *MilestoneTreeRequest) (*MilestoneTr
 			              created_at, updated_at, 0
 			         FROM workitems.milestones
 			        WHERE id = $1
+			          AND ($4 = '' OR org_id = $4 OR project_id IN (SELECT id FROM org.projects WHERE org_id = $4))
 			       UNION ALL
 			       SELECT m.id, m.parent_milestone_id, m.org_id, m.project_id, m.name, m.description,
 			              m.start_date, m.end_date, m.cancelled_at, m.cancelled_reason,
@@ -2684,7 +2704,7 @@ func MilestoneTree(ctx context.Context, req *MilestoneTreeRequest) (*MilestoneTr
 			       FROM tree
 			      WHERE ($3::boolean OR cancelled_at IS NULL)
 			      ORDER BY depth, start_date, id`,
-			req.RootMilestoneID, milestoneMaxDepth-1, req.IncludeCancelled,
+			req.RootMilestoneID, milestoneMaxDepth-1, req.IncludeCancelled, req.OrgID,
 		)
 	default:
 		// Walk from all roots in the scope. Roots are milestones whose

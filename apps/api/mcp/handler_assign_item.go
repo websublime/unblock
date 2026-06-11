@@ -91,7 +91,8 @@ func handleAssignItem(ctx context.Context, req *sdkmcp.CallToolRequest, in assig
 
 	// assigned_by_user comes from the resolved Identity (§6.2 Tool 18),
 	// never the wire. On the unassign path (MilestoneID == "") the RPC
-	// clears milestone_assigned_by regardless, so passing it is harmless.
+	// ignores AssignedByUser and sets milestone_assigned_by to NULL
+	// unconditionally, so passing it is harmless.
 	if err := workitems.AssignItem(mcpCtx, &workitems.AssignItemRequest{
 		ItemID:         in.ItemID,
 		MilestoneID:    in.MilestoneID,

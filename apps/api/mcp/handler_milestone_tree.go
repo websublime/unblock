@@ -5,11 +5,13 @@
 // Returns the recursive milestone tree (depth bounded at M-INV-6 = 4),
 // either rooted at root_milestone_id OR walking all roots within the
 // caller's scope. Read-side org scope is pinned to the Bearer-resolved
-// Identity: org_id is NOT a client-supplied wire field. When
-// root_milestone_id is empty the walk is scoped to identity.OrgID
-// (optionally narrowed to project_id when supplied); when
-// root_milestone_id is set the scope is derived from that milestone by
-// the backing RPC.
+// Identity on BOTH paths: org_id is NOT a client-supplied wire field, it
+// always comes from identity.OrgID. When root_milestone_id is empty the
+// walk is scoped to identity.OrgID (optionally narrowed to project_id
+// when supplied). When root_milestone_id is set the backing RPC requires
+// the root milestone to be reachable from identity.OrgID, so a foreign
+// root_milestone_id returns an empty tree rather than leaking a
+// cross-tenant subtree.
 //
 // SPEC: docs/specs/01-spec-backend-mvp.md § 6.2 Tool 19 + § 4.4.1
 // (workitems.MilestoneTree) + § 7 (error envelope).
@@ -118,18 +120,20 @@ func handleMilestoneTree(ctx context.Context, req *sdkmcp.CallToolRequest, in mi
 		return nil, milestoneTreeOut{}, mapError(state, tool, err)
 	}
 
+	// Pin the read scope to the caller's identity.OrgID on BOTH paths.
+	// Roots walk (root_milestone_id empty): the RPC selects only roots
+	// reachable from this org; project_id, when supplied, narrows further.
+	// Rooted walk (root_milestone_id set): the RPC requires the root
+	// milestone itself to be reachable from this org, so a foreign
+	// root_milestone_id yields an empty tree instead of leaking a
+	// cross-tenant subtree (SPEC §4.4.1 line 1165; §6.2 Tool 19). org_id is
+	// never a client-supplied wire field — it always comes from the
+	// Bearer-resolved Identity.
 	treeReq := workitems.MilestoneTreeRequest{
+		OrgID:            identity.OrgID,
 		ProjectID:        in.ProjectID,
 		RootMilestoneID:  in.RootMilestoneID,
 		IncludeCancelled: in.IncludeCancelled,
-	}
-	// Roots walk (root_milestone_id empty): pin org scope to the caller's
-	// identity.OrgID so a client cannot enumerate a foreign org's roots.
-	// project_id, when supplied, narrows the walk within that org. The
-	// rooted walk (root_milestone_id set) derives its scope from the root
-	// milestone inside the RPC, so no org_id is needed there.
-	if in.RootMilestoneID == "" {
-		treeReq.OrgID = identity.OrgID
 	}
 	if in.ProjectID != "" && state != nil && state.Call != nil {
 		state.Call.ProjectID = in.ProjectID
