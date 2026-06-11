@@ -2100,7 +2100,7 @@ it and does NOT recompute it.
   the block is specifically "still has open blockers", the handler also
   sets `data.missing = "is_ready"` so the agent can disambiguate "wrong
   status" from "blocked". Example:
-  `{ "kind": "PRECONDITION_NOT_MET", "status": "Backlog", "required": "Ready", "missing": "is_ready" }`.
+  `{ "kind": "PRECONDITION_NOT_MET", "details": { "status": "Backlog", "required": "Ready", "missing": "is_ready" } }`.
 - Item not found / not visible → `NOT_FOUND`.
 
 **Transition performed.** Inside a single `SELECT … FOR UPDATE`
