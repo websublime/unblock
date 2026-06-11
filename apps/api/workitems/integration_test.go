@@ -153,6 +153,28 @@ func createReadyItem(t *testing.T, ctx context.Context, fx *fixture) string {
 	return id
 }
 
+// createBacklogItem inserts a Backlog, unclaimed task directly via SQL.
+// Used by the claim-not-Ready precondition tests (bead unblock-tv8.72):
+// a fresh Backlog item is the demo case that was mis-reported as
+// ALREADY_CLAIMED. is_ready is irrelevant to claim's status precondition,
+// so it is left at its column default (false).
+func createBacklogItem(t *testing.T, ctx context.Context, fx *fixture) string {
+	t.Helper()
+	id, err := ulid.New()
+	if err != nil {
+		t.Fatalf("ulid: %v", err)
+	}
+	if _, err := encoredb.DB.Exec(ctx,
+		`INSERT INTO workitems.items
+		   (id, org_id, project_id, type, title, status, is_ready)
+		 VALUES ($1, $2, $3, 'task', 'test task', 'Backlog', false)`,
+		id, fx.OrgID, fx.ProjectID,
+	); err != nil {
+		t.Fatalf("insert item: %v", err)
+	}
+	return id
+}
+
 // setItemState sets state columns + claim columns directly. Used only
 // by state-machine invariant tests that need a known starting state.
 // Does NOT touch is_ready or pipeline_stage (lint-protected).
@@ -456,6 +478,66 @@ func TestClaimLoserPath(t *testing.T) {
 	e := err.(*errs.Error)
 	if e.Meta["winner_user_id"] != fx.UserID {
 		t.Fatalf("meta[winner_user_id] = %v, want %q", e.Meta["winner_user_id"], fx.UserID)
+	}
+}
+
+// TestClaimRejectsNotReady asserts a fresh, unclaimed Backlog item is
+// rejected with PRECONDITION_NOT_MET (errs.FailedPrecondition) carrying
+// Meta{status:'Backlog', required:'Ready'} and NO winner_user_id — the
+// regression fixed by bead unblock-tv8.72 (§7.2). Previously this case
+// funnelled to the unconditional alreadyClaimedError loser arm and was
+// mis-reported as ALREADY_CLAIMED with no winner info.
+func TestClaimRejectsNotReady(t *testing.T) {
+	ctx := context.Background()
+	fx := seedFixture(t, ctx)
+	itemID := createBacklogItem(t, ctx, fx)
+
+	_, err := workitems.Claim(ctx, &workitems.ClaimRequest{
+		ItemID: itemID, ClaimerUserID: fx.UserID, ClaimerAgent: "claude-code",
+	})
+	if err == nil {
+		t.Fatalf("expected FailedPrecondition, got nil")
+	}
+	if errs.Code(err) != errs.FailedPrecondition {
+		t.Fatalf("err code = %v, want FailedPrecondition", errs.Code(err))
+	}
+	e := err.(*errs.Error)
+	if e.Meta["status"] != "Backlog" {
+		t.Fatalf("meta[status] = %v, want Backlog", e.Meta["status"])
+	}
+	if e.Meta["required"] != "Ready" {
+		t.Fatalf("meta[required] = %v, want Ready", e.Meta["required"])
+	}
+	// §7.2 / bead unblock-tv8.72: claim's wrong-status rejection carries
+	// NO "missing" (that is promote's is_ready disambiguator only) and is
+	// NOT the ALREADY_CLAIMED loser path (no winner meta).
+	if _, ok := e.Meta["missing"]; ok {
+		t.Fatalf("meta[missing] must be absent for claim wrong-status, got %v", e.Meta["missing"])
+	}
+	if _, ok := e.Meta["winner_user_id"]; ok {
+		t.Fatalf("meta[winner_user_id] must be absent (not the ALREADY_CLAIMED path), got %v", e.Meta["winner_user_id"])
+	}
+}
+
+// TestClaimRejectsNotFound asserts claiming a non-existent item returns
+// NOT_FOUND (errs.NotFound), distinct from the loser / not-Ready arms
+// (§6.4 + bead unblock-tv8.72).
+func TestClaimRejectsNotFound(t *testing.T) {
+	ctx := context.Background()
+	fx := seedFixture(t, ctx)
+
+	missingID, err := ulid.New()
+	if err != nil {
+		t.Fatalf("ulid: %v", err)
+	}
+	_, err = workitems.Claim(ctx, &workitems.ClaimRequest{
+		ItemID: missingID, ClaimerUserID: fx.UserID, ClaimerAgent: "claude-code",
+	})
+	if err == nil {
+		t.Fatalf("expected NotFound, got nil")
+	}
+	if errs.Code(err) != errs.NotFound {
+		t.Fatalf("err code = %v, want NotFound", errs.Code(err))
 	}
 }
 

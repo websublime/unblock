@@ -1484,8 +1484,18 @@ func Close(ctx context.Context, req *CloseRequest) (*Item, error) {
 	return readItem(ctx, req.ItemID)
 }
 
-// Claim performs the SPEC §6.4 atomic claim transaction. On loser
-// path returns errs.AlreadyExists with Meta carrying winner info.
+// Claim performs the SPEC §6.4 atomic claim transaction. The row is
+// locked with SELECT … FOR UPDATE and the precondition
+// (status='Ready' AND claimed_by_id IS NULL) is evaluated in Go on the
+// locked row, so the three zero-row causes are reported distinctly
+// (§7.2, bead unblock-tv8.72):
+//   - item absent                      → errs.NotFound (NOT_FOUND)
+//   - claimed_by_id IS NOT NULL        → errs.AlreadyExists (ALREADY_CLAIMED)
+//     with Meta carrying winner info
+//   - status <> 'Ready' (unclaimed)    → errs.FailedPrecondition
+//     (PRECONDITION_NOT_MET) with
+//     Meta{status:<current>, required:'Ready'}
+//
 // Enforces invariant I-3 (qa_state=failed → review_state and qa_state
 // both reset to 'pending' in the same transaction).
 //
@@ -1509,46 +1519,88 @@ func Claim(ctx context.Context, req *ClaimRequest) (*Item, error) {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// SELECT FOR UPDATE: only succeeds if status='Ready' AND not yet
-	// claimed. Zero rows means the loser path. We also project org_id
-	// and project_id here so the I-3-path cascade publish (post-commit,
-	// below) has the scope fields it needs without a second read.
-	var lockedID, orgID, projectID, qaState string
+	// SELECT FOR UPDATE on the BARE row (no status/claimed predicate),
+	// mirroring Promote's read-then-branch shape (§6.4 + §7.2, bead
+	// unblock-tv8.72). The §6.4 SQL filters the lock by
+	// (status='Ready' AND claimed_by_id IS NULL); doing the SAME filter
+	// in SQL collapses three DISTINCT zero-row causes into one ErrNoRows
+	// arm and mis-reports a never-Ready item as ALREADY_CLAIMED. Instead
+	// we lock the row unconditionally and discriminate the three cases in
+	// Go AFTER the lock (TOCTOU-safe — the FOR UPDATE serialises claim
+	// against a concurrent promote/add_dependency/claim):
+	//   - ErrNoRows                          → NOT_FOUND
+	//   - claimed_by_id IS NOT NULL          → ALREADY_CLAIMED (winner meta)
+	//   - status <> 'Ready' (and unclaimed)  → PRECONDITION_NOT_MET
+	//                                          {status:<current>, required:'Ready'}
+	// Only (status='Ready' AND claimed_by_id IS NULL) proceeds to the
+	// I-3/UPDATE path below.
+	//
+	// We also project org_id and project_id here so the I-3-path cascade
+	// publish (post-commit, below) has the scope fields it needs without a
+	// second read.
+	var lockedID, orgID, projectID, currentStatus, qaState string
+	var claimedByID *string
 	err = tx.QueryRow(ctx,
-		`SELECT id, org_id, COALESCE(project_id, ''), qa_state
+		`SELECT id, org_id, COALESCE(project_id, ''), status, claimed_by_id, qa_state
 		   FROM workitems.items
-		  WHERE id = $1 AND status = 'Ready' AND claimed_by_id IS NULL
+		  WHERE id = $1
 		  FOR UPDATE`,
 		req.ItemID,
-	).Scan(&lockedID, &orgID, &projectID, &qaState)
+	).Scan(&lockedID, &orgID, &projectID, &currentStatus, &claimedByID, &qaState)
 	if err != nil {
 		if errors.Is(err, sqldb.ErrNoRows) {
-			// Loser path — fetch winner info.
-			//
-			// Concurrency hazard: we MUST release the SELECT FOR
-			// UPDATE transaction (and its underlying pgxpool conn)
-			// BEFORE calling alreadyClaimedError, which opens a
-			// fresh pool conn via db.QueryRow. The deferred
-			// tx.Rollback above runs only at function-return, which
-			// is too late: at function entry under high concurrent
-			// claim load (N > pgxpool MaxConns), every goroutine
-			// already holds one conn for its own losing SELECT FOR
-			// UPDATE tx and the pool has zero free conns. Each
-			// loser would then queue forever for the second conn
-			// alreadyClaimedError needs, deadlocking N-way on the
-			// pool (no losers can release their first conn until
-			// they've returned from Claim, but they can't return
-			// until alreadyClaimedError completes, which can't run
-			// without a second conn). Explicit early-rollback here
-			// frees the conn back to the pool BEFORE the second
-			// acquisition is attempted, so the loser path scales
-			// linearly with N under any pool size. The deferred
-			// rollback is harmless after an explicit one — pgx
-			// treats double-rollback as a no-op (ErrTxClosed).
-			_ = tx.Rollback()
-			return nil, alreadyClaimedError(ctx, req.ItemID)
+			return nil, &errs.Error{Code: errs.NotFound, Message: "item not found"}
 		}
 		return nil, &errs.Error{Code: errs.Internal, Message: "claim lock failed"}
+	}
+
+	// Discriminate on the LOCKED row (§6.4 loser path + §7.2, bead
+	// unblock-tv8.72). This MUST run BEFORE the I-3 reset / UPDATE block
+	// below — a not-Ready or already-claimed item must never reach the
+	// claim UPDATE.
+	if claimedByID != nil {
+		// Genuine concurrent-loser path — fetch winner info and return
+		// ALREADY_CLAIMED unchanged (§6.4).
+		//
+		// Concurrency hazard: we MUST release the SELECT FOR UPDATE
+		// transaction (and its underlying pgxpool conn) BEFORE calling
+		// alreadyClaimedError, which opens a fresh pool conn via
+		// db.QueryRow. The deferred tx.Rollback above runs only at
+		// function-return, which is too late: at function entry under
+		// high concurrent claim load (N > pgxpool MaxConns), every
+		// goroutine already holds one conn for its own SELECT FOR
+		// UPDATE tx and the pool has zero free conns. Each loser would
+		// then queue forever for the second conn alreadyClaimedError
+		// needs, deadlocking N-way on the pool (no losers can release
+		// their first conn until they've returned from Claim, but they
+		// can't return until alreadyClaimedError completes, which can't
+		// run without a second conn). Explicit early-rollback here frees
+		// the conn back to the pool BEFORE the second acquisition is
+		// attempted, so the loser path scales linearly with N under any
+		// pool size. The deferred rollback is harmless after an explicit
+		// one — pgx treats double-rollback as a no-op (ErrTxClosed).
+		_ = tx.Rollback()
+		return nil, alreadyClaimedError(ctx, req.ItemID)
+	}
+	if currentStatus != statusReady {
+		// Item exists and is unclaimed but is not in Ready (e.g. a fresh
+		// Backlog item that was never promoted). §7.2 status-precondition
+		// extension: emit PRECONDITION_NOT_MET carrying the item's CURRENT
+		// status + the required status. NO "missing" — claim's block is a
+		// wrong-status, not an unmet structural readiness gate ("missing"
+		// is promote's Backlog-but-is_ready=false disambiguator only).
+		// errmap surfaces Meta[status]/[required] inside data.details.
+		// This arm opens no second pool conn, so the deferred rollback
+		// suffices (no early-rollback needed).
+		return nil, &errs.Error{
+			Code:    errs.FailedPrecondition,
+			Message: "claim requires status='Ready'",
+			Meta: errs.Metadata{
+				"invariant": "claim_requires_ready_item",
+				"status":    currentStatus,
+				"required":  statusReady,
+			},
+		}
 	}
 
 	// I-3: when claimed item has qa_state='failed', reset
