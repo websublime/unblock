@@ -79,7 +79,11 @@ func handleCreateMilestone(ctx context.Context, req *sdkmcp.CallToolRequest, in 
 	// passed to the backing RPC, satisfying the XOR the RPC + DDL CHECK
 	// enforce. A client cannot name a foreign org because OrgID is never
 	// read from the wire.
+	// CallerOrgID is pinned to identity.OrgID (never the wire) so the backing
+	// RPC's parent-read seam gates a foreign parent_milestone_id as NOT_FOUND
+	// rather than leaking a cross-tenant parent's scope/dates (§10.1.1).
 	scope := workitems.CreateMilestoneRequest{
+		CallerOrgID:       identity.OrgID,
 		ParentMilestoneID: in.ParentMilestoneID,
 		Name:              in.Name,
 		Description:       in.Description,

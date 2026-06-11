@@ -81,7 +81,8 @@ func handleRemoveDependency(ctx context.Context, req *sdkmcp.CallToolRequest, in
 	tool := "remove_dependency"
 	state := bindTool(req, tool)
 
-	if _, ok := identityFromReq(req); !ok {
+	identity, ok := identityFromReq(req)
+	if !ok {
 		return nil, removeDependencyOut{}, mapError(state, tool, errMissingIdentityErr())
 	}
 
@@ -94,12 +95,15 @@ func handleRemoveDependency(ctx context.Context, req *sdkmcp.CallToolRequest, in
 	// (deps/deps.go:443-457) — passing both / neither surfaces
 	// InvalidArgument with no Meta.field, which errmap maps to §7
 	// VALIDATION with details.reason carrying the deps-layer message.
-	// We forward the inputs verbatim.
+	// We forward the inputs verbatim. CallerOrgID is pinned to identity.OrgID
+	// (never the wire) so the backing RPC's to_item tenant gate rejects a
+	// foreign edge as NOT_FOUND rather than acting cross-tenant (§10.1.1).
 	resp, err := deps.RemoveEdge(mcpCtx, &deps.RemoveEdgeRequest{
-		EdgeID:   in.EdgeID,
-		FromItem: in.FromItemID,
-		ToItem:   in.ToItemID,
-		Kind:     in.Kind,
+		EdgeID:      in.EdgeID,
+		CallerOrgID: identity.OrgID,
+		FromItem:    in.FromItemID,
+		ToItem:      in.ToItemID,
+		Kind:        in.Kind,
 	})
 	if err != nil {
 		return nil, removeDependencyOut{}, mapError(state, tool, err)

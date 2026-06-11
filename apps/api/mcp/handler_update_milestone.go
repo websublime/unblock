@@ -11,8 +11,10 @@
 //
 // Org scope flows through the Bearer-resolved Identity (identity.OrgID
 // via withIdentityFromReq); the milestone is addressed by its ULID. The
-// backing write RPC does not self-gate — the MCP handler is the
-// authoritative write gate (workitems.go auth-model doc-comment).
+// handler pins CallerOrgID from identity.OrgID and the backing write RPC
+// self-gates on a row-level tenant predicate (a foreign milestone_id
+// yields NOT_FOUND) — round-16 / bead unblock-tv8.77, §10.1.1
+// (workitems.go auth-model doc-comment).
 //
 // Invariant / validation rejections surface from the backing RPC and are
 // projected by mapError into the §7 envelope (PRECONDITION_NOT_MET with
@@ -69,7 +71,8 @@ func handleUpdateMilestone(ctx context.Context, req *sdkmcp.CallToolRequest, in 
 	tool := "update_milestone"
 	state := bindTool(req, tool)
 
-	if _, ok := identityFromReq(req); !ok {
+	identity, ok := identityFromReq(req)
+	if !ok {
 		return nil, updateMilestoneOut{}, mapError(state, tool, errMissingIdentityErr())
 	}
 
@@ -86,8 +89,12 @@ func handleUpdateMilestone(ctx context.Context, req *sdkmcp.CallToolRequest, in 
 		})
 	}
 
+	// CallerOrgID is pinned to identity.OrgID (never the wire) so the backing
+	// RPC's row-level tenant predicate rejects a foreign milestone_id as
+	// NOT_FOUND rather than acting cross-tenant (§10.1.1).
 	ms, err := workitems.UpdateMilestone(mcpCtx, &workitems.UpdateMilestoneRequest{
 		MilestoneID:     in.MilestoneID,
+		CallerOrgID:     identity.OrgID,
 		Name:            in.Name,
 		Description:     in.Description,
 		StartDate:       in.StartDate,

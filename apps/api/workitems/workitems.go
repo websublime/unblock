@@ -25,49 +25,68 @@
 // subscriber per SPEC §5.7.1 — encore.app/deps owns the write path,
 // enforced by apps/api/shared/lint/no_direct_is_ready_write.go).
 //
-// # Authorisation model — layered gate (read-side vs write-side)
+// # Authorisation model — symmetric row-level tenant gate (read + write)
 //
-// The workitems service uses a deliberately asymmetric authorisation
-// pattern that callers MUST respect:
+// The workitems service self-gates BOTH the read path and the write
+// path in SQL. The tenant predicate is enforced by the SQL itself, not
+// by a callable check, so a misbehaving or compromised caller can never
+// act across orgs through these RPCs.
 //
 //   - Read-side RPCs (Get, GetTrail, List, Search) self-gate via
 //     rbac.For[T](identity, table). The rbac builder injects the
 //     tenant predicate (org_id = $caller_org) directly into every
-//     emitted SQL clause, so a misbehaving or compromised caller can
-//     never read across orgs through these RPCs — the tenant gate is
-//     enforced by the SQL itself, not by a callable check.
+//     emitted SQL clause. ListLabels / MilestoneTree use an EXPLICIT
+//     raw-SQL tenant predicate instead of rbac.For (their UNION-ALL /
+//     rooted-CTE shapes are not expressible via the builder) — the same
+//     justified deviation documented on those RPCs.
 //
-//   - Write-side RPCs (Create, Update, AppendComment, SetStateColumns,
-//     Close, Claim, CreateMilestone, UpdateMilestone, AssignItem) do
-//     NOT call org.Authorize internally. They trust that the MCP tool
-//     handler resolved the caller's org-scoped Identity from the Bearer
-//     hot path and pinned org scope to identity.OrgID BEFORE dispatching
-//     to the private RPC — no handler in P01 calls org.Authorize
-//     directly; the org gate is the Bearer-resolved Identity injected
-//     via the mcp withIdentityFromReq bridge (the write RPCs read
-//     auth.UserID()/auth.Data() and trust identity.OrgID; org_id is
-//     never accepted from the wire on the write tools). The MCP layer is
-//     the single authoritative gate for the write path because it owns
-//     the session→identity resolution. Layering an explicit Authorize
-//     call inside every private write RPC would duplicate that
-//     resolution, double-bill the auth schema, and split the audit
-//     trail between two layers.
+//   - Write-side RPCs self-gate via a ROW-LEVEL tenant predicate keyed
+//     on an internal CallerOrgID channel (round-16 / bead
+//     unblock-tv8.77, SPEC §10.1.1). CallerOrgID is populated by the MCP
+//     tool handler from the Bearer-resolved identity.OrgID and is NEVER
+//     accepted from the wire — it travels as a private RPC struct field.
+//     Each item write RPC (Update, AppendComment, SetStateColumns,
+//     Close, Claim, Promote, AssignItem) injects
+//     (CallerOrgID = ” OR org_id = CallerOrgID) into its targeting SQL
+//     (the SELECT … FOR UPDATE row lock, the mutating UPDATE/DELETE, or
+//     — for AppendComment's INSERT — the INSERT … SELECT on the parent
+//     item's org). Each milestone write RPC (CreateMilestone's
+//     parent-read seam, UpdateMilestone) and MilestoneTree use the
+//     org-XOR-project form
+//     (CallerOrgID = ” OR org_id = CallerOrgID OR project_id IN
+//     (SELECT id FROM org.projects WHERE org_id = CallerOrgID)),
+//     because project-scoped milestones carry NULL org_id. A foreign
+//     target id therefore matches zero rows → NOT_FOUND (or zero rows
+//     inserted on an INSERT), never a cross-tenant mutation.
 //
-// This is consistent with the org service's own private writes
-// (org.CreateProject etc.) and matches SPEC §10.1's gate model: read
-// gates live in the SQL, write gates live at the MCP boundary. If a
-// new caller outside the MCP layer (e.g. another internal service)
-// needs to invoke a write RPC here, the caller is responsible for
-// calling org.Authorize first; the RPC's pre-validation (field
-// validation, enum allow-listing, FK checks) is NOT a substitute for
-// the org gate.
+// # Empty-CallerOrgID no-op (item/milestone) vs hard guard (labels)
 //
-// Belt-and-suspenders defence-in-depth (a second org.Authorize call
-// inside each write RPC) was considered and rejected during round-2
-// review of bead unblock-tv8.10 — the duplicate gate would obscure
-// the layered model without adding a meaningful security property,
-// since the only callers in P01 are the MCP layer and the test
-// harness (which uses the same rbac.For gate on the read side).
+// The item / milestone write RPCs take the empty-CallerOrgID NO-OP form:
+// (CallerOrgID = ” OR <predicate>) — empty CallerOrgID is a no-op gate.
+// This is deliberate (SPEC §10.1.1, ratified by Miguel 2026-06-11):
+// trusted internal no-auth callers — the §11.1.1 exit-criterion seed and
+// the integration tests that drive these RPCs directly through Encore's
+// private mesh with no org context — pass an empty CallerOrgID, and the
+// no-op branch lets them operate unscoped. The branch is reachable ONLY
+// from those trusted callers: every MCP handler ALWAYS pins CallerOrgID
+// from identity.OrgID before dispatch, so the no-op is unreachable from
+// the agent surface. A hard CallerOrgID=="" reject on these RPCs would
+// break the entire exit-criterion + integration suite.
+//
+// By contrast the label write RPCs (CreateLabel, UpdateLabel,
+// DeleteLabel) HARD-REJECT an empty CallerOrgID with InvalidArgument —
+// they have no trusted-internal-caller path (they are MCP-only), so an
+// empty CallerOrgID there is always a programming error.
+//
+// The org service's own private writes (org.CreateProject etc.) follow
+// the same Bearer-resolved-identity pattern. This matches SPEC §10.1 /
+// §10.1.1's gate model: read and write tenant gates both live in the
+// SQL, with the write gate keyed on the CallerOrgID internal channel.
+// Layering an explicit org.Authorize call inside every private write RPC
+// (belt-and-suspenders) was considered and rejected during round-2
+// review of bead unblock-tv8.10 — the duplicate gate would obscure the
+// model without adding a meaningful security property over the row-level
+// predicate above.
 package workitems
 
 import (
@@ -165,8 +184,18 @@ type Comment struct {
 }
 
 // UpdateRequest is the input to Update. SPEC §4.4.
+//
+// CallerOrgID is NOT a wire argument — the MCP handler pins it from the
+// Bearer-resolved org-scoped Identity (identity.OrgID) and passes it
+// RPC-side so Update self-gates its UPDATE on org_id = CallerOrgID. A
+// foreign ItemID matches zero rows → NOT_FOUND, never a cross-tenant
+// mutation. An empty CallerOrgID is the §10.1.1 no-op for trusted internal
+// callers (the §11.1.1 E2E seed + integration tests); the MCP handler
+// always pins it, so the no-op is unreachable from the agent surface
+// (round-16 / bead unblock-tv8.77).
 type UpdateRequest struct {
 	ItemID      string    `json:"item_id"`
+	CallerOrgID string    `json:"caller_org_id"`
 	Title       *string   `json:"title"`
 	Body        *string   `json:"body"`
 	Priority    *string   `json:"priority"`
@@ -191,8 +220,17 @@ type Trail struct {
 }
 
 // AppendCommentRequest is the input to AppendComment. SPEC §4.4.
+//
+// CallerOrgID is NOT a wire argument — the MCP handler pins it from the
+// Bearer-resolved org-scoped Identity (identity.OrgID). AppendComment is an
+// INSERT, so it gates via INSERT … SELECT predicated on the PARENT item's
+// org_id = CallerOrgID: a foreign ItemID inserts zero rows → NOT_FOUND,
+// never a cross-tenant comment. An empty CallerOrgID is the §10.1.1 no-op
+// for trusted internal callers; the MCP handler always pins it (round-16 /
+// bead unblock-tv8.77).
 type AppendCommentRequest struct {
 	ItemID      string `json:"item_id"`
+	CallerOrgID string `json:"caller_org_id"`
 	AuthorID    string `json:"author_id"`
 	AuthorAgent string `json:"author_agent"`
 	ParentID    string `json:"parent_id"`
@@ -202,8 +240,17 @@ type AppendCommentRequest struct {
 }
 
 // SetStateRequest is the input to SetStateColumns. SPEC §4.4.
+//
+// CallerOrgID is NOT a wire argument — the MCP handler pins it from the
+// Bearer-resolved org-scoped Identity (identity.OrgID) so SetStateColumns
+// self-gates the SELECT … FOR UPDATE row lock on org_id = CallerOrgID. A
+// foreign ItemID yields NOT_FOUND BEFORE any invariant check runs, never a
+// cross-tenant state mutation. An empty CallerOrgID is the §10.1.1 no-op
+// for trusted internal callers; the MCP handler always pins it (round-16 /
+// bead unblock-tv8.77).
 type SetStateRequest struct {
 	ItemID        string  `json:"item_id"`
+	CallerOrgID   string  `json:"caller_org_id"`
 	ImplState     *string `json:"impl_state"`
 	ReviewState   *string `json:"review_state"`
 	QAState       *string `json:"qa_state"`
@@ -255,14 +302,31 @@ type GetStateResponse struct {
 }
 
 // CloseRequest is the input to Close. SPEC §4.4.
+//
+// CallerOrgID is NOT a wire argument — the MCP handler pins it from the
+// Bearer-resolved org-scoped Identity (identity.OrgID) so Close self-gates
+// the SELECT … FOR UPDATE row lock on org_id = CallerOrgID, checked BEFORE
+// the AF3 claimed_by_id precondition. A foreign ItemID yields NOT_FOUND,
+// never a cross-tenant close. An empty CallerOrgID is the §10.1.1 no-op for
+// trusted internal callers; the MCP handler always pins it (round-16 /
+// bead unblock-tv8.77).
 type CloseRequest struct {
-	ItemID string `json:"item_id"`
-	Reason string `json:"reason"`
+	ItemID      string `json:"item_id"`
+	CallerOrgID string `json:"caller_org_id"`
+	Reason      string `json:"reason"`
 }
 
 // ClaimRequest is the input to Claim. SPEC §4.4.
+//
+// CallerOrgID is NOT a wire argument — the MCP handler pins it from the
+// Bearer-resolved org-scoped Identity (identity.OrgID) so Claim self-gates
+// the SELECT … FOR UPDATE row lock on org_id = CallerOrgID. A foreign
+// ItemID yields NOT_FOUND (not ALREADY_CLAIMED), never a cross-tenant
+// claim. An empty CallerOrgID is the §10.1.1 no-op for trusted internal
+// callers; the MCP handler always pins it (round-16 / bead unblock-tv8.77).
 type ClaimRequest struct {
 	ItemID        string `json:"item_id"`
+	CallerOrgID   string `json:"caller_org_id"`
 	ClaimerUserID string `json:"claimer_user_id"`
 	ClaimerAgent  string `json:"claimer_agent"`
 }
@@ -405,9 +469,19 @@ type Milestone struct {
 }
 
 // CreateMilestoneRequest is the input to CreateMilestone. SPEC §4.4.1.
+//
+// CallerOrgID is NOT a wire argument — the MCP handler pins it from the
+// Bearer-resolved org-scoped Identity (identity.OrgID). When
+// ParentMilestoneID is supplied, the parent-read seam self-gates on the
+// milestone tenant predicate (org_id = CallerOrgID OR project_id IN the
+// caller's org's projects) so a foreign parent ULID yields NOT_FOUND,
+// never a cross-tenant read leak. An empty CallerOrgID is the §10.1.1
+// no-op for trusted internal callers (the §11.1.1 E2E seed); the MCP
+// handler always pins it (round-16 / bead unblock-tv8.77).
 type CreateMilestoneRequest struct {
 	OrgID             string `json:"org_id"`
 	ProjectID         string `json:"project_id"`
+	CallerOrgID       string `json:"caller_org_id"`
 	ParentMilestoneID string `json:"parent_milestone_id"`
 	Name              string `json:"name"`
 	Description       string `json:"description"`
@@ -416,8 +490,17 @@ type CreateMilestoneRequest struct {
 }
 
 // UpdateMilestoneRequest is the input to UpdateMilestone. SPEC §4.4.1.
+//
+// CallerOrgID is NOT a wire argument — the MCP handler pins it from the
+// Bearer-resolved org-scoped Identity (identity.OrgID) so UpdateMilestone
+// self-gates on the milestone tenant predicate (the targeted milestone's
+// org_id = CallerOrgID OR its project_id IN the caller's org's projects).
+// A foreign MilestoneID yields NOT_FOUND, never a cross-tenant mutation.
+// An empty CallerOrgID is the §10.1.1 no-op for trusted internal callers;
+// the MCP handler always pins it (round-16 / bead unblock-tv8.77).
 type UpdateMilestoneRequest struct {
 	MilestoneID     string     `json:"milestone_id"`
+	CallerOrgID     string     `json:"caller_org_id"`
 	Name            *string    `json:"name"`
 	Description     *string    `json:"description"`
 	StartDate       *string    `json:"start_date"`
@@ -427,16 +510,36 @@ type UpdateMilestoneRequest struct {
 }
 
 // AssignItemRequest is the input to AssignItem. SPEC §4.4.1.
+//
+// CallerOrgID is NOT a wire argument — the MCP handler pins it from the
+// Bearer-resolved org-scoped Identity (identity.OrgID) so AssignItem
+// self-gates on the TARGET item's tenancy (the item's org_id =
+// CallerOrgID). A foreign ItemID yields NOT_FOUND, never a cross-tenant
+// milestone assignment. An empty CallerOrgID is the §10.1.1 no-op for
+// trusted internal callers (the §11.1.1 E2E seed); the MCP handler always
+// pins it (round-16 / bead unblock-tv8.77).
 type AssignItemRequest struct {
 	ItemID         string `json:"item_id"`
+	CallerOrgID    string `json:"caller_org_id"`
 	MilestoneID    string `json:"milestone_id"`
 	AssignedByUser string `json:"assigned_by_user"`
 }
 
 // MilestoneTreeRequest is the input to MilestoneTree. SPEC §4.4.1.
+//
+// CallerOrgID is NOT a wire argument — the MCP handler pins it from the
+// Bearer-resolved org-scoped Identity (identity.OrgID). The recursive-CTE
+// anchor self-gates on the milestone tenant predicate (org_id =
+// CallerOrgID OR project_id IN the caller's org's projects). A foreign
+// RootMilestoneID produces an empty anchor → no rows, closing the IDOR
+// read seam. An empty CallerOrgID is the §10.1.1 no-op for trusted internal
+// callers (the §11.1.1 E2E seed, the P05 roadmap RPC); the MCP handler
+// always pins it (round-16 / beads unblock-tv8.75 + .77). OrgID/ProjectID
+// remain the wire-supplied scope selectors for the roots walk.
 type MilestoneTreeRequest struct {
 	OrgID            string `json:"org_id"`
 	ProjectID        string `json:"project_id"`
+	CallerOrgID      string `json:"caller_org_id"`
 	RootMilestoneID  string `json:"root_milestone_id"`
 	IncludeCancelled bool   `json:"include_cancelled"`
 }
@@ -886,12 +989,19 @@ func Create(ctx context.Context, req *CreateRequest) (*Item, error) {
 		if kind == "" {
 			kind = "blocks"
 		}
+		// CallerOrgID is the just-created item's org (req.OrgID is itself
+		// pinned from identity.OrgID by the MCP handler). deps.AddEdgeInTx
+		// gates both endpoints on CallerOrgID, so a Create that names a
+		// foreign FromItem is rejected NOT_FOUND. The empty-CallerOrgID no-op
+		// covers the trusted internal create path (round-16 / bead
+		// unblock-tv8.77, §10.1.1).
 		_, postCommit, err := deps.AddEdgeInTx(ctx, tx, &deps.AddEdgeRequest{
-			OrgID:     req.OrgID,
-			ProjectID: req.ProjectID,
-			FromItem:  edge.FromItem,
-			ToItem:    id,
-			Kind:      kind,
+			OrgID:       req.OrgID,
+			ProjectID:   req.ProjectID,
+			CallerOrgID: req.OrgID,
+			FromItem:    edge.FromItem,
+			ToItem:      id,
+			Kind:        kind,
 		})
 		if err != nil {
 			return nil, err
@@ -947,7 +1057,16 @@ func Update(ctx context.Context, req *UpdateRequest) (*Item, error) {
 	// existing column value. milestone_id uses a sentinel — when the
 	// pointer is set to "" it clears, otherwise it sets the new value.
 	// Title/Body/Priority follow the same nil = unchanged contract.
-	_, err = tx.Exec(ctx,
+	//
+	// Row-level tenant gate (round-16 / bead unblock-tv8.77, §10.1.1): the
+	// WHERE clause's ($7 = '' OR org_id = $7) predicate is the IDOR gate. A
+	// foreign ItemID (org_id != CallerOrgID) matches zero rows → NOT_FOUND
+	// below, never a cross-tenant mutation. The empty-CallerOrgID no-op
+	// keeps trusted internal callers (the §11.1.1 E2E seed, integration
+	// tests) operating unscoped; the MCP handler always pins CallerOrgID
+	// from identity.OrgID, so the no-op is unreachable from the agent
+	// surface.
+	tag, err := tx.Exec(ctx,
 		`UPDATE workitems.items
 		    SET title       = COALESCE($2, title),
 		        body        = COALESCE($3, body),
@@ -957,9 +1076,11 @@ func Update(ctx context.Context, req *UpdateRequest) (*Item, error) {
 		                         ELSE milestone_id
 		                       END,
 		        updated_at  = now()
-		  WHERE id = $1`,
+		  WHERE id = $1
+		    AND ($7 = '' OR org_id = $7)`,
 		req.ItemID, req.Title, req.Body, req.Priority,
 		req.MilestoneID != nil, derefString(req.MilestoneID),
+		req.CallerOrgID,
 	)
 	if err != nil {
 		if isForeignKeyViolation(err) {
@@ -967,6 +1088,13 @@ func Update(ctx context.Context, req *UpdateRequest) (*Item, error) {
 		}
 		rlog.Error("workitems: update failed", "err", err, "item_id", req.ItemID)
 		return nil, &errs.Error{Code: errs.Internal, Message: "update failed"}
+	}
+	// Zero affected rows means either the item does not exist OR it belongs
+	// to another tenant (org_id != CallerOrgID). Surface NOT_FOUND for both
+	// — a cross-tenant ItemID is indistinguishable from a missing one and
+	// never leaks existence across the tenant boundary.
+	if tag.RowsAffected() == 0 {
+		return nil, &errs.Error{Code: errs.NotFound, Message: "item not found"}
 	}
 
 	// Labels: full-replace when the pointer is set (empty slice = clear).
@@ -1262,12 +1390,26 @@ func AppendComment(ctx context.Context, req *AppendCommentRequest) (*Comment, er
 		return nil, &errs.Error{Code: errs.Internal, Message: "comment id generation failed"}
 	}
 
-	_, err = db.Exec(ctx,
+	// Row-level tenant gate (round-16 / bead unblock-tv8.77, §10.1.1):
+	// AppendComment is an INSERT, so it gates via INSERT … SELECT predicated
+	// on the PARENT item's org_id = CallerOrgID. The SELECT yields a row
+	// ONLY when the target item exists AND ($9 = '' OR its org_id = $9) — a
+	// foreign ItemID (org_id != CallerOrgID) yields zero source rows → zero
+	// inserted rows → NOT_FOUND below, never a cross-tenant comment. The
+	// empty-CallerOrgID no-op keeps trusted internal callers operating
+	// unscoped; the MCP handler always pins CallerOrgID from identity.OrgID,
+	// so the no-op is unreachable from the agent surface. The parent_id FK
+	// (parent comment must reference the same item) is still enforced by the
+	// comments_parent_fk constraint, surfacing as the FK-violation arm below.
+	tag, err := db.Exec(ctx,
 		`INSERT INTO workitems.comments
 		   (id, item_id, parent_id, author_id, author_agent, kind, status, body)
-		 VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), NULLIF($5, ''), $6, $7, $8)`,
+		 SELECT $1, i.id, NULLIF($3, ''), NULLIF($4, ''), NULLIF($5, ''), $6, $7, $8
+		   FROM workitems.items i
+		  WHERE i.id = $2
+		    AND ($9 = '' OR i.org_id = $9)`,
 		id, req.ItemID, req.ParentID, req.AuthorID, req.AuthorAgent,
-		kind, status, req.Body,
+		kind, status, req.Body, req.CallerOrgID,
 	)
 	if err != nil {
 		if isForeignKeyViolation(err) {
@@ -1275,6 +1417,12 @@ func AppendComment(ctx context.Context, req *AppendCommentRequest) (*Comment, er
 		}
 		rlog.Error("workitems: append comment failed", "err", err, "item_id", req.ItemID)
 		return nil, &errs.Error{Code: errs.Internal, Message: "append comment failed"}
+	}
+	// Zero inserted rows means the parent item does not exist OR belongs to
+	// another tenant (org_id != CallerOrgID). Surface NOT_FOUND for both so
+	// a cross-tenant ItemID is indistinguishable from a missing one.
+	if tag.RowsAffected() == 0 {
+		return nil, &errs.Error{Code: errs.NotFound, Message: "item not found"}
 	}
 
 	// Read back so updated_at default is reflected.
@@ -1345,14 +1493,21 @@ func SetStateColumns(ctx context.Context, req *SetStateRequest) (*Item, error) {
 	// predicate-evaluation branch stays uniform; only the publishing
 	// branch consumes it. COALESCE(project_id,'') mirrors the Close
 	// pattern at workitems.go:1290-1296.
+	// Row-level tenant gate (round-16 / bead unblock-tv8.77, §10.1.1): the
+	// FOR UPDATE lock is predicated on ($2 = '' OR org_id = $2). A foreign
+	// ItemID (org_id != CallerOrgID) matches no row → ErrNoRows → NOT_FOUND
+	// BEFORE any invariant check runs, never a cross-tenant state mutation.
+	// The empty-CallerOrgID no-op keeps trusted internal callers operating
+	// unscoped; the MCP handler always pins CallerOrgID from identity.OrgID.
 	var cur stateRow
 	err = tx.QueryRow(ctx,
 		`SELECT impl_state, review_state, qa_state, pipeline_state, claimed_by_id,
 		        org_id, COALESCE(project_id, '')
 		   FROM workitems.items
 		  WHERE id = $1
+		    AND ($2 = '' OR org_id = $2)
 		  FOR UPDATE`,
-		req.ItemID,
+		req.ItemID, req.CallerOrgID,
 	).Scan(&cur.Impl, &cur.Review, &cur.QA, &cur.Pipeline, &cur.ClaimedBy,
 		&cur.OrgID, &cur.ProjectID)
 	if err != nil {
@@ -1485,6 +1640,13 @@ func Close(ctx context.Context, req *CloseRequest) (*Item, error) {
 
 	// Read org_id, project_id, claimed_by_id to validate AF3 and to
 	// scope the cascade event.
+	//
+	// Row-level tenant gate (round-16 / bead unblock-tv8.77, §10.1.1): the
+	// FOR UPDATE lock is predicated on ($2 = '' OR org_id = $2), checked
+	// BEFORE the AF3 claimed_by_id precondition. A foreign ItemID (org_id !=
+	// CallerOrgID) matches no row → ErrNoRows → NOT_FOUND, never a
+	// cross-tenant close. The empty-CallerOrgID no-op keeps trusted internal
+	// callers operating unscoped; the MCP handler always pins CallerOrgID.
 	var orgID, projectID string
 	var claimedBy *string
 	var currentStatus string
@@ -1492,8 +1654,9 @@ func Close(ctx context.Context, req *CloseRequest) (*Item, error) {
 		`SELECT org_id, COALESCE(project_id, ''), claimed_by_id, status
 		   FROM workitems.items
 		  WHERE id = $1
+		    AND ($2 = '' OR org_id = $2)
 		  FOR UPDATE`,
-		req.ItemID,
+		req.ItemID, req.CallerOrgID,
 	).Scan(&orgID, &projectID, &claimedBy, &currentStatus)
 	if err != nil {
 		if errors.Is(err, sqldb.ErrNoRows) {
@@ -1655,14 +1818,23 @@ func Claim(ctx context.Context, req *ClaimRequest) (*Item, error) {
 	// We also project org_id and project_id here so the I-3-path cascade
 	// publish (post-commit, below) has the scope fields it needs without a
 	// second read.
+	// Row-level tenant gate (round-16 / bead unblock-tv8.77, §10.1.1): the
+	// FOR UPDATE lock is predicated on ($2 = '' OR org_id = $2). A foreign
+	// ItemID (org_id != CallerOrgID) matches no row → ErrNoRows → NOT_FOUND
+	// (NOT ALREADY_CLAIMED), never a cross-tenant claim. The gate runs
+	// before the §6.4 / §7.2 loser/precondition discrimination so a foreign
+	// id can never reach the ALREADY_CLAIMED or PRECONDITION_NOT_MET arms.
+	// The empty-CallerOrgID no-op keeps trusted internal callers operating
+	// unscoped; the MCP handler always pins CallerOrgID from identity.OrgID.
 	var lockedID, orgID, projectID, currentStatus, qaState string
 	var claimedByID *string
 	err = tx.QueryRow(ctx,
 		`SELECT id, org_id, COALESCE(project_id, ''), status, claimed_by_id, qa_state
 		   FROM workitems.items
 		  WHERE id = $1
+		    AND ($2 = '' OR org_id = $2)
 		  FOR UPDATE`,
-		req.ItemID,
+		req.ItemID, req.CallerOrgID,
 	).Scan(&lockedID, &orgID, &projectID, &currentStatus, &claimedByID, &qaState)
 	if err != nil {
 		if errors.Is(err, sqldb.ErrNoRows) {
@@ -1806,8 +1978,17 @@ func Claim(ctx context.Context, req *ClaimRequest) (*Item, error) {
 }
 
 // PromoteRequest is the input to Promote. SPEC §6.2 Tool 15.
+//
+// CallerOrgID is NOT a wire argument — the MCP handler pins it from the
+// Bearer-resolved org-scoped Identity (identity.OrgID) so Promote
+// self-gates the SELECT … FOR UPDATE row lock on org_id = CallerOrgID. A
+// foreign ItemID yields NOT_FOUND, never a cross-tenant promotion. An empty
+// CallerOrgID is the §10.1.1 no-op for trusted internal callers; the MCP
+// handler always pins it (round-16 / bead unblock-tv8.77). Promote has no
+// §4.4 block — its gate is contract-defined in §6.2 Tool 15 prose only.
 type PromoteRequest struct {
-	ItemID string `json:"item_id"`
+	ItemID      string `json:"item_id"`
+	CallerOrgID string `json:"caller_org_id"`
 }
 
 // Promote transitions a Backlog item to Ready (SPEC §6.2 Tool 15 / §6.6
@@ -1858,14 +2039,21 @@ func Promote(ctx context.Context, req *PromoteRequest) (*Item, error) {
 	// concurrent add_dependency that flips is_ready false cannot race the
 	// promotion (TOCTOU): the FOR UPDATE serialises promote against the
 	// §6.5 inline is_ready recompute.
+	// Row-level tenant gate (round-16 / bead unblock-tv8.77, §10.1.1): the
+	// FOR UPDATE lock is predicated on ($2 = '' OR org_id = $2). A foreign
+	// ItemID (org_id != CallerOrgID) matches no row → ErrNoRows → NOT_FOUND,
+	// checked before the Backlog/is_ready precondition, never a cross-tenant
+	// promotion. The empty-CallerOrgID no-op keeps trusted internal callers
+	// operating unscoped; the MCP handler always pins CallerOrgID.
 	var currentStatus string
 	var isReady bool
 	err = tx.QueryRow(ctx,
 		`SELECT status, is_ready
 		   FROM workitems.items
 		  WHERE id = $1
+		    AND ($2 = '' OR org_id = $2)
 		  FOR UPDATE`,
-		req.ItemID,
+		req.ItemID, req.CallerOrgID,
 	).Scan(&currentStatus, &isReady)
 	if err != nil {
 		if errors.Is(err, sqldb.ErrNoRows) {
@@ -2449,14 +2637,24 @@ func CreateMilestone(ctx context.Context, req *CreateMilestoneRequest) (*Milesto
 	// reparent / update cannot invalidate the check between read and
 	// our insert.
 	if req.ParentMilestoneID != "" {
+		// Row-level tenant gate (round-16 / bead unblock-tv8.77, §10.1.1):
+		// the parent-read seam is predicated on the milestone tenant
+		// predicate — ($5 = '' OR org_id = $5 OR project_id IN the caller's
+		// org's projects). A foreign parent ULID matches no row → ErrNoRows
+		// → NOT_FOUND, never a cross-tenant read leak of a foreign parent's
+		// scope/dates. The empty-CallerOrgID no-op keeps trusted internal
+		// callers operating unscoped; the MCP handler always pins CallerOrgID.
 		var parentOrg, parentProject *string
 		var parentStart, parentEnd time.Time
 		err := tx.QueryRow(ctx,
 			`SELECT org_id, project_id, start_date, end_date
 			   FROM workitems.milestones
 			  WHERE id = $1
+			    AND ($2 = ''
+			         OR org_id = $2
+			         OR project_id IN (SELECT id FROM org.projects WHERE org_id = $2))
 			  FOR UPDATE`,
-			req.ParentMilestoneID,
+			req.ParentMilestoneID, req.CallerOrgID,
 		).Scan(&parentOrg, &parentProject, &parentStart, &parentEnd)
 		if err != nil {
 			if errors.Is(err, sqldb.ErrNoRows) {
@@ -2574,14 +2772,24 @@ func UpdateMilestone(ctx context.Context, req *UpdateMilestoneRequest) (*Milesto
 
 	// Lock the row and read current values to validate M-INV-3 against
 	// the parent (if any) and against any existing children.
+	// Row-level tenant gate (round-16 / bead unblock-tv8.77, §10.1.1): the
+	// FOR UPDATE lock is predicated on the milestone tenant predicate —
+	// ($2 = '' OR org_id = $2 OR project_id IN the caller's org's projects).
+	// A foreign MilestoneID matches no row → ErrNoRows → NOT_FOUND, never a
+	// cross-tenant mutation. The empty-CallerOrgID no-op keeps trusted
+	// internal callers operating unscoped; the MCP handler always pins
+	// CallerOrgID from identity.OrgID.
 	var parentID *string
 	var curStart, curEnd time.Time
 	err = tx.QueryRow(ctx,
 		`SELECT parent_milestone_id, start_date, end_date
 		   FROM workitems.milestones
 		  WHERE id = $1
+		    AND ($2 = ''
+		         OR org_id = $2
+		         OR project_id IN (SELECT id FROM org.projects WHERE org_id = $2))
 		  FOR UPDATE`,
-		req.MilestoneID,
+		req.MilestoneID, req.CallerOrgID,
 	).Scan(&parentID, &curStart, &curEnd)
 	if err != nil {
 		if errors.Is(err, sqldb.ErrNoRows) {
@@ -2677,31 +2885,47 @@ func AssignItem(ctx context.Context, req *AssignItemRequest) error {
 
 	if req.MilestoneID == "" {
 		// Unassign: clear all three columns.
+		//
+		// Row-level tenant gate (round-16 / bead unblock-tv8.77, §10.1.1):
+		// the UPDATE is predicated on ($2 = '' OR org_id = $2). A foreign
+		// ItemID matches zero rows → NOT_FOUND below, never a cross-tenant
+		// unassign. The empty-CallerOrgID no-op keeps trusted internal
+		// callers operating unscoped; the MCP handler always pins CallerOrgID.
 		res, err := tx.Exec(ctx,
 			`UPDATE workitems.items
 			    SET milestone_id          = NULL,
 			        milestone_assigned_at = NULL,
 			        milestone_assigned_by = NULL,
 			        updated_at            = now()
-			  WHERE id = $1`,
-			req.ItemID,
+			  WHERE id = $1
+			    AND ($2 = '' OR org_id = $2)`,
+			req.ItemID, req.CallerOrgID,
 		)
 		if err != nil {
 			return &errs.Error{Code: errs.Internal, Message: "milestone unassign failed"}
 		}
 		// A WHERE id = $1 UPDATE that matches no row silently succeeds.
-		// Surface a non-existent item as NotFound instead of a bogus
-		// 200 — the assign branch already returns NotFound for the same
-		// condition via its SELECT guard, so mirror that contract here.
+		// Surface a non-existent OR cross-tenant item as NotFound instead of
+		// a bogus 200 — the assign branch returns NotFound for the same
+		// condition via its gated SELECT, so mirror that contract here.
 		if res.RowsAffected() == 0 {
 			return &errs.Error{Code: errs.NotFound, Message: "item not found"}
 		}
 	} else {
 		// M-INV-7: scope reachability check.
+		//
+		// Row-level tenant gate (round-16 / bead unblock-tv8.77, §10.1.1):
+		// the target-item read is predicated on ($2 = '' OR org_id = $2). A
+		// foreign ItemID matches no row → ErrNoRows → NOT_FOUND, never a
+		// cross-tenant milestone assignment. The empty-CallerOrgID no-op
+		// keeps trusted internal callers operating unscoped; the MCP handler
+		// always pins CallerOrgID from identity.OrgID.
 		var itemOrg, itemProject *string
 		err = tx.QueryRow(ctx,
-			`SELECT org_id, project_id FROM workitems.items WHERE id = $1`,
-			req.ItemID,
+			`SELECT org_id, project_id FROM workitems.items
+			  WHERE id = $1
+			    AND ($2 = '' OR org_id = $2)`,
+			req.ItemID, req.CallerOrgID,
 		).Scan(&itemOrg, &itemProject)
 		if err != nil {
 			if errors.Is(err, sqldb.ErrNoRows) {
@@ -2760,14 +2984,19 @@ func AssignItem(ctx context.Context, req *AssignItemRequest) error {
 // RootMilestoneID OR all roots within (OrgID, ProjectID). SPEC §4.4.1 +
 // §9.4.9 (depth-bounded by M-INV-6).
 //
-// Tenant scoping: when OrgID is non-empty it gates BOTH walks — the roots
-// walk selects only roots reachable from that org, and the rooted walk
-// (RootMilestoneID set) requires the root milestone itself to be reachable
-// from OrgID (directly org-scoped, or in a project owned by OrgID). A
-// foreign root therefore yields an empty result rather than leaking a
-// cross-tenant subtree. When OrgID is empty (trusted internal callers) the
-// gate is a no-op. The agent-facing milestone_tree MCP tool always passes
-// identity.OrgID on both paths.
+// Tenant scoping (round-16 / beads unblock-tv8.75 + .77, §10.1.1): the
+// CallerOrgID channel gates BOTH walks — the roots walk selects only roots
+// reachable from CallerOrgID, and the rooted walk (RootMilestoneID set)
+// requires the root milestone itself to be reachable from CallerOrgID
+// (directly org-scoped, or in a project owned by CallerOrgID). A foreign
+// root therefore yields an empty result rather than leaking a cross-tenant
+// subtree. OrgID / ProjectID remain the wire-supplied scope SELECTORS for
+// the roots walk (which roots to enumerate), distinct from the CallerOrgID
+// tenant GATE (which tenant the caller may see). When CallerOrgID is empty
+// (trusted internal callers — the §11.1.1 E2E seed, the P05 roadmap RPC)
+// the gate is a no-op. The agent-facing milestone_tree MCP tool always
+// pins CallerOrgID from identity.OrgID on both paths, so the no-op is
+// unreachable from the agent surface.
 //
 //encore:api private method=POST path=/workitems.MilestoneTree
 func MilestoneTree(ctx context.Context, req *MilestoneTreeRequest) (*MilestoneTreeResponse, error) {
@@ -2783,15 +3012,15 @@ func MilestoneTree(ctx context.Context, req *MilestoneTreeRequest) (*MilestoneTr
 	switch {
 	case req.RootMilestoneID != "":
 		// Rooted walk. The recursive-anchor WHERE clause gates the root
-		// milestone by tenant reachability from req.OrgID: the root must be
-		// directly org-scoped to $4 OR project-scoped to a project owned by
-		// $4. When $4 is the empty string (trusted internal callers — the
-		// E2E exit-criterion test, the P05 roadmap RPC) the predicate is a
-		// no-op and the walk is unscoped. The agent-facing milestone_tree
-		// MCP tool ALWAYS passes identity.OrgID, so a foreign root_milestone_id
-		// yields an empty anchor (no rows) — closing the cross-tenant /
-		// IDOR read seam on the rooted path (SPEC §4.4.1 line 1165 "OrgID
-		// derived from it"; §6.2 Tool 19 tenant-predicate-injected read).
+		// milestone by tenant reachability from req.CallerOrgID: the root
+		// must be directly org-scoped to $4 OR project-scoped to a project
+		// owned by $4. When $4 is the empty string (trusted internal callers
+		// — the E2E exit-criterion test, the P05 roadmap RPC) the predicate
+		// is a no-op and the walk is unscoped. The agent-facing milestone_tree
+		// MCP tool ALWAYS pins CallerOrgID from identity.OrgID, so a foreign
+		// root_milestone_id yields an empty anchor (no rows) — closing the
+		// cross-tenant / IDOR read seam on the rooted path (SPEC §10.1.1 /
+		// §4.4.1; §6.2 Tool 19 tenant-predicate-injected read).
 		rows, err = db.Query(ctx,
 			`WITH RECURSIVE tree(id, parent_milestone_id, org_id, project_id, name, description,
 			                     start_date, end_date, cancelled_at, cancelled_reason,
@@ -2817,11 +3046,24 @@ func MilestoneTree(ctx context.Context, req *MilestoneTreeRequest) (*MilestoneTr
 			       FROM tree
 			      WHERE ($3::boolean OR cancelled_at IS NULL)
 			      ORDER BY depth, start_date, id`,
-			req.RootMilestoneID, milestoneMaxDepth-1, req.IncludeCancelled, req.OrgID,
+			req.RootMilestoneID, milestoneMaxDepth-1, req.IncludeCancelled, req.CallerOrgID,
 		)
 	default:
 		// Walk from all roots in the scope. Roots are milestones whose
 		// parent_milestone_id IS NULL within (org_id, project_id).
+		//
+		// Two distinct predicates apply to the anchor (round-16 / bead
+		// unblock-tv8.77, §10.1.1):
+		//   - $1 (OrgID) / $2 (ProjectID) — the wire-supplied SCOPE SELECTOR
+		//     (which roots to enumerate). Unchanged from the existing
+		//     contract.
+		//   - $5 (CallerOrgID) — the tenant GATE. A row is visible only when
+		//     its org_id = CallerOrgID OR its project_id is in the caller's
+		//     org's projects. The empty-CallerOrgID no-op keeps trusted
+		//     internal callers unscoped; the MCP handler always pins it.
+		// Separating the two means a caller cannot enumerate another org's
+		// roots even by supplying that org's id as the OrgID selector — the
+		// CallerOrgID gate still rejects the foreign rows.
 		rows, err = db.Query(ctx,
 			`WITH RECURSIVE tree(id, parent_milestone_id, org_id, project_id, name, description,
 			                     start_date, end_date, cancelled_at, cancelled_reason,
@@ -2833,6 +3075,7 @@ func MilestoneTree(ctx context.Context, req *MilestoneTreeRequest) (*MilestoneTr
 			        WHERE parent_milestone_id IS NULL
 			          AND ($1 = '' OR org_id = $1 OR project_id IN (SELECT id FROM org.projects WHERE org_id = $1))
 			          AND ($2 = '' OR project_id = $2)
+			          AND ($5 = '' OR org_id = $5 OR project_id IN (SELECT id FROM org.projects WHERE org_id = $5))
 			       UNION ALL
 			       SELECT m.id, m.parent_milestone_id, m.org_id, m.project_id, m.name, m.description,
 			              m.start_date, m.end_date, m.cancelled_at, m.cancelled_reason,
@@ -2848,7 +3091,7 @@ func MilestoneTree(ctx context.Context, req *MilestoneTreeRequest) (*MilestoneTr
 			       FROM tree
 			      WHERE ($4::boolean OR cancelled_at IS NULL)
 			      ORDER BY depth, start_date, id`,
-			req.OrgID, req.ProjectID, milestoneMaxDepth-1, req.IncludeCancelled,
+			req.OrgID, req.ProjectID, milestoneMaxDepth-1, req.IncludeCancelled, req.CallerOrgID,
 		)
 	}
 	if err != nil {
@@ -2920,13 +3163,17 @@ func MilestoneTree(ctx context.Context, req *MilestoneTreeRequest) (*MilestoneTr
 }
 
 // -----------------------------------------------------------------------------
-// Label-registry RPCs (round-16, bead unblock-tv8.75). Back §6.2 Tools
-// 20–23 over the EXISTING workitems.labels / workitems.item_labels DDL
-// (SPEC §9.4.3) + migration 0130 (updated_at). Org scoping follows the
-// Bearer-Identity write/read split (see the package auth-model
-// doc-comment): the write RPCs trust identity.OrgID pinned by the MCP
-// handler and do NOT self-gate; ListLabels scopes via an explicit
-// tenant predicate. SPEC §4.4.
+// Label-registry RPCs (round-16, beads unblock-tv8.75 + .77). Back §6.2
+// Tools 20–23 over the EXISTING workitems.labels / workitems.item_labels
+// DDL (SPEC §9.4.3) + migration 0130 (updated_at). Org scoping follows the
+// row-level tenant gate (see the package auth-model doc-comment): the write
+// RPCs (CreateLabel / UpdateLabel / DeleteLabel) self-gate on the
+// CallerOrgID internal channel pinned by the MCP handler from
+// identity.OrgID and HARD-REJECT an empty CallerOrgID with InvalidArgument
+// (MCP-only callers, no trusted-internal no-op — round-16 / bead
+// unblock-tv8.77); a foreign LabelID / project ULID yields NOT_FOUND, never
+// a cross-tenant mutation. ListLabels scopes via an explicit tenant
+// predicate. SPEC §4.4 / §10.1.1.
 // -----------------------------------------------------------------------------
 
 // CreateLabel inserts a label into the registry, org- XOR project-scoped.
@@ -2940,6 +3187,16 @@ func MilestoneTree(ctx context.Context, req *MilestoneTreeRequest) (*MilestoneTr
 func CreateLabel(ctx context.Context, req *CreateLabelRequest) (*Label, error) {
 	if req == nil {
 		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "missing request body"}
+	}
+	if req.CallerOrgID == "" {
+		// The MCP handler always pins CallerOrgID from identity.OrgID; an
+		// empty value here is a programmer error (a hard tenant gate, never
+		// an unscoped write). CreateLabel has no trusted-internal no-auth
+		// caller path — it is MCP-only — so the §10.1.1 empty-CallerOrgID
+		// no-op is WRONG here. Hard-reject for consistency with UpdateLabel /
+		// DeleteLabel (round-16 / bead unblock-tv8.77 — closes the
+		// deferred-epic RISK).
+		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "CreateLabel requires caller org scope"}
 	}
 	// Scope XOR: exactly one of OrgID or ProjectID must be set. The DB
 	// labels_scope_xor_chk is the last line of defence; reject early here

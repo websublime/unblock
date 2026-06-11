@@ -129,8 +129,14 @@ func handleMilestoneTree(ctx context.Context, req *sdkmcp.CallToolRequest, in mi
 	// cross-tenant subtree (SPEC §4.4.1 line 1165; §6.2 Tool 19). org_id is
 	// never a client-supplied wire field — it always comes from the
 	// Bearer-resolved Identity.
+	// CallerOrgID is the tenant GATE (pinned to identity.OrgID, never the
+	// wire); OrgID is the scope SELECTOR for the roots walk. Both are pinned
+	// to identity.OrgID here, but the RPC keeps them distinct so a foreign
+	// root_milestone_id yields an empty tree via the CallerOrgID gate
+	// (§10.1.1 / bead unblock-tv8.77).
 	treeReq := workitems.MilestoneTreeRequest{
 		OrgID:            identity.OrgID,
+		CallerOrgID:      identity.OrgID,
 		ProjectID:        in.ProjectID,
 		RootMilestoneID:  in.RootMilestoneID,
 		IncludeCancelled: in.IncludeCancelled,

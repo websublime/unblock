@@ -122,8 +122,13 @@ func handleComment(ctx context.Context, req *sdkmcp.CallToolRequest, in commentI
 		})
 	}
 
+	// CallerOrgID is pinned to identity.OrgID (never the wire) so the backing
+	// RPC's INSERT … SELECT tenant gate on the parent item rejects a foreign
+	// item_id as NOT_FOUND rather than attaching a cross-tenant comment
+	// (§10.1.1).
 	c, err := workitems.AppendComment(mcpCtx, &workitems.AppendCommentRequest{
 		ItemID:      in.ItemID,
+		CallerOrgID: identity.OrgID,
 		AuthorID:    identity.UserID,
 		AuthorAgent: identity.AgentKind,
 		ParentID:    in.ParentID,

@@ -257,8 +257,12 @@ func handleSetState(ctx context.Context, req *sdkmcp.CallToolRequest, in setStat
 		}
 	}
 
+	// CallerOrgID is pinned to identity.OrgID (never the wire) so the backing
+	// RPC's row-level tenant predicate rejects a foreign item_id as NOT_FOUND
+	// (before any invariant check) rather than acting cross-tenant (§10.1.1).
 	item, err := workitems.SetStateColumns(mcpCtx, &workitems.SetStateRequest{
 		ItemID:        in.ItemID,
+		CallerOrgID:   identity.OrgID,
 		ImplState:     in.ImplState,
 		ReviewState:   in.ReviewState,
 		QAState:       in.QAState,
@@ -280,8 +284,13 @@ func handleSetState(ctx context.Context, req *sdkmcp.CallToolRequest, in setStat
 	// a structuredContent.warnings[] entry for the caller and a
 	// warning_codes audit entry for the operator. result_kind STAYS ok.
 	if in.IntentComment != nil {
+		// CallerOrgID pinned to identity.OrgID (never the wire); the item was
+		// just confirmed in-tenant by the SetStateColumns gate above, so this
+		// is consistent — the INSERT … SELECT gate re-validates the same org
+		// (§10.1.1).
 		commentErr := appendIntentComment(mcpCtx, &workitems.AppendCommentRequest{
 			ItemID:      in.ItemID,
+			CallerOrgID: identity.OrgID,
 			AuthorID:    identity.UserID,
 			AuthorAgent: identity.AgentKind,
 			Kind:        in.IntentComment.Kind,
