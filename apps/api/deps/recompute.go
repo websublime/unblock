@@ -43,6 +43,27 @@ import (
 // idempotent — if is_ready already matches the computed value, the
 // row is rewritten with the same value (no observable change).
 //
+// Status reconciliation (round-16, bead unblock-tv8.71, §6.6 transition
+// map). In the SAME statement the helper reconciles the item's Status
+// enum against the recomputed is_ready so the two never drift:
+//
+//   - Ready → Blocked DEMOTION: when is_ready recomputes to false AND the
+//     item is currently 'Ready' (unclaimed), status flips to 'Blocked'.
+//     This is the inverse of promote (Tool 15): a new unmet incoming
+//     blocks edge added to a Ready item demotes it. An 'InProgress'
+//     (claimed) item is NEVER demoted — §6.6 keeps it InProgress and only
+//     flips is_ready=false (the claimant resolves the blocker). A
+//     'Backlog' item likewise keeps its status; only is_ready changes.
+//   - Blocked → Ready RECOVERY: when is_ready recomputes to true AND the
+//     item is currently 'Blocked', status flips back to 'Ready'. This
+//     fires when the last open blocker closes (workitems.Close downstream
+//     recompute) or its edge is removed (RemoveEdge). A claimed item is
+//     never Blocked (see §6.6), so there is no claim to retain here.
+//
+// Backlog items with is_ready=true remain 'Backlog' (promote is an
+// explicit agent action — §6.6); no status transition is implied by
+// readiness alone outside the Ready⇄Blocked pair above.
+//
 // This is the SOLE write path for workitems.items.is_ready inside the
 // deps package (and the only one outside workitems.Close's inline
 // neighbour recompute). The shared/lint/no_direct_is_ready_write
@@ -57,7 +78,21 @@ func recomputeReady(ctx context.Context, tx *sqldb.Tx, itemID string) (bool, err
 		          JOIN workitems.items i ON i.id = d2.from_item
 		         WHERE d2.to_item = $1 AND d2.kind = 'blocks' AND i.status <> 'Done'
 		      )
-		    )
+		    ),
+		    status = CASE
+		      WHEN status = 'Ready' AND EXISTS (
+		        SELECT 1 FROM deps.dependencies d3
+		          JOIN workitems.items i3 ON i3.id = d3.from_item
+		         WHERE d3.to_item = $1 AND d3.kind = 'blocks' AND i3.status <> 'Done'
+		      ) THEN 'Blocked'
+		      WHEN status = 'Blocked' AND NOT EXISTS (
+		        SELECT 1 FROM deps.dependencies d4
+		          JOIN workitems.items i4 ON i4.id = d4.from_item
+		         WHERE d4.to_item = $1 AND d4.kind = 'blocks' AND i4.status <> 'Done'
+		      ) THEN 'Ready'
+		      ELSE status
+		    END,
+		    updated_at = now()
 		  WHERE id = $1
 		  RETURNING is_ready`,
 		itemID,

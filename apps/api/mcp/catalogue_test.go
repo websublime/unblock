@@ -33,9 +33,12 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// expectedP01ToolNames mirrors SPEC.md §5.2.2 (14 P01 tools) in the
+// expectedP01ToolNames mirrors SPEC.md §5.2.2 (15 P01 tools) in the
 // canonical spec order. Kept local to this test so a future spec edit
 // that re-orders or adds tools shows up as a single-file diff.
+//
+// round-16, bead unblock-tv8.71: +promote (Tool 15, the Backlog→Ready
+// writer per §6.2 Tool 15 / §6.6) appended at position 15.
 var expectedP01ToolNames = []string{
 	"prime",
 	"ready",
@@ -51,6 +54,7 @@ var expectedP01ToolNames = []string{
 	"remove_dependency",
 	"set_state",
 	"get_state",
+	"promote",
 }
 
 // catalogueFileDoc mirrors the on-disk JSON shape — kept independent of
@@ -115,10 +119,10 @@ func TestCatalogueTransitionsEmpty(t *testing.T) {
 	}
 }
 
-// TestCataloguePxxToolCount pins AC #1 first half: exactly 14 entries
-// in tools[]. A 15th tool means either P02 has shipped (in which case
-// expectedToolCount in the generator + this test both bump) or the
-// catalogue and the SPEC have drifted.
+// TestCataloguePxxToolCount pins AC #1 first half: exactly 15 entries
+// in tools[] (round-16: +promote). A 16th tool means either a later
+// round has shipped (in which case expectedToolCount in the generator +
+// this test both bump) or the catalogue and the SPEC have drifted.
 func TestCataloguePxxToolCount(t *testing.T) {
 	doc := loadCatalogueFromDisk(t)
 	if got := len(doc.Tools); got != len(expectedP01ToolNames) {
