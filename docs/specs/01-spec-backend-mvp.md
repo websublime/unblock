@@ -1,7 +1,8 @@
 # SPEC: P01 — Backend MVP Implementation Contract
 
-**Status:** APPROVED (round-16 label-tools drift-closure applied 2026-06-11 — labels `updated_at` migration `0130` + Tools 20–23 auth wording + Tools 16/19 wire-sample/prose alignment; round-16 P01 tool-surface scope amendment applied 2026-06-04; §3.5 fifth-secret addition applied 2026-06-02; round-15 NFR-1 harness test-isolation + mcpaudittest hardening applied 2026-05-29; round-14 NFR-1 latency-harness scope applied 2026-05-29; round-6 cascade-symmetry applied 2026-05-12; round-5 tracing applied 2026-05-12; round-4 auth applied 2026-05-11; DRIFT-1/-2 applied 2026-05-08; round-2 applied 2026-05-08; round-3 research applied 2026-05-08; original APPROVED 2026-05-07)
+**Status:** APPROVED (round-16 write-surface tenant-hardening lockstep applied 2026-06-11 — §10.1.1 row-level write gate + per-RPC `CallerOrgID` channel + deps fold-in + `CreateLabel` empty-`CallerOrgID` guard; round-16 label-tools drift-closure applied 2026-06-11 — labels `updated_at` migration `0130` + Tools 20–23 auth wording + Tools 16/19 wire-sample/prose alignment; round-16 P01 tool-surface scope amendment applied 2026-06-04; §3.5 fifth-secret addition applied 2026-06-02; round-15 NFR-1 harness test-isolation + mcpaudittest hardening applied 2026-05-29; round-14 NFR-1 latency-harness scope applied 2026-05-29; round-6 cascade-symmetry applied 2026-05-12; round-5 tracing applied 2026-05-12; round-4 auth applied 2026-05-11; DRIFT-1/-2 applied 2026-05-08; round-2 applied 2026-05-08; round-3 research applied 2026-05-08; original APPROVED 2026-05-07)
 **Changelog:**
+- 2026-06-11 — round-16 write-surface tenant-hardening lockstep (contract LOCKED by Miguel 2026-06-11 BEFORE implementation; discovered-from the `unblock-tv8.75` review via the `unblock-tv8.77` investigation; status remains APPROVED — IDOR-seam closure, not re-architecting). The read path already self-gated via `rbac.For` (§10.1); this round hardens the WRITE path symmetrically. **(1) Every item/milestone write-by-id RPC self-gates via a row-level tenant predicate keyed on an internal `CallerOrgID` channel** (populated by the MCP handler from `identity.OrgID`, NEVER from the wire — the established label/milestone internal-channel pattern). Affected `workitems` RPCs: `Update` (Tool 5), `SetStateColumns` (13), `Close` (6), `Claim` (3), `Promote` (15), `AppendComment` (10), `UpdateMilestone` (17), `AssignItem` (18), plus `CreateMilestone`'s parent-read seam (16). Predicate forms: items — `org_id = $caller`; milestones — `org_id = $caller OR project_id IN (SELECT id FROM org.projects WHERE org_id = $caller)` (org-XOR-project; project-scoped milestones carry `NULL org_id`); `AppendComment` (an INSERT) — gated via INSERT…SELECT on the parent item's org. A foreign id yields `NOT_FOUND` (or zero rows inserted), never a cross-tenant mutation. **(2) The item/milestone RPCs take the empty-`CallerOrgID` NO-OP form** `($caller = '' OR <predicate>)` (the `MilestoneTree` precedent, NOT the label-write hard-reject): trusted internal no-auth callers (the §11.1.1 exit-criterion seed + integration tests) call them directly with no org context; MCP handlers ALWAYS pin `CallerOrgID`, so the no-op branch is unreachable from the agent surface. Ratified explicitly in §10.1.1. **(3) `deps.AddEdge` / `deps.RemoveEdge` harden too** (folded in by Miguel) — both are MCP-reachable (Tools 11/12) and resolve endpoint orgs from the DB; both now receive `CallerOrgID` and reject with `NOT_FOUND` when a resolved endpoint org ≠ caller's org. **(4) `CreateLabel` gains the explicit empty-`CallerOrgID` `InvalidArgument` guard** (closing the deferred-epic RISK) — consistency with `UpdateLabel` / `DeleteLabel`; hard guard is correct there (MCP-only callers). Patched in lockstep: new §10.1.1 (write-gate model + predicate table + no-op-vs-hard-guard ratification); §4.4 `Update`/`AppendComment`/`SetStateColumns`/`Close`/`Claim` doc-comments + request structs (new `CallerOrgID` field); §4.4.1 `CreateMilestone`/`UpdateMilestone`/`AssignItem`/`MilestoneTree` doc-comments + request structs; §4.4 `CreateLabelRequest` (new `CallerOrgID` field + `InvalidArgument` guard prose) + label-RPC header comment + §6.2 closing note; §4.5 `AddEdge`/`RemoveEdge` doc-comments + request structs; §6.2 Tools 3/5/6/10/13/15 tenant-gate notes + Tools 16/17/18/19/20 auth wording (the "does not self-gate" phrasing on Tools 16/20 reworded to the row-level predicate) + Tools 11/12 tenant-gate notes. NOT touched (separate ownership / no drift): `apps/api/workitems/workitems.go` auth-model doc-comment + the catalogue + migrations (Greta's implementation lockstep on the bead branch); root `docs/SPEC.md` (its §5.6 RBAC prose already states row-level filtering is "applied uniformly to every read and write path" — already aligned with this hardening, no contradicting "write RPCs do not self-gate" claim exists there). No DDL / migration-file / public-API / `go.mod` change. Spec status remains APPROVED.
 - 2026-06-11 — round-16 lockstep-completion drift-closure (spec-drift surfaced by `/investigate` on bead `unblock-tv8.75`, the label-registry MCP Tools 20–23; status remains APPROVED): three drift items closed, one with a NEW migration, two mechanical-prose. (1) **DRIFT-1 — labels gain `updated_at`, RESOLVED by Miguel's decision (2026-06-11).** §4.4 `Label` always declared `UpdatedAt time.Time`, but the `workitems.labels` DDL omitted the column and the §6.2 closing note said "no new migration is required" — a genuine contradiction. Resolution (locked): ADD the column via a NEW up-only migration `0130_workitems_labels_updated_at.up.sql` (`updated_at timestamptz NOT NULL DEFAULT now()`, next free slot after the committed `0120`), rather than dropping the struct field — the registry is mutable via Tool 22 `update_label` and `items` / `milestones` / `comments` all carry `updated_at`. Patched in lockstep: §3.2 migration table (new `0130` row), the §6.2 "no new migration" closing note (rewritten to name `0130`), §4.4 label-RPC header comment + the `UpdateLabel` doc-comment (bumps `updated_at` on every write), §12 D-8 task row (migration `0130` reference), and root `docs/SPEC.md` §9.4.3 canonical `workitems.labels` DDL (column added with a dated provenance comment, mirroring the §9.4.6 precedent) + its §11 P01 row + its changelog. (2) **DRIFT-2a — Tools 20–23 authorization wording** aligned with the established Bearer-Identity org-scoping pattern (CONFIRMED against code: zero `org.Authorize` calls in `apps/api/mcp/`). The write tools (Tool 20 `create_label` / 22 `update_label` / 23 `delete_label`) had `org.Authorize`-on-`workitems.labels` / "RBAC-gated (action …)" phrasing and the closing note said the RPCs "route through `org.Authorize` exactly like the item RPCs"; reworded to the truth — write tools resolve the caller via `withIdentityFromReq` and pass `identity.OrgID` into a backing RPC that does NOT self-gate; the read tool (Tool 21 `list_labels`) self-gates via `rbac.For` SQL tenant-predicate injection (auth-model doc-comment `apps/api/workitems/workitems.go:28-66`). Mirrors the Tools 16–19 wording corrected in commit `ae30927`. (3) **DRIFT-2b — Tools 16/19 residual wire hygiene** (post-QA addendum from `.74`, CONFIRMED against `catalogue.json`). Tool 16 `create_milestone` and Tool 19 `milestone_tree` JSON wire samples still listed `org_id` as a client argument — the shipped tools take NO wire `org_id` (org pinned to `identity.OrgID`; the catalogue input-schemas omit it). Removed `org_id` from both samples (Tools 17/18 samples verified already clean). Tool 19's gating prose also claimed the backing RPC "self-gates via `rbac.For`" — corrected to the shipped mechanism: an EXPLICIT tenant predicate in the rooted-CTE anchor (`apps/api/workitems/workitems.go` ~2691, gated by `req.OrgID = identity.OrgID`, with the empty-`OrgID` internal-caller no-op). No catalogue / code / migration-file change — the implementation bead `unblock-tv8.75` owns the migration `0130` file + handler + RPC code. (4) **DRIFT-2c — label tools pin org to identity, NO wire `org_id` (DECIDED by Miguel 2026-06-11).** The remaining open question flagged during this drift-closure is now LOCKED: the label tools (Tools 20–23) pin org to the Bearer-resolved identity exactly like the milestone tools (Tools 16–19) — there is NO wire `org_id`. The optional `project_id` argument is the XOR selector: absent → org-scoped label (org from `identity.OrgID`); present → project-scoped (the handler/RPC validates the project belongs to the caller's org). Patched in lockstep: §4.4 `CreateLabelRequest` + `ListLabelsRequest` — `OrgID` re-annotated as populated from `identity.OrgID` and NEVER from the wire (mirrors `CreateMilestoneRequest` / the §6.2 Tool 19 read prose; `ProjectID` is the sole org/project wire selector); §6.2 Tool 20 `create_label` and Tool 21 `list_labels` JSON wire samples — `org_id` removed (Tools 22/23 samples verified already clean, scoping via `label_id`). `UpdateLabelRequest` / `DeleteLabelRequest` carry no `OrgID` (they scope via `LabelID`), so no struct change there. **(5) DRIFT-3 — two justified code-review divergences on `unblock-tv8.75` RATIFIED at spec level (DECIDED by Miguel 2026-06-11), in lockstep with the code rework on branch `feat/unblock-tv8-75-label-registry-mcp-tools`.** (5a) **`ListLabels` gates via an EXPLICIT raw-SQL tenant predicate, NOT `rbac.For`.** The shipped `ListLabels` RPC cannot use `rbac.For` because the PRD §6.4 project-wins-on-identical-name resolution is a `UNION ALL` that `rbac.For` cannot express; it instead injects an explicit `org_id = identity.OrgID` predicate into its raw SQL — the SAME justified-deviation precedent as Tool 19 `milestone_tree`, whose prose was corrected earlier in this changelog. The earlier "self-gates via `rbac.For`" wording for `ListLabels` was therefore wrong; corrected at every site — §6.2 Tool 21 `list_labels` gating prose + its wire-sample comment (mirrors the corrected Tool 19 style), the §6.2 Tools 20–23 "Label private RPCs" closing note, and the §4.4 label-RPC header comment + `ListLabelsRequest.OrgID` field comment. (5b) **`UpdateLabel` / `DeleteLabel` add a row-level tenant predicate.** The rework makes the targeted row's tenancy a precondition (label `org_id = identity.OrgID` OR its `project_id` belongs to a project in the caller's org), so a foreign `label_id` yields `NOT_FOUND` instead of acting cross-tenant — closing the same IDOR seam Tool 19 closed for reads. Reworded the §6.2 Tool 22 / Tool 23 auth sentences (formerly "the backing RPC does not self-gate") and the §4.4 `UpdateLabel` / `DeleteLabel` doc-comments to state the row-level constraint. The equivalent item / milestone write-RPC wording is deliberately NOT touched here — hardening those RPCs is a separate new bead. No catalogue / migration / public-API / DDL change (no canonical DDL is affected, so root `docs/SPEC.md` is untouched); the implementation bead `unblock-tv8.75` owns the handler + RPC code on its branch. Spec status remains APPROVED — drift closure, not a re-architecting.
 - 2026-06-11 — round-16 lockstep-completion drift-closure (spec-drift surfaced by `/investigate` on bead `unblock-tv8.74`; status remains APPROVED): two mechanical prose corrections, no design change. (1) **§4.4.1 milestone P02-deferral stragglers corrected** — the 2026-06-04 round-16 changelog claimed §4.4.1 "milestone-tools-now wording" was patched, but three prose lines escaped and still said the milestone MCP tools defer to P02 (the §4.4.1 intro paragraph, the `UpdateMilestone` reparenting doc-comment cross-reference, and the `MilestoneTree` "Used by" note); all three now state the tools ship NOW in P01 as MCP Tools 16–19 (§6.2), in lockstep with the round-16 §1/§6 override. The genuinely-deferred reparenting feature and the 4 P02 memory tools are untouched. (2) **§6.2 Tools 16–19 authorization wording aligned with the established Bearer-Identity org-scoping pattern** — the round-16 Tool 16/18 contracts mentioned a literal `org.Authorize` call, but NO shipped MCP handler (all 15) calls `org.Authorize` directly; the established pattern is org scoping via the Bearer-resolved org-scoped `Identity` (`withIdentityFromReq` + `identity.OrgID` on the write path; `rbac.For` SQL-injected tenant predicate on the read path), with the backing `workitems` write RPCs not self-gating (auth-model doc-comment at `apps/api/workitems/workitems.go:28-66`). Tools 16/17/18 (write) and 19 (read) reworded accordingly. Scoped to milestone tools only; the label Tools 20–23 (sibling bead `unblock-tv8.75`) carry the same `org.Authorize` phrasing and are deliberately left for .75's flow. No DDL / migration / public-API / `go.mod` change — the implementation bead `unblock-tv8.74` owns the catalogue + handler code. Spec status remains APPROVED.
 - 2026-06-11 — round-16 drift-closure (spec-drift closure from `/investigate` on bead `unblock-tv8.73`; status remains APPROVED): four mechanical lockstep corrections to the 2026-06-04 round-16 amendment, no design change. (1) **Migration renumbered `0110` → `0120`** — the round-16 text named the new up-only migration `0110_mcp_issued_to_user_notnull.up.sql`, but slot `0110` is already taken by the committed `0110_mcp_warning_codes.up.sql` (bead `unblock-tv8.63`); renamed to `0120_mcp_issued_to_user_notnull.up.sql` at every reference (round-16 changelog bullet, §3.2 table row + sequence note, §4.3.2 step 8, §11.1.2, §12 A-3 row). (2) **Root `docs/SPEC.md` §9.4.6 brought into lockstep** — the `mcp.api_keys.issued_to_user` DDL there still declared the column nullable with `ON DELETE SET NULL`; corrected to NOT NULL / `ON DELETE CASCADE` with the audit-survival note, and the §11 P01 row + changelog migration name renumbered to `0120`. (3) **§3.2 prose column fix** — the audit-survival FK was mis-named `mcp.tool_calls.issued_to_user` (no such column); corrected to `mcp.tool_calls.api_key_id` (already `ON DELETE SET NULL`). (4) **§4.3.2 step 3 SELECT aligned with code** — the documented `validateAPIKey` SELECT omitted `issued_to_user`; the column is added to match `apps/api/auth/auth.go`. No DDL semantics change, no public-API change, no `go.mod` change — the implementation bead `unblock-tv8.73` owns the migration file + code. Spec status remains APPROVED.
@@ -784,10 +785,17 @@ type Item struct {
 }
 
 //encore:api private method=POST path=/workitems.Update
+// Tenant gate (round-16 / bead unblock-tv8.77): self-gates the UPDATE on
+// org_id = CallerOrgID (CallerOrgID pinned from identity.OrgID by the MCP
+// handler, NEVER from the wire). A foreign ItemID yields NOT_FOUND, never
+// a cross-tenant mutation. Empty CallerOrgID is the §10.1 no-op
+// ($caller = '' OR org_id = $caller) for trusted internal callers; the
+// MCP handler always pins it, so the no-op is unreachable from agents.
 func Update(ctx context.Context, req UpdateRequest) (*Item, error)
 
 type UpdateRequest struct {
     ItemID      string
+    CallerOrgID string // pinned from identity.OrgID; NEVER from the wire (§10.1)
     Title       *string
     Body        *string
     Priority    *string
@@ -824,10 +832,18 @@ type ResolvedRef struct {
 }
 
 //encore:api private method=POST path=/workitems.AppendComment
+// Tenant gate (round-16 / bead unblock-tv8.77): being an INSERT, gates via
+// INSERT … SELECT predicated on the PARENT item's tenancy — the comment row
+// is inserted only when ItemID resolves to an item with
+// org_id = CallerOrgID (pinned from identity.OrgID, NEVER from the wire). A
+// foreign ItemID inserts zero rows → NOT_FOUND, never a cross-tenant
+// comment. Empty CallerOrgID is the §10.1 no-op for trusted internal
+// callers; the MCP handler always pins it.
 func AppendComment(ctx context.Context, req AppendCommentRequest) (*Comment, error)
 
 type AppendCommentRequest struct {
     ItemID       string
+    CallerOrgID  string // pinned from identity.OrgID; NEVER from the wire (§10.1)
     AuthorID     string // user id; nullable if AuthorAgent set
     AuthorAgent  string // AgentKind value; nullable if AuthorID set
     ParentID     string // optional; thread parent
@@ -856,6 +872,13 @@ type Comment struct {
 // Writes one or more of (impl_state, review_state, qa_state, pipeline_state)
 // + recomputes pipeline_stage via the cascade subscriber path.
 //
+// **Tenant gate (round-16 / bead unblock-tv8.77):** self-gates the
+// SELECT … FOR UPDATE row lock on org_id = CallerOrgID (pinned from
+// identity.OrgID, NEVER from the wire). A foreign ItemID yields NOT_FOUND
+// BEFORE any invariant check runs, never a cross-tenant state mutation.
+// Empty CallerOrgID is the §10.1 no-op for trusted internal callers; the
+// MCP handler always pins it.
+//
 // **P01 enforces:**
 //  - structural invariants (e.g. impl_state=done requires claimed_by_id IS NOT NULL);
 //  - the **five PRD §6.2 state-machine invariants** (round-2 D2 — see
@@ -874,6 +897,7 @@ func SetStateColumns(ctx context.Context, req SetStateRequest) (*Item, error)
 
 type SetStateRequest struct {
     ItemID        string
+    CallerOrgID   string // pinned from identity.OrgID; NEVER from the wire (§10.1)
     ImplState     *string
     ReviewState   *string
     QAState       *string
@@ -895,17 +919,31 @@ type SetStateRequest struct {
 //encore:api private method=POST path=/workitems.Close
 // MCP-layer precondition (AF3): rejects if claimed_by_id IS NULL.
 // Sets status=Done, closed_at=now(), emits deps.cascade.requested.
+// Tenant gate (round-16 / bead unblock-tv8.77): self-gates the status-flip
+// UPDATE on org_id = CallerOrgID (pinned from identity.OrgID, NEVER from
+// the wire), checked BEFORE the AF3 claimed_by_id precondition. A foreign
+// ItemID yields NOT_FOUND, never a cross-tenant close. Empty CallerOrgID is
+// the §10.1 no-op for trusted internal callers; the MCP handler always
+// pins it.
 func Close(ctx context.Context, req CloseRequest) (*Item, error)
 
 type CloseRequest struct {
-    ItemID  string
-    Reason  string // optional free-text recorded as a kind=completed comment
+    ItemID      string
+    CallerOrgID string // pinned from identity.OrgID; NEVER from the wire (§10.1)
+    Reason      string // optional free-text recorded as a kind=completed comment
 }
 
 //encore:api private method=POST path=/workitems.Claim
 // Atomic claim per SPEC §5.5. Runs the SELECT FOR UPDATE transaction.
 // Returns the loser-side ErrAlreadyClaimed with claimed_by_id and
 // claimed_at populated.
+//
+// **Tenant gate (round-16 / bead unblock-tv8.77):** self-gates the
+// SELECT … FOR UPDATE row lock on org_id = CallerOrgID (pinned from
+// identity.OrgID, NEVER from the wire). A foreign ItemID yields NOT_FOUND
+// (not ALREADY_CLAIMED), never a cross-tenant claim. Empty CallerOrgID is
+// the §10.1 no-op for trusted internal callers; the MCP handler always
+// pins it.
 //
 // **PRD §6.2 invariant #3 (round-2 D2).** When the item being claimed
 // has `qa_state='failed'` at the moment the row is locked, this RPC
@@ -919,6 +957,7 @@ func Claim(ctx context.Context, req ClaimRequest) (*Item, error)
 
 type ClaimRequest struct {
     ItemID         string
+    CallerOrgID    string // pinned from identity.OrgID; NEVER from the wire (§10.1)
     ClaimerUserID  string
     ClaimerAgent   string // AgentKind value
 }
@@ -990,9 +1029,14 @@ type SearchHit struct {
 // 2026-06-11 — ADD the column). UpdateLabel bumps updated_at on every
 // write. Org scoping follows the Bearer-Identity pattern (§6.2 closing
 // note): the write RPCs (CreateLabel / UpdateLabel / DeleteLabel) trust
-// the org-scoped Identity pinned by the MCP handler (identity.OrgID) and
-// do NOT call org.Authorize; UpdateLabel / DeleteLabel further apply a
-// row-level tenant predicate so a foreign LabelID is NOT_FOUND, never a
+// the org-scoped Identity pinned by the MCP handler (identity.OrgID,
+// passed RPC-side as CallerOrgID — internal channel, never wire) and
+// do NOT call org.Authorize. CreateLabel self-gates the project-scoped
+// insert on CallerOrgID and hard-rejects an empty CallerOrgID with
+// InvalidArgument (round-16 / bead unblock-tv8.77 — MCP-only callers, so
+// the no-op branch is wrong here; consistent with UpdateLabel /
+// DeleteLabel). UpdateLabel / DeleteLabel further apply a row-level
+// tenant predicate so a foreign LabelID is NOT_FOUND, never a
 // cross-tenant mutation. The read RPC (ListLabels) does NOT use rbac.For
 // (the project-wins-on-identical-name UNION ALL is not expressible via
 // rbac.For); it gates via an EXPLICIT tenant predicate in raw SQL
@@ -1011,8 +1055,17 @@ type CreateLabelRequest struct {
     // non-empty → project-scoped (the handler/RPC validates the project
     // belongs to identity.OrgID). DB CHECK labels_scope_xor_chk is the
     // last line of defence.
+    //
+    // CallerOrgID is ALSO pinned from identity.OrgID (never wire). On the
+    // project-scoped branch CreateLabel gates the insert on
+    // project_id IN (SELECT id FROM org.projects WHERE org_id = CallerOrgID)
+    // so a Bearer for org A cannot create a label inside org B's project.
+    // An empty CallerOrgID is HARD-REJECTED with InvalidArgument (round-16
+    // / bead unblock-tv8.77 — MCP-only callers, so the §10.1 no-op branch
+    // is wrong here; consistent with UpdateLabel / DeleteLabel).
     OrgID       string // populated from identity.OrgID; NEVER from the wire; XOR ProjectID
     ProjectID   string // ULID; optional wire arg; XOR OrgID
+    CallerOrgID string // populated from identity.OrgID; NEVER from the wire; empty → InvalidArgument
     Name        string // 1..64 chars; unique within scope
     Color       string // "#RRGGBB"
     Description  string // optional
@@ -1117,11 +1170,22 @@ package workitems
 //  - DB CHECKs milestones_scope_xor_chk and milestones_date_range_chk
 //    fire as the last line of defence
 // M-INV-7 is enforced lazily on AssignItem (see below).
+//
+// Tenant gate (round-16 / bead unblock-tv8.77): the parent-read seam
+// self-gates on CallerOrgID (pinned from identity.OrgID, NEVER from the
+// wire). When ParentMilestoneID is supplied, the parent row used for the
+// M-INV-2/3/5/6 ancestor + date + scope checks must satisfy
+// org_id = CallerOrgID OR project_id IN (SELECT id FROM org.projects
+// WHERE org_id = CallerOrgID); a foreign parent ULID yields NOT_FOUND,
+// never a cross-tenant read leak. Empty CallerOrgID is the §10.1 no-op
+// for trusted internal callers (the §11.1.1 E2E seed); the MCP handler
+// always pins it.
 func CreateMilestone(ctx context.Context, req CreateMilestoneRequest) (*Milestone, error)
 
 type CreateMilestoneRequest struct {
     OrgID             string  // ULID; XOR with ProjectID
     ProjectID         string  // ULID; XOR with OrgID
+    CallerOrgID       string  // pinned from identity.OrgID; NEVER from the wire (§10.1)
     ParentMilestoneID string  // optional ULID
     Name              string  // 1..200 chars
     Description       string  // optional, default ""
@@ -1152,10 +1216,19 @@ type Milestone struct {
 // supported in P01 — change parent_milestone_id is rejected with
 // kind=VALIDATION (reparenting itself is deferred to P02; the milestone
 // MCP tools ship NOW in P01 as Tools 16–19, §6.2).
+//
+// Tenant gate (round-16 / bead unblock-tv8.77): self-gates on a row-level
+// tenant predicate — the targeted milestone's org_id = CallerOrgID OR its
+// project_id IN (SELECT id FROM org.projects WHERE org_id = CallerOrgID)
+// (CallerOrgID pinned from identity.OrgID, NEVER from the wire). A foreign
+// MilestoneID yields NOT_FOUND, never a cross-tenant mutation. Empty
+// CallerOrgID is the §10.1 no-op for trusted internal callers; the MCP
+// handler always pins it.
 func UpdateMilestone(ctx context.Context, req UpdateMilestoneRequest) (*Milestone, error)
 
 type UpdateMilestoneRequest struct {
     MilestoneID     string
+    CallerOrgID     string  // pinned from identity.OrgID; NEVER from the wire (§10.1)
     Name            *string
     Description     *string
     StartDate       *string  // ISO date; pointer = optional
@@ -1174,10 +1247,18 @@ type UpdateMilestoneRequest struct {
 //   (milestone.project_id = item.project_id)
 //   OR (milestone.org_id IS NOT NULL AND milestone.org_id = item.org_id)
 // Rejects with kind=PRECONDITION_NOT_MET, data.invariant="M-INV-7" otherwise.
+//
+// Tenant gate (round-16 / bead unblock-tv8.77): self-gates on the TARGET
+// item's tenancy — the item's org_id = CallerOrgID (CallerOrgID pinned
+// from identity.OrgID, NEVER from the wire). A foreign ItemID yields
+// NOT_FOUND, never a cross-tenant milestone assignment. Empty CallerOrgID
+// is the §10.1 no-op for trusted internal callers (the §11.1.1 E2E seed);
+// the MCP handler always pins it.
 func AssignItem(ctx context.Context, req AssignItemRequest) error
 
 type AssignItemRequest struct {
     ItemID         string
+    CallerOrgID    string  // pinned from identity.OrgID; NEVER from the wire (§10.1)
     MilestoneID    string  // ULID; empty string = unassign
     AssignedByUser string  // ULID; the actor performing the assignment
 }
@@ -1196,11 +1277,22 @@ type AssignItemRequest struct {
 //  - the E2E exit-criterion test (`apps/api/exitcriteriontest/`,
 //    round-12) to verify post-seed milestone-tree shape;
 //  - P05 Astro roadmap view (delegates to this RPC).
+//
+// Read-side tenant gate (round-16 / beads unblock-tv8.75 + .77): the
+// recursive-CTE anchor is predicated on org_id = CallerOrgID OR
+// project_id IN (SELECT id FROM org.projects WHERE org_id = CallerOrgID)
+// (CallerOrgID pinned from identity.OrgID, NEVER from the wire) — NOT
+// rbac.For (the rooted-CTE shape is not expressible via rbac.For; same
+// justified deviation as ListLabels). A foreign RootMilestoneID produces
+// an empty anchor → no rows, closing the IDOR read seam. Empty
+// CallerOrgID is the §10.1 no-op for trusted internal callers (the
+// §11.1.1 E2E seed, the P05 roadmap RPC); the MCP handler always pins it.
 func MilestoneTree(ctx context.Context, req MilestoneTreeRequest) (*MilestoneTree, error)
 
 type MilestoneTreeRequest struct {
     OrgID             string  // required when RootMilestoneID is empty (XOR ProjectID)
     ProjectID         string  // required when RootMilestoneID is empty (XOR OrgID)
+    CallerOrgID       string  // pinned from identity.OrgID; NEVER from the wire (§10.1)
     RootMilestoneID   string  // optional; when set, OrgID/ProjectID derived from it
     IncludeCancelled  bool    // default false; when true, cancelled milestones appear
 }
@@ -1245,14 +1337,24 @@ package deps
 // Acquires per-project advisory lock (AF5), runs the depth-counter
 // reachability CTE (C5), inserts the edge, emits deps.cascade.requested
 // if the to_item's readiness flips.
+//
+// Tenant gate (round-16 / bead unblock-tv8.77): AddEdge is MCP-reachable
+// (add_dependency, Tool 11) and resolves both endpoint orgs from the DB.
+// It self-gates on CallerOrgID (pinned from identity.OrgID, NEVER from the
+// wire): both FromItem and ToItem must resolve to org_id = CallerOrgID. If
+// either endpoint's resolved org differs from the caller's org, the RPC
+// rejects with NOT_FOUND (the endpoints are not visible cross-tenant) —
+// never a cross-tenant edge. Empty CallerOrgID is the §10.1 no-op for
+// trusted internal callers; the MCP handler always pins it.
 func AddEdge(ctx context.Context, req AddEdgeRequest) (*Edge, error)
 
 type AddEdgeRequest struct {
-    OrgID     string
-    ProjectID string
-    FromItem  string
-    ToItem    string
-    Kind      string // "blocks" | "related"; default "blocks"
+    OrgID       string
+    ProjectID   string
+    CallerOrgID string // pinned from identity.OrgID; NEVER from the wire (§10.1)
+    FromItem    string
+    ToItem      string
+    Kind        string // "blocks" | "related"; default "blocks"
 }
 
 type Edge struct {
@@ -1279,13 +1381,24 @@ type Edge struct {
 // updates downstream of that to_item are eventually consistent (driven
 // by the post-commit publish, not by this RPC's return value). See §6.2
 // Tool 12 and §6.3.0.
+//
+// Tenant gate (round-16 / bead unblock-tv8.77): RemoveEdge is
+// MCP-reachable (remove_dependency, Tool 12) and resolves the edge's
+// endpoint orgs from the DB. It self-gates on CallerOrgID (pinned from
+// identity.OrgID, NEVER from the wire): the resolved edge endpoints must
+// belong to org_id = CallerOrgID. If the targeted edge's resolved
+// endpoint org differs from the caller's org, the RPC rejects with
+// NOT_FOUND (the edge is not visible cross-tenant) — never a cross-tenant
+// edge removal. Empty CallerOrgID is the §10.1 no-op for trusted internal
+// callers; the MCP handler always pins it.
 func RemoveEdge(ctx context.Context, req RemoveEdgeRequest) (*RemoveEdgeResponse, error)
 
 type RemoveEdgeRequest struct {
-    EdgeID    string  // EdgeID OR (FromItem + ToItem + Kind), exactly one path
-    FromItem  string  // composite: paired with ToItem + Kind
-    ToItem    string  // composite: paired with FromItem + Kind
-    Kind      string  // composite: paired with FromItem + ToItem
+    EdgeID      string  // EdgeID OR (FromItem + ToItem + Kind), exactly one path
+    CallerOrgID string  // pinned from identity.OrgID; NEVER from the wire (§10.1)
+    FromItem    string  // composite: paired with ToItem + Kind
+    ToItem      string  // composite: paired with FromItem + Kind
+    Kind        string  // composite: paired with FromItem + ToItem
 }
 
 type RemoveEdgeResponse struct {
@@ -1576,6 +1689,14 @@ Loser receives the structured error envelope (§7) with code
 `ALREADY_CLAIMED` and `data.winner_user_id`, `data.winner_agent`,
 `data.claimed_at`.
 
+**Tenant gate (round-16 / bead `unblock-tv8.77`).** The handler passes
+the Bearer-resolved `identity.OrgID` into `workitems.Claim` as
+`CallerOrgID` (internal channel, never wire). `Claim` self-gates the
+locked-row `SELECT … FOR UPDATE` on `org_id = $caller`, so a foreign
+`item_id` yields `NOT_FOUND` (not `ALREADY_CLAIMED`), never a
+cross-tenant claim. See §10.1 for the row-level write-gate model and the
+empty-`CallerOrgID` no-op ratification.
+
 #### Tool 4 — `create`
 
 ```jsonc
@@ -1622,6 +1743,12 @@ new item; if any would create a cycle, the entire `create` is rejected.
 
 Does NOT touch state dimensions — use `set_state` for those.
 
+**Tenant gate (round-16 / bead `unblock-tv8.77`).** The handler passes
+the Bearer-resolved `identity.OrgID` into `workitems.Update` as
+`CallerOrgID` (internal channel, never wire). `Update` self-gates its
+`UPDATE` on `org_id = $caller`, so a foreign `item_id` yields
+`NOT_FOUND`, never a cross-tenant mutation. See §10.1.
+
 #### Tool 6 — `close`
 
 ```jsonc
@@ -1641,6 +1768,13 @@ Does NOT touch state dimensions — use `set_state` for those.
 `PRECONDITION_NOT_MET` and `data.missing = "claimed_by_id"` if
 `claimed_by_id IS NULL`. The full Layer-1 BLOCK conditions
 (`qa_state=passed` etc.) ship in P02.
+
+**Tenant gate (round-16 / bead `unblock-tv8.77`).** The handler passes
+the Bearer-resolved `identity.OrgID` into `workitems.Close` as
+`CallerOrgID` (internal channel, never wire). `Close` self-gates the
+status-flip `UPDATE` on `org_id = $caller`, so a foreign `item_id` yields
+`NOT_FOUND`, never a cross-tenant close. The gate is checked BEFORE the
+AF3 `claimed_by_id` precondition. See §10.1.
 
 Side-effects (round-6 §6.3.0 symmetric writer model):
 
@@ -1789,6 +1923,15 @@ Append-only by construction (no update/delete tool ships in P01).
 **Body length enforcement boundary.** Handler enforces 1..16384 chars at
 the MCP boundary; `workitems.AppendComment` enforces the non-empty floor.
 
+**Tenant gate (round-16 / bead `unblock-tv8.77`).** The handler passes
+the Bearer-resolved `identity.OrgID` into `workitems.AppendComment` as
+`CallerOrgID` (internal channel, never wire). Because `AppendComment` is
+an `INSERT`, it gates via an `INSERT … SELECT` whose `SELECT` is
+predicated on the PARENT item's tenancy — the row is inserted only when
+the `item_id` resolves to an item with `org_id = $caller`. A foreign
+`item_id` inserts zero rows and the RPC returns `NOT_FOUND`, never a
+cross-tenant comment. See §10.1.
+
 #### Tool 11 — `add_dependency`
 
 ```jsonc
@@ -1807,6 +1950,16 @@ the MCP boundary; `workitems.AppendComment` enforces the non-empty floor.
 
 Cycle check: per-project advisory lock + depth-counter CTE per §6.5 below.
 On rejection, error code `CYCLE_DETECTED` with `data.cycle_path = ["<id>", ...]`.
+
+**Tenant gate (round-16 / bead `unblock-tv8.77`).** The handler passes
+the Bearer-resolved `identity.OrgID` into `deps.AddEdge` as `CallerOrgID`
+(internal channel, never wire). `AddEdge` resolves BOTH endpoints'
+(`from_item_id`, `to_item_id`) orgs from `workitems.items` and rejects
+with `NOT_FOUND` if either resolved endpoint org differs from
+`CallerOrgID` — so an agent cannot wire a `blocks`/`related` edge to or
+from another tenant's item. The gate is checked alongside the existing
+same-project requirement (cross-project edges are already `VALIDATION`).
+See §10.1.
 
 **`project_id` derivation (review L6-W8).** The advisory lock key is the
 `to_item_id`'s `project_id`, looked up in `workitems.items` at the start
@@ -1849,6 +2002,15 @@ The subscriber writes one `deps.cascade_events` row with
   "to_item_now_ready": true   // computed inline; sync within the same transaction
 }
 ```
+
+**Tenant gate (round-16 / bead `unblock-tv8.77`).** The handler passes
+the Bearer-resolved `identity.OrgID` into `deps.RemoveEdge` as
+`CallerOrgID` (internal channel, never wire). `RemoveEdge` resolves the
+targeted edge's endpoint orgs from the DB and rejects with `NOT_FOUND` if
+the resolved endpoint org differs from `CallerOrgID` — so an agent cannot
+delete another tenant's dependency edge by guessing an `edge_id` (or a
+composite `from/to/kind` triple). The gate fires BEFORE the `DELETE`. See
+§10.1.
 
 **Implementation (round-6 §6.3.0 symmetric writer model).** The
 single-hop `is_ready` recompute on the direct `to_item` runs inline in
@@ -1947,6 +2109,13 @@ publish — uniform across the four cascade kinds.
   ]
 }
 ```
+
+**Tenant gate (round-16 / bead `unblock-tv8.77`).** The handler passes
+the Bearer-resolved `identity.OrgID` into `workitems.SetStateColumns` as
+`CallerOrgID` (internal channel, never wire). `SetStateColumns`
+self-gates the `SELECT … FOR UPDATE` row lock on `org_id = $caller`, so a
+foreign `item_id` yields `NOT_FOUND` BEFORE any invariant check runs,
+never a cross-tenant state mutation. See §10.1.
 
 **P01 enforcement (round-2 D2 — five PRD §6.2 invariants + structural
 checks):**
@@ -2151,6 +2320,14 @@ it and does NOT recompute it.
   `{ "kind": "PRECONDITION_NOT_MET", "details": { "status": "Backlog", "required": "Ready", "missing": "is_ready" } }`.
 - Item not found / not visible → `NOT_FOUND`.
 
+**Tenant gate (round-16 / bead `unblock-tv8.77`).** The handler passes
+the Bearer-resolved `identity.OrgID` into `workitems.Promote` as
+`CallerOrgID` (internal channel, never wire). `Promote` self-gates the
+`SELECT … FOR UPDATE` row lock on `org_id = $caller`, so a foreign
+`item_id` yields `NOT_FOUND` (the "not visible" case above) BEFORE the
+Backlog/`is_ready` precondition is evaluated, never a cross-tenant
+promotion. See §10.1.
+
 **Transition performed.** Inside a single `SELECT … FOR UPDATE`
 transaction: re-check the precondition against the locked row, then
 `UPDATE workitems.items SET status = 'Ready' WHERE id = $item_id`.
@@ -2169,11 +2346,17 @@ no `CascadeRequested` and is not a Regime A `is_ready` writer.
 Thin MCP facade over `workitems.CreateMilestone` (§4.4.1). Org- or
 project-scoped (XOR). Org scoping is enforced by the Bearer-resolved
 org-scoped `Identity` — the handler resolves the caller via
-`withIdentityFromReq` and passes `identity.OrgID` into the backing RPC,
-matching every other write tool on the surface; the backing
-`workitems` write RPC does not self-gate (see the auth-model
-doc-comment at `apps/api/workitems/workitems.go`). Enforces
-M-INV-1/2/3/5/6 per the backing RPC.
+`withIdentityFromReq` and passes `identity.OrgID` into the backing RPC
+as `CallerOrgID` (the internal-channel field, NEVER a wire argument),
+matching every other write tool on the surface. The backing
+`workitems.CreateMilestone` self-gates its parent-read seam on
+`CallerOrgID` (round-16 / bead `unblock-tv8.77`): when
+`parent_milestone_id` is supplied the parent row must satisfy
+`org_id = $caller OR project_id IN (SELECT id FROM org.projects WHERE
+org_id = $caller)`, so a foreign parent ULID yields `NOT_FOUND`, never a
+cross-tenant M-INV-3/5 read leak (see the auth-model doc-comment at
+`apps/api/workitems/workitems.go`). Enforces M-INV-1/2/3/5/6 per the
+backing RPC.
 
 ```jsonc
 // arguments — mirrors workitems.CreateMilestoneRequest (NO wire org_id:
@@ -2202,7 +2385,12 @@ Thin MCP facade over `workitems.UpdateMilestone` (§4.4.1). Updates name,
 description, start/end dates, and cancellation. **Reparenting is rejected**
 in P01 (`VALIDATION`) exactly as the backing RPC specifies. Org scoping
 is enforced by the Bearer-resolved org-scoped `Identity` (`identity.OrgID`
-via `withIdentityFromReq`), matching the rest of the tool surface.
+via `withIdentityFromReq`), passed to the backing RPC as `CallerOrgID`
+(internal channel, never wire). `UpdateMilestone` applies a row-level
+tenant predicate (round-16 / bead `unblock-tv8.77`): the targeted
+milestone's `org_id = $caller OR project_id IN (SELECT id FROM
+org.projects WHERE org_id = $caller)`, so a foreign `milestone_id` yields
+`NOT_FOUND`, never a cross-tenant mutation.
 
 ```jsonc
 // arguments — mirrors workitems.UpdateMilestoneRequest
@@ -2227,7 +2415,11 @@ to a milestone, or **unassigns** when `milestone_id` is the empty string
 (clears `milestone_id` + `milestone_assigned_at` + `milestone_assigned_by`).
 Enforces M-INV-7. Org scoping is enforced by the Bearer-resolved
 org-scoped `Identity` (`identity.OrgID` via `withIdentityFromReq`),
-matching the rest of the tool surface.
+passed to the backing RPC as `CallerOrgID` (internal channel, never
+wire). `AssignItem` applies a row-level tenant predicate on the target
+item (round-16 / bead `unblock-tv8.77`): the item's `org_id = $caller`,
+so a foreign `item_id` yields `NOT_FOUND`, never a cross-tenant
+milestone assignment.
 
 ```jsonc
 // arguments — mirrors workitems.AssignItemRequest
@@ -2249,15 +2441,18 @@ matching the rest of the tool surface.
 Thin MCP facade over `workitems.MilestoneTree` (§4.4.1). Returns the
 recursive milestone tree (depth bounded at M-INV-6 = 4). Read-side org
 scoping is enforced by the Bearer-resolved org-scoped `Identity` — the
-handler ALWAYS passes `identity.OrgID` into the backing RPC. Unlike the
+handler ALWAYS passes `identity.OrgID` into the backing RPC as
+`CallerOrgID` (internal channel, never wire). Unlike the
 `rbac.For` read RPCs (Get / GetTrail / List / Search), `MilestoneTree`
 gates via an EXPLICIT tenant predicate in the recursive-CTE anchor
-(`org_id = $caller_org OR project_id IN (SELECT id FROM org.projects
-WHERE org_id = $caller_org)`, `apps/api/workitems/workitems.go` ~2691),
+(`org_id = $caller OR project_id IN (SELECT id FROM org.projects
+WHERE org_id = $caller)`, `apps/api/workitems/workitems.go` ~2691),
 so a foreign `root_milestone_id` yields an empty anchor (no rows) —
-closing the cross-tenant / IDOR read seam. The empty-`OrgID` no-op
-branch is reserved for trusted internal callers (the E2E test, the P05
-roadmap RPC) and is never reachable from the MCP boundary.
+closing the cross-tenant / IDOR read seam. The empty-`CallerOrgID` no-op
+branch (the predicate degrades to `($caller = '' OR <predicate>)`) is
+reserved for trusted internal callers (the §11.1.1 E2E seed, the P05
+roadmap RPC) and is never reachable from the MCP boundary — see the
+no-op-vs-hard-guard ratification under §10.1.
 
 ```jsonc
 // arguments — mirrors workitems.MilestoneTreeRequest (NO wire org_id:
@@ -2280,10 +2475,17 @@ Label-registry management over the existing `workitems.labels` table
 `labels_scope_xor_chk` CHECK). Org scoping is enforced by the
 Bearer-resolved org-scoped `Identity` — the handler resolves the caller
 via `withIdentityFromReq` and passes `identity.OrgID` into the backing
-RPC, matching every other write tool on the surface; the backing
-`workitems` write RPC does not self-gate (see the auth-model
-doc-comment at `apps/api/workitems/workitems.go:28-66`). Backed by a new
-private RPC `workitems.CreateLabel`.
+RPC as `CallerOrgID` (internal channel, never wire), matching every
+other write tool on the surface. `CreateLabel` self-gates the
+project-scoped insert on `CallerOrgID`
+(`project_id IN (SELECT id FROM org.projects WHERE org_id = $caller)`,
+so a Bearer for org A cannot create a label inside org B's project) and
+hard-rejects an empty `CallerOrgID` with `InvalidArgument` (round-16 /
+bead `unblock-tv8.77` — the label RPCs are MCP-only callers, so the
+no-op branch is incorrect here; this closes the deferred-epic RISK and
+makes `CreateLabel` consistent with `UpdateLabel` / `DeleteLabel`). See
+the auth-model doc-comment at `apps/api/workitems/workitems.go:28-66`.
+Backed by the private RPC `workitems.CreateLabel`.
 
 ```jsonc
 // arguments — NO wire org_id: the org is pinned from the Bearer-resolved
@@ -2401,9 +2603,15 @@ Label not found / not visible → `NOT_FOUND`.
 > tables already exist). Org scoping follows the established
 > Bearer-Identity pattern, NOT a direct `org.Authorize` call: each
 > backing RPC is dispatched with the caller's org pinned to
-> `identity.OrgID` — write RPCs (`CreateLabel` / `UpdateLabel` /
+> `identity.OrgID` (passed RPC-side as `CallerOrgID` — internal channel,
+> never wire) — write RPCs (`CreateLabel` / `UpdateLabel` /
 > `DeleteLabel`) trust the org-scoped `Identity` resolved by the MCP
-> handler via `withIdentityFromReq`; `UpdateLabel` / `DeleteLabel`
+> handler via `withIdentityFromReq`. `CreateLabel` self-gates the
+> project-scoped insert on `CallerOrgID` and hard-rejects an empty
+> `CallerOrgID` with `InvalidArgument` (round-16 / bead
+> `unblock-tv8.77` — MCP-only callers, so the §10.1 no-op branch is wrong
+> here; consistent with `UpdateLabel` / `DeleteLabel`, closes the
+> deferred-epic RISK). `UpdateLabel` / `DeleteLabel`
 > additionally apply a row-level tenant predicate so a foreign
 > `label_id` is `NOT_FOUND` rather than a cross-tenant mutation. The read
 > RPC (`ListLabels`) does NOT use `rbac.For` — the
@@ -3234,6 +3442,56 @@ orgs with a full role complement per side, runs without `t.Parallel`
 hardening), and is discoverable as `encore test
 ./apps/api/shared/rbactest/...` so the A-6 CI bead (`unblock-tv8.6`)
 can wire the gate without touching the suite.
+
+#### 10.1.1 Write-surface row-level tenant gate (round-16, bead `unblock-tv8.77`)
+
+The read path self-gates in SQL via `rbac.For[T]` (§10.1 above). The
+**write path** is hardened symmetrically: every item / milestone
+write-by-id RPC and the two MCP-reachable `deps` edge RPCs self-gate via
+a **row-level tenant predicate** keyed on an internal `CallerOrgID`
+channel. `CallerOrgID` is populated by the MCP handler from the
+Bearer-resolved `identity.OrgID` and is **NEVER accepted from the wire** —
+it travels as a private RPC struct field, exactly like the `OrgID`
+internal channel established for the label / milestone RPCs (§4.4 /
+§4.4.1). A foreign target id therefore yields `NOT_FOUND` (or zero
+affected rows on an INSERT), never a cross-tenant mutation. This closes
+the IDOR write seams that the §10.1 read gate already closed on the read
+side — discovered-from the `unblock-tv8.75` review and decided by Miguel
+(2026-06-11).
+
+**Gated RPCs and predicate forms:**
+
+| RPC (MCP tool) | Predicate form |
+|---|---|
+| `workitems.Update` (5 `update`), `Close` (6), `Claim` (3), `Promote` (15), `SetStateColumns` (13), `AssignItem` (18 — on the target item) | `org_id = $caller` on the `SELECT … FOR UPDATE` / `UPDATE` row |
+| `workitems.AppendComment` (10) | INSERT … SELECT predicated on the PARENT item's `org_id = $caller` (zero rows inserted → `NOT_FOUND`) |
+| `workitems.UpdateMilestone` (17), `CreateMilestone` parent-read seam (16) | `org_id = $caller OR project_id IN (SELECT id FROM org.projects WHERE org_id = $caller)` — org-XOR-project scoped (project-scoped milestones carry `NULL org_id`) |
+| `workitems.MilestoneTree` (19, read) | same milestone predicate, in the recursive-CTE anchor |
+| `deps.AddEdge` (11), `deps.RemoveEdge` (12) | resolve each endpoint's org from the DB; reject with `NOT_FOUND` if any resolved endpoint org ≠ `$caller` |
+
+**No-op-vs-hard-guard ratification (DECIDED by Miguel 2026-06-11).** The
+item / milestone write RPCs above take the **empty-`CallerOrgID` NO-OP
+form** — the predicate is `($caller = '' OR <predicate>)`, the same
+precedent as `MilestoneTree` / `ListLabels`, NOT the hard-reject the
+label *write* RPCs use. This is a deliberate divergence: trusted internal
+no-auth callers — the §11.1.1 exit-criterion seed and integration tests
+that drive these RPCs directly through Encore's private mesh with no org
+context — pass an empty `CallerOrgID`, and the no-op branch lets them
+operate unscoped. The branch is reachable ONLY from those trusted
+callers: every MCP handler ALWAYS pins `CallerOrgID` from
+`identity.OrgID` before dispatch, so the no-op is **unreachable from the
+agent surface**. By contrast `CreateLabel` / `UpdateLabel` / `DeleteLabel`
+**hard-reject** an empty `CallerOrgID` with `InvalidArgument` — those RPCs
+have no trusted-internal-caller path (they are MCP-only), so an empty
+`CallerOrgID` there is always a programming error. `CreateLabel`'s hard
+guard is added in this round for consistency with `UpdateLabel` /
+`DeleteLabel`, closing the deferred-epic RISK.
+
+The load-bearing description of this write-gate model lives in the
+`apps/api/workitems/workitems.go` auth-model doc-comment (§10.1 read-side
+/ write-side split); the `deps` endpoint-resolution gate lives in
+`apps/api/deps/`. Those code doc-comments are updated in lockstep on the
+implementation bead's branch.
 
 ### 10.2 Tracing (NFR-12)
 
