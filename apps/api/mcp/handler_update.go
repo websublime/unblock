@@ -141,7 +141,8 @@ func handleUpdate(ctx context.Context, req *sdkmcp.CallToolRequest, in updateIn)
 	tool := "update"
 	state := bindTool(req, tool)
 
-	if _, ok := identityFromReq(req); !ok {
+	identity, ok := identityFromReq(req)
+	if !ok {
 		return nil, updateOut{}, mapError(state, tool, errMissingIdentityErr())
 	}
 
@@ -220,8 +221,12 @@ func handleUpdate(ctx context.Context, req *sdkmcp.CallToolRequest, in updateIn)
 		}
 	}
 
+	// CallerOrgID is pinned to identity.OrgID (never the wire) so the backing
+	// RPC's row-level tenant predicate rejects a foreign item_id as NOT_FOUND
+	// rather than acting cross-tenant (§10.1.1).
 	item, err := workitems.Update(mcpCtx, &workitems.UpdateRequest{
 		ItemID:      in.ItemID,
+		CallerOrgID: identity.OrgID,
 		Title:       in.Title,
 		Body:        in.Body,
 		Priority:    in.Priority,

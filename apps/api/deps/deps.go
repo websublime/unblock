@@ -16,11 +16,20 @@
 // apps/api/db/ service's init via deps.BindDB(DB). RPC bodies read
 // `db` directly after process bootstrap.
 //
-// Authorisation: deps RPCs are private and called from the MCP tool
-// layer (D-5 / unblock-tv8.20) which gates via org.Authorize at the
-// session→org boundary BEFORE dispatching here. The deps RPCs trust
-// that gate the same way workitems write-side RPCs do (see
-// workitems.go file header for the layered model). RecentCascadeEvents
+// Authorisation: the two MCP-reachable edge RPCs (AddEdge — Tool 11;
+// RemoveEdge — Tool 12) self-gate via a row-level tenant predicate keyed
+// on an internal CallerOrgID channel (round-16 / bead unblock-tv8.77,
+// SPEC §10.1.1). CallerOrgID is pinned by the MCP handler from the
+// Bearer-resolved identity.OrgID and is NEVER accepted from the wire.
+// Both RPCs resolve their endpoints' org from the DB (workitems.items)
+// and reject with NOT_FOUND when any resolved endpoint org differs from
+// CallerOrgID — the endpoints are not visible cross-tenant, so a foreign
+// item/edge id is indistinguishable from a missing one. The
+// empty-CallerOrgID no-op covers trusted internal callers (the
+// workitems.Create combined-tx path, which passes its own org); the MCP
+// handler always pins CallerOrgID so the no-op is unreachable from the
+// agent surface. This mirrors the workitems write-side row-level gate
+// (see workitems.go file header for the full model). RecentCascadeEvents
 // scopes by explicit (org_id, project_id) inputs so the SQL filter is
 // explicit on every read.
 package deps
@@ -74,12 +83,21 @@ type Edge struct {
 }
 
 // AddEdgeRequest is the input to AddEdge. SPEC §4.5.
+//
+// CallerOrgID is NOT a wire argument — the MCP handler pins it from the
+// Bearer-resolved org-scoped Identity (identity.OrgID). AddEdge resolves
+// both endpoints' org from the DB and rejects with NOT_FOUND when either
+// resolved org differs from CallerOrgID, so a caller for org A cannot add
+// an edge between items in org B. An empty CallerOrgID is the §10.1.1
+// no-op for trusted internal callers (the workitems.Create combined-tx
+// path); the MCP handler always pins it (round-16 / bead unblock-tv8.77).
 type AddEdgeRequest struct {
-	OrgID     string `json:"org_id"`
-	ProjectID string `json:"project_id"`
-	FromItem  string `json:"from_item"`
-	ToItem    string `json:"to_item"`
-	Kind      string `json:"kind"` // "blocks" | "related"; default "blocks"
+	OrgID       string `json:"org_id"`
+	ProjectID   string `json:"project_id"`
+	CallerOrgID string `json:"caller_org_id"`
+	FromItem    string `json:"from_item"`
+	ToItem      string `json:"to_item"`
+	Kind        string `json:"kind"` // "blocks" | "related"; default "blocks"
 }
 
 // AddEdge acquires the per-project advisory lock (AF5), runs the
@@ -95,6 +113,13 @@ type AddEdgeRequest struct {
 // Cycle violations return FailedPrecondition Meta{"kind":"CYCLE_DETECTED",
 // "from","to","cycle_path"} — the MCP layer (D-5) translates this Meta
 // payload into the JSON-RPC error envelope's data field per §7.
+//
+// Tenant gate (round-16 / bead unblock-tv8.77, §10.1.1): AddEdge
+// self-gates on CallerOrgID (pinned from identity.OrgID by the MCP
+// handler, NEVER from the wire) — both FromItem and ToItem must resolve
+// to org_id = CallerOrgID, else the RPC rejects with NOT_FOUND (the
+// endpoints are not visible cross-tenant). The empty-CallerOrgID no-op
+// covers trusted internal callers (workitems.Create); see AddEdgeInTx.
 //
 //encore:api private method=POST path=/deps.AddEdge
 func AddEdge(ctx context.Context, req *AddEdgeRequest) (*Edge, error) {
@@ -153,7 +178,9 @@ type AddEdgeInTxPostCommit func(ctx context.Context)
 //
 //   - InvalidArgument for missing/invalid fields, self-loop, bad
 //     kind, cross-org or cross-project endpoints.
-//   - NotFound when either endpoint is missing.
+//   - NotFound when either endpoint is missing OR (round-16 / bead
+//     unblock-tv8.77) resolves to an org other than CallerOrgID — the
+//     endpoints are not visible cross-tenant.
 //   - AlreadyExists on duplicate (from, to, kind) (UNIQUE
 //     dependencies_pair_uniq).
 //   - FailedPrecondition with Meta.kind="CYCLE_DETECTED" + cycle_path
@@ -240,6 +267,25 @@ func AddEdgeInTx(ctx context.Context, tx *sqldb.Tx, req *AddEdgeRequest) (*Edge,
 			}
 		}
 		return nil, nil, &errs.Error{Code: errs.Internal, Message: "to_item lookup failed"}
+	}
+	// Row-level tenant gate (round-16 / bead unblock-tv8.77, §10.1.1):
+	// both resolved endpoint orgs must equal CallerOrgID. A caller for
+	// org A passing a from/to item that resolves to org B yields
+	// NOT_FOUND — the endpoints are not visible cross-tenant, so a
+	// foreign item id is indistinguishable from a missing one (we already
+	// return NOT_FOUND for a missing endpoint above). The empty-CallerOrgID
+	// no-op covers trusted internal callers (workitems.Create's combined
+	// tx, which passes its own org); the MCP handler always pins CallerOrgID
+	// from identity.OrgID, so the no-op is unreachable from the agent
+	// surface. This check runs BEFORE the cross-org / cross-project guards
+	// so a cross-tenant slip never reveals the foreign endpoints' orgs in
+	// the error Meta.
+	if req.CallerOrgID != "" && (fromOrg != req.CallerOrgID || toOrg != req.CallerOrgID) {
+		return nil, nil, &errs.Error{
+			Code:    errs.NotFound,
+			Message: "edge endpoint not found",
+			Meta:    errs.Metadata{"field": "to_item_id"},
+		}
 	}
 	// Cross-org edges are caught by the cross-project guard below in the
 	// common case (org_id partitions projects), but check explicitly so
@@ -409,11 +455,20 @@ func AddEdgeInTx(ctx context.Context, tx *sqldb.Tx, req *AddEdgeRequest) (*Edge,
 
 // RemoveEdgeRequest is the input to RemoveEdge. SPEC §4.5. Pass either
 // EdgeID OR (FromItem + ToItem + Kind), exactly one path.
+//
+// CallerOrgID is NOT a wire argument — the MCP handler pins it from the
+// Bearer-resolved org-scoped Identity (identity.OrgID). RemoveEdge
+// resolves the edge's to_item org from the DB and rejects with NOT_FOUND
+// when it differs from CallerOrgID, so a caller for org A cannot delete an
+// edge in org B. An empty CallerOrgID is the §10.1.1 no-op for trusted
+// internal callers; the MCP handler always pins it (round-16 / bead
+// unblock-tv8.77).
 type RemoveEdgeRequest struct {
-	EdgeID   string `json:"edge_id"`
-	FromItem string `json:"from_item"`
-	ToItem   string `json:"to_item"`
-	Kind     string `json:"kind"`
+	EdgeID      string `json:"edge_id"`
+	CallerOrgID string `json:"caller_org_id"`
+	FromItem    string `json:"from_item"`
+	ToItem      string `json:"to_item"`
+	Kind        string `json:"kind"`
 }
 
 // RemoveEdgeResponse is the output of RemoveEdge. SPEC §4.5.
@@ -441,6 +496,13 @@ type RemoveEdgeResponse struct {
 // Returns to_item_now_ready as the SINGLE-HOP view. Transitive
 // pipeline_stage updates downstream of to_item are eventually
 // consistent — driven by the post-commit publish.
+//
+// Tenant gate (round-16 / bead unblock-tv8.77, §10.1.1): RemoveEdge
+// self-gates on CallerOrgID (pinned from identity.OrgID by the MCP
+// handler, NEVER from the wire) — the resolved edge's to_item must
+// belong to org_id = CallerOrgID, else the RPC rejects with NOT_FOUND
+// (the edge is not visible cross-tenant). The empty-CallerOrgID no-op
+// covers trusted internal callers; the MCP handler always pins it.
 //
 //encore:api private method=POST path=/deps.RemoveEdge
 func RemoveEdge(ctx context.Context, req *RemoveEdgeRequest) (*RemoveEdgeResponse, error) {
@@ -498,14 +560,22 @@ func RemoveEdge(ctx context.Context, req *RemoveEdgeRequest) (*RemoveEdgeRespons
 		orgID     string
 		projectID string
 	)
+	//
+	// Row-level tenant gate (round-16 / bead unblock-tv8.77, §10.1.1): the
+	// resolution JOIN is predicated on ($N = '' OR i.org_id = $N) on the
+	// to_item's org. A foreign edge (to_item.org_id != CallerOrgID) resolves
+	// to no row → ErrNoRows → NOT_FOUND, never a cross-tenant edge removal.
+	// The empty-CallerOrgID no-op covers trusted internal callers; the MCP
+	// handler always pins CallerOrgID from identity.OrgID.
 	if haveEdgeID {
 		err = tx.QueryRow(ctx,
 			`SELECT d.id, d.to_item, i.org_id, COALESCE(i.project_id, '')
 			   FROM deps.dependencies d
 			   JOIN workitems.items i ON i.id = d.to_item
 			  WHERE d.id = $1
+			    AND ($2 = '' OR i.org_id = $2)
 			  FOR UPDATE OF d`,
-			req.EdgeID,
+			req.EdgeID, req.CallerOrgID,
 		).Scan(&edgeID, &toItem, &orgID, &projectID)
 	} else {
 		err = tx.QueryRow(ctx,
@@ -513,8 +583,9 @@ func RemoveEdge(ctx context.Context, req *RemoveEdgeRequest) (*RemoveEdgeRespons
 			   FROM deps.dependencies d
 			   JOIN workitems.items i ON i.id = d.to_item
 			  WHERE d.from_item = $1 AND d.to_item = $2 AND d.kind = $3
+			    AND ($4 = '' OR i.org_id = $4)
 			  FOR UPDATE OF d`,
-			req.FromItem, req.ToItem, req.Kind,
+			req.FromItem, req.ToItem, req.Kind, req.CallerOrgID,
 		).Scan(&edgeID, &toItem, &orgID, &projectID)
 	}
 	if err != nil {

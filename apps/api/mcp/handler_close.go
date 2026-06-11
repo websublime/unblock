@@ -59,7 +59,8 @@ func handleClose(ctx context.Context, req *sdkmcp.CallToolRequest, in closeIn) (
 	tool := "close"
 	state := bindTool(req, tool)
 
-	if _, ok := identityFromReq(req); !ok {
+	identity, ok := identityFromReq(req)
+	if !ok {
 		return nil, closeOut{}, mapError(state, tool, errMissingIdentityErr())
 	}
 
@@ -72,9 +73,13 @@ func handleClose(ctx context.Context, req *sdkmcp.CallToolRequest, in closeIn) (
 		state.Call.ItemID = in.ItemID
 	}
 
+	// CallerOrgID is pinned to identity.OrgID (never the wire) so the backing
+	// RPC's row-level tenant predicate rejects a foreign item_id as NOT_FOUND
+	// rather than acting cross-tenant (§10.1.1).
 	item, err := workitems.Close(mcpCtx, &workitems.CloseRequest{
-		ItemID: in.ItemID,
-		Reason: in.Reason,
+		ItemID:      in.ItemID,
+		CallerOrgID: identity.OrgID,
+		Reason:      in.Reason,
 	})
 	if err != nil {
 		return nil, closeOut{}, mapError(state, tool, err)

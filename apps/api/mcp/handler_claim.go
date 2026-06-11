@@ -57,8 +57,12 @@ func handleClaim(ctx context.Context, req *sdkmcp.CallToolRequest, in claimIn) (
 		state.Call.ItemID = in.ItemID
 	}
 
+	// CallerOrgID is pinned to identity.OrgID (never the wire) so the backing
+	// RPC's row-level tenant predicate rejects a foreign item_id as NOT_FOUND
+	// rather than acting cross-tenant (§10.1.1).
 	item, err := workitems.Claim(mcpCtx, &workitems.ClaimRequest{
 		ItemID:        in.ItemID,
+		CallerOrgID:   identity.OrgID,
 		ClaimerUserID: identity.UserID,
 		ClaimerAgent:  identity.AgentKind,
 	})

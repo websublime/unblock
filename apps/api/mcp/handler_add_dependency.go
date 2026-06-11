@@ -158,12 +158,17 @@ func handleAddDependency(ctx context.Context, req *sdkmcp.CallToolRequest, in ad
 		state.Call.ProjectID = toItem.ProjectID
 	}
 
+	// CallerOrgID is pinned to identity.OrgID (never the wire) so the backing
+	// RPC's endpoint-resolution gate rejects an edge whose from/to item
+	// resolves to a foreign org as NOT_FOUND rather than acting cross-tenant
+	// (§10.1.1).
 	edge, err := deps.AddEdge(mcpCtx, &deps.AddEdgeRequest{
-		OrgID:     identity.OrgID,
-		ProjectID: toItem.ProjectID,
-		FromItem:  in.FromItemID,
-		ToItem:    in.ToItemID,
-		Kind:      in.Kind, // pass empty through; deps.AddEdgeInTx owns the "blocks" default.
+		OrgID:       identity.OrgID,
+		ProjectID:   toItem.ProjectID,
+		CallerOrgID: identity.OrgID,
+		FromItem:    in.FromItemID,
+		ToItem:      in.ToItemID,
+		Kind:        in.Kind, // pass empty through; deps.AddEdgeInTx owns the "blocks" default.
 	})
 	if err != nil {
 		return nil, addDependencyOut{}, mapError(state, tool, err)

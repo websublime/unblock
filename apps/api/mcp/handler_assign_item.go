@@ -13,8 +13,10 @@
 // assigned_by_user is taken from the caller's resolved Identity
 // (identity.UserID) — it is NOT a client-supplied argument. Org scope
 // flows through the Bearer-resolved Identity (withIdentityFromReq); the
-// backing write RPC does not self-gate — the MCP handler is the
-// authoritative write gate (workitems.go auth-model doc-comment).
+// handler pins CallerOrgID from identity.OrgID and the backing write RPC
+// self-gates the target item on a row-level tenant predicate (a foreign
+// item_id yields NOT_FOUND) — round-16 / bead unblock-tv8.77, §10.1.1
+// (workitems.go auth-model doc-comment).
 //
 // M-INV-7 (milestone scope reachable in the item's project) violations
 // surface from the RPC as FailedPrecondition with Meta["invariant"]=
@@ -92,9 +94,13 @@ func handleAssignItem(ctx context.Context, req *sdkmcp.CallToolRequest, in assig
 	// assigned_by_user comes from the resolved Identity (§6.2 Tool 18),
 	// never the wire. On the unassign path (MilestoneID == "") the RPC
 	// ignores AssignedByUser and sets milestone_assigned_by to NULL
-	// unconditionally, so passing it is harmless.
+	// unconditionally, so passing it is harmless. CallerOrgID is pinned to
+	// identity.OrgID (never the wire) so the backing RPC's row-level tenant
+	// gate on the target item rejects a foreign item_id as NOT_FOUND rather
+	// than acting cross-tenant (§10.1.1).
 	if err := workitems.AssignItem(mcpCtx, &workitems.AssignItemRequest{
 		ItemID:         in.ItemID,
+		CallerOrgID:    identity.OrgID,
 		MilestoneID:    in.MilestoneID,
 		AssignedByUser: identity.UserID,
 	}); err != nil {
