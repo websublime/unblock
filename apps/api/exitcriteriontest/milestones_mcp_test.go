@@ -24,6 +24,12 @@
 // model). Org scope is pinned to the Bearer-resolved Identity — no
 // org_id is sent on the wire (DECISION on this bead).
 //
+// A second test, TestExitCriterion_MilestoneTree_CrossTenantRootRejected,
+// pins the round-16 rework: a rooted milestone_tree whose
+// root_milestone_id belongs to a foreign org returns an empty tree rather
+// than leaking the cross-tenant subtree (the rooted CTE is gated by
+// identity.OrgID).
+//
 // SPEC: docs/specs/01-spec-backend-mvp.md § 6.2 Tools 16–19 + § 4.4.1
 // (milestone RPCs) + § 11.1.2 (functional assertions) + § 7 (envelope).
 
@@ -35,6 +41,7 @@ import (
 	"testing"
 
 	encoredb "encore.app/db"
+	"encore.app/shared/ulid"
 )
 
 // mcpMilestone is the typed shape of the structuredContent
@@ -243,6 +250,76 @@ func TestExitCriterion_MilestoneTools_MCPBoundary(t *testing.T) {
 		t.Fatalf("unassign: milestone_id = %v, want null", *unassigned.MilestoneID)
 	}
 	assertItemMilestoneCleared(t, t.Context(), target)
+}
+
+// TestExitCriterion_MilestoneTree_CrossTenantRootRejected pins the
+// round-16 rework (bead unblock-tv8.74) cross-tenant read fix: a rooted
+// milestone_tree call whose root_milestone_id belongs to a FOREIGN org
+// (not reachable from the caller's Bearer-resolved identity.OrgID) must
+// return an empty tree, NOT the foreign subtree. Before the fix the
+// rooted CTE had no tenant predicate (`WHERE id = $1`), so any
+// authenticated agent could read any org's milestone subtree by ULID —
+// a confused-deputy / IDOR seam across the MCP boundary.
+//
+// Setup seeds a second org + project + an org-scoped milestone under it
+// directly via the DB (the caller's API key is bound to f.OrgID only),
+// then drives milestone_tree over the MCP wire as the fixture identity.
+// The org-roots walk safety is covered implicitly (the foreign milestone
+// never appears in the caller's unrooted walk); this test pins the
+// rooted path specifically.
+//
+// SPEC: docs/specs/01-spec-backend-mvp.md § 4.4.1 (line 1165, "OrgID
+// derived from it") + § 6.2 Tool 19 (tenant-predicate-injected read).
+func TestExitCriterion_MilestoneTree_CrossTenantRootRejected(t *testing.T) {
+	f := fx(t)
+	sessionID := initializeSession(t, f.RawKey)
+	ctx := t.Context()
+
+	// Seed a FOREIGN org (no membership, no API key for the caller).
+	foreignOrgID, err := ulid.New()
+	if err != nil {
+		t.Fatalf("ulid foreign org: %v", err)
+	}
+	foreignSlug := "foreign-" + foreignOrgID[len(foreignOrgID)-8:]
+	if _, err := encoredb.DB.Exec(ctx,
+		`INSERT INTO org.organizations (id, slug, name) VALUES ($1, $2, $3)`,
+		foreignOrgID, foreignSlug, "Foreign Org",
+	); err != nil {
+		t.Fatalf("insert foreign org: %v", err)
+	}
+	t.Cleanup(func() {
+		// Background ctx because t.Context() is cancelled before cleanup
+		// runs. ON DELETE CASCADE clears the foreign project + milestone.
+		_, _ = encoredb.DB.Exec(context.Background(), `DELETE FROM org.organizations WHERE id = $1`, foreignOrgID)
+	})
+
+	// Org-scoped milestone under the foreign org. Inserted directly so the
+	// caller's identity is never involved in its creation.
+	foreignMSID, err := ulid.New()
+	if err != nil {
+		t.Fatalf("ulid foreign milestone: %v", err)
+	}
+	if _, err := encoredb.DB.Exec(ctx,
+		`INSERT INTO workitems.milestones (id, org_id, name, start_date, end_date)
+		 VALUES ($1, $2, $3, $4, $5)`,
+		foreignMSID, foreignOrgID, "Foreign Roadmap", "2026-01-01", "2026-12-31",
+	); err != nil {
+		t.Fatalf("insert foreign milestone: %v", err)
+	}
+
+	// Rooted milestone_tree at the FOREIGN milestone, authenticated as the
+	// fixture identity (org = f.OrgID). The rooted CTE anchor is gated by
+	// identity.OrgID, so the foreign root is unreachable ⇒ empty roots.
+	env := callTool(t, f.RawKey, sessionID, "milestone_tree", map[string]any{
+		"root_milestone_id": foreignMSID,
+	})
+	var tree mcpMilestoneTree
+	if err := json.Unmarshal(expectSuccess(t, env), &tree); err != nil {
+		t.Fatalf("unmarshal cross-tenant milestone_tree: %v", err)
+	}
+	if len(tree.Roots) != 0 {
+		t.Fatalf("cross-tenant rooted milestone_tree leaked %d root(s): %+v; want empty (foreign org subtree must NOT be readable)", len(tree.Roots), tree.Roots)
+	}
 }
 
 // findMilestoneNode returns the node with the given milestone id within
