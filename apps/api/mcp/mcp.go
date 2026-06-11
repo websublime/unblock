@@ -1,6 +1,7 @@
 // Package mcp owns the public Streamable HTTP MCP endpoint at /mcp and
-// the 15 P01 tool handlers (round-16: +promote, Tool 15). See SPEC §4.3
-// (transport, auth, hot path) and §6.2 (tool catalogue).
+// the 19 P01 tool handlers (round-16: +promote, Tool 15, then +milestone
+// management, Tools 16–19). See SPEC §4.3 (transport, auth, hot path)
+// and §6.2 (tool catalogue).
 //
 // In P01 task A-1 this package only declared the //encore:api raw
 // endpoint skeleton so Encore recognised mcp as a service. Bead A-5
