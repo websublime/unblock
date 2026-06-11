@@ -1,7 +1,8 @@
 # SPEC: P01 — Backend MVP Implementation Contract
 
-**Status:** APPROVED (round-16 P01 tool-surface scope amendment applied 2026-06-04; §3.5 fifth-secret addition applied 2026-06-02; round-15 NFR-1 harness test-isolation + mcpaudittest hardening applied 2026-05-29; round-14 NFR-1 latency-harness scope applied 2026-05-29; round-6 cascade-symmetry applied 2026-05-12; round-5 tracing applied 2026-05-12; round-4 auth applied 2026-05-11; DRIFT-1/-2 applied 2026-05-08; round-2 applied 2026-05-08; round-3 research applied 2026-05-08; original APPROVED 2026-05-07)
+**Status:** APPROVED (round-16 label-tools drift-closure applied 2026-06-11 — labels `updated_at` migration `0130` + Tools 20–23 auth wording + Tools 16/19 wire-sample/prose alignment; round-16 P01 tool-surface scope amendment applied 2026-06-04; §3.5 fifth-secret addition applied 2026-06-02; round-15 NFR-1 harness test-isolation + mcpaudittest hardening applied 2026-05-29; round-14 NFR-1 latency-harness scope applied 2026-05-29; round-6 cascade-symmetry applied 2026-05-12; round-5 tracing applied 2026-05-12; round-4 auth applied 2026-05-11; DRIFT-1/-2 applied 2026-05-08; round-2 applied 2026-05-08; round-3 research applied 2026-05-08; original APPROVED 2026-05-07)
 **Changelog:**
+- 2026-06-11 — round-16 lockstep-completion drift-closure (spec-drift surfaced by `/investigate` on bead `unblock-tv8.75`, the label-registry MCP Tools 20–23; status remains APPROVED): three drift items closed, one with a NEW migration, two mechanical-prose. (1) **DRIFT-1 — labels gain `updated_at`, RESOLVED by Miguel's decision (2026-06-11).** §4.4 `Label` always declared `UpdatedAt time.Time`, but the `workitems.labels` DDL omitted the column and the §6.2 closing note said "no new migration is required" — a genuine contradiction. Resolution (locked): ADD the column via a NEW up-only migration `0130_workitems_labels_updated_at.up.sql` (`updated_at timestamptz NOT NULL DEFAULT now()`, next free slot after the committed `0120`), rather than dropping the struct field — the registry is mutable via Tool 22 `update_label` and `items` / `milestones` / `comments` all carry `updated_at`. Patched in lockstep: §3.2 migration table (new `0130` row), the §6.2 "no new migration" closing note (rewritten to name `0130`), §4.4 label-RPC header comment + the `UpdateLabel` doc-comment (bumps `updated_at` on every write), §12 D-8 task row (migration `0130` reference), and root `docs/SPEC.md` §9.4.3 canonical `workitems.labels` DDL (column added with a dated provenance comment, mirroring the §9.4.6 precedent) + its §11 P01 row + its changelog. (2) **DRIFT-2a — Tools 20–23 authorization wording** aligned with the established Bearer-Identity org-scoping pattern (CONFIRMED against code: zero `org.Authorize` calls in `apps/api/mcp/`). The write tools (Tool 20 `create_label` / 22 `update_label` / 23 `delete_label`) had `org.Authorize`-on-`workitems.labels` / "RBAC-gated (action …)" phrasing and the closing note said the RPCs "route through `org.Authorize` exactly like the item RPCs"; reworded to the truth — write tools resolve the caller via `withIdentityFromReq` and pass `identity.OrgID` into a backing RPC that does NOT self-gate; the read tool (Tool 21 `list_labels`) self-gates via `rbac.For` SQL tenant-predicate injection (auth-model doc-comment `apps/api/workitems/workitems.go:28-66`). Mirrors the Tools 16–19 wording corrected in commit `ae30927`. (3) **DRIFT-2b — Tools 16/19 residual wire hygiene** (post-QA addendum from `.74`, CONFIRMED against `catalogue.json`). Tool 16 `create_milestone` and Tool 19 `milestone_tree` JSON wire samples still listed `org_id` as a client argument — the shipped tools take NO wire `org_id` (org pinned to `identity.OrgID`; the catalogue input-schemas omit it). Removed `org_id` from both samples (Tools 17/18 samples verified already clean). Tool 19's gating prose also claimed the backing RPC "self-gates via `rbac.For`" — corrected to the shipped mechanism: an EXPLICIT tenant predicate in the rooted-CTE anchor (`apps/api/workitems/workitems.go` ~2691, gated by `req.OrgID = identity.OrgID`, with the empty-`OrgID` internal-caller no-op). No catalogue / code / migration-file change — the implementation bead `unblock-tv8.75` owns the migration `0130` file + handler + RPC code. (4) **DRIFT-2c — label tools pin org to identity, NO wire `org_id` (DECIDED by Miguel 2026-06-11).** The remaining open question flagged during this drift-closure is now LOCKED: the label tools (Tools 20–23) pin org to the Bearer-resolved identity exactly like the milestone tools (Tools 16–19) — there is NO wire `org_id`. The optional `project_id` argument is the XOR selector: absent → org-scoped label (org from `identity.OrgID`); present → project-scoped (the handler/RPC validates the project belongs to the caller's org). Patched in lockstep: §4.4 `CreateLabelRequest` + `ListLabelsRequest` — `OrgID` re-annotated as populated from `identity.OrgID` and NEVER from the wire (mirrors `CreateMilestoneRequest` / the §6.2 Tool 19 read prose; `ProjectID` is the sole org/project wire selector); §6.2 Tool 20 `create_label` and Tool 21 `list_labels` JSON wire samples — `org_id` removed (Tools 22/23 samples verified already clean, scoping via `label_id`). `UpdateLabelRequest` / `DeleteLabelRequest` carry no `OrgID` (they scope via `LabelID`), so no struct change there. Spec status remains APPROVED — drift closure, not a re-architecting.
 - 2026-06-11 — round-16 lockstep-completion drift-closure (spec-drift surfaced by `/investigate` on bead `unblock-tv8.74`; status remains APPROVED): two mechanical prose corrections, no design change. (1) **§4.4.1 milestone P02-deferral stragglers corrected** — the 2026-06-04 round-16 changelog claimed §4.4.1 "milestone-tools-now wording" was patched, but three prose lines escaped and still said the milestone MCP tools defer to P02 (the §4.4.1 intro paragraph, the `UpdateMilestone` reparenting doc-comment cross-reference, and the `MilestoneTree` "Used by" note); all three now state the tools ship NOW in P01 as MCP Tools 16–19 (§6.2), in lockstep with the round-16 §1/§6 override. The genuinely-deferred reparenting feature and the 4 P02 memory tools are untouched. (2) **§6.2 Tools 16–19 authorization wording aligned with the established Bearer-Identity org-scoping pattern** — the round-16 Tool 16/18 contracts mentioned a literal `org.Authorize` call, but NO shipped MCP handler (all 15) calls `org.Authorize` directly; the established pattern is org scoping via the Bearer-resolved org-scoped `Identity` (`withIdentityFromReq` + `identity.OrgID` on the write path; `rbac.For` SQL-injected tenant predicate on the read path), with the backing `workitems` write RPCs not self-gating (auth-model doc-comment at `apps/api/workitems/workitems.go:28-66`). Tools 16/17/18 (write) and 19 (read) reworded accordingly. Scoped to milestone tools only; the label Tools 20–23 (sibling bead `unblock-tv8.75`) carry the same `org.Authorize` phrasing and are deliberately left for .75's flow. No DDL / migration / public-API / `go.mod` change — the implementation bead `unblock-tv8.74` owns the catalogue + handler code. Spec status remains APPROVED.
 - 2026-06-11 — round-16 drift-closure (spec-drift closure from `/investigate` on bead `unblock-tv8.73`; status remains APPROVED): four mechanical lockstep corrections to the 2026-06-04 round-16 amendment, no design change. (1) **Migration renumbered `0110` → `0120`** — the round-16 text named the new up-only migration `0110_mcp_issued_to_user_notnull.up.sql`, but slot `0110` is already taken by the committed `0110_mcp_warning_codes.up.sql` (bead `unblock-tv8.63`); renamed to `0120_mcp_issued_to_user_notnull.up.sql` at every reference (round-16 changelog bullet, §3.2 table row + sequence note, §4.3.2 step 8, §11.1.2, §12 A-3 row). (2) **Root `docs/SPEC.md` §9.4.6 brought into lockstep** — the `mcp.api_keys.issued_to_user` DDL there still declared the column nullable with `ON DELETE SET NULL`; corrected to NOT NULL / `ON DELETE CASCADE` with the audit-survival note, and the §11 P01 row + changelog migration name renumbered to `0120`. (3) **§3.2 prose column fix** — the audit-survival FK was mis-named `mcp.tool_calls.issued_to_user` (no such column); corrected to `mcp.tool_calls.api_key_id` (already `ON DELETE SET NULL`). (4) **§4.3.2 step 3 SELECT aligned with code** — the documented `validateAPIKey` SELECT omitted `issued_to_user`; the column is added to match `apps/api/auth/auth.go`. No DDL semantics change, no public-API change, no `go.mod` change — the implementation bead `unblock-tv8.73` owns the migration file + code. Spec status remains APPROVED.
 - 2026-06-04 — round-16 (P01 MCP tool-surface scope amendment; surfaced by the 2026-06-03 local-MCP demo + 2026-06-04 review; covers epic `unblock-tv8` beads .71/.72/.73/.74/.75/.76): the P01 agent-facing tool inventory grows from **14 to 23** and the v1.0 inventory from **18 to 27** (still + the 4 memory tools at P02). Five contract changes land in lockstep. (1) **`promote` keystone (.71)** — a new Tool 15 `promote` transitions an item Backlog→Ready, precondition `status='Backlog' AND is_ready=true`; the not-ready rejection reuses the EXISTING §7 `PRECONDITION_NOT_MET` kind, extended ADDITIVELY with a `{status, required}` pair alongside the existing `{missing}`/`{rejection_reason}` shapes. .71 also closes round-12 DRIFT-2 ("the state-machine does not allow the canonical fixture's Done/Ready end-states via RPC") by pinning the FULL Backlog/Ready/InProgress/Blocked/Done transition map (§6.6) incl. the Ready→Blocked demotion that fires when a `blocks` edge is later added to a Ready item. .71 further pins the **`is_ready`-on-create rule**: a freshly-created item with no incoming `blocks` edges MUST get `is_ready=true` INLINE at create time inside `workitems.Create`'s own transaction (today `recomputeReady` never fires on the create path, so such items are stranded non-ready); `workitems.Create` joins the §6.3.0 Regime A `is_ready` single-writer allow-list and the §11.3 `no_direct_is_ready_write` allow-list, and the misleading create doc-comment is corrected. (2) **`issued_to_user` REQUIRED (.73)** — the column becomes NOT NULL on every MCP API key; all "nullable / org-level service key" wording is removed; a new up-only migration `0120_mcp_issued_to_user_notnull.up.sql` runs `ALTER … SET NOT NULL` and swaps the FK from `ON DELETE SET NULL` to `ON DELETE CASCADE` (deleting a user deletes their keys; `mcp.tool_calls` audit rows survive via their own `ON DELETE SET NULL`); `IssueAPIKey` rejects empty `IssuedToUser` with `InvalidArgument`; the §4.3.2 validate path never constructs an empty-UID identity. (3) **Milestone MCP tools (.74)** — OVERRIDES the §6.2 round-2 D1 deferral note + the §1 / §4.4.1 P02-deferral wording: the four milestone tools `create_milestone` / `update_milestone` / `assign_item` (incl. unassign via empty `milestone_id`) / `milestone_tree` are exposed NOW (Tools 16–19), thin MCP facades over the already-shipping `workitems.CreateMilestone`/`UpdateMilestone`/`AssignItem`/`MilestoneTree` private RPCs (§4.4.1). (4) **Label-registry MCP tools (.75)** — four NEW org-scoped, RBAC-gated tools `create_label` / `list_labels` / `update_label` (rename + recolor) / `delete_label` (Tools 20–23) over the existing `workitems.labels` table; four new `workitems` private RPCs back them. (5) **`show` resolves references (.76)** — Tool 7 `show` resolves the parent and the direct in/out dependency targets to `{id, title, status}` objects (one level deep, payload bounded) instead of bare IDs. The §7 `PRECONDITION_NOT_MET {status, required}` extension defined by .71 is the SAME taxonomy reused by .72 (the `claim`-on-not-Ready error) — .72 carries no separate spec text; its error is satisfied by the .71 §7 design. Patches in lockstep: §1 overview (tool-count bullets + milestone P02-defer wording) … §3.2 (new migration `0120`) … §4.1 (`IssueAPIKeyRequest.IssuedToUser` REQUIRED + doc-comment) … §4.3.2 step 8 (no empty-UID identity) … §4.4.1 (milestone-tools-now wording) … §5.2 (NOT-exposed list trimmed) … §6 header ("The 23 P01 MCP Tools") … §6.2 deferral note (rewritten: milestone + label + promote tools now in P01) … §6.2 Tool 7 `show` (reference resolution) … new §6.2 Tools 15–23 … new §6.6 (status transition map) … §6.3.0 Regime A allow-list (+`workitems.Create`) … §7 (`PRECONDITION_NOT_MET {status, required}` extension) … §10.3 (catalogue tool count 14→23) … §11.1.2 (promote assertion) … §11.3 `is_ready` allow-list (+`workitems.Create`) … §12 task table (D-2 promote, D-8 milestone+label tools, A-3 migration 0120) … §14 approval checklist (14→23). Cross-doc reconciliation (CONFIRMED by Miguel, no doc left stale): docs/PRD.md FR-8 + priority row, docs/SPEC.md §5.2.2 inventory + the "18 tools" mentions, and docs/plans/01-plan-backend-mvp.md tool table are all updated to the identical P01=23 / v1.0=27 counts, each carrying a P01-round-16 provenance note. Spec status remains APPROVED — this is a scope amendment, not a re-architecting.
@@ -242,6 +243,7 @@ in steps of 10. Step numbering matches §9.4.0 ordering:
 | `0080_boards.up.sql` | Schema `boards` per SPEC §9.4.7 (tables `boards`, `columns` + indexes). **Schema-only in P01** — no service code until P05. |
 | `0090_memory.up.sql` | Schema `memory` per SPEC §9.4.8 (tables `entries`, `entry_refs` + indexes). **Schema-only in P01** — no service code until P02. |
 | `0120_mcp_issued_to_user_notnull.up.sql` (round-16, bead `unblock-tv8.73`) | Tighten `mcp.api_keys.issued_to_user`: (1) `ALTER TABLE mcp.api_keys ALTER COLUMN issued_to_user SET NOT NULL;` (2) drop the existing FK and re-add it as `FOREIGN KEY (issued_to_user) REFERENCES auth.users(id) ON DELETE CASCADE` (was `ON DELETE SET NULL`). Every MCP API key is now owned by exactly one user; deleting that user deletes their keys. `mcp.tool_calls.api_key_id` (the audit FK) is unaffected and KEEPS its `ON DELETE SET NULL` so audit rows survive a user deletion. Up-only, pre-prod — no rows exist yet, so the `SET NOT NULL` cannot fail on existing data; the migration is additive to the §3.2 sequence and does not renumber 0010..0090. Slot `0110` is already taken by the committed `0110_mcp_warning_codes.up.sql` (bead `unblock-tv8.63`), so this migration takes the next free slot `0120`. |
+| `0130_workitems_labels_updated_at.up.sql` (round-16, bead `unblock-tv8.75`) | Add the `updated_at` column to `workitems.labels`: `ALTER TABLE workitems.labels ADD COLUMN updated_at timestamptz NOT NULL DEFAULT now();`. Closes the contradiction between the §4.4 `Label.UpdatedAt` field (which has always declared the column) and the original `0040_workitems.up.sql` DDL (which omitted it). Resolution DECIDED by Miguel 2026-06-11: the label registry is mutable via Tool 22 (`update_label` rename/recolor) and every other long-lived `workitems` row (`items`, `milestones`, `comments`) already carries `updated_at`, so the column is added rather than dropping the struct field. The backing `workitems.UpdateLabel` RPC bumps `updated_at` on every write (§4.4). Up-only, pre-prod — no rows exist yet, so the `NOT NULL DEFAULT now()` cannot fail on existing data; the migration is additive to the §3.2 sequence and does not renumber 0010..0120. Next free slot after the committed `0120` → `0130`. |
 
 > **Migration `0100`** is the Tool-2 covering index pinned in round-7
 > (§6.2.0 / §6.2 Tool 2). It is referenced but its row is documented at
@@ -981,15 +983,31 @@ type SearchHit struct {
 
 // --- Label-registry RPCs (round-16, bead unblock-tv8.75) ---
 // Back the label MCP tools (§6.2 Tools 20–23) over the EXISTING
-// workitems.labels / workitems.item_labels tables (SPEC §9.4.3). No new
-// migration — the tables already exist. Org-scoped, RBAC-gated.
+// workitems.labels / workitems.item_labels tables (SPEC §9.4.3). One new
+// up-only migration 0130_workitems_labels_updated_at.up.sql (§3.2) adds
+// the updated_at column declared by the Label struct below (the original
+// 0040_workitems.up.sql DDL omitted it; drift DECIDED by Miguel
+// 2026-06-11 — ADD the column). UpdateLabel bumps updated_at on every
+// write. Org scoping follows the Bearer-Identity pattern (§6.2 closing
+// note): the write RPCs (CreateLabel / UpdateLabel / DeleteLabel) trust
+// the org-scoped Identity pinned by the MCP handler (identity.OrgID) and
+// do NOT call org.Authorize; the read RPC (ListLabels) self-gates via
+// rbac.For SQL tenant-predicate injection (auth-model doc-comment at
+// apps/api/workitems/workitems.go:28-66).
 
 //encore:api private method=POST path=/workitems.CreateLabel
 func CreateLabel(ctx context.Context, req CreateLabelRequest) (*Label, error)
 
 type CreateLabelRequest struct {
-    OrgID       string // ULID; XOR ProjectID (labels_scope_xor_chk)
-    ProjectID   string // ULID; XOR OrgID
+    // OrgID is NOT a wire argument. The MCP handler pins it from the
+    // Bearer-resolved org-scoped Identity (identity.OrgID) and passes it
+    // RPC-side — exactly like CreateMilestoneRequest (§4.4.1). ProjectID
+    // is the XOR selector: empty → org-scoped (to identity.OrgID);
+    // non-empty → project-scoped (the handler/RPC validates the project
+    // belongs to identity.OrgID). DB CHECK labels_scope_xor_chk is the
+    // last line of defence.
+    OrgID       string // populated from identity.OrgID; NEVER from the wire; XOR ProjectID
+    ProjectID   string // ULID; optional wire arg; XOR OrgID
     Name        string // 1..64 chars; unique within scope
     Color       string // "#RRGGBB"
     Description  string // optional
@@ -1012,15 +1030,23 @@ type Label struct {
 func ListLabels(ctx context.Context, req ListLabelsRequest) (*ListLabelsResponse, error)
 
 type ListLabelsRequest struct {
-    OrgID     string // optional
-    ProjectID string // optional; when set, returns project + inherited org labels
+    // OrgID is NOT a wire argument. The read RPC self-gates via rbac.For
+    // SQL tenant-predicate injection (org_id = identity.OrgID); the MCP
+    // handler resolves the caller from the Bearer-resolved Identity. Org
+    // scope is therefore always the caller's org — never wire-supplied
+    // (mirrors the milestone read RPC prose, §4.4.1 / §6.2 Tool 19).
+    OrgID     string // populated from identity.OrgID; NEVER from the wire
+    ProjectID string // optional wire arg; when set, returns project + inherited org labels
 }
 type ListLabelsResponse struct {
     Labels []Label
 }
 
 //encore:api private method=POST path=/workitems.UpdateLabel
-// Renames and/or recolors. Scope (OrgID/ProjectID) is immutable.
+// Renames and/or recolors. Scope (OrgID/ProjectID) is immutable. Bumps
+// workitems.labels.updated_at (the column added by migration 0130, §3.2)
+// to now() on every successful write; the returned Label carries the new
+// UpdatedAt.
 func UpdateLabel(ctx context.Context, req UpdateLabelRequest) (*Label, error)
 
 type UpdateLabelRequest struct {
@@ -2137,10 +2163,11 @@ doc-comment at `apps/api/workitems/workitems.go`). Enforces
 M-INV-1/2/3/5/6 per the backing RPC.
 
 ```jsonc
-// arguments — mirrors workitems.CreateMilestoneRequest
+// arguments — mirrors workitems.CreateMilestoneRequest (NO wire org_id:
+// the org is pinned from the Bearer-resolved identity.OrgID; pass
+// project_id to project-scope, omit it to org-scope)
 {
-  "org_id": "<ULID; XOR project_id>",
-  "project_id": "<ULID; XOR org_id>",
+  "project_id": "<ULID; optional — omit to org-scope to the caller's org>",
   "parent_milestone_id": "<ULID; optional>",
   "name": "Q1",
   "description": "...",
@@ -2209,15 +2236,23 @@ matching the rest of the tool surface.
 Thin MCP facade over `workitems.MilestoneTree` (§4.4.1). Returns the
 recursive milestone tree (depth bounded at M-INV-6 = 4). Read-side org
 scoping is enforced by the Bearer-resolved org-scoped `Identity` — the
-backing RPC self-gates via `rbac.For` (the tenant predicate is injected
-into the SQL), matching the rest of the read-side tool surface.
+handler ALWAYS passes `identity.OrgID` into the backing RPC. Unlike the
+`rbac.For` read RPCs (Get / GetTrail / List / Search), `MilestoneTree`
+gates via an EXPLICIT tenant predicate in the recursive-CTE anchor
+(`org_id = $caller_org OR project_id IN (SELECT id FROM org.projects
+WHERE org_id = $caller_org)`, `apps/api/workitems/workitems.go` ~2691),
+so a foreign `root_milestone_id` yields an empty anchor (no rows) —
+closing the cross-tenant / IDOR read seam. The empty-`OrgID` no-op
+branch is reserved for trusted internal callers (the E2E test, the P05
+roadmap RPC) and is never reachable from the MCP boundary.
 
 ```jsonc
-// arguments — mirrors workitems.MilestoneTreeRequest
+// arguments — mirrors workitems.MilestoneTreeRequest (NO wire org_id:
+// the org is pinned from the Bearer-resolved identity.OrgID; pass
+// project_id to scope to a project, or root_milestone_id for a subtree)
 {
-  "org_id": "<ULID; required when root_milestone_id empty, XOR project_id>",
-  "project_id": "<ULID; required when root_milestone_id empty, XOR org_id>",
-  "root_milestone_id": "<ULID; optional>",
+  "project_id": "<ULID; optional — scopes roots to a project>",
+  "root_milestone_id": "<ULID; optional — returns the subtree rooted here>",
   "include_cancelled": false
 }
 
@@ -2229,15 +2264,20 @@ into the SQL), matching the rest of the read-side tool surface.
 
 Label-registry management over the existing `workitems.labels` table
 (PRD §6.4). Org- or project-scoped (XOR, enforced by the existing
-`labels_scope_xor_chk` CHECK). RBAC-gated (`org.Authorize` on
-`workitems.labels`, action `write`). Backed by a new private RPC
-`workitems.CreateLabel`.
+`labels_scope_xor_chk` CHECK). Org scoping is enforced by the
+Bearer-resolved org-scoped `Identity` — the handler resolves the caller
+via `withIdentityFromReq` and passes `identity.OrgID` into the backing
+RPC, matching every other write tool on the surface; the backing
+`workitems` write RPC does not self-gate (see the auth-model
+doc-comment at `apps/api/workitems/workitems.go:28-66`). Backed by a new
+private RPC `workitems.CreateLabel`.
 
 ```jsonc
-// arguments
+// arguments — NO wire org_id: the org is pinned from the Bearer-resolved
+// identity.OrgID; pass project_id to project-scope, omit it to org-scope
+// to the caller's org
 {
-  "org_id": "<ULID; XOR project_id>",
-  "project_id": "<ULID; XOR org_id>",
+  "project_id": "<ULID; optional — omit to org-scope to the caller's org>",
   "name": "bug",            // 1..64 chars; unique within scope
   "color": "#d73a4a",       // hex color; validated #RRGGBB
   "description": "<string; optional>"
@@ -2256,12 +2296,18 @@ A duplicate `name` within the same scope → `CONFLICT` with
 Lists labels visible to the caller within a scope. Project labels and the
 org labels reachable from that project are both returned; the PRD §6.4
 "project wins on identical name" resolution is applied at query time.
-RBAC-gated (action `read`). Backed by `workitems.ListLabels`.
+Read-side org scoping is enforced by the Bearer-resolved org-scoped
+`Identity` — the backing RPC self-gates via `rbac.For`, which injects the
+tenant predicate (`org_id = $caller_org`) directly into the emitted SQL,
+matching the rest of the read-side tool surface (auth-model doc-comment
+at `apps/api/workitems/workitems.go:28-66`). Backed by
+`workitems.ListLabels`.
 
 ```jsonc
-// arguments
+// arguments — NO wire org_id: the read RPC self-gates to the caller's org
+// via rbac.For (org_id = identity.OrgID); pass project_id to scope within
+// that org to a project
 {
-  "org_id": "<ULID; optional>",
   "project_id": "<ULID; optional — when set, returns project labels + inherited org labels>"
 }
 
@@ -2273,7 +2319,11 @@ RBAC-gated (action `read`). Backed by `workitems.ListLabels`.
 
 Renames and/or recolors an existing label. Cannot change a label's scope
 (`org_id` / `project_id` are immutable — a scope change is a
-delete-then-create). RBAC-gated (action `write`). Backed by
+delete-then-create). Org scoping is enforced by the Bearer-resolved
+org-scoped `Identity` (`identity.OrgID` via `withIdentityFromReq`),
+matching the rest of the write-tool surface; the backing RPC does not
+self-gate. A successful write bumps `workitems.labels.updated_at` (the
+column added by migration `0130`, §3.2). Backed by
 `workitems.UpdateLabel`.
 
 ```jsonc
@@ -2298,8 +2348,10 @@ Deletes a label from the registry. The many-to-many
 `workitems.item_labels` rows referencing it are removed in the same
 transaction (the existing junction-table FK is `ON DELETE CASCADE` per
 SPEC §9.4.3) — deleting a label detaches it from every item; it does NOT
-delete the items. RBAC-gated (action `delete`). Backed by
-`workitems.DeleteLabel`.
+delete the items. Org scoping is enforced by the Bearer-resolved
+org-scoped `Identity` (`identity.OrgID` via `withIdentityFromReq`),
+matching the rest of the write-tool surface; the backing RPC does not
+self-gate. Backed by `workitems.DeleteLabel`.
 
 ```jsonc
 // arguments
@@ -2314,10 +2366,25 @@ Label not found / not visible → `NOT_FOUND`.
 > **Label private RPCs (round-16).** Tools 20–23 are backed by four new
 > `workitems` private RPCs — `CreateLabel`, `ListLabels`, `UpdateLabel`,
 > `DeleteLabel` — added to §4.4 in lockstep. They operate over the
-> existing `workitems.labels` / `workitems.item_labels` DDL (SPEC §9.4.3);
-> **no new migration** is required for labels (the tables already exist).
-> Each RPC is org-scoped and routed through `org.Authorize` exactly like
-> the item RPCs.
+> existing `workitems.labels` / `workitems.item_labels` DDL (SPEC §9.4.3).
+> **One new up-only migration `0130_workitems_labels_updated_at.up.sql`**
+> (§3.2, bead `unblock-tv8.75`) adds the `updated_at timestamptz NOT NULL
+> DEFAULT now()` column to `workitems.labels` — the §4.4 `Label.UpdatedAt`
+> field has always declared it and `UpdateLabel` bumps it on every write,
+> but the original `0040_workitems.up.sql` DDL omitted it (drift DECIDED
+> by Miguel 2026-06-11: ADD the column — the registry is mutable via Tool
+> 22 and the other long-lived `workitems` rows all carry `updated_at`). No
+> other DDL change is required for labels (the `labels` / `item_labels`
+> tables already exist). Org scoping follows the established
+> Bearer-Identity pattern, NOT a direct `org.Authorize` call: each
+> backing RPC is dispatched with the caller's org pinned to
+> `identity.OrgID` — write RPCs (`CreateLabel` / `UpdateLabel` /
+> `DeleteLabel`) trust the org-scoped `Identity` resolved by the MCP
+> handler via `withIdentityFromReq` and do not self-gate; the read RPC
+> (`ListLabels`) self-gates via `rbac.For` SQL tenant-predicate injection
+> (see the auth-model doc-comment at
+> `apps/api/workitems/workitems.go:28-66`). No MCP handler in P01 calls
+> `org.Authorize` directly.
 
 ### 6.3 Cascade subsystem (Manifesto Law 1)
 
@@ -3673,7 +3740,7 @@ section that locks its contract:
 | D-5 (Tools 11–12) | Greta | §6.2 (tools 11–12), §6.5 |
 | D-6 (Tools 13–14) | Greta | §6.2 (tools 13–14) |
 | D-7 (Catalogue v0; round-16 23 tools) | Greta | §10.3 (catalogue carries all 23 P01 tool definitions) |
-| D-8 (round-16 milestone + label MCP tools — Tools 16–23) | Greta | §6.2 (Tools 16–19 milestone facades per bead `unblock-tv8.74`; Tools 20–23 label tools per bead `unblock-tv8.75`), §4.4 (label RPCs), §4.4.1 (milestone RPCs) |
+| D-8 (round-16 milestone + label MCP tools — Tools 16–23) | Greta | §6.2 (Tools 16–19 milestone facades per bead `unblock-tv8.74`; Tools 20–23 label tools per bead `unblock-tv8.75`), §4.4 (label RPCs incl. migration `0130_workitems_labels_updated_at` per bead `unblock-tv8.75`), §4.4.1 (milestone RPCs), §3.2 (migration `0130`) |
 | E-2 (NFR-1 latency harness) | Greta | §11.2 (warm-cache definition) |
 | E-3 (NFR-2 RBAC suite) | Greta | §10.1, §11.2 |
 | E-4 (Exit-criterion E2E test) | Greta | §11.1 (incl. §11.1.0 fixture topology + §11.1.1 seed ownership), §6.3 (cascade), §6.5 (cycle) |
