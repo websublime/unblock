@@ -214,6 +214,14 @@ func classifyEnvelopeError(err error) envelopeError {
 		if to, _ := e.Meta["to"].(string); to != "" {
 			details["to"] = to
 		}
+		// workitems.CreateLabel / UpdateLabel surface the violated UNIQUE
+		// index name directly under Meta["constraint"] (labels_org_name_uniq
+		// / labels_project_name_uniq) — the §6.2 Tool 20 contract requires
+		// data.constraint to name the index. An explicit constraint key
+		// overrides the deps-inferred default above.
+		if constraint, _ := e.Meta["constraint"].(string); constraint != "" {
+			details["constraint"] = constraint
+		}
 		return envelopeError{kind: envelopeKindConflict, message: msg, details: details}
 
 	case errs.FailedPrecondition:

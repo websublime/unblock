@@ -132,6 +132,15 @@ var toolRegistrars = []func(*sdkmcp.Server){
 	registerHandleUpdateMilestone,
 	registerHandleAssignItem,
 	registerHandleMilestoneTree,
+	// round-16, bead unblock-tv8.75: label-registry management (Tools
+	// 20–23). Thin MCP facades over the workitems label RPCs (§4.4 / §6.2
+	// Tools 20–23). Appended in spec order; order is not load-bearing (the
+	// SDK keys tools by name), but the catalogue.json tool order IS pinned
+	// at 20–23 by TestCatalogueToolNamesMatchSpecOrder.
+	registerHandleCreateLabel,
+	registerHandleListLabel,
+	registerHandleUpdateLabel,
+	registerHandleDeleteLabel,
 }
 
 func init() {

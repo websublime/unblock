@@ -42,6 +42,9 @@ import (
 // round-16, bead unblock-tv8.74: +milestone management (Tools 16–19:
 // create_milestone / update_milestone / assign_item / milestone_tree
 // per §6.2) appended at positions 16–19.
+// round-16, bead unblock-tv8.75: +label-registry management (Tools 20–23:
+// create_label / list_labels / update_label / delete_label per §6.2)
+// appended at positions 20–23.
 var expectedP01ToolNames = []string{
 	"prime",
 	"ready",
@@ -62,6 +65,10 @@ var expectedP01ToolNames = []string{
 	"update_milestone",
 	"assign_item",
 	"milestone_tree",
+	"create_label",
+	"list_labels",
+	"update_label",
+	"delete_label",
 }
 
 // catalogueFileDoc mirrors the on-disk JSON shape — kept independent of

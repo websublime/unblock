@@ -322,6 +322,34 @@ func readMilestone(ctx context.Context, id string) (*Milestone, error) {
 	return &m, nil
 }
 
+// readLabel fetches a single workitems.labels row by id and returns it as
+// a Label value. NotFound when the row is missing. Used after a write
+// (CreateLabel / UpdateLabel) to read back the canonical persisted shape,
+// including the now()-bumped updated_at. SPEC §4.4.
+func readLabel(ctx context.Context, id string) (*Label, error) {
+	var (
+		l                Label
+		orgID, projectID *string
+		description      *string
+	)
+	err := db.QueryRow(ctx,
+		`SELECT id, org_id, project_id, name, color, description, created_at, updated_at
+		   FROM workitems.labels
+		  WHERE id = $1`,
+		id,
+	).Scan(&l.ID, &orgID, &projectID, &l.Name, &l.Color, &description, &l.CreatedAt, &l.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, sqldb.ErrNoRows) {
+			return nil, &errs.Error{Code: errs.NotFound, Message: "label not found"}
+		}
+		return nil, &errs.Error{Code: errs.Internal, Message: "label read failed"}
+	}
+	l.OrgID = ptrToString(orgID)
+	l.ProjectID = ptrToString(projectID)
+	l.Description = ptrToString(description)
+	return &l, nil
+}
+
 // ptrToString returns *p when p != nil, else "".
 func ptrToString(p *string) string {
 	if p == nil {
@@ -333,8 +361,6 @@ func ptrToString(p *string) string {
 // isUniqueViolation returns true when err is a Postgres UNIQUE violation
 // on the named constraint. Matched by substring (pgx error wrapping
 // varies by Encore version).
-//
-//nolint:unused
 func isUniqueViolation(err error, constraint string) bool {
 	if err == nil {
 		return false
