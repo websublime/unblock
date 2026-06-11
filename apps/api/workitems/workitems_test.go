@@ -339,8 +339,9 @@ func TestUpdateLabelRejectsBadInput(t *testing.T) {
 	}{
 		{"nil", nil},
 		{"empty label_id", &UpdateLabelRequest{}},
-		{"name too long", &UpdateLabelRequest{LabelID: "l", Name: &badName}},
-		{"bad color", &UpdateLabelRequest{LabelID: "l", Color: &badColor}},
+		{"empty caller org", &UpdateLabelRequest{LabelID: "l"}},
+		{"name too long", &UpdateLabelRequest{LabelID: "l", CallerOrgID: "o", Name: &badName}},
+		{"bad color", &UpdateLabelRequest{LabelID: "l", CallerOrgID: "o", Color: &badColor}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -362,6 +363,7 @@ func TestDeleteLabelRejectsBadInput(t *testing.T) {
 	}{
 		{"nil", nil},
 		{"empty label_id", &DeleteLabelRequest{}},
+		{"empty caller org", &DeleteLabelRequest{LabelID: "l"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

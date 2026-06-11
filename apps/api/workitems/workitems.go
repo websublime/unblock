@@ -490,9 +490,18 @@ type Label struct {
 // Bearer-resolved org-scoped Identity (identity.OrgID) and passes it
 // RPC-side (mirrors CreateMilestoneRequest). ProjectID is the XOR
 // selector: empty → org-scoped to OrgID; non-empty → project-scoped.
+//
+// CallerOrgID is also pinned from identity.OrgID (never wire). On the
+// project-scoped branch (ProjectID set, OrgID empty) it is the org the
+// project MUST belong to: CreateLabel gates the insert on
+// project_id IN (SELECT id FROM org.projects WHERE org_id = CallerOrgID),
+// so a Bearer for org A cannot create a label inside org B's project by
+// passing a foreign project ULID (DRIFT-2c locked decision). On the
+// org-scoped branch CallerOrgID equals OrgID and the gate is a no-op.
 type CreateLabelRequest struct {
 	OrgID       string `json:"org_id"`
 	ProjectID   string `json:"project_id"`
+	CallerOrgID string `json:"caller_org_id"`
 	Name        string `json:"name"`
 	Color       string `json:"color"`
 	Description string `json:"description"`
@@ -517,16 +526,32 @@ type ListLabelsResponse struct {
 
 // UpdateLabelRequest is the input to UpdateLabel. Renames and/or recolors;
 // the label's scope (OrgID / ProjectID) is immutable. SPEC §4.4.
+//
+// CallerOrgID is NOT a wire argument — the MCP handler pins it from the
+// Bearer-resolved org-scoped Identity (identity.OrgID) and passes it
+// RPC-side so UpdateLabel can apply its row-level tenant predicate (the
+// targeted label's org_id = CallerOrgID OR its project_id belongs to a
+// project in the caller's org). A foreign LabelID yields NOT_FOUND, never
+// a cross-tenant write. SPEC §4.4 (DRIFT-3b).
 type UpdateLabelRequest struct {
 	LabelID     string  `json:"label_id"`
+	CallerOrgID string  `json:"caller_org_id"`
 	Name        *string `json:"name"`
 	Color       *string `json:"color"`
 	Description *string `json:"description"`
 }
 
 // DeleteLabelRequest is the input to DeleteLabel. SPEC §4.4.
+//
+// CallerOrgID is NOT a wire argument — the MCP handler pins it from the
+// Bearer-resolved org-scoped Identity (identity.OrgID) and passes it
+// RPC-side so DeleteLabel can apply its row-level tenant predicate (the
+// targeted label's org_id = CallerOrgID OR its project_id belongs to a
+// project in the caller's org). A foreign LabelID yields NOT_FOUND, never
+// a cross-tenant delete. SPEC §4.4 (DRIFT-3b).
 type DeleteLabelRequest struct {
-	LabelID string `json:"label_id"`
+	LabelID     string `json:"label_id"`
+	CallerOrgID string `json:"caller_org_id"`
 }
 
 // DeleteLabelResponse is the output of DeleteLabel. DetachedItemCount is
@@ -2935,10 +2960,21 @@ func CreateLabel(ctx context.Context, req *CreateLabelRequest) (*Label, error) {
 		return nil, &errs.Error{Code: errs.Internal, Message: "label id generation failed"}
 	}
 
-	_, err = db.Exec(ctx,
+	// Row-level tenant gate for the project-scoped branch (DRIFT-2c locked
+	// decision): the INSERT only proceeds when the target project belongs to
+	// the caller's org. We express this as a guarded INSERT … SELECT whose
+	// WHERE is satisfiable ONLY when either (a) this is the org-scoped branch
+	// (project_id empty) or (b) the project_id is in the caller's org's
+	// projects (cross-schema read of org.projects, the same precedent
+	// ListLabels uses). A foreign project ULID yields ZERO inserted rows →
+	// NOT_FOUND below, never a cross-tenant write. CallerOrgID is pinned from
+	// identity.OrgID by the MCP handler, never the wire.
+	tag, err := db.Exec(ctx,
 		`INSERT INTO workitems.labels (id, org_id, project_id, name, color, description)
-		 VALUES ($1, NULLIF($2, ''), NULLIF($3, ''), $4, $5, NULLIF($6, ''))`,
-		id, req.OrgID, req.ProjectID, name, req.Color, req.Description,
+		 SELECT $1, NULLIF($2, ''), NULLIF($3, ''), $4, $5, NULLIF($6, '')
+		  WHERE $3 = ''
+		     OR $3 IN (SELECT id FROM org.projects WHERE org_id = $7)`,
+		id, req.OrgID, req.ProjectID, name, req.Color, req.Description, req.CallerOrgID,
 	)
 	if err != nil {
 		// Case-insensitive uniqueness is enforced by the lower(name) UNIQUE
@@ -2961,6 +2997,14 @@ func CreateLabel(ctx context.Context, req *CreateLabelRequest) (*Label, error) {
 		}
 		rlog.Error("workitems: label insert failed", "err", err)
 		return nil, &errs.Error{Code: errs.Internal, Message: "label insert failed"}
+	}
+	// Zero inserted rows means the project-scoped guard rejected the project:
+	// the project_id does not belong to the caller's org (or does not exist).
+	// Surface NOT_FOUND — the same shape a non-existent project would yield —
+	// so a cross-tenant project ULID is indistinguishable from a missing one
+	// and never leaks existence across the tenant boundary.
+	if tag.RowsAffected() == 0 {
+		return nil, &errs.Error{Code: errs.NotFound, Message: "label project does not exist"}
 	}
 
 	return readLabel(ctx, id)
@@ -3060,10 +3104,22 @@ func ListLabels(ctx context.Context, req *ListLabelsRequest) (*ListLabelsRespons
 // AlreadyExists with Meta["constraint"] → §7 CONFLICT. SPEC §4.4 / §6.2
 // Tool 22.
 //
+// Applies a row-level tenant predicate (DRIFT-3b): the targeted label's
+// org_id = CallerOrgID OR its project_id belongs to a project in the
+// caller's org. A foreign LabelID matches zero rows → NOT_FOUND, never a
+// cross-tenant write. CallerOrgID is pinned from identity.OrgID by the MCP
+// handler, never the wire.
+//
 //encore:api private method=POST path=/workitems.UpdateLabel
 func UpdateLabel(ctx context.Context, req *UpdateLabelRequest) (*Label, error) {
 	if req == nil || req.LabelID == "" {
 		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "missing label_id"}
+	}
+	if req.CallerOrgID == "" {
+		// The MCP handler always pins CallerOrgID from identity.OrgID; an
+		// empty value here is a programmer error (a hard tenant gate, never
+		// an unscoped write).
+		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "UpdateLabel requires caller org scope"}
 	}
 	if req.Name != nil {
 		n := strings.TrimSpace(*req.Name)
@@ -3076,14 +3132,20 @@ func UpdateLabel(ctx context.Context, req *UpdateLabelRequest) (*Label, error) {
 		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "color must be #RRGGBB", Meta: errs.Metadata{"field": "color"}}
 	}
 
+	// The WHERE clause's row-level tenant predicate is the IDOR gate: a
+	// label whose org_id is not the caller's AND whose project_id is not in
+	// the caller's org's projects matches zero rows → NOT_FOUND below. This
+	// closes the same cross-tenant seam Tool 19 closed for reads.
 	tag, err := db.Exec(ctx,
 		`UPDATE workitems.labels
 		    SET name        = COALESCE($2, name),
 		        color       = COALESCE($3, color),
 		        description  = CASE WHEN $4::boolean THEN NULLIF($5, '') ELSE description END,
 		        updated_at   = now()
-		  WHERE id = $1`,
-		req.LabelID, req.Name, req.Color, req.Description != nil, ptrToString(req.Description),
+		  WHERE id = $1
+		    AND (org_id = $6
+		         OR project_id IN (SELECT id FROM org.projects WHERE org_id = $6))`,
+		req.LabelID, req.Name, req.Color, req.Description != nil, ptrToString(req.Description), req.CallerOrgID,
 	)
 	if err != nil {
 		if isUniqueViolation(err, "labels_org_name_uniq") {
@@ -3111,10 +3173,22 @@ func UpdateLabel(ctx context.Context, req *UpdateLabelRequest) (*Label, error) {
 // from every item without deleting the items. DetachedItemCount is the
 // number of junction rows removed. SPEC §4.4 / §6.2 Tool 23.
 //
+// Applies a row-level tenant predicate (DRIFT-3b): the targeted label's
+// org_id = CallerOrgID OR its project_id belongs to a project in the
+// caller's org. A foreign LabelID matches zero rows → NOT_FOUND, never a
+// cross-tenant delete. CallerOrgID is pinned from identity.OrgID by the MCP
+// handler, never the wire.
+//
 //encore:api private method=POST path=/workitems.DeleteLabel
 func DeleteLabel(ctx context.Context, req *DeleteLabelRequest) (*DeleteLabelResponse, error) {
 	if req == nil || req.LabelID == "" {
 		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "missing label_id"}
+	}
+	if req.CallerOrgID == "" {
+		// The MCP handler always pins CallerOrgID from identity.OrgID; an
+		// empty value here is a programmer error (a hard tenant gate, never
+		// an unscoped delete).
+		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "DeleteLabel requires caller org scope"}
 	}
 
 	tx, err := db.Begin(ctx)
@@ -3124,18 +3198,32 @@ func DeleteLabel(ctx context.Context, req *DeleteLabelRequest) (*DeleteLabelResp
 	defer func() { _ = tx.Rollback() }()
 
 	// Count the junction rows BEFORE the delete so DetachedItemCount
-	// reflects exactly what the FK cascade will remove. Done inside the
+	// reflects exactly what the FK cascade will remove. The count is gated
+	// by the SAME row-level tenant predicate as the DELETE so a foreign
+	// label_id yields a 0 count AND the DELETE matches zero rows → NOT_FOUND
+	// (never a cross-tenant existence/count leak). Done inside the
 	// transaction so a concurrent attach/detach cannot skew the count
 	// relative to the delete.
 	var detached int
 	if err := tx.QueryRow(ctx,
-		`SELECT COUNT(*) FROM workitems.item_labels WHERE label_id = $1`,
-		req.LabelID,
+		`SELECT COUNT(*)
+		   FROM workitems.item_labels il
+		   JOIN workitems.labels l ON l.id = il.label_id
+		  WHERE il.label_id = $1
+		    AND (l.org_id = $2
+		         OR l.project_id IN (SELECT id FROM org.projects WHERE org_id = $2))`,
+		req.LabelID, req.CallerOrgID,
 	).Scan(&detached); err != nil {
 		return nil, &errs.Error{Code: errs.Internal, Message: "label detach count failed"}
 	}
 
-	tag, err := tx.Exec(ctx, `DELETE FROM workitems.labels WHERE id = $1`, req.LabelID)
+	tag, err := tx.Exec(ctx,
+		`DELETE FROM workitems.labels
+		  WHERE id = $1
+		    AND (org_id = $2
+		         OR project_id IN (SELECT id FROM org.projects WHERE org_id = $2))`,
+		req.LabelID, req.CallerOrgID,
+	)
 	if err != nil {
 		rlog.Error("workitems: label delete failed", "err", err, "label_id", req.LabelID)
 		return nil, &errs.Error{Code: errs.Internal, Message: "label delete failed"}

@@ -8,8 +8,12 @@
 // item without deleting the items. The structuredContent's
 // detached_item_count reports how many item attachments were removed. Org
 // scoping is enforced by the Bearer-resolved Identity (the handler resolves
-// the caller via withIdentityFromReq); the backing RPC does not self-gate
-// (workitems.go auth-model doc-comment). A missing label → §7 NOT_FOUND.
+// the caller via withIdentityFromReq and passes identity.OrgID as
+// CallerOrgID); the backing RPC applies a row-level tenant predicate (the
+// targeted label's org_id = CallerOrgID OR its project_id belongs to a
+// project in the caller's org) so a foreign label_id yields NOT_FOUND
+// rather than a cross-tenant delete (DRIFT-3b). A missing OR foreign label
+// → §7 NOT_FOUND.
 //
 // SPEC: docs/specs/01-spec-backend-mvp.md § 6.2 Tool 23 + § 4.4
 // (workitems.DeleteLabel) + § 7 (error envelope).
@@ -51,7 +55,8 @@ func handleDeleteLabel(ctx context.Context, req *sdkmcp.CallToolRequest, in dele
 	tool := "delete_label"
 	state := bindTool(req, tool)
 
-	if _, ok := identityFromReq(req); !ok {
+	identity, ok := identityFromReq(req)
+	if !ok {
 		return nil, deleteLabelOut{}, mapError(state, tool, errMissingIdentityErr())
 	}
 
@@ -68,8 +73,12 @@ func handleDeleteLabel(ctx context.Context, req *sdkmcp.CallToolRequest, in dele
 		})
 	}
 
+	// CallerOrgID is pinned to identity.OrgID (never the wire) so the backing
+	// RPC's row-level tenant predicate rejects a foreign label_id as
+	// NOT_FOUND rather than acting cross-tenant (DRIFT-3b).
 	resp, err := workitems.DeleteLabel(mcpCtx, &workitems.DeleteLabelRequest{
-		LabelID: in.LabelID,
+		LabelID:     in.LabelID,
+		CallerOrgID: identity.OrgID,
 	})
 	if err != nil {
 		return nil, deleteLabelOut{}, mapError(state, tool, err)

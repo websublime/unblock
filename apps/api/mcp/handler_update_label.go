@@ -5,8 +5,11 @@
 // Renames and/or recolors an existing label. The label's scope (org_id /
 // project_id) is immutable — a scope change is a delete-then-create. Org
 // scoping is enforced by the Bearer-resolved Identity (the handler resolves
-// the caller via withIdentityFromReq); the backing RPC does not self-gate
-// (workitems.go auth-model doc-comment). A successful write bumps
+// the caller via withIdentityFromReq and passes identity.OrgID as
+// CallerOrgID); the backing RPC applies a row-level tenant predicate (the
+// targeted label's org_id = CallerOrgID OR its project_id belongs to a
+// project in the caller's org) so a foreign label_id yields NOT_FOUND
+// rather than a cross-tenant write (DRIFT-3b). A successful write bumps
 // workitems.labels.updated_at (the column added by migration 0130, §3.2).
 //
 // A rename colliding with an existing label in the same scope
@@ -56,7 +59,8 @@ func handleUpdateLabel(ctx context.Context, req *sdkmcp.CallToolRequest, in upda
 	tool := "update_label"
 	state := bindTool(req, tool)
 
-	if _, ok := identityFromReq(req); !ok {
+	identity, ok := identityFromReq(req)
+	if !ok {
 		return nil, updateLabelOut{}, mapError(state, tool, errMissingIdentityErr())
 	}
 
@@ -73,8 +77,12 @@ func handleUpdateLabel(ctx context.Context, req *sdkmcp.CallToolRequest, in upda
 		})
 	}
 
+	// CallerOrgID is pinned to identity.OrgID (never the wire) so the backing
+	// RPC's row-level tenant predicate rejects a foreign label_id as
+	// NOT_FOUND rather than acting cross-tenant (DRIFT-3b).
 	label, err := workitems.UpdateLabel(mcpCtx, &workitems.UpdateLabelRequest{
 		LabelID:     in.LabelID,
+		CallerOrgID: identity.OrgID,
 		Name:        in.Name,
 		Color:       in.Color,
 		Description: in.Description,
