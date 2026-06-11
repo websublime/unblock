@@ -16,6 +16,12 @@
 // 'blocks' edge originates from a non-Done item." Called by:
 //
 //   - deps.AddEdge (Tool 11 / §6.5): after INSERT, recompute for to_item.
+//   - deps.AddEdgeInTx (the package-internal edge helper): same INSERT +
+//     recompute for to_item, but inside a caller-supplied transaction.
+//     workitems.Create drives this from its dependencies[] edge-loop
+//     (round-16, bead unblock-tv8.71), so an item created WITH an inlined
+//     incoming 'blocks' edge gets its is_ready corrected here in the same
+//     create transaction.
 //   - deps.RemoveEdge (Tool 12 / §6.5): after DELETE, recompute for to_item.
 //   - The cascade subscriber (C-3 / §6.3.2) is FORBIDDEN from writing
 //     is_ready — it only reads pipeline_stage. The single-hop neighbours
