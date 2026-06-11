@@ -95,7 +95,9 @@ func AuthHandler(ctx context.Context, p *AuthParams) (auth.UID, *AuthData, error
 	// auth.UID is the canonical user identifier surface of the Encore
 	// auth context. We use Identity.UserID — a ULID for the
 	// session-token path; for API-key callers it is the
-	// `mcp.api_keys.issued_to_user` value (nullable in the schema; an
-	// empty string is acceptable for org-level service keys).
+	// `mcp.api_keys.issued_to_user` value, which is always a non-empty
+	// ULID (the column is NOT NULL and issuance requires it — bead
+	// unblock-tv8.73). Validate rejects any key lacking an owning user
+	// before reaching here, so UserID is never empty on the api-key path.
 	return auth.UID(resp.Identity.UserID), &AuthData{Identity: resp.Identity}, nil
 }

@@ -217,11 +217,18 @@ func validateAPIKey(ctx context.Context, rawKey string) (*ValidateResponse, erro
 	// last_used_at write is a UI hint loss, not an auth failure.
 	go touchLastUsedAt(id)
 
-	// Step 8: construct Identity.
-	uid := ""
-	if issuedToUser != nil {
-		uid = *issuedToUser
+	// Step 8: construct Identity. issued_to_user is NOT NULL at the
+	// schema level (migration 0120, bead unblock-tv8.73) and required at
+	// issuance, so a well-formed key always has an owning user. Guard
+	// defensively anyway: never emit an empty-UID Identity, which Encore's
+	// auth handler rejects with the opaque "empty uid and non-empty auth
+	// data" error. A malformed (NULL/empty-user) key is treated as an
+	// invalid key, not a 500.
+	if issuedToUser == nil || *issuedToUser == "" {
+		rlog.Error("auth: api_key has no owning user (schema invariant violated)", "key_id", id)
+		return nil, &errs.Error{Code: errs.Unauthenticated, Message: "malformed api key: no owning user"}
 	}
+	uid := *issuedToUser
 	return &ValidateResponse{
 		Identity: Identity{
 			UserID:    uid,
@@ -515,7 +522,7 @@ func splitScopes(raw string) []string {
 // IssueAPIKeyRequest is the input to IssueAPIKey. SPEC §4.1.
 type IssueAPIKeyRequest struct {
 	OrgID        string     `json:"org_id"`         // ULID
-	IssuedToUser string     `json:"issued_to_user"` // ULID; nullable (org-level service key)
+	IssuedToUser string     `json:"issued_to_user"` // ULID; REQUIRED — every key is owned by a user (no org-level service key)
 	Label        string     `json:"label"`          // human-readable, e.g. "claude-code-laptop"
 	AgentKind    string     `json:"agent_kind"`     // AgentKind value
 	Scopes       []string   `json:"scopes"`
@@ -549,6 +556,14 @@ func IssueAPIKey(ctx context.Context, req *IssueAPIKeyRequest) (*IssueAPIKeyResp
 	if req.Label == "" {
 		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "missing label"}
 	}
+	if req.IssuedToUser == "" {
+		// Every MCP API key MUST be owned by a user — there is no
+		// userless "org-level service key" (bead unblock-tv8.73). A
+		// NULL-user key is structurally unusable: validateAPIKey would
+		// build an empty-UID Identity that Encore's auth handler
+		// rejects ("empty uid and non-empty auth data").
+		return nil, &errs.Error{Code: errs.InvalidArgument, Message: "api key must be issued to a user"}
+	}
 	if _, ok := agentKindAllowed[req.AgentKind]; !ok {
 		// Catch the CHECK constraint client-side so the caller gets
 		// a clean 400 instead of a Postgres-flavoured 500.
@@ -578,16 +593,11 @@ func IssueAPIKey(ctx context.Context, req *IssueAPIKeyRequest) (*IssueAPIKeyResp
 	if scopes == nil {
 		scopes = []string{}
 	}
-	var issuedToUser any
-	if req.IssuedToUser != "" {
-		issuedToUser = req.IssuedToUser
-	}
-
 	_, err = db.Exec(ctx,
 		`INSERT INTO mcp.api_keys
 		   (id, org_id, issued_to_user, label, agent_kind, key_hash, key_prefix, scopes, expires_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-		keyID, req.OrgID, issuedToUser, req.Label, req.AgentKind, hash, prefix, scopes, req.ExpiresAt,
+		keyID, req.OrgID, req.IssuedToUser, req.Label, req.AgentKind, hash, prefix, scopes, req.ExpiresAt,
 	)
 	if err != nil {
 		// Do NOT include rawKey in the log — it has not been

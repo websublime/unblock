@@ -49,6 +49,7 @@ import (
 
 	"encore.app/auth"
 	"encore.app/mcp"
+	"encore.app/shared/ulid"
 )
 
 // mcpInitializeBody is a minimal JSON-RPC 2.0 initialize request per
@@ -134,15 +135,37 @@ func mcpEndpoint() string {
 // rawKey); IssueAPIKey performs the full key-format dance so we
 // exercise the real production path.
 //
+// Every MCP API key MUST be owned by a user (bead unblock-tv8.73:
+// issued_to_user is NOT NULL and IssueAPIKey rejects an empty owner),
+// so the helper first seeds a throwaway auth.users row and binds the
+// key to it via IssuedToUser. The user is cleaned up after the test.
+//
 // Each test calls seedAPIKey with its own org id so tests run
 // independently (no cross-test fixture coupling).
 func seedAPIKey(t *testing.T, orgID string) (rawKey, keyID string) {
 	t.Helper()
-	resp, err := auth.IssueAPIKey(context.Background(), &auth.IssueAPIKeyRequest{
-		OrgID:     orgID,
-		Label:     "d1-transport-test",
-		AgentKind: "claude-code",
-		Scopes:    []string{},
+	ctx := context.Background()
+
+	userID, err := ulid.New()
+	if err != nil {
+		t.Fatalf("ulid userID: %v", err)
+	}
+	if _, err := db.Exec(ctx,
+		`INSERT INTO auth.users (id, primary_provider, primary_provider_id, email, display_name)
+		 VALUES ($1, 'github', $2, $3, $4)`,
+		userID, "d1-"+userID[len(userID)-8:],
+		strings.ToLower(userID[len(userID)-8:])+"@d1.local", "d1-user",
+	); err != nil {
+		t.Fatalf("insert auth.users: %v", err)
+	}
+	t.Cleanup(func() { _, _ = db.Exec(ctx, `DELETE FROM auth.users WHERE id = $1`, userID) })
+
+	resp, err := auth.IssueAPIKey(ctx, &auth.IssueAPIKeyRequest{
+		OrgID:        orgID,
+		IssuedToUser: userID,
+		Label:        "d1-transport-test",
+		AgentKind:    "claude-code",
+		Scopes:       []string{},
 	})
 	if err != nil {
 		t.Fatalf("auth.IssueAPIKey: %v", err)
