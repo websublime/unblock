@@ -1672,8 +1672,15 @@ func SetStateColumns(ctx context.Context, req *SetStateRequest) (*Item, error) {
 		}
 	}
 
-	// I-4: review_state ∈ (approved, needs_rework) requires impl_state=done.
-	if (newReview == reviewApproved || newReview == reviewNeedsRework) && newImpl != implDone {
+	// I-4 (FORWARD review gate, SPEC §6.2 Tool 13 line 2241 + SQL
+	// pseudocode line 2269): review_state → approved requires
+	// impl_state=done. The review_state → needs_rework transition is the
+	// REWORK trigger, governed by I-5 above (which legitimately permits
+	// the concurrent impl done → pending), so it is EXEMPT from I-4.
+	// Keying on needs_rework here would make the one-call
+	// set_state(impl_state=pending, review_state=needs_rework) rework
+	// unreachable and violate the §11.1.2 exit criterion.
+	if newReview == reviewApproved && newImpl != implDone {
 		return nil, preconditionError("review_change_requires_impl_done", "review_state change requires impl_state=done")
 	}
 
