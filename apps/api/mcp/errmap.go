@@ -183,6 +183,16 @@ func classifyEnvelopeError(err error) envelopeError {
 		} else {
 			details["reason"] = msg
 		}
+		// SPEC §7.3.1 (bead unblock-tv8.82): an out-of-range numeric
+		// argument (paginated limit / ready_limit below the minimum or
+		// above the maximum) carries the advertised inclusive range under
+		// Meta["bound"] (e.g. "1..200"). Surface it as data.bound so the
+		// agent can self-correct. Present only on range violations; other
+		// VALIDATION causes (missing required, invalid enum, wrong type)
+		// omit it.
+		if v, ok := e.Meta["bound"].(string); ok && v != "" {
+			details["bound"] = v
+		}
 		return envelopeError{kind: envelopeKindValidation, message: msg, details: details}
 
 	case errs.AlreadyExists:

@@ -54,13 +54,12 @@ type createOut struct {
 // registerHandleCreate is invoked by transport.go's init — see the
 // toolRegistrars rationale there.
 func registerHandleCreate(s *sdkmcp.Server) {
-	sdkmcp.AddTool(s, &sdkmcp.Tool{
-		Name: "create",
-		Description: "Create a new work item (epic | task | finding). " +
-			"Optional dependencies[] entries are cycle-checked inline " +
-			"inside the same transaction as the item insert; on any " +
+	registerValidatedTool(s, "create",
+		"Create a new work item (epic | task | finding). "+
+			"Optional dependencies[] entries are cycle-checked inline "+
+			"inside the same transaction as the item insert; on any "+
 			"failure the entire create is rejected. SPEC § 6.2 Tool 4.",
-	}, handleCreate)
+		nil, handleCreate)
 }
 
 func handleCreate(ctx context.Context, req *sdkmcp.CallToolRequest, in createIn) (*sdkmcp.CallToolResult, createOut, error) {

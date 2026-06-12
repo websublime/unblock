@@ -78,14 +78,13 @@ type addDependencyOut struct {
 // registerHandleAddDependency is invoked by transport.go's init — see
 // the toolRegistrars rationale there.
 func registerHandleAddDependency(s *sdkmcp.Server) {
-	sdkmcp.AddTool(s, &sdkmcp.Tool{
-		Name: "add_dependency",
-		Description: "Add a dependency edge between two work items in the " +
-			"same project. Cycle-detected inline (per-project advisory " +
-			"lock + depth-counter CTE per §6.5). Cross-project edges are " +
-			"rejected with VALIDATION. kind defaults to \"blocks\". " +
+	registerValidatedTool(s, "add_dependency",
+		"Add a dependency edge between two work items in the "+
+			"same project. Cycle-detected inline (per-project advisory "+
+			"lock + depth-counter CTE per §6.5). Cross-project edges are "+
+			"rejected with VALIDATION. kind defaults to \"blocks\". "+
 			"SPEC § 6.2 Tool 11.",
-	}, handleAddDependency)
+		nil, handleAddDependency)
 }
 
 func handleAddDependency(ctx context.Context, req *sdkmcp.CallToolRequest, in addDependencyIn) (*sdkmcp.CallToolResult, addDependencyOut, error) {

@@ -40,14 +40,13 @@ type promoteOut struct {
 // registerHandlePromote is invoked by transport.go's init — see the
 // toolRegistrars rationale there.
 func registerHandlePromote(s *sdkmcp.Server) {
-	sdkmcp.AddTool(s, &sdkmcp.Tool{
-		Name: "promote",
-		Description: "Promote a Backlog item to Ready so it enters the ready " +
-			"queue and becomes claimable. Precondition: status='Backlog' AND " +
-			"is_ready=true (no open blockers). A still-blocked or wrong-status " +
-			"item is rejected with PRECONDITION_NOT_MET carrying {status, " +
+	registerValidatedTool(s, "promote",
+		"Promote a Backlog item to Ready so it enters the ready "+
+			"queue and becomes claimable. Precondition: status='Backlog' AND "+
+			"is_ready=true (no open blockers). A still-blocked or wrong-status "+
+			"item is rejected with PRECONDITION_NOT_MET carrying {status, "+
 			"required}. SPEC § 6.2 Tool 15 + § 6.6.",
-	}, handlePromote)
+		nil, handlePromote)
 }
 
 func handlePromote(ctx context.Context, req *sdkmcp.CallToolRequest, in promoteIn) (*sdkmcp.CallToolResult, promoteOut, error) {

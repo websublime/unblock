@@ -26,13 +26,12 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// searchLimitDefault / searchLimitMax mirror SPEC §6.2 Tool 9 line 1428
-// (1..100; default 25). Aligns with workitems.searchDefaultLimit /
-// searchMaxLimit so the wire ceiling matches the downstream RPC.
-const (
-	searchLimitDefault = 25
-	searchLimitMax     = 100
-)
+// searchLimitDefault is the per-tool default applied when `limit` is
+// OMITTED (SPEC §6.2 Tool 9 line 1428: default 25). The advertised
+// inclusive range (1..100) lives in catalogue.gen.go and is ENFORCED by
+// the shared validateArgs boundary pass (§7.3.1) — a supplied
+// out-of-range value rejects with VALIDATION, never clamps.
+const searchLimitDefault = 25
 
 type searchIn struct {
 	ProjectID string `json:"project_id,omitempty"`
@@ -66,13 +65,12 @@ type searchOut struct {
 // registerHandleSearch is invoked by transport.go's init — see the
 // toolRegistrars rationale there.
 func registerHandleSearch(s *sdkmcp.Server) {
-	sdkmcp.AddTool(s, &sdkmcp.Tool{
-		Name: "search",
-		Description: "Full-text search over items + comments. UNION ALL " +
-			"over items_fts_idx and comments_fts_idx; ranked by " +
-			"ts_rank_cd DESC; snippet via ts_headline (≤ 200 chars). " +
+	registerValidatedTool(s, "search",
+		"Full-text search over items + comments. UNION ALL "+
+			"over items_fts_idx and comments_fts_idx; ranked by "+
+			"ts_rank_cd DESC; snippet via ts_headline (≤ 200 chars). "+
 			"Paginates via opaque cursor (§6.2.0). SPEC § 6.2 Tool 9.",
-	}, handleSearch)
+		nil, handleSearch)
 }
 
 func handleSearch(ctx context.Context, req *sdkmcp.CallToolRequest, in searchIn) (*sdkmcp.CallToolResult, searchOut, error) {
@@ -105,18 +103,12 @@ func handleSearch(ctx context.Context, req *sdkmcp.CallToolRequest, in searchIn)
 		})
 	}
 
-	// Limit bounds — same shape as handler_ready.go / handler_list.go.
-	// limit <= 0 coerces to spec default (25); limit > 100 is a
-	// contract violation and surfaces as VALIDATION data.field=limit.
-	if in.Limit <= 0 {
+	// §7.3.1: a SUPPLIED limit outside 1..100 was already rejected with
+	// VALIDATION by the shared validateArgs boundary pass (§7.3.2). A
+	// zero here can only mean the argument was OMITTED, so we apply the
+	// per-tool default on omission only — no clamp, no coerce.
+	if in.Limit == 0 {
 		in.Limit = searchLimitDefault
-	}
-	if in.Limit > searchLimitMax {
-		return nil, searchOut{}, mapError(state, tool, &errs.Error{
-			Code:    errs.InvalidArgument,
-			Message: "limit out of range (1..100)",
-			Meta:    errs.Metadata{"field": "limit"},
-		})
 	}
 
 	// §6.2.0 cursor decode — verifies HMAC + version discriminator,

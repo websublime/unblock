@@ -74,13 +74,12 @@ type getStateOut struct {
 // registerHandleGetState is invoked by transport.go's init — see the
 // toolRegistrars rationale there.
 func registerHandleGetState(s *sdkmcp.Server) {
-	sdkmcp.AddTool(s, &sdkmcp.Tool{
-		Name: "get_state",
-		Description: "Read the four state dimensions + materialised " +
-			"pipeline_stage + is_ready + claim columns + the per-kind " +
-			"recent_kinds aggregate from workitems.comments (one row per " +
+	registerValidatedTool(s, "get_state",
+		"Read the four state dimensions + materialised "+
+			"pipeline_stage + is_ready + claim columns + the per-kind "+
+			"recent_kinds aggregate from workitems.comments (one row per "+
 			"distinct kind, most recent first). SPEC § 6.2 Tool 14.",
-	}, handleGetState)
+		nil, handleGetState)
 }
 
 func handleGetState(ctx context.Context, req *sdkmcp.CallToolRequest, in getStateIn) (*sdkmcp.CallToolResult, getStateOut, error) {

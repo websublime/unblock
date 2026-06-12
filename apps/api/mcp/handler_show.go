@@ -105,13 +105,12 @@ type showOut struct {
 // registerHandleShow is invoked by transport.go's init — see the
 // toolRegistrars rationale there.
 func registerHandleShow(s *sdkmcp.Server) {
-	sdkmcp.AddTool(s, &sdkmcp.Tool{
-		Name: "show",
-		Description: "Read an item with its comments, incoming + outgoing " +
-			"dependencies, and finding children. include_comments / " +
-			"include_dependencies / include_findings default to true. " +
+	registerValidatedTool(s, "show",
+		"Read an item with its comments, incoming + outgoing "+
+			"dependencies, and finding children. include_comments / "+
+			"include_dependencies / include_findings default to true. "+
 			"SPEC § 6.2 Tool 7.",
-	}, handleShow)
+		nil, handleShow)
 }
 
 func handleShow(ctx context.Context, req *sdkmcp.CallToolRequest, in showIn) (*sdkmcp.CallToolResult, showOut, error) {

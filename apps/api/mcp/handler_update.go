@@ -49,7 +49,6 @@ import (
 
 	"encore.app/workitems"
 	"encore.dev/beta/errs"
-	"github.com/google/jsonschema-go/jsonschema"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -91,50 +90,24 @@ type updateOut struct {
 // registerHandleUpdate is invoked by transport.go's init — see the
 // toolRegistrars rationale there.
 //
-// Tool.InputSchema is set explicitly to an object schema with
-// AdditionalProperties = true so the SDK's auto-inferred
-// `additionalProperties: false` does not fire on impl_state/etc. The
-// handler enforces the rejection itself with a §7-shaped error.
+// update routes through the SHARED §7.3 validation layer
+// (registerValidatedTool) like every other tool. The catalogue `update`
+// schema declares `additionalProperties:true` (the ONLY tool that does),
+// so validateArgs does NOT reject unknown keys — the four forbidden
+// state-dimension keys (impl_state / review_state / qa_state /
+// pipeline_state) survive into req.Params.Arguments where handleUpdate's
+// raw-JSON sniff rejects them with the §7 VALIDATION envelope. The shared
+// layer still enforces the rich contract's required[item_id] and the
+// priority enum; milestone_id's three-way null/string/absent intent is
+// resolved from the raw JSON inside handleUpdate (the typed updateIn
+// deliberately omits MilestoneID — see its doc comment).
 func registerHandleUpdate(s *sdkmcp.Server) {
-	sdkmcp.AddTool(s, &sdkmcp.Tool{
-		Name: "update",
-		Description: "Update editable item columns (title, body, priority, " +
-			"milestone_id, labels). State dimensions (impl_state, " +
-			"review_state, qa_state, pipeline_state) are rejected with " +
+	registerValidatedTool(s, "update",
+		"Update editable item columns (title, body, priority, "+
+			"milestone_id, labels). State dimensions (impl_state, "+
+			"review_state, qa_state, pipeline_state) are rejected with "+
 			"VALIDATION — use set_state instead. SPEC § 6.2 Tool 5.",
-		// AdditionalProperties: true here keeps the SDK's
-		// applySchema from rejecting unknown keys before the handler
-		// runs (which would surface as an SDK IsError content frame,
-		// not the §7 envelope the spec mandates). The handler then
-		// sniffs req.Params.Arguments for the forbidden state-
-		// dimension keys and produces the canonical envelope.
-		InputSchema: &jsonschema.Schema{
-			Type: "object",
-			Properties: map[string]*jsonschema.Schema{
-				"item_id":      {Type: "string"},
-				"title":        {Type: "string"},
-				"body":         {Type: "string"},
-				"priority":     {Type: "string"},
-				"milestone_id": {Types: []string{"string", "null"}},
-				"labels": {
-					Type:  "array",
-					Items: &jsonschema.Schema{Type: "string"},
-				},
-			},
-			Required:             []string{"item_id"},
-			AdditionalProperties: trueSchemaForUpdate(),
-		},
-	}, handleUpdate)
-}
-
-// trueSchemaForUpdate returns the JSON-Schema sentinel for "any
-// additional properties are allowed". The jsonschema-go library
-// distinguishes "no constraint" (nil) from "explicit allow" via a
-// pointer to an empty schema; we use the latter to make the intent
-// reviewable and to prevent a future re-inference pass from collapsing
-// nil into the default falseSchema().
-func trueSchemaForUpdate() *jsonschema.Schema {
-	return &jsonschema.Schema{}
+		nil, handleUpdate)
 }
 
 func handleUpdate(ctx context.Context, req *sdkmcp.CallToolRequest, in updateIn) (*sdkmcp.CallToolResult, updateOut, error) {

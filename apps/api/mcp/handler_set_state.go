@@ -210,14 +210,13 @@ var intentCommentAllowedStatuses = map[string]struct{}{
 // registerHandleSetState is invoked by transport.go's init — see the
 // toolRegistrars rationale there.
 func registerHandleSetState(s *sdkmcp.Server) {
-	sdkmcp.AddTool(s, &sdkmcp.Tool{
-		Name: "set_state",
-		Description: "Set one or more of (impl_state, review_state, " +
-			"qa_state, pipeline_state) atomically. Enforces the five " +
-			"PRD §6.2 state-machine invariants I-1..I-5 (data.invariant " +
-			"populated on PRECONDITION_NOT_MET). Optionally writes an " +
+	registerValidatedTool(s, "set_state",
+		"Set one or more of (impl_state, review_state, "+
+			"qa_state, pipeline_state) atomically. Enforces the five "+
+			"PRD §6.2 state-machine invariants I-1..I-5 (data.invariant "+
+			"populated on PRECONDITION_NOT_MET). Optionally writes an "+
 			"intent_comment alongside the state change. SPEC § 6.2 Tool 13.",
-	}, handleSetState)
+		nil, handleSetState)
 }
 
 func handleSetState(ctx context.Context, req *sdkmcp.CallToolRequest, in setStateIn) (*sdkmcp.CallToolResult, setStateOut, error) {

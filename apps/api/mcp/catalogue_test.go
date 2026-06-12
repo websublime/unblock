@@ -292,6 +292,20 @@ func TestGeneratedCatalogueRoundTrips(t *testing.T) {
 // same code path the wire-protocol does.
 func liveSDKToolNames(t *testing.T) []string {
 	t.Helper()
+	tools := liveSDKTools(t)
+	names := make([]string, 0, len(tools))
+	for name := range tools {
+		names = append(names, name)
+	}
+	return names
+}
+
+// liveSDKTools drives the SDK's tools/list over an in-memory transport
+// pair (the wire-protocol path agents use) and returns the advertised
+// *Tool per name. Used to assert BOTH the tool-name inventory and the
+// advertised InputSchema parity against the catalogue.
+func liveSDKTools(t *testing.T) map[string]*sdkmcp.Tool {
+	t.Helper()
 	ctx := context.Background()
 
 	clientTransport, serverTransport := sdkmcp.NewInMemoryTransports()
@@ -317,9 +331,69 @@ func liveSDKToolNames(t *testing.T) []string {
 		t.Fatalf("clientSession.ListTools: %v", err)
 	}
 
-	names := make([]string, 0, len(res.Tools))
+	tools := make(map[string]*sdkmcp.Tool, len(res.Tools))
 	for _, tool := range res.Tools {
-		names = append(names, tool.Name)
+		tools[tool.Name] = tool
 	}
-	return names
+	return tools
+}
+
+// TestRegisteredInputSchemaMatchesCatalogue is the unblock-tv8.82
+// schema-parity drift guard (§6.2.0a + §7.3.2). The pre-existing
+// TestCatalogueNamesMatchToolRegistrars asserts only NAME equality
+// between catalogue.json and the live tools/list; it does NOT diff the
+// schemas, so a schema-enriching rework could silently advertise a schema
+// that diverges from the catalogue. This test closes that gap: the rich
+// InputSchema the SDK advertises in tools/list for every tool MUST be
+// byte-identical (under canonicalisation) to the catalogue's input_schema.
+// They share a single source of truth — registerValidatedTool reads the
+// advertised schema straight from ToolByName(name).InputSchema — so this
+// is a structural guarantee, asserted here to keep it that way.
+func TestRegisteredInputSchemaMatchesCatalogue(t *testing.T) {
+	doc := loadCatalogueFromDisk(t)
+	catalogueByName := make(map[string]json.RawMessage, len(doc.Tools))
+	for _, tool := range doc.Tools {
+		catalogueByName[tool.Name] = tool.InputSchema
+	}
+
+	live := liveSDKTools(t)
+	for name, want := range catalogueByName {
+		tool, ok := live[name]
+		if !ok {
+			t.Errorf("tool %q present in catalogue.json but not in live tools/list", name)
+			continue
+		}
+		gotCanon := canonicaliseJSON(t, mustMarshalSchema(t, tool.InputSchema))
+		wantCanon := canonicaliseJSON(t, want)
+		if gotCanon != wantCanon {
+			t.Errorf("tool %q advertised input schema differs from catalogue:\n  live      = %s\n  catalogue = %s",
+				name, gotCanon, wantCanon)
+		}
+	}
+}
+
+// mustMarshalSchema marshals the advertised InputSchema (a
+// *jsonschema.Schema or remarshalable value) back to JSON bytes.
+func mustMarshalSchema(t *testing.T, schema any) []byte {
+	t.Helper()
+	b, err := json.Marshal(schema)
+	if err != nil {
+		t.Fatalf("marshal advertised InputSchema: %v", err)
+	}
+	return b
+}
+
+// canonicaliseJSON round-trips JSON bytes through a map so key order and
+// whitespace are normalised before comparison.
+func canonicaliseJSON(t *testing.T, raw []byte) string {
+	t.Helper()
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		t.Fatalf("canonicalise: unmarshal %s: %v", string(raw), err)
+	}
+	out, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("canonicalise: marshal: %v", err)
+	}
+	return string(out)
 }
