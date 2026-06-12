@@ -361,6 +361,7 @@
         "type": "object",
         "required": [
           "item",
+          "parent",
           "comments",
           "dependencies_in",
           "dependencies_out",
@@ -369,6 +370,16 @@
         "properties": {
           "item": {
             "$ref": "#/$shared/Item"
+          },
+          "parent": {
+            "oneOf": [
+              {
+                "$ref": "#/$shared/ResolvedRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "comments": {
             "type": "array",
@@ -379,13 +390,13 @@
           "dependencies_in": {
             "type": "array",
             "items": {
-              "$ref": "#/$shared/Edge"
+              "$ref": "#/$shared/ResolvedRef"
             }
           },
           "dependencies_out": {
             "type": "array",
             "items": {
-              "$ref": "#/$shared/Edge"
+              "$ref": "#/$shared/ResolvedRef"
             }
           },
           "findings": {
@@ -1387,6 +1398,29 @@
           "type": "string"
         },
         "created_by": {
+          "type": "string"
+        }
+      }
+    },
+    "ResolvedRef": {
+      "type": "object",
+      "required": [
+        "id",
+        "title",
+        "status",
+        "kind"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "kind": {
           "type": "string"
         }
       }

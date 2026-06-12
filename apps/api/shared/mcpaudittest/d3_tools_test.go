@@ -394,6 +394,28 @@ func TestD3_ShowReturnsAllFourCollections(t *testing.T) {
 
 	itemID := seedUnclaimedItem(t, fx.OrgID, fx.ProjectID)
 
+	// Seed a parent epic and re-parent itemID under it so `show`
+	// resolves a non-null parent {id,title,status} (round-16 /
+	// unblock-tv8.76). The parent ref's kind is empty by design.
+	parentID, _ := ulid.New()
+	if _, err := db.Exec(ctx,
+		`INSERT INTO workitems.items
+		   (id, org_id, project_id, type, title, status, priority,
+		    created_at, updated_at)
+		 VALUES ($1, $2, $3, 'epic', 'd3 parent epic', 'InProgress', 'P1',
+		         now(), now())`,
+		parentID, fx.OrgID, fx.ProjectID,
+	); err != nil {
+		t.Fatalf("insert parent epic: %v", err)
+	}
+	t.Cleanup(func() { _, _ = db.Exec(ctx, `DELETE FROM workitems.items WHERE id = $1`, parentID) })
+	if _, err := db.Exec(ctx,
+		`UPDATE workitems.items SET parent_id = $1 WHERE id = $2`,
+		parentID, itemID,
+	); err != nil {
+		t.Fatalf("re-parent itemID: %v", err)
+	}
+
 	// Seed one comment via direct INSERT (AppendComment requires an
 	// author binding we don't carry here; the wire shape only cares
 	// that GetTrail emits the comment).
@@ -456,6 +478,7 @@ func TestD3_ShowReturnsAllFourCollections(t *testing.T) {
 
 	var structured struct {
 		Item            map[string]any   `json:"item"`
+		Parent          map[string]any   `json:"parent"`
 		Comments        []map[string]any `json:"comments"`
 		DependenciesIn  []map[string]any `json:"dependencies_in"`
 		DependenciesOut []map[string]any `json:"dependencies_out"`
@@ -467,21 +490,58 @@ func TestD3_ShowReturnsAllFourCollections(t *testing.T) {
 	if got, _ := structured.Item["id"].(string); got != itemID {
 		t.Fatalf("item.id = %q, want %q", got, itemID)
 	}
+
+	// Parent resolves to {id,title,status}; kind is empty for the parent
+	// ref (round-16 / unblock-tv8.76).
+	if structured.Parent == nil {
+		t.Fatalf("parent = nil, want resolved {id,title,status}")
+	}
+	if got, _ := structured.Parent["id"].(string); got != parentID {
+		t.Fatalf("parent.id = %q, want %q", got, parentID)
+	}
+	if got, _ := structured.Parent["title"].(string); got != "d3 parent epic" {
+		t.Fatalf("parent.title = %q, want %q", got, "d3 parent epic")
+	}
+	if got, _ := structured.Parent["status"].(string); got != "InProgress" {
+		t.Fatalf("parent.status = %q, want %q", got, "InProgress")
+	}
+	if got, _ := structured.Parent["kind"].(string); got != "" {
+		t.Fatalf("parent.kind = %q, want empty for parent ref", got)
+	}
+
 	if len(structured.Comments) != 1 {
 		t.Fatalf("comments len = %d, want 1", len(structured.Comments))
 	}
+
+	// dependencies_in resolves the FAR endpoint (the blocker, from_item)
+	// to {id,title,status,kind} — NOT the bare edge row.
 	if len(structured.DependenciesIn) != 1 {
 		t.Fatalf("dependencies_in len = %d, want 1", len(structured.DependenciesIn))
 	}
-	if got, _ := structured.DependenciesIn[0]["from_item"].(string); got != otherID {
-		t.Fatalf("dependencies_in[0].from_item = %q, want %q", got, otherID)
+	if got, _ := structured.DependenciesIn[0]["id"].(string); got != otherID {
+		t.Fatalf("dependencies_in[0].id = %q, want %q (FAR endpoint)", got, otherID)
 	}
+	if got, _ := structured.DependenciesIn[0]["title"].(string); got != "d3-unclaimed" {
+		t.Fatalf("dependencies_in[0].title = %q, want %q", got, "d3-unclaimed")
+	}
+	if got, _ := structured.DependenciesIn[0]["status"].(string); got != "Ready" {
+		t.Fatalf("dependencies_in[0].status = %q, want %q", got, "Ready")
+	}
+	if got, _ := structured.DependenciesIn[0]["kind"].(string); got != "blocks" {
+		t.Fatalf("dependencies_in[0].kind = %q, want %q", got, "blocks")
+	}
+
+	// dependencies_out resolves the FAR endpoint (to_item).
 	if len(structured.DependenciesOut) != 1 {
 		t.Fatalf("dependencies_out len = %d, want 1", len(structured.DependenciesOut))
 	}
-	if got, _ := structured.DependenciesOut[0]["to_item"].(string); got != thirdID {
-		t.Fatalf("dependencies_out[0].to_item = %q, want %q", got, thirdID)
+	if got, _ := structured.DependenciesOut[0]["id"].(string); got != thirdID {
+		t.Fatalf("dependencies_out[0].id = %q, want %q (FAR endpoint)", got, thirdID)
 	}
+	if got, _ := structured.DependenciesOut[0]["kind"].(string); got != "blocks" {
+		t.Fatalf("dependencies_out[0].kind = %q, want %q", got, "blocks")
+	}
+
 	if len(structured.Findings) != 1 {
 		t.Fatalf("findings len = %d, want 1", len(structured.Findings))
 	}
@@ -561,6 +621,91 @@ func TestD3_ShowRespectsIncludeFlags(t *testing.T) {
 	}
 	if len(s3.Findings) != 0 {
 		t.Fatalf("include_findings=false: findings len = %d, want 0", len(s3.Findings))
+	}
+}
+
+// TestD3_ShowParentNullWhenNoParent asserts that `show` emits an explicit
+// JSON `null` for parent when the item has no parent epic — not a missing
+// key, not an empty object (round-16 / unblock-tv8.76, SPEC §6.2 line
+// 1812). seedUnclaimedItem creates a parentless item.
+func TestD3_ShowParentNullWhenNoParent(t *testing.T) {
+	resetToolCalls(t)
+	fx := seedD2Fixture(t)
+
+	itemID := seedUnclaimedItem(t, fx.OrgID, fx.ProjectID)
+
+	env := callTool(t, fx.RawKey, "show", map[string]any{"item_id": itemID})
+	res := assertStructuredEchoesText(t, env)
+
+	// The `parent` key MUST be present and serialise as null. We assert
+	// on the raw JSON so an omitted key (omitempty regression) or an
+	// empty object both fail.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(res.StructuredContent, &raw); err != nil {
+		t.Fatalf("unmarshal raw: %v", err)
+	}
+	parentRaw, present := raw["parent"]
+	if !present {
+		t.Fatalf("parent key absent — want explicit null (SPEC §6.2 line 1812)")
+	}
+	if string(parentRaw) != "null" {
+		t.Fatalf("parent = %s, want null", string(parentRaw))
+	}
+}
+
+// TestD3_ShowOmitsCrossTenantNeighbours asserts the round-16 tenant-seam
+// discipline on the resolving JOINs: a parent or dependency neighbour that
+// lives in a FOREIGN org resolves to zero rows and is OMITTED, never
+// leaked (SPEC §6.2 lines 1841-1843, §7 line 3191 — no error, just
+// omission). We seed the root item in org A, then seed a foreign-org
+// parent + a foreign-org dependency edge, and assert parent is null and
+// dependencies_in is empty.
+func TestD3_ShowOmitsCrossTenantNeighbours(t *testing.T) {
+	resetToolCalls(t)
+	ctx := context.Background()
+	orgA := seedD2Fixture(t)
+	orgB := seedD2Fixture(t)
+
+	rootID := seedUnclaimedItem(t, orgA.OrgID, orgA.ProjectID)
+
+	// Foreign-org parent: re-parent the org-A root under an org-B epic.
+	// The resolving parent lookup carries org_id = caller(A) so the
+	// org-B parent resolves to zero rows → parent null, not leaked.
+	foreignParent := seedUnclaimedItem(t, orgB.OrgID, orgB.ProjectID)
+	if _, err := db.Exec(ctx,
+		`UPDATE workitems.items SET parent_id = $1 WHERE id = $2`,
+		foreignParent, rootID,
+	); err != nil {
+		t.Fatalf("re-parent root under foreign org: %v", err)
+	}
+
+	// Foreign-org incoming dependency: a blocker that lives in org B.
+	foreignBlocker := seedUnclaimedItem(t, orgB.OrgID, orgB.ProjectID)
+	edgeIn, _ := ulid.New()
+	if _, err := db.Exec(ctx,
+		`INSERT INTO deps.dependencies (id, from_item, to_item, kind)
+		 VALUES ($1, $2, $3, 'blocks')`,
+		edgeIn, foreignBlocker, rootID,
+	); err != nil {
+		t.Fatalf("insert cross-tenant edge: %v", err)
+	}
+	t.Cleanup(func() { _, _ = db.Exec(ctx, `DELETE FROM deps.dependencies WHERE id = $1`, edgeIn) })
+
+	env := callTool(t, orgA.RawKey, "show", map[string]any{"item_id": rootID})
+	res := assertStructuredEchoesText(t, env)
+
+	var structured struct {
+		Parent         map[string]any   `json:"parent"`
+		DependenciesIn []map[string]any `json:"dependencies_in"`
+	}
+	if err := json.Unmarshal(res.StructuredContent, &structured); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if structured.Parent != nil {
+		t.Fatalf("parent = %v, want null — cross-tenant parent must be omitted, not leaked", structured.Parent)
+	}
+	if len(structured.DependenciesIn) != 0 {
+		t.Fatalf("dependencies_in len = %d, want 0 — cross-tenant neighbour must be omitted, not leaked", len(structured.DependenciesIn))
 	}
 }
 
