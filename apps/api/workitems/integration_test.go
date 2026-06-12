@@ -387,15 +387,13 @@ func TestSetStateInvariantI4ReviewChangeRequiresImplDone(t *testing.T) {
 
 func TestSetStateInvariantI5ImplDoneToPendingOnlyViaRework(t *testing.T) {
 	// I-5: A bare impl=pending request on an item currently at impl=done
-	// (no review/qa change) MUST reject — the rework path is the only
-	// transition that resets impl. The actual rework workflow per
-	// PRD §6.2 is: (1) SetStateColumns(review_state=needs_rework) flips
-	// review and auto-resets qa (I-1); (2) the next supervisor Claim
-	// resets impl/review/qa to pending (I-3, enforced in Claim).
-	// SetStateColumns itself does NOT support the (impl=pending,
-	// review=needs_rework) one-shot transition — I-4 would still fire
-	// because review_state ∈ {approved,needs_rework} requires
-	// impl_state=done by the spec literal at §6.2 Tool 13 line 1506.
+	// (no review/qa change, no active rework predicate) MUST reject with
+	// impl_done_to_pending_requires_rework_path — the rework path is the
+	// only transition that resets impl. The one-call rework
+	// (impl=pending, review=needs_rework) IS supported and succeeds —
+	// see TestSetStateOneCallReworkSucceeds. SPEC §6.2 Tool 13 I-4 (line
+	// 2241): I-4 is the FORWARD gate (only review→approved requires
+	// impl=done); needs_rework is exempt and governed by I-5.
 	ctx := context.Background()
 	fx := seedFixture(t, ctx)
 	itemID := createReadyItem(t, ctx, fx)
@@ -415,24 +413,55 @@ func TestSetStateInvariantI5ImplDoneToPendingOnlyViaRework(t *testing.T) {
 	}
 }
 
-func TestSetStateInvariantI5AllowedWhenQAAlreadyFailed(t *testing.T) {
-	// I-5 rework-path: when the item is at impl=done and qa=failed
-	// already, a SetStateColumns(impl=pending) with no qa change is
-	// allowed (the failed qa is the rework signal — currentQAFailedAndUnchanged).
-	// But I-2 would block (qa=failed requires review=approved) on the
-	// resulting state if review is changed; here review stays
-	// approved so I-2 passes. I-4 also passes because newImpl=pending
-	// AND newReview is approved → I-4 fires "review approved requires
-	// impl done". So this transition would still trip I-4 by the
-	// literal spec.
+func TestSetStateOneCallReworkSucceeds(t *testing.T) {
+	// SPEC §6.2 Tool 13 I-4 (line 2241) + §11.1.2 exit criterion
+	// (lines 3914-3917): the one-call rework
+	// set_state(impl_state=pending, review_state=needs_rework) on a
+	// CLAIMED item at impl=done MUST SUCCEED. I-5 (workitems.go) permits
+	// the concurrent impl done→pending because the review=needs_rework
+	// rework predicate is satisfied; I-4 is the FORWARD gate and is
+	// EXEMPT for needs_rework (only approved requires impl=done); I-1
+	// auto-resets qa_state→pending. Result: impl=pending,
+	// review=needs_rework, qa=pending.
 	//
-	// In practice the rework flow goes via Claim's I-3 reset, not via
-	// SetStateColumns. This test is intentionally NOT testing a
-	// "happy" rework via SetStateColumns; it documents that I-5's
-	// rework-path detection works (the rejection skips when the
-	// rework predicate is satisfied). The downstream I-4 enforcement
-	// is the next gate.
-	t.Skip("I-5 rework-path interactions with I-4 are documented in workitems.go; the only end-to-end rework is via Claim (TestClaimResetsReworkOnQAFailed).")
+	// This is the regression guard for unblock-tv8.81: before the fix,
+	// I-4 keyed on the coalesced new_review IN (approved, needs_rework)
+	// and over-fired "review_change_requires_impl_done" on this call,
+	// making the §11.1.2 exit criterion unsatisfiable through the MCP
+	// surface.
+	ctx := context.Background()
+	fx := seedFixture(t, ctx)
+	itemID := createReadyItem(t, ctx, fx)
+	// Claimed item at impl=done, review=approved, qa=passed.
+	setItemState(t, ctx, itemID, "done", "approved", "passed", fx.UserID)
+
+	newImpl := "pending"
+	newReview := "needs_rework"
+	got, err := workitems.SetStateColumns(ctx, &workitems.SetStateRequest{
+		ItemID:      itemID,
+		ImplState:   &newImpl,
+		ReviewState: &newReview,
+	})
+	if err != nil {
+		t.Fatalf("one-call rework SetStateColumns: unexpected error: %v", err)
+	}
+	if got.ImplState != "pending" {
+		t.Fatalf("impl_state = %q, want pending", got.ImplState)
+	}
+	if got.ReviewState != "needs_rework" {
+		t.Fatalf("review_state = %q, want needs_rework", got.ReviewState)
+	}
+	// I-1 auto-reset: review_state=needs_rework forces qa_state→pending.
+	if got.QAState != "pending" {
+		t.Fatalf("qa_state = %q, want pending (I-1 auto-reset)", got.QAState)
+	}
+
+	// Verify the persisted row matches the returned Item.
+	impl, review, qa, _ := readItemStateColumns(t, ctx, itemID)
+	if impl != "pending" || review != "needs_rework" || qa != "pending" {
+		t.Fatalf("persisted (impl,review,qa) = (%q,%q,%q), want (pending,needs_rework,pending)",
+			impl, review, qa)
+	}
 }
 
 func TestSetStateImplDoneRequiresClaim(t *testing.T) {
@@ -606,7 +635,7 @@ func TestClaimResetsReworkOnQAFailed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
-	// SPEC §6.2 I-3 line 1505: Claim resets review_state + qa_state to
+	// SPEC §6.2 Tool 13 I-3 (line 2240): Claim resets review_state + qa_state to
 	// pending. impl_state is deliberately preserved (the worker drives
 	// any impl_state mutation through SetStateColumns, which enforces
 	// I-4/I-5 against the rework path).
@@ -1132,7 +1161,7 @@ func TestMilestoneTreeAssemblesNestedStructure(t *testing.T) {
 //	(phase 3, sequential) Claim — observes qa='failed' and applies
 //	  I-3 atomically, resetting review_state + qa_state to 'pending'.
 //	  impl_state MUST remain 'done' (I-3 scope is review+qa only,
-//	  matching SPEC §6.2 line 1505 verbatim).
+//	  matching SPEC §6.2 Tool 13 I-3 line 2240 verbatim).
 //
 // Iterating phases 1+2+3 N times stresses both the SELECT FOR UPDATE
 // serialisation (phase 1) and the I-3 atomic reset (phase 3) under
@@ -1242,7 +1271,7 @@ func TestClaimVsSetStateColumnsRaceAR18(t *testing.T) {
 		}
 		// I-3: review_state + qa_state both reset to 'pending';
 		// impl_state preserved (scope is review+qa only per SPEC §6.2
-		// line 1505).
+		// Tool 13 I-3 line 2240).
 		if got.ReviewState != "pending" || got.QAState != "pending" {
 			i3Violations++
 			t.Fatalf("iter %d phase 3 I-3 reset: review=%q qa=%q (want pending/pending)",

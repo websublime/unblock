@@ -200,32 +200,52 @@ func TestExitCriterion_StateInvariant_I5(t *testing.T) {
 		}
 	})
 
-	t.Run("rework_path_via_claim_I3", func(t *testing.T) {
-		// SPEC §11.1.2 I-5 last sub-bullet wording: "The same call
-		// when review_state='needs_rework' succeeds." A literal
-		// interpretation (a SetStateColumns request that flips
-		// impl_state=done → pending while also asserting/keeping
-		// review_state=needs_rework) is unreachable through
-		// SetStateColumns by design — I-4 still requires impl=done
-		// when review ∈ {approved, needs_rework} per workitems.go
-		// line 1268, so the combined request rejects on I-4 BEFORE
-		// the rework path can take effect.
+	t.Run("accept_with_rework_path", func(t *testing.T) {
+		// SPEC §11.1.2 I-5 last sub-bullet (lines 3914-3917): "The
+		// same call when review_state='needs_rework' succeeds." The
+		// one-call rework set_state(impl_state=pending,
+		// review_state=needs_rework) on a claimed impl=done item
+		// MUST SUCCEED end-to-end through the MCP surface. I-4 (SPEC
+		// §6.2 Tool 13 line 2241) is the FORWARD gate — only
+		// review→approved requires impl=done; needs_rework is EXEMPT
+		// (governed by I-5, which permits the concurrent impl
+		// done→pending). I-1 auto-resets qa_state→pending.
 		//
-		// The codebase convention (workitems/integration_test.go
-		// line 350-368, TestSetStateInvariantI5AllowedWhenQAAlreadyFailed,
-		// is t.Skip-ed with the same rationale) is that the
-		// canonical rework flow uses Claim's I-3 reset path, not a
-		// one-shot SetStateColumns. We follow the same convention:
-		// the I-3 reset is exercised by TestExitCriterion_StateInvariant_I3
-		// above, which is the spec's intended "rework path
-		// succeeds" assertion mediated by the production code path.
-		//
-		// DEVIATION-LOG (logged on bead unblock-tv8.26): the SPEC
-		// §11.1.2 I-5 second sub-bullet is unreachable through
-		// SetStateColumns alone; the production happy-rework flow
-		// is Claim's I-3. The internal I-3 path is exercised by
-		// the dedicated I-3 test above.
-		t.Skip("I-5 rework happy path is exercised by TestExitCriterion_StateInvariant_I3 (Claim I-3 reset); SetStateColumns one-shot combination is rejected by I-4 per workitems.go:1268. See DEVIATION on bead unblock-tv8.26.")
+		// Regression guard for unblock-tv8.81 (supersedes the prior
+		// t.Skip and its unblock-tv8.26 deviation): before the I-4
+		// predicate was narrowed to approved-only, this call rejected
+		// with review_change_requires_impl_done, making the §11.1.2
+		// exit criterion unsatisfiable through the agent surface.
+		itemID := seedFreshClaimedReady(t, ctx, f, "I-5-accept-target", "approved", "passed")
+
+		pending := "pending"
+		needsRework := "needs_rework"
+		env := callTool(t, f.RawKey, sessionID, "set_state", map[string]any{
+			"item_id":      itemID,
+			"impl_state":   pending,
+			"review_state": needsRework,
+		})
+		raw := expectSuccess(t, env)
+
+		var s struct {
+			Item struct {
+				ImplState   string `json:"impl_state"`
+				ReviewState string `json:"review_state"`
+				QAState     string `json:"qa_state"`
+			} `json:"item"`
+		}
+		if err := json.Unmarshal(raw, &s); err != nil {
+			t.Fatalf("unmarshal set_state result: %v; raw=%s", err, string(raw))
+		}
+		if s.Item.ImplState != "pending" {
+			t.Fatalf("I-5 accept: impl_state = %q, want pending", s.Item.ImplState)
+		}
+		if s.Item.ReviewState != "needs_rework" {
+			t.Fatalf("I-5 accept: review_state = %q, want needs_rework", s.Item.ReviewState)
+		}
+		if s.Item.QAState != "pending" {
+			t.Fatalf("I-5 accept: qa_state = %q, want pending (I-1 auto-reset)", s.Item.QAState)
+		}
 	})
 }
 
