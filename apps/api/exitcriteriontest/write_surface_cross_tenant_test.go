@@ -39,6 +39,7 @@ package exitcriteriontest_test
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	encoredb "encore.app/db"
@@ -57,6 +58,7 @@ type foreignTenant struct {
 	ProjMilesID string // a foreign project-scoped milestone (org_id NULL, project_id set) — locks the project_id branch of the milestone org-XOR-project gate
 	EdgeID      string // a foreign edge ItemID → ClaimedID
 	LabelID     string // a foreign org-scoped label (create-path label gate, bead unblock-tv8.78)
+	CommentID   string // a foreign comment ON the foreign ItemID (AppendComment parent_id same-item gate, bead unblock-tv8.80)
 }
 
 // seedForeignTenant inserts a complete foreign org B (org, user, project,
@@ -75,6 +77,7 @@ func seedForeignTenant(t *testing.T, ctx context.Context) foreignTenant {
 		ProjMilesID: mustULID(t, "foreign project milestone"),
 		EdgeID:      mustULID(t, "foreign edge"),
 		LabelID:     mustULID(t, "foreign label"),
+		CommentID:   mustULID(t, "foreign comment"),
 	}
 	foreignSlug := "foreign-" + ft.OrgID[len(ft.OrgID)-8:]
 
@@ -157,6 +160,17 @@ func seedForeignTenant(t *testing.T, ctx context.Context) foreignTenant {
 	); err != nil {
 		t.Fatalf("insert foreign label: %v", err)
 	}
+	// A foreign comment ON the foreign item — the AppendComment parent_id
+	// same-item gate target (bead unblock-tv8.80). A home caller threading a
+	// reply whose parent_id is this id must get NOT_FOUND (foreign-org parent),
+	// indistinguishable from a missing parent.
+	if _, err := encoredb.DB.Exec(ctx,
+		`INSERT INTO workitems.comments (id, item_id, author_id, kind, body)
+		 VALUES ($1, $2, $3, 'general', 'Foreign comment')`,
+		ft.CommentID, ft.ItemID, ft.UserID,
+	); err != nil {
+		t.Fatalf("insert foreign comment: %v", err)
+	}
 	return ft
 }
 
@@ -209,21 +223,110 @@ func TestExitCriterion_WriteSurface_CrossTenantRejected(t *testing.T) {
 		}
 	})
 
-	// --- comment: foreign item ⇒ NOT_FOUND, zero comments inserted ------
+	// --- comment: foreign item ⇒ NOT_FOUND, no comment inserted ------
+	// The fixture seeds one comment on the foreign item (ft.CommentID, the
+	// parent_id gate target below); the cross-tenant call must add nothing, so
+	// the count stays at its seeded baseline.
 	t.Run("comment", func(t *testing.T) {
+		before := countItemComments(t, ctx, ft.ItemID)
 		env := callTool(t, f.RawKey, sessionID, "comment", map[string]any{
 			"item_id": ft.ItemID,
 			"body":    "intruder comment",
 		})
 		assertNotFound(t, env, "comment")
-		var n int
-		if err := encoredb.DB.QueryRow(ctx,
-			`SELECT COUNT(*) FROM workitems.comments WHERE item_id = $1`, ft.ItemID,
-		).Scan(&n); err != nil {
-			t.Fatalf("count foreign comments: %v", err)
+		if after := countItemComments(t, ctx, ft.ItemID); after != before {
+			t.Fatalf("cross-tenant comment changed foreign item comment count %d → %d, want unchanged", before, after)
 		}
-		if n != 0 {
-			t.Fatalf("cross-tenant comment inserted %d row(s) on foreign item, want 0", n)
+	})
+
+	// --- comment: foreign-org parent_id ⇒ NOT_FOUND, no reply inserted ---
+	// Home caller, home item, but parent_id = a comment that lives in the
+	// FOREIGN org (on the foreign item). The same-item parent_id gate (bead
+	// unblock-tv8.80, §10.1.1 / §6.2 Tool 10) must reject this with NOT_FOUND
+	// — indistinguishable from a missing parent — and insert zero rows.
+	t.Run("comment_foreign_parent_id", func(t *testing.T) {
+		homeItem := f.ItemID("itm_a")
+		before := countItemComments(t, ctx, homeItem)
+		env := callTool(t, f.RawKey, sessionID, "comment", map[string]any{
+			"item_id":   homeItem,
+			"parent_id": ft.CommentID, // foreign-org comment — the reference under test
+			"body":      "reply under a foreign comment",
+		})
+		assertNotFound(t, env, "comment (foreign parent_id)")
+		if after := countItemComments(t, ctx, homeItem); after != before {
+			t.Fatalf("comment with foreign parent_id changed home item comment count %d → %d, want unchanged", before, after)
+		}
+	})
+
+	// --- comment: cross-item (same-org) parent_id ⇒ NOT_FOUND ------------
+	// Home caller, home item itm_b, parent_id = a comment that exists in the
+	// SAME org but on a DIFFERENT home item (itm_a). The gate is same-item, not
+	// merely same-org, so this must also be NOT_FOUND with zero rows inserted
+	// (bead unblock-tv8.80 — cross-item threading is rejected even within a tenant).
+	t.Run("comment_cross_item_parent_id", func(t *testing.T) {
+		itemA := f.ItemID("itm_a")
+		itemB := f.ItemID("itm_b")
+		// Seed a home comment ON itm_a (same org as the caller).
+		parentOnA := mustULID(t, "home parent on itm_a")
+		if _, err := encoredb.DB.Exec(ctx,
+			`INSERT INTO workitems.comments (id, item_id, author_id, kind, body)
+			 VALUES ($1, $2, $3, 'general', 'home comment on itm_a')`,
+			parentOnA, itemA, f.UserID,
+		); err != nil {
+			t.Fatalf("seed home comment on itm_a: %v", err)
+		}
+		t.Cleanup(func() {
+			_, _ = encoredb.DB.Exec(context.Background(), `DELETE FROM workitems.comments WHERE id = $1`, parentOnA)
+		})
+		before := countItemComments(t, ctx, itemB)
+		env := callTool(t, f.RawKey, sessionID, "comment", map[string]any{
+			"item_id":   itemB,     // a DIFFERENT home item
+			"parent_id": parentOnA, // same-org comment, but on itm_a — the reference under test
+			"body":      "reply on itm_b pointing at an itm_a comment",
+		})
+		assertNotFound(t, env, "comment (cross-item parent_id)")
+		if after := countItemComments(t, ctx, itemB); after != before {
+			t.Fatalf("comment with cross-item parent_id changed itm_b comment count %d → %d, want unchanged", before, after)
+		}
+	})
+
+	// --- comment: same-item parent_id ⇒ SUCCESS, reply threaded ----------
+	// The positive control: a home caller threading a reply on the SAME home
+	// item as the parent comment must SUCCEED and echo parent_id (proves the
+	// same-item gate does not over-reject legitimate threading).
+	t.Run("comment_same_item_parent_id", func(t *testing.T) {
+		itemA := f.ItemID("itm_a")
+		parentOnA := mustULID(t, "home parent for same-item thread")
+		if _, err := encoredb.DB.Exec(ctx,
+			`INSERT INTO workitems.comments (id, item_id, author_id, kind, body)
+			 VALUES ($1, $2, $3, 'general', 'home parent for same-item thread')`,
+			parentOnA, itemA, f.UserID,
+		); err != nil {
+			t.Fatalf("seed same-item parent comment: %v", err)
+		}
+		t.Cleanup(func() {
+			_, _ = encoredb.DB.Exec(context.Background(), `DELETE FROM workitems.comments WHERE parent_id = $1 OR id = $1`, parentOnA)
+		})
+		env := callTool(t, f.RawKey, sessionID, "comment", map[string]any{
+			"item_id":   itemA,
+			"parent_id": parentOnA, // a comment on the SAME item — must thread
+			"body":      "valid same-item reply",
+		})
+		var out struct {
+			Comment struct {
+				ID       string `json:"id"`
+				ItemID   string `json:"item_id"`
+				ParentID string `json:"parent_id"`
+			} `json:"comment"`
+		}
+		if err := json.Unmarshal(expectSuccess(t, env), &out); err != nil {
+			t.Fatalf("unmarshal comment success: %v", err)
+		}
+		if out.Comment.ParentID != parentOnA {
+			t.Fatalf("same-item reply parent_id = %q, want %q", out.Comment.ParentID, parentOnA)
+		}
+		if out.Comment.ItemID != itemA {
+			t.Fatalf("same-item reply item_id = %q, want %q", out.Comment.ItemID, itemA)
 		}
 	})
 
@@ -432,6 +535,20 @@ func countCallerItemsTitled(t *testing.T, ctx context.Context, orgID, title stri
 		`SELECT COUNT(*) FROM workitems.items WHERE org_id = $1 AND title = $2`, orgID, title,
 	).Scan(&n); err != nil {
 		t.Fatalf("count caller items titled %q: %v", title, err)
+	}
+	return n
+}
+
+// countItemComments returns the number of comments on the given item — used to
+// prove the AppendComment parent_id same-item gate (bead unblock-tv8.80) inserts
+// ZERO rows when a non-empty parent_id is foreign-org or cross-item.
+func countItemComments(t *testing.T, ctx context.Context, itemID string) int {
+	t.Helper()
+	var n int
+	if err := encoredb.DB.QueryRow(ctx,
+		`SELECT COUNT(*) FROM workitems.comments WHERE item_id = $1`, itemID,
+	).Scan(&n); err != nil {
+		t.Fatalf("count comments on item %s: %v", itemID, err)
 	}
 	return n
 }

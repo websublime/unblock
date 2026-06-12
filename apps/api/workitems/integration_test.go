@@ -268,6 +268,52 @@ func TestAppendComment(t *testing.T) {
 	if c.ID == "" || c.Body != "hello" {
 		t.Fatalf("AppendComment returned bad comment: %+v", c)
 	}
+
+	// Same-item parent_id threads successfully (bead unblock-tv8.80,
+	// §10.1.1 / §6.2 Tool 10): a reply whose parent_id is a comment on the
+	// SAME item must succeed and echo parent_id. This is the positive control
+	// for the same-item gate (proves it does not over-reject legitimate
+	// threading). The internal caller passes an empty CallerOrgID (the no-op
+	// branch), so the same-item predicate is the sole gate exercised here.
+	reply, err := workitems.AppendComment(ctx, &workitems.AppendCommentRequest{
+		ItemID:   item.ID,
+		ParentID: c.ID, // a comment on the SAME item
+		AuthorID: fx.UserID,
+		Kind:     "general",
+		Status:   "info",
+		Body:     "threaded reply",
+	})
+	if err != nil {
+		t.Fatalf("AppendComment same-item thread: %v", err)
+	}
+	if reply.ParentID != c.ID {
+		t.Fatalf("same-item reply parent_id = %q, want %q", reply.ParentID, c.ID)
+	}
+
+	// Cross-item parent_id is rejected with NOT_FOUND (bead unblock-tv8.80):
+	// the gate is same-item, not merely same-org. A reply on item2 whose
+	// parent_id points at a comment on item1 (same org) must insert zero rows
+	// and surface NOT_FOUND, indistinguishable from a missing parent.
+	item2, err := workitems.Create(ctx, &workitems.CreateRequest{
+		OrgID: fx.OrgID, ProjectID: fx.ProjectID, Type: "task", Title: "T2",
+	})
+	if err != nil {
+		t.Fatalf("Create item2: %v", err)
+	}
+	_, err = workitems.AppendComment(ctx, &workitems.AppendCommentRequest{
+		ItemID:   item2.ID,
+		ParentID: c.ID, // a comment on item1 — a DIFFERENT item
+		AuthorID: fx.UserID,
+		Kind:     "general",
+		Status:   "info",
+		Body:     "cross-item reply",
+	})
+	if err == nil {
+		t.Fatalf("AppendComment cross-item parent_id: expected NOT_FOUND, got success")
+	}
+	if code := errs.Code(err); code != errs.NotFound {
+		t.Fatalf("AppendComment cross-item parent_id: code = %v, want NotFound", code)
+	}
 }
 
 // -----------------------------------------------------------------------------
