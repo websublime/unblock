@@ -1263,8 +1263,9 @@ func GetState(ctx context.Context, req *GetStateRequest) (*GetStateResponse, err
 	}, nil
 }
 
-// GetTrail returns the item + its comments + incoming/outgoing edges +
-// findings. SPEC §4.4.
+// GetTrail returns the item plus its parent and direct in/out dependency
+// targets resolved to {id,title,status,kind} (one level, org-scoped), its
+// comments, and findings. SPEC §4.4.
 //
 //encore:api private method=POST path=/workitems.GetTrail
 func GetTrail(ctx context.Context, req *GetTrailRequest) (*Trail, error) {
