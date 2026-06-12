@@ -1473,6 +1473,17 @@ func GetTrail(ctx context.Context, req *GetTrailRequest) (*Trail, error) {
 // the INSERT so callers get a clearer error than a Postgres CHECK
 // violation.
 //
+// Tenant + threading gate (§10.1.1, §6.2 Tool 10): the INSERT … SELECT
+// gates the target item on org_id = CallerOrgID (empty CallerOrgID is the
+// trusted-internal no-op), and — when ParentID is non-empty — additionally
+// requires the parent comment to live on the SAME target item (parent_id IN
+// (SELECT id FROM workitems.comments WHERE item_id = $target_item), bead
+// unblock-tv8.80). Same-item transitively implies same-org, so no separate
+// parent-org branch is needed; a foreign-org OR cross-item parent_id inserts
+// zero rows → NOT_FOUND, indistinguishable from a missing parent. The
+// empty-ParentID top-level-comment path and the self-parent prohibition
+// (comments_no_self_parent_chk) are preserved.
+//
 //encore:api private method=POST path=/workitems.AppendComment
 func AppendComment(ctx context.Context, req *AppendCommentRequest) (*Comment, error) {
 	if req == nil || req.ItemID == "" {
@@ -1517,16 +1528,34 @@ func AppendComment(ctx context.Context, req *AppendCommentRequest) (*Comment, er
 	// inserted rows → NOT_FOUND below, never a cross-tenant comment. The
 	// empty-CallerOrgID no-op keeps trusted internal callers operating
 	// unscoped; the MCP handler always pins CallerOrgID from identity.OrgID,
-	// so the no-op is unreachable from the agent surface. The parent_id FK
-	// (parent comment must reference the same item) is still enforced by the
-	// comments_parent_fk constraint, surfacing as the FK-violation arm below.
+	// so the no-op is unreachable from the agent surface.
+	//
+	// parent_id same-item threading scope (bead unblock-tv8.80, §10.1.1,
+	// §6.2 Tool 10, contract LOCKED by Miguel 2026-06-12): when ParentID is
+	// non-empty it MUST resolve to an existing comment ON THE SAME target
+	// item ($2) — the AND ($3 = '' OR $3 IN (SELECT id FROM
+	// workitems.comments WHERE item_id = $2)) arm below. The target item is
+	// already CallerOrgID-gated by the i.org_id predicate, so same-item
+	// transitively guarantees same-org; no separate parent-org branch is
+	// needed. A foreign-org OR cross-item parent_id matches zero comments →
+	// zero source rows → zero inserted rows → NOT_FOUND, indistinguishable
+	// from a missing parent (closes the live-proven parent_id IDOR). The
+	// empty-ParentID arm preserves the top-level-comment path. The
+	// self-parent prohibition is still enforced by comments_no_self_parent_chk
+	// (a comment cannot be its own parent even on the same item). The
+	// existence-only inline FK to workitems.comments(id) (migration 0040,
+	// ON DELETE SET NULL, unnamed — there is NO constraint named
+	// comments_parent_fk) is retained as defense-in-depth; the INSERT … SELECT
+	// predicate is the primary, tenant- and item-scoped gate.
 	tag, err := db.Exec(ctx,
 		`INSERT INTO workitems.comments
 		   (id, item_id, parent_id, author_id, author_agent, kind, status, body)
 		 SELECT $1, i.id, NULLIF($3, ''), NULLIF($4, ''), NULLIF($5, ''), $6, $7, $8
 		   FROM workitems.items i
 		  WHERE i.id = $2
-		    AND ($9 = '' OR i.org_id = $9)`,
+		    AND ($9 = '' OR i.org_id = $9)
+		    AND ($3 = ''
+		         OR $3 IN (SELECT id FROM workitems.comments WHERE item_id = $2))`,
 		id, req.ItemID, req.ParentID, req.AuthorID, req.AuthorAgent,
 		kind, status, req.Body, req.CallerOrgID,
 	)
@@ -1537,9 +1566,11 @@ func AppendComment(ctx context.Context, req *AppendCommentRequest) (*Comment, er
 		rlog.Error("workitems: append comment failed", "err", err, "item_id", req.ItemID)
 		return nil, &errs.Error{Code: errs.Internal, Message: "append comment failed"}
 	}
-	// Zero inserted rows means the parent item does not exist OR belongs to
-	// another tenant (org_id != CallerOrgID). Surface NOT_FOUND for both so
-	// a cross-tenant ItemID is indistinguishable from a missing one.
+	// Zero inserted rows means the target item does not exist OR belongs to
+	// another tenant (org_id != CallerOrgID) OR a non-empty parent_id does
+	// not resolve to a comment on the SAME target item (foreign-org or
+	// cross-item parent). Surface NOT_FOUND for all so a cross-tenant ItemID
+	// or a foreign/cross-item ParentID is indistinguishable from a missing one.
 	if tag.RowsAffected() == 0 {
 		return nil, &errs.Error{Code: errs.NotFound, Message: "item not found"}
 	}
