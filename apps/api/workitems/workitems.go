@@ -59,6 +59,34 @@
 //     target id therefore matches zero rows → NOT_FOUND (or zero rows
 //     inserted on an INSERT), never a cross-tenant mutation.
 //
+//   - The CREATE path (Create, Tool 4) self-gates its wire-supplied
+//     cross-references symmetrically (round-16 / bead unblock-tv8.78,
+//     SPEC §10.1.1 / §4.4 Create). The item INSERT is a guarded
+//     INSERT … SELECT whose WHERE validates project_id (IN caller-org
+//     projects), parent_id / discovered_from_id (IN caller-org items),
+//     and milestone_id (org-XOR-project) against the caller org; a
+//     foreign reference yields ZERO inserted rows → NOT_FOUND, the same
+//     envelope a missing id yields. Labels are gated identically by
+//     attachLabelsTx (org-XOR-project label-ownership form). The
+//     dependencies[] endpoints stay gated by deps.AddEdgeInTx's own
+//     CallerOrgID check.
+//
+//     DECISION (Miguel 2026-06-12, SPEC §10.1.1): the create-path gate
+//     keys on the EXISTING req.OrgID — the same value the INSERT stamps
+//     org_id from, already pinned from identity.OrgID by the MCP handler
+//     and validated non-empty — NOT a separate CallerOrgID channel, and
+//     with NO empty-OrgID no-op branch. Deliberate divergence from the
+//     .77 update/delete-by-id convention below: Create's internal callers
+//     (the §11.1.1 exit-criterion seed + integration tests) all pass a
+//     real, same-org OrgID referencing same-org rows, so the non-empty
+//     req.OrgID gate passes them with no no-op branch. Coverage is
+//     identical to the CallerOrgID-channel RPCs; only the key differs.
+//     (attachLabelsTx itself takes the empty-callerOrg no-op form because
+//     it is SHARED with the Update label-replace path, which keys on the
+//     .77 CallerOrgID channel that trusted internal callers leave empty;
+//     Create always passes a non-empty req.OrgID, so the gate is active
+//     on the create path regardless.)
+//
 // # Empty-CallerOrgID no-op (item/milestone) vs hard guard (labels)
 //
 // The item / milestone write RPCs take the empty-CallerOrgID NO-OP form:
@@ -970,14 +998,53 @@ func Create(ctx context.Context, req *CreateRequest) (*Item, error) {
 	// status stays 'Backlog' — is_ready=true makes the item immediately
 	// promote-able (Tool 15 / §6.6), but promotion is an explicit agent
 	// action, not an implicit side-effect of create.
-	_, err = tx.Exec(ctx,
+	// Create-path cross-reference tenant gate (round-16, bead unblock-tv8.78,
+	// SPEC §10.1.1 / §4.4 Create). The INSERT's FK constraints only check
+	// reference EXISTENCE in ANY org — a foreign-but-existing project_id /
+	// parent_id / discovered_from_id / milestone_id would otherwise be stored,
+	// producing an item whose org_id differs from the referenced row's org (the
+	// create-path analogue of the §10.1.1 write-by-id IDOR seam). We close that
+	// seam with a guarded INSERT … SELECT: each wire reference is validated
+	// against the caller org in the SELECT's WHERE before the row materialises.
+	//
+	// Gate-key DECISION (Miguel 2026-06-12, §10.1.1): the gate keys on the
+	// existing req.OrgID — the SAME value the INSERT stamps org_id from, already
+	// pinned from identity.OrgID by the MCP handler and validated non-empty at
+	// :874 — NOT a separate CallerOrgID channel, and with NO empty-OrgID no-op
+	// branch. This is a deliberate divergence from the .77 update/delete-by-id
+	// convention: Create's internal callers (the §11.1.1 exit-criterion seed +
+	// integration tests) all pass a real same-org OrgID referencing same-org
+	// rows, so the non-empty req.OrgID gate passes them without a no-op branch.
+	// Coverage is identical to the CallerOrgID-channel RPCs.
+	//
+	// Per-reference predicates (each guarded by `$n = '' OR …` so an UNSET
+	// optional reference skips the gate):
+	//   - project_id        → IN (SELECT id FROM org.projects WHERE org_id = $caller)
+	//   - parent_id         → IN (SELECT id FROM workitems.items WHERE org_id = $caller)
+	//   - discovered_from_id→ same as parent_id (a caller-org item)
+	//   - milestone_id      → org_id = $caller OR project_id IN caller-org projects
+	//                         (org-XOR-project; project-scoped milestones carry NULL org_id)
+	//
+	// A foreign reference yields ZERO inserted rows → NOT_FOUND below, the SAME
+	// envelope a genuinely-missing id yields (existence in another org is never
+	// disclosed). All inside the existing single tx (bead-unblock-tv8.17
+	// atomicity) so a reject rolls the whole create back. The dependencies[]
+	// endpoints are gated separately by deps.AddEdgeInTx below — unchanged.
+	tag, err := tx.Exec(ctx,
 		`INSERT INTO workitems.items
 		   (id, org_id, project_id, milestone_id, parent_id, discovered_from_id,
 		    type, title, body, priority,
 		    severity, kind_of_finding, is_ready)
-		 VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), NULLIF($5, ''), NULLIF($6, ''),
-		         $7, $8, $9, $10,
-		         NULLIF($11, ''), NULLIF($12, ''), true)`,
+		 SELECT $1, $2, NULLIF($3, ''), NULLIF($4, ''), NULLIF($5, ''), NULLIF($6, ''),
+		        $7, $8, $9, $10,
+		        NULLIF($11, ''), NULLIF($12, ''), true
+		  WHERE ($3 = '' OR $3 IN (SELECT id FROM org.projects WHERE org_id = $2))
+		    AND ($5 = '' OR $5 IN (SELECT id FROM workitems.items WHERE org_id = $2))
+		    AND ($6 = '' OR $6 IN (SELECT id FROM workitems.items WHERE org_id = $2))
+		    AND ($4 = ''
+		         OR $4 IN (SELECT id FROM workitems.milestones
+		                    WHERE org_id = $2
+		                       OR project_id IN (SELECT id FROM org.projects WHERE org_id = $2)))`,
 		id, req.OrgID, req.ProjectID, req.MilestoneID, req.ParentID, req.DiscoveredFromID,
 		itemType, title, req.Body, priority,
 		req.Severity, req.KindOfFinding,
@@ -992,10 +1059,24 @@ func Create(ctx context.Context, req *CreateRequest) (*Item, error) {
 		rlog.Error("workitems: create insert failed", "err", err, "org_id", req.OrgID)
 		return nil, &errs.Error{Code: errs.Internal, Message: "create insert failed"}
 	}
+	// Zero inserted rows means a cross-reference tenant gate rejected the
+	// INSERT: one of project_id / parent_id / discovered_from_id / milestone_id
+	// does not belong to the caller's org (or does not exist). Surface
+	// NOT_FOUND — the same shape a genuinely-missing reference yields — so a
+	// foreign-but-existing id is indistinguishable from a missing one and never
+	// leaks existence across the tenant boundary (§10.1.1, CreateLabel
+	// zero-rows precedent).
+	if tag.RowsAffected() == 0 {
+		return nil, &errs.Error{Code: errs.NotFound, Message: "referenced org/project/milestone/parent does not exist"}
+	}
 
-	// Attach labels in the same transaction.
+	// Attach labels in the same transaction. attachLabelsTx gates each
+	// wire-supplied label_id against the caller org (req.OrgID, the same
+	// create-path gate key as the cross-references above, §10.1.1): a foreign
+	// label_id attaches nothing and yields NOT_FOUND — never a cross-tenant
+	// attach (round-16, bead unblock-tv8.78).
 	if len(req.Labels) > 0 {
-		if err := attachLabelsTx(ctx, tx, id, req.Labels); err != nil {
+		if err := attachLabelsTx(ctx, tx, id, req.OrgID, req.Labels); err != nil {
 			return nil, err
 		}
 	}
@@ -1125,7 +1206,11 @@ func Update(ctx context.Context, req *UpdateRequest) (*Item, error) {
 			return nil, &errs.Error{Code: errs.Internal, Message: "label clear failed"}
 		}
 		if len(*req.Labels) > 0 {
-			if err := attachLabelsTx(ctx, tx, req.ItemID, *req.Labels); err != nil {
+			// Gate replacement labels on the .77 CallerOrgID channel (empty for
+			// trusted internal callers → no-op; MCP handlers always pin it). A
+			// foreign label_id attaches nothing → NOT_FOUND, matching the
+			// create-path label gate (round-16, bead unblock-tv8.78, §10.1.1).
+			if err := attachLabelsTx(ctx, tx, req.ItemID, req.CallerOrgID, *req.Labels); err != nil {
 				return nil, err
 			}
 		}
