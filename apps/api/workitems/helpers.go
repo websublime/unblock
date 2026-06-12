@@ -251,6 +251,12 @@ func attachLabelsTx(ctx context.Context, tx *sqldb.Tx, itemID, callerOrg string,
 			itemID, labelID, callerOrg,
 		)
 		if err != nil {
+			// Defensive / effectively unreachable for this guarded INSERT … SELECT:
+			// a missing label_id selects zero rows (no FK violation) and flows
+			// through the RowsAffected()==0 → EXISTS-recheck → NOT_FOUND path
+			// below; the item_id FK cannot fire (the item row was just created in
+			// this same tx). Kept so the NOT_FOUND outcome holds even if the query
+			// shape ever regresses to an INSERT … VALUES.
 			if isForeignKeyViolation(err) {
 				return &errs.Error{
 					Code:    errs.NotFound,
