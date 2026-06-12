@@ -9,14 +9,17 @@
 // full Trail; the handler drops collections the caller opted out of
 // so wire size is bounded by the request.
 //
-// The wire shape mirrors SPEC §6.2 Tool 7 lines 1370-1378:
+// The wire shape mirrors SPEC §6.2 Tool 7 (round-16 / bead
+// unblock-tv8.76 — parent + dependency targets resolved to
+// {id,title,status,kind} ResolvedRefs, not bare IDs):
 //
 //	{
 //	  "item":             <Item>,
+//	  "parent":           <ResolvedRef> | null,  // resolved parent; null when no parent
 //	  "comments":         [Comment],
-//	  "dependencies_in":  [Edge],   // edges where to_item = item_id
-//	  "dependencies_out": [Edge],   // edges where from_item = item_id
-//	  "findings":         [Item]    // children with type=finding
+//	  "dependencies_in":  [ResolvedRef],  // FAR target of edges where to_item = item_id
+//	  "dependencies_out": [ResolvedRef],  // FAR target of edges where from_item = item_id
+//	  "findings":         [Item]          // children with type=finding
 //	}
 //
 // Each collection always serialises as an array (never null) so
@@ -35,7 +38,6 @@ import (
 	"context"
 	"time"
 
-	"encore.app/deps"
 	"encore.app/workitems"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -76,24 +78,27 @@ type showComment struct {
 	UpdatedAt   string `json:"updated_at"`
 }
 
-// showEdge is the JSON wire shape for one deps.Edge row. The §4.5
-// Edge struct carries created_by which we surface as an optional
-// string (omitted when empty so the wire stays compact for
-// system-generated edges).
-type showEdge struct {
-	ID        string `json:"id"`
-	FromItem  string `json:"from_item"`
-	ToItem    string `json:"to_item"`
-	Kind      string `json:"kind"`
-	CreatedAt string `json:"created_at"`
-	CreatedBy string `json:"created_by,omitempty"`
+// showRef is the JSON wire shape for one resolved neighbour — the parent
+// or a dependency target — surfaced as {id,title,status,kind} (SPEC §6.2
+// Tool 7 lines 1819-1825, round-16 / bead unblock-tv8.76). The bare-Edge
+// shape (id/from_item/to_item/created_by) is intentionally dropped: an
+// agent rendering the neighbourhood needs the FAR target's identity +
+// display fields, not the edge row. `kind` carries the edge kind
+// ("blocks" | "related") so edge semantics survive; it is EMPTY for the
+// parent ref (§4.4 line 831).
+type showRef struct {
+	ID     string `json:"id"`
+	Title  string `json:"title"`
+	Status string `json:"status"`
+	Kind   string `json:"kind"`
 }
 
 type showOut struct {
 	Item            primeItem     `json:"item"`
+	Parent          *showRef      `json:"parent"` // pointer (NOT omitempty) so it serialises null when absent — SPEC §6.2 line 1812
 	Comments        []showComment `json:"comments"`
-	DependenciesIn  []showEdge    `json:"dependencies_in"`
-	DependenciesOut []showEdge    `json:"dependencies_out"`
+	DependenciesIn  []showRef     `json:"dependencies_in"`
+	DependenciesOut []showRef     `json:"dependencies_out"`
 	Findings        []primeItem   `json:"findings"`
 }
 
@@ -142,9 +147,10 @@ func handleShow(ctx context.Context, req *sdkmcp.CallToolRequest, in showIn) (*s
 
 	out := showOut{
 		Item:            itemToPrime(*trail.Item),
+		Parent:          refToShow(trail.Parent),
 		Comments:        []showComment{},
-		DependenciesIn:  []showEdge{},
-		DependenciesOut: []showEdge{},
+		DependenciesIn:  []showRef{},
+		DependenciesOut: []showRef{},
 		Findings:        []primeItem{},
 	}
 
@@ -152,8 +158,8 @@ func handleShow(ctx context.Context, req *sdkmcp.CallToolRequest, in showIn) (*s
 		out.Comments = commentsToShow(trail.Comments)
 	}
 	if includeDependencies {
-		out.DependenciesIn = edgesToShow(trail.DependenciesIn)
-		out.DependenciesOut = edgesToShow(trail.DependenciesOut)
+		out.DependenciesIn = refsToShow(trail.DependenciesIn)
+		out.DependenciesOut = refsToShow(trail.DependenciesOut)
 	}
 	if includeFindings {
 		out.Findings = itemsToPrime(trail.Findings)
@@ -191,22 +197,40 @@ func commentsToShow(in []workitems.Comment) []showComment {
 	return out
 }
 
-// edgesToShow converts a []deps.Edge into the §6.2 wire shape. Always
-// returns a non-nil slice.
-func edgesToShow(in []deps.Edge) []showEdge {
+// refsToShow converts a []workitems.ResolvedRef (the resolved dependency
+// targets) into the §6.2 wire shape. Always returns a non-nil slice so
+// the JSON encodes as `[]` rather than `null` on the empty case
+// (round-16 / bead unblock-tv8.76).
+func refsToShow(in []workitems.ResolvedRef) []showRef {
 	if len(in) == 0 {
-		return []showEdge{}
+		return []showRef{}
 	}
-	out := make([]showEdge, 0, len(in))
-	for _, e := range in {
-		out = append(out, showEdge{
-			ID:        e.ID,
-			FromItem:  e.FromItem,
-			ToItem:    e.ToItem,
-			Kind:      e.Kind,
-			CreatedAt: e.CreatedAt.UTC().Format(time.RFC3339Nano),
-			CreatedBy: e.CreatedBy,
+	out := make([]showRef, 0, len(in))
+	for _, r := range in {
+		out = append(out, showRef{
+			ID:     r.ID,
+			Title:  r.Title,
+			Status: r.Status,
+			Kind:   r.Kind,
 		})
 	}
 	return out
+}
+
+// refToShow converts the resolved parent ResolvedRef into the §6.2 wire
+// shape. Returns nil when there is no parent (or it was omitted as a
+// cross-tenant neighbour) so showOut.Parent serialises as JSON `null`
+// rather than an empty object — SPEC §6.2 line 1812 (round-16 / bead
+// unblock-tv8.76). The parent ref's Kind is empty by design (§4.4 line
+// 831) and is carried through verbatim.
+func refToShow(in *workitems.ResolvedRef) *showRef {
+	if in == nil {
+		return nil
+	}
+	return &showRef{
+		ID:     in.ID,
+		Title:  in.Title,
+		Status: in.Status,
+		Kind:   in.Kind,
+	}
 }

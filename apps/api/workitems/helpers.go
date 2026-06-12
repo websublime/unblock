@@ -15,7 +15,6 @@ import (
 	"strings"
 	"time"
 
-	"encore.app/deps"
 	"encore.dev/beta/errs"
 	"encore.dev/rlog"
 	"encore.dev/storage/sqldb"
@@ -243,46 +242,93 @@ func attachLabelsTx(ctx context.Context, tx *sqldb.Tx, itemID string, labels []s
 	return nil
 }
 
-// readEdges fetches deps.dependencies rows where the named column
-// equals itemID. col MUST be "from_item" or "to_item" (compile-time
-// string constants — runtime values are NEVER accepted here per
-// SPEC §10.1). The returned slice may be empty.
-func readEdges(ctx context.Context, col, itemID string) ([]deps.Edge, error) {
+// readResolvedEdges fetches deps.dependencies rows touching itemID on the
+// NEAR endpoint and resolves the FAR endpoint to a ResolvedRef
+// {id,title,status,kind} via a single JOIN onto workitems.items — one
+// round-trip per direction (SPEC §6.2 Tool 7, round-16 / bead
+// unblock-tv8.76). dir MUST be "in" or "out" (compile-time string
+// constants — runtime values are NEVER accepted here per SPEC §10.1):
+//
+//   - "in":  edges where to_item   = itemID; the FAR (resolved) endpoint
+//     is from_item — the item that blocks / relates TO itemID.
+//   - "out": edges where from_item = itemID; the FAR (resolved) endpoint
+//     is to_item — the item itemID blocks / relates to.
+//
+// The JOIN carries an org_id = $2 predicate on the target item so a
+// cross-tenant neighbour resolves to zero rows and is OMITTED, never
+// leaked (SPEC §6.2 lines 1841-1843; the round-16 tenant-seam discipline
+// applied to a read join). orgID is the caller's org_id, pinned from the
+// caller identity — NEVER from the wire. The returned slice may be empty.
+func readResolvedEdges(ctx context.Context, dir, itemID, orgID string) ([]ResolvedRef, error) {
 	var sql string
-	switch col {
-	case "from_item":
-		sql = `SELECT id, from_item, to_item, kind, created_at, COALESCE(created_by, '')
-		         FROM deps.dependencies
-		        WHERE from_item = $1
-		        ORDER BY created_at`
-	case "to_item":
-		sql = `SELECT id, from_item, to_item, kind, created_at, COALESCE(created_by, '')
-		         FROM deps.dependencies
-		        WHERE to_item = $1
-		        ORDER BY created_at`
+	switch dir {
+	case "in":
+		// Root is to_item; resolve the FAR from_item.
+		sql = `SELECT d.from_item, i.title, i.status, d.kind
+		         FROM deps.dependencies d
+		         JOIN workitems.items i ON i.id = d.from_item AND i.org_id = $2
+		        WHERE d.to_item = $1
+		        ORDER BY d.created_at`
+	case "out":
+		// Root is from_item; resolve the FAR to_item.
+		sql = `SELECT d.to_item, i.title, i.status, d.kind
+		         FROM deps.dependencies d
+		         JOIN workitems.items i ON i.id = d.to_item AND i.org_id = $2
+		        WHERE d.from_item = $1
+		        ORDER BY d.created_at`
 	default:
 		// Programmer error — caller passed something other than the
-		// two whitelisted column names. Surface a structured error
+		// two whitelisted direction tokens. Surface a structured error
 		// rather than concatenating the bad value into SQL.
-		return nil, &errs.Error{Code: errs.Internal, Message: "readEdges: invalid column"}
+		return nil, &errs.Error{Code: errs.Internal, Message: "readResolvedEdges: invalid direction"}
 	}
-	rows, err := db.Query(ctx, sql, itemID)
+	rows, err := db.Query(ctx, sql, itemID, orgID)
 	if err != nil {
 		return nil, &errs.Error{Code: errs.Internal, Message: "edges read failed"}
 	}
 	defer rows.Close()
-	var out []deps.Edge
+	var out []ResolvedRef
 	for rows.Next() {
-		var e deps.Edge
-		if err := rows.Scan(&e.ID, &e.FromItem, &e.ToItem, &e.Kind, &e.CreatedAt, &e.CreatedBy); err != nil {
+		var r ResolvedRef
+		if err := rows.Scan(&r.ID, &r.Title, &r.Status, &r.Kind); err != nil {
 			return nil, &errs.Error{Code: errs.Internal, Message: "edge scan failed"}
 		}
-		out = append(out, e)
+		out = append(out, r)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, &errs.Error{Code: errs.Internal, Message: "edges iter failed"}
 	}
 	return out, nil
+}
+
+// readResolvedParent resolves an item's parent to a ResolvedRef
+// {id,title,status} — Kind is left empty (the parent is not reached via a
+// dependency edge; SPEC §4.4 line 831, round-16 / bead unblock-tv8.76).
+// parentID is Item.ParentID ("" when the item has no parent). The lookup
+// carries an org_id = $2 predicate so a cross-tenant parent resolves to
+// zero rows and yields a nil ref (omitted, never leaked); orgID is pinned
+// from the caller identity. Returns (nil, nil) when there is no parent or
+// the parent is not visible to the caller.
+func readResolvedParent(ctx context.Context, parentID, orgID string) (*ResolvedRef, error) {
+	if parentID == "" {
+		return nil, nil
+	}
+	var r ResolvedRef
+	err := db.QueryRow(ctx,
+		`SELECT id, title, status
+		   FROM workitems.items
+		  WHERE id = $1 AND org_id = $2`,
+		parentID, orgID,
+	).Scan(&r.ID, &r.Title, &r.Status)
+	if err != nil {
+		if errors.Is(err, sqldb.ErrNoRows) {
+			// Parent exists by id reference but is not visible to this
+			// caller (cross-tenant) — omit rather than leak.
+			return nil, nil
+		}
+		return nil, &errs.Error{Code: errs.Internal, Message: "parent resolve failed"}
+	}
+	return &r, nil
 }
 
 // readMilestone fetches a single milestone row by id and returns it as

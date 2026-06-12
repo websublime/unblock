@@ -113,10 +113,13 @@ import (
 // Locked type surface (SPEC §4.4). Field shapes are wire-locked; do not edit
 // without a spec amendment.
 //
-// Edge (CreateRequest.Dependencies and Trail.DependenciesIn/Out) uses
-// deps.Edge directly per SPEC §4.4 lines 591-592 — the skeleton-time local
-// workitems.Edge struct was removed in C-1 (bead unblock-tv8.10), closing
-// findings unblock-tv8.27 and unblock-tv8.28.
+// CreateRequest.Dependencies uses deps.Edge directly per SPEC §4.4 lines
+// 591-592 — the skeleton-time local workitems.Edge struct was removed in
+// C-1 (bead unblock-tv8.10), closing findings unblock-tv8.27 and
+// unblock-tv8.28. Trail.DependenciesIn/Out were subsequently WIDENED from
+// []deps.Edge to []ResolvedRef in round-16 (bead unblock-tv8.76): `show`
+// resolves the FAR dependency target to {id,title,status,kind} rather than
+// returning the bare edge row.
 // -----------------------------------------------------------------------------
 
 // Item is the canonical work-item row shape. SPEC §4.4.
@@ -208,15 +211,34 @@ type GetTrailRequest struct {
 	ItemID string `json:"item_id"`
 }
 
-// Trail is the comment + edges + findings bundle returned by GetTrail.
-// SPEC §4.4. DependenciesIn / DependenciesOut use deps.Edge (post C-1
-// reconciliation, bead unblock-tv8.10).
+// Trail is the comment + resolved-neighbours + findings bundle returned
+// by GetTrail. SPEC §4.4.
+//
+// Round-16 / bead unblock-tv8.76: Parent + DependenciesIn/Out resolve the
+// item's immediate neighbourhood to {id,title,status,kind} ResolvedRefs so
+// an agent can render it without N follow-up show/get calls. Resolution is
+// bounded to exactly ONE level — the resolved neighbours' own parents and
+// dependencies are NOT walked. All resolved rows are RBAC-scoped
+// identically to the root item, so a cross-tenant neighbour is omitted
+// rather than leaked.
 type Trail struct {
-	Item            *Item       `json:"item"`
-	Comments        []Comment   `json:"comments"`
-	DependenciesIn  []deps.Edge `json:"dependencies_in"`
-	DependenciesOut []deps.Edge `json:"dependencies_out"`
-	Findings        []Item      `json:"findings"`
+	Item            *Item         `json:"item"`
+	Parent          *ResolvedRef  `json:"parent"` // nil when the item has no parent epic
+	Comments        []Comment     `json:"comments"`
+	DependenciesIn  []ResolvedRef `json:"dependencies_in"`  // edges where to_item == Item.ID, target resolved
+	DependenciesOut []ResolvedRef `json:"dependencies_out"` // edges where from_item == Item.ID, target resolved
+	Findings        []Item        `json:"findings"`
+}
+
+// ResolvedRef is a one-level-deep resolution of a related item (parent or
+// dependency target) to its identity + display fields. Bounded by design:
+// no body, no comments, no nested neighbours (round-16 / bead
+// unblock-tv8.76, SPEC §4.4).
+type ResolvedRef struct {
+	ID     string `json:"id"`     // target item ULID
+	Title  string `json:"title"`  // target item title
+	Status string `json:"status"` // target item Status enum (§6.1)
+	Kind   string `json:"kind"`   // edge kind ("blocks" | "related"); empty for the parent ref
 }
 
 // AppendCommentRequest is the input to AppendComment. SPEC §4.4.
@@ -1301,13 +1323,23 @@ func GetTrail(ctx context.Context, req *GetTrailRequest) (*Trail, error) {
 		return nil, &errs.Error{Code: errs.Internal, Message: "trail comments iter failed"}
 	}
 
-	// DependenciesIn (edges where to_item = item.id) and
-	// DependenciesOut (edges where from_item = item.id).
-	in, err := readEdges(ctx, "to_item", req.ItemID)
+	// Parent: resolved to {id,title,status} (Kind empty), nil when the
+	// item has no parent or the parent is cross-tenant (omitted, not
+	// leaked) — round-16 / bead unblock-tv8.76, SPEC §4.4 + §6.2 Tool 7.
+	parent, err := readResolvedParent(ctx, item.ParentID, identity.OrgID)
 	if err != nil {
 		return nil, err
 	}
-	out, err := readEdges(ctx, "from_item", req.ItemID)
+
+	// DependenciesIn (edges where to_item = item.id) and
+	// DependenciesOut (edges where from_item = item.id), each with the
+	// FAR endpoint resolved to {id,title,status,kind} via a single
+	// org-scoped JOIN — one round-trip per direction (SPEC §6.2 Tool 7).
+	in, err := readResolvedEdges(ctx, "in", req.ItemID, identity.OrgID)
+	if err != nil {
+		return nil, err
+	}
+	out, err := readResolvedEdges(ctx, "out", req.ItemID, identity.OrgID)
 	if err != nil {
 		return nil, err
 	}
@@ -1342,6 +1374,7 @@ func GetTrail(ctx context.Context, req *GetTrailRequest) (*Trail, error) {
 
 	return &Trail{
 		Item:            item,
+		Parent:          parent,
 		Comments:        comments,
 		DependenciesIn:  in,
 		DependenciesOut: out,
