@@ -215,17 +215,40 @@ func loadLabels(ctx context.Context, itemID string) ([]string, error) {
 }
 
 // attachLabelsTx inserts (item_id, label_id) rows using the caller's
-// transaction handle. Errors map FK violations to NotFound and unique
-// violations to AlreadyExists.
-func attachLabelsTx(ctx context.Context, tx *sqldb.Tx, itemID string, labels []string) error {
+// transaction handle, gating each wire-supplied label_id against the caller's
+// org (round-16, bead unblock-tv8.78, SPEC §10.1.1). Errors map FK violations
+// and cross-tenant / missing labels to NotFound.
+//
+// Each INSERT is a guarded INSERT … SELECT whose WHERE admits the label only
+// when it is org-scoped to callerOrg OR project-scoped to a project in
+// callerOrg (the org-XOR-project label-ownership form, milestone precedent) —
+// so a foreign label_id (org- or project-scoped to another org) attaches
+// NOTHING and yields NOT_FOUND, the SAME envelope a genuinely-missing label
+// yields, never disclosing cross-tenant existence and never planting a
+// cross-org item_labels row.
+//
+// callerOrg keys the gate. The predicate takes the empty-callerOrg NO-OP form
+// (`callerOrg = ” OR …`): the create path always passes a real, non-empty
+// req.OrgID so the gate is active there; the Update label-replace caller
+// passes its CallerOrgID channel, which trusted internal no-auth callers leave
+// empty (the .77 §10.1.1 no-op convention) — MCP handlers always pin it, so the
+// no-op is unreachable from the agent surface. A non-existent label_id matches
+// no row → zero inserted → NOT_FOUND regardless of callerOrg.
+func attachLabelsTx(ctx context.Context, tx *sqldb.Tx, itemID, callerOrg string, labels []string) error {
 	for _, labelID := range labels {
 		if labelID == "" {
 			continue
 		}
-		_, err := tx.Exec(ctx,
-			`INSERT INTO workitems.item_labels (item_id, label_id) VALUES ($1, $2)
+		tag, err := tx.Exec(ctx,
+			`INSERT INTO workitems.item_labels (item_id, label_id)
+			 SELECT $1, $2
+			   FROM workitems.labels
+			  WHERE id = $2
+			    AND ($3 = ''
+			         OR org_id = $3
+			         OR project_id IN (SELECT id FROM org.projects WHERE org_id = $3))
 			 ON CONFLICT (item_id, label_id) DO NOTHING`,
-			itemID, labelID,
+			itemID, labelID, callerOrg,
 		)
 		if err != nil {
 			if isForeignKeyViolation(err) {
@@ -237,6 +260,30 @@ func attachLabelsTx(ctx context.Context, tx *sqldb.Tx, itemID string, labels []s
 			}
 			rlog.Error("workitems: label attach failed", "err", err, "item_id", itemID, "label_id", labelID)
 			return &errs.Error{Code: errs.Internal, Message: "label attach failed"}
+		}
+		// Zero inserted rows means EITHER the label does not exist OR it belongs
+		// to another org (the gate rejected it) — UNLESS the (item_id, label_id)
+		// pair already exists, in which case ON CONFLICT DO NOTHING legitimately
+		// affects zero rows. Distinguish: re-check whether the (item_id,
+		// label_id) row is now present. If present, the label was already
+		// attached (idempotent re-attach) — not an error. If absent, the gate or
+		// a missing label_id rejected it → NOT_FOUND, the same shape a missing
+		// label yields (never disclosing cross-tenant existence).
+		if tag.RowsAffected() == 0 {
+			var exists bool
+			if err := tx.QueryRow(ctx,
+				`SELECT EXISTS (SELECT 1 FROM workitems.item_labels WHERE item_id = $1 AND label_id = $2)`,
+				itemID, labelID,
+			).Scan(&exists); err != nil {
+				return &errs.Error{Code: errs.Internal, Message: "label attach verify failed"}
+			}
+			if !exists {
+				return &errs.Error{
+					Code:    errs.NotFound,
+					Message: fmt.Sprintf("label %q does not exist", labelID),
+					Meta:    errs.Metadata{"label_id": labelID},
+				}
+			}
 		}
 	}
 	return nil
