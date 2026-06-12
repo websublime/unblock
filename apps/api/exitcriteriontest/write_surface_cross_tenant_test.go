@@ -53,7 +53,8 @@ type foreignTenant struct {
 	UserID      string
 	ItemID      string // a foreign work item (Backlog, is_ready=true → would be promotable IN its own org)
 	ClaimedID   string // a foreign work item already claimed (would be closable IN its own org)
-	MilestoneID string // a foreign org-scoped milestone
+	MilestoneID string // a foreign org-scoped milestone (org_id set, project_id NULL)
+	ProjMilesID string // a foreign project-scoped milestone (org_id NULL, project_id set) — locks the project_id branch of the milestone org-XOR-project gate
 	EdgeID      string // a foreign edge ItemID → ClaimedID
 	LabelID     string // a foreign org-scoped label (create-path label gate, bead unblock-tv8.78)
 }
@@ -71,6 +72,7 @@ func seedForeignTenant(t *testing.T, ctx context.Context) foreignTenant {
 		ItemID:      mustULID(t, "foreign item"),
 		ClaimedID:   mustULID(t, "foreign claimed item"),
 		MilestoneID: mustULID(t, "foreign milestone"),
+		ProjMilesID: mustULID(t, "foreign project milestone"),
 		EdgeID:      mustULID(t, "foreign edge"),
 		LabelID:     mustULID(t, "foreign label"),
 	}
@@ -119,13 +121,25 @@ func seedForeignTenant(t *testing.T, ctx context.Context) foreignTenant {
 	); err != nil {
 		t.Fatalf("insert foreign claimed item: %v", err)
 	}
-	// A foreign org-scoped milestone.
+	// A foreign org-scoped milestone (org_id set, project_id NULL) — exercises
+	// the org_id = $caller branch of the milestone org-XOR-project gate.
 	if _, err := encoredb.DB.Exec(ctx,
 		`INSERT INTO workitems.milestones (id, org_id, name, start_date, end_date)
 		 VALUES ($1, $2, 'Foreign Milestone', '2026-01-01', '2026-12-31')`,
 		ft.MilestoneID, ft.OrgID,
 	); err != nil {
 		t.Fatalf("insert foreign milestone: %v", err)
+	}
+	// A foreign project-scoped milestone (org_id NULL, project_id → org B's
+	// project) — exercises the project_id IN (caller-org projects) branch of
+	// the milestone org-XOR-project gate, the subtler tenant boundary the XOR
+	// form exists for (bead unblock-tv8.78 pre-QA cleanup).
+	if _, err := encoredb.DB.Exec(ctx,
+		`INSERT INTO workitems.milestones (id, project_id, name, start_date, end_date)
+		 VALUES ($1, $2, 'Foreign Project Milestone', '2026-01-01', '2026-12-31')`,
+		ft.ProjMilesID, ft.ProjectID,
+	); err != nil {
+		t.Fatalf("insert foreign project milestone: %v", err)
 	}
 	// A foreign edge between the two foreign items.
 	if _, err := encoredb.DB.Exec(ctx,
@@ -496,6 +510,25 @@ func TestExitCriterion_CreateCrossReference_CrossTenantRejected(t *testing.T) {
 		assertNotFound(t, env, "create (foreign milestone_id)")
 		if n := countCallerItemsTitled(t, ctx, f.OrgID, title); n != 0 {
 			t.Fatalf("create with foreign milestone_id stored %d item(s) in caller org, want 0", n)
+		}
+	})
+
+	// --- foreign PROJECT-scoped milestone_id ⇒ NOT_FOUND, no item stored -----
+	// The org-scoped case above exercises the org_id = $caller branch of the
+	// milestone org-XOR-project gate; this case (org_id NULL, project_id → org
+	// B's project) locks the OTHER branch — project_id IN (caller-org projects)
+	// — so the full XOR predicate is covered (bead unblock-tv8.78 pre-QA cleanup).
+	t.Run("foreign_project_scoped_milestone_id", func(t *testing.T) {
+		title := "create-foreign-project-milestone"
+		env := callTool(t, f.RawKey, sessionID, "create", map[string]any{
+			"project_id":   f.ProjectID, // caller's own valid project
+			"type":         "task",
+			"title":        title,
+			"milestone_id": ft.ProjMilesID, // foreign project-scoped milestone — the reference under test
+		})
+		assertNotFound(t, env, "create (foreign project-scoped milestone_id)")
+		if n := countCallerItemsTitled(t, ctx, f.OrgID, title); n != 0 {
+			t.Fatalf("create with foreign project-scoped milestone_id stored %d item(s) in caller org, want 0", n)
 		}
 	})
 
