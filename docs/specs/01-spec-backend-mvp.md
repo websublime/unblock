@@ -2,6 +2,7 @@
 
 **Status:** APPROVED (create-path cross-reference tenant validation applied 2026-06-12 — §10.1.1 gate-model extended to `workitems.Create`'s wire references, keyed on the existing `req.OrgID` per Miguel's 2026-06-12 DECISION, + §4.4 `CreateRequest`/`DependencyEdge` drift reconciliation; round-16 write-surface tenant-hardening lockstep applied 2026-06-11 — §10.1.1 row-level write gate + per-RPC `CallerOrgID` channel + deps fold-in + `CreateLabel` empty-`CallerOrgID` guard; round-16 label-tools drift-closure applied 2026-06-11 — labels `updated_at` migration `0130` + Tools 20–23 auth wording + Tools 16/19 wire-sample/prose alignment; round-16 P01 tool-surface scope amendment applied 2026-06-04; §3.5 fifth-secret addition applied 2026-06-02; round-15 NFR-1 harness test-isolation + mcpaudittest hardening applied 2026-05-29; round-14 NFR-1 latency-harness scope applied 2026-05-29; round-6 cascade-symmetry applied 2026-05-12; round-5 tracing applied 2026-05-12; round-4 auth applied 2026-05-11; DRIFT-1/-2 applied 2026-05-08; round-2 applied 2026-05-08; round-3 research applied 2026-05-08; original APPROVED 2026-05-07)
 **Changelog:**
+- 2026-06-12 — uniform §7 argument-validation contract WRITTEN at the MCP boundary (contract LOCKED by Miguel 2026-06-12 BEFORE implementation; bead `unblock-tv8.82`, discovered-from the live MCP sweep B2+B3; status remains APPROVED — this WRITES a uniform argument-validation contract + ENRICHES the advertised tool schema, an additive boundary-contract extension, NOT a re-architecting). **The live `tools/list` schema is the go-sdk-reflected (`jsonschema.ForType`, v1.6.0) registered schema — type + required + `additionalProperties:false` only — NOT `catalogue.json` (an off-wire P01 authoring artifact for the P02 `meta_catalogue` tool); the catalogue's advertised bounds/enums were never on the wire.** Three locked decisions: **(1) Rich schema advertised (NET-NEW)** — `tools/list` now advertises the FULL input-argument contract: `enum` values, `minimum`/`maximum` bounds, and `required[]` (today only type+required are reflected). **(2) Uniform §7 VALIDATION** — EVERY argument-shape violation (missing required, invalid enum, wrong type, AND out-of-range numeric bound) returns the §7 `VALIDATION` envelope (`kind=VALIDATION`, `trace_id`, `data.field` naming the offending argument; `data.reason`/`data.bound` on a range violation), uniformly across the 23-tool surface — no bare `isError` text frames for argument violations. **(3) Bounds ENFORCED (out-of-range REJECTS — behavior change)** — `prime.ready_limit` (1..50), `ready.limit` (1..200), `list.limit` (1..200), `search.limit` (1..100): a value below the minimum (incl. `limit<=0`) OR above the maximum REJECTS with `VALIDATION`, NOT silently coerced/clamped. This re-locks the round-7 coerce-to-default / clamp-to-max limit semantics to the REJECT semantics wherever handler doc-comments or in-code comments disagree (an OMITTED optional limit still takes the per-tool default — the bound check applies only to a supplied value). **Mechanism (documented at contract altitude):** the REGISTERED (SDK-validated) schema is RELAXED on exactly the keywords the shared boundary-validation layer owns (so `applySchema` → `resolved.Validate` does not pre-reject with a bare frame), while `tools/list` advertises the full rich schema; a shared `validateArgs` pass at the handler boundary validates required/enum/type/range and mints §7 `VALIDATION` via the existing `apps/api/mcp/errmap.go` `mapError` path (`errs.InvalidArgument` → `VALIDATION` with `data.field`) — the precedent `apps/api/mcp/handler_update.go` already ships (relaxed `InputSchema` + handler-top raw-arg validation + `mapError`). Patched in lockstep: §7 `VALIDATION` table row (argument-shape violations enumerated; range `data.reason`/`data.bound` sample added) + new §7.3 (uniform argument validation; §7.3.1 bounds-enforced/reject re-lock; §7.3.2 relaxed-registered-schema + enriched-`tools/list` + shared `validateArgs` mechanism); new §6.2.0a (rich schema advertised NET-NEW + paginated `limit` bounds table + enum/type/required + round-7 re-lock; the `deps.RecentCascadeEvents` internal "capped at 50" private-RPC clamp is explicitly distinguished from the WIRE `ready_limit` bound and left untouched); §10.3 (catalogue.json = off-wire authoring artifact vs. the now-enriched live reflected `tools/list` schema reconciliation). NOT touched (separate ownership): `apps/api/mcp/` handlers + the shared validation layer + `catalogue.json` + tests (the implementation bead `unblock-tv8.82`, Greta, owns those on its branch). Root `docs/SPEC.md` is **untouched** — its §7.5 BLOCK-condition schema governs PIPELINE state-transition validation (Layer 1), not argument-shape validation, and carries NO claim that `catalogue.json` `input_schema` bounds are live-on-the-wire nor any clamp/coerce limit semantics; no contradiction exists (verified). Spec status remains APPROVED.
 - 2026-06-12 — §6.2 Tool 13 I-4 prose/SQL pseudocode RECONCILED toward the §11.1.2 exit criterion (bug `unblock-tv8.81`, discovered-from the live MCP sweep; status remains APPROVED — this reconciles an internal SELF-CONTRADICTION toward the spec's own exit criterion, NOT a re-architecting / behavioral-contract change). **The contradiction (all three verbatim from the file):** the §6.2 Tool 13 I-4 PROSE row keyed the reject on `req.review_state` (so the one-call rework `set_state(impl=pending, review=needs_rework)` SUCCEEDS); the I-4 SQL PSEUDOCODE keyed the reject on the COALESCED `new_review IN ('approved','needs_rework')` (so the SAME call REJECTS with `review_change_requires_impl_done` — what the buggy code at `workitems.go:1707` implements); and the §11.1.2 EXIT CRITERION (~lines 3914-3917) REQUIRES that rework call to SUCCEED ("The same call when `review_state='needs_rework'` succeeds"). The exit criterion is authoritative, so the ONLY self-consistent reading is: **I-4 is the FORWARD review gate — `review_state → approved` requires `impl_state=done`; the `review_state → needs_rework` REVERSE trigger is EXEMPT** (it is precisely the I-5 rework path that legitimately reverts `impl_state` `done → pending`). The prose + exit criterion win; the SQL pseudocode was WRONG. **Fixed in lockstep (docs only):** (1) §6.2 Tool 13 I-4 SQL pseudocode — `violates_i4` predicate narrowed from `new_review IN ('approved','needs_rework') AND new_impl <> 'done'` to `new_review = 'approved' AND new_impl <> 'done'` (`needs_rework` dropped from the reject condition); (2) §6.2 Tool 13 I-4 prose row — rewritten unambiguously: I-4 requires `impl_state=done` only for a transition to `approved`; `needs_rework` is the rework trigger governed by I-5 (which permits the concurrent `impl done→pending`), explicitly noting the one-call `set_state(impl_state=pending, review_state=needs_rework)` on a claimed `impl=done` item SUCCEEDS (impl→pending, review→needs_rework, qa auto-reset→pending per I-1) per the §11.1.2 exit criterion. **The forward gate is PRESERVED explicitly** — `review_state → approved` on an `impl=pending` item still REJECTS (the carve-out is NOT widened to `approved`; widening would let unfinished work be approved and corrupt the §5.7.1 `pipeline_stage` derivation). §11.1.2 (~3914-3917) was VERIFIED already consistent (it states the rework call succeeds) and is NOT weakened. (The bead's cited "line 3884" is a MISLABEL — line 3884 is the `edge_added` cascade-event assertion, not the I-4 criterion; the binding criterion is §11.1.2 lines 3914-3917.) Root `docs/SPEC.md` is **untouched** — its §5.7 explicitly defers the precondition map ("The exact precondition map and error shapes land in the P02 spec") and carries NO I-4 forward/reverse gate claim; its §5.7.1 derivation table (`review_state = needs_rework → Implementation`; `review_state = approved AND qa_state = pending → Quality`) is fully consistent with the reconciled reading. **No DDL / migration / behavioral-contract change** beyond making the rework path reachable as the exit criterion always required. NOT touched (separate ownership): `apps/api/workitems/workitems.go:1707` (the `violates_i4` predicate fix) + the now-un-skipped I-5 property test — the implementation bead `unblock-tv8.81` (Greta) owns those on its branch. Spec status remains APPROVED.
 - 2026-06-12 — comment `parent_id` same-item threading-scope contract WRITTEN (contract LOCKED by Miguel 2026-06-12 BEFORE implementation; bead `unblock-tv8.80`, discovered-from the live MCP sweep and proven live via the MCP endpoint; status remains APPROVED — this WRITES a missing threading-scope contract and closes an IDOR, an additive §10.1.1 gate-model extension, NOT a re-architecting). **This contract did not previously exist anywhere in the spec — a genuine GAP, not a drift.** `AppendComment` inserted the wire-supplied `parent_id` verbatim with NO scoping predicate (gating only the target `item_id` by org per the `unblock-tv8.77` round), and the `comments` FK is existence-only/unnamed, so a caller could thread a comment under a foreign-org OR cross-item parent — a live-proven cross-tenant IDOR, same class as `unblock-tv8.77` / `unblock-tv8.78`. (The bead's `§6.5` citation is a MISLABEL: spec §6.5 is "Cycle detection at write time" and PRD §6.5 is the comment kind×status axes — neither defines `parent_id` scope; the contract is written where the write-gate model lives, §6.2 Tool 10 + §10.1.1.) **Locked contract:** a comment's `parent_id`, when non-empty, MUST resolve to an EXISTING comment ON THE SAME item as the new comment (`item_id` = the target item); a foreign-org OR cross-item `parent_id` yields `NOT_FOUND`, indistinguishable from a missing parent. Same-item transitively guarantees same-org (the target item is already `CallerOrgID`-gated), so this is the stricter, correct predicate that closes the IDOR — no separate parent-org branch is needed. The self-parent prohibition (`comments_no_self_parent_chk`) and the empty-`parent_id` top-level path are preserved. Enforced by the `AppendComment` `INSERT … SELECT` predicate (the §10.1.1 write-gate mechanism), NOT by the existence-only FK. Patched in lockstep: §6.2 Tool 10 (`comment`) — new "Threading scope" paragraph; §10.1.1 write-surface predicate table — new `workitems.AppendComment` `parent_id` row (`parent_id IN (SELECT id FROM workitems.comments WHERE item_id = $target_item)`, foreign/cross-item → `NOT_FOUND`); §4.4 `AppendComment` RPC doc-comment — same-item `parent_id` scoping prose. NOT touched (separate ownership): `apps/api/workitems/workitems.go` (`AppendComment` predicate + the now-false code comment that claims no parent predicate) + tests — the implementation bead `unblock-tv8.80` (Greta) owns those on its branch. **No DDL / migration change is needed** — the gate is a query predicate, not DDL (the existence-only FK is untouched). Root `docs/SPEC.md` is **untouched**: no DDL/migration change and no comment-threading or `AppendComment` auth-model claim there contradicts the same-item rule (its §5.6 RBAC prose — row-level filtering "applied uniformly to every read and write path" — is strengthened, not contradicted; §9.4 `workitems.comments` DDL is unaffected). Spec status remains APPROVED.
 - 2026-06-12 — corrective forward migration `0140` for the `cascade_events_kind_chk` in-place-edit drift (discovered-from live MCP testing on bead `unblock-tv8.79`; status remains APPROVED — additive migration-table lockstep, not a re-architecting). Round-6 widened `deps.cascade_events_kind_chk` from 2 kinds to 4 (`'close','edge_added','edge_removed','state_change'`) by editing `0050_deps.up.sql` IN PLACE (commit `3e0d00d`); because golang-migrate keys by version number, any DB that had already applied `0050` silently retained the stale 2-kind constraint, so `state_change`/`edge_added` cascade audit inserts fail with SQLSTATE 23514. Fix: a NEW up-only forward migration `0140_deps_cascade_events_kind_chk_fix.up.sql` that DROPs (IF EXISTS) and re-ADDs the constraint with the full 4 kinds — idempotent (no-op-equivalent on fresh DBs, corrective on stale ones). Roll-forward discipline is preserved: `0050` is NOT re-edited. No audit-kind coverage gap exists — §11.1.2 already enumerates and asserts all four kinds, and §3.2:242 (`0050` row) + the §9.4.4-mirroring "`cascade_events.kind` enum (round-6)" block in this file already list the 4 kinds in lockstep with the source (confirmed against migration source + spec; both at 4 kinds). Patched in lockstep: §3.2 migration table (new `0140` row after `0130`). NOT touched (already correct / separate ownership): §3.2:242 `0050` row + the §9.4.4 canonical-DDL mirror block (both already 4-kind), root `docs/SPEC.md` §9.4.4 (no DDL semantics change — the source and spec are already at 4 kinds), and `apps/api/db/migrations/0140_deps_cascade_events_kind_chk_fix.up.sql` itself (the implementation bead `unblock-tv8.79`, Greta, owns the migration file). Spec status remains APPROVED.
@@ -1653,6 +1654,59 @@ clauses — they narrow the result set but do NOT substitute for
 pagination when an agent legitimately needs to consume the full set
 in chunks.
 
+### 6.2.0a Advertised input-argument schema + bounds enforcement (locked — bead `unblock-tv8.82`)
+
+> **(locked, additive)** This subsection pins what the live `tools/list`
+> schema advertises and how the per-tool argument bounds are enforced. It is
+> the §6.2-level companion to the §7.3 uniform-validation contract. Decisions
+> LOCKED by Miguel (2026-06-12). No DDL / migration / success-payload change.
+
+**Rich schema advertised (NET-NEW).** The live `tools/list` input schema for
+every tool MUST advertise the **FULL** input-argument contract for agent
+discovery: the `enum` value set for every closed-enum argument
+(`priority_min`, `status[]`, `pipeline_stage[]`, `comment.kind`,
+`comment.status`, `source`, and any other §6.1/§6.5-enumerated argument), the
+`minimum`/`maximum` bounds for every numeric argument with a declared range,
+and the `required[]` list. This is **net-new**: prior to this bead the live
+schema (reflected by the go-sdk `jsonschema.ForType` from each Go input
+struct, §10.3) carried only `type` + `required` + `additionalProperties:false`
+and NEVER `enum` or `minimum`/`maximum`, so the per-tool bounds quoted in the
+§6.2 argument comments (`// 1..200`, `"P0".."P4"`, etc.) and in
+`catalogue.json` were never on the wire. They are now first-class, advertised
+schema.
+
+**Paginated `limit` bounds (ENFORCED — out-of-range REJECTS).** The paginated
+read tools advertise an inclusive `[minimum, maximum]` on their limit
+argument and **enforce** it via §7.3:
+
+| Tool | Argument | Range (`min..max`) | Default (when omitted) |
+|---|---|---|---|
+| Tool 1 `prime` | `ready_limit` | `1..50` | `10` |
+| Tool 2 `ready` | `limit` | `1..200` | `10` |
+| Tool 8 `list` | `limit` | `1..200` | `50` |
+| Tool 9 `search` | `limit` | `1..100` | `25` |
+
+A supplied value outside its range — including `limit <= 0` and a
+`prime.ready_limit > 50` — is **REJECTED** with the §7 `VALIDATION` envelope
+(`data.field` = the limit argument, `data.bound` = the range), NOT silently
+coerced to the default and NOT clamped to the maximum. This **re-locks** the
+round-7 pagination semantics: the §6.2 argument comments below that read
+`// 1..N; default D` denote an ENFORCED inclusive bound with a default that
+applies ONLY on omission — any prior coerce-to-default / clamp-to-max reading
+(in handler doc-comments or in-code comments) is superseded by the reject
+contract per §7.3.1. (`deps.RecentCascadeEvents.Limit`'s "capped at 50"
+internal-RPC note in §4.4 is an internal private-RPC clamp on a server-set
+value — NOT a wire argument — and is untouched: `prime`'s WIRE `ready_limit`
+is the §7.3 enforced bound; the recent-events fan-out cap is an internal
+implementation detail of the `prime` handler.)
+
+**Enum + type + required.** Per §7.3, an invalid enum value, a wrong type, or
+a missing required argument on ANY of the 23 tools likewise returns the §7
+`VALIDATION` envelope with `data.field`. The `cursor` argument's existing
+`VALIDATION` contract (§6.2.0: decode/HMAC/shape/type failures →
+`data.field = "cursor"`) is a member of this same uniform family and is
+unchanged.
+
 ### 6.2 Tool-by-tool contracts
 
 > **Round-16 milestone-tools note (OVERRIDES the round-2 D1 deferral).**
@@ -3136,7 +3190,7 @@ All MCP tool errors return a JSON-RPC 2.0 error object:
 | `UNAUTHENTICATED` | Bearer missing / invalid / revoked / expired | `{}` |
 | `FORBIDDEN` | Authenticated, but `org.Authorize` denies | `{ "resource": "...", "action": "..." }` |
 | `NOT_FOUND` | Subject id does not exist or not visible to caller | `{ "kind": "item", "id": "..." }` |
-| `VALIDATION` | Argument shape / type / range violation | `{ "field": "title", "reason": "must be 1..200 chars" }` |
+| `VALIDATION` | Argument shape / type / range violation — missing required argument, invalid enum value, wrong type, OR out-of-range numeric bound (§7.3) | `{ "field": "title", "reason": "must be 1..200 chars" }` or (range) `{ "field": "limit", "reason": "out of range", "bound": "1..200" }` |
 | `ALREADY_CLAIMED` | `claim` loser path | `{ "winner_user_id": "...", "winner_agent": "...", "claimed_at": "..." }` |
 | `CYCLE_DETECTED` | `add_dependency` / `create` cycle reject | `{ "from": "...", "to": "...", "cycle_path": ["...", "..."] }` |
 | `PRECONDITION_NOT_MET` | Structural precondition violated (P01) or BLOCK condition (P02+) | `{ "missing": "claimed_by_id" }` or `{ "rejection_reason": "..." }` or (round-16) `{ "status": "Backlog", "required": "Ready" }` — see the §7.2 status-precondition extension |
@@ -3291,6 +3345,84 @@ not at all. A rejection that is purely structural (e.g. close's
 
 This keeps the taxonomy consistent across `promote` and `claim`: a
 machine reading `data.required = "Ready"` handles both identically.
+
+### 7.3 Uniform argument validation at the MCP boundary (locked — bead `unblock-tv8.82`)
+
+> **(locked, additive)** This subsection pins a UNIFORM argument-validation
+> contract across the entire 23-tool MCP surface. It is an additive
+> boundary-contract extension — it does not re-architect any tool, change any
+> DDL, or alter any success-path payload. Origin: bead `unblock-tv8.82`,
+> discovered-from the live MCP sweep (B2+B3). Decisions LOCKED by Miguel
+> (2026-06-12).
+
+**The contract.** EVERY argument-shape violation at the MCP boundary —
+
+1. a **missing required** argument,
+2. an **invalid enum** value (a string outside a closed value set, e.g.
+   `priority_min` outside `"P0".."P4"`, `status[]` / `pipeline_stage[]`
+   outside their §6.1 enums, `kind` / `status` on `comment` outside §6.5),
+3. a **wrong type** (e.g. a string where a number is required, an object
+   where an array is required), AND
+4. an **out-of-range numeric bound** (a paginated `limit` / `ready_limit`
+   below the minimum or above the maximum — §7.3.1)
+
+— MUST surface as the §7 `VALIDATION` envelope, uniformly, **before** the
+handler's domain logic runs. The envelope carries `kind = "VALIDATION"`, the
+`trace_id` (§10.2), and `data.field` naming the offending argument; for a
+range violation it additionally carries `data.reason` and `data.bound` (the
+advertised `min..max`, e.g. `"1..200"`). No argument violation may surface as
+a bare `isError` text frame (`CallToolResult{isError:true, content:[text]}`)
+with no §7 envelope.
+
+**§7.3.1 Bounds are ENFORCED — out-of-range REJECTS (behavior change).** The
+paginated tools advertise an inclusive `[minimum, maximum]` on their `limit`
+argument (§6.2.0a): `prime.ready_limit` ∈ `1..50`, `ready.limit` ∈ `1..200`,
+`list.limit` ∈ `1..200`, `search.limit` ∈ `1..100`. A value below the minimum
+(including `0`, negative, or absent-as-zero when supplied explicitly) OR above
+the maximum is **REJECTED** with `VALIDATION` (`data.field` = the limit
+argument, `data.bound` = the advertised range). The server does **NOT**
+silently clamp-to-max or coerce-to-default an out-of-range value. This is a
+deliberate **behavior change** from the round-7 pagination semantics, where
+`limit <= 0` coerced to the per-tool default and `prime.ready_limit > 50`
+clamped to 50: under this contract **both reject**. Any round-7 handler
+doc-comment, prose, or in-code comment that describes coerce-to-default or
+clamp-to-max limit semantics is **RE-LOCKED to the reject semantics** by this
+subsection — the reject contract is now authoritative wherever the two
+disagree. (An OMITTED optional `limit`/`ready_limit` still takes the per-tool
+default — the bound check applies only to a value the caller actually
+supplies; absence is not a zero.)
+
+**§7.3.2 Mechanism (stated at contract altitude, not line-by-line).** The
+live `tools/list` schema is REFLECTED by the go-sdk (v1.6.0,
+`jsonschema.ForType`) from each handler's Go input struct; by default it
+carries only `type`, `required` (absence of `,omitempty`), and
+`additionalProperties:false` — it has NEVER carried `enum` or
+`minimum`/`maximum`, so the advertised bounds/enums were never on the wire
+(see §10.3 / §6.2.0a). The go-sdk validates the REGISTERED schema PRE-handler
+(`applySchema` → `resolved.Validate` before the typed handler runs); a
+PRE-handler failure returns a bare `isError` text frame with **no** §7
+envelope — and §7 envelopes can only be minted from INSIDE the handler (via
+the existing `apps/api/mcp/errmap.go` `mapError` path, which maps
+`errs.InvalidArgument` → `VALIDATION` with `data.field`). Therefore, to make
+every argument violation §7-shaped:
+
+- the **registered** (SDK-validated) input schema is **RELAXED** on exactly
+  the keywords the shared boundary-validation layer owns (so `applySchema`
+  does not pre-reject any of the four violation classes with a bare frame),
+  while
+- the advertised **`tools/list`** schema is **ENRICHED** to the full rich
+  contract — `enum`, `minimum`/`maximum`, and `required[]` — for agent
+  discovery (§6.2.0a), and
+- a **shared `validateArgs` pass at the handler boundary** validates
+  required / enum / type / range against the contract and mints the §7
+  `VALIDATION` envelope via the existing `mapError` path.
+
+This is the precedent already shipped by `apps/api/mcp/handler_update.go`
+(register a relaxed `InputSchema` so `applySchema` does not pre-reject, then
+validate the raw args at handler-top and mint §7 via `mapError`). The
+mechanism is documented here at CONTRACT altitude; the per-tool wiring,
+the shared-layer implementation, and tests are owned by Greta (the
+implementation bead).
 
 ---
 
@@ -3702,6 +3834,22 @@ discovery path.)
 
 `mcp.meta_catalogue` MCP tool itself is **not** exposed in P01 — it ships
 in P02 once the BLOCK conditions are authored.
+
+**Catalogue vs. live `tools/list` schema (reconciliation — bead
+`unblock-tv8.82`).** `apps/api/mcp/catalogue.json` is an **off-wire
+authoring artifact** consumed at build time (P02 `mcp.meta_catalogue` +
+the P04 `unblock-plugin` renderer); its `input_schema` bounds/enums are
+**NOT** the schema the live MCP endpoint advertises and were never on the
+wire. The schema served live by `tools/list` is **REFLECTED** by the go-sdk
+(v1.6.0) via `jsonschema.ForType` from each handler's Go input struct (it
+does not read `catalogue.json` at runtime). Pre-bead-`unblock-tv8.82` that
+reflected schema carried only `type` + `required` + `additionalProperties:
+false`; bead `unblock-tv8.82` ENRICHES the live `tools/list` schema to also
+advertise `enum` + `minimum`/`maximum` + `required[]` (§6.2.0a) and enforces
+them via the §7.3 uniform-validation contract. The catalogue's bounds/enums
+and the now-enriched live schema therefore SHOULD agree by construction, but
+the live `tools/list` reflected schema — not `catalogue.json` — is
+authoritative for what an agent receives on the wire.
 
 ### 10.4 Security boundary / threat model (D-1 transport addendum)
 
