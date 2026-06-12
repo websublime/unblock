@@ -31,11 +31,6 @@ import (
 // (default 10, range 1..50). Same shape as the Tool 2 `ready` limit.
 const primeReadyLimitDefault = 10
 
-// primeReadyLimitMax mirrors readyMaxLimit — kept as a separate
-// const so a future spec amendment that diverges Tool 1 from Tool 2
-// is a single-line edit here.
-const primeReadyLimitMax = 50
-
 // primeClaimedPageSize is the cursor page size used by the
 // claimed_by_me fan-out loop. Matches workitems.listMaxLimit (the
 // hard ceiling enforced inside workitems.List) so each round-trip
@@ -130,12 +125,11 @@ type primeMemoryHint struct {
 // order hazard where handler_*.go inits would otherwise crash on a
 // nil sdkServer).
 func registerHandlePrime(s *sdkmcp.Server) {
-	sdkmcp.AddTool(s, &sdkmcp.Tool{
-		Name: "prime",
-		Description: "Dashboard read for a fresh agent session: ready " +
-			"summary, items the caller already claims, recent cascade " +
+	registerValidatedTool(s, "prime",
+		"Dashboard read for a fresh agent session: ready "+
+			"summary, items the caller already claims, recent cascade "+
 			"events, and (P02+) memory hints. SPEC § 6.2 Tool 1.",
-	}, handlePrime)
+		nil, handlePrime)
 }
 
 // handlePrime executes the §6.2 Tool 1 read fan-out. Identity is
@@ -161,12 +155,14 @@ func handlePrime(ctx context.Context, req *sdkmcp.CallToolRequest, in primeIn) (
 		state.Call.ProjectID = in.ProjectID
 	}
 
+	// §7.3.1: a SUPPLIED ready_limit outside 1..50 was already rejected
+	// with VALIDATION by the shared validateArgs boundary pass (§7.3.2).
+	// By the time control reaches here, in.ReadyLimit == 0 can only mean
+	// the argument was OMITTED (an explicit 0 would have rejected), so we
+	// apply the per-tool default on omission only — no clamp, no coerce.
 	readyLimit := in.ReadyLimit
-	if readyLimit <= 0 {
+	if readyLimit == 0 {
 		readyLimit = primeReadyLimitDefault
-	}
-	if readyLimit > primeReadyLimitMax {
-		readyLimit = primeReadyLimitMax
 	}
 
 	// 1) ready_summary — wraps workitems.Ready under the same scope.

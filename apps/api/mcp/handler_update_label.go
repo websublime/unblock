@@ -46,13 +46,12 @@ type updateLabelOut struct {
 // registerHandleUpdateLabel is invoked by transport.go's init — see the
 // toolRegistrars rationale there.
 func registerHandleUpdateLabel(s *sdkmcp.Server) {
-	sdkmcp.AddTool(s, &sdkmcp.Tool{
-		Name: "update_label",
-		Description: "Rename and/or recolor an existing label. Only the " +
-			"supplied fields change; the label's scope is immutable. A rename " +
-			"that collides with an existing label in the same scope rejects " +
+	registerValidatedTool(s, "update_label",
+		"Rename and/or recolor an existing label. Only the "+
+			"supplied fields change; the label's scope is immutable. A rename "+
+			"that collides with an existing label in the same scope rejects "+
 			"with CONFLICT. SPEC § 6.2 Tool 22.",
-	}, handleUpdateLabel)
+		nil, handleUpdateLabel)
 }
 
 func handleUpdateLabel(ctx context.Context, req *sdkmcp.CallToolRequest, in updateLabelIn) (*sdkmcp.CallToolResult, updateLabelOut, error) {

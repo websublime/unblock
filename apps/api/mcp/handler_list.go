@@ -41,15 +41,12 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// listLimitDefault / listLimitMax mirror SPEC §6.2 Tool 8 line 1389
-// (1..200; default 50). Aligns with workitems.listDefaultLimit /
-// listMaxLimit so the wire ceiling matches the downstream RPC.
-// Two local consts keep this handler's behaviour readable without
-// chasing constants across package boundaries.
-const (
-	listLimitDefault = 50
-	listLimitMax     = 200
-)
+// listLimitDefault is the per-tool default applied when `limit` is
+// OMITTED (SPEC §6.2 Tool 8 line 1389: default 50). The advertised
+// inclusive range (1..200) lives in catalogue.gen.go and is ENFORCED by
+// the shared validateArgs boundary pass (§7.3.1) — a supplied
+// out-of-range value rejects with VALIDATION, never clamps.
+const listLimitDefault = 50
 
 type listIn struct {
 	ProjectID     string   `json:"project_id,omitempty"`
@@ -73,12 +70,11 @@ type listOut struct {
 // registerHandleList is invoked by transport.go's init — see the
 // toolRegistrars rationale there.
 func registerHandleList(s *sdkmcp.Server) {
-	sdkmcp.AddTool(s, &sdkmcp.Tool{
-		Name: "list",
-		Description: "Paginate workitems with scalar + array filters " +
-			"(project_id, milestone_id, status, pipeline_stage, " +
+	registerValidatedTool(s, "list",
+		"Paginate workitems with scalar + array filters "+
+			"(project_id, milestone_id, status, pipeline_stage, "+
 			"claimed_by, labels). Ordered by id ASC. SPEC § 6.2 Tool 8.",
-	}, handleList)
+		nil, handleList)
 }
 
 func handleList(ctx context.Context, req *sdkmcp.CallToolRequest, in listIn) (*sdkmcp.CallToolResult, listOut, error) {
@@ -98,19 +94,12 @@ func handleList(ctx context.Context, req *sdkmcp.CallToolRequest, in listIn) (*s
 		state.Call.ProjectID = in.ProjectID
 	}
 
-	// Limit bounds — same shape as handler_ready.go (rework S4): explicit
-	// default coercion + explicit range rejection. limit=0/negative
-	// coerces to listLimitDefault (50); limit > listLimitMax is a
-	// contract violation surfaced as VALIDATION.
-	if in.Limit <= 0 {
+	// §7.3.1: a SUPPLIED limit outside 1..200 was already rejected with
+	// VALIDATION by the shared validateArgs boundary pass (§7.3.2). A
+	// zero here can only mean the argument was OMITTED, so we apply the
+	// per-tool default on omission only — no clamp, no coerce.
+	if in.Limit == 0 {
 		in.Limit = listLimitDefault
-	}
-	if in.Limit > listLimitMax {
-		return nil, listOut{}, mapError(state, tool, &errs.Error{
-			Code:    errs.InvalidArgument,
-			Message: "limit out of range (1..200)",
-			Meta:    errs.Metadata{"field": "limit"},
-		})
 	}
 
 	// §6.2.0 cursor decode — the opaque token is verified and the {id}

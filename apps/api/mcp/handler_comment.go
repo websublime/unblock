@@ -75,13 +75,12 @@ type commentOut struct {
 // registerHandleComment is invoked by transport.go's init — see the
 // toolRegistrars rationale there.
 func registerHandleComment(s *sdkmcp.Server) {
-	sdkmcp.AddTool(s, &sdkmcp.Tool{
-		Name: "comment",
-		Description: "Append a comment to a work item. Append-only — no " +
-			"update or delete tool ships in P01. Validates kind/status " +
-			"against §6.5 enums; body length 1..16384 chars. SPEC § 6.2 " +
+	registerValidatedTool(s, "comment",
+		"Append a comment to a work item. Append-only — no "+
+			"update or delete tool ships in P01. Validates kind/status "+
+			"against §6.5 enums; body length 1..16384 chars. SPEC § 6.2 "+
 			"Tool 10.",
-	}, handleComment)
+		nil, handleComment)
 }
 
 func handleComment(ctx context.Context, req *sdkmcp.CallToolRequest, in commentIn) (*sdkmcp.CallToolResult, commentOut, error) {

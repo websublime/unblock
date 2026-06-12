@@ -37,13 +37,12 @@ type listLabelsOut struct {
 // registerHandleListLabel is invoked by transport.go's init — see the
 // toolRegistrars rationale there.
 func registerHandleListLabel(s *sdkmcp.Server) {
-	sdkmcp.AddTool(s, &sdkmcp.Tool{
-		Name: "list_labels",
-		Description: "List labels visible to the caller within a scope. Without " +
-			"project_id, returns the caller's org labels. With project_id, " +
-			"returns the project's labels plus the inherited org labels " +
+	registerValidatedTool(s, "list_labels",
+		"List labels visible to the caller within a scope. Without "+
+			"project_id, returns the caller's org labels. With project_id, "+
+			"returns the project's labels plus the inherited org labels "+
 			"(project wins on identical name). SPEC § 6.2 Tool 21.",
-	}, handleListLabel)
+		nil, handleListLabel)
 }
 
 func handleListLabel(ctx context.Context, req *sdkmcp.CallToolRequest, in listLabelsIn) (*sdkmcp.CallToolResult, listLabelsOut, error) {

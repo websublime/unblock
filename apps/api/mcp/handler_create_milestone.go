@@ -54,15 +54,14 @@ type createMilestoneOut struct {
 // registerHandleCreateMilestone is invoked by transport.go's init — see
 // the toolRegistrars rationale there.
 func registerHandleCreateMilestone(s *sdkmcp.Server) {
-	sdkmcp.AddTool(s, &sdkmcp.Tool{
-		Name: "create_milestone",
-		Description: "Create a milestone scoped to the caller's org or to a " +
-			"project (pass project_id to project-scope; omit it to org-scope). " +
-			"Optional parent_milestone_id nests the milestone (depth ≤ 4); the " +
-			"child date range must be within the parent's. Invariant violations " +
-			"(M-INV-2/3/5/6) reject with PRECONDITION_NOT_MET carrying " +
+	registerValidatedTool(s, "create_milestone",
+		"Create a milestone scoped to the caller's org or to a "+
+			"project (pass project_id to project-scope; omit it to org-scope). "+
+			"Optional parent_milestone_id nests the milestone (depth ≤ 4); the "+
+			"child date range must be within the parent's. Invariant violations "+
+			"(M-INV-2/3/5/6) reject with PRECONDITION_NOT_MET carrying "+
 			"data.invariant. SPEC § 6.2 Tool 16.",
-	}, handleCreateMilestone)
+		nil, handleCreateMilestone)
 }
 
 func handleCreateMilestone(ctx context.Context, req *sdkmcp.CallToolRequest, in createMilestoneIn) (*sdkmcp.CallToolResult, createMilestoneOut, error) {

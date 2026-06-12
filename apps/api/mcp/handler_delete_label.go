@@ -42,13 +42,12 @@ type deleteLabelOut struct {
 // registerHandleDeleteLabel is invoked by transport.go's init — see the
 // toolRegistrars rationale there.
 func registerHandleDeleteLabel(s *sdkmcp.Server) {
-	sdkmcp.AddTool(s, &sdkmcp.Tool{
-		Name: "delete_label",
-		Description: "Delete a label from the registry. Detaches it from every " +
-			"item it was applied to (the items are not deleted); " +
-			"detached_item_count reports how many attachments were removed. " +
+	registerValidatedTool(s, "delete_label",
+		"Delete a label from the registry. Detaches it from every "+
+			"item it was applied to (the items are not deleted); "+
+			"detached_item_count reports how many attachments were removed. "+
 			"A missing label rejects with NOT_FOUND. SPEC § 6.2 Tool 23.",
-	}, handleDeleteLabel)
+		nil, handleDeleteLabel)
 }
 
 func handleDeleteLabel(ctx context.Context, req *sdkmcp.CallToolRequest, in deleteLabelIn) (*sdkmcp.CallToolResult, deleteLabelOut, error) {

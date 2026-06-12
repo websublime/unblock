@@ -550,41 +550,48 @@ func TestD4_CommentBodyExceedsCap(t *testing.T) {
 	}
 }
 
-// TestD4_CommentMissingItemID: missing item_id is rejected by the
-// MCP SDK's JSON-schema pre-validation (item_id is declared without
-// `omitempty` so the SDK marks it required at the schema layer). The
-// rejection surfaces as a successful JSON-RPC `result` envelope with
-// `isError:true` and a `content[0].text` carrying the SDK validator's
-// message — distinct from the §7 VALIDATION envelope which only fires
-// AFTER schema validation passes. We assert the SDK error path here
-// because the wire-level guarantee is "missing item_id never executes
-// AppendComment", which the SDK enforces upstream of our handler.
+// TestD4_CommentMissingItemID: a missing required item_id now surfaces
+// the §7 VALIDATION envelope (kind=VALIDATION, trace_id, data.field=
+// item_id) — NOT a bare isError text frame. This is the canonical proof
+// of the unblock-tv8.82 uniform argument-validation contract (SPEC §7.3):
+// every argument-shape violation at the MCP boundary is §7-shaped,
+// because the shared validateArgs boundary pass runs the required/enum/
+// type/range checks itself and mints the envelope via mapError BEFORE the
+// handler's domain logic (the go-sdk no longer pre-validates — tools are
+// registered with the rich schema via the non-generic path, §7.3.2).
+// Pre-tv8.82 this case returned a successful result with isError:true and
+// a content-text "validating arguments: …" frame; that behavior is now
+// retired.
 func TestD4_CommentMissingItemID(t *testing.T) {
 	resetToolCalls(t)
 	fx := seedD2Fixture(t)
 
+	// Absent required item_id → §7 VALIDATION, data.field=item_id.
 	env := callTool(t, fx.RawKey, "comment", map[string]any{
 		"kind":   "general",
 		"status": "info",
 		"body":   "body",
 	})
-	if env.Error != nil {
-		t.Fatalf("expected SDK-level isError, got JSON-RPC error envelope data=%s", string(env.Error.Data))
+	if env.Error == nil {
+		t.Fatalf("expected §7 VALIDATION on missing item_id; got success result=%s", string(env.Result))
 	}
-	var res toolCallResult
-	if err := json.Unmarshal(env.Result, &res); err != nil {
-		t.Fatalf("unmarshal result: %v", err)
+	var data envelopeData
+	if err := json.Unmarshal(env.Error.Data, &data); err != nil {
+		t.Fatalf("unmarshal error.data: %v", err)
 	}
-	if !res.IsError {
-		t.Fatalf("missing item_id must produce isError=true result; got %+v", res)
+	if data.Kind != "VALIDATION" {
+		t.Fatalf("error.data.kind = %q, want VALIDATION (data=%s)", data.Kind, string(env.Error.Data))
 	}
-	if len(res.Content) == 0 || !strings.Contains(res.Content[0].Text, "item_id") {
-		t.Fatalf("expected error text to mention item_id; got content=%+v", res.Content)
+	if data.TraceID == "" {
+		t.Fatalf("error.data.trace_id is empty; §7 envelope requires it")
+	}
+	if got, _ := data.Details["field"].(string); got != "item_id" {
+		t.Fatalf("error.data.details.field = %q, want \"item_id\"", got)
 	}
 
-	// Defense-in-depth: an EMPTY item_id (present but zero) bypasses
-	// the SDK's required-field check (the field IS present) and reaches
-	// the handler's own guard, which surfaces §7 VALIDATION with
+	// Defense-in-depth: an EMPTY item_id (present but zero) passes the
+	// required-key presence check (the field IS present) and reaches the
+	// handler's own guard, which surfaces the same §7 VALIDATION with
 	// data.field="item_id".
 	env2 := callTool(t, fx.RawKey, "comment", map[string]any{
 		"item_id": "",
@@ -595,14 +602,14 @@ func TestD4_CommentMissingItemID(t *testing.T) {
 	if env2.Error == nil {
 		t.Fatalf("expected §7 VALIDATION on empty item_id; got success result=%s", string(env2.Result))
 	}
-	var data envelopeData
-	if err := json.Unmarshal(env2.Error.Data, &data); err != nil {
+	var data2 envelopeData
+	if err := json.Unmarshal(env2.Error.Data, &data2); err != nil {
 		t.Fatalf("unmarshal error.data: %v", err)
 	}
-	if data.Kind != "VALIDATION" {
-		t.Fatalf("error.data.kind = %q, want VALIDATION", data.Kind)
+	if data2.Kind != "VALIDATION" {
+		t.Fatalf("error.data.kind = %q, want VALIDATION", data2.Kind)
 	}
-	if got, _ := data.Details["field"].(string); got != "item_id" {
+	if got, _ := data2.Details["field"].(string); got != "item_id" {
 		t.Fatalf("error.data.details.field = %q, want \"item_id\"", got)
 	}
 }

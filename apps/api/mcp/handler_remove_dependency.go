@@ -66,15 +66,14 @@ type removeDependencyOut struct {
 // registerHandleRemoveDependency is invoked by transport.go's init —
 // see the toolRegistrars rationale there.
 func registerHandleRemoveDependency(s *sdkmcp.Server) {
-	sdkmcp.AddTool(s, &sdkmcp.Tool{
-		Name: "remove_dependency",
-		Description: "Delete a dependency edge. Accepts edge_id OR the " +
-			"composite (from_item_id, to_item_id, kind) — exactly one " +
-			"shape. Recomputes is_ready inline for the direct to_item " +
-			"(single-hop) and publishes CascadeRequested{Reason:" +
-			"\"edge_removed\"} post-commit for the multi-hop " +
+	registerValidatedTool(s, "remove_dependency",
+		"Delete a dependency edge. Accepts edge_id OR the "+
+			"composite (from_item_id, to_item_id, kind) — exactly one "+
+			"shape. Recomputes is_ready inline for the direct to_item "+
+			"(single-hop) and publishes CascadeRequested{Reason:"+
+			"\"edge_removed\"} post-commit for the multi-hop "+
 			"pipeline_stage recompute. SPEC § 6.2 Tool 12.",
-	}, handleRemoveDependency)
+		nil, handleRemoveDependency)
 }
 
 func handleRemoveDependency(ctx context.Context, req *sdkmcp.CallToolRequest, in removeDependencyIn) (*sdkmcp.CallToolResult, removeDependencyOut, error) {

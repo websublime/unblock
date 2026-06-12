@@ -853,33 +853,39 @@ func TestD2_ReadyLimitOutOfRange(t *testing.T) {
 	}
 }
 
-// TestD2_ReadyLimitZeroDefaultsTo10 asserts the round-7 S4 contract:
-// limit <= 0 coerces to the spec default (10) — NOT to the prior
-// "negative-then-zero" indirection. Seed 12 items, request limit=0,
-// expect exactly 10 items returned + total_ready=12 + a non-empty
-// next_cursor (more pages exist).
-func TestD2_ReadyLimitZeroDefaultsTo10(t *testing.T) {
+// TestD2_ReadyLimitZeroRejects asserts the unblock-tv8.82 §7.3.1
+// re-lock: a SUPPLIED limit=0 is below the advertised minimum (1) and is
+// now REJECTED with §7 VALIDATION (data.field=limit, data.bound="1..200")
+// — NOT coerced to the per-tool default. This supersedes the round-7
+// "limit<=0 coerces to default" semantics. (An OMITTED limit still takes
+// the default — covered by the happy-path control elsewhere; absence is
+// not a supplied zero.)
+func TestD2_ReadyLimitZeroRejects(t *testing.T) {
 	resetToolCalls(t)
 	fx := seedD2Fixture(t)
 	for i := 0; i < 12; i++ {
 		seedReadyItem(t, fx.OrgID, fx.ProjectID, "P1", time.Duration(i)*time.Second)
 	}
 
-	// limit=0 → coerced to readyLimitDefault (10).
 	env := callTool(t, fx.RawKey, "ready", map[string]any{
 		"project_id": fx.ProjectID,
 		"limit":      0,
 	})
-	res := assertStructuredEchoesText(t, env)
-	page := decodeReadyPage(t, res.StructuredContent)
-	if len(page.Items) != 10 {
-		t.Fatalf("items len = %d, want 10 (spec default)", len(page.Items))
+	if env.Error == nil {
+		t.Fatalf("expected VALIDATION envelope on supplied limit=0; got success result=%s", string(env.Result))
 	}
-	if page.TotalReady != 12 {
-		t.Fatalf("total_ready = %d, want 12", page.TotalReady)
+	var data envelopeData
+	if err := json.Unmarshal(env.Error.Data, &data); err != nil {
+		t.Fatalf("unmarshal error.data: %v", err)
 	}
-	if page.NextCursor == nil {
-		t.Fatalf("next_cursor nil — 2 more rows exist")
+	if data.Kind != "VALIDATION" {
+		t.Fatalf("error.data.kind = %q, want VALIDATION", data.Kind)
+	}
+	if v, _ := data.Details["field"].(string); v != "limit" {
+		t.Fatalf("error.data.details.field = %q, want \"limit\"", v)
+	}
+	if v, _ := data.Details["bound"].(string); v != "1..200" {
+		t.Fatalf("error.data.details.bound = %q, want \"1..200\"", v)
 	}
 }
 

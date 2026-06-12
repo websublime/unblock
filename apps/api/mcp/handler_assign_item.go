@@ -56,14 +56,13 @@ type assignItemOut struct {
 // registerHandleAssignItem is invoked by transport.go's init — see the
 // toolRegistrars rationale there.
 func registerHandleAssignItem(s *sdkmcp.Server) {
-	sdkmcp.AddTool(s, &sdkmcp.Tool{
-		Name: "assign_item",
-		Description: "Assign a work item to a milestone, or unassign it by " +
-			"passing milestone_id as the empty string. The actor is the " +
-			"calling identity (not a wire argument). A milestone not reachable " +
-			"in the item's project rejects with PRECONDITION_NOT_MET " +
+	registerValidatedTool(s, "assign_item",
+		"Assign a work item to a milestone, or unassign it by "+
+			"passing milestone_id as the empty string. The actor is the "+
+			"calling identity (not a wire argument). A milestone not reachable "+
+			"in the item's project rejects with PRECONDITION_NOT_MET "+
 			"(data.invariant=M-INV-7). SPEC § 6.2 Tool 18.",
-	}, handleAssignItem)
+		nil, handleAssignItem)
 }
 
 func handleAssignItem(ctx context.Context, req *sdkmcp.CallToolRequest, in assignItemIn) (*sdkmcp.CallToolResult, assignItemOut, error) {

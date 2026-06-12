@@ -71,10 +71,12 @@ const sdkServerName = "unblock-mcp"
 const sdkServerVersion = "0.1.0"
 
 // sdkServer is the package-level MCP server instance. Tool handlers
-// (D-2..D-6, beads unblock-tv8.17..unblock-tv8.21) call
-// sdkmcp.AddTool(sdkServer, …) at package init to register tools;
-// in D-1 no tools are registered and the SDK exposes only the
-// built-in initialize / list_tools / list_resources methods.
+// register against it at package init via registerValidatedTool
+// (validate.go), which advertises the rich catalogue input schema in
+// tools/list and routes every dispatch through the shared §7.3
+// argument-validation boundary pass (bead unblock-tv8.82). In D-1 no
+// tools are registered and the SDK exposes only the built-in
+// initialize / list_tools / list_resources methods.
 //
 // Initialized at package init via initSDKServer (see init() below)
 // — package-init order is unimportant because no //encore:api
@@ -92,8 +94,9 @@ var sdkStreamableHandler *sdkmcp.StreamableHTTPHandler
 // toolRegistrar is one entry in the per-tool registration table.
 // Each tool handler file (handler_prime.go, handler_ready.go,
 // handler_claim.go, handler_create.go, …) exposes a registerXxx
-// function that calls sdkmcp.AddTool against the constructed
-// sdkServer. We collect them here so the package init order is:
+// function that calls registerValidatedTool (validate.go) against the
+// constructed sdkServer. We collect them here so the package init order
+// is:
 //
 //  1. transport.go init runs first (alphabetically first file with
 //     an init() in this package is errenvelope.go which has none;

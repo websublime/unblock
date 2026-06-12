@@ -22,14 +22,12 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// readyLimitDefault / readyLimitMax mirror SPEC §6.2 Tool 2 line 1183
-// (1..200; default 10). After round-7 the rework removed the
-// downstream 50-cap (Linus REVIEW S2) so the wire range is honoured
-// end-to-end without silent truncation.
-const (
-	readyLimitDefault = 10
-	readyLimitMax     = 200
-)
+// readyLimitDefault is the per-tool default applied when `limit` is
+// OMITTED (SPEC §6.2 Tool 2 line 1183: default 10). The advertised
+// inclusive range (1..200) lives in catalogue.gen.go and is ENFORCED by
+// the shared validateArgs boundary pass (§7.3.1) — a supplied
+// out-of-range value rejects with VALIDATION, never clamps.
+const readyLimitDefault = 10
 
 type readyIn struct {
 	ProjectID   string `json:"project_id,omitempty"`
@@ -60,12 +58,11 @@ type readyOut struct {
 // registerHandleReady is invoked by transport.go's init — see the
 // toolRegistrars rationale there.
 func registerHandleReady(s *sdkmcp.Server) {
-	sdkmcp.AddTool(s, &sdkmcp.Tool{
-		Name: "ready",
-		Description: "Items currently Ready for any agent to claim, " +
-			"ordered by (priority asc, created_at asc, id asc). " +
+	registerValidatedTool(s, "ready",
+		"Items currently Ready for any agent to claim, "+
+			"ordered by (priority asc, created_at asc, id asc). "+
 			"Paginates via opaque cursor (§6.2.0). SPEC § 6.2 Tool 2.",
-	}, handleReady)
+		nil, handleReady)
 }
 
 func handleReady(ctx context.Context, req *sdkmcp.CallToolRequest, in readyIn) (*sdkmcp.CallToolResult, readyOut, error) {
@@ -85,20 +82,12 @@ func handleReady(ctx context.Context, req *sdkmcp.CallToolRequest, in readyIn) (
 		state.Call.ProjectID = in.ProjectID
 	}
 
-	// Limit bounds per SPEC §6.2 Tool 2 line 1183 (1..200; default 10).
-	// Two explicit lines that read straight off the spec (rework S4 —
-	// no magic, no chained defaults). limit > 200 is a contract
-	// violation and surfaces as VALIDATION; limit <= 0 coerces to the
-	// spec default.
-	if in.Limit <= 0 {
+	// §7.3.1: a SUPPLIED limit outside 1..200 was already rejected with
+	// VALIDATION by the shared validateArgs boundary pass (§7.3.2). A
+	// zero here can only mean the argument was OMITTED, so we apply the
+	// per-tool default on omission only — no clamp, no coerce.
+	if in.Limit == 0 {
 		in.Limit = readyLimitDefault
-	}
-	if in.Limit > readyLimitMax {
-		return nil, readyOut{}, mapError(state, tool, &errs.Error{
-			Code:    errs.InvalidArgument,
-			Message: "limit out of range (1..200)",
-			Meta:    errs.Metadata{"field": "limit"},
-		})
 	}
 
 	// §6.2.0 cursor decode. The opaque token is verified and the

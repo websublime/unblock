@@ -51,14 +51,13 @@ type createLabelOut struct {
 // registerHandleCreateLabel is invoked by transport.go's init — see the
 // toolRegistrars rationale there.
 func registerHandleCreateLabel(s *sdkmcp.Server) {
-	sdkmcp.AddTool(s, &sdkmcp.Tool{
-		Name: "create_label",
-		Description: "Create a label in the registry, scoped to the caller's " +
-			"org or to a project (pass project_id to project-scope; omit it to " +
-			"org-scope). name is 1..64 chars and unique within scope " +
-			"(case-insensitive); color is #RRGGBB. A duplicate name rejects " +
+	registerValidatedTool(s, "create_label",
+		"Create a label in the registry, scoped to the caller's "+
+			"org or to a project (pass project_id to project-scope; omit it to "+
+			"org-scope). name is 1..64 chars and unique within scope "+
+			"(case-insensitive); color is #RRGGBB. A duplicate name rejects "+
 			"with CONFLICT carrying data.constraint. SPEC § 6.2 Tool 20.",
-	}, handleCreateLabel)
+		nil, handleCreateLabel)
 }
 
 func handleCreateLabel(ctx context.Context, req *sdkmcp.CallToolRequest, in createLabelIn) (*sdkmcp.CallToolResult, createLabelOut, error) {

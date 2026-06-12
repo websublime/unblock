@@ -46,13 +46,12 @@ type closeOut struct {
 // registerHandleClose is invoked by transport.go's init — see the
 // toolRegistrars rationale there.
 func registerHandleClose(s *sdkmcp.Server) {
-	sdkmcp.AddTool(s, &sdkmcp.Tool{
-		Name: "close",
-		Description: "Flip an item to Done. Rejects with PRECONDITION_NOT_MET " +
-			"(data.missing=claimed_by_id) when the item is not currently " +
-			"claimed. Emits CascadeRequested{Reason:\"close\"} post-commit. " +
+	registerValidatedTool(s, "close",
+		"Flip an item to Done. Rejects with PRECONDITION_NOT_MET "+
+			"(data.missing=claimed_by_id) when the item is not currently "+
+			"claimed. Emits CascadeRequested{Reason:\"close\"} post-commit. "+
 			"SPEC § 6.2 Tool 6.",
-	}, handleClose)
+		nil, handleClose)
 }
 
 func handleClose(ctx context.Context, req *sdkmcp.CallToolRequest, in closeIn) (*sdkmcp.CallToolResult, closeOut, error) {

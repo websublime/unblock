@@ -31,12 +31,11 @@ type claimOut struct {
 // registerHandleClaim is invoked by transport.go's init — see the
 // toolRegistrars rationale there.
 func registerHandleClaim(s *sdkmcp.Server) {
-	sdkmcp.AddTool(s, &sdkmcp.Tool{
-		Name: "claim",
-		Description: "Atomically claim a Ready item. Loser path returns " +
-			"ALREADY_CLAIMED with winner_user_id, winner_agent, " +
+	registerValidatedTool(s, "claim",
+		"Atomically claim a Ready item. Loser path returns "+
+			"ALREADY_CLAIMED with winner_user_id, winner_agent, "+
 			"claimed_at. SPEC § 6.2 Tool 3 + § 6.4.",
-	}, handleClaim)
+		nil, handleClaim)
 }
 
 func handleClaim(ctx context.Context, req *sdkmcp.CallToolRequest, in claimIn) (*sdkmcp.CallToolResult, claimOut, error) {

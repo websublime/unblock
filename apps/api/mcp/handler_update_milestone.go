@@ -57,14 +57,13 @@ type updateMilestoneOut struct {
 // registerHandleUpdateMilestone is invoked by transport.go's init — see
 // the toolRegistrars rationale there.
 func registerHandleUpdateMilestone(s *sdkmcp.Server) {
-	sdkmcp.AddTool(s, &sdkmcp.Tool{
-		Name: "update_milestone",
-		Description: "Update a milestone's name, description, start/end " +
-			"dates, or cancellation. Only the supplied fields change. " +
-			"Reparenting is not supported in P01 (rejected with VALIDATION). " +
-			"Date changes that violate a parent's or child's range reject " +
+	registerValidatedTool(s, "update_milestone",
+		"Update a milestone's name, description, start/end "+
+			"dates, or cancellation. Only the supplied fields change. "+
+			"Reparenting is not supported in P01 (rejected with VALIDATION). "+
+			"Date changes that violate a parent's or child's range reject "+
 			"with PRECONDITION_NOT_MET. SPEC § 6.2 Tool 17.",
-	}, handleUpdateMilestone)
+		nil, handleUpdateMilestone)
 }
 
 func handleUpdateMilestone(ctx context.Context, req *sdkmcp.CallToolRequest, in updateMilestoneIn) (*sdkmcp.CallToolResult, updateMilestoneOut, error) {
