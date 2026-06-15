@@ -2034,6 +2034,111 @@ func TestWriteSurfaceTenantGate_CallerOrgID(t *testing.T) {
 	}
 }
 
+// TestCreateMilestoneTenantGate_ProjectScope proves the project-scoped
+// CreateMilestone INSERT…SELECT gate (bead unblock-tv8.83, §10.1.1): a home
+// caller cannot create a milestone scoped to a FOREIGN org's project. The
+// foreign-but-existing project_id is indistinguishable from a missing one
+// (NOT_FOUND), and nothing is inserted. A same-org positive control proves
+// legitimate project-scoped creation still works, and the empty-CallerOrgID
+// no-op (trusted internal callers) is preserved.
+func TestCreateMilestoneTenantGate_ProjectScope(t *testing.T) {
+	ctx := context.Background()
+	fx := seedFixture(t, ctx)
+
+	// Seed a FOREIGN org + a project owned by it.
+	foreignOrg, err := ulid.New()
+	if err != nil {
+		t.Fatalf("ulid foreign org: %v", err)
+	}
+	if _, err := encoredb.DB.Exec(ctx,
+		`INSERT INTO org.organizations (id, slug, name) VALUES ($1, $2, $3)`,
+		foreignOrg, "witest-foreign-"+foreignOrg[len(foreignOrg)-8:], "foreign org",
+	); err != nil {
+		t.Fatalf("insert foreign org: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = encoredb.DB.Exec(ctx, `DELETE FROM org.organizations WHERE id = $1`, foreignOrg)
+	})
+	foreignProject, err := ulid.New()
+	if err != nil {
+		t.Fatalf("ulid foreign project: %v", err)
+	}
+	if _, err := encoredb.DB.Exec(ctx,
+		`INSERT INTO org.projects (id, org_id, slug, name) VALUES ($1, $2, $3, $4)`,
+		foreignProject, foreignOrg, "p-"+foreignProject[len(foreignProject)-8:], "foreign project",
+	); err != nil {
+		t.Fatalf("insert foreign project: %v", err)
+	}
+
+	milestoneCount := func() int {
+		t.Helper()
+		var n int
+		if qerr := encoredb.DB.QueryRow(ctx,
+			`SELECT count(*) FROM workitems.milestones WHERE project_id = $1`, foreignProject,
+		).Scan(&n); qerr != nil {
+			t.Fatalf("count milestones: %v", qerr)
+		}
+		return n
+	}
+
+	// 1. NEGATIVE: home caller (CallerOrgID = fx.OrgID) scoping a milestone to
+	//    the FOREIGN org's project ⇒ NOT_FOUND, nothing inserted.
+	ms, err := workitems.CreateMilestone(ctx, &workitems.CreateMilestoneRequest{
+		ProjectID:   foreignProject,
+		CallerOrgID: fx.OrgID,
+		Name:        "Foreign Q1",
+		StartDate:   "2026-01-01",
+		EndDate:     "2026-03-31",
+	})
+	if err == nil {
+		t.Fatalf("cross-tenant CreateMilestone (foreign project_id) succeeded, want NOT_FOUND")
+	}
+	if errs.Code(err) != errs.NotFound {
+		t.Fatalf("cross-tenant CreateMilestone err code = %v, want NotFound", errs.Code(err))
+	}
+	if ms != nil {
+		t.Fatalf("cross-tenant CreateMilestone returned a milestone %+v, want nil", ms)
+	}
+	if n := milestoneCount(); n != 0 {
+		t.Fatalf("cross-tenant CreateMilestone inserted %d row(s) into foreign project, want 0", n)
+	}
+
+	// 2. POSITIVE control: home caller scoping a milestone to its OWN project
+	//    ⇒ gate passes, milestone created.
+	own, err := workitems.CreateMilestone(ctx, &workitems.CreateMilestoneRequest{
+		ProjectID:   fx.ProjectID,
+		CallerOrgID: fx.OrgID,
+		Name:        "Home Q1",
+		StartDate:   "2026-01-01",
+		EndDate:     "2026-03-31",
+	})
+	if err != nil {
+		t.Fatalf("same-org CreateMilestone (own project, CallerOrgID=fx.OrgID) failed: %v", err)
+	}
+	if own == nil || own.ID == "" {
+		t.Fatalf("same-org CreateMilestone returned empty milestone")
+	}
+	if own.ProjectID != fx.ProjectID {
+		t.Fatalf("same-org CreateMilestone project_id = %q, want %q", own.ProjectID, fx.ProjectID)
+	}
+
+	// 3. EMPTY CallerOrgID is the trusted-internal NO-OP: a project-scoped
+	//    milestone with no org context still creates (the path the §11.1.1
+	//    E2E seed and every existing milestone test depends on).
+	noop, err := workitems.CreateMilestone(ctx, &workitems.CreateMilestoneRequest{
+		ProjectID: fx.ProjectID,
+		Name:      "Noop Q2",
+		StartDate: "2026-04-01",
+		EndDate:   "2026-06-30",
+	})
+	if err != nil {
+		t.Fatalf("empty-CallerOrgID CreateMilestone (no-op path) failed: %v", err)
+	}
+	if noop == nil || noop.ID == "" {
+		t.Fatalf("empty-CallerOrgID CreateMilestone returned empty milestone")
+	}
+}
+
 // claimedStatus reads an item's status column by id for tenant-gate
 // assertions.
 func claimedStatus(t *testing.T, ctx context.Context, id string) string {

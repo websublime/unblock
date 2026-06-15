@@ -2861,11 +2861,27 @@ func CreateMilestone(ctx context.Context, req *CreateMilestoneRequest) (*Milesto
 		// (deferred to P02) inherits the gate.
 	}
 
-	_, err = tx.Exec(ctx,
+	// Row-level tenant gate for the project-scoped branch (bead
+	// unblock-tv8.83, §10.1.1): the project-scoped milestone's ProjectID is
+	// stamped from the wire, so the INSERT only proceeds when the target
+	// project belongs to the caller's org. We express this as a guarded
+	// INSERT … SELECT whose WHERE is satisfiable ONLY when (a) the
+	// empty-CallerOrgID no-op fires (trusted internal / E2E-seed callers —
+	// a DELIBERATE divergence from CreateLabel's hard-reject), (b) this is
+	// the org-scoped branch (project_id empty), or (c) the project_id is in
+	// the caller's org's projects. A foreign project ULID yields ZERO
+	// inserted rows → NOT_FOUND below, never a cross-tenant write. The
+	// already-gated parent_milestone_id parent-read seam above is unchanged;
+	// CallerOrgID is pinned from identity.OrgID by the MCP handler, never the
+	// wire.
+	tag, err := tx.Exec(ctx,
 		`INSERT INTO workitems.milestones
 		   (id, parent_milestone_id, org_id, project_id, name, description, start_date, end_date)
-		 VALUES ($1, NULLIF($2, ''), NULLIF($3, ''), NULLIF($4, ''), $5, $6, $7, $8)`,
-		id, req.ParentMilestoneID, req.OrgID, req.ProjectID, name, req.Description, req.StartDate, req.EndDate,
+		 SELECT $1, NULLIF($2, ''), NULLIF($3, ''), NULLIF($4, ''), $5, $6, $7, $8
+		  WHERE $9 = ''
+		     OR $4 = ''
+		     OR $4 IN (SELECT id FROM org.projects WHERE org_id = $9)`,
+		id, req.ParentMilestoneID, req.OrgID, req.ProjectID, name, req.Description, req.StartDate, req.EndDate, req.CallerOrgID,
 	)
 	if err != nil {
 		if isCheckViolation(err, "milestones_scope_xor_chk") {
@@ -2882,6 +2898,14 @@ func CreateMilestone(ctx context.Context, req *CreateMilestoneRequest) (*Milesto
 		}
 		rlog.Error("workitems: milestone insert failed", "err", err)
 		return nil, &errs.Error{Code: errs.Internal, Message: "milestone insert failed"}
+	}
+	// Zero inserted rows means the project-scoped guard rejected the project:
+	// the project_id does not belong to the caller's org (or does not exist).
+	// Surface NOT_FOUND — the same shape a non-existent project would yield —
+	// so a cross-tenant project ULID is indistinguishable from a missing one
+	// and never leaks existence across the tenant boundary.
+	if tag.RowsAffected() == 0 {
+		return nil, &errs.Error{Code: errs.NotFound, Message: "milestone project does not exist"}
 	}
 
 	if err := tx.Commit(); err != nil {
