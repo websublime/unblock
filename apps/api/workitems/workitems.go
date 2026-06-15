@@ -1182,7 +1182,15 @@ func Update(ctx context.Context, req *UpdateRequest) (*Item, error) {
 	// otherwise pass). The clear-to-null path (milestone_id = "") and the
 	// nil = unchanged path both set $6 = '' and satisfy the empty disjunct,
 	// carrying NO milestone predicate — PRESERVED. The empty-CallerOrgID
-	// no-op ($7 = '') is PRESERVED.
+	// no-op ($7 = '') is PRESERVED for those empty-milestone ($6 = '')
+	// paths. It is NARROWED for the set-milestone case: when CallerOrgID is
+	// empty AND a non-empty milestone_id is supplied, the milestone subquery
+	// (org_id = '' OR project_id IN projects of org_id = '') matches nothing →
+	// zero rows → NOT_FOUND, rather than an unscoped set. This is unreachable
+	// in practice — the MCP handler always pins CallerOrgID from identity.OrgID
+	// and no trusted internal caller sets a milestone via Update with an empty
+	// CallerOrgID — and mirrors the Create (~1044) / AssignItem (~3137)
+	// precedent exactly.
 	tag, err := tx.Exec(ctx,
 		`UPDATE workitems.items
 		    SET title       = COALESCE($2, title),
