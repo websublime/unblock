@@ -69,6 +69,16 @@ type CreateProjectRequest struct {
 	OrgID string `json:"org_id"`
 	Name  string `json:"name"`
 	Slug  string `json:"slug"`
+	// CallerUserID is the caller-membership gate key (bead
+	// unblock-tv8.86). It is pinned from the resolved caller identity
+	// (the future key-management BFF / web-admin surface's
+	// session→user→org resolution, §4.3.2) and is NEVER accepted from
+	// the wire — exactly the §10.1.1 internal-channel convention. When
+	// non-empty the RPC requires the caller to be a write-capable member
+	// of OrgID before the INSERT. Empty → dormant no-op (the trusted
+	// §11.1.1 seed + org / rbactest / exitcriteriontest / perftest
+	// callers pass no caller identity).
+	CallerUserID string `json:"caller_user_id"` // ULID
 }
 
 // AddMemberRequest is the input to AddMember. SPEC §4.2.
@@ -76,6 +86,17 @@ type AddMemberRequest struct {
 	OrgID  string `json:"org_id"`
 	UserID string `json:"user_id"`
 	Role   string `json:"role"` // "owner" | "admin" | "member" | "viewer"
+	// CallerUserID is the caller-admin gate key + role-cap basis (bead
+	// unblock-tv8.86). It is pinned from the resolved caller identity
+	// (the future key-management BFF / web-admin surface's
+	// session→user→org resolution, §4.3.2) and is NEVER accepted from
+	// the wire — exactly the §10.1.1 internal-channel convention. When
+	// non-empty the RPC requires the caller to hold an admin/owner
+	// org.members row in OrgID AND caps the granted Role at the caller's
+	// effective role (no granting above one's own). Empty → dormant
+	// no-op (the trusted §11.1.1 seed + org / rbactest /
+	// exitcriteriontest / perftest callers pass no caller identity).
+	CallerUserID string `json:"caller_user_id"` // ULID
 }
 
 // AuthorizeRequest is the input to Authorize. SPEC §4.2.
@@ -276,6 +297,29 @@ func CreateOrganization(ctx context.Context, req *CreateOrganizationRequest) (*O
 // CreateProject inserts a new org.projects row. UNIQUE (org_id, slug)
 // is enforced by projects_org_slug_uniq.
 //
+// Tenant gate (bead unblock-tv8.86, SPEC §4.2 / §10.1.1). Pre-this-round
+// the only guard on the wire-supplied OrgID was the org_id FK →
+// NotFound, which catches a NON-EXISTENT org but NOT a FOREIGN EXISTING
+// one — so a caller could create a project under any other tenant's org
+// (a WARNING-class cross-tenant write IDOR). It is NOT reachable from the
+// MCP agent wire today (no MCP tool maps to it; only test/seed callers
+// exist) — LATENTLY exploitable once a future key-management / web-admin
+// BFF is wired. When CallerUserID is non-empty the RPC requires the
+// caller to be a write-capable member of OrgID (an org.members row whose
+// role permits the "write" action, the org.Authorize predicate, SELECT
+// role FROM org.members WHERE org_id=$1 AND user_id=$2, §4.2 /
+// apps/api/org/org.go:520) BEFORE the INSERT; a foreign / non-member
+// OrgID → NotFound (replacing the FK→NotFound, which only caught a
+// non-existent org), nothing inserted, existence not leaked. CallerUserID
+// is pinned from the resolved caller identity (the future BFF's
+// session→user→org resolution, §4.3.2) and is NEVER from the wire. Empty
+// CallerUserID is a NO-OP (dormant gate): the gate is skipped so the
+// trusted §11.1.1 seed + org / rbactest / exitcriteriontest / perftest
+// callers (no caller identity) operate unscoped — DORMANT until the
+// future BFF pins CallerUserID, and that future bead MUST pin it (else
+// the no-op leaves the IDOR open). No org schema change — the gate is an
+// org.members membership read.
+//
 //encore:api private method=POST path=/org.CreateProject
 func CreateProject(ctx context.Context, req *CreateProjectRequest) (*Project, error) {
 	if req == nil {
@@ -291,6 +335,32 @@ func CreateProject(ctx context.Context, req *CreateProjectRequest) (*Project, er
 	slug, err := normaliseSlug(req.Slug)
 	if err != nil {
 		return nil, err
+	}
+
+	// Tenant gate (bead unblock-tv8.86): when CallerUserID is pinned,
+	// require the caller to be a write-capable member of OrgID before
+	// the INSERT. Empty CallerUserID is a dormant no-op (trusted §11.1.1
+	// seed / org / rbactest / exitcriteriontest / perftest callers). A
+	// foreign / non-member OrgID surfaces as NotFound (existence not
+	// leaked), never a cross-tenant write.
+	if req.CallerUserID != "" {
+		role, err := orgMemberRole(ctx, req.OrgID, req.CallerUserID)
+		if err != nil {
+			rlog.Error("org: create project caller-membership lookup failed", "err", err, "org_id", req.OrgID)
+			return nil, &errs.Error{Code: errs.Internal, Message: "create project failed"}
+		}
+		// Caller must be a member AND hold a role that permits the
+		// "write" action (owner/admin/member; viewer is read-only). A
+		// non-member OR a write-incapable member both surface as
+		// NotFound so a cross-tenant probe cannot distinguish "org does
+		// not exist" from "org belongs to another tenant" (existence
+		// not leaked).
+		if role == "" || !rolePermits(role, actionWrite) {
+			return nil, &errs.Error{
+				Code:    errs.NotFound,
+				Message: fmt.Sprintf("organization %q not found", req.OrgID),
+			}
+		}
 	}
 
 	id, err := ulid.New()
@@ -425,6 +495,32 @@ type projectRow struct {
 // AddMember inserts an org.members row. Role is validated client-side
 // so the DB CHECK (members_role_chk) is never the surface error.
 //
+// Tenant gate (bead unblock-tv8.86, SPEC §4.2 / §10.1.1) — CRITICAL
+// privilege escalation. Pre-this-round the INSERT stamped OrgID, UserID,
+// and Role straight from the wire with ZERO caller-ownership check
+// (callerIdentity fed only the invited_by audit column, NEVER
+// authorization) and Role had no cap — so a caller could mint themselves
+// (or anyone) as owner of ANY existing org. It is NOT reachable from the
+// MCP agent wire today (no MCP tool maps to it; only test/seed callers
+// exist) — LATENTLY exploitable once a future key-management / web-admin
+// BFF is wired. When CallerUserID is non-empty the RPC enforces BOTH:
+// (a) the caller holds an admin/owner org.members row in OrgID (the
+// org.Authorize predicate, SELECT role FROM org.members WHERE org_id=$1
+// AND user_id=$2, §4.2 / apps/api/org/org.go:520) BEFORE the INSERT; and
+// (b) the granted Role is CAPPED at the caller's effective role — a
+// caller cannot grant a role above their own. A foreign / non-member
+// OrgID or an unauthorised (non-admin) caller → NotFound (existence not
+// leaked); an over-grant → PermissionDenied; nothing inserted in either
+// case. CallerUserID is pinned from the resolved caller identity (the
+// future BFF's session→user→org resolution, §4.3.2) and is NEVER from
+// the wire. Empty CallerUserID is a NO-OP (dormant gate): the gate is
+// skipped so the trusted §11.1.1 seed + org / rbactest /
+// exitcriteriontest / perftest callers (no caller identity) operate
+// unscoped — DORMANT until the future BFF pins CallerUserID, and that
+// future bead MUST pin it (else the no-op leaves the priv-esc open). No
+// org schema change — the gate is an org.members membership read + a
+// role cap.
+//
 //encore:api private method=POST path=/org.AddMember
 func AddMember(ctx context.Context, req *AddMemberRequest) error {
 	if req == nil {
@@ -454,17 +550,56 @@ func AddMember(ctx context.Context, req *AddMemberRequest) error {
 		}
 	}
 
+	// Tenant gate + role cap (bead unblock-tv8.86): when CallerUserID is
+	// pinned, the caller must be an admin/owner of OrgID, and the
+	// granted Role must not exceed the caller's effective role. Empty
+	// CallerUserID is a dormant no-op (trusted §11.1.1 seed / org /
+	// rbactest / exitcriteriontest / perftest callers).
+	if req.CallerUserID != "" {
+		callerRole, err := orgMemberRole(ctx, req.OrgID, req.CallerUserID)
+		if err != nil {
+			rlog.Error("org: add member caller-membership lookup failed", "err", err, "org_id", req.OrgID)
+			return &errs.Error{Code: errs.Internal, Message: "add member failed"}
+		}
+		// (a) Caller must hold an admin or owner row in OrgID. A
+		// non-member, or a member without admin authority, surfaces as
+		// NotFound so a cross-tenant probe cannot distinguish "org does
+		// not exist" from "org belongs to another tenant" or "caller
+		// lacks admin" (existence not leaked).
+		if callerRole != roleAdmin && callerRole != roleOwner {
+			return &errs.Error{
+				Code:    errs.NotFound,
+				Message: fmt.Sprintf("organization %q not found", req.OrgID),
+			}
+		}
+		// (b) Role cap: the granted role may not exceed the caller's
+		// effective role (an admin cannot mint an owner). An over-grant
+		// is an authorization failure, not an existence probe, so it
+		// surfaces as PermissionDenied.
+		if roleStrength[req.Role] > roleStrength[callerRole] {
+			return &errs.Error{
+				Code:    errs.PermissionDenied,
+				Message: fmt.Sprintf("cannot grant role %q above caller's role %q", req.Role, callerRole),
+				Meta:    errs.Metadata{"field": "role"},
+			}
+		}
+	}
+
 	id, err := ulid.New()
 	if err != nil {
 		return &errs.Error{Code: errs.Internal, Message: "member id generation failed"}
 	}
 
-	// invited_by is sourced from the caller's auth.Identity (Encore
-	// auth-context wired via auth.UserID). Nullable in the schema —
-	// when the caller is an agent or the context is missing, we
-	// insert NULL rather than fabricating a user id.
+	// invited_by is the audit trail for who added this member. When the
+	// caller identity is pinned off-wire (CallerUserID, the future BFF
+	// surface) it is authoritative; otherwise we fall back to the Encore
+	// auth-context identity (callerIdentity). Nullable in the schema —
+	// when neither is present, or the caller is an agent, we insert NULL
+	// rather than fabricating a user id.
 	var invitedBy any
-	if identity, ok := callerIdentity(ctx); ok && identity.UserID != "" && identity.Role != roleAgent {
+	if req.CallerUserID != "" {
+		invitedBy = req.CallerUserID
+	} else if identity, ok := callerIdentity(ctx); ok && identity.UserID != "" && identity.Role != roleAgent {
 		invitedBy = identity.UserID
 	}
 
@@ -638,6 +773,33 @@ func effectiveRole(ctx context.Context, orgID, projectID, userID string) (string
 	}
 
 	return strongerRole(orgRole, projectRole), nil
+}
+
+// orgMemberRole returns the org-level role of userID in orgID, or "" when
+// the user has no org.members row. It is the load-bearing gate read for
+// the CreateProject caller-membership and AddMember caller-admin checks
+// (bead unblock-tv8.86) — the same canonical predicate org.Authorize keys
+// on (SELECT role FROM org.members WHERE org_id=$1 AND user_id=$2, §4.2 /
+// apps/api/org/org.go:520-624). A genuine "no membership" returns
+// ("", nil); only a real query failure returns a non-nil error. Empty
+// orgID/userID can never match a membership row, so they short-circuit to
+// ("", nil) — a malformed caller cannot probe with empty ids.
+func orgMemberRole(ctx context.Context, orgID, userID string) (string, error) {
+	if orgID == "" || userID == "" {
+		return "", nil
+	}
+	var role string
+	err := db.QueryRow(ctx,
+		`SELECT role FROM org.members WHERE org_id = $1 AND user_id = $2`,
+		orgID, userID,
+	).Scan(&role)
+	if err != nil {
+		if errors.Is(err, sqldb.ErrNoRows) {
+			return "", nil
+		}
+		return "", fmt.Errorf("org members lookup: %w", err)
+	}
+	return role, nil
 }
 
 // strongerRole returns the rank-max of two role strings. Empty strings
