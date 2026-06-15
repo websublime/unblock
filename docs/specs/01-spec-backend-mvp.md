@@ -1,7 +1,8 @@
 # SPEC: P01 — Backend MVP Implementation Contract
 
-**Status:** APPROVED (org-provisioning write-surface tenant gates applied 2026-06-15 — §10.1.1 gate-model + §4.2 extended to the two `org` RPCs that write tenant-scoped rows from the wire (`org.AddMember` caller-admin `org.members` predicate + role cap — closing a CRITICAL cross-tenant privilege escalation; `org.CreateProject` caller-membership predicate replacing the FK→`NotFound` that only caught a non-existent org — closing a WARNING write IDOR), the sibling org-provisioning RPCs the `.85` admin/BFF sweep set aside — DORMANT (empty-caller no-op) until a future key-management BFF pins the caller identity (bead `unblock-tv8.86`); auth/BFF admin write-surface tenant gates applied 2026-06-15 — §10.1.1 gate-model extended to the two `auth` RPCs that write `mcp.api_keys` (`IssueAPIKey` `org.Authorize`-on-`CallerUserID` ownership + `issued_to_user ∈ org.members`; `RevokeAPIKey` `CallerOrgID` row predicate on the UPDATE), closing TWO LATENT cross-tenant write IDORs on the admin/BFF surface the MCP-wire sweep set aside — DORMANT (empty-caller no-op) until a future key-management BFF pins the caller identity (bead `unblock-tv8.85`); `Update.milestone_id` write-scope tenant gate applied 2026-06-15 — §10.1.1 gate-model extended to `workitems.Update`'s wire-supplied `milestone_id` selector (org-XOR-project milestone predicate, `AssignItem`/`Create` precedent), closing the CRITICAL cross-tenant write IDOR that `.83`'s AC4 wrongly assumed gated (bead `unblock-tv8.84`); `create_milestone.project_id` INSERT-scope tenant gate applied 2026-06-15 — §10.1.1 gate-model extended to `workitems.CreateMilestone`'s project-scoped `project_id` selector (guarded INSERT…SELECT, `CreateLabel` precedent), closing the last ungated cross-reference write-IDOR in the family (bead `unblock-tv8.83`); create-path cross-reference tenant validation applied 2026-06-12 — §10.1.1 gate-model extended to `workitems.Create`'s wire references, keyed on the existing `req.OrgID` per Miguel's 2026-06-12 DECISION, + §4.4 `CreateRequest`/`DependencyEdge` drift reconciliation; round-16 write-surface tenant-hardening lockstep applied 2026-06-11 — §10.1.1 row-level write gate + per-RPC `CallerOrgID` channel + deps fold-in + `CreateLabel` empty-`CallerOrgID` guard; round-16 label-tools drift-closure applied 2026-06-11 — labels `updated_at` migration `0130` + Tools 20–23 auth wording + Tools 16/19 wire-sample/prose alignment; round-16 P01 tool-surface scope amendment applied 2026-06-04; §3.5 fifth-secret addition applied 2026-06-02; round-15 NFR-1 harness test-isolation + mcpaudittest hardening applied 2026-05-29; round-14 NFR-1 latency-harness scope applied 2026-05-29; round-6 cascade-symmetry applied 2026-05-12; round-5 tracing applied 2026-05-12; round-4 auth applied 2026-05-11; DRIFT-1/-2 applied 2026-05-08; round-2 applied 2026-05-08; round-3 research applied 2026-05-08; original APPROVED 2026-05-07)
+**Status:** APPROVED (cascade publish-trigger / §5.7.1 derivation-input reconciliation applied 2026-06-15 — §6.2 Tool 13 `set_state` + §6.2 Tool 10 `comment` Side-effects, §6.3.0 Regime B + `state_change` row + non-publisher list, §6.3.2 subscriber + enum bullet, §4.4 `SetStateColumns` + `AppendComment` doc-comments reconciled so the cascade-publish trigger set EQUALS the AUTHORITATIVE root-SPEC §5.7.1 derivation-input set: a pure `pipeline_state` write AND an investigation/review comment append are §5.7.1-affecting and MUST publish `CascadeRequested{state_change}` — closing the STALE-`pipeline_stage` internal self-contradiction (the former "pure `pipe_state` is exempt" carve-out, FACTUALLY WRONG vs §5.7.1 rows 1–3, RETIRED); no DDL/migration/derivation-table change, root SPEC untouched (bead `unblock-tv8.87`); org-provisioning write-surface tenant gates applied 2026-06-15 — §10.1.1 gate-model + §4.2 extended to the two `org` RPCs that write tenant-scoped rows from the wire (`org.AddMember` caller-admin `org.members` predicate + role cap — closing a CRITICAL cross-tenant privilege escalation; `org.CreateProject` caller-membership predicate replacing the FK→`NotFound` that only caught a non-existent org — closing a WARNING write IDOR), the sibling org-provisioning RPCs the `.85` admin/BFF sweep set aside — DORMANT (empty-caller no-op) until a future key-management BFF pins the caller identity (bead `unblock-tv8.86`); auth/BFF admin write-surface tenant gates applied 2026-06-15 — §10.1.1 gate-model extended to the two `auth` RPCs that write `mcp.api_keys` (`IssueAPIKey` `org.Authorize`-on-`CallerUserID` ownership + `issued_to_user ∈ org.members`; `RevokeAPIKey` `CallerOrgID` row predicate on the UPDATE), closing TWO LATENT cross-tenant write IDORs on the admin/BFF surface the MCP-wire sweep set aside — DORMANT (empty-caller no-op) until a future key-management BFF pins the caller identity (bead `unblock-tv8.85`); `Update.milestone_id` write-scope tenant gate applied 2026-06-15 — §10.1.1 gate-model extended to `workitems.Update`'s wire-supplied `milestone_id` selector (org-XOR-project milestone predicate, `AssignItem`/`Create` precedent), closing the CRITICAL cross-tenant write IDOR that `.83`'s AC4 wrongly assumed gated (bead `unblock-tv8.84`); `create_milestone.project_id` INSERT-scope tenant gate applied 2026-06-15 — §10.1.1 gate-model extended to `workitems.CreateMilestone`'s project-scoped `project_id` selector (guarded INSERT…SELECT, `CreateLabel` precedent), closing the last ungated cross-reference write-IDOR in the family (bead `unblock-tv8.83`); create-path cross-reference tenant validation applied 2026-06-12 — §10.1.1 gate-model extended to `workitems.Create`'s wire references, keyed on the existing `req.OrgID` per Miguel's 2026-06-12 DECISION, + §4.4 `CreateRequest`/`DependencyEdge` drift reconciliation; round-16 write-surface tenant-hardening lockstep applied 2026-06-11 — §10.1.1 row-level write gate + per-RPC `CallerOrgID` channel + deps fold-in + `CreateLabel` empty-`CallerOrgID` guard; round-16 label-tools drift-closure applied 2026-06-11 — labels `updated_at` migration `0130` + Tools 20–23 auth wording + Tools 16/19 wire-sample/prose alignment; round-16 P01 tool-surface scope amendment applied 2026-06-04; §3.5 fifth-secret addition applied 2026-06-02; round-15 NFR-1 harness test-isolation + mcpaudittest hardening applied 2026-05-29; round-14 NFR-1 latency-harness scope applied 2026-05-29; round-6 cascade-symmetry applied 2026-05-12; round-5 tracing applied 2026-05-12; round-4 auth applied 2026-05-11; DRIFT-1/-2 applied 2026-05-08; round-2 applied 2026-05-08; round-3 research applied 2026-05-08; original APPROVED 2026-05-07)
 **Changelog:**
+- 2026-06-15 — cascade publish-trigger / §5.7.1 derivation-input reconciliation (bead `unblock-tv8.87`, discovered + live-confirmed by the 2026-06-15 MCP catalogue sweep; status remains APPROVED — this reconciles an internal SELF-CONTRADICTION toward the AUTHORITATIVE root-SPEC §5.7.1 derivation table, NOT a re-architecting / behavioral-derivation change; same shape as the `.81` reconciliation). **The contradiction (all verbatim):** root `docs/SPEC.md` §5.7.1 "Derivation table (authoritative)" (lines 786–804) derives `pipeline_stage`, FIRST and short-circuiting, from the item's OWN `pipeline_state` (`needs_human`/`paused` → `Deferred`; `no_investigation` AND `impl=pending` → `Implementation` — rows 1–3) AND from comment existence (`kind=review` → `Review`; `kind=investigation` → `Implementation` — the comment-existence rows). This table is AUTHORITATIVE and CORRECT. But this phase spec's cascade-publish TRIGGER set was NARROWER than that derivation-input set: §6.2 Tool 13 (`set_state`) said "pure `pipe_state` mutations do NOT publish" with the FALSE justification that "§5.7.1 derives `pipeline_stage` from the upstream chain … not from a downstream item's own `pipe_state`" (disproven by §5.7.1 rows 1–3 — the item's OWN `pipeline_state` IS the first, short-circuiting input — and live-confirmed: a later impl-write re-derived `pipeline_stage = Deferred` honoring an earlier `pipeline_state = needs_human`); and §6.2 Tool 10 (`comment`/`AppendComment`) published NO `CascadeRequested` at all, yet a `kind=investigation`/`kind=review` comment append IS a §5.7.1 comment-existence input. Net effect: `pipeline_stage` went STALE after a pure `pipeline_state` write OR an investigation/review comment append. §6.3.0's OWN framing of `set_state`'s publish as a "narrow rule for §5.7.1-affecting writes" already implied the fix — a pure `pipeline_state` write IS §5.7.1-affecting. **The §5.7.1 table WINS** (exactly as the §11.1.2 exit criterion won in the `.81` reconciliation). The ONLY self-consistent reading: the cascade-publish trigger set MUST EQUAL the §5.7.1 derivation-input set — a pure `pipeline_state` write AND an investigation/review comment append are §5.7.1-affecting and MUST publish `CascadeRequested{Reason:"state_change", TriggeredByItemID:item_id}`. **Reconciled in lockstep (docs only):** (1) §6.2 Tool 13 `set_state` Side-effects — rewritten: a write changing ANY §5.7.1 input (the item's own `pipeline_state` rows 1–3 INCLUDED) MUST publish; the false "pure `pipe_state` exempt" carve-out + its justification RETIRED; states publish-trigger = §5.7.1 input set; (2) §6.2 Tool 10 `comment` — NEW Side-effects clause: `AppendComment` with `kind ∈ {investigation, review}` MUST publish `state_change` (other kinds need not); (3) §6.3.0 — Regime B intro gains the publish-trigger = §5.7.1-input-set INVARIANT; the `state_change` table row + the non-publisher list + the §6.3.2 subscriber `state_change` comment + the `'state_change'` enum bullet all updated to add `AppendComment` (investigation/review) and pure `pipeline_state` writes as publishers, with a "retired non-publisher (tension #3)" note; (4) §4.4 `SetStateColumns` + `AppendComment` doc-comments — publish prose reconciled (pure `pipeline_state` write publishes; investigation/review comment publishes). **§11.3 reconciled — no edit needed:** §11.3 (a) "`pipeline_stage` single-writer = the cascade subscriber" is STRENGTHENED, not contradicted — the trigger SET widens but the subscriber remains the SOLE writer; §11.1.2 exit criteria assert the existing `close`/edge/`set_state(qa)` paths and are unaffected (the implementation bead adds the new `state_change` assertions). **NOT touched (separate ownership): the cascade-publish CODE (`apps/api/workitems/` `SetStateColumns` + `AppendComment` publish paths) + the `apps/api/deps/` cascade subscriber + the exit-criterion / property tests — implementation bead `unblock-tv8.87` (Greta) owns those on its branch.** **No DDL / migration / behavioral-derivation change** — the §5.7.1 derivation table is UNCHANGED; only the publish-trigger set widens to MATCH it (the `deps.cascade_events.kind` enum already carries `'state_change'`; no new kind). **Root `docs/SPEC.md` is UNTOUCHED** — its §5.7.1 derivation table (lines 786–804) is the authoritative, correct side this reconciles TOWARD; its §9.4.4 `deps.cascade_events.kind` doc-block (lines 1667–1674) and round-6 sync log (lines 2419–2421) describe the `state_change` provenance ILLUSTRATIVELY ("Tool 13 review/qa state writes … and `workitems.Claim` I-3 reset") anchored on "writes that can flip `pipeline_stage` for downstream items" = §5.7.1-affecting; they carry NO exclusionary publish-trigger claim that pure `pipeline_state` writes or investigation/review comment appends MUST NOT publish, so no contradiction exists there (verified). Spec status remains APPROVED.
 - 2026-06-15 — org-provisioning write-surface tenant gates (bead `unblock-tv8.86`, discovered-from the 2026-06-15 admin/BFF surface IDOR sweep — the SIBLING org-provisioning RPCs the `.85` round, on the same admin/BFF surface, deliberately set aside; status remains APPROVED — this is an additive §10.1.1 gate-model + §4.2 extension closing a CRITICAL cross-tenant privilege escalation + a write IDOR, NOT a re-architecting). Two `private` Encore RPCs in `apps/api/org/org.go` write tenant-scoped rows from the wire with NO caller-ownership check: **(1) `org.AddMember` (org.go:429-475) — CRITICAL cross-tenant privilege escalation** — takes `OrgID`/`UserID`/`Role` straight from the wire and INSERTs an `org.members` row with ZERO caller-ownership check (`callerIdentity` feeds only the `invited_by` audit column, NEVER authorization), and `Role` has no cap → a caller can mint itself (or anyone) as `owner` of ANY existing org; **(2) `org.CreateProject` (org.go:280-311) — WARNING** — takes `OrgID` from the wire and INSERTs an `org.projects` row under it; the only guard is the FK→`NotFound`, which catches a NON-EXISTENT org but NOT a FOREIGN existing one. NEITHER is reachable from the MCP agent wire today (no MCP tool maps to them; no non-test in-repo caller; `apps/web` is a README placeholder) — both are LATENTLY exploitable cross-tenant once a future key-management / web-admin BFF is wired. **Locked contract (decided by Miguel — fix now via spec-first, mirroring `.85`):** these RPCs carry NO caller identity today; the fix ADDS an off-wire `CallerUserID` channel pinned from the resolved session identity (the future BFF's session→user→org resolution, §4.3.2), NEVER from the wire — exactly the §10.1.1 / `.85` internal-channel convention, NOT a wire argument. **AddMember:** new `CallerUserID` field; when non-empty, require the caller to hold an **admin/owner** `org.members` row in `OrgID` (`SELECT role FROM org.members WHERE org_id=$1 AND user_id=$2`, §4.2 / `org.go:520`) BEFORE the INSERT, AND **cap the grantable `Role` at the caller's effective role** (a caller cannot grant above their own). A foreign / non-member `OrgID`, an unauthorised caller, or an over-grant → `NOT_FOUND` / appropriate error, nothing inserted, existence not leaked. **CreateProject:** new `CallerUserID` field; when non-empty, require the caller to be a **write-capable member** of `OrgID` before the INSERT; a foreign / non-member `OrgID` → `NOT_FOUND`, **replacing the FK→`NotFound`** that only caught a non-existent org. **Empty-caller NO-OP (dormant gate):** when `CallerUserID` is empty (the trusted §11.1.1 seed + `org` / `rbactest` / `exitcriteriontest` / `perftest` callers, which pass no caller identity) the gate is skipped — DORMANT until the future BFF pins the caller; that future bead MUST pin it (else the no-op leaves the priv-esc / IDOR open). Same empty-caller no-op precedent as `.85` / the §10.1.1 item/milestone write-RPC pattern. Bootstrapping is correctly OUT of scope: `org.CreateOrganization` (caller becomes owner), `auth.ExchangeOAuthCode` / `auth.Validate` (identity establishment). Infra CONFIRMED present: `org.members` (migration `0030`), `org.Authorize` (`org.go:520`), the org service owns the `org` schema (direct read OK). Proactively noted: `org.project_members` has no write RPC yet (seed-only) — a future `AddProjectMember`-style RPC will need the IDENTICAL gate. Patched in lockstep: §4.2 (new `CreateProject` / `AddMember` tenant-gate doc-comments + `CreateProjectRequest` / `AddMemberRequest` struct stubs carrying the new `CallerUserID` channel; the `Authorize` doc-comment reconciled — see below; the future-`AddProjectMember` note); §10.1.1 "Auth / BFF admin write surface" subsection (two new rows — `org.AddMember`, `org.CreateProject` — + the org-provisioning intro paragraph + widened closing no-op prose). **Spec self-overclaim reconciled:** the §4.2 `Authorize` doc-comment said `Authorize` is "called by every other service before reading or writing a resource", which could be read to imply `org`'s OWN writes route through it — they do NOT; reworded to "the canonical CROSS-SERVICE RBAC predicate … called by every OTHER service", with an explicit note that `CreateProject` / `AddMember` self-gate via the new `CallerUserID` `org.members` predicate (dormant) while `Authorize` remains the cross-service primitive OTHER services call. **NOT touched (separate ownership): `apps/api/org/org.go` (the gates + the new request fields) + `apps/api/workitems/workitems.go:109-117` (the FALSE "org writes are gated" auth-model doc-comment, which is the CODE's to correct) + tests — the implementation bead `unblock-tv8.86` (Greta) owns those on its branch.** **No DDL / migration / public-API change** — the gates are membership predicates + an `org.Authorize` call + (for `AddMember`) a role cap; the `org` schema (incl. `org.members`, `org.projects`) is UNCHANGED. **Root `docs/SPEC.md` is untouched** — its §5.6 RBAC prose (row-level filtering "applied uniformly to every read and write path") is STRENGTHENED, not contradicted; it carries NO claim that `org`'s own provisioning self-writes are already gated, so no contradiction exists there (verified). Spec status remains APPROVED.
 - 2026-06-15 — auth/BFF admin write-surface tenant gates (bead `unblock-tv8.85`, discovered-from the 2026-06-15 cross-tenant write-IDOR audit extended to the ADMIN/BFF surface the MCP-wire sweep — `.75`/`.77`/`.78`/`.80`/`.83`/`.84` — deliberately set aside; status remains APPROVED — this is an additive §10.1.1 gate-model extension closing TWO LATENT auth-surface IDORs, NOT a re-architecting). Two `private` Encore RPCs in `apps/api/auth/auth.go` write/modify `mcp.api_keys` rows scoped by `org_id` with NO caller-org ownership check: **(1) `auth.RevokeAPIKey`** — `UPDATE mcp.api_keys SET revoked_at=COALESCE(revoked_at,now()) WHERE id=$1` with no caller predicate (any tenant's key revocable by id); **(2) `auth.IssueAPIKey`** — the INSERT stamps `org_id` + `issued_to_user` straight from the wire with no check the caller owns `org_id` nor that `issued_to_user` is a member of `org_id`. NEITHER is reachable from the MCP agent wire today (no MCP tool maps to them; only test/seed callers, and the §11.1.1 E2E seed writes `mcp.api_keys` via direct INSERT) — they are LATENTLY exploitable cross-tenant once a future key-management BFF / web-admin surface is wired. **Locked contract (decided by Miguel — fix now via spec-first):** these RPCs carry NO caller identity today; the fix ADDS a caller-identity channel pinned from the resolved caller identity (the future BFF's session→user→org resolution, §4.3.2 / `auth.Validate` `TokenKind="session"`), NEVER from the wire — exactly the §10.1.1 internal-channel convention, NOT a wire argument. **RevokeAPIKey:** new `CallerOrgID` field; the UPDATE gains `AND ($caller='' OR org_id=$caller)` so a cross-tenant `key_id` affects zero rows → `NOT_FOUND` (existence not leaked); the `COALESCE` idempotency is PRESERVED. **IssueAPIKey:** new `CallerUserID` field (needed because the ownership check uses `org.Authorize`, which keys on the caller's user id); gate on BOTH (a) caller owns `org_id` via `org.Authorize(CallerUserID, <write action>, OrgID)` — `SELECT role FROM org.members WHERE org_id=$1 AND user_id=$2` (`apps/api/org/org.go:520`) — and (b) `issued_to_user ∈ org.members(OrgID)`; a foreign `org_id` or a non-member `issued_to_user` → rejected (`NOT_FOUND` / appropriate error), nothing inserted. **Empty-caller NO-OP (dormant gate):** when the caller-identity field is empty (the trusted §11.1.1 E2E seed + integration / mcpaudit / perf tests, which pass no caller identity or seed `mcp.api_keys` via direct INSERT) the gate is skipped — DORMANT until the future key-management BFF / admin surface pins the caller identity; that future bead MUST pin it (else the no-op leaves it open). This mirrors the §10.1.1 empty-`CallerOrgID` no-op precedent (the MilestoneTree / item-milestone write-RPC pattern), adapted to the auth/BFF surface. Infra CONFIRMED present: `org.members` (migration `0030_org.up.sql:19`, cols org_id/user_id/role), `org.Authorize` (`org.go:520`, membership+role check), `org.AddMember` (`org.go:428`). Patched in lockstep: §4.1 `IssueAPIKey` doc-comment + `IssueAPIKeyRequest` (new `CallerUserID` field) and `RevokeAPIKey` doc-comment + `RevokeAPIKeyRequest` (new `CallerOrgID` field) — each annotated "pinned from the resolved caller identity; NEVER from the wire"; §4.3.2 (new note distinguishing the BFF session-resolution caller identity from the Bearer API-key Validate hot path); §10.1.1 (new "auth/BFF admin write surface" subsection + predicate table — `RevokeAPIKey` caller-org UPDATE predicate, `IssueAPIKey` `org.Authorize` ownership + `issued_to_user` membership — noting (a) NOT MCP-wire-reachable, caller identity pinned by the FUTURE BFF not the Bearer handler; (b) DORMANT empty-caller no-op until that surface is wired, the future bead MUST pin it; (c) cross-tenant probes → `NOT_FOUND`). **NOT touched (separate ownership): `apps/api/auth/auth.go` (the gates + the new request fields) + tests — the implementation bead `unblock-tv8.85` (Greta) owns those on its branch.** **No DDL / migration / public-API change** — the gates are query predicates + an `org.Authorize` call + a membership predicate; the `mcp.api_keys` schema is UNCHANGED. **Root `docs/SPEC.md` is untouched** — its §5.6 RBAC prose (row-level filtering "applied uniformly to every read and write path", `docs/SPEC.md:732`) is STRENGTHENED not contradicted, and its `mcp.api_keys` note (`docs/SPEC.md:1855`) already records `auth.IssueAPIKey` is exercised via direct-INSERT test seeds in P01 — consistent with the dormant-gate framing; no contradicting claim about these RPCs exists there (verified). Spec status remains APPROVED.
 - 2026-06-15 — `Update.milestone_id` write-scope tenant gate (bead `unblock-tv8.84`, discovered-from an adversarial completeness sweep during review of `.83` — which PROVED `.83`'s AC4 ("`create_milestone.project_id` is the LAST ungated selector") INCOMPLETE: `workitems.Update`'s wire-supplied `milestone_id` write was the residual ungated selector — proven by code read 2026-06-15; status remains APPROVED — this is an additive §10.1.1 gate-model extension closing the CRITICAL `Update.milestone_id` cross-tenant write IDOR, NOT a re-architecting). `workitems.Update` wrote the wire-supplied `milestone_id` into `workitems.items` with NO check that the milestone belongs to the caller's org — the `UPDATE`'s only tenant predicate gates the TARGET ITEM's org (`org_id = $caller`, bead `.77`), NOT the new `milestone_id`. Same IDOR class already closed for `.75` (`CreateLabel.project_id`), `.77` (`CreateMilestone.parent` + Update target-item seam), `.78` (`workitems.Create.*`), `.80` (`AppendComment.parent_id`), and `.83` (`create_milestone.project_id`). **Locked contract:** when the request sets a **non-empty** `milestone_id`, the `UPDATE` additionally requires `milestone_id IN (SELECT id FROM workitems.milestones WHERE org_id = $caller OR project_id IN (SELECT id FROM org.projects WHERE org_id = $caller))` — the org-XOR-project milestone predicate, mirroring the EXISTING sibling gates on the two other paths that write the same `items.milestone_id` column, `workitems.Create` and `AssignItem` (both already org-XOR-project gated): a foreign-but-existing `milestone_id` yields zero affected rows → `NOT_FOUND`, the item UNCHANGED, indistinguishable from a missing milestone. The **clear-to-null** path (`milestone_id = ""`) and the **nil = unchanged** path both satisfy the empty-`milestone_id` disjunct and carry NO milestone predicate — PRESERVED; the existing target-item `org_id = $caller` gate (`.77`) and the empty-`CallerOrgID` no-op are PRESERVED. Patched in lockstep: §10.1.1 write-surface predicate table (new `workitems.Update` `milestone_id` write-scope row, distinct from and additional to the existing target-item row); §4.4 `Update` RPC doc-comment (Tenant-gate block extended with the milestone-write paragraph — no struct/field change, `UpdateRequest` already carries `CallerOrgID` and `MilestoneID`); §6.2 Tool 5 `update` (gating prose extended to cover the `milestone_id` selector alongside the existing item gate — no wire change). **NOT touched (separate ownership): `apps/api/workitems/workitems.go` (the `Update` `WHERE`-clause milestone gate + the now-accurate doc-comment) + `apps/api/exitcriteriontest/write_surface_cross_tenant_test.go` (the missing owned-item + foreign-milestone subtest) — the implementation bead `unblock-tv8.84` (Greta) owns those on its branch.** **No DDL / migration / public-API / struct change** — the gate is a query predicate; the existence-only FK is untouched. **Root `docs/SPEC.md` is untouched** — no DDL change, and its §5.6 RBAC prose (row-level filtering applies "uniformly to every read and write path") is strengthened, not contradicted. Spec status remains APPROVED.
@@ -1065,6 +1066,20 @@ type ResolvedRef struct {
 // Empty ParentID is the top-level-comment path; the self-parent prohibition
 // (comments_no_self_parent_chk) is preserved. This closes the parent_id
 // cross-tenant/cross-item IDOR (§10.1.1, §6.2 Tool 10).
+//
+// Cascade publish (bead unblock-tv8.87 — publish-trigger = §5.7.1
+// derivation-input set): comment existence is a §5.7.1 pipeline_stage
+// derivation input (a kind=review comment derives Review; a
+// kind=investigation comment derives Implementation — root SPEC §5.7.1).
+// So after the INSERT commits, when Kind ∈ {investigation, review} this
+// RPC publishes CascadeRequested{Reason:"state_change",
+// TriggeredByItemID:ItemID} so the subscriber recomputes pipeline_stage
+// for this item + its forward 'blocks' closure per §5.7.1 / §6.3.0
+// Regime B. Other Kinds are NOT §5.7.1 inputs and do not publish. The
+// publish is unconditional on the comment landing; the subscriber's
+// pipeline_stage UPDATE is idempotent (no-ops when the derived value is
+// unchanged), so re-publishing on an already-satisfied existence
+// predicate is harmless.
 func AppendComment(ctx context.Context, req AppendCommentRequest) (*Comment, error)
 
 type AppendCommentRequest struct {
@@ -1097,6 +1112,18 @@ type Comment struct {
 //encore:api private method=POST path=/workitems.SetStateColumns
 // Writes one or more of (impl_state, review_state, qa_state, pipeline_state)
 // + recomputes pipeline_stage via the cascade subscriber path.
+//
+// **Cascade publish (bead unblock-tv8.87 — publish-trigger = §5.7.1
+// derivation-input set).** After the UPDATE commits, publishes
+// CascadeRequested{Reason:"state_change", TriggeredByItemID:ItemID} when
+// the write changed ANY §5.7.1 pipeline_stage derivation input. This
+// INCLUDES a pure pipeline_state write (running/needs_human/paused/
+// no_investigation) with NO change to impl/review/qa: the item's own
+// pipeline_state is the FIRST, short-circuiting §5.7.1 input (root SPEC
+// §5.7.1 rows 1-3), so a pure pipeline_state write is §5.7.1-affecting
+// and MUST publish (the former "pure pipe_state is exempt" carve-out was
+// wrong and is retired). The subscriber re-derives pipeline_stage for
+// this item + its forward 'blocks' closure per §5.7.1 / §6.3.0 Regime B.
 //
 // **Tenant gate (round-16 / bead unblock-tv8.77):** self-gates the
 // SELECT … FOR UPDATE row lock on org_id = CallerOrgID (pinned from
@@ -2263,6 +2290,27 @@ the stricter, correct predicate that closes the cross-tenant / cross-item
 (`comments_no_self_parent_chk`) and the empty-`parent_id` top-level path
 are preserved.
 
+**Side-effects (round-6 §6.3.0 symmetric writer model; publish-trigger
+set widened to the full §5.7.1 derivation-input set — bead
+`unblock-tv8.87`).** Comment existence is a §5.7.1 `pipeline_stage`
+derivation input: per root `docs/SPEC.md` §5.7.1, a `kind=review` comment
+existing on the item derives `Review` (and a `kind=investigation` comment
+existing derives `Implementation`). Therefore an `AppendComment` whose
+`kind` is `investigation` or `review` flips a §5.7.1 comment-existence
+predicate the FIRST time such a comment lands on the item, and MUST
+publish `CascadeRequested{Reason:"state_change", TriggeredByItemID:
+item_id, …}` post-commit so the subscriber recomputes `pipeline_stage`
+per §5.7.1. The publish is unconditional on the comment landing (the
+subscriber's `pipeline_stage` UPDATE is itself idempotent — it no-ops
+when the derived value is unchanged, e.g. a second `kind=review` comment;
+see §6.3.2 — so re-publishing on a kind whose existence predicate already
+held is correct and harmless). Comment kinds OTHER than `investigation` /
+`review` are NOT §5.7.1 derivation inputs and need not publish. The
+publish drives the forward `blocks` closure recompute (Regime B); the
+triggered item is re-derived in the same pass. This is the same
+publish-trigger-equals-derivation-input rule as Tool 13's `set_state`:
+the cascade-publish trigger set MUST cover EVERY §5.7.1 derivation input.
+
 #### Tool 11 — `add_dependency`
 
 ```jsonc
@@ -2556,18 +2604,45 @@ two ways, never as an error:
 This is the ONLY warning producer wired in P01/P02 today; the §7 code
 registry is extensible for future cases without a result-shape change.
 
-**Side-effects (round-6 §6.3.0 symmetric writer model — tension #3
-narrow rule).** After the validating UPDATE commits, the handler
+**Side-effects (round-6 §6.3.0 symmetric writer model; publish-trigger
+set widened to the full §5.7.1 derivation-input set — bead
+`unblock-tv8.87`).** After the validating UPDATE commits, the handler
 publishes `CascadeRequested{Reason:"state_change", TriggeredByItemID:
-item_id, …}` ONLY when the write changes `(impl_state, review_state,
-qa_state)` in a way that materially affects §5.7.1 `pipeline_stage`
-derivation. Pure `pipe_state` mutations (with no change to the other
-three columns) do NOT publish — §5.7.1 derives `pipeline_stage` from
-the upstream chain's readiness/closure, not from a downstream item's
-own `pipe_state`. The publish drives the multi-hop `pipeline_stage`
-recompute on the forward `blocks` closure (Regime B). Note: this tool
-writes no `is_ready`-affecting state directly; Regime A is not invoked
-here.
+item_id, …}` whenever the write changes ANY column that is a §5.7.1
+`pipeline_stage` derivation input. The publish-trigger set MUST EQUAL
+the §5.7.1 derivation-input set — no narrower. The §5.7.1 inputs (root
+`docs/SPEC.md` §5.7.1 "Derivation table (authoritative)", rows 1–3 and
+the comment-existence rows) are: the item's OWN `pipeline_state`
+(`needs_human`/`paused` → `Deferred`; `no_investigation` AND
+`impl_state=pending` → `Implementation` — short-circuiting, evaluated
+FIRST), `impl_state`, `review_state`, `qa_state`, `status`/`closed_at`,
+and the comment-existence predicates (`kind=review`, `kind=investigation`).
+Therefore:
+
+- A `set_state` write that changes `pipeline_state`
+  (`running`/`needs_human`/`paused`/`no_investigation`) IS a
+  §5.7.1-affecting write — the item's own `pipeline_state` is the FIRST,
+  short-circuiting derivation input (§5.7.1 rows 1–3) — and MUST publish
+  `CascadeRequested{Reason:"state_change", TriggeredByItemID: item_id, …}`
+  post-commit, so the subscriber recomputes this item's `pipeline_stage`
+  per §5.7.1 (e.g. `pipeline_state → needs_human` must re-derive
+  `pipeline_stage = Deferred`). A pure `pipeline_state` write — with no
+  change to `(impl_state, review_state, qa_state)` — is NOT exempt.
+- A write that changes any of `(impl_state, review_state, qa_state)`
+  likewise publishes (unchanged from prior rounds).
+
+(The earlier "pure `pipe_state` mutations do NOT publish" carve-out and
+its justification that "§5.7.1 derives `pipeline_stage` from the upstream
+chain … not from a downstream item's own `pipe_state`" were FACTUALLY
+WRONG — disproven by §5.7.1 rows 1–3, where the item's OWN
+`pipeline_state` is the first, short-circuiting derivation input, and
+live-confirmed by the 2026-06-15 MCP sweep, where a later impl-write
+re-derived `pipeline_stage = Deferred` honoring an earlier
+`pipeline_state = needs_human`. That carve-out is RETIRED.) The publish
+drives the multi-hop `pipeline_stage` recompute on the forward `blocks`
+closure (Regime B); the triggered item is itself re-derived in the same
+pass. Note: this tool writes no `is_ready`-affecting state directly;
+Regime A is not invoked here.
 
 **AR-18 (new — round-2).** State-invariant interaction with concurrent
 `Claim`. Invariant I-3 is enforced in `workitems.Claim` (not in
@@ -3001,11 +3076,26 @@ writes `is_ready`. Allowed writers:
 
 **Regime B — `pipeline_stage` (multi-hop, subscriber-only).** The
 cascade subscriber is the **sole writer** of `pipeline_stage`. Every
-call site that materially mutates §5.7.1 derivation inputs publishes
+call site that mutates ANY §5.7.1 derivation input publishes
 `CascadeRequested{Reason:<kind>, TriggeredByItemID:<id>, …}` after its
 transaction commits. The subscriber walks the forward `blocks` closure
 from `TriggeredByItemID` and recomputes `pipeline_stage` (only) for the
-affected items.
+affected items (the triggered item included).
+
+**Publish-trigger set = §5.7.1 derivation-input set (invariant — bead
+`unblock-tv8.87`).** The set of writes that publish a `state_change`
+cascade MUST EQUAL the set of §5.7.1 `pipeline_stage` derivation inputs —
+no narrower (a narrower trigger set leaves `pipeline_stage` STALE after
+an unrecomputed derivation-input change) and no wider needed. Per root
+`docs/SPEC.md` §5.7.1 "Derivation table (authoritative)", those inputs
+are: the item's OWN `pipeline_state` (rows 1–3, evaluated FIRST and
+short-circuiting), `impl_state`, `review_state`, `qa_state`,
+`status`/`closed_at`, and the comment-existence predicates
+(`kind=review`, `kind=investigation`). The `state_change` publishers
+(Tool 13 `set_state`, Tool 10 `comment` on investigation/review kinds,
+`workitems.Claim` I-3 reset) together cover exactly this input set;
+`close` covers `status`/`closed_at` and `edge_added`/`edge_removed`
+cover the upstream-chain readiness that feeds the multi-hop walk.
 
 **Who emits which Reason, what the subscriber does:**
 
@@ -3014,19 +3104,33 @@ affected items.
 | `"close"` | `workitems.Close` (Tool 6) post-commit | Status flipped to Done. | Walk forward `blocks` closure from the closed item; recompute `pipeline_stage` on every reachable item per §5.7.1. |
 | `"edge_added"` | `deps.AddEdge` (Tool 11 / §6.5) post-commit | New `blocks` edge committed. | Walk forward `blocks` closure from `to_item`; recompute `pipeline_stage` (the new upstream blocker may push downstream stages backward). |
 | `"edge_removed"` | `deps.RemoveEdge` (Tool 12) post-commit, with `event_id` REUSED from the inline audit row | Edge deleted. | Walk forward `blocks` closure from `to_item`; recompute `pipeline_stage` on transitively reachable items. The audit-row insert collapses to no-op via `ON CONFLICT (event_id, triggered_by_item_id) DO NOTHING` (the inline path already wrote it). |
-| `"state_change"` | `workitems.SetStateColumns` (Tool 13) post-commit when the write changes `(impl_state, review_state, qa_state)` materially per §5.7.1; AND `workitems.Claim` post-commit ONLY on the I-3 reset path (current `qa_state='failed'` triggers the in-transaction reset of `review_state` and `qa_state` to `pending`). | State-column mutation that affects §5.7.1 derivation. | Walk forward `blocks` closure from the mutated item; recompute `pipeline_stage` (downstream items may transition between Implementation / Review / QA stages). |
+| `"state_change"` | `workitems.SetStateColumns` (Tool 13) post-commit when the write changes ANY §5.7.1 derivation input — INCLUDING a pure `pipeline_state` write (`running`/`needs_human`/`paused`/`no_investigation`), which is the §5.7.1 rows 1–3 short-circuiting input (bead `unblock-tv8.87`) — as well as any of `(impl_state, review_state, qa_state)`; AND `workitems.AppendComment` (Tool 10) post-commit when `kind ∈ {investigation, review}` (a §5.7.1 comment-existence input — bead `unblock-tv8.87`); AND `workitems.Claim` post-commit ONLY on the I-3 reset path (current `qa_state='failed'` triggers the in-transaction reset of `review_state` and `qa_state` to `pending`). | A mutation of any §5.7.1 derivation input (item's own `pipeline_state`, `impl_state`, `review_state`, `qa_state`, or an investigation/review comment append). | Walk forward `blocks` closure from the mutated item; recompute `pipeline_stage` per §5.7.1 (the triggered item itself plus downstream items may transition between Investigation / Implementation / Review / Quality / Deferred / Done stages). |
 
 **Explicit non-publishers (round-6 tensions, resolved).**
 
-- `workitems.SetStateColumns` writes that affect ONLY `pipe_state`
-  (with no change to `impl_state`/`review_state`/`qa_state`) do NOT
-  publish — §5.7.1 derives `pipeline_stage` from the upstream chain's
-  readiness/closure, not from a downstream item's own `pipe_state`
-  (tension #3 ruling).
 - `workitems.Claim` in the normal Ready→InProgress path (no I-3 reset
-  fires) does NOT publish — the claimed item was non-Done before and
-  remains non-Done; no §5.7.1 downstream re-derivation is needed
-  (tension #2 ruling). Only the I-3 reset path publishes.
+  fires) does NOT publish — claiming alone is not a §5.7.1 derivation
+  input (it writes `claimed_by_id`/`claimed_at`, not a derivation column),
+  and the item was non-Done before and remains non-Done; no §5.7.1
+  re-derivation is needed (tension #2 ruling). Only the I-3 reset path,
+  which mutates `review_state`/`qa_state`, publishes.
+- `workitems.AppendComment` with a `kind` that is NEITHER `investigation`
+  NOR `review` does NOT publish — only those two kinds are §5.7.1
+  comment-existence derivation inputs (bead `unblock-tv8.87`).
+
+**Retired non-publisher (bead `unblock-tv8.87`).** The former tension-#3
+ruling — "`SetStateColumns` writes that affect ONLY `pipe_state` do NOT
+publish, because §5.7.1 derives `pipeline_stage` from the upstream chain,
+not from the item's own `pipe_state`" — was FACTUALLY WRONG. The item's
+OWN `pipeline_state` is the FIRST, short-circuiting §5.7.1 derivation
+input (root SPEC §5.7.1 rows 1–3: `needs_human`/`paused` → `Deferred`,
+`no_investigation` AND `impl=pending` → `Implementation`). A pure
+`pipeline_state` write IS §5.7.1-affecting and MUST publish
+`CascadeRequested{state_change}`. This was discovered and live-confirmed
+by the 2026-06-15 MCP sweep (a later impl-write re-derived
+`pipeline_stage = Deferred` honoring an earlier `pipeline_state =
+needs_human`). The carve-out is RETIRED; pure `pipeline_state` writes are
+publishers (see the `state_change` row above and §6.2 Tool 13).
 
 **Audit-row kind reuse.** `deps.cascade_events.kind` carries the same
 discriminant value as the `Reason` field of the originating
@@ -3101,11 +3205,16 @@ func handleCascadeRequested(ctx context.Context, msg *CascadeRequested) error {
         // still runs. is_ready was recomputed inline for the direct
         // to_item; walk the forward closure to propagate pipeline_stage.
     case "state_change":
-        // Triggered by workitems.SetStateColumns (Tool 13) post-commit
-        // when (impl_state, review_state, qa_state) changed materially
-        // per §5.7.1, OR by workitems.Claim post-commit ONLY on the
-        // I-3 reset path (tension #2 narrow rule). Walk the forward
-        // closure; pipeline_stage may transition on downstream items.
+        // Triggered by any mutation of a §5.7.1 derivation input
+        // (bead unblock-tv8.87 — publish-trigger set = derivation-input
+        // set): workitems.SetStateColumns (Tool 13) post-commit when it
+        // changed the item's own pipeline_state (§5.7.1 rows 1-3) OR any
+        // of (impl_state, review_state, qa_state); OR
+        // workitems.AppendComment (Tool 10) post-commit when kind is
+        // investigation/review (§5.7.1 comment-existence input); OR
+        // workitems.Claim post-commit ONLY on the I-3 reset path
+        // (tension #2 narrow rule). Walk the forward closure; the
+        // triggered item itself and downstream items may transition.
     default:
         // Unknown Reason — log + drop (defensive; the publisher set
         // is closed, but a malformed redelivery should not crash the
@@ -3154,10 +3263,14 @@ column with `CHECK (kind IN ('close','edge_added','edge_removed','state_change')
   publishes post-commit with the SAME `event_id`, and the subscriber's
   re-insert collapses to no-op via the ON CONFLICT clause (tension #1).
   The subscriber's `pipeline_stage` recompute pass still runs.
-- `'state_change'` — Tool 13 publish on §5.7.1-affecting writes; AND
-  `workitems.Claim` publish on the I-3 reset path only (tensions #2
-  and #3 narrow rules). Subscriber writes the audit row during its
-  `pipeline_stage` recompute pass.
+- `'state_change'` — Tool 13 (`set_state`) publish on any §5.7.1-affecting
+  write, INCLUDING a pure `pipeline_state` write (§5.7.1 rows 1–3, bead
+  `unblock-tv8.87`); AND Tool 10 (`comment`/`AppendComment`) publish on
+  `kind ∈ {investigation, review}` (§5.7.1 comment-existence input, bead
+  `unblock-tv8.87`); AND `workitems.Claim` publish on the I-3 reset path
+  only (tension #2). The former tension-#3 "pure `pipe_state` is exempt"
+  rule is RETIRED (bead `unblock-tv8.87`). Subscriber writes the audit
+  row during its `pipeline_stage` recompute pass.
 
 P01 ships all four kinds (round-6 cascade-symmetry). Subsequent phases
 that introduce new cascade kinds extend the enum in their own phase
