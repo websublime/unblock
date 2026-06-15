@@ -106,15 +106,23 @@
 // they have no trusted-internal-caller path (they are MCP-only), so an
 // empty CallerOrgID there is always a programming error.
 //
-// The org service's own private writes (org.CreateProject etc.) follow
-// the same Bearer-resolved-identity pattern. This matches SPEC §10.1 /
-// §10.1.1's gate model: read and write tenant gates both live in the
-// SQL, with the write gate keyed on the CallerOrgID internal channel.
-// Layering an explicit org.Authorize call inside every private write RPC
-// (belt-and-suspenders) was considered and rejected during round-2
-// review of bead unblock-tv8.10 — the duplicate gate would obscure the
-// model without adding a meaningful security property over the row-level
-// predicate above.
+// The org service's own tenant-scoped private writes (org.CreateProject,
+// org.AddMember) self-gate via a CallerUserID org.members membership
+// predicate of their own (bead unblock-tv8.86, SPEC §4.2 / §10.1.1) —
+// NOT via this CallerOrgID channel and NOT via org.Authorize (which is
+// the cross-SERVICE primitive other services call, never the gate for
+// org's own provisioning writes). That org-write gate is DORMANT today
+// (an empty-CallerUserID no-op for the trusted §11.1.1 seed + org /
+// rbactest / exitcriteriontest / perftest callers) and goes live once a
+// future key-management / web-admin BFF pins CallerUserID from the
+// resolved session identity. (Bootstrapping writes — org.CreateOrganization,
+// where the caller BECOMES the owner — carry no membership gate by
+// design and are correctly out of scope.) This matches SPEC §10.1 /
+// §10.1.1's gate model: each service's write tenant gate lives in its own
+// RPC, keyed on a caller-identity channel pinned off-wire from the
+// resolved session — the workitems write gate keys on the CallerOrgID
+// channel above; the org provisioning writes key on their own
+// CallerUserID membership predicate.
 package workitems
 
 import (
