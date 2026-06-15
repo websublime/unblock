@@ -1433,12 +1433,17 @@ func TestClaimPropertyHalfFailedHalfNotN100(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------------
-// SetStateColumns cascade publish (bead unblock-tv8.53 / SPEC §6.3.0
-// tension #3 narrow rule). The four tests below cover acceptance
-// criteria #1-#4: §5.7.1-affecting writes publish exactly one
-// CascadeRequested{Reason:"state_change"}, pipe-only writes do NOT
-// publish, I-1's auto-reset of qa_state counts as a material change,
-// and the N=100 half-changing/half-pipe-only property assertion.
+// SetStateColumns cascade publish (bead unblock-tv8.53; publish-trigger
+// set widened to the full §5.7.1 derivation-input set — bead
+// unblock-tv8.87). The tests below cover the publish TRIGGER: a write
+// changing ANY §5.7.1 derivation input (impl/review/qa OR the item's own
+// pipeline_state — §5.7.1 rows 1-3, short-circuiting) publishes exactly
+// one CascadeRequested{Reason:"state_change"}; a no-op write (no column
+// value changes) does NOT publish; I-1's auto-reset of qa_state counts
+// as a material change; and the N=100 half-impl/half-pipe property
+// assertion (both halves publish). The downstream pipeline_stage
+// recompute is exercised end-to-end in
+// exitcriteriontest/cascade_pipeline_stage_trigger_test.go.
 // -----------------------------------------------------------------------------
 
 // TestSetStateImplChangePublishesStateChange — happy path AC #1.
@@ -1493,13 +1498,18 @@ func TestSetStateImplChangePublishesStateChange(t *testing.T) {
 	}
 }
 
-// TestSetStatePipeStateOnlyDoesNotPublish — negative path AC #2.
-// SPEC §6.3.0 explicit non-publishers (lines 1803-1809, tension #3
-// ruling): writes that affect ONLY pipeline_state (with no change to
-// impl/review/qa) MUST NOT publish. §5.7.1 derives pipeline_stage from
-// the upstream chain's readiness/closure, not from a downstream item's
-// own pipe_state.
-func TestSetStatePipeStateOnlyDoesNotPublish(t *testing.T) {
+// TestSetStatePipeStateOnlyPublishes — AC #2 (bead unblock-tv8.87).
+// The former "pure pipe_state write does NOT publish" carve-out
+// (tension #3) is RETIRED: the item's OWN pipeline_state is the FIRST,
+// short-circuiting §5.7.1 derivation input (rows 1-3), so a pure
+// pipeline_state write (no change to impl/review/qa) IS §5.7.1-affecting
+// and MUST publish exactly one state_change (SPEC §6.2 Tool 13
+// Side-effects + §6.3.0 Regime B). The downstream pipeline_stage
+// recompute (needs_human/paused → Deferred) is exercised end-to-end via
+// the subscriber in
+// exitcriteriontest/cascade_pipeline_stage_trigger_test.go; here we
+// assert the publish TRIGGER itself (the gap this bead closes).
+func TestSetStatePipeStateOnlyPublishes(t *testing.T) {
 	ctx := context.Background()
 	fx := seedFixture(t, ctx)
 	itemID := createReadyItem(t, ctx, fx)
@@ -1519,8 +1529,50 @@ func TestSetStatePipeStateOnlyDoesNotPublish(t *testing.T) {
 		t.Fatalf("pipeline_state = %q, want paused", got.PipelineState)
 	}
 
+	msgs := cascadeRequestedMessagesFor(itemID, "state_change")
+	if len(msgs) != 1 {
+		t.Fatalf("pure pipeline_state SetStateColumns must publish exactly 1 state_change cascade for item=%q: got %d (want 1) — §5.7.1 rows 1-3 are short-circuiting derivation inputs",
+			itemID, len(msgs))
+	}
+	msg := msgs[0]
+	if msg.EventID == "" {
+		t.Fatalf("state_change cascade: EventID empty (ULID must be minted before tx.Begin)")
+	}
+	if msg.OrgID != fx.OrgID {
+		t.Fatalf("state_change cascade: OrgID=%q, want %q", msg.OrgID, fx.OrgID)
+	}
+	if msg.ProjectID != fx.ProjectID {
+		t.Fatalf("state_change cascade: ProjectID=%q, want %q", msg.ProjectID, fx.ProjectID)
+	}
+	if msg.EmittedAt.IsZero() {
+		t.Fatalf("state_change cascade: EmittedAt zero (must be wall-clock at publish time)")
+	}
+}
+
+// TestSetStateNoColumnChangeDoesNotPublish — negative path (bead
+// unblock-tv8.87): a set_state that changes NO §5.7.1 derivation input —
+// every supplied column equals the current value, so newImpl/newReview/
+// newQA/newPipeline all equal cur — MUST NOT publish. This confirms the
+// publish gate keys on a real value change, not merely on a column being
+// present in the request.
+func TestSetStateNoColumnChangeDoesNotPublish(t *testing.T) {
+	ctx := context.Background()
+	fx := seedFixture(t, ctx)
+	itemID := createReadyItem(t, ctx, fx)
+	setItemState(t, ctx, itemID, "pending", "pending", "pending", fx.UserID)
+
+	// pipeline_state is already 'running' (column default); writing
+	// 'running' again is a no-op on every §5.7.1 input.
+	noop := "running"
+	if _, err := workitems.SetStateColumns(ctx, &workitems.SetStateRequest{
+		ItemID:        itemID,
+		PipelineState: &noop,
+	}); err != nil {
+		t.Fatalf("SetStateColumns: %v", err)
+	}
+
 	if msgs := cascadeRequestedMessagesFor(itemID, "state_change"); len(msgs) != 0 {
-		t.Fatalf("pipe_state-only SetStateColumns must NOT publish state_change cascade for item=%q: got %d publish(es) (want 0)",
+		t.Fatalf("no-op SetStateColumns must NOT publish state_change for item=%q: got %d (want 0)",
 			itemID, len(msgs))
 	}
 }
@@ -1558,20 +1610,23 @@ func TestSetStateI1AutoResetPublishes(t *testing.T) {
 	}
 }
 
-// TestSetStatePropertyHalfChangeHalfPipeOnlyN100 — AC #4 property test.
-// Create N=100 claimed items in the (impl=pending, review=pending,
-// qa=pending) posture. First half: SetStateColumns(impl_state=done)
-// — §5.7.1-affecting, MUST publish exactly one state_change each.
-// Second half: SetStateColumns(pipeline_state=paused) — pipe-only,
-// MUST NOT publish.
+// TestSetStatePropertyHalfImplHalfPipeBothPublishN100 — property test
+// (bead unblock-tv8.87). Create N=100 claimed items in the
+// (impl=pending, review=pending, qa=pending) posture. First half:
+// SetStateColumns(impl_state=done) — §5.7.1-affecting via impl, MUST
+// publish exactly one state_change each. Second half:
+// SetStateColumns(pipeline_state=paused) — §5.7.1-affecting via the
+// item's OWN pipeline_state (§5.7.1 rows 1-3, short-circuiting), MUST
+// ALSO publish exactly one state_change each (the former pipe-only
+// non-publisher carve-out is RETIRED). Net: all N=100 writes publish
+// exactly once.
 //
-// Per DECISION comment on the bead: AC #4's "50 deps.cascade_events
-// rows" reads as "50 et.Topic publishes whose Reason=state_change"
-// because the Encore test runtime does not fire subscribers during
-// `encore test`. The publish surface is the observable contract and
-// matches the canonical pattern from
-// TestClaimPropertyHalfFailedHalfNotN100.
-func TestSetStatePropertyHalfChangeHalfPipeOnlyN100(t *testing.T) {
+// Per DECISION comment on the bead: the AC's "deps.cascade_events rows"
+// reads as "et.Topic publishes whose Reason=state_change" because the
+// Encore test runtime does not fire subscribers during `encore test`.
+// The publish surface is the observable contract and matches the
+// canonical pattern from TestClaimPropertyHalfFailedHalfNotN100.
+func TestSetStatePropertyHalfImplHalfPipeBothPublishN100(t *testing.T) {
 	ctx := context.Background()
 	fx := seedFixture(t, ctx)
 
@@ -1647,15 +1702,15 @@ func TestSetStatePropertyHalfChangeHalfPipeOnlyN100(t *testing.T) {
 	}
 
 	if changeHits != halfChange {
-		t.Fatalf("change half: %d state_change publishes (want %d) — §5.7.1-affecting writes must publish exactly once",
+		t.Fatalf("impl half: %d state_change publishes (want %d) — §5.7.1-affecting writes must publish exactly once",
 			changeHits, halfChange)
 	}
-	if pipeHits != 0 {
-		t.Fatalf("pipe-only half: %d state_change publishes (want 0) — pipe_state-only writes must NOT publish (SPEC §6.3.0 tension #3)",
-			pipeHits)
+	if pipeHits != N-halfChange {
+		t.Fatalf("pipe half: %d state_change publishes (want %d) — pure pipeline_state writes are §5.7.1-affecting (rows 1-3) and MUST publish exactly once (bead unblock-tv8.87)",
+			pipeHits, N-halfChange)
 	}
 
-	t.Logf("N=100 split (change=%d, pipe=%d): state_change publishes: change=%d, pipe=%d",
+	t.Logf("N=100 split (impl=%d, pipe=%d): state_change publishes: impl=%d, pipe=%d (both halves publish)",
 		halfChange, N-halfChange, changeHits, pipeHits)
 }
 
