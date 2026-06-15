@@ -1,7 +1,8 @@
 # SPEC: P01 — Backend MVP Implementation Contract
 
-**Status:** APPROVED (auth/BFF admin write-surface tenant gates applied 2026-06-15 — §10.1.1 gate-model extended to the two `auth` RPCs that write `mcp.api_keys` (`IssueAPIKey` `org.Authorize`-on-`CallerUserID` ownership + `issued_to_user ∈ org.members`; `RevokeAPIKey` `CallerOrgID` row predicate on the UPDATE), closing TWO LATENT cross-tenant write IDORs on the admin/BFF surface the MCP-wire sweep set aside — DORMANT (empty-caller no-op) until a future key-management BFF pins the caller identity (bead `unblock-tv8.85`); `Update.milestone_id` write-scope tenant gate applied 2026-06-15 — §10.1.1 gate-model extended to `workitems.Update`'s wire-supplied `milestone_id` selector (org-XOR-project milestone predicate, `AssignItem`/`Create` precedent), closing the CRITICAL cross-tenant write IDOR that `.83`'s AC4 wrongly assumed gated (bead `unblock-tv8.84`); `create_milestone.project_id` INSERT-scope tenant gate applied 2026-06-15 — §10.1.1 gate-model extended to `workitems.CreateMilestone`'s project-scoped `project_id` selector (guarded INSERT…SELECT, `CreateLabel` precedent), closing the last ungated cross-reference write-IDOR in the family (bead `unblock-tv8.83`); create-path cross-reference tenant validation applied 2026-06-12 — §10.1.1 gate-model extended to `workitems.Create`'s wire references, keyed on the existing `req.OrgID` per Miguel's 2026-06-12 DECISION, + §4.4 `CreateRequest`/`DependencyEdge` drift reconciliation; round-16 write-surface tenant-hardening lockstep applied 2026-06-11 — §10.1.1 row-level write gate + per-RPC `CallerOrgID` channel + deps fold-in + `CreateLabel` empty-`CallerOrgID` guard; round-16 label-tools drift-closure applied 2026-06-11 — labels `updated_at` migration `0130` + Tools 20–23 auth wording + Tools 16/19 wire-sample/prose alignment; round-16 P01 tool-surface scope amendment applied 2026-06-04; §3.5 fifth-secret addition applied 2026-06-02; round-15 NFR-1 harness test-isolation + mcpaudittest hardening applied 2026-05-29; round-14 NFR-1 latency-harness scope applied 2026-05-29; round-6 cascade-symmetry applied 2026-05-12; round-5 tracing applied 2026-05-12; round-4 auth applied 2026-05-11; DRIFT-1/-2 applied 2026-05-08; round-2 applied 2026-05-08; round-3 research applied 2026-05-08; original APPROVED 2026-05-07)
+**Status:** APPROVED (org-provisioning write-surface tenant gates applied 2026-06-15 — §10.1.1 gate-model + §4.2 extended to the two `org` RPCs that write tenant-scoped rows from the wire (`org.AddMember` caller-admin `org.members` predicate + role cap — closing a CRITICAL cross-tenant privilege escalation; `org.CreateProject` caller-membership predicate replacing the FK→`NotFound` that only caught a non-existent org — closing a WARNING write IDOR), the sibling org-provisioning RPCs the `.85` admin/BFF sweep set aside — DORMANT (empty-caller no-op) until a future key-management BFF pins the caller identity (bead `unblock-tv8.86`); auth/BFF admin write-surface tenant gates applied 2026-06-15 — §10.1.1 gate-model extended to the two `auth` RPCs that write `mcp.api_keys` (`IssueAPIKey` `org.Authorize`-on-`CallerUserID` ownership + `issued_to_user ∈ org.members`; `RevokeAPIKey` `CallerOrgID` row predicate on the UPDATE), closing TWO LATENT cross-tenant write IDORs on the admin/BFF surface the MCP-wire sweep set aside — DORMANT (empty-caller no-op) until a future key-management BFF pins the caller identity (bead `unblock-tv8.85`); `Update.milestone_id` write-scope tenant gate applied 2026-06-15 — §10.1.1 gate-model extended to `workitems.Update`'s wire-supplied `milestone_id` selector (org-XOR-project milestone predicate, `AssignItem`/`Create` precedent), closing the CRITICAL cross-tenant write IDOR that `.83`'s AC4 wrongly assumed gated (bead `unblock-tv8.84`); `create_milestone.project_id` INSERT-scope tenant gate applied 2026-06-15 — §10.1.1 gate-model extended to `workitems.CreateMilestone`'s project-scoped `project_id` selector (guarded INSERT…SELECT, `CreateLabel` precedent), closing the last ungated cross-reference write-IDOR in the family (bead `unblock-tv8.83`); create-path cross-reference tenant validation applied 2026-06-12 — §10.1.1 gate-model extended to `workitems.Create`'s wire references, keyed on the existing `req.OrgID` per Miguel's 2026-06-12 DECISION, + §4.4 `CreateRequest`/`DependencyEdge` drift reconciliation; round-16 write-surface tenant-hardening lockstep applied 2026-06-11 — §10.1.1 row-level write gate + per-RPC `CallerOrgID` channel + deps fold-in + `CreateLabel` empty-`CallerOrgID` guard; round-16 label-tools drift-closure applied 2026-06-11 — labels `updated_at` migration `0130` + Tools 20–23 auth wording + Tools 16/19 wire-sample/prose alignment; round-16 P01 tool-surface scope amendment applied 2026-06-04; §3.5 fifth-secret addition applied 2026-06-02; round-15 NFR-1 harness test-isolation + mcpaudittest hardening applied 2026-05-29; round-14 NFR-1 latency-harness scope applied 2026-05-29; round-6 cascade-symmetry applied 2026-05-12; round-5 tracing applied 2026-05-12; round-4 auth applied 2026-05-11; DRIFT-1/-2 applied 2026-05-08; round-2 applied 2026-05-08; round-3 research applied 2026-05-08; original APPROVED 2026-05-07)
 **Changelog:**
+- 2026-06-15 — org-provisioning write-surface tenant gates (bead `unblock-tv8.86`, discovered-from the 2026-06-15 admin/BFF surface IDOR sweep — the SIBLING org-provisioning RPCs the `.85` round, on the same admin/BFF surface, deliberately set aside; status remains APPROVED — this is an additive §10.1.1 gate-model + §4.2 extension closing a CRITICAL cross-tenant privilege escalation + a write IDOR, NOT a re-architecting). Two `private` Encore RPCs in `apps/api/org/org.go` write tenant-scoped rows from the wire with NO caller-ownership check: **(1) `org.AddMember` (org.go:429-475) — CRITICAL cross-tenant privilege escalation** — takes `OrgID`/`UserID`/`Role` straight from the wire and INSERTs an `org.members` row with ZERO caller-ownership check (`callerIdentity` feeds only the `invited_by` audit column, NEVER authorization), and `Role` has no cap → a caller can mint itself (or anyone) as `owner` of ANY existing org; **(2) `org.CreateProject` (org.go:280-311) — WARNING** — takes `OrgID` from the wire and INSERTs an `org.projects` row under it; the only guard is the FK→`NotFound`, which catches a NON-EXISTENT org but NOT a FOREIGN existing one. NEITHER is reachable from the MCP agent wire today (no MCP tool maps to them; no non-test in-repo caller; `apps/web` is a README placeholder) — both are LATENTLY exploitable cross-tenant once a future key-management / web-admin BFF is wired. **Locked contract (decided by Miguel — fix now via spec-first, mirroring `.85`):** these RPCs carry NO caller identity today; the fix ADDS an off-wire `CallerUserID` channel pinned from the resolved session identity (the future BFF's session→user→org resolution, §4.3.2), NEVER from the wire — exactly the §10.1.1 / `.85` internal-channel convention, NOT a wire argument. **AddMember:** new `CallerUserID` field; when non-empty, require the caller to hold an **admin/owner** `org.members` row in `OrgID` (`SELECT role FROM org.members WHERE org_id=$1 AND user_id=$2`, §4.2 / `org.go:520`) BEFORE the INSERT, AND **cap the grantable `Role` at the caller's effective role** (a caller cannot grant above their own). A foreign / non-member `OrgID`, an unauthorised caller, or an over-grant → `NOT_FOUND` / appropriate error, nothing inserted, existence not leaked. **CreateProject:** new `CallerUserID` field; when non-empty, require the caller to be a **write-capable member** of `OrgID` before the INSERT; a foreign / non-member `OrgID` → `NOT_FOUND`, **replacing the FK→`NotFound`** that only caught a non-existent org. **Empty-caller NO-OP (dormant gate):** when `CallerUserID` is empty (the trusted §11.1.1 seed + `org` / `rbactest` / `exitcriteriontest` / `perftest` callers, which pass no caller identity) the gate is skipped — DORMANT until the future BFF pins the caller; that future bead MUST pin it (else the no-op leaves the priv-esc / IDOR open). Same empty-caller no-op precedent as `.85` / the §10.1.1 item/milestone write-RPC pattern. Bootstrapping is correctly OUT of scope: `org.CreateOrganization` (caller becomes owner), `auth.ExchangeOAuthCode` / `auth.Validate` (identity establishment). Infra CONFIRMED present: `org.members` (migration `0030`), `org.Authorize` (`org.go:520`), the org service owns the `org` schema (direct read OK). Proactively noted: `org.project_members` has no write RPC yet (seed-only) — a future `AddProjectMember`-style RPC will need the IDENTICAL gate. Patched in lockstep: §4.2 (new `CreateProject` / `AddMember` tenant-gate doc-comments + `CreateProjectRequest` / `AddMemberRequest` struct stubs carrying the new `CallerUserID` channel; the `Authorize` doc-comment reconciled — see below; the future-`AddProjectMember` note); §10.1.1 "Auth / BFF admin write surface" subsection (two new rows — `org.AddMember`, `org.CreateProject` — + the org-provisioning intro paragraph + widened closing no-op prose). **Spec self-overclaim reconciled:** the §4.2 `Authorize` doc-comment said `Authorize` is "called by every other service before reading or writing a resource", which could be read to imply `org`'s OWN writes route through it — they do NOT; reworded to "the canonical CROSS-SERVICE RBAC predicate … called by every OTHER service", with an explicit note that `CreateProject` / `AddMember` self-gate via the new `CallerUserID` `org.members` predicate (dormant) while `Authorize` remains the cross-service primitive OTHER services call. **NOT touched (separate ownership): `apps/api/org/org.go` (the gates + the new request fields) + `apps/api/workitems/workitems.go:109-117` (the FALSE "org writes are gated" auth-model doc-comment, which is the CODE's to correct) + tests — the implementation bead `unblock-tv8.86` (Greta) owns those on its branch.** **No DDL / migration / public-API change** — the gates are membership predicates + an `org.Authorize` call + (for `AddMember`) a role cap; the `org` schema (incl. `org.members`, `org.projects`) is UNCHANGED. **Root `docs/SPEC.md` is untouched** — its §5.6 RBAC prose (row-level filtering "applied uniformly to every read and write path") is STRENGTHENED, not contradicted; it carries NO claim that `org`'s own provisioning self-writes are already gated, so no contradiction exists there (verified). Spec status remains APPROVED.
 - 2026-06-15 — auth/BFF admin write-surface tenant gates (bead `unblock-tv8.85`, discovered-from the 2026-06-15 cross-tenant write-IDOR audit extended to the ADMIN/BFF surface the MCP-wire sweep — `.75`/`.77`/`.78`/`.80`/`.83`/`.84` — deliberately set aside; status remains APPROVED — this is an additive §10.1.1 gate-model extension closing TWO LATENT auth-surface IDORs, NOT a re-architecting). Two `private` Encore RPCs in `apps/api/auth/auth.go` write/modify `mcp.api_keys` rows scoped by `org_id` with NO caller-org ownership check: **(1) `auth.RevokeAPIKey`** — `UPDATE mcp.api_keys SET revoked_at=COALESCE(revoked_at,now()) WHERE id=$1` with no caller predicate (any tenant's key revocable by id); **(2) `auth.IssueAPIKey`** — the INSERT stamps `org_id` + `issued_to_user` straight from the wire with no check the caller owns `org_id` nor that `issued_to_user` is a member of `org_id`. NEITHER is reachable from the MCP agent wire today (no MCP tool maps to them; only test/seed callers, and the §11.1.1 E2E seed writes `mcp.api_keys` via direct INSERT) — they are LATENTLY exploitable cross-tenant once a future key-management BFF / web-admin surface is wired. **Locked contract (decided by Miguel — fix now via spec-first):** these RPCs carry NO caller identity today; the fix ADDS a caller-identity channel pinned from the resolved caller identity (the future BFF's session→user→org resolution, §4.3.2 / `auth.Validate` `TokenKind="session"`), NEVER from the wire — exactly the §10.1.1 internal-channel convention, NOT a wire argument. **RevokeAPIKey:** new `CallerOrgID` field; the UPDATE gains `AND ($caller='' OR org_id=$caller)` so a cross-tenant `key_id` affects zero rows → `NOT_FOUND` (existence not leaked); the `COALESCE` idempotency is PRESERVED. **IssueAPIKey:** new `CallerUserID` field (needed because the ownership check uses `org.Authorize`, which keys on the caller's user id); gate on BOTH (a) caller owns `org_id` via `org.Authorize(CallerUserID, <write action>, OrgID)` — `SELECT role FROM org.members WHERE org_id=$1 AND user_id=$2` (`apps/api/org/org.go:520`) — and (b) `issued_to_user ∈ org.members(OrgID)`; a foreign `org_id` or a non-member `issued_to_user` → rejected (`NOT_FOUND` / appropriate error), nothing inserted. **Empty-caller NO-OP (dormant gate):** when the caller-identity field is empty (the trusted §11.1.1 E2E seed + integration / mcpaudit / perf tests, which pass no caller identity or seed `mcp.api_keys` via direct INSERT) the gate is skipped — DORMANT until the future key-management BFF / admin surface pins the caller identity; that future bead MUST pin it (else the no-op leaves it open). This mirrors the §10.1.1 empty-`CallerOrgID` no-op precedent (the MilestoneTree / item-milestone write-RPC pattern), adapted to the auth/BFF surface. Infra CONFIRMED present: `org.members` (migration `0030_org.up.sql:19`, cols org_id/user_id/role), `org.Authorize` (`org.go:520`, membership+role check), `org.AddMember` (`org.go:428`). Patched in lockstep: §4.1 `IssueAPIKey` doc-comment + `IssueAPIKeyRequest` (new `CallerUserID` field) and `RevokeAPIKey` doc-comment + `RevokeAPIKeyRequest` (new `CallerOrgID` field) — each annotated "pinned from the resolved caller identity; NEVER from the wire"; §4.3.2 (new note distinguishing the BFF session-resolution caller identity from the Bearer API-key Validate hot path); §10.1.1 (new "auth/BFF admin write surface" subsection + predicate table — `RevokeAPIKey` caller-org UPDATE predicate, `IssueAPIKey` `org.Authorize` ownership + `issued_to_user` membership — noting (a) NOT MCP-wire-reachable, caller identity pinned by the FUTURE BFF not the Bearer handler; (b) DORMANT empty-caller no-op until that surface is wired, the future bead MUST pin it; (c) cross-tenant probes → `NOT_FOUND`). **NOT touched (separate ownership): `apps/api/auth/auth.go` (the gates + the new request fields) + tests — the implementation bead `unblock-tv8.85` (Greta) owns those on its branch.** **No DDL / migration / public-API change** — the gates are query predicates + an `org.Authorize` call + a membership predicate; the `mcp.api_keys` schema is UNCHANGED. **Root `docs/SPEC.md` is untouched** — its §5.6 RBAC prose (row-level filtering "applied uniformly to every read and write path", `docs/SPEC.md:732`) is STRENGTHENED not contradicted, and its `mcp.api_keys` note (`docs/SPEC.md:1855`) already records `auth.IssueAPIKey` is exercised via direct-INSERT test seeds in P01 — consistent with the dormant-gate framing; no contradicting claim about these RPCs exists there (verified). Spec status remains APPROVED.
 - 2026-06-15 — `Update.milestone_id` write-scope tenant gate (bead `unblock-tv8.84`, discovered-from an adversarial completeness sweep during review of `.83` — which PROVED `.83`'s AC4 ("`create_milestone.project_id` is the LAST ungated selector") INCOMPLETE: `workitems.Update`'s wire-supplied `milestone_id` write was the residual ungated selector — proven by code read 2026-06-15; status remains APPROVED — this is an additive §10.1.1 gate-model extension closing the CRITICAL `Update.milestone_id` cross-tenant write IDOR, NOT a re-architecting). `workitems.Update` wrote the wire-supplied `milestone_id` into `workitems.items` with NO check that the milestone belongs to the caller's org — the `UPDATE`'s only tenant predicate gates the TARGET ITEM's org (`org_id = $caller`, bead `.77`), NOT the new `milestone_id`. Same IDOR class already closed for `.75` (`CreateLabel.project_id`), `.77` (`CreateMilestone.parent` + Update target-item seam), `.78` (`workitems.Create.*`), `.80` (`AppendComment.parent_id`), and `.83` (`create_milestone.project_id`). **Locked contract:** when the request sets a **non-empty** `milestone_id`, the `UPDATE` additionally requires `milestone_id IN (SELECT id FROM workitems.milestones WHERE org_id = $caller OR project_id IN (SELECT id FROM org.projects WHERE org_id = $caller))` — the org-XOR-project milestone predicate, mirroring the EXISTING sibling gates on the two other paths that write the same `items.milestone_id` column, `workitems.Create` and `AssignItem` (both already org-XOR-project gated): a foreign-but-existing `milestone_id` yields zero affected rows → `NOT_FOUND`, the item UNCHANGED, indistinguishable from a missing milestone. The **clear-to-null** path (`milestone_id = ""`) and the **nil = unchanged** path both satisfy the empty-`milestone_id` disjunct and carry NO milestone predicate — PRESERVED; the existing target-item `org_id = $caller` gate (`.77`) and the empty-`CallerOrgID` no-op are PRESERVED. Patched in lockstep: §10.1.1 write-surface predicate table (new `workitems.Update` `milestone_id` write-scope row, distinct from and additional to the existing target-item row); §4.4 `Update` RPC doc-comment (Tenant-gate block extended with the milestone-write paragraph — no struct/field change, `UpdateRequest` already carries `CallerOrgID` and `MilestoneID`); §6.2 Tool 5 `update` (gating prose extended to cover the `milestone_id` selector alongside the existing item gate — no wire change). **NOT touched (separate ownership): `apps/api/workitems/workitems.go` (the `Update` `WHERE`-clause milestone gate + the now-accurate doc-comment) + `apps/api/exitcriteriontest/write_surface_cross_tenant_test.go` (the missing owned-item + foreign-milestone subtest) — the implementation bead `unblock-tv8.84` (Greta) owns those on its branch.** **No DDL / migration / public-API / struct change** — the gate is a query predicate; the existence-only FK is untouched. **Root `docs/SPEC.md` is untouched** — no DDL change, and its §5.6 RBAC prose (row-level filtering applies "uniformly to every read and write path") is strengthened, not contradicted. Spec status remains APPROVED.
 - 2026-06-15 — `create_milestone.project_id` INSERT-scope tenant gate (bead `unblock-tv8.83`, discovered-from the live MCP sweep / `unblock-tv8.78`, proven live 2026-06-12; status remains APPROVED — this is an additive §10.1.1 gate-model extension closing the LAST ungated cross-reference write-IDOR in the family, `create_milestone.project_id`, NOT a re-architecting). `workitems.CreateMilestone` inserted the project-scoped milestone's wire-supplied `project_id` with NO check that it belongs to the caller's org — the same IDOR class already closed for `.75` (`CreateLabel.project_id`), `.77` (`CreateMilestone.parent_milestone_id`), `.78` (`workitems.Create.*`), and `.80` (`AppendComment.parent_id`). `create_milestone.project_id` was the one remaining selector. **Locked contract:** on the **project-scoped branch** (non-empty `project_id`), the milestone INSERT becomes a guarded `INSERT … SELECT` requiring `project_id IN (SELECT id FROM org.projects WHERE org_id = $caller)` — mirroring the EXISTING `CreateLabel` INSERT…SELECT precedent: a foreign-but-existing `project_id` yields zero source rows → `NOT_FOUND`, nothing inserted, indistinguishable from a missing project. The **org-scoped branch** (`org_id` set, `project_id` empty) carries no project predicate, and the **empty-`CallerOrgID` no-op IS preserved** (a DELIBERATE divergence from `CreateLabel`'s hard-reject — `CreateMilestone` has trusted internal / E2E-seed callers per §10.1.1). The already-gated `parent_milestone_id` parent-read seam (bead `unblock-tv8.77`) is preserved unchanged. Patched in lockstep: §10.1.1 write-surface predicate table (new `workitems.CreateMilestone` `project_id` INSERT-scope row); §6.2 Tool 16 `create_milestone` (gating prose extended to cover the `project_id` selector alongside the existing parent-read seam — no wire change); §4.4.1 `CreateMilestone` doc-comment (Tenant-gate block extended with the project-scoped INSERT…SELECT paragraph — no struct/field change, `CreateMilestoneRequest` already carries `CallerOrgID`). **NOT touched (separate ownership): `apps/api/workitems/workitems.go` (the guarded INSERT…SELECT) + tests — the implementation bead `unblock-tv8.83` (Greta) owns those on its branch.** **No DDL / migration / public-API / struct change** — the gate is a query predicate; the existence-only FK is untouched. **Root `docs/SPEC.md` is untouched** — no DDL change, and its §5.6 RBAC prose already states row-level filtering applies "uniformly to every read and write path" (strengthened, not contradicted). Spec status remains APPROVED.
@@ -612,8 +613,39 @@ package org
 //encore:api private method=POST path=/org.CreateOrganization
 func CreateOrganization(ctx context.Context, req CreateOrganizationRequest) (*Organization, error)
 
+// **Tenant gate (bead `unblock-tv8.86`).** This RPC INSERTs a `org.projects`
+// row under the wire-supplied `OrgID`. Pre-this-round the only guard was the
+// `org_id` FK → `NotFound`, which catches a NON-EXISTENT org but NOT a
+// FOREIGN EXISTING one — so a caller could create a project under any other
+// tenant's org (a WARNING-class cross-tenant write IDOR). It is NOT reachable
+// from the MCP agent wire today (no MCP tool maps to it; only test/seed
+// callers exist) — LATENTLY exploitable once a future key-management /
+// web-admin BFF is wired. The gate adds a `CallerUserID` channel pinned from
+// the resolved caller identity (the future BFF's session→user→org resolution,
+// §4.3.2), NEVER from the wire — exactly the §10.1.1 internal-channel
+// convention, NOT a wire argument. When `CallerUserID` is non-empty the RPC
+// requires the caller to be a write-capable member of `OrgID`
+// (`SELECT role FROM org.members WHERE org_id=$1 AND user_id=$2`, §4.2 /
+// `apps/api/org/org.go:520`) BEFORE the INSERT; a foreign / non-member
+// `OrgID` → `NOT_FOUND` (replacing the FK→`NotFound`, which only catches a
+// non-existent org), nothing inserted, existence not leaked. **Empty
+// `CallerUserID` is a NO-OP (dormant gate)** — the trusted §11.1.1 seed +
+// `org` / `rbactest` / `exitcriteriontest` / `perftest` callers pass no
+// caller identity, so the gate is skipped; DORMANT until the future BFF pins
+// `CallerUserID`; that future bead MUST pin it (else the no-op leaves it
+// open). Same empty-caller no-op precedent as `unblock-tv8.85` / the §10.1.1
+// item/milestone write-RPC pattern. NO `org` schema change is required — the
+// gate is a membership predicate.
+//
 //encore:api private method=POST path=/org.CreateProject
 func CreateProject(ctx context.Context, req CreateProjectRequest) (*Project, error)
+
+type CreateProjectRequest struct {
+    OrgID         string // ULID; the org the project is created under
+    Name          string
+    Slug          string
+    CallerUserID  string // ULID; pinned from the resolved caller identity (future BFF session→user→org resolution, §4.3.2); NEVER from the wire. Gate key for the org.members caller-membership predicate (bead unblock-tv8.86). Empty → dormant no-op (trusted §11.1.1 seed / org / rbactest / exitcriteriontest / perftest callers).
+}
 
 //encore:api private method=GET path=/org.GetOrganization/:id
 func GetOrganization(ctx context.Context, id string) (*Organization, error)
@@ -621,13 +653,57 @@ func GetOrganization(ctx context.Context, id string) (*Organization, error)
 //encore:api private method=GET path=/org.GetProject/:id
 func GetProject(ctx context.Context, id string) (*Project, error)
 
+// **Tenant gate (bead `unblock-tv8.86`) — CRITICAL privilege escalation.**
+// This RPC INSERTs an `org.members` row from the wire-supplied `OrgID`,
+// `UserID`, and `Role` with ZERO caller-ownership check — `callerIdentity`
+// feeds only the `invited_by` audit column, NEVER authorization — and `Role`
+// has no cap. So a caller could mint themselves (or anyone) as `owner` of ANY
+// existing org: a CRITICAL cross-tenant privilege escalation. It is NOT
+// reachable from the MCP agent wire today (no MCP tool maps to it; only
+// test/seed callers exist) — LATENTLY exploitable once a future
+// key-management / web-admin BFF is wired. The gate adds a `CallerUserID`
+// channel pinned from the resolved caller identity (the future BFF's
+// session→user→org resolution, §4.3.2), NEVER from the wire — exactly the
+// §10.1.1 internal-channel convention, NOT a wire argument. When
+// `CallerUserID` is non-empty the RPC enforces BOTH: (a) the caller holds an
+// admin/owner `org.members` row in `OrgID`
+// (`SELECT role FROM org.members WHERE org_id=$1 AND user_id=$2`, §4.2 /
+// `apps/api/org/org.go:520`) BEFORE the INSERT; and (b) the granted `Role` is
+// CAPPED at the caller's effective role — a caller cannot grant a role above
+// their own. A foreign / non-member `OrgID`, an unauthorised (non-admin)
+// caller, or an over-grant → `NOT_FOUND` / appropriate error, nothing
+// inserted, existence not leaked. **Empty `CallerUserID` is a NO-OP (dormant
+// gate)** — the trusted §11.1.1 seed + `org` / `rbactest` /
+// `exitcriteriontest` / `perftest` callers pass no caller identity, so the
+// gate is skipped; DORMANT until the future BFF pins `CallerUserID`; that
+// future bead MUST pin it (else the no-op leaves the priv-esc open). Same
+// empty-caller no-op precedent as `unblock-tv8.85` / the §10.1.1
+// item/milestone write-RPC pattern. NO `org` schema change is required — the
+// gate is a membership predicate + a role cap.
+//
 //encore:api private method=POST path=/org.AddMember
 func AddMember(ctx context.Context, req AddMemberRequest) error
 
-// Authorize is the canonical RBAC predicate. Called by every other service
-// before reading or writing a resource. Returns nil on permit;
-// ErrForbidden on deny. The org_id of the resource is matched against the
-// identity's org_id; cross-tenant calls are rejected here.
+type AddMemberRequest struct {
+    OrgID         string // ULID; the org the member is added to
+    UserID        string // ULID; the user being added
+    Role          string // role granted — CAPPED at the caller's effective role when CallerUserID is non-empty (bead unblock-tv8.86)
+    CallerUserID  string // ULID; pinned from the resolved caller identity (future BFF session→user→org resolution, §4.3.2); NEVER from the wire. Gate key for the org.members caller-admin predicate + role cap (bead unblock-tv8.86); also feeds the invited_by audit column. Empty → dormant no-op (trusted §11.1.1 seed / org / rbactest / exitcriteriontest / perftest callers).
+}
+
+// Authorize is the canonical CROSS-SERVICE RBAC predicate. Called by every
+// OTHER service before reading or writing a resource it owns. Returns nil on
+// permit; ErrForbidden on deny. The org_id of the resource is matched against
+// the identity's org_id; cross-tenant calls are rejected here.
+//
+// NOTE (bead `unblock-tv8.86`): the `org` service's OWN tenant-scoped write
+// RPCs (`CreateProject`, `AddMember`) do NOT route through `Authorize` — they
+// self-gate via the new `CallerUserID` `org.members` membership predicate
+// documented on each RPC above (dormant until the future BFF pins the caller).
+// `Authorize` remains the cross-service primitive that OTHER services call;
+// it is NOT the gate for `org`'s own provisioning writes. (Bootstrapping
+// writes — `CreateOrganization`, where the caller BECOMES the owner — carry
+// no membership gate by design and are correctly out of scope.)
 //
 //encore:api private method=POST path=/org.Authorize
 func Authorize(ctx context.Context, req AuthorizeRequest) error
@@ -640,6 +716,13 @@ type AuthorizeRequest struct {
     ProjectID  string // optional
 }
 ```
+
+> **Future RPC note (bead `unblock-tv8.86`):** `org.project_members` has no
+> write RPC yet (seed-only). A future `AddProjectMember`-style RPC will need
+> the IDENTICAL caller-membership gate (`CallerUserID` `org.members` /
+> `org.project_members` predicate, dormant empty-caller no-op) before it
+> INSERTs a project-membership row from the wire — else it reopens the same
+> IDOR class on the project-membership surface.
 
 ### 4.3 `mcp` service
 
@@ -3862,25 +3945,58 @@ writes `mcp.api_keys` via direct INSERT), so the IDORs they close are
 This is the same IDOR class as `.75` / `.77` / `.78` / `.80` / `.83` / `.84`,
 on the ADMIN/BFF surface instead of the MCP wire.
 
+**Org-provisioning write surface (bead `unblock-tv8.86`).** The 2026-06-15
+admin/BFF surface IDOR sweep that produced `.85` set aside the SIBLING
+org-provisioning RPCs on this same admin surface; this round adds them. Two
+`private` `org` RPCs (`apps/api/org/org.go`, §4.2) write tenant-scoped rows
+from the wire with NO caller-ownership check: **(1) `org.AddMember`** —
+INSERTs an `org.members` row from the wire-supplied `OrgID`/`UserID`/`Role`
+with ZERO caller check (`callerIdentity` feeds only the `invited_by` audit
+column, never authorization) and NO `Role` cap → a CRITICAL cross-tenant
+privilege escalation (a caller could mint itself `owner` of ANY org);
+**(2) `org.CreateProject`** — INSERTs an `org.projects` row under the
+wire-supplied `OrgID` guarded only by the FK→`NotFound`, which catches a
+NON-EXISTENT org but NOT a FOREIGN existing one (a WARNING-class write IDOR).
+Like the `auth` rows, NEITHER is MCP-wire-reachable today (no MCP tool maps to
+them; only test/seed callers), so both IDORs are **LATENT** — exploitable
+cross-tenant only once a future key-management / web-admin BFF is wired. Same
+IDOR class + dormant-gate pattern as `.85`, on the org-provisioning surface.
+**Bootstrapping writes are correctly OUT of scope:** `org.CreateOrganization`
+(the caller BECOMES the owner) and `auth.ExchangeOAuthCode` / `auth.Validate`
+(identity establishment) carry no membership gate by design.
+
 | RPC (auth/BFF admin) | Predicate form |
 |---|---|
 | `auth.RevokeAPIKey` (§4.1) | the UPDATE gains `id=$1 AND ($caller='' OR org_id=$caller)`, with `$caller` = the new `CallerOrgID` channel (pinned from the resolved session identity, §4.3.2, NEVER from the wire). A cross-tenant `KeyID` affects zero rows → `NOT_FOUND` (existence not leaked); the `COALESCE` idempotency is preserved. |
 | `auth.IssueAPIKey` (§4.1) | gate on BOTH (a) caller-owns-org — `org.Authorize` keyed on the new `CallerUserID` channel (`SELECT role FROM org.members WHERE org_id=$1 AND user_id=$2`, §4.2 / `apps/api/org/org.go:520`) — and (b) `IssuedToUser ∈ org.members(OrgID)` (membership predicate; infra: `org.members` per migration `0030`, `org.AddMember` §4.2). A foreign `OrgID` or a non-member `IssuedToUser` → rejected (`NOT_FOUND` / appropriate error), nothing inserted, existence not leaked. |
+| `org.AddMember` (§4.2) — **CRITICAL priv-esc** (bead `unblock-tv8.86`) | the INSERT of an `org.members` row from the wire-supplied `OrgID`/`UserID`/`Role` gains the new `CallerUserID` channel (pinned from the resolved session identity, §4.3.2, NEVER from the wire — `callerIdentity` previously fed only the `invited_by` audit column, never authorization). When `$caller` is non-empty the RPC requires BOTH (a) the caller holds an **admin/owner** `org.members` row in `OrgID` (`SELECT role FROM org.members WHERE org_id=$1 AND user_id=$2`, §4.2 / `apps/api/org/org.go:520`) AND (b) the granted `Role` is **capped at the caller's effective role** (no granting above one's own). A foreign / non-member `OrgID`, an unauthorised (non-admin) caller, or an over-grant → `NOT_FOUND` / appropriate error, nothing inserted, existence not leaked. Closes a CRITICAL cross-tenant privilege-escalation (a caller could mint itself `owner` of ANY org). |
+| `org.CreateProject` (§4.2) (bead `unblock-tv8.86`) | the INSERT of an `org.projects` row under the wire-supplied `OrgID` gains the new `CallerUserID` channel (pinned from the resolved session identity, §4.3.2, NEVER from the wire). When `$caller` is non-empty the RPC requires the caller to be a **write-capable member** of `OrgID` (`SELECT role FROM org.members WHERE org_id=$1 AND user_id=$2`, §4.2 / `apps/api/org/org.go:520`) before the INSERT. A foreign / non-member `OrgID` → `NOT_FOUND`, **replacing the bare FK→`NotFound`** (which only caught a non-existent org, not a foreign existing one), nothing inserted, existence not leaked. |
 
-Both take the **empty-caller NO-OP form** — `RevokeAPIKey`'s `$caller=''`
-disjunct and `IssueAPIKey`'s empty-`CallerUserID` skip — exactly the
-empty-`CallerOrgID` no-op precedent ratified above (the item/milestone
-write-RPC pattern), NOT the `CreateLabel` hard-reject: the trusted §11.1.1
-E2E seed + integration / mcpaudit / perf tests pass no caller identity (or
-seed `mcp.api_keys` via direct INSERT). The gate is therefore **DORMANT until
-the future key-management BFF / admin surface is wired**, and that future bead
-MUST pin the caller identity (`CallerOrgID` / `CallerUserID`) — else the no-op
-leaves the IDOR open. Cross-tenant probes return `NOT_FOUND`, never leaking
-existence. **NO `mcp.api_keys` schema / DDL / migration change** — the gates
-are a query predicate + an `org.Authorize` call + a membership predicate; the
-`mcp.api_keys` schema is unchanged. The load-bearing code lives in
-`apps/api/auth/auth.go` (`IssueAPIKey` / `RevokeAPIKey` + the new request
-fields), updated in lockstep on the implementation bead's branch.
+All four take the **empty-caller NO-OP form** — `RevokeAPIKey`'s `$caller=''`
+disjunct, and the empty-`CallerUserID` skip on `IssueAPIKey` / `org.AddMember`
+/ `org.CreateProject` — exactly the empty-`CallerOrgID` no-op precedent
+ratified above (the item/milestone write-RPC pattern), NOT the `CreateLabel`
+hard-reject: the trusted §11.1.1 E2E seed + integration / mcpaudit / perf
+tests pass no caller identity (or seed `mcp.api_keys` via direct INSERT), and
+the trusted §11.1.1 seed + `org` / `rbactest` / `exitcriteriontest` /
+`perftest` callers drive the `org` RPCs with no caller identity. The gate is
+therefore **DORMANT until the future key-management BFF / admin surface is
+wired**, and that future bead MUST pin the caller identity
+(`CallerOrgID` / `CallerUserID`) — else the no-op leaves the IDOR (and, for
+`org.AddMember`, the priv-esc) open. Cross-tenant probes return `NOT_FOUND`,
+never leaking existence. **NO `mcp.api_keys` NOR `org` schema / DDL / migration
+change** — the gates are query predicates + an `org.Authorize` call +
+membership predicates + (for `org.AddMember`) a role cap; the `mcp.api_keys`
+and `org` schemas are unchanged. The infra all CONFIRMED present:
+`org.members` (migration `0030`), `org.Authorize` (`org.go:520`, the
+`SELECT role FROM org.members WHERE org_id=$1 AND user_id=$2` membership/role
+check), and the org service owns the `org` schema (direct read OK). The
+load-bearing code lives in `apps/api/auth/auth.go` (`IssueAPIKey` /
+`RevokeAPIKey` + the new request fields) and `apps/api/org/org.go`
+(`AddMember` / `CreateProject` gates + the new `CallerUserID` request fields),
+updated in lockstep on the implementation bead's branch. (`org.project_members`
+has no write RPC yet — seed-only; a future `AddProjectMember`-style RPC will
+need the IDENTICAL caller-membership gate, noted in §4.2.)
 
 The load-bearing description of this write-gate model lives in the
 `apps/api/workitems/workitems.go` auth-model doc-comment (§10.1 read-side
