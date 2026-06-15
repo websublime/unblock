@@ -863,6 +863,20 @@ var (
 		commentStatusSuccess: {},
 	}
 
+	// commentKindCascadePublishers is the set of comment kinds whose
+	// EXISTENCE is a §5.7.1 pipeline_stage derivation input: a
+	// kind=review comment derives Review, a kind=investigation comment
+	// derives Implementation (root docs/SPEC.md §5.7.1 comment-existence
+	// rows). An AppendComment of one of these kinds flips a §5.7.1
+	// predicate and MUST publish CascadeRequested{state_change} so the
+	// cascade subscriber recomputes pipeline_stage (bead unblock-tv8.87,
+	// SPEC §6.2 Tool 10 Side-effects). Other kinds are NOT §5.7.1 inputs
+	// and do not publish.
+	commentKindCascadePublishers = map[string]struct{}{
+		"investigation": {},
+		"review":        {},
+	}
+
 	agentKindAllowed = map[string]struct{}{
 		"claude-code": {},
 		"copilot":     {},
@@ -1520,6 +1534,15 @@ func GetTrail(ctx context.Context, req *GetTrailRequest) (*Trail, error) {
 // empty-ParentID top-level-comment path and the self-parent prohibition
 // (comments_no_self_parent_chk) are preserved.
 //
+// Side-effects (bead unblock-tv8.87, SPEC §6.2 Tool 10 Side-effects +
+// §6.3.0 Regime B): comment existence is a §5.7.1 pipeline_stage
+// derivation input. When Kind is investigation or review, the append
+// publishes CascadeRequested{Reason:"state_change", TriggeredByItemID:
+// item_id} post-insert so the cascade subscriber recomputes
+// pipeline_stage for this item + its forward 'blocks' closure. Other
+// kinds are not §5.7.1 inputs and do not publish. Best-effort: a publish
+// failure is logged, never returned — the comment is already committed.
+//
 //encore:api private method=POST path=/workitems.AppendComment
 func AppendComment(ctx context.Context, req *AppendCommentRequest) (*Comment, error) {
 	if req == nil || req.ItemID == "" {
@@ -1626,7 +1649,72 @@ func AppendComment(ctx context.Context, req *AppendCommentRequest) (*Comment, er
 	if err != nil {
 		return nil, &errs.Error{Code: errs.Internal, Message: "comment read-back failed"}
 	}
+
+	// §5.7.1 publish-trigger (bead unblock-tv8.87, SPEC §6.2 Tool 10
+	// Side-effects + §6.3.0 Regime B): comment existence is a §5.7.1
+	// pipeline_stage derivation input — a kind=review comment on the item
+	// derives Review, a kind=investigation comment derives Implementation.
+	// So an AppendComment whose kind is investigation/review flips a
+	// §5.7.1 comment-existence predicate and MUST publish
+	// CascadeRequested{Reason:"state_change", TriggeredByItemID:item_id}
+	// post-insert so the subscriber recomputes pipeline_stage on this item
+	// + its forward 'blocks' closure (Regime B; the subscriber is the sole
+	// writer of pipeline_stage). The publish is UNCONDITIONAL on the
+	// comment landing — the subscriber's pipeline_stage UPDATE is itself
+	// idempotent (no-ops when the derived value is unchanged, e.g. a second
+	// kind=review comment), so re-publishing on an already-held predicate
+	// is correct and harmless. Other kinds are NOT §5.7.1 inputs and do not
+	// publish. Best-effort: log.Warn on any failure, never fail the append
+	// — the comment is already committed. Encore Pub/Sub does not carry ctx
+	// across the topic boundary; TraceID is copied from tracectx into the
+	// payload explicitly (mirrors Close at workitems.go:1953-1973).
+	if _, ok := commentKindCascadePublishers[kind]; ok {
+		publishCommentCascade(ctx, req.ItemID)
+	}
+
 	return &c, nil
+}
+
+// publishCommentCascade emits a CascadeRequested{Reason:"state_change"}
+// for an investigation/review comment append (bead unblock-tv8.87). It
+// reads the item's scope (org_id, project_id) and mints a fresh event id;
+// any failure is logged at Warn and swallowed — the comment is already
+// committed and the cascade is best-effort, exactly like Close's
+// post-commit publish. Mirrors the AR-11 retry-safe pattern (a fresh ULID
+// per call; the subscriber's UNIQUE (event_id, triggered_by_item_id)
+// constraint collapses redeliveries of the SAME payload).
+func publishCommentCascade(ctx context.Context, itemID string) {
+	var orgID, projectID string
+	if err := db.QueryRow(ctx,
+		`SELECT org_id, COALESCE(project_id, '')
+		   FROM workitems.items
+		  WHERE id = $1`,
+		itemID,
+	).Scan(&orgID, &projectID); err != nil {
+		rlog.Warn("workitems: comment cascade scope read failed (comment already committed)",
+			"err", err, "item_id", itemID)
+		return
+	}
+
+	eventID, err := ulid.New()
+	if err != nil {
+		rlog.Warn("workitems: comment cascade event id generation failed (comment already committed)",
+			"err", err, "item_id", itemID)
+		return
+	}
+
+	if _, err := deps.CascadeRequestedTopic.Publish(ctx, &deps.CascadeRequested{
+		EventID:           eventID,
+		OrgID:             orgID,
+		ProjectID:         projectID,
+		TriggeredByItemID: itemID,
+		Reason:            "state_change",
+		TraceID:           tracectx.TraceID(ctx),
+		EmittedAt:         time.Now().UTC(),
+	}); err != nil {
+		rlog.Warn("workitems: comment cascade publish failed (comment already committed)",
+			"err", err, "item_id", itemID)
+	}
 }
 
 // SetStateColumns writes one or more of (impl_state, review_state,
@@ -1635,17 +1723,21 @@ func AppendComment(ctx context.Context, req *AppendCommentRequest) (*Comment, er
 // Claim). On violation, returns errs.FailedPrecondition with
 // Meta["invariant"] populated per SPEC §6.2 Tool 13.
 //
-// Side-effects (round-6 §6.3.0 symmetric writer model — tension #3
-// narrow rule, SPEC lines 1700-1711 + 1801): after the validating
+// Side-effects (round-6 §6.3.0 symmetric writer model; publish-trigger
+// set widened to the full §5.7.1 derivation-input set — bead
+// unblock-tv8.87, SPEC §6.2 Tool 13 Side-effects): after the validating
 // UPDATE commits, publishes CascadeRequested{Reason:"state_change",
-// TriggeredByItemID:item_id, …} when the write changes one or more
-// of (impl_state, review_state, qa_state) — including I-1's
-// auto-reset of qa_state. Pure pipe_state mutations (no change to
-// the other three) do NOT publish (SPEC §6.3.0 explicit
-// non-publishers, tension #3 ruling). The publish drives the
-// multi-hop pipeline_stage recompute on the forward 'blocks' closure
-// (Regime B; the cascade subscriber is the sole writer of
-// pipeline_stage).
+// TriggeredByItemID:item_id, …} when the write changes ANY §5.7.1
+// pipeline_stage derivation input — one or more of (impl_state,
+// review_state, qa_state, pipeline_state), including I-1's auto-reset
+// of qa_state. The item's OWN pipeline_state is the FIRST,
+// short-circuiting §5.7.1 input (rows 1-3), so a PURE pipeline_state
+// write (running/needs_human/paused/no_investigation, no change to the
+// other three) IS §5.7.1-affecting and MUST publish — the former "pure
+// pipe_state is exempt" carve-out (tension #3) was FACTUALLY WRONG vs
+// §5.7.1 and is RETIRED. The publish drives the multi-hop
+// pipeline_stage recompute on the forward 'blocks' closure (Regime B;
+// the cascade subscriber is the sole writer of pipeline_stage).
 //
 //encore:api private method=POST path=/workitems.SetStateColumns
 func SetStateColumns(ctx context.Context, req *SetStateRequest) (*Item, error) {
@@ -1751,16 +1843,27 @@ func SetStateColumns(ctx context.Context, req *SetStateRequest) (*Item, error) {
 		return nil, preconditionError("review_change_requires_impl_done", "review_state change requires impl_state=done")
 	}
 
-	// Compute the §6.3.0 tension #3 "materially changed" predicate
+	// Compute the §5.7.1 derivation-input "materially changed" predicate
 	// BEFORE the UPDATE so the publish gate captures the state
 	// transition post-I-1-auto-reset (R2 of the bead investigation).
-	// Pure pipe_state writes leave newImpl/newReview/newQA equal to
-	// cur and evaluate to false (AC #2). Over-publishing is acceptable
+	//
+	// Publish-trigger-set = §5.7.1-derivation-input-set (bead
+	// unblock-tv8.87, SPEC §6.2 Tool 13 Side-effects + §6.3.0 Regime B):
+	// a write changing ANY of (impl_state, review_state, qa_state,
+	// pipeline_state) is §5.7.1-affecting and MUST publish. The item's
+	// OWN pipeline_state is the FIRST, short-circuiting derivation input
+	// (§5.7.1 rows 1-3: needs_human/paused → Deferred; no_investigation
+	// AND impl=pending → Implementation), so a PURE pipeline_state write
+	// — with no change to the other three — is NOT exempt. The former
+	// "pure pipe_state is exempt" carve-out (tension #3) was FACTUALLY
+	// WRONG vs §5.7.1 and is RETIRED. Over-publishing is acceptable
 	// (subscriber's idempotent UPDATE guard absorbs it); under-publishing
-	// would be a correctness bug — hence the simple any-of-three form.
+	// would be a correctness bug (a stale pipeline_stage) — hence the
+	// simple any-of-four form.
 	publishStateChange := (newImpl != cur.Impl) ||
 		(newReview != cur.Review) ||
-		(newQA != cur.QA)
+		(newQA != cur.QA) ||
+		(newPipeline != cur.Pipeline)
 
 	// All invariants validated. Apply the update.
 	_, err = tx.Exec(ctx,
@@ -1783,16 +1886,19 @@ func SetStateColumns(ctx context.Context, req *SetStateRequest) (*Item, error) {
 		return nil, &errs.Error{Code: errs.Internal, Message: "set_state commit failed"}
 	}
 
-	// Round-6 §6.3.0 tension #3 narrow rule (SPEC §6.2 Tool 13 lines
-	// 1700-1711 + §6.3.0 line 1801): publish CascadeRequested with
-	// Reason="state_change" ONLY when the write changed at least one
-	// of (impl_state, review_state, qa_state) — including I-1's
-	// auto-reset of qa_state. Pipe-only writes do NOT publish. Encore
-	// Pub/Sub does not carry ctx across the topic boundary; TraceID is
-	// copied from tracectx into the payload explicitly (mirrors Close
-	// at workitems.go:1377-1397 + Claim at 1492-1526). Best-effort:
-	// log.Warn on publish failure, do not return error — the state
-	// mutation is already committed.
+	// §5.7.1 publish-trigger rule (bead unblock-tv8.87, SPEC §6.2 Tool 13
+	// Side-effects + §6.3.0 Regime B): publish CascadeRequested with
+	// Reason="state_change" when the write changed at least one §5.7.1
+	// derivation input — any of (impl_state, review_state, qa_state,
+	// pipeline_state), including I-1's auto-reset of qa_state. A pure
+	// pipeline_state write IS §5.7.1-affecting (the item's own
+	// pipeline_state is the first, short-circuiting input — §5.7.1 rows
+	// 1-3) and DOES publish; the prior pipe-only carve-out is retired.
+	// Encore Pub/Sub does not carry ctx across the topic boundary;
+	// TraceID is copied from tracectx into the payload explicitly
+	// (mirrors Close at workitems.go:1377-1397 + Claim at 1492-1526).
+	// Best-effort: log.Warn on publish failure, do not return error —
+	// the state mutation is already committed.
 	if publishStateChange && eventIDErr == nil {
 		if _, err := deps.CascadeRequestedTopic.Publish(ctx, &deps.CascadeRequested{
 			EventID:           eventID,
