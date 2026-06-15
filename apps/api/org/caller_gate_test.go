@@ -45,8 +45,10 @@ import (
 
 // enrol adds userID to orgID with the given role via the DORMANT-gate
 // path (no CallerUserID), the same way the §11.1.1 seed enrols members.
-// Used to establish the caller's own membership before the active-gate
-// assertions.
+// It deliberately bypasses the active caller-gate via the empty-caller
+// no-op to establish the membership fixture — the gate under test would
+// otherwise reject the very rows these assertions need in place. Used to
+// establish the caller's own membership before the active-gate assertions.
 func enrol(t *testing.T, ctx context.Context, orgID, userID, role string) {
 	t.Helper()
 	if err := org.AddMember(ctx, &org.AddMemberRequest{
