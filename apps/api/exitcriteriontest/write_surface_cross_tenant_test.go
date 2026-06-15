@@ -13,7 +13,9 @@
 // asserted unchanged.
 //
 // Tools exercised (one cross-tenant case per hardened write tool):
-//   - update            (workitems.Update)
+//   - update            (workitems.Update — foreign item AND, per bead
+//                         unblock-tv8.84, owned item + foreign milestone_id
+//                         ⇒ NOT_FOUND, plus a same-org positive control)
 //   - comment           (workitems.AppendComment, INSERT … SELECT gate)
 //   - set_state         (workitems.SetStateColumns)
 //   - close             (workitems.Close)
@@ -220,6 +222,109 @@ func TestExitCriterion_WriteSurface_CrossTenantRejected(t *testing.T) {
 		}
 		if title != "Foreign Item" {
 			t.Fatalf("cross-tenant update mutated foreign title to %q, want %q", title, "Foreign Item")
+		}
+	})
+
+	// --- update: OWNED item, FOREIGN milestone_id ⇒ NOT_FOUND, owned
+	//     milestone_id stays NULL -------------------------------------------
+	// The caller owns itm_b; it passes a FOREIGN milestone_id. workitems.Update
+	// writes the wire-supplied milestone_id into the OWNED item, so the
+	// target-item gate ($7 = org_id) alone would let this through — the
+	// existence-only FK passes for a foreign-but-existing milestone. The
+	// milestone-write gate (bead unblock-tv8.84, §10.1.1) additionally requires
+	// the milestone to belong to the caller's org (org-XOR-project predicate,
+	// mirroring AssignItem / Create), so the foreign milestone is invisible:
+	// the UPDATE matches zero rows → NOT_FOUND, indistinguishable from a missing
+	// milestone, and the owned item's milestone_id stays NULL. Without the gate
+	// this is the proven cross-tenant write IDOR.
+	t.Run("update_foreign_milestone", func(t *testing.T) {
+		ownedItem := f.ItemID("itm_b")
+		env := callTool(t, f.RawKey, sessionID, "update", map[string]any{
+			"item_id":      ownedItem,
+			"milestone_id": ft.MilestoneID, // foreign org-scoped milestone — the reference under test
+		})
+		assertNotFound(t, env, "update (owned item, foreign milestone)")
+		var milestoneID *string
+		if err := encoredb.DB.QueryRow(ctx,
+			`SELECT milestone_id FROM workitems.items WHERE id = $1`, ownedItem,
+		).Scan(&milestoneID); err != nil {
+			t.Fatalf("read owned item milestone_id: %v", err)
+		}
+		if milestoneID != nil {
+			t.Fatalf("update with foreign milestone set owned milestone_id to %q, want NULL", *milestoneID)
+		}
+	})
+
+	// --- update: OWNED item, FOREIGN PROJECT-scoped milestone_id ⇒ NOT_FOUND -
+	// The org-scoped case above exercises the org_id = $caller branch of the
+	// milestone org-XOR-project gate; this case (a foreign project-scoped
+	// milestone, org_id NULL, project_id → org B's project) locks the OTHER
+	// branch — project_id IN (caller-org projects) — so the full XOR predicate
+	// on the update path is covered (bead unblock-tv8.84). The owned item's
+	// milestone_id must stay NULL.
+	t.Run("update_foreign_project_scoped_milestone", func(t *testing.T) {
+		ownedItem := f.ItemID("itm_c")
+		env := callTool(t, f.RawKey, sessionID, "update", map[string]any{
+			"item_id":      ownedItem,
+			"milestone_id": ft.ProjMilesID, // foreign project-scoped milestone — the reference under test
+		})
+		assertNotFound(t, env, "update (owned item, foreign project-scoped milestone)")
+		var milestoneID *string
+		if err := encoredb.DB.QueryRow(ctx,
+			`SELECT milestone_id FROM workitems.items WHERE id = $1`, ownedItem,
+		).Scan(&milestoneID); err != nil {
+			t.Fatalf("read owned item milestone_id: %v", err)
+		}
+		if milestoneID != nil {
+			t.Fatalf("update with foreign project-scoped milestone set owned milestone_id to %q, want NULL", *milestoneID)
+		}
+	})
+
+	// --- update: OWNED item, SAME-ORG milestone_id ⇒ SUCCESS, assigned -------
+	// The positive control: a home caller assigning a HOME org-scoped milestone
+	// to its OWN item via update must SUCCEED and stamp the column. Proves the
+	// milestone-write gate (bead unblock-tv8.84) does not over-reject legitimate
+	// same-org milestone assignment through the update path.
+	t.Run("update_same_org_milestone", func(t *testing.T) {
+		ownedItem := f.ItemID("itm_d")
+		homeMilestone := mustULID(t, "home milestone for update positive control")
+		if _, err := encoredb.DB.Exec(ctx,
+			`INSERT INTO workitems.milestones (id, org_id, name, start_date, end_date)
+			 VALUES ($1, $2, 'Home Milestone', '2026-01-01', '2026-12-31')`,
+			homeMilestone, f.OrgID,
+		); err != nil {
+			t.Fatalf("seed home milestone: %v", err)
+		}
+		t.Cleanup(func() {
+			// Detach from the item first (the FK would otherwise block the delete)
+			// then drop the milestone.
+			_, _ = encoredb.DB.Exec(context.Background(), `UPDATE workitems.items SET milestone_id = NULL WHERE id = $1`, ownedItem)
+			_, _ = encoredb.DB.Exec(context.Background(), `DELETE FROM workitems.milestones WHERE id = $1`, homeMilestone)
+		})
+		env := callTool(t, f.RawKey, sessionID, "update", map[string]any{
+			"item_id":      ownedItem,
+			"milestone_id": homeMilestone, // same-org milestone — must assign
+		})
+		var out struct {
+			Item struct {
+				ID          string `json:"id"`
+				MilestoneID string `json:"milestone_id"`
+			} `json:"item"`
+		}
+		if err := json.Unmarshal(expectSuccess(t, env), &out); err != nil {
+			t.Fatalf("unmarshal update success: %v", err)
+		}
+		if out.Item.MilestoneID != homeMilestone {
+			t.Fatalf("same-org update milestone_id = %q, want %q", out.Item.MilestoneID, homeMilestone)
+		}
+		var milestoneID *string
+		if err := encoredb.DB.QueryRow(ctx,
+			`SELECT milestone_id FROM workitems.items WHERE id = $1`, ownedItem,
+		).Scan(&milestoneID); err != nil {
+			t.Fatalf("read owned item milestone_id: %v", err)
+		}
+		if milestoneID == nil || *milestoneID != homeMilestone {
+			t.Fatalf("same-org update persisted milestone_id %v, want %q", milestoneID, homeMilestone)
 		}
 	})
 

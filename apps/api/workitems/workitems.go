@@ -1162,13 +1162,27 @@ func Update(ctx context.Context, req *UpdateRequest) (*Item, error) {
 	// Title/Body/Priority follow the same nil = unchanged contract.
 	//
 	// Row-level tenant gate (round-16 / bead unblock-tv8.77, §10.1.1): the
-	// WHERE clause's ($7 = '' OR org_id = $7) predicate is the IDOR gate. A
-	// foreign ItemID (org_id != CallerOrgID) matches zero rows → NOT_FOUND
-	// below, never a cross-tenant mutation. The empty-CallerOrgID no-op
-	// keeps trusted internal callers (the §11.1.1 E2E seed, integration
-	// tests) operating unscoped; the MCP handler always pins CallerOrgID
-	// from identity.OrgID, so the no-op is unreachable from the agent
-	// surface.
+	// WHERE clause's ($7 = '' OR org_id = $7) predicate is the TARGET-ITEM
+	// IDOR gate. A foreign ItemID (org_id != CallerOrgID) matches zero rows →
+	// NOT_FOUND below, never a cross-tenant mutation. The empty-CallerOrgID
+	// no-op keeps trusted internal callers (the §11.1.1 E2E seed, integration
+	// tests) operating unscoped; the MCP handler always pins CallerOrgID from
+	// identity.OrgID, so the no-op is unreachable from the agent surface.
+	//
+	// Milestone-write tenant gate (bead unblock-tv8.84, §10.1.1): DISTINCT
+	// from and ADDITIONAL to the target-item gate above. When the request
+	// sets a non-empty milestone_id ($6 != ''), the UPDATE additionally
+	// requires that milestone to belong to the caller's org via the
+	// org-XOR-project predicate ($6 IN milestones WHERE org_id = $7 OR
+	// project_id IN caller-org projects) — mirroring the EXACT sibling gates
+	// on the two other paths that write items.milestone_id, workitems.Create
+	// (~1044) and AssignItem (~3137). A foreign-but-existing milestone_id
+	// matches zero rows → NOT_FOUND, the item UNCHANGED, indistinguishable
+	// from a missing milestone (the existence-only FK at 0040:50 would
+	// otherwise pass). The clear-to-null path (milestone_id = "") and the
+	// nil = unchanged path both set $6 = '' and satisfy the empty disjunct,
+	// carrying NO milestone predicate — PRESERVED. The empty-CallerOrgID
+	// no-op ($7 = '') is PRESERVED.
 	tag, err := tx.Exec(ctx,
 		`UPDATE workitems.items
 		    SET title       = COALESCE($2, title),
@@ -1180,7 +1194,11 @@ func Update(ctx context.Context, req *UpdateRequest) (*Item, error) {
 		                       END,
 		        updated_at  = now()
 		  WHERE id = $1
-		    AND ($7 = '' OR org_id = $7)`,
+		    AND ($7 = '' OR org_id = $7)
+		    AND ($6 = ''
+		         OR $6 IN (SELECT id FROM workitems.milestones
+		                    WHERE org_id = $7
+		                       OR project_id IN (SELECT id FROM org.projects WHERE org_id = $7)))`,
 		req.ItemID, req.Title, req.Body, req.Priority,
 		req.MilestoneID != nil, derefString(req.MilestoneID),
 		req.CallerOrgID,
@@ -1192,10 +1210,12 @@ func Update(ctx context.Context, req *UpdateRequest) (*Item, error) {
 		rlog.Error("workitems: update failed", "err", err, "item_id", req.ItemID)
 		return nil, &errs.Error{Code: errs.Internal, Message: "update failed"}
 	}
-	// Zero affected rows means either the item does not exist OR it belongs
-	// to another tenant (org_id != CallerOrgID). Surface NOT_FOUND for both
-	// — a cross-tenant ItemID is indistinguishable from a missing one and
-	// never leaks existence across the tenant boundary.
+	// Zero affected rows means one of: the item does not exist, it belongs to
+	// another tenant (org_id != CallerOrgID), OR a non-empty milestone_id
+	// belongs to another tenant (the unblock-tv8.84 milestone-write gate).
+	// Surface NOT_FOUND for all — a cross-tenant ItemID or milestone_id is
+	// indistinguishable from a missing one and never leaks existence across
+	// the tenant boundary.
 	if tag.RowsAffected() == 0 {
 		return nil, &errs.Error{Code: errs.NotFound, Message: "item not found"}
 	}
