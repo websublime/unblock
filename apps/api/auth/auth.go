@@ -527,6 +527,16 @@ type IssueAPIKeyRequest struct {
 	AgentKind    string     `json:"agent_kind"`     // AgentKind value
 	Scopes       []string   `json:"scopes"`
 	ExpiresAt    *time.Time `json:"expires_at"` // nullable; default: never
+	// CallerUserID is the ownership-gate key (bead unblock-tv8.85). It
+	// is pinned from the resolved caller identity (the future
+	// key-management BFF / web-admin surface's session→user→org
+	// resolution, §4.3.2) and is NEVER accepted from the wire — exactly
+	// the §10.1.1 internal-channel convention. When non-empty the RPC
+	// requires the caller to own OrgID (an org.members membership of
+	// CallerUserID in OrgID, the org.Authorize predicate). Empty →
+	// dormant no-op (the trusted §11.1.1 E2E seed and the integration /
+	// mcpaudit / perf tests pass no caller identity).
+	CallerUserID string `json:"caller_user_id"` // ULID
 }
 
 // IssueAPIKeyResponse is the output of IssueAPIKey. SPEC §4.1.
@@ -544,6 +554,31 @@ type IssueAPIKeyResponse struct {
 // Operator-facing surfaces (CLI or web admin) are deferred to a future
 // phase. Returns the raw key ONCE — the caller stores it; subsequent
 // reads return only the prefix and metadata.
+//
+// Tenant gate (bead unblock-tv8.85, SPEC §4.1 / §10.1.1). Pre-this-round
+// the INSERT stamped org_id + issued_to_user straight from the wire with
+// NO check that the caller owned OrgID, nor that IssuedToUser was a
+// member of OrgID — a LATENT cross-tenant write IDOR (not MCP-wire
+// reachable today: no MCP tool maps to this RPC; only test/seed callers
+// exist) exploitable once a future key-management BFF / web-admin surface
+// is wired. When CallerUserID is non-empty the RPC now enforces BOTH:
+// (a) the caller owns OrgID — CallerUserID has an org.members row in
+// OrgID (the org.Authorize predicate, SELECT role FROM org.members WHERE
+// org_id=$1 AND user_id=$2, §4.2 / apps/api/org/org.go:520); and
+// (b) IssuedToUser is a member of OrgID — the same org.members
+// membership predicate on IssuedToUser. A foreign OrgID (caller not a
+// member) OR a non-member IssuedToUser is rejected with NOT_FOUND
+// BEFORE any INSERT runs — nothing is inserted, existence is not leaked.
+// CallerUserID is pinned from the resolved caller identity (the future
+// BFF's session→user→org resolution, §4.3.2) and is NEVER from the wire.
+// Empty CallerUserID is a NO-OP (dormant gate): the gate is skipped so
+// the trusted §11.1.1 E2E seed + integration / mcpaudit / perf callers
+// (no caller identity) operate unscoped — the gate is DORMANT until the
+// future key-management BFF / admin surface pins CallerUserID, and that
+// future bead MUST pin it (else the no-op leaves the IDOR open). No
+// mcp.api_keys schema change — the gate is two org.members membership
+// reads. The pre-DB input guards (org_id / label / issued_to_user
+// non-empty, agent_kind allowed) are preserved and run first.
 //
 //encore:api private method=POST path=/auth.IssueAPIKey
 func IssueAPIKey(ctx context.Context, req *IssueAPIKeyRequest) (*IssueAPIKeyResponse, error) {
@@ -570,6 +605,39 @@ func IssueAPIKey(ctx context.Context, req *IssueAPIKeyRequest) (*IssueAPIKeyResp
 		return nil, &errs.Error{
 			Code:    errs.InvalidArgument,
 			Message: fmt.Sprintf("invalid agent_kind %q (allowed: claude-code, copilot, cursor, codex, aider, custom)", req.AgentKind),
+		}
+	}
+
+	// Tenant gate (bead unblock-tv8.85): when CallerUserID is pinned,
+	// enforce that the caller owns OrgID and that IssuedToUser is a
+	// member of OrgID — both before any INSERT. Empty CallerUserID is a
+	// dormant no-op (trusted §11.1.1 seed / integration callers). A
+	// foreign OrgID or non-member IssuedToUser surfaces as NOT_FOUND
+	// (existence not leaked), never a cross-tenant write.
+	if req.CallerUserID != "" {
+		// (a) Caller owns OrgID: the caller must be a member of the
+		// target org (the org.Authorize membership predicate).
+		callerMember, err := isOrgMember(ctx, req.OrgID, req.CallerUserID)
+		if err != nil {
+			rlog.Error("auth: api_key issue caller-membership lookup failed", "err", err, "org_id", req.OrgID)
+			return nil, &errs.Error{Code: errs.Internal, Message: "issue api key failed"}
+		}
+		if !callerMember {
+			// Caller is not a member of OrgID — either the org does
+			// not exist or it belongs to another tenant. Both surface
+			// as NOT_FOUND so a cross-tenant caller cannot distinguish
+			// the two (existence not leaked).
+			return nil, &errs.Error{Code: errs.NotFound, Message: "org not found"}
+		}
+		// (b) IssuedToUser is a member of OrgID: a key may only be
+		// issued to a user who actually belongs to the target org.
+		issuedMember, err := isOrgMember(ctx, req.OrgID, req.IssuedToUser)
+		if err != nil {
+			rlog.Error("auth: api_key issue issued-to membership lookup failed", "err", err, "org_id", req.OrgID)
+			return nil, &errs.Error{Code: errs.Internal, Message: "issue api key failed"}
+		}
+		if !issuedMember {
+			return nil, &errs.Error{Code: errs.NotFound, Message: "issued_to_user is not a member of the org"}
 		}
 	}
 
@@ -618,31 +686,101 @@ func IssueAPIKey(ctx context.Context, req *IssueAPIKeyRequest) (*IssueAPIKeyResp
 // RevokeAPIKeyRequest is the input to RevokeAPIKey. SPEC §4.1.
 type RevokeAPIKeyRequest struct {
 	KeyID string `json:"key_id"` // ULID
+	// CallerOrgID is the row-level tenant predicate for the revoke
+	// UPDATE (bead unblock-tv8.85). It is pinned from the resolved
+	// caller identity (the future key-management BFF / web-admin
+	// surface's session→user→org resolution, §4.3.2) and is NEVER
+	// accepted from the wire — exactly the §10.1.1 internal-channel
+	// convention. Empty → dormant no-op (the trusted §11.1.1 E2E seed
+	// and the integration / mcpaudit / perf tests pass no caller
+	// identity).
+	CallerOrgID string `json:"caller_org_id"` // ULID
 }
 
 // RevokeAPIKey flips revoked_at; idempotent.
 //
 // Idempotency contract: a second Revoke call on the same key is a
 // no-op (revoked_at is preserved at the first-revoke timestamp via
-// COALESCE). Revoking a non-existent key is also accepted silently —
-// the caller cannot distinguish a key it never had from one already
-// revoked, and revoking what you don't own is harmless. A future
-// bead may add an authorization check (the caller must own org_id).
+// COALESCE).
+//
+// Tenant gate (bead unblock-tv8.85, SPEC §4.1 / §10.1.1). Pre-this-round
+// the UPDATE carried NO caller-org predicate, so any tenant's key was
+// revocable by id — a LATENT cross-tenant write IDOR (not MCP-wire
+// reachable today: no MCP tool maps to this RPC; only test/seed callers
+// exist) exploitable once a future key-management BFF / web-admin surface
+// is wired. The UPDATE now gains `AND ($caller = ” OR org_id = $caller)`
+// where $caller is CallerOrgID (pinned from the resolved session
+// identity, §4.3.2 — NEVER from the wire). A cross-tenant KeyID matches
+// zero rows → NOT_FOUND (existence is NOT leaked). The COALESCE
+// idempotency is preserved (a same-org re-revoke is still a no-op
+// success). Empty CallerOrgID is a NO-OP (dormant gate): the $caller=”
+// disjunct skips the predicate so the trusted §11.1.1 seed + integration
+// / mcpaudit / perf callers (no caller identity) operate unscoped — the
+// gate is DORMANT until the future key-management BFF / admin surface
+// pins CallerOrgID, and that future bead MUST pin it (else the no-op
+// leaves the IDOR open). No mcp.api_keys schema change — the gate is a
+// query predicate on the existing UPDATE.
 //
 //encore:api private method=POST path=/auth.RevokeAPIKey
 func RevokeAPIKey(ctx context.Context, req *RevokeAPIKeyRequest) error {
 	if req == nil || req.KeyID == "" {
 		return &errs.Error{Code: errs.InvalidArgument, Message: "missing key_id"}
 	}
-	_, err := db.Exec(ctx,
+	// Row-level tenant gate: when CallerOrgID is non-empty the UPDATE
+	// only matches a key owned by the caller's org; a cross-tenant
+	// KeyID matches zero rows and surfaces as NOT_FOUND (existence not
+	// leaked). When CallerOrgID is empty the $1='' disjunct admits any
+	// id — the dormant no-op for trusted internal / seed callers.
+	tag, err := db.Exec(ctx,
 		`UPDATE mcp.api_keys
 		   SET revoked_at = COALESCE(revoked_at, now())
-		 WHERE id = $1`,
-		req.KeyID,
+		 WHERE id = $1
+		   AND ($2 = '' OR org_id = $2)`,
+		req.KeyID, req.CallerOrgID,
 	)
 	if err != nil {
 		rlog.Error("auth: api_key revoke failed", "err", err, "key_id", req.KeyID)
 		return &errs.Error{Code: errs.Internal, Message: "revoke api key failed"}
 	}
+	if tag.RowsAffected() == 0 {
+		// No row matched: either the key does not exist, or it belongs
+		// to another tenant and CallerOrgID was pinned. Both surface as
+		// NOT_FOUND — a cross-tenant caller cannot distinguish a key it
+		// never had from one owned by another org (existence not
+		// leaked). The empty-CallerOrgID no-op path never reaches here
+		// for an existing id (the $2='' disjunct matches it).
+		return &errs.Error{Code: errs.NotFound, Message: "api key not found"}
+	}
 	return nil
+}
+
+// isOrgMember reports whether userID has an org.members row in orgID —
+// the canonical membership predicate org.Authorize keys on (SELECT role
+// FROM org.members WHERE org_id=$1 AND user_id=$2, §4.2 /
+// apps/api/org/org.go:520-624). It is the load-bearing gate for the
+// IssueAPIKey caller-owns-org and issued_to_user-membership checks (bead
+// unblock-tv8.85). The read is a cross-schema lookup on the shared
+// `unblock` database — the same cross-schema-read precedent the auth
+// service already uses for mcp.api_keys (validateAPIKey) and the
+// workitems write gates use for org.projects (§10.1.1). A genuine
+// "no membership" returns (false, nil); only a real query failure
+// returns a non-nil error.
+func isOrgMember(ctx context.Context, orgID, userID string) (bool, error) {
+	if orgID == "" || userID == "" {
+		// An empty org or user can never be a membership match. Guard
+		// here so a malformed caller cannot probe with empty ids.
+		return false, nil
+	}
+	var one int
+	err := db.QueryRow(ctx,
+		`SELECT 1 FROM org.members WHERE org_id = $1 AND user_id = $2`,
+		orgID, userID,
+	).Scan(&one)
+	if err != nil {
+		if errors.Is(err, sqldb.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("org members lookup: %w", err)
+	}
+	return true, nil
 }
