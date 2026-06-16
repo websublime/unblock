@@ -1,6 +1,6 @@
 # PLAN: P02 — Backend Complete (providers + memory tools + Layer-1 pipeline enforcement)
 
-**Status:** APPROVED *(2026-06-16 — review-driven drift/gap reconciliation applied 2026-06-16 (23 confirmed findings from an adversarial plan×PRD×SPEC×code sweep). User decisions Q1–Q6 resolved §6; the SPEC §11 P02/P05 traceability patch is applied on main, not pending. Previously DRAFT 2026-06-16.)*
+**Status:** APPROVED *(Q7=drop / Q8=documented-outlier resolved 2026-06-16. Research-reconciled 2026-06-16 — R-P02-1..13 verdicts recorded (9 CONFIRMED / 3 PARTIAL / 1 CONTRADICTED), C1–C5 resolved (§5.5): C2 SPEC §5.2.2 patched (Resource + custom JSON-RPC method, SSE→Streamable-HTTP); **C1 (Q7) RESOLVED 2026-06-16 = DROP** — the per-install `providers.installations.webhook_secret_enc` column is dropped via a NEW additive forward migration (`0060` unedited; re-added at v1.1 for the OAuth-app/GitLab per-install fallback); HMAC verifies against the app-level Encore secret `GITHUB_APP_WEBHOOK_SECRET` only; SPEC §9.4.5 C1 note + changelog patched; **C5 (Q8) RESOLVED 2026-06-16 = documented cold-start outlier** — no external pinger at v1.0 (SPEC §13 AR-16 option ii; external pinger option i deferred to v1.x); SPEC §13 AR-16 patched; C3 (validator read RPC) + C4 (memory `deleted_at` additive migration) recorded as 02-spec contracts; R1/R2 risks + research OQ4/OQ5 dispositioned. P01 migrations 0060/0090 untouched (the C1 DROP and C4 soft-delete ship as new forward files). Prior: review-driven drift/gap reconciliation 2026-06-16 (23 findings); user decisions Q1–Q6 resolved §6; SPEC §11 P02/P05 traceability patch applied on main.)*
 **Author:** Ada (architect)
 **Date:** 2026-06-16
 **Source PRD:** [docs/PRD.md](../PRD.md) (APPROVED, 2026-05-07)
@@ -81,7 +81,7 @@ Services that change in P02 without being net-new:
 | Service | What changes in P02 |
 |---|---|
 | `mcp` | (a) **+4 memory tools** (24–27), facades over `memory.*` RPCs. (b) **Layer-1 state-transition validator** goes live: `set_state`, `claim`, `close` gain the comment-trail-driven BLOCK conditions deferred from P01 (P01 plan §3.4 / Q1). (c) **`catalogue.json` BLOCK-conditions section** authored (§5.7 / §7.5); `go generate` now emits a **load-bearing** `catalogue.gen.go` validator (P01 shipped a placeholder section). (d) **`mcp.meta_catalogue` v1** and **`verify_can_transition` v1** operational primitives go live (SPEC §5.2.2 — both were deferred to P02). |
-| `workitems` / `deps` | No net-new surface, but P02's Layer-1 validator reads the comment trail (`workitems.comments`) and the four state columns — confirm the P01 `GetTrail` / `get_state` RPCs expose everything the validator needs without a new private RPC. (Validated in research, see §5.) The webhook normaliser writes through the existing `workitems.Create` / `Update` RPCs — no direct cross-schema writes (Law 6 / RBAC §5.6). |
+| `workitems` / `deps` | **Net-new validator read surface (research R-P02-7/C3 flipped the original "no new RPC" assumption).** P02's Layer-1 validator reads the comment trail (`workitems.comments`) and the four state columns. The original assumption — "the P01 `GetTrail` / `get_state` RPCs expose everything the validator needs without a new private RPC" — is **WRONG**: `workitems.GetState.recent_kinds` is `DISTINCT ON (kind)` (latest-per-kind), which can serve neither the §7.5.1 global `last_comment_*` predicate (single most-recent comment across all kinds) nor a history-aware `any_comment_*=ever-existed` predicate (a later same-kind comment overwrites an earlier success). **P02 therefore adds a new/extended `workitems` read RPC** for the validator predicates (the exact signature — e.g. `GetCommentTrailPredicates(item_id)` returning the global-latest tuple plus per-`(kind,status)` EXISTS booleans, or a `GetState` extension — is an **02-spec contract**, see §5.5 R-P02-7). The webhook normaliser still writes through the existing `workitems.Create` / `Update` RPCs — no direct cross-schema writes (Law 6 / RBAC §5.6). |
 
 ### 2.2 The MCP tool surface: 23 → 27 (SPEC §5.2.2)
 
@@ -92,7 +92,7 @@ P02 adds the four memory tools. The P01 23-tool inventory is unchanged.
 | 24 | `remember` | Write a scoped memory entry (`org`/`project`/`user`). Secret sanitiser runs **before** encryption (NFR-7); 8 KB `value_size` cap (DDL CHECK, §9.4.8); per-(scope, key) uniqueness enforced by the partial unique indexes. Records a `memory.sanitiser_events` row on every sanitiser hit (AR-14). |
 | 25 | `recall` | Read entries by scope + key; supports tag and full-text (`ts_doc` GIN) filters. Decrypt-on-read; never decrypt-on-search (AR-10). RBAC-scoped. Whether expired rows (`memory.entries.expires_at`) are filtered at read time is resolved by R-P02-13 / B-6. |
 | 26 | `memories` | List entries by scope with pagination; cheap dashboard read (powers `prime`'s `memory_hints` field, which was empty in P01 — P01 plan §3.2). Whether expired rows (`expires_at`) are filtered is resolved by R-P02-13 / B-6. |
-| 27 | `forget` | Soft-delete an entry (audit-trail preserved; the exact soft-delete column lands in the spec — DDL today has no `deleted_at`, so this is an additive-column decision, see §5 / R-P02-10). |
+| 27 | `forget` | Soft-delete an entry (audit-trail preserved). **Research R-P02-10/C4 CONFIRMED the DDL gap is genuine:** `memory.entries` has no `deleted_at`. The additive forward migration (B-4, §2.5) adds `deleted_at timestamptz` AND rewrites the three per-scope unique indexes to partial-on-not-deleted (`… AND deleted_at IS NULL`), else `forget`→re-`remember` of the same `(scope,key)` breaks. `recall`/`memories` MUST filter `deleted_at IS NULL` (couples with the R-P02-13 `expires_at` read filter). No edit to `0090`. |
 
 > The provider sync tooling promised by PRD FR-8 ("plus the providers/sync
 > tooling needed for bidirectional GitHub sync") lives **inside** the
@@ -132,10 +132,21 @@ criterion names directly. The work:
   (not a top-level agent tool; SPEC §5.2.2) that re-validates a candidate
   transition against the **same** generated validator. This is the MCP
   machinery Layer 2 (P04) will call from the `verify-state` hook.
+  **Mechanism (research R-P02-6/C2, SPEC §5.2.2 patched 2026-06-16):** the
+  go-sdk v1.6.0 has **no "registered-but-unlisted tool"** concept — any
+  `AddTool` registration is advertised in `tools/list`. To keep the
+  agent-facing `tools/list` at exactly 27, `verify_can_transition` ships as a
+  **custom JSON-RPC method** (e.g. `unblock/verifyCanTransition`) intercepted
+  via the go-sdk `AddReceivingMiddleware` hook, NOT via `AddTool`. The exact
+  method name + arg-decode + §7 envelope path is an 02-spec contract.
 - **Ship `mcp.meta_catalogue` v1** — the read-only catalogue endpoint that
-  serves the live `catalogue.json` over the MCP channel for the P04
-  build-time renderer to verify against the checked-in copy (AR-4 third
-  corner).
+  serves the live `catalogue.json` for the P04 build-time renderer to verify
+  against the checked-in copy (AR-4 third corner). **Mechanism (research
+  R-P02-6/C2, SPEC §5.2.2 patched 2026-06-16):** ships as an **MCP Resource**
+  (`AddResource`, stable URI e.g. `unblock://catalogue`, surfaced under
+  `resources/list` — never in `tools/list`), over the same Streamable HTTP
+  transport (`POST /mcp`). The stale SPEC "same SSE channel" wording is
+  corrected to Streamable HTTP in the same patch.
 
 > **The five PRD §6.2 column-value invariants already shipped in P01**
 > (P01 plan §2.2 Tool 13, round-2 D2): writing `qa_state=failed` requires
@@ -144,18 +155,44 @@ criterion names directly. The work:
 > comment-trail dependency. **P02 adds the comment-trail-driven gates on
 > top.** The spec must reconcile the two layers so a transition is not
 > double-validated with conflicting messages.
+>
+> **Two-error-code reconciliation (research R-P02-7/C3, RP02-2).** P01's
+> `set_state` already rejects the five column-value invariants I-1..I-5 with
+> `PRECONDITION_NOT_MET` + `data.invariant`. P02's new comment-trail gates
+> reject with `PIPELINE_PRECONDITION_NOT_MET` (a **distinct** `envelopeKind*`
+> constant — research R-P02-5 confirmed the `errmap.go` path carries it).
+> These MUST NOT double-fire: the 02-spec pins the order — **column-value
+> invariants (I-1..I-5, `PRECONDITION_NOT_MET`) evaluated first,
+> comment-trail gates (`PIPELINE_PRECONDITION_NOT_MET`) second, exactly one
+> error wins** per bad transition (A-3 / RP02-2). F-2 asserts a single,
+> correct rejection.
 
 ### 2.4 Provider integration (FR-11, Law 3)
 
 The `providers` service is the largest net-new code surface. Sub-areas:
 
 - **Webhook ingestion** — `POST /webhooks/github` (public, FR-12). Verify
-  the per-installation HMAC signature (`webhook_secret_enc`, §9.4.5);
-  insert into `providers.events` with the `(provider, delivery_id)`
-  dedup constraint (AR-12); return `200 OK` on a recognised duplicate so
-  GitHub stops retrying; the per-row payload sanitiser redacts emails /
-  credential patterns **on insert** (§9.4.5 retention policy, first
-  layer).
+  the HMAC signature **before the body is parsed** (constant-time
+  `hmac.Equal` over the raw bytes, research R-P02-1). **Secret-model
+  reconciliation (research R-P02-4/C1, RESOLVED 2026-06-16 — DROP — see §6 Q7
+  / §5.5 C1):** under the **confirmed v1.0 GitHub-App path** the
+  webhook secret is **app-level** — one secret for all installs, the
+  delivery disambiguated by `installation.id` in the payload — so HMAC
+  verifies against an **Encore application secret** (working name
+  `GITHUB_APP_WEBHOOK_SECRET`, provisioned in Track E-2) **only**, **NOT** the
+  per-install `installations.webhook_secret_enc` column. That per-install
+  column is **DROPPED via a new additive forward migration** (a forward
+  `ALTER TABLE … DROP COLUMN`; `0060` itself is NOT edited per
+  `feedback_migration_edit_drift`; the stub table is empty pre-production so
+  the drop is safe — §2.5(d); SPEC §9.4.5 C1 note + changelog patched
+  2026-06-16) and is **re-added by a future migration** when the OAuth-app /
+  future-GitLab per-install fallback ships (v1.1). Then insert into
+  `providers.events` with the
+  `(provider, delivery_id)` dedup constraint (AR-12); return `200 OK` on a
+  recognised duplicate so GitHub stops retrying; the per-row payload
+  sanitiser redacts emails / credential patterns **on insert** (§9.4.5
+  retention policy, first layer). Per-class failure statuses (4xx-final vs
+  5xx-retryable) per research R-P02-4b are an 02-spec contract (C-1 / F-1).
 - **Normalisation** — map a GitHub `issues.*` / `pull_request.*` event
   into a canonical `workitems.items` create/update via the existing
   `workitems` RPCs, recording the mapping in `providers.mappings`
@@ -180,16 +217,45 @@ The `providers` service is the largest net-new code surface. Sub-areas:
 - **Additive migrations only.** P02 does **not** re-run §9.4.5 / §9.4.7 /
   §9.4.8 (all eight schemas already migrated in P01 — Q2 CONFIRMED). P02
   adds *forward* migrations for: (a) `memory.sanitiser_events` (AR-14);
-  (b) any `memory.entries` soft-delete column `forget` needs (R-P02-10 / B-4);
+  (b) the **`memory.entries` soft-delete migration (research R-P02-10/C4
+  CONFIRMED genuine DDL gap, B-4)** — a NEW additive forward migration that
+  (i) adds `deleted_at timestamptz` to `memory.entries`, AND (ii) DROPs +
+  recreates the three per-scope unique indexes
+  (`entries_org_key_uniq` / `entries_project_key_uniq` /
+  `entries_user_key_uniq`) as **partial-on-not-deleted**
+  (`… AND deleted_at IS NULL`). Both halves are mandatory: without the
+  partial-index rewrite, `forget` (soft-delete) then re-`remember` of the
+  same `(scope,key)` violates the live unique index. `0090_memory` is **NOT**
+  edited (`feedback_migration_edit_drift`); the migration is a new,
+  higher-numbered forward file; the exact file lands in the 02-spec.
   (c) anything the providers digest/retention job requires beyond the
-  shipped §9.4.5 DDL. Per `feedback_migration_edit_drift`: **never edit an
+  shipped §9.4.5 DDL.
+  (d) the **`providers.installations.webhook_secret_enc` DROP COLUMN
+  migration (C1, Q7 RESOLVED 2026-06-16 — DROP)** — a NEW additive forward
+  `ALTER TABLE providers.installations DROP COLUMN webhook_secret_enc`. Under
+  the confirmed GitHub-App path HMAC verifies against the app-level Encore
+  secret `GITHUB_APP_WEBHOOK_SECRET` only, so the per-install column is dead;
+  `providers.installations` is an empty stub pre-production so the drop is
+  safe. `0060_providers` is **NOT** edited; the column is re-added by a
+  future migration when the OAuth-app / GitLab per-install fallback ships
+  (v1.1). Exact file authored in 02-spec.
+  Per `feedback_migration_edit_drift`: **never edit an
   applied P01 migration in place** — P02 migrations are new, higher-numbered
   files.
 - **Encore Pub/Sub + Cron.** P02 introduces the providers reconciliation
   cron, the payload-digest cron, and (per AR-14) the memory sanitiser
-  periodic re-scan job. Confirm whether the `provider.events` Pub/Sub
-  topic named in CLAUDE.md is needed, or whether webhook→normalise is
-  synchronous within the handler (research / spec decision).
+  periodic re-scan job. **Research R-P02-11 CONFIRMED** the ack-fast /
+  normalise-async path (Q3 working assumption): the `provider.events`
+  Pub/Sub topic does **not** yet exist (only `deps-cascade-*` topics do) but
+  the pattern is idiomatic — `pubsub.NewTopic[*ProviderEvent](...,
+  {DeliveryGuarantee: AtLeastOnce})` + a subscriber, mirroring
+  `deps/cascade.go`. **Async path invariant (AR-11):** the subscriber
+  payload MUST carry a **publisher-generated ULID `EventID`** as a typed
+  field; at-least-once replay dedup uses `ON CONFLICT DO NOTHING` keyed on it
+  — **distinct** from the handler-side `(provider, delivery_id)` AR-12 dedup.
+  The proven template is `deps.cascade_events (event_id,
+  triggered_by_item_id) UNIQUE` (`cascade.go:158-162`). The final topic +
+  subscriber + idempotency-key shape is an 02-spec contract.
 - **Encore Cloud deploy + secrets (Olive).** P02 is the first phase that
   deploys to Encore Cloud staging (P01 plan Q6: "Encore Cloud staging
   deploy is a P02 ops task owned by Olive"). This brings: the GitHub
@@ -199,7 +265,18 @@ The `providers` service is the largest net-new code surface. Sub-areas:
   into Encore secrets; the
   `pgcrypto` DEK (`MEMORY_DEK`) provisioning; the AR-13 free-tier ceiling
   measurement (Pub/Sub rate, connection cap, cold-start) and the AR-16
-  synthetic warmer (`mcp-warmer` cron hitting `meta_catalogue`).
+  synthetic warmer. **Research R-P02-12/C5 (Q8 RESOLVED 2026-06-16 —
+  documented outlier — see §6 Q8 / §5.5 C5):** Encore Cloud's **free-tier
+  cron minimum interval is once per hour** (and cron does not run in
+  local/preview), so an in-Encore `mcp-warmer` cron **cannot run sub-hourly**
+  — hourly pings will not keep a scale-to-zero MCP service warm. Two
+  non-gating options (Q5: capacity is a report, NFR-1 measured-warm): (a) an
+  **external sub-hourly uptime pinger** hitting `POST /mcp`, or (b) accept
+  cold-start as the documented launch-period outlier (AR-16(a)). **v1.0 takes
+  option (b) — documented outlier, no external pinger at v1.0;** option (a)
+  is deferred to v1.x. The SPEC §13 AR-16 wording is patched 2026-06-16 to
+  record the hourly bound and mark option (ii)/(b) as the v1.0 disposition;
+  E-3 publishes the measured cold-start number on staging.
 - **RBAC regression suite extension (NFR-2).** P01 shipped the suite for
   its surfaces; P02 **extends it to `providers` and `memory`** (P01 plan
   §2.3 says so explicitly). Memory scope isolation (org/project/user) and
@@ -329,7 +406,7 @@ by **Olive** (infra-supervisor).
 | B-1 | `memory` service: `Remember`/`Recall`/`List`/`Forget` private RPCs; `pgcrypto` `value_enc` encrypt-at-rest; `ts_doc` build (sanitise-before-tokenise, AR-10) | go-supervisor (Greta) |
 | B-2 | Always-on secret sanitiser (NFR-7) + `memory.sanitiser_events` audit table (AR-14; additive migration) + the periodic re-scan job | go-supervisor (Greta) |
 | B-3 | MCP tools 24–27 (`remember`/`recall`/`memories`/`forget`) as facades over `memory.*`; wire `prime.memory_hints` | go-supervisor (Greta) |
-| B-4 | `forget` soft-delete column decision + additive migration (R-P02-10) | go-supervisor (Greta) |
+| B-4 | `forget` soft-delete additive migration (R-P02-10/C4 CONFIRMED): add `memory.entries.deleted_at` + rewrite the three per-scope unique indexes partial-on-not-deleted (`… AND deleted_at IS NULL`); `recall`/`memories` filter `deleted_at IS NULL`. New forward file, no edit to `0090`. | go-supervisor (Greta) |
 | B-5 | RBAC regression suite extended to `memory` (org/project/user scope isolation) | go-supervisor (Greta) |
 | B-6 | Resolve `memory.entries.expires_at` semantics (R-P02-13) — either wire it into `remember` (write) + `recall`/`memories` (read-time filter), or document it as inert/reserved for v1.0 (no DDL change) | go-supervisor (Greta) |
 
@@ -355,8 +432,8 @@ by **Olive** (infra-supervisor).
 | ID | Task | Owner |
 |---|---|---|
 | E-1 | Encore Cloud staging deploy (P01 Q6 deferred this to P02) | infra-supervisor (Olive) |
-| E-2 | Secrets: provision the R-P02-4-decided provider credential (App path ⇒ App ID + private-key PEM + per-install installation-id; fallback ⇒ OAuth-app client-id/secret/redirect-uri) + per-install webhook secret + `MEMORY_DEK`. **Note:** under the App path, `apps/api/SECRETS.md`'s table and `apps/api/secrets.nonprod.cue` must gain `GitHubApp*` placeholders (App ID, private-key PEM) — neither exists today (the registry holds OAuth-app secrets only). R-P02-4 is the gate that selects the final set. | infra-supervisor (Olive) |
-| E-3 | AR-13 free-tier ceiling measurement (Pub/Sub rate, connection cap, cold-start) + AR-16 `mcp-warmer` cron | infra-supervisor (Olive) |
+| E-2 | Secrets (R-P02-4/C1 CONFIRMED App path): provision **App ID + private-key PEM + the app-level webhook secret** (working name `GITHUB_APP_WEBHOOK_SECRET`) + `MEMORY_DEK`. **C1 (RESOLVED 2026-06-16 — DROP, §6 Q7):** the webhook secret is **app-level** (one for all installs), verified before body-parse — NOT the per-install `webhook_secret_enc` column, which is **DROPPED via a new additive forward migration** (§2.5(d); `0060` unedited; re-added at v1.1 for the OAuth-app / GitLab per-install fallback). `apps/api/SECRETS.md`'s table + `apps/api/secrets.nonprod.cue` must gain `GitHubApp*` + `GitHubAppWebhookSecret` placeholders (neither exists today — the registry holds OAuth-app secrets only). OAuth-app fallback set (client-id/secret/redirect-uri + per-install secret) deferred unless the App path is rejected. | infra-supervisor (Olive) |
+| E-3 | AR-13 free-tier ceiling measurement (Pub/Sub rate, connection cap, cold-start) + AR-16 warmer. **R-P02-12/C5 (RESOLVED 2026-06-16 — documented outlier, §6 Q8):** free-tier cron is **hourly-min**, so an in-Encore sub-hourly `mcp-warmer` is not deliverable — v1.0 disposition is **document cold-start as an accepted launch-period outlier** (AR-16(a) / SPEC §13 AR-16 option ii); **no external pinger ships at v1.0** (external sub-hourly pinger on `POST /mcp` deferred to v1.x, option i). E-3 publishes the measured cold-start number on staging. Non-gating (Q5). | infra-supervisor (Olive) |
 | E-4 | Cron schedules wired (reconcile, payload-digest, sanitiser re-scan, warmer) | infra-supervisor (Olive) |
 
 ### 4.6 Track F — Exit-criterion harness
@@ -438,6 +515,96 @@ the phase spec).
 | R-P02-11 | **Encore Cron + Pub/Sub for the providers reconciler, payload-digest, and sanitiser re-scan.** Encore cron declaration semantics; whether webhook→normalise should be synchronous-in-handler or via the `provider.events` Pub/Sub topic (CLAUDE.md names the topic — confirm it is real and needed). **If async is selected, the spec MUST declare the new `provider.events` subscriber's publisher-generated ULID `EventID` idempotency key carried as a typed payload field (SPEC AR-11) — at-least-once replay dedup is distinct from the handler-side `(provider, delivery_id)` constraint (AR-12).** | Determines Track C/D/E structure and AR-13 Pub/Sub-rate budget. |
 | R-P02-12 | **Encore Cloud free-tier ceilings under P02 load (AR-13/AR-16).** Concrete Pub/Sub rate, connection cap, cold-start numbers measured on staging; the `mcp-warmer` cron viability; whether the webhook ingestion + cron jobs fit the free tier. | First real deploy; the M-1 latency target and the cron jobs must coexist on the free tier. |
 
+### 5.5 Research verdicts and contradiction resolutions (reconciled 2026-06-16)
+
+Source: [`docs/research/02-research-backend-complete.md`](../research/02-research-backend-complete.md)
+(Smith, 2026-06-16). **Net: 9 CONFIRMED, 3 PARTIAL, 1 CONTRADICTED**; five
+contradictions C1–C5 + two risks resolved below. None blocks the phase; all
+are spec-shape decisions. R-P02 verdicts:
+
+| ID | Verdict | Reconciliation into this plan |
+|---|---|---|
+| R-P02-1 | CONFIRMED | `X-Hub-Signature-256` = hex(HMAC-SHA256(secret, raw_body)); `hmac.Equal` constant-time over unparsed bytes. `X-GitHub-Delivery` GUID = the AR-12 dedup key (stable across redeliveries). v1.0 sub set = `issues` + `pull_request`, action in body, `event_type='<event>.<action>'`. No change. |
+| R-P02-2 | PARTIAL | REST (go-github) covers the full v1.0 read+write field map; defer githubv4. Unmapped at v1.0 (02-spec decides degradation): GitHub has no dependency graph (we own it), `state_reason` has no canonical column, the three pipeline columns are unblock-only (NOT inferred from issue state), GitHub-login ↔ `claimed_by_id` ULID needs identity resolution or stays unmapped. Field map is an 02-spec contract. |
+| R-P02-3 | CONFIRMED | Loop suppressors all available: App-bot `sender.login` allowlist (fast path) + content-idempotent normalise (structural backstop) + `last_synced_at` echo window (columns exist in `0060`). go-github surfaces rate-limit headers. See R1. |
+| R-P02-3b | CONFIRMED | Pin `github.com/google/go-github` (REST, latest major **v88.0.0**, 2026-05-21) + `bradleyfalzon/ghinstallation/v2` (App installation transport). `golang-jwt/jwt/v5 v5.3.1` already in `go.sum`. githubv4 only if a GraphQL-only field forces it (not expected v1.0). Exact major pinned in 02-spec. |
+| R-P02-4 | CONFIRMED (App) — **C1** | GitHub App wins: one app-level webhook URL + one app-level webhook secret for all installs (disambiguated by `installation.id`); installation access tokens (JWT-signed, 1-hour) for autonomous server-to-server issue writes; rate budget ≥ OAuth. **C1 resolved below** — webhook secret is app-level (Encore secret), not per-install. |
+| R-P02-4b | CONFIRMED | Failure-status contract: bad/absent HMAC → 401 (no `events` insert, no normalise); unknown `installation.id` → 404; malformed JSON → 400; oversized → 413; duplicate `X-GitHub-Delivery` → 200; transient our-side → 503. All 4xx-final classes are non-retryable. 02-spec pins (C-1/F-1). |
+| R-P02-5 | CONFIRMED | `errmap.go` already returns `*sdkjsonrpc.Error{Code:-32000, Data:<§7 envelope>}` forwarded verbatim → the exact mechanism for `PIPELINE_PRECONDITION_NOT_MET`. Map onto a NEW `envelopeKind*` constant distinct from the existing `PRECONDITION_NOT_MET` (I-1..I-5). See C3. |
+| R-P02-6 | **CONTRADICTED — C2** | go-sdk v1.6.0 has **no "registered-but-unlisted tool"**. SPEC §5.2.2 patched 2026-06-16. **C2 resolved below.** |
+| R-P02-7 | PARTIAL — **C3** | `GetState.recent_kinds` is `DISTINCT ON (kind)` (latest-per-kind) — cannot serve global `last_comment_*` nor history-aware `any_comment_*=ever`. The §2.1 "no new RPC" assumption is **WRONG**. **C3 resolved below.** |
+| R-P02-8 | CONFIRMED | pgcrypto `pgp_sym_encrypt`/`pgp_sym_decrypt` + `MEMORY_DEK` proven in P01 (`auth/auth.go:487`, `secrets.go:68`, `secrets.nonprod.cue:62`). The `memory` package needs its own `var secrets struct { MemoryDEK string }` (Encore secrets are package-scoped); CI drift-check unions packages. Pin the explicit aes256 form for parity (02-spec). DEK rotation (`MEMORY_DEK_NEXT`, AR-7) inert in P02. No latency gate (Q6). |
+| R-P02-9 | PARTIAL | Ordering CONFIRMED structural (`0090` comments: sanitise → tokenise(ts_doc) → encrypt) but it is a **service-code invariant** the 02-spec must pin (DDL enforces nothing). **No v1.0 pattern set exists yet** — the regex baseline is an 02-spec deliverable (research recommends AWS key id, generic secret/token/password/api-key, GitHub PAT prefixes, PEM markers, JWT, bearer, email). `memory.sanitiser_events` shape is a net-new 02-spec contract (additive migration). See R2. |
+| R-P02-10 | CONFIRMED — **C4** | Genuine DDL gap (`memory.entries` has no `deleted_at`); partial-on-not-deleted index rewrite required. **C4 resolved below** (B-4, §2.5). |
+| R-P02-11 | CONFIRMED | Async webhook→normalise viable + idiomatic; `provider.events` topic does not yet exist; AR-11 publisher-ULID `EventID` idempotency required, distinct from AR-12. Recorded in §2.5. Cron min interval = hourly (→ C5). |
+| R-P02-12 | CONFIRMED — **C5** | Free-tier: 100k req/day, 100k Pub/Sub msgs/day, 1 GB DB, **cron hourly-min**, 2 cloud envs, no preview, no log retention. mcp-warmer not deliverable sub-hourly in-Encore. AR-13 pooled bindings already compliant (`db/db.go`). **C5 resolved below.** |
+| R-P02-13 | CONFIRMED (inert) | `expires_at` ships in `0090`, no code references it. No DDL change for any option. Read-filter couples with the C4 `deleted_at IS NULL` filter; write-surface (wire vs read-filter-only vs inert) is the 02-spec decision (B-6, Q4 open). Precedent: `mcp.api_keys.expires_at` read-time-honour-no-sweeper (`0070`). |
+
+**Contradiction resolutions (C1–C5):**
+
+- **C1 [providers webhook secret — app-level, RESOLVED 2026-06-16 — DROP].**
+  Under the confirmed GitHub-App path, HMAC verifies against an **app-level
+  Encore secret** (`GITHUB_APP_WEBHOOK_SECRET`, added to Track E-2 / §3.5
+  secrets registry of the 02-spec + `SECRETS.md` + `secrets.nonprod.cue`)
+  **only**. The per-install `installations.webhook_secret_enc` column is
+  **DROPPED via a new additive forward migration** (a forward
+  `ALTER TABLE … DROP COLUMN`; `0060` itself is **NOT** edited per
+  `feedback_migration_edit_drift`; the stub table is empty pre-production so
+  the drop is safe), and **re-added** by a future migration when the
+  OAuth-app / GitLab per-install fallback ships (v1.1). SPEC §9.4.5 C1 note +
+  changelog patched 2026-06-16. Recorded in §2.4 + §2.5(d) + §6 Q7. The exact
+  migration file is an 02-spec deliverable.
+- **C2 [unlisted-tool mechanism — SPEC drift, RESOLVED].** SPEC §5.2.2
+  patched 2026-06-16: `meta_catalogue` → MCP **Resource** (`AddResource`,
+  `resources/list`); `verify_can_transition` → **custom JSON-RPC method** via
+  `AddReceivingMiddleware`; the stale "same SSE channel" wording corrected to
+  Streamable HTTP. 27-tool count unchanged. Recorded in §2.3.
+- **C3 [validator read surface — 02-spec contract, NOT a root-SPEC edit].**
+  SPEC §7.5.1 already *defines* `last_comment_*`/`any_comment_*` correctly
+  and §6.2 Tool 14 describes `get_state` as "most recent per kind" without
+  claiming it serves those predicates — **no literal root-SPEC
+  contradiction**, so this is recorded as an **02-spec contract** (new/
+  extended `workitems` read RPC), not a root-SPEC patch. The 02-spec defines
+  the RPC (global-latest tuple + per-`(kind,status)` EXISTS) and pins the
+  PRECONDITION ordering (I-1..I-5 first / pipeline gates second; one error
+  wins). Recorded in §2.1 + §2.3 + R-P02-7 above + RP02-2 (§7).
+- **C4 [memory deleted_at gap — RESOLVED, additive migration].** NEW
+  additive forward migration adds `deleted_at timestamptz` to
+  `memory.entries` AND rewrites the three per-scope unique indexes to
+  partial-on-not-deleted (`… AND deleted_at IS NULL`). `recall`/`memories`
+  filter `deleted_at IS NULL`. **No edit to `0090`.** Recorded in §2.2 +
+  §2.5 + B-4. The exact migration file is an 02-spec deliverable.
+- **C5 [mcp-warmer cron — infra, RESOLVED 2026-06-16 — documented outlier].**
+  Free-tier cron is hourly-min → the AR-16 every-N-minutes in-Encore warmer
+  is not deliverable. Non-gating (Q5). Disposition: **document cold-start as
+  an accepted launch-period outlier** (AR-16(a) "measured warm only"); **no
+  external pinger ships at v1.0** — an external sub-hourly pinger on
+  `POST /mcp` remains a v1.x option if cold-start proves painful. This is the
+  v1.0 disposition of SPEC §13 AR-16 option (ii); the external pinger
+  (option i) is deferred to v1.x. E-3 publishes the measured cold-start
+  number on staging. SPEC §13 AR-16 patched 2026-06-16. Recorded in §2.5 + §7
+  RP02-7 + §8.5 + §6 Q8.
+
+**Remaining research open questions (Q4 `expires_at`, Q5 sanitiser pattern
+set) — dispositioned to the 02-spec (no DDL change, non-flagging):**
+
+- **`expires_at` (research OQ4, R-P02-13, B-6).** Disposition: **couple the
+  read-time filter** (`recall`/`memories` filter `WHERE expires_at IS NULL OR
+  expires_at > now()`) with the C4 `deleted_at IS NULL` filter as one
+  combined predicate; the **write-surface decision** (wire `remember`'s
+  optional `expires_at` vs read-filter-only vs inert/reserved) is pinned by
+  the 02-spec. No DDL change either way (column already in `0090`). No expiry
+  *sweeper* cron in scope — read-time filtering only, matching the
+  `mcp.api_keys.expires_at` no-sweeper precedent (`0070`).
+- **Sanitiser pattern set (research OQ5, R-P02-9, B-1/B-2).** Disposition:
+  the v1.0 regex **baseline is a net-new 02-spec deliverable** (no code
+  exists today). The research-recommended starting set — AWS access-key id,
+  generic `secret|token|password|api-key`, GitHub PAT prefixes
+  (`ghp_/gho_/ghu_/ghs_/ghr_`), PEM block markers, JWT, bearer headers,
+  email addresses — is the **starting point, not a locked contract**; the
+  02-spec authors and pins the final list. Posture: redact-not-reject,
+  audit-on-hit (best-effort per NFR-7/PRD-R6).
+
 ---
 
 ## 6. Resolved Decisions (Q1–Q6)
@@ -508,6 +675,36 @@ are **not** on the `prime → ready → claim` hot path (NFR-1 / M-1 is the
 only PRD latency north-star and it excludes memory). Any memory latency
 budget is a spec-level NFR, not a release gate.
 
+### Q7. C1 — webhook-secret model (research-surfaced 2026-06-16) — RESOLVED 2026-06-16 — **DROP**
+
+**Decision (user, 2026-06-16): DROP.** Under the confirmed GitHub-App path
+(Q4), HMAC verifies against an **app-level Encore secret**
+(`GITHUB_APP_WEBHOOK_SECRET`, Track E-2) **only** — one secret for all
+installs, delivery disambiguated by `installation.id` in the payload. The
+per-install `providers.installations.webhook_secret_enc` column is
+**DROPPED via a NEW additive forward migration** (a forward
+`ALTER TABLE providers.installations DROP COLUMN webhook_secret_enc` — the
+P01 `0060_providers` migration is **NOT** edited, per
+`feedback_migration_edit_drift`; `providers.installations` is an empty stub
+pre-production so the drop is safe). The column is **re-added by a future
+migration** when the OAuth-app / GitLab per-install fallback ships (v1.1).
+SPEC §9.4.5 C1 note + changelog patched 2026-06-16 to record the DROP. The
+exact migration file is an 02-spec deliverable; added to the §2.5 enumerated
+additive-migration list.
+
+### Q8. C5 — mcp-warmer on free-tier hourly cron (research-surfaced 2026-06-16) — RESOLVED 2026-06-16 — **documented outlier**
+
+**Decision (user, 2026-06-16): document cold-start as an outlier (no external
+pinger at v1.0).** The free-tier cron hourly-min makes the AR-16 in-Encore
+sub-hourly warmer undeliverable; rather than ship an external pinger at
+v1.0, **cold-start is accepted as a launch-period outlier** (AR-16(a)
+"measured warm only"). **No external pinger ships at v1.0.** E-3 publishes
+the measured cold-start number on staging; an **external sub-hourly pinger
+remains a v1.x option** if cold-start proves painful in practice. This is
+the v1.0 disposition of SPEC §13 AR-16 option (ii); the external pinger
+(option i) is deferred to v1.x. Non-gating (Q5); not a functional release
+gate. SPEC §13 AR-16 patched 2026-06-16 to mark which option v1.0 takes.
+
 ---
 
 ## 7. Risks Specific to P02
@@ -517,13 +714,13 @@ covers product-wide risks).
 
 | # | Risk | Mitigation |
 |---|---|---|
-| RP02-1 | **Bidirectional sync loop / GitHub rate-limit exhaustion.** A naive sync writes to GitHub, the echo webhook re-triggers normalisation, which re-writes — a storm that burns the 5000/hr REST budget. | R-P02-3 closes the loop-prevention design before D-1; `last_synced_at` echo-suppression + actor allowlist; reconciler respects rate-limit headers. Sync is opt-in per installation, so blast radius is bounded. |
+| RP02-1 | **Bidirectional sync loop / GitHub rate-limit exhaustion.** A naive sync writes to GitHub, the echo webhook re-triggers normalisation, which re-writes — a storm that burns the 5000/hr REST budget. | **Research R-P02-3 CONFIRMED all suppressors available** (R1): App-bot `sender.login` allowlist (fast path) + `last_synced_at` echo window (`0060` columns exist) + content-idempotent normalise (structural backstop); go-github surfaces `x-ratelimit-*`/`retry-after` as typed errors so the reconciler honours them. 02-spec combines actor-allowlist + idempotent-normalise. Sync is opt-in per installation, so blast radius is bounded. |
 | RP02-2 | **Layer-1 validator double-validates against the P01 column-value invariants with conflicting errors.** P01 already enforces the five §6.2 column rules in `set_state`; P02 adds comment-trail gates. A clumsy merge yields two rejection codes for one bad transition. | A-3 reconciles the two layers into one validator pass; the spec pins which check runs first and which error wins. F-2 asserts a single, correct rejection. |
 | RP02-3 | **Catalogue drift between PRD §6.7, `catalogue.json`, and `catalogue.gen.go`.** Three representations of the same state machine; hand-authoring the JSON from the PRD table invites transcription error. | AR-4 CI drift test (now load-bearing, A-6) diffs the Go-codegen corner against the live `meta_catalogue`; Ada keeps PRD §6.7 ↔ JSON in sync; the spec includes a per-transition test matrix. |
 | RP02-4 | **Webhook HMAC / dedup edge cases.** Replayed `X-GitHub-Delivery`, signature-mismatch, oversized payloads, or a payload-sanitiser false-positive that mangles a legit field. | AR-12 unique constraint + 200-on-duplicate; HMAC verified before any processing; sanitiser is redact-not-reject; F-1 covers the happy path + a replay + a bad-signature case. |
-| RP02-5 | **Secret sanitiser false negative leaks a credential into `ts_doc` (unencrypted, GIN-indexed).** AR-10/AR-14: `ts_doc` is plaintext-derived and unencrypted by necessity. | Sanitise-before-tokenise ordering is structural (B-1); `sanitiser_events` audit + periodic re-scan (B-2, AR-14) make a missed pattern recoverable; `ts_doc` is SELECT-locked to the `memory` connection user (AR-10). |
+| RP02-5 | **Secret sanitiser false negative leaks a credential into `ts_doc` (unencrypted, GIN-indexed).** AR-10/AR-14: `ts_doc` is plaintext-derived and unencrypted by necessity. | **Research R-P02-9 (R2):** no v1.0 pattern set exists yet — the regex baseline is a NET-NEW 02-spec deliverable (best-effort per NFR-7/PRD-R6). The sanitise-before-tokenise **ordering is a service-code invariant** (DDL enforces nothing — B-1 must implement it). Recovery net: `sanitiser_events` audit + periodic re-scan (B-2, AR-14) make a missed pattern recoverable; `ts_doc` is SELECT-locked to the `memory` connection user (AR-10). |
 | RP02-6 | **`forget` DDL gap (no `deleted_at`).** SPEC §5.2.2 promises soft-delete but §9.4.8 has no column for it. | R-P02-10 / B-4 resolve the additive column + whether the unique indexes go partial-on-not-deleted before B-3 ships `forget`. |
-| RP02-7 | **Encore Cloud free-tier ceiling binds at first real deploy (AR-13).** Webhook ingestion + three cron jobs + the warmer + MCP traffic may exceed the free-tier Pub/Sub rate or connection cap. | E-3 measures on staging before D goes live; the AR-1 exit path (NATS + standard Postgres) is the documented escape; capacity is a report (Q5), not a launch blocker, but the numbers gate scale-out planning. |
+| RP02-7 | **Encore Cloud free-tier ceiling binds at first real deploy (AR-13); free-tier cron is hourly-min (C5).** Webhook ingestion + three cron jobs + the warmer + MCP traffic may exceed the free-tier Pub/Sub rate or connection cap. | **Research R-P02-12 CONFIRMED concrete ceilings** (100k req/day, 100k Pub/Sub msgs/day, 1 GB DB, **cron hourly-min**, 2 cloud envs) — Pub/Sub volume is ample at v1 scale; pooled DB bindings already compliant (`db/db.go`). **C5 (RESOLVED 2026-06-16 — documented outlier, §6 Q8):** the AR-16 every-N-minutes `mcp-warmer` is **not deliverable in-Encore on the free tier** (hourly-min); the v1.0 disposition is **document cold-start as an accepted launch-period outlier** (SPEC §13 AR-16 option ii) — **no external pinger ships at v1.0** (the external sub-hourly pinger, option i, is a v1.x option if cold-start proves painful). E-3 publishes the measured cold-start number on staging before D goes live; the AR-1 exit path (NATS + standard Postgres) is the documented escape; capacity is a report (Q5), not a launch blocker. |
 | RP02-8 | **Migration drift: P02 edits a P01 migration in place.** Per `feedback_migration_edit_drift`, editing an applied migration silently drifts the long-lived staging + local DBs even while CI stays green on a fresh run. | All P02 migrations are new forward files, higher-numbered than `0140`; CI runs migrations fresh AND a staging-replay check confirms forward-only. |
 
 ---
@@ -535,7 +732,8 @@ This phase is **DONE** when all of the following are demonstrably true.
 ### 8.1 Functional acceptance (PRD §8 + SPEC §11 P02 exit criterion)
 
 - [ ] A GitHub repository can be linked (`providers.LinkRepo` creates an
-      installation with an encrypted webhook secret).
+      installation; under the confirmed App path the webhook secret is the
+      app-level Encore secret, not per-install — C1, §2.4).
 - [ ] A synthetic HMAC-signed `issues.opened` webhook delivered to
       `POST /webhooks/github` is signature-verified, deduplicated, and
       normalised into a canonical `workitems.items` row mapped via
@@ -634,22 +832,38 @@ This phase is **DONE** when all of the following are demonstrably true.
 ### 8.5 Ops (non-gating per Q5)
 
 - [ ] **Track E (non-gating per Q5).** Encore Cloud staging deploy live
-      (E-1) + provider + per-install webhook secret + `MEMORY_DEK`
-      provisioned (E-2); AR-13 free-tier ceiling report + AR-16
-      `mcp-warmer` viability published (E-3). Confirms the required work
-      landed; **not a pass/fail release gate** on the P02 functional exit
-      criterion (mirrors Q5 — staging + capacity are required *work*, not a
-      functional gate).
+      (E-1) + provider App secret set (App ID + PEM + **app-level**
+      `GITHUB_APP_WEBHOOK_SECRET`, C1) + `MEMORY_DEK` provisioned (E-2);
+      AR-13 free-tier ceiling report published (E-3). **AR-16 warmer
+      (C5, RESOLVED 2026-06-16 — documented outlier, §6 Q8):** the report
+      records that free-tier cron is hourly-min so an in-Encore sub-hourly
+      warmer is undeliverable; the v1.0 disposition is **cold-start
+      documented as an accepted launch-period outlier** (SPEC §13 AR-16
+      option ii) with **no external pinger at v1.0** (external sub-hourly
+      pinger deferred to v1.x as option i).
+      Confirms the required work landed; **not a pass/fail release gate** on
+      the P02 functional exit criterion (mirrors Q5 — staging + capacity are
+      required *work*, not a functional gate).
 
 ---
 
 ## 9. Sequencing Notes
 
-- **`/research` runs first** to close R-P02-1 through R-P02-13 (incl. the
-  R-P02-3b / R-P02-4b siblings). Findings
-  update or contradict §2 / §5 of this plan; the plan is re-approved if
-  anything load-bearing flips (esp. R-P02-2 field map, R-P02-3 loop
-  prevention, R-P02-4 App-vs-OAuth, R-P02-10 `forget` DDL gap).
+- **`/research` is CLOSED (2026-06-16).** R-P02-1 through R-P02-13 (incl.
+  the R-P02-3b / R-P02-4b siblings) are verified in
+  `docs/research/02-research-backend-complete.md` — 9 CONFIRMED, 3 PARTIAL,
+  1 CONTRADICTED. The load-bearing flips are reconciled into §2 / §5.5 and
+  the plan is **re-approved**: R-P02-7/C3 flipped the "no new validator RPC"
+  assumption (§2.1); R-P02-6/C2 contradicted the hidden-tool primitive
+  (SPEC §5.2.2 patched, §2.3); R-P02-4/C1 made the webhook secret app-level —
+  **Q7 RESOLVED 2026-06-16 = DROP** the per-install `webhook_secret_enc`
+  column via a new additive forward migration (§2.4 + §2.5(d); `0060`
+  unedited; re-added at v1.1); R-P02-10/C4 confirmed the `forget` DDL gap
+  (§2.5, B-4); R-P02-12/C5 made the in-Encore warmer free-tier-undeliverable —
+  **Q8 RESOLVED 2026-06-16 = documented cold-start outlier**, no external
+  pinger at v1.0 (§2.5 + §7 RP02-7 + §8.5). The three SPEC patches (C1/C2/C5)
+  are spec-first on main; C3
+  and C4 are recorded as 02-spec contracts, not root-SPEC edits (§5.5).
 - **SPEC §11 patch is applied (2026-06-16).** Q1 resolved boards→P05; the
   §11 P02/P05 traceability reconciliation (boards P02→P05, add
   `apps/api/memory` to P02, replace the stale §9.4.5/§9.4.7 base-schema
@@ -692,7 +906,13 @@ This phase is **DONE** when all of the following are demonstrably true.
   (`memory` DDL), §9.4.10 (DEK / local-secrets), §11 (P02 traceability —
   reconciled 2026-06-16: boards→P05, `apps/api/memory` added to P02,
   additive-only migration reality; Q1 resolved), §13 (AR-1, AR-4, AR-7, AR-10, AR-12,
-  AR-13, AR-14, AR-16).
+  AR-13, AR-14, AR-16). **Research-reconciled 2026-06-16:** §5.2.2 (C2 —
+  `verify_can_transition` custom JSON-RPC method / `meta_catalogue` Resource;
+  SSE→Streamable-HTTP), §9.4.5 (C1 — app-level webhook-secret; **Q7 RESOLVED
+  2026-06-16 = DROP** the per-install `webhook_secret_enc` column via a new
+  additive forward migration, `0060` unedited), §13 AR-16 (C5 — free-tier
+  hourly-cron warmer; **Q8 RESOLVED 2026-06-16 = documented cold-start
+  outlier**, option ii, no external pinger at v1.0).
 - **Manifesto** Laws L3 (Postgres source of truth / provider events), L8
   (pipeline gates enforced architecturally — Layer 1 in P02).
 - **Predecessor:** P01 plan §2.1 (schema-only stubs for providers/memory),
