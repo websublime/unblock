@@ -1,6 +1,6 @@
 # PLAN: P02 — Backend Complete (providers + memory tools + Layer-1 pipeline enforcement)
 
-**Status:** APPROVED *(Q7=drop / Q8=documented-outlier resolved 2026-06-16. Research-reconciled 2026-06-16 — R-P02-1..13 verdicts recorded (9 CONFIRMED / 3 PARTIAL / 1 CONTRADICTED), C1–C5 resolved (§5.5): C2 SPEC §5.2.2 patched (Resource + custom JSON-RPC method, SSE→Streamable-HTTP); **C1 (Q7) RESOLVED 2026-06-16 = DROP** — the per-install `providers.installations.webhook_secret_enc` column is dropped via a NEW additive forward migration (`0060` unedited; re-added at v1.1 for the OAuth-app/GitLab per-install fallback); HMAC verifies against the app-level Encore secret `GITHUB_APP_WEBHOOK_SECRET` only; SPEC §9.4.5 C1 note + changelog patched; **C5 (Q8) RESOLVED 2026-06-16 = documented cold-start outlier** — no external pinger at v1.0 (SPEC §13 AR-16 option ii; external pinger option i deferred to v1.x); SPEC §13 AR-16 patched; C3 (validator read RPC) + C4 (memory `deleted_at` additive migration) recorded as 02-spec contracts; R1/R2 risks + research OQ4/OQ5 dispositioned. P01 migrations 0060/0090 untouched (the C1 DROP and C4 soft-delete ship as new forward files). Prior: review-driven drift/gap reconciliation 2026-06-16 (23 findings); user decisions Q1–Q6 resolved §6; SPEC §11 P02/P05 traceability patch applied on main.)*
+**Status:** APPROVED *(Q7=drop / Q8=documented-outlier resolved 2026-06-16. Research-reconciled 2026-06-16 — R-P02-1..13 verdicts recorded (9 CONFIRMED / 3 PARTIAL / 1 CONTRADICTED), C1–C5 resolved (§5.5): C2 SPEC §5.2.2 patched (Resource + custom JSON-RPC method, SSE→Streamable-HTTP); **C1 (Q7) RESOLVED 2026-06-16 = DROP** — the per-install `providers.installations.webhook_secret_enc` column is dropped via a NEW additive forward migration (`0060` unedited; re-added at v1.1 for the OAuth-app/GitLab per-install fallback); HMAC verifies against the app-level Encore secret `GITHUB_APP_WEBHOOK_SECRET` only; SPEC §9.4.5 C1 note + changelog patched; **C5 (Q8) RESOLVED 2026-06-16 = documented cold-start outlier** — no external pinger at v1.0 (SPEC §13 AR-16 option ii; external pinger option i deferred to v1.x); SPEC §13 AR-16 patched; C3 (validator read RPC) + C4 (memory `deleted_at` additive migration) recorded as 02-spec contracts; R1/R2 risks + research OQ4/OQ5 dispositioned. P01 migrations 0060/0090 untouched (the C1 DROP and C4 soft-delete ship as new forward files). **Code-grounded review reconciliation applied 2026-06-16 (23 findings; §5.6 code-grounded spec-constraints added)** — confronted the reconciled docs against live `apps/api/` code: GROUP A drifts fixed (C-2 `installation_id_enc`-only per Q7-DROP; `/webhooks/github` raw endpoint inside `providers` not `apps/api/public/`; §5.2.2 primitives "do NOT count toward the 27" uniform; per-RPC invariant split — `set_state` = I-1/I-2/I-4/I-5 + structural `impl_done_requires_claim`, I-3 = `claim`-only; three-stub `.gitkeep` hygiene); §5.6 added with 13 spec-constraints; AR-11 citation corrected to the executable `cascade_subscriber.go` INSERT. go-sdk version drift DISCONFIRMED — v1.6.0 unchanged. Prior: review-driven drift/gap reconciliation 2026-06-16 (23 findings); user decisions Q1–Q6 resolved §6; SPEC §11 P02/P05 traceability patch applied on main.)*
 **Author:** Ada (architect)
 **Date:** 2026-06-16
 **Source PRD:** [docs/PRD.md](../PRD.md) (APPROVED, 2026-05-07)
@@ -148,24 +148,43 @@ criterion names directly. The work:
   transport (`POST /mcp`). The stale SPEC "same SSE channel" wording is
   corrected to Streamable HTTP in the same patch.
 
-> **The five PRD §6.2 column-value invariants already shipped in P01**
-> (P01 plan §2.2 Tool 13, round-2 D2): writing `qa_state=failed` requires
-> `review_state=approved`; writing `review_state=needs_rework` resets
-> `qa_state=pending`; etc. Those are pure column-value rules with no
-> comment-trail dependency. **P02 adds the comment-trail-driven gates on
-> top.** The spec must reconcile the two layers so a transition is not
-> double-validated with conflicting messages.
+> **The PRD §6.2 column-value invariants already shipped in P01 — but they
+> are split across two RPCs, not all in `set_state` (code-grounded review
+> D1-4, 2026-06-16).** Per `apps/api/workitems/workitems.go`:
+> - **`set_state` (`SetStateColumns`) carries FOUR of the five** — I-1 (auto-reset
+>   of `qa_state` when `review_state=needs_rework`; an **auto-reset, NOT a
+>   rejection** — `workitems.go:1803-1806`), I-2 (`:1813-1816`), I-5
+>   (`:1818-1832`), I-4 (`:1842-1844`) — **plus a separate structural
+>   `impl_done_requires_claim` check** (`impl_state=done` requires
+>   `claimed_by_id IS NOT NULL` — `:1808-1811`) that is **not** one of I-1..I-5.
+> - **I-3 lives in `claim` (`Claim`), not `set_state`** — `qa_state=failed` →
+>   `review_state`+`qa_state` reset to pending (`workitems.go:1722` docstring,
+>   `:2078`, `:2194`).
 >
-> **Two-error-code reconciliation (research R-P02-7/C3, RP02-2).** P01's
-> `set_state` already rejects the five column-value invariants I-1..I-5 with
-> `PRECONDITION_NOT_MET` + `data.invariant`. P02's new comment-trail gates
-> reject with `PIPELINE_PRECONDITION_NOT_MET` (a **distinct** `envelopeKind*`
-> constant — research R-P02-5 confirmed the `errmap.go` path carries it).
-> These MUST NOT double-fire: the 02-spec pins the order — **column-value
-> invariants (I-1..I-5, `PRECONDITION_NOT_MET`) evaluated first,
-> comment-trail gates (`PIPELINE_PRECONDITION_NOT_MET`) second, exactly one
-> error wins** per bad transition (A-3 / RP02-2). F-2 asserts a single,
-> correct rejection.
+> Those are pure column-value rules with no comment-trail dependency. **P02
+> adds the comment-trail-driven gates on top.** The spec must reconcile the
+> layers so a transition is not double-validated with conflicting messages,
+> and must pin the invariant set **per-RPC** (do NOT write "I-1..I-5 evaluated
+> first in `set_state`").
+>
+> **Two-error-code reconciliation (research R-P02-7/C3, RP02-2; per-RPC
+> ordering per D1-4).** P01's `set_state` already rejects its column-value
+> invariants with `PRECONDITION_NOT_MET` + `data.invariant`. P02's new
+> comment-trail gates reject with `PIPELINE_PRECONDITION_NOT_MET` (a
+> **distinct** `envelopeKind*` constant — research R-P02-5 confirmed the
+> `errmap.go` path carries it). These MUST NOT double-fire. The 02-spec pins
+> the order **per-RPC**, matching the code:
+> - **`set_state` (`SetStateColumns`):** (1) I-1 auto-reset (precedes but is
+>   NOT a rejection, so it does not participate in "one error wins"); then the
+>   rejection checks **in code order**: structural `impl_done_requires_claim`
+>   → I-2 → I-5 → I-4 (all `PRECONDITION_NOT_MET`); **then** the P02
+>   comment-trail gate (`PIPELINE_PRECONDITION_NOT_MET`).
+> - **`claim` (`Claim`):** I-3 is enforced here, not in `set_state`.
+>
+> So the per-transition test matrix + codegen ordering contract place **I-3
+> under `claim`** and **`impl_done_requires_claim` under `set_state`**, and
+> exactly one error wins per bad transition (A-3 / RP02-2). F-2 asserts a
+> single, correct rejection.
 
 ### 2.4 Provider integration (FR-11, Law 3)
 
@@ -253,9 +272,14 @@ The `providers` service is the largest net-new code surface. Sub-areas:
   payload MUST carry a **publisher-generated ULID `EventID`** as a typed
   field; at-least-once replay dedup uses `ON CONFLICT DO NOTHING` keyed on it
   — **distinct** from the handler-side `(provider, delivery_id)` AR-12 dedup.
-  The proven template is `deps.cascade_events (event_id,
-  triggered_by_item_id) UNIQUE` (`cascade.go:158-162`). The final topic +
-  subscriber + idempotency-key shape is an 02-spec contract.
+  The proven, **executable** template is the
+  `INSERT INTO deps.cascade_events … ON CONFLICT (event_id,
+  triggered_by_item_id) DO NOTHING` in `insertCascadeEventRow`
+  (`apps/api/deps/cascade_subscriber.go:742`, SQL at `:769-779`), with the
+  publisher-generated ULID `EventID` field on `CascadeRequested`
+  (`deps/cascade.go:53-57`) — **not** the topic-declaration doc comment at
+  `cascade.go:158-162` (that is a contract comment, no INSERT). The final
+  topic + subscriber + idempotency-key shape is an 02-spec contract.
 - **Encore Cloud deploy + secrets (Olive).** P02 is the first phase that
   deploys to Encore Cloud staging (P01 plan Q6: "Encore Cloud staging
   deploy is a P02 ops task owned by Olive"). This brings: the GitHub
@@ -294,9 +318,13 @@ The `providers` service is the largest net-new code surface. Sub-areas:
 
 ### 2.6 Repository / infra deliverables
 
-- `apps/api/providers/` service code + the `POST /webhooks/github` wiring
-  in `apps/api/public/` (the second of the two FR-12 v1.0 public
-  endpoints; P01 wired only `/mcp`).
+- `apps/api/providers/` service code **including** the `POST /webhooks/github`
+  raw public endpoint (`//encore:api public raw`) wired **INSIDE the
+  `providers` service** — same pattern as `/mcp`, which is a
+  `//encore:api public raw path=/mcp` declared inside the `mcp` service
+  (`apps/api/mcp/mcp.go`), **not** an `apps/api/public/` package (no such
+  package exists). This is the second of the two FR-12 v1.0 public endpoints;
+  P01 wired `/mcp` inside the `mcp` service.
 - `apps/api/memory/` service code + the four MCP tool registrations in
   `apps/api/mcp/`.
 - `apps/api/mcp/catalogue.json` BLOCK-conditions section authored;
@@ -306,11 +334,18 @@ The `providers` service is the largest net-new code surface. Sub-areas:
   the sole `sqldb.NewDatabase("unblock", ...)` owner is `apps/api/db/db.go`)
   — additive only, higher-numbered than the P01 set (which ends at
   `0140_deps_cascade_events_kind_chk_fix`).
-- **Repo hygiene (P02-impl obligation).** The `providers/.gitkeep` and
-  `memory/.gitkeep` stubs currently cite the stale
-  `apps/api/auth/migrations/...` path; they MUST be deleted (once the
-  service `.go` files land) or corrected to `apps/api/db/migrations/`
-  during P02 implementation.
+- **Repo hygiene (P02-impl obligation).** **All THREE** stub `.gitkeep`s cite
+  the stale `apps/api/auth/migrations/...` path (line 2 of each; the real
+  migration owner is `apps/api/db/migrations/`):
+  - `apps/api/providers/.gitkeep` (cites `auth/migrations/0060_providers.up.sql`)
+    and `apps/api/memory/.gitkeep` (cites `auth/migrations/0090_memory.up.sql`)
+    MUST be **deleted** once their service `.go` files land in P02, **or**
+    corrected to `apps/api/db/migrations/`.
+  - `apps/api/boards/.gitkeep` (cites `auth/migrations/0080_boards.up.sql`)
+    — boards service code is **deferred to P05** (Q1), so the "once the
+    service `.go` files land" trigger never fires for it in P02; its stub
+    MUST be **corrected in-place** to `apps/api/db/migrations/0080_boards.up.sql`
+    during P02 hygiene so the stale path does not silently persist.
 - `infra/` (Olive): Encore Cloud staging deploy config, GitHub OAuth-app +
   webhook secrets, cron schedules, the AR-13 capacity-measurement gate, the
   AR-16 warmer cron.
@@ -415,7 +450,7 @@ by **Olive** (infra-supervisor).
 | ID | Task | Owner |
 |---|---|---|
 | C-1 | `POST /webhooks/github` public handler: HMAC verify, `providers.events` insert + `(provider, delivery_id)` dedup (AR-12), on-insert payload sanitiser, 200-on-duplicate + failure-status contract per R-P02-4b | go-supervisor (Greta) |
-| C-2 | `providers.LinkRepo` RPC: create `providers.installations`, store encrypted installation id + webhook secret | go-supervisor (Greta) |
+| C-2 | `providers.LinkRepo` RPC: create `providers.installations`, store encrypted installation id (`installation_id_enc`) **only** — **NO per-install webhook secret** (Q7 RESOLVED = DROP `webhook_secret_enc`); HMAC verifies against the app-level Encore secret `GITHUB_APP_WEBHOOK_SECRET` (provisioned in Track E-2), not a per-install secret | go-supervisor (Greta) |
 | C-3 | Webhook normaliser: GitHub issue/PR event → canonical `workitems.items` via `workitems` RPCs; record `providers.mappings` | go-supervisor (Greta) |
 | C-4 | Payload 90-day digest cron + redactor pattern set (§9.4.5 retention) | go-supervisor (Greta) |
 
@@ -536,7 +571,7 @@ are spec-shape decisions. R-P02 verdicts:
 | R-P02-8 | CONFIRMED | pgcrypto `pgp_sym_encrypt`/`pgp_sym_decrypt` + `MEMORY_DEK` proven in P01 (`auth/auth.go:487`, `secrets.go:68`, `secrets.nonprod.cue:62`). The `memory` package needs its own `var secrets struct { MemoryDEK string }` (Encore secrets are package-scoped); CI drift-check unions packages. Pin the explicit aes256 form for parity (02-spec). DEK rotation (`MEMORY_DEK_NEXT`, AR-7) inert in P02. No latency gate (Q6). |
 | R-P02-9 | PARTIAL | Ordering CONFIRMED structural (`0090` comments: sanitise → tokenise(ts_doc) → encrypt) but it is a **service-code invariant** the 02-spec must pin (DDL enforces nothing). **No v1.0 pattern set exists yet** — the regex baseline is an 02-spec deliverable (research recommends AWS key id, generic secret/token/password/api-key, GitHub PAT prefixes, PEM markers, JWT, bearer, email). `memory.sanitiser_events` shape is a net-new 02-spec contract (additive migration). See R2. |
 | R-P02-10 | CONFIRMED — **C4** | Genuine DDL gap (`memory.entries` has no `deleted_at`); partial-on-not-deleted index rewrite required. **C4 resolved below** (B-4, §2.5). |
-| R-P02-11 | CONFIRMED | Async webhook→normalise viable + idiomatic; `provider.events` topic does not yet exist; AR-11 publisher-ULID `EventID` idempotency required, distinct from AR-12. Recorded in §2.5. Cron min interval = hourly (→ C5). |
+| R-P02-11 | CONFIRMED | Async webhook→normalise viable + idiomatic; `provider.events` topic does not yet exist; AR-11 publisher-ULID `EventID` idempotency required, distinct from AR-12. Executable template = `insertCascadeEventRow` `ON CONFLICT … DO NOTHING` at `deps/cascade_subscriber.go:742`/`:769-779` + `CascadeRequested.EventID` at `cascade.go:53-57` (NOT the `cascade.go:158-162` doc comment). Recorded in §2.5. Cron min interval = hourly (→ C5). |
 | R-P02-12 | CONFIRMED — **C5** | Free-tier: 100k req/day, 100k Pub/Sub msgs/day, 1 GB DB, **cron hourly-min**, 2 cloud envs, no preview, no log retention. mcp-warmer not deliverable sub-hourly in-Encore. AR-13 pooled bindings already compliant (`db/db.go`). **C5 resolved below.** |
 | R-P02-13 | CONFIRMED (inert) | `expires_at` ships in `0090`, no code references it. No DDL change for any option. Read-filter couples with the C4 `deleted_at IS NULL` filter; write-surface (wire vs read-filter-only vs inert) is the 02-spec decision (B-6, Q4 open). Precedent: `mcp.api_keys.expires_at` read-time-honour-no-sweeper (`0070`). |
 
@@ -604,6 +639,171 @@ set) — dispositioned to the 02-spec (no DDL change, non-flagging):**
   email addresses — is the **starting point, not a locked contract**; the
   02-spec authors and pins the final list. Posture: redact-not-reject,
   audit-on-hit (best-effort per NFR-7/PRD-R6).
+
+### 5.6 Code-grounded constraints for the 02-spec
+
+A code-grounded adversarial review (2026-06-16) confronted these reconciled
+docs against the live `apps/api/` code and confirmed 23 findings. The
+following are **hard constraints the existing code already imposes** —
+things `/spec` → `/tasks` → `/do` would otherwise get wrong. This is a
+**constraints checklist for the 02-spec**, not the spec itself: no SQL,
+JSON schemas, or migration files are authored here. Each bullet carries its
+`file:symbol` anchor and the imperative for the 02-spec author.
+
+1. **[D6-02, HIGH] P01 catalogue guards to mutate.** The P01 catalogue
+   codegen has hard guards that FAIL the moment P02 does exactly what
+   Track A requires. **The 02-spec MUST** enumerate these guards to mutate:
+   `apps/api/cmd/gen-catalogue/main.go:60` `const expectedToolCount = 23`
+   (bump → 27 for the four memory tools); `main.go:109-111`
+   `die("transitions[] must be empty in P01 …")` (relax/replace with the
+   §7.5.1 typed-schema validation so an authored `block_conditions` set
+   passes); and the catalogue tests `apps/api/mcp/catalogue_test.go:48-72`
+   (`expectedP01ToolNames` 23-name slice → extend to 27 + rename),
+   `:129-134` (`TestCatalogueTransitionsEmpty` → invert to assert
+   `transitions[]` matches the PRD §6.7 row count), `:114-125`
+   (`schema_version` `v0.1` pin → decide the `v0.1→v1` bump). Also note the
+   4 new tools need 4 `AddTool` registrations or
+   `TestCatalogueNamesMatchToolRegistrars` (`:193-214`) fails.
+
+2. **[D6-01, HIGH] BindDB late-bind for the two net-new services.** **The
+   02-spec MUST** require that each of `providers` and `memory` ships its own
+   `apps/api/<svc>/db.go` with `var db *sqldb.Database` +
+   `func BindDB(d *sqldb.Database) { db = d }` (mirror
+   `apps/api/workitems/db.go`), AND that `apps/api/db/db.go` registers both —
+   add `encore.app/providers` + `encore.app/memory` to the import block
+   (`db.go:182-190`) and `providers.BindDB(DB)` + `memory.BindDB(DB)` to
+   `init()` (`db.go:273-280`). `apps/api/db/db.go:33-34` mandates this "no
+   exceptions"; without it every providers/memory RPC reads a nil handle and
+   panics on first query. (Domain services MUST NOT call `sqldb.Named` /
+   `sqldb.NewDatabase` at package init.)
+
+3. **[D6-03, HIGH] providers RBAC — per-table org-scoping classification.**
+   Only `providers.installations` has `org_id`
+   (`0060_providers.up.sql:10`); `providers.events` (`0060:28-43`) and
+   `providers.mappings` (`0060:70-87`) carry only an `installation_id` FK —
+   **NO `org_id`**. So the D-3 extension CANNOT use `rbac.For` on
+   events/mappings (`rbac.For` emits `<table>.org_id = $1`, which Postgres
+   rejects on org_id-less tables — `matrix.go:136-139`). **The 02-spec MUST**
+   add three `org.go` Resource constants (`resourceProvidersInstallations` /
+   `resourceProvidersEvents` / `resourceProvidersMappings`, all in
+   `resourceAllowed`, NONE in `agentReadWriteResources`) and classify:
+   `installations` → `rbac.For` (`KindOrgScoped`, carries `org_id`);
+   `events` + `mappings` → **Authorize-only** (`KindAuthorizeOnly`), scoped
+   via the parent installation's `org_id` FK join (mirroring
+   `workitems.comments` → `items`). Add the matching `rbactest` matrix rows
+   + a `case "providers.installations":` arm in `selectScopedOrgIDs`.
+
+4. **[D6-04, MED] memory RBAC — B-5 EXTENDS, not net-new.** `memory.entries`
+   is ALREADY in the `rbactest` matrix as dual `KindOrgScoped` +
+   `KindAuthorizeOnly` (`matrix.go:218-219`) with a `scope='org'` seed row
+   and an existing `selectScopedOrgIDs` case (`rbactest_test.go:632`). The
+   in-code P02 note at `matrix.go:182-188` spells out the gap. **The 02-spec
+   MUST** frame B-5 as EXTENDING the existing entry: add project- and
+   user-scope seed rows (`org_id` NULL, `project_id`/`user_id` set per
+   `entries_scope_target_chk`, `0090:36-40`) and supply a **non-`rbac.For`**
+   isolation predicate for project/user reads (because `rbac.For` emits
+   `memory.entries.org_id = $1` — `rbac.go:314` — which passes VACUOUSLY for
+   NULL-org_id rows and proves nothing). It is NOT net-new scaffolding.
+
+5. **[D2-3, MED] Layer-1 validator wires INTO the existing handler.** **The
+   02-spec MUST** state that the comment-trail gate is invoked inside the
+   EXISTING `set_state` path (`apps/api/mcp/handler_set_state.go`, which
+   today reads "Layer-1 BLOCK conditions … ship in P02 — NOT enforced here"
+   at `:32-34`), gating via the generated `catalogue.gen.go` validator —
+   **NOT a new MCP tool**.
+
+6. **[D1-3, MED] intent_comment is post-commit; the gate reads PRE-EXISTING
+   comments.** `set_state`'s `intent_comment` is appended best-effort AFTER
+   `SetStateColumns` commits, non-atomically
+   (`handler_set_state.go:43-44`, `:85-88`), and `SetStateColumns` never
+   reads `workitems.comments` (`workitems.go:1782-1790`). **The 02-spec
+   MUST** therefore pin: (a) the comment-trail gate evaluates comments
+   COMMITTED BEFORE the `set_state` call — the required trail must PRE-EXIST;
+   (b) `set_state`'s own `intent_comment` does NOT satisfy its own gate;
+   (c) the agent must do **two calls** — append the `(kind=qa,
+   status=success)` comment first, THEN call `set_state(qa_state=passed)`;
+   (d) the in-call order: identity/validation → Layer-1 comment-trail gate
+   (reads pre-existing trail) → column-value invariants inside
+   `SetStateColumns` → state write → post-commit `intent_comment` append;
+   F-2 asserts this ordering.
+
+7. **[D1-2, LOW] errmap.go discriminator branch for the new error.** The new
+   `PIPELINE_PRECONDITION_NOT_MET` needs a dedicated discriminator branch in
+   `apps/api/mcp/errmap.go` — within the `errs.FailedPrecondition` arm
+   (`:237-297`), route a Meta tag onto a new
+   `envelopeKindPipelinePreconditionNotMet` constant BEFORE the terminal
+   `envelopeKindPreconditionNotMet` return at `errmap.go:297` (analogous to
+   the existing `CYCLE_DETECTED` branch at `:241-260`). Add the constant to
+   `errenvelope.go`'s const block, distinct from `envelopeKindPreconditionNotMet`
+   (`errenvelope.go:70`). Without it, the gate's rejection silently collapses
+   into `PRECONDITION_NOT_MET`. **The 02-spec MUST** pin the discriminator key.
+
+8. **[D6-05, MED] every new secret needs a boot-time fail-fast guard.** **The
+   02-spec MUST** require that each new secret (GitHub App ID, private-key
+   PEM, `GITHUB_APP_WEBHOOK_SECRET`) is declared in a `var secrets struct`
+   with a paired boot-time fail-fast `init()` panic-on-empty guard (matching
+   `apps/api/auth/secrets.go:136-150`), landing in the SAME commit as the
+   `secrets.nonprod.cue` placeholders + the `SECRETS.md` table row so the CI
+   secrets-SoT drift-check stays green and no deploy boots with an empty
+   secret. The plan's Track E-2 adds the `.cue` entries but the guard
+   obligation is the spec's. (Owner package: likely a new
+   `apps/api/providers/secrets.go`, since Encore secrets are package-scoped.)
+
+9. **[D6-06, LOW] prime.memory_hints — POPULATE the existing struct.**
+   `apps/api/mcp/handler_prime.go` already declares
+   `type primeMemoryHint struct { … }` (`:114-117`), the response field
+   `MemoryHints []primeMemoryHint json:"memory_hints"` (`:58`), and the
+   empty-literal site `[]primeMemoryHint{}` (`:232`). **The 02-spec MUST**
+   frame B-3 as POPULATING this existing shape (and resolve the projection:
+   how a `memory.entries` row collapses into `{source, body}`, or whether
+   `primeMemoryHint` widens — a backward-additive change, acceptable
+   pre-prod), NOT reinventing the schema.
+
+10. **[D6-07, LOW] B-4 soft-delete index rewrite preserves the scope
+    predicate.** The three existing partial unique indexes are
+    `… (org_id, key) WHERE scope='org'` (and project/user siblings) —
+    `0090_memory.up.sql:47-55`. **The 02-spec MUST** require the recreated
+    indexes read `WHERE scope='org' AND deleted_at IS NULL` — the
+    `deleted_at IS NULL` clause is **ADDITIVE** to the existing scope
+    predicate and `(scope-key)` column tuple, NOT a replacement, so per-scope
+    uniqueness semantics (and the `entries_scope_target_chk` NULL columns)
+    are preserved.
+
+11. **[D1-5, LOW] AR-11 idempotency template — cite the executable INSERT.**
+    **The 02-spec MUST** cite the EXECUTABLE template at
+    `apps/api/deps/cascade_subscriber.go:742` (`insertCascadeEventRow`) and
+    its SQL `INSERT INTO deps.cascade_events … ON CONFLICT (event_id,
+    triggered_by_item_id) DO NOTHING` (`:769-779`), plus the publisher-ULID
+    `EventID` field on `CascadeRequested` (`cascade.go:53-57`) — **NOT** the
+    topic-declaration doc comment at `cascade.go:158-162`. (Plan §2.5 +
+    research R-P02-11 citations corrected 2026-06-16.)
+
+12. **[D2-2/D2-5, LOW] catalogue.json authoring shape is greenfield.** Today
+    `catalogue.json` is `[schema_version, tools, transitions(empty), $shared]`
+    with **zero** `block_conditions` (`catalogue.json`,
+    `catalogue.gen.go:31` embeds `"transitions":[]`). **The 02-spec MUST**
+    pin: (a) the exact `transitions[].block_conditions` JSON shape per §7.5.1
+    (incl. the predicate vocabulary, resolving the `any_comment_*` EXISTS read
+    surface per C3); (b) the custom JSON-RPC method-name string for
+    `verify_can_transition` (e.g. `unblock/verifyCanTransition`, via
+    `AddReceivingMiddleware`, with manual arg-decode) and the
+    `meta_catalogue` Resource URI (e.g. `unblock://catalogue`, MIME
+    `application/json`, via `AddResource`) — both verified implementable on
+    the pinned go-sdk **v1.6.0** (`server.go:1352` `AddReceivingMiddleware`,
+    `:519` `AddResource`); (c) regenerate `catalogue.gen.go` via `go generate`
+    or the CI drift guard (`catalogue.go:10-12`) fails.
+
+13. **[D3-2, LOW] forward-only migration convention.** `0090_memory` has no
+    `.down.sql` (the entire P01 set is up-only, validating
+    `feedback_migration_edit_drift`). **The 02-spec MUST** note that every new
+    P02 forward migration (the `memory.entries` soft-delete file, the
+    `webhook_secret_enc` DROP file, `memory.sanitiser_events`, the providers
+    retention additions) ships **up-only — no paired `.down.sql`** — matching
+    the existing migration set.
+
+> Note on the go-sdk version: the review **disconfirmed** any version drift —
+> `apps/api/go.mod:8` pins `go-sdk v1.6.0` and every doc cites v1.6.0
+> consistently. No version string is changed.
 
 ---
 
@@ -715,7 +915,7 @@ covers product-wide risks).
 | # | Risk | Mitigation |
 |---|---|---|
 | RP02-1 | **Bidirectional sync loop / GitHub rate-limit exhaustion.** A naive sync writes to GitHub, the echo webhook re-triggers normalisation, which re-writes — a storm that burns the 5000/hr REST budget. | **Research R-P02-3 CONFIRMED all suppressors available** (R1): App-bot `sender.login` allowlist (fast path) + `last_synced_at` echo window (`0060` columns exist) + content-idempotent normalise (structural backstop); go-github surfaces `x-ratelimit-*`/`retry-after` as typed errors so the reconciler honours them. 02-spec combines actor-allowlist + idempotent-normalise. Sync is opt-in per installation, so blast radius is bounded. |
-| RP02-2 | **Layer-1 validator double-validates against the P01 column-value invariants with conflicting errors.** P01 already enforces the five §6.2 column rules in `set_state`; P02 adds comment-trail gates. A clumsy merge yields two rejection codes for one bad transition. | A-3 reconciles the two layers into one validator pass; the spec pins which check runs first and which error wins. F-2 asserts a single, correct rejection. |
+| RP02-2 | **Layer-1 validator double-validates against the P01 column-value invariants with conflicting errors.** P01 already enforces the §6.2 column rules — but **split across two RPCs** (D1-4): `set_state` carries four (I-1,I-2,I-4,I-5) + the structural `impl_done_requires_claim`; `claim` carries I-3. P02 adds comment-trail gates on `set_state`. A clumsy merge yields two rejection codes for one bad transition. | A-3 reconciles the layers into one validator pass; the spec pins the **per-RPC** ordering (§2.3 sidebar) — which check runs first and which error wins. F-2 asserts a single, correct rejection. |
 | RP02-3 | **Catalogue drift between PRD §6.7, `catalogue.json`, and `catalogue.gen.go`.** Three representations of the same state machine; hand-authoring the JSON from the PRD table invites transcription error. | AR-4 CI drift test (now load-bearing, A-6) diffs the Go-codegen corner against the live `meta_catalogue`; Ada keeps PRD §6.7 ↔ JSON in sync; the spec includes a per-transition test matrix. |
 | RP02-4 | **Webhook HMAC / dedup edge cases.** Replayed `X-GitHub-Delivery`, signature-mismatch, oversized payloads, or a payload-sanitiser false-positive that mangles a legit field. | AR-12 unique constraint + 200-on-duplicate; HMAC verified before any processing; sanitiser is redact-not-reject; F-1 covers the happy path + a replay + a bad-signature case. |
 | RP02-5 | **Secret sanitiser false negative leaks a credential into `ts_doc` (unencrypted, GIN-indexed).** AR-10/AR-14: `ts_doc` is plaintext-derived and unencrypted by necessity. | **Research R-P02-9 (R2):** no v1.0 pattern set exists yet — the regex baseline is a NET-NEW 02-spec deliverable (best-effort per NFR-7/PRD-R6). The sanitise-before-tokenise **ordering is a service-code invariant** (DDL enforces nothing — B-1 must implement it). Recovery net: `sanitiser_events` audit + periodic re-scan (B-2, AR-14) make a missed pattern recoverable; `ts_doc` is SELECT-locked to the `memory` connection user (AR-10). |
