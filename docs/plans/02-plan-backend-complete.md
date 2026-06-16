@@ -1,6 +1,6 @@
 # PLAN: P02 — Backend Complete (providers + memory tools + Layer-1 pipeline enforcement)
 
-**Status:** APPROVED *(Q7=drop / Q8=documented-outlier resolved 2026-06-16. Research-reconciled 2026-06-16 — R-P02-1..13 verdicts recorded (9 CONFIRMED / 3 PARTIAL / 1 CONTRADICTED), C1–C5 resolved (§5.5): C2 SPEC §5.2.2 patched (Resource + custom JSON-RPC method, SSE→Streamable-HTTP); **C1 (Q7) RESOLVED 2026-06-16 = DROP** — the per-install `providers.installations.webhook_secret_enc` column is dropped via a NEW additive forward migration (`0060` unedited; re-added at v1.1 for the OAuth-app/GitLab per-install fallback); HMAC verifies against the app-level Encore secret `GITHUB_APP_WEBHOOK_SECRET` only; SPEC §9.4.5 C1 note + changelog patched; **C5 (Q8) RESOLVED 2026-06-16 = documented cold-start outlier** — no external pinger at v1.0 (SPEC §13 AR-16 option ii; external pinger option i deferred to v1.x); SPEC §13 AR-16 patched; C3 (validator read RPC) + C4 (memory `deleted_at` additive migration) recorded as 02-spec contracts; R1/R2 risks + research OQ4/OQ5 dispositioned. P01 migrations 0060/0090 untouched (the C1 DROP and C4 soft-delete ship as new forward files). **Code-grounded review reconciliation applied 2026-06-16 (23 findings; §5.6 code-grounded spec-constraints added)** — confronted the reconciled docs against live `apps/api/` code: GROUP A drifts fixed (C-2 `installation_id_enc`-only per Q7-DROP; `/webhooks/github` raw endpoint inside `providers` not `apps/api/public/`; §5.2.2 primitives "do NOT count toward the 27" uniform; per-RPC invariant split — `set_state` = I-1/I-2/I-4/I-5 + structural `impl_done_requires_claim`, I-3 = `claim`-only; three-stub `.gitkeep` hygiene); §5.6 added with 13 spec-constraints; AR-11 citation corrected to the executable `cascade_subscriber.go` INSERT. go-sdk version drift DISCONFIRMED — v1.6.0 unchanged. Prior: review-driven drift/gap reconciliation 2026-06-16 (23 findings); user decisions Q1–Q6 resolved §6; SPEC §11 P02/P05 traceability patch applied on main.)*
+**Status:** APPROVED *(Q7=drop / Q8=documented-outlier resolved 2026-06-16. Research-reconciled 2026-06-16 — R-P02-1..13 verdicts recorded (9 CONFIRMED / 3 PARTIAL / 1 CONTRADICTED), C1–C5 resolved (§5.5): C2 SPEC §5.2.2 patched (Resource + custom JSON-RPC method, SSE→Streamable-HTTP); **C1 (Q7) RESOLVED 2026-06-16 = DROP** — the per-install `providers.installations.webhook_secret_enc` column is dropped via a NEW additive forward migration (`0060` unedited; re-added at v1.1 for the OAuth-app/GitLab per-install fallback); HMAC verifies against the app-level Encore secret `GITHUB_APP_WEBHOOK_SECRET` only; SPEC §9.4.5 C1 note + changelog patched; **C5 (Q8) RESOLVED 2026-06-16 = documented cold-start outlier** — no external pinger at v1.0 (SPEC §13 AR-16 option ii; external pinger option i deferred to v1.x); SPEC §13 AR-16 patched; C3 (validator read RPC) + C4 (memory `deleted_at` additive migration) recorded as 02-spec contracts; R1/R2 risks + research OQ4/OQ5 dispositioned. P01 migrations 0060/0090 untouched (the C1 DROP and C4 soft-delete ship as new forward files). **Code-grounded review reconciliation applied 2026-06-16 (23 findings; §5.6 code-grounded spec-constraints added)** — confronted the reconciled docs against live `apps/api/` code: GROUP A drifts fixed (C-2 `installation_id_enc`-only per Q7-DROP; `/webhooks/github` raw endpoint inside `providers` not `apps/api/public/`; §5.2.2 primitives "do NOT count toward the 27" uniform; per-RPC invariant split — `set_state` = I-1/I-2/I-4/I-5 + structural `impl_done_requires_claim`, I-3 = `claim`-only; three-stub `.gitkeep` hygiene); §5.6 added with 13 spec-constraints; AR-11 citation corrected to the executable `cascade_subscriber.go` INSERT. go-sdk version drift DISCONFIRMED — v1.6.0 unchanged. Prior: review-driven drift/gap reconciliation 2026-06-16 (23 findings); user decisions Q1–Q6 resolved §6; SPEC §11 P02/P05 traceability patch applied on main. **§2.3 ordering reconciled to gate-first per 02-spec OQ-A 2026-06-16** — the comment-trail gate runs in the MCP handler before `SetStateColumns`; the pipeline gate's `PIPELINE_PRECONDITION_NOT_MET` wins when both would fail; the old "invariants-first" prose in §2.3 + §5.5 C3 row + §7 RP02-2 was replaced. Plan stays APPROVED.)*
 **Author:** Ada (architect)
 **Date:** 2026-06-16
 **Source PRD:** [docs/PRD.md](../PRD.md) (APPROVED, 2026-05-07)
@@ -168,23 +168,31 @@ criterion names directly. The work:
 > first in `set_state`").
 >
 > **Two-error-code reconciliation (research R-P02-7/C3, RP02-2; per-RPC
-> ordering per D1-4).** P01's `set_state` already rejects its column-value
-> invariants with `PRECONDITION_NOT_MET` + `data.invariant`. P02's new
-> comment-trail gates reject with `PIPELINE_PRECONDITION_NOT_MET` (a
-> **distinct** `envelopeKind*` constant — research R-P02-5 confirmed the
-> `errmap.go` path carries it). These MUST NOT double-fire. The 02-spec pins
-> the order **per-RPC**, matching the code:
-> - **`set_state` (`SetStateColumns`):** (1) I-1 auto-reset (precedes but is
->   NOT a rejection, so it does not participate in "one error wins"); then the
+> ordering per D1-4; gate-first per 02-spec OQ-A RESOLVED 2026-06-16).** P01's
+> `set_state` already rejects its column-value invariants with
+> `PRECONDITION_NOT_MET` + `data.invariant`. P02's new comment-trail gates
+> reject with `PIPELINE_PRECONDITION_NOT_MET` (a **distinct** `envelopeKind*`
+> constant — research R-P02-5 confirmed the `errmap.go` path carries it).
+> These MUST NOT double-fire. The 02-spec pins the order **per-RPC, gate-first**
+> (the comment-trail gate reads pre-existing comments in the MCP handler
+> **BEFORE** `SetStateColumns` runs — 02-spec §4.4.5 / OQ-A RESOLVED
+> 2026-06-16):
+> - **`set_state`:** (1) the **P02 comment-trail gate runs first** in the MCP
+>   handler (`PIPELINE_PRECONDITION_NOT_MET`); if it rejects, `SetStateColumns`
+>   is never reached. (2) Only if the gate passes does `SetStateColumns` run
+>   its column-value invariants — I-1 auto-reset (precedes but is NOT a
+>   rejection, so it does not participate in "one error wins"); then the
 >   rejection checks **in code order**: structural `impl_done_requires_claim`
->   → I-2 → I-5 → I-4 (all `PRECONDITION_NOT_MET`); **then** the P02
->   comment-trail gate (`PIPELINE_PRECONDITION_NOT_MET`).
+>   → I-2 → I-5 → I-4 (all `PRECONDITION_NOT_MET`). **The column invariants are
+>   the structural backstop**; when a pipeline gate and a column invariant
+>   would both fail, the **pipeline gate's `PIPELINE_PRECONDITION_NOT_MET`
+>   wins** because it is checked first.
 > - **`claim` (`Claim`):** I-3 is enforced here, not in `set_state`.
 >
 > So the per-transition test matrix + codegen ordering contract place **I-3
 > under `claim`** and **`impl_done_requires_claim` under `set_state`**, and
 > exactly one error wins per bad transition (A-3 / RP02-2). F-2 asserts a
-> single, correct rejection.
+> single, correct rejection. Cross-reference 02-spec §4.4.5.
 
 ### 2.4 Provider integration (FR-11, Law 3)
 
@@ -601,8 +609,11 @@ are spec-shape decisions. R-P02 verdicts:
   contradiction**, so this is recorded as an **02-spec contract** (new/
   extended `workitems` read RPC), not a root-SPEC patch. The 02-spec defines
   the RPC (global-latest tuple + per-`(kind,status)` EXISTS) and pins the
-  PRECONDITION ordering (I-1..I-5 first / pipeline gates second; one error
-  wins). Recorded in §2.1 + §2.3 + R-P02-7 above + RP02-2 (§7).
+  PRECONDITION ordering **gate-first** (02-spec OQ-A RESOLVED 2026-06-16): the
+  pipeline comment-trail gate runs in the MCP handler **before**
+  `SetStateColumns`, so the pipeline gate's `PIPELINE_PRECONDITION_NOT_MET`
+  wins when both would fail; the column invariants are the structural backstop;
+  one error wins. Recorded in §2.1 + §2.3 + R-P02-7 above + RP02-2 (§7).
 - **C4 [memory deleted_at gap — RESOLVED, additive migration].** NEW
   additive forward migration adds `deleted_at timestamptz` to
   `memory.entries` AND rewrites the three per-scope unique indexes to
@@ -915,7 +926,7 @@ covers product-wide risks).
 | # | Risk | Mitigation |
 |---|---|---|
 | RP02-1 | **Bidirectional sync loop / GitHub rate-limit exhaustion.** A naive sync writes to GitHub, the echo webhook re-triggers normalisation, which re-writes — a storm that burns the 5000/hr REST budget. | **Research R-P02-3 CONFIRMED all suppressors available** (R1): App-bot `sender.login` allowlist (fast path) + `last_synced_at` echo window (`0060` columns exist) + content-idempotent normalise (structural backstop); go-github surfaces `x-ratelimit-*`/`retry-after` as typed errors so the reconciler honours them. 02-spec combines actor-allowlist + idempotent-normalise. Sync is opt-in per installation, so blast radius is bounded. |
-| RP02-2 | **Layer-1 validator double-validates against the P01 column-value invariants with conflicting errors.** P01 already enforces the §6.2 column rules — but **split across two RPCs** (D1-4): `set_state` carries four (I-1,I-2,I-4,I-5) + the structural `impl_done_requires_claim`; `claim` carries I-3. P02 adds comment-trail gates on `set_state`. A clumsy merge yields two rejection codes for one bad transition. | A-3 reconciles the layers into one validator pass; the spec pins the **per-RPC** ordering (§2.3 sidebar) — which check runs first and which error wins. F-2 asserts a single, correct rejection. |
+| RP02-2 | **Layer-1 validator double-validates against the P01 column-value invariants with conflicting errors.** P01 already enforces the §6.2 column rules — but **split across two RPCs** (D1-4): `set_state` carries four (I-1,I-2,I-4,I-5) + the structural `impl_done_requires_claim`; `claim` carries I-3. P02 adds comment-trail gates on `set_state`. A clumsy merge yields two rejection codes for one bad transition. | A-3 reconciles the layers into one validator pass; the spec pins the **per-RPC, gate-first** ordering (§2.3 sidebar; 02-spec §4.4.5 / OQ-A RESOLVED 2026-06-16) — the comment-trail gate runs in the MCP handler **before** `SetStateColumns`, so the pipeline gate's `PIPELINE_PRECONDITION_NOT_MET` wins when both would fail (column invariants = structural backstop). F-2 asserts a single, correct rejection. |
 | RP02-3 | **Catalogue drift between PRD §6.7, `catalogue.json`, and `catalogue.gen.go`.** Three representations of the same state machine; hand-authoring the JSON from the PRD table invites transcription error. | AR-4 CI drift test (now load-bearing, A-6) diffs the Go-codegen corner against the live `meta_catalogue`; Ada keeps PRD §6.7 ↔ JSON in sync; the spec includes a per-transition test matrix. |
 | RP02-4 | **Webhook HMAC / dedup edge cases.** Replayed `X-GitHub-Delivery`, signature-mismatch, oversized payloads, or a payload-sanitiser false-positive that mangles a legit field. | AR-12 unique constraint + 200-on-duplicate; HMAC verified before any processing; sanitiser is redact-not-reject; F-1 covers the happy path + a replay + a bad-signature case. |
 | RP02-5 | **Secret sanitiser false negative leaks a credential into `ts_doc` (unencrypted, GIN-indexed).** AR-10/AR-14: `ts_doc` is plaintext-derived and unencrypted by necessity. | **Research R-P02-9 (R2):** no v1.0 pattern set exists yet — the regex baseline is a NET-NEW 02-spec deliverable (best-effort per NFR-7/PRD-R6). The sanitise-before-tokenise **ordering is a service-code invariant** (DDL enforces nothing — B-1 must implement it). Recovery net: `sanitiser_events` audit + periodic re-scan (B-2, AR-14) make a missed pattern recoverable; `ts_doc` is SELECT-locked to the `memory` connection user (AR-10). |
