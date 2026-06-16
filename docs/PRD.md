@@ -1,6 +1,6 @@
 # PRD: ://unblock — Provider-Agnostic Work-Tracking Engine for AI Agents
 
-**Status:** APPROVED
+**Status:** APPROVED *(2026-06-16 — §8 P01 service list reconciled with SPEC §11: `memory` qualified as P01 schema-only, `mcp` named as the live P01 service; provenance-only, no product-scope decision changed.)*
 **Author:** Grace (product-manager)
 **Date:** 2026-05-07
 **Companion:** [docs/MANIFESTO.md](./MANIFESTO.md) (APPROVED, 2026-05-07)
@@ -548,7 +548,7 @@ The project ships in four sequential phases plus a renderer phase. The AST CLI s
 ### P01 — Backend MVP
 
 - Encore Go on a single Postgres (8 schemas).
-- Services: `auth`, `org`, `workitems`, `deps`, `memory`.
+- Services: `auth`, `org`, `workitems`, `deps`, `mcp`; `memory` (schema only — service code lands in P02 per SPEC §11).
 - MCP server with **23 tools** over Streamable HTTP (per FR-8; P01 round-16 raised this from 14 — adds `promote`, the four milestone tools, and the four label-registry tools).
 - Public Encore endpoints: `POST /webhooks/github`, `POST /mcp` + `GET /mcp` (single logical MCP endpoint, Streamable HTTP per FR-12). OAuth callback is on Astro origin per FR-12.
 - Exit criterion: an agent can authenticate via Bearer API key and complete `prime → ready → claim → close` against a manually-seeded graph; cascade fires; cycle detection rejects offending edges.
