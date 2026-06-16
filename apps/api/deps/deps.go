@@ -250,7 +250,13 @@ func AddEdgeInTx(ctx context.Context, tx *sqldb.Tx, req *AddEdgeRequest) (*Edge,
 			return nil, nil, &errs.Error{
 				Code:    errs.NotFound,
 				Message: "from_item not found",
-				Meta:    errs.Metadata{"field": "from_item_id", "id": req.FromItem},
+				// §7 NOT_FOUND details shape is {kind:"item", id} — carry the
+				// "item" subject discriminant so mapError projects details.kind,
+				// matching the symmetric to_item handler path
+				// (mcp/handler_add_dependency.go) and the §7 contract
+				// (docs/specs/01-spec-backend-mvp.md §7 line 3491). bead
+				// unblock-tv8.89.
+				Meta: errs.Metadata{"field": "from_item_id", "id": req.FromItem, "kind": "item"},
 			}
 		}
 		return nil, nil, &errs.Error{Code: errs.Internal, Message: "from_item lookup failed"}
@@ -263,7 +269,12 @@ func AddEdgeInTx(ctx context.Context, tx *sqldb.Tx, req *AddEdgeRequest) (*Edge,
 			return nil, nil, &errs.Error{
 				Code:    errs.NotFound,
 				Message: "to_item not found",
-				Meta:    errs.Metadata{"field": "to_item_id", "id": req.ToItem},
+				// §7 NOT_FOUND details shape is {kind:"item", id}. The MCP
+				// surface resolves to_item via workitems.Get before AddEdge so
+				// this in-tx path is unreachable from the agent boundary, but
+				// keep the in-tx contract internally symmetric with the
+				// from_item path above. bead unblock-tv8.89.
+				Meta: errs.Metadata{"field": "to_item_id", "id": req.ToItem, "kind": "item"},
 			}
 		}
 		return nil, nil, &errs.Error{Code: errs.Internal, Message: "to_item lookup failed"}

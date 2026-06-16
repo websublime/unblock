@@ -306,6 +306,89 @@ func TestAddEdgeRejectsCrossProject(t *testing.T) {
 	}
 }
 
+// notFoundDetails projects an in-tx NOT_FOUND error's Meta into the §7
+// `details` shape exactly as mcp/errmap.go::classifyEnvelopeError does for
+// the NotFound case — only the `kind` and `id` keys survive. This lets the
+// symmetry assertion compare what the agent observes on the wire, not the
+// internal Meta (which also carries `field`).
+func notFoundDetails(t *testing.T, err error) map[string]any {
+	t.Helper()
+	if errs.Code(err) != errs.NotFound {
+		t.Fatalf("code = %v, want NotFound; err = %v", errs.Code(err), err)
+	}
+	var e *errs.Error
+	if !errors.As(err, &e) {
+		t.Fatalf("not an *errs.Error: %v", err)
+	}
+	details := map[string]any{}
+	if v, ok := e.Meta["kind"].(string); ok && v != "" {
+		details["kind"] = v
+	}
+	if v, ok := e.Meta["id"].(string); ok && v != "" {
+		details["id"] = v
+	}
+	return details
+}
+
+// TestAddEdgeNotFoundDetailsSymmetry locks bead unblock-tv8.89: a missing
+// from_item and a missing to_item MUST both surface §7 NOT_FOUND details of
+// the same shape — {kind:"item", id} (§7 line 3491,
+// docs/specs/01-spec-backend-mvp.md). Before the fix the from_item path
+// omitted the kind:"item" discriminant the to_item path carried, so the wire
+// details were asymmetric ({id} vs {id, kind:"item"}).
+func TestAddEdgeNotFoundDetailsSymmetry(t *testing.T) {
+	ctx := context.Background()
+	fx := seedFixture(t, ctx)
+	real := createItem(t, ctx, fx, "Backlog")
+	missing := mustULID(t) // valid ULID shape, no row
+
+	// from_item missing, to_item real.
+	_, fromErr := deps.AddEdge(ctx, &deps.AddEdgeRequest{
+		OrgID:     fx.OrgID,
+		ProjectID: fx.ProjectID,
+		FromItem:  missing,
+		ToItem:    real,
+	})
+	if fromErr == nil {
+		t.Fatalf("expected NOT_FOUND for missing from_item, got nil")
+	}
+	fromDetails := notFoundDetails(t, fromErr)
+
+	// from_item real, to_item missing.
+	_, toErr := deps.AddEdge(ctx, &deps.AddEdgeRequest{
+		OrgID:     fx.OrgID,
+		ProjectID: fx.ProjectID,
+		FromItem:  real,
+		ToItem:    missing,
+	})
+	if toErr == nil {
+		t.Fatalf("expected NOT_FOUND for missing to_item, got nil")
+	}
+	toDetails := notFoundDetails(t, toErr)
+
+	// §7: both details MUST carry kind="item".
+	if fromDetails["kind"] != "item" {
+		t.Fatalf("from_item NOT_FOUND details.kind = %v, want \"item\"", fromDetails["kind"])
+	}
+	if toDetails["kind"] != "item" {
+		t.Fatalf("to_item NOT_FOUND details.kind = %v, want \"item\"", toDetails["kind"])
+	}
+	// The id is the respective missing endpoint's id.
+	if fromDetails["id"] != missing || toDetails["id"] != missing {
+		t.Fatalf("details.id mismatch: from=%v to=%v, want %q", fromDetails["id"], toDetails["id"], missing)
+	}
+	// The two paths' details are structurally identical (same keys, same
+	// per-key shape) — acceptance criterion #2.
+	if len(fromDetails) != len(toDetails) {
+		t.Fatalf("details key-count differs: from=%v to=%v", fromDetails, toDetails)
+	}
+	for k := range fromDetails {
+		if _, ok := toDetails[k]; !ok {
+			t.Fatalf("from_item details key %q absent in to_item details %v", k, toDetails)
+		}
+	}
+}
+
 func TestAddEdgeRejectsCycleAndPopulatesPath(t *testing.T) {
 	ctx := context.Background()
 	fx := seedFixture(t, ctx)
