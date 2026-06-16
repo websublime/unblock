@@ -15,6 +15,7 @@
 - 2026-06-16 — §5.2.2 operational-primitives mechanism reconciliation (research R-P02-6/C2, gating the P02 spec): the `verify_can_transition` + `meta_catalogue` descriptions are corrected from the stale "exposed via the same SSE channel" wording (the live MCP transport is Streamable HTTP `POST /mcp` per §5.3, not the deprecated 2024-11-05 SSE+POST shape) to the concrete go-sdk mechanisms — `verify_can_transition` is a **custom JSON-RPC method** via `AddReceivingMiddleware`, `meta_catalogue` is an **MCP Resource** via `AddResource`. Provenance: the `modelcontextprotocol/go-sdk` v1.6.0 has no "registered-but-unlisted tool" concept (any `AddTool` is advertised in `tools/list`), so the SPEC's "not in the 27 / not listed" promise needs an explicit non-`AddTool` mechanism. The **27-tool count is unchanged** — both primitives stay off `tools/list`. Provenance-only mechanism reconciliation — no architectural decision changed. Status remains APPROVED.
 - 2026-06-16 — §9.4.5 webhook-secret model note (research R-P02-4/C1, gating the P02 spec; **Q7 RESOLVED 2026-06-16 — DROP**, amended same day): under the **confirmed v1.0 GitHub-App path** the webhook secret is **app-level** (one secret for all installs, verified before body-parse against an Encore application secret e.g. `GITHUB_APP_WEBHOOK_SECRET`, provisioned in Track E-2). The user resolved the flagged disposition (P02 plan §6 Q7) to **DROP** the dead per-install `installations.webhook_secret_enc` column rather than keep it nullable-unused: the column is **DROPPED via a new additive forward DROP migration** (a forward `ALTER TABLE … DROP COLUMN`; `0060_providers` itself is **unedited**, per `feedback_migration_edit_drift`; `providers.installations` is an empty stub pre-production so the drop is safe) and **re-added by a future migration** when the OAuth-app / future-GitLab per-install fallback ships (v1.1). HMAC verifies against the app-level `GITHUB_APP_WEBHOOK_SECRET`. The §9.4.5 DDL note is amended accordingly. This is an **additive forward DROP migration (0060 unedited)** — not "no schema change"; the exact migration file is a P02-spec deliverable. Provenance + resolution record — the 8:8 schema decomposition is unchanged. Status remains APPROVED.
 - 2026-06-16 — §13 AR-16 free-tier cron constraint (research R-P02-12/C5, gating the P02 spec; **Q8 RESOLVED 2026-06-16 — documented outlier**, amended same day): the synthetic-warmer mitigation is corrected from "a small Encore cron (`mcp-warmer`, every N minutes)" to record that **Encore Cloud's free-tier cron minimum interval is once per hour** (and cron does not run in local/preview envs), so an in-Encore sub-hourly warmer is **not deliverable on the free tier**. The user resolved the flagged disposition (P02 plan §6 Q8): the **v1.0 disposition is option (ii) — accept cold-start as the documented launch-period outlier** (AR-16(a) "measured warm only" already carves this out); **no external pinger ships at v1.0**. The external sub-hourly uptime pinger on `POST /mcp` (option i) is **deferred to v1.x** as a fallback if cold-start proves painful in practice. E-3 publishes the measured cold-start number on staging. Both options stay described in AR-16; the v1.0 choice is marked. Provenance + resolution record — no architectural decision changed; the NFR-1 warm-only measurement methodology is unchanged. Status remains APPROVED.
+- 2026-06-16 — §5.2.2 operational-primitives wording cleanup (code-grounded P02 review finding D2-4, residual of the earlier same-day C2 fix): the `verify_can_transition` and `meta_catalogue` bullets are made uniform — both now read "first-class **operational primitive that does NOT count toward the 27**", removing any residual "count as part of the inventory" framing for the two primitives and aligning their "does not count" wording verbatim. `set_state` (#13) + `get_state` (#14) remain counted within the 27 (they are canonical agent tools); only the two operational primitives are excluded. Provenance-only — no architectural decision changed; the inventory of 27 is unchanged. Status remains APPROVED.
 - 2026-06-16 — §5.2 heading + preamble + §13 decision row 2 + acceptance checklist: service-count framing disambiguation surfaced by the migration-owner (auth → db) reconciliation in the preceding 2026-06-16 entry. The "8 services / 8 schemas / 8:8" framing is clarified to refer specifically to the **8 domain services** that map 1:1 to the 8 schemas; the dedicated zero-API `db` migration-owner service (which owns no schema, holds the sole `sqldb.NewDatabase("unblock", …)` call + all `apps/api/db/migrations/`, and late-binds every domain handle via `BindDB`) is a **9th** Encore service package outside the 8:8 count — so the repository has **9 service dirs = 8 domain + 1 `db` infra**. The 8:8 domain decomposition decision (§5.2.1) is **unchanged and not weakened**; only the total service-package count is made unambiguous. Provenance-only — no architectural decision changed. Status remains APPROVED.
 **Source PRD:** [docs/PRD.md](./PRD.md) (APPROVED, 2026-05-07)
 **Companion:** [docs/MANIFESTO.md](./MANIFESTO.md) (APPROVED, 2026-05-07)
@@ -536,7 +537,8 @@ reconciles the two.
   accessors **and count within the 27 above**. `set_state` is the one tool subject to all of Layer 1's BLOCK
   conditions (§7.5).
 - `verify_can_transition` is **not** a separate top-level MCP tool — it is a
-  read-only operational primitive exposed over the same Streamable HTTP
+  first-class **operational primitive that does NOT count toward the 27**,
+  exposed read-only over the same Streamable HTTP
   transport (`POST /mcp`, §5.3) as a **custom JSON-RPC method** (e.g.
   `unblock/verifyCanTransition`) intercepted via the go-sdk
   `AddReceivingMiddleware` hook before tool dispatch, **not** via
@@ -545,17 +547,18 @@ reconciles the two.
   tool"** concept — any `AddTool` registration is advertised in `tools/list`
   for every session. A custom JSON-RPC method keeps the agent-facing
   `tools/list` at exactly 27 while still backing the primitive with the same
-  Layer-1 validator that gates `set_state`.) It does not count as one of the
+  Layer-1 validator that gates `set_state`.) It does **not** count toward the
   27. (PRD FR-8 reconciliation: the FR-8 sentence "exposing 27 tools at
   v1.0" — raised from 18 by the P01 round-16 amendment — refers to the
   agent-facing inventory above; `verify_can_transition` is a hook-facing
   primitive shared with the Layer-2 enforcement path.)
 - `meta_catalogue` is **not** a separate top-level MCP tool either — it is a
-  read-only **MCP Resource** (go-sdk `AddResource`, surfaced under
+  first-class **operational primitive that does NOT count toward the 27**,
+  shipped as a read-only **MCP Resource** (go-sdk `AddResource`, surfaced under
   `resources/list` at a stable URI such as `unblock://catalogue`), served by
   the `mcp` service over the same Streamable HTTP transport for the Layer-3
   build-time renderer to verify against the checked-in `catalogue.json`
-  (§7.2). It does not count toward the 27 for the same reason: it is an
+  (§7.2). It does **not** count toward the 27 for the same reason: it is an
   operational read primitive consumed by tooling, not by agents in their
   workflow, and being a Resource it never appears in `tools/list`.
   (Mechanism note, research R-P02-6/C2 2026-06-16 — same provenance as
