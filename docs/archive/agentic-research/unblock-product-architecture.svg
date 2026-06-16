@@ -1,0 +1,198 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 830" width="680" height="830">
+<title>://unblock — Product Architecture</title>
+<desc>Two-layer architecture: local daemon with bus and Claude Code sessions, connected via MCP and SSE to the remote ://unblock backend, Astro web dashboard, and external providers.</desc>
+<style>
+  text { font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif; }
+  .th { font-size: 13px; font-weight: 600; fill: #1a1a1a; }
+  .ts { font-size: 11px; font-weight: 400; fill: #63635e; }
+</style>
+<defs>
+  <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+    <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+  </marker>
+</defs>
+
+<!-- Background -->
+<rect width="680" height="830" fill="#ffffff"/>
+
+<!-- ═══ LOCAL LAYER ═══ -->
+<rect x="24" y="14" width="632" height="326" rx="14" fill="none" stroke="#c8c8c4" stroke-width="0.5" stroke-dasharray="6 4"/>
+<text class="ts" x="44" y="34" fill="#a0a09b">Local</text>
+<text x="340" y="50" text-anchor="middle" font-size="15" font-weight="600" fill="#1a1a1a" font-family="Inter, system-ui, sans-serif">Developer's machine</text>
+
+<!-- Config pill -->
+<rect x="44" y="66" width="146" height="30" rx="15" fill="#f5f5f4" stroke="#d4d4d0" stroke-width="0.5"/>
+<text class="ts" x="117" y="85" text-anchor="middle">~/.unblock/config.toml</text>
+
+<!-- Daemon container -->
+<rect x="216" y="62" width="428" height="136" rx="10" fill="#f5f5f4" stroke="#d4d4d0" stroke-width="0.5"/>
+<text class="th" x="430" y="82" text-anchor="middle">unblock-agentic daemon</text>
+
+<!-- Arrow: config → daemon -->
+<line x1="190" y1="81" x2="214" y2="81" stroke="#c8c8c4" stroke-width="0.5" marker-end="url(#arrow)"/>
+
+<!-- Bus A -->
+<rect x="230" y="94" width="112" height="30" rx="6" fill="none" stroke="#c8c8c4" stroke-width="0.5"/>
+<text class="ts" x="286" y="113" text-anchor="middle">Bus · project A</text>
+
+<!-- Conductor A -->
+<rect x="354" y="94" width="112" height="30" rx="6" fill="none" stroke="#c8c8c4" stroke-width="0.5"/>
+<text class="ts" x="410" y="113" text-anchor="middle">Conductor · DAG</text>
+
+<!-- Observers -->
+<rect x="478" y="94" width="154" height="30" rx="6" fill="none" stroke="#c8c8c4" stroke-width="0.5"/>
+<text class="ts" x="555" y="113" text-anchor="middle">Observers</text>
+
+<!-- Bus B -->
+<rect x="230" y="136" width="112" height="30" rx="6" fill="none" stroke="#c8c8c4" stroke-width="0.5"/>
+<text class="ts" x="286" y="155" text-anchor="middle">Bus · project B</text>
+
+<!-- Conductor B -->
+<rect x="354" y="136" width="112" height="30" rx="6" fill="none" stroke="#c8c8c4" stroke-width="0.5"/>
+<text class="ts" x="410" y="155" text-anchor="middle">Conductor · DAG</text>
+
+<!-- Sessions container -->
+<rect x="216" y="212" width="428" height="112" rx="10" fill="none" stroke="#d4d4d0" stroke-width="0.5"/>
+<text class="th" x="430" y="232" text-anchor="middle">Claude Code sessions</text>
+
+<!-- Arrow: daemon bottom → sessions top -->
+<line x1="430" y1="198" x2="430" y2="210" stroke="#c8c8c4" stroke-width="0.5" marker-end="url(#arrow)"/>
+<text class="ts" x="446" y="208" fill="#a0a09b">spawn</text>
+
+<!-- Session 1 -->
+<rect x="230" y="244" width="126" height="38" rx="6" fill="none" stroke="#c8c8c4" stroke-width="0.5"/>
+<text class="ts" x="293" y="260" text-anchor="middle">Session 1</text>
+<text class="ts" x="293" y="274" text-anchor="middle" fill="#a0a09b">item A · proj A</text>
+
+<!-- Session 2 -->
+<rect x="366" y="244" width="126" height="38" rx="6" fill="none" stroke="#c8c8c4" stroke-width="0.5"/>
+<text class="ts" x="429" y="260" text-anchor="middle">Session 2</text>
+<text class="ts" x="429" y="274" text-anchor="middle" fill="#a0a09b">item B · proj A</text>
+
+<!-- Session 3 -->
+<rect x="502" y="244" width="126" height="38" rx="6" fill="none" stroke="#c8c8c4" stroke-width="0.5"/>
+<text class="ts" x="565" y="260" text-anchor="middle">Session 3</text>
+<text class="ts" x="565" y="274" text-anchor="middle" fill="#a0a09b">item C · proj B</text>
+
+<!-- Filesystem pill -->
+<rect x="44" y="256" width="146" height="30" rx="15" fill="#f5f5f4" stroke="#d4d4d0" stroke-width="0.5"/>
+<text class="ts" x="117" y="275" text-anchor="middle">Local filesystem</text>
+
+<!-- Arrow: session 1 → filesystem -->
+<line x1="228" y1="268" x2="192" y2="271" stroke="#c8c8c4" stroke-width="0.5" marker-end="url(#arrow)"/>
+<text class="ts" x="198" y="258" fill="#a0a09b">r/w</text>
+
+<!-- ═══ CONNECTION ZONE ═══ -->
+
+<!-- MCP: straight down from local to MCP endpoint -->
+<line x1="370" y1="340" x2="370" y2="486" stroke="#0F6E56" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+<!-- MCP label pill -->
+<rect x="316" y="396" width="44" height="20" rx="10" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/>
+<text x="338" y="410" text-anchor="middle" font-size="10" font-weight="500" fill="#0F6E56" font-family="Inter, system-ui, sans-serif">MCP</text>
+
+<!-- SSE: straight up from SSE broadcast to local -->
+<line x1="560" y1="486" x2="560" y2="340" stroke="#185FA5" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+<!-- SSE label pill -->
+<rect x="570" y="396" width="40" height="20" rx="10" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.5"/>
+<text x="590" y="410" text-anchor="middle" font-size="10" font-weight="500" fill="#185FA5" font-family="Inter, system-ui, sans-serif">SSE</text>
+
+<!-- API key label -->
+<rect x="432" y="396" width="58" height="20" rx="10" fill="#f5f5f4" stroke="#d4d4d0" stroke-width="0.5"/>
+<text class="ts" x="461" y="410" text-anchor="middle" font-size="10">API key</text>
+
+<!-- ═══ REMOTE LAYER ═══ -->
+<rect x="24" y="436" width="632" height="200" rx="14" fill="none" stroke="#c8c8c4" stroke-width="0.5" stroke-dasharray="6 4"/>
+<text class="ts" x="44" y="456" fill="#a0a09b">Remote</text>
+<text x="340" y="472" text-anchor="middle" font-size="15" font-weight="600" fill="#1a1a1a" font-family="Inter, system-ui, sans-serif">://unblock cloud · Encore</text>
+
+<!-- Services -->
+<rect x="44" y="486" width="260" height="58" rx="8" fill="#f5f5f4" stroke="#d4d4d0" stroke-width="0.5"/>
+<text class="th" x="174" y="508" text-anchor="middle">Go services</text>
+<text class="ts" x="174" y="524" text-anchor="middle" fill="#a0a09b">auth · org · workitems · deps · mcp · memory</text>
+
+<!-- MCP endpoint -->
+<rect x="330" y="486" width="130" height="36" rx="6" fill="none" stroke="#0F6E56" stroke-width="0.8"/>
+<text x="395" y="502" text-anchor="middle" font-size="12" font-weight="500" fill="#0F6E56" font-family="Inter, system-ui, sans-serif">MCP endpoint</text>
+<text class="ts" x="395" y="516" text-anchor="middle" fill="#a0a09b">Streamable HTTP</text>
+
+<!-- SSE broadcast -->
+<rect x="490" y="486" width="130" height="36" rx="6" fill="none" stroke="#185FA5" stroke-width="0.8"/>
+<text x="555" y="502" text-anchor="middle" font-size="12" font-weight="500" fill="#185FA5" font-family="Inter, system-ui, sans-serif">SSE broadcast</text>
+<text class="ts" x="555" y="516" text-anchor="middle" fill="#a0a09b">push to clients</text>
+
+<!-- Arrow: MCP endpoint → services -->
+<line x1="328" y1="504" x2="306" y2="504" stroke="#0F6E56" stroke-width="0.5" marker-end="url(#arrow)"/>
+
+<!-- Postgres -->
+<rect x="44" y="558" width="116" height="28" rx="6" fill="#f5f5f4" stroke="#d4d4d0" stroke-width="0.5"/>
+<text class="ts" x="102" y="576" text-anchor="middle">Postgres · 8 schemas</text>
+
+<!-- Pub/Sub -->
+<rect x="172" y="558" width="132" height="28" rx="6" fill="#f5f5f4" stroke="#d4d4d0" stroke-width="0.5"/>
+<text class="ts" x="238" y="576" text-anchor="middle">Pub/Sub topics</text>
+
+<!-- Arrow: services → postgres -->
+<line x1="102" y1="544" x2="102" y2="556" stroke="#c8c8c4" stroke-width="0.5" marker-end="url(#arrow)"/>
+
+<!-- Arrow: services → pubsub -->
+<line x1="238" y1="544" x2="238" y2="556" stroke="#c8c8c4" stroke-width="0.5" marker-end="url(#arrow)"/>
+
+<!-- Arrow: pubsub → SSE broadcast -->
+<path d="M304 572 L555 572 L555 524" fill="none" stroke="#185FA5" stroke-width="0.5" marker-end="url(#arrow)"/>
+<text x="434" y="568" font-size="10" fill="#185FA5" font-family="Inter, system-ui, sans-serif">feeds</text>
+
+<!-- Webhook ingestion -->
+<rect x="330" y="558" width="130" height="28" rx="6" fill="#f5f5f4" stroke="#d4d4d0" stroke-width="0.5"/>
+<text class="ts" x="395" y="576" text-anchor="middle">Webhook ingestion</text>
+
+<!-- Arrow: webhook → services -->
+<line x1="395" y1="558" x2="304" y2="530" stroke="#c8c8c4" stroke-width="0.5" marker-end="url(#arrow)"/>
+
+<!-- ═══ BOTTOM ROW ═══ -->
+
+<!-- Astro Web -->
+<rect x="24" y="672" width="236" height="68" rx="10" fill="#f5f5f4" stroke="#d4d4d0" stroke-width="0.5"/>
+<text class="th" x="142" y="696" text-anchor="middle">Astro web client</text>
+<text class="ts" x="142" y="712" text-anchor="middle" fill="#a0a09b">Kanban · dep graph · activity</text>
+<text class="ts" x="142" y="726" text-anchor="middle" fill="#c8c8c4">Cloudflare Pages</text>
+
+<!-- Arrow: remote → astro -->
+<line x1="142" y1="636" x2="142" y2="670" stroke="#c8c8c4" stroke-width="0.5" marker-end="url(#arrow)"/>
+<text class="ts" x="156" y="658" fill="#a0a09b">BFF</text>
+
+<!-- GitHub -->
+<rect x="296" y="672" width="136" height="48" rx="8" fill="none" stroke="#d4d4d0" stroke-width="0.5"/>
+<text class="th" x="364" y="694" text-anchor="middle">GitHub / GitLab</text>
+<text class="ts" x="364" y="710" text-anchor="middle" fill="#a0a09b">webhooks</text>
+
+<!-- Arrow: github → webhook -->
+<line x1="364" y1="672" x2="395" y2="588" stroke="#c8c8c4" stroke-width="0.5" marker-end="url(#arrow)"/>
+
+<!-- Other developer -->
+<rect x="468" y="672" width="188" height="68" rx="10" fill="none" stroke="#d4d4d0" stroke-width="0.5" stroke-dasharray="4 3"/>
+<text class="th" x="562" y="696" text-anchor="middle">Another developer</text>
+<text class="ts" x="562" y="712" text-anchor="middle" fill="#a0a09b">own daemon + MCP</text>
+<text class="ts" x="562" y="726" text-anchor="middle" fill="#a0a09b">views Astro web</text>
+
+<!-- Arrow: other dev → astro -->
+<line x1="466" y1="706" x2="262" y2="706" stroke="#c8c8c4" stroke-width="0.5" stroke-dasharray="4 3" marker-end="url(#arrow)"/>
+
+<!-- Arrow: other dev → backend -->
+<path d="M620 672 L620 524" fill="none" stroke="#0F6E56" stroke-width="0.5" stroke-dasharray="4 3" marker-end="url(#arrow)"/>
+<text x="628" y="600" font-size="10" fill="#0F6E56" font-family="Inter, system-ui, sans-serif" opacity="0.6">MCP</text>
+
+<!-- unblock-code standalone -->
+<rect x="44" y="776" width="170" height="28" rx="14" fill="none" stroke="#d4d4d0" stroke-width="0.5"/>
+<text class="ts" x="129" y="794" text-anchor="middle" fill="#a0a09b">unblock-code CLI · standalone</text>
+
+<!-- Legend -->
+<text class="ts" x="320" y="788" fill="#c8c8c4">Legend</text>
+<line x1="320" y1="802" x2="342" y2="802" stroke="#0F6E56" stroke-width="1.2" marker-end="url(#arrow)"/>
+<text x="350" y="806" font-size="11" fill="#0F6E56" font-family="Inter, system-ui, sans-serif">MCP (req/res)</text>
+<line x1="468" y1="802" x2="490" y2="802" stroke="#185FA5" stroke-width="1.2" marker-end="url(#arrow)"/>
+<text x="498" y="806" font-size="11" fill="#185FA5" font-family="Inter, system-ui, sans-serif">SSE (push)</text>
+
+</svg>
