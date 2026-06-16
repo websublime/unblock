@@ -54,7 +54,7 @@ validates a candidate transition against the same Layer-1 validator.*
 
 **Explicitly NOT in P02:** the Reactive Agent Environment /
 `unblock-agentic` work described in
-`docs/research/agentic-research/RFC-REACTIVE-AGENT-ENVIRONMENT.md`. That
+`docs/archive/agentic-research/RFC-REACTIVE-AGENT-ENVIRONMENT.md`. That
 RFC tags itself as **P02+/additive**, not P02. It is out of scope for
 this phase (see §3.7) and neither this plan nor the P02 spec depend on
 it.
@@ -261,7 +261,7 @@ again the authoritative traceability source.
 ### 3.2 Reactive Agent Environment / `unblock-agentic` (P02+/additive, NOT P02)
 
 The RFC at
-`docs/research/agentic-research/RFC-REACTIVE-AGENT-ENVIRONMENT.md` and the
+`docs/archive/agentic-research/RFC-REACTIVE-AGENT-ENVIRONMENT.md` and the
 companion `UNBLOCK-AGENTIC-RUST.md` / `MOZAIK-ARCHITECTURE-REFERENCE.md`
 describe a reactive agent environment. The RFC explicitly tags this as
 **P02+/additive**, i.e. *after and on top of* P02, not part of it. P02
@@ -699,5 +699,5 @@ This phase is **DONE** when all of the following are demonstrably true.
   §3.4 (Layer-1 deferral to P02), Q2 (all 8 schemas migrate in P01), Q6
   (Encore Cloud staging is a P02 ops task).
 - **Explicitly excluded:**
-  `docs/research/agentic-research/RFC-REACTIVE-AGENT-ENVIRONMENT.md`
+  `docs/archive/agentic-research/RFC-REACTIVE-AGENT-ENVIRONMENT.md`
   (P02+/additive, not P02 — §3.2).
