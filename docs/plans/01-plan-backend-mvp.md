@@ -71,7 +71,7 @@ Services whose **schema** ships in P01 but whose **runtime surface is empty**:
 | Service | What ships in P01 | What is deferred |
 |---|---|---|
 | `providers` | DDL only (§9.4.5); no service code, no public webhook endpoint | Webhook handler, normaliser, sync — P02 |
-| `boards` | DDL only (§9.4.7); no service code | Saved-view CRUD — P02 |
+| `boards` | DDL only (§9.4.7); no service code | Saved-view CRUD — **P05** (no consumer until the Astro web client; aligns with §6 Q2 resolution "grow code in … P05 (boards)") |
 | `memory` | DDL only (§9.4.8); no service code, no MCP tools, no sanitiser | Sanitiser, the 4 MCP tools, secret-event audit — P02 |
 
 Rationale for "schema-only" services in P01: SPEC §11 traceability lists
