@@ -32,7 +32,10 @@ local-first Postgres so the product survives provider outages.
 Three deliverables:
 
 1. **`apps/api/`** — Go backend on Encore framework, hosted on Encore Cloud.
-   Eight services, single Postgres with eight schemas, Pub/Sub + Cron native.
+   Eight domain services (1:1 with the eight schemas), single Postgres with
+   eight schemas, Pub/Sub + Cron native. Plus a separate zero-API `db` service
+   (no schema of its own) that owns migrations + the sole `sqldb.NewDatabase`
+   call — so there are 9 Encore service packages total = 8 domain + 1 `db`.
 2. **`apps/web/`** — Astro 5 frontend on Cloudflare Pages with `line://ui`
    headless Web Components. Astro Actions act as a BFF; the browser never
    touches Encore directly.
@@ -55,7 +58,7 @@ source of truth. Postgres stores everything. Go computes everything.
 ```
 unblock/
 ├── apps/
-│   ├── api/                        # Encore Go backend (8 services, 1 Postgres, 8 schemas)
+│   ├── api/                        # Encore Go backend (8 domain services + zero-API db migration-owner, 1 Postgres, 8 schemas)
 │   └── web/                        # Astro 5 + line-ui (BFF via Astro Actions)
 ├── crates/                         # Rust workspace: unblock-code (AST CLI) + unblock-plugin (m-a renderer)
 ├── docs/
