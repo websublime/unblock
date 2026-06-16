@@ -9,6 +9,10 @@
 - 2026-06-04 — §5.2.2 + §1 + §6.2 contracts table + §3.x repo-tree + §11 traceability: the v1.0 MCP tool inventory is reconciled from **18 → 27** in lockstep with the **P01 round-16 amendment** (`docs/specs/01-spec-backend-mvp.md`, beads `unblock-tv8.71` / `.74` / `.75`). P01 grows from 14 → 23 (adds `promote`, four milestone tools, four label tools); v1.0 grows to 27 (23 P01 + 4 memory at P02). Provenance: this edit exists solely to keep the Stage-1 architecture inventory identical to the P01 phase spec — no architectural decision changed, only the tool count and names. The P01-round-16 `0120_mcp_issued_to_user_notnull` migration is noted in the §11 P01 row.
 - 2026-06-11 — §9.4.3 + §11 P01 row: P01-round-16 lockstep drift closure (surfaced by `/investigate` on bead `unblock-tv8.75`, the label-registry MCP tools). The `workitems.labels` DDL in §9.4.3 gained an `updated_at timestamptz NOT NULL DEFAULT now()` column to match the phase-spec `Label.UpdatedAt` struct field (which always declared it) — the original `0040_workitems.up.sql` omitted it, a genuine contradiction. Resolution DECIDED by Miguel: ADD the column (the registry is mutable via MCP Tool 22 `update_label`, and `items` / `milestones` / `comments` all carry `updated_at`), via the new up-only migration `0130_workitems_labels_updated_at`, noted in the §11 P01 row alongside `0120`. Provenance-only architectural sync — no architectural decision beyond the column addition. Status remains APPROVED.
 - 2026-06-11 — §9.4.6 + §11 P01 row + 2026-06-04 changelog entry: P01-round-16 lockstep drift closure (surfaced by `/investigate` on bead `unblock-tv8.73`). The `mcp.api_keys.issued_to_user` DDL in §9.4.6 was still nullable with `ON DELETE SET NULL` and described as an org-level service key; it is brought into lockstep with the P01 round-16 contract — NOT NULL, FK `ON DELETE CASCADE`, with the audit-survival note (`mcp.tool_calls.api_key_id` is `ON DELETE SET NULL`, so tool-call history survives user deletion). The migration name is also corrected `0110` → `0120` here and in the §11 P01 row (slot `0110` is held by the committed `0110_mcp_warning_codes` migration, bead `unblock-tv8.63`). Provenance-only architectural sync — no architectural decision changed. Status remains APPROVED.
+- 2026-06-16 — §11 P02 + P05 rows: P02-plan traceability reconciliation (surfaced authoring `docs/plans/02-plan-backend-complete.md`; user decisions Q1–Q6 resolved 2026-06-16). Four §11 corrections, all provenance-only — no architectural decision changed: (1) **boards service code moves P02 → P05.** The P02 row's `apps/api/boards` component is removed; the P05 row gains `apps/api/boards` (saved-view CRUD service code), with a note that the boards *schema* (§9.4.7) already landed in P01 so P05 ships service code only. Saved-view persistence has no consumer until the Astro web client (P05). (2) **`apps/api/memory` service code added to the P02 row** — the Remember/Recall/List/Forget RPCs + always-on sanitiser are a net-new P02 deliverable and were missing from the component list. (3) **P02 migration reference corrected from "§9.4.5 + §9.4.7" to the additive-only reality** — all eight §9.4.x base schemas land in P01 (per the P01-row resolution and `01-plan` §2.1), so P02 ships only *new forward* migrations (the §9.4.5/§9.4.7 base-schema reference in the P02 row was stale/self-contradictory against the P01 row's "all eight schemas land in P01"). The exact P02 migration files (`memory.sanitiser_events` AR-14, the `forget` soft-delete column on `memory.entries`, the providers payload-digest/retention additions) are enumerated in `02-spec` after research. Status remains APPROVED.
+- 2026-06-16 — §5.2 + §3.x repo-tree + §9.4 migration-ordering note + §9.4.6 mcp note + §13 AR-15: migration-owner reconciliation (auth → db), aligning the SPEC with the committed code per commit `b8035b7`. The migration-owner service is no longer `auth`; it is a dedicated zero-API `db` service that declares the sole `sqldb.NewDatabase("unblock", …)` call in the workspace and ships the canonical migration set under `apps/api/db/migrations/`. Every domain service (`auth`, `org`, `workitems`, `deps`, `providers`, `mcp`, `boards`, `memory`) is an equal consumer via the canonical `BindDB` late-bind hook invoked from `db`'s `init()`; no domain service calls `sqldb.Named`/`sqldb.NewDatabase` at package init (CLAUDE.md Coding Standards already mandate `apps/api/db/`). All former auth-directory migration references are retargeted to `apps/api/db/migrations/`. Provenance-only — no architectural decision changed, the SPEC is being brought into lockstep with already-committed code. Status remains APPROVED.
+- 2026-06-16 — §5.2.2 tool-count self-contradiction fix: the inventory preamble previously asserted `verify_can_transition` + `meta_catalogue` "count as part of the inventory", contradicting the "Operational primitives" subsection and §11 (which classify them as operational primitives that do NOT count toward the 27). The preamble is corrected: the 27 counted tools include `set_state` (#13) and `get_state` (#14); `verify_can_transition` and `meta_catalogue` are first-class operational primitives but do NOT count toward the 27. Provenance-only — no architectural decision changed; the inventory of 27 is unchanged. Status remains APPROVED.
+- 2026-06-16 — §5.2 heading + preamble + §13 decision row 2 + acceptance checklist: service-count framing disambiguation surfaced by the migration-owner (auth → db) reconciliation in the preceding 2026-06-16 entry. The "8 services / 8 schemas / 8:8" framing is clarified to refer specifically to the **8 domain services** that map 1:1 to the 8 schemas; the dedicated zero-API `db` migration-owner service (which owns no schema, holds the sole `sqldb.NewDatabase("unblock", …)` call + all `apps/api/db/migrations/`, and late-binds every domain handle via `BindDB`) is a **9th** Encore service package outside the 8:8 count — so the repository has **9 service dirs = 8 domain + 1 `db` infra**. The 8:8 domain decomposition decision (§5.2.1) is **unchanged and not weakened**; only the total service-package count is made unambiguous. Provenance-only — no architectural decision changed. Status remains APPROVED.
 **Source PRD:** [docs/PRD.md](./PRD.md) (APPROVED, 2026-05-07)
 **Companion:** [docs/MANIFESTO.md](./MANIFESTO.md) (APPROVED, 2026-05-07)
 **Carries forward verbatim:** [docs/code-cli/plan.md](./code-cli/plan.md), [docs/code-cli/spec.md](./code-cli/spec.md), [docs/code-cli/research.md](./code-cli/research.md)
@@ -244,6 +248,8 @@ unblock/
 │   ├── api/                        # Go (Encore) backend — P01 + P02
 │   │   ├── encore.app
 │   │   ├── go.mod
+│   │   ├── db/                     # dedicated zero-API migration-owner service (sole sqldb.NewDatabase("unblock") + canonical migrations + every <service>.BindDB(DB))
+│   │   │   └── migrations/         # canonical migrations realising §9.4 DDL
 │   │   ├── auth/                   # auth service (OAuth2+PKCE, API keys, sessions)
 │   │   ├── org/                    # org / project / RBAC service
 │   │   ├── workitems/              # work items, comments, labels, milestones
@@ -254,7 +260,6 @@ unblock/
 │   │   ├── boards/                 # kanban / saved-view persistence
 │   │   ├── memory/                 # scoped memory service (4 MCP tools)
 │   │   ├── public/                 # the public endpoints (FR-12, 2 at v1.0)
-│   │   ├── migrations/             # canonical migrations realising §9.4 DDL
 │   │   └── shared/                 # cross-service types, errors, RBAC helpers
 │   └── web/                        # Astro 5 + line-ui frontend — P05 (v1.1)
 │       ├── astro.config.mjs
@@ -343,14 +348,25 @@ Postgres if Encore ever blocks us.
   every product change in Rust is ~2× the Go equivalent at this product
   stage.
 
-### 5.2 Service decomposition (8 services, 8 schemas, 1 database)
+### 5.2 Service decomposition (8 domain services, 8 schemas, 1 database; +1 zero-API `db` migration-owner service)
 
-The eight services map 1:1 to the eight schemas declared in FR-1 (logical
-ownership: each service is the only writer to its schema). **This 8:8 logical
-mapping is locked** (Manifesto Principle 4: orthogonal deliverables applies
-intra-backend too — `boards`, `mcp`, and `memory` stay separate). Cross-service
-queries happen via Encore RPC; **no service reads another service's tables
-directly** (this is enforced by Encore's per-service DB binding).
+The eight **domain** services map 1:1 to the eight schemas declared in FR-1
+(logical ownership: each service is the only writer to its schema). **This 8:8
+logical mapping is locked** (Manifesto Principle 4: orthogonal deliverables
+applies intra-backend too — `boards`, `mcp`, and `memory` stay separate).
+Cross-service queries happen via Encore RPC; **no service reads another
+service's tables directly** (this is enforced by Encore's per-service DB
+binding).
+
+The "8 services / 8 schemas / 8:8" framing throughout this SPEC refers
+specifically to these **8 domain services**. There is, in addition, a
+dedicated zero-API **`db` service** (which owns no schema of its own) that
+holds the sole `sqldb.NewDatabase("unblock", …)` call and all migrations under
+`apps/api/db/migrations/`, and late-binds every domain service's handle via
+`BindDB` (see the migration-ownership subsection immediately below). Counting
+it, the repository contains **9 Encore service packages total = 8 domain
+services (1:1 with schemas) + 1 zero-API `db` infra service**. The `db` service
+sits outside the 8:8 domain decomposition and does not weaken it.
 
 **Migration ownership (research C2, CONTRADICTED — corrected).** Encore's
 database primitive is **per-service, not per-schema**: per the Encore docs,
@@ -361,36 +377,46 @@ contribute migration files. Therefore the eight schemas cannot ship as eight
 service-local migrations directories — they must live under a single
 **migration-owner service**.
 
-We designate **`auth` as the migration-owner service**. Rationale:
+We designate a dedicated zero-API **`db` service as the migration-owner
+service**. Rationale:
 
-- `auth` is the bottom of the dependency graph in §9.4.0 — every other schema
-  has FKs into `auth.users` (or transitively via `org`), and no schema has a
-  FK pointing **into** `auth`. Migrations starting from `auth` therefore
-  satisfy FK ordering naturally.
-- `auth` is small and stable; piggy-backing the canonical migrations on it
-  does not couple migration cadence to a high-churn service.
-- It is the lowest service Encore must deploy first regardless, so the
-  deploy-ordering implication (below) costs nothing extra.
+- A purpose-built `db` service owns nothing but the canonical database
+  resource: it declares the sole `sqldb.NewDatabase("unblock", …)` call in
+  the workspace and ships the migration set. No domain service's surface is
+  coupled to the lifecycle of schemas it does not consume — `auth` no longer
+  carries DDL for `org` / `workitems` / `deps` / `providers` / `mcp` /
+  `boards` / `memory`.
+- Migrations are still authored in `§9.4.0` FK order (`auth` first), so FK
+  ordering is satisfied naturally regardless of which service owns the
+  directory.
+- The `db` service is zero-API and stable; piggy-backing the canonical
+  migrations on it does not couple migration cadence to any high-churn
+  domain service.
 
 **Concrete shape.** All canonical-ordered SQL migration files for **all
 eight schemas** in §9.4.0 order live under
-`apps/api/auth/migrations/NNNN_<descr>.up.sql`. The `auth` service is the
+`apps/api/db/migrations/NNNN_<descr>.up.sql`. The `db` service is the
 only caller of `sqldb.NewDatabase("unblock", sqldb.DatabaseConfig{Migrations:
-"./migrations"})` — it owns the named handle. The other seven services
-(`org`, `workitems`, `deps`, `providers`, `mcp`, `boards`, `memory`)
-declare `var db = sqldb.Named("unblock")` to obtain the same DB handle for
-their queries. Each service still writes only to its logical schema; Encore's
-per-service DB binding plus the `pkg/rbac` typed query helper (§5.6) reject
-cross-schema writes at compile time.
+"./migrations"})` — it owns the named handle. Every domain service
+(`auth`, `org`, `workitems`, `deps`, `providers`, `mcp`, `boards`, `memory`)
+is an equal consumer: each declares `var db *sqldb.Database` + a
+`BindDB(d *sqldb.Database)` late-bind hook, and `db`'s package `init()`
+invokes `<service>.BindDB(DB)` for every consumer (the canonical BindDB
+pattern; domain services MUST NOT call `sqldb.Named`/`sqldb.NewDatabase` at
+package init — both panic at package-load outside the encore CLI). Each
+service still writes only to its logical schema; Encore's per-service DB
+binding plus the `pkg/rbac` typed query helper (§5.6) reject cross-schema
+writes at compile time.
 
 **Deploy-ordering implication (new architectural risk AR-15).** Because
-`auth` owns migrations and every other service depends on schemas created
-by those migrations, **`auth` must reach a healthy state (migrations applied)
-before any other service that runs queries against `org`, `workitems`,
-`deps`, `providers`, `mcp`, `boards`, or `memory` can serve traffic**.
-Encore handles this automatically through its dependency graph: a service
-that calls `sqldb.Named("unblock")` implicitly depends on the service that
-defined `unblock`, and Encore deploys in dependency order. The architecture
+the `db` service owns migrations and every domain service depends on schemas
+created by those migrations, **the `db` service must reach a healthy state
+(migrations applied) before any service that runs queries against `auth`,
+`org`, `workitems`, `deps`, `providers`, `mcp`, `boards`, or `memory` can
+serve traffic**. Encore handles this automatically through its dependency
+graph: a service whose handle is bound to the `unblock` database implicitly
+depends on the service that defined `unblock` (the `db` service), and Encore
+deploys in dependency order. The architecture
 records this as AR-15 in §13 so future contributors do not collapse the
 ordering guarantee into a "best effort" assumption.
 
@@ -454,9 +480,11 @@ The user reviewed and locked this 8:8 decomposition. Isolation > RPC overhead:
 
 PRD FR-8 promises 27 tools at v1.0. The inventory below pins names and
 one-line descriptions. P01 ships **23**, P02 adds the **4** memory tools.
-The state-machine accessors (`set_state`, `get_state`, `verify_can_transition`)
-and `meta_catalogue` are **operational primitives** that count as part of
-the inventory — they are first-class agent-facing tools, not internal helpers.
+The state-machine accessors `set_state` (#13) and `get_state` (#14) are
+counted agent-facing tools within the 27. `verify_can_transition` and
+`meta_catalogue` are **operational primitives** — first-class, not internal
+helpers, but they do **not** count toward the 27 (they are hook-/renderer-
+facing sub-calls; see "Operational primitives" below and §11).
 Reconciliation note: PRD FR-8 lists the categories ("work-item CRUD,
 dependencies, ready, claim, close, comment trail, prime, etc.") plus the
 round-16 additions; PRD §8 P02 says "+4 memory tools = 27 total". This list
@@ -499,10 +527,10 @@ reconciles the two.
 | 26 | `memories` | List memory entries by scope with pagination; cheap dashboard read |
 | 27 | `forget` | Soft-delete a memory entry (audit-trail preserved via `deleted_at`-equivalent) |
 
-##### Operational primitives (counted within the 27 above; cross-references)
+##### Operational primitives (cross-references)
 
 - `set_state` (#13) and `get_state` (#14) are the canonical state-machine
-  accessors. `set_state` is the one tool subject to all of Layer 1's BLOCK
+  accessors **and count within the 27 above**. `set_state` is the one tool subject to all of Layer 1's BLOCK
   conditions (§7.5).
 - `verify_can_transition` is **not** a separate top-level MCP tool — it is a
   read-only sub-call exposed via the same SSE channel for the Layer-2 hook
@@ -1191,9 +1219,9 @@ the schema must update this section.
   old one. Documented as AR-7 in §13.
 - **Migration ordering:** schemas migrate in this order due to cross-schema
   FK direction. **All eight schemas migrate from a single owner directory**
-  (`apps/api/auth/migrations/`, see §5.2 for the rationale — Encore's
-  database primitive is per-service, so one service owns the migrations
-  directory for the whole DB):
+  (`apps/api/db/migrations/`, see §5.2 for the rationale — Encore's
+  database primitive is per-service, so the dedicated zero-API `db` service
+  owns the migrations directory for the whole DB):
   1. `auth` (no incoming FKs from other schemas).
   2. `org` (FKs into `auth` only).
   3. `workitems` (FKs into `org` and `auth`).
@@ -1207,7 +1235,7 @@ the schema must update this section.
   Files for different logical schemas are grouped by the §9.4.0 step number
   (e.g. `0010_bootstrap.up.sql` for `CREATE EXTENSION` declarations,
   `0020_auth.up.sql`, `0030_org.up.sql`, …, `0090_memory.up.sql`) and
-  share the single `auth/migrations/` directory. Adding a column to (e.g.)
+  share the single `db/migrations/` directory. Adding a column to (e.g.)
   `workitems` in a later phase ships as a new file `0095_workitems_add_…
   .up.sql` under the same directory.
 - **Required Postgres extensions** (declared once, in the bootstrap migration):
@@ -1807,11 +1835,12 @@ CREATE INDEX mappings_drift_idx
 
 > **Migration / DB-handle ownership note (research C2).** The `mcp` service
 > does **not** own the migration files for its schema. Per §5.2, **all eight
-> schemas' migrations live under `apps/api/auth/migrations/`** because
-> Encore's database primitive is per-service and only one service can own
-> the migrations directory for a DB. The `mcp` service obtains its DB
-> handle by calling `sqldb.Named("unblock")` (the database name `auth`
-> registered in §5.2's migration-owner discussion) and writes only to the
+> schemas' migrations live under `apps/api/db/migrations/`** because
+> Encore's database primitive is per-service and only the dedicated zero-API
+> `db` service owns the migrations directory for a DB. The `mcp` service
+> obtains its DB handle via the canonical `mcp.BindDB(DB)` late-bind hook
+> invoked from the `db` service's `init()` (the `unblock` database is
+> registered by §5.2's `db` migration-owner) and writes only to the
 > `mcp.*` tables defined below. Writes to `mcp.api_keys.expires_at` and
 > `mcp.api_keys.revoked_at` etc. are mediated by the `pkg/rbac` typed query
 > helper (§5.6); cross-schema writes from `mcp` to (e.g.) `workitems.*`
@@ -2271,10 +2300,10 @@ release candidate must additionally pass the cross gates.
 | Phase | Components touched | Manifesto coverage | Exit criterion (per PRD §8) |
 |---|---|---|---|
 | **P01 — Backend MVP** | `apps/api/auth` (incl. **migrations directory for all 8 schemas**, see §5.2), `org`, `workitems`, `deps`, `memory` (schema-only stub), `providers` (schema-only stub), `boards` (schema-only stub), `mcp` (23 tools per P01 round-16 — was 14; adds `promote`, four milestone tools, four label tools; Streamable HTTP transport per MCP spec 2025-06-18), `public/`; migrations §9.4.1–§9.4.8 + round-16 `0120_mcp_issued_to_user_notnull` + round-16 `0130_workitems_labels_updated_at` (all eight schemas land in P01 per the plan resolution; service code for `providers`/`boards`/`memory` is deferred to later phases per plan §2.1) | L1, L2, L3 (foundations), L5, L7 | Agent completes `prime → ready → claim → close` against a manually-seeded graph; cascade fires; cycle detection rejects offending edges |
-| **P02 — Backend complete** | `apps/api/providers` (webhook + sync), `apps/api/boards`, `mcp` (+4 memory tools = 27 total; P01 round-16 carried P01 to 23), Layer 1 state-transition validator, **`mcp.meta_catalogue` v1 + `verify_can_transition` v1** (operational primitives, §5.2.2); migrations §9.4.5 + §9.4.7 | L3 (provider events), L8 layer 1 | A GitHub repo can be linked, webhooks normalise into canonical work items, attempts to mark `done` without the required comment trail are rejected at the MCP boundary; `mcp.meta_catalogue` returns the live catalogue.json; `verify_can_transition` validates a candidate transition against the same Layer-1 validator |
+| **P02 — Backend complete** | `apps/api/providers` (webhook + sync), `apps/api/memory` (Remember/Recall/List/Forget RPCs + always-on sanitiser), `mcp` (+4 memory tools = 27 total; P01 round-16 carried P01 to 23), Layer 1 state-transition validator, **`mcp.meta_catalogue` v1 + `verify_can_transition` v1** (operational primitives, §5.2.2); **additive forward migrations only** — all eight §9.4.x base schemas already landed in P01 (see P01 row), so P02 adds only new higher-numbered files (the `memory.sanitiser_events` audit table AR-14, the `forget` soft-delete column on `memory.entries`, the providers payload-digest/retention additions), exact files enumerated in `02-spec` after research | L3 (provider events), L8 layer 1 | A GitHub repo can be linked, webhooks normalise into canonical work items, attempts to mark `done` without the required comment trail are rejected at the MCP boundary; `mcp.meta_catalogue` returns the live catalogue.json; `verify_can_transition` validates a candidate transition against the same Layer-1 validator |
 | **P03 — AST CLI v1.0.0** | `crates/unblock-indexer-core`, `unblock-indexer`, `unblock-code` | L6 | All 9 HARD gates in code-cli/plan §14.1 pass on a fresh clone; ROI harness publishes raw logs + per-flow medians as a release artefact |
 | **P04 — Plugin renderer** | `crates/unblock-plugin` **consumes the P02-shipped `mcp.meta_catalogue` v1** at build time (and embeds `crates/unblock-plugin/data/catalogue.json` via `include_str!`); registers the `verify-state` hook against `mcp.verify_can_transition` (also shipped in P02) | L8 layer 2 + 3 (full Law 8) | Pipeline-bypass attempt is rejected by MCP (Layer 1, P02), flagged by the post-dispatch hook (Layer 2), and refused by the agent prompt's BLOCK condition (Layer 3); all three layers agree; catalogue drift CI test green |
-| **P05 — Astro web (v1.1)** | `apps/web/` (Astro Actions BFF including `auth/[provider]/callback`, kanban, graph, roadmap, comments) | L4 | A developer authenticates, sees the same graph the agent sees, and acts on it through the BFF without the browser ever obtaining Encore credentials |
+| **P05 — Astro web (v1.1)** | `apps/api/boards` (saved-view CRUD service code — the boards *schema* §9.4.7 already landed in P01, so P05 ships service code only), `apps/web/` (Astro Actions BFF including `auth/[provider]/callback`, kanban, graph, roadmap, comments) | L4 | A developer authenticates, sees the same graph the agent sees, and acts on it through the BFF without the browser ever obtaining Encore credentials; saved views persist via the `boards` service |
 
 ---
 
@@ -2329,7 +2358,7 @@ section calls out the ones the architecture choices specifically introduce).
 | AR-12 | **Webhook replay protection.** GitHub may re-deliver the same `X-GitHub-Delivery` id (manual replay, partition retry). Without dedup the `providers.events` audit grows unbounded and the normaliser may produce duplicate work-item updates. | The `events_delivery_uniq UNIQUE (provider, delivery_id)` constraint on `providers.events` (§9.4.5) is the structural mitigation — duplicate inserts fail at the database, the webhook handler returns 200 OK on a recognised duplicate so GitHub stops retrying, and the normaliser is never called twice for the same delivery id. The HMAC signature check (FR-12) gates whether we accept the payload at all; the unique constraint gates whether we process it. Both layers must hold for a webhook to mutate state. |
 | AR-13 | **Encore Cloud free-tier ceiling (PRD R-1 cross-reference).** v1.0 launches on the free tier; concrete ceilings affect the M-1 latency target. | Documented ceilings the architecture must respect: **Pub/Sub message rate** (rate limited per project on the free tier — measured ceiling lands in the P02 capacity-planning gate before scale-out); **Postgres connection cap** (free-tier shared-cluster connection limit; `auth.Validate` and the cascade subscriber are the two largest pool consumers — both must use Encore's pooled DB binding rather than a fresh connection per call); **cold-start latency** (free-tier scale-to-zero behaviour can add seconds to a cold MCP `prime` call — mitigated by a synthetic warmer hitting `mcp.meta_catalogue` every N minutes from the same project). The Encore-lock-in exit (AR-1) presupposes that any of these ceilings becomes binding before scale-out is possible. M-1 is measured warm; cold-start is documented as an outlier class for the launch period. |
 | AR-14 | **Memory secret-sanitiser false negatives (PRD R-6 architectural mitigation).** The sanitiser is best-effort regex; novel credential shapes will slip through. | Three-part mitigation. (a) **Audit-on-detect:** every sanitiser hit (positive or warning-only) is recorded in a `memory.sanitiser_events` audit table (added in P02 alongside the memory service) so we can review what *was* caught and tune patterns; (b) **periodic re-scan:** a background job re-runs the current pattern set against existing `value_enc` rows on every pattern-set update — re-encrypting any row whose decrypted plaintext now matches a pattern; (c) **scoped re-encryption:** the re-scan operates per-scope (org/project/user) so it can be paused for a tenant if the cost is too high in one project. The sanitiser remains best-effort by design (NFR-7); these mitigations ensure that a missed pattern today is recoverable tomorrow. |
-| AR-15 | **Migration-owner service deploy ordering (research C2).** All eight schemas' migrations are owned by the `auth` service (§5.2). Any service whose handlers query a schema other than its own depends on `auth` having reached a healthy state first; if Encore deploys an out-of-order subset (e.g. `workitems` boots before `auth` finishes its bootstrap migration), queries fail with `relation does not exist` errors. | Encore handles this automatically through its dependency graph: a service that calls `sqldb.Named("unblock")` implicitly depends on the service that defined the database (`auth`), and Encore's deployer sequences services in dependency order. The architecture pins `auth` as the migration-owner explicitly (§5.2) so the dependency graph is deterministic. CI gate: a "migrations only" job runs `auth` to completion against an empty database before any service-test job starts (P01 plan A-6). The deploy-ordering invariant is asserted in the exit-criterion harness (E-4) by booting the local Encore emulator from a clean state and confirming `auth` reaches healthy first. |
+| AR-15 | **Migration-owner service deploy ordering (research C2).** All eight schemas' migrations are owned by the dedicated zero-API `db` service (§5.2). Any service whose handlers query the database depends on `db` having reached a healthy state first; if Encore deploys an out-of-order subset (e.g. `workitems` boots before `db` finishes its bootstrap migration), queries fail with `relation does not exist` errors. | Encore handles this automatically through its dependency graph: a service whose handle is bound to the `unblock` database implicitly depends on the service that defined the database (the `db` service), and Encore's deployer sequences services in dependency order. The architecture pins the `db` service as the migration-owner explicitly (§5.2) so the dependency graph is deterministic. CI gate: a "migrations only" job runs the `db` service to completion against an empty database before any service-test job starts (P01 plan A-6). The deploy-ordering invariant is asserted in the exit-criterion harness (E-4) by booting the local Encore emulator from a clean state and confirming the `db` service reaches healthy first. |
 | AR-16 | **Streamable HTTP cold-start latency on Encore Cloud edge proxy (research C6 + AR-13).** The MCP transport is `POST /mcp` + `GET /mcp` (Streamable HTTP per the 2025-06-18 spec). On Encore Cloud's free tier, the edge proxy may scale to zero between requests; the first MCP `POST /mcp` after an idle period adds cold-start latency (potentially seconds) on top of the warm-cache budget — directly threatening NFR-1 / M-1 (`prime → ready → claim` p99 < 2 s). The legacy SSE transport had the same risk; Streamable HTTP does not introduce a new class of risk but the per-call shape (a fresh `POST` for every tool call rather than a single long-lived SSE stream) means more cold-start opportunities. | Three-part mitigation. (a) **NFR-1 measured warm only.** The latency harness (P01 plan E-2) explicitly carves out cold-start outliers; warm-cache means: pool established, identity validated, no scale-to-zero rehydration in the budget. Documented as part of the M-1 measurement methodology. (b) **Synthetic warmer.** A small Encore cron (`mcp-warmer`, every N minutes) hits `mcp.meta_catalogue` from the same project to keep the MCP service warm during business hours; the same warmer pre-establishes a Postgres pooled connection. (c) **Server-side event-stream response mode.** For long-running tools (none required at v1.0), Streamable HTTP's `text/event-stream` response shape lets a single `POST /mcp` keep the connection open while the tool runs — the cold-start cost is amortised over the tool's full execution. The P01 spec pins which tools (if any) opt into the streaming response mode and documents the keep-alive heartbeat interval for `GET /mcp` long-poll connections. Cold-start under Encore Cloud is a P02 ops measurement task (P01 acceptance is local-emulator only per plan §6 Q6). |
 
 ---
@@ -2341,7 +2370,7 @@ section calls out the ones the architecture choices specifically introduce).
 | # | Question | Resolution |
 |---|---|---|
 | 1 | Repository layout (`apps/api/`, `apps/web/`, `crates/`, `temp/rust-v1/` archived) | **CONFIRMED** — see §4. `temp/rust-v1/` gitignored. |
-| 2 | 8 services × 8 schemas (1:1) vs collapsing some | **CONFIRMED 8:8** — see §5.2.1. Isolation > RPC overhead (Manifesto Principle 4 applies intra-backend). |
+| 2 | 8 services × 8 schemas (1:1) vs collapsing some | **CONFIRMED 8:8** — see §5.2.1. Isolation > RPC overhead (Manifesto Principle 4 applies intra-backend). The 8:8 counts **domain** services only; the zero-API `db` migration-owner service (§5.2) is a 9th package outside this count, so the repo has **9 service dirs** = 8 domain + 1 `db`. |
 | 3 | Encore Cloud lock-in | **CONFIRMED** — locked from prior strategic discussion. AR-1 accepted with NATS + standard Postgres exit path. |
 | 4 | Plugin catalogue export shape | **CONFIRMED** — JSON checked-in at `crates/unblock-plugin/data/catalogue.json` + compile-time embed via `include_str!`. Backend MCP `meta.catalogue` tool exposes the same catalogue live. CI drift test enforces equality. See §7.2. |
 | 5 | Public endpoint paths | **CONFIRMED + CORRECTED** — `/auth/callback` was a PRD bug; OAuth callback is on the **Astro origin** as an Astro Action, not Encore. v1.0 Encore public surface = 2 logical endpoints (`/webhooks/github`, `/mcp` over Streamable HTTP per the 2025-06-18 spec — `POST` and `GET` on the same path). v1.1 adds `/webhooks/gitlab`. See §5.3, §10.1. (Round-3 correction: round-2 referenced `GET /mcp/sse`, the deprecated 2024-11-05 transport; round-3 research C6 contradicted that and Streamable HTTP is now the canonical shape.) |
@@ -2358,7 +2387,8 @@ This document moves from DRAFT to APPROVED when:
 - [x] All eight open questions in §14 are answered.
 - [x] The user confirms the four-deliverable shape (backend, AST CLI,
       plugin, web).
-- [x] The user confirms the 8-schema / 8-service Encore decomposition.
+- [x] The user confirms the 8-schema / 8-service Encore decomposition (+ the
+      zero-API `db` migration-owner service — 9 packages total).
 - [x] The user confirms the polyglot monorepo layout.
 - [x] The user confirms the public-endpoint inventory (2 at v1.0, +1 at
       v1.1) and Bearer-key MCP auth model; OAuth callback is on Astro.
