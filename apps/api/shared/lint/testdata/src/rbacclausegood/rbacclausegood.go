@@ -141,3 +141,63 @@ func goodUnrelatedFor(id rbac.Identity, userTable string) {
 	// this out.
 	_ = For[row](id, userTable)
 }
+
+// -- rbac.ScopedQuery.Columns (every variadic column arg) --------------
+//
+// Each variadic column argument must be a compile-time string constant.
+// The shapes mirror the Where/For good cases; the analyzer must NOT
+// flag any of them.
+
+// Plain double-quoted string literals — the canonical form.
+func goodColumnsLiterals(ctx context.Context, id rbac.Identity) ([]row, error) {
+	return rbac.For[row](id, "workitems.items").
+		Columns("id", "org_id").
+		Where("status = $1", "Ready").
+		Run(ctx)
+}
+
+// Back-quoted (raw) string literal as a column.
+func goodColumnsRawLiteral(ctx context.Context, id rbac.Identity) ([]row, error) {
+	return rbac.For[row](id, "workitems.items").
+		Columns(`id`).
+		Run(ctx)
+}
+
+// Package-level untyped string constant — itemsTable is reused as a
+// stand-in; a comma-joined column-list const is also a single constant
+// (mirrors the production `Columns(itemColumnList)` call shape).
+const columnList = "id, org_id, title"
+
+func goodColumnsNamedConst(ctx context.Context, id rbac.Identity) ([]row, error) {
+	return rbac.For[row](id, "workitems.items").
+		Columns(columnList).
+		Run(ctx)
+}
+
+// Constant expression composed of two string constants as a column.
+const colBase = "org"
+const colTail = "_id"
+const composedColumn = colBase + colTail
+
+func goodColumnsComposedConst(ctx context.Context, id rbac.Identity) ([]row, error) {
+	return rbac.For[row](id, "workitems.items").
+		Columns(composedColumn).
+		Run(ctx)
+}
+
+// Parenthesised literal as a column — unparen strips the wrapper.
+func goodColumnsParenthesisedLiteral(ctx context.Context, id rbac.Identity) ([]row, error) {
+	return rbac.For[row](id, "workitems.items").
+		Columns(("id")).
+		Run(ctx)
+}
+
+// A `Columns` method on a different type with the same name MUST NOT
+// false-positive — receiver-type resolution filters by package path.
+func (u *unrelatedBuilder) Columns(_ ...string) *unrelatedBuilder { return u }
+
+func goodUnrelatedColumns(b *unrelatedBuilder, userCol string) {
+	// userCol is runtime — would be flagged if the analyzer matched by
+	// name. Receiver-type resolution must filter this out.
+	b.Columns(userCol)
+}

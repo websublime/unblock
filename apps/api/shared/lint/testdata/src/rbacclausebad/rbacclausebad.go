@@ -107,3 +107,58 @@ func badForSelectorTable(ctx context.Context, id rbac.Identity, t tableSpec) ([]
 						Where("status = $1", "Ready").
 						Run(ctx)
 }
+
+// -- rbac.ScopedQuery.Columns (every variadic column arg) --------------
+//
+// Columns is variadic and has no bind channel: EVERY argument is a SQL
+// identifier sink, so each runtime value must flag individually. The
+// shapes mirror the Where bad cases.
+
+// Var as a column argument — runtime value, must flag.
+func badColumnsVar(ctx context.Context, id rbac.Identity, userCol string) ([]row, error) {
+	return rbac.For[row](id, "workitems.items").
+		Columns(userCol). // want `rbac\.Columns: every column argument must be a Go string literal or untyped string constant`
+		Run(ctx)
+}
+
+// Runtime concatenation of a column identifier — must flag.
+func badColumnsConcat(ctx context.Context, id rbac.Identity, suffix string) ([]row, error) {
+	return rbac.For[row](id, "workitems.items").
+		Columns("id_" + suffix). // want `rbac\.Columns: every column argument must be a Go string literal or untyped string constant`
+		Run(ctx)
+}
+
+// fmt.Sprintf return as a column — runtime value, must flag.
+func badColumnsSprintf(ctx context.Context, id rbac.Identity, col string) ([]row, error) {
+	return rbac.For[row](id, "workitems.items").
+		Columns(fmt.Sprintf("%s", col)). // want `rbac\.Columns: every column argument must be a Go string literal or untyped string constant`
+		Run(ctx)
+}
+
+// Function-return as a column — runtime value, must flag.
+func buildColumn() string { return "id" }
+
+func badColumnsFuncReturn(ctx context.Context, id rbac.Identity) ([]row, error) {
+	return rbac.For[row](id, "workitems.items").
+		Columns(buildColumn()). // want `rbac\.Columns: every column argument must be a Go string literal or untyped string constant`
+		Run(ctx)
+}
+
+// Struct-field selector as a column — runtime value, must flag.
+type colSpec struct {
+	Name string
+}
+
+func badColumnsSelector(ctx context.Context, id rbac.Identity, c colSpec) ([]row, error) {
+	return rbac.For[row](id, "workitems.items").
+		Columns(c.Name). // want `rbac\.Columns: every column argument must be a Go string literal or untyped string constant`
+		Run(ctx)
+}
+
+// A literal mixed with a runtime value — only the runtime arg must flag,
+// asserting per-argument granularity.
+func badColumnsMixed(ctx context.Context, id rbac.Identity, userCol string) ([]row, error) {
+	return rbac.For[row](id, "workitems.items").
+		Columns("id", userCol). // want `rbac\.Columns: every column argument must be a Go string literal or untyped string constant`
+		Run(ctx)
+}

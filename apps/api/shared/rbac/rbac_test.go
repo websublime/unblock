@@ -144,6 +144,81 @@ func TestWhere_EmptyClause(t *testing.T) {
 	}
 }
 
+// TestColumns_DefaultIsSelectStar confirms that a builder on which
+// Columns is never called keeps the default `SELECT *` projection, so
+// existing consumers (org.projects, the rbactest matrix rows) are
+// unaffected (unblock-8xb.8).
+func TestColumns_DefaultIsSelectStar(t *testing.T) {
+	q := For[struct{ ID string }](fakeIdentity("org_alpha"), "workitems.items").
+		Where("id = $1", "itm_x")
+	sql, _ := q.build()
+	if !strings.HasPrefix(sql, "SELECT * FROM workitems.items WHERE ") {
+		t.Errorf("default projection not SELECT *: got %q", sql)
+	}
+}
+
+// TestColumns_ExplicitProjection confirms an explicit Columns call
+// narrows the SELECT list to the supplied ordered identifiers while
+// preserving the scope predicate and user clauses (unblock-8xb.8).
+func TestColumns_ExplicitProjection(t *testing.T) {
+	q := For[struct {
+		ID    string
+		OrgID string
+	}](fakeIdentity("org_alpha"), "workitems.items").
+		Columns("id", "org_id").
+		Where("id = $1", "itm_x")
+	sql, args := q.build()
+	wantSQL := "SELECT id, org_id FROM workitems.items WHERE workitems.items.org_id = $1 AND id = $2"
+	if sql != wantSQL {
+		t.Errorf("SQL mismatch:\n got %q\nwant %q", sql, wantSQL)
+	}
+	wantArgs := []any{"org_alpha", "itm_x"}
+	if len(args) != len(wantArgs) {
+		t.Fatalf("args len = %d, want %d (%v)", len(args), len(wantArgs), args)
+	}
+	for i, a := range args {
+		if a != wantArgs[i] {
+			t.Errorf("args[%d] = %v, want %v", i, a, wantArgs[i])
+		}
+	}
+}
+
+// TestColumns_SingleCommaJoinedString confirms the production call shape
+// `Columns(itemColumnList)` — a single comma-joined string constant —
+// is emitted verbatim into the projection (the variadic slice has one
+// element, so build's strings.Join is a no-op that preserves it).
+func TestColumns_SingleCommaJoinedString(t *testing.T) {
+	const list = "id, org_id, title"
+	q := For[struct{ ID string }](fakeIdentity("org_alpha"), "workitems.items").
+		Columns(list)
+	sql, _ := q.build()
+	if !strings.HasPrefix(sql, "SELECT id, org_id, title FROM workitems.items WHERE ") {
+		t.Errorf("comma-joined projection not preserved: got %q", sql)
+	}
+}
+
+// TestColumns_EmptyCall surfaces the no-columns programmer error at Run
+// time rather than emitting `SELECT  FROM`.
+func TestColumns_EmptyCall(t *testing.T) {
+	q := For[struct{ ID string }](fakeIdentity("org_alpha"), "workitems.items").
+		Columns()
+	_, err := q.Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "no columns") {
+		t.Fatalf("Run after empty Columns = %v, want no-columns error", err)
+	}
+}
+
+// TestColumns_BlankColumn surfaces a blank identifier as a programmer
+// error at Run time.
+func TestColumns_BlankColumn(t *testing.T) {
+	q := For[struct{ ID string }](fakeIdentity("org_alpha"), "workitems.items").
+		Columns("id", "   ")
+	_, err := q.Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "empty column identifier") {
+		t.Fatalf("Run after blank Columns = %v, want empty-identifier error", err)
+	}
+}
+
 // TestRenumberPlaceholders_NoPlaceholders is a unit-level guard for
 // the helper.
 func TestRenumberPlaceholders_NoPlaceholders(t *testing.T) {
