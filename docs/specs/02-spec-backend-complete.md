@@ -799,6 +799,26 @@ note at `matrix.go:182-188` spells out the gap. B-5 **EXTENDS** this:
   isolation predicate keys on `project_id = $1` / `user_id = $1` respectively,
   scoped through the caller's org membership.
 
+**`tsvector` projection constraint (round-18, bead `unblock-8xb.8`).** Any
+`rbac.For[T]` read of `memory.entries` — whether the production memory-service
+org-scope read (B-1/B-5) or the `rbactest` matrix read — MUST pass an explicit
+`.Columns(...)` projection that EXCLUDES the `ts_doc tsvector NOT NULL` column
+(`0090_memory.up.sql:29`). This is the general rule pinned in
+`01-spec-backend-mvp.md` §3.4 / §10.1 (round-17/18): `ts_doc` is delivered by
+the Encore pgx v5.7.6 runtime in BINARY format (OID 3614) with NO registered
+scan-plan into any Go scalar (`[]byte` included), so `SELECT *` over
+`memory.entries` fails `rows.Scan` on any populated result set on the Encore
+platform (the local emulator delivers text format and masks the defect — exactly
+the latent failure mode that blocked the P01 `workitems.items` reads). `ts_doc`
+is query-side only (the `recall` / `prime.memory_hints` `@@`/GIN predicate,
+§5.4.1/§5.5.1); no read path scans its value into Go. The `rbactest`
+`memory.entries` read at `rbactest_test.go:633` is corrected for this on the
+`unblock-8xb.8` branch (its phantom `memoryEntriesRow.TSDoc []byte` field is
+removed); the production memory-service reads introduced by B-1/B-5 MUST follow
+the same pattern from the outset, or they reintroduce this exact bug in
+production. The same rule applies to any future `rbac.For` read over
+`workitems.comments` (its `fts tsvector`).
+
 It is NOT net-new scaffolding (CG-4).
 
 ---
