@@ -470,9 +470,10 @@ func seedSide(ctx context.Context, db *sqldb.Database, fx *Fixture, orgLabel str
 	//        entries_size_chk.
 	//      - ts_doc is computed via to_tsvector('english', $N) in
 	//        the INSERT so pgx never needs a tsvector codec on the
-	//        bind side. The SELECT-side codec gap is handled by the
-	//        []byte typing of memoryEntriesRow.TSDoc (see
-	//        rbactest_test.go).
+	//        bind side. The SELECT-side codec gap is avoided entirely:
+	//        the memory.entries read passes .Columns(memoryEntriesColumnList)
+	//        which EXCLUDES ts_doc, so it is never projected/scanned
+	//        (unblock-8xb.8 round-18; see rbactest_test.go).
 	memEntryID, err := ulid.New()
 	if err != nil {
 		return fmt.Errorf("memory_entry ulid: %w", err)

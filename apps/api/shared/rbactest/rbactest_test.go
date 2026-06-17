@@ -358,12 +358,23 @@ func runAuthorizeOnlyTuple(t *testing.T, fx *Fixture, callerOrg, targetOrg, role
 
 // The per-table row types below (orgProjectsRow, orgMembersRow) are the
 // typed projections used by selectScopedOrgIDs to read each
-// KindOrgScoped table. The rbac.For builder issues `SELECT *`
+// KindOrgScoped table. By default the rbac.For builder issues `SELECT *`
 // (apps/api/shared/rbac rbac.go), so the suite cannot use a two-field
 // (id, org_id) row over a many-column table — the reflection scanner
 // would mismatch column count vs field count. Each row type therefore
 // mirrors its table's full column layout; the suite reads only OrgID and
 // the remaining fields exist solely to balance the column count.
+//
+// EXCEPTION (unblock-8xb.8 round-18): the two tables carrying a
+// `tsvector` column — workitems.items (fts) and memory.entries (ts_doc)
+// — pass an explicit `.Columns(...)` projection that EXCLUDES the
+// tsvector column instead of relying on `SELECT *`. The Encore pgx
+// runtime delivers tsvector in binary format (OID 3614) with no
+// scan-plan into any Go type, so projecting it fails any populated scan
+// (SPEC 01 §3.4 / §10.1 / §10.1.1 + SPEC 02 §5.6). Their row types
+// therefore OMIT the tsvector field and their declaration order matches
+// the corresponding *ColumnList const, not the raw `SELECT *` ordinals.
+// The other six tables carry no tsvector and stay on default `SELECT *`.
 //
 // (Earlier rounds described a single `scopedRow` projection here; that
 // type was inlined into the per-table row types below and no longer
@@ -402,13 +413,17 @@ type orgMembersRow struct {
 }
 
 // workitemsItemsRow mirrors workitems.items column order verbatim
-// per migration 0040_workitems.up.sql lines 46-135 + the trailing
-// `fts` tsvector column added by ALTER TABLE at lines 151-155
-// (28 fields total). rbac.For emits `SELECT *` and scans by ordinal
-// (apps/api/shared/rbac/rbac.go line 413), so the field count and
-// declaration order MUST match the schema's column declaration
-// order EXACTLY — including the trailing fts column. Field shapes
-// (text vs *text vs time.Time vs *time.Time vs []byte) match
+// per migration 0040_workitems.up.sql lines 46-135 (28 columns). The
+// read at selectScopedOrgIDs passes `.Columns(workitemsItemsColumnList)`
+// so the generated trailing `fts tsvector` column (added by ALTER TABLE
+// at lines 151-155) is DELIBERATELY NOT projected and therefore not a
+// field here: the Encore pgx runtime delivers tsvector in binary format
+// (OID 3614) with no scan-plan into any Go type, so projecting it would
+// fail any populated scan (SPEC 01 §3.4 / §10.1 / §10.1.1, unblock-8xb.8
+// round-18). rbac.For scans by ordinal (apps/api/shared/rbac/rbac.go),
+// so the field count and declaration order MUST match
+// workitemsItemsColumnList EXACTLY. Field shapes (text vs *text vs
+// time.Time vs *time.Time vs []byte) match
 // apps/api/workitems/helpers.go's itemRow type verbatim; the type
 // is re-declared here (not imported) so a drift between the suite
 // and the production scanner surfaces as a test failure instead of
@@ -446,15 +461,23 @@ type workitemsItemsRow struct {
 	CreatedAt           time.Time
 	UpdatedAt           time.Time
 	ClosedAt            *time.Time
-	// FTS is the generated tsvector column appended by ALTER TABLE
-	// in 0040_workitems.up.sql line 151-155. pgx v5.7 has no
-	// registered tsvector type, so the driver delivers the text
-	// representation as a raw byte slice. The field is unused
-	// downstream — it exists only to keep ordinal positions aligned
-	// with the migration so rbac.For's reflection scanner does not
-	// error on column count.
-	FTS []byte
 }
+
+// workitemsItemsColumnList is the explicit projection passed to
+// rbac.For[workitemsItemsRow] via `.Columns(...)` so the generated
+// `fts tsvector` column (0040_workitems.up.sql:151) is excluded — the
+// Encore pgx runtime delivers tsvector in binary format (OID 3614) with
+// no scan-plan into any Go type, so projecting it fails any populated
+// scan (SPEC 01 §3.4 / §10.1, unblock-8xb.8 round-18). It is a
+// package-level const literal so the no_rbac_dynamic_clause analyzer
+// accepts it (SPEC §11.3), mirroring the production itemColumnList.
+// Order MUST match workitemsItemsRow's field declaration order.
+const workitemsItemsColumnList = `id, org_id, project_id, milestone_id, parent_id, discovered_from_id,
+	type, title, body, status, priority, pipeline_stage,
+	agent_kind, impl_state, review_state, qa_state, pipeline_state,
+	severity, kind_of_finding, claimed_by_id, claimed_by_agent,
+	claimed_at, is_ready, milestone_assigned_at, milestone_assigned_by,
+	created_at, updated_at, closed_at`
 
 // depsCascadeEventsRow mirrors deps.cascade_events column order
 // verbatim per migration 0050_deps.up.sql lines 53-119 (10 columns).
@@ -516,12 +539,16 @@ type mcpAPIKeysRow struct {
 	RevokedAt    *time.Time
 }
 
-// memoryEntriesRow mirrors memory.entries column order verbatim per
-// migration 0090_memory.up.sql lines 13-45 (15 columns). The TSDoc
-// field at position 11 is the `ts_doc tsvector` column — pgx v5.7
-// has no registered tsvector codec, so it is typed as []byte (same
-// pattern as workitemsItemsRow.FTS). The value_enc bytea column at
-// position 9 is also []byte.
+// memoryEntriesRow mirrors the memory.entries columns projected by
+// memoryEntriesColumnList per migration 0090_memory.up.sql lines 13-45.
+// The read at selectScopedOrgIDs passes `.Columns(memoryEntriesColumnList)`
+// so the `ts_doc tsvector` column (0090_memory.up.sql:29) is DELIBERATELY
+// NOT projected and therefore not a field here: the Encore pgx runtime
+// delivers tsvector in binary format (OID 3614) with no scan-plan into
+// any Go type, so projecting it would fail any populated scan (SPEC 01
+// §3.4 / §10.1 / §10.1.1 + SPEC 02 §5.6, unblock-8xb.8 round-18). rbac.For
+// scans by ordinal, so the field count and declaration order MUST match
+// memoryEntriesColumnList EXACTLY. The value_enc bytea column is []byte.
 type memoryEntriesRow struct {
 	ID          string
 	Scope       string
@@ -534,11 +561,22 @@ type memoryEntriesRow struct {
 	ValueEnc    []byte
 	ValueSize   int
 	Tags        []string
-	TSDoc       []byte
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 	ExpiresAt   *time.Time
 }
+
+// memoryEntriesColumnList is the explicit projection passed to
+// rbac.For[memoryEntriesRow] via `.Columns(...)` so the `ts_doc tsvector`
+// column (0090_memory.up.sql:29) is excluded — the Encore pgx runtime
+// delivers tsvector in binary format (OID 3614) with no scan-plan into
+// any Go type, so projecting it fails any populated scan (SPEC 01 §3.4 /
+// §10.1 + SPEC 02 §5.6, unblock-8xb.8 round-18). It is a package-level
+// const literal so the no_rbac_dynamic_clause analyzer accepts it (SPEC
+// §11.3). Order MUST match memoryEntriesRow's field declaration order.
+const memoryEntriesColumnList = `id, scope, org_id, project_id, user_id, author_id,
+	author_agent, key, value_enc, value_size, tags,
+	created_at, updated_at, expires_at`
 
 // boardsBoardsRow mirrors boards.boards column order verbatim per
 // migration 0080_boards.up.sql lines 8-22 (11 columns). The
@@ -586,7 +624,8 @@ func selectScopedOrgIDs(ctx context.Context, id auth.Identity, table string) ([]
 		return out, nil
 
 	case "workitems.items":
-		rows, err := rbac.For[workitemsItemsRow](id, "workitems.items").Run(ctx)
+		rows, err := rbac.For[workitemsItemsRow](id, "workitems.items").
+			Columns(workitemsItemsColumnList).Run(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -630,7 +669,8 @@ func selectScopedOrgIDs(ctx context.Context, id auth.Identity, table string) ([]
 		return out, nil
 
 	case "memory.entries":
-		rows, err := rbac.For[memoryEntriesRow](id, "memory.entries").Run(ctx)
+		rows, err := rbac.For[memoryEntriesRow](id, "memory.entries").
+			Columns(memoryEntriesColumnList).Run(ctx)
 		if err != nil {
 			return nil, err
 		}
