@@ -148,7 +148,7 @@ Human engineers who interact with the system through the web UI for ceremony tas
 
 - **FR-14.** Layer 1 — MCP state-transition validation. State machine encoded in the backend; every transition is gated by explicit preconditions (e.g. `done` requires a `REVIEW` comment present; `claim` requires status `ready`). Implemented in P02.
 - **FR-15.** Layer 2 — Post-dispatch state validator. The `verify-state` plugin hook (Stop / agentStop event) calls MCP `verify_can_transition` against the dispatched session's final state and the comment trail. Non-compliance is surfaced as a finding work item (`type=finding`, severity per §6.10) linked to the parent epic via `parent_id` and `discovered_from_id`. **No separate inspector agent is required** — the validator runs as a hook calling the same MCP machinery that enforces Layer 1.
-- **FR-16.** Layer 3 — Agent prompt structure. The mister-anderson plugin renderer emits prompts onto Claude Code and GitHub Copilot with explicit BLOCK conditions matching the MCP state machine. All three layers agree by construction; bypassing any single layer leaves the other two enforcing.
+- **FR-16.** Layer 3 — Agent prompt structure. The mister-anderson plugin renderer emits prompts onto Claude Code with explicit BLOCK conditions matching the MCP state machine. All three layers agree by construction; bypassing any single layer leaves the other two enforcing.
 
 ### 5.3 Astro web frontend — P05
 
@@ -417,14 +417,14 @@ Dropped from the v1 catalogue: Martin (refactorer — collapsed into supervisors
 |---|---|---|
 | **Greta** | Go (Encore) | `apps/api/encore.app` + Go modules |
 | **Aria** | TypeScript / Astro / line-ui | `apps/web/astro.config.*` + line-ui imports |
-| **Neo** | Rust | `crates/Cargo.toml` (covers both `unblock-code` and `unblock-plugin`) |
+| **Neo** | Rust | `crates/Cargo.toml` (covers both `unblock-code` and `unblock-render`) |
 | **Olive** | Infrastructure / CI-CD | `.github/workflows/*.yml`, Encore deploy config, Cloudflare Pages config |
 
 Other dynamic supervisors from the m-a v1 catalogue (Nina, Luna, Violet, Tessa, Juno, Kali, Maya, Isla, Ava, Nova, Iris) remain available — Daphne provisions them via `/add-supervisor` when a future project uses those stacks. The catalogue is open; specific supervisors are activated only when their detection signal fires.
 
 ### 6.9 Skills catalogue
 
-20 user-invocable skills + 1 shared-only. Each skill has a stage tag for the Copilot-facing description-contract lint.
+20 user-invocable skills + 1 shared-only. Each skill has a stage tag enforced by the description-contract lint (§6.9 below).
 
 | # | Slash | Stage | Persona / actor | Memory integration |
 |---|---|---|---|---|
@@ -451,7 +451,7 @@ Other dynamic supervisors from the m-a v1 catalogue (Nina, Luna, Violet, Tessa, 
 
 **Shared-only (not user-invocable):** `subagents-discipline`.
 
-**Description contract** (Copilot-facing lint, enforced by `unblock-plugin`'s `build.rs`): every slash skill's description must start with an imperative verb, name the input object, include a trigger phrase, and end with a stage tag `[product] | [spec] | [impl] | [ops]`.
+**Description contract** (skill-description-quality lint, enforced by `unblock-render`'s `build.rs`): every slash skill's description must start with an imperative verb, name the input object, include a trigger phrase, and end with a stage tag `[product] | [spec] | [impl] | [ops]`.
 
 ### 6.10 Severity thresholds for review and QA findings
 
@@ -491,13 +491,11 @@ Findings always live in the same parent epic as the bead that originated them �
 
 ### 6.12 Plugin hooks
 
-| Hook | Purpose | Claude Code mapping | Copilot cloud mapping |
-|---|---|---|---|
-| `session-start` | Dashboard + MCP `prime` call; load org / project memory; surface ready set | `SessionStart` event | `sessionStart` event |
-| `inject-discipline-reminder` | Pre-dispatch reminder — supervisor disposition rules, BLOCK conditions | `PreToolUse` matcher = `Task` | `preToolUse` filter = sub-agent |
-| `verify-state` | Post-stop validation — MCP `verify_can_transition` ensures the dispatched agent did not violate the state machine | `Stop` event | `agentStop` event |
-
-Copilot local: zero hooks (no programmable hook surface). The dispatch convention (`@<persona>: <task>`) substitutes for explicit hooks.
+| Hook | Purpose | Claude Code mapping |
+|---|---|---|
+| `session-start` | Dashboard + MCP `prime` call; load org / project memory; surface ready set | `SessionStart` event |
+| `inject-discipline-reminder` | Pre-dispatch reminder — supervisor disposition rules, BLOCK conditions | `PreToolUse` matcher = `Task` |
+| `verify-state` | Post-stop validation — MCP `verify_can_transition` ensures the dispatched agent did not violate the state machine | `Stop` event |
 
 ### 6.13 Happy path — work item lifecycle
 
@@ -571,10 +569,11 @@ The project ships in four sequential phases plus a renderer phase. The AST CLI s
 
 ### P04 — mister-anderson plugin renderer
 
-- Rust binary `unblock-plugin` in the `crates/` workspace (sibling of `unblock-code`).
+- Rust binary `unblock-render` in the `crates/` workspace (sibling of `unblock-code`).
 - Stage 3 implementation tier of Law 8: full three-layer enforcement.
-- Renders the typed catalogue (8 fixed personas, dynamic supervisors, 20 skills, 3 hooks per §6.8 / §6.9 / §6.12) onto Claude Code, GitHub Copilot cloud, and GitHub Copilot local.
-- Layer 2 enforcement: post-dispatch state validator runs against MCP `verify_can_transition` to ensure the dispatched session did not bypass the state machine. Implemented via the `verify-state` plugin hook (Stop / agentStop event) calling MCP — no separate inspector agent.
+- Renders the typed catalogue (8 fixed personas, dynamic supervisors, 20 skills, 3 hooks per §6.8 / §6.9 / §6.12) into a packaged Claude Code plugin (`.claude-plugin/plugin.json` manifest + `agents/` + `skills/` + `hooks/` + MCP server config), marketplace-installable. Claude Code is the only host.
+- CLI: `unblock-render --supervisors=<list> --out=<dir> [--apply]` — no `render` subcommand (the binary is the renderer) and no host-targeting flag.
+- Layer 2 enforcement: post-dispatch state validator runs against MCP `verify_can_transition` to ensure the dispatched session did not bypass the state machine. Implemented via the `verify-state` plugin hook (Claude Code `Stop` event) calling MCP — no separate inspector agent.
 - Layer 3 enforcement: agent prompt structure carries explicit BLOCK conditions matching the MCP state machine.
 - Exit criterion: an attempt to bypass the pipeline (e.g. mark `done` without a `kind=review, status=success` comment) is rejected by the MCP server (Layer 1, P02), the post-dispatch hook flags it (Layer 2), and the agent prompt's BLOCK condition would have refused to issue the call (Layer 3). All three layers agree.
 
@@ -675,7 +674,7 @@ Five north-star metrics gate v1.0. All other quantitative metrics (webhook laten
 - **R-6 — Memory secret sanitiser false negatives.** Best-effort detection cannot catch every credential pattern. Mitigation: warning is mandatory; sanitised form is stored; documentation flags this clearly.
 - **R-7 — Single-vendor lock-in via GitHub at v1.0.** GitLab arrives at v1.1, but a v1.0 user is effectively GitHub-only. Mitigation: provider-agnostic architecture (Principle 3) ensures the canonical store is neutral; GitLab is an integration project, not a re-architecture.
 - **R-8 — line-ui maturity gates P05.** websublime line-ui (vitamin repo) is a young headless component library. **P05 (Astro web) cannot start before line-ui v1 ships** — feature completeness for forms, dialogs, dropdowns, popovers, tabs, toasts, navigation, accordions, tooltips, date pickers, comboboxes, and mobile-responsive defaults. If line-ui slips, P05 slips. Mitigation: P05 is decoupled from v1.0 (ships at v1.1), so line-ui can grow at its own cadence in the vitamin repo without pressuring the v1.0 launch. Component-level replacement remains a fall-back if a specific line-ui primitive proves blocking, but the design assumption is line-ui matures first.
-- **R-9 — Plugin renderer (P04) scope creep.** Rendering correct prompts onto both Claude Code and GitHub Copilot is harder than rendering onto one. Mitigation: scope is locked to "render BLOCK conditions matching the MCP state machine"; richer renderer features are post-v1.
+- **R-9 — Plugin renderer (P04) packaging correctness.** The renderer now targets a single host (Claude Code), so the original multi-host rendering risk is largely retired. The residual risk is emitting a correct, marketplace-installable packaged plugin (`.claude-plugin/plugin.json` manifest + `agents/` + `skills/` + `hooks/` + MCP server config) whose BLOCK conditions still match the MCP state machine. Mitigation: scope is locked to "render BLOCK conditions matching the MCP state machine" into the packaged bundle; the CI catalogue-drift test (§7.2 SPEC) guards Layer-1/Layer-3 agreement; richer renderer features are post-v1.
 
 ---
 

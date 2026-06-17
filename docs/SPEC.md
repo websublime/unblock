@@ -50,7 +50,7 @@ realises Stage 3 of Law 8:
 |---|---|---|---|---|
 | 1 | **Backend (API + remote MCP)** | Go (Encore) on a single Postgres + Pub/Sub | P01 + P02 | v1.0 |
 | 2 | **AST CLI (`unblock-code`)** | Rust (edition 2024), tree-sitter, SQLite + FTS5 | P03 | v1.0 |
-| 3 | **Plugin renderer (`unblock-plugin`)** | Rust (edition 2024) | P04 | v1.0 |
+| 3 | **Plugin renderer (`unblock-render`)** | Rust (edition 2024) | P04 | v1.0 |
 | 4 | **Web client** | Astro 5 + line-ui on Cloudflare Pages | P05 | v1.1 (line-ui-blocked) |
 
 These four deliverables are **structurally decoupled** (Manifesto Law 6). They
@@ -142,7 +142,7 @@ The current repository hosted a Rust v1 workspace (`crates/unblock-core`,
 that workspace is **archived under `temp/rust-v1/`** (gitignored, local-only
 archaeology) — the backend is Go (Encore) per FR-1 and FR-8. The Rust crates
 that survive into v1.0 are the new code-cli crates (`unblock-indexer-core`,
-`unblock-indexer`, `unblock-code`) plus the plugin renderer (`unblock-plugin`).
+`unblock-indexer`, `unblock-code`) plus the plugin renderer (`unblock-render`).
 **There is no Rust binary called `unblock-mcp` in the new architecture.** The
 MCP server is an Encore Go service in `apps/api/mcp/`.
 
@@ -202,9 +202,9 @@ detection, atomic claim transaction) inform the Go re-implementation.
                                               │ (catalogue.json)
    ┌────────────────────────────────┐    ┌────┴───────────────────────┐
    │      AST CLI (unblock-code)    │    │  Plugin renderer (unblock- │
-   │      Rust, local-only          │    │  plugin), Rust, build-time │
-   │      tree-sitter + SQLite/FTS5 │    │  Renders Claude Code +     │
-   │      ~/.cache/unblock/...      │    │  Copilot prompts/hooks     │
+   │      Rust, local-only          │    │  render), Rust, build-time │
+   │      tree-sitter + SQLite/FTS5 │    │  Emits packaged Claude     │
+   │      ~/.cache/unblock/...      │    │  Code plugin bundle        │
    │                                │    │  Reads mcp.meta_catalogue  │
    │                                │    │  at build (& CI verifies)  │
    └────────────────────────────────┘    └────────────────────────────┘
@@ -230,9 +230,9 @@ runtime coupling is permitted (Manifesto Law 6).
 | **Astro Actions ↔ Encore RPC** (private API) | Encore backend (private services) | Astro Actions BFF | Encore-generated TypeScript clients; not reachable from the browser; auth via forwarded session id (`Authorization: Bearer <session_id>` + `X-Unblock-BFF-Origin: astro`) per §5.3.1 |
 | **GitHub webhook payload** | GitHub | Encore backend `providers` service | `POST /webhooks/github`, signature-verified |
 | **OAuth callback (Astro origin)** | GitHub / GitLab | Astro Action `auth/[provider]/callback` → private RPC `auth.exchangeOAuthCode` | Browser redirect target on `unblock.websublime.com`; PKCE-validated; HttpOnly cookie set on Astro origin |
-| **Plugin catalogue export** | Encore backend `mcp.meta_catalogue` MCP tool **and** checked-in `crates/unblock-plugin/data/catalogue.json` | `unblock-plugin` (build-time `include_str!`); CI drift test (runtime) | Compile-time embed into the Rust plugin renderer; CI compares the embedded JSON to the live MCP `meta.catalogue` response and fails on mismatch |
-| **MCP `verify_can_transition`** | Encore backend | Plugin `verify-state` hook in dispatched session | Same MCP transport, called by Claude Code Stop / Copilot agentStop hook |
-| **Plugin BLOCK conditions** | `unblock-plugin` (build-time) | Claude Code / Copilot agent prompt | Static markdown / TOML emitted onto the host's plugin directory; consumed at agent start, not at runtime by the backend |
+| **Plugin catalogue export** | Encore backend `mcp.meta_catalogue` MCP tool **and** checked-in `crates/unblock-render/data/catalogue.json` | `unblock-render` (build-time `include_str!`); CI drift test (runtime) | Compile-time embed into the Rust plugin renderer; CI compares the embedded JSON to the live MCP `meta.catalogue` response and fails on mismatch |
+| **MCP `verify_can_transition`** | Encore backend | Plugin `verify-state` hook in dispatched session | Same MCP transport, called by the Claude Code `Stop` hook |
+| **Plugin BLOCK conditions** | `unblock-render` (build-time) | Claude Code agent prompt | Static markdown emitted into the packaged Claude Code plugin bundle; consumed at agent start, not at runtime by the backend |
 
 The AST CLI participates in **no** runtime contract with the backend. Its
 only outputs are stdout JSON envelopes (consumed by humans/agents via Bash)
@@ -282,7 +282,7 @@ unblock/
 │   ├── unblock-indexer-core/       # pure lib (parsing, kinds, span, mtime rules)
 │   ├── unblock-indexer/            # impure lib (sqlx, tree-sitter, FS walker)
 │   ├── unblock-code/               # bin (clap CLI; 11 commands)
-│   └── unblock-plugin/             # bin (build-time renderer for Claude/Copilot)
+│   └── unblock-render/             # bin (build-time renderer → packaged Claude Code plugin)
 │       └── data/
 │           └── catalogue.json      # checked-in copy embedded via include_str!
 ├── docs/
@@ -797,7 +797,7 @@ trail (FR-10) — e.g. `qa_state → passed` requires a `(kind=qa,
 status=success)` comment to exist. The exact precondition map and error
 shapes land in the P02 spec. The state-machine catalogue is exported via
 the `mcp.meta_catalogue` MCP tool **and** checked-in at
-`crates/unblock-plugin/data/catalogue.json` for build-time consumption.
+`crates/unblock-render/data/catalogue.json` for build-time consumption.
 
 **State-machine source-of-truth and codegen (CONFIRMED).** The Go
 state-machine in `apps/api/mcp/` is **generated** from `apps/api/mcp/catalogue.json`
@@ -887,7 +887,7 @@ that bind the CLI to the rest of the product.
 | `unblock-indexer-core` | pure lib | Domain types: `SymbolKind` (17 variants), `Span`, `LanguageId`, mtime invariant, no I/O |
 | `unblock-indexer` | impure lib | sqlx + SQLite + FTS5 schema and queries, tree-sitter parsing, FS walker (`ignore` crate), per-query mtime check |
 | `unblock-code` | bin | clap CLI hosting 11 commands; the only consumer-visible surface |
-| `unblock-plugin` | bin | (Phase 04 — see §7) — sibling of `unblock-code`, not a consumer of indexer crates |
+| `unblock-render` | bin | (Phase 04 — see §7) — sibling of `unblock-code`, not a consumer of indexer crates |
 
 ### 6.2 Architectural invariants (Manifesto Law 6 enforcement)
 
@@ -911,42 +911,41 @@ redistribute the same artefacts; no per-platform compile-from-source path.
 
 ## 7. Plugin Renderer Architecture (Phase 04)
 
-`unblock-plugin` is a Rust binary in `crates/unblock-plugin/`. It runs
+`unblock-render` is a Rust binary in `crates/unblock-render/`. It runs
 **at agent setup time**, not at runtime. Its job is to render the typed
 catalogue (8 fixed personas, dynamic supervisors, 20 skills, 3 hooks per
-PRD §6.8 / §6.9 / §6.12) onto two host plugin systems:
+PRD §6.8 / §6.9 / §6.12) into a **packaged Claude Code plugin** —
+Claude Code is the only host:
 
 | Host | Format | What is rendered |
 |---|---|---|
-| Claude Code | `~/.claude/...` markdown + TOML | Persona prompts, slash skill descriptions, session-start / preToolUse / Stop hooks |
-| GitHub Copilot (cloud + local) | Copilot custom instructions / chat config | Same persona + skill catalogue, with hook fall-back to dispatch convention `@<persona>: <task>` for Copilot local (no programmable hooks) |
+| Claude Code | Packaged plugin bundle (`.claude-plugin/plugin.json` manifest + `agents/` + `skills/` + `hooks/` + MCP server config), marketplace-installable | Persona prompts, slash skill descriptions, session-start / preToolUse / Stop hooks, MCP server config |
 
-### 7.1 CLI surface (CONFIRMED, carries forward verbatim from v1 §7.5.5)
+### 7.1 CLI surface
 
 ```
-unblock-plugin render --target=<target> --supervisors=<list> --out=<dir> [--apply]
+unblock-render --supervisors=<list> --out=<dir> [--apply]
 ```
 
 | Flag | Values | Effect |
 |---|---|---|
-| `--target` | `claude-code`, `copilot-cloud`, `copilot-local` | Which host plugin format to emit |
 | `--supervisors` | comma-separated stack list (e.g. `greta,aria,neo,olive`) | Which dynamic supervisors to include |
-| `--out` | directory path | Where to write the rendered artefacts (or print preview) |
-| `--apply` | flag (default off) | When set, writes directly into `.claude/agents/`, `.claude/skills/`, `.claude/hooks/`, `.claude/settings.json`, `.github/agents/`, `.github/copilot-instructions.md` per target. When unset, prints rendered output to stdout for inspection. |
+| `--out` | directory path | Where to write the rendered plugin bundle (or print preview) |
+| `--apply` | flag (default off) | When set, assembles and installs the packaged Claude Code plugin bundle — `.claude-plugin/plugin.json` (manifest), `agents/` (personas + supervisors), `skills/` (slash skills), `hooks/` (session-start, inject-discipline-reminder, verify-state), and the MCP server config. When unset, prints the rendered bundle to stdout for inspection. |
 
-There is **no** subcommand called `install`. `render` is the canonical
-operation. Without `--apply`, the renderer is a pure preview; with `--apply`,
-it materialises files at their host-specific paths. This makes the renderer
-trivially testable (golden-file tests on the preview output) and gives users
-a clean "dry run" workflow.
+The binary **is** the renderer — there is no `render` subcommand and no
+host-targeting flag. Without `--apply`, the renderer is a pure preview; with
+`--apply`, it materialises the packaged plugin bundle at `--out`. This makes
+the renderer trivially testable (golden-file tests on the preview bundle) and
+gives users a clean "dry run" workflow.
 
 ### 7.2 Catalogue source (CONFIRMED)
 
 The state-machine + tool catalogue lives in **two synchronised places**:
 
-1. `crates/unblock-plugin/data/catalogue.json` — checked-in copy, embedded
+1. `crates/unblock-render/data/catalogue.json` — checked-in copy, embedded
    into the binary at compile time via Rust's `include_str!`. This makes the
-   plugin renderer fully offline — `unblock-plugin render --target=...` runs
+   plugin renderer fully offline — `unblock-render --supervisors=...` runs
    without ever contacting the backend.
 2. `apps/api/mcp/catalogue.json` — the canonical source, served live by the
    `mcp.meta_catalogue` MCP tool call.
@@ -959,7 +958,7 @@ is to give CI a "live" reference to diff against the checked-in copy.
 
 **Drift mitigation:** a CI test (`.github/workflows/catalogue-drift.yml`)
 boots the local Encore emulator, calls `mcp.meta_catalogue`, diffs against
-`crates/unblock-plugin/data/catalogue.json`, and fails on mismatch. **CI is
+`crates/unblock-render/data/catalogue.json`, and fails on mismatch. **CI is
 the only point at which the two copies are reconciled** — there is no
 runtime path that contacts the backend from the renderer. The checked-in
 JSON is the build-time source of truth; the live MCP endpoint is the
@@ -982,7 +981,7 @@ renderer never hits the network.
   the right level.
 - **Layer 2 of Law 8** — the post-dispatch state validator — is a *hook*
   registered at install time that calls MCP `verify_can_transition` at
-  the host's Stop / agentStop event. The renderer emits the hook
+  the Claude Code `Stop` event. The renderer emits the hook
   configuration; the actual validation runs against the live MCP server.
 
 ### 7.4 Three layers of Law 8 — where each lives architecturally
@@ -990,8 +989,8 @@ renderer never hits the network.
 | Layer | Where it lives | When it runs | What it does |
 |---|---|---|---|
 | **Layer 1 — MCP state-transition validation** | `apps/api/mcp/` (Encore service) | At every MCP tool call that mutates state | Rejects the call with a structured error if the precondition does not hold |
-| **Layer 2 — post-dispatch state validator** | `unblock-plugin` renders the `verify-state` hook into Claude Code Stop / Copilot agentStop event; the hook calls MCP `verify_can_transition` | After every dispatched session ends | Surfaces non-compliance as a `type=finding` work item linked to the parent epic via `parent_id` and `discovered_from_id` |
-| **Layer 3 — agent prompt structure** | `unblock-plugin` renders BLOCK conditions into the persona prompt body | Read by the agent at session start; checked at every relevant tool call inside the session | Refuses to issue a violating call before it ever reaches MCP |
+| **Layer 2 — post-dispatch state validator** | `unblock-render` renders the `verify-state` hook into the Claude Code `Stop` event; the hook calls MCP `verify_can_transition` | After every dispatched session ends | Surfaces non-compliance as a `type=finding` work item linked to the parent epic via `parent_id` and `discovered_from_id` |
+| **Layer 3 — agent prompt structure** | `unblock-render` renders BLOCK conditions into the persona prompt body | Read by the agent at session start; checked at every relevant tool call inside the session | Refuses to issue a violating call before it ever reaches MCP |
 
 All three layers carry the **same** state-machine knowledge by construction:
 the state-machine catalogue is owned by the backend; the plugin renderer
@@ -1060,7 +1059,7 @@ transition). The catalogue is consumed three times from the same source file:
 |---|---|---|
 | Layer 1 | `apps/api/mcp/catalogue.gen.go` | `go generate` reads `apps/api/mcp/catalogue.json` and emits a typed Go validator per transition. The generated file is committed; CI fails on a `go generate` diff. |
 | Layer 2 | `verify-state` hook → MCP `verify_can_transition` | The hook does not parse the catalogue itself — it calls the MCP RPC, which uses the same Layer-1 generated validator. One source, one validator, two call sites. |
-| Layer 3 | `crates/unblock-plugin/data/catalogue.json` (compile-time `include_str!`) | The Rust renderer iterates `transitions[].block_conditions` and emits matching BLOCK clauses into the persona-prompt markdown. |
+| Layer 3 | `crates/unblock-render/data/catalogue.json` (compile-time `include_str!`) | The Rust renderer iterates `transitions[].block_conditions` and emits matching BLOCK clauses into the persona-prompt markdown. |
 
 The CI catalogue-drift test (§7.2) compares all three corners. If any layer's
 view of `block_conditions` diverges, the build fails. **This is what makes
@@ -2338,7 +2337,7 @@ release candidate must additionally pass the cross gates.
 | **P01 — Backend MVP** | `apps/api/auth` (incl. **migrations directory for all 8 schemas**, see §5.2), `org`, `workitems`, `deps`, `memory` (schema-only stub), `providers` (schema-only stub), `boards` (schema-only stub), `mcp` (23 tools per P01 round-16 — was 14; adds `promote`, four milestone tools, four label tools; Streamable HTTP transport per MCP spec 2025-06-18), `public/`; migrations §9.4.1–§9.4.8 + round-16 `0120_mcp_issued_to_user_notnull` + round-16 `0130_workitems_labels_updated_at` (all eight schemas land in P01 per the plan resolution; service code for `providers`/`boards`/`memory` is deferred to later phases per plan §2.1) | L1, L2, L3 (foundations), L5, L7 | Agent completes `prime → ready → claim → close` against a manually-seeded graph; cascade fires; cycle detection rejects offending edges |
 | **P02 — Backend complete** | `apps/api/providers` (webhook + sync), `apps/api/memory` (Remember/Recall/List/Forget RPCs + always-on sanitiser), `mcp` (+4 memory tools = 27 total; P01 round-16 carried P01 to 23), Layer 1 state-transition validator, **`mcp.meta_catalogue` v1 + `verify_can_transition` v1** (operational primitives, §5.2.2); **additive forward migrations only** — all eight §9.4.x base schemas already landed in P01 (see P01 row), so P02 adds only new higher-numbered files (the `memory.sanitiser_events` audit table AR-14, the `forget` soft-delete column on `memory.entries`, the providers payload-digest/retention additions), exact files enumerated in `02-spec` after research | L3 (provider events), L8 layer 1 | A GitHub repo can be linked, webhooks normalise into canonical work items, attempts to mark `done` without the required comment trail are rejected at the MCP boundary; `mcp.meta_catalogue` returns the live catalogue.json; `verify_can_transition` validates a candidate transition against the same Layer-1 validator |
 | **P03 — AST CLI v1.0.0** | `crates/unblock-indexer-core`, `unblock-indexer`, `unblock-code` | L6 | All 9 HARD gates in code-cli/plan §14.1 pass on a fresh clone; ROI harness publishes raw logs + per-flow medians as a release artefact |
-| **P04 — Plugin renderer** | `crates/unblock-plugin` **consumes the P02-shipped `mcp.meta_catalogue` v1** at build time (and embeds `crates/unblock-plugin/data/catalogue.json` via `include_str!`); registers the `verify-state` hook against `mcp.verify_can_transition` (also shipped in P02) | L8 layer 2 + 3 (full Law 8) | Pipeline-bypass attempt is rejected by MCP (Layer 1, P02), flagged by the post-dispatch hook (Layer 2), and refused by the agent prompt's BLOCK condition (Layer 3); all three layers agree; catalogue drift CI test green |
+| **P04 — Plugin renderer** | `crates/unblock-render` **consumes the P02-shipped `mcp.meta_catalogue` v1** at build time (and embeds `crates/unblock-render/data/catalogue.json` via `include_str!`); registers the `verify-state` hook against `mcp.verify_can_transition` (also shipped in P02) | L8 layer 2 + 3 (full Law 8) | Pipeline-bypass attempt is rejected by MCP (Layer 1, P02), flagged by the post-dispatch hook (Layer 2), and refused by the agent prompt's BLOCK condition (Layer 3); all three layers agree; catalogue drift CI test green |
 | **P05 — Astro web (v1.1)** | `apps/api/boards` (saved-view CRUD service code — the boards *schema* §9.4.7 already landed in P01, so P05 ships service code only), `apps/web/` (Astro Actions BFF including `auth/[provider]/callback`, kanban, graph, roadmap, comments) | L4 | A developer authenticates, sees the same graph the agent sees, and acts on it through the BFF without the browser ever obtaining Encore credentials; saved views persist via the `boards` service |
 
 ---
@@ -2383,7 +2382,7 @@ section calls out the ones the architecture choices specifically introduce).
 | AR-1 | **Encore lock-in.** Replatforming away from Encore is a large undertaking. **ACCEPTED per user decision.** | Encore code is mostly Go + Postgres + Pub/Sub semantics; the abstraction surface is thin. Exit strategy through self-hosted NATS + standard Postgres is feasible at moderate cost if Encore ever blocks us. |
 | AR-2 | **Single-Postgres scaling ceiling.** All eight schemas share one DB; one schema's hot writes can affect another. | Acceptable at v1 scale per PRD §11 (the M-1 latency target is met on this topology). Step-up path: read replicas + partitioning per schema, both supported by Encore Cloud's managed Postgres. Re-architecture into multi-DB is a phase-replan event, not a v1 concern. |
 | AR-3 | **Polyglot monorepo CI complexity.** Three toolchains (Go, Rust, Astro) in one repo. | Per-stack gate sets isolate the matrices; Olive (CI-CD supervisor) owns orchestration; per-supervisor branches keep concurrent work clean. |
-| AR-4 | **Plugin renderer drift from MCP state machine.** Layer 1 is in Go; Layer 3 is rendered at build time by Rust from a checked-in JSON catalogue. They could disagree. | The state-machine catalogue is owned by the backend, exposed live via `mcp.meta_catalogue`, and checked into `crates/unblock-plugin/data/catalogue.json` for build-time embed via `include_str!`. CI (§7.2) diffs the two; mismatch = red build. |
+| AR-4 | **Plugin renderer drift from MCP state machine.** Layer 1 is in Go; Layer 3 is rendered at build time by Rust from a checked-in JSON catalogue. They could disagree. | The state-machine catalogue is owned by the backend, exposed live via `mcp.meta_catalogue`, and checked into `crates/unblock-render/data/catalogue.json` for build-time embed via `include_str!`. CI (§7.2) diffs the two; mismatch = red build. |
 | AR-5 | **AST CLI zero-coupling tempts duplication.** With no shared types, both binaries may re-implement similar utilities. | Acceptable; Manifesto Law 6 is strict precisely because the cost of duplication is lower than the cost of cross-binary coupling. |
 | AR-6 | **BFF discipline at v1.0 (no web yet).** Until P05 ships, no BFF exists; all clients of private APIs are internal. | Until v1.1, the public surface is just two FR-12 endpoints; private APIs remain truly private (no browser path at all). When P05 lands, the BFF discipline is enforced from day one of v1.1. |
 | AR-7 | **`pgcrypto` symmetric DEK rotation cost.** Three schemas hold `_enc` columns; rotation requires re-encrypting every row of `auth.oauth_tokens`, `providers.installations`, and `memory.entries`. | Rotation is offline-batchable. The rotation strategy (§9.4.10) introduces `MEMORY_DEK_NEXT`, re-encrypts in batches, then swaps. At v1 scale (low row counts) the operation completes in minutes; at scale it remains a background job. The DEK is supplied via Encore secret only — application code never logs it. |
@@ -2408,10 +2407,10 @@ section calls out the ones the architecture choices specifically introduce).
 | 1 | Repository layout (`apps/api/`, `apps/web/`, `crates/`, `temp/rust-v1/` archived) | **CONFIRMED** — see §4. `temp/rust-v1/` gitignored. |
 | 2 | 8 services × 8 schemas (1:1) vs collapsing some | **CONFIRMED 8:8** — see §5.2.1. Isolation > RPC overhead (Manifesto Principle 4 applies intra-backend). The 8:8 counts **domain** services only; the zero-API `db` migration-owner service (§5.2) is a 9th package outside this count, so the repo has **9 service dirs** = 8 domain + 1 `db`. |
 | 3 | Encore Cloud lock-in | **CONFIRMED** — locked from prior strategic discussion. AR-1 accepted with NATS + standard Postgres exit path. |
-| 4 | Plugin catalogue export shape | **CONFIRMED** — JSON checked-in at `crates/unblock-plugin/data/catalogue.json` + compile-time embed via `include_str!`. Backend MCP `meta.catalogue` tool exposes the same catalogue live. CI drift test enforces equality. See §7.2. |
+| 4 | Plugin catalogue export shape | **CONFIRMED** — JSON checked-in at `crates/unblock-render/data/catalogue.json` + compile-time embed via `include_str!`. Backend MCP `meta.catalogue` tool exposes the same catalogue live. CI drift test enforces equality. See §7.2. |
 | 5 | Public endpoint paths | **CONFIRMED + CORRECTED** — `/auth/callback` was a PRD bug; OAuth callback is on the **Astro origin** as an Astro Action, not Encore. v1.0 Encore public surface = 2 logical endpoints (`/webhooks/github`, `/mcp` over Streamable HTTP per the 2025-06-18 spec — `POST` and `GET` on the same path). v1.1 adds `/webhooks/gitlab`. See §5.3, §10.1. (Round-3 correction: round-2 referenced `GET /mcp/sse`, the deprecated 2024-11-05 transport; round-3 research C6 contradicted that and Streamable HTTP is now the canonical shape.) |
 | 6 | Drop Rust `unblock-mcp` crate | **CONFIRMED** — fully archived under `temp/rust-v1/` (gitignored). New MCP server is the Encore Go service in `apps/api/mcp/`. |
-| 7 | Plugin renderer install UX | **CONFIRMED** — `unblock-plugin render --target=<target> --supervisors=<list> --out=<dir> [--apply]`. Carries v1 design pattern verbatim. See §7.1. |
+| 7 | Plugin renderer install UX | **CONFIRMED** — `unblock-render --supervisors=<list> --out=<dir> [--apply]` emits a packaged Claude Code plugin bundle (no `render` subcommand, no `--target`; Claude-only). See §7.1. |
 | 8 | Web UI graph rendering library | **CONFIRMED** — deferred to P05 spec. Architectural commitment is "force-directed dependency graph rendered as canvas / SVG"; library locked at Stage 2. |
 
 ---

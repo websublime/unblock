@@ -44,9 +44,9 @@ Three deliverables:
    - `unblock-code` — standalone, one-shot CLI that indexes source code into
      a local SQLite + FTS5 database and answers structured queries
      (find-symbol, outline, search). Decoupled from the backend by design.
-   - `unblock-plugin` — mister-anderson workflow renderer that emits agents,
-     skills, hooks, and MCP config onto Claude Code, GitHub Copilot cloud,
-     and GitHub Copilot local from a single typed catalogue.
+   - `unblock-render` — mister-anderson workflow renderer that emits a
+     packaged Claude Code plugin (agents, skills, hooks, MCP config) from a
+     single typed catalogue.
 
 GitHub and GitLab are **event sources** (webhooks, OAuth identity), not the
 source of truth. Postgres stores everything. Go computes everything.
@@ -60,7 +60,7 @@ unblock/
 ├── apps/
 │   ├── api/                        # Encore Go backend (8 domain services + zero-API db migration-owner, 1 Postgres, 8 schemas)
 │   └── web/                        # Astro 5 + line-ui (BFF via Astro Actions)
-├── crates/                         # Rust workspace: unblock-code (AST CLI) + unblock-plugin (m-a renderer)
+├── crates/                         # Rust workspace: unblock-code (AST CLI) + unblock-render (m-a renderer)
 ├── docs/
 │   ├── MANIFESTO.md                # (to be written by Stage 1)
 │   ├── PRD.md                      # (to be written by Stage 1)
@@ -114,11 +114,11 @@ unblock/
   - `unblock-indexer-core` (lib) — pure types, AST traversal, schema constants
   - `unblock-indexer` (lib) — sqlx + FTS5 + statically-linked tree-sitter grammars + filesystem walker
   - `unblock-code` (bin) — clap-based AST CLI
-  - `unblock-plugin` (bin) — mister-anderson workflow renderer (agents, skills, hooks, MCP config) onto Claude Code + Copilot cloud + Copilot local
+  - `unblock-render` (bin) — mister-anderson workflow renderer that emits a packaged Claude Code plugin (agents, skills, hooks, MCP config)
 - **AST CLI storage**: local SQLite + FTS5 + WAL at `~/.cache/unblock/repos/<repo-hash>/index.db`
 - **AST CLI grammars**: 10 statically-linked tree-sitter (8 default: Rust/TS/JS/Python/Go/Java/C/PHP; opt-in: cpp/ruby)
 - **AST CLI commands**: 11 (find-symbol, list-symbols, outline, get-symbol, search, find-references, reindex, status, languages, init, parse)
-- **Plugin renderer**: typed catalogue (8 fixed personas, dynamic supervisors, 20 skills, 3 hooks) → emits `.claude/agents/`, `.claude/skills/`, `.github/agents/`, `.claude/hooks/`, `.claude/settings.json`, `.github/copilot-instructions.md` per target. CLI: `unblock-plugin render --target=<t> --supervisors=<list> --out=<dir>`.
+- **Plugin renderer**: typed catalogue (8 fixed personas, dynamic supervisors, 20 skills, 3 hooks) → emits a packaged Claude Code plugin: `.claude-plugin/plugin.json` (manifest) + `agents/` (personas + supervisors) + `skills/` + `hooks/` (session-start, inject-discipline-reminder, verify-state) + MCP server config. Marketplace-installable. Claude Code only — no `.github/` outputs, no per-target rendering. CLI: `unblock-render --supervisors=<list> --out=<dir> [--apply]`.
 - **Distribution**: cargo-dist → cross-platform binaries; Homebrew tap; npm wrapper. Both binaries share the same release pipeline.
 - **AST CLI decoupling**: `unblock-code` and the issue-tracker `mcp` service share zero runtime state (Manifesto Law 6). See `docs/code-cli/spec.md` §3.
 
@@ -132,7 +132,7 @@ The active set for `://unblock` after Stage 1:
 
 - **Greta** — Go (`apps/api/`, Encore services)
 - **Aria** — TypeScript / Astro / line-ui (`apps/web/`)
-- **Neo** — Rust (`crates/`, both `unblock-code` and `unblock-plugin`)
+- **Neo** — Rust (`crates/`, both `unblock-code` and `unblock-render`)
 - **Olive** — Infrastructure / CI-CD (Encore Cloud deployment, Cloudflare
   Pages, GitHub Actions, secrets management)
 
