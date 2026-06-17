@@ -10,6 +10,7 @@
 //
 //	func For[T any](identity auth.Identity, table string) *ScopedQuery[T]
 //	func (q *ScopedQuery[T]) Where(clause string, args ...any) *ScopedQuery[T]
+//	func (q *ScopedQuery[T]) Columns(cols ...string) *ScopedQuery[T]
 //	func (q *ScopedQuery[T]) Run(ctx context.Context) ([]T, error)
 //
 // Identity-type plumbing (bead unblock-tv8.30): SPEC §10.1's surface
@@ -62,32 +63,37 @@
 //     declare access to the unblock database fails at `encore check`
 //     time, not at runtime.
 //
-// Injection-safety invariant (SPEC §10.1, unblock-tv8.33, unblock-tv8.35):
+// Injection-safety invariant (SPEC §10.1, unblock-tv8.33, unblock-tv8.35,
+// unblock-8xb.8):
 //
-//   - The first argument to Where (clause) AND the second argument to
-//     For (table) MUST each be a Go string literal or an untyped string
+//   - The first argument to Where (clause), the second argument to
+//     For (table), AND every variadic argument to Columns (each column
+//     identifier) MUST each be a Go string literal or an untyped string
 //     constant — i.e. a value that is fixed at compile time. Every
 //     runtime value (request body, URL parameter, header, row from the
-//     database, anything user-controlled) is forbidden in either
-//     position; values destined for Where flow through the args...
-//     variadic, and the table identifier of For has no runtime channel
-//     at all (it is a SQL identifier, not a value).
-//   - Both strings are concatenated verbatim into the assembled SQL
-//     statement (see build): the clause into the WHERE chain, and the
-//     table into the FROM clause AND into the canonical scope predicate
-//     `<table>.org_id = $1`. There is no runtime validation, escaping,
-//     or sanitisation — the SQL string is opaque to Go. A runtime value
-//     in either position fragments the WHERE predicate and silently
-//     bypasses the org_id scope guard installed by For. For a
-//     tenant-isolation gate this is fatal.
+//     database, anything user-controlled) is forbidden in any of these
+//     positions; values destined for Where flow through the args...
+//     variadic, and the table/column identifiers have no runtime channel
+//     at all (they are SQL identifiers, not values).
+//   - All three strings are concatenated verbatim into the assembled SQL
+//     statement (see build): the clause into the WHERE chain, the table
+//     into the FROM clause AND into the canonical scope predicate
+//     `<table>.org_id = $1`, and the columns into the SELECT projection.
+//     There is no runtime validation, escaping, or sanitisation — the
+//     SQL string is opaque to Go. A runtime value in any of these
+//     positions fragments the statement and silently bypasses the
+//     org_id scope guard installed by For. For a tenant-isolation gate
+//     this is fatal.
 //   - The project-local static analyzer
 //     `apps/api/shared/lint/no_rbac_dynamic_clause.go` is the
-//     enforcement gate for BOTH call shapes: it rejects any call to
+//     enforcement gate for ALL THREE call shapes: it rejects any call to
 //     ScopedQuery.Where whose first argument is not a compile-time
-//     string constant, and any call to rbac.For whose second argument
-//     (table) is not a compile-time string constant. The analyzer is
-//     wired into `apps/api/.golangci.yml` and is also runnable directly
-//     via `go run ./shared/lint/cmd/no_rbac_dynamic_clause ./...`.
+//     string constant, any call to rbac.For whose second argument
+//     (table) is not a compile-time string constant, and any call to
+//     ScopedQuery.Columns with a non-constant variadic argument. The
+//     analyzer is wired into `apps/api/.golangci.yml` and is also
+//     runnable directly via
+//     `go run ./shared/lint/cmd/no_rbac_dynamic_clause ./...`.
 //   - Runtime detection is fundamentally impossible: by the time the
 //     SQL string reaches build, Go has erased the difference between a
 //     literal and a runtime-constructed string. The analyzer is the
@@ -245,6 +251,14 @@ type ScopedQuery[T any] struct {
 	// declaration order. They are AND-joined onto scopeClause at Run.
 	userClauses []userClause
 
+	// columns is the explicit SELECT projection set by Columns. When nil
+	// (Columns never called), build emits the default `SELECT *`; when
+	// non-nil, build emits `SELECT <cols joined by ", ">`. The columns
+	// MUST be listed in the SAME order as T's exported struct fields —
+	// scanAll scans by ordinal. Each identifier is a compile-time string
+	// constant (the §11.3 analyzer enforces this). See Columns.
+	columns []string
+
 	// err captures the first error encountered during fluent
 	// construction (e.g. an empty clause string passed to Where).
 	// Run surfaces it instead of executing.
@@ -368,17 +382,94 @@ func (q *ScopedQuery[T]) Where(clause string, args ...any) *ScopedQuery[T] {
 	return q
 }
 
+// Columns restricts the SELECT projection to an EXPLICIT, ordered column
+// list, replacing the default `SELECT *`. The columns MUST be listed in
+// the SAME order as T's exported struct fields — scanAll still scans by
+// ordinal, so a mismatch between projection order and field order
+// produces a scan error at Run time.
+//
+// Columns is OPTIONAL and additive. A *ScopedQuery[T] on which Columns is
+// never called keeps the default `SELECT *` shape, so every consumer that
+// maps T 1:1 to the full table (`org.projects`, the rbactest matrix rows)
+// is UNAFFECTED with zero call-site change. The method exists for the
+// `workitems.items` read path, whose table carries a generated
+// `fts tsvector` column (migration 0040) that the Encore pgx v5.7.6 /
+// encore.dev v1.52.1 runtime delivers in BINARY format (OID 3614) with NO
+// registered scan-plan into any Go type — so `SELECT *` fails at runtime
+// on any populated result set (`cannot scan tsvector (OID 3614) in binary
+// format into *[]uint8`). The read RPCs pass the canonical fts-excluding
+// projection via Columns so `fts` is never projected. See SPEC §3.4 /
+// §10.1.
+//
+// The scope-predicate injection (`<table>.org_id = $1`) and the
+// no-compile-without-scope guarantee are ORTHOGONAL to the projection and
+// are PRESERVED unchanged: Columns only narrows the SELECT list.
+//
+// SECURITY (SPEC §10.1, §11.3, unblock-8xb.8).
+//
+// Each column identifier MUST be a Go string literal or an untyped string
+// constant fixed at compile time. SQL identifiers have NO bind-parameter
+// channel in PostgreSQL — a column cannot be passed via args... like a
+// value. A runtime-constructed column string is concatenated verbatim
+// into the SELECT projection (build below), exactly the same footgun
+// class as For's table (unblock-tv8.35) and Where's clause
+// (unblock-tv8.33).
+//
+//	// CORRECT — string literals and named constants:
+//	rbac.For[Item](id, "workitems.items").Columns("id", "org_id").Run(ctx)
+//
+//	const itemColumnList = "id, org_id, title"
+//	rbac.For[Item](id, "workitems.items").Columns(itemColumnList).Run(ctx)
+//
+//	// WRONG — runtime construction breaches the literal-only invariant:
+//	rbac.For[Item](id, "workitems.items").Columns(req.Col)        // rejected
+//	rbac.For[Item](id, "workitems.items").Columns(strings.Join(c, ",")) // rejected
+//
+// The analyzer at `apps/api/shared/lint/no_rbac_dynamic_clause.go`
+// rejects every non-literal Columns argument at lint time, alongside the
+// same gate on Where's first argument and For's second argument. Runtime
+// validation is impossible — the SQL string is opaque to Go by the time
+// it reaches build. Bypassing the analyzer (e.g. //nolint suppression)
+// on this method is forbidden and a code-review failure.
+//
+// An empty call (`Columns()`) or a call with an all-blank list is
+// recorded as an error and surfaces at Run time; the receiver is still
+// returned so fluent chains do not crash.
+func (q *ScopedQuery[T]) Columns(cols ...string) *ScopedQuery[T] {
+	if q == nil {
+		return q
+	}
+	if q.err != nil {
+		return q
+	}
+	if len(cols) == 0 {
+		q.err = errors.New("rbac: Columns called with no columns")
+		return q
+	}
+	for _, c := range cols {
+		if strings.TrimSpace(c) == "" {
+			q.err = errors.New("rbac: Columns called with an empty column identifier")
+			return q
+		}
+	}
+	q.columns = append(append([]string(nil), q.columns...), cols...)
+	return q
+}
+
 // Run executes the assembled query and scans rows into a []T. It is a
 // fatal builder error (ErrMissingScope) if the receiver was not
 // produced by For. Any error captured during fluent construction is
 // surfaced here.
 //
 // Row scanning uses reflection: T must be a struct whose exported
-// fields correspond, in declaration order, to the columns selected by
-// `SELECT * FROM <table>`. Mismatched column counts produce a
-// structured error. P01 keeps the SELECT shape implicit (`*`) — future
-// phases may add an explicit Columns([]string) hook without breaking
-// the locked surface.
+// fields correspond, in declaration order, to the columns projected by
+// the SELECT. By default the projection is `SELECT * FROM <table>`; when
+// Columns has been called, it is the explicit ordered list instead. The
+// scanned columns MUST line up positionally with T's exported fields in
+// either shape; a mismatched column count produces a structured error.
+// The explicit Columns([]string) hook (round-17, unblock-8xb.8) was
+// anticipated here and added without breaking the locked surface — it is
+// optional and additive.
 //
 // Run is not on the API-key hot path (SPEC §4.3.2 short-circuits via a
 // direct key_prefix lookup); reflection cost is acceptable for the
@@ -428,7 +519,19 @@ func (q *ScopedQuery[T]) Run(ctx context.Context) ([]T, error) {
 // directly via the unexported buildForTest hook.
 func (q *ScopedQuery[T]) build() (string, []any) {
 	var sb strings.Builder
-	sb.WriteString("SELECT * FROM ")
+	sb.WriteString("SELECT ")
+	if len(q.columns) == 0 {
+		// Default projection — every consumer that maps T 1:1 to the
+		// full table keeps this shape (unblock-8xb.8).
+		sb.WriteString("*")
+	} else {
+		// Explicit ordered projection set via Columns. Each identifier
+		// is a compile-time string constant (the §11.3 analyzer
+		// enforces it) and is concatenated verbatim — SQL identifiers
+		// have no bind channel.
+		sb.WriteString(strings.Join(q.columns, ", "))
+	}
+	sb.WriteString(" FROM ")
 	sb.WriteString(q.table)
 	sb.WriteString(" WHERE ")
 	sb.WriteString(q.scopeClause)

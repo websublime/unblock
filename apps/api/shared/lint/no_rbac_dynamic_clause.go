@@ -1,6 +1,6 @@
 // no_rbac_dynamic_clause.go — second project-local analyzer for the
 // unblock backend. Enforces SPEC §10.1's injection-safety invariant on
-// the rbac typed query builder against TWO call shapes:
+// the rbac typed query builder against THREE call shapes:
 //
 //   - `(*encore.app/shared/rbac.ScopedQuery[T]).Where(clause, args...)`
 //     — first argument (clause, index 0) MUST be a compile-time string
@@ -12,10 +12,17 @@
 //     predicate (`<table>.org_id = $1`); a runtime value rewrites both
 //     sinks and silently bypasses tenant isolation, exactly the same
 //     class of footgun Where guards against.
+//   - `(*encore.app/shared/rbac.ScopedQuery[T]).Columns(cols...)` —
+//     EVERY variadic argument (each column identifier) MUST be a
+//     compile-time string constant (unblock-8xb.8). Each identifier is
+//     concatenated verbatim into the SELECT projection; like the table,
+//     a SQL identifier has no bind channel, so a runtime column value is
+//     an injection sink. Round-17 / SPEC §11.3 extends the invariant to
+//     this third sink.
 //
 // Every runtime value flows through args... (Where) or is forbidden
-// outright (For has no positional bind channel for table — table is a
-// SQL identifier, not a value).
+// outright (For's table and Columns' identifiers have no positional bind
+// channel — they are SQL identifiers, not values).
 //
 // Why a static analyzer (and not a runtime check, and not a wrapper
 // type):
@@ -100,6 +107,12 @@ const rbacPackagePath = "encore.app/shared/rbac"
 // rbac.ScopedQuery[T] whose first argument the analyzer guards.
 const rbacWhereMethod = "Where"
 
+// rbacColumnsMethod is the SPEC §10.1 method name on rbac.ScopedQuery[T]
+// (round-17, unblock-8xb.8) whose EVERY variadic argument the analyzer
+// guards. Like Where it is a method on the typed receiver, so it
+// resolves through pass.TypesInfo.Selections.
+const rbacColumnsMethod = "Columns"
+
 // rbacForFunc is the locked SPEC §10.1 package-level constructor name on
 // rbac whose SECOND argument (table) the analyzer guards. For is
 // generic, so the AST shape at the call site is
@@ -110,12 +123,13 @@ const rbacForFunc = "For"
 // golangci-lint module-plugin loader picks this up via the cmd/
 // entry point. Despite the file/registration name retaining the
 // historical "clause" suffix (kept stable to avoid churning the
-// golangci-lint custom-binary registration), the analyzer guards both
-// `rbac.ScopedQuery.Where` (clause, arg index 0) and `rbac.For` (table,
-// arg index 1). The Doc string is the authoritative scope.
+// golangci-lint custom-binary registration), the analyzer guards
+// `rbac.ScopedQuery.Where` (clause, arg index 0), `rbac.For` (table,
+// arg index 1), and `rbac.ScopedQuery.Columns` (every variadic column
+// arg). The Doc string is the authoritative scope.
 var NoRbacDynamicClauseAnalyzer = &analysis.Analyzer{
 	Name:     "no_rbac_dynamic_clause",
-	Doc:      "rejects runtime-constructed string arguments to rbac.ScopedQuery.Where (clause, arg 0) and rbac.For (table, arg 1); both MUST be a Go string literal or untyped string constant (SPEC §10.1, unblock-tv8.33, unblock-tv8.35)",
+	Doc:      "rejects runtime-constructed string arguments to rbac.ScopedQuery.Where (clause, arg 0), rbac.For (table, arg 1), and rbac.ScopedQuery.Columns (every variadic column); all MUST be a Go string literal or untyped string constant (SPEC §10.1/§11.3, unblock-tv8.33, unblock-tv8.35, unblock-8xb.8)",
 	Run:      runNoRbacDynamicClause,
 	URL:      "https://github.com/websublime/unblock/blob/main/docs/specs/01-spec-backend-mvp.md#101-rbac-pkgrbac-nfr-2",
 	Requires: nil,
@@ -170,6 +184,23 @@ func runNoRbacDynamicClause(pass *analysis.Pass) (interface{}, error) {
 					first := call.Args[0]
 					if !isCompileTimeStringConstant(pass.TypesInfo, first) {
 						pass.ReportRangef(first, "rbac.Where: first argument must be a Go string literal or untyped string constant; runtime values MUST flow through args... — see SPEC §10.1 / unblock-tv8.33")
+					}
+					return true
+				}
+
+				// Detection path C: method call on
+				// (*rbac.ScopedQuery[T]).Columns. Columns is variadic
+				// (cols ...string) and has NO bind channel — EVERY
+				// argument is a SQL identifier sink, so every variadic
+				// argument MUST be a compile-time string constant. Like
+				// Where, the Fun is a bare SelectorExpr (Columns is not
+				// generic) and the receiver resolves through Selections.
+				if sel.Sel != nil && sel.Sel.Name == rbacColumnsMethod &&
+					isRbacScopedQueryReceiver(pass.TypesInfo, sel) {
+					for _, arg := range call.Args {
+						if !isCompileTimeStringConstant(pass.TypesInfo, arg) {
+							pass.ReportRangef(arg, "rbac.Columns: every column argument must be a Go string literal or untyped string constant; a runtime column identifier breaches the SELECT projection — see SPEC §10.1/§11.3 / unblock-8xb.8")
+						}
 					}
 					return true
 				}

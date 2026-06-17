@@ -21,15 +21,19 @@ import (
 )
 
 // itemColumnList is the canonical column projection for workitems.items
-// reads that do not go through rbac.For (e.g. nested fetches in
-// GetTrail). The order MUST match itemRow's field declaration order.
+// reads. The order MUST match itemRow's field declaration order.
 // Nullable columns are scanned into *string targets; COALESCE is
 // avoided so pgx's nullable-text path is exercised directly.
 //
-// rbac.For uses `SELECT *` so any column-order drift between the
-// migration and itemRow would surface as scan errors in rbac.For's
-// reflection path — keep them in sync. FTS is intentionally excluded
-// here (direct queries do not need it).
+// Both direct SELECTs (e.g. nested fetches in GetTrail) AND the
+// rbac.For[itemRow] read RPCs use this list: the rbac reads pass it via
+// `.Columns(itemColumnList)` so the SELECT projection excludes the
+// generated `fts tsvector` column. `fts` MUST stay excluded — the
+// Encore pgx runtime delivers it in binary format (OID 3614) with no
+// scan-plan into any Go type, so projecting it fails any populated scan
+// (SPEC §3.4 / §10.1, unblock-8xb.8). Any column-order drift between
+// the migration and itemRow surfaces as a scan error in rbac.For's
+// reflection path — keep this list, itemRow, and the migration in sync.
 const itemColumnList = `id, org_id, project_id, milestone_id, parent_id, discovered_from_id,
 	type, title, body, status, priority, pipeline_stage,
 	agent_kind, impl_state, review_state, qa_state, pipeline_state,
@@ -37,11 +41,15 @@ const itemColumnList = `id, org_id, project_id, milestone_id, parent_id, discove
 	claimed_at, is_ready, milestone_assigned_at, milestone_assigned_by,
 	created_at, updated_at, closed_at`
 
-// itemRow mirrors workitems.items column order verbatim (per migration
-// 0040_workitems.up.sql lines 46-135 + the post-ALTER fts column).
-// rbac.For uses `SELECT * FROM workitems.items` and scans by ordinal,
-// so this shape MUST match the schema's column declaration order
-// including the trailing `fts` tsvector column added by ALTER TABLE.
+// itemRow mirrors the workitems.items columns projected by
+// itemColumnList, in declaration order (per migration
+// 0040_workitems.up.sql lines 46-135). The rbac.For[itemRow] read RPCs
+// pass `.Columns(itemColumnList)` and scan by ordinal, so this shape
+// MUST match itemColumnList exactly. The generated trailing `fts`
+// tsvector column is DELIBERATELY NOT projected (and therefore not a
+// field here): the Encore pgx runtime delivers it in binary format
+// (OID 3614) with no scan-plan into any Go type, so projecting it would
+// fail any populated scan (SPEC §3.4 / §10.1, unblock-8xb.8).
 type itemRow struct {
 	ID                  string
 	OrgID               string
@@ -71,14 +79,6 @@ type itemRow struct {
 	CreatedAt           time.Time
 	UpdatedAt           time.Time
 	ClosedAt            *time.Time
-	// FTS is the generated tsvector column appended by ALTER TABLE in
-	// 0040_workitems.up.sql line 151-155. rbac.For uses SELECT * which
-	// projects it; pgx v5.7 has no registered tsvector type, so the
-	// driver delivers the text representation as a raw byte slice.
-	// The field is unused downstream — it exists only to keep the
-	// ordinal positions aligned with the migration so rbac.For's
-	// reflection-based scanner does not error on column count.
-	FTS []byte
 }
 
 // stateRow is the lightweight projection used by SetStateColumns to

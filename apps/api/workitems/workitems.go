@@ -1287,6 +1287,7 @@ func Get(ctx context.Context, id string) (*Item, error) {
 		return nil, &errs.Error{Code: errs.Unauthenticated, Message: "no caller identity"}
 	}
 	rows, err := rbac.For[itemRow](identity, "workitems.items").
+		Columns(itemColumnList).
 		Where("id = $1", id).
 		Run(ctx)
 	if err != nil {
@@ -1343,6 +1344,7 @@ func GetState(ctx context.Context, req *GetStateRequest) (*GetStateResponse, err
 	// item_id from another org surfaces as NotFound here, never as a
 	// stale row leak to the MCP wire.
 	itemRows, err := rbac.For[itemRow](identity, "workitems.items").
+		Columns(itemColumnList).
 		Where("id = $1", req.ItemID).
 		Run(ctx)
 	if err != nil {
@@ -1414,6 +1416,7 @@ func GetTrail(ctx context.Context, req *GetTrailRequest) (*Trail, error) {
 
 	// Fetch the item with org-scope predicate.
 	rows, err := rbac.For[itemRow](identity, "workitems.items").
+		Columns(itemColumnList).
 		Where("id = $1", req.ItemID).
 		Run(ctx)
 	if err != nil {
@@ -2439,7 +2442,8 @@ func List(ctx context.Context, req *ListRequest) (*ListResponse, error) {
 	// (created_at, id). We pass cursor as a string "ULID|RFC3339"; an
 	// empty Cursor means first page. For P01 we use a simpler
 	// id-only cursor (ULIDs are time-sortable, so id alone suffices).
-	q := rbac.For[itemRow](identity, "workitems.items")
+	q := rbac.For[itemRow](identity, "workitems.items").
+		Columns(itemColumnList)
 	if req.ProjectID != "" {
 		q = q.Where("project_id = $1", req.ProjectID)
 	}
@@ -2624,6 +2628,7 @@ func Ready(ctx context.Context, req *ReadyRequest) (*ReadyResponse, error) {
 	// builder to filter predicates only; this mirrors the same trick
 	// used by workitems.List for its own ORDER BY.
 	q := rbac.For[itemRow](identity, "workitems.items").
+		Columns(itemColumnList).
 		Where("is_ready = true").
 		Where("status = 'Ready'").
 		Where("closed_at IS NULL")

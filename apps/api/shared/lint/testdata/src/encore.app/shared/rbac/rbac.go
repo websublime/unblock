@@ -51,6 +51,13 @@ func (q *ScopedQuery[T]) Where(_ string, _ ...any) *ScopedQuery[T] {
 	return q
 }
 
+// Columns mirrors the SPEC §10.1 round-17 signature (unblock-8xb.8). The
+// analyzer flags every non-literal variadic argument at call sites of
+// THIS method.
+func (q *ScopedQuery[T]) Columns(_ ...string) *ScopedQuery[T] {
+	return q
+}
+
 // Run mirrors the locked SPEC §10.1 signature so chained call sites
 // compile.
 func (q *ScopedQuery[T]) Run(_ context.Context) ([]T, error) {
