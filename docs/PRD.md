@@ -712,7 +712,11 @@ None at PRD time. All eight discovery questions are resolved in §1–§12 and t
 | P04 | mister-anderson plugin renderer (Layer 2 + 3) | v1.0 | New work, `docs/SPEC.md` (architect) |
 | P05 | Astro web (kanban + graph + roadmap + comments) | **v1.1** (line-ui-blocked) | New work, `docs/SPEC.md` (architect) |
 
-### 14.4 Competitive context
+### 14.4 Related products
+
+- **`unblock-agentic`** — a **separate, post-v1.0 control-plane product** (own crate `crates/unblock-agentic`): a local reconciler daemon that parallelises the mister-anderson pipeline over the `://unblock` dependency DAG. It is **additive** on top of the backend MCP surface and the `unblock-render` packaged plugin, it is **not part of the v1.0 P01–P04 scope**, and its own P0–P3 phase ladder is distinct from the P01–P05 phases above. See [docs/agentic/PRD.md](./agentic/PRD.md).
+
+### 14.5 Competitive context
 
 - **GitHub Issues / Linear / Jira** — flat issue lists with link-metadata dependencies. No computable ready set. No structured agent-first MCP surface. No pipeline enforcement.
 - **`bd` (beads)** — provider-agnostic, dev-PM-style local tool. Not a runtime product; used inside this repo as a developer tool (per `feedback_bd_is_dev_tool_not_product`). `://unblock` is the GitHub-backed alternative for shipped products.
