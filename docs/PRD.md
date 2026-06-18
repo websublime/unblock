@@ -577,6 +577,17 @@ The project ships in four sequential phases plus a renderer phase. The AST CLI s
 - Layer 3 enforcement: agent prompt structure carries explicit BLOCK conditions matching the MCP state machine.
 - Exit criterion: an attempt to bypass the pipeline (e.g. mark `done` without a `kind=review, status=success` comment) is rejected by the MCP server (Layer 1, P02), the post-dispatch hook flags it (Layer 2), and the agent prompt's BLOCK condition would have refused to issue the call (Layer 3). All three layers agree.
 
+### Provisioning BFF — minimal web slice (pulled forward, distinct from P05)
+
+A **minimal provisioning BFF** is pulled forward as a small early web slice, **decoupled from the line-ui-gated rich views** (kanban / dependency graph / roadmap), which **stay at v1.1 (P05)**. Scope is deliberately narrow:
+
+- OAuth login (OAuth2+PKCE to GitHub or GitLab, BFF discipline per FR-18 / NFR-4 — HttpOnly cookie on the Astro origin, no Encore credential in the browser).
+- Create-org.
+- Create-project.
+- Issue-API-key (via the existing `auth.IssueAPIKey` private RPC, called server-side through an Astro Action).
+
+This slice uses **only** forms and basic navigation — it does **not** depend on the rich line-ui primitives that gate P05 (R-8). It exists so a human can self-serve org / project / credential creation in production (the prerequisite for onboarding any API-key consumer, including the post-v1 `unblock-agentic` daemon — see §14.4 and `docs/agentic/PRD.md`). The full P05 rich views remain at v1.1, gated on line-ui v1. **Local / headless provisioning does not use this BFF** — it uses a seed against local `encore run`.
+
 ### P05 — Astro web (ships at v1.1)
 
 - Astro 5 + line-ui on Cloudflare Pages.
@@ -629,6 +640,7 @@ The project ships in four sequential phases plus a renderer phase. The AST CLI s
 - **GitLab** — OAuth identity at v1.0; full integration deferred to v1.1.
 - **Anthropic API** — used only by the ROI harness for the AST CLI release-gate measurement; not a runtime dependency of the product.
 - **`line-ui` / `vitamin` (websublime-internal project, repo `/Users/ramosmig/Public/WS-Labs/vitamin`)** — headless Web Components library powering the Astro web client (P05). **Hard dependency for P05** — the vitamin repo must reach feature-complete v1 before P05 implementation begins. Not external in the vendor sense, but external in the build-pipeline sense — line-ui has its own release cadence in its own repo.
+- **Provisioning BFF (minimal web slice, §8)** — the prerequisite for **human production onboarding**: creating an org, a project, and credentials (OAuth login + create-org + create-project + issue-API-key via `IssueAPIKey`). It is the production onboarding path for **any** API-key consumer, **including the post-v1 `unblock-agentic` daemon** (§14.4). It is **decoupled from line-ui** (forms + navigation only) and is therefore **not** gated on line-ui v1; the **full P05 rich views** (kanban / dependency graph / roadmap) **remain gated on line-ui v1 (R-8)**. **Local / headless provisioning is web-independent** — it uses a seed against local `encore run`.
 
 ### 10.2 Tech stack constraints
 

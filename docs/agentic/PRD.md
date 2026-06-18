@@ -1,6 +1,6 @@
 # PRD: `unblock-agentic` — DAG-Driven Control Plane for the mister-anderson Pipeline
 
-**Status:** APPROVED *(2026-06-18 — operator-approved after the review-edit pass: deployment reads PENDING everywhere; `P01–P04` launch scope vs `P01–P05` all-phases disambiguated; canonical FR-18 reshape set; `claim` is lead-only and the daemon never claims; FR-23 Approve = `set_state(review_state=approved) → close`; Success Metrics + Out-of-Scope sections added.)*
+**Status:** APPROVED *(2026-06-18 — operator-approved after the review-edit pass: deployment reads PENDING everywhere; `P01–P04` launch scope vs `P01–P05` all-phases disambiguated; canonical FR-18 reshape set; `claim` is lead-only and the daemon never claims; FR-23 Approve = `set_state(review_state=approved) → close`; Success Metrics + Out-of-Scope sections added. **Then implemented six post-approval SPEC-decision locks (SQ-1…SQ-5 + transport)**: daemon-per-ORG / multi-project (SQ-1); key minting via the existing `IssueAPIKey` from an encore-internal seed + KEYCHAIN, not env (SQ-2); severity-driven findings topology, no auto-blocking-edges (SQ-3); chat-first report/approval via a local control-MCP (SQ-4); pause + fail-fast + backoff degraded mode (SQ-5); stdio per-session shim over a unix socket for BOTH the proxy and the control interface (transport). These edits IMPLEMENT locked decisions and resolve the matching §13 Open Questions — they do not re-open product scope.)*
 **Author:** Grace (product-manager)
 **Date:** 2026-06-18
 **Companion:** [docs/MANIFESTO.md](../MANIFESTO.md) (APPROVED, 2026-05-07) — the 8 governing Laws this product respects
@@ -32,7 +32,7 @@ The concrete failure modes observed today:
 - **OBJ-2.** Operate as a **reconciler**: a single idempotent control loop that compares desired state (the DAG) against observed state (`claude agents --json` + `://unblock` + buffered hooks), acts on the diff, and self-heals after a missed event or a daemon restart — at **work-item granularity**, never trusting in-memory state as truth.
 - **OBJ-3.** Verify completion **via the work-item artifacts and the comment trail, never the agent's self-report**, so an orchestrator cannot be fooled by a confabulated "done".
 - **OBJ-4.** Enforce **single-writer to the `://unblock` write surface** as an orchestration convention — only the team lead talks to `://unblock` (append-only), the reshape set is daemon-only, agents are credential-free, worktree isolation is the real containment — without requiring a backend change.
-- **OBJ-5.** Give the single operator **human gates with a formal close-and-cascade**, an explicit `needs-input` escape valve distinct from a planned gate, and a report surface to Approve / Rework / Waive — keeping the human in the loop without making the human the bottleneck for the parallel parts.
+- **OBJ-5.** Give the single operator **human gates with a formal close-and-cascade**, an explicit `needs-input` escape valve distinct from a planned gate, and a **chat-first report/approval surface** — a local control-MCP consumed by the operator's own Claude Code session, so gates / needs-input / status appear in the chat and the operator acts by telling Claude to Approve / Rework / Waive / Answer (SQ-4) — keeping the human in the loop without making the human the bottleneck for the parallel parts.
 - **OBJ-6.** **Delegate all Claude Code configuration to `unblock-render`** (the daemon supplies `--plugin-dir`, never re-authors `.claude/`), so the three-layer pipeline enforcement (Manifesto Law 8) survives under parallel orchestration.
 
 ---
@@ -41,7 +41,7 @@ The concrete failure modes observed today:
 
 ### 3.1 Primary persona — the Operator (human-in-the-loop)
 
-A single operator (Miguel) who starts the daemon, approves or reworks or waives gates, answers `needs-input` questions, and tunes the concurrency budget. The operator does **not** dispatch agents by hand or step the pipeline; they supervise a fleet that the daemon schedules. The daemon runs **locally, in the operator's name** — its `://unblock` keys are issued to the operator's real user, not to a synthetic service principal (RD-3). Multi-operator and governance are explicitly post-v1.
+A single operator (Miguel) who starts the daemon, approves or reworks or waives gates, answers `needs-input` questions, and tunes the concurrency budget. The operator does **not** dispatch agents by hand or step the pipeline; they supervise a fleet that the daemon schedules. The daemon runs **locally, in the operator's name** — its `://unblock` keys are issued to the operator's real user, not to a synthetic service principal (RD-3). **One daemon serves one ORG and manages ALL of that org's projects** (SQ-1): the org-scoped API key carries a per-request `project_id`, so the daemon schedules across the org's full project set rather than a single project. Multi-operator, multi-org-per-daemon, and governance are explicitly post-v1.
 
 ### 3.2 Secondary persona — the discipline teams (autonomous workers)
 
@@ -53,9 +53,16 @@ The eight mister-anderson teams the daemon dispatches. Each team is a Claude Cod
 
 `unblock-agentic` is a **reconciler / control-plane daemon** that sits between the operator and the running agent fleet. Three layers:
 
-1. **Control plane** — the `unblock-agentic` daemon: the reconciler (`reconcile()`), the orchestration ledger, the local MCP proxy, and the hook-sink. This is the daemon's own private state and logic.
+1. **Control plane** — the `unblock-agentic` daemon: the reconciler (`reconcile()`), the orchestration ledger, the per-team MCP proxy, the operator control-MCP, and the hook-sink. This is the daemon's own private state and logic.
 2. **Discipline-team layer** — the eight teams, each a Claude Code background agent-team (a coordinator lead + ≥3 teammates), grouped into **Areas** (the gate/pool grouping — see §7).
 3. **Shared substrate** — `://unblock` (the dependency DAG, work-item state, the comment trail, findings) reached over remote MCP, plus per-area-task **git worktrees** for isolation. The substrate is **local `encore run`** (`127.0.0.1:9900`, local app id `unblock-sco2`) for P0–P2; cutover to **Encore Cloud** is **PENDING** and happens once the backend is **DEPLOYED** (`://unblock` epic E-1 / bead `unblock-8xb.5.1`) — **the backend is not deployed today** (see §11 + R-6).
+
+**Three interfaces (SQ-4 + transport).** The daemon exposes three distinct interfaces, all transported as **stdio per-session shims bridging to the daemon over a unix socket** (see §5.5):
+1. **per-team PROXY** — the **data plane** (agents → backend): each team session reaches `://unblock` append-only through its team-scoped proxy shim.
+2. **CONTROL** — the **operator → daemon** plane: a **local control-MCP** consumed by the operator's *own* Claude Code session, so gates / needs-input / status surface **in the chat** and the operator acts by telling Claude (control tools: status / pending / approve / reject / waive / answer). OS desktop notifications ping the operator when attention is needed (the daemon cannot push into a running session).
+3. **optional HTML dashboard** — a **secondary / post-v1** loopback HTML view; `apps/web` integration is **optional, post-v1**.
+
+This is **Law-4-clean**: a local Claude session talks to a local daemon; no backend credential ever reaches a browser.
 
 ```mermaid
 flowchart TB
@@ -63,7 +70,8 @@ flowchart TB
     subgraph CP["Control plane — unblock-agentic daemon (operator's name, RD-3)"]
         REC["reconcile()<br/>desired vs observed → diff → act"]
         LED["ledger<br/>(orchestration only:<br/>assignments · captured session-ids ·<br/>rework counters · budget)"]
-        PRX["local MCP proxy<br/>per-team append keys + project_id"]
+        PRX["per-team MCP proxy<br/>stdio shim → unix socket<br/>per-team append keys + project_id"]
+        CTL["control-MCP (operator)<br/>unblock-agentic ctl → unix socket<br/>status·pending·approve·reject·waive·answer"]
         SNK["hook-sink<br/>(loopback; hints)"]
         KEY["keys<br/>1 reshape + N per-team append<br/>(never in a worktree)"]
     end
@@ -74,23 +82,25 @@ flowchart TB
         UNB["://unblock — DAG + state + comment trail + findings<br/>(local encore run → Encore Cloud)"]
         WT["git worktrees (per area-task)"]
     end
-    OP --> REC
+    OP -->|"own Claude Code session (chat)"| CTL
+    CTL --> REC
     REC -->|"dispatch lead"| LEAD
     LEAD -.->|"hooks (hints)"| SNK
-    LEAD -->|"MCP append-only, credential-free"| PRX
+    LEAD -->|"MCP append-only, credential-free (stdio shim → unix socket)"| PRX
     PRX -->|"Bearer team key + project_id"| UNB
     REC -->|"reshape: create · add_dependency · promote · close (own key, OUTSIDE the proxy)"| UNB
     UNB -->|"ready set + state + comment trail"| REC
     LEAD --- WT
-    REC --> OP
+    REC -->|"gates · needs-input · status + OS notification"| CTL
+    CTL --> OP
     KEY -.-> PRX
     KEY -.-> REC
 ```
 
 **Governing-Law alignment.** The daemon must respect the eight Manifesto Laws (full mapping in §10.3 below). The load-bearing ones:
 
-- **Law 3 (Postgres is the source of truth).** The daemon's ledger is orchestration state, never domain truth; on conflict, `://unblock` + `claude agents --json` win over buffered hooks. Backend-unreachable is a degraded mode the daemon must handle, not work around (see Open Questions §13).
-- **Law 4 (BFF is structural).** The daemon holds the keys and POSTs server-side; agents are credential-free. The report/approval surface must not put a backend credential in a browser (the surface shape is an Open Question — §13).
+- **Law 3 (Postgres is the source of truth).** The daemon's ledger is orchestration state, never domain truth; on conflict, `://unblock` + `claude agents --json` win over buffered hooks. Backend-unreachable is a degraded mode the daemon handles, not works around — **resolved by SQ-5**: pause new dispatches + backoff, fail-fast in-flight writes (no buffering/replay), and re-converge from truth on recovery (NFR-7).
+- **Law 4 (BFF is structural).** The daemon holds the keys and POSTs server-side; agents are credential-free. The report/approval surface must not put a backend credential in a browser — **resolved by SQ-4**: the primary surface is a **local control-MCP** consumed by the operator's own Claude Code session (chat-first), so no browser credential is ever in play (the optional HTML dashboard is loopback, secondary, post-v1).
 - **Law 6 (decoupled deliverables share no runtime state).** `unblock-agentic` shares **zero runtime state** with `unblock-code` (the AST CLI). Its data plane is exclusively `://unblock` via MCP. The AST CLI's "no daemon, no watcher" invariant (root FR-27) is an AST-CLI-only property and does not contradict this product (see §13).
 - **Law 8 (three-layer pipeline enforcement).** The daemon's Stop-hook sink is **additive** to the renderer's `verify-state` hook; it dispatches renderer-produced personas; it never re-authors `.claude/`. All three enforcement layers survive parallel orchestration (see §9, T3).
 
@@ -110,16 +120,16 @@ FR numbering is local to this PRD (it does not continue the root `docs/PRD.md` s
 
 ### 5.2 Scheduling
 
-- **FR-6.** `://unblock`'s `ready` set is the **readiness oracle**. The daemon does **not** reimplement topological scheduling — it reads readiness from the DAG.
-- **FR-7.** The daemon adds **routing** (work item → team, by stage/labels), a **concurrency ceiling** (see §5.9), **human gates** (§5.6), and **priority** on top of `ready`.
+- **FR-6.** `://unblock`'s `ready` set is the **readiness oracle**. The daemon does **not** reimplement topological scheduling — it reads readiness from the DAG. Because one daemon serves the org's many projects (SQ-1), `ready` is **polled per-project across the org's project set** (the org-scoped key with a per-request `project_id`); the daemon reconciles a per-project ready frontier, never a single global one.
+- **FR-7.** The daemon adds **routing** (work item → team, by stage/labels), a **concurrency ceiling** (see §5.10), **human gates** (§5.6), and **priority** on top of `ready`.
 - **FR-8.** Completing a work item (its artifacts verified, its state written) propagates through the DAG: closing a blocker unblocks its dependents. The daemon does not hand-walk the graph; the backend cascade plus the daemon's `promote` (FR-21) recover newly-ready items.
 
 ### 5.3 Dispatch / session birth
 
-- **FR-9.** A dispatch is at the granularity of an **area-task** (a work item routed to its team). Dispatch creates a **git worktree** named after the work item — the unit of isolation, config, and correlation.
+- **FR-9.** A dispatch is at the granularity of an **area-task** (a work item routed to its team). Dispatch creates a **git worktree** that is **project-qualified** — named `worktree-<project>-<wi>` (SQ-1: because one daemon serves the org's many projects, the worktree name carries the project to keep cross-project area-tasks isolated and unambiguous). The worktree is the unit of isolation, config, and correlation.
 - **FR-10.** The daemon provisions per dispatch: the rendered plugin (via `--plugin-dir`, **never** re-authoring `.claude/`), a curated MCP set (the unblock proxy route for the lead plus role-appropriate read MCPs), and a **brief** composed from `://unblock`. The brief **MUST point to the spec/plan and the comment trail and NEVER inline an authoritative copy** (the bead-description-is-not-the-spec rule).
 - **FR-11.** The daemon **dispatches the lead** as a background agent-team. `--bg` **IGNORES (warns at) a caller-supplied `--session-id` and generates its own** (warn-and-proceed, not a hard error), so the daemon **captures** the generated session id (from `--bg` output / `claude agents --json`), correlates it by `--name`/`--cwd`, and persists it in the ledger.
-- **FR-12.** Dispatch **records the assignment in the ledger immediately** (idempotency; prevents double-dispatch). The ledger is orchestration-only state — assignments, captured session-ids, rework counters, budget — never domain truth.
+- **FR-12.** Dispatch **records the assignment in the ledger immediately** (idempotency; prevents double-dispatch). The ledger is orchestration-only state — assignments, captured session-ids, rework counters, budget — never domain truth. Because one daemon serves the org's many projects (SQ-1), every ledger record is **keyed by `(project, wi)`** (not by `wi` alone), so the same work-item number across two projects never collides.
 - **FR-13.** The daemon **observes** via hooks (`SessionStart`, `Stop`, `SubagentStop`, `TeammateIdle`, `TaskCompleted`) plus `claude agents --json`, and **verifies completion via the work-item artifacts and the comment trail — NEVER the agent's self-report.**
 - **FR-14.** The daemon must detect a headless session **stalled in `state:blocked`** (a too-tight permission allowlist with no human to approve) as a **failure**, and either re-dispatch or surface `needs-input` (§5.6). The daemon uses `--permission-mode default` with a complete `--allowedTools` allowlist; it **never** launches a lead with `bypassPermissions` / `--dangerously-skip-permissions` (that mode propagates to every teammate).
 - **FR-15.** **Permissions = authority.** The provisioned `--allowedTools` allowlist defines each team's capability boundary. Agents cannot escalate beyond it. The allowlist denies `Edit`/`Write` on `.mcp.json` and `.claude/settings` (anti-escape), and `--strict-mcp-config` restricts the session to exactly the daemon-provisioned MCP set (which INCLUDES the useful role MCPs — it is "only the daemon-provisioned set", not "only unblock").
@@ -136,10 +146,11 @@ FR numbering is local to this PRD (it does not continue the root `docs/PRD.md` s
   - `claim` is **NOT** in the reshape set. `claim` is a **lead-only append-surface action** (FR-19, FR/identity-2): the team lead claims its own area-task via the proxy. **The daemon never claims.**
   - `milestones` and `labels` are **reshape-key-eligible but NOT exercised by any v1 team — reserved.** They have no owning team or FR in this PRD; they are listed only to fix the reshape capability boundary, and the SPEC must not wire them to any team route at v1.
 - **FR-19.** **Only the lead talks to `://unblock`**, and only on the **append-only** surface (`comment` / `set_state` / `claim`), via the local MCP proxy. **`claim` is lead-only:** the lead claims its OWN area-task (the gate or pool work item it was dispatched on) — this is the sole use of `claim` in the product, and the daemon never performs it. Teammates produce artifacts and `SendMessage` to the lead; teammates have **no** `://unblock` MCP route.
-- **FR-20.** The daemon **curates the MCP set per role**: the unblock proxy route (lead, append-only, key + `project_id` injected by the proxy) plus role MCPs (e.g. a docs MCP for Research, a design-system MCP for frontend Developers). The proxy is an **http per-path** route (`…/team/<team>`) that denies reshape and injects the per-team key and `project_id`. Single-writer is an **orchestration convention** enforced at the proxy + keys-never-in-a-worktree (credential-free) + the deny-Edit/Write rule of FR-15 — it is **not** a backend guarantee. Worktree isolation is the real containment; the proxy is a trust boundary, not a security boundary.
+- **FR-20.** The daemon **curates the MCP set per role**: the unblock proxy route (lead, append-only, key + `project_id` injected by the proxy) plus role MCPs (e.g. a docs MCP for Research, a design-system MCP for frontend Developers). **Transport — stdio per-session shim over a unix socket (NOT http-loopback).** The daemon provisions each session's `.mcp.json` to spawn a **thin stdio shim with the team baked in** — `unblock-agentic proxy --team <X> --session <id>` for agents — and the shim **bridges to the daemon over a UNIX SOCKET** (operator-only filesystem permissions). The daemon learns the team from **that connection** (not from a guessable URL path); the **key never touches a TCP socket** and **the shim never sees the key**; isolation is per-session. The shim/route denies reshape and injects the per-team key + `project_id` at the daemon side. **Security rationale:** an http-loopback-per-path proxy (`…/team/<team>`) would let an agent with `Bash` run `curl http://127.0.0.1:PORT/team/<otherteam>` and obtain **another team's injected key** → cross-team escape → broken single-writer; the stdio-per-session-over-unix-socket design **closes this** (no listening TCP port, team fixed by the connection, key never on the wire). Single-writer remains an **orchestration convention** enforced at the proxy + keys-never-in-a-worktree (credential-free) + the deny-Edit/Write rule of FR-15 — it is **not** a backend guarantee. Worktree isolation is the real containment; the proxy is a trust boundary, not a security boundary.
 
 ### 5.6 Human gates, needs-input, and reshape ownership
 
+- **FR-20a (report/approval surface — chat-first via the control-MCP, SQ-4).** The operator's surface for gates, needs-input, and status is the daemon's **local control-MCP**, consumed by the operator's **own Claude Code session**. **Transport** (same stdio-over-unix-socket model as the proxy, FR-20): the operator's `.mcp.json` spawns the control shim **`unblock-agentic ctl`**, which bridges to the daemon over the operator-only unix socket — no http-loopback, no listening TCP port. GatePending / NeedsInput / status appear **in the chat**; the operator acts by telling Claude, which calls the control tools **status / pending / approve / reject / waive / answer**. The daemon cannot push into a running session, so **OS desktop notifications** ping the operator when attention is needed. A loopback **HTML dashboard** is a **secondary, post-v1** view; `apps/web` integration is **optional, post-v1**. Wherever the verdict FRs below say "in the report", they mean **this control-MCP chat surface**.
 - **FR-21.** **The daemon owns `promote`** (daemon-only, outside the proxy). Each tick it promotes newly-created-unblocked items (`Backlog` + `is_ready` → `Ready`) and dependents that became `is_ready` after a blocker closed (the native cascade recovers `Blocked → Ready`, never `Backlog → Ready`).
 - **FR-22.** **A human gate is the phase-boundary work item, and that gate item IS the area-task the team works** (the lead is dispatched directly on it); downstream is blocked by a DAG edge. The gate has two distinct projections:
   - **GatePending** — a planned gate awaiting a human verdict, projected from "gate item + artifact-complete". During the work the **lead** (append, via proxy) **claims the gate item, sets `impl_state=done`, and posts `kind=completed`** to the trail; the daemon projects GatePending once that completed-artifact signal is present. No new backend state — `claimed_by_id` on a gate item is the team's per-team append key.
@@ -150,25 +161,32 @@ FR numbering is local to this PRD (it does not continue the root `docs/PRD.md` s
   There is **no `promote → claim` prefix** (the daemon never claims — FR-18/FR-19) and **no `qa_state=passed` step** (`close` never requires qa). The `close` fires the **native cascade** (Law 1 / FR-6) that unblocks dependents; the daemon then `promote`s any dependent left in `Backlog` (FR-21). The dependency edge **stays** as a record (no `remove_dependency`).
 - **FR-24.** **Reject** = keep the gate **open**, append a `kind=review, status=warning` comment, and **re-dispatch** (the rework counter increments; **3× → escalate to the human**).
 - **FR-25.** **Waive** = the Approve sequence (FR-23) plus a `severity=risk` finding recording the waived condition.
-- **FR-26.** **NeedsInput resolution.** The human answers in the report; the daemon **posts the answer** to the trail, sets `set_state(pipeline_state=running)`, and **re-dispatches** the area-task with the answer in the brief.
+- **FR-26.** **NeedsInput resolution.** The operator answers via the control-MCP `answer` tool in their own Claude Code session (FR-20a); the daemon **posts the answer** to the trail, sets `set_state(pipeline_state=running)`, and **re-dispatches** the area-task with the answer in the brief.
 - **FR-27.** **The rework counter** is derived from the comment trail (counting `kind=review` comments with `status=error`/`warning` on the item) — Law-3-clean, no schema change.
 
-### 5.7 reparent / promote scope
+### 5.7 Findings feedback topology (severity-driven — SQ-3)
 
-- **FR-28.** **`reparent` is out of scope at v1.** `parent_id` is write-once; there is no reparent or delete tool. Parentage is organizational and does **not** affect scheduling (scheduling uses dependency edges), so the DAG is parent-stable after first apply and the cost of omitting reparent is ≈ nil.
+- **FR-28.** **Findings are routed by SEVERITY, reusing the root PRD's severity catalogue (root §6.10 / §6.11) — and the daemon creates NO auto-blocking edges from findings.** Two routes:
+  - **High severity (CRITICAL review / BLOCKER QA)** → **rework via STATE, not a separate item**: the gate's review/QA outcome writes `review_state=needs_rework` (or a qa-fail), and the **daemon re-dispatches** the originating area-task (the FR-24 Reject / rework-counter machinery). No separate finding work item is created, and **no dependency edge is drawn** — rework is driven by state.
+  - **Lower severity (WARNING / MAJOR / RISK / SUGGESTION / MINOR / DEVIATION / EXTRA)** → tracked as a `type=finding` work item linked via `discovered_from_id` + `parent_id` (root §6.6), **INFORMATIONAL by default** — **no blocking edge** — and scheduled as **independent work** in its own right (it enters the ready queue like any other item once created).
+  - **The daemon NEVER auto-creates a blocking edge from a finding.** Blocking arises only from (a) the **human-gate Reject** verdict (FR-24, which keeps the gate open) or (b) the dependency edges the **Decomposition** team already drew as part of the desired DAG (FR-18). This keeps Law 1 clean: the graph's blocking structure is authored deliberately (decomposition + human gates), not synthesised reactively from findings.
 
-### 5.8 Renderer relationship (`unblock-render`)
+### 5.8 reparent / promote scope
 
-- **FR-29.** The daemon **delegates all Claude Code configuration to `unblock-render`** via `--plugin-dir <rendered plugin>`. It never re-authors `agents/`, `skills/`, `hooks/`, or the MCP config. The split (T1): the **renderer decides WHAT config to write**; the **daemon decides WHEN/WHERE, spawns, and reconciles**.
-- **FR-30.** The daemon's hook-sink is **additive** to the renderer's `verify-state` hook (T3). Law 8 Layer 2 (the post-dispatch validator) and Layer 3 (the personas' BLOCK conditions) survive parallel orchestration because the daemon dispatches renderer-produced personas and adds its own Stop hook without replacing the renderer's. Layer 1 (the backend validator) is parallelism-immune.
+- **FR-29.** **`reparent` is out of scope at v1.** `parent_id` is write-once; there is no reparent or delete tool. Parentage is organizational and does **not** affect scheduling (scheduling uses dependency edges), so the DAG is parent-stable after first apply and the cost of omitting reparent is ≈ nil.
 
-### 5.9 Concurrency budget
+### 5.9 Renderer relationship (`unblock-render`)
 
-- **FR-31.** At P1 the daemon enforces a **max-concurrent ceiling** and a **dispatch-admission rule** that uses the existing `://unblock` ready-queue ordering — even though the full budget *policy* (agent-slot accounting, per-project fairness, reserve, backpressure signals) is a P3 deliverable.
-- **FR-32.** When the ready set exceeds the ceiling, surplus work items **stay `Ready`** (an implicit queue ordered by priority + critical-path depth). There is **no preemption**.
-- **FR-33.** `inflight` is **recomputed from `claude agents --json` each pass**, never tracked as a running counter — a missed `Stop` event must not leak a slot.
+- **FR-30.** The daemon **delegates all Claude Code configuration to `unblock-render`** via `--plugin-dir <rendered plugin>`. It never re-authors `agents/`, `skills/`, `hooks/`, or the MCP config. The split (T1): the **renderer decides WHAT config to write**; the **daemon decides WHEN/WHERE, spawns, and reconciles**.
+- **FR-31.** The daemon's hook-sink is **additive** to the renderer's `verify-state` hook (T3). Law 8 Layer 2 (the post-dispatch validator) and Layer 3 (the personas' BLOCK conditions) survive parallel orchestration because the daemon dispatches renderer-produced personas and adds its own Stop hook without replacing the renderer's. Layer 1 (the backend validator) is parallelism-immune.
 
-### 5.10 Priority Classification
+### 5.10 Concurrency budget
+
+- **FR-32.** At P1 the daemon enforces a **max-concurrent ceiling** and a **dispatch-admission rule** that uses the existing `://unblock` ready-queue ordering. Because one daemon serves the org's many projects (SQ-1), the concurrency model is **two-dimensional**: an **org-wide ceiling** (the fleet-level cap) PLUS a **per-project quota** — the original `MAX_AGENTS_PER_PROJECT` — so a single busy project cannot starve the org's other projects (per-project fairness). At P1 the org-wide ceiling and the per-project quota are enforced as admission gates; the full budget *policy* (agent-slot accounting, the fairness *scheduler* across projects, reserve, backpressure signals) is a P3 deliverable. (This is the FR formerly numbered FR-31; renumbered after the SQ-3 findings FR was inserted.)
+- **FR-33.** When a ready frontier exceeds the org-wide ceiling **or** a project exceeds its per-project quota (SQ-1), surplus work items **stay `Ready`** (an implicit queue ordered by priority + critical-path depth, fair-shared across the org's projects). There is **no preemption**.
+- **FR-34.** `inflight` is **recomputed from `claude agents --json` each pass**, never tracked as a running counter — a missed `Stop` event must not leak a slot.
+
+### 5.11 Priority Classification
 
 | Requirement | Impact | Confidence | Effort | Category | Phase |
 |---|---|---|---|---|---|
@@ -177,11 +195,13 @@ FR numbering is local to this PRD (it does not continue the root `docs/PRD.md` s
 | FR-9–FR-15 (dispatch + verify-via-artifacts + permissions) | H | H | H | Must-have | P0/P1 |
 | FR-16–FR-17 (hook-sink, additive Stop hook) | H | H | M | Must-have | P0 |
 | FR-18–FR-20 (single-writer Model 2 + curated MCP proxy) | H | H | H | Must-have | P0 |
-| FR-21, FR-28 (daemon-owned promote; no reparent) | H | H | L | Must-have | P0/P2 |
+| FR-21, FR-29 (daemon-owned promote; no reparent) | H | H | L | Must-have | P0/P2 |
 | FR-22–FR-27 (gates, needs-input, rework counter) | H | M | H | Must-have | P2 |
-| FR-29–FR-30 (renderer delegation, additive hook) | H | M | M | Must-have | P1/P2 |
-| FR-31–FR-33 (concurrency ceiling; budget policy) | M | M | M | Performance | P1 (ceiling) / P3 (policy) |
-| HTML report with Approve/Rework/Waive | H | M | M | Performance | P2 |
+| FR-28 (findings feedback topology — severity-driven, no auto-edges) | H | M | M | Must-have | P1/P2 |
+| FR-30–FR-31 (renderer delegation, additive hook) | H | M | M | Must-have | P1/P2 |
+| FR-32–FR-34 (concurrency ceiling; budget policy) | M | M | M | Performance | P1 (ceiling) / P3 (policy) |
+| FR-20a control-MCP report surface (chat-first; status/pending/approve/reject/waive/answer + desktop notifications) | H | M | M | Must-have | P2 |
+| Optional loopback HTML dashboard / `apps/web` integration | L | M | M | Delight | post-v1 |
 
 ---
 
@@ -191,11 +211,16 @@ NFR numbering is local to this PRD.
 
 - **NFR-1 (robustness / self-healing).** A daemon restart is just a reconcile that re-reads truth (FR-5). The daemon **never trusts in-memory state as truth**; the ledger is rebuildable from `claude agents --json` + `://unblock` + persisted assignments. Bounded re-dispatch is the accepted cost of the no-resume-teammate limitation.
 - **NFR-2 (completion integrity).** Completion is verified against work-item artifacts and the comment trail — **never** the agent's self-report (Law-8 spirit; confabulation is a proven failure mode). A `state:blocked` headless session is treated as a failure, not as in-progress.
-- **NFR-3 (credential-free agents).** Agents never hold a `://unblock` credential. Keys live in the daemon/proxy and are never written into a worktree. The blast radius if a worktree somehow obtains a direct key is bounded precisely because the design is credential-free (worktree threat-model — see §13).
+- **NFR-3 (credential-free agents).** Agents never hold a `://unblock` credential. Keys live in the daemon/proxy — **stored in the OS keychain, never in environment variables** (SQ-2, FR/identity-6) because the daemon's env is inherited by the spawned `claude --bg` children and an env-var key would leak straight to the agents — and are never written into a worktree. The blast radius if a worktree somehow obtains a direct key is bounded precisely because the design is credential-free (worktree threat-model — see §13).
 - **NFR-4 (single-writer convention).** The `://unblock` write surface is single-writer by orchestration convention: only the lead appends, reshape is daemon-only, and the proxy denies reshape on team routes. This is **not** a backend guarantee — the backend's authorization does not branch on `agent_kind` (a verified backend fact, §10.4). Worktree isolation is the containment of record.
 - **NFR-5 (auditability).** Every `://unblock` action is attributable by **API-key label / `api_key_id`** (per-team append keys vs the daemon reshape key) via the `mcp.tool_calls.api_key_id` audit FK. Attribution is by ACTOR (label/key), with the operator's real user as the AUTHORITY axis (RD-3). The audit FK is nullable (`ON DELETE SET NULL`) and the daemon tolerates NULL.
 - **NFR-6 (idempotency).** All dispatch and act operations are idempotent (FR-2, FR-12); the ledger's assignment record prevents double-dispatch.
-- **NFR-7 (Law-3 degraded mode).** When `://unblock` is unreachable the daemon **pauses dispatch**, buffers/fail-safes in-flight signals, retries with backoff, and re-diffs on recovery. It never invents domain truth to work around an outage (degraded-mode shape — see §13).
+- **NFR-7 (Law-3 degraded mode — SQ-5).** When `://unblock` is unreachable the daemon enters a degraded mode that is **pause + fail-fast + backoff + re-converge from truth**:
+  - **Pause** new dispatches and **retry the reconcile tick with exponential backoff**.
+  - **Fail-fast** in-flight sessions' backend writes — **NO buffering / NO replay**: a write that didn't land = didn't happen; the affected area-task is simply **incomplete**.
+  - **Re-converge from truth on recovery**: the reconciler **re-reads truth, re-diffs, and re-dispatches incomplete area-tasks** (the restart invariant generalized — level-triggered, Kubernetes-controller style). It **NEVER advances state on assumption**.
+  - The degraded state is **surfaced via the control-MCP** (FR-20a) so the operator sees it in the chat.
+  This **supersedes** the earlier "buffer / fail-safe in-flight signals" wording: there is no buffering — fail-fast is the rule.
 - **NFR-8 (Claude-only).** The product targets the `claude` CLI exclusively (verified v2.1.178, 2026-06-17): `--bg` agent-teams, `claude agents --json` as the truth source, hooks, and the `unblock` plugin via `--plugin-dir`. No other agent harness is supported at v1.
 - **NFR-9 (single operator, local).** The daemon runs locally in the single operator's name (RD-3). Multi-operator, synthetic service principals, and governance are explicitly post-v1.
 - **NFR-10 (no bd in the runtime).** `bd`/beads/Dolt is the orchestrator's internal dev tool and is **never** part of this product's runtime. The daemon's data plane is exclusively `://unblock` via MCP.
@@ -207,15 +232,16 @@ NFR numbering is local to this PRD.
 ### 7.1 Hierarchy
 
 ```
-Daemon
-  └── Area { gate | pool }          ← the Gate/Pool grouping
-        └── Team (one of 8)
-              └── Coordinator (team lead, dispatched via --agent)
-                    └── Agents (≥3 teammates)
-                          └── Process (one `claude --bg` session)
+Daemon (one ORG, SQ-1)
+  └── Project (one of the org's many)   ← the org-wide ceiling + per-project quota apply here
+        └── Area { gate | pool }        ← the Gate/Pool grouping
+              └── Team (one of 8)
+                    └── Coordinator (team lead, dispatched via --agent)
+                          └── Agents (≥3 teammates)
+                                └── Process (one `claude --bg` session)
 ```
 
-"Area" is the gate/pool grouping layer. A **gate** Area fires at a phase boundary and is human-approved (FR-22–FR-25). A **pool** Area runs in parallel without a phase-boundary gate.
+The **Project** layer is the SQ-1 multi-project grouping: one daemon serves one org and manages all of that org's projects, scheduling a per-project ready frontier and enforcing the org-wide ceiling + per-project quota (FR-32). "Area" is the gate/pool grouping layer within a project. A **gate** Area fires at a phase boundary and is human-approved (FR-22–FR-25). A **pool** Area runs in parallel without a phase-boundary gate.
 
 ### 7.2 Roster — 8 teams
 
@@ -277,7 +303,7 @@ flowchart LR
 
 `unblock-render` (renamed from `unblock-plugin`) is a **build-time renderer** that emits the packaged `unblock` Claude plugin (`.claude-plugin/plugin.json` + `agents/` + `skills/` + `hooks/` + MCP config). Claude-only. `unblock-agentic` depends on its output.
 
-- **T1 (separation of concerns).** The **renderer = WHAT** config to write; the **daemon = WHEN/WHERE + spawn + reconcile**. The daemon delegates config to the renderer via `--plugin-dir <rendered plugin>` and **never re-authors `.claude/`** (FR-29).
+- **T1 (separation of concerns).** The **renderer = WHAT** config to write; the **daemon = WHEN/WHERE + spawn + reconcile**. The daemon delegates config to the renderer via `--plugin-dir <rendered plugin>` and **never re-authors `.claude/`** (FR-30).
 - **T3 (Law-8 survival under parallelism).** The daemon's hook-sink is **additive** to the renderer's `verify-state` hook — multiple `Stop` hooks all fire, deduped by command string (confirmed), so Law 8 **Layer 2** survives. The daemon dispatches renderer-produced personas, so **Layer 3** BLOCK conditions survive. **Layer 1** (the backend validator) is parallelism-immune. The daemon's Stop-hook command **must differ** from the renderer's (FR-17).
 - **Cross-dependency.** The daemon needs the packaged plugin via `--plugin-dir`. The renderer rename/packaging **spec** landed (commit `69dad9a`); the renderer **implementation** is `://unblock` `P04` (post-`P03`). `unblock-agentic` **P0 may use a conformant stub plugin** until the real renderer output is available — a minimal but CONFORMANT packaged plugin (`.claude-plugin/plugin.json` + `agents/` defining at least the dispatched coordinator persona + every teammate persona the Lens/Partition spawns reference + `hooks/`), shaped to the `unblock-render` output contract (commit `69dad9a`), **not a no-op placeholder**. The cutover to the real renderer output (P1) is config-only because the daemon never re-authors `.claude/` (FR-29).
 
@@ -289,6 +315,8 @@ flowchart LR
 - **FR/identity-2.** Key set: **1 reshape key** (label `unblock-agentic-daemon`, `agent_kind=custom`) used **outside the proxy** for the **FR-18 reshape set** — `create / add_dependency / remove_dependency / close / promote` (+ the reserved `milestones / labels`); **`claim` is NOT in this set** (claim is lead-only, FR-19); plus **N per-team append keys** (labels `unblock-agentic-<team>`, `agent_kind=claude-code`) used **via the proxy** for the append surface (`comment / set_state / claim`). On a gate item `claimed_by_id` is therefore the **team's per-team append key** (the lead's claim), **not** the daemon reshape key.
 - **FR/identity-3.** Per-team and daemon-vs-human attribution is by **label / `api_key_id`** (the backend does not branch on user for this). Agents stay **credential-free** — keys live in the daemon/proxy, never in a worktree.
 - **FR/identity-4.** **No `agent_kind` enum change.** The seed is an **idempotent upsert** — locally it creates/reuses the operator user plus the keys; on Cloud it uses the OAuth user. A synthetic service principal (multi-operator / governance) is post-v1.
+- **FR/identity-5 (key minting — SQ-2).** The seed **mints keys by invoking the EXISTING private `auth.IssueAPIKey` RPC from an encore-internal seed** — service-to-service, **not** from `cmd/` (E1388-safe; `cmd/` cannot reach a private Encore RPC). This is **NOT** the deferred key-management BFF — `IssueAPIKey` already exists; the seed simply calls it. The seed **pins `CallerUserID` to the operator's user**, which **exercises the dormant tenant gate** on `IssueAPIKey` (§10.4) and thereby **closes the cross-tenant write IDOR** rather than leaving it dormant. Raw keys are **printed once**; the operator then **loads them into the OS KEYCHAIN**.
+- **FR/identity-6 (keys live in the KEYCHAIN, not env — SQ-2).** Keys are stored in the **OS keychain**, **never in environment variables.** Rationale (reinforces NFR-3 and FR/identity-3): the spawned `claude --bg` children **inherit the daemon's environment**, so a key placed in an env var would leak directly into every spawned agent — breaking the credential-free invariant. The keychain is read only by the daemon/proxy at use-time and is never inherited by a child process. (The seed's runnable form is the encore-internal seed of FR/identity-5; `exitcriteriontest/seed.go` is **TEST-fixture code**, not a runnable seed — see §11.)
 
 ### 10.3 Manifesto Law mapping
 
@@ -296,12 +324,12 @@ The eight `://unblock` Manifesto Laws map onto this product as follows (the load
 
 - **Law 1 (the DAG is the product).** Scheduling and gate-cascade are graph-driven; the daemon reads readiness and fires `close` so the native cascade unblocks dependents (FR-6, FR-8, FR-23).
 - **Law 2 (the ready queue is computable).** `://unblock`'s `ready` set is the readiness oracle; the daemon never reimplements topo-scheduling (FR-6).
-- **Law 3 (Postgres is the source of truth).** The ledger is orchestration state only; on conflict `://unblock` + `claude agents --json` win over buffered hooks; backend-unreachable is a degraded mode, not worked around (§4, NFR-7, FR-3).
-- **Law 4 (the BFF is structural).** The daemon holds the keys and POSTs server-side; agents are credential-free; the report surface must not put a credential in a browser (§4, NFR-3, §13.7).
+- **Law 3 (Postgres is the source of truth).** The ledger is orchestration state only; on conflict `://unblock` + `claude agents --json` win over buffered hooks; backend-unreachable is a degraded mode (SQ-5: pause + fail-fast + backoff + re-converge from truth), never worked around (§4, NFR-7, FR-3).
+- **Law 4 (the BFF is structural).** The daemon holds the keys and POSTs server-side; agents are credential-free; the report surface is a chat-first local control-MCP (SQ-4) consumed by the operator's own Claude Code session, so no credential reaches a browser (§4 Three-interfaces, NFR-3, FR-22 report surface).
 - **Law 5 (structured project memory).** Out of scope at v1 — the daemon does not author `memory.*` entries.
-- **Law 6 (decoupled deliverables share no runtime state).** Zero shared runtime state with `unblock-code`; the data plane is exclusively `://unblock` via MCP (§4, NFR-10, §13.10).
+- **Law 6 (decoupled deliverables share no runtime state).** Zero shared runtime state with `unblock-code`; the data plane is exclusively `://unblock` via MCP (§4, NFR-10, §13 FR-27-scoping TODO).
 - **Law 7 (provider-agnostic).** Inherited from the substrate; the daemon adds nothing provider-specific.
-- **Law 8 (three-layer pipeline enforcement).** The daemon's Stop-hook sink is additive to the renderer's `verify-state` hook; it dispatches renderer-produced personas; it never re-authors `.claude/` (§4, §9 T3, FR-29, FR-30).
+- **Law 8 (three-layer pipeline enforcement).** The daemon's Stop-hook sink is additive to the renderer's `verify-state` hook; it dispatches renderer-produced personas; it never re-authors `.claude/` (§4, §9 T3, FR-30, FR-31).
 
 ### 10.4 Verified backend facts (do not re-litigate)
 
@@ -314,7 +342,7 @@ The eight `://unblock` Manifesto Laws map onto this product as follows (the load
 - `Status` enum = `Backlog | Ready | InProgress | Blocked | Done`. `pipeline_state` enum = `running | needs_human | paused | no_investigation`.
 - Comment `kind` includes `needs-human`, `override`, `completed`, `review`, `qa`, …; comment `status` ∈ `error | warning | info | success`.
 - `org.Authorize`'s agent branch grants identical read+write on a fixed resource set with **no** `agent_kind` branching — which is why single-writer is an orchestration convention, not a backend guarantee (NFR-4).
-- `IssueAPIKey` carries a dormant `CallerUserID` tenant gate that a future BFF must pin (otherwise a cross-tenant write IDOR stays open) — noted for the SPEC, out of scope for this PRD.
+- `IssueAPIKey` carries a dormant `CallerUserID` tenant gate. **SQ-2: the encore-internal seed pins `CallerUserID` to the operator's user when it calls `IssueAPIKey`**, which exercises the gate and closes the otherwise-dormant cross-tenant write IDOR (FR/identity-5). (`IssueAPIKey` already exists; this is **not** the deferred key-management BFF.)
 
 ---
 
@@ -325,8 +353,8 @@ The eight `://unblock` Manifesto Laws map onto this product as follows (the load
 | Phase | Scope | Substrate |
 |---|---|---|
 | **P0** | Scaffold the crate. Ledger + `reconcile()` + local MCP proxy + hook-sink + the SQL seed (operator user + keys). May run against a **conformant stub plugin** (see "Stub plugin" note below). | local `encore run` (`127.0.0.1:9900`, app id `unblock-sco2`) |
-| **P1** | **Developers end-to-end** — one Area, dispatch → team → findings → completion → DAG propagation. Concurrency ceiling + dispatch-admission rule (FR-31). **`--plugin-dir` cuts over from the stub plugin to the real `unblock-render` output** as soon as it is available. | local `encore run` |
-| **P2** | **Full 8-team roster + gates + report** — gate Areas, GatePending vs NeedsInput, the HTML report with Approve / Rework / Waive. | local `encore run` |
+| **P1** | **Developers end-to-end** — one Area, dispatch → team → findings → completion → DAG propagation. Concurrency ceiling + dispatch-admission rule (FR-32). **`--plugin-dir` cuts over from the stub plugin to the real `unblock-render` output** as soon as it is available. | local `encore run` |
+| **P2** | **Full 8-team roster + gates + report** — gate Areas, GatePending vs NeedsInput, the **chat-first control-MCP report surface** (status / pending / approve / reject / waive / answer + OS desktop notifications, FR-20a / SQ-4). The optional loopback HTML dashboard / `apps/web` integration is post-v1. | local `encore run` |
 | **P3** | **Budget / agent-slots + backpressure + `rtk gain` tuning.** | cutover to **Encore Cloud** once the backend is **DEPLOYED** (E-1 / `unblock-8xb.5.1`) — **not deployed today** |
 
 **Substrate cutover.** P0–P2 run against **local `encore run`**; cutover to **Encore Cloud** happens when the backend deploy (`://unblock` epic E-1, bead `unblock-8xb.5.1`) lands. The backend is **not deployed today** (local app id `unblock-sco2`); `://unblock` P02 is still in spec.
@@ -335,7 +363,11 @@ The eight `://unblock` Manifesto Laws map onto this product as follows (the load
 
 **Stub plugin (P0).** The stub is **not a throwaway no-op**: it is a **minimal but CONFORMANT packaged plugin** shaped to the `unblock-render` output contract (commit `69dad9a`) — `.claude-plugin/plugin.json` (a valid manifest) + `agents/` defining at least the dispatched coordinator persona **and every teammate persona** the Lens/Partition spawns reference + `hooks/`. It is sufficient to dispatch a real lead-plus-teammates team in P0/P1; the cutover to the real renderer output (P1) is then config-only.
 
-**Seed reuse.** The seed reuses the apikey HMAC derivation; the existing `exitcriteriontest/seed.go` copies that HMAC helper — the SPEC must decide **export-shared vs copy** (§13). Note `exitcriteriontest/seed.go` is **TEST-fixture scaffolding** (a copy of the HMAC helper), **NOT a runnable seed binary** — the seed's own key-minting path is itself an Open Question (§13).
+**Seed reuse (SQ-2).** The runnable seed is an **encore-internal seed that calls the existing private `auth.IssueAPIKey` RPC** (service-to-service, E1388-safe; **not** from `cmd/`) to mint keys, pinning `CallerUserID` to the operator's user — which exercises the dormant tenant gate and closes the cross-tenant write IDOR (FR/identity-5, §10.4). Raw keys print once; the operator loads them into the OS keychain (FR/identity-6). This **supersedes** the earlier "copy-or-export the apikey HMAC helper" framing: because the seed calls `IssueAPIKey` rather than re-deriving HMAC, the export-vs-copy question and the local-key-minting-path question are **both ANSWERED**. Note `exitcriteriontest/seed.go` is **TEST-fixture scaffolding** (a copy of the HMAC helper used by tests), **NOT a runnable seed binary** — the runnable seed is the encore-internal one described here.
+
+**Onboarding & the provisioning BFF (production vs local).** Two provisioning paths, by deployment:
+- **Local / headless dev** is **web-independent**: the encore-internal **seed** (above) creates the operator user + org/project + keys directly against local `encore run` — no web surface required.
+- **Production onboarding** (a human creating an org, a project, and credentials against deployed Encore Cloud) depends on the **minimal provisioning BFF** pulled forward in the root PRD (`docs/PRD.md` §8 — OAuth login + create-org + create-project + issue-API-key via `IssueAPIKey`). That provisioning BFF is the prerequisite for onboarding the post-v1 `unblock-agentic` operator in production. It is **distinct from** the full P05 rich views (kanban / dependency graph / roadmap), which remain gated on line-ui v1 (root R-8) and are **not** required to onboard the daemon.
 
 ---
 
@@ -345,7 +377,7 @@ The eight `://unblock` Manifesto Laws map onto this product as follows (the load
 - **R-2 — Headless agents confabulate "done".** Empirically observed. Mitigation: verify-via-artifacts-and-trail, never self-report (FR-13, NFR-2).
 - **R-3 — Single-writer is convention, not a backend guarantee.** `org.Authorize` does not branch on `agent_kind` (§10.4). Mitigation: proxy denies reshape + credential-free agents + deny-Edit/Write on `.mcp.json`/`.claude/settings` + worktree isolation as the real containment (NFR-3, NFR-4). The proxy is a trust boundary, not a security boundary.
 - **R-4 — A too-tight `--allowedTools` allowlist stalls a headless session in `state:blocked`** with no human to approve. Mitigation: complete allowlist + `--permission-mode default`; detect `state:blocked` as failure (FR-14).
-- **R-5 — Renderer not yet implemented.** `unblock-render` implementation is `://unblock` `P04`. Mitigation: P0 uses a **conformant stub plugin** (a minimal but valid packaged plugin shaped to the `unblock-render` output contract — `.claude-plugin/plugin.json` + `agents/` for the coordinator + every referenced teammate persona + `hooks/`; not a no-op); the daemon never re-authors `.claude/` (FR-29) so the P1 cutover to the real plugin is config-only.
+- **R-5 — Renderer not yet implemented.** `unblock-render` implementation is `://unblock` `P04`. Mitigation: P0 uses a **conformant stub plugin** (a minimal but valid packaged plugin shaped to the `unblock-render` output contract — `.claude-plugin/plugin.json` + `agents/` for the coordinator + every referenced teammate persona + `hooks/`; not a no-op); the daemon never re-authors `.claude/` (FR-30) so the P1 cutover to the real plugin is config-only.
 - **R-6 — Backend not deployed; substrate is local.** Mitigation: P0–P2 run on local `encore run`; Law-3 degraded mode (NFR-7) handles unreachability; cutover to Cloud gated on E-1.
 - **R-7 — Law-8 enforcement could be bypassed under parallel orchestration.** Mitigation: additive Stop hook with a distinct command (FR-17, T3); the SPEC must include an integration test that a pipeline-bypass under daemon orchestration STILL emits the Layer-2 finding (§13).
 - **R-8 — `--bg` session-id capture is indirect** (`--bg` **ignores and warns** at a caller-supplied `--session-id`, generating its own — warn-and-proceed, not a hard error). Mitigation: capture from `--bg` output / `claude agents --json`, correlate by `--name`/`--cwd`, persist in the ledger (FR-11).
@@ -354,23 +386,33 @@ The eight `://unblock` Manifesto Laws map onto this product as follows (the load
 
 ## 13. Open Questions (SPEC TODOs for Ada)
 
-> These are transcribed from the locked design (`/tmp/unblock-agentic-design-v2.md` §12) plus the explicitly-flagged SPEC TODOs in §5–§7 of that design. They are **for Ada's SPEC (`docs/agentic/SPEC.md`)**, not to be resolved at PRD time. They did **not** block PRD approval — they are architecture-altitude, not requirements-altitude. Items §13.1 and §13.2 are now partly/fully **ANSWERED** by verified backend facts (see below); the rest remain open for the SPEC.
+> These are transcribed from the locked design (`/tmp/unblock-agentic-design-v2.md` §12) plus the explicitly-flagged SPEC TODOs in §5–§7 of that design. They are **for Ada's SPEC (`docs/agentic/SPEC.md`)**, not to be resolved at PRD time. They did **not** block PRD approval — they are architecture-altitude, not requirements-altitude.
+>
+> **Six post-approval SPEC decisions (SQ-1…SQ-5 + transport) were ratified one-by-one and are now IMPLEMENTED in the body of this PRD; the items they answered have left this list.** The remaining items below are the still-open SPEC-TODOs.
 
-1. **`close` precondition set — ANSWERED.** Backend `close` precondition = **`claimed_by_id` only**; the impl/review/qa `set_state` writes are **audit record-keeping, not close gates**. This is the grounded fact behind FR-23's Approve sequence (`set_state(review_state=approved) → close`, nothing more). No remaining open part.
-2. **`set_state` and `pipeline_state` — partly ANSWERED.** `set_state` **can** write `pipeline_state` (yes, **unconditionally**) — **ANSWERED**. The **OPEN** part is only the **convention** distinguishing `needs_human` (agent-stuck, **lead-set**) vs `paused` (operator-paused): the **backend enforces neither**, so the SPEC must define and document the convention.
-3. **Developers / Partition file-partition** — the mechanism for disjoint file slices inside one shared worktree (FR/§8.3).
-4. **Brief composition** — the brief MUST point to the spec/plan + comment-trail and NEVER inline an authoritative copy (the bead-description-is-not-the-spec rule). Confirm the exact brief contract.
-5. **Rework counter persistence** — count `kind=review, status=error`/`warning` comments (Law-3-clean, no schema change). Confirm the counting rule and the 3×-escalation trigger.
-6. **Degraded-mode under Law 3** — backend unreachable: pause dispatch, buffer/fail-safe in-flight work, reconciler retries with backoff, re-diff on recovery. Specify the exact buffering and back-off policy.
-7. **Report / approval surface (Law 4)** — a daemon-LOCAL operator UI that holds the key and POSTs server-side, vs integrating into `apps/web` via Astro Actions (the latter pulls it onto the v1.1 web path). Decide the surface.
-8. **Single-project-per-daemon** — recommended for v1 (matches the per-request `project_id`). Confirm.
-9. **Slot accounting at P1** — a max-concurrent ceiling + a dispatch-admission rule using the existing ready-queue ordering, even if the budget POLICY waits for P3 (FR-31). Specify the ceiling and admission rule.
-10. **FR-27 scoping (root PRD)** — the "no daemon / no watcher" invariant is **AST-CLI-only**; add one sentence so `unblock-agentic` does not read as a contradiction. Law 6 holds — zero shared runtime state with `unblock-code`.
-11. **Worktree threat-model** — the proxy is a trust boundary, not a security boundary. Specify the blast radius if a worktree obtains a direct key (bounded by the credential-free design).
-12. **Findings feedback topology** — per team: does a finding create a **blocking edge** that forces rework, or an **informational link**? Tie `review_state=needs_rework` / qa-fail to finding creation so rework is **graph-driven** (Law 1).
-13. **Seed: export-shared vs copy the HMAC helper** — the existing `exitcriteriontest/seed.go` copies the apikey HMAC derivation; decide whether the seed exports a shared helper or copies it. Note `exitcriteriontest/seed.go` is **TEST-fixture scaffolding** (a copy of the HMAC helper), **NOT a runnable seed binary**.
-14. **Local key-minting path for the seed** — for the local operator user + keys, decide between **calling the private `IssueAPIKey` RPC** (and whether to **pin** or **leave-empty** `CallerUserID` for the local-seed case) vs **direct `sqldb` row writes**. Tie this decision to the export-vs-copy question (§13.13): both concern how the seed mints credentials without a runnable seed binary today.
-15. **Layer-2 integration test under orchestration** — a test that a pipeline-bypass under daemon orchestration STILL emits the Layer-2 finding; confirm the daemon's Stop-hook command differs from the renderer's (FR-17, T3).
+The still-open SPEC-TODOs:
+
+1. **`needs_human` vs `paused` convention** — `set_state` can write `pipeline_state` unconditionally (verified), and `close` requires `claimed_by_id` only (verified — the grounded fact behind FR-23). The **open** part is only the **convention** distinguishing `needs_human` (agent-stuck, **lead-set**) from `paused` (operator-paused): the **backend enforces neither**, so the SPEC must define and document the convention.
+2. **Developers / Partition file-partition** — the mechanism for disjoint file slices inside one shared worktree (§8.3).
+3. **Brief composition** — the brief MUST point to the spec/plan + comment-trail and NEVER inline an authoritative copy (the bead-description-is-not-the-spec rule). Confirm the exact brief contract.
+4. **Rework counter persistence** — count `kind=review, status=error`/`warning` comments (Law-3-clean, no schema change). Confirm the counting rule and the 3×-escalation trigger.
+5. **Slot accounting at P1** — a max-concurrent ceiling + a dispatch-admission rule using the existing ready-queue ordering (now two-dimensional: org-wide ceiling + per-project quota, FR-32), even if the budget POLICY waits for P3. Specify the ceiling and admission rule.
+6. **FR-27 scoping (root PRD)** — the "no daemon / no watcher" invariant is **AST-CLI-only**; add one sentence so `unblock-agentic` does not read as a contradiction. Law 6 holds — zero shared runtime state with `unblock-code`.
+7. **Worktree threat-model** — the proxy is a trust boundary, not a security boundary. Specify the blast radius if a worktree obtains a direct key (bounded by the credential-free design + the stdio-over-unix-socket transport, FR-20).
+8. **Layer-2 integration test under orchestration** — a test that a pipeline-bypass under daemon orchestration STILL emits the Layer-2 finding; confirm the daemon's Stop-hook command differs from the renderer's (FR-17, T3).
+
+### 13.1 Resolved post-approval (moved into the body — kept here only as a pointer)
+
+| Was an OQ | Resolved by | Now lives in |
+|---|---|---|
+| `close` precondition set | verified backend fact | §10.4, FR-23 |
+| Single-project-per-daemon | **SQ-1** (daemon-per-ORG, multi-project) | §3.1, FR-6, FR-9, FR-12, FR-32, §7.1, §15 |
+| Seed: export-shared vs copy the HMAC helper | **SQ-2** (seed calls `IssueAPIKey`, no HMAC re-derivation) | §11 Seed reuse, FR/identity-5 |
+| Local key-minting path for the seed | **SQ-2** (encore-internal seed → `IssueAPIKey`, pin `CallerUserID`, KEYCHAIN) | FR/identity-5, FR/identity-6, §10.4 |
+| Findings feedback topology | **SQ-3** (severity-driven, no auto-blocking-edges) | FR-28 |
+| Report / approval surface (Law 4) | **SQ-4** (chat-first local control-MCP) | FR-20a, §4 Three-interfaces, NFR-3 |
+| Degraded-mode under Law 3 | **SQ-5** (pause + fail-fast + backoff + re-converge) | NFR-7, §4 Law 3 |
+| Proxy transport shape | **transport** (stdio per-session shim → unix socket) | FR-20, FR-20a, §4 Three-interfaces, Glossary |
 
 ---
 
@@ -389,11 +431,11 @@ Three testable north stars. Each is marked **HARD** (a measured gate that must p
 Consolidates the boundaries that are otherwise stated against individual requirements, so the architect and downstream supervisors have one explicit list. Each item names where the full rationale lives.
 
 - **Multi-operator, governance, and synthetic service principals** — the daemon runs locally in the single operator's name with keys issued to the operator's real user; no multi-tenant operator model and no synthetic principal at v1 (NFR-9, FR/identity-4).
-- **`reparent` / `delete`** — `parent_id` is write-once; there is no reparent or delete tool. Parentage is organizational and does not affect scheduling (FR-28).
+- **`reparent` / `delete`** — `parent_id` is write-once; there is no reparent or delete tool. Parentage is organizational and does not affect scheduling (FR-29).
 - **Non-Claude agent harnesses** — the product targets the `claude` CLI exclusively (`--bg` agent-teams, `claude agents --json`, hooks, `--plugin-dir`); no other harness is supported (NFR-8).
-- **Multi-project-per-daemon** — v1 is a lean **single-project** daemon, matching the per-request `project_id` (§13.8).
+- **Multi-ORG per daemon** — one daemon serves exactly one org and manages all of that org's projects (SQ-1, §3.1, FR-6/FR-9/FR-12/FR-32); serving **multiple orgs** requires multiple daemons (one daemon = one org). Multi-org-per-daemon is **post-v1**.
 - **`bd`/beads/Dolt in the runtime** — these are the orchestrator's internal dev tool, never part of this product's runtime; the data plane is exclusively `://unblock` via MCP (NFR-10).
-- **A report surface hosted on `apps/web`** — the v1 report/approval surface is a daemon-local operator UI that holds the key and POSTs server-side; integrating the surface into `apps/web` via Astro Actions is **deferred** (it would pull the surface onto the v1.1 web path) and remains an Open Question (§13.7).
+- **A report surface hosted on `apps/web` / a loopback HTML dashboard** — the v1 report/approval surface is the **chat-first local control-MCP** consumed by the operator's own Claude Code session (FR-20a / SQ-4). An optional loopback **HTML dashboard** and integrating the surface into `apps/web` via Astro Actions are both **secondary / post-v1** (the latter would pull the surface onto the v1.1 web path).
 - **`milestones` / `labels` reshape wiring** — reshape-key-eligible but reserved; no v1 team exercises them (FR-18).
 
 ---
@@ -416,5 +458,7 @@ Consolidates the boundaries that are otherwise stated against individual require
 - **GatePending** — a planned gate awaiting a human verdict (gate item + artifact-complete); no new backend state.
 - **NeedsInput** — an agent genuinely stuck mid-task (`pipeline_state=needs_human` + `kind=needs-human` comment); a distinct signal from GatePending, never sharing a column.
 - **Restart invariant** — on restart the daemon re-reads truth and re-dispatches incomplete area-tasks rather than re-adopting non-resumable teammates.
-- **Proxy** — the daemon's local http-per-path MCP route (`…/team/<team>`) that injects the per-team key + `project_id` and denies reshape; a trust boundary, not a security boundary.
+- **Proxy** — the daemon's per-team MCP data-plane route. **Transport (SQ-transport):** a **stdio per-session shim** (`unblock-agentic proxy --team <X> --session <id>`, team baked in) that **bridges to the daemon over an operator-only unix socket** — NOT http-loopback-per-path. It injects the per-team key + `project_id` and denies reshape; the key never touches a TCP socket and the shim never sees it. A trust boundary, not a security boundary.
+- **Control-MCP** — the daemon's operator-plane MCP, consumed by the operator's **own Claude Code session** (chat-first, SQ-4). Spawned as the stdio shim `unblock-agentic ctl` bridging to the daemon over the same unix socket; tools: status / pending / approve / reject / waive / answer. OS desktop notifications ping the operator when attention is needed.
+- **Unix-socket transport** — the single operator-only-permissioned unix socket that both the per-team proxy shims and the operator control shim bridge to (SQ-transport); replaces any http-loopback design so an agent cannot `curl` another team's key.
 - **Stub plugin** — a **minimal but CONFORMANT** packaged plugin (not a throwaway no-op) usable in P0 before the real `unblock-render` implementation (`P04`) is available: `.claude-plugin/plugin.json` (valid manifest) + `agents/` defining at least the dispatched coordinator persona and every teammate persona the Lens/Partition spawns reference + `hooks/`, shaped to the `unblock-render` output contract (commit `69dad9a`). Sufficient to dispatch a real team; the P1 cutover to the renderer output is config-only.
