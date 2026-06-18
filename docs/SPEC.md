@@ -61,6 +61,17 @@ only at well-defined contracts: the MCP wire protocol, the GitHub webhook
 payload schema, and the Astro-origin OAuth callback that bridges browser →
 backend without ever exposing backend credentials to the browser.
 
+> **Post-v1.0 product — `unblock-agentic`.** A fifth deliverable, the
+> `crates/unblock-agentic` reconciler daemon (a DAG-driven control plane that
+> parallelises the mister-anderson pipeline over the `://unblock` dependency
+> DAG), is a **separate, post-v1.0 product** off the v1.0 `P01–P04` launch
+> scope. It is **additive** on top of this architecture — its data plane is
+> exclusively `://unblock` via MCP (Law 6: zero shared runtime state with
+> `unblock-code`) and it consumes the `unblock-render` packaged plugin via
+> `--plugin-dir`. It is NOT part of this Stage-1 architecture. Its requirements
+> live in [docs/agentic/PRD.md](./agentic/PRD.md) (APPROVED) and its
+> implementation contract in [docs/agentic/SPEC.md](./agentic/SPEC.md).
+
 ### 1.1 What is in the architecture
 
 - The deliverable inventory and what each one is for.
