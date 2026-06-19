@@ -1,0 +1,41 @@
+[package]
+name = "unblock-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "unblock_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "unblock"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+unblock-engine = { workspace = true }
+unblock-render = { workspace = true }
+unblock-policy = { workspace = true }
+unblock-mcp = { workspace = true }
+unblock-error = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+# Self-update surface (D17/FR-25). The feature name `self-update` is deliberately distinct from the
+# `unblock update` command token (CF-K); `--no-default-features` drops it and the only network surface.
+axoupdater = { workspace = true, optional = true }
+
+# OQ-4 RESOLVED: the cli (L7, owner of the `unblock` binary) installs the cooperative-shutdown
+# signal handlers (FR-17). Windows is a no-op, so signal-hook is unix-only.
+[target.'cfg(unix)'.dependencies]
+signal-hook = { workspace = true }
+
+[features]
+default = ["self-update"]
+self-update = ["dep:axoupdater"]

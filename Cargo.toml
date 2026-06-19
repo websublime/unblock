@@ -1,37 +1,106 @@
 [workspace]
-members = []
 resolver = "2"
+members = [
+    "crates/unblock-model",
+    "crates/unblock-error",
+    "crates/unblock-policy",
+    "crates/unblock-storage",
+    "crates/unblock-sync",
+    "crates/unblock-health",
+    "crates/unblock-config",
+    "crates/unblock-engine",
+    "crates/unblock-render",
+    "crates/unblock-mcp",
+    "crates/unblock-cli",
+    "crates/unblock-fuzz",
+    "xtask",
+]
+# `unblock-fuzz` is a member but NOT a default member: its (deferred) nested cargo-fuzz
+# package needs nightly + libFuzzer, which must never reach the stable-1.96 default build
+# (NFR-12). `xtask` is workspace tooling (the layering check), not a product crate.
+default-members = [
+    "crates/unblock-model",
+    "crates/unblock-error",
+    "crates/unblock-policy",
+    "crates/unblock-storage",
+    "crates/unblock-sync",
+    "crates/unblock-health",
+    "crates/unblock-config",
+    "crates/unblock-engine",
+    "crates/unblock-render",
+    "crates/unblock-mcp",
+    "crates/unblock-cli",
+]
 
 [workspace.package]
+version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/websublime/unblock"
 
 [workspace.dependencies]
+# --- internal crates (workspace-internal, unpublished; consumed via `workspace = true`) ---
+# Only crates that are depended *upon* are listed; cli/fuzz/xtask are leaves.
+unblock-model = { path = "crates/unblock-model" }
+unblock-error = { path = "crates/unblock-error" }
+unblock-policy = { path = "crates/unblock-policy" }
+unblock-storage = { path = "crates/unblock-storage" }
+unblock-sync = { path = "crates/unblock-sync" }
+unblock-health = { path = "crates/unblock-health" }
+unblock-config = { path = "crates/unblock-config" }
+unblock-engine = { path = "crates/unblock-engine" }
+unblock-render = { path = "crates/unblock-render" }
+unblock-mcp = { path = "crates/unblock-mcp" }
+
+# --- external: core ---
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
-reqwest = { version = "0.12", features = ["json"] }
-petgraph = "0.7"
 chrono = { version = "0.4", features = ["serde"] }
 snafu = "0.8"
-rmcp = { version = "1.0", features = ["server", "transport-io"] }
 schemars = "1"
-rand = "0.9"
+async-trait = "0.1"
+sha2 = "0.10"
+toml = "0.8"
+csv = "1.3"
+dunce = "1"
+petgraph = "0.7"
+
+# --- external: storage backend (local file / bundled SQLite by default; remote/replica
+#     behind the non-default `remote` feature, D15/NFR-10 — `core` statically bundles SQLite) ---
+libsql = { version = "0.9.30", default-features = false, features = ["core"] }
+
+# --- external: MCP (primary surface, RK-2 pinned via committed Cargo.lock) ---
+rmcp = { version = "1.7", features = ["server", "transport-io"] }
+
+# --- external: CLI (stable features only, D9) ---
+clap = { version = "4", features = ["derive", "env"] }
+
+# --- external: observability ---
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+
+# --- external: cooperative-shutdown signals (FR-17; the cli owns handler install, OQ-4) ---
+signal-hook = "0.3"
+
+# --- external: self-update (D17/FR-25; behind cli `self-update` feature, CF-K) ---
+axoupdater = "0.10"
+
+# --- external: resilience for the remote/replica path only (NFR-3; backon, not archived backoff) ---
+backon = { version = "1", features = ["tokio-sleep"] }
+failsafe = "1.3"
+
+# --- dev/test (declared here; wired per crate as suites land) ---
 proptest = "1"
 criterion = { version = "0.5", features = ["async_tokio"] }
 wiremock = "0.6"
-async-trait = "0.1"
-failsafe = "1.3"
-backoff = { version = "0.4", features = ["tokio"] }
+rand = "0.9"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 module_name_repetitions = "allow"
 missing_errors_doc = "allow"
-
-[workspace.lints.rust]
-unsafe_code = "deny"
-missing_docs = "warn"

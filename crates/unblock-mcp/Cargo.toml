@@ -1,0 +1,27 @@
+[package]
+name = "unblock-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+unblock-engine = { workspace = true }
+unblock-render = { workspace = true }
+unblock-policy = { workspace = true }
+# Tool I/O embeds the §1.10 contract DTOs and StructuredError directly (mcp plan §10) —
+# declared here rather than relied on transitively via engine's re-exports.
+unblock-model = { workspace = true }
+unblock-error = { workspace = true }
+rmcp = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+snafu = { workspace = true }

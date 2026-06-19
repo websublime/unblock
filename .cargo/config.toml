@@ -1,0 +1,4 @@
+# Workspace cargo aliases. Network access is not configured here (offline-first, D13/NFR-6).
+[alias]
+# Acyclic crate-graph / layering enforcement (NFR-15). T0.9 wires this into the CI `layering` job.
+xtask = "run --quiet --package xtask --"

@@ -1,0 +1,18 @@
+[package]
+name = "unblock-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+unblock-model = { workspace = true }
+unblock-error = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+csv = { workspace = true }
+chrono = { workspace = true }

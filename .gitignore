@@ -1,41 +1,25 @@
 # macOS
 .DS_Store
 
-# Beads / Dolt
-.beads-credential-key
-.beads/issues.jsonl
-.dolt/
-*.db
-
-# Rust workspace (apps + crates)
+# Rust build artifacts
 target/
-crates/target/
 **/target/
 
-# Encore
-apps/api/.encore/
-apps/api/encore.gen/
-
-# Astro / Node
-node_modules/
-**/node_modules/
-apps/web/.astro/
-apps/web/dist/
-apps/web/.wrangler/
-
-# Generated TS clients (regenerated at build time)
-apps/web/src/lib/encore-client.ts
+# Local libsql database — runtime state, never committed (issues.jsonl IS a diffable export, D5)
+*.db
+*.db-wal
+*.db-shm
 
 # Local environment
 .env
 .env.local
 .env.*.local
 
-# IDEs
+# IDEs / editors
 .vscode/
 .idea/
 *.swp
 *~
 
-# Archived v1 artifacts (untracked desktop docs from rust-v1 era)
+# Archived pre-rewrite reference material (not part of the workspace)
 temp

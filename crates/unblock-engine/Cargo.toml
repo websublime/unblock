@@ -1,0 +1,36 @@
+[package]
+name = "unblock-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+unblock-config = { workspace = true }
+unblock-storage = { workspace = true }
+unblock-policy = { workspace = true }
+unblock-model = { workspace = true }
+unblock-error = { workspace = true }
+# `sync`/`health` are composed behind default-on features (engine plan §Cargo.toml).
+unblock-sync = { workspace = true, optional = true }
+unblock-health = { workspace = true, optional = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+snafu = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+schemars = { workspace = true }
+# NOTE (OQ-4 RESOLVED): the OS signal handler install lives in `unblock-cli` (L7); the engine
+# only reads the cooperative shutdown flag. The engine therefore takes NO `signal-hook` dep.
+
+[features]
+default = ["sync", "health"]
+sync = ["dep:unblock-sync"]
+health = ["dep:unblock-health"]
+# D15: forwards only to storage's non-default remote/replica path.
+remote = ["unblock-storage/remote"]
