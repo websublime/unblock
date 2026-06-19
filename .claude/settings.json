@@ -1,0 +1,26 @@
+{
+  "includeCoAuthoredBy": false,
+  "permissions": {
+    "allow": [
+      "mcp__acp__Write",
+      "mcp__acp__Edit",
+      "Bash(find:*)",
+      "Bash(cargo *)",
+      "Bash(git *)",
+      "Bash(gh pr:*)",
+      "Bash(gh api:*)",
+      "Bash(rtk *)",
+      "Bash(python3:*)",
+      "Bash(grep:*)",
+      "Bash(rg:*)",
+      "Bash(ls:*)",
+      "Bash(wc:*)"
+    ]
+  },
+  "enabledPlugins": {
+    "mister-anderson@websublime-mister-anderson": false
+  },
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  }
+}
