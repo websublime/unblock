@@ -1,0 +1,19 @@
+[package]
+name = "unblock-health"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+unblock-model = { workspace = true }
+unblock-error = { workspace = true }
+unblock-sync = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+snafu = { workspace = true }
+chrono = { workspace = true }

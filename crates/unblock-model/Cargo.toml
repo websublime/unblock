@@ -1,0 +1,18 @@
+[package]
+name = "unblock-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+unblock-error = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+schemars = { workspace = true }
+sha2 = { workspace = true }

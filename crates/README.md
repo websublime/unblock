@@ -1,70 +1,58 @@
-# crates — Rust workspace
+# crates — the `unblock` Rust workspace
 
-This directory hosts the Rust workspace for `://unblock`. It produces **two
-distinct binaries** that ship via the same release pipeline (cargo-dist +
-Homebrew + npm) but solve unrelated problems:
+This directory holds the multi-crate Rust workspace for **unblock**, an agent-first, **MCP-first**
+issue tracker. Every domain feature is an MCP tool/resource/prompt over stdio; the CLI is
+lifecycle/ops only. libsql is the source of truth; JSONL is an optional export (D5).
 
-1. **`unblock-code`** — local, stateless, one-shot AST CLI that indexes
-   source code into a SQLite + FTS5 database and exposes structured queries
-   (find-symbol, outline, search, …) over a JSON envelope. Designed to save
-   AI-agent tokens that would otherwise go to `Glob`/`Grep`/`Read`.
-2. **`unblock-plugin`** — mister-anderson workflow renderer that emits typed
-   agents, skills, hooks, and MCP config onto Claude Code, GitHub Copilot
-   cloud, and GitHub Copilot local from a single Rust catalogue.
+The single shipped binary is **`unblock`** (from `unblock-cli`); all `unblock-*` library crates are
+workspace-internal (`publish = false`) and never published to crates.io.
 
-## Status
+## Crates & layering (NFR-15, acyclic, enforced)
 
-**Empty skeleton.** Bootstrap deferred until Stage 3 of the new product
-roadmap. The AST CLI design is preserved verbatim in
-[`docs/code-cli/`](../docs/code-cli/) (plan, spec, research). The plugin
-renderer surface is specified in `docs/PRD.md` §6 and detailed in
-`docs/SPEC.md` (post-Stage-1).
+Layer order — edges point downward only; no back-edges, no cycles:
 
-## Planned crates (4)
+```
+L0  unblock-model | unblock-error        (pure types / error vocabulary)
+L1  unblock-policy                       (pure decision contracts)
+L2  unblock-storage                      (Storage trait + libsql impl)
+L3  unblock-sync | unblock-health        (JSONL export/import · integrity)
+L4  unblock-config                       (layered TOML + workspace-open facade)
+L5  unblock-engine                       (the single mutation home — Session, D14)
+L6  unblock-render                       (output formatting)
+L7  unblock-mcp | unblock-cli            (rmcp stdio server · lifecycle binary)
+```
 
-- **`unblock-indexer-core`** (lib) — pure types, AST traversal, schema
-  constants (zero IO, zero async, zero tokio). Owned by the AST CLI.
-- **`unblock-indexer`** (lib) — sqlx + FTS5, statically-linked tree-sitter
-  grammars, filesystem walker via `ignore`. Owned by the AST CLI.
-- **`unblock-code`** (bin) — clap-based AST CLI. Standalone.
-- **`unblock-plugin`** (bin) — clap-based plugin renderer. Standalone.
+The only intra-L7 edge is **`unblock-cli → unblock-mcp`** (the cli owns the binary; mcp is a
+library exposing `serve(...)`). `unblock-storage` depends on `model + error` only (the engine composes
+storage + policy). `unblock-fuzz` is an unpublished member (fuzz harness over ingestion).
 
-## AST CLI (`unblock-code`) — key constraints
+| Crate | Layer | Role |
+|---|---|---|
+| `unblock-model` | L0 | Pure domain types, `content_hash`/`sync_equals`, validation, §1.10 DTOs |
+| `unblock-error` | L0 | `ErrorCode`, 0–8 exit-code table, `StructuredError`, `CodedError` |
+| `unblock-policy` | L1 | Ready-sort, gating, scheduler, cache-key — pure, side-effect-free |
+| `unblock-storage` | L2 | `Storage` trait + libsql impl (WAL + `busy_timeout`); remote behind a feature (D15) |
+| `unblock-sync` | L3 | Light JSONL export/import + `bd` import; atomic write; path confinement |
+| `unblock-health` | L3 | libsql `integrity_check` + `doctor` (full taxonomy v1.1) |
+| `unblock-config` | L4 | Layered TOML, `.unblock/` discovery, builds the `Arc<dyn Storage>` (CF-D) |
+| `unblock-engine` | L5 | `Session`; in-process write `Semaphore` (D14); reads bypass it (FR-10) |
+| `unblock-render` | L6 | json/robot/plain/csv/markdown (TOON v1.1); stdout/stderr discipline |
+| `unblock-mcp` | L7 | **Primary** surface: rmcp stdio server, 7-tool taxonomy + resources + prompts |
+| `unblock-cli` | L7 | The `unblock` binary: serve/migrate/doctor/version/init/agents/update |
+| `unblock-fuzz` | — | Unpublished; `cargo-fuzz` targets over model/sync/storage ingestion |
 
-- **Standalone**. Fully decoupled from the Encore backend. Does not consume
-  the API. `unblock-code` and the issue-tracker `mcp` service share zero
-  runtime state. Locked in `docs/code-cli/spec.md` §3 as an explicit non-goal.
-- 10 statically-linked tree-sitter grammars: 8 default
-  (Rust, TypeScript, JavaScript, Python, Go, Java, C, PHP) + 2 opt-in
-  (`lang-cpp`, `lang-ruby`).
-- 17 canonical `SymbolKind` variants.
-- 11 commands: find-symbol, list-symbols, outline, get-symbol, search,
-  find-references (HEURISTIC), reindex, status, languages, init, parse.
-- Local SQLite + FTS5 + WAL index at `~/.cache/unblock/repos/<repo-hash>/index.db`.
-- One-shot stateless invocation — no daemon, no watcher, no MCP.
+`xtask` (repo root) is workspace tooling: `cargo xtask check-layering` enforces the matrix above.
 
-## Plugin renderer (`unblock-plugin`) — key surface
+## Authoritative docs (read before working)
 
-- Renders the mister-anderson workflow (8 fixed personas + dynamic
-  supervisors + 20 skills + 3 hooks) onto three editor targets:
-  Claude Code, GitHub Copilot cloud, GitHub Copilot local.
-- CLI: `unblock-plugin render --target=<t> --supervisors=<list> --out=<dir>`.
-- Single typed catalogue in Rust source — emits per-target artefacts:
-  `.claude/agents/`, `.claude/skills/`, `.github/agents/`,
-  `.claude/hooks/`, `.claude/settings.json`,
-  `.github/copilot-instructions.md`.
-- Description-contract lint runs at `build.rs` time (every slash-skill's
-  description must follow the imperative-verb + trigger-phrase + stage-tag
-  contract — see `docs/PRD.md` §6.7).
+- Product truth: [`docs/PRD.md`](../docs/PRD.md) · Interface SSOT: [`docs/plans/01-design-spine.md`](../docs/plans/01-design-spine.md)
+- Per-crate plans: [`docs/plans/crates/`](../docs/plans/crates/) · Task DAG: [`docs/plans/implementation-plan.md`](../docs/plans/implementation-plan.md)
+- Live status: [`docs/plans/STATUS.md`](../docs/plans/STATUS.md) · Workspace contract: [`CLAUDE.md`](../CLAUDE.md)
 
-## Distribution
+## Build
 
-Both binaries ship via the same pipeline:
-
-- `cargo install unblock-code` / `cargo install unblock-plugin`
-- Homebrew tap: `brew install websublime/tap/unblock-code` / `unblock-plugin`
-- npm wrapper: `npx @unblock/code` / `npx @unblock/plugin`
-
-See `docs/code-cli/plan.md` for the AST CLI epic structure and acceptance
-criteria. The plugin renderer's epic structure lands in
-`docs/plans/NN-plan-plugin.md` after Stage 2.
+```
+cargo build --workspace            # stable 1.96, edition 2024
+cargo xtask check-layering         # NFR-15 acyclic-graph gate
+cargo test --workspace
+```

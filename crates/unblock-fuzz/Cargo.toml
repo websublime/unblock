@@ -1,0 +1,21 @@
+[package]
+name = "unblock-fuzz"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+unblock-model = { workspace = true }
+unblock-error = { workspace = true }
+unblock-storage = { workspace = true }
+unblock-sync = { workspace = true }
+
+# NOTE: the cargo-fuzz harness (fuzz_targets, libfuzzer-sys, arbitrary) is a SEPARATE nested
+# `fuzz/` package added at the fuzzing task (T0.7+). It pins nightly ONLY for libFuzzer codegen via
+# its own `fuzz/rust-toolchain.toml` and is `exclude`d from this workspace, so the stable-1.96
+# default build never pulls libFuzzer (NFR-12). `unblock-fuzz` is a member but NOT a default member.

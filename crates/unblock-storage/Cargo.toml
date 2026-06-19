@@ -1,0 +1,40 @@
+[package]
+name = "unblock-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+unblock-model = { workspace = true }
+unblock-error = { workspace = true }
+libsql = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+serde_json = { workspace = true }
+snafu = { workspace = true }
+tokio = { workspace = true }
+# Private graph traversal / cycle detection backing the `Storage` trait's
+# detect_cycles / dependency_tree (spine §3.2). No petgraph type appears in any public API.
+petgraph = { workspace = true }
+# Remote/replica path only (non-default, D15/NFR-10) — kept off the default build.
+backon = { workspace = true, optional = true }
+failsafe = { workspace = true, optional = true }
+
+[features]
+default = []
+# D15: remote/embedded-replica + its TLS/HTTP surface, behind a non-default feature.
+remote = [
+    "libsql/replication",
+    "libsql/remote",
+    "libsql/sync",
+    "libsql/tls",
+    "dep:backon",
+    "dep:failsafe",
+]
+# Exposes the reusable Storage contract test suite (NFR-16) to downstream crates.
+testkit = []
