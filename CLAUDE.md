@@ -81,8 +81,11 @@ process guide, imported so every session loads it:
 @docs/PROCESS.md
 
 Essentials: every lifecycle phase runs as a **hand-picked team** (PROCESS.md §4 — specialist mates +
-`multi-agent-coordinator`, spawned as a Workflow). Take the next **ready** task from `docs/plans/STATUS.md`.
-Branch off `main`. A change ships only after the **design Review** and the **Verify quality gate** (each ≥3
+`multi-agent-coordinator`, spawned as a Workflow). **The main session is the *orchestrator*, not an implementer**:
+it assigns teams (incl. **Implement**), awaits outcomes, and decides/acts — it hand-writes only conversational or
+one-line/trivial edits. Substantive, multi-file, and multi-crate work (including scaffolding) is **always** a spawned
+team, which writes in an **isolated worktree** (never in the shared tree). Take the next **ready** task from
+`docs/plans/STATUS.md`. Branch off `main`. A change ships only after the **design Review** and the **Verify quality gate** (each ≥3
 agents) pass → **Conventional, atomic commits** (`git-workflow-manager`) → **Claude opens the PR** (`gh pr
 create`); a human merges → on merge, flip the `STATUS.md` task to ☑ done.
 

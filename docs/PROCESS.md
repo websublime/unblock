@@ -34,6 +34,18 @@ tool. **Never simplify the solution to make progress; if you reach that point, s
   can pick yourself. Don't barrel ahead past a decision that's his to make.
 
 ## 4. Multi-agent orchestration (when & how)
+- **Role separation — the main session is the *orchestrator*, not an implementer.** Miguel conducts the main
+  session; the orchestrator (Claude) makes decisions *with* Miguel, **assigns the per-phase team as a Workflow —
+  including the Implement phase** — awaits the outcome, then decides/acts on it. The main session edits files
+  **directly only** in conversation or genuinely trivial turns (a one-line fix, a `STATUS.md` status flip).
+  **Scaffolding, crate creation, and any multi-file / multi-crate change are always done by a spawned team — even
+  when the spec is exact** (a well-specified change is *not* a trivial one). This keeps the orchestrator's context
+  clean and makes every substantive change an auditable Workflow transcript instead of ad-hoc main-session edits.
+- **How a team writes (operational).** An Implement team writes in an **isolated git worktree** (`isolation:
+  "worktree"`) when writers run in parallel, or via a **single implementer agent** when the artifact must stay
+  coherent (e.g. one scaffold); it returns the diff + a short summary. The orchestrator reviews that diff and runs
+  the Verify gate — it does **not** hand-write the artifact. **Never run file-mutating agents in the shared working
+  tree** (they can switch branches or clobber state); isolate them.
 - **Use a Workflow** for substantive, decomposable, or review work (decompose + cover in parallel; independent
   perspectives before committing; scale beyond one context). **Solo** for trivial/mechanical edits or conversation.
 - **Proportionality.** The per-phase team lineup (below) is the **default for substantive work**; trivial/mechanical
@@ -56,7 +68,7 @@ coordinator**, run adversarially.
 | **Decide** | `Plan`, `rust-engineer`, `research-analyst` (+ `project-idea-validator` for product forks) | `multi-agent-coordinator` |
 | **Spec/Plan** | `Plan`, `rust-engineer`, `project-manager` | `multi-agent-coordinator` |
 | **Review** (design gate, ≥3) | `Plan`, `rust-engineer`, `research-analyst` (± `project-manager` / `project-idea-validator` lenses) | `multi-agent-coordinator` |
-| **Implement** | `rust-engineer` + the crate specialist: `mcp-developer` (`unblock-mcp`), `cli-developer` (`unblock-cli`); core crates `rust-engineer`-led (`refactoring-specialist` for refactors) | `multi-agent-coordinator` |
+| **Implement** | `rust-engineer` + the crate specialist: `mcp-developer` (`unblock-mcp`), `cli-developer` (`unblock-cli`); core crates `rust-engineer`-led (`refactoring-specialist` for refactors). **Runs as a Workflow that writes in an isolated worktree / a single implementer — the orchestrator never hand-writes the change** (see §4 role + operational notes). | `multi-agent-coordinator` |
 | **Verify** (quality gate, ≥3) | `code-reviewer`, `qa-expert`, `rust-engineer` (+ `/security-review` for sync/storage/MCP-input changes) | `multi-agent-coordinator` |
 | **Track** | `project-manager`, `git-workflow-manager` | `multi-agent-coordinator` |
 
