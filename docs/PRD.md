@@ -1,740 +1,332 @@
-# PRD: ://unblock — Provider-Agnostic Work-Tracking Engine for AI Agents
+# unblock — Product Requirements Document
 
-**Status:** APPROVED *(2026-06-16 — §8 P01 service list reconciled with SPEC §11: `memory` qualified as P01 schema-only, `mcp` named as the live P01 service; provenance-only, no product-scope decision changed.)*
-**Author:** Grace (product-manager)
-**Date:** 2026-05-07
-**Companion:** [docs/MANIFESTO.md](./MANIFESTO.md) (APPROVED, 2026-05-07)
-**Source design (carries forward verbatim):** [docs/code-cli/plan.md](./code-cli/plan.md), [docs/code-cli/spec.md](./code-cli/spec.md), [docs/code-cli/research.md](./code-cli/research.md)
+- **Status:** APPROVED (v1.1) — §12 closed; CI/CD + distribution via `dist` added (D17); plans in `docs/plans/`
+- **Date:** 2026-06-19
+- **Owner:** Miguel Ramos
+- **Repo:** `websublime/unblock`
+- **Stage:** Pre-1.0, no external users — breaking changes welcome, no migration or backward-compat burden.
 
----
-
-## 1. Problem Statement
-
-AI agents are increasingly the primary contributors to software work — investigating, implementing, reviewing, shipping. The work-tracking layer they depend on, however, was designed for humans: flat issue lists, free-form bodies, GUI-first workflows, and tools that assume continuous memory between sessions.
-
-The concrete failure modes observed today:
-
-1. **Flat lists, not graphs.** Existing trackers (GitHub Issues, Linear, Jira) treat dependencies as link metadata, not as a first-class structure that can be queried for "what is ready to work on right now". Agents must read every issue, parse free-form text, infer relationships, and decide manually — burning context on work the platform should do.
-2. **Provider lock-in.** A team that adopts a tracker is shackled to that vendor's data model. There is no neutral, computable graph that survives a provider migration.
-3. **No structured project memory.** Architectural decisions, conventions, risks, and lessons are buried in PR descriptions, Slack threads, and wiki pages. Agents have no scoped, queryable substrate for "what does this org/project expect of me?".
-4. **No structural pipeline discipline.** Tools without process are chainsaws without safety guards. Today an agent can mark work `done` without investigation, without review, without QA — because the platform never enforced the pipeline. Discipline is documentation, not architecture.
-5. **Code-search tax.** Agents burn enormous token budgets re-discovering codebase structure on every session via `Glob` + `Grep` + `Read` chains. There is no fast, structured query surface for symbols, definitions, and outlines.
-
-The market does not currently offer a single product that solves all five. `://unblock` is that product: a provider-agnostic work-tracking engine where the dependency graph is the product, the ready queue is computable, project memory is structured, the pipeline is structurally enforced, and an independent AST CLI saves tokens for code navigation.
+> **unblock** is a ground-up, idiomatic, multi-crate Rust rewrite of the deprecated `beads_rust` tool
+> (binary `br`, an "agent-first issue tracker"; source under `temp/beads_rust-main`). It is grounded in a
+> code-confirmed discovery of the original (25 functional / 17 non-functional requirements, 11 domain
+> entities) and reshaped by explicit, locked product decisions (§4).
+>
+> **Value proposition:** *unblock is the only local, offline-capable, dependency-aware issue store with
+> atomic multi-agent claim, a versioned dependency-aware scheduler, and contention-safe swarm coordination
+> at 250k+ issues — no accounts, no internet, with a credible shared-state path via libsql sync.*
 
 ---
 
-## 2. Objectives
+## 1. Overview & Vision
 
-- **OBJ-1.** Ship a single product surface — backend + web + AST CLI — at v1.0 such that an AI agent can go from cold start to productive work in one MCP call sequence (`prime → ready → claim`) under two seconds on a warm cache.
-- **OBJ-2.** Make the dependency graph the canonical computational primitive: every mutation recomputes derived state (ready set, dependency closure, cycles), and cascades propagate via Pub/Sub without agent participation.
-- **OBJ-3.** Decouple the product from any single tracker by treating Postgres as the source of truth and provider integrations (GitHub at v1.0, GitLab at v1.1) as event sources only.
-- **OBJ-4.** Enforce the four-stage pipeline (investigation → implementation → review → QA) through three independent architectural layers — MCP state-transition validation, a post-dispatch state validator running after every dispatched session, and agent prompt structure with explicit BLOCK conditions — such that all three must be bypassed simultaneously to violate the pipeline.
-- **OBJ-5.** Provide a first-class scoped memory service (`memory.*`) so org-/project-/user-level knowledge is structured, queryable, and sanitised — not free-form text.
-- **OBJ-6.** Ship a structurally decoupled AST CLI (`unblock-code`) that demonstrably saves tokens for AI agents on representative code-navigation flows, distributed via cargo-dist, Homebrew, and npm.
+unblock is a **local-first, agent-first issue tracker** purpose-built so AI coding agents — and the humans
+orchestrating swarms of them — can keep **dependency-aware, machine-readable issue state next to the code**,
+with no accounts and no external service required.
 
----
+It inverts the original product's interface: the **Model Context Protocol (MCP) is the primary surface**.
+Every domain feature is exposed as MCP tools/resources/prompts over stdio; the command-line binary exists
+only for **lifecycle/operations** (serve, migrate, doctor, version, init, agents, update — D3), not as the feature surface.
 
-## 3. Target Users
+Persistence is a **libsql** (Turso SQLite fork) database — the **source of truth** — accessed behind a
+`Storage` trait, local-file by default with a native path to remote/replicated sync later. A line-oriented
+JSONL export/import is retained as an **optional** portability/audit feature (git-diffable snapshots), **not**
+as a synchronization mechanism.
 
-### 3.1 Primary persona — AI-agent-driven dev teams
+### 1.1 Competitive context
 
-Engineering organisations whose day-to-day execution layer is one or more AI agents (Claude Code, GitHub Copilot CLI, Cursor agents, custom Anthropic/OpenAI agent harnesses). Their pain: agents have no shared memory, no structured pipeline, and no fast view of "what's ready". They need a backend that exposes the graph as a tool, not as a UI.
+| Alternative | Why unblock instead |
+|---|---|
+| **GitHub MCP server** (issues as MCP tools) | Requires internet + account; no dependency graph; no atomic claim; no offline. |
+| **saga-mcp** (TS, SQLite, hierarchy + deps + audit) | No atomic claim; single-agent assumption; no swarm-coordination diagnostics; no scheduler; no performance validation; TS runtime overhead. |
+| **Raw SQLite MCP server** | No domain model; no exit-code/error contract; no typed dependency edges. |
 
-### 3.2 Secondary persona — Orchestrators
+**Defensible wedge:** swarm-scale correctness at 250k+ issues — atomic multi-agent claim, contention-safe
+coordination, a versioned agent error contract, and a dependency-aware scheduler. Everything else is table stakes.
 
-Human or agent operators who dispatch sub-agents across a graph of work. They need a deterministic way to pick the next ready item, to enforce that an investigation agent actually wrote an `INVESTIGATION` comment before an implementation agent claims the same item, and to cascade newly unblocked work without manual bookkeeping.
+## 2. Problem Statement
 
-### 3.3 Tertiary persona — Developers
+External trackers (GitHub Issues, Jira, Linear) require internet and accounts, fragment context away from the
+code, cost money, and expose weak machine APIs; bare TODO comments carry no status, dependencies, or
+queryability. AI coding agents working in swarms need **deterministic, non-interactive, dependency-aware**
+issue state that lives with the repo, is offline-capable, and is machine-readable end to end.
 
-Human engineers who interact with the system through the web UI for ceremony tasks (kanban triage, comment review, dependency visualisation) and through the CLI for code navigation. They are not the primary target; the product is designed for their agents first, for them second.
+The **trust anchor** is the local libsql database (durable, transactional, with a real sync protocol for the
+shared case). Issues no longer need git as a transport; a git-diffable JSONL snapshot remains available as an
+**optional, secondary** convenience for audit and review, not as the source of truth.
 
----
+The original `beads_rust` delivered the agent value but accreted into an unmaintainable shape: a single
+~50k-LOC binary crate with by-convention-only layering, monster files (`storage/sqlite.rs` ~22.6k LOC,
+`sync/mod.rs` ~9.4k, `doctor.rs`), write-orchestration logic duplicated between the CLI and the MCP server,
+and a deep dependency on niche single-author sibling crates — most critically the pre-1.0 pure-Rust
+**fsqlite** SQLite engine (15 crates) whose error type leaked into the public API and which **hot-spins at
+100% CPU on lock contention** (defect 243), forcing `busy_timeout=0` plus a hand-rolled backoff.
 
-## 4. User Stories (JTBD-framed)
+unblock delivers the same agent value as a **coherent, acyclic multi-crate workspace** with an embeddable
+core, a mainstream storage backend behind a trait, MCP as the first-class interface, and the agent contract
+preserved.
 
-### 4.1 Primary persona — AI agent
+## 3. Personas
 
-- **US-1 — Find ready work.**
-  When I (an agent) start a fresh session with no memory of prior context, I want to call a single MCP tool and receive the next ready work item with all blocking dependencies resolved, so I can begin productive work without consuming tokens on graph traversal.
-  - Acceptance: a `ready` MCP call returns at least one work item whose dependency closure is fully `done`, ordered deterministically, in p99 under 2 seconds on a warm cache.
-  - Acceptance: the response carries enough context (project, parent epic, comment trail, scoped memory) for the agent to start without follow-up reads.
+| Persona | Tier | Needs |
+|---|---|---|
+| **AI coding agent** | primary | Deterministic, non-interactive, always-valid structured output; structured errors (`code`/`message`/`hint`/`retryable`); the 0–8 exit-code taxonomy (CLI) / matching MCP error codes; atomic claim; a "what should I work on" query (`ready`/`scheduler`); discovery of contracts (`capabilities`/`schema`) versioned by `contract_version`; `discovered-from` dependency for the work flywheel; stale-claim coordination diagnostics; MCP stdio transport. |
+| **Swarm orchestrator** | primary | Ranked, explainable ready-work scheduling (deterministic evidence `unblock.scheduler.v1`); read-only coordination status to diagnose hidden/stale `in_progress` claims (`unblock.coordination.v1`); contention resilience (no CPU hot-spin) at 250k–1M issues and thousands of agents. |
+| **CI / external system** | primary | Scriptable structured output and exit-code categories; changelog from closed issues; orphan detection; workflow **gate** verdicts (`ci_green`/`min_reviewers`/`security_sign_off`) that block status transitions. |
+| **Maintainer / rewrite engineer** | primary | Embeddable, testable core library API; enforced acyclic crate layering; mainstream swappable dependencies behind traits; a `Storage`-trait contract suite. |
+| **Human developer** | **secondary / future** | Issue lifecycle and dependency planning. **Note:** under D3 (CLI has no domain features) and D7 (no rich rendering), daily domain work requires a **running MCP client**; a human in a bare terminal cannot create/list/close/dep directly. This persona is explicitly secondary in v1; a domain-CLI shim is out of scope (would contradict D3). |
 
-- **US-2 — Claim atomically.**
-  When two agents observe the same ready item, I want the platform to grant the claim to exactly one of them, so I never duplicate work or waste compute.
-  - Acceptance: `claim` is a single Postgres transaction with `SELECT FOR UPDATE`; the loser receives a structured "already claimed" error referencing the winner's agent identifier and timestamp.
+## 4. Product Principles & Key Decisions
 
-- **US-3 — Cascade automatically.**
-  When I close a work item, I want the platform to recompute the graph and promote newly unblocked dependents to `ready` without me having to know what depends on what, so my mental model is "close my work, the system tells me what opened up".
-  - Acceptance: a successful close emits a Pub/Sub event whose subscriber promotes newly unblocked items in the same logical operation; the next `ready` call reflects the new set.
+These decisions are **locked** (confirmed with Miguel) and shape the rest of this document.
 
-- **US-4 — Read structured project memory.**
-  When I need to know "what conventions does this project enforce?" or "what was the decision on X?", I want to query a scoped memory service and receive atomic facts, so I do not parse Slack/PRs/wikis.
-  - Acceptance: `recall` returns memories scoped to org/project/user with full-text and tag filtering; values are capped at 8 KB; secrets are sanitised with a warning before storage.
+| ID | Decision | Rationale |
+|---|---|---|
+| **D1** | **Storage = libsql** behind an async `Storage` trait. Local file now; remote/embedded-replica/synced available later. | Mainstream, maintained; gives local **and** remote with one async client → no separate "shared service". Replaces the niche fsqlite stack and its hot-spin defect. |
+| **D2** | **MCP = rmcp over stdio, and MCP is the PRIMARY interface.** | rmcp is the official async SDK (`rmcp 1.0`, `server`+`transport-io`). Agent-first product → the agent protocol is the product. |
+| **D3** | **CLI is reduced to lifecycle/ops only** (`serve`, `migrate`, `doctor`, `version`, `init`, `agents`, `update` — all lifecycle/ops, no domain features). All **domain features via MCP**. | "All features via MCP." The binary still needs a lifecycle surface; that is not the feature surface. |
+| **D4** | **Errors = snafu**, **per-crate** error enums (no god-enum); mapped to MCP error data / exit codes at the boundary. | Idiomatic typed errors with context selectors; no backend error leakage. |
+| **D5** | **libsql is source of truth; JSONL is an OPTIONAL light export/import feature.** Drop the heavy git-merge coordination (3-way merge, 4-phase collision detection, distributed locks, data-loss guards). | libsql provides real sharing; git-as-transport is redundant. Keep JSONL only for portable, diffable snapshots. Reversible toward DB-only later. |
+| **D6** | **Whole stack is async (tokio).** | Consequence of rmcp + libsql; matches the scaffold (`tokio = full`). |
+| **D7** | **MCP-only sheds the rich-rendering stack** (rich_rust, crossterm, indicatif); rendering is the MCP client's job. | Structured content over MCP; large supply-chain reduction. |
+| **D8** | **Rename everything to `unblock`** — binary `unblock`, crates `unblock-*`, config dir `.unblock/`, resource URIs `unblock://…`, contract ids `unblock.*.v1`. | New product identity. |
+| **D9** | **Target stable Rust** (pinned `1.96.0`); drop clap dynamic/unstable features. | Removes the only reason the original needed nightly. |
+| **D10** | **Config = TOML** (`.unblock/config.toml`); **single env prefix `UNBLOCK_`** (`UNBLOCK_ACTOR`/`UNBLOCK_DIR`/`UNBLOCK_JSONL`/`UNBLOCK_OUTPUT_FORMAT`). | Idiomatic; avoids the unmaintained serde_yaml fork on an untrusted-input path; unifies BD_/BEADS_/BR_. |
+| **D11** | **Drop** the town/mayor **cross-project routing**; keep single-workspace `.unblock/` discovery. | Elaborate and niche; reintroduce only on a concrete multi-repo need. |
+| **D12** | **Keep** TOON output (feature-gated; **v1.1**), **keep** the compaction fields in the model — **rationale: JSONL round-trip fidelity, not Go-bd conformance.** *(In-binary self-update superseded by D17 — now `axoupdater` in `unblock-cli` at v1, no isolated crate; see FR-25.)* | Conservative; not dropped without need, but scoped out of v1 (see D13/§13). |
+| **D13** | **No daemon self-install, no automatic git operations, no git library linked, no network on normal command paths.** | Preserves the non-invasive, offline-first stance. (The MCP stdio server is a foreground process launched by the client, not a self-installed daemon.) |
+| **D14** | **v1 concurrency = single `unblock serve` per workspace owns the DB.** The engine single-writer discipline is **in-process only** (a tokio `Semaphore` in `unblock-engine`); agents scale by connecting as MCP clients to that one serve process. Concurrent external writers (CLI while serve runs, or multiple serve) are **best-effort** via SQLite WAL + `busy_timeout`, **not** the supported path; `migrate`/`doctor` run when serve is inactive. | Simplest correct model; makes NFR-2/NFR-3 testable; matches libsql's local SQLite backend. |
+| **D15** | **libsql ships local-file-only / bundled by default; the remote/replica feature is OFF by default**, behind an explicit non-default Cargo feature, with a warning that enabling it may make network calls. | Preserves D13/NFR-17 ("no network on normal path") and keeps the TLS/HTTP transitive surface out of the default build (NFR-10/NFR-11). |
+| **D16** | **v1 ships a one-shot, best-effort `bd`→unblock import** (bd-export → `issues.jsonl` → `import`). | A general bd→unblock migration capability for anyone with an existing `bd` repo. (unblock's own dev tracking is NOT in bd — it lives in `docs/plans/STATUS.md`.) Reuses the FR-7/FR-8 import path. |
+| **D17** | **CI/CD & distribution via `dist`** (cargo-dist): 6 target triples (mac/linux/win × x86_64/aarch64), shell+powershell installers, **self-update via `axoupdater` in v1**, GitHub artifact attestations; CI quality gate from M0. | Mainstream release tooling; replaces the hand-rolled `self_update` stack; satisfies NFR-9/NFR-11/NFR-17. See `docs/plans/ci-cd-and-distribution.md`. |
 
-- **US-5 — Be blocked when out of pipeline.**
-  When I try to mark a work item `done` without an `INVESTIGATION` and `REVIEW` comment in the trail, I want the MCP server to refuse the transition, so the pipeline cannot be silently skipped.
-  - Acceptance: state-transition validation rejects the mutation with a structured error citing the missing precondition.
-  - Acceptance: the post-dispatch validator running after my session would also catch the violation; the agent prompt I run under contains an explicit BLOCK condition for the same case. All three layers agree.
-
-### 4.2 Secondary persona — Orchestrator
-
-- **US-6 — Dispatch by readiness, not by guess.**
-  When I am orchestrating a fleet of agents, I want a single API that returns the n highest-priority ready items, so I can dispatch in parallel without manually traversing the graph.
-  - Acceptance: `ready --limit n` returns up to n items with stable ordering and per-item metadata sufficient to dispatch.
-
-- **US-7 — See cycle violations early.**
-  When I introduce a new dependency, I want the platform to reject the operation if it would create a cycle, so the graph is always a DAG.
-  - Acceptance: `add_dependency` rejects on cycle creation with a structured error pointing at the offending edge; the rejection is enforced at write time, not at read time.
-
-### 4.3 Tertiary persona — Developer
-
-- **US-8 — Visualise the graph in a browser.**
-  When I want to understand the shape of work, I want to open a web UI showing kanban + dependency graph + roadmap, so I can communicate with stakeholders without exporting screenshots.
-  - Acceptance: the Astro web client renders kanban, dependency graph, roadmap, and per-item comments; auth is via OAuth2+PKCE to GitHub or GitLab; backend credentials never reach the browser (BFF-only, HttpOnly cookie on Astro origin).
-
-- **US-9 — Save tokens on code search.**
-  When I (or an agent) need to find a symbol's definition, I want to invoke a single CLI command that returns a JSON envelope with the file, span, and signature, so I do not chain `Glob` + `Grep` + `Read`.
-  - Acceptance: `unblock-code find-symbol <name>` returns p99 < 10 ms on the medium representative corpus, warm cache; envelope schema is locked per the spec.
-  - Acceptance: ROI harness shows the indexer median is at least 2.0× faster than the `Glob/Grep/Read` baseline across 3 representative agent flows × N=10 runs (SOFT gate; release-publish, follow-up bead if missed, does not block release).
-
-- **US-10 — Install the CLI without dev tooling drama.**
-  When I want to install `unblock-code`, I want to run a single one-liner from cargo-dist, Homebrew, or npm, so I do not have to compile from source.
-  - Acceptance: cargo-dist publishes prebuilt artifacts for Linux x86_64, macOS aarch64, and Windows x86_64; Homebrew formula and npm wrapper redistribute the same artifacts.
-
----
+> The locked §4 set was reviewed by three independent lenses; none is a blocking technical flaw. NFR-3 framing
+> (CF-3) and FR-9 scope (CF-1) were clarified — see §6 and §8.2 — without reversing any decision.
 
 ## 5. Functional Requirements
 
-### 5.1 Backend (Encore Go API + MCP) — P01 + P02
+> **Delivery (D2/D3):** FR-1…FR-23 are surfaced as **MCP tools/resources/prompts** (§9). CLI command names
+> are the canonical vocabulary for tool/action naming and for the few lifecycle commands.
+> **v1 tier** = the walking-skeleton thin slice (D14/§13). Items marked **[v1.1]** are deferred.
+> Acceptance criteria (AC) below are the objective "done" gate for each v1 must-FR.
 
-- **FR-1.** Single Postgres database with 8 schemas: `auth`, `org`, `workitems`, `deps`, `providers`, `mcp`, `boards`, `memory`. No additional persistent stores.
-- **FR-2.** OAuth2+PKCE identity via GitHub or GitLab, single primary identity per user; secondary providers attach as event sources only.
-- **FR-3.** Org-level RBAC enforced as Postgres row-level filtering, applied uniformly to every read and write path. Cross-tenant leaks are a release-blocker.
-- **FR-4.** Work-item domain: id, title, body, status, priority, agent claim, parent (epic), arbitrary tags, provider links. CRUD via MCP and via Astro Actions BFF.
-- **FR-5.** Dependency graph stored as edges in `deps`; computed views for ready set, dependency closure, cycle detection. Recomputation on every mutation.
-- **FR-6.** Cascade on close: a successful close emits a Pub/Sub event whose subscriber promotes newly unblocked dependents to `ready` in the same logical operation.
-- **FR-7.** Atomic claim: `SELECT FOR UPDATE` transaction; exactly one agent wins; loser receives structured rejection.
-- **FR-8.** MCP server over **Streamable HTTP** per the MCP 2025-06-18 spec — single endpoint at `/mcp` accepting both `POST /mcp` (client requests; response can be a single JSON-RPC reply or an SSE stream of incremental responses for long-running tools) and `GET /mcp` (server-initiated SSE stream for resumable / long-lived sessions). Bearer `<api-key>` auth on every request, `Mcp-Session-Id` response header on `initialize`. Implementation uses `github.com/modelcontextprotocol/go-sdk` (the canonical Go SDK; not `rmcp` which is Rust-only). Exposing 27 tools at v1.0 (reconciled from the original "18 tools" figure by the P01 round-16 amendment — see `docs/specs/01-spec-backend-mvp.md` round-16 changelog):
-  - 23 in P01 (work-item CRUD, dependencies, ready, claim, **promote**, close, comment trail, prime, state accessors, the four **milestone** management tools, and the four **label-registry** tools)
-  - +4 memory tools in P02 (`remember`, `recall`, `memories`, `forget`)
-  - Plus the providers/sync tooling needed for bidirectional GitHub sync.
-  Exact tool inventory is pinned by the architect in `docs/SPEC.md` §5.2.2. (P01 round-16 raised P01 from 14→23 and v1.0 from 18→27: `promote` + 4 milestone tools + 4 label tools moved into P01 / were newly added.)
-- **FR-9.** State-transition validation at the MCP layer: every status change is checked against the pipeline state machine; invalid transitions are rejected with a structured error citing the missing precondition (Law 8, layer 1).
-- **FR-10.** Comment trail with **two orthogonal axes**, designed so agents can act on signal without parsing free-form text (Manifesto Principle 6):
-  - **`kind`** — semantic category. Eleven values: `investigation`, `decision`, `deviation`, `completed`, `review`, `qa`, `deferred`, `pr`, `needs-human`, `override`, `general`.
-  - **`status`** — action signal. Four values: `error`, `warning`, `info`, `success`. **NOT NULL, default `info`.**
-  - **Composition is policy-free.** A `kind=qa` with `status=success` represents PASS; with `status=error` represents FAIL. A `kind=review` with `status=success` represents APPROVE; with `status=warning` represents NEEDS-REWORK. The product does not impose a cross-axis validation matrix — agents and humans can use any (kind, status) combination that fits their use.
-  - **UI uses `status`** for colour-coding and badges (line-ui alert variants map 1:1 to the four status values). **Queries filter on `status`** for cross-item inspection panels (e.g., "show every `status=error` comment in this project").
-  - Comments are append-only (no in-place edits to the body after creation). Edits use `edited_at` and a versioned audit trail at the schema level (post-v1) — for v1, we only record `updated_at`.
-- **FR-11.** GitHub provider integration:
-  - Webhook ingestion at the public `POST /webhooks/github` endpoint, signature-verified, normalising to canonical `WorkItem`.
-  - Bidirectional sync, opt-in per integration: changes in `://unblock` propagate to GitHub Issues; webhook events update the canonical store.
-  - Reconciliation on a schedule when webhooks are missed or the provider is offline.
-- **FR-12.** Public Encore endpoints at v1.0 (the only paths reachable directly from external services):
-  - `POST /webhooks/github` — provider event sink, HMAC-verified.
-  - `POST /mcp` + `GET /mcp` — remote MCP for AI agents over Streamable HTTP per the 2025-06-18 spec. Single logical endpoint at one path, two HTTP methods. Bearer `<api-key>` on every request.
-  At v1.1, a third endpoint is added:
-  - `POST /webhooks/gitlab` — provider event sink, HMAC-verified (v1.1).
-  All other Encore APIs are private; the Astro BFF is the sole privileged client. **The OAuth callback is hosted by Astro on the web origin** (`unblock.websublime.com/auth/[provider]/callback`) — the Astro Action handles the callback and calls Encore's private `auth.exchangeOAuthCode` internally. This preserves the BFF discipline (Law 4): no auth credentials cross domain boundaries.
-- **FR-13.** Memory service:
-  - 4 MCP tools: `remember`, `recall`, `memories`, `forget`.
-  - 3 scopes: `org`, `project`, `user`.
-  - 8 KB max value size per entry.
-  - Always-on secret sanitiser: detects credential-shaped strings, emits a warning, stores the sanitised form.
-  - Query surface: GIN `tsvector` full-text index plus tag index. No versioning at v1.
+### Core issue management
+> **FR-1 umbrella:** "FR-1" denotes the core CRUD requirement as a whole and is realized by the three
+> sub-requirements **FR-1a** (Create), **FR-1b** (Read/Update), and **FR-1c** (Delete). Other docs may cite
+> either the umbrella "FR-1" or a specific sub-id; both resolve here.
+- **FR-1a [must] — Create.** create (type, priority, labels, parent, deps, due/defer, estimate, slug, bulk markdown import, `ephemeral`, attribution fields) and quick-create (returns id only). *AC: every option round-trips through libsql and a `show` of the new id; quick-create returns only the id; invalid enum/priority yields a structured error with `code` + `hint`.*
+- **FR-1b [must] — Read/Update.** show; update (multi-id; label add/remove/set; reparent). *AC: multi-id update is atomic per id; reparent rejects cycles; `updated_at` advances; no-op update is detectable.*
+- **FR-1c [must] — Delete semantics.** tombstone-based delete with cascade / hard / dry-run. *AC: default delete tombstones (recoverable); `--cascade` tombstones children; `--hard` removes rows; `--dry-run` mutates nothing and reports the plan; tombstones never resurrect on import.*
+- **FR-2 [must] — Atomic claim.** A single mutation sets assignee **and** `in_progress` with no race window. *AC: under the contention lab, N agents claiming the same issue yield exactly one winner; losers get a deterministic "already claimed" structured error.*
+- **FR-3 [must] — Scheduling / defer.** `defer`/`undefer` move issues out of and back into the ready set until a date. *AC: a deferred issue never appears in `ready` before `defer_until`; `undefer` restores it immediately.*
 
-### 5.2 Pipeline enforcement (Law 8) — P02 + P04
+### Querying
+- **FR-4 [must] — Query surface.** `list` (deep filters: status/type/assignee/label AND+OR/priority ranges/text-contains; structured + CSV), `ready` (unblocked + undeferred + hybrid-sorted; the agent entrypoint; **default-complete/unlimited**), `blocked`, `search` (full-text, default cap 50), `count` (group-by), `stale`. *AC: `ready` excludes blocked/deferred/closed; filters compose; `search` cap is overridable; outputs are snapshot-stable (NFR-14).*
+- **FR-5 [must] — Dependencies & graph.** Typed edges (`blocks`, `parent-child`, `conditional-blocks`, `waits-for`, `related`, `discovered-from`, `replies-to`, `relates-to`, `duplicates`, `supersedes`, `caused-by`, `Custom`); dep add/remove/list/tree/cycles + graph view. Only `blocks`/`parent-child`/`conditional-blocks`/`waits-for` affect ready-work. Graph traversal/cycle detection via `petgraph`. *AC: adding an edge that creates a `blocks` cycle is rejected with the cycle path; `ready` reflects edge changes immediately.*
+- **FR-6 [v1.1] — Organization.** Labels (add/remove/list/list-all/rename), threaded comments (add/list), epic rollups with auto-close-eligibility.
+- **FR-21 [v1.1] — Saved queries.** Named, reusable `list`-style filter sets. *(Demoted; re-evaluate whether agents have a use case post-D2/D3.)*
 
-- **FR-14.** Layer 1 — MCP state-transition validation. State machine encoded in the backend; every transition is gated by explicit preconditions (e.g. `done` requires a `REVIEW` comment present; `claim` requires status `ready`). Implemented in P02.
-- **FR-15.** Layer 2 — Post-dispatch state validator. The `verify-state` plugin hook (Stop / agentStop event) calls MCP `verify_can_transition` against the dispatched session's final state and the comment trail. Non-compliance is surfaced as a finding work item (`type=finding`, severity per §6.10) linked to the parent epic via `parent_id` and `discovered_from_id`. **No separate inspector agent is required** — the validator runs as a hook calling the same MCP machinery that enforces Layer 1.
-- **FR-16.** Layer 3 — Agent prompt structure. The mister-anderson plugin renderer emits prompts onto Claude Code with explicit BLOCK conditions matching the MCP state machine. All three layers agree by construction; bypassing any single layer leaves the other two enforcing.
+### Persistence & interchange (model B)
+- **FR-7 [must] — Persistence + optional JSONL interchange.** libsql is the source of truth. Provide **optional** `export`/`import` to/from a line-oriented `issues.jsonl` for portability/audit/git-diffable snapshots. Export is atomic (temp in same dir → flush + `sync_all` → atomic rename; on error remove temp, leave original intact). **No** automatic three-way merge, **no** git operations. *AC: export is byte-deterministic for a fixed DB state; a killed export never corrupts the existing file (NFR-4).*
+- **FR-8 [must] — Safe import.** Import validates each line, **rejects git conflict markers and malformed JSON before any DB mutation**, and confines the JSONL path (canonicalize; reject symlink escapes / `.git` / `..` / disallowed extensions). Tombstones never resurrected. *AC: a file with a conflict marker is rejected with zero DB writes; a symlink-escaping path is refused at preflight.*
+- **FR-26 [must] — One-shot `bd` import (D16).** Best-effort import of any existing `bd`/beads repo's data via `bd-export` → `issues.jsonl` → `import`, mapping bd fields to the unblock domain model. *AC: a representative `bd` repo imports with a reported count of issues/deps/comments migrated and a list of any dropped/unmapped fields; rerunning is idempotent (dedup by `content_hash`).*
 
-### 5.3 Astro web frontend — P05
+### Engine, contract & lifecycle
+- **FR-9 [must] — Single shared engine/session.** One implementation of `open → (optional import) → mutate → (optional export) → recover`, consumed by **both** the MCP server and the CLI, so behaviour cannot drift. **Mutation serialization is in-process** (a tokio `Semaphore`), per D14; reads use a fast path. *AC: a property test shows interleaved mutations through the engine are linearizable; MCP and CLI produce identical results for the same operation.*
+- **FR-10 [must] — Read fast path.** Read operations bypass the write semaphore. *AC: reads proceed while a write holds the semaphore (WAL readers).* 
+- **FR-11 [must] — Agent contract surface.** Always-valid structured output; structured errors carrying `code`/`message`/`hint`/`retryable`; the 0–8 exit-code taxonomy (CLI) and matching MCP error codes; `close --suggest-next` returns newly unblocked issues; `ready` is the canonical discovery query. *AC: a golden snapshot pins every exit code and MCP error code; output is always valid JSON even on error.*
+- **FR-12 [must] — Self-describing contracts.** `capabilities` and `schema` emit a versioned (`contract_version`) machine-readable description of tools, payload shapes, and error/exit codes. *AC: bumping a tool's schema bumps `contract_version`; a client can detect drift.*
+- **FR-13 [must (subset) / v1.1 (full)] — Layered configuration.** v1 ships **CLI > env (`UNBLOCK_*`) > project `.unblock/config.toml` > defaults**; the DB config table and user-config layers are **[v1.1]**. Startup-vs-runtime key partitioning. *AC: precedence is unit-tested across all v1 layers.*
+- **FR-14 [must] — Workspace bootstrap.** `init [--prefix]` creates `.unblock/`; `agents` injects/maintains `AGENTS.md`. *AC: `init` is idempotent; refuses to clobber an existing non-empty `.unblock/` without `--force`.*
 
-- **FR-17.** Astro 5 + line-ui (websublime headless Web Components on top of Zag.js), deployed to Cloudflare Pages.
-- **FR-18.** Astro Actions act as the BFF: HttpOnly cookie on the Astro origin only; the browser never holds an Encore credential.
-- **FR-19.** Views at v1.0: kanban board, dependency graph, roadmap, per-item comment trail.
-- **FR-20.** Auth flow: OAuth2+PKCE to GitHub or GitLab, callback handled by the Astro origin, session cookie set on the Astro origin, Encore API reached only via Astro Actions.
-- **FR-21.** Mobile-responsive layout via line-ui defaults. Native mobile clients are out of scope (see §9).
+### Health, reliability & shutdown
+- **FR-16 [must (lite) / v1.1 (full taxonomy)] — Workspace health.** v1: `doctor` + libsql `integrity_check` + basic diagnostics. **[v1.1]:** the full Healthy/Drifted/Recoverable/Unsafe taxonomy with composite severity, redefined for a libsql-authoritative world (Recoverable → libsql integrity/WAL recovery, not JSONL; Drifted meaningful only when JSONL export is enabled). Recovery preserves evidence under `.unblock/.recovery/`.
+- **FR-17 [must] — Cooperative shutdown.** Translate SIGINT/SIGTERM/SIGHUP into an atomic shutdown flag so the serve process unwinds cleanly and flushes/closes libsql; a second signal escalates to async-signal-safe exit; Windows no-op. *AC: SIGTERM mid-write commits-or-rolls-back cleanly and closes the DB with no WAL corruption (failure-injection test).*
 
-### 5.4 AST CLI (`unblock-code`) — P03
+### Coordination, gates, audit
+- **FR-18 [v1.1] — Swarm coordination diagnostics.** `scheduler` ranks ready work with explainable deterministic evidence (`unblock.scheduler.v1`); `coordination status` (`unblock.coordination.v1`) read-only diagnoses hidden/stale `in_progress` claims. Pure versioned contracts. **Coordination is purely DB-state-derived; the upstream "Agent Mail" dependency is dropped** (§12).
+- **FR-19 [v1.1] — Workflow gates.** Policy-driven (`.unblock/policy.toml`) transition gates (CI/reviewers report pass/fail; transition blocked until required gates pass). Project-local, not exported.
+- **FR-22 [v1.1] — Audit / flight recorder.** Append-only `interactions.jsonl` with capture-only Tier-1 attribution (`agent_name`/`harness`/`model`), never enforced.
 
-The AST CLI carries forward verbatim from the approved `docs/code-cli/{plan,spec,research}.md`. The functional requirements below summarise the surface; the spec is authoritative.
+### MCP surface (primary) & diagnostics
+- **FR-20 [must] — MCP stdio server (PRIMARY).** `unblock serve` exposes **tools** (issue lifecycle, claim, defer, query, dependencies, sync export/import; v1.1 adds labels/comments, scheduler, coordination, gates), **resources** (`unblock://issues/ready`, `unblock://issues/{id}`, `unblock://capabilities`, `unblock://schema`; v1.1 adds coordination/status), and **prompts** (triage, plan_next_work). Built on **rmcp** in the isolated `unblock-mcp` crate. *AC: an MCP client can complete ready → claim → close end to end; tool input is schema-validated (`schemars`) and rejects oversized/invalid args.*
+- **FR-15 [must] — Diagnostics & info (pure-DB).** stats/status, info, where, version, lint; **changelog and orphans derive purely from DB state** — `changelog` from closed-issue metadata, `orphans` from issues whose `external_ref` matches a commit pattern. **No git is read or linked** (resolves the NFR-6 contradiction). *AC: the NFR-6 static gate passes with FR-15 present.*
+- **FR-23 [v1.1] — Shell completions** (static, bash/zsh/fish/powershell/elvish).
 
-- **FR-22.** Three new Rust crates: `unblock-indexer-core` (pure lib), `unblock-indexer` (impure lib), `unblock-code` (clap-based bin).
-- **FR-23.** Statically-linked tree-sitter grammars for 10 languages: Rust, TypeScript, JavaScript, Python, Go, Java, C, C++, Ruby, PHP. **8 default-enabled** (Rust, TypeScript, JavaScript, Python, Go, Java, C, PHP); **`lang-cpp` and `lang-ruby` are opt-in** Cargo features.
-- **FR-24.** SQLite + FTS5 + WAL local index, cache root `~/.cache/unblock/repos/<repo-hash>/index.db`. Span-only — no body text in DB.
-- **FR-25.** 11 CLI commands: `find-symbol`, `list-symbols`, `outline`, `get-symbol`, `search`, `find-references` (HEURISTIC), `reindex`, `status`, `languages`, `init`, `parse`.
-- **FR-26.** 17 canonical `SymbolKind` variants persisted in SQLite with FTS5 over `name`, `signature`, `comment`.
-- **FR-27.** Per-query mtime check is the **sole** sync mechanism between one-shot CLI invocations (invariant). No daemon, no watcher.
-- **FR-28.** Distribution: cargo-dist prebuilt artifacts for Linux x86_64, macOS aarch64, Windows x86_64; Homebrew formula; npm wrapper.
-- **FR-29.** Structurally decoupled from the backend (Manifesto Law 6): no shared runtime state between `unblock-mcp` and `unblock-code`, no cross-binary queries, no shared HTTP client.
+### Distribution & self-update (D17)
+- **FR-25 [must] — Self-update via `dist`/`axoupdater` (v1).** `unblock update` (a lifecycle command, D3) embeds `axoupdater`; updates are verified against GitHub artifact attestations before execution (NFR-17); never invoked on normal command paths. Distribution: shell + powershell installers across 6 target triples. The command lands in `unblock-cli` behind the `self-update` Cargo feature (the feature name enables the `unblock update` command; default-on, dropped under `--no-default-features` per CF-K). *(See `docs/plans/ci-cd-and-distribution.md`.)*
 
-### 5.5 Priority Classification
+### Dropped (D11)
+- **FR-24 [wont] — Cross-project town/mayor routing.** Single-workspace discovery only.
 
-| Requirement | Impact | Confidence | Effort | Category |
-|-------------|--------|------------|--------|----------|
-| FR-1 (single Postgres, 8 schemas) | H | H | M | Must-have |
-| FR-5 (dependency graph + cycle detection) | H | H | H | Must-have |
-| FR-6 (cascade on close) | H | H | M | Must-have |
-| FR-7 (atomic claim) | H | H | L | Must-have |
-| FR-8 (MCP Streamable HTTP, 27 tools — P01 round-16; was 18) | H | H | H | Must-have |
-| FR-9 (state-transition validation, layer 1) | H | H | M | Must-have |
-| FR-11 (GitHub webhooks + bidirectional sync) | H | M | H | Must-have |
-| FR-13 (memory service) | H | M | M | Performance |
-| FR-14–16 (pipeline three layers) | H | M | H | Must-have |
-| FR-17–21 (Astro web) | M | H | H | Performance |
-| FR-22–29 (AST CLI) | H | M | H | Performance |
-| US-9 ROI ≥ 2.0× | M | M | M | Delight (SOFT) |
-| Mobile responsive (FR-21) | L | H | L | Delight |
+## 6. Non-Functional Requirements
 
----
+- **NFR-1 [performance]** Storage targets with `criterion` baselines and a 10% CI regression gate: create <1ms; list 1k <10ms / 10k <100ms; ready 1k <5ms / 10k <50ms; export 10k <500ms; import 10k <1s. *(Re-baseline on libsql.)*
+- **NFR-2 [performance]** Swarm scale **under the D14 topology** (one serve per workspace in v1; cross-machine/multi-dev sharing is the v1.2 libsql-remote path, writes serialized at the primary), with a read-only fast path. **v1 commits to 250k issues validated in CI** (ci-cd `scale` job, storage/engine; owner impl-plan T3.5). The **1M-issue / 10k-agent corpus is a v1.3 CI gate** (not a v1 acceptance gate); it is not part of the v1 ship-gate set.
+- **NFR-3 [reliability/perf]** **The primary non-spin guarantee is libsql/SQLite WAL + the native `busy_timeout` (>0) handler + the in-process serialized writer — this resolves the fsqlite-243 hot-spin by construction.** App-level jittered backoff is a **secondary** fallback for the remote/replica path only; the chosen retry crate MUST pass `cargo-deny` (do **not** use the archived `backoff 0.4` — use `backon` or `tokio-retry`). A contention-replay lab proves no 100% CPU hot-spin. *(Validate libsql busy/lock semantics EARLY — see Risk Register.)*
+- **NFR-4 [reliability]** Atomic JSONL export (temp + `sync_all` + atomic rename; remove temp, leave original intact on error), verified by failure-injection e2e tests.
+- **NFR-5 [reliability]** Release reliability gates must pass: failure-replay, e2e export/import failure-injection, long-lived single-workspace stress, interleaved concurrent command-family integrity; emergency override requires a written reason.
+- **NFR-6 [security]** unblock runs **zero git operations** and links **no git library**, enforced by a static gate (no `Command::new("git")`, no git crate). FR-15 is pure-DB and compatible with this gate.
+- **NFR-7 [security]** JSONL writes confined to `.unblock/` by default; external paths require explicit opt-in with canonicalization and rejection of symlink escapes / `.git` / `..` / disallowed extensions; preflight before opening/parsing.
+- **NFR-8 [security]** Import rejects git conflict markers and malformed JSON before any DB mutation; tombstones never resurrected; force flags mutually exclusive and never bypass syntax/conflict-marker validation.
+- **NFR-9 [supply-chain]** **`forbid(unsafe_code)`** in every crate (stronger than `deny`; update the scaffold); clippy pedantic; commit `Cargo.lock`; `cargo-audit`/`cargo-deny` in CI; pin every GitHub Action to a 40-char SHA (incl. the `dist`-generated release workflow). Release/distribution via `dist` (D17, `docs/plans/ci-cd-and-distribution.md`).
+- **NFR-10 [supply-chain]** Minimize transitive surface: prefer mainstream multi-maintainer crates; eliminate the 15-crate fsqlite stack; keep network/TLS (`reqwest`, libsql remote) **behind non-default features** so it never appears on the normal path.
+- **NFR-11 [portability]** Single self-contained `unblock` binary, no runtime system deps on Linux/macOS/Windows; path normalization; cfg-guarded unix signal handling.
+- **NFR-12 [portability]** Build on **stable Rust** (`1.96.0`); nightly only for an explicit, documented reason (none currently). **Gate:** a CI job pins `rust-toolchain` to `1.96.0` stable and builds `--locked`; a green stable build is the NFR-12 acceptance gate (see ci-cd §2).
+- **NFR-13 [observability]** Structured `tracing` on an `unblock.reliability` target (operation/path/result/reason): INFO for guard activations, force overrides, external path use, conflict markers; DEBUG for per-file/per-issue events.
+- **NFR-14 [observability]** Clean structured output strictly on stdout; diagnostics strictly on stderr; snapshot-guarded stable output shapes (`insta`).
+- **NFR-15 [architecture]** Enforced **acyclic** crate layering: pure leaf domain/policy crates depend only on model+error; storage hides its backend behind a trait with a backend-agnostic error; **no crate reaches into another's internals** (`unblock-storage` depends only on model+error — see §8.1).
+- **NFR-16 [testability]** Per-crate unit tests; `proptest` over lifecycle/content-hash/import round-trip; `insta` snapshots with a CI check gate; `cargo-fuzz` over the ingestion surface; a `Storage`-trait **contract suite** validating each backend independently; `wiremock` for any remote/network path.
+- **NFR-17 [reliability/security]** Distribution/self-update via `dist`/`axoupdater` (v1): artifacts carry **GitHub artifact attestations** and are verified before execution; **no network calls on any normal command path** — only on explicit `unblock update` (offline-first; libsql remote behind a non-default feature, D15). See `docs/plans/ci-cd-and-distribution.md`.
+- **NFR-18 [security — threat model]** The MCP tool surface is an untrusted-input boundary: all tool args are `schemars`-validated with size/rate limits; a malicious/buggy agent is bounded to its own workspace's data (no path escape, no host command execution); libsql remote credentials (when used) are **never** stored in `config.toml` — only via `UNBLOCK_*` env or OS keychain. Tie safe drift to `contract_version` (FR-12).
 
-## 6. Product Catalogues
+## 7. Domain Model
 
-These catalogues pin product-level decisions that shape every downstream artefact. They are not implementation contracts (those live in `docs/SPEC.md`) — they define the domain shapes, workflow surface, and behavioural rules that the architect, supervisors, and agents all reason against.
-
-A reminder of what is **deliberately absent** from these catalogues, having been v1 GitHub-API workarounds: pipeline-state labels, `derive_label` mappings, label reconciliation invariants, custom-field "smushed" canonical names, comment kinds parsed from text prefixes. Postgres is the source of truth; the UI computes display from typed columns; agents act on enums, not on parsed strings.
-
-### 6.1 Custom field enums
-
-Persisted as Postgres enum columns on `workitems.items` (no derive layer):
-
-| Enum | Values | Notes |
+| Entity | Key fields | Notes |
 |---|---|---|
-| `Status` | `Backlog`, `Ready`, `InProgress`, `Blocked`, `Done` | Computed; `is_ready` materialised by `deps` after every mutation; UI / MCP read the column |
-| `Priority` | `P0`, `P1`, `P2`, `P3`, `P4` | Wire value is the code only. UI maps to display labels (e.g. `P0` → "Critical") at render time, not at storage time |
-| `PipelineStage` | `Investigation`, `Implementation`, `Review`, `Quality`, `Deferred`, `Done` | Pipeline progress dimension |
-| `AgentKind` | `claude-code`, `copilot`, `cursor`, `codex`, `aider`, `custom` | Identifier for the agent that claimed the item; attached to `claimed_by_agent` |
+| **Issue** | id (prefix + optional slug + hash), content_hash (canonical dedup, not serialized), title, description, design, acceptance_criteria, notes, status, priority (0–4), issue_type, assignee, owner, estimated_minutes, created_at/by, updated_at, closed_at, close_reason, closed_by_session, due_at, defer_until, external_ref, source_system/repo/repo_path, agent_context, tombstone fields, compaction fields, sender, ephemeral, pinned, is_template; relations: labels, dependencies, comments | Core work item. `content_hash` + `sync_equals` drive dedup/equality. Compaction fields **kept for JSONL round-trip fidelity** (D12), not Go-bd conformance. |
+| **Status** | open, in_progress, blocked, deferred, draft, closed, tombstone, pinned, `Custom(String)` | Open enum; only some dep types gate ready-work. |
+| **Priority** | newtype i32 in 0..=4 (0=Critical … 4=Backlog); parses `P0`/`0` | Surfaced in hybrid ready sorting. |
+| **IssueType** | task, bug, feature, epic, chore, docs, question, `Custom(String)` | Open enum; epic participates in rollups. |
+| **Dependency** | issue_id → depends_on_id, dep_type, created_at/by, metadata (JSON), thread_id | `discovered-from` is central to the agent flywheel. |
+| **Comment** | id, issue_id, author, body, created_at | Threaded. [v1.1] |
+| **Event** | id, issue_id, event_type, actor, old_value, new_value, comment, created_at; Tier-1 attribution (agent_name/harness/model) | Append-only audit; attribution capture-only; written transactionally inside mutate(). |
+| **EpicStatus** | epic id, total_children, closed_children, eligible_for_close | Derived rollup. [v1.1] |
+| **WorkspaceHealth / AnomalyClass** | classification, anomaly code+severity, composite severity = max | Full taxonomy [v1.1]; v1 ships libsql integrity + doctor. |
+| **GateResult / PolicyDocument** | gate name, provider, status, required gates per transition | Project-local (`.unblock/policy.toml`), not exported. [v1.1] |
+| **On-disk artifacts** (`.unblock/`) | `unblock.db` (libsql, source of truth), `config.toml`, `policy.toml` [v1.1], `interactions.jsonl` [v1.1], `issues.jsonl` (optional export), metadata | libsql is authoritative; `issues.jsonl` is an optional snapshot (D5). |
 
-### 6.2 State model — three orthogonal dimensions
+## 8. Architecture
 
-Pipeline state lives as three enum columns on `workitems.items`. **No derived label, no label reconciliation.** The Astro web client computes any display badge it wants by reading the three columns directly via Encore RPC.
+### 8.1 Crate decomposition (acyclic, bottom-up)
 
-| Dimension | Column | Values |
-|---|---|---|
-| Implementation | `impl_state` | `pending`, `done` |
-| Review | `review_state` | `pending`, `approved`, `needs_rework` |
-| QA | `qa_state` | `pending`, `passed`, `failed` |
-
-**Invariants** (enforced at MCP layer, FR-9):
-
-- Writing `review_state=needs_rework` resets `qa_state=pending` in the same transaction.
-- Writing `qa_state=failed` requires `review_state=approved` (otherwise rejected).
-- After `qa_state=failed`, the next supervisor `claim` resets `review_state=pending` + `qa_state=pending` atomically.
-- `impl_state=done` is required before `review_state` can leave `pending`.
-- Transitioning `impl_state=done → pending` is allowed only via the rework path (Review NEEDS-REWORK or QA FAIL routes).
-
-**Exception modes** are first-class enum values on a separate column `pipeline_state` (overrides the three dimensions for orchestration purposes):
-
-| `pipeline_state` value | Meaning |
-|---|---|
-| `running` | Default — the three dimensions above are authoritative |
-| `needs_human` | Escape valve: 3× rework (review or qa), claim conflict, worktree conflict, or manual flag |
-| `paused` | User-paused; resume restores the prior state |
-| `no_investigation` | Set by `/plan` or developer to skip the investigation step in the pipeline |
-
-### 6.3 Milestone hierarchy (recursive)
-
-Milestones are **recursive containers** that group work items in time. A milestone can contain child milestones, supporting the typical Quarter → Sprint pattern as well as deeper structures (Year → Quarter → Month → Sprint).
-
-The v1 schema's `workitems.iterations` table is **dropped** — recursive milestones absorb the iteration concept. A sprint is simply a leaf milestone with a short date range; an iteration is just a milestone you happen to use as a sprint.
-
-#### Structure example
-
-```
-Quarter Q1 (milestone, 90 days)
-├── Sprint 1.1 (milestone, 15 days)
-├── Sprint 1.2 (milestone, 15 days)
-├── Sprint 1.3 (milestone, 15 days)
-├── Sprint 1.4 (milestone, 15 days)
-├── Sprint 1.5 (milestone, 15 days)
-└── Sprint 1.6 (milestone, 15 days)
-```
-
-#### Schema shape
-
-A milestone has: `id` (ULID), `parent_milestone_id` (nullable self-reference FK), `org_id` XOR `project_id` (same scoping as labels), `name`, `description`, `start_date`, `end_date`, `cancelled_at` (nullable), and a derived `status` view (see below).
-
-#### Membership (1:1)
-
-A work item can belong to **exactly one** milestone (modelled as a `milestone_id` column on `workitems.items`, with `milestone_assigned_at` / `milestone_assigned_by` audit columns on the same row — single source of truth, no junction table). The milestone can be at **any level** of the tree:
-
-- An epic that spans the whole quarter → `milestone_id = Q1`
-- A task assigned to a specific sprint → `milestone_id = Sprint 1.3`
-
-Quarter-level membership of an item assigned to Sprint 1.3 is **derived** by walking the parent chain (recursive CTE) — items "in Q1" includes both directly-assigned epics and tasks assigned to any descendant sprint.
-
-#### Invariants
-
-| # | Invariant | Enforcement |
-|---|---|---|
-| **M-INV-1** | `id != parent_milestone_id` — no self-loop | DB CHECK |
-| **M-INV-2** | Cycle prevention across the parent chain | App-level (recursive CTE check on insert / update) |
-| **M-INV-3** | Child date range ⊆ parent date range | App-level invariant |
-| **M-INV-4** | Sibling time overlap is **allowed with warning** — some teams overlap sprints during transitions | App-level warning, not hard reject |
-| **M-INV-5** | Child's `(org_id, project_id)` scope matches parent's | App-level + DB constraint |
-| **M-INV-6** | Max depth = 4 (year / quarter / month / sprint covers all known patterns) | App-level enforcement |
-| **M-INV-7** | Item's milestone scope must be reachable in the item's project (item in project P can only be in milestones scoped to P or to P's org) | App-level enforcement |
-
-#### Derived `status`
-
-Not a stored column — a computed view from `start_date`, `end_date`, `cancelled_at`, and the descendant items' `Status`:
-
-| Value | Condition |
-|---|---|
-| `upcoming` | `start_date > now()` AND `cancelled_at IS NULL` |
-| `active` | `now()` ∈ `[start_date, end_date]` AND `cancelled_at IS NULL` |
-| `completed` | `end_date < now()` AND every descendant item has `Status = Done` AND `cancelled_at IS NULL` |
-| `overdue` | `end_date < now()` AND any descendant item has `Status != Done` AND `cancelled_at IS NULL` |
-| `cancelled` | `cancelled_at IS NOT NULL` |
-
-The Astro web client renders milestone progress directly from this view; agents query it via MCP.
-
-#### Query patterns unlocked
-
-| Need | Query shape |
-|---|---|
-| Items directly in Q1 (epics not assigned to any sprint inside Q1) | `SELECT * FROM workitems.items WHERE milestone_id = q1_id` |
-| All items inside Q1 (epics + sprint-assigned tasks) | Recursive CTE walking down from Q1; aggregate items pointed to by Q1 or any descendant |
-| Burndown per sprint | `SELECT closed_at, count(*) FROM workitems.items WHERE milestone_id = sprint_id GROUP BY date_trunc('day', closed_at)` |
-| Roadmap render | Tree of milestones (recursive CTE) + per-node item counts and `status` view aggregated upward |
-
-#### MCP surface
-
-The `mcp` service exposes milestone CRUD via the standard work-item tools. Specific shape lands in `docs/SPEC.md`. At minimum:
-
-- `milestones.create({ parent_milestone_id?, name, description, start_date, end_date, scope })`
-- `milestones.assignItem({ item_id, milestone_id })` / `milestones.unassignItem({ item_id })`
-- `milestones.tree({ root_id?, scope })` — return the tree (recursive CTE)
-- `milestones.cancel({ id, reason })` — sets `cancelled_at`
-
-### 6.4 User-facing labels (not pipeline state)
-
-`workitems.labels` is a real Postgres table — these are user-facing classification labels (bug, feature, tech-debt, breaking-change, customer-impact) that humans and agents apply to work items for filtering and querying. They are **not** state-derived.
-
-- Scope: `org_id` XOR `project_id` (CHECK constraint enforces XOR — labels are either org-wide or project-local).
-- Each label has `name`, `color`, `description`.
-- Many-to-many junction table `workitems.item_labels`.
-- Labels can be filtered in `ready`, `list`, and board views.
-- Project labels override identically-named org labels (resolved at query time, project wins).
-
-Pipeline state, severity findings, and exception modes are **not** expressed via labels — see §6.2 (state and exception modes), §6.6 (findings), §6.11 (rework paths).
-
-### 6.5 Comment trail — kind × status orthogonal axes
-
-Per FR-10. Comments are append-only structured records with two axes.
-
-| `kind` (semantic category) | Canonical position in the pipeline |
-|---|---|
-| `investigation` | After `claim`, before implementation |
-| `decision` | Any point during implementation; design choices |
-| `deviation` | Any point; documented divergence from plan / spec |
-| `completed` | At end of implementation; `impl_state` → `done` |
-| `review` | After `completed`; `review_state` → `approved` or `needs_rework` |
-| `qa` | After review approved; `qa_state` → `passed` or `failed` |
-| `deferred` | Any point; explains a deferred sub-task or bead |
-| `pr` | When a pull request is opened or merged that closes the item |
-| `needs-human` | When `pipeline_state` → `needs_human` |
-| `override` | When QA FAIL is bypassed via the override path |
-| `general` | Catch-all; ad-hoc human or agent prose |
-
-**`status` axis** (orthogonal action signal): `error`, `warning`, `info`, `success`. NOT NULL, default `info`. UI uses the four values for colour-coded badges (mapping 1:1 to line-ui alert variants); queries filter `status` for "show all errors / warnings on this item / project".
-
-The product **does not impose** a (kind, status) cross-axis validation matrix — agents and humans use whatever combination expresses the truth. Common pairings:
-
-| Pair | Meaning |
-|---|---|
-| `kind=qa, status=success` | QA PASS |
-| `kind=qa, status=error` | QA FAIL |
-| `kind=qa, status=warning` | QA PASS with findings (recorded but non-blocking) |
-| `kind=review, status=success` | Review APPROVE |
-| `kind=review, status=warning` | Review NEEDS-REWORK |
-| `kind=completed, status=success` | Implementation finished cleanly |
-| `kind=needs-human, status=error` | Escape valve fired |
-| `kind=override, status=warning` | QA bypassed; risk acknowledged |
-
-### 6.6 Findings as first-class child work items
-
-V1 expressed review / QA findings as label suffixes on the originating bead. The new architecture surfaces findings as **proper child work items** with type and severity, linked by parent FK to the originating bead's parent epic (per `feedback_findings_epic_parent`).
-
-| Field | Values |
-|---|---|
-| `type` | `finding` |
-| `severity` | `critical`, `major`, `minor`, `risk`, `extra`, `deviation` |
-| `parent_id` | Originating bead's parent epic |
-| `discovered_from_id` | Originating bead (the work item that surfaced this finding) |
-| `kind_of_finding` | `review` or `qa` (which gate produced it) |
-
-This unlocks first-class queries the v1 label-based approach could not express:
-
-- "All `severity=critical` findings across this org, regardless of project"
-- "All findings discovered from work items in iteration X"
-- "Findings closed without a corresponding `pr` comment" (audit)
-- "Median time-to-close per severity"
-
-### 6.7 Pipeline state machine
-
-Authoritative state transitions enforced at the MCP boundary (FR-14, Law 8 layer 1). A transition is rejected with a structured error if the precondition does not hold.
-
-| From | To | Precondition |
-|---|---|---|
-| (any) | `claim` | `Status == Ready` and `claimed_by_id IS NULL` |
-| `impl_state=pending` | `impl_state=done` | `claimed_by_id IS NOT NULL`; comment trail includes `kind=completed` |
-| `review_state=pending` | `review_state=approved` | `impl_state=done`; comment trail includes `kind=review, status=success` |
-| `review_state=pending` | `review_state=needs_rework` | `impl_state=done`; comment trail includes `kind=review, status=warning` |
-| `qa_state=pending` | `qa_state=passed` | `review_state=approved`; comment trail includes `kind=qa, status=success` |
-| `qa_state=pending` | `qa_state=failed` | `review_state=approved`; comment trail includes `kind=qa, status=error` |
-| `qa_state=failed` | `qa_state=passed` | **Override path** — comment trail includes `kind=override, status=warning` with `body` length ≥ 20 chars; user-confirmed via Quinn (§6.11). Sets `is_override=true` on the qa-state event audit |
-| `pipeline_state=running` | `pipeline_state=needs_human` | 3× `review_state=needs_rework` on the same item OR 3× `qa_state=failed` OR claim conflict OR worktree conflict OR explicit `mcp.flag_human` call |
-| `Status=*` | `Status=Done` | `qa_state=passed` (which is reached either via the qa PASS row above, or via the override path row above) |
-
-The state machine is a function of the three dimensions plus `pipeline_state`. Transitions are exposed as MCP tool calls (`set_state`, `claim`, `close`); the agent prompt structure (FR-16) carries the same preconditions as explicit BLOCK conditions; the post-dispatch validator (FR-15) re-validates after every dispatch.
-
-### 6.8 Personas and supervisors (mister-anderson catalogue)
-
-#### 8 fixed personas (workflow-level, stage-bound)
-
-| Persona | Role | Model | Memory integration |
+| Crate | Layer | Responsibility | Depends on |
 |---|---|---|---|
-| **Grace** | Product Manager (Stage 1: manifesto, requirements) | opus | Reads `org` / `project` memory for prior product decisions; writes summarised PM decisions back |
-| **Ada** | Architect + Coherence Reviewer (Stage 1 architecture, Stage 2 plan / spec) | opus | Reads memory for architectural conventions and prior phase learnings; writes phase-level architectural decisions |
-| **Smith** | Research / API validator (Stage 2 research) | opus | Reads memory for prior research findings; writes validated API / library pin decisions |
-| **Sherlock** | Investigator (Stage 3 investigate) | opus | Reads memory for project conventions before investigation; writes summarised findings as scoped facts |
-| **Fernando** | Issue Owner (Stage 2 tasks, Stage 3 finding tracking) | sonnet | Writes finding work items linked to memory entries when patterns recur |
-| **Linus** | Code Reviewer (Stage 3 review) | opus | Reads memory for review patterns and team conventions; writes recurring code-review patterns as facts |
-| **Quinn** | QA Gate (Stage 3 quality) | opus | Reads memory for QA patterns; writes QA insights and recurring failure modes as facts |
-| **Daphne** | Discovery / supervisor installer (Ops) | sonnet | Reads memory for prior stack-detection results to skip redundant probing |
-
-Dropped from the v1 catalogue: Martin (refactorer — collapsed into supervisors), Gadget (inspector — collapsed into Quinn / pipeline enforcement layer 2).
-
-#### Dynamic supervisors (stack-bound, dispatched by `/do`)
-
-`://unblock`'s active set:
-
-| Persona | Stack | Detection signal |
-|---|---|---|
-| **Greta** | Go (Encore) | `apps/api/encore.app` + Go modules |
-| **Aria** | TypeScript / Astro / line-ui | `apps/web/astro.config.*` + line-ui imports |
-| **Neo** | Rust | `crates/Cargo.toml` (covers both `unblock-code` and `unblock-render`) |
-| **Olive** | Infrastructure / CI-CD | `.github/workflows/*.yml`, Encore deploy config, Cloudflare Pages config |
-
-Other dynamic supervisors from the m-a v1 catalogue (Nina, Luna, Violet, Tessa, Juno, Kali, Maya, Isla, Ava, Nova, Iris) remain available — Daphne provisions them via `/add-supervisor` when a future project uses those stacks. The catalogue is open; specific supervisors are activated only when their detection signal fires.
-
-### 6.9 Skills catalogue
-
-20 user-invocable skills + 1 shared-only. Each skill has a stage tag enforced by the description-contract lint (§6.9 below).
-
-| # | Slash | Stage | Persona / actor | Memory integration |
-|---|---|---|---|---|
-| 1 | `workflow` | Meta | meta-orchestrator | — |
-| 2 | `setup` | Ops | Daphne | Reads stack-detection memory; writes detection result |
-| 3 | `add-supervisor` | Ops | Daphne | — |
-| 4 | `product` | 1 | Grace + Ada (orchestrator) | — |
-| 5 | `manifesto` | 1 | Grace | — |
-| 6 | `requirements` | 1 | Grace | Reads `project` / `org` memory for prior PRD decisions |
-| 7 | `architecture` | 1 | Ada | Reads memory for architectural conventions; writes high-level decisions |
-| 8 | `specification` | 2 | Ada + Smith + Fernando (orchestrator) | — |
-| 9 | `plan` | 2 | Ada | Reads memory for prior phase learnings; writes phase-level plan rationale |
-| 10 | `research` | 2 | Smith | Reads memory for prior research; writes validated assumptions |
-| 11 | `spec` | 2 | Ada | Reads + writes architectural decisions |
-| 12 | `tasks` | 2 | Fernando | — |
-| 13 | `implementation` | 3 | Supervisor + Sherlock + Linus + Quinn + Fernando (orchestrator) | — |
-| 14 | `investigate` | 3 | Sherlock | Reads memory for project conventions; writes summarised findings |
-| 15 | `do` | 3 | Supervisor (dynamic) | Reads memory for stack conventions and prior decisions |
-| 16 | `review` | 3 | Linus + Fernando | Reads memory for review patterns; writes recurring patterns |
-| 17 | `quality` | 3 | Quinn + Fernando | Reads memory for QA patterns; writes QA insights |
-| 18 | `update` | Ops | Fernando | — |
-| 19 | `reconcile` | Ops | MCP | Queries audit trail; surfaces drift hints from memory |
-| 20 | `doctor` | Ops | MCP | Queries memory for context-driven health hints |
-
-**Shared-only (not user-invocable):** `subagents-discipline`.
-
-**Description contract** (skill-description-quality lint, enforced by `unblock-render`'s `build.rs`): every slash skill's description must start with an imperative verb, name the input object, include a trigger phrase, and end with a stage tag `[product] | [spec] | [impl] | [ops]`.
-
-### 6.10 Severity thresholds for review and QA findings
-
-The severity of a finding determines whether it forces rework, becomes its own work item, or is batched into a cleanup item.
-
-| Gate | Severity | Action |
-|---|---|---|
-| Review | `CRITICAL` | Forces rework on the originating bead; **never** produces a separate finding item |
-| Review | `WARNING` | Individual finding work item, `type=finding, severity=major`, sub-issue of the originating bead's parent epic |
-| Review | `SUGGESTION` | Batched cleanup finding (`severity=minor`) per epic, or per-severity finding items |
-| QA | `BLOCKER` | Forces rework; never produces a separate finding item |
-| QA | `MAJOR` | Individual finding item, `severity=major` |
-| QA | `MINOR` | Batched cleanup finding, `severity=minor` |
-| QA | `RISK` | Individual finding item, `severity=risk` |
-| QA | `DEVIATION` | Individual finding item, `severity=deviation` |
-| QA | `EXTRA` | Individual finding item, `severity=extra` |
-
-Findings always live in the same parent epic as the bead that originated them — there is **no separate "Review Findings" epic** (per `feedback_findings_epic_parent`).
-
-### 6.11 Rework paths
-
-#### Review NEEDS-REWORK
-
-1. Linus writes a `kind=review, status=warning` comment + CRITICAL / WARNING findings (CRITICAL inline, WARNING as finding items).
-2. MCP `set_state(review_state=needs_rework)` → resets `qa_state=pending` atomically.
-3. Auto-dispatch supervisor for rework via `/do`.
-4. New cycle: `kind=decision` / `deviation` → `kind=completed` → new `kind=review`.
-5. **Escape valve:** 3× NEEDS-REWORK on the same bead → `pipeline_state=needs_human`.
-
-#### QA FAIL — three sub-options
-
-| Option | Effect |
-|---|---|
-| **rework** | Returns to supervisor; full cycle re-implementation + re-review + re-QA |
-| **follow-up** | Fernando creates finding items under the parent epic; the original bead proceeds to Done (degraded, with a `kind=qa, status=warning` comment marking the deferred concerns) |
-| **override** | User confirms with reason ≥ 20 chars; Quinn writes a `kind=override, status=warning` comment; `set_state(qa_state=passed, override=true)`; Fernando creates a `severity=risk` finding item to track the bypassed condition |
-
-### 6.12 Plugin hooks
-
-| Hook | Purpose | Claude Code mapping |
-|---|---|---|
-| `session-start` | Dashboard + MCP `prime` call; load org / project memory; surface ready set | `SessionStart` event |
-| `inject-discipline-reminder` | Pre-dispatch reminder — supervisor disposition rules, BLOCK conditions | `PreToolUse` matcher = `Task` |
-| `verify-state` | Post-stop validation — MCP `verify_can_transition` ensures the dispatched agent did not violate the state machine | `Stop` event |
-
-### 6.13 Happy path — work item lifecycle
-
-| # | Action | Comment | State change | `pipeline_state` |
-|---|---|---|---|---|
-| 1 | Item created | — | `Status=Backlog`, `impl_state=pending` | `running` |
-| 2 | Becomes ready (no open blockers) | — | `Status=Ready`, `is_ready=true` (materialised) | `running` |
-| 3 | Supervisor `claim` | — | `claimed_by_id` set, `Status=InProgress` | `running` |
-| 4 | Investigation (optional) | `kind=investigation, status=info` | — | `running` |
-| 5 | Design decisions (N×) | `kind=decision, status=info` | — | `running` |
-| 6 | Plan deviations (N×, optional) | `kind=deviation, status=warning` | — | `running` |
-| 7 | Implementation complete | `kind=completed, status=success` | `impl_state=done` | `running` |
-| 8 | Review APPROVE | `kind=review, status=success` | `review_state=approved` | `running` |
-| 9 | QA PASS | `kind=qa, status=success` | `qa_state=passed` | `running` |
-| 10 | PR opened | `kind=pr, status=info` | — | `running` |
-| 11 | PR merged | `kind=pr, status=success` | — | `running` |
-| 12 | Item closed (Fernando via `/update`) | — | `Status=Done`, `closed_at` set | `running` |
-
-**Close semantics**: closing the item does not delete or relabel anything. Findings linked via `discovered_from_id` remain queryable. The full audit trail (state changes, comments, claimed-by history) is preserved in Postgres indefinitely.
-
----
-
-## 7. Non-Functional Requirements
-
-- **NFR-1 — Latency.** `prime → ready → claim` p99 < 2 s warm cache (Law 7). Measured end-to-end from MCP call ingress to response egress; warm cache means a Postgres connection pool already established and the agent already authenticated.
-- **NFR-2 — Tenant isolation.** Zero cross-tenant RBAC leaks. Enforced by an exhaustive security regression suite that runs against every release candidate; any failure is release-blocking.
-- **NFR-3 — Source-of-truth durability.** Postgres is the canonical store (Law 3). Provider outages must not stop the product from operating; reconciliation runs on a schedule.
-- **NFR-4 — BFF discipline.** The browser never holds backend credentials (Law 4). Astro Actions are the only privileged client; HttpOnly cookies live on the Astro origin only; the Encore API is unreachable from the browser except for the documented public endpoints (FR-12). The OAuth callback is on the Astro origin, never on Encore.
-- **NFR-5 — Graph integrity.** The dependency graph is a DAG at all times; cycle creation is rejected at write time, never tolerated and lazily detected.
-- **NFR-6 — Pipeline structural enforcement.** Bypassing the pipeline must require simultaneous bypass of all three layers (FR-14, FR-15, FR-16). A design that fails this property is wrong by definition (Law 8).
-- **NFR-7 — Memory secret sanitisation.** Always on; no opt-out at v1. Detection is best-effort; warning is mandatory; the sanitised form is what is stored.
-- **NFR-8 — AST CLI performance gates** (per `docs/code-cli/plan.md` §14, locked):
-  - HARD: `find-symbol` p99 < 10 ms; `outline` p99 < 20 ms; `list-symbols` p99 < 50 ms; `search` p99 < 30 ms (medium corpus, warm cache).
-  - HARD: FTS5 PRAGMA assertion fires on connection open; binary refuses operation on a SQLite without FTS5.
-  - HARD: per-query mtime check verified by integration test.
-  - SOFT: ROI median ≥ 2.0× vs `Glob/Grep/Read` baseline across 3 flows × N=10 runs (release-gate one-shot, not per-PR CI).
-- **NFR-9 — Decoupled deliverables.** `unblock-mcp`, the Astro web client, and `unblock-code` ship independently and share no runtime state (Law 6).
-- **NFR-10 — Quality gates.** Every change must pass `cargo fmt --check --all`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `cargo doc --no-deps --workspace` (zero warnings) — extended analogously for the Go backend and Astro frontend.
-- **NFR-11 — Coding discipline.** `#[non_exhaustive]` on growable public enums in library crates; `snafu` errors with crate-scoped `Result<T>`; no `unwrap()` / `expect()` outside tests; `#![deny(unsafe_code)]` workspace-wide.
-- **NFR-12 — Logging.** `tracing` JSON Lines on STDERR; STDOUT reserved for protocol payloads (MCP envelopes, CLI JSON envelopes). Never mix progress and results.
-
----
-
-## 8. Phasing
-
-The project ships in four sequential phases plus a renderer phase. The AST CLI ships **before** the web frontend so the user can dogfood the backend via MCP + CLI before web UX is built.
-
-### P01 — Backend MVP
-
-- Encore Go on a single Postgres (8 schemas).
-- Services: `auth`, `org`, `workitems`, `deps`, `mcp`; `memory` (schema only — service code lands in P02 per SPEC §11).
-- MCP server with **23 tools** over Streamable HTTP (per FR-8; P01 round-16 raised this from 14 — adds `promote`, the four milestone tools, and the four label-registry tools).
-- Public Encore endpoints: `POST /webhooks/github`, `POST /mcp` + `GET /mcp` (single logical MCP endpoint, Streamable HTTP per FR-12). OAuth callback is on Astro origin per FR-12.
-- Exit criterion: an agent can authenticate via Bearer API key and complete `prime → ready → claim → close` against a manually-seeded graph; cascade fires; cycle detection rejects offending edges.
-
-### P02 — Backend complete
-
-- `providers` service: GitHub webhook ingestion + bidirectional sync.
-- Remaining MCP tools, totalling **27 tools** at end of P02 (the 23 P01 tools + the 4 memory tools; figure reconciled from the original 18 by the P01 round-16 amendment).
-- Pipeline enforcement layer 1: MCP state-transition validation per Manifesto Law 8.
-- Exit criterion: a GitHub repository can be linked, webhooks normalise events into canonical work items, and an attempt to mark a work item `done` without the required comment trail is rejected at the MCP boundary.
-
-### P03 — AST CLI v1.0.0
-
-- Rust workspace per `docs/code-cli/plan.md` and `docs/code-cli/spec.md` verbatim.
-- Three new crates (`unblock-indexer-core`, `unblock-indexer`, `unblock-code`).
-- 10 statically-linked tree-sitter grammars (8 default + 2 opt-in).
-- 11 CLI commands; SQLite + FTS5 + WAL local index.
-- Distribution: cargo-dist + Homebrew + npm.
-- Exit criterion: all 9 HARD gates in `plan.md` §14.1 pass on a fresh clone; ROI harness publishes raw run logs + per-flow medians as a release artifact.
-
-### P04 — mister-anderson plugin renderer
-
-- Rust binary `unblock-render` in the `crates/` workspace (sibling of `unblock-code`).
-- Stage 3 implementation tier of Law 8: full three-layer enforcement.
-- Renders the typed catalogue (8 fixed personas, dynamic supervisors, 20 skills, 3 hooks per §6.8 / §6.9 / §6.12) into a packaged Claude Code plugin (`.claude-plugin/plugin.json` manifest + `agents/` + `skills/` + `hooks/` + MCP server config), marketplace-installable. Claude Code is the only host.
-- CLI: `unblock-render --supervisors=<list> --out=<dir> [--apply]` — no `render` subcommand (the binary is the renderer) and no host-targeting flag.
-- Layer 2 enforcement: post-dispatch state validator runs against MCP `verify_can_transition` to ensure the dispatched session did not bypass the state machine. Implemented via the `verify-state` plugin hook (Claude Code `Stop` event) calling MCP — no separate inspector agent.
-- Layer 3 enforcement: agent prompt structure carries explicit BLOCK conditions matching the MCP state machine.
-- Exit criterion: an attempt to bypass the pipeline (e.g. mark `done` without a `kind=review, status=success` comment) is rejected by the MCP server (Layer 1, P02), the post-dispatch hook flags it (Layer 2), and the agent prompt's BLOCK condition would have refused to issue the call (Layer 3). All three layers agree.
-
-### Provisioning BFF — minimal web slice (pulled forward, distinct from P05)
-
-A **minimal provisioning BFF** is pulled forward as a small early web slice, **decoupled from the line-ui-gated rich views** (kanban / dependency graph / roadmap), which **stay at v1.1 (P05)**. Scope is deliberately narrow:
-
-- OAuth login (OAuth2+PKCE to GitHub or GitLab, BFF discipline per FR-18 / NFR-4 — HttpOnly cookie on the Astro origin, no Encore credential in the browser).
-- Create-org.
-- Create-project.
-- Issue-API-key (via the existing `auth.IssueAPIKey` private RPC, called server-side through an Astro Action).
-
-This slice uses **only** forms and basic navigation — it does **not** depend on the rich line-ui primitives that gate P05 (R-8). It exists so a human can self-serve org / project / credential creation in production (the prerequisite for onboarding any API-key consumer, including the post-v1 `unblock-agentic` daemon — see §14.4 and `docs/agentic/PRD.md`). The full P05 rich views remain at v1.1, gated on line-ui v1. **Local / headless provisioning does not use this BFF** — it uses a seed against local `encore run`.
-
-### P05 — Astro web (ships at v1.1)
-
-- Astro 5 + line-ui on Cloudflare Pages.
-- Astro Actions BFF; HttpOnly cookie on the Astro origin.
-- Views: kanban, dependency graph, roadmap (with recursive milestone tree per §6.3), per-item comments.
-- Auth flow with OAuth2+PKCE to GitHub or GitLab.
-- Web ships **after** v1.0 because the agent-facing surface (backend MCP + AST CLI + plugin) is fully usable without a UI. Humans dogfood via the plugin's structured workflow during the v1.0 → v1.1 window; the web is a humans-first triage and visualisation layer over a system that already runs.
-- **External hard dependency:** `line-ui` (vitamin repo, websublime-internal) must reach feature-complete v1 covering at minimum: forms, dialogs, dropdowns, popovers, tabs, toasts, navigation, accordions, tooltips, date pickers, comboboxes, and mobile-responsive defaults. P05 implementation cannot begin before line-ui v1.
-- Exit criterion: a developer can authenticate, see the same graph the agent sees, and act on it through the BFF without the browser ever obtaining Encore credentials.
-
-### v1.0 launch scope
-
-**v1.0 launches headless** — P01 + P02 + P03 + P04 ship at v1.0. The plugin (P04) is in v1.0 — not v1.x — because Manifesto Principle 8 and Law 8 mandate full three-layer pipeline enforcement at first launch.
-
-**P05 (Astro web) ships at v1.1**, blocked on `line-ui` (vitamin repo) reaching a feature-complete v1 milestone. The agent-facing surface (backend MCP, AST CLI, plugin) is fully functional without a web UI — Manifesto Principle 4 ("three orthogonal deliverables, each useful alone") is the design constraint that makes a headless v1.0 launch coherent.
-
----
-
-## 9. Out of Scope
-
-### 9.1 Manifesto-locked out-of-scope (verbatim from `docs/MANIFESTO.md`)
-
-- **Desktop application.** `://unblock` ships as web (Astro) + remote MCP + standalone CLI. There is no GPUI, Tauri, or Electron desktop app.
-- **Code generation by the AST CLI.** `unblock-code` indexes, queries, and reports. It never writes code, refactors, or modifies source files.
-- **Custom storage that duplicates Postgres.** No local SQLite caches inside the API service, no Redis-backed shadow state, no per-client serialisation. Postgres is enough.
-- **Provider-specific UI.** When a work item maps to a GitHub issue, the product links to GitHub for the native experience. We do not reinvent GitHub's PR review or GitLab's merge request UI.
-- **Replacing wikis, CMSs, or knowledge bases.** The `memory` service stores atomic facts, not documents. 8 KB max per entry, no rich-text editor, no hierarchy. We are not Notion or Confluence.
-- **Network-level multi-tenant isolation.** RBAC is org-level row-level filtering, not VPC isolation. Enterprise SOC 2-grade isolation is explicitly post-v1.
-- **Self-hosting story for v1.** The product runs on Encore Cloud and Cloudflare Pages. Self-hosting Encore + Cloudflare Workers compatible Postgres is technically possible but not supported by us in v1.
-- **Real-time collaboration on work item content.** Editing a description is single-user. We are not Figma or Google Docs.
-- **Agent decision-making.** `://unblock` tracks state and exposes the graph. It does not decide what an agent should work on next, how to implement a task, or how to write tests. The agent decides; the platform informs.
-
-### 9.2 Additional v1.0 out-of-scope
-
-- **Import tooling from `bd` / Linear / Jira / GitHub Issues.** Costly, distracts from the core graph engine; explicit out-of-scope at v1.0.
-- **SLA / uptime guarantees.** The product runs on Encore Cloud's free tier at v1 scale, which carries no SLA. No SLA is offered to users.
-- **Mobile native clients.** Web-first. The Astro client is mobile-responsive via line-ui defaults; native iOS/Android apps are post-v1.
-- **GitLab provider integration at v1.0.** Deferred to v1.1 (separate work, fork-OAuth pattern).
-- **Linear / Jira provider integration.** Manifesto says "eventually"; not v1, not v1.x — backlog with no committed phase.
-
----
-
-## 10. Dependencies & Constraints
-
-### 10.1 External services and projects
-
-- **Encore Cloud** (free tier) — backend hosting, Pub/Sub, Postgres provisioning.
-- **Cloudflare Pages** — Astro web frontend hosting (P05, v1.1).
-- **GitHub** — OAuth identity, webhooks, REST / GraphQL for bidirectional sync.
-- **GitLab** — OAuth identity at v1.0; full integration deferred to v1.1.
-- **Anthropic API** — used only by the ROI harness for the AST CLI release-gate measurement; not a runtime dependency of the product.
-- **`line-ui` / `vitamin` (websublime-internal project, repo `/Users/ramosmig/Public/WS-Labs/vitamin`)** — headless Web Components library powering the Astro web client (P05). **Hard dependency for P05** — the vitamin repo must reach feature-complete v1 before P05 implementation begins. Not external in the vendor sense, but external in the build-pipeline sense — line-ui has its own release cadence in its own repo.
-- **Provisioning BFF (minimal web slice, §8)** — the prerequisite for **human production onboarding**: creating an org, a project, and credentials (OAuth login + create-org + create-project + issue-API-key via `IssueAPIKey`). It is the production onboarding path for **any** API-key consumer, **including the post-v1 `unblock-agentic` daemon** (§14.4). It is **decoupled from line-ui** (forms + navigation only) and is therefore **not** gated on line-ui v1; the **full P05 rich views** (kanban / dependency graph / roadmap) **remain gated on line-ui v1 (R-8)**. **Local / headless provisioning is web-independent** — it uses a seed against local `encore run`.
-
-### 10.2 Tech stack constraints
-
-- **Backend:** Encore Go on a single Postgres (8 schemas). No additional persistent stores. No Redis. No local SQLite inside the API service.
-- **Web (P05, v1.1):** Astro 5 + line-ui (websublime-internal headless Web Components on top of Zag.js, vitamin repo). BFF via Astro Actions; HttpOnly cookie on the Astro origin only. P05 is gated on line-ui v1 — see §10.1.
-- **AST CLI:** Rust (edition 2024) workspace with `tree-sitter` + `sqlx` (sqlite + FTS5 + WAL) + `ignore` + `clap`. Statically-linked grammars; build requires a host C toolchain (gcc/clang/Apple Clang/MSVC).
-- **MCP transport:** Remote MCP over **Streamable HTTP** per the MCP 2025-06-18 spec (single endpoint `/mcp`, two methods `POST` + `GET`), with `Bearer <api-key>`. Go SDK: `github.com/modelcontextprotocol/go-sdk`.
-
-### 10.3 Architectural constraints (Manifesto Laws)
-
-- **Law 1 — Cascade is structural.** Every close recomputes the graph and promotes via Pub/Sub.
-- **Law 2 — One graph, one truth.** Postgres wins on disagreement.
-- **Law 3 — Postgres is the source of truth.** Provider outages must not stop the product.
-- **Law 4 — BFF is structural.** Browser holds no backend credentials.
-- **Law 5 — Claim semantics are atomic.** `SELECT FOR UPDATE` transaction.
-- **Law 6 — Decoupled deliverables share no runtime state.** AST CLI and backend are independent.
-- **Law 7 — One command away from productive work.** `prime → ready → claim` < 2 s warm cache.
-- **Law 8 — Pipeline gates are enforced architecturally.** Three independent layers, all must be bypassed simultaneously.
-
-A design that violates any law is wrong by definition. A feature that requires relaxing a law is not built.
-
----
-
-## 11. Success Metrics (PRD-level north stars)
-
-Five north-star metrics gate v1.0. All other quantitative metrics (webhook latency, concurrent MCP clients, individual tool budgets, etc.) live in their phase plans, not the PRD.
-
-- **M-1 — `prime → ready → claim` p99 < 2 s warm cache.** Law 7. HARD release gate.
-- **M-2 — Zero cross-tenant RBAC leaks.** Enforced by an exhaustive security regression suite executed against every release candidate. HARD release gate; any failure blocks release.
-- **M-3 — AST CLI ROI ≥ 2.0× vs `Glob/Grep/Read` median.** Across 3 representative agent flows × N=10 runs (per `docs/code-cli/spec.md` §15). **SOFT gate** — release-publishes the report; if median is below 2.0× on any flow, open a `unblock:finding:risk` follow-up bead. Does not block release.
-- **M-4 — Pipeline completion rate without rework ≥ 70%.** Manifesto Principle 8: discipline value of the pipeline. Measured as the share of work items that complete the full pipeline (`investigation → implementation → review → QA`) without re-opening or re-claiming. Target ≥ 70% over the first 30 days post-launch.
-- **M-5 — Cascade events per day.** Graph engagement metric. Counts `cascade` Pub/Sub events emitted by the backend per active org per day. Target: non-zero on the median active org from week 2 onward (i.e. the graph is actually used as a graph, not a flat list).
-
----
-
-## 12. Risks
-
-- **R-1 — Encore Cloud free-tier limits.** The product is launched on a free tier with no SLA; outages are possible. Mitigation: Postgres is the source of truth (Law 3), agents and the web client surface degraded mode, and the public endpoints are designed to fail loudly rather than silently.
-- **R-2 — GitHub webhook reliability.** Webhooks can be missed (delivery failures, repo-level outages). Mitigation: scheduled reconciliation per Law 3; webhooks are an event source, never the source of truth.
-- **R-3 — Pipeline enforcement bypass via direct Postgres writes.** A privileged operator could write directly to Postgres and skip MCP validation. Mitigation: the three-layer enforcement (MCP validation, post-dispatch validator, agent prompt) covers the agent path; direct DB writes are an operator-error category outside Law 8's scope.
-- **R-4 — AST CLI ROI under 2.0×.** The ROI gate is SOFT precisely because the harness is expensive (Anthropic API cost, Sonnet output non-determinism) and could fail for harness reasons rather than indexer reasons. Mitigation: publish raw logs + per-flow medians as a release artifact so reviewers can assess severity; open a follow-up bead if missed.
-- **R-5 — Static-linked binary size pushback.** Default install of `unblock-code` is constrained to ~30 MB stripped (research R-CLI-2); `lang-cpp` and `lang-ruby` are opt-in to land under the threshold. Mitigation: documented in plan §3 and §14.1 H2; size is a SOFT gate (S1).
-- **R-6 — Memory secret sanitiser false negatives.** Best-effort detection cannot catch every credential pattern. Mitigation: warning is mandatory; sanitised form is stored; documentation flags this clearly.
-- **R-7 — Single-vendor lock-in via GitHub at v1.0.** GitLab arrives at v1.1, but a v1.0 user is effectively GitHub-only. Mitigation: provider-agnostic architecture (Principle 3) ensures the canonical store is neutral; GitLab is an integration project, not a re-architecture.
-- **R-8 — line-ui maturity gates P05.** websublime line-ui (vitamin repo) is a young headless component library. **P05 (Astro web) cannot start before line-ui v1 ships** — feature completeness for forms, dialogs, dropdowns, popovers, tabs, toasts, navigation, accordions, tooltips, date pickers, comboboxes, and mobile-responsive defaults. If line-ui slips, P05 slips. Mitigation: P05 is decoupled from v1.0 (ships at v1.1), so line-ui can grow at its own cadence in the vitamin repo without pressuring the v1.0 launch. Component-level replacement remains a fall-back if a specific line-ui primitive proves blocking, but the design assumption is line-ui matures first.
-- **R-9 — Plugin renderer (P04) packaging correctness.** The renderer now targets a single host (Claude Code), so the original multi-host rendering risk is largely retired. The residual risk is emitting a correct, marketplace-installable packaged plugin (`.claude-plugin/plugin.json` manifest + `agents/` + `skills/` + `hooks/` + MCP server config) whose BLOCK conditions still match the MCP state machine. Mitigation: scope is locked to "render BLOCK conditions matching the MCP state machine" into the packaged bundle; the CI catalogue-drift test (§7.2 SPEC) guards Layer-1/Layer-3 agreement; richer renderer features are post-v1.
-
----
-
-## 13. Open Questions
-
-None at PRD time. All eight discovery questions are resolved in §1–§12 and the Manifesto. Architectural-level questions (exact MCP tool names and signatures, exact Postgres DDL, exact Pub/Sub topic shape, exact OAuth scope set) are deferred to `docs/SPEC.md` (Ada — architect).
-
----
-
-## 14. Appendix
-
-### 14.1 Reference documents
-
-- [docs/MANIFESTO.md](./MANIFESTO.md) — APPROVED 2026-05-07. Primary alignment doc; 8 principles, 8 governing laws, out-of-scope list. Non-negotiable.
-- [docs/code-cli/plan.md](./code-cli/plan.md) — APPROVED. AST CLI phase plan (v1.0.0); carries forward verbatim into P03.
-- [docs/code-cli/spec.md](./code-cli/spec.md) — APPROVED. AST CLI authoritative spec (v1.0.0).
-- [docs/code-cli/research.md](./code-cli/research.md) — AST CLI research file (R-CLI-1 … R-CLI-5 closed).
-- [bd persistent memory key](#) `unblock-architecture-locked-2026-05-07-after-iterative-design` — strategic context including the SonicJS and Connect rejections that shaped the Encore + Astro + Rust three-deliverable architecture.
-
-### 14.2 Persona summary
-
-| Persona | Primary surface | Pain solved |
-|---|---|---|
-| AI agent | MCP over Streamable HTTP | No graph traversal cost; one call to ready work; structured pipeline; scoped memory. |
-| Orchestrator | MCP over Streamable HTTP + web | Dispatch by readiness, see cycle violations, observe cascades. |
-| Developer | Astro web + AST CLI | Graph visualisation, comment review, fast code navigation without `Glob/Grep/Read` chains. |
-
-### 14.3 Phase / deliverable cross-reference
-
-| Phase | Deliverable | Ships at | Carries forward verbatim from |
+| `unblock-model` | L0 | Pure domain types; content-hash / sync-equality / tombstone logic; validation; shared contract types (e.g. cache-key). No I/O. | error (single sanctioned L0 edge — CF-G: `FromStr::Err` / `IssueValidator` return `unblock_error::ModelError`; `error` has no in-workspace deps so L0 stays acyclic) |
+| `unblock-error` | L0 | **snafu** error taxonomy; structured error payloads; 0–8 exit-code table. Backend-agnostic. | — |
+| `unblock-policy` | L1 | Pure versioned decision contracts: scheduler, coordination, gates/close-policy, inheritance, cache. Side-effect-free. | model, error |
+| `unblock-storage` | L2 | `Storage` trait + **libsql** implementation (schema/migrations, queries, transactions, WAL + `busy_timeout`). Only crate aware of the backend. **Depends on model+error only** (CF-11 fix). | model, error |
+| `unblock-sync` | L3 | **Light** JSONL export/import + atomic write + path-confinement + conflict-marker scan. *(Shrunk per D5.)* | storage, model, error |
+| `unblock-health` | L3 | v1: libsql integrity + diagnostics. [v1.1]: full Workspace Health Contract. | model, error, sync |
+| `unblock-config` | L4 | Layered TOML config resolution, `.unblock/` discovery, open-a-workspace facade. | storage, sync, health, error |
+| `unblock-engine` | L5 | Shared session API (open → import? → mutate → export? → recover); **in-process write Semaphore (D14)**; shutdown/logging. Composes storage **+ policy**. Embeddable surface for MCP/CLI. | config, sync, storage, policy, health, model, error |
+| `unblock-render` | L6 | Output/format (json/robot/plain/csv/markdown; **TOON feature-gated, v1.1**) behind a trait. Reduced under D7. | model, error |
+| `unblock-mcp` | L7 | **Primary** rmcp stdio server (tools/resources/prompts) over the engine. Feature-isolated. | engine, render, policy |
+| `unblock-cli` | L7 | Reduced binary: lifecycle/ops (serve/migrate/doctor/version) + thin routing. | engine, render, policy |
+| `unblock-fuzz` | — | Unpublished member; `cargo-fuzz` targets over model/sync/storage. | model, sync, storage, error |
+
+> CF-11 fix: `unblock-storage` no longer depends on `unblock-policy`; the engine (L5) composes storage + policy.
+> Any shared contract type policy/storage both need lives in `unblock-model`.
+>
+> **"Depends on" convention:** L0 crates (`model`, `error`) are listed **explicitly** on every row that depends on
+> them directly (not left transitive), so each row is a complete dependency declaration. The only sanctioned
+> intra-L0 edge is `model → error` (CF-G).
+
+### 8.2 Concurrency, async & data flow
+
+- **Async everywhere** (tokio). The `Storage` trait is async (`async-trait`); libsql is an async client.
+- **Supported v1 topology (D14):** each MCP client spawns its **own** `unblock serve` (stdio = one server per
+  client). v1 is **local single-workspace**: for one client, the engine serializes writes with an **in-process
+  tokio `Semaphore`** and reads use a fast path (WAL readers). Multiple local serve processes on the same
+  `unblock.db` (two editor windows, or a CLI `migrate`/`doctor` while serve runs) fall back to SQLite WAL +
+  `busy_timeout` — correct but **best-effort**; `migrate`/`doctor` are expected to run when serve is inactive.
+- **Multi-dev / cross-machine sharing is v1.2, not v1 (D15):** there, each dev keeps their own local `unblock
+  serve` pointed at a **shared libsql/Turso primary** (embedded replica: local reads, **writes delegated to the
+  primary** → atomic ops like `claim` serialize there; reads are eventually-consistent per sync interval). That is
+  how the swarm/multi-dev persona scales — **not** thousands of clients on one local serve. See `00-roadmap.md` §3.
+- **Non-spin guarantee (NFR-3):** WAL + native `busy_timeout` (>0) + the in-process serialized writer — no
+  app-level spin; defect-243 cannot recur. `failsafe`/retry only guard the optional remote/replica path.
+- **Write flow (model B):** acquire engine write permit → mutate libsql (issue rows + transactional audit
+  events) → optionally export to `issues.jsonl` (atomic temp+fsync+rename) if export is enabled. No git, no merge.
+- **Read flow:** fast-path query against libsql (in-memory graph traversal via `petgraph` where needed) → render.
+- **Shutdown (FR-17):** a cooperative flag flips on signal; the engine flushes/closes libsql cleanly.
+
+## 9. MCP Surface Design (primary interface)
+
+Designed deliberately rather than one-tool-per-CLI-command (to keep the client's tool list small — token cost
++ selection accuracy):
+
+- **Tools** — actions, consolidated where natural (e.g. an `issue` tool with an `action` enum for
+  create/update/close/reopen/delete; dedicated `claim`, `ready`, `dep`, `search`, `export`/`import`). Schemas via `schemars`.
+- **Resources** — queryable state: `unblock://issues/{id}`, `unblock://issues/ready`, `unblock://issues/blocked`, `unblock://capabilities`, `unblock://schema`.
+- **Prompts** — guided workflows: `triage`, `plan_next_work`, `close_with_suggestions`.
+- **Errors** — domain errors map to MCP error data carrying `code`/`message`/`hint`/`retryable`, parallel to the CLI 0–8 exit codes.
+- **Discovery** — `capabilities`/`schema` versioned by `contract_version`.
+- **Target:** keep v1 tool count small (favour consolidated tools + resources over a per-command explosion); record the count as a success metric (§14).
+
+## 10. Technology Stack
+
+Confirmed against the workspace scaffold (`Cargo.toml`):
+
+- **Runtime/async:** `tokio` (full). **Storage:** **libsql** *(add to `workspace.dependencies`; local-file/bundled default, remote behind a non-default feature — D15)* behind `async-trait` `Storage`. **Graph:** `petgraph`. **MCP:** `rmcp 1.0` (`server`, `transport-io`). **Schemas:** `schemars`. **Errors:** `snafu`. **Time:** `chrono`. **Serialization:** `serde`/`serde_json`; **config:** TOML. **Resilience (remote path only):** `failsafe` + a maintained retry crate (`backon`/`tokio-retry`, **not** archived `backoff 0.4`). **HTTP (non-default):** `reqwest`; **mocked by** `wiremock`. **Logging:** `tracing`(+subscriber). **CLI (lifecycle):** a lightweight `clap` (stable features only) *(add)*. **Testing:** `proptest`, `criterion` (async_tokio), `insta`, `cargo-fuzz`. **Toolchain:** stable `1.96.0`; lints **`unsafe_code = forbid`**, `missing_docs = warn`, clippy pedantic.
+
+**Scaffold changes required:** add `libsql` (with features) and `clap`; swap `backoff` → `backon`/`tokio-retry`; change `unsafe_code` from `deny` to `forbid`.
+
+**Removed vs original:** fsqlite (15 crates) → libsql; fastmcp-rust → rmcp; rich_rust/crossterm/indicatif → dropped (D7); serde_yml → TOML; anyhow/thiserror → snafu; clap unstable/nightly → stable; **`self_update` → `dist`/`axoupdater`** (D17). **Release tooling:** `dist` (cargo-dist) for the CI release pipeline + installers + attestations.
+
+**Crate publishing:** the `unblock-*` library crates are **workspace-internal — not published to crates.io**; only the `unblock` binary is distributed (via `dist`).
+
+## 11. Out of Scope (v1)
+
+- Town/mayor cross-project routing (D11) — `wont`.
+- A hosted/networked multi-user service (collaboration via libsql sync or optional JSONL snapshot, not a bespoke server).
+- Automatic git operations, hook installation, git-history reading, or any self-installed daemon (D13/NFR-6).
+- Backward compatibility with classic Go-bd's Dolt architecture or with existing on-disk DBs. *(Note: a one-shot best-effort `bd` data import IS in scope — FR-26/D16 — distinct from maintaining compatibility.)*
+- v1.1-deferred features: FR-6, FR-13(full), FR-16(full taxonomy), FR-18, FR-19, FR-21, FR-22, FR-23, TOON. *(FR-25 self-update moved to v1 via `dist`/`axoupdater` — D17.)*
+
+## 12. Resolved Items
+
+### 12.1 Agent Mail — DROPPED
+It belonged to the upstream beads author's ecosystem. unblock has no "Agent Mail" dependency; swarm coordination (FR-18) is **purely DB-state-derived**.
+
+### 12.2 MCP tool taxonomy — DEFINED
+The concrete v1 consolidated tool/resource/prompt set and tool-count target are specified in the implementation plan (`docs/plans/implementation-plan.md`, MCP surface section).
+
+### 12.3 Self-update (FR-25) — LANDS IN v1
+Self-update **lands in v1 via `axoupdater`** (D17/CF-K); signing = **GitHub artifact attestations** verified before execution (NFR-17); **no isolated crate** — the command lives in `unblock-cli`. The earlier minisign-vs-embedded-key question is closed (attestations chosen). Command name is canonical `unblock update` (see §12.6).
+
+### 12.4 Health taxonomy (FR-16) — DEFERRED to v1.1
+v1 ships `doctor` + libsql `integrity_check`; the Recoverable/Drifted/Unsafe redefinition for a libsql-authoritative world is a v1.1 design item.
+
+### 12.5 Names — LOCKED
+Config dir `.unblock/`; DB `unblock.db`; optional export `issues.jsonl`; config `config.toml`; v1.1 artifacts `policy.toml`, `interactions.jsonl`.
+
+### 12.6 Self-update command name — `unblock update`
+The single v1 self-update command is spelled **`unblock update`** everywhere (PRD FR-25/NFR-17, ci-cd, roadmap, README, and `unblock-cli` — `Command::Update`/`UpdateArgs`/`commands/update.rs`/help snapshots). The Cargo feature stays named **`self-update`**; the feature enables the `unblock update` command (G-2/G-18).
+
+## 13. Phasing & Milestones
+
+A vertical walking skeleton (D14, thin-slice scope). Each milestone is independently shippable/testable.
+
+| Milestone | Crates | FRs | Gate |
 |---|---|---|---|
-| P01 | Backend MVP (Encore Go + Postgres + 23 MCP tools — P01 round-16; was 14) | v1.0 | New work, `docs/SPEC.md` (architect) |
-| P02 | Backend complete (providers + 27 MCP tools total + Layer 1 enforcement) | v1.0 | New work, `docs/SPEC.md` (architect) |
-| P03 | AST CLI v1.0.0 | v1.0 | `docs/code-cli/{plan,spec,research}.md` |
-| P04 | mister-anderson plugin renderer (Layer 2 + 3) | v1.0 | New work, `docs/SPEC.md` (architect) |
-| P05 | Astro web (kanban + graph + roadmap + comments) | **v1.1** (line-ui-blocked) | New work, `docs/SPEC.md` (architect) |
+| **M0 — Foundation** | unblock-model, unblock-error, unblock-storage (Storage trait + libsql impl) | — | `Storage` contract suite (NFR-16) green; **contention lab confirms no hot-spin (NFR-3) BEFORE other crates depend on storage** |
+| **M1 — Engine + core domain** | unblock-engine (Semaphore, lifecycle), unblock-policy, unblock-config (subset) | FR-1a/1b/1c, FR-2, FR-3, FR-4 (incl. ready), FR-5, FR-9, FR-10, FR-13 (config-resolution subset; engine/env/file precedence) | Property test: engine mutations linearizable; CRUD/ready/dep via internal API |
+| **M2 — MCP surface** | unblock-mcp, unblock-render (reduced), unblock-sync | FR-20, FR-11, FR-12, FR-7, FR-8, FR-26 (bd import), FR-15 | MCP client completes ready → claim → close; a representative bd repo imports |
+| **M3 — Reliability + ops + GA** | unblock-cli, unblock-health (lite) | FR-14 (init/agents bootstrap), FR-13 (CLI flag-forwarding half), FR-16 (lite), FR-17, FR-25 (dist/axoupdater) | Shutdown/failure-injection (NFR-4/5) + perf budgets (NFR-1/2) green; `dist` release pipeline + attestations |
+| **v1.1+** | — | FR-6, FR-13(full), FR-16(full), FR-18, FR-19, FR-21, FR-22, FR-23, TOON | per-feature |
 
-### 14.4 Related products
+## 14. Success Metrics & Risk Register
 
-- **`unblock-agentic`** — a **separate, post-v1.0 control-plane product** (own crate `crates/unblock-agentic`): a local reconciler daemon that parallelises the mister-anderson pipeline over the `://unblock` dependency DAG. It is **additive** on top of the backend MCP surface and the `unblock-render` packaged plugin, it is **not part of the v1.0 P01–P04 scope**, and its own P0–P3 phase ladder is distinct from the P01–P05 phases above. See [docs/agentic/PRD.md](./agentic/PRD.md).
+### 14.1 Success metrics (ship-gates)
+- **Functional parity (v1 slice):** every v1-tier FR meets its AC.
+- **Performance:** NFR-1 budgets and NFR-2 (250k in CI) pass as hard gates.
+- **Agent experience:** end-to-end `ready → claim → close` round-trip latency under a target (TBD on M2); MCP tool count ≤ target (§9).
+- **Dev tracking:** unblock's v1 development is tracked in `docs/plans/STATUS.md` (Markdown registry); once v1 works, unblock can take over tracking its own v1.1+ work (the dogfood milestone).
 
-### 14.5 Competitive context
+### 14.2 Risk register
+| ID | Risk | L | I | Mitigation | Trigger/owner |
+|---|---|---|---|---|---|
+| RK-1 | libsql busy/lock semantics don't actually avoid hot-spin under load | M | H | **Contention lab in M0, before any crate depends on storage** (NFR-3); **fallback = `rusqlite` behind the same `Storage` trait** if it fails (a swap, not a rewrite) | M0 / storage owner |
+| RK-2 | rmcp 1.0 API churn | M | M | Pin version; isolate in `unblock-mcp`; thin adapter over engine | M2 / mcp owner |
+| RK-3 | MCP tool count hurts client selection accuracy | M | M | Consolidate tools + resources (§9); measure count (§14.1) | M2 |
+| RK-4 | libsql remote feature leaks TLS/HTTP into default build | L | M | Remote behind non-default feature (D15); cargo-deny on tree | M0 |
+| RK-5 | Health-contract scope creep | M | M | v1 ships lite; full taxonomy deferred to v1.1 (FR-16) | v1.1 |
+| RK-6 | Self-update supply-chain (unsigned) | L | H | v1: verify GitHub artifact attestations before execution (FR-25/NFR-17); `axoupdater` in `unblock-cli`, no isolated crate (D17/CF-K) | M3 / cli owner |
 
-- **GitHub Issues / Linear / Jira** — flat issue lists with link-metadata dependencies. No computable ready set. No structured agent-first MCP surface. No pipeline enforcement.
-- **`bd` (beads)** — provider-agnostic, dev-PM-style local tool. Not a runtime product; used inside this repo as a developer tool (per `feedback_bd_is_dev_tool_not_product`). `://unblock` is the GitHub-backed alternative for shipped products.
-- **Notion / Confluence** — knowledge bases, not work trackers. Memory service is explicitly not a wiki replacement (see §9.1).
-- **Code-search MCP servers** — typically wrap `ripgrep` or LSP. `unblock-code` differs by being one-shot CLI (no MCP, no editor registration), statically-linked across 10 grammars, and structurally decoupled from the issue tracker (Law 6).
+## Appendix A — Traceability
 
----
-
-**Status: APPROVED 2026-05-07.** Ready for `/architecture` (Ada — architect consumes this PRD as input to `docs/SPEC.md`).
+Derived from a 3-analyst + coordinator discovery workflow over `temp/beads_rust-main` and a subsequent
+3-lens + coordinator review (technical / product / PM). FR/NFR ids map to the original feature inventory;
+deviations are annotated inline and consolidated in §4 (Key Decisions). Review verdict that produced v0.2:
+"excellent foundation; needs a concurrency decision, a delivery wrapper, a tightened v1 thin-slice, and
+contradiction fixes" — all addressed in this revision.
