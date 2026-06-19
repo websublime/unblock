@@ -82,7 +82,7 @@ These decisions are **locked** (confirmed with Miguel) and shape the rest of thi
 | ID | Decision | Rationale |
 |---|---|---|
 | **D1** | **Storage = libsql** behind an async `Storage` trait. Local file now; remote/embedded-replica/synced available later. | Mainstream, maintained; gives local **and** remote with one async client → no separate "shared service". Replaces the niche fsqlite stack and its hot-spin defect. |
-| **D2** | **MCP = rmcp over stdio, and MCP is the PRIMARY interface.** | rmcp is the official async SDK (`rmcp 1.0`, `server`+`transport-io`). Agent-first product → the agent protocol is the product. |
+| **D2** | **MCP = rmcp over stdio, and MCP is the PRIMARY interface.** | rmcp is the official async SDK (`rmcp 1.7`, `server`+`transport-io`). Agent-first product → the agent protocol is the product. |
 | **D3** | **CLI is reduced to lifecycle/ops only** (`serve`, `migrate`, `doctor`, `version`, `init`, `agents`, `update` — all lifecycle/ops, no domain features). All **domain features via MCP**. | "All features via MCP." The binary still needs a lifecycle surface; that is not the feature surface. |
 | **D4** | **Errors = snafu**, **per-crate** error enums (no god-enum); mapped to MCP error data / exit codes at the boundary. | Idiomatic typed errors with context selectors; no backend error leakage. |
 | **D5** | **libsql is source of truth; JSONL is an OPTIONAL light export/import feature.** Drop the heavy git-merge coordination (3-way merge, 4-phase collision detection, distributed locks, data-loss guards). | libsql provides real sharing; git-as-transport is redundant. Keep JSONL only for portable, diffable snapshots. Reversible toward DB-only later. |
@@ -169,7 +169,7 @@ These decisions are **locked** (confirmed with Miguel) and shape the rest of thi
 - **NFR-7 [security]** JSONL writes confined to `.unblock/` by default; external paths require explicit opt-in with canonicalization and rejection of symlink escapes / `.git` / `..` / disallowed extensions; preflight before opening/parsing.
 - **NFR-8 [security]** Import rejects git conflict markers and malformed JSON before any DB mutation; tombstones never resurrected; force flags mutually exclusive and never bypass syntax/conflict-marker validation.
 - **NFR-9 [supply-chain]** **`forbid(unsafe_code)`** in every crate (stronger than `deny`; update the scaffold); clippy pedantic; commit `Cargo.lock`; `cargo-audit`/`cargo-deny` in CI; pin every GitHub Action to a 40-char SHA (incl. the `dist`-generated release workflow). Release/distribution via `dist` (D17, `docs/plans/ci-cd-and-distribution.md`).
-- **NFR-10 [supply-chain]** Minimize transitive surface: prefer mainstream multi-maintainer crates; eliminate the 15-crate fsqlite stack; keep network/TLS (`reqwest`, libsql remote) **behind non-default features** so it never appears on the normal path.
+- **NFR-10 [supply-chain]** Minimize transitive surface: prefer mainstream multi-maintainer crates; eliminate the 15-crate fsqlite stack; keep network/TLS (`reqwest` is **transitive-only** behind libsql's `remote` feature + the cli `self-update`/`axoupdater` surface — never a direct dep; libsql remote) **behind non-default features** so it never appears on the normal path.
 - **NFR-11 [portability]** Single self-contained `unblock` binary, no runtime system deps on Linux/macOS/Windows; path normalization; cfg-guarded unix signal handling.
 - **NFR-12 [portability]** Build on **stable Rust** (`1.96.0`); nightly only for an explicit, documented reason (none currently). **Gate:** a CI job pins `rust-toolchain` to `1.96.0` stable and builds `--locked`; a green stable build is the NFR-12 acceptance gate (see ci-cd §2).
 - **NFR-13 [observability]** Structured `tracing` on an `unblock.reliability` target (operation/path/result/reason): INFO for guard activations, force overrides, external path use, conflict markers; DEBUG for per-file/per-issue events.
@@ -210,8 +210,8 @@ These decisions are **locked** (confirmed with Miguel) and shape the rest of thi
 | `unblock-config` | L4 | Layered TOML config resolution, `.unblock/` discovery, open-a-workspace facade. | storage, sync, health, error |
 | `unblock-engine` | L5 | Shared session API (open → import? → mutate → export? → recover); **in-process write Semaphore (D14)**; shutdown/logging. Composes storage **+ policy**. Embeddable surface for MCP/CLI. | config, sync, storage, policy, health, model, error |
 | `unblock-render` | L6 | Output/format (json/robot/plain/csv/markdown; **TOON feature-gated, v1.1**) behind a trait. Reduced under D7. | model, error |
-| `unblock-mcp` | L7 | **Primary** rmcp stdio server (tools/resources/prompts) over the engine. Feature-isolated. | engine, render, policy |
-| `unblock-cli` | L7 | Reduced binary: lifecycle/ops (serve/migrate/doctor/version) + thin routing. | engine, render, policy |
+| `unblock-mcp` | L7 | **Primary** rmcp stdio server (tools/resources/prompts) over the engine. Feature-isolated. | engine, render, policy, model, error |
+| `unblock-cli` | L7 | Reduced binary: lifecycle/ops (serve/migrate/doctor/version) + thin routing; owns cooperative-shutdown signal install (FR-17, OQ-4). | engine, render, policy, mcp, error |
 | `unblock-fuzz` | — | Unpublished member; `cargo-fuzz` targets over model/sync/storage. | model, sync, storage, error |
 
 > CF-11 fix: `unblock-storage` no longer depends on `unblock-policy`; the engine (L5) composes storage + policy.
@@ -257,9 +257,9 @@ Designed deliberately rather than one-tool-per-CLI-command (to keep the client's
 
 Confirmed against the workspace scaffold (`Cargo.toml`):
 
-- **Runtime/async:** `tokio` (full). **Storage:** **libsql** *(add to `workspace.dependencies`; local-file/bundled default, remote behind a non-default feature — D15)* behind `async-trait` `Storage`. **Graph:** `petgraph`. **MCP:** `rmcp 1.0` (`server`, `transport-io`). **Schemas:** `schemars`. **Errors:** `snafu`. **Time:** `chrono`. **Serialization:** `serde`/`serde_json`; **config:** TOML. **Resilience (remote path only):** `failsafe` + a maintained retry crate (`backon`/`tokio-retry`, **not** archived `backoff 0.4`). **HTTP (non-default):** `reqwest`; **mocked by** `wiremock`. **Logging:** `tracing`(+subscriber). **CLI (lifecycle):** a lightweight `clap` (stable features only) *(add)*. **Testing:** `proptest`, `criterion` (async_tokio), `insta`, `cargo-fuzz`. **Toolchain:** stable `1.96.0`; lints **`unsafe_code = forbid`**, `missing_docs = warn`, clippy pedantic.
+- **Runtime/async:** `tokio` (full). **Storage:** **libsql** *(in `workspace.dependencies` as `default-features = false, features = ["core"]` — local; SQLite is statically bundled by `core` (there is **no** separate `bundled` Cargo feature); remote/replica behind the non-default `remote` feature — D15)* behind `async-trait` `Storage`. **Graph:** `petgraph`. **MCP:** `rmcp 1.7` (`server`, `transport-io`). **Schemas:** `schemars`. **Errors:** `snafu`. **Time:** `chrono`. **Serialization:** `serde`/`serde_json`; **config:** TOML. **Resilience (remote path only):** `failsafe` + a maintained retry crate (`backon`/`tokio-retry`, **not** archived `backoff 0.4`). **HTTP (non-default, transitive-only):** `reqwest` — pulled **only** via libsql's `remote` feature and the cli `self-update`/`axoupdater` surface; **not** a direct workspace dependency; **mocked by** `wiremock`. **Logging:** `tracing`(+subscriber). **CLI (lifecycle):** a lightweight `clap` (stable features only) *(add)*. **Testing:** `proptest`, `criterion` (async_tokio), `insta`, `cargo-fuzz`. **Toolchain:** stable `1.96.0`; lints **`unsafe_code = forbid`**, `missing_docs = warn`, clippy pedantic.
 
-**Scaffold changes required:** add `libsql` (with features) and `clap`; swap `backoff` → `backon`/`tokio-retry`; change `unsafe_code` from `deny` to `forbid`.
+**Scaffold (done at T0.1+T0.2):** added `libsql` (`default-features = false, features = ["core"]`), `clap` (`derive`/`env`), `axoupdater` (cli `self-update`), `backon` (remote retry); swapped archived `backoff` → `backon`; **dropped direct `reqwest`** (transitive-only); `unsafe_code` `deny` → `forbid`; `default-members` excludes `unblock-fuzz`; `rmcp` pinned to `1.7` via the committed `Cargo.lock`. *(This list is the dependency-stack SSOT alongside the per-crate plans — there is no separate spine dependency section.)*
 
 **Removed vs original:** fsqlite (15 crates) → libsql; fastmcp-rust → rmcp; rich_rust/crossterm/indicatif → dropped (D7); serde_yml → TOML; anyhow/thiserror → snafu; clap unstable/nightly → stable; **`self_update` → `dist`/`axoupdater`** (D17). **Release tooling:** `dist` (cargo-dist) for the CI release pipeline + installers + attestations.
 
@@ -317,7 +317,7 @@ A vertical walking skeleton (D14, thin-slice scope). Each milestone is independe
 | ID | Risk | L | I | Mitigation | Trigger/owner |
 |---|---|---|---|---|---|
 | RK-1 | libsql busy/lock semantics don't actually avoid hot-spin under load | M | H | **Contention lab in M0, before any crate depends on storage** (NFR-3); **fallback = `rusqlite` behind the same `Storage` trait** if it fails (a swap, not a rewrite) | M0 / storage owner |
-| RK-2 | rmcp 1.0 API churn | M | M | Pin version; isolate in `unblock-mcp`; thin adapter over engine | M2 / mcp owner |
+| RK-2 | rmcp 1.7 API churn | M | M | Pin version; isolate in `unblock-mcp`; thin adapter over engine | M2 / mcp owner |
 | RK-3 | MCP tool count hurts client selection accuracy | M | M | Consolidate tools + resources (§9); measure count (§14.1) | M2 |
 | RK-4 | libsql remote feature leaks TLS/HTTP into default build | L | M | Remote behind non-default feature (D15); cargo-deny on tree | M0 |
 | RK-5 | Health-contract scope creep | M | M | v1 ships lite; full taxonomy deferred to v1.1 (FR-16) | v1.1 |
