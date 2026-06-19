@@ -614,7 +614,7 @@ impl Session {
 
 ## 5. MCP schemas — `unblock-mcp` (L7)
 
-**rmcp 1.0** (`server`, `transport-io`) stdio server (`unblock serve`), thin adapter over `Session`. **7 consolidated tools** (target ≤ 8), resources, prompts. Every tool input/output derives `JsonSchema` + `Serialize`/`Deserialize`; args are schemars-validated with size/rate limits (NFR-18). Discovery (`capabilities`/`schema`) carries `contract_version` (FR-12).
+**rmcp 1.7** (`server`, `transport-io`) stdio server (`unblock serve`), thin adapter over `Session`. **7 consolidated tools** (target ≤ 8), resources, prompts. Every tool input/output derives `JsonSchema` + `Serialize`/`Deserialize`; args are schemars-validated with size/rate limits (NFR-18). Discovery (`capabilities`/`schema`) carries `contract_version` (FR-12).
 
 ### 5.1 Tool taxonomy (7 tools)
 

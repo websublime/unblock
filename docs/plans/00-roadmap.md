@@ -50,7 +50,7 @@ pass as hard gates; unblock dogfoods its own repo (issues imported from `bd` via
 | FR-15 | Pure-DB diagnostics: stats/info/where/version/lint; `changelog` (closed-issue metadata) + `orphans` (`external_ref` pattern) — **no git** |
 | FR-16 (lite) | `doctor` + libsql `integrity_check` + basic diagnostics |
 | FR-17 | Cooperative shutdown (SIGINT/SIGTERM/SIGHUP → atomic flag; clean libsql flush/close) |
-| FR-20 | **MCP stdio server (PRIMARY)** on rmcp 1.0: ≤8 consolidated tools, resources, prompts |
+| FR-20 | **MCP stdio server (PRIMARY)** on rmcp 1.7: ≤8 consolidated tools, resources, prompts |
 | FR-25 | **Self-update** (`unblock update`) via `axoupdater`; verified by GitHub artifact attestations (NFR-17, D17) |
 
 ### Key NFR gates
@@ -60,7 +60,7 @@ NFR-6 (zero git), NFR-9 (`forbid(unsafe_code)`, pinned actions), NFR-14 (stdout/
 NFR-15 (acyclic layering), NFR-16 (Storage contract suite), NFR-18 (MCP untrusted-input boundary).
 
 ### Crates touched (all 12)
-`unblock-model`, `unblock-error`, `unblock-policy`, `unblock-storage` (libsql, local/bundled default;
+`unblock-model`, `unblock-error`, `unblock-policy`, `unblock-storage` (libsql, local default — `features = ["core"]`;
 remote feature **off**, D15), `unblock-sync` (light), `unblock-health` (lite), `unblock-config` (subset),
 `unblock-engine`, `unblock-render` (reduced), `unblock-mcp` (primary), `unblock-cli` (lifecycle: serve/
 migrate/doctor/version/update), `unblock-fuzz`.

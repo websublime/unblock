@@ -33,22 +33,22 @@ layer**; THIS file is the **cross-session source of truth** (it survives compact
 | id | Item | Depends on | Status |
 |---|---|---|---|
 | P.1 | This `STATUS.md` registry | — | ☑ |
-| P.2 | Root `CLAUDE.md` (global rules / arch / idiomatic Rust) | — | ◐ |
+| P.2 | Root `CLAUDE.md` (global rules / arch / idiomatic Rust) | — | ☑ |
 | P.3 | Roadmap v1.2/v1.3 review — **deferred to v1 GA** (just-in-time; not a pre-T0 gate) | — | — |
 
 ## M0 — Foundation  *(gate: Storage contract suite green + contention lab proves no hot-spin)*
 
 | id | Task | Depends on | Status | Notes |
 |---|---|---|---|---|
-| T0.1 | Workspace scaffold deps (`Cargo.toml`: libsql/clap/axoupdater; backoff→backon; deny→forbid) | P.2 | ☐ | AC: empty workspace builds on stable 1.96 |
-| T0.2 | Create 12 `unblock-*` crates + layering CI check | T0.1 | ☐ | per-crate `CLAUDE.md` stubs here |
+| T0.1 | Workspace scaffold deps (`Cargo.toml`: libsql/clap/axoupdater; backoff→backon; reqwest dropped; deny→forbid) | P.2 | ◐ | **MERGED with T0.2** (branch `t0.1-2-workspace-scaffold`); 3-lens design Review = PASS-with-changes, applied |
+| T0.2 | Create 12 `unblock-*` crates + `xtask` layering check | T0.1 | ◐ | **MERGED with T0.1**; AC green: build 1.96 + remote/no-default variants + storage/mcp network-free; per-crate `CLAUDE.md` stubs done; **design Review + Verify gates both PASS** (layering rejects an injected back-edge — non-vacuous) |
 | T0.3 | `unblock-model` (types, hash, sync-eq, validation) | T0.2 | ☐ | |
 | T0.4 | `unblock-error` (snafu taxonomy, exit codes) | T0.2 | ☐ | |
 | T0.5 | `unblock-storage`: `Storage` trait | T0.3, T0.4 | ☐ | |
 | T0.6 | `unblock-storage`: libsql impl (WAL, busy_timeout) | T0.5 | ☐ | |
 | T0.7 | Storage contract test suite (NFR-16) | T0.6 | ☐ | |
 | T0.8 | **Contention lab (RK-1 / NFR-3 — M0 GATE)** | T0.6 | ☐ | no hot-spin before anything depends on storage; fallback = rusqlite behind the trait |
-| T0.9 | CI scaffolding (ci.yml, deny.toml, .cargo/config, **doc-lint**) | T0.2 | ☐ | quality gate + doc-lint live from M0 |
+| T0.9 | CI scaffolding (ci.yml, deny.toml, .cargo/config, **doc-lint**) | T0.2 | ☐ | quality gate + doc-lint live from M0. *(Verify-gate follow-ups: `deny.toml [bans]` must deny `git2`/`gix`/`libgit2-sys` to machine-enforce NFR-6; the `layering` job must check out the committed `Cargo.lock` so `cargo metadata --offline` resolves. `.cargo/config.toml` already exists from T0.2.)* |
 
 ## M1 — Engine + core domain  *(gate: CRUD/ready/dep linearizable via engine)*
 
