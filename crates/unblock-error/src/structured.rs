@@ -12,9 +12,11 @@ use crate::sanitize::sanitize_message;
 /// A machine-parseable, agent-friendly structured error (spine §2.4; FR-11).
 ///
 /// Carries a stable [`ErrorCode`], a terminal-sanitized human message, an optional
-/// self-correction `hint`, a `retryable` flag (mirrors [`ErrorCode::is_retryable`]), and a
-/// free-form `context` object. The `message` is always routed through
-/// [`crate::sanitize_message`] by every constructor, so it can never carry raw control bytes.
+/// (terminal-sanitized) self-correction `hint`, a `retryable` flag (mirrors
+/// [`ErrorCode::is_retryable`]), and a free-form `context` object. Both `message` and `hint` are
+/// always routed through [`crate::sanitize_message`] by every constructor/builder, so neither can
+/// carry raw control bytes (spine §2.4 chokepoint). `context` values are terminal-safe only via
+/// JSON encoding — a text/plain render of any context value must route through a sanitizer.
 ///
 /// Serializes to valid JSON in every state: an empty `context` is omitted, and a `None` `hint`
 /// is omitted, so the payload stays compact.
@@ -63,7 +65,8 @@ impl StructuredError {
     /// Build a structured error from any [`CodedError`] (dynamic-dispatch entry point).
     ///
     /// Pulls `code`/`hint`/`retryable`/`context` from the trait, uses [`std::fmt::Display`] for
-    /// the message, and routes that message through [`crate::sanitize_message`]. This is the
+    /// the message, and routes **both** the message and the `hint` through
+    /// [`crate::sanitize_message`] (the §2.4 chokepoint covers message AND hint). This is the
     /// `&dyn CodedError` path the L7 boundary uses; the blanket `From<&E>` (see
     /// [`crate::CodedError`]) is the generic counterpart.
     #[must_use]
@@ -75,16 +78,20 @@ impl StructuredError {
         Self {
             code,
             message: sanitize_message(&err.to_string()).into_owned(),
-            hint: err.hint(),
+            hint: err.hint().map(|hint| sanitize_message(&hint).into_owned()),
             retryable: err.retryable(),
             context: err.context(),
         }
     }
 
     /// Attach a self-correction `hint` (builder).
+    ///
+    /// The `hint` is routed through [`crate::sanitize_message`] — `find_similar_ids` can fold an
+    /// attacker-influenced not-found id into a suggestion, so the suggested text is untrusted and
+    /// must be terminal-safe even for a plain-text TTY renderer (the §2.4 chokepoint, NFR-14).
     #[must_use]
     pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
-        self.hint = Some(hint.into());
+        self.hint = Some(sanitize_message(&hint.into()).into_owned());
         self
     }
 
@@ -165,6 +172,17 @@ mod tests {
         let value = serde_json::to_value(&err).unwrap();
         assert_eq!(value["hint"], "Priority must be 0-4");
         assert_eq!(value["context"]["provided"], "high");
+    }
+
+    #[test]
+    fn with_hint_sanitizes_control_chars() {
+        let err = StructuredError::from_code(ErrorCode::IssueNotFound, "nope")
+            .with_hint("Did you mean '\x1b[2Kub-x'?\x07");
+        let hint = err.hint.as_deref().unwrap();
+        assert!(!hint.contains('\x1b'));
+        assert!(!hint.contains('\x07'));
+        assert!(hint.contains("\\u{1b}[2Kub-x"));
+        assert!(hint.contains("\\u{7}"));
     }
 
     #[test]

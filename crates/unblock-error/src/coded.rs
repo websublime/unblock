@@ -53,7 +53,7 @@ where
         Self {
             code,
             message: sanitize_message(&err.to_string()).into_owned(),
-            hint: err.hint(),
+            hint: err.hint().map(|hint| sanitize_message(&hint).into_owned()),
             retryable: err.retryable(),
             context: err.context(),
         }
@@ -71,10 +71,11 @@ mod tests {
     // Object-safety guard: this signature only compiles if `CodedError` is object-safe.
     fn _object_safe(_: &dyn CodedError) {}
 
-    #[derive(Debug)]
+    #[derive(Debug, Default)]
     struct FakeError {
-        code: ErrorCode,
+        code: Option<ErrorCode>,
         message: String,
+        hint: Option<String>,
     }
 
     impl fmt::Display for FakeError {
@@ -87,7 +88,11 @@ mod tests {
 
     impl CodedError for FakeError {
         fn code(&self) -> ErrorCode {
-            self.code
+            self.code.unwrap_or(ErrorCode::InternalError)
+        }
+
+        fn hint(&self) -> Option<String> {
+            self.hint.clone()
         }
 
         fn context(&self) -> Map<String, Value> {
@@ -100,8 +105,9 @@ mod tests {
     #[test]
     fn inherent_from_coded_path() {
         let err = FakeError {
-            code: ErrorCode::DatabaseLocked,
+            code: Some(ErrorCode::DatabaseLocked),
             message: "locked".to_string(),
+            ..FakeError::default()
         };
         let structured = StructuredError::from_coded(&err);
         assert_eq!(structured.code, ErrorCode::DatabaseLocked);
@@ -113,8 +119,9 @@ mod tests {
     #[test]
     fn blanket_from_path() {
         let err = FakeError {
-            code: ErrorCode::IssueNotFound,
+            code: Some(ErrorCode::IssueNotFound),
             message: "missing".to_string(),
+            ..FakeError::default()
         };
         let structured: StructuredError = (&err).into();
         assert_eq!(structured.code, ErrorCode::IssueNotFound);
@@ -124,8 +131,9 @@ mod tests {
     #[test]
     fn display_with_control_chars_is_sanitized() {
         let err = FakeError {
-            code: ErrorCode::InternalError,
+            code: Some(ErrorCode::InternalError),
             message: "alert\x07\x1b[31mred".to_string(),
+            ..FakeError::default()
         };
         let structured = StructuredError::from_coded(&err);
         assert!(!structured.message.contains('\x07'));
@@ -135,5 +143,30 @@ mod tests {
 
         let via_blanket: StructuredError = (&err).into();
         assert_eq!(structured.message, via_blanket.message);
+    }
+
+    #[test]
+    fn hint_with_esc_and_bel_is_sanitized_on_both_paths() {
+        let err = FakeError {
+            code: Some(ErrorCode::IssueNotFound),
+            message: "not found".to_string(),
+            hint: Some("Did you mean '\x1b[2Kub-evil'?\x07\nsecond line".to_string()),
+        };
+
+        let via_inherent = StructuredError::from_coded(&err);
+        let via_blanket: StructuredError = (&err).into();
+
+        for structured in [&via_inherent, &via_blanket] {
+            let hint = structured.hint.as_deref().expect("hint present");
+            // No raw control byte except the preserved layout characters \n / \t.
+            assert!(
+                !hint.chars().any(|c| c.is_control() && !matches!(c, '\n' | '\t')),
+                "raw control char leaked into hint: {hint:?}"
+            );
+            assert!(hint.contains("\\u{1b}[2Kub-evil"));
+            assert!(hint.contains("\\u{7}"));
+            assert!(hint.contains('\n'), "newline must be preserved");
+        }
+        assert_eq!(via_inherent.hint, via_blanket.hint);
     }
 }

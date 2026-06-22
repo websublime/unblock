@@ -19,6 +19,18 @@ pub const VALID_TYPE_HINT: &str = "Valid types: task, bug, feature, epic, chore,
 /// Maximum Levenshtein distance for an id to be offered as a suggestion.
 pub const MAX_SUGGESTION_DISTANCE: usize = 3;
 
+/// Maximum input length (in `char`s) for [`find_similar_ids`] before suggestions are skipped.
+///
+/// `find_similar_ids` is a **public** entry point and `searched` is the raw not-found id, which
+/// reaches it *before* any id-format validation (ids are short: the hierarchical-id limit is 40
+/// chars). The per-pair Levenshtein cost is `O(n·m)`, so an unbounded `searched` (or unbounded
+/// candidate) would let an attacker drive `O(N · n · m)` work from a single lookup. We cap both
+/// the `searched` string and every candidate at `256` chars — already absurdly long for an id, an
+/// order of magnitude past any legitimate value — and return no suggestions when the cap is
+/// exceeded (a too-long id has no plausible near-neighbour anyway). This bounds each comparison at
+/// `256·256` cells regardless of input, keeping the help path cheap.
+pub const MAX_SUGGESTION_INPUT_CHARS: usize = 256;
+
 /// Valid status values (O(1) membership lookup).
 static VALID_STATUSES: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     [
@@ -220,6 +232,10 @@ fn digit_str(s: &str) -> Option<&'static str> {
 
 /// The Levenshtein edit distance between two strings (counted in `char`s, not bytes).
 ///
+/// Uses the two-row rolling variant — `O(min(n, m))` memory and `O(n·m)` time — which yields the
+/// exact same distance as the classic full-matrix algorithm but never allocates the `O(n·m)`
+/// matrix. (`find_similar_ids` additionally bounds `n`/`m` so total work stays modest, see there.)
+///
 /// # Examples
 ///
 /// ```
@@ -229,45 +245,50 @@ fn digit_str(s: &str) -> Option<&'static str> {
 /// ```
 #[must_use]
 pub fn levenshtein_distance(a: &str, b: &str) -> usize {
-    let a_chars: Vec<char> = a.chars().collect();
-    let b_chars: Vec<char> = b.chars().collect();
-    let a_len = a_chars.len();
-    let b_len = b_chars.len();
+    // Iterate columns over the longer string so the two rolling rows are `min(n, m) + 1` long.
+    let (shorter, longer) = {
+        let a_chars: Vec<char> = a.chars().collect();
+        let b_chars: Vec<char> = b.chars().collect();
+        if a_chars.len() <= b_chars.len() {
+            (a_chars, b_chars)
+        } else {
+            (b_chars, a_chars)
+        }
+    };
 
-    if a_len == 0 {
-        return b_len;
-    }
-    if b_len == 0 {
-        return a_len;
-    }
-
-    let mut matrix = vec![vec![0usize; b_len + 1]; a_len + 1];
-
-    for (i, row) in matrix.iter_mut().enumerate().take(a_len + 1) {
-        row[0] = i;
-    }
-    for (j, item) in matrix[0].iter_mut().enumerate().take(b_len + 1) {
-        *item = j;
+    let short_len = shorter.len();
+    if short_len == 0 {
+        return longer.len();
     }
 
-    for (i, a_char) in a_chars.iter().enumerate() {
-        for (j, b_char) in b_chars.iter().enumerate() {
-            let cost = usize::from(a_char != b_char);
-            matrix[i + 1][j + 1] = std::cmp::min(
-                std::cmp::min(matrix[i][j + 1] + 1, matrix[i + 1][j] + 1),
-                matrix[i][j] + cost,
+    // `prev[j]` = distance for the first `j` chars of `shorter` against the row above.
+    let mut prev: Vec<usize> = (0..=short_len).collect();
+    let mut curr: Vec<usize> = vec![0; short_len + 1];
+
+    for (i, long_char) in longer.iter().enumerate() {
+        curr[0] = i + 1;
+        for (j, short_char) in shorter.iter().enumerate() {
+            let cost = usize::from(short_char != long_char);
+            curr[j + 1] = std::cmp::min(
+                std::cmp::min(prev[j + 1] + 1, curr[j] + 1),
+                prev[j] + cost,
             );
         }
+        std::mem::swap(&mut prev, &mut curr);
     }
 
-    matrix[a_len][b_len]
+    prev[short_len]
 }
 
 /// Find ids similar to `searched`, ranked by Levenshtein distance.
 ///
-/// Candidates with distance greater than [`MAX_SUGGESTION_DISTANCE`] are filtered out **before**
-/// the `max` cap is applied; the surviving candidates are sorted deterministically (by distance,
-/// then lexicographically) and truncated to `max`.
+/// Inputs are bounded first: if `searched` exceeds [`MAX_SUGGESTION_INPUT_CHARS`] this returns no
+/// suggestions immediately (the not-found id reaches this public fn before format validation, so an
+/// unbounded input could otherwise drive `O(N · n · m)` work — see the const docs). Each candidate
+/// is likewise skipped if it exceeds the cap. Surviving candidates with distance greater than
+/// [`MAX_SUGGESTION_DISTANCE`] are filtered out **before** the `max` cap is applied; the rest are
+/// sorted deterministically (by distance, then lexicographically) and truncated to `max`. With the
+/// caps in place, total cost is `O(N · min(n, m))` rows of bounded width.
 ///
 /// # Examples
 ///
@@ -280,8 +301,16 @@ pub fn levenshtein_distance(a: &str, b: &str) -> usize {
 /// ```
 #[must_use]
 pub fn find_similar_ids(searched: &str, existing: &[String], max: usize) -> Vec<String> {
+    // Cheap length guard: a pathologically long not-found id has no plausible near-neighbour, and
+    // bounding it here keeps each Levenshtein comparison within `MAX_SUGGESTION_INPUT_CHARS` cells.
+    if searched.chars().count() > MAX_SUGGESTION_INPUT_CHARS {
+        return Vec::new();
+    }
+
     let mut candidates: Vec<(usize, &str)> = existing
         .iter()
+        // Skip untrusted candidates that blow the cap before paying the O(n·m) comparison.
+        .filter(|id| id.chars().count() <= MAX_SUGGESTION_INPUT_CHARS)
         .map(|id| (levenshtein_distance(searched, id), id.as_str()))
         .filter(|(dist, _)| *dist <= MAX_SUGGESTION_DISTANCE)
         .collect();
@@ -298,8 +327,8 @@ pub fn find_similar_ids(searched: &str, existing: &[String], max: usize) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::{
-        detect_priority_intent, detect_status_intent, detect_type_intent, find_similar_ids,
-        levenshtein_distance,
+        MAX_SUGGESTION_INPUT_CHARS, detect_priority_intent, detect_status_intent,
+        detect_type_intent, find_similar_ids, levenshtein_distance,
     };
 
     #[test]
@@ -309,6 +338,11 @@ mod tests {
         assert_eq!(levenshtein_distance("abc", "abd"), 1);
         assert_eq!(levenshtein_distance("abc", "abcd"), 1);
         assert_eq!(levenshtein_distance("kitten", "sitting"), 3);
+        // Symmetric; longer-first vs shorter-first must agree (two-row variant invariant).
+        assert_eq!(levenshtein_distance("sitting", "kitten"), 3);
+        assert_eq!(levenshtein_distance("flaw", "lawn"), 2);
+        assert_eq!(levenshtein_distance("", "abc"), 3);
+        assert_eq!(levenshtein_distance("abc", ""), 3);
     }
 
     #[test]
@@ -343,6 +377,61 @@ mod tests {
     fn find_similar_empty_on_no_candidates() {
         let existing = vec!["completely-different".to_string()];
         assert!(find_similar_ids("ub-abc", &existing, 3).is_empty());
+    }
+
+    #[test]
+    fn find_similar_skips_pathologically_long_searched() {
+        // A `searched` over the cap returns empty immediately — even with an exact-match candidate
+        // present — instead of paying an O(n·m) comparison per candidate. (Asserts the result, not
+        // timing.)
+        let huge = "x".repeat(MAX_SUGGESTION_INPUT_CHARS + 1);
+        let existing = vec![huge.clone(), "ub-abc".to_string()];
+        assert!(find_similar_ids(&huge, &existing, 3).is_empty());
+    }
+
+    #[test]
+    fn find_similar_accepts_searched_at_the_cap() {
+        // Exactly at the cap is still processed (the guard is strictly greater-than).
+        let at_cap = "a".repeat(MAX_SUGGESTION_INPUT_CHARS);
+        let existing = vec![at_cap.clone()];
+        let hits = find_similar_ids(&at_cap, &existing, 3);
+        assert_eq!(hits, vec![at_cap]);
+    }
+
+    #[test]
+    fn find_similar_skips_oversized_candidates_only() {
+        // A too-long candidate is skipped, but normal candidates in the same slice still match.
+        let huge = "y".repeat(MAX_SUGGESTION_INPUT_CHARS + 5);
+        let existing = vec![huge.clone(), "ub-abc".to_string(), "ub-abd".to_string()];
+        let hits = find_similar_ids("ub-abc", &existing, 5);
+        assert!(hits.contains(&"ub-abc".to_string()));
+        assert!(hits.contains(&"ub-abd".to_string()));
+        assert!(!hits.contains(&huge));
+    }
+
+    #[test]
+    fn find_similar_never_suggests_distance_four() {
+        // "ub-abc" vs "ub-abcdef" is distance 3 (kept); vs "ub-abcdefg" is distance 4 (dropped).
+        let kept = "ub-abcdef".to_string(); // 3 insertions
+        let dropped = "ub-abcdefg".to_string(); // 4 insertions
+        assert_eq!(levenshtein_distance("ub-abc", &kept), 3);
+        assert_eq!(levenshtein_distance("ub-abc", &dropped), 4);
+
+        let existing = vec![kept.clone(), dropped.clone()];
+        let hits = find_similar_ids("ub-abc", &existing, 5);
+        assert!(hits.contains(&kept));
+        assert!(!hits.contains(&dropped), "a dist-4 id must never be suggested");
+    }
+
+    #[test]
+    fn find_similar_deterministic_distance_then_lexicographic() {
+        // Two candidates at distance 1 must come back sorted lexicographically, regardless of the
+        // input slice order.
+        let existing = vec!["ub-abd".to_string(), "ub-abe".to_string()];
+        let reversed = vec!["ub-abe".to_string(), "ub-abd".to_string()];
+        let expected = vec!["ub-abd".to_string(), "ub-abe".to_string()];
+        assert_eq!(find_similar_ids("ub-abc", &existing, 5), expected);
+        assert_eq!(find_similar_ids("ub-abc", &reversed, 5), expected);
     }
 
     #[test]
