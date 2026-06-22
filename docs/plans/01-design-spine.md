@@ -342,6 +342,28 @@ impl StorageError { pub fn code(&self) -> unblock_error::ErrorCode; } // each cr
 
 Each crate implements `fn code(&self) -> ErrorCode` (and a hint/retryable view) so the boundary can build a `StructuredError` uniformly. Upward composition uses snafu source nesting; the engine's error is the union surfaced to L7.
 
+**`ModelError` aggregate validation (D-E1 — NORMATIVE).** `unblock-error` owns the one concrete per-crate enum that `unblock-model` returns (spine §1.1/§1.2/§1.9: `Status::FromStr`, `Priority::FromStr`, `IssueValidator::validate`). It keeps **scalar** variants for the single-field `FromStr` paths *and* one **aggregate carrier** that holds every failure an `IssueValidator::validate` run found, so the boundary still emits exactly one `ErrorCode` while preserving multi-field detail (FR-11 agent self-correction):
+
+```rust
+// unblock-error
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FieldError { pub field: String, pub reason: String }
+
+#[derive(Debug, snafu::Snafu)]
+#[snafu(visibility(pub(crate)))]
+pub enum ModelError {
+    InvalidPriority { value: String },          // -> ErrorCode::InvalidPriority
+    InvalidStatus   { value: String },          // -> ErrorCode::InvalidStatus
+    InvalidType     { value: String },          // -> ErrorCode::InvalidType
+    InvalidId       { id: String },             // -> ErrorCode::InvalidId
+    RequiredField   { field: &'static str },    // -> ErrorCode::RequiredField (empty/whitespace title)
+    ReparentCycle   { path: String },           // -> ErrorCode::CycleDetected
+    ValidationFailed { fields: Vec<FieldError> }, // -> ErrorCode::ValidationFailed (aggregate carrier)
+}
+```
+
+The §1.9 signature `IssueValidator::validate -> Result<(), unblock_error::ModelError>` stays VERBATIM (single error — the aggregate lives **inside** it: a multi-failure run returns `Err(ModelError::ValidationFailed { fields })`; a single-field `FromStr` returns the matching scalar variant).
+
 ### 2.2 ErrorCode (stable, SCREAMING_SNAKE in JSON)
 
 ```rust
@@ -370,7 +392,9 @@ impl ErrorCode {
     pub const fn is_retryable(&self) -> bool;
     //   exact retryable set (no glob): DatabaseLocked | AlreadyClaimed | ValidationFailed
     //   | InvalidStatus | InvalidType | InvalidPriority | RequiredField | AmbiguousId.
-    //   (matches error.md; the §2.3 exit-4 validation variants are the four Validation* members.)
+    //   (matches error.md; the retryable exit-4 members are the five retryable Validation* members
+    //   — ValidationFailed/InvalidStatus/InvalidType/InvalidPriority/RequiredField; PolicyViolation
+    //   is exit-4 but non-retryable.)
 }
 ```
 
@@ -407,6 +431,10 @@ impl StructuredError {
 ```
 
 The L7 boundary converts any composed crate error → `StructuredError` (CLI: serialize to stdout + `process::exit(exit_code)`; MCP: attach as error data, §5.6). Output is **always valid JSON even on error** (FR-11). `tracing` on `unblock.reliability` records the guard/error (NFR-13); structured output strictly stdout, diagnostics stderr (NFR-14).
+
+**`ModelError::ValidationFailed { fields }` → `context` mapping (D-E1 — NORMATIVE).** When the aggregate validation carrier (§2.1) is bridged to a `StructuredError` via `CodedError`, its per-field detail surfaces as a `context["fields"]` array of `{ "field": String, "reason": String }` objects (the serialized `FieldError` shape). This keeps the boundary emitting exactly one `ErrorCode` (`VALIDATION_FAILED`) while the agent self-correction surface retains every failing field. The scalar `ModelError` variants (e.g. `InvalidPriority`) carry their single value in `context` as their own keys; only the aggregate uses the `fields` array.
+
+**Message sanitization chokepoint (NORMATIVE).** Every `StructuredError` constructor — `from_code`, `from_coded`, and the blanket `From<&E>` bridge — routes the `message` through `unblock_error::sanitize_message` (the `\n`/`\t`-preserving terminal sanitizer, ported from `format/text.rs::sanitize_terminal_text`). A composed error whose `Display` carries ESC/BEL/control bytes therefore yields a sanitized `.message` no matter which entry point built it (single chokepoint). The stricter inline variant that escapes `\n`/`\t` (`sanitize_terminal_inline`) lives in `unblock-render` for single-line display fields, **not** here.
 
 ---
 
