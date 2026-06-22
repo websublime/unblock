@@ -9,13 +9,31 @@ publish = false
 [lints]
 workspace = true
 
+# The fuzz CORES live here (in `src/`) as plain `pub fn run_<t>_case(&[u8]) -> Result<(), FuzzError>`
+# so they build + replay on STABLE Rust (NFR-12). The nested cargo-fuzz package (`fuzz/`, excluded
+# from the workspace) holds only 5-line libFuzzer wrappers over these cores.
 [dependencies]
+# L0/L2 surfaces under test. `unblock-sync` is intentionally ABSENT at T0.7 — the JSONL/`bd` import
+# targets are post-T0.7 (the member's T0.7 edges are model + error + storage only). `testkit` exposes
+# the gated `StorageTestkit` seam + the contract suite the storage cores reuse.
 unblock-model = { workspace = true }
 unblock-error = { workspace = true }
-unblock-storage = { workspace = true }
-unblock-sync = { workspace = true }
+unblock-storage = { workspace = true, features = ["testkit"] }
 
-# NOTE: the cargo-fuzz harness (fuzz_targets, libfuzzer-sys, arbitrary) is a SEPARATE nested
-# `fuzz/` package added at the fuzzing task (T0.7+). It pins nightly ONLY for libFuzzer codegen via
-# its own `fuzz/rust-toolchain.toml` and is `exclude`d from this workspace, so the stable-1.96
-# default build never pulls libFuzzer (NFR-12). `unblock-fuzz` is a member but NOT a default member.
+# Drives the async `Storage` trait from the sync target entrypoint via a per-case current-thread
+# runtime (`tokio_block_on`, OQ-1 RESOLVED). `features = ["full"]` via the workspace dep — libsql's
+# async needs more than `["rt", "macros"]`, so the member escalates to the workspace tokio
+# (correctness over minimalism).
+tokio = { workspace = true }
+# Temp workspaces/DBs for the storage cores (file-backed `open_local`).
+tempfile = { workspace = true }
+# JSON parse/serialize for the content_hash transport round-trips + issue_ingest.
+serde_json = { workspace = true }
+# Timestamps for the arbitrary issue/dependency builders.
+chrono = { workspace = true }
+# Local `FuzzError` enum (workspace convention; `?`-friendly From conversions).
+snafu = { workspace = true }
+
+[dev-dependencies]
+# Stable-side randomized smoke per target core (complements the committed-corpus replay).
+proptest = { workspace = true }

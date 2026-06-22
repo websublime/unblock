@@ -1,0 +1,96 @@
+# Nested cargo-fuzz package — OUTSIDE the workspace (excluded in the root Cargo.toml).
+#
+# This crate needs **nightly + libFuzzer** (sanitizer codegen), which must never reach the
+# stable-1.96 default build (NFR-12). It is therefore NOT a workspace member: its deps are pinned
+# INLINE (plain `path = "../../unblock-*"` + version literals), NOT `workspace = true`, because there
+# is no parent `[workspace]` to inherit from here.
+#
+# All target logic lives in the `unblock-fuzz` MEMBER crate (`../src/`); the `[[bin]]` targets below
+# are 5-line `fuzz_target!` wrappers over its `run_<t>_case` cores. Build/run with the pinned nightly:
+#   cargo +nightly-2024-10-31 fuzz run <target>
+[package]
+name = "unblock-fuzz-targets"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+# The member crate that hosts the cores + shared harness. `testkit` exposes the gated storage seam
+# the storage cores use.
+unblock-fuzz = { path = ".." }
+unblock-model = { path = "../../unblock-model" }
+unblock-error = { path = "../../unblock-error" }
+unblock-storage = { path = "../../unblock-storage", features = ["testkit"] }
+
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+# The cores drive async storage + JSON; pinned inline (no workspace inheritance here).
+tokio = { version = "1", features = ["full"] }
+tempfile = "3"
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+
+[profile.release]
+# Keep line tables for readable crash backtraces without full debuginfo bloat.
+debug = 1
+
+# --- model + error targets ---
+[[bin]]
+name = "content_hash"
+path = "fuzz_targets/content_hash.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "issue_ingest"
+path = "fuzz_targets/issue_ingest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_id"
+path = "fuzz_targets/parse_id.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "enum_deserialize"
+path = "fuzz_targets/enum_deserialize.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sanitize"
+path = "fuzz_targets/sanitize.rs"
+test = false
+doc = false
+bench = false
+
+# --- storage targets ---
+[[bin]]
+name = "query_filters"
+path = "fuzz_targets/query_filters.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cycle_detect"
+path = "fuzz_targets/cycle_detect.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "id_alloc"
+path = "fuzz_targets/id_alloc.rs"
+test = false
+doc = false
+bench = false

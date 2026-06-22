@@ -1,0 +1,6 @@
+# Build + run artifacts of the nested cargo-fuzz package. The committed `corpus/` seeds are KEPT
+# (they are the regression-replay inputs the stable `cargo test` gate replays).
+/target
+/artifacts
+/coverage
+Cargo.lock

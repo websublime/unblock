@@ -1,0 +1,6 @@
+# Pin the nightly used ONLY for libFuzzer sanitizer codegen (this nested package needs it). This is
+# a SCOPED toolchain file: it applies only inside `crates/unblock-fuzz/fuzz/`, never to the workspace
+# root (which stays on stable 1.96.0, NFR-12). The library crates never compile under this channel.
+[toolchain]
+channel = "nightly-2024-10-31"
+components = ["rustfmt", "clippy"]
