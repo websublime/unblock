@@ -387,9 +387,11 @@ pub enum ErrorCode {
     InternalError,
 }
 impl ErrorCode {
-    pub const fn as_str(&self) -> &'static str;       // "ISSUE_NOT_FOUND", ...
-    pub const fn exit_code(&self) -> u8;              // 0..=8 per table below
-    pub const fn is_retryable(&self) -> bool;
+    // `ErrorCode` is a 1-byte `Copy` enum, so these views take `self` by value (a `&self`
+    // signature would trip clippy `trivially_copy_pass_by_ref`).
+    pub const fn as_str(self) -> &'static str;        // "ISSUE_NOT_FOUND", ...
+    pub const fn exit_code(self) -> u8;               // 0..=8 per table below
+    pub const fn is_retryable(self) -> bool;
     //   exact retryable set (no glob): DatabaseLocked | AlreadyClaimed | ValidationFailed
     //   | InvalidStatus | InvalidType | InvalidPriority | RequiredField | AmbiguousId.
     //   (matches error.md; the retryable exit-4 members are the five retryable Validation* members
@@ -434,7 +436,7 @@ The L7 boundary converts any composed crate error → `StructuredError` (CLI: se
 
 **`ModelError::ValidationFailed { fields }` → `context` mapping (D-E1 — NORMATIVE).** When the aggregate validation carrier (§2.1) is bridged to a `StructuredError` via `CodedError`, its per-field detail surfaces as a `context["fields"]` array of `{ "field": String, "reason": String }` objects (the serialized `FieldError` shape). This keeps the boundary emitting exactly one `ErrorCode` (`VALIDATION_FAILED`) while the agent self-correction surface retains every failing field. The scalar `ModelError` variants (e.g. `InvalidPriority`) carry their single value in `context` as their own keys; only the aggregate uses the `fields` array.
 
-**Message sanitization chokepoint (NORMATIVE).** Every `StructuredError` constructor — `from_code`, `from_coded`, and the blanket `From<&E>` bridge — routes the `message` through `unblock_error::sanitize_message` (the `\n`/`\t`-preserving terminal sanitizer, ported from `format/text.rs::sanitize_terminal_text`). A composed error whose `Display` carries ESC/BEL/control bytes therefore yields a sanitized `.message` no matter which entry point built it (single chokepoint). The stricter inline variant that escapes `\n`/`\t` (`sanitize_terminal_inline`) lives in `unblock-render` for single-line display fields, **not** here.
+**Message + hint sanitization chokepoint (NORMATIVE).** Every `StructuredError` constructor and builder — `from_code`, `from_coded`, the blanket `From<&E>` bridge, and `with_hint` — routes **both** the `message` and the `hint` through `unblock_error::sanitize_message` (the `\n`/`\t`-preserving terminal sanitizer, ported from `format/text.rs::sanitize_terminal_text`). Both fields are attacker-influenceable — the `hint` in particular folds in suggested ids from `find_similar_ids`, where the not-found id is raw, pre-validation input — so a composed error whose `Display` *or* hint carries ESC/BEL/control bytes still yields a sanitized `.message`/`.hint` no matter which entry point built it (single L0 chokepoint, NFR-14). **`context` values are terminal-safe only via JSON encoding:** the JSON/MCP surface escapes them, but any text/plain render of a context value (e.g. in `unblock-render`) MUST route that value through a sanitizer — this pairs with the `unblock-render` hand-off note. The stricter inline variant that escapes `\n`/`\t` (`sanitize_terminal_inline`) lives in `unblock-render` for single-line display fields, **not** here.
 
 ---
 
