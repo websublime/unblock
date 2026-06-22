@@ -1,0 +1,13 @@
+---
+source: crates/unblock-error/tests/json_contract.rs
+expression: err
+---
+{
+  "code": "ISSUE_NOT_FOUND",
+  "message": "Issue not found: ub-abc",
+  "hint": "Did you mean 'ub-abd'?",
+  "retryable": false,
+  "context": {
+    "searched_id": "ub-abc"
+  }
+}

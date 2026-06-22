@@ -9,8 +9,22 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+default = []
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
 schemars = { workspace = true }
 snafu = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+proptest = { workspace = true }
+criterion = { workspace = true }
+
+# Informational micro-bench for the error-construction path (not a CI regression gate; the error
+# path is not in the NFR-1 budget table).
+[[bench]]
+name = "error_path"
+harness = false
