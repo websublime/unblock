@@ -74,6 +74,6 @@ pub use results::{
     ExportReport, GraphEdge, ImportReport,
 };
 pub use validation::{
-    ACTOR_MAX_CHARS, CUSTOM_VARIANT_MAX_CHARS, ESTIMATED_MINUTES_MAX, ISSUE_LABEL_MAX_COUNT,
-    IssueValidator, LabelValidator, TITLE_MAX_CHARS,
+    ACTOR_MAX_CHARS, CUSTOM_VARIANT_MAX_CHARS, ESTIMATED_MINUTES_MAX, EXTERNAL_REF_MAX_CHARS,
+    ISSUE_LABEL_MAX_COUNT, IssueValidator, LABEL_MAX_LEN, LabelValidator, TITLE_MAX_CHARS,
 };

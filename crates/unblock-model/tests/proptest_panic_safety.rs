@@ -1,9 +1,14 @@
 //! Panic-safety property tests for the untrusted-input chain (NFR-16).
 //!
-//! The cargo-fuzz ingestion targets are deferred to T0.7 (nightly/libFuzzer, excluded from the
-//! stable workspace). These proptests close the coverage gap cheaply on stable: over arbitrary
-//! bytes / arbitrary strings the full untrusted-input chain must NEVER panic and must stay
-//! well-formed (`compute_content_hash` is always exactly 64 lowercase-hex chars).
+//! The cargo-fuzz ingestion targets landed at T0.7 (nightly/libFuzzer, excluded from the stable
+//! workspace). These proptests close the coverage gap cheaply on stable: over arbitrary bytes /
+//! arbitrary strings the full untrusted-input chain must NEVER panic and must stay well-formed
+//! (`compute_content_hash` is always exactly 64 lowercase-hex chars).
+//!
+//! Parallel fuzz-side expression: `unblock_fuzz::run_content_hash_case`,
+//! `run_issue_ingest_case`, `run_parse_id_case`, and `run_enum_deserialize_case` exercise the same
+//! invariants under libFuzzer. `unblock-model` (L0) does **not** depend on `unblock-fuzz` (that
+//! would invert the layering); these are deliberately independent mirrors.
 
 use chrono::{TimeZone, Utc};
 use proptest::prelude::*;

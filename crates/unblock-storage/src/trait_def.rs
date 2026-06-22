@@ -189,8 +189,13 @@ pub trait Storage: Send + Sync {
 
     /// Count issues matching `filters`, optionally grouped (by status/type/assignee/priority/label).
     ///
-    /// With `group_by = None`, returns a single bucket with the total count; the per-group counts
-    /// always sum to the ungrouped total over the same filter.
+    /// With `group_by = None`, returns a single bucket with the total count. For
+    /// `Status`/`Type`/`Assignee`/`Priority` the per-group counts **sum to the ungrouped total** over
+    /// the same filter (each issue lands in exactly one bucket). **`Label` is the exception:** an
+    /// issue is counted **once per label it carries** (the label JOIN), so the `Label` group sum
+    /// equals the number of `(issue, label)` pairs among the matching issues — which can be greater
+    /// than the total (a multi-label issue) **or** less than it (label-less issues contribute zero).
+    /// It is therefore **not** related to the total by a simple `==` or `>=`.
     async fn count_issues(
         &self,
         filters: &ListFilters,
