@@ -32,6 +32,7 @@ session** by default (template: `docs/plans/templates/drift-gap-report.md`).
 - **Never decide to simplify the solution.** If you reach a point where simplifying seems necessary, **stop and ask**.
 - **Ask before anything hard to reverse** or outward-facing (publishing, deleting, network sends).
 - **A task/plan description is never authoritative** — always read the referenced spec (spine/PRD §) before implementing.
+- **Semantic search (`ccc`/cocoindex) is discovery, not authority** — it locates `file:line` ranges; it **never** replaces a full read of the authoritative spec (spine/PRD) or original source (`temp/beads_rust-main`) when exact fidelity matters (byte layouts, complete rule sets, contract field sets). A returned chunk is a pointer, not the whole answer.
 - **Converse in Portuguese; write all artifacts (code, docs, comments) in English.**
 
 ## Architecture & layering (NFR-15 — enforced, acyclic)
