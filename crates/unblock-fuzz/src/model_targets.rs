@@ -68,12 +68,15 @@ pub fn run_content_hash_case(data: &[u8]) -> Result<(), FuzzError> {
     // Field-scope: an EXCLUDED field (estimated_minutes) never changes the hash; an INCLUDED field
     // (title) does (when it actually differs).
     let mut excluded = issue.clone();
+    // `wrapping_abs` (NOT `abs`, which panics on `i32::MIN`) keeps this fuzz core panic-free for ALL
+    // i32 even though `normalize_issue` clamps the value upstream — a fuzz core must never carry a
+    // latent panic. The exact value is irrelevant: `estimated_minutes` is excluded from the hash.
     excluded.estimated_minutes = Some(
         excluded
             .estimated_minutes
             .unwrap_or(0)
             .wrapping_add(7)
-            .abs(),
+            .wrapping_abs(),
     );
     assert_eq!(
         excluded.compute_content_hash(),
