@@ -1,0 +1,88 @@
+---
+source: crates/unblock-model/tests/schema_snapshots.rs
+expression: json
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Event",
+  "description": "An append-only audit event (spine §1.7), written transactionally inside a mutation.",
+  "type": "object",
+  "properties": {
+    "actor": {
+      "description": "The actor that caused the event.",
+      "type": "string"
+    },
+    "agent_name": {
+      "description": "Tier-1 attribution: self-reported agent name (capture-only, never enforced).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "comment": {
+      "description": "An optional free-form comment.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "created_at": {
+      "description": "Creation timestamp.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "event_type": {
+      "description": "The kind of event.",
+      "$ref": "#/$defs/EventType"
+    },
+    "harness": {
+      "description": "Tier-1 attribution: self-reported harness identifier (capture-only).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "id": {
+      "description": "Stable event id.",
+      "type": "integer",
+      "format": "int64"
+    },
+    "issue_id": {
+      "description": "The issue this event belongs to.",
+      "type": "string"
+    },
+    "model": {
+      "description": "Tier-1 attribution: self-reported model identifier (capture-only).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "new_value": {
+      "description": "The new value (for change events).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "old_value": {
+      "description": "The prior value (for change events).",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "id",
+    "issue_id",
+    "event_type",
+    "actor",
+    "created_at"
+  ],
+  "$defs": {
+    "EventType": {
+      "type": "string"
+    }
+  }
+}

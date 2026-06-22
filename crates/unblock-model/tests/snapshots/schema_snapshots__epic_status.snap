@@ -1,0 +1,415 @@
+---
+source: crates/unblock-model/tests/schema_snapshots.rs
+expression: json
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EpicStatus",
+  "description": "Epic completion status with child counts (spine §1.7; derived rollup, populated v1.1).",
+  "type": "object",
+  "properties": {
+    "closed_children": {
+      "description": "Number of closed child issues.",
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
+    "eligible_for_close": {
+      "description": "Whether the epic is eligible to be closed.",
+      "type": "boolean"
+    },
+    "epic": {
+      "description": "The epic issue.",
+      "$ref": "#/$defs/Issue"
+    },
+    "total_children": {
+      "description": "Total number of child issues.",
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "epic",
+    "total_children",
+    "closed_children",
+    "eligible_for_close"
+  ],
+  "$defs": {
+    "Comment": {
+      "description": "A comment on an issue (spine §1.7; surface defined now, populated v1.1).",
+      "type": "object",
+      "properties": {
+        "author": {
+          "description": "The comment author.",
+          "type": "string"
+        },
+        "created_at": {
+          "description": "Creation timestamp.",
+          "type": "string",
+          "format": "date-time"
+        },
+        "id": {
+          "description": "Stable comment id.",
+          "type": "integer",
+          "format": "int64"
+        },
+        "issue_id": {
+          "description": "The issue this comment belongs to.",
+          "type": "string"
+        },
+        "text": {
+          "description": "The comment body (serialized under `\"text\"`).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "issue_id",
+        "author",
+        "text",
+        "created_at"
+      ]
+    },
+    "Dependency": {
+      "description": "A relationship between two issues (spine §1.7).",
+      "type": "object",
+      "properties": {
+        "created_at": {
+          "description": "Creation timestamp.",
+          "type": "string",
+          "format": "date-time"
+        },
+        "created_by": {
+          "description": "Who created the edge.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "depends_on_id": {
+          "description": "The issue being depended on (target).",
+          "type": "string"
+        },
+        "issue_id": {
+          "description": "The issue that has the dependency (source).",
+          "type": "string"
+        },
+        "metadata": {
+          "description": "Optional JSON metadata. A degenerate empty (or whitespace-only) string is coerced to\n`None` on deserialization to tolerate legacy JSONL that wrote `\"metadata\":\"\"`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "thread_id": {
+          "description": "Thread id for conversation linking.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "description": "The kind of dependency.",
+          "$ref": "#/$defs/DependencyType"
+        }
+      },
+      "required": [
+        "issue_id",
+        "depends_on_id",
+        "type",
+        "created_at"
+      ]
+    },
+    "DependencyType": {
+      "type": "string"
+    },
+    "Issue": {
+      "description": "The primary issue entity (spine §1.6).\n\n`content_hash` is `#[serde(skip)]` — it never appears in JSONL and is recomputed on load (it is\nthe import idempotency key, FR-26). `compaction_level` always serializes as an integer (`0` when\n`None`) for `bd` conformance. All other optional fields are omitted when empty.",
+      "type": "object",
+      "properties": {
+        "acceptance_criteria": {
+          "description": "Acceptance criteria.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "agent_context": {
+          "description": "Canonical-JSON governance document inherited by descendants.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "assignee": {
+          "description": "Assigned actor.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "close_reason": {
+          "description": "Reason for closure.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "closed_at": {
+          "description": "Closure timestamp.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "closed_by_session": {
+          "description": "Session id that closed this issue.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "comments": {
+          "description": "Comments (hydrated for export/display; populated v1.1).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Comment"
+          }
+        },
+        "compacted_at": {
+          "description": "Compaction timestamp.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "compacted_at_commit": {
+          "description": "The commit at which the issue was compacted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "compaction_level": {
+          "description": "Compaction level (kept for JSONL round-trip fidelity, D12). `None` serializes as `0`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32",
+          "default": 0
+        },
+        "created_at": {
+          "description": "Creation timestamp.",
+          "type": "string",
+          "format": "date-time"
+        },
+        "created_by": {
+          "description": "Creator.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "defer_until": {
+          "description": "Defer-until date.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "delete_reason": {
+          "description": "Tombstone: reason for deletion.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "deleted_at": {
+          "description": "Tombstone: deletion timestamp.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "deleted_by": {
+          "description": "Tombstone: who deleted the issue.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dependencies": {
+          "description": "Dependencies (hydrated for export/display).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Dependency"
+          }
+        },
+        "description": {
+          "description": "Detailed description (unbounded by design).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "design": {
+          "description": "Technical design notes.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "due_at": {
+          "description": "Due date.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "ephemeral": {
+          "description": "Whether the issue is ephemeral.",
+          "type": "boolean"
+        },
+        "estimated_minutes": {
+          "description": "Estimated effort in minutes.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "external_ref": {
+          "description": "External reference (orphans derive from this; FR-15).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "Unique id (prefix + optional slug + hash, e.g. `\"ub-abc123\"`).",
+          "type": "string"
+        },
+        "is_template": {
+          "description": "Whether the issue is a template.",
+          "type": "boolean"
+        },
+        "issue_type": {
+          "description": "Issue type.",
+          "$ref": "#/$defs/IssueType",
+          "default": "task"
+        },
+        "labels": {
+          "description": "Labels (hydrated for export/display).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "notes": {
+          "description": "Additional notes.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "original_size": {
+          "description": "The pre-compaction size.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "original_type": {
+          "description": "Tombstone: the issue type before deletion (preserved across the tombstone transition).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "owner": {
+          "description": "Issue owner.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pinned": {
+          "description": "Whether the issue is pinned.",
+          "type": "boolean"
+        },
+        "priority": {
+          "description": "Priority (0=Critical, 4=Backlog).",
+          "$ref": "#/$defs/Priority",
+          "default": 2
+        },
+        "sender": {
+          "description": "Message sender (messaging surface).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_repo": {
+          "description": "Source repository basename (multi-repo support).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_repo_path": {
+          "description": "Absolute canonical path of the source repository.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_system": {
+          "description": "Source system for imported issues.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "description": "Workflow status.",
+          "$ref": "#/$defs/Status",
+          "default": "open"
+        },
+        "title": {
+          "description": "Title (1..=500 chars; see [`crate::IssueValidator`]).",
+          "type": "string"
+        },
+        "updated_at": {
+          "description": "Last-update timestamp.",
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    "IssueType": {
+      "type": "string"
+    },
+    "Priority": {
+      "description": "Issue priority (spine §1.2): a transparent newtype over `i32`, valid range `0..=4`.\n\nOrdering is numeric, so `CRITICAL < HIGH < MEDIUM < LOW < BACKLOG` — this is the order the\nhybrid ready-sort relies on. `Default` is [`Priority::MEDIUM`]. The wire form is the bare\ninteger (`#[serde(transparent)]`), and `Display` renders `\"P{n}\"`.\n\n# Examples\n\n```\nuse unblock_model::Priority;\nuse std::str::FromStr;\n\nassert_eq!(Priority::default(), Priority::MEDIUM);\nassert_eq!(Priority::CRITICAL.to_string(), \"P0\");\nassert_eq!(Priority::from_str(\"p1\").unwrap(), Priority::HIGH);\nassert!(Priority::from_str(\"P5\").is_err());\nassert!(Priority::CRITICAL < Priority::BACKLOG);\n```",
+      "type": "integer",
+      "format": "int32"
+    },
+    "Status": {
+      "type": "string"
+    }
+  }
+}

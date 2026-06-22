@@ -1,0 +1,36 @@
+---
+source: crates/unblock-model/tests/schema_snapshots.rs
+expression: json
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OutputFormat",
+  "description": "The output format for rendered command output (spine §1.10).",
+  "oneOf": [
+    {
+      "description": "Structured JSON to stdout (the default).",
+      "type": "string",
+      "const": "json"
+    },
+    {
+      "description": "A stable machine-parse line format.",
+      "type": "string",
+      "const": "robot"
+    },
+    {
+      "description": "Human-readable terminal output.",
+      "type": "string",
+      "const": "plain"
+    },
+    {
+      "description": "Comma-separated values.",
+      "type": "string",
+      "const": "csv"
+    },
+    {
+      "description": "Markdown.",
+      "type": "string",
+      "const": "markdown"
+    }
+  ]
+}

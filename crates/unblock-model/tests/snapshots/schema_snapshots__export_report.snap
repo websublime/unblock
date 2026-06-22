@@ -1,0 +1,26 @@
+---
+source: crates/unblock-model/tests/schema_snapshots.rs
+expression: json
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ExportReport",
+  "description": "The report of a JSONL export operation (FR-7).",
+  "type": "object",
+  "properties": {
+    "path": {
+      "description": "The path written to (serialized as a string).",
+      "type": "string"
+    },
+    "written": {
+      "description": "Number of issues written.",
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "written",
+    "path"
+  ]
+}

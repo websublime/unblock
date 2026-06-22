@@ -1,0 +1,61 @@
+---
+source: crates/unblock-model/tests/schema_snapshots.rs
+expression: json
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Dependency",
+  "description": "A relationship between two issues (spine §1.7).",
+  "type": "object",
+  "properties": {
+    "created_at": {
+      "description": "Creation timestamp.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "created_by": {
+      "description": "Who created the edge.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "depends_on_id": {
+      "description": "The issue being depended on (target).",
+      "type": "string"
+    },
+    "issue_id": {
+      "description": "The issue that has the dependency (source).",
+      "type": "string"
+    },
+    "metadata": {
+      "description": "Optional JSON metadata. A degenerate empty (or whitespace-only) string is coerced to\n`None` on deserialization to tolerate legacy JSONL that wrote `\"metadata\":\"\"`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "thread_id": {
+      "description": "Thread id for conversation linking.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "type": {
+      "description": "The kind of dependency.",
+      "$ref": "#/$defs/DependencyType"
+    }
+  },
+  "required": [
+    "issue_id",
+    "depends_on_id",
+    "type",
+    "created_at"
+  ],
+  "$defs": {
+    "DependencyType": {
+      "type": "string"
+    }
+  }
+}

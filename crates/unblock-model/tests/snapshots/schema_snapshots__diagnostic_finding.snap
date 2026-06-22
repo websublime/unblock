@@ -1,0 +1,24 @@
+---
+source: crates/unblock-model/tests/schema_snapshots.rs
+expression: json
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DiagnosticFinding",
+  "description": "A single generic key/value diagnostic finding row (CF-B).",
+  "type": "object",
+  "properties": {
+    "detail": {
+      "description": "The finding detail.",
+      "type": "string"
+    },
+    "label": {
+      "description": "The finding label.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "label",
+    "detail"
+  ]
+}

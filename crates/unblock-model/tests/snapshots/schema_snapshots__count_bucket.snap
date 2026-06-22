@@ -1,0 +1,26 @@
+---
+source: crates/unblock-model/tests/schema_snapshots.rs
+expression: json
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CountBucket",
+  "description": "A single count bucket from a count query.",
+  "type": "object",
+  "properties": {
+    "count": {
+      "description": "The count in this bucket.",
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
+    "key": {
+      "description": "The bucket key (status/type/assignee/priority/label value).",
+      "type": "string"
+    }
+  },
+  "required": [
+    "key",
+    "count"
+  ]
+}

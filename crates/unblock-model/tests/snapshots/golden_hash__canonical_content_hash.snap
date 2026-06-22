@@ -1,0 +1,5 @@
+---
+source: crates/unblock-model/tests/golden_hash.rs
+expression: hash
+---
+dc1b794f82d52958e60d47a20952bb9f8016e6e134f152ccbeb67ab6ffb9f468

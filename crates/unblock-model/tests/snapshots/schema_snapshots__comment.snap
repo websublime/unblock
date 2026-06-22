@@ -1,0 +1,41 @@
+---
+source: crates/unblock-model/tests/schema_snapshots.rs
+expression: json
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Comment",
+  "description": "A comment on an issue (spine §1.7; surface defined now, populated v1.1).",
+  "type": "object",
+  "properties": {
+    "author": {
+      "description": "The comment author.",
+      "type": "string"
+    },
+    "created_at": {
+      "description": "Creation timestamp.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "id": {
+      "description": "Stable comment id.",
+      "type": "integer",
+      "format": "int64"
+    },
+    "issue_id": {
+      "description": "The issue this comment belongs to.",
+      "type": "string"
+    },
+    "text": {
+      "description": "The comment body (serialized under `\"text\"`).",
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "issue_id",
+    "author",
+    "text",
+    "created_at"
+  ]
+}
