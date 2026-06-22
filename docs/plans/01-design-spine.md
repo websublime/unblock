@@ -620,17 +620,21 @@ between an earlier prose description and the source are resolved **in favour of 
   (is_template = 0 OR is_template IS NULL)`. `ORDER BY priority ASC, created_at ASC, id ASC`. The
   original's `AND id NOT LIKE '%-wisp-%'` wisp filter is **DROPPED** (Miguel). Default-complete unless
   `limit` set; the hybrid re-rank stays in the engine (CF-11).
-- **`blocked_issues` (sqlite.rs:5886–5912, 6076–6090, 6258–6311) — `status NOT IN ('closed',
-  'tombstone')` (INCLUDES `in_progress`/`deferred`); blocked via two live-computed passes, NOT one
-  4-type SQL.** An issue is blocked iff it is in the union of (1) **direct 3-type blockers** — a
-  `'blocks'`/`'conditional-blocks'`/`'waits-for'` edge on a blocker that is not `closed`/`tombstone`
-  (`external:%` and template blockers excluded; `LEFT JOIN` so a missing blocker id is treated as
-  unresolved), and (2) **open epic-rollup children** — a `'parent-child'` edge where the parent issue's
-  `issue_type = 'epic'` and the child's `status NOT IN ('closed', 'tombstone')` marks the **parent**
-  blocked (a separate propagation pass, not folded into the direct query). `ORDER BY priority ASC,
-  created_at DESC, id ASC` (Miguel). *(The original additionally propagated a blocked parent's state
-  down to its children — `propagate_blocked_parents`, sqlite.rs:6371 — which this contract does NOT
-  reproduce; the two passes above are the locked set.)*
+- **`blocked_issues` (sqlite.rs:5720–5746, 5886–5912, 6076–6090, 6258–6311, 6371–6398) — `status NOT
+  IN ('closed', 'tombstone')` (INCLUDES `in_progress`/`deferred`); blocked via THREE live-computed
+  passes, NOT one 4-type SQL.** An issue is blocked iff it is in the union of (1) **direct 3-type
+  blockers** — a `'blocks'`/`'conditional-blocks'`/`'waits-for'` edge on a blocker that is not
+  `closed`/`tombstone` (`external:%` and template blockers excluded; `LEFT JOIN` so a missing blocker
+  id is treated as unresolved); (2) **open epic-rollup children** — a `'parent-child'` edge where the
+  parent issue's `issue_type = 'epic'` and the child's `status NOT IN ('closed', 'tombstone')` marks
+  the **parent** blocked (a separate pass, not folded into the direct query); and (3) **transitive
+  children of blocked parents (NORMATIVE)** — a **fixpoint** down-propagation over the `'parent-child'`
+  tree: starting from the blocked set of passes (1)+(2), every issue with a `'parent-child'` edge to an
+  already-blocked **parent** is itself blocked, iterating until no new id is added (mirrors
+  `propagate_blocked_parents`, sqlite.rs:6369–6398; edges per `load_local_parent_child_edges_impl`,
+  sqlite.rs:6165–6191 — `parent = depends_on_id`, `child = issue_id`, `external:%` excluded on both
+  ends; the propagation is purely structural over the edge). `ORDER BY priority ASC, created_at DESC,
+  id ASC` (Miguel).
 - **`search_issues` (sqlite.rs:4543–4727) — substring `instr(lower(col))` over title+description+id.**
   The needle is lowercased and matched with
   `instr(lower(title), ?) > 0 OR instr(lower(description), ?) > 0 OR instr(lower(id), ?) > 0` (no LIKE
@@ -665,9 +669,9 @@ no `Claimed`**. Each mutation emits exactly:
 ### 3.3 libsql impl notes (normative for `unblock-storage`)
 
 - **WAL** journal mode; **`busy_timeout = 5000 ms` (native, `Connection::busy_timeout`)** — `const BUSY_TIMEOUT_MS: u64 = 5000`. This is the **sanctioned INVERSE of beads**, which set `busy_timeout = 0` + a hand-rolled flock + sleep backoff to dodge *frankensqlite*'s hot-spin. libsql ships **real SQLite**, whose native `busy_timeout` is sleep-based (it blocks, it never spins), so a non-zero native timeout resolves fsqlite-243 **by construction**. Do **not** port the beads `=0`/backoff/flock machinery.
-- **Pragmas (read schema.rs:606–643):** `journal_mode = WAL`, `foreign_keys = ON`, `synchronous = NORMAL`, `temp_store = MEMORY`, `cache_size = -8000`, `journal_size_limit = 33554432`, and **`wal_autocheckpoint = 0`** + a **manual `wal_checkpoint(TRUNCATE)`** on fresh-bootstrap and on close. Periodic in-flight checkpointing is **PASSIVE** (beads:1422–1428): a seam is wired but defaults conservative; its mode is tuned at T0.8.
+- **Pragmas (read schema.rs:606–643):** `foreign_keys = ON`, `synchronous = NORMAL`, `temp_store = MEMORY`, `cache_size = -8000`, `journal_size_limit = 33554432` on every connection; the **WAL-only** pragmas — `journal_mode = WAL` and **`wal_autocheckpoint = 0`** (+ a **manual `wal_checkpoint(TRUNCATE)`** on fresh-bootstrap) — are applied **on the file-backed path only**. A shared-cache `:memory:` DB **cannot** use WAL (it always reports `journal_mode = memory`), so asserting WAL there is both a no-op AND an intermittent "API misuse"/`DatabaseLocked` flake under parallel opens; it is skipped for `open_in_memory`. Periodic in-flight checkpointing is **PASSIVE** (beads:1422–1428): a seam is wired but defaults conservative; its mode is tuned at T0.8.
 - **Transactions:** every **mutating** tx uses **`BEGIN IMMEDIATE`** (`transaction_with_behavior(TransactionBehavior::Immediate)`); reads use the default **Deferred** behaviour.
-- **OQ-5 (RESOLVED — Miguel + design Review): two connections, not one.** `LibsqlStorage` holds a **serialized WRITE connection** (writes go through `BEGIN IMMEDIATE`; the engine's D14 `Semaphore` serializes writers at L5) **AND a separate READ connection** for the read fast path, so WAL gives concurrent MVCC reader snapshots vs the single writer (FR-10). For `open_in_memory`, both connections must see the **same** in-memory database — a bare `:memory:` is connection-private — so the impl opens a **named shared-cache in-memory URI** (`file:<unique>?mode=memory&cache=shared`, valid because libsql-ffi compiles SQLite with `SQLITE_USE_URI`). Public constructors: `open_local(&Path)` and `open_in_memory()`. (Earlier OQ-5 wording said "single connection" — superseded.)
+- **OQ-5 (RESOLVED — Miguel + design Review): two connections, not one.** `LibsqlStorage` holds a **serialized WRITE connection** (writes go through `BEGIN IMMEDIATE`; the engine's D14 `Semaphore` serializes writers at L5) **AND a separate READ connection** for the read fast path, so WAL gives concurrent MVCC reader snapshots vs the single writer (FR-10). For `open_in_memory`, both connections must see the **same** in-memory database — a bare `:memory:` is connection-private — so the impl opens a **named shared-cache in-memory URI** (`file:<unique>?mode=memory&cache=shared`, valid because libsql-ffi compiles SQLite with `SQLITE_USE_URI`); this path is **shared-cache, NOT WAL** (see the pragmas bullet). Public constructors: `open_local(&Path)` and `open_in_memory()`. (Earlier OQ-5 wording said "single connection" — superseded.) **Real WAL + native `busy_timeout` concurrency is validated by the T0.8 contention lab on a FILE DB, not an in-memory one** (the in-memory shared-cache path cannot exercise WAL).
 - **Default build = local file / bundled only.** Remote/embedded-replica is a non-default Cargo feature `remote` (TLS/HTTP transitive surface kept off the normal path; D15/NFR-10). When `remote`, app-level jittered retry (`backon`/`tokio-retry`, **not** archived `backoff 0.4`) guards only that path; `wiremock` for tests.
 - Mutations are **transactional**: issue rows + audit `Event` rows committed together inside one tx.
 - libsql/SQLite errors are absorbed into `StorageError::Backend { .. }` (opaque) and surfaced only as `ErrorCode` — no backend type in the public API. The single `From<libsql::Error>` bridge maps `SqliteFailure(code, _)` with `(code & 0xff) ∈ {5, 6}` (SQLITE_BUSY / SQLITE_LOCKED) to `DatabaseLocked`; everything else becomes `Backend{..}` (the catch-all arm is required — `libsql::Error` is `#[non_exhaustive]`).

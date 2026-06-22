@@ -1,0 +1,3 @@
+# proptest writes failing-case seeds here; a flake-induced seed must not slip into a commit.
+# Strategy/code fixes are pinned by the tests themselves, not by a checked-in regression file.
+*.proptest-regressions
