@@ -1,0 +1,123 @@
+---
+source: crates/unblock-model/tests/schema_snapshots.rs
+expression: json
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ListFilters",
+  "description": "Filters for list/ready/blocked/search/count/stale queries (spine §1.10).",
+  "type": "object",
+  "properties": {
+    "assignee": {
+      "description": "Assignee filter.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "include_closed": {
+      "description": "Include closed issues.",
+      "type": "boolean"
+    },
+    "include_deferred": {
+      "description": "Include deferred issues.",
+      "type": "boolean"
+    },
+    "issue_type": {
+      "description": "Issue-type filter (OR within).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/IssueType"
+      }
+    },
+    "labels_all": {
+      "description": "Labels that must ALL be present (AND).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "labels_any": {
+      "description": "Labels of which ANY may be present (OR).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "limit": {
+      "description": "Result cap (`None` = unlimited; ready is default-complete).",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint",
+      "minimum": 0
+    },
+    "offset": {
+      "description": "Result offset.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint",
+      "minimum": 0
+    },
+    "priority_max": {
+      "description": "Maximum priority (inclusive).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Priority"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "priority_min": {
+      "description": "Minimum priority (inclusive).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Priority"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "status": {
+      "description": "Status filter (OR within).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Status"
+      }
+    },
+    "text_contains": {
+      "description": "Free-text contains filter.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "status",
+    "issue_type",
+    "labels_all",
+    "labels_any",
+    "include_deferred",
+    "include_closed"
+  ],
+  "$defs": {
+    "IssueType": {
+      "type": "string"
+    },
+    "Priority": {
+      "description": "Issue priority (spine §1.2): a transparent newtype over `i32`, valid range `0..=4`.\n\nOrdering is numeric, so `CRITICAL < HIGH < MEDIUM < LOW < BACKLOG` — this is the order the\nhybrid ready-sort relies on. `Default` is [`Priority::MEDIUM`]. The wire form is the bare\ninteger (`#[serde(transparent)]`), and `Display` renders `\"P{n}\"`.\n\n# Examples\n\n```\nuse unblock_model::Priority;\nuse std::str::FromStr;\n\nassert_eq!(Priority::default(), Priority::MEDIUM);\nassert_eq!(Priority::CRITICAL.to_string(), \"P0\");\nassert_eq!(Priority::from_str(\"p1\").unwrap(), Priority::HIGH);\nassert!(Priority::from_str(\"P5\").is_err());\nassert!(Priority::CRITICAL < Priority::BACKLOG);\n```",
+      "type": "integer",
+      "format": "int32"
+    },
+    "Status": {
+      "type": "string"
+    }
+  }
+}

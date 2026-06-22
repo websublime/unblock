@@ -1,0 +1,36 @@
+---
+source: crates/unblock-model/tests/schema_snapshots.rs
+expression: json
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ImportReport",
+  "description": "The report of a JSONL/bd import operation (FR-8/FR-26).",
+  "type": "object",
+  "properties": {
+    "dropped_fields": {
+      "description": "Fields dropped during import.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "imported": {
+      "description": "Number of issues imported.",
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
+    "skipped": {
+      "description": "Number of lines skipped (no-ops / rejected).",
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "imported",
+    "skipped",
+    "dropped_fields"
+  ]
+}

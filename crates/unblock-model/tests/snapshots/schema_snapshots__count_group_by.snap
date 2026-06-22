@@ -1,0 +1,36 @@
+---
+source: crates/unblock-model/tests/schema_snapshots.rs
+expression: json
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CountGroupBy",
+  "description": "The grouping dimension for a count query (spine §1.10).",
+  "oneOf": [
+    {
+      "description": "Group by status.",
+      "type": "string",
+      "const": "status"
+    },
+    {
+      "description": "Group by issue type.",
+      "type": "string",
+      "const": "type"
+    },
+    {
+      "description": "Group by assignee.",
+      "type": "string",
+      "const": "assignee"
+    },
+    {
+      "description": "Group by priority.",
+      "type": "string",
+      "const": "priority"
+    },
+    {
+      "description": "Group by label.",
+      "type": "string",
+      "const": "label"
+    }
+  ]
+}

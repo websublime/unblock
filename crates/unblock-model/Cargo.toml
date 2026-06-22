@@ -9,10 +9,35 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+default = []
+# Bare marker feature (CF-J / spine §1.10): toggles only the `Toon` variant of
+# `OutputFormat`. The model crate has NO toon encoder — encoding lives in
+# `unblock-render`; this exists so the shared `OutputFormat` enum reserves the
+# variant for `unblock-render`/`unblock-config` to re-export.
+toon = []
+
 [dependencies]
 unblock-error = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
-schemars = { workspace = true }
+# `chrono04` enables the `JsonSchema` impls for `chrono::DateTime<Utc>` (schemars 1.x gates chrono
+# support behind this feature). Required by the timestamp fields on `Issue`/`Dependency`/etc.
+schemars = { workspace = true, features = ["chrono04"] }
 sha2 = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+proptest = { workspace = true }
+criterion = { workspace = true }
+
+# Informational micro-benches for the two perf-sensitive pure-CPU paths
+# (content_hash + sync_equals, both hot during import/dedup). NOT NFR-1 CI gates.
+[[bench]]
+name = "hash"
+harness = false
+
+[[bench]]
+name = "sync_eq"
+harness = false

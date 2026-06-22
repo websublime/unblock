@@ -1,0 +1,46 @@
+---
+source: crates/unblock-model/tests/schema_snapshots.rs
+expression: json
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DiagnosticKind",
+  "description": "The kind of a diagnostic probe (CF-B; mirrors the spine §5.2 `DiagnosticsInput` kinds).",
+  "oneOf": [
+    {
+      "description": "Aggregate statistics.",
+      "type": "string",
+      "const": "stats"
+    },
+    {
+      "description": "General workspace info.",
+      "type": "string",
+      "const": "info"
+    },
+    {
+      "description": "Where the workspace lives.",
+      "type": "string",
+      "const": "where"
+    },
+    {
+      "description": "Version information.",
+      "type": "string",
+      "const": "version"
+    },
+    {
+      "description": "Lint findings.",
+      "type": "string",
+      "const": "lint"
+    },
+    {
+      "description": "The changelog of closed issues.",
+      "type": "string",
+      "const": "changelog"
+    },
+    {
+      "description": "Orphan candidates (FR-15).",
+      "type": "string",
+      "const": "orphans"
+    }
+  ]
+}

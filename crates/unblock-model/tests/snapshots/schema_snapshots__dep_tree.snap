@@ -1,0 +1,55 @@
+---
+source: crates/unblock-model/tests/schema_snapshots.rs
+expression: json
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DepTree",
+  "description": "A dependency tree/graph rooted at one or more issues.",
+  "type": "object",
+  "properties": {
+    "edges": {
+      "description": "The edges of the tree/graph.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/GraphEdge"
+      }
+    },
+    "root": {
+      "description": "The root issue id.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "root",
+    "edges"
+  ],
+  "$defs": {
+    "DependencyType": {
+      "type": "string"
+    },
+    "GraphEdge": {
+      "description": "A directed dependency edge.",
+      "type": "object",
+      "properties": {
+        "dep_type": {
+          "description": "The dependency type.",
+          "$ref": "#/$defs/DependencyType"
+        },
+        "from": {
+          "description": "The source issue id.",
+          "type": "string"
+        },
+        "to": {
+          "description": "The target issue id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "from",
+        "to",
+        "dep_type"
+      ]
+    }
+  }
+}
