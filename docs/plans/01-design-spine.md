@@ -23,13 +23,12 @@
 
 ## 1. Domain types — `unblock-model` (L0)
 
-Pure types, no I/O. Derives target: `Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema` unless noted. `chrono::{DateTime, Utc}` for time. Open enums (`Status`/`IssueType`/`DependencyType`/`EventType`) keep a `Custom(String)` tail variant with custom `Deserialize` (unknown string → `Custom`) and `as_str`/`Display`/`FromStr`.
+Pure types, no I/O. Derives target: `Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema` unless noted. `chrono::{DateTime, Utc}` for time. Open enums (`Status`/`IssueType`/`DependencyType`/`EventType`) keep a `Custom(String)` tail variant and **hand-roll all three of `Serialize` (via `as_str`), `Deserialize` (unknown string → `Custom`), and `JsonSchema` (a plain string)** — they derive neither `Serialize`/`Deserialize`/`JsonSchema` nor carry any `#[serde(...)]` attribute (a `#[serde(untagged)]` `Custom` would conflict with the hand-rolled `Deserialize`). Each also has `as_str`/`Display`/`FromStr` (`Err = unblock_error::ModelError`).
 
 ### 1.1 Status
 
 ```rust
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Default, JsonSchema)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]   // Serialize/Deserialize/JsonSchema hand-rolled (as string)
 pub enum Status {
     #[default] Open,
     InProgress,            // serializes "in_progress"
@@ -39,9 +38,13 @@ pub enum Status {
     Closed,
     Tombstone,
     Pinned,
-    #[serde(untagged)] Custom(String),
+    Custom(String),        // open-enum tail — NOT `#[serde(untagged)]`
 }
-// custom Deserialize: unknown string -> Custom; case-insensitive known parse.
+// Serialize: hand-rolled `serialize_str(self.as_str())` (snake_case known strings; the raw
+//   original-case string for Custom). Deserialize: hand-rolled — case-insensitive known parse,
+//   unknown string -> Custom(original-case). JsonSchema: hand-rolled as a plain `string`.
+//   No derived serde and no `#[serde(...)]` attribute (a `#[serde(untagged)]` Custom would
+//   conflict with the hand-rolled Deserialize — intentionally omitted).
 impl Status {
     pub fn as_str(&self) -> &str;            // "open" | "in_progress" | ...
     pub const fn is_terminal(&self) -> bool; // Closed | Tombstone
@@ -73,36 +76,40 @@ impl Priority {
 ### 1.3 IssueType
 
 ```rust
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Default, JsonSchema)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]   // Serialize/Deserialize/JsonSchema hand-rolled (as string)
 pub enum IssueType {
     #[default] Task, Bug, Feature, Epic, Chore, Docs, Question,
-    #[serde(untagged)] Custom(String),
+    Custom(String),        // open-enum tail — NOT `#[serde(untagged)]`
 }
 impl IssueType {
     pub fn as_str(&self) -> &str;
     pub const fn is_standard(&self) -> bool; // !Custom
 }
+// Serialize: hand-rolled `serialize_str(self.as_str())` (snake_case known; raw original-case for
+//   Custom). Deserialize: hand-rolled — case-insensitive known parse, unknown -> Custom(original-case).
+//   JsonSchema: hand-rolled string. No derived serde / no `#[serde(...)]` attribute.
 // epic participates in EpicStatus rollups [v1.1]. Default = Task.
 ```
 
 ### 1.4 DependencyType
 
 ```rust
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, JsonSchema)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]   // Serialize/Deserialize/JsonSchema hand-rolled (as string)
 pub enum DependencyType {
     Blocks, ParentChild, ConditionalBlocks, WaitsFor,   // <- the four that gate ready-work
     Related, DiscoveredFrom, RepliesTo, RelatesTo,
     Duplicates, Supersedes, CausedBy,
-    #[serde(untagged)] Custom(String),
+    Custom(String),        // open-enum tail — NOT `#[serde(untagged)]`
 }
 impl DependencyType {
     pub fn as_str(&self) -> &str;            // "blocks" | "parent-child" | ...
     pub const fn affects_ready_work(&self) -> bool; // Blocks|ParentChild|ConditionalBlocks|WaitsFor
     pub const fn is_blocking(&self) -> bool;        // same set as affects_ready_work
 }
-// custom Deserialize: kebab-case known parse, else Custom. DiscoveredFrom is the agent flywheel edge.
+// Serialize: hand-rolled `serialize_str(self.as_str())` (kebab-case known strings). Deserialize:
+//   hand-rolled — case-insensitive kebab-case known parse, else Custom (NOTE: unlike Status/IssueType,
+//   DependencyType lowercases the value BEFORE storing it in Custom). JsonSchema: hand-rolled string.
+//   No derived serde / no `#[serde(...)]` attribute. DiscoveredFrom is the agent flywheel edge.
 ```
 
 ### 1.5 EventType
@@ -234,6 +241,7 @@ pub struct EpicStatus {                    // [v1.1] derived rollup
 ### 1.8 content_hash / sync_equals / tombstone semantics (normative)
 
 - **`content_hash`** — `compute_content_hash(&self) -> String`. SHA-256, lowercase hex, over a stable ordered, null-separated field set: `title, description, design, acceptance_criteria, notes, status.as_str(), priority.0, issue_type.as_str(), assignee, owner, created_by, external_ref, source_system, pinned, is_template`. **Excludes** `id`, `content_hash` (circular), relations (labels/deps/comments), all timestamps, tombstone fields, `estimated_minutes`, `due_at`, `defer_until`, `close_reason`, `closed_by_session`. `#[serde(skip)]` → never appears in JSONL; recomputed on load. Used for import dedup/idempotency (FR-26) and sync equality fast-path.
+  - **Canonical byte stream (NORMATIVE — frozen; Q4 = KEEP, the model crate plan `unblock-model.md`).** Each field above is appended to the SHA-256 stream as `bytes(value) ++ 0x00` (a single `0x00` separator after *every* field, including the last). `None` → empty string `""`; a `false` boolean flag → empty string `""` while a `true` flag → its label (`"pinned"` / `"template"`); `priority` is the decimal integer of `priority.0` (e.g. `"2"`, **not** `"P2"`); the final digest is rendered lowercase `{:02x}` per byte (64 hex chars). **After `is_template`** the stream appends a **frozen 17-field Go-bd zero-value padding tail** so a Rust `content_hash` stays byte-for-byte identical to a `bd`-exported hash (FR-26 / D16 idempotent one-shot `bd` import). The tail, in exact order, is: `"" , false-flag("crystallizes")→"" , "" , "" , "0" , "" , "" , "" , "" , "" , "" , "" , "" , "" , "" , "" , ""` — i.e. **15 empty strings, one `"0"` (the Go `timeout` duration zero value) at position 5, and the single `false` crystallizes-flag at position 2** (which, being `false`, also serializes as `""`). Go-bd source-field correspondence (documentation only — Rust does not model these): `quality_score, crystallizes, await_type, await_id, timeout, holder, hook_bead, role_bead, agent_state, role_type, rig, mol_type, work_type, event_kind, actor, target, payload`. This tail is **frozen** and is locked by a golden `insta` hash snapshot (`tests/golden_hash.rs`); changing it would break `bd` import idempotency and is a breaking change requiring a spine amendment.
 - **`sync_equals(&self, other) -> bool`** — semantic equality for import/export boundaries. Compares the full synced payload (incl. `due_at`, `defer_until`, tombstone fields, compaction fields, and relations **order-independent**: labels deduped+sorted; deps and comments sorted by a fixed key tuple). Treats `compaction_level == None` as `0`. Ignores volatile audit-only fields. This is the import "is this line a no-op?" predicate, not derived `PartialEq`.
 - **Tombstone** — delete sets `status = Tombstone` + `deleted_at`/`deleted_by`/`delete_reason` (and `original_type` preserved). `is_expired_tombstone(retention_days: Option<u64>) -> bool` (TTL helper). Invariant: **import NEVER resurrects a tombstone** — a non-tombstone JSONL line for an id that is tombstoned in the DB is rejected/skipped, not applied.
 
