@@ -1,0 +1,35 @@
+---
+source: crates/unblock-storage/src/libsql/mod.rs
+expression: indexes
+---
+[
+    "idx_comments_created_at",
+    "idx_comments_issue",
+    "idx_dependencies_blocking",
+    "idx_dependencies_depends_on",
+    "idx_dependencies_depends_on_type",
+    "idx_dependencies_issue",
+    "idx_dependencies_type",
+    "idx_events_actor",
+    "idx_events_created_at",
+    "idx_events_issue",
+    "idx_events_type",
+    "idx_issues_assignee",
+    "idx_issues_content_hash",
+    "idx_issues_created_at",
+    "idx_issues_defer_until",
+    "idx_issues_due_at",
+    "idx_issues_ephemeral",
+    "idx_issues_external_ref_unique",
+    "idx_issues_issue_type",
+    "idx_issues_list_active_order",
+    "idx_issues_pinned",
+    "idx_issues_priority",
+    "idx_issues_ready",
+    "idx_issues_status",
+    "idx_issues_tombstone",
+    "idx_issues_updated_at",
+    "idx_labels_issue",
+    "idx_labels_label",
+    "idx_metadata_key",
+]

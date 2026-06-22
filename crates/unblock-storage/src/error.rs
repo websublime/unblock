@@ -7,9 +7,10 @@
 //!
 //! No backend type ever appears in any public signature (spine §6 rule 2): a libsql error is
 //! absorbed into [`BackendOpaque`], whose message is sanitized **at construction** and whose inner
-//! `String` is never publicly reachable. The `From<libsql::Error> for BackendOpaque` conversion is
-//! the only place that names a libsql type and is **deferred to T0.6** (this T0.5 interface-only
-//! crate has no libsql dependency); T0.5 ships the crate-internal `BackendOpaque::from_message`.
+//! `String` is never publicly reachable. The `From<libsql::Error> for BackendOpaque` conversion
+//! (added at T0.6) is the only place that names a libsql type; the crate-internal
+//! [`map_libsql_err`] routes the two retryable busy/locked codes to
+//! [`StorageError::DatabaseLocked`] and everything else to [`StorageError::Backend`].
 
 use std::fmt;
 
@@ -222,9 +223,8 @@ impl CodedError for StorageError {
 /// raw control byte from a backend message can escape through the public API (spine §6 rule 2,
 /// NFR-14). Only `Debug`, `Display`, and [`std::error::Error`] are exposed.
 ///
-/// The `From<libsql::Error>` conversion — the single place that names a libsql type — is added at
-/// T0.6 alongside the backend impl. T0.5 constructs this type only via the crate-internal
-/// `BackendOpaque::from_message` constructor.
+/// The [`From<libsql::Error>`] conversion below — the single place that names a libsql type —
+/// runs the same sanitize-at-construction path via [`BackendOpaque::from_message`].
 #[derive(Debug)]
 pub struct BackendOpaque(String);
 
@@ -233,9 +233,6 @@ impl BackendOpaque {
     ///
     /// The message is routed through [`unblock_error::sanitize_message`] immediately, so a stored
     /// `BackendOpaque` can never carry raw control bytes regardless of how it is later rendered.
-    // Reserved seam: the libsql `From<libsql::Error>` bridge that calls this lands at T0.6; in T0.5
-    // only the sanitization test exercises it, so the lib build sees it as unused.
-    #[allow(dead_code)]
     pub(crate) fn from_message(message: impl Into<String>) -> Self {
         Self(sanitize_message(&message.into()).into_owned())
     }
@@ -249,6 +246,42 @@ impl fmt::Display for BackendOpaque {
 }
 
 impl std::error::Error for BackendOpaque {}
+
+impl From<libsql::Error> for BackendOpaque {
+    /// Absorb a libsql error opaquely: render it via `Display` and sanitize at construction.
+    ///
+    /// This is the **only** place that names a libsql type. The concrete `libsql::Error` value is
+    /// consumed and reduced to a sanitized `String`; neither the backend type nor any raw control
+    /// byte from its message can escape through the public API (spine §6 rule 2, NFR-14).
+    fn from(error: libsql::Error) -> Self {
+        Self::from_message(error.to_string())
+    }
+}
+
+/// `SQLite` primary result code for a busy database (`SQLITE_BUSY`).
+const SQLITE_BUSY: i32 = 5;
+/// `SQLite` primary result code for a locked table/database (`SQLITE_LOCKED`).
+const SQLITE_LOCKED: i32 = 6;
+
+/// Map a backend (libsql) error to the backend-agnostic [`StorageError`].
+///
+/// The two retryable concurrency codes — `SQLITE_BUSY` (5) and `SQLITE_LOCKED` (6), matched on the
+/// low byte of the (possibly extended) result code — surface as the retryable
+/// [`StorageError::DatabaseLocked`]; every other libsql failure is absorbed opaquely into
+/// [`StorageError::Backend`]. The catch-all arm is **required**: `libsql::Error` is
+/// `#[non_exhaustive]`, so new variants must still compile.
+pub(crate) fn map_libsql_err(error: libsql::Error) -> StorageError {
+    match error {
+        libsql::Error::SqliteFailure(code, _)
+            if (code & 0xff) == SQLITE_BUSY || (code & 0xff) == SQLITE_LOCKED =>
+        {
+            StorageError::DatabaseLocked
+        }
+        other => StorageError::Backend {
+            source: BackendOpaque::from(other),
+        },
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -431,5 +464,49 @@ mod tests {
         // The SQL-looking text is preserved (it is not a control byte) but harmlessly escaped of
         // control sequences — the point is no terminal-control byte survives.
         assert!(shown.contains("DROP TABLE issues"));
+    }
+
+    /// `From<libsql::Error>` absorbs a backend error opaquely and sanitizes its message at
+    /// construction (no raw control byte from the backend message survives).
+    #[test]
+    fn from_libsql_error_sanitizes() {
+        let backend: BackendOpaque =
+            libsql::Error::SqliteFailure(1, "boom\x1b[2K\x07near \"x\"".to_string()).into();
+        let shown = backend.to_string();
+        assert!(
+            !shown
+                .chars()
+                .any(|c| c.is_control() && !matches!(c, '\n' | '\t')),
+            "raw control byte leaked through From<libsql::Error>: {shown:?}"
+        );
+        assert!(shown.contains("boom"));
+    }
+
+    /// `map_libsql_err` routes `SQLITE_BUSY` (5) and `SQLITE_LOCKED` (6) — including their extended
+    /// forms — to the retryable `DatabaseLocked`; every other failure is absorbed into `Backend`.
+    #[test]
+    fn map_libsql_err_busy_locked_to_database_locked() {
+        // Primary codes.
+        for code in [super::SQLITE_BUSY, super::SQLITE_LOCKED] {
+            let mapped = super::map_libsql_err(libsql::Error::SqliteFailure(code, "x".into()));
+            assert!(
+                matches!(mapped, StorageError::DatabaseLocked),
+                "code {code}"
+            );
+            assert!(mapped.retryable());
+        }
+        // Extended codes share the low byte (e.g. SQLITE_BUSY_SNAPSHOT = 5 | (11<<8) = 0x0B05).
+        let extended_busy = super::SQLITE_BUSY | (11 << 8);
+        assert!(matches!(
+            super::map_libsql_err(libsql::Error::SqliteFailure(extended_busy, "x".into())),
+            StorageError::DatabaseLocked
+        ));
+        // A non-busy/locked sqlite failure is absorbed opaquely.
+        let other = super::map_libsql_err(libsql::Error::SqliteFailure(1, "syntax".into()));
+        assert!(matches!(other, StorageError::Backend { .. }));
+        assert!(!other.retryable());
+        // A non-SqliteFailure variant is also absorbed opaquely.
+        let connect = super::map_libsql_err(libsql::Error::ConnectionFailed("nope".into()));
+        assert!(matches!(connect, StorageError::Backend { .. }));
     }
 }
