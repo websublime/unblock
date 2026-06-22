@@ -9,32 +9,29 @@ publish = false
 [lints]
 workspace = true
 
+# T0.5 — interface-only crate: the backend-free `Storage` trait, the storage-owned value
+# types (`DeletePlan`/`DeleteMode`/`IssuePatch`), and `StorageError`. The libsql backend
+# (`LibsqlStorage`), `petgraph`, the `remote`/`testkit` features, and their TLS/network surface
+# are added at T0.6 (see `docs/plans/crates/unblock-storage.md` §3.1, T0.5↔T0.6 boundary).
+# Keeping the manifest trimmed makes the no-TLS/no-network default-feature property hold
+# trivially and avoids building libsql's bundled SQLite for an interface-only crate.
 [dependencies]
 unblock-model = { workspace = true }
 unblock-error = { workspace = true }
-libsql = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
-serde_json = { workspace = true }
 snafu = { workspace = true }
+# JSON values for the `CodedError::context()` payloads (no backend; serde_json::Map/Value only).
+serde_json = { workspace = true }
+
+[dev-dependencies]
+# Drives the `Arc<dyn Storage>` coercion / object-safety test (`#[tokio::test]`).
 tokio = { workspace = true }
-# Private graph traversal / cycle detection backing the `Storage` trait's
-# detect_cycles / dependency_tree (spine §3.2). No petgraph type appears in any public API.
-petgraph = { workspace = true }
-# Remote/replica path only (non-default, D15/NFR-10) — kept off the default build.
-backon = { workspace = true, optional = true }
-failsafe = { workspace = true, optional = true }
 
 [features]
 default = []
-# D15: remote/embedded-replica + its TLS/HTTP surface, behind a non-default feature.
-remote = [
-    "libsql/replication",
-    "libsql/remote",
-    "libsql/sync",
-    "libsql/tls",
-    "dep:backon",
-    "dep:failsafe",
-]
-# Exposes the reusable Storage contract test suite (NFR-16) to downstream crates.
-testkit = []
+# Empty seam marker reserving the non-default `remote` name (D15). The engine forwards
+# `remote = ["unblock-storage/remote"]` to it, so the passthrough must resolve. T0.6 fills this
+# with the libsql remote/replica + `backon`/`failsafe` deps; in T0.5 it is a no-op (the
+# no-TLS/no-network default-feature property still holds — an empty feature pulls nothing).
+remote = []
