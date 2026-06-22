@@ -348,7 +348,7 @@ pub enum StorageError {
 impl StorageError { pub fn code(&self) -> unblock_error::ErrorCode; } // each crate maps its variants -> ErrorCode
 ```
 
-Each crate implements `fn code(&self) -> ErrorCode` (and a hint/retryable view) so the boundary can build a `StructuredError` uniformly. Upward composition uses snafu source nesting; the engine's error is the union surfaced to L7.
+Each crate's enum implements **`unblock_error::CodedError`** (the merged L0 bridge: `code()` required; `hint()`/`retryable()`/`context()` defaulted, with `retryable()` tracking `code().is_retryable()`) — this is the concrete mechanism that satisfies the older inherent-`code()` prose in the sketch above, and it is what lets the boundary build a `StructuredError` uniformly (via the blanket `From<&E>` / `StructuredError::from_coded`). Upward composition uses snafu source nesting; the engine's error is the union surfaced to L7.
 
 **`ModelError` aggregate validation (D-E1 — NORMATIVE).** `unblock-error` owns the one concrete per-crate enum that `unblock-model` returns (spine §1.1/§1.2/§1.9: `Status::FromStr`, `Priority::FromStr`, `IssueValidator::validate`). It keeps **scalar** variants for the single-field `FromStr` paths *and* one **aggregate carrier** that holds every failure an `IssueValidator::validate` run found, so the boundary still emits exactly one `ErrorCode` while preserving multi-field detail (FR-11 agent self-correction):
 
@@ -462,13 +462,67 @@ pub struct DeletePlan { pub mode: DeleteMode, pub targets: Vec<String>, pub casc
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeleteMode { Tombstone, Cascade, Hard, DryRun }
 
-#[derive(Debug, Clone)]
-pub struct IssuePatch {                  // partial update; None = leave unchanged
-    pub title: Option<String>, pub description: Option<Option<String>>, /* ...all updatable fields... */
-    pub status: Option<Status>, pub priority: Option<Priority>, pub assignee: Option<Option<String>>,
+// IssuePatch field set = Option B (full enumeration of model-backed updatable `Issue` columns).
+// Outer Option = "present in this patch / leave unchanged"; the inner Option on nullable text
+// fields distinguishes clear (Some(None)) from set (Some(Some)). Derives `Default` (all-None =
+// patch nothing). `defer_until` is intentionally OUT — defer/undefer own it. No invented fields:
+// every field below maps 1:1 to a real updatable `unblock-model` Issue column (or to labels/parent
+// relations that update_issue mutates), cross-checked against §1.6.
+#[derive(Debug, Clone, Default)]
+#[allow(clippy::option_option)] // outer=present-in-patch; inner=clear-vs-set on nullable columns
+pub struct IssuePatch {
+    pub title: Option<String>,                          // NOT NULL column -> plain Option
+    // nullable text columns -> Option<Option<String>> (None=leave / Some(None)=clear / Some(Some)=set)
+    pub description: Option<Option<String>>,
+    pub design: Option<Option<String>>,
+    pub acceptance_criteria: Option<Option<String>>,
+    pub notes: Option<Option<String>>,
+    pub owner: Option<Option<String>>,
+    pub external_ref: Option<Option<String>>,
+    pub assignee: Option<Option<String>>,
+    // plain Option<T> for NOT-NULL / scalar columns
+    pub status: Option<Status>,
+    pub priority: Option<Priority>,
+    pub issue_type: Option<IssueType>,
+    pub estimated_minutes: Option<i32>,
+    pub due_at: Option<DateTime<Utc>>,
+    // label relation ops (applied by update_issue)
     pub labels_add: Vec<String>, pub labels_remove: Vec<String>, pub labels_set: Option<Vec<String>>,
-    pub parent: Option<Option<String>>,  // reparent; cycle-checked
+    pub parent: Option<Option<String>>,                 // reparent; cycle-checked
 }
+```
+
+**`StorageError` (storage-owned; the §2.1 sketch made concrete — NORMATIVE).** The full v1 variant set and its `ErrorCode` mapping. It implements `unblock_error::CodedError` (NOT a bespoke inherent `code()`; §2.1 note), so the L7 boundary bridges it via the blanket `From<&E>` like every other crate enum. `Migration` is defined **concretely and minimally, model-backed**: `Migration { from: i32, to: i32, reason: String }` (`from`/`to` are `PRAGMA user_version` values, `i32` to match the schema-version type). `Backend { source: BackendOpaque }` absorbs the libsql error opaquely — no libsql type is ever public (spine §6 rule 2). `BackendOpaque` sanitizes its message **at construction** via `unblock_error::sanitize_message` and exposes only `Debug`/`Display`.
+
+```rust
+#[derive(Debug, snafu::Snafu)]
+#[snafu(visibility(pub(crate)))]
+pub enum StorageError {
+    IssueNotFound { id: String },        // -> IssueNotFound
+    AmbiguousId { id: String },          // -> AmbiguousId
+    IdCollision { id: String },          // -> IdCollision
+    InvalidId { id: String },            // -> InvalidId
+    DatabaseLocked,                      // -> DatabaseLocked
+    SchemaMismatch { found: i32, expected: i32 },  // -> SchemaMismatch
+    NotInitialized,                      // -> NotInitialized
+    AlreadyInitialized,                  // -> AlreadyInitialized
+    AlreadyClaimed { id: String, by: String },     // -> AlreadyClaimed (FR-2 loser; `by` = current holder, re-read in-tx)
+    CycleDetected { path: String },      // -> CycleDetected
+    DependencyNotFound,                  // -> DependencyNotFound
+    HasDependents { id: String },        // -> HasDependents
+    SelfDependency,                      // -> SelfDependency
+    DuplicateDependency,                 // -> DuplicateDependency
+    Backend { source: BackendOpaque },   // -> DatabaseError (libsql absorbed; opaque)
+    Migration { from: i32, to: i32, reason: String }, // -> SchemaMismatch (model-backed)
+    IntegrityFailed { messages: Vec<String> },        // -> DatabaseError (PRAGMA integrity_check failures)
+}
+// impl unblock_error::CodedError for StorageError { code() per the map; retryable() = default
+//   (code().is_retryable()); context() surfaces the structured payload agents need —
+//   AlreadyClaimed{by} -> context["holder"]; CycleDetected{path} -> context["cycle_path"];
+//   SchemaMismatch{found,expected}; IssueNotFound{id}; HasDependents{id}; IntegrityFailed{messages}; ... }
+//
+// pub struct BackendOpaque(String); // private inner; from_message() runs sanitize_message at construction;
+//   Debug + manual Display (sanitized text) + impl std::error::Error. No From<libsql::Error> until T0.6.
 ```
 
 ### 3.2 The trait
