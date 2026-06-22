@@ -51,6 +51,12 @@ impl Issue {
     ///
     /// Returns `false` for a non-tombstone, for `retention_days` of `None` or `0`, or when
     /// `deleted_at` is unknown. The retention window is clamped at [`MAX_SAFE_TOMBSTONE_DAYS`].
+    ///
+    /// **Panic-free for any input.** Both the `u64 → i64` clamp *and* the `deleted_at + retention`
+    /// calendar addition are overflow-safe: the addition uses `checked_add_signed`, and an overflow
+    /// (a `deleted_at` so near [`chrono::DateTime::<Utc>::MAX_UTC`] that adding the retention escapes
+    /// the calendar) yields `false` — by definition such an expiry is astronomically far in the
+    /// future, so the tombstone is **not yet** expired.
     #[must_use]
     pub fn is_expired_tombstone(&self, retention_days: Option<u64>) -> bool {
         if self.status != Status::Tombstone {
@@ -73,8 +79,14 @@ impl Issue {
         // `clamped <= MAX_SAFE_TOMBSTONE_DAYS` always fits i64; the fallback is defensive only.
         let days_i64 = i64::try_from(clamped)
             .unwrap_or_else(|_| i64::try_from(MAX_SAFE_TOMBSTONE_DAYS).unwrap_or(i64::MAX));
-        let expiration = deleted_at + Duration::days(days_i64);
-        Utc::now() > expiration
+
+        // `deleted_at + Duration::days(..)` can overflow the calendar for a near-MAX `deleted_at`;
+        // `checked_add_signed` returns `None` instead of panicking. An expiry that overflows the
+        // calendar is unreachably far in the future -> treat the tombstone as not yet expired.
+        match deleted_at.checked_add_signed(Duration::days(days_i64)) {
+            Some(expiration) => Utc::now() > expiration,
+            None => false,
+        }
     }
 }
 
@@ -83,7 +95,7 @@ mod tests {
     use super::MAX_SAFE_TOMBSTONE_DAYS;
     use crate::enums::{IssueType, Status};
     use crate::issue::Issue;
-    use chrono::{Duration, TimeZone, Utc};
+    use chrono::{DateTime, Duration, TimeZone, Utc};
 
     fn base() -> Issue {
         Issue {
@@ -161,5 +173,18 @@ mod tests {
         // u64::MAX clamps to MAX_SAFE_TOMBSTONE_DAYS — no panic, not expired.
         assert!(!issue.is_expired_tombstone(Some(u64::MAX)));
         assert!(!issue.is_expired_tombstone(Some(MAX_SAFE_TOMBSTONE_DAYS)));
+    }
+
+    #[test]
+    fn near_max_deleted_at_with_large_retention_does_not_panic() {
+        // A `deleted_at` near the calendar ceiling: `deleted_at + retention` overflows
+        // `DateTime<Utc>`. The old `deleted_at + Duration::days(..)` would panic here; the
+        // `checked_add_signed` path returns `None` -> not yet expired (no panic).
+        let mut issue = base();
+        issue.status = Status::Tombstone;
+        issue.deleted_at = Some(DateTime::<Utc>::MAX_UTC);
+        assert!(!issue.is_expired_tombstone(Some(MAX_SAFE_TOMBSTONE_DAYS)));
+        assert!(!issue.is_expired_tombstone(Some(u64::MAX)));
+        assert!(!issue.is_expired_tombstone(Some(1)));
     }
 }
