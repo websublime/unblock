@@ -49,10 +49,25 @@ mod filters;
 mod libsql;
 mod trait_def;
 
+/// Backend-independent storage **contract suite** (NFR-16) + the gated `StorageTestkit` seam.
+///
+/// Gated behind `#[cfg(any(test, feature = "testkit"))]`: it is compiled for the crate's own
+/// `tests/contract.rs` (which needs no flag) and, when the `testkit` feature is enabled, exported so
+/// out-of-crate consumers (the `unblock-fuzz` storage targets, a future backend's self-test) can run
+/// the same suite. It is **never** part of the default public surface (no extra deps, no production
+/// code path).
+#[cfg(any(test, feature = "testkit"))]
+pub mod testkit;
+
 pub use error::{BackendOpaque, StorageError};
 pub use filters::{DeleteMode, DeletePlan, IssuePatch};
 pub use libsql::LibsqlStorage;
 pub use trait_def::Storage;
+
+// The contract-suite entry + the gated seam trait, re-exported so a future backend (and the fuzz
+// crate) reuses them without reaching into the `testkit` module path.
+#[cfg(any(test, feature = "testkit"))]
+pub use testkit::{StorageTestkit, run_storage_contract_suite};
 
 // Query/result contract types defined in `unblock-model` §1.10 (CF-A/CF-B/CF-C) and re-exported
 // here so existing importers of `unblock_storage::ListFilters` keep compiling and CF-E

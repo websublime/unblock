@@ -33,6 +33,13 @@ mod mutate;
 mod query;
 mod schema;
 
+// The `StorageTestkit` impl for `LibsqlStorage` lives **in-module** (gated) so it can reach the
+// `pub(super)` connection accessors (`read`/`write`) and `ids::next_child_number` without widening
+// any visibility at the crate root (resolved-decision #1). It is compiled for the crate's own tests
+// and when the `testkit` feature is on.
+#[cfg(any(test, feature = "testkit"))]
+mod testkit;
+
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
