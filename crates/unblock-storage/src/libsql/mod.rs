@@ -92,11 +92,19 @@ impl LibsqlStorage {
             .build()
             .await
             .map_err(map_libsql_err)?;
-        Self::from_database(db).await
+        // A real file: WAL applies (real WAL + native busy_timeout concurrency, validated by the
+        // T0.8 contention lab on a file DB).
+        Self::from_database(db, true).await
     }
 
     /// Open a fresh, process-unique in-memory libsql database shared by the write and read
     /// connections (named shared-cache URI; see the module docs).
+    ///
+    /// The in-memory store uses **shared-cache, NOT WAL**: a `SQLite` in-memory database cannot use
+    /// WAL (it always reports `journal_mode = memory`), so the WAL/`wal_autocheckpoint` pragmas are
+    /// skipped on this path. (Asserting WAL there is both a no-op and an intermittent
+    /// "API misuse"/`DatabaseLocked` flake source.) Real WAL + `busy_timeout` concurrency is validated
+    /// by the **T0.8 contention lab on a file DB**, not here.
     ///
     /// # Errors
     ///
@@ -111,15 +119,19 @@ impl LibsqlStorage {
             .build()
             .await
             .map_err(map_libsql_err)?;
-        Self::from_database(db).await
+        // In-memory: shared-cache, NOT WAL (see the method docs + `apply_pragmas`).
+        Self::from_database(db, false).await
     }
 
     /// Build the two connections from an opened `Database` and apply the runtime pragmas to each.
-    async fn from_database(db: Database) -> Result<Self, StorageError> {
+    ///
+    /// `file_backed` selects whether the WAL-only pragmas are applied (only file databases can use
+    /// WAL; a shared-cache `:memory:` DB reports `journal_mode = memory` regardless).
+    async fn from_database(db: Database, file_backed: bool) -> Result<Self, StorageError> {
         let write_conn = db.connect().map_err(map_libsql_err)?;
         let read_conn = db.connect().map_err(map_libsql_err)?;
-        apply_pragmas(&write_conn).await?;
-        apply_pragmas(&read_conn).await?;
+        apply_pragmas(&write_conn, file_backed).await?;
+        apply_pragmas(&read_conn, file_backed).await?;
         Ok(Self {
             _db: db,
             write_conn: Mutex::new(write_conn),
@@ -142,27 +154,39 @@ impl LibsqlStorage {
 /// Apply the runtime pragmas to a connection (spine §3.3, ported from the original schema.rs:606-643
 /// — except `busy_timeout`, which is the native non-spinning inverse of beads).
 ///
-/// Sets, in order: native `busy_timeout`; WAL journal mode; `foreign_keys = ON`;
-/// `synchronous = NORMAL`; `temp_store = MEMORY`; `cache_size = -8000` (≈8 MiB);
-/// `journal_size_limit = 33554432` (bound WAL growth); `wal_autocheckpoint = 0` (manual
-/// truncate-checkpoints only — see `migrations::bootstrap_fresh`).
-async fn apply_pragmas(conn: &Connection) -> Result<(), StorageError> {
-    // Native, sleep-based busy handler (NFR-3). Set first so the subsequent WAL switch can wait
-    // rather than fail under any concurrent open.
+/// Sets, in order: native `busy_timeout`; (file-backed only) WAL journal mode + `wal_autocheckpoint
+/// = 0`; `foreign_keys = ON`; `synchronous = NORMAL`; `temp_store = MEMORY`; `cache_size = -8000`
+/// (≈8 MiB); `journal_size_limit = 33554432` (bound WAL growth).
+///
+/// **The WAL-only pragmas (`journal_mode = WAL`, `wal_autocheckpoint = 0`) are applied only when
+/// `file_backed`.** A shared-cache `:memory:` database cannot use WAL — it always reports
+/// `journal_mode = memory` — so asserting WAL there is a no-op AND an intermittent flake source
+/// (under parallel shared-cache opens libsql can return "bad parameter or other API misuse" /
+/// `DatabaseLocked` from the `PRAGMA journal_mode = WAL` on the in-memory path). Skipping it removes
+/// the flake; the in-memory store relies on shared-cache + the native `busy_timeout`, and real WAL
+/// concurrency is validated by the T0.8 contention lab on a file DB.
+async fn apply_pragmas(conn: &Connection, file_backed: bool) -> Result<(), StorageError> {
+    // Native, sleep-based busy handler (NFR-3). Set first so any subsequent switch can wait rather
+    // than fail under a concurrent open.
     conn.busy_timeout(Duration::from_millis(BUSY_TIMEOUT_MS))
         .map_err(map_libsql_err)?;
 
-    // Several of these PRAGMAs (journal_mode, journal_size_limit, wal_autocheckpoint, …) return a
-    // result row, which `execute` rejects with `ExecuteReturnedRows`. Run them via `query`, which
-    // consumes any returned rows. The `Rows` is dropped immediately (we only set, never read here).
+    // WAL-only pragmas: file-backed databases only (in-memory cannot use WAL).
+    if file_backed {
+        for pragma in ["PRAGMA journal_mode = WAL", "PRAGMA wal_autocheckpoint = 0"] {
+            let _ = conn.query(pragma, ()).await.map_err(map_libsql_err)?;
+        }
+    }
+
+    // Several of these PRAGMAs (journal_size_limit, …) return a result row, which `execute` rejects
+    // with `ExecuteReturnedRows`. Run them via `query`, which consumes any returned rows. The `Rows`
+    // is dropped immediately (we only set, never read here).
     for pragma in [
-        "PRAGMA journal_mode = WAL",
         "PRAGMA foreign_keys = ON",
         "PRAGMA synchronous = NORMAL",
         "PRAGMA temp_store = MEMORY",
         "PRAGMA cache_size = -8000",
         "PRAGMA journal_size_limit = 33554432",
-        "PRAGMA wal_autocheckpoint = 0",
     ] {
         let _ = conn.query(pragma, ()).await.map_err(map_libsql_err)?;
     }
@@ -459,6 +483,44 @@ mod tests {
         // The read connection (distinct handle) sees the committed write.
         let fetched = storage.get_issue("ub-share1").await.expect("get");
         assert!(fetched.is_some(), "read conn must see the committed write");
+    }
+
+    /// Stress the `open_in_memory` + migrate + first-write path under heavy parallelism: 32 tasks
+    /// each open an independent shared-cache in-memory store, migrate it, and write an issue. This
+    /// pins the WAL-flake fix — before it, `PRAGMA journal_mode = WAL` on the `:memory:` path could
+    /// intermittently return "API misuse" / `DatabaseLocked` under parallel opens. Every task must
+    /// succeed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn open_in_memory_parallel_first_write_stress() {
+        use chrono::{TimeZone, Utc};
+        use unblock_model::Issue;
+
+        let mut handles = Vec::new();
+        for n in 0..32 {
+            handles.push(tokio::spawn(async move {
+                let storage = LibsqlStorage::open_in_memory().await?;
+                storage.migrate().await?;
+                let issue = Issue {
+                    id: format!("ub-stress-{n}"),
+                    title: format!("stress {n}"),
+                    created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+                    updated_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+                    ..Issue::default()
+                };
+                storage.create_issue(&issue, "stress").await?;
+                // Confirm the first write is visible through the read connection.
+                let fetched = storage.get_issue(&format!("ub-stress-{n}")).await?;
+                assert!(fetched.is_some(), "task {n}: first write must be visible");
+                Ok::<(), StorageError>(())
+            }));
+        }
+
+        for (n, handle) in handles.into_iter().enumerate() {
+            handle
+                .await
+                .expect("join")
+                .unwrap_or_else(|e| panic!("task {n} failed: {e:?}"));
+        }
     }
 
     /// `PRAGMA table_info(issues)` column order is golden-pinned (the 38-column ordinal sequence).

@@ -256,16 +256,23 @@ pub(super) async fn stale_issues(
 }
 
 // --------------------------------------------------------------------------------------------------
-// Live blocked-set computation (two passes; spine §3.2.1) — replaces the original's
-// `blocked_issues_cache` JOIN/NOT-IN.
+// Live blocked-set computation (THREE passes; spine §3.2.1) — replaces the original's
+// `blocked_issues_cache` JOIN/NOT-IN. Mirrors `compute_blocked_issues_map_impl`
+// (sqlite.rs:5720-5746) which combines direct blockers, `propagate_blocked_parents`
+// (sqlite.rs:6371-6398), and the epic-open-child rollup.
 // --------------------------------------------------------------------------------------------------
 
-/// Compute the set of issue ids that are currently **blocked** (the live two-pass union):
+/// Compute the set of issue ids that are currently **blocked** (the live three-pass union):
 /// 1. **direct 3-type blockers** — a `'blocks'`/`'conditional-blocks'`/`'waits-for'` edge whose
 ///    blocker is not `closed`/`tombstone` (`external:%` and template blockers excluded; a missing
-///    blocker id, via `LEFT JOIN`, is treated as unresolved), and
+///    blocker id, via `LEFT JOIN`, is treated as unresolved),
 /// 2. **open epic-rollup children** — a `'parent-child'` edge where the parent's `issue_type='epic'`
-///    and the child's status is non-terminal marks the **parent** blocked.
+///    and the child's status is non-terminal marks the **parent** blocked, and
+/// 3. **transitive children of blocked parents** — a fixpoint BFS down the `'parent-child'` tree:
+///    every issue with a `'parent-child'` edge to an already-blocked parent is itself blocked,
+///    iterated until no new ids are added (mirrors `propagate_blocked_parents`, sqlite.rs:6371-6398;
+///    the edges come from `load_local_parent_child_edges_impl`, sqlite.rs:6165-6191 — `parent =
+///    depends_on_id`, `child = issue_id`, `external:%` excluded).
 pub(super) async fn live_blocked_ids(conn: &Connection) -> Result<HashSet<String>, StorageError> {
     let mut blocked = HashSet::new();
 
@@ -312,7 +319,66 @@ pub(super) async fn live_blocked_ids(conn: &Connection) -> Result<HashSet<String
         }
     }
 
+    // Pass 3: propagate blocked-state DOWN the parent-child tree to a fixpoint. A child of a blocked
+    // parent is itself blocked (transitive). Mirrors `propagate_blocked_parents` (sqlite.rs:6371).
+    propagate_blocked_to_children(conn, &mut blocked).await?;
+
     Ok(blocked)
+}
+
+/// Mark every transitive child of an already-blocked parent as blocked, iterating to a fixpoint
+/// (BFS down the `'parent-child'` tree). The edge set is `parent (depends_on_id) -> [children
+/// (issue_id)]`, with `external:%` excluded on both ends (sqlite.rs:6165-6191). Terminal/template
+/// children stay blocked once marked — this mirrors the original `propagate_blocked_parents`, which
+/// propagates over the structural edge regardless of the child's own status (a directly-blocked
+/// child only *enters* the seed set via passes 1/2, but down-propagation is purely structural).
+async fn propagate_blocked_to_children(
+    conn: &Connection,
+    blocked: &mut HashSet<String>,
+) -> Result<(), StorageError> {
+    // Load the parent-child edges once: parent_id -> [child_id, …].
+    let mut rows = conn
+        .query(
+            "SELECT issue_id, depends_on_id FROM dependencies \
+             WHERE type = 'parent-child' \
+               AND issue_id NOT LIKE 'external:%' \
+               AND depends_on_id NOT LIKE 'external:%'",
+            (),
+        )
+        .await
+        .map_err(map_libsql_err)?;
+
+    let mut children_by_parent: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    while let Some(row) = rows.next().await.map_err(map_libsql_err)? {
+        let Value::Text(child_id) = row.get_value(0).map_err(map_libsql_err)? else {
+            continue;
+        };
+        let Value::Text(parent_id) = row.get_value(1).map_err(map_libsql_err)? else {
+            continue;
+        };
+        children_by_parent
+            .entry(parent_id)
+            .or_default()
+            .push(child_id);
+    }
+
+    if children_by_parent.is_empty() || blocked.is_empty() {
+        return Ok(());
+    }
+
+    // BFS fixpoint: from each blocked parent, mark its children blocked and enqueue them.
+    let mut queue: Vec<String> = blocked.iter().cloned().collect();
+    while let Some(parent_id) = queue.pop() {
+        if let Some(children) = children_by_parent.get(&parent_id) {
+            for child_id in children {
+                if blocked.insert(child_id.clone()) {
+                    queue.push(child_id.clone());
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 // --------------------------------------------------------------------------------------------------

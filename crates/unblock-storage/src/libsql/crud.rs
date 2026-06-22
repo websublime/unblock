@@ -610,7 +610,8 @@ async fn apply_labels(
 }
 
 /// Apply a reparent (`parent`): set/clear the `parent-child` dependency edge, cycle-checked. Returns
-/// whether the parent changed.
+/// whether the parent **changed** — a reparent to the issue's current parent (or a detach when there
+/// is no parent edge) is a no-op (returns `false`, so it does not, on its own, advance `updated_at`).
 async fn apply_reparent(
     tx: &libsql::Transaction,
     id: &str,
@@ -619,6 +620,14 @@ async fn apply_reparent(
     let Some(parent) = patch.parent.clone() else {
         return Ok(false);
     };
+
+    // The current parent (the single `parent-child` edge declared by this issue, if any).
+    let current_parent = existing_parent(tx, id).await?;
+    if parent == current_parent {
+        // No change: requested parent equals the current one (incl. detach when already parentless).
+        return Ok(false);
+    }
+
     // Remove any existing parent-child edge declared by this issue.
     tx.execute(
         "DELETE FROM dependencies WHERE issue_id = ?1 AND type = 'parent-child'",
@@ -646,6 +655,29 @@ async fn apply_reparent(
         .map_err(map_libsql_err)?;
     }
     Ok(true)
+}
+
+/// The current parent id of `id` (its single `parent-child` `depends_on_id`), or `None` if it has no
+/// parent edge.
+async fn existing_parent(
+    tx: &libsql::Transaction,
+    id: &str,
+) -> Result<Option<String>, StorageError> {
+    let mut rows = tx
+        .query(
+            "SELECT depends_on_id FROM dependencies WHERE issue_id = ?1 AND type = 'parent-child' \
+             LIMIT 1",
+            libsql::params![id],
+        )
+        .await
+        .map_err(map_libsql_err)?;
+    match rows.next().await.map_err(map_libsql_err)? {
+        Some(row) => match row.get_value(0).map_err(map_libsql_err)? {
+            Value::Text(parent) => Ok(Some(parent)),
+            _ => Ok(None),
+        },
+        None => Ok(None),
+    }
 }
 
 /// Execute (or, for `DryRun`, plan) a delete (spine §3.2.1).

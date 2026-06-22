@@ -8,7 +8,7 @@
 
 use chrono::{DateTime, TimeZone, Utc};
 
-use unblock_model::{Dependency, DependencyType, Issue, ListFilters, Priority, Status};
+use unblock_model::{Dependency, DependencyType, Issue, IssueType, ListFilters, Priority, Status};
 use unblock_storage::{DeleteMode, DeletePlan, IssuePatch, LibsqlStorage, Storage, StorageError};
 
 fn ts(year: i32, month: u32, day: u32) -> DateTime<Utc> {
@@ -153,10 +153,17 @@ async fn status_priority_assignee_emit_their_events() {
     };
     storage.update_issue("ub-1", &patch, "a").await.unwrap();
 
-    let events = event_types(&storage, "ub-1").await;
-    assert!(events.contains(&"status_changed".to_string()));
-    assert!(events.contains(&"priority_changed".to_string()));
-    assert!(events.contains(&"assignee_changed".to_string()));
+    // EXACT ordered equality (the §3.2.1 oracle is order-sensitive; list_events is ASC). The
+    // update applies status -> priority -> assignee, so the events follow that order after `created`.
+    assert_eq!(
+        event_types(&storage, "ub-1").await,
+        vec![
+            "created".to_string(),
+            "status_changed".to_string(),
+            "priority_changed".to_string(),
+            "assignee_changed".to_string(),
+        ]
+    );
 }
 
 #[tokio::test]
@@ -190,9 +197,19 @@ async fn close_emits_closed_reopen_emits_reopened() {
         .await
         .unwrap();
 
-    let events = event_types(&storage, "ub-1").await;
-    assert!(events.contains(&"closed".to_string()));
-    assert!(events.contains(&"reopened".to_string()));
+    // EXACT ordered equality: each status change emits StatusChanged first, then the Closed/Reopened
+    // refinement. Close (open->closed): status_changed + closed. Reopen (closed->open):
+    // status_changed + reopened.
+    assert_eq!(
+        event_types(&storage, "ub-1").await,
+        vec![
+            "created".to_string(),
+            "status_changed".to_string(),
+            "closed".to_string(),
+            "status_changed".to_string(),
+            "reopened".to_string(),
+        ]
+    );
 }
 
 #[tokio::test]
@@ -213,10 +230,10 @@ async fn delete_tombstone_from_non_terminal_emits_deleted() {
     let fetched = storage.get_issue("ub-1").await.unwrap().unwrap();
     assert_eq!(fetched.status, Status::Tombstone);
     assert!(fetched.original_type.is_some(), "original_type preserved");
-    assert!(
-        event_types(&storage, "ub-1")
-            .await
-            .contains(&"deleted".to_string())
+    // EXACT ordered equality: tombstoning a non-terminal issue emits exactly one Deleted event.
+    assert_eq!(
+        event_types(&storage, "ub-1").await,
+        vec!["created".to_string(), "deleted".to_string()]
     );
 }
 
@@ -453,6 +470,171 @@ async fn blocked_includes_in_progress() {
     );
 }
 
+/// Pass 3 (transitive): a child of a directly-blocked **non-epic** parent is itself blocked and is
+/// absent from `ready_issues` — the new transitive down-propagation behaviour.
+#[tokio::test]
+async fn transitive_child_of_blocked_parent_is_blocked() {
+    let storage = fresh().await;
+    storage
+        .create_issue(&issue("ub-blocker", "blocker"), "a")
+        .await
+        .unwrap();
+    storage
+        .create_issue(&issue("ub-parent", "parent"), "a")
+        .await
+        .unwrap(); // plain task, not epic
+    storage
+        .create_issue(&issue("ub-child", "child"), "a")
+        .await
+        .unwrap();
+
+    // ub-parent is directly blocked by ub-blocker.
+    storage
+        .add_dependency(&dep("ub-parent", "ub-blocker", DependencyType::Blocks), "a")
+        .await
+        .unwrap();
+    // ub-child is a parent-child of ub-parent (child depends_on parent).
+    storage
+        .add_dependency(
+            &dep("ub-child", "ub-parent", DependencyType::ParentChild),
+            "a",
+        )
+        .await
+        .unwrap();
+
+    let blocked = blocked_ids(&storage).await;
+    assert!(
+        blocked.contains(&"ub-parent".to_string()),
+        "parent directly blocked"
+    );
+    assert!(
+        blocked.contains(&"ub-child".to_string()),
+        "child of a blocked parent must be transitively blocked"
+    );
+
+    let ready = ready_ids(&storage).await;
+    assert!(
+        !ready.contains(&"ub-child".to_string()),
+        "blocked child excluded from ready"
+    );
+    assert!(
+        !ready.contains(&"ub-parent".to_string()),
+        "blocked parent excluded from ready"
+    );
+}
+
+/// Pass 3 (deep transitivity): a grandchild of a blocked ancestor is blocked.
+#[tokio::test]
+async fn deep_grandchild_of_blocked_ancestor_is_blocked() {
+    let storage = fresh().await;
+    storage
+        .create_issue(&issue("ub-blocker", "blocker"), "a")
+        .await
+        .unwrap();
+    storage
+        .create_issue(&issue("ub-gp", "grandparent"), "a")
+        .await
+        .unwrap();
+    storage
+        .create_issue(&issue("ub-p", "parent"), "a")
+        .await
+        .unwrap();
+    storage
+        .create_issue(&issue("ub-c", "child"), "a")
+        .await
+        .unwrap();
+
+    storage
+        .add_dependency(&dep("ub-gp", "ub-blocker", DependencyType::Blocks), "a")
+        .await
+        .unwrap();
+    storage
+        .add_dependency(&dep("ub-p", "ub-gp", DependencyType::ParentChild), "a")
+        .await
+        .unwrap();
+    storage
+        .add_dependency(&dep("ub-c", "ub-p", DependencyType::ParentChild), "a")
+        .await
+        .unwrap();
+
+    let blocked = blocked_ids(&storage).await;
+    for id in ["ub-gp", "ub-p", "ub-c"] {
+        assert!(
+            blocked.contains(&id.to_string()),
+            "{id} must be transitively blocked"
+        );
+    }
+}
+
+/// Pass 2 (epic-rollup): an EPIC parent with an open child IS blocked and excluded from ready.
+#[tokio::test]
+async fn epic_parent_with_open_child_is_blocked() {
+    let storage = fresh().await;
+    let mut epic = issue("ub-epic", "epic");
+    epic.issue_type = IssueType::Epic;
+    storage.create_issue(&epic, "a").await.unwrap();
+    storage
+        .create_issue(&issue("ub-kid", "kid"), "a")
+        .await
+        .unwrap();
+
+    // kid is a parent-child of the epic (kid depends_on epic).
+    storage
+        .add_dependency(&dep("ub-kid", "ub-epic", DependencyType::ParentChild), "a")
+        .await
+        .unwrap();
+
+    let blocked = blocked_ids(&storage).await;
+    assert!(
+        blocked.contains(&"ub-epic".to_string()),
+        "an epic with an open child must be blocked (rollup)"
+    );
+    let ready = ready_ids(&storage).await;
+    assert!(
+        !ready.contains(&"ub-epic".to_string()),
+        "blocked epic excluded from ready"
+    );
+}
+
+/// Pass 2 negative: a NON-epic parent with an open child is NOT blocked (it is not directly blocked,
+/// nor a child of any blocked issue) — only epics roll up open children.
+#[tokio::test]
+async fn non_epic_parent_with_open_child_is_not_blocked() {
+    let storage = fresh().await;
+    storage
+        .create_issue(&issue("ub-parent", "parent"), "a")
+        .await
+        .unwrap(); // plain task
+    storage
+        .create_issue(&issue("ub-kid", "kid"), "a")
+        .await
+        .unwrap();
+
+    storage
+        .add_dependency(
+            &dep("ub-kid", "ub-parent", DependencyType::ParentChild),
+            "a",
+        )
+        .await
+        .unwrap();
+
+    let blocked = blocked_ids(&storage).await;
+    assert!(
+        !blocked.contains(&"ub-parent".to_string()),
+        "a non-epic parent does not roll up its open children"
+    );
+    // And the child of an unblocked parent is not blocked either.
+    assert!(
+        !blocked.contains(&"ub-kid".to_string()),
+        "child of an unblocked parent is not blocked"
+    );
+    let ready = ready_ids(&storage).await;
+    assert!(
+        ready.contains(&"ub-parent".to_string()),
+        "unblocked non-epic parent is ready"
+    );
+}
+
 #[tokio::test]
 async fn search_matches_title_description_id_substring() {
     let storage = fresh().await;
@@ -647,6 +829,28 @@ fn dep(from: &str, to: &str, dep_type: DependencyType) -> Dependency {
         metadata: None,
         thread_id: None,
     }
+}
+
+/// The current blocked-set ids.
+async fn blocked_ids(storage: &LibsqlStorage) -> Vec<String> {
+    storage
+        .blocked_issues(&ListFilters::default())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|i| i.id)
+        .collect()
+}
+
+/// The current ready-set ids.
+async fn ready_ids(storage: &LibsqlStorage) -> Vec<String> {
+    storage
+        .ready_issues(&ListFilters::default())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|i| i.id)
+        .collect()
 }
 
 // --------------------------------------------------------------------------------------------------
