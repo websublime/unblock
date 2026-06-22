@@ -585,12 +585,92 @@ pub trait Storage: Send + Sync {
 }
 ```
 
+#### 3.2.1 Method semantics (T0.6, normative — source-verified vs `temp/beads_rust-main/src/storage/sqlite.rs`)
+
+The terse signatures above are made concrete here. The libsql impl reproduces the *behaviour* of the
+original `bd` SQLite storage (cited line ranges), not its monolith shape. The cited contradictions
+between an earlier prose description and the source are resolved **in favour of the source**.
+
+- **`create_issue` (sqlite.rs:2206–2238) — NO content-hash dedup.** Create guards only on (a) **id
+  collision** → `IdCollision{id}` and (b) **`external_ref` collision** → backend error; it computes and
+  **stores** `content_hash` but **never short-circuits on it**. The FR-26 idempotency note belongs to the
+  **import path** (`unblock-sync`), not to `create_issue`. Inserts the row + `Event(Created)` in one tx;
+  hierarchical ids bump the `child_counters` row in-tx; per-relation `Event(LabelAdded)`/
+  `Event(DependencyAdded)`/`Event(Commented)` are recorded for any seeded relations.
+- **`update_issue` (sqlite.rs:2496–2509, 2572–2870) — per-field event granularity; empty diff is a
+  full skip.** An empty patch (or one that changes nothing) returns the issue unchanged and writes **no
+  `SET`, no `updated_at`, no `Event`** (`if set_clauses.is_empty() { return Ok }`). `updated_at` advances
+  and `content_hash` is recomputed **only** when at least one stored column changes. Per-field events
+  (see the EventType-per-mutation table below) are emitted **only when the field's value actually
+  changes** (e.g. patching `status`→its current value emits no `StatusChanged`).
+- **`delete_issue` (sqlite.rs:2952–3015) — delegate to the model `Issue::into_tombstone`** (which sets
+  `status = Tombstone` + `deleted_*` and preserves `original_type`), then bump `updated_at = now` and
+  recompute `content_hash`. **`Event(Deleted)` is written ONLY when the prior status was non-terminal**
+  (`!was_terminal`): tombstoning an already-`Closed` issue records **no** `Deleted` event. An
+  already-tombstone target is a **no-op `Ok`**. One tx. (The model-B schema drops the original's
+  `close_metadata` table, so its cleanup `DELETE` is removed.)
+- **`claim_issue` (sqlite.rs:2888–2935) — assignee-ONLY guard, no status predicate.** The atomic claim
+  `UPDATE` carries `WHERE id = ? AND (assignee IS NULL OR TRIM(assignee) = '' OR assignee = ?<actor>)`
+  — there is **no** `status NOT IN (...)` predicate. 0 rows affected → re-`SELECT` the current holder
+  **within the same tx** → `AlreadyClaimed{by}`. A **same-actor re-claim short-circuits BEFORE the
+  `UPDATE`** (idempotent `Ok`, no `updated_at`, no event).
+- **`ready_issues` (sqlite.rs:4988–5048) — mirrors `idx_issues_ready`.**
+  `status = 'open' AND id NOT IN <live blocked set> AND (defer_until IS NULL OR defer_until <= now) AND
+  (pinned = 0 OR pinned IS NULL) AND (ephemeral = 0 OR ephemeral IS NULL) AND
+  (is_template = 0 OR is_template IS NULL)`. `ORDER BY priority ASC, created_at ASC, id ASC`. The
+  original's `AND id NOT LIKE '%-wisp-%'` wisp filter is **DROPPED** (Miguel). Default-complete unless
+  `limit` set; the hybrid re-rank stays in the engine (CF-11).
+- **`blocked_issues` (sqlite.rs:5886–5912, 6076–6090, 6258–6311) — `status NOT IN ('closed',
+  'tombstone')` (INCLUDES `in_progress`/`deferred`); blocked via two live-computed passes, NOT one
+  4-type SQL.** An issue is blocked iff it is in the union of (1) **direct 3-type blockers** — a
+  `'blocks'`/`'conditional-blocks'`/`'waits-for'` edge on a blocker that is not `closed`/`tombstone`
+  (`external:%` and template blockers excluded; `LEFT JOIN` so a missing blocker id is treated as
+  unresolved), and (2) **open epic-rollup children** — a `'parent-child'` edge where the parent issue's
+  `issue_type = 'epic'` and the child's `status NOT IN ('closed', 'tombstone')` marks the **parent**
+  blocked (a separate propagation pass, not folded into the direct query). `ORDER BY priority ASC,
+  created_at DESC, id ASC` (Miguel). *(The original additionally propagated a blocked parent's state
+  down to its children — `propagate_blocked_parents`, sqlite.rs:6371 — which this contract does NOT
+  reproduce; the two passes above are the locked set.)*
+- **`search_issues` (sqlite.rs:4543–4727) — substring `instr(lower(col))` over title+description+id.**
+  The needle is lowercased and matched with
+  `instr(lower(title), ?) > 0 OR instr(lower(description), ?) > 0 OR instr(lower(id), ?) > 0` (no LIKE
+  escaping on the needle). A `filters.text_contains` FILTER (distinct from the search needle) keeps the
+  `LIKE ? ESCAPE '\'` form over `title`. Cap **50** when `filters.limit` is unset. `ORDER BY priority
+  ASC, created_at DESC, id ASC` (the no-explicit-sort tail). The `sort`/`reverse` branches are deferred
+  to v1.x; FTS5 to v1.3.
+
+**EventType-per-mutation (the T0.7 oracle).** Model `EventType` = 15 named (Created, Updated,
+StatusChanged, PriorityChanged, AssigneeChanged, Commented, Closed, Reopened, DependencyAdded,
+DependencyRemoved, LabelAdded, LabelRemoved, Compacted, Deleted, Restored) + `Custom` — **no `Deferred`,
+no `Claimed`**. Each mutation emits exactly:
+
+| Mutation | Event(s) (in order) |
+|---|---|
+| create | `Created` (+ `LabelAdded`/`DependencyAdded`/`Commented` per seeded relation) |
+| update `title` | `Updated` |
+| update `status` (changed) | `StatusChanged` (+ `Closed` on →`closed` from non-terminal · + `Reopened` on terminal→non-terminal · + `Deleted` on →`tombstone` from non-terminal) |
+| update `priority` (changed) | `PriorityChanged` |
+| update `assignee` (changed) | `AssigneeChanged` |
+| update body fields (`description`/`design`/`acceptance_criteria`/`notes`/`owner`/`estimated_minutes`/`external_ref`/`issue_type`/`source_repo`/`agent_context`) | **none** |
+| no-op update (nothing changed) | **none** |
+| claim (won) | `AssigneeChanged` + `StatusChanged` |
+| claim (same-actor re-claim) | **none** |
+| defer / undefer | `Updated` |
+| delete (tombstone from non-terminal) | `Deleted` |
+| delete (from terminal / already-tombstone) | **none** |
+| add / remove dependency | `DependencyAdded` / `DependencyRemoved` |
+| comment | `Commented` |
+| add / remove label | `LabelAdded` / `LabelRemoved` |
+
 ### 3.3 libsql impl notes (normative for `unblock-storage`)
 
-- **WAL** journal mode; **`busy_timeout > 0`** (native, non-spinning — resolves fsqlite-243 hot-spin by construction, NFR-3). Never `busy_timeout=0` + hand-rolled backoff.
+- **WAL** journal mode; **`busy_timeout = 5000 ms` (native, `Connection::busy_timeout`)** — `const BUSY_TIMEOUT_MS: u64 = 5000`. This is the **sanctioned INVERSE of beads**, which set `busy_timeout = 0` + a hand-rolled flock + sleep backoff to dodge *frankensqlite*'s hot-spin. libsql ships **real SQLite**, whose native `busy_timeout` is sleep-based (it blocks, it never spins), so a non-zero native timeout resolves fsqlite-243 **by construction**. Do **not** port the beads `=0`/backoff/flock machinery.
+- **Pragmas (read schema.rs:606–643):** `journal_mode = WAL`, `foreign_keys = ON`, `synchronous = NORMAL`, `temp_store = MEMORY`, `cache_size = -8000`, `journal_size_limit = 33554432`, and **`wal_autocheckpoint = 0`** + a **manual `wal_checkpoint(TRUNCATE)`** on fresh-bootstrap and on close. Periodic in-flight checkpointing is **PASSIVE** (beads:1422–1428): a seam is wired but defaults conservative; its mode is tuned at T0.8.
+- **Transactions:** every **mutating** tx uses **`BEGIN IMMEDIATE`** (`transaction_with_behavior(TransactionBehavior::Immediate)`); reads use the default **Deferred** behaviour.
+- **OQ-5 (RESOLVED — Miguel + design Review): two connections, not one.** `LibsqlStorage` holds a **serialized WRITE connection** (writes go through `BEGIN IMMEDIATE`; the engine's D14 `Semaphore` serializes writers at L5) **AND a separate READ connection** for the read fast path, so WAL gives concurrent MVCC reader snapshots vs the single writer (FR-10). For `open_in_memory`, both connections must see the **same** in-memory database — a bare `:memory:` is connection-private — so the impl opens a **named shared-cache in-memory URI** (`file:<unique>?mode=memory&cache=shared`, valid because libsql-ffi compiles SQLite with `SQLITE_USE_URI`). Public constructors: `open_local(&Path)` and `open_in_memory()`. (Earlier OQ-5 wording said "single connection" — superseded.)
 - **Default build = local file / bundled only.** Remote/embedded-replica is a non-default Cargo feature `remote` (TLS/HTTP transitive surface kept off the normal path; D15/NFR-10). When `remote`, app-level jittered retry (`backon`/`tokio-retry`, **not** archived `backoff 0.4`) guards only that path; `wiremock` for tests.
 - Mutations are **transactional**: issue rows + audit `Event` rows committed together inside one tx.
-- libsql/SQLite errors are absorbed into `StorageError::Backend { .. }` (opaque) and surfaced only as `ErrorCode` — no backend type in the public API.
+- libsql/SQLite errors are absorbed into `StorageError::Backend { .. }` (opaque) and surfaced only as `ErrorCode` — no backend type in the public API. The single `From<libsql::Error>` bridge maps `SqliteFailure(code, _)` with `(code & 0xff) ∈ {5, 6}` (SQLITE_BUSY / SQLITE_LOCKED) to `DatabaseLocked`; everything else becomes `Backend{..}` (the catch-all arm is required — `libsql::Error` is `#[non_exhaustive]`).
 - Backed by a backend-independent **contract suite** (NFR-16) exercising every trait method; the contention lab (NFR-3, M0 gate) drives N concurrent writers asserting correctness + no 100% CPU hot-spin.
 
 ---
