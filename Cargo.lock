@@ -2806,10 +2806,15 @@ dependencies = [
 name = "unblock-fuzz"
 version = "0.1.0"
 dependencies = [
+ "chrono",
+ "proptest",
+ "serde_json",
+ "snafu",
+ "tempfile",
+ "tokio",
  "unblock-error",
  "unblock-model",
  "unblock-storage",
- "unblock-sync",
 ]
 
 [[package]]
@@ -2896,6 +2901,7 @@ dependencies = [
  "proptest",
  "serde_json",
  "snafu",
+ "tempfile",
  "tokio",
  "unblock-error",
  "unblock-model",

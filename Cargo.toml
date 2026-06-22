@@ -15,8 +15,14 @@ members = [
     "crates/unblock-fuzz",
     "xtask",
 ]
-# `unblock-fuzz` is a member but NOT a default member: its (deferred) nested cargo-fuzz
-# package needs nightly + libFuzzer, which must never reach the stable-1.96 default build
+# The nested cargo-fuzz package (`crates/unblock-fuzz/fuzz`) is its OWN crate, OUTSIDE this
+# workspace: it needs nightly + libFuzzer, which must never reach the stable-1.96 default build
+# (NFR-12). Excluding it keeps `cargo build --workspace` from ever compiling libfuzzer-sys /
+# arbitrary, while the `unblock-fuzz` member (its `src/` cores + stable regression replay) still
+# builds on stable.
+exclude = ["crates/unblock-fuzz/fuzz"]
+# `unblock-fuzz` is a member but NOT a default member: its sibling nested cargo-fuzz package
+# (excluded above) needs nightly + libFuzzer, which must never reach the stable-1.96 default build
 # (NFR-12). `xtask` is workspace tooling (the layering check), not a product crate.
 default-members = [
     "crates/unblock-model",
@@ -96,6 +102,8 @@ insta = { version = "1", features = ["json"] }
 criterion = { version = "0.5", features = ["async_tokio"] }
 wiremock = "0.6"
 rand = "0.9"
+# Temp workspaces/DBs for the storage contract suite (file-backed `open_local`) + the fuzz cores.
+tempfile = "3"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

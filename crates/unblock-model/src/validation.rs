@@ -33,9 +33,16 @@ pub const ESTIMATED_MINUTES_MAX: i32 = 525_960;
 /// are effectively ASCII so the observable behaviour is identical, and `external_ref` is **not**
 /// part of the frozen `content_hash`, so import idempotency (FR-26) is unaffected. This is a
 /// deliberate correctness improvement, not a port error.
-const EXTERNAL_REF_MAX_CHARS: usize = 200;
+///
+/// `pub` (additive, re-exported from the crate root) so callers that **repair** an issue back to a
+/// validatable shape (e.g. the `unblock-fuzz` `normalize_issue`) can clamp to the validator's own
+/// bound instead of duplicating the magic number.
+pub const EXTERNAL_REF_MAX_CHARS: usize = 200;
 /// Maximum length of a single label, in bytes (ASCII-only charset, so bytes == chars).
-const LABEL_MAX_LEN: usize = 50;
+///
+/// `pub` (additive, re-exported from the crate root) for the same reason as
+/// [`EXTERNAL_REF_MAX_CHARS`]: a repair pass clamps to the validator's bound, not a copy of it.
+pub const LABEL_MAX_LEN: usize = 50;
 
 /// Validates issue fields and invariants (spine §1.9). Pure; no I/O.
 pub struct IssueValidator;
