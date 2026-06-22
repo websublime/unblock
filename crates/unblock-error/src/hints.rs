@@ -49,9 +49,11 @@ static VALID_STATUSES: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
 
 /// Valid issue-type values (O(1) membership lookup).
 static VALID_TYPES: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
-    ["task", "bug", "feature", "epic", "chore", "docs", "question"]
-        .into_iter()
-        .collect()
+    [
+        "task", "bug", "feature", "epic", "chore", "docs", "question",
+    ]
+    .into_iter()
+    .collect()
 });
 
 /// Status synonyms → canonical status, for intent detection.
@@ -179,10 +181,7 @@ pub fn detect_type_intent(input: &str) -> Option<&'static str> {
     if lower.is_empty() {
         return None;
     }
-    VALID_TYPES
-        .iter()
-        .find(|t| t.starts_with(&lower))
-        .copied()
+    VALID_TYPES.iter().find(|t| t.starts_with(&lower)).copied()
 }
 
 /// Detect the priority the user likely meant (digits, `P0`–`P4`, or synonyms).
@@ -269,10 +268,8 @@ pub fn levenshtein_distance(a: &str, b: &str) -> usize {
         curr[0] = i + 1;
         for (j, short_char) in shorter.iter().enumerate() {
             let cost = usize::from(short_char != long_char);
-            curr[j + 1] = std::cmp::min(
-                std::cmp::min(prev[j + 1] + 1, curr[j] + 1),
-                prev[j] + cost,
-            );
+            curr[j + 1] =
+                std::cmp::min(std::cmp::min(prev[j + 1] + 1, curr[j] + 1), prev[j] + cost);
         }
         std::mem::swap(&mut prev, &mut curr);
     }
@@ -420,7 +417,10 @@ mod tests {
         let existing = vec![kept.clone(), dropped.clone()];
         let hits = find_similar_ids("ub-abc", &existing, 5);
         assert!(hits.contains(&kept));
-        assert!(!hits.contains(&dropped), "a dist-4 id must never be suggested");
+        assert!(
+            !hits.contains(&dropped),
+            "a dist-4 id must never be suggested"
+        );
     }
 
     #[test]
@@ -468,13 +468,12 @@ mod tests {
         for (input, expected) in [("0", "0"), ("1", "1"), ("2", "2"), ("3", "3"), ("4", "4")] {
             assert_eq!(detect_priority_intent(input), Some(expected));
         }
-        for (input, expected) in [
-            ("p0", "0"),
-            ("P0", "0"),
-            ("p4", "4"),
-            ("P4", "4"),
-        ] {
-            assert_eq!(detect_priority_intent(input), Some(expected), "input: {input}");
+        for (input, expected) in [("p0", "0"), ("P0", "0"), ("p4", "4"), ("P4", "4")] {
+            assert_eq!(
+                detect_priority_intent(input),
+                Some(expected),
+                "input: {input}"
+            );
         }
     }
 

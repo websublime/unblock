@@ -24,7 +24,10 @@ fn empty_context_and_none_hint_are_omitted() {
 fn full_payload_round_trips() {
     let err = StructuredError::from_code(ErrorCode::ValidationFailed, "invalid")
         .with_hint("fix the title")
-        .with_context("fields", json!([{ "field": "title", "reason": "cannot be empty" }]));
+        .with_context(
+            "fields",
+            json!([{ "field": "title", "reason": "cannot be empty" }]),
+        );
     let text = serde_json::to_string(&err).unwrap();
     let back: StructuredError = serde_json::from_str(&text).unwrap();
     assert_eq!(err, back);

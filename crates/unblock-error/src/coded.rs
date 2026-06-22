@@ -160,7 +160,9 @@ mod tests {
             let hint = structured.hint.as_deref().expect("hint present");
             // No raw control byte except the preserved layout characters \n / \t.
             assert!(
-                !hint.chars().any(|c| c.is_control() && !matches!(c, '\n' | '\t')),
+                !hint
+                    .chars()
+                    .any(|c| c.is_control() && !matches!(c, '\n' | '\t')),
                 "raw control char leaked into hint: {hint:?}"
             );
             assert!(hint.contains("\\u{1b}[2Kub-evil"));

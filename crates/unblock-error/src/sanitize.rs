@@ -97,7 +97,10 @@ mod tests {
     #[test]
     fn escapes_cr_bs_esc_bel_del_and_c1() {
         let out = sanitize_message("a\rb\x08c\x1bd\x07e\x7ff\u{9b}g");
-        assert!(!out.chars().any(|c| c.is_control() && !matches!(c, '\n' | '\t')));
+        assert!(
+            !out.chars()
+                .any(|c| c.is_control() && !matches!(c, '\n' | '\t'))
+        );
         assert!(out.contains("\\r"));
         assert!(out.contains("\\u{8}"));
         assert!(out.contains("\\u{1b}"));

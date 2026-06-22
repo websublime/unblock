@@ -182,7 +182,10 @@ mod tests {
             ErrorCode::RequiredField
         );
         assert_eq!(
-            ModelError::ReparentCycle { path: "a -> b -> a".into() }.code(),
+            ModelError::ReparentCycle {
+                path: "a -> b -> a".into()
+            }
+            .code(),
             ErrorCode::CycleDetected
         );
     }
@@ -207,7 +210,9 @@ mod tests {
 
     #[test]
     fn invalid_priority_hint_and_context() {
-        let err = ModelError::InvalidPriority { value: "high".into() };
+        let err = ModelError::InvalidPriority {
+            value: "high".into(),
+        };
         let structured = StructuredError::from_coded(&err);
         assert!(structured.hint.is_some());
         assert_eq!(structured.context["provided"], "high");

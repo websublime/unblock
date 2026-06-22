@@ -2,9 +2,7 @@
 //! laws, and the Levenshtein metric laws.
 
 use proptest::prelude::*;
-use unblock_error::{
-    ErrorCode, levenshtein_distance, sanitize_message,
-};
+use unblock_error::{ErrorCode, levenshtein_distance, sanitize_message};
 
 /// Strategy over any constructible `ErrorCode` (drawn from the exhaustive `ALL` table).
 fn any_code() -> impl Strategy<Value = ErrorCode> {
