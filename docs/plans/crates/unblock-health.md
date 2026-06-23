@@ -12,7 +12,7 @@
 
 ## Public API summary (what other crates import)
 
-Consumers: `unblock-engine` (composes health; backs `Session::doctor`/`Session::recover` and `Session::diagnostics`, spine §4.1 — OQ-2 RESOLVED), transitively `unblock-cli` (`doctor` command, FR-16) and `unblock-mcp` (`diagnostics` tool, FR-15/§5.2). Health never depends on engine; engine owns the `&dyn Storage` and passes integrity rows + paths in. The engine maps health's `DoctorReport` (v1) / `WorkspaceClassification` (v1.1) into the model `DiagnosticReport`/`DiagnosticFinding`/`DiagnosticKind` it returns from `Session::doctor` (spine §4.1).
+Consumers: `unblock-engine` (composes health; backs `Session::doctor`/`Session::recover` and `Session::diagnostics`, spine §4.1 — OQ-2 RESOLVED), transitively `unblock-cli` (`doctor` command, FR-16) and `unblock-mcp` (`diagnostics` tool, FR-15 / spine §5.2). Health never depends on engine; engine owns the `&dyn Storage` and passes integrity rows + paths in. The engine maps health's `DoctorReport` (v1) / `WorkspaceClassification` (v1.1) into the model `DiagnosticReport`/`DiagnosticFinding`/`DiagnosticKind` it returns from `Session::doctor` (spine §4.1).
 
 **v1 (lite):**
 - `HealthError` (snafu, per-crate; `fn code(&self) -> unblock_error::ErrorCode`).

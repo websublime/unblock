@@ -3,13 +3,16 @@
 # Runs on every PR and on pushes to the default branch. All jobs build on stable 1.96.0 (D9/NFR-12).
 # Every `uses:` is pinned to a 40-char commit SHA with a trailing `# vX.Y.Z` (NFR-9).
 #
-# This file authors the 11 M0 jobs (ci-cd §2). FOUR jobs are DEFERRED with their gating task and are
-# intentionally NOT present yet (they depend on artefacts that do not exist until then):
+# This file defines the 10 always-on M0 jobs (ci-cd §2): fmt, clippy, test, storage-testkit,
+# snapshots, layering, doc-lint, toolchain, audit, deny. The 11th M0 job — `fuzz-smoke` — runs on a
+# nightly schedule in `fuzz-smoke.yml` (it also runs the two #[ignore]d contention-lab controls).
+#
+# FOUR further jobs are DEFERRED with their gating task and are intentionally NOT present yet (they
+# depend on artefacts that do not exist until then):
 #   - bench-gate  → T3.5  (needs a `benches/` criterion suite)
 #   - scale       → T3.5  (needs the 250k-issue corpus harness)
 #   - no-network  → T3.1/T3.6 (needs the `unblock-cli` binary + the axoupdater/dist surface to scan)
 #   - rate-limit  → T3.4/T3.5 (needs the rate-limit + long-lived stress harness)
-# The nightly fuzz-smoke + the two #[ignore]d contention controls live in `fuzz-smoke.yml`.
 #
 # Feature policy (D15/NFR-10, ci-cd §2.2): the testkit clippy/test steps use TARGETED features
 # (`-p unblock-storage --features testkit`), never `--all-features` — `--all-features` resolves the
