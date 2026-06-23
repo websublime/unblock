@@ -54,7 +54,7 @@ layer**; THIS file is the **cross-session source of truth** (it survives compact
 
 | id | Task | Depends on | Status | Notes |
 |---|---|---|---|---|
-| T1.1 | `unblock-policy` (ready-sort, gating, cache-key) | M0 | ☐ | |
+| T1.1 | `unblock-policy` (ready-sort, gating, cache-key) | M0 | ◐ | Branch `t1.1-policy`. Spec-first: ready-hybrid comparator drift fixed (Miguel: source-faithful **bucket hybrid** = `bucket(priority≤1) ASC, created_at ASC, id ASC` per `sort_ready_hybrid`, not the `list` default the plan mis-cited) + spine §4.1 comparator pin; Q1/Q2 resolved. |
 | T1.2 | `unblock-engine` (session + write Semaphore, D14) | T1.1 | ☐ | |
 | T1.3 | `unblock-config` (v1 subset, layered TOML) | T1.2 | ☐ | |
 | T1.4 | Issue lifecycle FR-1a/1b/1c, FR-2, FR-3 | T1.2 | ☐ | |
