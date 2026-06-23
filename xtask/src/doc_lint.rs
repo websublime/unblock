@@ -601,6 +601,10 @@ fn class_c_commands(doc: &Doc, guards: &Guards, out: &mut Vec<Finding>) {
 
 /// Rejection-context guard: the line carries an explicit negative-example marker, so a non-canonical
 /// `unblock <verb>` on it is a deliberate "this is rejected" illustration, not a spelling drift.
+///
+/// `e.g.` is deliberately NOT a marker — it is too broad and would silence a genuine future typo on an
+/// "e.g." example line. The remaining markers all name a rejection/usage-error context explicitly
+/// (cli.md's negative example carries `reject` + `unknown` + `usage error` regardless).
 fn is_rejection_context(line: &str) -> bool {
     const MARKERS: &[&str] = &[
         "reject",
@@ -608,7 +612,6 @@ fn is_rejection_context(line: &str) -> bool {
         "usage error",
         "not a command",
         "→ exit",
-        "e.g.",
     ];
     let lower = line.to_ascii_lowercase();
     MARKERS.iter().any(|m| lower.contains(m))
@@ -663,8 +666,11 @@ fn class_e_cross_refs(doc: &Doc, guards: &Guards, index: &CorpusIndex, out: &mut
     // or a short-name (`spine`/`PRD`/`impl-plan`/`roadmap`/`ci-cd`). The matched form is captured so
     // we can resolve it and decide whether it is KNOWN (an unknown short-name is reported on the ref
     // it governs).
-    // Short-names may appear capitalized at a sentence start (`Spine §4.1`); accept the leading
-    // capital for the word-style names. `PRD` is an acronym and matched exactly.
+    // Convention: word-style short-names accept an OPTIONAL leading capital (a sentence-start
+    // `Spine §4.1`) but nothing else — `[Ss]pine` etc., NOT a fully case-insensitive match (which
+    // would catch unrelated prose like "SPINE"). `PRD` is an acronym, matched exactly. This MUST
+    // mirror `short_name_to_file`, which lowercases the word-style names before resolving (and matches
+    // `PRD` exactly) — the two are kept in lock-step so a captured qualifier always resolves.
     let qualifier = Regex::new(
         r"(?:(01-design-spine|PRD|implementation-plan|00-roadmap|ci-cd-and-distribution)\.md`?)|\b([Ss]pine|PRD|[Ii]mpl-plan|[Rr]oadmap|[Cc]i-cd)\b",
     )
@@ -672,6 +678,13 @@ fn class_e_cross_refs(doc: &Doc, guards: &Guards, index: &CorpusIndex, out: &mut
     // A `§N` ref. The section number is a dotted run that NEVER ends on a dot (so a sentence-final
     // `§3.1.` captures `3.1`, not `3.1.`), matching the class-(d) right-boundary convention.
     let sec = Regex::new(r"§(\d+(?:\.\d+)*)").expect("valid section regex");
+    // Inheritance barriers: doc-name-like tokens that are NOT one of the five recognised qualifiers —
+    // a `*.md` filename (e.g. a crate-plan `unblock-render.md`) or a bare crate name (`unblock-foo`).
+    // A barrier between a qualifier and a `§N` BREAKS the carry-forward, so the `§N` cannot silently
+    // inherit a far-away qualifier across an intervening "other doc" mention — it falls back to self
+    // (and a genuinely ambiguous bare ref then surfaces as unresolved against the containing file).
+    let barrier = Regex::new(r"\b[A-Za-z0-9][A-Za-z0-9_-]*\.md\b|\bunblock-[a-z]+\b")
+        .expect("valid barrier regex");
 
     for (line_idx, line) in doc.lines.iter().enumerate() {
         if guards.fenced[line_idx] {
@@ -692,21 +705,37 @@ fn class_e_cross_refs(doc: &Doc, guards: &Guards, index: &CorpusIndex, out: &mut
                 continue;
             };
             quals.push(QualHit {
+                start: m.start(),
                 end: m.end(),
                 display,
                 target,
             });
         }
 
+        // Barrier END offsets: an unrecognised doc-name token whose span does NOT coincide with a
+        // recognised qualifier (a recognised `01-design-spine.md` is a qualifier, not a barrier).
+        let barriers: Vec<(usize, usize)> = barrier
+            .find_iter(line)
+            .map(|m| (m.start(), m.end()))
+            .filter(|&(bs, be)| !quals.iter().any(|q| q.start <= bs && be <= q.end))
+            .collect();
+
         for c in sec.captures_iter(line) {
             let whole = c.get(0).expect("group 0 present");
             let section = &c[1];
             let ref_start = whole.start();
 
-            // The governing qualifier is the LAST one ending at-or-before this `§N`. This implements
-            // the spec's "small preceding window": a `spine §1.8 ... §1.1 ... §1.10` line carries the
-            // `spine` context forward to its bare sibling refs. With none, resolve against self.
-            let governing = quals.iter().rfind(|q| q.end <= ref_start);
+            // The governing qualifier is the LAST one ending at-or-before this `§N` — UNLESS an
+            // inheritance barrier (an other-doc mention) sits between that qualifier and the ref, in
+            // which case the carry-forward is broken and the ref falls back to self. This implements
+            // the spec's "small preceding window": `spine §1.8 ... §1.1` carries `spine` forward to a
+            // bare sibling, but `spine §3.1 vs unblock-render.md §6` does NOT leak `spine` onto `§6`.
+            let governing = quals.iter().rev().find(|q| {
+                q.end <= ref_start
+                    && !barriers
+                        .iter()
+                        .any(|&(bs, _)| q.end <= bs && bs < ref_start)
+            });
 
             match governing {
                 Some(q) => {
@@ -729,9 +758,10 @@ fn class_e_cross_refs(doc: &Doc, guards: &Guards, index: &CorpusIndex, out: &mut
     }
 }
 
-/// A qualifier occurrence on a line: where it ends, how it was written, and its resolved target
+/// A qualifier occurrence on a line: its byte span, how it was written, and its resolved target
 /// (`None` = an unknown doc-name, reported on the ref it governs).
 struct QualHit {
+    start: usize,
     end: usize,
     display: String,
     target: Option<&'static str>,
@@ -1207,6 +1237,59 @@ mod tests {
         assert!(
             !f.iter().any(|x| x.class == 'e'),
             "§6 should resolve via prefix-parent 6.1, got {f:?}"
+        );
+    }
+
+    /// Build a 2-doc corpus (a spine with the given headings + the doc under test) and run class (e).
+    fn class_e_on(spine_headings: &str, under_path: &str, under_text: &str) -> Vec<Finding> {
+        let prd = doc(
+            "docs/PRD.md",
+            "# PRD\n- APPROVED (v1.1)\n## 4. D\n| **D1** | a | b |\n",
+        );
+        let spine = doc(
+            "docs/plans/01-design-spine.md",
+            &format!("# spine\n{spine_headings}"),
+        );
+        let under = doc(under_path, under_text);
+        let docs = vec![prd, spine, under];
+        let index = CorpusIndex::build(&docs);
+        let target = docs.iter().find(|d| d.path == under_path).expect("present");
+        let guards = Guards::build(target);
+        let mut out = Vec::new();
+        class_e_cross_refs(target, &guards, &index, &mut out);
+        out
+    }
+
+    #[test]
+    fn class_e_sibling_refs_inherit_qualifier() {
+        // `spine §3.1 ... §1.10` — the bare `§1.10` inherits the `spine` context (no barrier).
+        let f = class_e_on(
+            "### 3.1 a\n### 1.10 b\n",
+            "docs/plans/crates/unblock-storage.md",
+            "Per spine §3.1 the type lives in model §1.10 here.\n",
+        );
+        assert!(
+            f.is_empty(),
+            "both §3.1 and the inherited §1.10 should resolve against the spine, got {f:?}"
+        );
+    }
+
+    #[test]
+    fn class_e_barrier_breaks_inheritance() {
+        // `spine §3.1 vs unblock-render.md §6` — the intervening other-doc mention is a barrier, so
+        // `§6` must NOT inherit `spine`; it falls back to self (the storage plan, no §6) and is flagged.
+        let f = class_e_on(
+            "### 3.1 a\n### 6 b\n",
+            "docs/plans/crates/unblock-storage.md",
+            "Compare spine §3.1 vs unblock-render.md §6 here.\n",
+        );
+        assert!(
+            f.iter().any(|x| x.class == 'e' && x.message.contains("§6")),
+            "the barrier must stop `spine` leaking onto §6, surfacing it as unresolved, got {f:?}"
+        );
+        assert!(
+            !f.iter().any(|x| x.message.contains("§3.1")),
+            "§3.1 still resolves against the spine, got {f:?}"
         );
     }
 
