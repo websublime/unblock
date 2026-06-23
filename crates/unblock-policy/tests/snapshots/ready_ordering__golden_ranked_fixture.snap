@@ -1,0 +1,12 @@
+---
+source: crates/unblock-policy/tests/ready_ordering.rs
+expression: ranked
+---
+[
+  "ub-p0-old",
+  "ub-p1-old-a",
+  "ub-p1-old-b",
+  "ub-p0-new",
+  "ub-p2-old",
+  "ub-p4-mid"
+]

@@ -9,11 +9,43 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+default = []
+# Exposes the shared `proptest` strategy module (`proptest_support`) so the crate's own
+# integration tests + benches can reuse the unit-test generators (NFR-16). The module is also
+# `#[cfg(test)]`-active, so plain in-crate unit tests run without the flag. The feature pulls in
+# the optional `proptest` dependency (`dep:proptest`) — required because a feature-gated *library*
+# module cannot reach a dev-dependency, only a regular (optional) one. Off by default, so it adds
+# ZERO surface to `cargo build`/release (RK-2 / NFR-12).
+proptest-support = ["dep:proptest"]
+
 [dependencies]
 unblock-model = { workspace = true }
 unblock-error = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
 chrono = { workspace = true }
-schemars = { workspace = true }
+# `chrono04` enables the `JsonSchema` impls for `chrono::DateTime<Utc>` (schemars 1.x gates chrono
+# support behind this feature) — required by the timestamp fields on the contract/ready types.
+schemars = { workspace = true, features = ["chrono04"] }
 snafu = { workspace = true }
+# Optional: only compiled when `proptest-support` is on (test/bench builds). NEVER in release.
+proptest = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Self-reference with `proptest-support` enabled so the crate's own integration tests + benches
+# see the shared `proptest_support` generators (the canonical test-util feature pattern). This
+# also activates the optional `proptest` dep for the test/bench compilation only.
+unblock-policy = { path = ".", features = ["proptest-support"] }
+# JSON round-trips for the contract/error/snapshot tests (the lib itself does no runtime JSON).
+serde_json = { workspace = true }
+# Golden JSON snapshots (ranked ready fixture, PolicyError variant->code, ContractEnvelope, versions).
+insta = { workspace = true }
+# Total-order / fingerprint / inheritance property tests (NFR-16).
+proptest = { workspace = true }
+# Criterion benches for the ready-sort comparator (NFR-1).
+criterion = { workspace = true }
+
+# Ready-sort comparator throughput (NFR-1 budget at the policy layer): 10k + 250k candidates.
+[[bench]]
+name = "policy"
+harness = false

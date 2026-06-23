@@ -1,0 +1,7 @@
+---
+source: crates/unblock-policy/tests/contract_versions.rs
+expression: contract_versions()
+---
+[
+  "unblock.policy.v1"
+]
