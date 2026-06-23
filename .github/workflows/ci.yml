@@ -1,0 +1,169 @@
+# unblock — CI quality gate (from M0). See docs/plans/ci-cd-and-distribution.md §2.
+#
+# Runs on every PR and on pushes to the default branch. All jobs build on stable 1.96.0 (D9/NFR-12).
+# Every `uses:` is pinned to a 40-char commit SHA with a trailing `# vX.Y.Z` (NFR-9).
+#
+# This file authors the 11 M0 jobs (ci-cd §2). FOUR jobs are DEFERRED with their gating task and are
+# intentionally NOT present yet (they depend on artefacts that do not exist until then):
+#   - bench-gate  → T3.5  (needs a `benches/` criterion suite)
+#   - scale       → T3.5  (needs the 250k-issue corpus harness)
+#   - no-network  → T3.1/T3.6 (needs the `unblock-cli` binary + the axoupdater/dist surface to scan)
+#   - rate-limit  → T3.4/T3.5 (needs the rate-limit + long-lived stress harness)
+# The nightly fuzz-smoke + the two #[ignore]d contention controls live in `fuzz-smoke.yml`.
+#
+# Feature policy (D15/NFR-10, ci-cd §2.2): the testkit clippy/test steps use TARGETED features
+# (`-p unblock-storage --features testkit`), never `--all-features` — `--all-features` resolves the
+# libsql `remote` TLS stack (reqwest/hyper/rustls) which must stay off the M0 gate.
+
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.96.0
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy (pedantic)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.96.0
+          components: clippy
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: clippy (workspace, all targets)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: clippy (storage testkit — feature-gated code is lint-clean)
+        run: cargo clippy -p unblock-storage --all-targets --features testkit --locked -- -D warnings
+
+  test:
+    name: test (workspace)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.96.0
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      # The always-on unit + proptest + behaviour.rs set. The testkit-gated contract.rs /
+      # contention_lab.rs are `#![cfg(feature = "testkit")]` and compile to 0 tests here — they run
+      # in the dedicated `storage-testkit` job.
+      - run: cargo test --workspace --locked
+
+  storage-testkit:
+    name: storage testkit (NFR-16 contract + NFR-3 contention)
+    # ubuntu-latest provides >= 2 vCPU; the contention gate hard-fails on a single-vCPU runner
+    # (writers cannot genuinely contend there).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.96.0
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: assert >= 2 vCPU (contention gate precondition)
+        run: |
+          n="$(nproc)"
+          echo "available vCPU: ${n}"
+          if [ "${n}" -lt 2 ]; then
+            echo "::error::contention lab needs >= 2 vCPU; runner has ${n}" >&2
+            exit 1
+          fi
+      - name: NFR-16 Storage contract suite
+        run: cargo test -p unblock-storage --features testkit --locked --test contract
+      - name: NFR-3 contention lab (M0 gate)
+        run: cargo test -p unblock-storage --features testkit --locked --test contention_lab
+
+  snapshots:
+    name: snapshots (insta --check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.96.0
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: install cargo-insta
+        run: cargo install cargo-insta --version 1.48.0 --locked
+      - run: cargo insta test --check --workspace
+
+  layering:
+    name: layering (NFR-15 acyclic graph)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.96.0
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      # Reads the committed Cargo.lock so `cargo metadata --offline` resolves (no lock regen).
+      - run: cargo xtask check-layering
+
+  doc-lint:
+    name: doc-lint (doc-corpus consistency)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.96.0
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - run: cargo xtask doc-lint
+
+  toolchain:
+    name: toolchain (NFR-12 stable 1.96 --locked)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.96.0
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      # A green stable build with the committed lock is the NFR-12 gate; fails if any crate needs
+      # nightly-only features.
+      - run: cargo build --workspace --locked
+
+  audit:
+    name: audit (cargo-audit advisories)
+    # Supply-chain jobs are network-allowed by design (they fetch the advisory DB).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  deny:
+    name: deny (licenses, bans, sources, advisories)
+    # Network-allowed by design. Single invocation covers all four check sets.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2.0.20
+        with:
+          command: check

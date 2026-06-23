@@ -1,0 +1,81 @@
+# unblock — nightly fuzz smoke + the #[ignore]d contention-lab controls.
+# See docs/plans/ci-cd-and-distribution.md §2 (`fuzz-smoke` row).
+#
+# Two independent legs, isolated so the nightly toolchain NEVER touches the stable storage build:
+#   1. fuzz-targets   — nightly-2024-10-31 + libFuzzer, a short `cargo fuzz run` per ingestion target
+#                       (the nested `crates/unblock-fuzz/fuzz` cargo-fuzz package, OUTSIDE the
+#                       stable-1.96 workspace, per its scoped rust-toolchain.toml).
+#   2. contention-controls — stable 1.96.0, the two `#[ignore]`d controls (forced-spin, WAL-negative)
+#                       that keep the M0 contention gate proven non-vacuous.
+#
+# Failure routing at M0: just go red. `workflow_dispatch` allows a manual re-run. No issue-opening.
+# Every `uses:` is pinned to a 40-char commit SHA with a trailing `# vX.Y.Z` (NFR-9).
+
+name: fuzz-smoke
+
+on:
+  schedule:
+    # 04:00 UTC daily.
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  fuzz-targets:
+    name: fuzz targets (nightly libFuzzer)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - content_hash
+          - issue_ingest
+          - parse_id
+          - enum_deserialize
+          - sanitize
+          - query_filters
+          - cycle_detect
+          - id_alloc
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      # The nested fuzz package pins nightly-2024-10-31 via its own rust-toolchain.toml; install that
+      # channel explicitly here so libFuzzer sanitizer codegen is available.
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: nightly-2024-10-31
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: crates/unblock-fuzz/fuzz
+      - name: install cargo-fuzz
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
+      - name: cargo fuzz run ${{ matrix.target }} (60s)
+        working-directory: crates/unblock-fuzz/fuzz
+        run: cargo +nightly-2024-10-31 fuzz run ${{ matrix.target }} -- -max_total_time=60
+
+  contention-controls:
+    name: contention controls (stable, --ignored)
+    # The two controls run on stable 1.96 — nightly must never leak onto the storage build. They
+    # also need >= 2 vCPU (the forced-spin control measures a real hot-spin ratio).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.96.0
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: assert >= 2 vCPU
+        run: |
+          n="$(nproc)"
+          echo "available vCPU: ${n}"
+          if [ "${n}" -lt 2 ]; then
+            echo "::error::contention controls need >= 2 vCPU; runner has ${n}" >&2
+            exit 1
+          fi
+      - name: forced-spin + WAL-negative controls
+        run: cargo test -p unblock-storage --features testkit --locked --test contention_lab -- --ignored
