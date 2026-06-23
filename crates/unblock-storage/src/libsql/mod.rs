@@ -41,6 +41,7 @@ mod schema;
 mod testkit;
 
 use std::path::Path;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -77,6 +78,26 @@ pub(crate) const CHECKPOINT_EVERY_N_MUTATIONS: u64 = 50;
 /// Monotonic counter giving each `open_in_memory()` a unique shared-cache name, so two in-memory
 /// stores never collide on the process-global `SQLite` shared cache.
 static MEMORY_DB_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Serializes the **shared-cache in-memory open** sequence across the whole process.
+///
+/// `open_in_memory()` opens a `cache=shared` URI. Opening a shared-cache database mutates `SQLite`'s
+/// **process-global shared-cache registry** (the `sqlite3SharedCacheList` linked list), and libsql
+/// opens connections with the default mutex flags — so two threads racing `sqlite3_open_v2` on
+/// shared-cache URIs concurrently can corrupt that global step and surface `SQLITE_MISUSE`
+/// ("bad parameter or other API misuse"). This is a genuine `SQLite` shared-cache concurrency
+/// limitation, not cross-store contention: even *distinct* shared-cache names race in the global
+/// list. Serializing the open (build + both `connect()`s + pragmas) removes the race at its source —
+/// this is mutual exclusion around a non-reentrant global op, NOT a retry/sleep band-aid.
+///
+/// Scoped to the **in-memory** path only: `open_local()` opens a private file with no shared cache and
+/// is unaffected (and production runs on file DBs — D14/D15 — so this never serializes a hot path; an
+/// open happens once per workspace). The guard is a `tokio` async mutex because the guarded sequence
+/// awaits (`build`/pragmas); the brief critical section is the open, not the lifetime of the store.
+fn memory_open_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 /// Process-internal instrumentation for a [`LibsqlStorage`] — three monotonic counters plus the
 /// test-controllable checkpoint cadence and the (test-only) busy-witness/spin toggles.
@@ -258,9 +279,14 @@ impl LibsqlStorage {
     ///
     /// The in-memory store uses **shared-cache, NOT WAL**: a `SQLite` in-memory database cannot use
     /// WAL (it always reports `journal_mode = memory`), so the WAL/`wal_autocheckpoint` pragmas are
-    /// skipped on this path. (Asserting WAL there is both a no-op and an intermittent
-    /// "API misuse"/`DatabaseLocked` flake source.) Real WAL + `busy_timeout` concurrency is validated
-    /// by the **T0.8 contention lab on a file DB**, not here.
+    /// skipped on this path (asserting WAL there is a no-op). Real WAL + `busy_timeout` concurrency is
+    /// validated by the **T0.8 contention lab on a file DB**, not here.
+    ///
+    /// The whole open sequence (build + connect + pragmas) is serialized process-wide via
+    /// [`memory_open_lock`]: opening a `cache=shared` URI mutates `SQLite`'s global shared-cache
+    /// registry, which is not safe to run concurrently and otherwise intermittently surfaces
+    /// `SQLITE_MISUSE` ("bad parameter or other API misuse") under parallel opens — a real `SQLite`
+    /// limitation, fixed at source here rather than masked (T0.9; root-fix of the T0.6 flake).
     ///
     /// # Errors
     ///
@@ -271,6 +297,13 @@ impl LibsqlStorage {
         // two connections share one cache. `mode=memory` + `cache=shared` is interpreted because
         // libsql-ffi compiles SQLite with SQLITE_USE_URI.
         let uri = format!("file:unblock_mem_{seq}?mode=memory&cache=shared");
+        // Serialize the shared-cache open: `sqlite3_open_v2` on a `cache=shared` URI mutates SQLite's
+        // process-global shared-cache registry, which is not safe to run concurrently from multiple
+        // threads (it intermittently surfaces SQLITE_MISUSE). Hold the global open-lock for the whole
+        // build + connect + pragma sequence (`from_database`), then drop it; the store then runs
+        // fully concurrently. Scoped to in-memory only — `open_local` has no shared cache. See
+        // [`memory_open_lock`].
+        let _open_guard = memory_open_lock().lock().await;
         let db = Builder::new_local(&uri)
             .build()
             .await
@@ -341,11 +374,11 @@ impl LibsqlStorage {
 ///
 /// **The WAL-only pragmas (`journal_mode = WAL`, `wal_autocheckpoint = 0`) are applied only when
 /// `file_backed`.** A shared-cache `:memory:` database cannot use WAL — it always reports
-/// `journal_mode = memory` — so asserting WAL there is a no-op AND an intermittent flake source
-/// (under parallel shared-cache opens libsql can return "bad parameter or other API misuse" /
-/// `DatabaseLocked` from the `PRAGMA journal_mode = WAL` on the in-memory path). Skipping it removes
-/// the flake; the in-memory store relies on shared-cache + the native `busy_timeout`, and real WAL
-/// concurrency is validated by the T0.8 contention lab on a file DB.
+/// `journal_mode = memory` — so asserting WAL there is a no-op; the in-memory store relies on
+/// shared-cache + the native `busy_timeout`, and real WAL concurrency is validated by the T0.8
+/// contention lab on a file DB. (The intermittent "bad parameter or other API misuse" seen under
+/// parallel in-memory opens is **not** caused by this pragma — it is the `SQLite` shared-cache
+/// global-open race, serialized at source by [`memory_open_lock`] in `open_in_memory`.)
 async fn apply_pragmas(
     conn: &Connection,
     file_backed: bool,
@@ -858,10 +891,11 @@ mod tests {
     }
 
     /// Stress the `open_in_memory` + migrate + first-write path under heavy parallelism: 32 tasks
-    /// each open an independent shared-cache in-memory store, migrate it, and write an issue. This
-    /// pins the WAL-flake fix — before it, `PRAGMA journal_mode = WAL` on the `:memory:` path could
-    /// intermittently return "API misuse" / `DatabaseLocked` under parallel opens. Every task must
-    /// succeed.
+    /// each open an independent shared-cache in-memory store, migrate it, and write an issue. This is
+    /// the regression guard for the `SQLite` shared-cache global-open race (T0.6 flake): concurrent
+    /// `sqlite3_open_v2` on `cache=shared` URIs intermittently returned "bad parameter or other API
+    /// misuse" until `open_in_memory` began serializing the open via `memory_open_lock` (T0.9). Every
+    /// task must succeed.
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn open_in_memory_parallel_first_write_stress() {
         use chrono::{TimeZone, Utc};
