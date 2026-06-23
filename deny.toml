@@ -1,0 +1,72 @@
+# cargo-deny configuration — the M0 supply-chain gate (NFR-6/NFR-9/NFR-10).
+# See docs/plans/ci-cd-and-distribution.md §2 (`deny` job).
+#
+# `cargo deny check` runs all four sets (advisories, bans, licenses, sources). The license allowlist
+# is DERIVED from the committed Cargo.lock (incl. the axoupdater/aws-lc TLS stack that ships
+# unconditionally) — see the [licenses] block. The no-git ban ([bans].deny) machine-enforces NFR-6.
+
+[graph]
+# Leave `targets` unset → cargo-deny evaluates ALL target platforms, so a platform-specific git crate
+# (e.g. a windows-only one) cannot slip past the no-git ban behind a cfg. Default features only — we
+# do NOT enable `--all-features` here (it would pull the libsql `remote` TLS stack; D15/NFR-10).
+all-features = false
+
+# -------------------------------------------------------------------------------------------------
+# Advisories — RustSec advisory DB (defense-in-depth alongside the separate `cargo audit` job).
+# -------------------------------------------------------------------------------------------------
+[advisories]
+version = 2
+# Refuse a yanked crate in the lock (supply-chain hygiene); unmaintained/vulnerable use the defaults.
+yanked = "deny"
+
+# -------------------------------------------------------------------------------------------------
+# Licenses — allowlist DERIVED from the committed Cargo.lock. No GPL/LGPL/AGPL/MPL (copyleft).
+# -------------------------------------------------------------------------------------------------
+[licenses]
+version = 2
+# A license must be matched with >= 93% textual confidence (SPDX scanner).
+confidence-threshold = 0.93
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "Unicode-3.0",
+  "CDLA-Permissive-2.0",
+  "MPL-2.0",
+  "OpenSSL",
+]
+# Note: the axoupdater TLS stack in the lock unconditionally — `ring` (`MIT AND ISC AND OpenSSL`) and
+# the `aws-lc-sys` AND-expression — resolves cleanly because every component license (MIT/ISC/
+# OpenSSL/Apache-2.0/ISC) is in `allow` above; no per-crate clarify is needed.
+
+# -------------------------------------------------------------------------------------------------
+# Bans — the no-git ban (NFR-6) + transitive-budget hygiene (NFR-10).
+# -------------------------------------------------------------------------------------------------
+[bans]
+# Multiple versions of a crate are a smell, not a hard fail at M0 (the budget tightens later).
+multiple-versions = "warn"
+# A wildcard (`*`) version requirement is never allowed for REGISTRY crates (reproducibility, NFR-9).
+# Internal workspace `path`/`workspace = true` crates carry no registry version and are exempt — they
+# are pinned by the lock + their path, not a floating registry requirement.
+wildcards = "deny"
+allow-wildcard-paths = true
+
+# NFR-6: unblock links NO git library and runs zero git operations. Machine-enforce it: any git crate
+# in the tree fails the gate. (FR-15 diagnostics are pure-DB; nothing here should pull a git lib.)
+deny = [
+  { crate = "git2" },
+  { crate = "gix" },
+  { crate = "libgit2-sys" },
+]
+
+# -------------------------------------------------------------------------------------------------
+# Sources — crates.io only; no unknown registries or git sources.
+# -------------------------------------------------------------------------------------------------
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
