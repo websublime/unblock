@@ -738,7 +738,7 @@ impl Session {
     // --- reads: fast path, NO write permit (FR-10) ---
     pub async fn get(&self, id: &str) -> Result<Option<Issue>, EngineError>;
     pub async fn list(&self, filters: &ListFilters) -> Result<Vec<Issue>, EngineError>;
-    pub async fn ready(&self, filters: &ListFilters) -> Result<Vec<Issue>, EngineError>; // hybrid sort via policy
+    pub async fn ready(&self, filters: &ListFilters) -> Result<Vec<Issue>, EngineError>; // hybrid sort via policy (NORMATIVE: "hybrid sort via policy" == `unblock-policy::cmp_ready` == `ready_hybrid_bucket(priority.0<=1)` ASC, then created_at ASC, then id ASC — byte-faithful to `sort_ready_hybrid` sqlite.rs:10444 / `ready_hybrid_bucket` sqlite.rs:10515. The §3.2.1 `ready_issues` SQL (`ORDER BY priority ASC, created_at ASC, id ASC`) is the candidate **pre-sort** (created_at ASC, NOT the list DESC order); the engine re-ranks it via `cmp_ready` — which buckets P0/P1 together so the final order differs from the SQL pre-sort — per CF-11. §3.2.1 SQL is unchanged.)
     pub async fn blocked(&self, filters: &ListFilters) -> Result<Vec<Issue>, EngineError>;
     pub async fn search(&self, query: &str, filters: &ListFilters) -> Result<Vec<Issue>, EngineError>;
     pub async fn count(&self, filters: &ListFilters, by: Option<CountGroupBy>) -> Result<Vec<CountBucket>, EngineError>;
