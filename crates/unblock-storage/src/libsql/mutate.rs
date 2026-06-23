@@ -11,7 +11,7 @@ use crate::error::{StorageError, map_libsql_err};
 use super::crud::get_issue;
 use super::events::append_event_in_tx;
 use super::mappers::ISSUE_COLUMNS;
-use super::with_immediate_tx;
+use super::{WriteHook, with_immediate_tx};
 
 /// Atomically claim `id` for `assignee` (FR-2). The guard is **assignee-only** — there is no status
 /// predicate (spine §3.2.1, sqlite.rs:2888-2935):
@@ -24,6 +24,7 @@ use super::with_immediate_tx;
 /// re-`SELECT` the holder in-tx → `AlreadyClaimed{by}`.
 pub(super) async fn claim_issue(
     conn: &Connection,
+    hook: WriteHook<'_>,
     id: &str,
     assignee: &str,
     actor: &str,
@@ -32,7 +33,7 @@ pub(super) async fn claim_issue(
     let assignee = assignee.to_string();
     let actor = actor.to_string();
 
-    with_immediate_tx(conn, |tx| async move {
+    with_immediate_tx(conn, hook, |tx| async move {
         // Load the current row inside the tx.
         let sql = format!("SELECT {ISSUE_COLUMNS} FROM issues WHERE id = ?1");
         let mut rows = tx
@@ -137,25 +138,28 @@ async fn current_holder(tx: &libsql::Transaction, id: &str) -> Result<String, St
 /// Defer `id` until `until` (sets `defer_until`), writing `Event(Updated)` (spine §3.2.1).
 pub(super) async fn defer_issue(
     conn: &Connection,
+    hook: WriteHook<'_>,
     id: &str,
     until: DateTime<Utc>,
     actor: &str,
 ) -> Result<Issue, StorageError> {
-    set_defer(conn, id, Some(until), actor).await
+    set_defer(conn, hook, id, Some(until), actor).await
 }
 
 /// Undefer `id` (clears `defer_until`), writing `Event(Updated)` (spine §3.2.1).
 pub(super) async fn undefer_issue(
     conn: &Connection,
+    hook: WriteHook<'_>,
     id: &str,
     actor: &str,
 ) -> Result<Issue, StorageError> {
-    set_defer(conn, id, None, actor).await
+    set_defer(conn, hook, id, None, actor).await
 }
 
 /// Shared set/clear of `defer_until` + `updated_at` + `content_hash` + `Event(Updated)`.
 async fn set_defer(
     conn: &Connection,
+    hook: WriteHook<'_>,
     id: &str,
     until: Option<DateTime<Utc>>,
     actor: &str,
@@ -163,7 +167,7 @@ async fn set_defer(
     let id_owned = id.to_string();
     let actor = actor.to_string();
 
-    with_immediate_tx(conn, |tx| async move {
+    with_immediate_tx(conn, hook, |tx| async move {
         let sql = format!("SELECT {ISSUE_COLUMNS} FROM issues WHERE id = ?1");
         let mut rows = tx
             .query(&sql, libsql::params![id_owned.as_str()])

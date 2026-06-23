@@ -283,6 +283,20 @@ pub(crate) fn map_libsql_err(error: libsql::Error) -> StorageError {
     }
 }
 
+/// Whether a libsql error is the retryable busy/locked concurrency signal (`SQLITE_BUSY` /
+/// `SQLITE_LOCKED`, matched on the low byte of the possibly-extended result code).
+///
+/// Used by the libsql write path to witness write-lock contention without consuming the error: the
+/// T0.8 contention lab's busy-witness probe and forced-spin control both branch on this. It mirrors
+/// the exact code set [`map_libsql_err`] routes to [`StorageError::DatabaseLocked`].
+pub(crate) fn is_busy_locked(error: &libsql::Error) -> bool {
+    matches!(
+        error,
+        libsql::Error::SqliteFailure(code, _)
+            if (code & 0xff) == SQLITE_BUSY || (code & 0xff) == SQLITE_LOCKED
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{BackendOpaque, StorageError};

@@ -62,6 +62,42 @@ pub trait StorageTestkit: Storage {
     /// Lets the suite assert the id child-counter advances monotonically past the hierarchical
     /// children created through the public [`Storage::create_issue`].
     async fn testkit_child_high_water(&self, parent_id: &str) -> Result<Option<u32>, StorageError>;
+
+    // --- T0.8 contention-lab instrumentation seams (RK-1 / NFR-3) ---------------------------------
+    //
+    // The counters + toggles below exist solely so the M0 contention-lab gate
+    // (`tests/contention_lab.rs`) can prove, from outside the crate, that (a) contention actually
+    // materialized (the busy-retry witness is > 0 under contention and == 0 without) and (b) the
+    // passive WAL checkpoint keeps the sidecar bounded — without ever widening the production surface.
+
+    /// The number of **witnessed write-lock contention events** since open.
+    ///
+    /// A contended `BEGIN IMMEDIATE` (another writer held the file write-lock) is counted here when
+    /// the busy-witness probe is enabled, or once per spin in the forced-spin control. The contention
+    /// lab asserts this is `> 0` in the contended leg and `== 0` in the baseline leg — the
+    /// deterministic proof that contention materialized (never a silent pass).
+    async fn testkit_busy_retry_count(&self) -> u64;
+
+    /// The number of **passive WAL checkpoints** fired by the periodic cadence since open.
+    async fn testkit_checkpoint_count(&self) -> u64;
+
+    /// The number of **committed mutations** since open (every `BEGIN IMMEDIATE` that committed).
+    async fn testkit_mutation_count(&self) -> u64;
+
+    /// Set the passive-checkpoint cadence: fire one passive checkpoint every `n` committed mutations
+    /// (`0` disables it). The lab sets `0` inside its timed CPU-ratio brackets so checkpoint CPU
+    /// never enters the ratio, and restores the production cadence for the WAL-bound sub-phase.
+    async fn testkit_set_checkpoint_interval(&self, n: u64);
+
+    /// Enable/disable the **zero-timeout busy-witness probe** on the write path.
+    ///
+    /// libsql exposes no busy-handler callback and the native `busy_timeout` resolves contention by
+    /// *blocking silently* (no error surfaces), so without this probe contention is invisible from
+    /// safe Rust. With it on, each mutating `BEGIN IMMEDIATE` first tries to acquire the write lock
+    /// with a zero timeout: if another writer holds it, that is recorded as one busy-retry and the
+    /// write then proceeds with the real (blocking) begin — the blocking semantics the gate measures
+    /// are unchanged. Off in production.
+    async fn testkit_set_busy_witness(&self, on: bool);
 }
 
 // --------------------------------------------------------------------------------------------------

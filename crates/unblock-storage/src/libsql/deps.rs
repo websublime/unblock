@@ -16,7 +16,7 @@ use crate::error::{StorageError, map_libsql_err};
 
 use super::events::append_event_in_tx;
 use super::mappers::dependency_from_row;
-use super::with_immediate_tx;
+use super::{WriteHook, with_immediate_tx};
 
 /// The gating dependency types (`affects_ready_work`), as their wire strings, for SQL `IN (…)`.
 const GATING_TYPES: [&str; 4] = ["blocks", "parent-child", "conditional-blocks", "waits-for"];
@@ -28,6 +28,7 @@ const GATING_TYPES: [&str; 4] = ["blocks", "parent-child", "conditional-blocks",
 /// [`StorageError::CycleDetected`] with the concrete path.
 pub(super) async fn add_dependency(
     conn: &Connection,
+    hook: WriteHook<'_>,
     dep: &Dependency,
     actor: &str,
 ) -> Result<(), StorageError> {
@@ -37,7 +38,7 @@ pub(super) async fn add_dependency(
     let dep = dep.clone();
     let actor = actor.to_string();
 
-    with_immediate_tx(conn, |tx| async move {
+    with_immediate_tx(conn, hook, |tx| async move {
         // Duplicate edge?
         let mut rows = tx
             .query(
@@ -96,6 +97,7 @@ pub(super) async fn add_dependency(
 /// Remove a dependency edge + `Event(DependencyRemoved)`.
 pub(super) async fn remove_dependency(
     conn: &Connection,
+    hook: WriteHook<'_>,
     issue_id: &str,
     depends_on_id: &str,
     dep_type: &DependencyType,
@@ -106,7 +108,7 @@ pub(super) async fn remove_dependency(
     let dep_type = dep_type.clone();
     let actor = actor.to_string();
 
-    with_immediate_tx(conn, |tx| async move {
+    with_immediate_tx(conn, hook, |tx| async move {
         let removed = tx
             .execute(
                 "DELETE FROM dependencies WHERE issue_id = ?1 AND depends_on_id = ?2 AND type = ?3",

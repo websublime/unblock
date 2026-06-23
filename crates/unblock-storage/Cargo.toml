@@ -39,8 +39,12 @@ tokio = { workspace = true }
 insta = { workspace = true }
 # Row<->domain round-trip + invariant property tests.
 proptest = { workspace = true }
-# Temp-file DB for the file-backed leg of the NFR-16 contract suite (`tests/contract.rs`).
+# Temp-file DB for the file-backed leg of the NFR-16 contract suite (`tests/contract.rs`) and the
+# T0.8 contention lab.
 tempfile = { workspace = true }
+# Whole-process CPU time (all tokio worker threads) for the T0.8 contention lab's baseline-relative
+# CPU-per-write ratio (NFR-3 / RK-1). Unsafe-free (no raw libc); test-only.
+cpu-time = { workspace = true }
 
 [features]
 default = []

@@ -58,4 +58,31 @@ impl StorageTestkit for LibsqlStorage {
         let next = next_child_number(self.read(), parent_id).await?;
         Ok(next.checked_sub(1).filter(|&hw| hw > 0))
     }
+
+    // --- T0.8 contention-lab instrumentation seams -----------------------------------------------
+    //
+    // Thin async wrappers over the in-`mod.rs` `StorageInstrument` (reached via the `pub(super)`
+    // `instrument()` accessor — no crate-root visibility is widened). They are intentionally
+    // `async` to satisfy the `StorageTestkit: Storage` (`#[async_trait]`) shape, but do no I/O: the
+    // counters are atomics.
+
+    async fn testkit_busy_retry_count(&self) -> u64 {
+        self.instrument().busy_retry_count()
+    }
+
+    async fn testkit_checkpoint_count(&self) -> u64 {
+        self.instrument().checkpoint_count()
+    }
+
+    async fn testkit_mutation_count(&self) -> u64 {
+        self.instrument().mutation_count()
+    }
+
+    async fn testkit_set_checkpoint_interval(&self, n: u64) {
+        self.instrument().set_checkpoint_interval(n);
+    }
+
+    async fn testkit_set_busy_witness(&self, on: bool) {
+        self.instrument().set_busy_witness(on);
+    }
 }

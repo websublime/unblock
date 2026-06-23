@@ -41,7 +41,7 @@ mod schema;
 mod testkit;
 
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -53,7 +53,7 @@ use unblock_model::{
     CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue, ListFilters,
 };
 
-use crate::error::{StorageError, map_libsql_err};
+use crate::error::{StorageError, is_busy_locked, map_libsql_err};
 use crate::filters::{DeletePlan, IssuePatch};
 use crate::trait_def::Storage;
 
@@ -62,9 +62,128 @@ use crate::trait_def::Storage;
 /// Sleep-based and non-spinning — the sanctioned inverse of beads's `busy_timeout = 0` + backoff.
 pub(crate) const BUSY_TIMEOUT_MS: u64 = 5000;
 
+/// Passive WAL-checkpoint cadence: fire `PRAGMA wal_checkpoint(PASSIVE)` on the held write connection
+/// once every `CHECKPOINT_EVERY_N_MUTATIONS` committed mutations (spine §3.3 — resolved at T0.8).
+///
+/// PASSIVE never blocks readers or writers and never takes the exclusive lock that TRUNCATE would, so
+/// it cannot manufacture contention in the write hot path; it only opportunistically folds committed
+/// WAL frames back into the main database so a long-lived `serve` does not grow the WAL unboundedly
+/// (`wal_autocheckpoint = 0` disables `SQLite`'s own automatic checkpointing — see [`apply_pragmas`]).
+/// The T0.8 contention lab asserts the WAL sidecar stays bounded under sustained multi-instance
+/// contention with this cadence on, and (a `#[ignore]`d negative control) that it breaches the
+/// ceiling with it off.
+pub(crate) const CHECKPOINT_EVERY_N_MUTATIONS: u64 = 50;
+
 /// Monotonic counter giving each `open_in_memory()` a unique shared-cache name, so two in-memory
 /// stores never collide on the process-global `SQLite` shared cache.
 static MEMORY_DB_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Process-internal instrumentation for a [`LibsqlStorage`] — three monotonic counters plus the
+/// test-controllable checkpoint cadence and the (test-only) busy-witness/spin toggles.
+///
+/// In production only the mutation counter and the passive checkpoint cadence are live (the witness
+/// and spin toggles default off and are flipped solely by the gated `StorageTestkit` seam). The
+/// counters are plain [`AtomicU64`]/[`AtomicBool`] — unsafe-free — and exist so the T0.8 contention
+/// lab can prove (a) contention materialized (busy-retry > 0 under contention, == 0 without) and
+/// (b) the passive checkpoint keeps the WAL bounded.
+#[derive(Debug)]
+pub(super) struct StorageInstrument {
+    /// Committed mutations (every successful `with_immediate_tx` commit bumps this).
+    mutation_count: AtomicU64,
+    /// Witnessed write-lock contention events (a `BEGIN IMMEDIATE` that observed the file write-lock
+    /// held by another writer — see [`with_immediate_tx`]).
+    busy_retry_count: AtomicU64,
+    /// Passive WAL checkpoints fired by the periodic cadence.
+    checkpoint_count: AtomicU64,
+    /// Mutations between passive checkpoints (`0` disables the cadence). Defaults to
+    /// [`CHECKPOINT_EVERY_N_MUTATIONS`]; the contention lab sets it to `0` inside the timed brackets.
+    checkpoint_interval: AtomicU64,
+    /// When `true`, each mutating `BEGIN IMMEDIATE` first runs a **zero-timeout probe** to witness
+    /// write-lock contention deterministically without changing the real (blocking) transaction's
+    /// semantics. Off in production; the lab enables it so the busy-retry witness is observable.
+    busy_witness: AtomicBool,
+}
+
+impl Default for StorageInstrument {
+    fn default() -> Self {
+        Self {
+            mutation_count: AtomicU64::new(0),
+            busy_retry_count: AtomicU64::new(0),
+            checkpoint_count: AtomicU64::new(0),
+            checkpoint_interval: AtomicU64::new(CHECKPOINT_EVERY_N_MUTATIONS),
+            busy_witness: AtomicBool::new(false),
+        }
+    }
+}
+
+impl StorageInstrument {
+    /// Record one committed mutation; returns `true` when the passive-checkpoint cadence is due.
+    ///
+    /// The cadence is due when the interval is non-zero and the new count is an exact multiple of it.
+    fn record_mutation(&self) -> bool {
+        let count = self.mutation_count.fetch_add(1, Ordering::Relaxed) + 1;
+        let interval = self.checkpoint_interval.load(Ordering::Relaxed);
+        interval != 0 && count.is_multiple_of(interval)
+    }
+
+    /// Bump the witnessed-contention counter.
+    fn record_busy(&self) {
+        self.busy_retry_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Bump the passive-checkpoint counter.
+    fn record_checkpoint(&self) {
+        self.checkpoint_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Whether the zero-timeout busy-witness probe is enabled.
+    fn witness_enabled(&self) -> bool {
+        self.busy_witness.load(Ordering::Relaxed)
+    }
+
+    /// Read the committed-mutation count (testkit seam).
+    #[cfg(any(test, feature = "testkit"))]
+    pub(super) fn mutation_count(&self) -> u64 {
+        self.mutation_count.load(Ordering::Relaxed)
+    }
+
+    /// Read the witnessed write-lock-contention count (testkit seam).
+    #[cfg(any(test, feature = "testkit"))]
+    pub(super) fn busy_retry_count(&self) -> u64 {
+        self.busy_retry_count.load(Ordering::Relaxed)
+    }
+
+    /// Read the passive-checkpoint count (testkit seam).
+    #[cfg(any(test, feature = "testkit"))]
+    pub(super) fn checkpoint_count(&self) -> u64 {
+        self.checkpoint_count.load(Ordering::Relaxed)
+    }
+
+    /// Set the passive-checkpoint cadence (`0` disables it) — testkit seam. The contention lab sets
+    /// `0` inside its timed brackets so checkpoint CPU never enters the CPU-per-write ratio.
+    #[cfg(any(test, feature = "testkit"))]
+    pub(super) fn set_checkpoint_interval(&self, n: u64) {
+        self.checkpoint_interval.store(n, Ordering::Relaxed);
+    }
+
+    /// Enable/disable the zero-timeout busy-witness probe — testkit seam. The contention lab enables
+    /// it so the busy-retry witness is observable from safe Rust.
+    #[cfg(any(test, feature = "testkit"))]
+    pub(super) fn set_busy_witness(&self, on: bool) {
+        self.busy_witness.store(on, Ordering::Relaxed);
+    }
+}
+
+/// The instrumentation context threaded into the mutating sibling functions so their
+/// [`with_immediate_tx`] calls witness contention (and, in the forced-spin control, spin-retry) and
+/// drive the passive-checkpoint cadence. Borrowed from the [`LibsqlStorage`] for one mutation.
+#[derive(Clone, Copy)]
+pub(super) struct WriteHook<'a> {
+    /// The store's instrumentation (counters + cadence + toggles).
+    pub(super) instrument: &'a StorageInstrument,
+    /// The native `busy_timeout` (ms) — `BUSY_TIMEOUT_MS` in production, `0` for the forced-spin control.
+    pub(super) busy_timeout_ms: u64,
+}
 
 /// The libsql-backed [`Storage`] implementation (local file / bundled `SQLite`).
 ///
@@ -83,6 +202,13 @@ pub struct LibsqlStorage {
     write_conn: Mutex<Connection>,
     /// The read connection (WAL MVCC reader snapshots; never serialized behind the writer).
     read_conn: Connection,
+    /// The native `busy_timeout` (ms) applied to both connections. Always [`BUSY_TIMEOUT_MS`] in
+    /// production; the gated forced-spin test constructor sets it to `0` so losers spin-retry
+    /// (proving the contention-lab metric actually detects a hot-spin).
+    busy_timeout_ms: u64,
+    /// Process-internal instrumentation (counters + checkpoint cadence + the test-only
+    /// busy-witness/spin toggles). See [`StorageInstrument`].
+    instrument: StorageInstrument,
 }
 
 impl LibsqlStorage {
@@ -101,7 +227,30 @@ impl LibsqlStorage {
             .map_err(map_libsql_err)?;
         // A real file: WAL applies (real WAL + native busy_timeout concurrency, validated by the
         // T0.8 contention lab on a file DB).
-        Self::from_database(db, true).await
+        Self::from_database(db, true, BUSY_TIMEOUT_MS).await
+    }
+
+    /// Open a local libsql database at `path` with a **non-default** native `busy_timeout`.
+    ///
+    /// Gated to tests / the `testkit` feature: the only sanctioned caller is the T0.8 contention
+    /// lab's **forced-spin control**, which passes `busy_timeout_ms = 0` so write-lock losers
+    /// surface `SQLITE_BUSY` immediately and the storage spin-retries them at the application level
+    /// (the beads anti-pattern, deliberately reproduced). That proves the lab's CPU-per-write ratio
+    /// metric actually *detects* a hot-spin (a non-vacuous gate). Production never uses this path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::Backend`] if the database cannot be opened or a pragma fails.
+    #[cfg(any(test, feature = "testkit"))]
+    pub async fn open_local_with_busy_timeout(
+        path: &Path,
+        busy_timeout_ms: u64,
+    ) -> Result<Self, StorageError> {
+        let db = Builder::new_local(path)
+            .build()
+            .await
+            .map_err(map_libsql_err)?;
+        Self::from_database(db, true, busy_timeout_ms).await
     }
 
     /// Open a fresh, process-unique in-memory libsql database shared by the write and read
@@ -127,22 +276,30 @@ impl LibsqlStorage {
             .await
             .map_err(map_libsql_err)?;
         // In-memory: shared-cache, NOT WAL (see the method docs + `apply_pragmas`).
-        Self::from_database(db, false).await
+        Self::from_database(db, false, BUSY_TIMEOUT_MS).await
     }
 
     /// Build the two connections from an opened `Database` and apply the runtime pragmas to each.
     ///
     /// `file_backed` selects whether the WAL-only pragmas are applied (only file databases can use
     /// WAL; a shared-cache `:memory:` DB reports `journal_mode = memory` regardless).
-    async fn from_database(db: Database, file_backed: bool) -> Result<Self, StorageError> {
+    /// `busy_timeout_ms` is the native sleep-based busy timeout applied to both connections (always
+    /// [`BUSY_TIMEOUT_MS`] except on the gated forced-spin control path, which passes `0`).
+    async fn from_database(
+        db: Database,
+        file_backed: bool,
+        busy_timeout_ms: u64,
+    ) -> Result<Self, StorageError> {
         let write_conn = db.connect().map_err(map_libsql_err)?;
         let read_conn = db.connect().map_err(map_libsql_err)?;
-        apply_pragmas(&write_conn, file_backed).await?;
-        apply_pragmas(&read_conn, file_backed).await?;
+        apply_pragmas(&write_conn, file_backed, busy_timeout_ms).await?;
+        apply_pragmas(&read_conn, file_backed, busy_timeout_ms).await?;
         Ok(Self {
             _db: db,
             write_conn: Mutex::new(write_conn),
             read_conn,
+            busy_timeout_ms,
+            instrument: StorageInstrument::default(),
         })
     }
 
@@ -155,6 +312,23 @@ impl LibsqlStorage {
     /// transaction, and release it on return.
     pub(super) async fn write(&self) -> tokio::sync::MutexGuard<'_, Connection> {
         self.write_conn.lock().await
+    }
+
+    /// Borrow the process-internal instrumentation (counters + checkpoint cadence + test toggles).
+    ///
+    /// Gated: the only consumer is the in-module [`StorageTestkit`](crate::testkit::StorageTestkit)
+    /// impl, which exposes the counters/toggles through the gated seam.
+    #[cfg(any(test, feature = "testkit"))]
+    pub(super) fn instrument(&self) -> &StorageInstrument {
+        &self.instrument
+    }
+
+    /// The per-mutation instrumentation context for the mutating sibling functions.
+    pub(super) fn hook(&self) -> WriteHook<'_> {
+        WriteHook {
+            instrument: &self.instrument,
+            busy_timeout_ms: self.busy_timeout_ms,
+        }
     }
 }
 
@@ -172,10 +346,15 @@ impl LibsqlStorage {
 /// `DatabaseLocked` from the `PRAGMA journal_mode = WAL` on the in-memory path). Skipping it removes
 /// the flake; the in-memory store relies on shared-cache + the native `busy_timeout`, and real WAL
 /// concurrency is validated by the T0.8 contention lab on a file DB.
-async fn apply_pragmas(conn: &Connection, file_backed: bool) -> Result<(), StorageError> {
+async fn apply_pragmas(
+    conn: &Connection,
+    file_backed: bool,
+    busy_timeout_ms: u64,
+) -> Result<(), StorageError> {
     // Native, sleep-based busy handler (NFR-3). Set first so any subsequent switch can wait rather
-    // than fail under a concurrent open.
-    conn.busy_timeout(Duration::from_millis(BUSY_TIMEOUT_MS))
+    // than fail under a concurrent open. `busy_timeout_ms` is always `BUSY_TIMEOUT_MS` (5000) in
+    // production; the gated forced-spin control passes `0` so losers surface `SQLITE_BUSY`.
+    conn.busy_timeout(Duration::from_millis(busy_timeout_ms))
         .map_err(map_libsql_err)?;
 
     // WAL-only pragmas: file-backed databases only (in-memory cannot use WAL).
@@ -201,31 +380,131 @@ async fn apply_pragmas(conn: &Connection, file_backed: bool) -> Result<(), Stora
 }
 
 /// Run `op` inside a `BEGIN IMMEDIATE` transaction on `conn`, committing on `Ok` and rolling back on
-/// `Err` (mutating-transaction helper, spine §3.3).
+/// `Err` (mutating-transaction helper, spine §3.3), instrumented for the contention lab.
 ///
 /// The closure returns its own `Result`; a transaction-open or commit failure is mapped through
 /// [`map_libsql_err`]. On `Err` the transaction is rolled back (a rollback failure is swallowed —
 /// the original error is the one worth surfacing; an uncommitted libsql `Transaction` also rolls
 /// back on drop).
+///
+/// # Acquiring the `BEGIN IMMEDIATE` write lock
+///
+/// `conn` is the **held** write connection (its [`Mutex`] guard is owned by the caller), so this
+/// function has exclusive use of it. How the write lock is acquired depends on the configured
+/// `busy_timeout_ms`:
+///
+/// - **Normal (production) — `busy_timeout_ms > 0`.** A single blocking `BEGIN IMMEDIATE`; the native
+///   sleep-based busy handler resolves cross-instance write-lock contention by *blocking*, never
+///   spinning (NFR-3). When the (test-only) busy-witness toggle is on, a **zero-timeout probe** runs
+///   first: it flips the connection's `busy_timeout` to 0 and tries to begin. If the probe observes
+///   the write lock held by another writer (`SQLITE_BUSY`/`SQLITE_LOCKED`), it records one witnessed
+///   contention event and falls through to the real blocking begin; if the probe *acquires*, that
+///   very transaction is used (no redundant begin). The probe changes nothing about the blocking
+///   semantics the gate measures — it only makes contention observable from safe Rust (libsql exposes
+///   no busy-handler callback). It is off in production.
+/// - **Forced-spin control — `busy_timeout_ms == 0`.** The native handler is disabled, so a contended
+///   `BEGIN IMMEDIATE` returns `SQLITE_BUSY` immediately. This deliberately reproduces the beads
+///   anti-pattern: a tight application-level retry loop re-begins until it acquires, recording one
+///   busy-retry per spin. That burns CPU and is the *only* path that does — it exists so the
+///   contention lab can prove its CPU-per-write ratio metric actually detects a hot-spin.
+/// # Post-commit instrumentation
+///
+/// On a successful commit the mutation counter is bumped and, once every
+/// [`CHECKPOINT_EVERY_N_MUTATIONS`] committed mutations (the test-controllable cadence on
+/// `instrument`), a **passive** WAL checkpoint fires on this same held connection. A failed/rolled-back
+/// transaction touches no counter. This is the single commit chokepoint every `Storage` mutation funnels
+/// through, so the cadence is exact and process-wide for the store.
 pub(super) async fn with_immediate_tx<F, Fut, T>(
     conn: &Connection,
+    hook: WriteHook<'_>,
     op: F,
 ) -> Result<T, StorageError>
 where
     F: FnOnce(libsql::Transaction) -> Fut,
     Fut: std::future::Future<Output = Result<(T, libsql::Transaction), StorageError>>,
 {
-    let tx = conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .await
-        .map_err(map_libsql_err)?;
-    match op(tx).await {
+    let tx = begin_immediate(conn, hook).await?;
+    let value = match op(tx).await {
         Ok((value, tx)) => {
             tx.commit().await.map_err(map_libsql_err)?;
-            Ok(value)
+            value
         }
-        Err(err) => Err(err),
+        Err(err) => return Err(err),
+    };
+    // The mutation committed: record it and fire the passive checkpoint when the cadence is due.
+    if hook.instrument.record_mutation() {
+        passive_checkpoint(conn).await;
+        hook.instrument.record_checkpoint();
     }
+    Ok(value)
+}
+
+/// Acquire a `BEGIN IMMEDIATE` transaction on the held write connection, applying the busy policy
+/// described on [`with_immediate_tx`] (witness probe in normal mode, spin-retry in forced-spin mode).
+async fn begin_immediate(
+    conn: &Connection,
+    hook: WriteHook<'_>,
+) -> Result<libsql::Transaction, StorageError> {
+    let WriteHook {
+        instrument,
+        busy_timeout_ms,
+    } = hook;
+    if busy_timeout_ms == 0 {
+        // Forced-spin control ONLY (never a production path — production always uses
+        // `BUSY_TIMEOUT_MS`): the native handler is off, so begin returns SQLITE_BUSY immediately on
+        // contention. This **tight, non-yielding** retry loop deliberately reproduces the *frankensqlite*
+        // defect-243 hot-spin — it pins the worker thread, burning CPU while it waits, so the
+        // contention lab's CPU-per-write metric can prove it actually detects a spin. (A cooperative
+        // `yield_now()` here would defer to the runtime and *not* burn CPU, masking the very failure
+        // the control exists to surface — so it is intentionally absent. The forced-spin control runs
+        // on a runtime sized with more worker threads than writers so the lock holder never starves.)
+        loop {
+            match conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .await
+            {
+                Ok(tx) => return Ok(tx),
+                Err(err) if is_busy_locked(&err) => instrument.record_busy(),
+                Err(err) => return Err(map_libsql_err(err)),
+            }
+        }
+    }
+
+    if instrument.witness_enabled() {
+        // Zero-timeout witness probe: flip busy_timeout to 0, try to begin. The held-connection
+        // guard guarantees exclusive use, so toggling the timeout is race-free.
+        conn.busy_timeout(Duration::ZERO).map_err(map_libsql_err)?;
+        let probe = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await;
+        // Restore the real (blocking) timeout before anything else can begin on this connection.
+        conn.busy_timeout(Duration::from_millis(busy_timeout_ms))
+            .map_err(map_libsql_err)?;
+        match probe {
+            // The probe acquired the write lock with no contention: use this transaction directly.
+            Ok(tx) => return Ok(tx),
+            // The probe observed another writer holding the lock: record it, then fall through to the
+            // real blocking begin (which the native handler resolves by sleeping, not spinning).
+            Err(err) if is_busy_locked(&err) => instrument.record_busy(),
+            Err(err) => return Err(map_libsql_err(err)),
+        }
+    }
+
+    // The real, blocking begin (native sleep-based busy handler; never spins).
+    conn.transaction_with_behavior(TransactionBehavior::Immediate)
+        .await
+        .map_err(map_libsql_err)
+}
+
+/// Fire a **passive** WAL checkpoint on the (held) write connection, swallowing any error.
+///
+/// PASSIVE checkpoints opportunistically copy committed WAL frames into the main database without
+/// taking the exclusive lock that TRUNCATE would and without blocking concurrent readers/writers, so
+/// it can never manufacture contention in the write hot path. A non-WAL connection (the in-memory
+/// shared-cache path) simply yields no rows. The error is swallowed: a checkpoint is best-effort
+/// housekeeping — a transient failure must never fail the mutation that already committed.
+async fn passive_checkpoint(conn: &Connection) {
+    let _ = conn.query("PRAGMA wal_checkpoint(PASSIVE)", ()).await;
 }
 
 #[async_trait]
@@ -242,7 +521,7 @@ impl Storage for LibsqlStorage {
 
     async fn create_issue(&self, issue: &Issue, actor: &str) -> Result<String, StorageError> {
         let conn = self.write().await;
-        crud::create_issue(&conn, issue, actor).await
+        crud::create_issue(&conn, self.hook(), issue, actor).await
     }
 
     async fn get_issue(&self, id: &str) -> Result<Option<Issue>, StorageError> {
@@ -260,7 +539,7 @@ impl Storage for LibsqlStorage {
         actor: &str,
     ) -> Result<Issue, StorageError> {
         let conn = self.write().await;
-        crud::update_issue(&conn, id, patch, actor).await
+        crud::update_issue(&conn, self.hook(), id, patch, actor).await
     }
 
     async fn delete_issue(
@@ -269,7 +548,7 @@ impl Storage for LibsqlStorage {
         actor: &str,
     ) -> Result<DeletePlan, StorageError> {
         let conn = self.write().await;
-        crud::delete_issue(&conn, plan, actor).await
+        crud::delete_issue(&conn, self.hook(), plan, actor).await
     }
 
     async fn claim_issue(
@@ -279,7 +558,7 @@ impl Storage for LibsqlStorage {
         actor: &str,
     ) -> Result<Issue, StorageError> {
         let conn = self.write().await;
-        mutate::claim_issue(&conn, id, assignee, actor).await
+        mutate::claim_issue(&conn, self.hook(), id, assignee, actor).await
     }
 
     async fn defer_issue(
@@ -289,12 +568,12 @@ impl Storage for LibsqlStorage {
         actor: &str,
     ) -> Result<Issue, StorageError> {
         let conn = self.write().await;
-        mutate::defer_issue(&conn, id, until, actor).await
+        mutate::defer_issue(&conn, self.hook(), id, until, actor).await
     }
 
     async fn undefer_issue(&self, id: &str, actor: &str) -> Result<Issue, StorageError> {
         let conn = self.write().await;
-        mutate::undefer_issue(&conn, id, actor).await
+        mutate::undefer_issue(&conn, self.hook(), id, actor).await
     }
 
     async fn list_issues(&self, filters: &ListFilters) -> Result<Vec<Issue>, StorageError> {
@@ -335,7 +614,7 @@ impl Storage for LibsqlStorage {
 
     async fn add_dependency(&self, dep: &Dependency, actor: &str) -> Result<(), StorageError> {
         let conn = self.write().await;
-        deps::add_dependency(&conn, dep, actor).await
+        deps::add_dependency(&conn, self.hook(), dep, actor).await
     }
 
     async fn remove_dependency(
@@ -346,7 +625,7 @@ impl Storage for LibsqlStorage {
         actor: &str,
     ) -> Result<(), StorageError> {
         let conn = self.write().await;
-        deps::remove_dependency(&conn, issue_id, depends_on_id, dep_type, actor).await
+        deps::remove_dependency(&conn, self.hook(), issue_id, depends_on_id, dep_type, actor).await
     }
 
     async fn list_dependencies(&self, id: &str) -> Result<Vec<Dependency>, StorageError> {
@@ -380,7 +659,7 @@ impl Storage for LibsqlStorage {
 
 #[cfg(test)]
 mod tests {
-    use super::{BUSY_TIMEOUT_MS, LibsqlStorage};
+    use super::{BUSY_TIMEOUT_MS, CHECKPOINT_EVERY_N_MUTATIONS, LibsqlStorage};
     use crate::{Storage, StorageError};
 
     /// `apply_pragmas` readback for the in-memory store: the native `busy_timeout` and foreign-key
@@ -440,6 +719,92 @@ mod tests {
 
         drop(storage);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The periodic passive WAL checkpoint **bounds** the `-wal` sidecar (the mechanism the T0.8
+    /// integration gate relies on but cannot reach from outside the crate, since the periodic
+    /// checkpoint fires on the held write connection).
+    ///
+    /// With `wal_autocheckpoint = 0` and no checkpoint, the `-wal` file grows monotonically with every
+    /// committed frame (it is never folded back into the main DB, so its space is never reused). A
+    /// periodic **passive** checkpoint folds committed frames back so the file's space is reused
+    /// in place — the file stops growing, staying *bounded* (PASSIVE reuses the WAL rather than
+    /// truncating it, so the proof is "bounded", not "shrinks to zero"). The test writes the **same**
+    /// batch twice over two fresh stores — once with the cadence OFF, once ON — and asserts the
+    /// checkpointed run's `-wal` is materially smaller (bounded) than the unbounded run's, and that the
+    /// passive-checkpoint counter advanced. (A single-writer store never contends, so the busy-retry
+    /// witness must stay 0.)
+    #[tokio::test]
+    async fn passive_checkpoint_bounds_wal_sidecar() {
+        use chrono::{TimeZone, Utc};
+        use std::sync::atomic::Ordering;
+        use unblock_model::Issue;
+
+        // Drive one fresh file-backed store through `writes` creates with the given checkpoint
+        // cadence; return the final `-wal` size and the store (so its counters can be inspected).
+        async fn run(cadence: u64, writes: u32) -> (u64, u64, u64) {
+            let dir = std::env::temp_dir().join(format!(
+                "unblock_wal_bound_{cadence}_{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_nanos())
+            ));
+            std::fs::create_dir_all(&dir).expect("mkdir");
+            let path = dir.join("unblock.db");
+            let wal_path = dir.join("unblock.db-wal");
+
+            let storage = LibsqlStorage::open_local(&path).await.expect("open");
+            storage.migrate().await.expect("migrate");
+            storage
+                .instrument()
+                .checkpoint_interval
+                .store(cadence, Ordering::Relaxed);
+
+            for n in 0..writes {
+                let issue = Issue {
+                    id: format!("ub-wal-{n}"),
+                    title: format!("grow the wal {n}"),
+                    created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+                    updated_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+                    ..Issue::default()
+                };
+                storage
+                    .create_issue(&issue, "writer")
+                    .await
+                    .expect("create");
+            }
+
+            let wal = std::fs::metadata(&wal_path).map_or(0, |m| m.len());
+            let checkpoints = storage.instrument().checkpoint_count();
+            let busy = storage.instrument().busy_retry_count();
+            drop(storage);
+            let _ = std::fs::remove_dir_all(&dir);
+            (wal, checkpoints, busy)
+        }
+
+        // Enough writes for several checkpoint intervals so the bound is visible.
+        let writes = 600u32;
+        let (unbounded_wal, off_checkpoints, off_busy) = run(0, writes).await;
+        let (bounded_wal, on_checkpoints, on_busy) =
+            run(CHECKPOINT_EVERY_N_MUTATIONS, writes).await;
+        let expected_checkpoints = u64::from(writes) / CHECKPOINT_EVERY_N_MUTATIONS;
+
+        assert_eq!(off_checkpoints, 0, "cadence off fires no checkpoint");
+        assert!(
+            on_checkpoints >= expected_checkpoints - 1,
+            "cadence on must fire ~{expected_checkpoints} checkpoints (got {on_checkpoints})"
+        );
+        assert!(
+            bounded_wal < unbounded_wal,
+            "the periodic passive checkpoint must bound the -wal sidecar \
+             (unbounded {unbounded_wal} bytes vs bounded {bounded_wal} bytes)"
+        );
+        // A single-writer store never contends: the busy-retry witness stays 0 on both runs.
+        assert_eq!(
+            off_busy, 0,
+            "uncontended writer records no busy-retry (off)"
+        );
+        assert_eq!(on_busy, 0, "uncontended writer records no busy-retry (on)");
     }
 
     /// Opening twice (migrate run twice) is idempotent — the second `migrate` is a no-op.

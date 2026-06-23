@@ -104,6 +104,9 @@ wiremock = "0.6"
 rand = "0.9"
 # Temp workspaces/DBs for the storage contract suite (file-backed `open_local`) + the fuzz cores.
 tempfile = "3"
+# Whole-process CPU time across all tokio worker threads (no raw libc, unsafe-free). Drives the
+# T0.8 contention lab's baseline-relative CPU-per-write ratio (NFR-3 / RK-1). Test-only.
+cpu-time = "1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
