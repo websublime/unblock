@@ -12,6 +12,15 @@
 //! **root** (i.e. the chain is ordered nearest-first, walking up the parent tree). A single-element
 //! chain means parent == root → one block (the root role wins). Disabled config → empty.
 //!
+//! # Emission order (v1.1 render reconciliation)
+//!
+//! v1 emits **parent-first** (`chain[0]` → `blocks[0]`, role `"parent"`; the root bookend last).
+//! The original `beads` `collect_inherited_blocks` emitted **root-first** as a *text-layout*
+//! (render) concern, not a policy invariant — the spine pins no normative order on inheritance
+//! blocks and the plan pins only the *selected set*. So this pure L1 selector is free to return
+//! parent-first; **`unblock-render` (v1.1) owns final presentation order** and must reorder for the
+//! surfaced UX rather than silently inheriting this order.
+//!
 //! # v1 limits (full logic lands in v1.1)
 //!
 //! v1 ships only the two-bookend selection over an already-walked chain: it does not resolve

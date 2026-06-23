@@ -44,4 +44,19 @@ proptest! {
         let disabled = unblock_policy::InheritanceConfig { enabled: false, fields: cfg.fields };
         prop_assert!(select_inherited_blocks(&chain, &disabled).is_empty());
     }
+
+    /// Parent-before-root emission order: a 2-block result is always [parent, root/epic] (the pure
+    /// L1 selector returns parent first; `unblock-render` owns final presentation order — see the
+    /// inheritance module doc). A root/epic block never precedes the parent block.
+    #[test]
+    fn parent_precedes_root(chain in arb_ancestor_chain(), cfg in arb_inheritance_config()) {
+        let blocks = select_inherited_blocks(&chain, &cfg);
+        if blocks.len() == 2 {
+            prop_assert_eq!(blocks[0].source_role.as_str(), "parent");
+            prop_assert!(
+                matches!(blocks[1].source_role.as_str(), "root" | "epic"),
+                "the second bookend must be a root/epic"
+            );
+        }
+    }
 }

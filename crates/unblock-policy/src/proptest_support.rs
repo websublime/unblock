@@ -24,8 +24,13 @@ use crate::ready::{BlockingEdge, ReadyContext};
 /// Bounded so generated timestamps stay valid and comparisons exercise both `<`/`=`/`>` paths.
 pub fn arb_timestamp() -> impl Strategy<Value = DateTime<Utc>> {
     // ~1970..2065, dense enough to hit ties on `created_at`.
-    (0_i64..3_000_000_000_i64)
-        .prop_map(|secs| Utc.timestamp_opt(secs, 0).single().unwrap_or_else(Utc::now))
+    // Deterministic fallback (the `single()` None branch is unreachable for this bounded range, but
+    // a wall-clock fallback inside a seed-reproducible generator would be a latent hazard).
+    (0_i64..3_000_000_000_i64).prop_map(|secs| {
+        Utc.timestamp_opt(secs, 0)
+            .single()
+            .unwrap_or(DateTime::from_timestamp_nanos(0))
+    })
 }
 
 /// Arbitrary [`Priority`] across the full valid `0..=4` range (P0..P4).
