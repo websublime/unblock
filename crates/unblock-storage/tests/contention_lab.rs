@@ -37,8 +37,9 @@
 //! time is sleep, not CPU). A hot-spin ⇒ `R ≫ 5` (the `K - 1` losers burn cores while one writer works,
 //! so per-write CPU rises ≈ `K×`). The ratio normalizes for machine speed (both legs, same runner, same
 //! process), so it is far more flake-resistant than any absolute CPU/wall threshold. The gate asserts
-//! **R ≤ 5.0** — a *provisional* wide categorical bound: this machine measures `R ≈ 1.1` blocking and
-//! `R ≈ 26` for the forced-spin control, so 5.0 sits with large headroom on both sides. It is marked
+//! **R ≤ 5.0** — a *provisional* wide categorical bound. On a multi-core dev machine independent runs
+//! measure `R ≈ 1.0–1.2` blocking (the run-to-run spread; the band bounds it, not a single point) and
+//! `R ≈ 25–27` for the forced-spin control, so 5.0 sits with large headroom on both sides. It is marked
 //! provisional in code + docs; the actual measured `R` is printed on every run and recorded in
 //! `STATUS.md`. Calibration of a tighter bound is pending (perf budgets are T3.5).
 //!
@@ -140,8 +141,9 @@ static GATE_SERIAL: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 /// Provisional gate bound on the contended/baseline CPU-per-write ratio (see the module docs).
 ///
-/// Wide categorical bound: far below a spin's > 10, comfortably above honest blocking's ~1.2–2. The
-/// measured `R` is printed on every run; a tighter, calibrated bound is pending (perf budgets = T3.5).
+/// Wide categorical bound: far below a spin's `≈ 25–27`, comfortably above honest blocking's
+/// `≈ 1.0–1.2`. The measured `R` is printed on every run; a tighter, calibrated bound is pending
+/// (perf budgets = T3.5).
 const PROVISIONAL_RATIO_CEILING: f64 = 5.0;
 
 /// Floor on the adaptive writer count (the gate needs at least two writers to contend at all).
@@ -258,6 +260,17 @@ async fn run_gate(parallelism: usize) {
         correctness.create_attempts,
         correctness.create_locked
     );
+    // Update-storm no-lost-write reconciliation: every attempt either committed or lost with the
+    // allowlisted DatabaseLocked (any other variant already panicked in the storm) — nothing vanished.
+    assert_eq!(
+        correctness.update_committed + correctness.update_locked,
+        correctness.update_attempts,
+        "every update-storm attempt must commit or lose with DatabaseLocked (no lost write): \
+         committed {} + locked {} != attempts {}",
+        correctness.update_committed,
+        correctness.update_locked,
+        correctness.update_attempts
+    );
 
     // (4) WAL stays bounded under sustained contention with the periodic checkpoint on.
     assert!(
@@ -321,6 +334,13 @@ impl LegStats {
 /// spec; only the *scheduling* differs, which is exactly the property being isolated. A parallel
 /// baseline would silently fold parallelism overhead into the denominator and suppress the ratio,
 /// masking a real hot-spin — so it is deliberately avoided.)
+///
+/// **Spin isolation (why R is a clean spin signal).** The gate and the forced-spin control hold the
+/// *scheduling* constant — `Sequential` baseline, `Parallel` contended — and vary **only**
+/// `busy_timeout` (5000 ms blocking vs 0 spinning). Same topology, same writers, same ops; the lone
+/// independent variable across the two configurations is the busy policy. So the resulting `R`
+/// (`≈ 1.0–1.2` at 5000 ms vs `≈ 27` at 0) isolates the *spin*, not any scheduling or parallelism
+/// artifact — which is exactly what makes the gate a sound, non-vacuous non-spin proof.
 #[derive(Clone, Copy)]
 enum Concurrency {
     /// Run the writers one after another (the honest, contention-free per-write CPU reference).
@@ -477,6 +497,8 @@ struct CorrectnessStats {
     created: u64,
     /// Disjoint-creates that lost with the allowlisted `DatabaseLocked`.
     create_locked: u64,
+    /// Update-storm attempts (`upd_per_writer * writers`).
+    update_attempts: u64,
     /// Update-storm commits.
     update_committed: u64,
     /// Update-storm `DatabaseLocked` losers (allowlisted).
@@ -596,6 +618,7 @@ async fn run_correctness_phases(writers: usize) -> CorrectnessStats {
             (committed, locked)
         });
     }
+    let update_attempts = u64::from(upd_per_writer) * stores.len() as u64;
     let mut update_committed = 0u64;
     let mut update_locked = 0u64;
     while let Some(res) = upd_set.join_next().await {
@@ -621,6 +644,7 @@ async fn run_correctness_phases(writers: usize) -> CorrectnessStats {
         create_attempts,
         created,
         create_locked,
+        update_attempts,
         update_committed,
         update_locked,
     }
@@ -1000,7 +1024,7 @@ fn print_diagnostics(
     );
     println!(
         "RATIO R  : {ratio:.3}  (provisional ceiling {PROVISIONAL_RATIO_CEILING:.1}; \
-         blocking -> ~1, spin -> >10)"
+         blocking ~1.0-1.2, spin >> 5)"
     );
     println!(
         "WITNESS  : baseline busy_retries={} contended busy_retries={}",
@@ -1008,12 +1032,13 @@ fn print_diagnostics(
     );
     println!(
         "CORRECT  : claim_winners={} claim_losers={} | creates: attempts={} created={} locked={} | \
-         updates: committed={} locked={}",
+         updates: attempts={} committed={} locked={}",
         correctness.claim_winners,
         correctness.claim_losers,
         correctness.create_attempts,
         correctness.created,
         correctness.create_locked,
+        correctness.update_attempts,
         correctness.update_committed,
         correctness.update_locked
     );
