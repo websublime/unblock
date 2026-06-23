@@ -1,209 +1,28 @@
-//! `xtask` — workspace tooling.
+//! `xtask` — workspace tooling (thin dispatcher over the `xtask` library).
 //!
-//! `check-layering` enforces the acyclic crate graph (NFR-15) by reading the *resolved*
-//! workspace metadata (`cargo metadata`) — not by text-parsing manifests — so it sees
-//! feature-gated `dep:` edges, renames, and path-vs-registry forms correctly.
+//! `check-layering` enforces the acyclic crate graph (NFR-15) from resolved `cargo metadata`
+//! (`xtask::layering`). `doc-lint` runs the doc-corpus consistency lint (the six drift classes
+//! a..f; `xtask::doc_lint`, ci-cd §2.1).
 //!
-//! Run: `cargo xtask check-layering`. T0.9 wires this into the CI `layering` job.
-//! See `docs/plans/ci-cd-and-distribution.md` §2.
+//! Run: `cargo xtask check-layering` / `cargo xtask doc-lint`. T0.9 wires both into the CI
+//! `layering` + `doc-lint` jobs. See `docs/plans/ci-cd-and-distribution.md` §2.
 #![forbid(unsafe_code)]
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::process::{Command, ExitCode};
+use std::process::ExitCode;
+
+use xtask::{doc_lint, layering};
 
 fn main() -> ExitCode {
     match std::env::args().nth(1).as_deref() {
-        Some("check-layering") => check_layering(),
+        Some("check-layering") => layering::check_layering(),
+        Some("doc-lint") => doc_lint::doc_lint(),
         Some(other) => {
-            eprintln!("unknown xtask {other:?}\n  available: check-layering");
+            eprintln!("unknown xtask {other:?}\n  available: check-layering, doc-lint");
             ExitCode::from(2)
         }
         None => {
-            eprintln!("usage: cargo xtask <task>\n  available: check-layering");
+            eprintln!("usage: cargo xtask <task>\n  available: check-layering, doc-lint");
             ExitCode::from(2)
         }
-    }
-}
-
-/// Allowed *internal* (workspace) dependency edges per crate (NFR-15 layering).
-///
-/// Source of truth: PRD §8.1 + design-spine §0. Every internal normal-kind edge must
-/// appear here; `unblock-cli -> unblock-mcp` is the only intra-L7 edge; no edge may
-/// point upward in the layer order
-/// `model|error -> policy -> storage -> sync|health -> config -> engine -> render -> mcp|cli`.
-fn allowed_edges() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
-    let table: &[(&str, &[&str])] = &[
-        ("unblock-error", &[]),
-        ("unblock-model", &["unblock-error"]),
-        ("unblock-policy", &["unblock-model", "unblock-error"]),
-        ("unblock-storage", &["unblock-model", "unblock-error"]),
-        (
-            "unblock-sync",
-            &["unblock-storage", "unblock-model", "unblock-error"],
-        ),
-        (
-            "unblock-health",
-            &["unblock-model", "unblock-error", "unblock-sync"],
-        ),
-        (
-            "unblock-config",
-            &[
-                "unblock-storage",
-                "unblock-sync",
-                "unblock-health",
-                "unblock-error",
-            ],
-        ),
-        (
-            "unblock-engine",
-            &[
-                "unblock-config",
-                "unblock-sync",
-                "unblock-storage",
-                "unblock-policy",
-                "unblock-health",
-                "unblock-model",
-                "unblock-error",
-            ],
-        ),
-        ("unblock-render", &["unblock-model", "unblock-error"]),
-        (
-            "unblock-mcp",
-            &[
-                "unblock-engine",
-                "unblock-render",
-                "unblock-policy",
-                "unblock-model",
-                "unblock-error",
-            ],
-        ),
-        (
-            "unblock-cli",
-            &[
-                "unblock-engine",
-                "unblock-render",
-                "unblock-policy",
-                "unblock-mcp",
-                "unblock-error",
-            ],
-        ),
-        (
-            "unblock-fuzz",
-            &[
-                "unblock-model",
-                "unblock-sync",
-                "unblock-storage",
-                "unblock-error",
-            ],
-        ),
-        ("xtask", &[]),
-    ];
-    table
-        .iter()
-        .map(|(k, v)| (*k, v.iter().copied().collect()))
-        .collect()
-}
-
-fn check_layering() -> ExitCode {
-    let cargo = option_env!("CARGO").unwrap_or("cargo");
-    let output = match Command::new(cargo)
-        .args([
-            "metadata",
-            "--format-version",
-            "1",
-            "--no-deps",
-            "--offline",
-        ])
-        .output()
-    {
-        Ok(out) => out,
-        Err(err) => {
-            eprintln!("failed to invoke `cargo metadata`: {err}");
-            return ExitCode::FAILURE;
-        }
-    };
-    if !output.status.success() {
-        eprintln!(
-            "`cargo metadata` failed:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        return ExitCode::FAILURE;
-    }
-
-    let meta: serde_json::Value = match serde_json::from_slice(&output.stdout) {
-        Ok(value) => value,
-        Err(err) => {
-            eprintln!("failed to parse `cargo metadata` output: {err}");
-            return ExitCode::FAILURE;
-        }
-    };
-
-    let allowed = allowed_edges();
-    let packages = meta["packages"].as_array().cloned().unwrap_or_default();
-    let members: BTreeSet<&str> = packages
-        .iter()
-        .filter_map(|pkg| pkg["name"].as_str())
-        .collect();
-
-    // Guard against a vacuous pass: every crate named in the matrix must be a real
-    // workspace member. Catches empty/garbled `cargo metadata` output and matrix drift
-    // (a renamed/removed crate) before the edge loop can silently report "OK".
-    let missing: Vec<&str> = allowed
-        .keys()
-        .copied()
-        .filter(|name| !members.contains(name))
-        .collect();
-    if !missing.is_empty() {
-        eprintln!(
-            "layering check could not verify — `cargo metadata` listed no member for: {} \
-             (empty/garbled metadata, or matrix drift in xtask/src/main.rs)",
-            missing.join(", ")
-        );
-        return ExitCode::FAILURE;
-    }
-
-    let mut violations: Vec<String> = Vec::new();
-    let mut unlisted: Vec<String> = Vec::new();
-
-    for pkg in &packages {
-        let name = pkg["name"].as_str().unwrap_or_default();
-        let Some(allow) = allowed.get(name) else {
-            unlisted.push(name.to_owned());
-            continue;
-        };
-        for dep in pkg["dependencies"].as_array().into_iter().flatten() {
-            let dep_name = dep["name"].as_str().unwrap_or_default();
-            // Only internal (workspace) edges form the layering graph.
-            if !members.contains(dep_name) {
-                continue;
-            }
-            // `kind` is null for normal deps; dev/build deps do not constrain layering.
-            if matches!(dep["kind"].as_str(), Some("dev" | "build")) {
-                continue;
-            }
-            if !allow.contains(dep_name) {
-                violations.push(format!("  DISALLOWED: {name} -> {dep_name}"));
-            }
-        }
-    }
-
-    for name in &unlisted {
-        eprintln!("WARN: workspace package not in the layering matrix: {name}");
-    }
-
-    if violations.is_empty() && unlisted.is_empty() {
-        println!("layering OK: every internal crate edge conforms to the NFR-15 matrix");
-        ExitCode::SUCCESS
-    } else if violations.is_empty() {
-        // An unlisted package is a matrix-maintenance gap, not a layering breach.
-        eprintln!("layering check incomplete: update the matrix in xtask/src/main.rs");
-        ExitCode::FAILURE
-    } else {
-        eprintln!("LAYERING VIOLATIONS (NFR-15):");
-        for line in &violations {
-            eprintln!("{line}");
-        }
-        eprintln!("\nallowed edges are pinned in xtask/src/main.rs (source: PRD §8.1 + spine §0)");
-        ExitCode::FAILURE
     }
 }
