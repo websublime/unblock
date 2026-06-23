@@ -72,6 +72,12 @@ csv = "1.3"
 dunce = "1"
 petgraph = "0.7"
 
+# --- workspace tooling (xtask) ---
+# `regex` drives the `cargo xtask doc-lint` doc-corpus consistency lint (ci-cd §2.1). It is ALREADY
+# in the lock transitively (via `tracing-subscriber`'s `env-filter`), so making it a direct xtask dep
+# adds ZERO new transitive surface. Version tracks the locked `regex` (1.12.x).
+regex = "1"
+
 # --- external: storage backend (local file / bundled SQLite by default; remote/replica
 #     behind the non-default `remote` feature, D15/NFR-10 — `core` statically bundles SQLite) ---
 libsql = { version = "0.9.30", default-features = false, features = ["core"] }
