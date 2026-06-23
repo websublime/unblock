@@ -36,12 +36,14 @@ allow = [
   "Zlib",
   "Unicode-3.0",
   "CDLA-Permissive-2.0",
-  "MPL-2.0",
-  "OpenSSL",
 ]
-# Note: the axoupdater TLS stack in the lock unconditionally — `ring` (`MIT AND ISC AND OpenSSL`) and
-# the `aws-lc-sys` AND-expression — resolves cleanly because every component license (MIT/ISC/
-# OpenSSL/Apache-2.0/ISC) is in `allow` above; no per-crate clarify is needed.
+# Each entry is load-bearing for at least one crate in the committed lock (verified via
+# `cargo deny list`): e.g. Unicode-3.0 (unicode-ident/icu data), CDLA-Permissive-2.0 (webpki roots),
+# and the TLS stack — `ring` (Apache-2.0 / ISC / MIT) and `aws-lc-sys`
+# (ISC AND MIT AND Apache-2.0, + BSD-3-Clause/MIT-0 components) — all resolve under the entries
+# above; no per-crate clarify is needed. We do NOT pre-authorize an unused license category:
+# MPL-2.0 (weak copyleft) and OpenSSL are used by ZERO crates in the lock, so listing them would only
+# pre-clear a forbidden/unneeded class for a future transitive — they are deliberately absent.
 
 # -------------------------------------------------------------------------------------------------
 # Bans — the no-git ban (NFR-6) + transitive-budget hygiene (NFR-10).
