@@ -971,10 +971,26 @@ pub struct UpdateArgs { /* --check, --version <tag>, --yes */ }
 
 ## 6. Conformance rules
 
-1. Per-crate plans MUST use these exact type/field/signature shapes; deviations require amending this file first.
-2. No backend (libsql) type may appear in any public API outside `unblock-storage`'s private impl (NFR-15).
-3. `content_hash` is `#[serde(skip)]` and recomputed on load; it is the import idempotency key (FR-26).
-4. All mutations flow through `Session` (FR-9) and the single write permit (D14); reads never acquire it (FR-10).
-5. Every error surfaced at L7 maps to exactly one `ErrorCode` and one 0–8 exit code per §2.3 (golden-snapshot pinned).
-6. MCP tool count stays ≤ 8; new domain surface in v1.1 extends existing tools by discriminator before adding tools (RK-3).
-7. `forbid(unsafe_code)`, no git crate / `Command::new("git")` anywhere (NFR-6/NFR-9); network/TLS only behind the non-default `remote` feature (D15).
+> The seven rules below are individually addressable as `spine §6.1`..`§6.7` so a crate plan can cite
+> the exact rule it conforms to (e.g. RK-3 = §6.6). Each `### 6.N` carries the full normative rule.
+
+### 6.1 Exact shapes (amend-first)
+Per-crate plans MUST use these exact type/field/signature shapes; deviations require amending this file first.
+
+### 6.2 No backend type in public API
+No backend (libsql) type may appear in any public API outside `unblock-storage`'s private impl (NFR-15).
+
+### 6.3 content_hash recomputed on load
+`content_hash` is `#[serde(skip)]` and recomputed on load; it is the import idempotency key (FR-26).
+
+### 6.4 Single mutation path
+All mutations flow through `Session` (FR-9) and the single write permit (D14); reads never acquire it (FR-10).
+
+### 6.5 One error → one code → one exit code
+Every error surfaced at L7 maps to exactly one `ErrorCode` and one 0–8 exit code per §2.3 (golden-snapshot pinned).
+
+### 6.6 MCP tool-count budget
+MCP tool count stays ≤ 8; new domain surface in v1.1 extends existing tools by discriminator before adding tools (RK-3).
+
+### 6.7 Safety / no-git / no-default-network
+`forbid(unsafe_code)`, no git crate / `Command::new("git")` anywhere (NFR-6/NFR-9); network/TLS only behind the non-default `remote` feature (D15).

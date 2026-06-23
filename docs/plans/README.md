@@ -124,7 +124,7 @@ The 16 documents were cross-checked for: (a) consumed APIs actually produced by 
 ### HIGH
 
 - **CF-A — [RESOLVED] Render-visible DTOs are placed above the crate that must format them (render = model+error only).** *Resolution: `CountBucket`, `GraphEdge`, `DepTree`, `CloseOutcome`, `ExportReport`, `ImportReport`, `DiagnosticReport`/`DiagnosticKind` relocated to `unblock-model`; storage/engine re-export them, so render imports only model+error.*
-  *Crates/files:* `unblock-render` (§1, §6, OQ-3) vs spine §3.1 (`CountBucket`, `DepTree`/`GraphEdge` in storage L2) and spine §4.1 (`CloseOutcome`, `ExportReport`, `ImportReport`, `DiagnosticReport` in engine L5).
+  *Crates/files:* `unblock-render` (its Public-API + Cross-crate-deps sections, OQ-3) vs spine §3.1 (`CountBucket`, `DepTree`/`GraphEdge` in storage L2) and spine §4.1 (`CloseOutcome`, `ExportReport`, `ImportReport`, `DiagnosticReport` in engine L5).
   *Problem:* `unblock-render` (L6) depends on **model + error only** (PRD §8.1) but its `Renderer` trait must format `CountBucket`, `DepTree`, `CloseOutcome`, sync reports and `DiagnosticReport`. Those types live in storage (L2) and engine (L5). Render cannot import storage or engine without widening its dependency edge (engine is L5 = below render L6 in the layer order, but PRD §8.1 still forbids the edge).
   *Fix:* **Amend the spine to relocate the display-DTOs into `unblock-model`** — `CountBucket`, `GraphEdge`, `DepTree`, `CloseOutcome`, `ExportReport`, `ImportReport`, `DiagnosticReport`/`DiagnosticKind`. (`StructuredError` is already in `unblock-error`.) Storage/engine then re-export them from model. This is the CF-11 pattern ("shared contract type lives in model") applied to display types. Decide before render T-work and before engine's report.rs.
 
@@ -151,7 +151,7 @@ The 16 documents were cross-checked for: (a) consumed APIs actually produced by 
   *Fix:* **Reserve the names now in spine §3.2 as v1.1 additive trait methods:** `read_config()/write_config()` (config-table) and a small diagnostic-probe set (`duplicate_rows`, `null_in_not_null`, `write_probe`, `child_count_drift`) returning backend-agnostic rows. Additive (default-method) so no v1 break. Land in storage v1.1.
 
 - **CF-F — [RESOLVED] `Attribution` is defined in two crates with different meanings.** *Resolution: policy gate type renamed to `AttributionGate`; the single capture-only `Attribution` lives in `unblock-model` and is shared by engine/mcp/event. Noted in spine §1.7 + §5.2.*
-  *Crates/files:* `unblock-policy` (§1.1 gates: a `struct Attribution` inside `PolicyDocument`/gate evaluation) and `unblock-mcp` (`tools/dto.rs` `struct Attribution` capture-only agent_name/harness/model, per spine §5.2), plus the capture-only attribution fields on `model::Event`.
+  *Crates/files:* `unblock-policy` (its gates section: a `struct Attribution` inside `PolicyDocument`/gate evaluation) and `unblock-mcp` (`tools/dto.rs` `struct Attribution` capture-only agent_name/harness/model, per spine §5.2), plus the capture-only attribution fields on `model::Event`.
   *Problem:* Same type name, two distinct concepts (gate-policy attribution requirement vs MCP capture-only agent metadata). Risk of confusion / accidental coupling.
   *Fix:* Rename the policy gate one to `AttributionGate` (or `RequireAttribution`) and keep the MCP/event capture-only one as the single `Attribution` carried in `unblock-model` (so engine/mcp/event share one definition). Note in spine §1.7 (Event attribution) + §5.2.
 

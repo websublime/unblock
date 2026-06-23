@@ -25,30 +25,38 @@ unblock has two distinct GitHub Actions pipelines:
 
 Runs on `pull_request` and pushes to the default branch. Jobs (all on stable `1.96.0`, per D9):
 
-| Job | Gate | NFR |
-|---|---|---|
-| `fmt` | `cargo fmt --check` | — |
-| `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` (pedantic; `forbid(unsafe_code)`) | NFR-9, NFR-15 |
-| `test` | `cargo test --workspace` incl. the `Storage` **contract suite** + proptest | NFR-16 |
-| `snapshots` | `cargo insta test --check` (stable output shapes) | NFR-14, NFR-16 |
-| `layering` | acyclic-crate-graph assertion (no back-edges; storage = model+error only) | NFR-15 |
-| `audit` | `cargo audit` (advisories; catches e.g. an archived retry crate) | NFR-3, NFR-9 |
-| `deny` | `cargo deny check` (licenses, bans, sources; **no-git ban**: no git crate in tree; transitive budget) | NFR-6, NFR-9, NFR-10 |
-| `fuzz-smoke` | short `cargo fuzz` run on ingestion targets | NFR-16 |
-| `bench-gate` | `criterion` baselines with a 10% regression gate (perf-sensitive paths) | NFR-1 |
-| `scale` | 250k-issue corpus under the single-serve topology (D14) | NFR-2 |
-| `contention` | **the contention lab** — assert no 100% CPU hot-spin (libsql WAL + busy_timeout) | NFR-3 |
-| `toolchain` | pin `rust-toolchain.toml` to **stable `1.96.0`** and build the workspace with `--locked`; a green stable build (no nightly-only features) is the gate. Fails if any crate requires nightly. | NFR-12 |
-| `no-network` | **workspace-wide no-network symbol-scan** — assert no networking symbols (`reqwest`, `hyper`, `std::net`, raw TLS) link into any crate except the `self-update`-feature-gated `axoupdater` surface in `unblock-cli`; spot-checks the default-feature binary too. | NFR-17 |
-| `rate-limit` | rate-limit / stress assertions for the single-serve gate (NFR-18 rate-limit half) and the long-lived interleaved-write stress harness (NFR-5); owned here in CI (harness file cross-ref impl-plan T3.5). | NFR-5, NFR-18 |
-| `doc-lint` | **doc-corpus consistency lint** (see below) — catches the D-id / FR-tier / command-token / stamp / cross-ref / doc-count drift classes. | — |
+| Job | Gate | NFR | Lands |
+|---|---|---|---|
+| `fmt` | `cargo fmt --check` | — | **M0 (T0.9)** |
+| `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` (pedantic; `forbid(unsafe_code)`) **plus** a targeted `cargo clippy -p unblock-storage --all-targets --features testkit -- -D warnings` step so the feature-gated testkit/contract/contention code is lint-clean | NFR-9, NFR-15 | **M0 (T0.9)** |
+| `test` | `cargo test --workspace` (the always-on unit + proptest + `behaviour.rs` set; the `testkit`-gated `contract.rs`/`contention_lab.rs` are `#![cfg(feature = "testkit")]` and compile to 0 tests here — they run in the dedicated `storage-testkit` job below) | NFR-16 | **M0 (T0.9)** |
+| `storage-testkit` | `cargo test -p unblock-storage --features testkit --test contract` (the NFR-16 **contract suite**) **and** `--test contention_lab` (the M0 **contention gate**, `contention_lab_no_hot_spin_and_correct`). **Requires ≥ 2 vCPU** — the contention test hard-fails on a single-vCPU runner (writers cannot genuinely contend). **Targeted features, not `--all-features`** (see §2.2). | NFR-3, NFR-16 | **M0 (T0.9)** |
+| `snapshots` | `cargo insta test --check` (stable output shapes) | NFR-14, NFR-16 | **M0 (T0.9)** |
+| `layering` | `cargo xtask check-layering` — acyclic-crate-graph assertion (no back-edges; storage = model+error only), reading the committed `Cargo.lock` so `cargo metadata --offline` resolves | NFR-15 | **M0 (T0.9)** |
+| `audit` | `cargo audit` (advisories; catches e.g. an archived retry crate) | NFR-3, NFR-9 | **M0 (T0.9)** |
+| `deny` | `cargo deny check` (licenses, bans, sources, advisories; **no-git ban**: no git crate in tree; transitive budget) | NFR-6, NFR-9, NFR-10 | **M0 (T0.9)** |
+| `toolchain` | pin `rust-toolchain.toml` to **stable `1.96.0`** and build the workspace with `--locked`; a green stable build (no nightly-only features) is the gate. Fails if any crate requires nightly. | NFR-12 | **M0 (T0.9)** |
+| `doc-lint` | `cargo xtask doc-lint` — **doc-corpus consistency lint** (see §2.1) over the fixed 19-file corpus; catches the D-id / FR-tier / command-token / stamp / cross-ref / doc-count drift classes. | — | **M0 (T0.9)** |
+| `fuzz-smoke` | short `cargo fuzz` run on the 8 ingestion targets, on a **scheduled** (nightly) workflow (`fuzz-smoke.yml`): nightly-`2024-10-31` + libFuzzer for the targets, plus a separate stable-1.96 step that runs the two `#[ignore]`d contention-lab controls (forced-spin, WAL-negative) to keep the M0 gate proven non-vacuous. Failure routing at M0 = just go red; `workflow_dispatch` allows a manual re-run; no issue-opening. | NFR-16 | **M0 (T0.9)** — nightly schedule |
+| `bench-gate` | `criterion` baselines with a 10% regression gate (perf-sensitive paths) | NFR-1 | **DEFERRED → T3.5** (no `benches/` suite until perf budgets land) |
+| `scale` | 250k-issue corpus under the single-serve topology (D14) | NFR-2 | **DEFERRED → T3.5** (the 250k corpus harness is built at T3.5) |
+| `no-network` | **workspace-wide no-network symbol-scan** — assert no networking symbols (`reqwest`, `hyper`, `std::net`, raw TLS) link into any crate except the `self-update`-feature-gated `axoupdater` surface in `unblock-cli`; spot-checks the default-feature binary too. | NFR-17 | **DEFERRED → T3.1/T3.6** (needs the `unblock-cli` binary + the `axoupdater`/dist surface to scan) |
+| `rate-limit` | rate-limit / stress assertions for the single-serve gate (NFR-18 rate-limit half) and the long-lived interleaved-write stress harness (NFR-5); owned here in CI (harness file cross-ref impl-plan T3.4/T3.5). | NFR-5, NFR-18 | **DEFERRED → T3.4/T3.5** (the rate-limit + stress harness ships with the engine reliability gates) |
 
-- **Action pinning (NFR-9):** every `uses:` is pinned to a 40-char commit SHA, with an action-pins inventory and a network-free local verifier. This applies to **both** the hand-authored CI and the dist-generated release workflow (post-process / pin the generated `uses:` lines; re-pin on `dist` upgrades).
-- **`Cargo.lock` committed** (NFR-9).
+> **The standalone `contention` NFR-3 job is folded into `storage-testkit` at M0** — the contention lab is the M0 exit gate (T0.8) and runs as `--test contention_lab` under `storage-testkit`; the separately-owned long-lived stress half is the deferred `rate-limit` job.
+
+> **DEFERRED ledger (M0 scope of T0.9).** The 11 jobs marked **M0 (T0.9)** are authored now in `.github/workflows/ci.yml` (+ the nightly `fuzz-smoke.yml`). The four genuinely-deferred jobs — **`bench-gate` (→ T3.5)**, **`scale` (→ T3.5)**, **`no-network` (→ T3.1/T3.6)**, **`rate-limit` (→ T3.4/T3.5)** — depend on artefacts (a `benches/` suite, the 250k corpus harness, the `unblock-cli` binary + `axoupdater`/dist surface, the rate-limit/stress harness) that do not exist until their gating task lands. They are listed at the top of `ci.yml` as a comment so the gap is visible, not silent.
+
+- **Action pinning (NFR-9):** every `uses:` is pinned to a 40-char commit SHA, with a trailing `# vX.Y.Z` comment. This applies to **both** the hand-authored CI and the dist-generated release workflow (post-process / pin the generated `uses:` lines; re-pin on `dist` upgrades).
+- **`Cargo.lock` committed** (NFR-9); all M0 build/test jobs run `--locked`.
+
+### 2.2 Targeted features vs `--all-features` (D15/NFR-10 — the M0 gate must not link TLS)
+
+`cargo tree -e features --all-features` resolves the libsql **`remote`** feature, which pulls `reqwest`/`hyper`/`rustls`/`hyper-rustls` into the build. Activating `--all-features` in the M0 quality gate would therefore compile the network/TLS surface that D15 keeps **off the default path** (NFR-10/NFR-17). So the testkit clippy/test steps use **targeted features** — `-p unblock-storage --features testkit` — which is verified TLS- and network-free (`testkit` pulls no deps). **Never `--all-features` in CI** until/unless the remote path is itself a tested target (v1.2).
 
 ### 2.1 `doc-lint` — doc-corpus consistency lint
 
-A mechanical lint over the `docs/` corpus (PRD.md, the `docs/plans/*` set, the 12 crate plans + fuzz) that fails CI on the drift classes seen in the consolidated review. It checks:
+`cargo xtask doc-lint` — a mechanical, offline, sub-second lint over a **fixed 19-file corpus** (`docs/PRD.md`; the six `docs/plans/*.md` — `00-roadmap`, `01-design-spine`, `README`, `STATUS`, `ci-cd-and-distribution`, `implementation-plan`; the 12 `docs/plans/crates/unblock-*.md` incl. fuzz). `docs/PROCESS.md` and `docs/plans/templates/*` are **out of corpus**. An existence-guard FAILs on any missing **or** unexpected corpus file (a smaller-than-expected corpus is a vacuous pass). Global guards: a `CommonMark` block-fence mask (all classes skip fenced lines), an inline-code-span index (class (c) fires only in-code), a never-finding glyph set (`● ◐ — ☑ ⊘ ☐`), and an approximate-number guard (`≈`/`~`). Findings are sorted `(file, line, class)` and emitted as `path:line: [x] msg` on stderr; clean ⇒ `doc-lint OK: 19 docs, 6 classes clean` on stdout, exit 0. It checks:
 
 - **(a) D-id coherence** — each `D-id` (D1..D17) appears with the **same** version tag, packaging, and verification scheme everywhere it is referenced (would have caught D12-vs-D17 self-update drift).
 - **(b) FR/NFR tier coherence** — each `FR-id`/`NFR-id` resolves to a PRD definition and carries a **consistent tier** (v1/v1.1/v1.2/v1.3) across all docs (would have caught the FR-25 version drift).
