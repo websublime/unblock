@@ -14,7 +14,7 @@ use crate::filters::{DeleteMode, DeletePlan};
 use super::events::append_event_in_tx;
 use super::ids::update_child_counter_in_tx;
 use super::mappers::{ISSUE_COLUMNS, bind_issue, dependency_from_row, issue_from_row};
-use super::with_immediate_tx;
+use super::{WriteHook, with_immediate_tx};
 
 /// Create an issue: validate, guard against `id/external_ref` collisions, insert the row + relations,
 /// write `Event(Created)` (+ per-relation events) — all in one tx. Returns the allocated id.
@@ -24,6 +24,7 @@ use super::with_immediate_tx;
 #[allow(clippy::too_many_lines)] // one cohesive transaction: row + labels + deps + comments + events
 pub(super) async fn create_issue(
     conn: &Connection,
+    hook: WriteHook<'_>,
     issue: &Issue,
     actor: &str,
 ) -> Result<String, StorageError> {
@@ -36,7 +37,7 @@ pub(super) async fn create_issue(
     let content_hash = issue.compute_content_hash();
     let issue = issue.clone();
 
-    with_immediate_tx(conn, |tx| async move {
+    with_immediate_tx(conn, hook, |tx| async move {
         // Guard 1: id collision.
         if row_exists(&tx, "SELECT 1 FROM issues WHERE id = ?1 LIMIT 1", &issue.id).await? {
             return Err(StorageError::IdCollision { id: issue.id });
@@ -299,6 +300,7 @@ impl UpdateBuilder {
 #[allow(clippy::too_many_lines)]
 pub(super) async fn update_issue(
     conn: &Connection,
+    hook: WriteHook<'_>,
     id: &str,
     patch: &crate::filters::IssuePatch,
     actor: &str,
@@ -309,7 +311,7 @@ pub(super) async fn update_issue(
     let id_owned = id.to_string();
     let actor = actor.to_string();
 
-    with_immediate_tx(conn, |tx| async move {
+    with_immediate_tx(conn, hook, |tx| async move {
         // Load the current row inside the tx (TOCTOU-safe).
         let sql = format!("SELECT {ISSUE_COLUMNS} FROM issues WHERE id = ?1");
         let mut rows = tx
@@ -691,6 +693,7 @@ async fn existing_parent(
 /// An already-tombstone target is a no-op (no event). Returns the resolved plan.
 pub(super) async fn delete_issue(
     conn: &Connection,
+    hook: WriteHook<'_>,
     plan: &DeletePlan,
     actor: &str,
 ) -> Result<DeletePlan, StorageError> {
@@ -710,7 +713,7 @@ pub(super) async fn delete_issue(
     let mode = plan.mode;
     let actor = actor.to_string();
 
-    with_immediate_tx(conn, |tx| async move {
+    with_immediate_tx(conn, hook, |tx| async move {
         let affected: Vec<String> = match mode {
             DeleteMode::Cascade => {
                 let mut all = targets.clone();
