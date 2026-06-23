@@ -37,6 +37,8 @@ fn golden_ranked_fixture() {
         issue("ub-p0-new", Priority::CRITICAL, 300),
         issue("ub-p1-old-b", Priority::HIGH, 200),
         issue("ub-p1-old-a", Priority::HIGH, 200), // same bucket+age as -b: id breaks the tie
+        issue("ub-p0-age200", Priority::CRITICAL, 200), // P0 shares bucket 0 + age 200 with the P1s:
+        // cross-priority bucket-collapse, broken only by id
         issue("ub-p4-mid", Priority::BACKLOG, 150),
         issue("ub-p0-old", Priority::CRITICAL, 50),
     ];

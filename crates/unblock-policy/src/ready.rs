@@ -234,8 +234,10 @@ pub enum ReadyVerdict {
 ///    now` deferral does not defer; spine §3.2.1 `defer_until <= now`).
 /// 3. **Active blocking edges** (any [`BlockingEdge::is_active_blocker`]) →
 ///    [`ReadyVerdict::Blocked`] carrying the blocker ids.
-/// 4. **`Open`** with none of the above → [`ReadyVerdict::Ready`] (the storage filter is
-///    `status = 'open'`).
+/// 4. **`Open`** with none of the above → [`ReadyVerdict::Ready`]. NOTE: storage's `ready_issues`
+///    SQL (spine §3.2.1) additionally excludes `pinned`/`ephemeral`/`is_template` candidates
+///    *upstream* (the engine/storage pre-filter), which this pure predicate does not see — so
+///    `is_ready == Ready` is the policy verdict, not a guarantee the row is storage-`ready`-visible.
 /// 5. **Otherwise** (a non-terminal, non-`Open` status with no defer/blockers — e.g. `Blocked`,
 ///    `InProgress`, `Draft`, `Pinned`, `Custom`) → [`ReadyVerdict::NotActionable`].
 ///

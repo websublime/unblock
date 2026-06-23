@@ -137,6 +137,12 @@ pub fn filters_fingerprint(filters: &ListFilters) -> String {
     push_opt_str(&mut out, "assignee", filters.assignee.as_deref());
     push_opt_str(&mut out, "text_contains", filters.text_contains.as_deref());
 
+    // The numeric/bool scalars below are NOT length-prefixed (unlike the set sections and the
+    // string scalars in `push_opt_str`): each renders over a closed `[0-9-]` / `true`/`false`
+    // charset that cannot contain the `;`/`=`/`(`/`)` section delimiters, and each carries a unique
+    // tag — so no cross-section boundary can be forged. A future *string*-typed scalar MUST instead
+    // use the length-prefixed `push_opt_str` form.
+    //
     // Priority bounds (serialize the inner i32 explicitly; `None` distinct from any value).
     match filters.priority_min {
         None => out.push_str("priority_min=none;"),
@@ -309,5 +315,28 @@ mod tests {
             ..ListFilters::default()
         };
         assert_ne!(filters_fingerprint(&one), filters_fingerprint(&two));
+    }
+
+    #[test]
+    fn fingerprint_wire_format_is_stable() {
+        // Pin the EXACT canonical encoding as a contract: a refactor of `push_set`/`push_opt_str`
+        // that stayed internally consistent could silently re-mint every cache key with no
+        // relational test failing — this golden catches it. All 12 `ListFilters` fields are set
+        // explicitly so adding a field forces a deliberate snapshot update.
+        let filters = ListFilters {
+            status: vec![Status::Open, Status::Blocked],
+            issue_type: vec![IssueType::Bug],
+            assignee: Some("alice".into()),
+            labels_all: vec!["b".into(), "a".into()],
+            labels_any: vec!["x".into()],
+            priority_min: Some(Priority::HIGH),
+            priority_max: Some(Priority::BACKLOG),
+            text_contains: Some("foo".into()),
+            include_deferred: true,
+            include_closed: false,
+            limit: Some(50),
+            offset: Some(10),
+        };
+        insta::assert_snapshot!(filters_fingerprint(&filters));
     }
 }
