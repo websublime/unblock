@@ -2879,12 +2879,16 @@ name = "unblock-policy"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "criterion",
+ "insta",
+ "proptest",
  "schemars",
  "serde",
  "serde_json",
  "snafu",
  "unblock-error",
  "unblock-model",
+ "unblock-policy",
 ]
 
 [[package]]

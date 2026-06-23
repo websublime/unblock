@@ -1,0 +1,10 @@
+---
+source: crates/unblock-policy/src/error.rs
+expression: table
+---
+[
+  [
+    "Internal",
+    "INTERNAL_ERROR"
+  ]
+]

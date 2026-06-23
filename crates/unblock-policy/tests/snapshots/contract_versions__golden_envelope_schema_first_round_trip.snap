@@ -1,0 +1,12 @@
+---
+source: crates/unblock-policy/tests/contract_versions.rs
+expression: env
+---
+{
+  "schema": "unblock.demo.v1",
+  "generated_at": "2026-01-01T00:00:00Z",
+  "payload": [
+    "alpha",
+    "beta"
+  ]
+}
