@@ -23,8 +23,12 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 snafu = { workspace = true }
 tracing = { workspace = true }
+# `init_tracing` (engine plan `src/logging.rs`) installs the `unblock.reliability` subscriber
+# (NFR-13). Already in the workspace lock; adds no NEW transitive surface to the default build.
+tracing-subscriber = { workspace = true }
 serde = { workspace = true }
 schemars = { workspace = true }
+serde_json = { workspace = true }
 # NOTE (OQ-4 RESOLVED): the OS signal handler install lives in `unblock-cli` (L7); the engine
 # only reads the cooperative shutdown flag. The engine therefore takes NO `signal-hook` dep.
 
@@ -34,3 +38,25 @@ sync = ["dep:unblock-sync"]
 health = ["dep:unblock-health"]
 # D15: forwards only to storage's non-default remote/replica path.
 remote = ["unblock-storage/remote"]
+
+[dev-dependencies]
+# The tests drive the REAL libsql storage (no `Storage` mock — FR-9 "identical behaviour through
+# one path"): a `#[cfg(test)]` `Session` ctor over `LibsqlStorage::open_in_memory` + temp `.unblock/`
+# workspaces via `unblock_config::open_with_storage`.
+unblock-storage = { workspace = true }
+unblock-config = { workspace = true }
+unblock-model = { workspace = true }
+unblock-error = { workspace = true }
+unblock-policy = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+# The `ParkedStorage` decorator (tests/common) impls the async `Storage` trait to park a write
+# mid-tx (FR-10 read-during-write + D14 cancel-safety) — real storage delegation, not a mock.
+async-trait = { workspace = true }
+# FR-9 linearizability property test + the write-permit single-occupancy invariant.
+proptest = { workspace = true }
+# Golden `EngineError -> ErrorCode -> exit_code` map (FR-11) + diagnostics-per-kind snapshots.
+insta = { workspace = true }
+serde_json = { workspace = true }
+# Temp `.unblock/` workspaces for the config-facade harness path.
+tempfile = { workspace = true }
