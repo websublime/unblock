@@ -91,6 +91,8 @@ mod tests {
             start: PathBuf::from("/tmp/nowhere"),
         };
         assert_eq!(err.code(), ErrorCode::NotInitialized);
+        // spine §2.3: NotInitialized is a Database-category code -> exit 2.
+        assert_eq!(err.code().exit_code(), 2);
     }
 
     #[test]
@@ -99,6 +101,8 @@ mod tests {
             ConfigError::ActorUnresolved.code(),
             ErrorCode::RequiredField
         );
+        // spine §2.3: RequiredField is a Validation/policy-category code -> exit 4.
+        assert_eq!(ConfigError::ActorUnresolved.code().exit_code(), 4);
     }
 
     #[test]
@@ -112,6 +116,8 @@ mod tests {
         assert_eq!(inner.code(), ErrorCode::DatabaseError);
         let err = ConfigError::DbOpenFailed { source: inner };
         assert_eq!(err.code(), ErrorCode::DatabaseError);
+        // spine §2.3: DatabaseError is a Database-category code -> exit 2.
+        assert_eq!(err.code().exit_code(), 2);
     }
 
     #[test]
@@ -124,6 +130,8 @@ mod tests {
         assert_eq!(inner.code(), ErrorCode::SchemaMismatch);
         let err = ConfigError::MigrationFailed { source: inner };
         assert_eq!(err.code(), ErrorCode::SchemaMismatch);
+        // spine §2.3: SchemaMismatch is a Database-category code -> exit 2.
+        assert_eq!(err.code().exit_code(), 2);
     }
 
     #[test]
@@ -135,5 +143,7 @@ mod tests {
         assert_eq!(inner.code(), ErrorCode::SchemaMismatch);
         let err = ConfigError::MigrationFailed { source: inner };
         assert_eq!(err.code(), ErrorCode::SchemaMismatch);
+        // spine §2.3: SchemaMismatch is a Database-category code -> exit 2.
+        assert_eq!(err.code().exit_code(), 2);
     }
 }

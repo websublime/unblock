@@ -11,12 +11,19 @@ workspace = true
 
 [dependencies]
 unblock-storage = { workspace = true }
+# FORWARD-DECLARED at T1.3a (kept by design — do NOT trim): `unblock-sync`/`unblock-health` are the
+# PRD §8.1 dependency contract for this crate; they are exercised by the T1.3 full layered resolver
+# (and v1.1 health/sync seams), not the T1.3a minimal subset.
 unblock-sync = { workspace = true }
 unblock-health = { workspace = true }
 # DIRECT dep (L0->L4, acyclic): config re-exports the domain knob type
 # `unblock_model::OutputFormat` (G-7/CF-J — single home in the model) inside `ResolvedConfig`.
 unblock-model = { workspace = true }
 unblock-error = { workspace = true }
+# FORWARD-DECLARED at T1.3a (kept by design — do NOT trim): `serde`/`toml`/`tracing` feed the T1.3
+# layered resolver (deserialize `config.toml` -> `ProjectConfig`, parse TOML, resolution tracing).
+# Unused by the T1.3a minimal subset; a normal (non-optional) dep is not a clippy unused-dep warning,
+# so keeping them leaves the build clean.
 serde = { workspace = true }
 toml = { workspace = true }
 snafu = { workspace = true }
