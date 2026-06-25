@@ -6,4 +6,4 @@ Layered TOML config (CLI > env `UNBLOCK_*` > project `.unblock/config.toml` > de
 
 - **Plan (authoritative):** [`docs/plans/crates/unblock-config.md`](../../docs/plans/crates/unblock-config.md)
 - **Interface SSOT:** `docs/plans/01-design-spine.md` §4 · **Product:** `docs/PRD.md`
-- **Depends on:** `storage`, `sync`, `health`, `error`.
+- **Depends on:** `storage`, `sync`, `health`, `model`, `error` (`model` is a DIRECT L0->L4 edge — the `OutputFormat` re-export, G-7/CF-J).
