@@ -2769,12 +2769,16 @@ dependencies = [
 name = "unblock-config"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "serde",
  "snafu",
+ "tempfile",
+ "tokio",
  "toml",
  "tracing",
  "unblock-error",
  "unblock-health",
+ "unblock-model",
  "unblock-storage",
  "unblock-sync",
 ]

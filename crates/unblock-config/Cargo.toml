@@ -13,8 +13,21 @@ workspace = true
 unblock-storage = { workspace = true }
 unblock-sync = { workspace = true }
 unblock-health = { workspace = true }
+# DIRECT dep (L0->L4, acyclic): config re-exports the domain knob type
+# `unblock_model::OutputFormat` (G-7/CF-J — single home in the model) inside `ResolvedConfig`.
+unblock-model = { workspace = true }
 unblock-error = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
 snafu = { workspace = true }
 tracing = { workspace = true }
+# The workspace-open facades are `async fn` (open/migrate libsql); the trait is async throughout.
+tokio = { workspace = true }
+
+[dev-dependencies]
+# Temp `.unblock/` workspaces + file-backed libsql DBs for the discovery / open-facade tests.
+tempfile = { workspace = true }
+# Drives the `#[tokio::test]` async facade tests (open_local + migrate round-trip).
+tokio = { workspace = true }
+# Timestamps for the `Issue` built in the open-with-storage round-trip test.
+chrono = { workspace = true }
