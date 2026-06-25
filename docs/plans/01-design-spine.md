@@ -868,8 +868,8 @@ impl Session {
 
     // --- lifecycle / ops (OQ-2 RESOLVED: doctor + recover ARE part of the public Session surface;
     //     the cli `doctor` command and mcp diagnostics both go through these, no separate path) ---
-    pub async fn doctor(&self) -> Result<DiagnosticReport, EngineError>;  // integrity_check + diagnostic taxonomy (FR-15/FR-16)
-    pub async fn recover(&self) -> Result<DiagnosticReport, EngineError>; // attempt repair (WAL checkpoint, reindex); reports actions taken
+    pub async fn doctor(&self) -> Result<DiagnosticReport, EngineError>;  // FR-15/FR-16. v1 = SIGNATURE only; body seamed to unblock-health (T3.3) — returns EngineError::FeatureNotWired{feature:"health"} until then (the integrity DiagnosticKind variant + DoctorReport→DiagnosticReport mapping are designed at T3.3; the landed DiagnosticKind has no integrity variant)
+    pub async fn recover(&self) -> Result<DiagnosticReport, EngineError>; // attempt repair (WAL checkpoint, reindex; reports actions taken). v1 = SIGNATURE only; body seamed to unblock-health (T3.3) — returns EngineError::FeatureNotWired{feature:"health"} until then (the rich repair + evidence dir are T3.3)
     pub async fn shutdown(&self) -> Result<(), EngineError>; // flush + close libsql cleanly (FR-17)
 }
 
