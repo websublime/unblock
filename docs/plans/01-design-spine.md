@@ -372,6 +372,39 @@ pub enum ModelError {
 
 The §1.9 signature `IssueValidator::validate -> Result<(), unblock_error::ModelError>` stays VERBATIM (single error — the aggregate lives **inside** it: a multi-failure run returns `Err(ModelError::ValidationFailed { fields })`; a single-field `FromStr` returns the matching scalar variant).
 
+**`ConfigError` — the per-crate snafu enum owned by `unblock-config` (L4).** Following the §2.1 pattern, `unblock-config` defines its own `#[derive(Debug, Snafu)] pub enum ConfigError` implementing `unblock_error::CodedError` (`code() -> ErrorCode`); like every per-crate enum it maps each variant to **an existing `ErrorCode`** from §2.2 (it never introduces a new code). The **T1.3a minimal v1 variant set** is intentionally small (the full layered-resolution variants — parse/unknown-key/invalid-value/credential paths — are added **additively at T1.3**, mapping to the same exit-7/exit-8 codes). v1 minimal map (every right-hand side is a real §2.2 variant):
+
+```rust
+// unblock-config (per-crate snafu enum; concrete field set in the crate plan)
+#[derive(Debug, snafu::Snafu)]
+#[snafu(visibility(pub(crate)))]
+pub enum ConfigError {
+    WorkspaceNotFound { start: PathBuf },          // -> ErrorCode::NotInitialized  (no .unblock/ found by upward discovery)
+    DbOpenFailed { source: StorageError },         // -> ErrorCode::DatabaseError   (libsql open failed; StorageError already absorbed the backend)
+    MigrationFailed { source: StorageError },      // -> ErrorCode::SchemaMismatch  (migrate-if-needed failed during open)
+    ActorUnresolved,                               // -> ErrorCode::RequiredField   (no actor from UNBLOCK_ACTOR / $USER / default)
+}
+impl ConfigError { pub fn code(&self) -> unblock_error::ErrorCode; } // via CodedError
+```
+
+> **ErrorCode-mapping rationale (T1.3a, for design Review to validate).**
+> - `WorkspaceNotFound` → **`NotInitialized`** (exit 2). Closest *existing* code: discovery failing means there is no
+>   initialized `.unblock/` workspace at/above `start` — the precise meaning of `NOT_INITIALIZED` ("Workspace not
+>   initialized"). The exit-7 `ConfigNotFound` ("Config **file** not found") is narrower (a missing `config.toml`,
+>   which is *not* an error in T1.3a — config defaults), and `IssueNotFound`/`InvalidId`/`InvalidArgument` are about
+>   issue ids, not workspaces (and `InvalidArgument` is not in the §2.2 set at all). `NotInitialized` is the honest
+>   match and pairs with the CLI `init` path (an un-discovered workspace is the "run `init` first" condition).
+> - `DbOpenFailed` → **`DatabaseError`** (exit 2) — the libsql open failed for a non-lock reason; the originating
+>   `StorageError` already absorbed the opaque backend (spine §3.3), so config only re-exposes the boundary code.
+> - `MigrationFailed` → **`SchemaMismatch`** (exit 2) — consistent with `StorageError::Migration → SchemaMismatch`
+>   pinned at T0.5; a failed migrate-if-needed is a schema-version problem.
+> - `ActorUnresolved` → **`RequiredField`** (exit 4) — the engine requires a non-empty `actor` (spine §4); with the
+>   `UNBLOCK_ACTOR → $USER → "unblock"` chain this is effectively unreachable in T1.3a (the final default always
+>   resolves), but the variant exists so a future strict-actor mode (T1.3) has its code reserved.
+>
+> The set grows **additively at T1.3** (e.g. `ConfigParse → ConfigParseError`, `InvalidValue → ConfigError`,
+> `Io → IoError`) — no T1.3a code is renumbered or removed.
+
 ### 2.2 ErrorCode (stable, SCREAMING_SNAKE in JSON)
 
 ```rust
@@ -683,15 +716,25 @@ no `Claimed`**. Each mutation emits exactly:
 
 The single mutation home (FR-9). Composes storage + policy + (optional) sync/health. MCP and CLI are thin adapters; behaviour cannot drift. **In-process write serialization via a tokio `Semaphore(1)`** (D14); reads bypass it (FR-10).
 
-**Workspace-open ownership (CF-D — normative):** discovery of `.unblock/` and construction of the `Arc<dyn Storage>` is owned by **`unblock-config`**. `WorkspaceContext` is **DEFINED in `unblock-config`** (not engine). `unblock-config` exposes **two facades** (G-5 option b):
+**Workspace-open ownership (CF-D — normative):** discovery of `.unblock/` and construction of the `Arc<dyn Storage>` is owned by **`unblock-config`**. `WorkspaceContext`, `ResolvedContext`, and `ResolvedConfig` are **DEFINED in `unblock-config`** (not engine). `unblock-config` exposes **two facades** (G-5 option b):
 
 ```rust
 // in unblock-config:
 
+// ResolvedConfig is config-owned (DEFINED in unblock-config) — the resolved, validated config
+// value the engine/Session reads. Both contexts below embed it by value. Its concrete v1 field set
+// is pinned by the unblock-config crate plan (`docs/plans/crates/unblock-config.md` §2/§3): it is
+// DEFAULTED in the T1.3a minimal subset and RESOLVED for real (layered TOML/env/CLI) at T1.3.
+pub struct ResolvedConfig { /* config-owned; see the unblock-config crate plan for the pinned field set */ }
+
 // (1) resolve-only — NO storage; discovery + resolved config only (for `where`, doctor pre-checks,
 //     completions, and anything that must not open/migrate the DB).
 #[derive(Debug, Clone)]
-pub struct ResolvedContext { pub workspace_dir: PathBuf, pub actor: String, /* resolved config */ }
+pub struct ResolvedContext {
+    pub workspace_dir: PathBuf,
+    pub actor: String,
+    pub config: ResolvedConfig,        // config-owned (DEFINED in unblock-config)
+}
 pub async fn open_workspace(start: &Path) -> Result<ResolvedContext, ConfigError>;
 
 // (2) storage-bearing — discovery + open/migrate libsql; the field is NON-OPTIONAL.
@@ -700,10 +743,30 @@ pub struct WorkspaceContext {
     pub storage: Arc<dyn Storage>,     // NON-OPTIONAL (G-5): always present once built
     pub workspace_dir: PathBuf,
     pub actor: String,
-    /* resolved config */
+    pub config: ResolvedConfig,        // config-owned (DEFINED in unblock-config)
 }
 pub async fn open_with_storage(start: &Path) -> Result<WorkspaceContext, ConfigError>;
 ```
+
+> **NOTE (T1.3a minimal subset — build split, NORMATIVE sequencing).** The **T1.3a** task delivers EXACTLY these
+> types (`WorkspaceContext`, `ResolvedContext`, `ResolvedConfig`, `ConfigError`) plus the two facades, with
+> `ResolvedConfig` populated from **defaults** (no layered resolution yet). It performs `.unblock/` upward
+> discovery from `start`, libsql open + migrate via `unblock_storage::LibsqlStorage::open_local`, `Arc<dyn Storage>`
+> construction, and actor resolution (`UNBLOCK_ACTOR` env → `$USER` → `"unblock"`). The **full layered resolution**
+> (CLI > env `UNBLOCK_*` > project `.unblock/config.toml` > defaults) lands **additively at T1.3** — it replaces the
+> defaulting internals and enriches the facade input, touching **no public type or signature** pinned here. T1.3a
+> sequences **before** T1.2: the engine *consumes* config's `WorkspaceContext`, and config is **L4** so it **cannot**
+> depend on the engine at **L5** (`cargo xtask check-layering` would reject that back-edge).
+
+> **NOTE (facade signature, T1.3a `&Path` vs T1.3 `&CliOverrides`).** The facade signatures above take
+> `start: &Path` for v1; the **T1.3a minimal subset** ships exactly that — `open_with_storage(start: &Path)` /
+> `open_workspace(start: &Path)`. The richer CLI-override forwarding the config crate plan describes (a
+> `&CliOverrides`/overrides parameter that threads `--dir`/`--db`/`--actor`/`--output-format` down through
+> resolution) is a **T1.3-ADDITIVE** enrichment of the facade's *input*, not a change to what the engine consumes:
+> the engine binds to the **result** type (`WorkspaceContext`), never to the facade signature, so swapping
+> `&Path` → `&CliOverrides` at T1.3 does **not** break `Session::open`. (This reconciles the spine `&Path` ↔
+> config-plan `&CliOverrides` drift by **sequencing**: `&Path` for the T1.3a minimal subset, `&CliOverrides`
+> additive at T1.3 — the engine never observes the difference.)
 
 **`unblock-engine` CONSUMES** a `WorkspaceContext` — it does **not** construct storage itself, and never sees an `Option<Arc<dyn Storage>>`. `Session::open` takes the already-built storage-bearing context; because `storage` is non-optional there is no unwrap and no None-path mismatch. The resolve-only `ResolvedContext` is for callers that must not touch the DB.
 

@@ -18,23 +18,79 @@
 
 > **Acyclicity note:** the spine lists L3 `health` as depending on `sync` and L4 `config` as depending on `storage + sync + health + error`. That is a strict forward edge set; `unblock-config` introduces no back-edge. The crate does **not** open the engine — it discovers `.unblock/`, builds the `Arc<dyn Storage>` (spine §4 intro + §4.1, CF-D), and returns a fully-resolved storage-bearing `WorkspaceContext { storage: Arc<dyn Storage> /* NON-OPTIONAL */, workspace_dir, actor, resolved config }` that the engine (L5) consumes via `Session::open(ctx, cfg)` to turn into a `Session`. The resolve-only facade instead returns a `ResolvedContext` (config + paths, no storage) for `init`/no-DB paths.
 
+> **v1 build split — T1.3a (minimal) lands BEFORE T1.2; T1.3 (full) is additive (spine §4 intro, NORMATIVE).**
+> This crate is built in two tasks so the engine (L5) has the context types it consumes:
+> - **T1.3a — minimal subset (the interface the engine depends on):** delivers `WorkspaceContext` +
+>   `ResolvedContext` + `ConfigError` + `ResolvedConfig` (the last with **hardcoded/defaulted values**), plus
+>   `open_with_storage` / `open_workspace`. The facades perform: `.unblock/` **upward discovery from `start`**,
+>   **libsql open + migrate via the landed `unblock_storage::LibsqlStorage::open_local`**, `Arc<dyn Storage>`
+>   construction, and **actor resolution precedence** `UNBLOCK_ACTOR` env → `$USER` → `"unblock"`. There is **NO**
+>   layered TOML/env/CLI precedence engine yet — `ResolvedConfig` is built from defaults. This sequences **before
+>   T1.2** because the engine *consumes* `WorkspaceContext`, and config is **L4** so it **cannot** depend on the
+>   engine at **L5** (`cargo xtask check-layering` rejects that back-edge; the build dep edge is engine→config).
+> - **T1.3 — full layered resolver (additive, no public-type/signature change):** adds the precedence engine
+>   (**CLI > env `UNBLOCK_*` > project `.unblock/config.toml` > defaults**) ADDITIVELY — it **replaces the
+>   defaulting internals** behind `ResolvedConfig` (same public shape, now resolved for real) and may **enrich the
+>   facade input** (see the facade-signature note). It touches **no public type pinned at T1.3a**.
+>
+> **`ResolvedConfig` (config-owned, spine §4 CF-D) — the resolved config value embedded by value in both
+> contexts.** It is **DEFINED in this crate** (the spine references it as config-owned). Pin a **MINIMAL v1 shape** —
+> only the fields v1 actually reads (grounded in this plan's `WorkspaceConfig`/`ProjectConfig` key set and what the
+> engine/`Session` consumes), DEFAULTED at T1.3a and resolved for real at T1.3:
+>
+> ```rust
+> // unblock-config — the resolved, validated config the engine/Session reads (config-owned, spine §4 CF-D).
+> #[derive(Debug, Clone)]
+> pub struct ResolvedConfig {
+>     pub actor: String,           // resolved actor (T1.3a: UNBLOCK_ACTOR -> $USER -> "unblock")
+>     pub output_format: OutputFormat, // re-exported from unblock-model (G-7/CF-J); default per model
+>     pub jsonl_export: bool,      // auto-export JSONL after mutating ops (FR-7); T1.3a default = false
+>     pub search_cap: usize,       // search result cap (FR-4); T1.3a default = 50
+>     pub db_filename: String,     // T1.3a default = "unblock.db"   (locked name, PRD §12.5)
+>     pub jsonl_filename: String,  // T1.3a default = "issues.jsonl" (locked name, PRD §12.5)
+> }
+> ```
+>
+> No keys are invented beyond this plan's locked constants and `WorkspaceConfig` set: `actor`, `output_format`,
+> `jsonl_export`, `search_cap`, `db_filename`, `jsonl_filename` all already appear in `WorkspaceConfig`/`ProjectConfig`
+> (§3 `config.rs`/`schema.rs`). At T1.3a these are **defaulted**; at T1.3 the layered resolver fills them — the shape
+> does not change. (Relationship to `WorkspaceConfig`/`ConfigPaths`: `ResolvedConfig` is the spine-named, engine-facing
+> projection embedded in the contexts; the richer internal `WorkspaceConfig` + `ConfigPaths` of the full resolver
+> remain the T1.3 internals that *produce* it — they are not part of the minimal T1.3a public surface.)
+>
+> **Facade-signature reconciliation (spine §4 `&Path` ↔ this plan's `&CliOverrides`).** The `&CliOverrides` form the
+> §2/§3 tables below show is the **T1.3-ADDITIVE** shape (the CLI threads `--dir`/`--db`/`--actor`/`--output-format`
+> down through resolution). The **T1.3a minimal** facade instead takes `start: &Path`:
+> `open_with_storage(start: &Path)` / `open_workspace(start: &Path)` (spine §4, the normative v1 signatures). This is
+> a pure **sequencing** of the input parameter — the **result** types (`WorkspaceContext` / `ResolvedContext`) are
+> identical across T1.3a and T1.3, so the engine (which binds to the result, never the facade signature) is
+> unaffected when the input is enriched at T1.3. **No public type or signature pinned by the spine changes.**
+>
+> The spine wins on any interface disagreement (spine §6.1); this split is an authorized spine-pinned sequencing,
+> not a divergence.
+
 ---
 
 ## 2. Public API summary (what other crates import), per version
 
-### v1 (subset — FR-13 subset, T1.3)
-- `WorkspaceConfig` — the merged, validated config value (startup + runtime keys).
+### v1 (subset — FR-13 subset; split across T1.3a minimal + T1.3 full — see the build-split note above)
+
+**[T1.3a — minimal subset]** the public surface the engine consumes (facades take `start: &Path`):
+- `ResolvedConfig` — the resolved, validated config the engine/`Session` reads (config-owned, spine §4 CF-D); minimal v1 shape pinned in the build-split note. DEFAULTED at T1.3a, resolved at T1.3.
+- `ResolvedContext` — the resolve-only context (no storage): `{ workspace_dir, actor, config: ResolvedConfig }` (spine §4). Returned by `open_workspace` for `init`/no-DB paths (G-5 option b).
+- `WorkspaceContext` — the **storage-bearing** context (CF-D): `{ storage: Arc<dyn Storage> /* NON-OPTIONAL, spine §4.1 */, workspace_dir, actor, config: ResolvedConfig }`. Consumed by `Session::open`.
+- `open_workspace(start: &Path) -> Result<ResolvedContext, ConfigError>` — resolve-only facade (no DB): `.unblock/` upward discovery → defaulted `ResolvedConfig` → returns a `ResolvedContext` with **no storage handle** (for `init`/no-DB paths). **Does NOT open the DB.**
+- `open_with_storage(start: &Path) -> Result<WorkspaceContext, ConfigError>` — the **workspace-open facade** (CF-D): discover → **open + migrate-if-needed libsql via `unblock_storage::LibsqlStorage::open_local` → build the `Arc<dyn Storage>`** → actor resolution (`UNBLOCK_ACTOR` → `$USER` → `"unblock"`) → returns a storage-bearing `WorkspaceContext` (spine §4.1). The engine consumes this via `Session::open(ctx, cfg)`; **config builds storage, engine never does.**
+- `ConfigError` (snafu, per-crate; implements `unblock_error::CodedError`). T1.3a minimal variant set (spine §2.1): `WorkspaceNotFound → NotInitialized`, `DbOpenFailed → DatabaseError`, `MigrationFailed → SchemaMismatch`, `ActorUnresolved → RequiredField`. The exit-7 config-file variants (`ConfigError`/`ConfigNotFound`/`ConfigParseError`) + I/O are added **additively at T1.3** with the layered resolver.
+
+**[T1.3 — full layered resolver, additive over T1.3a]** (replaces the defaulting internals; facades may take `&CliOverrides`; no public-type/spine-signature change):
+- `WorkspaceConfig` — the merged, validated config value (startup + runtime keys); the full-resolver internal that *produces* `ResolvedConfig`.
 - `ConfigPaths` — resolved `unblock_dir` / `db_path` / `jsonl_path` (mirrors spine `SessionConfig.workspace_dir` source; engine consumes these).
-- `CliOverrides` — the typed top layer the CLI passes down (highest precedence).
+- `CliOverrides` — the typed top layer the CLI passes down (highest precedence); the additive facade input shape.
 - `EnvOverrides` — parsed `UNBLOCK_*` layer (second precedence).
 - `discover_unblock_dir(start: Option<&Path>, cli: &CliOverrides) -> Result<PathBuf, ConfigError>` — walk-up `.unblock/` discovery honoring `UNBLOCK_DIR`/`--dir`.
 - `discover_optional_unblock_dir(...) -> Result<Option<PathBuf>, ConfigError>` — for `init`/no-workspace commands.
 - `WorkspaceConfig::resolve(cli, env, project_toml, defaults) -> Result<WorkspaceConfig, ConfigError>` — the precedence engine.
-- `ResolvedContext` — the resolve-only context (no storage): bundles `WorkspaceConfig` + `ConfigPaths` + `workspace_dir` + `actor`. Returned by `open_workspace` for `init`/no-DB paths (G-5 option b).
-- `WorkspaceContext` — the **storage-bearing** context (CF-D): `WorkspaceConfig` + `ConfigPaths` + `workspace_dir` + `actor` + `storage: Arc<dyn Storage>` (**NON-OPTIONAL**, spine §4.1). Consumed by `Session::open`.
-- `open_workspace(cli: &CliOverrides) -> Result<ResolvedContext, ConfigError>` — resolve-only facade (no DB): discover → load TOML → merge → validate → resolve paths → returns a `ResolvedContext` with `WorkspaceConfig` + `ConfigPaths` and **no storage handle** (for `init`/no-DB paths).
-- `open_with_storage(cli: &CliOverrides) -> Result<WorkspaceContext, ConfigError>` — the **workspace-open facade** (CF-D): discover → resolve → **open + migrate-if-needed libsql via the `Storage` constructor → build the `Arc<dyn Storage>`** → returns a storage-bearing `WorkspaceContext { storage: Arc<dyn Storage> /* NON-OPTIONAL */, workspace_dir, actor, resolved config }` (spine §4.1). The engine consumes this via `Session::open(ctx, cfg)`; **config builds storage, engine never does.**
-- `ConfigError` (snafu, per-crate; `code() -> unblock_error::ErrorCode` → `ConfigError`/`ConfigNotFound`/`ConfigParseError`, exit 7).
 - `OutputFormat` (**re-exported** from `unblock-model`, not defined here — G-7/CF-J; `pub use unblock_model::OutputFormat`), `StartupKey`/`RuntimeKey` partition markers (FR-13 startup-vs-runtime).
 
 ### v1.1 (full — FR-13 full)
