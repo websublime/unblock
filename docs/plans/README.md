@@ -56,7 +56,7 @@ This directory holds the full planning corpus for the multi-crate Rust rewrite. 
                    │   └─────────────┘            │
                  L4 ▼ ▼                            │
                      ┌──────────────┐             │
-                     │unblock-config│─────────────┤   (storage+sync+health+error)
+                     │unblock-config│─────────────┤   (storage+sync+health+model+error)
                      └──────┬───────┘             │
                  L5         ▼                     │
                      ┌──────────────┐             │

@@ -207,7 +207,7 @@ These decisions are **locked** (confirmed with Miguel) and shape the rest of thi
 | `unblock-storage` | L2 | `Storage` trait + **libsql** implementation (schema/migrations, queries, transactions, WAL + `busy_timeout`). Only crate aware of the backend. **Depends on model+error only** (CF-11 fix). | model, error |
 | `unblock-sync` | L3 | **Light** JSONL export/import + atomic write + path-confinement + conflict-marker scan. *(Shrunk per D5.)* | storage, model, error |
 | `unblock-health` | L3 | v1: libsql integrity + diagnostics. [v1.1]: full Workspace Health Contract. | model, error, sync |
-| `unblock-config` | L4 | Layered TOML config resolution, `.unblock/` discovery, open-a-workspace facade. | storage, sync, health, error |
+| `unblock-config` | L4 | Layered TOML config resolution, `.unblock/` discovery, open-a-workspace facade. | storage, sync, health, model, error |
 | `unblock-engine` | L5 | Shared session API (open → import? → mutate → export? → recover); **in-process write Semaphore (D14)**; shutdown/logging. Composes storage **+ policy**. Embeddable surface for MCP/CLI. | config, sync, storage, policy, health, model, error |
 | `unblock-render` | L6 | Output/format (json/robot/plain/csv/markdown; **TOON feature-gated, v1.1**) behind a trait. Reduced under D7. | model, error |
 | `unblock-mcp` | L7 | **Primary** rmcp stdio server (tools/resources/prompts) over the engine. Feature-isolated. | engine, render, policy, model, error |

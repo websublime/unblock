@@ -33,6 +33,7 @@ fn allowed_edges() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
                 "unblock-storage",
                 "unblock-sync",
                 "unblock-health",
+                "unblock-model",
                 "unblock-error",
             ],
         ),
