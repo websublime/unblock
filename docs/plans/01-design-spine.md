@@ -380,11 +380,22 @@ The §1.9 signature `IssueValidator::validate -> Result<(), unblock_error::Model
 #[snafu(visibility(pub(crate)))]
 pub enum ConfigError {
     WorkspaceNotFound { start: PathBuf },          // -> ErrorCode::NotInitialized  (no .unblock/ found by upward discovery)
-    DbOpenFailed { source: StorageError },         // -> ErrorCode::DatabaseError   (libsql open failed; StorageError already absorbed the backend)
-    MigrationFailed { source: StorageError },      // -> ErrorCode::SchemaMismatch  (migrate-if-needed failed during open)
+    DbOpenFailed { source: StorageError },         // -> source.code()              (wraps open_local; typically Backend -> DatabaseError)
+    MigrationFailed { source: StorageError },      // -> source.code()              (wraps migrate(); Migration/SchemaMismatch -> SchemaMismatch, Backend -> DatabaseError)
     ActorUnresolved,                               // -> ErrorCode::RequiredField   (no actor from UNBLOCK_ACTOR / $USER / default)
 }
-impl ConfigError { pub fn code(&self) -> unblock_error::ErrorCode; } // via CodedError
+// ConfigError implements the L0 bridge trait (NOT a bespoke inherent code()), matching the landed
+// StorageError convention — the L7 blanket `From<&E: CodedError> for StructuredError` needs the trait impl.
+impl unblock_error::CodedError for ConfigError {
+    fn code(&self) -> unblock_error::ErrorCode {
+        match self {
+            Self::WorkspaceNotFound { .. } => unblock_error::ErrorCode::NotInitialized,
+            // forward the inner StorageError's own code — do NOT hardcode (so Backend stays DatabaseError)
+            Self::DbOpenFailed { source } | Self::MigrationFailed { source } => source.code(),
+            Self::ActorUnresolved => unblock_error::ErrorCode::RequiredField,
+        }
+    }
+}
 ```
 
 > **ErrorCode-mapping rationale (T1.3a, for design Review to validate).**
@@ -394,10 +405,15 @@ impl ConfigError { pub fn code(&self) -> unblock_error::ErrorCode; } // via Code
 >   which is *not* an error in T1.3a — config defaults), and `IssueNotFound`/`InvalidId`/`InvalidArgument` are about
 >   issue ids, not workspaces (and `InvalidArgument` is not in the §2.2 set at all). `NotInitialized` is the honest
 >   match and pairs with the CLI `init` path (an un-discovered workspace is the "run `init` first" condition).
-> - `DbOpenFailed` → **`DatabaseError`** (exit 2) — the libsql open failed for a non-lock reason; the originating
->   `StorageError` already absorbed the opaque backend (spine §3.3), so config only re-exposes the boundary code.
-> - `MigrationFailed` → **`SchemaMismatch`** (exit 2) — consistent with `StorageError::Migration → SchemaMismatch`
->   pinned at T0.5; a failed migrate-if-needed is a schema-version problem.
+> - `DbOpenFailed` → **`source.code()`** (the inner `StorageError`'s own code — config does **not** hardcode it).
+>   `DbOpenFailed` wraps `LibsqlStorage::open_local`; an open failure is typically `StorageError::Backend →
+>   DatabaseError` (exit 2), the backend already absorbed opaquely (spine §3.3). Forwarding means a lock/backend
+>   cause keeps its honest code rather than being flattened.
+> - `MigrationFailed` → **`source.code()`** (forwarded, NOT hardcoded `SchemaMismatch`). `MigrationFailed` wraps
+>   `Storage::migrate()`: a genuine `StorageError::Migration`/`SchemaMismatch` cause forwards to `SchemaMismatch`
+>   (consistent with `StorageError::Migration → SchemaMismatch` pinned at T0.5), while a `StorageError::Backend`
+>   cause stays `DatabaseError`. Forwarding avoids mis-labelling a backend failure as a schema problem. (Every such
+>   StorageError code is exit 2 — the **exit code is unchanged** regardless of which inner variant fired.)
 > - `ActorUnresolved` → **`RequiredField`** (exit 4) — the engine requires a non-empty `actor` (spine §4); with the
 >   `UNBLOCK_ACTOR → $USER → "unblock"` chain this is effectively unreachable in T1.3a (the final default always
 >   resolves), but the variant exists so a future strict-actor mode (T1.3) has its code reserved.
@@ -716,13 +732,25 @@ no `Claimed`**. Each mutation emits exactly:
 
 The single mutation home (FR-9). Composes storage + policy + (optional) sync/health. MCP and CLI are thin adapters; behaviour cannot drift. **In-process write serialization via a tokio `Semaphore(1)`** (D14); reads bypass it (FR-10).
 
-**Workspace-open ownership (CF-D — normative):** discovery of `.unblock/` and construction of the `Arc<dyn Storage>` is owned by **`unblock-config`**. `WorkspaceContext`, `ResolvedContext`, and `ResolvedConfig` are **DEFINED in `unblock-config`** (not engine). `unblock-config` exposes **two facades** (G-5 option b):
+**Workspace-open ownership (CF-D — normative):** discovery of `.unblock/` and construction of the `Arc<dyn Storage>` is owned by **`unblock-config`**. `WorkspaceContext`, `ResolvedContext`, `ResolvedConfig`, and `ConfigPaths` are **DEFINED in `unblock-config`** (not engine). `unblock-config` exposes **two facades** (G-5 option b):
 
 ```rust
 // in unblock-config:
 
+// ConfigPaths is config-owned (DEFINED in unblock-config) — config OWNS path resolution from T1.3a
+// (single source of truth). Both contexts below embed it by value. Derived from the discovered
+// workspace + the ResolvedConfig filenames; the concrete shape is pinned by the unblock-config crate
+// plan (`docs/plans/crates/unblock-config.md` §2/§3).
+#[derive(Debug, Clone)]
+pub struct ConfigPaths {
+    pub unblock_dir: PathBuf,   // the discovered/created `.unblock/` directory (= workspace_dir.join(".unblock"))
+    pub db_path: PathBuf,       // unblock_dir.join(ResolvedConfig.db_filename)    (T1.3a default "unblock.db")
+    pub jsonl_path: PathBuf,    // unblock_dir.join(ResolvedConfig.jsonl_filename) (T1.3a default "issues.jsonl")
+}
+
 // ResolvedConfig is config-owned (DEFINED in unblock-config) — the resolved, validated config
-// value the engine/Session reads. Both contexts below embed it by value. Its concrete v1 field set
+// VALUES the engine/Session reads (NOT paths, NOT actor: actor is the top-level context field per
+// §4.1; paths live in ConfigPaths). Both contexts below embed it by value. Its concrete v1 field set
 // is pinned by the unblock-config crate plan (`docs/plans/crates/unblock-config.md` §2/§3): it is
 // DEFAULTED in the T1.3a minimal subset and RESOLVED for real (layered TOML/env/CLI) at T1.3.
 pub struct ResolvedConfig { /* config-owned; see the unblock-config crate plan for the pinned field set */ }
@@ -731,9 +759,10 @@ pub struct ResolvedConfig { /* config-owned; see the unblock-config crate plan f
 //     completions, and anything that must not open/migrate the DB).
 #[derive(Debug, Clone)]
 pub struct ResolvedContext {
-    pub workspace_dir: PathBuf,
-    pub actor: String,
+    pub workspace_dir: PathBuf,        // project root (the dir that CONTAINS `.unblock/`)
+    pub actor: String,                 // authoritative actor (§4.1) — NOT inside ResolvedConfig
     pub config: ResolvedConfig,        // config-owned (DEFINED in unblock-config)
+    pub paths: ConfigPaths,            // config-owned: resolved `.unblock/` + db/jsonl paths (T1.3a)
 }
 pub async fn open_workspace(start: &Path) -> Result<ResolvedContext, ConfigError>;
 
@@ -741,18 +770,24 @@ pub async fn open_workspace(start: &Path) -> Result<ResolvedContext, ConfigError
 #[derive(Clone)]
 pub struct WorkspaceContext {
     pub storage: Arc<dyn Storage>,     // NON-OPTIONAL (G-5): always present once built
-    pub workspace_dir: PathBuf,
-    pub actor: String,
+    pub workspace_dir: PathBuf,        // project root (the dir that CONTAINS `.unblock/`)
+    pub actor: String,                 // authoritative actor (§4.1) — NOT inside ResolvedConfig
     pub config: ResolvedConfig,        // config-owned (DEFINED in unblock-config)
+    pub paths: ConfigPaths,            // config-owned: resolved `.unblock/` + db/jsonl paths (T1.3a)
 }
 pub async fn open_with_storage(start: &Path) -> Result<WorkspaceContext, ConfigError>;
 ```
 
 > **NOTE (T1.3a minimal subset — build split, NORMATIVE sequencing).** The **T1.3a** task delivers EXACTLY these
-> types (`WorkspaceContext`, `ResolvedContext`, `ResolvedConfig`, `ConfigError`) plus the two facades, with
-> `ResolvedConfig` populated from **defaults** (no layered resolution yet). It performs `.unblock/` upward
-> discovery from `start`, libsql open + migrate via `unblock_storage::LibsqlStorage::open_local`, `Arc<dyn Storage>`
-> construction, and actor resolution (`UNBLOCK_ACTOR` env → `$USER` → `"unblock"`). The **full layered resolution**
+> types (`WorkspaceContext`, `ResolvedContext`, `ResolvedConfig`, `ConfigPaths`, `ConfigError`) plus the two facades,
+> with `ResolvedConfig` populated from **defaults** (no layered resolution yet). **Config OWNS path resolution from
+> T1.3a — the single source of truth:** `paths.unblock_dir` is the discovered/created `.unblock/` directory
+> (`= workspace_dir.join(".unblock")`), and `db_path`/`jsonl_path` are **derived** from `unblock_dir` + the
+> `ResolvedConfig` filenames (`db_filename`/`jsonl_filename`). `workspace_dir` (the project **root** that contains
+> `.unblock/`) and `paths.unblock_dir` (= `workspace_dir/.unblock`) are **distinct and both intentional**. The task
+> performs `.unblock/` upward discovery from `start`, libsql open + migrate via
+> `unblock_storage::LibsqlStorage::open_local`, `Arc<dyn Storage>` construction, path resolution into `ConfigPaths`,
+> and actor resolution (`UNBLOCK_ACTOR` env → `$USER` → `"unblock"`). The **full layered resolution**
 > (CLI > env `UNBLOCK_*` > project `.unblock/config.toml` > defaults) lands **additively at T1.3** — it replaces the
 > defaulting internals and enriches the facade input, touching **no public type or signature** pinned here. T1.3a
 > sequences **before** T1.2: the engine *consumes* config's `WorkspaceContext`, and config is **L4** so it **cannot**
