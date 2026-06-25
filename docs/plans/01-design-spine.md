@@ -810,7 +810,10 @@ pub async fn open_with_storage(start: &Path) -> Result<WorkspaceContext, ConfigE
 ### 4.1 Session surface
 
 ```rust
-pub struct Session { /* storage: Arc<dyn Storage>, write_permit: Arc<tokio::sync::Semaphore>, policy, config, shutdown */ }
+pub struct Session { /* storage: Arc<dyn Storage>, write_permit: Arc<tokio::sync::Semaphore>, config, actor, paths, shutdown */ }
+// NO `policy` field (OQ-1 RESOLVED, T1.2): `unblock-policy` ships only FREE FUNCTIONS (`cmp_ready` etc.) —
+// there is no policy struct/trait-object to hold; `ready()` calls `unblock_policy::cmp_ready` directly.
+// A `dyn`-pluggable-policy handle is a v2 additive seam (it would add a field then; it does not exist now).
 
 // SessionConfig is engine-owned. Post-CF-D `workspace_dir`/`actor` MOVED to WorkspaceContext
 // (config-owned) and are NO LONGER here. SessionConfig carries engine-behaviour knobs only.
