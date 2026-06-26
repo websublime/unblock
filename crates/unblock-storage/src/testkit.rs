@@ -169,6 +169,10 @@ where
     contract_tombstone_preserves_type_and_event_rule(factory().await).await;
     contract_transactional_audit_atomicity(factory().await).await;
 
+    // Delete modes — cascade + hard (FR-1c, never-run production paths).
+    contract_cascade_delete(factory().await).await;
+    contract_hard_delete(factory().await).await;
+
     // Seam-backed: id child-counter high-water mark.
     contract_child_counter_high_water(factory().await).await;
 }
@@ -1419,6 +1423,175 @@ pub async fn contract_transactional_audit_atomicity<S: Storage>(storage: S) {
         storage.list_dependencies("ub-b").await.unwrap().len(),
         edges_on_b,
         "no edge added on ub-b (the rejected direction)"
+    );
+}
+
+/// `DeleteMode::Cascade` tombstones the target and all dotted-id-prefix descendants (FR-1c).
+///
+/// The corpus: `ub-1` (target), `ub-1.1`/`ub-1.1.1` (prefix children, Open),
+/// `ub-1.2` (prefix child, Closed/terminal), `ub-10` (dot-boundary decoy — shares `ub-1` prefix
+/// WITHOUT a dot, must be UNTOUCHED), `ub-2` (unrelated, must be UNTOUCHED).
+///
+/// Cascade keys on the `{target}.%` dotted-id LIKE pattern (`crud.rs:835`), NOT on edges —
+/// so this corpus uses dotted ids without any parent-child edges.
+pub async fn contract_cascade_delete<S: Storage>(storage: S) {
+    // Build corpus.
+    storage.create_issue(&issue("ub-1", "root"), "alice").await.unwrap();
+    storage.create_issue(&issue("ub-1.1", "child"), "alice").await.unwrap();
+    storage.create_issue(&issue("ub-1.1.1", "grandchild"), "alice").await.unwrap();
+    // ub-1.2 is Closed (terminal) — tombstone_one must set deleted_by but must NOT emit Deleted.
+    storage.create_issue(&issue("ub-1.2", "closed-child"), "alice").await.unwrap();
+    storage
+        .update_issue(
+            "ub-1.2",
+            &IssuePatch { status: Some(Status::Closed), ..IssuePatch::default() },
+            "alice",
+        )
+        .await
+        .unwrap();
+    // Dot-boundary decoy: shares the "ub-1" string prefix but has no dot after "ub-1".
+    storage.create_issue(&issue("ub-10", "decoy"), "alice").await.unwrap();
+    // Unrelated root.
+    storage.create_issue(&issue("ub-2", "unrelated"), "alice").await.unwrap();
+
+    let plan = DeletePlan {
+        mode: DeleteMode::Cascade,
+        targets: vec!["ub-1".to_string()],
+        cascade_children: Vec::new(), // storage resolves this
+    };
+    let resolved = storage.delete_issue(&plan, "admin").await.unwrap();
+
+    // Resolved plan shows the full blast radius (sorted, non-empty).
+    assert_eq!(resolved.mode, DeleteMode::Cascade);
+    assert_eq!(resolved.targets, vec!["ub-1".to_string()]);
+    assert_eq!(
+        resolved.cascade_children,
+        vec!["ub-1.1".to_string(), "ub-1.1.1".to_string(), "ub-1.2".to_string()],
+        "cascade_children: sorted prefix-descendants; ub-10 excluded (no dot); ub-2 excluded"
+    );
+
+    // All four affected issues are Tombstone with original_type preserved.
+    for id in ["ub-1", "ub-1.1", "ub-1.1.1", "ub-1.2"] {
+        let fetched = storage.get_issue(id).await.unwrap().unwrap();
+        assert_eq!(fetched.status, Status::Tombstone, "{id} must be Tombstone");
+        assert!(fetched.original_type.is_some(), "{id} original_type must be preserved");
+        assert_eq!(
+            fetched.deleted_by.as_deref(),
+            Some("admin"),
+            "{id} deleted_by must be the actor (including the terminal ub-1.2)"
+        );
+    }
+
+    // Deleted-event count: 3 non-terminal members each emit one; ub-1.2 (was Closed) emits zero.
+    for id in ["ub-1", "ub-1.1", "ub-1.1.1"] {
+        assert!(
+            event_types(&storage, id).await.contains(&"deleted".to_string()),
+            "{id} (non-terminal) must have a Deleted event"
+        );
+    }
+    let ub12_deleted = event_types(&storage, "ub-1.2")
+        .await
+        .into_iter()
+        .filter(|e| e == "deleted")
+        .count();
+    assert_eq!(ub12_deleted, 0, "ub-1.2 (was Closed/terminal) must have zero Deleted events");
+
+    // Bounded blast radius: dot-boundary decoy and unrelated root are UNTOUCHED.
+    let decoy = storage.get_issue("ub-10").await.unwrap().unwrap();
+    assert_eq!(decoy.status, Status::Open, "ub-10 (dot-boundary decoy) must be untouched");
+    assert!(decoy.deleted_by.is_none());
+
+    let unrelated = storage.get_issue("ub-2").await.unwrap().unwrap();
+    assert_eq!(unrelated.status, Status::Open, "ub-2 (unrelated) must be untouched");
+    assert!(unrelated.deleted_by.is_none());
+}
+
+/// `DeleteMode::Hard` permanently removes the target row + FK-child rows + inbound dep rows —
+/// but child *issue rows* identified by the dotted-id prefix SURVIVE (Hard ≠ Cascade).
+///
+/// `issues` has NO self-referential parent FK (`schema.rs:34-78`). The `Hard` arm in `crud.rs:731`
+/// takes `_ => targets.clone()` — it does NOT extend with `cascade_children`. Only the target's own
+/// child rows (labels/deps/events via `issue_id` FK CASCADE) + inbound `depends_on_id` dep rows
+/// (explicit DELETE, `crud.rs:741-746`) are removed.
+///
+/// `PRAGMA foreign_keys = ON` is verified by `pragmas_readback_in_memory` (mod.rs:702-727) and
+/// `foreign_keys_enforced` (mod.rs:853); the FK CASCADE assertion here relies on that.
+pub async fn contract_hard_delete<S: Storage>(storage: S) {
+    // ub-1: target; ub-1.1: child issue (dotted id — must survive); ub-2: unrelated.
+    storage.create_issue(&issue("ub-1", "target"), "alice").await.unwrap();
+    storage.create_issue(&issue("ub-1.1", "child"), "alice").await.unwrap();
+    storage.create_issue(&issue("ub-2", "unrelated"), "alice").await.unwrap();
+
+    // Outbound edge: ub-1 --blocks--> ub-3 (ub-1's issue_id dep row — FK CASCADE removes it).
+    storage.create_issue(&issue("ub-3", "out-target"), "alice").await.unwrap();
+    storage
+        .add_dependency(&dep("ub-1", "ub-3", DependencyType::Blocks), "alice")
+        .await
+        .unwrap();
+
+    // Inbound edge: ub-4 --blocks--> ub-1 (depends_on_id = "ub-1", NO FK — explicit DELETE).
+    storage.create_issue(&issue("ub-4", "in-blocker"), "alice").await.unwrap();
+    storage
+        .add_dependency(&dep("ub-4", "ub-1", DependencyType::Blocks), "alice")
+        .await
+        .unwrap();
+
+    let plan = DeletePlan {
+        mode: DeleteMode::Hard,
+        targets: vec!["ub-1".to_string()],
+        cascade_children: Vec::new(),
+    };
+    storage.delete_issue(&plan, "admin").await.unwrap();
+
+    // (1) ub-1 row is gone.
+    assert!(
+        storage.get_issue("ub-1").await.unwrap().is_none(),
+        "Hard delete must remove the target row"
+    );
+
+    // (2) Inbound orphan cleaned: ub-4's dep list has no depends_on_id="ub-1".
+    let ub4_deps = storage.list_dependencies("ub-4").await.unwrap();
+    assert!(
+        !ub4_deps.iter().any(|d| d.depends_on_id == "ub-1"),
+        "inbound dep from ub-4 to ub-1 must be cleaned by explicit DELETE"
+    );
+
+    // (3) FK CASCADE: ub-1's OWN dep rows (issue_id="ub-1") are gone.
+    let ub1_deps = storage.list_dependencies("ub-1").await.unwrap();
+    assert!(ub1_deps.is_empty(), "ub-1's own dep rows gone via FK CASCADE");
+
+    // (4) Global no-orphan: whole graph has no edge mentioning ub-1.
+    let graph = storage.dependency_graph(&[]).await.unwrap();
+    assert!(
+        !graph.edges.iter().any(|e| e.from == "ub-1" || e.to == "ub-1"),
+        "no edge may reference the deleted ub-1"
+    );
+
+    // (5) Hard ≠ Cascade: child *issue rows* survive (issues table has NO self-parent FK).
+    assert!(
+        storage.get_issue("ub-1.1").await.unwrap().is_some(),
+        "ub-1.1 (child issue row) SURVIVES Hard delete — no self-parent FK"
+    );
+    assert!(
+        storage.get_issue("ub-2").await.unwrap().is_some(),
+        "ub-2 (unrelated) SURVIVES"
+    );
+    assert!(
+        storage.get_issue("ub-3").await.unwrap().is_some(),
+        "ub-3 (outbound target) SURVIVES"
+    );
+    assert!(
+        storage.get_issue("ub-4").await.unwrap().is_some(),
+        "ub-4 (inbound blocker) SURVIVES"
+    );
+
+    // (6) Hard writes no spurious Deleted event on a SURVIVING issue (S9): tombstone_one is never
+    //     called (Hard takes the row-delete path). ub-1's OWN events are unobservable post-delete
+    //     (its events rows are gone via FK CASCADE, not by writing a Deleted event), so we only
+    //     assert what is checkable: ub-4 (which survives) has no "deleted" event from this Hard op.
+    assert!(
+        !event_types(&storage, "ub-4").await.contains(&"deleted".to_string()),
+        "Hard delete must NOT emit a Deleted event on any surviving issue"
     );
 }
 
