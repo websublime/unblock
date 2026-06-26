@@ -138,6 +138,73 @@ async fn body_field_update_emits_no_event() {
 }
 
 #[tokio::test]
+async fn close_reason_round_trips_via_update_set_clear_leave() {
+    let storage = fresh().await;
+    storage
+        .create_issue(&issue("ub-1", "t"), "a")
+        .await
+        .unwrap();
+    // A freshly created issue has no close reason (DEFAULT '' → None on load).
+    let before = storage.get_issue("ub-1").await.unwrap().unwrap();
+    assert_eq!(before.close_reason, None);
+
+    // Some(Some("done")) → set, and it persists across a re-read.
+    storage
+        .update_issue(
+            "ub-1",
+            &IssuePatch {
+                close_reason: Some(Some("done".to_string())),
+                ..IssuePatch::default()
+            },
+            "a",
+        )
+        .await
+        .unwrap();
+    let set = storage.get_issue("ub-1").await.unwrap().unwrap();
+    assert_eq!(set.close_reason.as_deref(), Some("done"));
+
+    // None (leave unchanged) → the stored reason survives an unrelated patch.
+    storage
+        .update_issue(
+            "ub-1",
+            &IssuePatch {
+                title: Some("retitled".to_string()),
+                ..IssuePatch::default()
+            },
+            "a",
+        )
+        .await
+        .unwrap();
+    let left = storage.get_issue("ub-1").await.unwrap().unwrap();
+    assert_eq!(
+        left.close_reason.as_deref(),
+        Some("done"),
+        "None must leave close_reason untouched"
+    );
+
+    // Some(None) → clear to the column default '' (coalesces to None on load).
+    storage
+        .update_issue(
+            "ub-1",
+            &IssuePatch {
+                close_reason: Some(None),
+                ..IssuePatch::default()
+            },
+            "a",
+        )
+        .await
+        .unwrap();
+    let cleared = storage.get_issue("ub-1").await.unwrap().unwrap();
+    assert_eq!(cleared.close_reason, None, "Some(None) clears the reason");
+
+    // close_reason is a body column → it writes NO own event (only created + the title `updated`).
+    assert_eq!(
+        event_types(&storage, "ub-1").await,
+        vec!["created".to_string(), "updated".to_string()]
+    );
+}
+
+#[tokio::test]
 async fn status_priority_assignee_emit_their_events() {
     let storage = fresh().await;
     storage

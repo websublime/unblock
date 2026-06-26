@@ -297,6 +297,11 @@ impl UpdateBuilder {
 /// recomputed; per-field events are written **only** for the fields whose value actually changed
 /// (see the §3.2.1 EventType-per-mutation table). A reparent (`parent`) is cycle-checked. Returns the
 /// hydrated, updated issue.
+///
+/// `close_reason` is a `DEFAULT ''` body column persisted like the other body-text fields (no own
+/// event — §3.2.1 table). It is patched **independently** of `status`: the `StatusChanged`/`Closed`
+/// audit event does **not** carry the reason in v1 (wiring it would couple the two independent patch
+/// fields through `append_event_in_tx`; deferred — the reason is still durably stored on the row).
 #[allow(clippy::too_many_lines)]
 pub(super) async fn update_issue(
     conn: &Connection,
@@ -356,6 +361,9 @@ pub(super) async fn update_issue(
         );
         builder.push_opt_text("notes", &patch.notes, &mut issue.notes);
         builder.push_opt_text("owner", &patch.owner, &mut issue.owner);
+        // close_reason: a `DEFAULT ''` body column (no event); the close path sets it (T1.2,
+        // spine §3.1). `Some(None)` clears to '' (→ None on load); `Some(Some(s))` sets it.
+        builder.push_opt_text("close_reason", &patch.close_reason, &mut issue.close_reason);
 
         // --- external_ref (nullable, uniqueness-checked; no event) ---
         if let Some(ext) = patch.external_ref.clone()
