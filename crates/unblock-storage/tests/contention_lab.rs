@@ -34,14 +34,23 @@
 //!   write-lock + native `busy_timeout` engage.
 //!
 //! `R = (contended CPU-per-write) / (baseline CPU-per-write)`. Honest blocking ⇒ `R ≈ 1` (the extra
-//! time is sleep, not CPU). A hot-spin ⇒ `R ≫ 5` (the `K - 1` losers burn cores while one writer works,
+//! time is sleep, not CPU). A hot-spin ⇒ `R ≫ 3` (the `K - 1` losers burn cores while one writer works,
 //! so per-write CPU rises ≈ `K×`). The ratio normalizes for machine speed (both legs, same runner, same
 //! process), so it is far more flake-resistant than any absolute CPU/wall threshold. The gate asserts
-//! **R ≤ 5.0** — a *provisional* wide categorical bound. On a multi-core dev machine independent runs
+//! **R ≤ 3.0** — a *provisional* wide categorical bound. On a multi-core dev machine independent runs
 //! measure `R ≈ 1.0–1.2` blocking (the run-to-run spread; the band bounds it, not a single point) and
-//! `R ≈ 25–27` for the forced-spin control, so 5.0 sits with large headroom on both sides. It is marked
-//! provisional in code + docs; the actual measured `R` is printed on every run and recorded in
-//! `STATUS.md`. Calibration of a tighter bound is pending (perf budgets are T3.5).
+//! `R ≈ 25–27` for the forced-spin control, so 3.0 sits with large headroom on both sides.
+//!
+//! **Recalibration (5.0 → 3.0).** `R` is *not* invariant to the runner's core count: the contended
+//! leg's per-write CPU rises with the number of losers that can burn a core at once, so a *real*
+//! hot-spin reaches `R ≈ 28` on a 14-core dev box but only `R ≈ 4.42` on a 4-vCPU GitHub runner (the
+//! weakest sanctioned runner). The original `5.0` ceiling was therefore **vacuous on low-core CI
+//! runners** — a genuine spin at `R ≈ 4.42` would have *passed* `R ≤ 5.0`, and the forced-spin control
+//! flaked around the 5 threshold there. Honest blocking, by contrast, is robustly `R ≈ 1.0–1.2` on
+//! *every* runner (blocking adds wall time, not CPU), so lowering the ceiling to `3.0` keeps the honest
+//! gate passing with ~2.5× margin while making a real spin **caught even on a 4-vCPU runner**
+//! (`4.42 > 3.0`). The ceiling stays provisional; the actual measured `R` is printed on every run and
+//! recorded in `STATUS.md`. Calibration of a tighter bound is pending (perf budgets are T3.5).
 //!
 //! The periodic passive checkpoint is **disabled inside both timed brackets** (so checkpoint CPU never
 //! enters the ratio); open/migrate/warmup stay **outside** both brackets; the baseline tasks are
@@ -67,7 +76,13 @@
 //!
 //! - **forced-spin control** ([`forced_spin_control_blows_the_ratio`]) — a store built with
 //!   `busy_timeout = 0` so losers spin-retry at the application level (the beads anti-pattern). It runs
-//!   the same two legs and asserts `R ≫ 5` (the metric detects a real hot-spin).
+//!   the same two legs and proves the lab detects a real hot-spin via a **core-independent hot-spin
+//!   signature** — a busy-retry witness (the contended leg retries furiously while the baseline's is 0)
+//!   plus a CPU-burn witness (`contended cpu/wall > 1.8`, i.e. multiple cores burning, while the
+//!   baseline's `cpu/wall ≈ 1`) — and *also* reports `R` as a corroborating diagnostic. Those two
+//!   witnesses hold on **any `>= 2`-core runner**; `R > 3.0` is the secondary check (a real spin reaches
+//!   `R ≈ 4.42` even on the weakest 4-vCPU runner). It also prints the *honest* (native-blocking) `R`
+//!   side by side so the separation `honest ≈ 1.x < ceiling 3.0 < spin` is visible on the actual runner.
 //! - **WAL negative control** ([`wal_negative_control_breaches_ceiling`]) — the same sustained
 //!   contention window with the periodic checkpoint **disabled**; it asserts the `-wal` sidecar
 //!   **breaches** the ceiling that the positive WAL-bound sub-phase holds it under (so the positive
@@ -82,7 +97,7 @@
 //!
 //! | Symptom | Meaning | Action |
 //! |---|---|---|
-//! | High `R` (> 5) **with** a confirmed busy-retry witness | a real CPU hot-spin under contention | **STOP** — pivot to `rusqlite` behind the same `Storage` trait; re-open D14/D15. This is the RK-1 signal. |
+//! | High `R` (> 3) **with** a confirmed busy-retry witness | a real CPU hot-spin under contention | **STOP** — pivot to `rusqlite` behind the same `Storage` trait; re-open D14/D15. This is the RK-1 signal. |
 //! | busy-retry witness **absent** (contended == 0) | no contention materialized | gate **INCONCLUSIVE** (a harness defect), **not** a pass and **not** a failure — fix the harness. |
 //! | non-empty `integrity_check` / an unexpected error variant | data corruption / a lost write | **STOP** — corruption finding; pivot. |
 //!
@@ -141,10 +156,40 @@ static GATE_SERIAL: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 /// Provisional gate bound on the contended/baseline CPU-per-write ratio (see the module docs).
 ///
-/// Wide categorical bound: far below a spin's `≈ 25–27`, comfortably above honest blocking's
-/// `≈ 1.0–1.2`. The measured `R` is printed on every run; a tighter, calibrated bound is pending
-/// (perf budgets = T3.5).
-const PROVISIONAL_RATIO_CEILING: f64 = 5.0;
+/// Wide categorical bound: honest blocking's `R ≈ 1.0–1.2` passes with ~2.5× margin, while a *real*
+/// hot-spin is caught on **every** sanctioned runner — including the weakest 4-vCPU GitHub runner,
+/// where a genuine spin only reaches `R ≈ 4.42` (`4.42 > 3.0`).
+///
+/// **Recalibrated `5.0 → 3.0`.** `R` scales with the runner's core count (a spin reaches `R ≈ 28` on a
+/// 14-core dev box but only `R ≈ 4.42` on a 4-vCPU runner), so the old `5.0` was **vacuous on low-core
+/// CI runners** — a real spin at `R ≈ 4.42` would have passed `R ≤ 5.0`, and the forced-spin control
+/// flaked around the 5 threshold there. `3.0` makes both the gate's `R ≤ 3.0` assert and the
+/// forced-spin control's `R > 3.0` corroborating check non-vacuous on a 4-vCPU runner, while honest
+/// blocking (robustly `R ≈ 1.0–1.2` on every runner) still passes comfortably.
+///
+/// The measured `R` is printed on every run; a tighter, calibrated bound is pending (perf budgets =
+/// T3.5).
+const PROVISIONAL_RATIO_CEILING: f64 = 3.0;
+
+/// Forced-spin control: minimum **cores burning** (`cpu/wall`) the contended spin leg must exhibit.
+///
+/// This is the **core-independent** primary hot-spin witness (see [`LegStats::cpu_per_wall`]). A real
+/// non-yielding spin keeps the `K - 1` losers busy-looping on their own cores, so `cpu/wall ≈ K`; even
+/// on a 4-vCPU runner a real spin observed `~3.56` cores burning. Honest blocking sleeps, so its
+/// `cpu/wall ≈ 1`. `1.8` sits decisively above `1` (no blocking leg reaches it) and well below the
+/// `~3.56` a spin reaches on the *weakest* sanctioned runner — so the witness holds on any
+/// `>= 2`-core runner regardless of how `R`'s magnitude scales.
+const SPIN_CORE_BURN_FLOOR: f64 = 1.8;
+
+/// Forced-spin control: minimum busy-retry count the contended spin leg must witness.
+///
+/// A real spin retries the zero-timeout write lock furiously — a 4-vCPU runner observed `547100`
+/// contended busy-retries (vs `0` baseline). A `10_000` floor is ~50× below that observation yet vastly
+/// above any plausible non-spin (the native gate's contended witness is in the hundreds–thousands), so
+/// it cleanly separates a furious spin from incidental contention on any `>= 2`-core runner. (It is
+/// also far above the spin leg's committed-write count, so the spin is provably retrying, not
+/// progressing.)
+const SPIN_BUSY_RETRY_FLOOR: u64 = 10_000;
 
 /// Floor on the adaptive writer count (the gate needs at least two writers to contend at all).
 const MIN_WRITERS: usize = 2;
@@ -335,6 +380,21 @@ impl LegStats {
         // against a zero divide defensively so a harness bug surfaces as a clear value, not a panic.
         let writes = self.writes.max(1) as f64;
         self.cpu.as_secs_f64() / writes
+    }
+
+    /// Whole-process CPU divided by wall time = the **average number of cores burning** during the leg.
+    ///
+    /// This is the **core-independent** hot-spin witness used by the forced-spin control: a blocking
+    /// busy handler sleeps (no CPU while waiting), so a serialized/blocking leg stays near `≈ 1.0`; a
+    /// hot-spin keeps `K - 1` losers busy-looping on their own cores, so it climbs to `≈ K`. Even on a
+    /// 4-vCPU runner a real spin observed `~3.56` cores burning — so a `> 1.8` floor cleanly separates a
+    /// spin (multiple cores) from honest blocking (`≈ 1`) on **any `>= 2`-core runner**, unlike `R`,
+    /// whose magnitude scales with the core count.
+    fn cpu_per_wall(&self) -> f64 {
+        // Guard a zero divide defensively (a leg always elapses > 0 wall, but a harness bug should
+        // surface as a clear value, not a panic).
+        let wall = self.wall.as_secs_f64().max(f64::MIN_POSITIVE);
+        self.cpu.as_secs_f64() / wall
     }
 }
 
@@ -812,8 +872,27 @@ async fn count_bounded_update_storm(
 /// FORCED-SPIN CONTROL (falsifiability): a store built with `busy_timeout = 0` so write-lock losers
 /// spin-retry at the application level (the beads / *frankensqlite* defect-243 anti-pattern,
 /// deliberately reproduced as a **tight, non-yielding** loop that pins its worker thread). Runs the
-/// same two legs and asserts `R ≫ 5` — proving the lab's CPU-per-write metric actually detects a
-/// hot-spin. `#[ignore]`d: this is a deliberate spin and would otherwise fail the gate's intent.
+/// same two legs and proves the lab's metric actually detects a hot-spin. `#[ignore]`d: this is a
+/// deliberate spin and would otherwise fail the gate's intent.
+///
+/// **Core-independent hot-spin signature (the primary proof).** Because the CPU-per-write ratio `R`
+/// scales with the runner's core count (a spin reaches `R ≈ 28` on a 14-core box but only `R ≈ 4.42`
+/// on a 4-vCPU runner), asserting `R > ceiling` alone is fragile near the threshold on low-core
+/// runners. So the control's **primary** assertions are the two qualitative witnesses of a real spin
+/// that hold on **any `>= 2`-core runner**:
+///
+/// 1. **busy-retry witness** — the contended leg retries the zero-timeout lock furiously
+///    (`busy_retries > `[`SPIN_BUSY_RETRY_FLOOR`], observed `547100` on a 4-vCPU runner) while the
+///    baseline's stays `== 0` (own files, no contention);
+/// 2. **CPU-burn witness** — the contended leg burns multiple cores
+///    (`cpu/wall > `[`SPIN_CORE_BURN_FLOOR`], observed `~3.56` on a 4-vCPU runner) while the baseline's
+///    stays near one core (`cpu/wall ≈ 1`). This is the **key** core-independent signal: a blocking
+///    handler sleeps (CPU idle while waiting), a spin burns.
+///
+/// `R > `[`PROVISIONAL_RATIO_CEILING`] is kept only as a **corroborating** secondary check (it holds at
+/// `4.42 > 3.0` even on the weakest runner). The control also measures + prints the *honest*
+/// (native-blocking) contended `R` side by side so the run shows `honest R ≈ 1.x < ceiling 3.0 < spin R`
+/// on the actual runner — making the separation visible on CI.
 ///
 /// Built on its **own** runtime sized to `K + 4` worker threads (not `#[tokio::test]`): a true
 /// non-yielding spin needs at least one thread per concurrent writer **plus** spare for the lock
@@ -842,7 +921,7 @@ fn forced_spin_control_blows_the_ratio() {
 
         println!(
             "\n=== forced-spin control (busy_timeout = 0; tight non-yielding spin; \
-             expect R >> {PROVISIONAL_RATIO_CEILING}) ==="
+             expect a core-independent spin signature; R >> {PROVISIONAL_RATIO_CEILING} corroborates) ==="
         );
 
         // Baseline leg: own files (no contention even at busy_timeout=0 → no spin, honest cost).
@@ -872,27 +951,85 @@ fn forced_spin_control_blows_the_ratio() {
             timed_write_storm(&stores, writers, Concurrency::Parallel, "spin-contended").await;
 
         let ratio = contended.cpu_per_write() / baseline.cpu_per_write();
+        let contended_core_burn = contended.cpu_per_wall();
+        let baseline_core_burn = baseline.cpu_per_wall();
+
+        // --- Honest-leg calibration diagnostic: the SAME shared-file storm but with the NATIVE
+        //     (blocking) busy_timeout, so the run prints `honest R` vs `spin R` side by side — proving
+        //     the separation `honest ~1.x < ceiling 3.0 < spin` on the ACTUAL runner. Lightweight: it
+        //     reuses the gate's native legs. (Both legs use the GATE's 4-thread arithmetic implicitly
+        //     via the same writer body; the blocking handler sleeps, so the K+4 runtime suffices.)
+        let honest_baseline = run_baseline_leg(writers).await;
+        let honest_contended = run_contended_leg(writers).await;
+        let honest_ratio = honest_contended.cpu_per_write() / honest_baseline.cpu_per_write();
+
         println!(
-            "[forced-spin] baseline cpu/write={:.3}us contended cpu/write={:.3}us R={ratio:.2} \
-             busy_retries(contended)={}",
+            "[forced-spin] spin-baseline cpu/write={:.3}us spin-contended cpu/write={:.3}us \
+             spin R={ratio:.2} | contended cpu/wall={contended_core_burn:.2} (cores burning) \
+             baseline cpu/wall={baseline_core_burn:.2} | contended busy_retries={} baseline \
+             busy_retries={} | honest R={honest_ratio:.2} (native blocking; contended \
+             cpu/wall={:.2})",
             baseline.cpu_per_write() * 1e6,
             contended.cpu_per_write() * 1e6,
-            contended.busy_retries
+            contended.busy_retries,
+            baseline.busy_retries,
+            honest_contended.cpu_per_wall(),
         );
 
+        // ==== PRIMARY (core-independent) hot-spin witnesses — hold on ANY >= 2-core runner ====
+
+        // (1) busy-retry witness: a real spin retries the zero-timeout lock furiously; the baseline
+        //     (own files) never contends.
         assert!(
-            contended.busy_retries > 0,
-            "forced-spin control: the contended leg must record spins (busy_retries > 0)"
+            contended.busy_retries > SPIN_BUSY_RETRY_FLOOR,
+            "forced-spin control: the contended spin leg must witness a FURIOUS busy-retry storm \
+             (> {SPIN_BUSY_RETRY_FLOOR}), got {} — a real non-yielding spin retries the zero-timeout \
+             write lock millions of times. A low count means the spin did not materialize.",
+            contended.busy_retries
         );
+        assert_eq!(
+            baseline.busy_retries, 0,
+            "forced-spin control: the baseline leg (each writer on its own file) must record ZERO \
+             contention, got {} — the busy-retry witness is only meaningful against a 0 baseline.",
+            baseline.busy_retries
+        );
+
+        // (2) CPU-burn witness (the KEY core-independent signal): the contended leg burns multiple
+        //     cores (spin), the baseline burns ~1 (no waiting). A blocking handler would sleep, so this
+        //     separates spin from block regardless of how many cores the runner has.
+        assert!(
+            contended_core_burn > SPIN_CORE_BURN_FLOOR,
+            "forced-spin control: the contended spin leg must BURN multiple cores \
+             (cpu/wall > {SPIN_CORE_BURN_FLOOR}), got {contended_core_burn:.2} — a real non-yielding \
+             spin keeps the K-1 losers busy-looping on their own cores. cpu/wall ≈ 1 would mean it is \
+             NOT spinning (the metric would be vacuous)."
+        );
+
+        // ==== SECONDARY (corroborating) — R still blows the (now lower) ceiling ====
         assert!(
             ratio > PROVISIONAL_RATIO_CEILING,
-            "forced-spin control FAILED to blow the ratio: R = {ratio:.2} did not exceed \
-             {PROVISIONAL_RATIO_CEILING} — the metric would NOT detect a real hot-spin (the gate would \
-             be vacuous). Investigate."
+            "forced-spin control: R = {ratio:.2} did not exceed the ceiling \
+             {PROVISIONAL_RATIO_CEILING} — even on the weakest 4-vCPU runner a real spin reaches \
+             R ≈ 4.42 > 3.0. Combined with the busy-retry + cpu-burn witnesses above, R is the \
+             corroborating proof the CPU-per-write metric detects a hot-spin."
         );
+
+        // ==== Honest-leg separation (documents that the gate is non-vacuous on THIS runner) ====
+        assert!(
+            honest_ratio <= PROVISIONAL_RATIO_CEILING,
+            "forced-spin control: the HONEST (native-blocking) contended R = {honest_ratio:.2} must \
+             stay under the ceiling {PROVISIONAL_RATIO_CEILING} — it proves the separation \
+             `honest < ceiling < spin` holds on this runner (if honest R itself breached the ceiling, \
+             the gate's R <= ceiling assert would be flaky, not the spin)."
+        );
+
         println!(
-            "=== forced-spin control PASS: R = {ratio:.2} >> {PROVISIONAL_RATIO_CEILING} \
-             (the metric detects a hot-spin) ===\n"
+            "=== forced-spin control PASS: spin signature confirmed — contended busy_retries={} \
+             (> {SPIN_BUSY_RETRY_FLOOR}, baseline 0), contended cpu/wall={contended_core_burn:.2} \
+             (> {SPIN_CORE_BURN_FLOOR} cores), spin R={ratio:.2} > {PROVISIONAL_RATIO_CEILING} \
+             corroborates; honest R={honest_ratio:.2} <= {PROVISIONAL_RATIO_CEILING} (separation \
+             holds) ===\n",
+            contended.busy_retries
         );
     });
 }
@@ -1110,7 +1247,7 @@ fn print_diagnostics(
     );
     println!(
         "RATIO R  : {ratio:.3}  (provisional ceiling {PROVISIONAL_RATIO_CEILING:.1}; \
-         blocking ~1.0-1.2, spin >> 5)"
+         blocking ~1.0-1.2, spin >> 3)"
     );
     println!(
         "WITNESS  : baseline busy_retries={} contended busy_retries={}",
