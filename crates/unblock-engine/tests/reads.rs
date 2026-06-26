@@ -7,9 +7,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::parked::ParkedStorage;
-use common::{add_blocks, issue, session, session_over};
+use common::{add_blocks, issue, seed_open, session, session_over};
 use unblock_engine::DiagnosticKind;
-use unblock_model::Priority;
+use unblock_model::{CountGroupBy, ListFilters, Priority};
 
 #[tokio::test]
 async fn ready_excludes_blocked_deferred_closed_and_reflects_edge_change() {
@@ -147,6 +147,104 @@ async fn reads_succeed_while_a_write_holds_the_permit() {
 }
 
 #[tokio::test]
+async fn search_applies_default_cap_when_limit_unset_and_honours_an_explicit_limit() {
+    // FR-4: with no `filters.limit`, the engine fills the default `search_cap` (50). Seed 55 matching
+    // issues so the uncapped result would be 55 — the cap must clamp it to 50; an explicit small
+    // limit must be honoured verbatim.
+    let session = session().await;
+    seed_open(&session, 55).await; // titles are "issue ub-XXXX" — all match the needle "issue".
+
+    // No limit set -> the engine applies the default cap of 50.
+    let capped = session
+        .search("issue", &ListFilters::default())
+        .await
+        .expect("search");
+    assert_eq!(
+        capped.len(),
+        50,
+        "default search_cap (50) must clamp the result"
+    );
+
+    // An explicit limit is honoured verbatim (the engine does not override a set limit).
+    let limited = session
+        .search(
+            "issue",
+            &ListFilters {
+                limit: Some(7),
+                ..ListFilters::default()
+            },
+        )
+        .await
+        .expect("search");
+    assert_eq!(limited.len(), 7, "an explicit limit must be honoured");
+}
+
+#[tokio::test]
+async fn count_group_by_status_buckets_sum_to_total() {
+    // FR-4: count with a group-by returns per-key buckets; a separate close moves one issue into a
+    // distinct status bucket. The buckets must sum to the grand total.
+    let session = session().await;
+    for (id, secs) in [("ub-a", 1000), ("ub-b", 1001), ("ub-c", 1002)] {
+        session
+            .create(&issue(id, Priority::MEDIUM, secs))
+            .await
+            .expect("create");
+    }
+    // Close one so two statuses exist (open + closed).
+    session
+        .close_with_suggestions("ub-c", None)
+        .await
+        .expect("close");
+
+    let filters = ListFilters {
+        include_closed: true,
+        ..ListFilters::default()
+    };
+    let buckets = session
+        .count(&filters, Some(CountGroupBy::Status))
+        .await
+        .expect("count");
+    let total: usize = buckets.iter().map(|b| b.count).sum();
+    assert_eq!(total, 3, "buckets must sum to the 3 issues");
+    // At least two distinct status keys are present (open + closed).
+    assert!(
+        buckets.len() >= 2,
+        "a closed issue creates a second status bucket, got {buckets:?}"
+    );
+}
+
+#[tokio::test]
+async fn stale_returns_only_issues_older_than_the_cutoff() {
+    // FR-4: `stale(older_than, filters)` returns issues whose `updated_at` predates the cutoff.
+    let session = session().await;
+    // Two issues created at fixed deterministic timestamps (1000s and 5000s epoch via the corpus
+    // builder), so a cutoff between them isolates exactly the older one.
+    session
+        .create(&issue("ub-old", Priority::MEDIUM, 1000))
+        .await
+        .expect("create old");
+    session
+        .create(&issue("ub-new", Priority::MEDIUM, 5000))
+        .await
+        .expect("create new");
+
+    // Cutoff at 3000s: only ub-old (updated_at == 1000s) is older.
+    let cutoff = common::t(3000);
+    let stale: Vec<String> = session
+        .stale(cutoff, &ListFilters::default())
+        .await
+        .expect("stale")
+        .into_iter()
+        .map(|i| i.id)
+        .collect();
+    assert_eq!(
+        stale,
+        vec!["ub-old".to_string()],
+        "only the older issue is stale"
+    );
+}
+
+#[tokio::test]
 async fn diagnostics_dispatch_covers_every_kind() {
     let session = session().await;
     session
@@ -179,4 +277,61 @@ async fn diagnostics_dispatch_covers_every_kind() {
         .find(|f| f.label == "total")
         .expect("total finding");
     assert_eq!(total.detail, "1");
+}
+
+#[tokio::test]
+async fn diagnostics_report_shapes_are_golden_pinned() {
+    // Golden-pin the v1 DiagnosticReport SHAPE per kind (label set + per-kind detail policy) over a
+    // fixed, deterministic corpus, so T2.7 (changelog `since`, richer lint) cannot silently drift the
+    // wire shapes. Volatile details (absolute paths in Info/Where, the crate version, env-specific
+    // workspace facts) are REDACTED — we pin the structure, not the machine.
+    let session = session().await;
+    // A deterministic corpus: one open issue + one closed issue (so Stats/Changelog are non-empty).
+    session
+        .create(&issue("ub-open", Priority::MEDIUM, 1000))
+        .await
+        .expect("create open");
+    session
+        .create(&issue("ub-done", Priority::HIGH, 2000))
+        .await
+        .expect("create done");
+    session
+        .close_with_suggestions("ub-done", Some("finished".to_string()))
+        .await
+        .expect("close");
+
+    // For each kind, render a stable "kind: [label=detail, ...]" line, redacting the volatile labels.
+    let volatile = [
+        "workspace_dir",
+        "db_path",
+        "jsonl_path",
+        "unblock_dir",
+        "version",
+    ];
+    let mut lines = Vec::new();
+    for kind in [
+        DiagnosticKind::Stats,
+        DiagnosticKind::Info,
+        DiagnosticKind::Where,
+        DiagnosticKind::Version,
+        DiagnosticKind::Lint,
+        DiagnosticKind::Changelog,
+        DiagnosticKind::Orphans,
+    ] {
+        let report = session.diagnostics(kind).await.expect("diagnostics");
+        let rendered: Vec<String> = report
+            .findings
+            .iter()
+            .map(|f| {
+                if volatile.contains(&f.label.as_str()) {
+                    format!("{}=<redacted>", f.label)
+                } else {
+                    format!("{}={}", f.label, f.detail)
+                }
+            })
+            .collect();
+        lines.push(format!("{kind:?}: [{}]", rendered.join(", ")));
+    }
+
+    insta::assert_snapshot!("diagnostics_report_shapes", lines.join("\n"));
 }

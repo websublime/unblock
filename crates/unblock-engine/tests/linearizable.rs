@@ -198,3 +198,180 @@ async fn claim_race_exactly_one_winner() {
         "every other claimer loses with AlreadyClaimed"
     );
 }
+
+/// FR-9 (M1 AC) — GENUINELY CONCURRENT linearizability over the real-libsql DB through the engine's
+/// `Semaphore(1)`.
+///
+/// The proptest above is single-threaded (it awaits each op before the next), so it proves replay
+/// determinism but NOT that the engine permit serializes truly-in-flight writers. This test drives
+/// many mutations **concurrently** — `create`/`update`/`claim` futures launched at once across a
+/// multi-thread runtime through ONE shared `Arc<Session>` (the supported in-process topology, spine
+/// §4.2: exactly one `unblock serve` per workspace ⇒ one permit) — so every op contends for the
+/// **single** write permit. It then asserts the serialization invariants the permit must guarantee:
+///   (a) `integrity_check()` is clean after the storm (no torn rows / corruption),
+///   (b) NO lost writes — every op that returned `Ok` is reflected in the final DB state (the storm
+///       collects each create/claim/update result; an `Ok` that is not durable is a lost write),
+///   (c) outcomes are consistent with SOME serial order:
+///       - concurrent claims on one id → exactly one durable winner (the persisted assignee) and the
+///         permit serializes so each claim either wins or loses cleanly with `AlreadyClaimed`,
+///       - concurrent creates → every `Ok` create is present,
+///       - concurrent updates of one id → the final priority is one of the values whose update
+///         returned `Ok` (a last-writer-wins state, never a torn mix).
+///
+/// Non-vacuous: without the permit, two `update_issue` BEGIN-IMMEDIATE transactions in flight on the
+/// one write connection would either interleave their read-modify-write of `content_hash`/`updated_at`
+/// or surface `DatabaseLocked` instead of serializing cleanly — so an `Ok` update could be lost or a
+/// claim could double-win, failing (b)/(c). (We do NOT commit a permit-less variant — the reasoning
+/// is the guard.)
+/// The result of one in-flight mutation in the concurrent FR-9 storm: each variant carries `Some`
+/// when the op returned `Ok` (so the test asserts "every Ok is durable", not "every op succeeded").
+enum ConcurrentOutcome {
+    /// `Some(id)` when the create returned `Ok`.
+    Created(Option<String>),
+    /// `Some(assignee)` when the claim returned `Ok`.
+    Claimed(Option<String>),
+    /// `Some(priority)` when the update returned `Ok`.
+    Updated(Option<i32>),
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::too_many_lines)] // one cohesive concurrency storm + its three serialization asserts.
+async fn concurrent_mutations_serialize_no_lost_writes_no_corruption() {
+    let shared: Arc<dyn Storage> = {
+        let s = LibsqlStorage::open_in_memory().await.expect("open");
+        s.migrate().await.expect("migrate");
+        Arc::new(s)
+    };
+
+    // ONE shared session ⇒ ONE write permit serializes every concurrent in-flight mutation (the
+    // supported in-process topology, spine §4.2). Reads/writes take `&self`, so it shares across tasks.
+    let session =
+        Arc::new(session_over(shared.clone(), unblock_engine::SessionConfig::default()).await);
+
+    // Seed two issues that concurrent updaters/claimers will contend over.
+    session
+        .create(&issue("ub-claimed", Priority::MEDIUM, 500))
+        .await
+        .expect("seed claimed");
+    session
+        .create(&issue("ub-updated", Priority::MEDIUM, 600))
+        .await
+        .expect("seed updated");
+
+    let created_ids: Vec<String> = (0..12).map(|k| format!("ub-c{k:04}")).collect();
+    let claimers = 8usize;
+    let update_priorities: Vec<u8> = (0..8).map(|k| u8::try_from(k % 5).unwrap_or(0)).collect();
+
+    // Each task returns its outcome so we can assert "every Ok is durable" (not "every op succeeded").
+    let mut tasks: tokio::task::JoinSet<ConcurrentOutcome> = tokio::task::JoinSet::new();
+
+    // Concurrent creates (each a distinct id).
+    for (i, id) in created_ids.iter().cloned().enumerate() {
+        let session = session.clone();
+        let priority = u8::try_from(i % 5).unwrap_or(0);
+        let created_secs = 1000 + i64::try_from(i).unwrap_or(0);
+        tasks.spawn(async move {
+            let mut iss = issue(&id, Priority(i32::from(priority)), created_secs);
+            iss.title = format!("created {id}");
+            ConcurrentOutcome::Created(session.create(&iss).await.ok())
+        });
+    }
+
+    // Concurrent claimers racing for ub-claimed.
+    for k in 0..claimers {
+        let session = session.clone();
+        tasks.spawn(async move {
+            let assignee = format!("worker-{k}");
+            ConcurrentOutcome::Claimed(
+                session
+                    .claim("ub-claimed", &assignee)
+                    .await
+                    .ok()
+                    .and_then(|iss| iss.assignee),
+            )
+        });
+    }
+
+    // Concurrent updates of ub-updated's priority.
+    for p in update_priorities.clone() {
+        let session = session.clone();
+        tasks.spawn(async move {
+            let patch = IssuePatch {
+                priority: Some(Priority(i32::from(p))),
+                ..IssuePatch::default()
+            };
+            ConcurrentOutcome::Updated(
+                session
+                    .update("ub-updated", &patch)
+                    .await
+                    .ok()
+                    .map(|i| i.priority.0),
+            )
+        });
+    }
+
+    // Collect the outcomes of every in-flight op.
+    let mut ok_created: Vec<String> = Vec::new();
+    let mut ok_claim_assignees: Vec<String> = Vec::new();
+    let mut ok_update_priorities: Vec<i32> = Vec::new();
+    while let Some(joined) = tasks.join_next().await {
+        match joined.expect("task joined without panic") {
+            ConcurrentOutcome::Created(Some(id)) => ok_created.push(id),
+            ConcurrentOutcome::Claimed(Some(a)) => ok_claim_assignees.push(a),
+            ConcurrentOutcome::Updated(Some(p)) => ok_update_priorities.push(p),
+            _ => {}
+        }
+    }
+
+    // (a) Integrity is clean after the concurrent storm (the permit + BEGIN IMMEDIATE serialized
+    //     every read-modify-write, so no torn rows).
+    let integrity = shared.integrity_check().await.expect("integrity_check");
+    assert!(
+        integrity.is_empty(),
+        "post-storm integrity_check must be clean, got {integrity:?}"
+    );
+
+    // Through ONE serializing session, every distinct create succeeds (the permit prevents any
+    // BEGIN-IMMEDIATE contention loss) — so all 12 returned Ok.
+    assert_eq!(
+        ok_created.len(),
+        created_ids.len(),
+        "the single permit serializes creates so each distinct-id create returns Ok"
+    );
+
+    // (b) No lost writes: every create that returned Ok is durable in the final state.
+    for id in &ok_created {
+        assert!(
+            session.get(id).await.expect("get").is_some(),
+            "an Ok create ({id}) must be durable (no lost write)"
+        );
+    }
+
+    // (c) Concurrent claims → exactly one durable winner: ub-claimed is in_progress with the persisted
+    //     assignee, and that assignee is among the claims that returned Ok (a single serial winner).
+    let claimed = session
+        .get("ub-claimed")
+        .await
+        .expect("get")
+        .expect("present");
+    assert_eq!(claimed.status, Status::InProgress, "claimed -> in_progress");
+    let durable_assignee = claimed.assignee.expect("a durable winner assignee");
+    // The permit serializes claims so the durable assignee is the one whose claim returned Ok and won.
+    assert!(
+        ok_claim_assignees.contains(&durable_assignee),
+        "the durable assignee {durable_assignee} must be an Ok-claim winner, got Ok set {ok_claim_assignees:?}"
+    );
+
+    // (c) Concurrent updates → the final priority is one of the values whose update returned Ok
+    //     (a last-writer-wins state, never a torn mix).
+    let updated = session
+        .get("ub-updated")
+        .await
+        .expect("get")
+        .expect("present");
+    assert!(
+        ok_update_priorities.contains(&updated.priority.0),
+        "final priority {} must be one of the Ok-returning update values {ok_update_priorities:?}",
+        updated.priority.0
+    );
+}

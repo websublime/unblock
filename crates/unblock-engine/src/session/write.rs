@@ -44,17 +44,31 @@ impl Session {
 
     /// Apply an [`IssuePatch`] to an issue, returning the updated issue (FR-1c).
     ///
-    /// Validates the *post-patch* coherence the engine owns — currently the patch is applied by
-    /// storage (per-field events, no-op skip); the engine's pre-validation guards the model
-    /// invariants storage trusts (e.g. a `priority` out of range surfaces `ModelError`, not a
-    /// flattened backend error). Under the write permit.
+    /// Validates the *post-patch* issue the **same way `create` validates** (the storage
+    /// `update_issue` is validation-free, spine §3.2.1): under the write permit it **loads the
+    /// current issue**, merges every patch field into a candidate [`Issue`], runs the **full**
+    /// [`IssueValidator::validate`] on that merged candidate, and only then delegates to
+    /// `storage.update_issue`. So a patch that would set a blank/whitespace `title`, introduce a NUL
+    /// byte, or push an over-length/whitespace `external_ref` surfaces [`EngineError::Model`] (the
+    /// aggregate `ValidationFailed`) and leaves the DB unchanged — closing the update-path
+    /// data-integrity hole. The load + validate + update all run under one permit (linearizable).
     ///
     /// # Errors
-    /// - [`EngineError::Model`] if the patch carries an out-of-range scalar (priority).
+    /// - [`EngineError::Model`] if the merged candidate fails validation (aggregate `ValidationFailed`).
+    /// - The transparent storage source `IssueNotFound` if the issue does not exist.
     /// - [`EngineError::ShutdownInProgress`] / transparent storage source.
     pub async fn update(&self, id: &str, patch: &IssuePatch) -> Result<Issue> {
-        validate_patch(patch)?;
         let _guard = self.acquire().await?;
+        // Load the current issue (under the permit, so the validate→update window is serialized).
+        let Some(current) = self.storage.get_issue(id).await? else {
+            return Err(EngineError::Storage {
+                source: unblock_storage::StorageError::IssueNotFound { id: id.to_string() },
+            });
+        };
+        // Merge the patch into a candidate and run the FULL validator (the same gate `create` runs);
+        // storage trusts a validated row. A failure surfaces as the EngineError::Model aggregate.
+        let candidate = apply_patch_for_validation(&current, patch);
+        IssueValidator::validate(&candidate)?;
         Ok(self.storage.update_issue(id, patch, &self.actor).await?)
     }
 
@@ -124,22 +138,21 @@ impl Session {
 
     /// Close an issue and report the issues it newly unblocked (FR-11).
     ///
-    /// Closes by delegating a `status = Closed` patch to `storage.update_issue` (storage derives
-    /// `closed_at` + writes the `StatusChanged`/`Closed` events transactionally), then computes the
-    /// **newly-unblocked** set via the `unblock_policy` free functions: every issue that had a gating
-    /// edge **to** the closed id is re-evaluated against its live incoming edges, and those that are
-    /// now [`ReadyVerdict::Ready`] are returned (OQ-1 — no policy handle). The whole operation runs
-    /// under one write permit.
+    /// Closes by delegating a `status = Closed` patch (carrying the optional `reason`) to
+    /// `storage.update_issue` (storage derives `closed_at`, **persists `close_reason`**, and writes
+    /// the `StatusChanged`/`Closed` events transactionally), then computes the **newly-unblocked**
+    /// set via the `unblock_policy` free functions: every issue that had a gating edge **to** the
+    /// closed id is re-evaluated against its live incoming edges, and those that are now
+    /// [`ReadyVerdict::Ready`] are returned (OQ-1 — no policy handle). The whole operation runs under
+    /// one write permit.
     ///
-    /// # `reason` — KNOWN v1 contract gap (surfaced, not simplified)
+    /// # `reason` persistence
     ///
-    /// The spine §4.1 signature takes `reason: Option<String>`, but the storage `IssuePatch` (spine
-    /// §3.1, normative) has **no `close_reason` field** and there is **no dedicated close storage
-    /// method** — so in v1 the `reason` **cannot be persisted** through the `Storage` trait. It is
-    /// accepted (the public signature stays spine-exact) and surfaced as a tracing event, but NOT
-    /// written to the DB. Persisting it needs a spine amendment (an `IssuePatch.close_reason` field
-    /// or a `close_issue` storage method) — a cross-crate contract decision for Miguel, NOT a thing
-    /// to drop silently or work around by reaching past the `Storage` boundary.
+    /// `reason` is persisted to the issue's `close_reason` column via the patch's
+    /// `close_reason: Some(Some(reason))` field (spine §3.1/§4.1, T1.2 — no longer tracing-only). A
+    /// `None` reason leaves `close_reason` unchanged (the patch field stays `None`). The
+    /// `close_reason` column is not part of the frozen `content_hash` (spine §1.8), so persisting it
+    /// does not perturb import idempotency (FR-26).
     ///
     /// # Errors
     /// - [`EngineError::ShutdownInProgress`] / transparent storage source.
@@ -150,21 +163,11 @@ impl Session {
     ) -> Result<CloseOutcome> {
         let _guard = self.acquire().await?;
 
-        // KNOWN GAP: `reason` is not persistable through the v1 Storage contract (no close_reason in
-        // IssuePatch, no close_issue method). Capture it for observability so it is not silently
-        // lost, and surface the gap for the spine decision (see the method doc).
-        if let Some(ref reason) = reason {
-            tracing::info!(
-                target: crate::logging::RELIABILITY_TARGET,
-                issue = id,
-                reason = reason.as_str(),
-                "close reason captured but NOT persisted (v1 contract gap — no IssuePatch.close_reason)"
-            );
-        }
-
-        // Close: status -> Closed. Storage derives closed_at + the Closed/StatusChanged events.
+        // Close: status -> Closed, persisting the reason (Some => set; None => leave unchanged).
+        // Storage derives closed_at + the Closed/StatusChanged events transactionally.
         let patch = IssuePatch {
             status: Some(Status::Closed),
+            close_reason: reason.map(Some),
             ..IssuePatch::default()
         };
         let closed = self.storage.update_issue(id, &patch, &self.actor).await?;
@@ -260,34 +263,92 @@ impl Session {
     }
 }
 
-/// Validate the scalar fields an `IssuePatch` carries that the engine owns (priority range), so an
-/// out-of-range value surfaces as `ModelError` (not a flattened backend error). Nullable text /
-/// label ops are validated by storage's `update_issue` against the loaded row.
-fn validate_patch(patch: &IssuePatch) -> Result<()> {
-    use unblock_error::{FieldError, ModelError};
-    use unblock_model::Priority;
+/// Merge an [`IssuePatch`] into a clone of `current`, producing the candidate [`Issue`] that storage
+/// would persist — so the engine can run the **full** [`IssueValidator::validate`] on it before
+/// delegating (storage's `update_issue` is validation-free). It mirrors the storage apply rules for
+/// every field the validator inspects, including the `status`-derived `closed_at` transition (set on
+/// →`Closed`, cleared on reopen) so a legitimate close-via-update does not spuriously fail the
+/// closed-state coherence rule.
+///
+/// `due_at`/`close_reason` and the `parent` reparent are not validated by `IssueValidator`, so they
+/// are applied where they affect a validated field (none) and otherwise omitted from the candidate —
+/// they cannot make a row invalid. Label ops (`labels_set`/`labels_add`/`labels_remove`) ARE merged
+/// (the validator bounds the label count + charset).
+fn apply_patch_for_validation(current: &Issue, patch: &IssuePatch) -> Issue {
+    use std::collections::BTreeSet;
 
-    let mut fields = Vec::new();
-    if let Some(priority) = patch.priority
-        && (priority.0 < Priority::CRITICAL.0 || priority.0 > Priority::BACKLOG.0)
-    {
-        fields.push(FieldError::new("priority", "must be 0-4"));
+    let mut candidate = current.clone();
+
+    if let Some(title) = &patch.title {
+        candidate.title.clone_from(title);
+    }
+    apply_opt_text(&patch.description, &mut candidate.description);
+    apply_opt_text(&patch.design, &mut candidate.design);
+    apply_opt_text(
+        &patch.acceptance_criteria,
+        &mut candidate.acceptance_criteria,
+    );
+    apply_opt_text(&patch.notes, &mut candidate.notes);
+    apply_opt_text(&patch.owner, &mut candidate.owner);
+    apply_opt_text(&patch.external_ref, &mut candidate.external_ref);
+    apply_opt_text(&patch.assignee, &mut candidate.assignee);
+    apply_opt_text(&patch.close_reason, &mut candidate.close_reason);
+
+    if let Some(priority) = patch.priority {
+        candidate.priority = priority;
+    }
+    if let Some(issue_type) = &patch.issue_type {
+        candidate.issue_type = issue_type.clone();
     }
     if let Some(minutes) = patch.estimated_minutes {
-        if minutes < 0 {
-            fields.push(FieldError::new("estimated_minutes", "cannot be negative"));
-        } else if minutes > unblock_model::ESTIMATED_MINUTES_MAX {
-            fields.push(FieldError::new(
-                "estimated_minutes",
-                "exceeds maximum (525960 minutes / ~1 year)",
-            ));
-        }
+        candidate.estimated_minutes = Some(minutes);
     }
-    if fields.is_empty() {
-        Ok(())
-    } else {
-        Err(EngineError::Model {
-            source: ModelError::ValidationFailed { fields },
-        })
+    if let Some(due) = patch.due_at {
+        candidate.due_at = Some(due);
+    }
+
+    // Status transition: replicate storage's closed_at derivation so the closed-state coherence rule
+    // matches what would actually be persisted (Closed sets closed_at; a non-terminal status clears
+    // it; Tombstone leaves closed_at as-is — the validator permits a tombstone with any closed_at).
+    if let Some(status) = &patch.status
+        && status.as_str() != candidate.status.as_str()
+    {
+        match status {
+            Status::Closed => {
+                if candidate.closed_at.is_none() {
+                    candidate.closed_at = Some(Utc::now());
+                }
+            }
+            Status::Tombstone => {}
+            _ => candidate.closed_at = None,
+        }
+        candidate.status = status.clone();
+    }
+
+    // Labels: set replaces, add inserts, remove deletes — order-independent, deduped (mirrors
+    // storage's apply_labels reconciliation), so the count/charset validation sees the final set.
+    let mut labels: BTreeSet<String> = candidate.labels.iter().cloned().collect();
+    if let Some(set_labels) = &patch.labels_set {
+        labels = set_labels.iter().cloned().collect();
+    }
+    for add in &patch.labels_add {
+        labels.insert(add.clone());
+    }
+    for remove in &patch.labels_remove {
+        labels.remove(remove);
+    }
+    candidate.labels = labels.into_iter().collect();
+
+    candidate
+}
+
+/// Apply a nullable-text patch field (`None` leave / `Some(None)` clear / `Some(Some)` set) onto a
+/// candidate field, mirroring the storage `push_opt_text` semantics. The nested `Option` and the
+/// borrow mirror the [`IssuePatch`](unblock_storage::IssuePatch) field shape (outer=present-in-patch,
+/// inner=clear-vs-set), so both pedantic lints are intentionally scoped here.
+#[allow(clippy::option_option, clippy::ref_option)]
+fn apply_opt_text(patch: &Option<Option<String>>, target: &mut Option<String>) {
+    if let Some(new) = patch {
+        target.clone_from(new);
     }
 }
