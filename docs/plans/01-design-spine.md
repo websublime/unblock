@@ -529,6 +529,7 @@ pub struct IssuePatch {
     pub owner: Option<Option<String>>,
     pub external_ref: Option<Option<String>>,
     pub assignee: Option<Option<String>>,
+    pub close_reason: Option<Option<String>>,           // close reason (persisted to the close_reason column)
     // plain Option<T> for NOT-NULL / scalar columns
     pub status: Option<Status>,
     pub priority: Option<Priority>,
@@ -540,6 +541,8 @@ pub struct IssuePatch {
     pub parent: Option<Option<String>>,                 // reparent; cycle-checked
 }
 ```
+
+**`close_reason` persistence (T1.2 Verify-gate, NORMATIVE).** `close_reason` is the nullable-text tri-state (`None` = leave unchanged; `Some(None)` = clear to the column default `''`; `Some(Some(s))` = set). `update_issue` persists it to the existing `close_reason TEXT DEFAULT ''` column (already projected by `ISSUE_COLUMNS`; `create_issue` already binds it from the `Issue`). The engine's `close_with_suggestions(id, reason)` (§4.1) builds a `status = Closed` patch carrying `close_reason` and persists it through `update_issue` under the write permit — the reason is **stored**, not tracing-only. The `close_reason` column is **not** part of the frozen `content_hash` (spine §1.8), so persisting it does not perturb import idempotency (FR-26).
 
 **`StorageError` (storage-owned; the §2.1 sketch made concrete — NORMATIVE).** The full v1 variant set and its `ErrorCode` mapping. It implements `unblock_error::CodedError` (NOT a bespoke inherent `code()`; §2.1 note), so the L7 boundary bridges it via the blanket `From<&E>` like every other crate enum. `Migration` is defined **concretely and minimally, model-backed**: `Migration { from: i32, to: i32, reason: String }` (`from`/`to` are `PRAGMA user_version` values, `i32` to match the schema-version type). `Backend { source: BackendOpaque }` absorbs the libsql error opaquely — no libsql type is ever public (spine §6 rule 2). `BackendOpaque` sanitizes its message **at construction** via `unblock_error::sanitize_message` and exposes only `Debug`/`Display`.
 
@@ -704,7 +707,7 @@ no `Claimed`**. Each mutation emits exactly:
 | update `status` (changed) | `StatusChanged` (+ `Closed` on →`closed` from non-terminal · + `Reopened` on terminal→non-terminal · + `Deleted` on →`tombstone` from non-terminal) |
 | update `priority` (changed) | `PriorityChanged` |
 | update `assignee` (changed) | `AssigneeChanged` |
-| update body fields (`description`/`design`/`acceptance_criteria`/`notes`/`owner`/`estimated_minutes`/`external_ref`/`issue_type`/`source_repo`/`agent_context`) | **none** |
+| update body fields (`description`/`design`/`acceptance_criteria`/`notes`/`owner`/`estimated_minutes`/`external_ref`/`issue_type`/`source_repo`/`agent_context`/`close_reason`) | **none** |
 | no-op update (nothing changed) | **none** |
 | claim (won) | `AssigneeChanged` + `StatusChanged` |
 | claim (same-actor re-claim) | **none** |
