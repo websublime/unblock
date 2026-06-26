@@ -2,7 +2,7 @@
 # See docs/plans/ci-cd-and-distribution.md §2 (`fuzz-smoke` row).
 #
 # Two independent legs, isolated so the nightly toolchain NEVER touches the stable storage build:
-#   1. fuzz-targets   — nightly-2024-10-31 + libFuzzer, a short `cargo fuzz run` per ingestion target
+#   1. fuzz-targets   — nightly-2026-04-01 + libFuzzer, a short `cargo fuzz run` per ingestion target
 #                       (the nested `crates/unblock-fuzz/fuzz` cargo-fuzz package, OUTSIDE the
 #                       stable-1.96 workspace, per its scoped rust-toolchain.toml).
 #   2. contention-controls — stable 1.96.0, the two `#[ignore]`d controls (forced-spin, WAL-negative)
@@ -44,11 +44,12 @@ jobs:
           - id_alloc
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-      # The nested fuzz package pins nightly-2024-10-31 via its own rust-toolchain.toml; install that
-      # channel explicitly here so libFuzzer sanitizer codegen is available.
+      # The nested fuzz package pins nightly-2026-04-01 via its own rust-toolchain.toml; install that
+      # channel explicitly here so libFuzzer sanitizer codegen is available. (The pin must be >= the
+      # workspace's stable 1.96 target: edition 2024 + let-chains; an older nightly cannot parse the tree.)
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
-          toolchain: nightly-2024-10-31
+          toolchain: nightly-2026-04-01
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: crates/unblock-fuzz/fuzz
@@ -56,7 +57,7 @@ jobs:
         run: cargo install cargo-fuzz --version 0.13.2 --locked
       - name: cargo fuzz run ${{ matrix.target }} (60s)
         working-directory: crates/unblock-fuzz/fuzz
-        run: cargo +nightly-2024-10-31 fuzz run ${{ matrix.target }} -- -max_total_time=60
+        run: cargo +nightly-2026-04-01 fuzz run ${{ matrix.target }} -- -max_total_time=60
 
   contention-controls:
     name: contention controls (stable, --ignored)

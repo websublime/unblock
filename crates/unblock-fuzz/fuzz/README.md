@@ -10,10 +10,14 @@ This directory is a **separate cargo-fuzz package, OUTSIDE the workspace** (excl
 libFuzzer needs **nightly** sanitizer codegen, which must never reach the stable-1.96 default build
 (NFR-12). So this package:
 
-- is `exclude`d from the workspace (the root `cargo build --workspace` never compiles
-  `libfuzzer-sys`/`arbitrary`);
-- pins its toolchain in `rust-toolchain.toml` (`nightly-2024-10-31`), **scoped to this directory
-  only** — the workspace root stays on stable `1.96.0`.
+- is `exclude`d from the workspace **and** declares its own empty `[workspace]` table in
+  `Cargo.toml` (the root `cargo build --workspace` never compiles `libfuzzer-sys`/`arbitrary`, and
+  `cargo fuzz` can build this manifest directly without cargo treating it as a member of the parent
+  workspace);
+- pins its toolchain in `rust-toolchain.toml` (`nightly-2026-04-01` = rustc 1.96.0-nightly),
+  **scoped to this directory only** — the workspace root stays on stable `1.96.0`. The pin must be
+  **>= the workspace's stable 1.96 target**: the `unblock-*` tree is edition 2024 (>= 1.85) and uses
+  let-chains (>= 1.88), so an older nightly cannot parse it.
 
 The **stable PR gate** is `cargo test` in the member crate (`../`): `tests/regression.rs` replays the
 committed `corpus/` through the cores and runs a `proptest!` smoke per target. New crash artifacts get
@@ -24,14 +28,14 @@ the libFuzzer toolchain**.
 
 ```sh
 cargo install cargo-fuzz                 # once
-rustup toolchain install nightly-2024-10-31 --component rust-src
+rustup toolchain install nightly-2026-04-01 --component rust-src
 
 # Run a target (the scoped rust-toolchain.toml selects the nightly automatically inside fuzz/):
-cargo +nightly-2024-10-31 fuzz run content_hash
-cargo +nightly-2024-10-31 fuzz run content_hash -- -max_total_time=60   # timed smoke
+cargo +nightly-2026-04-01 fuzz run content_hash
+cargo +nightly-2026-04-01 fuzz run content_hash -- -max_total_time=60   # timed smoke
 
 # Coverage (periodic corpus-quality review; not gated):
-cargo +nightly-2024-10-31 fuzz coverage content_hash
+cargo +nightly-2026-04-01 fuzz coverage content_hash
 ```
 
 ## Targets and what each proves
