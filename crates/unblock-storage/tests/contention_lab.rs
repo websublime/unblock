@@ -39,7 +39,9 @@
 //! process), so it is far more flake-resistant than any absolute CPU/wall threshold. The gate asserts
 //! **R ≤ 3.0** — a *provisional* wide categorical bound. On a multi-core dev machine independent runs
 //! measure `R ≈ 1.0–1.2` blocking (the run-to-run spread; the band bounds it, not a single point) and
-//! `R ≈ 25–27` for the forced-spin control, so 3.0 sits with large headroom on both sides.
+//! `R ≈ 25–29` for the forced-spin control **on a 14-core dev box** (only `R ≈ 4.42` on the weakest
+//! 4-vCPU runner — see Recalibration below), so 3.0 sits between the honest band and a real spin on
+//! every sanctioned runner.
 //!
 //! **Recalibration (5.0 → 3.0).** `R` is *not* invariant to the runner's core count: the contended
 //! leg's per-write CPU rises with the number of losers that can burn a core at once, so a *real*
@@ -185,10 +187,11 @@ const SPIN_CORE_BURN_FLOOR: f64 = 1.8;
 ///
 /// A real spin retries the zero-timeout write lock furiously — a 4-vCPU runner observed `547100`
 /// contended busy-retries (vs `0` baseline). A `10_000` floor is ~50× below that observation yet vastly
-/// above any plausible non-spin (the native gate's contended witness is in the hundreds–thousands), so
-/// it cleanly separates a furious spin from incidental contention on any `>= 2`-core runner. (It is
-/// also far above the spin leg's committed-write count, so the spin is provably retrying, not
-/// progressing.)
+/// above any plausible non-spin: the native gate's witness records at most one event **per committed
+/// write** (so its contended count is in the hundreds–thousands), whereas the spin's count is
+/// **loop-iteration-driven** (millions) — orders of magnitude above the leg's committed-write count, so
+/// a contended count clearing the floor proves the writers are *retrying, not progressing*. It cleanly
+/// separates a furious spin from incidental contention on any `>= 2`-core runner.
 const SPIN_BUSY_RETRY_FLOOR: u64 = 10_000;
 
 /// Floor on the adaptive writer count (the gate needs at least two writers to contend at all).
