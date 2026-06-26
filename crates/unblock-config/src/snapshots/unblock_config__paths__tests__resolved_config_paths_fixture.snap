@@ -1,0 +1,9 @@
+---
+source: crates/unblock-config/src/paths.rs
+expression: paths
+---
+ConfigPaths {
+    unblock_dir: "/fixture/workspace/.unblock",
+    db_path: "/fixture/workspace/.unblock/unblock.db",
+    jsonl_path: "/fixture/workspace/.unblock/issues.jsonl",
+}

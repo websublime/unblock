@@ -56,7 +56,10 @@ mod output;
 mod relations;
 mod results;
 mod serde_helpers;
-mod validation;
+/// Pure issue/actor validation (spine §1.9). Public so the spine-referenced path
+/// `unblock_model::validation::validate_actor` resolves (Seam A single-home, T1.3); the validator
+/// types and `validate_actor` are also re-exported from the crate root below.
+pub mod validation;
 
 pub use cache::CacheKey;
 pub use enums::{DependencyType, EventType, IssueType, Priority, Status};
@@ -76,4 +79,5 @@ pub use results::{
 pub use validation::{
     ACTOR_MAX_CHARS, CUSTOM_VARIANT_MAX_CHARS, ESTIMATED_MINUTES_MAX, EXTERNAL_REF_MAX_CHARS,
     ISSUE_LABEL_MAX_COUNT, IssueValidator, LABEL_MAX_LEN, LabelValidator, TITLE_MAX_CHARS,
+    validate_actor,
 };

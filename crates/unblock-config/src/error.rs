@@ -60,10 +60,51 @@ pub enum ConfigError {
     ///
     /// Maps to [`ErrorCode::RequiredField`] (the engine requires a non-empty `actor`, spine §4).
     /// With the `UNBLOCK_ACTOR → $USER → "unblock"` chain the final literal default always
-    /// resolves, so this is **effectively unreachable** in T1.3a — the variant is reserved for a
-    /// future strict-actor mode (T1.3).
+    /// resolves, so this is **effectively unreachable** in T1.3 — the variant is reserved for a
+    /// future strict-actor mode.
     #[snafu(display("could not resolve an actor (UNBLOCK_ACTOR / $USER / default)"))]
     ActorUnresolved,
+
+    /// A `.unblock/config.toml` could not be parsed as TOML (spine §2.1 additive set).
+    ///
+    /// Maps to [`ErrorCode::ConfigParseError`] (exit 7). The variant identifier is `Parse` (spine
+    /// §2.1) even though it maps to the `ConfigParseError` code; the inner [`toml::de::Error`] is
+    /// absorbed (its message is surfaced, the type never re-exposed past this boundary).
+    #[snafu(display("failed to parse {}: {source}", path.display()))]
+    Parse {
+        /// The TOML deserialization failure.
+        source: toml::de::Error,
+        /// The config file that failed to parse.
+        path: PathBuf,
+    },
+
+    /// Reading a config file from disk failed (spine §2.1 additive set).
+    ///
+    /// Maps to [`ErrorCode::IoError`] (exit 8). Wraps the underlying [`std::io::Error`] together
+    /// with the offending path for a diagnostic message.
+    #[snafu(display("failed to read {}: {source}", path.display()))]
+    Io {
+        /// The underlying I/O failure.
+        source: std::io::Error,
+        /// The path that could not be read.
+        path: PathBuf,
+    },
+
+    /// A resolved config value violated a validation rule (spine §2.1 additive set).
+    ///
+    /// Maps to [`ErrorCode::ConfigError`] (exit 7). Covers: an out-of-policy actor (Seam A
+    /// `validate_actor` — over-length / NUL / control char), a path-injecting or absolute
+    /// `db_filename` / `jsonl_filename` / `--db` (Seam B), an unparseable `UNBLOCK_OUTPUT_FORMAT`,
+    /// an unsupported `backend`, and a forbidden `[remote] auth_token` in `config.toml` (NFR-18).
+    #[snafu(display("invalid config value for `{key}` = `{value}`: {reason}"))]
+    InvalidValue {
+        /// The config key whose value was rejected.
+        key: String,
+        /// The rejected value (terminal-safe; rendered as-supplied).
+        value: String,
+        /// Why the value was rejected.
+        reason: String,
+    },
 }
 
 impl CodedError for ConfigError {
@@ -74,6 +115,10 @@ impl CodedError for ConfigError {
             // DatabaseError and a Migration/SchemaMismatch cause stays SchemaMismatch).
             Self::DbOpenFailed { source } | Self::MigrationFailed { source } => source.code(),
             Self::ActorUnresolved => ErrorCode::RequiredField,
+            // Config-file additive set (spine §2.1): exit 7 (Parse/InvalidValue) + exit 8 (Io).
+            Self::Parse { .. } => ErrorCode::ConfigParseError,
+            Self::Io { .. } => ErrorCode::IoError,
+            Self::InvalidValue { .. } => ErrorCode::ConfigError,
         }
     }
 }
@@ -145,5 +190,101 @@ mod tests {
         assert_eq!(err.code(), ErrorCode::SchemaMismatch);
         // spine §2.3: SchemaMismatch is a Database-category code -> exit 2.
         assert_eq!(err.code().exit_code(), 2);
+    }
+
+    #[test]
+    fn parse_maps_to_config_parse_error_exit_7() {
+        // A genuine toml::de::Error (a number where a table is expected).
+        let source = toml::from_str::<toml::Table>("not_a_table").expect_err("toml parse error");
+        let err = ConfigError::Parse {
+            source,
+            path: PathBuf::from("/ws/.unblock/config.toml"),
+        };
+        assert_eq!(err.code(), ErrorCode::ConfigParseError);
+        // spine §2.3: ConfigParseError is a Config-category code -> exit 7.
+        assert_eq!(err.code().exit_code(), 7);
+    }
+
+    #[test]
+    fn io_maps_to_io_error_exit_8() {
+        let source = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let err = ConfigError::Io {
+            source,
+            path: PathBuf::from("/ws/.unblock/config.toml"),
+        };
+        assert_eq!(err.code(), ErrorCode::IoError);
+        // spine §2.3: IoError is an I/O-category code -> exit 8.
+        assert_eq!(err.code().exit_code(), 8);
+    }
+
+    #[test]
+    fn invalid_value_maps_to_config_error_exit_7() {
+        let err = ConfigError::InvalidValue {
+            key: "actor".to_string(),
+            value: "x".repeat(201),
+            reason: "exceeds 200 characters".to_string(),
+        };
+        assert_eq!(err.code(), ErrorCode::ConfigError);
+        // spine §2.3: ConfigError is a Config-category code -> exit 7.
+        assert_eq!(err.code().exit_code(), 7);
+    }
+
+    /// Golden snapshot of the full `(variant -> code -> exit)` table (now 7 variants, spine §2.3 /
+    /// FR-11). Drift in any variant's mapping or the addition/removal of a variant fails the check.
+    #[test]
+    fn error_variant_code_exit_table_golden() {
+        let variants: Vec<ConfigError> = vec![
+            ConfigError::WorkspaceNotFound {
+                start: PathBuf::from("/ws"),
+            },
+            ConfigError::DbOpenFailed {
+                source: StorageError::IntegrityFailed {
+                    messages: vec!["x".to_string()],
+                },
+            },
+            ConfigError::MigrationFailed {
+                source: StorageError::Migration {
+                    from: 1,
+                    to: 2,
+                    reason: "r".to_string(),
+                },
+            },
+            ConfigError::ActorUnresolved,
+            ConfigError::Parse {
+                source: toml::from_str::<toml::Table>("x").expect_err("parse err"),
+                path: PathBuf::from("/ws/.unblock/config.toml"),
+            },
+            ConfigError::Io {
+                source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
+                path: PathBuf::from("/ws/.unblock/config.toml"),
+            },
+            ConfigError::InvalidValue {
+                key: "actor".to_string(),
+                value: "v".to_string(),
+                reason: "r".to_string(),
+            },
+        ];
+
+        let table: Vec<(String, String, u8)> = variants
+            .iter()
+            .map(|e| {
+                let variant = match e {
+                    ConfigError::WorkspaceNotFound { .. } => "WorkspaceNotFound",
+                    ConfigError::DbOpenFailed { .. } => "DbOpenFailed",
+                    ConfigError::MigrationFailed { .. } => "MigrationFailed",
+                    ConfigError::ActorUnresolved => "ActorUnresolved",
+                    ConfigError::Parse { .. } => "Parse",
+                    ConfigError::Io { .. } => "Io",
+                    ConfigError::InvalidValue { .. } => "InvalidValue",
+                };
+                (
+                    variant.to_string(),
+                    e.code().as_str().to_string(),
+                    e.code().exit_code(),
+                )
+            })
+            .collect();
+
+        insta::assert_json_snapshot!("config_error_variant_code_exit_table", table);
     }
 }
