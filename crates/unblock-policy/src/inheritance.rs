@@ -272,6 +272,28 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_id_chain_excludes_tombstone_parent() {
+        // Storage never produces a chain with duplicate ids (id is a unique PK; an ancestor chain
+        // walks distinct issues). This test pins that the selector is **position-based** (it picks
+        // `chain[0]` as parent and `chain[last]` as root) and **tombstone-safe** even on a colliding
+        // chain: a tombstoned parent and a non-tombstone root that happen to share id "ub-a" must
+        // yield exactly the root's block, never the tombstone's. (The integration property's
+        // find-by-id source lookup is ambiguous on such a chain, which is why the proptest generator
+        // now enforces unique ids — but the production logic is robust regardless, as proven here.)
+        let chain = vec![
+            // parent (chain[0]): tombstoned, id collides with the root.
+            node("ub-a", IssueType::Task, Some("ctx-p"), true),
+            // root (chain[last]): non-tombstone epic, same id.
+            node("ub-a", IssueType::Epic, Some("ctx"), false),
+        ];
+        let blocks = select_inherited_blocks(&chain, &cfg());
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].source_role, "epic");
+        assert_eq!(blocks[0].source_id, "ub-a");
+        assert_eq!(blocks[0].content, "ctx");
+    }
+
+    #[test]
     fn ancestor_without_configured_field_is_skipped() {
         let chain = vec![
             node("ub-parent", IssueType::Task, None, false), // no agent_context -> skipped

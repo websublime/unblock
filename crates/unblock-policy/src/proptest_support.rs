@@ -234,9 +234,29 @@ pub fn arb_ancestor_node() -> impl Strategy<Value = AncestorNode> {
         )
 }
 
-/// Arbitrary ancestor chain (0..6 nodes, nearest-first).
+/// Arbitrary ancestor chain (0..6 nodes, nearest-first) with **unique ids**.
+///
+/// A real ancestor chain is a walk up **distinct** ancestor issues, so every node has a distinct
+/// id (a storage primary-key invariant). The base [`arb_ancestor_node`] id is `"ub-[a-z]{1,5}"`,
+/// which proptest *shrinks* toward `ub-a` and can therefore collide; this generator appends each
+/// node's index to its base id so ids are provably unique while keeping the arbitrary base.
+///
+/// Uniqueness matters for the integration property `never_includes_tombstoned`, which attributes an
+/// emitted block back to its source via `chain.iter().find(|n| n.id == block.source_id)` (the first
+/// node with that id). The production selector is **position-based** (it only selects `chain[0]` and
+/// `chain[last]`) and **tombstone-safe** (`block_for` returns `None` for a tombstone), so it never
+/// sources a block from a tombstone regardless of ids — but on a duplicate-id chain that find-by-id
+/// lookup is ambiguous and matched the *wrong* (earlier, tombstoned) node, a false positive an
+/// over-broad duplicate-id chain produced. Enforcing the storage invariant here removes that
+/// ambiguity without weakening the property. (The position-based tombstone-safety on a colliding
+/// chain — the case real storage never produces — is pinned by a unit test in `inheritance.rs`.)
 pub fn arb_ancestor_chain() -> impl Strategy<Value = Vec<AncestorNode>> {
-    vec(arb_ancestor_node(), 0..6)
+    vec(arb_ancestor_node(), 0..6).prop_map(|mut nodes| {
+        for (i, node) in nodes.iter_mut().enumerate() {
+            node.id = format!("{}-{i}", node.id);
+        }
+        nodes
+    })
 }
 
 /// Arbitrary [`InheritanceConfig`] (enabled flag + a field list drawn from plausible field names).
