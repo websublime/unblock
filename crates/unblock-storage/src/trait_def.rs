@@ -168,12 +168,19 @@ pub trait Storage: Send + Sync {
     /// re-ranks this candidate set with the hybrid sort; storage only guarantees the stable order.
     async fn ready_issues(&self, filters: &ListFilters) -> Result<Vec<Issue>, StorageError>;
 
-    /// Return the **blocked** set: open, non-deferred issues with **at least one unresolved gating
-    /// edge** (a `blocks`/`parent-child`/`conditional-blocks`/`waits-for` dependency on a
-    /// not-yet-closed issue).
+    /// Return the **blocked** set: non-terminal issues (`status NOT IN ('closed','tombstone')`,
+    /// deferred-INCLUSIVE) with **at least one unresolved gating edge** (a
+    /// `blocks`/`parent-child`/`conditional-blocks`/`waits-for` dependency on a not-yet-closed
+    /// issue).
     ///
-    /// Ready and blocked are **disjoint** but not jointly exhaustive (a deferred or closed issue is
-    /// neither).
+    /// `filters` **compose** (D18, spine §3.2.1): the same narrowing facets `list_issues` applies
+    /// (status-OR, `issue_type`-OR, priority range, `assignee`, `labels_all`/`labels_any`,
+    /// `text_contains`) narrow the candidate rows before the live membership test. The baseline is
+    /// deferred-inclusive and does NOT inherit `list`'s default visibility, so
+    /// `include_closed`/`include_deferred` are **no-ops** here.
+    ///
+    /// Ready and blocked are **disjoint** but not jointly exhaustive (a closed issue is neither; a
+    /// deferred issue is blocked only if it has an unresolved gating edge).
     async fn blocked_issues(&self, filters: &ListFilters) -> Result<Vec<Issue>, StorageError>;
 
     /// Full-text-ish search over `query` honouring `filters`.
