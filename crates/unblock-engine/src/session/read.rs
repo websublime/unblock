@@ -49,6 +49,12 @@ impl Session {
 
     /// The blocked set (issues with at least one unresolved gating edge).
     ///
+    /// `filters` **compose** (D18, spine §3.2.1): the same narrowing facets `list` applies
+    /// (status-OR, `issue_type`-OR, priority range, `assignee`, `labels_all`/`labels_any`,
+    /// `text_contains`) narrow the blocked set. The baseline is **deferred-inclusive**, so
+    /// `include_closed`/`include_deferred` are **no-ops** here (closed/tombstone can never be
+    /// blocked-visible; deferred is always shown).
+    ///
     /// # Errors
     /// Forwards any storage failure.
     pub async fn blocked(&self, filters: &ListFilters) -> Result<Vec<Issue>> {

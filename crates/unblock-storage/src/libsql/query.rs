@@ -104,16 +104,37 @@ pub(super) async fn ready_issues(
 
 /// `blocked_issues`: `status NOT IN ('closed','tombstone')` (INCLUDES `in_progress/deferred`) filtered
 /// to the live blocked set. Ordered `priority ASC, created_at DESC, id ASC`.
+///
+/// **Composes the `list` narrowing facets (D18, spine §3.2.1).** The same narrowing facet set as
+/// `list_issues` — status-OR, `issue_type`-OR, inclusive priority range, `assignee`, `labels_all`
+/// (AND) / `labels_any` (OR), and `text_contains` (title) — narrows the candidate rows **before**
+/// the in-Rust blocked-set membership test (net = `{live blocked set} ∩ {facet-matched rows}`). The
+/// three-pass blocked detection and the `ORDER BY` are unchanged — facets only filter.
+///
+/// The baseline `status NOT IN ('closed','tombstone')` is **deferred-INCLUSIVE** — `blocked` does
+/// NOT inherit `list`'s default visibility branch (which strips `deferred`), so
+/// `include_closed`/`include_deferred` are **no-ops** here (closed/tombstone can never be
+/// blocked-visible; deferred is always shown).
 pub(super) async fn blocked_issues(
     conn: &Connection,
     filters: &ListFilters,
 ) -> Result<Vec<Issue>, StorageError> {
     let blocked = live_blocked_ids(conn).await?;
 
-    let sql = "SELECT id FROM issues WHERE status NOT IN ('closed', 'tombstone') \
-         ORDER BY priority ASC, created_at DESC, id ASC";
+    // Facets NARROW within blocked's OWN deferred-inclusive baseline; NO list visibility branch.
+    let mut facet_sql = String::new();
+    let mut params: Vec<Value> = Vec::new();
+    compose_facets(filters, &mut facet_sql, &mut params);
 
-    let mut rows = conn.query(sql, ()).await.map_err(map_libsql_err)?;
+    let sql = format!(
+        "SELECT id FROM issues WHERE status NOT IN ('closed', 'tombstone'){facet_sql} \
+         ORDER BY priority ASC, created_at DESC, id ASC"
+    );
+
+    let mut rows = conn
+        .query(&sql, params_from_iter(params))
+        .await
+        .map_err(map_libsql_err)?;
     let mut ids = Vec::new();
     while let Some(row) = rows.next().await.map_err(map_libsql_err)? {
         if let Value::Text(id) = row.get_value(0).map_err(map_libsql_err)?
@@ -388,20 +409,51 @@ async fn propagate_blocked_to_children(
 /// Build the shared `WHERE` fragment (`" AND …"`, to follow `WHERE 1=1`) + params for the full
 /// filter set (status/type OR, priority range, assignee, labels AND/OR, `text_contains` LIKE,
 /// `include_deferred/closed`).
+///
+/// **Byte-identical** to the historical emit order for its four callers (list/search/count/stale):
+/// `facets_into` → `text_contains` → visibility branch → labels. The visibility branch binds no
+/// params, so the param-bearing fragments still emit in the order facets → text → labels and every
+/// `?N` index is unchanged. `blocked_issues` does NOT use this helper — it owns its own
+/// deferred-inclusive status predicate and uses [`compose_facets`] (the narrowing facets *without*
+/// the visibility branch) — D18, spine §3.2.1.
 fn build_filter_where(filters: &ListFilters) -> (String, Vec<Value>) {
     let mut sql = String::new();
     let mut params: Vec<Value> = Vec::new();
 
     facets_into(filters, &mut sql, &mut params);
+    text_contains_filter(filters, &mut sql, &mut params);
+    visibility_branch(filters, &mut sql);
+    labels_filters(filters, &mut sql, &mut params);
 
-    // text_contains FILTER: keeps LIKE ? ESCAPE '\' over title (distinct from the search needle).
+    (sql, params)
+}
+
+/// Emit the **narrowing** facets (status-OR, type-OR, priority range, assignee, `text_contains`,
+/// labels AND/OR) into `sql`/`params`. Does **NOT** emit the closed/deferred visibility branch —
+/// callers that own their own status predicate (`blocked_issues`) append nothing for visibility;
+/// list/search/count/stale add visibility separately via [`build_filter_where`] (D18, spine §3.2.1).
+///
+/// Param-emit order matches [`build_filter_where`] (`facets_into` → `text_contains` → labels), so a
+/// caller composing this directly produces the same `?N` indices the full helper would.
+fn compose_facets(filters: &ListFilters, sql: &mut String, params: &mut Vec<Value>) {
+    facets_into(filters, sql, params);
+    text_contains_filter(filters, sql, params);
+    labels_filters(filters, sql, params);
+}
+
+/// `text_contains` FILTER: keeps `LIKE ? ESCAPE '\'` over `title` (distinct from the search needle).
+fn text_contains_filter(filters: &ListFilters, sql: &mut String, params: &mut Vec<Value>) {
     if let Some(text) = &filters.text_contains {
         let idx = params.len() + 1;
         let _ = write!(sql, " AND title LIKE ?{idx} ESCAPE '\\'");
         params.push(Value::Text(format!("%{}%", escape_like_pattern(text))));
     }
+}
 
-    // Closed / deferred visibility (default: exclude closed + tombstone; deferred excluded unless asked).
+/// Closed / deferred visibility branch (default: exclude closed + tombstone; deferred excluded
+/// unless asked). Binds **no** params — `list`/`search`/`count`/`stale` only. `blocked_issues` does
+/// NOT apply this (its baseline is deferred-INCLUSIVE — D18, spine §3.2.1).
+fn visibility_branch(filters: &ListFilters, sql: &mut String) {
     if filters.include_closed {
         sql.push_str(" AND status != 'tombstone'");
     } else if filters.include_deferred {
@@ -409,8 +461,10 @@ fn build_filter_where(filters: &ListFilters) -> (String, Vec<Value>) {
     } else {
         sql.push_str(" AND status NOT IN ('closed', 'tombstone', 'deferred')");
     }
+}
 
-    // Labels AND / OR via membership subqueries.
+/// Labels AND / OR via membership subqueries (`EXISTS` correlated on `issues.id`).
+fn labels_filters(filters: &ListFilters, sql: &mut String, params: &mut Vec<Value>) {
     for label in &filters.labels_all {
         let idx = params.len() + 1;
         let _ = write!(
@@ -435,8 +489,6 @@ fn build_filter_where(filters: &ListFilters) -> (String, Vec<Value>) {
             params.push(Value::Text(label.clone()));
         }
     }
-
-    (sql, params)
 }
 
 /// Build the facet-only `WHERE` fragment (status/type OR, priority range, assignee) for `ready`
