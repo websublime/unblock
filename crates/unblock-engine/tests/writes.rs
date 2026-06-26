@@ -472,7 +472,11 @@ async fn delete_cascade_through_engine_tombstones_descendants() {
     assert_eq!(resolved.mode, DeleteMode::Cascade);
     assert_eq!(
         resolved.cascade_children,
-        vec!["ub-1.1".to_string(), "ub-1.1.1".to_string(), "ub-1.2".to_string()],
+        vec![
+            "ub-1.1".to_string(),
+            "ub-1.1.1".to_string(),
+            "ub-1.2".to_string()
+        ],
         "cascade_children must be sorted and contain exactly the three dotted-prefix descendants"
     );
 
@@ -480,8 +484,16 @@ async fn delete_cascade_through_engine_tombstones_descendants() {
     // NOTE: per-event assertions (Deleted event emitted for non-terminal only) live at
     // storage (Gap 1a, behaviour.rs) because Session has no list_events (S5).
     for id in ["ub-1", "ub-1.1", "ub-1.1.1", "ub-1.2"] {
-        let fetched = session.get(id).await.expect("get").expect("must be present as tombstone");
-        assert_eq!(fetched.status, Status::Tombstone, "{id} must be Tombstone after Cascade");
+        let fetched = session
+            .get(id)
+            .await
+            .expect("get")
+            .expect("must be present as tombstone");
+        assert_eq!(
+            fetched.status,
+            Status::Tombstone,
+            "{id} must be Tombstone after Cascade"
+        );
         assert_eq!(
             fetched.deleted_by.as_deref(),
             Some("tester"),
@@ -490,13 +502,32 @@ async fn delete_cascade_through_engine_tombstones_descendants() {
     }
 
     // Dot-boundary decoy ub-10 and unrelated ub-2 are UNTOUCHED.
-    let decoy = session.get("ub-10").await.expect("get").expect("ub-10 must exist");
-    assert_eq!(decoy.status, Status::Open, "ub-10 (dot-boundary decoy) must be untouched");
+    let decoy = session
+        .get("ub-10")
+        .await
+        .expect("get")
+        .expect("ub-10 must exist");
+    assert_eq!(
+        decoy.status,
+        Status::Open,
+        "ub-10 (dot-boundary decoy) must be untouched"
+    );
     assert!(decoy.deleted_by.is_none(), "ub-10 must have no deleted_by");
 
-    let unrelated = session.get("ub-2").await.expect("get").expect("ub-2 must exist");
-    assert_eq!(unrelated.status, Status::Open, "ub-2 (unrelated) must be untouched");
-    assert!(unrelated.deleted_by.is_none(), "ub-2 must have no deleted_by");
+    let unrelated = session
+        .get("ub-2")
+        .await
+        .expect("get")
+        .expect("ub-2 must exist");
+    assert_eq!(
+        unrelated.status,
+        Status::Open,
+        "ub-2 (unrelated) must be untouched"
+    );
+    assert!(
+        unrelated.deleted_by.is_none(),
+        "ub-2 must have no deleted_by"
+    );
 }
 
 /// Gap 1d — Hard delete through the Session removes ONLY the target row.
@@ -512,9 +543,18 @@ async fn delete_cascade_through_engine_tombstones_descendants() {
 async fn delete_hard_through_engine_removes_target_only() {
     let session = session().await;
     // Minimal corpus: target + the child that MUST survive + an inbound edge for orphan verification.
-    session.create(&issue("ub-1", Priority::MEDIUM, 100)).await.expect("create ub-1");
-    session.create(&issue("ub-1.1", Priority::MEDIUM, 101)).await.expect("create ub-1.1");
-    session.create(&issue("ub-2", Priority::MEDIUM, 102)).await.expect("create ub-2");
+    session
+        .create(&issue("ub-1", Priority::MEDIUM, 100))
+        .await
+        .expect("create ub-1");
+    session
+        .create(&issue("ub-1.1", Priority::MEDIUM, 101))
+        .await
+        .expect("create ub-1.1");
+    session
+        .create(&issue("ub-2", Priority::MEDIUM, 102))
+        .await
+        .expect("create ub-2");
     // Inbound blocker: ub-2 --blocks--> ub-1 (inbound dep, no FK — must be cleaned by Hard delete).
     add_blocks(&session, "ub-2", "ub-1").await;
 
@@ -543,7 +583,10 @@ async fn delete_hard_through_engine_removes_target_only() {
     // No orphan edges: the whole dependency graph has no edge referencing the deleted ub-1.
     let graph = session.dependency_graph(&[]).await.expect("graph");
     assert!(
-        !graph.edges.iter().any(|e| e.from == "ub-1" || e.to == "ub-1"),
+        !graph
+            .edges
+            .iter()
+            .any(|e| e.from == "ub-1" || e.to == "ub-1"),
         "no edge in the global graph may reference the hard-deleted ub-1"
     );
 }
@@ -585,12 +628,15 @@ async fn delete_tombstone_through_engine_persists_row_and_is_not_patchable() {
 
     // Row persists as a tombstone with actor propagation — this is the retained-on-soft-delete invariant (the recovery PATH itself is T1.7).
     // The row is retained (contrast Hard where get returns None), enabling future recovery.
-    let tombstoned = session
-        .get("ub-0001")
-        .await
-        .expect("get")
-        .expect("tombstoned row must still be present via get (row retained, not hard-deleted)");
-    assert_eq!(tombstoned.status, Status::Tombstone, "status must be Tombstone");
+    let tombstoned =
+        session.get("ub-0001").await.expect("get").expect(
+            "tombstoned row must still be present via get (row retained, not hard-deleted)",
+        );
+    assert_eq!(
+        tombstoned.status,
+        Status::Tombstone,
+        "status must be Tombstone"
+    );
     assert!(
         tombstoned.original_type.is_some(),
         "original_type must be preserved on Tombstone"
@@ -643,30 +689,78 @@ async fn delete_dry_run_reports_plan_over_hierarchy() {
     // The returned plan reports the full blast radius (NON-EMPTY — this is what was missing before).
     assert_eq!(
         resolved.cascade_children,
-        vec!["ub-1.1".to_string(), "ub-1.1.1".to_string(), "ub-1.2".to_string()],
+        vec![
+            "ub-1.1".to_string(),
+            "ub-1.1.1".to_string(),
+            "ub-1.2".to_string()
+        ],
         "DryRun must report the full cascade_children plan (non-empty) over the hierarchy"
     );
 
     // Nothing mutated: every issue is in its original state.
-    let target = session.get("ub-1").await.expect("get").expect("ub-1 must exist");
-    assert_eq!(target.status, Status::Open, "DryRun must not tombstone the target");
+    let target = session
+        .get("ub-1")
+        .await
+        .expect("get")
+        .expect("ub-1 must exist");
+    assert_eq!(
+        target.status,
+        Status::Open,
+        "DryRun must not tombstone the target"
+    );
 
-    let child = session.get("ub-1.1").await.expect("get").expect("ub-1.1 must exist");
+    let child = session
+        .get("ub-1.1")
+        .await
+        .expect("get")
+        .expect("ub-1.1 must exist");
     assert_eq!(child.status, Status::Open, "DryRun must not affect ub-1.1");
 
-    let grandchild = session.get("ub-1.1.1").await.expect("get").expect("ub-1.1.1 must exist");
-    assert_eq!(grandchild.status, Status::Open, "DryRun must not affect ub-1.1.1");
+    let grandchild = session
+        .get("ub-1.1.1")
+        .await
+        .expect("get")
+        .expect("ub-1.1.1 must exist");
+    assert_eq!(
+        grandchild.status,
+        Status::Open,
+        "DryRun must not affect ub-1.1.1"
+    );
 
     // ub-1.2 was Closed (terminal) when seeded; DryRun must leave it Closed (not tombstoned).
-    let closed_child = session.get("ub-1.2").await.expect("get").expect("ub-1.2 must exist");
-    assert_eq!(closed_child.status, Status::Closed, "DryRun must not affect ub-1.2 (Closed)");
+    let closed_child = session
+        .get("ub-1.2")
+        .await
+        .expect("get")
+        .expect("ub-1.2 must exist");
+    assert_eq!(
+        closed_child.status,
+        Status::Closed,
+        "DryRun must not affect ub-1.2 (Closed)"
+    );
 
     // Bounding witnesses are also untouched.
-    let decoy = session.get("ub-10").await.expect("get").expect("ub-10 must exist");
-    assert_eq!(decoy.status, Status::Open, "DryRun must not affect ub-10 (decoy)");
+    let decoy = session
+        .get("ub-10")
+        .await
+        .expect("get")
+        .expect("ub-10 must exist");
+    assert_eq!(
+        decoy.status,
+        Status::Open,
+        "DryRun must not affect ub-10 (decoy)"
+    );
 
-    let unrelated = session.get("ub-2").await.expect("get").expect("ub-2 must exist");
-    assert_eq!(unrelated.status, Status::Open, "DryRun must not affect ub-2 (unrelated)");
+    let unrelated = session
+        .get("ub-2")
+        .await
+        .expect("get")
+        .expect("ub-2 must exist");
+    assert_eq!(
+        unrelated.status,
+        Status::Open,
+        "DryRun must not affect ub-2 (unrelated)"
+    );
 }
 
 // --------------------------------------------------------------------------------------------------
@@ -689,8 +783,14 @@ async fn delete_dry_run_reports_plan_over_hierarchy() {
 #[tokio::test]
 async fn reparent_via_patch_cycle_is_rejected() {
     let session = session().await;
-    session.create(&issue("ub-a", Priority::MEDIUM, 1000)).await.expect("create ub-a");
-    session.create(&issue("ub-b", Priority::MEDIUM, 1001)).await.expect("create ub-b");
+    session
+        .create(&issue("ub-a", Priority::MEDIUM, 1000))
+        .await
+        .expect("create ub-a");
+    session
+        .create(&issue("ub-b", Priority::MEDIUM, 1001))
+        .await
+        .expect("create ub-b");
 
     // First reparent: ub-b -> ub-a (parent-child edge). This must succeed.
     let patch_b_to_a = IssuePatch {
@@ -753,7 +853,10 @@ async fn reparent_via_patch_cycle_is_rejected() {
 #[tokio::test]
 async fn self_reparent_via_patch_is_rejected() {
     let session = session().await;
-    session.create(&issue("ub-a", Priority::MEDIUM, 1000)).await.expect("create ub-a");
+    session
+        .create(&issue("ub-a", Priority::MEDIUM, 1000))
+        .await
+        .expect("create ub-a");
 
     let patch = IssuePatch {
         parent: Some(Some("ub-a".to_string())),
@@ -812,7 +915,10 @@ async fn update_advances_updated_at_through_engine() {
         returned.updated_at,
         created_at
     );
-    assert_eq!(returned.title, "renamed", "returned value must carry the new title");
+    assert_eq!(
+        returned.title, "renamed",
+        "returned value must carry the new title"
+    );
 
     // Confirm the advance is persisted (not just a returned-value artifact).
     let persisted = session.get("ub-0001").await.expect("get").expect("present");
@@ -941,7 +1047,11 @@ async fn create_max_populated_round_trips_through_engine() {
     let id = session.create(&full).await.expect("create full issue");
     assert_eq!(id, "ub-full");
 
-    let got = session.get("ub-full").await.expect("get").expect("must exist");
+    let got = session
+        .get("ub-full")
+        .await
+        .expect("get")
+        .expect("must exist");
 
     // Field-for-field equality for all genuine scalar/text Create fields.
     assert_eq!(got.title, full.title);

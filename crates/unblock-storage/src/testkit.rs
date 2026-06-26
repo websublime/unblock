@@ -1436,23 +1436,44 @@ pub async fn contract_transactional_audit_atomicity<S: Storage>(storage: S) {
 /// so this corpus uses dotted ids without any parent-child edges.
 pub async fn contract_cascade_delete<S: Storage>(storage: S) {
     // Build corpus.
-    storage.create_issue(&issue("ub-1", "root"), "alice").await.unwrap();
-    storage.create_issue(&issue("ub-1.1", "child"), "alice").await.unwrap();
-    storage.create_issue(&issue("ub-1.1.1", "grandchild"), "alice").await.unwrap();
+    storage
+        .create_issue(&issue("ub-1", "root"), "alice")
+        .await
+        .unwrap();
+    storage
+        .create_issue(&issue("ub-1.1", "child"), "alice")
+        .await
+        .unwrap();
+    storage
+        .create_issue(&issue("ub-1.1.1", "grandchild"), "alice")
+        .await
+        .unwrap();
     // ub-1.2 is Closed (terminal) — tombstone_one must set deleted_by but must NOT emit Deleted.
-    storage.create_issue(&issue("ub-1.2", "closed-child"), "alice").await.unwrap();
+    storage
+        .create_issue(&issue("ub-1.2", "closed-child"), "alice")
+        .await
+        .unwrap();
     storage
         .update_issue(
             "ub-1.2",
-            &IssuePatch { status: Some(Status::Closed), ..IssuePatch::default() },
+            &IssuePatch {
+                status: Some(Status::Closed),
+                ..IssuePatch::default()
+            },
             "alice",
         )
         .await
         .unwrap();
     // Dot-boundary decoy: shares the "ub-1" string prefix but has no dot after "ub-1".
-    storage.create_issue(&issue("ub-10", "decoy"), "alice").await.unwrap();
+    storage
+        .create_issue(&issue("ub-10", "decoy"), "alice")
+        .await
+        .unwrap();
     // Unrelated root.
-    storage.create_issue(&issue("ub-2", "unrelated"), "alice").await.unwrap();
+    storage
+        .create_issue(&issue("ub-2", "unrelated"), "alice")
+        .await
+        .unwrap();
 
     let plan = DeletePlan {
         mode: DeleteMode::Cascade,
@@ -1466,7 +1487,11 @@ pub async fn contract_cascade_delete<S: Storage>(storage: S) {
     assert_eq!(resolved.targets, vec!["ub-1".to_string()]);
     assert_eq!(
         resolved.cascade_children,
-        vec!["ub-1.1".to_string(), "ub-1.1.1".to_string(), "ub-1.2".to_string()],
+        vec![
+            "ub-1.1".to_string(),
+            "ub-1.1.1".to_string(),
+            "ub-1.2".to_string()
+        ],
         "cascade_children: sorted prefix-descendants; ub-10 excluded (no dot); ub-2 excluded"
     );
 
@@ -1474,7 +1499,10 @@ pub async fn contract_cascade_delete<S: Storage>(storage: S) {
     for id in ["ub-1", "ub-1.1", "ub-1.1.1", "ub-1.2"] {
         let fetched = storage.get_issue(id).await.unwrap().unwrap();
         assert_eq!(fetched.status, Status::Tombstone, "{id} must be Tombstone");
-        assert!(fetched.original_type.is_some(), "{id} original_type must be preserved");
+        assert!(
+            fetched.original_type.is_some(),
+            "{id} original_type must be preserved"
+        );
         assert_eq!(
             fetched.deleted_by.as_deref(),
             Some("admin"),
@@ -1485,7 +1513,9 @@ pub async fn contract_cascade_delete<S: Storage>(storage: S) {
     // Deleted-event count: 3 non-terminal members each emit one; ub-1.2 (was Closed) emits zero.
     for id in ["ub-1", "ub-1.1", "ub-1.1.1"] {
         assert!(
-            event_types(&storage, id).await.contains(&"deleted".to_string()),
+            event_types(&storage, id)
+                .await
+                .contains(&"deleted".to_string()),
             "{id} (non-terminal) must have a Deleted event"
         );
     }
@@ -1494,15 +1524,26 @@ pub async fn contract_cascade_delete<S: Storage>(storage: S) {
         .into_iter()
         .filter(|e| e == "deleted")
         .count();
-    assert_eq!(ub12_deleted, 0, "ub-1.2 (was Closed/terminal) must have zero Deleted events");
+    assert_eq!(
+        ub12_deleted, 0,
+        "ub-1.2 (was Closed/terminal) must have zero Deleted events"
+    );
 
     // Bounded blast radius: dot-boundary decoy and unrelated root are UNTOUCHED.
     let decoy = storage.get_issue("ub-10").await.unwrap().unwrap();
-    assert_eq!(decoy.status, Status::Open, "ub-10 (dot-boundary decoy) must be untouched");
+    assert_eq!(
+        decoy.status,
+        Status::Open,
+        "ub-10 (dot-boundary decoy) must be untouched"
+    );
     assert!(decoy.deleted_by.is_none());
 
     let unrelated = storage.get_issue("ub-2").await.unwrap().unwrap();
-    assert_eq!(unrelated.status, Status::Open, "ub-2 (unrelated) must be untouched");
+    assert_eq!(
+        unrelated.status,
+        Status::Open,
+        "ub-2 (unrelated) must be untouched"
+    );
     assert!(unrelated.deleted_by.is_none());
 }
 
@@ -1518,19 +1559,34 @@ pub async fn contract_cascade_delete<S: Storage>(storage: S) {
 /// `foreign_keys_enforced` (mod.rs:853); the FK CASCADE assertion here relies on that.
 pub async fn contract_hard_delete<S: Storage>(storage: S) {
     // ub-1: target; ub-1.1: child issue (dotted id — must survive); ub-2: unrelated.
-    storage.create_issue(&issue("ub-1", "target"), "alice").await.unwrap();
-    storage.create_issue(&issue("ub-1.1", "child"), "alice").await.unwrap();
-    storage.create_issue(&issue("ub-2", "unrelated"), "alice").await.unwrap();
+    storage
+        .create_issue(&issue("ub-1", "target"), "alice")
+        .await
+        .unwrap();
+    storage
+        .create_issue(&issue("ub-1.1", "child"), "alice")
+        .await
+        .unwrap();
+    storage
+        .create_issue(&issue("ub-2", "unrelated"), "alice")
+        .await
+        .unwrap();
 
     // Outbound edge: ub-1 --blocks--> ub-3 (ub-1's issue_id dep row — FK CASCADE removes it).
-    storage.create_issue(&issue("ub-3", "out-target"), "alice").await.unwrap();
+    storage
+        .create_issue(&issue("ub-3", "out-target"), "alice")
+        .await
+        .unwrap();
     storage
         .add_dependency(&dep("ub-1", "ub-3", DependencyType::Blocks), "alice")
         .await
         .unwrap();
 
     // Inbound edge: ub-4 --blocks--> ub-1 (depends_on_id = "ub-1", NO FK — explicit DELETE).
-    storage.create_issue(&issue("ub-4", "in-blocker"), "alice").await.unwrap();
+    storage
+        .create_issue(&issue("ub-4", "in-blocker"), "alice")
+        .await
+        .unwrap();
     storage
         .add_dependency(&dep("ub-4", "ub-1", DependencyType::Blocks), "alice")
         .await
@@ -1558,12 +1614,18 @@ pub async fn contract_hard_delete<S: Storage>(storage: S) {
 
     // (3) FK CASCADE: ub-1's OWN dep rows (issue_id="ub-1") are gone.
     let ub1_deps = storage.list_dependencies("ub-1").await.unwrap();
-    assert!(ub1_deps.is_empty(), "ub-1's own dep rows gone via FK CASCADE");
+    assert!(
+        ub1_deps.is_empty(),
+        "ub-1's own dep rows gone via FK CASCADE"
+    );
 
     // (4) Global no-orphan: whole graph has no edge mentioning ub-1.
     let graph = storage.dependency_graph(&[]).await.unwrap();
     assert!(
-        !graph.edges.iter().any(|e| e.from == "ub-1" || e.to == "ub-1"),
+        !graph
+            .edges
+            .iter()
+            .any(|e| e.from == "ub-1" || e.to == "ub-1"),
         "no edge may reference the deleted ub-1"
     );
 
@@ -1590,7 +1652,9 @@ pub async fn contract_hard_delete<S: Storage>(storage: S) {
     //     (its events rows are gone via FK CASCADE, not by writing a Deleted event), so we only
     //     assert what is checkable: ub-4 (which survives) has no "deleted" event from this Hard op.
     assert!(
-        !event_types(&storage, "ub-4").await.contains(&"deleted".to_string()),
+        !event_types(&storage, "ub-4")
+            .await
+            .contains(&"deleted".to_string()),
         "Hard delete must NOT emit a Deleted event on any surviving issue"
     );
 }

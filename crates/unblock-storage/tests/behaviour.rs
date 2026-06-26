@@ -374,21 +374,46 @@ async fn dry_run_delete_mutates_nothing() {
 async fn seed_cascade_corpus(actor: &str) -> LibsqlStorage {
     let storage = fresh().await;
     // ub-1: the delete target (root, Open)
-    storage.create_issue(&issue("ub-1", "root"), actor).await.unwrap();
-    // ub-1.1: child (depth 1, Open) — non-terminal cascade member
-    storage.create_issue(&issue("ub-1.1", "child"), actor).await.unwrap();
-    // ub-1.1.1: grandchild (depth 2, Open) — proves recursive prefix match
-    storage.create_issue(&issue("ub-1.1.1", "grandchild"), actor).await.unwrap();
-    // ub-1.2: sibling child (Closed/terminal) — proves Deleted-event guard
-    storage.create_issue(&issue("ub-1.2", "closed-child"), actor).await.unwrap();
     storage
-        .update_issue("ub-1.2", &IssuePatch { status: Some(Status::Closed), ..IssuePatch::default() }, actor)
+        .create_issue(&issue("ub-1", "root"), actor)
+        .await
+        .unwrap();
+    // ub-1.1: child (depth 1, Open) — non-terminal cascade member
+    storage
+        .create_issue(&issue("ub-1.1", "child"), actor)
+        .await
+        .unwrap();
+    // ub-1.1.1: grandchild (depth 2, Open) — proves recursive prefix match
+    storage
+        .create_issue(&issue("ub-1.1.1", "grandchild"), actor)
+        .await
+        .unwrap();
+    // ub-1.2: sibling child (Closed/terminal) — proves Deleted-event guard
+    storage
+        .create_issue(&issue("ub-1.2", "closed-child"), actor)
+        .await
+        .unwrap();
+    storage
+        .update_issue(
+            "ub-1.2",
+            &IssuePatch {
+                status: Some(Status::Closed),
+                ..IssuePatch::default()
+            },
+            actor,
+        )
         .await
         .unwrap();
     // ub-10: dot-boundary decoy (shares "ub-1" prefix WITHOUT a dot — must be UNTOUCHED by cascade)
-    storage.create_issue(&issue("ub-10", "decoy-prefix"), actor).await.unwrap();
+    storage
+        .create_issue(&issue("ub-10", "decoy-prefix"), actor)
+        .await
+        .unwrap();
     // ub-2: unrelated root — bounded blast-radius witness
-    storage.create_issue(&issue("ub-2", "unrelated"), actor).await.unwrap();
+    storage
+        .create_issue(&issue("ub-2", "unrelated"), actor)
+        .await
+        .unwrap();
     storage
 }
 
@@ -418,7 +443,11 @@ async fn delete_cascade_tombstones_self_and_descendants() {
     assert_eq!(resolved.mode, DeleteMode::Cascade);
     assert_eq!(
         resolved.cascade_children,
-        vec!["ub-1.1".to_string(), "ub-1.1.1".to_string(), "ub-1.2".to_string()],
+        vec![
+            "ub-1.1".to_string(),
+            "ub-1.1.1".to_string(),
+            "ub-1.2".to_string()
+        ],
         "cascade_children must be sorted and contain exactly the three dotted-prefix descendants"
     );
 
@@ -450,14 +479,17 @@ async fn delete_cascade_tombstones_self_and_descendants() {
     }
     // 3 non-terminal members (ub-1, ub-1.1, ub-1.1.1) each emit one Deleted event; ub-1.2 emits 0.
     assert_eq!(
-        deleted_event_count,
-        3,
+        deleted_event_count, 3,
         "total Deleted events across all 4 affected issues must be 3 (terminal ub-1.2 gets none)"
     );
 
     // (5) Dot-boundary decoy ub-10 is UNTOUCHED (shares "ub-1" prefix but has no dot after "ub-1").
     let decoy = storage.get_issue("ub-10").await.unwrap().unwrap();
-    assert_eq!(decoy.status, Status::Open, "ub-10 (dot-boundary decoy) must be untouched");
+    assert_eq!(
+        decoy.status,
+        Status::Open,
+        "ub-10 (dot-boundary decoy) must be untouched"
+    );
     assert!(decoy.deleted_by.is_none(), "ub-10 must have no deleted_by");
     assert_eq!(
         event_types(&storage, "ub-10").await,
@@ -467,8 +499,15 @@ async fn delete_cascade_tombstones_self_and_descendants() {
 
     // (5) Unrelated ub-2 is also UNTOUCHED.
     let unrelated = storage.get_issue("ub-2").await.unwrap().unwrap();
-    assert_eq!(unrelated.status, Status::Open, "ub-2 (unrelated) must be untouched");
-    assert!(unrelated.deleted_by.is_none(), "ub-2 must have no deleted_by");
+    assert_eq!(
+        unrelated.status,
+        Status::Open,
+        "ub-2 (unrelated) must be untouched"
+    );
+    assert!(
+        unrelated.deleted_by.is_none(),
+        "ub-2 must have no deleted_by"
+    );
 }
 
 /// Gap 1b — Hard delete removes ONLY the target's own row + its FK-child rows + inbound dep rows.
@@ -496,19 +535,34 @@ async fn delete_hard_removes_target_rows_and_inbound_deps_no_orphans() {
     let storage = fresh().await;
 
     // Core corpus: ub-1 (target), ub-1.1 (child — must survive Hard), ub-2 (unrelated).
-    storage.create_issue(&issue("ub-1", "target"), "alice").await.unwrap();
-    storage.create_issue(&issue("ub-1.1", "child"), "alice").await.unwrap();
-    storage.create_issue(&issue("ub-2", "unrelated"), "alice").await.unwrap();
+    storage
+        .create_issue(&issue("ub-1", "target"), "alice")
+        .await
+        .unwrap();
+    storage
+        .create_issue(&issue("ub-1.1", "child"), "alice")
+        .await
+        .unwrap();
+    storage
+        .create_issue(&issue("ub-2", "unrelated"), "alice")
+        .await
+        .unwrap();
 
     // Outbound edge: ub-1 --blocks--> ub-3  (ub-1's own issue_id dep row — FK CASCADE removes it).
-    storage.create_issue(&issue("ub-3", "outbound-target"), "alice").await.unwrap();
+    storage
+        .create_issue(&issue("ub-3", "outbound-target"), "alice")
+        .await
+        .unwrap();
     storage
         .add_dependency(&dep("ub-1", "ub-3", DependencyType::Blocks), "alice")
         .await
         .unwrap();
 
     // Inbound edge: ub-4 --blocks--> ub-1  (depends_on_id = "ub-1", NO FK — explicit DELETE).
-    storage.create_issue(&issue("ub-4", "inbound-blocker"), "alice").await.unwrap();
+    storage
+        .create_issue(&issue("ub-4", "inbound-blocker"), "alice")
+        .await
+        .unwrap();
     storage
         .add_dependency(&dep("ub-4", "ub-1", DependencyType::Blocks), "alice")
         .await
@@ -547,7 +601,10 @@ async fn delete_hard_removes_target_rows_and_inbound_deps_no_orphans() {
     // (4) Global no-orphan: whole dependency graph has no edge involving ub-1.
     let graph = storage.dependency_graph(&[]).await.unwrap();
     assert!(
-        !graph.edges.iter().any(|e| e.from == "ub-1" || e.to == "ub-1"),
+        !graph
+            .edges
+            .iter()
+            .any(|e| e.from == "ub-1" || e.to == "ub-1"),
         "no edge in the whole graph may reference the deleted ub-1"
     );
 
@@ -573,7 +630,9 @@ async fn delete_hard_removes_target_rows_and_inbound_deps_no_orphans() {
     //     FK CASCADE and thus unobservable, so we only assert what is actually checkable: ub-4
     //     (which still exists) has no "deleted" event from the Hard operation.
     assert!(
-        !event_types(&storage, "ub-4").await.contains(&"deleted".to_string()),
+        !event_types(&storage, "ub-4")
+            .await
+            .contains(&"deleted".to_string()),
         "Hard delete must not emit a Deleted event on any surviving issue"
     );
 }
@@ -599,17 +658,34 @@ async fn delete_hard_removes_target_rows_and_inbound_deps_no_orphans() {
 #[tokio::test]
 async fn reparent_success_moves_edge_and_advances_updated_at() {
     let storage = fresh().await;
-    storage.create_issue(&issue("ub-p1", "parent-1"), "a").await.unwrap();
-    storage.create_issue(&issue("ub-p2", "parent-2"), "a").await.unwrap();
-    storage.create_issue(&issue("ub-child", "child"), "a").await.unwrap();
-    let created_at = storage.get_issue("ub-child").await.unwrap().unwrap().created_at;
+    storage
+        .create_issue(&issue("ub-p1", "parent-1"), "a")
+        .await
+        .unwrap();
+    storage
+        .create_issue(&issue("ub-p2", "parent-2"), "a")
+        .await
+        .unwrap();
+    storage
+        .create_issue(&issue("ub-child", "child"), "a")
+        .await
+        .unwrap();
+    let created_at = storage
+        .get_issue("ub-child")
+        .await
+        .unwrap()
+        .unwrap()
+        .created_at;
 
     // First reparent: ub-child → ub-p1.
     let patch1 = IssuePatch {
         parent: Some(Some("ub-p1".to_string())),
         ..IssuePatch::default()
     };
-    storage.update_issue("ub-child", &patch1, "a").await.unwrap();
+    storage
+        .update_issue("ub-child", &patch1, "a")
+        .await
+        .unwrap();
 
     // A real reparent advances updated_at. Strict `>` is safe: created_at is frozen to ts(2026,1,1)
     // while the reparent stamps Utc::now() (S7).
@@ -621,10 +697,15 @@ async fn reparent_success_moves_edge_and_advances_updated_at() {
 
     // Exactly one parent-child edge and it points to ub-p1.
     let deps_after_1 = storage.list_dependencies("ub-child").await.unwrap();
-    let parent_edges_after_1: Vec<_> = deps_after_1.iter()
+    let parent_edges_after_1: Vec<_> = deps_after_1
+        .iter()
         .filter(|d| d.dep_type == DependencyType::ParentChild)
         .collect();
-    assert_eq!(parent_edges_after_1.len(), 1, "exactly one parent-child edge after first reparent");
+    assert_eq!(
+        parent_edges_after_1.len(),
+        1,
+        "exactly one parent-child edge after first reparent"
+    );
     assert_eq!(parent_edges_after_1[0].depends_on_id, "ub-p1");
 
     // The attach emitted exactly one dependency_added event (mirroring add_dependency) — NOT updated.
@@ -639,7 +720,10 @@ async fn reparent_success_moves_edge_and_advances_updated_at() {
         parent: Some(Some("ub-p2".to_string())),
         ..IssuePatch::default()
     };
-    storage.update_issue("ub-child", &patch2, "a").await.unwrap();
+    storage
+        .update_issue("ub-child", &patch2, "a")
+        .await
+        .unwrap();
 
     // The move advances updated_at again past the first reparent's stamp.
     let after_2 = storage.get_issue("ub-child").await.unwrap().unwrap();
@@ -650,10 +734,15 @@ async fn reparent_success_moves_edge_and_advances_updated_at() {
 
     // The ub-p1 edge must be GONE; only the ub-p2 edge survives.
     let deps_after_2 = storage.list_dependencies("ub-child").await.unwrap();
-    let parent_edges_after_2: Vec<_> = deps_after_2.iter()
+    let parent_edges_after_2: Vec<_> = deps_after_2
+        .iter()
         .filter(|d| d.dep_type == DependencyType::ParentChild)
         .collect();
-    assert_eq!(parent_edges_after_2.len(), 1, "exactly one parent-child edge after second reparent");
+    assert_eq!(
+        parent_edges_after_2.len(),
+        1,
+        "exactly one parent-child edge after second reparent"
+    );
     assert_eq!(
         parent_edges_after_2[0].depends_on_id, "ub-p2",
         "the ub-p1 edge must be replaced by ub-p2 (moved, not duplicated)"
@@ -682,12 +771,25 @@ async fn reparent_success_moves_edge_and_advances_updated_at() {
 #[tokio::test]
 async fn reparent_to_current_parent_is_noop() {
     let storage = fresh().await;
-    storage.create_issue(&issue("ub-p2", "parent-2"), "a").await.unwrap();
-    storage.create_issue(&issue("ub-child", "child"), "a").await.unwrap();
+    storage
+        .create_issue(&issue("ub-p2", "parent-2"), "a")
+        .await
+        .unwrap();
+    storage
+        .create_issue(&issue("ub-child", "child"), "a")
+        .await
+        .unwrap();
 
     // Set parent to ub-p2.
     storage
-        .update_issue("ub-child", &IssuePatch { parent: Some(Some("ub-p2".to_string())), ..IssuePatch::default() }, "a")
+        .update_issue(
+            "ub-child",
+            &IssuePatch {
+                parent: Some(Some("ub-p2".to_string())),
+                ..IssuePatch::default()
+            },
+            "a",
+        )
         .await
         .unwrap();
 
@@ -696,7 +798,14 @@ async fn reparent_to_current_parent_is_noop() {
 
     // Reparent to the same parent again → no-op.
     storage
-        .update_issue("ub-child", &IssuePatch { parent: Some(Some("ub-p2".to_string())), ..IssuePatch::default() }, "a")
+        .update_issue(
+            "ub-child",
+            &IssuePatch {
+                parent: Some(Some("ub-p2".to_string())),
+                ..IssuePatch::default()
+            },
+            "a",
+        )
         .await
         .unwrap();
 
@@ -713,7 +822,8 @@ async fn reparent_to_current_parent_is_noop() {
 
     // Edge is unchanged.
     let deps = storage.list_dependencies("ub-child").await.unwrap();
-    let parent_edges: Vec<_> = deps.iter()
+    let parent_edges: Vec<_> = deps
+        .iter()
         .filter(|d| d.dep_type == DependencyType::ParentChild)
         .collect();
     assert_eq!(parent_edges.len(), 1);
@@ -730,26 +840,53 @@ async fn reparent_to_current_parent_is_noop() {
 #[tokio::test]
 async fn reparent_detach_then_redetach() {
     let storage = fresh().await;
-    storage.create_issue(&issue("ub-p2", "parent-2"), "a").await.unwrap();
-    storage.create_issue(&issue("ub-child", "child"), "a").await.unwrap();
-    let created_at = storage.get_issue("ub-child").await.unwrap().unwrap().created_at;
+    storage
+        .create_issue(&issue("ub-p2", "parent-2"), "a")
+        .await
+        .unwrap();
+    storage
+        .create_issue(&issue("ub-child", "child"), "a")
+        .await
+        .unwrap();
+    let created_at = storage
+        .get_issue("ub-child")
+        .await
+        .unwrap()
+        .unwrap()
+        .created_at;
 
     // Attach to ub-p2 first.
     storage
-        .update_issue("ub-child", &IssuePatch { parent: Some(Some("ub-p2".to_string())), ..IssuePatch::default() }, "a")
+        .update_issue(
+            "ub-child",
+            &IssuePatch {
+                parent: Some(Some("ub-p2".to_string())),
+                ..IssuePatch::default()
+            },
+            "a",
+        )
         .await
         .unwrap();
 
     // Detach: parent: Some(None) → removes the edge (a real change).
     storage
-        .update_issue("ub-child", &IssuePatch { parent: Some(None), ..IssuePatch::default() }, "a")
+        .update_issue(
+            "ub-child",
+            &IssuePatch {
+                parent: Some(None),
+                ..IssuePatch::default()
+            },
+            "a",
+        )
         .await
         .unwrap();
 
     // No parent-child edge remains after the detach.
     let deps_detached = storage.list_dependencies("ub-child").await.unwrap();
     assert!(
-        deps_detached.iter().all(|d| d.dep_type != DependencyType::ParentChild),
+        deps_detached
+            .iter()
+            .all(|d| d.dep_type != DependencyType::ParentChild),
         "detach must remove the parent-child edge"
     );
 
@@ -774,7 +911,14 @@ async fn reparent_detach_then_redetach() {
     let updated_at_after_detach = after_detach.updated_at;
     let events_after_detach = event_types(&storage, "ub-child").await;
     storage
-        .update_issue("ub-child", &IssuePatch { parent: Some(None), ..IssuePatch::default() }, "a")
+        .update_issue(
+            "ub-child",
+            &IssuePatch {
+                parent: Some(None),
+                ..IssuePatch::default()
+            },
+            "a",
+        )
         .await
         .unwrap();
 

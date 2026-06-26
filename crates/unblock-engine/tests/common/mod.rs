@@ -106,20 +106,41 @@ pub async fn seed_hierarchy(session: &Session) {
     use unblock_engine::IssuePatch;
     use unblock_model::Status;
 
-    session.create(&issue("ub-1", Priority::MEDIUM, 100)).await.expect("create ub-1");
-    session.create(&issue("ub-1.1", Priority::MEDIUM, 101)).await.expect("create ub-1.1");
-    session.create(&issue("ub-1.1.1", Priority::MEDIUM, 102)).await.expect("create ub-1.1.1");
-    session.create(&issue("ub-1.2", Priority::MEDIUM, 103)).await.expect("create ub-1.2");
+    session
+        .create(&issue("ub-1", Priority::MEDIUM, 100))
+        .await
+        .expect("create ub-1");
+    session
+        .create(&issue("ub-1.1", Priority::MEDIUM, 101))
+        .await
+        .expect("create ub-1.1");
+    session
+        .create(&issue("ub-1.1.1", Priority::MEDIUM, 102))
+        .await
+        .expect("create ub-1.1.1");
+    session
+        .create(&issue("ub-1.2", Priority::MEDIUM, 103))
+        .await
+        .expect("create ub-1.2");
     // Close ub-1.2 (terminal) to prove the Deleted-event guard.
     session
         .update(
             "ub-1.2",
-            &IssuePatch { status: Some(Status::Closed), ..IssuePatch::default() },
+            &IssuePatch {
+                status: Some(Status::Closed),
+                ..IssuePatch::default()
+            },
         )
         .await
         .expect("close ub-1.2");
-    session.create(&issue("ub-10", Priority::MEDIUM, 104)).await.expect("create ub-10");
-    session.create(&issue("ub-2", Priority::MEDIUM, 105)).await.expect("create ub-2");
+    session
+        .create(&issue("ub-10", Priority::MEDIUM, 104))
+        .await
+        .expect("create ub-10");
+    session
+        .create(&issue("ub-2", Priority::MEDIUM, 105))
+        .await
+        .expect("create ub-2");
 }
 
 /// Add a `Blocks` dependency `from -> on` (from depends on / is blocked by `on`).
