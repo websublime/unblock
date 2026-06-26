@@ -141,9 +141,13 @@ where
     contract_list_issues(factory().await).await;
     contract_ready_issues(factory().await).await;
     contract_blocked_issues(factory().await).await;
+    contract_blocked_facets(factory().await).await;
     contract_ready_blocked_disjoint(factory().await).await;
     contract_search_issues(factory().await).await;
     contract_search_escape_guard(factory().await).await;
+    contract_list_filters_compose(factory().await).await;
+    contract_priority_range_inclusive(factory().await).await;
+    contract_label_and_or(factory().await).await;
     contract_count_issues_sum_consistency(factory().await).await;
     contract_stale_issues(factory().await).await;
 
@@ -626,6 +630,358 @@ pub async fn contract_blocked_issues<S: Storage>(storage: S) {
     assert!(
         blocked.contains(&"ub-wip".to_string()),
         "in_progress blocked issue appears"
+    );
+}
+
+/// **`blocked_issues` composes the `list` narrowing facets AND preserves the deferred-blocked set**
+/// (D18, spine §3.2.1; the cross-backend guard for the T1.5 production change — A.7).
+///
+/// This is the ONLY contract leg that protects future backends against the most likely
+/// implementation error: reusing `list`'s default visibility branch in `blocked` (which strips
+/// `deferred`-status rows). It therefore asserts both the facet narrowing and — crucially — that a
+/// `deferred`-status blocked issue STILL appears under a default filter and is NOT dropped by
+/// `include_deferred=false`.
+// The comprehensive corpus (5 issues + a blocker) plus the seven a–g sub-assertions exceed the
+// pedantic line cap; splitting the single coherent A.7 guard would obscure the invariant it pins.
+#[allow(clippy::too_many_lines)]
+pub async fn contract_blocked_facets<S: Storage>(storage: S) {
+    // A shared blocker so each candidate has an unresolved gating edge.
+    storage
+        .create_issue(&issue("ub-blocker", "blocker"), "a")
+        .await
+        .unwrap();
+
+    // ub-bug-blocked: Bug, P0, label {a}, blocked + in_progress (claimed).
+    let mut bug = issue("ub-bug-blocked", "bug blocked");
+    bug.issue_type = IssueType::Bug;
+    bug.priority = Priority::CRITICAL; // P0 — the LOWEST priority NUMBER
+    bug.labels = vec!["a".to_string()];
+    storage.create_issue(&bug, "a").await.unwrap();
+    storage
+        .add_dependency(
+            &dep("ub-bug-blocked", "ub-blocker", DependencyType::Blocks),
+            "a",
+        )
+        .await
+        .unwrap();
+    storage
+        .claim_issue("ub-bug-blocked", "bob", "bob")
+        .await
+        .unwrap();
+
+    // ub-defer-blocked: Task, P2, label {b}, blocked, then set status = deferred (the regression pin).
+    let mut deferred = issue("ub-defer-blocked", "deferred blocked");
+    deferred.issue_type = IssueType::Task;
+    deferred.priority = Priority::MEDIUM; // P2
+    deferred.labels = vec!["b".to_string()];
+    storage.create_issue(&deferred, "a").await.unwrap();
+    storage
+        .add_dependency(
+            &dep("ub-defer-blocked", "ub-blocker", DependencyType::Blocks),
+            "a",
+        )
+        .await
+        .unwrap();
+    // Set the STATUS to deferred (defer_until alone does NOT change status; only a deferred *status*
+    // exercises list's `NOT IN ('deferred')` strip — the precise regression A.7 guards).
+    storage
+        .update_issue(
+            "ub-defer-blocked",
+            &IssuePatch {
+                status: Some(Status::Deferred),
+                ..IssuePatch::default()
+            },
+            "a",
+        )
+        .await
+        .unwrap();
+
+    // ub-closed-blocked: was blocked, then closed (must NEVER be blocked-visible).
+    storage
+        .create_issue(&issue("ub-closed-blocked", "closed blocked"), "a")
+        .await
+        .unwrap();
+    storage
+        .add_dependency(
+            &dep("ub-closed-blocked", "ub-blocker", DependencyType::Blocks),
+            "a",
+        )
+        .await
+        .unwrap();
+    storage
+        .update_issue(
+            "ub-closed-blocked",
+            &IssuePatch {
+                status: Some(Status::Closed),
+                ..IssuePatch::default()
+            },
+            "a",
+        )
+        .await
+        .unwrap();
+
+    // ub-free: open, no gating edge — never blocked.
+    storage
+        .create_issue(&issue("ub-free", "free"), "a")
+        .await
+        .unwrap();
+
+    let blocked_ids = |f: ListFilters| {
+        let storage = &storage;
+        async move {
+            storage
+                .blocked_issues(&f)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|i| i.id)
+                .collect::<std::collections::HashSet<String>>()
+        }
+    };
+
+    // (a) default: both the in_progress AND the deferred-status blocked issue appear; closed excluded;
+    //     ub-free (no edge) excluded.
+    let default = blocked_ids(ListFilters::default()).await;
+    assert!(
+        default.contains("ub-bug-blocked"),
+        "in_progress blocked issue appears under default"
+    );
+    // (b) REQUIRED visibility-preserved pin (A.7): the DEFERRED-status blocked issue is still present
+    //     — proves blocked did NOT inherit list's `NOT IN ('deferred')` visibility branch.
+    assert!(
+        default.contains("ub-defer-blocked"),
+        "deferred-status blocked issue MUST survive a default filter (deferred-inclusive baseline)"
+    );
+    assert!(
+        !default.contains("ub-closed-blocked"),
+        "closed is never blocked-visible"
+    );
+    assert!(!default.contains("ub-free"), "an unblocked issue is absent");
+
+    // (c) facet narrows: labels_all=[a] keeps only the Bug-blocked (its sole {a} carrier).
+    let by_label = blocked_ids(ListFilters {
+        labels_all: vec!["a".to_string()],
+        ..ListFilters::default()
+    })
+    .await;
+    assert_eq!(
+        by_label,
+        std::collections::HashSet::from(["ub-bug-blocked".to_string()]),
+        "labels_all=[a] narrows blocked to the single {{a}} carrier"
+    );
+
+    // (d) priority facet narrows non-vacuously: ub-bug-blocked=P0, ub-defer-blocked=P2 →
+    //     priority_max=CRITICAL keeps ONLY the P0.
+    let by_prio = blocked_ids(ListFilters {
+        priority_max: Some(Priority::CRITICAL),
+        ..ListFilters::default()
+    })
+    .await;
+    assert_eq!(
+        by_prio,
+        std::collections::HashSet::from(["ub-bug-blocked".to_string()]),
+        "priority_max=CRITICAL keeps only the P0 blocked issue (non-vacuous)"
+    );
+
+    // (e) REQUIRED no-op pins (A.7): include_deferred=false does NOT drop the deferred-blocked issue;
+    //     include_closed=true does NOT add the closed-blocked issue.
+    let no_defer = blocked_ids(ListFilters {
+        include_deferred: false,
+        ..ListFilters::default()
+    })
+    .await;
+    assert!(
+        no_defer.contains("ub-defer-blocked"),
+        "include_deferred is a no-op on blocked — the deferred-blocked issue stays"
+    );
+    let with_closed = blocked_ids(ListFilters {
+        include_closed: true,
+        ..ListFilters::default()
+    })
+    .await;
+    assert!(
+        !with_closed.contains("ub-closed-blocked"),
+        "include_closed is a no-op on blocked — closed never becomes blocked-visible"
+    );
+
+    // (g) status facet vs blocked base: status=[Closed] ∩ (status NOT IN closed/tombstone) = ∅.
+    let status_closed = blocked_ids(ListFilters {
+        status: vec![Status::Closed],
+        ..ListFilters::default()
+    })
+    .await;
+    assert!(
+        status_closed.is_empty(),
+        "blocked(status=[Closed]) is empty (closed is excluded by the deferred-inclusive base)"
+    );
+}
+
+/// (Optional, mirrors engine #1 at the `Storage` layer.) `list_issues` facets compose as an
+/// intersection: a multi-facet filter matches exactly the one row satisfying every facet.
+pub async fn contract_list_filters_compose<S: Storage>(storage: S) {
+    let mut hit = issue("ub-hit", "fix the parser");
+    hit.issue_type = IssueType::Task;
+    hit.priority = Priority::HIGH;
+    hit.assignee = Some("alice".to_string());
+    hit.labels = vec!["api".to_string()];
+    storage.create_issue(&hit, "a").await.unwrap();
+
+    // Decoys, each differing on exactly one facet.
+    let mut wrong_type = issue("ub-wrongtype", "fix the parser");
+    wrong_type.issue_type = IssueType::Bug;
+    wrong_type.priority = Priority::HIGH;
+    wrong_type.assignee = Some("alice".to_string());
+    wrong_type.labels = vec!["api".to_string()];
+    storage.create_issue(&wrong_type, "a").await.unwrap();
+
+    let mut wrong_label = issue("ub-wronglabel", "fix the parser");
+    wrong_label.issue_type = IssueType::Task;
+    wrong_label.priority = Priority::HIGH;
+    wrong_label.assignee = Some("alice".to_string());
+    wrong_label.labels = vec!["ui".to_string()];
+    storage.create_issue(&wrong_label, "a").await.unwrap();
+
+    let combined = ListFilters {
+        issue_type: vec![IssueType::Task],
+        priority_min: Some(Priority::HIGH),
+        priority_max: Some(Priority::HIGH),
+        assignee: Some("alice".to_string()),
+        labels_all: vec!["api".to_string()],
+        text_contains: Some("parser".to_string()),
+        ..ListFilters::default()
+    };
+    let ids: Vec<String> = storage
+        .list_issues(&combined)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|i| i.id)
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["ub-hit".to_string()],
+        "composed facets intersect to the single matching row"
+    );
+
+    // Non-vacuity: dropping the label facet admits the wrong-label decoy.
+    let drop_label = ListFilters {
+        labels_all: Vec::new(),
+        ..combined
+    };
+    let ids: std::collections::HashSet<String> = storage
+        .list_issues(&drop_label)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|i| i.id)
+        .collect();
+    assert!(
+        ids.contains("ub-wronglabel"),
+        "relaxing labels_all admits the wrong-label decoy (the facet was load-bearing)"
+    );
+}
+
+/// (Optional, mirrors engine #3.) The `priority` range is inclusive on both ends and direction-pinned
+/// (CRITICAL=0 is the LOWEST number; a min/max swap cannot pass).
+pub async fn contract_priority_range_inclusive<S: Storage>(storage: S) {
+    for (id, prio) in [
+        ("ub-p0", Priority::CRITICAL),
+        ("ub-p1", Priority::HIGH),
+        ("ub-p2", Priority::MEDIUM),
+        ("ub-p3", Priority::LOW),
+        ("ub-p4", Priority::BACKLOG),
+    ] {
+        let mut i = issue(id, id);
+        i.priority = prio;
+        storage.create_issue(&i, "a").await.unwrap();
+    }
+
+    let range: std::collections::HashSet<String> = storage
+        .list_issues(&ListFilters {
+            priority_min: Some(Priority::HIGH),
+            priority_max: Some(Priority::MEDIUM),
+            ..ListFilters::default()
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|i| i.id)
+        .collect();
+    assert_eq!(
+        range,
+        std::collections::HashSet::from(["ub-p1".to_string(), "ub-p2".to_string()]),
+        "priority [HIGH,MEDIUM] is inclusive on both ends and excludes the lower-numbered P0"
+    );
+
+    let only_p0: Vec<String> = storage
+        .list_issues(&ListFilters {
+            priority_max: Some(Priority::CRITICAL),
+            ..ListFilters::default()
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|i| i.id)
+        .collect();
+    assert_eq!(
+        only_p0,
+        vec!["ub-p0".to_string()],
+        "priority_max=CRITICAL keeps only P0 (the lowest number)"
+    );
+}
+
+/// (Optional, mirrors engine #2.) `labels_all` (AND) and `labels_any` (OR) discriminate, and both
+/// together intersect (AND ∩ OR), with a `{c}` witness in neither.
+pub async fn contract_label_and_or<S: Storage>(storage: S) {
+    for (id, labels) in [
+        ("ub-a", vec!["a"]),
+        ("ub-b", vec!["b"]),
+        ("ub-ab", vec!["a", "b"]),
+        ("ub-c", vec!["c"]),
+    ] {
+        let mut i = issue(id, id);
+        i.labels = labels.into_iter().map(str::to_string).collect();
+        storage.create_issue(&i, "a").await.unwrap();
+    }
+
+    let all: std::collections::HashSet<String> = storage
+        .list_issues(&ListFilters {
+            labels_all: vec!["a".to_string(), "b".to_string()],
+            ..ListFilters::default()
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|i| i.id)
+        .collect();
+    assert_eq!(
+        all,
+        std::collections::HashSet::from(["ub-ab".to_string()]),
+        "labels_all=[a,b] (AND) matches only the issue carrying BOTH"
+    );
+
+    let any: std::collections::HashSet<String> = storage
+        .list_issues(&ListFilters {
+            labels_any: vec!["a".to_string(), "b".to_string()],
+            ..ListFilters::default()
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|i| i.id)
+        .collect();
+    assert_eq!(
+        any,
+        std::collections::HashSet::from([
+            "ub-a".to_string(),
+            "ub-b".to_string(),
+            "ub-ab".to_string()
+        ]),
+        "labels_any=[a,b] (OR) matches any carrier; ub-c (neither) is absent"
+    );
+    assert_ne!(
+        all, any,
+        "AND and OR over the same labels are distinct sets"
     );
 }
 
