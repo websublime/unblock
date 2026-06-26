@@ -735,7 +735,7 @@ no `Claimed`**. Each mutation emits exactly:
 
 The single mutation home (FR-9). Composes storage + policy + (optional) sync/health. MCP and CLI are thin adapters; behaviour cannot drift. **In-process write serialization via a tokio `Semaphore(1)`** (D14); reads bypass it (FR-10).
 
-**Workspace-open ownership (CF-D — normative):** discovery of `.unblock/` and construction of the `Arc<dyn Storage>` is owned by **`unblock-config`**. `WorkspaceContext`, `ResolvedContext`, `ResolvedConfig`, and `ConfigPaths` are **DEFINED in `unblock-config`** (not engine). `unblock-config` exposes **two facades** (G-5 option b):
+**Workspace-open ownership (CF-D — normative):** discovery of the workspace dir (named **`.unblock` OR `_unblock`** — the monorepo alias for dot-dir-hostile environments, FORK-2/D8) and construction of the `Arc<dyn Storage>` is owned by **`unblock-config`**. A **symlinked** workspace dir is allowed but **canonicalized**, and the resolved `db_path`/`jsonl_path` are **confined within the canonicalized `unblock_dir`** (FORK-3, NFR-18 blast-radius — never rejected outright). `WorkspaceContext`, `ResolvedContext`, `ResolvedConfig`, and `ConfigPaths` are **DEFINED in `unblock-config`** (not engine). `unblock-config` exposes **two facades** (G-5 option b), each with a T1.3-additive `_with_cli` overload (FORK-1):
 
 ```rust
 // in unblock-config:
@@ -779,6 +779,13 @@ pub struct WorkspaceContext {
     pub paths: ConfigPaths,            // config-owned: resolved `.unblock/` + db/jsonl paths (T1.3a)
 }
 pub async fn open_with_storage(start: &Path) -> Result<WorkspaceContext, ConfigError>;
+
+// (3) T1.3-ADDITIVE CLI overloads (FORK-1 — OVERLOAD model). The `&Path` facades above are PERMANENT and
+//     UNCHANGED; each DELEGATES to its `_with_cli` form with a `CliOverrides { dir: Some(start), ..default }`.
+//     `CliOverrides` (the typed top precedence layer, config-owned) threads --dir/--db/--actor/--output-format
+//     through resolution. These return the SAME result types the engine consumes — NO signature swap, NO break.
+pub async fn open_workspace_with_cli(cli: &CliOverrides) -> Result<ResolvedContext, ConfigError>;
+pub async fn open_with_storage_with_cli(cli: &CliOverrides) -> Result<WorkspaceContext, ConfigError>;
 ```
 
 > **NOTE (T1.3a minimal subset — build split, NORMATIVE sequencing).** The **T1.3a** task delivers EXACTLY these
@@ -788,23 +795,29 @@ pub async fn open_with_storage(start: &Path) -> Result<WorkspaceContext, ConfigE
 > (`= workspace_dir.join(".unblock")`), and `db_path`/`jsonl_path` are **derived** from `unblock_dir` + the
 > `ResolvedConfig` filenames (`db_filename`/`jsonl_filename`). `workspace_dir` (the project **root** that contains
 > `.unblock/`) and `paths.unblock_dir` (= `workspace_dir/.unblock`) are **distinct and both intentional**. The task
-> performs `.unblock/` upward discovery from `start`, libsql open + migrate via
+> performs **workspace upward discovery** from `start` (a dir named **`.unblock` OR `_unblock`** — the monorepo alias
+> for dot-dir-hostile environments, FORK-2/D8), libsql open + migrate via
 > `unblock_storage::LibsqlStorage::open_local`, `Arc<dyn Storage>` construction, path resolution into `ConfigPaths`,
-> and actor resolution (`UNBLOCK_ACTOR` env → `$USER` → `"unblock"`). The **full layered resolution**
-> (CLI > env `UNBLOCK_*` > project `.unblock/config.toml` > defaults) lands **additively at T1.3** — it replaces the
-> defaulting internals and enriches the facade input, touching **no public type or signature** pinned here. T1.3a
-> sequences **before** T1.2: the engine *consumes* config's `WorkspaceContext`, and config is **L4** so it **cannot**
-> depend on the engine at **L5** (`cargo xtask check-layering` would reject that back-edge).
+> and actor resolution (T1.3a: `UNBLOCK_ACTOR` env → `$USER` → `"unblock"`). The **full layered resolution**
+> (CLI > env `UNBLOCK_*` > project `config.toml` > defaults) lands **additively at T1.3** — it replaces the
+> defaulting internals and **adds the `_with_cli` facade overloads** (FORK-1, see the facade-signature note),
+> extends actor precedence to the global order (FORK-4: `--actor` > `UNBLOCK_ACTOR` > `config.toml [actor]` > `$USER`
+> > `"unblock"`), and **canonicalizes a symlinked workspace dir and confines** `db_path`/`jsonl_path` within the
+> canonicalized `unblock_dir` (FORK-3, NFR-18 blast-radius) — touching **no public type or `&Path` signature**
+> pinned here. T1.3a sequences **before** T1.2: the engine *consumes* config's `WorkspaceContext`, and config is
+> **L4** so it **cannot** depend on the engine at **L5** (`cargo xtask check-layering` would reject that back-edge).
 
-> **NOTE (facade signature, T1.3a `&Path` vs T1.3 `&CliOverrides`).** The facade signatures above take
-> `start: &Path` for v1; the **T1.3a minimal subset** ships exactly that — `open_with_storage(start: &Path)` /
-> `open_workspace(start: &Path)`. The richer CLI-override forwarding the config crate plan describes (a
-> `&CliOverrides`/overrides parameter that threads `--dir`/`--db`/`--actor`/`--output-format` down through
-> resolution) is a **T1.3-ADDITIVE** enrichment of the facade's *input*, not a change to what the engine consumes:
-> the engine binds to the **result** type (`WorkspaceContext`), never to the facade signature, so swapping
-> `&Path` → `&CliOverrides` at T1.3 does **not** break `Session::open`. (This reconciles the spine `&Path` ↔
-> config-plan `&CliOverrides` drift by **sequencing**: `&Path` for the T1.3a minimal subset, `&CliOverrides`
-> additive at T1.3 — the engine never observes the difference.)
+> **NOTE (facade signatures — OVERLOAD model, FORK-1, NORMATIVE).** The two `&Path` facades above
+> (`open_workspace(start: &Path)` / `open_with_storage(start: &Path)`) are **PERMANENT and UNCHANGED** — T1.3a ships
+> exactly them, and T1.3 keeps them verbatim. The richer CLI-override forwarding the config crate plan describes (a
+> `&CliOverrides` parameter that threads `--dir`/`--db`/`--actor`/`--output-format` down through resolution) lands at
+> T1.3 as **two ADDITIVE overloads** — `open_workspace_with_cli(cli: &CliOverrides)` /
+> `open_with_storage_with_cli(cli: &CliOverrides)` (block item (3) above) — **not** as a signature swap. The `&Path`
+> facades **delegate** to their `_with_cli` form with a `CliOverrides { dir: Some(start), ..Default::default() }`, so
+> every existing caller keeps compiling unchanged and the engine (which binds to the **result** type
+> `WorkspaceContext`, never to a facade signature) is unaffected. (This reconciles the spine `&Path` ↔ config-plan
+> `&CliOverrides` drift by **overload addition**, not by sequencing/swapping the parameter — the `&Path` API never
+> goes away.)
 
 **`unblock-engine` CONSUMES** a `WorkspaceContext` — it does **not** construct storage itself, and never sees an `Option<Arc<dyn Storage>>`. `Session::open` takes the already-built storage-bearing context; because `storage` is non-optional there is no unwrap and no None-path mismatch. The resolve-only `ResolvedContext` is for callers that must not touch the DB.
 

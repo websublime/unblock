@@ -88,7 +88,7 @@ These decisions are **locked** (confirmed with Miguel) and shape the rest of thi
 | **D5** | **libsql is source of truth; JSONL is an OPTIONAL light export/import feature.** Drop the heavy git-merge coordination (3-way merge, 4-phase collision detection, distributed locks, data-loss guards). | libsql provides real sharing; git-as-transport is redundant. Keep JSONL only for portable, diffable snapshots. Reversible toward DB-only later. |
 | **D6** | **Whole stack is async (tokio).** | Consequence of rmcp + libsql; matches the scaffold (`tokio = full`). |
 | **D7** | **MCP-only sheds the rich-rendering stack** (rich_rust, crossterm, indicatif); rendering is the MCP client's job. | Structured content over MCP; large supply-chain reduction. |
-| **D8** | **Rename everything to `unblock`** — binary `unblock`, crates `unblock-*`, config dir `.unblock/`, resource URIs `unblock://…`, contract ids `unblock.*.v1`. | New product identity. |
+| **D8** | **Rename everything to `unblock`** — binary `unblock`, crates `unblock-*`, config dir `.unblock/` (**monorepo alias `_unblock/` also accepted on discovery** — the original beads `.beads`+`_beads` affordance for dot-dir-hostile environments; amended 2026-06-26), resource URIs `unblock://…`, contract ids `unblock.*.v1`. | New product identity. |
 | **D9** | **Target stable Rust** (pinned `1.96.0`); drop clap dynamic/unstable features. | Removes the only reason the original needed nightly. |
 | **D10** | **Config = TOML** (`.unblock/config.toml`); **single env prefix `UNBLOCK_`** (`UNBLOCK_ACTOR`/`UNBLOCK_DIR`/`UNBLOCK_JSONL`/`UNBLOCK_OUTPUT_FORMAT`). | Idiomatic; avoids the unmaintained serde_yaml fork on an untrusted-input path; unifies BD_/BEADS_/BR_. |
 | **D11** | **Drop** the town/mayor **cross-project routing**; keep single-workspace `.unblock/` discovery. | Elaborate and niche; reintroduce only on a concrete multi-repo need. |
@@ -193,7 +193,7 @@ These decisions are **locked** (confirmed with Miguel) and shape the rest of thi
 | **EpicStatus** | epic id, total_children, closed_children, eligible_for_close | Derived rollup. [v1.1] |
 | **WorkspaceHealth / AnomalyClass** | classification, anomaly code+severity, composite severity = max | Full taxonomy [v1.1]; v1 ships libsql integrity + doctor. |
 | **GateResult / PolicyDocument** | gate name, provider, status, required gates per transition | Project-local (`.unblock/policy.toml`), not exported. [v1.1] |
-| **On-disk artifacts** (`.unblock/`) | `unblock.db` (libsql, source of truth), `config.toml`, `policy.toml` [v1.1], `interactions.jsonl` [v1.1], `issues.jsonl` (optional export), metadata | libsql is authoritative; `issues.jsonl` is an optional snapshot (D5). |
+| **On-disk artifacts** (`.unblock/`) | `unblock.db` (libsql, source of truth), `config.toml`, `policy.toml` [v1.1], `interactions.jsonl` [v1.1], `issues.jsonl` (optional export) | libsql is authoritative; `issues.jsonl` is an optional snapshot (D5). **No separate `metadata.json`** — startup-path keys (db/jsonl filenames, retention, backend) fold into `config.toml` (Q2, 2026-06-26; names §12.5). |
 
 ## 8. Architecture
 
@@ -288,7 +288,7 @@ Self-update **lands in v1 via `axoupdater`** (D17/CF-K); signing = **GitHub arti
 v1 ships `doctor` + libsql `integrity_check`; the Recoverable/Drifted/Unsafe redefinition for a libsql-authoritative world is a v1.1 design item.
 
 ### 12.5 Names — LOCKED
-Config dir `.unblock/`; DB `unblock.db`; optional export `issues.jsonl`; config `config.toml`; v1.1 artifacts `policy.toml`, `interactions.jsonl`.
+Config dir `.unblock/` (monorepo alias `_unblock/` also accepted on discovery — D8, FORK-2/2026-06-26); DB `unblock.db`; optional export `issues.jsonl`; config `config.toml`; v1.1 artifacts `policy.toml`, `interactions.jsonl`.
 
 ### 12.6 Self-update command name — `unblock update`
 The single v1 self-update command is spelled **`unblock update`** everywhere (PRD FR-25/NFR-17, ci-cd, roadmap, README, and `unblock-cli` — `Command::Update`/`UpdateArgs`/`commands/update.rs`/help snapshots). The Cargo feature stays named **`self-update`**; the feature enables the `unblock update` command (G-2/G-18).
