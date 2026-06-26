@@ -87,6 +87,41 @@ pub async fn seed_open(session: &Session, n: usize) -> Vec<String> {
     ids
 }
 
+/// Seed the 6-issue authoritative Cascade/Hard/DryRun corpus (T1.4 LOCKED spec §2).
+///
+/// Dotted ids are required because `resolve_cascade_children` keys on the `{target}.%` dotted-id
+/// prefix (crud.rs:835), NOT on parent-child edges. The reparent corpus uses flat ids; these two
+/// corpora are intentionally separate (D-DRIFT-A in the LOCKED spec).
+///
+/// Corpus:
+/// - `ub-1`   — delete target (root, Open)
+/// - `ub-1.1` — child depth 1 (Open), non-terminal cascade member
+/// - `ub-1.1.1` — grandchild depth 2 (Open), proves recursive prefix match
+/// - `ub-1.2` — sibling child (Closed/terminal), proves Deleted-event guard
+/// - `ub-10`  — dot-boundary decoy (shares "ub-1" prefix WITHOUT a dot — must be UNTOUCHED)
+/// - `ub-2`   — unrelated root, bounded blast-radius witness
+///
+/// `resolve_cascade_children(["ub-1"]) == ["ub-1.1","ub-1.1.1","ub-1.2"]` (sorted).
+pub async fn seed_hierarchy(session: &Session) {
+    use unblock_engine::IssuePatch;
+    use unblock_model::Status;
+
+    session.create(&issue("ub-1", Priority::MEDIUM, 100)).await.expect("create ub-1");
+    session.create(&issue("ub-1.1", Priority::MEDIUM, 101)).await.expect("create ub-1.1");
+    session.create(&issue("ub-1.1.1", Priority::MEDIUM, 102)).await.expect("create ub-1.1.1");
+    session.create(&issue("ub-1.2", Priority::MEDIUM, 103)).await.expect("create ub-1.2");
+    // Close ub-1.2 (terminal) to prove the Deleted-event guard.
+    session
+        .update(
+            "ub-1.2",
+            &IssuePatch { status: Some(Status::Closed), ..IssuePatch::default() },
+        )
+        .await
+        .expect("close ub-1.2");
+    session.create(&issue("ub-10", Priority::MEDIUM, 104)).await.expect("create ub-10");
+    session.create(&issue("ub-2", Priority::MEDIUM, 105)).await.expect("create ub-2");
+}
+
 /// Add a `Blocks` dependency `from -> on` (from depends on / is blocked by `on`).
 pub async fn add_blocks(session: &Session, from: &str, on: &str) {
     let dep = Dependency {

@@ -1,5 +1,6 @@
 //! Mutation-path integration tests: engine-side validation (FR-11), delete `DryRun`, reparent-cycle
-//! rejection (FR-5), close-with-suggestions newly-unblocked (FR-11), claim idempotency (FR-2).
+//! rejection (FR-5), close-with-suggestions newly-unblocked (FR-11), claim idempotency (FR-2),
+//! and the never-run Cascade/Hard/Tombstone/DryRun delete paths (FR-1c) + reparent guards (FR-1b).
 
 mod common;
 
@@ -7,10 +8,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::parked::ParkedStorage;
-use common::{add_blocks, issue, session, session_over};
+use common::{add_blocks, issue, seed_hierarchy, session, session_over, t};
 use unblock_engine::{DeleteMode, DeletePlan, EngineError, IssuePatch};
 use unblock_error::{CodedError, ErrorCode};
-use unblock_model::{Dependency, DependencyType, Priority};
+use unblock_model::{Dependency, DependencyType, IssueType, Priority, Status};
 
 #[tokio::test]
 async fn create_validation_runs_in_engine_as_model_aggregate_not_flattened() {
@@ -434,4 +435,568 @@ async fn defer_excludes_from_ready_then_undefer_restores() {
         .await
         .expect("ready");
     assert_eq!(ready.len(), 1);
+}
+
+// --------------------------------------------------------------------------------------------------
+// FR-1c: Cascade / Hard / Tombstone / DryRun delete through the Session (Gaps 1c, 1d, 2, 7)
+//
+// Per-affected Deleted-event + deleted_by-actor assertions MUST live at the storage layer
+// (unblock_storage/tests/behaviour.rs Gap 1a/1b) because the Session read surface (read.rs) exposes
+// no `list_events` / `list_dependencies` method. The engine layer asserts only what the Session
+// surface exposes: post-state via `get`, the returned DeletePlan.cascade_children, and orphan-edge
+// absence via `dependency_graph(&[])`. (S5 — T1.4 LOCKED spec.)
+//
+// The dotted-id corpus (ub-1, ub-1.1, ub-1.1.1, ub-1.2-Closed, ub-10, ub-2) is built by
+// `common::seed_hierarchy`; reparent tests use a separate flat-id corpus (D-DRIFT-A).
+// --------------------------------------------------------------------------------------------------
+
+/// Gap 1c — Cascade delete through the Session tombstones target + all `{target}.%` descendants.
+///
+/// The Session passes `cascade_children: Vec::new()` to storage; storage resolves internally.
+/// Asserts the returned plan's `cascade_children` is NON-EMPTY (proves the resolver ran), and that
+/// every affected issue has `status == Tombstone` + `deleted_by == Some("tester")` via `get`.
+/// Bounding witnesses `ub-10` (dot-boundary decoy) and `ub-2` (unrelated) remain Open.
+#[tokio::test]
+async fn delete_cascade_through_engine_tombstones_descendants() {
+    let session = session().await;
+    seed_hierarchy(&session).await;
+
+    let plan = DeletePlan {
+        mode: DeleteMode::Cascade,
+        targets: vec!["ub-1".to_string()],
+        cascade_children: Vec::new(),
+    };
+    let resolved = session.delete(&plan).await.expect("cascade delete");
+
+    // The returned plan must list the full blast radius (sorted, non-empty).
+    assert_eq!(resolved.mode, DeleteMode::Cascade);
+    assert_eq!(
+        resolved.cascade_children,
+        vec!["ub-1.1".to_string(), "ub-1.1.1".to_string(), "ub-1.2".to_string()],
+        "cascade_children must be sorted and contain exactly the three dotted-prefix descendants"
+    );
+
+    // All four affected issues (target + three children) are Tombstone with deleted_by set.
+    // NOTE: per-event assertions (Deleted event emitted for non-terminal only) live at
+    // storage (Gap 1a, behaviour.rs) because Session has no list_events (S5).
+    for id in ["ub-1", "ub-1.1", "ub-1.1.1", "ub-1.2"] {
+        let fetched = session.get(id).await.expect("get").expect("must be present as tombstone");
+        assert_eq!(fetched.status, Status::Tombstone, "{id} must be Tombstone after Cascade");
+        assert_eq!(
+            fetched.deleted_by.as_deref(),
+            Some("tester"),
+            "{id} deleted_by must be the session actor"
+        );
+    }
+
+    // Dot-boundary decoy ub-10 and unrelated ub-2 are UNTOUCHED.
+    let decoy = session.get("ub-10").await.expect("get").expect("ub-10 must exist");
+    assert_eq!(decoy.status, Status::Open, "ub-10 (dot-boundary decoy) must be untouched");
+    assert!(decoy.deleted_by.is_none(), "ub-10 must have no deleted_by");
+
+    let unrelated = session.get("ub-2").await.expect("get").expect("ub-2 must exist");
+    assert_eq!(unrelated.status, Status::Open, "ub-2 (unrelated) must be untouched");
+    assert!(unrelated.deleted_by.is_none(), "ub-2 must have no deleted_by");
+}
+
+/// Gap 1d — Hard delete through the Session removes ONLY the target row.
+///
+/// Hard ≠ Cascade: `issues` has NO self-parent FK (schema.rs:34-78), so child issue rows SURVIVE.
+/// (M1 fix — the prior spec-plan.md 1d wording was incorrect; this test proves the correct behaviour.)
+///
+/// `PRAGMA foreign_keys = ON` is verified by `pragmas_readback_in_memory` (mod.rs:702-727) and
+/// `foreign_keys_enforced` (mod.rs:853). The FK CASCADE assertion (own dep/event rows gone) is
+/// exercised at storage (Gap 1b). This test proves the through-engine observable facts only:
+/// target absent, child SURVIVES, no orphan edges in the global graph. (S6 / S5)
+#[tokio::test]
+async fn delete_hard_through_engine_removes_target_only() {
+    let session = session().await;
+    // Minimal corpus: target + the child that MUST survive + an inbound edge for orphan verification.
+    session.create(&issue("ub-1", Priority::MEDIUM, 100)).await.expect("create ub-1");
+    session.create(&issue("ub-1.1", Priority::MEDIUM, 101)).await.expect("create ub-1.1");
+    session.create(&issue("ub-2", Priority::MEDIUM, 102)).await.expect("create ub-2");
+    // Inbound blocker: ub-2 --blocks--> ub-1 (inbound dep, no FK — must be cleaned by Hard delete).
+    add_blocks(&session, "ub-2", "ub-1").await;
+
+    let plan = DeletePlan {
+        mode: DeleteMode::Hard,
+        targets: vec!["ub-1".to_string()],
+        cascade_children: Vec::new(),
+    };
+    let resolved = session.delete(&plan).await.expect("hard delete");
+
+    // Mode is preserved in the returned plan.
+    assert_eq!(resolved.mode, DeleteMode::Hard);
+
+    // Target row is gone (Hard removes it entirely — no tombstone).
+    assert!(
+        session.get("ub-1").await.expect("get").is_none(),
+        "Hard delete must remove the target row entirely"
+    );
+
+    // Hard ≠ Cascade: the child issue row SURVIVES (M1: `issues` has no self-parent FK).
+    assert!(
+        session.get("ub-1.1").await.expect("get").is_some(),
+        "ub-1.1 (child issue row) must SURVIVE a Hard delete — Hard does not cascade issue rows"
+    );
+
+    // No orphan edges: the whole dependency graph has no edge referencing the deleted ub-1.
+    let graph = session.dependency_graph(&[]).await.expect("graph");
+    assert!(
+        !graph.edges.iter().any(|e| e.from == "ub-1" || e.to == "ub-1"),
+        "no edge in the global graph may reference the hard-deleted ub-1"
+    );
+}
+
+/// Gap 2 — Tombstone delete through the Session persists the row but the row is NOT patchable (FR-1c).
+///
+/// The existing `delete_dry_run_mutates_nothing` (writes.rs:257) tests `DryRun` only; this proves
+/// the default Tombstone path: the row persists (status == `Tombstone`), contrasting Hard (row gone).
+///
+/// # DESIGN NOTE — tombstone retention is NOT live-update recovery
+///
+/// `update_issue` (crud.rs:332-334) intentionally rejects any patch on a tombstoned row with
+/// `StorageError::IssueNotFound` — the "original rejects this" design from the classic `bd` system.
+/// So a tombstone is NOT recoverable via the live `update` path: the row is *retained* (not
+/// hard-deleted), enabling future recovery via the dedicated restore command (tracked as a separate
+/// v1 task, T1.7) rather than a live `update`. The tombstoned row IS observable via `get` (the
+/// storage `get_issue` returns tombstones), which is proven here.
+///
+/// What this test proves (matching the actual storage contract):
+/// - Tombstone row persists and is visible via `get` (row retained, not hard-deleted).
+/// - `update(status: Open)` on a tombstone returns `IssueNotFound` by design (storage guard) —
+///   i.e. the row is NOT patchable; recovery is the dedicated restore command (T1.7), not `update`.
+/// - Contrast: Hard delete → `get` returns `None` (row gone entirely).
+#[tokio::test]
+async fn delete_tombstone_through_engine_persists_row_and_is_not_patchable() {
+    let session = session().await;
+    session
+        .create(&issue("ub-0001", Priority::MEDIUM, 1000))
+        .await
+        .expect("create");
+
+    let plan = DeletePlan {
+        mode: DeleteMode::Tombstone,
+        targets: vec!["ub-0001".to_string()],
+        cascade_children: Vec::new(),
+    };
+    let resolved = session.delete(&plan).await.expect("tombstone delete");
+    assert_eq!(resolved.mode, DeleteMode::Tombstone);
+
+    // Row persists as a tombstone with actor propagation — this is the retained-on-soft-delete invariant (the recovery PATH itself is T1.7).
+    // The row is retained (contrast Hard where get returns None), enabling future recovery.
+    let tombstoned = session
+        .get("ub-0001")
+        .await
+        .expect("get")
+        .expect("tombstoned row must still be present via get (row retained, not hard-deleted)");
+    assert_eq!(tombstoned.status, Status::Tombstone, "status must be Tombstone");
+    assert!(
+        tombstoned.original_type.is_some(),
+        "original_type must be preserved on Tombstone"
+    );
+    assert_eq!(
+        tombstoned.deleted_by.as_deref(),
+        Some("tester"),
+        "deleted_by must be the session actor"
+    );
+
+    // The storage guard: update_issue intentionally rejects patches on tombstoned rows
+    // (crud.rs:332-334, "A tombstone cannot be patched"). The row is retained but not patchable
+    // via the live update path — recovery is the dedicated restore command (T1.7 — Session::restore), not this live-update path.
+    let patch = IssuePatch {
+        status: Some(Status::Open),
+        ..IssuePatch::default()
+    };
+    let recover_err = session
+        .update("ub-0001", &patch)
+        .await
+        .expect_err("update on tombstone must be rejected by storage (crud.rs:332-334)");
+    assert_eq!(
+        recover_err.code(),
+        ErrorCode::IssueNotFound,
+        "tombstone update must surface IssueNotFound (the storage guard returns IssueNotFound for tombstones)"
+    );
+}
+
+/// Gap 7 — `DryRun` over the hierarchical corpus reports the full blast-radius plan (FR-1c, M3).
+///
+/// The existing `delete_dry_run_mutates_nothing` (writes.rs:257) asserts only `mode==DryRun` +
+/// nothing-mutated; it uses a flat single-issue corpus that leaves `cascade_children` empty.
+/// This test proves the PLAN half: over the dotted-id hierarchy, `DryRun` must return a NON-EMPTY
+/// `cascade_children == ["ub-1.1","ub-1.1.1","ub-1.2"]` AND leave every issue in its original state.
+#[tokio::test]
+async fn delete_dry_run_reports_plan_over_hierarchy() {
+    let session = session().await;
+    seed_hierarchy(&session).await;
+
+    let plan = DeletePlan {
+        mode: DeleteMode::DryRun,
+        targets: vec!["ub-1".to_string()],
+        cascade_children: Vec::new(),
+    };
+    let resolved = session.delete(&plan).await.expect("dry-run");
+
+    // Mode is preserved.
+    assert_eq!(resolved.mode, DeleteMode::DryRun);
+
+    // The returned plan reports the full blast radius (NON-EMPTY — this is what was missing before).
+    assert_eq!(
+        resolved.cascade_children,
+        vec!["ub-1.1".to_string(), "ub-1.1.1".to_string(), "ub-1.2".to_string()],
+        "DryRun must report the full cascade_children plan (non-empty) over the hierarchy"
+    );
+
+    // Nothing mutated: every issue is in its original state.
+    let target = session.get("ub-1").await.expect("get").expect("ub-1 must exist");
+    assert_eq!(target.status, Status::Open, "DryRun must not tombstone the target");
+
+    let child = session.get("ub-1.1").await.expect("get").expect("ub-1.1 must exist");
+    assert_eq!(child.status, Status::Open, "DryRun must not affect ub-1.1");
+
+    let grandchild = session.get("ub-1.1.1").await.expect("get").expect("ub-1.1.1 must exist");
+    assert_eq!(grandchild.status, Status::Open, "DryRun must not affect ub-1.1.1");
+
+    // ub-1.2 was Closed (terminal) when seeded; DryRun must leave it Closed (not tombstoned).
+    let closed_child = session.get("ub-1.2").await.expect("get").expect("ub-1.2 must exist");
+    assert_eq!(closed_child.status, Status::Closed, "DryRun must not affect ub-1.2 (Closed)");
+
+    // Bounding witnesses are also untouched.
+    let decoy = session.get("ub-10").await.expect("get").expect("ub-10 must exist");
+    assert_eq!(decoy.status, Status::Open, "DryRun must not affect ub-10 (decoy)");
+
+    let unrelated = session.get("ub-2").await.expect("get").expect("ub-2 must exist");
+    assert_eq!(unrelated.status, Status::Open, "DryRun must not affect ub-2 (unrelated)");
+}
+
+// --------------------------------------------------------------------------------------------------
+// FR-1b: Reparent cycle/self guard + updated_at advance + no-op (Gaps 3a, 3b, 5a, 5b)
+//
+// Reparent uses the PATCH path (Session::update with parent field), NOT add_dep — this is the
+// never-run branch in apply_reparent (crud.rs:625-668) that the existing `reparent_cycle_is_rejected`
+// (writes.rs:278) does NOT exercise (it uses add_dep directly). These tests prove the PATCH path.
+// --------------------------------------------------------------------------------------------------
+
+/// Gap 3a — Reparent-via-patch: closing a cycle is rejected with `CycleDetected` (exit 5).
+///
+/// Build edge ub-b -> ub-a via `update{parent: Some(Some("ub-a"))}`, then attempt to close the
+/// cycle `ub-a -> ub-b -> ub-a` via `update("ub-a", {parent: Some(Some("ub-b"))})`.
+/// The second update must fail with `CycleDetected` (exit 5) and leave the DB unchanged: the original
+/// ub-b->ub-a edge survives (transaction rolled back), and ub-a has no new parent-child edge.
+///
+/// This exercises the PATCH path through `apply_reparent`/`would_cycle_in_tx` (crud.rs:650-668),
+/// distinct from the `add_dep` path tested by the existing `reparent_cycle_is_rejected` (line 278).
+#[tokio::test]
+async fn reparent_via_patch_cycle_is_rejected() {
+    let session = session().await;
+    session.create(&issue("ub-a", Priority::MEDIUM, 1000)).await.expect("create ub-a");
+    session.create(&issue("ub-b", Priority::MEDIUM, 1001)).await.expect("create ub-b");
+
+    // First reparent: ub-b -> ub-a (parent-child edge). This must succeed.
+    let patch_b_to_a = IssuePatch {
+        parent: Some(Some("ub-a".to_string())),
+        ..IssuePatch::default()
+    };
+    session
+        .update("ub-b", &patch_b_to_a)
+        .await
+        .expect("first reparent ub-b -> ub-a must succeed");
+
+    // Second reparent: ub-a -> ub-b would close a->b->a cycle. Must fail.
+    let patch_a_to_b = IssuePatch {
+        parent: Some(Some("ub-b".to_string())),
+        ..IssuePatch::default()
+    };
+    let err = session
+        .update("ub-a", &patch_a_to_b)
+        .await
+        .expect_err("cycle-closing reparent must be rejected");
+
+    assert_eq!(
+        err.code(),
+        ErrorCode::CycleDetected,
+        "must surface CycleDetected, got {err:?}"
+    );
+    assert_eq!(
+        err.code().exit_code(),
+        5,
+        "CycleDetected must map to exit code 5"
+    );
+
+    // DB unchanged: the original ub-b->ub-a edge SURVIVES (the cyclic tx was rolled back).
+    // Verify via the whole dependency graph — no parent-child edge FROM ub-a should exist,
+    // and the ub-b->ub-a parent-child edge should still be present.
+    let graph = session.dependency_graph(&[]).await.expect("graph");
+    let has_a_to_b = graph
+        .edges
+        .iter()
+        .any(|e| e.from == "ub-a" && e.to == "ub-b");
+    assert!(
+        !has_a_to_b,
+        "the cyclic ub-a->ub-b edge must NOT be present (tx was rolled back)"
+    );
+    // The original ub-b->ub-a parent-child edge survives.
+    let has_b_to_a = graph
+        .edges
+        .iter()
+        .any(|e| e.from == "ub-b" && e.to == "ub-a");
+    assert!(
+        has_b_to_a,
+        "the original ub-b->ub-a parent-child edge must survive the failed cyclic reparent"
+    );
+}
+
+/// Gap 3b — Self-reparent via patch is rejected with `SelfDependency` (exit 5).
+///
+/// `apply_reparent` (crud.rs:650-651) returns `SelfDependency` BEFORE the cycle check when
+/// `child_id == parent_id`. This branch is never-run; this test exercises it for the first time.
+#[tokio::test]
+async fn self_reparent_via_patch_is_rejected() {
+    let session = session().await;
+    session.create(&issue("ub-a", Priority::MEDIUM, 1000)).await.expect("create ub-a");
+
+    let patch = IssuePatch {
+        parent: Some(Some("ub-a".to_string())),
+        ..IssuePatch::default()
+    };
+    let err = session
+        .update("ub-a", &patch)
+        .await
+        .expect_err("self-reparent must be rejected");
+
+    assert_eq!(
+        err.code(),
+        ErrorCode::SelfDependency,
+        "must surface SelfDependency, got {err:?}"
+    );
+    assert_eq!(
+        err.code().exit_code(),
+        5,
+        "SelfDependency must map to exit code 5"
+    );
+}
+
+/// Gap 5a — `update` advances `updated_at` through the engine (FR-1b).
+///
+/// The engine `issue()` helper pins `created_at = updated_at = t(secs)`, a frozen past instant
+/// (~1970). `update_issue` stamps `Utc::now()` — so strict `>` is safe here (S7: the frozen-past
+/// `created_at` means `Utc::now()` is always later, making `>` sound, not a time-fragile flake).
+/// The test also confirms the advance is persisted: a fresh `get` shows the new title AND the
+/// advanced timestamp (not just the returned value).
+#[tokio::test]
+async fn update_advances_updated_at_through_engine() {
+    let session = session().await;
+    // `issue()` sets created_at = updated_at = t(1000) ≈ 1970-01-01T00:16:40Z (frozen past).
+    session
+        .create(&issue("ub-0001", Priority::MEDIUM, 1000))
+        .await
+        .expect("create");
+
+    let created_at = session
+        .get("ub-0001")
+        .await
+        .expect("get")
+        .expect("present")
+        .created_at;
+
+    let patch = IssuePatch {
+        title: Some("renamed".to_string()),
+        ..IssuePatch::default()
+    };
+    let returned = session.update("ub-0001", &patch).await.expect("update");
+
+    // Strict `>`: created_at is frozen to the past (t(1000) ≈ 1970), Utc::now() is always later.
+    assert!(
+        returned.updated_at > created_at,
+        "update must advance updated_at (returned): {:?} must be > {:?}",
+        returned.updated_at,
+        created_at
+    );
+    assert_eq!(returned.title, "renamed", "returned value must carry the new title");
+
+    // Confirm the advance is persisted (not just a returned-value artifact).
+    let persisted = session.get("ub-0001").await.expect("get").expect("present");
+    assert!(
+        persisted.updated_at > created_at,
+        "update must advance updated_at (persisted): {:?} must be > {:?}",
+        persisted.updated_at,
+        created_at
+    );
+    assert_eq!(persisted.title, "renamed", "persisted title must match");
+}
+
+/// Gap 5b — No-op update leaves `updated_at` unchanged through the engine (FR-1b).
+///
+/// The no-EVENT half (storage writes no event on a no-op patch) is discharged at storage layer
+/// (`noop_update_writes_no_event_and_leaves_updated_at`, behaviour.rs:100) — the Session read
+/// surface has no `list_events`. This test covers only the through-engine timestamp half: a
+/// `IssuePatch::default()` patch must leave `updated_at` identical to `created_at` (S8).
+#[tokio::test]
+async fn noop_update_is_detectable_through_engine() {
+    let session = session().await;
+    session
+        .create(&issue("ub-0001", Priority::MEDIUM, 1000))
+        .await
+        .expect("create");
+
+    let before = session
+        .get("ub-0001")
+        .await
+        .expect("get")
+        .expect("present")
+        .updated_at;
+
+    // A fully-default patch (no field set) must be a no-op at storage.
+    session
+        .update("ub-0001", &IssuePatch::default())
+        .await
+        .expect("no-op update");
+
+    let after = session
+        .get("ub-0001")
+        .await
+        .expect("get")
+        .expect("present")
+        .updated_at;
+
+    // The no-EVENT guarantee lives at storage (behaviour.rs:100, `noop_update_writes_no_event_and_
+    // leaves_updated_at`); the Session has no list_events to assert here. We assert the timestamp
+    // half only (S8).
+    assert_eq!(
+        after, before,
+        "no-op update (IssuePatch::default) must not advance updated_at"
+    );
+}
+
+/// Gap 6 — Max-populated create round-trips through the engine (FR-1a, S2-pruned, optional).
+///
+/// Asserts every genuine `IssueInput::Create`-equivalent field on the `Issue` struct
+/// (spine §5.2:942-957) round-trips through `create` → `get` with field-for-field equality —
+/// INCLUDING the two relation fields a Create carries: `parent` (a `parent-child` dependency edge)
+/// and `deps` (a `blocks` edge to a pre-created sibling). The relations round-trip via the hydrated
+/// `Issue.dependencies` on `get` AND via `dependency_graph`.
+///
+/// S2 pruning: `comments` are a separate action (not a Create field); `content_hash` is derived
+/// and excluded from the round-trip claim (it is `#[serde(skip)]` and recomputed on load).
+/// `content_hash` derived sanity: `got.compute_content_hash() == got.compute_content_hash()` (deterministic).
+///
+/// NOTE on `slug`/`external_ref`: these are two DISTINCT fields, not interchangeable. `external_ref`
+/// is the issue's own column (an external system reference, e.g. `gh-12345`); a `slug` is a separate
+/// id-formatting convention baked into the `id` string at allocation time — it is NOT carried by
+/// `external_ref`. This test round-trips `external_ref` as its own field and makes no slug claim.
+#[tokio::test]
+async fn create_max_populated_round_trips_through_engine() {
+    let session = session().await;
+
+    // Pre-create a sibling (dep target) and a parent (parent-child edge target).
+    session
+        .create(&issue("ub-sibling", Priority::MEDIUM, 900))
+        .await
+        .expect("create sibling");
+    session
+        .create(&issue("ub-parent", Priority::MEDIUM, 901))
+        .await
+        .expect("create parent");
+
+    // The two relations a Create carries: a parent (parent-child edge) + a dep (blocks the sibling).
+    let edge = |to: &str, dep_type| Dependency {
+        issue_id: "ub-full".to_string(),
+        depends_on_id: to.to_string(),
+        dep_type,
+        created_at: t(1000),
+        created_by: Some("external-author".to_string()),
+        metadata: None,
+        thread_id: None,
+    };
+
+    // Build a maximally-populated issue with every genuine Create field (incl. parent + deps).
+    let full = unblock_model::Issue {
+        id: "ub-full".to_string(),
+        title: "full-create round-trip".to_string(),
+        description: Some("detailed description".to_string()),
+        design: Some("technical design notes".to_string()),
+        acceptance_criteria: Some("acceptance criteria".to_string()),
+        notes: Some("additional notes".to_string()),
+        issue_type: IssueType::Bug,
+        priority: Priority::HIGH,
+        labels: vec!["alpha".to_string(), "beta".to_string()],
+        due_at: Some(t(9_999_999)),
+        defer_until: Some(t(8_888_888)),
+        estimated_minutes: Some(120),
+        ephemeral: true,
+        // `attribution` maps to `created_by` in the Issue struct.
+        created_by: Some("external-author".to_string()),
+        // `external_ref` is the issue's own external-system reference column (distinct from a slug).
+        external_ref: Some("gh-12345".to_string()),
+        // parent + deps: the relation half of a Create (parent-child edge + a blocks edge).
+        dependencies: vec![
+            edge("ub-parent", DependencyType::ParentChild),
+            edge("ub-sibling", DependencyType::Blocks),
+        ],
+        created_at: t(1000),
+        updated_at: t(1000),
+        ..unblock_model::Issue::default()
+    };
+
+    let id = session.create(&full).await.expect("create full issue");
+    assert_eq!(id, "ub-full");
+
+    let got = session.get("ub-full").await.expect("get").expect("must exist");
+
+    // Field-for-field equality for all genuine scalar/text Create fields.
+    assert_eq!(got.title, full.title);
+    assert_eq!(got.description, full.description);
+    assert_eq!(got.design, full.design);
+    assert_eq!(got.acceptance_criteria, full.acceptance_criteria);
+    assert_eq!(got.notes, full.notes);
+    assert_eq!(got.issue_type, full.issue_type);
+    assert_eq!(got.priority, full.priority);
+    assert_eq!(got.due_at, full.due_at);
+    assert_eq!(got.defer_until, full.defer_until);
+    assert_eq!(got.estimated_minutes, full.estimated_minutes);
+    assert_eq!(got.ephemeral, full.ephemeral);
+    assert_eq!(got.created_by, full.created_by);
+    assert_eq!(got.external_ref, full.external_ref);
+    // Labels round-trip as a sorted set (storage may normalise order).
+    let mut got_labels = got.labels.clone();
+    got_labels.sort();
+    let mut expected_labels = full.labels.clone();
+    expected_labels.sort();
+    assert_eq!(got_labels, expected_labels, "labels must round-trip");
+
+    // parent + deps round-trip via the hydrated `Issue.dependencies` on `get` AND `dependency_graph`.
+    let graph = session.dependency_graph(&[]).await.expect("graph");
+    assert_edge_round_trips(&got, &graph, "ub-parent", &DependencyType::ParentChild);
+    assert_edge_round_trips(&got, &graph, "ub-sibling", &DependencyType::Blocks);
+
+    // Derived sanity: content_hash is deterministic (not an option field — excluded from claim).
+    let h1 = got.compute_content_hash();
+    let h2 = got.compute_content_hash();
+    assert_eq!(h1, h2, "content_hash must be deterministic");
+    assert_eq!(h1.len(), 64, "content_hash must be 64 hex chars");
+}
+
+/// Assert the edge `got.id --dep_type--> to` round-trips both via the hydrated `got.dependencies`
+/// and via the whole-graph `dependency_graph(&[])` snapshot.
+fn assert_edge_round_trips(
+    got: &unblock_model::Issue,
+    graph: &unblock_model::DepTree,
+    to: &str,
+    dep_type: &DependencyType,
+) {
+    assert!(
+        got.dependencies
+            .iter()
+            .any(|d| d.depends_on_id == to && &d.dep_type == dep_type),
+        "edge {} --{dep_type:?}--> {to} must round-trip via get",
+        got.id
+    );
+    assert!(
+        graph
+            .edges
+            .iter()
+            .any(|e| e.from == got.id && e.to == to && &e.dep_type == dep_type),
+        "edge {} --{dep_type:?}--> {to} must be in the dependency graph",
+        got.id
+    );
 }
