@@ -34,6 +34,11 @@ impl Default for TracingOptions {
 /// level and returns quietly if one is already set (so a binary that wired its own subscriber, or a
 /// repeated call in tests, never panics or errors). Diagnostics go to stderr (NFR-14); structured
 /// output to stdout is the renderer's concern, not this helper's.
+///
+/// Exposing a subscriber-install helper from a **library** is intentional-but-best-effort: it is
+/// opt-in (a caller must call it), idempotent, and override-safe (`try_init` no-ops when a global
+/// subscriber already exists), so it never hijacks process state the way a global OS signal handler
+/// would (contrast the cli-owned shutdown handler, OQ-4). The cli's install is the canonical one.
 pub fn init_tracing(opts: TracingOptions) {
     use tracing_subscriber::EnvFilter;
 

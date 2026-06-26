@@ -1,0 +1,11 @@
+---
+source: crates/unblock-engine/tests/reads.rs
+expression: "lines.join(\"\\n\")"
+---
+Stats: [status:closed=1, status:open=1, total=2]
+Info: [actor=tester, workspace_dir=<redacted>, issues=2]
+Where: [unblock_dir=<redacted>, db_path=<redacted>, jsonl_path=<redacted>]
+Version: [version=<redacted>]
+Lint: [blocked=0]
+Changelog: [ub-done=issue ub-done]
+Orphans: []
