@@ -482,15 +482,20 @@ pub(super) async fn update_issue(
         let label_changed = apply_labels(&tx, &id_owned, &actor, &patch, &mut issue).await?;
 
         // --- reparent (cycle-checked) ---
-        let parent_changed = apply_reparent(&tx, &id_owned, &patch).await?;
+        // A real reparent emits DependencyRemoved/DependencyAdded into `events` and advances
+        // `updated_at` (FR-1b) even when no row column otherwise changed.
+        let parent_changed = apply_reparent(&tx, &id_owned, &patch, &actor, &mut events).await?;
 
         // Empty diff: nothing in the row, no relation change -> full skip (no updated_at, no event).
         if builder.is_empty() && !label_changed && !parent_changed {
             return Ok((issue, tx));
         }
 
-        // A row column changed -> advance updated_at + recompute content_hash.
-        if !builder.is_empty() {
+        // A row column changed OR a real reparent occurred -> advance updated_at. A reparent with no
+        // other row change still stamps `updated_at` so the modification is observable (FR-1b).
+        // `content_hash` excludes `updated_at` + relations (spine §1.8), so the recompute on a
+        // pure-reparent change is a no-op against the stored hash (parent/deps are not hashed).
+        if !builder.is_empty() || parent_changed {
             let now = Utc::now();
             issue.updated_at = now;
             builder.push("updated_at", Value::Text(now.to_rfc3339()));
@@ -619,14 +624,27 @@ async fn apply_labels(
     Ok(true)
 }
 
-/// Apply a reparent (`parent`): set/clear the `parent-child` dependency edge, cycle-checked. Returns
-/// whether the parent **changed** — a reparent to the issue's current parent (or a detach when there
-/// is no parent edge) is a no-op (returns `false`, so it does not, on its own, advance `updated_at`).
+/// Apply a reparent (`parent`): set/clear the `parent-child` dependency edge, cycle-checked.
+///
+/// A reparent is a genuine modification of the issue (FR-1b): on a **real** parent change it
+/// advances `updated_at` (the caller stamps the row) and emits the same dependency audit events as
+/// [`add_dependency`]/[`remove_dependency`] (`DependencyRemoved` for the dropped old parent edge,
+/// `DependencyAdded` for the new parent edge), threading the real `actor` through. The events are
+/// pushed into the caller's `events` vec so they commit transactionally in the single
+/// `append_event_in_tx` loop after the row update.
+///
+/// Returns whether the parent **changed** — a reparent to the issue's current parent (or a detach
+/// when there is no parent edge) is a no-op (returns `false`, pushes NO event, and so does not, on
+/// its own, advance `updated_at`).
 async fn apply_reparent(
     tx: &libsql::Transaction,
     id: &str,
     patch: &crate::filters::IssuePatch,
+    actor: &str,
+    events: &mut Vec<(unblock_model::EventType, Option<String>, Option<String>)>,
 ) -> Result<bool, StorageError> {
+    use unblock_model::EventType;
+
     let Some(parent) = patch.parent.clone() else {
         return Ok(false);
     };
@@ -646,6 +664,12 @@ async fn apply_reparent(
     .await
     .map_err(map_libsql_err)?;
 
+    // Old parent edge dropped -> DependencyRemoved (old parent in `old_value`, mirroring
+    // `remove_dependency`).
+    if let Some(old_parent) = current_parent {
+        events.push((EventType::DependencyRemoved, Some(old_parent), None));
+    }
+
     if let Some(parent_id) = parent {
         if parent_id == id {
             return Err(StorageError::SelfDependency);
@@ -658,11 +682,14 @@ async fn apply_reparent(
         }
         tx.execute(
             "INSERT INTO dependencies (issue_id, depends_on_id, type, created_at, created_by) \
-             VALUES (?1, ?2, 'parent-child', ?3, '')",
-            libsql::params![id, parent_id.as_str(), Utc::now().to_rfc3339()],
+             VALUES (?1, ?2, 'parent-child', ?3, ?4)",
+            libsql::params![id, parent_id.as_str(), Utc::now().to_rfc3339(), actor],
         )
         .await
         .map_err(map_libsql_err)?;
+        // New parent edge set -> DependencyAdded (new parent in `new_value`, mirroring
+        // `add_dependency`).
+        events.push((EventType::DependencyAdded, None, Some(parent_id)));
     }
     Ok(true)
 }
