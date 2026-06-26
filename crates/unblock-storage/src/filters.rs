@@ -83,6 +83,10 @@ pub struct IssuePatch {
     pub external_ref: Option<Option<String>>,
     /// Assigned actor (nullable text).
     pub assignee: Option<Option<String>>,
+    /// Close reason (nullable text, persisted to the `close_reason` column). `Some(None)` clears it
+    /// to the column default `''`; `Some(Some(s))` sets it. The engine's `close_with_suggestions`
+    /// sets it alongside `status = Closed` (spine §3.1/§4.1, T1.2).
+    pub close_reason: Option<Option<String>>,
 
     /// Workflow status (scalar; plain `Option`).
     pub status: Option<Status>,
