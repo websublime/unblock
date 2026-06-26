@@ -1,0 +1,41 @@
+---
+source: crates/unblock-config/src/error.rs
+expression: table
+---
+[
+  [
+    "WorkspaceNotFound",
+    "NOT_INITIALIZED",
+    2
+  ],
+  [
+    "DbOpenFailed",
+    "DATABASE_ERROR",
+    2
+  ],
+  [
+    "MigrationFailed",
+    "SCHEMA_MISMATCH",
+    2
+  ],
+  [
+    "ActorUnresolved",
+    "REQUIRED_FIELD",
+    4
+  ],
+  [
+    "Parse",
+    "CONFIG_PARSE_ERROR",
+    7
+  ],
+  [
+    "Io",
+    "IO_ERROR",
+    8
+  ],
+  [
+    "InvalidValue",
+    "CONFIG_ERROR",
+    7
+  ]
+]

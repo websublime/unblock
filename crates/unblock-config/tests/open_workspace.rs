@@ -5,7 +5,10 @@
 use std::fs;
 
 use chrono::{TimeZone, Utc};
-use unblock_config::{ConfigError, open_with_storage, open_workspace};
+use unblock_config::{
+    CliOverrides, ConfigError, open_with_storage, open_with_storage_with_cli, open_workspace,
+    open_workspace_with_cli,
+};
 use unblock_error::{CodedError, ErrorCode};
 use unblock_model::Issue;
 
@@ -34,20 +37,20 @@ async fn open_workspace_resolves_paths_without_creating_the_db() {
 
     let ctx = open_workspace(workspace.path()).await.expect("resolve");
 
-    // workspace_dir is the project root that CONTAINS `.unblock/`.
-    assert_eq!(
-        ctx.workspace_dir.canonicalize().expect("canon ws"),
-        workspace.path().canonicalize().expect("canon tmp")
-    );
-    // paths are derived from the discovered workspace + defaulted filenames.
-    assert_eq!(ctx.paths.unblock_dir, workspace.path().join(".unblock"));
+    // workspace_dir is the project root that CONTAINS `.unblock/`. The discovered dir is now
+    // CANONICALIZED (FORK-3/Seam C), so compare against the canonicalized tempdir (macOS maps
+    // /var -> /private/var). workspace_dir is the parent of the canonicalized `.unblock`.
+    let canon_ws = workspace.path().canonicalize().expect("canon tmp");
+    assert_eq!(ctx.workspace_dir, canon_ws);
+    // paths derive from the canonicalized discovered unblock_dir + defaulted filenames.
+    assert_eq!(ctx.paths.unblock_dir, canon_ws.join(".unblock"));
     assert_eq!(
         ctx.paths.db_path,
-        workspace.path().join(".unblock").join("unblock.db")
+        canon_ws.join(".unblock").join("unblock.db")
     );
     assert_eq!(
         ctx.paths.jsonl_path,
-        workspace.path().join(".unblock").join("issues.jsonl")
+        canon_ws.join(".unblock").join("issues.jsonl")
     );
     // resolve-only MUST NOT open or create the database file.
     assert!(
@@ -204,4 +207,57 @@ async fn open_with_storage_reopen_is_idempotent_and_preserves_data() {
         problems.is_empty(),
         "reopened db must be healthy: {problems:?}"
     );
+}
+
+#[tokio::test]
+async fn open_workspace_with_cli_explicit_dir_resolves_without_db() {
+    // FORK-1 overload: the explicit `--dir` points straight at the workspace (no walk-up, MF-2).
+    let workspace = fresh_workspace();
+    let cli = CliOverrides::new().with_dir(workspace.path());
+
+    let ctx = open_workspace_with_cli(&cli)
+        .await
+        .expect("resolve via cli");
+
+    let canon_ws = workspace.path().canonicalize().expect("canon");
+    assert_eq!(ctx.paths.unblock_dir, canon_ws.join(".unblock"));
+    assert!(
+        !ctx.paths.db_path.exists(),
+        "resolve-only must not create the db"
+    );
+}
+
+#[tokio::test]
+async fn open_with_storage_with_cli_threads_actor_override() {
+    // FORK-4: the `--actor` override is the authoritative actor in the resulting context.
+    let workspace = fresh_workspace();
+    let cli = CliOverrides::new()
+        .with_dir(workspace.path())
+        .with_actor("alice-cli");
+
+    let ctx = open_with_storage_with_cli(&cli)
+        .await
+        .expect("open via cli");
+    assert_eq!(ctx.actor, "alice-cli");
+    assert!(ctx.paths.db_path.exists(), "open_local must create the db");
+}
+
+#[tokio::test]
+async fn open_with_storage_with_cli_rejects_over_long_actor() {
+    let workspace = fresh_workspace();
+    let cli = CliOverrides::new()
+        .with_dir(workspace.path())
+        .with_actor("x".repeat(201));
+
+    match open_with_storage_with_cli(&cli).await {
+        Ok(_) => panic!("must reject an over-long actor"),
+        Err(err) => {
+            assert!(
+                matches!(err, ConfigError::InvalidValue { .. }),
+                "expected InvalidValue, got {err:?}"
+            );
+            assert_eq!(err.code(), ErrorCode::ConfigError);
+            assert_eq!(err.code().exit_code(), 7);
+        }
+    }
 }

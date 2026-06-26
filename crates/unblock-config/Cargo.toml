@@ -30,6 +30,9 @@ snafu = { workspace = true }
 tracing = { workspace = true }
 # The workspace-open facades are `async fn` (open/migrate libsql); the trait is async throughout.
 tokio = { workspace = true }
+# Symlinked-workspace canonicalization (Seam C, FORK-3): resolves symlinks without Windows `\\?\`
+# verbatim prefixes so the confinement `starts_with` check stays platform-stable (NFR-11/NFR-18).
+dunce = { workspace = true }
 
 [dev-dependencies]
 # Temp `.unblock/` workspaces + file-backed libsql DBs for the discovery / open-facade tests.
@@ -38,3 +41,8 @@ tempfile = { workspace = true }
 tokio = { workspace = true }
 # Timestamps for the `Issue` built in the open-with-storage round-trip test.
 chrono = { workspace = true }
+# Property tests for the precedence engine / schema round-trip / keys exhaustiveness (T1.3).
+proptest = { workspace = true }
+# Golden snapshots: error (variant->code->exit) table, default WorkspaceConfig, ConfigPaths fixture,
+# startup/runtime key lists (T1.3).
+insta = { workspace = true }

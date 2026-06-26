@@ -1,0 +1,14 @@
+---
+source: crates/unblock-config/src/config.rs
+expression: wc
+---
+WorkspaceConfig {
+    actor: "unblock",
+    output_format: Json,
+    jsonl_export: false,
+    search_cap: 50,
+    db_filename: "unblock.db",
+    jsonl_filename: "issues.jsonl",
+    deletions_retention_days: None,
+    backend: None,
+}

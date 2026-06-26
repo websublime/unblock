@@ -29,7 +29,9 @@
 //!     std::fs::create_dir(workspace.path().join(".unblock")).unwrap();
 //!
 //!     let ctx = open_workspace(workspace.path()).await.expect("resolve");
-//!     assert_eq!(ctx.paths.unblock_dir, workspace.path().join(".unblock"));
+//!     // The discovered dir is canonicalized (FORK-3), so compare against the canonical tempdir.
+//!     let canon = workspace.path().canonicalize().unwrap();
+//!     assert_eq!(ctx.paths.unblock_dir, canon.join(".unblock"));
 //!     // resolve-only never opens or creates the database file:
 //!     assert!(!ctx.paths.db_path.exists());
 //! });
@@ -39,16 +41,29 @@
 #![warn(missing_docs)]
 
 mod actor;
+mod cli;
 mod config;
 mod context;
 mod discovery;
+mod env;
 mod error;
+pub mod keys;
+mod merge;
 mod paths;
+mod schema;
 
-pub use config::ResolvedConfig;
-pub use context::{ResolvedContext, WorkspaceContext, open_with_storage, open_workspace};
+pub use cli::CliOverrides;
+pub use config::{ResolvedConfig, WorkspaceConfig};
+pub use context::{
+    ResolvedContext, WorkspaceContext, open_with_storage, open_with_storage_with_cli,
+    open_workspace, open_workspace_with_cli,
+};
+pub use discovery::{discover_optional_unblock_dir, discover_unblock_dir};
+pub use env::{EnvOverrides, EnvSource};
 pub use error::ConfigError;
+pub use keys::{KeyClass, RUNTIME_KEYS, RuntimeKey, STARTUP_KEYS, StartupKey, classify};
 pub use paths::ConfigPaths;
+pub use schema::{ProjectConfig, RemoteTable};
 
 // `OutputFormat` is owned once in `unblock-model` (G-7/CF-J) and re-exported here so consumers of
 // `ResolvedConfig.output_format` reach it through config without a second definition.

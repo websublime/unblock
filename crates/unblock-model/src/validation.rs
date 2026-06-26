@@ -44,6 +44,40 @@ pub const EXTERNAL_REF_MAX_CHARS: usize = 200;
 /// [`EXTERNAL_REF_MAX_CHARS`]: a repair pass clamps to the validator's bound, not a copy of it.
 pub const LABEL_MAX_LEN: usize = 50;
 
+/// Bound a **resolved** actor string (single-home actor validation — Seam A, spine §1.9).
+///
+/// The model owns this rule once; `unblock-config` is its v1 caller (CLI/MCP become later callers),
+/// so the bound lives in exactly one place. An actor is valid iff it is at most
+/// [`ACTOR_MAX_CHARS`] **`char`s** long (counted with [`str::chars`], NOT UTF-8 bytes), contains no
+/// NUL, and contains no other control character ([`char::is_control`]).
+///
+/// The caller is expected to have already treated empty/whitespace as "unset" (the resolved actor
+/// reaching here is the non-empty value chosen by the precedence chain); this function does not
+/// trim or reject emptiness — it only enforces the upper bound and the control-char rule.
+///
+/// # Errors
+///
+/// Returns a [`FieldError`] (`field: "actor"`) when the actor exceeds [`ACTOR_MAX_CHARS`] `char`s,
+/// contains a NUL byte, or contains any other control character.
+pub fn validate_actor(actor: &str) -> Result<(), FieldError> {
+    if actor.chars().count() > ACTOR_MAX_CHARS {
+        return Err(FieldError::new(
+            "actor",
+            format!("exceeds {ACTOR_MAX_CHARS} characters"),
+        ));
+    }
+    if actor.contains('\0') {
+        return Err(FieldError::new("actor", "cannot contain NUL bytes"));
+    }
+    if actor.chars().any(char::is_control) {
+        return Err(FieldError::new(
+            "actor",
+            "cannot contain control characters",
+        ));
+    }
+    Ok(())
+}
+
 /// Validates issue fields and invariants (spine §1.9). Pure; no I/O.
 pub struct IssueValidator;
 
@@ -292,7 +326,7 @@ impl LabelValidator {
 
 #[cfg(test)]
 mod tests {
-    use super::{IssueValidator, LabelValidator};
+    use super::{ACTOR_MAX_CHARS, IssueValidator, LabelValidator, validate_actor};
     use crate::enums::{IssueType, Priority, Status};
     use crate::issue::Issue;
     use chrono::{TimeZone, Utc};
@@ -489,5 +523,42 @@ mod tests {
         assert!(LabelValidator::validate("bad label").is_err());
         assert!(LabelValidator::validate("has/slash").is_err());
         assert!(LabelValidator::validate("").is_err());
+    }
+
+    #[test]
+    fn validate_actor_accepts_ascii_and_boundary_length() {
+        assert!(validate_actor("alice").is_ok());
+        // Exactly ACTOR_MAX_CHARS (200) chars passes (char-counted boundary).
+        assert!(validate_actor(&"a".repeat(ACTOR_MAX_CHARS)).is_ok());
+        // A 200-char multibyte actor passes (counted in chars, not bytes).
+        assert!(validate_actor(&"\u{1f980}".repeat(ACTOR_MAX_CHARS)).is_ok());
+    }
+
+    #[test]
+    fn validate_actor_rejects_over_length_char_counted() {
+        // 201 ASCII chars fails.
+        let err = validate_actor(&"a".repeat(ACTOR_MAX_CHARS + 1)).expect_err("over length");
+        assert_eq!(err.field, "actor");
+        // 201 multibyte chars (well over 200 BYTES) fails — proving the bound is char-counted, not
+        // byte-counted (200 multibyte chars passed above).
+        let err =
+            validate_actor(&"\u{1f980}".repeat(ACTOR_MAX_CHARS + 1)).expect_err("over length mb");
+        assert_eq!(err.field, "actor");
+    }
+
+    #[test]
+    fn validate_actor_rejects_nul() {
+        let err = validate_actor("ali\0ce").expect_err("nul rejected");
+        assert_eq!(err.field, "actor");
+        assert_eq!(err.reason, "cannot contain NUL bytes");
+    }
+
+    #[test]
+    fn validate_actor_rejects_other_control_chars() {
+        for ctrl in ["a\tb", "a\nb", "a\rb"] {
+            let err = validate_actor(ctrl).expect_err("control char rejected");
+            assert_eq!(err.field, "actor");
+            assert_eq!(err.reason, "cannot contain control characters");
+        }
     }
 }

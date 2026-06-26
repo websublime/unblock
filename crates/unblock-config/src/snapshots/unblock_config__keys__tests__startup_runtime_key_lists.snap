@@ -1,0 +1,18 @@
+---
+source: crates/unblock-config/src/keys.rs
+expression: "(STARTUP_KEYS, RUNTIME_KEYS)"
+---
+[
+  [
+    "db_filename",
+    "jsonl_filename",
+    "backend",
+    "deletions_retention_days"
+  ],
+  [
+    "actor",
+    "output_format",
+    "jsonl_export",
+    "search_cap"
+  ]
+]
