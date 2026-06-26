@@ -161,6 +161,25 @@ const OPS_PER_WRITER: u32 = 600;
 /// still being decisively breached by the unbounded negative control.
 const WAL_CEILING_BYTES: u64 = 64 * 1024 * 1024;
 
+/// Total committed writes the **WAL-negative control** drives, **independent of the runner's core
+/// count**, so it breaches [`WAL_CEILING_BYTES`] deterministically on any `>= 2`-vCPU runner.
+///
+/// The negative control's whole job is to grow the `-wal` sidecar past the ceiling with the checkpoint
+/// OFF, proving the positive WAL-bound assertion is falsifiable. Its predecessor sized the volume as
+/// `writers * 400` where `writers = available_parallelism().clamp(2, 16)` — so the write volume (and
+/// therefore the WAL size) **scaled with the runner's cores**: ~1600 writes (~59.5 MiB, *under* the
+/// 64 MiB ceiling) on a 4-vCPU runner, ~6400 (~220 MiB) on a 16-core dev box. That made the breach
+/// flaky on small CI runners. The fix is a **fixed total** sized for a comfortable margin on the
+/// *smallest* allowed runner.
+///
+/// Sizing: the observed cost is ~38 KiB of `-wal` per committed write (59.5 MiB / ~1600 writes). At
+/// `MIN_WRITERS = 2` (the floor, the worst case for total volume — see
+/// [`count_bounded_update_storm`]) this fixed total yields `ceil(4096 / 2) * 2 = 4096` committed
+/// writes ≈ **152 MiB**, i.e. ~2.4 × the 64 MiB ceiling — a decisive, deterministic breach on a 2-vCPU
+/// runner. It is `#[ignore]`d + nightly-only, so the larger (slower) volume is acceptable; capped well
+/// under an absurd value.
+const WAL_NEGATIVE_TOTAL_WRITES: u32 = 4096;
+
 /// Hard wall-clock cap on the whole gate body (defense against a pathological hang).
 // `from_secs(120)` reads more naturally as a 120-second budget than `from_mins(2)` here.
 #[allow(clippy::duration_suboptimal_units)]
@@ -733,6 +752,59 @@ async fn sustained_update_storm(stores: &[Arc<LibsqlStorage>], writers: usize) -
     writes
 }
 
+/// A **count-bounded** update storm that commits a **fixed `total` writes regardless of the writer /
+/// core count** — used by the WAL-negative control so its `-wal` growth is deterministic on any runner
+/// (unlike [`sustained_update_storm`], whose volume is `writers * per_writer` and therefore scales with
+/// `available_parallelism`). Each of the `writers` writers commits `ceil(total / writers)` updates, so
+/// the committed total is `ceil(total / writers) * writers` — **always `>= total`** (and `<= total +
+/// writers`), so the volume floor is `total` on **every** runner regardless of `writers`. That floor —
+/// not a core-scaled volume — is what guarantees the deterministic `-wal` breach down to
+/// `MIN_WRITERS = 2`. Returns the committed write count.
+async fn count_bounded_update_storm(
+    stores: &[Arc<LibsqlStorage>],
+    writers: usize,
+    total: u32,
+) -> u64 {
+    // The same small pool of shared hot rows as the positive phase (drives many WAL frames).
+    let rows = 8u32;
+    for n in 0..rows {
+        stores[0]
+            .create_issue(&seed_issue(&format!("ub-wal-{n}")), "seed")
+            .await
+            .expect("seed wal row");
+    }
+    // Split the fixed total across the writers (round up so the committed total is >= `total`). With
+    // `writers >= MIN_WRITERS >= 2` this never divides by zero, and `per_writer * writers` stays close
+    // to `total` independent of how many cores the runner has.
+    let writers_u32 = u32::try_from(writers).unwrap_or(u32::MAX).max(1);
+    let per_writer = total.div_ceil(writers_u32);
+    let mut set = JoinSet::new();
+    for store in stores.iter().take(writers) {
+        let store = Arc::clone(store);
+        set.spawn(async move {
+            let mut committed = 0u64;
+            for n in 0..per_writer {
+                let id = format!("ub-wal-{}", n % rows);
+                let patch = IssuePatch {
+                    title: Some(format!("wal-rev-{n}")),
+                    ..IssuePatch::default()
+                };
+                match store.update_issue(&id, &patch, "wal-writer").await {
+                    Ok(_) => committed += 1,
+                    Err(StorageError::DatabaseLocked) => {}
+                    Err(other) => panic!("wal storm: unexpected error: {other:?}"),
+                }
+            }
+            committed
+        });
+    }
+    let mut writes = 0u64;
+    while let Some(res) = set.join_next().await {
+        writes += res.expect("wal writer join");
+    }
+    writes
+}
+
 // --------------------------------------------------------------------------------------------------
 // #[ignore]d controls — prove the gate is non-vacuous (run with `-- --ignored`)
 // --------------------------------------------------------------------------------------------------
@@ -829,6 +901,13 @@ fn forced_spin_control_blows_the_ratio() {
 /// passive checkpoint **disabled** — the `-wal` sidecar must **breach** [`WAL_CEILING_BYTES`], proving
 /// the positive WAL-bound assertion is falsifiable (a real checkpoint is doing the bounding, not the
 /// ceiling being trivially large). `#[ignore]`d: it deliberately lets the WAL grow unbounded.
+///
+/// **Core-independent volume.** Unlike the positive [`run_wal_bound_phase`] (whose volume may scale
+/// with `writers`), this control drives a **fixed total** of [`WAL_NEGATIVE_TOTAL_WRITES`] committed
+/// updates via [`count_bounded_update_storm`], so the `-wal` it produces does **not** depend on the
+/// runner's core count. The former volume (`writers * 400`) shrank on small runners — ~59.5 MiB on a
+/// 4-vCPU runner, *under* the 64 MiB ceiling — making the breach flaky; the fixed total breaches with
+/// ~2-3× margin on any `>= 2`-vCPU runner, restoring the falsifiability proof deterministically.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "WAL negative control; run explicitly with -- --ignored"]
 async fn wal_negative_control_breaches_ceiling() {
@@ -840,7 +919,8 @@ async fn wal_negative_control_breaches_ceiling() {
     let writers = parallelism.clamp(MIN_WRITERS, 16);
 
     println!(
-        "\n=== WAL negative control (checkpoint DISABLED; expect -wal > {WAL_CEILING_BYTES} bytes) ==="
+        "\n=== WAL negative control (checkpoint DISABLED; expect -wal > {WAL_CEILING_BYTES} bytes; \
+         fixed total = {WAL_NEGATIVE_TOTAL_WRITES} writes, core-independent) ==="
     );
 
     let dir = TempDir::new().expect("temp dir");
@@ -851,9 +931,15 @@ async fn wal_negative_control_breaches_ceiling() {
         store.testkit_set_checkpoint_interval(0).await;
     }
 
-    let writes = sustained_update_storm(&stores, writers).await;
+    // Fixed total, independent of `writers` / `available_parallelism` — see WAL_NEGATIVE_TOTAL_WRITES.
+    let writes = count_bounded_update_storm(&stores, writers, WAL_NEGATIVE_TOTAL_WRITES).await;
     let wal_bytes = wal_size(&path);
-    println!("[wal-negative] writes={writes} wal_bytes={wal_bytes} ceiling={WAL_CEILING_BYTES}");
+    println!(
+        "[wal-negative] writers={writers} target_total={WAL_NEGATIVE_TOTAL_WRITES} \
+         writes={writes} wal_bytes={wal_bytes} ceiling={WAL_CEILING_BYTES} \
+         margin={:.2}x",
+        wal_bytes as f64 / WAL_CEILING_BYTES as f64
+    );
 
     assert!(
         wal_bytes > WAL_CEILING_BYTES,
