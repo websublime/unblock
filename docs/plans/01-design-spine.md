@@ -955,11 +955,18 @@ pub enum IssueInput {
         #[serde(default)] quick: bool,                  // quick-create -> output is id only
         #[serde(flatten)] attribution: Attribution,     // agent_name/harness/model (capture-only)
     },
+    // Seam note (Q1 — T1.4): Bulk markdown import (FR-1a) is handled by the `issue`-tool adapter
+    // (T2.3) by parsing the markdown into N `Create` calls (loop over `Session::create`); there is
+    // no bulk-create on the `Session` surface by design.
     Show   { id: String },
     Update { ids: Vec<String>, #[serde(flatten)] patch: PatchInput, #[serde(flatten)] attribution: Attribution },
     Close  { id: String, #[serde(default)] reason: Option<String>, #[serde(default)] suggest_next: bool,
              #[serde(flatten)] attribution: Attribution },
     Reopen { id: String, #[serde(flatten)] attribution: Attribution },
+    // Seam note (Q2 — T1.4): `Reopen` maps to `Session::update(id, { status: <non-terminal>, .. })`
+    // (storage emits the `Reopened` event on a terminal→non-terminal transition, `crud.rs:416-423`).
+    // There is deliberately no `Session::reopen` — reopen is an update patch (consistent with the
+    // single-id update surface).
     Delete { ids: Vec<String>, #[serde(default)] mode: DeleteModeInput, #[serde(flatten)] attribution: Attribution },
 }
 
