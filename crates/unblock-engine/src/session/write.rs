@@ -42,7 +42,7 @@ impl Session {
         Ok(self.storage.create_issue(issue, &self.actor).await?)
     }
 
-    /// Apply an [`IssuePatch`] to an issue, returning the updated issue (FR-1c).
+    /// Apply an [`IssuePatch`] to an issue, returning the updated issue (FR-1b).
     ///
     /// Validates the *post-patch* issue the **same way `create` validates** (the storage
     /// `update_issue` is validation-free, spine §3.2.1): under the write permit it **loads the
