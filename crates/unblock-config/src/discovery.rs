@@ -161,7 +161,22 @@ fn canonicalize_existing(dir: &Path) -> PathBuf {
     // `dunce::canonicalize` avoids Windows `\\?\` verbatim prefixes; it resolves symlinks like
     // `std::fs::canonicalize`. The discovered dir always exists, so this is safe (never canonicalize
     // `start`, which may not exist).
-    dunce::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf())
+    match dunce::canonicalize(dir) {
+        Ok(canonical) => canonical,
+        Err(error) => {
+            // The degrade is observable: confinement (Seam B) will use the non-canonical base, so a
+            // symlinked workspace dir is no longer resolved to its real path. Behaviour is unchanged
+            // (we still fall back so discovery never hard-fails) — only the warning is new.
+            tracing::warn!(
+                target: "unblock.config",
+                dir = %dir.display(),
+                %error,
+                "failed to canonicalize the discovered workspace dir; path confinement will use \
+                 the non-canonical base"
+            );
+            dir.to_path_buf()
+        }
+    }
 }
 
 /// Turn `path` into an absolute path without resolving symlinks or requiring it to exist.

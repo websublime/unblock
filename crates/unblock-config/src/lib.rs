@@ -1,18 +1,29 @@
-//! `unblock-config` (L4) — `.unblock/` workspace discovery, config-owned value/path types, and the
-//! two workspace-open facades (CF-D, spine §4).
+//! `unblock-config` (L4) — the layered configuration resolver, `.unblock/` workspace discovery,
+//! config-owned value/path types, and the two workspace-open facades (CF-D, spine §4).
 //!
-//! This crate is the **T1.3a minimal subset**: the interface the engine (L5) consumes. It delivers
-//! the config-owned value type [`ResolvedConfig`] and path type [`ConfigPaths`] (with
-//! hardcoded/defaulted values), the two contexts [`ResolvedContext`] (resolve-only) and
-//! [`WorkspaceContext`] (storage-bearing), the per-crate [`ConfigError`], and the facades
-//! [`open_workspace`] (no DB) / [`open_with_storage`] (open + migrate libsql, build the
-//! `Arc<dyn Storage>`).
+//! This crate is the **full T1.3 layered resolver**. It merges configuration across four layers in
+//! strict precedence — **CLI ([`CliOverrides`]) > env `UNBLOCK_*` ([`EnvOverrides`]) > project
+//! `.unblock/config.toml` ([`ProjectConfig`]) > defaults** (highest wins per field) — and partitions
+//! keys into startup-only vs runtime-reloadable ([`keys`]: [`STARTUP_KEYS`] / [`RUNTIME_KEYS`],
+//! [`classify`]). It delivers the config-owned value type [`ResolvedConfig`] and path type
+//! [`ConfigPaths`] (resolved for real, not defaulted), the two contexts [`ResolvedContext`]
+//! (resolve-only, no storage) and [`WorkspaceContext`] (storage-bearing), and the per-crate
+//! [`ConfigError`].
+//!
+//! **Discovery** walks up for the nearest dir named `.unblock` **or** `_unblock` (the monorepo alias,
+//! FORK-2/D8); the discovered dir is **canonicalized** so artifacts are confined to the canonical
+//! subtree (FORK-3, NFR-18). An explicit `--dir`/`UNBLOCK_DIR` is used directly with no walk-up
+//! (MF-2).
+//!
+//! **Two facade pairs** front the resolver. The permanent `&Path` facades — [`open_workspace`]
+//! (resolve-only, no DB) / [`open_with_storage`] (open + migrate libsql, build the
+//! `Arc<dyn Storage>`) — pass `start` as the walk-up start; their additive `_with_cli` overloads —
+//! [`open_workspace_with_cli`] / [`open_with_storage_with_cli`] — thread a full [`CliOverrides`]
+//! (`--dir`/`--db`/`--actor`/`--output-format`) through resolution (FORK-1 OVERLOAD model).
 //!
 //! **Config owns workspace-open** (CF-D): it discovers `.unblock/`, resolves paths, opens/migrates
 //! libsql, and constructs the `Arc<dyn Storage>` carried by [`WorkspaceContext`]; the engine
-//! consumes the context via `Session::open` — it does not construct storage. The full layered
-//! TOML/env/CLI resolver (CLI > env `UNBLOCK_*` > project `.unblock/config.toml` > defaults) lands
-//! **additively at T1.3** without changing any type or facade signature pinned here.
+//! consumes the context via `Session::open` — it does not construct storage.
 //!
 //! See `docs/plans/crates/unblock-config.md` and `docs/plans/01-design-spine.md` §4.
 //!
