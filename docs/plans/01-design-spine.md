@@ -672,6 +672,18 @@ between an earlier prose description and the source are resolved **in favour of 
   — there is **no** `status NOT IN (...)` predicate. 0 rows affected → re-`SELECT` the current holder
   **within the same tx** → `AlreadyClaimed{by}`. A **same-actor re-claim short-circuits BEFORE the
   `UPDATE`** (idempotent `Ok`, no `updated_at`, no event).
+- **`list_issues` — composes the full `ListFilters` set.** `status`-OR, `issue_type`-OR, inclusive
+  `priority_min`/`priority_max`, `assignee`, `labels_all` (AND, per-label `EXISTS`) / `labels_any`
+  (OR, single `EXISTS … IN`), `text_contains` (title `LIKE ? ESCAPE '\'`, distinct from the `search`
+  needle), and closed/deferred visibility (default excludes `closed`/`tombstone`/`deferred`;
+  `include_closed`/`include_deferred` widen it). `ORDER BY priority ASC, created_at DESC, id ASC` —
+  note `created_at` **DESC** (newest-first), **deliberately distinct from `ready`'s `created_at ASC`**
+  pre-sort (oldest-first within a priority bucket; policy `ready.rs:16-17`). Default-complete unless
+  `limit` set; `offset`-without-`limit` uses `LIMIT -1 OFFSET n`. Authoritative order for render/MCP
+  snapshots (T2.1/T2.3), NFR-14. (§3.2.1 previously had no entry for `list_issues`, `count_issues`,
+  `stale_issues`, or `get_issue`; the first three are pinned here/below because their order is
+  render-snapshot authoritative. `get_issue` is intentionally entry-less: a single-row lookup by id
+  with no ordering surface.)
 - **`ready_issues` (sqlite.rs:4988–5048) — mirrors `idx_issues_ready`.**
   `status = 'open' AND id NOT IN <live blocked set> AND (defer_until IS NULL OR defer_until <= now) AND
   (pinned = 0 OR pinned IS NULL) AND (ephemeral = 0 OR ephemeral IS NULL) AND
@@ -692,7 +704,15 @@ between an earlier prose description and the source are resolved **in favour of 
   `propagate_blocked_parents`, sqlite.rs:6369–6398; edges per `load_local_parent_child_edges_impl`,
   sqlite.rs:6165–6191 — `parent = depends_on_id`, `child = issue_id`, `external:%` excluded on both
   ends; the propagation is purely structural over the edge). `ORDER BY priority ASC, created_at DESC,
-  id ASC` (Miguel).
+  id ASC` (Miguel). **Facets NARROW the blocked set (FR-4 "filters compose", D18).**
+  `blocked_issues` applies the same *narrowing* facets as `list_issues` — status-OR, `issue_type`-OR,
+  inclusive `priority_min`/`priority_max`, `assignee`, `labels_all` (AND) / `labels_any` (OR), and
+  `text_contains` (title `LIKE ? ESCAPE '\'`) — to the candidate rows **before** the live blocked-set
+  membership test. The three-pass blocked detection and the `ORDER BY` are unchanged (facets only
+  filter; they never alter blocked-ness or order). Crucially, `blocked` does **NOT** inherit
+  `list_issues`' default visibility: its baseline `status NOT IN ('closed','tombstone')` is
+  **deferred-INCLUSIVE**, so `include_closed`/`include_deferred` are **no-ops** here (closed/tombstone
+  can never be blocked-visible; deferred is always shown).
 - **`search_issues` (sqlite.rs:4543–4727) — substring `instr(lower(col))` over title+description+id.**
   The needle is lowercased and matched with
   `instr(lower(title), ?) > 0 OR instr(lower(description), ?) > 0 OR instr(lower(id), ?) > 0` (no LIKE
@@ -700,6 +720,16 @@ between an earlier prose description and the source are resolved **in favour of 
   `LIKE ? ESCAPE '\'` form over `title`. Cap **50** when `filters.limit` is unset. `ORDER BY priority
   ASC, created_at DESC, id ASC` (the no-explicit-sort tail). The `sort`/`reverse` branches are deferred
   to v1.x; FTS5 to v1.3.
+- **`count_issues` — `ORDER BY k ASC`** over the group key (`status` / `issue_type` /
+  `COALESCE(assignee,'')` / `CAST(priority AS TEXT)` / `labels.label`); ungrouped (`by=None`) returns a
+  single `key="total"` bucket. The `Label` group-by JOINs the labels table and therefore
+  **double-counts** multi-label issues vs the ungrouped total. Default visibility = `list_issues`
+  default (excludes closed/tombstone/deferred; `include_*` widen). Priority keys are numeric strings
+  `'0'..'4'` sorted **lexically** by `k ASC` (fine for single digits). Deterministic order is
+  render-snapshot authoritative (T2.1), NFR-14.
+- **`stale_issues` — `ORDER BY updated_at ASC, id ASC`** (oldest-updated first); composes the full
+  `ListFilters` set plus `updated_at < older_than`. Default visibility = `list_issues` default.
+  Deterministic order is render-snapshot authoritative (T2.1), NFR-14.
 
 **EventType-per-mutation (the T0.7 oracle).** Model `EventType` = 15 named (Created, Updated,
 StatusChanged, PriorityChanged, AssigneeChanged, Commented, Closed, Reopened, DependencyAdded,
