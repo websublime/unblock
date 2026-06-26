@@ -251,6 +251,11 @@ pub struct EpicStatus {                    // [v1.1] derived rollup
 pub struct IssueValidator; // pure; title 1..=500, priority 0..=4, enum coherence, reparent-cycle check input.
 impl IssueValidator { pub fn validate(issue: &Issue) -> Result<(), unblock_error::ModelError>; }
 
+// Single-home actor bounding (the model owns the rule; config is its v1 caller — Seam A, lands T1.3).
+// Bounds the RESOLVED actor: <= ACTOR_MAX_CHARS = 200 chars (chars().count(), NOT bytes) + rejects NUL
+// + rejects other control chars. CLI/MCP become later callers; the rule lives once here.
+pub fn validate_actor(actor: &str) -> Result<(), unblock_error::FieldError>;
+
 // Shared contract type that BOTH policy and storage need lives here (CF-11):
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CacheKey(pub String); // ready/blocked projection cache key contract.
@@ -418,7 +423,8 @@ impl unblock_error::CodedError for ConfigError {
 >   `UNBLOCK_ACTOR → $USER → "unblock"` chain this is effectively unreachable in T1.3a (the final default always
 >   resolves), but the variant exists so a future strict-actor mode (T1.3) has its code reserved.
 >
-> The set grows **additively at T1.3** (e.g. `ConfigParse → ConfigParseError`, `InvalidValue → ConfigError`,
+> The set grows **additively at T1.3** (e.g. `Parse → ConfigParseError` (the **variant identifier is `Parse`**;
+> the `ErrorCode::ConfigParseError` mapping is unchanged), `InvalidValue → ConfigError`,
 > `Io → IoError`) — no T1.3a code is renumbered or removed.
 
 ### 2.2 ErrorCode (stable, SCREAMING_SNAKE in JSON)
@@ -781,7 +787,10 @@ pub struct WorkspaceContext {
 pub async fn open_with_storage(start: &Path) -> Result<WorkspaceContext, ConfigError>;
 
 // (3) T1.3-ADDITIVE CLI overloads (FORK-1 — OVERLOAD model). The `&Path` facades above are PERMANENT and
-//     UNCHANGED; each DELEGATES to its `_with_cli` form with a `CliOverrides { dir: Some(start), ..default }`.
+//     UNCHANGED; each DELEGATES to its `_with_cli` form passing `start` as the WALK-UP START parameter, NOT as
+//     `cli.dir`: `discover_unblock_dir(Some(start), &CliOverrides::default())`. (`cli.dir` is the EXPLICIT
+//     `--dir`/`UNBLOCK_DIR` override — NO walk-up; `start` is the separate walk-up START — so the facades must
+//     leave `cli.dir` unset and thread `start` through the start param.)
 //     `CliOverrides` (the typed top precedence layer, config-owned) threads --dir/--db/--actor/--output-format
 //     through resolution. These return the SAME result types the engine consumes — NO signature swap, NO break.
 pub async fn open_workspace_with_cli(cli: &CliOverrides) -> Result<ResolvedContext, ConfigError>;
@@ -813,8 +822,11 @@ pub async fn open_with_storage_with_cli(cli: &CliOverrides) -> Result<WorkspaceC
 > `&CliOverrides` parameter that threads `--dir`/`--db`/`--actor`/`--output-format` down through resolution) lands at
 > T1.3 as **two ADDITIVE overloads** — `open_workspace_with_cli(cli: &CliOverrides)` /
 > `open_with_storage_with_cli(cli: &CliOverrides)` (block item (3) above) — **not** as a signature swap. The `&Path`
-> facades **delegate** to their `_with_cli` form with a `CliOverrides { dir: Some(start), ..Default::default() }`, so
-> every existing caller keeps compiling unchanged and the engine (which binds to the **result** type
+> facades **delegate** to their `_with_cli` form passing `start` as the **walk-up START** parameter via
+> `discover_unblock_dir(Some(start), &CliOverrides::default())` — **NOT** as `cli.dir`. (`cli.dir` is the EXPLICIT
+> `--dir`/`UNBLOCK_DIR` override, which **does not walk up**; the `&Path` facades want the walk-up-from-`start`
+> behaviour, so they leave `cli.dir` unset and route `start` through the discovery start parameter.) Every existing
+> caller keeps compiling unchanged and the engine (which binds to the **result** type
 > `WorkspaceContext`, never to a facade signature) is unaffected. (This reconciles the spine `&Path` ↔ config-plan
 > `&CliOverrides` drift by **overload addition**, not by sequencing/swapping the parameter — the `&Path` API never
 > goes away.)
