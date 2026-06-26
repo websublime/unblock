@@ -10,6 +10,7 @@ use std::fs;
 
 use unblock_config::{
     CliOverrides, ConfigError, discover_optional_unblock_dir, discover_unblock_dir,
+    open_workspace_with_cli,
 };
 
 #[test]
@@ -100,4 +101,58 @@ fn symlinked_workspace_dir_is_canonicalized_and_confined() {
     let canon_real = real.join(".unblock").canonicalize().expect("canon real");
     assert_eq!(found, canon_real);
     assert!(found.starts_with(real.canonicalize().expect("canon real root")));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn fork3_symlink_inside_workspace_is_confined_to_the_canonical_dir() {
+    // FORK-3 + the spine's ACCEPTED-TOCTOU note: a symlink placed INSIDE the `.unblock/` dir that
+    // points OUTSIDE the workspace does NOT widen confinement. The discovered dir is canonicalized,
+    // and confinement is the lexical `starts_with(canonical unblock_dir)` post-join check (NOT an
+    // atomic open through the symlink). So:
+    //   * a `--db` whose RESOLVED path lexically escapes the canonical dir is REJECTED (InvalidValue);
+    //   * a normal in-dir `--db` (lexically within the canonical dir) is ACCEPTED-as-confined, even
+    //     though a sibling symlink exists — the accepted residual TOCTOU per the spec.
+    let root = tempfile::tempdir().expect("tempdir");
+    let workspace = root.path().join("ws");
+    let unblock = workspace.join(".unblock");
+    fs::create_dir_all(&unblock).expect("mkdir .unblock");
+
+    // An escape target OUTSIDE the workspace, and a symlink to it placed INSIDE `.unblock/`.
+    let outside = root.path().join("outside");
+    fs::create_dir_all(&outside).expect("mkdir outside");
+    let escape_link = unblock.join("escape");
+    std::os::unix::fs::symlink(&outside, &escape_link).expect("symlink inside .unblock");
+
+    let canon_unblock = unblock.canonicalize().expect("canon .unblock");
+
+    // (1) A `--db` resolving OUTSIDE the canonical dir (absolute path under `outside/`) is REJECTED
+    //     with the path-confinement error — the inside symlink does not launder the escape.
+    let escaping_db = outside.join("stolen.db");
+    let cli = CliOverrides::new()
+        .with_dir(&workspace)
+        .with_db(&escaping_db);
+    match open_workspace_with_cli(&cli).await {
+        Ok(_) => panic!("a `--db` escaping the canonical workspace dir must be rejected"),
+        Err(err) => match err {
+            ConfigError::InvalidValue { key, .. } => assert_eq!(key, "--db"),
+            other => panic!("expected InvalidValue for the escaping --db, got {other:?}"),
+        },
+    }
+
+    // (2) A normal in-dir `--db` (a bare filename joined onto the canonical dir) is ACCEPTED — it
+    //     lexically stays within the canonical `unblock_dir`, the documented accepted-as-confined
+    //     outcome. `open_workspace_with_cli` is resolve-only, so it never creates the db file.
+    let cli = CliOverrides::new()
+        .with_dir(&workspace)
+        .with_db(canon_unblock.join("inside.db"));
+    let ctx = open_workspace_with_cli(&cli)
+        .await
+        .expect("an in-dir --db must be accepted as confined");
+    assert_eq!(ctx.paths.unblock_dir, canon_unblock);
+    assert_eq!(ctx.paths.db_path, canon_unblock.join("inside.db"));
+    assert!(
+        ctx.paths.db_path.starts_with(&canon_unblock),
+        "the resolved db_path must stay within the canonical unblock_dir"
+    );
 }

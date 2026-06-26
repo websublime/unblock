@@ -140,6 +140,26 @@ fn jsonl_export_precedence() {
 }
 
 #[test]
+fn empty_env_falls_through_to_project_layer() {
+    // An EMPTY (whitespace-only or "") env var is normalized to unset, so the lower layer (project
+    // config.toml) supplies the value — it is NEVER parsed as an empty value at the env layer.
+
+    // (a) UNBLOCK_OUTPUT_FORMAT = "  " (whitespace) falls through to project output_format = "csv".
+    let (_g, project) = project_from_toml("output_format = \"csv\"\n");
+    let wc = resolve(
+        &CliOverrides::default(),
+        &[("UNBLOCK_OUTPUT_FORMAT", "  ")],
+        &project,
+    );
+    assert_eq!(wc.output_format(), OutputFormat::Csv);
+
+    // (b) UNBLOCK_JSONL = "" (empty) falls through to project jsonl_export = true.
+    let (_g2, project) = project_from_toml("jsonl_export = true\n");
+    let wc = resolve(&CliOverrides::default(), &[("UNBLOCK_JSONL", "")], &project);
+    assert!(wc.jsonl_export());
+}
+
+#[test]
 fn startup_keys_from_project_toml() {
     // db_filename / jsonl_export_filename / search_cap / deletions_retention_days / backend.
     let (_g, project) = project_from_toml(
