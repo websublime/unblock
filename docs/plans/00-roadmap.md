@@ -36,7 +36,7 @@ pass as hard gates; unblock dogfoods its own repo (issues imported from `bd` via
 ### Lands (FRs)
 | FR | Capability |
 |---|---|
-| FR-1a/1b/1c | Issue create / quick-create; show/update (multi-id, labels, reparent w/ cycle reject); tombstone delete (cascade/hard/dry-run) |
+| FR-1a/1b/1c | Issue create / quick-create; show/update (multi-id, labels, reparent w/ cycle reject); tombstone delete (cascade/hard/dry-run); dedicated restore/un-tombstone (D20) |
 | FR-2 | **Atomic claim** (assignee + `in_progress`, no race window) — the wedge |
 | FR-3 | Scheduling: `defer` / `undefer` |
 | FR-4 | Query surface: `list` / `ready` / `blocked` / `search` / `count` / `stale` (`ready` = canonical agent entrypoint) |
@@ -82,6 +82,7 @@ shape (only additive `contract_version` bumps).
 | FR | Capability | Crates |
 |---|---|---|
 | FR-6 | **Organization:** labels (rename/list-all), threaded comments (add/list), epic rollups + auto-close-eligibility | model, storage, engine, mcp |
+| FR-1c (D20 seams) | **Restore extensions:** cascade-restore (needs a delete-batch identity to avoid over-reviving independently-tombstoned children) + TTL-refusal of expired tombstones (`deletions_retention_days`, reserved/unenforced in v1) | model, storage, engine, mcp |
 | FR-18 | **Swarm coordination diagnostics:** `scheduler` (ranked, explainable `unblock.scheduler.v1`); `coordination status` (`unblock.coordination.v1`, read-only stale-claim diagnosis). Purely DB-state-derived (Agent Mail dropped, PRD §12) | policy, engine, mcp |
 | FR-19 | **Workflow gates:** policy-driven (`.unblock/policy.toml`) transition gates (ci_green / min_reviewers / security_sign_off) | policy, config, engine, mcp |
 | FR-13 (full) | DB config-table + user-config layers; full startup/runtime partitioning | config, storage, engine |
