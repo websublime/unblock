@@ -624,7 +624,12 @@ pub trait Storage: Send + Sync {
     async fn list_dependencies(&self, id: &str) -> Result<Vec<Dependency>, StorageError>;
     async fn dependency_tree(&self, id: &str) -> Result<DepTree, StorageError>;
     async fn dependency_graph(&self, roots: &[String]) -> Result<DepTree, StorageError>; // backs dep `graph`; empty roots = whole graph
-    async fn detect_cycles(&self) -> Result<Vec<Vec<String>>, StorageError>; // each = a cycle path
+    async fn detect_cycles(&self, blocking_only: bool) -> Result<Vec<Vec<String>>, StorageError>;
+    //  each = an ORDERED cycle-path witness (NOT a sorted node set): a multi-node cycle is
+    //  [start, …, start] (repeats the start); a self-loop is [node, node] (§3.2.1).
+    //  blocking_only=true → the 4 gating types only (= `affects_ready_work`); =false → ALL
+    //  dependency types (integrity/lint view) — D19, faithful to original detect_blocking_cycles
+    //  (true) / detect_all_cycles (false).
 
     // --- events (audit; append-only) ---
     async fn list_events(&self, issue_id: &str) -> Result<Vec<Event>, StorageError>;
@@ -730,6 +735,68 @@ between an earlier prose description and the source are resolved **in favour of 
 - **`stale_issues` — `ORDER BY updated_at ASC, id ASC`** (oldest-updated first); composes the full
   `ListFilters` set plus `updated_at < older_than`. Default visibility = `list_issues` default.
   Deterministic order is render-snapshot authoritative (T2.1), NFR-14.
+
+The dependency ops (FR-5) — source-verified vs the original cycle machinery:
+
+- **`add_dependency` (cycle rejection: `would_create_cycle`/`check_cycle` sqlite.rs:2286,2440;
+  `find_cycle_graph_path` sqlite.rs:10664) — rejects a *gating* cycle with the REAL ordered path.**
+  Guards `SelfDependency` then `DuplicateDependency`, then builds the gating graph **including the
+  prospective edge** (private `petgraph`, `would_cycle_in_tx`) over the 4 `affects_ready_work` types.
+  If the new edge closes a gating cycle it is rejected with `CycleDetected { path }` where `path` is
+  the **actual ordered cycle, naming every node** (e.g. `a -> b -> c -> a`), reconstructed by a private
+  `find_cycle_path` DFS over the just-built graph (which already contains the prospective edge) — NOT a
+  synthetic `a -> … -> a` placeholder (FR-5 AC). On success: insert + transactional
+  `Event(DependencyAdded)`. (The reparent cycle-check, `crud.rs`, routes through the same
+  `would_cycle_in_tx`, so the orientation fix below lands once.)
+- **`would_cycle_in_tx` edge orientation (NORMATIVE — D4 correctness pin; `check_cycle`
+  sqlite.rs:2440–2453 + `load_dependency_cycle_graph` sqlite.rs:11379–11387).** When building the
+  gating cycle graph, the three blocking types (`blocks`/`conditional-blocks`/`waits-for`) are inserted
+  **FORWARD** (`issue_id -> depends_on_id`), but `parent-child` edges are inserted **REVERSED**
+  (`parent depends_on_id -> child issue_id`). This matches `load_dependency_cycle_graph` *and* unblock's
+  own blocked-set propagation (parent blocked → child blocked, `blocked_issues` pass 3 above), so the
+  cycle detector is consistent with unblock's own blocking direction; a uniform-forward graph would
+  mis-detect mixed parent-child + blocks/waits-for/conditional-blocks cycles. **The prospective edge is
+  oriented by the SAME per-type rule as an existing row** — a `parent-child` prospective edge is
+  inserted REVERSED (`depends_on_id -> issue_id`), every other gating type FORWARD
+  (`issue_id -> depends_on_id`) — then the cycle path is the `find_cycle_path` DFS from the prospective
+  edge's graph-`from` back through its graph-`to`. This is the **orientation-consistent** reading of the
+  original: the original `check_cycle` (sqlite.rs:2457–2476) treated the prospective edge as
+  standard-forward regardless of type, a latent bug that let a pure `parent-child` cycle close
+  undetected at add-time (the original's own `test_get_ready_issues_recursive_parent_cycle` adds three
+  `parent-child` edges that close a cycle, yet all three `add_dependency` calls succeed). unblock pins
+  the consistent reversal so a `parent-child`-only **or** mixed gating cycle is rejected at add-time, in
+  line with the FR-5 AC and the `reparent_*_cycle_is_rejected` regression guards. Both `add_dependency`
+  (carrying `dep.dep_type`) and `apply_reparent` (always `parent-child`) pass the prospective edge's
+  type so the orientation is applied; the add-time guard is otherwise always gating (= original hardwired
+  `blocking_only=true`).
+- **`detect_cycles(blocking_only)` (`detect_cycles` sqlite.rs:11321; `load_dependency_cycle_graph`
+  sqlite.rs:11379; `cycle_witnesses_from_graph` sqlite.rs:11410) — ORDERED traversal witnesses over
+  SCCs, NOT sorted node sets (D3/D19).** Loads the cycle graph with the **same orientation** as
+  `would_cycle_in_tx` (parent-child reversed, others forward), finds the strongly-connected components,
+  then emits **one ordered witness per cyclic component**: a multi-node cycle is `[start, …, start]`
+  (repeats the start), a self-loop is `[node, node]`; an acyclic graph returns `[]`. **The `…` here is
+  META-notation for the interior nodes, which ARE named in the real witness** (e.g. a 3-node cycle is
+  `["a", "b", "c", "a"]`) — it is NOT the literal D2-rejected placeholder string `a -> … -> a`, which
+  never named the interior. `blocking_only=true`
+  restricts the graph to the 4 gating types (= `affects_ready_work`; the original `detect_blocking_cycles`);
+  `blocking_only=false` includes **all** dependency types (the original `detect_all_cycles`, the
+  integrity/lint view) — **D19**. The witness shape (not a `path.sort()`'d node set, not a single-element
+  self-loop) is the contract the `dep cycles` MCP action (T2.3) renders. **The `Storage` trait and the
+  `Session` forward take a bare `bool` `blocking_only` (no Rust-level default); the default-TRUE
+  (gating-only) lives ONLY on the MCP wire (`DepToolInput::Cycles`, §5.2 `#[serde(default = "default_true")]`)**
+  — the same input-default-vs-method-arg asymmetry as `DiagnosticsInput::Changelog{since}` vs
+  `diagnostics(kind)`.
+- **`dependency_tree` / `dependency_graph(roots)` (unblock is the reference — the original has no
+  `DepTree`/`GraphEdge` builder).** Forward-edge reachability (`issue_id -> depends_on_id`) over the
+  dependency table: `dependency_tree(id)` returns the subtree rooted at `id`; `dependency_graph(roots)`
+  returns the union of the reachable subgraphs for a non-empty `roots`, or the whole graph for empty
+  `roots`. The emitted edges are sorted by `(from, to, dep_type)` for snapshot stability (NFR-14,
+  T2.1) — an unblock-only determinism choice.
+- **`list_dependencies(id)` — direct edges of `id`, `ORDER BY depends_on_id ASC, type ASC`**
+  (deterministic; render-snapshot authoritative, NFR-14). Backs the `dep list` MCP action (§5.3 `Deps`)
+  via the `Session::list_dependencies` forward (§4.1). `remove_dependency` deletes the exact
+  `(issue_id, depends_on_id, dep_type)` edge → `DependencyNotFound` if absent; on success
+  `Event(DependencyRemoved)`.
 
 **EventType-per-mutation (the T0.7 oracle).** Model `EventType` = 15 named (Created, Updated,
 StatusChanged, PriorityChanged, AssigneeChanged, Commented, Closed, Reopened, DependencyAdded,
@@ -902,9 +969,10 @@ impl Session {
     pub async fn search(&self, query: &str, filters: &ListFilters) -> Result<Vec<Issue>, EngineError>;
     pub async fn count(&self, filters: &ListFilters, by: Option<CountGroupBy>) -> Result<Vec<CountBucket>, EngineError>;
     pub async fn stale(&self, older_than: DateTime<Utc>, filters: &ListFilters) -> Result<Vec<Issue>, EngineError>;
+    pub async fn list_dependencies(&self, id: &str) -> Result<Vec<Dependency>, EngineError>; // backs dep `list` action (§5.3 Deps)
     pub async fn dependency_tree(&self, id: &str) -> Result<DepTree, EngineError>;
     pub async fn dependency_graph(&self, roots: &[String]) -> Result<DepTree, EngineError>; // backs dep `graph` action (§5.2); empty roots = whole graph
-    pub async fn detect_cycles(&self) -> Result<Vec<Vec<String>>, EngineError>;
+    pub async fn detect_cycles(&self, blocking_only: bool) -> Result<Vec<Vec<String>>, EngineError>; // backs dep `cycles` action (§5.2); blocking_only filter (D19)
     pub async fn diagnostics(&self, kind: DiagnosticKind) -> Result<DiagnosticReport, EngineError>; // FR-15
 
     // --- mutations: each acquires the write permit for its whole tx ---
@@ -1029,9 +1097,10 @@ pub enum DepToolInput {                                                  // (was
     Remove { issue_id: String, depends_on_id: String, dep_type: DependencyType, #[serde(flatten)] attribution: Attribution },
     List   { id: String },
     Tree   { id: String },
-    Cycles {},
+    Cycles { #[serde(default = "default_true")] blocking_only: bool },  // default TRUE = gating-only (the FR-5 ready view); false = all dep types (integrity/lint, D19) — T2.3 wires it to Session::detect_cycles
     Graph  { #[serde(default)] roots: Vec<String> },
 }
+fn default_true() -> bool { true }   // serde default for DepToolInput::Cycles.blocking_only (wire-only; the trait/Session take a bare bool)
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(tag = "action", rename_all = "snake_case")]
@@ -1071,7 +1140,7 @@ pub enum ToolOutput {
     Close(CloseOutcome),               // close --suggest-next -> newly_unblocked
     Deps(Vec<Dependency>),
     Tree(DepTree),
-    Cycles(Vec<Vec<String>>),
+    Cycles(Vec<Vec<String>>),           // ordered cycle-path witnesses ([start,…,start] / self-loop [n,n]), gating-only or all-types per the action's blocking_only (§3.2.1, D19)
     Sync(SyncOutput),                  // ExportReport | ImportReport
     Diagnostics(DiagnosticReport),
     Error(StructuredError),            // always valid JSON even on error (FR-11)
