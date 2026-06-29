@@ -846,7 +846,7 @@ The dependency ops (FR-5) — source-verified vs the original cycle machinery:
   restricts the graph to the 4 gating types (= `affects_ready_work`; the original `detect_blocking_cycles`);
   `blocking_only=false` includes **all** dependency types (the original `detect_all_cycles`, the
   integrity/lint view) — **D19**. The witness shape (not a `path.sort()`'d node set, not a single-element
-  self-loop) is the contract the `dep cycles` MCP action (T2.3) renders. **The `Storage` trait and the
+  self-loop) is the contract the `dep cycles` MCP action (T2.2) renders. **The `Storage` trait and the
   `Session` forward take a bare `bool` `blocking_only` (no Rust-level default); the default-TRUE
   (gating-only) lives ONLY on the MCP wire (`DepToolInput::Cycles`, §5.2 `#[serde(default = "default_true")]`)**
   — the same input-default-vs-method-arg asymmetry as `DiagnosticsInput::Changelog{since}` vs
@@ -1222,7 +1222,7 @@ pub enum IssueInput {
     // tombstone cannot be reopened via the update patch (the tombstone-patch guard fires first — §3.2.1
     // `update_issue`, crud.rs:332-334, the SSOT), so restore is the dedicated un-tombstone path emitting only
     // `Event(Restored)` (§3.2.1 `restore_issue` / §4.1 `Session::restore`). The interface
-    // lands now; the `issue`-tool MCP adapter wires this action at T2.3.
+    // lands now; the `issue`-tool MCP adapter wires this action at T2.2.
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -1254,7 +1254,7 @@ pub enum DepToolInput {                                                  // (was
     Remove { issue_id: String, depends_on_id: String, dep_type: DependencyType, #[serde(flatten)] attribution: Attribution },
     List   { id: String },
     Tree   { id: String },
-    Cycles { #[serde(default = "default_true")] blocking_only: bool },  // default TRUE = gating-only (the FR-5 ready view); false = all dep types (integrity/lint, D19) — T2.3 wires it to Session::detect_cycles
+    Cycles { #[serde(default = "default_true")] blocking_only: bool },  // default TRUE = gating-only (the FR-5 ready view); false = all dep types (integrity/lint, D19) — T2.2 wires it to Session::detect_cycles
     Graph  { #[serde(default)] roots: Vec<String> },
 }
 fn default_true() -> bool { true }   // serde default for DepToolInput::Cycles.blocking_only (wire-only; the trait/Session take a bare bool)
