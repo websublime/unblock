@@ -1444,17 +1444,32 @@ pub async fn contract_detect_cycles_generic<S: Storage>(storage: S) {
         .await
         .unwrap();
 
-    // Acyclic graph → no cycles (and the call terminates).
-    let cycles = storage.detect_cycles().await.unwrap();
-    assert!(cycles.is_empty(), "acyclic graph yields no cycles");
+    // Acyclic graph → no cycles (and the call terminates), for both blocking-only views.
+    assert!(
+        storage.detect_cycles(true).await.unwrap().is_empty(),
+        "acyclic gating graph yields no cycles"
+    );
+    assert!(
+        storage.detect_cycles(false).await.unwrap().is_empty(),
+        "acyclic all-types graph yields no cycles"
+    );
 
-    // The reverse gating edge would close a cycle → rejected with a path.
+    // The reverse gating edge would close a cycle → rejected with the REAL ordered path naming both
+    // endpoints (`ub-b -> ub-a -> ub-b`), NOT a synthetic placeholder.
     match storage
         .add_dependency(&dep("ub-b", "ub-a", DependencyType::Blocks), "x")
         .await
     {
         Err(StorageError::CycleDetected { path }) => {
-            assert!(path.contains("ub-b"), "cycle path names a node: {path}");
+            assert!(
+                path.contains("ub-a") && path.contains("ub-b"),
+                "cycle path names both nodes: {path}"
+            );
+            let nodes: Vec<&str> = path.split(" -> ").collect();
+            assert!(
+                nodes.len() >= 3 && nodes.first() == nodes.last(),
+                "the path is an ordered cycle `[start, …, start]`: {path}"
+            );
         }
         other => panic!("expected CycleDetected, got {other:?}"),
     }
@@ -1465,7 +1480,7 @@ pub async fn contract_detect_cycles_generic<S: Storage>(storage: S) {
         .await
         .expect("related edges never cycle");
     assert!(
-        storage.detect_cycles().await.unwrap().is_empty(),
+        storage.detect_cycles(true).await.unwrap().is_empty(),
         "a related back-edge does not create a gating cycle"
     );
 }
@@ -1494,7 +1509,7 @@ pub async fn contract_detect_cycles_positive<S: Storage + StorageTestkit>(storag
         .await
         .expect("raw edge planted");
 
-    let cycles = storage.detect_cycles().await.unwrap();
+    let cycles = storage.detect_cycles(true).await.unwrap();
     assert!(!cycles.is_empty(), "the stored gating cycle is detected");
     let names: std::collections::HashSet<&str> = cycles
         .iter()
@@ -1503,6 +1518,12 @@ pub async fn contract_detect_cycles_positive<S: Storage + StorageTestkit>(storag
     assert!(
         names.contains("ub-a") && names.contains("ub-b"),
         "the detected cycle path contains both nodes: {cycles:?}"
+    );
+    // The witness is an ordered cycle `[start, …, start]` (the start repeated at the end), NOT a
+    // sorted node set: for this 2-cycle it is `[a, b, a]` (D3).
+    assert!(
+        cycles.iter().any(|w| w.len() == 3 && w.first() == w.last()),
+        "the witness is an ordered `[start, …, start]` cycle: {cycles:?}"
     );
 }
 

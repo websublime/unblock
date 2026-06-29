@@ -9,7 +9,8 @@
 
 use chrono::{DateTime, Utc};
 use unblock_model::{
-    CountBucket, CountGroupBy, DepTree, DiagnosticKind, DiagnosticReport, Issue, ListFilters,
+    CountBucket, CountGroupBy, DepTree, Dependency, DiagnosticKind, DiagnosticReport, Issue,
+    ListFilters,
 };
 
 use crate::diagnostics::{self, WorkspaceFacts};
@@ -99,6 +100,15 @@ impl Session {
         Ok(self.storage.stale_issues(older_than, filters).await?)
     }
 
+    /// The direct dependency edges declared **by** `id` (backs the dep `list` action, spine
+    /// §3.2/§4.1 — D1). A read path: **no write permit** (FR-10).
+    ///
+    /// # Errors
+    /// Forwards any storage failure.
+    pub async fn list_dependencies(&self, id: &str) -> Result<Vec<Dependency>> {
+        Ok(self.storage.list_dependencies(id).await?)
+    }
+
     /// The dependency subtree rooted at `id`.
     ///
     /// # Errors
@@ -116,12 +126,14 @@ impl Session {
         Ok(self.storage.dependency_graph(roots).await?)
     }
 
-    /// Detect every dependency cycle, each as a path of ids.
+    /// Detect every dependency cycle, each as an ordered traversal witness (backs the dep `cycles`
+    /// action, spine §4.1 — D19). `blocking_only=true` restricts to the 4 gating types (the ready
+    /// view); `=false` considers all dependency types (the integrity/lint view).
     ///
     /// # Errors
     /// Forwards any storage failure.
-    pub async fn detect_cycles(&self) -> Result<Vec<Vec<String>>> {
-        Ok(self.storage.detect_cycles().await?)
+    pub async fn detect_cycles(&self, blocking_only: bool) -> Result<Vec<Vec<String>>> {
+        Ok(self.storage.detect_cycles(blocking_only).await?)
     }
 
     /// Build the [`DiagnosticReport`] for `kind` (FR-15) — pure-DB, no git (NFR-6).

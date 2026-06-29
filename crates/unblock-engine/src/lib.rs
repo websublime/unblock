@@ -111,8 +111,8 @@ pub use report::{CloseOutcome, ExportReport, ImportOptions, ImportReport};
 // --- re-exported model-owned DTOs (CF-B/CF-C, spine §1.10) — defined in unblock-model, never
 //     redefined here, so unblock-render (model + error only) can format engine results ---
 pub use unblock_model::{
-    CountBucket, CountGroupBy, DepTree, DiagnosticFinding, DiagnosticKind, DiagnosticReport,
-    GraphEdge, ListFilters,
+    CountBucket, CountGroupBy, DepTree, Dependency, DiagnosticFinding, DiagnosticKind,
+    DiagnosticReport, GraphEdge, ListFilters,
 };
 
 // --- re-exported storage-owned contract types so adapters import them from one place ---
@@ -126,7 +126,7 @@ mod tests {
     //! statically witnesses the whole re-export surface (CF-A/CF-B/CF-C + storage-owned + engine).
     #[allow(unused_imports)]
     use crate::{
-        CloseOutcome, CountBucket, CountGroupBy, DeleteMode, DeletePlan, DepTree,
+        CloseOutcome, CountBucket, CountGroupBy, DeleteMode, DeletePlan, DepTree, Dependency,
         DiagnosticFinding, DiagnosticKind, DiagnosticReport, EngineError, ExportReport, GraphEdge,
         ImportOptions, ImportReport, IssuePatch, ListFilters, Result, Session, SessionConfig,
         TracingOptions,
