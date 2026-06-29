@@ -1,0 +1,8 @@
+---
+source: crates/unblock-render/tests/snapshots.rs
+expression: "render(OutputFormat::Markdown, & opts, \"counts\")"
+---
+| key | count |
+| --- | --- |
+| open | 5 |
+| in\_progress | 2 |

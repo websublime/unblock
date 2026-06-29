@@ -1,0 +1,10 @@
+---
+source: crates/unblock-render/tests/snapshots.rs
+expression: "render(OutputFormat::Markdown, & opts, \"diagnostics\")"
+---
+## Diagnostics: Stats
+
+| label | detail |
+| --- | --- |
+| total | 42 |
+| open | 7 |

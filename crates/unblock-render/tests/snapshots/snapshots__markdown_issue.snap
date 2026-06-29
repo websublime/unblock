@@ -1,0 +1,15 @@
+---
+source: crates/unblock-render/tests/snapshots.rs
+expression: "render(OutputFormat::Markdown, & opts, \"issue\")"
+---
+## ub\-abc123
+
+- **Title:** Render the docs
+- **Status:** in\_progress
+- **Priority:** P2
+- **Type:** task
+- **Assignee:** alice
+- **Created:** 2026-01-02T03:04:05Z
+- **Updated:** 2026-01-02T03:04:06Z
+
+first line\\nsecond line

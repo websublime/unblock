@@ -1,0 +1,5 @@
+---
+source: crates/unblock-render/tests/snapshots.rs
+expression: "r.issues(&[], &opts).unwrap().stdout"
+---
+id,title,status,priority,issue_type,assignee,created_at,updated_at

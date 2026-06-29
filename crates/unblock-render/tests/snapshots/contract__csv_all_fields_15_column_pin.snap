@@ -1,0 +1,6 @@
+---
+source: crates/unblock-render/tests/contract.rs
+expression: out.stdout
+---
+id,title,description,status,priority,issue_type,assignee,owner,created_at,updated_at,closed_at,due_at,defer_until,notes,external_ref
+ub-abc123,"Render, please",multi\nline,open,2,task,alice,,2026-01-02T03:04:05Z,2026-01-02T03:04:06Z,,,,,

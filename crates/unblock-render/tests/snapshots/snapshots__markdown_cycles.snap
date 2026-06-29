@@ -1,0 +1,5 @@
+---
+source: crates/unblock-render/tests/snapshots.rs
+expression: "render(OutputFormat::Markdown, & opts, \"cycles\")"
+---
+- ub\-a → ub\-b → ub\-a

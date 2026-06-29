@@ -1,0 +1,13 @@
+---
+source: crates/unblock-render/tests/snapshots.rs
+expression: "render(OutputFormat::Json, & pretty, \"error\")"
+---
+{
+  "code": "VALIDATION_FAILED",
+  "message": "title too long",
+  "hint": "shorten the title",
+  "retryable": true,
+  "context": {
+    "provided": "danger\u001b[2Jwipe"
+  }
+}

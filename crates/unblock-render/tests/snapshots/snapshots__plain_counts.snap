@@ -1,0 +1,6 @@
+---
+source: crates/unblock-render/tests/snapshots.rs
+expression: "render(OutputFormat::Plain, & opts, \"counts\")"
+---
+open: 5
+in_progress: 2
