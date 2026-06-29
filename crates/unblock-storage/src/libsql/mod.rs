@@ -584,6 +584,11 @@ impl Storage for LibsqlStorage {
         crud::delete_issue(&conn, self.hook(), plan, actor).await
     }
 
+    async fn restore_issue(&self, id: &str, actor: &str) -> Result<Issue, StorageError> {
+        let conn = self.write().await;
+        crud::restore_issue(&conn, self.hook(), id, actor).await
+    }
+
     async fn claim_issue(
         &self,
         id: &str,

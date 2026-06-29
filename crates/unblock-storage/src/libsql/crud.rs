@@ -862,6 +862,101 @@ async fn tombstone_one(
     Ok(())
 }
 
+/// Restore (un-tombstone) a SOFT-deleted issue — the audited live inverse of `tombstone_one`
+/// (FR-1c "recoverable", D20; spine §3.2.1). One `BEGIN IMMEDIATE` tx, TOCTOU-safe.
+///
+/// 1. Load the row inside the tx; missing → [`StorageError::IssueNotFound`] (this bounds restore to
+///    SOFT deletes — a `Hard`-deleted row is gone).
+/// 2. Not a tombstone (already active) → **idempotent no-op `Ok(issue)`**: no `UPDATE`, no event, no
+///    `updated_at` bump (mirrors `tombstone_one`'s already-tombstone early `Ok`).
+/// 3. Real tombstone → delegate to the model `Issue::restore_from_tombstone` (best-effort `status`
+///    via `closed_at`; `issue_type` untouched; `original_type` + the tombstone fields cleared), bump
+///    `updated_at`, recompute `content_hash`, and write a single `Event(Restored)` — **always** (a
+///    restore is never a no-event case; never `StatusChanged`/`Reopened`, the §3.2.1 carve-out).
+///
+/// `closed_at` is bound from the restored value — NULL on the Open branch, the kept value on the
+/// Closed branch — which is what satisfies the issues-table CHECK constraint on either side.
+///
+/// Re-reads via `get_issue` so labels/deps/comments hydrate. Since the row was just written, a
+/// `None` re-read is an **internal invariant violation** → a `Backend` error, **never**
+/// `IssueNotFound` (mirroring `claim_issue`'s in-tx holder re-`SELECT`).
+pub(super) async fn restore_issue(
+    conn: &Connection,
+    hook: WriteHook<'_>,
+    id: &str,
+    actor: &str,
+) -> Result<Issue, StorageError> {
+    let id_owned = id.to_string();
+    let actor = actor.to_string();
+
+    with_immediate_tx(conn, hook, |tx| async move {
+        // Load the current row inside the tx (TOCTOU-safe).
+        let sql = format!("SELECT {ISSUE_COLUMNS} FROM issues WHERE id = ?1");
+        let mut rows = tx
+            .query(&sql, libsql::params![id_owned.as_str()])
+            .await
+            .map_err(map_libsql_err)?;
+        let Some(row) = rows.next().await.map_err(map_libsql_err)? else {
+            return Err(StorageError::IssueNotFound { id: id_owned });
+        };
+        let issue = issue_from_row(&row)?;
+        drop(rows);
+
+        // Already active → idempotent no-op (no UPDATE, no event, no updated_at bump).
+        if !issue.is_tombstone() {
+            return Ok((issue, tx));
+        }
+
+        let now = Utc::now();
+        let mut restored = issue.restore_from_tombstone();
+        restored.updated_at = now;
+        let new_hash = restored.compute_content_hash();
+
+        // `closed_at`: NULL for the Open branch, the kept value for the Closed branch — the CHECK
+        // satisfier on both sides (restore_from_tombstone set it accordingly).
+        tx.execute(
+            "UPDATE issues SET status = ?1, original_type = '', deleted_at = NULL, \
+             deleted_by = '', delete_reason = '', closed_at = ?2, updated_at = ?3, \
+             content_hash = ?4 WHERE id = ?5",
+            libsql::params![
+                restored.status.as_str(),
+                restored
+                    .closed_at
+                    .map_or(Value::Null, |d| Value::Text(d.to_rfc3339())),
+                restored.updated_at.to_rfc3339(),
+                new_hash,
+                id_owned.as_str(),
+            ],
+        )
+        .await
+        .map_err(map_libsql_err)?;
+
+        // A restore ALWAYS emits exactly one Restored event (contrast tombstone_one, which suppresses
+        // the Deleted event on a terminal prior status).
+        append_event_in_tx(
+            &tx,
+            &id_owned,
+            &unblock_model::EventType::Restored,
+            &actor,
+            None,
+            None,
+            Some("Restored issue"),
+        )
+        .await?;
+
+        Ok((restored, tx))
+    })
+    .await?;
+
+    // Re-read with full hydration. The row was just written, so a `None` here is corruption — a
+    // `Backend` invariant-violation error, NOT a caller-facing `IssueNotFound`.
+    get_issue(conn, id).await?.ok_or_else(|| StorageError::Backend {
+        source: crate::error::BackendOpaque::from_message(format!(
+            "restore_issue: re-read of just-restored issue {id} returned no row (invariant violation)"
+        )),
+    })
+}
+
 /// Resolve the descendant ids of `targets` (hierarchical `{target}.*` ids) for the cascade plan.
 async fn resolve_cascade_children(
     conn: &Connection,

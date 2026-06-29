@@ -361,6 +361,179 @@ async fn dry_run_delete_mutates_nothing() {
 }
 
 // --------------------------------------------------------------------------------------------------
+// Restore (un-tombstone) — FR-1c "recoverable", D20
+// --------------------------------------------------------------------------------------------------
+
+/// The was-CLOSED case is where the CHECK constraint bites: restoring a was-Closed tombstone MUST
+/// land `status='closed'` with `closed_at IS NOT NULL` (the issues-table CHECK fails otherwise, the
+/// tx rolls back, and restore silently fails). The bug hides for the Open case, so this is the
+/// load-bearing branch.
+#[tokio::test]
+async fn restore_was_closed_lands_closed_with_closed_at_preserved() {
+    let storage = fresh().await;
+    storage
+        .create_issue(&issue("ub-1", "t"), "a")
+        .await
+        .unwrap();
+    // Close it (sets closed_at), then tombstone it (keeps closed_at; emits no Deleted from terminal).
+    storage
+        .update_issue(
+            "ub-1",
+            &IssuePatch {
+                status: Some(Status::Closed),
+                ..IssuePatch::default()
+            },
+            "a",
+        )
+        .await
+        .unwrap();
+    let closed_at = storage
+        .get_issue("ub-1")
+        .await
+        .unwrap()
+        .unwrap()
+        .closed_at
+        .expect("closed_at set on close");
+
+    let plan = DeletePlan {
+        mode: DeleteMode::Tombstone,
+        targets: vec!["ub-1".to_string()],
+        cascade_children: Vec::new(),
+    };
+    storage.delete_issue(&plan, "admin").await.unwrap();
+
+    // Restore: the was-Closed signal (closed_at) lands status=Closed with closed_at preserved — the
+    // CHECK passes (no rollback / silent failure).
+    let restored = storage
+        .restore_issue("ub-1", "admin")
+        .await
+        .expect("restore");
+    assert_eq!(restored.status, Status::Closed);
+    assert_eq!(
+        restored.closed_at,
+        Some(closed_at),
+        "closed_at preserved — the CHECK satisfier for status='closed'"
+    );
+    assert_eq!(restored.original_type, None);
+    assert!(restored.deleted_at.is_none());
+    assert!(restored.deleted_by.is_none());
+}
+
+/// A soft tombstone keeps deps + labels, so a restored issue re-enters the dependency graph with its
+/// surviving edges (the inverse of close's newly-unblocked) and keeps its labels.
+#[tokio::test]
+async fn restore_keeps_surviving_deps_and_labels() {
+    let storage = fresh().await;
+    storage
+        .create_issue(&issue("ub-1", "blocked"), "a")
+        .await
+        .unwrap();
+    storage
+        .create_issue(&issue("ub-2", "blocker"), "a")
+        .await
+        .unwrap();
+    // ub-1 is blocked-by ub-2.
+    storage
+        .add_dependency(&dep("ub-1", "ub-2", DependencyType::Blocks), "a")
+        .await
+        .unwrap();
+    // Give ub-1 a label.
+    storage
+        .update_issue(
+            "ub-1",
+            &IssuePatch {
+                labels_add: vec!["urgent".to_string()],
+                ..IssuePatch::default()
+            },
+            "a",
+        )
+        .await
+        .unwrap();
+
+    let plan = DeletePlan {
+        mode: DeleteMode::Tombstone,
+        targets: vec!["ub-1".to_string()],
+        cascade_children: Vec::new(),
+    };
+    storage.delete_issue(&plan, "admin").await.unwrap();
+
+    let restored = storage
+        .restore_issue("ub-1", "admin")
+        .await
+        .expect("restore");
+    assert_eq!(restored.status, Status::Open);
+    // Label survived the tombstone → restore.
+    assert_eq!(restored.labels, vec!["urgent".to_string()]);
+    // The blocking edge survived → the restored issue is still blocked-by ub-2.
+    let deps = storage.list_dependencies("ub-1").await.unwrap();
+    assert_eq!(deps.len(), 1, "the blocking edge survived the restore");
+    assert_eq!(deps[0].depends_on_id, "ub-2");
+}
+
+/// Restore recomputes `content_hash` (status is hashed) and bumps `updated_at`.
+#[tokio::test]
+async fn restore_recomputes_hash_and_bumps_updated_at() {
+    let storage = fresh().await;
+    storage
+        .create_issue(&issue("ub-1", "t"), "a")
+        .await
+        .unwrap();
+    let plan = DeletePlan {
+        mode: DeleteMode::Tombstone,
+        targets: vec!["ub-1".to_string()],
+        cascade_children: Vec::new(),
+    };
+    storage.delete_issue(&plan, "admin").await.unwrap();
+    let tombstoned = storage.get_issue("ub-1").await.unwrap().unwrap();
+    let tomb_updated = tombstoned.updated_at;
+
+    let restored = storage
+        .restore_issue("ub-1", "admin")
+        .await
+        .expect("restore");
+    assert!(
+        restored.updated_at >= tomb_updated,
+        "updated_at bumped on restore"
+    );
+    // content_hash is recomputed from the restored (status=open) fields; it must equal the hash of an
+    // equivalent freshly-loaded active issue (status is part of the hash, so it differs from the
+    // tombstone hash).
+    let reloaded = storage.get_issue("ub-1").await.unwrap().unwrap();
+    assert_eq!(
+        reloaded.content_hash,
+        Some(reloaded.compute_content_hash()),
+        "stored content_hash matches the recomputed hash of the restored row"
+    );
+    assert_ne!(
+        reloaded.content_hash, tombstoned.content_hash,
+        "restored hash differs from the tombstone hash (status is hashed)"
+    );
+}
+
+/// A `Hard`-deleted row is gone: restore cannot resurrect it → `IssueNotFound` (restore is bounded to
+/// SOFT deletes).
+#[tokio::test]
+async fn restore_of_hard_deleted_is_issue_not_found() {
+    let storage = fresh().await;
+    storage
+        .create_issue(&issue("ub-1", "t"), "a")
+        .await
+        .unwrap();
+    let plan = DeletePlan {
+        mode: DeleteMode::Hard,
+        targets: vec!["ub-1".to_string()],
+        cascade_children: Vec::new(),
+    };
+    storage.delete_issue(&plan, "admin").await.unwrap();
+    assert!(storage.get_issue("ub-1").await.unwrap().is_none());
+
+    match storage.restore_issue("ub-1", "admin").await {
+        Err(StorageError::IssueNotFound { id }) => assert_eq!(id, "ub-1"),
+        other => panic!("expected IssueNotFound for a hard-deleted id, got {other:?}"),
+    }
+}
+
+// --------------------------------------------------------------------------------------------------
 // Cascade + Hard delete (FR-1c) — never-run production paths exercised here
 // --------------------------------------------------------------------------------------------------
 

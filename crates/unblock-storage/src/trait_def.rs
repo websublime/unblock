@@ -109,6 +109,26 @@ pub trait Storage: Send + Sync {
         actor: &str,
     ) -> Result<DeletePlan, StorageError>;
 
+    /// Restore (un-tombstone) a SOFT-deleted issue — the audited live inverse of `delete_issue`'s
+    /// soft tombstone (FR-1c "recoverable", D20). Single-target only (scalar; no cascade — see spine
+    /// §3.2.1).
+    ///
+    /// Semantics (spine §3.2.1, one `BEGIN IMMEDIATE` tx, TOCTOU-safe — the row is loaded inside the
+    /// tx):
+    /// - **Missing / hard-deleted id** → [`StorageError::IssueNotFound`] (restore is bounded to soft
+    ///   deletes; no new `ErrorCode` is minted).
+    /// - **Not a tombstone** (already active) → **idempotent no-op `Ok(issue)`**: no event, no
+    ///   `updated_at` bump (mirrors `delete_issue`'s already-tombstone no-op and `claim_issue`'s
+    ///   same-actor short-circuit — retry-safe).
+    /// - **Real tombstone** → one `UPDATE` delegating to the model `Issue::restore_from_tombstone`
+    ///   (best-effort `status` via `closed_at`; `issue_type` untouched; `original_type` and the
+    ///   tombstone fields cleared; `closed_at` kept on the Closed branch / cleared on Open), bumps
+    ///   `updated_at` + recomputes `content_hash`, and writes a single transactional
+    ///   `Event(Restored)` — **never** `StatusChanged`/`Reopened` (the §3.2.1 carve-out).
+    ///
+    /// Returns the hydrated restored [`Issue`].
+    async fn restore_issue(&self, id: &str, actor: &str) -> Result<Issue, StorageError>;
+
     // ---------------------------------------------------------------------------------------------
     // atomic claim (FR-2)
     // ---------------------------------------------------------------------------------------------
@@ -355,6 +375,11 @@ mod tests {
             _actor: &str,
         ) -> Result<DeletePlan, StorageError> {
             Ok(plan.clone())
+        }
+
+        async fn restore_issue(&self, _id: &str, _actor: &str) -> Result<Issue, StorageError> {
+            // Like the other `Issue`-returning methods: a backend-free stub has no row to restore.
+            Err(StorageError::NotInitialized)
         }
 
         async fn claim_issue(

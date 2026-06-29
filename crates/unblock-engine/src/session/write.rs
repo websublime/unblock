@@ -83,6 +83,26 @@ impl Session {
         Ok(self.storage.delete_issue(plan, &self.actor).await?)
     }
 
+    /// Restore (un-tombstone) a SOFT-deleted issue (FR-1c "recoverable", D20).
+    ///
+    /// The dedicated inverse of a soft delete: it acquires the write permit for the whole storage tx
+    /// and delegates to `storage.restore_issue` (the engine supplies the actor). An already-active id
+    /// is an idempotent `Ok`; a missing/hard-deleted id surfaces the transparent `IssueNotFound`
+    /// source. A single `Event(Restored)` is written transactionally by storage.
+    ///
+    /// This is **structurally distinct** from the reopen=update mapping (spine §5.2): a tombstone
+    /// cannot be patched via `update` — the storage tombstone-patch guard fires first (spine §3.2.1
+    /// `update_issue`) — so reopen=update never reaches a tombstone. `restore` is the dedicated
+    /// terminal(tombstone)→active path; the two are not unified.
+    ///
+    /// # Errors
+    /// - [`EngineError::ShutdownInProgress`] / transparent storage source (incl. `IssueNotFound` for
+    ///   a missing or hard-deleted id).
+    pub async fn restore(&self, id: &str) -> Result<Issue> {
+        let _guard = self.acquire().await?;
+        Ok(self.storage.restore_issue(id, &self.actor).await?)
+    }
+
     /// Atomically claim an issue for `assignee` (FR-2).
     ///
     /// A single conditional `UPDATE` so concurrent claimers cannot both win; the loser surfaces

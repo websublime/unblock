@@ -130,6 +130,7 @@ where
     contract_get_issues(factory().await).await;
     contract_update_issue(factory().await).await;
     contract_delete_issue(factory().await).await;
+    contract_restore_issue(factory().await).await;
 
     // Claim / defer.
     contract_claim_issue_three_outcomes(factory().await).await;
@@ -380,6 +381,90 @@ pub async fn contract_delete_issue<S: Storage>(storage: S) {
 
     let fetched = storage.get_issue("ub-1").await.unwrap().unwrap();
     assert_eq!(fetched.status, Status::Tombstone);
+}
+
+/// `restore_issue` (D20) — the audited live inverse of a soft delete (spine §3.2.1):
+/// - a tombstone restores to active, **clears `original_type`**, **preserves `issue_type`**, and
+///   emits exactly one `Event(Restored)`;
+/// - an already-active issue is an **idempotent no-op `Ok`** (no new event);
+/// - a missing/hard-deleted id → `IssueNotFound`.
+pub async fn contract_restore_issue<S: Storage>(storage: S) {
+    // create → delete(Tombstone) → restore.
+    let mut bug = issue("ub-1", "t");
+    bug.issue_type = IssueType::Bug;
+    storage.create_issue(&bug, "a").await.unwrap();
+
+    let plan = DeletePlan {
+        mode: DeleteMode::Tombstone,
+        targets: vec!["ub-1".to_string()],
+        cascade_children: Vec::new(),
+    };
+    storage.delete_issue(&plan, "admin").await.expect("delete");
+    let tombstoned = storage.get_issue("ub-1").await.unwrap().unwrap();
+    assert_eq!(tombstoned.status, Status::Tombstone);
+    assert_eq!(tombstoned.original_type.as_deref(), Some("bug"));
+
+    let restored = storage
+        .restore_issue("ub-1", "admin")
+        .await
+        .expect("restore");
+    // Active again (was-Open → Open), original_type cleared, issue_type preserved.
+    assert_eq!(restored.status, Status::Open);
+    assert_eq!(
+        restored.original_type, None,
+        "original_type cleared on restore"
+    );
+    assert_eq!(
+        restored.issue_type,
+        IssueType::Bug,
+        "issue_type preserved across restore"
+    );
+    assert!(restored.deleted_at.is_none());
+    assert!(restored.deleted_by.is_none());
+
+    // Exactly one Restored event (created → deleted → restored), never StatusChanged/Reopened.
+    assert_eq!(
+        event_types(&storage, "ub-1").await,
+        vec![
+            "created".to_string(),
+            "deleted".to_string(),
+            "restored".to_string()
+        ],
+        "restore emits a single Restored event, never StatusChanged/Reopened"
+    );
+
+    // Already-active → idempotent no-op Ok: NO event AND NO row write. Capture updated_at +
+    // content_hash BEFORE so the no-op contract is non-vacuous — a stray `UPDATE … SET updated_at`
+    // (which would still emit no event) must be caught. Mirrors
+    // `noop_update_writes_no_event_and_leaves_updated_at` (behaviour.rs:100). The ==-assert on
+    // updated_at/content_hash is the load-bearing guard here (the event check alone is vacuous).
+    let before_events = event_types(&storage, "ub-1").await;
+    let before = storage.get_issue("ub-1").await.unwrap().unwrap();
+    let again = storage
+        .restore_issue("ub-1", "admin")
+        .await
+        .expect("restore of an active issue is an idempotent Ok");
+    assert_eq!(again.status, Status::Open);
+    assert_eq!(
+        event_types(&storage, "ub-1").await,
+        before_events,
+        "restore of an already-active issue writes no event"
+    );
+    let after = storage.get_issue("ub-1").await.unwrap().unwrap();
+    assert_eq!(
+        after.updated_at, before.updated_at,
+        "no-op restore must NOT bump updated_at (byte-for-byte unchanged)"
+    );
+    assert_eq!(
+        after.content_hash, before.content_hash,
+        "no-op restore must NOT rewrite the row (content_hash byte-for-byte unchanged)"
+    );
+
+    // Missing id → IssueNotFound.
+    match storage.restore_issue("ub-missing", "admin").await {
+        Err(StorageError::IssueNotFound { id }) => assert_eq!(id, "ub-missing"),
+        other => panic!("expected IssueNotFound for a missing id, got {other:?}"),
+    }
 }
 
 // --------------------------------------------------------------------------------------------------
