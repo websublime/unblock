@@ -928,6 +928,9 @@ pub struct ConfigPaths {
 // §4.1; paths live in ConfigPaths). Both contexts below embed it by value. Its concrete v1 field set
 // is pinned by the unblock-config crate plan (`docs/plans/crates/unblock-config.md` §2/§3): it is
 // DEFAULTED in the T1.3a minimal subset and RESOLVED for real (layered TOML/env/CLI) at T1.3.
+// It carries the ADDITIVE `id_prefix` field (D21/T1.8, default "ub", `normalize_prefix`-normalized): the
+// engine id-allocator reads `ctx.config.id_prefix` at mint time to render `ub-<hash>`/`ub-<slug>-<hash>`
+// (the prefix is config-derived, NOT a constant — faithful to the original `IdConfig::with_prefix`).
 pub struct ResolvedConfig { /* config-owned; see the unblock-config crate plan for the pinned field set */ }
 
 // (1) resolve-only — NO storage; discovery + resolved config only (for `where`, doctor pre-checks,
@@ -1073,16 +1076,18 @@ impl Session {
     //   Tombstones/imported rows reach storage with their original ids ONLY through here. STAYS (D21).
     pub async fn create_issue(&self, new: NewIssue) -> Result<Issue, EngineError>; // D21 — the MINTING create path
     //   INTERACTIVE create (MCP/CLI quick-create + full create). MINTS the id under the write permit (D21):
-    //   - root id `ub-<hash>` (faithful `bd` adaptive-base36) or, with `new.slug`, `ub-<slug>-<hash>`;
+    //   - root id `ub-<hash>` (faithful `bd` adaptive-base36) or, with `new.slug`, `ub-<slug>-<hash>` — the
+    //     prefix is CONFIG-DERIVED (read from the Session's held `ResolvedConfig.id_prefix`, default "ub",
+    //     `normalize_prefix`-normalized; D21), NOT a constant; the seed carries the resolved actor as `creator`;
     //   - with `new.parent`, the hierarchical `parent.N` via storage `next_child_number(parent)`;
-    //   the candidate is probed against storage `exists` and the mint→probe→insert is ATOMIC under the SAME
+    //   the candidate is probed against storage via `get_issue(id).is_some()` (there is no `Storage::exists`) and the mint→probe→insert is ATOMIC under the SAME
     //   permit (so two concurrent creates under one parent cannot mint the same `parent.N` — this is WHY
     //   minting is the engine's job, NOT an L7 adapter's; FR-9 single mutation home). It resolves `new.deps`
     //   into edges added in/after the same tx, then returns the created `Issue` (the MCP quick-create extracts
     //   `.id`). NAME: `create_issue` parallels `Storage::create_issue` (engine mints + delegates to storage);
     //   the two live in DIFFERENT namespaces (`Session::` vs the `Storage` trait), so the name does not clash.
     //   The pure candidate compute (hash/seed/adaptive-length/slug-normalize) lives in unblock-model `id.rs`;
-    //   the stateful collision-retry loop + the `exists`/`next_child_number` probe live in the engine allocator.
+    //   the stateful collision-retry loop + the existence probe (`get_issue(id).is_some()`, NOT a `Storage::exists`) and the `next_child_number` read live in the engine allocator.
     pub async fn update(&self, id: &str, patch: &IssuePatch) -> Result<Issue, EngineError>;
     pub async fn delete(&self, plan: &DeletePlan) -> Result<DeletePlan, EngineError>;
     pub async fn restore(&self, id: &str) -> Result<Issue, EngineError>; // FR-1c recovery (D20) — un-tombstone
