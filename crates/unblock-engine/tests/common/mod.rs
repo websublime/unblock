@@ -143,18 +143,25 @@ pub async fn seed_hierarchy(session: &Session) {
         .expect("create ub-2");
 }
 
-/// Add a `Blocks` dependency `from -> on` (from depends on / is blocked by `on`).
-pub async fn add_blocks(session: &Session, from: &str, on: &str) {
-    let dep = Dependency {
+/// Build a `Dependency` edge `from -> on` of the given type (a test fixture).
+pub fn dep(from: &str, on: &str, dep_type: DependencyType) -> Dependency {
+    Dependency {
         issue_id: from.to_string(),
         depends_on_id: on.to_string(),
-        dep_type: DependencyType::Blocks,
+        dep_type,
         created_at: Utc::now(),
         created_by: Some("tester".to_string()),
         metadata: None,
         thread_id: None,
-    };
-    session.add_dep(&dep).await.expect("add_dep");
+    }
+}
+
+/// Add a `Blocks` dependency `from -> on` (from depends on / is blocked by `on`).
+pub async fn add_blocks(session: &Session, from: &str, on: &str) {
+    session
+        .add_dep(&dep(from, on, DependencyType::Blocks))
+        .await
+        .expect("add_dep");
 }
 
 /// A `Storage` decorator that gates a chosen mutation on a [`tokio::sync::Notify`], so a write
@@ -318,8 +325,11 @@ pub mod parked {
         async fn dependency_graph(&self, roots: &[String]) -> Result<DepTree, StorageError> {
             self.inner.dependency_graph(roots).await
         }
-        async fn detect_cycles(&self) -> Result<Vec<Vec<String>>, StorageError> {
-            self.inner.detect_cycles().await
+        async fn detect_cycles(
+            &self,
+            blocking_only: bool,
+        ) -> Result<Vec<Vec<String>>, StorageError> {
+            self.inner.detect_cycles(blocking_only).await
         }
         async fn list_events(&self, issue_id: &str) -> Result<Vec<Event>, StorageError> {
             self.inner.list_events(issue_id).await

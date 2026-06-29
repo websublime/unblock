@@ -110,9 +110,9 @@ pub fn run_cycle_detect_case(data: &[u8]) -> Result<(), FuzzError> {
             }
         }
 
-        // The public path never created a gating cycle.
+        // The public path never created a gating cycle (gating view, D19).
         assert!(
-            storage.detect_cycles().await?.is_empty(),
+            storage.detect_cycles(true).await?.is_empty(),
             "the public add_dependency path must never create a gating cycle"
         );
 
@@ -127,11 +127,13 @@ pub fn run_cycle_detect_case(data: &[u8]) -> Result<(), FuzzError> {
         storage
             .testkit_insert_raw_edge(&dep("ub-cyc-b", "ub-cyc-a", DependencyType::Blocks))
             .await?;
-        let cycles = storage.detect_cycles().await?;
+        let cycles = storage.detect_cycles(true).await?;
         assert!(
             !cycles.is_empty(),
             "a planted gating cycle must be detected"
         );
+        // The 2-cycle is the ordered witness `[start, other, start]` (the start repeated at the end),
+        // NOT a sorted node set (D3); both planted nodes are named.
         let nodes: HashSet<&str> = cycles
             .iter()
             .flat_map(|path| path.iter().map(String::as_str))
@@ -139,6 +141,10 @@ pub fn run_cycle_detect_case(data: &[u8]) -> Result<(), FuzzError> {
         assert!(
             nodes.contains("ub-cyc-a") && nodes.contains("ub-cyc-b"),
             "the detected cycle names both planted nodes: {cycles:?}"
+        );
+        assert!(
+            cycles.iter().any(|w| w.len() == 3 && w.first() == w.last()),
+            "the witness is an ordered cycle `[start, …, start]`: {cycles:?}"
         );
 
         Ok::<(), FuzzError>(())

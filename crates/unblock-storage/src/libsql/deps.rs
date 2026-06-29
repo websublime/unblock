@@ -4,11 +4,26 @@
 //! `conditional-blocks` / `waits-for`); a non-gating edge (e.g. `related`) can never create a
 //! ready-gating cycle. The graph is built from the `dependencies` rows and reasoned over with
 //! `petgraph` (a **private** dependency — no petgraph type appears in any public signature).
+//!
+//! ## Gating-graph edge orientation (D4, NORMATIVE — spine §3.2.1)
+//!
+//! [`build_gating_graph`] is the **single** orientation home shared by [`would_cycle_in_tx`] and
+//! [`detect_cycles`] (so the D4 orientation lands exactly once). When building the cycle graph:
+//! `blocks` / `conditional-blocks` / `waits-for` are inserted **FORWARD** (`issue_id -> depends_on_id`),
+//! but `parent-child` is inserted **REVERSED** (`parent depends_on_id -> child issue_id`) — matching
+//! unblock's own parent→child blocked propagation (`query.rs` pass 3) and the original
+//! `check_cycle` (sqlite.rs:2440) / `load_dependency_cycle_graph` (sqlite.rs:11379). A uniform-forward
+//! graph would mis-detect mixed `parent-child` + `blocks`/`waits-for`/`conditional-blocks` cycles.
+//!
+//! `blocking_only=true` restricts the graph to the 4 gating types (= `affects_ready_work`; the
+//! original `detect_blocking_cycles`); `blocking_only=false` includes **all** dependency types (the
+//! original `detect_all_cycles`, the integrity/lint view) — but `parent-child` is **still reversed**
+//! in either branch (D19; "all types" = parent-child included-and-reversed + every other type
+//! forward, NOT "all forward").
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use libsql::{Connection, Value};
-use petgraph::graph::{DiGraph, NodeIndex};
 
 use unblock_model::{DepTree, Dependency, DependencyType, GraphEdge};
 
@@ -20,6 +35,9 @@ use super::{WriteHook, with_immediate_tx};
 
 /// The gating dependency types (`affects_ready_work`), as their wire strings, for SQL `IN (…)`.
 const GATING_TYPES: [&str; 4] = ["blocks", "parent-child", "conditional-blocks", "waits-for"];
+
+/// The `parent-child` wire string (the one type the gating graph inserts REVERSED, D4).
+const PARENT_CHILD: &str = "parent-child";
 
 /// Add a dependency edge + `Event(DependencyAdded)` (spine §3.2.1).
 ///
@@ -52,15 +70,16 @@ pub(super) async fn add_dependency(
         }
         drop(rows);
 
-        // Cycle check for a gating edge.
+        // Cycle check for a gating edge. `would_cycle_in_tx` returns the REAL ordered cycle path
+        // (every node named, e.g. `a -> b -> c -> a`) reconstructed over the just-built graph — the
+        // same graph that detected the cycle, never a re-query or a synthetic `a -> … -> a`
+        // placeholder (D2/GATE-MUST-3, FR-5 AC).
         if dep.dep_type.affects_ready_work()
-            && would_cycle_in_tx(&tx, &dep.issue_id, &dep.depends_on_id).await?
+            && let Some(cycle) =
+                would_cycle_in_tx(&tx, &dep.issue_id, &dep.depends_on_id, &dep.dep_type).await?
         {
             return Err(StorageError::CycleDetected {
-                path: format!(
-                    "{} -> {} -> … -> {}",
-                    dep.issue_id, dep.depends_on_id, dep.issue_id
-                ),
+                path: render_cycle_path(&cycle),
             });
         }
 
@@ -258,49 +277,56 @@ pub(super) async fn dependency_graph(
     })
 }
 
-/// Detect every cycle over the **gating** edge set, returning each as a path of ids.
-pub(super) async fn detect_cycles(conn: &Connection) -> Result<Vec<Vec<String>>, StorageError> {
-    let all = load_all_edges(conn).await?;
-    let gating: Vec<(String, String)> = all
-        .into_iter()
-        .filter(|(_, _, t)| t.affects_ready_work())
-        .map(|(from, to, _)| (from, to))
-        .collect();
-
-    let (graph, index_of, id_of) = build_petgraph(&gating);
-
-    // Every strongly-connected component of size > 1 (or a self-loop) is a cycle. Use Tarjan's SCC.
-    let sccs = petgraph::algo::tarjan_scc(&graph);
-    let mut cycles = Vec::new();
-    for scc in sccs {
-        if scc.len() > 1 {
-            let mut path: Vec<String> = scc.iter().map(|n| id_of[n].clone()).collect();
-            path.sort();
-            cycles.push(path);
-        } else if let Some(node) = scc.first() {
-            // A single node is a cycle only if it has a self-edge (gating self-deps are rejected on
-            // insert, so this is defensive).
-            if graph.contains_edge(*node, *node) {
-                cycles.push(vec![id_of[node].clone()]);
-            }
-        }
-    }
-    let _ = &index_of; // index_of retained for symmetry / future path reconstruction.
-    cycles.sort();
-    Ok(cycles)
+/// Detect every dependency cycle as an **ordered traversal witness** (D3/D19, spine §3.2.1).
+///
+/// Builds the gating graph with the shared [`build_gating_graph`] orientation (`parent-child`
+/// reversed, others forward), finds the strongly-connected components via `petgraph`'s Tarjan SCC,
+/// then emits **one ordered witness per cyclic component**: a multi-node cycle is `[start, …, start]`
+/// (the start repeated at the end), a self-loop is `[node, node]`; an acyclic graph returns `[]`.
+/// The outer `Vec` is sorted deterministically (NFR-14 snapshot stability, mirroring the original
+/// `cycle_witnesses_with_components_from_graph` sort, sqlite.rs:11440).
+///
+/// `blocking_only=true` restricts the graph to the 4 gating types (= `affects_ready_work`);
+/// `=false` includes all dependency types (the integrity/lint view) — `parent-child` is reversed
+/// regardless.
+pub(super) async fn detect_cycles(
+    conn: &Connection,
+    blocking_only: bool,
+) -> Result<Vec<Vec<String>>, StorageError> {
+    let edges = load_all_edges(conn).await?;
+    let graph = build_gating_graph(&edges, blocking_only);
+    Ok(cycle_witnesses(&graph))
 }
 
-/// Whether adding the gating edge `from -> to` would close a cycle (i.e. `from` is already reachable
-/// from `to` over the existing gating edges). Run within the caller's transaction.
+/// Whether adding the gating edge `(issue_id, depends_on_id)` of type `dep_type` would close a cycle.
+/// Returns the **ordered cycle path** (`Some([issue_id, …, issue_id])`, naming every node on the
+/// cycle) when it would, or `None` otherwise. Run within the caller's transaction.
+///
+/// Orientation (D4/GATE-MUST-1/GATE-MUST-4, source-cited vs `check_cycle` sqlite.rs:2440-2488,
+/// `load_dependency_cycle_graph` sqlite.rs:11379): the existing rows are oriented by
+/// [`build_gating_graph_from_typed`] — `parent-child` reversed (`parent depends_on_id -> child
+/// issue_id`), the other gating types forward (`issue_id -> depends_on_id`). The **prospective edge
+/// is oriented the SAME way as an existing row of its own type** — a `parent-child` prospective edge
+/// is inserted REVERSED (`depends_on_id -> issue_id`), every other type FORWARD
+/// (`issue_id -> depends_on_id`). This is the orientation-consistent reading of the original (whose
+/// `check_cycle` treated the prospective edge as standard-forward, a latent bug that missed pure
+/// `parent-child` cycles, e.g. the original's own `test_get_ready_issues_recursive_parent_cycle`
+/// adds three `parent-child` edges that close a cycle yet all succeed); unblock's own parent→child
+/// blocked propagation (`query.rs` pass 3) requires the consistent reversal so a mixed or
+/// `parent-child`-only cycle is caught at add-time, matching the `reparent_*_cycle_is_rejected`
+/// regression guards. Both `add_dependency` and `apply_reparent` route through here, so the
+/// orientation + the real-path reconstruction land once.
 pub(super) async fn would_cycle_in_tx(
     tx: &libsql::Transaction,
-    from: &str,
-    to: &str,
-) -> Result<bool, StorageError> {
-    // Load the existing gating edges.
+    issue_id: &str,
+    depends_on_id: &str,
+    dep_type: &DependencyType,
+) -> Result<Option<Vec<String>>, StorageError> {
+    // Load the existing gating edges WITH their type (the type is required so `parent-child` can be
+    // inserted reversed — D4/GATE-MUST-1; a type-erased load could not orient the graph).
     let placeholders: Vec<String> = (1..=GATING_TYPES.len()).map(|i| format!("?{i}")).collect();
     let sql = format!(
-        "SELECT issue_id, depends_on_id FROM dependencies WHERE type IN ({})",
+        "SELECT issue_id, depends_on_id, type FROM dependencies WHERE type IN ({})",
         placeholders.join(", ")
     );
     let params: Vec<Value> = GATING_TYPES
@@ -312,23 +338,57 @@ pub(super) async fn would_cycle_in_tx(
         .await
         .map_err(map_libsql_err)?;
 
-    let mut edges: Vec<(String, String)> = Vec::new();
+    let mut edges: Vec<(String, String, String)> = Vec::new();
     while let Some(row) = rows.next().await.map_err(map_libsql_err)? {
-        let Value::Text(issue_id) = row.get_value(0).map_err(map_libsql_err)? else {
+        let Value::Text(row_issue) = row.get_value(0).map_err(map_libsql_err)? else {
             continue;
         };
-        let Value::Text(depends_on) = row.get_value(1).map_err(map_libsql_err)? else {
+        let Value::Text(row_depends_on) = row.get_value(1).map_err(map_libsql_err)? else {
             continue;
         };
-        edges.push((issue_id, depends_on));
+        let Value::Text(type_str) = row.get_value(2).map_err(map_libsql_err)? else {
+            continue;
+        };
+        edges.push((row_issue, row_depends_on, type_str));
     }
-    // The prospective edge.
-    edges.push((from.to_string(), to.to_string()));
 
-    let (graph, index_of, _id_of) = build_petgraph(&edges);
-    // A cycle exists iff the graph (now including from->to) is not a DAG.
-    let _ = &index_of;
-    Ok(petgraph::algo::is_cyclic_directed(&graph))
+    // Build the gating graph from the EXISTING rows (the add-time guard is always gating, matching
+    // the original hardwired `blocking_only=true`), with `parent-child` reversed.
+    let mut graph = build_gating_graph_from_typed(&edges, true);
+
+    // Orient the prospective edge the same way an existing row of its own type would be oriented.
+    let prospective_is_parent_child = dep_type.as_str() == PARENT_CHILD;
+    let (graph_from, graph_to) = if prospective_is_parent_child {
+        (depends_on_id, issue_id) // reversed: parent depends_on_id -> child issue_id
+    } else {
+        (issue_id, depends_on_id) // forward: issue_id -> depends_on_id
+    };
+    graph.entry(graph_to.to_string()).or_default();
+    push_unique(graph.entry(graph_from.to_string()).or_default(), graph_to);
+
+    // The prospective edge `graph_from -> graph_to` closes a cycle iff `graph_from` is reachable from
+    // `graph_to` over the rest of the graph (there is a path `graph_to -> … -> graph_from`).
+    // Reconstruct that real ordered path and prepend `graph_from` so the witness is the full ordered
+    // cycle `[graph_from, graph_to, …, graph_from]`.
+    Ok(find_cycle_path(&graph, graph_from, graph_to).map(|tail| {
+        let mut cycle = vec![graph_from.to_string()];
+        cycle.extend(tail);
+        cycle
+    }))
+}
+
+/// Render an ordered cycle witness as the `a -> b -> c -> a` path string carried by
+/// [`StorageError::CycleDetected`]. Shared by `add_dependency` and `apply_reparent` (crud.rs).
+pub(super) fn render_cycle_path(cycle: &[String]) -> String {
+    cycle.join(" -> ")
+}
+
+/// Append `id` to `neighbours` only if it is not already present (the cycle graph stores each
+/// directed edge once, mirroring the original `dedup`).
+fn push_unique(neighbours: &mut Vec<String>, id: &str) {
+    if !neighbours.iter().any(|n| n == id) {
+        neighbours.push(id.to_string());
+    }
 }
 
 /// Load every dependency edge (`issue_id, depends_on_id, dep_type`) from the table.
@@ -350,9 +410,14 @@ async fn load_all_edges(
         let Value::Text(type_str) = row.get_value(2).map_err(map_libsql_err)? else {
             continue;
         };
+        // `DependencyType::from_str` is infallible (an unknown type parses to `Custom`), so the Err
+        // arm is unreachable — but to keep this panic-free in a lib path we map the impossible Err to
+        // a `Custom` sink rather than the former `unwrap_or(Blocks)`, which was dead code that could
+        // have fabricated a phantom gating `Blocks` edge from a malformed stored type
+        // (D5/GATE-NIT-4).
         let dep_type = type_str
             .parse::<DependencyType>()
-            .unwrap_or(DependencyType::Blocks);
+            .unwrap_or_else(|_| DependencyType::Custom(type_str.clone()));
         out.push((issue_id, depends_on, dep_type));
     }
     Ok(out)
@@ -371,36 +436,216 @@ fn adjacency(
     map
 }
 
-/// Build a `petgraph` `DiGraph` of `from -> to` id edges, returning the node-index maps.
+/// Build the cycle graph (id -> sorted, deduped neighbour ids) from typed edges, applying the D4
+/// orientation. This is the **single** orientation home (GATE-SHOULD-1); [`build_gating_graph`] is a
+/// thin wrapper over it that maps the strongly-typed [`DependencyType`] to its wire string.
+///
+/// - `parent-child` is inserted **REVERSED** (`depends_on_id -> issue_id`) regardless of
+///   `blocking_only`.
+/// - the other gating types (`blocks`/`conditional-blocks`/`waits-for`) are inserted **FORWARD**.
+/// - `blocking_only=true` admits only the 4 gating types; `=false` admits **all** types forward
+///   (with `parent-child` still reversed) — the integrity/lint view (D19).
+///
+/// Mirrors the original `load_dependency_cycle_graph` (sqlite.rs:11360-11395): a `BTreeMap` for a
+/// deterministic node order, each neighbour list sorted+deduped.
+fn build_gating_graph_from_typed(
+    edges: &[(String, String, String)],
+    blocking_only: bool,
+) -> BTreeMap<String, Vec<String>> {
+    let mut graph: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (issue_id, depends_on, type_str) in edges {
+        let is_parent_child = type_str == PARENT_CHILD;
+        let admit = if blocking_only {
+            GATING_TYPES.contains(&type_str.as_str())
+        } else {
+            true
+        };
+        if !admit {
+            continue;
+        }
+        // Determine orientation: parent-child reversed (parent depends_on -> child issue_id);
+        // everything else forward (issue_id -> depends_on).
+        let (from, to) = if is_parent_child {
+            (depends_on, issue_id)
+        } else {
+            (issue_id, depends_on)
+        };
+        graph.entry(to.clone()).or_default();
+        push_unique(graph.entry(from.clone()).or_default(), to);
+    }
+    for neighbours in graph.values_mut() {
+        neighbours.sort();
+        neighbours.dedup();
+    }
+    graph
+}
+
+/// Build the cycle graph from strongly-typed edges (the [`detect_cycles`] entry point), delegating to
+/// [`build_gating_graph_from_typed`] — the single D4-orientation home.
+fn build_gating_graph(
+    edges: &[(String, String, DependencyType)],
+    blocking_only: bool,
+) -> BTreeMap<String, Vec<String>> {
+    let typed: Vec<(String, String, String)> = edges
+        .iter()
+        .map(|(from, to, dep_type)| (from.clone(), to.clone(), dep_type.as_str().to_string()))
+        .collect();
+    build_gating_graph_from_typed(&typed, blocking_only)
+}
+
+/// Reconstruct the ordered path `start -> … -> target` within the cycle graph (an iterative DFS),
+/// or `None` if `target` is unreachable from `start`. The returned path **begins at `start` and ends
+/// at `target`** (both endpoints named). Mirrors the original `find_cycle_graph_path`
+/// (sqlite.rs:10664-10692).
+fn find_cycle_path(
+    graph: &BTreeMap<String, Vec<String>>,
+    target: &str,
+    start: &str,
+) -> Option<Vec<String>> {
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut stack: Vec<(String, Vec<String>)> = vec![(start.to_string(), vec![start.to_string()])];
+
+    while let Some((node, path)) = stack.pop() {
+        if node == target {
+            return Some(path);
+        }
+        if !visited.insert(node.clone()) {
+            continue;
+        }
+        if let Some(neighbours) = graph.get(&node) {
+            // Reverse so the smallest neighbour is popped first (deterministic, mirrors the original).
+            for neighbour in neighbours.iter().rev() {
+                if !visited.contains(neighbour) {
+                    let mut next = path.clone();
+                    next.push(neighbour.clone());
+                    stack.push((neighbour.clone(), next));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Emit one ordered witness per cyclic strongly-connected component of the cycle graph, sorted
+/// deterministically. A size-1 component is a cycle only if it has a self-loop (→ `[node, node]`);
+/// a larger cyclic component is reconstructed as `[start, …, start]`. Mirrors the original
+/// `cycle_witnesses_with_components_from_graph` (sqlite.rs:11417-11442).
+fn cycle_witnesses(graph: &BTreeMap<String, Vec<String>>) -> Vec<Vec<String>> {
+    let (petgraph, id_of) = build_petgraph(graph);
+    let sccs = petgraph::algo::tarjan_scc(&petgraph);
+
+    let mut cycles: Vec<Vec<String>> = Vec::new();
+    for scc in sccs {
+        if scc.len() == 1 {
+            let node = &id_of[&scc[0]];
+            // A single node is a cycle only if it carries a self-edge.
+            if graph
+                .get(node)
+                .is_some_and(|neighbours| neighbours.iter().any(|n| n == node))
+            {
+                cycles.push(vec![node.clone(), node.clone()]);
+            }
+            continue;
+        }
+        let component: HashSet<&str> = scc.iter().map(|n| id_of[n].as_str()).collect();
+        if let Some(cycle) = witness_for_component(graph, &component) {
+            cycles.push(cycle);
+        }
+    }
+
+    // Deterministic outer order (NFR-14): sort by the witness itself.
+    cycles.sort();
+    cycles
+}
+
+/// Reconstruct an ordered `[start, …, start]` witness for a multi-node cyclic component. `start` is
+/// the component's lexicographically-smallest node (deterministic); the path runs from a same-component
+/// neighbour of `start` back to `start`. Mirrors `cycle_witness_for_component` (sqlite.rs:11514).
+fn witness_for_component(
+    graph: &BTreeMap<String, Vec<String>>,
+    component: &HashSet<&str>,
+) -> Option<Vec<String>> {
+    let start = component.iter().copied().min()?;
+    let neighbours = graph.get(start)?;
+    for neighbour in neighbours {
+        if neighbour.as_str() == start || !component.contains(neighbour.as_str()) {
+            continue;
+        }
+        if let Some(tail) = find_cycle_path_in_component(graph, start, neighbour, component) {
+            let mut cycle = vec![start.to_string()];
+            cycle.extend(tail);
+            return Some(cycle);
+        }
+    }
+    None
+}
+
+/// DFS from `start_neighbour` back to `target` confined to `component`, returning the node path
+/// (including `start_neighbour`, ending at `target`). Mirrors the component-confined
+/// `find_cycle_graph_path` (sqlite.rs:10664).
+fn find_cycle_path_in_component(
+    graph: &BTreeMap<String, Vec<String>>,
+    target: &str,
+    start_neighbour: &str,
+    component: &HashSet<&str>,
+) -> Option<Vec<String>> {
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut stack: Vec<(String, Vec<String>)> = vec![(
+        start_neighbour.to_string(),
+        vec![start_neighbour.to_string()],
+    )];
+
+    while let Some((node, path)) = stack.pop() {
+        if node == target {
+            return Some(path);
+        }
+        if !visited.insert(node.clone()) {
+            continue;
+        }
+        if let Some(neighbours) = graph.get(&node) {
+            for neighbour in neighbours.iter().rev() {
+                if component.contains(neighbour.as_str()) && !visited.contains(neighbour) {
+                    let mut next = path.clone();
+                    next.push(neighbour.clone());
+                    stack.push((neighbour.clone(), next));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Build a `petgraph` `DiGraph` from the cycle graph (id -> neighbour ids), returning the
+/// node-index → id map (used to translate Tarjan SCC results back to ids). `petgraph` stays a
+/// **private** dependency (no petgraph type appears in any public signature).
 fn build_petgraph(
-    edges: &[(String, String)],
+    graph: &BTreeMap<String, Vec<String>>,
 ) -> (
-    DiGraph<(), ()>,
-    HashMap<String, NodeIndex>,
-    HashMap<NodeIndex, String>,
+    petgraph::graph::DiGraph<(), ()>,
+    HashMap<petgraph::graph::NodeIndex, String>,
 ) {
-    let mut graph = DiGraph::new();
+    use petgraph::graph::{DiGraph, NodeIndex};
+
+    let mut digraph = DiGraph::new();
     let mut index_of: HashMap<String, NodeIndex> = HashMap::new();
     let mut id_of: HashMap<NodeIndex, String> = HashMap::new();
 
-    let node = |graph: &mut DiGraph<(), ()>,
-                index_of: &mut HashMap<String, NodeIndex>,
-                id_of: &mut HashMap<NodeIndex, String>,
-                id: &str|
-     -> NodeIndex {
+    let mut node = |digraph: &mut DiGraph<(), ()>, id: &str| -> NodeIndex {
         if let Some(idx) = index_of.get(id) {
             return *idx;
         }
-        let idx = graph.add_node(());
+        let idx = digraph.add_node(());
         index_of.insert(id.to_string(), idx);
         id_of.insert(idx, id.to_string());
         idx
     };
 
-    for (from, to) in edges {
-        let a = node(&mut graph, &mut index_of, &mut id_of, from);
-        let b = node(&mut graph, &mut index_of, &mut id_of, to);
-        graph.update_edge(a, b, ());
+    for (from, neighbours) in graph {
+        let a = node(&mut digraph, from);
+        for to in neighbours {
+            let b = node(&mut digraph, to);
+            digraph.update_edge(a, b, ());
+        }
     }
-    (graph, index_of, id_of)
+    (digraph, id_of)
 }

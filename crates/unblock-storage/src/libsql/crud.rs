@@ -674,10 +674,20 @@ async fn apply_reparent(
         if parent_id == id {
             return Err(StorageError::SelfDependency);
         }
-        // Cycle check over the gating graph (a parent-child edge gates ready work).
-        if super::deps::would_cycle_in_tx(tx, id, &parent_id).await? {
+        // Cycle check over the gating graph (a parent-child edge gates ready work). Reuses the same
+        // `would_cycle_in_tx` as `add_dependency`, so the reparent cycle path is the REAL ordered
+        // path naming every node — built from the SAME detecting graph, not a synthetic
+        // `{id} -> {parent_id} -> … -> {id}` placeholder (D2/GATE-MUST-3, spine §3.2.1).
+        if let Some(cycle) = super::deps::would_cycle_in_tx(
+            tx,
+            id,
+            &parent_id,
+            &unblock_model::DependencyType::ParentChild,
+        )
+        .await?
+        {
             return Err(StorageError::CycleDetected {
-                path: format!("{id} -> {parent_id} -> … -> {id}"),
+                path: super::deps::render_cycle_path(&cycle),
             });
         }
         tx.execute(

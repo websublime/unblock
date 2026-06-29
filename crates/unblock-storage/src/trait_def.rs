@@ -251,10 +251,17 @@ pub trait Storage: Send + Sync {
     /// edge); a non-empty `roots` returns the union of the subgraphs reachable from those roots.
     async fn dependency_graph(&self, roots: &[String]) -> Result<DepTree, StorageError>;
 
-    /// Detect every dependency cycle, returning each as a path of ids.
+    /// Detect every dependency cycle, returning each as an **ordered traversal witness**: a
+    /// multi-node cycle is `[start, …, start]` (the start repeated at the end), a self-loop is
+    /// `[node, node]`; an acyclic graph returns `[]`. The outer `Vec` is deterministically ordered
+    /// (NFR-14). NOT a sorted SCC node set (spine §3.2.1, D3).
     ///
-    /// Considers only the gating edge set (`DependencyType::affects_ready_work`).
-    async fn detect_cycles(&self) -> Result<Vec<Vec<String>>, StorageError>;
+    /// `blocking_only=true` restricts the cycle graph to the 4 gating types
+    /// (`DependencyType::affects_ready_work`) — the ready-work view; `=false` considers **all**
+    /// dependency types — the integrity/lint view. `parent-child` is inserted reversed regardless
+    /// (D4/D19). The trait takes a bare `bool`; the default-TRUE (gating-only) is a wire-only
+    /// contract on the MCP `Cycles` input (spine §5.2).
+    async fn detect_cycles(&self, blocking_only: bool) -> Result<Vec<Vec<String>>, StorageError>;
 
     // ---------------------------------------------------------------------------------------------
     // events (audit; append-only)
@@ -444,7 +451,10 @@ mod tests {
             })
         }
 
-        async fn detect_cycles(&self) -> Result<Vec<Vec<String>>, StorageError> {
+        async fn detect_cycles(
+            &self,
+            _blocking_only: bool,
+        ) -> Result<Vec<Vec<String>>, StorageError> {
             Ok(Vec::new())
         }
 

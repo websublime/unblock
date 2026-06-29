@@ -673,8 +673,8 @@ impl Storage for LibsqlStorage {
         deps::dependency_graph(self.read(), roots).await
     }
 
-    async fn detect_cycles(&self) -> Result<Vec<Vec<String>>, StorageError> {
-        deps::detect_cycles(self.read()).await
+    async fn detect_cycles(&self, blocking_only: bool) -> Result<Vec<Vec<String>>, StorageError> {
+        deps::detect_cycles(self.read(), blocking_only).await
     }
 
     async fn list_events(&self, issue_id: &str) -> Result<Vec<Event>, StorageError> {
