@@ -304,6 +304,108 @@ async fn reparent_cycle_is_rejected() {
     assert_eq!(err.code().exit_code(), 5);
 }
 
+/// M-E2 [AC #1] — a cycle-closing `add_dep` surfaces the `CycleDetected` path through the
+/// Storage→Engine transparent mapping, and the path NAMES the cycle nodes (not just the code). The
+/// transparent `EngineError::Storage` source is downcast to reach `StorageError::CycleDetected.path`.
+#[tokio::test]
+async fn add_dep_cycle_surfaces_named_path_through_engine() {
+    let session = session().await;
+    for (id, secs) in [("ub-a", 1000), ("ub-b", 1001)] {
+        session
+            .create(&issue(id, Priority::MEDIUM, secs))
+            .await
+            .expect("create");
+    }
+    add_blocks(&session, "ub-a", "ub-b").await; // a -> b
+    // b -> a closes the cycle.
+    let cyclic = Dependency {
+        issue_id: "ub-b".to_string(),
+        depends_on_id: "ub-a".to_string(),
+        dep_type: DependencyType::Blocks,
+        created_at: chrono::Utc::now(),
+        created_by: Some("tester".to_string()),
+        metadata: None,
+        thread_id: None,
+    };
+    let err = session.add_dep(&cyclic).await.expect_err("cycle");
+    assert_eq!(err.code(), ErrorCode::CycleDetected);
+
+    // Reach the actual path: the transparent storage source carries `CycleDetected { path }`.
+    match err {
+        EngineError::Storage {
+            source: unblock_storage::StorageError::CycleDetected { path },
+        } => {
+            assert!(
+                path.contains("ub-a") && path.contains("ub-b"),
+                "the engine-surfaced cycle path names the cycle nodes: {path}"
+            );
+            let nodes: Vec<&str> = path.split(" -> ").collect();
+            assert_eq!(
+                nodes.first(),
+                nodes.last(),
+                "the path is an ordered cycle [start, …, start]: {path}"
+            );
+            assert!(!path.contains('…'), "no synthetic placeholder: {path}");
+        }
+        other => panic!("expected a transparent CycleDetected, got {other:?}"),
+    }
+}
+
+/// M-E5 — engine error-code mapping for the dependency write surface: duplicate →
+/// `DuplicateDependency`, self-edge → `SelfDependency`, removing a missing edge →
+/// `DependencyNotFound` (storage covers these; the engine forward was unproven).
+#[tokio::test]
+async fn add_remove_dep_error_codes_map_through_engine() {
+    let session = session().await;
+    for (id, secs) in [("ub-a", 1000), ("ub-b", 1001)] {
+        session
+            .create(&issue(id, Priority::MEDIUM, secs))
+            .await
+            .expect("create");
+    }
+    add_blocks(&session, "ub-a", "ub-b").await;
+
+    // Duplicate edge.
+    let dup = Dependency {
+        issue_id: "ub-a".to_string(),
+        depends_on_id: "ub-b".to_string(),
+        dep_type: DependencyType::Blocks,
+        created_at: chrono::Utc::now(),
+        created_by: Some("tester".to_string()),
+        metadata: None,
+        thread_id: None,
+    };
+    assert_eq!(
+        session.add_dep(&dup).await.expect_err("dup").code(),
+        ErrorCode::DuplicateDependency
+    );
+
+    // Self-edge.
+    let self_edge = Dependency {
+        issue_id: "ub-a".to_string(),
+        depends_on_id: "ub-a".to_string(),
+        dep_type: DependencyType::Blocks,
+        created_at: chrono::Utc::now(),
+        created_by: Some("tester".to_string()),
+        metadata: None,
+        thread_id: None,
+    };
+    assert_eq!(
+        session.add_dep(&self_edge).await.expect_err("self").code(),
+        ErrorCode::SelfDependency
+    );
+
+    // Remove a non-existent edge.
+    assert_eq!(
+        session
+            .remove_dep("ub-b", "ub-a", &DependencyType::Blocks)
+            .await
+            .expect_err("missing")
+            .code(),
+        ErrorCode::DependencyNotFound
+    );
+}
+
 #[tokio::test]
 async fn close_with_suggestions_returns_newly_unblocked() {
     let session = session().await;
@@ -822,6 +924,18 @@ async fn reparent_via_patch_cycle_is_rejected() {
         5,
         "CycleDetected must map to exit code 5"
     );
+    // The reparent cycle path is the REAL ordered path naming both nodes (D2) — not a placeholder.
+    match err {
+        EngineError::Storage {
+            source: unblock_storage::StorageError::CycleDetected { path },
+        } => {
+            assert!(
+                path.contains("ub-a") && path.contains("ub-b") && !path.contains('…'),
+                "the reparent cycle path names every node, no placeholder: {path}"
+            );
+        }
+        other => panic!("expected a transparent CycleDetected, got {other:?}"),
+    }
 
     // DB unchanged: the original ub-b->ub-a edge SURVIVES (the cyclic tx was rolled back).
     // Verify via the whole dependency graph — no parent-child edge FROM ub-a should exist,

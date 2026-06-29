@@ -9,9 +9,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::parked::ParkedStorage;
-use common::{add_blocks, issue, seed_open, session, session_over};
+use common::{add_blocks, dep, issue, seed_open, session, session_over};
 use unblock_engine::{DiagnosticKind, IssuePatch};
-use unblock_model::{CountGroupBy, Issue, IssueType, ListFilters, Priority, Status};
+use unblock_model::{
+    CountGroupBy, DependencyType, Issue, IssueType, ListFilters, Priority, Status,
+};
 
 #[tokio::test]
 async fn ready_excludes_blocked_deferred_closed_and_reflects_edge_change() {
@@ -55,6 +57,169 @@ async fn ready_excludes_blocked_deferred_closed_and_reflects_edge_change() {
         .map(|i| i.id)
         .collect();
     assert_eq!(ready_after, vec!["ub-b".to_string()]);
+}
+
+/// M-E1 [AC #2 headline] — `ready` reflects an edge change immediately, proven through `remove_dep`
+/// (the existing `ready_excludes_blocked_deferred_closed_and_reflects_edge_change` only proves ADD +
+/// CLOSE, never `remove_dep`). Non-vacuous: ub-b is absent from `ready` while the edge exists and
+/// present once it is removed.
+#[tokio::test]
+async fn ready_reflects_remove_dep_immediately() {
+    let session = session().await;
+    for (id, secs) in [("ub-a", 1000), ("ub-b", 1001)] {
+        session
+            .create(&issue(id, Priority::MEDIUM, secs))
+            .await
+            .expect("create");
+    }
+    // ub-b is blocked by ub-a.
+    add_blocks(&session, "ub-b", "ub-a").await;
+    let ready_ids: Vec<String> = session
+        .ready(&ListFilters::default())
+        .await
+        .expect("ready")
+        .into_iter()
+        .map(|i| i.id)
+        .collect();
+    assert_eq!(
+        ready_ids,
+        vec!["ub-a".to_string()],
+        "ub-b is absent while the blocks edge exists"
+    );
+
+    // Remove the blocking edge → ub-b becomes ready immediately (FR-5 AC, the remove half).
+    session
+        .remove_dep("ub-b", "ub-a", &unblock_model::DependencyType::Blocks)
+        .await
+        .expect("remove_dep");
+    let ready_after: Vec<String> = session
+        .ready(&ListFilters::default())
+        .await
+        .expect("ready")
+        .into_iter()
+        .map(|i| i.id)
+        .collect();
+    assert!(
+        ready_after.contains(&"ub-b".to_string()),
+        "ub-b is present once the edge is removed: {ready_after:?}"
+    );
+}
+
+/// M-E3 — `Session::list_dependencies` round-trips an added edge (closes the spine §4.1
+/// self-inconsistency at the engine layer — D1).
+#[tokio::test]
+async fn list_dependencies_round_trips_an_added_edge() {
+    let session = session().await;
+    for (id, secs) in [("ub-a", 1000), ("ub-b", 1001)] {
+        session
+            .create(&issue(id, Priority::MEDIUM, secs))
+            .await
+            .expect("create");
+    }
+    add_blocks(&session, "ub-a", "ub-b").await; // ub-a depends on ub-b
+
+    let deps = session
+        .list_dependencies("ub-a")
+        .await
+        .expect("list_dependencies");
+    assert_eq!(deps.len(), 1, "exactly the one declared edge");
+    assert_eq!(deps[0].issue_id, "ub-a");
+    assert_eq!(deps[0].depends_on_id, "ub-b");
+    assert_eq!(deps[0].dep_type, unblock_model::DependencyType::Blocks);
+    // The other endpoint declares nothing.
+    assert!(
+        session
+            .list_dependencies("ub-b")
+            .await
+            .expect("list")
+            .is_empty(),
+        "ub-b declares no edges"
+    );
+}
+
+/// M-E4 — `Session::dependency_tree` returns the subtree for a Blocks chain; `Session::detect_cycles`
+/// is `[]` on acyclic and a non-empty ordered witness after a planted cycle (these two forwards had
+/// zero engine coverage).
+#[tokio::test]
+async fn dependency_tree_and_detect_cycles_forwards() {
+    let session = session().await;
+    for (id, secs) in [("ub-a", 1000), ("ub-b", 1001), ("ub-c", 1002)] {
+        session
+            .create(&issue(id, Priority::MEDIUM, secs))
+            .await
+            .expect("create");
+    }
+    // a -> b -> c (blocks chain).
+    add_blocks(&session, "ub-a", "ub-b").await;
+    add_blocks(&session, "ub-b", "ub-c").await;
+
+    let tree = session.dependency_tree("ub-a").await.expect("tree");
+    assert_eq!(tree.root, "ub-a");
+    let edges: Vec<(&str, &str)> = tree
+        .edges
+        .iter()
+        .map(|e| (e.from.as_str(), e.to.as_str()))
+        .collect();
+    assert_eq!(edges, vec![("ub-a", "ub-b"), ("ub-b", "ub-c")]);
+
+    // Acyclic → no cycles, for both blocking_only views.
+    assert!(
+        session
+            .detect_cycles(true)
+            .await
+            .expect("cycles")
+            .is_empty()
+    );
+    assert!(
+        session
+            .detect_cycles(false)
+            .await
+            .expect("cycles")
+            .is_empty()
+    );
+
+    // A NON-gating back-edge (`related`) is accepted (it never gates a cycle), yet
+    // `detect_cycles(false)` (all dep types) reports a non-empty ORDERED witness over the related
+    // pair while `detect_cycles(true)` (gating-only) stays []. This proves the witness surfaces
+    // end-to-end through the Session forward AND the `blocking_only` filter, without the storage
+    // testkit seam. (A gating cycle is rejected at add-time; its witness shape is proven at storage
+    // via M-S2.)
+    for (id, secs) in [("ub-rel-a", 2000), ("ub-rel-b", 2001)] {
+        session
+            .create(&issue(id, Priority::MEDIUM, secs))
+            .await
+            .expect("create related node");
+    }
+    session
+        .add_dep(&dep("ub-rel-a", "ub-rel-b", DependencyType::Related))
+        .await
+        .expect("related edge accepted");
+    session
+        .add_dep(&dep("ub-rel-b", "ub-rel-a", DependencyType::Related))
+        .await
+        .expect("the reverse related edge is accepted");
+    let all_cycles = session.detect_cycles(false).await.expect("cycles");
+    assert!(
+        !all_cycles.is_empty(),
+        "the all-types view reports the related cycle: {all_cycles:?}"
+    );
+    let witness = all_cycles
+        .iter()
+        .find(|w| w.iter().any(|n| n == "ub-rel-a") && w.iter().any(|n| n == "ub-rel-b"))
+        .expect("a witness over the related pair");
+    assert_eq!(
+        witness.first(),
+        witness.last(),
+        "the witness is an ordered cycle [start, …, start]: {witness:?}"
+    );
+    assert!(
+        session
+            .detect_cycles(true)
+            .await
+            .expect("cycles")
+            .is_empty(),
+        "the gating-only view does NOT see a related cycle"
+    );
 }
 
 #[tokio::test]
