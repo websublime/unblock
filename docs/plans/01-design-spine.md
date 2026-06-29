@@ -244,6 +244,7 @@ pub struct EpicStatus {                    // [v1.1] derived rollup
   - **Canonical byte stream (NORMATIVE — frozen; Q4 = KEEP, the model crate plan `unblock-model.md`).** Each field above is appended to the SHA-256 stream as `bytes(value) ++ 0x00` (a single `0x00` separator after *every* field, including the last). `None` → empty string `""`; a `false` boolean flag → empty string `""` while a `true` flag → its label (`"pinned"` / `"template"`); `priority` is the decimal integer of `priority.0` (e.g. `"2"`, **not** `"P2"`); the final digest is rendered lowercase `{:02x}` per byte (64 hex chars). **After `is_template`** the stream appends a **frozen 17-field Go-bd zero-value padding tail** so a Rust `content_hash` stays byte-for-byte identical to a `bd`-exported hash (FR-26 / D16 idempotent one-shot `bd` import). The tail, in exact order, is: `"" , false-flag("crystallizes")→"" , "" , "" , "0" , "" , "" , "" , "" , "" , "" , "" , "" , "" , "" , "" , ""` — i.e. **15 empty strings, one `"0"` (the Go `timeout` duration zero value) at position 5, and the single `false` crystallizes-flag at position 2** (which, being `false`, also serializes as `""`). Go-bd source-field correspondence (documentation only — Rust does not model these): `quality_score, crystallizes, await_type, await_id, timeout, holder, hook_bead, role_bead, agent_state, role_type, rig, mol_type, work_type, event_kind, actor, target, payload`. This tail is **frozen** and is locked by a golden `insta` hash snapshot (`tests/golden_hash.rs`); changing it would break `bd` import idempotency and is a breaking change requiring a spine amendment.
 - **`sync_equals(&self, other) -> bool`** — semantic equality for import/export boundaries. Compares the full synced payload (incl. `due_at`, `defer_until`, tombstone fields, compaction fields, and relations **order-independent**: labels deduped+sorted; deps and comments sorted by a fixed key tuple). Treats `compaction_level == None` as `0`. Ignores volatile audit-only fields. This is the import "is this line a no-op?" predicate, not derived `PartialEq`.
 - **Tombstone** — delete sets `status = Tombstone` + `deleted_at`/`deleted_by`/`delete_reason` (and `original_type` preserved). `is_expired_tombstone(retention_days: Option<u64>) -> bool` (TTL helper). Invariant: **import NEVER resurrects a tombstone** — a non-tombstone JSONL line for an id that is tombstoned in the DB is rejected/skipped, not applied.
+- **Restore (D20)** — the live, audited **INVERSE of delete** (satisfies FR-1c "recoverable"). A dedicated `Storage::restore_issue`/`Session::restore` un-tombstones a SOFT-deleted issue: it **clears `original_type`** (→ `None`), **NEVER touches `issue_type`** (the live `issue_type` on a tombstone is already correct — `into_tombstone` only snapshots, never mutates it), sets `status` **best-effort via `closed_at`** (`closed_at.is_some() ? Closed : Open` — only `closed_at` survives as the was-Closed signal; pre-delete status is not preserved), and **clears `closed_at` on a restore-to-non-terminal** (the Closed branch keeps it — both the signal and the CHECK-constraint satisfier). A round-trip helper `Issue::restore_from_tombstone` (the pure inverse of `into_tombstone`, no clock) backs it. TTL-aware refusal of an expired tombstone is a **v1.1 seam** (`deletions_retention_days` is reserved/unenforced in v1). Restore is a **live engine op, NOT an import** — it is **DISJOINT** from the import no-resurrection invariant above (which stays unchanged and import-path-scoped). See §3/§3.2.1/§4.1.
 
 ### 1.9 Validation + shared contract types
 
@@ -598,6 +599,8 @@ pub trait Storage: Send + Sync {
     async fn get_issues(&self, ids: &[String]) -> Result<Vec<Issue>, StorageError>;
     async fn update_issue(&self, id: &str, patch: &IssuePatch, actor: &str) -> Result<Issue, StorageError>;
     async fn delete_issue(&self, plan: &DeletePlan, actor: &str) -> Result<DeletePlan, StorageError>; // DryRun mutates nothing
+    async fn restore_issue(&self, id: &str, actor: &str) -> Result<Issue, StorageError>; // FR-1c (D20) — un-tombstone (single id);
+    //   already-active → idempotent no-op Ok(issue) (no event, no updated_at bump); missing/hard-deleted id → IssueNotFound. §3.2.1.
 
     // --- atomic claim (FR-2): single mutation sets assignee + in_progress, no race window ---
     async fn claim_issue(&self, id: &str, assignee: &str, actor: &str) -> Result<Issue, StorageError>;
@@ -665,13 +668,61 @@ between an earlier prose description and the source are resolved **in favour of 
   `SET`, no `updated_at`, no `Event`** (`if set_clauses.is_empty() { return Ok }`). `updated_at` advances
   and `content_hash` is recomputed **only** when at least one stored column changes. Per-field events
   (see the EventType-per-mutation table below) are emitted **only when the field's value actually
-  changes** (e.g. patching `status`→its current value emits no `StatusChanged`).
+  changes** (e.g. patching `status`→its current value emits no `StatusChanged`). **Tombstone-patch guard
+  (crud.rs:332-334, SSOT):** a patch targeting a **tombstone** is rejected with **`IssueNotFound`** before any
+  `SET` — a tombstone cannot be reopened/edited via `update`, so the only un-tombstone path is `restore`
+  (see the `restore_issue` carve-out below). This guard is what makes `restore` STRUCTURALLY separate from the
+  reopen=update mapping (§5.2) and is cited by the §3.2.1 `restore_issue` step, the §4.1 `Session::restore` seam
+  note, and the §5.2 `Reopen`/`Restore` notes — all of which point HERE as the normative source.
 - **`delete_issue` (sqlite.rs:2952–3015) — delegate to the model `Issue::into_tombstone`** (which sets
   `status = Tombstone` + `deleted_*` and preserves `original_type`), then bump `updated_at = now` and
   recompute `content_hash`. **`Event(Deleted)` is written ONLY when the prior status was non-terminal**
   (`!was_terminal`): tombstoning an already-`Closed` issue records **no** `Deleted` event. An
   already-tombstone target is a **no-op `Ok`**. One tx. (The model-B schema drops the original's
   `close_metadata` table, so its cleanup `DELETE` is removed.)
+- **`restore_issue` (net-new; D20) — the audited live INVERSE of `delete_issue`'s soft tombstone.** One
+  `BEGIN IMMEDIATE` tx, TOCTOU-safe: **load the row inside the tx**. (1) **Missing → `IssueNotFound`** (this
+  bounds FR-1c "recoverable" to SOFT deletes — a Hard-deleted row is gone; restore does **not** mint a new
+  `NotATombstone` ErrorCode, keeping the frozen unblock-error golden / exit-code table / retryable set
+  untouched). (2) **Not a tombstone → idempotent no-op `Ok(issue)`** — **no event, no `updated_at` bump**
+  (mirrors delete's already-tombstone no-op and claim's same-actor short-circuit; retry-safe). (3) **Real
+  tombstone → one `UPDATE`** delegating to the model `Issue::restore_from_tombstone` (the pure inverse of
+  `into_tombstone`), which:
+  - sets `status` **best-effort via `closed_at`** — `if closed_at.is_some() { Closed } else { Open }` (D20,
+    DECISION 1). The pre-delete status is NOT preserved (only `original_type` survives); `closed_at` being
+    set is the **only** signal the issue was Closed before deletion. Open and Closed round-trip exactly;
+    InProgress/Blocked/Deferred collapse to Open (that information is genuinely lost — acceptable).
+  - **leaves `issue_type` UNTOUCHED** (DECISION 3): `into_tombstone` never mutates `issue_type` (it only
+    snapshots `original_type` from the live `issue_type`), so the live `issue_type` on a tombstone is
+    ALREADY correct. Writing `original_type`→`issue_type` would be a no-op for local deletes and would
+    **CORRUPT** imported rows where the serde-carried `original_type` diverges from `issue_type`.
+  - **clears `original_type` → `None`** (the empty-string DB column → `None` on load), returning the row to a
+    clean active issue.
+  - **clears the tombstone fields**: `deleted_at` → NULL, `deleted_by` → `''`, `delete_reason` → `''`.
+  - **`closed_at` handling is CORRECTNESS-CRITICAL** (driven by the issues-table CHECK constraint, below):
+    the **Open** branch sets `closed_at` → NULL (defensive; it is already NULL on a tombstone); the **Closed**
+    branch **KEEPS** the existing `closed_at` (it is both the status signal AND what satisfies the CHECK for
+    `status='closed'`).
+  - bumps `updated_at = now` and **recomputes `content_hash`** from the restored fields (the hash includes
+    `status`, so for a was-Closed issue it legitimately differs from the pre-delete hash — correct, not a bug).
+  - appends a single **`Event(Restored)`** (D20, DECISION 2 — see the EventType table carve-out; restore is a
+    DEDICATED path and emits ONLY `Restored`, never `StatusChanged`/`Reopened`).
+  Returns the restored `Issue` (the impl re-reads via `get_issue` so labels/deps/comments hydrate). **The
+  re-read runs in-tx (or post-commit while still holding the write permit); since the row was just written, a
+  `None` re-read is an INTERNAL INVARIANT VIOLATION → a `Backend` error, NEVER `IssueNotFound`** (mirroring how
+  `claim_issue` re-`SELECT`s the holder in-tx — a just-written row that reads back absent is corruption, not a
+  caller-facing "not found"). A restored
+  issue **re-enters the dependency graph with its surviving edges** (soft tombstone keeps deps/labels/comments
+  rows) — it may be **immediately blocked-by/blocking** live issues (the inverse of close's newly-unblocked);
+  no relation-rehydration logic is added (`policy never_includes_tombstoned` already filters tombstones from
+  `ready`; the live-adjacent-to-tombstone case is distinct and fine). **CHECK-constraint correctness:** the
+  issues-table constraint `(status='closed' AND closed_at IS NOT NULL) OR (status='tombstone') OR (status NOT
+  IN ('closed','tombstone') AND closed_at IS NULL)` makes the `closed_at` handling correctness-critical, not
+  hygiene — a missed clear/keep → CHECK fails → tx rollback → silent restore failure. **Single-target only
+  (D20, DECISION 4):** `restore_issue` is scalar — NO `--cascade`, NO ancestor guard (the tombstone records no
+  "deleted-by-cascade" provenance, so a blanket cascade-restore would over-revive children tombstoned
+  independently); cascade-restore is a **v1.1 seam** (needs a delete-batch identity). The `deletions_retention_days`
+  TTL is **reserved/unenforced in v1**; a TTL-aware refusal of an expired tombstone is a v1.1 seam.
 - **`claim_issue` (sqlite.rs:2888–2935) — assignee-ONLY guard, no status predicate.** The atomic claim
   `UPDATE` carries `WHERE id = ? AND (assignee IS NULL OR TRIM(assignee) = '' OR assignee = ?<actor>)`
   — there is **no** `status NOT IN (...)` predicate. 0 rows affected → re-`SELECT` the current holder
@@ -817,9 +868,20 @@ no `Claimed`**. Each mutation emits exactly:
 | defer / undefer | `Updated` |
 | delete (tombstone from non-terminal) | `Deleted` |
 | delete (from terminal / already-tombstone) | **none** |
+| restore (tombstone → active) | `Restored` |
+| restore (already-active / missing target) | **none** |
 | add / remove dependency | `DependencyAdded` / `DependencyRemoved` |
 | comment | `Commented` |
 | add / remove label | `LabelAdded` / `LabelRemoved` |
+
+> **NOTE (restore carve-out — the T0.7 oracle is normative here).** `restore` (D20) is a **DEDICATED** path
+> that emits **ONLY `Restored`**. Although a tombstone→active restore is a terminal→non-terminal transition,
+> restore does **NOT** traverse the generic `update status` rule above: it emits **no `Reopened`** and **no
+> `StatusChanged`** (mirroring the way `delete`/`tombstone_one` emits a single `Deleted`, not `StatusChanged`).
+> The generic `Reopened` is reserved for the `update`-patch path (a tombstone cannot be patched via `update` —
+> the **tombstone-patch guard** fires first, see the `update_issue` bullet above, crud.rs:332-334, the SSOT), so
+> the two never collide. This carve-out is the test oracle — do not let an implementer reuse the update
+> terminal→non-terminal logic for restore.
 
 ### 3.3 libsql impl notes (normative for `unblock-storage`)
 
@@ -979,6 +1041,12 @@ impl Session {
     pub async fn create(&self, issue: &Issue) -> Result<String, EngineError>;
     pub async fn update(&self, id: &str, patch: &IssuePatch) -> Result<Issue, EngineError>;
     pub async fn delete(&self, plan: &DeletePlan) -> Result<DeletePlan, EngineError>;
+    pub async fn restore(&self, id: &str) -> Result<Issue, EngineError>; // FR-1c recovery (D20) — un-tombstone
+    //   (acquires the write permit for its whole tx; delegates to storage.restore_issue; the engine supplies
+    //   the actor). SEAM: restore is STRUCTURALLY distinct from the reopen=update mapping (§5.2). A tombstone
+    //   CANNOT be patched via `update` — the update tombstone-patch guard (crud.rs:332-334) fires first (SSOT:
+    //   §3.2.1 `update_issue`), so reopen=update never reaches a tombstone; restore is the dedicated
+    //   terminal(tombstone)→active path and emits ONLY `Event(Restored)` (§3.2.1 carve-out). Do NOT unify them.
     pub async fn claim(&self, id: &str, assignee: &str) -> Result<Issue, EngineError>;      // FR-2
     pub async fn defer(&self, id: &str, until: DateTime<Utc>) -> Result<Issue, EngineError>;
     pub async fn undefer(&self, id: &str) -> Result<Issue, EngineError>;
@@ -1023,7 +1091,7 @@ impl Session {
 
 | # | Tool | Discriminator | Maps to |
 |---|---|---|---|
-| 1 | `issue` | `action: create\|show\|update\|close\|reopen\|delete` | FR-1a/1b/1c |
+| 1 | `issue` | `action: create\|show\|update\|close\|reopen\|delete\|restore` | FR-1a/1b/1c |
 | 2 | `claim` | (none) | FR-2 |
 | 3 | `defer` | `action: defer\|undefer` | FR-3 |
 | 4 | `query` | `kind: list\|ready\|blocked\|search\|count\|stale` | FR-4 |
@@ -1066,6 +1134,13 @@ pub enum IssueInput {
     // There is deliberately no `Session::reopen` — reopen is an update patch (consistent with the
     // single-id update surface).
     Delete { ids: Vec<String>, #[serde(default)] mode: DeleteModeInput, #[serde(flatten)] attribution: Attribution },
+    Restore { id: String, #[serde(flatten)] attribution: Attribution },
+    // Seam note (D20 — FR-1c "recoverable"): `Restore` is SINGLE-ID (scalar, non-cascading per D20 DECISION 4 —
+    // no `ids: Vec<_>`, unlike `Delete`) and maps to `Session::restore(id)` — NOT to `Session::update`. A
+    // tombstone cannot be reopened via the update patch (the tombstone-patch guard fires first — §3.2.1
+    // `update_issue`, crud.rs:332-334, the SSOT), so restore is the dedicated un-tombstone path emitting only
+    // `Event(Restored)` (§3.2.1 `restore_issue` / §4.1 `Session::restore`). The interface
+    // lands now; the `issue`-tool MCP adapter wires this action at T2.3.
 }
 
 #[derive(Deserialize, JsonSchema)]
