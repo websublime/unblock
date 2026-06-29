@@ -1336,9 +1336,315 @@ async fn gating_cycle_is_rejected_with_path() {
         .add_dependency(&dep("ub-b", "ub-a", DependencyType::Blocks), "x")
         .await;
     match cyclic {
-        Err(StorageError::CycleDetected { path }) => assert!(path.contains("ub-b")),
+        Err(StorageError::CycleDetected { path }) => {
+            // The path is the REAL ordered cycle naming BOTH nodes (`ub-b -> ub-a -> ub-b`), starting
+            // and ending at the same node — NOT a synthetic placeholder.
+            assert!(
+                path.contains("ub-a") && path.contains("ub-b"),
+                "path names both nodes: {path}"
+            );
+            let nodes: Vec<&str> = path.split(" -> ").collect();
+            assert_eq!(
+                nodes.first(),
+                nodes.last(),
+                "ordered cycle [start, …, start]"
+            );
+            assert!(nodes.len() >= 3, "a 2-cycle witness is `[a, b, a]`: {path}");
+        }
         other => panic!("expected CycleDetected, got {other:?}"),
     }
+}
+
+/// M-S1 — a ≥3-node gating cycle `a -> b -> c -> a` is rejected with the **REAL ordered path naming
+/// the interior node `c`** (NOT the old `a -> b -> … -> c` placeholder, which never named `c`).
+#[tokio::test]
+async fn three_node_gating_cycle_path_names_interior_node() {
+    let storage = fresh().await;
+    for id in ["ub-a", "ub-b", "ub-c"] {
+        storage.create_issue(&issue(id, id), "x").await.unwrap();
+    }
+    // a -> b -> c (blocks), acyclic so far.
+    storage
+        .add_dependency(&dep("ub-a", "ub-b", DependencyType::Blocks), "x")
+        .await
+        .unwrap();
+    storage
+        .add_dependency(&dep("ub-b", "ub-c", DependencyType::Blocks), "x")
+        .await
+        .unwrap();
+    // c -> a closes the 3-node cycle.
+    match storage
+        .add_dependency(&dep("ub-c", "ub-a", DependencyType::Blocks), "x")
+        .await
+    {
+        Err(StorageError::CycleDetected { path }) => {
+            assert!(
+                path.contains("ub-a") && path.contains("ub-b") && path.contains("ub-c"),
+                "the path NAMES every node incl. the interior `ub-c`: {path}"
+            );
+            let nodes: Vec<&str> = path.split(" -> ").collect();
+            assert!(
+                nodes.len() >= 4,
+                "a 3-node cycle path has >= 4 entries (start repeated): {path}"
+            );
+            assert_eq!(
+                nodes.first(),
+                nodes.last(),
+                "ordered cycle [start, …, start]"
+            );
+            assert!(
+                !path.contains('…'),
+                "no synthetic ellipsis placeholder: {path}"
+            );
+        }
+        other => panic!("expected CycleDetected, got {other:?}"),
+    }
+}
+
+/// M-S3 — mixed `parent-child` + `blocks` (and `parent-child` + `waits-for`) gating cycles are
+/// rejected. MUST fail against the old forward-all orientation: gates D4. Plus each non-`blocks`
+/// gating type cycles in isolation.
+#[tokio::test]
+async fn mixed_parent_child_and_blocking_cycle_is_rejected() {
+    // parent-child + blocks over THREE nodes (distinct `(issue_id, depends_on_id)` pairs so the
+    // duplicate guard never fires): `pc(b->a)` → reversed graph `a -> b`; `blocks(b->c)` → `b -> c`;
+    // `blocks(c->a)` → `c -> a` closes `a -> b -> c -> a`. A uniform-forward graph would orient the
+    // parent-child edge `b -> a` instead, leaving NO cycle — so this gates the D4 reversal.
+    let storage = fresh().await;
+    for id in ["ub-a", "ub-b", "ub-c"] {
+        storage.create_issue(&issue(id, id), "x").await.unwrap();
+    }
+    storage
+        .add_dependency(&dep("ub-b", "ub-a", DependencyType::ParentChild), "x")
+        .await
+        .unwrap();
+    storage
+        .add_dependency(&dep("ub-b", "ub-c", DependencyType::Blocks), "x")
+        .await
+        .expect("b -> c does not close a cycle yet");
+    match storage
+        .add_dependency(&dep("ub-c", "ub-a", DependencyType::Blocks), "x")
+        .await
+    {
+        Err(StorageError::CycleDetected { path }) => {
+            assert!(
+                path.contains("ub-a") && path.contains("ub-b") && path.contains("ub-c"),
+                "the mixed cycle names every node: {path}"
+            );
+        }
+        other => panic!("mixed parent-child + blocks cycle must be rejected, got {other:?}"),
+    }
+
+    // parent-child + waits-for over three nodes (same structure, waits-for as the blocking type).
+    let storage = fresh().await;
+    for id in ["ub-x", "ub-y", "ub-z"] {
+        storage.create_issue(&issue(id, id), "x").await.unwrap();
+    }
+    storage
+        .add_dependency(&dep("ub-y", "ub-x", DependencyType::ParentChild), "x")
+        .await
+        .unwrap(); // reversed graph: x -> y
+    storage
+        .add_dependency(&dep("ub-y", "ub-z", DependencyType::WaitsFor), "x")
+        .await
+        .expect("y -> z does not close a cycle yet");
+    match storage
+        .add_dependency(&dep("ub-z", "ub-x", DependencyType::WaitsFor), "x")
+        .await
+    {
+        Err(StorageError::CycleDetected { .. }) => {}
+        other => panic!("mixed parent-child + waits-for cycle must be rejected, got {other:?}"),
+    }
+}
+
+/// M-S3 (cont.) — a `conditional-blocks` cycle and a `waits-for` cycle are each rejected in
+/// isolation (untested before despite being in the gating set).
+#[tokio::test]
+async fn conditional_blocks_and_waits_for_cycles_are_rejected() {
+    for ty in [DependencyType::ConditionalBlocks, DependencyType::WaitsFor] {
+        let storage = fresh().await;
+        for id in ["ub-1", "ub-2"] {
+            storage.create_issue(&issue(id, id), "x").await.unwrap();
+        }
+        storage
+            .add_dependency(&dep("ub-1", "ub-2", ty.clone()), "x")
+            .await
+            .unwrap();
+        match storage
+            .add_dependency(&dep("ub-2", "ub-1", ty.clone()), "x")
+            .await
+        {
+            Err(StorageError::CycleDetected { .. }) => {}
+            other => panic!("a {ty:?} cycle must be rejected, got {other:?}"),
+        }
+    }
+}
+
+/// A pure `parent-child` cycle is rejected at add-time (the original `check_cycle` missed this; D4
+/// orientation-consistency fixes it — gates the prospective-edge reversal rule).
+#[tokio::test]
+async fn pure_parent_child_cycle_is_rejected_at_add_time() {
+    let storage = fresh().await;
+    for id in ["ub-a", "ub-b", "ub-c"] {
+        storage.create_issue(&issue(id, id), "x").await.unwrap();
+    }
+    // b's parent = a, c's parent = b (reversed graph: a -> b -> c).
+    storage
+        .add_dependency(&dep("ub-b", "ub-a", DependencyType::ParentChild), "x")
+        .await
+        .unwrap();
+    storage
+        .add_dependency(&dep("ub-c", "ub-b", DependencyType::ParentChild), "x")
+        .await
+        .unwrap();
+    // a's parent = c (reversed graph: c -> a) closes a -> b -> c -> a.
+    match storage
+        .add_dependency(&dep("ub-a", "ub-c", DependencyType::ParentChild), "x")
+        .await
+    {
+        Err(StorageError::CycleDetected { path }) => {
+            assert!(
+                path.contains("ub-a") && path.contains("ub-b") && path.contains("ub-c"),
+                "names every node on the parent-child cycle: {path}"
+            );
+        }
+        other => panic!("a pure parent-child cycle must be rejected at add-time, got {other:?}"),
+    }
+}
+
+/// `detect_cycles(false)` (all dep types) detects a cycle formed by a NON-gating edge that
+/// `detect_cycles(true)` (gating-only) does NOT — proving the `blocking_only` param. (The
+/// parent-child-under-both-values + ordered-witness-shape legs need the raw-edge seam; see the
+/// `testkit_backed` module below.)
+#[tokio::test]
+async fn detect_cycles_blocking_only_param() {
+    // Non-gating (`related`) cycle: present under false, absent under true.
+    let storage = fresh().await;
+    for id in ["ub-a", "ub-b"] {
+        storage.create_issue(&issue(id, id), "x").await.unwrap();
+    }
+    storage
+        .add_dependency(&dep("ub-a", "ub-b", DependencyType::Related), "x")
+        .await
+        .unwrap();
+    storage
+        .add_dependency(&dep("ub-b", "ub-a", DependencyType::Related), "x")
+        .await
+        .unwrap();
+    assert!(
+        storage.detect_cycles(true).await.unwrap().is_empty(),
+        "a related cycle is invisible to the gating-only view"
+    );
+    assert!(
+        !storage.detect_cycles(false).await.unwrap().is_empty(),
+        "a related cycle IS visible to the all-types view"
+    );
+}
+
+/// M-S6 — a representative non-gating type beyond `Related` (`Duplicates`) added both directions
+/// never raises `CycleDetected` and never removes an issue from `ready`.
+#[tokio::test]
+async fn non_gating_duplicates_edge_never_cycles_or_blocks() {
+    let storage = fresh().await;
+    for id in ["ub-a", "ub-b"] {
+        storage.create_issue(&issue(id, id), "x").await.unwrap();
+    }
+    storage
+        .add_dependency(&dep("ub-a", "ub-b", DependencyType::Duplicates), "x")
+        .await
+        .expect("duplicates never cycles");
+    storage
+        .add_dependency(&dep("ub-b", "ub-a", DependencyType::Duplicates), "x")
+        .await
+        .expect("the reverse duplicates edge never cycles");
+    // Neither issue is blocked by a non-gating edge — both remain ready.
+    let ready: Vec<String> = storage
+        .ready_issues(&ListFilters::default())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|i| i.id)
+        .collect();
+    assert!(
+        ready.contains(&"ub-a".to_string()) && ready.contains(&"ub-b".to_string()),
+        "a duplicates edge keeps both issues ready: {ready:?}"
+    );
+}
+
+/// M-S5 — `dependency_tree(root)` over a small fan-out: the reachable edge set + deterministic
+/// `(from, to, dep_type)` edge ordering.
+#[tokio::test]
+async fn dependency_tree_fan_out_shape_is_deterministic() {
+    let storage = fresh().await;
+    for id in ["ub-r", "ub-c1", "ub-c2", "ub-g"] {
+        storage.create_issue(&issue(id, id), "x").await.unwrap();
+    }
+    // r -> c2, r -> c1 (added out of order), c1 -> g. (Related so no cycle gating in play.)
+    storage
+        .add_dependency(&dep("ub-r", "ub-c2", DependencyType::Related), "x")
+        .await
+        .unwrap();
+    storage
+        .add_dependency(&dep("ub-r", "ub-c1", DependencyType::Related), "x")
+        .await
+        .unwrap();
+    storage
+        .add_dependency(&dep("ub-c1", "ub-g", DependencyType::Related), "x")
+        .await
+        .unwrap();
+
+    let tree = storage.dependency_tree("ub-r").await.unwrap();
+    assert_eq!(tree.root, "ub-r");
+    let edges: Vec<(&str, &str)> = tree
+        .edges
+        .iter()
+        .map(|e| (e.from.as_str(), e.to.as_str()))
+        .collect();
+    // Reachable edge set {r->c1, r->c2, c1->g}, sorted by (from, to, dep_type) regardless of insert
+    // order — deterministic for snapshots (NFR-14).
+    assert_eq!(
+        edges,
+        vec![("ub-c1", "ub-g"), ("ub-r", "ub-c1"), ("ub-r", "ub-c2")]
+    );
+}
+
+/// M-S4 — `dependency_graph` with a NON-EMPTY root set returns only the subgraph reachable from the
+/// root, excluding a disjoint component, with the root recorded.
+#[tokio::test]
+async fn dependency_graph_non_empty_root_excludes_disjoint() {
+    let storage = fresh().await;
+    for id in ["ub-a", "ub-b", "ub-c", "ub-x", "ub-y"] {
+        storage.create_issue(&issue(id, id), "x").await.unwrap();
+    }
+    // a -> b -> c (the queried component) and a disjoint x -> y.
+    storage
+        .add_dependency(&dep("ub-a", "ub-b", DependencyType::Related), "x")
+        .await
+        .unwrap();
+    storage
+        .add_dependency(&dep("ub-b", "ub-c", DependencyType::Related), "x")
+        .await
+        .unwrap();
+    storage
+        .add_dependency(&dep("ub-x", "ub-y", DependencyType::Related), "x")
+        .await
+        .unwrap();
+
+    let tree = storage
+        .dependency_graph(&["ub-a".to_string()])
+        .await
+        .unwrap();
+    assert_eq!(tree.root, "ub-a");
+    let edges: Vec<(&str, &str)> = tree
+        .edges
+        .iter()
+        .map(|e| (e.from.as_str(), e.to.as_str()))
+        .collect();
+    assert_eq!(
+        edges,
+        vec![("ub-a", "ub-b"), ("ub-b", "ub-c")],
+        "only the subgraph reachable from ub-a; the disjoint x -> y is excluded"
+    );
 }
 
 #[tokio::test]
@@ -1492,6 +1798,111 @@ async fn ready_ids(storage: &LibsqlStorage) -> Vec<String> {
         .into_iter()
         .map(|i| i.id)
         .collect()
+}
+
+// --------------------------------------------------------------------------------------------------
+// detect_cycles ordered-witness shape (needs the raw-edge seam to plant a STORED cycle the public
+// guard rejects) — gated on the `testkit` feature (the seam is unreachable from an integration test
+// without it; an integration crate cannot see the lib's `#[cfg(test)]` items).
+// --------------------------------------------------------------------------------------------------
+
+#[cfg(feature = "testkit")]
+mod testkit_backed {
+    use super::{dep, fresh, issue};
+    use unblock_model::DependencyType;
+    use unblock_storage::{Storage, StorageTestkit};
+
+    /// M-S2 — `detect_cycles(true)` returns the ordered-witness shape (`[start, …, start]`) for a
+    /// planted multi-node gating cycle, `[]` on acyclic; a self-loop reports `[node, node]`.
+    #[tokio::test]
+    async fn detect_cycles_ordered_witness_shape() {
+        let storage = fresh().await;
+        for id in ["ub-a", "ub-b", "ub-c"] {
+            storage.create_issue(&issue(id, id), "x").await.unwrap();
+        }
+        // Acyclic chain a -> b -> c.
+        storage
+            .add_dependency(&dep("ub-a", "ub-b", DependencyType::Blocks), "x")
+            .await
+            .unwrap();
+        storage
+            .add_dependency(&dep("ub-b", "ub-c", DependencyType::Blocks), "x")
+            .await
+            .unwrap();
+        assert!(
+            storage.detect_cycles(true).await.unwrap().is_empty(),
+            "an acyclic gating graph yields []"
+        );
+
+        // Plant the closing edge c -> a RAW (the public guard would reject it) → 3-node gating cycle.
+        storage
+            .testkit_insert_raw_edge(&dep("ub-c", "ub-a", DependencyType::Blocks))
+            .await
+            .expect("raw edge planted");
+        let cycles = storage.detect_cycles(true).await.unwrap();
+        assert_eq!(cycles.len(), 1, "exactly one cyclic component: {cycles:?}");
+        let witness = &cycles[0];
+        assert_eq!(
+            witness.first(),
+            witness.last(),
+            "ordered witness [start, …, start]: {witness:?}"
+        );
+        assert_eq!(
+            witness.len(),
+            4,
+            "3-node cycle witness has 4 entries: {witness:?}"
+        );
+        let names: std::collections::HashSet<&str> = witness.iter().map(String::as_str).collect();
+        assert!(
+            names.contains("ub-a") && names.contains("ub-b") && names.contains("ub-c"),
+            "every node is named: {witness:?}"
+        );
+
+        // Self-loop planted raw → witness [node, node].
+        let storage = fresh().await;
+        storage
+            .create_issue(&issue("ub-self", "s"), "x")
+            .await
+            .unwrap();
+        storage
+            .testkit_insert_raw_edge(&dep("ub-self", "ub-self", DependencyType::Blocks))
+            .await
+            .expect("raw self-edge planted");
+        let cycles = storage.detect_cycles(true).await.unwrap();
+        assert_eq!(
+            cycles,
+            vec![vec!["ub-self".to_string(), "ub-self".to_string()]],
+            "a self-loop reports [node, node]"
+        );
+    }
+
+    /// M-S2 (cont.) — a stored `parent-child` cycle is caught under BOTH `blocking_only` values
+    /// (reversed regardless), complementing the `related`-only leg in
+    /// `detect_cycles_blocking_only_param`.
+    #[tokio::test]
+    async fn detect_cycles_parent_child_under_both_values() {
+        let storage = fresh().await;
+        for id in ["ub-x", "ub-y"] {
+            storage.create_issue(&issue(id, id), "x").await.unwrap();
+        }
+        // Plant a stored 2-node parent-child cycle (the public add-time guard now rejects this).
+        storage
+            .testkit_insert_raw_edge(&dep("ub-y", "ub-x", DependencyType::ParentChild))
+            .await
+            .unwrap();
+        storage
+            .testkit_insert_raw_edge(&dep("ub-x", "ub-y", DependencyType::ParentChild))
+            .await
+            .unwrap();
+        assert!(
+            !storage.detect_cycles(true).await.unwrap().is_empty(),
+            "parent-child cycle visible to the gating view"
+        );
+        assert!(
+            !storage.detect_cycles(false).await.unwrap().is_empty(),
+            "parent-child cycle visible to the all-types view"
+        );
+    }
 }
 
 // --------------------------------------------------------------------------------------------------
