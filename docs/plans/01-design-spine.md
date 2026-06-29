@@ -1134,7 +1134,11 @@ impl Session {
     pub async fn import_bd(&self, path: &Path) -> Result<ImportReport, EngineError>;     // D16, idempotent via content_hash
 
     // --- lifecycle / ops (OQ-2 RESOLVED: doctor + recover ARE part of the public Session surface;
-    //     the cli `doctor` command and mcp diagnostics both go through these, no separate path) ---
+    //     the cli `doctor` command goes through these) ---
+    // PRECISION NOTE (T2.2): the mcp `diagnostics` TOOL (§5.1, the 7-kind read path) maps to
+    //   `Session::diagnostics(kind)` above (BUILD-now, pure-DB) — it is DISTINCT from `doctor()`/`recover()`
+    //   here (the T3.3 health seam, FeatureNotWired{"health"} until then). The mcp diagnostics tool does NOT
+    //   route through doctor/recover; only the cli `doctor` command does.
     pub async fn doctor(&self) -> Result<DiagnosticReport, EngineError>;  // FR-15/FR-16. v1 = SIGNATURE only; body seamed to unblock-health (T3.3) — returns EngineError::FeatureNotWired{feature:"health"} until then (the integrity DiagnosticKind variant + DoctorReport→DiagnosticReport mapping are designed at T3.3; the landed DiagnosticKind has no integrity variant)
     pub async fn recover(&self) -> Result<DiagnosticReport, EngineError>; // attempt repair (WAL checkpoint, reindex; reports actions taken). v1 = SIGNATURE only; body seamed to unblock-health (T3.3) — returns EngineError::FeatureNotWired{feature:"health"} until then (the rich repair + evidence dir are T3.3)
     pub async fn shutdown(&self) -> Result<(), EngineError>; // flush + close libsql cleanly (FR-17)
