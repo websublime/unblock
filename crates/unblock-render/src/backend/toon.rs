@@ -22,12 +22,13 @@ impl ToonRenderer {
     pub(crate) fn new(opts: RenderOptions) -> Self {
         Self { opts }
     }
+}
 
-    fn unsupported(&self) -> Result<RenderOutput, RenderError> {
-        Err(RenderError::UnsupportedFormat {
-            format: OutputFormat::Toon,
-        })
-    }
+/// Until the v1.1 encoder lands, every TOON method errs `UnsupportedFormat`.
+fn unsupported() -> Result<RenderOutput, RenderError> {
+    Err(RenderError::UnsupportedFormat {
+        format: OutputFormat::Toon,
+    })
 }
 
 impl Renderer for ToonRenderer {
@@ -36,11 +37,11 @@ impl Renderer for ToonRenderer {
     }
 
     fn issue(&self, _value: &Issue, _opts: &RenderOptions) -> Result<RenderOutput, RenderError> {
-        self.unsupported()
+        unsupported()
     }
 
     fn issues(&self, _value: &[Issue], _opts: &RenderOptions) -> Result<RenderOutput, RenderError> {
-        self.unsupported()
+        unsupported()
     }
 
     fn counts(
@@ -48,7 +49,7 @@ impl Renderer for ToonRenderer {
         _value: &[CountBucket],
         _opts: &RenderOptions,
     ) -> Result<RenderOutput, RenderError> {
-        self.unsupported()
+        unsupported()
     }
 
     fn dep_tree(
@@ -56,7 +57,7 @@ impl Renderer for ToonRenderer {
         _value: &DepTree,
         _opts: &RenderOptions,
     ) -> Result<RenderOutput, RenderError> {
-        self.unsupported()
+        unsupported()
     }
 
     fn cycles(
@@ -64,7 +65,7 @@ impl Renderer for ToonRenderer {
         _value: &[Vec<String>],
         _opts: &RenderOptions,
     ) -> Result<RenderOutput, RenderError> {
-        self.unsupported()
+        unsupported()
     }
 
     fn structured_error(
@@ -72,7 +73,7 @@ impl Renderer for ToonRenderer {
         _value: &StructuredError,
         _opts: &RenderOptions,
     ) -> Result<RenderOutput, RenderError> {
-        self.unsupported()
+        unsupported()
     }
 
     fn diagnostics(
@@ -80,6 +81,6 @@ impl Renderer for ToonRenderer {
         _value: &DiagnosticReport,
         _opts: &RenderOptions,
     ) -> Result<RenderOutput, RenderError> {
-        self.unsupported()
+        unsupported()
     }
 }
