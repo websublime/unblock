@@ -662,7 +662,14 @@ between an earlier prose description and the source are resolved **in favour of 
   **stores** `content_hash` but **never short-circuits on it**. The FR-26 idempotency note belongs to the
   **import path** (`unblock-sync`), not to `create_issue`. Inserts the row + `Event(Created)` in one tx;
   hierarchical ids bump the `child_counters` row in-tx; per-relation `Event(LabelAdded)`/
-  `Event(DependencyAdded)`/`Event(Commented)` are recorded for any seeded relations.
+  `Event(DependencyAdded)`/`Event(Commented)` are recorded for any seeded relations. **Storage receives an
+  already-allocated `Issue.id` — it does NOT mint (D21).** For the interactive create path the id is minted
+  by the **engine** id-allocator (D21) under the write permit and the resulting `Issue` is handed here; for
+  the import/internal path the caller supplies the id (`Session::create`). The id-collision guard above is the
+  storage-side backstop that makes the engine's mint→probe→insert atomic when both run under the single permit
+  (a candidate that races in still surfaces `IdCollision`). The in-tx `child_counters` bump for a hierarchical
+  id is the write-half whose read-half (`next_child_number`, §3.2 / crate plan §3.3) the engine allocator
+  consumes in production (D21) — the two halves run under the SAME permit so the `parent.N` counter cannot race.
 - **`update_issue` (sqlite.rs:2496–2509, 2572–2870) — per-field event granularity; empty diff is a
   full skip.** An empty patch (or one that changes nothing) returns the issue unchanged and writes **no
   `SET`, no `updated_at`, no `Event`** (`if set_clauses.is_empty() { return Ok }`). `updated_at` advances
@@ -1017,6 +1024,27 @@ pub struct SessionConfig {
 #[derive(Debug, Clone, Default)]
 pub struct ImportOptions { pub dry_run: bool /* ...future import knobs... */ }
 
+// NewIssue is ENGINE-owned (defined in unblock-engine; D21) — the input to the MINTING create path
+// `Session::create_issue(NewIssue)`. It carries the domain fields of an interactive create MINUS the
+// id (the engine mints it). The fields mirror IssueInput::Create (§5.2) minus the wire-only knobs
+// (`quick`/`attribution` are L7 adapter concerns, not engine state). The engine builds an `Issue`
+// from these + the minted id under the write permit; it is NOT a model DTO and NOT the import shape.
+#[derive(Debug, Clone, Default)]
+pub struct NewIssue {
+    pub title: String,
+    pub description: Option<String>,
+    pub issue_type: Option<IssueType>,            // None -> model default
+    pub priority: Option<Priority>,               // None -> model default
+    pub labels: Vec<String>,
+    pub parent: Option<String>,                   // Some -> hierarchical `parent.N` via next_child_number
+    pub deps: Vec<Dependency>,                    // added as edges in/after the same tx
+    pub due_at: Option<DateTime<Utc>>,
+    pub defer_until: Option<DateTime<Utc>>,
+    pub estimated_minutes: Option<i32>,
+    pub slug: Option<String>,                     // Some -> root id is `ub-<slug>-<hash>` (D21)
+    pub ephemeral: bool,
+}
+
 impl Session {
     // open: CONSUMES a WorkspaceContext built by unblock-config (discovery + Arc<dyn Storage>
     //       construction + migrate-if-needed happen in config, NOT here — CF-D). Engine only
@@ -1039,6 +1067,22 @@ impl Session {
 
     // --- mutations: each acquires the write permit for its whole tx ---
     pub async fn create(&self, issue: &Issue) -> Result<String, EngineError>;
+    //   CALLER-SUPPLIED id — the IMPORT/INTERNAL path. It does NOT mint: it validates the given `Issue`
+    //   (incl. its `id`) and inserts it, preserving the id so `content_hash`-keyed import idempotency
+    //   (FR-26) is byte-stable. The bulk-markdown / JSONL / bd-import paths build an `Issue` and call this.
+    //   Tombstones/imported rows reach storage with their original ids ONLY through here. STAYS (D21).
+    pub async fn create_issue(&self, new: NewIssue) -> Result<Issue, EngineError>; // D21 — the MINTING create path
+    //   INTERACTIVE create (MCP/CLI quick-create + full create). MINTS the id under the write permit (D21):
+    //   - root id `ub-<hash>` (faithful `bd` adaptive-base36) or, with `new.slug`, `ub-<slug>-<hash>`;
+    //   - with `new.parent`, the hierarchical `parent.N` via storage `next_child_number(parent)`;
+    //   the candidate is probed against storage `exists` and the mint→probe→insert is ATOMIC under the SAME
+    //   permit (so two concurrent creates under one parent cannot mint the same `parent.N` — this is WHY
+    //   minting is the engine's job, NOT an L7 adapter's; FR-9 single mutation home). It resolves `new.deps`
+    //   into edges added in/after the same tx, then returns the created `Issue` (the MCP quick-create extracts
+    //   `.id`). NAME: `create_issue` parallels `Storage::create_issue` (engine mints + delegates to storage);
+    //   the two live in DIFFERENT namespaces (`Session::` vs the `Storage` trait), so the name does not clash.
+    //   The pure candidate compute (hash/seed/adaptive-length/slug-normalize) lives in unblock-model `id.rs`;
+    //   the stateful collision-retry loop + the `exists`/`next_child_number` probe live in the engine allocator.
     pub async fn update(&self, id: &str, patch: &IssuePatch) -> Result<Issue, EngineError>;
     pub async fn delete(&self, plan: &DeletePlan) -> Result<DeletePlan, EngineError>;
     pub async fn restore(&self, id: &str) -> Result<Issue, EngineError>; // FR-1c recovery (D20) — un-tombstone
@@ -1070,7 +1114,7 @@ impl Session {
 // CloseOutcome / ImportReport / ExportReport are defined in unblock-model §1.10 and
 // re-exported here (CF-A) — NOT redefined. CountBucket / GraphEdge / DepTree /
 // DiagnosticReport / DiagnosticFinding / DiagnosticKind likewise come from unblock-model
-// via the same re-export. SessionConfig + ImportOptions are engine-owned (above).
+// via the same re-export. SessionConfig + ImportOptions + NewIssue (D21) are engine-owned (above).
 ```
 
 ### 4.2 Write-Semaphore contract (D14 — normative)
@@ -1121,9 +1165,14 @@ pub enum IssueInput {
         #[serde(default)] quick: bool,                  // quick-create -> output is id only
         #[serde(flatten)] attribution: Attribution,     // agent_name/harness/model (capture-only)
     },
-    // Seam note (Q1 — T1.4): Bulk markdown import (FR-1a) is handled by the `issue`-tool adapter
-    // (T2.3) by parsing the markdown into N `Create` calls (loop over `Session::create`); there is
-    // no bulk-create on the `Session` surface by design.
+    // D21 mapping: the `issue`-tool adapter maps `Create` → the engine-owned `NewIssue` (§4.1) and calls the
+    // MINTING `Session::create_issue(NewIssue)` (the ENGINE mints `ub-<hash>` / `ub-<slug>-<hash>` / `parent.N`
+    // under the write permit). `quick=true` -> output is `.id` only. NOT `Session::create(&Issue)` — that is
+    // the id-PRESERVING import/internal path (FR-26), which never mints.
+    // Seam note (Q1 — T1.4, reconciled at T1.8/D21): Bulk markdown import (FR-1a) is handled by the `issue`-tool
+    // adapter (T2.3) by parsing the markdown into N `Create` calls (loop over the MINTING `Session::create_issue`
+    // — bulk-markdown is interactive create, so each record mints a fresh id; the id-preserving `Session::create`
+    // backs only the JSONL/bd IMPORT path). There is no bulk-create on the `Session` surface by design.
     Show   { id: String },
     Update { ids: Vec<String>, #[serde(flatten)] patch: PatchInput, #[serde(flatten)] attribution: Attribution },
     Close  { id: String, #[serde(default)] reason: Option<String>, #[serde(default)] suggest_next: bool,
