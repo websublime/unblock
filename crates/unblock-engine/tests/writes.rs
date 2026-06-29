@@ -698,19 +698,22 @@ async fn delete_hard_through_engine_removes_target_only() {
 /// The existing `delete_dry_run_mutates_nothing` (writes.rs:257) tests `DryRun` only; this proves
 /// the default Tombstone path: the row persists (status == `Tombstone`), contrasting Hard (row gone).
 ///
-/// # DESIGN NOTE — tombstone retention is NOT live-update recovery
+/// # DESIGN NOTE — tombstone retention is NOT live-update recovery; restore IS the recovery path
 ///
 /// `update_issue` (crud.rs:332-334) intentionally rejects any patch on a tombstoned row with
 /// `StorageError::IssueNotFound` — the "original rejects this" design from the classic `bd` system.
 /// So a tombstone is NOT recoverable via the live `update` path: the row is *retained* (not
-/// hard-deleted), enabling future recovery via the dedicated restore command (tracked as a separate
-/// v1 task, T1.7) rather than a live `update`. The tombstoned row IS observable via `get` (the
-/// storage `get_issue` returns tombstones), which is proven here.
+/// hard-deleted), and recovery is the dedicated `Session::restore` command (D20). **T1.7 has
+/// landed**, so this test asserts BOTH sides: `update` still rejects a tombstone patch (restore is a
+/// separate path — the two are not unified), AND `session.restore(id)` DOES recover the row. The
+/// tombstoned row IS observable via `get` (the storage `get_issue` returns tombstones).
 ///
 /// What this test proves (matching the actual storage contract):
 /// - Tombstone row persists and is visible via `get` (row retained, not hard-deleted).
 /// - `update(status: Open)` on a tombstone returns `IssueNotFound` by design (storage guard) —
-///   i.e. the row is NOT patchable; recovery is the dedicated restore command (T1.7), not `update`.
+///   i.e. the row is NOT patchable via `update`; recovery is `Session::restore`, not `update`.
+/// - `session.restore(id)` recovers the row to active (the positive path — see the dedicated
+///   `restore_through_engine_recovers_tombstone_*` tests for the full assertions).
 /// - Contrast: Hard delete → `get` returns `None` (row gone entirely).
 #[tokio::test]
 async fn delete_tombstone_through_engine_persists_row_and_is_not_patchable() {
@@ -765,6 +768,95 @@ async fn delete_tombstone_through_engine_persists_row_and_is_not_patchable() {
         ErrorCode::IssueNotFound,
         "tombstone update must surface IssueNotFound (the storage guard returns IssueNotFound for tombstones)"
     );
+
+    // T1.7 has landed: the DEDICATED restore path DOES recover the tombstone (the positive path,
+    // cross-referenced from `restore_through_engine_recovers_tombstone_was_open`). Restore is
+    // STRUCTURALLY separate from the rejected update path above — the two are not unified (D20).
+    let restored = session
+        .restore("ub-0001")
+        .await
+        .expect("Session::restore recovers a soft-deleted issue (T1.7)");
+    assert_eq!(
+        restored.status,
+        Status::Open,
+        "restore returns the (was-Open) tombstone to an active Open status"
+    );
+    assert!(
+        restored.deleted_at.is_none() && restored.original_type.is_none(),
+        "restore clears the tombstone fields + original_type"
+    );
+}
+
+/// T1.7 positive path — `Session::restore` recovers a was-Open soft-deleted issue: create → delete
+/// (Tombstone) → restore → `get` shows active, `original_type` cleared, `issue_type` preserved (D20).
+#[tokio::test]
+async fn restore_through_engine_recovers_tombstone_was_open() {
+    let session = session().await;
+    let mut bug = issue("ub-0001", Priority::MEDIUM, 1000);
+    bug.issue_type = IssueType::Bug;
+    session.create(&bug).await.expect("create");
+
+    let plan = DeletePlan {
+        mode: DeleteMode::Tombstone,
+        targets: vec!["ub-0001".to_string()],
+        cascade_children: Vec::new(),
+    };
+    session.delete(&plan).await.expect("tombstone delete");
+    let tombstoned = session.get("ub-0001").await.expect("get").expect("present");
+    assert_eq!(tombstoned.status, Status::Tombstone);
+    assert_eq!(tombstoned.original_type.as_deref(), Some("bug"));
+
+    let restored = session.restore("ub-0001").await.expect("restore");
+    assert_eq!(restored.status, Status::Open);
+    assert_eq!(restored.original_type, None, "original_type cleared");
+    assert_eq!(
+        restored.issue_type,
+        IssueType::Bug,
+        "issue_type preserved across restore"
+    );
+
+    // The recovered row is active and visible via get.
+    let fetched = session.get("ub-0001").await.expect("get").expect("present");
+    assert_eq!(fetched.status, Status::Open);
+}
+
+/// T1.7 — restore of an already-active issue is an idempotent `Ok` no-op (D20).
+#[tokio::test]
+async fn restore_through_engine_already_active_is_noop_ok() {
+    let session = session().await;
+    session
+        .create(&issue("ub-0001", Priority::MEDIUM, 1000))
+        .await
+        .expect("create");
+
+    let restored = session
+        .restore("ub-0001")
+        .await
+        .expect("restore of an active issue is an idempotent Ok");
+    assert_eq!(restored.status, Status::Open);
+}
+
+/// T1.7 — restore of a hard-deleted (gone) id surfaces `IssueNotFound` (restore is bounded to SOFT
+/// deletes; no new `ErrorCode` minted — D20).
+#[tokio::test]
+async fn restore_through_engine_hard_deleted_is_issue_not_found() {
+    let session = session().await;
+    session
+        .create(&issue("ub-0001", Priority::MEDIUM, 1000))
+        .await
+        .expect("create");
+    let plan = DeletePlan {
+        mode: DeleteMode::Hard,
+        targets: vec!["ub-0001".to_string()],
+        cascade_children: Vec::new(),
+    };
+    session.delete(&plan).await.expect("hard delete");
+
+    let err = session
+        .restore("ub-0001")
+        .await
+        .expect_err("restore of a hard-deleted id must fail");
+    assert_eq!(err.code(), ErrorCode::IssueNotFound);
 }
 
 /// Gap 7 — `DryRun` over the hierarchical corpus reports the full blast-radius plan (FR-1c, M3).

@@ -253,6 +253,9 @@ pub mod parked {
         ) -> Result<DeletePlan, StorageError> {
             self.inner.delete_issue(plan, actor).await
         }
+        async fn restore_issue(&self, id: &str, actor: &str) -> Result<Issue, StorageError> {
+            self.inner.restore_issue(id, actor).await
+        }
         async fn claim_issue(
             &self,
             id: &str,

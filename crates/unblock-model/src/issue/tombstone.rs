@@ -47,6 +47,48 @@ impl Issue {
         self
     }
 
+    /// Restore this issue from a tombstone — the **pure inverse** of [`Issue::into_tombstone`] (spine
+    /// §1.8, D20).
+    ///
+    /// No clock: like `into_tombstone`, this sets **no timestamp** — storage bumps `updated_at` and
+    /// recomputes `content_hash` after calling it (mirroring how `tombstone_one` finishes the soft
+    /// delete). It:
+    /// - sets `status` **best-effort via `closed_at`** — `Status::Closed` when `closed_at.is_some()`,
+    ///   else `Status::Open`. The pre-delete status is **not** preserved (only `original_type`
+    ///   survives a tombstone); `closed_at` being set is the *only* signal the issue was Closed.
+    ///   Open/Closed round-trip exactly; InProgress/Blocked/Deferred collapse to Open (lost, by
+    ///   design).
+    /// - leaves `issue_type` **UNTOUCHED** — `into_tombstone` only *snapshots* `original_type` from
+    ///   the live `issue_type`, never mutates it, so the live value on a tombstone is already correct
+    ///   (writing `original_type → issue_type` would corrupt imported rows whose serde-carried
+    ///   `original_type` diverges from `issue_type`).
+    /// - **clears `original_type` → `None`**, returning a clean active issue.
+    /// - **clears the tombstone fields** — `deleted_at`/`deleted_by`/`delete_reason` → `None`.
+    /// - **`closed_at`**: the Open branch ensures `None`; the Closed branch **keeps** it (it is both
+    ///   the was-Closed signal and what satisfies the issues-table CHECK constraint for
+    ///   `status='closed'`).
+    ///
+    /// Defensive: a non-tombstone is returned unchanged (storage guards before calling, but the
+    /// helper stays total).
+    #[must_use]
+    pub fn restore_from_tombstone(mut self) -> Self {
+        if !self.is_tombstone() {
+            return self;
+        }
+        if self.closed_at.is_some() {
+            self.status = Status::Closed;
+            // Keep `closed_at` — the was-Closed signal AND the CHECK satisfier for status='closed'.
+        } else {
+            self.status = Status::Open;
+            self.closed_at = None; // defensive — a tombstone's closed_at is already None.
+        }
+        self.original_type = None;
+        self.deleted_at = None;
+        self.deleted_by = None;
+        self.delete_reason = None;
+        self
+    }
+
     /// Whether this tombstone has exceeded its TTL (spine §1.8).
     ///
     /// Returns `false` for a non-tombstone, for `retention_days` of `None` or `0`, or when
@@ -133,6 +175,94 @@ mod tests {
         issue.original_type = Some("feature".to_string());
         let tomb = issue.into_tombstone(None, None, Utc::now());
         assert_eq!(tomb.original_type.as_deref(), Some("feature"));
+    }
+
+    #[test]
+    fn restore_from_was_open_tombstone_lands_open_and_clears_fields() {
+        // A was-Open issue tombstoned (no closed_at), then restored: Open, type preserved,
+        // original_type + deleted_* cleared.
+        let now = Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
+        let tomb = base().into_tombstone(Some("admin".to_string()), Some("dup".to_string()), now);
+        assert!(tomb.is_tombstone());
+
+        let restored = tomb.restore_from_tombstone();
+        assert_eq!(restored.status, Status::Open);
+        assert_eq!(restored.closed_at, None);
+        assert_eq!(restored.original_type, None);
+        assert_eq!(restored.deleted_at, None);
+        assert_eq!(restored.deleted_by, None);
+        assert_eq!(restored.delete_reason, None);
+        // issue_type is UNTOUCHED by restore (and untouched by tombstone).
+        assert_eq!(restored.issue_type, IssueType::Bug);
+    }
+
+    #[test]
+    fn restore_from_was_closed_tombstone_lands_closed_and_keeps_closed_at() {
+        // A was-Closed issue: closed_at set BEFORE deletion is the only was-Closed signal.
+        let closed = Utc.with_ymd_and_hms(2026, 3, 1, 0, 0, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
+        let mut issue = base();
+        issue.status = Status::Closed;
+        issue.closed_at = Some(closed);
+        let tomb = issue.into_tombstone(Some("admin".to_string()), None, now);
+        // Tombstone keeps closed_at (into_tombstone never touches it).
+        assert_eq!(tomb.closed_at, Some(closed));
+
+        let restored = tomb.restore_from_tombstone();
+        assert_eq!(restored.status, Status::Closed);
+        assert_eq!(
+            restored.closed_at,
+            Some(closed),
+            "closed_at preserved — the was-Closed signal AND the CHECK satisfier"
+        );
+        assert_eq!(restored.original_type, None);
+        assert_eq!(restored.deleted_at, None);
+        assert_eq!(restored.deleted_by, None);
+        assert_eq!(restored.delete_reason, None);
+        assert_eq!(restored.issue_type, IssueType::Bug);
+    }
+
+    #[test]
+    fn restore_round_trip_preserves_issue_type_and_status_open() {
+        // into_tombstone(...).restore_from_tombstone() round-trip for an originally-Open issue.
+        let now = Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
+        let original = base();
+        let original_type = original.issue_type.clone();
+
+        let restored = original
+            .into_tombstone(Some("x".to_string()), Some("r".to_string()), now)
+            .restore_from_tombstone();
+        assert_eq!(restored.status, Status::Open);
+        assert_eq!(restored.issue_type, original_type);
+        assert_eq!(restored.original_type, None);
+        assert_eq!(restored.deleted_at, None);
+        assert_eq!(restored.deleted_by, None);
+        assert_eq!(restored.delete_reason, None);
+    }
+
+    #[test]
+    fn restore_round_trip_preserves_status_closed() {
+        // Originally-Closed round-trip: tombstone then restore returns Closed (via closed_at signal).
+        let closed = Utc.with_ymd_and_hms(2026, 3, 1, 0, 0, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
+        let mut original = base();
+        original.status = Status::Closed;
+        original.closed_at = Some(closed);
+
+        let restored = original
+            .into_tombstone(Some("x".to_string()), None, now)
+            .restore_from_tombstone();
+        assert_eq!(restored.status, Status::Closed);
+        assert_eq!(restored.closed_at, Some(closed));
+        assert_eq!(restored.original_type, None);
+    }
+
+    #[test]
+    fn restore_on_non_tombstone_is_unchanged() {
+        // The helper is total: a non-tombstone is returned unchanged (storage guards before calling).
+        let active = base();
+        let restored = active.clone().restore_from_tombstone();
+        assert_eq!(restored, active);
     }
 
     #[test]
