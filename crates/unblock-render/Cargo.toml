@@ -9,10 +9,35 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+default = []
+# Propagates the model's bare `toon` marker feature (CF-J / spine §1.10) so the
+# re-exported `OutputFormat::Toon` variant + `ContentType::Toon` are visible under
+# `--features toon`. There is NO `toon`/`toon_rust` encoder dependency in v1 — the
+# encoder, its cargo-deny audit, and the real `ToonRenderer` impl land in v1.1
+# (crate plan §5 item 4). The v1 backend file is `#[cfg]`-empty.
+toon = ["unblock-model/toon"]
+
 [dependencies]
 unblock-model = { workspace = true }
 unblock-error = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-csv = { workspace = true }
 chrono = { workspace = true }
+# Per-crate error enum convention (CLAUDE.md "Errors: snafu, per-crate"); the locked `RenderError`
+# uses `#[derive(Snafu)]` + `#[snafu(visibility(pub(crate)))]` context selectors.
+snafu = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+proptest = { workspace = true }
+criterion = { workspace = true }
+# Read-side only: the contract suite re-parses emitted CSV rows with `csv::Reader`
+# to assert RFC-4180 well-formedness + cell count. The WRITE path is hand-rolled
+# (verbatim port of the original `escape_field`), so `csv` is never a runtime dep
+# (crate plan §3 Cargo.toml row, decision #2).
+csv = { workspace = true }
+
+[[bench]]
+name = "render"
+harness = false
