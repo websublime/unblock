@@ -1,0 +1,16 @@
+---
+source: crates/unblock-render/tests/snapshots.rs
+expression: "render(OutputFormat::Plain, & opts, \"issue\")"
+---
+ID: ub-abc123
+Title: Render the docs
+Status: in_progress
+Priority: P2
+Type: task
+Assignee: alice
+Labels: docs
+Created: 2026-01-02T03:04:05Z
+Updated: 2026-01-02T03:04:06Z
+Description:
+first line
+second line

@@ -1,0 +1,7 @@
+---
+source: crates/unblock-render/tests/snapshots.rs
+expression: "render(OutputFormat::Markdown, & opts, \"dep_tree\")"
+---
+- ub\-root
+  - ub\-root → ub\-child (parent\-child)
+  - ub\-child → ub\-blocked (blocks)

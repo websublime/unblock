@@ -1,0 +1,6 @@
+---
+source: crates/unblock-render/tests/snapshots.rs
+expression: "render(OutputFormat::Plain, & opts, \"issues\")"
+---
+ub-abc123 [P2] [task] - Render the docs
+ub-def456 [P2] [task] - Pipes | and, commas

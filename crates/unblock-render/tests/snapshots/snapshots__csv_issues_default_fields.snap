@@ -1,0 +1,7 @@
+---
+source: crates/unblock-render/tests/snapshots.rs
+expression: "render(OutputFormat::Csv, & opts, \"issues\")"
+---
+id,title,status,priority,issue_type,assignee,created_at,updated_at
+ub-abc123,Render the docs,in_progress,2,task,alice,2026-01-02T03:04:05Z,2026-01-02T03:04:06Z
+ub-def456,"Pipes | and, commas",open,2,task,alice,2026-01-02T03:04:05Z,2026-01-02T03:04:06Z

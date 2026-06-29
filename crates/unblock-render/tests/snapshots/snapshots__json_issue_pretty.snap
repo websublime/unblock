@@ -1,0 +1,19 @@
+---
+source: crates/unblock-render/tests/snapshots.rs
+expression: "render(OutputFormat::Json, & pretty, \"issue\")"
+---
+{
+  "id": "ub-abc123",
+  "title": "Render the docs",
+  "description": "first line\nsecond line",
+  "status": "in_progress",
+  "priority": 2,
+  "issue_type": "task",
+  "assignee": "alice",
+  "created_at": "2026-01-02T03:04:05Z",
+  "updated_at": "2026-01-02T03:04:06Z",
+  "compaction_level": 0,
+  "labels": [
+    "docs"
+  ]
+}

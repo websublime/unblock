@@ -1,0 +1,10 @@
+---
+source: crates/unblock-render/tests/snapshots.rs
+expression: "render(OutputFormat::Markdown, & opts, \"error\")"
+---
+**Error** `VALIDATION\_FAILED`: title too long
+- _Hint:_ shorten the title
+
+| key | value |
+| --- | --- |
+| provided | danger\\u\{1b\}\[2Jwipe |
