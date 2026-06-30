@@ -180,6 +180,9 @@ where
 
     // Seam-backed: id child-counter high-water mark.
     contract_child_counter_high_water(factory().await).await;
+
+    // Production trait read-half (D21): next_child_number advances as children are created.
+    contract_next_child_number(factory().await).await;
 }
 
 // --------------------------------------------------------------------------------------------------
@@ -2158,5 +2161,52 @@ pub async fn contract_child_counter_high_water<S: Storage + StorageTestkit>(stor
     assert!(
         last_hw >= 3,
         "high-water ({last_hw}) advanced past the max child segment (3)"
+    );
+}
+
+/// `next_child_number` (the PRODUCTION trait read-half the engine allocator consumes, D21) returns
+/// the high-water mark + 1, advancing as children are created through the public `create_issue`.
+///
+/// Distinct from the testkit-only `testkit_child_high_water` seam: this reaches the same body via the
+/// public trait surface (so a backend's production wiring is exercised, not just the test seam).
+pub async fn contract_next_child_number<S: Storage>(storage: S) {
+    storage
+        .create_issue(&issue("ub-root", "root"), "a")
+        .await
+        .unwrap();
+
+    // No child yet → the first child number is 1.
+    assert_eq!(
+        storage.next_child_number("ub-root").await.unwrap(),
+        1,
+        "the first child of a fresh parent is number 1"
+    );
+
+    // Create child .1, then .2 through the public API; next_child_number advances past each.
+    storage
+        .create_issue(&issue("ub-root.1", "child 1"), "a")
+        .await
+        .unwrap();
+    assert_eq!(
+        storage.next_child_number("ub-root").await.unwrap(),
+        2,
+        "after child .1, the next free child number is 2"
+    );
+
+    storage
+        .create_issue(&issue("ub-root.2", "child 2"), "a")
+        .await
+        .unwrap();
+    assert_eq!(
+        storage.next_child_number("ub-root").await.unwrap(),
+        3,
+        "after child .2, the next free child number is 3"
+    );
+
+    // An unknown parent has no counter → its first child is 1 (never panics on a missing parent).
+    assert_eq!(
+        storage.next_child_number("ub-unknown").await.unwrap(),
+        1,
+        "an unseen parent's first child number is 1"
     );
 }

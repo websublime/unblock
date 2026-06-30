@@ -44,11 +44,10 @@ pub(super) async fn update_child_counter_in_tx(
 /// `LIKE`-escaped scan of existing `{parent_id}.N` ids for legacy data or a missing counter row.
 /// Never panics: overflow saturates.
 ///
-/// Reached by the gated `StorageTestkit::testkit_child_high_water` seam, which exercises the
-/// counter's monotonic-advance contract from the NFR-16 suite; the engine's id allocator also
-/// consumes it once that wiring lands. The `allow(dead_code)` only applies to the **plain** build
-/// (no `testkit`, not under test), where the seam does not reach it yet.
-#[cfg_attr(not(any(test, feature = "testkit")), allow(dead_code))]
+/// This backs the production [`Storage::next_child_number`](crate::Storage::next_child_number) trait
+/// method (T1.8/D21) — the read-half the engine id-allocator consumes — AND the gated
+/// `StorageTestkit::testkit_child_high_water` seam (which exposes the raw high-water mark for the
+/// NFR-16 suite). Both are distinct surfaces over this one body.
 pub(super) async fn next_child_number(
     conn: &Connection,
     parent_id: &str,
