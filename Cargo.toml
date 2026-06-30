@@ -95,6 +95,11 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 # --- external: cooperative-shutdown signals (FR-17; the cli owns handler install, OQ-4) ---
 signal-hook = "0.3"
 
+# --- external: cooperative-shutdown token for the MCP stdio server (FR-17; the
+#     `tokio_util::sync::CancellationToken` source for rmcp's `serve_with_ct`, which re-exports
+#     nothing for it — unblock-mcp imports it directly) ---
+tokio-util = "0.7"
+
 # --- external: self-update (D17/FR-25; behind cli `self-update` feature, CF-K) ---
 axoupdater = "0.10"
 

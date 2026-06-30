@@ -1,0 +1,240 @@
+//! The server: [`UnblockServer`] (the `ServerHandler`), [`serve`], and the hand-written resource +
+//! `get_info` methods (spine §5).
+//!
+//! The single `impl ServerHandler for UnblockServer` STACKS `#[tool_handler]` + `#[prompt_handler]`
+//! (each detects the other as a sibling and the hand-written `get_info`, so neither emits its own)
+//! plus the HAND-WRITTEN `get_info` / `list_resource_templates` / `read_resource` (rmcp has no
+//! resource macro). The tool routers from the 7 tool files compose via `+`; the prompt router comes
+//! from `prompts::mod`. Holding `Arc<Session>`, the server is a thin adapter — the engine owns the
+//! write Semaphore (D14), so there is no write orchestration here.
+
+use std::sync::Arc;
+
+use rmcp::ServerHandler;
+use rmcp::handler::server::router::tool::ToolRouter;
+use rmcp::model::{
+    AnnotateAble, ErrorData, GetPromptRequestParams, GetPromptResult, ListPromptsResult,
+    ListResourceTemplatesResult, PaginatedRequestParams, RawResourceTemplate,
+    ReadResourceRequestParams, ReadResourceResult, ResourceContents, ServerCapabilities,
+    ServerInfo,
+};
+use rmcp::service::{RequestContext, RoleServer};
+use rmcp::transport::stdio;
+use rmcp::{Service, ServiceExt};
+use serde::Serialize;
+use snafu::ResultExt;
+use unblock_engine::Session;
+use unblock_error::StructuredError;
+
+use crate::error::{McpServerError, RunLoopSnafu, TransportSnafu};
+use crate::options::{CONTRACT_VERSION, Quotas, ServeOptions};
+use crate::resources::{self, ResourceUri, capabilities, schema_bundle};
+use crate::tools::enforce_quota;
+
+/// The MCP server handler — a thin adapter over [`Session`] (spine §5).
+///
+/// Holds `Arc<Session>` (so it is `Send + Sync`, as `ServerHandler` requires) plus the request
+/// [`Quotas`]. It carries NO write lock — the engine owns the write Semaphore (D14).
+#[derive(Clone)]
+pub(crate) struct UnblockServer {
+    /// The single mutation home (FR-9). Every tool/resource call delegates to it.
+    pub(crate) session: Arc<Session>,
+    /// The untrusted-input limits (NFR-18), enforced in [`UnblockServer::preflight`].
+    pub(crate) quotas: Quotas,
+}
+
+impl UnblockServer {
+    /// Build the server handler.
+    pub(crate) fn new(session: Arc<Session>, quotas: Quotas) -> Self {
+        Self { session, quotas }
+    }
+
+    /// Aggregate the 7 tool routers into one (composed via `+`, spine §5.1).
+    fn aggregate_tool_router() -> ToolRouter<Self> {
+        Self::issue_router()
+            + Self::claim_router()
+            + Self::defer_router()
+            + Self::query_router()
+            + Self::dep_router()
+            + Self::sync_router()
+            + Self::diagnostics_router()
+    }
+
+    /// The NFR-18 quota preflight, run inside each tool body BEFORE any `Session` call.
+    ///
+    /// Re-serializes the already-deserialized typed input and runs [`enforce_quota`]; an oversized
+    /// input is rejected in-band (it never reaches the engine). Returns `Err(structured)` on breach.
+    pub(crate) fn preflight<T: Serialize>(&self, input: &T) -> Result<(), StructuredError> {
+        let value = serde_json::to_value(input).unwrap_or(serde_json::Value::Null);
+        enforce_quota(&value, &self.quotas)
+    }
+
+    /// Build the `ReadResourceResult` text body for a parsed resource URI (read-only, FR-10).
+    async fn read_resource_body(&self, uri: &str) -> Result<serde_json::Value, StructuredError> {
+        match resources::parse_uri(uri) {
+            ResourceUri::IssueById(id) => resources::issues::read_issue(&self.session, &id).await,
+            ResourceUri::Ready => resources::issues::read_ready(&self.session).await,
+            ResourceUri::Blocked => resources::issues::read_blocked(&self.session).await,
+            ResourceUri::Capabilities => {
+                serde_json::to_value(capabilities()).map_err(|e| serialize_error(&e))
+            }
+            ResourceUri::Schema => {
+                serde_json::to_value(schema_bundle()).map_err(|e| serialize_error(&e))
+            }
+            ResourceUri::Unknown => Err(unknown_resource(uri)),
+        }
+    }
+}
+
+#[rmcp::tool_handler(router = Self::aggregate_tool_router())]
+#[rmcp::prompt_handler(router = Self::prompt_router())]
+impl ServerHandler for UnblockServer {
+    /// Advertise tools + prompts + resources, the server identity, and the instructions.
+    ///
+    /// HAND-WRITTEN (not macro-generated): the two stacked handler macros both detect this method and
+    /// skip emitting their own. It enables all three capabilities so the resource methods below are
+    /// discoverable.
+    fn get_info(&self) -> ServerInfo {
+        let capabilities = ServerCapabilities::builder()
+            .enable_tools()
+            .enable_prompts()
+            .enable_resources()
+            .build();
+        ServerInfo::new(capabilities).with_instructions(format!(
+            "unblock MCP server (contract {CONTRACT_VERSION}). 7 tools, 5 resources, 3 prompts."
+        ))
+    }
+
+    /// Advertise the resource templates (the 5 `unblock://...` URIs, spine §5.4).
+    async fn list_resource_templates(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourceTemplatesResult, ErrorData> {
+        let templates = [
+            (
+                "unblock://issues/{id}",
+                "issue-by-id",
+                "A single issue by id.",
+            ),
+            (
+                "unblock://issues/ready",
+                "ready-issues",
+                "The default-complete ready set.",
+            ),
+            (
+                "unblock://issues/blocked",
+                "blocked-issues",
+                "The blocked set.",
+            ),
+            (
+                "unblock://capabilities",
+                "capabilities",
+                "The discovery document (FR-12).",
+            ),
+            (
+                "unblock://schema",
+                "schema",
+                "The JsonSchema bundle for every tool I/O (FR-12).",
+            ),
+        ]
+        .into_iter()
+        .map(|(uri, name, description)| {
+            RawResourceTemplate::new(uri, name)
+                .with_description(description)
+                .with_mime_type("application/json")
+                .no_annotation()
+        })
+        .collect();
+        Ok(ListResourceTemplatesResult {
+            resource_templates: templates,
+            next_cursor: None,
+            meta: None,
+        })
+    }
+
+    /// Read a resource by URI (read-only, FR-10). A miss → `resource_not_found` (-32002); a domain
+    /// error is surfaced as `ErrorData` (resources have no in-band channel like tools do).
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResult, ErrorData> {
+        match self.read_resource_body(&request.uri).await {
+            Ok(body) => Ok(ReadResourceResult::new(vec![ResourceContents::text(
+                body.to_string(),
+                request.uri,
+            )])),
+            Err(structured) => Err(crate::error::to_rmcp_error_data(&structured)),
+        }
+    }
+}
+
+/// Build, bind, and run the MCP stdio server until cancellation (FR-17).
+///
+/// Binds the `transport-io` stdio transport and runs `serve_with_ct` with the caller's
+/// [`ServeOptions::cancel`] token; a `cancel()` drains in-flight work and returns cleanly. The
+/// `session` is shared as `Arc<Session>` (the engine owns the write Semaphore, D14).
+///
+/// # Errors
+/// - [`McpServerError::Transport`] if the rmcp service fails to initialize/bind.
+/// - [`McpServerError::RunLoop`] if the run loop ends abnormally (the background task is aborted).
+pub async fn serve(session: Arc<Session>, opts: ServeOptions) -> Result<(), McpServerError> {
+    let server = UnblockServer::new(session, opts.quotas);
+    let running = serve_handler(server, stdio(), opts.cancel).await?;
+    running.waiting().await.context(RunLoopSnafu)?;
+    Ok(())
+}
+
+/// Generic over the transport so the lifecycle test can drive an in-memory duplex transport.
+async fn serve_handler<T, E, A>(
+    server: UnblockServer,
+    transport: T,
+    cancel: tokio_util::sync::CancellationToken,
+) -> Result<rmcp::service::RunningService<RoleServer, UnblockServer>, McpServerError>
+where
+    UnblockServer: Service<RoleServer>,
+    T: rmcp::transport::IntoTransport<RoleServer, E, A>,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    server
+        .serve_with_ct(transport, cancel)
+        .await
+        .context(TransportSnafu)
+}
+
+/// Map a JSON serialization failure to a structured `InternalError` (no panic in library code).
+fn serialize_error(err: &serde_json::Error) -> StructuredError {
+    StructuredError::from_code(
+        unblock_error::ErrorCode::InternalError,
+        format!("failed to serialize resource body: {err}"),
+    )
+}
+
+/// Build the structured not-found for an unknown resource URI (→ -32002 at the boundary).
+fn unknown_resource(uri: &str) -> StructuredError {
+    StructuredError::from_code(
+        unblock_error::ErrorCode::IssueNotFound,
+        format!("unknown resource: {uri}"),
+    )
+    .with_context("uri", serde_json::json!(uri))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::UnblockServer;
+    use crate::options::Quotas;
+
+    const fn assert_send_sync<T: Send + Sync + 'static>() {}
+
+    #[test]
+    fn unblock_server_is_send_sync() {
+        assert_send_sync::<UnblockServer>();
+    }
+
+    #[test]
+    fn quotas_default_round_trips() {
+        // A compile-witness that the server's quota type is constructible here.
+        let _q = Quotas::default();
+    }
+}
