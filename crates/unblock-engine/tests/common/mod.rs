@@ -322,6 +322,9 @@ pub mod parked {
         async fn list_dependencies(&self, id: &str) -> Result<Vec<Dependency>, StorageError> {
             self.inner.list_dependencies(id).await
         }
+        async fn next_child_number(&self, parent_id: &str) -> Result<u32, StorageError> {
+            self.inner.next_child_number(parent_id).await
+        }
         async fn dependency_tree(&self, id: &str) -> Result<DepTree, StorageError> {
             self.inner.dependency_tree(id).await
         }

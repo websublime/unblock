@@ -262,6 +262,20 @@ pub trait Storage: Send + Sync {
     /// List the dependencies declared *by* `id`.
     async fn list_dependencies(&self, id: &str) -> Result<Vec<Dependency>, StorageError>;
 
+    // ---------------------------------------------------------------------------------------------
+    // hierarchical-id child allocation (FR-1a, D21) — the READ-half the engine allocator consumes
+    // ---------------------------------------------------------------------------------------------
+
+    /// Return the next free child number for `parent.N` minting (the `child_counters` high-water
+    /// mark + 1, falling back to a `LIKE`-escaped scan of existing `{parent}.N` ids).
+    ///
+    /// This is the PRODUCTION read-half (T1.8) the engine id-allocator consumes (spine §3.2, D21):
+    /// the engine reads it under the SAME write permit as the in-tx counter bump performed by
+    /// [`create_issue`](Storage::create_issue), so two concurrent creates under one parent cannot
+    /// mint the same `parent.N`. It is **distinct** from the testkit-only `testkit_child_high_water`
+    /// seam (which exposes the raw high-water mark for tests). Never panics: overflow saturates.
+    async fn next_child_number(&self, parent_id: &str) -> Result<u32, StorageError>;
+
     /// Return the dependency subtree **rooted at `id`** as a [`DepTree`].
     async fn dependency_tree(&self, id: &str) -> Result<DepTree, StorageError>;
 
@@ -460,6 +474,11 @@ mod tests {
 
         async fn list_dependencies(&self, _id: &str) -> Result<Vec<Dependency>, StorageError> {
             Ok(Vec::new())
+        }
+
+        async fn next_child_number(&self, _parent_id: &str) -> Result<u32, StorageError> {
+            // A backend-free stub has no child counters; the first child number is 1.
+            Ok(1)
         }
 
         async fn dependency_tree(&self, id: &str) -> Result<DepTree, StorageError> {

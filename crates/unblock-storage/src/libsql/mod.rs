@@ -670,6 +670,12 @@ impl Storage for LibsqlStorage {
         deps::list_dependencies(self.read(), id).await
     }
 
+    async fn next_child_number(&self, parent_id: &str) -> Result<u32, StorageError> {
+        // A pure read of the child-counter high-water mark (+1) — the read-half the engine allocator
+        // consumes under the write permit (D21). Uses the read connection (WAL reader snapshot).
+        ids::next_child_number(self.read(), parent_id).await
+    }
+
     async fn dependency_tree(&self, id: &str) -> Result<DepTree, StorageError> {
         deps::dependency_tree(self.read(), id).await
     }
