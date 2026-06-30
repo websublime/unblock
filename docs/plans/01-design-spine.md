@@ -634,6 +634,13 @@ pub trait Storage: Send + Sync {
     //  dependency types (integrity/lint view) — D19, faithful to original detect_blocking_cycles
     //  (true) / detect_all_cycles (false).
 
+    // --- hierarchical-id child allocation (FR-1a, D21) — the READ-half the engine allocator consumes ---
+    async fn next_child_number(&self, parent_id: &str) -> Result<u32, StorageError>; // high-water+1 (§3.2.1)
+    //  PRODUCTION method (T1.8): returns the next free child number for `parent.N` minting — the
+    //  `child_counters` high-water mark + 1, falling back to a LIKE-ESCAPE legacy scan. DISTINCT from
+    //  the testkit-only `testkit_child_high_water` seam. The engine reads this under the SAME write
+    //  permit as the in-tx counter bump (create_issue), so the `parent.N` counter cannot race.
+
     // --- events (audit; append-only) ---
     async fn list_events(&self, issue_id: &str) -> Result<Vec<Event>, StorageError>;
 
@@ -856,6 +863,21 @@ The dependency ops (FR-5) — source-verified vs the original cycle machinery:
   `(issue_id, depends_on_id, dep_type)` edge → `DependencyNotFound` if absent; on success
   `Event(DependencyRemoved)`.
 
+The hierarchical-id child allocation (FR-1a, D21) — the read-half of `parent.N` minting:
+
+- **`next_child_number(parent_id)` (T0.6 impl; PRODUCTION-CONSUMED from T1.8, D21) — returns the next
+  free child number (high-water + 1) for `parent.N`.** Reads the `child_counters` high-water mark for
+  `parent_id` and returns it **+ 1**; on a missing counter row (e.g. imported data with no counter
+  seeded) it falls back to a **`LIKE`-ESCAPE legacy scan** (`id LIKE ? ESCAPE '\'` over the existing
+  `parent.N` children, the wildcards in `parent_id` escaped) and returns max-child + 1, or 1 when the
+  parent has no children yet. **This is the READ-half** whose WRITE-half is the in-tx `child_counters`
+  bump inside `create_issue`; the engine allocator runs both under the SAME write permit (D14) so two
+  concurrent creates under one parent cannot mint the same `parent.N`. **DISTINCT from the testkit-only
+  `testkit_child_high_water` seam** (which exposes the raw high-water mark for tests): `next_child_number`
+  is the production method on the trait, and the libsql impl (`unblock-storage/src/libsql/ids.rs`)
+  already exists — T1.8 Implement promotes it from `pub(super)` to the trait impl and removes its
+  `allow(dead_code)`.
+
 **EventType-per-mutation (the T0.7 oracle).** Model `EventType` = 15 named (Created, Updated,
 StatusChanged, PriorityChanged, AssigneeChanged, Commented, Closed, Reopened, DependencyAdded,
 DependencyRemoved, LabelAdded, LabelRemoved, Compacted, Deleted, Restored) + `Custom` — **no `Deferred`,
@@ -1076,18 +1098,20 @@ impl Session {
     //   Tombstones/imported rows reach storage with their original ids ONLY through here. STAYS (D21).
     pub async fn create_issue(&self, new: NewIssue) -> Result<Issue, EngineError>; // D21 — the MINTING create path
     //   INTERACTIVE create (MCP/CLI quick-create + full create). MINTS the id under the write permit (D21):
-    //   - root id `ub-<hash>` (faithful `bd` adaptive-base36) or, with `new.slug`, `ub-<slug>-<hash>` — the
-    //     prefix is CONFIG-DERIVED (read from the Session's held `ResolvedConfig.id_prefix`, default "ub",
-    //     `normalize_prefix`-normalized; D21), NOT a constant; the seed carries the resolved actor as `creator`;
-    //   - with `new.parent`, the hierarchical `parent.N` via storage `next_child_number(parent)`;
-    //   the candidate is probed against storage via `get_issue(id).is_some()` (there is no `Storage::exists`) and the mint→probe→insert is ATOMIC under the SAME
+    //   - root id `ub-<hash>` (faithful `bd` adaptive-base36) or, with `new.slug`, `ub-<slug>-<hash>` — the slug
+    //     is `normalize_slug`'d then `normalize_slug_for_prefix(slug, prefix)`'d to fit `<prefix>-<slug>` within
+    //     `MAX_ID_PREFIX_LEN` (=64) or drop to hash-only; the prefix is CONFIG-DERIVED (read from the Session's
+    //     held `ResolvedConfig.id_prefix`, default "ub", `normalize_prefix`-normalized; D21), NOT a constant; the
+    //     seed carries the resolved actor as `creator`;
+    //   - with `new.parent`, the hierarchical `parent.N` via the `Storage::next_child_number(parent)` trait method (§3.2);
+    //   the candidate is probed against storage via `get_issue(id).await?.is_some()` (there is no `Storage::exists`) and the mint→probe→insert is ATOMIC under the SAME
     //   permit (so two concurrent creates under one parent cannot mint the same `parent.N` — this is WHY
     //   minting is the engine's job, NOT an L7 adapter's; FR-9 single mutation home). It resolves `new.deps`
     //   into edges added in/after the same tx, then returns the created `Issue` (the MCP quick-create extracts
     //   `.id`). NAME: `create_issue` parallels `Storage::create_issue` (engine mints + delegates to storage);
     //   the two live in DIFFERENT namespaces (`Session::` vs the `Storage` trait), so the name does not clash.
     //   The pure candidate compute (hash/seed/adaptive-length/slug-normalize) lives in unblock-model `id.rs`;
-    //   the stateful collision-retry loop + the existence probe (`get_issue(id).is_some()`, NOT a `Storage::exists`) and the `next_child_number` read live in the engine allocator.
+    //   the stateful collision-retry loop + the existence probe (`get_issue(id).await?.is_some()`, NOT a `Storage::exists`) and the `next_child_number` read live in the engine allocator.
     pub async fn update(&self, id: &str, patch: &IssuePatch) -> Result<Issue, EngineError>;
     pub async fn delete(&self, plan: &DeletePlan) -> Result<DeletePlan, EngineError>;
     pub async fn restore(&self, id: &str) -> Result<Issue, EngineError>; // FR-1c recovery (D20) — un-tombstone
