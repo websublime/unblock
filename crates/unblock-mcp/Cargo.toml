@@ -53,3 +53,7 @@ insta = { workspace = true }
 proptest = { workspace = true }
 tempfile = { workspace = true }
 serde_json = { workspace = true }
+# The hash-coupled CONTRACT_VERSION drift gate (tests/contract_suite.rs, D22/F6) computes a SHA-256
+# digest of `schema_bundle()` and asserts it equals the pinned `SCHEMA_BUNDLE_HASH` — so a schema edit
+# FORCES a version bump (not a silent golden re-bless). Test-only: the shipped binary never hashes.
+sha2 = { workspace = true }

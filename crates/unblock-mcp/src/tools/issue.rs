@@ -34,6 +34,18 @@ pub(crate) enum IssueInput {
     /// The payload is boxed (it is the largest variant) — the wire shape is unchanged: a newtype
     /// variant over a `#[serde(flatten)]`-equivalent struct keeps `{action:"create", title, ...}`.
     Create(Box<CreateInput>),
+    /// Bulk-create issues from an inline markdown document (D22 — `{action:"create_bulk", markdown}`).
+    ///
+    /// The `markdown` is INLINE content (NOT a path). The adapter parses it (all-or-nothing
+    /// pre-mutation), caps the record count at `Quotas::max_batch`, maps each `ParsedIssue` →
+    /// `NewIssue` (carrying the symbolic dep/parent refs verbatim), and calls the ATOMIC
+    /// `Session::create_bulk` — NOT a loop over `create_issue`. The engine mints all ids + resolves the
+    /// 2-phase intra-file dep/parent IN MEMORY + inserts the whole batch in ONE tx (rollback-on-any-
+    /// failure → ZERO writes). Output reuses `ToolOutput::Issues`.
+    CreateBulk {
+        /// The inline bulk-markdown document content.
+        markdown: String,
+    },
     /// Show a single issue by id.
     Show {
         /// The issue id.
@@ -114,6 +126,18 @@ pub(crate) struct CreateInput {
     pub estimated_minutes: Option<i32>,
     #[serde(default)]
     pub slug: Option<String>,
+    /// The `### Design` content (D22 — maps onto `NewIssue::design`).
+    #[serde(default)]
+    pub design: Option<String>,
+    /// The `### Acceptance Criteria` / `### Acceptance` content (D22 — `NewIssue::acceptance_criteria`).
+    #[serde(default)]
+    pub acceptance_criteria: Option<String>,
+    /// The `### Assignee` content (D22 — `NewIssue::assignee`).
+    #[serde(default)]
+    pub assignee: Option<String>,
+    /// The `### Agent Context` content (D22 — `NewIssue::agent_context`).
+    #[serde(default)]
+    pub agent_context: Option<String>,
     #[serde(default)]
     pub ephemeral: bool,
     /// Quick-create: the output is the minted id only.
@@ -247,6 +271,10 @@ impl UnblockServer {
                     defer_until,
                     estimated_minutes,
                     slug,
+                    design,
+                    acceptance_criteria,
+                    assignee,
+                    agent_context,
                     ephemeral,
                     quick,
                     attribution: _,
@@ -269,6 +297,11 @@ impl UnblockServer {
                     estimated_minutes,
                     slug,
                     ephemeral,
+                    design,
+                    acceptance_criteria,
+                    assignee,
+                    agent_context,
+                    ..NewIssue::default()
                 };
                 match self.session.create_issue(new).await {
                     Ok(issue) if quick => ok_json(&crate::tools::output::IdOnly { id: issue.id }),
@@ -276,6 +309,7 @@ impl UnblockServer {
                     Err(err) => engine_err_json(&err),
                 }
             }
+            IssueInput::CreateBulk { markdown } => self.create_bulk_action(&markdown).await,
             IssueInput::Show { id } => match self.session.get(&id).await {
                 Ok(Some(issue)) => ok_json(&issue),
                 Ok(None) => err_json(&issue_not_found(&id)),
@@ -342,6 +376,63 @@ impl UnblockServer {
                 Err(err) => engine_err_json(&err),
             },
         }
+    }
+}
+
+impl UnblockServer {
+    /// The `create_bulk` action (D22): parse the inline markdown (all-or-nothing), cap the record
+    /// count at `Quotas::max_batch` (before any mint), map each `ParsedIssue` → `NewIssue` (carrying
+    /// the symbolic dep/parent refs verbatim), and call the ATOMIC `Session::create_bulk`. Output
+    /// reuses `ToolOutput::Issues` (the Vec of created issues).
+    async fn create_bulk_action(&self, markdown: &str) -> CallToolResult {
+        // (1) Parse the whole document (all-or-nothing pre-mutation parse).
+        let parsed = match crate::tools::bulk_markdown::parse_bulk_markdown(markdown) {
+            Ok(parsed) => parsed,
+            Err(structured) => return err_json(&structured),
+        };
+
+        // (2) Cap the parsed record count at max_batch BEFORE any mint (the spy Session sees zero calls).
+        if let Err(structured) = crate::tools::enforce_batch_quota(parsed.len(), &self.quotas) {
+            return err_json(&structured);
+        }
+
+        // (3) Map each ParsedIssue → NewIssue (carrying the symbolic refs verbatim for the engine).
+        let records: Vec<NewIssue> = parsed.into_iter().map(parsed_to_new_issue).collect();
+
+        // (4) The ATOMIC bulk create (engine mints + resolves + one storage tx). Output = the Vec.
+        match self.session.create_bulk(records).await {
+            Ok(issues) => ok_json(&issues),
+            Err(err) => engine_err_json(&err),
+        }
+    }
+}
+
+/// Map a parsed bulk-markdown record to the engine-owned [`NewIssue`] (D22). The dependency / parent
+/// references are carried VERBATIM (as `dep_refs` / symbolic `parent` / `stand_in_id`) — the ENGINE
+/// resolves them at `create_bulk`. The `priority` / `issue_type` strings are parsed leniently (an
+/// unparseable value falls back to the model default, surfaced by validation downstream if needed).
+fn parsed_to_new_issue(parsed: crate::tools::bulk_markdown::ParsedIssue) -> NewIssue {
+    NewIssue {
+        title: parsed.title,
+        description: parsed.description,
+        issue_type: parsed
+            .issue_type
+            .as_deref()
+            .and_then(|t| t.parse::<IssueType>().ok()),
+        priority: parsed
+            .priority
+            .as_deref()
+            .and_then(|p| p.parse::<Priority>().ok()),
+        labels: parsed.labels,
+        parent: parsed.parent,
+        slug: None,
+        design: parsed.design,
+        acceptance_criteria: parsed.acceptance_criteria,
+        assignee: parsed.assignee,
+        agent_context: parsed.agent_context,
+        stand_in_id: parsed.stand_in_id,
+        dep_refs: parsed.dependencies,
+        ..NewIssue::default()
     }
 }
 

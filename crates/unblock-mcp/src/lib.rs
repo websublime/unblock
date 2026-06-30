@@ -8,7 +8,8 @@
 //!
 //! - [`serve`] — build the rmcp server, bind the stdio transport, run until cancellation (FR-17).
 //! - [`ServeOptions`] / [`Quotas`] — server config + untrusted-input limits (NFR-18).
-//! - [`CONTRACT_VERSION`] — the mcp-owned `contract_version` SSOT (F-5; bumped on any schema change).
+//! - [`CONTRACT_VERSION`] / [`SCHEMA_BUNDLE_HASH`] — the mcp-owned `contract_version` SSOT (F-5;
+//!   bumped on any schema change) + its hash-coupled drift pin (F-6/D22).
 //! - [`capabilities`] / [`schema_bundle`] — pure builders (no `Session`) so the CLI can dump the
 //!   contract offline (FR-12).
 //! - [`McpServerError`] — server lifecycle/transport errors only; per-tool domain errors flow in-band
@@ -28,7 +29,7 @@ mod server;
 mod tools;
 
 pub use error::McpServerError;
-pub use options::{CONTRACT_VERSION, Quotas, ServeOptions};
+pub use options::{CONTRACT_VERSION, Quotas, SCHEMA_BUNDLE_HASH, ServeOptions};
 pub use resources::{
     Capabilities, ErrorCodeDescriptor, PromptDescriptor, ResourceDescriptor, SchemaBundle,
     ToolDescriptor, capabilities, schema_bundle,
