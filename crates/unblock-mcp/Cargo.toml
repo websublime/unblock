@@ -18,6 +18,8 @@ unblock-policy = { workspace = true }
 unblock-model = { workspace = true }
 unblock-error = { workspace = true }
 rmcp = { workspace = true }
+# The cooperative-shutdown token for rmcp's `serve_with_ct` (FR-17). rmcp re-exports nothing for it.
+tokio-util = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -25,3 +27,18 @@ chrono = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 snafu = { workspace = true }
+
+[dev-dependencies]
+# The integration tests (`tests/lifecycle.rs` M2 exit-gate, `tests/error_mapping.rs`) drive a real
+# in-memory `Session` over a temp libsql backend — the same construction the engine tests use
+# (LibsqlStorage::open_in_memory -> migrate -> Arc<dyn Storage>; WorkspaceContext; Session::open).
+unblock-storage = { workspace = true }
+unblock-config = { workspace = true }
+# The in-process MCP lifecycle test (`tests/lifecycle.rs`) drives an in-memory `tokio::io::duplex`
+# client against the server, so it needs the rmcp `client` feature (in addition to the runtime
+# `server`/`transport-io`). NEVER the `local` feature (it drops Send+Sync from ServerHandler).
+rmcp = { workspace = true, features = ["client"] }
+insta = { workspace = true }
+proptest = { workspace = true }
+tempfile = { workspace = true }
+serde_json = { workspace = true }

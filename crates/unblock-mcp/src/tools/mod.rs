@@ -1,0 +1,192 @@
+//! The 7 consolidated MCP tools (spine §5.1) + the shared quota preflight and JSON adapters.
+//!
+//! Each tool family is its own file (`issue`/`claim`/`defer`/`query`/`dep`/`sync`/`diagnostics`); the
+//! tool functions live on [`crate::server::UnblockServer`] under one `#[tool_router]` (see
+//! `server.rs`). This module owns the cross-tool helpers:
+//!
+//! - [`enforce_quota`] — the NFR-18 untrusted-input preflight, run **inside each tool body after
+//!   `Parameters<T>` deserialization and BEFORE any `Session` call** (rmcp has no stdio quota hook).
+//! - [`ok_json`] / [`err_json`] — map a domain result to an rmcp `CallToolResult` that is always
+//!   valid JSON (success via `structured`, in-band domain error via `structured_error`, FR-11).
+
+pub(crate) mod claim;
+pub(crate) mod defer;
+pub(crate) mod dep;
+pub(crate) mod diagnostics;
+pub(crate) mod dto;
+pub(crate) mod issue;
+pub(crate) mod output;
+pub(crate) mod query;
+pub(crate) mod sync;
+
+use rmcp::model::CallToolResult;
+use serde::Serialize;
+use unblock_engine::EngineError;
+use unblock_error::{ErrorCode, StructuredError};
+
+use crate::error::engine_error_to_structured;
+use crate::options::Quotas;
+
+/// The serialized output of a successful tool call (spine §5.3 `ToolOutput` success arms).
+///
+/// Mapped to an rmcp `CallToolResult::structured` (content mirror + structured `data`,
+/// `is_error=false`). Domain errors do NOT use this — they use [`err_json`].
+pub(crate) fn ok_json<T: Serialize>(output: &T) -> CallToolResult {
+    match serde_json::to_value(output) {
+        Ok(value) => CallToolResult::structured(value),
+        // Serialization of a domain value should be infallible; if it ever fails, surface a
+        // structured InternalError rather than panicking (no unwrap in library code).
+        Err(err) => err_json(&StructuredError::from_code(
+            ErrorCode::InternalError,
+            format!("failed to serialize tool output: {err}"),
+        )),
+    }
+}
+
+/// Map a [`StructuredError`] to an **in-band** error `CallToolResult` (FR-11).
+///
+/// `CallToolResult::structured_error` carries the JSON content mirror + structured `data` +
+/// `is_error=Some(true)` in one result — always valid JSON even on error (the spine §5.3
+/// `ToolOutput::Error` arm). `Err(ErrorData)` is reserved for true protocol faults.
+pub(crate) fn err_json(structured: &StructuredError) -> CallToolResult {
+    match serde_json::to_value(structured) {
+        Ok(value) => CallToolResult::structured_error(value),
+        Err(_) => CallToolResult::structured_error(serde_json::json!({
+            "code": ErrorCode::InternalError.as_str(),
+            "message": "failed to serialize structured error",
+            "retryable": false,
+        })),
+    }
+}
+
+/// Map an [`EngineError`] to an in-band error `CallToolResult` (the boundary, spine §5.6).
+pub(crate) fn engine_err_json(err: &EngineError) -> CallToolResult {
+    err_json(&engine_error_to_structured(err))
+}
+
+/// The untrusted-input quota preflight (NFR-18), run inside each tool body **before** the engine.
+///
+/// rmcp provides NO built-in request-size / array-length / string-length / batch cap on the stdio
+/// path, so this is the only enforcement point. It walks the already-deserialized JSON `args` and
+/// rejects, in-band, any input that exceeds a [`Quotas`] limit — so an oversized payload never
+/// reaches a `Session` call (the blast radius stays confined to the workspace).
+///
+/// Returns `Err(structured)` (a `ValidationFailed` over-quota error) on breach, `Ok(())` otherwise.
+pub(crate) fn enforce_quota(
+    args: &serde_json::Value,
+    quotas: &Quotas,
+) -> Result<(), StructuredError> {
+    // Total serialized size.
+    let serialized_len = serde_json::to_string(args).map_or(0, |s| s.len());
+    if serialized_len > quotas.max_request_bytes {
+        return Err(over_quota(
+            "request",
+            serialized_len,
+            quotas.max_request_bytes,
+        ));
+    }
+    check_value(args, quotas)
+}
+
+/// Recursively check arrays/strings against the per-element limits.
+fn check_value(value: &serde_json::Value, quotas: &Quotas) -> Result<(), StructuredError> {
+    match value {
+        serde_json::Value::String(s) => {
+            if s.len() > quotas.max_string_len {
+                return Err(over_quota("string", s.len(), quotas.max_string_len));
+            }
+            Ok(())
+        }
+        serde_json::Value::Array(items) => {
+            if items.len() > quotas.max_array_len {
+                return Err(over_quota("array", items.len(), quotas.max_array_len));
+            }
+            for item in items {
+                check_value(item, quotas)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Object(map) => {
+            for v in map.values() {
+                check_value(v, quotas)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Build the structured over-quota error (a `ValidationFailed` with the limit context).
+fn over_quota(kind: &str, actual: usize, limit: usize) -> StructuredError {
+    StructuredError::from_code(
+        ErrorCode::ValidationFailed,
+        format!("{kind} exceeds the configured quota ({actual} > {limit})"),
+    )
+    .with_hint("reduce the input size below the server quota and retry")
+    .with_context("kind", serde_json::json!(kind))
+    .with_context("actual", serde_json::json!(actual))
+    .with_context("limit", serde_json::json!(limit))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{enforce_quota, err_json, ok_json};
+    use crate::options::Quotas;
+    use unblock_error::{ErrorCode, StructuredError};
+
+    #[test]
+    fn ok_json_is_not_an_error_result() {
+        let result = ok_json(&serde_json::json!({"id": "ub-1"}));
+        assert_eq!(result.is_error, Some(false));
+        assert!(result.structured_content.is_some());
+    }
+
+    #[test]
+    fn err_json_is_an_error_result_with_valid_json() {
+        let structured = StructuredError::from_code(ErrorCode::IssueNotFound, "nope");
+        let result = err_json(&structured);
+        assert_eq!(result.is_error, Some(true));
+        let payload = result.structured_content.expect("structured payload");
+        assert_eq!(payload["code"], "ISSUE_NOT_FOUND");
+    }
+
+    #[test]
+    fn enforce_quota_passes_small_input() {
+        let args = serde_json::json!({"title": "small", "labels": ["a", "b"]});
+        assert!(enforce_quota(&args, &Quotas::default()).is_ok());
+    }
+
+    #[test]
+    fn enforce_quota_rejects_over_length_array() {
+        let quotas = Quotas {
+            max_array_len: 2,
+            ..Quotas::default()
+        };
+        let args = serde_json::json!({"labels": ["a", "b", "c"]});
+        let err = enforce_quota(&args, &quotas).expect_err("over array quota");
+        assert_eq!(err.code, ErrorCode::ValidationFailed);
+        assert_eq!(err.context["kind"], "array");
+    }
+
+    #[test]
+    fn enforce_quota_rejects_over_length_string() {
+        let quotas = Quotas {
+            max_string_len: 4,
+            ..Quotas::default()
+        };
+        let args = serde_json::json!({"title": "way too long"});
+        let err = enforce_quota(&args, &quotas).expect_err("over string quota");
+        assert_eq!(err.context["kind"], "string");
+    }
+
+    #[test]
+    fn enforce_quota_rejects_over_request_bytes() {
+        let quotas = Quotas {
+            max_request_bytes: 8,
+            ..Quotas::default()
+        };
+        let args = serde_json::json!({"title": "this whole request is too big"});
+        let err = enforce_quota(&args, &quotas).expect_err("over request quota");
+        assert_eq!(err.context["kind"], "request");
+    }
+}
