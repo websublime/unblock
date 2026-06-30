@@ -9,6 +9,7 @@ WorkspaceConfig {
     search_cap: 50,
     db_filename: "unblock.db",
     jsonl_filename: "issues.jsonl",
+    id_prefix: "ub",
     deletions_retention_days: None,
     backend: None,
 }

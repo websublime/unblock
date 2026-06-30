@@ -13,7 +13,7 @@
 //! `$USER` > `"unblock"`) and is bounded via [`unblock_model::validate_actor`] (Seam A);
 //! `deletions_retention_days` and `backend` are resolved-but-NOT-projected (reserved).
 
-use unblock_model::{OutputFormat, validate_actor};
+use unblock_model::{OutputFormat, normalize_prefix, validate_actor};
 
 use crate::actor::resolve_actor_layered;
 use crate::cli::CliOverrides;
@@ -30,6 +30,10 @@ pub(crate) const JSONL_FILENAME: &str = "issues.jsonl";
 
 /// The T1.3a default search-result cap (FR-4).
 pub(crate) const DEFAULT_SEARCH_CAP: usize = 50;
+
+/// The default issue-id prefix (D21/T1.8). Rendered as `ub-<hash>` by the engine allocator unless a
+/// workspace overrides `id_prefix`.
+pub(crate) const DEFAULT_ID_PREFIX: &str = "ub";
 
 /// The resolved, validated config values the engine/`Session` consumes (config-owned, spine §4
 /// CF-D).
@@ -51,10 +55,14 @@ pub struct ResolvedConfig {
     /// The JSONL export filename inside `.unblock/`. T1.3a default = `"issues.jsonl"`
     /// (PRD §12.5).
     pub jsonl_filename: String,
+    /// The issue-id prefix the engine allocator mints with (D21/T1.8 ADDITIVE). Default = `"ub"`,
+    /// `normalize_prefix`-normalized. The engine reads `ctx.config.id_prefix` at mint time to render
+    /// `ub-<hash>`/`ub-<slug>-<hash>` (config-derived, not a constant).
+    pub id_prefix: String,
 }
 
 impl Default for ResolvedConfig {
-    /// The T1.3a defaults: `Json` / `false` / `50` / `"unblock.db"` / `"issues.jsonl"`.
+    /// The T1.3a defaults: `Json` / `false` / `50` / `"unblock.db"` / `"issues.jsonl"` / `"ub"`.
     fn default() -> Self {
         Self {
             output_format: OutputFormat::default(),
@@ -62,6 +70,7 @@ impl Default for ResolvedConfig {
             search_cap: DEFAULT_SEARCH_CAP,
             db_filename: DB_FILENAME.to_string(),
             jsonl_filename: JSONL_FILENAME.to_string(),
+            id_prefix: DEFAULT_ID_PREFIX.to_string(),
         }
     }
 }
@@ -85,6 +94,8 @@ pub(crate) struct Defaults {
     pub db_filename: String,
     /// Default JSONL filename (`"issues.jsonl"`, PRD §12.5).
     pub jsonl_filename: String,
+    /// Default issue-id prefix (`"ub"`, D21/T1.8).
+    pub id_prefix: String,
     /// Reserved (no v1 default retention window).
     pub deletions_retention_days: Option<u64>,
     /// Reserved (no v1 default backend value; `None` resolves to the libsql default downstream).
@@ -102,6 +113,7 @@ impl Default for Defaults {
             search_cap: DEFAULT_SEARCH_CAP,
             db_filename: DB_FILENAME.to_string(),
             jsonl_filename: JSONL_FILENAME.to_string(),
+            id_prefix: DEFAULT_ID_PREFIX.to_string(),
             deletions_retention_days: None,
             backend: None,
         }
@@ -131,6 +143,9 @@ pub struct WorkspaceConfig {
     pub(crate) db_filename: String,
     /// The resolved JSONL filename inside `.unblock/` (startup key).
     pub(crate) jsonl_filename: String,
+    /// The resolved, `normalize_prefix`-normalized issue-id prefix (startup key, D21/T1.8). Projected
+    /// to [`ResolvedConfig::id_prefix`].
+    pub(crate) id_prefix: String,
     /// The resolved tombstone retention window (reserved for v1.1; NOT projected).
     pub(crate) deletions_retention_days: Option<u64>,
     /// The resolved backend selector (only `"libsql"` accepted in v1; reserved, NOT projected).
@@ -169,12 +184,17 @@ impl WorkspaceConfig {
             ..Defaults::default()
         };
 
-        let merged = merge_layers(&[
+        let mut merged = merge_layers(&[
             ConfigLayer::Cli(cli),
             ConfigLayer::Env(env),
             ConfigLayer::Project(project),
             ConfigLayer::Defaults(&defaults),
         ]);
+
+        // D21: normalize the resolved id_prefix via the single-home model normalizer. `normalize_prefix`
+        // is total — it strips unsupported chars/trailing separators and falls back to "ub" if nothing
+        // usable remains — so the engine allocator always receives a valid, non-empty prefix.
+        merged.id_prefix = normalize_prefix(&merged.id_prefix);
 
         merged.validate()?;
         Ok(merged)
@@ -226,6 +246,7 @@ impl WorkspaceConfig {
             search_cap: self.search_cap,
             db_filename: self.db_filename,
             jsonl_filename: self.jsonl_filename,
+            id_prefix: self.id_prefix,
         }
     }
 
@@ -264,6 +285,13 @@ impl WorkspaceConfig {
     #[must_use]
     pub fn jsonl_filename(&self) -> &str {
         &self.jsonl_filename
+    }
+
+    /// The resolved, normalized issue-id prefix (startup key, D21/T1.8; projected to
+    /// `ResolvedConfig.id_prefix` and read by the engine allocator at mint time).
+    #[must_use]
+    pub fn id_prefix(&self) -> &str {
+        &self.id_prefix
     }
 
     /// The resolved tombstone retention window (reserved for v1.1; not projected to `ResolvedConfig`).
@@ -458,6 +486,37 @@ mod tests {
         let resolved = wc.into_resolved();
         // The reserved knobs are not on ResolvedConfig; the projected ones round-trip.
         assert_eq!(resolved.search_cap, 123);
+    }
+
+    #[test]
+    fn id_prefix_defaults_to_ub_and_resolves_through() {
+        // No layer sets it → the "ub" default, projected to ResolvedConfig.
+        let wc = resolve(&CliOverrides::default(), &ProjectConfig::default(), &[]).expect("resolve");
+        assert_eq!(wc.id_prefix, "ub");
+        assert_eq!(wc.into_resolved().id_prefix, "ub");
+        // The default ResolvedConfig also carries "ub" (T1.3a default).
+        assert_eq!(ResolvedConfig::default().id_prefix, "ub");
+    }
+
+    #[test]
+    fn id_prefix_from_project_is_normalized() {
+        // A project override is honoured and normalize_prefix-normalized (lowercased, trimmed,
+        // trailing separators stripped) by resolve().
+        let project = ProjectConfig {
+            id_prefix: Some("  MyProj-  ".to_string()),
+            ..ProjectConfig::default()
+        };
+        let wc = resolve(&CliOverrides::default(), &project, &[]).expect("resolve");
+        assert_eq!(wc.id_prefix, "myproj");
+        assert_eq!(wc.into_resolved().id_prefix, "myproj");
+
+        // A prefix that normalizes to nothing falls back to the "ub" default (normalize_prefix is total).
+        let empty = ProjectConfig {
+            id_prefix: Some("!!!".to_string()),
+            ..ProjectConfig::default()
+        };
+        let wc = resolve(&CliOverrides::default(), &empty, &[]).expect("resolve");
+        assert_eq!(wc.id_prefix, "ub");
     }
 
     #[test]
