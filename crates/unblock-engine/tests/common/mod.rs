@@ -562,3 +562,202 @@ pub mod collide {
         }
     }
 }
+
+/// A `Storage` decorator that injects an **out-of-band racing writer** into the bulk-create window:
+/// on the FIRST `create_issues` call it commits (via the inner real storage) a row whose id collides
+/// with one of the batch's records, THEN delegates the batch to the inner `create_issues`. The real
+/// one-tx insert then hits the in-tx `IdCollision` and ROLLS BACK the whole batch — the precise
+/// "an out-of-band writer races a row in between the probe and the commit" scenario the spec's
+/// atomicity backstop describes. Every other call is a pure delegate. It also COUNTS `create_issues`
+/// vs `create_issue` calls so a test can prove the engine routes the bulk through ONE atomic
+/// `create_issues` (not N `create_issue` calls).
+pub mod race {
+    use super::{Arc, Storage};
+    use async_trait::async_trait;
+    use chrono::{DateTime, Utc};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use unblock_model::{
+        CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue,
+    };
+    use unblock_storage::{DeletePlan, IssuePatch, ListFilters, StorageError};
+
+    /// Injects an out-of-band racing commit before the first `create_issues` delegation.
+    pub struct RaceInjector {
+        inner: Arc<dyn Storage>,
+        race_id: String,
+        armed: AtomicBool,
+        create_issues_calls: AtomicUsize,
+        create_issue_calls: AtomicUsize,
+    }
+
+    impl RaceInjector {
+        /// Wrap `inner`; before the first `create_issues`, commit a colliding row with id `race_id`.
+        #[must_use]
+        pub fn new(inner: Arc<dyn Storage>, race_id: impl Into<String>) -> Arc<Self> {
+            Arc::new(Self {
+                inner,
+                race_id: race_id.into(),
+                armed: AtomicBool::new(true),
+                create_issues_calls: AtomicUsize::new(0),
+                create_issue_calls: AtomicUsize::new(0),
+            })
+        }
+
+        /// How many `create_issues` (bulk) calls were made.
+        #[must_use]
+        pub fn bulk_calls(&self) -> usize {
+            self.create_issues_calls.load(Ordering::SeqCst)
+        }
+
+        /// How many single `create_issue` calls were made.
+        #[must_use]
+        pub fn single_calls(&self) -> usize {
+            self.create_issue_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl Storage for RaceInjector {
+        async fn create_issues(&self, issues: &[Issue], actor: &str) -> Result<(), StorageError> {
+            self.create_issues_calls.fetch_add(1, Ordering::SeqCst);
+            if self.armed.swap(false, Ordering::SeqCst) {
+                let racer = Issue {
+                    id: self.race_id.clone(),
+                    title: "out-of-band racer".to_string(),
+                    ..Issue::default()
+                };
+                self.inner.create_issue(&racer, actor).await?;
+            }
+            self.inner.create_issues(issues, actor).await
+        }
+
+        async fn create_issue(&self, issue: &Issue, actor: &str) -> Result<String, StorageError> {
+            self.create_issue_calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.create_issue(issue, actor).await
+        }
+
+        async fn migrate(&self) -> Result<(), StorageError> {
+            self.inner.migrate().await
+        }
+        async fn integrity_check(&self) -> Result<Vec<String>, StorageError> {
+            self.inner.integrity_check().await
+        }
+        async fn get_issue(&self, id: &str) -> Result<Option<Issue>, StorageError> {
+            self.inner.get_issue(id).await
+        }
+        async fn get_issues(&self, ids: &[String]) -> Result<Vec<Issue>, StorageError> {
+            self.inner.get_issues(ids).await
+        }
+        async fn update_issue(
+            &self,
+            id: &str,
+            patch: &IssuePatch,
+            actor: &str,
+        ) -> Result<Issue, StorageError> {
+            self.inner.update_issue(id, patch, actor).await
+        }
+        async fn delete_issue(
+            &self,
+            plan: &DeletePlan,
+            actor: &str,
+        ) -> Result<DeletePlan, StorageError> {
+            self.inner.delete_issue(plan, actor).await
+        }
+        async fn restore_issue(&self, id: &str, actor: &str) -> Result<Issue, StorageError> {
+            self.inner.restore_issue(id, actor).await
+        }
+        async fn claim_issue(
+            &self,
+            id: &str,
+            assignee: &str,
+            actor: &str,
+        ) -> Result<Issue, StorageError> {
+            self.inner.claim_issue(id, assignee, actor).await
+        }
+        async fn defer_issue(
+            &self,
+            id: &str,
+            until: DateTime<Utc>,
+            actor: &str,
+        ) -> Result<Issue, StorageError> {
+            self.inner.defer_issue(id, until, actor).await
+        }
+        async fn undefer_issue(&self, id: &str, actor: &str) -> Result<Issue, StorageError> {
+            self.inner.undefer_issue(id, actor).await
+        }
+        async fn list_issues(&self, filters: &ListFilters) -> Result<Vec<Issue>, StorageError> {
+            self.inner.list_issues(filters).await
+        }
+        async fn ready_issues(&self, filters: &ListFilters) -> Result<Vec<Issue>, StorageError> {
+            self.inner.ready_issues(filters).await
+        }
+        async fn blocked_issues(&self, filters: &ListFilters) -> Result<Vec<Issue>, StorageError> {
+            self.inner.blocked_issues(filters).await
+        }
+        async fn search_issues(
+            &self,
+            query: &str,
+            filters: &ListFilters,
+        ) -> Result<Vec<Issue>, StorageError> {
+            self.inner.search_issues(query, filters).await
+        }
+        async fn count_issues(
+            &self,
+            filters: &ListFilters,
+            group_by: Option<CountGroupBy>,
+        ) -> Result<Vec<CountBucket>, StorageError> {
+            self.inner.count_issues(filters, group_by).await
+        }
+        async fn stale_issues(
+            &self,
+            older_than: DateTime<Utc>,
+            filters: &ListFilters,
+        ) -> Result<Vec<Issue>, StorageError> {
+            self.inner.stale_issues(older_than, filters).await
+        }
+        async fn add_dependency(&self, dep: &Dependency, actor: &str) -> Result<(), StorageError> {
+            self.inner.add_dependency(dep, actor).await
+        }
+        async fn remove_dependency(
+            &self,
+            issue_id: &str,
+            depends_on_id: &str,
+            dep_type: &DependencyType,
+            actor: &str,
+        ) -> Result<(), StorageError> {
+            self.inner
+                .remove_dependency(issue_id, depends_on_id, dep_type, actor)
+                .await
+        }
+        async fn list_dependencies(&self, id: &str) -> Result<Vec<Dependency>, StorageError> {
+            self.inner.list_dependencies(id).await
+        }
+        async fn next_child_number(&self, parent_id: &str) -> Result<u32, StorageError> {
+            self.inner.next_child_number(parent_id).await
+        }
+        async fn dependency_tree(&self, id: &str) -> Result<DepTree, StorageError> {
+            self.inner.dependency_tree(id).await
+        }
+        async fn dependency_graph(&self, roots: &[String]) -> Result<DepTree, StorageError> {
+            self.inner.dependency_graph(roots).await
+        }
+        async fn detect_cycles(
+            &self,
+            blocking_only: bool,
+        ) -> Result<Vec<Vec<String>>, StorageError> {
+            self.inner.detect_cycles(blocking_only).await
+        }
+        async fn list_events(&self, issue_id: &str) -> Result<Vec<Event>, StorageError> {
+            self.inner.list_events(issue_id).await
+        }
+        async fn closed_since(
+            &self,
+            since: Option<DateTime<Utc>>,
+        ) -> Result<Vec<Issue>, StorageError> {
+            self.inner.closed_since(since).await
+        }
+        async fn orphan_candidates(&self) -> Result<Vec<Issue>, StorageError> {
+            self.inner.orphan_candidates().await
+        }
+    }
+}
