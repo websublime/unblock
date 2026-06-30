@@ -1,0 +1,250 @@
+---
+source: crates/unblock-mcp/tests/contract_goldens.rs
+expression: caps
+---
+{
+  "contract_version": "unblock.mcp.v1",
+  "tools": [
+    {
+      "name": "issue",
+      "description": "Create, show, update, close, reopen, delete, or restore issues."
+    },
+    {
+      "name": "claim",
+      "description": "Atomically claim an issue for an assignee."
+    },
+    {
+      "name": "defer",
+      "description": "Defer an issue until a future timestamp, or undefer it."
+    },
+    {
+      "name": "query",
+      "description": "Query issues: list, ready, blocked, search, count, or stale."
+    },
+    {
+      "name": "dep",
+      "description": "Manage and query dependencies: add, remove, list, tree, cycles, or graph."
+    },
+    {
+      "name": "sync",
+      "description": "Export/import the issue store as JSONL, or one-shot import a bd export."
+    },
+    {
+      "name": "diagnostics",
+      "description": "Diagnostics: stats, info, where, version, lint, changelog, or orphans."
+    }
+  ],
+  "resources": [
+    {
+      "uri": "unblock://issues/{id}",
+      "description": "A single issue by id."
+    },
+    {
+      "uri": "unblock://issues/ready",
+      "description": "The default-complete ready set (agent entrypoint)."
+    },
+    {
+      "uri": "unblock://issues/blocked",
+      "description": "The blocked set."
+    },
+    {
+      "uri": "unblock://capabilities",
+      "description": "This discovery document."
+    },
+    {
+      "uri": "unblock://schema",
+      "description": "The JsonSchema bundle for every tool I/O."
+    }
+  ],
+  "prompts": [
+    {
+      "name": "triage",
+      "description": "A guided triage workflow over blocked/unassigned/deferred work."
+    },
+    {
+      "name": "plan_next_work",
+      "description": "Drive the ready -> claim selection (FR-20)."
+    },
+    {
+      "name": "close_with_suggestions",
+      "description": "Close an issue and surface the newly-unblocked set (FR-11)."
+    }
+  ],
+  "error_codes": [
+    {
+      "code": "DATABASE_NOT_FOUND",
+      "exit_code": 2,
+      "retryable": false
+    },
+    {
+      "code": "DATABASE_LOCKED",
+      "exit_code": 2,
+      "retryable": true
+    },
+    {
+      "code": "SCHEMA_MISMATCH",
+      "exit_code": 2,
+      "retryable": false
+    },
+    {
+      "code": "DATABASE_ERROR",
+      "exit_code": 2,
+      "retryable": false
+    },
+    {
+      "code": "NOT_INITIALIZED",
+      "exit_code": 2,
+      "retryable": false
+    },
+    {
+      "code": "ALREADY_INITIALIZED",
+      "exit_code": 2,
+      "retryable": false
+    },
+    {
+      "code": "ISSUE_NOT_FOUND",
+      "exit_code": 3,
+      "retryable": false
+    },
+    {
+      "code": "AMBIGUOUS_ID",
+      "exit_code": 3,
+      "retryable": true
+    },
+    {
+      "code": "ID_COLLISION",
+      "exit_code": 3,
+      "retryable": false
+    },
+    {
+      "code": "INVALID_ID",
+      "exit_code": 3,
+      "retryable": false
+    },
+    {
+      "code": "NOTHING_TO_DO",
+      "exit_code": 3,
+      "retryable": false
+    },
+    {
+      "code": "ALREADY_CLAIMED",
+      "exit_code": 3,
+      "retryable": true
+    },
+    {
+      "code": "VALIDATION_FAILED",
+      "exit_code": 4,
+      "retryable": true
+    },
+    {
+      "code": "INVALID_STATUS",
+      "exit_code": 4,
+      "retryable": true
+    },
+    {
+      "code": "INVALID_TYPE",
+      "exit_code": 4,
+      "retryable": true
+    },
+    {
+      "code": "INVALID_PRIORITY",
+      "exit_code": 4,
+      "retryable": true
+    },
+    {
+      "code": "REQUIRED_FIELD",
+      "exit_code": 4,
+      "retryable": true
+    },
+    {
+      "code": "POLICY_VIOLATION",
+      "exit_code": 4,
+      "retryable": false
+    },
+    {
+      "code": "CYCLE_DETECTED",
+      "exit_code": 5,
+      "retryable": false
+    },
+    {
+      "code": "DEPENDENCY_NOT_FOUND",
+      "exit_code": 5,
+      "retryable": false
+    },
+    {
+      "code": "HAS_DEPENDENTS",
+      "exit_code": 5,
+      "retryable": false
+    },
+    {
+      "code": "SELF_DEPENDENCY",
+      "exit_code": 5,
+      "retryable": false
+    },
+    {
+      "code": "DUPLICATE_DEPENDENCY",
+      "exit_code": 5,
+      "retryable": false
+    },
+    {
+      "code": "JSONL_PARSE_ERROR",
+      "exit_code": 6,
+      "retryable": false
+    },
+    {
+      "code": "PREFIX_MISMATCH",
+      "exit_code": 6,
+      "retryable": false
+    },
+    {
+      "code": "IMPORT_COLLISION",
+      "exit_code": 6,
+      "retryable": false
+    },
+    {
+      "code": "SYNC_CONFLICT",
+      "exit_code": 6,
+      "retryable": false
+    },
+    {
+      "code": "CONFLICT_MARKERS",
+      "exit_code": 6,
+      "retryable": false
+    },
+    {
+      "code": "PATH_TRAVERSAL",
+      "exit_code": 6,
+      "retryable": false
+    },
+    {
+      "code": "CONFIG_ERROR",
+      "exit_code": 7,
+      "retryable": false
+    },
+    {
+      "code": "CONFIG_NOT_FOUND",
+      "exit_code": 7,
+      "retryable": false
+    },
+    {
+      "code": "CONFIG_PARSE_ERROR",
+      "exit_code": 7,
+      "retryable": false
+    },
+    {
+      "code": "IO_ERROR",
+      "exit_code": 8,
+      "retryable": false
+    },
+    {
+      "code": "JSON_ERROR",
+      "exit_code": 8,
+      "retryable": false
+    },
+    {
+      "code": "INTERNAL_ERROR",
+      "exit_code": 1,
+      "retryable": false
+    }
+  ]
+}

@@ -2883,6 +2883,7 @@ dependencies = [
  "unblock-config",
  "unblock-engine",
  "unblock-error",
+ "unblock-mcp",
  "unblock-model",
  "unblock-policy",
  "unblock-render",

@@ -34,3 +34,9 @@ pub use resources::{
     ToolDescriptor, capabilities, schema_bundle,
 };
 pub use server::serve;
+
+// Test-only seam (feature-gated, `#[doc(hidden)]`): the in-process MCP lifecycle test drives the
+// real server over an in-memory duplex transport via these. NEVER part of the shipped contract.
+#[cfg(feature = "test-util")]
+#[doc(hidden)]
+pub use server::{UnblockServer, serve_duplex_for_test};
