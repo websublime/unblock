@@ -308,7 +308,7 @@ fn run(docs: &[Doc]) -> Vec<Finding> {
 
 /// Pre-computed cross-corpus indexes the classes resolve against.
 struct CorpusIndex {
-    /// D-ids defined in PRD §4 (`| **Dx** |` rows), e.g. {1..=19}.
+    /// D-ids defined in PRD §4 (`| **Dx** |` rows), e.g. {1..=21}.
     defined_d_ids: BTreeSet<u32>,
     /// FR/NFR ids defined in PRD §5/§6, with their canonical release marker (if any).
     /// Key = full id (`FR-1a`, `NFR-3`); value = `Some("must"|"v1.1"|"wont"|...)` or `None`.
