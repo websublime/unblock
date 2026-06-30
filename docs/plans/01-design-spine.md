@@ -1068,6 +1068,16 @@ pub struct NewIssue {
     pub estimated_minutes: Option<i32>,
     pub slug: Option<String>,                     // Some -> root id is `ub-<slug>-<hash>` (D21)
     pub ephemeral: bool,
+    // --- markdown-captured content fields (D22) — the bulk-markdown parser sets these (faithful to
+    //     `markdown_import.rs::apply_section_to_issue`), so scalar create + bulk are full-fidelity.
+    //     `create_issue` maps each onto the built `Issue` field of the same name (the domain `Issue`
+    //     §1.6 ALREADY carries all four — no model change). `notes`/`owner` are deliberately NOT here:
+    //     the markdown has no `### Notes`/`### Owner` section, so the create surface stays exactly as
+    //     wide as the markdown authority. They remain reachable via `update` (PatchInput §5.2).
+    pub design: Option<String>,                   // <- `### Design`
+    pub acceptance_criteria: Option<String>,      // <- `### Acceptance Criteria` / `### Acceptance`
+    pub assignee: Option<String>,                 // <- `### Assignee`
+    pub agent_context: Option<String>,            // <- `### Agent Context` / `agent-context` / `agent_context`
 }
 
 impl Session {
@@ -1108,7 +1118,10 @@ impl Session {
     //   permit (so two concurrent creates under one parent cannot mint the same `parent.N` — this is WHY
     //   minting is the engine's job, NOT an L7 adapter's; FR-9 single mutation home). It resolves `new.deps`
     //   into edges added in/after the same tx, then returns the created `Issue` (the MCP quick-create extracts
-    //   `.id`). NAME: `create_issue` parallels `Storage::create_issue` (engine mints + delegates to storage);
+    //   `.id`). It maps the markdown-captured fields `design`/`acceptance_criteria`/`assignee`/`agent_context`
+    //   (D22) onto the built `Issue` fields of the same name (the domain `Issue` §1.6 already carries them — no
+    //   model change). `Session::create(&Issue)` is UNCHANGED (the id-preserving import path already accepts a
+    //   fully-built `Issue` with those fields). NAME: `create_issue` parallels `Storage::create_issue` (engine mints + delegates to storage);
     //   the two live in DIFFERENT namespaces (`Session::` vs the `Storage` trait), so the name does not clash.
     //   The pure candidate compute (hash/seed/adaptive-length/slug-normalize) lives in unblock-model `id.rs`;
     //   the stateful collision-retry loop + the existence probe (`get_issue(id).await?.is_some()`, NOT a `Storage::exists`) and the `next_child_number` read live in the engine allocator.
@@ -1194,6 +1207,10 @@ pub enum IssueInput {
         #[serde(default)] defer_until: Option<DateTime<Utc>>,
         #[serde(default)] estimated_minutes: Option<i32>,
         #[serde(default)] slug: Option<String>,
+        #[serde(default)] design: Option<String>,            // D22 — markdown `### Design`; maps to NewIssue.design
+        #[serde(default)] acceptance_criteria: Option<String>, // D22 — `### Acceptance Criteria`/`### Acceptance`
+        #[serde(default)] assignee: Option<String>,          // D22 — `### Assignee`
+        #[serde(default)] agent_context: Option<String>,     // D22 — `### Agent Context`/`agent-context`/`agent_context`
         #[serde(default)] ephemeral: bool,
         #[serde(default)] quick: bool,                  // quick-create -> output is id only
         #[serde(flatten)] attribution: Attribution,     // agent_name/harness/model (capture-only)
@@ -1201,11 +1218,30 @@ pub enum IssueInput {
     // D21 mapping: the `issue`-tool adapter maps `Create` → the engine-owned `NewIssue` (§4.1) and calls the
     // MINTING `Session::create_issue(NewIssue)` (the ENGINE mints `ub-<hash>` / `ub-<slug>-<hash>` / `parent.N`
     // under the write permit). `quick=true` -> output is `.id` only. NOT `Session::create(&Issue)` — that is
-    // the id-PRESERVING import/internal path (FR-26), which never mints.
-    // Seam note (Q1 — T1.4, reconciled at T1.8/D21): Bulk markdown import (FR-1a) is handled by the `issue`-tool
-    // adapter (T2.3) by parsing the markdown into N `Create` calls (loop over the MINTING `Session::create_issue`
-    // — bulk-markdown is interactive create, so each record mints a fresh id; the id-preserving `Session::create`
-    // backs only the JSONL/bd IMPORT path). There is no bulk-create on the `Session` surface by design.
+    // the id-PRESERVING import/internal path (FR-26), which never mints. The `design`/`acceptance_criteria`/
+    // `assignee`/`agent_context` fields (D22) mirror the new `NewIssue` fields 1:1 (CreateInput field == NewIssue
+    // field); `notes`/`owner` are NOT on `Create` (no markdown section sets them — D22 — they stay update-only).
+    CreateBulk { markdown: String },   // D22 — {action:"create_bulk", markdown:"..."}; inline document content (NOT a path)
+    // D22 mapping: `CreateBulk` is the bulk-markdown import surface — a NEW discriminator on the EXISTING `issue`
+    // tool (keeps the tool count at 7, ≤ 8, §6.6 "extend before add"). The adapter:
+    //   (1) caps the parsed record count at `Quotas::max_batch` at the preflight (BEFORE any mint — §5 NFR-18);
+    //   (2) parses + validates the WHOLE document via a pure mcp-owned `parse_bulk_markdown(&str)` helper —
+    //       a byte-faithful port of `temp/beads_rust-main/src/util/markdown_import.rs::parse_markdown_content`
+    //       (H2 record / H3 section grammar; implicit-description quirk; `type:id`/bare/`external:`/`blocked-by`
+    //       dep encoding; bulleted/checkbox list items) — ALL-OR-NOTHING PRE-MUTATION (FR-1a "rejected
+    //       pre-mutation"): a single malformed/unresolvable block rejects the ENTIRE batch with ONE
+    //       `StructuredError{code: ValidationFailed, hint, context}` and ZERO writes (deviation from the original's
+    //       best-effort per-issue `continue` — the PRD's safe-import discipline wins, NFR-8);
+    //   (3) 2-phase intra-file resolution (faithful port): Phase 1 loops the MINTING `Session::create_issue(NewIssue)`
+    //       (bulk-markdown is INTERACTIVE create — each record mints; it does NOT preserve ids, unlike JSONL/bd
+    //       import which loops `Session::create(&Issue)`), registering `title`→id and stand-in `### ID`→id; Phase 2
+    //       resolves deferred `### Dependencies`/`### Parent` symbolic refs (stand-in id → title → pre-existing
+    //       storage id — the `lookup_import_reference` order; an ambiguous multi-match is an error under the
+    //       all-or-nothing rule, not a skipped warning) and wires the edges;
+    //   (4) output reuses `ToolOutput::Issues` (§5.3) — the Vec of created issues.
+    // There is NO bulk-create primitive on the `Session`/model surface by design — the loop is the L7 adapter's.
+    // ADDING this arm (and the 4 `Create` fields above) changes the `issue` tool's `JsonSchema`, so it BUMPS
+    // `CONTRACT_VERSION` (the FR-12 drift gate fires by design — §5.4 / the contract test).
     Show   { id: String },
     Update { ids: Vec<String>, #[serde(flatten)] patch: PatchInput, #[serde(flatten)] attribution: Attribution },
     Close  { id: String, #[serde(default)] reason: Option<String>, #[serde(default)] suggest_next: bool,
@@ -1291,7 +1327,7 @@ pub struct FilterInput { /* mirrors ListFilters: status, issue_type, assignee, l
 #[derive(Serialize, JsonSchema)] #[serde(untagged)]
 pub enum ToolOutput {
     Issue(Issue),
-    Issues(Vec<Issue>),
+    Issues(Vec<Issue>),                 // multi-id update; ALSO the `create_bulk` output (D22 — N created issues)
     Id(IdOnly),                         // quick-create
     Counts(Vec<CountBucket>),
     Close(CloseOutcome),               // close --suggest-next -> newly_unblocked
@@ -1382,7 +1418,7 @@ All mutations flow through `Session` (FR-9) and the single write permit (D14); r
 Every error surfaced at L7 maps to exactly one `ErrorCode` and one 0–8 exit code per §2.3 (golden-snapshot pinned).
 
 ### 6.6 MCP tool-count budget
-MCP tool count stays ≤ 8; new domain surface in v1.1 extends existing tools by discriminator before adding tools (RK-3).
+MCP tool count stays ≤ 8; new domain surface extends existing tools by discriminator before adding tools (RK-3). D22's `create_bulk` is a NEW `action` arm on the existing `issue` tool (NOT a new tool) — the live `list_tools` golden (T2.3) keeps the count at 7.
 
 ### 6.7 Safety / no-git / no-default-network
 `forbid(unsafe_code)`, no git crate / `Command::new("git")` anywhere (NFR-6/NFR-9); network/TLS only behind the non-default `remote` feature (D15).
