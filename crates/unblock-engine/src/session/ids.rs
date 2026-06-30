@@ -4,8 +4,10 @@
 //! lives in `unblock-model` (`id.rs`); this module drives the **stateful** collision-retry loop over
 //! those pure pieces, probing storage for existence. It is called by
 //! [`Session::create_issue`](crate::Session::create_issue) **under the write permit**, so the
-//! mint→probe→insert is atomic (a candidate that races in still surfaces `IdCollision` from
-//! `storage.create_issue`, which the engine retries).
+//! mint→probe→insert is atomic: the ladder returns only a candidate the `get_issue` probe found free,
+//! and no in-process writer can take it before the held-permit insert. A residual `IdCollision` from
+//! `storage.create_issue` (only possible from an out-of-band race) PROPAGATES to the caller — the
+//! allocator does NOT catch-and-re-mint at the insert (its retry is pre-insert collision avoidance).
 //!
 //! This is a faithful re-home of the original `temp/beads_rust-main/src/util/id.rs` STATEFUL
 //! `IdGenerator::generate` / `generate_with_slug` caller loop (adaptive length + slug + collision
