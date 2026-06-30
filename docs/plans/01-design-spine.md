@@ -698,7 +698,10 @@ between an earlier prose description and the source are resolved **in favour of 
   rolls back on `Err`; an uncommitted libsql `Transaction` also rolls back on drop). The dependency edges the engine
   resolved intra-batch are carried on each `Issue.dependencies` and inserted by the same per-record path, so an edge
   pointing at a sibling minted earlier in the SAME batch resolves correctly (both rows live in the one uncommitted
-  tx). The **id-collision guard inside the tx is the atomicity backstop**: the engine's pre-tx `get_issue` probe
+  tx). Same-parent siblings in the batch arrive with ALREADY-DISTINCT `parent.N` ids (the engine `create_bulk` mints
+  them via its in-batch per-parent counter, §4.1 step 2 — `next_child_number` reads only committed state, so two
+  same-parent siblings would otherwise both mint the same `parent.N` and collide in-tx); storage just runs the per-record
+  `child_counters` UPSERT (high-water MAX), which lands the row's `N` monotonically regardless of insert order. The **id-collision guard inside the tx is the atomicity backstop**: the engine's pre-tx `get_issue` probe
   (against committed state + the in-batch minted set) avoids collisions, but an out-of-band writer that races a row
   in between the probe and this commit still surfaces `IdCollision` here — and because it is inside the one tx, it
   rolls back the WHOLE batch (never a partial commit). This is the design that closes the partial-batch hole a loop
@@ -1159,7 +1162,25 @@ impl Session {
     //   (1) acquires the write permit ONCE for the entire batch (NOT once per record);
     //   (2) MINTS every id under the held permit via the SAME engine allocator (`ids.rs`) — the `get_issue` probe
     //       consults BOTH committed storage AND an in-memory already-minted set (intra-batch dedup: two records in
-    //       the batch cannot mint the same id);
+    //       the batch cannot mint the same id). **In-batch per-parent child-counter (D22/T2.3 — the gating fix):** for
+    //       hierarchical (`parent.N`) ids the mint phase keeps an in-memory `HashMap<parent_id, u32>` next-child counter.
+    //       The FIRST child of a parent seeds from `storage.next_child_number(parent)` (the committed high-water); each
+    //       subsequent SAME-parent sibling in the batch uses the INCREMENTED in-memory value — so siblings get DISTINCT
+    //       `parent.1, parent.2, …` even though the committed `child_counters` row (read by `next_child_number`) only
+    //       reflects committed state and is bumped once, by the single `storage.create_issues` tx. (Without this, two
+    //       same-parent siblings would BOTH read the same committed high-water and mint the SAME `parent.N` → an in-tx
+    //       `IdCollision` → guaranteed whole-batch rollback — the bulk would be UNBUILDABLE for any 2+ same-parent
+    //       children.) The in-tx `IdCollision` guard remains the backstop for an out-of-band racer. **Mint ORDER
+    //       (parent-before-child, topological):** a record whose parent is ANOTHER record in the same batch (an
+    //       intra-file `### Parent` title / `### ID` stand-in ref) can only mint `parent.N` AFTER its parent's id is
+    //       minted, so the mint phase processes records in TOPOLOGICAL order over the intra-batch parent edges (parent
+    //       before child); a record whose parent resolves to a pre-existing storage id has no intra-batch parent edge and
+    //       mints in file order. A **parent cycle** among intra-batch records (A's parent is B, B's parent is A) → reject
+    //       the WHOLE batch with one `ValidationFailed` (it cannot be topologically ordered — there is no valid mint
+    //       order). This is faithful to the original's resolution order (`create.rs:855`–`1121` create issues in file
+    //       order but DEFER an intra-file parent to a pre-existing-id resolution, then wire it in Phase 2; because each
+    //       original `create_issue` COMMITTED before the next, `next_child_number` there saw the just-committed sibling —
+    //       the atomic one-tx design loses that, so the in-memory counter + topological order reproduce it);
     //   (3) resolves the 2-phase intra-file deps/parent (stand-in `### ID` / title → the just-minted ids) IN MEMORY
     //       against the minted set;
     //   (4) builds N fully-formed `Issue`s (minted id + fields + engine defaults + the resolved dependency edges)
@@ -1270,7 +1291,8 @@ pub enum IssueInput {
     CreateBulk { markdown: String },   // D22 — {action:"create_bulk", markdown:"..."}; inline document content (NOT a path)
     // D22 mapping: `CreateBulk` is the bulk-markdown import surface — a NEW discriminator on the EXISTING `issue`
     // tool (keeps the tool count at 7, ≤ 8, §6.6 "extend before add"). The adapter:
-    //   (1) caps the parsed record count at `Quotas::max_batch` at the preflight (BEFORE any mint — §5 NFR-18);
+    //   (1) caps the parsed record count at `Quotas::max_batch` at the preflight (BEFORE any mint — the args-validation
+    //       rule pinned in this section's intro above, `PRD NFR-18`);
     //   (2) parses + validates the WHOLE document via a pure mcp-owned `parse_bulk_markdown(&str)` helper —
     //       a byte-faithful port of `temp/beads_rust-main/src/util/markdown_import.rs::parse_markdown_content`
     //       (H2 record / H3 section grammar; implicit-description quirk; `type:id`/bare/`external:`/`blocked-by`
@@ -1283,11 +1305,24 @@ pub enum IssueInput {
     //       refs carried for the engine to resolve) and calls the ATOMIC `Session::create_bulk(Vec<NewIssue>)` (§4.1) —
     //       NOT a loop over `create_issue`. The ENGINE owns the 2-phase intra-file resolution (faithful port): under ONE
     //       write permit it mints every id (the `get_issue` probe consulting committed state + the in-batch minted set),
-    //       resolves each deferred stand-in `### ID` / title → minted id (the `lookup_import_reference` order; an
-    //       ambiguous multi-match is an error under the all-or-nothing rule, not a skipped warning) IN MEMORY, then
-    //       inserts the whole batch in ONE `storage.create_issues` tx (§3.2.1) — rollback-on-any-failure (mint
-    //       exhaustion, a raced `IdCollision`, any backend error) → ZERO writes. bulk-markdown is INTERACTIVE create
-    //       (mints fresh ids; does NOT preserve ids, unlike JSONL/bd import which loops `Session::create(&Issue)`);
+    //       resolves each deferred stand-in `### ID` / title → minted id (the `lookup_import_reference` order:
+    //       **stand-in id → title → pre-existing storage id**, case-insensitive — faithful to `create.rs:1194`/`:1347`)
+    //       IN MEMORY, then inserts the whole batch in ONE `storage.create_issues` tx (§3.2.1) — rollback-on-any-failure
+    //       (mint exhaustion, a raced `IdCollision`, any backend error) → ZERO writes. WHOLE-BATCH PRE-MUTATION REJECTION
+    //       SET (all-or-nothing, faithful-but-STRICTER than the original's per-record `continue`/`eprintln!` skip): the
+    //       engine rejects the ENTIRE batch with ONE `StructuredError{code: ValidationFailed}` (ZERO writes) on ANY of —
+    //       (a) an **ambiguous** intra-file ref (a title/stand-in matching >1 record, original `create.rs:1131`/`:1174`);
+    //       (b) an **unresolved** ref (no stand-in/title/storage match, original `create.rs:1135`/`:1216`);
+    //       (c) a **self-dependency** (a record's resolved dep id == its own minted id, original `create.rs:1227` skip);
+    //       (d) a **self-parent** (a record's resolved parent id == its own minted id, original `create.rs:1144` skip);
+    //       (e) a **marker-only / empty** dep ref (a `-`/`*`/`+` token or empty after strip, original `create.rs:1234`/
+    //       `is_marker_only_dependency`:1376 skip — most are dropped by the parser's `is_marker_only_token`, but any that
+    //       survive to resolution reject the batch). The original SKIPPED each of (a)–(e) per-record and created the rest;
+    //       unblock refuses the whole batch (NFR-8 safe-import discipline wins over the port). The `blocked-by` dep-type
+    //       alias is flipped to `blocks` at THIS engine edge-resolution step (when the edge is built — original
+    //       `create.rs:1190`), NOT in the pure parser (the parser preserves the reference string verbatim). bulk-markdown
+    //       is INTERACTIVE create (mints fresh ids; does NOT preserve ids, unlike JSONL/bd import which loops
+    //       `Session::create(&Issue)`);
     //   (4) output reuses `ToolOutput::Issues` (§5.3) — the Vec of created issues.
     // The bulk-create primitive lives on the `Session`/`Storage` surface BY DESIGN (`Session::create_bulk` over
     // `Storage::create_issues`, §4.1/§3.2) — it is the ONLY way to get one-tx all-or-nothing atomicity (an L7 loop over
