@@ -226,6 +226,10 @@ pub mod parked {
             self.inner.create_issue(issue, actor).await
         }
 
+        async fn create_issues(&self, issues: &[Issue], actor: &str) -> Result<(), StorageError> {
+            self.inner.create_issues(issues, actor).await
+        }
+
         async fn migrate(&self) -> Result<(), StorageError> {
             self.inner.migrate().await
         }
@@ -432,6 +436,9 @@ pub mod collide {
 
         async fn create_issue(&self, issue: &Issue, actor: &str) -> Result<String, StorageError> {
             self.inner.create_issue(issue, actor).await
+        }
+        async fn create_issues(&self, issues: &[Issue], actor: &str) -> Result<(), StorageError> {
+            self.inner.create_issues(issues, actor).await
         }
         async fn migrate(&self) -> Result<(), StorageError> {
             self.inner.migrate().await
