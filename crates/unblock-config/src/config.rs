@@ -491,7 +491,8 @@ mod tests {
     #[test]
     fn id_prefix_defaults_to_ub_and_resolves_through() {
         // No layer sets it → the "ub" default, projected to ResolvedConfig.
-        let wc = resolve(&CliOverrides::default(), &ProjectConfig::default(), &[]).expect("resolve");
+        let wc =
+            resolve(&CliOverrides::default(), &ProjectConfig::default(), &[]).expect("resolve");
         assert_eq!(wc.id_prefix, "ub");
         assert_eq!(wc.into_resolved().id_prefix, "ub");
         // The default ResolvedConfig also carries "ub" (T1.3a default).

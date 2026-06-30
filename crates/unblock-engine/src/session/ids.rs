@@ -56,9 +56,7 @@ impl Session {
         // Root id: the adaptive collision-retry ladder.
         let issue_count = self.issue_count().await?;
         match new.slug {
-            Some(slug) if !slug.is_empty() => {
-                self.allocate_slug_id(new, slug, issue_count).await
-            }
+            Some(slug) if !slug.is_empty() => self.allocate_slug_id(new, slug, issue_count).await,
             _ => self.allocate_hash_id(new, issue_count).await,
         }
     }

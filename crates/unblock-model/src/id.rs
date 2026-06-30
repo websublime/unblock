@@ -620,7 +620,10 @@ mod tests {
     fn generated_root_and_slug_ids_round_trip_through_parse_id() {
         let now = Utc::now();
         let len = optimal_hash_length(10);
-        let hash = compute_id_hash(&generate_id_seed("Title", Some("d"), Some("me"), now, 0), len);
+        let hash = compute_id_hash(
+            &generate_id_seed("Title", Some("d"), Some("me"), now, 0),
+            len,
+        );
 
         // ub-<hash> round-trips.
         let root = format!("ub-{hash}");
