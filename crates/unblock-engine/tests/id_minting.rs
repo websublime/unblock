@@ -60,7 +60,11 @@ async fn child_mint_produces_parent_dot_n() {
         })
         .await
         .expect("child");
-    assert_eq!(child.id, format!("{}.1", parent.id), "first child is parent.1");
+    assert_eq!(
+        child.id,
+        format!("{}.1", parent.id),
+        "first child is parent.1"
+    );
 
     let child2 = s
         .create_issue(NewIssue {
@@ -70,7 +74,11 @@ async fn child_mint_produces_parent_dot_n() {
         })
         .await
         .expect("child 2");
-    assert_eq!(child2.id, format!("{}.2", parent.id), "second child is parent.2");
+    assert_eq!(
+        child2.id,
+        format!("{}.2", parent.id),
+        "second child is parent.2"
+    );
 
     // Both children parse as hierarchical ids of the parent.
     let parsed = parse_id(&child2.id).expect("child id parses");
@@ -181,7 +189,10 @@ async fn slug_budget_fallback_drops_to_hash_only() {
         .expect("budget fallback");
 
     let parsed = parse_id(&created.id).expect("fallback id parses");
-    assert_eq!(parsed.prefix, long_prefix, "budget exhausted → hash-only, no slug");
+    assert_eq!(
+        parsed.prefix, long_prefix,
+        "budget exhausted → hash-only, no slug"
+    );
     assert!(!parsed.hash.is_empty());
 }
 
@@ -259,12 +270,19 @@ async fn concurrent_children_under_one_parent_are_distinct() {
             created.id
         );
     }
-    assert_eq!(ids.len(), n, "every concurrent child got a distinct parent.N");
+    assert_eq!(
+        ids.len(),
+        n,
+        "every concurrent child got a distinct parent.N"
+    );
 
     // The minted ids are exactly parent.1..=parent.N (no gaps, no lost write).
     let expected: std::collections::HashSet<String> =
         (1..=n).map(|k| format!("{}.{k}", parent.id)).collect();
-    assert_eq!(ids, expected, "the children are exactly parent.1..parent.{n}");
+    assert_eq!(
+        ids, expected,
+        "the children are exactly parent.1..parent.{n}"
+    );
 }
 
 /// The import/internal path `create(&Issue)` still inserts a caller-supplied id (never mints, D21).
@@ -275,7 +293,10 @@ async fn create_with_caller_supplied_id_still_works() {
         .create(&issue("ub-imported", Priority::MEDIUM, 100))
         .await
         .expect("import create");
-    assert_eq!(id, "ub-imported", "create preserves the caller id (no mint)");
+    assert_eq!(
+        id, "ub-imported",
+        "create preserves the caller id (no mint)"
+    );
     assert!(s.get("ub-imported").await.expect("get").is_some());
 }
 

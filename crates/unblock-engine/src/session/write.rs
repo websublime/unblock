@@ -11,7 +11,9 @@
 //! `unblock_policy` free functions over caller-built `ReadyContext`s (OQ-1; no policy handle).
 
 use chrono::{DateTime, Utc};
-use unblock_model::{Dependency, DependencyType, Issue, IssueType, IssueValidator, Priority, Status};
+use unblock_model::{
+    Dependency, DependencyType, Issue, IssueType, IssueValidator, Priority, Status,
+};
 use unblock_policy::{BlockingEdge, ReadyContext, ReadyVerdict, is_ready};
 use unblock_storage::{DeletePlan, IssuePatch};
 
