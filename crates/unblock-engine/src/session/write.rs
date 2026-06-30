@@ -11,7 +11,7 @@
 //! `unblock_policy` free functions over caller-built `ReadyContext`s (OQ-1; no policy handle).
 
 use chrono::{DateTime, Utc};
-use unblock_model::{Dependency, DependencyType, Issue, IssueValidator, Status};
+use unblock_model::{Dependency, DependencyType, Issue, IssueType, IssueValidator, Priority, Status};
 use unblock_policy::{BlockingEdge, ReadyContext, ReadyVerdict, is_ready};
 use unblock_storage::{DeletePlan, IssuePatch};
 
@@ -19,6 +19,41 @@ use crate::error::{EngineError, Result};
 use crate::permit::acquire_write;
 use crate::report::CloseOutcome;
 use crate::session::Session;
+use crate::session::ids::NewIssueSeed;
+
+/// The input to the MINTING create path [`Session::create_issue`] (engine-owned, D21).
+///
+/// Carries the domain fields of an **interactive** create MINUS the id — the engine mints the id
+/// under the write permit. The fields mirror the MCP/CLI `Create` input minus the wire-only knobs
+/// (`quick`/attribution are L7 adapter concerns). It is NOT a model DTO and NOT the import shape
+/// (the import/internal path is [`Session::create`], which preserves caller ids for FR-26).
+#[derive(Debug, Clone, Default)]
+pub struct NewIssue {
+    /// The issue title (required; also hashed into the id seed).
+    pub title: String,
+    /// The optional description/body (also hashed into the id seed).
+    pub description: Option<String>,
+    /// The issue type. `None` → the model default ([`IssueType::default`]).
+    pub issue_type: Option<IssueType>,
+    /// The priority. `None` → the model default ([`Priority::default`]).
+    pub priority: Option<Priority>,
+    /// Labels to seed on the new issue.
+    pub labels: Vec<String>,
+    /// `Some(parent)` mints the hierarchical `parent.N` id via `Storage::next_child_number`.
+    pub parent: Option<String>,
+    /// Dependency edges to add in/after the same write tx.
+    pub deps: Vec<Dependency>,
+    /// An optional due date.
+    pub due_at: Option<DateTime<Utc>>,
+    /// An optional defer-until date.
+    pub defer_until: Option<DateTime<Utc>>,
+    /// An optional estimate in minutes.
+    pub estimated_minutes: Option<i32>,
+    /// An optional user slug → the root id is `ub-<slug>-<hash>` (D21).
+    pub slug: Option<String>,
+    /// Whether the new issue is ephemeral (excluded from JSONL export).
+    pub ephemeral: bool,
+}
 
 impl Session {
     /// Acquire the single write permit, shutdown-aware (D14, spine §4.2).
@@ -40,6 +75,84 @@ impl Session {
         IssueValidator::validate(issue)?;
         let _guard = self.acquire().await?;
         Ok(self.storage.create_issue(issue, &self.actor).await?)
+    }
+
+    /// Create an issue, **minting** its id under the write permit, and return the created `Issue`
+    /// (FR-1a, D21 — the INTERACTIVE create path for MCP/CLI).
+    ///
+    /// Distinct from [`create`](Session::create) (the id-preserving import/internal path): this MINTS
+    /// the id via the engine allocator ([`Session::allocate_id`]) — a root `ub-<hash>` / slug
+    /// `ub-<slug>-<hash>` (config-derived prefix; the slug fits the prefix budget or drops to
+    /// hash-only) or, with `new.parent`, the hierarchical `parent.N`. The whole mint→build→insert runs
+    /// under one write permit, so two concurrent creates under one parent cannot mint the same
+    /// `parent.N`, and a candidate that races in surfaces `IdCollision` (which the allocator's probe
+    /// loop avoids by extending the hash / bumping the nonce).
+    ///
+    /// Steps under the permit: (1) mint the id (probing storage); (2) build the candidate `Issue`
+    /// (minted id + `new` fields + engine defaults: `created_by = actor`,
+    /// `created_at = updated_at = now`); (3) run the full [`IssueValidator::validate`] (the same gate
+    /// `create` runs — `ModelError` surfaces as [`EngineError::Model`]); (4) `storage.create_issue`;
+    /// (5) add each `new.deps` edge; (6) re-read via `get_issue` and return the hydrated `Issue`.
+    ///
+    /// # Errors
+    /// - [`EngineError::Model`] if the built issue fails validation (aggregate `ValidationFailed`).
+    /// - [`EngineError::ShutdownInProgress`] if a shutdown is in progress.
+    /// - The transparent storage source on any backend failure (id collision after a probe race,
+    ///   `external_ref` collision, a dependency cycle, a missing parent for the child counter, etc.).
+    pub async fn create_issue(&self, new: NewIssue) -> Result<Issue> {
+        let _guard = self.acquire().await?;
+
+        let now = Utc::now();
+
+        // (1) Mint the id, probing storage (under the held permit, so the probe→insert is atomic).
+        let seed = NewIssueSeed {
+            title: &new.title,
+            description: new.description.as_deref(),
+            parent: new.parent.as_deref(),
+            slug: new.slug.as_deref(),
+            created_at: now,
+        };
+        let id = self.allocate_id(&seed).await?;
+
+        // (2) Build the candidate Issue (minted id + new fields + engine defaults).
+        let issue = Issue {
+            id: id.clone(),
+            title: new.title,
+            description: new.description,
+            status: Status::default(),
+            priority: new.priority.unwrap_or_default(),
+            issue_type: new.issue_type.unwrap_or_default(),
+            estimated_minutes: new.estimated_minutes,
+            created_at: now,
+            created_by: Some(self.actor.clone()),
+            updated_at: now,
+            due_at: new.due_at,
+            defer_until: new.defer_until,
+            ephemeral: new.ephemeral,
+            labels: new.labels,
+            ..Issue::default()
+        };
+
+        // (3) Validate the built issue the SAME way `create` validates (storage is validation-free).
+        IssueValidator::validate(&issue)?;
+
+        // (4) Insert the row + Event(Created) transactionally (storage's IdCollision guard is the
+        //     atomic backstop for a raced candidate).
+        self.storage.create_issue(&issue, &self.actor).await?;
+
+        // (5) Add the dependency edges in/after the same write tx (parent is already encoded in the
+        //     id; `deps` are explicit edges). Each writes its own transactional Event(DependencyAdded).
+        for dep in &new.deps {
+            self.storage.add_dependency(dep, &self.actor).await?;
+        }
+
+        // (6) Re-read the hydrated issue (labels/deps populated) and return it.
+        self.storage
+            .get_issue(&id)
+            .await?
+            .ok_or(EngineError::Storage {
+                source: unblock_storage::StorageError::IssueNotFound { id },
+            })
     }
 
     /// Apply an [`IssuePatch`] to an issue, returning the updated issue (FR-1b).
