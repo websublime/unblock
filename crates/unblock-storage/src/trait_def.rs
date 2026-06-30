@@ -69,6 +69,22 @@ pub trait Storage: Send + Sync {
     /// transaction. `actor` is the attributed author.
     async fn create_issue(&self, issue: &Issue, actor: &str) -> Result<String, StorageError>;
 
+    /// Create the WHOLE slice in **exactly ONE** `BEGIN IMMEDIATE` transaction (D22/T2.3, spine
+    /// §3.2.1 — the ATOMIC bulk INSERT primitive).
+    ///
+    /// Inserts every `Issue` — its row + its `Event(Created)` + per-relation events + the seeded
+    /// dependency edges + any `child_counters` bump — committed ONCE. It does **no minting and no
+    /// validation** (the engine `Session::create_bulk` mints every id + runs the full
+    /// `IssueValidator::validate` BEFORE calling this — storage receives fully-formed `Issue`s).
+    ///
+    /// **All-or-nothing:** ANY failure on ANY record (id/`external_ref` collision, FK/CHECK
+    /// violation, backend error) rolls back the entire transaction — **ZERO rows persist** (never a
+    /// partial batch). A dependency edge pointing at a sibling minted earlier in the SAME batch
+    /// resolves because both rows live in the one uncommitted tx. It is **NEVER** a loop of
+    /// `create_issue` (that would be N independent transactions = a partial-commit hole). The single
+    /// `create_issue`/`create(&Issue)` paths are UNCHANGED.
+    async fn create_issues(&self, issues: &[Issue], actor: &str) -> Result<(), StorageError>;
+
     /// Fetch a single issue by id, hydrated with its labels and dependencies.
     ///
     /// Returns `Ok(None)` when no issue matches (a missing issue is **not** an error here; callers
@@ -363,6 +379,10 @@ mod tests {
         }
 
         async fn create_issue(&self, _issue: &Issue, _actor: &str) -> Result<String, StorageError> {
+            Err(StorageError::NotInitialized)
+        }
+
+        async fn create_issues(&self, _issues: &[Issue], _actor: &str) -> Result<(), StorageError> {
             Err(StorageError::NotInitialized)
         }
 

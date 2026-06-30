@@ -1973,6 +1973,124 @@ async fn ready_ids(storage: &LibsqlStorage) -> Vec<String> {
         .collect()
 }
 
+/// The total row count (active + closed + tombstone) over `id LIKE 'ub-%'`, via the public read path.
+async fn count_all(storage: &LibsqlStorage) -> usize {
+    let filters = ListFilters {
+        include_closed: true,
+        include_deferred: true,
+        ..ListFilters::default()
+    };
+    storage.list_issues(&filters).await.unwrap().len()
+}
+
+// --------------------------------------------------------------------------------------------------
+// create_issues — the ATOMIC bulk INSERT (D22/T2.3, spine §3.2.1)
+// --------------------------------------------------------------------------------------------------
+
+/// A clean N-record batch inserts all N rows + their `Event(Created)` in one tx, round-tripping via
+/// `get_issues`.
+#[tokio::test]
+async fn create_issues_inserts_whole_batch_in_one_tx() {
+    let storage = fresh().await;
+    let batch = vec![
+        issue("ub-a", "alpha"),
+        issue("ub-b", "beta"),
+        issue("ub-c", "gamma"),
+    ];
+
+    storage
+        .create_issues(&batch, "alice")
+        .await
+        .expect("bulk create");
+
+    let ids: Vec<String> = batch.iter().map(|i| i.id.clone()).collect();
+    let loaded = storage.get_issues(&ids).await.expect("get_issues");
+    assert_eq!(loaded.len(), 3, "all three rows persisted");
+    for id in &ids {
+        assert_eq!(
+            event_types(&storage, id).await,
+            vec!["created".to_string()],
+            "each row gets exactly one Created event",
+        );
+    }
+}
+
+/// A sibling-to-sibling dependency edge (record B depends on record A, BOTH in the same batch)
+/// resolves and persists — both rows live in the one uncommitted tx.
+#[tokio::test]
+async fn create_issues_resolves_intra_batch_sibling_edge() {
+    let storage = fresh().await;
+    let mut b = issue("ub-b", "beta");
+    b.dependencies = vec![dep("ub-b", "ub-a", DependencyType::Blocks)];
+    let batch = vec![issue("ub-a", "alpha"), b];
+
+    storage
+        .create_issues(&batch, "alice")
+        .await
+        .expect("bulk create with sibling edge");
+
+    let edges = storage.list_dependencies("ub-b").await.expect("deps");
+    assert_eq!(edges.len(), 1, "the sibling edge persisted");
+    assert_eq!(edges[0].depends_on_id, "ub-a");
+}
+
+/// FAULT-INJECTION ROLLBACK: a batch whose record #k's id duplicates a pre-existing COMMITTED row
+/// fails with `IdCollision` and leaves ZERO rows from the batch — records 1..k-1 are NOT persisted
+/// (the all-or-nothing atomicity proof, spine §3.2.1).
+#[tokio::test]
+async fn create_issues_rolls_back_whole_batch_on_mid_batch_collision() {
+    let storage = fresh().await;
+    // Pre-seed a COMMITTED row so the batch's 3rd record collides with it.
+    storage
+        .create_issue(&issue("ub-c", "pre-existing"), "alice")
+        .await
+        .expect("seed");
+    let pre_count = count_all(&storage).await;
+    assert_eq!(pre_count, 1);
+
+    // The batch: two fresh records, then a record that collides with the committed `ub-c`.
+    let batch = vec![
+        issue("ub-a", "alpha"),
+        issue("ub-b", "beta"),
+        issue("ub-c", "collides"),
+    ];
+    let err = storage
+        .create_issues(&batch, "alice")
+        .await
+        .expect_err("mid-batch collision must fail the whole batch");
+    assert!(
+        matches!(err, StorageError::IdCollision { id } if id == "ub-c"),
+        "the failure is the IdCollision on record #k",
+    );
+
+    // ZERO rows from the batch persisted: the count is unchanged from before the call, and the two
+    // records staged before #k (ub-a, ub-b) are absent.
+    assert_eq!(
+        count_all(&storage).await,
+        pre_count,
+        "row count unchanged — no partial batch",
+    );
+    assert!(
+        storage.get_issue("ub-a").await.unwrap().is_none(),
+        "record #1 staged before the failure must NOT persist",
+    );
+    assert!(
+        storage.get_issue("ub-b").await.unwrap().is_none(),
+        "record #2 staged before the failure must NOT persist",
+    );
+}
+
+/// An EMPTY batch is a no-op `Ok` (one trivially-committed tx, no rows).
+#[tokio::test]
+async fn create_issues_empty_batch_is_noop_ok() {
+    let storage = fresh().await;
+    storage
+        .create_issues(&[], "alice")
+        .await
+        .expect("empty batch is Ok");
+    assert_eq!(count_all(&storage).await, 0);
+}
+
 // --------------------------------------------------------------------------------------------------
 // detect_cycles ordered-witness shape (needs the raw-edge seam to plant a STORED cycle the public
 // guard rejects) — gated on the `testkit` feature (the seam is unreachable from an integration test

@@ -557,6 +557,11 @@ impl Storage for LibsqlStorage {
         crud::create_issue(&conn, self.hook(), issue, actor).await
     }
 
+    async fn create_issues(&self, issues: &[Issue], actor: &str) -> Result<(), StorageError> {
+        let conn = self.write().await;
+        crud::create_issues(&conn, self.hook(), issues, actor).await
+    }
+
     async fn get_issue(&self, id: &str) -> Result<Option<Issue>, StorageError> {
         crud::get_issue(self.read(), id).await
     }

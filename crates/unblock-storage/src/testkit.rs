@@ -126,6 +126,7 @@ where
 
     // CRUD.
     contract_create_issue(factory().await).await;
+    contract_create_issues_atomic(factory().await).await;
     contract_get_issue(factory().await).await;
     contract_get_issues(factory().await).await;
     contract_update_issue(factory().await).await;
@@ -231,6 +232,20 @@ async fn event_types<S: Storage>(storage: &S, id: &str) -> Vec<String> {
         .collect()
 }
 
+/// The total row count (active + closed + tombstone) via the public list read path.
+async fn count_all<S: Storage>(storage: &S) -> usize {
+    let filters = ListFilters {
+        include_closed: true,
+        include_deferred: true,
+        ..ListFilters::default()
+    };
+    storage
+        .list_issues(&filters)
+        .await
+        .expect("list_issues")
+        .len()
+}
+
 // --------------------------------------------------------------------------------------------------
 // Lifecycle
 // --------------------------------------------------------------------------------------------------
@@ -273,6 +288,59 @@ pub async fn contract_create_issue<S: Storage>(storage: S) {
     assert!(
         matches!(collision, Err(StorageError::IdCollision { .. })),
         "duplicate id must collide"
+    );
+}
+
+/// `create_issues` (D22/T2.3) is the ATOMIC bulk INSERT: a clean batch inserts every row + a
+/// sibling-to-sibling edge in ONE tx, AND a mid-batch failure rolls back the WHOLE batch (ZERO rows
+/// persist — the all-or-nothing proof, spine §3.2.1).
+pub async fn contract_create_issues_atomic<S: Storage>(storage: S) {
+    // (1) A clean N-record batch with an intra-batch sibling edge round-trips.
+    let mut b = issue("ub-b", "beta");
+    b.dependencies = vec![dep("ub-b", "ub-a", DependencyType::Blocks)];
+    let batch = vec![issue("ub-a", "alpha"), b, issue("ub-c", "gamma")];
+    storage
+        .create_issues(&batch, "alice")
+        .await
+        .expect("clean bulk create");
+    let loaded = storage
+        .get_issues(&["ub-a".to_string(), "ub-b".to_string(), "ub-c".to_string()])
+        .await
+        .expect("get_issues");
+    assert_eq!(loaded.len(), 3, "all rows persisted");
+    let edges = storage.list_dependencies("ub-b").await.expect("deps");
+    assert_eq!(edges.len(), 1, "sibling edge persisted");
+    assert_eq!(edges[0].depends_on_id, "ub-a");
+    assert_eq!(event_types(&storage, "ub-a").await, vec!["created"]);
+
+    // (2) FAULT-INJECTION ROLLBACK: a second batch whose record #k collides with a committed id
+    //     fails and leaves ZERO new rows — records staged before #k are discarded.
+    let count_before = count_all(&storage).await;
+    let collide_batch = vec![
+        issue("ub-x", "x"),
+        issue("ub-y", "y"),
+        issue("ub-a", "collides"), // duplicates the committed ub-a
+    ];
+    let err = storage
+        .create_issues(&collide_batch, "alice")
+        .await
+        .expect_err("mid-batch collision must fail the whole batch");
+    assert!(
+        matches!(err, StorageError::IdCollision { id } if id == "ub-a"),
+        "the failure is the IdCollision on record #k",
+    );
+    assert_eq!(
+        count_all(&storage).await,
+        count_before,
+        "ZERO rows from the failed batch persist (no partial commit)",
+    );
+    assert!(
+        storage.get_issue("ub-x").await.expect("get").is_none(),
+        "record staged before the failure must NOT persist",
+    );
+    assert!(
+        storage.get_issue("ub-y").await.expect("get").is_none(),
+        "record staged before the failure must NOT persist",
     );
 }
 

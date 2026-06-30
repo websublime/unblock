@@ -21,7 +21,10 @@ use super::{WriteHook, with_immediate_tx};
 ///
 /// There is **no** content-hash dedup (spine §3.2.1): the hash is computed and stored, never used to
 /// short-circuit. FR-26 import idempotency lives in `unblock-sync`, not here.
-#[allow(clippy::too_many_lines)] // one cohesive transaction: row + labels + deps + comments + events
+///
+/// The per-record body is the shared [`insert_issue_in_tx`] helper — so the single-create path and the
+/// atomic bulk path ([`create_issues`]) run **identical** in-tx logic (one source of truth, spine
+/// §3.2.1 / crate plan §3.3). This wrapper just opens its OWN one-shot `with_immediate_tx`.
 pub(super) async fn create_issue(
     conn: &Connection,
     hook: WriteHook<'_>,
@@ -38,142 +41,204 @@ pub(super) async fn create_issue(
     let issue = issue.clone();
 
     with_immediate_tx(conn, hook, |tx| async move {
-        // Guard 1: id collision.
-        if row_exists(&tx, "SELECT 1 FROM issues WHERE id = ?1 LIMIT 1", &issue.id).await? {
-            return Err(StorageError::IdCollision { id: issue.id });
+        insert_issue_in_tx(&tx, &issue, &content_hash, actor).await?;
+        let id = issue.id.clone();
+        Ok((id, tx))
+    })
+    .await
+}
+
+/// Insert ONE fully-formed `Issue` inside the caller's already-open transaction (the shared per-record
+/// body, D22/T2.3 — spine §3.2.1 / crate plan §3.3).
+///
+/// Runs the `create_issue` per-record work — the id-collision guard, the `external_ref`-collision
+/// guard, the row INSERT (binding the supplied `content_hash`), the in-tx `child_counters` bump for a
+/// hierarchical id, the deduped label/dependency/comment inserts with their per-relation
+/// `Event(LabelAdded)`/`Event(DependencyAdded)`/`Event(Commented)`, and the defining `Event(Created)`.
+///
+/// It does **no minting and no validation** (the engine layer validates/mints first — storage stays
+/// validation-free, like `create_issue`). It borrows `&tx` so the bulk path can call it N times inside
+/// ONE `with_immediate_tx`; on any `Err` the caller's tx rolls back the WHOLE batch (ZERO rows
+/// persist). Both `create_issue` (its own one-shot tx) and `create_issues` (the ONE shared tx, looped)
+/// call this — never each other.
+#[allow(clippy::too_many_lines)] // one cohesive record body: row + labels + deps + comments + events
+pub(super) async fn insert_issue_in_tx(
+    tx: &libsql::Transaction,
+    issue: &Issue,
+    content_hash: &str,
+    actor: &str,
+) -> Result<(), StorageError> {
+    // Guard 1: id collision.
+    if row_exists(tx, "SELECT 1 FROM issues WHERE id = ?1 LIMIT 1", &issue.id).await? {
+        return Err(StorageError::IdCollision {
+            id: issue.id.clone(),
+        });
+    }
+
+    // Guard 2: external_ref collision.
+    if let Some(ext_ref) = issue.external_ref.as_deref()
+        && row_exists(
+            tx,
+            "SELECT 1 FROM issues WHERE external_ref = ?1 LIMIT 1",
+            ext_ref,
+        )
+        .await?
+    {
+        return Err(StorageError::Backend {
+            source: crate::error::BackendOpaque::from_message(format!(
+                "external reference already exists: {ext_ref}"
+            )),
+        });
+    }
+
+    // Insert the issue row.
+    let columns = format!(
+        "INSERT INTO issues ({ISSUE_COLUMNS}) VALUES ({})",
+        placeholders(38)
+    );
+    let params = bind_issue(issue, content_hash);
+    tx.execute(&columns, params_from_iter(params))
+        .await
+        .map_err(map_libsql_err)?;
+
+    // Maintain the child counter for a hierarchical id.
+    if let Ok(parsed) = parse_id(&issue.id)
+        && !parsed.is_root()
+        && let (Some(parent), Some(&child)) = (parsed.parent(), parsed.child_path.last())
+    {
+        update_child_counter_in_tx(tx, &parent, child).await?;
+    }
+
+    // Insert labels (deduped) + Event(LabelAdded) each.
+    let mut seen = HashSet::new();
+    for label in &issue.labels {
+        if !seen.insert(label.as_str()) {
+            continue;
         }
-
-        // Guard 2: external_ref collision.
-        if let Some(ext_ref) = issue.external_ref.as_deref()
-            && row_exists(
-                &tx,
-                "SELECT 1 FROM issues WHERE external_ref = ?1 LIMIT 1",
-                ext_ref,
-            )
-            .await?
-        {
-            return Err(StorageError::Backend {
-                source: crate::error::BackendOpaque::from_message(format!(
-                    "external reference already exists: {ext_ref}"
-                )),
-            });
-        }
-
-        // Insert the issue row.
-        let columns = format!(
-            "INSERT INTO issues ({ISSUE_COLUMNS}) VALUES ({})",
-            placeholders(38)
-        );
-        let params = bind_issue(&issue, &content_hash);
-        tx.execute(&columns, params_from_iter(params))
-            .await
-            .map_err(map_libsql_err)?;
-
-        // Maintain the child counter for a hierarchical id.
-        if let Ok(parsed) = parse_id(&issue.id)
-            && !parsed.is_root()
-            && let (Some(parent), Some(&child)) = (parsed.parent(), parsed.child_path.last())
-        {
-            update_child_counter_in_tx(&tx, &parent, child).await?;
-        }
-
-        // Insert labels (deduped) + Event(LabelAdded) each.
-        let mut seen = HashSet::new();
-        for label in &issue.labels {
-            if !seen.insert(label.as_str()) {
-                continue;
-            }
-            tx.execute(
-                "INSERT INTO labels (issue_id, label) VALUES (?1, ?2)",
-                libsql::params![issue.id.as_str(), label.as_str()],
-            )
-            .await
-            .map_err(map_libsql_err)?;
-            append_event_in_tx(
-                &tx,
-                &issue.id,
-                &unblock_model::EventType::LabelAdded,
-                actor,
-                None,
-                Some(label),
-                None,
-            )
-            .await?;
-        }
-
-        // Insert dependencies (deduped) + Event(DependencyAdded) each.
-        let mut seen_deps = HashSet::new();
-        for dep in &issue.dependencies {
-            if dep.depends_on_id == issue.id {
-                return Err(StorageError::SelfDependency);
-            }
-            if !seen_deps.insert(dep.depends_on_id.as_str()) {
-                continue;
-            }
-            tx.execute(
-                "INSERT INTO dependencies (issue_id, depends_on_id, type, created_at, created_by) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                libsql::params![
-                    issue.id.as_str(),
-                    dep.depends_on_id.as_str(),
-                    dep.dep_type.as_str(),
-                    dep.created_at.to_rfc3339(),
-                    dep.created_by.as_deref().unwrap_or(actor),
-                ],
-            )
-            .await
-            .map_err(map_libsql_err)?;
-            append_event_in_tx(
-                &tx,
-                &issue.id,
-                &unblock_model::EventType::DependencyAdded,
-                actor,
-                None,
-                Some(&dep.depends_on_id),
-                None,
-            )
-            .await?;
-        }
-
-        // Insert comments + Event(Commented) each.
-        for comment in &issue.comments {
-            tx.execute(
-                "INSERT INTO comments (issue_id, author, text, created_at) VALUES (?1, ?2, ?3, ?4)",
-                libsql::params![
-                    issue.id.as_str(),
-                    comment.author.as_str(),
-                    comment.body.as_str(),
-                    comment.created_at.to_rfc3339(),
-                ],
-            )
-            .await
-            .map_err(map_libsql_err)?;
-            append_event_in_tx(
-                &tx,
-                &issue.id,
-                &unblock_model::EventType::Commented,
-                actor,
-                None,
-                None,
-                Some(&comment.body),
-            )
-            .await?;
-        }
-
-        // The defining event.
+        tx.execute(
+            "INSERT INTO labels (issue_id, label) VALUES (?1, ?2)",
+            libsql::params![issue.id.as_str(), label.as_str()],
+        )
+        .await
+        .map_err(map_libsql_err)?;
         append_event_in_tx(
-            &tx,
+            tx,
             &issue.id,
-            &unblock_model::EventType::Created,
+            &unblock_model::EventType::LabelAdded,
+            actor,
+            None,
+            Some(label),
+            None,
+        )
+        .await?;
+    }
+
+    // Insert dependencies (deduped) + Event(DependencyAdded) each.
+    let mut seen_deps = HashSet::new();
+    for dep in &issue.dependencies {
+        if dep.depends_on_id == issue.id {
+            return Err(StorageError::SelfDependency);
+        }
+        if !seen_deps.insert(dep.depends_on_id.as_str()) {
+            continue;
+        }
+        tx.execute(
+            "INSERT INTO dependencies (issue_id, depends_on_id, type, created_at, created_by) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            libsql::params![
+                issue.id.as_str(),
+                dep.depends_on_id.as_str(),
+                dep.dep_type.as_str(),
+                dep.created_at.to_rfc3339(),
+                dep.created_by.as_deref().unwrap_or(actor),
+            ],
+        )
+        .await
+        .map_err(map_libsql_err)?;
+        append_event_in_tx(
+            tx,
+            &issue.id,
+            &unblock_model::EventType::DependencyAdded,
+            actor,
+            None,
+            Some(&dep.depends_on_id),
+            None,
+        )
+        .await?;
+    }
+
+    // Insert comments + Event(Commented) each.
+    for comment in &issue.comments {
+        tx.execute(
+            "INSERT INTO comments (issue_id, author, text, created_at) VALUES (?1, ?2, ?3, ?4)",
+            libsql::params![
+                issue.id.as_str(),
+                comment.author.as_str(),
+                comment.body.as_str(),
+                comment.created_at.to_rfc3339(),
+            ],
+        )
+        .await
+        .map_err(map_libsql_err)?;
+        append_event_in_tx(
+            tx,
+            &issue.id,
+            &unblock_model::EventType::Commented,
             actor,
             None,
             None,
-            Some(&format!("Created issue: {}", issue.title)),
+            Some(&comment.body),
         )
         .await?;
+    }
 
-        let id = issue.id.clone();
-        Ok((id, tx))
+    // The defining event.
+    append_event_in_tx(
+        tx,
+        &issue.id,
+        &unblock_model::EventType::Created,
+        actor,
+        None,
+        None,
+        Some(&format!("Created issue: {}", issue.title)),
+    )
+    .await?;
+
+    Ok(())
+}
+
+/// Create the WHOLE slice in **exactly ONE** `BEGIN IMMEDIATE` tx (D22/T2.3 — the ATOMIC bulk INSERT,
+/// spine §3.2.1).
+///
+/// Opens ONE `with_immediate_tx` (the same commit chokepoint as every other mutation) and loops the
+/// shared [`insert_issue_in_tx`] helper per record — it is **NEVER a loop of `create_issue`** (N
+/// `create_issue` calls = N independent txs = a partial-commit hole on the first mid-batch failure, the
+/// exact bug this primitive closes). For EACH `Issue` the helper runs the SAME per-record body
+/// `create_issue` runs, committing ONCE. It does **no minting and no validation** (the engine
+/// `Session::create_bulk` mints every id + validates each built `Issue` BEFORE this — storage stays
+/// validation-free).
+///
+/// **Atomicity is the whole point:** a failure on record #k (a raced `IdCollision`, an `external_ref`
+/// clash, an FK/CHECK violation, any backend error) returns `Err` → `with_immediate_tx` rolls back the
+/// whole tx → records 1..k-1 staged in the same tx are discarded → ZERO rows persist (no partial
+/// batch). A dependency edge pointing at a sibling minted earlier in the SAME batch resolves because
+/// both rows live in the one uncommitted tx. Same-parent siblings arrive with ALREADY-DISTINCT
+/// `parent.N` ids (the engine mints them via its in-batch per-parent counter); the per-record
+/// `child_counters` UPSERT (high-water MAX) lands each row's `N` monotonically regardless of order.
+pub(super) async fn create_issues(
+    conn: &Connection,
+    hook: WriteHook<'_>,
+    issues: &[Issue],
+    actor: &str,
+) -> Result<(), StorageError> {
+    // Pre-compute each content hash before entering the tx (no clone of the slice; the helper borrows).
+    let hashes: Vec<String> = issues.iter().map(Issue::compute_content_hash).collect();
+
+    with_immediate_tx(conn, hook, |tx| async move {
+        for (issue, content_hash) in issues.iter().zip(hashes.iter()) {
+            insert_issue_in_tx(&tx, issue, content_hash, actor).await?;
+        }
+        Ok(((), tx))
     })
     .await
 }
