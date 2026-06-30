@@ -9,6 +9,13 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+default = []
+# A test-only seam: exposes `serve_duplex_for_test` (and the otherwise-private `UnblockServer`) so
+# the in-process MCP lifecycle test can drive the real server over an in-memory duplex transport.
+# Never enabled in a shipped build — it is enabled only by this crate's own integration tests.
+test-util = []
+
 [dependencies]
 unblock-engine = { workspace = true }
 unblock-render = { workspace = true }
@@ -29,6 +36,10 @@ tracing = { workspace = true }
 snafu = { workspace = true }
 
 [dev-dependencies]
+# Self dev-dependency that enables the `test-util` feature for the integration tests ONLY (the
+# standard cargo idiom): `cargo test` then sees `serve_duplex_for_test`/`UnblockServer` without the
+# shipped build (which has `test-util` off) exposing them. The lib + its tests link the same crate.
+unblock-mcp = { path = ".", features = ["test-util"] }
 # The integration tests (`tests/lifecycle.rs` M2 exit-gate, `tests/error_mapping.rs`) drive a real
 # in-memory `Session` over a temp libsql backend — the same construction the engine tests use
 # (LibsqlStorage::open_in_memory -> migrate -> Arc<dyn Storage>; WorkspaceContext; Session::open).

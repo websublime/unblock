@@ -35,8 +35,12 @@ use crate::tools::enforce_quota;
 ///
 /// Holds `Arc<Session>` (so it is `Send + Sync`, as `ServerHandler` requires) plus the request
 /// [`Quotas`]. It carries NO write lock — the engine owns the write Semaphore (D14).
+///
+/// `#[doc(hidden)] pub` (not part of the documented contract) only so the feature-gated
+/// [`serve_duplex_for_test`] can name it in its return type; normal consumers use [`serve`].
+#[doc(hidden)]
 #[derive(Clone)]
-pub(crate) struct UnblockServer {
+pub struct UnblockServer {
     /// The single mutation home (FR-9). Every tool/resource call delegates to it.
     pub(crate) session: Arc<Session>,
     /// The untrusted-input limits (NFR-18), enforced in [`UnblockServer::preflight`].
@@ -201,6 +205,31 @@ where
         .serve_with_ct(transport, cancel)
         .await
         .context(TransportSnafu)
+}
+
+/// Build and run the server over an arbitrary in-memory transport (TEST-ONLY, `test-util` feature).
+///
+/// Drives the **same** `UnblockServer` + `serve_with_ct` path as [`serve`], but over a caller-
+/// supplied duplex transport instead of stdio — so the M2 lifecycle exit-gate (`tests/lifecycle.rs`)
+/// can run a full in-process MCP client/server flow without touching real stdio. Feature-gated and
+/// `#[doc(hidden)]` so it never widens the shipped public surface.
+///
+/// # Errors
+/// - [`McpServerError::Transport`] if the rmcp service fails to initialize over the transport.
+#[cfg(feature = "test-util")]
+#[doc(hidden)]
+pub async fn serve_duplex_for_test<T, E, A>(
+    session: Arc<Session>,
+    quotas: Quotas,
+    transport: T,
+    cancel: tokio_util::sync::CancellationToken,
+) -> Result<rmcp::service::RunningService<RoleServer, UnblockServer>, McpServerError>
+where
+    T: rmcp::transport::IntoTransport<RoleServer, E, A>,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    let server = UnblockServer::new(session, quotas);
+    serve_handler(server, transport, cancel).await
 }
 
 /// Map a JSON serialization failure to a structured `InternalError` (no panic in library code).

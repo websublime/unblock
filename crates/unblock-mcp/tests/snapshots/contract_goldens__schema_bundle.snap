@@ -1,0 +1,1899 @@
+---
+source: crates/unblock-mcp/tests/contract_goldens.rs
+expression: bundle
+---
+{
+  "contract_version": "unblock.mcp.v1",
+  "issue": {
+    "$defs": {
+      "CreateInput": {
+        "description": "The `create` action payload (boxed in [`IssueInput::Create`]).\n\nMirrors the spine §5.2 `Create` fields; mapped to the engine-owned [`NewIssue`] (D21) minus the\nwire-only `quick`/`attribution` (which are not `NewIssue` fields).",
+        "properties": {
+          "agent_name": {
+            "default": null,
+            "description": "Self-reported agent name (capture-only).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "defer_until": {
+            "default": null,
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "deps": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/DepInput"
+            },
+            "type": "array"
+          },
+          "description": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "due_at": {
+            "default": null,
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ephemeral": {
+            "default": false,
+            "type": "boolean"
+          },
+          "estimated_minutes": {
+            "default": null,
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "harness": {
+            "default": null,
+            "description": "Self-reported harness identifier (capture-only).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "issue_type": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/IssueType"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "labels": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "model": {
+            "default": null,
+            "description": "Self-reported model identifier (capture-only).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "parent": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "priority": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Priority"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "quick": {
+            "default": false,
+            "description": "Quick-create: the output is the minted id only.",
+            "type": "boolean"
+          },
+          "slug": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "description": "The issue title (required).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "type": "object"
+      },
+      "DeleteModeInput": {
+        "description": "The delete mode on the wire (spine §5.2 `DeleteModeInput` → [`DeleteMode`]).",
+        "oneOf": [
+          {
+            "const": "tombstone",
+            "description": "Soft-delete (default): tombstone the targets.",
+            "type": "string"
+          },
+          {
+            "const": "cascade",
+            "description": "Tombstone the targets and their children.",
+            "type": "string"
+          },
+          {
+            "const": "hard",
+            "description": "Permanently delete the rows.",
+            "type": "string"
+          },
+          {
+            "const": "dry_run",
+            "description": "Compute the plan only; mutate nothing.",
+            "type": "string"
+          }
+        ]
+      },
+      "DepInput": {
+        "description": "A dependency edge on the wire (spine §5.2 `DepInput`).\n\nUsed both as a `query`/`dep`-tool edge input and as a `Create.deps` element. The model\n[`Dependency`] additionally carries a `created_at`/`created_by` — supplied by the adapter via\n[`DepInput::into_dependency`], not by the wire.",
+        "properties": {
+          "dep_type": {
+            "$ref": "#/$defs/DependencyType",
+            "description": "The dependency type."
+          },
+          "depends_on_id": {
+            "description": "The blocker issue id (target).",
+            "type": "string"
+          },
+          "issue_id": {
+            "description": "The dependent issue id (source).",
+            "type": "string"
+          },
+          "metadata": {
+            "default": null,
+            "description": "Optional JSON metadata for the edge.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "issue_id",
+          "depends_on_id",
+          "dep_type"
+        ],
+        "type": "object"
+      },
+      "DependencyType": {
+        "type": "string"
+      },
+      "IssueType": {
+        "type": "string"
+      },
+      "Priority": {
+        "description": "Issue priority (spine §1.2): a transparent newtype over `i32`, valid range `0..=4`.\n\nOrdering is numeric, so `CRITICAL < HIGH < MEDIUM < LOW < BACKLOG` — this is the order the\nhybrid ready-sort relies on. `Default` is [`Priority::MEDIUM`]. The wire form is the bare\ninteger (`#[serde(transparent)]`), and `Display` renders `\"P{n}\"`.\n\n# Examples\n\n```\nuse unblock_model::Priority;\nuse std::str::FromStr;\n\nassert_eq!(Priority::default(), Priority::MEDIUM);\nassert_eq!(Priority::CRITICAL.to_string(), \"P0\");\nassert_eq!(Priority::from_str(\"p1\").unwrap(), Priority::HIGH);\nassert!(Priority::from_str(\"P5\").is_err());\nassert!(Priority::CRITICAL < Priority::BACKLOG);\n```",
+        "format": "int32",
+        "type": "integer"
+      },
+      "Status": {
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "The `issue` tool input (spine §5.2 — EXACT shape; 7 actions).",
+    "oneOf": [
+      {
+        "$ref": "#/$defs/CreateInput",
+        "description": "Create a new issue (interactive MINTING create, D21).\n\nThe payload is boxed (it is the largest variant) — the wire shape is unchanged: a newtype\nvariant over a `#[serde(flatten)]`-equivalent struct keeps `{action:\"create\", title, ...}`.",
+        "properties": {
+          "action": {
+            "const": "create",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Show a single issue by id.",
+        "properties": {
+          "action": {
+            "const": "show",
+            "type": "string"
+          },
+          "id": {
+            "description": "The issue id.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "id"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Update one or more issues with a patch.",
+        "properties": {
+          "acceptance_criteria": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "action": {
+            "const": "update",
+            "type": "string"
+          },
+          "agent_name": {
+            "default": null,
+            "description": "Self-reported agent name (capture-only).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "assignee": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "close_reason": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "design": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "due_at": {
+            "default": null,
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "estimated_minutes": {
+            "default": null,
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "external_ref": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "harness": {
+            "default": null,
+            "description": "Self-reported harness identifier (capture-only).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ids": {
+            "description": "The target issue ids.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "issue_type": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/IssueType"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "labels_add": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "labels_remove": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "labels_set": {
+            "default": null,
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "model": {
+            "default": null,
+            "description": "Self-reported model identifier (capture-only).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "notes": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "owner": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "parent": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "priority": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Priority"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "status": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Status"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "title": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "action",
+          "ids"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Close an issue, optionally surfacing the newly-unblocked set.",
+        "properties": {
+          "action": {
+            "const": "close",
+            "type": "string"
+          },
+          "agent_name": {
+            "default": null,
+            "description": "Self-reported agent name (capture-only).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "harness": {
+            "default": null,
+            "description": "Self-reported harness identifier (capture-only).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "description": "The issue id.",
+            "type": "string"
+          },
+          "model": {
+            "default": null,
+            "description": "Self-reported model identifier (capture-only).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "suggest_next": {
+            "default": false,
+            "description": "When `true`, return the `newly_unblocked` set (FR-11).",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "action",
+          "id"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Reopen an issue (an `update` patch to a non-terminal status).",
+        "properties": {
+          "action": {
+            "const": "reopen",
+            "type": "string"
+          },
+          "agent_name": {
+            "default": null,
+            "description": "Self-reported agent name (capture-only).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "harness": {
+            "default": null,
+            "description": "Self-reported harness identifier (capture-only).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "description": "The issue id.",
+            "type": "string"
+          },
+          "model": {
+            "default": null,
+            "description": "Self-reported model identifier (capture-only).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "action",
+          "id"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Delete one or more issues (tombstone/cascade/hard/dry-run).",
+        "properties": {
+          "action": {
+            "const": "delete",
+            "type": "string"
+          },
+          "agent_name": {
+            "default": null,
+            "description": "Self-reported agent name (capture-only).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "harness": {
+            "default": null,
+            "description": "Self-reported harness identifier (capture-only).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ids": {
+            "description": "The target issue ids.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "mode": {
+            "$ref": "#/$defs/DeleteModeInput",
+            "default": "tombstone"
+          },
+          "model": {
+            "default": null,
+            "description": "Self-reported model identifier (capture-only).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "action",
+          "ids"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Restore (un-tombstone) a single soft-deleted issue (D20).",
+        "properties": {
+          "action": {
+            "const": "restore",
+            "type": "string"
+          },
+          "agent_name": {
+            "default": null,
+            "description": "Self-reported agent name (capture-only).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "harness": {
+            "default": null,
+            "description": "Self-reported harness identifier (capture-only).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "description": "The issue id.",
+            "type": "string"
+          },
+          "model": {
+            "default": null,
+            "description": "Self-reported model identifier (capture-only).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "action",
+          "id"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "IssueInput"
+  },
+  "claim": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "The `claim` tool input (spine §5.2 — EXACT shape).",
+    "properties": {
+      "agent_name": {
+        "default": null,
+        "description": "Self-reported agent name (capture-only).",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "assignee": {
+        "description": "The assignee taking the claim.",
+        "type": "string"
+      },
+      "harness": {
+        "default": null,
+        "description": "Self-reported harness identifier (capture-only).",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "id": {
+        "description": "The issue id to claim.",
+        "type": "string"
+      },
+      "model": {
+        "default": null,
+        "description": "Self-reported model identifier (capture-only).",
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "id",
+      "assignee"
+    ],
+    "title": "ClaimInput",
+    "type": "object"
+  },
+  "defer": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "The `defer` tool input (spine §5.2 — EXACT shape).",
+    "oneOf": [
+      {
+        "description": "Defer the issue until a future timestamp.",
+        "properties": {
+          "action": {
+            "const": "defer",
+            "type": "string"
+          },
+          "agent_name": {
+            "default": null,
+            "description": "Self-reported agent name (capture-only).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "harness": {
+            "default": null,
+            "description": "Self-reported harness identifier (capture-only).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "description": "The issue id.",
+            "type": "string"
+          },
+          "model": {
+            "default": null,
+            "description": "Self-reported model identifier (capture-only).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "until": {
+            "description": "The defer-until timestamp.",
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "id",
+          "until"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Undefer the issue (clear `defer_until`).",
+        "properties": {
+          "action": {
+            "const": "undefer",
+            "type": "string"
+          },
+          "agent_name": {
+            "default": null,
+            "description": "Self-reported agent name (capture-only).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "harness": {
+            "default": null,
+            "description": "Self-reported harness identifier (capture-only).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "description": "The issue id.",
+            "type": "string"
+          },
+          "model": {
+            "default": null,
+            "description": "Self-reported model identifier (capture-only).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "action",
+          "id"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "DeferInput"
+  },
+  "query": {
+    "$defs": {
+      "CountGroupBy": {
+        "description": "The grouping dimension for a count query (spine §1.10).",
+        "oneOf": [
+          {
+            "const": "status",
+            "description": "Group by status.",
+            "type": "string"
+          },
+          {
+            "const": "type",
+            "description": "Group by issue type.",
+            "type": "string"
+          },
+          {
+            "const": "assignee",
+            "description": "Group by assignee.",
+            "type": "string"
+          },
+          {
+            "const": "priority",
+            "description": "Group by priority.",
+            "type": "string"
+          },
+          {
+            "const": "label",
+            "description": "Group by label.",
+            "type": "string"
+          }
+        ]
+      },
+      "IssueType": {
+        "type": "string"
+      },
+      "Priority": {
+        "description": "Issue priority (spine §1.2): a transparent newtype over `i32`, valid range `0..=4`.\n\nOrdering is numeric, so `CRITICAL < HIGH < MEDIUM < LOW < BACKLOG` — this is the order the\nhybrid ready-sort relies on. `Default` is [`Priority::MEDIUM`]. The wire form is the bare\ninteger (`#[serde(transparent)]`), and `Display` renders `\"P{n}\"`.\n\n# Examples\n\n```\nuse unblock_model::Priority;\nuse std::str::FromStr;\n\nassert_eq!(Priority::default(), Priority::MEDIUM);\nassert_eq!(Priority::CRITICAL.to_string(), \"P0\");\nassert_eq!(Priority::from_str(\"p1\").unwrap(), Priority::HIGH);\nassert!(Priority::from_str(\"P5\").is_err());\nassert!(Priority::CRITICAL < Priority::BACKLOG);\n```",
+        "format": "int32",
+        "type": "integer"
+      },
+      "Status": {
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "The `query` tool input (spine §5.2 — EXACT shape).",
+    "oneOf": [
+      {
+        "description": "List issues matching the filters.",
+        "properties": {
+          "assignee": {
+            "default": null,
+            "description": "Assignee equality filter.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "include_closed": {
+            "default": false,
+            "description": "Include closed/tombstone issues.",
+            "type": "boolean"
+          },
+          "include_deferred": {
+            "default": false,
+            "description": "Include deferred issues.",
+            "type": "boolean"
+          },
+          "issue_type": {
+            "default": [],
+            "description": "Issue-type OR-set.",
+            "items": {
+              "$ref": "#/$defs/IssueType"
+            },
+            "type": "array"
+          },
+          "kind": {
+            "const": "list",
+            "type": "string"
+          },
+          "labels_all": {
+            "default": [],
+            "description": "Labels that must ALL be present (AND).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "labels_any": {
+            "default": [],
+            "description": "Labels of which ANY may be present (OR).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "limit": {
+            "default": null,
+            "description": "Result cap (`None` = unlimited; `ready` is default-complete).",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "offset": {
+            "default": null,
+            "description": "Result offset.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "priority_max": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Priority"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Maximum priority (inclusive)."
+          },
+          "priority_min": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Priority"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Minimum priority (inclusive)."
+          },
+          "status": {
+            "default": [],
+            "description": "Status OR-set (a match on ANY listed status).",
+            "items": {
+              "$ref": "#/$defs/Status"
+            },
+            "type": "array"
+          },
+          "text_contains": {
+            "default": null,
+            "description": "Substring match over title/description.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The ready set (default-complete unless a limit is set).",
+        "properties": {
+          "assignee": {
+            "default": null,
+            "description": "Assignee equality filter.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "include_closed": {
+            "default": false,
+            "description": "Include closed/tombstone issues.",
+            "type": "boolean"
+          },
+          "include_deferred": {
+            "default": false,
+            "description": "Include deferred issues.",
+            "type": "boolean"
+          },
+          "issue_type": {
+            "default": [],
+            "description": "Issue-type OR-set.",
+            "items": {
+              "$ref": "#/$defs/IssueType"
+            },
+            "type": "array"
+          },
+          "kind": {
+            "const": "ready",
+            "type": "string"
+          },
+          "labels_all": {
+            "default": [],
+            "description": "Labels that must ALL be present (AND).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "labels_any": {
+            "default": [],
+            "description": "Labels of which ANY may be present (OR).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "limit": {
+            "default": null,
+            "description": "Result cap (`None` = unlimited; `ready` is default-complete).",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "offset": {
+            "default": null,
+            "description": "Result offset.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "priority_max": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Priority"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Maximum priority (inclusive)."
+          },
+          "priority_min": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Priority"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Minimum priority (inclusive)."
+          },
+          "status": {
+            "default": [],
+            "description": "Status OR-set (a match on ANY listed status).",
+            "items": {
+              "$ref": "#/$defs/Status"
+            },
+            "type": "array"
+          },
+          "text_contains": {
+            "default": null,
+            "description": "Substring match over title/description.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The blocked set.",
+        "properties": {
+          "assignee": {
+            "default": null,
+            "description": "Assignee equality filter.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "include_closed": {
+            "default": false,
+            "description": "Include closed/tombstone issues.",
+            "type": "boolean"
+          },
+          "include_deferred": {
+            "default": false,
+            "description": "Include deferred issues.",
+            "type": "boolean"
+          },
+          "issue_type": {
+            "default": [],
+            "description": "Issue-type OR-set.",
+            "items": {
+              "$ref": "#/$defs/IssueType"
+            },
+            "type": "array"
+          },
+          "kind": {
+            "const": "blocked",
+            "type": "string"
+          },
+          "labels_all": {
+            "default": [],
+            "description": "Labels that must ALL be present (AND).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "labels_any": {
+            "default": [],
+            "description": "Labels of which ANY may be present (OR).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "limit": {
+            "default": null,
+            "description": "Result cap (`None` = unlimited; `ready` is default-complete).",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "offset": {
+            "default": null,
+            "description": "Result offset.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "priority_max": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Priority"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Maximum priority (inclusive)."
+          },
+          "priority_min": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Priority"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Minimum priority (inclusive)."
+          },
+          "status": {
+            "default": [],
+            "description": "Status OR-set (a match on ANY listed status).",
+            "items": {
+              "$ref": "#/$defs/Status"
+            },
+            "type": "array"
+          },
+          "text_contains": {
+            "default": null,
+            "description": "Substring match over title/description.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Full-text search (default cap 50, applied by the engine).",
+        "properties": {
+          "assignee": {
+            "default": null,
+            "description": "Assignee equality filter.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "include_closed": {
+            "default": false,
+            "description": "Include closed/tombstone issues.",
+            "type": "boolean"
+          },
+          "include_deferred": {
+            "default": false,
+            "description": "Include deferred issues.",
+            "type": "boolean"
+          },
+          "issue_type": {
+            "default": [],
+            "description": "Issue-type OR-set.",
+            "items": {
+              "$ref": "#/$defs/IssueType"
+            },
+            "type": "array"
+          },
+          "kind": {
+            "const": "search",
+            "type": "string"
+          },
+          "labels_all": {
+            "default": [],
+            "description": "Labels that must ALL be present (AND).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "labels_any": {
+            "default": [],
+            "description": "Labels of which ANY may be present (OR).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "limit": {
+            "default": null,
+            "description": "Result cap (`None` = unlimited; `ready` is default-complete).",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "offset": {
+            "default": null,
+            "description": "Result offset.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "priority_max": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Priority"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Maximum priority (inclusive)."
+          },
+          "priority_min": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Priority"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Minimum priority (inclusive)."
+          },
+          "query": {
+            "description": "The search query.",
+            "type": "string"
+          },
+          "status": {
+            "default": [],
+            "description": "Status OR-set (a match on ANY listed status).",
+            "items": {
+              "$ref": "#/$defs/Status"
+            },
+            "type": "array"
+          },
+          "text_contains": {
+            "default": null,
+            "description": "Substring match over title/description.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "query"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Count issues, optionally grouped.",
+        "properties": {
+          "assignee": {
+            "default": null,
+            "description": "Assignee equality filter.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "group_by": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/CountGroupBy"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional group-by dimension."
+          },
+          "include_closed": {
+            "default": false,
+            "description": "Include closed/tombstone issues.",
+            "type": "boolean"
+          },
+          "include_deferred": {
+            "default": false,
+            "description": "Include deferred issues.",
+            "type": "boolean"
+          },
+          "issue_type": {
+            "default": [],
+            "description": "Issue-type OR-set.",
+            "items": {
+              "$ref": "#/$defs/IssueType"
+            },
+            "type": "array"
+          },
+          "kind": {
+            "const": "count",
+            "type": "string"
+          },
+          "labels_all": {
+            "default": [],
+            "description": "Labels that must ALL be present (AND).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "labels_any": {
+            "default": [],
+            "description": "Labels of which ANY may be present (OR).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "limit": {
+            "default": null,
+            "description": "Result cap (`None` = unlimited; `ready` is default-complete).",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "offset": {
+            "default": null,
+            "description": "Result offset.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "priority_max": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Priority"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Maximum priority (inclusive)."
+          },
+          "priority_min": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Priority"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Minimum priority (inclusive)."
+          },
+          "status": {
+            "default": [],
+            "description": "Status OR-set (a match on ANY listed status).",
+            "items": {
+              "$ref": "#/$defs/Status"
+            },
+            "type": "array"
+          },
+          "text_contains": {
+            "default": null,
+            "description": "Substring match over title/description.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Stale issues (not updated since `older_than`).",
+        "properties": {
+          "assignee": {
+            "default": null,
+            "description": "Assignee equality filter.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "include_closed": {
+            "default": false,
+            "description": "Include closed/tombstone issues.",
+            "type": "boolean"
+          },
+          "include_deferred": {
+            "default": false,
+            "description": "Include deferred issues.",
+            "type": "boolean"
+          },
+          "issue_type": {
+            "default": [],
+            "description": "Issue-type OR-set.",
+            "items": {
+              "$ref": "#/$defs/IssueType"
+            },
+            "type": "array"
+          },
+          "kind": {
+            "const": "stale",
+            "type": "string"
+          },
+          "labels_all": {
+            "default": [],
+            "description": "Labels that must ALL be present (AND).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "labels_any": {
+            "default": [],
+            "description": "Labels of which ANY may be present (OR).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "limit": {
+            "default": null,
+            "description": "Result cap (`None` = unlimited; `ready` is default-complete).",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "offset": {
+            "default": null,
+            "description": "Result offset.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "older_than": {
+            "description": "The staleness threshold.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "priority_max": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Priority"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Maximum priority (inclusive)."
+          },
+          "priority_min": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Priority"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Minimum priority (inclusive)."
+          },
+          "status": {
+            "default": [],
+            "description": "Status OR-set (a match on ANY listed status).",
+            "items": {
+              "$ref": "#/$defs/Status"
+            },
+            "type": "array"
+          },
+          "text_contains": {
+            "default": null,
+            "description": "Substring match over title/description.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "older_than"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "QueryInput"
+  },
+  "dep": {
+    "$defs": {
+      "DependencyType": {
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "The `dep` tool input (spine §5.2 — EXACT shape; was `DepInput2`).",
+    "oneOf": [
+      {
+        "description": "Add a dependency edge (cycle-rejecting).",
+        "properties": {
+          "action": {
+            "const": "add",
+            "type": "string"
+          },
+          "agent_name": {
+            "default": null,
+            "description": "Self-reported agent name (capture-only).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "dep_type": {
+            "$ref": "#/$defs/DependencyType",
+            "description": "The dependency type."
+          },
+          "depends_on_id": {
+            "description": "The blocker issue id.",
+            "type": "string"
+          },
+          "harness": {
+            "default": null,
+            "description": "Self-reported harness identifier (capture-only).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "issue_id": {
+            "description": "The dependent issue id.",
+            "type": "string"
+          },
+          "metadata": {
+            "default": null,
+            "description": "Optional JSON metadata for the edge.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "model": {
+            "default": null,
+            "description": "Self-reported model identifier (capture-only).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "action",
+          "issue_id",
+          "depends_on_id",
+          "dep_type"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Remove a dependency edge.",
+        "properties": {
+          "action": {
+            "const": "remove",
+            "type": "string"
+          },
+          "agent_name": {
+            "default": null,
+            "description": "Self-reported agent name (capture-only).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "dep_type": {
+            "$ref": "#/$defs/DependencyType",
+            "description": "The dependency type."
+          },
+          "depends_on_id": {
+            "description": "The blocker issue id.",
+            "type": "string"
+          },
+          "harness": {
+            "default": null,
+            "description": "Self-reported harness identifier (capture-only).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "issue_id": {
+            "description": "The dependent issue id.",
+            "type": "string"
+          },
+          "model": {
+            "default": null,
+            "description": "Self-reported model identifier (capture-only).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "action",
+          "issue_id",
+          "depends_on_id",
+          "dep_type"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "List the direct edges declared by an issue.",
+        "properties": {
+          "action": {
+            "const": "list",
+            "type": "string"
+          },
+          "id": {
+            "description": "The issue id.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "id"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The dependency subtree rooted at an issue.",
+        "properties": {
+          "action": {
+            "const": "tree",
+            "type": "string"
+          },
+          "id": {
+            "description": "The root issue id.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "id"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Detect dependency cycles.",
+        "properties": {
+          "action": {
+            "const": "cycles",
+            "type": "string"
+          },
+          "blocking_only": {
+            "default": true,
+            "description": "Restrict to gating edges only (default TRUE; `false` = all dep types, D19).",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The dependency graph for a root set (empty roots = the whole graph).",
+        "properties": {
+          "action": {
+            "const": "graph",
+            "type": "string"
+          },
+          "roots": {
+            "default": [],
+            "description": "The root ids (empty = the whole graph).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "DepToolInput"
+  },
+  "sync": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "The `sync` tool input (spine §5.2 — EXACT shape).",
+    "oneOf": [
+      {
+        "description": "Export the store to JSONL (default path `.unblock/issues.jsonl`).",
+        "properties": {
+          "action": {
+            "const": "export",
+            "type": "string"
+          },
+          "path": {
+            "default": null,
+            "description": "Optional export path (path-confined to the workspace).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Import JSONL.",
+        "properties": {
+          "action": {
+            "const": "import",
+            "type": "string"
+          },
+          "dry_run": {
+            "default": false,
+            "description": "Plan-only: report the import without writing.",
+            "type": "boolean"
+          },
+          "path": {
+            "description": "The JSONL path to import.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "path"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "One-shot, idempotent `bd` import (D16).",
+        "properties": {
+          "action": {
+            "const": "import_bd",
+            "type": "string"
+          },
+          "path": {
+            "description": "The `bd` export path to import.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "path"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "SyncInput"
+  },
+  "diagnostics": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "The `diagnostics` tool input (spine §5.2 — EXACT shape; mirrors [`DiagnosticKind`]).",
+    "oneOf": [
+      {
+        "description": "Aggregate statistics.",
+        "properties": {
+          "kind": {
+            "const": "stats",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "General workspace info.",
+        "properties": {
+          "kind": {
+            "const": "info",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Where the workspace lives.",
+        "properties": {
+          "kind": {
+            "const": "where",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Version information (embeds the contract version).",
+        "properties": {
+          "kind": {
+            "const": "version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Lint findings.",
+        "properties": {
+          "kind": {
+            "const": "lint",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The changelog of closed issues (the `since` window is T2.7; dropped here).",
+        "properties": {
+          "kind": {
+            "const": "changelog",
+            "type": "string"
+          },
+          "since": {
+            "default": null,
+            "description": "Optional since-window (accepted but not yet threaded — T2.7).",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Orphan candidates (FR-15).",
+        "properties": {
+          "kind": {
+            "const": "orphans",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "DiagnosticsInput"
+  }
+}
