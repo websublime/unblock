@@ -1107,6 +1107,18 @@ pub struct NewIssue {
     pub acceptance_criteria: Option<String>,      // <- `### Acceptance Criteria` / `### Acceptance`
     pub assignee: Option<String>,                 // <- `### Assignee`
     pub agent_context: Option<String>,            // <- `### Agent Context` / `agent-context` / `agent_context`
+    // --- bulk symbolic-ref carriers (D22/T2.3) — populated ONLY by the bulk-markdown path; the engine
+    //     `create_bulk` resolves them under the write permit. Single `create_issue` leaves them empty
+    //     (stand_in_id=None, dep_refs=[]) and keeps using the resolved `deps`/`parent` above (BYTE-
+    //     UNCHANGED). The carriers hold the VERBATIM parsed symbolic references the engine resolves:
+    pub stand_in_id: Option<String>,              // <- the `### ID` symbolic intra-file handle (NOT the minted id)
+    pub dep_refs: Vec<String>,                    // <- the verbatim `### Dependencies` reference strings (type:id / bare / external: / blocked-by / title / stand-in)
+    //     The bulk path ALSO sets `parent` to the SYMBOLIC `### Parent` ref (a title / `### ID` stand-in)
+    //     when it is an intra-file ref; `create_bulk` resolves `dep_refs` + the symbolic `parent` +
+    //     `stand_in_id` against the in-batch title/stand-in maps + committed storage (stand-in → title →
+    //     storage order; `blocked-by`→`blocks` flipped at the edge-build step), then merges the resolved
+    //     edges with the already-resolved `deps`. §5.2 (`CreateBulk` adapter) builds these; §4.1
+    //     `create_bulk` resolves them.
 }
 
 impl Session {
