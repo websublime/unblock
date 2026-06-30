@@ -50,6 +50,11 @@ pub struct ProjectConfig {
     pub deletions_retention_days: Option<u64>,
     /// `backend` (startup key) — parsed + validated (only `"libsql"` in v1; MF-3), reserved.
     pub backend: Option<String>,
+    /// `id_prefix` (startup key, D21/T1.8 ADDITIVE) — the issue-id prefix. `None` → default `"ub"`;
+    /// merged then normalized via [`unblock_model::normalize_prefix`] in
+    /// [`WorkspaceConfig::resolve`](crate::WorkspaceConfig::resolve). The engine id-allocator reads it
+    /// at mint time to render `ub-<hash>`/`ub-<slug>-<hash>` (config-derived, not a constant).
+    pub id_prefix: Option<String>,
     /// The `[remote]` table (v1.2 surface) — present here ONLY to **deny** an `auth_token` at
     /// parse (NFR-18). Any other `[remote]` keys flow into `RemoteTable::extra` (warn-only).
     pub remote: Option<RemoteTable>,

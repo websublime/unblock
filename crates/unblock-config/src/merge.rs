@@ -47,6 +47,7 @@ trait LayerView {
     fn search_cap(&self) -> Option<usize>;
     fn db_filename(&self) -> Option<&str>;
     fn jsonl_filename(&self) -> Option<&str>;
+    fn id_prefix(&self) -> Option<&str>;
     fn deletions_retention_days(&self) -> Option<u64>;
     fn backend(&self) -> Option<&str>;
 }
@@ -101,6 +102,14 @@ impl LayerView for ConfigLayer<'_> {
             // merged `jsonl_filename`.
             ConfigLayer::Project(p) => p.jsonl_export_filename.as_deref(),
             ConfigLayer::Defaults(d) => Some(d.jsonl_filename.as_str()),
+        }
+    }
+    fn id_prefix(&self) -> Option<&str> {
+        match self {
+            // id_prefix is a startup key (D21); not a CLI/env override in v1 — project or default.
+            ConfigLayer::Cli(_) | ConfigLayer::Env(_) => None,
+            ConfigLayer::Project(p) => p.id_prefix.as_deref(),
+            ConfigLayer::Defaults(d) => Some(d.id_prefix.as_str()),
         }
     }
     fn deletions_retention_days(&self) -> Option<u64> {
@@ -160,6 +169,8 @@ pub(crate) fn merge_layers(layers: &[ConfigLayer<'_>]) -> WorkspaceConfig {
             .expect("Defaults layer guarantees a db_filename"),
         jsonl_filename: pick(layers, |l| l.jsonl_filename().map(str::to_string))
             .expect("Defaults layer guarantees a jsonl_filename"),
+        id_prefix: pick(layers, |l| l.id_prefix().map(str::to_string))
+            .expect("Defaults layer guarantees an id_prefix"),
         // These two are reserved (Defaults supplies None) — not always set, so plain pick.
         deletions_retention_days: pick(layers, LayerView::deletions_retention_days),
         backend: pick(layers, |l| l.backend().map(str::to_string)),
