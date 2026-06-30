@@ -10,6 +10,7 @@
 //! calls `unblock_policy::cmp_ready` directly and `close_with_suggestions` consumes `is_ready` as a
 //! free fn. `sync`/`health` are typed not-wired seams (no handle field in v1).
 
+pub(crate) mod ids;
 pub(crate) mod interchange;
 pub(crate) mod lifecycle;
 pub(crate) mod read;

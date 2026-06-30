@@ -32,10 +32,11 @@ pub const MAX_ID_LENGTH: usize = MAX_ID_PREFIX_LEN + 1 + MAX_ID_HASH_LEN;
 pub const MAX_SLUG_LEN: usize = 48;
 
 /// Minimum adaptive hash length (the birthday-heuristic floor — D21).
-const MIN_HASH_LENGTH: usize = 3;
-/// Maximum adaptive hash length the heuristic climbs to before [`optimal_hash_length`] saturates
-/// (D21; bounded well under [`MAX_ID_HASH_LEN`] so the parser still accepts the id).
-const MAX_HASH_LENGTH: usize = 8;
+pub const MIN_HASH_LENGTH: usize = 3;
+/// Maximum adaptive hash length the birthday heuristic climbs to before [`optimal_hash_length`]
+/// saturates (D21; bounded well under [`MAX_ID_HASH_LEN`], the parser ceiling, so the id still
+/// parses). The engine allocator grows the hash up to this cap before taking the saturated fallback.
+pub const MAX_HASH_LENGTH: usize = 8;
 /// The birthday-problem collision probability ceiling: [`optimal_hash_length`] grows the hash until
 /// `P(collision) < MAX_COLLISION_PROB` (D21).
 const MAX_COLLISION_PROB: f64 = 0.25;

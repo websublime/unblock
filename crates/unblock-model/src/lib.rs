@@ -65,9 +65,9 @@ pub use cache::CacheKey;
 pub use enums::{DependencyType, EventType, IssueType, Priority, Status};
 pub use filters::{CountGroupBy, ListFilters};
 pub use id::{
-    MAX_ID_HASH_LEN, MAX_ID_LENGTH, MAX_ID_PREFIX_LEN, MAX_SLUG_LEN, ParsedId, child_id,
-    compute_id_hash, generate_id_seed, is_valid_id_format, normalize_prefix, normalize_slug,
-    normalize_slug_for_prefix, optimal_hash_length, parse_id,
+    MAX_HASH_LENGTH, MAX_ID_HASH_LEN, MAX_ID_LENGTH, MAX_ID_PREFIX_LEN, MAX_SLUG_LEN,
+    MIN_HASH_LENGTH, ParsedId, child_id, compute_id_hash, generate_id_seed, is_valid_id_format,
+    normalize_prefix, normalize_slug, normalize_slug_for_prefix, optimal_hash_length, parse_id,
 };
 pub use issue::{
     Issue, MAX_SAFE_TOMBSTONE_DAYS, content_hash, content_hash_from_parts, hex_encode,
