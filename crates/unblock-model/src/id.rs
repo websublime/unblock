@@ -508,6 +508,19 @@ mod tests {
         );
     }
 
+    /// Golden: a known seed maps to the EXACT base36 string the original algorithm emits (SHA-256 →
+    /// first 8 bytes → `u64` → base36 → last `len` chars). This pins the byte-level output so a port
+    /// drift (a different byte slice, endianness, alphabet, or slice direction) is caught immediately.
+    #[test]
+    fn compute_id_hash_golden_bytes() {
+        // Computed from the reference algorithm for the fixed seed "unblock-id-seed".
+        assert_eq!(compute_id_hash("unblock-id-seed", 8), "bzjullp1");
+        // The shorter hash is the TAIL of the longer (least-significant base36 digits), so the
+        // length-3 golden is the last 3 chars of the length-8 golden.
+        assert_eq!(compute_id_hash("unblock-id-seed", 3), "lp1");
+        assert_eq!(compute_id_hash("unblock-id-seed", 12), "9su6bzjullp1");
+    }
+
     #[test]
     fn compute_id_hash_takes_the_tail_not_the_head() {
         // Tail-slice direction: the length-3 hash is the LAST 3 chars of the full base36 encoding of
@@ -533,6 +546,25 @@ mod tests {
         assert!((3..=8).contains(&big));
         // Monotone-ish: a huge count saturates at 8.
         assert_eq!(optimal_hash_length(usize::MAX), 8);
+    }
+
+    /// Pin the birthday-heuristic ladder rungs at exact boundaries, so a drift in the probability
+    /// formula (or the `MIN`/`MAX`/`MAX_COLLISION_PROB` constants) is caught. The rungs were computed
+    /// from the reference formula: the length steps up at counts 164, 984, 5899, 35390, 212340.
+    #[test]
+    fn optimal_hash_length_ladder_rungs() {
+        // Rung 0→3: the minimum holds up to (and including) 163, then steps to 4 at 164.
+        assert_eq!(optimal_hash_length(163), 3);
+        assert_eq!(optimal_hash_length(164), 4);
+        // A mid rung: length 4 holds through 983, length 5 begins at 984.
+        assert_eq!(optimal_hash_length(200), 4);
+        assert_eq!(optimal_hash_length(983), 4);
+        assert_eq!(optimal_hash_length(984), 5);
+        assert_eq!(optimal_hash_length(1_000), 5);
+        // The top rung: length 7 holds through 212339, then the cap (8) begins at 212340 and stays.
+        assert_eq!(optimal_hash_length(212_339), 7);
+        assert_eq!(optimal_hash_length(212_340), 8);
+        assert_eq!(optimal_hash_length(10_000_000), 8);
     }
 
     #[test]
