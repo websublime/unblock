@@ -1,6 +1,6 @@
 ---
-source: crates/unblock-mcp/tests/contract_goldens.rs
-expression: bundle
+source: crates/unblock-mcp/tests/contract_suite.rs
+expression: schema_bundle()
 ---
 {
   "contract_version": "unblock.mcp.v1.1",
