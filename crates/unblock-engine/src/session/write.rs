@@ -87,8 +87,18 @@ impl Session {
     /// `ub-<slug>-<hash>` (config-derived prefix; the slug fits the prefix budget or drops to
     /// hash-only) or, with `new.parent`, the hierarchical `parent.N`. The whole mint→build→insert runs
     /// under one write permit, so two concurrent creates under one parent cannot mint the same
-    /// `parent.N`, and a candidate that races in surfaces `IdCollision` (which the allocator's probe
-    /// loop avoids by extending the hash / bumping the nonce).
+    /// `parent.N`.
+    ///
+    /// # Collision handling (no insert-level retry)
+    ///
+    /// The allocator AVOIDS collisions **before** the insert: its ladder probes each candidate with
+    /// `get_issue` and only returns an id that is currently free (extending the hash / bumping the
+    /// nonce until a free candidate is found). Because the probe and the insert both run under the
+    /// **held** write permit, no other in-process writer can occupy the chosen id in between. A storage
+    /// `IdCollision` can therefore only arise from an out-of-band writer that raced the row in after
+    /// the probe; if it does, it **PROPAGATES** to the caller as the transparent storage source — this
+    /// method does **not** catch it and re-mint. (The probe loop is collision-avoidance, not
+    /// post-insert retry.)
     ///
     /// Steps under the permit: (1) mint the id (probing storage); (2) build the candidate `Issue`
     /// (minted id + `new` fields + engine defaults: `created_by = actor`,
@@ -138,8 +148,9 @@ impl Session {
         // (3) Validate the built issue the SAME way `create` validates (storage is validation-free).
         IssueValidator::validate(&issue)?;
 
-        // (4) Insert the row + Event(Created) transactionally (storage's IdCollision guard is the
-        //     atomic backstop for a raced candidate).
+        // (4) Insert the row + Event(Created) transactionally. The probe loop already chose a free id
+        //     under the held permit, so storage's IdCollision guard only fires for an out-of-band race
+        //     — and when it does, the `?` PROPAGATES it (no catch-and-re-mint at the insert).
         self.storage.create_issue(&issue, &self.actor).await?;
 
         // (5) Add the dependency edges in/after the same write tx (parent is already encoded in the
