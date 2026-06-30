@@ -12,11 +12,24 @@ pub(crate) mod capabilities;
 pub(crate) mod issues;
 pub(crate) mod schema;
 
+use unblock_error::{ErrorCode, StructuredError};
+
 pub use capabilities::{
     Capabilities, ErrorCodeDescriptor, PromptDescriptor, ResourceDescriptor, ToolDescriptor,
     capabilities,
 };
 pub use schema::{SchemaBundle, schema_bundle};
+
+/// Map a JSON serialization failure to a structured `InternalError` (no panic in library code).
+///
+/// The single home for "a domain value failed to re-serialize into a resource body" — shared by the
+/// [`issues`] read helpers and the `capabilities`/`schema` arms of the server's `read_resource`.
+pub(crate) fn serialize_error(err: &serde_json::Error) -> StructuredError {
+    StructuredError::from_code(
+        ErrorCode::InternalError,
+        format!("failed to serialize resource body: {err}"),
+    )
+}
 
 /// The `unblock://issues/` prefix; the `{id}`/`ready`/`blocked` tail is parsed off it.
 const ISSUES_PREFIX: &str = "unblock://issues/";

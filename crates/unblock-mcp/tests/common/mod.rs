@@ -61,11 +61,25 @@ pub async fn connect(
     RunningService<RoleServer, UnblockServer>,
     CancellationToken,
 ) {
+    connect_with_instructions(session, None).await
+}
+
+/// Like [`connect`], but advertises the given `instructions` (drives the `ServeOptions::instructions`
+/// → `get_info().instructions` wiring through the same real server path the CLI uses).
+pub async fn connect_with_instructions(
+    session: Arc<Session>,
+    instructions: Option<String>,
+) -> (
+    RunningService<RoleClient, ()>,
+    RunningService<RoleServer, UnblockServer>,
+    CancellationToken,
+) {
     let (server_io, client_io) = tokio::io::duplex(64 * 1024);
     let cancel = CancellationToken::new();
     let server_task = tokio::spawn(serve_duplex_for_test(
         session,
         Quotas::default(),
+        instructions,
         server_io,
         cancel.clone(),
     ));

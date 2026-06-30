@@ -8,10 +8,57 @@
 
 mod common;
 
-use common::{call_tool, connect};
+use common::{call_tool, connect, connect_with_instructions};
 use serde_json::json;
 use unblock_engine::NewIssue;
 use unblock_model::{Dependency, DependencyType};
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn handshake_advertises_unblock_identity_and_default_instructions() {
+    let session = common::session().await;
+    let (client, server, _cancel) = connect(session).await;
+
+    // After initialize, the client peer holds the server's `InitializeResult` (its `ServerInfo`).
+    let info = client.peer_info().expect("server info after handshake");
+    assert_eq!(
+        info.server_info.name, "unblock",
+        "server identity name must be `unblock`, not rmcp's build-env default"
+    );
+    assert_eq!(
+        info.server_info.version,
+        env!("CARGO_PKG_VERSION"),
+        "server version must be this crate's package version"
+    );
+    // No `ServeOptions::instructions` → the generated capability-summary default is advertised.
+    let instructions = info
+        .instructions
+        .as_deref()
+        .expect("default instructions present");
+    assert!(
+        instructions.contains("unblock MCP server"),
+        "default instructions summarize the surface, got: {instructions}"
+    );
+
+    let _ = client.cancel().await;
+    let _ = server.cancel().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn handshake_honors_caller_supplied_instructions() {
+    let session = common::session().await;
+    let custom = "use the query tool first".to_string();
+    let (client, server, _cancel) = connect_with_instructions(session, Some(custom.clone())).await;
+
+    let info = client.peer_info().expect("server info after handshake");
+    assert_eq!(
+        info.instructions.as_deref(),
+        Some(custom.as_str()),
+        "a non-None ServeOptions::instructions must be advertised verbatim"
+    );
+
+    let _ = client.cancel().await;
+    let _ = server.cancel().await;
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn m2_exit_gate_ready_claim_close_surfaces_newly_unblocked() {

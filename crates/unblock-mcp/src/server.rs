@@ -13,8 +13,8 @@ use std::sync::Arc;
 use rmcp::ServerHandler;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::model::{
-    AnnotateAble, ErrorData, GetPromptRequestParams, GetPromptResult, ListPromptsResult,
-    ListResourceTemplatesResult, PaginatedRequestParams, RawResourceTemplate,
+    AnnotateAble, ErrorData, GetPromptRequestParams, GetPromptResult, Implementation,
+    ListPromptsResult, ListResourceTemplatesResult, PaginatedRequestParams, RawResourceTemplate,
     ReadResourceRequestParams, ReadResourceResult, ResourceContents, ServerCapabilities,
     ServerInfo,
 };
@@ -45,12 +45,19 @@ pub struct UnblockServer {
     pub(crate) session: Arc<Session>,
     /// The untrusted-input limits (NFR-18), enforced in [`UnblockServer::preflight`].
     pub(crate) quotas: Quotas,
+    /// Optional human-readable instructions advertised to clients in [`UnblockServer::get_info`]
+    /// (from `ServeOptions::instructions`). `None` falls back to a generated default summary.
+    pub(crate) instructions: Option<String>,
 }
 
 impl UnblockServer {
     /// Build the server handler.
-    pub(crate) fn new(session: Arc<Session>, quotas: Quotas) -> Self {
-        Self { session, quotas }
+    pub(crate) fn new(session: Arc<Session>, quotas: Quotas, instructions: Option<String>) -> Self {
+        Self {
+            session,
+            quotas,
+            instructions,
+        }
     }
 
     /// Aggregate the 7 tool routers into one (composed via `+`, spine §5.1).
@@ -68,8 +75,17 @@ impl UnblockServer {
     ///
     /// Re-serializes the already-deserialized typed input and runs [`enforce_quota`]; an oversized
     /// input is rejected in-band (it never reaches the engine). Returns `Err(structured)` on breach.
+    ///
+    /// **Fail-closed:** if the typed input cannot be re-serialized for measurement, this returns an
+    /// in-band `InternalError` rather than letting an un-measurable input slip past the quota — the
+    /// untrusted-input boundary must never fail open (NFR-18).
     pub(crate) fn preflight<T: Serialize>(&self, input: &T) -> Result<(), StructuredError> {
-        let value = serde_json::to_value(input).unwrap_or(serde_json::Value::Null);
+        let value = serde_json::to_value(input).map_err(|err| {
+            StructuredError::from_code(
+                unblock_error::ErrorCode::InternalError,
+                format!("failed to serialize input for quota measurement: {err}"),
+            )
+        })?;
         enforce_quota(&value, &self.quotas)
     }
 
@@ -80,10 +96,10 @@ impl UnblockServer {
             ResourceUri::Ready => resources::issues::read_ready(&self.session).await,
             ResourceUri::Blocked => resources::issues::read_blocked(&self.session).await,
             ResourceUri::Capabilities => {
-                serde_json::to_value(capabilities()).map_err(|e| serialize_error(&e))
+                serde_json::to_value(capabilities()).map_err(|e| resources::serialize_error(&e))
             }
             ResourceUri::Schema => {
-                serde_json::to_value(schema_bundle()).map_err(|e| serialize_error(&e))
+                serde_json::to_value(schema_bundle()).map_err(|e| resources::serialize_error(&e))
             }
             ResourceUri::Unknown => Err(unknown_resource(uri)),
         }
@@ -98,15 +114,25 @@ impl ServerHandler for UnblockServer {
     /// HAND-WRITTEN (not macro-generated): the two stacked handler macros both detect this method and
     /// skip emitting their own. It enables all three capabilities so the resource methods below are
     /// discoverable.
+    ///
+    /// The `server_info` is pinned to our real identity — name `"unblock"`, version this crate's
+    /// `CARGO_PKG_VERSION` — instead of rmcp's `from_build_env()` default (which would advertise the
+    /// `rmcp` crate). The instructions honor `ServeOptions::instructions` when the caller set one,
+    /// else fall back to a generated capability summary.
     fn get_info(&self) -> ServerInfo {
         let capabilities = ServerCapabilities::builder()
             .enable_tools()
             .enable_prompts()
             .enable_resources()
             .build();
-        ServerInfo::new(capabilities).with_instructions(format!(
-            "unblock MCP server (contract {CONTRACT_VERSION}). 7 tools, 5 resources, 3 prompts."
-        ))
+        let instructions = self.instructions.clone().unwrap_or_else(|| {
+            format!(
+                "unblock MCP server (contract {CONTRACT_VERSION}). 7 tools, 5 resources, 3 prompts."
+            )
+        });
+        ServerInfo::new(capabilities)
+            .with_server_info(Implementation::new("unblock", env!("CARGO_PKG_VERSION")))
+            .with_instructions(instructions)
     }
 
     /// Advertise the resource templates (the 5 `unblock://...` URIs, spine §5.4).
@@ -184,7 +210,7 @@ impl ServerHandler for UnblockServer {
 /// - [`McpServerError::Transport`] if the rmcp service fails to initialize/bind.
 /// - [`McpServerError::RunLoop`] if the run loop ends abnormally (the background task is aborted).
 pub async fn serve(session: Arc<Session>, opts: ServeOptions) -> Result<(), McpServerError> {
-    let server = UnblockServer::new(session, opts.quotas);
+    let server = UnblockServer::new(session, opts.quotas, opts.instructions);
     let running = serve_handler(server, stdio(), opts.cancel).await?;
     running.waiting().await.context(RunLoopSnafu)?;
     Ok(())
@@ -221,6 +247,7 @@ where
 pub async fn serve_duplex_for_test<T, E, A>(
     session: Arc<Session>,
     quotas: Quotas,
+    instructions: Option<String>,
     transport: T,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<rmcp::service::RunningService<RoleServer, UnblockServer>, McpServerError>
@@ -228,16 +255,8 @@ where
     T: rmcp::transport::IntoTransport<RoleServer, E, A>,
     E: std::error::Error + Send + Sync + 'static,
 {
-    let server = UnblockServer::new(session, quotas);
+    let server = UnblockServer::new(session, quotas, instructions);
     serve_handler(server, transport, cancel).await
-}
-
-/// Map a JSON serialization failure to a structured `InternalError` (no panic in library code).
-fn serialize_error(err: &serde_json::Error) -> StructuredError {
-    StructuredError::from_code(
-        unblock_error::ErrorCode::InternalError,
-        format!("failed to serialize resource body: {err}"),
-    )
 }
 
 /// Build the structured not-found for an unknown resource URI (→ -32002 at the boundary).

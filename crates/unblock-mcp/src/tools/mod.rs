@@ -71,17 +71,34 @@ pub(crate) fn engine_err_json(err: &EngineError) -> CallToolResult {
 /// rejects, in-band, any input that exceeds a [`Quotas`] limit — so an oversized payload never
 /// reaches a `Session` call (the blast radius stays confined to the workspace).
 ///
-/// Returns `Err(structured)` (a `ValidationFailed` over-quota error) on breach, `Ok(())` otherwise.
+/// Scope (v1): this enforces `max_request_bytes`, `max_array_len`, and `max_string_len`. It does
+/// **not** enforce [`Quotas::max_batch`] — there is no batch tool surface in v1 (single-call tools
+/// only); the `max_batch` limit lands now as config but is wired to enforcement at the batch surface
+/// (T2.3 / v1.3). `max_concurrent_requests` is likewise an rmcp-transport concern, not a per-call
+/// preflight one. Calling out the gap here keeps it explicit rather than a silent omission.
+///
+/// **Fail-closed:** an input that cannot even be re-serialized for size measurement is rejected as an
+/// `InternalError` rather than waved through — the untrusted boundary never fails open.
+///
+/// Returns `Err(structured)` (a `ValidationFailed` over-quota error, or an `InternalError` on an
+/// un-measurable input) on breach, `Ok(())` otherwise.
 pub(crate) fn enforce_quota(
     args: &serde_json::Value,
     quotas: &Quotas,
 ) -> Result<(), StructuredError> {
-    // Total serialized size.
-    let serialized_len = serde_json::to_string(args).map_or(0, |s| s.len());
-    if serialized_len > quotas.max_request_bytes {
+    // Total serialized size. A `serde_json::Value` is plain data, so re-serializing it is effectively
+    // infallible — but if it ever fails we fail closed (treat the input as un-measurable, reject it)
+    // rather than measuring it as zero bytes and letting it through.
+    let serialized = serde_json::to_string(args).map_err(|err| {
+        StructuredError::from_code(
+            ErrorCode::InternalError,
+            format!("failed to serialize input for quota measurement: {err}"),
+        )
+    })?;
+    if serialized.len() > quotas.max_request_bytes {
         return Err(over_quota(
             "request",
-            serialized_len,
+            serialized.len(),
             quotas.max_request_bytes,
         ));
     }

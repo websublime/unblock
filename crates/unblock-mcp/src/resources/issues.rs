@@ -10,6 +10,7 @@ use unblock_error::{ErrorCode, StructuredError};
 use unblock_model::ListFilters;
 
 use crate::error::engine_error_to_structured;
+use crate::resources::serialize_error;
 
 /// Read a single issue by id (`unblock://issues/{id}`) → the issue JSON, or a structured not-found.
 pub(crate) async fn read_issue(
@@ -41,12 +42,4 @@ pub(crate) async fn read_blocked(session: &Session) -> Result<serde_json::Value,
         Ok(issues) => serde_json::to_value(&issues).map_err(|e| serialize_error(&e)),
         Err(err) => Err(engine_error_to_structured(&err)),
     }
-}
-
-/// Map a JSON serialization failure to a structured `InternalError` (no panic in library code).
-fn serialize_error(err: &serde_json::Error) -> StructuredError {
-    StructuredError::from_code(
-        ErrorCode::InternalError,
-        format!("failed to serialize resource body: {err}"),
-    )
 }
