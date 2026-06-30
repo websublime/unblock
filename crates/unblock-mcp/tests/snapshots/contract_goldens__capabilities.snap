@@ -3,7 +3,7 @@ source: crates/unblock-mcp/tests/contract_goldens.rs
 expression: caps
 ---
 {
-  "contract_version": "unblock.mcp.v1",
+  "contract_version": "unblock.mcp.v1.1",
   "tools": [
     {
       "name": "issue",

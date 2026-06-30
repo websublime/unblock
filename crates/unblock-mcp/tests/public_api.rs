@@ -3,14 +3,19 @@
 
 use unblock_mcp::{
     CONTRACT_VERSION, Capabilities, ErrorCodeDescriptor, McpServerError, PromptDescriptor, Quotas,
-    ResourceDescriptor, SchemaBundle, ServeOptions, ToolDescriptor, capabilities, schema_bundle,
-    serve,
+    ResourceDescriptor, SCHEMA_BUNDLE_HASH, SchemaBundle, ServeOptions, ToolDescriptor,
+    capabilities, schema_bundle, serve,
 };
 
 #[test]
 fn public_types_and_consts_resolve() {
     // Consts + builders are usable offline.
-    assert_eq!(CONTRACT_VERSION, "unblock.mcp.v1");
+    assert_eq!(CONTRACT_VERSION, "unblock.mcp.v1.1");
+    assert_eq!(
+        SCHEMA_BUNDLE_HASH.len(),
+        64,
+        "the hash-coupled drift pin is exported"
+    );
     let caps: Capabilities = capabilities();
     let bundle: SchemaBundle = schema_bundle();
     assert_eq!(caps.contract_version, CONTRACT_VERSION);

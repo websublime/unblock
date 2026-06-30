@@ -9,6 +9,7 @@
 //! - [`ok_json`] / [`err_json`] — map a domain result to an rmcp `CallToolResult` that is always
 //!   valid JSON (success via `structured`, in-band domain error via `structured_error`, FR-11).
 
+pub(crate) mod bulk_markdown;
 pub(crate) mod claim;
 pub(crate) mod defer;
 pub(crate) mod dep;
@@ -71,11 +72,11 @@ pub(crate) fn engine_err_json(err: &EngineError) -> CallToolResult {
 /// rejects, in-band, any input that exceeds a [`Quotas`] limit — so an oversized payload never
 /// reaches a `Session` call (the blast radius stays confined to the workspace).
 ///
-/// Scope (v1): this enforces `max_request_bytes`, `max_array_len`, and `max_string_len`. It does
-/// **not** enforce [`Quotas::max_batch`] — there is no batch tool surface in v1 (single-call tools
-/// only); the `max_batch` limit lands now as config but is wired to enforcement at the batch surface
-/// (T2.3 / v1.3). `max_concurrent_requests` is likewise an rmcp-transport concern, not a per-call
-/// preflight one. Calling out the gap here keeps it explicit rather than a silent omission.
+/// Scope: this enforces `max_request_bytes`, `max_array_len`, and `max_string_len`. The
+/// [`Quotas::max_batch`] cap (the bulk record-count limit, D22/T2.3) is enforced by
+/// [`enforce_batch_quota`] at the `create_bulk` action AFTER the markdown parse (before any mint),
+/// since it bounds the *parsed* record count, not a raw input array. `max_concurrent_requests` is an
+/// rmcp-transport concern, not a per-call preflight one.
 ///
 /// **Fail-closed:** an input that cannot even be re-serialized for size measurement is rejected as an
 /// `InternalError` rather than waved through — the untrusted boundary never fails open.
@@ -131,6 +132,18 @@ fn check_value(value: &serde_json::Value, quotas: &Quotas) -> Result<(), Structu
         }
         _ => Ok(()),
     }
+}
+
+/// Enforce [`Quotas::max_batch`] on a PARSED bulk record count (D22/T2.3, F5).
+///
+/// Run by the `create_bulk` action AFTER the markdown parse and BEFORE any mint, so an over-cap
+/// document is rejected in-band (a `ValidationFailed`) and never reaches `Session::create_bulk` (the
+/// blast radius stays confined to the workspace; the spy `Session` records zero calls).
+pub(crate) fn enforce_batch_quota(count: usize, quotas: &Quotas) -> Result<(), StructuredError> {
+    if count > quotas.max_batch {
+        return Err(over_quota("batch", count, quotas.max_batch));
+    }
+    Ok(())
 }
 
 /// Build the structured over-quota error (a `ValidationFailed` with the limit context).
