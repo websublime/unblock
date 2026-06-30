@@ -55,6 +55,26 @@ pub struct NewIssue {
     pub slug: Option<String>,
     /// Whether the new issue is ephemeral (excluded from JSONL export).
     pub ephemeral: bool,
+    // --- markdown-captured content fields (D22/T2.3) — set by the bulk-markdown parser and the MCP
+    //     `Create` action so scalar create + bulk are full-fidelity. `create_issue` maps each onto the
+    //     built `Issue` field of the same name (the domain `Issue` already carries all four — no model
+    //     change). `notes`/`owner` are deliberately absent (no markdown section sets them).
+    /// The `### Design` content (maps onto `Issue::design`).
+    pub design: Option<String>,
+    /// The `### Acceptance Criteria` / `### Acceptance` content (maps onto `Issue::acceptance_criteria`).
+    pub acceptance_criteria: Option<String>,
+    /// The `### Assignee` content (maps onto `Issue::assignee`).
+    pub assignee: Option<String>,
+    /// The `### Agent Context` content (maps onto `Issue::agent_context`).
+    pub agent_context: Option<String>,
+    // --- bulk symbolic-ref carriers (D22/T2.3) — populated ONLY by the bulk-markdown path; the engine
+    //     `create_bulk` resolves them under the write permit. Single `create_issue` leaves them empty
+    //     (`stand_in_id = None`, `dep_refs = []`) and uses the resolved `deps`/`parent` (byte-unchanged).
+    /// The verbatim `### ID` symbolic intra-file handle (NOT the minted id). Bulk-only.
+    pub stand_in_id: Option<String>,
+    /// The verbatim `### Dependencies` reference strings (`type:id` / bare / `external:` / `blocked-by` /
+    /// title / stand-in) the engine resolves at `create_bulk`. Bulk-only (empty for single create).
+    pub dep_refs: Vec<String>,
 }
 
 impl Session {
@@ -126,7 +146,9 @@ impl Session {
         };
         let id = self.allocate_id(&seed).await?;
 
-        // (2) Build the candidate Issue (minted id + new fields + engine defaults).
+        // (2) Build the candidate Issue (minted id + new fields + engine defaults). The D22
+        //     markdown-captured fields map 1:1 onto the same-named built-`Issue` fields (field-wiring
+        //     only; the domain `Issue` already carries them — NO model change).
         let issue = Issue {
             id: id.clone(),
             title: new.title,
@@ -142,6 +164,10 @@ impl Session {
             defer_until: new.defer_until,
             ephemeral: new.ephemeral,
             labels: new.labels,
+            design: new.design,
+            acceptance_criteria: new.acceptance_criteria,
+            assignee: new.assignee,
+            agent_context: new.agent_context,
             ..Issue::default()
         };
 
@@ -166,6 +192,242 @@ impl Session {
             .ok_or(EngineError::Storage {
                 source: unblock_storage::StorageError::IssueNotFound { id },
             })
+    }
+
+    /// Create a WHOLE batch atomically — the all-or-nothing bulk MINTING create path (FR-1a, D22/T2.3).
+    ///
+    /// This is the bulk sibling of [`create_issue`](Session::create_issue); it exists BECAUSE the
+    /// minting path is non-idempotent (a loop of N independent `create_issue` calls that fails on
+    /// record #k leaves a partial batch, and a re-run re-mints the survivors as DUPLICATES). So the
+    /// whole batch MUST be one atomic unit. It acquires the write permit ONCE and:
+    ///
+    /// 1. orders the records **parent-before-child** topologically over the intra-batch parent edges
+    ///    (a parent cycle / ambiguous parent ref → [`EngineError::Model`] `ValidationFailed`, ZERO
+    ///    writes);
+    /// 2. MINTS every id under the permit in that order via [`allocate_id_in_batch`](Session::allocate_id_in_batch)
+    ///    — the existence probe consults committed storage AND an in-batch minted set (intra-batch
+    ///    dedup); a same-parent sibling uses the in-batch per-parent counter so siblings get distinct
+    ///    `parent.1, parent.2, …` (the committed `next_child_number` sees only committed state);
+    /// 3. resolves each record's `dep_refs` + symbolic `parent` against the in-batch title/stand-in
+    ///    maps + committed storage (the order **stand-in → title → storage**; `blocked-by`→`blocks`
+    ///    flipped at the edge-build step), rejecting the WHOLE batch on ANY ambiguous / unresolved /
+    ///    self-dependency / self-parent / marker-only ref ([`EngineError::Model`] `ValidationFailed`,
+    ///    ZERO writes — faithful-but-STRICTER than the original per-record skip, NFR-8);
+    /// 4. builds the N candidate [`Issue`]s (minted id + fields + the resolved + verbatim dependency
+    ///    edges) and runs the FULL [`IssueValidator::validate`] on each (the same gate `create_issue`
+    ///    runs);
+    /// 5. inserts the whole batch in the ONE `storage.create_issues` tx — rollback-on-any-failure →
+    ///    ZERO writes.
+    ///
+    /// # Errors
+    /// - [`EngineError::Model`] (`ValidationFailed`) on a parent cycle, any rejection-set hit, or a
+    ///   built-issue validation failure — ZERO writes.
+    /// - [`EngineError::ShutdownInProgress`] if a shutdown is in progress.
+    /// - The transparent storage source on any backend failure (a raced `IdCollision`, an
+    ///   `external_ref` collision, etc.) — the whole tx rolls back → ZERO writes.
+    pub async fn create_bulk(&self, records: Vec<NewIssue>) -> Result<Vec<Issue>> {
+        use crate::session::bulk::{BatchMaps, topological_mint_order};
+
+        let _guard = self.acquire().await?;
+        let now = Utc::now();
+
+        // The intra-batch title/stand-in indices (case-insensitive) consulted by mint + resolution.
+        let maps = BatchMaps::build(&records);
+
+        // (1) Parent-before-child topological order (rejects parent cycle / ambiguous parent ref).
+        let order = topological_mint_order(&records, &maps).map_err(validation_failed)?;
+
+        // (2) Mint every id in topological order under the held permit.
+        let minted_id_of = self.mint_bulk_ids(&records, &maps, &order, now).await?;
+
+        // (3) Probe committed storage once per distinct non-intra-batch dependency reference.
+        let storage_resolve = self.probe_storage_dep_refs(&records, &maps).await?;
+
+        // (4) Build + validate the N issues (in FILE order, so the returned Vec mirrors the input).
+        let built =
+            self.build_bulk_issues(&records, &maps, &minted_id_of, &storage_resolve, now)?;
+
+        // (5) Insert the whole batch in the ONE atomic tx, in PARENT-BEFORE-CHILD topological order
+        //     (a child's `parent.N` id bumps the `child_counters` FK → its parent row must exist
+        //     first). `order` is the topological index sequence; `built` is file-indexed. The response
+        //     is re-projected to FILE order below. Rollback-on-any-failure → ZERO writes.
+        let insert_slice: Vec<Issue> = order.iter().map(|&idx| built[idx].clone()).collect();
+        self.storage
+            .create_issues(&insert_slice, &self.actor)
+            .await?;
+
+        // Re-read the hydrated issues (labels/deps populated) in FILE order for the response.
+        let ids: Vec<String> = built.iter().map(|i| i.id.clone()).collect();
+        let hydrated = self.storage.get_issues(&ids).await?;
+        let mut by_id: std::collections::HashMap<String, Issue> =
+            hydrated.into_iter().map(|i| (i.id.clone(), i)).collect();
+        let mut out = Vec::with_capacity(ids.len());
+        for id in &ids {
+            if let Some(issue) = by_id.remove(id) {
+                out.push(issue);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Mint every record's id in topological order under the held permit ([`create_bulk`] step 2).
+    ///
+    /// `minted` is the in-batch already-minted id set (intra-batch dedup); `child_counters` is the
+    /// per-parent in-memory next-child counter; the returned map is `record index → minted id`.
+    async fn mint_bulk_ids(
+        &self,
+        records: &[NewIssue],
+        maps: &crate::session::bulk::BatchMaps,
+        order: &[usize],
+        now: DateTime<Utc>,
+    ) -> Result<std::collections::HashMap<usize, String>> {
+        use crate::session::bulk::resolve_parent_id;
+        use crate::session::ids::NewIssueSeed;
+
+        let mut minted: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut child_counters: std::collections::HashMap<String, u32> =
+            std::collections::HashMap::new();
+        let mut minted_id_of: std::collections::HashMap<usize, String> =
+            std::collections::HashMap::new();
+
+        for &idx in order {
+            let record = &records[idx];
+
+            // Resolve the symbolic parent for MINTING `parent.N`: an intra-batch parent (already minted
+            // in this topological order) or a pre-existing storage id (probed once). A root has none.
+            let storage_parent =
+                match (record.parent.as_deref(), maps.lookup_is_intra_batch(record)) {
+                    (Some(parent_ref), false) => {
+                        // Not an intra-batch ref → resolve against committed storage.
+                        if self.storage.get_issue(parent_ref).await?.is_some() {
+                            Some(parent_ref.to_string())
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+            let resolved_parent = resolve_parent_id(record, maps, &minted_id_of, storage_parent)
+                .map_err(validation_failed)?;
+
+            let seed = NewIssueSeed {
+                title: &record.title,
+                description: record.description.as_deref(),
+                parent: resolved_parent.as_deref(),
+                slug: record.slug.as_deref(),
+                created_at: now,
+            };
+            let id = self
+                .allocate_id_in_batch(&seed, &minted, &mut child_counters)
+                .await?;
+            minted.insert(id.clone());
+            minted_id_of.insert(idx, id);
+        }
+        Ok(minted_id_of)
+    }
+
+    /// Build + validate the N candidate issues in FILE order ([`create_bulk`] step 4). Rejects the
+    /// whole batch on any unresolved/ambiguous/self/marker dep ref or a built-issue validation failure.
+    /// Pure (no `await`): the mint + storage probes already ran; this just resolves edges in memory.
+    fn build_bulk_issues(
+        &self,
+        records: &[NewIssue],
+        maps: &crate::session::bulk::BatchMaps,
+        minted_id_of: &std::collections::HashMap<usize, String>,
+        storage_resolve: &std::collections::HashMap<String, Option<String>>,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<Issue>> {
+        use crate::session::bulk::resolve_dep_refs;
+
+        let mut built: Vec<Issue> = Vec::with_capacity(records.len());
+        for (idx, record) in records.iter().enumerate() {
+            let id = minted_id_of
+                .get(&idx)
+                .cloned()
+                .ok_or_else(|| validation_failed(vec![]))?;
+
+            let resolved_edges = resolve_dep_refs(record, &id, maps, minted_id_of, storage_resolve)
+                .map_err(validation_failed)?;
+
+            // Merge the already-resolved `deps` (verbatim) with the resolved `dep_refs` edges, deduped
+            // by depends_on_id (storage also dedups, but keep the built Issue clean).
+            let mut dependencies: Vec<Dependency> = record.deps.clone();
+            let mut seen: std::collections::HashSet<String> = dependencies
+                .iter()
+                .map(|d| d.depends_on_id.clone())
+                .collect();
+            for edge in resolved_edges {
+                if seen.insert(edge.depends_on_id.clone()) {
+                    dependencies.push(Dependency {
+                        issue_id: id.clone(),
+                        depends_on_id: edge.depends_on_id,
+                        dep_type: edge.dep_type,
+                        created_at: now,
+                        created_by: Some(self.actor.clone()),
+                        metadata: None,
+                        thread_id: None,
+                    });
+                }
+            }
+
+            let issue = Issue {
+                id,
+                title: record.title.clone(),
+                description: record.description.clone(),
+                status: Status::default(),
+                priority: record.priority.unwrap_or_default(),
+                issue_type: record.issue_type.clone().unwrap_or_default(),
+                estimated_minutes: record.estimated_minutes,
+                created_at: now,
+                created_by: Some(self.actor.clone()),
+                updated_at: now,
+                due_at: record.due_at,
+                defer_until: record.defer_until,
+                ephemeral: record.ephemeral,
+                labels: record.labels.clone(),
+                design: record.design.clone(),
+                acceptance_criteria: record.acceptance_criteria.clone(),
+                assignee: record.assignee.clone(),
+                agent_context: record.agent_context.clone(),
+                dependencies,
+                ..Issue::default()
+            };
+
+            // The SAME validation gate `create_issue` runs (storage stays validation-free).
+            IssueValidator::validate(&issue)?;
+            built.push(issue);
+        }
+        Ok(built)
+    }
+
+    /// Probe committed storage once per distinct non-intra-batch dependency reference, returning a
+    /// `ref → Option<resolved_id>` map [`create_bulk`](Session::create_bulk) step 4 consults. A
+    /// reference matching a batch record is excluded (it resolves intra-batch, not via storage).
+    async fn probe_storage_dep_refs(
+        &self,
+        records: &[NewIssue],
+        maps: &crate::session::bulk::BatchMaps,
+    ) -> Result<std::collections::HashMap<String, Option<String>>> {
+        // Collect the distinct candidate ids (the id-half of each non-intra-batch dep_ref).
+        let mut candidates: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for record in records {
+            for dep_str in &record.dep_refs {
+                if maps.lookup(dep_str).is_some() {
+                    continue; // resolves intra-batch (incl. titles with colons) — not a storage probe.
+                }
+                let dep_id = crate::session::bulk::dep_ref_id(dep_str);
+                if maps.lookup(&dep_id).is_none() {
+                    candidates.insert(dep_id);
+                }
+            }
+        }
+        let mut resolved: std::collections::HashMap<String, Option<String>> =
+            std::collections::HashMap::new();
+        for candidate in candidates {
+            let found = self.storage.get_issue(&candidate).await?.map(|i| i.id);
+            resolved.insert(candidate, found);
+        }
+        Ok(resolved)
     }
 
     /// Apply an [`IssuePatch`] to an issue, returning the updated issue (FR-1b).
@@ -496,5 +758,14 @@ fn apply_patch_for_validation(current: &Issue, patch: &IssuePatch) -> Issue {
 fn apply_opt_text(patch: &Option<Option<String>>, target: &mut Option<String>) {
     if let Some(new) = patch {
         target.clone_from(new);
+    }
+}
+
+/// Map a non-empty set of bulk-resolution [`FieldError`](unblock_error::FieldError)s into the engine
+/// `ValidationFailed` aggregate (D22/T2.3 — the whole-batch reject set surfaces as one
+/// [`EngineError::Model`], ZERO writes).
+fn validation_failed(fields: Vec<unblock_error::FieldError>) -> EngineError {
+    EngineError::Model {
+        source: unblock_error::ModelError::ValidationFailed { fields },
     }
 }
