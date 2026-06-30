@@ -30,7 +30,7 @@ pub const CONTRACT_VERSION: &str = "unblock.mcp.v1.1";
 /// **Re-pin this whenever the tool input schemas change** (alongside the `CONTRACT_VERSION` bump + the
 /// re-blessed `schema_bundle` golden).
 pub const SCHEMA_BUNDLE_HASH: &str =
-    "0000000000000000000000000000000000000000000000000000000000000000";
+    "4522c4516155762ef7aa2e14b4aa6485c14b6a980c10838dce35f59106b7ec7d";
 
 /// Untrusted-input limits enforced **before** any `Session` call (NFR-18).
 ///

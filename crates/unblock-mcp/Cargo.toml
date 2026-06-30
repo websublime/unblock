@@ -57,3 +57,6 @@ serde_json = { workspace = true }
 # digest of `schema_bundle()` and asserts it equals the pinned `SCHEMA_BUNDLE_HASH` — so a schema edit
 # FORCES a version bump (not a silent golden re-bless). Test-only: the shipped binary never hashes.
 sha2 = { workspace = true }
+# The NFR-18 quota AC suite (`tests/quotas.rs`) wraps storage in a `RecordingStorage` spy that
+# implements the async `Storage` trait — test-only, never linked into the shipped binary.
+async-trait = { workspace = true }

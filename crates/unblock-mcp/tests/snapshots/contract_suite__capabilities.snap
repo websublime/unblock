@@ -1,6 +1,6 @@
 ---
-source: crates/unblock-mcp/tests/contract_goldens.rs
-expression: caps
+source: crates/unblock-mcp/tests/contract_suite.rs
+expression: capabilities()
 ---
 {
   "contract_version": "unblock.mcp.v1.1",
