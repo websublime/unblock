@@ -351,3 +351,207 @@ pub mod parked {
         }
     }
 }
+
+/// A `Storage` decorator that **forces the root-hash collision ladder to extend the hash length**.
+///
+/// The engine allocator (`session/ids.rs`) tries nonces `0..10` at the adaptive base length, then —
+/// only if all ten collide — grows the length by one and retries (`ids.rs:93`, the EXTENSION branch).
+/// To exercise that branch deterministically over real storage, this wrapper makes every root
+/// candidate whose **hash segment is exactly `base_len` characters** appear already-occupied (it
+/// returns a synthetic `Some(Issue)` from `get_issue` for those ids, recording each distinct one),
+/// while delegating everything else to the inner real `LibsqlStorage`. Once the allocator extends to
+/// `base_len + 1`, candidates stop being shadowed, so the real insert + re-read for the longer id pass
+/// straight through. Every other call is a pure delegate (no behaviour mock).
+pub mod collide {
+    use super::{Arc, Storage};
+    use async_trait::async_trait;
+    use chrono::{DateTime, Utc};
+    use std::collections::BTreeSet;
+    use std::sync::Mutex;
+    use unblock_model::{
+        CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue, parse_id,
+    };
+    use unblock_storage::{DeletePlan, IssuePatch, ListFilters, StorageError};
+
+    /// Forces the hash-length-extension branch by shadowing every root candidate whose hash segment
+    /// is exactly `base_len` chars.
+    pub struct CollisionForcer {
+        inner: Arc<dyn Storage>,
+        /// The base adaptive hash length to shadow (= `optimal_hash_length(issue_count)`).
+        base_len: usize,
+        /// The distinct base-length root candidate ids the allocator probed (and we shadowed).
+        shadowed: Mutex<BTreeSet<String>>,
+    }
+
+    impl CollisionForcer {
+        /// Wrap `inner`; shadow every root candidate `*-<hash>` with `hash.len() == base_len`.
+        #[must_use]
+        pub fn new(inner: Arc<dyn Storage>, base_len: usize) -> Arc<Self> {
+            Arc::new(Self {
+                inner,
+                base_len,
+                shadowed: Mutex::new(BTreeSet::new()),
+            })
+        }
+
+        /// How many DISTINCT base-length root candidates were probed (and reported occupied).
+        #[must_use]
+        pub fn shadowed_count(&self) -> usize {
+            self.shadowed.lock().expect("forcer lock").len()
+        }
+
+        /// A root candidate to shadow = a parseable ROOT id (no child path) whose hash segment is
+        /// exactly `base_len` characters. Slug/longer/child candidates are NOT shadowed.
+        fn should_shadow(&self, id: &str) -> bool {
+            match parse_id(id) {
+                Ok(parsed) => parsed.is_root() && parsed.hash.len() == self.base_len,
+                Err(_) => false,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Storage for CollisionForcer {
+        async fn get_issue(&self, id: &str) -> Result<Option<Issue>, StorageError> {
+            if self.should_shadow(id) {
+                // Report this base-length candidate as occupied so the allocator must move on; record
+                // it so the test can assert all ten base-length nonces were exhausted.
+                self.shadowed
+                    .lock()
+                    .expect("forcer lock")
+                    .insert(id.to_string());
+                let occupied = Issue {
+                    id: id.to_string(),
+                    title: "synthetic occupant".to_string(),
+                    ..Issue::default()
+                };
+                return Ok(Some(occupied));
+            }
+            self.inner.get_issue(id).await
+        }
+
+        async fn create_issue(&self, issue: &Issue, actor: &str) -> Result<String, StorageError> {
+            self.inner.create_issue(issue, actor).await
+        }
+        async fn migrate(&self) -> Result<(), StorageError> {
+            self.inner.migrate().await
+        }
+        async fn integrity_check(&self) -> Result<Vec<String>, StorageError> {
+            self.inner.integrity_check().await
+        }
+        async fn get_issues(&self, ids: &[String]) -> Result<Vec<Issue>, StorageError> {
+            self.inner.get_issues(ids).await
+        }
+        async fn update_issue(
+            &self,
+            id: &str,
+            patch: &IssuePatch,
+            actor: &str,
+        ) -> Result<Issue, StorageError> {
+            self.inner.update_issue(id, patch, actor).await
+        }
+        async fn delete_issue(
+            &self,
+            plan: &DeletePlan,
+            actor: &str,
+        ) -> Result<DeletePlan, StorageError> {
+            self.inner.delete_issue(plan, actor).await
+        }
+        async fn restore_issue(&self, id: &str, actor: &str) -> Result<Issue, StorageError> {
+            self.inner.restore_issue(id, actor).await
+        }
+        async fn claim_issue(
+            &self,
+            id: &str,
+            assignee: &str,
+            actor: &str,
+        ) -> Result<Issue, StorageError> {
+            self.inner.claim_issue(id, assignee, actor).await
+        }
+        async fn defer_issue(
+            &self,
+            id: &str,
+            until: DateTime<Utc>,
+            actor: &str,
+        ) -> Result<Issue, StorageError> {
+            self.inner.defer_issue(id, until, actor).await
+        }
+        async fn undefer_issue(&self, id: &str, actor: &str) -> Result<Issue, StorageError> {
+            self.inner.undefer_issue(id, actor).await
+        }
+        async fn list_issues(&self, filters: &ListFilters) -> Result<Vec<Issue>, StorageError> {
+            self.inner.list_issues(filters).await
+        }
+        async fn ready_issues(&self, filters: &ListFilters) -> Result<Vec<Issue>, StorageError> {
+            self.inner.ready_issues(filters).await
+        }
+        async fn blocked_issues(&self, filters: &ListFilters) -> Result<Vec<Issue>, StorageError> {
+            self.inner.blocked_issues(filters).await
+        }
+        async fn search_issues(
+            &self,
+            query: &str,
+            filters: &ListFilters,
+        ) -> Result<Vec<Issue>, StorageError> {
+            self.inner.search_issues(query, filters).await
+        }
+        async fn count_issues(
+            &self,
+            filters: &ListFilters,
+            group_by: Option<CountGroupBy>,
+        ) -> Result<Vec<CountBucket>, StorageError> {
+            self.inner.count_issues(filters, group_by).await
+        }
+        async fn stale_issues(
+            &self,
+            older_than: DateTime<Utc>,
+            filters: &ListFilters,
+        ) -> Result<Vec<Issue>, StorageError> {
+            self.inner.stale_issues(older_than, filters).await
+        }
+        async fn add_dependency(&self, dep: &Dependency, actor: &str) -> Result<(), StorageError> {
+            self.inner.add_dependency(dep, actor).await
+        }
+        async fn remove_dependency(
+            &self,
+            issue_id: &str,
+            depends_on_id: &str,
+            dep_type: &DependencyType,
+            actor: &str,
+        ) -> Result<(), StorageError> {
+            self.inner
+                .remove_dependency(issue_id, depends_on_id, dep_type, actor)
+                .await
+        }
+        async fn list_dependencies(&self, id: &str) -> Result<Vec<Dependency>, StorageError> {
+            self.inner.list_dependencies(id).await
+        }
+        async fn next_child_number(&self, parent_id: &str) -> Result<u32, StorageError> {
+            self.inner.next_child_number(parent_id).await
+        }
+        async fn dependency_tree(&self, id: &str) -> Result<DepTree, StorageError> {
+            self.inner.dependency_tree(id).await
+        }
+        async fn dependency_graph(&self, roots: &[String]) -> Result<DepTree, StorageError> {
+            self.inner.dependency_graph(roots).await
+        }
+        async fn detect_cycles(
+            &self,
+            blocking_only: bool,
+        ) -> Result<Vec<Vec<String>>, StorageError> {
+            self.inner.detect_cycles(blocking_only).await
+        }
+        async fn list_events(&self, issue_id: &str) -> Result<Vec<Event>, StorageError> {
+            self.inner.list_events(issue_id).await
+        }
+        async fn closed_since(
+            &self,
+            since: Option<DateTime<Utc>>,
+        ) -> Result<Vec<Issue>, StorageError> {
+            self.inner.closed_since(since).await
+        }
+        async fn orphan_candidates(&self) -> Result<Vec<Issue>, StorageError> {
+            self.inner.orphan_candidates().await
+        }
+    }
+}

@@ -11,9 +11,10 @@ mod common;
 use std::sync::Arc;
 
 use unblock_engine::{NewIssue, Session, SessionConfig};
-use unblock_model::{Priority, parse_id};
+use unblock_model::{Priority, optimal_hash_length, parse_id};
 use unblock_storage::{LibsqlStorage, Storage};
 
+use common::collide::CollisionForcer;
 use common::{issue, session};
 
 /// A root mint produces a parseable `ub-<hash>` and round-trips through `get`.
@@ -141,6 +142,72 @@ async fn collision_with_preoccupied_candidate_is_avoided() {
         child.id,
         format!("{}.2", parent.id),
         "the minted child must skip the pre-occupied .1 and take .2"
+    );
+}
+
+/// **Forces the hash-length-EXTENSION branch (`session/ids.rs:93`) to fire, and asserts it did.**
+///
+/// The allocator probes nonces `0..10` at the adaptive base length (`optimal_hash_length(0) == 3`
+/// for the empty store), and only when **all ten** collide does it grow the length by one and retry.
+/// A [`CollisionForcer`] makes every root candidate whose hash segment is exactly the base length
+/// appear already-occupied, so the loop must exhaust all ten base-length nonces and take the
+/// extension branch — yielding a minted hash that is strictly LONGER than the base length.
+///
+/// Non-vacuous: we assert (a) the forcer shadowed exactly the **ten** base-length nonces (proving the
+/// whole base rung was tried, i.e. `>10` collisions were not silently skipped) and (b) the minted
+/// hash is `base_len + 1` (the extension actually advanced the ladder). If the `length += 1` branch
+/// were removed, the loop could never return a non-base-length id over this forcer (it would spin on
+/// the saturated fallback or loop), so this test would fail.
+#[tokio::test]
+async fn hash_collision_extends_the_length() {
+    // Real in-memory libsql, migrated, then wrapped so every base-length root candidate collides.
+    let storage = LibsqlStorage::open_in_memory().await.expect("open");
+    storage.migrate().await.expect("migrate");
+    let inner: Arc<dyn Storage> = Arc::new(storage);
+
+    // Empty store → base adaptive length is the minimum (3); shadow exactly that rung.
+    let base_len = optimal_hash_length(0);
+    assert_eq!(
+        base_len, 3,
+        "empty-store base hash length is the minimum (3)"
+    );
+    let forcer = CollisionForcer::new(inner, base_len);
+    let storage: Arc<dyn Storage> = forcer.clone();
+
+    let s = session_with_prefix(storage, "ub").await;
+
+    let created = s
+        .create_issue(NewIssue {
+            title: "force a hash extension".to_string(),
+            ..NewIssue::default()
+        })
+        .await
+        .expect("mint over the collision forcer");
+
+    let parsed = parse_id(&created.id).expect("the extended id still parses");
+    assert_eq!(parsed.prefix, "ub");
+    assert!(parsed.is_root(), "still a root id, just a longer hash");
+
+    // (a) All ten base-length nonces were probed and reported occupied — the full base rung was tried.
+    assert_eq!(
+        forcer.shadowed_count(),
+        10,
+        "the loop must exhaust all ten base-length nonces before extending the hash"
+    );
+
+    // (b) The extension branch advanced the length: the minted hash is base_len + 1 (length 4 here),
+    // strictly longer than the base length — the EXTENSION branch fired.
+    assert!(
+        parsed.hash.len() > base_len,
+        "the minted hash {} (len {}) must be LONGER than the base length {} — the extension branch fired",
+        parsed.hash,
+        parsed.hash.len(),
+        base_len
+    );
+    assert_eq!(
+        parsed.hash.len(),
+        base_len + 1,
+        "exactly one extension step was needed (length-4 nonce 0 is free over the forcer)"
     );
 }
 
