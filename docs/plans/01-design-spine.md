@@ -595,6 +595,13 @@ pub trait Storage: Send + Sync {
 
     // --- issue CRUD (mutations carry actor + optional Tier-1 attribution; write Event(s) transactionally) ---
     async fn create_issue(&self, issue: &Issue, actor: &str) -> Result<String, StorageError>; // returns id
+    async fn create_issues(&self, issues: &[Issue], actor: &str) -> Result<(), StorageError>;  // D22/T2.3 — ATOMIC bulk insert
+    //  Inserts the WHOLE slice in ONE `BEGIN IMMEDIATE` tx: every row + its `Event(Created)` + per-relation
+    //  events + the seeded dependency edges + child-counter bumps, committed ONCE. ANY failure on ANY record
+    //  (id/`external_ref` collision, FK/CHECK violation, backend error) ROLLS BACK the entire tx — ZERO rows
+    //  persisted (no partial batch). The engine `Session::create_bulk` (§4.1) mints all ids + resolves intra-batch
+    //  deps under the write permit BEFORE calling this, so storage receives fully-formed `Issue`s with resolved
+    //  ids/edges. `create_issue` (single) and `create(&Issue)` (import) are UNCHANGED. §3.2.1.
     async fn get_issue(&self, id: &str) -> Result<Option<Issue>, StorageError>;               // hydrated (labels/deps)
     async fn get_issues(&self, ids: &[String]) -> Result<Vec<Issue>, StorageError>;
     async fn update_issue(&self, id: &str, patch: &IssuePatch, actor: &str) -> Result<Issue, StorageError>;
@@ -677,6 +684,25 @@ between an earlier prose description and the source are resolved **in favour of 
   (a candidate that races in still surfaces `IdCollision`). The in-tx `child_counters` bump for a hierarchical
   id is the write-half whose read-half (`next_child_number`, §3.2 / crate plan §3.3) the engine allocator
   consumes in production (D21) — the two halves run under the SAME permit so the `parent.N` counter cannot race.
+- **`create_issues` (net-new; D22/T2.3) — the ATOMIC bulk INSERT (the all-or-nothing one-tx primitive).** Opens
+  ONE `BEGIN IMMEDIATE` tx (the same `with_immediate_tx` chokepoint as every other mutation) and, FOR EACH `Issue`
+  in the slice, does exactly the per-record work `create_issue` does inside that single shared tx: the **id-collision
+  guard** (`IdCollision{id}`) + the **`external_ref`-collision guard** (backend error), the row INSERT (binding the
+  computed `content_hash`), the in-tx `child_counters` bump for a hierarchical id, the deduped label/dependency/comment
+  inserts with their per-relation `Event(LabelAdded)`/`Event(DependencyAdded)`/`Event(Commented)`, and the defining
+  `Event(Created)`. It does **no minting and no validation** (the engine `Session::create_bulk` mints every id +
+  runs the full `IssueValidator::validate` on each built `Issue` BEFORE calling this — storage stays validation-free,
+  like `create_issue`). **Atomicity is the whole point:** the loop runs inside ONE tx, so a failure on record #k
+  (a raced `IdCollision`, an `external_ref` clash, an FK/CHECK violation, any backend error) returns `Err` and the
+  tx ROLLS BACK — records 1..k-1 staged in the same tx are discarded, ZERO rows persist (`with_immediate_tx` already
+  rolls back on `Err`; an uncommitted libsql `Transaction` also rolls back on drop). The dependency edges the engine
+  resolved intra-batch are carried on each `Issue.dependencies` and inserted by the same per-record path, so an edge
+  pointing at a sibling minted earlier in the SAME batch resolves correctly (both rows live in the one uncommitted
+  tx). The **id-collision guard inside the tx is the atomicity backstop**: the engine's pre-tx `get_issue` probe
+  (against committed state + the in-batch minted set) avoids collisions, but an out-of-band writer that races a row
+  in between the probe and this commit still surfaces `IdCollision` here — and because it is inside the one tx, it
+  rolls back the WHOLE batch (never a partial commit). This is the design that closes the partial-batch hole a loop
+  over single `create_issue` calls would leave; the single `create_issue`/`create` paths are UNCHANGED.
 - **`update_issue` (sqlite.rs:2496–2509, 2572–2870) — per-field event granularity; empty diff is a
   full skip.** An empty patch (or one that changes nothing) returns the issue unchanged and writes **no
   `SET`, no `updated_at`, no `Event`** (`if set_clauses.is_empty() { return Ok }`). `updated_at` advances
@@ -1125,6 +1151,26 @@ impl Session {
     //   the two live in DIFFERENT namespaces (`Session::` vs the `Storage` trait), so the name does not clash.
     //   The pure candidate compute (hash/seed/adaptive-length/slug-normalize) lives in unblock-model `id.rs`;
     //   the stateful collision-retry loop + the existence probe (`get_issue(id).await?.is_some()`, NOT a `Storage::exists`) and the `next_child_number` read live in the engine allocator.
+    pub async fn create_bulk(&self, records: Vec<NewIssue>) -> Result<Vec<Issue>, EngineError>; // D22/T2.3 — the ATOMIC bulk MINTING create path
+    //   The all-or-nothing bulk sibling of `create_issue` — it backs the MCP `create_bulk` action (§5.2) and exists
+    //   BECAUSE the minting create path is non-idempotent: a loop of N independent `create_issue` calls that fails on
+    //   record #k leaves a partial batch, and re-running re-mints the survivors as DUPLICATES (the import path is
+    //   `content_hash`-idempotent; the minting path is NOT). So the whole batch MUST be one atomic unit. It:
+    //   (1) acquires the write permit ONCE for the entire batch (NOT once per record);
+    //   (2) MINTS every id under the held permit via the SAME engine allocator (`ids.rs`) — the `get_issue` probe
+    //       consults BOTH committed storage AND an in-memory already-minted set (intra-batch dedup: two records in
+    //       the batch cannot mint the same id);
+    //   (3) resolves the 2-phase intra-file deps/parent (stand-in `### ID` / title → the just-minted ids) IN MEMORY
+    //       against the minted set;
+    //   (4) builds N fully-formed `Issue`s (minted id + fields + engine defaults + the resolved dependency edges)
+    //       and runs the FULL `IssueValidator::validate` on each (the same gate `create_issue` runs);
+    //   (5) calls `storage.create_issues(&issues, actor)` — the ONE `BEGIN IMMEDIATE` tx (§3.2.1) — and returns the
+    //       created `Issue`s.
+    //   ON ANY FAILURE (mint exhaustion, an unresolved ref that slipped validation, a raced `IdCollision`, any storage
+    //   error) the whole tx ROLLS BACK → ZERO issues persisted → the caller gets ONE `EngineError`/`StructuredError`.
+    //   This is the TRUE all-or-nothing (parse-validation AND mint/insert atomicity), NEVER a partial commit. The MCP
+    //   `create_bulk` adapter (§5.2) calls THIS — NOT a loop over `create_issue`. The single-record `create_issue`/
+    //   `create(&Issue)` paths are UNCHANGED (this is additive).
     pub async fn update(&self, id: &str, patch: &IssuePatch) -> Result<Issue, EngineError>;
     pub async fn delete(&self, plan: &DeletePlan) -> Result<DeletePlan, EngineError>;
     pub async fn restore(&self, id: &str) -> Result<Issue, EngineError>; // FR-1c recovery (D20) — un-tombstone
@@ -1181,7 +1227,7 @@ impl Session {
 
 | # | Tool | Discriminator | Maps to |
 |---|---|---|---|
-| 1 | `issue` | `action: create\|show\|update\|close\|reopen\|delete\|restore` | FR-1a/1b/1c |
+| 1 | `issue` | `action: create\|create_bulk\|show\|update\|close\|reopen\|delete\|restore` (D22 `create_bulk` is the 8th `issue` ACTION — a discriminator arm, so the **tool** count stays 7 ≤ 8, §6.6) | FR-1a/1b/1c |
 | 2 | `claim` | (none) | FR-2 |
 | 3 | `defer` | `action: defer\|undefer` | FR-3 |
 | 4 | `query` | `kind: list\|ready\|blocked\|search\|count\|stale` | FR-4 |
@@ -1232,14 +1278,21 @@ pub enum IssueInput {
     //       pre-mutation"): a single malformed/unresolvable block rejects the ENTIRE batch with ONE
     //       `StructuredError{code: ValidationFailed, hint, context}` and ZERO writes (deviation from the original's
     //       best-effort per-issue `continue` — the PRD's safe-import discipline wins, NFR-8);
-    //   (3) 2-phase intra-file resolution (faithful port): Phase 1 loops the MINTING `Session::create_issue(NewIssue)`
-    //       (bulk-markdown is INTERACTIVE create — each record mints; it does NOT preserve ids, unlike JSONL/bd
-    //       import which loops `Session::create(&Issue)`), registering `title`→id and stand-in `### ID`→id; Phase 2
-    //       resolves deferred `### Dependencies`/`### Parent` symbolic refs (stand-in id → title → pre-existing
-    //       storage id — the `lookup_import_reference` order; an ambiguous multi-match is an error under the
-    //       all-or-nothing rule, not a skipped warning) and wires the edges;
+    //   (3) builds a `Vec<NewIssue>` (field-faithful: title/parent/priority/type/description + the D22 markdown-captured
+    //       `design`/`acceptance_criteria`/`assignee`/`agent_context`, plus the symbolic `### Dependencies`/`### Parent`
+    //       refs carried for the engine to resolve) and calls the ATOMIC `Session::create_bulk(Vec<NewIssue>)` (§4.1) —
+    //       NOT a loop over `create_issue`. The ENGINE owns the 2-phase intra-file resolution (faithful port): under ONE
+    //       write permit it mints every id (the `get_issue` probe consulting committed state + the in-batch minted set),
+    //       resolves each deferred stand-in `### ID` / title → minted id (the `lookup_import_reference` order; an
+    //       ambiguous multi-match is an error under the all-or-nothing rule, not a skipped warning) IN MEMORY, then
+    //       inserts the whole batch in ONE `storage.create_issues` tx (§3.2.1) — rollback-on-any-failure (mint
+    //       exhaustion, a raced `IdCollision`, any backend error) → ZERO writes. bulk-markdown is INTERACTIVE create
+    //       (mints fresh ids; does NOT preserve ids, unlike JSONL/bd import which loops `Session::create(&Issue)`);
     //   (4) output reuses `ToolOutput::Issues` (§5.3) — the Vec of created issues.
-    // There is NO bulk-create primitive on the `Session`/model surface by design — the loop is the L7 adapter's.
+    // The bulk-create primitive lives on the `Session`/`Storage` surface BY DESIGN (`Session::create_bulk` over
+    // `Storage::create_issues`, §4.1/§3.2) — it is the ONLY way to get one-tx all-or-nothing atomicity (an L7 loop over
+    // single `create_issue` calls would commit each independently and could leave a partial batch — fatal here because
+    // the mint is non-idempotent: a re-run would duplicate the survivors).
     // ADDING this arm (and the 4 `Create` fields above) changes the `issue` tool's `JsonSchema`, so it BUMPS
     // `CONTRACT_VERSION` (the FR-12 drift gate fires by design — §5.4 / the contract test).
     Show   { id: String },
