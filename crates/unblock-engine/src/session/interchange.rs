@@ -1,18 +1,20 @@
 //! `impl Session` JSONL/bd interchange (FR-7/8/26).
 //!
-//! `export_jsonl`/`import_jsonl` delegate to `unblock-sync` (L3) behind the default-on `sync`
-//! feature (T2.4). Under `--no-default-features` the bodies fall back to the typed
+//! `export_jsonl`/`import_jsonl`/`import_bd` delegate to `unblock-sync` (L3) behind the default-on
+//! `sync` feature (T2.4/T2.5). Under `--no-default-features` the bodies fall back to the typed
 //! [`EngineError::FeatureNotWired`] (`feature: "sync"`) so the methods compile with OR without the
-//! feature. `import_bd` STAYS `FeatureNotWired{"sync"}` under both cfgs until T2.5.
+//! feature.
 //!
 //! **Never a faked success and never inline JSONL logic in the engine** — atomic write /
-//! conflict-marker preflight / path confinement / tombstone-no-resurrect all live in `unblock-sync`
-//! at L3. `import_jsonl` acquires the D14 write permit (MF-4) across the sync call; `export_jsonl` is
-//! read-only and takes NO permit.
+//! conflict-marker preflight / path confinement / tombstone-no-resurrect / the bd import-normalize
+//! repair pass all live in `unblock-sync` at L3. `import_jsonl`/`import_bd` acquire the D14 write
+//! permit (MF-4) across the sync call; `export_jsonl` is read-only and takes NO permit.
 
 use std::path::Path;
 
-use crate::error::{EngineError, Result};
+#[cfg(not(feature = "sync"))]
+use crate::error::EngineError;
+use crate::error::Result;
 use crate::report::{ExportReport, ImportOptions, ImportReport};
 use crate::session::Session;
 
@@ -90,14 +92,33 @@ impl Session {
         Err(EngineError::FeatureNotWired { feature: "sync" })
     }
 
-    /// One-shot, idempotent `bd` import (idempotent via `content_hash`) — D16/FR-26.
+    /// One-shot, best-effort `bd` import (idempotent via `content_hash`) — D16/FR-26/D24.
     ///
-    /// **STAYS seam-deferred to T2.5** under both cfgs: the bd field-map is not built at T2.4, so
-    /// this returns the typed [`EngineError::FeatureNotWired`] (`feature: "sync"`) and writes nothing.
+    /// Acquires the single D14 write permit for the WHOLE call (MF-4) — the bd import-normalize repair
+    /// pass runs at L3, then the shared atomic classify+`create_issues` tail runs under the permit so
+    /// no concurrent writer races a classified-new id. Skip-only production semantics (bd ids
+    /// preserved verbatim; unknown top-level fields reported in `dropped_fields`;
+    /// `dependencies`/`comments` counts are the POST-repair/POST-dedup relation tallies).
     ///
     /// # Errors
-    /// - [`EngineError::FeatureNotWired`] (`feature: "sync"`) in v1 — writes nothing.
-    #[allow(clippy::unused_async)] // async in the spine §4.1 signature; the T2.5 body awaits sync.
+    /// - The transparent [`EngineError::Sync`] source on a preflight/map/apply failure (sync-on).
+    /// - [`EngineError::ShutdownInProgress`] if a shutdown is in progress.
+    /// - [`EngineError::FeatureNotWired`] (`feature: "sync"`) under `--no-default-features`.
+    #[cfg(feature = "sync")]
+    pub async fn import_bd(&self, path: &Path) -> Result<ImportReport> {
+        // MF-4: hold the D14 write permit across the whole sync call (map + classify probes + tx).
+        let _guard = crate::permit::acquire_write(&self.write_permit, &self.shutdown).await?;
+        let report =
+            unblock_sync::import_bd(&*self.storage, path, &self.unblock_dir, self.actor()).await?;
+        Ok(report)
+    }
+
+    /// One-shot, best-effort `bd` import (idempotent via `content_hash`) — D16/FR-26/D24.
+    ///
+    /// # Errors
+    /// - [`EngineError::FeatureNotWired`] (`feature: "sync"`) — writes nothing.
+    #[cfg(not(feature = "sync"))]
+    #[allow(clippy::unused_async)] // async in the spine §4.1 signature; the sync body awaits.
     pub async fn import_bd(&self, _path: &Path) -> Result<ImportReport> {
         Err(EngineError::FeatureNotWired { feature: "sync" })
     }

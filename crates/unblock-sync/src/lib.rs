@@ -8,6 +8,7 @@
 #![warn(missing_docs)]
 
 mod atomic;
+mod bd_import;
 mod conflict;
 mod error;
 mod export;
@@ -21,7 +22,8 @@ mod testutil;
 // Reports are model-owned (CF-A): re-export, never redefine.
 pub use unblock_model::{ExportReport, ImportReport};
 
-// The two orchestration entry points the engine calls.
+// The orchestration entry points the engine calls.
+pub use bd_import::{import_bd, map_bd_record};
 pub use export::{ExportOptions, export_jsonl};
 pub use import::{CollisionPolicy, ImportOptions, import_jsonl};
 

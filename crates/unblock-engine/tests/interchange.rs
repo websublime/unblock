@@ -1,9 +1,10 @@
 //! Interchange tests (FR-7/8/26) — run under the DEFAULT (sync-on) build (MF-10).
 //!
-//! `export_jsonl`/`import_jsonl` now DELEGATE to `unblock-sync`: they SUCCEED over a confined path
-//! under a real temp `.unblock/`, and positive-assert they do NOT return `FeatureNotWired` in the
-//! same build. An external `/tmp/...` path returns `EngineError::Sync(PathTraversal)`. Only
-//! `import_bd` stays seamed (`FeatureNotWired{"sync"}`, T2.5).
+//! `export_jsonl`/`import_jsonl`/`import_bd` all DELEGATE to `unblock-sync`: they SUCCEED over a
+//! confined path under a real temp `.unblock/`, and positive-assert they do NOT return
+//! `FeatureNotWired` in the same build. An external `/tmp/...` path returns
+//! `EngineError::Sync(PathTraversal)`. `import_bd` is wired at T2.5 (D24) — it acquires the D14 write
+//! permit like `import_jsonl`.
 
 mod common;
 
@@ -155,15 +156,54 @@ async fn import_jsonl_short_circuits_under_shutdown_and_writes_nothing() {
 }
 
 #[tokio::test]
-async fn import_bd_stays_feature_not_wired() {
+async fn import_bd_is_wired_and_not_feature_not_wired() {
+    // T2.5 (D24): `import_bd` now DELEGATES to `unblock-sync` (sync-on build) — the seam is GONE. An
+    // external `/tmp/...` path is a real `Sync(PathTraversal)`, never `FeatureNotWired`.
     let (session, _tmp) = session_with_unblock_dir().await;
     let err = session
-        .import_bd(std::path::Path::new("/tmp/nonexistent.jsonl"))
+        .import_bd(std::path::Path::new("/tmp/should-not-be-read.jsonl"))
         .await
-        .expect_err("bd seam");
-    // Only `import_bd` keeps the seam (T2.5) — pinned in the SAME sync-on build.
-    assert!(matches!(
-        err,
-        EngineError::FeatureNotWired { feature: "sync" }
-    ));
+        .expect_err("external bd path rejected");
+    assert!(
+        matches!(err, EngineError::Sync { .. }),
+        "expected EngineError::Sync(PathTraversal), got {err:?}"
+    );
+    assert!(!matches!(err, EngineError::FeatureNotWired { .. }));
+}
+
+#[tokio::test]
+async fn import_bd_short_circuits_under_shutdown_and_writes_nothing() {
+    // NON-VACUOUS (MF-4): `import_bd` MUST hold the D14 write permit across the sync call. Once the
+    // cooperative shutdown flag is set, `acquire_write` fails fast with `ShutdownInProgress` BEFORE
+    // the bd map/apply runs — so a valid bd file is NOT applied. Removing the `acquire_write` line
+    // from `import_bd` lets the import proceed under shutdown → this test FAILS (proven by mutation).
+    let (source, tmp) = session_with_unblock_dir().await;
+    source
+        .create(&issue("ub-0001", Priority::MEDIUM, 1000))
+        .await
+        .expect("create");
+    // Any confined, importable file works here (an unblock export is a valid bd-shaped line too).
+    let src_target = tmp.path().join(".unblock").join("issues.jsonl");
+    source.export_jsonl(&src_target).await.expect("export");
+    let exported = std::fs::read_to_string(&src_target).unwrap();
+
+    let (fresh, tmp2) = session_with_unblock_dir().await;
+    let fresh_target = tmp2.path().join(".unblock").join("issues.jsonl");
+    std::fs::write(&fresh_target, &exported).unwrap();
+
+    fresh.shutdown().await.expect("shutdown");
+
+    let err = fresh
+        .import_bd(&fresh_target)
+        .await
+        .expect_err("bd import under shutdown must be refused by the write permit");
+    assert!(
+        matches!(err, EngineError::ShutdownInProgress),
+        "expected ShutdownInProgress (permit gates the bd import), got {err:?}"
+    );
+    let all = fresh.list(&ListFilters::default()).await.expect("list");
+    assert!(
+        all.is_empty(),
+        "bd import must not write under shutdown: {all:?}"
+    );
 }
