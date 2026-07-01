@@ -28,7 +28,10 @@ fn any_output_format() -> impl Strategy<Value = OutputFormat> {
 }
 
 /// The `snake_case` wire string for an [`OutputFormat`] (matches the serde rename — no `serde_json`
-/// dep). The five v1 formats are exhaustive in this crate's build (the `toon` variant is gated off).
+/// dep). Exhaustive in BOTH feature states: the five v1 formats are always present, and the
+/// `#[cfg(feature = "toon")]` arm covers the model's feature-gated `Toon` variant so this `match`
+/// compiles under `--all-features` (the `any_output_format` strategy never yields `Toon`, but the
+/// arm keeps the mapping total and future-proof).
 fn output_format_wire(f: OutputFormat) -> &'static str {
     match f {
         OutputFormat::Json => "json",
@@ -36,6 +39,8 @@ fn output_format_wire(f: OutputFormat) -> &'static str {
         OutputFormat::Plain => "plain",
         OutputFormat::Csv => "csv",
         OutputFormat::Markdown => "markdown",
+        #[cfg(feature = "toon")]
+        OutputFormat::Toon => "toon",
     }
 }
 
