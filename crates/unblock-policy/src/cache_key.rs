@@ -14,8 +14,8 @@
 //! produce the same fingerprint. `labels_all` and `labels_any` are kept in **distinct** sections
 //! (an AND-label is not interchangeable with an OR-label), and every scalar field
 //! (`assignee`, `priority_min`/`priority_max`, `text_contains`, `include_deferred`/
-//! `include_closed`, `limit`/`offset`) is serialized in a fixed, labelled order. Logically-equal
-//! filters fingerprint equal; any field difference fingerprints different.
+//! `include_closed`/`include_tombstone`, `limit`/`offset`) is serialized in a fixed, labelled order.
+//! Logically-equal filters fingerprint equal; any field difference fingerprints different.
 
 use std::fmt::Write as _;
 
@@ -159,6 +159,10 @@ pub fn filters_fingerprint(filters: &ListFilters) -> String {
 
     let _ = write!(out, "include_deferred={};", filters.include_deferred);
     let _ = write!(out, "include_closed={};", filters.include_closed);
+    // `include_tombstone` (FORK-1/D23) folded in so the fingerprint stays INJECTIVE — two filter
+    // sets differing only in this field must fingerprint differently (else a ready/blocked
+    // projection cache key collides). Bool renders over the `true`/`false` charset, delimiter-safe.
+    let _ = write!(out, "include_tombstone={};", filters.include_tombstone);
 
     match filters.limit {
         None => out.push_str("limit=none;"),
@@ -249,6 +253,10 @@ mod tests {
             include_closed: true,
             ..ListFilters::default()
         };
+        let with_tombstone = ListFilters {
+            include_tombstone: true,
+            ..ListFilters::default()
+        };
         let with_assignee = ListFilters {
             assignee: Some("alice".into()),
             ..ListFilters::default()
@@ -261,6 +269,9 @@ mod tests {
         assert_ne!(base_fp, filters_fingerprint(&with_min));
         assert_ne!(base_fp, filters_fingerprint(&with_limit));
         assert_ne!(base_fp, filters_fingerprint(&with_closed));
+        // FORK-1/D23 injectivity: a filter differing ONLY in `include_tombstone` fingerprints
+        // distinctly (else a ready/blocked projection cache key would collide).
+        assert_ne!(base_fp, filters_fingerprint(&with_tombstone));
         assert_ne!(base_fp, filters_fingerprint(&with_assignee));
         assert_ne!(base_fp, filters_fingerprint(&with_type));
     }

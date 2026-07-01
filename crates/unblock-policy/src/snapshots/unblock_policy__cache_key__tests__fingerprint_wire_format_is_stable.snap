@@ -2,4 +2,4 @@
 source: crates/unblock-policy/src/cache_key.rs
 expression: filters_fingerprint(&filters)
 ---
-status=[7:blocked;4:open;];type=[3:bug;];labels_all=[1:a;1:b;];labels_any=[1:x;];assignee=some(5:alice);text_contains=some(3:foo);priority_min=some(1);priority_max=some(4);include_deferred=true;include_closed=false;limit=some(50);offset=some(10);
+status=[7:blocked;4:open;];type=[3:bug;];labels_all=[1:a;1:b;];labels_any=[1:x;];assignee=some(5:alice);text_contains=some(3:foo);priority_min=some(1);priority_max=some(4);include_deferred=true;include_closed=false;include_tombstone=false;limit=some(50);offset=some(10);
