@@ -1,0 +1,14 @@
+---
+source: crates/unblock-sync/tests/bd_contract.rs
+expression: report
+---
+{
+  "imported": 5,
+  "skipped": 0,
+  "dependencies": 3,
+  "comments": 2,
+  "dropped_fields": [
+    "legacy_field",
+    "deprecated_col"
+  ]
+}
