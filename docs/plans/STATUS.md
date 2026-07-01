@@ -97,3 +97,16 @@ v1 design is not at risk. See `00-roadmap.md`.
 
 - **v1.1** (LOCKED scope, backlog): FR-6, FR-13 (full), FR-16 (full taxonomy), FR-18, FR-19, FR-21, FR-22, FR-23, TOON.
 - **v1.2 / v1.3 / v2+** (PROPOSED — direction only): see `00-roadmap.md`; reviewed when v1 nears GA.
+
+## Known issues / fast-follows *(not blocking v1)*
+
+Surfaced during development, tracked here (the repo's system of record) so they aren't lost; resolved just-in-time.
+
+- **`cargo build --all-features --all-targets` fails (`E0004`) — latent `toon` test gap.**
+  `crates/unblock-config/tests/proptest.rs` has a non-exhaustive `match` on `OutputFormat` that does not cover the
+  `OutputFormat::Toon` variant which the `toon` feature (the v1.1 TOON stub introduced at T2.1) enables — so a
+  whole-workspace `--all-features --all-targets` build breaks. **Latent, not a v1 blocker:** the CI matrix uses
+  *targeted* features (D15/NFR-10 keep the libsql `remote` TLS stack off the gate), never whole-workspace
+  `--all-features --all-targets`, so no shipped gate is red. **Predates T2.4** (the offending files were last touched
+  at T1.3 — git-confirmed absent from the T2.4 diff); surfaced/confirmed by the T2.4 Verify gate. **Fix when TOON
+  lands in v1.1:** add the `Toon` match arm (or `#[cfg(feature = "toon")]`-gate the test).
