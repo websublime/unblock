@@ -450,11 +450,23 @@ fn text_contains_filter(filters: &ListFilters, sql: &mut String, params: &mut Ve
     }
 }
 
-/// Closed / deferred visibility branch (default: exclude closed + tombstone; deferred excluded
-/// unless asked). Binds **no** params — `list`/`search`/`count`/`stale` only. `blocked_issues` does
-/// NOT apply this (its baseline is deferred-INCLUSIVE — D18, spine §3.2.1).
+/// Closed / deferred / tombstone visibility branch (default: exclude closed + tombstone; deferred
+/// excluded unless asked). Binds **no** params — `list`/`search`/`count`/`stale` only.
+/// `blocked_issues` does NOT apply this (its baseline is deferred-INCLUSIVE — D18, spine §3.2.1).
+///
+/// `include_tombstone` (FORK-1/D23, spine §1.10) is the WIDEST switch, checked OUTERMOST: it is set
+/// only by the `unblock-sync` full-corpus export so tombstoned rows round-trip (FR-8). When it is
+/// `false` (every non-export caller), this falls through to the EXACT prior 3-branch behaviour —
+/// byte-identical SQL, so those callers are unchanged.
 fn visibility_branch(filters: &ListFilters, sql: &mut String) {
-    if filters.include_closed {
+    if filters.include_tombstone {
+        // Export path: tombstones stay visible. With `include_closed` also set (the sync export),
+        // append nothing → all statuses. Otherwise exclude only `closed` (deferred stays visible for
+        // a full pull; tombstone is NOT excluded).
+        if !filters.include_closed {
+            sql.push_str(" AND status != 'closed'");
+        }
+    } else if filters.include_closed {
         sql.push_str(" AND status != 'tombstone'");
     } else if filters.include_deferred {
         sql.push_str(" AND status NOT IN ('closed', 'tombstone')");
