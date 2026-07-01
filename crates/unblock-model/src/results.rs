@@ -51,12 +51,21 @@ pub struct CloseOutcome {
 }
 
 /// The report of a JSONL/bd import operation (FR-8/FR-26).
+///
+/// `dependencies`/`comments` count the relation/comment rows migrated by the one-shot `bd` import
+/// (D24/F1), tallied on the POST-repair, POST-dedup record (faithful to bd's
+/// `record_imported_relation_counts`); both stay `0` on the generic `import_jsonl` path (it never
+/// tallies them).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct ImportReport {
     /// Number of issues imported.
     pub imported: usize,
     /// Number of lines skipped (no-ops / rejected).
     pub skipped: usize,
+    /// Number of dependency edges migrated (POST-dedup; `0` on the generic `import_jsonl` path).
+    pub dependencies: usize,
+    /// Number of comments migrated (`0` on the generic `import_jsonl` path).
+    pub comments: usize,
     /// Fields dropped during import.
     pub dropped_fields: Vec<String>,
 }
@@ -157,6 +166,8 @@ mod tests {
         let imp = ImportReport {
             imported: 5,
             skipped: 1,
+            dependencies: 3,
+            comments: 2,
             dropped_fields: vec!["x".to_string()],
         };
         let json = serde_json::to_string(&imp).unwrap();

@@ -167,6 +167,8 @@ pub async fn import_jsonl(
         return Ok(ImportReport {
             imported: create_subset.len(),
             skipped,
+            dependencies: 0,
+            comments: 0,
             dropped_fields: Vec::new(),
         });
     }
@@ -180,6 +182,8 @@ pub async fn import_jsonl(
     Ok(ImportReport {
         imported: create_subset.len(),
         skipped,
+        dependencies: 0,
+        comments: 0,
         dropped_fields: Vec::new(),
     })
 }

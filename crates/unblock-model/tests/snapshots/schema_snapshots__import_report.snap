@@ -5,9 +5,21 @@ expression: json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "ImportReport",
-  "description": "The report of a JSONL/bd import operation (FR-8/FR-26).",
+  "description": "The report of a JSONL/bd import operation (FR-8/FR-26).\n\n`dependencies`/`comments` count the relation/comment rows migrated by the one-shot `bd` import\n(D24/F1), tallied on the POST-repair, POST-dedup record (faithful to bd's\n`record_imported_relation_counts`); both stay `0` on the generic `import_jsonl` path (it never\ntallies them).",
   "type": "object",
   "properties": {
+    "comments": {
+      "description": "Number of comments migrated (`0` on the generic `import_jsonl` path).",
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
+    "dependencies": {
+      "description": "Number of dependency edges migrated (POST-dedup; `0` on the generic `import_jsonl` path).",
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
     "dropped_fields": {
       "description": "Fields dropped during import.",
       "type": "array",
@@ -31,6 +43,8 @@ expression: json
   "required": [
     "imported",
     "skipped",
+    "dependencies",
+    "comments",
     "dropped_fields"
   ]
 }

@@ -57,6 +57,8 @@ mod tests {
         let value = serde_json::to_value(SyncOutput::Import(ImportReport {
             imported: 2,
             skipped: 1,
+            dependencies: 0,
+            comments: 0,
             dropped_fields: vec![],
         }))
         .unwrap();
