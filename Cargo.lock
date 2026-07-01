@@ -2963,11 +2963,15 @@ dependencies = [
 name = "unblock-sync"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "dunce",
+ "insta",
+ "proptest",
  "serde",
  "serde_json",
  "snafu",
+ "tempfile",
  "tokio",
  "tracing",
  "unblock-error",

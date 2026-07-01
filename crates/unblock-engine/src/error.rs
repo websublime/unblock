@@ -29,9 +29,10 @@
 //!
 //! # Additive growth (NO v1 signature change)
 //!
-//! `Sync { source: SyncError }` lands with **T2.4** and `Health { source: HealthError }` with
-//! **T3.3** (each forwarding `source.code()`); at that point `FeatureNotWired` is removed for those
-//! methods. No backend type ever leaks (spine §6 rule 2).
+//! `Sync { source: SyncError }` landed at **T2.4** (cfg-gated behind the default-on `sync` feature,
+//! forwarding `source.code()`/`hint()`/`context()`); `FeatureNotWired` is now removed for
+//! `export_jsonl`/`import_jsonl` (kept for `import_bd` until T2.5). `Health { source: HealthError }`
+//! lands the same way at **T3.3**. No backend type ever leaks (spine §6 rule 2).
 
 use snafu::Snafu;
 use unblock_error::{CodedError, ErrorCode, ModelError};
@@ -65,6 +66,16 @@ pub enum EngineError {
     Model {
         /// The underlying model/validation failure (aggregate or scalar).
         source: ModelError,
+    },
+
+    /// A `unblock-sync` JSONL interchange operation failed (T2.4/D23). Additive, cfg-gated behind the
+    /// default-on `sync` feature — vanishes together with the `unblock-sync` dep under
+    /// `--no-default-features`. Forwards `source.code()`/`hint()`/`context()` (`CodedError`).
+    #[cfg(feature = "sync")]
+    #[snafu(transparent)]
+    Sync {
+        /// The underlying sync failure.
+        source: unblock_sync::SyncError,
     },
 
     /// An operation was attempted against a workspace that is not open.
@@ -107,6 +118,8 @@ impl CodedError for EngineError {
             Self::Storage { source } => source.code(),
             Self::Policy { source } => source.code(),
             Self::Model { source } => source.code(),
+            #[cfg(feature = "sync")]
+            Self::Sync { source } => source.code(),
             // Engine-local variants map to EXISTING §2.2 codes — never a new code.
             Self::WorkspaceNotOpen => ErrorCode::NotInitialized,
             Self::ShutdownInProgress | Self::WritePermitPoisoned | Self::FeatureNotWired { .. } => {
@@ -122,6 +135,8 @@ impl CodedError for EngineError {
             Self::Storage { source } => source.hint(),
             Self::Policy { source } => source.hint(),
             Self::Model { source } => source.hint(),
+            #[cfg(feature = "sync")]
+            Self::Sync { source } => source.hint(),
             Self::WorkspaceNotOpen
             | Self::ShutdownInProgress
             | Self::WritePermitPoisoned
@@ -137,6 +152,8 @@ impl CodedError for EngineError {
             Self::Storage { source } => source.context(),
             Self::Policy { source } => source.context(),
             Self::Model { source } => source.context(),
+            #[cfg(feature = "sync")]
+            Self::Sync { source } => source.context(),
             Self::WorkspaceNotOpen
             | Self::ShutdownInProgress
             | Self::WritePermitPoisoned

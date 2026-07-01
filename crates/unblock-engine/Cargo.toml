@@ -53,6 +53,9 @@ chrono = { workspace = true }
 # The `ParkedStorage` decorator (tests/common) impls the async `Storage` trait to park a write
 # mid-tx (FR-10 read-during-write + D14 cancel-safety) — real storage delegation, not a mock.
 async-trait = { workspace = true }
+# The `error_contract.rs` golden constructs a `SyncError` to pin the new `EngineError::Sync` row
+# (the `#[cfg(feature="sync")]` case). Default-on `sync` makes it a dev-dep for the test binary.
+unblock-sync = { workspace = true }
 # FR-9 linearizability property test + the write-permit single-occupancy invariant.
 proptest = { workspace = true }
 # Golden `EngineError -> ErrorCode -> exit_code` map (FR-11) + diagnostics-per-kind snapshots.
