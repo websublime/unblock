@@ -47,7 +47,12 @@ async fn count_all(session: &Session) -> usize {
 // --------------------------------------------------------------------------------------------------
 
 /// A clean N-record batch round-trips all N created issues, in FILE order, with each minting a
-/// parseable root id.
+/// parseable, MUTUALLY-DISTINCT root id.
+///
+/// Timing-independent by construction: the three records carry DISTINCT titles, so each feeds a
+/// different id seed even though the whole batch shares one `created_at` instant (the mint stamps all
+/// records with one `now`). The minted root ids are therefore deterministic for the batch, and the
+/// explicit distinct-id check below proves the in-batch dedup never returns a colliding id.
 #[tokio::test]
 async fn clean_batch_round_trips_all_records_in_file_order() {
     let s = session().await;
@@ -64,8 +69,14 @@ async fn clean_batch_round_trips_all_records_in_file_order() {
     assert_eq!(created[0].title, "alpha");
     assert_eq!(created[1].title, "beta");
     assert_eq!(created[2].title, "gamma");
+    let mut ids = std::collections::HashSet::new();
     for issue in &created {
         assert!(parse_id(&issue.id).expect("parses").is_root());
+        assert!(
+            ids.insert(issue.id.clone()),
+            "every batch record mints a distinct root id (got a duplicate: {})",
+            issue.id
+        );
     }
     assert_eq!(count_all(&s).await, 3);
 }
