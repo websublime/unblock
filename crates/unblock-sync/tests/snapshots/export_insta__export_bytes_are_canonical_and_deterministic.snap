@@ -1,0 +1,8 @@
+---
+source: crates/unblock-sync/tests/export_insta.rs
+assertion_line: 47
+expression: joined
+---
+{"compaction_level":0,"created_at":"2026-01-02T03:04:05Z","id":"ub-1","issue_type":"task","priority":2,"status":"open","title":"issue ub-1","updated_at":"2026-01-02T03:04:05Z"}
+{"compaction_level":0,"created_at":"2026-01-02T03:04:05Z","dependencies":[{"created_at":"2026-01-02T04:04:05Z","depends_on_id":"ub-1","issue_id":"ub-2","type":"blocks"}],"id":"ub-2","issue_type":"task","priority":2,"status":"open","title":"issue ub-2","updated_at":"2026-01-02T03:04:05Z"}
+{"compaction_level":0,"created_at":"2026-01-02T03:04:05Z","id":"ub-3","issue_type":"task","priority":2,"status":"open","title":"issue ub-3","updated_at":"2026-01-02T03:04:05Z"}
