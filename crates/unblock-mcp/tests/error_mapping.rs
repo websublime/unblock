@@ -83,11 +83,18 @@ async fn sync_export_surfaces_clean_in_band_error_when_path_unconfinable() {
     let session = common::session().await;
     let (client, server, _cancel) = connect(session).await;
 
-    // The sync surface is WIRED at T2.4 (D23): `export` no longer returns FeatureNotWired. The test
-    // session's default `<workspace>/.unblock/issues.jsonl` lives under a non-existent `/tmp/...`
-    // workspace whose `.unblock/` cannot be confined, so the wired path surfaces a CLEAN in-band
-    // `PATH_TRAVERSAL` structured error (valid JSON), never a protocol fault.
-    let (is_error, structured) = call_tool(&client, "sync", json!({ "action": "export" })).await;
+    // The sync surface is WIRED at T2.4 (D23): `export` no longer returns FeatureNotWired. An explicit
+    // `../`-escaping path is rejected LEXICALLY by `validate_sync_path` (the `..` guard fires before any
+    // filesystem access/canonicalization, so the outcome is DETERMINISTIC across platforms — it does not
+    // depend on the `/tmp`→`/private/tmp` symlink or whether the workspace dir exists). The wired export
+    // therefore surfaces a CLEAN in-band `PATH_TRAVERSAL` structured error (valid JSON), never a protocol
+    // fault and never the removed FeatureNotWired seam.
+    let (is_error, structured) = call_tool(
+        &client,
+        "sync",
+        json!({ "action": "export", "path": "../../../../../../etc/unblock-evil-export.jsonl" }),
+    )
+    .await;
     assert!(
         is_error,
         "an unconfinable export path must be an in-band error"
