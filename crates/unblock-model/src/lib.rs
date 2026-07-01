@@ -56,6 +56,7 @@ mod output;
 mod relations;
 mod results;
 mod serde_helpers;
+mod time;
 /// Pure issue/actor validation (spine §1.9). Public so the spine-referenced path
 /// `unblock_model::validation::validate_actor` resolves (Seam A single-home, T1.3); the validator
 /// types and `validate_actor` are also re-exported from the crate root below.
@@ -78,6 +79,7 @@ pub use results::{
     CloseOutcome, CountBucket, DepTree, DiagnosticFinding, DiagnosticKind, DiagnosticReport,
     ExportReport, GraphEdge, ImportReport,
 };
+pub use time::fmt_ts_secs;
 pub use validation::{
     ACTOR_MAX_CHARS, CUSTOM_VARIANT_MAX_CHARS, ESTIMATED_MINUTES_MAX, EXTERNAL_REF_MAX_CHARS,
     ISSUE_LABEL_MAX_COUNT, IssueValidator, LABEL_MAX_LEN, LabelValidator, TITLE_MAX_CHARS,
