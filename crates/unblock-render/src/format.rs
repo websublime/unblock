@@ -11,7 +11,7 @@
 
 use std::str::FromStr;
 
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Utc};
 
 pub use unblock_model::OutputFormat;
 
@@ -128,10 +128,14 @@ impl std::fmt::Display for FormatName {
 
 /// The single canonical timestamp helper (A.OQ-B / crate plan §5 item 5).
 ///
-/// RFC-3339, UTC, **second precision**, `Z` suffix (`use_z = true`). This is the **only** path any
-/// backend uses to render a [`DateTime<Utc>`]: no backend may call `to_rfc3339()` directly (it
-/// emits sub-seconds + offset, breaking byte-determinism and the T2.4 export-byte coherence). This
-/// is an intentional deviation from the original CSV/text bytes.
+/// RFC-3339, UTC, **second precision**, `Z` suffix. This is the **only** path any backend uses to
+/// render a [`DateTime<Utc>`]: no backend may call `to_rfc3339()` directly (it emits sub-seconds +
+/// offset, breaking byte-determinism and the T2.4 export-byte coherence). This is an intentional
+/// deviation from the original CSV/text bytes.
+///
+/// Since T2.4/FORK-4 the canonical formatter is LIFTED into `unblock-model` L0
+/// ([`unblock_model::fmt_ts_secs`]) as the single source of truth so `unblock-sync` — which cannot
+/// depend on render (L6) — shares it; `fmt_ts` is a thin, byte-identical delegate.
 ///
 /// # Examples
 ///
@@ -144,7 +148,7 @@ impl std::fmt::Display for FormatName {
 /// ```
 #[must_use]
 pub fn fmt_ts(dt: DateTime<Utc>) -> String {
-    dt.to_rfc3339_opts(SecondsFormat::Secs, true)
+    unblock_model::fmt_ts_secs(dt)
 }
 
 #[cfg(test)]
