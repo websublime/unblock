@@ -78,6 +78,18 @@ fn contract_rows() -> Vec<(&'static str, String, u8, bool)> {
         ),
     ];
 
+    // The transparent `unblock-sync` source (T2.4/D23), cfg-gated behind the default-on `sync`
+    // feature. It forwards `SyncError::code()` (exit-6 IMPORT_COLLISION here), non-retryable.
+    #[cfg(feature = "sync")]
+    let cases = {
+        let mut cases = cases;
+        cases.push((
+            "Sync::ImportCollision",
+            unblock_sync::SyncError::ImportCollision { id: "ub-1".into() }.into(),
+        ));
+        cases
+    };
+
     cases
         .into_iter()
         .map(|(label, err)| {
