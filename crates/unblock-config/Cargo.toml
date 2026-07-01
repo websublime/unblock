@@ -9,6 +9,15 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+default = []
+# Propagates the model's bare `toon` marker feature (CF-J / spine §1.10) so the re-exported
+# `unblock_model::OutputFormat::Toon` variant is visible under `--features toon` — mirrors
+# `unblock-render`'s passthrough so every OutputFormat-re-exporting crate is toon-coherent (keeps
+# any exhaustive `match` on the re-exported enum, e.g. the precedence proptest helper, buildable
+# under `--all-features`). There is NO toon encoder dependency in v1 (the real encoder is v1.1).
+toon = ["unblock-model/toon"]
+
 [dependencies]
 unblock-storage = { workspace = true }
 # FORWARD-DECLARED at T1.3a (kept by design — do NOT trim): `unblock-sync`/`unblock-health` are the
