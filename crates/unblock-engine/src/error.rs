@@ -30,9 +30,10 @@
 //! # Additive growth (NO v1 signature change)
 //!
 //! `Sync { source: SyncError }` landed at **T2.4** (cfg-gated behind the default-on `sync` feature,
-//! forwarding `source.code()`/`hint()`/`context()`); `FeatureNotWired` is now removed for
-//! `export_jsonl`/`import_jsonl` (kept for `import_bd` until T2.5). `Health { source: HealthError }`
-//! lands the same way at **T3.3**. No backend type ever leaks (spine §6 rule 2).
+//! forwarding `source.code()`/`hint()`/`context()`); `FeatureNotWired` (`"sync"`) is now removed for
+//! `export_jsonl`/`import_jsonl` **and `import_bd`** (all wired at T2.4/T2.5), kept only under
+//! `--no-default-features`. `Health { source: HealthError }` lands the same way at **T3.3**. No
+//! backend type ever leaks (spine §6 rule 2).
 
 use snafu::Snafu;
 use unblock_error::{CodedError, ErrorCode, ModelError};
@@ -98,11 +99,12 @@ pub enum EngineError {
     #[snafu(display("write permit poisoned (semaphore closed)"))]
     WritePermitPoisoned,
 
-    /// A method whose backing crate is not yet wired returned its typed seam error.
+    /// A method whose backing crate is not compiled in returned its typed seam error.
     ///
-    /// `feature` is `"sync"` (the `export_jsonl`/`import_jsonl`/`import_bd` seam, T2.4) or
-    /// `"health"` (the `doctor`/`recover` seam, T3.3). It is **never** a faked success and **never**
-    /// inline L3 logic. Maps to [`ErrorCode::InternalError`] (exit 1) until the dep crate lands.
+    /// `feature` is `"sync"` (the `export_jsonl`/`import_jsonl`/`import_bd` bodies, wired at T2.4/T2.5
+    /// — this variant is now reached ONLY under `--no-default-features`) or `"health"` (the
+    /// `doctor`/`recover` seam, T3.3). It is **never** a faked success and **never** inline L3 logic.
+    /// Maps to [`ErrorCode::InternalError`] (exit 1) until/unless the dep crate is compiled in.
     #[snafu(display("feature not wired: {feature}"))]
     FeatureNotWired {
         /// The not-yet-wired feature: `"sync"` or `"health"`.

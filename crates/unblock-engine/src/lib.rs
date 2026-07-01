@@ -24,9 +24,11 @@
 //!
 //! # SEAM-deferred methods (typed not-wired — never a faked success)
 //!
-//! `export_jsonl`/`import_jsonl`/`import_bd` (the `sync` seam, T2.4) and `doctor`/`recover` (the
-//! `health` seam, T3.3) land their **signatures** now; their v1 bodies return
-//! [`EngineError::FeatureNotWired`]. T2.4/T3.3 replace the bodies additively (no v1 signature change).
+//! `export_jsonl`/`import_jsonl`/`import_bd` (the `sync` seam) are WIRED to `unblock-sync` at
+//! T2.4/T2.5 (default-on `sync` feature; `FeatureNotWired` only under `--no-default-features`).
+//! `doctor`/`recover` (the `health` seam, T3.3) still return [`EngineError::FeatureNotWired`] until
+//! their body lands. All were introduced with their v1 **signatures**; bodies land additively (no v1
+//! signature change).
 //!
 //! # Example — a happy-path round-trip against a temp workspace
 //!
