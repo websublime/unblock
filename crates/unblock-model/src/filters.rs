@@ -31,6 +31,13 @@ pub struct ListFilters {
     pub include_deferred: bool,
     /// Include closed issues.
     pub include_closed: bool,
+    /// Include `status = 'tombstone'` (soft-deleted) rows. Default `false` — the default-visibility,
+    /// `include_deferred`, and `include_closed` branches all EXCLUDE tombstones, so a caller must opt
+    /// in explicitly. Set `true` ONLY by the `unblock-sync` full-corpus export (FORK-1/D23):
+    /// tombstones must be exported so import-side tombstone-non-resurrection (FR-8, spine §1.8) is
+    /// round-trippable. Orthogonal to `include_closed`: export sets BOTH `true`. list/ready/blocked/
+    /// search/count/stale keep it `false` (agent query surfaces never set it).
+    pub include_tombstone: bool,
     /// Result cap (`None` = unlimited; ready is default-complete).
     pub limit: Option<usize>,
     /// Result offset.
@@ -65,6 +72,8 @@ mod tests {
         assert!(f.assignee.is_none());
         assert!(f.limit.is_none());
         assert!(!f.include_closed);
+        // `include_tombstone` defaults to `false` via `#[derive(Default)]` (export-only opt-in, D23).
+        assert!(!f.include_tombstone);
         // Stable empty filter feeds the policy fingerprint determinism.
         assert_eq!(f, ListFilters::default());
     }

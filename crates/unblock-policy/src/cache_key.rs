@@ -321,7 +321,7 @@ mod tests {
     fn fingerprint_wire_format_is_stable() {
         // Pin the EXACT canonical encoding as a contract: a refactor of `push_set`/`push_opt_str`
         // that stayed internally consistent could silently re-mint every cache key with no
-        // relational test failing — this golden catches it. All 12 `ListFilters` fields are set
+        // relational test failing — this golden catches it. All 13 `ListFilters` fields are set
         // explicitly so adding a field forces a deliberate snapshot update.
         let filters = ListFilters {
             status: vec![Status::Open, Status::Blocked],
@@ -334,6 +334,7 @@ mod tests {
             text_contains: Some("foo".into()),
             include_deferred: true,
             include_closed: false,
+            include_tombstone: false,
             limit: Some(50),
             offset: Some(10),
         };
