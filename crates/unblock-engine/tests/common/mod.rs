@@ -372,6 +372,7 @@ pub mod collide {
     use chrono::{DateTime, Utc};
     use std::collections::BTreeSet;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use unblock_model::{
         CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue, parse_id,
     };
@@ -385,6 +386,13 @@ pub mod collide {
         base_len: usize,
         /// The distinct base-length root candidate ids the allocator probed (and we shadowed).
         shadowed: Mutex<BTreeSet<String>>,
+        /// EVERY base-length root probe the allocator made (incl. any repeats) — the deterministic,
+        /// TIMING-INDEPENDENT count the test asserts. The loop probes nonces `0..10` at the base
+        /// length before it can extend, so this is exactly 10 regardless of whether the ten
+        /// `created_at`-seeded hashes happen to be distinct (two seeds CAN hash to the same base-length
+        /// digits, which would make the de-duplicated `shadowed` set smaller than 10 — a real,
+        /// timestamp-dependent flake the probe count avoids).
+        probes: AtomicUsize,
     }
 
     impl CollisionForcer {
@@ -395,13 +403,24 @@ pub mod collide {
                 inner,
                 base_len,
                 shadowed: Mutex::new(BTreeSet::new()),
+                probes: AtomicUsize::new(0),
             })
         }
 
-        /// How many DISTINCT base-length root candidates were probed (and reported occupied).
+        /// How many DISTINCT base-length root candidates were probed (and reported occupied). This is
+        /// `<= base_rung_probes()` — two `created_at`-seeded nonces can collide to the same base-length
+        /// hash, so a test must NOT assert this equals the rung width (use [`base_rung_probes`] instead).
         #[must_use]
         pub fn shadowed_count(&self) -> usize {
             self.shadowed.lock().expect("forcer lock").len()
+        }
+
+        /// How many base-length root probes were made IN TOTAL (counting repeats) — the deterministic
+        /// width of the base rung the allocator exhausted before extending. Timing-independent: the
+        /// loop always probes nonces `0..10` at the base length, so this is exactly 10 over this forcer.
+        #[must_use]
+        pub fn base_rung_probes(&self) -> usize {
+            self.probes.load(Ordering::SeqCst)
         }
 
         /// A root candidate to shadow = a parseable ROOT id (no child path) whose hash segment is
@@ -418,8 +437,11 @@ pub mod collide {
     impl Storage for CollisionForcer {
         async fn get_issue(&self, id: &str) -> Result<Option<Issue>, StorageError> {
             if self.should_shadow(id) {
-                // Report this base-length candidate as occupied so the allocator must move on; record
-                // it so the test can assert all ten base-length nonces were exhausted.
+                // Report this base-length candidate as occupied so the allocator must move on. Count
+                // EVERY base-length probe (the deterministic rung width the test asserts) and also
+                // record the distinct ids (diagnostic only — not asserted, since two seeds can hash
+                // to the same base-length digits).
+                self.probes.fetch_add(1, Ordering::SeqCst);
                 self.shadowed
                     .lock()
                     .expect("forcer lock")

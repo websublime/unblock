@@ -153,11 +153,17 @@ async fn collision_with_preoccupied_candidate_is_avoided() {
 /// appear already-occupied, so the loop must exhaust all ten base-length nonces and take the
 /// extension branch — yielding a minted hash that is strictly LONGER than the base length.
 ///
-/// Non-vacuous: we assert (a) the forcer shadowed exactly the **ten** base-length nonces (proving the
-/// whole base rung was tried, i.e. `>10` collisions were not silently skipped) and (b) the minted
+/// Non-vacuous: we assert (a) the forcer was probed exactly **ten** times at the base length (proving
+/// the whole base rung was tried, i.e. `>10` collisions were not silently skipped) and (b) the minted
 /// hash is `base_len + 1` (the extension actually advanced the ladder). If the `length += 1` branch
 /// were removed, the loop could never return a non-base-length id over this forcer (it would spin on
 /// the saturated fallback or loop), so this test would fail.
+///
+/// **Timing-independent:** we count the base-rung PROBES (`base_rung_probes`), not the de-duplicated
+/// SET of shadowed ids. The 10 base-length candidates are `created_at`-seeded; two seeds can hash to
+/// the same 3-char base36 digits, which would shrink a distinct-id set below 10 at certain timestamps
+/// (a real flake under heavy concurrent-build CPU contention). The probe count is exactly 10 on every
+/// run because the loop always tries nonces `0..10` before it can extend.
 #[tokio::test]
 async fn hash_collision_extends_the_length() {
     // Real in-memory libsql, migrated, then wrapped so every base-length root candidate collides.
@@ -189,8 +195,11 @@ async fn hash_collision_extends_the_length() {
     assert!(parsed.is_root(), "still a root id, just a longer hash");
 
     // (a) All ten base-length nonces were probed and reported occupied — the full base rung was tried.
+    // Asserting the PROBE COUNT (not the de-duplicated shadowed set) makes this timing-independent:
+    // the loop always probes nonces 0..10 at the base length, so this is exactly 10 on every run, even
+    // when two `created_at`-seeded nonces collide to the same base-length hash.
     assert_eq!(
-        forcer.shadowed_count(),
+        forcer.base_rung_probes(),
         10,
         "the loop must exhaust all ten base-length nonces before extending the hash"
     );
