@@ -79,21 +79,24 @@ async fn claim_contention_is_in_band_already_claimed() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn sync_seam_surfaces_feature_not_wired_in_band() {
+async fn sync_export_surfaces_clean_in_band_error_when_path_unconfinable() {
     let session = common::session().await;
     let (client, server, _cancel) = connect(session).await;
 
-    // The sync seam returns EngineError::FeatureNotWired{"sync"} (-> INTERNAL_ERROR) at T2.2; it must
-    // surface as a CLEAN in-band structured error (valid JSON), never a protocol fault.
+    // The sync surface is WIRED at T2.4 (D23): `export` no longer returns FeatureNotWired. The test
+    // session's default `<workspace>/.unblock/issues.jsonl` lives under a non-existent `/tmp/...`
+    // workspace whose `.unblock/` cannot be confined, so the wired path surfaces a CLEAN in-band
+    // `PATH_TRAVERSAL` structured error (valid JSON), never a protocol fault.
     let (is_error, structured) = call_tool(&client, "sync", json!({ "action": "export" })).await;
-    assert!(is_error, "the sync seam must be an in-band error");
-    assert_error_envelope(&structured, "INTERNAL_ERROR");
     assert!(
-        structured["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("sync"),
-        "the message must name the not-wired feature: {structured}"
+        is_error,
+        "an unconfinable export path must be an in-band error"
+    );
+    assert_error_envelope(&structured, "PATH_TRAVERSAL");
+    // It is NOT the removed FeatureNotWired seam.
+    assert_ne!(
+        structured["code"], "INTERNAL_ERROR",
+        "the sync seam is wired — no FeatureNotWired here: {structured}"
     );
 
     let _ = client.cancel().await;
