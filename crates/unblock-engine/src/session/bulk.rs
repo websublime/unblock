@@ -118,8 +118,9 @@ pub(crate) fn topological_mint_order(
                     return Err(vec![FieldError::new(
                         "parent",
                         format!(
-                            "record `{}` is its own parent (`{parent_ref}`)",
-                            display(&record.title)
+                            "record `{}` is its own parent (`{}`)",
+                            display(&record.title),
+                            display(parent_ref)
                         ),
                     )]);
                 }
@@ -129,7 +130,8 @@ pub(crate) fn topological_mint_order(
                 return Err(vec![FieldError::new(
                     "parent",
                     format!(
-                        "ambiguous parent reference `{parent_ref}` for record `{}` (matches >1 record)",
+                        "ambiguous parent reference `{}` for record `{}` (matches >1 record)",
+                        display(parent_ref),
                         display(&record.title)
                     ),
                 )]);
@@ -207,7 +209,8 @@ pub(crate) fn resolve_parent_id(
                     Err(vec![FieldError::new(
                         "parent",
                         format!(
-                            "intra-batch parent `{parent_ref}` was not minted before its child"
+                            "intra-batch parent `{}` was not minted before its child",
+                            display(parent_ref)
                         ),
                     )])
                 },
@@ -216,7 +219,10 @@ pub(crate) fn resolve_parent_id(
         }
         Some(RefResolution::Ambiguous) => Err(vec![FieldError::new(
             "parent",
-            format!("ambiguous parent reference `{parent_ref}` (matches >1 record)"),
+            format!(
+                "ambiguous parent reference `{}` (matches >1 record)",
+                display(parent_ref)
+            ),
         )]),
         None => {
             // No intra-batch match → must resolve against pre-existing storage.
@@ -225,7 +231,8 @@ pub(crate) fn resolve_parent_id(
                     Err(vec![FieldError::new(
                         "parent",
                         format!(
-                            "unresolved parent reference `{parent_ref}` (no batch or storage match)"
+                            "unresolved parent reference `{}` (no batch or storage match)",
+                            display(parent_ref)
                         ),
                     )])
                 },
@@ -320,7 +327,10 @@ pub(crate) fn resolve_dep_refs(
                     let id = minted_id_of.get(&idx).cloned().ok_or_else(|| {
                         vec![FieldError::new(
                             "dependencies",
-                            format!("intra-batch dependency `{dep_str}` was not minted"),
+                            format!(
+                                "intra-batch dependency `{}` was not minted",
+                                display(dep_str)
+                            ),
                         )]
                     })?;
                     (unblock_model::DependencyType::Blocks, id)
@@ -328,7 +338,10 @@ pub(crate) fn resolve_dep_refs(
                 RefResolution::Ambiguous => {
                     return Err(vec![FieldError::new(
                         "dependencies",
-                        format!("ambiguous dependency reference `{dep_str}` (matches >1 record)"),
+                        format!(
+                            "ambiguous dependency reference `{}` (matches >1 record)",
+                            display(dep_str)
+                        ),
                     )]);
                 }
             }
@@ -346,14 +359,20 @@ pub(crate) fn resolve_dep_refs(
                     minted_id_of.get(&idx).cloned().ok_or_else(|| {
                         vec![FieldError::new(
                             "dependencies",
-                            format!("intra-batch dependency `{dep_id}` was not minted"),
+                            format!(
+                                "intra-batch dependency `{}` was not minted",
+                                display(&dep_id)
+                            ),
                         )]
                     })?
                 }
                 Some(RefResolution::Ambiguous) => {
                     return Err(vec![FieldError::new(
                         "dependencies",
-                        format!("ambiguous dependency reference `{dep_id}` (matches >1 record)"),
+                        format!(
+                            "ambiguous dependency reference `{}` (matches >1 record)",
+                            display(&dep_id)
+                        ),
                     )]);
                 }
                 None => match storage_resolve.get(&dep_id) {
@@ -362,7 +381,8 @@ pub(crate) fn resolve_dep_refs(
                         return Err(vec![FieldError::new(
                             "dependencies",
                             format!(
-                                "unresolved dependency reference `{dep_id}` (no batch or storage match)"
+                                "unresolved dependency reference `{}` (no batch or storage match)",
+                                display(&dep_id)
                             ),
                         )]);
                     }
