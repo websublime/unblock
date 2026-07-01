@@ -42,7 +42,7 @@ pass as hard gates; unblock dogfoods its own repo (issues imported from `bd` via
 | FR-4 | Query surface: `list` / `ready` / `blocked` / `search` / `count` / `stale` (`ready` = canonical agent entrypoint) |
 | FR-5 | Typed dependency edges + graph (`petgraph` traversal, `blocks`-cycle rejection) |
 | FR-7 / FR-8 | Optional JSONL export/import (atomic write; conflict-marker + malformed-JSON rejection; path confinement) |
-| FR-26 | One-shot best-effort `bd` → unblock import (D16) |
+| FR-26 | One-shot best-effort `bd` → unblock import (D16/D24) |
 | FR-9 / FR-10 | Single shared engine; in-process write `Semaphore` (D14); read fast path |
 | FR-11 / FR-12 | Agent contract: structured errors (`code`/`message`/`hint`/`retryable`), 0–8 exit codes + MCP error parity; self-describing `capabilities`/`schema` versioned by `contract_version` |
 | FR-13 (subset) | Layered config: CLI > env (`UNBLOCK_*`) > project `config.toml` > defaults |
