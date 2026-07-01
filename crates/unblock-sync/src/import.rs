@@ -118,10 +118,108 @@ fn classify(existing: Option<Issue>, incoming: Issue, policy: CollisionPolicy) -
     }
 }
 
+/// Shared FR-8 preflight for BOTH import paths (`import_jsonl` and `bd_import::import_bd`) — MF-4.
+///
+/// Runs the path-confinement + conflict-marker guards so FR-8 cannot be bypassed by construction: no
+/// import can reach the classify+tx tail ([`apply_records`]) without confining the path and rejecting
+/// a conflict-marker file first. The bounded fd-metadata size guard is enforced inside
+/// [`ensure_no_conflict_markers`] (and again in `validate_records` / the bd `map_bd_record` reader).
+/// The per-line validation (`IssueValidator` + in-file dup-id) is caller-specific: `import_jsonl`
+/// runs [`validate_records`]; `bd_import` runs the equivalent after `map_bd_record`.
+///
+/// Returns the canonicalized, confined path (the caller then reads records from it).
+///
+/// # Errors
+///
+/// [`SyncError::PathTraversal`] (confinement) / [`SyncError::ConflictMarkers`] (a merge accident) /
+/// the ingestion-guard errors from the bounded read — all BEFORE any DB write.
+pub(crate) fn preflight_source(
+    path: &Path,
+    confine_root: &Path,
+    allow_external: bool,
+) -> Result<std::path::PathBuf, SyncError> {
+    // (1) path confinement.
+    let canonical = validate_sync_path(path, confine_root, allow_external)?;
+    // (2) conflict markers (also enforces the fd-metadata size guard + bounded per-line read, MF-3).
+    ensure_no_conflict_markers(&canonical)?;
+    Ok(canonical)
+}
+
+/// The classify + atomic-`create_issues` tail shared by BOTH import paths (D24/F5, steps 5a-5c).
+///
+/// Classifies every record (READ-ONLY `get_issue` probes) under the SAME tombstone-guard-first →
+/// `sync_equals`-Skip → exists-Skip matrix, then applies the new-id subset through ONE
+/// `Storage::create_issues` tx (rollback-on-any → ZERO rows). The engine holds the D14 write permit
+/// across the whole call (MF-4), so no concurrent writer races a classified-new id between probe and
+/// tx. `imported` is set only AFTER the tx commits.
+///
+/// The returned report carries `imported`/`skipped`/`dropped_fields` with `dependencies: 0,
+/// comments: 0` — EACH CALLER finalizes the two relation counts on the returned report (MF-2):
+/// `import_jsonl` leaves them `0`; `bd_import` sets its POST-repair/POST-dedup tallies.
+///
+/// `opts.dry_run` short-circuits AFTER classify (report the plan, mutate nothing — SF-5); `import_bd`
+/// synthesizes `dry_run: false` at its call site, so it always applies.
+///
+/// # Errors
+///
+/// [`SyncError::ImportCollision`] under `Error`; the transparent `Storage` source if the atomic
+/// `create_issues` tx fails (rollback → ZERO rows).
+pub(crate) async fn apply_records(
+    storage: &dyn Storage,
+    records: Vec<Issue>,
+    dropped: Vec<String>,
+    actor: &str,
+    opts: &ImportOptions,
+) -> Result<ImportReport, SyncError> {
+    // (5a) classify every record (read-only `get_issue` probes).
+    let mut create_subset: Vec<Issue> = Vec::new();
+    let mut skipped = 0usize;
+    for incoming in records {
+        let id = incoming.id.clone();
+        let existing = storage.get_issue(&incoming.id).await?;
+        match classify(existing, incoming, opts.on_collision) {
+            ApplyDecision::Import(issue) => create_subset.push(*issue),
+            ApplyDecision::Skip { reason } => {
+                tracing::debug!(target: "unblock.reliability", id = %id, reason, "import: skipping record");
+                skipped += 1;
+            }
+            ApplyDecision::Collision { id } => return Err(SyncError::ImportCollision { id }),
+        }
+    }
+
+    // dry_run: report the plan (would-import = new-id subset size), mutate nothing (SF-5).
+    if opts.dry_run {
+        return Ok(ImportReport {
+            imported: create_subset.len(),
+            skipped,
+            dependencies: 0,
+            comments: 0,
+            dropped_fields: dropped,
+        });
+    }
+
+    // (5b) ONE atomic tx over the new-id subset (rollback-on-any → ZERO rows). `imported` is set only
+    //      after the tx COMMITS (a rollback propagates as Err, never a partial count).
+    if !create_subset.is_empty() {
+        storage.create_issues(&create_subset, actor).await?;
+    }
+
+    // (5c) imported set only after commit; relation counts default to 0 (each caller finalizes).
+    Ok(ImportReport {
+        imported: create_subset.len(),
+        skipped,
+        dependencies: 0,
+        comments: 0,
+        dropped_fields: dropped,
+    })
+}
+
 /// Import `path` into the store (FR-8), returning the [`ImportReport`].
 ///
 /// The engine holds the D14 write permit across this whole call (MF-4). Production callers pass
-/// `on_collision: Skip`; the apply is atomic (classify read-only, then ONE `create_issues` tx).
+/// `on_collision: Skip`; the apply is atomic (classify read-only, then ONE `create_issues` tx). This
+/// generic path imports only unblock's own canonical exports, so it applies NO bd repairs and leaves
+/// `dependencies`/`comments` at `0` (it never tallies relations).
 ///
 /// # Errors
 ///
@@ -136,56 +234,17 @@ pub async fn import_jsonl(
     actor: &str,
     opts: &ImportOptions,
 ) -> Result<ImportReport, SyncError> {
-    // (1) path confinement.
-    let canonical = validate_sync_path(path, confine_root, opts.allow_external)?;
-    // (2) conflict markers.
-    ensure_no_conflict_markers(&canonical)?;
+    // (1)/(2) shared FR-8 preflight: path confinement + conflict-marker rejection (ZERO DB writes).
+    let canonical = preflight_source(path, confine_root, opts.allow_external)?;
     // (3) per-line validation — ALL failures collected; ANY survivor aborts with ZERO writes.
     let summary = validate_records(&canonical)?;
     if let Some((line, detail)) = summary.failures.first() {
         return Err(first_failure_to_error(*line, detail));
     }
 
-    // (4)/(5) classify every record (read-only `get_issue` probes).
-    let mut create_subset: Vec<Issue> = Vec::new();
-    let mut skipped = 0usize;
-    for incoming in summary.records {
-        let id = incoming.id.clone();
-        let existing = storage.get_issue(&incoming.id).await?;
-        match classify(existing, incoming, opts.on_collision) {
-            ApplyDecision::Import(issue) => create_subset.push(*issue),
-            ApplyDecision::Skip { reason } => {
-                tracing::debug!(target: "unblock.reliability", id = %id, reason, "import: skipping record");
-                skipped += 1;
-            }
-            ApplyDecision::Collision { id } => return Err(SyncError::ImportCollision { id }),
-        }
-    }
-
-    // (4) dry_run: report the plan, mutate nothing.
-    if opts.dry_run {
-        return Ok(ImportReport {
-            imported: create_subset.len(),
-            skipped,
-            dependencies: 0,
-            comments: 0,
-            dropped_fields: Vec::new(),
-        });
-    }
-
-    // (5b) ONE atomic tx over the new-id subset (rollback-on-any → ZERO rows). `imported` is set only
-    //      after the tx COMMITS (a rollback propagates as Err, never a partial count).
-    if !create_subset.is_empty() {
-        storage.create_issues(&create_subset, actor).await?;
-    }
-
-    Ok(ImportReport {
-        imported: create_subset.len(),
-        skipped,
-        dependencies: 0,
-        comments: 0,
-        dropped_fields: Vec::new(),
-    })
+    // (4)/(5) classify + atomic apply via the shared tail — the generic path drops no fields and
+    //         never tallies relations, so `dropped`/`dependencies`/`comments` stay empty/`0`.
+    apply_records(storage, summary.records, Vec::new(), actor, opts).await
 }
 
 /// Map the first collected validation failure to its typed [`SyncError`] (ZERO DB writes).
