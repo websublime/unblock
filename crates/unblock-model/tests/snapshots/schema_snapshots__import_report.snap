@@ -5,17 +5,17 @@ expression: json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "ImportReport",
-  "description": "The report of a JSONL/bd import operation (FR-8/FR-26).\n\n`dependencies`/`comments` count the relation/comment rows migrated by the one-shot `bd` import\n(D24/F1), tallied on the POST-repair, POST-dedup record (faithful to bd's\n`record_imported_relation_counts`); both stay `0` on the generic `import_jsonl` path (it never\ntallies them).",
+  "description": "The report of a JSONL/bd import operation (FR-8/FR-26).\n\n`dependencies`/`comments` count the relations/comments of the issues ACTUALLY inserted by the\none-shot `bd` import (the applied subset — D24/F1), matching bd's applied-subset scoping (its\n`record_imported_relation_counts` runs only on applied Insert/Update records, never on a Skip). So\nan idempotent rerun (all records Skipped) reports `dependencies=0, comments=0`. Both stay `0` on\nthe generic `import_jsonl` path (it never tallies them).",
   "type": "object",
   "properties": {
     "comments": {
-      "description": "Number of comments migrated (`0` on the generic `import_jsonl` path).",
+      "description": "Comments on the applied (actually-inserted) subset (`0` on a full-Skip rerun and on the\ngeneric `import_jsonl` path).",
       "type": "integer",
       "format": "uint",
       "minimum": 0
     },
     "dependencies": {
-      "description": "Number of dependency edges migrated (POST-dedup; `0` on the generic `import_jsonl` path).",
+      "description": "Dependency edges on the applied (actually-inserted) subset (`0` on a full-Skip rerun and on\nthe generic `import_jsonl` path).",
       "type": "integer",
       "format": "uint",
       "minimum": 0

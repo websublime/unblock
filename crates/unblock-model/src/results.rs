@@ -52,19 +52,22 @@ pub struct CloseOutcome {
 
 /// The report of a JSONL/bd import operation (FR-8/FR-26).
 ///
-/// `dependencies`/`comments` count the relation/comment rows migrated by the one-shot `bd` import
-/// (D24/F1), tallied on the POST-repair, POST-dedup record (faithful to bd's
-/// `record_imported_relation_counts`); both stay `0` on the generic `import_jsonl` path (it never
-/// tallies them).
+/// `dependencies`/`comments` count the relations/comments of the issues ACTUALLY inserted by the
+/// one-shot `bd` import (the applied subset — D24/F1), matching bd's applied-subset scoping (its
+/// `record_imported_relation_counts` runs only on applied Insert/Update records, never on a Skip). So
+/// an idempotent rerun (all records Skipped) reports `dependencies=0, comments=0`. Both stay `0` on
+/// the generic `import_jsonl` path (it never tallies them).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct ImportReport {
     /// Number of issues imported.
     pub imported: usize,
     /// Number of lines skipped (no-ops / rejected).
     pub skipped: usize,
-    /// Number of dependency edges migrated (POST-dedup; `0` on the generic `import_jsonl` path).
+    /// Dependency edges on the applied (actually-inserted) subset (`0` on a full-Skip rerun and on
+    /// the generic `import_jsonl` path).
     pub dependencies: usize,
-    /// Number of comments migrated (`0` on the generic `import_jsonl` path).
+    /// Comments on the applied (actually-inserted) subset (`0` on a full-Skip rerun and on the
+    /// generic `import_jsonl` path).
     pub comments: usize,
     /// Fields dropped during import.
     pub dropped_fields: Vec<String>,

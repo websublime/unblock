@@ -137,7 +137,9 @@ const KNOWN_COMMENT_KEYS: &[&str] = &["id", "issue_id", "author", "text", "creat
 ///
 /// Synthesizes `ImportOptions { dry_run: false, allow_external: false, on_collision: Skip }` (no
 /// `opts` — Skip-only, always applies). The engine holds the D14 write permit across the whole call.
-/// `dependencies`/`comments` on the report are the POST-repair/POST-dedup relation tallies (MF-2).
+/// `dependencies`/`comments` on the report count the relations/comments of the issues ACTUALLY
+/// inserted (the applied subset), matching bd's applied-subset scoping (MF-2) — so an idempotent rerun
+/// (all records Skipped) reports `dependencies=0, comments=0`.
 ///
 /// # Errors
 ///
@@ -158,24 +160,24 @@ pub async fn import_bd(
     // (3) per-line map + repair + validate + in-file dup-id — ALL failures abort with ZERO writes.
     let mapped = read_bd_records(&canonical)?;
 
-    // Tally the relation/comment counts on the POST-repair, POST-dedup records (faithful to bd's
-    // `record_imported_relation_counts`, mod.rs:4611-4614) — counted over EVERY mapped record (the
-    // migrated set bd reports; the shared apply tail decides which rows are actually inserted).
-    let dependencies: usize = mapped.records.iter().map(|i| i.dependencies.len()).sum();
-    let comments: usize = mapped.records.iter().map(|i| i.comments.len()).sum();
-
-    // (4)/(5) funnel into the shared atomic classify+create tail (Skip-only, always applies).
+    // (4)/(5) funnel into the shared atomic classify+create tail (Skip-only, always applies). The
+    //         tail returns the relation/comment sums over the APPLIED subset (the records it actually
+    //         inserts), not over every mapped record: it counts the relations/comments of the issues
+    //         ACTUALLY inserted, matching bd's applied-subset scoping (bd's
+    //         `record_imported_relation_counts`, mod.rs:4611-4614, runs ONLY on an applied
+    //         Insert/Update, mod.rs:4563/4579 — NEVER on a Skip, mod.rs:4581). So an idempotent rerun
+    //         (all Skipped) reports `dependencies=0, comments=0`.
     let opts = ImportOptions {
         dry_run: false,
         allow_external: false,
         on_collision: crate::import::CollisionPolicy::Skip,
     };
-    let mut report =
+    let (mut report, applied) =
         apply_records(storage, mapped.records, mapped.dropped_fields, actor, &opts).await?;
 
-    // Finalize the two relation counts on the report the shared tail returned (MF-2).
-    report.dependencies = dependencies;
-    report.comments = comments;
+    // Finalize the two relation counts on the report from the APPLIED subset (MF-2).
+    report.dependencies = applied.dependencies;
+    report.comments = applied.comments;
     Ok(report)
 }
 
@@ -187,10 +189,18 @@ struct MappedBd {
 
 /// Read every line of the (preflighted) bd export, mapping + repairing + validating each.
 ///
-/// The reader mirrors [`crate::jsonl::validate_records`]'s bounded per-line read + fd-metadata size
-/// guard (MF-3). Per-line: [`map_bd_record`] (unknown-key diff + `from_value` + 7 repairs + shared
+/// The reader mirrors [`crate::jsonl::validate_records`]'s bounded per-line read (MF-3) + the
+/// fd-metadata file-size guard against [`crate::conflict::MAX_IMPORT_FILE_BYTES`] (the FORK-3/NFR-18
+/// ingestion bound). Per-line: [`map_bd_record`] (unknown-key diff + `from_value` + 7 repairs + shared
 /// `normalize`), then `IssueValidator::validate` + in-file dup-id — the FIRST surviving failure aborts
 /// with ZERO DB writes (faithful to the generic path).
+///
+/// NOTE (V1): the fd-metadata guard here re-checks size/regular-file that `preflight_source` →
+/// `ensure_no_conflict_markers` already ran on this same path. This double-check is DELIBERATE — it
+/// mirrors the generic path exactly ([`crate::jsonl::validate_records`] re-runs the identical guard
+/// after preflight, `jsonl.rs`). Both readers open their OWN guarded fd rather than threading a reader
+/// out of `preflight_source`, keeping the FR-8 preflight a pure boolean gate (no fd handed across the
+/// classify boundary). Deduping would break that symmetry for a micro-opt, so it is left as-is.
 fn read_bd_records(path: &Path) -> Result<MappedBd, SyncError> {
     use std::io::BufReader;
 
@@ -290,7 +300,11 @@ fn read_bd_records(path: &Path) -> Result<MappedBd, SyncError> {
 ///
 /// [`SyncError::JsonEncode`] if the `Value` fails to deserialize as an [`Issue`] (the caller re-maps
 /// it to a line-numbered [`SyncError::JsonlParse`]).
-pub fn map_bd_record(value: Value) -> Result<(Issue, Vec<String>), SyncError> {
+///
+/// Crate-internal (`import_bd` is the only public entry): the sole in-crate caller
+/// ([`read_bd_records`]) feeds a `from_str`-bounded `Value`, so exposing the unbounded `from_value`
+/// recursion surface (no 128-level limit) to external callers is intentionally avoided (V1/V4).
+pub(crate) fn map_bd_record(value: Value) -> Result<(Issue, Vec<String>), SyncError> {
     // (a) diff the raw TOP-LEVEL keys against the known Issue key set BEFORE `from_value` (serde
     //     silently discards unknowns — Issue does not set `deny_unknown_fields`).
     let known: HashSet<&str> = KNOWN_ISSUE_KEYS.iter().copied().collect();
