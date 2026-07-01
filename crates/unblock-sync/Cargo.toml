@@ -20,3 +20,11 @@ snafu = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
 dunce = { workspace = true }
+
+[dev-dependencies]
+# Backend-free `FakeStorage` double (full `#[async_trait] Storage` impl), property + snapshot tests,
+# and the real-libsql contract suite. All are already in `[workspace.dependencies]`.
+async-trait = { workspace = true }
+proptest = { workspace = true }
+insta = { workspace = true }
+tempfile = { workspace = true }
