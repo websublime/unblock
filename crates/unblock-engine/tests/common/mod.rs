@@ -35,6 +35,18 @@ pub async fn session_with(cfg: SessionConfig) -> Session {
 pub async fn session_over(storage: Arc<dyn Storage>, cfg: SessionConfig) -> Session {
     let workspace_dir = PathBuf::from("/tmp/unblock-test-ws");
     let unblock_dir = workspace_dir.join(".unblock");
+    session_over_in_dir(storage, cfg, workspace_dir, unblock_dir).await
+}
+
+/// Like [`session_over`], but with an explicit `workspace_dir` / `unblock_dir` (used by the
+/// interchange tests, which need a REAL on-disk `.unblock/` under a tempdir for the confined
+/// JSONL export/import).
+pub async fn session_over_in_dir(
+    storage: Arc<dyn Storage>,
+    cfg: SessionConfig,
+    workspace_dir: PathBuf,
+    unblock_dir: PathBuf,
+) -> Session {
     let config = ResolvedConfig::default();
     let paths = ConfigPaths {
         db_path: unblock_dir.join(&config.db_filename),
@@ -49,6 +61,28 @@ pub async fn session_over(storage: Arc<dyn Storage>, cfg: SessionConfig) -> Sess
         paths,
     };
     Session::open(ctx, cfg).await.expect("open session")
+}
+
+/// Build a real-storage `Session` whose `.unblock/` dir is a freshly-created tempdir (the caller owns
+/// the returned `TempDir` so it outlives the session). Used by the interchange tests.
+pub async fn session_with_unblock_dir() -> (Session, tempfile::TempDir) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let workspace_dir = tmp.path().to_path_buf();
+    let unblock_dir = workspace_dir.join(".unblock");
+    std::fs::create_dir_all(&unblock_dir).expect("create .unblock");
+    let storage = LibsqlStorage::open_in_memory()
+        .await
+        .expect("open in-memory");
+    storage.migrate().await.expect("migrate");
+    let storage: Arc<dyn Storage> = Arc::new(storage);
+    let session = session_over_in_dir(
+        storage,
+        SessionConfig::default(),
+        workspace_dir,
+        unblock_dir,
+    )
+    .await;
+    (session, tmp)
 }
 
 /// A fixed reference timestamp the corpus builders use (deterministic snapshots).
