@@ -148,7 +148,9 @@ pub fn arb_list_filters() -> impl Strategy<Value = ListFilters> {
         prop::option::of(arb_priority()),
         prop::option::of("[a-z ]{0,8}"),
         prop::bool::ANY,
-        prop::bool::ANY,
+        // `(include_closed, include_tombstone)` bundled into one tuple slot to stay within proptest's
+        // tuple-arity `Strategy` impls (D23 added the 13th `ListFilters` field).
+        (prop::bool::ANY, prop::bool::ANY),
         prop::option::of(0_usize..1000),
         prop::option::of(0_usize..1000),
     )
@@ -163,7 +165,7 @@ pub fn arb_list_filters() -> impl Strategy<Value = ListFilters> {
                 priority_max,
                 text_contains,
                 include_deferred,
-                include_closed,
+                (include_closed, include_tombstone),
                 limit,
                 offset,
             )| ListFilters {
@@ -177,6 +179,7 @@ pub fn arb_list_filters() -> impl Strategy<Value = ListFilters> {
                 text_contains,
                 include_deferred,
                 include_closed,
+                include_tombstone,
                 limit,
                 offset,
             },

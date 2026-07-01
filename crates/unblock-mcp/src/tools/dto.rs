@@ -126,6 +126,9 @@ impl FilterInput {
             text_contains: self.text_contains,
             include_deferred: self.include_deferred,
             include_closed: self.include_closed,
+            // `include_tombstone` is export-internal (FORK-1/D23, spine §5.2 non-mirror): no agent
+            // query sets it, so `FilterInput` deliberately does NOT carry it — always `false` here.
+            include_tombstone: false,
             limit: self.limit,
             offset: self.offset,
         }
