@@ -8,7 +8,7 @@ use std::path::Path;
 use chrono::{TimeZone, Utc};
 use unblock_model::{Issue, ListFilters, Status};
 use unblock_sync::{
-    ExportOptions, ImportOptions, export_jsonl, import_jsonl, serialize_issue_line,
+    CollisionPolicy, ExportOptions, ImportOptions, export_jsonl, import_jsonl, serialize_issue_line,
 };
 
 use unblock_storage::{LibsqlStorage, Storage};
@@ -186,6 +186,66 @@ async fn dry_run_over_resurrection_path_zero_writes() {
     assert_eq!(ir.imported, 0);
     let after = storage.get_issue("ub-1").await.unwrap().unwrap();
     assert_eq!(after.status, Status::Tombstone);
+}
+
+#[tokio::test]
+async fn tombstone_guard_wins_over_error_policy_on_real_libsql() {
+    // SF-1 (NON-VACUOUS): the tombstone guard is distinguished from the production-default `Skip`
+    // ONLY under a non-`Skip` policy. Under `CollisionPolicy::Error`, a DB-tombstoned id whose
+    // incoming line DIFFERS (a non-tombstone resurrection attempt) would — WITHOUT the guard — fall
+    // through to the collision branch and raise `ImportCollision`. The guard runs FIRST, so the
+    // record is SKIPPED ("tombstone protection"): zero writes, the row stays tombstoned, and NO
+    // `ImportCollision` is raised. Removing the `existing.is_tombstone() && !incoming.is_tombstone()`
+    // guard flips this to `Err(ImportCollision)` — this test then FAILS (proven by mutation).
+    let (_tmp, dir) = unblock_dir();
+    let storage = fresh_storage().await;
+    storage.create_issue(&issue("ub-1"), "t").await.unwrap();
+    storage
+        .delete_issue(
+            &unblock_storage::DeletePlan {
+                mode: unblock_storage::DeleteMode::Tombstone,
+                targets: vec!["ub-1".to_string()],
+                cascade_children: Vec::new(),
+            },
+            "admin",
+        )
+        .await
+        .unwrap();
+    let before = storage.get_issue("ub-1").await.unwrap().unwrap();
+    assert_eq!(before.status, Status::Tombstone);
+
+    // The incoming line is a DIFFERING non-tombstone record for the same id (so `sync_equals` is
+    // false and, absent the guard, the `Error` policy would collide).
+    let mut incoming = issue("ub-1");
+    incoming.title = "resurrect me".to_string();
+    let line = serialize_issue_line(&incoming).unwrap();
+    let path = write_lines(&dir, "issues.jsonl", &[line]);
+
+    let ir = import_jsonl(
+        &storage,
+        &path,
+        &dir,
+        "t",
+        &ImportOptions {
+            on_collision: CollisionPolicy::Error,
+            ..ImportOptions::default()
+        },
+    )
+    .await
+    .expect("the tombstone guard must skip BEFORE the Error collision branch");
+    assert_eq!(ir.imported, 0, "must not resurrect under Error policy");
+    assert_eq!(
+        ir.skipped, 1,
+        "skipped via the tombstone guard, not collided"
+    );
+
+    // The DB row is UNTOUCHED — still a tombstone.
+    let after = storage.get_issue("ub-1").await.unwrap().unwrap();
+    assert_eq!(
+        after.status,
+        Status::Tombstone,
+        "tombstone guard protects even under Error policy"
+    );
 }
 
 #[tokio::test]

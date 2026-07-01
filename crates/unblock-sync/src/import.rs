@@ -190,14 +190,11 @@ fn first_failure_to_error(line: usize, detail: &str) -> SyncError {
         // Extract the id from the `duplicate id '...'` detail for a precise error.
         let id = detail.split('\'').nth(1).unwrap_or_default().to_string();
         SyncError::DuplicateId { line, id }
-    } else if detail.starts_with("JSONL parse error") || detail.contains("not valid UTF-8") {
-        // Re-parse to reconstruct a JsonlParse is not possible without the line; surface as a
-        // ValidationFailed carrying the detail so the exit code stays exit-6 (JSONL parse class).
-        SyncError::ValidationFailed {
-            line,
-            detail: detail.to_string(),
-        }
     } else {
+        // Everything else (a JSONL parse error, a non-UTF-8 line, or a semantic validation failure)
+        // surfaces as a `ValidationFailed` carrying the detail, so the exit code stays exit-6 (the
+        // JSONL/validation class). Reconstructing a `JsonlParse` from the detail alone is not
+        // possible without the raw line, so a single arm is exact here.
         SyncError::ValidationFailed {
             line,
             detail: detail.to_string(),

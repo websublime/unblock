@@ -231,6 +231,54 @@ mod tests {
     use super::{temp_path_for, write_atomic};
     use crate::error::SyncError;
 
+    /// Count the `*.tmp` files directly under `dir` (orphan-temp detector).
+    fn tmp_count(dir: &std::path::Path) -> usize {
+        std::fs::read_dir(dir)
+            .expect("read_dir")
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .count()
+    }
+
+    #[tokio::test]
+    async fn post_temp_failure_removes_orphan_temp_via_raii_guard() {
+        // SF-3 (NON-VACUOUS): a failure that fires AFTER the temp file has been created must still
+        // leave ZERO orphan `*.tmp` files — the `TempFileGuard::drop` RAII cleanup fires on the early
+        // `Err` return. The three `atomic_failure.rs` integration tests all reject at PREFLIGHT (an
+        // external target — before any temp exists), so they cannot exercise the guard. Here the
+        // target NAME resolves to a valid confined `issues.jsonl`, so the temp IS created and written;
+        // the failure is injected at the PRE-RENAME re-validation, which sees the target path is a
+        // DIRECTORY (not a regular file) and returns `PathTraversal(NonRegularFile)` — strictly after
+        // the temp exists and the guard is armed.
+        //
+        // Neutering `TempFileGuard::drop` (making it a no-op) leaves the orphan `*.tmp` behind, so the
+        // `tmp_count == 0` assertion then FAILS (proven by mutation).
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("issues.jsonl");
+        // Make the target a NON-EMPTY DIRECTORY: the temp is created first, then the pre-rename
+        // `validate_sync_path(final_path)` rejects the directory AFTER the temp already exists.
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("occupant"), b"x").unwrap();
+
+        let err = write_atomic(&target, dir.path(), std::iter::once("line".to_string()))
+            .await
+            .expect_err("a directory target must fail the write");
+        assert!(
+            matches!(err, SyncError::PathTraversal { .. }),
+            "expected a post-temp PathTraversal(NonRegularFile), got {err:?}"
+        );
+
+        // RAII: despite the temp being created + written before the failure, no orphan `*.tmp` remains.
+        assert_eq!(
+            tmp_count(dir.path()),
+            0,
+            "the temp guard must remove the orphan temp on a post-temp failure"
+        );
+        // The pre-existing directory (the "original") is untouched.
+        assert!(target.is_dir(), "the target directory is left intact");
+        assert!(target.join("occupant").exists(), "its contents survive");
+    }
+
     #[tokio::test]
     async fn writes_target_with_content() {
         let dir = tempfile::tempdir().unwrap();
