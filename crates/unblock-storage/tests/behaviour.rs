@@ -304,6 +304,91 @@ async fn delete_tombstone_from_non_terminal_emits_deleted() {
     );
 }
 
+/// `visibility_branch` (FORK-1/D23): the full-corpus export filter
+/// (`include_closed=true, include_deferred=true, include_tombstone=true`) returns EVERY status
+/// (Open + Closed + Tombstone), while the DEFAULT filter still excludes closed + tombstone — the
+/// regression guard that the new widest branch did NOT widen the default visibility.
+#[tokio::test]
+async fn list_visibility_include_tombstone_returns_full_corpus() {
+    let storage = fresh().await;
+    // Open (ub-open).
+    storage
+        .create_issue(&issue("ub-open", "open"), "a")
+        .await
+        .unwrap();
+    // Closed (ub-closed) via an update.
+    storage
+        .create_issue(&issue("ub-closed", "closed"), "a")
+        .await
+        .unwrap();
+    storage
+        .update_issue(
+            "ub-closed",
+            &IssuePatch {
+                status: Some(Status::Closed),
+                ..IssuePatch::default()
+            },
+            "a",
+        )
+        .await
+        .unwrap();
+    // Tombstone (ub-tomb) via a soft delete.
+    storage
+        .create_issue(&issue("ub-tomb", "tomb"), "a")
+        .await
+        .unwrap();
+    storage
+        .delete_issue(
+            &DeletePlan {
+                mode: DeleteMode::Tombstone,
+                targets: vec!["ub-tomb".to_string()],
+                cascade_children: Vec::new(),
+            },
+            "admin",
+        )
+        .await
+        .unwrap();
+
+    // Full-corpus export filter → all three statuses present.
+    let full = ListFilters {
+        include_closed: true,
+        include_deferred: true,
+        include_tombstone: true,
+        ..ListFilters::default()
+    };
+    let mut ids: Vec<String> = storage
+        .list_issues(&full)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|i| i.id)
+        .collect();
+    ids.sort();
+    assert_eq!(
+        ids,
+        vec![
+            "ub-closed".to_string(),
+            "ub-open".to_string(),
+            "ub-tomb".to_string()
+        ],
+        "full-corpus filter must include closed + tombstone rows"
+    );
+
+    // DEFAULT filter → only the Open row (closed + tombstone still excluded — regression guard).
+    let default_ids: Vec<String> = storage
+        .list_issues(&ListFilters::default())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|i| i.id)
+        .collect();
+    assert_eq!(
+        default_ids,
+        vec!["ub-open".to_string()],
+        "the default filter must still exclude closed + tombstone"
+    );
+}
+
 #[tokio::test]
 async fn delete_from_terminal_emits_no_deleted_event() {
     let storage = fresh().await;

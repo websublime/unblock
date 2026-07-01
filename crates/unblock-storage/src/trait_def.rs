@@ -64,9 +64,11 @@ pub trait Storage: Send + Sync {
 
     /// Create an issue, returning its allocated id.
     ///
-    /// Validates via the model `IssueValidator`, allocates the id, dedups by `content_hash`
-    /// (FR-26 idempotency), inserts the row, and writes an `Event(Created)` in the same
-    /// transaction. `actor` is the attributed author.
+    /// Validates via the model `IssueValidator`, guards against id/`external_ref` collisions, inserts
+    /// the row, and writes an `Event(Created)` in the same transaction. `actor` is the attributed
+    /// author. There is **NO** content-hash dedup here — the hash is computed and stored (a dedup
+    /// cache column) but never short-circuits an insert; FR-26 import idempotency lives in
+    /// `unblock-sync` (get-then-skip via `sync_equals`), not in storage. (Matches `crud.rs`.)
     async fn create_issue(&self, issue: &Issue, actor: &str) -> Result<String, StorageError>;
 
     /// Create the WHOLE slice in **exactly ONE** `BEGIN IMMEDIATE` transaction (D22/T2.3, spine
