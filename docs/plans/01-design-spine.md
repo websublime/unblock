@@ -264,7 +264,7 @@ pub struct CacheKey(pub String); // ready/blocked projection cache key contract.
 
 ### 1.10 Query/result contract types (CF-A/CF-B/CF-C — defined here, re-exported by upper crates)
 
-These types are **defined normatively in `unblock-model`** so that crates which cannot depend on `unblock-storage` can still reference them. `unblock-policy` needs `ListFilters`/`CountGroupBy` for its filter-fingerprint (CF-C); `unblock-render` (model + error only) needs the display/result DTOs and `OutputFormat` to format output (CF-A/CF-J); `DiagnosticReport`/`DiagnosticKind`/`DiagnosticFinding` are referenced by engine/render/mcp and previously had no home (CF-B). The **full owned set** is: `ListFilters, CountGroupBy, OutputFormat, CountBucket, GraphEdge, DepTree, CloseOutcome, ImportReport, ExportReport, DiagnosticReport, DiagnosticFinding, DiagnosticKind`. Every other crate (`unblock-storage`, `unblock-engine`, `unblock-render`, `unblock-config`, `unblock-sync`, `unblock-mcp`) **re-exports** these via `pub use unblock_model::{...}` — none redefines them.
+These types are **defined normatively in `unblock-model`** so that crates which cannot depend on `unblock-storage` can still reference them. `unblock-policy` needs `ListFilters`/`CountGroupBy` for its filter-fingerprint (CF-C); Any field ADDED to `ListFilters` (e.g. `include_tombstone`, D23) MUST also be folded into `unblock-policy::filters_fingerprint` so the fingerprint stays INJECTIVE (two filter sets differing only in the new field must produce distinct fingerprints) — see the policy crate plan `cache_key.rs`. `unblock-render` (model + error only) needs the display/result DTOs and `OutputFormat` to format output (CF-A/CF-J); `DiagnosticReport`/`DiagnosticKind`/`DiagnosticFinding` are referenced by engine/render/mcp and previously had no home (CF-B). The **full owned set** is: `ListFilters, CountGroupBy, OutputFormat, CountBucket, GraphEdge, DepTree, CloseOutcome, ImportReport, ExportReport, DiagnosticReport, DiagnosticFinding, DiagnosticKind`. Every other crate (`unblock-storage`, `unblock-engine`, `unblock-render`, `unblock-config`, `unblock-sync`, `unblock-mcp`) **re-exports** these via `pub use unblock_model::{...}` — none redefines them.
 
 **Derive policy for §1.10 (NORMATIVE — G-1):** every type below flows to an L7 consumer (MCP `ToolOutput`/`QueryInput`, engine results, render parse-back, policy serialization). They therefore ALL derive `Debug, Clone, Serialize, Deserialize, JsonSchema`, plus `PartialEq, Eq` where round-trip/equality tests need it. The `derive` lines below are normative; crate plans (unblock-model `filters.rs`/`results.rs`, mcp `ToolOutput`, engine, render) must match exactly. `PathBuf` derives `JsonSchema` (serialized as a string) — `ExportReport.path` is schema-valid.
 
@@ -282,6 +282,13 @@ pub struct ListFilters {
     pub text_contains: Option<String>,
     pub include_deferred: bool,
     pub include_closed: bool,
+    /// Include `status = 'tombstone'` (soft-deleted) rows. Default `false` — the default-visibility,
+    /// `include_deferred`, and `include_closed` branches all EXCLUDE tombstones, so a caller must opt
+    /// in explicitly. Set `true` ONLY by the `unblock-sync` full-corpus export (FORK-1/D23): tombstones
+    /// must be exported so import-side tombstone-non-resurrection (FR-8, spine §1.8) is round-trippable.
+    /// Orthogonal to `include_closed`: export sets BOTH true. list/ready/blocked/search/count/stale keep
+    /// it `false` (agent query surfaces never set it).
+    pub include_tombstone: bool,
     pub limit: Option<usize>,           // None = unlimited (ready is default-complete)
     pub offset: Option<usize>,
 }
@@ -327,6 +334,24 @@ pub struct DiagnosticReport { pub kind: DiagnosticKind, pub findings: Vec<Diagno
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct DiagnosticFinding { pub label: String, pub detail: String } // generic key/value finding row
 ```
+
+`ExportReport.written` counts every serialized issue line in the export corpus, which — per FORK-1/D23 — INCLUDES closed and tombstone rows (`ListFilters { include_closed: true, include_tombstone: true, .. }`) and EXCLUDES ephemeral / `-wisp-` rows. All emitted `DateTime<Utc>` fields are rendered via `unblock_model::fmt_ts_secs` (CF-TS) so export bytes are deterministic and byte-coherent with render (D-OQ-B).
+
+**Canonical timestamp helper (CF-TS — NORMATIVE, D-OQ-B / FORK-4 / D23).** The single source of truth for rendering a `DateTime<Utc>` as an RFC-3339 string lives in **`unblock-model`** (L0), in a new module `src/time.rs`, re-exported flat from `lib.rs`:
+
+```rust
+use chrono::{DateTime, SecondsFormat, Utc};
+/// Canonical RFC-3339 rendering: UTC, SECOND precision, `Z` suffix (e.g. `2026-01-02T03:04:05Z`).
+/// The ONLY path any crate may use to stringify a `DateTime<Utc>` for output/export. No crate may
+/// call `to_rfc3339()` directly (it emits sub-seconds + numeric offset, breaking byte-determinism
+/// and the render↔export byte-coherence the T2.4 JSONL export depends on).
+#[must_use]
+pub fn fmt_ts_secs(dt: DateTime<Utc>) -> String {
+    dt.to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+```
+
+**`unblock-render::fmt_ts` is REWIRED to call it** (`fmt_ts(dt) == unblock_model::fmt_ts_secs(dt)` — render keeps the `fmt_ts` name as a thin wrapper/re-export for its backends; the body becomes the model call, not a second `to_rfc3339_opts`). **`unblock-sync` calls `fmt_ts_secs` directly** on export (sync depends on `unblock-model` at L0, so it needs NO render dep — the `sync→render` layering violation is avoided by construction). DRY end-state: exactly ONE `to_rfc3339_opts(SecondsFormat::Secs, true)` in the workspace (in `unblock-model`). Byte form is `<date>T<time>Z` at second precision — byte-identical to the current `fmt_ts` (verified verbatim at `crates/unblock-render/src/format.rs:146-148` this session). `content_hash` is unaffected (spine §1.8 excludes all timestamps from the hash), so this is hash-safe. Render's doctest (`format.rs:138-143`) and unit test (`format.rs:236-244`) stay green unchanged.
 
 ---
 
@@ -775,7 +800,9 @@ between an earlier prose description and the source are resolved **in favour of 
   `priority_min`/`priority_max`, `assignee`, `labels_all` (AND, per-label `EXISTS`) / `labels_any`
   (OR, single `EXISTS … IN`), `text_contains` (title `LIKE ? ESCAPE '\'`, distinct from the `search`
   needle), and closed/deferred visibility (default excludes `closed`/`tombstone`/`deferred`;
-  `include_closed`/`include_deferred` widen it). `ORDER BY priority ASC, created_at DESC, id ASC` —
+  `include_closed`/`include_deferred` widen it). `include_tombstone` (D23, export-only) additionally
+  widens the baseline to include `status='tombstone'` rows; agent surfaces never set it.
+  `ORDER BY priority ASC, created_at DESC, id ASC` —
   note `created_at` **DESC** (newest-first), **deliberately distinct from `ready`'s `created_at ASC`**
   pre-sort (oldest-first within a priority bucket; policy `ready.rs:16-17`). Default-complete unless
   `limit` set; `offset`-without-`limit` uses `LIMIT -1 OFFSET n`. Authoritative order for render/MCP
@@ -1078,6 +1105,14 @@ pub struct SessionConfig {
 #[derive(Debug, Clone, Default)]
 pub struct ImportOptions { pub dry_run: bool /* ...future import knobs... */ }
 
+// EngineError source set (additive — NORMATIVE): v1 = 3 transparent sources (StorageError / PolicyError /
+// ModelError) + engine-local variants (incl. FeatureNotWired). At T2.4 (D23), a 4th transparent source is added
+// additively, cfg-gated behind the default-on `sync` feature:
+// `#[cfg(feature="sync")] #[snafu(transparent)] Sync { source: unblock_sync::SyncError }`, forwarding
+// `source.code()`/`hint()`/`context()` (CodedError). NON-BREAKING (no v1 signature changes; export_jsonl/import_jsonl
+// stop returning FeatureNotWired{"sync"} once wired, import_bd keeps it until T2.5). The `Health { source: HealthError }`
+// source lands the same way at T3.3. No CONTRACT_VERSION bump (engine-internal, not an MCP schema change).
+
 // NewIssue is ENGINE-owned (defined in unblock-engine; D21) — the input to the MINTING create path
 // `Session::create_issue(NewIssue)`. It carries the domain fields of an interactive create MINUS the
 // id (the engine mints it). The fields mirror IssueInput::Create (§5.2) minus the wire-only knobs
@@ -1221,6 +1256,10 @@ impl Session {
         -> Result<CloseOutcome, EngineError>; // returns newly-unblocked issues (FR-11)
 
     // --- interchange (FR-7/FR-8/FR-26), delegates to unblock-sync ---
+    // T2.4: the export/import BODIES delegate to `unblock_sync::{export_jsonl,import_jsonl}` (cfg-gated behind the
+    // default-on `sync` feature); the engine maps its public `ImportOptions{dry_run}` into sync's internal
+    // `ImportOptions{dry_run, allow_external, on_collision}` at the call site (§4.1 `ImportOptions` note above).
+    // `import_bd` STAYS `FeatureNotWired{"sync"}` until T2.5.
     pub async fn export_jsonl(&self, path: &Path) -> Result<ExportReport, EngineError>; // atomic temp+fsync+rename
     pub async fn import_jsonl(&self, path: &Path, opts: ImportOptions) -> Result<ImportReport, EngineError>;
     pub async fn import_bd(&self, path: &Path) -> Result<ImportReport, EngineError>;     // D16, idempotent via content_hash
@@ -1418,7 +1457,10 @@ pub struct Attribution { #[serde(default)] pub agent_name: Option<String>,
 
 #[derive(Deserialize, JsonSchema, Default)]
 pub struct FilterInput { /* mirrors ListFilters: status, issue_type, assignee, labels_all/any,
-                            priority_min/max, text_contains, include_deferred, include_closed, limit, offset */ }
+                            priority_min/max, text_contains, include_deferred, include_closed, limit, offset.
+                            `include_tombstone` is deliberately NOT mirrored — it is export-internal (no agent
+                            query sets it); the mirror stays intentionally NON-surjective. Do NOT add it to the
+                            wire (no CONTRACT_VERSION bump; FORK-2 guarantee). */ }
 ```
 
 ### 5.3 Output shapes
