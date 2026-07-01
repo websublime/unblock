@@ -145,6 +145,22 @@ pub(crate) fn preflight_source(
     Ok(canonical)
 }
 
+/// The relation/comment sums over the APPLIED subset (the records `apply_records` actually inserts).
+///
+/// Faithful to bd's `record_imported_relation_counts` (`temp/beads_rust-main/src/sync/mod.rs:4611-4614`),
+/// which is invoked ONLY on an applied Insert/Update record (mod.rs:4563/4579), NEVER on a Skip
+/// (mod.rs:4581) — so these sums range over the applied subset, not every mapped record. On an
+/// idempotent rerun (all records Skipped) both sums are `0`. Returned so the CALLER finalizes the two
+/// relation counts on the report (MF-2): `import_jsonl` ignores them (stays `0`); `import_bd` copies
+/// them onto its report.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct AppliedRelationSums {
+    /// Dependency edges on the applied subset (POST-repair/POST-dedup at the `import_bd` call site).
+    pub dependencies: usize,
+    /// Comments on the applied subset.
+    pub comments: usize,
+}
+
 /// The classify + atomic-`create_issues` tail shared by BOTH import paths (D24/F5, steps 5a-5c).
 ///
 /// Classifies every record (READ-ONLY `get_issue` probes) under the SAME tombstone-guard-first →
@@ -153,12 +169,17 @@ pub(crate) fn preflight_source(
 /// across the whole call (MF-4), so no concurrent writer races a classified-new id between probe and
 /// tx. `imported` is set only AFTER the tx commits.
 ///
-/// The returned report carries `imported`/`skipped`/`dropped_fields` with `dependencies: 0,
-/// comments: 0` — EACH CALLER finalizes the two relation counts on the returned report (MF-2):
-/// `import_jsonl` leaves them `0`; `bd_import` sets its POST-repair/POST-dedup tallies.
+/// Returns `(ImportReport, AppliedRelationSums)`. The report carries `imported`/`skipped`/
+/// `dropped_fields` with `dependencies: 0, comments: 0`; the second tuple element carries the
+/// relation/comment sums over the APPLIED subset (the inserted records — NEVER the Skipped ones,
+/// faithful to bd's applied-subset scoping). EACH CALLER finalizes the two relation counts on the
+/// report (MF-2): `import_jsonl` DISCARDS the sums (leaves them `0`); `import_bd` copies them onto its
+/// report.
 ///
 /// `opts.dry_run` short-circuits AFTER classify (report the plan, mutate nothing — SF-5); `import_bd`
-/// synthesizes `dry_run: false` at its call site, so it always applies.
+/// synthesizes `dry_run: false` at its call site, so it always applies. The applied-subset sums are
+/// computed over the same `create_subset` in both the dry-run and commit branches (symmetric with
+/// `imported = create_subset.len()`).
 ///
 /// # Errors
 ///
@@ -170,7 +191,7 @@ pub(crate) async fn apply_records(
     dropped: Vec<String>,
     actor: &str,
     opts: &ImportOptions,
-) -> Result<ImportReport, SyncError> {
+) -> Result<(ImportReport, AppliedRelationSums), SyncError> {
     // (5a) classify every record (read-only `get_issue` probes).
     let mut create_subset: Vec<Issue> = Vec::new();
     let mut skipped = 0usize;
@@ -187,15 +208,24 @@ pub(crate) async fn apply_records(
         }
     }
 
+    // Relation/comment sums over the APPLIED subset ONLY (never the Skipped records) — faithful to
+    // bd's applied-subset scoping (mod.rs:4563/4579/4581). On a full-Skip rerun `create_subset` is
+    // empty, so both sums are `0`.
+    let applied = AppliedRelationSums {
+        dependencies: create_subset.iter().map(|i| i.dependencies.len()).sum(),
+        comments: create_subset.iter().map(|i| i.comments.len()).sum(),
+    };
+
     // dry_run: report the plan (would-import = new-id subset size), mutate nothing (SF-5).
     if opts.dry_run {
-        return Ok(ImportReport {
+        let report = ImportReport {
             imported: create_subset.len(),
             skipped,
             dependencies: 0,
             comments: 0,
             dropped_fields: dropped,
-        });
+        };
+        return Ok((report, applied));
     }
 
     // (5b) ONE atomic tx over the new-id subset (rollback-on-any → ZERO rows). `imported` is set only
@@ -205,13 +235,14 @@ pub(crate) async fn apply_records(
     }
 
     // (5c) imported set only after commit; relation counts default to 0 (each caller finalizes).
-    Ok(ImportReport {
+    let report = ImportReport {
         imported: create_subset.len(),
         skipped,
         dependencies: 0,
         comments: 0,
         dropped_fields: dropped,
-    })
+    };
+    Ok((report, applied))
 }
 
 /// Import `path` into the store (FR-8), returning the [`ImportReport`].
@@ -243,8 +274,11 @@ pub async fn import_jsonl(
     }
 
     // (4)/(5) classify + atomic apply via the shared tail — the generic path drops no fields and
-    //         never tallies relations, so `dropped`/`dependencies`/`comments` stay empty/`0`.
-    apply_records(storage, summary.records, Vec::new(), actor, opts).await
+    //         never tallies relations: DISCARD the applied-subset sums so `dropped`/`dependencies`/
+    //         `comments` stay empty/`0` (D24/F1 — only the bd path tallies relations).
+    let (report, _applied) =
+        apply_records(storage, summary.records, Vec::new(), actor, opts).await?;
+    Ok(report)
 }
 
 /// Map the first collected validation failure to its typed [`SyncError`] (ZERO DB writes).

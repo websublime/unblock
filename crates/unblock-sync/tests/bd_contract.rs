@@ -165,6 +165,72 @@ async fn bd_import_rerun_is_idempotent() {
     assert_eq!(second.imported, 0, "rerun is idempotent");
     assert_eq!(second.skipped, 5, "all 5 records skipped on rerun");
     assert_eq!(count_rows(&storage).await, 5, "no duplicate rows");
+    // The relation counts are scoped to the APPLIED subset (bd's applied-subset scoping): a full-Skip
+    // rerun inserts NOTHING, so deps/comments MUST be 0 — never re-counted over the Skipped records
+    // (would over-report the FR-26 "migrated" count on every idempotent rerun).
+    assert_eq!(
+        second.dependencies, 0,
+        "rerun applies nothing → dependencies=0 (applied-subset scoping)"
+    );
+    assert_eq!(
+        second.comments, 0,
+        "rerun applies nothing → comments=0 (applied-subset scoping)"
+    );
+}
+
+#[tokio::test]
+async fn bd_import_mixed_counts_only_the_newly_applied_subset() {
+    // Applied-subset scoping proof (NOT a full-set tally): first import the fixture (5 records,
+    // bd-1 carries 3 POST-dedup deps + 2 comments). The second import re-presents the SAME 5 records
+    // (all Skipped) PLUS one NEW record (bd-6) carrying its OWN deps + comments. The second report's
+    // relation counts MUST reflect ONLY bd-6's relations (the applied subset) — the Skipped records'
+    // relations are NOT re-counted.
+    let (tmp, dir, staged) = stage_fixture();
+    let storage = fresh_storage().await;
+
+    let first = import_bd(&storage, &staged, &dir, "importer")
+        .await
+        .expect("first import");
+    assert_eq!(first.imported, 5);
+    assert_eq!(first.dependencies, 3, "bd-1 POST-dedup deps");
+    assert_eq!(first.comments, 2, "bd-1 comments");
+
+    // Build the second file: the SAME 5 fixture lines (→ all Skip) + a NEW bd-6 with 2 deps + 1
+    // comment. bd-6's relations are the ONLY applied-subset relations on the second import.
+    let fixture_bytes = std::fs::read(&staged).expect("read staged fixture");
+    let mut second_file = fixture_bytes;
+    let bd6 = concat!(
+        r#"{"id":"bd-6","title":"new record with relations","status":"open","priority":2,"#,
+        r#""issue_type":"task","created_at":"2023-11-14T22:13:20Z",""#,
+        r#"updated_at":"2023-11-14T22:13:20Z","#,
+        r#""dependencies":["#,
+        r#"{"issue_id":"bd-6","depends_on_id":"bd-1","type":"blocks","created_at":"2023-11-14T22:13:20Z"},"#,
+        r#"{"issue_id":"bd-6","depends_on_id":"bd-2","type":"blocks","created_at":"2023-11-14T22:13:20Z"}"#,
+        r#"],"comments":[{"id":9,"issue_id":"bd-6","author":"carol","text":"only comment","created_at":"2023-11-15T09:00:00Z"}]}"#,
+        "\n"
+    );
+    second_file.extend_from_slice(bd6.as_bytes());
+    let staged2 = dir.join("issues.jsonl");
+    std::fs::write(&staged2, &second_file).expect("write second file");
+
+    let second = import_bd(&storage, &staged2, &dir, "importer")
+        .await
+        .expect("second import");
+
+    assert_eq!(second.imported, 1, "only bd-6 is new");
+    assert_eq!(second.skipped, 5, "the 5 fixture records already exist");
+    // Applied-subset scoping: ONLY bd-6's relations are counted (2 deps + 1 comment), NOT the
+    // Skipped bd-1's 3 deps / 2 comments (a full-set tally would report 5 deps / 3 comments).
+    assert_eq!(
+        second.dependencies, 2,
+        "count ONLY bd-6's 2 deps (applied subset), not the skipped bd-1's 3"
+    );
+    assert_eq!(
+        second.comments, 1,
+        "count ONLY bd-6's 1 comment (applied subset), not the skipped bd-1's 2"
+    );
+    assert_eq!(count_rows(&storage).await, 6, "5 + bd-6");
+    drop(tmp);
 }
 
 #[tokio::test]

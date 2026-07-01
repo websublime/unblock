@@ -22,8 +22,9 @@ mod testutil;
 // Reports are model-owned (CF-A): re-export, never redefine.
 pub use unblock_model::{ExportReport, ImportReport};
 
-// The orchestration entry points the engine calls.
-pub use bd_import::{import_bd, map_bd_record};
+// The orchestration entry points the engine calls. `map_bd_record` is crate-internal (V1/V4) — the
+// only public bd entry is `import_bd`; nothing outside this crate needs the raw `Value`-mapper.
+pub use bd_import::import_bd;
 pub use export::{ExportOptions, export_jsonl};
 pub use import::{CollisionPolicy, ImportOptions, import_jsonl};
 
