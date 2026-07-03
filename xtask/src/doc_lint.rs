@@ -308,7 +308,7 @@ fn run(docs: &[Doc]) -> Vec<Finding> {
 
 /// Pre-computed cross-corpus indexes the classes resolve against.
 struct CorpusIndex {
-    /// D-ids defined in PRD §4 (`| **Dx** |` rows), e.g. {1..=24}.
+    /// D-ids defined in PRD §4 (`| **Dx** |` rows), e.g. {1..=25}.
     defined_d_ids: BTreeSet<u32>,
     /// FR/NFR ids defined in PRD §5/§6, with their canonical release marker (if any).
     /// Key = full id (`FR-1a`, `NFR-3`); value = `Some("must"|"v1.1"|"wont"|...)` or `None`.
@@ -448,7 +448,7 @@ fn heading_index(doc: &Doc) -> BTreeSet<String> {
 // ---------------------------------------------------------------------------------------------
 
 fn class_a_d_ids(doc: &Doc, guards: &Guards, index: &CorpusIndex, out: &mut Vec<Finding>) {
-    // Spec tokenizes `\bD(2[0-4]|1[0-9]|[1-9])\b` for the in-range ids (D1..D24), but an undefined ref
+    // Spec tokenizes `\bD(2[0-5]|1[0-9]|[1-9])\b` for the in-range ids (D1..D25), but an undefined ref
     // (D98, D99) is *also* a violation — so we match every `\bDn\b` and resolve membership against
     // the PRD §4 definition set. Range-awareness lives in the definition set, not the regex.
     let any = Regex::new(r"\bD(\d+)\b").expect("valid Dn regex");
