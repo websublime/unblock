@@ -1,13 +1,16 @@
-//! Golden contract suite for the 0–8 exit-code table (spine §2.3; FR-11).
+//! Golden contract suite for the 0–8 exit-code table (spine §2.3; FR-11) + the static hint-shape
+//! taxonomy (spine §2.2; D25/FORK-4B).
 //!
 //! Asserted at the crate boundary (independent of the unit tests in `code.rs`): every
-//! `ErrorCode` maps to an exact `(as_str, exit_code, is_retryable)` triple, the emitted exit
-//! codes cover exactly {1,2,3,4,5,6,7,8}, `0` is emitted by no code, and `AlreadyClaimed` is the
-//! explicit `(exit 3, retryable)` carrier (FR-2). The full 35-triple table is insta-pinned, so any
+//! `ErrorCode` maps to an exact `(as_str, exit_code, is_retryable, hint_shape)` quadruple, the emitted
+//! exit codes cover exactly {1,2,3,4,5,6,7,8}, `0` is emitted by no code, and `AlreadyClaimed` is the
+//! explicit `(exit 3, retryable)` carrier (FR-2). The full 35-quadruple table is insta-pinned, so any
 //! unintentional change to the vocabulary fails the snapshot gate.
 
 use std::collections::{BTreeSet, HashSet};
-use unblock_error::ErrorCode;
+use unblock_error::{
+    ErrorCode, HintShape, PRIORITY_DETAIL_HINT, VALID_STATUS_HINT, VALID_TYPE_HINT,
+};
 
 #[test]
 fn all_array_has_35_unique_variants() {
@@ -54,9 +57,61 @@ fn as_str_matches_serde_string_for_every_variant() {
 
 #[test]
 fn golden_exit_code_table() {
-    let table: Vec<(&'static str, u8, bool)> = ErrorCode::ALL
+    let table: Vec<(&'static str, u8, bool, &'static str)> = ErrorCode::ALL
         .iter()
-        .map(|c| (c.as_str(), c.exit_code(), c.is_retryable()))
+        .map(|c| {
+            (
+                c.as_str(),
+                c.exit_code(),
+                c.is_retryable(),
+                c.hint_shape().as_str(),
+            )
+        })
         .collect();
     insta::assert_json_snapshot!(table);
+}
+
+#[test]
+fn hint_shape_counts_are_the_honest_map() {
+    // The D25/FORK-4B honest map: exactly 3 StaticText + 1 ContextualText + 1 SimilarIds; the rest None.
+    let mut static_text = 0;
+    let mut contextual = 0;
+    let mut similar = 0;
+    for code in ErrorCode::ALL {
+        match code.hint_shape() {
+            HintShape::StaticText => static_text += 1,
+            HintShape::ContextualText => contextual += 1,
+            HintShape::SimilarIds => similar += 1,
+            HintShape::None => {}
+        }
+    }
+    assert_eq!(static_text, 3, "exactly 3 StaticText codes");
+    assert_eq!(contextual, 1, "exactly 1 ContextualText code");
+    assert_eq!(similar, 1, "exactly 1 SimilarIds code");
+}
+
+#[test]
+fn static_hint_texts_equal_the_exported_consts() {
+    assert_eq!(
+        ErrorCode::InvalidStatus.static_hint(),
+        Some(VALID_STATUS_HINT)
+    );
+    assert_eq!(ErrorCode::InvalidType.static_hint(), Some(VALID_TYPE_HINT));
+    assert_eq!(
+        ErrorCode::InvalidPriority.static_hint(),
+        Some(PRIORITY_DETAIL_HINT)
+    );
+}
+
+#[test]
+fn static_hint_is_some_iff_hint_shape_is_static_text() {
+    // The D25 coherence invariant, exhaustively over ALL (holds by construction).
+    for code in ErrorCode::ALL {
+        assert_eq!(
+            code.hint_shape() == HintShape::StaticText,
+            code.static_hint().is_some(),
+            "hint_shape==StaticText must iff static_hint().is_some() for {}",
+            code.as_str()
+        );
+    }
 }

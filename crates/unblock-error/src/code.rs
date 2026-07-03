@@ -1,11 +1,55 @@
 //! The stable [`ErrorCode`] vocabulary and its `const fn` views.
 //!
 //! `ErrorCode` is the `SCREAMING_SNAKE_CASE` boundary vocabulary (spine §2.2) that every
-//! per-crate error enum maps into via [`crate::CodedError`]. The three `const fn` views —
-//! [`ErrorCode::as_str`], [`ErrorCode::exit_code`], and [`ErrorCode::is_retryable`] — are the
-//! normative 0–8 exit-code table (spine §2.3) and the retryability contract (FR-11).
+//! per-crate error enum maps into via [`crate::CodedError`]. Its five `const fn` views —
+//! [`ErrorCode::as_str`], [`ErrorCode::exit_code`], [`ErrorCode::is_retryable`],
+//! [`ErrorCode::hint_shape`], and [`ErrorCode::static_hint`] — are the normative 0–8 exit-code table
+//! (spine §2.3), the retryability contract (FR-11), and the static hint-shape taxonomy (D25/FORK-4B).
 
 use serde::{Deserialize, Serialize};
+
+use crate::hints::{PRIORITY_DETAIL_HINT, VALID_STATUS_HINT, VALID_TYPE_HINT};
+
+/// The static per-code hint SHAPE (spine §2.2, D25/FORK-4B).
+///
+/// What KIND of self-correction `hint` a [`StructuredError`](crate::StructuredError) with this code
+/// may carry WHEN one is present (FR-11/FR-12; presence stays per-instance —
+/// `StructuredError.hint: Option<String>`, §2.4). Grounded in the REAL producer set (the T2.6 hint-site
+/// survey) — never aspirational (the D25 honesty rule). Surfaced in the mcp `capabilities()` error map
+/// (spine §5.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HintShape {
+    /// No production site attaches a hint to this code.
+    None,
+    /// A fixed, code-determined constant (see [`ErrorCode::static_hint`]).
+    StaticText,
+    /// Free-form guidance composed at the failure site; presence and text vary by producer.
+    ContextualText,
+    /// Fuzzy near-miss id suggestions via [`crate::find_similar_ids`] (`context["similar_ids"]`),
+    /// with a list-discovery fallback when no candidate is close.
+    SimilarIds,
+}
+
+impl HintShape {
+    /// The stable `snake_case` string for this shape (matches the serde representation).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use unblock_error::HintShape;
+    /// assert_eq!(HintShape::SimilarIds.as_str(), "similar_ids");
+    /// ```
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::StaticText => "static_text",
+            Self::ContextualText => "contextual_text",
+            Self::SimilarIds => "similar_ids",
+        }
+    }
+}
 
 /// Machine-readable, stable error codes (spine §2.2).
 ///
@@ -293,5 +337,58 @@ impl ErrorCode {
                 | Self::RequiredField
                 | Self::AmbiguousId
         )
+    }
+
+    /// The static [`HintShape`] for this code (spine §2.2, D25/FORK-4B).
+    ///
+    /// Grounded in the REAL production hint sites (no invented hints — the D25 honesty rule):
+    /// - [`Self::SimilarIds`] — [`Self::IssueNotFound`] (the `unblock://issues/{id}` not-found fold
+    ///   via [`crate::find_similar_ids`], surfaced in `context["similar_ids"]`).
+    /// - [`Self::StaticText`] — [`Self::InvalidStatus`] / [`Self::InvalidType`] /
+    ///   [`Self::InvalidPriority`] (the `ModelError::hint` fixed constants; see [`Self::static_hint`]).
+    /// - [`Self::ContextualText`] — [`Self::ValidationFailed`] (the mcp over-quota + bulk-markdown-parse
+    ///   site-composed hints; the `ModelError::ValidationFailed` aggregate itself carries none).
+    /// - [`Self::None`] — every other code (the remaining 30 of 35).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use unblock_error::{ErrorCode, HintShape};
+    /// assert_eq!(ErrorCode::IssueNotFound.hint_shape(), HintShape::SimilarIds);
+    /// assert_eq!(ErrorCode::InvalidStatus.hint_shape(), HintShape::StaticText);
+    /// assert_eq!(ErrorCode::DatabaseLocked.hint_shape(), HintShape::None);
+    /// ```
+    #[must_use]
+    pub const fn hint_shape(self) -> HintShape {
+        match self {
+            Self::IssueNotFound => HintShape::SimilarIds,
+            Self::InvalidStatus | Self::InvalidType | Self::InvalidPriority => {
+                HintShape::StaticText
+            }
+            Self::ValidationFailed => HintShape::ContextualText,
+            _ => HintShape::None,
+        }
+    }
+
+    /// The fixed hint text for a [`HintShape::StaticText`] code, or `None` otherwise (D25/FORK-4B).
+    ///
+    /// This is the SINGLE source of the fixed hint texts — `ModelError::hint` delegates here — so the
+    /// invariant `hint_shape() == HintShape::StaticText ⟺ static_hint().is_some()` holds by construction.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use unblock_error::ErrorCode;
+    /// assert!(ErrorCode::InvalidPriority.static_hint().is_some());
+    /// assert_eq!(ErrorCode::IssueNotFound.static_hint(), None);
+    /// ```
+    #[must_use]
+    pub const fn static_hint(self) -> Option<&'static str> {
+        match self {
+            Self::InvalidStatus => Some(VALID_STATUS_HINT),
+            Self::InvalidType => Some(VALID_TYPE_HINT),
+            Self::InvalidPriority => Some(PRIORITY_DETAIL_HINT),
+            _ => None,
+        }
     }
 }

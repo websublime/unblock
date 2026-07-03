@@ -15,6 +15,7 @@ use unblock_model::{CountGroupBy, ListFilters};
 
 use crate::server::UnblockServer;
 use crate::tools::dto::FilterInput;
+use crate::tools::output::QueryOutput;
 use crate::tools::{engine_err_json, err_json, ok_json};
 
 /// The `query` tool input (spine §5.2 — EXACT shape).
@@ -78,21 +79,21 @@ impl UnblockServer {
             QueryInput::List { filters } => {
                 let filters: ListFilters = filters.into_list_filters();
                 match self.session.list(&filters).await {
-                    Ok(issues) => ok_json(&issues),
+                    Ok(issues) => ok_json(&QueryOutput::Issues(issues)),
                     Err(err) => engine_err_json(&err),
                 }
             }
             QueryInput::Ready { filters } => {
                 let filters: ListFilters = filters.into_list_filters();
                 match self.session.ready(&filters).await {
-                    Ok(issues) => ok_json(&issues),
+                    Ok(issues) => ok_json(&QueryOutput::Issues(issues)),
                     Err(err) => engine_err_json(&err),
                 }
             }
             QueryInput::Blocked { filters } => {
                 let filters: ListFilters = filters.into_list_filters();
                 match self.session.blocked(&filters).await {
-                    Ok(issues) => ok_json(&issues),
+                    Ok(issues) => ok_json(&QueryOutput::Issues(issues)),
                     Err(err) => engine_err_json(&err),
                 }
             }
@@ -108,14 +109,14 @@ impl UnblockServer {
                     filters.limit = Some(limit);
                 }
                 match self.session.search(&query, &filters).await {
-                    Ok(issues) => ok_json(&issues),
+                    Ok(issues) => ok_json(&QueryOutput::Issues(issues)),
                     Err(err) => engine_err_json(&err),
                 }
             }
             QueryInput::Count { group_by, filters } => {
                 let filters: ListFilters = filters.into_list_filters();
                 match self.session.count(&filters, group_by).await {
-                    Ok(buckets) => ok_json(&buckets),
+                    Ok(buckets) => ok_json(&QueryOutput::Counts(buckets)),
                     Err(err) => engine_err_json(&err),
                 }
             }
@@ -125,7 +126,7 @@ impl UnblockServer {
             } => {
                 let filters: ListFilters = filters.into_list_filters();
                 match self.session.stale(older_than, &filters).await {
-                    Ok(issues) => ok_json(&issues),
+                    Ok(issues) => ok_json(&QueryOutput::Issues(issues)),
                     Err(err) => engine_err_json(&err),
                 }
             }

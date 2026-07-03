@@ -6,8 +6,8 @@
 //! - `create` maps [`IssueInput::Create`] → the engine-owned [`unblock_engine::NewIssue`] and calls
 //!   the **MINTING** `Session::create_issue` (D21 — the engine mints the id under the write permit).
 //!   It is NOT `Session::create(&Issue)`, the id-PRESERVING import path. The wire-only `quick` /
-//!   `attribution` are not `NewIssue` fields and are dropped. `quick=true` returns `ToolOutput::Id`.
-//! - `close{suggest_next}` returns `ToolOutput::Close` carrying `newly_unblocked` (FR-11).
+//!   `attribution` are not `NewIssue` fields and are dropped. `quick=true` returns `IssueOutput::Id`.
+//! - `close{suggest_next}` returns `IssueOutput::Close` carrying `newly_unblocked` (FR-11).
 //! - `reopen` is an `update` patch to a non-terminal status — there is NO `Session::reopen`.
 //! - `restore` is SINGLE-ID (scalar, D20) → `Session::restore(id)` (the dedicated un-tombstone path),
 //!   NOT `update`.
@@ -23,6 +23,7 @@ use unblock_model::{IssueType, Priority, Status};
 
 use crate::server::UnblockServer;
 use crate::tools::dto::{Attribution, DepInput};
+use crate::tools::output::{DeleteModeOutput, DeletePlanOutput, IdOnly, IssueOutput};
 use crate::tools::{engine_err_json, err_json, ok_json};
 
 /// The `issue` tool input (spine §5.2 — EXACT shape; 7 actions).
@@ -41,7 +42,7 @@ pub(crate) enum IssueInput {
     /// `NewIssue` (carrying the symbolic dep/parent refs verbatim), and calls the ATOMIC
     /// `Session::create_bulk` — NOT a loop over `create_issue`. The engine mints all ids + resolves the
     /// 2-phase intra-file dep/parent IN MEMORY + inserts the whole batch in ONE tx (rollback-on-any-
-    /// failure → ZERO writes). Output reuses `ToolOutput::Issues`.
+    /// failure → ZERO writes). Output reuses `IssueOutput::Issues`.
     CreateBulk {
         /// The inline bulk-markdown document content.
         markdown: String,
@@ -304,14 +305,14 @@ impl UnblockServer {
                     ..NewIssue::default()
                 };
                 match self.session.create_issue(new).await {
-                    Ok(issue) if quick => ok_json(&crate::tools::output::IdOnly { id: issue.id }),
-                    Ok(issue) => ok_json(&issue),
+                    Ok(issue) if quick => ok_json(&IssueOutput::Id(IdOnly { id: issue.id })),
+                    Ok(issue) => ok_json(&IssueOutput::Issue(Box::new(issue))),
                     Err(err) => engine_err_json(&err),
                 }
             }
             IssueInput::CreateBulk { markdown } => self.create_bulk_action(&markdown).await,
             IssueInput::Show { id } => match self.session.get(&id).await {
-                Ok(Some(issue)) => ok_json(&issue),
+                Ok(Some(issue)) => ok_json(&IssueOutput::Issue(Box::new(issue))),
                 Ok(None) => err_json(&issue_not_found(&id)),
                 Err(err) => engine_err_json(&err),
             },
@@ -328,7 +329,7 @@ impl UnblockServer {
                         Err(err) => return engine_err_json(&err),
                     }
                 }
-                ok_json(&updated)
+                ok_json(&IssueOutput::Issues(updated))
             }
             IssueInput::Close {
                 id,
@@ -341,7 +342,7 @@ impl UnblockServer {
                         // Without suggest_next the caller wants only the closed issue surfaced.
                         outcome.newly_unblocked.clear();
                     }
-                    ok_json(&outcome)
+                    ok_json(&IssueOutput::Close(Box::new(outcome)))
                 }
                 Err(err) => engine_err_json(&err),
             },
@@ -352,7 +353,7 @@ impl UnblockServer {
                     ..IssuePatch::default()
                 };
                 match self.session.update(&id, &patch).await {
-                    Ok(issue) => ok_json(&issue),
+                    Ok(issue) => ok_json(&IssueOutput::Issue(Box::new(issue))),
                     Err(err) => engine_err_json(&err),
                 }
             }
@@ -367,12 +368,16 @@ impl UnblockServer {
                     cascade_children: Vec::new(),
                 };
                 match self.session.delete(&plan).await {
-                    Ok(resolved) => ok_json(&delete_plan_json(&resolved)),
+                    Ok(resolved) => ok_json(&IssueOutput::Delete(DeletePlanOutput {
+                        mode: DeleteModeOutput::from(resolved.mode),
+                        targets: resolved.targets,
+                        cascade_children: resolved.cascade_children,
+                    })),
                     Err(err) => engine_err_json(&err),
                 }
             }
             IssueInput::Restore { id, attribution: _ } => match self.session.restore(&id).await {
-                Ok(issue) => ok_json(&issue),
+                Ok(issue) => ok_json(&IssueOutput::Issue(Box::new(issue))),
                 Err(err) => engine_err_json(&err),
             },
         }
@@ -383,7 +388,7 @@ impl UnblockServer {
     /// The `create_bulk` action (D22): parse the inline markdown (all-or-nothing), cap the record
     /// count at `Quotas::max_batch` (before any mint), map each `ParsedIssue` → `NewIssue` (carrying
     /// the symbolic dep/parent refs verbatim), and call the ATOMIC `Session::create_bulk`. Output
-    /// reuses `ToolOutput::Issues` (the Vec of created issues).
+    /// reuses `IssueOutput::Issues` (the Vec of created issues).
     async fn create_bulk_action(&self, markdown: &str) -> CallToolResult {
         // (1) Parse the whole document (all-or-nothing pre-mutation parse).
         let parsed = match crate::tools::bulk_markdown::parse_bulk_markdown(markdown) {
@@ -401,7 +406,7 @@ impl UnblockServer {
 
         // (4) The ATOMIC bulk create (engine mints + resolves + one storage tx). Output = the Vec.
         match self.session.create_bulk(records).await {
-            Ok(issues) => ok_json(&issues),
+            Ok(issues) => ok_json(&IssueOutput::Issues(issues)),
             Err(err) => engine_err_json(&err),
         }
     }
@@ -443,19 +448,4 @@ fn issue_not_found(id: &str) -> unblock_error::StructuredError {
         format!("issue not found: {id}"),
     )
     .with_context("id", serde_json::json!(id))
-}
-
-/// Serialize a resolved [`DeletePlan`] (which has no `Serialize` derive) to a stable JSON shape.
-fn delete_plan_json(plan: &DeletePlan) -> serde_json::Value {
-    let mode = match plan.mode {
-        DeleteMode::Tombstone => "tombstone",
-        DeleteMode::Cascade => "cascade",
-        DeleteMode::Hard => "hard",
-        DeleteMode::DryRun => "dry_run",
-    };
-    serde_json::json!({
-        "mode": mode,
-        "targets": plan.targets,
-        "cascade_children": plan.cascade_children,
-    })
 }

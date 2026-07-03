@@ -53,9 +53,10 @@ insta = { workspace = true }
 proptest = { workspace = true }
 tempfile = { workspace = true }
 serde_json = { workspace = true }
-# The hash-coupled CONTRACT_VERSION drift gate (tests/contract_suite.rs, D22/F6) computes a SHA-256
-# digest of `schema_bundle()` and asserts it equals the pinned `SCHEMA_BUNDLE_HASH` — so a schema edit
-# FORCES a version bump (not a silent golden re-bless). Test-only: the shipped binary never hashes.
+# The hash-coupled CONTRACT_VERSION drift gate (tests/contract_suite.rs, D22/D25) computes a SHA-256
+# digest of the two-document tuple `(capabilities(), schema_bundle())` and asserts it equals the pinned
+# `CONTRACT_HASH` — so a contract edit FORCES a version bump (not a silent golden re-bless). Test-only:
+# the shipped binary never hashes.
 sha2 = { workspace = true }
 # The NFR-18 quota AC suite (`tests/quotas.rs`) wraps storage in a `RecordingStorage` spy that
 # implements the async `Storage` trait — test-only, never linked into the shipped binary.

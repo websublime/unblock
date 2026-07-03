@@ -6,176 +6,211 @@ expression: table
   [
     "DATABASE_NOT_FOUND",
     2,
-    false
+    false,
+    "none"
   ],
   [
     "DATABASE_LOCKED",
     2,
-    true
+    true,
+    "none"
   ],
   [
     "SCHEMA_MISMATCH",
     2,
-    false
+    false,
+    "none"
   ],
   [
     "DATABASE_ERROR",
     2,
-    false
+    false,
+    "none"
   ],
   [
     "NOT_INITIALIZED",
     2,
-    false
+    false,
+    "none"
   ],
   [
     "ALREADY_INITIALIZED",
     2,
-    false
+    false,
+    "none"
   ],
   [
     "ISSUE_NOT_FOUND",
     3,
-    false
+    false,
+    "similar_ids"
   ],
   [
     "AMBIGUOUS_ID",
     3,
-    true
+    true,
+    "none"
   ],
   [
     "ID_COLLISION",
     3,
-    false
+    false,
+    "none"
   ],
   [
     "INVALID_ID",
     3,
-    false
+    false,
+    "none"
   ],
   [
     "NOTHING_TO_DO",
     3,
-    false
+    false,
+    "none"
   ],
   [
     "ALREADY_CLAIMED",
     3,
-    true
+    true,
+    "none"
   ],
   [
     "VALIDATION_FAILED",
     4,
-    true
+    true,
+    "contextual_text"
   ],
   [
     "INVALID_STATUS",
     4,
-    true
+    true,
+    "static_text"
   ],
   [
     "INVALID_TYPE",
     4,
-    true
+    true,
+    "static_text"
   ],
   [
     "INVALID_PRIORITY",
     4,
-    true
+    true,
+    "static_text"
   ],
   [
     "REQUIRED_FIELD",
     4,
-    true
+    true,
+    "none"
   ],
   [
     "POLICY_VIOLATION",
     4,
-    false
+    false,
+    "none"
   ],
   [
     "CYCLE_DETECTED",
     5,
-    false
+    false,
+    "none"
   ],
   [
     "DEPENDENCY_NOT_FOUND",
     5,
-    false
+    false,
+    "none"
   ],
   [
     "HAS_DEPENDENTS",
     5,
-    false
+    false,
+    "none"
   ],
   [
     "SELF_DEPENDENCY",
     5,
-    false
+    false,
+    "none"
   ],
   [
     "DUPLICATE_DEPENDENCY",
     5,
-    false
+    false,
+    "none"
   ],
   [
     "JSONL_PARSE_ERROR",
     6,
-    false
+    false,
+    "none"
   ],
   [
     "PREFIX_MISMATCH",
     6,
-    false
+    false,
+    "none"
   ],
   [
     "IMPORT_COLLISION",
     6,
-    false
+    false,
+    "none"
   ],
   [
     "SYNC_CONFLICT",
     6,
-    false
+    false,
+    "none"
   ],
   [
     "CONFLICT_MARKERS",
     6,
-    false
+    false,
+    "none"
   ],
   [
     "PATH_TRAVERSAL",
     6,
-    false
+    false,
+    "none"
   ],
   [
     "CONFIG_ERROR",
     7,
-    false
+    false,
+    "none"
   ],
   [
     "CONFIG_NOT_FOUND",
     7,
-    false
+    false,
+    "none"
   ],
   [
     "CONFIG_PARSE_ERROR",
     7,
-    false
+    false,
+    "none"
   ],
   [
     "IO_ERROR",
     8,
-    false
+    false,
+    "none"
   ],
   [
     "JSON_ERROR",
     8,
-    false
+    false,
+    "none"
   ],
   [
     "INTERNAL_ERROR",
     1,
-    false
+    false,
+    "none"
   ]
 ]

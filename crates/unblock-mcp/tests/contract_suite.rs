@@ -1,13 +1,16 @@
-//! FR-12 golden conformance + the HASH-COUPLED `CONTRACT_VERSION` drift gate (D22/F6) + the
-//! taxonomy-conformance golden closing PRD §12.2.
+//! FR-12 golden conformance + the ONE hash-coupled `CONTRACT_VERSION` drift gate (D22 widened by D25)
+//! + the taxonomy-conformance golden closing PRD §12.2.
 //!
-//! Three guarantees:
-//! 1. **Snapshots** of the pure `schema_bundle()` + `capabilities()` builders (the same goldens
-//!    `contract_goldens.rs` blesses) — any tool/resource/prompt schema change shows up here.
-//! 2. **Hash-coupled drift gate (non-vacuous both ways):** `schema_bundle().contract_version ==
-//!    CONTRACT_VERSION` AND a SHA-256 of the bundle equals the pinned `SCHEMA_BUNDLE_HASH`. So a
-//!    schema edit FORCES a `CONTRACT_VERSION` bump + a hash re-pin (not a silent golden re-bless), and
-//!    a version bump without a hash change is also caught.
+//! Guarantees:
+//! 1. **Snapshots** of the pure `capabilities()` + `schema_bundle()` builders (blessed HERE) — any
+//!    tool/resource/prompt descriptor, error-map, or input/output-schema change shows up, and the two
+//!    goldens localize WHICH document moved.
+//! 2. **The ONE hash-coupled drift gate (non-vacuous both ways):** both builders stamp
+//!    `CONTRACT_VERSION`, AND a SHA-256 over the ORDERED two-document tuple
+//!    `(capabilities(), schema_bundle())` equals the pinned `CONTRACT_HASH`. So a content edit in
+//!    EITHER document FORCES a `CONTRACT_VERSION` bump + a hash re-pin (not a silent golden re-bless),
+//!    and a version bump without a document change is also caught (both documents embed
+//!    `contract_version`).
 //! 3. **Taxonomy conformance (PRD §12.2):** over a LIVE `serve_duplex_for_test` duplex the
 //!    `list_tools` (≤ 8 — exactly 7, `create_bulk` is a discriminator NOT a tool) / resource-templates
 //!    (5) / prompts (3) sets EQUAL the pure `capabilities()` builder set (builder-vs-router parity —
@@ -17,12 +20,14 @@ mod common;
 
 use common::{connect, session};
 use sha2::{Digest, Sha256};
-use unblock_mcp::{CONTRACT_VERSION, SCHEMA_BUNDLE_HASH, capabilities, schema_bundle};
+use unblock_mcp::{CONTRACT_HASH, CONTRACT_VERSION, capabilities, schema_bundle};
 
-/// The canonical SHA-256 hex digest of the serialized `schema_bundle()` — the gate's computed half.
-fn schema_bundle_hash() -> String {
+/// The canonical SHA-256 hex digest of the ordered two-document tuple `(capabilities(),
+/// schema_bundle())` — the gate's computed half (D22 widened by D25).
+fn contract_hash() -> String {
     use std::fmt::Write as _;
-    let bytes = serde_json::to_vec(&schema_bundle()).expect("serialize schema bundle");
+    let bytes =
+        serde_json::to_vec(&(capabilities(), schema_bundle())).expect("serialize contract tuple");
     let digest = Sha256::digest(&bytes);
     digest.iter().fold(String::with_capacity(64), |mut acc, b| {
         let _ = write!(acc, "{b:02x}");
@@ -36,17 +41,45 @@ fn contract_version_is_stamped_on_both_builders() {
     assert_eq!(schema_bundle().contract_version, CONTRACT_VERSION);
 }
 
-/// The HASH-COUPLED gate: the pinned `SCHEMA_BUNDLE_HASH` matches the live bundle hash. A schema edit
-/// changes the hash → this fails until BOTH `CONTRACT_VERSION` and `SCHEMA_BUNDLE_HASH` are bumped
-/// (non-vacuous: the hash is over the real bundle, and `CONTRACT_VERSION` is part of that bundle, so a
-/// version bump alone also changes the hash — the gate is non-vacuous in both directions).
+/// The ONE hash-coupled gate: the pinned `CONTRACT_HASH` matches the live two-document digest. A
+/// content edit in either discovery document changes the digest → this fails until BOTH
+/// `CONTRACT_VERSION` and `CONTRACT_HASH` are bumped (non-vacuous: the digest is over the real
+/// documents, and `contract_version` is a field of both, so a version bump alone also changes the
+/// digest — the gate is non-vacuous in both directions).
 #[test]
-fn schema_bundle_hash_matches_the_pinned_gate() {
+fn contract_hash_matches_the_pinned_gate() {
     assert_eq!(
-        schema_bundle_hash(),
-        SCHEMA_BUNDLE_HASH,
-        "schema bundle drifted: bump CONTRACT_VERSION + re-pin SCHEMA_BUNDLE_HASH (+ re-bless the \
-         schema_bundle golden). The FR-12/D22 drift gate fires by design.",
+        contract_hash(),
+        CONTRACT_HASH,
+        "the contract surface drifted: bump CONTRACT_VERSION + re-pin CONTRACT_HASH (+ re-bless the \
+         capabilities/schema_bundle goldens — they identify WHICH document moved). The \
+         FR-12/D22/D25 gate fires by design.",
+    );
+}
+
+/// impl-plan AC(5), capabilities side, MECHANIZED: mutating ONE descriptor-copy string moves the
+/// two-document digest. Self-contained (compares against a FRESH unmutated digest, not only the pin),
+/// so it stays meaningful while the pin is stale during a re-pin window.
+#[test]
+fn capabilities_content_mutation_moves_the_gate() {
+    let unmutated = contract_hash();
+
+    let mut caps = capabilities();
+    assert!(!caps.tools.is_empty(), "there is a descriptor to mutate");
+    caps.tools[0].description.push('!');
+    let mutated = {
+        use std::fmt::Write as _;
+        let bytes =
+            serde_json::to_vec(&(caps, schema_bundle())).expect("serialize mutated contract tuple");
+        let digest = Sha256::digest(&bytes);
+        digest.iter().fold(String::with_capacity(64), |mut acc, b| {
+            let _ = write!(acc, "{b:02x}");
+            acc
+        })
+    };
+    assert_ne!(
+        mutated, unmutated,
+        "a capabilities-document content mutation MUST move the two-document digest"
     );
 }
 

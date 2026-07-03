@@ -37,7 +37,7 @@ mod model;
 mod sanitize;
 mod structured;
 
-pub use code::ErrorCode;
+pub use code::{ErrorCode, HintShape};
 pub use coded::CodedError;
 pub use hints::{
     MAX_SUGGESTION_DISTANCE, PRIORITY_DETAIL_HINT, PRIORITY_SHORT_HINT, VALID_STATUS_HINT,
