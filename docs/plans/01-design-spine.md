@@ -267,7 +267,7 @@ pub struct CacheKey(pub String); // ready/blocked projection cache key contract.
 
 These types are **defined normatively in `unblock-model`** so that crates which cannot depend on `unblock-storage` can still reference them. `unblock-policy` needs `ListFilters`/`CountGroupBy` for its filter-fingerprint (CF-C); Any field ADDED to `ListFilters` (e.g. `include_tombstone`, D23) MUST also be folded into `unblock-policy::filters_fingerprint` so the fingerprint stays INJECTIVE (two filter sets differing only in the new field must produce distinct fingerprints) — see the policy crate plan `cache_key.rs`. `unblock-render` (model + error only) needs the display/result DTOs and `OutputFormat` to format output (CF-A/CF-J); `DiagnosticReport`/`DiagnosticKind`/`DiagnosticFinding` are referenced by engine/render/mcp and previously had no home (CF-B). The **full owned set** is: `ListFilters, CountGroupBy, OutputFormat, CountBucket, GraphEdge, DepTree, CloseOutcome, ImportReport, ExportReport, DiagnosticReport, DiagnosticFinding, DiagnosticKind`. Every other crate (`unblock-storage`, `unblock-engine`, `unblock-render`, `unblock-config`, `unblock-sync`, `unblock-mcp`) **re-exports** these via `pub use unblock_model::{...}` — none redefines them.
 
-**Derive policy for §1.10 (NORMATIVE — G-1):** every type below flows to an L7 consumer (MCP `ToolOutput`/`QueryInput`, engine results, render parse-back, policy serialization). They therefore ALL derive `Debug, Clone, Serialize, Deserialize, JsonSchema`, plus `PartialEq, Eq` where round-trip/equality tests need it. The `derive` lines below are normative; crate plans (unblock-model `filters.rs`/`results.rs`, mcp `ToolOutput`, engine, render) must match exactly. `PathBuf` derives `JsonSchema` (serialized as a string) — `ExportReport.path` is schema-valid.
+**Derive policy for §1.10 (NORMATIVE — G-1):** every type below flows to an L7 consumer (the MCP §5.3 per-tool outputs/`QueryInput`, engine results, render parse-back, policy serialization). They therefore ALL derive `Debug, Clone, Serialize, Deserialize, JsonSchema`, plus `PartialEq, Eq` where round-trip/equality tests need it. The `derive` lines below are normative; crate plans (unblock-model `filters.rs`/`results.rs`, the mcp §5.3 output family, engine, render) must match exactly. `PathBuf` derives `JsonSchema` (serialized as a string) — `ExportReport.path` is schema-valid.
 
 ```rust
 // --- query inputs (CF-C: relocated from storage so policy can depend on them) ---
@@ -285,10 +285,12 @@ pub struct ListFilters {
     pub include_closed: bool,
     /// Include `status = 'tombstone'` (soft-deleted) rows. Default `false` — the default-visibility,
     /// `include_deferred`, and `include_closed` branches all EXCLUDE tombstones, so a caller must opt
-    /// in explicitly. Set `true` ONLY by the `unblock-sync` full-corpus export (FORK-1/D23): tombstones
+    /// in explicitly. Set `true` by the `unblock-sync` full-corpus export (FORK-1/D23) and the mcp
+    /// `issues/{id}` not-found suggestion corpus (T2.6/D25 — a read-only error-path scan): tombstones
     /// must be exported so import-side tombstone-non-resurrection (FR-8, spine §1.8) is round-trippable.
     /// Orthogonal to `include_closed`: export sets BOTH true. list/ready/blocked/search/count/stale keep
-    /// it `false` (agent query surfaces never set it).
+    /// it `false` (no query TOOL sets it; the mcp `issues/{id}` not-found suggestion scan is the one
+    /// agent-facing consumer — T2.6/D25).
     pub include_tombstone: bool,
     pub limit: Option<usize>,           // None = unlimited (ready is default-complete)
     pub offset: Option<usize>,
@@ -338,7 +340,7 @@ pub struct DiagnosticFinding { pub label: String, pub detail: String } // generi
 
 `ExportReport.written` counts every serialized issue line in the export corpus, which — per FORK-1/D23 — INCLUDES closed and tombstone rows (`ListFilters { include_closed: true, include_tombstone: true, .. }`) and EXCLUDES ephemeral / `-wisp-` rows. All emitted `DateTime<Utc>` fields are rendered via `unblock_model::fmt_ts_secs` (CF-TS) so export bytes are deterministic and byte-coherent with render (D-OQ-B).
 
-**`ImportReport.dependencies`/`.comments` (D24/F1)** count the relation/comment rows migrated by the one-shot `bd` import, tallied on the POST-repair, POST-dedup record (faithful to bd's `record_imported_relation_counts`, `temp/beads_rust-main/src/sync/mod.rs:4611-4614`); both default to `0` on the generic `import_jsonl` path (it never tallies them). **Count plumbing (MF-2, option (a)):** the shared `unblock-sync::apply_records` (D24/F5) builds+returns the report with `imported`/`skipped`/`dropped_fields` set and `dependencies:0, comments:0`; EACH CALLER finalizes the two counts on the returned report — `import_jsonl` leaves them `0`, `import_bd` sets them to its tallies — so the seam carries no deps/comments params (see the sync `import.rs` row). Since `ImportReport` has NO `Default` derive, the two added fields force an Implement ripple: re-bless the JsonSchema golden `crates/unblock-model/tests/snapshots/schema_snapshots__import_report.snap` (3→5 properties) + update every 3-field struct literal (`import.rs:167`/`:180`, `results.rs:157-161`, `output.rs:57-61`, the new `bd_import.rs` constructor). Definition/re-export home = `unblock-model` (spine §1.10). Additive; NOT part of any MCP tool input `JsonSchema` (it rides in the mcp-owned `SyncOutput`), so **no `CONTRACT_VERSION` bump** — verified against `schema_bundle()` (the golden re-bless is the model snapshot, not the `schema_bundle` hash).
+**`ImportReport.dependencies`/`.comments` (D24/F1)** count the relation/comment rows migrated by the one-shot `bd` import, tallied on the POST-repair, POST-dedup record (faithful to bd's `record_imported_relation_counts`, `temp/beads_rust-main/src/sync/mod.rs:4611-4614`); both default to `0` on the generic `import_jsonl` path (it never tallies them). **Count plumbing (MF-2, option (a)):** the shared `unblock-sync::apply_records` (D24/F5) builds+returns the report with `imported`/`skipped`/`dropped_fields` set and `dependencies:0, comments:0`; EACH CALLER finalizes the two counts on the returned report — `import_jsonl` leaves them `0`, `import_bd` sets them to its tallies — so the seam carries no deps/comments params (see the sync `import.rs` row). Since `ImportReport` has NO `Default` derive, the two added fields force an Implement ripple: re-bless the JsonSchema golden `crates/unblock-model/tests/snapshots/schema_snapshots__import_report.snap` (3→5 properties) + update every 3-field struct literal (`import.rs:167`/`:180`, `results.rs:157-161`, `output.rs:57-61`, the new `bd_import.rs` constructor). Definition/re-export home = `unblock-model` (spine §1.10). Additive; NOT part of any MCP tool input `JsonSchema` (it rides in the mcp-owned `SyncOutput`), so **no `CONTRACT_VERSION` bump** — verified against `schema_bundle()` (the golden re-bless is the model snapshot, not the `schema_bundle` hash). **Forward note (T2.6/D25):** superseded going forward — the D25 bundle carries the per-tool output schemas (`sync` output = `SyncOutput`), so ANY future `ImportReport`/`ExportReport` field change moves `CONTRACT_HASH` and forces a `CONTRACT_VERSION` bump. The T2.5 ruling stays valid for its time.
 
 **Canonical timestamp helper (CF-TS — NORMATIVE, D-OQ-B / FORK-4 / D23).** The single source of truth for rendering a `DateTime<Utc>` as an RFC-3339 string lives in **`unblock-model`** (L0), in a new module `src/time.rs`, re-exported flat from `lib.rs`:
 
@@ -489,8 +491,46 @@ impl ErrorCode {
     //   (matches error.md; the retryable exit-4 members are the five retryable Validation* members
     //   — ValidationFailed/InvalidStatus/InvalidType/InvalidPriority/RequiredField; PolicyViolation
     //   is exit-4 but non-retryable.)
+    pub const fn hint_shape(self) -> HintShape;       // D25/FORK-4B — static per-code hint SHAPE
+    //   exact map (grounded in the REAL production hint sites; no invented hints):
+    //     SimilarIds     -> IssueNotFound                       (the unblock://issues/{id} not-found
+    //                       fold, D25/FORK-3A — find_similar_ids + context["similar_ids"])
+    //     StaticText     -> InvalidPriority | InvalidStatus | InvalidType
+    //                       (ModelError::hint() -> the pinned PRIORITY_DETAIL_HINT /
+    //                        VALID_STATUS_HINT / VALID_TYPE_HINT constants, hints.rs)
+    //     ContextualText -> ValidationFailed                     (site-composed guidance: the mcp
+    //                       over-quota + bulk-markdown-parse hints)
+    //     None           -> every other code (the remaining 30 of 35)
+    pub const fn static_hint(self) -> Option<&'static str>; // the fixed text for StaticText codes,
+    //   None otherwise. The SINGLE source of the fixed hint texts (`ModelError::hint` delegates
+    //   here), so `hint_shape() == StaticText ⟺ static_hint().is_some()` holds by construction.
 }
+
+/// D25/FORK-4B — the static per-code hint SHAPE (FR-12): what KIND of `hint` a code carries WHEN
+/// one is present. Presence stays per-instance (`StructuredError.hint: Option<String>`, §2.4);
+/// this is the machine-advertised taxonomy surfaced in the mcp `capabilities()` error map (§5.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HintShape {
+    None,           // no production site attaches a hint to this code
+    StaticText,     // a fixed, code-determined constant (the hints.rs *_HINT consts)
+    ContextualText, // free-form guidance composed at the failure site (content varies per site)
+    SimilarIds,     // fuzzy near-miss id suggestions via find_similar_ids (context["similar_ids"]),
+                    // with a list-discovery fallback when no candidate is close
+}
+impl HintShape { pub const fn as_str(self) -> &'static str; } // "none" | "static_text" | ...
 ```
+
+**Honesty rule (NORMATIVE):** a code may move off `HintShape::None` only when a real production
+hint-construction site ships in the same change; shapes are never aspirational. The full
+`code → (exit_code, retryable, hint_shape)` map is golden-pinned in unblock-error alongside the
+§2.3 exit-code table (the quadruple golden), and re-surfaced (version-coupled) in the mcp
+`capabilities()` error map — changing any `hint_shape` moves the D25 `CONTRACT_HASH` gate. An enum
+(not `&'static str`, not a payload-carrying variant) is deliberate: exhaustive matches force every
+future `ErrorCode` variant to declare its shape; a `StaticText(&'static str)` payload would break
+`Deserialize` (the FR-12 e2e parses `Capabilities` client-side) — the fixed text is reachable via
+the paired `static_hint()` instead; and the L0 discipline holds (no new deps — serde/schemars
+only, same as `ErrorCode`).
 
 ### 2.3 Exit-code table (0–8) — golden-snapshot pinned (FR-11)
 
@@ -803,8 +843,8 @@ between an earlier prose description and the source are resolved **in favour of 
   `priority_min`/`priority_max`, `assignee`, `labels_all` (AND, per-label `EXISTS`) / `labels_any`
   (OR, single `EXISTS … IN`), `text_contains` (title `LIKE ? ESCAPE '\'`, distinct from the `search`
   needle), and closed/deferred visibility (default excludes `closed`/`tombstone`/`deferred`;
-  `include_closed`/`include_deferred` widen it). `include_tombstone` (D23, export-only) additionally
-  widens the baseline to include `status='tombstone'` rows; agent surfaces never set it.
+  `include_closed`/`include_deferred` widen it). `include_tombstone` (D23; the sync full-corpus export + the mcp `issues/{id}` not-found suggestion scan, T2.6/D25) additionally
+  widens the baseline to include `status='tombstone'` rows; no agent QUERY TOOL sets it (the mcp resource error-path scan is the one non-export consumer).
   `ORDER BY priority ASC, created_at DESC, id ASC` —
   note `created_at` **DESC** (newest-first), **deliberately distinct from `ready`'s `created_at ASC`**
   pre-sort (oldest-first within a priority bucket; policy `ready.rs:16-17`). Default-complete unless
@@ -1299,7 +1339,7 @@ impl Session {
 
 ## 5. MCP schemas — `unblock-mcp` (L7)
 
-**rmcp 1.7** (`server`, `transport-io`) stdio server (`unblock serve`), thin adapter over `Session`. **7 consolidated tools** (target ≤ 8), resources, prompts. Every tool input/output derives `JsonSchema` + `Serialize`/`Deserialize`; args are schemars-validated with size/rate limits (NFR-18). Discovery (`capabilities`/`schema`) carries `contract_version` (FR-12).
+**rmcp 1.7** (`server`, `transport-io`) stdio server (`unblock serve`), thin adapter over `Session`. **7 consolidated tools** (target ≤ 8), resources, prompts. Every tool input/output derives `JsonSchema` + `Serialize`/`Deserialize` — inputs AND outputs ride the schema bundle as per-tool `{input, output}` pairs (D25, §5.3/§5.4); args are schemars-validated with size/rate limits (NFR-18). Discovery (`capabilities`/`schema`) carries `contract_version` (FR-12), and BOTH discovery documents are covered by the single pinned `CONTRACT_HASH` drift gate (D22 clause 8 widened by D25 — §5.4).
 
 ### 5.1 Tool taxonomy (7 tools)
 
@@ -1380,7 +1420,7 @@ pub enum IssueInput {
     //       `create.rs:1190`), NOT in the pure parser (the parser preserves the reference string verbatim). bulk-markdown
     //       is INTERACTIVE create (mints fresh ids; does NOT preserve ids, unlike JSONL/bd import which loops
     //       `Session::create(&Issue)`);
-    //   (4) output reuses `ToolOutput::Issues` (§5.3) — the Vec of created issues.
+    //   (4) output reuses `IssueOutput::Issues` (§5.3, D25) — the Vec of created issues.
     // The bulk-create primitive lives on the `Session`/`Storage` surface BY DESIGN (`Session::create_bulk` over
     // `Storage::create_issues`, §4.1/§3.2) — it is the ONLY way to get one-tx all-or-nothing atomicity (an L7 loop over
     // single `create_issue` calls would commit each independently and could leave a partial batch — fatal here because
@@ -1464,34 +1504,71 @@ pub struct Attribution { #[serde(default)] pub agent_name: Option<String>,
 #[derive(Deserialize, JsonSchema, Default)]
 pub struct FilterInput { /* mirrors ListFilters: status, issue_type, assignee, labels_all/any,
                             priority_min/max, text_contains, include_deferred, include_closed, limit, offset.
-                            `include_tombstone` is deliberately NOT mirrored — it is export-internal (no agent
-                            query sets it); the mirror stays intentionally NON-surjective. Do NOT add it to the
+                            `include_tombstone` is deliberately NOT mirrored — it never rides the WIRE mirror
+                            (no `QueryInput` field); its two in-process consumers are the sync export and the mcp
+                            `issues/{id}` not-found suggestion scan (T2.6/D25); the mirror stays intentionally
+                            NON-surjective. Do NOT add it to the
                             wire (no CONTRACT_VERSION bump; FORK-2 guarantee). */ }
 ```
 
-### 5.3 Output shapes
+### 5.3 Output shapes (D25/FORK-1B — per-tool, MATERIALIZED, NORMATIVE)
+
+The output surface is a family of REAL, mcp-owned types — the single output authority, not documentation.
+Tool bodies construct their structured success payload AS an arm of their tool's union (or as the tool's
+single output type). All unions are `#[serde(untagged)]` ⇒ the wire bytes are IDENTICAL to serializing the
+arm's value directly, so materializing changes NO wire byte and NO golden except the schema bundle. `Box` is
+serde- and schemars-transparent (wire bytes + published schema unchanged); the boxed arms (`Issue`, `Close`)
+keep `clippy::large_enum_variant` clean under CI `-D warnings` (`ci.yml:63`) — `CloseOutcome` inlines a full
+41-field `Issue` (`crates/unblock-model/src/results.rs:46-51`). Each
+tool's `schema_for!(<output>)` is its §5.4 `ToolSchemas.output`: a new output shape must join its tool's
+union to be returnable, and joining it moves the D25 gate (`CONTRACT_HASH` → `CONTRACT_VERSION` bump).
+*(Supersedes the pre-D25 single `ToolOutput` union sketch, which also missed the landed `delete`/`added`/
+`removed` shapes; the name `ToolOutput` survives only in historical decision/task records.)*
 
 ```rust
+// issue — the 5 success shapes of the 8 actions:
 #[derive(Serialize, JsonSchema)] #[serde(untagged)]
-pub enum ToolOutput {
-    Issue(Issue),
-    Issues(Vec<Issue>),                 // multi-id update; ALSO the `create_bulk` output (D22 — N created issues)
-    Id(IdOnly),                         // quick-create
-    Counts(Vec<CountBucket>),
-    Close(CloseOutcome),               // close --suggest-next -> newly_unblocked
-    Deps(Vec<Dependency>),
-    Tree(DepTree),
-    Cycles(Vec<Vec<String>>),           // ordered cycle-path witnesses ([start,…,start] / self-loop [n,n]), gating-only or all-types per the action's blocking_only (§3.2.1, D19)
-    Sync(SyncOutput),                  // ExportReport | ImportReport
-    Diagnostics(DiagnosticReport),
-    Error(StructuredError),            // always valid JSON even on error (FR-11)
+pub enum IssueOutput {
+    Id(IdOnly),                        // quick-create
+    Issue(Box<Issue>),                 // create / show / reopen / restore
+    Issues(Vec<Issue>),                // multi-id update; ALSO create_bulk (D22 — N created issues)
+    Close(Box<CloseOutcome>),          // close — suggest_next -> newly_unblocked (FR-11)
+    Delete(DeletePlanOutput),          // the resolved delete plan (was the ad-hoc delete_plan_json)
 }
 #[derive(Serialize, JsonSchema)] pub struct IdOnly { pub id: String }
+#[derive(Serialize, JsonSchema)]
+pub struct DeletePlanOutput { pub mode: DeleteModeOutput, pub targets: Vec<String>, pub cascade_children: Vec<String> }
+#[derive(Serialize, JsonSchema)] #[serde(rename_all = "snake_case")]
+pub enum DeleteModeOutput { Tombstone, Cascade, Hard, DryRun }   // From<DeleteMode>; wire == the old strings
 
-// SyncOutput (G-23a): mcp-owned wrapper over the two model report DTOs (re-exported from unblock-model).
+// claim / defer — output = Issue (no union needed).
+
+// query:
+#[derive(Serialize, JsonSchema)] #[serde(untagged)]
+pub enum QueryOutput { Issues(Vec<Issue>), Counts(Vec<CountBucket>) }  // Issues = list/ready/blocked/search/stale
+
+// dep:
+#[derive(Serialize, JsonSchema)] #[serde(untagged)]
+pub enum DepOutput {
+    Added(DepAdded),                   // {"added":true}   (was ad-hoc json!)
+    Removed(DepRemoved),               // {"removed":true} (was ad-hoc json!)
+    Deps(Vec<Dependency>),
+    Tree(DepTree),                     // tree AND graph (Session::dependency_graph returns DepTree)
+    Cycles(Vec<Vec<String>>),          // ordered cycle-path witnesses (§3.2.1, D19)
+}
+#[derive(Serialize, JsonSchema)] pub struct DepAdded { pub added: bool }
+#[derive(Serialize, JsonSchema)] pub struct DepRemoved { pub removed: bool }
+
+// sync — output = SyncOutput (G-23a): mcp-owned wrapper over the two model report DTOs.
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SyncOutput { Export(ExportReport), Import(ImportReport) }
+
+// diagnostics — output = DiagnosticReport (§1.10).
+
+// The in-band ERROR output is NOT an arm of any union: every tool may return a `StructuredError` with
+// `is_error = true` (FR-11 — always valid JSON even on error). It is published ONCE, bundle-level, as
+// `SchemaBundle.error` (§5.4) — the rmcp `is_error` flag is the channel discriminator (§5.6).
 ```
 
 ### 5.4 Resources
@@ -1500,20 +1577,88 @@ pub enum SyncOutput { Export(ExportReport), Import(ImportReport) }
 unblock://issues/{id}        -> Issue            (FR-4)
 unblock://issues/ready       -> Vec<Issue>       (default-complete ready set; agent entrypoint)
 unblock://issues/blocked     -> Vec<Issue>
-unblock://capabilities       -> Capabilities     (FR-12; tools/resources/prompts + error/exit-code map)
-unblock://schema             -> SchemaBundle     (FR-12; JsonSchema per tool I/O)
+unblock://capabilities       -> Capabilities     (FR-12; tools/resources/prompts + error/exit-code/hint-shape map)
+unblock://schema             -> SchemaBundle     (FR-12; JsonSchema per tool I/O — per-tool {input, output} pairs + the shared error schema, D25)
 ```
 
+**`{id}` not-found (D25/FORK-3A — NORMATIVE, faithful to the original `issue_not_found_resource`):**
+a missing/unknown `{id}` yields a `StructuredError{code: IssueNotFound}` whose hint folds fuzzy
+near-miss suggestions via the public `unblock_error::find_similar_ids(id, <full id corpus>, 3)` —
+candidate corpus = every issue id in the DB, closed/tombstoned included (the original `get_all_ids`
+semantics; one read-only fetch on the error path, no write permit, FR-10; the crate plan pins the
+exact `Session` read — `include_deferred`+`include_closed`+`include_tombstone` all true reach the
+full corpus, D23), cap 3 (the original `structured.rs::issue_not_found`), with the
+"Did you mean …?" / list-discovery-fallback hint family and `context{searched_id, similar_ids}`;
+a FAILED corpus scan surfaces the scan error, not the not-found (the original's pinned behaviour).
+At the rmcp boundary, not-found (unknown URI or `IssueNotFound`) maps to
+`ErrorData::resource_not_found` (**-32002**) carrying the `StructuredError` as data; true internal
+faults stay `INTERNAL_ERROR` (-32603).
+
 ```rust
-#[derive(Serialize, JsonSchema)]
+// `Deserialize` on `Capabilities`/`ErrorCodeDescriptor` is REQUIRED, not illustrative: the FR-12
+// e2e parses both documents CLIENT-side (§5.4 gate / the T2.6 drift e2e); the landed code already
+// derives it — materializing this sketch exactly must not regress the parse path.
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct Capabilities {
-    pub contract_version: String,                  // bumped when any tool schema changes (FR-12)
+    pub contract_version: String,                  // bumped when EITHER discovery document changes (FR-12/D25 gate)
     pub tools: Vec<ToolDescriptor>,
     pub resources: Vec<ResourceDescriptor>,
     pub prompts: Vec<PromptDescriptor>,
-    pub error_codes: Vec<ErrorCodeDescriptor>,     // code -> exit_code, retryable, hint
+    pub error_codes: Vec<ErrorCodeDescriptor>,     // code -> exit_code, retryable, hint_shape (D25/FORK-4B)
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ErrorCodeDescriptor {
+    pub code: String,          // "ISSUE_NOT_FOUND", ... (§2.2 as_str)
+    pub exit_code: u8,         // 0..=8 (§2.3 parity)
+    pub retryable: bool,       // == ErrorCode::is_retryable
+    pub hint_shape: HintShape, // §2.2 — the static per-code hint shape (snake_case string on the wire)
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ToolSchemas {
+    pub input: Value,          // schema_for!(<Tool>Input) — draft 2020-12
+    pub output: Value,         // schema_for!(<tool's §5.3 output>) — the SUCCESS shape(s)
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SchemaBundle {
+    pub contract_version: String,
+    // 7 × per-tool {input, output} (§5.1 order). Outputs (§5.3): issue=IssueOutput, claim=Issue,
+    // defer=Issue, query=QueryOutput, dep=DepOutput, sync=SyncOutput, diagnostics=DiagnosticReport.
+    pub issue: ToolSchemas,
+    pub claim: ToolSchemas,
+    pub defer: ToolSchemas,
+    pub query: ToolSchemas,
+    pub dep: ToolSchemas,
+    pub sync: ToolSchemas,
+    pub diagnostics: ToolSchemas,
+    // D25 — the shared in-band error output every tool may return with `is_error = true` (FR-11):
+    // schema_for!(StructuredError), published ONCE (the rmcp `is_error` flag is the channel
+    // discriminator — folding it into each per-tool union would misstate the discriminator and
+    // duplicate one shape 7 times). Transitively via $defs the bundle pins IdOnly, SyncOutput,
+    // ExportReport/ImportReport, CountBucket, CloseOutcome, DepTree, Dependency, DiagnosticReport,
+    // StructuredError, and Issue — so the resource payloads above are pinned too.
+    pub error: Value,
 }
 ```
+
+**The FR-12 drift gate (D22 clause 8, widened by D25 — NORMATIVE).** ONE pinned digest,
+`CONTRACT_HASH` (unblock-mcp `options.rs`, superseding `SCHEMA_BUNDLE_HASH`, in lockstep with
+`CONTRACT_VERSION`), = SHA-256 over `serde_json::to_vec(&(capabilities(), schema_bundle()))` — the
+ordered two-document tuple. The contract test asserts (i) both builders stamp `CONTRACT_VERSION`
+and (ii) the recomputed digest equals `CONTRACT_HASH`. **Non-vacuous both directions:** any byte
+change in EITHER discovery document moves the digest (edit without bump → fail), and
+`contract_version` is a stamped field of BOTH documents (a bump alone also moves the digest — a
+bump without re-pin fails too). **Version-coupled artifact set = exactly the two discovery
+documents** + their transitive JsonSchema `$defs` closure (so `unblock-error` `ErrorCode`-set /
+exit / retryable / hint-shape changes, edits to the capabilities-document descriptor copies, and
+ANY output-DTO field change force a `CONTRACT_VERSION` bump — the D25 reversal of D24 clause 3's
+forward rule). **Golden-only set
+(re-blessable, NEVER version-coupled):** the 3 prompt rendered-message snapshots (§5.5 — prompt
+content is guidance, not machine contract; prompt NAMES are version-coupled — live-vs-builder
+parity + hash; tool/resource/prompt DESCRIPTION strings are version-coupled only in their
+capabilities-document copies) and the redundant per-crate schema/exit-table goldens.
 
 ### 5.5 Prompts
 
@@ -1525,7 +1670,7 @@ close_with_suggestions -> close + surface newly-unblocked
 
 ### 5.6 Error mapping at the MCP boundary
 
-Any `EngineError` → `StructuredError` (§2.4) attached as rmcp tool error **data** (`code`/`message`/`hint`/`retryable`/`context`), parallel to the CLI 0–8 exit codes. A failed tool call still returns **valid JSON** (`ToolOutput::Error`). Oversized/invalid args are rejected by schemars validation before reaching the engine (NFR-18); blast radius confined to the workspace.
+Any `EngineError` → `StructuredError` (§2.4) attached as rmcp tool error **data** (`code`/`message`/`hint`/`retryable`/`context`), parallel to the CLI 0–8 exit codes. A failed tool call still returns **valid JSON** (the shared in-band error output — `SchemaBundle.error`, `is_error=true`; §5.3/§5.4 D25). Oversized/invalid args are rejected by schemars validation before reaching the engine (NFR-18); blast radius confined to the workspace.
 
 ---
 
