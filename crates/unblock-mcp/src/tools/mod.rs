@@ -28,10 +28,12 @@ use unblock_error::{ErrorCode, StructuredError};
 use crate::error::engine_error_to_structured;
 use crate::options::Quotas;
 
-/// The serialized output of a successful tool call (spine §5.3 `ToolOutput` success arms).
+/// The serialized output of a successful tool call (a spine §5.3 per-tool output type, D25).
 ///
 /// Mapped to an rmcp `CallToolResult::structured` (content mirror + structured `data`,
-/// `is_error=false`). Domain errors do NOT use this — they use [`err_json`].
+/// `is_error=false`). Domain errors do NOT use this — they use [`err_json`]. `serde_json::to_value`
+/// is the wire arbiter here, so the untagged per-tool output unions are byte-identical to the values
+/// they wrap.
 pub(crate) fn ok_json<T: Serialize>(output: &T) -> CallToolResult {
     match serde_json::to_value(output) {
         Ok(value) => CallToolResult::structured(value),
@@ -47,8 +49,9 @@ pub(crate) fn ok_json<T: Serialize>(output: &T) -> CallToolResult {
 /// Map a [`StructuredError`] to an **in-band** error `CallToolResult` (FR-11).
 ///
 /// `CallToolResult::structured_error` carries the JSON content mirror + structured `data` +
-/// `is_error=Some(true)` in one result — always valid JSON even on error (the spine §5.3
-/// `ToolOutput::Error` arm). `Err(ErrorData)` is reserved for true protocol faults.
+/// `is_error=Some(true)` in one result — always valid JSON even on error (the shared in-band error
+/// output, `SchemaBundle.error`; the rmcp `is_error` flag is the channel discriminator, §5.6).
+/// `Err(ErrorData)` is reserved for true protocol faults.
 pub(crate) fn err_json(structured: &StructuredError) -> CallToolResult {
     match serde_json::to_value(structured) {
         Ok(value) => CallToolResult::structured_error(value),

@@ -3,7 +3,7 @@ source: crates/unblock-mcp/tests/contract_suite.rs
 expression: capabilities()
 ---
 {
-  "contract_version": "unblock.mcp.v1.1",
+  "contract_version": "unblock.mcp.v1.2",
   "tools": [
     {
       "name": "issue",
@@ -74,177 +74,212 @@ expression: capabilities()
     {
       "code": "DATABASE_NOT_FOUND",
       "exit_code": 2,
-      "retryable": false
+      "retryable": false,
+      "hint_shape": "none"
     },
     {
       "code": "DATABASE_LOCKED",
       "exit_code": 2,
-      "retryable": true
+      "retryable": true,
+      "hint_shape": "none"
     },
     {
       "code": "SCHEMA_MISMATCH",
       "exit_code": 2,
-      "retryable": false
+      "retryable": false,
+      "hint_shape": "none"
     },
     {
       "code": "DATABASE_ERROR",
       "exit_code": 2,
-      "retryable": false
+      "retryable": false,
+      "hint_shape": "none"
     },
     {
       "code": "NOT_INITIALIZED",
       "exit_code": 2,
-      "retryable": false
+      "retryable": false,
+      "hint_shape": "none"
     },
     {
       "code": "ALREADY_INITIALIZED",
       "exit_code": 2,
-      "retryable": false
+      "retryable": false,
+      "hint_shape": "none"
     },
     {
       "code": "ISSUE_NOT_FOUND",
       "exit_code": 3,
-      "retryable": false
+      "retryable": false,
+      "hint_shape": "similar_ids"
     },
     {
       "code": "AMBIGUOUS_ID",
       "exit_code": 3,
-      "retryable": true
+      "retryable": true,
+      "hint_shape": "none"
     },
     {
       "code": "ID_COLLISION",
       "exit_code": 3,
-      "retryable": false
+      "retryable": false,
+      "hint_shape": "none"
     },
     {
       "code": "INVALID_ID",
       "exit_code": 3,
-      "retryable": false
+      "retryable": false,
+      "hint_shape": "none"
     },
     {
       "code": "NOTHING_TO_DO",
       "exit_code": 3,
-      "retryable": false
+      "retryable": false,
+      "hint_shape": "none"
     },
     {
       "code": "ALREADY_CLAIMED",
       "exit_code": 3,
-      "retryable": true
+      "retryable": true,
+      "hint_shape": "none"
     },
     {
       "code": "VALIDATION_FAILED",
       "exit_code": 4,
-      "retryable": true
+      "retryable": true,
+      "hint_shape": "contextual_text"
     },
     {
       "code": "INVALID_STATUS",
       "exit_code": 4,
-      "retryable": true
+      "retryable": true,
+      "hint_shape": "static_text"
     },
     {
       "code": "INVALID_TYPE",
       "exit_code": 4,
-      "retryable": true
+      "retryable": true,
+      "hint_shape": "static_text"
     },
     {
       "code": "INVALID_PRIORITY",
       "exit_code": 4,
-      "retryable": true
+      "retryable": true,
+      "hint_shape": "static_text"
     },
     {
       "code": "REQUIRED_FIELD",
       "exit_code": 4,
-      "retryable": true
+      "retryable": true,
+      "hint_shape": "none"
     },
     {
       "code": "POLICY_VIOLATION",
       "exit_code": 4,
-      "retryable": false
+      "retryable": false,
+      "hint_shape": "none"
     },
     {
       "code": "CYCLE_DETECTED",
       "exit_code": 5,
-      "retryable": false
+      "retryable": false,
+      "hint_shape": "none"
     },
     {
       "code": "DEPENDENCY_NOT_FOUND",
       "exit_code": 5,
-      "retryable": false
+      "retryable": false,
+      "hint_shape": "none"
     },
     {
       "code": "HAS_DEPENDENTS",
       "exit_code": 5,
-      "retryable": false
+      "retryable": false,
+      "hint_shape": "none"
     },
     {
       "code": "SELF_DEPENDENCY",
       "exit_code": 5,
-      "retryable": false
+      "retryable": false,
+      "hint_shape": "none"
     },
     {
       "code": "DUPLICATE_DEPENDENCY",
       "exit_code": 5,
-      "retryable": false
+      "retryable": false,
+      "hint_shape": "none"
     },
     {
       "code": "JSONL_PARSE_ERROR",
       "exit_code": 6,
-      "retryable": false
+      "retryable": false,
+      "hint_shape": "none"
     },
     {
       "code": "PREFIX_MISMATCH",
       "exit_code": 6,
-      "retryable": false
+      "retryable": false,
+      "hint_shape": "none"
     },
     {
       "code": "IMPORT_COLLISION",
       "exit_code": 6,
-      "retryable": false
+      "retryable": false,
+      "hint_shape": "none"
     },
     {
       "code": "SYNC_CONFLICT",
       "exit_code": 6,
-      "retryable": false
+      "retryable": false,
+      "hint_shape": "none"
     },
     {
       "code": "CONFLICT_MARKERS",
       "exit_code": 6,
-      "retryable": false
+      "retryable": false,
+      "hint_shape": "none"
     },
     {
       "code": "PATH_TRAVERSAL",
       "exit_code": 6,
-      "retryable": false
+      "retryable": false,
+      "hint_shape": "none"
     },
     {
       "code": "CONFIG_ERROR",
       "exit_code": 7,
-      "retryable": false
+      "retryable": false,
+      "hint_shape": "none"
     },
     {
       "code": "CONFIG_NOT_FOUND",
       "exit_code": 7,
-      "retryable": false
+      "retryable": false,
+      "hint_shape": "none"
     },
     {
       "code": "CONFIG_PARSE_ERROR",
       "exit_code": 7,
-      "retryable": false
+      "retryable": false,
+      "hint_shape": "none"
     },
     {
       "code": "IO_ERROR",
       "exit_code": 8,
-      "retryable": false
+      "retryable": false,
+      "hint_shape": "none"
     },
     {
       "code": "JSON_ERROR",
       "exit_code": 8,
-      "retryable": false
+      "retryable": false,
+      "hint_shape": "none"
     },
     {
       "code": "INTERNAL_ERROR",
       "exit_code": 1,
-      "retryable": false
+      "retryable": false,
+      "hint_shape": "none"
     }
   ]
 }

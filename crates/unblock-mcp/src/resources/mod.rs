@@ -18,7 +18,7 @@ pub use capabilities::{
     Capabilities, ErrorCodeDescriptor, PromptDescriptor, ResourceDescriptor, ToolDescriptor,
     capabilities,
 };
-pub use schema::{SchemaBundle, schema_bundle};
+pub use schema::{SchemaBundle, ToolSchemas, schema_bundle};
 
 /// Map a JSON serialization failure to a structured `InternalError` (no panic in library code).
 ///

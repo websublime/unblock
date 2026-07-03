@@ -6,7 +6,7 @@
 
 use rmcp::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use unblock_error::ErrorCode;
+use unblock_error::{ErrorCode, HintShape};
 
 use crate::options::CONTRACT_VERSION;
 
@@ -61,6 +61,8 @@ pub struct ErrorCodeDescriptor {
     pub exit_code: u8,
     /// Whether the failing operation is potentially retryable.
     pub retryable: bool,
+    /// The static shape of the self-correction hint this code may carry (spine §2.2, D25/FORK-4B).
+    pub hint_shape: HintShape,
 }
 
 /// Build the [`Capabilities`] document (pure; no `Session`).
@@ -168,6 +170,7 @@ fn error_code_descriptors() -> Vec<ErrorCodeDescriptor> {
             code: code.as_str().to_string(),
             exit_code: code.exit_code(),
             retryable: code.is_retryable(),
+            hint_shape: code.hint_shape(),
         })
         .collect()
 }

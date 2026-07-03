@@ -2,17 +2,17 @@
 //! without a `Session` (FR-12). Each `use`/reference only compiles if the item is public.
 
 use unblock_mcp::{
-    CONTRACT_VERSION, Capabilities, ErrorCodeDescriptor, McpServerError, PromptDescriptor, Quotas,
-    ResourceDescriptor, SCHEMA_BUNDLE_HASH, SchemaBundle, ServeOptions, ToolDescriptor,
-    capabilities, schema_bundle, serve,
+    CONTRACT_HASH, CONTRACT_VERSION, Capabilities, ErrorCodeDescriptor, McpServerError,
+    PromptDescriptor, Quotas, ResourceDescriptor, SchemaBundle, ServeOptions, ToolDescriptor,
+    ToolSchemas, capabilities, schema_bundle, serve,
 };
 
 #[test]
 fn public_types_and_consts_resolve() {
     // Consts + builders are usable offline.
-    assert_eq!(CONTRACT_VERSION, "unblock.mcp.v1.1");
+    assert_eq!(CONTRACT_VERSION, "unblock.mcp.v1.2");
     assert_eq!(
-        SCHEMA_BUNDLE_HASH.len(),
+        CONTRACT_HASH.len(),
         64,
         "the hash-coupled drift pin is exported"
     );
@@ -21,11 +21,19 @@ fn public_types_and_consts_resolve() {
     assert_eq!(caps.contract_version, CONTRACT_VERSION);
     assert_eq!(bundle.contract_version, CONTRACT_VERSION);
 
+    // The per-tool `{input, output}` bundle + the shared error schema are objects (T2.6/D25).
+    let _pair: &ToolSchemas = &bundle.issue;
+    assert!(bundle.issue.input.is_object());
+    assert!(bundle.issue.output.is_object());
+    assert!(bundle.error.is_object());
+
     // Descriptor types are nameable from the public surface.
     let _tool: Option<ToolDescriptor> = caps.tools.into_iter().next();
     let _resource: Option<ResourceDescriptor> = caps.resources.into_iter().next();
     let _prompt: Option<PromptDescriptor> = caps.prompts.into_iter().next();
-    let _err: Option<ErrorCodeDescriptor> = caps.error_codes.into_iter().next();
+    // `hint_shape` is readable (proves `HintShape` is public via unblock-error, spine §1.10).
+    let first_err: Option<ErrorCodeDescriptor> = caps.error_codes.into_iter().next();
+    let _shape = first_err.map(|d| d.hint_shape);
 
     // Options are constructible.
     let _opts = ServeOptions::default();

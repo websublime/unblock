@@ -4,41 +4,51 @@
 //!   (spine §5, mcp plan public-API table).
 //! - [`CONTRACT_VERSION`] is the **mcp-owned SSOT** (F-5) for the MCP `contract_version` — disjoint
 //!   from policy's `POLICY_CONTRACT_VERSION`. It is surfaced in [`crate::capabilities`] and the
-//!   `diagnostics version` finding, and is **bumped on any tool/resource/prompt schema change**
-//!   (the FR-12 drift gate, proven by `tests/contract_suite.rs` at T2.3).
+//!   `diagnostics version` finding, and is **bumped whenever EITHER discovery document changes** —
+//!   the FR-12 drift gate (D22 widened by D25), proven by `tests/contract_suite.rs`.
 
 use tokio_util::sync::CancellationToken;
 
 /// The mcp-owned contract version (F-5).
 ///
 /// The single source of the MCP `contract_version` (surfaced in [`crate::capabilities`] and the
-/// `diagnostics version` finding). **Bump this whenever any tool/resource/prompt input or output
-/// schema changes** — the FR-12 drift gate keys on it, hash-coupled to [`SCHEMA_BUNDLE_HASH`].
+/// `diagnostics version` finding). **Bump this whenever EITHER discovery document changes** — any tool
+/// input OR output schema, the shared error schema, a tool/resource/prompt descriptor copy, or the
+/// error-code map (incl. hint shapes). The FR-12 drift gate keys on it, hash-coupled to
+/// [`CONTRACT_HASH`] (D22 widened by D25).
 ///
 /// History: `unblock.mcp.v1` (T2.2) → `unblock.mcp.v1.1` (T2.3 / D22 — the `issue` schema gained the
 /// `create_bulk` action arm + the 4 `Create` fields `design`/`acceptance_criteria`/`assignee`/
-/// `agent_context`). The `unblock.mcp.vN[.M]` family preserves the contract-id convention while the
-/// `.M` revision marks an additive schema change within the v1 product.
-pub const CONTRACT_VERSION: &str = "unblock.mcp.v1.1";
+/// `agent_context`) → `unblock.mcp.v1.2` (T2.6/D25 — `SchemaBundle` recomposed to per-tool
+/// `{input,output}` + the shared error schema; `capabilities()` enters the gate; `ErrorCodeDescriptor`
+/// gained `hint_shape`; the pin renamed `SCHEMA_BUNDLE_HASH` → `CONTRACT_HASH`). The
+/// `unblock.mcp.vN[.M]` family preserves the contract-id convention while the `.M` revision marks an
+/// additive contract change within the v1 product.
+pub const CONTRACT_VERSION: &str = "unblock.mcp.v1.2";
 
-/// The pinned SHA-256 digest of `schema_bundle()` — the HASH-COUPLED half of the FR-12 drift gate
-/// (D22/F6, `tests/contract_suite.rs`).
+/// The pinned SHA-256 digest of the ordered two-document tuple `(capabilities(), schema_bundle())` —
+/// the HASH-COUPLED half of the FR-12 drift gate (D22 widened by D25, `tests/contract_suite.rs`).
 ///
-/// Moves IN LOCKSTEP with [`CONTRACT_VERSION`]: the contract test asserts `hash(schema_bundle()) ==
-/// SCHEMA_BUNDLE_HASH`, so a schema edit FORCES a version bump (not a silent golden re-bless) AND a
-/// version bump without a real schema change is caught (the gate is non-vacuous in both directions).
-/// **Re-pin this whenever the tool input schemas change** (alongside the `CONTRACT_VERSION` bump + the
-/// re-blessed `schema_bundle` golden).
-pub const SCHEMA_BUNDLE_HASH: &str =
-    "4522c4516155762ef7aa2e14b4aa6485c14b6a980c10838dce35f59106b7ec7d";
+/// Moves IN LOCKSTEP with [`CONTRACT_VERSION`]; non-vacuous both directions (both documents embed
+/// `contract_version`). **Re-pin this whenever EITHER discovery document changes:** any tool
+/// input/output schema, the shared error schema, a tool/resource/prompt descriptor copy, or the
+/// error-code map (incl. hint shapes) — alongside the `CONTRACT_VERSION` bump + the re-blessed
+/// `capabilities`/`schema_bundle` goldens. Prompt rendered MESSAGES are golden-only (insta), never
+/// version-coupled.
+///
+/// Determinism failure mode: this digest's stability relies on `serde_json`'s DEFAULT `BTreeMap` map
+/// representation — any future dep enabling `serde_json/preserve_order` (feature unification, dev-deps
+/// included) reorders the schemars-generated maps and moves `CONTRACT_HASH` with NO contract change;
+/// if the gate fires with "nothing changed", check `Cargo.lock` feature unification first.
+pub const CONTRACT_HASH: &str = "d3cbd6c08b0e02a47f9565d3c281e9ccf1d2109367dca3acf1b826de18a4dc70";
 
 /// Untrusted-input limits enforced **before** any `Session` call (NFR-18).
 ///
 /// rmcp provides NO built-in request-size / array-length / string-length / batch cap on the stdio
 /// path (and there is no stdio middleware layer), so these limits are enforced by a shared
 /// `enforce_quota(&args)` preflight inside each tool body — after `Parameters<T>` deserialization and
-/// before the engine is touched. A breach is returned in-band as a `ToolOutput::Error` (the blast
-/// radius stays confined to the workspace).
+/// before the engine is touched. A breach is returned in-band as the shared structured error
+/// (`is_error=true`, the `SchemaBundle.error` shape) — the blast radius stays confined to the workspace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Quotas {
     /// Maximum serialized request size in bytes (default 256 KiB).
@@ -114,14 +124,14 @@ mod tests {
 
     #[test]
     fn contract_version_is_the_bumped_v1_id() {
-        // T2.3/D22 bumped the `issue` schema (create_bulk arm + 4 Create fields) → v1.1.
-        assert_eq!(CONTRACT_VERSION, "unblock.mcp.v1.1");
+        // T2.6/D25 bumped the contract surface (per-tool outputs + capabilities enter the gate) → v1.2.
+        assert_eq!(CONTRACT_VERSION, "unblock.mcp.v1.2");
     }
 
     #[test]
-    fn schema_bundle_hash_is_a_64_char_hex() {
-        use super::SCHEMA_BUNDLE_HASH;
-        assert_eq!(SCHEMA_BUNDLE_HASH.len(), 64, "a SHA-256 hex digest");
-        assert!(SCHEMA_BUNDLE_HASH.chars().all(|c| c.is_ascii_hexdigit()));
+    fn contract_hash_is_a_64_char_hex() {
+        use super::CONTRACT_HASH;
+        assert_eq!(CONTRACT_HASH.len(), 64, "a SHA-256 hex digest");
+        assert!(CONTRACT_HASH.chars().all(|c| c.is_ascii_hexdigit()));
     }
 }

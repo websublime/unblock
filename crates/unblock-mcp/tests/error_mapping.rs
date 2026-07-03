@@ -1,7 +1,8 @@
 //! Error-mapping conformance (spine §5.6, FR-11): every engine error surfaces as an **in-band**
-//! `ToolOutput::Error` that is valid JSON carrying `code`/`message`/`retryable` (and `context` where
-//! the engine provides it). The tool call still SUCCEEDS at the protocol level (`Err(ErrorData)` is
-//! reserved for protocol faults) — the domain failure rides `is_error=true` + structured content.
+//! structured error (`SchemaBundle.error` shape, `is_error=true`) that is valid JSON carrying
+//! `code`/`message`/`retryable` (and `context` where the engine provides it). The tool call still
+//! SUCCEEDS at the protocol level (`Err(ErrorData)` is reserved for protocol faults) — the domain
+//! failure rides `is_error=true` + structured content.
 
 mod common;
 

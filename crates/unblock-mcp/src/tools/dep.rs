@@ -19,6 +19,7 @@ use unblock_model::DependencyType;
 
 use crate::server::UnblockServer;
 use crate::tools::dto::Attribution;
+use crate::tools::output::{DepAdded, DepOutput, DepRemoved};
 use crate::tools::{engine_err_json, err_json, ok_json};
 
 /// serde default for [`DepToolInput::Cycles::blocking_only`] (wire-only; the trait takes a bare bool).
@@ -108,7 +109,7 @@ impl UnblockServer {
                 }
                 .into_dependency(&actor, now);
                 match self.session.add_dep(&dep).await {
-                    Ok(()) => ok_json(&serde_json::json!({ "added": true })),
+                    Ok(()) => ok_json(&DepOutput::Added(DepAdded { added: true })),
                     Err(err) => engine_err_json(&err),
                 }
             }
@@ -122,25 +123,25 @@ impl UnblockServer {
                 .remove_dep(&issue_id, &depends_on_id, &dep_type)
                 .await
             {
-                Ok(()) => ok_json(&serde_json::json!({ "removed": true })),
+                Ok(()) => ok_json(&DepOutput::Removed(DepRemoved { removed: true })),
                 Err(err) => engine_err_json(&err),
             },
             DepToolInput::List { id } => match self.session.list_dependencies(&id).await {
-                Ok(deps) => ok_json(&deps),
+                Ok(deps) => ok_json(&DepOutput::Deps(deps)),
                 Err(err) => engine_err_json(&err),
             },
             DepToolInput::Tree { id } => match self.session.dependency_tree(&id).await {
-                Ok(tree) => ok_json(&tree),
+                Ok(tree) => ok_json(&DepOutput::Tree(tree)),
                 Err(err) => engine_err_json(&err),
             },
             DepToolInput::Cycles { blocking_only } => {
                 match self.session.detect_cycles(blocking_only).await {
-                    Ok(cycles) => ok_json(&cycles),
+                    Ok(cycles) => ok_json(&DepOutput::Cycles(cycles)),
                     Err(err) => engine_err_json(&err),
                 }
             }
             DepToolInput::Graph { roots } => match self.session.dependency_graph(&roots).await {
-                Ok(graph) => ok_json(&graph),
+                Ok(graph) => ok_json(&DepOutput::Tree(graph)),
                 Err(err) => engine_err_json(&err),
             },
         }

@@ -1,7 +1,7 @@
 //! The crate's error surface: [`McpServerError`] (server lifecycle only) + the boundary mappers.
 //!
-//! **Domain errors are NOT here** — they flow *in-band* as `ToolOutput::Error` (FR-11). This module
-//! owns only:
+//! **Domain errors are NOT here** — they flow *in-band* as the shared structured error
+//! (`is_error=true`, FR-11). This module owns only:
 //!
 //! - [`McpServerError`] — the snafu enum for server lifecycle/transport faults (the public type the
 //!   CLI handles from [`crate::serve`]).
@@ -9,8 +9,11 @@
 //!   (the blanket `From<&EngineError> for StructuredError`, F-6). Every `EngineError` variant is
 //!   covered (it is `CodedError`), yielding an already-sanitized [`StructuredError`]; the JSON
 //!   boundary makes `context` terminal-safe (serde escapes it) so no extra sanitize is needed here.
-//! - [`to_rmcp_error_data`] — wrap a [`StructuredError`] as an rmcp protocol-fault `ErrorData`
-//!   (reserved for true protocol faults; domain errors use the in-band channel).
+//! - [`to_rmcp_error_data`] — the RESOURCE-boundary mapper (T2.6/D25/F-2). Resources have no in-band
+//!   channel like tools do, so a `read_resource` failure surfaces as an `ErrorData`: a not-found
+//!   ([`unblock_error::ErrorCode::IssueNotFound`] — a missing `{id}` or an unknown URI) maps to
+//!   `ErrorData::resource_not_found` (-32002); every other code is a true internal fault
+//!   (-32603). The full structured payload rides `data` on both arms.
 
 use rmcp::model::{ErrorCode as RmcpErrorCode, ErrorData};
 use snafu::Snafu;
@@ -19,9 +22,9 @@ use unblock_error::StructuredError;
 
 /// Server lifecycle/transport errors surfaced by [`crate::serve`] (NOT domain errors).
 ///
-/// Per-tool domain failures are returned *in-band* as `ToolOutput::Error` (always-valid JSON,
-/// FR-11); this enum is reserved for the server's own lifecycle — binding the stdio transport or the
-/// run loop failing.
+/// Per-tool domain failures are returned *in-band* as the shared structured error (`is_error=true`,
+/// always-valid JSON, FR-11); this enum is reserved for the server's own lifecycle — binding the stdio
+/// transport or the run loop failing.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
 #[non_exhaustive]
@@ -51,18 +54,29 @@ pub(crate) fn engine_error_to_structured(err: &EngineError) -> StructuredError {
     err.into()
 }
 
-/// Wrap a [`StructuredError`] as an rmcp **protocol-fault** [`ErrorData`].
+/// Map a [`StructuredError`] to an rmcp [`ErrorData`] at the **`read_resource` boundary** (T2.6/D25/F-2).
 ///
-/// Reserved for true protocol faults (transport/serialization/auth-level). Domain errors do NOT use
-/// this — they flow in-band via `CallToolResult::structured_error` (FR-11). The full structured
-/// payload is attached as `data` so a client still sees `code`/`message`/`hint`/`retryable`/`context`.
+/// Resources have no in-band channel like tools do (which return `CallToolResult::structured_error`,
+/// FR-11), so a `read_resource` failure surfaces as an `ErrorData`. A not-found —
+/// [`unblock_error::ErrorCode::IssueNotFound`], built for a missing `{id}` (`resources/issues.rs`) or
+/// an unknown URI (`server::unknown_resource`) — maps to `ErrorData::resource_not_found` (-32002, the
+/// pinned rmcp contract, `rmcp-1.7.0` `model.rs:544`). Every other code reaching this boundary is a true
+/// internal fault → `INTERNAL_ERROR` (-32603). The full structured payload is attached as `data` on
+/// BOTH arms, so a client still sees `code`/`message`/`hint`/`retryable`/`context`.
 pub(crate) fn to_rmcp_error_data(structured: &StructuredError) -> ErrorData {
     let data = serde_json::to_value(structured).ok();
-    ErrorData::new(
-        RmcpErrorCode::INTERNAL_ERROR,
-        structured.message.clone(),
-        data,
-    )
+    match structured.code {
+        // Not-found at the read_resource boundary → -32002 (the pinned rmcp contract).
+        unblock_error::ErrorCode::IssueNotFound => {
+            ErrorData::resource_not_found(structured.message.clone(), data)
+        }
+        // Everything else is a true internal fault → -32603, full structured payload still attached.
+        _ => ErrorData::new(
+            RmcpErrorCode::INTERNAL_ERROR,
+            structured.message.clone(),
+            data,
+        ),
+    }
 }
 
 #[cfg(test)]

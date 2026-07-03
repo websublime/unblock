@@ -24,7 +24,7 @@ expression: json
       "type": "boolean"
     },
     "include_tombstone": {
-      "description": "Include `status = 'tombstone'` (soft-deleted) rows. Default `false` — the default-visibility,\n`include_deferred`, and `include_closed` branches all EXCLUDE tombstones, so a caller must opt\nin explicitly. Set `true` ONLY by the `unblock-sync` full-corpus export (FORK-1/D23):\ntombstones must be exported so import-side tombstone-non-resurrection (FR-8, spine §1.8) is\nround-trippable. Orthogonal to `include_closed`: export sets BOTH `true`. list/ready/blocked/\nsearch/count/stale keep it `false` (agent query surfaces never set it).",
+      "description": "Include `status = 'tombstone'` (soft-deleted) rows. Default `false` — the default-visibility,\n`include_deferred`, and `include_closed` branches all EXCLUDE tombstones, so a caller must opt\nin explicitly. Set `true` by the `unblock-sync` full-corpus export (FORK-1/D23) and the mcp\n`issues/{id}` not-found suggestion corpus (T2.6/D25 — a read-only error-path scan): tombstones\nmust be exported so import-side tombstone-non-resurrection (FR-8, spine §1.8) is\nround-trippable. Orthogonal to `include_closed`: export sets BOTH `true`. list/ready/blocked/\nsearch/count/stale keep it `false` (no query TOOL sets it; the mcp `issues/{id}` not-found\nsuggestion scan is the one agent-facing consumer — T2.6/D25).",
       "type": "boolean"
     },
     "issue_type": {

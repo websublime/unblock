@@ -8,12 +8,13 @@
 //!
 //! - [`serve`] — build the rmcp server, bind the stdio transport, run until cancellation (FR-17).
 //! - [`ServeOptions`] / [`Quotas`] — server config + untrusted-input limits (NFR-18).
-//! - [`CONTRACT_VERSION`] / [`SCHEMA_BUNDLE_HASH`] — the mcp-owned `contract_version` SSOT (F-5;
-//!   bumped on any schema change) + its hash-coupled drift pin (F-6/D22).
+//! - [`CONTRACT_VERSION`] / [`CONTRACT_HASH`] — the mcp-owned `contract_version` SSOT (F-5; bumped
+//!   when EITHER discovery document changes) + the ONE hash-coupled drift pin over the two-document
+//!   tuple `(capabilities(), schema_bundle())` (D22 widened by D25).
 //! - [`capabilities`] / [`schema_bundle`] — pure builders (no `Session`) so the CLI can dump the
 //!   contract offline (FR-12).
 //! - [`McpServerError`] — server lifecycle/transport errors only; per-tool domain errors flow in-band
-//!   as `ToolOutput::Error` (FR-11).
+//!   as the shared structured error (`is_error=true`, FR-11).
 //!
 //! Everything else (tool routers, input/output DTOs, resource/prompt handlers, the error mapper) is
 //! `pub(crate)` — not part of the cross-crate contract.
@@ -29,10 +30,10 @@ mod server;
 mod tools;
 
 pub use error::McpServerError;
-pub use options::{CONTRACT_VERSION, Quotas, SCHEMA_BUNDLE_HASH, ServeOptions};
+pub use options::{CONTRACT_HASH, CONTRACT_VERSION, Quotas, ServeOptions};
 pub use resources::{
     Capabilities, ErrorCodeDescriptor, PromptDescriptor, ResourceDescriptor, SchemaBundle,
-    ToolDescriptor, capabilities, schema_bundle,
+    ToolDescriptor, ToolSchemas, capabilities, schema_bundle,
 };
 pub use server::serve;
 

@@ -14,7 +14,6 @@ use snafu::Snafu;
 
 use crate::code::ErrorCode;
 use crate::coded::CodedError;
-use crate::hints::{PRIORITY_DETAIL_HINT, VALID_STATUS_HINT, VALID_TYPE_HINT};
 
 /// A single field-level validation failure (D-E1).
 ///
@@ -112,15 +111,11 @@ impl CodedError for ModelError {
     }
 
     fn hint(&self) -> Option<String> {
-        match self {
-            Self::InvalidPriority { .. } => Some(PRIORITY_DETAIL_HINT.to_string()),
-            Self::InvalidStatus { .. } => Some(VALID_STATUS_HINT.to_string()),
-            Self::InvalidType { .. } => Some(VALID_TYPE_HINT.to_string()),
-            Self::InvalidId { .. }
-            | Self::RequiredField { .. }
-            | Self::ReparentCycle { .. }
-            | Self::ValidationFailed { .. } => None,
-        }
+        // Delegate to the single source of the fixed hint texts (D25/FORK-4B): `static_hint` is
+        // `Some` exactly for the `HintShape::StaticText` codes ({InvalidStatus, InvalidType,
+        // InvalidPriority}), `None` otherwise — provably equivalent to the pre-D25 per-variant match
+        // (InvalidId/RequiredField/ReparentCycle→CycleDetected/ValidationFailed all map to `None`).
+        self.code().static_hint().map(str::to_string)
     }
 
     fn context(&self) -> Map<String, Value> {

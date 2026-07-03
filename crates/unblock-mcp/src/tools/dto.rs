@@ -8,9 +8,9 @@
 //!   [`DepInput::into_dependency`] builds the model [`unblock_model::Dependency`] under a supplied
 //!   actor/timestamp.
 //!
-//! The result/display DTOs returned through `ToolOutput` (`CountBucket`, `DepTree`, `CloseOutcome`,
-//! `ExportReport`, `ImportReport`, `DiagnosticReport`) are the spine §1.10 types **sourced from
-//! `unblock-model`** (CF-A/CF-B) and serialized as-is — never redefined here.
+//! The result/display DTOs returned through the spine §5.3 per-tool outputs (`CountBucket`, `DepTree`,
+//! `CloseOutcome`, `ExportReport`, `ImportReport`, `DiagnosticReport`) are the spine §1.10 types
+//! **sourced from `unblock-model`** (CF-A/CF-B) and serialized as-is — never redefined here.
 
 use chrono::{DateTime, Utc};
 use rmcp::schemars::JsonSchema;
@@ -126,8 +126,10 @@ impl FilterInput {
             text_contains: self.text_contains,
             include_deferred: self.include_deferred,
             include_closed: self.include_closed,
-            // `include_tombstone` is export-internal (FORK-1/D23, spine §5.2 non-mirror): no agent
-            // query sets it, so `FilterInput` deliberately does NOT carry it — always `false` here.
+            // `include_tombstone` never rides the wire (FORK-1/D23, spine §5.2 non-mirror): no
+            // query TOOL sets it (its in-process consumers are the sync export + the mcp
+            // `issues/{id}` not-found scan, T2.6/D25), so `FilterInput` deliberately does NOT carry
+            // it — always `false` here.
             include_tombstone: false,
             limit: self.limit,
             offset: self.offset,
