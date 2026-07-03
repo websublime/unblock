@@ -106,4 +106,31 @@ mod tests {
         let payload = data.data.expect("structured payload attached");
         assert_eq!(payload["code"], "INTERNAL_ERROR");
     }
+
+    #[test]
+    fn issue_not_found_maps_to_resource_not_found() {
+        use unblock_error::StructuredError;
+        let structured = StructuredError::from_code(ErrorCode::IssueNotFound, "nope");
+        let data = to_rmcp_error_data(&structured);
+        assert_eq!(
+            data.code.0, -32002,
+            "IssueNotFound → -32002 resource_not_found"
+        );
+        let payload = data.data.expect("structured payload attached");
+        assert_eq!(payload["code"], "ISSUE_NOT_FOUND");
+    }
+
+    #[test]
+    fn non_not_found_codes_map_to_internal_error() {
+        use unblock_error::StructuredError;
+        for code in [ErrorCode::NotInitialized, ErrorCode::InternalError] {
+            let structured = StructuredError::from_code(code, "boom");
+            let data = to_rmcp_error_data(&structured);
+            assert_eq!(data.code.0, -32603, "{code:?} → -32603 internal error");
+            assert!(
+                data.data.is_some(),
+                "payload still attached on the -32603 arm"
+            );
+        }
+    }
 }

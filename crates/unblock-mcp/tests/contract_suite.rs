@@ -18,8 +18,11 @@
 
 mod common;
 
-use common::{connect, session};
+use common::{call_tool, connect, session};
+use rmcp::model::GetPromptRequestParams;
+use serde_json::json;
 use sha2::{Digest, Sha256};
+use unblock_error::ErrorCode;
 use unblock_mcp::{CONTRACT_HASH, CONTRACT_VERSION, capabilities, schema_bundle};
 
 /// The canonical SHA-256 hex digest of the ordered two-document tuple `(capabilities(),
@@ -161,6 +164,124 @@ async fn live_resource_templates_and_prompts_match_the_builder() {
         "live prompt set == the builder set"
     );
 
+    let _ = client.cancel().await;
+    let _ = server.cancel().await;
+}
+
+// --------------------------------------------------------------------------------------------------
+// The F-5 non-vacuous ErrorCode cross-check (the code->{exit_code,retryable,hint_shape} parity pin).
+// --------------------------------------------------------------------------------------------------
+
+/// Every `capabilities().error_codes` entry round-trips its `code` STRING through serde BACK into
+/// `unblock_error::ErrorCode` and matches the const-fn views (`exit_code`/`is_retryable`/`hint_shape`).
+/// The serde wire round-trip is what makes it non-vacuous — it catches an `as_str`↔serde mismatch, a
+/// wrong descriptor field, ordering loss, or a duplicate (NOT an in-crate `x == x` compare). 35
+/// entries, unique, in `ErrorCode::ALL` declaration order.
+#[test]
+fn capabilities_error_map_round_trips_error_code_all() {
+    let caps = capabilities();
+    assert_eq!(caps.error_codes.len(), 35, "exactly 35 error-code entries");
+
+    let mut seen = std::collections::HashSet::new();
+    for (i, descriptor) in caps.error_codes.iter().enumerate() {
+        // Parse the descriptor's `code` STRING back into an `ErrorCode` through serde (the wire path).
+        let code: ErrorCode = serde_json::from_value(json!(descriptor.code)).unwrap_or_else(|_| {
+            panic!(
+                "descriptor code {:?} parses back to ErrorCode",
+                descriptor.code
+            )
+        });
+
+        assert!(seen.insert(code), "duplicate code {:?}", descriptor.code);
+        assert_eq!(
+            code,
+            ErrorCode::ALL[i],
+            "entries are in ErrorCode::ALL order"
+        );
+        assert_eq!(descriptor.exit_code, code.exit_code(), "exit_code parity");
+        assert_eq!(
+            descriptor.retryable,
+            code.is_retryable(),
+            "retryable parity"
+        );
+        assert_eq!(
+            descriptor.hint_shape,
+            code.hint_shape(),
+            "hint_shape parity"
+        );
+    }
+    assert_eq!(seen.len(), 35, "all 35 codes present, unique");
+}
+
+// --------------------------------------------------------------------------------------------------
+// F-10 — the diagnostics{kind:version} finding pins mcp_contract_version.
+// --------------------------------------------------------------------------------------------------
+
+/// The live `diagnostics {"kind":"version"}` tool output carries `mcp_contract_version ==
+/// CONTRACT_VERSION` as a finding (pins the `with_contract_version` wiring, `diagnostics.rs`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn diagnostics_version_reports_mcp_contract_version() {
+    let session = session().await;
+    let (client, server, _cancel) = connect(session).await;
+
+    let (is_error, out) = call_tool(&client, "diagnostics", json!({ "kind": "version" })).await;
+    assert!(!is_error, "diagnostics version must succeed");
+    let findings = out["findings"].as_array().expect("findings array");
+    let stamped = findings.iter().any(|f| {
+        f["label"].as_str() == Some("mcp_contract_version")
+            && f["detail"].as_str() == Some(CONTRACT_VERSION)
+    });
+    assert!(
+        stamped,
+        "a finding must carry mcp_contract_version == {CONTRACT_VERSION}, got {findings:?}"
+    );
+
+    let _ = client.cancel().await;
+    let _ = server.cancel().await;
+}
+
+// --------------------------------------------------------------------------------------------------
+// F-6 — the 3 prompt rendered-message goldens (GOLDEN-ONLY — deliberately NOT version-coupled:
+// prompt message content is re-blessable without a CONTRACT_VERSION bump; the prompt SET/NAMES are
+// parity-checked and hash-pinned; description strings only via their document copies). Going through
+// `get_prompt` (not the pure `messages()` fns) pins the real wire surface incl. the #[prompt_router].
+// --------------------------------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn prompt_triage_golden() {
+    let session = session().await;
+    let (client, server, _cancel) = connect(session).await;
+    let result = client
+        .get_prompt(GetPromptRequestParams::new("triage"))
+        .await
+        .expect("get_prompt triage");
+    insta::assert_json_snapshot!("prompt_triage", result.messages);
+    let _ = client.cancel().await;
+    let _ = server.cancel().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn prompt_plan_next_work_golden() {
+    let session = session().await;
+    let (client, server, _cancel) = connect(session).await;
+    let result = client
+        .get_prompt(GetPromptRequestParams::new("plan_next_work"))
+        .await
+        .expect("get_prompt plan_next_work");
+    insta::assert_json_snapshot!("prompt_plan_next_work", result.messages);
+    let _ = client.cancel().await;
+    let _ = server.cancel().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn prompt_close_with_suggestions_golden() {
+    let session = session().await;
+    let (client, server, _cancel) = connect(session).await;
+    let result = client
+        .get_prompt(GetPromptRequestParams::new("close_with_suggestions"))
+        .await
+        .expect("get_prompt close_with_suggestions");
+    insta::assert_json_snapshot!("prompt_close_with_suggestions", result.messages);
     let _ = client.cancel().await;
     let _ = server.cancel().await;
 }

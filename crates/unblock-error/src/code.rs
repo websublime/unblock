@@ -392,3 +392,37 @@ impl ErrorCode {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{ErrorCode, HintShape};
+
+    #[test]
+    fn hint_shape_serde_strings() {
+        for (shape, s) in [
+            (HintShape::None, "none"),
+            (HintShape::StaticText, "static_text"),
+            (HintShape::ContextualText, "contextual_text"),
+            (HintShape::SimilarIds, "similar_ids"),
+        ] {
+            assert_eq!(shape.as_str(), s);
+            assert_eq!(serde_json::to_string(&shape).unwrap(), format!("\"{s}\""));
+            let back: HintShape = serde_json::from_str(&format!("\"{s}\"")).unwrap();
+            assert_eq!(back, shape);
+        }
+    }
+
+    #[test]
+    fn hint_shape_is_total_over_all_and_coherent() {
+        // Every code has a shape (const-fn totality) and the StaticText⟺static_hint invariant holds.
+        for code in ErrorCode::ALL {
+            let shape = code.hint_shape();
+            assert_eq!(
+                shape == HintShape::StaticText,
+                code.static_hint().is_some(),
+                "StaticText⟺static_hint must hold for {}",
+                code.as_str()
+            );
+        }
+    }
+}

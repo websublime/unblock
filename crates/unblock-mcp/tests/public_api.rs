@@ -22,9 +22,10 @@ fn public_types_and_consts_resolve() {
     assert_eq!(bundle.contract_version, CONTRACT_VERSION);
 
     // The per-tool `{input, output}` bundle + the shared error schema are objects (T2.6/D25).
-    let _pair: &ToolSchemas = &bundle.issue;
-    assert!(bundle.issue.input.is_object());
-    assert!(bundle.issue.output.is_object());
+    // Naming `ToolSchemas` in a type ascription is a compile-witness that the type is public.
+    let issue_schemas: &ToolSchemas = &bundle.issue;
+    assert!(issue_schemas.input.is_object());
+    assert!(issue_schemas.output.is_object());
     assert!(bundle.error.is_object());
 
     // Descriptor types are nameable from the public surface.
