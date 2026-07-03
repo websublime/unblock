@@ -1,0 +1,13 @@
+---
+source: crates/unblock-mcp/tests/contract_suite.rs
+expression: result.messages
+---
+[
+  {
+    "role": "user",
+    "content": {
+      "type": "text",
+      "text": "Close an issue and act on what it unblocks. Steps:\n1. Call `issue` with `{\"action\":\"close\",\"id\":\"<id>\",\"suggest_next\":true}` — the result's `newly_unblocked` lists the issues this close just made ready.\n2. For each newly-unblocked issue, decide whether to claim it now (via `claim`) or leave it for the next planning pass.\n3. Report what was closed and which issues became ready."
+    }
+  }
+]

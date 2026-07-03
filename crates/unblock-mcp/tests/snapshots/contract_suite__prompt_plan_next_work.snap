@@ -1,0 +1,13 @@
+---
+source: crates/unblock-mcp/tests/contract_suite.rs
+expression: result.messages
+---
+[
+  {
+    "role": "user",
+    "content": {
+      "type": "text",
+      "text": "Plan the next unit of work. Steps:\n1. Read the `unblock://issues/ready` resource (or call `query` with `{\"kind\":\"ready\"}`) — it is default-complete and already hybrid-ranked.\n2. Pick the highest-ranked ready issue that fits the current session's scope.\n3. Call `claim` with `{\"id\":\"<chosen-id>\",\"assignee\":\"<you>\"}` to take it atomically (if the claim loses a race, pick the next ready issue and retry).\n4. Report the claimed issue and a one-line plan to complete it."
+    }
+  }
+]
