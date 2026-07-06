@@ -378,6 +378,9 @@ pub mod parked {
         async fn list_events(&self, issue_id: &str) -> Result<Vec<Event>, StorageError> {
             self.inner.list_events(issue_id).await
         }
+        async fn epic_child_rollup(&self) -> Result<Vec<(String, (usize, usize))>, StorageError> {
+            self.inner.epic_child_rollup().await
+        }
         async fn closed_since(
             &self,
             since: Option<DateTime<Utc>>,
@@ -607,6 +610,9 @@ pub mod collide {
         async fn list_events(&self, issue_id: &str) -> Result<Vec<Event>, StorageError> {
             self.inner.list_events(issue_id).await
         }
+        async fn epic_child_rollup(&self) -> Result<Vec<(String, (usize, usize))>, StorageError> {
+            self.inner.epic_child_rollup().await
+        }
         async fn closed_since(
             &self,
             since: Option<DateTime<Utc>>,
@@ -805,6 +811,9 @@ pub mod race {
         }
         async fn list_events(&self, issue_id: &str) -> Result<Vec<Event>, StorageError> {
             self.inner.list_events(issue_id).await
+        }
+        async fn epic_child_rollup(&self) -> Result<Vec<(String, (usize, usize))>, StorageError> {
+            self.inner.epic_child_rollup().await
         }
         async fn closed_since(
             &self,

@@ -4,10 +4,11 @@
 
 mod common;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::Utc;
 use common::parked::ParkedStorage;
 use common::{add_blocks, dep, issue, seed_open, session, session_over};
 use unblock_engine::{DiagnosticKind, IssuePatch};
@@ -428,14 +429,14 @@ async fn diagnostics_dispatch_covers_every_kind() {
         DiagnosticKind::Changelog,
         DiagnosticKind::Orphans,
     ] {
-        let report = session.diagnostics(kind).await.expect("diagnostics");
+        let report = session.diagnostics(kind, None).await.expect("diagnostics");
         // The report's kind is the INPUT kind (never an integrity placeholder).
         assert_eq!(report.kind, kind);
     }
 
     // Stats reflects the one created issue in the total.
     let stats = session
-        .diagnostics(DiagnosticKind::Stats)
+        .diagnostics(DiagnosticKind::Stats, None)
         .await
         .expect("stats");
     let total = stats
@@ -468,12 +469,16 @@ async fn diagnostics_report_shapes_are_golden_pinned() {
         .expect("close");
 
     // For each kind, render a stable "kind: [label=detail, ...]" line, redacting the volatile labels.
+    // `avg_lead_time_hours` is time-dependent (a `closed_at − created_at` over the frozen epoch-based
+    // corpus timestamps and `Utc::now()` at close), so we pin its PRESENCE + POSITION (the NFR-14
+    // contract) but REDACT its numeric value — the machine, not the structure.
     let volatile = [
         "workspace_dir",
         "db_path",
         "jsonl_path",
         "unblock_dir",
         "version",
+        "avg_lead_time_hours",
     ];
     let mut lines = Vec::new();
     for kind in [
@@ -485,7 +490,7 @@ async fn diagnostics_report_shapes_are_golden_pinned() {
         DiagnosticKind::Changelog,
         DiagnosticKind::Orphans,
     ] {
-        let report = session.diagnostics(kind).await.expect("diagnostics");
+        let report = session.diagnostics(kind, None).await.expect("diagnostics");
         let rendered: Vec<String> = report
             .findings
             .iter()
@@ -501,6 +506,385 @@ async fn diagnostics_report_shapes_are_golden_pinned() {
     }
 
     insta::assert_snapshot!("diagnostics_report_shapes", lines.join("\n"));
+}
+
+// --------------------------------------------------------------------------------------------------
+// T2.7/D26 — the faithful pure-DB diagnostics taxonomy (changelog `since`, bd lint, bd stats).
+// Each test is NON-VACUOUS and FAILS under the old drop-since / blocked-lite / tally-only code.
+// --------------------------------------------------------------------------------------------------
+
+/// Return the `{label: detail}` map of a diagnostic's findings.
+fn findings_map(report: &unblock_engine::DiagnosticReport) -> HashMap<String, String> {
+    report
+        .findings
+        .iter()
+        .map(|f| (f.label.clone(), f.detail.clone()))
+        .collect()
+}
+
+/// Collect the `(label, detail)` pairs of a diagnostic, in emission order.
+fn findings_pairs(report: &unblock_engine::DiagnosticReport) -> Vec<(String, String)> {
+    report
+        .findings
+        .iter()
+        .map(|f| (f.label.clone(), f.detail.clone()))
+        .collect()
+}
+
+#[tokio::test]
+async fn changelog_since_windows_closed_issues_and_excludes_templates() {
+    let session = session().await;
+
+    // Two issues closed at DIFFERENT times: ub-early (created earlier) closed first, ub-late later.
+    session
+        .create(&issue("ub-early", Priority::MEDIUM, 1000))
+        .await
+        .expect("create early");
+    session
+        .close_with_suggestions("ub-early", None)
+        .await
+        .expect("close early");
+    // A marker `since` captured BETWEEN the two closes.
+    let since = Utc::now();
+    // A template issue that is ALSO closed — must be EXCLUDED from the changelog (bd-faithful, SF-2).
+    session
+        .create(&Issue {
+            is_template: true,
+            ..issue("ub-tmpl", Priority::MEDIUM, 1001)
+        })
+        .await
+        .expect("create template");
+    session
+        .close_with_suggestions("ub-tmpl", None)
+        .await
+        .expect("close template");
+    session
+        .create(&issue("ub-late", Priority::MEDIUM, 1002))
+        .await
+        .expect("create late");
+    session
+        .close_with_suggestions("ub-late", None)
+        .await
+        .expect("close late");
+
+    // since=Some(marker): only ub-late (closed at/after the marker); ub-early is BEFORE it. This
+    // FAILS under the old drop-since adapter (which returned the full window regardless).
+    let windowed = session
+        .diagnostics(DiagnosticKind::Changelog, Some(since))
+        .await
+        .expect("changelog windowed");
+    let windowed_ids: Vec<&str> = windowed.findings.iter().map(|f| f.label.as_str()).collect();
+    assert_eq!(
+        windowed_ids,
+        vec!["ub-late"],
+        "since window excludes the earlier close and the template, includes only the later close"
+    );
+
+    // since=None: all closed NON-TEMPLATE issues (ub-early + ub-late), template still excluded.
+    let full = session
+        .diagnostics(DiagnosticKind::Changelog, None)
+        .await
+        .expect("changelog full");
+    let full_ids: Vec<&str> = full.findings.iter().map(|f| f.label.as_str()).collect();
+    assert_eq!(
+        full_ids,
+        vec!["ub-early", "ub-late"],
+        "None window returns every closed non-template issue; the template is EXCLUDED"
+    );
+}
+
+#[tokio::test]
+async fn lint_flags_missing_template_sections_per_type_case_insensitively() {
+    let session = session().await;
+
+    // A Bug MISSING Acceptance Criteria (has Steps to Reproduce) → exactly ONE finding for it.
+    session
+        .create(&full_issue(
+            "ub-bug-partial",
+            "bug missing AC",
+            IssueType::Bug,
+            Priority::MEDIUM,
+            None,
+            &[],
+            Some("## Steps to Reproduce\nboot then crash"),
+            1000,
+        ))
+        .await
+        .expect("create bug-partial");
+    // A Bug with BOTH sections, the AC heading LOWERCASE single-hash → SATISFIED (case-insensitive,
+    // prefix-agnostic) → NO finding.
+    session
+        .create(&full_issue(
+            "ub-bug-ok",
+            "bug complete",
+            IssueType::Bug,
+            Priority::MEDIUM,
+            None,
+            &[],
+            Some("## Steps to Reproduce\nx\n\n# acceptance criteria\ny"),
+            1001,
+        ))
+        .await
+        .expect("create bug-ok");
+    // An Epic missing Success Criteria → ONE finding.
+    session
+        .create(&full_issue(
+            "ub-epic",
+            "epic no success",
+            IssueType::Epic,
+            Priority::MEDIUM,
+            None,
+            &[],
+            Some("just a blurb"),
+            1002,
+        ))
+        .await
+        .expect("create epic");
+    // A Chore has NO required sections → SKIPPED entirely (no finding).
+    session
+        .create(&full_issue(
+            "ub-chore",
+            "chore",
+            IssueType::Chore,
+            Priority::MEDIUM,
+            None,
+            &[],
+            None,
+            1003,
+        ))
+        .await
+        .expect("create chore");
+
+    let report = session
+        .diagnostics(DiagnosticKind::Lint, None)
+        .await
+        .expect("lint");
+    let pairs = findings_pairs(&report);
+
+    assert_eq!(
+        pairs,
+        vec![
+            (
+                "ub-bug-partial".to_string(),
+                "missing section: ## Acceptance Criteria".to_string()
+            ),
+            (
+                "ub-epic".to_string(),
+                "missing section: ## Success Criteria".to_string()
+            ),
+        ],
+        "one finding per missing section, ordered by id ASC; the complete Bug and the Chore are silent"
+    );
+    // The OLD `blocked=<n>`-lite finding is GONE (this fails under the old lint).
+    assert!(
+        !report.findings.iter().any(|f| f.label == "blocked"),
+        "the bd-faithful lint never emits a `blocked` count"
+    );
+}
+
+#[tokio::test]
+async fn lint_orders_bug_sections_by_declaration() {
+    let session = session().await;
+    // A Bug with NEITHER section → two findings, in declaration order (Steps THEN Acceptance).
+    session
+        .create(&full_issue(
+            "ub-bug",
+            "bug empty",
+            IssueType::Bug,
+            Priority::MEDIUM,
+            None,
+            &[],
+            Some("no headings here"),
+            1000,
+        ))
+        .await
+        .expect("create bug");
+
+    let report = session
+        .diagnostics(DiagnosticKind::Lint, None)
+        .await
+        .expect("lint");
+    assert_eq!(
+        findings_pairs(&report),
+        vec![
+            (
+                "ub-bug".to_string(),
+                "missing section: ## Steps to Reproduce".to_string()
+            ),
+            (
+                "ub-bug".to_string(),
+                "missing section: ## Acceptance Criteria".to_string()
+            ),
+        ],
+        "inner order = the required-section declaration order (Steps to Reproduce THEN Acceptance)"
+    );
+}
+
+#[tokio::test]
+async fn stats_reports_bd_faithful_counters_with_tombstone_and_pinned_and_epic_eligible() {
+    let session = session().await;
+
+    // Two closed issues (lead-time sample present) — one is also the eligible-epic's child.
+    session
+        .create(&issue("ub-closed-1", Priority::MEDIUM, 1000))
+        .await
+        .expect("c");
+    session
+        .close_with_suggestions("ub-closed-1", None)
+        .await
+        .expect("close");
+
+    // An epic whose SINGLE parent-child child is closed → eligible for closure.
+    session
+        .create(&full_issue(
+            "ub-epic",
+            "epic",
+            IssueType::Epic,
+            Priority::MEDIUM,
+            None,
+            &[],
+            None,
+            1001,
+        ))
+        .await
+        .expect("epic");
+    session
+        .create(&issue("ub-child", Priority::MEDIUM, 1002))
+        .await
+        .expect("child");
+    session
+        .close_with_suggestions("ub-child", None)
+        .await
+        .expect("close child");
+    // Parent-child edge: child depends_on epic (stored orientation).
+    session
+        .add_dep(&dep("ub-child", "ub-epic", DependencyType::ParentChild))
+        .await
+        .expect("add parent-child");
+
+    // A PINNED issue (via the `pinned` column).
+    session
+        .create(&Issue {
+            pinned: true,
+            ..issue("ub-pinned", Priority::MEDIUM, 1003)
+        })
+        .await
+        .expect("pinned");
+
+    // A TOMBSTONE issue (soft-deleted).
+    session
+        .create(&issue("ub-gone", Priority::MEDIUM, 1004))
+        .await
+        .expect("create");
+    session
+        .delete(&unblock_engine::DeletePlan {
+            mode: unblock_engine::DeleteMode::Tombstone,
+            targets: vec!["ub-gone".to_string()],
+            cascade_children: Vec::new(),
+        })
+        .await
+        .expect("tombstone");
+
+    let report = session
+        .diagnostics(DiagnosticKind::Stats, None)
+        .await
+        .expect("stats");
+    let map = findings_map(&report);
+
+    // `tombstone` is a DISTINCT counter = 1 (this fails under the old tally-only stats).
+    assert_eq!(map.get("tombstone").map(String::as_str), Some("1"));
+    // `total` EXCLUDES the tombstone: closed-1, epic, child, pinned = 4 (ub-gone not counted).
+    assert_eq!(map.get("total").map(String::as_str), Some("4"));
+    // `pinned` counts the pinned issue.
+    assert_eq!(map.get("pinned").map(String::as_str), Some("1"));
+    // The epic with all-children-closed is eligible.
+    assert_eq!(map.get("epics_eligible").map(String::as_str), Some("1"));
+    // A lead-time sample exists (two closed issues) → the row is PRESENT.
+    assert!(
+        map.contains_key("avg_lead_time_hours"),
+        "avg_lead_time present when there are closed issues"
+    );
+    // `closed` = the two closed issues (closed-1 + child).
+    assert_eq!(map.get("closed").map(String::as_str), Some("2"));
+
+    // Emission order is PINNED (NFR-14): the counter labels appear in the bd-parity order, with
+    // avg_lead_time_hours BETWEEN epics_eligible and total.
+    let labels: Vec<&str> = report.findings.iter().map(|f| f.label.as_str()).collect();
+    assert_eq!(
+        labels,
+        vec![
+            "open",
+            "in_progress",
+            "blocked",
+            "closed",
+            "ready",
+            "deferred",
+            "draft",
+            "tombstone",
+            "pinned",
+            "epics_eligible",
+            "avg_lead_time_hours",
+            "total",
+        ],
+        "the stats findings emit in the PINNED bd-parity order"
+    );
+}
+
+#[tokio::test]
+async fn stats_omits_avg_lead_time_on_empty_closed_corpus() {
+    let session = session().await;
+    // Only OPEN issues → no closed rows → the avg_lead_time_hours row is ABSENT.
+    session
+        .create(&issue("ub-open", Priority::MEDIUM, 1000))
+        .await
+        .expect("create");
+
+    let report = session
+        .diagnostics(DiagnosticKind::Stats, None)
+        .await
+        .expect("stats");
+    let labels: Vec<&str> = report.findings.iter().map(|f| f.label.as_str()).collect();
+    assert!(
+        !labels.contains(&"avg_lead_time_hours"),
+        "avg_lead_time_hours is ABSENT when there are no closed issues"
+    );
+    // The order is still pinned; total is last, right after epics_eligible.
+    assert_eq!(
+        labels.last().copied(),
+        Some("total"),
+        "total is the last finding"
+    );
+}
+
+#[tokio::test]
+async fn orphans_surfaces_only_commit_hash_external_refs() {
+    let session = session().await;
+    // A hex commit-ish external_ref MATCHES; a jira-123 uppercase-y ref does NOT.
+    session
+        .create(&Issue {
+            external_ref: Some("a1b2c3d4e5f6".to_string()),
+            ..issue("ub-commit", Priority::MEDIUM, 1000)
+        })
+        .await
+        .expect("create commit");
+    session
+        .create(&Issue {
+            external_ref: Some("JIRA-123".to_string()),
+            ..issue("ub-jira", Priority::MEDIUM, 1001)
+        })
+        .await
+        .expect("create jira");
+
+    let report = session
+        .diagnostics(DiagnosticKind::Orphans, None)
+        .await
+        .expect("orphans");
+    let ids: Vec<&str> = report.findings.iter().map(|f| f.label.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["ub-commit"],
+        "only the commit-hash-shaped external_ref surfaces; the jira ref does not"
+    );
 }
 
 // --------------------------------------------------------------------------------------------------
