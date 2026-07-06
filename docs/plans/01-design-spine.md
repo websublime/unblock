@@ -720,6 +720,16 @@ pub trait Storage: Send + Sync {
     async fn list_events(&self, issue_id: &str) -> Result<Vec<Event>, StorageError>;
 
     // --- diagnostics support (FR-15, pure-DB; no git) ---
+    // D26 (T2.7): changelog/lint/orphans add NO new Storage method — the engine composes them from the
+    //   reads already declared here + list/ready/blocked/count/dependency_tree. `closed_since` is already
+    //   `since`-windowed; `orphan_candidates` is already status-agnostic. The bd-faithful `stats` diagnostic
+    //   is the ONE exception: `epics_eligible_for_closure` (per-epic parent-child child rollup) and `pinned`
+    //   (`pinned=1 OR status='pinned'`) cannot be composed from the surface above, so a faithful port adds
+    //   ONE purely-additive pure-DB aggregate primitive — `stats_rollup() -> StatsRollup` (an internal
+    //   engine↔storage aggregate; NOT a wire/schema DTO, so NO mcp `CONTRACT_HASH` impact). This is the ONE
+    //   open T2.7 storage-surface design point (additive primitive vs a forbidden drop of the two counters),
+    //   routed to the T2.7 design-Review gate with Miguel. (The full-taxonomy `diagnostic_probe`/
+    //   `diagnostic_probes` remain the commented [v1.1] CF-E seams below.)
     async fn closed_since(&self, since: Option<DateTime<Utc>>) -> Result<Vec<Issue>, StorageError>; // changelog
     async fn orphan_candidates(&self) -> Result<Vec<Issue>, StorageError>;  // external_ref matches commit pattern
 
@@ -948,8 +958,35 @@ The dependency ops (FR-5) — source-verified vs the original cycle machinery:
   self-loop) is the contract the `dep cycles` MCP action (T2.2) renders. **The `Storage` trait and the
   `Session` forward take a bare `bool` `blocking_only` (no Rust-level default); the default-TRUE
   (gating-only) lives ONLY on the MCP wire (`DepToolInput::Cycles`, §5.2 `#[serde(default = "default_true")]`)**
-  — the same input-default-vs-method-arg asymmetry as `DiagnosticsInput::Changelog{since}` vs
-  `diagnostics(kind)`.
+  — the same input-default-vs-method-arg asymmetry as `DiagnosticsInput::Changelog{since}` (wire
+  `#[serde(default)]`) vs the bare `since` arg on `diagnostics(kind, since)` (D26/OQ-1).
+- **`diagnostics(kind, since)` (FR-15, pure-DB — D26; no git, NFR-6).** The 7-kind read path composes
+  ONLY existing `Storage` reads for changelog/lint/orphans — NO new trait method there. **`stats`** = the
+  bd-faithful `StatsSummary` (`temp/beads_rust-main/src/cli/commands/stats.rs:376-499`): `list_issues` +
+  `count_issues` over the widest-visibility filters → per-status tallies
+  (open/in_progress/closed/deferred/draft/tombstone), `pinned` (`pinned=1` col OR `Pinned` status),
+  `total` EXCLUDING tombstones, `blocked` = `Status::Blocked` ∪ the dependency-blocked active id set
+  (deduped — via `blocked_issues`), `ready` (via `ready_issues`), `epics_eligible_for_closure`
+  (non-template non-terminal epics whose parent-child children are all closed/tombstone, child-count>0),
+  `average_lead_time_hours` (mean `closed_at − created_at` over closed, emitted only when `Some`) — **MINUS**
+  bd's git-derived `RecentActivity` block (`git_recent_activity`, EXCLUDED per NFR-6). **STORAGE-SURFACE
+  NOTE (OQ-5 seam — flagged, resolve at the T2.7 design-Review with Miguel; §3.2 note below):** two of these
+  — `epics_eligible_for_closure` (per-epic child rollup) and `pinned` (`pinned=1 OR status='pinned'`) —
+  CANNOT be composed from the existing trait; a faithful port adds ONE purely-additive, pure-DB read
+  primitive (`stats_rollup() -> StatsRollup`, an internal engine↔storage aggregate, NOT a wire/schema DTO,
+  so NO `CONTRACT_HASH` impact). Dropping the two to avoid the primitive would thin the faithful port
+  (forbidden — never-simplify hard rule). **`lint`** = the bd template-section rules
+  (`temp/beads_rust-main/src/cli/commands/lint.rs`): required `## …` sections per type (Bug ⇒
+  Steps-to-Reproduce + Acceptance-Criteria; Task/Feature ⇒ Acceptance-Criteria; Epic ⇒ Success-Criteria;
+  other ⇒ none), a case-insensitive heading-substring test over `description` only (prefix `## `/`# `
+  stripped), over non-template/non-terminal rows, one finding per missing section — REPLACING the prior
+  `blocked=<n>`-lite finding (which bd's `lint` never computes). **`changelog`** = `closed_since(since)`
+  (window-capable — `since=None` ⇒ all closed). **`orphans`** = `orphan_candidates()` — **status-agnostic**
+  (every row whose `external_ref` matches the commit-hash shape; NOT bd's `status IN ('open','in_progress')`
+  narrowing — the faithful FR-15 reading). Every kind emits generic `DiagnosticFinding{label,detail}` rows
+  (§1.10 / §5.3), so the enrichment does NOT touch the mcp schema bundle (no `CONTRACT_VERSION` bump —
+  §5.4/D25). `since` is a bare method arg; the wire default lives only on `DiagnosticsInput::Changelog{since}`
+  (§5.2), the D19 `detect_cycles(blocking_only)` precedent.
 - **`dependency_tree` / `dependency_graph(roots)` (unblock is the reference — the original has no
   `DepTree`/`GraphEdge` builder).** Forward-edge reachability (`issue_id -> depends_on_id`) over the
   dependency table: `dependency_tree(id)` returns the subtree rooted at `id`; `dependency_graph(roots)`
@@ -1217,7 +1254,7 @@ impl Session {
     pub async fn dependency_tree(&self, id: &str) -> Result<DepTree, EngineError>;
     pub async fn dependency_graph(&self, roots: &[String]) -> Result<DepTree, EngineError>; // backs dep `graph` action (§5.2); empty roots = whole graph
     pub async fn detect_cycles(&self, blocking_only: bool) -> Result<Vec<Vec<String>>, EngineError>; // backs dep `cycles` action (§5.2); blocking_only filter (D19)
-    pub async fn diagnostics(&self, kind: DiagnosticKind) -> Result<DiagnosticReport, EngineError>; // FR-15
+    pub async fn diagnostics(&self, kind: DiagnosticKind, since: Option<DateTime<Utc>>) -> Result<DiagnosticReport, EngineError>; // FR-15; `since` = changelog window (bare arg, default lives only on the MCP wire — D26/OQ-1, the D19 detect_cycles precedent)
 
     // --- mutations: each acquires the write permit for its whole tx ---
     pub async fn create(&self, issue: &Issue) -> Result<String, EngineError>;
@@ -1313,7 +1350,8 @@ impl Session {
     // --- lifecycle / ops (OQ-2 RESOLVED: doctor + recover ARE part of the public Session surface;
     //     the cli `doctor` command goes through these) ---
     // PRECISION NOTE (T2.2): the mcp `diagnostics` TOOL (§5.1, the 7-kind read path) maps to
-    //   `Session::diagnostics(kind)` above (BUILD-now, pure-DB) — it is DISTINCT from `doctor()`/`recover()`
+    //   `Session::diagnostics(kind, since)` above (BUILD-now, pure-DB; `since` threads the changelog window
+    //   — D26/OQ-1) — it is DISTINCT from `doctor()`/`recover()`
     //   here (the T3.3 health seam, FeatureNotWired{"health"} until then). The mcp diagnostics tool does NOT
     //   route through doctor/recover; only the cli `doctor` command does.
     pub async fn doctor(&self) -> Result<DiagnosticReport, EngineError>;  // FR-15/FR-16. v1 = SIGNATURE only; body seamed to unblock-health (T3.3) — returns EngineError::FeatureNotWired{feature:"health"} until then (the integrity DiagnosticKind variant + DoctorReport→DiagnosticReport mapping are designed at T3.3; the landed DiagnosticKind has no integrity variant)
@@ -1564,7 +1602,11 @@ pub enum DepOutput {
 #[serde(rename_all = "snake_case")]
 pub enum SyncOutput { Export(ExportReport), Import(ImportReport) }
 
-// diagnostics — output = DiagnosticReport (§1.10).
+// diagnostics — output = DiagnosticReport (§1.10). v1 per-kind findings are ADVISORY generic
+// DiagnosticFinding{label,detail} rows (D26/OQ-2): stats/lint/changelog/orphans express every
+// counter/warning/entry as {label,detail}, so the taxonomy enrichment stays inside the existing
+// schema (NO CONTRACT_VERSION bump). A richer/nested per-kind DTO is a v1.1 structure seam — it
+// WOULD enter the hashed bundle (§5.4) and force a version bump, so it is deliberately deferred.
 
 // The in-band ERROR output is NOT an arm of any union: every tool may return a `StructuredError` with
 // `is_error = true` (FR-11 — always valid JSON even on error). It is published ONCE, bundle-level, as
