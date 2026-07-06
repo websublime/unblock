@@ -64,8 +64,13 @@ fn allowed_edges() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
             "unblock-cli",
             &[
                 "unblock-engine",
+                // DIRECT dep (D27/AF-3, T3.1): the cli NAMES `CliOverrides`/`open_*_with_cli`/
+                // `WorkspaceContext`/`ConfigError` — a valid L7 -> L4 downward edge, no cycle.
+                "unblock-config",
                 "unblock-render",
                 "unblock-policy",
+                // DIRECT dep (D27/AF-3, T3.1): `normalize_prefix` for `init --prefix` — L7 -> L0.
+                "unblock-model",
                 "unblock-mcp",
                 "unblock-error",
             ],

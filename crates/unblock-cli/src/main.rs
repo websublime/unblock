@@ -1,8 +1,12 @@
-//! `unblock` — process entry point for the lifecycle/ops CLI. Real routing (a tokio runtime
-//! driving `unblock_cli::run()` returning an `ExitCode`) lands at T3.1. See
-//! `docs/plans/crates/unblock-cli.md`.
+//! `unblock` — process entry point for the lifecycle/ops CLI. Builds the tokio runtime and delegates
+//! to the library facade [`unblock_cli::run`], returning its [`std::process::ExitCode`]. All routing,
+//! logging, dispatch, and the 0–8 exit-code boundary live in the library so they stay hermetically
+//! testable. See `docs/plans/crates/unblock-cli.md`.
 #![forbid(unsafe_code)]
 
-fn main() {
-    // Lifecycle/ops surface (serve/migrate/doctor/version/init/agents/update) is implemented at T3.1.
+use std::process::ExitCode;
+
+#[tokio::main]
+async fn main() -> ExitCode {
+    unblock_cli::run().await
 }

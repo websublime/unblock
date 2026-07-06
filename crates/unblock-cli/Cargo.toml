@@ -19,12 +19,23 @@ workspace = true
 
 [dependencies]
 unblock-engine = { workspace = true }
+# DIRECT dep (D27/T3.1 — NOT merely transitive via engine): the CLI NAMES `CliOverrides`,
+# `open_*_with_cli`, `WorkspaceContext`/`ResolvedContext`/`ConfigPaths`/`ResolvedConfig`, `ConfigError`.
+unblock-config = { workspace = true }
 unblock-render = { workspace = true }
 unblock-policy = { workspace = true }
+# DIRECT dep (D27/AF-3): `normalize_prefix` for `init --prefix` (config does NOT re-export it).
+unblock-model = { workspace = true }
 unblock-mcp = { workspace = true }
 unblock-error = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
+# The `CancellationToken` for `ServeOptions.cancel` (D27/AD-4/DR-11).
+tokio-util = { workspace = true }
+# Per-crate error enum + context selectors (D4) — the `CliError` boundary.
+snafu = { workspace = true }
+# The CLI-local lifecycle report structs derive `Serialize` (D27/AD-2).
+serde = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 # Self-update surface (D17/FR-25). The feature name `self-update` is deliberately distinct from the
@@ -35,6 +46,14 @@ axoupdater = { workspace = true, optional = true }
 # signal handlers (FR-17). Windows is a no-op, so signal-hook is unix-only.
 [target.'cfg(unix)'.dependencies]
 signal-hook = { workspace = true }
+
+[dev-dependencies]
+# Temp workspaces for the `init`/scaffold + dispatch unit tests (integration suites land NEXT stage).
+tempfile = { workspace = true }
+# Construct a `WorkspaceContext` (with an `Arc<dyn Storage>`) in the dispatch unit test.
+unblock-storage = { workspace = true }
+# Round-trip the scaffolded `config.toml` through the real deserializer in the `init` unit test.
+toml = { workspace = true }
 
 [features]
 default = ["self-update"]
