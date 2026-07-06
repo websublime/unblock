@@ -45,6 +45,63 @@ pub enum McpServerError {
     },
 }
 
+impl McpServerError {
+    /// Build a genuine [`McpServerError::Transport`] for tests (TEST-ONLY, `test-util` feature).
+    ///
+    /// Produces a REAL `ServerInitializeError::TransportError` (via the public
+    /// [`rmcp::service::ServerInitializeError::transport`] constructor over the concrete
+    /// `AsyncRwTransport` whose `Error` is [`std::io::Error`]) — NOT a fabricated placeholder. This
+    /// exists solely so a downstream crate (`unblock-cli`'s exit-code boundary test) can construct
+    /// the `Transport` arm to prove its D27/AF-4 mapping (`→ InternalError`, exit 1). The enum stays
+    /// `#[non_exhaustive]`; this seam is feature-gated + `#[doc(hidden)]`, so the shipped public API
+    /// is unchanged.
+    #[cfg(feature = "test-util")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __transport_error(message: &str) -> Self {
+        use rmcp::RoleServer;
+        use rmcp::service::ServerInitializeError;
+        use snafu::IntoError as _;
+
+        // A real transport error whose `T::Error` is `std::io::Error` (AsyncRwTransport's Error type),
+        // wrapped through the public `transport` constructor into a genuine `ServerInitializeError`.
+        type IoTransport = rmcp::transport::async_rw::AsyncRwTransport<
+            RoleServer,
+            tokio::io::DuplexStream,
+            tokio::io::DuplexStream,
+        >;
+        let io_err = std::io::Error::new(std::io::ErrorKind::ConnectionReset, message.to_string());
+        let init_err =
+            ServerInitializeError::transport::<IoTransport>(io_err, "test-util transport");
+        TransportSnafu.into_error(init_err)
+    }
+
+    /// Build a genuine [`McpServerError::RunLoop`] for tests (TEST-ONLY, `test-util` feature).
+    ///
+    /// Produces a REAL [`tokio::task::JoinError`] by aborting a spawned task and awaiting its handle
+    /// (the exact join-error the server's `running.waiting().await` surfaces on an aborted run loop),
+    /// then wraps it through the `RunLoop` context selector. Same rationale/gating as
+    /// [`McpServerError::__transport_error`].
+    #[cfg(feature = "test-util")]
+    #[doc(hidden)]
+    #[must_use]
+    pub async fn __run_loop_error() -> Self {
+        use snafu::IntoError as _;
+
+        // Abort a spawned task to obtain a genuine `JoinError` (a cancelled join), identical in shape
+        // to the one the aborted rmcp run-loop task yields.
+        let handle = tokio::spawn(async {
+            // Park until aborted — never completes on its own.
+            std::future::pending::<()>().await;
+        });
+        handle.abort();
+        let join_err = handle
+            .await
+            .expect_err("an aborted task must yield a JoinError");
+        RunLoopSnafu.into_error(join_err)
+    }
+}
+
 /// Map an [`EngineError`] to a sanitized [`StructuredError`] at the MCP boundary (spine §2.4/§5.6).
 ///
 /// Exactly `(&err).into()` — the blanket `From<&EngineError> for StructuredError` (F-6). The engine
@@ -132,5 +189,30 @@ mod tests {
                 "payload still attached on the -32603 arm"
             );
         }
+    }
+
+    /// The `test-util` constructors build the REAL lifecycle variants (not fakes) — a smoke test that
+    /// they yield the expected `McpServerError` shape (the seam `unblock-cli`'s exit test depends on).
+    #[cfg(feature = "test-util")]
+    #[test]
+    fn transport_test_util_builds_transport_variant() {
+        use super::McpServerError;
+        let err = McpServerError::__transport_error("boom");
+        assert!(
+            matches!(err, McpServerError::Transport { .. }),
+            "the seam yields a genuine Transport variant"
+        );
+    }
+
+    /// The async run-loop seam yields a genuine `RunLoop` variant (an aborted-task join error).
+    #[cfg(feature = "test-util")]
+    #[tokio::test]
+    async fn run_loop_test_util_builds_run_loop_variant() {
+        use super::McpServerError;
+        let err = McpServerError::__run_loop_error().await;
+        assert!(
+            matches!(err, McpServerError::RunLoop { .. }),
+            "the seam yields a genuine RunLoop variant"
+        );
     }
 }
