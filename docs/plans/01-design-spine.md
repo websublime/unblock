@@ -1005,7 +1005,9 @@ The dependency ops (FR-5) — source-verified vs the original cycle machinery:
   other ⇒ none), a case-insensitive heading-substring test over `description` only (prefix `## `/`# `
   stripped), over non-template/non-terminal rows, one finding per missing section — REPLACING the prior
   `blocked=<n>`-lite finding (which bd's `lint` never computes). The lint CANDIDATE set is the active
-  non-template set (`ListFilters::default()` = open+in_progress minus closed/deferred); bd's default is
+  non-template set (`ListFilters::default()` = the ACTIVE, NON-TERMINAL, NON-DEFERRED set — SQL
+  `status NOT IN ('closed','tombstone','deferred')`, so ALSO admits `blocked`/`draft`/`pinned`/custom-active,
+  not just `open`+`in_progress`); bd's default is
   `status=open` only, so unblock's broader active set is a defensible status-agnostic superset (the
   section-presence test is status-agnostic — pin this so the snapshot is intentional). **`changelog`** =
   `closed_since(since)` (window-capable — `since=None` ⇒ all closed), THEN the engine `changelog()`

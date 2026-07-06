@@ -287,10 +287,12 @@ fn strip_heading_prefix(heading: &str) -> &str {
 /// (the `## `/`# ` prefix stripped), so `# acceptance criteria` satisfies `## Acceptance Criteria`.
 ///
 /// **Order (PINNED for NFR-14):** outer = issue id ASC; inner = the required-section DECLARATION
-/// order (Bug: `Steps to Reproduce` THEN `Acceptance Criteria`). The candidate set is the active
-/// non-template set (`ListFilters::default()` = `open`+`in_progress` minus closed/deferred/tombstone),
-/// templates filtered in-memory (`list_issues` does not exclude them). This REPLACES the prior
-/// `blocked=<n>`-lite finding (bd's `lint` never computes a blocked count).
+/// order (Bug: `Steps to Reproduce` THEN `Acceptance Criteria`). The candidate set is
+/// `ListFilters::default()` — the ACTIVE, NON-TERMINAL, NON-DEFERRED set (SQL `status NOT IN
+/// ('closed','tombstone','deferred')`, so it also admits `blocked`/`draft`/`pinned`/custom-active
+/// statuses, NOT just `open`+`in_progress`) — with templates filtered in-memory (`list_issues` does
+/// not exclude them). This REPLACES the prior `blocked=<n>`-lite finding (bd's `lint` never computes a
+/// blocked count).
 async fn lint(storage: &dyn Storage) -> Result<Vec<DiagnosticFinding>> {
     let mut candidates = storage.list_issues(&ListFilters::default()).await?;
     // Templates are not a required recommended-section subject (bd excludes `is_template`).
