@@ -48,8 +48,17 @@ pub async fn run(_args: &ServeArgs, overrides: &CliOverrides) -> Result<Option<u
     // Clean cooperative shutdown: drain the in-flight write permit, leave libsql idle for a clean close.
     session.shutdown().await?;
 
-    // `Some(128+signo)` when a signal drove the shutdown; `None` on a clean EOF exit (0).
-    Ok(handle.signal_exit_code())
+    // On the SIGNAL path, exit deterministically with `128 + signo` (FR-17/D27/AD-4). This must NOT
+    // fall through to the normal `ExitCode` return: `serve` binds `tokio::io::stdin()`, whose read is
+    // a BLOCKING pool task; when the shutdown was cancellation-driven (not EOF) that blocking read is
+    // still parked on an open stdin, so letting `#[tokio::main]`'s runtime drop run would hang waiting
+    // for it. A first-signal clean shutdown therefore terminates the process here (the drop-guarded
+    // `Session` has already flushed + drained the write permit). On a clean EOF exit stdin is closed,
+    // the blocking read has returned, and the runtime drops without blocking → `Ok(None)` (exit 0).
+    if let Some(code) = handle.signal_exit_code() {
+        std::process::exit(i32::from(code));
+    }
+    Ok(None)
 }
 
 /// The optional client-facing MCP instructions string (advertised on `initialize`).
