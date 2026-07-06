@@ -2,10 +2,10 @@
 source: crates/unblock-engine/tests/reads.rs
 expression: "lines.join(\"\\n\")"
 ---
-Stats: [status:closed=1, status:open=1, total=2]
+Stats: [open=1, in_progress=0, blocked=0, closed=1, ready=1, deferred=0, draft=0, tombstone=0, pinned=0, epics_eligible=0, avg_lead_time_hours=<redacted>, total=2]
 Info: [actor=tester, workspace_dir=<redacted>, issues=2]
 Where: [unblock_dir=<redacted>, db_path=<redacted>, jsonl_path=<redacted>]
 Version: [version=<redacted>]
-Lint: [blocked=0]
+Lint: [ub-open=missing section: ## Acceptance Criteria]
 Changelog: [ub-done=issue ub-done]
 Orphans: []

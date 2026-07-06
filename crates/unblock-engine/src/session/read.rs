@@ -141,9 +141,18 @@ impl Session {
     /// The returned report's `kind` is the caller-supplied input (one of the seven constructible
     /// variants); this is the BUILD-now read path (contrast `doctor`/`recover`, seamed to T3.3).
     ///
+    /// `since` is the **changelog window** (D26/OQ-1): a bare method argument whose default lives
+    /// only on the MCP wire (`DiagnosticsInput::Changelog{since}`), the D19 `detect_cycles(blocking_only)`
+    /// precedent. It applies to the [`Changelog`](DiagnosticKind::Changelog) kind only; every other
+    /// kind ignores it.
+    ///
     /// # Errors
     /// Forwards any storage failure from the underlying probe.
-    pub async fn diagnostics(&self, kind: DiagnosticKind) -> Result<DiagnosticReport> {
+    pub async fn diagnostics(
+        &self,
+        kind: DiagnosticKind,
+        since: Option<DateTime<Utc>>,
+    ) -> Result<DiagnosticReport> {
         let facts = WorkspaceFacts {
             actor: &self.actor,
             workspace_dir: &self.workspace_dir,
@@ -151,6 +160,6 @@ impl Session {
             db_path: &self.db_path,
             jsonl_path: &self.jsonl_path,
         };
-        diagnostics::diagnostics(self.storage.as_ref(), facts, kind).await
+        diagnostics::diagnostics(self.storage.as_ref(), facts, kind, since).await
     }
 }
