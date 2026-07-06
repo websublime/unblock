@@ -1,12 +1,14 @@
 //! Tool **#7 `diagnostics`** — the 7-kind read-path diagnostics (spine §5.1/§5.2, FR-15).
 //!
-//! Maps `DiagnosticsInput{kind}` → the model [`DiagnosticKind`] → `Session::diagnostics(kind)` (the
-//! BUILD-now, pure-DB read path) returning a [`unblock_model::DiagnosticReport`]. It does NOT route
-//! through `doctor()`/`recover()` (the T3.3 health seam) — see the spine §4.1 precision note.
+//! Maps `DiagnosticsInput{kind}` → the model [`DiagnosticKind`] + the changelog `since` window →
+//! `Session::diagnostics(kind, since)` (the BUILD-now, pure-DB read path) returning a
+//! [`unblock_model::DiagnosticReport`]. It does NOT route through `doctor()`/`recover()` (the T3.3
+//! health seam) — see the spine §4.1 precision note.
 //!
 //! - `version` embeds [`crate::CONTRACT_VERSION`] in the report (the mcp `contract_version` SSOT).
-//! - `changelog{since}` accepts the wire `since` but DROPS it pre-call — there is no `Session`
-//!   parameter for it at T2.2 (the `since` window threading is T2.7); the report uses the full window.
+//! - `changelog{since}` THREADS the wire `since` to `Session::diagnostics(kind, Some(since))`
+//!   (D26/OQ-1 — the D19 `detect_cycles(blocking_only)` precedent: the wire default lives on the
+//!   `#[serde(default)] since` field; every other kind passes `None`). No schema change → no bump.
 //! - No git (FR-15/NFR-6) — `diagnostics` is pure-DB.
 
 use chrono::{DateTime, Utc};
@@ -36,6 +38,11 @@ pub(crate) enum DiagnosticsInput {
     /// Lint findings.
     Lint {},
     /// The changelog of closed issues (the `since` window is T2.7; dropped here).
+    // NOTE: this doc comment + the `since` field's below are captured by `#[derive(JsonSchema)]` and
+    // therefore land in the hashed schema bundle (D25/FR-12). They are kept BYTE-IDENTICAL to the
+    // T2.6 pin so threading `since` into the engine (T2.7) does NOT move `CONTRACT_HASH` (no bump —
+    // the wire SHAPE is unchanged; only the engine consumes `since` now). Re-wording them would move
+    // the digest and force a `CONTRACT_VERSION` bump.
     Changelog {
         /// Optional since-window (accepted but not yet threaded — T2.7).
         #[serde(default)]
@@ -46,17 +53,18 @@ pub(crate) enum DiagnosticsInput {
 }
 
 impl DiagnosticsInput {
-    /// Map the wire discriminator to the model [`DiagnosticKind`] (total).
-    fn to_diagnostic_kind(&self) -> DiagnosticKind {
+    /// Map the wire discriminator to the model [`DiagnosticKind`] and the changelog `since` window
+    /// (total). `since` is threaded ONLY for `Changelog`; every other kind passes `None`
+    /// (D26/OQ-1 — the bare-arg + wire-default asymmetry, the D19 precedent).
+    fn to_kind_and_since(&self) -> (DiagnosticKind, Option<DateTime<Utc>>) {
         match self {
-            Self::Stats {} => DiagnosticKind::Stats,
-            Self::Info {} => DiagnosticKind::Info,
-            Self::Where {} => DiagnosticKind::Where,
-            Self::Version {} => DiagnosticKind::Version,
-            Self::Lint {} => DiagnosticKind::Lint,
-            // `since` is intentionally dropped pre-call (no Session parameter at T2.2 — T2.7).
-            Self::Changelog { since: _ } => DiagnosticKind::Changelog,
-            Self::Orphans {} => DiagnosticKind::Orphans,
+            Self::Stats {} => (DiagnosticKind::Stats, None),
+            Self::Info {} => (DiagnosticKind::Info, None),
+            Self::Where {} => (DiagnosticKind::Where, None),
+            Self::Version {} => (DiagnosticKind::Version, None),
+            Self::Lint {} => (DiagnosticKind::Lint, None),
+            Self::Changelog { since } => (DiagnosticKind::Changelog, *since),
+            Self::Orphans {} => (DiagnosticKind::Orphans, None),
         }
     }
 }
@@ -75,8 +83,8 @@ impl UnblockServer {
         if let Err(structured) = self.preflight(&input) {
             return err_json(&structured);
         }
-        let kind = input.to_diagnostic_kind();
-        match self.session.diagnostics(kind).await {
+        let (kind, since) = input.to_kind_and_since();
+        match self.session.diagnostics(kind, since).await {
             Ok(report) => ok_json(&with_contract_version(kind, report)),
             Err(err) => engine_err_json(&err),
         }
