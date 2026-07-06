@@ -112,6 +112,9 @@ proptest = "1"
 insta = { version = "1", features = ["json"] }
 criterion = { version = "0.5", features = ["async_tokio"] }
 wiremock = "0.6"
+# The cli integration tests drive the real `unblock` binary over piped stdio (`serve` MCP handshake,
+# exit-code goldens, help snapshots). Test-only; never linked into the shipped binary (AD-6).
+assert_cmd = "2"
 rand = "0.9"
 # Temp workspaces/DBs for the storage contract suite (file-backed `open_local`) + the fuzz cores.
 tempfile = "3"

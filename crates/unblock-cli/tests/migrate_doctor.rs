@@ -1,0 +1,175 @@
+//! `unblock migrate` (D27/AF-2) + `unblock doctor` (doctor-lite, D27/AF-1) end-to-end.
+//!
+//! - migrate: a fresh workspace is already migrated on open, so the FIRST `migrate` reports the real
+//!   schema (`schema_from == schema_to == 1`, `applied == false` — the honest idempotent signal, not
+//!   a phantom applied-list), and a SECOND run reports identically (idempotent). Report shape pinned.
+//! - doctor: a clean DB → `integrity: ok` + structured Stats/Info findings, exit 0. A corrupted DB →
+//!   exit 2 (db bucket) — the corruption is surfaced as a `DATABASE_ERROR` structured error (the
+//!   deterministic corruption a page-overwrite yields; the non-empty-`integrity_check` → exit-2
+//!   mapping is unit-tested in `commands/doctor.rs::database_error_exit_is_two`).
+
+mod common;
+
+use common::Workspace;
+use serde_json::Value;
+
+/// Run a json-mode command in `ws` and parse its stdout as a JSON report (asserts success exit 0).
+fn json_report(ws: &Workspace, args: &[&str]) -> Value {
+    let out = ws.cmd().args(args).output().expect("run command");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "command must succeed; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf8 stdout");
+    serde_json::from_str(stdout.trim()).expect("valid JSON report on stdout")
+}
+
+/// Pull a finding's `detail` by `label` from a `DiagnosticReport`-shaped value.
+fn detail<'a>(report: &'a Value, label: &str) -> Option<&'a str> {
+    report["findings"]
+        .as_array()?
+        .iter()
+        .find(|f| f["label"] == label)
+        .and_then(|f| f["detail"].as_str())
+}
+
+#[test]
+fn migrate_fresh_reports_current_schema_and_is_idempotent() {
+    let ws = Workspace::init();
+
+    // First migrate: the config facade already migrated on open, so this reports the current schema
+    // with `applied == false` (honest — nothing was advanced by THIS call).
+    let first = json_report(&ws, &["migrate", "--output", "json"]);
+    assert_eq!(
+        first["kind"], "info",
+        "migrate report reuses DiagnosticKind::Info"
+    );
+    assert_eq!(
+        detail(&first, "schema_from"),
+        Some("1"),
+        "on-disk schema before"
+    );
+    assert_eq!(
+        detail(&first, "schema_to"),
+        Some("1"),
+        "on-disk schema after"
+    );
+    assert_eq!(
+        detail(&first, "applied"),
+        Some("false"),
+        "no advance post-open"
+    );
+    // The database finding names the workspace DB (a path — assert it ends with the db filename).
+    assert!(
+        detail(&first, "database").is_some_and(|d| d.ends_with("unblock.db")),
+        "migrate report names the workspace db"
+    );
+
+    // Second migrate: idempotent — identical from/to/applied.
+    let second = json_report(&ws, &["migrate", "--output", "json"]);
+    assert_eq!(detail(&second, "schema_from"), Some("1"));
+    assert_eq!(detail(&second, "schema_to"), Some("1"));
+    assert_eq!(detail(&second, "applied"), Some("false"));
+}
+
+#[test]
+fn migrate_report_shape_is_snapshot_pinned() {
+    let ws = Workspace::init();
+    let out = ws
+        .cmd()
+        .args(["migrate", "--output", "json"])
+        .output()
+        .expect("run migrate");
+    assert_eq!(out.status.code(), Some(0));
+    let mut report: Value = serde_json::from_slice(&out.stdout).expect("valid JSON migrate report");
+    // The `database` detail is an absolute tempdir path — redact it to a stable token so the snapshot
+    // pins the SHAPE (kind + finding labels + schema/applied values) without the volatile path.
+    if let Some(findings) = report["findings"].as_array_mut() {
+        for f in findings {
+            if f["label"] == "database" {
+                f["detail"] = Value::String("<db-path>".to_string());
+            }
+        }
+    }
+    insta::assert_json_snapshot!("migrate_report_fresh", report);
+}
+
+#[test]
+fn doctor_healthy_exits_0_with_structured_findings() {
+    let ws = Workspace::init();
+    let report = json_report(&ws, &["doctor", "--output", "json"]);
+    assert_eq!(
+        report["kind"], "info",
+        "doctor-lite report reuses DiagnosticKind::Info"
+    );
+    // Integrity header present and OK on a clean DB.
+    assert_eq!(
+        detail(&report, "integrity"),
+        Some("ok"),
+        "clean DB integrity"
+    );
+    // No integrity_problem findings on a clean DB.
+    let labels: Vec<&str> = report["findings"]
+        .as_array()
+        .expect("findings array")
+        .iter()
+        .map(|f| f["label"].as_str().unwrap_or(""))
+        .collect();
+    assert!(
+        !labels.contains(&"integrity_problem"),
+        "a clean DB has no integrity problems"
+    );
+    // Stats + Info sections are folded in (advisory), proving the diagnostics composition (AF-1).
+    assert!(
+        labels.iter().any(|l| l.starts_with("stats.")),
+        "stats folded in"
+    );
+    assert!(
+        labels.iter().any(|l| l.starts_with("info.")),
+        "info folded in"
+    );
+}
+
+#[test]
+fn doctor_on_a_corrupt_db_exits_2() {
+    // Corrupt the DB deterministically (overwrite a large b-tree region past the header page) so the
+    // read fails as a malformed-image DatabaseError → exit 2 (the db bucket). This proves `doctor`
+    // yields a non-zero db-bucket exit on a corrupt workspace (AF-1: non-zero only on corruption).
+    let ws = Workspace::init();
+    corrupt_db(&ws.db_path());
+    let out = ws
+        .cmd()
+        .args(["doctor", "--output", "json"])
+        .output()
+        .expect("run doctor on corrupt db");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "a corrupt DB yields a db-bucket (exit 2) error; stdout: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let value: Value =
+        serde_json::from_slice(&out.stdout).expect("valid JSON structured error on stdout (FR-11)");
+    assert_eq!(
+        value["code"], "DATABASE_ERROR",
+        "corruption maps to the db-bucket DATABASE_ERROR code (spine §2.3 unchanged)"
+    );
+}
+
+/// Overwrite a deep region of the `SQLite` file with garbage (keeping the `100`-byte header + page 1
+/// so the DB still opens) — a page-level corruption that a read surfaces as `database disk image is
+/// malformed`. Deterministic across runs.
+fn corrupt_db(db: &std::path::Path) {
+    use std::io::{Seek, SeekFrom, Write};
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .open(db)
+        .expect("open db for corruption");
+    // Start of page 2 (default page size 4096); overwrite a large contiguous run of b-tree pages.
+    f.seek(SeekFrom::Start(4096)).expect("seek");
+    let garbage = vec![0xADu8; 8 * 1024];
+    f.write_all(&garbage).expect("corrupt");
+    f.flush().expect("flush");
+}

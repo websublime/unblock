@@ -1,0 +1,26 @@
+---
+source: crates/unblock-cli/tests/help_snapshots.rs
+expression: "help(&[\"--help\"])"
+---
+unblock — agent-first issue tracker (lifecycle/ops CLI; domain features are MCP tools)
+
+Usage: unblock [OPTIONS] <COMMAND>
+
+Commands:
+  serve    Run the MCP stdio server (the primary product surface, FR-20)
+  migrate  Ensure the workspace database schema is current and report the from→to delta (FR-16)
+  doctor   Run read-only health diagnostics on the workspace (doctor-lite, FR-16)
+  version  Print version / build metadata (no workspace, no network)
+  init     Scaffold a new `.unblock/` workspace (config + migrated empty database, FR-14)
+  agents   Write / refresh the managed `AGENTS.md` MCP-wiring block (FR-14)
+  update   Self-update the `unblock` binary (attestation-verified, FR-25/D17)
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+      --dir <DIR>        The explicit workspace `.unblock/` directory (no walk-up; `--dir` > `UNBLOCK_DIR`, MF-2) [env: UNBLOCK_DIR=]
+      --actor <ACTOR>    The actor override (`--actor` > `UNBLOCK_ACTOR`, FORK-4) [env: UNBLOCK_ACTOR=]
+  -o, --output <FORMAT>  The output format for rendered reports (`json|robot|plain|csv|markdown`). NO clap `env` — `UNBLOCK_OUTPUT_FORMAT` is owned by config's strict env layer for workspace commands; the flag still forwards so `--flag > env` holds (spine §5b)
+  -v, --verbose...       Increase verbosity (`-v` INFO, `-vv` DEBUG, `-vvv+` TRACE). Logs go to stderr only (NFR-14)
+  -q, --quiet            Suppress all but error-level diagnostics (`-q`). Overrides `-v`
+  -h, --help             Print help
+  -V, --version          Print version

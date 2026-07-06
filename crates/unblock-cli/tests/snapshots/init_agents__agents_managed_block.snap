@@ -1,0 +1,15 @@
+---
+source: crates/unblock-cli/tests/init_agents.rs
+expression: content
+---
+<!-- BEGIN unblock -->
+## unblock (MCP)
+
+This workspace is tracked by **unblock**. Issue-data operations are exposed over MCP — the
+`unblock` CLI is lifecycle/ops only.
+
+- Start the server: `unblock serve` (MCP over stdio).
+- Contract: `unblock.mcp.v1.2`.
+- Tools: use the MCP tool set (create/list/close/dep/…) — do NOT shell out to the CLI for
+issue data.
+<!-- END unblock -->
