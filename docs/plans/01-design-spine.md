@@ -723,13 +723,23 @@ pub trait Storage: Send + Sync {
     // D26 (T2.7): changelog/lint/orphans add NO new Storage method — the engine composes them from the
     //   reads already declared here + list/ready/blocked/count/dependency_tree. `closed_since` is already
     //   `since`-windowed; `orphan_candidates` is already status-agnostic. The bd-faithful `stats` diagnostic
-    //   is the ONE exception: `epics_eligible_for_closure` (per-epic parent-child child rollup) and `pinned`
-    //   (`pinned=1 OR status='pinned'`) cannot be composed from the surface above, so a faithful port adds
-    //   ONE purely-additive pure-DB aggregate primitive — `stats_rollup() -> StatsRollup` (an internal
-    //   engine↔storage aggregate; NOT a wire/schema DTO, so NO mcp `CONTRACT_HASH` impact). This is the ONE
-    //   open T2.7 storage-surface design point (additive primitive vs a forbidden drop of the two counters),
-    //   routed to the T2.7 design-Review gate with Miguel. (The full-taxonomy `diagnostic_probe`/
-    //   `diagnostic_probes` remain the commented [v1.1] CF-E seams below.)
+    //   is the ONE exception: `epics_eligible_for_closure` needs a per-epic parent-child child rollup that
+    //   no existing read composes, so a faithful port adds ONE purely-additive pure-DB aggregate primitive —
+    //   `epic_child_rollup() -> Vec<(String,(usize,usize))>` (below): per-epic (child_total,
+    //   child_closed_or_tombstone), Vec sorted by epic id in SQL (ORDER BY — bd's get_epic_counts returns a
+    //   non-deterministic HashMap, sqlite.rs:6978; unblock sorts for NFR-14). bd's get_epic_counts ported 1:1
+    //   (JOIN dependencies d JOIN issues i ON d.issue_id = i.id WHERE d.type='parent-child' AND the CHILD is
+    //   non-template; child-closed = status IN ('closed','tombstone')). The epic-side active + non-template
+    //   filter (issue_type==Epic ∧ ¬terminal ∧ ¬template, stats.rs:441-446) is applied IN-MEMORY in the
+    //   engine — both filters live at their respective sites, do not conflate. `pinned` and the per-status /
+    //   tombstone tallies are NOT primitives: `pinned` is composed in-memory (issue.pinned || status==Pinned,
+    //   stats.rs:436) over the widest-visibility list_issues pass, and the per-status tally + tombstone count
+    //   + tombstone-excluded total come from the EXISTING count_issues (with include_tombstone:true for the
+    //   tally). The rollup is a bare Vec of tuples — NO StatsRollup model DTO — so §1.10 does not grow a
+    //   type. It is an internal aggregate; NOT a wire/schema DTO, so NO mcp `CONTRACT_HASH` impact.
+    //   (The full-taxonomy `diagnostic_probe`/`diagnostic_probes` remain the commented [v1.1] CF-E seams
+    //   below.)
+    async fn epic_child_rollup(&self) -> Result<Vec<(String, (usize, usize))>, StorageError>; // stats: per-epic (child_total, child_closed_or_tombstone), ORDER BY epic id
     async fn closed_since(&self, since: Option<DateTime<Utc>>) -> Result<Vec<Issue>, StorageError>; // changelog
     async fn orphan_candidates(&self) -> Result<Vec<Issue>, StorageError>;  // external_ref matches commit pattern
 
@@ -965,28 +975,53 @@ The dependency ops (FR-5) — source-verified vs the original cycle machinery:
   bd-faithful `StatsSummary` (`temp/beads_rust-main/src/cli/commands/stats.rs:376-499`): `list_issues` +
   `count_issues` over the widest-visibility filters → per-status tallies
   (open/in_progress/closed/deferred/draft/tombstone), `pinned` (`pinned=1` col OR `Pinned` status),
-  `total` EXCLUDING tombstones, `blocked` = `Status::Blocked` ∪ the dependency-blocked active id set
-  (deduped — via `blocked_issues`), `ready` (via `ready_issues`), `epics_eligible_for_closure`
+  `total` EXCLUDING tombstones, `blocked` = `Status::Blocked` id set ∪ the dependency-blocked active id set
+  (DEDUPED by id — a manual-Blocked issue that is also dependency-blocked counts once; the `Status::Blocked`
+  id SET comes from `list_issues(status=Blocked)` or `blocked_issues` membership — `count_issues` gives a
+  COUNT not ids), `ready` (via `ready_issues`), `epics_eligible_for_closure`
   (non-template non-terminal epics whose parent-child children are all closed/tombstone, child-count>0),
   `average_lead_time_hours` (mean `closed_at − created_at` over closed, emitted only when `Some`) — **MINUS**
-  bd's git-derived `RecentActivity` block (`git_recent_activity`, EXCLUDED per NFR-6). **STORAGE-SURFACE
-  NOTE (OQ-5 seam — flagged, resolve at the T2.7 design-Review with Miguel; §3.2 note below):** two of these
-  — `epics_eligible_for_closure` (per-epic child rollup) and `pinned` (`pinned=1 OR status='pinned'`) —
-  CANNOT be composed from the existing trait; a faithful port adds ONE purely-additive, pure-DB read
-  primitive (`stats_rollup() -> StatsRollup`, an internal engine↔storage aggregate, NOT a wire/schema DTO,
-  so NO `CONTRACT_HASH` impact). Dropping the two to avoid the primitive would thin the faithful port
-  (forbidden — never-simplify hard rule). **`lint`** = the bd template-section rules
+  bd's git-derived `RecentActivity` block (`git_recent_activity`, EXCLUDED per NFR-6). **TOMBSTONE VISIBILITY
+  (not over-count):** today's `stats` ALREADY excludes tombstones from `total` (`count_issues` with
+  `include_tombstone:false` → `visibility_branch`'s `else if include_closed` arm emits `AND status !=
+  'tombstone'`, `libsql/query.rs`) and emits NO `tombstone` bucket; the gap is the ABSENT tombstone COUNTER.
+  T2.7 sources the per-status tally from `count_issues` with `include_tombstone:true` (a live read-path flag
+  since T2.6/D25) → the distinct `tombstone` finding is surfaced and `total` stays the non-tombstone sum
+  (`total` needs no change). **STORAGE-SURFACE NOTE (OQ-5 seam — design-Review RATIFIED the NARROW primitive;
+  §3.2 note above):** only `epics_eligible_for_closure`'s per-epic child rollup CANNOT be composed from the
+  existing trait; a faithful port adds ONE purely-additive, pure-DB read primitive
+  (`epic_child_rollup() -> Vec<(String,(usize,usize))>` — per-epic `(child_total,
+  child_closed_or_tombstone)`, `ORDER BY` epic id in SQL for NFR-14, bd's `get_epic_counts` ported 1:1). It
+  is an internal aggregate, NOT a wire/schema DTO, so NO `CONTRACT_HASH` impact, and returns a bare Vec of
+  tuples — NO `StatsRollup` model type (§1.10 does not grow). `pinned` is DROPPED from the primitive —
+  computed in-memory (`issue.pinned || status == Pinned`, `stats.rs:436`) over the widest-visibility
+  `list_issues` pass — and the per-status/tombstone tallies come from the existing `count_issues`. Dropping
+  `epics_eligible`/`pinned` to avoid the primitive would thin the faithful port (forbidden — never-simplify
+  hard rule). **Documented seams (NOT silent bd divergences):** `ready`'s external-blocker exclusion is a
+  vacuously-empty v1.1 config seam (unblock v1 has no external-project layer, so bd's `external_blockers`
+  term is empty) and bd's wisp filter is spine-DROPPED (Miguel). **`lint`** = the bd template-section rules
   (`temp/beads_rust-main/src/cli/commands/lint.rs`): required `## …` sections per type (Bug ⇒
   Steps-to-Reproduce + Acceptance-Criteria; Task/Feature ⇒ Acceptance-Criteria; Epic ⇒ Success-Criteria;
   other ⇒ none), a case-insensitive heading-substring test over `description` only (prefix `## `/`# `
   stripped), over non-template/non-terminal rows, one finding per missing section — REPLACING the prior
-  `blocked=<n>`-lite finding (which bd's `lint` never computes). **`changelog`** = `closed_since(since)`
-  (window-capable — `since=None` ⇒ all closed). **`orphans`** = `orphan_candidates()` — **status-agnostic**
+  `blocked=<n>`-lite finding (which bd's `lint` never computes). The lint CANDIDATE set is the active
+  non-template set (`ListFilters::default()` = open+in_progress minus closed/deferred); bd's default is
+  `status=open` only, so unblock's broader active set is a defensible status-agnostic superset (the
+  section-presence test is status-agnostic — pin this so the snapshot is intentional). **`changelog`** =
+  `closed_since(since)` (window-capable — `since=None` ⇒ all closed), THEN the engine `changelog()`
+  composition filters out `is_template` rows (faithful to bd's `list_changelog_issues` template exclusion,
+  `sqlite.rs:4014`; `closed_since` stays shared/unchanged — the template filter is an engine-side composition
+  step, NOT a widening of the shared read). **`orphans`** = `orphan_candidates()` — **status-agnostic**
   (every row whose `external_ref` matches the commit-hash shape; NOT bd's `status IN ('open','in_progress')`
   narrowing — the faithful FR-15 reading). Every kind emits generic `DiagnosticFinding{label,detail}` rows
   (§1.10 / §5.3), so the enrichment does NOT touch the mcp schema bundle (no `CONTRACT_VERSION` bump —
-  §5.4/D25). `since` is a bare method arg; the wire default lives only on `DiagnosticsInput::Changelog{since}`
-  (§5.2), the D19 `detect_cycles(blocking_only)` precedent.
+  §5.4/D25). **Emission order (NFR-14 insta):** stats findings in the fixed order `open, in_progress,
+  blocked, closed, ready, deferred, draft, tombstone, pinned, epics_eligible, [avg_lead_time_hours], total`
+  (`avg_lead_time_hours` ABSENT when `None`); lint findings outer = issue id ASC, inner = missing sections in
+  the fixed required-section DECLARATION order (Bug: `## Steps to Reproduce` THEN `## Acceptance Criteria`);
+  the epic rollup `ORDER BY` epic id in SQL (not HashMap-iterated). `since` is a bare method arg; the wire
+  default lives only on `DiagnosticsInput::Changelog{since}` (§5.2), the D19 `detect_cycles(blocking_only)`
+  precedent.
 - **`dependency_tree` / `dependency_graph(roots)` (unblock is the reference — the original has no
   `DepTree`/`GraphEdge` builder).** Forward-edge reachability (`issue_id -> depends_on_id`) over the
   dependency table: `dependency_tree(id)` returns the subtree rooted at `id`; `dependency_graph(roots)`
