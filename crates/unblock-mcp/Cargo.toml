@@ -12,8 +12,10 @@ workspace = true
 [features]
 default = []
 # A test-only seam: exposes `serve_duplex_for_test` (and the otherwise-private `UnblockServer`) so
-# the in-process MCP lifecycle test can drive the real server over an in-memory duplex transport.
-# Never enabled in a shipped build — it is enabled only by this crate's own integration tests.
+# the in-process MCP lifecycle test can drive the real server over an in-memory duplex transport,
+# plus the `__transport_error` / `__run_loop_error` `McpServerError` constructors so consumers (the
+# CLI) can prove the `McpServerError` → exit-1 mapping without a real transport/run-loop failure.
+# Never enabled in a shipped build — it is enabled only by this crate's (and consumers') tests.
 test-util = []
 
 [dependencies]
