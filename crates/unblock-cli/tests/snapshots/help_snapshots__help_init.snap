@@ -1,0 +1,17 @@
+---
+source: crates/unblock-cli/tests/help_snapshots.rs
+expression: "help(&[\"init\", \"--help\"])"
+---
+Scaffold a new `.unblock/` workspace (config + migrated empty database, FR-14)
+
+Usage: unblock init [OPTIONS]
+
+Options:
+      --dir <DIR>        The explicit workspace `.unblock/` directory (no walk-up; `--dir` > `UNBLOCK_DIR`, MF-2) [env: UNBLOCK_DIR=]
+      --prefix <PREFIX>  The issue-id prefix to seed `config.toml` with (normalized; default `ub`)
+      --actor <ACTOR>    The actor override (`--actor` > `UNBLOCK_ACTOR`, FORK-4) [env: UNBLOCK_ACTOR=]
+      --force            Overwrite an existing `.unblock/` scaffold instead of refusing (clobber guard override)
+  -o, --output <FORMAT>  The output format for rendered reports (`json|robot|plain|csv|markdown`). NO clap `env` — `UNBLOCK_OUTPUT_FORMAT` is owned by config's strict env layer for workspace commands; the flag still forwards so `--flag > env` holds (spine §5b)
+  -v, --verbose...       Increase verbosity (`-v` INFO, `-vv` DEBUG, `-vvv+` TRACE). Logs go to stderr only (NFR-14)
+  -q, --quiet            Suppress all but error-level diagnostics (`-q`). Overrides `-v`
+  -h, --help             Print help

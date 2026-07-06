@@ -1,0 +1,25 @@
+---
+source: crates/unblock-cli/tests/migrate_doctor.rs
+expression: report
+---
+{
+  "findings": [
+    {
+      "detail": "<db-path>",
+      "label": "database"
+    },
+    {
+      "detail": "1",
+      "label": "schema_from"
+    },
+    {
+      "detail": "1",
+      "label": "schema_to"
+    },
+    {
+      "detail": "false",
+      "label": "applied"
+    }
+  ],
+  "kind": "info"
+}
