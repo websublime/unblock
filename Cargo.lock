@@ -2898,6 +2898,7 @@ dependencies = [
  "axoupdater",
  "clap",
  "insta",
+ "libsql",
  "serde",
  "serde_json",
  "signal-hook",

@@ -68,6 +68,17 @@ unblock-engine = { workspace = true }
 unblock-config = { workspace = true }
 unblock-model = { workspace = true }
 serde_json = { workspace = true }
+# Enable the `test-util` seam of unblock-mcp for the exit-code boundary unit test ONLY (the standard
+# cargo idiom): it exposes `McpServerError::__transport_error`/`__run_loop_error` so `exit.rs` can
+# construct BOTH `CliError::Mcp` arms and prove the D27/AF-4 mapping (→ InternalError, exit 1). The
+# shipped `unblock` binary depends on unblock-mcp WITHOUT `test-util`, so its public surface is
+# unaffected. `test-util` is additive, so both the runtime dep + this dev entry unify cleanly.
+unblock-mcp = { workspace = true, features = ["test-util"] }
+# TEST-ONLY: the schema-mismatch CLI boundary case (`tests/migrate_doctor.rs`) stamps a workspace DB
+# to a FUTURE `PRAGMA user_version` via a raw libsql open — proving the D27/AF-2 newer-DB rejection
+# end-to-end at the cli boundary (exit 2 + SCHEMA_MISMATCH). Same feature set as the storage crate's
+# private backend dep (bundled SQLite, no TLS/network — RK-4). Never linked into the shipped binary.
+libsql = { workspace = true }
 
 [features]
 default = ["self-update"]
