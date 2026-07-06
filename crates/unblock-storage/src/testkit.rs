@@ -166,6 +166,7 @@ where
     contract_list_events_order_oracle(factory().await).await;
 
     // Diagnostics.
+    contract_epic_child_rollup(factory().await).await;
     contract_closed_since(factory().await).await;
     contract_orphan_candidates(factory().await).await;
 
@@ -1774,6 +1775,58 @@ pub async fn contract_orphan_candidates<S: Storage>(storage: S) {
         .collect();
     assert!(orphans.contains(&"ub-commit".to_string()));
     assert!(!orphans.contains(&"ub-jira".to_string()));
+}
+
+/// `epic_child_rollup` (D26/T2.7) returns per-epic `(child_total, child_closed_or_tombstone)` over
+/// `parent-child` edges — non-template children only, non-`parent-child` edges ignored, id-sorted.
+pub async fn contract_epic_child_rollup<S: Storage>(storage: S) {
+    // An empty store yields an empty rollup.
+    assert!(
+        storage.epic_child_rollup().await.unwrap().is_empty(),
+        "empty store → empty rollup"
+    );
+
+    let mut epic = issue("ub-epic", "epic");
+    epic.issue_type = IssueType::Epic;
+    storage.create_issue(&epic, "a").await.unwrap();
+
+    // 3 real children: 2 closed / 1 open.
+    for (id, closed) in [("ub-c1", true), ("ub-c2", true), ("ub-c3", false)] {
+        let mut child = issue(id, "child");
+        if closed {
+            child.status = Status::Closed;
+            child.closed_at = Some(ts(2026, 1, 2));
+        }
+        storage.create_issue(&child, "a").await.unwrap();
+        storage
+            .add_dependency(&dep(id, "ub-epic", DependencyType::ParentChild), "a")
+            .await
+            .unwrap();
+    }
+    // A TEMPLATE child — EXCLUDED from the rollup (bd's is_template guard).
+    let mut tmpl = issue("ub-tmpl", "template child");
+    tmpl.is_template = true;
+    storage.create_issue(&tmpl, "a").await.unwrap();
+    storage
+        .add_dependency(&dep("ub-tmpl", "ub-epic", DependencyType::ParentChild), "a")
+        .await
+        .unwrap();
+    // A NON-parent-child edge — IGNORED by the rollup.
+    let mut blk = issue("ub-blk", "blocker, wrong edge type");
+    blk.status = Status::Closed;
+    blk.closed_at = Some(ts(2026, 1, 2));
+    storage.create_issue(&blk, "a").await.unwrap();
+    storage
+        .add_dependency(&dep("ub-blk", "ub-epic", DependencyType::Blocks), "a")
+        .await
+        .unwrap();
+
+    let rollup = storage.epic_child_rollup().await.unwrap();
+    assert_eq!(
+        rollup,
+        vec![("ub-epic".to_string(), (3, 2))],
+        "3 non-template parent-child children, 2 closed (template + Blocks ignored)"
+    );
 }
 
 // --------------------------------------------------------------------------------------------------

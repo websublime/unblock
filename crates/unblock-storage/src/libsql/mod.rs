@@ -697,6 +697,10 @@ impl Storage for LibsqlStorage {
         events::list_events(self.read(), issue_id).await
     }
 
+    async fn epic_child_rollup(&self) -> Result<Vec<(String, (usize, usize))>, StorageError> {
+        diagnostics::epic_child_rollup(self.read()).await
+    }
+
     async fn closed_since(&self, since: Option<DateTime<Utc>>) -> Result<Vec<Issue>, StorageError> {
         diagnostics::closed_since(self.read(), since).await
     }

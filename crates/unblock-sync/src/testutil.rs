@@ -235,6 +235,9 @@ impl Storage for FakeStorage {
     async fn list_events(&self, _issue_id: &str) -> Result<Vec<Event>, StorageError> {
         unimplemented!("FakeStorage::list_events")
     }
+    async fn epic_child_rollup(&self) -> Result<Vec<(String, (usize, usize))>, StorageError> {
+        unimplemented!("FakeStorage::epic_child_rollup")
+    }
     async fn closed_since(
         &self,
         _since: Option<DateTime<Utc>>,
