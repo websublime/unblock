@@ -856,6 +856,265 @@ async fn stats_omits_avg_lead_time_on_empty_closed_corpus() {
     );
 }
 
+/// Create an Epic + one child, wire the parent-child edge, optionally close the child. `secs` seeds
+/// distinct `created_at` timestamps for determinism; `is_template_epic` marks the EPIC (never the
+/// child) a template. Used by the `epics_eligible` eligibility corpus (MF-1).
+async fn epic_with_child(
+    session: &unblock_engine::Session,
+    epic_id: &str,
+    child_id: &str,
+    is_template_epic: bool,
+    close_child: bool,
+    secs: i64,
+) {
+    session
+        .create(&Issue {
+            is_template: is_template_epic,
+            ..full_issue(
+                epic_id,
+                "epic",
+                IssueType::Epic,
+                Priority::MEDIUM,
+                None,
+                &[],
+                None,
+                secs,
+            )
+        })
+        .await
+        .expect("create epic");
+    session
+        .create(&issue(child_id, Priority::MEDIUM, secs + 1))
+        .await
+        .expect("create child");
+    if close_child {
+        session
+            .close_with_suggestions(child_id, None)
+            .await
+            .expect("close child");
+    }
+    // Parent-child edge: child depends_on epic (the stored orientation the rollup keys on).
+    session
+        .add_dep(&dep(child_id, epic_id, DependencyType::ParentChild))
+        .await
+        .expect("add parent-child");
+}
+
+/// MF-1 (VERIFY, mutations d/d2) — `epics_eligible` counts an epic ONLY when BOTH discriminating
+/// filters hold: the SQL rollup gate (`child_total>0 && child_closed==child_total`) AND the in-memory
+/// epic-side gate (`Epic ∧ ¬terminal ∧ ¬template`). The corpus seeds ONE genuinely-eligible epic and
+/// THREE negatives, so each filter must actually EXCLUDE something:
+/// - `ub-epic-ok`    — active non-template Epic, its ONE child closed → ELIGIBLE.
+/// - `ub-epic-open`  — active non-template Epic, its child still OPEN → `child_closed < child_total`;
+///   excluded by the ROLLUP gate (dropping `closed==total`/relaxing `child_total>0` would admit it).
+/// - `ub-epic-tmpl`  — a TEMPLATE Epic whose (non-template) child is closed → in the rollup with
+///   `closed==total`, but excluded by the epic-side `¬template` filter.
+/// - `ub-epic-term`  — a TERMINAL (Closed) Epic whose child is closed → in the rollup with
+///   `closed==total`, but excluded by the epic-side `¬terminal` filter.
+///
+/// The rollup therefore carries FOUR epic entries (all four have a closed-or-open non-template child),
+/// yet `epics_eligible == 1`. Dropping the rollup gate → `ub-epic-open` enters (count 2, mutation d);
+/// dropping the epic-side filter → `ub-epic-tmpl` + `ub-epic-term` enter (count ≥3, mutation d2). Both
+/// go RED. A DEDICATED test over a FRESH session, so the `diagnostics_report_shapes` insta golden is
+/// untouched.
+#[tokio::test]
+async fn stats_epics_eligible_excludes_ineligible_epics() {
+    let session = session().await;
+
+    // (1) ELIGIBLE — active non-template epic, child closed.
+    epic_with_child(&session, "ub-epic-ok", "ub-child-ok", false, true, 1000).await;
+    // (2) NEGATIVE (rollup gate) — active non-template epic, child still OPEN.
+    epic_with_child(
+        &session,
+        "ub-epic-open",
+        "ub-child-open",
+        false,
+        false,
+        1100,
+    )
+    .await;
+    // (3) NEGATIVE (epic-side ¬template) — TEMPLATE epic, child closed.
+    epic_with_child(&session, "ub-epic-tmpl", "ub-child-tmpl", true, true, 1200).await;
+    // (4) NEGATIVE (epic-side ¬terminal) — active non-template epic, child closed, THEN close the epic.
+    epic_with_child(&session, "ub-epic-term", "ub-child-term", false, true, 1300).await;
+    session
+        .update(
+            "ub-epic-term",
+            &IssuePatch {
+                status: Some(Status::Closed),
+                ..IssuePatch::default()
+            },
+        )
+        .await
+        .expect("close the terminal epic");
+
+    let report = session
+        .diagnostics(DiagnosticKind::Stats, None)
+        .await
+        .expect("stats");
+    let map = findings_map(&report);
+
+    // Only ub-epic-ok qualifies; the three negatives are each excluded by a DISTINCT filter.
+    assert_eq!(
+        map.get("epics_eligible").map(String::as_str),
+        Some("1"),
+        "exactly the one active-non-template epic whose child is all-closed is eligible"
+    );
+}
+
+/// MF-2 (VERIFY, mutation e) — `blocked` is the id SET of the manual `Status::Blocked` rows UNION the
+/// dependency-blocked active ids, DEDUPED by id: an issue that is BOTH manual-Blocked AND
+/// dependency-blocked counts ONCE. The corpus seeds:
+/// - `ub-both`  — manual `Status::Blocked` AND has an unresolved blocking dependency → it appears in
+///   BOTH the `Status::Blocked` set AND the `blocked_issues` set (the OVERLAP).
+/// - `ub-dep`   — a second, distinctly dependency-blocked issue (only in `blocked_issues`).
+///
+/// So `blocked == 2` (the overlap counted once). A non-deduped union (`HashSet → Vec`, `insert →
+/// push`) would double-count `ub-both` and yield 3 → mutation e goes RED.
+#[tokio::test]
+async fn stats_blocked_counts_overlap_once() {
+    let session = session().await;
+
+    // A shared blocker so each candidate has an unresolved gating edge.
+    session
+        .create(&issue("ub-blocker", Priority::MEDIUM, 900))
+        .await
+        .expect("create blocker");
+
+    // ub-both: dependency-blocked AND then set to manual Status::Blocked (the OVERLAP member).
+    session
+        .create(&issue("ub-both", Priority::MEDIUM, 1000))
+        .await
+        .expect("create both");
+    add_blocks(&session, "ub-both", "ub-blocker").await;
+    session
+        .update(
+            "ub-both",
+            &IssuePatch {
+                status: Some(Status::Blocked),
+                ..IssuePatch::default()
+            },
+        )
+        .await
+        .expect("set manual Blocked");
+
+    // ub-dep: distinctly dependency-blocked only (never manually Blocked).
+    session
+        .create(&issue("ub-dep", Priority::MEDIUM, 1001))
+        .await
+        .expect("create dep");
+    add_blocks(&session, "ub-dep", "ub-blocker").await;
+
+    let report = session
+        .diagnostics(DiagnosticKind::Stats, None)
+        .await
+        .expect("stats");
+    let map = findings_map(&report);
+
+    // ub-both is in BOTH the manual-Blocked set and the blocked_issues set, yet counts ONCE ⇒ 2.
+    assert_eq!(
+        map.get("blocked").map(String::as_str),
+        Some("2"),
+        "the manual-Blocked and dependency-blocked overlap (ub-both) is deduped: ub-both + ub-dep = 2, not 3"
+    );
+}
+
+/// SF-2 (VERIFY) — hardens the `required_sections` lint arms directly:
+/// (a) a `Task` and a `Feature` MISSING their `## Acceptance Criteria` each emit exactly one finding,
+///     and a PRESENT one is silent (the `Task|Feature ⇒ [## Acceptance Criteria]` arm, previously only
+///     caught transitively via the Bug/Epic cases); and
+/// (b) an `IssueType::Custom(_)` issue is SKIPPED entirely (no findings), pinning the open-enum
+///     `_ => &[]` skip arm against bd's closed enum.
+#[tokio::test]
+async fn lint_covers_task_feature_and_skips_custom() {
+    let session = session().await;
+
+    // A Task MISSING Acceptance Criteria → ONE finding.
+    session
+        .create(&full_issue(
+            "ub-task-missing",
+            "task no AC",
+            IssueType::Task,
+            Priority::MEDIUM,
+            None,
+            &[],
+            Some("just a blurb, no headings"),
+            1000,
+        ))
+        .await
+        .expect("create task-missing");
+    // A Feature MISSING Acceptance Criteria → ONE finding.
+    session
+        .create(&full_issue(
+            "ub-feature-missing",
+            "feature no AC",
+            IssueType::Feature,
+            Priority::MEDIUM,
+            None,
+            &[],
+            Some("no headings here either"),
+            1001,
+        ))
+        .await
+        .expect("create feature-missing");
+    // A Task WITH Acceptance Criteria → SILENT (satisfies the same arm).
+    session
+        .create(&full_issue(
+            "ub-task-ok",
+            "task with AC",
+            IssueType::Task,
+            Priority::MEDIUM,
+            None,
+            &[],
+            Some("## Acceptance Criteria\ndone when green"),
+            1002,
+        ))
+        .await
+        .expect("create task-ok");
+    // A Custom-type issue → SKIPPED entirely (the open-enum `_ => &[]` arm), regardless of description.
+    session
+        .create(&full_issue(
+            "ub-custom",
+            "custom kind",
+            IssueType::Custom("proposal".to_string()),
+            Priority::MEDIUM,
+            None,
+            &[],
+            Some("no headings, but Custom is never linted"),
+            1003,
+        ))
+        .await
+        .expect("create custom");
+
+    let report = session
+        .diagnostics(DiagnosticKind::Lint, None)
+        .await
+        .expect("lint");
+    let pairs = findings_pairs(&report);
+
+    // Exactly the two missing-AC findings (id ASC); the complete Task and the Custom issue are silent.
+    assert_eq!(
+        pairs,
+        vec![
+            (
+                "ub-feature-missing".to_string(),
+                "missing section: ## Acceptance Criteria".to_string()
+            ),
+            (
+                "ub-task-missing".to_string(),
+                "missing section: ## Acceptance Criteria".to_string()
+            ),
+        ],
+        "Task|Feature ⇒ one AC finding each when missing; the AC-complete Task and the Custom-type \
+         issue emit nothing"
+    );
+    // Belt-and-braces: the Custom issue NEVER appears.
+    assert!(
+        !report.findings.iter().any(|f| f.label == "ub-custom"),
+        "IssueType::Custom is skipped by the `_ => &[]` arm (open-enum tail)"
+    );
+}
+
 #[tokio::test]
 async fn orphans_surfaces_only_commit_hash_external_refs() {
     let session = session().await;
