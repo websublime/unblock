@@ -104,7 +104,7 @@ mod shutdown;
 pub use error::{EngineError, Result};
 pub use logging::{RELIABILITY_TARGET, TracingOptions, init_tracing};
 pub use session::write::NewIssue;
-pub use session::{Session, SessionConfig};
+pub use session::{MigrateOutcome, Session, SessionConfig};
 pub use shutdown::is_shutdown_requested;
 
 // --- the report module owns the engine-local `ImportOptions` and re-exports the model-owned
@@ -131,8 +131,8 @@ mod tests {
     use crate::{
         CloseOutcome, CountBucket, CountGroupBy, DeleteMode, DeletePlan, DepTree, Dependency,
         DiagnosticFinding, DiagnosticKind, DiagnosticReport, EngineError, ExportReport, GraphEdge,
-        ImportOptions, ImportReport, IssuePatch, ListFilters, Result, Session, SessionConfig,
-        TracingOptions,
+        ImportOptions, ImportReport, IssuePatch, ListFilters, MigrateOutcome, Result, Session,
+        SessionConfig, TracingOptions,
     };
 
     #[test]
@@ -140,6 +140,13 @@ mod tests {
         let _cfg = SessionConfig::default();
         let _opts = ImportOptions::default();
         let _tracing = TracingOptions::default();
+        // The engine-local `MigrateOutcome` return (D27/AF-2) is constructible from the crate root.
+        let outcome = MigrateOutcome {
+            from: 1,
+            to: 1,
+            applied: false,
+        };
+        assert!(!outcome.applied);
         assert_eq!(crate::RELIABILITY_TARGET, "unblock.reliability");
     }
 }

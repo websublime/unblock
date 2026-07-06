@@ -146,6 +146,9 @@ impl Storage for FakeStorage {
     async fn integrity_check(&self) -> Result<Vec<String>, StorageError> {
         unimplemented!("FakeStorage::integrity_check")
     }
+    async fn schema_version(&self) -> Result<i64, StorageError> {
+        unimplemented!("FakeStorage::schema_version")
+    }
     async fn get_issues(&self, _ids: &[String]) -> Result<Vec<Issue>, StorageError> {
         unimplemented!("FakeStorage::get_issues")
     }

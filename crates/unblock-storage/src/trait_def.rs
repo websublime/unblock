@@ -58,6 +58,16 @@ pub trait Storage: Send + Sync {
     /// returned strings are integrity problems to surface to the operator.
     async fn integrity_check(&self) -> Result<Vec<String>, StorageError>;
 
+    /// Read the current on-disk schema version (`PRAGMA user_version`) — D27/AF-2 (T3.1, spine §3.2).
+    ///
+    /// A fresh, never-migrated database reports `0`; a migrated database at the current baseline
+    /// reports `CURRENT_SCHEMA_VERSION`. This is a **pure read** (no write permit, no migration
+    /// side-effect) so the engine can report `migrate`'s from→to delta without re-opening the
+    /// database. Backend-agnostic `i64`: the on-disk value is a `PRAGMA` integer (i64 domain); the
+    /// libsql impl widens its internal `i32` reader via `i64::from(..)` so no backend width leaks into
+    /// the contract. Backs the engine `Session::migrate() -> MigrateOutcome` (spine §4.1).
+    async fn schema_version(&self) -> Result<i64, StorageError>;
+
     // ---------------------------------------------------------------------------------------------
     // issue CRUD (mutations carry the actor + optional Tier-1 attribution; write Event(s) in-tx)
     // ---------------------------------------------------------------------------------------------
@@ -392,6 +402,12 @@ mod tests {
 
         async fn integrity_check(&self) -> Result<Vec<String>, StorageError> {
             Ok(Vec::new())
+        }
+
+        async fn schema_version(&self) -> Result<i64, StorageError> {
+            // An un-bootstrapped stub is honestly unstamped: `PRAGMA user_version` on a fresh DB is 0
+            // (this stub's `migrate` returns `NotInitialized`, so it never advances the version).
+            Ok(0)
         }
 
         async fn create_issue(&self, _issue: &Issue, _actor: &str) -> Result<String, StorageError> {

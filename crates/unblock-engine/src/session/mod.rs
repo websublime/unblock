@@ -17,6 +17,10 @@ pub(crate) mod lifecycle;
 pub(crate) mod read;
 pub(crate) mod write;
 
+// The engine-local `MigrateOutcome` return (D27/AF-2, T3.1) is defined in `lifecycle`; re-export it
+// here so `lib.rs` can surface it alongside `Session`/`SessionConfig` (spine §4.1).
+pub use lifecycle::MigrateOutcome;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;

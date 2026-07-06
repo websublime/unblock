@@ -2104,6 +2104,48 @@ async fn epic_child_rollup_is_empty_on_empty_store() {
 }
 
 // --------------------------------------------------------------------------------------------------
+// schema_version (D27/AF-2, T3.1) — PRAGMA user_version read via the public Storage trait
+// --------------------------------------------------------------------------------------------------
+
+/// A fresh, **un-migrated** store reports `0` (unstamped `PRAGMA user_version`); after `migrate()`
+/// it reports the current stamped baseline (a positive version).
+#[tokio::test]
+async fn schema_version_zero_before_migrate_positive_after() {
+    // Un-migrated: open_in_memory does NOT stamp a version.
+    let storage = LibsqlStorage::open_in_memory().await.expect("open");
+    assert_eq!(
+        storage
+            .schema_version()
+            .await
+            .expect("schema_version fresh"),
+        0,
+        "a fresh, never-migrated DB reports user_version 0"
+    );
+
+    // Migrating bootstraps + stamps the baseline.
+    storage.migrate().await.expect("migrate");
+    let migrated = storage
+        .schema_version()
+        .await
+        .expect("schema_version migrated");
+    assert!(
+        migrated >= 1,
+        "a migrated DB reports its stamped baseline (>= 1), got {migrated}"
+    );
+
+    // Pure read: re-reading (and re-migrating idempotently) does not change the reported version.
+    storage.migrate().await.expect("re-migrate no-op");
+    assert_eq!(
+        storage
+            .schema_version()
+            .await
+            .expect("schema_version stable"),
+        migrated,
+        "schema_version is a stable pure read; an idempotent re-migrate does not advance it"
+    );
+}
+
+// --------------------------------------------------------------------------------------------------
 // helpers
 // --------------------------------------------------------------------------------------------------
 

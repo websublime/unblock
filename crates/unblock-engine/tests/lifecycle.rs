@@ -6,6 +6,44 @@ use common::{session, session_with};
 use unblock_engine::{EngineError, Session, SessionConfig};
 
 #[tokio::test]
+async fn migrate_is_idempotent_no_op_post_open() {
+    // The context's config already migrated on open (FR-9 single open path), so `migrate` is a
+    // no-op: from == to (the stamped baseline), applied == false (D27/AF-2).
+    let session = session().await;
+    let outcome = session.migrate().await.expect("migrate");
+    assert_eq!(
+        outcome.from, outcome.to,
+        "a facade-opened workspace is already at the baseline: from == to"
+    );
+    assert!(
+        outcome.from >= 1,
+        "migrated store reports its stamped baseline (>= 1), got {}",
+        outcome.from
+    );
+    assert!(
+        !outcome.applied,
+        "no schema advance post-open (applied == false)"
+    );
+
+    // A second migrate is still idempotent (applied stays false, from == to unchanged).
+    let again = session.migrate().await.expect("re-migrate");
+    assert_eq!(
+        (again.from, again.to, again.applied),
+        (outcome.from, outcome.to, false)
+    );
+}
+
+#[tokio::test]
+async fn migrate_under_shutdown_flag_is_refused() {
+    // A shutdown-in-progress session refuses the write permit up front (migrate is a write-path op),
+    // so `migrate()` fails fast with ShutdownInProgress and never touches the DB.
+    let session = session().await;
+    session.shutdown().await.expect("shutdown");
+    let err = session.migrate().await.expect_err("refused under shutdown");
+    assert!(matches!(err, EngineError::ShutdownInProgress));
+}
+
+#[tokio::test]
 async fn open_fresh_workspace_succeeds() {
     let session = session().await;
     // The context's config already migrated; a read works immediately.

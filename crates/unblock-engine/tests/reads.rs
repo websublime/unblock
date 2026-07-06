@@ -315,6 +315,55 @@ async fn reads_succeed_while_a_write_holds_the_permit() {
 }
 
 #[tokio::test]
+async fn integrity_check_returns_empty_on_healthy_db() {
+    // D27/AF-1: the doctor-lite input read surfaces `Storage::integrity_check`; a healthy DB has no
+    // problems.
+    let session = session().await;
+    let problems = session.integrity_check().await.expect("integrity_check");
+    assert!(
+        problems.is_empty(),
+        "a healthy DB reports no integrity problems"
+    );
+}
+
+#[tokio::test]
+async fn integrity_check_never_acquires_the_write_permit() {
+    use unblock_storage::Storage;
+    // FR-10: `integrity_check` is a pure read — it must complete WHILE a write holds the engine's
+    // single permit (like every other read).
+    let inner = unblock_storage::LibsqlStorage::open_in_memory()
+        .await
+        .expect("open");
+    inner.migrate().await.expect("migrate");
+
+    let parked: Arc<ParkedStorage> = ParkedStorage::new(Arc::new(inner));
+    let storage: Arc<dyn Storage> = parked.clone();
+    let session = Arc::new(session_over(storage, unblock_engine::SessionConfig::default()).await);
+
+    // Spawn a write that parks mid-tx, holding the engine permit.
+    let writer_session = session.clone();
+    let writer = tokio::spawn(async move {
+        writer_session
+            .create(&issue("ub-parked", Priority::MEDIUM, 2000))
+            .await
+    });
+    parked.wait_until_parked().await;
+
+    // integrity_check completes despite the held write permit (it never touches it).
+    let problems = tokio::time::timeout(Duration::from_secs(2), session.integrity_check())
+        .await
+        .expect("integrity_check must not block on the write permit")
+        .expect("integrity_check ok");
+    assert!(
+        problems.is_empty(),
+        "healthy DB, no problems, read completed mid-write"
+    );
+
+    parked.release();
+    writer.await.expect("join").expect("parked write completes");
+}
+
+#[tokio::test]
 async fn search_applies_default_cap_when_limit_unset_and_honours_an_explicit_limit() {
     // FR-4: with no `filters.limit`, the engine fills the default `search_cap` (50). Seed 55 matching
     // issues so the uncapped result would be 55 — the cap must clamp it to 50; an explicit small

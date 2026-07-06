@@ -55,12 +55,12 @@ mod private {
 /// Parse an [`OutputFormat`] from its name (case-insensitive).
 ///
 /// Accepts the canonical names plus the `text` alias for `plain`. An unrecognised value is a
-/// [`RenderError::UnsupportedFormat`] carrying the default (`Json`) as the offending placeholder —
-/// callers that need the raw string should validate before calling.
+/// [`RenderError::UnknownFormat`] carrying the raw (trimmed) offending name so the boundary can echo
+/// exactly what the caller passed (D27/AF-4, T3.1).
 ///
 /// # Errors
 ///
-/// Returns [`RenderError::UnsupportedFormat`] when `value` is not a known format name.
+/// Returns [`RenderError::UnknownFormat`] when `value` is not a known format name.
 pub fn parse_format(value: &str) -> Result<OutputFormat, RenderError> {
     match value.trim().to_ascii_lowercase().as_str() {
         "json" => Ok(OutputFormat::Json),
@@ -70,11 +70,11 @@ pub fn parse_format(value: &str) -> Result<OutputFormat, RenderError> {
         "markdown" | "md" => Ok(OutputFormat::Markdown),
         #[cfg(feature = "toon")]
         "toon" => Ok(OutputFormat::Toon),
-        _ => Err(RenderError::UnsupportedFormat {
-            // The variant carries a format; for a parse failure we have no valid one, so report
-            // the default. Callers distinguish via the message ("does not support") vs. the raw
-            // input they passed. `parse_env_value` below returns `None` instead for env strings.
-            format: OutputFormat::Json,
+        // Carry the raw (trimmed) name the caller passed — `UnknownFormat` is distinct from
+        // `UnsupportedFormat` (a KNOWN format that cannot render a kind). `parse_env_value` below
+        // still maps this to `None` (the env layer swallows an unknown value via `.ok()`).
+        _ => Err(RenderError::UnknownFormat {
+            name: value.trim().to_string(),
         }),
     }
 }
@@ -202,7 +202,13 @@ mod tests {
 
     #[test]
     fn unknown_format_errors_and_env_is_none() {
-        assert!(parse_format("xml").is_err());
+        use crate::RenderError;
+        // D27/AF-4: the fallthrough arm returns `UnknownFormat` carrying the raw (trimmed) name.
+        match parse_format("  bogus ") {
+            Err(RenderError::UnknownFormat { name }) => assert_eq!(name, "bogus"),
+            other => panic!("expected UnknownFormat carrying the raw name, got {other:?}"),
+        }
+        // The env layer still swallows an unknown value (via `.ok()`).
         assert_eq!(parse_env_value("xml"), None);
     }
 

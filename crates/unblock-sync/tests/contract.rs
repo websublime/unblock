@@ -350,6 +350,9 @@ impl Storage for RaceInjector {
     async fn integrity_check(&self) -> Result<Vec<String>, unblock_storage::StorageError> {
         self.inner.integrity_check().await
     }
+    async fn schema_version(&self) -> Result<i64, unblock_storage::StorageError> {
+        self.inner.schema_version().await
+    }
     async fn create_issue(
         &self,
         i: &Issue,
