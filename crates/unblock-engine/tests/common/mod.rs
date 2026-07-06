@@ -270,6 +270,9 @@ pub mod parked {
         async fn integrity_check(&self) -> Result<Vec<String>, StorageError> {
             self.inner.integrity_check().await
         }
+        async fn schema_version(&self) -> Result<i64, StorageError> {
+            self.inner.schema_version().await
+        }
         async fn get_issue(&self, id: &str) -> Result<Option<Issue>, StorageError> {
             self.inner.get_issue(id).await
         }
@@ -505,6 +508,9 @@ pub mod collide {
         async fn integrity_check(&self) -> Result<Vec<String>, StorageError> {
             self.inner.integrity_check().await
         }
+        async fn schema_version(&self) -> Result<i64, StorageError> {
+            self.inner.schema_version().await
+        }
         async fn get_issues(&self, ids: &[String]) -> Result<Vec<Issue>, StorageError> {
             self.inner.get_issues(ids).await
         }
@@ -703,6 +709,9 @@ pub mod race {
         }
         async fn integrity_check(&self) -> Result<Vec<String>, StorageError> {
             self.inner.integrity_check().await
+        }
+        async fn schema_version(&self) -> Result<i64, StorageError> {
+            self.inner.schema_version().await
         }
         async fn get_issue(&self, id: &str) -> Result<Option<Issue>, StorageError> {
             self.inner.get_issue(id).await

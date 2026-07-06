@@ -123,6 +123,7 @@ where
     // Lifecycle.
     contract_migrate_idempotent(factory().await).await;
     contract_integrity_check_clean(factory().await).await;
+    contract_schema_version(factory().await).await;
 
     // CRUD.
     contract_create_issue(factory().await).await;
@@ -261,6 +262,26 @@ pub async fn contract_migrate_idempotent<S: Storage>(storage: S) {
 pub async fn contract_integrity_check_clean<S: Storage>(storage: S) {
     let problems = storage.integrity_check().await.expect("integrity_check");
     assert!(problems.is_empty(), "healthy DB returns no problems");
+}
+
+/// `schema_version` reports the stamped baseline on a migrated store (D27/AF-2, T3.1).
+///
+/// The factory yields a **migrated** store, so its on-disk `PRAGMA user_version` is the current
+/// baseline: a positive value (a fresh/unstamped DB would report `0`). This is a backend-agnostic
+/// assertion (the concrete baseline constant is a libsql-internal detail); it proves the read
+/// surfaces a real stamped version and re-reads consistently (a pure read, no side-effect).
+pub async fn contract_schema_version<S: Storage>(storage: S) {
+    let version = storage.schema_version().await.expect("schema_version");
+    assert!(
+        version >= 1,
+        "a migrated store reports its stamped baseline (>= 1), not the unstamped 0; got {version}"
+    );
+    // Pure read: re-reading yields the same version (no migration side-effect).
+    let again = storage
+        .schema_version()
+        .await
+        .expect("schema_version re-read");
+    assert_eq!(version, again, "schema_version is a stable pure read");
 }
 
 // --------------------------------------------------------------------------------------------------

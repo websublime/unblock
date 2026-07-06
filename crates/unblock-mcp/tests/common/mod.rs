@@ -278,6 +278,9 @@ pub mod recording {
         async fn integrity_check(&self) -> Result<Vec<String>, StorageError> {
             self.inner.integrity_check().await
         }
+        async fn schema_version(&self) -> Result<i64, StorageError> {
+            self.inner.schema_version().await
+        }
         async fn get_issue(&self, id: &str) -> Result<Option<Issue>, StorageError> {
             self.inner.get_issue(id).await
         }
@@ -414,6 +417,9 @@ pub mod failing {
         }
         async fn integrity_check(&self) -> Result<Vec<String>, StorageError> {
             self.inner.integrity_check().await
+        }
+        async fn schema_version(&self) -> Result<i64, StorageError> {
+            self.inner.schema_version().await
         }
         async fn create_issue(&self, issue: &Issue, actor: &str) -> Result<String, StorageError> {
             self.inner.create_issue(issue, actor).await

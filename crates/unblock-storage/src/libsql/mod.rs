@@ -552,6 +552,15 @@ impl Storage for LibsqlStorage {
         diagnostics::integrity_check(self.read()).await
     }
 
+    async fn schema_version(&self) -> Result<i64, StorageError> {
+        // Pure read (D27/AF-2): `PRAGMA user_version` on the read connection (WAL MVCC snapshot;
+        // never serialized behind the writer). Delegate to the existing `current_user_version`
+        // helper and widen its `i32` to the backend-agnostic `i64` contract (infallible).
+        Ok(i64::from(
+            migrations::current_user_version(self.read()).await?,
+        ))
+    }
+
     async fn create_issue(&self, issue: &Issue, actor: &str) -> Result<String, StorageError> {
         let conn = self.write().await;
         crud::create_issue(&conn, self.hook(), issue, actor).await

@@ -162,4 +162,21 @@ impl Session {
         };
         diagnostics::diagnostics(self.storage.as_ref(), facts, kind, since).await
     }
+
+    /// Run `PRAGMA integrity_check`, returning the raw problem rows (D27/AF-1, T3.1 — the doctor-lite
+    /// input read, spine §4.1).
+    ///
+    /// Surfaces the existing [`Storage::integrity_check`](unblock_storage::Storage::integrity_check):
+    /// a healthy database returns an empty `Vec`; any returned strings are integrity problems. This is
+    /// the ONE corruption signal reachable at T3.1 — the full Healthy/Drifted/Recoverable/Unsafe
+    /// taxonomy + `--repair` land additively over [`Session::doctor`](Session::doctor) at T3.3. A pure
+    /// read: it **never** acquires the write permit (FR-10). The cli `doctor` command composes it with
+    /// `diagnostics(Stats|Lint|Info)` into a doctor-lite report; a non-empty result maps to
+    /// `ErrorCode::DatabaseError` (exit 2) at the cli boundary.
+    ///
+    /// # Errors
+    /// Forwards any storage failure as the transparent `EngineError` source.
+    pub async fn integrity_check(&self) -> Result<Vec<String>> {
+        Ok(self.storage.integrity_check().await?)
+    }
 }
