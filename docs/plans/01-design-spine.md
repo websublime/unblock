@@ -17,7 +17,7 @@
 
 ### 0.1 Settled L7 edge — `unblock-cli → unblock-mcp` (NORMATIVE; closes cli Q1)
 
-`unblock-cli` **depends on** `unblock-mcp`. The CLI owns the `unblock` binary (incl. `unblock serve`); `unblock-mcp` is a **library** that exposes `serve(session, transport, shutdown)` and the tool/resource/prompt registry. The direction is fixed **cli → mcp** and **never mcp → cli** — this is the single L7↔L7 edge that determines acyclicity, and it is now a decision (not an assumption). The cli plan's Open Question Q1 is **RESOLVED** by this line. README §2 and §0 draw this edge as settled and are correct.
+`unblock-cli` **depends on** `unblock-mcp`. The CLI owns the `unblock` binary (incl. `unblock serve`); `unblock-mcp` is a **library** that exposes `serve(session: Arc<Session>, opts: ServeOptions) -> Result<(), McpServerError>` and the tool/resource/prompt registry. **`serve` signature (LIVE — D27/AD-4, reconciled spine-first against T2.2/PR #387):** it is the **2-arg** `serve(Arc<Session>, ServeOptions)` — the transport is bound **internally** to `stdio()` (the caller does NOT pass a transport), and shutdown is a `tokio_util::sync::CancellationToken` carried in `ServeOptions.cancel` (`.cancel()` drains in-flight work and returns `Ok(())`). The earlier 3-arg `serve(session, transport, shutdown)` / bespoke `ShutdownToken` sketch **never shipped** and is superseded here. The direction is fixed **cli → mcp** and **never mcp → cli** — this is the single L7↔L7 edge that determines acyclicity, and it is now a decision (not an assumption). The cli plan's Open Question Q1 is **RESOLVED** by this line. README §2 and §0 draw this edge as settled and are correct.
 
 ---
 
@@ -386,6 +386,8 @@ impl StorageError { pub fn code(&self) -> unblock_error::ErrorCode; } // each cr
 
 Each crate's enum implements **`unblock_error::CodedError`** (the merged L0 bridge: `code()` required; `hint()`/`retryable()`/`context()` defaulted, with `retryable()` tracking `code().is_retryable()`) — this is the concrete mechanism that satisfies the older inherent-`code()` prose in the sketch above, and it is what lets the boundary build a `StructuredError` uniformly (via the blanket `From<&E>` / `StructuredError::from_coded`). Upward composition uses snafu source nesting; the engine's error is the union surfaced to L7.
 
+**`RenderError` follows this pattern too (D27/AF-4, T3.1 — additive).** `unblock-render` already computes an inherent `code()`; T3.1 adds `impl unblock_error::CodedError for RenderError { fn code(&self) -> ErrorCode { self.code() } }` (delegating to the inherent map — one error → one code, §6.5 unchanged) so the uniform `(&err).into()` L7 bridge covers it like every other per-crate enum. The 4th render variant `RenderError::UnknownFormat { name: String }` (added at T3.1 — `parse_format`'s unknown-name arm) maps to `ErrorCode::ValidationFailed`, the same family as `UnsupportedFormat`/`FieldUnknown`; the §2.3 exit table is UNCHANGED (no new ErrorCode). **`McpServerError` is the deliberate exception:** it does NOT impl `CodedError` — the cli `exit.rs` maps it EXPLICITLY (`Transport`/`RunLoop` → `ErrorCode::InternalError`, exit 1; a serve run-loop/transport failure is an INTERNAL condition, not a user IoError) via `StructuredError::from_code(InternalError, err.to_string())` (which already routes through `sanitize_message`). See §5b.
+
 **`ModelError` aggregate validation (D-E1 — NORMATIVE).** `unblock-error` owns the one concrete per-crate enum that `unblock-model` returns (spine §1.1/§1.2/§1.9: `Status::FromStr`, `Priority::FromStr`, `IssueValidator::validate`). It keeps **scalar** variants for the single-field `FromStr` paths *and* one **aggregate carrier** that holds every failure an `IssueValidator::validate` run found, so the boundary still emits exactly one `ErrorCode` while preserving multi-field detail (FR-11 agent self-correction):
 
 ```rust
@@ -660,6 +662,14 @@ pub trait Storage: Send + Sync {
     // --- lifecycle ---
     async fn migrate(&self) -> Result<(), StorageError>;
     async fn integrity_check(&self) -> Result<Vec<String>, StorageError>; // libsql integrity_check rows
+    async fn schema_version(&self) -> Result<i64, StorageError>;           // D27/AF-2 (T3.1) — PRAGMA user_version, PURE READ
+    //  Read the current on-disk schema version (a fresh/unstamped DB reports 0; a migrated DB at the current
+    //  baseline reports CURRENT_SCHEMA_VERSION). A pure read (no write permit, no migration side-effect) so the
+    //  engine can report `migrate`'s from→to delta without re-opening. Backend-agnostic `i64` (the on-disk value is
+    //  a PRAGMA integer; libsql's internal helper is i32 but the trait keeps the wider type so no backend width
+    //  leaks — the libsql impl widens with `i64::from(current_user_version(..))`). Every `Storage` impl states it
+    //  (no default fn — a defaulted answer would silently mislead a versioning backend); the test stubs return a
+    //  constant (`NoopStorage` → 0, the other doubles → 1). Backs `Session::migrate` (§4.1).
 
     // --- issue CRUD (mutations carry actor + optional Tier-1 attribution; write Event(s) transactionally) ---
     async fn create_issue(&self, issue: &Issue, actor: &str) -> Result<String, StorageError>; // returns id
@@ -1292,6 +1302,13 @@ impl Session {
     pub async fn dependency_graph(&self, roots: &[String]) -> Result<DepTree, EngineError>; // backs dep `graph` action (§5.2); empty roots = whole graph
     pub async fn detect_cycles(&self, blocking_only: bool) -> Result<Vec<Vec<String>>, EngineError>; // backs dep `cycles` action (§5.2); blocking_only filter (D19)
     pub async fn diagnostics(&self, kind: DiagnosticKind, since: Option<DateTime<Utc>>) -> Result<DiagnosticReport, EngineError>; // FR-15; `since` = changelog window (bare arg, default lives only on the MCP wire — D26/OQ-1, the D19 detect_cycles precedent)
+    pub async fn integrity_check(&self) -> Result<Vec<String>, EngineError>; // D27/AF-1 (T3.1) — FR-16 doctor-lite input
+    //   Surfaces the existing `Storage::integrity_check` (`PRAGMA integrity_check`): a healthy DB returns an empty
+    //   `Vec`; any strings are integrity problems. The ONE corruption signal reachable at T3.1 (the full
+    //   Healthy/Drifted/Recoverable/Unsafe taxonomy + `--repair` land ADDITIVELY over `doctor()` at T3.3). A read:
+    //   never acquires the write permit (FR-10). BUILD-now, like `diagnostics`. The cli `doctor` command composes
+    //   this + `diagnostics(Stats|Lint|Info)` into a doctor-lite report; a non-empty result maps to
+    //   ErrorCode::DatabaseError (exit 2) at the cli boundary (spine §2.3 exit table unchanged).
 
     // --- mutations: each acquires the write permit for its whole tx ---
     pub async fn create(&self, issue: &Issue) -> Result<String, EngineError>;
@@ -1384,14 +1401,33 @@ impl Session {
     pub async fn import_jsonl(&self, path: &Path, opts: ImportOptions) -> Result<ImportReport, EngineError>;
     pub async fn import_bd(&self, path: &Path) -> Result<ImportReport, EngineError>;     // D16, idempotent via content_hash
 
-    // --- lifecycle / ops (OQ-2 RESOLVED: doctor + recover ARE part of the public Session surface;
-    //     the cli `doctor` command goes through these) ---
+    // --- lifecycle / ops ---
+    // MigrateOutcome (D27/AF-2, T3.1) — the outcome of an idempotent `Session::migrate`. Engine-local (NOT a
+    //   §1.10 DTO; no JsonSchema; the cli maps it onto a DiagnosticReport per D27/AD-2). `from`/`to` are the
+    //   on-disk PRAGMA user_version observed before/after; `applied = from != to`.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct MigrateOutcome { pub from: i64, pub to: i64, pub applied: bool }
+    pub async fn migrate(&self) -> Result<MigrateOutcome, EngineError>; // D27/AF-2 (T3.1) — additive engine passthrough
+    //   Ensure the schema is at the current baseline, idempotently, and report the from→to delta. Runs UNDER the
+    //   single write permit (D14 — migration is a write-path op): reads `from = storage.schema_version()`, runs the
+    //   idempotent `storage.migrate()` (a no-op on a current DB), re-reads `to`, returns `{from, to, applied: from!=to}`.
+    //   A DB stamped NEWER than this build surfaces the transparent `StorageError::SchemaMismatch` (→ exit 2), never a
+    //   fake success. Because the config open facade migrates on open (FR-9 single open path), `applied` is normally
+    //   `false` post-open — an honest idempotent signal, not a phantom applied-list. Backs the cli `migrate` command.
+    //
+    // (OQ-2 RESOLVED: doctor + recover ARE part of the public Session surface.)
     // PRECISION NOTE (T2.2): the mcp `diagnostics` TOOL (§5.1, the 7-kind read path) maps to
     //   `Session::diagnostics(kind, since)` above (BUILD-now, pure-DB; `since` threads the changelog window
     //   — D26/OQ-1) — it is DISTINCT from `doctor()`/`recover()`
     //   here (the T3.3 health seam, FeatureNotWired{"health"} until then). The mcp diagnostics tool does NOT
-    //   route through doctor/recover; only the cli `doctor` command does.
-    pub async fn doctor(&self) -> Result<DiagnosticReport, EngineError>;  // FR-15/FR-16. v1 = SIGNATURE only; body seamed to unblock-health (T3.3) — returns EngineError::FeatureNotWired{feature:"health"} until then (the integrity DiagnosticKind variant + DoctorReport→DiagnosticReport mapping are designed at T3.3; the landed DiagnosticKind has no integrity variant)
+    //   route through doctor/recover.
+    // CLI DOCTOR-LITE (D27/AF-1, T3.1 — reconciled spine-first): the cli `doctor` command does NOT call
+    //   `doctor()`/`recover()` at T3.1 (they are the T3.3 FeatureNotWired{"health"} seam). It composes a doctor-LITE
+    //   report from the BUILD-now reads `diagnostics(Stats|Lint|Info)` + the new `integrity_check()` read above
+    //   (integrity is the ONE corruption signal reachable at T3.1). The FULL Healthy/Drifted/Recoverable/Unsafe
+    //   taxonomy + `--repair` + `.unblock/.recovery/` evidence land ADDITIVELY over the wired `doctor()`/`recover()`
+    //   at T3.3. (Earlier prose said "cli doctor goes through doctor()/recover()" — superseded by this note.)
+    pub async fn doctor(&self) -> Result<DiagnosticReport, EngineError>;  // FR-15/FR-16. v1 = SIGNATURE only; body seamed to unblock-health (T3.3) — returns EngineError::FeatureNotWired{feature:"health"} until then (the integrity DiagnosticKind variant + DoctorReport→DiagnosticReport mapping are designed at T3.3; the landed DiagnosticKind has no integrity variant). NOT called by the cli doctor-lite at T3.1 (see the note above).
     pub async fn recover(&self) -> Result<DiagnosticReport, EngineError>; // attempt repair (WAL checkpoint, reindex; reports actions taken). v1 = SIGNATURE only; body seamed to unblock-health (T3.3) — returns EngineError::FeatureNotWired{feature:"health"} until then (the rich repair + evidence dir are T3.3)
     pub async fn shutdown(&self) -> Result<(), EngineError>; // flush + close libsql cleanly (FR-17)
 }
@@ -1399,7 +1435,11 @@ impl Session {
 // CloseOutcome / ImportReport / ExportReport are defined in unblock-model §1.10 and
 // re-exported here (CF-A) — NOT redefined. CountBucket / GraphEdge / DepTree /
 // DiagnosticReport / DiagnosticFinding / DiagnosticKind likewise come from unblock-model
-// via the same re-export. SessionConfig + ImportOptions + NewIssue (D21) are engine-owned (above).
+// via the same re-export. SessionConfig + ImportOptions + NewIssue (D21) + MigrateOutcome
+// (D27/AF-2) are engine-owned (above); MigrateOutcome is a plain engine-local return (no
+// JsonSchema, NOT a §1.10 DTO), exported from unblock-engine like the peer ImportOptions
+// (the TRUE engine-local peer — a plain engine-defined return, no JsonSchema; contrast
+// CloseOutcome, which IS a §1.10 model DTO the engine merely re-exports).
 ```
 
 ### 4.2 Write-Semaphore contract (D14 — normative)
@@ -1755,7 +1795,7 @@ Any `EngineError` → `StructuredError` (§2.4) attached as rmcp tool error **da
 
 ## 5b. CLI lifecycle surface — `unblock-cli` (L7)
 
-`unblock-cli` owns the `unblock` binary and depends on `unblock-mcp` (§0.1). Lifecycle/ops commands (NOT the issue-data verbs, which go through MCP tools / the engine): the v1 command set is **`serve, migrate, doctor, version, init, agents, update`** — all lifecycle/ops. (This widens the PRD D3 list, which named only `serve/migrate/doctor/version`; `init`/`agents`/`update` ship in cli at M3 per the cli plan / T3.1 / T3.6. The cli Q2 startup-vs-runtime partitioning is the only remaining cli open item.)
+`unblock-cli` owns the `unblock` binary and depends on `unblock-mcp` (§0.1). Lifecycle/ops commands (NOT the issue-data verbs, which go through MCP tools / the engine): the v1 command set is **`serve, migrate, doctor, version, init, agents, update`** — all lifecycle/ops. (This widens the PRD D3 list, which named only `serve/migrate/doctor/version`; `init`/`agents`/`update` ship in cli at M3 per the cli plan / T3.1 / T3.6.) The T3.1 command behaviours below are ratified by **D27 (PRD §4)** and reconciled spine-first against the live surface on `main` @ b384103.
 
 ```rust
 // commands/update.rs — the v1 self-update command (FR-25 / D17). Command token is `unblock update`
@@ -1764,8 +1804,26 @@ Any `EngineError` → `StructuredError` (§2.4) attached as rmcp tool error **da
 pub struct UpdateArgs { /* --check, --version <tag>, --yes */ }
 ```
 
-- **Self-update seam (FR-25, D17):** the `unblock update` command uses **`axoupdater` as a library dependency of `unblock-cli`** (NOT a separate `unblock-update` crate). Updates are verified via **GitHub artifact attestations** (NFR-17), not an embedded key. Gated behind the **`self-update`** Cargo feature (default-on); `--no-default-features` drops the feature and thus the `unblock update` command and its network surface (CF-K).
+**The CLI is a pure `CliOverrides` forwarder (D27/AD-3).** `unblock-config` owns ALL layering (CLI > env `UNBLOCK_*` > `.unblock/config.toml` > defaults), `.unblock/` discovery, path confinement, and prefix normalization; the CLI does NOT re-implement precedence. The single CLI-owned resolution seam is **clap `env`**: `--dir`→`UNBLOCK_DIR` and `--actor`→`UNBLOCK_ACTOR` bind via clap `env` (so `--flag > UNBLOCK_*` is free) and `GlobalArgs::to_overrides()` is the ONE place clap types cross into `CliOverrides`. `UNBLOCK_OUTPUT_FORMAT` is parsed strictly by config's env layer (the single strict parse site); the `--output/-o` flag forwards via `CliOverrides.output_format` so `--flag > env` still holds inside config's resolver. `CliOverrides` has NO `id_prefix` field, so `init --prefix` is NOT forwarded — it is written into the scaffold `config.toml` text (see `init`).
+
+**serve (FR-20 / D27/AD-4).** Opens a `WorkspaceContext` via `open_with_storage_with_cli`, builds a `SessionConfig { jsonl_export: ctx.config.jsonl_export, import_on_open: false, remote: false }` (`import_on_open` MUST stay false in v1 — `true` returns `FeatureNotWired{"sync"}`, exit 1), installs the FR-17 shutdown handle, opens the `Session` + `with_shutdown_flag`, then calls the LIVE **2-arg** `unblock_mcp::serve(Arc<Session>, ServeOptions { cancel, quotas: Quotas::default(), instructions })` (§0.1 — transport is internal `stdio()`). On EOF/first signal the `CancellationToken` cancels → `serve` returns `Ok` → `session.shutdown()` (drain the permit, clean libsql close). stdout carries ONLY MCP framing (logging is stderr-only, NFR-14). Single-serve-per-workspace (D14).
+
+**migrate (D27/AF-2).** Opens the context (the facade already migrates on open), opens the `Session`, calls the NEW `Session::migrate() -> MigrateOutcome` (§4.1) under the write permit, builds a CLI-local `MigrateReport { database, schema_from, schema_to, applied }`, maps it onto a `DiagnosticReport { kind: Info, findings }` and emits via `Renderer::diagnostics`. Exit 0 on success; a newer-than-build DB → transparent `SchemaMismatch` → exit 2. Idempotent (`applied` normally `false` post-open).
+
+**doctor (D27/AF-1 — doctor-LITE).** Opens the `Session` and composes `diagnostics(Stats|Lint|Info)` + the NEW `Session::integrity_check()` read (§4.1) into a CLI-local `DoctorReport`, mapped onto a `DiagnosticReport { kind: Info, findings }`. It does NOT call `Session::doctor()`/`recover()` (the T3.3 health seam). **Non-zero exit only on detected corruption:** a non-empty `integrity_check` → `ErrorCode::DatabaseError` (exit 2; §2.3 unchanged, no new code); Lint/orphan findings are advisory (no exit flip); else exit 0. `--repair` + the full taxonomy land at T3.3.
+
+**version (D27/AD-5).** Runs with NO workspace. Emits `VersionReport { version, build, commit: Option<_>, rustc: Option<_>, target: Option<_>, features }` from `build.rs`-emitted `option_env!("UNBLOCK_BUILD_*")` (absent = `None`) — NO git invocation / git crate / network / GitHub update-check (NFR-6/D13; the update-check lives only in `unblock update`). Rendered via the same to-`DiagnosticReport` path (kind `Version`).
+
+**init (D27/AF-3).** Creates exactly `.unblock/config.toml` (hand-written TOML — `ProjectConfig` is `Deserialize`-only — seeded with the `unblock_model::normalize_prefix`-normalized `--prefix`, default `ub`; the CLI takes a direct `unblock-model` dep) + a migrated empty `unblock.db` opened through `open_with_storage_with_cli` (FR-9 no-drift). NO `.gitignore`/`metadata.json`/`issues.jsonl` (D13/NFR-6/model-B). **Clobber guard:** refuse if `config.toml` OR `unblock.db` is already present without `--force` → a CLI-local `CliError::AlreadyInitialized` → `ErrorCode::AlreadyInitialized` (exit 2; `ConfigError` has no such variant). Reports a CLI-local `InitReport`.
+
+**agents (FR-14).** A pure file op (SEPARATE from init): resolve-only open (`open_workspace_with_cli`, no DB) to find `workspace_dir`, then merge an idempotent managed AGENTS.md block (delimited markers) describing the MCP wiring (`unblock serve`, stdio transport, tool set). Writes a terse "wrote X" note to stderr.
+
+**error boundary (D27/AF-4).** `exit.rs` owns the 0–8 cast (there is no `From<ExitCode> for std::process::ExitCode` in `unblock-error`). Transparent-`CodedError` sources (`EngineError`/`ConfigError`/, with AF-4, `RenderError`) bridge via `(&err).into()`. `McpServerError` (`Transport`/`RunLoop`, `#[non_exhaustive]`) is mapped EXPLICITLY to `ErrorCode::InternalError` (exit 1) — a serve failure is internal, not a user IoError (NOT exit 8). CLI-local variants: `AlreadyInitialized` (exit 2), scaffold/agents `Io` (exit 8). **NFR-14 + FR-11 split:** in json/robot the structured error renders to STDOUT (always valid JSON even on error); in plain a human `error[CODE]: message` line goes to STDERR.
+
+**Self-update seam (FR-25, D17):** the `unblock update` command uses **`axoupdater` as a library dependency of `unblock-cli`** (NOT a separate `unblock-update` crate). Updates are verified via **GitHub artifact attestations** (NFR-17), not an embedded key. Gated behind the **`self-update`** Cargo feature (default-on); `--no-default-features` drops the feature and thus the `unblock update` command and its network surface (CF-K).
+
 - The CLI maps each `EngineError`/boundary error → `StructuredError` and exits with its 0–8 exit code (§2.4); structured output to stdout, diagnostics to stderr (NFR-14).
+- **Report render (D27/AD-2):** the four report structs (`VersionReport`/`MigrateReport`/`DoctorReport`/`InitReport`) are CLI-LOCAL private types (deriving `serde::Serialize`; NOT §1.10 contract types — §6.1 binds only re-exported §1.10 DTOs). Each maps onto a `DiagnosticReport` and is rendered by `Renderer::diagnostics` (the ONE live lifecycle-render path, all five formats, FR-11 uniform) — NOT a generic `render<T>`.
 
 ---
 
