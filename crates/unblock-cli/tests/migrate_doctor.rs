@@ -97,6 +97,57 @@ fn migrate_report_shape_is_snapshot_pinned() {
 }
 
 #[test]
+fn migrate_on_a_future_schema_db_exits_2_with_schema_mismatch() {
+    // D27/AF-2 newer-DB path, proven END-TO-END at the CLI boundary. The rejection is proven at the
+    // storage layer (`libsql::migrate_rejects_future_version`), but NOT via the cli — this closes that
+    // gap. Stamp the workspace DB to a FUTURE `PRAGMA user_version` (99), then run `unblock migrate`:
+    // the config facade migrates on open, `migrate()` finds found=99 > expected → `SchemaMismatch`,
+    // which surfaces transparently as exit 2 + a `SCHEMA_MISMATCH` structured error on stdout (FR-11).
+    let ws = Workspace::init();
+    stamp_user_version(&ws.db_path(), 99);
+
+    let out = ws
+        .cmd()
+        .args(["migrate", "--output", "json"])
+        .output()
+        .expect("run migrate on a future-schema db");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "a newer-than-build DB yields a db-bucket (exit 2) error; stdout: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let value: Value =
+        serde_json::from_slice(&out.stdout).expect("valid JSON structured error on stdout (FR-11)");
+    assert_eq!(
+        value["code"], "SCHEMA_MISMATCH",
+        "a future user_version maps to the SCHEMA_MISMATCH code (D27/AF-2)"
+    );
+}
+
+/// Stamp `PRAGMA user_version = <version>` on the workspace DB via a raw libsql open (the same bundled
+/// `SQLite` the backend uses). This makes the on-disk schema look NEWER than this build so the next
+/// migrate rejects it with `SchemaMismatch` (D27/AF-2). The connection is dropped before the CLI child
+/// opens the file, so there is no writer contention.
+fn stamp_user_version(db: &std::path::Path, version: i64) {
+    // A tiny current-thread runtime just to drive the async libsql open/exec (the harness is sync).
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build a current-thread runtime");
+    rt.block_on(async {
+        let database = libsql::Builder::new_local(db)
+            .build()
+            .await
+            .expect("open the workspace db");
+        let conn = database.connect().expect("connect");
+        conn.execute(&format!("PRAGMA user_version = {version}"), ())
+            .await
+            .expect("stamp user_version");
+    });
+}
+
+#[test]
 fn doctor_healthy_exits_0_with_structured_findings() {
     let ws = Workspace::init();
     let report = json_report(&ws, &["doctor", "--output", "json"]);

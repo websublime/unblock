@@ -231,4 +231,59 @@ mod tests {
         assert_eq!(err.code(), ErrorCode::NotInitialized);
         assert_eq!(err.code().exit_code(), 2);
     }
+
+    /// D27/AF-4 (non-vacuous): a serve TRANSPORT failure (`McpServerError::Transport`) is an INTERNAL
+    /// condition → `InternalError` (exit 1), NEVER a user `IoError` (exit 8). This constructs a REAL
+    /// `CliError::Mcp{Transport}` via the `test-util` seam and pins the mapping — mutating the `Mcp`
+    /// arm in `code()` to `IoError` turns this RED.
+    #[test]
+    fn mcp_transport_maps_to_internal_error_exit_1() {
+        let err = CliError::Mcp {
+            source: unblock_mcp::McpServerError::__transport_error("transport bind failed"),
+        };
+        assert_eq!(
+            err.code(),
+            ErrorCode::InternalError,
+            "a serve transport failure is INTERNAL, not a user IoError"
+        );
+        assert_eq!(
+            err.code().exit_code(),
+            1,
+            "InternalError is exit 1 (NOT the IoError exit 8)"
+        );
+        assert_ne!(
+            err.code().exit_code(),
+            8,
+            "a serve failure must NEVER be the user IoError exit 8"
+        );
+    }
+
+    /// D27/AF-4 (non-vacuous): a serve RUN-LOOP failure (`McpServerError::RunLoop`) maps identically →
+    /// `InternalError` (exit 1). Constructs a REAL `CliError::Mcp{RunLoop}` (an aborted-task `JoinError`)
+    /// via the `test-util` seam. Async because building a genuine `JoinError` awaits an aborted task.
+    #[tokio::test]
+    async fn mcp_run_loop_maps_to_internal_error_exit_1() {
+        let err = CliError::Mcp {
+            source: unblock_mcp::McpServerError::__run_loop_error().await,
+        };
+        assert_eq!(err.code(), ErrorCode::InternalError);
+        assert_eq!(err.code().exit_code(), 1);
+        assert_ne!(
+            err.code().exit_code(),
+            8,
+            "a serve run-loop failure must NEVER be the user IoError exit 8"
+        );
+    }
+
+    /// The structured payload for a `CliError::Mcp` renders with the `INTERNAL_ERROR` code + exit 1
+    /// (the terminal boundary a serve failure reaches — FR-11 always-valid on error).
+    #[test]
+    fn mcp_error_to_structured_is_internal_error() {
+        let err = CliError::Mcp {
+            source: unblock_mcp::McpServerError::__transport_error("boom"),
+        };
+        let structured = to_structured(err);
+        assert_eq!(structured.code, ErrorCode::InternalError);
+        assert_eq!(structured.exit_code(), 1);
+    }
 }
