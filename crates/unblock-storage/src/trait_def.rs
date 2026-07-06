@@ -326,6 +326,20 @@ pub trait Storage: Send + Sync {
     // diagnostics support (FR-15, pure-DB; no git, no network — NFR-6)
     // ---------------------------------------------------------------------------------------------
 
+    /// Per-epic `parent-child` child rollup — the ONE additive `stats` primitive (D26/T2.7,
+    /// spine §3.2): each entry is `(epic_id, (child_total, child_closed_or_tombstone))`, the outer
+    /// `Vec` **sorted by epic id in SQL** (`ORDER BY`, deterministic — NFR-14; bd's `get_epic_counts`
+    /// returns a non-deterministic `HashMap`, `sqlite.rs:6978`, which unblock does NOT copy).
+    ///
+    /// bd's `get_epic_counts` ported 1:1: over every `type = 'parent-child'` edge (stored as
+    /// `epic = depends_on_id`, `child = issue_id`) whose CHILD is non-template, count the child total
+    /// and the children whose `status IN ('closed','tombstone')`, grouped by the epic id. The
+    /// engine applies the epic-side active + non-template filter (`issue_type == Epic ∧ ¬terminal ∧
+    /// ¬template`) IN-MEMORY — both filters live at their respective sites and are NOT conflated.
+    ///
+    /// Pure-DB; **never** shells to git (NFR-6). An empty store returns `Ok(Vec::new())`.
+    async fn epic_child_rollup(&self) -> Result<Vec<(String, (usize, usize))>, StorageError>;
+
     /// Return issues closed since `since` (or all closed issues when `since` is `None`), by
     /// `closed_at` — the changelog source. Pure-DB; **never** shells to git (NFR-6).
     async fn closed_since(&self, since: Option<DateTime<Utc>>) -> Result<Vec<Issue>, StorageError>;
@@ -525,6 +539,10 @@ mod tests {
         }
 
         async fn list_events(&self, _issue_id: &str) -> Result<Vec<Event>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn epic_child_rollup(&self) -> Result<Vec<(String, (usize, usize))>, StorageError> {
             Ok(Vec::new())
         }
 

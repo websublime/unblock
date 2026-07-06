@@ -32,6 +32,56 @@ pub(super) async fn integrity_check(conn: &Connection) -> Result<Vec<String>, St
     Ok(problems)
 }
 
+/// Per-epic `parent-child` child rollup — bd's `get_epic_counts` ported 1:1 (`sqlite.rs:6978-7006`),
+/// the ONE additive `stats` primitive (D26/T2.7).
+///
+/// A `parent-child` edge is stored `epic = depends_on_id`, `child = issue_id` (see `deps.rs` /
+/// `query.rs` pass 3), so the JOIN `d.issue_id = i.id` hydrates the CHILD row. Over every
+/// `parent-child` edge whose CHILD is non-template, this counts the child `total` and the children
+/// whose `status IN ('closed','tombstone')`, grouped by the epic id (`d.depends_on_id`). The result
+/// is **sorted by epic id in SQL** (`ORDER BY`) — deterministic (NFR-14), unlike bd's non-deterministic
+/// `HashMap`. The epic-side active + non-template filter is applied IN-MEMORY by the engine (D26).
+///
+/// Pure-DB; never shells to git (NFR-6).
+pub(super) async fn epic_child_rollup(
+    conn: &Connection,
+) -> Result<Vec<(String, (usize, usize))>, StorageError> {
+    let mut rows = conn
+        .query(
+            "SELECT d.depends_on_id AS epic, \
+                    COUNT(*) AS total, \
+                    SUM(CASE WHEN i.status IN ('closed', 'tombstone') THEN 1 ELSE 0 END) AS closed \
+             FROM dependencies d \
+             JOIN issues i ON d.issue_id = i.id \
+             WHERE d.type = 'parent-child' \
+               AND (i.is_template = 0 OR i.is_template IS NULL) \
+             GROUP BY d.depends_on_id \
+             ORDER BY d.depends_on_id ASC",
+            (),
+        )
+        .await
+        .map_err(map_libsql_err)?;
+
+    let mut out = Vec::new();
+    while let Some(row) = rows.next().await.map_err(map_libsql_err)? {
+        let Value::Text(epic) = row.get_value(0).map_err(map_libsql_err)? else {
+            continue;
+        };
+        let total = match row.get_value(1).map_err(map_libsql_err)? {
+            Value::Integer(i) => usize::try_from(i).unwrap_or(0),
+            _ => 0,
+        };
+        // `SUM(CASE …)` yields NULL for an all-zero group in some engines and an integer otherwise;
+        // both map to a plain count (NULL → 0).
+        let closed = match row.get_value(2).map_err(map_libsql_err)? {
+            Value::Integer(i) => usize::try_from(i).unwrap_or(0),
+            _ => 0,
+        };
+        out.push((epic, (total, closed)));
+    }
+    Ok(out)
+}
+
 /// Return issues closed since `since` (or all closed issues when `since` is `None`), by `closed_at`.
 ///
 /// Pure-DB changelog source; never shells to git (NFR-6).

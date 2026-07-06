@@ -490,6 +490,11 @@ impl Storage for RaceInjector {
     ) -> Result<Vec<unblock_model::Event>, unblock_storage::StorageError> {
         self.inner.list_events(id).await
     }
+    async fn epic_child_rollup(
+        &self,
+    ) -> Result<Vec<(String, (usize, usize))>, unblock_storage::StorageError> {
+        self.inner.epic_child_rollup().await
+    }
     async fn closed_since(
         &self,
         s: Option<chrono::DateTime<Utc>>,

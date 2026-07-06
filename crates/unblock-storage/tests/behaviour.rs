@@ -2020,6 +2020,89 @@ async fn orphan_candidates_match_commit_hash_external_refs() {
     assert!(!orphans.contains(&"ub-jira".to_string()));
 }
 
+/// `epic_child_rollup` (D26/T2.7): per-epic `(child_total, child_closed_or_tombstone)` over
+/// `parent-child` edges, non-template children only, non-`parent-child` edges ignored, id-sorted.
+#[tokio::test]
+async fn epic_child_rollup_counts_children_by_status_excluding_templates() {
+    let storage = fresh().await;
+
+    // Two epics so we can assert the id-sorted output over more than one group.
+    let mut epic_a = issue("ub-epic-a", "epic A");
+    epic_a.issue_type = IssueType::Epic;
+    storage.create_issue(&epic_a, "a").await.unwrap();
+    let mut epic_b = issue("ub-epic-b", "epic B");
+    epic_b.issue_type = IssueType::Epic;
+    storage.create_issue(&epic_b, "a").await.unwrap();
+
+    // epic-a: 3 real children (2 closed / 1 open) + 1 TEMPLATE child (EXCLUDED from the rollup).
+    for (id, closed) in [("ub-c1", true), ("ub-c2", true), ("ub-c3", false)] {
+        let mut child = issue(id, "child");
+        if closed {
+            child.status = Status::Closed;
+            child.closed_at = Some(ts(2026, 1, 2));
+        }
+        storage.create_issue(&child, "a").await.unwrap();
+        // Parent-child edge: issue_id = child, depends_on_id = epic (stored orientation).
+        storage
+            .add_dependency(&dep(id, "ub-epic-a", DependencyType::ParentChild), "a")
+            .await
+            .unwrap();
+    }
+    let mut template_child = issue("ub-tmpl", "template child");
+    template_child.is_template = true;
+    storage.create_issue(&template_child, "a").await.unwrap();
+    storage
+        .add_dependency(
+            &dep("ub-tmpl", "ub-epic-a", DependencyType::ParentChild),
+            "a",
+        )
+        .await
+        .unwrap();
+
+    // A NON-parent-child edge onto epic-a (Blocks) must be IGNORED by the rollup.
+    let mut blocker = issue("ub-blk", "blocker child (wrong edge type)");
+    blocker.status = Status::Closed;
+    blocker.closed_at = Some(ts(2026, 1, 2));
+    storage.create_issue(&blocker, "a").await.unwrap();
+    storage
+        .add_dependency(&dep("ub-blk", "ub-epic-a", DependencyType::Blocks), "a")
+        .await
+        .unwrap();
+
+    // epic-b: 1 tombstone child (counts as closed_or_tombstone) + 1 open child.
+    let mut tomb = issue("ub-d1", "tombstone child");
+    tomb.status = Status::Tombstone;
+    storage.create_issue(&tomb, "a").await.unwrap();
+    storage
+        .add_dependency(&dep("ub-d1", "ub-epic-b", DependencyType::ParentChild), "a")
+        .await
+        .unwrap();
+    let open_child = issue("ub-d2", "open child");
+    storage.create_issue(&open_child, "a").await.unwrap();
+    storage
+        .add_dependency(&dep("ub-d2", "ub-epic-b", DependencyType::ParentChild), "a")
+        .await
+        .unwrap();
+
+    let rollup = storage.epic_child_rollup().await.unwrap();
+
+    // Id-sorted (SQL ORDER BY), template child excluded, wrong-edge-type child ignored.
+    assert_eq!(
+        rollup,
+        vec![
+            ("ub-epic-a".to_string(), (3, 2)), // 3 real children, 2 closed (template + Blocks ignored)
+            ("ub-epic-b".to_string(), (2, 1)), // tombstone counts as closed_or_tombstone
+        ],
+    );
+}
+
+/// An empty store yields an empty rollup (no panics, no git).
+#[tokio::test]
+async fn epic_child_rollup_is_empty_on_empty_store() {
+    let storage = fresh().await;
+    assert!(storage.epic_child_rollup().await.unwrap().is_empty());
+}
+
 // --------------------------------------------------------------------------------------------------
 // helpers
 // --------------------------------------------------------------------------------------------------
