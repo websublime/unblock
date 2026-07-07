@@ -10,30 +10,8 @@
 
 mod common;
 
-use common::Workspace;
+use common::{Workspace, detail, json_report};
 use serde_json::Value;
-
-/// Run a json-mode command in `ws` and parse its stdout as a JSON report (asserts success exit 0).
-fn json_report(ws: &Workspace, args: &[&str]) -> Value {
-    let out = ws.cmd().args(args).output().expect("run command");
-    assert_eq!(
-        out.status.code(),
-        Some(0),
-        "command must succeed; stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let stdout = String::from_utf8(out.stdout).expect("utf8 stdout");
-    serde_json::from_str(stdout.trim()).expect("valid JSON report on stdout")
-}
-
-/// Pull a finding's `detail` by `label` from a `DiagnosticReport`-shaped value.
-fn detail<'a>(report: &'a Value, label: &str) -> Option<&'a str> {
-    report["findings"]
-        .as_array()?
-        .iter()
-        .find(|f| f["label"] == label)
-        .and_then(|f| f["detail"].as_str())
-}
 
 #[test]
 fn migrate_fresh_reports_current_schema_and_is_idempotent() {
