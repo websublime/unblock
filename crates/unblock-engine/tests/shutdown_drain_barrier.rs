@@ -77,7 +77,8 @@ async fn shutdown_parks_while_the_bulk_tx_is_held_then_drains_to_commit() {
 
     // While the barrier holds the tx, `shutdown()`'s permit-drain must NOT return: a bounded timeout
     // proves it PARKS (not a vacuous "it happened to be fast" race).
-    let parked_shutdown = tokio::time::timeout(Duration::from_millis(300), session.shutdown()).await;
+    let parked_shutdown =
+        tokio::time::timeout(Duration::from_millis(300), session.shutdown()).await;
     assert!(
         parked_shutdown.is_err(),
         "shutdown() must PARK while the barrier holds the write permit (D14 drain, spine §4.2) — \
@@ -99,7 +100,11 @@ async fn shutdown_parks_while_the_bulk_tx_is_held_then_drains_to_commit() {
         .await
         .expect("writer task joins")
         .expect("create_bulk commits — a lone shutdown drains-to-commit, never rolls back");
-    assert_eq!(created.len(), N, "the whole batch committed (no partial write)");
+    assert_eq!(
+        created.len(),
+        N,
+        "the whole batch committed (no partial write)"
+    );
 
     // Drop the barrier Session (+ its storage handle) BEFORE the fresh reopen.
     drop(session);

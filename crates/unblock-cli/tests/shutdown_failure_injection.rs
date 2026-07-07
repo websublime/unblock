@@ -232,7 +232,7 @@ async fn c6_second_signal_escalation_never_hangs_and_keeps_a_valid_exit_code() {
     let status = wait_for(&mut client.child, Duration::from_secs(20));
     let code = status.code();
     assert!(
-        matches!(code, Some(143) | Some(130)),
+        matches!(code, Some(143 | 130)),
         "the second signal must not corrupt the recorded exit code — both 143 (TERM) and 130 (INT) \
          are valid 128+signo outcomes of this race, got {code:?}"
     );
@@ -324,7 +324,7 @@ async fn c_neg_reopen_and_check_oracle_channels_can_both_fail() {
 /// (a `StorageError`, e.g. "database disk image is malformed") in addition to an `Ok` non-empty
 /// `Vec<String>` — both are legitimate "the integrity channel detected the problem" outcomes. Used
 /// ONLY by C-neg's integrity-channel leg (see its call site for why `common::reopen_and_check` itself
-/// is not reused here: every OTHER case funnels through it expecting integrity_check to never fail).
+/// is not reused here: every OTHER case funnels through it expecting `integrity_check` to never fail).
 async fn integrity_channel_detects_a_problem(root: &std::path::Path) -> bool {
     let overrides = unblock_config::CliOverrides::new().with_dir(root.join(".unblock"));
     let ctx = unblock_config::open_with_storage_with_cli(&overrides)

@@ -25,7 +25,7 @@ use libsql::{Builder, TransactionBehavior};
 
 /// The number of rows the uncommitted tx inserts. Each row's `description` is large enough (see
 /// [`DESCRIPTION_LEN`]) that the total dirty-page volume exceeds the small `cache_size` set below,
-/// forcing SQLite's cache-spill (ON by default) to write dirty frames to the `-wal` sidecar BEFORE
+/// forcing `SQLite`'s cache-spill (ON by default) to write dirty frames to the `-wal` sidecar BEFORE
 /// commit — so the crash-recovery discard the integration test proves is genuinely non-vacuous (real
 /// frames existed in the WAL at kill time, not just an in-memory page cache).
 const ROWS: usize = 200;
@@ -75,5 +75,5 @@ async fn main() {
 
     // Sleep well past any reasonable parent timeout — the parent SIGKILLs this process while the tx
     // is open. `tx` stays alive (never dropped, never committed) for as long as this process runs.
-    tokio::time::sleep(Duration::from_secs(120)).await;
+    tokio::time::sleep(Duration::from_mins(2)).await;
 }
