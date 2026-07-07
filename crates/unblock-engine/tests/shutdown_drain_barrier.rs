@@ -90,14 +90,17 @@ async fn shutdown_parks_while_the_bulk_tx_is_held_then_drains_to_commit() {
 
     // Negative-timing leg: rely on `shutdown()` IDEMPOTENCY rather than re-polling the timed-out
     // future above (which was already dropped by the `timeout` — cancel-safe, spine §4.2). A FRESH
-    // `shutdown()` call now drains cleanly.
-    session
-        .shutdown()
+    // `shutdown()` call now drains cleanly. Both this drain AND the writer join are bounded by a
+    // generous timeout so a drain-to-commit DEADLOCK regression fails FAST here (with a clear message)
+    // instead of hanging until the CI job-level timeout.
+    tokio::time::timeout(Duration::from_secs(5), session.shutdown())
         .await
+        .expect("a fresh shutdown() must not deadlock after the barrier releases")
         .expect("a fresh shutdown() drains to commit after the barrier releases");
 
-    let created = writer
+    let created = tokio::time::timeout(Duration::from_secs(5), writer)
         .await
+        .expect("the create_bulk writer must not deadlock after the drain")
         .expect("writer task joins")
         .expect("create_bulk commits — a lone shutdown drains-to-commit, never rolls back");
     assert_eq!(
