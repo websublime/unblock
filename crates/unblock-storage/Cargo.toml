@@ -9,6 +9,15 @@ publish = false
 [lints]
 workspace = true
 
+# T3.2/C5 (FR-17/NFR-5) test-only helper binary: drives RAW libsql (the crate's existing private
+# backend dep below — NO new dep) to hold an UNCOMMITTED `BEGIN IMMEDIATE` tx open (source under
+# `tests/bin/`, never `src/` — it never ships via `dist`; the shipped `unblock-storage` lib is
+# unaffected). Located from `tests/shutdown_abandoned_tx.rs` via `env!("CARGO_BIN_EXE_c5_abandoned_tx")`
+# (the same `CARGO_BIN_EXE` idiom `assert_cmd::cargo_bin` uses in the cli suite).
+[[bin]]
+name = "c5_abandoned_tx"
+path = "tests/bin/c5_abandoned_tx.rs"
+
 # L2 — the backend-free `Storage` trait + the only backend-aware impl (libsql).
 # `libsql` and `petgraph` are PRIVATE deps (no backend/graph type in any public signature,
 # spine §6 rule 2). The default build is local file / bundled SQLite only (no TLS, no
