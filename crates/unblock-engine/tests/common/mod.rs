@@ -200,10 +200,15 @@ pub async fn add_blocks(session: &Session, from: &str, on: &str) {
 
 /// A `Storage` decorator that gates a chosen mutation on a [`tokio::sync::Notify`], so a write
 /// driven through the engine **holds the engine's write permit** while parked inside the storage
-/// transaction — the precise condition the FR-10 (read-during-write) and D14 (cancel-safety) tests
-/// need. It delegates **every** call to a real inner `LibsqlStorage` (no behaviour mock): the only
-/// added effect is a controllable pause at the start of the gated mutation, inside the engine's
-/// permit-holding window.
+/// transaction — the precise condition the FR-10 (read-during-write), D14 (cancel-safety), and T3.2/C4
+/// (drain-to-commit barrier) tests need. It delegates **every** call to a real inner `LibsqlStorage`
+/// (no behaviour mock): the only added effect is a controllable pause at the start of the gated
+/// mutation, inside the engine's permit-holding window.
+///
+/// Two independent, mutually-exclusive gates share the same `Notify` pair: the original single
+/// `create_issue` gate ([`new`](ParkedStorage::new), armed by default — every pre-T3.2 caller is
+/// unaffected) and the T3.2 bulk `create_issues` gate
+/// ([`new_gated_bulk`](ParkedStorage::new_gated_bulk), opt-in). Only one is ever armed per instance.
 pub mod parked {
     use super::{Arc, Storage};
     use async_trait::async_trait;
@@ -215,18 +220,25 @@ pub mod parked {
     };
     use unblock_storage::{DeletePlan, IssuePatch, ListFilters, StorageError};
 
-    /// A storage wrapper that parks the next `create_issue` until [`release`](ParkedStorage::release)
-    /// is called, while delegating everything to the inner real storage.
+    /// A storage wrapper that parks the next `create_issue` (or, if built via
+    /// [`new_gated_bulk`](Self::new_gated_bulk), the next `create_issues` bulk tx) until
+    /// [`release`](Self::release) is called, while delegating everything to the inner real storage.
     pub struct ParkedStorage {
         inner: Arc<dyn Storage>,
         gate: Notify,
         /// Set once the parked write has entered (so the test can wait for "the write is mid-tx").
         entered: Notify,
+        /// The single `create_issue` gate (armed by [`new`](Self::new); disarmed otherwise).
         armed: AtomicBool,
+        /// The T3.2/C4 bulk `create_issues` gate (armed ONLY by
+        /// [`new_gated_bulk`](Self::new_gated_bulk) — opt-in, so every existing single-create-gated
+        /// caller is unaffected).
+        bulk_armed: AtomicBool,
     }
 
     impl ParkedStorage {
-        /// Wrap an inner storage; the first `create_issue` parks until released.
+        /// Wrap an inner storage; the first `create_issue` parks until released. The bulk
+        /// `create_issues` gate stays disarmed (a plain delegate).
         #[must_use]
         pub fn new(inner: Arc<dyn Storage>) -> Arc<Self> {
             Arc::new(Self {
@@ -234,6 +246,21 @@ pub mod parked {
                 gate: Notify::new(),
                 entered: Notify::new(),
                 armed: AtomicBool::new(true),
+                bulk_armed: AtomicBool::new(false),
+            })
+        }
+
+        /// Wrap an inner storage; the first `create_issues` BULK tx parks until released (T3.2/C4 —
+        /// the engine drain-to-commit barrier over `Session::create_bulk`). The single `create_issue`
+        /// gate stays disarmed.
+        #[must_use]
+        pub fn new_gated_bulk(inner: Arc<dyn Storage>) -> Arc<Self> {
+            Arc::new(Self {
+                inner,
+                gate: Notify::new(),
+                entered: Notify::new(),
+                armed: AtomicBool::new(false),
+                bulk_armed: AtomicBool::new(true),
             })
         }
 
@@ -261,6 +288,12 @@ pub mod parked {
         }
 
         async fn create_issues(&self, issues: &[Issue], actor: &str) -> Result<(), StorageError> {
+            if self.bulk_armed.swap(false, Ordering::SeqCst) {
+                // T3.2/C4: signal "entered the bulk tx" (the engine's write permit is held across the
+                // whole `create_bulk` body, write.rs:231), then park until the test releases the gate.
+                self.entered.notify_one();
+                self.gate.notified().await;
+            }
             self.inner.create_issues(issues, actor).await
         }
 
