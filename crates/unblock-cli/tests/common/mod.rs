@@ -298,9 +298,10 @@ pub fn send_signal(pid: u32, signal: &str) {
     assert!(status.success(), "kill -s {signal} {pid} failed");
 }
 
-/// Like [`send_signal`], but tolerates an already-dead target (`kill`'s ESRCH "No such process" exit
-/// 1) — used ONLY for the SECOND signal in the escalation case (C6/T3.2): by the time it is sent the
-/// child may already be mid-exit (or exited) from the first signal, and that is not a test failure.
+/// Like [`send_signal`], but tolerates an already-dead target (`kill`'s ESRCH "No such process",
+/// exit code 1) — used ONLY for the SECOND signal in the escalation case (C6/T3.2): by the time it
+/// is sent the child may already be mid-exit (or exited) from the first signal, and that is not a
+/// test failure.
 pub fn send_signal_tolerant(pid: u32, signal: &str) {
     let _ = std::process::Command::new("kill")
         .args(["-s", signal, &pid.to_string()])
@@ -418,9 +419,10 @@ pub async fn reopen_and_check(root: &Path) -> (Vec<String>, usize) {
 /// validation-rejected (non-signal) doc.
 #[must_use]
 pub fn bulk_markdown(n: usize) -> String {
+    use std::fmt::Write as _;
     let mut doc = String::new();
     for k in 1..=n {
-        doc.push_str(&format!("## bulk-item-{k}\n"));
+        let _ = writeln!(doc, "## bulk-item-{k}");
     }
     doc
 }
