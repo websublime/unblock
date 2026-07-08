@@ -1305,7 +1305,8 @@ impl Session {
     pub async fn integrity_check(&self) -> Result<Vec<String>, EngineError>; // D27/AF-1 (T3.1) — FR-16 doctor-lite input
     //   Surfaces the existing `Storage::integrity_check` (`PRAGMA integrity_check`): a healthy DB returns an empty
     //   `Vec`; any strings are integrity problems. The ONE corruption signal reachable at T3.1 (the full
-    //   Healthy/Drifted/Recoverable/Unsafe taxonomy + `--repair` land ADDITIVELY over `doctor()` at T3.3). A read:
+    //   Healthy/Drifted/Recoverable/Unsafe taxonomy + `--repair` land ADDITIVELY over `doctor()`/`recover()` at
+    //   v1.1; `doctor()` itself is wired lite at T3.3 — D29). A read:
     //   never acquires the write permit (FR-10). BUILD-now, like `diagnostics`. The cli `doctor` command composes
     //   this + `diagnostics(Stats|Lint|Info)` into a doctor-lite report; a non-empty result maps to
     //   ErrorCode::DatabaseError (exit 2) at the cli boundary (spine §2.3 exit table unchanged).
@@ -1421,14 +1422,18 @@ impl Session {
     //   — D26/OQ-1) — it is DISTINCT from `doctor()`/`recover()`
     //   here (the T3.3 health seam, FeatureNotWired{"health"} until then). The mcp diagnostics tool does NOT
     //   route through doctor/recover.
-    // CLI DOCTOR-LITE (D27/AF-1, T3.1 — reconciled spine-first): the cli `doctor` command does NOT call
-    //   `doctor()`/`recover()` at T3.1 (they are the T3.3 FeatureNotWired{"health"} seam). It composes a doctor-LITE
-    //   report from the BUILD-now reads `diagnostics(Stats|Lint|Info)` + the new `integrity_check()` read above
-    //   (integrity is the ONE corruption signal reachable at T3.1). The FULL Healthy/Drifted/Recoverable/Unsafe
-    //   taxonomy + `--repair` + `.unblock/.recovery/` evidence land ADDITIVELY over the wired `doctor()`/`recover()`
-    //   at T3.3. (Earlier prose said "cli doctor goes through doctor()/recover()" — superseded by this note.)
-    pub async fn doctor(&self) -> Result<DiagnosticReport, EngineError>;  // FR-15/FR-16. v1 = SIGNATURE only; body seamed to unblock-health (T3.3) — returns EngineError::FeatureNotWired{feature:"health"} until then (the integrity DiagnosticKind variant + DoctorReport→DiagnosticReport mapping are designed at T3.3; the landed DiagnosticKind has no integrity variant). NOT called by the cli doctor-lite at T3.1 (see the note above).
-    pub async fn recover(&self) -> Result<DiagnosticReport, EngineError>; // attempt repair (WAL checkpoint, reindex; reports actions taken). v1 = SIGNATURE only; body seamed to unblock-health (T3.3) — returns EngineError::FeatureNotWired{feature:"health"} until then (the rich repair + evidence dir are T3.3)
+    // CLI DOCTOR (D27/AF-1 @ T3.1 → refined by D29 @ T3.3, reconciled spine-first): at **T3.1** the cli
+    //   `doctor` command does NOT call `doctor()`/`recover()` (they are the FeatureNotWired{"health"} seam then);
+    //   it composes a doctor-LITE report from the BUILD-now reads `diagnostics(Stats|Lint|Info)` + the
+    //   `integrity_check()` read above (integrity is the ONE corruption signal reachable at T3.1). At **T3.3
+    //   (HEALTH-LITE, D29)** `doctor()` IS wired (the lite aggregation below) and the cli `doctor` ROUTES THROUGH
+    //   the wired `doctor()` — surfacing file-state anomalies too — while PRESERVING the D27/AF-1
+    //   exit-2-on-corruption derivation (non-empty integrity → ErrorCode::DatabaseError). The FULL
+    //   Healthy/Drifted/Recoverable/Unsafe taxonomy + `--repair` + `.unblock/.recovery/` evidence land ADDITIVELY
+    //   over the `doctor()`/`recover()` seam at **v1.1**; `recover()` stays FeatureNotWired through v1. (Earlier
+    //   prose put the cli→doctor() routing at T3.1 — that is the T3.3 refinement, not a T3.1 fact.)
+    pub async fn doctor(&self) -> Result<DiagnosticReport, EngineError>;  // FR-15/FR-16. v1 pre-T3.3 = SIGNATURE only (returns EngineError::FeatureNotWired{feature:"health"}); **T3.3 (HEALTH-LITE, D29) wires the LITE aggregation** — integrity_check rows + pure file-state classification via unblock-health `run_doctor` → DoctorReport, mapped onto DiagnosticReport REUSING DiagnosticKind::Info (NO new model variant, NO §1.10/CONTRACT_HASH change — F2). The cli doctor routes through this from T3.3 (see the note above).
+    pub async fn recover(&self) -> Result<DiagnosticReport, EngineError>; // attempt repair (WAL checkpoint, reindex; reports actions taken). STAYS EngineError::FeatureNotWired{feature:"health"} through v1 (F1/D29) — its body (`--repair` + the `.unblock/.recovery/` evidence writer + the rich repair taxonomy) is **v1.1**, NOT T3.3; wiring a hollow "nothing repaired" report would be the faked success FeatureNotWired forbids.
     pub async fn shutdown(&self) -> Result<(), EngineError>; // flush + close libsql cleanly (FR-17)
 }
 
@@ -1810,7 +1815,7 @@ pub struct UpdateArgs { /* --check, --version <tag>, --yes */ }
 
 **migrate (D27/AF-2).** Opens the context (the facade already migrates on open), opens the `Session`, calls the NEW `Session::migrate() -> MigrateOutcome` (§4.1) under the write permit, builds a CLI-local `MigrateReport { database, schema_from, schema_to, applied }`, maps it onto a `DiagnosticReport { kind: Info, findings }` and emits via `Renderer::diagnostics`. Exit 0 on success; a newer-than-build DB → transparent `SchemaMismatch` → exit 2. Idempotent (`applied` normally `false` post-open).
 
-**doctor (D27/AF-1 — doctor-LITE).** Opens the `Session` and composes `diagnostics(Stats|Lint|Info)` + the NEW `Session::integrity_check()` read (§4.1) into a CLI-local `DoctorReport`, mapped onto a `DiagnosticReport { kind: Info, findings }`. It does NOT call `Session::doctor()`/`recover()` (the T3.3 health seam). **Non-zero exit only on detected corruption:** a non-empty `integrity_check` → `ErrorCode::DatabaseError` (exit 2; §2.3 unchanged, no new code); Lint/orphan findings are advisory (no exit flip); else exit 0. `--repair` + the full taxonomy land at T3.3.
+**doctor (D27/AF-1 — doctor-LITE).** Opens the `Session` and composes `diagnostics(Stats|Lint|Info)` + the NEW `Session::integrity_check()` read (§4.1) into a CLI-local `DoctorReport`, mapped onto a `DiagnosticReport { kind: Info, findings }`. At T3.1 it does NOT call `Session::doctor()`/`recover()` (the `health` seam); at **T3.3 (HEALTH-LITE, D29/F4)** it ROUTES through the now-wired `Session::doctor()` (adding file-state anomalies). **Non-zero exit only on detected corruption:** a non-empty `integrity_check` → `ErrorCode::DatabaseError` (exit 2; §2.3 unchanged, no new code); Lint/orphan findings are advisory (no exit flip); else exit 0. `--repair` + the full taxonomy land at **v1.1**.
 
 **version (D27/AD-5).** Runs with NO workspace. Emits `VersionReport { version, build, commit: Option<_>, rustc: Option<_>, target: Option<_>, features }` from `build.rs`-emitted `option_env!("UNBLOCK_BUILD_*")` (absent = `None`) — NO git invocation / git crate / network / GitHub update-check (NFR-6/D13; the update-check lives only in `unblock update`). Rendered via the same to-`DiagnosticReport` path (kind `Version`).
 
