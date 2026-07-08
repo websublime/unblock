@@ -14,12 +14,12 @@ lifecycle/ops only. Pre-1.0, no external users — breaking changes welcome, no 
 
 | Doc | Role |
 |---|---|
-| `docs/PRD.md` | Product truth — decisions (§4 D1..D27), FR/NFR, domain model, milestones. **APPROVED v1.1.** |
+| `docs/PRD.md` | Product truth — decisions (§4 D1..D28), FR/NFR, domain model, milestones. **APPROVED v1.1.** |
 | `docs/plans/01-design-spine.md` | **Authoritative interface contract** (types, `Storage` trait, `Session` API, MCP schemas, errors). |
 | `docs/plans/implementation-plan.md` | Task DAG M0–M3 (T-ids) + acceptance criteria. |
 | `docs/plans/STATUS.md` | **Live task registry** — what's done / in-progress / to-do (the system of record). |
 | `docs/plans/crates/unblock-*.md` | Per-file plan for each crate. |
-| `docs/plans/00-roadmap.md` | v1/v1.1 LOCKED; v1.2/v1.3/v2+ PROPOSED. |
+| `docs/plans/00-roadmap.md` | v1/v1.1 LOCKED; v1.2–v1.5/v2+ PROPOSED. |
 | `docs/plans/ci-cd-and-distribution.md` | CI gates + `dist` release + the doc-lint. |
 
 **Rule:** the spine is the **reference** on interface disagreements — but a plan↔spine drift is reconciled **with
