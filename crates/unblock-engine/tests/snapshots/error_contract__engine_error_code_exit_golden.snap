@@ -1,6 +1,5 @@
 ---
 source: crates/unblock-engine/tests/error_contract.rs
-assertion_line: 109
 expression: contract_rows()
 ---
 [
@@ -86,6 +85,12 @@ expression: contract_rows()
     "Sync::ImportCollision",
     "IMPORT_COLLISION",
     6,
+    false
+  ],
+  [
+    "Health::IntegrityCheckFailed",
+    "DATABASE_ERROR",
+    2,
     false
   ]
 ]
