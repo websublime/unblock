@@ -26,9 +26,9 @@
 //!
 //! `export_jsonl`/`import_jsonl`/`import_bd` (the `sync` seam) are WIRED to `unblock-sync` at
 //! T2.4/T2.5 (default-on `sync` feature; `FeatureNotWired` only under `--no-default-features`).
-//! `doctor`/`recover` (the `health` seam, T3.3) still return [`EngineError::FeatureNotWired`] until
-//! their body lands. All were introduced with their v1 **signatures**; bodies land additively (no v1
-//! signature change).
+//! `doctor()` (the `health` seam) is wired to `unblock-health` at T3.3 (HEALTH-LITE, D29); `recover()`
+//! still returns [`EngineError::FeatureNotWired`] through v1 (its `--repair`/evidence body is v1.1). All
+//! were introduced with their v1 **signatures**; bodies land additively (no v1 signature change).
 //!
 //! # Example — a happy-path round-trip against a temp workspace
 //!
