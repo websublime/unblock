@@ -1,12 +1,14 @@
 //! CLI-local lifecycle report structs + the to-`DiagnosticReport` adapter + the render/emit path
 //! (D27/AD-2) and the format resolver for the no-workspace path (D27/AD-3, SF-1).
 //!
-//! The four report structs (`VersionReport`/`MigrateReport`/`DoctorReport`/`InitReport`) are
+//! The three report structs (`VersionReport`/`MigrateReport`/`InitReport`) are
 //! CLI-PRIVATE (deriving `serde::Serialize`; NOT spine §1.10 contract types — §6.1 binds only
 //! re-exported §1.10 DTOs; the T2.1 render private-type precedent). Each maps onto a
 //! `DiagnosticReport { kind, findings }` via [`ToDiagnosticReport`] and is rendered by
 //! `Renderer::diagnostics` — the ONE live lifecycle-render path, all five formats, FR-11 uniform
-//! (NOT a generic `render<T>`; the `Renderer` trait has no such method).
+//! (NOT a generic `render<T>`; the `Renderer` trait has no such method). *(The `doctor` command has NO
+//! cli-local report at T3.3: it renders the wired `Session::doctor()` `DiagnosticReport` directly —
+//! D29/F4.)*
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -51,21 +53,6 @@ pub struct MigrateReport {
     pub schema_to: i64,
     /// Whether the migrate advanced the schema (`schema_from != schema_to`).
     pub applied: bool,
-}
-
-/// `unblock doctor` doctor-lite report (D27/AF-1): integrity + the folded diagnostics findings.
-#[derive(Debug, Clone, Serialize)]
-pub struct DoctorReport {
-    /// Whether `PRAGMA integrity_check` reported no problems.
-    pub integrity_ok: bool,
-    /// The raw integrity problem rows (empty when `integrity_ok`).
-    pub integrity_problems: Vec<String>,
-    /// The `Stats` diagnostics findings (label/detail).
-    pub stats: Vec<(String, String)>,
-    /// The `Lint` diagnostics findings (advisory).
-    pub lint: Vec<(String, String)>,
-    /// The `Info` diagnostics findings.
-    pub info: Vec<(String, String)>,
 }
 
 /// `unblock init` report — what was scaffolded (AF-3).
@@ -136,33 +123,6 @@ impl ToDiagnosticReport for MigrateReport {
     }
 }
 
-impl ToDiagnosticReport for DoctorReport {
-    fn to_report(&self) -> DiagnosticReport {
-        let mut findings = vec![finding(
-            "integrity",
-            if self.integrity_ok { "ok" } else { "problems" },
-        )];
-        // Integrity problems first (the corruption signal), then the advisory sections in a stable
-        // order (Stats, Lint, Info) — deterministic finding order (NFR-14).
-        for problem in &self.integrity_problems {
-            findings.push(finding("integrity_problem", problem.clone()));
-        }
-        for (label, detail) in &self.stats {
-            findings.push(finding(format!("stats.{label}"), detail.clone()));
-        }
-        for (label, detail) in &self.lint {
-            findings.push(finding(format!("lint.{label}"), detail.clone()));
-        }
-        for (label, detail) in &self.info {
-            findings.push(finding(format!("info.{label}"), detail.clone()));
-        }
-        DiagnosticReport {
-            kind: DiagnosticKind::Info,
-            findings,
-        }
-    }
-}
-
 impl ToDiagnosticReport for InitReport {
     fn to_report(&self) -> DiagnosticReport {
         DiagnosticReport {
@@ -220,9 +180,7 @@ pub fn diag(message: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        DoctorReport, InitReport, MigrateReport, ToDiagnosticReport, VersionReport, pick_cli_format,
-    };
+    use super::{InitReport, MigrateReport, ToDiagnosticReport, VersionReport, pick_cli_format};
     use crate::cli::GlobalArgs;
     use unblock_engine::DiagnosticKind;
     use unblock_render::OutputFormat;
@@ -267,27 +225,6 @@ mod tests {
             .find(|f| f.label == "applied")
             .expect("applied finding");
         assert_eq!(applied.detail, "false");
-    }
-
-    #[test]
-    fn doctor_report_integrity_first_then_sections() {
-        let report = DoctorReport {
-            integrity_ok: false,
-            integrity_problems: vec!["corrupt page 3".to_string()],
-            stats: vec![("issues".to_string(), "0".to_string())],
-            lint: vec![("stale".to_string(), "none".to_string())],
-            info: vec![("actor".to_string(), "alice".to_string())],
-        }
-        .to_report();
-        assert_eq!(report.kind, DiagnosticKind::Info);
-        assert_eq!(report.findings[0].label, "integrity");
-        assert_eq!(report.findings[0].detail, "problems");
-        assert_eq!(report.findings[1].label, "integrity_problem");
-        // Sections are prefixed + ordered stats → lint → info.
-        let labels: Vec<&str> = report.findings.iter().map(|f| f.label.as_str()).collect();
-        assert!(labels.iter().any(|l| l.starts_with("stats.")));
-        assert!(labels.iter().any(|l| l.starts_with("lint.")));
-        assert!(labels.iter().any(|l| l.starts_with("info.")));
     }
 
     #[test]
