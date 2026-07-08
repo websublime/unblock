@@ -5,8 +5,9 @@
 //! `unblock-model`** (spine §1.10, CF-B) and re-exported (never redefined here) so `unblock-render`
 //! (model + error only) can format them. The seven landed kinds — `Stats|Info|Where|Version|Lint|
 //! Changelog|Orphans` — are the caller-supplied **input** (this is the BUILD-now read path; contrast
-//! `doctor`/`recover`, whose integrity `DiagnosticKind` is unconstructible in v1 and is therefore
-//! seamed to `health`/T3.3).
+//! `doctor()`/`recover()`, the `health` seam: `doctor()` is wired at T3.3/HEALTH-LITE and REUSES the
+//! existing `DiagnosticKind::Info` for its lite report — no new variant, D29/F2 — while `recover()`
+//! stays `FeatureNotWired` for its v1.1 repair body).
 //!
 //! Every derivation is **pure-DB** (counts, `epic_child_rollup`, `closed_since`, `orphan_candidates`,
 //! `list`/`ready`/`blocked` reads) — it **never** shells to git or touches the network (FR-15 /

@@ -139,7 +139,8 @@ impl Session {
     /// Build the [`DiagnosticReport`] for `kind` (FR-15) — pure-DB, no git (NFR-6).
     ///
     /// The returned report's `kind` is the caller-supplied input (one of the seven constructible
-    /// variants); this is the BUILD-now read path (contrast `doctor`/`recover`, seamed to T3.3).
+    /// variants); this is the BUILD-now read path (contrast `doctor()`/`recover()`, the `health` seam —
+    /// `doctor()` wired at T3.3/HEALTH-LITE, `recover()` at v1.1).
     ///
     /// `since` is the **changelog window** (D26/OQ-1): a bare method argument whose default lives
     /// only on the MCP wire (`DiagnosticsInput::Changelog{since}`), the D19 `detect_cycles(blocking_only)`
@@ -168,11 +169,13 @@ impl Session {
     ///
     /// Surfaces the existing [`Storage::integrity_check`](unblock_storage::Storage::integrity_check):
     /// a healthy database returns an empty `Vec`; any returned strings are integrity problems. This is
-    /// the ONE corruption signal reachable at T3.1 — the full Healthy/Drifted/Recoverable/Unsafe
-    /// taxonomy + `--repair` land additively over [`Session::doctor`](Session::doctor) at T3.3. A pure
-    /// read: it **never** acquires the write permit (FR-10). The cli `doctor` command composes it with
-    /// `diagnostics(Stats|Lint|Info)` into a doctor-lite report; a non-empty result maps to
-    /// `ErrorCode::DatabaseError` (exit 2) at the cli boundary.
+    /// the ONE corruption signal reachable at T3.1. At **T3.3 (HEALTH-LITE, D29)**
+    /// [`Session::doctor`](Session::doctor) is wired (integrity + file-state) and the cli `doctor` routes
+    /// through it; the full Healthy/Drifted/Recoverable/Unsafe taxonomy + `--repair` land additively at
+    /// **v1.1** over the wired `doctor()`/`recover()` seam. A pure read: it **never** acquires the write
+    /// permit (FR-10). At T3.1 the cli `doctor` command composes it with `diagnostics(Stats|Lint|Info)`
+    /// into a doctor-lite report; a non-empty result maps to `ErrorCode::DatabaseError` (exit 2) at the
+    /// cli boundary.
     ///
     /// # Errors
     /// Forwards any storage failure as the transparent `EngineError` source.

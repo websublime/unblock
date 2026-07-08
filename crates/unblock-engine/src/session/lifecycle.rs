@@ -149,17 +149,19 @@ impl Session {
 
     /// Run health/integrity diagnostics (FR-15/FR-16).
     ///
-    /// **v1 = SIGNATURE only; body seamed to `unblock-health` (T3.3).** Returns
-    /// [`EngineError::FeatureNotWired`] (`feature: "health"`) and writes nothing. The integrity report
-    /// needs a `DiagnosticKind` representing integrity/doctor, but the landed `DiagnosticKind` has no
-    /// such constructible variant (only `Stats|Info|Where|Version|Lint|Changelog|Orphans`); the
-    /// integrity variant + the `DoctorReport`→`DiagnosticReport` mapping are a **T3.3** design item
-    /// (OQ-2). No model change at T1.2.
+    /// **Pre-T3.3 = SIGNATURE only; body seamed to `unblock-health`.** Returns
+    /// [`EngineError::FeatureNotWired`] (`feature: "health"`) and writes nothing until wired.
+    /// **T3.3 (HEALTH-LITE, D29) wires the lite body**: it composes `integrity_check()` rows + the pure
+    /// file-state classification from `unblock-health` (`run_doctor`) into a `DoctorReport`, then maps it
+    /// onto a [`DiagnosticReport`] **reusing the existing `DiagnosticKind::Info`** (F2 — NO new model
+    /// variant, no spine §1.10 / `CONTRACT_HASH` change; the landed `DiagnosticKind` set —
+    /// `Stats|Info|Where|Version|Lint|Changelog|Orphans` — is unchanged). The cli `doctor` command routes
+    /// through this wired `doctor()` from T3.3 (F4). The full 4-state taxonomy + `--repair` are **v1.1**.
     ///
     /// # Errors
     ///
-    /// - [`EngineError::FeatureNotWired`] (`feature: "health"`) in v1 (the health seam is unwired
-    ///   until T3.3).
+    /// - [`EngineError::FeatureNotWired`] (`feature: "health"`) until the T3.3 wiring lands; thereafter
+    ///   the transparent `Health { source: HealthError }` variant on a health failure.
     #[allow(clippy::unused_async)] // async in the spine §4.1 signature; the T3.3 body awaits health.
     pub async fn doctor(&self) -> Result<DiagnosticReport> {
         Err(EngineError::FeatureNotWired { feature: "health" })
@@ -167,17 +169,18 @@ impl Session {
 
     /// Attempt workspace repair (WAL checkpoint, reindex; reports actions taken) — FR-16.
     ///
-    /// **v1 = SIGNATURE only; body seamed to `unblock-health` (T3.3).** Returns
-    /// [`EngineError::FeatureNotWired`] (`feature: "health"`) and writes nothing. Returns
-    /// [`DiagnosticReport`] (spine §4.1, NOT a bespoke `RecoveryReport`); the rich repair taxonomy +
-    /// `.unblock/.recovery/` evidence dir land additively at T3.3 over this unchanged signature
-    /// (OQ-2).
+    /// **STAYS SIGNATURE only through v1 (F1/D29).** Returns [`EngineError::FeatureNotWired`]
+    /// (`feature: "health"`) and writes nothing. Returns [`DiagnosticReport`] (spine §4.1, NOT a bespoke
+    /// `RecoveryReport`); its body — `--repair` (WAL checkpoint/reindex) + the `.unblock/.recovery/`
+    /// evidence writer + the rich repair taxonomy — is a **v1.1** deliverable, NOT T3.3. T3.3 wires only
+    /// `doctor()` (the read-only lite report); wiring `recover()` to a hollow "nothing repaired" report
+    /// would be the faked success `FeatureNotWired` forbids.
     ///
     /// # Errors
     ///
-    /// - [`EngineError::FeatureNotWired`] (`feature: "health"`) in v1 (the health seam is unwired
-    ///   until T3.3).
-    #[allow(clippy::unused_async)] // async in the spine §4.1 signature; the T3.3 body awaits health.
+    /// - [`EngineError::FeatureNotWired`] (`feature: "health"`) through v1 (the recover seam is unwired
+    ///   until v1.1).
+    #[allow(clippy::unused_async)] // async in the spine §4.1 signature; the v1.1 body awaits health repair.
     pub async fn recover(&self) -> Result<DiagnosticReport> {
         Err(EngineError::FeatureNotWired { feature: "health" })
     }

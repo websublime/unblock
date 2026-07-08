@@ -32,8 +32,10 @@
 //! `Sync { source: SyncError }` landed at **T2.4** (cfg-gated behind the default-on `sync` feature,
 //! forwarding `source.code()`/`hint()`/`context()`); `FeatureNotWired` (`"sync"`) is now removed for
 //! `export_jsonl`/`import_jsonl` **and `import_bd`** (all wired at T2.4/T2.5), kept only under
-//! `--no-default-features`. `Health { source: HealthError }` lands the same way at **T3.3**. No
-//! backend type ever leaks (spine §6 rule 2).
+//! `--no-default-features`. `Health { source: HealthError }` lands the same way at **T3.3** —
+//! `doctor()` is wired (HEALTH-LITE, D29), so a health failure surfaces transparently, while
+//! `recover()` STAYS `FeatureNotWired { feature: "health" }` (its `--repair`/evidence body is **v1.1**).
+//! No backend type ever leaks (spine §6 rule 2).
 
 use snafu::Snafu;
 use unblock_error::{CodedError, ErrorCode, ModelError};
@@ -103,8 +105,10 @@ pub enum EngineError {
     ///
     /// `feature` is `"sync"` (the `export_jsonl`/`import_jsonl`/`import_bd` bodies, wired at T2.4/T2.5
     /// — this variant is now reached ONLY under `--no-default-features`) or `"health"` (the
-    /// `doctor`/`recover` seam, T3.3). It is **never** a faked success and **never** inline L3 logic.
-    /// Maps to [`ErrorCode::InternalError`] (exit 1) until/unless the dep crate is compiled in.
+    /// `doctor()`/`recover()` seam: `doctor()` is wired at T3.3/HEALTH-LITE (D29), so post-T3.3 this
+    /// reaches `"health"` only via `recover()`, whose `--repair`/evidence body is v1.1). It is **never**
+    /// a faked success and **never** inline L3 logic. Maps to [`ErrorCode::InternalError`] (exit 1)
+    /// until/unless the dep crate is compiled in.
     #[snafu(display("feature not wired: {feature}"))]
     FeatureNotWired {
         /// The not-yet-wired feature: `"sync"` or `"health"`.
