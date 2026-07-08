@@ -24,7 +24,7 @@
 //! - **Errors** — [`PolicyError`] (a v1 `Internal`-only forward-compat seam implementing
 //!   `unblock_error::CodedError`).
 //!
-//! The scheduler/coordination/gate/saved-query/cache contracts are v1.1/v1.3 and are **not** part
+//! The scheduler/coordination/gate/saved-query/cache contracts are v1.1/v1.4 and are **not** part
 //! of this v1 surface (see `docs/plans/crates/unblock-policy.md`).
 //!
 //! # Example

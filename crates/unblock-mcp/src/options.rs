@@ -57,7 +57,7 @@ pub struct Quotas {
     pub max_array_len: usize,
     /// Maximum length of any input string (default 64 KiB).
     pub max_string_len: usize,
-    /// Maximum batch size (default 100). *(v1.3 batch surface; the limit lands now.)*
+    /// Maximum batch size (default 100). *(v1.4 batch surface; the limit lands now.)*
     pub max_batch: usize,
     /// Maximum number of concurrent in-flight requests (default 64).
     pub max_concurrent_requests: usize,

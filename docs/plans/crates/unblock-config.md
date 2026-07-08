@@ -150,7 +150,7 @@ These **land with the full layered resolver at T1.3** (they were deferred from t
 - `RemoteConfig` (feature `remote`): endpoint URL, sync interval (startup-only keys).
 - `CredentialSource` — resolves libsql auth tokens from `UNBLOCK_*` env **or** OS keychain **only**, never `config.toml` (NFR-18 hard rule, enforced by a deny-test).
 
-> The crate does **not** participate in v1.3 (roadmap §7 crate-impact matrix shows no `unblock-config` cell for v1.3).
+> The crate does **not** participate in v1.4 (roadmap §9 crate-impact matrix shows no `unblock-config` cell for v1.4).
 
 ---
 
