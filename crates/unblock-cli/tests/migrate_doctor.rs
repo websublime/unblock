@@ -169,6 +169,47 @@ fn doctor_healthy_routes_through_session_doctor_and_exits_0() {
 }
 
 #[test]
+fn doctor_with_advisory_jsonl_conflict_renders_the_anomaly_yet_exits_0() {
+    // SF3 — the headline F4 boundary: an ADVISORY file-state anomaly (a merge conflict left in the
+    // JSONL export → health=unsafe) with CLEAN integrity is RENDERED in the report AND exits 0.
+    // Advisory findings NEVER flip the exit; exit 2 is corruption-only (D27/AF-1, D29/F4).
+    let ws = Workspace::init();
+    // The engine inspects `<.unblock>/issues.jsonl` (config's default jsonl path). `init` seeds no
+    // jsonl (AF-3), so materialize one carrying git conflict markers.
+    let jsonl = ws.unblock_dir().join("issues.jsonl");
+    std::fs::write(
+        &jsonl,
+        "<<<<<<< HEAD\n{\"id\":\"ub-1\"}\n=======\n{\"id\":\"ub-2\"}\n>>>>>>> branch\n",
+    )
+    .expect("write a conflicted jsonl export");
+
+    // `json_report` asserts exit 0 — so a passing call already proves the advisory anomaly did NOT
+    // flip the exit despite health=unsafe.
+    let report = json_report(&ws, &["doctor", "--output", "json"]);
+    assert_eq!(report["kind"], "info");
+    assert_eq!(
+        detail(&report, "integrity"),
+        Some("ok"),
+        "integrity is clean — only the JSONL is conflicted"
+    );
+    assert_eq!(
+        detail(&report, "health"),
+        Some("unsafe"),
+        "a JSONL merge conflict is Unsafe (advisory), yet the exit stays 0; report: {report}"
+    );
+    assert_eq!(
+        detail(&report, "jsonl_conflict_markers"),
+        Some("JSONL contains merge conflict markers"),
+        "the advisory anomaly must be surfaced as a rendered finding row"
+    );
+}
+
+// SF4/SF5 (v1.1 follow-up): an e2e fixture driving a readable-but-integrity-DIRTY libsql DB to exit 2
+// (and `Session::doctor()` over genuinely corrupt integrity rows) is impractical to synthesize
+// reliably; `doctor_exit(&[String])` non-empty→exit-2 is unit + mutation-proven in `commands/doctor.rs`
+// and the corrupt-DB error path is covered by `doctor_on_a_corrupt_db_exits_2` below (see the health
+// crate plan's "deferred should-fixes" note).
+#[test]
 fn doctor_on_a_corrupt_db_exits_2() {
     // Corrupt the DB deterministically (overwrite a large b-tree region past the header page) so the
     // read fails as a malformed-image DatabaseError → exit 2 (the db bucket). This proves `doctor`
