@@ -39,7 +39,9 @@ const LOCK_FILE_NAME: &str = ".unblock.lock";
 ///
 /// Each carries a stable string [`code`](Self::code), a [`severity`](Self::severity), and a
 /// human [`Display`](Self::fmt); the classifier pushes them in a **fixed deterministic order**
-/// (variant-declaration order) so snapshots stay stable (NFR-14).
+/// (variant-declaration order) so snapshots stay stable (NFR-14). The declaration order is the
+/// **faithful beads push/render order** (`temp/beads_rust-main/src/health.rs`): `JsonlConflictMarkers`
+/// sits at **position 5**, BEFORE `JournalSidecarPresent` and `OrphanedLockFile`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum FileAnomaly {
@@ -57,12 +59,12 @@ pub enum FileAnomaly {
     /// The `-wal` sidecar is non-empty but smaller than its 32-byte header (a truncated/crashed WAL;
     /// an empty 0-byte WAL is a valid live/checkpointed state and is not flagged).
     TruncatedWal,
+    /// The JSONL export contains git merge-conflict markers.
+    JsonlConflictMarkers,
     /// A rollback `-journal` sidecar is present (an incomplete transaction).
     JournalSidecarPresent,
     /// An orphaned, stale `.unblock.lock` file is present.
     OrphanedLockFile,
-    /// The JSONL export contains git merge-conflict markers.
-    JsonlConflictMarkers,
 }
 
 impl FileAnomaly {
@@ -74,9 +76,9 @@ impl FileAnomaly {
             Self::DatabaseNotSqlite => "database_not_sqlite",
             Self::SidecarMismatch { .. } => "sidecar_mismatch",
             Self::TruncatedWal => "truncated_wal",
+            Self::JsonlConflictMarkers => "jsonl_conflict_markers",
             Self::JournalSidecarPresent => "journal_sidecar_present",
             Self::OrphanedLockFile => "orphaned_lock_file",
-            Self::JsonlConflictMarkers => "jsonl_conflict_markers",
         }
     }
 
@@ -107,11 +109,11 @@ impl fmt::Display for FileAnomaly {
                 write!(f, "sidecar mismatch (WAL={has_wal}, SHM={has_shm})")
             }
             Self::TruncatedWal => f.write_str("truncated WAL sidecar (<32 bytes)"),
+            Self::JsonlConflictMarkers => f.write_str("JSONL contains merge conflict markers"),
             Self::JournalSidecarPresent => {
                 f.write_str("journal sidecar present (incomplete transaction)")
             }
             Self::OrphanedLockFile => f.write_str("orphaned lock file (.unblock.lock) present"),
-            Self::JsonlConflictMarkers => f.write_str("JSONL contains merge conflict markers"),
         }
     }
 }
@@ -130,11 +132,11 @@ impl fmt::Display for FileAnomaly {
 ///   normal for libsql).
 /// - [`TruncatedWal`](FileAnomaly::TruncatedWal): `has_wal` and the `-wal` file is non-empty but
 ///   `< 32` bytes (an empty 0-byte WAL is valid — see [`wal_is_truncated`]).
+/// - [`JsonlConflictMarkers`](FileAnomaly::JsonlConflictMarkers): the jsonl is a file and contains a
+///   git conflict marker (see [`jsonl_has_conflict_markers`]).
 /// - [`JournalSidecarPresent`](FileAnomaly::JournalSidecarPresent): a `-journal` sidecar exists.
 /// - [`OrphanedLockFile`](FileAnomaly::OrphanedLockFile): a `.unblock.lock` exists next to the db and
 ///   is stale (see [`is_orphaned_lock_file`]).
-/// - [`JsonlConflictMarkers`](FileAnomaly::JsonlConflictMarkers): the jsonl is a file and contains a
-///   git conflict marker (see [`jsonl_has_conflict_markers`]).
 #[must_use]
 pub fn classify_file_state(db: &Path, jsonl: Option<&Path>) -> Vec<FileAnomaly> {
     let mut anomalies = Vec::new();
@@ -166,6 +168,12 @@ pub fn classify_file_state(db: &Path, jsonl: Option<&Path>) -> Vec<FileAnomaly> 
         anomalies.push(FileAnomaly::TruncatedWal);
     }
 
+    // JsonlConflictMarkers: unresolved merge markers in the JSONL export. Pushed at position 5 —
+    // BEFORE journal + orphaned-lock — to preserve the faithful beads push/render order (NFR-14).
+    if jsonl.is_some_and(|p| p.is_file() && jsonl_has_conflict_markers(p)) {
+        anomalies.push(FileAnomaly::JsonlConflictMarkers);
+    }
+
     // JournalSidecarPresent: a rollback `-journal` (an incomplete transaction).
     if paths::sidecar(db, JOURNAL_SUFFIX).is_file() {
         anomalies.push(FileAnomaly::JournalSidecarPresent);
@@ -175,11 +183,6 @@ pub fn classify_file_state(db: &Path, jsonl: Option<&Path>) -> Vec<FileAnomaly> 
     let lock_path = lock_file_path(db);
     if lock_path.is_file() && is_orphaned_lock_file(&lock_path, SystemTime::now()) {
         anomalies.push(FileAnomaly::OrphanedLockFile);
-    }
-
-    // JsonlConflictMarkers: unresolved merge markers in the JSONL export.
-    if jsonl.is_some_and(|p| p.is_file() && jsonl_has_conflict_markers(p)) {
-        anomalies.push(FileAnomaly::JsonlConflictMarkers);
     }
 
     anomalies
