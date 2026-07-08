@@ -226,6 +226,109 @@ fn case_combined_anomalies_keep_deterministic_order_and_worst_is_max() {
     assert_eq!(worst, HealthLevel::Unsafe);
 }
 
+#[test]
+fn case_truncated_wal_boundary_values() {
+    // SF1 — boundary-value analysis around the 32-byte WAL-header threshold and the ratified D29
+    // lower bound: a non-empty `-wal` of 1..=31 bytes IS truncated; 0 bytes (a valid live/checkpointed
+    // WAL) and >= 32 bytes are NOT. Guards the off-by-one on the deviating `(1..MIN_WAL_LEN)` line.
+    for (len, fires) in [(0_usize, false), (1, true), (31, true), (32, false)] {
+        let fx = Fixture::new();
+        fx.write_valid_db();
+        fx.write_clean_jsonl();
+        std::fs::write(sidecar(&fx.db, "-wal"), vec![0_u8; len]).unwrap();
+        // A `-shm` alongside the `-wal` keeps SidecarMismatch (shm-without-wal) quiet for the 0-byte
+        // case, so `truncated_wal` is the sole variable under test.
+        std::fs::write(sidecar(&fx.db, "-shm"), [0_u8; 64]).unwrap();
+        assert_eq!(
+            has_code(&fx.classify(), "truncated_wal"),
+            fires,
+            "a {len}-byte -wal: truncated_wal should fire == {fires}"
+        );
+    }
+}
+
+#[test]
+fn case_orphaned_lock_emitted_by_classify_via_backdated_mtime() {
+    // SF2 — drive the REAL-clock `classify_file_state` path (not just the injected-clock helper) so it
+    // genuinely EMITS OrphanedLockFile: create `.unblock.lock` next to the db and BACKDATE its mtime
+    // an hour past the 30-min stale threshold via `File::set_modified` (stable since Rust 1.75 — no
+    // `filetime` dependency).
+    let fx = Fixture::new();
+    fx.write_valid_db();
+    fx.write_clean_jsonl();
+    let lock = fx.db.parent().unwrap().join(".unblock.lock");
+    std::fs::write(&lock, b"pid:12345").unwrap();
+    let backdated = SystemTime::now()
+        .checked_sub(Duration::from_hours(1))
+        .expect("now - 1h is representable");
+    // Reopen (no truncate) purely to set the mtime; the write above is already flushed + closed.
+    let handle = std::fs::File::options().write(true).open(&lock).unwrap();
+    handle.set_modified(backdated).unwrap();
+    drop(handle);
+
+    assert!(
+        has_code(&fx.classify(), "orphaned_lock_file"),
+        "a lock backdated 1h past the 30-min stale threshold must be emitted by classify_file_state"
+    );
+}
+
+#[test]
+fn case_db_and_jsonl_as_directories_degrade_without_panic() {
+    // SF6 — adversarial fs-shape: the db path and jsonl path are DIRECTORIES-in-place. classify must
+    // not panic and must not misfire DatabaseNotSqlite (a directory is not a readable SQLite file);
+    // the conflict scan over a directory conservatively returns false (a dir cannot be read as bytes).
+    let fx = Fixture::new();
+    std::fs::create_dir(&fx.db).unwrap();
+    std::fs::create_dir(&fx.jsonl).unwrap();
+    let anomalies = fx.classify(); // must not panic
+    assert!(
+        !has_code(&anomalies, "database_not_sqlite"),
+        "a directory-in-place db is not flagged as corrupt SQLite (db.is_file() is false): {anomalies:?}"
+    );
+    assert!(
+        !jsonl_has_conflict_markers(&fx.jsonl),
+        "a directory cannot be read as bytes — the conflict scan degrades to false"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn case_broken_symlink_paths_degrade_without_panic() {
+    // SF6 — the db + jsonl paths are BROKEN symlinks (target absent). `is_file()` follows the link and
+    // reports false, so no anomaly fires and neither the classifier nor the conflict scan panics.
+    use std::os::unix::fs::symlink;
+    let fx = Fixture::new();
+    let missing = fx.db.parent().unwrap().join("nope-does-not-exist");
+    symlink(&missing, &fx.db).unwrap();
+    symlink(&missing, &fx.jsonl).unwrap();
+    let anomalies = fx.classify(); // must not panic
+    assert!(
+        anomalies.is_empty(),
+        "broken symlinks resolve to nothing on disk: {anomalies:?}"
+    );
+    assert!(!jsonl_has_conflict_markers(&fx.jsonl));
+}
+
+#[cfg(unix)]
+#[test]
+fn case_permission_denied_jsonl_degrades_without_panic() {
+    // SF6 — a jsonl carrying conflict markers but chmod 000 (unreadable). The scan must NOT panic;
+    // when the process cannot open it (non-root) it degrades to `false` (absence of evidence). The
+    // exact boolean depends on privilege (root bypasses the mode bit), so the invariant under test is
+    // graceful, panic-free degradation.
+    use std::os::unix::fs::PermissionsExt;
+    let fx = Fixture::new();
+    fx.write_valid_db();
+    std::fs::write(&fx.jsonl, "<<<<<<< HEAD\n{\"id\":\"a\"}\n").unwrap();
+    std::fs::set_permissions(&fx.jsonl, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let _ = jsonl_has_conflict_markers(&fx.jsonl); // must not panic
+    let _ = fx.classify(); // classify over the same workspace must also not panic
+
+    // Restore permissions so the tempdir cleanup is unencumbered.
+    std::fs::set_permissions(&fx.jsonl, std::fs::Permissions::from_mode(0o644)).unwrap();
+}
+
 /// Materialize `bytes` at `path`.
 fn write_bytes(path: &Path, bytes: &[u8]) {
     std::fs::write(path, bytes).unwrap();
