@@ -10,10 +10,23 @@ publish = false
 workspace = true
 
 [dependencies]
+# v1-lite is STORAGE-FREE (F3/D29): integrity rows arrive as `Vec<String>` (the engine calls
+# `Session::integrity_check()` and passes them in); health never holds a `Storage` handle nor names a
+# libsql type (NFR-15). `unblock-model` + `unblock-sync` are DECLARED-but-UNUSED v1.1 seams (the model
+# `DiagnosticReport` re-map + JSONL-drift-via-sync land in v1.1's `classify.rs`) kept now so the v1.1
+# layout needs no rewrite — the layering matrix (`xtask/src/layering.rs`) whitelists both edges.
 unblock-model = { workspace = true }
 unblock-error = { workspace = true }
 unblock-sync = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+schemars = { workspace = true }
 snafu = { workspace = true }
-chrono = { workspace = true }
+
+[dev-dependencies]
+# File-state fixtures materialize db/wal/shm/journal/lock/jsonl on disk.
+tempfile = { workspace = true }
+# Invariants: HealthLevel composite == max; classify_file_state never panics on arbitrary bytes.
+proptest = { workspace = true }
+# JSON snapshots pin the contract shape of HealthLevel/FileAnomaly/DoctorReport (NFR-14).
+insta = { workspace = true }

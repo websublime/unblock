@@ -2998,10 +2998,13 @@ dependencies = [
 name = "unblock-health"
 version = "0.1.0"
 dependencies = [
- "chrono",
+ "insta",
+ "proptest",
+ "schemars",
  "serde",
  "serde_json",
  "snafu",
+ "tempfile",
  "unblock-error",
  "unblock-model",
  "unblock-sync",

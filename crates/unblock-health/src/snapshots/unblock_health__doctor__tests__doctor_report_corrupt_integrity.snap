@@ -1,0 +1,16 @@
+---
+source: crates/unblock-health/src/doctor.rs
+expression: report
+---
+{
+  "integrity_ok": false,
+  "integrity_rows": [
+    "page 3 is never used"
+  ],
+  "file_state": [],
+  "summary": {
+    "integrity_ok": false,
+    "anomaly_count": 0,
+    "worst": "recoverable"
+  }
+}
