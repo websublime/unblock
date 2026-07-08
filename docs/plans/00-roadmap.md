@@ -3,7 +3,7 @@
 - **Status:** v1 + v1.1 **LOCKED** (derived from APPROVED PRD); v1.2–v1.5 / v2-plus **PROPOSED** (for Miguel review)
 - **Date:** 2026-06-19 · **v1.2–v1.5 resequence:** 2026-07-07 (session ratified by Miguel; audience decision minted as PRD §4 D28)
 - **Owner:** Miguel Ramos
-- **Sources of truth:** `docs/PRD.md` (PRD APPROVED v1.1, §5 tiers / §11 scope / §13 phasing), `docs/plans/01-design-spine.md` (cross-crate interfaces — wins on any cross-crate type/signature disagreement), `docs/plans/implementation-plan.md` (v1 walking skeleton). Hierarchy: PRD > spine > crate plans. Grounding for deferred/later items: original `temp/beads_rust-main` feature inventory; UX grounding for the v1.5 UI: the 14 mockups under `temp/tentative-v2/docs/designs/` (**reference-only**, same status as `temp/beads_rust-main`).
+- **Sources of truth:** `docs/PRD.md` (PRD APPROVED v1.1, §5 tiers / §11 scope / §13 phasing), `docs/plans/01-design-spine.md` (cross-crate interfaces — wins on any cross-crate type/signature disagreement), `docs/plans/implementation-plan.md` (v1 walking skeleton). Hierarchy: PRD > spine > crate plans. Grounding for deferred/later items: original `temp/beads_rust-main` feature inventory; UX grounding for the v1.5 TUI: the TUI-adopted subset of the 14 mockups under `temp/tentative-v2/docs/designs/` (**reference-only**, same status as `temp/beads_rust-main`; the graph / burnup screens there inform the v2+ PRO web instead — roadmap §7).
 - **Stage:** Pre-1.0, no external users — breaking changes welcome, no migration / backward-compat burden (PRD header).
 
 > This roadmap allocates the natural product evolution across releases. **v1 and v1.1 are locked** — they
@@ -18,7 +18,7 @@
 
 - **Theme/Goal** — the one-line reason the release exists.
 - **Lands** — the FR/NFR ids and features delivered (FR ids trace to PRD §5; new proposed capabilities are tagged `[NEW]` and not yet PRD-blessed).
-- **Crates touched** — which of the 12 workspace crates (PRD §8.1) take work. The proposed v1.5 `unblock-ui` crate (roadmap §6/§9) would be a 13th; it is minted only at v1.5 lock (PRD §8.1 is unchanged until then).
+- **Crates touched** — which of the 12 workspace crates (PRD §8.1) take work. The proposed v1.5 `unblock-tui` crate (roadmap §6/§9) would be a 13th; it is minted only at v1.5 lock (PRD §8.1 is unchanged until then).
 - **Status** — `LOCKED` (PRD-approved) or `PROPOSED` (review candidate). PROPOSED versions are **direction, locked just-in-time** as each nears its build window; every per-version tech/scope call below is **re-confirmed at that version's lock** with fresh research and real learnings.
 
 Acyclic layering is invariant across all releases (PRD §8.1 / NFR-15):
@@ -138,8 +138,8 @@ contract, stated so nobody expects otherwise: **all writes serialize at the prim
 no multi-master semantics.**
 
 **Distribution pattern:** remote stays a **non-default Cargo feature**; the **`dist` release artifacts enable
-it** (dev `cargo build` stays slim — NFR-10 —; shipped binaries are full). Final call at v1.2 lock. (The same
-pattern is reused for the v1.5 `ui` feature — roadmap §6.)
+it** (dev `cargo build` stays slim — NFR-10 —; shipped binaries are full). Final call at v1.2 lock. (The v1.5
+local TUI does **not** reuse this pattern — it is 100% Rust with no Cargo feature and no web assets, roadmap §6.)
 
 ### Lands (features)
 | Item | Capability | Trace |
@@ -170,6 +170,9 @@ config split + keychain credential resolution), `unblock-engine` (write topology
 - TLS/HTTP transitive surface only enters builds that opt into remote (NFR-10 must stay green on default build).
 - Lock-time confirmations: the embedded-replicas-vs-Turso-Sync default (fresh research at v1.2 lock) and the
   "dist artifacts enable `remote`" distribution call.
+- The D14 **"single-serve per workspace"** wording gets a topology review here (cross-machine primary
+  serialization); that review also covers the **local two-writer / co-tenancy** case surfaced at v1.5 (a TUI
+  and an agent serve on one machine — roadmap §6).
 - *Answered 2026-07-07 (dropped):* the offline-first question — decided above (remote writes require network;
   reads stay local; no queue-and-reconcile in v1.2).
 - *Deferred 2026-07-07 (dropped as a v1.2 question):* multi-writer reconciliation (LWW-vs-oplog) — moot under
@@ -234,7 +237,7 @@ layer (roadmap §4) — planning lands first precisely so these ranking signals 
 
 **Goal:** 1M-issue performance is a CI hard gate, not a manual exercise; the scheduler/coordination contracts
 gain active assistance (not just observation); the MCP surface gets richer — and gains the streamable-HTTP
-transport — without bloating the tool list.
+transport (**re-evaluated at v1.4 lock** — see the Lands row) — without bloating the tool list.
 
 ### Lands (features)
 | Item | Capability | Trace |
@@ -242,7 +245,7 @@ transport — without bloating the tool list.
 | `[NEW]` 1M-issue perf as CI gate | Promote NFR-2's manual 1M / 10k-agent corpus to an automated regression gate; index/query tuning (the original's `workitems_ready_index` lesson) | NFR-1/NFR-2 |
 | `[NEW]` Active coordination | Beyond `coordination status`: stale-claim **reclaim** policy, claim TTLs/heartbeats, deterministic re-assignment evidence — still DB-derived, still no Agent Mail | FR-18 extension |
 | `[NEW]` Scheduler v2 | Richer ranking signals (cost/estimate-aware, critical-path-aware via `petgraph`, milestone-due-date-aware via the v1.3 planning layer), still a pure versioned `unblock.scheduler.v2` contract | FR-18 / policy |
-| `[NEW]` MCP streamable-HTTP transport | **Moved from v2+ into v1.4** (decided 2026-07-07): a D2 extension (the D2 amendment lands at v1.4 lock) — **stdio stays primary**; HTTP is an *additional* transport under the same isolation discipline. The enabler for the v1.5 UI (roadmap §6), alongside the subscription-style change notifications below | D2, FR-20 |
+| `[NEW]` MCP streamable-HTTP transport | **Moved from v2+ into v1.4** (decided 2026-07-07): a D2 extension (the D2 amendment lands at v1.4 lock) — **stdio stays primary**; HTTP is an *additional* transport under the same isolation discipline. **Rationale re-framed (2026-07-08):** it is **no longer a UI enabler** — the v1.5 local TUI speaks MCP over stdio and the v2+ PRO web reads Turso directly (roadmap §6/§7), so neither needs it. Its remaining justification is thinner: a serve exposed to clients that **cannot spawn a local stdio child** (e.g. a shared team serve endpoint). Under the v1.2 embedded-replica model each machine runs its own local serve over stdio, so this is **re-evaluated at v1.4 lock** (may stay in v1.4 or defer to v2+). Listed alongside the subscription-style change notifications below | D2, FR-20 |
 | `[NEW]` Richer MCP surface | Streaming/large-result resources, batch tools, subscription-style change notifications — measured against the tool-count budget (RK-3); resources preferred over new tools | FR-20 / PRD §9 |
 | `[NEW]` Compaction / archival | Activate the model's compaction fields (kept for JSONL fidelity, D12) as a real archival path for very large stores; restore-from-snapshot | D12, domain model |
 | `[NEW]` Performance observability | `tracing`-based perf spans + a `criterion` dashboard; contention-lab generalized to a continuous load harness | NFR-13 |
@@ -262,62 +265,91 @@ touches to `unblock-fuzz`/harnesses.
 
 ---
 
-## 6. v1.5 — Human surface: local UI  **[PROPOSED]**
+## 6. v1.5 — Human surface: local TUI  **[PROPOSED]**
 
-**Theme / purpose (Miguel's wording):** an **offline, local** window for the user to **visualize the state of
-the project/workspace** — self-contained, no external services. Reads are always local (the local DB, or the
-local replica in remote workspaces); in remote workspaces writes follow the v1.2 stance (network required —
-roadmap §3). **Phase 1 is read-only visualization.**
+**Theme / purpose (Miguel's framing):** an **offline, local, terminal-native** window for the team's
+**developers** to **visualize the state of the project/workspace** — a rich-DX point of visibility *inside* the
+dev workflow (no browser, no context-switch). The same "visualize the state" purpose as the retired web-local
+proposal, now terminal-native. Reads are always local (the local DB, or the local replica in remote
+workspaces); in remote workspaces writes follow the v1.2 stance (network required — roadmap §3). **Phase 1 is
+read-only visualization.**
 
-**Architecture (ratified 2026-07-07):** the UI is an **MCP client** — there is **no second domain surface**
-(FR-9 single mutation home; D2/D3 preserved, not relaxed — PRD §4 D28). A new `ui` **lifecycle command** on
-the D3 surface (lifecycle/ops only, no domain CLI; the canonical D3 verb set — and the doc-lint command-token
-class that pins it — gains `ui` at v1.5 lock) starts a **loopback HTTP server** serving embedded static assets
-plus the same MCP server over the **v1.4 streamable-HTTP transport** (roadmap §5). The explicit-command
-precedent for local network is `unblock update` (D13/NFR-6 — nothing on the normal command path).
+**Architecture (ratified 2026-07-08):** the TUI is an **MCP client over stdio** — it spawns `unblock serve` as
+a child process and speaks MCP over **stdio, exactly as Claude Code / agents do today**. There is **no second
+domain surface** (FR-9 single mutation home; D2/D3 preserved, not relaxed — PRD §4 D28): only the concrete
+client changes (web → terminal); D28's principle (humans served through an MCP client) is unchanged. A new
+`tui` **lifecycle command** on the D3 surface (lifecycle/ops only, no domain CLI; the canonical D3 verb set —
+and the doc-lint command-token class that pins it — gains `tui` at v1.5 lock). **NO loopback HTTP server, NO
+embedded web assets, NO dependency on the v1.4 streamable-HTTP transport** (roadmap §5) — stdio ships in v1.
 
-**Security (NFR-18 from day one):** bind **127.0.0.1 ONLY**; startup-generated session token; Origin/Host
-validation (DNS-rebinding/CSRF are real attacks against loopback servers).
+**Security (NFR-18):** the untrusted-input surface is **~unchanged from v1** — a child process over stdio opens
+**no new socket**, so there is **no session token, no Origin/Host validation, and no DNS-rebinding/CSRF
+concern** (all of which the retired loopback-web design required). A stated advantage of the terminal-native
+design over the web-local one.
 
-**Phasing (ratified 2026-07-07):**
-- **Phase 1 — read-only:** board by status/milestone, dependency graph (force/hierarchical/radial),
-  roadmap/burnup per milestone, goals view, ready queue, swarm observability (live claims by actor via FR-22
-  audit + FR-18 coordination), issue detail with comments/labels/deps.
-- **Phase 2 — writes:** create/edit/claim/close + milestone/goal management via the **same MCP tools** with
-  the human as actor.
-- **Live updates:** phase 1 may poll; the v1.4 subscription-style notifications (roadmap §5) upgrade it.
+**Dependency / sequencing (ratified 2026-07-08):** the TUI **transport** has **no hard dependency beyond the v1
+MCP contract** (stdio is shipped in v1), so it **MAY be pulled earlier opportunistically**. Its phase-1
+**screens**, however, couple to later domain *data*: **swarm observability** needs FR-18 + FR-22 (both
+**[v1.1]**) and the **milestone board / roadmap / burnup** need the **v1.3** planning layer — so an early pull
+would ship a **thinner** TUI until those tools land. By default it **keeps the v1.5 slot** so as **not** to
+divert the critical path (v1.2 shared-state first — roadmap §3). The critical path (v1.2 → v1.3 → v1.4) is
+UNCHANGED.
 
-**Stack (ratified 2026-07-07):** **Astro in static-output mode ONLY** — no SSR, no Astro Actions, no Node on
-any product path; the browser is a direct MCP client. Bundle embedded in the binary (`rust-embed`) behind a
-**non-default Cargo `ui` feature enabled in `dist` artifacts** (the same pattern as `remote` — roadmap §3).
-Bundle fully self-contained: no CDN fonts/scripts, strict CSP, offline-first. Visualization components stay
-framework-light (canvas + d3-force graph, SVG gantt, Web-Components board — no React smuggled in via viz
-libs). The npm supply chain gets its **own CI gate** (committed lockfile + audit — `cargo-deny` does not cover
-npm); pinned Node toolchain; the `dist` pipeline gains a Node build stage. Component library decided at v1.5
-lock — **line-ui (websublime's headless Web Components lib) is the leading candidate**.
+**Phasing (ratified 2026-07-08):**
+- **Phase 1 — read-only:** ready queue, board by status/milestone, issue detail (trail / dependencies /
+  labels), activity, and **swarm observability** (live claims by actor via FR-22 audit + FR-18 coordination),
+  plus a text roadmap/burnup per milestone.
+- **Phase 2 — writes:** claim / close / create / edit + milestone/goal management via the **same MCP tools**
+  with the human as actor.
+- **Live updates:** phase 1 may poll; the v1.4 subscription-style server→client notifications (roadmap §5)
+  upgrade it **over stdio** (notifications are protocol-level — no HTTP needed).
 
-**UX reference (ratified 2026-07-07):** the 14 mockups at `temp/tentative-v2/docs/designs/*.png` are the UX
-reference — **reference-only** (the tentative-v2 tree has the same status as `temp/beads_rust-main`).
-- **Adopted screens:** tasks views (all/ready/mine + milestone filter + detail panel with
-  trail/dependencies/claim/labels), graph (force/hierarchical/radial), roadmap (subject to the
-  milestone-nesting fork recorded at roadmap §4), activity.
+**Screens — the KEY difference from the retired web proposal: graphs are EXCLUDED.** The
+force/hierarchical/radial dependency graph does **not** translate to a terminal at mockup quality
+(braille-canvas approximations only — no real hover/zoom/drag), so it is **deliberately out of scope for the
+TUI** and belongs to the v2+ commercial PRO web (roadmap §7). Adopted for the TUI: **ready / board / detail /
+activity + a text roadmap/burnup per milestone.**
+
+**Stack (ratified 2026-07-08):** **ratatui** (the mature core — a modular workspace since 0.30) is the base;
+**`ratatui-kit` is too young to carry the product's human face** (recorded the same way line-ui was "leading
+candidate, not locked"), and **tui-realm** (an Elm/React-like, stateful model) is the alternative for a
+component/state architecture. Final framework call at v1.5 lock. **100% Rust: NO npm, NO Node, NO `dist` Node
+build stage, NO `rust-embed` of web assets, NO `ui` Cargo feature** — `cargo-deny` covers the whole tree and
+the binary gains no npm supply-chain surface. (This **removes** the single biggest cost the retired web-local
+v1.5 carried.)
+
+**UX reference (ratified 2026-07-08):** the same 14 mockups at `temp/tentative-v2/docs/designs/*.png` stay the
+UX reference — **reference-only** (the tentative-v2 tree has the same status as `temp/beads_rust-main`); the
+terminal-noir aesthetic translates *even more* literally to a real terminal.
+- **Adopted screens:** tasks / ready / board, issue detail (trail / dependencies / labels / claim), activity,
+  roadmap (subject to the milestone-nesting fork recorded at roadmap §4).
+- **NOT adopted for the TUI:** the graph screens (force/hierarchical/radial) — they move to the v2+ commercial
+  PRO web (roadmap §7).
 - **Reinterpreted:** findings = filtered issue views (labels / saved queries FR-21) — findings are ordinary
   issues, not a new concept.
-- **DISCARDED (Miguel, 2026-07-07):** the pipeline screen (a tri-state impl/review/qa pipeline is not in
+- **Still DISCARDED (Miguel, 2026-07-07):** the pipeline screen (a tri-state impl/review/qa pipeline is not in
   unblock's model; FR-19 gates are the domain concept) and the memory screen (no product memory concept
   exists; if ever wanted it is a separate future product discussion — deliberately NOT scoped here).
 
 ### Crates touched
-**`unblock-ui`** *(proposed L7 crate — embedded static assets + the loopback server serving the same MCP server over the
-v1.4 streamable-HTTP transport (the browser is the MCP client); minted at v1.5 lock)*, `unblock-cli` (the `ui` lifecycle command),
-`unblock-mcp` (served over the v1.4 HTTP transport). Plus a Node build stage in the `dist` pipeline (not a
-crate).
+**`unblock-tui`** *(proposed L7 crate — a ratatui terminal app that is itself the MCP client: it spawns
+`unblock serve` as a child and speaks MCP over stdio, with no loopback server / no embedded web assets / no new
+transport; minted at v1.5 lock)*, `unblock-cli` (the `tui` lifecycle command), `unblock-mcp` (consumed over
+stdio — no new transport). **No Node build stage, no npm gate** (removed with the web proposal).
 
 ### Risks / open questions for v1.5 lock
-- Component library final call (line-ui is the leading candidate, not yet locked).
-- The milestone-nesting fork (roadmap §4) shapes the roadmap/burnup screen.
-- npm supply-chain gate design (lockfile + audit tooling choice; pinned Node toolchain).
-- Phase-2 write-scope boundaries (which MCP tools the UI exposes to the human actor first).
+- Framework final call: **ratatui** vs **tui-realm** (and `ratatui-kit` maturity) — not yet locked.
+- Which screens make the phase-1 read-only cut.
+- Phase-2 write-scope boundaries (which MCP tools the TUI exposes to the human actor first).
+- The milestone-nesting fork (roadmap §4) shapes the text roadmap/burnup screen.
+- Multi-process against one **local** `unblock.db`: because the TUI spawns its **own** `unblock serve` child, a
+  TUI process **and** an agent on the same machine are **two independent local writers** — the in-process write
+  `Semaphore` (D14) serializes within one serve, **not across two** — so this within-machine co-tenancy is
+  **best-effort** (correct-but-not-the-supported-path, PRD §8.2 / D14), held only by SQLite WAL + `busy_timeout`
+  (NFR-3). This is **distinct** from the cross-machine v1.2 case (one local serve per machine; all writes
+  serialize at the shared primary — roadmap §3, PRD §8.2). The D14 "single-serve per workspace" wording gets
+  the topology review the v1.2 roadmap already promises (roadmap §3), and this local two-writer case is part of
+  that review.
 
 ---
 
@@ -331,15 +363,19 @@ locked decision, need a concrete external demand, or imply a materially larger p
 | Cross-project / multi-repo routing (the original's town/mayor) | **Explicitly dropped in v1 (FR-24/D11)**; reintroduce *only* on a concrete multi-repo demand, and likely in a shape informed by v1.2 multi-workspace sync rather than the original's elaborate mayor design |
 | **Turso Sync / Turso Database backend migration** | Storage backend evolution behind the `Storage` trait + the NFR-16 contract suite. The vendor's recommended path for NEW sync projects (as of 2026-07), but its engine is beta — revisit when the engine leaves beta. Also the **only path to offline-write reconciliation** (the v1.2 stance — roadmap §3 — defers queue-and-reconcile to this candidate) |
 | **Fine-grained auth/ACL for shared stores** | The future answer to the v1.2 documented no-ACL limitation (roadmap §3: token = full write within the team trust domain); needs concrete team-scale demand and likely server-side enforcement |
+| **Commercial web dashboard (PRO)** | A **separate commercial product** (NOT the OSS binary): a **static SPA** + a **client-minted read-only Turso token** (`data_read` fine-grained permission — minted by the **team's own Turso account / control plane** (the same trust domain that already holds write in v1.2 — self-hosted `sqld` deployments mint the equivalent `sqld` JWT/Hrana read grant) as a short-lived read grant, *not* by any credential-custodying PRO backend; `data_read` is a Turso-*platform* token scope, not unblock's deferred v2+ ACL, whose future per-user scoping is the fine-grained-ACL row above — held in the browser via `@libsql/client/web` over Hrana/HTTP, so **we never custody credentials, never proxy data**) + **`unblock-model` + `unblock-policy` compiled to WASM** (viable precisely because NFR-15 keeps L0/L1 pure — no tokio/I/O/petgraph-in-policy), so the domain logic that actually lives in those crates — the ready **sort** (the hybrid re-rank comparator, `unblock-policy`) and the scheduler **explanations** — comes from the **same crates**, not reimplemented. The **storage-layer** derivations do NOT: `blocked` (a live 3-pass SQL computation incl. a fixpoint blocked-parent propagation), the ready **filter** (`id NOT IN <blocked set>`) and the epic **rollups** are `unblock-storage` (L2) SQL, not model/policy (PRD §8.1 / `01-design-spine.md` §3.2), so the browser **re-issues that storage SQL directly against the read-only Turso replica** (a future `unblock-storage`-compiled-to-WASM path could later move it in-process). (**FR-9 preserved — the PRO offers no *mutation* surface at all; it is structurally read-only.**) Renders the "wow" that the terminal cannot: the dependency graph, burnup, live swarm observability (the graph / burnup mockups under `temp/tentative-v2/docs/designs/`, TUI-excluded per roadmap §6, inform this). **Zero hosted engine, zero credential custody; no drift on the WASM'd domain logic (sort + explanations) — the storage SQL is the one thing the browser re-executes rather than forks.** This is where **Astro + line-ui migrate** (freed from the binary + D13/NFR-6 — SSR / Astro-Actions become legal again in a separate repo/product; the npm/Node ecosystem lives there, not the OSS tree). **Structurally read-only** — browser writes via raw Hrana would bypass the engine (content_hash / events / claims), so writes are NOT offered; a real-engine-in-browser (a WASM `Storage` backend running the actual engine over Hrana) is a **v2+-dreaming** note only — build nothing on it now. **Gates:** v1.2 shipped (no client Turso remote ⇒ nothing to point at) **AND** a go-to-market decision (external customers = a pivot from D28's "internal company teams" framing — needs its own future D-id and a PRO PRD-lite when/if it locks). **Moat honesty:** the MCP contract is public / self-describing, so a free viewer is buildable by anyone — the moat is the WASM domain core + schema ownership (pre-1.0) + pace + the agent-swarm-native angle, not the UI itself. **Direction only — no spec, no promise, no timeline** (like the rest of this table) |
 | DB-only mode (drop JSONL entirely) | D5 keeps JSONL as optional and notes the design is "reversible toward DB-only later" — a candidate once sync (v1.2) makes JSONL redundant for the shared case |
 | Hosted / managed shared service | PRD §11 keeps this out of scope (collaboration is via libsql sync, not a bespoke server). Only revisit if v1.2 sync proves insufficient for real teams |
 | Pluggable alternative storage backends | The `Storage` trait + contract suite (NFR-16) make this *possible*; a second backend would only ship on concrete demand (the trait exists precisely so this is cheap when needed — the Turso Sync row above is its first concrete instance) |
 
 **Moved out of this table (2026-07-07 resequence):**
-- **Human-facing surface** → scheduled as **v1.5** (roadmap §6). The local UI is an MCP *client*, so D3 is
-  preserved rather than relaxed — the audience shift is PRD §4 D28.
-- **Additional MCP transports** → the **streamable-HTTP transport is scheduled as v1.4** (roadmap §5, a D2
-  extension); any *other* transports stay unscheduled and would follow the same isolation discipline.
+- **Human-facing surface** → scheduled as **v1.5** (roadmap §6). The local **TUI** is an MCP *client*, so D3 is
+  preserved rather than relaxed — the audience shift is PRD §4 D28. (The web dashboard's "wow" — graphs, burnup,
+  swarm — returns above as the separate v2+ commercial PRO product.)
+- **Additional MCP transports** → the **streamable-HTTP transport is proposed for v1.4** (roadmap §5, a D2
+  extension), but its "UI enabler" justification was dropped (2026-07-08) — it is **re-evaluated at v1.4 lock**
+  (may stay in v1.4 or defer back here to v2+); any *other* transports stay unscheduled and would follow the
+  same isolation discipline.
 
 These are intentionally unscheduled. Each requires a product decision (and several reverse a locked PRD §4
 decision) before it can leave this list.
@@ -348,7 +384,7 @@ decision) before it can leave this list.
 
 ## 8. Feature-to-version matrix
 
-Legend: ● lands · ◐ extended/hardened · ✗ = dropped · `[NEW]` not yet in PRD FR set · L=LOCKED, P=PROPOSED
+Legend: ● lands · ◐ extended/hardened · ✗ = dropped · blank = not landing · `[NEW]` not yet in PRD FR set · L=LOCKED, P=PROPOSED
 
 | Feature / FR | v1 (L) | v1.1 (L) | v1.2 (P) | v1.3 (P) | v1.4 (P) | v1.5 (P) | v2+ (P) |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
@@ -369,7 +405,7 @@ Legend: ● lands · ◐ extended/hardened · ✗ = dropped · `[NEW]` not yet i
 | Cooperative shutdown (FR-17) | ● | | | | | | |
 | Swarm coordination / scheduler (FR-18) | | ● diagnostics | ◐ actor attribution | | ◐ active + v2 | | |
 | Workflow gates (FR-19) | | ● | | ◐ milestone-close gate (candidate) | | | |
-| MCP stdio server (FR-20) | ● | ◐ surface | ◐ sync resources | ◐ planning tool | ◐ batch/stream + streamable-HTTP | | ◐ other transports (unscheduled) |
+| MCP stdio server (FR-20) | ● | ◐ surface | ◐ sync resources | ◐ planning tool | ◐ batch/stream + streamable-HTTP (re-eval at lock) | | ◐ other transports (unscheduled) |
 | Saved queries (FR-21) | | ● | | | | | |
 | Audit / flight recorder (FR-22) | | ● | ◐ actor conventions | | | | |
 | Shell completions (FR-23) | | ● | | | | | |
@@ -383,10 +419,10 @@ Legend: ● lands · ◐ extended/hardened · ✗ = dropped · `[NEW]` not yet i
 | **Multi-workspace (sync-scoped)** `[NEW]` | | | ● | | | | |
 | **Milestones (first-class) + milestone-scoped queries** `[NEW]` | | | | ● | | | |
 | **Goals (first-class, slim)** `[NEW]` | | | | ● | | | |
-| **MCP streamable-HTTP transport** `[NEW]` | | | | | ● | | |
+| **MCP streamable-HTTP transport** `[NEW]` | | | | | ● (re-eval at lock) | | |
 | **1M-issue perf as CI gate** `[NEW]` | (manual) | | | | ● | | |
 | **Compaction / archival activation** `[NEW]` | (fields only) | | | | ● | | |
-| **Local UI — MCP client** `[NEW]` | | | | | | ● P1 read-only / P2 writes | |
+| **Local TUI — MCP client (stdio)** `[NEW]` | | | | | | ● P1 read-only / P2 writes | |
 | **Pluggable backends / hosted service** `[NEW]` | | | | | | | ◐ |
 | **Fine-grained auth/ACL (shared stores)** `[NEW]` | | | | | | | ◐ |
 
@@ -409,18 +445,23 @@ not feature-landing): ● substantial work in that release · ◐ incidental / h
 | `unblock-config` | ● subset | ● full | ● | | | | |
 | `unblock-engine` | ● | ● | ● | ● | ● | | |
 | `unblock-render` | ● | ● | | ◐ | ◐ | | |
-| `unblock-mcp` | ● | ● | ◐ | ● | ● | ◐ | ◐ |
+| `unblock-mcp` | ● | ● | ◐ | ● | ● | | ◐ |
 | `unblock-cli` | ● | ● | ◐ | | | ◐ | |
 | `unblock-fuzz` *(ingestion + bench harness)* | ● | | | | ◐ | | |
-| `unblock-ui` *(proposed — minted at v1.5 lock)* | | | | | | ● | |
+| `unblock-tui` *(proposed — minted at v1.5 lock)* | | | | | | ● | |
 
 Notes:
-- **`unblock-ui`** is the proposed 13th workspace crate (L7 — embedded static assets + the loopback `ui`
-  server that **serves** the same MCP server over the v1.4 streamable-HTTP transport (the **browser** is the
-  MCP client), roadmap §5/§6; so the crate depends on `unblock-mcp`, mirroring the `cli → mcp` edge). It is
-  minted only at v1.5 lock, when PRD §8.1 grows; until then the 12-crate set is unchanged.
-- The v1.5 `dist` pipeline also gains a **Node build stage** (npm lockfile + audit CI gate) — build
-  infrastructure, not a crate.
+- **`unblock-tui`** is the proposed 13th workspace crate (L7 — a ratatui terminal app that is itself the **MCP
+  client**: it spawns `unblock serve` as a child and speaks MCP over **stdio** (exactly as Claude Code / agents
+  do today), roadmap §6; **no loopback server, no embedded web assets, no new transport**). At **runtime** it
+  links nothing of the server — it drives a child process over stdio — so its only compile-time edge to
+  `unblock-mcp` is for the **contract DTO types** it deserializes from the wire (the D25 per-tool output
+  shapes); `unblock-mcp` itself takes **no new v1.5 work** (hence it is blank at v1.5 in the table above — the
+  web-era ◐ was the retired HTTP-serving touch). It is minted only at v1.5 lock, when PRD §8.1 grows; until
+  then the 12-crate set is unchanged.
+- **100% Rust, no Node:** the TUI adds **no npm/Node build stage** to `dist` and **no `ui` Cargo feature** —
+  `cargo-deny` covers the whole tree and the binary gains no npm supply-chain surface. (The web dashboard's
+  npm/Node ecosystem lives in the separate v2+ commercial PRO product — roadmap §7 — not the OSS tree.)
 
 ---
 
@@ -431,11 +472,12 @@ humans-via-clients (coordination diagnostics, gates, organization); v1.2 makes i
 human+agent teams (PRD §4 D28 — libsql embedded replicas: reads local, all writes serialized at the primary,
 no multi-master); v1.3 gives the shared store a *planning layer* (goals = why, milestones = when) so both
 humans and agents can steer by release; v1.4 makes it *fast and actively helpful at the top of the scale
-curve* (1M as a CI gate, active coordination, richer MCP + the streamable-HTTP transport) — consuming v1.3's
-milestone signals in scheduler v2 and enabling v1.5; v1.5 opens the *human window* (an offline, local,
-read-first UI that is itself an MCP client — FR-9's single surface preserved). Everything in v2-plus either
+curve* (1M as a CI gate, active coordination, richer MCP + the streamable-HTTP transport, whose "UI enabler"
+rationale was dropped 2026-07-08 — re-evaluated at v1.4 lock) — consuming v1.3's milestone signals in scheduler
+v2; v1.5 opens the *human window* (an offline, local, terminal-native, read-first **TUI** that is itself an MCP
+client over **stdio** — no new transport needed, FR-9's single surface preserved). Everything in v2-plus either
 reverses a locked decision or awaits concrete external demand and is therefore deliberately unscheduled. The
 acyclic layering and the `Storage` trait/contract suite are the two invariants that make this sequence cheap:
 remote storage (v1.2), backend evolution (the v2+ Turso Sync candidate) and alternative backends slot in
-behind the trait without touching callers, and the UI rides the existing MCP contract instead of minting a
+behind the trait without touching callers, and the TUI rides the existing MCP contract instead of minting a
 second domain surface.
