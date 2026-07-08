@@ -206,9 +206,9 @@ fn case_diff3_style_markers_are_detected() {
 
 #[test]
 fn case_combined_anomalies_keep_deterministic_order_and_worst_is_max() {
-    // A journal sidecar (Recoverable, pushed 5th) + conflict markers (Unsafe, pushed 7th): the push
-    // order is variant-declaration order, so journal comes before jsonl, and the composite worst is
-    // the `max` (Unsafe).
+    // Conflict markers (Unsafe, pushed 5th) + a journal sidecar (Recoverable, pushed 6th): the push
+    // order is variant-declaration order — the faithful beads order, so JsonlConflictMarkers comes
+    // BEFORE JournalSidecarPresent — and the composite worst is the `max` (Unsafe).
     let fx = Fixture::new();
     fx.write_valid_db();
     std::fs::write(sidecar(&fx.db, "-journal"), b"journal data").unwrap();
@@ -216,7 +216,7 @@ fn case_combined_anomalies_keep_deterministic_order_and_worst_is_max() {
 
     let anomalies = fx.classify();
     let codes: Vec<&str> = anomalies.iter().map(FileAnomaly::code).collect();
-    assert_eq!(codes, ["journal_sidecar_present", "jsonl_conflict_markers"]);
+    assert_eq!(codes, ["jsonl_conflict_markers", "journal_sidecar_present"]);
 
     let worst = anomalies
         .iter()
