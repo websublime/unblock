@@ -97,7 +97,7 @@ Legend: ● new/major work · ◐ extended/hardened · (—) untouched.
 | `unblock-cli` | ● serve/migrate/doctor/version/init/agents + `unblock update` (FR-25, D17; axoupdater dep) | ● completions | (—) | (—) |
 | `unblock-fuzz` | ● content_hash/jsonl/sync_cycle/bd/query/config-smoke | ● config full + claim_race | ◐ remote_sync (feature) | ◐ scale_ingest |
 
-> **Note (2026-07-07 resequence):** this per-crate table predates the full v1.2–v1.5 shape. Its last column — relabeled **v1.4 (PROPOSED)** — tracks the scale / swarm-coordination / MCP-richness work formerly numbered v1.3; the **new v1.3 planning layer** (milestones + goals) and the **v1.5 local UI** are not yet represented as columns here. `00-roadmap.md` §3–§7 (and the roadmap §9 crate-impact table) is authoritative for the v1.2–v1.5 crate shape.
+> **Note (2026-07-07 resequence):** this per-crate table predates the full v1.2–v1.5 shape. Its last column — relabeled **v1.4 (PROPOSED)** — tracks the scale / swarm-coordination / MCP-richness work formerly numbered v1.3; the **new v1.3 planning layer** (milestones + goals) and the **v1.5 local TUI** are not yet represented as columns here. `00-roadmap.md` §3–§7 (and the roadmap §9 crate-impact table) is authoritative for the v1.2–v1.5 crate shape.
 
 **Total files planned across the 12 crate plans:** ≈ **190 plan-enumerated files** (source + test + bench + fuzz-target rows in the FILE BREAKDOWN tables). Approximate per-crate counts: model ~24, error ~13, policy ~18, storage ~22, sync ~14, health ~17, config ~20, engine ~24, render ~21, mcp ~30, cli ~24, fuzz ~18. (Counts include `Cargo.toml`, every `src/` module, `tests/`, `benches/`, and fuzz targets listed for traceability; the exact number shifts as conditional/`[v1.x]` files are confirmed.)
 
