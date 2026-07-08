@@ -1427,8 +1427,15 @@ impl Session {
     //   it composes a doctor-LITE report from the BUILD-now reads `diagnostics(Stats|Lint|Info)` + the
     //   `integrity_check()` read above (integrity is the ONE corruption signal reachable at T3.1). At **T3.3
     //   (HEALTH-LITE, D29)** `doctor()` IS wired (the lite aggregation below) and the cli `doctor` ROUTES THROUGH
-    //   the wired `doctor()` — surfacing file-state anomalies too — while PRESERVING the D27/AF-1
-    //   exit-2-on-corruption derivation (non-empty integrity → ErrorCode::DatabaseError). The FULL
+    //   the wired `doctor()` for OUTPUT — surfacing file-state anomalies too — while PRESERVING the D27/AF-1
+    //   exit-2-on-corruption derivation via a SEPARATE, auxiliary `Session::integrity_check()` read used ONLY
+    //   for the exit code (F4 mechanism = OPTION (a), orchestrator-pinned): the cli RENDERS `doctor()`'s
+    //   `DiagnosticReport` (integrity + file-state findings) for output but DERIVES exit from
+    //   `integrity_check()`'s `Vec<String>` so the mutation-proven `doctor_exit(&integrity: &[String])` stays
+    //   BYTE-IDENTICAL (non-empty integrity → ErrorCode::DatabaseError exit 2; else exit 0; Lint/file-state
+    //   findings stay advisory, NO exit flip). The exit MUST NOT be derived by string-matching the flattened
+    //   Info findings; the second `integrity_check()` is a cheap PRAGMA on the already-open DB — zero-regression
+    //   preservation of the D27/AF-1 exit asset. The FULL
     //   Healthy/Drifted/Recoverable/Unsafe taxonomy + `--repair` + `.unblock/.recovery/` evidence land ADDITIVELY
     //   over the `doctor()`/`recover()` seam at **v1.1**; `recover()` stays FeatureNotWired through v1. (Earlier
     //   prose put the cli→doctor() routing at T3.1 — that is the T3.3 refinement, not a T3.1 fact.)
