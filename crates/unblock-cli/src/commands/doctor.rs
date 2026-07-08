@@ -3,10 +3,12 @@
 //!
 //! Opens the `Session` and composes `diagnostics(Stats|Lint|Info)` + the NEW `Session::integrity_check()`
 //! read into a CLI-local `DoctorReport` (mapped onto `DiagnosticReport { kind: Info, .. }`). It does
-//! NOT call `Session::doctor()`/`recover()` (the T3.3 `FeatureNotWired{"health"}` seam). **Non-zero
-//! exit only on detected corruption:** a non-empty `integrity_check` → exit 2
-//! (`ErrorCode::DatabaseError`); Lint/orphan findings are ADVISORY (reported, no exit flip); else exit
-//! 0. The full Healthy/Drifted/Recoverable/Unsafe taxonomy + `--repair` land at T3.3.
+//! NOT call `Session::doctor()`/`recover()` at T3.1 (the `FeatureNotWired{"health"}` seam); at **T3.3
+//! (HEALTH-LITE, D29/F4)** this command is rewired to route through the now-wired `Session::doctor()`
+//! (adding file-state anomalies), preserving this exit rule. **Non-zero exit only on detected
+//! corruption:** a non-empty `integrity_check` → exit 2 (`ErrorCode::DatabaseError`); Lint/orphan
+//! findings are ADVISORY (reported, no exit flip); else exit 0. The full
+//! Healthy/Drifted/Recoverable/Unsafe taxonomy + `--repair` land at **v1.1**.
 
 use unblock_config::{CliOverrides, open_with_storage_with_cli};
 use unblock_engine::{DiagnosticKind, DiagnosticReport, Session, SessionConfig};
