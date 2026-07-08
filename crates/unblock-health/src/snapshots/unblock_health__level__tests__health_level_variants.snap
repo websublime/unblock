@@ -1,0 +1,10 @@
+---
+source: crates/unblock-health/src/level.rs
+expression: "[HealthLevel::Healthy, HealthLevel::Drifted, HealthLevel::Recoverable,\nHealthLevel::Unsafe,]"
+---
+[
+  "healthy",
+  "drifted",
+  "recoverable",
+  "unsafe"
+]
