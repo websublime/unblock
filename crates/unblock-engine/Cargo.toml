@@ -56,6 +56,10 @@ async-trait = { workspace = true }
 # The `error_contract.rs` golden constructs a `SyncError` to pin the new `EngineError::Sync` row
 # (the `#[cfg(feature="sync")]` case). Default-on `sync` makes it a dev-dep for the test binary.
 unblock-sync = { workspace = true }
+# Likewise the `error_contract.rs` golden constructs a `HealthError` to pin the `EngineError::Health`
+# row (the `#[cfg(feature="health")]` case, T3.3/D29); the `lifecycle.rs` doctor-mapping unit test
+# constructs a `DoctorReport` via `run_doctor`. Default-on `health` makes it a dev-dep too.
+unblock-health = { workspace = true }
 # FR-9 linearizability property test + the write-permit single-occupancy invariant.
 proptest = { workspace = true }
 # Golden `EngineError -> ErrorCode -> exit_code` map (FR-11) + diagnostics-per-kind snapshots.

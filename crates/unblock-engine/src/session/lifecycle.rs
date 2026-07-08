@@ -162,9 +162,35 @@ impl Session {
     ///
     /// - [`EngineError::FeatureNotWired`] (`feature: "health"`) until the T3.3 wiring lands; thereafter
     ///   the transparent `Health { source: HealthError }` variant on a health failure.
-    #[allow(clippy::unused_async)] // async in the spine §4.1 signature; the T3.3 body awaits health.
+    #[cfg_attr(not(feature = "health"), allow(clippy::unused_async))] // no await without health
     pub async fn doctor(&self) -> Result<DiagnosticReport> {
-        Err(EngineError::FeatureNotWired { feature: "health" })
+        #[cfg(feature = "health")]
+        {
+            // Compose the ONE corruption signal reachable now (integrity_check rows) + the pure
+            // file-state classification into unblock-health's `DoctorReport`, then fold it onto a
+            // `DiagnosticReport` reusing `DiagnosticKind::Info` (F2 — no model change). `run_doctor`
+            // is storage-free and non-async (F3); `integrity_check()` (a read, no write permit) is the
+            // only await.
+            let integrity_rows = self.integrity_check().await?;
+            let report = unblock_health::run_doctor(&integrity_rows, &self.health_paths())?;
+            Ok(doctor_report_to_diagnostic(&report))
+        }
+        #[cfg(not(feature = "health"))]
+        {
+            Err(EngineError::FeatureNotWired { feature: "health" })
+        }
+    }
+
+    /// Build the [`WorkspacePaths`](unblock_health::WorkspacePaths) bundle `doctor()` classifies over
+    /// (F3 — health is storage-free; the engine supplies the already-resolved paths). `recovery_dir`
+    /// is reserved for the v1.1 evidence writer (unused by the lite `run_doctor`).
+    #[cfg(feature = "health")]
+    fn health_paths(&self) -> unblock_health::WorkspacePaths {
+        unblock_health::WorkspacePaths {
+            db: self.db_path.clone(),
+            jsonl: Some(self.jsonl_path.clone()),
+            recovery_dir: self.unblock_dir.join(".recovery"),
+        }
     }
 
     /// Attempt workspace repair (WAL checkpoint, reindex; reports actions taken) — FR-16.
@@ -183,5 +209,93 @@ impl Session {
     #[allow(clippy::unused_async)] // async in the spine §4.1 signature; the v1.1 body awaits health repair.
     pub async fn recover(&self) -> Result<DiagnosticReport> {
         Err(EngineError::FeatureNotWired { feature: "health" })
+    }
+}
+
+/// Map an `unblock-health` [`DoctorReport`](unblock_health::DoctorReport) onto the model
+/// [`DiagnosticReport`] `Session::doctor` returns, **reusing the existing
+/// [`DiagnosticKind::Info`](unblock_model::DiagnosticKind::Info)** (F2 — no new model variant, no
+/// spine §1.10 / `CONTRACT_HASH` change).
+///
+/// Emits a stable headline (`health` = the composite worst level, `integrity` = `ok`/`N problem(s)`),
+/// then one generic [`DiagnosticFinding`](unblock_model::DiagnosticFinding) per integrity problem row
+/// and per file-state anomaly (`label` = the anomaly's stable code, `detail` = its `Display`). The
+/// order is deterministic (NFR-14 — insta-pinned at the cli/engine boundary).
+#[cfg(feature = "health")]
+fn doctor_report_to_diagnostic(report: &unblock_health::DoctorReport) -> DiagnosticReport {
+    use unblock_model::{DiagnosticFinding, DiagnosticKind};
+
+    let mut findings =
+        Vec::with_capacity(2 + report.integrity_rows.len() + report.file_state.len());
+    findings.push(DiagnosticFinding {
+        label: "health".to_string(),
+        detail: report.summary.worst.as_str().to_string(),
+    });
+    findings.push(DiagnosticFinding {
+        label: "integrity".to_string(),
+        detail: if report.integrity_ok {
+            "ok".to_string()
+        } else {
+            format!("{} problem(s)", report.integrity_rows.len())
+        },
+    });
+    for row in &report.integrity_rows {
+        findings.push(DiagnosticFinding {
+            label: "integrity_problem".to_string(),
+            detail: row.clone(),
+        });
+    }
+    for anomaly in &report.file_state {
+        findings.push(DiagnosticFinding {
+            label: anomaly.code().to_string(),
+            detail: anomaly.to_string(),
+        });
+    }
+    DiagnosticReport {
+        kind: DiagnosticKind::Info,
+        findings,
+    }
+}
+
+#[cfg(all(test, feature = "health"))]
+mod tests {
+    use super::doctor_report_to_diagnostic;
+    use std::path::PathBuf;
+    use unblock_health::{WorkspacePaths, run_doctor};
+    use unblock_model::DiagnosticKind;
+
+    /// The engine mapping folds corrupt integrity rows into a `recoverable` health finding + one
+    /// `integrity_problem` per row, reusing `DiagnosticKind::Info` (F2). Uses non-existent paths so no
+    /// file-state anomaly fires and integrity is the sole signal.
+    #[test]
+    fn corrupt_integrity_maps_to_a_recoverable_info_report() {
+        let paths = WorkspacePaths {
+            db: PathBuf::from("/nonexistent/unblock.db"),
+            jsonl: None,
+            recovery_dir: PathBuf::from("/nonexistent/.recovery"),
+        };
+        let rows = vec![
+            "*** in database main ***".to_string(),
+            "page 5 is never used".to_string(),
+        ];
+        let report = run_doctor(&rows, &paths).expect("run_doctor is infallible");
+        let diag = doctor_report_to_diagnostic(&report);
+
+        assert_eq!(diag.kind, DiagnosticKind::Info);
+        let detail = |label: &str| {
+            diag.findings
+                .iter()
+                .find(|f| f.label == label)
+                .map(|f| f.detail.as_str())
+        };
+        assert_eq!(detail("health"), Some("recoverable"));
+        assert_eq!(detail("integrity"), Some("2 problem(s)"));
+        let problems: Vec<&str> = diag
+            .findings
+            .iter()
+            .filter(|f| f.label == "integrity_problem")
+            .map(|f| f.detail.as_str())
+            .collect();
+        assert_eq!(problems, rows);
     }
 }

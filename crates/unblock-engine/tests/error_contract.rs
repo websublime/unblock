@@ -90,6 +90,21 @@ fn contract_rows() -> Vec<(&'static str, String, u8, bool)> {
         cases
     };
 
+    // The transparent `unblock-health` source (T3.3/HEALTH-LITE, D29), cfg-gated behind the default-on
+    // `health` feature. It forwards `HealthError::code()` (exit-2 DATABASE_ERROR here), non-retryable.
+    #[cfg(feature = "health")]
+    let cases = {
+        let mut cases = cases;
+        cases.push((
+            "Health::IntegrityCheckFailed",
+            unblock_health::HealthError::IntegrityCheckFailed {
+                rows: vec!["corrupt page".into()],
+            }
+            .into(),
+        ));
+        cases
+    };
+
     cases
         .into_iter()
         .map(|(label, err)| {

@@ -81,6 +81,18 @@ pub enum EngineError {
         source: unblock_sync::SyncError,
     },
 
+    /// A `unblock-health` doctor operation failed (T3.3/HEALTH-LITE, D29). Additive, cfg-gated behind
+    /// the default-on `health` feature — vanishes together with the `unblock-health` dep under
+    /// `--no-default-features`. Forwards `source.code()`/`hint()`/`context()` (`CodedError`). Wiring
+    /// [`Session::doctor`](crate::Session::doctor) makes a health failure surface transparently;
+    /// `recover()` STAYS `FeatureNotWired` (its repair body is v1.1).
+    #[cfg(feature = "health")]
+    #[snafu(transparent)]
+    Health {
+        /// The underlying health failure.
+        source: unblock_health::HealthError,
+    },
+
     /// An operation was attempted against a workspace that is not open.
     ///
     /// Maps to [`ErrorCode::NotInitialized`] (exit 2).
@@ -126,6 +138,8 @@ impl CodedError for EngineError {
             Self::Model { source } => source.code(),
             #[cfg(feature = "sync")]
             Self::Sync { source } => source.code(),
+            #[cfg(feature = "health")]
+            Self::Health { source } => source.code(),
             // Engine-local variants map to EXISTING §2.2 codes — never a new code.
             Self::WorkspaceNotOpen => ErrorCode::NotInitialized,
             Self::ShutdownInProgress | Self::WritePermitPoisoned | Self::FeatureNotWired { .. } => {
@@ -143,6 +157,8 @@ impl CodedError for EngineError {
             Self::Model { source } => source.hint(),
             #[cfg(feature = "sync")]
             Self::Sync { source } => source.hint(),
+            #[cfg(feature = "health")]
+            Self::Health { source } => source.hint(),
             Self::WorkspaceNotOpen
             | Self::ShutdownInProgress
             | Self::WritePermitPoisoned
@@ -160,6 +176,8 @@ impl CodedError for EngineError {
             Self::Model { source } => source.context(),
             #[cfg(feature = "sync")]
             Self::Sync { source } => source.context(),
+            #[cfg(feature = "health")]
+            Self::Health { source } => source.context(),
             Self::WorkspaceNotOpen
             | Self::ShutdownInProgress
             | Self::WritePermitPoisoned
