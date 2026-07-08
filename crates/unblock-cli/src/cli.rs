@@ -116,7 +116,7 @@ pub struct ServeArgs {}
 #[derive(Debug, Args)]
 pub struct MigrateArgs {}
 
-/// `unblock doctor` — no v1 flags (`--repair` is a T3.3 seam, AF-1).
+/// `unblock doctor` — no v1 flags (`--repair` is a v1.1 seam, AF-1/D29).
 #[derive(Debug, Args)]
 pub struct DoctorArgs {}
 
