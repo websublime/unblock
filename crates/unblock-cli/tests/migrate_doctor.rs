@@ -1,12 +1,13 @@
-//! `unblock migrate` (D27/AF-2) + `unblock doctor` (doctor-lite, D27/AF-1) end-to-end.
+//! `unblock migrate` (D27/AF-2) + `unblock doctor` (HEALTH-LITE, D29/F4) end-to-end.
 //!
 //! - migrate: a fresh workspace is already migrated on open, so the FIRST `migrate` reports the real
 //!   schema (`schema_from == schema_to == 1`, `applied == false` — the honest idempotent signal, not
 //!   a phantom applied-list), and a SECOND run reports identically (idempotent). Report shape pinned.
-//! - doctor: a clean DB → `integrity: ok` + structured Stats/Info findings, exit 0. A corrupted DB →
-//!   exit 2 (db bucket) — the corruption is surfaced as a `DATABASE_ERROR` structured error (the
-//!   deterministic corruption a page-overwrite yields; the non-empty-`integrity_check` → exit-2
-//!   mapping is unit-tested in `commands/doctor.rs::database_error_exit_is_two`).
+//! - doctor (T3.3): the cli ROUTES through the wired `Session::doctor()` — a clean DB → `health:
+//!   healthy` + `integrity: ok` (no file-state anomalies), exit 0. A corrupted DB → exit 2 (db bucket)
+//!   — the corruption is surfaced as a `DATABASE_ERROR` structured error (the deterministic corruption
+//!   a page-overwrite yields; the non-empty-`integrity_check` → exit-2 mapping is unit-tested in
+//!   `commands/doctor.rs::database_error_exit_is_two`).
 
 mod common;
 
@@ -126,20 +127,27 @@ fn stamp_user_version(db: &std::path::Path, version: i64) {
 }
 
 #[test]
-fn doctor_healthy_exits_0_with_structured_findings() {
+fn doctor_healthy_routes_through_session_doctor_and_exits_0() {
+    // T3.3 (D29/F4): the cli routes through the wired `Session::doctor()`. On a clean workspace the
+    // health report is `health: healthy` + `integrity: ok` with NO file-state anomalies, exit 0
+    // (`json_report` asserts success). The T3.1 Stats/Lint/Info composition is SUPERSEDED for the
+    // doctor output.
     let ws = Workspace::init();
     let report = json_report(&ws, &["doctor", "--output", "json"]);
     assert_eq!(
         report["kind"], "info",
-        "doctor-lite report reuses DiagnosticKind::Info"
+        "doctor report reuses DiagnosticKind::Info (F2 — no new model variant)"
     );
-    // Integrity header present and OK on a clean DB.
+    assert_eq!(
+        detail(&report, "health"),
+        Some("healthy"),
+        "a clean workspace is healthy (the live 0-byte WAL is not a truncation, D29 refinement); report: {report}"
+    );
     assert_eq!(
         detail(&report, "integrity"),
         Some("ok"),
         "clean DB integrity"
     );
-    // No integrity_problem findings on a clean DB.
     let labels: Vec<&str> = report["findings"]
         .as_array()
         .expect("findings array")
@@ -150,14 +158,13 @@ fn doctor_healthy_exits_0_with_structured_findings() {
         !labels.contains(&"integrity_problem"),
         "a clean DB has no integrity problems"
     );
-    // Stats + Info sections are folded in (advisory), proving the diagnostics composition (AF-1).
+    // The T3.1 diagnostics composition (stats./info. prefixes) is SUPERSEDED at T3.3 — the doctor
+    // output is the health-lite report (integrity + file-state), NOT Stats/Lint/Info.
     assert!(
-        labels.iter().any(|l| l.starts_with("stats.")),
-        "stats folded in"
-    );
-    assert!(
-        labels.iter().any(|l| l.starts_with("info.")),
-        "info folded in"
+        !labels
+            .iter()
+            .any(|l| l.starts_with("stats.") || l.starts_with("info.")),
+        "no diagnostics-composition sections at T3.3; labels: {labels:?}"
     );
 }
 

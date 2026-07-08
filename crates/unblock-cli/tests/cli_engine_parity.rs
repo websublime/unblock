@@ -11,7 +11,7 @@ mod common;
 use common::Workspace;
 use serde_json::Value;
 use unblock_config::{CliOverrides, open_with_storage_with_cli};
-use unblock_engine::{DiagnosticKind, Session, SessionConfig};
+use unblock_engine::{Session, SessionConfig};
 
 /// Open a `Session` directly over `ws`'s workspace via the SAME facade the CLI dispatches through.
 async fn open_session(ws: &Workspace) -> Session {
@@ -66,10 +66,13 @@ async fn migrate_cli_matches_session_directly() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn doctor_cli_matches_session_diagnostics_and_integrity() {
+async fn doctor_cli_renders_session_doctor_verbatim() {
+    // T3.3 (D29/F4): the cli RENDERS the wired `Session::doctor()` `DiagnosticReport` directly (no
+    // transformation), so the rendered findings match the engine's report exactly — the FR-9 no-drift
+    // guarantee for the doctor path.
     let ws = Workspace::init();
 
-    // CLI side: `unblock doctor --output json`.
+    // CLI side: `unblock doctor --output json` (child process; it closes its session on exit).
     let out = ws
         .cmd()
         .args(["doctor", "--output", "json"])
@@ -78,45 +81,29 @@ async fn doctor_cli_matches_session_diagnostics_and_integrity() {
     assert_eq!(out.status.code(), Some(0));
     let cli_report: Value = serde_json::from_slice(&out.stdout).expect("valid JSON doctor report");
 
-    // Engine side: the SAME composition the CLI performs (AF-1) — integrity + Stats/Lint/Info.
+    // Engine side: `Session::doctor()` over the SAME workspace (after the child exited — single-serve).
     let session = open_session(&ws).await;
-    let integrity = session.integrity_check().await.expect("integrity_check");
-    let stats = session
-        .diagnostics(DiagnosticKind::Stats, None)
-        .await
-        .expect("stats");
-    let info = session
-        .diagnostics(DiagnosticKind::Info, None)
-        .await
-        .expect("info");
+    let engine_report = session.doctor().await.expect("Session::doctor");
 
-    // Integrity parity: a clean DB → engine reports empty → CLI header is `ok`.
-    assert!(integrity.is_empty(), "clean DB integrity is empty");
+    // Kind parity + verbatim finding parity (label + detail, in order): the cli adds nothing.
     assert_eq!(
-        detail(&cli_report, "integrity"),
-        Some("ok"),
-        "CLI integrity header parity"
+        cli_report["kind"], "info",
+        "doctor reuses DiagnosticKind::Info"
     );
-
-    // Stats parity: every engine Stats finding is rendered as a `stats.<label>` row with the same
-    // detail (the CLI does no transformation beyond the label prefix, AF-1/AD-2).
-    for finding in &stats.findings {
-        let cli_label = format!("stats.{}", finding.label);
+    let cli_findings = cli_report["findings"].as_array().expect("findings array");
+    assert_eq!(
+        cli_findings.len(),
+        engine_report.findings.len(),
+        "no cli-added findings (verbatim render); cli: {cli_report}"
+    );
+    for (cli_finding, engine_finding) in cli_findings.iter().zip(&engine_report.findings) {
+        assert_eq!(cli_finding["label"], engine_finding.label, "label parity");
         assert_eq!(
-            detail(&cli_report, &cli_label),
-            Some(finding.detail.as_str()),
-            "stats parity for `{}`",
-            finding.label
+            cli_finding["detail"], engine_finding.detail,
+            "detail parity"
         );
     }
-    // Info parity likewise (the `info.actor`/`info.workspace_dir`/... rows).
-    for finding in &info.findings {
-        let cli_label = format!("info.{}", finding.label);
-        assert_eq!(
-            detail(&cli_report, &cli_label),
-            Some(finding.detail.as_str()),
-            "info parity for `{}`",
-            finding.label
-        );
-    }
+    // A clean workspace is healthy with clean integrity (sanity on the shared content).
+    assert_eq!(detail(&cli_report, "health"), Some("healthy"));
+    assert_eq!(detail(&cli_report, "integrity"), Some("ok"));
 }
