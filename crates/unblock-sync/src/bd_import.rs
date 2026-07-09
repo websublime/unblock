@@ -48,7 +48,7 @@ use unblock_model::{DependencyType, ImportReport, Issue, IssueValidator, Status}
 use unblock_storage::Storage;
 
 use crate::error::SyncError;
-use crate::import::{ImportOptions, apply_records, preflight_source};
+use crate::import::{ImportOperation, ImportOptions, apply_records, preflight_source};
 use crate::jsonl;
 
 /// The terminal-status text aliases bd wrote as `Status::Custom` that map to `Closed` (repair 3).
@@ -196,8 +196,15 @@ pub async fn import_bd(
         on_collision: crate::import::CollisionPolicy::Skip,
         external_reason: None,
     };
-    let (mut report, applied) =
-        apply_records(storage, mapped.records, mapped.dropped_fields, actor, &opts).await?;
+    let (mut report, applied) = apply_records(
+        storage,
+        mapped.records,
+        mapped.dropped_fields,
+        actor,
+        ImportOperation::Bd,
+        &opts,
+    )
+    .await?;
 
     // Finalize the two relation counts on the report from the APPLIED subset (MF-2).
     report.dependencies = applied.dependencies;
