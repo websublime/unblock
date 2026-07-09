@@ -1,16 +1,23 @@
 //! `tracing` init helper on the `unblock.reliability` target (NFR-13).
 //!
-//! The engine emits spans/events on the `unblock.reliability` target — INFO for guard activations /
-//! external-path use / conflict-marker rejection / force overrides; DEBUG per-file/per-issue. The
-//! structured-stdout / diagnostics-stderr discipline (NFR-14) is the renderer's job; the engine only
-//! emits.
+//! The engine owns ONLY the idempotent subscriber INIT — it emits **no** reliability guard events.
+//! The NFR-13 guard activations (external-path use / conflict-marker rejection / force-override at
+//! INFO, the best-effort perms guard at WARN, per-file/per-issue at DEBUG) are emitted at their guard
+//! sites in `unblock-sync` (L3, `src/reliability.rs`) carrying the four fields
+//! `operation`/`path`/`result`/`reason` (D30). The structured-stdout / diagnostics-stderr discipline
+//! (NFR-14) is the renderer's job.
 //!
 //! [`init_tracing`] is a best-effort, idempotent helper a binary may call once at start-up. It
 //! installs a process-global subscriber only if none is set yet (it never panics on a double-call,
 //! and never errors out a library caller that already installed its own subscriber).
 
-/// The `tracing` target the engine's reliability spans/events are emitted on (NFR-13).
-pub const RELIABILITY_TARGET: &str = "unblock.reliability";
+/// The `tracing` target `init_tracing`'s `EnvFilter` directive references (NFR-13).
+///
+/// Re-exported from the L0 crate `unblock-error` (hoisted there at T3.4/D30) so the engine, the
+/// L3 emit site (`unblock-sync`) and the cli all reference the SAME one const — the filter-target
+/// can never diverge from the emit-target. `unblock-cli`'s existing `use
+/// unblock_engine::RELIABILITY_TARGET` keeps working via this re-export.
+pub use unblock_error::RELIABILITY_TARGET;
 
 /// Options controlling [`init_tracing`].
 #[derive(Debug, Clone, Copy)]

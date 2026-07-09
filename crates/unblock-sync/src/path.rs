@@ -48,6 +48,31 @@ pub enum PathReject {
     TempCollision,
 }
 
+/// Reject an `allow_external` override that carries NO written reason (NFR-5/D30 forward seam).
+///
+/// The reason gates `allow_external` at the sync boundary: writing/reading outside `confine_root`
+/// requires an operator-written reason (which then rides the NFR-13 force-override INFO at the
+/// honored-`allow_external` site). A no-op when `allow_external` is `false`. Each orchestrator
+/// (`export_jsonl` / `import_jsonl` / `import_bd`) calls this at the TOP of its body. Unreachable in
+/// v1 — the engine forces `allow_external: false` on every write path.
+///
+/// # Errors
+///
+/// [`SyncError::ExternalOverrideWithoutReason`] (→ `ErrorCode::PathTraversal`, exit-6) when
+/// `allow_external` is set but `external_reason` is `None`.
+pub(crate) fn reject_external_without_reason(
+    path: &Path,
+    allow_external: bool,
+    external_reason: Option<&str>,
+) -> Result<(), SyncError> {
+    if allow_external && external_reason.is_none() {
+        return Err(SyncError::ExternalOverrideWithoutReason {
+            path: path.to_path_buf(),
+        });
+    }
+    Ok(())
+}
+
 /// Validate `path` for a sync read/write, returning the canonicalized confined path.
 ///
 /// `confine_root` is the absolute `.unblock/` dir (canonicalized once here). `allow_external`

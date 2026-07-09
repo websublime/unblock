@@ -47,3 +47,23 @@ pub use hints::{
 pub use model::{FieldError, ModelError};
 pub use sanitize::sanitize_message;
 pub use structured::{ExitCode, StructuredError};
+
+/// The `tracing` target every reliability event/span is emitted on (NFR-13/D30).
+///
+/// Hoisted to this L0 crate (T3.4/D30) so `unblock-sync` (the L3 emit site), `unblock-engine`
+/// (`init_tracing`'s `EnvFilter` directive, via a re-export) and `unblock-cli` all reference the
+/// SAME one const — the subscriber's filter-target can never diverge from the emit-target (the
+/// silent-drop hazard a by-value duplicate would create). A zero-dep string const with no natural
+/// module home, so it lives at the crate root.
+pub const RELIABILITY_TARGET: &str = "unblock.reliability";
+
+#[cfg(test)]
+mod tests {
+    use super::RELIABILITY_TARGET;
+
+    #[test]
+    fn reliability_target_is_pinned() {
+        // The single source of the NFR-13 tracing-target name (engine re-exports, sync/cli import).
+        assert_eq!(RELIABILITY_TARGET, "unblock.reliability");
+    }
+}

@@ -35,6 +35,8 @@ impl Session {
             &self.unblock_dir,
             &unblock_sync::ExportOptions {
                 allow_external: false,
+                // NFR-5/D30 forward seam: v1 never sets `allow_external`, so no reason is threaded.
+                external_reason: None,
             },
         )
         .await?;
@@ -70,6 +72,8 @@ impl Session {
             dry_run: opts.dry_run,
             allow_external: false,
             on_collision: unblock_sync::CollisionPolicy::Skip,
+            // NFR-5/D30 forward seam: v1 never sets `allow_external`, so no reason is threaded.
+            external_reason: None,
         };
         let report = unblock_sync::import_jsonl(
             &*self.storage,

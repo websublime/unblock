@@ -21,6 +21,14 @@ tracing = { workspace = true }
 tokio = { workspace = true }
 dunce = { workspace = true }
 
+[features]
+# T3.4/D30 — NON-default, dep-free marker gating the per-stage fault points in `atomic.rs` (write /
+# flush / `sync_all` / rename / parent-dir fsync). Each fault-point call-site statement is itself
+# `#[cfg(feature = "fault-injection")]`, so the shipped byte-path is byte-unchanged under default
+# features; NEVER enabled in the `dist` binary. CI runs a TARGETED `-p unblock-sync --features
+# fault-injection` clippy+test leg (testkit precedent — do NOT `--all-features`).
+fault-injection = []
+
 [dev-dependencies]
 # Backend-free `FakeStorage` double (full `#[async_trait] Storage` impl), property + snapshot tests,
 # and the real-libsql contract suite. All are already in `[workspace.dependencies]`.
@@ -28,3 +36,13 @@ async-trait = { workspace = true }
 proptest = { workspace = true }
 insta = { workspace = true }
 tempfile = { workspace = true }
+# The NFR-13 `tracing_capture_reliability` field-VALUE capture test (`tests/reliability_tracing.rs`)
+# installs a SCOPED `tracing_subscriber::Layer` via `set_default` (does NOT touch the global
+# `init_tracing`) and captures the four structured field VALUES via a hand-rolled `field::Visit` — NOT
+# `tracing-test`, whose `logs_contain` asserts on the FORMATTED string, not the field VALUES (D30 AC).
+# `tracing-subscriber` is already in the root `[workspace.dependencies]`, so this adds ZERO new
+# transitive surface. This is the D30 dep-free FALLBACK (taken): the `tracing-capture` primary is NOT
+# in the committed lock and pulls 4 crates (id-arena, predicates 2.1.5, tracing-tunnel) — predicates
+# 2.1.5 DUPLICATES the workspace's existing predicates 3.x (a `multiple-versions` transitive-budget
+# regression), so the dep-free layer that asserts the four field VALUES exactly is the cleaner path.
+tracing-subscriber = { workspace = true }

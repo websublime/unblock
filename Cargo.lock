@@ -3120,6 +3120,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "unblock-error",
  "unblock-model",
  "unblock-storage",
