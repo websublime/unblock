@@ -57,6 +57,31 @@ pub struct ImportOptions {
     pub external_reason: Option<String>,
 }
 
+/// Which import path drives [`apply_records`] — pins the `operation` label on the per-skip
+/// `reliability_detail!` DEBUG to the caller's own vocabulary (NFR-13/D30).
+///
+/// The D30 operation vocabulary is pinned to exactly `"export"` / `"import"` / `"import_bd"`; the
+/// shared apply tail is only ever reached from the two IMPORT orchestrators, so this enum carries
+/// exactly their two labels — an off-vocab label is unrepresentable by construction. A bd-path skip
+/// therefore emits `operation="import_bd"` (filterable), never the generic `"import"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ImportOperation {
+    /// The generic `import_jsonl` path → `operation="import"`.
+    Jsonl,
+    /// The one-shot bd path (`import_bd`) → `operation="import_bd"`.
+    Bd,
+}
+
+impl ImportOperation {
+    /// The pinned D30 operation label for this import path (`"import"` / `"import_bd"`).
+    const fn as_label(self) -> &'static str {
+        match self {
+            Self::Jsonl => "import",
+            Self::Bd => "import_bd",
+        }
+    }
+}
+
 /// The classification decision for one incoming record (read-only; no DB write yet).
 #[derive(Debug)]
 enum ApplyDecision {
@@ -185,6 +210,11 @@ pub(crate) struct AppliedRelationSums {
 /// computed over the same `create_subset` in both the dry-run and commit branches (symmetric with
 /// `imported = create_subset.len()`).
 ///
+/// `operation` is the CALLER's pinned D30 label ([`ImportOperation::Jsonl`] → `"import"`,
+/// [`ImportOperation::Bd`] → `"import_bd"`); it rides the per-skip `reliability_detail!` DEBUG so a
+/// bd-path skip is filterable under its own operation vocabulary (D30 override-reason gate note in
+/// `docs/plans/crates/unblock-sync.md` — vocab pinned to exactly `export`/`import`/`import_bd`).
+///
 /// # Errors
 ///
 /// [`SyncError::ImportCollision`] under `Error`; the transparent `Storage` source if the atomic
@@ -194,6 +224,7 @@ pub(crate) async fn apply_records(
     records: Vec<Issue>,
     dropped: Vec<String>,
     actor: &str,
+    operation: ImportOperation,
     opts: &ImportOptions,
 ) -> Result<(ImportReport, AppliedRelationSums), SyncError> {
     // (5a) classify every record (read-only `get_issue` probes).
@@ -206,9 +237,12 @@ pub(crate) async fn apply_records(
             ApplyDecision::Import(issue) => create_subset.push(*issue),
             ApplyDecision::Skip { reason } => {
                 // NFR-13 (D30): the per-issue skip DETAIL routes through the SSOT `reliability_detail!`
-                // — the record id rides the uniform `path` field (operation pinned to "import").
+                // — the record id rides the uniform `path` field, and the `operation` label is the
+                // CALLER's own (`import` / `import_bd`) so a bd-path skip stays filterable (D30 pinned
+                // vocab; each orchestrator passes its own label — the shared tail no longer hardcodes
+                // "import").
                 crate::reliability::reliability_detail!(
-                    operation = "import",
+                    operation = operation.as_label(),
                     path = id,
                     result = "skip",
                     reason = reason,
@@ -312,8 +346,15 @@ pub async fn import_jsonl(
     // (4)/(5) classify + atomic apply via the shared tail — the generic path drops no fields and
     //         never tallies relations: DISCARD the applied-subset sums so `dropped`/`dependencies`/
     //         `comments` stay empty/`0` (D24/F1 — only the bd path tallies relations).
-    let (report, _applied) =
-        apply_records(storage, summary.records, Vec::new(), actor, opts).await?;
+    let (report, _applied) = apply_records(
+        storage,
+        summary.records,
+        Vec::new(),
+        actor,
+        ImportOperation::Jsonl,
+        opts,
+    )
+    .await?;
     Ok(report)
 }
 
