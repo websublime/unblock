@@ -23,12 +23,17 @@ use unblock_model::{IssueType, Priority, Status};
 
 use crate::server::UnblockServer;
 use crate::tools::dto::{Attribution, DepInput};
-use crate::tools::output::{DeleteModeOutput, DeletePlanOutput, IdOnly, IssueOutput};
+use crate::tools::output::{DeleteModeOutput, DeletePlanOutput, IdOnly, IssueList, IssueOutput};
 use crate::tools::{engine_err_json, err_json, ok_json};
 
 /// The `issue` tool input (spine §5.2 — EXACT shape; 7 actions).
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "action", rename_all = "snake_case")]
+// §5.2a (CD-1): inject the root `"type": "object"` so the published inputSchema is MCP-conformant. A
+// `#[serde(tag)]` tagged enum renders a root `oneOf` with NO root `type`; strict clients reject the
+// whole `tools/list`. schemars lowers this to a post-mutator that inserts `type: object` AFTER the
+// derived `oneOf` body — the union (and instance validation) is preserved verbatim.
+#[schemars(extend("type" = "object"))]
 pub(crate) enum IssueInput {
     /// Create a new issue (interactive MINTING create, D21).
     ///
@@ -329,7 +334,7 @@ impl UnblockServer {
                         Err(err) => return engine_err_json(&err),
                     }
                 }
-                ok_json(&IssueOutput::Issues(updated))
+                ok_json(&IssueOutput::Issues(IssueList { issues: updated }))
             }
             IssueInput::Close {
                 id,
@@ -404,9 +409,10 @@ impl UnblockServer {
         // (3) Map each ParsedIssue → NewIssue (carrying the symbolic refs verbatim for the engine).
         let records: Vec<NewIssue> = parsed.into_iter().map(parsed_to_new_issue).collect();
 
-        // (4) The ATOMIC bulk create (engine mints + resolves + one storage tx). Output = the Vec.
+        // (4) The ATOMIC bulk create (engine mints + resolves + one storage tx). Output = the CD-2
+        // object-wrapped Vec (`{"issues":[…]}`).
         match self.session.create_bulk(records).await {
-            Ok(issues) => ok_json(&IssueOutput::Issues(issues)),
+            Ok(issues) => ok_json(&IssueOutput::Issues(IssueList { issues })),
             Err(err) => engine_err_json(&err),
         }
     }

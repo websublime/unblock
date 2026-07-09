@@ -26,6 +26,9 @@ use crate::tools::{engine_err_json, err_json, ok_json};
 /// The `diagnostics` tool input (spine §5.2 — EXACT shape; mirrors [`DiagnosticKind`]).
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+// §5.2a (CD-1): inject the root `"type": "object"` (the tagged-enum `oneOf` root omits it, which
+// strict MCP clients reject) — the union is preserved verbatim.
+#[schemars(extend("type" = "object"))]
 pub(crate) enum DiagnosticsInput {
     /// Aggregate statistics.
     Stats {},

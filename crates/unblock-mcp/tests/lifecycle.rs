@@ -98,9 +98,10 @@ async fn m2_exit_gate_ready_claim_close_surfaces_newly_unblocked() {
     // 1) query{ready}: the blocker is ready, the dependent is NOT (it is blocked).
     let (is_error, ready) = call_tool(&client, "query", json!({ "kind": "ready" })).await;
     assert!(!is_error, "ready query must succeed");
-    let ready_ids: Vec<String> = ready
+    // CD-2 (spine §5.3): the `query` list arm is object-wrapped as `{"issues":[…]}`, never a bare array.
+    let ready_ids: Vec<String> = ready["issues"]
         .as_array()
-        .expect("ready is an array")
+        .expect("ready is CD-2 object-wrapped as {\"issues\":[…]}")
         .iter()
         .map(|issue| issue["id"].as_str().unwrap_or("").to_string())
         .collect();

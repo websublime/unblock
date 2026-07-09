@@ -69,9 +69,12 @@ async fn query_ready_via_mcp_equals_session_ready() {
     let ready_direct = s.ready(&ListFilters::default()).await.expect("ready");
     let direct_json = serde_json::to_value(&ready_direct).expect("serialize");
 
+    // CD-2 (spine §5.3): the tool's `structuredContent` object-wraps the list arm as `{"issues":[…]}`
+    // (never a bare array), so the parity is the wrapped Vec vs the direct Vec.
     assert_eq!(
-        ready_via_mcp, direct_json,
-        "MCP query{{ready}} == Session::ready (identical results through two call sites)",
+        ready_via_mcp,
+        json!({ "issues": direct_json }),
+        "MCP query{{ready}} == Session::ready object-wrapped (identical results through two call sites)",
     );
 
     let _ = client.cancel().await;
@@ -93,7 +96,10 @@ async fn create_bulk_via_mcp_persists_through_session() {
     )
     .await;
     assert!(!is_error, "bulk create succeeds");
-    let created_arr = created.as_array().expect("the Vec output");
+    // CD-2: the created issues ride the object-wrapped `{"issues":[…]}` arm, not a bare array.
+    let created_arr = created["issues"]
+        .as_array()
+        .expect("the CD-2 object-wrapped issues array");
     assert_eq!(created_arr.len(), 2, "two issues created");
 
     // The same issues are visible through Session::list directly.

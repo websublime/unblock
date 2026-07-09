@@ -4,10 +4,19 @@
 //! documentation. Each tool body constructs its structured success payload AS an arm of its tool's
 //! [`serde(untagged)`] union (or as the tool's single output type), so the published
 //! `schema_bundle()` output schemas are true BY CONSTRUCTION (never schema-only types). All unions are
-//! `#[serde(untagged)]` ⇒ the wire bytes are IDENTICAL to serializing the arm's value directly, so
-//! materializing them changed NO wire byte (only the schema bundle). `Box` is serde- and
-//! schemars-transparent (wire bytes + published schema unchanged); the boxed arms
-//! ([`IssueOutput::Issue`], [`IssueOutput::Close`]) keep `clippy::large_enum_variant` clean.
+//! `#[serde(untagged)]` ⇒ the wire bytes are IDENTICAL to serializing the arm's value directly.
+//!
+//! **CD-2 object-wrap (spine §5.3, NORMATIVE).** A tool's structured success payload rides the rmcp
+//! `CallToolResult.structuredContent`, whose MCP type is an OBJECT (`{[key: string]: unknown}`). The
+//! list-shaped arms therefore MUST NOT serialize as a bare top-level array: each `Vec` arm is wrapped
+//! in a single-field object struct — [`IssueList`] (shared by [`IssueOutput::Issues`] and
+//! [`QueryOutput::Issues`]), [`CountList`], [`DepList`], [`CycleList`] — so its wire value is
+//! `{"issues":[…]}` / `{"counts":[…]}` / `{"deps":[…]}` / `{"cycles":[…]}`, never `[…]`. This is the
+//! ONE place materializing DOES change wire bytes (the list results were bare arrays before) — a
+//! deliberate structural fix that moves `CONTRACT_HASH`. The scalar/object arms already serialize as
+//! objects and are unchanged. `Box` is serde- and schemars-transparent (wire bytes + published schema
+//! unchanged); the boxed arms ([`IssueOutput::Issue`], [`IssueOutput::Close`]) keep
+//! `clippy::large_enum_variant` clean.
 //!
 //! [`IdOnly`] and [`SyncOutput`] are declared **here** (mcp-owned, F-4); they are NOT re-exported from
 //! `unblock-model`. The report DTOs [`SyncOutput`] wraps (`ExportReport`/`ImportReport`), the
@@ -43,12 +52,22 @@ pub(crate) enum IssueOutput {
     Id(IdOnly),
     /// A single issue (`create` / `show` / `reopen` / `restore`).
     Issue(Box<Issue>),
-    /// Multiple issues (multi-id `update`; ALSO `create_bulk` — the N created issues).
-    Issues(Vec<Issue>),
+    /// Multiple issues (multi-id `update`; ALSO `create_bulk` — the N created issues), CD-2
+    /// object-wrapped as `{"issues":[…]}`.
+    Issues(IssueList),
     /// The `close` outcome (`suggest_next` → `newly_unblocked`, FR-11).
     Close(Box<CloseOutcome>),
     /// The resolved delete plan (was the ad-hoc `delete_plan_json`).
     Delete(DeletePlanOutput),
+}
+
+/// The CD-2 object-wrap for a list of issues: `{"issues":[…]}` (spine §5.3). Shared by
+/// [`IssueOutput::Issues`] (multi-id `update` / `create_bulk`) and [`QueryOutput::Issues`]
+/// (`list`/`ready`/`blocked`/`search`/`stale`), so `structuredContent` is an object, never a bare array.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub(crate) struct IssueList {
+    /// The issues in the result set.
+    pub issues: Vec<Issue>,
 }
 
 /// The resolved `delete` plan output (spine §5.3, D25) — was the ad-hoc `delete_plan_json`.
@@ -88,14 +107,23 @@ impl From<DeleteMode> for DeleteModeOutput {
     }
 }
 
-/// The `query` tool success union (spine §5.3, D25). `#[serde(untagged)]` ⇒ wire-identical.
+/// The `query` tool success union (spine §5.3, D25). Both arms are CD-2 object-wrapped (§5.3) so the
+/// `structuredContent` is always a JSON object, never a bare array. `#[serde(untagged)]` ⇒ the arm's
+/// wrapper value is emitted directly (`{"issues":[…]}` / `{"counts":[…]}`).
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(untagged)]
 pub(crate) enum QueryOutput {
-    /// The `list`/`ready`/`blocked`/`search`/`stale` result set.
-    Issues(Vec<Issue>),
-    /// The `count` buckets.
-    Counts(Vec<CountBucket>),
+    /// The `list`/`ready`/`blocked`/`search`/`stale` result set (`{"issues":[…]}`).
+    Issues(IssueList),
+    /// The `count` buckets (`{"counts":[…]}`).
+    Counts(CountList),
+}
+
+/// The CD-2 object-wrap for `query{count}` buckets: `{"counts":[…]}` (spine §5.3).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub(crate) struct CountList {
+    /// The count buckets.
+    pub counts: Vec<CountBucket>,
 }
 
 /// The `dep` tool success union (spine §5.3, D25). `#[serde(untagged)]` ⇒ wire-identical to the
@@ -107,12 +135,27 @@ pub(crate) enum DepOutput {
     Added(DepAdded),
     /// `remove` acknowledgement (`{"removed":true}`).
     Removed(DepRemoved),
-    /// The direct edges declared by an issue (`list`).
-    Deps(Vec<Dependency>),
+    /// The direct edges declared by an issue (`list`), CD-2 object-wrapped as `{"deps":[…]}`.
+    Deps(DepList),
     /// The dependency `tree` OR `graph` (`Session::dependency_graph` returns a `DepTree`).
     Tree(DepTree),
-    /// The ordered cycle-path witnesses (`cycles`, §3.2.1/D19).
-    Cycles(Vec<Vec<String>>),
+    /// The ordered cycle-path witnesses (`cycles`, §3.2.1/D19), CD-2 object-wrapped as `{"cycles":[…]}`.
+    Cycles(CycleList),
+}
+
+/// The CD-2 object-wrap for `dep{list}` edges: `{"deps":[…]}` (spine §5.3).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub(crate) struct DepList {
+    /// The direct dependency edges.
+    pub deps: Vec<Dependency>,
+}
+
+/// The CD-2 object-wrap for `dep{cycles}` witnesses: `{"cycles":[…]}` (spine §5.3) — each cycle is an
+/// ordered list of issue ids.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub(crate) struct CycleList {
+    /// The ordered cycle-path witnesses.
+    pub cycles: Vec<Vec<String>>,
 }
 
 /// The `dep add` acknowledgement (`{"added":true}`) — a typed shape for the pre-D25 ad-hoc value.
@@ -144,8 +187,8 @@ pub(crate) enum SyncOutput {
 #[cfg(test)]
 mod tests {
     use super::{
-        DeleteModeOutput, DeletePlanOutput, DepAdded, DepOutput, DepRemoved, IdOnly, IssueOutput,
-        SyncOutput,
+        CountList, CycleList, DeleteModeOutput, DeletePlanOutput, DepAdded, DepList, DepOutput,
+        DepRemoved, IdOnly, IssueList, IssueOutput, QueryOutput, SyncOutput,
     };
     use std::path::PathBuf;
     use unblock_engine::DeleteMode;
@@ -208,6 +251,46 @@ mod tests {
         let removed =
             serde_json::to_value(DepOutput::Removed(DepRemoved { removed: true })).unwrap();
         assert_eq!(removed, serde_json::json!({ "removed": true }));
+    }
+
+    #[test]
+    fn issue_output_issues_is_object_wrapped_not_a_bare_array() {
+        // CD-2: the list arm MUST serialize as {"issues":[…]} (an object), never a bare array — the
+        // rmcp `structuredContent` MCP type is an object.
+        let value =
+            serde_json::to_value(IssueOutput::Issues(IssueList { issues: vec![] })).unwrap();
+        assert!(
+            value.is_object(),
+            "structuredContent must be an object (CD-2)"
+        );
+        assert!(value["issues"].is_array(), "carries an `issues` array");
+        assert!(!value.is_array(), "never a bare array");
+    }
+
+    #[test]
+    fn query_output_arms_are_object_wrapped() {
+        // Both `query` list arms are CD-2 object-wrapped (never a bare array).
+        let issues =
+            serde_json::to_value(QueryOutput::Issues(IssueList { issues: vec![] })).unwrap();
+        assert_eq!(issues, serde_json::json!({ "issues": [] }));
+
+        let counts =
+            serde_json::to_value(QueryOutput::Counts(CountList { counts: vec![] })).unwrap();
+        assert_eq!(counts, serde_json::json!({ "counts": [] }));
+    }
+
+    #[test]
+    fn dep_output_list_and_cycles_are_object_wrapped() {
+        let deps = serde_json::to_value(DepOutput::Deps(DepList { deps: vec![] })).unwrap();
+        assert_eq!(deps, serde_json::json!({ "deps": [] }));
+
+        // `cycles` is a list-of-lists; the wrap keeps the ordered witnesses under `cycles`.
+        let cycles = serde_json::to_value(DepOutput::Cycles(CycleList {
+            cycles: vec![vec!["ub-a".to_string(), "ub-b".to_string()]],
+        }))
+        .unwrap();
+        assert_eq!(cycles, serde_json::json!({ "cycles": [["ub-a", "ub-b"]] }));
+        assert!(!cycles.is_array(), "never a bare array (CD-2)");
     }
 
     #[test]
