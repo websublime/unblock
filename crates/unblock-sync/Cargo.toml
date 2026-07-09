@@ -29,6 +29,15 @@ dunce = { workspace = true }
 # fault-injection` clippy+test leg (testkit precedent — do NOT `--all-features`).
 fault-injection = []
 
+# T3.4/C5: test-only helper binary — drives the REAL `unblock_sync::export_jsonl` in a loop against a
+# real libsql workspace so `tests/atomic_failure.rs` can `Child::kill()` (SIGKILL) it mid-write and
+# prove the atomic temp->fsync->rename keeps the target a COMPLETE file across a hard kill (NFR-4).
+# Source under `tests/bin/`, never `src/` — it never ships via `dist`; the shipped lib is unaffected.
+# Located from `tests/atomic_failure.rs` via `env!("CARGO_BIN_EXE_export_kill")`.
+[[bin]]
+name = "export_kill"
+path = "tests/bin/export_kill.rs"
+
 [dev-dependencies]
 # Backend-free `FakeStorage` double (full `#[async_trait] Storage` impl), property + snapshot tests,
 # and the real-libsql contract suite. All are already in `[workspace.dependencies]`.
