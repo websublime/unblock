@@ -1,0 +1,4 @@
+# unblock workspace config (scaffolded by `unblock init`).
+# See `docs/plans/crates/unblock-config.md` for the full key set; every key not set here
+# falls back to its default.
+id_prefix = "ub"
