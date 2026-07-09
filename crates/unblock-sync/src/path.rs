@@ -357,8 +357,8 @@ fn is_allowed_jsonl_temp_name(file_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        PathReject, is_allowed_jsonl_temp_name, normalize_lexically, validate_sync_path,
-        validate_temp_path,
+        PathReject, is_allowed_jsonl_temp_name, normalize_lexically,
+        reject_external_without_reason, validate_sync_path, validate_temp_path,
     };
     use crate::error::SyncError;
     use std::path::{Path, PathBuf};
@@ -484,5 +484,36 @@ mod tests {
         assert!(!is_allowed_jsonl_temp_name("issues.jsonl.abc.tmp"));
         assert!(!is_allowed_jsonl_temp_name(".jsonl.1.tmp"));
         assert!(!is_allowed_jsonl_temp_name("issues.txt.1.tmp"));
+    }
+
+    #[test]
+    fn reason_gate_rejects_external_override_without_reason() {
+        // The LOCKED D30-2 reason-gate predicate: `allow_external && external_reason.is_none()` is the
+        // SOLE reject condition. This drives all four (allow_external × reason) cells so neutering the
+        // predicate flips exactly one of them — behavioral coverage the exit-6 mapping test lacks.
+        let path = Path::new("/some/external/issues.jsonl");
+
+        // (1) external override WITHOUT a reason → the ONLY rejected cell.
+        let err = reject_external_without_reason(path, true, None)
+            .expect_err("external override without a reason must be rejected");
+        assert!(
+            matches!(
+                &err,
+                SyncError::ExternalOverrideWithoutReason { path: rejected } if rejected == path
+            ),
+            "expected ExternalOverrideWithoutReason carrying the offending path, got {err:?}"
+        );
+
+        // (2) external override WITH a written reason → allowed.
+        reject_external_without_reason(path, true, Some("operator reason"))
+            .expect("a written reason satisfies the gate");
+
+        // (3) no external override, no reason → no-op (the reason is irrelevant when not external).
+        reject_external_without_reason(path, false, None)
+            .expect("no external override is always allowed");
+
+        // (4) no external override, reason present → still a no-op.
+        reject_external_without_reason(path, false, Some("operator reason"))
+            .expect("no external override is always allowed, reason ignored");
     }
 }
