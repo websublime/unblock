@@ -15,6 +15,7 @@ mod export;
 mod import;
 mod jsonl;
 mod path;
+mod reliability;
 
 #[cfg(test)]
 mod testutil;
@@ -38,3 +39,8 @@ pub use path::validate_sync_path;
 // The per-crate error + its `PathReject` detail.
 pub use error::SyncError;
 pub use path::PathReject;
+
+// T3.4/D30 EXPORT-side fault-injection seam (NFR-4). Behind the non-default `fault-injection`
+// feature ONLY — driven from `tests/atomic_failure.rs`; NEVER in the shipped binary.
+#[cfg(feature = "fault-injection")]
+pub use atomic::{FaultPoint, arm_fault, clear_faults};

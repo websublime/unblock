@@ -19,6 +19,11 @@ use crate::path::validate_sync_path;
 pub struct ExportOptions {
     /// Opt-in to write outside `confine_root` (NFR-7); default `false`.
     pub allow_external: bool,
+    /// A written reason REQUIRED when `allow_external` is set (NFR-5/D30 forward seam). An
+    /// `allow_external` override WITHOUT a reason is [`SyncError::ExternalOverrideWithoutReason`];
+    /// when present, it rides the NFR-13 force-override INFO. Unreachable in v1 (`allow_external` is
+    /// forced `false` by the engine).
+    pub external_reason: Option<String>,
 }
 
 /// Export the store to `path` atomically (FR-7), returning the [`ExportReport`].
@@ -29,18 +34,34 @@ pub struct ExportOptions {
 ///
 /// # Errors
 ///
-/// [`SyncError::PathTraversal`] on a rejected path; [`SyncError::JsonEncode`] on serialization;
-/// [`SyncError::Io`] on the atomic write; the transparent `Storage` source on a backend read failure.
+/// [`SyncError::ExternalOverrideWithoutReason`] when `allow_external` is set without a written
+/// reason (NFR-5/D30); [`SyncError::PathTraversal`] on a rejected path; [`SyncError::JsonEncode`] on
+/// serialization; [`SyncError::Io`] on the atomic write; the transparent `Storage` source on a
+/// backend read failure.
 pub async fn export_jsonl(
     storage: &dyn Storage,
     path: &Path,
     confine_root: &Path,
     opts: &ExportOptions,
 ) -> Result<ExportReport, SyncError> {
+    // NFR-5/D30 (forward seam): an `allow_external` override MUST carry a written reason. The reject
+    // lives in the orchestrator (it holds the opts + knows the operation label).
+    crate::path::reject_external_without_reason(
+        path,
+        opts.allow_external,
+        opts.external_reason.as_deref(),
+    )?;
     let canonical: PathBuf = validate_sync_path(path, confine_root, opts.allow_external)?;
     if opts.allow_external && !canonical.starts_with(confine_root) {
-        // NFR-13: surface an external-path write on the reliability channel.
-        tracing::info!(target: "unblock.reliability", path = %canonical.display(), "exporting to an external JSONL path (allow_external)");
+        // NFR-13 (D30): ONE INFO covering BOTH external-path use AND force-override (they coincide in
+        // v1 — the only external-path mechanism IS the reason-gated `allow_external`). The reject
+        // above guarantees `external_reason` is `Some` here.
+        crate::reliability::reliability_guard!(
+            operation = "export",
+            path = canonical.display(),
+            result = "external-path-force-override",
+            reason = opts.external_reason.as_deref().unwrap_or_default(),
+        );
     }
 
     // Full non-ephemeral corpus incl. closed + tombstones (FORK-1/D23).

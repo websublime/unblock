@@ -16,6 +16,92 @@ use crate::path::{validate_sync_path, validate_temp_path};
 /// The max number of temp-name collision-retry attempts before giving up.
 const MAX_TEMP_ATTEMPTS: u32 = 64;
 
+/// Deterministic per-stage fault-injection seam for the EXPORT atomic write (T3.4/NFR-4, D30).
+///
+/// Behind the non-default `fault-injection` feature ONLY — every guard call-site in
+/// [`write_atomic_blocking`] is itself `#[cfg(feature = "fault-injection")]`, so the shipped
+/// byte-path is byte-unchanged under default features (this whole module VANISHES). The fault plan is
+/// a **process-global `AtomicU8`** (`#![forbid(unsafe_code)]` forbids `static mut`), armed from the
+/// external `tests/` crate via [`arm_fault`] and reset via [`clear_faults`]; the seam tests run
+/// serially. Import has no atomic fs write path (it applies via one `Storage::create_issues` tx), so
+/// import failure-injection rides the DB-transaction rollback instead — never this seam.
+#[cfg(feature = "fault-injection")]
+mod fault {
+    use std::sync::atomic::{AtomicU8, Ordering};
+
+    use crate::error::SyncError;
+
+    /// A deterministic per-stage fault point in the atomic export write (T3.4/NFR-4).
+    ///
+    /// Write/Flush/SyncAll/Rename all fire BEFORE the atomic rename commits (the target never
+    /// changes); [`ParentDirFsync`](Self::ParentDirFsync) fires AFTER the rename (the new content is
+    /// already applied, only durability is unconfirmed).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum FaultPoint {
+        /// Fail the `write_all` of the line content.
+        Write,
+        /// Fail the `flush` of the temp file.
+        Flush,
+        /// Fail the `sync_all` (fsync) of the temp file.
+        SyncAll,
+        /// Fail the atomic `rename` of the temp over the target.
+        Rename,
+        /// Fail the POST-rename parent-dir fsync (durability-unconfirmed; the new content IS applied).
+        ParentDirFsync,
+    }
+
+    /// The disarmed sentinel (no fault point armed).
+    const DISARMED: u8 = 0;
+
+    /// The process-global armed fault point (`0` = disarmed; `1..=5` = a [`FaultPoint`]). An
+    /// `AtomicU8` (never `static mut` — `#![forbid(unsafe_code)]`), so it crosses into the
+    /// `spawn_blocking` closure the write runs in.
+    static ARMED: AtomicU8 = AtomicU8::new(DISARMED);
+
+    impl FaultPoint {
+        /// The `1..=5` `u8` encoding stored in [`ARMED`].
+        const fn code(self) -> u8 {
+            match self {
+                FaultPoint::Write => 1,
+                FaultPoint::Flush => 2,
+                FaultPoint::SyncAll => 3,
+                FaultPoint::Rename => 4,
+                FaultPoint::ParentDirFsync => 5,
+            }
+        }
+    }
+
+    /// Arm the process-global fault plan to fail at `point` on the next atomic export write.
+    ///
+    /// Driven from the external `tests/atomic_failure.rs` seam tests (which run serially and
+    /// [`clear_faults`] between cases).
+    pub fn arm_fault(point: FaultPoint) {
+        ARMED.store(point.code(), Ordering::SeqCst);
+    }
+
+    /// Disarm the process-global fault plan (reset between serial seam-test cases).
+    pub fn clear_faults() {
+        ARMED.store(DISARMED, Ordering::SeqCst);
+    }
+
+    /// If `point` is currently armed, build the [`SyncError::Io`] that stage would surface (the
+    /// check is inlined at each stage behind `#[cfg(feature = "fault-injection")]`).
+    pub(crate) fn injected(
+        point: FaultPoint,
+        path: &std::path::Path,
+        action: &'static str,
+    ) -> Option<SyncError> {
+        (ARMED.load(Ordering::SeqCst) == point.code()).then(|| SyncError::Io {
+            path: path.to_path_buf(),
+            action,
+            source: std::io::Error::other(format!("fault-injection: {point:?}")),
+        })
+    }
+}
+
+#[cfg(feature = "fault-injection")]
+pub use fault::{FaultPoint, arm_fault, clear_faults};
+
 /// A temp file that removes itself on drop unless [`TempFileGuard::persist`] is called.
 struct TempFileGuard {
     path: PathBuf,
@@ -70,7 +156,14 @@ fn temp_path_for(final_path: &Path, attempt: u32) -> PathBuf {
 fn set_restrictive_perms(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
     if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
-        tracing::warn!(target: "unblock.reliability", path = %path.display(), error = %e, "could not set 0600 perms on temp file");
+        // NFR-13 (D30): the best-effort perms guard routes through the SSOT WARN arm WITHOUT
+        // re-leveling — the four-field body carries the io error as the `reason`.
+        crate::reliability::reliability_warn!(
+            operation = "export",
+            path = path.display(),
+            result = "perms-not-set",
+            reason = e,
+        );
     }
 }
 
@@ -94,7 +187,14 @@ fn sync_directory(dir: &Path) -> Result<(), SyncError> {
 
 #[cfg(not(unix))]
 fn sync_directory(dir: &Path) -> Result<(), SyncError> {
-    tracing::debug!(target: "unblock.reliability", path = %dir.display(), "skipping parent-dir fsync: no portable directory fsync on this target");
+    // NFR-13 (D30): the non-unix parent-fsync-skip DEBUG routes through the SSOT `reliability_detail!`
+    // (four-field body) — do NOT carve it out of the standardization.
+    crate::reliability::reliability_detail!(
+        operation = "export",
+        path = dir.display(),
+        result = "parent-fsync-skipped",
+        reason = "no portable directory fsync on this target",
+    );
     Ok(())
 }
 
@@ -126,6 +226,41 @@ pub async fn write_atomic(
 }
 
 /// The blocking body of [`write_atomic`] (runs inside `spawn_blocking`).
+/// (2)-(3) Allocate a fresh temp file next to `final_path` via a `create_new` collision-retry loop.
+///
+/// Each candidate is re-validated against the temp allowlist before opening; a taken name retries the
+/// next suffix, any other open error surfaces, and exhausting [`MAX_TEMP_ATTEMPTS`] is a
+/// [`SyncError::PathTraversal`] (`TempCollision`).
+fn allocate_temp_file(
+    final_path: &Path,
+    confine_root: &Path,
+) -> Result<(File, PathBuf), SyncError> {
+    for attempt in 0..MAX_TEMP_ATTEMPTS {
+        let candidate = temp_path_for(final_path, attempt);
+        validate_temp_path(&candidate, final_path, confine_root)?;
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => return Ok((file, candidate)),
+            // Name taken — try the next attempt suffix on the next loop iteration.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(source) => {
+                return Err(SyncError::Io {
+                    path: candidate,
+                    action: "creating temp file",
+                    source,
+                });
+            }
+        }
+    }
+    Err(SyncError::PathTraversal {
+        path: temp_path_for(final_path, 0),
+        reason: crate::path::PathReject::TempCollision,
+    })
+}
+
 fn write_atomic_blocking(
     final_path: &Path,
     confine_root: &Path,
@@ -139,37 +274,7 @@ fn write_atomic_blocking(
     })?;
 
     // (2)-(3) allocate a temp file with `create_new` collision-retry.
-    let mut temp_file: Option<(File, PathBuf)> = None;
-    for attempt in 0..MAX_TEMP_ATTEMPTS {
-        let candidate = temp_path_for(final_path, attempt);
-        validate_temp_path(&candidate, final_path, confine_root)?;
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&candidate)
-        {
-            Ok(file) => {
-                temp_file = Some((file, candidate));
-                break;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                // Name taken — try the next attempt suffix on the next loop iteration.
-            }
-            Err(source) => {
-                return Err(SyncError::Io {
-                    path: candidate,
-                    action: "creating temp file",
-                    source,
-                });
-            }
-        }
-    }
-    let Some((mut file, temp_path)) = temp_file else {
-        return Err(SyncError::PathTraversal {
-            path: temp_path_for(final_path, 0),
-            reason: crate::path::PathReject::TempCollision,
-        });
-    };
+    let (mut file, temp_path) = allocate_temp_file(final_path, confine_root)?;
 
     // (4) RAII: remove the temp on any early return below.
     let guard = TempFileGuard::new(temp_path.clone());
@@ -178,6 +283,11 @@ fn write_atomic_blocking(
     set_restrictive_perms(&temp_path);
 
     // (6) write all lines with a trailing newline each.
+    #[cfg(feature = "fault-injection")]
+    if let Some(err) = fault::injected(fault::FaultPoint::Write, &temp_path, "writing to temp file")
+    {
+        return Err(err);
+    }
     let mut count = 0usize;
     for line in lines {
         file.write_all(line.as_bytes())
@@ -195,11 +305,20 @@ fn write_atomic_blocking(
     }
 
     // (7) flush + fsync the FILE.
+    #[cfg(feature = "fault-injection")]
+    if let Some(err) = fault::injected(fault::FaultPoint::Flush, &temp_path, "flushing temp file") {
+        return Err(err);
+    }
     file.flush().map_err(|source| SyncError::Io {
         path: temp_path.clone(),
         action: "flushing temp file",
         source,
     })?;
+    #[cfg(feature = "fault-injection")]
+    if let Some(err) = fault::injected(fault::FaultPoint::SyncAll, &temp_path, "fsyncing temp file")
+    {
+        return Err(err);
+    }
     file.sync_all().map_err(|source| SyncError::Io {
         path: temp_path.clone(),
         action: "fsyncing temp file",
@@ -212,6 +331,14 @@ fn write_atomic_blocking(
     validate_sync_path(final_path, confine_root, false)?;
 
     // (9) atomic rename over the target.
+    #[cfg(feature = "fault-injection")]
+    if let Some(err) = fault::injected(
+        fault::FaultPoint::Rename,
+        final_path,
+        "renaming temp file over",
+    ) {
+        return Err(err);
+    }
     std::fs::rename(&temp_path, final_path).map_err(|source| SyncError::Io {
         path: final_path.to_path_buf(),
         action: "renaming temp file over",
@@ -219,6 +346,16 @@ fn write_atomic_blocking(
     })?;
 
     // (10) DRIFT-1: fsync the parent dir so the rename's dir-entry update is crash-durable.
+    // The ParentDirFsync fault fires HERE — POST-rename: the new content is already applied to the
+    // target (the temp became the target), only durability is unconfirmed.
+    #[cfg(feature = "fault-injection")]
+    if let Some(err) = fault::injected(
+        fault::FaultPoint::ParentDirFsync,
+        parent,
+        "fsyncing parent dir of",
+    ) {
+        return Err(err);
+    }
     sync_directory(parent)?;
 
     // (11) the temp is now the target — do NOT remove it.

@@ -153,9 +153,32 @@ pub async fn import_bd(
     confine_root: &Path,
     actor: &str,
 ) -> Result<ImportReport, SyncError> {
+    // NFR-5/D30 (forward seam): the reason-gate reject lives in every orchestrator. `import_bd` is
+    // Skip-only with `allow_external` structurally `false`, so this is a defensive no-op (the reject
+    // never fires) — kept uniform with `export_jsonl`/`import_jsonl`, never silently dropped.
+    crate::path::reject_external_without_reason(path, false, None)?;
     // (1)/(2) shared FR-8 preflight: path confinement + conflict-marker rejection (ZERO DB writes,
-    //         Skip-only production semantics → allow_external is always false).
-    let canonical = preflight_source(path, confine_root, false)?;
+    //         Skip-only production semantics → allow_external is always false). `preflight_source`
+    //         STAYS pure; NFR-13's conflict-marker guard is emitted HERE (operation "import_bd") at
+    //         the true guard site right before propagating (D30).
+    let canonical = match preflight_source(path, confine_root, false) {
+        Ok(canonical) => canonical,
+        Err(err) => {
+            if let SyncError::ConflictMarkers {
+                path: marked,
+                preview,
+            } = &err
+            {
+                crate::reliability::reliability_guard!(
+                    operation = "import_bd",
+                    path = marked.display(),
+                    result = "conflict-markers-rejected",
+                    reason = preview,
+                );
+            }
+            return Err(err);
+        }
+    };
 
     // (3) per-line map + repair + validate + in-file dup-id — ALL failures abort with ZERO writes.
     let mapped = read_bd_records(&canonical)?;
@@ -171,6 +194,7 @@ pub async fn import_bd(
         dry_run: false,
         allow_external: false,
         on_collision: crate::import::CollisionPolicy::Skip,
+        external_reason: None,
     };
     let (mut report, applied) =
         apply_records(storage, mapped.records, mapped.dropped_fields, actor, &opts).await?;

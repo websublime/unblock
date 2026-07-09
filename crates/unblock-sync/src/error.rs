@@ -90,6 +90,19 @@ pub enum SyncError {
         detail: String,
     },
 
+    /// An `allow_external` override was requested WITHOUT a written reason (NFR-5/D30, forward seam).
+    ///
+    /// The reason gates `allow_external` at the sync boundary — an override that writes/reads outside
+    /// `confine_root` MUST carry an operator-written reason (which then rides the NFR-13
+    /// force-override/external-path INFO). Maps to the existing `ErrorCode::PathTraversal` (exit-6,
+    /// the confine-root-override family; NO new code). Unreachable in v1 (`allow_external` is forced
+    /// `false` on every write path); this is a forward seam.
+    #[snafu(display("external-path override on '{}' requires a written reason", path.display()))]
+    ExternalOverrideWithoutReason {
+        /// The external path whose override was requested without a reason.
+        path: PathBuf,
+    },
+
     /// A filesystem operation (open/read/write/rename/fsync/`create_dir_all`) failed (NFR-4/5).
     #[snafu(display("I/O error {action} '{}': {source}", path.display()))]
     Io {
@@ -141,14 +154,17 @@ pub enum SyncError {
 impl SyncError {
     /// The stable [`ErrorCode`] this error maps to (spine §2.2/§2.3).
     ///
-    /// exit-6 (JSONL/sync): `PathTraversal`, `ConflictMarkers`, `JsonlParse`, `ValidationFailed`,
-    /// `DuplicateId`, `LineTooLong` → JSONL parse class; `ImportCollision`; `PrefixMismatch`;
-    /// `SyncConflict`. exit-8 (I/O): `Io`, `FileTooLarge` → `IoError`; `JsonEncode` → `JsonError`.
-    /// The `Storage` source forwards its own code.
+    /// exit-6 (JSONL/sync): `PathTraversal`, `ExternalOverrideWithoutReason` (both →
+    /// `PathTraversal`), `ConflictMarkers`, `JsonlParse`, `ValidationFailed`, `DuplicateId`,
+    /// `LineTooLong` → JSONL parse class; `ImportCollision`; `PrefixMismatch`; `SyncConflict`.
+    /// exit-8 (I/O): `Io`, `FileTooLarge` → `IoError`; `JsonEncode` → `JsonError`. The `Storage`
+    /// source forwards its own code.
     #[must_use]
     pub fn code(&self) -> ErrorCode {
         match self {
-            Self::PathTraversal { .. } => ErrorCode::PathTraversal,
+            Self::PathTraversal { .. } | Self::ExternalOverrideWithoutReason { .. } => {
+                ErrorCode::PathTraversal
+            }
             Self::ConflictMarkers { .. } => ErrorCode::ConflictMarkers,
             Self::JsonlParse { .. }
             | Self::ValidationFailed { .. }
@@ -252,6 +268,15 @@ mod tests {
                     detail: "diverged".into(),
                 },
                 ErrorCode::SyncConflict,
+                6,
+            ),
+            (
+                // NFR-5/D30 forward seam: an external override without a written reason maps to the
+                // existing `PathTraversal` (exit-6), no new code (spine §2.3 exit table unchanged).
+                SyncError::ExternalOverrideWithoutReason {
+                    path: PathBuf::from("/outside/issues.jsonl"),
+                },
+                ErrorCode::PathTraversal,
                 6,
             ),
             (

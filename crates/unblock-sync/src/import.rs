@@ -51,6 +51,10 @@ pub struct ImportOptions {
     pub allow_external: bool,
     /// How to handle an existing id (default `Skip`).
     pub on_collision: CollisionPolicy,
+    /// A written reason REQUIRED when `allow_external` is set (NFR-5/D30 forward seam). An
+    /// `allow_external` override WITHOUT a reason is [`SyncError::ExternalOverrideWithoutReason`].
+    /// Unreachable in v1 (`allow_external` is forced `false` by the engine).
+    pub external_reason: Option<String>,
 }
 
 /// The classification decision for one incoming record (read-only; no DB write yet).
@@ -201,7 +205,14 @@ pub(crate) async fn apply_records(
         match classify(existing, incoming, opts.on_collision) {
             ApplyDecision::Import(issue) => create_subset.push(*issue),
             ApplyDecision::Skip { reason } => {
-                tracing::debug!(target: "unblock.reliability", id = %id, reason, "import: skipping record");
+                // NFR-13 (D30): the per-issue skip DETAIL routes through the SSOT `reliability_detail!`
+                // — the record id rides the uniform `path` field (operation pinned to "import").
+                crate::reliability::reliability_detail!(
+                    operation = "import",
+                    path = id,
+                    result = "skip",
+                    reason = reason,
+                );
                 skipped += 1;
             }
             ApplyDecision::Collision { id } => return Err(SyncError::ImportCollision { id }),
@@ -265,8 +276,33 @@ pub async fn import_jsonl(
     actor: &str,
     opts: &ImportOptions,
 ) -> Result<ImportReport, SyncError> {
+    // NFR-5/D30 (forward seam): reject an `allow_external` override without a written reason.
+    crate::path::reject_external_without_reason(
+        path,
+        opts.allow_external,
+        opts.external_reason.as_deref(),
+    )?;
     // (1)/(2) shared FR-8 preflight: path confinement + conflict-marker rejection (ZERO DB writes).
-    let canonical = preflight_source(path, confine_root, opts.allow_external)?;
+    // `preflight_source` STAYS pure; NFR-13's conflict-marker guard is emitted HERE (the orchestrator
+    // knows its operation label) at the true guard site, right before propagating (D30).
+    let canonical = match preflight_source(path, confine_root, opts.allow_external) {
+        Ok(canonical) => canonical,
+        Err(err) => {
+            if let SyncError::ConflictMarkers {
+                path: marked,
+                preview,
+            } = &err
+            {
+                crate::reliability::reliability_guard!(
+                    operation = "import",
+                    path = marked.display(),
+                    result = "conflict-markers-rejected",
+                    reason = preview,
+                );
+            }
+            return Err(err);
+        }
+    };
     // (3) per-line validation — ALL failures collected; ANY survivor aborts with ZERO writes.
     let summary = validate_records(&canonical)?;
     if let Some((line, detail)) = summary.failures.first() {
