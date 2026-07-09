@@ -169,6 +169,120 @@ async fn live_resource_templates_and_prompts_match_the_builder() {
 }
 
 // --------------------------------------------------------------------------------------------------
+// MCP-conformance drift gates (CD-1 input root type / CD-2 structuredContent object) over a LIVE duplex.
+// --------------------------------------------------------------------------------------------------
+
+/// CD-1 (spine §5.2a, NORMATIVE): every LIVE `tools/list` entry's `inputSchema` root MUST carry
+/// `"type": "object"`. rmcp 1.7 guards the tool *output* schema root (`schema_for_output`) but NOT the
+/// input, so this invariant is unblock-owned: the six tagged-enum inputs earn it via
+/// `#[schemars(extend("type" = "object"))]`; `ClaimInput` already conforms. A strict TS-SDK client
+/// rejects the WHOLE `tools/list` if any single element omits the root `type`, so this asserts it for
+/// ALL 7 tools over the real router (not just the pure bundle builder).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_tools_input_schema_root_is_object() {
+    let session = session().await;
+    let (client, server, _cancel) = connect(session).await;
+
+    let tools = client.list_all_tools().await.expect("list_tools");
+    assert_eq!(tools.len(), 7, "exactly 7 tools");
+    for tool in &tools {
+        assert_eq!(
+            tool.input_schema.get("type"),
+            Some(&json!("object")),
+            "tool `{}` inputSchema root MUST be `type: object` (CD-1) — a strict MCP client rejects \
+             the whole tools/list otherwise",
+            tool.name
+        );
+    }
+
+    let _ = client.cancel().await;
+    let _ = server.cancel().await;
+}
+
+/// CD-2 (spine §5.3, NORMATIVE): a tool's structured success payload rides the rmcp
+/// `CallToolResult.structuredContent`, whose MCP type is an OBJECT. The list-shaped arms
+/// (`query`/`dep`/`issue`) MUST NOT serialize as a bare top-level array: they are object-wrapped
+/// (`{"issues":[…]}` / `{"counts":[…]}` / `{"deps":[…]}` / `{"cycles":[…]}`). This drives the real
+/// `query`-tool list path over the live duplex and asserts the wire value is a JSON object keyed
+/// `issues`, never a bare array.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_query_list_structured_content_is_an_object() {
+    let session = session().await;
+    let (client, server, _cancel) = connect(session).await;
+
+    // `query{list}` returns the (possibly empty) issue set — a list arm. Its structuredContent MUST be
+    // the CD-2 object-wrap, not a bare array.
+    let (is_error, out) = call_tool(&client, "query", json!({ "kind": "list" })).await;
+    assert!(!is_error, "query list must succeed");
+    assert!(
+        out.is_object(),
+        "structuredContent MUST be a JSON object (CD-2), got {out:?}"
+    );
+    assert!(
+        out.get("issues")
+            .and_then(serde_json::Value::as_array)
+            .is_some(),
+        "the object-wrapped list arm carries an `issues` array (CD-2), got {out:?}"
+    );
+    assert!(
+        !out.is_array(),
+        "structuredContent must never be a bare array (CD-2)"
+    );
+
+    let _ = client.cancel().await;
+    let _ = server.cancel().await;
+}
+
+/// CD-2 for the `dep` tool's OWN wire path (its list arms are not exercised elsewhere): `dep{list}` and
+/// `dep{cycles}` MUST each ride an object-wrapped `structuredContent` (`{"deps":[…]}` / `{"cycles":[…]}`),
+/// never a bare array. Empty result sets still prove the wrap (the object shape is structural).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_dep_list_and_cycles_structured_content_are_objects() {
+    let session = session().await;
+    let (client, server, _cancel) = connect(session).await;
+
+    // Seed one issue so `dep{list}` addresses a real id (an empty `deps` still object-wraps).
+    let (is_error, created) = call_tool(
+        &client,
+        "issue",
+        json!({ "action": "create", "title": "seed", "quick": true }),
+    )
+    .await;
+    assert!(!is_error, "seed create must succeed");
+    let id = created["id"].as_str().expect("minted id").to_string();
+
+    let (is_error, deps) = call_tool(&client, "dep", json!({ "action": "list", "id": id })).await;
+    assert!(!is_error, "dep list must succeed");
+    assert!(
+        deps.get("deps")
+            .and_then(serde_json::Value::as_array)
+            .is_some(),
+        "dep list structuredContent MUST be object-wrapped `{{\"deps\":[…]}}` (CD-2), got {deps:?}"
+    );
+    assert!(
+        !deps.is_array(),
+        "dep list must never be a bare array (CD-2)"
+    );
+
+    let (is_error, cycles) = call_tool(&client, "dep", json!({ "action": "cycles" })).await;
+    assert!(!is_error, "dep cycles must succeed");
+    assert!(
+        cycles
+            .get("cycles")
+            .and_then(serde_json::Value::as_array)
+            .is_some(),
+        "dep cycles structuredContent MUST be object-wrapped `{{\"cycles\":[…]}}` (CD-2), got {cycles:?}"
+    );
+    assert!(
+        !cycles.is_array(),
+        "dep cycles must never be a bare array (CD-2)"
+    );
+
+    let _ = client.cancel().await;
+    let _ = server.cancel().await;
+}
+
+// --------------------------------------------------------------------------------------------------
 // The F-5 non-vacuous ErrorCode cross-check (the code->{exit_code,retryable,hint_shape} parity pin).
 // --------------------------------------------------------------------------------------------------
 

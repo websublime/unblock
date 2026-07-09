@@ -108,22 +108,29 @@ mod tests {
     fn every_tool_schema_is_an_object() {
         let bundle = schema_bundle();
         let pairs = [
-            &bundle.issue,
-            &bundle.claim,
-            &bundle.defer,
-            &bundle.query,
-            &bundle.dep,
-            &bundle.sync,
-            &bundle.diagnostics,
+            ("issue", &bundle.issue),
+            ("claim", &bundle.claim),
+            ("defer", &bundle.defer),
+            ("query", &bundle.query),
+            ("dep", &bundle.dep),
+            ("sync", &bundle.sync),
+            ("diagnostics", &bundle.diagnostics),
         ];
-        for pair in pairs {
-            assert!(
-                pair.input.is_object(),
-                "tool input schema must be an object"
+        for (name, pair) in pairs {
+            // CD-1 (spine §5.2a, NORMATIVE): every published tool `inputSchema` root MUST carry
+            // `"type": "object"` — NOT merely be a JSON object (a `oneOf` root is a JSON object but
+            // omits the root `type`, which strict MCP clients reject for the WHOLE `tools/list`). The
+            // six tagged-enum inputs earn it via `#[schemars(extend("type" = "object"))]`; `ClaimInput`
+            // (a plain struct) already has it. Asserting `input["type"] == "object"` (not `is_object()`,
+            // which passes vacuously for a bare `oneOf` root) is the mechanized CD-1 gate.
+            assert_eq!(
+                pair.input.get("type"),
+                Some(&serde_json::json!("object")),
+                "tool {name} inputSchema root MUST be `type: object` (CD-1, spine §5.2a)"
             );
             assert!(
                 pair.output.is_object(),
-                "tool output schema must be an object"
+                "tool {name} output schema must be a JSON object"
             );
         }
         assert!(

@@ -19,7 +19,7 @@ use unblock_model::DependencyType;
 
 use crate::server::UnblockServer;
 use crate::tools::dto::Attribution;
-use crate::tools::output::{DepAdded, DepOutput, DepRemoved};
+use crate::tools::output::{CycleList, DepAdded, DepList, DepOutput, DepRemoved};
 use crate::tools::{engine_err_json, err_json, ok_json};
 
 /// serde default for [`DepToolInput::Cycles::blocking_only`] (wire-only; the trait takes a bare bool).
@@ -30,6 +30,9 @@ fn default_true() -> bool {
 /// The `dep` tool input (spine §5.2 — EXACT shape; was `DepInput2`).
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "action", rename_all = "snake_case")]
+// §5.2a (CD-1): inject the root `"type": "object"` (the tagged-enum `oneOf` root omits it, which
+// strict MCP clients reject) — the union is preserved verbatim.
+#[schemars(extend("type" = "object"))]
 pub(crate) enum DepToolInput {
     /// Add a dependency edge (cycle-rejecting).
     Add {
@@ -127,7 +130,7 @@ impl UnblockServer {
                 Err(err) => engine_err_json(&err),
             },
             DepToolInput::List { id } => match self.session.list_dependencies(&id).await {
-                Ok(deps) => ok_json(&DepOutput::Deps(deps)),
+                Ok(deps) => ok_json(&DepOutput::Deps(DepList { deps })),
                 Err(err) => engine_err_json(&err),
             },
             DepToolInput::Tree { id } => match self.session.dependency_tree(&id).await {
@@ -136,7 +139,7 @@ impl UnblockServer {
             },
             DepToolInput::Cycles { blocking_only } => {
                 match self.session.detect_cycles(blocking_only).await {
-                    Ok(cycles) => ok_json(&DepOutput::Cycles(cycles)),
+                    Ok(cycles) => ok_json(&DepOutput::Cycles(CycleList { cycles })),
                     Err(err) => engine_err_json(&err),
                 }
             }

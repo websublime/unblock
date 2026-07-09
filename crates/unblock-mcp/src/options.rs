@@ -21,10 +21,13 @@ use tokio_util::sync::CancellationToken;
 /// `create_bulk` action arm + the 4 `Create` fields `design`/`acceptance_criteria`/`assignee`/
 /// `agent_context`) → `unblock.mcp.v1.2` (T2.6/D25 — `SchemaBundle` recomposed to per-tool
 /// `{input,output}` + the shared error schema; `capabilities()` enters the gate; `ErrorCodeDescriptor`
-/// gained `hint_shape`; the pin renamed `SCHEMA_BUNDLE_HASH` → `CONTRACT_HASH`). The
-/// `unblock.mcp.vN[.M]` family preserves the contract-id convention while the `.M` revision marks an
-/// additive contract change within the v1 product.
-pub const CONTRACT_VERSION: &str = "unblock.mcp.v1.2";
+/// gained `hint_shape`; the pin renamed `SCHEMA_BUNDLE_HASH` → `CONTRACT_HASH`) → `unblock.mcp.v1.3`
+/// (MCP-conformance drifts CD-1/CD-2, spine §5.2a/§5.3 — the six tagged-enum inputs inject a root
+/// `"type": "object"` and the `query`/`dep`/`issue` list arms are object-wrapped; both change
+/// schema-bundle bytes, so they ship JOINTLY as one bump). The `unblock.mcp.vN[.M]` family preserves
+/// the contract-id convention while the `.M` revision marks an additive contract change within the v1
+/// product.
+pub const CONTRACT_VERSION: &str = "unblock.mcp.v1.3";
 
 /// The pinned SHA-256 digest of the ordered two-document tuple `(capabilities(), schema_bundle())` —
 /// the HASH-COUPLED half of the FR-12 drift gate (D22 widened by D25, `tests/contract_suite.rs`).
@@ -40,7 +43,7 @@ pub const CONTRACT_VERSION: &str = "unblock.mcp.v1.2";
 /// representation — any future dep enabling `serde_json/preserve_order` (feature unification, dev-deps
 /// included) reorders the schemars-generated maps and moves `CONTRACT_HASH` with NO contract change;
 /// if the gate fires with "nothing changed", check `Cargo.lock` feature unification first.
-pub const CONTRACT_HASH: &str = "d3cbd6c08b0e02a47f9565d3c281e9ccf1d2109367dca3acf1b826de18a4dc70";
+pub const CONTRACT_HASH: &str = "1bd36281c014965071a38762ce5211ff875a7676ed9513faa2a0d17932329572";
 
 /// Untrusted-input limits enforced **before** any `Session` call (NFR-18).
 ///
@@ -124,8 +127,9 @@ mod tests {
 
     #[test]
     fn contract_version_is_the_bumped_v1_id() {
-        // T2.6/D25 bumped the contract surface (per-tool outputs + capabilities enter the gate) → v1.2.
-        assert_eq!(CONTRACT_VERSION, "unblock.mcp.v1.2");
+        // CD-1/CD-2 (spine §5.2a/§5.3) bumped the contract surface again — the six tagged-enum inputs
+        // gained a root `type: object` and the list output arms are object-wrapped → v1.3.
+        assert_eq!(CONTRACT_VERSION, "unblock.mcp.v1.3");
     }
 
     #[test]

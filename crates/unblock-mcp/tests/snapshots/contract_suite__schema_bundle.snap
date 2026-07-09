@@ -3,7 +3,7 @@ source: crates/unblock-mcp/tests/contract_suite.rs
 expression: schema_bundle()
 ---
 {
-  "contract_version": "unblock.mcp.v1.2",
+  "contract_version": "unblock.mcp.v1.3",
   "issue": {
     "input": {
       "$defs": {
@@ -666,7 +666,8 @@ expression: schema_bundle()
           "type": "object"
         }
       ],
-      "title": "IssueInput"
+      "title": "IssueInput",
+      "type": "object"
     },
     "output": {
       "$defs": {
@@ -1122,6 +1123,22 @@ expression: schema_bundle()
           ],
           "type": "object"
         },
+        "IssueList": {
+          "description": "The CD-2 object-wrap for a list of issues: `{\"issues\":[…]}` (spine §5.3). Shared by\n[`IssueOutput::Issues`] (multi-id `update` / `create_bulk`) and [`QueryOutput::Issues`]\n(`list`/`ready`/`blocked`/`search`/`stale`), so `structuredContent` is an object, never a bare array.",
+          "properties": {
+            "issues": {
+              "description": "The issues in the result set.",
+              "items": {
+                "$ref": "#/$defs/Issue"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "issues"
+          ],
+          "type": "object"
+        },
         "IssueType": {
           "type": "string"
         },
@@ -1145,11 +1162,8 @@ expression: schema_bundle()
           "description": "A single issue (`create` / `show` / `reopen` / `restore`)."
         },
         {
-          "description": "Multiple issues (multi-id `update`; ALSO `create_bulk` — the N created issues).",
-          "items": {
-            "$ref": "#/$defs/Issue"
-          },
-          "type": "array"
+          "$ref": "#/$defs/IssueList",
+          "description": "Multiple issues (multi-id `update`; ALSO `create_bulk` — the N created issues), CD-2\nobject-wrapped as `{\"issues\":[…]}`."
         },
         {
           "$ref": "#/$defs/CloseOutcome",
@@ -1685,7 +1699,8 @@ expression: schema_bundle()
           "type": "object"
         }
       ],
-      "title": "DeferInput"
+      "title": "DeferInput",
+      "type": "object"
     },
     "output": {
       "$defs": {
@@ -2829,7 +2844,8 @@ expression: schema_bundle()
           "type": "object"
         }
       ],
-      "title": "QueryInput"
+      "title": "QueryInput",
+      "type": "object"
     },
     "output": {
       "$defs": {
@@ -2885,6 +2901,22 @@ expression: schema_bundle()
           "required": [
             "key",
             "count"
+          ],
+          "type": "object"
+        },
+        "CountList": {
+          "description": "The CD-2 object-wrap for `query{count}` buckets: `{\"counts\":[…]}` (spine §5.3).",
+          "properties": {
+            "counts": {
+              "description": "The count buckets.",
+              "items": {
+                "$ref": "#/$defs/CountBucket"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "counts"
           ],
           "type": "object"
         },
@@ -3217,6 +3249,22 @@ expression: schema_bundle()
           ],
           "type": "object"
         },
+        "IssueList": {
+          "description": "The CD-2 object-wrap for a list of issues: `{\"issues\":[…]}` (spine §5.3). Shared by\n[`IssueOutput::Issues`] (multi-id `update` / `create_bulk`) and [`QueryOutput::Issues`]\n(`list`/`ready`/`blocked`/`search`/`stale`), so `structuredContent` is an object, never a bare array.",
+          "properties": {
+            "issues": {
+              "description": "The issues in the result set.",
+              "items": {
+                "$ref": "#/$defs/Issue"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "issues"
+          ],
+          "type": "object"
+        },
         "IssueType": {
           "type": "string"
         },
@@ -3232,21 +3280,15 @@ expression: schema_bundle()
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "anyOf": [
         {
-          "description": "The `list`/`ready`/`blocked`/`search`/`stale` result set.",
-          "items": {
-            "$ref": "#/$defs/Issue"
-          },
-          "type": "array"
+          "$ref": "#/$defs/IssueList",
+          "description": "The `list`/`ready`/`blocked`/`search`/`stale` result set (`{\"issues\":[…]}`)."
         },
         {
-          "description": "The `count` buckets.",
-          "items": {
-            "$ref": "#/$defs/CountBucket"
-          },
-          "type": "array"
+          "$ref": "#/$defs/CountList",
+          "description": "The `count` buckets (`{\"counts\":[…]}`)."
         }
       ],
-      "description": "The `query` tool success union (spine §5.3, D25). `#[serde(untagged)]` ⇒ wire-identical.",
+      "description": "The `query` tool success union (spine §5.3, D25). Both arms are CD-2 object-wrapped (§5.3) so the\n`structuredContent` is always a JSON object, never a bare array. `#[serde(untagged)]` ⇒ the arm's\nwrapper value is emitted directly (`{\"issues\":[…]}` / `{\"counts\":[…]}`).",
       "title": "QueryOutput"
     }
   },
@@ -3448,10 +3490,30 @@ expression: schema_bundle()
           "type": "object"
         }
       ],
-      "title": "DepToolInput"
+      "title": "DepToolInput",
+      "type": "object"
     },
     "output": {
       "$defs": {
+        "CycleList": {
+          "description": "The CD-2 object-wrap for `dep{cycles}` witnesses: `{\"cycles\":[…]}` (spine §5.3) — each cycle is an\nordered list of issue ids.",
+          "properties": {
+            "cycles": {
+              "description": "The ordered cycle-path witnesses.",
+              "items": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "cycles"
+          ],
+          "type": "object"
+        },
         "DepAdded": {
           "description": "The `dep add` acknowledgement (`{\"added\":true}`) — a typed shape for the pre-D25 ad-hoc value.",
           "properties": {
@@ -3462,6 +3524,22 @@ expression: schema_bundle()
           },
           "required": [
             "added"
+          ],
+          "type": "object"
+        },
+        "DepList": {
+          "description": "The CD-2 object-wrap for `dep{list}` edges: `{\"deps\":[…]}` (spine §5.3).",
+          "properties": {
+            "deps": {
+              "description": "The direct dependency edges.",
+              "items": {
+                "$ref": "#/$defs/Dependency"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "deps"
           ],
           "type": "object"
         },
@@ -3587,25 +3665,16 @@ expression: schema_bundle()
           "description": "`remove` acknowledgement (`{\"removed\":true}`)."
         },
         {
-          "description": "The direct edges declared by an issue (`list`).",
-          "items": {
-            "$ref": "#/$defs/Dependency"
-          },
-          "type": "array"
+          "$ref": "#/$defs/DepList",
+          "description": "The direct edges declared by an issue (`list`), CD-2 object-wrapped as `{\"deps\":[…]}`."
         },
         {
           "$ref": "#/$defs/DepTree",
           "description": "The dependency `tree` OR `graph` (`Session::dependency_graph` returns a `DepTree`)."
         },
         {
-          "description": "The ordered cycle-path witnesses (`cycles`, §3.2.1/D19).",
-          "items": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "type": "array"
+          "$ref": "#/$defs/CycleList",
+          "description": "The ordered cycle-path witnesses (`cycles`, §3.2.1/D19), CD-2 object-wrapped as `{\"cycles\":[…]}`."
         }
       ],
       "description": "The `dep` tool success union (spine §5.3, D25). `#[serde(untagged)]` ⇒ wire-identical to the\npre-D25 ad-hoc `json!` values.",
@@ -3680,7 +3749,8 @@ expression: schema_bundle()
           "type": "object"
         }
       ],
-      "title": "SyncInput"
+      "title": "SyncInput",
+      "type": "object"
     },
     "output": {
       "$defs": {
@@ -3888,7 +3958,8 @@ expression: schema_bundle()
           "type": "object"
         }
       ],
-      "title": "DiagnosticsInput"
+      "title": "DiagnosticsInput",
+      "type": "object"
     },
     "output": {
       "$defs": {
