@@ -566,7 +566,7 @@ impl StructuredError {
 }
 ```
 
-The L7 boundary converts any composed crate error → `StructuredError` (CLI: serialize to stdout + `process::exit(exit_code)`; MCP: attach as error data, §5.6). Output is **always valid JSON even on error** (FR-11). `tracing` on `unblock.reliability` records the guard/error (NFR-13); structured output strictly stdout, diagnostics stderr (NFR-14).
+The L7 boundary converts any composed crate error → `StructuredError` (CLI: serialize to stdout + `process::exit(exit_code)`; MCP: attach as error data, §5.6). Output is **always valid JSON even on error** (FR-11). `tracing` on `unblock.reliability` records the L7-boundary error, while the reliability GUARD emissions (external-path use, conflict-marker rejection, force-override) are emitted in `unblock-sync` at L3 with the standardized `operation`/`path`/`result`/`reason` field set (NFR-13, D30); `unblock-engine/src/logging.rs` owns only the idempotent subscriber init; structured output strictly stdout, diagnostics stderr (NFR-14).
 
 **`ModelError::ValidationFailed { fields }` → `context` mapping (D-E1 — NORMATIVE).** When the aggregate validation carrier (§2.1) is bridged to a `StructuredError` via `CodedError`, its per-field detail surfaces as a `context["fields"]` array of `{ "field": String, "reason": String }` objects (the serialized `FieldError` shape). This keeps the boundary emitting exactly one `ErrorCode` (`VALIDATION_FAILED`) while the agent self-correction surface retains every failing field. The scalar `ModelError` variants (e.g. `InvalidPriority`) carry their single value in `context` as their own keys; only the aggregate uses the `fields` array.
 

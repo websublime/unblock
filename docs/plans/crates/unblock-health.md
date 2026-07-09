@@ -12,6 +12,8 @@
 
 > **T3.3 Verify-gate deferred should-fixes (v1.1 follow-ups, D29).** SF4/SF5 — an end-to-end fixture driving a readable-but-integrity-DIRTY libsql DB to exit 2 (and `Session::doctor()` over genuinely corrupt integrity rows) is impractical to construct reliably (a corrupt-but-readable libsql image is hard to synthesize deterministically); the `doctor_exit(&[String])` non-empty→exit-2 logic is already unit + mutation-proven and the two halves are proven separately. SF7 — `unblock doctor` runs `PRAGMA integrity_check` twice per invocation (the F4 option-(a) tradeoff that keeps `doctor_exit(&[String])` byte-identical); deriving the exit from `report.integrity_ok` to scan once is a negligible v1 optimization on a local single-workspace DB, deferred to v1.1 (do NOT change the exit mechanism in v1).
 
+> **T3.4 failure-replay uses the v1-LITE surface only (NFR-5/D30).** The T3.4 NFR-5 failure-replay gate (an ENGINE test, `crates/unblock-engine/tests/failure_replay.rs`) replays corrupted-workspace fixtures and asserts the LITE doctor posture — `classify_file_state` (this crate) + `Session::integrity_check()` — NOT the v1.1 `ReliabilityAuditRecord`/`audit.rs`/full Healthy·Drifted·Recoverable·Unsafe taxonomy (rows 35/54/56 stay `[v1.1]`). T3.4 adds NO new `unblock-health` surface; it consumes the shipped v1 `run_doctor`/`classify_file_state`/`FileAnomaly`/`HealthLevel`.
+
 ---
 
 ## Public API summary (what other crates import)
