@@ -1485,6 +1485,7 @@ impl Session {
 ```rust
 #[derive(Deserialize, JsonSchema)]
 #[serde(tag = "action", rename_all = "snake_case")]
+#[schemars(extend("type" = "object"))]   // §5.2a — inputSchema root MUST be `type: object` (CD-1)
 pub enum IssueInput {
     Create {
         title: String,
@@ -1547,7 +1548,7 @@ pub enum IssueInput {
     //       `create.rs:1190`), NOT in the pure parser (the parser preserves the reference string verbatim). bulk-markdown
     //       is INTERACTIVE create (mints fresh ids; does NOT preserve ids, unlike JSONL/bd import which loops
     //       `Session::create(&Issue)`);
-    //   (4) output reuses `IssueOutput::Issues` (§5.3, D25) — the Vec of created issues.
+    //   (4) output reuses `IssueOutput::Issues` (§5.3, D25) — the CD-2 object-wrapped `IssueList` of created issues.
     // The bulk-create primitive lives on the `Session`/`Storage` surface BY DESIGN (`Session::create_bulk` over
     // `Storage::create_issues`, §4.1/§3.2) — it is the ONLY way to get one-tx all-or-nothing atomicity (an L7 loop over
     // single `create_issue` calls would commit each independently and could leave a partial batch — fatal here because
@@ -1578,6 +1579,7 @@ pub struct ClaimInput { pub id: String, pub assignee: String, #[serde(flatten)] 
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(tag = "action", rename_all = "snake_case")]
+#[schemars(extend("type" = "object"))]   // §5.2a — inputSchema root MUST be `type: object` (CD-1)
 pub enum DeferInput {
     Defer   { id: String, until: DateTime<Utc>, #[serde(flatten)] attribution: Attribution },
     Undefer { id: String, #[serde(flatten)] attribution: Attribution },
@@ -1585,6 +1587,7 @@ pub enum DeferInput {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[schemars(extend("type" = "object"))]   // §5.2a — inputSchema root MUST be `type: object` (CD-1)
 pub enum QueryInput {
     List   { #[serde(flatten)] filters: FilterInput },
     Ready  { #[serde(flatten)] filters: FilterInput },   // default-complete unless limit set
@@ -1596,6 +1599,7 @@ pub enum QueryInput {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(tag = "action", rename_all = "snake_case")]
+#[schemars(extend("type" = "object"))]   // §5.2a — inputSchema root MUST be `type: object` (CD-1)
 pub enum DepToolInput {                                                  // (was DepInput2; stray "2" removed)
     Add    { issue_id: String, depends_on_id: String, dep_type: DependencyType,
              #[serde(default)] metadata: Option<String>, #[serde(flatten)] attribution: Attribution },
@@ -1609,6 +1613,7 @@ fn default_true() -> bool { true }   // serde default for DepToolInput::Cycles.b
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(tag = "action", rename_all = "snake_case")]
+#[schemars(extend("type" = "object"))]   // §5.2a — inputSchema root MUST be `type: object` (CD-1)
 pub enum SyncInput {
     Export   { #[serde(default)] path: Option<String> },     // default .unblock/issues.jsonl; path-confined
     Import   { path: String, #[serde(default)] dry_run: bool },
@@ -1617,6 +1622,7 @@ pub enum SyncInput {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[schemars(extend("type" = "object"))]   // §5.2a — inputSchema root MUST be `type: object` (CD-1)
 pub enum DiagnosticsInput {
     Stats {}, Info {}, Where {}, Version {}, Lint {}, Changelog { #[serde(default)] since: Option<DateTime<Utc>> }, Orphans {},
 }
@@ -1638,12 +1644,34 @@ pub struct FilterInput { /* mirrors ListFilters: status, issue_type, assignee, l
                             wire (no CONTRACT_VERSION bump; FORK-2 guarantee). */ }
 ```
 
+**§5.2a — Tool `inputSchema` root type (NORMATIVE — MCP-conformance drift CD-1, 2026-07-09).** Every published tool input schema MUST have a root `"type": "object"` — both the live rmcp
+`tools/list` `inputSchema` AND the `unblock://schema` `ToolSchemas.input` (§5.4). schemars renders the six
+`#[serde(tag = …)]` tagged-enum inputs of §5.2 (`IssueInput`, `DeferInput`, `QueryInput`, `DepToolInput`,
+`SyncInput`, `DiagnosticsInput`) as a root `oneOf` with **no** root `type`; strict MCP clients reject the
+WHOLE `tools/list` at discovery (the TypeScript SDK's
+`ToolSchema.inputSchema = z.object({ type: z.literal("object") }).passthrough()` throws `invalid_value at
+inputSchema.type`, and it parses the tool array with `.parse()`, so ONE bad element takes every tool — the
+conformant `ClaimInput` struct included — dark). rmcp 1.7 guards the tool *output* schema root type
+(`schema_for_output`) but **not** the input, so this invariant is unblock-owned at the L7 tool-registration
+boundary: each tagged-enum input carries `#[schemars(extend("type" = "object"))]` (schemars_derive lowers it
+to a post-mutator inserting `"type": "object"` AFTER the derived `oneOf` body). The `oneOf` discriminated
+union is **preserved verbatim** — every branch is already `type: object` (the tag is a `const` property), so
+instance validation is UNCHANGED; the root keyword is a **structural requirement of the MCP `inputSchema`
+contract**, not a validation change (no flattening, no lost per-variant `required` sets). `ClaimInput` (a plain
+struct) is already `type: object` and is untouched. Enforced by a conformance assertion that
+`tools[*].inputSchema.type == "object"` for all 7 tools over the live builder-vs-router duplex (§6.6) and by
+strengthening the bundle test `every_tool_schema_is_an_object` to assert `input.type == "object"` (not merely
+`is_object()`, which a `oneOf` root passes vacuously). The injected root key changes the published
+`schema_bundle().<tool>.input` bytes, so it moves `CONTRACT_HASH` and forces a `CONTRACT_VERSION` bump (§5.4,
+jointly with the §5.3 output change).
+
 ### 5.3 Output shapes (D25/FORK-1B — per-tool, MATERIALIZED, NORMATIVE)
 
 The output surface is a family of REAL, mcp-owned types — the single output authority, not documentation.
 Tool bodies construct their structured success payload AS an arm of their tool's union (or as the tool's
 single output type). All unions are `#[serde(untagged)]` ⇒ the wire bytes are IDENTICAL to serializing the
-arm's value directly, so materializing changes NO wire byte and NO golden except the schema bundle. `Box` is
+arm's value directly, so materializing changes NO wire byte and NO golden except the schema bundle (the ONE
+exception is the CD-2 object-wrap of the list arms below — a deliberate, wire-visible structural fix). `Box` is
 serde- and schemars-transparent (wire bytes + published schema unchanged); the boxed arms (`Issue`, `Close`)
 keep `clippy::large_enum_variant` clean under CI `-D warnings` (`ci.yml:63`) — `CloseOutcome` inlines a full
 41-field `Issue` (`crates/unblock-model/src/results.rs:46-51`). Each
@@ -1652,17 +1680,35 @@ union to be returnable, and joining it moves the D25 gate (`CONTRACT_HASH` → `
 *(Supersedes the pre-D25 single `ToolOutput` union sketch, which also missed the landed `delete`/`added`/
 `removed` shapes; the name `ToolOutput` survives only in historical decision/task records.)*
 
+**Output `structuredContent` root MUST be an object (NORMATIVE — MCP-conformance drift CD-2, 2026-07-09).**
+A tool's structured success payload rides the rmcp `CallToolResult.structuredContent`, whose MCP type is an
+object (`{[key: string]: unknown}`; corroborated by `Tool.outputSchema.type = const "object"`). The
+list-shaped arms below therefore MUST NOT serialize as a bare top-level array: each `Vec` arm is wrapped in a
+single-field, mcp-owned object struct — `IssueList{ issues }` (shared by `IssueOutput::Issues` and
+`QueryOutput::Issues`), `CountList{ counts }`, `DepList{ deps }`, `CycleList{ cycles }` — so its wire value is
+`{"issues":[…]}` / `{"counts":[…]}` / `{"deps":[…]}` / `{"cycles":[…]}`, never `[…]`. This is the ONE place
+where materializing DOES change wire bytes (the `query`/`dep`/`issue` list results were bare arrays before) — a
+deliberate structural fix, wire-visible, so it moves `CONTRACT_HASH` and forces a `CONTRACT_VERSION` bump
+(§5.4, jointly with §5.2a). The scalar/object arms (`IdOnly`, `Issue`, `CloseOutcome`, `DeletePlanOutput`,
+`DepAdded`/`DepRemoved`, `DepTree`, `SyncOutput`, `DiagnosticReport`) already serialize as objects and are
+UNCHANGED; the enums stay `#[serde(untagged)]` (each arm remains transparent — only a wrapped arm's OWN value
+shape changes). The §5.4 resource read bodies (`unblock://issues/ready`/`blocked` → `Vec<Issue>`) are NOT
+affected: a resource read returns TEXT content (`ReadResourceResult.contents[].text`), not `structuredContent`,
+so a bare-array JSON string there is spec-legal. Enforced by an assertion that each tool's live
+`structuredContent` is a JSON object.
+
 ```rust
 // issue — the 5 success shapes of the 8 actions:
 #[derive(Serialize, JsonSchema)] #[serde(untagged)]
 pub enum IssueOutput {
     Id(IdOnly),                        // quick-create
     Issue(Box<Issue>),                 // create / show / reopen / restore
-    Issues(Vec<Issue>),                // multi-id update; ALSO create_bulk (D22 — N created issues)
+    Issues(IssueList),                 // multi-id update; ALSO create_bulk (D22 — N); {"issues":[…]} object-wrap (CD-2)
     Close(Box<CloseOutcome>),          // close — suggest_next -> newly_unblocked (FR-11)
     Delete(DeletePlanOutput),          // the resolved delete plan (was the ad-hoc delete_plan_json)
 }
 #[derive(Serialize, JsonSchema)] pub struct IdOnly { pub id: String }
+#[derive(Serialize, JsonSchema)] pub struct IssueList { pub issues: Vec<Issue> }   // CD-2 object-wrap: {"issues":[…]} (shared by IssueOutput + QueryOutput)
 #[derive(Serialize, JsonSchema)]
 pub struct DeletePlanOutput { pub mode: DeleteModeOutput, pub targets: Vec<String>, pub cascade_children: Vec<String> }
 #[derive(Serialize, JsonSchema)] #[serde(rename_all = "snake_case")]
@@ -1672,19 +1718,22 @@ pub enum DeleteModeOutput { Tombstone, Cascade, Hard, DryRun }   // From<DeleteM
 
 // query:
 #[derive(Serialize, JsonSchema)] #[serde(untagged)]
-pub enum QueryOutput { Issues(Vec<Issue>), Counts(Vec<CountBucket>) }  // Issues = list/ready/blocked/search/stale
+pub enum QueryOutput { Issues(IssueList), Counts(CountList) }  // Issues = list/ready/blocked/search/stale; CD-2 object-wrap
+#[derive(Serialize, JsonSchema)] pub struct CountList { pub counts: Vec<CountBucket> }   // CD-2 object-wrap: {"counts":[…]}
 
 // dep:
 #[derive(Serialize, JsonSchema)] #[serde(untagged)]
 pub enum DepOutput {
     Added(DepAdded),                   // {"added":true}   (was ad-hoc json!)
     Removed(DepRemoved),               // {"removed":true} (was ad-hoc json!)
-    Deps(Vec<Dependency>),
+    Deps(DepList),                     // {"deps":[…]} object-wrap (CD-2)
     Tree(DepTree),                     // tree AND graph (Session::dependency_graph returns DepTree)
-    Cycles(Vec<Vec<String>>),          // ordered cycle-path witnesses (§3.2.1, D19)
+    Cycles(CycleList),                 // {"cycles":[…]} object-wrap (CD-2); ordered cycle-path witnesses (§3.2.1, D19)
 }
 #[derive(Serialize, JsonSchema)] pub struct DepAdded { pub added: bool }
 #[derive(Serialize, JsonSchema)] pub struct DepRemoved { pub removed: bool }
+#[derive(Serialize, JsonSchema)] pub struct DepList { pub deps: Vec<Dependency> }        // CD-2 object-wrap: {"deps":[…]}
+#[derive(Serialize, JsonSchema)] pub struct CycleList { pub cycles: Vec<Vec<String>> }   // CD-2 object-wrap: {"cycles":[…]}
 
 // sync — output = SyncOutput (G-23a): mcp-owned wrapper over the two model report DTOs.
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -1767,9 +1816,10 @@ pub struct SchemaBundle {
     // D25 — the shared in-band error output every tool may return with `is_error = true` (FR-11):
     // schema_for!(StructuredError), published ONCE (the rmcp `is_error` flag is the channel
     // discriminator — folding it into each per-tool union would misstate the discriminator and
-    // duplicate one shape 7 times). Transitively via $defs the bundle pins IdOnly, SyncOutput,
-    // ExportReport/ImportReport, CountBucket, CloseOutcome, DepTree, Dependency, DiagnosticReport,
-    // StructuredError, and Issue — so the resource payloads above are pinned too.
+    // duplicate one shape 7 times). Transitively via $defs the bundle pins IdOnly, the CD-2 list
+    // wrappers (IssueList/CountList/DepList/CycleList), SyncOutput, ExportReport/ImportReport,
+    // CountBucket, CloseOutcome, DepTree, Dependency, DiagnosticReport, StructuredError, and Issue —
+    // so the resource payloads above are pinned too.
     pub error: Value,
 }
 ```
@@ -1790,6 +1840,17 @@ forward rule). **Golden-only set
 content is guidance, not machine contract; prompt NAMES are version-coupled — live-vs-builder
 parity + hash; tool/resource/prompt DESCRIPTION strings are version-coupled only in their
 capabilities-document copies) and the redundant per-crate schema/exit-table goldens.
+
+**MCP-conformance wire change (2026-07-09 — the gate firing as designed).** Two live-probe conformance
+drifts against strict MCP clients are fixed spine-first: the §5.2a input-root-type injection (CD-1) AND the
+§5.3 output object-wrap (CD-2). Each changes the bytes of the schema-bundle tool schemas (`schema_for!` of
+the six tagged-enum inputs / of `IssueOutput`/`QueryOutput`/`DepOutput`), so BOTH move `CONTRACT_HASH`. They
+are delivered JOINTLY as ONE bump — `CONTRACT_VERSION` `unblock.mcp.v1.2` → `unblock.mcp.v1.3` (unblock-mcp
+`options.rs`) — with `CONTRACT_HASH` re-pinned and the `schema_bundle` + `capabilities` goldens re-blessed
+(splitting them would force a wasteful `v1.2→v1.3→v1.4` double bump + double re-pin). This is the FR-12 drift
+gate proving itself again: an intentional schema change moves the digest by design. *(Spec-first: this clause
+lands first; the code — the `extend` attributes, the wrapper structs, the version bump/re-pin/re-bless, and
+the strengthened conformance tests — follows in the paired implementation change.)*
 
 ### 5.5 Prompts
 
