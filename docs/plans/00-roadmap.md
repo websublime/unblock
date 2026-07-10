@@ -44,7 +44,7 @@ pass as hard gates; unblock dogfoods its own repo (issues imported from `bd` via
 | FR-5 | Typed dependency edges + graph (`petgraph` traversal, `blocks`-cycle rejection) |
 | FR-7 / FR-8 | Optional JSONL export/import (atomic write; conflict-marker + malformed-JSON rejection; path confinement) |
 | FR-26 | One-shot best-effort `bd` → unblock import (D16/D24) |
-| FR-9 / FR-10 | Single shared engine; in-process write `Semaphore` (D14); read fast path |
+| FR-9 / FR-10 | Single shared engine; in-process write `Semaphore` (D14) + cross-process advisory `.unblock/.write.lock` (D31); read fast path |
 | FR-11 / FR-12 | Agent contract: structured errors (`code`/`message`/`hint`/`retryable`), 0–8 exit codes + MCP error parity; self-describing `capabilities`/`schema` versioned by `contract_version` |
 | FR-13 (subset) | Layered config: CLI > env (`UNBLOCK_*`) > project `config.toml` > defaults |
 | FR-14 | Workspace bootstrap: `init [--prefix]`, `agents` (AGENTS.md) |
@@ -170,9 +170,11 @@ config split + keychain credential resolution), `unblock-engine` (write topology
 - TLS/HTTP transitive surface only enters builds that opt into remote (NFR-10 must stay green on default build).
 - Lock-time confirmations: the embedded-replicas-vs-Turso-Sync default (fresh research at v1.2 lock) and the
   "dist artifacts enable `remote`" distribution call.
-- The D14 **"single-serve per workspace"** wording gets a topology review here (cross-machine primary
-  serialization); that review also covers the **local two-writer / co-tenancy** case surfaced at v1.5 (a TUI
-  and an agent serve on one machine — roadmap §6).
+- The D14 **"single-serve per workspace"** wording: the **local** (single-machine) half is **RESOLVED by D31**
+  (2026-07-09) — child-per-client is the supported topology, cross-process serialization restored via the
+  `.unblock/.write.lock` advisory lock — so the v1.2 topology review now covers only the **cross-machine
+  primary-serialization** half; the **local two-writer / co-tenancy** case surfaced at v1.5 (a TUI and an agent
+  serve on one machine — roadmap §6) is likewise covered by D31, not deferred.
 - *Answered 2026-07-07 (dropped):* the offline-first question — decided above (remote writes require network;
   reads stay local; no queue-and-reconcile in v1.2).
 - *Deferred 2026-07-07 (dropped as a v1.2 question):* multi-writer reconciliation (LWW-vs-oplog) — moot under
@@ -344,12 +346,13 @@ stdio — no new transport). **No Node build stage, no npm gate** (removed with 
 - The milestone-nesting fork (roadmap §4) shapes the text roadmap/burnup screen.
 - Multi-process against one **local** `unblock.db`: because the TUI spawns its **own** `unblock serve` child, a
   TUI process **and** an agent on the same machine are **two independent local writers** — the in-process write
-  `Semaphore` (D14) serializes within one serve, **not across two** — so this within-machine co-tenancy is
-  **best-effort** (correct-but-not-the-supported-path, PRD §8.2 / D14), held only by SQLite WAL + `busy_timeout`
-  (NFR-3). This is **distinct** from the cross-machine v1.2 case (one local serve per machine; all writes
-  serialize at the shared primary — roadmap §3, PRD §8.2). The D14 "single-serve per workspace" wording gets
-  the topology review the v1.2 roadmap already promises (roadmap §3), and this local two-writer case is part of
-  that review.
+  `Semaphore` (D14) serializes within one serve, **not across two**, so cross-process serialization is the
+  **restored `.unblock/.write.lock` advisory lock (D31)**: this within-machine co-tenancy is now the **SUPPORTED**
+  topology (child-per-client, D31), correct-by-construction, with `BEGIN IMMEDIATE` + native `busy_timeout`
+  (NFR-3) as the WAL-level backstop and NFS/SMB the documented residual. This is **distinct** from the
+  cross-machine v1.2 case (one local serve per machine; all writes serialize at the shared primary — roadmap §3,
+  PRD §8.2). The v1.2 topology review the roadmap already promises (roadmap §3) now covers only the cross-machine
+  primary-serialization half; the local two-writer case is **RESOLVED by D31**.
 
 ---
 
