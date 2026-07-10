@@ -31,6 +31,32 @@ pub(crate) const WRITE_PERMITS: usize = 1;
 #[derive(Debug)]
 pub(crate) struct WriteGuard(#[allow(dead_code)] OwnedSemaphorePermit);
 
+/// The combined guard a mutation holds for its WHOLE span (D14 + D31): the in-process write permit
+/// (OUTER) plus the cross-process advisory `.unblock/.write.lock` guard (INNER).
+///
+/// Fields drop in **declaration order**, so the file lock (inner) is released **before** the permit
+/// (outer) — the release-inner-first discipline (spine §4.2): acquire permit → `.write.lock`, release
+/// `.write.lock` → permit. `_lock` is `None` on the in-memory path (no cross-process file lock). A
+/// dropped future before commit releases **both** (RAII — the cancel-safety contract, NFR-5): the
+/// permit becomes reusable and the advisory lock is freed for the next writer.
+pub(crate) struct MutationGuard {
+    /// The cross-process advisory `.write.lock` guard (D31) — INNER; dropped FIRST. `None` in-memory.
+    _lock: Option<unblock_storage::WriteLockGuard>,
+    /// The in-process write permit (D14) — OUTER; dropped LAST.
+    _permit: WriteGuard,
+}
+
+impl MutationGuard {
+    /// Bundle the acquired write permit (outer) with the acquired `.write.lock` guard (inner), fixing
+    /// the release-inner-first drop order via field declaration order.
+    pub(crate) fn new(lock: Option<unblock_storage::WriteLockGuard>, permit: WriteGuard) -> Self {
+        Self {
+            _lock: lock,
+            _permit: permit,
+        }
+    }
+}
+
 /// Acquire the single write permit, shutdown-aware (spine §4.2).
 ///
 /// Checks the cooperative shutdown flag **first** — if a shutdown is in progress the call fails fast
