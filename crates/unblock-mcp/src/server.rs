@@ -212,16 +212,21 @@ impl ServerHandler for UnblockServer {
 
     /// Read a resource by URI (read-only, FR-10). A miss → `resource_not_found` (-32002); a domain
     /// error is surfaced as `ErrorData` (resources have no in-band channel like tools do).
+    ///
+    /// The body is stamped `mimeType: application/json` (CD-5) — the same type `resources/list` and
+    /// `resources/templates/list` advertise. rmcp's [`ResourceContents::text`] hardcodes the
+    /// non-IANA `"text"`, so we override it via [`ResourceContents::with_mime_type`]; the body bytes
+    /// are unchanged.
     async fn read_resource(
         &self,
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, ErrorData> {
         match self.read_resource_body(&request.uri).await {
-            Ok(body) => Ok(ReadResourceResult::new(vec![ResourceContents::text(
-                body.to_string(),
-                request.uri,
-            )])),
+            Ok(body) => Ok(ReadResourceResult::new(vec![
+                ResourceContents::text(body.to_string(), request.uri)
+                    .with_mime_type("application/json"),
+            ])),
             Err(structured) => Err(crate::error::to_rmcp_error_data(&structured)),
         }
     }
