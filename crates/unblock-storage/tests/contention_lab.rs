@@ -1301,6 +1301,10 @@ async fn open_locked(db: &Path, lock_timeout_ms: u64) -> LibsqlStorage {
 /// bound under an ASYMMETRIC serve+CLI mix, plus the migrate-vs-serve `timeout=0` refusal (AC-8/AC-10).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn write_lock_flock_contention_and_fairness() {
+    // Serialize against the M0 CPU legs (whole-process CPU is attributable to this test — see
+    // `GATE_SERIAL`), so the section-(0) no-hot-spin CPU witness below is clean.
+    let _serial = GATE_SERIAL.lock().await;
+
     let dir = TempDir::new().expect("tempdir");
     let db = dir.path().join("unblock.db");
     open_locked(&db, unblock_storage::DEFAULT_WRITE_LOCK_TIMEOUT_MS)
@@ -1308,6 +1312,44 @@ async fn write_lock_flock_contention_and_fairness() {
         .migrate()
         .await
         .expect("migrate");
+
+    // --- (0) NFR-3 non-vacuity (AC-3): the CONTENDED poll SLEEPS, it does not busy-spin. ---
+    // A holder holds the flock for HOLD; a waiter (timeout >> HOLD) acquires and waits ~HOLD. Under
+    // `GATE_SERIAL` the whole-process CPU during that wait is this test's: a `tokio::time::sleep` poll
+    // parks every worker (cpu ~ 0), a busy-spin would burn a core (cpu ~ wall). A `panic!`/removal
+    // mutation on the sleep-poll is caught RED here (the ratio jumps to ~1).
+    {
+        const HOLD: Duration = Duration::from_millis(300);
+        let holder = open_locked(&db, unblock_storage::DEFAULT_WRITE_LOCK_TIMEOUT_MS).await;
+        let waiter = open_locked(&db, unblock_storage::DEFAULT_WRITE_LOCK_TIMEOUT_MS).await;
+        let held = holder.acquire_write_lock().await.expect("holder holds");
+        let releaser = tokio::spawn(async move {
+            tokio::time::sleep(HOLD).await;
+            drop(held); // release after HOLD so the waiter's poll finally succeeds
+        });
+        let cpu0 = ProcessTime::now();
+        let wall0 = Instant::now();
+        let g = waiter
+            .acquire_write_lock()
+            .await
+            .expect("waiter acquires after HOLD (bounded, never a hang)");
+        let wall = wall0.elapsed();
+        let cpu = cpu0.elapsed();
+        drop(g);
+        releaser.await.expect("releaser");
+        assert!(
+            wall >= Duration::from_millis(200),
+            "the waiter must actually have WAITED (~HOLD) for the poll to be measured, got {wall:?}"
+        );
+        assert!(
+            cpu.as_secs_f64() < 0.5 * wall.as_secs_f64(),
+            "the contended poll must SLEEP, not busy-spin (cpu {cpu:?} vs wall {wall:?}; a spin burns cpu ~ wall)"
+        );
+        println!(
+            "D31 no-hot-spin: contended-wait cpu={cpu:?} wall={wall:?} (ratio {:.3}, spin would be ~1.0)",
+            cpu.as_secs_f64() / wall.as_secs_f64()
+        );
+    }
 
     // --- (1) flock-contention witness: fail-fast probes while ONE holder holds the flock ---
     // The witness is NON-SPINNING by construction: each probe opens with `lock_timeout_ms = 0`, so
