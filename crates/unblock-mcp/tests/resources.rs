@@ -42,6 +42,24 @@ async fn read_resource_text(
     serde_json::from_str(&text).expect("resource body is valid JSON")
 }
 
+/// Read a resource URI over the live client and return the single content's `mimeType` (CD-5).
+async fn read_resource_mime_type(
+    client: &rmcp::service::RunningService<rmcp::service::RoleClient, ()>,
+    uri: &str,
+) -> Option<String> {
+    let result = client
+        .read_resource(ReadResourceRequestParams::new(uri))
+        .await
+        .expect("read_resource round-trips");
+    let contents = result.contents.into_iter().next().expect("one content");
+    match contents {
+        rmcp::model::ResourceContents::TextResourceContents { mime_type, .. } => mime_type,
+        rmcp::model::ResourceContents::BlobResourceContents { .. } => {
+            panic!("expected text resource contents, got a blob")
+        }
+    }
+}
+
 /// Read a resource URI expecting a not-found error; return its `(code, data)`.
 async fn read_resource_err(
     client: &rmcp::service::RunningService<rmcp::service::RoleClient, ()>,
@@ -258,6 +276,35 @@ async fn missing_id_with_no_neighbours_falls_back_to_query_hint() {
         "empty workspace falls back to the query{{kind:list}} hint, got {:?}",
         data["hint"]
     );
+
+    let _ = client.cancel().await;
+    let _ = server.cancel().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn read_resource_stamps_application_json_mime_type() {
+    // CD-5: a `resources/read` body is stamped `mimeType: application/json` — the same type the
+    // resources/list + templates/list entries advertise (rmcp hardcodes the non-IANA `"text"`; RED
+    // before the fix, GREEN after). Cover a concrete document and a per-issue read.
+    let session = session().await;
+    let issue = seed_one(&session, "seeded").await;
+    let id = issue.id.clone();
+    let (client, server, _cancel) = connect(session).await;
+
+    for uri in [
+        "unblock://capabilities".to_string(),
+        "unblock://schema".to_string(),
+        "unblock://issues/ready".to_string(),
+        "unblock://issues/blocked".to_string(),
+        format!("unblock://issues/{id}"),
+    ] {
+        let mime = read_resource_mime_type(&client, &uri).await;
+        assert_eq!(
+            mime.as_deref(),
+            Some("application/json"),
+            "resources/read of `{uri}` MUST stamp mimeType application/json (CD-5)"
+        );
+    }
 
     let _ = client.cancel().await;
     let _ = server.cancel().await;
