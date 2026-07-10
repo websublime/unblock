@@ -119,12 +119,21 @@ Surfaced during development, tracked here (the repo's system of record) so they 
   uses targeted features (D15/NFR-10 keep the libsql `remote` TLS stack off the gate); a remote-free
   `--features toon` regression guard is a candidate follow-up (not added here — it is a gate change).
 
-- **⏳ PARTIAL — MCP-conformance fixes CD-1..CD-5 (impl follow-ups to the 2026-07-09 spec-first spine
+- **⏳ PARTIAL — MCP-conformance fixes CD-1..CD-6 (impl follow-ups to the 2026-07-09 spec-first spine
   reconciliation logged above).** A trackable home so the code follow-ups are not lost. **✅ CD-1 + CD-2 LANDED (ONE
   joint `CONTRACT_VERSION` `unblock.mcp.v1.2` → `unblock.mcp.v1.3` bump):** `#[schemars(extend("type" = "object"))]`
   on the six tagged-enum inputs + the `IssueList`/`CountList`/`DepList`/`CycleList` output wrappers + `CONTRACT_HASH`
   re-pin + `schema_bundle`/`capabilities` golden re-bless + the strengthened `every_tool_schema_is_an_object` and a
-  new live `tools[*].inputSchema.type == "object"` gate (spine §5.2a/§5.3; crate-plan F-7). **⏳ Pure-impl siblings
-  STILL OPEN (no spine edit, no `CONTRACT_HASH` impact):** CD-3 a `list_resources` override for the 4 static URIs
-  (re-align to PRD §12.2); CD-4 an `initialize` unsupported-`protocolVersion` clamp; CD-5 the read-path `mimeType` →
-  `application/json`. Whether any of these warrants a PRD §4 D-id is an open question for Miguel.
+  new live `tools[*].inputSchema.type == "object"` gate (spine §5.2a/§5.3; crate-plan F-7). **✅ CD-3 + CD-4 + CD-5
+  LANDED (pure impl in the `ServerHandler`, no spine edit, no `CONTRACT_HASH` impact):** CD-3 a hand-written
+  `list_resources` override advertises the 4 concrete URIs (ready/blocked/capabilities/schema) with `issues/{id}` the
+  sole template (re-align to PRD §12.2); CD-4 a `VersionClampingTransport` decorator clamps an UNSUPPORTED inbound
+  `initialize` `protocolVersion` (outside rmcp's `KNOWN_VERSIONS`) to `ProtocolVersion::LATEST` BEFORE rmcp's
+  serve-loop negotiation (a pure `ServerHandler::initialize` override is empirically insufficient — rmcp 1.7's
+  serve-loop re-derives the wire version as a lexical `min(client, handler)` AFTER the handler); CD-5 the read-path
+  `mimeType` → `application/json`. **⏳ CD-6 OPEN (hardening) — decouple CD-4 from the rmcp-internal negotiation
+  detail:** CD-4's clamp relies on rmcp 1.7's undocumented serve-loop lexical min-negotiation, so an rmcp bump could
+  shift semantics (mitigated today by the 4 `protocol_version` tests). CD-6 = add an rmcp-negotiation-behavior pin
+  (assert the version-derivation contract so an upgrade that changes it fails loudly) and/or pursue an upstream rmcp
+  fix making unsupported-version clamping a first-class handler contract, then simplify the transport wrapper if it
+  lands. Whether any CD warrants a PRD §4 D-id is an open question for Miguel.
