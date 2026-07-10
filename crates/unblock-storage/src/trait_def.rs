@@ -14,6 +14,7 @@ use unblock_model::{
     CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue, ListFilters,
 };
 
+use crate::WriteLockGuard;
 use crate::error::StorageError;
 use crate::filters::{DeletePlan, IssuePatch};
 
@@ -67,6 +68,21 @@ pub trait Storage: Send + Sync {
     /// libsql impl widens its internal `i32` reader via `i64::from(..)` so no backend width leaks into
     /// the contract. Backs the engine `Session::migrate() -> MigrateOutcome` (spine §4.1).
     async fn schema_version(&self) -> Result<i64, StorageError>;
+
+    /// Acquire the cross-process advisory write lock (`.unblock/.write.lock`) EXCLUSIVE for the WHOLE
+    /// mutation — the restored beads serializer (D31, a D14 amendment).
+    ///
+    /// The engine (L5) calls this under the write permit and holds the returned guard across the
+    /// `next_child_number` allocation READ **and** the write transaction (the same span as the permit),
+    /// so two `serve` processes on one workspace cannot mint the same `parent.N` or interleave writes
+    /// across processes. It composes BELOW the in-process `Semaphore` (L5) and ABOVE the write-conn
+    /// `Mutex` + `BEGIN IMMEDIATE`. Bounded + non-spinning (NFR-3): a native `try_lock` fast-path then
+    /// an async sleep-poll to the store's `write_lock_timeout_ms`; a timeout surfaces the retryable
+    /// [`StorageError::DatabaseLocked`] (no new `ErrorCode`). Returns a [`WriteLockGuard`] on the
+    /// file-backed path; `Ok(None)` on the in-memory path (no cross-process sharing, so no lock). Reads
+    /// take NO lock (WAL MVCC). Distinct from the vestigial `.unblock.lock` `OrphanedLockFile` target
+    /// (unblock-health is unchanged by D31).
+    async fn acquire_write_lock(&self) -> Result<Option<WriteLockGuard>, StorageError>;
 
     // ---------------------------------------------------------------------------------------------
     // issue CRUD (mutations carry the actor + optional Tier-1 attribution; write Event(s) in-tx)
@@ -379,6 +395,7 @@ fn _assert_object_safe(_: &dyn Storage) {}
 #[cfg(test)]
 mod tests {
     use super::Storage;
+    use crate::WriteLockGuard;
     use crate::error::StorageError;
     use crate::filters::{DeletePlan, IssuePatch};
     use async_trait::async_trait;
@@ -408,6 +425,11 @@ mod tests {
             // An un-bootstrapped stub is honestly unstamped: `PRAGMA user_version` on a fresh DB is 0
             // (this stub's `migrate` returns `NotInitialized`, so it never advances the version).
             Ok(0)
+        }
+
+        async fn acquire_write_lock(&self) -> Result<Option<WriteLockGuard>, StorageError> {
+            // A backend-free stub has no workspace file — no cross-process lock to take.
+            Ok(None)
         }
 
         async fn create_issue(&self, _issue: &Issue, _actor: &str) -> Result<String, StorageError> {

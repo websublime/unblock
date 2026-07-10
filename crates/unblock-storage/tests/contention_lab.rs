@@ -1158,7 +1158,11 @@ async fn open_shared_instances(
 /// Open one instance at `path` per the [`BusyMode`].
 async fn open_one(path: &Path, mode: BusyMode) -> LibsqlStorage {
     match mode {
-        BusyMode::Native => LibsqlStorage::open_local(path).await.expect("open_local"),
+        BusyMode::Native => {
+            LibsqlStorage::open_local(path, unblock_storage::DEFAULT_WRITE_LOCK_TIMEOUT_MS)
+                .await
+                .expect("open_local")
+        }
         BusyMode::ForcedSpin => LibsqlStorage::open_local_with_busy_timeout(path, 0)
             .await
             .expect("open_local_with_busy_timeout(0)"),

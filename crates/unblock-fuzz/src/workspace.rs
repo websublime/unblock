@@ -37,7 +37,11 @@ impl FuzzWorkspace {
     /// Returns a [`StorageError`] if the database cannot be opened or migrated.
     pub async fn open_local_storage(&self) -> Result<LibsqlStorage, StorageError> {
         use unblock_storage::Storage;
-        let storage = LibsqlStorage::open_local(&self.db_path).await?;
+        let storage = LibsqlStorage::open_local(
+            &self.db_path,
+            unblock_storage::DEFAULT_WRITE_LOCK_TIMEOUT_MS,
+        )
+        .await?;
         storage.migrate().await?;
         Ok(storage)
     }

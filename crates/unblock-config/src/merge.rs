@@ -45,6 +45,7 @@ trait LayerView {
     fn output_format(&self) -> Option<OutputFormat>;
     fn jsonl_export(&self) -> Option<bool>;
     fn search_cap(&self) -> Option<usize>;
+    fn write_lock_timeout_ms(&self) -> Option<u64>;
     fn db_filename(&self) -> Option<&str>;
     fn jsonl_filename(&self) -> Option<&str>;
     fn id_prefix(&self) -> Option<&str>;
@@ -85,6 +86,14 @@ impl LayerView for ConfigLayer<'_> {
             ConfigLayer::Cli(_) | ConfigLayer::Env(_) => None,
             ConfigLayer::Project(p) => p.search_cap,
             ConfigLayer::Defaults(d) => Some(d.search_cap),
+        }
+    }
+    fn write_lock_timeout_ms(&self) -> Option<u64> {
+        match self {
+            // write_lock_timeout_ms is a startup key (D31); not a CLI/env override in v1.
+            ConfigLayer::Cli(_) | ConfigLayer::Env(_) => None,
+            ConfigLayer::Project(p) => p.write_lock_timeout_ms,
+            ConfigLayer::Defaults(d) => Some(d.write_lock_timeout_ms),
         }
     }
     fn db_filename(&self) -> Option<&str> {
@@ -165,6 +174,8 @@ pub(crate) fn merge_layers(layers: &[ConfigLayer<'_>]) -> WorkspaceConfig {
             .expect("Defaults layer guarantees a jsonl_export"),
         search_cap: pick(layers, LayerView::search_cap)
             .expect("Defaults layer guarantees a search_cap"),
+        write_lock_timeout_ms: pick(layers, LayerView::write_lock_timeout_ms)
+            .expect("Defaults layer guarantees a write_lock_timeout_ms"),
         db_filename: pick(layers, |l| l.db_filename().map(str::to_string))
             .expect("Defaults layer guarantees a db_filename"),
         jsonl_filename: pick(layers, |l| l.jsonl_filename().map(str::to_string))

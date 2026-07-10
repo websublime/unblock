@@ -39,7 +39,7 @@ async fn shutdown_parks_while_the_bulk_tx_is_held_then_drains_to_commit() {
     std::fs::create_dir_all(&unblock_dir).expect("create .unblock");
     let db_path = unblock_dir.join("unblock.db");
 
-    let inner = LibsqlStorage::open_local(&db_path)
+    let inner = LibsqlStorage::open_local(&db_path, unblock_storage::DEFAULT_WRITE_LOCK_TIMEOUT_MS)
         .await
         .expect("open_local");
     inner.migrate().await.expect("migrate");
@@ -114,9 +114,10 @@ async fn shutdown_parks_while_the_bulk_tx_is_held_then_drains_to_commit() {
     drop(parked);
 
     // A fresh reopen (via `open_local`, the SAME production open path) sees exactly N committed rows.
-    let reopened = LibsqlStorage::open_local(&db_path)
-        .await
-        .expect("fresh reopen");
+    let reopened =
+        LibsqlStorage::open_local(&db_path, unblock_storage::DEFAULT_WRITE_LOCK_TIMEOUT_MS)
+            .await
+            .expect("fresh reopen");
     let filters = ListFilters {
         include_closed: true,
         include_deferred: true,

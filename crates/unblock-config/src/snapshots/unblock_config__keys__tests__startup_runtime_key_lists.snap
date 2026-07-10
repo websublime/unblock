@@ -7,6 +7,7 @@ expression: "(STARTUP_KEYS, RUNTIME_KEYS)"
     "db_filename",
     "jsonl_filename",
     "id_prefix",
+    "write_lock_timeout_ms",
     "backend",
     "deletions_retention_days"
   ],

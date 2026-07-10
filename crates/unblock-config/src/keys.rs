@@ -25,6 +25,9 @@ pub enum StartupKey {
     /// `id_prefix` — the issue-id prefix (D21/T1.8). Fixed for the lifetime of an open workspace
     /// (minted ids must stay stable), so it is a startup-only key.
     IdPrefix,
+    /// `write_lock_timeout_ms` — the `.unblock/.write.lock` acquire timeout (D31/T3.4.1). Fixed at
+    /// open and threaded DOWN to `LibsqlStorage::open_local`, so it is a startup-only key.
+    WriteLockTimeoutMs,
 }
 
 /// A runtime config key — re-readable while a session is live (FR-13).
@@ -54,6 +57,7 @@ pub const STARTUP_KEYS: &[&str] = &[
     "db_filename",
     "jsonl_filename",
     "id_prefix",
+    "write_lock_timeout_ms",
     "backend",
     "deletions_retention_days",
 ];
@@ -74,6 +78,7 @@ pub fn classify(key: &str) -> Option<KeyClass> {
         "backend" => Some(KeyClass::Startup(StartupKey::Backend)),
         "deletions_retention_days" => Some(KeyClass::Startup(StartupKey::DeletionsRetentionDays)),
         "id_prefix" => Some(KeyClass::Startup(StartupKey::IdPrefix)),
+        "write_lock_timeout_ms" => Some(KeyClass::Startup(StartupKey::WriteLockTimeoutMs)),
         "actor" => Some(KeyClass::Runtime(RuntimeKey::Actor)),
         "output_format" => Some(KeyClass::Runtime(RuntimeKey::OutputFormat)),
         "jsonl_export" => Some(KeyClass::Runtime(RuntimeKey::JsonlExport)),
@@ -98,6 +103,7 @@ mod tests {
         "db_filename",
         "jsonl_filename",
         "id_prefix",
+        "write_lock_timeout_ms",
         "deletions_retention_days",
         "backend",
     ];

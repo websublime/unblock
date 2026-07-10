@@ -27,11 +27,16 @@ mod deps;
 mod diagnostics;
 mod events;
 mod ids;
+mod lock;
 mod mappers;
 mod migrations;
 mod mutate;
 mod query;
 mod schema;
+
+// The cross-process advisory write lock (D31) + its public RAII guard, re-exported to the crate root
+// (`unblock_storage::WriteLockGuard`) so `Storage::acquire_write_lock` can name it in its signature.
+pub use lock::WriteLockGuard;
 
 // The `StorageTestkit` impl for `LibsqlStorage` lives **in-module** (gated) so it can reach the
 // `pub(super)` connection accessors (`read`/`write`) and `ids::next_child_number` without widening
@@ -56,6 +61,7 @@ use unblock_model::{
 
 use crate::error::{StorageError, is_busy_locked, map_libsql_err};
 use crate::filters::{DeletePlan, IssuePatch};
+use crate::libsql::lock::WriteLock;
 use crate::trait_def::Storage;
 
 /// Native `busy_timeout`, in milliseconds (spine §3.3, OQ-2 RESOLVED).
@@ -230,6 +236,11 @@ pub struct LibsqlStorage {
     /// Process-internal instrumentation (counters + checkpoint cadence + the test-only
     /// busy-witness/spin toggles). See [`StorageInstrument`].
     instrument: StorageInstrument,
+    /// The cross-process advisory write lock (D31), `Some` on the file-backed path, `None` for the
+    /// in-memory store (connection-private shared cache — no cross-process sharing, so no file lock).
+    /// It encapsulates both the `.write.lock` path (derived from the db-file parent) and the
+    /// configured `write_lock_timeout_ms` (threaded down from `unblock-config` at open).
+    write_lock: Option<WriteLock>,
 }
 
 impl LibsqlStorage {
@@ -238,17 +249,29 @@ impl LibsqlStorage {
     /// Applies the runtime pragmas (WAL, native `busy_timeout`, foreign keys, …) to both the write
     /// and read connections. Does **not** run migrations — call [`Storage::migrate`] next.
     ///
+    /// `lock_timeout_ms` is the bound for acquiring the cross-process advisory `.unblock/.write.lock`
+    /// (D31) — the timeout `unblock-config` threads DOWN here from its `write_lock_timeout_ms` key
+    /// (default [`DEFAULT_WRITE_LOCK_TIMEOUT_MS`](crate::DEFAULT_WRITE_LOCK_TIMEOUT_MS)). The lock file
+    /// path is derived **here** from the db-file parent (no `unblock-config` dependency — no L2→L4
+    /// back-edge).
+    ///
     /// # Errors
     ///
     /// Returns [`StorageError::Backend`] if the database cannot be opened or a pragma fails.
-    pub async fn open_local(path: &Path) -> Result<Self, StorageError> {
+    pub async fn open_local(path: &Path, lock_timeout_ms: u64) -> Result<Self, StorageError> {
         let db = Builder::new_local(path)
             .build()
             .await
             .map_err(map_libsql_err)?;
+        // The cross-process advisory `.write.lock` sits next to the db file (D31); its path is derived
+        // here in L2 from the db-file parent, so storage never reaches up to config (no L2→L4 edge).
+        let write_lock = Some(WriteLock::new(
+            path.parent().unwrap_or_else(|| Path::new(".")),
+            lock_timeout_ms,
+        ));
         // A real file: WAL applies (real WAL + native busy_timeout concurrency, validated by the
         // T0.8 contention lab on a file DB).
-        Self::from_database(db, true, BUSY_TIMEOUT_MS).await
+        Self::from_database(db, true, BUSY_TIMEOUT_MS, write_lock).await
     }
 
     /// Open a local libsql database at `path` with a **non-default** native `busy_timeout`.
@@ -271,7 +294,13 @@ impl LibsqlStorage {
             .build()
             .await
             .map_err(map_libsql_err)?;
-        Self::from_database(db, true, busy_timeout_ms).await
+        // File-backed, so it also carries the D31 advisory lock (default timeout); the forced-spin
+        // control exercises the WAL busy path and does not itself take the flock.
+        let write_lock = Some(WriteLock::new(
+            path.parent().unwrap_or_else(|| Path::new(".")),
+            crate::DEFAULT_WRITE_LOCK_TIMEOUT_MS,
+        ));
+        Self::from_database(db, true, busy_timeout_ms, write_lock).await
     }
 
     /// Open a fresh, process-unique in-memory libsql database shared by the write and read
@@ -308,8 +337,9 @@ impl LibsqlStorage {
             .build()
             .await
             .map_err(map_libsql_err)?;
-        // In-memory: shared-cache, NOT WAL (see the method docs + `apply_pragmas`).
-        Self::from_database(db, false, BUSY_TIMEOUT_MS).await
+        // In-memory: shared-cache, NOT WAL (see the method docs + `apply_pragmas`); a connection-
+        // private in-memory DB has no cross-process sharing, so it takes NO `.write.lock` (`None`).
+        Self::from_database(db, false, BUSY_TIMEOUT_MS, None).await
     }
 
     /// Build the two connections from an opened `Database` and apply the runtime pragmas to each.
@@ -322,6 +352,7 @@ impl LibsqlStorage {
         db: Database,
         file_backed: bool,
         busy_timeout_ms: u64,
+        write_lock: Option<WriteLock>,
     ) -> Result<Self, StorageError> {
         let write_conn = db.connect().map_err(map_libsql_err)?;
         let read_conn = db.connect().map_err(map_libsql_err)?;
@@ -333,6 +364,7 @@ impl LibsqlStorage {
             read_conn,
             busy_timeout_ms,
             instrument: StorageInstrument::default(),
+            write_lock,
         })
     }
 
@@ -543,9 +575,36 @@ async fn passive_checkpoint(conn: &Connection) {
 #[async_trait]
 impl Storage for LibsqlStorage {
     async fn migrate(&self) -> Result<(), StorageError> {
+        // Migration bypasses `with_immediate_tx`, so it takes the cross-process advisory `.write.lock`
+        // EXPLICITLY (D31) — but ONLY when it actually ADVANCES the schema. An already-current DB is an
+        // idempotent no-op that takes NO lock, so a normal multi-serve open never fails on contention.
+        // The lock decision uses a lock-free `PRAGMA user_version` read on the READ connection; the
+        // file lock (when needed) is acquired with `timeout=0` (fail-fast — a concurrent mid-mutation
+        // writer makes migrate refuse with `DatabaseLocked` rather than interleave a schema change) and
+        // BEFORE the write-conn `Mutex` (the same acquire order the mutation path uses).
+        let _lock_guard = if let Some(lock) = &self.write_lock {
+            let found = migrations::current_user_version(self.read()).await?;
+            if found == schema::CURRENT_SCHEMA_VERSION {
+                None
+            } else {
+                Some(lock.acquire_with_timeout(Duration::ZERO).await?)
+            }
+        } else {
+            None
+        };
         // Migration is a write-path operation: serialize it through the write connection.
         let conn = self.write().await;
         migrations::run_migrations(&conn).await
+    }
+
+    async fn acquire_write_lock(&self) -> Result<Option<WriteLockGuard>, StorageError> {
+        // D31: acquire the cross-process advisory `.write.lock` EXCLUSIVE for the WHOLE mutation. The
+        // engine (L5) holds the returned guard across the allocation READ + the write tx — a legal
+        // L5→L2 down-call. `Ok(None)` on the file-less in-memory path (no cross-process sharing).
+        match &self.write_lock {
+            Some(lock) => Ok(Some(lock.acquire().await?)),
+            None => Ok(None),
+        }
     }
 
     async fn integrity_check(&self) -> Result<Vec<String>, StorageError> {
@@ -769,7 +828,9 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("mkdir");
         let path = dir.join("unblock.db");
 
-        let storage = LibsqlStorage::open_local(&path).await.expect("open");
+        let storage = LibsqlStorage::open_local(&path, crate::DEFAULT_WRITE_LOCK_TIMEOUT_MS)
+            .await
+            .expect("open");
         let conn = storage.read().clone();
         let mut rows = conn
             .query("PRAGMA journal_mode", ())
@@ -815,7 +876,9 @@ mod tests {
             let path = dir.join("unblock.db");
             let wal_path = dir.join("unblock.db-wal");
 
-            let storage = LibsqlStorage::open_local(&path).await.expect("open");
+            let storage = LibsqlStorage::open_local(&path, crate::DEFAULT_WRITE_LOCK_TIMEOUT_MS)
+                .await
+                .expect("open");
             storage.migrate().await.expect("migrate");
             storage
                 .instrument()
