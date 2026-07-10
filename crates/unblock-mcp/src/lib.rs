@@ -39,6 +39,8 @@ pub use server::serve;
 
 // Test-only seam (feature-gated, `#[doc(hidden)]`): the in-process MCP lifecycle test drives the
 // real server over an in-memory duplex transport via these. NEVER part of the shipped contract.
+// `serve_duplex_unclamped_for_test` is the CD-6 assumption-pin variant that OMITS the
+// `VersionClampingTransport` so `tests/protocol_version.rs` can pin rmcp's raw serve-loop negotiation.
 #[cfg(feature = "test-util")]
 #[doc(hidden)]
-pub use server::{UnblockServer, serve_duplex_for_test};
+pub use server::{UnblockServer, serve_duplex_for_test, serve_duplex_unclamped_for_test};

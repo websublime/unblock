@@ -285,6 +285,23 @@ where
 /// be simultaneously `LATEST` and `<= "1999-01-01"`; verified empirically). The only place we can
 /// enforce conformance is BEFORE that negotiation, by clamping the inbound request. SUPPORTED (older)
 /// versions are left untouched so the loop still echoes them, exactly as the spec requires.
+///
+/// ## Assumption pin (CD-6) — this clamp is COUPLED to an UNDOCUMENTED rmcp internal
+///
+/// The correctness of this wrapper depends entirely on rmcp 1.7's serve-loop deriving the wire version
+/// as a lexical `min(client, handler)` (above). That is an rmcp implementation detail, not a documented
+/// contract, so a future rmcp bump could change it and silently make this clamp wrong or redundant.
+/// Two `tests/protocol_version.rs` pins fail LOUDLY if that happens, pointing maintainers straight here:
+/// - `rmcp_serve_loop_echoes_unsupported_below_latest_version_verbatim` drives the RAW, UNCLAMPED serve
+///   path ([`serve_duplex_unclamped_for_test`]) and asserts rmcp still echoes an unsupported
+///   below-latest version verbatim — the exact misbehaviour this wrapper compensates for;
+/// - `known_versions_and_latest_match_the_clamp_key_set` pins rmcp's [`ProtocolVersion::KNOWN_VERSIONS`]
+///   / [`ProtocolVersion::LATEST`] (the set this clamp keys on) to their expected values.
+///
+/// If either pin fails, an rmcp upgrade changed the version-negotiation assumption — re-evaluate (and
+/// possibly REMOVE) this transport before touching the pin. The eventual CD-6 endgame is an UPSTREAM
+/// rmcp fix making unsupported-version clamping a first-class `ServerHandler` contract, after which this
+/// wrapper can be deleted; that upstream work is OUT OF SCOPE here (this crate only pins the assumption).
 struct VersionClampingTransport<T> {
     /// The wrapped transport; every call delegates to it, `receive` after the clamp.
     inner: T,
@@ -327,6 +344,11 @@ where
 /// "Supported" is rmcp's [`ProtocolVersion::KNOWN_VERSIONS`] set (the versions this SDK, and thus this
 /// server, actually speaks). A version outside that set is clamped to `LATEST`; a version inside it is
 /// preserved so rmcp's serve-loop still echoes it (spec: a supported requested version MUST be echoed).
+///
+/// The `KNOWN_VERSIONS`/`LATEST` set this keys on is pinned by
+/// `known_versions_and_latest_match_the_clamp_key_set` (`tests/protocol_version.rs`); an rmcp bump that
+/// adds, removes, or re-orders supported versions fails that pin — see [`VersionClampingTransport`] for
+/// the full CD-6 coupling.
 fn clamp_unsupported_initialize_version(message: &mut ClientJsonRpcMessage) {
     if let JsonRpcMessage::Request(JsonRpcRequest {
         request: ClientRequest::InitializeRequest(request),
@@ -362,6 +384,39 @@ where
 {
     let server = UnblockServer::new(session, quotas, instructions);
     serve_handler(server, transport, cancel).await
+}
+
+/// Build and run the server over an arbitrary in-memory transport WITHOUT the
+/// [`VersionClampingTransport`] — the RAW rmcp serve path (TEST-ONLY, `test-util` feature).
+///
+/// This is the CD-6 assumption-pin seam. Unlike [`serve_duplex_for_test`] (which routes through
+/// [`serve_handler`] and therefore wraps the transport in [`VersionClampingTransport`]), this helper
+/// calls `serve_with_ct` on the caller's transport DIRECTLY, installing NO clamp. It exists ONLY so the
+/// `protocol_version` pin (`tests/protocol_version.rs`) can observe — and fail loudly on a change to —
+/// rmcp 1.7's UN-guarded serve-loop version negotiation that [`clamp_unsupported_initialize_version`]
+/// compensates for. NEVER route a shipped path through this: it deliberately reproduces the
+/// spec-non-conformant echo of an unsupported requested version.
+///
+/// # Errors
+/// - [`McpServerError::Transport`] if the rmcp service fails to initialize over the transport.
+#[cfg(feature = "test-util")]
+#[doc(hidden)]
+pub async fn serve_duplex_unclamped_for_test<T, E, A>(
+    session: Arc<Session>,
+    quotas: Quotas,
+    instructions: Option<String>,
+    transport: T,
+    cancel: tokio_util::sync::CancellationToken,
+) -> Result<rmcp::service::RunningService<RoleServer, UnblockServer>, McpServerError>
+where
+    T: rmcp::transport::IntoTransport<RoleServer, E, A>,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    let server = UnblockServer::new(session, quotas, instructions);
+    server
+        .serve_with_ct(transport, cancel)
+        .await
+        .context(TransportSnafu)
 }
 
 /// Build the structured not-found for an unknown resource URI (→ -32002 at the boundary).
