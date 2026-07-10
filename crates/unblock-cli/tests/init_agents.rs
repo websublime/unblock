@@ -20,7 +20,10 @@ fn init_scaffolds_only_config_and_db() {
     assert!(ws.config_path().exists(), "config.toml created");
     assert!(ws.db_path().exists(), "unblock.db created + migrated");
 
-    // The `.unblock/` dir holds EXACTLY these two entries — no extras (AF-3, D13/NFR-6/model-B).
+    // The `.unblock/` dir holds EXACTLY these entries — no extras (AF-3, D13/NFR-6/model-B). The
+    // `.write.lock` is the D31 cross-process advisory write lock (a pure `File::try_lock` target, no
+    // content), created when migrate's fresh-bootstrap takes the exclusive lock; it is a documented
+    // `.unblock/` artifact (PRD §7 on-disk-artifacts), distinct from the vestigial `.unblock.lock`.
     let entries: BTreeSet<String> = std::fs::read_dir(ws.unblock_dir())
         .expect("read .unblock")
         .map(|e| {
@@ -30,13 +33,13 @@ fn init_scaffolds_only_config_and_db() {
                 .into_owned()
         })
         .collect();
-    let expected: BTreeSet<String> = ["config.toml", "unblock.db"]
+    let expected: BTreeSet<String> = ["config.toml", "unblock.db", ".write.lock"]
         .into_iter()
         .map(str::to_string)
         .collect();
     assert_eq!(
         entries, expected,
-        "init must scaffold ONLY config.toml + unblock.db; no .gitignore/metadata.json/issues.jsonl"
+        "init must scaffold config.toml + unblock.db + the D31 .write.lock; no .gitignore/metadata.json/issues.jsonl"
     );
     // No AGENTS.md is written by init (agents is a SEPARATE command).
     assert!(
