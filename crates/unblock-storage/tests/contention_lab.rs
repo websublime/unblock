@@ -1279,3 +1279,137 @@ fn print_diagnostics(
     println!("INTEGRITY: {integrity:?} (empty = clean)");
     println!("--------------------------------------\n");
 }
+
+// =====================================================================================================
+// D31 / T3.4.1 — the cross-process `.write.lock` contention extension (AC-8 / AC-10).
+//
+// The M0 legs above write via `create_issue` and take NO flock, so they REMAIN the **no-lock CONTROL**
+// that keeps the WAL busy-witness valid: the flock serializes UPSTREAM of `BEGIN IMMEDIATE`, so a
+// flock-in-the-path leg would read a 0 WAL witness (OQ-4). Here we witness the flock DIRECTLY (a
+// separate, non-spinning `try_lock`→`WouldBlock` witness) and pin a PROVISIONAL fairness ceiling under
+// an ASYMMETRIC serve+CLI mix + the migrate-vs-serve `timeout=0` refusal.
+// =====================================================================================================
+
+/// Open one `LibsqlStorage` on `db` with the given `.write.lock` acquire timeout.
+async fn open_locked(db: &Path, lock_timeout_ms: u64) -> LibsqlStorage {
+    LibsqlStorage::open_local(db, lock_timeout_ms)
+        .await
+        .expect("open_local")
+}
+
+/// D31 (T3.4.1) — the `.write.lock` flock-contention witness + a PROVISIONAL p99-write-stall fairness
+/// bound under an ASYMMETRIC serve+CLI mix, plus the migrate-vs-serve `timeout=0` refusal (AC-8/AC-10).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn write_lock_flock_contention_and_fairness() {
+    let dir = TempDir::new().expect("tempdir");
+    let db = dir.path().join("unblock.db");
+    open_locked(&db, unblock_storage::DEFAULT_WRITE_LOCK_TIMEOUT_MS)
+        .await
+        .migrate()
+        .await
+        .expect("migrate");
+
+    // --- (1) flock-contention witness: fail-fast probes while ONE holder holds the flock ---
+    // The witness is NON-SPINNING by construction: each probe opens with `lock_timeout_ms = 0`, so
+    // `acquire_write_lock()` is a single `try_lock` (no poll) that returns `WouldBlock` -> DatabaseLocked.
+    let k = available_parallelism().clamp(2, 8);
+    let holder = open_locked(&db, unblock_storage::DEFAULT_WRITE_LOCK_TIMEOUT_MS).await;
+    let mut probes = Vec::with_capacity(k);
+    for _ in 0..k {
+        probes.push(open_locked(&db, 0).await);
+    }
+
+    let held = holder.acquire_write_lock().await.expect("holder acquires");
+    let mut wouldblock = 0usize;
+    for p in &probes {
+        match p.acquire_write_lock().await {
+            Err(StorageError::DatabaseLocked) => wouldblock += 1,
+            Ok(_) => panic!("a probe acquired the flock while the holder held it"),
+            Err(e) => panic!("unexpected probe error: {e:?}"),
+        }
+    }
+    assert_eq!(
+        wouldblock, k,
+        "the flock must materialize cross-instance contention (WouldBlock witness > 0)"
+    );
+
+    // Baseline: with the holder released, the SAME probes acquire — the lock is not stuck.
+    drop(held);
+    let mut baseline_block = 0usize;
+    for p in &probes {
+        match p.acquire_write_lock().await {
+            Ok(g) => drop(g),
+            Err(StorageError::DatabaseLocked) => baseline_block += 1,
+            Err(e) => panic!("unexpected: {e:?}"),
+        }
+    }
+    assert_eq!(
+        baseline_block, 0,
+        "uncontended flock acquires never block (witness baseline == 0)"
+    );
+
+    // --- (2) migrate-vs-serve (ASYMMETRIC): serve holds -> a timeout=0 migrate FAILS FAST ---
+    let serve = open_locked(&db, unblock_storage::DEFAULT_WRITE_LOCK_TIMEOUT_MS).await;
+    let migrate_probe = open_locked(&db, 0).await;
+    let serve_held = serve.acquire_write_lock().await.expect("serve holds");
+    assert!(
+        matches!(
+            migrate_probe.acquire_write_lock().await,
+            Err(StorageError::DatabaseLocked)
+        ),
+        "a timeout=0 migrate must FAIL FAST while a serve holds the flock (never interleave a schema change)"
+    );
+    drop(serve_held);
+    assert!(
+        migrate_probe.acquire_write_lock().await.is_ok(),
+        "migrate acquires once the serve releases (the lock is not stuck)"
+    );
+
+    // --- (3) PROVISIONAL p99-write-stall fairness under an ASYMMETRIC serve+CLI mix ---
+    // A long-lived "serve" acquires the flock in brief bursts and releases (yields fairly); a "CLI
+    // one-shot" measures its acquire wait under that contention.
+    let bg_db = db.clone();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let bg_stop = Arc::clone(&stop);
+    let bg = tokio::spawn(async move {
+        let serve = open_locked(&bg_db, unblock_storage::DEFAULT_WRITE_LOCK_TIMEOUT_MS).await;
+        while !bg_stop.load(Ordering::Relaxed) {
+            if let Ok(g) = serve.acquire_write_lock().await {
+                tokio::time::sleep(Duration::from_millis(1)).await; // brief hold
+                drop(g);
+            }
+            // Rest between bursts so the flock (which is NOT FIFO-fair) does not starve the CLI — the
+            // asymmetric mix is a serve WITH gaps, not a pathological tight re-acquire loop.
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    });
+
+    let cli = open_locked(&db, unblock_storage::DEFAULT_WRITE_LOCK_TIMEOUT_MS).await;
+    let mut waits: Vec<Duration> = Vec::with_capacity(200);
+    for _ in 0..200 {
+        let start = Instant::now();
+        let g = cli
+            .acquire_write_lock()
+            .await
+            .expect("cli acquires (bounded, never a hang)");
+        waits.push(start.elapsed());
+        drop(g);
+        tokio::time::sleep(Duration::from_micros(200)).await; // give the serve a turn
+    }
+    stop.store(true, Ordering::Relaxed);
+    let _ = bg.await;
+
+    waits.sort_unstable();
+    let p99 = waits[(waits.len() * 99 / 100).min(waits.len() - 1)];
+    // PROVISIONAL fairness ceiling (calibration-pending — perf budgets are T3.5; mirrors the T0.8
+    // R-ratio pattern). The 30s `lock_timeout_ms` is the starvation HARD-ceiling; p99 must be far
+    // below it, which also witnesses no hang and no hot-spin (the poll sleeps).
+    assert!(
+        p99 <= Duration::from_millis(500),
+        "PROVISIONAL p99-write-stall <= 500ms under the asymmetric serve+CLI mix (got {p99:?})"
+    );
+    println!(
+        "D31 flock: WouldBlock(contended)={wouldblock}/{k}, baseline=0; migrate-vs-serve fail-fast OK; \
+         p99 acquire stall={p99:?} (ceiling 500ms, hard-ceiling = 30s lock_timeout)"
+    );
+}
