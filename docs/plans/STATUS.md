@@ -131,12 +131,17 @@ Surfaced during development, tracked here (the repo's system of record) so they 
   `initialize` `protocolVersion` (outside rmcp's `KNOWN_VERSIONS`) to `ProtocolVersion::LATEST` BEFORE rmcp's
   serve-loop negotiation (a pure `ServerHandler::initialize` override is empirically insufficient — rmcp 1.7's
   serve-loop re-derives the wire version as a lexical `min(client, handler)` AFTER the handler); CD-5 the read-path
-  `mimeType` → `application/json`. **⏳ CD-6 OPEN (hardening) — decouple CD-4 from the rmcp-internal negotiation
-  detail:** CD-4's clamp relies on rmcp 1.7's undocumented serve-loop lexical min-negotiation, so an rmcp bump could
-  shift semantics (mitigated today by the 4 `protocol_version` tests). CD-6 = add an rmcp-negotiation-behavior pin
-  (assert the version-derivation contract so an upgrade that changes it fails loudly) and/or pursue an upstream rmcp
-  fix making unsupported-version clamping a first-class handler contract, then simplify the transport wrapper if it
-  lands. **PRD §4 D-id — RESOLVED 2026-07-10 (Miguel): none.** CD-1..CD-6 are spec-conformance fixes (MCP-spec-forced,
+  `mimeType` → `application/json`. **◐ CD-6 PARTIAL (hardening) — assumption pin LANDED; upstream rmcp fix + wrapper
+  removal remain:** CD-4's clamp relies on rmcp 1.7's undocumented serve-loop lexical min-negotiation, so an rmcp bump
+  could shift semantics. **✅ Assumption pin landed (tests + docs only, no behavior change, no `CONTRACT_HASH` impact):**
+  a raw UNCLAMPED serve seam (`serve_duplex_unclamped_for_test`) + two `tests/protocol_version.rs` pins —
+  `rmcp_serve_loop_echoes_unsupported_below_latest_version_verbatim` (asserts rmcp still echoes an unsupported
+  below-latest version verbatim over the un-clamped path — the exact misbehavior the clamp compensates for) and
+  `known_versions_and_latest_match_the_clamp_key_set` (pins the `KNOWN_VERSIONS`/`LATEST` set the clamp keys on) — so a
+  future rmcp bump that changes the negotiation or the supported set fails LOUDLY, pointing maintainers straight at the
+  `VersionClampingTransport` doc-comment. **⏳ Open remainder:** pursue an UPSTREAM rmcp fix making unsupported-version
+  clamping a first-class `ServerHandler` contract, then delete the transport wrapper once it lands. **PRD §4 D-id —
+  RESOLVED 2026-07-10 (Miguel): none.** CD-1..CD-6 are spec-conformance fixes (MCP-spec-forced,
   not product decisions with a genuine fork), so no D-id is minted; the rationale lives at the right altitude — the
   interface SSOT spine (§5.2a/§5.3) + crate-plan F-7 + git — and the `v1.2` → `v1.3` bump is governed by the FR-12
   drift gate + F-5 history, not a D-id. (A D-id would duplicate the spine at the wrong altitude and add doc-lint /
