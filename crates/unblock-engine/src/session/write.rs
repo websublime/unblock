@@ -18,7 +18,7 @@ use unblock_policy::{BlockingEdge, ReadyContext, ReadyVerdict, is_ready};
 use unblock_storage::{DeletePlan, IssuePatch};
 
 use crate::error::{EngineError, Result};
-use crate::permit::acquire_write;
+use crate::permit::{MutationGuard, acquire_write};
 use crate::report::CloseOutcome;
 use crate::session::Session;
 use crate::session::ids::NewIssueSeed;
@@ -78,9 +78,21 @@ pub struct NewIssue {
 }
 
 impl Session {
-    /// Acquire the single write permit, shutdown-aware (D14, spine §4.2).
-    async fn acquire(&self) -> Result<crate::permit::WriteGuard> {
-        acquire_write(&self.write_permit, &self.shutdown).await
+    /// Acquire the write permit **and** the cross-process advisory `.write.lock` for the WHOLE
+    /// mutation (D14 + D31, spine §4.2), shutdown-aware.
+    ///
+    /// Acquire order: the in-process `Semaphore` permit FIRST (so at most ONE in-process writer ever
+    /// reaches the file lock — no intra-process thundering herd, no priority inversion), THEN the
+    /// storage `.write.lock` (D31). The engine holds the returned [`MutationGuard`] across the
+    /// allocation READ **and** the write transaction — the same span — so two `serve` processes cannot
+    /// mint the same `parent.N` or interleave writes across processes; it releases inner-first on drop
+    /// (`.write.lock` before the permit). On the in-memory path the storage guard is `None` (no file
+    /// lock). A `.write.lock`-acquire timeout surfaces the transparent retryable
+    /// `StorageError::DatabaseLocked` and drops the already-held permit (no leak).
+    async fn acquire(&self) -> Result<MutationGuard> {
+        let permit = acquire_write(&self.write_permit, &self.shutdown).await?;
+        let lock = self.storage.acquire_write_lock().await?;
+        Ok(MutationGuard::new(lock, permit))
     }
 
     /// Create an issue, returning its allocated id (FR-1a).

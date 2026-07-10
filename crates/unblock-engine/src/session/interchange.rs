@@ -68,6 +68,10 @@ impl Session {
     pub async fn import_jsonl(&self, path: &Path, opts: ImportOptions) -> Result<ImportReport> {
         // MF-4: hold the D14 write permit across the whole sync call (classify probes + tx).
         let _guard = crate::permit::acquire_write(&self.write_permit, &self.shutdown).await?;
+        // D31: also hold the cross-process `.write.lock` across the whole import (classify probes +
+        // the atomic `create_issues` tx) so a concurrent serve on another process cannot interleave.
+        // Declared AFTER the permit, so it drops FIRST (release-inner-first, spine §4.2).
+        let _lock = self.storage.acquire_write_lock().await?;
         let sync_opts = unblock_sync::ImportOptions {
             dry_run: opts.dry_run,
             allow_external: false,
@@ -112,6 +116,9 @@ impl Session {
     pub async fn import_bd(&self, path: &Path) -> Result<ImportReport> {
         // MF-4: hold the D14 write permit across the whole sync call (map + classify probes + tx).
         let _guard = crate::permit::acquire_write(&self.write_permit, &self.shutdown).await?;
+        // D31: also hold the cross-process `.write.lock` across the whole bd import (declared after
+        // the permit so it drops first — release-inner-first, spine §4.2).
+        let _lock = self.storage.acquire_write_lock().await?;
         let report =
             unblock_sync::import_bd(&*self.storage, path, &self.unblock_dir, self.actor()).await?;
         Ok(report)
