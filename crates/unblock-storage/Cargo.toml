@@ -18,6 +18,14 @@ workspace = true
 name = "c5_abandoned_tx"
 path = "tests/bin/c5_abandoned_tx.rs"
 
+# AC-1 (D31/T3.4.1) test-only helper: ONE process in the cross-process `.write.lock` race, located
+# from `tests/write_lock_two_process.rs` via `env!("CARGO_BIN_EXE_write_lock_race")`. Source under
+# `tests/bin/` (never `src/`) — it never ships via `dist`; uses only the crate's public API + existing
+# deps (unblock-model/chrono/tokio), NO new dep.
+[[bin]]
+name = "write_lock_race"
+path = "tests/bin/write_lock_race.rs"
+
 # L2 — the backend-free `Storage` trait + the only backend-aware impl (libsql).
 # `libsql` and `petgraph` are PRIVATE deps (no backend/graph type in any public signature,
 # spine §6 rule 2). The default build is local file / bundled SQLite only (no TLS, no
