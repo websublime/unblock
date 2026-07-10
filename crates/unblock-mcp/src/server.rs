@@ -13,13 +13,14 @@ use std::sync::Arc;
 use rmcp::ServerHandler;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::model::{
-    AnnotateAble, ErrorData, GetPromptRequestParams, GetPromptResult, Implementation,
-    ListPromptsResult, ListResourceTemplatesResult, ListResourcesResult, PaginatedRequestParams,
+    AnnotateAble, ClientJsonRpcMessage, ClientRequest, ErrorData, GetPromptRequestParams,
+    GetPromptResult, Implementation, JsonRpcMessage, JsonRpcRequest, ListPromptsResult,
+    ListResourceTemplatesResult, ListResourcesResult, PaginatedRequestParams, ProtocolVersion,
     RawResource, RawResourceTemplate, ReadResourceRequestParams, ReadResourceResult,
     ResourceContents, ServerCapabilities, ServerInfo,
 };
-use rmcp::service::{RequestContext, RoleServer};
-use rmcp::transport::stdio;
+use rmcp::service::{RequestContext, RoleServer, RxJsonRpcMessage, TxJsonRpcMessage};
+use rmcp::transport::{Transport, stdio};
 use rmcp::{Service, ServiceExt};
 use serde::Serialize;
 use snafu::ResultExt;
@@ -243,6 +244,9 @@ pub async fn serve(session: Arc<Session>, opts: ServeOptions) -> Result<(), McpS
 }
 
 /// Generic over the transport so the lifecycle test can drive an in-memory duplex transport.
+///
+/// The transport is wrapped in a [`VersionClampingTransport`] (CD-4) so the SAME protocol-version
+/// clamp guards both the shipped stdio [`serve`] and the test [`serve_duplex_for_test`] path.
 async fn serve_handler<T, E, A>(
     server: UnblockServer,
     transport: T,
@@ -253,10 +257,80 @@ where
     T: rmcp::transport::IntoTransport<RoleServer, E, A>,
     E: std::error::Error + Send + Sync + 'static,
 {
+    let transport = VersionClampingTransport::new(transport.into_transport());
     server
         .serve_with_ct(transport, cancel)
         .await
         .context(TransportSnafu)
+}
+
+/// A [`Transport`] decorator that clamps an UNSUPPORTED inbound `initialize` `protocolVersion` to the
+/// server's latest supported [`ProtocolVersion`] BEFORE rmcp's serve-loop negotiation sees it (CD-4,
+/// MCP lifecycle spec: an unsupported requested version MUST be answered with a version the server
+/// supports — SHOULD be its latest — never echoed back).
+///
+/// ## Why a transport wrapper and NOT a `ServerHandler::initialize` override
+///
+/// rmcp 1.7's server serve-loop (`serve_server_with_ct_inner`) RE-DERIVES the wire `protocolVersion`
+/// AFTER the handler returns: it takes `min(client_requested, handler_response)` by a purely LEXICAL
+/// string compare and echoes the client's value whenever it sorts below the handler's. So a handler
+/// that returns `LATEST` is overridden right back to a bogus client-sent `"1999-01-01"` (it sorts
+/// below `LATEST`) — and there is NO handler return value `R` that can force `LATEST` for a
+/// below-latest unsupported version (the loop yields the client whenever `client < R`, and `R` cannot
+/// be simultaneously `LATEST` and `<= "1999-01-01"`; verified empirically). The only place we can
+/// enforce conformance is BEFORE that negotiation, by clamping the inbound request. SUPPORTED (older)
+/// versions are left untouched so the loop still echoes them, exactly as the spec requires.
+struct VersionClampingTransport<T> {
+    /// The wrapped transport; every call delegates to it, `receive` after the clamp.
+    inner: T,
+}
+
+impl<T> VersionClampingTransport<T> {
+    /// Wrap `inner`.
+    fn new(inner: T) -> Self {
+        Self { inner }
+    }
+}
+
+impl<T> Transport<RoleServer> for VersionClampingTransport<T>
+where
+    T: Transport<RoleServer>,
+{
+    type Error = T::Error;
+
+    fn send(
+        &mut self,
+        item: TxJsonRpcMessage<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send + 'static {
+        self.inner.send(item)
+    }
+
+    async fn receive(&mut self) -> Option<RxJsonRpcMessage<RoleServer>> {
+        let mut message = self.inner.receive().await?;
+        clamp_unsupported_initialize_version(&mut message);
+        Some(message)
+    }
+
+    fn close(&mut self) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
+        self.inner.close()
+    }
+}
+
+/// Rewrite an UNSUPPORTED `initialize` `protocolVersion` to [`ProtocolVersion::LATEST`] in place;
+/// leave every other message — and every SUPPORTED requested version — untouched (CD-4).
+///
+/// "Supported" is rmcp's [`ProtocolVersion::KNOWN_VERSIONS`] set (the versions this SDK, and thus this
+/// server, actually speaks). A version outside that set is clamped to `LATEST`; a version inside it is
+/// preserved so rmcp's serve-loop still echoes it (spec: a supported requested version MUST be echoed).
+fn clamp_unsupported_initialize_version(message: &mut ClientJsonRpcMessage) {
+    if let JsonRpcMessage::Request(JsonRpcRequest {
+        request: ClientRequest::InitializeRequest(request),
+        ..
+    }) = message
+        && !ProtocolVersion::KNOWN_VERSIONS.contains(&request.params.protocol_version)
+    {
+        request.params.protocol_version = ProtocolVersion::LATEST;
+    }
 }
 
 /// Build and run the server over an arbitrary in-memory transport (TEST-ONLY, `test-util` feature).
