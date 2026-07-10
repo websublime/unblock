@@ -3,10 +3,10 @@
 //!
 //! The single `impl ServerHandler for UnblockServer` STACKS `#[tool_handler]` + `#[prompt_handler]`
 //! (each detects the other as a sibling and the hand-written `get_info`, so neither emits its own)
-//! plus the HAND-WRITTEN `get_info` / `list_resource_templates` / `read_resource` (rmcp has no
-//! resource macro). The tool routers from the 7 tool files compose via `+`; the prompt router comes
-//! from `prompts::mod`. Holding `Arc<Session>`, the server is a thin adapter — the engine owns the
-//! write Semaphore (D14), so there is no write orchestration here.
+//! plus the HAND-WRITTEN `get_info` / `list_resources` / `list_resource_templates` / `read_resource`
+//! (rmcp has no resource macro). The tool routers from the 7 tool files compose via `+`; the prompt
+//! router comes from `prompts::mod`. Holding `Arc<Session>`, the server is a thin adapter — the engine
+//! owns the write Semaphore (D14), so there is no write orchestration here.
 
 use std::sync::Arc;
 
@@ -14,9 +14,9 @@ use rmcp::ServerHandler;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::model::{
     AnnotateAble, ErrorData, GetPromptRequestParams, GetPromptResult, Implementation,
-    ListPromptsResult, ListResourceTemplatesResult, PaginatedRequestParams, RawResourceTemplate,
-    ReadResourceRequestParams, ReadResourceResult, ResourceContents, ServerCapabilities,
-    ServerInfo,
+    ListPromptsResult, ListResourceTemplatesResult, ListResourcesResult, PaginatedRequestParams,
+    RawResource, RawResourceTemplate, ReadResourceRequestParams, ReadResourceResult,
+    ResourceContents, ServerCapabilities, ServerInfo,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::transport::stdio;
@@ -135,18 +135,20 @@ impl ServerHandler for UnblockServer {
             .with_instructions(instructions)
     }
 
-    /// Advertise the resource templates (the 5 `unblock://...` URIs, spine §5.4).
-    async fn list_resource_templates(
+    /// Advertise the four CONCRETE (non-parameterized) resources via `resources/list` (CD-3).
+    ///
+    /// Per the MCP spec, only RFC-6570 URI *templates* (a `{param}` placeholder) belong in
+    /// `resources/templates/list`; every fully-resolved URI belongs in `resources/list`. Four of our
+    /// five resources are concrete — `unblock://issues/ready`, `unblock://issues/blocked`,
+    /// `unblock://capabilities`, `unblock://schema` — so they are advertised HERE (the fifth,
+    /// `unblock://issues/{id}`, is the only genuine template; see [`Self::list_resource_templates`]).
+    /// Each carries the `application/json` mime type its [`Self::read_resource`] body serializes to.
+    async fn list_resources(
         &self,
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
-    ) -> Result<ListResourceTemplatesResult, ErrorData> {
-        let templates = [
-            (
-                "unblock://issues/{id}",
-                "issue-by-id",
-                "A single issue by id.",
-            ),
+    ) -> Result<ListResourcesResult, ErrorData> {
+        let resources = [
             (
                 "unblock://issues/ready",
                 "ready-issues",
@@ -170,12 +172,36 @@ impl ServerHandler for UnblockServer {
         ]
         .into_iter()
         .map(|(uri, name, description)| {
-            RawResourceTemplate::new(uri, name)
+            RawResource::new(uri, name)
                 .with_description(description)
                 .with_mime_type("application/json")
                 .no_annotation()
         })
         .collect();
+        Ok(ListResourcesResult {
+            resources,
+            next_cursor: None,
+            meta: None,
+        })
+    }
+
+    /// Advertise the ONE genuine RFC-6570 resource template — `unblock://issues/{id}` (CD-3, spine
+    /// §5.4).
+    ///
+    /// The other four `unblock://...` URIs are concrete (no `{param}`) and are advertised via
+    /// [`Self::list_resources`] instead — a strict MCP client treats `resources/templates/list`
+    /// entries as parameterized, so a concrete URI listed here would be mis-advertised as a template.
+    async fn list_resource_templates(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourceTemplatesResult, ErrorData> {
+        let templates = vec![
+            RawResourceTemplate::new("unblock://issues/{id}", "issue-by-id")
+                .with_description("A single issue by id.")
+                .with_mime_type("application/json")
+                .no_annotation(),
+        ];
         Ok(ListResourceTemplatesResult {
             resource_templates: templates,
             next_cursor: None,

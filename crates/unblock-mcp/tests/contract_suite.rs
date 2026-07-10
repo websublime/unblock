@@ -12,9 +12,10 @@
 //!    and a version bump without a document change is also caught (both documents embed
 //!    `contract_version`).
 //! 3. **Taxonomy conformance (PRD §12.2):** over a LIVE `serve_duplex_for_test` duplex the
-//!    `list_tools` (≤ 8 — exactly 7, `create_bulk` is a discriminator NOT a tool) / resource-templates
-//!    (5) / prompts (3) sets EQUAL the pure `capabilities()` builder set (builder-vs-router parity —
-//!    the builder cannot silently drift from what the server actually serves).
+//!    `list_tools` (≤ 8 — exactly 7, `create_bulk` is a discriminator NOT a tool) / resources (the
+//!    CD-3 split: 4 concrete via `resources/list` + 1 `{id}` template via `resources/templates/list`)
+//!    / prompts (3) sets EQUAL the pure `capabilities()` builder set (builder-vs-router parity — the
+//!    builder cannot silently drift from what the server actually serves).
 
 mod common;
 
@@ -128,19 +129,68 @@ async fn live_list_tools_equals_the_builder_seven() {
     let _ = server.cancel().await;
 }
 
-/// The LIVE server advertises exactly the 5 resource templates + 3 prompts the builder lists.
+/// CD-3 (MCP spec): the LIVE server splits its five resources by shape — the FOUR concrete
+/// (non-parameterized) URIs ride `resources/list`, the ONE genuine `{id}` template rides
+/// `resources/templates/list` — and the UNION still equals the pure `capabilities()` builder's five
+/// resource URIs; plus the 3 prompts the builder lists (builder-vs-router parity across the split).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_resource_templates_and_prompts_match_the_builder() {
     let session = session().await;
     let (client, server, _cancel) = connect(session).await;
 
+    // resources/templates/list holds ONLY the one genuine RFC-6570 template (CD-3).
     let templates = client
         .list_all_resource_templates()
         .await
         .expect("list_resource_templates");
-    assert_eq!(templates.len(), 5, "exactly 5 resource templates");
-    let mut live_uris: Vec<String> = templates.into_iter().map(|t| t.raw.uri_template).collect();
-    live_uris.sort();
+    assert_eq!(templates.len(), 1, "exactly 1 resource template (CD-3)");
+    let template_uris: Vec<String> = templates
+        .iter()
+        .map(|t| t.raw.uri_template.clone())
+        .collect();
+    assert_eq!(
+        template_uris,
+        vec!["unblock://issues/{id}".to_string()],
+        "the only template is unblock://issues/{{id}} (CD-3)"
+    );
+    // Invariant: every advertised template carries a `{param}` placeholder (fails today for the four
+    // concrete URIs that were mis-registered as templates before CD-3).
+    for template in &templates {
+        assert!(
+            template.raw.uri_template.contains('{'),
+            "a resources/templates/list entry MUST be parameterized, got `{}` (CD-3)",
+            template.raw.uri_template
+        );
+    }
+
+    // resources/list holds EXACTLY the four concrete (non-parameterized) URIs (CD-3).
+    let resources = client.list_all_resources().await.expect("list_resources");
+    assert_eq!(resources.len(), 4, "exactly 4 concrete resources (CD-3)");
+    let mut concrete_uris: Vec<String> = resources.iter().map(|r| r.raw.uri.clone()).collect();
+    concrete_uris.sort();
+    assert_eq!(
+        concrete_uris,
+        vec![
+            "unblock://capabilities".to_string(),
+            "unblock://issues/blocked".to_string(),
+            "unblock://issues/ready".to_string(),
+            "unblock://schema".to_string(),
+        ],
+        "resources/list == the four concrete URIs (CD-3)"
+    );
+    // No concrete URI may carry a `{` (they are fully resolved, not templates).
+    for resource in &resources {
+        assert!(
+            !resource.raw.uri.contains('{'),
+            "a resources/list entry MUST be concrete, got `{}` (CD-3)",
+            resource.raw.uri
+        );
+    }
+
+    // The UNION of the split (4 concrete ∪ 1 template) equals the builder's five resource URIs.
+    let mut live_union: Vec<String> = concrete_uris;
+    live_union.extend(template_uris);
+    live_union.sort();
     let mut built_uris: Vec<String> = capabilities()
         .resources
         .into_iter()
@@ -148,8 +198,8 @@ async fn live_resource_templates_and_prompts_match_the_builder() {
         .collect();
     built_uris.sort();
     assert_eq!(
-        live_uris, built_uris,
-        "live resource-template set == the builder set"
+        live_union, built_uris,
+        "resources/list ∪ resources/templates/list == the builder's five resource URIs (CD-3)"
     );
 
     let prompts = client.list_all_prompts().await.expect("list_prompts");
