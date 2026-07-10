@@ -448,7 +448,7 @@ fn heading_index(doc: &Doc) -> BTreeSet<String> {
 // ---------------------------------------------------------------------------------------------
 
 fn class_a_d_ids(doc: &Doc, guards: &Guards, index: &CorpusIndex, out: &mut Vec<Finding>) {
-    // Spec tokenizes `\bD(30|2[0-9]|1[0-9]|[1-9])\b` for the in-range ids (D1..D30), but an undefined ref
+    // Spec tokenizes `\bD(31|30|2[0-9]|1[0-9]|[1-9])\b` for the in-range ids (D1..D31), but an undefined ref
     // (D98, D99) is *also* a violation — so we match every `\bDn\b` and resolve membership against
     // the PRD §4 definition set. Range-awareness lives in the definition set, not the regex.
     let any = Regex::new(r"\bD(\d+)\b").expect("valid Dn regex");
