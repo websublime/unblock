@@ -10,6 +10,7 @@ WorkspaceConfig {
     db_filename: "unblock.db",
     jsonl_filename: "issues.jsonl",
     id_prefix: "ub",
+    write_lock_timeout_ms: 30000,
     deletions_retention_days: None,
     backend: None,
 }

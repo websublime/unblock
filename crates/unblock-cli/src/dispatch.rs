@@ -59,7 +59,10 @@ mod tests {
     async fn workspace_context(jsonl_export: bool) -> WorkspaceContext {
         let tmp = tempfile::tempdir().expect("tempdir");
         let db_path = tmp.path().join("unblock.db");
-        let storage = LibsqlStorage::open_local(&db_path).await.expect("open db");
+        let storage =
+            LibsqlStorage::open_local(&db_path, unblock_storage::DEFAULT_WRITE_LOCK_TIMEOUT_MS)
+                .await
+                .expect("open db");
         let config = ResolvedConfig {
             jsonl_export,
             ..ResolvedConfig::default()

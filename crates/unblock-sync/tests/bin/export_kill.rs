@@ -44,9 +44,10 @@ async fn main() {
         .expect("the jsonl target must live under a .unblock dir")
         .to_path_buf();
 
-    let storage = LibsqlStorage::open_local(&db_path)
-        .await
-        .expect("open_local");
+    let storage =
+        LibsqlStorage::open_local(&db_path, unblock_storage::DEFAULT_WRITE_LOCK_TIMEOUT_MS)
+            .await
+            .expect("open_local");
     storage.migrate().await.expect("migrate");
 
     // Seed a corpus so each export writes a non-trivial file (a wide mid-write kill window).

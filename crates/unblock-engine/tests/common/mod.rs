@@ -306,6 +306,11 @@ pub mod parked {
         async fn schema_version(&self) -> Result<i64, StorageError> {
             self.inner.schema_version().await
         }
+        async fn acquire_write_lock(
+            &self,
+        ) -> Result<Option<unblock_storage::WriteLockGuard>, StorageError> {
+            self.inner.acquire_write_lock().await
+        }
         async fn get_issue(&self, id: &str) -> Result<Option<Issue>, StorageError> {
             self.inner.get_issue(id).await
         }
@@ -544,6 +549,11 @@ pub mod collide {
         async fn schema_version(&self) -> Result<i64, StorageError> {
             self.inner.schema_version().await
         }
+        async fn acquire_write_lock(
+            &self,
+        ) -> Result<Option<unblock_storage::WriteLockGuard>, StorageError> {
+            self.inner.acquire_write_lock().await
+        }
         async fn get_issues(&self, ids: &[String]) -> Result<Vec<Issue>, StorageError> {
             self.inner.get_issues(ids).await
         }
@@ -745,6 +755,11 @@ pub mod race {
         }
         async fn schema_version(&self) -> Result<i64, StorageError> {
             self.inner.schema_version().await
+        }
+        async fn acquire_write_lock(
+            &self,
+        ) -> Result<Option<unblock_storage::WriteLockGuard>, StorageError> {
+            self.inner.acquire_write_lock().await
         }
         async fn get_issue(&self, id: &str) -> Result<Option<Issue>, StorageError> {
             self.inner.get_issue(id).await

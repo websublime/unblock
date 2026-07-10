@@ -186,8 +186,10 @@ async fn open_with_storage_from(
     } = resolve_workspace(start, cli)?;
     let actor = config.actor().to_string();
 
-    // open_local creates the db FILE inside the existing `.unblock/` but does NOT migrate.
-    let storage = LibsqlStorage::open_local(&paths.db_path)
+    // open_local creates the db FILE inside the existing `.unblock/` but does NOT migrate. The
+    // resolved `write_lock_timeout_ms` (D31) is threaded DOWN here (L4→L2); the `.write.lock` PATH is
+    // derived inside storage from the db-file parent, so there is no L2→L4 back-edge.
+    let storage = LibsqlStorage::open_local(&paths.db_path, config.write_lock_timeout_ms())
         .await
         .context(DbOpenFailedSnafu)?;
     // migrate() sets up the schema (two explicit calls — DbOpenFailed wraps open, MigrationFailed

@@ -29,9 +29,10 @@ async fn sigkill_mid_tx_leaves_zero_rows_and_a_clean_integrity_check() {
     // Pre-migrate via the PUBLIC open path — a SEPARATELY committed tx, so a stray committed row
     // from the helper's abandoned tx would make count == 1, giving count == 0 real meaning below.
     {
-        let storage = LibsqlStorage::open_local(&db_path)
-            .await
-            .expect("open_local");
+        let storage =
+            LibsqlStorage::open_local(&db_path, unblock_storage::DEFAULT_WRITE_LOCK_TIMEOUT_MS)
+                .await
+                .expect("open_local");
         storage.migrate().await.expect("migrate");
         // `storage` drops here: the parent's own connections close before the helper opens the SAME
         // file, so there is no cross-connection contention on the open.
@@ -74,9 +75,10 @@ async fn sigkill_mid_tx_leaves_zero_rows_and_a_clean_integrity_check() {
     assert!(!status.success(), "a SIGKILLed process never exits 0");
 
     // A fresh reopen via the SAME public open path (runs SQLite's ordinary WAL-recovery open).
-    let reopened = LibsqlStorage::open_local(&db_path)
-        .await
-        .expect("reopen after SIGKILL");
+    let reopened =
+        LibsqlStorage::open_local(&db_path, unblock_storage::DEFAULT_WRITE_LOCK_TIMEOUT_MS)
+            .await
+            .expect("reopen after SIGKILL");
     let problems = reopened.integrity_check().await.expect("integrity_check");
     assert!(
         problems.is_empty(),

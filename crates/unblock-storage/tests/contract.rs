@@ -51,7 +51,10 @@ async fn contract_suite_temp_file() {
         async move {
             let seq = FILE_DB_SEQ.fetch_add(1, Ordering::Relaxed);
             let path = base.join(format!("contract-{seq}.db"));
-            let storage = LibsqlStorage::open_local(&path).await.expect("open_local");
+            let storage =
+                LibsqlStorage::open_local(&path, unblock_storage::DEFAULT_WRITE_LOCK_TIMEOUT_MS)
+                    .await
+                    .expect("open_local");
             storage.migrate().await.expect("migrate");
             storage
         }

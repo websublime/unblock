@@ -35,6 +35,11 @@ pub(crate) const DEFAULT_SEARCH_CAP: usize = 50;
 /// workspace overrides `id_prefix`.
 pub(crate) const DEFAULT_ID_PREFIX: &str = "ub";
 
+/// The default `.unblock/.write.lock` acquire timeout, in ms (D31/T3.4.1). Sourced from the L2
+/// storage crate so config and storage share one value; threaded DOWN to `open_local` at open.
+pub(crate) const DEFAULT_WRITE_LOCK_TIMEOUT_MS: u64 =
+    unblock_storage::DEFAULT_WRITE_LOCK_TIMEOUT_MS;
+
 /// The resolved, validated config values the engine/`Session` consumes (config-owned, spine §4
 /// CF-D).
 ///
@@ -59,10 +64,14 @@ pub struct ResolvedConfig {
     /// `normalize_prefix`-normalized. The engine reads `ctx.config.id_prefix` at mint time to render
     /// `ub-<hash>`/`ub-<slug>-<hash>` (config-derived, not a constant).
     pub id_prefix: String,
+    /// The `.unblock/.write.lock` acquire timeout in ms (D31/T3.4.1 ADDITIVE). Default = `30_000`.
+    /// STARTUP-only; threaded DOWN to `LibsqlStorage::open_local` at open.
+    pub write_lock_timeout_ms: u64,
 }
 
 impl Default for ResolvedConfig {
-    /// The T1.3a defaults: `Json` / `false` / `50` / `"unblock.db"` / `"issues.jsonl"` / `"ub"`.
+    /// The T1.3a defaults: `Json` / `false` / `50` / `"unblock.db"` / `"issues.jsonl"` / `"ub"` /
+    /// `30_000` (the D31 write-lock timeout).
     fn default() -> Self {
         Self {
             output_format: OutputFormat::default(),
@@ -71,6 +80,7 @@ impl Default for ResolvedConfig {
             db_filename: DB_FILENAME.to_string(),
             jsonl_filename: JSONL_FILENAME.to_string(),
             id_prefix: DEFAULT_ID_PREFIX.to_string(),
+            write_lock_timeout_ms: DEFAULT_WRITE_LOCK_TIMEOUT_MS,
         }
     }
 }
@@ -96,6 +106,8 @@ pub(crate) struct Defaults {
     pub jsonl_filename: String,
     /// Default issue-id prefix (`"ub"`, D21/T1.8).
     pub id_prefix: String,
+    /// Default `.write.lock` acquire timeout (`30_000` ms, D31/T3.4.1).
+    pub write_lock_timeout_ms: u64,
     /// Reserved (no v1 default retention window).
     pub deletions_retention_days: Option<u64>,
     /// Reserved (no v1 default backend value; `None` resolves to the libsql default downstream).
@@ -114,6 +126,7 @@ impl Default for Defaults {
             db_filename: DB_FILENAME.to_string(),
             jsonl_filename: JSONL_FILENAME.to_string(),
             id_prefix: DEFAULT_ID_PREFIX.to_string(),
+            write_lock_timeout_ms: DEFAULT_WRITE_LOCK_TIMEOUT_MS,
             deletions_retention_days: None,
             backend: None,
         }
@@ -146,6 +159,9 @@ pub struct WorkspaceConfig {
     /// The resolved, `normalize_prefix`-normalized issue-id prefix (startup key, D21/T1.8). Projected
     /// to [`ResolvedConfig::id_prefix`].
     pub(crate) id_prefix: String,
+    /// The resolved `.write.lock` acquire timeout in ms (startup key, D31/T3.4.1). Projected to
+    /// [`ResolvedConfig::write_lock_timeout_ms`] and threaded DOWN to `open_local`.
+    pub(crate) write_lock_timeout_ms: u64,
     /// The resolved tombstone retention window (reserved for v1.1; NOT projected).
     pub(crate) deletions_retention_days: Option<u64>,
     /// The resolved backend selector (only `"libsql"` accepted in v1; reserved, NOT projected).
@@ -247,6 +263,7 @@ impl WorkspaceConfig {
             db_filename: self.db_filename,
             jsonl_filename: self.jsonl_filename,
             id_prefix: self.id_prefix,
+            write_lock_timeout_ms: self.write_lock_timeout_ms,
         }
     }
 
@@ -292,6 +309,13 @@ impl WorkspaceConfig {
     #[must_use]
     pub fn id_prefix(&self) -> &str {
         &self.id_prefix
+    }
+
+    /// The resolved `.write.lock` acquire timeout in ms (startup key, D31/T3.4.1; projected to
+    /// `ResolvedConfig.write_lock_timeout_ms` and threaded into `open_local` by `open_with_storage`).
+    #[must_use]
+    pub fn write_lock_timeout_ms(&self) -> u64 {
+        self.write_lock_timeout_ms
     }
 
     /// The resolved tombstone retention window (reserved for v1.1; not projected to `ResolvedConfig`).

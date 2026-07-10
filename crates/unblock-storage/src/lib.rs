@@ -61,8 +61,16 @@ pub mod testkit;
 
 pub use error::{BackendOpaque, StorageError};
 pub use filters::{DeleteMode, DeletePlan, IssuePatch};
-pub use libsql::LibsqlStorage;
+pub use libsql::{LibsqlStorage, WriteLockGuard};
 pub use trait_def::Storage;
+
+/// The default `.unblock/.write.lock` acquire timeout, in milliseconds (D31).
+///
+/// The `unblock-config` `write_lock_timeout_ms` key defaults to this value and threads it DOWN into
+/// [`LibsqlStorage::open_local`] at open; a bounded timeout turns a stuck holder into a retryable
+/// [`StorageError::DatabaseLocked`] rather than an unbounded park. Faithful to beads' 30s
+/// `--lock-timeout` default.
+pub const DEFAULT_WRITE_LOCK_TIMEOUT_MS: u64 = 30_000;
 
 // The contract-suite entry + the gated seam trait, re-exported so a future backend (and the fuzz
 // crate) reuses them without reaching into the `testkit` module path.

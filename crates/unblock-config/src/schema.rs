@@ -55,6 +55,9 @@ pub struct ProjectConfig {
     /// [`WorkspaceConfig::resolve`](crate::WorkspaceConfig::resolve). The engine id-allocator reads it
     /// at mint time to render `ub-<hash>`/`ub-<slug>-<hash>` (config-derived, not a constant).
     pub id_prefix: Option<String>,
+    /// `write_lock_timeout_ms` (startup key, D31/T3.4.1 ADDITIVE) — the `.unblock/.write.lock` acquire
+    /// timeout in ms. `None` → default `30_000`; threaded DOWN to `LibsqlStorage::open_local` at open.
+    pub write_lock_timeout_ms: Option<u64>,
     /// The `[remote]` table (v1.2 surface) — present here ONLY to **deny** an `auth_token` at
     /// parse (NFR-18). Any other `[remote]` keys flow into `RemoteTable::extra` (warn-only).
     pub remote: Option<RemoteTable>,

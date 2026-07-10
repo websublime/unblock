@@ -131,6 +131,12 @@ impl Storage for FakeStorage {
     async fn schema_version(&self) -> Result<i64, StorageError> {
         unimplemented!("FakeStorage::schema_version")
     }
+    async fn acquire_write_lock(
+        &self,
+    ) -> Result<Option<unblock_storage::WriteLockGuard>, StorageError> {
+        // A file-less fake store has no cross-process workspace lock.
+        Ok(None)
+    }
     async fn get_issues(&self, _ids: &[String]) -> Result<Vec<Issue>, StorageError> {
         unimplemented!("FakeStorage::get_issues")
     }

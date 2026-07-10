@@ -353,6 +353,11 @@ impl Storage for RaceInjector {
     async fn schema_version(&self) -> Result<i64, unblock_storage::StorageError> {
         self.inner.schema_version().await
     }
+    async fn acquire_write_lock(
+        &self,
+    ) -> Result<Option<unblock_storage::WriteLockGuard>, unblock_storage::StorageError> {
+        self.inner.acquire_write_lock().await
+    }
     async fn create_issue(
         &self,
         i: &Issue,
