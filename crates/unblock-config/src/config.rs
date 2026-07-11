@@ -40,6 +40,16 @@ pub(crate) const DEFAULT_ID_PREFIX: &str = "ub";
 pub(crate) const DEFAULT_WRITE_LOCK_TIMEOUT_MS: u64 =
     unblock_storage::DEFAULT_WRITE_LOCK_TIMEOUT_MS;
 
+/// The documented lower bound (in ms) for a resolved `write_lock_timeout_ms` (D31/T3.4.1). Any
+/// user-supplied value below this floor is clamped UP to it in [`WorkspaceConfig::resolve`].
+///
+/// Rationale: a `0` (or near-zero) acquire timeout makes **every** normal mutation fail-fast on the
+/// slightest contention — a footgun. `0` is reserved for migrate's internal `Duration::ZERO`
+/// fail-fast (an explicit L2 code path, MF2), and is never a user-facing acquire timeout. The floor
+/// is deliberately small (`100` ms) so it only rules out the pathological "instant fail" values
+/// while leaving every genuine tuning choice (short or long) untouched.
+pub(crate) const MIN_WRITE_LOCK_TIMEOUT_MS: u64 = 100;
+
 /// The resolved, validated config values the engine/`Session` consumes (config-owned, spine §4
 /// CF-D).
 ///
@@ -65,7 +75,9 @@ pub struct ResolvedConfig {
     /// `ub-<hash>`/`ub-<slug>-<hash>` (config-derived, not a constant).
     pub id_prefix: String,
     /// The `.unblock/.write.lock` acquire timeout in ms (D31/T3.4.1 ADDITIVE). Default = `30_000`.
-    /// STARTUP-only; threaded DOWN to `LibsqlStorage::open_local` at open.
+    /// STARTUP-only; threaded DOWN to `LibsqlStorage::open_local` at open. Resolved values are
+    /// clamped UP to [`MIN_WRITE_LOCK_TIMEOUT_MS`] (a `0`/near-zero timeout would fail-fast every
+    /// mutation — see [`WorkspaceConfig::resolve`]).
     pub write_lock_timeout_ms: u64,
 }
 
@@ -159,7 +171,8 @@ pub struct WorkspaceConfig {
     /// The resolved, `normalize_prefix`-normalized issue-id prefix (startup key, D21/T1.8). Projected
     /// to [`ResolvedConfig::id_prefix`].
     pub(crate) id_prefix: String,
-    /// The resolved `.write.lock` acquire timeout in ms (startup key, D31/T3.4.1). Projected to
+    /// The resolved `.write.lock` acquire timeout in ms (startup key, D31/T3.4.1). Clamped UP to
+    /// [`MIN_WRITE_LOCK_TIMEOUT_MS`] by [`WorkspaceConfig::resolve`]. Projected to
     /// [`ResolvedConfig::write_lock_timeout_ms`] and threaded DOWN to `open_local`.
     pub(crate) write_lock_timeout_ms: u64,
     /// The resolved tombstone retention window (reserved for v1.1; NOT projected).
@@ -211,6 +224,13 @@ impl WorkspaceConfig {
         // is total — it strips unsupported chars/trailing separators and falls back to "ub" if nothing
         // usable remains — so the engine allocator always receives a valid, non-empty prefix.
         merged.id_prefix = normalize_prefix(&merged.id_prefix);
+
+        // D31/T3.4.1: clamp the resolved write-lock timeout UP to a documented floor. A user value of
+        // 0 (or any sub-floor value) would make every normal mutation fail-fast on the slightest
+        // contention — a footgun. `0` is reserved for migrate's internal `Duration::ZERO` fail-fast
+        // (an explicit L2 code path, MF2), never a user-facing acquire timeout. `.max` is total, so it
+        // never introduces a new error path (the projection stays infallible, MF-5).
+        merged.write_lock_timeout_ms = merged.write_lock_timeout_ms.max(MIN_WRITE_LOCK_TIMEOUT_MS);
 
         merged.validate()?;
         Ok(merged)
@@ -333,7 +353,10 @@ impl WorkspaceConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::{DB_FILENAME, DEFAULT_SEARCH_CAP, JSONL_FILENAME, ResolvedConfig, WorkspaceConfig};
+    use super::{
+        DB_FILENAME, DEFAULT_SEARCH_CAP, DEFAULT_WRITE_LOCK_TIMEOUT_MS, JSONL_FILENAME,
+        MIN_WRITE_LOCK_TIMEOUT_MS, ResolvedConfig, WorkspaceConfig,
+    };
     use crate::cli::CliOverrides;
     use crate::env::{EnvOverrides, EnvSource};
     use crate::schema::ProjectConfig;
@@ -510,6 +533,50 @@ mod tests {
         let resolved = wc.into_resolved();
         // The reserved knobs are not on ResolvedConfig; the projected ones round-trip.
         assert_eq!(resolved.search_cap, 123);
+    }
+
+    #[test]
+    fn write_lock_timeout_is_clamped_up_to_the_floor() {
+        // D31/T3.4.1: a sub-floor user value (the `0` footgun, or any value below the floor) is
+        // clamped UP to MIN_WRITE_LOCK_TIMEOUT_MS so it cannot make every mutation fail-fast.
+        for sub_floor in [0_u64, 1, 50, MIN_WRITE_LOCK_TIMEOUT_MS - 1] {
+            let project = ProjectConfig {
+                write_lock_timeout_ms: Some(sub_floor),
+                ..ProjectConfig::default()
+            };
+            let wc = resolve(&CliOverrides::default(), &project, &[]).expect("resolve");
+            assert_eq!(
+                wc.write_lock_timeout_ms, MIN_WRITE_LOCK_TIMEOUT_MS,
+                "sub-floor value {sub_floor} must clamp up to the floor"
+            );
+            // The clamp round-trips through the infallible projection.
+            assert_eq!(
+                wc.into_resolved().write_lock_timeout_ms,
+                MIN_WRITE_LOCK_TIMEOUT_MS
+            );
+        }
+    }
+
+    #[test]
+    fn write_lock_timeout_above_floor_passes_through() {
+        // Any value at or above the floor is untouched by the clamp — genuine tuning is preserved.
+        for ok in [
+            MIN_WRITE_LOCK_TIMEOUT_MS,
+            MIN_WRITE_LOCK_TIMEOUT_MS + 1,
+            5_000,
+            60_000,
+        ] {
+            let project = ProjectConfig {
+                write_lock_timeout_ms: Some(ok),
+                ..ProjectConfig::default()
+            };
+            let wc = resolve(&CliOverrides::default(), &project, &[]).expect("resolve");
+            assert_eq!(wc.write_lock_timeout_ms, ok, "value {ok} must pass through");
+        }
+        // No project override → the default (well above the floor), unchanged.
+        let wc =
+            resolve(&CliOverrides::default(), &ProjectConfig::default(), &[]).expect("resolve");
+        assert_eq!(wc.write_lock_timeout_ms, DEFAULT_WRITE_LOCK_TIMEOUT_MS);
     }
 
     #[test]
