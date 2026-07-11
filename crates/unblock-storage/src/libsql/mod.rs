@@ -576,23 +576,20 @@ async fn passive_checkpoint(conn: &Connection) {
 impl Storage for LibsqlStorage {
     async fn migrate(&self) -> Result<(), StorageError> {
         // Migration bypasses `with_immediate_tx`, so it takes the cross-process advisory `.write.lock`
-        // EXPLICITLY (D31) — but ONLY when it actually ADVANCES the schema. An already-current DB is an
-        // idempotent no-op that takes NO lock, so a normal multi-serve open never fails on contention.
-        // The lock decision uses a lock-free `PRAGMA user_version` read on the READ connection; the
-        // file lock (when needed) is acquired with `timeout=0` (fail-fast — a concurrent mid-mutation
-        // writer makes migrate refuse with `DatabaseLocked` rather than interleave a schema change) and
-        // BEFORE the write-conn `Mutex` (the same acquire order the mutation path uses).
-        let _lock_guard = if let Some(lock) = &self.write_lock {
-            let found = migrations::current_user_version(self.read()).await?;
-            if found == schema::CURRENT_SCHEMA_VERSION {
-                None
-            } else {
-                Some(lock.acquire_with_timeout(Duration::ZERO).await?)
-            }
-        } else {
-            None
+        // EXPLICITLY (D31) for the WHOLE command, UNCONDITIONALLY — BEFORE the version check and the
+        // migration run. The lock is acquired with `timeout=0` (fail-fast): a concurrent mid-mutation
+        // writer holding the `.write.lock` makes migrate refuse with `DatabaseLocked` rather than
+        // interleave a schema change or block. It is taken BEFORE the write-conn `Mutex` (the same
+        // acquire order the mutation path uses). Taking it unconditionally (rather than only when the
+        // schema advances) removes the lock-free pre-read TOCTOU: the version check + migration run
+        // both happen UNDER the held lock. An in-memory store has no cross-process sharing, so it holds
+        // no file lock (`None`).
+        let _lock_guard = match &self.write_lock {
+            Some(lock) => Some(lock.acquire_with_timeout(Duration::ZERO).await?),
+            None => None,
         };
         // Migration is a write-path operation: serialize it through the write connection.
+        // `run_migrations` reads `user_version` itself and is an idempotent no-op when already current.
         let conn = self.write().await;
         migrations::run_migrations(&conn).await
     }
