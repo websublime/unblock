@@ -9,6 +9,15 @@ publish = false
 [lints]
 workspace = true
 
+# AC-1 / M1 (D31/T3.4.1) test-only helper: ONE process driving the REAL engine `Session::create_issue`
+# in the cross-process `.write.lock` race, located from `tests/engine_write_lock_two_process.rs` via
+# `env!("CARGO_BIN_EXE_engine_write_lock_race")`. Source under `tests/bin/` (never `src/`) — it never
+# ships via `dist`; uses only the crate's own lib + existing `[dependencies]` (config/storage/model +
+# tokio/async-trait/chrono), NO new dep.
+[[bin]]
+name = "engine_write_lock_race"
+path = "tests/bin/engine_write_lock_race.rs"
+
 [dependencies]
 unblock-config = { workspace = true }
 unblock-storage = { workspace = true }
