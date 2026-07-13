@@ -14,7 +14,7 @@ lifecycle/ops only. Pre-1.0, no external users — breaking changes welcome, no 
 
 | Doc | Role |
 |---|---|
-| `docs/PRD.md` | Product truth — decisions (§4 D1..D32), FR/NFR, domain model, milestones. **APPROVED v1.1.** |
+| `docs/PRD.md` | Product truth — decisions (§4 D1..D33), FR/NFR, domain model, milestones. **APPROVED v1.1.** |
 | `docs/plans/01-design-spine.md` | **Authoritative interface contract** (types, `Storage` trait, `Session` API, MCP schemas, errors). |
 | `docs/plans/implementation-plan.md` | Task DAG M0–M3 (T-ids) + acceptance criteria. |
 | `docs/plans/STATUS.md` | **Live task registry** — what's done / in-progress / to-do (the system of record). |
