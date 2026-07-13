@@ -19,6 +19,8 @@
 
 `unblock-cli` **depends on** `unblock-mcp`. The CLI owns the `unblock` binary (incl. `unblock mcp`); `unblock-mcp` is a **library** that exposes `run_mcp_server(session: Arc<Session>, opts: McpServerOptions) -> Result<(), McpServerError>` and the tool/resource/prompt registry. **`run_mcp_server` signature (LIVE — D27/AD-4, reconciled spine-first against T2.2/PR #387):** it is the **2-arg** `run_mcp_server(Arc<Session>, McpServerOptions)` — the transport is bound **internally** to `stdio()` (the caller does NOT pass a transport), and shutdown is a `tokio_util::sync::CancellationToken` carried in `McpServerOptions.cancel` (`.cancel()` drains in-flight work and returns `Ok(())`). The earlier 3-arg `run_mcp_server(session, transport, shutdown)` / bespoke `ShutdownToken` sketch **never shipped** and is superseded here. The direction is fixed **cli → mcp** and **never mcp → cli** — this is the single L7↔L7 edge that determines acyclicity, and it is now a decision (not an assumption). The cli plan's Open Question Q1 is **RESOLVED** by this line. README §2 and §0 draw this edge as settled and are correct.
 
+The same edge also carries `pub fn agents_digest() -> AgentsDigest` (+ its `ToolDigest`/`ToolAction`/`ResourceDigest`/`PromptDigest`/`ErrorCodeDigest` sub-types, §5.4, D33) — a pure derived-view helper consumed only by `unblock-cli`'s `unblock agents` renderer; it is NOT a new edge (same `cli → mcp` direction) and is NOT part of the hashed `CONTRACT_HASH` tuple.
+
 ---
 
 ## 1. Domain types — `unblock-model` (L0)
@@ -1873,6 +1875,18 @@ gate proving itself again: an intentional schema change moves the digest by desi
 lands first; the code — the `extend` attributes, the wrapper structs, the version bump/re-pin/re-bless, and
 the strengthened conformance tests — follows in the paired implementation change.)*
 
+**`agents_digest()` — a pure DERIVED VIEW, not a wire resource (T3.4.3/D33).** `unblock-mcp` additionally
+exposes `pub fn agents_digest() -> AgentsDigest` next to `schema_bundle()`: a CLI-friendly typed digest (the
+7 tools with their `oneOf`-derived actions + each action's FULL parameter surface — its required AND
+optional params, derived structurally from the `oneOf` arm and resolving an arm-root `$ref` one level for
+the delegated payload, e.g. `issue create` → `title` + its optional fields — the 5 resources, the 3
+prompts, and the `error_codes` map) computed STRUCTURALLY from `capabilities()` + `schema_bundle()`. It is
+NOT an `unblock://` resource and carries NO URI; it is consumed only by the CLI `unblock agents` command to
+render the managed `AGENTS.md` capabilities table (FR-14). Being a pure derived view over the two hashed
+discovery documents, it is drift-free BY CONSTRUCTION and is explicitly OUTSIDE the `CONTRACT_HASH`
+version-coupled set (like the §5.5 golden-only prompt snapshots) — adding or changing it does NOT bump
+`CONTRACT_VERSION`.
+
 ### 5.5 Prompts
 
 ```
@@ -1910,7 +1924,7 @@ pub struct UpdateArgs { /* --check, --version <tag>, --yes */ }
 
 **init (D27/AF-3).** Creates exactly `.unblock/config.toml` (hand-written TOML — `ProjectConfig` is `Deserialize`-only — seeded with the `unblock_model::normalize_prefix`-normalized `--prefix`, default `ub`; the CLI takes a direct `unblock-model` dep) + a migrated empty `unblock.db` opened through `open_with_storage_with_cli` (FR-9 no-drift). NO `.gitignore`/`metadata.json`/`issues.jsonl` (D13/NFR-6/model-B). **Clobber guard:** refuse if `config.toml` OR `unblock.db` is already present without `--force` → a CLI-local `CliError::AlreadyInitialized` → `ErrorCode::AlreadyInitialized` (exit 2; `ConfigError` has no such variant). Reports a CLI-local `InitReport`.
 
-**agents (FR-14).** A pure file op (SEPARATE from init): resolve-only open (`open_workspace_with_cli`, no DB) to find `workspace_dir`, then merge an idempotent managed AGENTS.md block (delimited markers) describing the MCP wiring (`unblock mcp`, stdio transport, tool set). Writes a terse "wrote X" note to stderr.
+**agents (FR-14, D33).** A pure file op (SEPARATE from init): resolve-only open (`open_workspace_with_cli`, no DB) to find `workspace_dir`, then merge an idempotent managed AGENTS.md block (delimited markers) describing the MCP wiring (`unblock mcp`, stdio transport, tool set). The block is a FULL capabilities table rendered by the zero-arg `managed_block() -> String`, a THIN markdown renderer over `unblock_mcp::agents_digest()` (§5.4) — descriptor tables for the 7 tools / 5 resources / 3 prompts, per-tool actions with their FULL required+optional parameter surface, the error-code → exit-code/retryable map, and pointers to `unblock://schema` + `unblock://capabilities`. Writes a terse "wrote X" note to stderr.
 
 **error boundary (D27/AF-4).** `exit.rs` owns the 0–8 cast (there is no `From<ExitCode> for std::process::ExitCode` in `unblock-error`). Transparent-`CodedError` sources (`EngineError`/`ConfigError`/, with AF-4, `RenderError`) bridge via `(&err).into()`. `McpServerError` (`Transport`/`RunLoop`, `#[non_exhaustive]`) is mapped EXPLICITLY to `ErrorCode::InternalError` (exit 1) — an MCP-server failure is internal, not a user IoError (NOT exit 8). CLI-local variants: `AlreadyInitialized` (exit 2), scaffold/agents `Io` (exit 8). **NFR-14 + FR-11 split:** in json/robot the structured error renders to STDOUT (always valid JSON even on error); in plain a human `error[CODE]: message` line goes to STDERR.
 
