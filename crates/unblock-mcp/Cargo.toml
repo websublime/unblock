@@ -11,7 +11,7 @@ workspace = true
 
 [features]
 default = []
-# A test-only seam: exposes `serve_duplex_for_test` (and the otherwise-private `UnblockServer`) so
+# A test-only seam: exposes `mcp_server_duplex_for_test` (and the otherwise-private `UnblockServer`) so
 # the in-process MCP lifecycle test can drive the real server over an in-memory duplex transport,
 # plus the `__transport_error` / `__run_loop_error` `McpServerError` constructors so consumers (the
 # CLI) can prove the `McpServerError` → exit-1 mapping without a real transport/run-loop failure.
@@ -39,7 +39,7 @@ snafu = { workspace = true }
 
 [dev-dependencies]
 # Self dev-dependency that enables the `test-util` feature for the integration tests ONLY (the
-# standard cargo idiom): `cargo test` then sees `serve_duplex_for_test`/`UnblockServer` without the
+# standard cargo idiom): `cargo test` then sees `mcp_server_duplex_for_test`/`UnblockServer` without the
 # shipped build (which has `test-util` off) exposing them. The lib + its tests link the same crate.
 unblock-mcp = { path = ".", features = ["test-util"] }
 # The integration tests (`tests/lifecycle.rs` M2 exit-gate, `tests/error_mapping.rs`) drive a real

@@ -1,6 +1,6 @@
 # unblock-cli — L7
 
-The reduced binary (`unblock`): lifecycle/ops only (serve/migrate/doctor/version/init/agents/update,
+The reduced binary (`unblock`): lifecycle/ops only (mcp/migrate/doctor/version/init/agents/update,
 D3) — thin routing over the engine + config flag-forwarding + tracing + the 0–8 exit-code boundary.
 Owns cooperative-shutdown signal install (FR-17, OQ-4). `unblock update` is behind the default-on
 `self-update` feature (CF-K); `--no-default-features` drops the only network surface.

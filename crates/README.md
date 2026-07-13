@@ -23,7 +23,7 @@ L7  unblock-mcp | unblock-cli            (rmcp stdio server · lifecycle binary)
 ```
 
 The only intra-L7 edge is **`unblock-cli → unblock-mcp`** (the cli owns the binary; mcp is a
-library exposing `serve(...)`). `unblock-storage` depends on `model + error` only (the engine composes
+library exposing `run_mcp_server(...)`). `unblock-storage` depends on `model + error` only (the engine composes
 storage + policy). `unblock-fuzz` is an unpublished member (fuzz harness over ingestion).
 
 | Crate | Layer | Role |
@@ -38,7 +38,7 @@ storage + policy). `unblock-fuzz` is an unpublished member (fuzz harness over in
 | `unblock-engine` | L5 | `Session`; in-process write `Semaphore` (D14); reads bypass it (FR-10) |
 | `unblock-render` | L6 | json/robot/plain/csv/markdown (TOON v1.1); stdout/stderr discipline |
 | `unblock-mcp` | L7 | **Primary** surface: rmcp stdio server, 7-tool taxonomy + resources + prompts |
-| `unblock-cli` | L7 | The `unblock` binary: serve/migrate/doctor/version/init/agents/update |
+| `unblock-cli` | L7 | The `unblock` binary: mcp/migrate/doctor/version/init/agents/update |
 | `unblock-fuzz` | — | Unpublished; `cargo-fuzz` targets over model/sync/storage ingestion |
 
 `xtask` (repo root) is workspace tooling: `cargo xtask check-layering` enforces the matrix above.

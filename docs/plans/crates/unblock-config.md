@@ -2,7 +2,7 @@
 
 - **Status:** DRAFT — conforms to `docs/plans/00-roadmap.md`, `docs/plans/01-design-spine.md`, and `docs/PRD.md` (PRD APPROVED v1.1). Any API here that would drift from the spine must amend the spine first (spine §6.1).
 - **Date:** 2026-06-19
-- **Grounding:** original `temp/beads_rust-main/src/config/mod.rs` (discovery, `ConfigPaths`, `Metadata`, layered precedence) — reshaped by locked decisions D8/D10/D11/D14/D15 (rename to `.unblock/`, TOML + single `UNBLOCK_` prefix, no town/mayor routing, single-serve topology, remote off by default).
+- **Grounding:** original `temp/beads_rust-main/src/config/mod.rs` (discovery, `ConfigPaths`, `Metadata`, layered precedence) — reshaped by locked decisions D8/D10/D11/D14/D15 (rename to `.unblock/`, TOML + single `UNBLOCK_` prefix, no town/mayor routing, single-MCP-server topology, remote off by default).
 
 ---
 
