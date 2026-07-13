@@ -55,7 +55,7 @@ pass as hard gates; unblock dogfoods its own repo (issues imported from `bd` via
 | FR-25 | **Self-update** (`unblock update`) via `axoupdater`; verified by GitHub artifact attestations (NFR-17, D17) |
 
 ### Key NFR gates
-NFR-1 (perf budgets), NFR-2 (250k CI / 1M manual under single-serve topology), **NFR-3 (no hot-spin —
+NFR-1 (perf budgets), NFR-2 (250k CI / 1M manual under single-MCP-server topology), **NFR-3 (no hot-spin —
 contention lab in M0 before any crate depends on storage)**, NFR-4/5 (atomic export + reliability gates),
 NFR-6 (zero git), NFR-9 (`forbid(unsafe_code)`, pinned actions), NFR-14 (stdout/stderr discipline),
 NFR-15 (acyclic layering), NFR-16 (Storage contract suite), NFR-18 (MCP untrusted-input boundary).
@@ -63,7 +63,7 @@ NFR-15 (acyclic layering), NFR-16 (Storage contract suite), NFR-18 (MCP untruste
 ### Crates touched (all 12)
 `unblock-model`, `unblock-error`, `unblock-policy`, `unblock-storage` (libsql, local default — `features = ["core"]`;
 remote feature **off**, D15), `unblock-sync` (light), `unblock-health` (lite), `unblock-config` (subset),
-`unblock-engine`, `unblock-render` (reduced), `unblock-mcp` (primary), `unblock-cli` (lifecycle: serve/
+`unblock-engine`, `unblock-render` (reduced), `unblock-mcp` (primary), `unblock-cli` (lifecycle: mcp/
 migrate/doctor/version/update), `unblock-fuzz`.
 
 ### Milestones (PRD §13 / plan §2–5)
@@ -102,7 +102,7 @@ labels/comments, scheduler, coordination, gates, saved-queries (plan §6).
 
 ## 3. v1.2 — Shared state: one primary, many machines (mixed human+agent teams)  **[PROPOSED]**
 
-**Theme:** Shared state for **mixed human+agent teams** (PRD §4 D28): ONE logical issue store served to many
+**Theme:** Shared state for **mixed human+agent teams** (PRD §4 D28): ONE logical issue store shared with many
 machines — dev laptops, CI runners, cloud agents — via libsql **embedded replicas**. Not merely "turn on the
 libsql feature": v1.2 is the release where unblock becomes a team product. The local-only single-workspace
 deployment is the initial test phase, not the product's end state.
@@ -170,11 +170,11 @@ config split + keychain credential resolution), `unblock-engine` (write topology
 - TLS/HTTP transitive surface only enters builds that opt into remote (NFR-10 must stay green on default build).
 - Lock-time confirmations: the embedded-replicas-vs-Turso-Sync default (fresh research at v1.2 lock) and the
   "dist artifacts enable `remote`" distribution call.
-- The D14 **"single-serve per workspace"** wording: the **local** (single-machine) half is **RESOLVED by D31**
+- The D14 **"single-MCP-server per workspace"** wording: the **local** (single-machine) half is **RESOLVED by D31**
   (2026-07-09) — child-per-client is the supported topology, cross-process serialization restored via the
   `.unblock/.write.lock` advisory lock — so the v1.2 topology review now covers only the **cross-machine
   primary-serialization** half; the **local two-writer / co-tenancy** case surfaced at v1.5 (a TUI and an agent
-  serve on one machine — roadmap §6) is likewise covered by D31, not deferred.
+  run on one machine — roadmap §6) is likewise covered by D31, not deferred.
 - *Answered 2026-07-07 (dropped):* the offline-first question — decided above (remote writes require network;
   reads stay local; no queue-and-reconcile in v1.2).
 - *Deferred 2026-07-07 (dropped as a v1.2 question):* multi-writer reconciliation (LWW-vs-oplog) — moot under
@@ -247,7 +247,7 @@ transport (**re-evaluated at v1.4 lock** — see the Lands row) — without bloa
 | `[NEW]` 1M-issue perf as CI gate | Promote NFR-2's manual 1M / 10k-agent corpus to an automated regression gate; index/query tuning (the original's `workitems_ready_index` lesson) | NFR-1/NFR-2 |
 | `[NEW]` Active coordination | Beyond `coordination status`: stale-claim **reclaim** policy, claim TTLs/heartbeats, deterministic re-assignment evidence — still DB-derived, still no Agent Mail | FR-18 extension |
 | `[NEW]` Scheduler v2 | Richer ranking signals (cost/estimate-aware, critical-path-aware via `petgraph`, milestone-due-date-aware via the v1.3 planning layer), still a pure versioned `unblock.scheduler.v2` contract | FR-18 / policy |
-| `[NEW]` MCP streamable-HTTP transport | **Moved from v2+ into v1.4** (decided 2026-07-07): a D2 extension (the D2 amendment lands at v1.4 lock) — **stdio stays primary**; HTTP is an *additional* transport under the same isolation discipline. **Rationale re-framed (2026-07-08):** it is **no longer a UI enabler** — the v1.5 local TUI speaks MCP over stdio and the v2+ PRO web reads Turso directly (roadmap §6/§7), so neither needs it. Its remaining justification is thinner: a serve exposed to clients that **cannot spawn a local stdio child** (e.g. a shared team serve endpoint). Under the v1.2 embedded-replica model each machine runs its own local serve over stdio, so this is **re-evaluated at v1.4 lock** (may stay in v1.4 or defer to v2+). Listed alongside the subscription-style change notifications below | D2, FR-20 |
+| `[NEW]` MCP streamable-HTTP transport | **Moved from v2+ into v1.4** (decided 2026-07-07): a D2 extension (the D2 amendment lands at v1.4 lock) — **stdio stays primary**; HTTP is an *additional* transport under the same isolation discipline. **Rationale re-framed (2026-07-08):** it is **no longer a UI enabler** — the v1.5 local TUI speaks MCP over stdio and the v2+ PRO web reads Turso directly (roadmap §6/§7), so neither needs it. Its remaining justification is thinner: an MCP server exposed to clients that **cannot spawn a local stdio child** (e.g. a shared team MCP-server endpoint). Under the v1.2 embedded-replica model each machine runs its own local MCP server over stdio, so this is **re-evaluated at v1.4 lock** (may stay in v1.4 or defer to v2+). Listed alongside the subscription-style change notifications below | D2, FR-20 |
 | `[NEW]` Richer MCP surface | Streaming/large-result resources, batch tools, subscription-style change notifications — measured against the tool-count budget (RK-3); resources preferred over new tools | FR-20 / PRD §9 |
 | `[NEW]` Compaction / archival | Activate the model's compaction fields (kept for JSONL fidelity, D12) as a real archival path for very large stores; restore-from-snapshot | D12, domain model |
 | `[NEW]` Performance observability | `tracing`-based perf spans + a `criterion` dashboard; contention-lab generalized to a continuous load harness | NFR-13 |
@@ -276,10 +276,10 @@ proposal, now terminal-native. Reads are always local (the local DB, or the loca
 workspaces); in remote workspaces writes follow the v1.2 stance (network required — roadmap §3). **Phase 1 is
 read-only visualization.**
 
-**Architecture (ratified 2026-07-08):** the TUI is an **MCP client over stdio** — it spawns `unblock serve` as
+**Architecture (ratified 2026-07-08):** the TUI is an **MCP client over stdio** — it spawns `unblock mcp` as
 a child process and speaks MCP over **stdio, exactly as Claude Code / agents do today**. There is **no second
 domain surface** (FR-9 single mutation home; D2/D3 preserved, not relaxed — PRD §4 D28): only the concrete
-client changes (web → terminal); D28's principle (humans served through an MCP client) is unchanged. A new
+client changes (web → terminal); D28's principle (humans work through an MCP client) is unchanged. A new
 `tui` **lifecycle command** on the D3 surface (lifecycle/ops only, no domain CLI; the canonical D3 verb set —
 and the doc-lint command-token class that pins it — gains `tui` at v1.5 lock). **NO loopback HTTP server, NO
 embedded web assets, NO dependency on the v1.4 streamable-HTTP transport** (roadmap §5) — stdio ships in v1.
@@ -335,7 +335,7 @@ terminal-noir aesthetic translates *even more* literally to a real terminal.
 
 ### Crates touched
 **`unblock-tui`** *(proposed L7 crate — a ratatui terminal app that is itself the MCP client: it spawns
-`unblock serve` as a child and speaks MCP over stdio, with no loopback server / no embedded web assets / no new
+`unblock mcp` as a child and speaks MCP over stdio, with no loopback server / no embedded web assets / no new
 transport; minted at v1.5 lock)*, `unblock-cli` (the `tui` lifecycle command), `unblock-mcp` (consumed over
 stdio — no new transport). **No Node build stage, no npm gate** (removed with the web proposal).
 
@@ -344,13 +344,13 @@ stdio — no new transport). **No Node build stage, no npm gate** (removed with 
 - Which screens make the phase-1 read-only cut.
 - Phase-2 write-scope boundaries (which MCP tools the TUI exposes to the human actor first).
 - The milestone-nesting fork (roadmap §4) shapes the text roadmap/burnup screen.
-- Multi-process against one **local** `unblock.db`: because the TUI spawns its **own** `unblock serve` child, a
+- Multi-process against one **local** `unblock.db`: because the TUI spawns its **own** `unblock mcp` child, a
   TUI process **and** an agent on the same machine are **two independent local writers** — the in-process write
-  `Semaphore` (D14) serializes within one serve, **not across two**, so cross-process serialization is the
+  `Semaphore` (D14) serializes within one MCP server, **not across two**, so cross-process serialization is the
   **restored `.unblock/.write.lock` advisory lock (D31)**: this within-machine co-tenancy is now the **SUPPORTED**
   topology (child-per-client, D31), correct-by-construction, with `BEGIN IMMEDIATE` + native `busy_timeout`
   (NFR-3) as the WAL-level backstop and NFS/SMB the documented residual. This is **distinct** from the
-  cross-machine v1.2 case (one local serve per machine; all writes serialize at the shared primary — roadmap §3,
+  cross-machine v1.2 case (one local MCP server per machine; all writes serialize at the shared primary — roadmap §3,
   PRD §8.2). The v1.2 topology review the roadmap already promises (roadmap §3) now covers only the cross-machine
   primary-serialization half; the local two-writer case is **RESOLVED by D31**.
 
@@ -455,7 +455,7 @@ not feature-landing): ● substantial work in that release · ◐ incidental / h
 
 Notes:
 - **`unblock-tui`** is the proposed 13th workspace crate (L7 — a ratatui terminal app that is itself the **MCP
-  client**: it spawns `unblock serve` as a child and speaks MCP over **stdio** (exactly as Claude Code / agents
+  client**: it spawns `unblock mcp` as a child and speaks MCP over **stdio** (exactly as Claude Code / agents
   do today), roadmap §6; **no loopback server, no embedded web assets, no new transport**). At **runtime** it
   links nothing of the server — it drives a child process over stdio — so its only compile-time edge to
   `unblock-mcp` is for the **contract DTO types** it deserializes from the wire (the D25 per-tool output

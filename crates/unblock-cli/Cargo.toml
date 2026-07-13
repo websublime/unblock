@@ -30,7 +30,7 @@ unblock-mcp = { workspace = true }
 unblock-error = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
-# The `CancellationToken` for `ServeOptions.cancel` (D27/AD-4/DR-11).
+# The `CancellationToken` for `McpServerOptions.cancel` (D27/AD-4/DR-11).
 tokio-util = { workspace = true }
 # Per-crate error enum + context selectors (D4) — the `CliError` boundary.
 snafu = { workspace = true }
@@ -52,18 +52,18 @@ signal-hook = { workspace = true }
 # `.unblock/` per case).
 tempfile = { workspace = true }
 # Construct a `WorkspaceContext` (with an `Arc<dyn Storage>`) in the dispatch unit test + the
-# cli_engine_parity / serve_lifecycle direct-`Session` fixtures.
+# cli_engine_parity / mcp_lifecycle direct-`Session` fixtures.
 unblock-storage = { workspace = true }
 # Round-trip the scaffolded `config.toml` through the real deserializer in the `init` unit test.
 toml = { workspace = true }
 # The integration matrix (crate-plan §Tests / D27): drive the real `unblock` binary + snapshot-pin.
-# `assert_cmd` runs the built binary (exit codes, help, serve stdio); `insta` pins help + report
+# `assert_cmd` runs the built binary (exit codes, help, mcp stdio); `insta` pins help + report
 # shapes; `wiremock` stands up the update-verify mock release source (FR-25/NFR-17).
 assert_cmd = { workspace = true }
 insta = { workspace = true }
 wiremock = { workspace = true }
 # `cli_engine_parity.rs` runs a lifecycle op via `Session` directly to prove no CLI drift (FR-9);
-# `serve_lifecycle.rs` asserts the MCP framing / payloads over piped stdio via `serde_json`.
+# `mcp_lifecycle.rs` asserts the MCP framing / payloads over piped stdio via `serde_json`.
 unblock-engine = { workspace = true }
 unblock-config = { workspace = true }
 unblock-model = { workspace = true }

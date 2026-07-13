@@ -15,7 +15,7 @@
 #   - scale       → T3.5  (needs the 250k-issue corpus harness)
 #   - no-network  → T3.1/T3.6 (crate-scoped gate landed at T3.1/D27; the workspace-wide scan needs the
 #                              `unblock-cli` binary + the axoupdater/dist surface, T3.6)
-#   - rate-limit  → T3.5  (single-serve rate-limit assertions; ride the perf/scale corpus)
+#   - rate-limit  → T3.5  (single-MCP-server rate-limit assertions; ride the perf/scale corpus)
 #
 # Feature policy (D15/NFR-10, ci-cd §2.2): the testkit clippy/test steps use TARGETED features
 # (`-p unblock-storage --features testkit`), never `--all-features` — `--all-features` resolves the

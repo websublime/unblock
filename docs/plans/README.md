@@ -24,7 +24,7 @@ This directory holds the full planning corpus for the multi-crate Rust rewrite. 
 | [`crates/unblock-engine.md`](crates/unblock-engine.md) | L5. The single mutation home — `Session` composing storage+policy(+sync/health), tokio `Semaphore(1)` write serialization (D14), reads bypass it (FR-10), cooperative shutdown. |
 | [`crates/unblock-render.md`](crates/unblock-render.md) | L6. Output formatting (json/robot/plain/csv/markdown; toon feature-gated). Reduced under D7 (no rich-terminal stack). Pure; returns Strings, never writes I/O. |
 | [`crates/unblock-mcp.md`](crates/unblock-mcp.md) | L7 (PRIMARY). rmcp 1.7 stdio server — 7-tool taxonomy + resources + prompts, schemars-validated under quotas, `contract_version`-stamped. Thin adapter over `Session`. |
-| [`crates/unblock-cli.md`](crates/unblock-cli.md) | L7. Reduced `unblock` binary — lifecycle/ops only (serve/migrate/doctor/version/init/agents/`unblock update`), 0–8 exit-code boundary, cooperative shutdown. No domain features (D3). |
+| [`crates/unblock-cli.md`](crates/unblock-cli.md) | L7. Reduced `unblock` binary — lifecycle/ops only (mcp/migrate/doctor/version/init/agents/`unblock update`), 0–8 exit-code boundary, cooperative shutdown. No domain features (D3). |
 | [`crates/unblock-fuzz.md`](crates/unblock-fuzz.md) | aux (unpublished). cargo-fuzz targets over the ingestion surfaces (content-hash, JSONL/bd import, config TOML, query filters, claim race). Sink crate; nothing depends on it. |
 | [`implementation-plan.md`](implementation-plan.md) | v1 walking-skeleton milestones M0–M3, task DAG (T-M.n), per-task acceptance criteria, MCP tool taxonomy. |
 | [`ci-cd-and-distribution.md`](ci-cd-and-distribution.md) | CI quality gate (from M0) + `dist` release pipeline at v1 GA: 6 target triples, shell+powershell installers, GitHub attestations, `axoupdater`-backed `unblock update` (D17). |
@@ -94,7 +94,7 @@ Legend: ● new/major work · ◐ extended/hardened · (—) untouched.
 | `unblock-engine` | ● Session lifecycle/read/write/interchange/shutdown | ● organization/coordination/gates/saved_queries/audit | ◐ `sync_topology.rs` | ◐ `compaction.rs` |
 | `unblock-render` | ● renderer/format/backends/sanitize | ◐ toon + v1.1 DTO views | (—) | ◐ `stream.rs` |
 | `unblock-mcp` | ● 7 tools + resources + prompts + server | ● discriminator growth + coordination resource | ◐ sync_status resource (feature) | ◐ batch/streaming/changes |
-| `unblock-cli` | ● serve/migrate/doctor/version/init/agents + `unblock update` (FR-25, D17; axoupdater dep) | ● completions | (—) | (—) |
+| `unblock-cli` | ● mcp/migrate/doctor/version/init/agents + `unblock update` (FR-25, D17; axoupdater dep) | ● completions | (—) | (—) |
 | `unblock-fuzz` | ● content_hash/jsonl/sync_cycle/bd/query/config-smoke | ● config full + claim_race | ◐ remote_sync (feature) | ◐ scale_ingest |
 
 > **Note (2026-07-07 resequence):** this per-crate table predates the full v1.2–v1.5 shape. Its last column — relabeled **v1.4 (PROPOSED)** — tracks the scale / swarm-coordination / MCP-richness work formerly numbered v1.3; the **new v1.3 planning layer** (milestones + goals) and the **v1.5 local TUI** are not yet represented as columns here. `00-roadmap.md` §3–§7 (and the roadmap §9 crate-impact table) is authoritative for the v1.2–v1.5 crate shape.
