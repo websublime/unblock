@@ -14,7 +14,7 @@ lifecycle/ops only. Pre-1.0, no external users — breaking changes welcome, no 
 
 | Doc | Role |
 |---|---|
-| `docs/PRD.md` | Product truth — decisions (§4 D1..D33), FR/NFR, domain model, milestones. **APPROVED v1.1.** |
+| `docs/PRD.md` | Product truth — decisions (§4 D1..D34), FR/NFR, domain model, milestones. **APPROVED v1.1.** |
 | `docs/plans/01-design-spine.md` | **Authoritative interface contract** (types, `Storage` trait, `Session` API, MCP schemas, errors). |
 | `docs/plans/implementation-plan.md` | Task DAG M0–M3 (T-ids) + acceptance criteria. |
 | `docs/plans/STATUS.md` | **Live task registry** — what's done / in-progress / to-do (the system of record). |
@@ -42,7 +42,9 @@ session** by default (template: `docs/plans/templates/drift-gap-report.md`).
 
 - `unblock-storage` and `unblock-render` and `unblock-policy` depend on **model + error only**.
 - `unblock-engine` is the **single mutation home** (FR-9): MCP and CLI are thin adapters over `Session`, so they
-  cannot drift. Writes serialize through an **in-process tokio `Semaphore`** (D14, single-MCP-server per workspace).
+  cannot drift. Writes serialize through an **in-process tokio `Semaphore`** (D14) that serializes within one MCP
+  server; cross-process writes are serialized by the D31 `.write.lock` advisory lock — the supported topology is
+  **child-per-client** (D31), not single-MCP-server-per-workspace.
 - `unblock-cli` → `unblock-mcp` (cli owns the binary; mcp is a library exposing `run_mcp_server()`); **never** mcp → cli.
 - Cross-crate types are **defined once in `unblock-model`** and re-exported (never redefined) — see spine §1.10.
 

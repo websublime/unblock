@@ -55,7 +55,7 @@ pass as hard gates; unblock dogfoods its own repo (issues imported from `bd` via
 | FR-25 | **Self-update** (`unblock update`) via `axoupdater`; verified by GitHub artifact attestations (NFR-17, D17) |
 
 ### Key NFR gates
-NFR-1 (perf budgets), NFR-2 (250k CI / 1M manual under single-MCP-server topology), **NFR-3 (no hot-spin —
+NFR-1 (perf budgets — hybrid gate, D34), NFR-2 (250k CI / 1M manual under the child-per-client topology, D14+D31), **NFR-3 (no hot-spin —
 contention lab in M0 before any crate depends on storage)**, NFR-4/5 (atomic export + reliability gates),
 NFR-6 (zero git), NFR-9 (`forbid(unsafe_code)`, pinned actions), NFR-14 (stdout/stderr discipline),
 NFR-15 (acyclic layering), NFR-16 (Storage contract suite), NFR-18 (MCP untrusted-input boundary).
