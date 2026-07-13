@@ -81,7 +81,7 @@ async fn doctor_cli_renders_session_doctor_verbatim() {
     assert_eq!(out.status.code(), Some(0));
     let cli_report: Value = serde_json::from_slice(&out.stdout).expect("valid JSON doctor report");
 
-    // Engine side: `Session::doctor()` over the SAME workspace (after the child exited — single-serve).
+    // Engine side: `Session::doctor()` over the SAME workspace (after the child exited — single-MCP-server).
     let session = open_session(&ws).await;
     let engine_report = session.doctor().await.expect("Session::doctor");
 

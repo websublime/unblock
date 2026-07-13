@@ -1,7 +1,7 @@
 //! Cli-local `tracing-subscriber` init — STDERR-ONLY (NFR-14) with a `-v/-q` level map.
 //!
 //! The CLI OWNS its subscriber (rather than delegating to engine's `init_tracing`) so it can
-//! GUARANTEE a stderr writer at the process edge: a `serve` run must never let a log line hit STDOUT,
+//! GUARANTEE a stderr writer at the process edge: an MCP-server (`unblock mcp`) run must never let a log line hit STDOUT,
 //! which carries the MCP framing (a single stray line corrupts the protocol). The reliability target
 //! is referenced from the engine's re-exported [`RELIABILITY_TARGET`] const so the target name stays a
 //! single SSOT (NFR-13). Idempotent via `try_init().ok()` (a second call — e.g. in tests — is a no-op).

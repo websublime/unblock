@@ -74,7 +74,7 @@ pub(crate) const BUSY_TIMEOUT_MS: u64 = 5000;
 ///
 /// PASSIVE never blocks readers or writers and never takes the exclusive lock that TRUNCATE would, so
 /// it cannot manufacture contention in the write hot path; it only opportunistically folds committed
-/// WAL frames back into the main database so a long-lived `serve` does not grow the WAL unboundedly
+/// WAL frames back into the main database so a long-lived MCP server does not grow the WAL unboundedly
 /// (`wal_autocheckpoint = 0` disables `SQLite`'s own automatic checkpointing — see [`apply_pragmas`]).
 /// The T0.8 contention lab asserts the WAL sidecar stays bounded under sustained multi-instance
 /// contention with this cadence on, and (a `#[ignore]`d negative control) that it breaches the

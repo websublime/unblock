@@ -206,7 +206,7 @@ async fn claim_race_exactly_one_winner() {
 /// determinism but NOT that the engine permit serializes truly-in-flight writers. This test drives
 /// many mutations **concurrently** — `create`/`update`/`claim` futures launched at once across a
 /// multi-thread runtime through ONE shared `Arc<Session>` (the supported in-process topology, spine
-/// §4.2: exactly one `unblock serve` per workspace ⇒ one permit) — so every op contends for the
+/// §4.2: exactly one MCP server (`unblock mcp`) per workspace ⇒ one permit) — so every op contends for the
 /// **single** write permit. It then asserts the serialization invariants the permit must guarantee:
 ///   (a) `integrity_check()` is clean after the storm (no torn rows / corruption),
 ///   (b) NO lost writes — every op that returned `Ok` is reflected in the final DB state (the storm

@@ -1,4 +1,4 @@
-//! CD-4 (MCP lifecycle spec) — protocol-version negotiation over a LIVE `serve_duplex_for_test` duplex.
+//! CD-4 (MCP lifecycle spec) — protocol-version negotiation over a LIVE `mcp_server_duplex_for_test` duplex.
 //!
 //! The MCP lifecycle spec requires: if the server SUPPORTS the client's requested `protocolVersion` it
 //! MUST echo it; otherwise it MUST answer with a version it supports (SHOULD be its latest). rmcp 1.7's
@@ -10,7 +10,7 @@
 //!   clamp — the server echoed the bogus value verbatim; GREEN after — it answers `LATEST`);
 //! - a SUPPORTED requested version (latest OR an older known one) is still echoed verbatim.
 //!
-//! CD-6 (assumption pin) — the four CD-4 tests above all drive the CLAMPED `serve_duplex_for_test`
+//! CD-6 (assumption pin) — the four CD-4 tests above all drive the CLAMPED `mcp_server_duplex_for_test`
 //! path, so they prove the clamp WORKS but do NOT pin the rmcp behaviour the clamp COMPENSATES for.
 //! The `VersionClampingTransport` is correct only while rmcp's serve-loop keeps deriving the wire
 //! version as a lexical `min(client, handler)` — an undocumented internal. Two pins below fail loudly
@@ -26,7 +26,7 @@ use rmcp::ServiceExt;
 use rmcp::model::{ClientCapabilities, ClientInfo, Implementation, ProtocolVersion};
 use tokio_util::sync::CancellationToken;
 use unblock_engine::Session;
-use unblock_mcp::{Quotas, serve_duplex_for_test, serve_duplex_unclamped_for_test};
+use unblock_mcp::{Quotas, mcp_server_duplex_for_test, mcp_server_duplex_unclamped_for_test};
 
 /// Drive a full initialize handshake with a client that requests `requested`, returning the
 /// `protocolVersion` the LIVE server negotiated back (its `InitializeResult`).
@@ -36,7 +36,7 @@ async fn negotiated_version(
 ) -> ProtocolVersion {
     let (server_io, client_io) = tokio::io::duplex(64 * 1024);
     let cancel = CancellationToken::new();
-    let server_task = tokio::spawn(serve_duplex_for_test(
+    let server_task = tokio::spawn(mcp_server_duplex_for_test(
         session,
         Quotas::default(),
         None,
@@ -154,7 +154,7 @@ async fn supported_older_version_is_echoed() {
 // ---------------------------------------------------------------------------------------------
 
 /// Like [`negotiated_version`], but drives the RAW, UNCLAMPED rmcp serve path
-/// ([`serve_duplex_unclamped_for_test`], WITHOUT the `VersionClampingTransport`) — so the pin can
+/// ([`mcp_server_duplex_unclamped_for_test`], WITHOUT the `VersionClampingTransport`) — so the pin can
 /// observe rmcp 1.7's un-guarded serve-loop version negotiation directly.
 async fn raw_negotiated_version(
     session: std::sync::Arc<Session>,
@@ -162,7 +162,7 @@ async fn raw_negotiated_version(
 ) -> ProtocolVersion {
     let (server_io, client_io) = tokio::io::duplex(64 * 1024);
     let cancel = CancellationToken::new();
-    let server_task = tokio::spawn(serve_duplex_unclamped_for_test(
+    let server_task = tokio::spawn(mcp_server_duplex_unclamped_for_test(
         session,
         Quotas::default(),
         None,
@@ -198,7 +198,7 @@ async fn raw_negotiated_version(
 
 /// CD-6 ASSUMPTION PIN — rmcp 1.7's RAW (unclamped) serve-loop ECHOES an unsupported, below-latest
 /// requested `protocolVersion` VERBATIM. This is the exact spec-non-conformant behaviour that
-/// [`serve_duplex_for_test`]'s `VersionClampingTransport` compensates for; the four CD-4 tests above
+/// [`mcp_server_duplex_for_test`]'s `VersionClampingTransport` compensates for; the four CD-4 tests above
 /// only prove the clamp, never the underlying rmcp assumption.
 ///
 /// If this test ever FAILS, rmcp changed its serve-loop version negotiation → the clamp in

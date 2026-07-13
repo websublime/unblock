@@ -5,7 +5,7 @@
 //! **Error mapping (D27/AF-4):** `EngineError`/`ConfigError`/`RenderError` are `CodedError`, so they
 //! bridge via `(&err).into()` (the blanket `From<&E>`). `McpServerError` is the deliberate exception:
 //! it does NOT impl `CodedError`, so `exit.rs` maps `Transport`/`RunLoop` EXPLICITLY to
-//! `ErrorCode::InternalError` (exit 1) — a serve run-loop/transport failure is an INTERNAL condition,
+//! `ErrorCode::InternalError` (exit 1) — an MCP-server run-loop/transport failure is an INTERNAL condition,
 //! not a user `IoError` (exit 8). CLI-local variants: `AlreadyInitialized` (exit 2, the init clobber
 //! guard — `ConfigError` has none), scaffold/agents `Io` (exit 8), `Update` (exit 1).
 //!
@@ -48,7 +48,7 @@ pub enum CliError {
     },
 
     /// The MCP server failed to start or its run loop ended abnormally (FR-20). `McpServerError` has
-    /// NO `CodedError`; it is mapped EXPLICITLY to `InternalError` (exit 1) — a serve failure is
+    /// NO `CodedError`; it is mapped EXPLICITLY to `InternalError` (exit 1) — an MCP-server failure is
     /// internal, not a user I/O fault (D27/AF-4).
     #[snafu(display("mcp server error: {source}"))]
     Mcp {
@@ -92,7 +92,7 @@ impl CliError {
             Self::Engine { source } => source.code(),
             Self::Config { source } => source.code(),
             Self::Render { source } => source.code(),
-            // McpServerError has NO CodedError — a serve failure is internal (exit 1), not I/O.
+            // McpServerError has NO CodedError — an MCP-server failure is internal (exit 1), not I/O.
             Self::Mcp { .. } => ErrorCode::InternalError,
             Self::AlreadyInitialized { .. } => ErrorCode::AlreadyInitialized,
             Self::Io { .. } => ErrorCode::IoError,
@@ -232,7 +232,7 @@ mod tests {
         assert_eq!(err.code().exit_code(), 2);
     }
 
-    /// D27/AF-4 (non-vacuous): a serve TRANSPORT failure (`McpServerError::Transport`) is an INTERNAL
+    /// D27/AF-4 (non-vacuous): an MCP-server TRANSPORT failure (`McpServerError::Transport`) is an INTERNAL
     /// condition → `InternalError` (exit 1), NEVER a user `IoError` (exit 8). This constructs a REAL
     /// `CliError::Mcp{Transport}` via the `test-util` seam and pins the mapping — mutating the `Mcp`
     /// arm in `code()` to `IoError` turns this RED.
@@ -244,7 +244,7 @@ mod tests {
         assert_eq!(
             err.code(),
             ErrorCode::InternalError,
-            "a serve transport failure is INTERNAL, not a user IoError"
+            "an MCP-server transport failure is INTERNAL, not a user IoError"
         );
         assert_eq!(
             err.code().exit_code(),
@@ -254,11 +254,11 @@ mod tests {
         assert_ne!(
             err.code().exit_code(),
             8,
-            "a serve failure must NEVER be the user IoError exit 8"
+            "an MCP-server failure must NEVER be the user IoError exit 8"
         );
     }
 
-    /// D27/AF-4 (non-vacuous): a serve RUN-LOOP failure (`McpServerError::RunLoop`) maps identically →
+    /// D27/AF-4 (non-vacuous): an MCP-server RUN-LOOP failure (`McpServerError::RunLoop`) maps identically →
     /// `InternalError` (exit 1). Constructs a REAL `CliError::Mcp{RunLoop}` (an aborted-task `JoinError`)
     /// via the `test-util` seam. Async because building a genuine `JoinError` awaits an aborted task.
     #[tokio::test]
@@ -271,12 +271,12 @@ mod tests {
         assert_ne!(
             err.code().exit_code(),
             8,
-            "a serve run-loop failure must NEVER be the user IoError exit 8"
+            "an MCP-server run-loop failure must NEVER be the user IoError exit 8"
         );
     }
 
     /// The structured payload for a `CliError::Mcp` renders with the `INTERNAL_ERROR` code + exit 1
-    /// (the terminal boundary a serve failure reaches — FR-11 always-valid on error).
+    /// (the terminal boundary an MCP-server failure reaches — FR-11 always-valid on error).
     #[test]
     fn mcp_error_to_structured_is_internal_error() {
         let err = CliError::Mcp {

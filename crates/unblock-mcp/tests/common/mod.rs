@@ -14,7 +14,7 @@ use serde_json::{Map, Value};
 use tokio_util::sync::CancellationToken;
 use unblock_config::{ConfigPaths, ResolvedConfig, WorkspaceContext};
 use unblock_engine::{Session, SessionConfig};
-use unblock_mcp::{Quotas, UnblockServer, serve_duplex_for_test};
+use unblock_mcp::{Quotas, UnblockServer, mcp_server_duplex_for_test};
 use unblock_storage::{LibsqlStorage, Storage};
 
 /// Build an `Arc<Session>` over a fresh in-memory libsql backend (migrated), wired into a synthetic
@@ -87,7 +87,7 @@ pub async fn session_recording() -> (Arc<Session>, Arc<recording::RecordingStora
 /// Spin up the real server over an in-memory duplex transport and return an initialized client peer
 /// plus the server handle + cancellation token (so a test can drive a cancel).
 ///
-/// The MCP initialize handshake is symmetric: `serve_duplex_for_test` awaits the client's initialize
+/// The MCP initialize handshake is symmetric: `mcp_server_duplex_for_test` awaits the client's initialize
 /// before returning, and the client awaits the server's response — so the two MUST run concurrently.
 /// The server-serve future is spawned, the client initializes on this task, then the server is joined.
 pub async fn connect(
@@ -100,7 +100,7 @@ pub async fn connect(
     connect_with_instructions(session, None).await
 }
 
-/// Like [`connect`], but advertises the given `instructions` (drives the `ServeOptions::instructions`
+/// Like [`connect`], but advertises the given `instructions` (drives the `McpServerOptions::instructions`
 /// → `get_info().instructions` wiring through the same real server path the CLI uses).
 pub async fn connect_with_instructions(
     session: Arc<Session>,
@@ -126,7 +126,7 @@ pub async fn connect_with_quotas(
 ) {
     let (server_io, client_io) = tokio::io::duplex(64 * 1024);
     let cancel = CancellationToken::new();
-    let server_task = tokio::spawn(serve_duplex_for_test(
+    let server_task = tokio::spawn(mcp_server_duplex_for_test(
         session,
         quotas,
         instructions,

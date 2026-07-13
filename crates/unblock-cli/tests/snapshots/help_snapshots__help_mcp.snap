@@ -1,10 +1,10 @@
 ---
 source: crates/unblock-cli/tests/help_snapshots.rs
-expression: "help(&[\"serve\", \"--help\"])"
+expression: "help(&[\"mcp\", \"--help\"])"
 ---
 Run the MCP stdio server (the primary product surface, FR-20)
 
-Usage: unblock serve [OPTIONS]
+Usage: unblock mcp [OPTIONS]
 
 Options:
       --dir <DIR>        The explicit workspace `.unblock/` directory (no walk-up; `--dir` > `UNBLOCK_DIR`, MF-2) [env: UNBLOCK_DIR=]

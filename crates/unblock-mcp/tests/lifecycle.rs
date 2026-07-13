@@ -1,8 +1,8 @@
 //! The **M2 exit-gate** end-to-end (spine §6 conformance, FR-20/FR-11/FR-17):
 //!
 //! An in-process MCP client drives `query{ready}` → `claim` → `issue{close, suggest_next}` over an
-//! in-memory `tokio::io::duplex` transport against the REAL server (`serve_duplex_for_test` runs the
-//! same `UnblockServer` + `serve_with_ct` path as the shipped `serve`), asserting the close surfaces
+//! in-memory `tokio::io::duplex` transport against the REAL server (`mcp_server_duplex_for_test` runs the
+//! same `UnblockServer` + `serve_with_ct` path as the shipped `run_mcp_server`), asserting the close surfaces
 //! the newly-unblocked issue. A second case proves cooperative shutdown: a `cancel()` mid-session
 //! returns cleanly (FR-17).
 
@@ -29,7 +29,7 @@ async fn handshake_advertises_unblock_identity_and_default_instructions() {
         env!("CARGO_PKG_VERSION"),
         "server version must be this crate's package version"
     );
-    // No `ServeOptions::instructions` → the generated capability-summary default is advertised.
+    // No `McpServerOptions::instructions` → the generated capability-summary default is advertised.
     let instructions = info
         .instructions
         .as_deref()
@@ -53,7 +53,7 @@ async fn handshake_honors_caller_supplied_instructions() {
     assert_eq!(
         info.instructions.as_deref(),
         Some(custom.as_str()),
-        "a non-None ServeOptions::instructions must be advertised verbatim"
+        "a non-None McpServerOptions::instructions must be advertised verbatim"
     );
 
     let _ = client.cancel().await;

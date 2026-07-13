@@ -23,8 +23,8 @@ fn top_level_help() {
 }
 
 #[test]
-fn serve_help() {
-    insta::assert_snapshot!("help_serve", help(&["serve", "--help"]));
+fn mcp_help() {
+    insta::assert_snapshot!("help_mcp", help(&["mcp", "--help"]));
 }
 
 #[test]

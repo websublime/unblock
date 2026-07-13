@@ -1,6 +1,6 @@
-//! `unblock serve` end-to-end over piped stdio (FR-9/FR-20/FR-17, D27/AD-4).
+//! `unblock mcp` end-to-end over piped stdio (FR-9/FR-20/FR-17, D27/AD-4).
 //!
-//! Drives the REAL `unblock serve` binary as a child process, speaking the MCP JSON-RPC protocol over
+//! Drives the REAL `unblock mcp` binary as a child process, speaking the MCP JSON-RPC protocol over
 //! its stdin/stdout directly (rmcp's `transport-io` framing is **newline-delimited JSON** — verified
 //! against `rmcp::transport::async_rw`). Proves:
 //! - the MCP `initialize` handshake succeeds and advertises the `unblock` identity;
@@ -8,16 +8,16 @@
 //!   stdio, and closing the blocker surfaces the newly-unblocked dependent (CLI↔MCP wiring, FR-9/20);
 //! - **stdout carries ONLY MCP framing** — every non-empty stdout line parses as JSON-RPC (NFR-14: no
 //!   log line ever pollutes stdout);
-//! - SIGTERM mid-serve drives a CLEAN cooperative shutdown: the process exits `128 + 15 == 143` and
+//! - SIGTERM mid-run drives a CLEAN cooperative shutdown: the process exits `128 + 15 == 143` and
 //!   stdout still holds only MCP framing (FR-17; the adversarial WAL-corruption/mid-write-atomicity
 //!   proof is `tests/shutdown_failure_injection.rs` (T3.2 — cases C1/C2/C3/C6) plus the deterministic
 //!   drain-to-commit barrier `unblock-engine/tests/shutdown_drain_barrier.rs` (C4) and the SIGKILL
 //!   abandoned-tx recovery proof `unblock-storage/tests/shutdown_abandoned_tx.rs` (C5)).
 //!
-//! The `serve` stdio harness (`ServeClient`/`send_signal`/`wait_for`) lives in `tests/common/mod.rs`
+//! The `mcp` stdio harness (`McpClient`/`send_signal`/`wait_for`) lives in `tests/common/mod.rs`
 //! (promoted there at T3.2 so the failure-injection suite can reuse it without duplication).
 //!
-//! These are unix-only (the SIGTERM/exit-`128+signo` contract is a unix construct; Windows serve is a
+//! These are unix-only (the SIGTERM/exit-`128+signo` contract is a unix construct; Windows `unblock mcp` is a
 //! no-op EOF path, NFR-11) — gated with `#![cfg(unix)]`.
 #![cfg(unix)]
 
@@ -25,13 +25,13 @@ mod common;
 
 use std::time::Duration;
 
-use common::{ServeClient, Workspace, id_set, issue_id, send_signal, wait_for};
+use common::{McpClient, Workspace, id_set, issue_id, send_signal, wait_for};
 use serde_json::{Value, json};
 
 #[test]
 fn initialize_handshake_advertises_unblock_identity() {
     let ws = Workspace::init();
-    let mut client = ServeClient::spawn(ws.root());
+    let mut client = McpClient::spawn(ws.root());
     let init = client.initialize();
     assert_eq!(
         init["serverInfo"]["name"], "unblock",
@@ -42,7 +42,7 @@ fn initialize_handshake_advertises_unblock_identity() {
         "initialize advertises capabilities"
     );
 
-    // Clean shutdown: closing stdin (EOF) returns `serve` cleanly (exit 0). Drop stdin explicitly.
+    // Clean shutdown: closing stdin (EOF) returns `run_mcp_server` cleanly (exit 0). Drop stdin explicitly.
     client.close_stdin();
     let status = wait_for(&mut client.child, Duration::from_secs(20));
     assert_eq!(status.code(), Some(0), "EOF drives a clean exit 0");
@@ -51,7 +51,7 @@ fn initialize_handshake_advertises_unblock_identity() {
 #[test]
 fn ready_claim_close_smoke_over_stdio() {
     let ws = Workspace::init();
-    let mut client = ServeClient::spawn(ws.root());
+    let mut client = McpClient::spawn(ws.root());
     client.initialize();
 
     // Seed a blocker + a dependent via the MINTING create path, add a Blocks edge, then run
@@ -114,13 +114,13 @@ fn ready_claim_close_smoke_over_stdio() {
 #[test]
 fn sigterm_drives_clean_shutdown_with_exit_143() {
     let ws = Workspace::init();
-    let mut client = ServeClient::spawn(ws.root());
+    let mut client = McpClient::spawn(ws.root());
     // Complete a handshake so the server is fully up + serving before the signal.
     client.initialize();
     let (err, _ready) = client.call_tool("query", &json!({"kind": "ready"}));
     assert!(!err, "a call works before the signal");
 
-    // SIGTERM the child (FR-17): the signal cancels the token + sets the engine flag → `serve` returns
+    // SIGTERM the child (FR-17): the signal cancels the token + sets the engine flag → `run_mcp_server` returns
     // Ok → `session.shutdown()` → the process exits `128 + 15 == 143`.
     let pid = client.child.id();
     send_signal(pid, "TERM");

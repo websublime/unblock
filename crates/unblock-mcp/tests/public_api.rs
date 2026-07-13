@@ -3,8 +3,8 @@
 
 use unblock_mcp::{
     CONTRACT_HASH, CONTRACT_VERSION, Capabilities, ErrorCodeDescriptor, McpServerError,
-    PromptDescriptor, Quotas, ResourceDescriptor, SchemaBundle, ServeOptions, ToolDescriptor,
-    ToolSchemas, capabilities, schema_bundle, serve,
+    McpServerOptions, PromptDescriptor, Quotas, ResourceDescriptor, SchemaBundle, ToolDescriptor,
+    ToolSchemas, capabilities, run_mcp_server, schema_bundle,
 };
 
 #[test]
@@ -37,22 +37,22 @@ fn public_types_and_consts_resolve() {
     let _shape = first_err.map(|d| d.hint_shape);
 
     // Options are constructible.
-    let _opts = ServeOptions::default();
+    let _opts = McpServerOptions::default();
     let _quotas = Quotas::default();
 }
 
 #[test]
-fn serve_is_a_named_public_fn() {
-    // A compile-only witness that `serve` is the public async entry point with the expected
+fn run_mcp_server_is_a_named_public_fn() {
+    // A compile-only witness that `run_mcp_server` is the public async entry point with the expected
     // signature; we do not call it (it would bind real stdio). Passing it to a bound that names its
     // exact parameter/return types proves the arity without invoking it.
-    fn takes_serve_shape<F, Fut>(_f: F)
+    fn takes_run_mcp_server_shape<F, Fut>(_f: F)
     where
-        F: Fn(std::sync::Arc<unblock_engine::Session>, ServeOptions) -> Fut,
+        F: Fn(std::sync::Arc<unblock_engine::Session>, McpServerOptions) -> Fut,
         Fut: std::future::Future<Output = Result<(), McpServerError>>,
     {
     }
-    takes_serve_shape(serve);
+    takes_run_mcp_server_shape(run_mcp_server);
 }
 
 #[test]

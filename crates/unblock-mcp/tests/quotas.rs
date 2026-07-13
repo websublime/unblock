@@ -1,5 +1,5 @@
 //! NFR-18 untrusted-input boundary AC suite: each over-quota class is rejected at the preflight —
-//! BEFORE any `Session`/`Storage` mutation — over a real `serve_duplex_for_test` wire. The
+//! BEFORE any `Session`/`Storage` mutation — over a real `mcp_server_duplex_for_test` wire. The
 //! `RecordingStorage` spy (wrapping a real in-memory backend) proves ZERO mutating storage calls were
 //! made (the blast radius stays confined to the workspace).
 //!

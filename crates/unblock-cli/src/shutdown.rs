@@ -2,11 +2,11 @@
 //! handling (a library must not hijack it, OQ-4).
 //!
 //! [`install`] returns a [`ShutdownHandle`] bundling:
-//! - a `tokio_util::sync::CancellationToken` (`token`) fed into `ServeOptions.cancel` — a `cancel()`
-//!   drives `unblock_mcp::serve` to return `Ok`;
+//! - a `tokio_util::sync::CancellationToken` (`token`) fed into `McpServerOptions.cancel` — a `cancel()`
+//!   drives `unblock_mcp::run_mcp_server` to return `Ok`;
 //! - an `Arc<AtomicBool>` (`flag`) wired into the engine via `Session::with_shutdown_flag` — the
 //!   engine reads it at mutation checkpoints (`Session::is_shutdown_requested`);
-//! - an `Arc<AtomicU8>` (`signalled`) recording `128 + signo` on the FIRST signal so `serve` can
+//! - an `Arc<AtomicU8>` (`signalled`) recording `128 + signo` on the FIRST signal so `run_mcp_server` can
 //!   yield the conventional signal exit code.
 //!
 //! On unix (`#[cfg(unix)]`) a dedicated NORMAL thread runs `signal_hook::iterator::Signals` for
@@ -16,17 +16,17 @@
 //! thread, so `process::exit` is fine there; NO `libc::_exit`, `#![forbid(unsafe_code)]` holds).
 //!
 //! On non-unix (`#[cfg(not(unix))]`) [`install`] returns a fresh handle with NO handler (a no-op);
-//! `serve` still shuts down on EOF (NFR-11).
+//! the MCP server still shuts down on EOF (NFR-11).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use tokio_util::sync::CancellationToken;
 
-/// The cooperative-shutdown handle handed to `serve` (D27/AD-4).
+/// The cooperative-shutdown handle handed to `run_mcp_server` (D27/AD-4).
 #[derive(Debug, Clone)]
 pub struct ShutdownHandle {
-    /// The cancellation token fed to `ServeOptions.cancel` (a `cancel()` returns `serve` cleanly).
+    /// The cancellation token fed to `McpServerOptions.cancel` (a `cancel()` returns `run_mcp_server` cleanly).
     pub token: CancellationToken,
     /// The engine shutdown flag wired via `Session::with_shutdown_flag`.
     pub flag: Arc<AtomicBool>,
@@ -35,7 +35,7 @@ pub struct ShutdownHandle {
 }
 
 impl ShutdownHandle {
-    /// The exit code the process should return after `serve` returns, or `None` on a clean EOF exit.
+    /// The exit code the process should return after `run_mcp_server` returns, or `None` on a clean EOF exit.
     ///
     /// Returns `Some(128 + signo)` when a signal drove the shutdown, `None` otherwise (exit 0).
     #[must_use]
@@ -61,7 +61,7 @@ pub fn install() -> ShutdownHandle {
     };
 
     // Registering may fail (e.g. an already-reserved signal) — if so we degrade to EOF-only shutdown
-    // (still correct: `serve` returns on stdin EOF). We do not panic at the process edge.
+    // (still correct: `run_mcp_server` returns on stdin EOF). We do not panic at the process edge.
     let Ok(mut signals) = Signals::new([SIGINT, SIGTERM, SIGHUP]) else {
         return handle;
     };
@@ -94,7 +94,7 @@ pub fn install() -> ShutdownHandle {
     handle
 }
 
-/// Install a no-op handle (non-unix) — `serve` shuts down on EOF (NFR-11).
+/// Install a no-op handle (non-unix) — the MCP server shuts down on EOF (NFR-11).
 #[cfg(not(unix))]
 #[must_use]
 pub fn install() -> ShutdownHandle {
