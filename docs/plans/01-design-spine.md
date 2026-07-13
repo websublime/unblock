@@ -469,6 +469,7 @@ impl unblock_error::CodedError for ConfigError {
 pub enum ErrorCode {
     // exit 2 — Database
     DatabaseNotFound, DatabaseLocked, SchemaMismatch, DatabaseError, NotInitialized, AlreadyInitialized,
+    RateLimited, // RateLimited new for NFR-18 rate-limit, T3.5/D34
     // exit 3 — Issue / operational
     IssueNotFound, AmbiguousId, IdCollision, InvalidId, NothingToDo, AlreadyClaimed, // AlreadyClaimed new for FR-2
     // exit 4 — Validation / policy
@@ -491,7 +492,7 @@ impl ErrorCode {
     pub const fn exit_code(self) -> u8;               // 0..=8 per table below
     pub const fn is_retryable(self) -> bool;
     //   exact retryable set (no glob): DatabaseLocked | AlreadyClaimed | ValidationFailed
-    //   | InvalidStatus | InvalidType | InvalidPriority | RequiredField | AmbiguousId.
+    //   | InvalidStatus | InvalidType | InvalidPriority | RequiredField | AmbiguousId | RateLimited.
     //   (matches error.md; the retryable exit-4 members are the five retryable Validation* members
     //   — ValidationFailed/InvalidStatus/InvalidType/InvalidPriority/RequiredField; PolicyViolation
     //   is exit-4 but non-retryable.)
@@ -504,7 +505,7 @@ impl ErrorCode {
     //                        VALID_STATUS_HINT / VALID_TYPE_HINT constants, hints.rs)
     //     ContextualText -> ValidationFailed                     (site-composed guidance: the mcp
     //                       over-quota + bulk-markdown-parse hints)
-    //     None           -> every other code (the remaining 30 of 35)
+    //     None           -> every other code (the remaining 31 of 36)
     pub const fn static_hint(self) -> Option<&'static str>; // the fixed text for StaticText codes,
     //   None otherwise. The SINGLE source of the fixed hint texts (`ModelError::hint` delegates
     //   here), so `hint_shape() == StaticText ⟺ static_hint().is_some()` holds by construction.
@@ -542,13 +543,15 @@ only, same as `ErrorCode`).
 |---|---|---|
 | **0** | Success | (no error) |
 | **1** | Internal / unknown | `InternalError` |
-| **2** | Database | `DatabaseNotFound`, `DatabaseLocked`, `SchemaMismatch`, `DatabaseError`, `NotInitialized`, `AlreadyInitialized` |
+| **2** | Database | `DatabaseNotFound`, `DatabaseLocked`, `SchemaMismatch`, `DatabaseError`, `NotInitialized`, `AlreadyInitialized`, `RateLimited` |
 | **3** | Issue / operational | `IssueNotFound`, `AmbiguousId`, `IdCollision`, `InvalidId`, `NothingToDo`, `AlreadyClaimed` |
 | **4** | Validation / policy | `ValidationFailed`, `InvalidStatus`, `InvalidType`, `InvalidPriority`, `RequiredField`, `PolicyViolation` |
 | **5** | Dependency | `CycleDetected`, `DependencyNotFound`, `HasDependents`, `SelfDependency`, `DuplicateDependency` |
 | **6** | Sync / JSONL | `JsonlParseError`, `PrefixMismatch`, `ImportCollision`, `SyncConflict`, `ConflictMarkers`, `PathTraversal` |
 | **7** | Config | `ConfigError`, `ConfigNotFound`, `ConfigParseError` |
 | **8** | I/O | `IoError`, `JsonError` |
+
+*(exit 2 also carries the retryable transient-busy `RateLimited` — an MCP-surface concurrency cap, not a DB fault; grouped with `DatabaseLocked` by retry semantics, D34.)*
 
 ### 2.4 Structured error payload (FR-11; mirrors MCP error data)
 
@@ -1875,6 +1878,15 @@ gate proving itself again: an intentional schema change moves the digest by desi
 lands first; the code — the `extend` attributes, the wrapper structs, the version bump/re-pin/re-bless, and
 the strengthened conformance tests — follows in the paired implementation change.)*
 
+**T3.5 `RateLimited` mint (2026-07-13 — D34/F-3, the gate firing as designed).** T3.5 adds
+`ErrorCode::RateLimited` (the MCP-handler concurrency-cap reject). Because the version-coupled set is exactly
+the two discovery documents + their transitive `$defs` closure, this changes BOTH: `capabilities().error_codes`
+gains one `ErrorCodeDescriptor`, and `schema_bundle()`'s shared `error` schema (`schema_for!(StructuredError)`)
+gains an `ErrorCode` enum variant. So `CONTRACT_HASH` re-pins and `CONTRACT_VERSION` bumps
+`unblock.mcp.v1.3` → `unblock.mcp.v1.4` (unblock-mcp `options.rs`), with both discovery goldens + the
+`unblock-error` `exit_code_table.rs` quadruple golden re-blessed. Spec-first: this clause lands first; the code
+follows in the paired implementation change (P2).
+
 **`agents_digest()` — a pure DERIVED VIEW, not a wire resource (T3.4.3/D33).** `unblock-mcp` additionally
 exposes `pub fn agents_digest() -> AgentsDigest` next to `schema_bundle()`: a CLI-friendly typed digest (the
 7 tools with their `oneOf`-derived actions + each action's FULL parameter surface — its required AND
@@ -1898,6 +1910,19 @@ close_with_suggestions -> close + surface newly-unblocked
 ### 5.6 Error mapping at the MCP boundary
 
 Any `EngineError` → `StructuredError` (§2.4) attached as rmcp tool error **data** (`code`/`message`/`hint`/`retryable`/`context`), parallel to the CLI 0–8 exit codes. A failed tool call still returns **valid JSON** (the shared in-band error output — `SchemaBundle.error`, `is_error=true`; §5.3/§5.4 D25). Oversized/invalid args are rejected by schemars validation before reaching the engine (NFR-18); blast radius confined to the workspace.
+
+**Rate-limit chokepoint (NFR-18 / D34-F5 — normative).** The `Quotas.max_concurrent_requests` cap is enforced
+by a single `Arc<Semaphore>` field on `UnblockServer` (built ONCE in `new`; the type derives `Clone`, so the
+field is `Arc`), the permit acquired around the tool-router dispatch AND the `read_resource` path — gating the
+tool + resource surface (and any future tool by construction). `try_acquire` failure → for a **tool** call, an
+**in-band** `CallToolResult` carrying `StructuredError { code: RateLimited, retryable: true }`; for a
+**resource** read (which has no in-band channel — `read_resource` returns `Result<_, ErrorData>`, `server.rs:220-232`),
+an **`ErrorData`** (JSON-RPC error) carrying the same `RateLimited` code. Exit 2 (§2.3); never dropped or
+backpressured (fast-fail is deterministic and bounds a pipelining agent immediately). The rate-limit
+`Semaphore(64)` sits STRICTLY ABOVE the engine write `Semaphore(1)` + the `.write.lock` (§4.2) — different
+semaphores, strict ordering, deadlock-free vs D14/D31. Prompts are excluded (pure builders, no `Session`). The
+per-request SIZE caps stay schemars/`enforce_quota` preflight checks mapping to `ValidationFailed` (a DISTINCT
+mechanism).
 
 ---
 
