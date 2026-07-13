@@ -1,11 +1,17 @@
-//! `unblock agents` (FR-14, D27/AF-3) — inject/maintain a managed `AGENTS.md` block describing the
-//! MCP wiring (how an agent connects to `unblock mcp`).
+//! `unblock agents` (FR-14, D27/AF-3, T3.4.3/D33) — inject/maintain a managed `AGENTS.md` block: a
+//! FULL capabilities table rendered from the typed `unblock_mcp::agents_digest()` (Option C).
 //!
 //! A pure file op (SEPARATE from `init`): resolve-only open (`open_workspace_with_cli`, NO DB) to find
 //! `workspace_dir`, then an idempotent merge of a MANAGED block delimited by markers (a re-run updates
 //! ONLY the block). Requires an existing workspace (`WorkspaceNotFound` → `NotInitialized`, exit 2) so
 //! `AGENTS.md` sits next to `.unblock/`. Writes a terse "wrote X" note to stderr.
+//!
+//! [`managed_block`] is a THIN markdown renderer over [`unblock_mcp::agents_digest`] (D33): the
+//! schema-shape walk (incl. resolving an arm-root `$ref`, e.g. `issue create` → `title`) lives in
+//! `unblock-mcp`, which already owns `capabilities()`/`schema_bundle()` — this crate adds NO
+//! `serde_json` production dependency and stays a plain-string renderer.
 
+use std::fmt::Write as _;
 use std::path::Path;
 
 use snafu::ResultExt;
@@ -49,20 +55,102 @@ fn read_existing(path: &Path) -> Result<Option<String>, CliError> {
     }
 }
 
-/// The managed block content (between the markers, exclusive) describing the MCP wiring.
+/// The managed block content (between the markers, exclusive): a FULL capabilities table rendered
+/// from the pure typed [`unblock_mcp::agents_digest`] (Option C, D33). Zero-arg — it calls
+/// `agents_digest()` internally so `run`/the merge tests below stay untouched.
 fn managed_block() -> String {
-    format!(
-        "## unblock (MCP)\n\
-         \n\
-         This workspace is tracked by **unblock**. Issue-data operations are exposed over MCP — the\n\
-         `unblock` CLI is lifecycle/ops only.\n\
-         \n\
-         - Start the server: `unblock mcp` (MCP over stdio).\n\
-         - Contract: `{contract}`.\n\
-         - Tools: use the MCP tool set (create/list/close/dep/…) — do NOT shell out to the CLI for\n\
-         issue data.\n",
-        contract = unblock_mcp::CONTRACT_VERSION,
-    )
+    let digest = unblock_mcp::agents_digest();
+    let mut out = String::new();
+
+    out.push_str("## unblock (MCP)\n\n");
+    out.push_str(
+        "This workspace is tracked by **unblock**. Issue-data operations are exposed over MCP — the\n\
+         `unblock` CLI is lifecycle/ops only.\n\n",
+    );
+    out.push_str("- Start the server: `unblock mcp` (MCP over stdio).\n");
+    let _ = writeln!(out, "- Contract: `{}`.", digest.contract_version);
+    out.push_str(
+        "- Machine-readable discovery: read `unblock://capabilities` (the source of these tables) and\n\
+         `unblock://schema` (the full JsonSchema bundle for every tool I/O).\n\n",
+    );
+
+    out.push_str("### Tools\n\n");
+    out.push_str("Descriptors (from `unblock://capabilities`):\n\n");
+    out.push_str("| Tool | Description |\n|---|---|\n");
+    for tool in &digest.tools {
+        let _ = writeln!(out, "| `{}` | {} |", tool.name, tool.description);
+    }
+    out.push('\n');
+
+    out.push_str(
+        "Actions (structural — derived from the `unblock://schema` `oneOf` discriminants; each row\n\
+         lists an action's FULL parameter surface, required AND optional):\n\n",
+    );
+    out.push_str("| Tool | Action | Required params | Optional params |\n|---|---|---|---|\n");
+    for tool in &digest.tools {
+        for action in &tool.actions {
+            let _ = writeln!(
+                out,
+                "| `{}` | {} | {} | {} |",
+                tool.name,
+                action_cell(action.name.as_deref()),
+                params_cell(&action.required),
+                params_cell(&action.optional),
+            );
+        }
+    }
+    out.push('\n');
+
+    out.push_str("### Resources\n\n");
+    out.push_str("| Resource | Description |\n|---|---|\n");
+    for resource in &digest.resources {
+        let _ = writeln!(out, "| `{}` | {} |", resource.uri, resource.description);
+    }
+    out.push('\n');
+
+    out.push_str("### Prompts\n\n");
+    out.push_str("| Prompt | Description |\n|---|---|\n");
+    for prompt in &digest.prompts {
+        let _ = writeln!(out, "| `{}` | {} |", prompt.name, prompt.description);
+    }
+    out.push('\n');
+
+    out.push_str("### Error codes\n\n");
+    out.push_str("| Code | Exit | Retryable |\n|---|---|---|\n");
+    for error in &digest.error_codes {
+        let _ = writeln!(
+            out,
+            "| `{}` | {} | {} |",
+            error.code,
+            error.exit_code,
+            yes_no(error.retryable),
+        );
+    }
+
+    out
+}
+
+/// Render an action's discriminant cell: `` `name` `` or `—` for a flat tool's implicit action.
+fn action_cell(name: Option<&str>) -> String {
+    name.map_or_else(|| "—".to_string(), |n| format!("`{n}`"))
+}
+
+/// Render a sorted param list as backtick-joined, comma-separated names, or `—` when empty.
+fn params_cell(params: &[String]) -> String {
+    if params.is_empty() {
+        "—".to_string()
+    } else {
+        params
+            .iter()
+            .map(|p| format!("`{p}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+/// `yes`/`no` for a retryability cell.
+fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
 }
 
 /// Idempotently merge the managed `block` into `existing` (or a fresh file). If the delimited block is
@@ -107,10 +195,61 @@ mod tests {
     use super::{BEGIN_MARKER, END_MARKER, managed_block, merge_managed_block};
 
     #[test]
-    fn managed_block_mentions_serve_and_contract() {
+    fn managed_block_mentions_mcp_and_contract() {
         let block = managed_block();
         assert!(block.contains("unblock mcp"));
         assert!(block.contains(unblock_mcp::CONTRACT_VERSION));
+        // The four capabilities-table sections (D33).
+        for heading in [
+            "### Tools",
+            "### Resources",
+            "### Prompts",
+            "### Error codes",
+        ] {
+            assert!(block.contains(heading), "missing section {heading}");
+        }
+        // The two machine-readable discovery pointers.
+        assert!(block.contains("unblock://capabilities"));
+        assert!(block.contains("unblock://schema"));
+    }
+
+    /// Drift-guard (D33): `create_bulk` exists ONLY as a `oneOf` arm of the `issue` tool's input — the
+    /// tool's one-line description never names it. Its presence in the rendered table proves the
+    /// structural `oneOf` walk drives the render, not a scrape of the description prose.
+    #[test]
+    fn managed_block_lists_every_tool_action() {
+        let block = managed_block();
+        assert!(
+            block.contains("| `issue` | `create_bulk` |"),
+            "create_bulk action must render under `issue` (structural oneOf walk)"
+        );
+        for action in [
+            "create",
+            "create_bulk",
+            "show",
+            "update",
+            "close",
+            "reopen",
+            "delete",
+            "restore",
+        ] {
+            assert!(
+                block.contains(&format!("| `issue` | `{action}` |")),
+                "missing issue action {action}"
+            );
+        }
+    }
+
+    /// Drift-guard (D33, Miguel's ruling): the `issue`/`create` row lists `title` as a REQUIRED param —
+    /// proving the arm-root `$ref` (`issue.create` → `#/$defs/CreateInput`) is resolved one level. A
+    /// walk that ignored the arm-root `$ref` would show `—` in the Required-params column instead.
+    #[test]
+    fn managed_block_shows_create_title_param() {
+        let block = managed_block();
+        assert!(
+            block.contains("| `issue` | `create` | `title` |"),
+            "issue create must list `title` as its required param (arm-root $ref resolved)"
+        );
     }
 
     #[test]

@@ -2,9 +2,10 @@
 //! without a `Session` (FR-12). Each `use`/reference only compiles if the item is public.
 
 use unblock_mcp::{
-    CONTRACT_HASH, CONTRACT_VERSION, Capabilities, ErrorCodeDescriptor, McpServerError,
-    McpServerOptions, PromptDescriptor, Quotas, ResourceDescriptor, SchemaBundle, ToolDescriptor,
-    ToolSchemas, capabilities, run_mcp_server, schema_bundle,
+    AgentsDigest, CONTRACT_HASH, CONTRACT_VERSION, Capabilities, ErrorCodeDescriptor,
+    ErrorCodeDigest, McpServerError, McpServerOptions, PromptDescriptor, PromptDigest, Quotas,
+    ResourceDescriptor, ResourceDigest, SchemaBundle, ToolAction, ToolDescriptor, ToolDigest,
+    ToolSchemas, agents_digest, capabilities, run_mcp_server, schema_bundle,
 };
 
 #[test]
@@ -39,6 +40,16 @@ fn public_types_and_consts_resolve() {
     // Options are constructible.
     let _opts = McpServerOptions::default();
     let _quotas = Quotas::default();
+
+    // `agents_digest()` (D33) is a public, pure, typed digest — NOT part of the hashed contract
+    // tuple (it derives neither `Serialize` nor `JsonSchema`).
+    let digest: AgentsDigest = agents_digest();
+    assert_eq!(digest.contract_version, CONTRACT_VERSION);
+    let first_tool: Option<ToolDigest> = digest.tools.into_iter().next();
+    let _action: Option<ToolAction> = first_tool.and_then(|t| t.actions.into_iter().next());
+    let _resource: Option<ResourceDigest> = digest.resources.into_iter().next();
+    let _prompt: Option<PromptDigest> = digest.prompts.into_iter().next();
+    let _error_code: Option<ErrorCodeDigest> = digest.error_codes.into_iter().next();
 }
 
 #[test]

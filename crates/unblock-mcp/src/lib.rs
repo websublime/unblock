@@ -13,6 +13,8 @@
 //!   tuple `(capabilities(), schema_bundle())` (D22 widened by D25).
 //! - [`capabilities`] / [`schema_bundle`] — pure builders (no `Session`) so the CLI can dump the
 //!   contract offline (FR-12).
+//! - [`agents_digest`] — a pure typed digest of the two discovery documents (D33), consumed by the
+//!   CLI's `unblock agents` managed AGENTS.md renderer; a DERIVED VIEW, never hash-coupled.
 //! - [`McpServerError`] — server lifecycle/transport errors only; per-tool domain errors flow in-band
 //!   as the shared structured error (`is_error=true`, FR-11).
 //!
@@ -32,8 +34,9 @@ mod tools;
 pub use error::McpServerError;
 pub use options::{CONTRACT_HASH, CONTRACT_VERSION, McpServerOptions, Quotas};
 pub use resources::{
-    Capabilities, ErrorCodeDescriptor, PromptDescriptor, ResourceDescriptor, SchemaBundle,
-    ToolDescriptor, ToolSchemas, capabilities, schema_bundle,
+    AgentsDigest, Capabilities, ErrorCodeDescriptor, ErrorCodeDigest, PromptDescriptor,
+    PromptDigest, ResourceDescriptor, ResourceDigest, SchemaBundle, ToolAction, ToolDescriptor,
+    ToolDigest, ToolSchemas, agents_digest, capabilities, schema_bundle,
 };
 pub use server::run_mcp_server;
 
