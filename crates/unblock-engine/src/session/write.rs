@@ -84,7 +84,7 @@ impl Session {
     /// Acquire order: the in-process `Semaphore` permit FIRST (so at most ONE in-process writer ever
     /// reaches the file lock — no intra-process thundering herd, no priority inversion), THEN the
     /// storage `.write.lock` (D31). The engine holds the returned [`MutationGuard`] across the
-    /// allocation READ **and** the write transaction — the same span — so two `serve` processes cannot
+    /// allocation READ **and** the write transaction — the same span — so two MCP-server processes cannot
     /// mint the same `parent.N` or interleave writes across processes; it releases inner-first on drop
     /// (`.write.lock` before the permit). On the in-memory path the storage guard is `None` (no file
     /// lock). A `.write.lock`-acquire timeout surfaces the transparent retryable

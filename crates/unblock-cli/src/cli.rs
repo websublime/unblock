@@ -92,7 +92,7 @@ impl GlobalArgs {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Run the MCP stdio server (the primary product surface, FR-20).
-    Serve(ServeArgs),
+    Mcp(McpArgs),
     /// Ensure the workspace database schema is current and report the from→to delta (FR-16).
     Migrate(MigrateArgs),
     /// Run read-only health diagnostics on the workspace (doctor-lite, FR-16).
@@ -108,9 +108,9 @@ pub enum Command {
     Update(UpdateArgs),
 }
 
-/// `unblock serve` — no v1 flags (the MCP surface is fixed; instructions are generated).
+/// `unblock mcp` — no v1 flags (the MCP surface is fixed; instructions are generated).
 #[derive(Debug, Args)]
-pub struct ServeArgs {}
+pub struct McpArgs {}
 
 /// `unblock migrate` — no v1 flags.
 #[derive(Debug, Args)]

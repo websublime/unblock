@@ -1,6 +1,6 @@
 //! T3.2/C4 — the engine drain-to-commit barrier (FR-17/NFR-5), the DETERMINISTIC anchor for AC
 //! clauses (a) no WAL corruption and (b) an in-flight write fully commits or fully rolls back (never
-//! partial), over the permit-drain mechanism itself (NO signal, NO real serve process).
+//! partial), over the permit-drain mechanism itself (NO signal, NO real MCP-server process).
 //!
 //! `Session::shutdown()` (lifecycle.rs) sets the shutdown flag, then `acquire_owned()`s the SAME
 //! single write permit (D14, `WRITE_PERMITS = 1`) a mutation holds for its ENTIRE body — so a

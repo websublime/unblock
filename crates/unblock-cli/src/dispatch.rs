@@ -1,12 +1,12 @@
 //! Pure routing: `Command` → the matching `commands::*::run`, plus the shared `SessionConfig`
-//! assembly for the storage-opening commands (`serve`/`migrate`/`doctor`).
+//! assembly for the storage-opening commands (`mcp`/`migrate`/`doctor`).
 //!
-//! **Who opens a `WorkspaceContext` via `open_with_storage_with_cli`:** serve, migrate, doctor.
+//! **Who opens a `WorkspaceContext` via `open_with_storage_with_cli`:** mcp, migrate, doctor.
 //! **Who does NOT open storage:** `version` (pure `build.rs` env — runs OUTSIDE a workspace),
 //! `update` (self-update, no workspace). **`init`** creates + opens through the facade (one code path,
 //! FR-9 no-drift). **`agents`** opens resolve-only (NO DB) to learn `workspace_dir`.
 //!
-//! Each handler returns `Result<Option<u8>, CliError>`: `Some(128+signo)` = a `serve` signal exit;
+//! Each handler returns `Result<Option<u8>, CliError>`: `Some(128+signo)` = an `mcp` signal exit;
 //! `None` = success (exit 0). `run_with` maps that through the exit boundary.
 
 use unblock_config::WorkspaceContext;
@@ -29,7 +29,7 @@ pub async fn dispatch(cli: Cli) -> Result<Option<u8>, CliError> {
         Command::Init(args) => commands::init::run(&args, &cli.global).await,
         Command::Agents(args) => commands::agents::run(&args, &cli.global).await,
         // Storage-opening commands.
-        Command::Serve(args) => commands::serve::run(&args, &overrides).await,
+        Command::Mcp(args) => commands::mcp::run(&args, &overrides).await,
         Command::Migrate(args) => commands::migrate::run(&args, &overrides).await,
         Command::Doctor(args) => commands::doctor::run(&args, &overrides).await,
         #[cfg(feature = "self-update")]

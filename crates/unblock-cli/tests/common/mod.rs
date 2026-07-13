@@ -8,8 +8,8 @@
 //! The `unblock` binary is located via `assert_cmd`'s cargo integration (`cargo_bin`), so the suites
 //! drive the SAME artifact the shipped build produces.
 //!
-//! T3.2 promotes the `serve` stdio harness (`ServeClient`/`send_signal`/`wait_for`, previously private
-//! to `serve_lifecycle.rs`) here so the shutdown-reliability failure-injection suite
+//! T3.2 promotes the `mcp` stdio harness (`McpClient`/`send_signal`/`wait_for`, previously private
+//! to `mcp_lifecycle.rs`) here so the shutdown-reliability failure-injection suite
 //! (`shutdown_failure_injection.rs`) can reuse it without duplicating the JSON-RPC framing code, and
 //! adds the shared shutdown-case oracle (`reopen_and_check`) + the pinned bulk-markdown fixture
 //! (`bulk_markdown`).
@@ -38,7 +38,7 @@ pub struct Workspace {
 
 impl Workspace {
     /// Scaffold a fresh workspace by running the real `unblock init` (FR-9 no-drift — the same code
-    /// path `serve`/`migrate`/`doctor` open). Panics on failure (a harness precondition, not the SUT).
+    /// path `mcp`/`migrate`/`doctor` open). Panics on failure (a harness precondition, not the SUT).
     #[must_use]
     pub fn init() -> Self {
         Self::init_with_prefix(None)
@@ -112,12 +112,12 @@ pub fn unblock_in(dir: &Path) -> Command {
 }
 
 // ----------------------------------------------------------------------------------------------
-// `serve` stdio harness (D27/AD-4, T3.1 — promoted here at T3.2 so `shutdown_failure_injection.rs`
+// `mcp` stdio harness (D27/AD-4, T3.1 — promoted here at T3.2 so `shutdown_failure_injection.rs`
 // can reuse it without duplicating the JSON-RPC framing code).
 // ----------------------------------------------------------------------------------------------
 
-/// A hand-rolled newline-delimited JSON-RPC client over a spawned `unblock serve` child.
-pub struct ServeClient {
+/// A hand-rolled newline-delimited JSON-RPC client over a spawned `unblock mcp` child.
+pub struct McpClient {
     pub child: Child,
     /// `Some` while the pipe is open; `.take()` + drop closes it → the child reads EOF.
     stdin: Option<ChildStdin>,
@@ -130,17 +130,17 @@ pub struct ServeClient {
     pub seen_lines: Vec<String>,
 }
 
-impl ServeClient {
-    /// Spawn `unblock serve` in `root` with piped stdio + captured stderr (kept off stdout).
+impl McpClient {
+    /// Spawn `unblock mcp` in `root` with piped stdio + captured stderr (kept off stdout).
     #[must_use]
     pub fn spawn(root: &Path) -> Self {
         let mut child = unblock_in(root)
-            .arg("serve")
+            .arg("mcp")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .expect("spawn `unblock serve`");
+            .expect("spawn `unblock mcp`");
         let stdin = child.stdin.take().expect("child stdin");
         let stdout = BufReader::new(child.stdout.take().expect("child stdout"));
         Self {
@@ -193,7 +193,7 @@ impl ServeClient {
         stdin.flush().expect("flush child stdin");
     }
 
-    /// Close the child's stdin pipe (EOF) so `serve` shuts down cleanly (exit 0).
+    /// Close the child's stdin pipe (EOF) so the MCP server shuts down cleanly (exit 0).
     pub fn close_stdin(&mut self) {
         // Dropping the `ChildStdin` closes the write end of the pipe → the child reads EOF.
         drop(self.stdin.take());
@@ -263,7 +263,7 @@ impl ServeClient {
     }
 }
 
-impl Drop for ServeClient {
+impl Drop for McpClient {
     fn drop(&mut self) {
         // Best-effort: kill the child if a test bailed before shutting it down cleanly.
         let _ = self.child.kill();
@@ -272,7 +272,7 @@ impl Drop for ServeClient {
 }
 
 /// Read `stdout` to EOF in a background thread, discarding every byte (no assertions) — the T3.2
-/// C2/C6 guardrail helper backing [`ServeClient::write_without_reading`].
+/// C2/C6 guardrail helper backing [`McpClient::write_without_reading`].
 fn drain_to_eof(mut stdout: BufReader<ChildStdout>) {
     let mut line = String::new();
     loop {

@@ -2,7 +2,7 @@
 //!
 //! Two **separate OS processes** (the `write_lock_race` `[[bin]]`) concurrently `create_issue` under
 //! the SAME parent on the SAME file DB, mirroring the child-per-client stdio topology (multiple
-//! `unblock serve` on one `unblock.db`, PRD §8.2). The engine mints `parent.N` from a pre-tx
+//! MCP servers (`unblock mcp`) on one `unblock.db`, PRD §8.2). The engine mints `parent.N` from a pre-tx
 //! `next_child_number` READ, so two processes that both read `N` before either commits would both mint
 //! `parent.N` — a cross-process `IdCollision` a tx-scoped lock cannot close.
 //!

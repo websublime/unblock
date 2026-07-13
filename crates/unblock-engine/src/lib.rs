@@ -13,7 +13,7 @@
 //!   in-process writers (linearizable per FR-9).
 //! - **Reads never touch the permit** (FR-10): they run concurrently against libsql WAL readers
 //!   while a write holds the permit.
-//! - Scope is **in-process only**: the supported topology is exactly one `unblock serve` per
+//! - Scope is **in-process only**: the supported topology is exactly one MCP server (`unblock mcp`) per
 //!   workspace.
 //! - Permit acquisition is **uncancel-safe** across the tx boundary: a dropped future before commit
 //!   releases the permit and leaves the DB committed-or-rolled-back (no partial state, NFR-5).

@@ -74,7 +74,7 @@ pub trait Storage: Send + Sync {
     ///
     /// The engine (L5) calls this under the write permit and holds the returned guard across the
     /// `next_child_number` allocation READ **and** the write transaction (the same span as the permit),
-    /// so two `serve` processes on one workspace cannot mint the same `parent.N` or interleave writes
+    /// so two MCP-server processes on one workspace cannot mint the same `parent.N` or interleave writes
     /// across processes. It composes BELOW the in-process `Semaphore` (L5) and ABOVE the write-conn
     /// `Mutex` + `BEGIN IMMEDIATE`. Bounded + non-spinning (NFR-3): a native `try_lock` fast-path then
     /// an async sleep-poll to the store's `write_lock_timeout_ms`; a timeout surfaces the retryable

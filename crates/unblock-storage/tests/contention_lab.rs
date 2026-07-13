@@ -14,7 +14,7 @@
 //! on the real OS-level WAL write lock — the only path that exercises WAL + native `busy_timeout`
 //! concurrency (a shared-cache `:memory:` DB cannot use WAL, and the single-instance `behaviour.rs`
 //! claim test is serialized by one `Mutex`, so neither exercises this). This mirrors D14's
-//! single-serve-per-workspace model stressed by `K` would-be servers racing one file.
+//! single-MCP-server-per-workspace model stressed by `K` would-be servers racing one file.
 //!
 //! ## The metric — a baseline-relative CPU-per-write **ratio**
 //!
@@ -1287,7 +1287,7 @@ fn print_diagnostics(
 // that keeps the WAL busy-witness valid: the flock serializes UPSTREAM of `BEGIN IMMEDIATE`, so a
 // flock-in-the-path leg would read a 0 WAL witness (OQ-4). Here we witness the flock DIRECTLY (a
 // separate, non-spinning `try_lock`→`WouldBlock` witness) and pin a PROVISIONAL fairness ceiling under
-// an ASYMMETRIC serve+CLI mix + the migrate-vs-serve `timeout=0` refusal.
+// an ASYMMETRIC MCP-server+CLI mix + the migrate-vs-MCP-server `timeout=0` refusal.
 // =====================================================================================================
 
 /// Open one `LibsqlStorage` on `db` with the given `.write.lock` acquire timeout.
@@ -1298,7 +1298,7 @@ async fn open_locked(db: &Path, lock_timeout_ms: u64) -> LibsqlStorage {
 }
 
 /// D31 (T3.4.1) — the `.write.lock` flock-contention witness + a PROVISIONAL p99-write-stall fairness
-/// bound under an ASYMMETRIC serve+CLI mix, plus the migrate-vs-serve `timeout=0` refusal (AC-8/AC-10).
+/// bound under an ASYMMETRIC MCP-server+CLI mix, plus the migrate-vs-MCP-server `timeout=0` refusal (AC-8/AC-10).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn write_lock_flock_contention_and_fairness() {
     // Serialize against the M0 CPU legs (whole-process CPU is attributable to this test — see
@@ -1390,38 +1390,41 @@ async fn write_lock_flock_contention_and_fairness() {
         "uncontended flock acquires never block (witness baseline == 0)"
     );
 
-    // --- (2) migrate-vs-serve (ASYMMETRIC): serve holds -> a timeout=0 migrate FAILS FAST ---
-    let serve = open_locked(&db, unblock_storage::DEFAULT_WRITE_LOCK_TIMEOUT_MS).await;
+    // --- (2) migrate-vs-MCP-server (ASYMMETRIC): the MCP server holds -> a timeout=0 migrate FAILS FAST ---
+    let mcp_server = open_locked(&db, unblock_storage::DEFAULT_WRITE_LOCK_TIMEOUT_MS).await;
     let migrate_probe = open_locked(&db, 0).await;
-    let serve_held = serve.acquire_write_lock().await.expect("serve holds");
+    let mcp_server_held = mcp_server
+        .acquire_write_lock()
+        .await
+        .expect("MCP server holds");
     assert!(
         matches!(
             migrate_probe.acquire_write_lock().await,
             Err(StorageError::DatabaseLocked)
         ),
-        "a timeout=0 migrate must FAIL FAST while a serve holds the flock (never interleave a schema change)"
+        "a timeout=0 migrate must FAIL FAST while an MCP server holds the flock (never interleave a schema change)"
     );
-    drop(serve_held);
+    drop(mcp_server_held);
     assert!(
         migrate_probe.acquire_write_lock().await.is_ok(),
-        "migrate acquires once the serve releases (the lock is not stuck)"
+        "migrate acquires once the MCP server releases (the lock is not stuck)"
     );
 
-    // --- (3) PROVISIONAL p99-write-stall fairness under an ASYMMETRIC serve+CLI mix ---
-    // A long-lived "serve" acquires the flock in brief bursts and releases (yields fairly); a "CLI
+    // --- (3) PROVISIONAL p99-write-stall fairness under an ASYMMETRIC MCP-server+CLI mix ---
+    // A long-lived MCP server acquires the flock in brief bursts and releases (yields fairly); a "CLI
     // one-shot" measures its acquire wait under that contention.
     let bg_db = db.clone();
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let bg_stop = Arc::clone(&stop);
     let bg = tokio::spawn(async move {
-        let serve = open_locked(&bg_db, unblock_storage::DEFAULT_WRITE_LOCK_TIMEOUT_MS).await;
+        let mcp_server = open_locked(&bg_db, unblock_storage::DEFAULT_WRITE_LOCK_TIMEOUT_MS).await;
         while !bg_stop.load(Ordering::Relaxed) {
-            if let Ok(g) = serve.acquire_write_lock().await {
+            if let Ok(g) = mcp_server.acquire_write_lock().await {
                 tokio::time::sleep(Duration::from_millis(1)).await; // brief hold
                 drop(g);
             }
             // Rest between bursts so the flock (which is NOT FIFO-fair) does not starve the CLI — the
-            // asymmetric mix is a serve WITH gaps, not a pathological tight re-acquire loop.
+            // asymmetric mix is an MCP server WITH gaps, not a pathological tight re-acquire loop.
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
     });
@@ -1436,7 +1439,7 @@ async fn write_lock_flock_contention_and_fairness() {
             .expect("cli acquires (bounded, never a hang)");
         waits.push(start.elapsed());
         drop(g);
-        tokio::time::sleep(Duration::from_micros(200)).await; // give the serve a turn
+        tokio::time::sleep(Duration::from_micros(200)).await; // give the MCP server a turn
     }
     stop.store(true, Ordering::Relaxed);
     let _ = bg.await;
@@ -1448,10 +1451,10 @@ async fn write_lock_flock_contention_and_fairness() {
     // below it, which also witnesses no hang and no hot-spin (the poll sleeps).
     assert!(
         p99 <= Duration::from_millis(500),
-        "PROVISIONAL p99-write-stall <= 500ms under the asymmetric serve+CLI mix (got {p99:?})"
+        "PROVISIONAL p99-write-stall <= 500ms under the asymmetric MCP-server+CLI mix (got {p99:?})"
     );
     println!(
-        "D31 flock: WouldBlock(contended)={wouldblock}/{k}, baseline=0; migrate-vs-serve fail-fast OK; \
+        "D31 flock: WouldBlock(contended)={wouldblock}/{k}, baseline=0; migrate-vs-MCP-server fail-fast OK; \
          p99 acquire stall={p99:?} (ceiling 500ms, hard-ceiling = 30s lock_timeout)"
     );
 }

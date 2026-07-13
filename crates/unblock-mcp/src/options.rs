@@ -1,6 +1,6 @@
 //! Server options + untrusted-input quotas + the mcp-owned `contract_version` SSOT.
 //!
-//! - [`ServeOptions`] / [`Quotas`] are the cross-crate config the CLI hands to [`crate::serve`]
+//! - [`McpServerOptions`] / [`Quotas`] are the cross-crate config the CLI hands to [`crate::run_mcp_server`]
 //!   (spine §5, mcp plan public-API table).
 //! - [`CONTRACT_VERSION`] is the **mcp-owned SSOT** (F-5) for the MCP `contract_version` — disjoint
 //!   from policy's `POLICY_CONTRACT_VERSION`. It is surfaced in [`crate::capabilities`] and the
@@ -78,13 +78,13 @@ impl Default for Quotas {
     }
 }
 
-/// Options for [`crate::serve`] (spine §5, mcp plan public-API table).
+/// Options for [`crate::run_mcp_server`] (spine §5, mcp plan public-API table).
 ///
 /// Carries the optional instruction string surfaced to clients, the request quotas (NFR-18), and the
 /// cooperative-shutdown handle (FR-17) — a `cancel()` on this token drains in-flight work and returns
-/// cleanly from `serve`.
+/// cleanly from `run_mcp_server`.
 #[derive(Debug, Clone)]
-pub struct ServeOptions {
+pub struct McpServerOptions {
     /// Optional human-readable instructions advertised to MCP clients.
     pub instructions: Option<String>,
     /// Untrusted-input limits (NFR-18).
@@ -93,7 +93,7 @@ pub struct ServeOptions {
     pub cancel: CancellationToken,
 }
 
-impl Default for ServeOptions {
+impl Default for McpServerOptions {
     fn default() -> Self {
         Self {
             instructions: None,
@@ -105,7 +105,7 @@ impl Default for ServeOptions {
 
 #[cfg(test)]
 mod tests {
-    use super::{CONTRACT_VERSION, Quotas, ServeOptions};
+    use super::{CONTRACT_VERSION, McpServerOptions, Quotas};
 
     #[test]
     fn quotas_default_values_are_pinned() {
@@ -118,8 +118,8 @@ mod tests {
     }
 
     #[test]
-    fn serve_options_default_has_empty_instructions_and_default_quotas() {
-        let opts = ServeOptions::default();
+    fn mcp_server_options_default_has_empty_instructions_and_default_quotas() {
+        let opts = McpServerOptions::default();
         assert!(opts.instructions.is_none());
         assert_eq!(opts.quotas, Quotas::default());
         assert!(!opts.cancel.is_cancelled());

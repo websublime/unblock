@@ -1,4 +1,4 @@
-//! The server: [`UnblockServer`] (the `ServerHandler`), [`serve`], and the hand-written resource +
+//! The server: [`UnblockServer`] (the `ServerHandler`), [`run_mcp_server`], and the hand-written resource +
 //! `get_info` methods (spine §5).
 //!
 //! The single `impl ServerHandler for UnblockServer` STACKS `#[tool_handler]` + `#[prompt_handler]`
@@ -28,7 +28,7 @@ use unblock_engine::Session;
 use unblock_error::StructuredError;
 
 use crate::error::{McpServerError, RunLoopSnafu, TransportSnafu};
-use crate::options::{CONTRACT_VERSION, Quotas, ServeOptions};
+use crate::options::{CONTRACT_VERSION, McpServerOptions, Quotas};
 use crate::resources::{self, ResourceUri, capabilities, schema_bundle};
 use crate::tools::enforce_quota;
 
@@ -38,7 +38,7 @@ use crate::tools::enforce_quota;
 /// [`Quotas`]. It carries NO write lock — the engine owns the write Semaphore (D14).
 ///
 /// `#[doc(hidden)] pub` (not part of the documented contract) only so the feature-gated
-/// [`serve_duplex_for_test`] can name it in its return type; normal consumers use [`serve`].
+/// [`mcp_server_duplex_for_test`] can name it in its return type; normal consumers use [`run_mcp_server`].
 #[doc(hidden)]
 #[derive(Clone)]
 pub struct UnblockServer {
@@ -47,7 +47,7 @@ pub struct UnblockServer {
     /// The untrusted-input limits (NFR-18), enforced in [`UnblockServer::preflight`].
     pub(crate) quotas: Quotas,
     /// Optional human-readable instructions advertised to clients in [`UnblockServer::get_info`]
-    /// (from `ServeOptions::instructions`). `None` falls back to a generated default summary.
+    /// (from `McpServerOptions::instructions`). `None` falls back to a generated default summary.
     pub(crate) instructions: Option<String>,
 }
 
@@ -118,7 +118,7 @@ impl ServerHandler for UnblockServer {
     ///
     /// The `server_info` is pinned to our real identity — name `"unblock"`, version this crate's
     /// `CARGO_PKG_VERSION` — instead of rmcp's `from_build_env()` default (which would advertise the
-    /// `rmcp` crate). The instructions honor `ServeOptions::instructions` when the caller set one,
+    /// `rmcp` crate). The instructions honor `McpServerOptions::instructions` when the caller set one,
     /// else fall back to a generated capability summary.
     fn get_info(&self) -> ServerInfo {
         let capabilities = ServerCapabilities::builder()
@@ -235,15 +235,18 @@ impl ServerHandler for UnblockServer {
 /// Build, bind, and run the MCP stdio server until cancellation (FR-17).
 ///
 /// Binds the `transport-io` stdio transport and runs `serve_with_ct` with the caller's
-/// [`ServeOptions::cancel`] token; a `cancel()` drains in-flight work and returns cleanly. The
+/// [`McpServerOptions::cancel`] token; a `cancel()` drains in-flight work and returns cleanly. The
 /// `session` is shared as `Arc<Session>` (the engine owns the write Semaphore, D14).
 ///
 /// # Errors
 /// - [`McpServerError::Transport`] if the rmcp service fails to initialize/bind.
 /// - [`McpServerError::RunLoop`] if the run loop ends abnormally (the background task is aborted).
-pub async fn serve(session: Arc<Session>, opts: ServeOptions) -> Result<(), McpServerError> {
+pub async fn run_mcp_server(
+    session: Arc<Session>,
+    opts: McpServerOptions,
+) -> Result<(), McpServerError> {
     let server = UnblockServer::new(session, opts.quotas, opts.instructions);
-    let running = serve_handler(server, stdio(), opts.cancel).await?;
+    let running = run_mcp_server_handler(server, stdio(), opts.cancel).await?;
     running.waiting().await.context(RunLoopSnafu)?;
     Ok(())
 }
@@ -251,8 +254,8 @@ pub async fn serve(session: Arc<Session>, opts: ServeOptions) -> Result<(), McpS
 /// Generic over the transport so the lifecycle test can drive an in-memory duplex transport.
 ///
 /// The transport is wrapped in a [`VersionClampingTransport`] (CD-4) so the SAME protocol-version
-/// clamp guards both the shipped stdio [`serve`] and the test [`serve_duplex_for_test`] path.
-async fn serve_handler<T, E, A>(
+/// clamp guards both the shipped stdio [`run_mcp_server`] and the test [`mcp_server_duplex_for_test`] path.
+async fn run_mcp_server_handler<T, E, A>(
     server: UnblockServer,
     transport: T,
     cancel: tokio_util::sync::CancellationToken,
@@ -293,7 +296,7 @@ where
 /// contract, so a future rmcp bump could change it and silently make this clamp wrong or redundant.
 /// Two `tests/protocol_version.rs` pins fail LOUDLY if that happens, pointing maintainers straight here:
 /// - `rmcp_serve_loop_echoes_unsupported_below_latest_version_verbatim` drives the RAW, UNCLAMPED serve
-///   path ([`serve_duplex_unclamped_for_test`]) and asserts rmcp still echoes an unsupported
+///   path ([`mcp_server_duplex_unclamped_for_test`]) and asserts rmcp still echoes an unsupported
 ///   below-latest version verbatim — the exact misbehaviour this wrapper compensates for;
 /// - `known_versions_and_latest_match_the_clamp_key_set` pins rmcp's [`ProtocolVersion::KNOWN_VERSIONS`]
 ///   / [`ProtocolVersion::LATEST`] (the set this clamp keys on) to their expected values.
@@ -362,7 +365,7 @@ fn clamp_unsupported_initialize_version(message: &mut ClientJsonRpcMessage) {
 
 /// Build and run the server over an arbitrary in-memory transport (TEST-ONLY, `test-util` feature).
 ///
-/// Drives the **same** `UnblockServer` + `serve_with_ct` path as [`serve`], but over a caller-
+/// Drives the **same** `UnblockServer` + `serve_with_ct` path as [`run_mcp_server`], but over a caller-
 /// supplied duplex transport instead of stdio — so the M2 lifecycle exit-gate (`tests/lifecycle.rs`)
 /// can run a full in-process MCP client/server flow without touching real stdio. Feature-gated and
 /// `#[doc(hidden)]` so it never widens the shipped public surface.
@@ -371,7 +374,7 @@ fn clamp_unsupported_initialize_version(message: &mut ClientJsonRpcMessage) {
 /// - [`McpServerError::Transport`] if the rmcp service fails to initialize over the transport.
 #[cfg(feature = "test-util")]
 #[doc(hidden)]
-pub async fn serve_duplex_for_test<T, E, A>(
+pub async fn mcp_server_duplex_for_test<T, E, A>(
     session: Arc<Session>,
     quotas: Quotas,
     instructions: Option<String>,
@@ -383,14 +386,14 @@ where
     E: std::error::Error + Send + Sync + 'static,
 {
     let server = UnblockServer::new(session, quotas, instructions);
-    serve_handler(server, transport, cancel).await
+    run_mcp_server_handler(server, transport, cancel).await
 }
 
 /// Build and run the server over an arbitrary in-memory transport WITHOUT the
 /// [`VersionClampingTransport`] — the RAW rmcp serve path (TEST-ONLY, `test-util` feature).
 ///
-/// This is the CD-6 assumption-pin seam. Unlike [`serve_duplex_for_test`] (which routes through
-/// [`serve_handler`] and therefore wraps the transport in [`VersionClampingTransport`]), this helper
+/// This is the CD-6 assumption-pin seam. Unlike [`mcp_server_duplex_for_test`] (which routes through
+/// [`run_mcp_server_handler`] and therefore wraps the transport in [`VersionClampingTransport`]), this helper
 /// calls `serve_with_ct` on the caller's transport DIRECTLY, installing NO clamp. It exists ONLY so the
 /// `protocol_version` pin (`tests/protocol_version.rs`) can observe — and fail loudly on a change to —
 /// rmcp 1.7's UN-guarded serve-loop version negotiation that [`clamp_unsupported_initialize_version`]
@@ -401,7 +404,7 @@ where
 /// - [`McpServerError::Transport`] if the rmcp service fails to initialize over the transport.
 #[cfg(feature = "test-util")]
 #[doc(hidden)]
-pub async fn serve_duplex_unclamped_for_test<T, E, A>(
+pub async fn mcp_server_duplex_unclamped_for_test<T, E, A>(
     session: Arc<Session>,
     quotas: Quotas,
     instructions: Option<String>,

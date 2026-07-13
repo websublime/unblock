@@ -4,7 +4,7 @@
 //! `Storage::acquire_write_lock` DIRECTLY, so it stays GREEN even if the lock is dropped from the
 //! production engine `Session::acquire()`. This test closes that gap: two **separate OS processes**
 //! drive the REAL engine `Session::create_issue` (the MINTING path) concurrently under the SAME parent
-//! on the SAME file DB — the child-per-client stdio topology (multiple `unblock serve` on one
+//! on the SAME file DB — the child-per-client stdio topology (multiple MCP servers (`unblock mcp`) on one
 //! `unblock.db`, PRD §8.2).
 //!
 //! The engine mints `parent.N` from a pre-tx `next_child_number` READ held under the D31 `.write.lock`

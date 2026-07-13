@@ -1,4 +1,4 @@
-//! `unblock-cli` (L7) — the reduced lifecycle/ops CLI facade over the engine: `serve`, `migrate`,
+//! `unblock-cli` (L7) — the reduced lifecycle/ops CLI facade over the engine: `mcp`, `migrate`,
 //! `doctor`, `version`, `init`, `agents`, `update` (D3). Thin routing + config flag-forwarding +
 //! tracing + the 0–8 exit-code boundary. Owns cooperative-shutdown signal install (FR-17, OQ-4).
 //!
@@ -44,7 +44,7 @@ pub async fn run() -> ExitCode {
 /// message and returns clap's exit code: `0` for `--help`/`--version`, `2` for a usage error), then
 /// initializes stderr-only logging, dispatches, and maps the outcome:
 /// - `Ok(None)` → success (exit `0`);
-/// - `Ok(Some(code))` → an explicit exit code (the `serve` `128+signo` signal exit);
+/// - `Ok(Some(code))` → an explicit exit code (the `mcp` `128+signo` signal exit);
 /// - `Err(e)` → [`exit::into_exit`] (the structured error render + 0–8 cast).
 pub async fn run_with<I, T>(args: I) -> ExitCode
 where

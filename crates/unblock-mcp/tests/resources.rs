@@ -1,5 +1,5 @@
 //! The FR-12 AC-2 client-side drift e2e (F-1) + the -32002 resource boundary (F-2) + the
-//! `similar_ids` not-found fold (FORK-3A), over a LIVE `serve_duplex_for_test` duplex.
+//! `similar_ids` not-found fold (FORK-3A), over a LIVE `mcp_server_duplex_for_test` duplex.
 //!
 //! A real MCP client issues wire-level `read_resource` over ALL 5 URIs and the unknown-URI branch:
 //! - the two discovery documents (`unblock://capabilities`/`unblock://schema`) are parsed CLIENT-SIDE

@@ -1,5 +1,5 @@
 //! `unblock agents` (FR-14, D27/AF-3) — inject/maintain a managed `AGENTS.md` block describing the
-//! MCP wiring (how an agent connects to `unblock serve`).
+//! MCP wiring (how an agent connects to `unblock mcp`).
 //!
 //! A pure file op (SEPARATE from `init`): resolve-only open (`open_workspace_with_cli`, NO DB) to find
 //! `workspace_dir`, then an idempotent merge of a MANAGED block delimited by markers (a re-run updates
@@ -57,7 +57,7 @@ fn managed_block() -> String {
          This workspace is tracked by **unblock**. Issue-data operations are exposed over MCP — the\n\
          `unblock` CLI is lifecycle/ops only.\n\
          \n\
-         - Start the server: `unblock serve` (MCP over stdio).\n\
+         - Start the server: `unblock mcp` (MCP over stdio).\n\
          - Contract: `{contract}`.\n\
          - Tools: use the MCP tool set (create/list/close/dep/…) — do NOT shell out to the CLI for\n\
          issue data.\n",
@@ -109,7 +109,7 @@ mod tests {
     #[test]
     fn managed_block_mentions_serve_and_contract() {
         let block = managed_block();
-        assert!(block.contains("unblock serve"));
+        assert!(block.contains("unblock mcp"));
         assert!(block.contains(unblock_mcp::CONTRACT_VERSION));
     }
 
@@ -118,7 +118,7 @@ mod tests {
         let out = merge_managed_block(None, &managed_block());
         assert!(out.starts_with(BEGIN_MARKER));
         assert!(out.contains(END_MARKER));
-        assert!(out.contains("unblock serve"));
+        assert!(out.contains("unblock mcp"));
     }
 
     #[test]

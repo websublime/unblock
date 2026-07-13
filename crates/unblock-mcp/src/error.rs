@@ -4,7 +4,7 @@
 //! (`is_error=true`, FR-11). This module owns only:
 //!
 //! - [`McpServerError`] — the snafu enum for server lifecycle/transport faults (the public type the
-//!   CLI handles from [`crate::serve`]).
+//!   CLI handles from [`crate::run_mcp_server`]).
 //! - [`engine_error_to_structured`] — the spine §2.4/§5.6 boundary mapper: exactly `(&err).into()`
 //!   (the blanket `From<&EngineError> for StructuredError`, F-6). Every `EngineError` variant is
 //!   covered (it is `CodedError`), yielding an already-sanitized [`StructuredError`]; the JSON
@@ -20,7 +20,7 @@ use snafu::Snafu;
 use unblock_engine::EngineError;
 use unblock_error::StructuredError;
 
-/// Server lifecycle/transport errors surfaced by [`crate::serve`] (NOT domain errors).
+/// Server lifecycle/transport errors surfaced by [`crate::run_mcp_server`] (NOT domain errors).
 ///
 /// Per-tool domain failures are returned *in-band* as the shared structured error (`is_error=true`,
 /// always-valid JSON, FR-11); this enum is reserved for the server's own lifecycle — binding the stdio

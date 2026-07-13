@@ -1,4 +1,4 @@
-//! T3.2 — cooperative-shutdown adversarial failure-injection over a REAL `unblock serve` process
+//! T3.2 — cooperative-shutdown adversarial failure-injection over a REAL `unblock mcp` process
 //! (FR-17/NFR-5). The AC (impl-plan T3.2 / PRD FR-17) has four clauses to PROVE: (1) SIGTERM mid-write
 //! leaves no WAL corruption; (2) the in-flight write fully commits or fully rolls back (never
 //! partial); (3) exit is `128+signo`; (4) a second signal escalates to an async-signal-safe exit.
@@ -21,7 +21,7 @@
 //!   against an UNREAD `create_bulk` response (background-drained, never read synchronously — a
 //!   signal-case guardrail). `count ∈ {0, N}`, never partial.
 //! - **C3** — signo-generic exit codes: SIGINT → 130, SIGHUP → 129 (SIGTERM → 143 is covered by C1 /
-//!   `serve_lifecycle.rs::sigterm_drives_clean_shutdown_with_exit_143`).
+//!   `mcp_lifecycle.rs::sigterm_drives_clean_shutdown_with_exit_143`).
 //! - **C6** — second-signal escalation (race-based, invariant-only): SIGTERM then an ESRCH-tolerant
 //!   SIGINT ~1–2ms later. Asserts NO HANG and `code() ∈ {143, 130}` — NOT `Some(143)` alone: the two
 //!   signals sent that close together can both be pending, and the lower signo (INT) can win delivery,
@@ -37,7 +37,7 @@
 //!   NOT test anything under test being broken — it proves the harness itself is non-vacuous.
 //!
 //! Unix-only (`#![cfg(unix)]`) — the SIGTERM/exit-`128+signo` contract is a unix construct; Windows
-//! `serve` is a no-op EOF path (NFR-11).
+//! `unblock mcp` is a no-op EOF path (NFR-11).
 #![cfg(unix)]
 
 mod common;
@@ -45,7 +45,7 @@ mod common;
 use std::time::Duration;
 
 use common::{
-    ServeClient, Workspace, bulk_markdown, detail, id_set, json_report, reopen_and_check,
+    McpClient, Workspace, bulk_markdown, detail, id_set, json_report, reopen_and_check,
     send_signal, send_signal_tolerant, wait_for,
 };
 use serde_json::{Value, json};
@@ -71,7 +71,7 @@ fn jitter_ms(max_ms: u64) -> u64 {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn c1_sigterm_after_a_committed_bulk_is_durable_and_stdout_stays_json_only() {
     let ws = Workspace::init();
-    let mut client = ServeClient::spawn(ws.root());
+    let mut client = McpClient::spawn(ws.root());
     client.initialize();
 
     let markdown = bulk_markdown(N);
@@ -124,7 +124,7 @@ async fn c1_sigterm_after_a_committed_bulk_is_durable_and_stdout_stays_json_only
 /// jittered SIGTERM. Never asserts "mid-tx was hit" — only the atomicity invariant.
 async fn run_c2_round(round: usize) {
     let ws = Workspace::init();
-    let mut client = ServeClient::spawn(ws.root());
+    let mut client = McpClient::spawn(ws.root());
     client.initialize();
 
     let markdown = bulk_markdown(N);
@@ -182,7 +182,7 @@ async fn c2_soak_mid_write_sigterm_never_leaves_a_partial_batch() {
 async fn c3_signo_generic_exit_codes_and_clean_integrity() {
     for (sig, code) in [("INT", 130), ("HUP", 129)] {
         let ws = Workspace::init();
-        let mut client = ServeClient::spawn(ws.root());
+        let mut client = McpClient::spawn(ws.root());
         client.initialize();
         let (err, _ready) = client.call_tool("query", &json!({"kind": "ready"}));
         assert!(!err, "sig {sig}: a call works before the signal");
@@ -211,7 +211,7 @@ async fn c3_signo_generic_exit_codes_and_clean_integrity() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn c6_second_signal_escalation_never_hangs_and_keeps_a_valid_exit_code() {
     let ws = Workspace::init();
-    let mut client = ServeClient::spawn(ws.root());
+    let mut client = McpClient::spawn(ws.root());
     client.initialize();
 
     let markdown = bulk_markdown(N);
@@ -257,7 +257,7 @@ async fn c6_second_signal_escalation_never_hangs_and_keeps_a_valid_exit_code() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn c_doctor_reports_clean_integrity_after_a_shutdown_round() {
     let ws = Workspace::init();
-    let mut client = ServeClient::spawn(ws.root());
+    let mut client = McpClient::spawn(ws.root());
     client.initialize();
 
     let markdown = bulk_markdown(N);

@@ -1,5 +1,5 @@
 //! End-to-end `diagnostics` tool coverage (FR-15, T2.7/D26) over the REAL server + in-memory duplex
-//! transport (`serve_duplex_for_test` runs the shipped `UnblockServer` path).
+//! transport (`mcp_server_duplex_for_test` runs the shipped `UnblockServer` path).
 //!
 //! The load-bearing case proves the adapter now THREADS the changelog `since` window into the engine
 //! (D26/OQ-1): it FAILS under the old adapter, which accepted `changelog{since}` on the wire then

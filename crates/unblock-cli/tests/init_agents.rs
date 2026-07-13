@@ -140,7 +140,7 @@ fn agents_writes_a_managed_block_and_is_idempotent() {
     );
     assert!(after_first.contains("<!-- END unblock -->"));
     assert!(
-        after_first.contains("unblock serve"),
+        after_first.contains("unblock mcp"),
         "block describes MCP wiring"
     );
 

@@ -1,7 +1,7 @@
 //! The cross-process advisory **write lock** (D31 — a D14 amendment) — the restored beads
 //! `.write.lock` serializer, re-homed as an L2 [`crate::Storage`] primitive.
 //!
-//! Under the supported child-per-client stdio topology (PRD §8.2) multiple `unblock serve`
+//! Under the supported child-per-client stdio topology (PRD §8.2) multiple MCP servers (`unblock mcp`)
 //! processes share one `unblock.db`; the in-process [`tokio::sync::Semaphore`] (L5) and the
 //! per-store write-connection [`tokio::sync::Mutex`] (L2) serialize writers only *within* one
 //! process. This primitive restores **cross-process** write serialization: every mutation acquires
