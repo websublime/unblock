@@ -7,13 +7,20 @@
 //! - [`ResourceUri`] — the parsed URI (the 5 resources + an unknown fallback) and [`parse_uri`].
 //! - the read helpers ([`issues`]) and the pure capability/schema builders ([`capabilities`],
 //!   [`schema`]) surfaced as the crate's public discovery API.
+//! - [`agents_digest`] — a pure typed digest (D33) derived from the two discovery documents, for the
+//!   CLI's `unblock agents` managed AGENTS.md block; NOT a wire resource, NOT version-coupled.
 
+pub(crate) mod agents_digest;
 pub(crate) mod capabilities;
 pub(crate) mod issues;
 pub(crate) mod schema;
 
 use unblock_error::{ErrorCode, StructuredError};
 
+pub use agents_digest::{
+    AgentsDigest, ErrorCodeDigest, PromptDigest, ResourceDigest, ToolAction, ToolDigest,
+    agents_digest,
+};
 pub use capabilities::{
     Capabilities, ErrorCodeDescriptor, PromptDescriptor, ResourceDescriptor, ToolDescriptor,
     capabilities,
