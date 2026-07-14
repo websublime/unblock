@@ -188,7 +188,9 @@ These decisions are **locked** (confirmed with Miguel) and shape the rest of thi
   folded into the gate). **The read (list/ready) ceilings were widened from the PR-0 provisional set (list ≤50/≤500,
   ready ≤25/≤250, create ≤5) because the current per-row-hydrated read path (`collect_hydrated`, N+1×3 queries per
   result set) put `ready`/`list` above the original 5× ceilings on the first real run (ready 1k ≈29ms, ready 10k
-  ≈284ms) — a known read-path cost; batch hydration is a v1.4 optimisation, not an NFR-1 v1 miss.** Any ceiling found
+  ≈284ms) — a known read-path cost. **Batch hydration is a PRE-GA task (T3.5.1, minted from this finding, Miguel
+  2026-07-14) that fixes the N+1 read path and re-tightens these read ceilings toward the tier-i reference budgets
+  before v1 GA — NOT a v1.4 deferral.** Any ceiling found
   tight is widened in the same commit, replicated identically across the number-equality sites (SF-2). The generous
   ceiling trips only on a gross regression (an O(N)→O(N²) blowup or a missing index) — the T0.8 core-count lesson (a
   real hot-spin gave R≈28 on 14 cores but R≈4.42 on a 4-vCPU runner: a generous absolute budget is MORE portable than
