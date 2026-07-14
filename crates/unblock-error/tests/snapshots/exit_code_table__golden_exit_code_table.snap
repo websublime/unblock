@@ -40,6 +40,12 @@ expression: table
     "none"
   ],
   [
+    "RATE_LIMITED",
+    2,
+    true,
+    "none"
+  ],
+  [
     "ISSUE_NOT_FOUND",
     3,
     false,

@@ -190,7 +190,8 @@ fn full_exit_code_table_is_dual_pinned_with_unblock_error() {
             | ErrorCode::SchemaMismatch
             | ErrorCode::DatabaseError
             | ErrorCode::NotInitialized
-            | ErrorCode::AlreadyInitialized => 2,
+            | ErrorCode::AlreadyInitialized
+            | ErrorCode::RateLimited => 2,
             // exit 3 — Issue / operational
             ErrorCode::IssueNotFound
             | ErrorCode::AmbiguousId

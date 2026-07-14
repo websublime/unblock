@@ -4,7 +4,7 @@
 //! Asserted at the crate boundary (independent of the unit tests in `code.rs`): every
 //! `ErrorCode` maps to an exact `(as_str, exit_code, is_retryable, hint_shape)` quadruple, the emitted
 //! exit codes cover exactly {1,2,3,4,5,6,7,8}, `0` is emitted by no code, and `AlreadyClaimed` is the
-//! explicit `(exit 3, retryable)` carrier (FR-2). The full 35-quadruple table is insta-pinned, so any
+//! explicit `(exit 3, retryable)` carrier (FR-2). The full 36-quadruple table is insta-pinned, so any
 //! unintentional change to the vocabulary fails the snapshot gate.
 
 use std::collections::{BTreeSet, HashSet};
@@ -13,10 +13,10 @@ use unblock_error::{
 };
 
 #[test]
-fn all_array_has_35_unique_variants() {
-    assert_eq!(ErrorCode::ALL.len(), 35, "the table is pinned at 35 codes");
+fn all_array_has_36_unique_variants() {
+    assert_eq!(ErrorCode::ALL.len(), 36, "the table is pinned at 36 codes");
     let unique: HashSet<_> = ErrorCode::ALL.iter().copied().collect();
-    assert_eq!(unique.len(), 35, "ALL must contain no duplicates");
+    assert_eq!(unique.len(), 36, "ALL must contain no duplicates");
 }
 
 #[test]
@@ -43,6 +43,14 @@ fn exit_codes_cover_one_through_eight_and_never_zero() {
 fn already_claimed_is_exit_three_and_retryable() {
     assert_eq!(ErrorCode::AlreadyClaimed.exit_code(), 3);
     assert!(ErrorCode::AlreadyClaimed.is_retryable());
+}
+
+#[test]
+fn rate_limited_is_exit_two_and_retryable() {
+    // NFR-18/D34 (OQ-2 ratified): the MCP concurrency-cap reject is exit 2 (the only {1..8} bucket
+    // carrying "resource busy, retry" — a 9th exit code would break the pinned coverage) and retryable.
+    assert_eq!(ErrorCode::RateLimited.exit_code(), 2);
+    assert!(ErrorCode::RateLimited.is_retryable());
 }
 
 #[test]
