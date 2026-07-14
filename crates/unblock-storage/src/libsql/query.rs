@@ -10,13 +10,14 @@ use unblock_model::{CountBucket, CountGroupBy, Issue, ListFilters};
 
 use crate::error::{StorageError, map_libsql_err};
 
-use super::crud::get_issue;
+use super::crud::hydrate_ids;
 use super::ids::escape_like_pattern;
 
 /// The default result cap applied to `search` when the caller sets no `limit` (spine §3.2.1).
 const SEARCH_DEFAULT_CAP: usize = 50;
 
-/// Read a `Vec<Issue>` from a prepared query, hydrating each via `get_issue` (labels + deps).
+/// Read a `Vec<Issue>` from a prepared id query, then batch-hydrate the whole ordered id set (labels
+/// + deps) via [`hydrate_ids`] — one batched fetch instead of the old per-id `get_issue` loop.
 async fn collect_hydrated(
     conn: &Connection,
     sql: &str,
@@ -32,13 +33,7 @@ async fn collect_hydrated(
             ids.push(id);
         }
     }
-    let mut out = Vec::with_capacity(ids.len());
-    for id in &ids {
-        if let Some(issue) = get_issue(conn, id).await? {
-            out.push(issue);
-        }
-    }
-    Ok(out)
+    hydrate_ids(conn, &ids).await
 }
 
 /// `list_issues`: compose `ListFilters` into a parameterized query (status/type OR, labels AND/OR,
@@ -93,13 +88,8 @@ pub(super) async fn ready_issues(
         ids.truncate(limit);
     }
 
-    let mut out = Vec::with_capacity(ids.len());
-    for id in &ids {
-        if let Some(issue) = get_issue(conn, id).await? {
-            out.push(issue);
-        }
-    }
-    Ok(out)
+    // Batch-hydrate the POST-truncate, POST-blocked-filter id list.
+    hydrate_ids(conn, &ids).await
 }
 
 /// `blocked_issues`: `status NOT IN ('closed','tombstone')` (INCLUDES `in_progress/deferred`) filtered
@@ -147,13 +137,8 @@ pub(super) async fn blocked_issues(
         ids.truncate(limit);
     }
 
-    let mut out = Vec::with_capacity(ids.len());
-    for id in &ids {
-        if let Some(issue) = get_issue(conn, id).await? {
-            out.push(issue);
-        }
-    }
-    Ok(out)
+    // Batch-hydrate the POST-truncate, blocked-set-filtered id list.
+    hydrate_ids(conn, &ids).await
 }
 
 /// `search_issues`: substring `instr(lower(col))` over title+description+id (needle lowercased, no
