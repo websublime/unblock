@@ -47,6 +47,13 @@ sync = ["dep:unblock-sync"]
 health = ["dep:unblock-health"]
 # D15: forwards only to storage's non-default remote/replica path.
 remote = ["unblock-storage/remote"]
+# T3.5/D34: forwards to storage's `testkit` so `benches/engine.rs` + `tests/scale.rs` can seed the
+# NFR-1/NFR-2 corpus via `unblock_storage::testkit::seed_corpus` (storage-direct, non-minted — F-2).
+# Off by default; enabled only by the CI `bench-gate`/`scale` jobs
+# (`cargo bench -p unblock-engine --features testkit` / `--test scale`), so a plain
+# `cargo test --workspace` builds the bench to an empty `main` and `tests/scale.rs` to zero tests.
+# storage `testkit` pulls NO deps, so this adds no transitive surface (RK-4 holds).
+testkit = ["unblock-storage/testkit"]
 
 [dev-dependencies]
 # The tests drive the REAL libsql storage (no `Storage` mock — FR-9 "identical behaviour through
@@ -76,3 +83,15 @@ insta = { workspace = true }
 serde_json = { workspace = true }
 # Temp `.unblock/` workspaces for the config-facade harness path.
 tempfile = { workspace = true }
+# NFR-1 HYBRID engine-overhead perf gate (T3.5/D34): `benches/engine.rs`. Already declared
+# workspace-wide (root Cargo.toml, `features=[async_tokio]`); adds no NEW transitive surface.
+criterion = { workspace = true }
+
+# NFR-1 engine perf gate (T3.5/D34): export/import (10k) + create/ready/list/claim engine overhead
+# vs the storage budgets. `harness = false` → criterion owns `main`. The bench BODY is
+# `#[cfg(feature = "testkit")]` (it needs `unblock_storage::testkit::seed_corpus` for export/import);
+# without the feature the target compiles to an empty `main`, so `cargo test`/`clippy --workspace`
+# (no testkit) stay green. Run via `cargo bench -p unblock-engine --features testkit`.
+[[bench]]
+name = "engine"
+harness = false
