@@ -7,16 +7,17 @@
 # snapshots, layering, doc-lint, toolchain, audit, deny. The 11th M0 job — `fuzz-smoke` — runs on a
 # nightly schedule in `fuzz-smoke.yml` (it also runs the two #[ignore]d contention-lab controls).
 #
-# The reliability half of the deferred ledger is a FIVE-job split (ci-cd §2). THREE land here:
+# The reliability half of the deferred ledger is a FIVE-job split (ci-cd §2). FOUR land here:
 #   - stress-integrity → T3.4 (NFR-5) — LANDED BELOW: the long-lived + interleaved engine integrity
 #     tests at a MODEST corpus + the `unblock-sync --features fault-injection` (NFR-4) clippy+test leg.
 #   - bench-gate → T3.5 (NFR-1) — LANDED BELOW: the HYBRID perf gate (D34) — `cargo bench` on the
 #     storage/engine/policy/render criterion suites (targeted `--features testkit`, never
 #     `--all-features`) + the absolute-ceiling compare `cargo xtask bench-gate`.
 #   - scale → T3.5 (NFR-2) — LANDED BELOW: the storage-direct 250k `tests/scale.rs` (storage + engine).
-# TWO jobs remain DEFERRED with their gating task (they depend on artefacts that do not exist yet):
-#   - rate-limit  → T3.5 (P2) (the `RateLimited` mint + `Arc<Semaphore>` chokepoint; a cheap
-#                              independent `-p unblock-mcp` leg — NOT riding the perf/scale corpus)
+#   - rate-limit → T3.5 (P2) (NFR-18) — LANDED BELOW: the `RateLimited` mint + `Arc<Semaphore>`
+#     chokepoint AC (`tests/rate_limit.rs`); a cheap independent `-p unblock-mcp` leg — NOT riding the
+#     perf/scale corpus.
+# ONE job remains DEFERRED with its gating task (it depends on artefacts that do not exist yet):
 #   - no-network  → T3.1/T3.6 (crate-scoped gate landed at T3.1/D27; the workspace-wide scan needs the
 #                              `unblock-cli` binary + the axoupdater/dist surface, T3.6)
 #
@@ -212,6 +213,22 @@ jobs:
         run: cargo test -p unblock-storage --features testkit --locked --test scale
       - name: NFR-2 engine scale (250k read budgets + integrity)
         run: cargo test -p unblock-engine --features testkit --locked --test scale
+
+  rate-limit:
+    name: rate-limit (NFR-18 Arc<Semaphore> chokepoint)
+    # T3.5/D34 (P2, ci-cd §2). A cheap INDEPENDENT `-p unblock-mcp` leg — does NOT ride the perf/scale
+    # 250k corpus. The concurrency cap is core-independent, but the N/N+1 AC runs on a multi-thread
+    # tokio runtime (needs >= 2 worker threads); ubuntu-latest provides them. `-p unblock-mcp` pulls the
+    # self dev-dep `features = ["test-util"]` that exposes `mcp_server_duplex_for_test`.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.96.0
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: NFR-18 rate-limit AC (chokepoint + SF-6 macro-suppression pin)
+        run: cargo test -p unblock-mcp --locked --test rate_limit
 
   snapshots:
     name: snapshots (insta --check)
