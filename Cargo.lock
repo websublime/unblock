@@ -3093,6 +3093,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "cpu-time",
+ "criterion",
  "insta",
  "libsql",
  "petgraph",
