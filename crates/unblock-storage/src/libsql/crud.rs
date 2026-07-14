@@ -1,12 +1,12 @@
 //! Issue CRUD (crate plan §3.3, spine §3.2.1). Every mutation runs inside one `BEGIN IMMEDIATE`
 //! transaction (rows + audit events commit together, FR-9).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use chrono::Utc;
 use libsql::{Connection, Value, params_from_iter};
 
-use unblock_model::{Issue, IssueValidator, parse_id};
+use unblock_model::{Dependency, Issue, IssueValidator, parse_id};
 
 use crate::error::{StorageError, map_libsql_err};
 use crate::filters::{DeleteMode, DeletePlan};
@@ -258,18 +258,19 @@ pub(super) async fn get_issue(conn: &Connection, id: &str) -> Result<Option<Issu
     Ok(Some(issue))
 }
 
-/// Fetch multiple issues by id (hydrated). Unknown ids are simply absent from the result.
+/// Fetch multiple issues by id (hydrated), preserving the caller's id order. Unknown ids are simply
+/// absent from the result.
+///
+/// Routes through the batched [`hydrate_ids`] helper (T3.5.1) instead of a per-id `get_issue` loop
+/// (which was `1 + 3N` queries). The result keeps the caller's order and drops absent ids exactly
+/// as the loop did. The ids are treated as a **lookup set**: a repeated id is hydrated at most once
+/// (every production caller passes a de-duplicated set — `session::write` sorts+dedups its
+/// candidate/blocker id lists and reconstructs its response via a by-id `HashMap::remove`).
 pub(super) async fn get_issues(
     conn: &Connection,
     ids: &[String],
 ) -> Result<Vec<Issue>, StorageError> {
-    let mut out = Vec::new();
-    for id in ids {
-        if let Some(issue) = get_issue(conn, id).await? {
-            out.push(issue);
-        }
-    }
-    Ok(out)
+    hydrate_ids(conn, ids).await
 }
 
 /// Hydrate an issue's `labels` (sorted) and `dependencies` from their tables.
@@ -305,6 +306,121 @@ async fn hydrate(conn: &Connection, issue: &mut Issue) -> Result<(), StorageErro
     }
     issue.dependencies = deps;
     Ok(())
+}
+
+/// The maximum number of ids bound into a single `WHERE … IN (…)` batch in [`hydrate_ids`].
+///
+/// Each id is one bound parameter, bounded by `SQLITE_MAX_VARIABLE_NUMBER`. Kept safely under the
+/// historical `999` floor (do **not** rely on the newer `32766` default): an unbounded read (no
+/// `limit`, permitted by the API) can materialize an id set larger than any single `IN (…)` clause
+/// may bind — e.g. the `scale`/read paths page at `1_000 > 999` — so the id list is chunked into
+/// several bounded `IN` queries rather than emitting one oversized `IN (…)` that `SQLite` rejects at
+/// runtime.
+const HYDRATE_ID_CHUNK: usize = 900;
+
+/// Batch-hydrate an **already-ordered** id list into fully-populated [`Issue`]s (labels +
+/// dependencies), preserving the input order.
+///
+/// This replaces the historical per-id `get_issue` loop (`1 + 3N` queries) with a batched fetch:
+/// for each chunk of at most [`HYDRATE_ID_CHUNK`] ids it runs three `WHERE … IN (…)` queries — the
+/// issue rows, the labels, and the dependencies — and folds **every** chunk into ONE set of
+/// accumulators; reconstruction then maps over the full ordered `ids` exactly once. Query count is
+/// `1 + 3·⌈N/CHUNK⌉` per call (the `1` is the caller's id query), versus the old `1 + 3N`.
+///
+/// **Byte-identical** to the old loop (`get_issue` per id):
+/// - **outer order** — reassembly iterates `ids`, so the result order is the caller's id-query
+///   order, never the arbitrary `IN`-result row order;
+/// - **label sort** (`label ASC`) and **dep sort** (`depends_on_id ASC, type ASC`) — preserved by
+///   the per-relation `ORDER BY`; the leading `issue_id` key only groups rows, leaving the same
+///   secondary keys to fully determine the intra-issue order the single-id `SELECT`s produced;
+/// - **skip-absent** — an id whose issue row has vanished (a tombstone/hard-delete race between the
+///   id query and hydration) is dropped by `filter_map` returning `None`, never a panic or a
+///   placeholder (identical to the old `if let Some(issue) = get_issue(…)`);
+/// - **empty relations** — an issue with no labels/deps gets an empty `Vec` (`unwrap_or_default`);
+/// - **empty id set** — an early `Ok(Vec::new())` guard (an `IN ()` is a SQL error).
+///
+/// The ids are treated as a lookup set: they are unique on every read path (each derives them from
+/// a primary-key `SELECT`) and de-duplicated on the `get_issues` path, so a repeated id is hydrated
+/// at most once.
+pub(super) async fn hydrate_ids(
+    conn: &Connection,
+    ids: &[String],
+) -> Result<Vec<Issue>, StorageError> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // One set of accumulators across ALL chunks (never a per-chunk map that resets — an issue's
+    // labels/deps live wholly in the one chunk its id occupies, since ids are unique).
+    let mut issues: HashMap<String, Issue> = HashMap::with_capacity(ids.len());
+    let mut labels: HashMap<String, Vec<String>> = HashMap::new();
+    let mut deps: HashMap<String, Vec<Dependency>> = HashMap::new();
+
+    for chunk in ids.chunks(HYDRATE_ID_CHUNK) {
+        let placeholder_list = placeholders(chunk.len());
+        let params: Vec<Value> = chunk.iter().map(|id| Value::Text(id.clone())).collect();
+
+        // Issue rows — the SAME 38-column projection as the single-id path, so `issue_from_row`
+        // ordinals hold and `content_hash` recomputes identically (excludes labels/deps).
+        let issue_sql =
+            format!("SELECT {ISSUE_COLUMNS} FROM issues WHERE id IN ({placeholder_list})");
+        let mut rows = conn
+            .query(&issue_sql, params_from_iter(params.clone()))
+            .await
+            .map_err(map_libsql_err)?;
+        while let Some(row) = rows.next().await.map_err(map_libsql_err)? {
+            let issue = issue_from_row(&row)?;
+            issues.insert(issue.id.clone(), issue);
+        }
+
+        // Labels — grouped by issue_id, `label ASC` within each (the added `issue_id` leading key
+        // only groups; `label ASC` still fully orders each issue's labels).
+        let labels_sql = format!(
+            "SELECT issue_id, label FROM labels WHERE issue_id IN ({placeholder_list}) \
+             ORDER BY issue_id ASC, label ASC"
+        );
+        let mut rows = conn
+            .query(&labels_sql, params_from_iter(params.clone()))
+            .await
+            .map_err(map_libsql_err)?;
+        while let Some(row) = rows.next().await.map_err(map_libsql_err)? {
+            let Value::Text(issue_id) = row.get_value(0).map_err(map_libsql_err)? else {
+                continue;
+            };
+            if let Value::Text(label) = row.get_value(1).map_err(map_libsql_err)? {
+                labels.entry(issue_id).or_default().push(label);
+            }
+        }
+
+        // Dependencies — grouped by issue_id, `depends_on_id ASC, type ASC` within each (identical
+        // secondary ordering to the single-id `hydrate`).
+        let deps_sql = format!(
+            "SELECT issue_id, depends_on_id, type, created_at, created_by, metadata, thread_id \
+             FROM dependencies WHERE issue_id IN ({placeholder_list}) \
+             ORDER BY issue_id ASC, depends_on_id ASC, type ASC"
+        );
+        let mut rows = conn
+            .query(&deps_sql, params_from_iter(params))
+            .await
+            .map_err(map_libsql_err)?;
+        while let Some(row) = rows.next().await.map_err(map_libsql_err)? {
+            let dep = dependency_from_row(&row)?;
+            deps.entry(dep.issue_id.clone()).or_default().push(dep);
+        }
+    }
+
+    // Reconstruct by driving the ORDERED id vec (never the IN-row order). `remove` is safe: ids are
+    // unique, and a missing row → `None` → the id is skipped.
+    let out = ids
+        .iter()
+        .filter_map(|id| {
+            let mut issue = issues.remove(id)?;
+            issue.labels = labels.remove(id).unwrap_or_default();
+            issue.dependencies = deps.remove(id).unwrap_or_default();
+            Some(issue)
+        })
+        .collect();
+    Ok(out)
 }
 
 /// Accumulates a dynamic `UPDATE issues SET …` clause, tracking `?n` placeholder indices.
