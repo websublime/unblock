@@ -7,15 +7,18 @@
 # snapshots, layering, doc-lint, toolchain, audit, deny. The 11th M0 job — `fuzz-smoke` — runs on a
 # nightly schedule in `fuzz-smoke.yml` (it also runs the two #[ignore]d contention-lab controls).
 #
-# The reliability half of the deferred ledger is a FIVE-job split (ci-cd §2). ONE lands here:
+# The reliability half of the deferred ledger is a FIVE-job split (ci-cd §2). THREE land here:
 #   - stress-integrity → T3.4 (NFR-5) — LANDED BELOW: the long-lived + interleaved engine integrity
 #     tests at a MODEST corpus + the `unblock-sync --features fault-injection` (NFR-4) clippy+test leg.
-# FOUR jobs remain DEFERRED with their gating task (they depend on artefacts that do not exist yet):
-#   - bench-gate  → T3.5  (needs a `benches/` criterion suite)
-#   - scale       → T3.5  (needs the 250k-issue corpus harness)
+#   - bench-gate → T3.5 (NFR-1) — LANDED BELOW: the HYBRID perf gate (D34) — `cargo bench` on the
+#     storage/engine/policy/render criterion suites (targeted `--features testkit`, never
+#     `--all-features`) + the absolute-ceiling compare `cargo xtask bench-gate`.
+#   - scale → T3.5 (NFR-2) — LANDED BELOW: the storage-direct 250k `tests/scale.rs` (storage + engine).
+# TWO jobs remain DEFERRED with their gating task (they depend on artefacts that do not exist yet):
+#   - rate-limit  → T3.5 (P2) (the `RateLimited` mint + `Arc<Semaphore>` chokepoint; a cheap
+#                              independent `-p unblock-mcp` leg — NOT riding the perf/scale corpus)
 #   - no-network  → T3.1/T3.6 (crate-scoped gate landed at T3.1/D27; the workspace-wide scan needs the
 #                              `unblock-cli` binary + the axoupdater/dist surface, T3.6)
-#   - rate-limit  → T3.5  (single-MCP-server rate-limit assertions; ride the perf/scale corpus)
 #
 # Feature policy (D15/NFR-10, ci-cd §2.2): the testkit clippy/test steps use TARGETED features
 # (`-p unblock-storage --features testkit`), never `--all-features` — `--all-features` resolves the
@@ -135,6 +138,69 @@ jobs:
         run: cargo clippy -p unblock-sync --all-targets --features fault-injection --locked -- -D warnings
       - name: NFR-4 fault-injection (per-stage seam tests)
         run: cargo test -p unblock-sync --features fault-injection --locked --test atomic_failure
+
+  bench-gate:
+    name: bench-gate (NFR-1 hybrid perf gate)
+    # T3.5/D34 (ci-cd §2). The absolute per-PR ceiling is asserted on a pinned >= 2-vCPU runner (the
+    # `storage-testkit` precedent) so the generous budgets are portable (D34/F-1). The advisory
+    # relative-10% delta is a SEPARATE nightly leg (never a per-PR gate) and is not run here.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.96.0
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: assert >= 2 vCPU (perf-gate runner precondition)
+        run: |
+          n="$(nproc)"
+          echo "available vCPU: ${n}"
+          if [ "${n}" -lt 2 ]; then
+            echo "::error::the NFR-1 perf gate needs >= 2 vCPU; runner has ${n}" >&2
+            exit 1
+          fi
+      # Run the four gated criterion suites — TARGETED features (`--features testkit` for the
+      # storage/engine corpus seeder), NEVER `--all-features` (which resolves the libsql `remote` TLS
+      # stack, ci-cd §2.2). Each writes `target/criterion/**/estimates.json`.
+      - name: bench storage (NFR-1)
+        run: cargo bench -p unblock-storage --features testkit --locked --bench storage
+      - name: bench engine (NFR-1)
+        run: cargo bench -p unblock-engine --features testkit --locked --bench engine
+      - name: bench policy (NFR-1, F-7)
+        run: cargo bench -p unblock-policy --locked --bench policy
+      - name: bench render (NFR-1, F-7)
+        run: cargo bench -p unblock-render --locked --bench render
+      # The hard tier-ii gate: fail if any measured mean exceeds its absolute ceiling (D34).
+      - name: bench-gate absolute-ceiling compare
+        run: cargo xtask bench-gate
+
+  scale:
+    name: scale (NFR-2 250k corpus)
+    # T3.5/D34 (ci-cd §2). ubuntu-latest provides >= 2 vCPU; the 250k seed + reads run on a
+    # multi-thread tokio runtime. An explicit timeout bounds a runaway seed.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.96.0
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: assert >= 2 vCPU (scale runner precondition)
+        run: |
+          n="$(nproc)"
+          echo "available vCPU: ${n}"
+          if [ "${n}" -lt 2 ]; then
+            echo "::error::the 250k scale test needs >= 2 vCPU; runner has ${n}" >&2
+            exit 1
+          fi
+      # The storage-direct, validated-but-non-minted 250k corpus (D34/F-2). TARGETED `--features
+      # testkit` (never `--all-features`). The `#[ignore]`d 1M soak variant is NOT run here.
+      - name: NFR-2 storage scale (250k read budgets + integrity)
+        run: cargo test -p unblock-storage --features testkit --locked --test scale
+      - name: NFR-2 engine scale (250k read budgets + integrity)
+        run: cargo test -p unblock-engine --features testkit --locked --test scale
 
   snapshots:
     name: snapshots (insta --check)
