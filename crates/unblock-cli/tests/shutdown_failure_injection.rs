@@ -137,10 +137,17 @@ async fn run_c2_round(round: usize) {
     let pid = client.child.id();
     send_signal(pid, "TERM");
     let status = wait_for(&mut client.child, Duration::from_secs(20));
-    assert_eq!(
-        status.code(),
-        Some(143),
-        "round {round}: SIGTERM yields the conventional 128+15 exit"
+    // A mid-write SIGTERM (against an UNREAD stdout pipe — a pathological client that stopped reading)
+    // races the cooperative shutdown against a blocked pipe write. Both outcomes are correct: the serve
+    // loop cancels cleanly (128+15 = 143), OR its blocked write errors during cancellation (the cli maps
+    // `McpServerError` → `InternalError` → exit 1). The load-bearing invariant is the DB atomicity
+    // asserted below (count 0-or-N, no WAL corruption) — never the exact exit code. A clean-success `0`
+    // on SIGTERM would be wrong; any code outside {143, 1} is a new signal worth investigating.
+    let code = status.code();
+    assert!(
+        code == Some(143) || code == Some(1),
+        "round {round}: mid-write SIGTERM must exit 143 (clean cancel) or 1 (write-path error during \
+         shutdown), got {code:?}"
     );
 
     let (problems, count) = reopen_and_check(ws.root()).await;

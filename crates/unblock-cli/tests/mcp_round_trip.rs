@@ -28,7 +28,12 @@ use serde_json::json;
 /// large enough for a stable p50/p99.
 const N: usize = 60;
 
+// Record-only (D34/F-4): prints the p50/p99 baseline, never gated. `#[ignore]`d so it does NOT run in
+// the `cargo test --workspace` job — there its `eprintln!` baseline is captured (invisible unless it
+// fails) and it would add a concurrent `unblock mcp` spawn to that job. It runs in the dedicated
+// `bench-gate` `-- --ignored --nocapture` leg, where the baseline line is visible in the CI log.
 #[test]
+#[ignore = "record-only p50/p99 baseline — run in the dedicated bench-gate --nocapture leg"]
 fn ready_claim_close_round_trip_records_p50_p99() {
     let ws = Workspace::init();
     let mut client = McpClient::spawn(ws.root());

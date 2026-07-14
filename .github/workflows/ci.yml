@@ -181,6 +181,10 @@ jobs:
       # The hard tier-ii gate: fail if any measured mean exceeds its absolute ceiling (D34).
       - name: bench-gate absolute-ceiling compare
         run: cargo xtask bench-gate
+      # Record-only round-trip baseline (D34/F-4) — `#[ignore]`d, run here with `--nocapture` so the
+      # p50/p99 line is visible in the CI log (never a gate; a failure here means the MCP loop broke).
+      - name: round-trip baseline (ready->claim->close p50/p99, record-only)
+        run: cargo test -p unblock-cli --test mcp_round_trip --locked -- --ignored --nocapture
 
   scale:
     name: scale (NFR-2 250k corpus)
