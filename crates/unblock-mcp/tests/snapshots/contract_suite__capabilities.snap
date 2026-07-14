@@ -3,7 +3,7 @@ source: crates/unblock-mcp/tests/contract_suite.rs
 expression: capabilities()
 ---
 {
-  "contract_version": "unblock.mcp.v1.3",
+  "contract_version": "unblock.mcp.v1.4",
   "tools": [
     {
       "name": "issue",
@@ -105,6 +105,12 @@ expression: capabilities()
       "code": "ALREADY_INITIALIZED",
       "exit_code": 2,
       "retryable": false,
+      "hint_shape": "none"
+    },
+    {
+      "code": "RATE_LIMITED",
+      "exit_code": 2,
+      "retryable": true,
       "hint_shape": "none"
     },
     {

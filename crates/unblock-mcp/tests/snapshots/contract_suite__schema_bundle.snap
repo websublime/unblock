@@ -3,7 +3,7 @@ source: crates/unblock-mcp/tests/contract_suite.rs
 expression: schema_bundle()
 ---
 {
-  "contract_version": "unblock.mcp.v1.3",
+  "contract_version": "unblock.mcp.v1.4",
   "issue": {
     "input": {
       "$defs": {
@@ -4078,6 +4078,11 @@ expression: schema_bundle()
           {
             "const": "ALREADY_INITIALIZED",
             "description": "Workspace already initialized.",
+            "type": "string"
+          },
+          {
+            "const": "RATE_LIMITED",
+            "description": "The MCP request-rate cap fired: too many concurrent in-flight requests (retryable — back off\nand retry). An MCP-surface concurrency cap (NFR-18/D34), grouped with the exit-2 transient-busy\nfamily by retry semantics — a `DatabaseLocked` sibling, NOT a DB fault (see the spine §2.3 note).",
             "type": "string"
           },
           {
