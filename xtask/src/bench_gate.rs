@@ -6,7 +6,9 @@
 //! **generous absolute ceiling** ([`ceiling_ns`]). Ceilings are calibrated at T3.5 Implement against
 //! the first real libsql/engine criterion run on the pinned ≥2-vCPU runner and are deliberately
 //! generous (a gross O(N)→O(N²)/missing-index regression trips them; subtle drift is caught by the
-//! SEPARATE advisory/nightly relative-10% delta, never a per-PR gate — D34/F-1).
+//! SEPARATE advisory/nightly relative-10% delta [`bench_compare`](crate::bench_compare), never a
+//! per-PR gate — D34/F-1). The read (`list`/`ready`) ceilings were **re-tightened at T3.5.1** toward
+//! the tier-i reference budgets once the `collect_hydrated` N+1 was replaced by batch hydration.
 //!
 //! Scope (F-7): storage + engine (NFR-1) **and** the pre-existing policy (`cmp_ready_sort`) + render
 //! (`render_issues`) benches are wired into this ONE gate — not demoted to informational.
@@ -23,12 +25,12 @@ const NS_PER_MS: f64 = 1_000_000.0;
 /// The hard per-PR ceiling (nanoseconds) for a criterion benchmark id (the `<group>/<param>` path),
 /// or `None` when the op is **record-only** (no v1 hard ceiling).
 ///
-/// The numbers are the T3.5-calibrated PROVISIONAL ceilings (PRD NFR-1 tier ii). They were widened
-/// from the PR-0 provisional set against the first real libsql/engine run because the per-row-hydrated
-/// read path (`collect_hydrated`) put `ready`/`list` above the original 5× ceilings — see the T3.5
-/// calibration note in the commit body / PRD NFR-1.
+/// The numbers are the PROVISIONAL ceilings (PRD NFR-1 tier ii). The read families were widened at
+/// T3.5-P1 (the per-row-hydrated `collect_hydrated` N+1 put `ready`/`list` above the original 5×
+/// ceilings) and then **re-tightened at T3.5.1** once batch hydration replaced the N+1 — see the
+/// T3.5.1 calibration note in the commit body / PRD NFR-1.
 fn ceiling_ns(bench: &str) -> Option<f64> {
-    // Exact-id ceilings in MILLISECONDS (PRD NFR-1 tier ii, T3.5-calibrated). Same-ceiling
+    // Exact-id ceilings in MILLISECONDS (PRD NFR-1 tier ii, T3.5.1-calibrated reads). Same-ceiling
     // storage/engine ops share a row. An id absent from the table (storage_count/*, storage_search/*)
     // is record-only — no hard ceiling in v1 (PRD NFR-1); `render_issues/*` is matched by prefix below.
     const CEILINGS_MS: &[(&str, f64)] = &[
@@ -36,16 +38,19 @@ fn ceiling_ns(bench: &str) -> Option<f64> {
         ("storage_create/insert", 15.0),
         ("engine_create/mint", 15.0),
         ("engine_claim/claim", 15.0),
-        // 1k read budgets (list/ready) — the N+1-hydration read path, T3.5-calibrated.
-        ("storage_list/1000", 100.0),
-        ("storage_ready/1000", 100.0),
-        ("engine_list/1000", 100.0),
-        ("engine_ready/1000", 100.0),
-        // 10k read budgets.
-        ("storage_list/10000", 1000.0),
-        ("storage_ready/10000", 1000.0),
-        ("engine_list/10000", 1000.0),
-        ("engine_ready/10000", 1000.0),
+        // 1k read budgets (list/ready) — the BATCH-hydration read path, T3.5.1 re-tightened from
+        // 100 (the T3.5-P1 N+1 widening) as the N+1 is fixed (~5.1-5.6ms local; generous ~5x local
+        // mean + CI-slowdown headroom, still comfortably >= the tier-i 1k budgets).
+        ("storage_list/1000", 50.0),
+        ("storage_ready/1000", 50.0),
+        ("engine_list/1000", 50.0),
+        ("engine_ready/1000", 50.0),
+        // 10k read budgets — T3.5.1 re-tightened from 1000 (~55-56ms local post-fix; same generous
+        // ~5x-plus-CI-headroom multiple; still comfortably >= the tier-i 10k budgets).
+        ("storage_list/10000", 500.0),
+        ("storage_ready/10000", 500.0),
+        ("engine_list/10000", 500.0),
+        ("engine_ready/10000", 500.0),
         // engine JSONL I/O (export/import 10k).
         ("engine_export/10000", 2500.0),
         ("engine_import/10000", 5000.0),
@@ -85,17 +90,17 @@ const REQUIRED: &[&str] = &[
 ];
 
 /// One parsed benchmark result.
-struct Bench {
+pub(crate) struct Bench {
     /// The `<group>/<param>` criterion id.
-    id: String,
+    pub(crate) id: String,
     /// The `mean.point_estimate` in nanoseconds.
-    mean_ns: f64,
+    pub(crate) mean_ns: f64,
 }
 
 /// Resolve the criterion output directory: the optional CLI override, else
 /// `${CARGO_TARGET_DIR:-target}/criterion` relative to the current dir (the workspace root under
 /// `cargo xtask`).
-fn criterion_dir(override_dir: Option<String>) -> PathBuf {
+pub(crate) fn criterion_dir(override_dir: Option<String>) -> PathBuf {
     if let Some(dir) = override_dir {
         return PathBuf::from(dir);
     }
@@ -106,7 +111,7 @@ fn criterion_dir(override_dir: Option<String>) -> PathBuf {
 
 /// Recursively collect every `<...>/new/estimates.json` under `root`, deriving its `<group>/<param>`
 /// id (the path from `root` with the trailing `/new/estimates.json` stripped, `/`-normalised).
-fn collect(root: &Path) -> Vec<Bench> {
+pub(crate) fn collect(root: &Path) -> Vec<Bench> {
     let mut out = Vec::new();
     collect_into(root, root, &mut out);
     out.sort_by(|a, b| a.id.cmp(&b.id));
