@@ -69,6 +69,8 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: clippy (storage testkit — feature-gated code is lint-clean)
         run: cargo clippy -p unblock-storage --all-targets --features testkit --locked -- -D warnings
+      - name: clippy (engine testkit — feature-gated code is lint-clean)
+        run: cargo clippy -p unblock-engine --all-targets --features testkit --locked -- -D warnings
 
   test:
     name: test (workspace)
@@ -163,6 +165,11 @@ jobs:
       # Run the four gated criterion suites — TARGETED features (`--features testkit` for the
       # storage/engine corpus seeder), NEVER `--all-features` (which resolves the libsql `remote` TLS
       # stack, ci-cd §2.2). Each writes `target/criterion/**/estimates.json`.
+      # Freshness guard (SF-B): purge any cached criterion output so the bench-gate REQUIRED-benches
+      # guard cannot be satisfied by a stale `new/estimates.json` from a prior run (a deleted/renamed
+      # required bench must fail, not silently pass on cached data).
+      - name: purge stale criterion output
+        run: rm -rf target/criterion
       - name: bench storage (NFR-1)
         run: cargo bench -p unblock-storage --features testkit --locked --bench storage
       - name: bench engine (NFR-1)
