@@ -2301,6 +2301,89 @@ async fn create_issues_empty_batch_is_noop_ok() {
     assert_eq!(count_all(&storage).await, 0);
 }
 
+/// **Batch-hydration chunk boundary (T3.5.1):** the batched read path chunks its `WHERE id IN (…)`
+/// list at `HYDRATE_ID_CHUNK` (900). With a corpus larger than one chunk, an issue whose labels +
+/// dependencies live in the SECOND chunk must still hydrate correctly, and the global result order
+/// must be preserved across the chunk boundary — the single-accumulator + ordered-reconstruct proof
+/// (a bug that processed only the first chunk, or reset the accumulator per chunk, would be caught).
+///
+/// Runs against a **file-backed** DB (a unique temp dir, like `scale.rs`) — NOT the shared-cache
+/// `open_in_memory` path: a 900+-row bulk insert on the process-global shared-cache registry would
+/// aggravate its documented parallel-open contention (`mod.rs::memory_open_lock`) and flake OTHER
+/// in-memory tests' opens. A file DB has no shared cache, so it stays isolated under `cargo test`.
+#[tokio::test]
+async fn batch_hydration_second_chunk_hydrates_and_order_preserved() {
+    // 902 issues > the 900-id chunk size → two chunks. All share the default priority + fixed
+    // created_at, so the `list` order is a pure `id ASC` over a dense zero-padded sequence.
+    const N: usize = 902;
+    // The 901st id (index 900) is the FIRST row of the SECOND chunk.
+    const SECOND_CHUNK_IDX: usize = 900;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("unblock.db");
+    let storage =
+        LibsqlStorage::open_local(&db_path, unblock_storage::DEFAULT_WRITE_LOCK_TIMEOUT_MS)
+            .await
+            .expect("open_local");
+    storage.migrate().await.expect("migrate");
+    let target_id = format!("ub-{SECOND_CHUNK_IDX:07}");
+
+    let mut batch: Vec<Issue> = Vec::with_capacity(N);
+    for i in 0..N {
+        let mut it = issue(&format!("ub-{i:07}"), &format!("issue {i}"));
+        if i == SECOND_CHUNK_IDX {
+            // Distinct labels (inserted UNSORTED) + an external (non-gating) blocks-dep to hydrate.
+            it.labels = vec!["z-label".to_string(), "a-label".to_string()];
+            it.dependencies = vec![dep(&target_id, "external:blk", DependencyType::Blocks)];
+        }
+        batch.push(it);
+    }
+    storage
+        .create_issues(&batch, "seed")
+        .await
+        .expect("bulk create");
+
+    let listed = storage
+        .list_issues(&ListFilters::default())
+        .await
+        .expect("list");
+    assert_eq!(listed.len(), N, "every issue is present across BOTH chunks");
+
+    // Global order preserved across the boundary: a dense id-ascending sequence.
+    for (i, it) in listed.iter().enumerate() {
+        assert_eq!(it.id, format!("ub-{i:07}"), "order preserved at index {i}");
+    }
+
+    // The second-chunk issue carries ITS OWN hydrated labels (sorted `label ASC`) + deps.
+    let second = &listed[SECOND_CHUNK_IDX];
+    assert_eq!(second.id, target_id);
+    assert_eq!(
+        second.labels,
+        vec!["a-label".to_string(), "z-label".to_string()],
+        "second-chunk issue labels hydrate sorted"
+    );
+    let dep_targets: Vec<&str> = second
+        .dependencies
+        .iter()
+        .map(|d| d.depends_on_id.as_str())
+        .collect();
+    assert_eq!(
+        dep_targets,
+        ["external:blk"],
+        "second-chunk issue dep hydrates"
+    );
+
+    // A first-chunk issue has NO labels/deps — no cross-chunk bleed.
+    assert!(
+        listed[0].labels.is_empty(),
+        "first-chunk issue has no labels"
+    );
+    assert!(
+        listed[0].dependencies.is_empty(),
+        "first-chunk issue has no deps"
+    );
+}
+
 // --------------------------------------------------------------------------------------------------
 // detect_cycles ordered-witness shape (needs the raw-edge seam to plant a STORED cycle the public
 // guard rejects) — gated on the `testkit` feature (the seam is unreachable from an integration test

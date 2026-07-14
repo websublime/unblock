@@ -131,6 +131,7 @@ where
     contract_create_issues_atomic(factory().await).await;
     contract_get_issue(factory().await).await;
     contract_get_issues(factory().await).await;
+    contract_get_issues_skip_absent_order(factory().await).await;
     contract_update_issue(factory().await).await;
     contract_delete_issue(factory().await).await;
     contract_restore_issue(factory().await).await;
@@ -154,6 +155,7 @@ where
     contract_label_and_or(factory().await).await;
     contract_count_issues_sum_consistency(factory().await).await;
     contract_stale_issues(factory().await).await;
+    contract_batch_hydration_determinism(factory().await).await;
 
     // Dependencies.
     contract_add_dependency(factory().await).await;
@@ -1418,6 +1420,134 @@ pub async fn contract_stale_issues<S: Storage>(storage: S) {
     assert!(
         !stale.contains(&"ub-fresh".to_string()),
         "freshly-updated issue is not stale"
+    );
+}
+
+/// **Batch-hydration determinism (T3.5.1):** every read path attaches EACH issue's OWN labels +
+/// dependencies (never a cross-attach) and preserves the query order (never the `IN`-result row
+/// order), with `label ASC` + `depends_on_id ASC` intra-issue sorting — the anti-mis-grouping /
+/// anti-reorder guard for the batched read path (`hydrate_ids`).
+///
+/// Three issues with **DISTINCT priorities** (so the result order is priority-driven and differs
+/// from the id/insertion order — a reconstruction that used the `IN`-row order would reorder them),
+/// **DISTINCT label sets** (one multi-label, inserted out of `label ASC` order), and **DISTINCT
+/// dependency sets** (`blocks` edges to `external:*` targets, which never gate readiness and never
+/// materialize as their own rows), driven through `list`, `ready`, AND `search`.
+pub async fn contract_batch_hydration_determinism<S: Storage>(storage: S) {
+    // ub-a: priority 2, two labels inserted UNSORTED, two external deps inserted UNSORTED.
+    let mut a = issue("ub-a", "alpha widget");
+    a.priority = Priority(2);
+    a.labels = vec!["m-label".to_string(), "a-label".to_string()];
+    a.dependencies = vec![
+        dep("ub-a", "external:z2", DependencyType::Blocks),
+        dep("ub-a", "external:z1", DependencyType::Blocks),
+    ];
+    // ub-b: priority 0, one label, one external dep.
+    let mut b = issue("ub-b", "beta widget");
+    b.priority = Priority(0);
+    b.labels = vec!["b-label".to_string()];
+    b.dependencies = vec![dep("ub-b", "external:z3", DependencyType::Blocks)];
+    // ub-c: priority 1, no labels, no deps.
+    let mut c = issue("ub-c", "gamma widget");
+    c.priority = Priority(1);
+
+    for i in [&a, &b, &c] {
+        storage.create_issue(i, "seed").await.expect("create");
+    }
+
+    // Expected read order: priority ASC → [ub-b(0), ub-c(1), ub-a(2)] — NOT the id/insert order.
+    let assert_shape = |issues: &[Issue], path: &str| {
+        let ids: Vec<&str> = issues.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["ub-b", "ub-c", "ub-a"],
+            "{path}: priority order preserved"
+        );
+
+        // ub-b (index 0): its own single label + single dep.
+        assert_eq!(
+            issues[0].labels,
+            vec!["b-label".to_string()],
+            "{path}: ub-b labels"
+        );
+        let b_deps: Vec<&str> = issues[0]
+            .dependencies
+            .iter()
+            .map(|d| d.depends_on_id.as_str())
+            .collect();
+        assert_eq!(b_deps, ["external:z3"], "{path}: ub-b deps");
+
+        // ub-c (index 1): empty relations.
+        assert!(issues[1].labels.is_empty(), "{path}: ub-c has no labels");
+        assert!(
+            issues[1].dependencies.is_empty(),
+            "{path}: ub-c has no deps"
+        );
+
+        // ub-a (index 2): its two labels SORTED (label ASC), its two deps SORTED (depends_on_id ASC).
+        assert_eq!(
+            issues[2].labels,
+            vec!["a-label".to_string(), "m-label".to_string()],
+            "{path}: ub-a labels sorted label ASC"
+        );
+        let a_deps: Vec<&str> = issues[2]
+            .dependencies
+            .iter()
+            .map(|d| d.depends_on_id.as_str())
+            .collect();
+        assert_eq!(
+            a_deps,
+            ["external:z1", "external:z2"],
+            "{path}: ub-a deps sorted depends_on_id ASC"
+        );
+    };
+
+    let listed = storage
+        .list_issues(&ListFilters::default())
+        .await
+        .expect("list");
+    assert_shape(&listed, "list");
+
+    let ready = storage
+        .ready_issues(&ListFilters::default())
+        .await
+        .expect("ready");
+    assert_shape(&ready, "ready");
+
+    let searched = storage
+        .search_issues("widget", &ListFilters::default())
+        .await
+        .expect("search");
+    assert_shape(&searched, "search");
+}
+
+/// **Batch-hydration skip-absent + order (T3.5.1):** `get_issues` (which now routes through the
+/// batched `hydrate_ids`) drops an id whose row is absent and keeps the CALLER's order — not the DB
+/// row order (a reconstruction from the `IN`-result rows would reorder them) and never a panic /
+/// null hole for the missing id.
+pub async fn contract_get_issues_skip_absent_order<S: Storage>(storage: S) {
+    for id in ["ub-1", "ub-2", "ub-3"] {
+        storage
+            .create_issue(&issue(id, id), "a")
+            .await
+            .expect("create");
+    }
+
+    // Caller order deliberately NON-ascending, with a missing id interleaved.
+    let got = storage
+        .get_issues(&[
+            "ub-3".to_string(),
+            "ub-missing".to_string(),
+            "ub-1".to_string(),
+            "ub-2".to_string(),
+        ])
+        .await
+        .expect("get_issues");
+    let ids: Vec<&str> = got.iter().map(|i| i.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        ["ub-3", "ub-1", "ub-2"],
+        "missing id skipped; survivors keep the caller's order (not the DB row order)"
     );
 }
 
