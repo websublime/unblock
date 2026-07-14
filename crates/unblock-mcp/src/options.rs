@@ -24,10 +24,13 @@ use tokio_util::sync::CancellationToken;
 /// gained `hint_shape`; the pin renamed `SCHEMA_BUNDLE_HASH` → `CONTRACT_HASH`) → `unblock.mcp.v1.3`
 /// (MCP-conformance drifts CD-1/CD-2, spine §5.2a/§5.3 — the six tagged-enum inputs inject a root
 /// `"type": "object"` and the `query`/`dep`/`issue` list arms are object-wrapped; both change
-/// schema-bundle bytes, so they ship JOINTLY as one bump). The `unblock.mcp.vN[.M]` family preserves
+/// schema-bundle bytes, so they ship JOINTLY as one bump) → `unblock.mcp.v1.4` (T3.5/D34 — the
+/// `ErrorCode::RateLimited` mint for the NFR-18 rate-limit chokepoint; the taxonomy grows 35→36, so
+/// `capabilities().error_codes` gains a descriptor AND `schema_bundle()`'s shared `ErrorCode` `oneOf`
+/// gains a `const`, moving both discovery documents' bytes). The `unblock.mcp.vN[.M]` family preserves
 /// the contract-id convention while the `.M` revision marks an additive contract change within the v1
 /// product.
-pub const CONTRACT_VERSION: &str = "unblock.mcp.v1.3";
+pub const CONTRACT_VERSION: &str = "unblock.mcp.v1.4";
 
 /// The pinned SHA-256 digest of the ordered two-document tuple `(capabilities(), schema_bundle())` —
 /// the HASH-COUPLED half of the FR-12 drift gate (D22 widened by D25, `tests/contract_suite.rs`).
@@ -43,7 +46,7 @@ pub const CONTRACT_VERSION: &str = "unblock.mcp.v1.3";
 /// representation — any future dep enabling `serde_json/preserve_order` (feature unification, dev-deps
 /// included) reorders the schemars-generated maps and moves `CONTRACT_HASH` with NO contract change;
 /// if the gate fires with "nothing changed", check `Cargo.lock` feature unification first.
-pub const CONTRACT_HASH: &str = "1bd36281c014965071a38762ce5211ff875a7676ed9513faa2a0d17932329572";
+pub const CONTRACT_HASH: &str = "eca90bb74d25f67effb41b94412f38facd456266cb7f799722ee0bf4e3e08640";
 
 /// Untrusted-input limits enforced **before** any `Session` call (NFR-18).
 ///
@@ -127,9 +130,9 @@ mod tests {
 
     #[test]
     fn contract_version_is_the_bumped_v1_id() {
-        // CD-1/CD-2 (spine §5.2a/§5.3) bumped the contract surface again — the six tagged-enum inputs
-        // gained a root `type: object` and the list output arms are object-wrapped → v1.3.
-        assert_eq!(CONTRACT_VERSION, "unblock.mcp.v1.3");
+        // T3.5/D34: minting `ErrorCode::RateLimited` (35→36) grew BOTH discovery documents' bytes
+        // (the error-code descriptor + the shared `ErrorCode` oneOf), so the contract bumped → v1.4.
+        assert_eq!(CONTRACT_VERSION, "unblock.mcp.v1.4");
     }
 
     #[test]

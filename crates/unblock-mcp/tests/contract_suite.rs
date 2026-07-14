@@ -339,12 +339,12 @@ async fn live_dep_list_and_cycles_structured_content_are_objects() {
 /// Every `capabilities().error_codes` entry round-trips its `code` STRING through serde BACK into
 /// `unblock_error::ErrorCode` and matches the const-fn views (`exit_code`/`is_retryable`/`hint_shape`).
 /// The serde wire round-trip is what makes it non-vacuous — it catches an `as_str`↔serde mismatch, a
-/// wrong descriptor field, ordering loss, or a duplicate (NOT an in-crate `x == x` compare). 35
+/// wrong descriptor field, ordering loss, or a duplicate (NOT an in-crate `x == x` compare). 36
 /// entries, unique, in `ErrorCode::ALL` declaration order.
 #[test]
 fn capabilities_error_map_round_trips_error_code_all() {
     let caps = capabilities();
-    assert_eq!(caps.error_codes.len(), 35, "exactly 35 error-code entries");
+    assert_eq!(caps.error_codes.len(), 36, "exactly 36 error-code entries");
 
     let mut seen = std::collections::HashSet::new();
     for (i, descriptor) in caps.error_codes.iter().enumerate() {
@@ -374,7 +374,7 @@ fn capabilities_error_map_round_trips_error_code_all() {
             "hint_shape parity"
         );
     }
-    assert_eq!(seen.len(), 35, "all 35 codes present, unique");
+    assert_eq!(seen.len(), 36, "all 36 codes present, unique");
 }
 
 // --------------------------------------------------------------------------------------------------

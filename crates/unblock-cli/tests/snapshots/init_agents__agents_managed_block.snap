@@ -9,7 +9,7 @@ This workspace is tracked by **unblock**. Issue-data operations are exposed over
 `unblock` CLI is lifecycle/ops only.
 
 - Start the server: `unblock mcp` (MCP over stdio).
-- Contract: `unblock.mcp.v1.3`.
+- Contract: `unblock.mcp.v1.4`.
 - Machine-readable discovery: read `unblock://capabilities` (the source of these tables) and
 `unblock://schema` (the full JsonSchema bundle for every tool I/O).
 
@@ -94,6 +94,7 @@ lists an action's FULL parameter surface, required AND optional):
 | `DATABASE_ERROR` | 2 | no |
 | `NOT_INITIALIZED` | 2 | no |
 | `ALREADY_INITIALIZED` | 2 | no |
+| `RATE_LIMITED` | 2 | yes |
 | `ISSUE_NOT_FOUND` | 3 | no |
 | `AMBIGUOUS_ID` | 3 | yes |
 | `ID_COLLISION` | 3 | no |
