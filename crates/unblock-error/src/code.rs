@@ -75,6 +75,10 @@ pub enum ErrorCode {
     NotInitialized,
     /// Workspace already initialized.
     AlreadyInitialized,
+    /// The MCP request-rate cap fired: too many concurrent in-flight requests (retryable — back off
+    /// and retry). An MCP-surface concurrency cap (NFR-18/D34), grouped with the exit-2 transient-busy
+    /// family by retry semantics — a `DatabaseLocked` sibling, NOT a DB fault (see the spine §2.3 note).
+    RateLimited,
 
     // === exit 3 — Issue / operational ===
     /// Issue with the specified id not found.
@@ -157,13 +161,14 @@ impl ErrorCode {
     /// The compiler enforces the count via the type — adding a variant without extending this
     /// array does not break compilation, so the `as_str` ↔ serde cross-assertion and the
     /// `tests/exit_code_table.rs` golden are the guards that catch an omission.
-    pub const ALL: [Self; 35] = [
+    pub const ALL: [Self; 36] = [
         Self::DatabaseNotFound,
         Self::DatabaseLocked,
         Self::SchemaMismatch,
         Self::DatabaseError,
         Self::NotInitialized,
         Self::AlreadyInitialized,
+        Self::RateLimited,
         Self::IssueNotFound,
         Self::AmbiguousId,
         Self::IdCollision,
@@ -213,6 +218,7 @@ impl ErrorCode {
             Self::DatabaseError => "DATABASE_ERROR",
             Self::NotInitialized => "NOT_INITIALIZED",
             Self::AlreadyInitialized => "ALREADY_INITIALIZED",
+            Self::RateLimited => "RATE_LIMITED",
             // Issue / operational
             Self::IssueNotFound => "ISSUE_NOT_FOUND",
             Self::AmbiguousId => "AMBIGUOUS_ID",
@@ -272,7 +278,8 @@ impl ErrorCode {
             | Self::SchemaMismatch
             | Self::DatabaseError
             | Self::NotInitialized
-            | Self::AlreadyInitialized => 2,
+            | Self::AlreadyInitialized
+            | Self::RateLimited => 2,
             // Issue / operational (3)
             Self::IssueNotFound
             | Self::AmbiguousId
@@ -314,7 +321,7 @@ impl ErrorCode {
     /// Retryable means the agent might succeed if it waits and retries (e.g. a transient lock or
     /// a lost claim) or fixes the input and retries (e.g. a validation error). The exact set is
     /// pinned by the spine §2.2 (no glob): `DatabaseLocked`, `AlreadyClaimed`, `ValidationFailed`,
-    /// `InvalidStatus`, `InvalidType`, `InvalidPriority`, `RequiredField`, `AmbiguousId`.
+    /// `InvalidStatus`, `InvalidType`, `InvalidPriority`, `RequiredField`, `AmbiguousId`, `RateLimited`.
     /// `PolicyViolation` is exit-4 but **not** retryable.
     ///
     /// # Examples
@@ -336,6 +343,7 @@ impl ErrorCode {
                 | Self::InvalidPriority
                 | Self::RequiredField
                 | Self::AmbiguousId
+                | Self::RateLimited
         )
     }
 
@@ -348,7 +356,7 @@ impl ErrorCode {
     ///   [`Self::InvalidPriority`] (the `ModelError::hint` fixed constants; see [`Self::static_hint`]).
     /// - [`Self::ContextualText`] — [`Self::ValidationFailed`] (the mcp over-quota + bulk-markdown-parse
     ///   site-composed hints; the `ModelError::ValidationFailed` aggregate itself carries none).
-    /// - [`Self::None`] — every other code (the remaining 30 of 35).
+    /// - [`Self::None`] — every other code (the remaining 31 of 36).
     ///
     /// # Examples
     ///
