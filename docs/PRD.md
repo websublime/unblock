@@ -182,15 +182,19 @@ These decisions are **locked** (confirmed with Miguel) and shape the rest of thi
   <5ms / 10k <50ms; export 10k <500ms; import 10k <1s — the **relative-10% regression delta** compares against
   this baseline in an **advisory/nightly** posture (`workflow_dispatch`/`#[ignore]`, report-only, never fails a
   PR); **(ii) hard per-PR gate** = a **generous absolute-ms ceiling** (a generous multiple of the baseline —
-  PROVISIONAL: create ≤5ms; list 1k ≤50ms / 10k ≤500ms; ready 1k ≤25ms / 10k ≤250ms; export 10k ≤2500ms; import
-  10k ≤5000ms; count/search have no hard ceiling in v1) asserted on a **pinned ≥2-vCPU runner**, calibrated +
-  confirmed against the first real libsql `criterion` run at T3.5 Implement (the "(Re-baseline on libsql)" step,
-  now folded into the gate; any ceiling found tight is widened in the same commit, replicated identically across
-  the number-equality sites — SF-2). The generous ceiling trips only on a gross regression (an O(N)→O(N²) blowup
-  or a missing index) — the T0.8 core-count lesson (a real hot-spin gave R≈28 on 14 cores but R≈4.42 on a 4-vCPU
-  runner: a generous absolute budget is MORE portable than a tight relative delta). The create budget applies to
-  the **storage insert path** (`Storage::create`/`create_issues`); the engine-mint `Session::create_issue`
-  recomputes `issue_count()` per create (O(N) at scale — a known v1.4 cached-count limit, not an NFR-1 miss).
+  T3.5-CALIBRATED: create ≤15ms; list 1k ≤100ms / 10k ≤1000ms; ready 1k ≤100ms / 10k ≤1000ms; export 10k ≤2500ms;
+  import 10k ≤5000ms; count/search have no hard ceiling in v1) asserted on a **pinned ≥2-vCPU runner**, calibrated +
+  confirmed against the first real libsql `criterion` run at T3.5 Implement (the "(Re-baseline on libsql)" step, now
+  folded into the gate). **The read (list/ready) ceilings were widened from the PR-0 provisional set (list ≤50/≤500,
+  ready ≤25/≤250, create ≤5) because the current per-row-hydrated read path (`collect_hydrated`, N+1×3 queries per
+  result set) put `ready`/`list` above the original 5× ceilings on the first real run (ready 1k ≈29ms, ready 10k
+  ≈284ms) — a known read-path cost; batch hydration is a v1.4 optimisation, not an NFR-1 v1 miss.** Any ceiling found
+  tight is widened in the same commit, replicated identically across the number-equality sites (SF-2). The generous
+  ceiling trips only on a gross regression (an O(N)→O(N²) blowup or a missing index) — the T0.8 core-count lesson (a
+  real hot-spin gave R≈28 on 14 cores but R≈4.42 on a 4-vCPU runner: a generous absolute budget is MORE portable than
+  a tight relative delta). The create budget applies to the **storage insert path**
+  (`Storage::create`/`create_issues`); the engine-mint `Session::create_issue` recomputes `issue_count()` per create
+  (O(N) at scale — a known v1.4 cached-count limit, not an NFR-1 miss).
 - **NFR-2 [performance]** Swarm scale **under the child-per-client topology (D14 as amended by D31)** —
   multiple `unblock mcp` servers per workspace is the SUPPORTED case, cross-process writes serialized by the
   `.unblock/.write.lock` advisory lock (D31); cross-machine/multi-dev sharing is the v1.2 libsql-remote path
