@@ -1,15 +1,19 @@
-# unblock — nightly fuzz smoke + the #[ignore]d contention-lab controls.
+# unblock — nightly fuzz smoke + the #[ignore]d contention-lab controls + the NFR-1 advisory perf leg.
 # See docs/plans/ci-cd-and-distribution.md §2 (`fuzz-smoke` row).
 #
-# Two independent legs, isolated so the nightly toolchain NEVER touches the stable storage build:
+# Three independent legs, isolated so the nightly toolchain NEVER touches the stable storage build:
 #   1. fuzz-targets   — nightly-2026-04-01 + libFuzzer, a short `cargo fuzz run` per ingestion target
 #                       (the nested `crates/unblock-fuzz/fuzz` cargo-fuzz package, OUTSIDE the
 #                       stable-1.96 workspace, per its scoped rust-toolchain.toml).
 #   2. contention-controls — stable 1.96.0, the two `#[ignore]`d controls (forced-spin, WAL-negative)
 #                       that keep the M0 contention gate proven non-vacuous.
+#   3. perf-advisory  — stable 1.96.0, the NFR-1 tier-i ADVISORY relative-10% delta (D34/F-1): runs
+#                       the criterion suites + `cargo xtask bench-compare` vs the committed baseline.
+#                       REPORT-ONLY — it NEVER fails (the hard per-PR gate is `bench-gate` in ci.yml).
 #
-# Failure routing at M0: just go red. `workflow_dispatch` allows a manual re-run. No issue-opening.
-# Every `uses:` is pinned to a 40-char commit SHA with a trailing `# vX.Y.Z` (NFR-9).
+# Failure routing at M0: just go red (the fuzz/contention legs). `workflow_dispatch` allows a manual
+# re-run. No issue-opening. Every `uses:` is pinned to a 40-char commit SHA with a trailing `# vX.Y.Z`
+# (NFR-9). The perf-advisory leg is report-only and cannot turn the workflow red.
 
 name: fuzz-smoke
 
@@ -80,3 +84,43 @@ jobs:
           fi
       - name: forced-spin + WAL-negative controls
         run: cargo test -p unblock-storage --features testkit --locked --test contention_lab -- --ignored
+
+  perf-advisory:
+    name: perf advisory (NFR-1 tier-i relative-10%, report-only)
+    # The NFR-1 tier-i ADVISORY relative-10% delta (D34/F-1). It re-runs the criterion suites (the
+    # SAME set the per-PR `bench-gate` job runs) and compares each mean to the committed baseline
+    # (`xtask/bench-baseline.json`) via `cargo xtask bench-compare`. It is STRICTLY REPORT-ONLY —
+    # the comparator always exits 0, so this leg can NEVER fail a nightly or a PR. The hard per-PR
+    # enforcement is the SEPARATE generous absolute-ms `bench-gate` job in ci.yml. Needs >= 2 vCPU
+    # (the bench-gate runner precondition) so the numbers are comparable to the pinned-runner baseline.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.96.0
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: assert >= 2 vCPU (advisory baseline is captured on a pinned >= 2-vCPU runner)
+        run: |
+          n="$(nproc)"
+          echo "available vCPU: ${n}"
+          if [ "${n}" -lt 2 ]; then
+            echo "::warning::perf-advisory prefers >= 2 vCPU for a comparable baseline; runner has ${n}"
+          fi
+      # Purge any cached criterion output so the comparison reads only this run's estimates.
+      - name: purge stale criterion output
+        run: rm -rf target/criterion
+      # The SAME four suites the per-PR bench-gate job runs (targeted `--features testkit`, never
+      # `--all-features` — ci-cd §2.2). Each writes target/criterion/**/estimates.json.
+      - name: bench storage (NFR-1)
+        run: cargo bench -p unblock-storage --features testkit --locked --bench storage
+      - name: bench engine (NFR-1)
+        run: cargo bench -p unblock-engine --features testkit --locked --bench engine
+      - name: bench policy (NFR-1, F-7)
+        run: cargo bench -p unblock-policy --locked --bench policy
+      - name: bench render (NFR-1, F-7)
+        run: cargo bench -p unblock-render --locked --bench render
+      # ADVISORY relative-10% delta vs the committed baseline — REPORT-ONLY (always exits 0).
+      - name: bench-compare advisory delta (report-only)
+        run: cargo xtask bench-compare
