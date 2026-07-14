@@ -12,30 +12,34 @@ use std::sync::Arc;
 
 use rmcp::ServerHandler;
 use rmcp::handler::server::router::tool::ToolRouter;
+use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::model::{
-    AnnotateAble, ClientJsonRpcMessage, ClientRequest, ErrorData, GetPromptRequestParams,
-    GetPromptResult, Implementation, JsonRpcMessage, JsonRpcRequest, ListPromptsResult,
-    ListResourceTemplatesResult, ListResourcesResult, PaginatedRequestParams, ProtocolVersion,
-    RawResource, RawResourceTemplate, ReadResourceRequestParams, ReadResourceResult,
-    ResourceContents, ServerCapabilities, ServerInfo,
+    AnnotateAble, CallToolRequestParams, CallToolResult, ClientJsonRpcMessage, ClientRequest,
+    ErrorData, GetPromptRequestParams, GetPromptResult, Implementation, JsonRpcMessage,
+    JsonRpcRequest, ListPromptsResult, ListResourceTemplatesResult, ListResourcesResult,
+    PaginatedRequestParams, ProtocolVersion, RawResource, RawResourceTemplate,
+    ReadResourceRequestParams, ReadResourceResult, ResourceContents, ServerCapabilities,
+    ServerInfo,
 };
 use rmcp::service::{RequestContext, RoleServer, RxJsonRpcMessage, TxJsonRpcMessage};
 use rmcp::transport::{Transport, stdio};
 use rmcp::{Service, ServiceExt};
 use serde::Serialize;
 use snafu::ResultExt;
+use tokio::sync::Semaphore;
 use unblock_engine::Session;
-use unblock_error::StructuredError;
+use unblock_error::{ErrorCode, StructuredError};
 
 use crate::error::{McpServerError, RunLoopSnafu, TransportSnafu};
 use crate::options::{CONTRACT_VERSION, McpServerOptions, Quotas};
 use crate::resources::{self, ResourceUri, capabilities, schema_bundle};
-use crate::tools::enforce_quota;
+use crate::tools::{enforce_quota, err_json};
 
 /// The MCP server handler — a thin adapter over [`Session`] (spine §5).
 ///
 /// Holds `Arc<Session>` (so it is `Send + Sync`, as `ServerHandler` requires) plus the request
-/// [`Quotas`]. It carries NO write lock — the engine owns the write Semaphore (D14).
+/// [`Quotas`]. It carries NO write lock — the engine owns the write Semaphore (D14) — but it DOES
+/// carry the NFR-18 rate-limit [`Semaphore`] (D34-F5), which sits STRICTLY ABOVE that write permit.
 ///
 /// `#[doc(hidden)] pub` (not part of the documented contract) only so the feature-gated
 /// [`mcp_server_duplex_for_test`] can name it in its return type; normal consumers use [`run_mcp_server`].
@@ -49,15 +53,23 @@ pub struct UnblockServer {
     /// Optional human-readable instructions advertised to clients in [`UnblockServer::get_info`]
     /// (from `McpServerOptions::instructions`). `None` falls back to a generated default summary.
     pub(crate) instructions: Option<String>,
+    /// The NFR-18 request-rate chokepoint (D34-F5, spine §5.6): a `Semaphore` of
+    /// `quotas.max_concurrent_requests` permits, built ONCE in [`UnblockServer::new`]. `try_acquire`d
+    /// (non-blocking) around the tool dispatch AND `read_resource`; saturation fast-fails with
+    /// [`ErrorCode::RateLimited`]. `Arc` because the handler derives `Clone` and every clone MUST share
+    /// the SAME permit pool (a per-clone semaphore would not bound total concurrency).
+    pub(crate) rate_limit: Arc<Semaphore>,
 }
 
 impl UnblockServer {
     /// Build the server handler.
     pub(crate) fn new(session: Arc<Session>, quotas: Quotas, instructions: Option<String>) -> Self {
+        let rate_limit = Arc::new(Semaphore::new(quotas.max_concurrent_requests));
         Self {
             session,
             quotas,
             instructions,
+            rate_limit,
         }
     }
 
@@ -110,6 +122,33 @@ impl UnblockServer {
 #[rmcp::tool_handler(router = Self::aggregate_tool_router())]
 #[rmcp::prompt_handler(router = Self::prompt_router())]
 impl ServerHandler for UnblockServer {
+    /// Dispatch a tool call — HAND-WRITTEN to install the NFR-18 rate-limit chokepoint (D34-F5, spine
+    /// §5.6). Because this method is present, `#[rmcp::tool_handler]` does NOT emit its own `call_tool`
+    /// (it only generates one when absent — `rmcp-macros-1.7.0/src/tool_handler.rs:44`, verified). The
+    /// `rate_limit_chokepoint_is_the_live_tool_dispatch_path` assumption pin (`tests/rate_limit.rs`)
+    /// fails LOUDLY if a future rmcp stops honouring that suppression, pointing maintainers straight here.
+    ///
+    /// A non-blocking [`Semaphore::try_acquire`] gates the WHOLE dispatch: on a held permit it
+    /// replicates the macro's generated body EXACTLY ([`ToolCallContext::new`] +
+    /// `aggregate_tool_router().call`), holding the permit for the entire `.await` (dropped on return);
+    /// on saturation it FAST-FAILS in-band (MF-5 — tools have an in-band channel, unlike resources)
+    /// with a retryable [`ErrorCode::RateLimited`] rather than backpressuring. The rate-limit
+    /// `Semaphore` sits STRICTLY ABOVE the engine write `Semaphore(1)` (§4.2), so this non-blocking
+    /// acquire can never join a wait cycle (deadlock-free vs D14/D31).
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match self.rate_limit.try_acquire() {
+            Ok(_permit) => {
+                let tcc = ToolCallContext::new(self, request, context);
+                Self::aggregate_tool_router().call(tcc).await
+            }
+            Err(_) => Ok(err_json(&rate_limited_error())),
+        }
+    }
+
     /// Advertise tools + prompts + resources, the server identity, and the instructions.
     ///
     /// HAND-WRITTEN (not macro-generated): the two stacked handler macros both detect this method and
@@ -222,6 +261,12 @@ impl ServerHandler for UnblockServer {
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, ErrorData> {
+        // NFR-18 rate-limit chokepoint (D34-F5, MF-5): resources have NO in-band channel like tools
+        // do, so a saturated cap surfaces OUT-OF-BAND as `ErrorData` (asymmetric to `call_tool`). The
+        // permit is held for the whole read (dropped on return).
+        let Ok(_permit) = self.rate_limit.try_acquire() else {
+            return Err(crate::error::to_rmcp_error_data(&rate_limited_error()));
+        };
         match self.read_resource_body(&request.uri).await {
             Ok(body) => Ok(ReadResourceResult::new(vec![
                 ResourceContents::text(body.to_string(), request.uri)
@@ -230,6 +275,18 @@ impl ServerHandler for UnblockServer {
             Err(structured) => Err(crate::error::to_rmcp_error_data(&structured)),
         }
     }
+}
+
+/// Build the NFR-18 rate-limit reject (D34-F5): a retryable [`ErrorCode::RateLimited`] structured
+/// error, surfaced when the `max_concurrent_requests` cap is saturated. Emitted in-band for tools
+/// (`err_json`) and out-of-band as `ErrorData` for resources (MF-5) — both carry this SAME payload
+/// (`code=RATE_LIMITED`, `retryable=true`). Attaches NO `hint` — the code's `hint_shape` is `None`
+/// (OQ-2: the `retryable` flag carries the back-off signal), so a hint here would break that taxonomy.
+fn rate_limited_error() -> StructuredError {
+    StructuredError::from_code(
+        ErrorCode::RateLimited,
+        "server at capacity: too many concurrent requests — retry after a short backoff",
+    )
 }
 
 /// Build, bind, and run the MCP stdio server until cancellation (FR-17).
