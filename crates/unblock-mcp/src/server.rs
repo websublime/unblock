@@ -64,7 +64,12 @@ pub struct UnblockServer {
 impl UnblockServer {
     /// Build the server handler.
     pub(crate) fn new(session: Arc<Session>, quotas: Quotas, instructions: Option<String>) -> Self {
-        let rate_limit = Arc::new(Semaphore::new(quotas.max_concurrent_requests));
+        // Clamp the UPPER bound only: `tokio::sync::Semaphore::new` panics on `> MAX_PERMITS`, and this
+        // is a lib path (`#![forbid(unsafe_code)]` / no-panic-in-lib) reachable only via an absurd
+        // operator config. A `0` is INTENTIONALLY preserved (fully-closed is fail-safe, and the SF-6
+        // pin test drives 0 permits to prove every request rejects) — do NOT floor it to 1.
+        let permits = quotas.max_concurrent_requests.min(Semaphore::MAX_PERMITS);
+        let rate_limit = Arc::new(Semaphore::new(permits));
         Self {
             session,
             quotas,

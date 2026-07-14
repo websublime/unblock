@@ -12,8 +12,10 @@
 //! - [`to_rmcp_error_data`] — the RESOURCE-boundary mapper (T2.6/D25/F-2). Resources have no in-band
 //!   channel like tools do, so a `read_resource` failure surfaces as an `ErrorData`: a not-found
 //!   ([`unblock_error::ErrorCode::IssueNotFound`] — a missing `{id}` or an unknown URI) maps to
-//!   `ErrorData::resource_not_found` (-32002); every other code is a true internal fault
-//!   (-32603). The full structured payload rides `data` on both arms.
+//!   `ErrorData::resource_not_found` (-32002); every other code maps to -32603 (a true internal fault,
+//!   OR — since D34/MF-5 — the retryable `RateLimited` capacity cap, which shares that transport code
+//!   but is distinguished by its structured `data.code`). The full structured payload rides `data` on
+//!   both arms.
 
 use rmcp::model::{ErrorCode as RmcpErrorCode, ErrorData};
 use snafu::Snafu;
@@ -117,9 +119,11 @@ pub(crate) fn engine_error_to_structured(err: &EngineError) -> StructuredError {
 /// FR-11), so a `read_resource` failure surfaces as an `ErrorData`. A not-found —
 /// [`unblock_error::ErrorCode::IssueNotFound`], built for a missing `{id}` (`resources/issues.rs`) or
 /// an unknown URI (`server::unknown_resource`) — maps to `ErrorData::resource_not_found` (-32002, the
-/// pinned rmcp contract, `rmcp-1.7.0` `model.rs:544`). Every other code reaching this boundary is a true
-/// internal fault → `INTERNAL_ERROR` (-32603). The full structured payload is attached as `data` on
-/// BOTH arms, so a client still sees `code`/`message`/`hint`/`retryable`/`context`.
+/// pinned rmcp contract, `rmcp-1.7.0` `model.rs:544`). Every other code reaching this boundary maps to
+/// `INTERNAL_ERROR` (-32603) — a true internal fault, OR (since D34/MF-5) the retryable `RateLimited`
+/// capacity cap, which shares the -32603 transport code but is distinguished by its structured
+/// `data.code`/`data.retryable`. The full structured payload is attached as `data` on BOTH arms, so a
+/// client still sees `code`/`message`/`hint`/`retryable`/`context`.
 pub(crate) fn to_rmcp_error_data(structured: &StructuredError) -> ErrorData {
     let data = serde_json::to_value(structured).ok();
     match structured.code {
@@ -127,7 +131,8 @@ pub(crate) fn to_rmcp_error_data(structured: &StructuredError) -> ErrorData {
         unblock_error::ErrorCode::IssueNotFound => {
             ErrorData::resource_not_found(structured.message.clone(), data)
         }
-        // Everything else is a true internal fault → -32603, full structured payload still attached.
+        // Everything else → -32603: a true internal fault, or the retryable `RateLimited` capacity cap
+        // (D34/MF-5) — the structured `code`/`retryable` ride `data`, so the client can distinguish.
         _ => ErrorData::new(
             RmcpErrorCode::INTERNAL_ERROR,
             structured.message.clone(),
