@@ -182,18 +182,19 @@ These decisions are **locked** (confirmed with Miguel) and shape the rest of thi
   <5ms / 10k <50ms; export 10k <500ms; import 10k <1s — the **relative-10% regression delta** compares against
   this baseline in an **advisory/nightly** posture (`workflow_dispatch`/`#[ignore]`, report-only, never fails a
   PR); **(ii) hard per-PR gate** = a **generous absolute-ms ceiling** (a generous multiple of the baseline —
-  T3.5-CALIBRATED: create ≤15ms; list 1k ≤100ms / 10k ≤1000ms; ready 1k ≤100ms / 10k ≤1000ms; export 10k ≤2500ms;
+  T3.5.1-CALIBRATED reads: create ≤15ms; list 1k ≤50ms / 10k ≤500ms; ready 1k ≤50ms / 10k ≤500ms; export 10k ≤2500ms;
   import 10k ≤5000ms; count/search have no hard ceiling in v1) asserted on a **pinned ≥2-vCPU runner**, calibrated +
   confirmed against the first real libsql `criterion` run at T3.5 Implement (the "(Re-baseline on libsql)" step, now
-  folded into the gate). **The read (list/ready) ceilings were widened from the PR-0 provisional set (list ≤50/≤500,
-  ready ≤25/≤250, create ≤5) because the current per-row-hydrated read path (`collect_hydrated`, N+1×3 queries per
-  result set) put `ready`/`list` above the original 5× ceilings on the first real run (ready 1k ≈29ms, ready 10k
-  ≈284ms) — a known read-path cost. **Batch hydration is a PRE-GA task (T3.5.1, minted from this finding, Miguel
-  2026-07-14) that fixes the N+1 read path and re-tightens these read ceilings toward the tier-i reference budgets
-  before v1 GA — NOT a v1.4 deferral. The tier-i advisory relative-10% drift-catcher is LIKEWISE deferred to T3.5.1
-  (it re-baselines against the fixed read path); until it lands, the hard tier-ii ceiling is the only perf
-  enforcement — a conscious ~3.5× read-regression blind window (ready 10k ≈284ms vs the ≤1000ms ceiling) closed
-  PRE-GA by T3.5.1.** Any ceiling found
+  folded into the gate). **The read (list/ready) ceilings were widened at T3.5-P1 (to list/ready ≤100/≤1000) because
+  the then per-row-hydrated read path (`collect_hydrated`, N+1×3 queries per result set) put `ready`/`list` above the
+  original 5× ceilings (ready 1k ≈29ms, ready 10k ≈284ms) — a known read-path cost — and were RE-TIGHTENED at T3.5.1
+  (list/ready 1k ≤50 / 10k ≤500) once **batch hydration** (T3.5.1, minted from this finding, Miguel 2026-07-14)
+  replaced the N+1 read path, dropping the fixed read cost to ~5ms (1k) / ~56ms (10k) — a PRE-GA fix, NOT a v1.4
+  deferral. The tier-i advisory relative-10% drift-catcher **LANDED at T3.5.1** (a committed `xtask/bench-baseline.json`
+  captured from the fixed read path + the `cargo xtask bench-compare` report-only comparator + the nightly
+  `fuzz-smoke` `perf-advisory` leg — D34/F-1), re-baselined against the fixed read cost; the earlier ~3.5×
+  read-regression blind window (ready 10k ≈284ms vs the old ≤1000ms ceiling) is therefore closed PRE-GA — the
+  re-tightened ≤500ms ceiling plus the advisory delta now bound read drift.** Any ceiling found
   tight is widened in the same commit, replicated identically across the number-equality sites (SF-2). The generous
   ceiling trips only on a gross regression (an O(N)→O(N²) blowup or a missing index) — the T0.8 core-count lesson (a
   real hot-spin gave R≈28 on 14 cores but R≈4.42 on a 4-vCPU runner: a generous absolute budget is MORE portable than
