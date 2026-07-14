@@ -62,6 +62,19 @@ tempfile = { workspace = true }
 # Whole-process CPU time (all tokio worker threads) for the T0.8 contention lab's baseline-relative
 # CPU-per-write ratio (NFR-3 / RK-1). Unsafe-free (no raw libc); test-only.
 cpu-time = { workspace = true }
+# NFR-1 HYBRID perf gate (T3.5/D34): the FIRST `async_tokio` criterion bench in the repo
+# (`benches/storage.rs`). Already declared workspace-wide (root Cargo.toml, `features=[async_tokio]`),
+# unused until now; adds no NEW transitive surface.
+criterion = { workspace = true }
+
+# NFR-1 storage perf gate (T3.5/D34): create/list/ready/count/search over a file-backed libsql DB.
+# `harness = false` → criterion owns `main`. The bench BODY is `#[cfg(feature = "testkit")]` (it needs
+# `testkit::seed_corpus`); without the feature the target compiles to an empty `main`, so
+# `cargo test/clippy --workspace` (no testkit) still builds it clean. Run it via
+# `cargo bench -p unblock-storage --features testkit`.
+[[bench]]
+name = "storage"
+harness = false
 
 [features]
 default = []

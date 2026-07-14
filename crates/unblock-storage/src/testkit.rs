@@ -35,7 +35,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
 
 use unblock_model::{
-    CountGroupBy, Dependency, DependencyType, Issue, IssueType, ListFilters, Priority, Status,
+    CountGroupBy, Dependency, DependencyType, Issue, IssueType, IssueValidator, ListFilters,
+    Priority, Status,
 };
 
 use crate::error::StorageError;
@@ -2351,4 +2352,70 @@ pub async fn contract_next_child_number<S: Storage>(storage: S) {
         1,
         "an unseen parent's first child number is 1"
     );
+}
+
+// --------------------------------------------------------------------------------------------------
+// Corpus seeder (T3.5/D34 — the shared perf/scale fixture)
+// --------------------------------------------------------------------------------------------------
+
+/// Issues inserted per atomic [`Storage::create_issues`] transaction while seeding a large corpus.
+///
+/// One `BEGIN IMMEDIATE` tx per chunk (spine §3.2.1). ~1k rows/tx keeps each transaction bounded
+/// while amortising the per-tx overhead across the 250k-issue NFR-2 corpus (D34).
+const SEED_CHUNK: usize = 1_000;
+
+/// Seed `n` synthetic-but-valid issues via batched atomic [`Storage::create_issues`] (~1k rows/tx).
+///
+/// The **one** corpus seeder shared by `benches/storage.rs`, `tests/scale.rs`, and the
+/// `unblock-engine` scale/bench suites (T3.5/D34). It is the **storage-direct, validated-but-
+/// non-minted** NFR-2 path Miguel sanctioned under the never-simplify rule (D34/F-2): each issue is
+/// built with a unique adaptive id (`ub-<i>`, all-digit hash — [`unblock_model::parse_id`] valid) at
+/// a fixed epoch and passed through [`IssueValidator::validate`] **before** the batch, because the
+/// atomic bulk primitive deliberately does no validation/mint of its own (the engine
+/// `Session::create_bulk` normally validates first). Bypassing the O(N²) engine mint validates the
+/// same rows without the quadratic build cost.
+///
+/// Insertion flows through the production [`Storage::create_issues`] write path, so for the libsql
+/// backend the passive WAL-checkpoint cadence (`CHECKPOINT_EVERY_N_MUTATIONS`) fires on the held
+/// write connection as the committed chunk-txs accumulate, keeping the `-wal` sidecar bounded across
+/// the whole seed (the contention-lab precedent — no unbounded WAL growth even at 250k).
+///
+/// # Errors
+///
+/// Propagates any [`StorageError`] from the underlying [`Storage::create_issues`] (e.g. a backend
+/// failure). A seeded id never collides because ids are a dense unique sequence.
+///
+/// # Panics
+///
+/// Panics if a generated issue fails [`IssueValidator::validate`] — a seeder-construction invariant
+/// that can never trip at runtime (this module is a test/bench harness), so surfacing it as a panic
+/// keeps the `-> Result<_, StorageError>` signature reserved for genuine backend errors.
+pub async fn seed_corpus<S: Storage>(storage: &S, n: usize) -> Result<(), StorageError> {
+    let created = ts(2026, 1, 1);
+    let mut chunk: Vec<Issue> = Vec::with_capacity(SEED_CHUNK.min(n));
+    let mut start = 0usize;
+    while start < n {
+        let end = (start + SEED_CHUNK).min(n);
+        chunk.clear();
+        for i in start..end {
+            let issue = seed_issue(i, created);
+            IssueValidator::validate(&issue).expect("seed_corpus builds only valid issues");
+            chunk.push(issue);
+        }
+        storage.create_issues(&chunk, "seed").await?;
+        start = end;
+    }
+    Ok(())
+}
+
+/// Build the `i`-th synthetic seed issue: a unique `ub-<i>` id (zero-padded so the all-digit hash is
+/// a syntactically valid [`unblock_model::parse_id`] id) at the fixed seed epoch.
+fn seed_issue(i: usize, created: DateTime<Utc>) -> Issue {
+    Issue {
+        id: format!("ub-{i:07}"),
+        title: format!("seed issue {i}"),
+        created_at: created,
+        updated_at: created,
+        ..Issue::default()
+    }
 }
