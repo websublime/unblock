@@ -119,7 +119,9 @@ pub trait Storage: Send + Sync {
     /// that require existence map `None` to [`StorageError::IssueNotFound`] themselves).
     async fn get_issue(&self, id: &str) -> Result<Option<Issue>, StorageError>;
 
-    /// Fetch multiple issues by id (hydrated). Unknown ids are simply absent from the result.
+    /// Fetch multiple issues by id (hydrated). Unknown ids are simply absent from the result. Ids are
+    /// a lookup **set**: a duplicate id yields **at most one** result (no duplicate-preservation
+    /// guarantee — the batch-hydration path, T3.5.1).
     async fn get_issues(&self, ids: &[String]) -> Result<Vec<Issue>, StorageError>;
 
     /// Apply an [`IssuePatch`] to an issue, returning the updated issue.

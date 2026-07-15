@@ -426,6 +426,14 @@ pub async fn contract_get_issues<S: Storage>(storage: S) {
     assert_eq!(ids.len(), 2, "unknown ids are absent");
     assert!(ids.contains(&"ub-1".to_string()));
     assert!(ids.contains(&"ub-2".to_string()));
+
+    // Ids are a lookup SET: a duplicate id yields AT MOST ONE result (the batch-hydration path
+    // dedups; the trait contract makes no duplicate-preservation guarantee — T3.5.1).
+    let deduped = storage
+        .get_issues(&["ub-1".to_string(), "ub-1".to_string()])
+        .await
+        .expect("get_issues dedups a duplicate id");
+    assert_eq!(deduped.len(), 1, "a duplicate id yields at most one result");
 }
 
 /// `update_issue` applies a patch, advances `updated_at` and recomputes `content_hash` when a row
