@@ -2518,6 +2518,23 @@ const SEED_CHUNK: usize = 1_000;
 /// write connection as the committed chunk-txs accumulate, keeping the `-wal` sidecar bounded across
 /// the whole seed (the contention-lab precedent — no unbounded WAL growth even at 250k).
 ///
+/// # Invariant: file-backed storage for large `n` / high-concurrency seeding (T3.5.1, unblock-storage.md §5 OQ-8)
+///
+/// Callers **MUST** pass a **file-backed** (`open_local`) storage when `n` is large or several tasks
+/// seed concurrently — never the shared-cache `open_in_memory` path. `open_in_memory`'s docs explain
+/// why: its `memory_open_lock` serializes only the open-vs-open race, and a large concurrent
+/// shared-cache transaction (or a concurrent store close) can still aggravate the same `SQLite`
+/// process-global shared-cache registry race under heavy load — the intermittent flake observed at
+/// T3.5.1. `benches/storage.rs` and `tests/scale.rs` already honor this (both seed a file-backed
+/// store); `tests/heavy_corpus_stress.rs` is the dedicated regression proof for the boundary.
+///
+/// This function deliberately carries **no runtime guard** rejecting an in-memory `storage`: it is
+/// generic over `S: Storage` and cannot cleanly detect file-vs-memory from the trait alone, and adding
+/// a detection seam would either widen the production `create_issues` path or land somewhere not
+/// cleanly reachable from here — either a genuine (and unwarranted) production-behaviour change for a
+/// test/bench-only invariant. The boundary is enforced by this doc, the `tests/heavy_corpus_stress.rs`
+/// regression, and code review instead — a deliberate omission, not an oversight.
+///
 /// # Errors
 ///
 /// Propagates any [`StorageError`] from the underlying [`Storage::create_issues`] (e.g. a backend

@@ -156,3 +156,18 @@ Surfaced during development, tracked here (the repo's system of record) so they 
   interface SSOT spine (§5.2a/§5.3) + crate-plan F-7 + git — and the `v1.2` → `v1.3` bump is governed by the FR-12
   drift gate + F-5 history, not a D-id. (A D-id would duplicate the spine at the wrong altitude and add doc-lint /
   decision-change-checklist overhead reserved for genuine product forks.)
+
+- **◐ T3.5.1 Verify follow-up — `open_in_memory` shared-cache heavy-load boundary hardened (option C,
+  Miguel 2026-07-15) — [PR #412](https://github.com/websublime/unblock/pull/412) OPEN (pending merge).**
+  Test-harness-only hardening — **zero production-code behaviour change**
+  (`open_in_memory`/`apply_pragmas`/`memory_open_lock`/`create_issues`/`seed_corpus` bodies unchanged): a new
+  un-gated file-backed heavy-corpus parallel stress regression (`crates/unblock-storage/tests/heavy_corpus_stress.rs`
+  — 16 tasks × a heavy 902-row `open_local`+migrate+`create_issues`+read-back batch, 0 failures) proving `open_local`
+  carries the load the shared-cache `open_in_memory` path cannot, plus boundary rustdoc on `open_in_memory` and
+  `testkit::seed_corpus` (test-only / light-tests-only vs heavy/high-concurrency MUST-use-`open_local`, with the
+  deliberate no-runtime-guard rationale stated inline) and a new OQ-8 reconciling `docs/plans/crates/unblock-storage.md`
+  (Tests columns + Open questions). Rejects an "immunize `open_in_memory`" fix (option A/E — the residual flake is not
+  reproducible in a dedicated single-process adversarial harness, so a targeted fix would be unfalsifiable) and a
+  single-connection in-memory store (option B — trades away the OQ-5 two-connection fidelity). **Verify gate PASS
+  (3 reviewers: CI-equivalent probe green, flakiness 0/5, non-vacuity mutation RED+reverted; 1 doc-accuracy
+  must-fix applied). PR #412 open — flip to ☑ on merge.**
