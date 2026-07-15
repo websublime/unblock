@@ -15,6 +15,9 @@
 //! - [`no_network::no_network`] fails if a networking symbol appears un-gated anywhere in
 //!   `crates/*/src` + `xtask/src` outside the whitelisted `self-update` axoupdater path (NFR-17/D5);
 //!   [`no_network::scan_file`] is the testable core.
+//! - [`release::run`] is the interactive `cargo xtask release` helper: pre-flight → prompt → compute
+//!   the next version → bump `Cargo.toml` + `Cargo.lock` → commit → annotated tag → push, gated by
+//!   two typed-tag confirmations and an offline `--dry-run` (ci-cd §3).
 //!
 //! The `xtask` binary (`src/main.rs`) is a thin dispatcher over this library.
 #![forbid(unsafe_code)]
@@ -24,4 +27,5 @@ pub mod bench_gate;
 pub mod doc_lint;
 pub mod layering;
 pub mod no_network;
+pub mod release;
 pub mod verify_pins;

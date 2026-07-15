@@ -137,6 +137,48 @@ allow-dirty = ["ci"]
 - **GitHub artifact attestations** (provenance) on every artifact, emitted by `actions/attest@v4` (NFR-17) — publish-side, verifiable out-of-band via `gh attestation verify`, not consulted on the auto-update path.
 - A GitHub Release with notes; the `axoupdater` updater artifact.
 
+### 3.3 `cargo xtask release` — interactive release helper
+
+`dist` fires the §3.1 pipeline on a pushed version tag and REQUIRES that tag to equal the workspace
+`[workspace.package]` version (root `Cargo.toml`). Pushing a mismatched or malformed tag is the one
+manual step that can break — or prematurely publish — a release. `cargo xtask release` (`xtask/src/release.rs`)
+automates that step behind a strict, human-operated safety model.
+
+- **Flow.** pre-flight → prompt (release type: pre-release rc / final) → prompt (bump: none / patch /
+  minor / major) → compute the new version → show the plan → (real run) edit the version key + refresh
+  `Cargo.lock` (`cargo update --workspace`) → commit (staging ONLY `Cargo.toml` + `Cargo.lock`, via
+  `git add -- Cargo.toml Cargo.lock`, so a stray path can never enter the public commit) → annotated
+  tag → a single atomic `git push --atomic origin main <tag>` (both refs advance or NEITHER does, so
+  `origin/main` can never be published without its tag, and a non-fast-forward race aborts both). The
+  version is bumped in exactly ONE place — the `[workspace.package]` `version` key — never the
+  `cargo-dist-version` pin or any dependency pin. New version = strip any existing pre-release, apply
+  the core bump (none keeps the core), and for a pre-release attach `rc.N` where `N` is one past the
+  highest existing `v<core>-rc.<N>` tag (else `1`).
+- **Pre-flight (aborts before any mutation).** HEAD is `main`; the working tree is clean; `git fetch
+  origin` then local `main` == `origin/main` (refuse if ahead/behind); the computed tag must not exist
+  locally NOR on the remote. It also prints a reminder that the publish step needs a `WS_GH_TOKEN`
+  secret with `contents: write` (a secret cannot be verified from the client, so this is a warning).
+- **Typed confirmation.** A real run demands the operator TYPE THE TAG exactly — once before any change
+  (mismatch = abort, nothing touched) and once more before the push (mismatch = stop with the local
+  commit + tag intact but nothing pushed). The push is called out as IRREVERSIBLE.
+- **Partial-failure recovery.** The mutation path is ordered (bump version → refresh `Cargo.lock` →
+  commit → annotated tag → the atomic push) and each step carries a remediation hint on failure, so an
+  interrupted release never leaves a raw backend error with no way back. The reachable half-states and
+  their remediation: a failure BEFORE the commit exists (partial bump / lock refresh) →
+  `git checkout -- Cargo.toml Cargo.lock`; a failure at the tag (the commit already exists) →
+  `git reset --hard HEAD~1`; a stop at the push gate OR a failure during the atomic push (commit + tag
+  exist, nothing pushed) → `git tag -d <tag>` then `git reset --hard HEAD~1`. Because the push is a
+  single `--atomic` publish of both refs, there is no "main pushed but tag missing" half-release to
+  recover from.
+- **`--dry-run`.** Runs every read-only step (pre-flight, prompts, compute, guard, plan) and stops
+  before any edit/commit/tag/push, printing the `[dry-run] would: …` plan; the working tree is left
+  unchanged. Use it to preview the exact version + tag a real run would produce.
+- **Relation to §2.** This helper is developer-tooling, NOT a CI job; it does not push anything on its
+  own and never runs unattended. The `verify-pins` gate (§2) still backstops the SHA-pins `dist`
+  regenerates into `release.yml`. NFR-9 (committed `Cargo.lock`) is preserved: the bump commit includes
+  the refreshed lock. Semver stability from GA is D35's rule — the helper is the mechanical way to cut
+  the tags that honour it.
+
 ## 4. Self-update via `axoupdater` (FR-25, v1)
 
 - The hand-rolled `self_update` crate is **dropped** (supersedes the original's reqwest/TLS self-update stack).
