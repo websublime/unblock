@@ -12,6 +12,9 @@
 //!   committed baseline (D34/F-1) — report-only, never fails a PR/nightly.
 //! - [`verify_pins::verify_pins`] fails if any third-party `uses:` in `.github/workflows/*.yml` is
 //!   not pinned to a 40-char commit SHA (NFR-9); [`verify_pins::scan_workflow`] is the testable core.
+//! - [`no_network::no_network`] fails if a networking symbol appears un-gated anywhere in
+//!   `crates/*/src` + `xtask/src` outside the whitelisted `self-update` axoupdater path (NFR-17/D5);
+//!   [`no_network::scan_file`] is the testable core.
 //!
 //! The `xtask` binary (`src/main.rs`) is a thin dispatcher over this library.
 #![forbid(unsafe_code)]
@@ -20,4 +23,5 @@ pub mod bench_compare;
 pub mod bench_gate;
 pub mod doc_lint;
 pub mod layering;
+pub mod no_network;
 pub mod verify_pins;

@@ -2,7 +2,7 @@
 source: crates/unblock-cli/tests/help_snapshots.rs
 expression: "help(&[\"update\", \"--help\"])"
 ---
-Self-update the `unblock` binary (attestation-verified, FR-25/D17)
+Self-update the `unblock` binary (checksum-verified before swap, FR-25/D17)
 
 Usage: unblock update [OPTIONS]
 
