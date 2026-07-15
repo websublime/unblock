@@ -103,7 +103,7 @@ pub enum Command {
     Init(InitArgs),
     /// Write / refresh the managed `AGENTS.md` MCP-wiring block (FR-14).
     Agents(AgentsArgs),
-    /// Self-update the `unblock` binary (attestation-verified, FR-25/D17).
+    /// Self-update the `unblock` binary (checksum-verified before swap, FR-25/D17).
     #[cfg(feature = "self-update")]
     Update(UpdateArgs),
 }

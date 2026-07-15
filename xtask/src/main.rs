@@ -7,16 +7,18 @@
 //! the NFR-1 tier-i advisory relative-10% delta vs the committed baseline (`xtask::bench_compare`,
 //! D34/F-1 — report-only, never fails). `verify-pins` fails if any third-party `uses:` in a
 //! `.github/workflows/*.yml` is not pinned to a 40-char commit SHA (`xtask::verify_pins`, NFR-9/D4).
+//! `no-network` fails if a networking symbol appears un-gated anywhere in `crates/*/src` + `xtask/src`
+//! outside the whitelisted `self-update` axoupdater path (`xtask::no_network`, NFR-17/D5).
 //!
 //! Run: `cargo xtask check-layering` / `cargo xtask doc-lint` / `cargo xtask bench-gate` /
-//! `cargo xtask bench-compare` / `cargo xtask verify-pins`. The CI `layering` / `doc-lint` /
-//! `bench-gate` / `verify-pins` jobs and the nightly `fuzz-smoke` advisory leg wire these in. See
-//! `docs/plans/ci-cd-and-distribution.md` §2.
+//! `cargo xtask bench-compare` / `cargo xtask verify-pins` / `cargo xtask no-network`. The CI
+//! `layering` / `doc-lint` / `bench-gate` / `verify-pins` / `no-network` jobs and the nightly
+//! `fuzz-smoke` advisory leg wire these in. See `docs/plans/ci-cd-and-distribution.md` §2.
 #![forbid(unsafe_code)]
 
 use std::process::ExitCode;
 
-use xtask::{bench_compare, bench_gate, doc_lint, layering, verify_pins};
+use xtask::{bench_compare, bench_gate, doc_lint, layering, no_network, verify_pins};
 
 fn main() -> ExitCode {
     match std::env::args().nth(1).as_deref() {
@@ -29,17 +31,18 @@ fn main() -> ExitCode {
             bench_compare::bench_compare(std::env::args().nth(2), std::env::args().nth(3))
         }
         Some("verify-pins") => verify_pins::verify_pins(),
+        Some("no-network") => no_network::no_network(),
         Some(other) => {
             eprintln!(
                 "unknown xtask {other:?}\n  available: check-layering, doc-lint, bench-gate, \
-                 bench-compare, verify-pins"
+                 bench-compare, verify-pins, no-network"
             );
             ExitCode::from(2)
         }
         None => {
             eprintln!(
                 "usage: cargo xtask <task>\n  available: check-layering, doc-lint, bench-gate, \
-                 bench-compare, verify-pins"
+                 bench-compare, verify-pins, no-network"
             );
             ExitCode::from(2)
         }
