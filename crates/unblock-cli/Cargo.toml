@@ -83,3 +83,10 @@ libsql = { workspace = true }
 [features]
 default = ["self-update"]
 self-update = ["dep:axoupdater"]
+
+# MANDATORY force-include for `dist` (T3.6/D35, ci-cd §3.1): every workspace crate is `publish = false`,
+# so dist auto-excludes them and would ship ZERO apps. `dist = true` opts the one shipped App (the
+# `unblock` binary) back in despite `publish = false`. The libs (no `[[bin]]`), `xtask`, and
+# `unblock-fuzz` stay auto-excluded — only this crate carries the marker.
+[package.metadata.dist]
+dist = true

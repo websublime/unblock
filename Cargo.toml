@@ -130,3 +130,9 @@ missing_docs = "warn"
 pedantic = { level = "warn", priority = -1 }
 module_name_repetitions = "allow"
 missing_errors_doc = "allow"
+
+# The cargo profile `dist` builds release artifacts with (T3.6/D35; added by `dist init`, REQUIRED —
+# the generated `release.yml` builds with `--profile dist`, so its absence fails the real release).
+[profile.dist]
+inherits = "release"
+lto = "thin"
