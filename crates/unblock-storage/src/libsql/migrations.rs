@@ -26,7 +26,8 @@ pub(crate) struct Migration {
 }
 
 /// The ordered forward steps. **Empty in v1** — a fresh database is bootstrapped directly from
-/// `SCHEMA_SQL`; there is no prior on-disk version to migrate from (pre-1.0, no external users).
+/// `SCHEMA_SQL`; v1.0.0 is the first shipped schema, so there is no prior on-disk `user_version` to
+/// migrate from.
 pub(crate) const MIGRATIONS: &[Migration] = &[];
 
 /// Read the database's `PRAGMA user_version`.

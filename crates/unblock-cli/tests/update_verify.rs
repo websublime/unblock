@@ -17,13 +17,14 @@
 //! server + the `<PREFIX>_INSTALLER_GHE_BASE_URL` redirect below are **never actually hit** on this
 //! path — they are retained only to DOCUMENT INTENT (they stand up the untrusted release source a
 //! future test will drive) and to keep the child hermetic (a redirected base can never reach real
-//! github.com even if the code path changed). They do NOT exercise an attestation/download-tampering
+//! github.com even if the code path changed). They do NOT exercise a checksum/download-tampering
 //! rejection today; the names/comments are written to say exactly that, not to overclaim.
 //!
-//! TODO(T3.6 / v1 GA): add a genuine tampered-DOWNLOAD attestation test. That needs a `dist`-receipt
-//! fixture so `new_for_updater_executable()` succeeds and the run reaches the download/verify stage,
-//! where a tampered artifact from the mock source must be REJECTED at attestation. Until that fixture
-//! exists, this suite proves the earlier (still safety-critical) unconfigured-updater refusal + no-swap.
+//! TODO(T3.6 / v1 GA): add a genuine tampered-DOWNLOAD checksum-verify test. That needs a `dist`-receipt
+//! fixture so the updater loads its receipt and the run reaches the download/verify stage, where a
+//! tampered artifact from the mock source must be REJECTED at the dist installer's SHA256 checksum.
+//! Until that fixture exists, this suite proves the earlier (still safety-critical)
+//! unconfigured-updater refusal + no-swap.
 //!
 //! The mock base is redirected per-CHILD via `Command::env` (parallel-safe; the suite never calls the
 //! `unsafe`/edition-2024-forbidden `std::env::set_var`). `--no-default-features` drops the command
@@ -52,7 +53,7 @@ const GHE_BASE_URL_ENV: &str = "UNBLOCK_INSTALLER_GHE_BASE_URL";
 /// never hit (the updater refuses before any network I/O); kept to document intent (see module TODO).
 async fn untrusted_release_server() -> MockServer {
     let server = MockServer::start().await;
-    // Every GHE releases endpoint would return a body that is NOT a valid, attested release (a bare
+    // Every GHE releases endpoint would return a body that is NOT a valid, checksummed release (a bare
     // object with no installer assets) — the untrusted artifact a future test must refuse at verify.
     Mock::given(method("GET"))
         .and(path_regex(r".*/releases.*"))

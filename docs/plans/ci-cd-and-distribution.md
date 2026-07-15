@@ -18,7 +18,7 @@ unblock has two distinct GitHub Actions pipelines:
 
 1. **CI (quality gate)** — runs on every PR/push. Hand-authored. Enforces the PRD's quality/supply-chain NFRs.
 2. **Release/distribution** — runs on a version tag. **Generated and maintained by `dist`** from
-   `[workspace.metadata.dist]`. Builds cross-platform artifacts, installers, checksums, attestations, a GitHub
+   `dist-workspace.toml` `[dist]`. Builds cross-platform artifacts, installers, checksums, attestations, a GitHub
    Release, and the `axoupdater` self-update surface.
 
 ## 2. CI pipeline (quality gate) — from M0
@@ -40,13 +40,15 @@ Runs on `pull_request` and pushes to the default branch. Jobs (all on stable `1.
 | `fuzz-smoke` | short `cargo fuzz` run on the 8 ingestion targets, on a **scheduled** (nightly) workflow (`fuzz-smoke.yml`): nightly-`2026-04-01` (= rustc 1.96.0-nightly) + libFuzzer for the targets, plus a separate stable-1.96 step that runs the two `#[ignore]`d contention-lab controls (forced-spin, WAL-negative) to keep the M0 gate proven non-vacuous. Both controls are **core-independent** so they are non-flaky on the 4-vCPU runner: the forced-spin control asserts a busy-retry + CPU-burn (`cpu/wall`) hot-spin signature (not just `R > ceiling`), and the WAL-negative control drives a fixed write total — see `unblock-storage.md` and `STATUS.md` T0.8. Failure routing at M0 = just go red; `workflow_dispatch` allows a manual re-run; no issue-opening. **Repair note (post-T1.3):** this leg was effectively **DOA since T0.7/T0.9** — the former `nightly-2024-10-31` pin (cargo 1.84) predated edition 2024 (>= 1.85) + let-chains (>= 1.88) so the `unblock-*` tree could not parse, and the nested `fuzz/Cargo.toml` lacked an empty `[workspace]` table so `cargo fuzz` could not build it directly. Re-pinned to `nightly-2026-04-01` (>= the stable 1.96 target) + the `[workspace]` table added; the unwatched cron is now repaired. | NFR-16 | **M0 (T0.9)** — nightly schedule |
 | `bench-gate` | HYBRID `criterion` gate (D34): a hard per-PR **generous absolute-ms** budget on a pinned ≥2-vCPU runner (`benches/storage.rs`, `benches/engine.rs` + the existing policy/render `criterion` benches wired into the SAME gate, F-7 — `cargo xtask bench-gate`) plus the **advisory/nightly 10% relative-regression report** (`cargo xtask bench-compare` vs the committed `xtask/bench-baseline.json`, homed in the `fuzz-smoke` `perf-advisory` leg, **report-only — never fails a PR/nightly**) | NFR-1 | **landed at T3.5 (P1)**; the read ceilings were **re-tightened + the advisory relative-10% leg landed at T3.5.1** (once batch hydration fixed the `collect_hydrated` N+1) |
 | `scale` | 250k-issue corpus (storage-direct, validated but non-minted — D34) under the child-per-client topology (D14+D31); a **timed integration test** (`crates/unblock-storage/tests/scale.rs` + `crates/unblock-engine/tests/scale.rs`), NOT a `criterion` bench — per-PR with an explicit timeout + an `#[ignore]`-gated soak variant | NFR-2 | **owned by / lands at T3.5 (P1)** (the 250k corpus harness/`seed_corpus` is built at T3.5) |
-| `no-network` | **workspace-wide no-network symbol-scan** — assert no networking symbols (`reqwest`, `hyper`, `std::net`, raw TLS) link into any crate except the `self-update`-feature-gated `axoupdater` surface in `unblock-cli`; spot-checks the default-feature binary too. | NFR-17 | **LANDABLE from T3.1 (D27/AD-6); full scan → T3.6.** T3.1 builds `unblock-cli` and lands the crate-scoped static gate `tests/no_git_gate.rs` (no `Command::new("git")`/git crate/network symbol on the default build; the only network dep is behind `self-update`); the workspace-wide CI `no-network` job + the default-feature binary + `axoupdater`/dist spot-check land at **T3.6** (needs the full dist surface). |
+| `no-network` | **workspace-wide no-network source-scan** — assert no networking symbols (`reqwest`, `hyper`, `std::net`, raw TLS, un-gated `axoupdater`) link into any crate except the whitelisted `self-update`-feature-gated `axoupdater` TLS path in `unblock-cli`; spot-checks the default-feature binary too. | NFR-17 | **LANDS at T3.6** (workspace-wide source-scan; whitelists the `self-update` axoupdater TLS path). T3.1 already landed the crate-scoped static tripwire `tests/no_git_gate.rs` (no `Command::new("git")`/git crate/network symbol on the default build; the only network dep is behind `self-update`); T3.6 adds the workspace-wide CI `no-network` xtask job (scans all `crates/*/src` + `xtask/src`) + the default-feature binary spot-check. |
 | `stress-integrity` | long-lived single-workspace stress (`crates/unblock-engine/tests/stress_longlived.rs` — a MODEST 10^3–10^4-op mixed run, NOT the 250k perf corpus, which is T3.5) + interleaved concurrent command-family integrity (`crates/unblock-engine/tests/interleaved_families.rs` — create/update/close vs export/import vs read) — INTEGRITY-only (no corruption / no partial write / linearizable; NO latency/throughput budget), with a default-CI-sized run + an `#[ignore]`-gated longer soak (NFR-5 stress/interleaving half). | NFR-5 | **DEFERRED → T3.4** (ships with the engine reliability gates + the `unblock-sync/src/atomic.rs` fault-injection seam) |
 | `rate-limit` | single-MCP-server rate-limit assertions (NFR-18 rate-limit half — the `Arc<Semaphore>` chokepoint + minted `RateLimited`, D34); a cheap, **independent** `-p unblock-mcp` leg (`crates/unblock-mcp/tests/rate_limit.rs`) | NFR-18 | **LANDED at T3.5 (P2)** |
+| `feature-matrix` | `cargo build -p unblock-cli --no-default-features --locked` (proves `axoupdater`/`reqwest`/`hyper` are unreachable when the `self-update` feature is off — the AUTHORITATIVE confinement proof) **plus** the default-on leg; pinned checkout/toolchain(`1.96.0`)/rust-cache | NFR-10, NFR-17 | **lands at T3.6 (P2)** |
+| `verify-pins` | `cargo xtask verify-pins` — fails if any `uses:` in `.github/workflows/release.yml` (or `ci.yml`) is not pinned to a 40-char commit SHA. `dist` CLOBBERS the generated pins on every regen, so this backstops the standing NFR-9 re-pin duty; it MUST cover `actions/attest@v4` (a floating major in dist's template). | NFR-9 | **lands at T3.6 (P1)** |
 
 > **The standalone `contention` NFR-3 job is folded into `storage-testkit` at M0** — the contention lab is the M0 exit gate (T0.8) and runs as `--test contention_lab` under `storage-testkit`; the separately-owned long-lived stress half is the deferred `stress-integrity` job (T3.4).
 
-> **DEFERRED ledger (M0 scope of T0.9).** The 11 jobs marked **M0 (T0.9)** are authored now in `.github/workflows/ci.yml` (+ the nightly `fuzz-smoke.yml`). The five genuinely-deferred jobs — **`bench-gate` (→ T3.5)**, **`scale` (→ T3.5)**, **`no-network` (→ T3.1/T3.6)**, **`stress-integrity` (→ T3.4)**, **`rate-limit` (→ T3.5)** — depend on artefacts (a `benches/` suite, the 250k corpus harness, the `unblock-cli` binary + `axoupdater`/dist surface, the fault-injection/stress-integrity harness for T3.4, the rate-limit harness for T3.5) that do not exist until their gating task lands. They are listed at the top of `ci.yml` as a comment so the gap is visible, not silent. **Landing status (as of T3.5):** `stress-integrity` landed at T3.4; `bench-gate` + `scale` landed at T3.5 (P1); `rate-limit` landed at T3.5 (P2); only `no-network` remains deferred (→ T3.6). The per-job rows above carry the live status.
+> **DEFERRED ledger (M0 scope of T0.9).** The 11 jobs marked **M0 (T0.9)** are authored now in `.github/workflows/ci.yml` (+ the nightly `fuzz-smoke.yml`). The five genuinely-deferred jobs — **`bench-gate` (→ T3.5)**, **`scale` (→ T3.5)**, **`no-network` (→ T3.1/T3.6)**, **`stress-integrity` (→ T3.4)**, **`rate-limit` (→ T3.5)** — depend on artefacts (a `benches/` suite, the 250k corpus harness, the `unblock-cli` binary + `axoupdater`/dist surface, the fault-injection/stress-integrity harness for T3.4, the rate-limit harness for T3.5) that do not exist until their gating task lands. They are listed at the top of `ci.yml` as a comment so the gap is visible, not silent. **Landing status (as of T3.6):** `stress-integrity` landed at T3.4; `bench-gate` + `scale` landed at T3.5 (P1); `rate-limit` landed at T3.5 (P2); `no-network` + the two NEW `feature-matrix` and `verify-pins` jobs land at **T3.6** — so with T3.6 **all deferred CI jobs have landed** (the deferred ledger is empty). The per-job rows above carry the live status.
 
 - **Action pinning (NFR-9):** every `uses:` is pinned to a 40-char commit SHA, with a trailing `# vX.Y.Z` comment. This applies to **both** the hand-authored CI and the dist-generated release workflow (post-process / pin the generated `uses:` lines; re-pin on `dist` upgrades).
 - **`Cargo.lock` committed** (NFR-9); all M0 build/test jobs run `--locked`.
@@ -59,7 +61,7 @@ Runs on `pull_request` and pushes to the default branch. Jobs (all on stable `1.
 
 `cargo xtask doc-lint` — a mechanical, offline, sub-second lint over a **fixed 19-file corpus** (`docs/PRD.md`; the six `docs/plans/*.md` — `00-roadmap`, `01-design-spine`, `README`, `STATUS`, `ci-cd-and-distribution`, `implementation-plan`; the 12 `docs/plans/crates/unblock-*.md` incl. fuzz). `docs/PROCESS.md` and `docs/plans/templates/*` are **out of corpus**. An existence-guard FAILs on any missing **or** unexpected corpus file (a smaller-than-expected corpus is a vacuous pass). Global guards: a `CommonMark` block-fence mask (all classes skip fenced lines), an inline-code-span index (class (c) fires only in-code), a never-finding glyph set (`● ◐ — ☑ ⊘ ☐`), and an approximate-number guard (`≈`/`~`). Findings are sorted `(file, line, class)` and emitted as `path:line: [x] msg` on stderr; clean ⇒ `doc-lint OK: 19 docs, 6 classes clean` on stdout, exit 0. It checks:
 
-- **(a) D-id coherence** — each `D-id` (D1..D34) appears with the **same** version tag, packaging, and verification scheme everywhere it is referenced (would have caught D12-vs-D17 self-update drift). *(The D-set is PRD-§4-data-driven: the lint parses the defined ids from the `| **Dx** |` rows and resolves membership against that set — the range is documentation, not a hard-coded regex; adding D34 to PRD §4 extends the set with no lint code change.)*
+- **(a) D-id coherence** — each `D-id` (D1..D35) appears with the **same** version tag, packaging, and verification scheme everywhere it is referenced (would have caught D12-vs-D17 self-update drift). *(The D-set is PRD-§4-data-driven: the lint parses the defined ids from the `| **Dx** |` rows and resolves membership against that set — the range is documentation, not a hard-coded regex; adding D35 to PRD §4 extends the set with no lint code change.)*
 - **(b) FR/NFR tier coherence** — each `FR-id`/`NFR-id` resolves to a PRD definition and carries a **consistent tier** (v1/v1.1/v1.2/v1.3/v1.4/v1.5) across all docs (would have caught the FR-25 version drift).
 - **(c) command-token spelling** — every user-facing `unblock <cmd>` token is spelled identically across PRD, roadmap, README, this doc, and the cli plan (the canonical self-update token is **`unblock update`**; the `self-update` Cargo feature name is deliberately distinct, per CF-K).
 - **(d) source-of-truth stamp** — the `PRD APPROVED vX.Y` stamp in every doc matches the PRD header revision (currently **v1.1**).
@@ -68,14 +70,18 @@ Runs on `pull_request` and pushes to the default branch. Jobs (all on stable `1.
 
 ## 3. Release / distribution pipeline (`dist`) — at v1 GA
 
-Driven by a version tag (e.g. `unblock-vX.Y.Z`); `dist` generates `.github/workflows/release.yml`.
+Driven by a version tag (e.g. `vX.Y.Z`, the `dist` single-App default); `dist` generates `.github/workflows/release.yml`.
 
-### 3.1 dist configuration (`[workspace.metadata.dist]`)
+### 3.1 dist configuration (`dist-workspace.toml` `[dist]`)
 
 ```toml
-[workspace.metadata.dist]
+# dist-workspace.toml [dist] — the canonical dist config location since dist 0.24.0
+[workspace]
+members = ["cargo:."]
+
+[dist]
 # Pin the dist version used in CI (managed by `dist init`/`dist generate`).
-cargo-dist-version = "<latest>"
+cargo-dist-version = "0.32.0"
 ci = ["github"]
 installers = ["shell", "powershell"]
 targets = [
@@ -85,18 +91,27 @@ targets = [
 ]
 # Self-update surface (axoupdater) — ships in v1 (FR-25)
 install-updater = true
-# Provenance signing — GitHub artifact attestations (NFR-17)
+# Provenance signing — GitHub artifact attestations (NFR-17), emitted by `actions/attest@v4`
 github-attestations = true
+# Per-artifact SHA256 checksum in dist-manifest.json — the SOLE client-side verify-before-swap gate
+# (NFR-17); set explicitly in the P1 dist config so a future `false` cannot silently remove the gate.
+checksum = "sha256"
+
+# MANDATORY force-include (every workspace crate is publish=false, so dist would otherwise ship ZERO
+# apps): mark the shipped `unblock` binary in crates/unblock-cli/Cargo.toml —
+#   [package.metadata.dist]
+#   dist = true
 ```
 
-> Exact key names track the pinned `dist` version (managed via `dist init`); the shape above is canonical.
-> The single distributed binary is `unblock` (from `unblock-cli`).
+> Exact key names track the pinned `dist` version (`0.32.0`, managed via `dist init`/`dist generate`); the
+> config lives in `dist-workspace.toml` `[dist]` (canonical since dist 0.24.0). The single distributed binary
+> is `unblock` (from `unblock-cli`), force-included via `[package.metadata.dist] dist = true` on that crate.
 
 ### 3.2 What it produces per release
 - Cross-platform archives for all 6 target triples (NFR-11: self-contained binary, no runtime system deps).
 - **shell** (`curl … | sh`) and **powershell** (`irm … | iex`) installers.
 - SHA256 checksums + a machine-readable `dist-manifest.json`.
-- **GitHub artifact attestations** (provenance) on every artifact (NFR-17).
+- **GitHub artifact attestations** (provenance) on every artifact, emitted by `actions/attest@v4` (NFR-17) — publish-side, verifiable out-of-band via `gh attestation verify`, not consulted on the auto-update path.
 - A GitHub Release with notes; the `axoupdater` updater artifact.
 
 ## 4. Self-update via `axoupdater` (FR-25, v1)
@@ -106,10 +121,14 @@ github-attestations = true
   lifecycle CLI exposes an **`unblock update`** command (D3: lifecycle/ops surface, not a domain feature). The
   command lands in `unblock-cli` behind the **`self-update`** Cargo feature (feature name ≠ command name, by
   design — CF-K; `--no-default-features` drops the `self-update` feature and with it the `unblock update` command).
-- **Verification before execution (NFR-17):** updates are checked against GitHub artifact **attestations**; the
-  updater refuses to install unverifiable artifacts. No network on any normal command path — only on explicit
-  `unblock update` (offline-first preserved, D13).
-- CI/release sets `AXOUPDATER_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}` to avoid GitHub API rate limits.
+- **Verify-before-swap (NFR-17):** axoupdater runs the dist installer, which verifies each artifact's **SHA256
+  checksum** against `dist-manifest.json` before `self_replace` swaps the binary — a mismatched/tampered download
+  is refused and nothing is swapped. GitHub artifact **attestations** are publish-side provenance (`actions/attest@v4`,
+  verifiable out-of-band via `gh attestation verify`), NOT consulted on the auto-update path. No network on any
+  normal command path — only on explicit `unblock update` (offline-first preserved, D13).
+- `AXOUPDATER_GITHUB_TOKEN` is a **client-runtime** env read by axoupdater on the user's machine (feeds
+  `set_github_token` to avoid GitHub API rate limits) — it is NOT a release-workflow secret; the dist-generated
+  `release.yml` publishes with the standard `${{ secrets.GITHUB_TOKEN }}`.
 
 ## 5. Mapping to PRD NFRs
 
@@ -119,7 +138,7 @@ github-attestations = true
 | NFR-10 minimize deps | `cargo deny` transitive budget; dropping the `self_update` reqwest/TLS stack in favour of `axoupdater`. |
 | NFR-11 portability | 6 target triples, single self-contained binary; (optional musl for fully-static Linux — see Open Items). |
 | NFR-12 stable toolchain | `toolchain` job pins `rust-toolchain.toml` to stable `1.96.0` and builds `--locked`; a green stable build is the gate (no nightly-only features). |
-| NFR-17 self-update/signing | GitHub artifact attestations; `axoupdater` verifies before execution; no network on normal paths; `no-network` symbol-scan job enforces it workspace-wide. |
+| NFR-17 self-update/signing | publish-side attestations (`actions/attest@v4`, `gh attestation verify`); client verify-before-swap = the dist installer's SHA256 checksum (`dist-manifest.json`); no network on normal paths; the workspace-wide `no-network` symbol-scan job enforces confinement (whitelisting only the `self-update` axoupdater path). |
 | NFR-1/2/3 | `criterion` gate, 250k scale job, contention lab in CI. |
 | NFR-5 | `stress-integrity` job (T3.4): long-lived + interleaved-write integrity harness over the `unblock-sync` fault-injection seam. |
 | NFR-18 | `rate-limit` job (T3.5): single-MCP-server rate-limit assertions. |
@@ -133,6 +152,10 @@ github-attestations = true
   feature-to-version matrix already reflects FR-25 in v1.
 
 ## 7. Open items
+
+> **Out of v1 GA (D35):** the homebrew tap, npm installer, macOS notarization, and linux-musl below are all
+> deferred past v1 — shell + powershell installers across the 6 gnu/darwin/msvc triples cover the 1.0.0 GA.
+
 - **Homebrew tap** — add the `homebrew` installer + a `websublime/homebrew-tap` repo (deferred; shell/powershell cover v1).
 - **npm installer** — attractive because MCP clients are often Node (`npx unblock`); revisit post-v1 with an `@websublime` scope.
 - **macOS notarization** — attestations cover provenance; Gatekeeper notarization (Apple Developer cert) deferred unless a macOS GUI install path is wanted.
