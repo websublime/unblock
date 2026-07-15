@@ -317,6 +317,22 @@ impl LibsqlStorage {
     /// `SQLITE_MISUSE` ("bad parameter or other API misuse") under parallel opens — a real `SQLite`
     /// limitation, fixed at source here rather than masked (T0.9; root-fix of the T0.6 flake).
     ///
+    /// # Test-only: light / low-concurrency use ONLY (T3.5.1 boundary, unblock-storage.md §5 OQ-8)
+    ///
+    /// This constructor is **test-only** and sized for **light or low-concurrency** tests.
+    /// **Heavy-corpus or high-concurrency-write tests MUST use [`open_local`](Self::open_local)**
+    /// (file-backed) instead. [`memory_open_lock`] serializes only the **open-vs-open** race (T0.9) —
+    /// it cannot cover the window where an open races a concurrent *large* shared-cache transaction (or
+    /// a concurrent store close) on another `open_in_memory` instance, which can still aggravate the
+    /// same `SQLite` process-global shared-cache registry race the open-lock does not reach. This
+    /// surfaced as a rare, intermittent flake under full-`cargo test --workspace` parallel load
+    /// (T3.5.1) that a dedicated single-process adversarial harness could not reproduce — i.e. it is a
+    /// load-marginal artifact of the shared-cache registry, not a bug this constructor can safely
+    /// immunize against. The robust fix is the boundary this doc prescribes: keep `open_in_memory` for
+    /// light tests, and route heavy or high-concurrency corpus work through `open_local`, mirroring
+    /// the gated `testkit::seed_corpus` invariant note and the regression proof in
+    /// `tests/heavy_corpus_stress.rs`.
+    ///
     /// # Errors
     ///
     /// Returns [`StorageError::Backend`] if the database cannot be opened or a pragma fails.
