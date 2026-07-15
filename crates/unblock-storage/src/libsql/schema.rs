@@ -15,9 +15,9 @@
 
 /// The current on-disk schema version stamped into `PRAGMA user_version`.
 ///
-/// v1 baseline. `MIGRATIONS` (in `migrations.rs`) is empty: there is no prior on-disk version to
-/// migrate from in v1 (pre-1.0, no external users — CLAUDE.md). Any database whose `user_version`
-/// is **greater** than this is rejected with [`crate::StorageError::SchemaMismatch`].
+/// v1 baseline. `MIGRATIONS` (in `migrations.rs`) is empty: v1.0.0 is the first shipped schema, so
+/// there is no prior on-disk `user_version` to migrate from in v1 (CLAUDE.md). Any database whose
+/// `user_version` is **greater** than this is rejected with [`crate::StorageError::SchemaMismatch`].
 pub(crate) const CURRENT_SCHEMA_VERSION: i32 = 1;
 
 /// The complete canonical SQL schema (model-B minimal-v1). Applied wholesale on a fresh database.

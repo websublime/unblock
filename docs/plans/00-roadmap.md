@@ -4,7 +4,7 @@
 - **Date:** 2026-06-19 · **v1.2–v1.5 resequence:** 2026-07-07 (session ratified by Miguel; audience decision minted as PRD §4 D28)
 - **Owner:** Miguel Ramos
 - **Sources of truth:** `docs/PRD.md` (PRD APPROVED v1.1, §5 tiers / §11 scope / §13 phasing), `docs/plans/01-design-spine.md` (cross-crate interfaces — wins on any cross-crate type/signature disagreement), `docs/plans/implementation-plan.md` (v1 walking skeleton). Hierarchy: PRD > spine > crate plans. Grounding for deferred/later items: original `temp/beads_rust-main` feature inventory; UX grounding for the v1.5 TUI: the TUI-adopted subset of the 14 mockups under `temp/tentative-v2/docs/designs/` (**reference-only**, same status as `temp/beads_rust-main`; the graph / burnup screens there inform the v2+ PRO web instead — roadmap §7).
-- **Stage:** Pre-1.0, no external users — breaking changes welcome, no migration / backward-compat burden (PRD header).
+- **Stage:** GA 1.0.0 — semver stability applies from GA (D35); breaking changes → 2.0.0 (supersedes the pre-1.0 posture; PRD header).
 
 > This roadmap allocates the natural product evolution across releases. **v1 and v1.1 are locked** — they
 > restate the PRD verbatim in intent and exist here only for a single horizon view. **v1.2 onward is a
@@ -52,7 +52,7 @@ pass as hard gates; unblock dogfoods its own repo (issues imported from `bd` via
 | FR-16 (lite) | `doctor` + libsql `integrity_check` + basic diagnostics |
 | FR-17 | Cooperative shutdown (SIGINT/SIGTERM/SIGHUP → atomic flag; clean libsql flush/close) |
 | FR-20 | **MCP stdio server (PRIMARY)** on rmcp 1.7: ≤8 consolidated tools, resources, prompts |
-| FR-25 | **Self-update** (`unblock update`) via `axoupdater`; verified by GitHub artifact attestations (NFR-17, D17) |
+| FR-25 | **Self-update** (`unblock update`) via `axoupdater`; verified by the dist-installer SHA256 checksum before swap; attestations = publish-side provenance (NFR-17, D17/D35) |
 
 ### Key NFR gates
 NFR-1 (perf budgets — hybrid gate, D34), NFR-2 (250k CI / 1M manual under the child-per-client topology, D14+D31), **NFR-3 (no hot-spin —

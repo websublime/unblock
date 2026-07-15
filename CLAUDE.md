@@ -7,14 +7,14 @@ Operational contract for anyone (human or agent) working in this repo. Keep it l
 
 **unblock** — a ground-up, idiomatic, multi-crate **Rust** rewrite of the deprecated `beads_rust` "agent-first
 issue tracker". **MCP-first**: every domain feature is an MCP tool/resource/prompt over stdio; the CLI is
-lifecycle/ops only. Pre-1.0, no external users — breaking changes welcome, no backward-compat/migration burden.
-(Original source for reference only: `temp/beads_rust-main`.)
+lifecycle/ops only. GA 1.0.0 — semver stability applies from GA (D35): the MCP contract, CLI surface, and 0–8 exit
+codes are stable, a breaking change → 2.0.0. (Original source for reference only: `temp/beads_rust-main`.)
 
 ## Document map (read before working)
 
 | Doc | Role |
 |---|---|
-| `docs/PRD.md` | Product truth — decisions (§4 D1..D34), FR/NFR, domain model, milestones. **APPROVED v1.1.** |
+| `docs/PRD.md` | Product truth — decisions (§4 D1..D35), FR/NFR, domain model, milestones. **APPROVED v1.1.** |
 | `docs/plans/01-design-spine.md` | **Authoritative interface contract** (types, `Storage` trait, `Session` API, MCP schemas, errors). |
 | `docs/plans/implementation-plan.md` | Task DAG M0–M3 (T-ids) + acceptance criteria. |
 | `docs/plans/STATUS.md` | **Live task registry** — what's done / in-progress / to-do (the system of record). |
@@ -67,7 +67,7 @@ session** by default (template: `docs/plans/templates/drift-gap-report.md`).
 - Config is **TOML**. Output: **structured to stdout, diagnostics to stderr** (NFR-14); output shapes are
   snapshot-pinned (`insta`).
 - **No git operations, no git library linked, no network on any normal command path** (D13/NFR-6). Network only
-  on explicit `unblock update` (axoupdater, attestation-verified). libsql `remote` feature is **off by default**.
+  on explicit `unblock update` (axoupdater runs the dist installer; SHA256-checksum-verified before swap). libsql `remote` feature is **off by default**.
 - libsql is the source of truth; JSONL is an **optional** export/import (no 3-way merge, no locks) — model B (D5).
 
 ## Testing (`cargo test`; no Go/Encore tooling here)

@@ -59,8 +59,9 @@ fn exit_0_success_emits_valid_json_on_stdout() {
 #[test]
 fn exit_1_internal_error_from_update_unconfigured() {
     // `update` outside a dist install refuses (the release source is not configured/verifiable) →
-    // `McpServerError`-family InternalError (exit 1). The attestation posture: an unverifiable source
-    // is rejected before any swap (see tests/update_verify.rs). Behind the default-on `self-update`.
+    // `McpServerError`-family InternalError (exit 1). The self-update posture: an unconfigured/
+    // unverifiable release source is refused before any swap (see tests/update_verify.rs). Behind the
+    // default-on `self-update`.
     let out = unblock()
         .args(["update", "--dry-run", "--output", "json"])
         .output()

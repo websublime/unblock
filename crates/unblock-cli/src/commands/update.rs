@@ -2,10 +2,12 @@
 //! default-on `self-update` feature. The ONLY network surface in the whole binary (confined here).
 //!
 //! `--dry-run` checks for + reports an available version WITHOUT swapping. A real run downloads +
-//! swaps the binary via `dist`'s installer, which verifies GitHub artifact attestations (NFR-17)
-//! before execution; any unverifiable/tampered artifact surfaces as a `CliError::Update` (→
-//! `InternalError`, exit 1). The Cargo feature name (`self-update`) deliberately differs from the
-//! command token (`unblock update`) — CF-K/G-18. `--no-default-features` drops both.
+//! runs `dist`'s installer, which verifies each artifact's SHA256 checksum (from `dist-manifest.json`)
+//! before the binary is swapped (`self_replace`); a checksum-mismatched/tampered download surfaces as
+//! a `CliError::Update` (→ `InternalError`, exit 1). GitHub artifact attestations are publish-side
+//! provenance (`gh attestation verify`), NOT consulted on the update path (NFR-17). The Cargo feature
+//! name (`self-update`) deliberately differs from the command token (`unblock update`) — CF-K/G-18.
+//! `--no-default-features` drops both.
 
 use axoupdater::AxoUpdater;
 
@@ -36,7 +38,7 @@ pub async fn run(args: &UpdateArgs) -> Result<Option<u8>, CliError> {
         return Ok(None);
     }
 
-    // Real run: download + verify (dist installer checks GitHub artifact attestations, NFR-17) + swap.
+    // Real run: download + run the dist installer (verifies each artifact's SHA256 checksum, NFR-17) + swap.
     if let Some(result) = updater.run().await.map_err(|e| update_error(&e))? {
         output::diag(&format!("updated to {}", result.new_version_tag));
     } else {

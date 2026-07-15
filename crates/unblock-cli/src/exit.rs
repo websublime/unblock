@@ -73,7 +73,7 @@ pub enum CliError {
         source: std::io::Error,
     },
 
-    /// A self-update failure (`axoupdater`/attestation). Maps to `ErrorCode::InternalError` (exit 1).
+    /// A self-update failure (`axoupdater`/dist-installer). Maps to `ErrorCode::InternalError` (exit 1).
     #[cfg(feature = "self-update")]
     #[snafu(display("self-update failed: {message}"))]
     Update {
@@ -203,7 +203,7 @@ mod tests {
     #[test]
     fn update_maps_to_internal_error_exit_1() {
         let err = CliError::Update {
-            message: "attestation failed".to_string(),
+            message: "checksum verification failed".to_string(),
         };
         assert_eq!(err.code(), ErrorCode::InternalError);
         assert_eq!(err.code().exit_code(), 1);

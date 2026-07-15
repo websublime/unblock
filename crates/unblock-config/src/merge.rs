@@ -10,8 +10,8 @@
 //! Field-wise picking ([`pick`]) makes the result a fully-resolved [`WorkspaceConfig`]: every field
 //! is the value of the highest-precedence layer that set it, with the `Defaults` layer guaranteeing
 //! a value for each. The enum is intentionally `pub(crate)` (SF-5) — widening it to a general/public
-//! surface in v1.1 (when the user/DB layers land) is a deliberate pre-1.0 widening, not a
-//! frozen-surface violation.
+//! surface in v1.1 (when the user/DB layers land) is a deliberate additive widening (adding public
+//! API is a minor, non-breaking bump under GA semver, D35), not a frozen-surface violation.
 
 use unblock_model::OutputFormat;
 
