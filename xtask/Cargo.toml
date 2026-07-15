@@ -14,6 +14,10 @@ serde_json = { workspace = true }
 # Drives the `doc-lint` subcommand's regex-specified rule set (ci-cd §2.1). Already in the lock
 # transitively (tracing-subscriber env-filter) — direct use here adds no new transitive surface.
 regex = { workspace = true }
+# Parses / bumps the `[workspace.package]` version for the `release` subcommand (ci-cd §3). Already in
+# the lock (1.0.28) transitively — a direct xtask dep adds no new transitive surface. Not a
+# `[workspace.dependencies]` entry (only xtask needs it), so pinned to the major here.
+semver = "1"
 
 [dev-dependencies]
 # Fixture trees for the `verify-pins` corpus + non-vacuity integration test (tests/verify_pins_corpus.rs).
