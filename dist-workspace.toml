@@ -1,0 +1,39 @@
+# dist-workspace.toml — the canonical `dist` config location since dist 0.24.0 (ci-cd §3.1).
+#
+# `dist` (formerly cargo-dist) drives the release/distribution pipeline (T3.6/D35). It generates and
+# maintains `.github/workflows/release.yml` from this `[dist]` table. See
+# `docs/plans/ci-cd-and-distribution.md` §3.
+#
+# NOTE: every workspace crate is `publish = false`, so dist would ship ZERO apps by default. The shipped
+# `unblock` binary is force-included via `[package.metadata.dist] dist = true` in
+# `crates/unblock-cli/Cargo.toml` — that opt-in is MANDATORY for this repo (§3.1 comment).
+[workspace]
+members = ["cargo:."]
+
+[dist]
+# Pin the dist version used in CI (managed by `dist init`/`dist generate`).
+cargo-dist-version = "0.32.0"
+ci = ["github"]
+installers = ["shell", "powershell"]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+]
+# Self-update surface (axoupdater) — ships in v1 (FR-25).
+install-updater = true
+# Provenance signing — GitHub artifact attestations (NFR-17), emitted by `actions/attest@v4`.
+# Publish-side provenance, verifiable out-of-band via `gh attestation verify`; NOT on the auto-update path.
+github-attestations = true
+# Per-artifact SHA256 checksum in dist-manifest.json — the SOLE client-side verify-before-swap gate
+# (NFR-17); set explicitly so a future `false` cannot silently remove the only integrity gate (MF-6).
+checksum = "sha256"
+# We SHA-pin every `uses:` in the generated `release.yml` (NFR-9). `allow-dirty = ["ci"]` tells dist
+# to (a) NOT fail `dist plan`/`build`/`host` on the resulting drift — those subcommands run as steps
+# INSIDE `release.yml`, so without this the real release would refuse — and (b) refuse to regenerate
+# the CI on `dist generate`, protecting the hand-applied pins from being clobbered. `cargo xtask
+# verify-pins` is the replacement freshness guard (it asserts the pins stay 40-char SHAs).
+allow-dirty = ["ci"]

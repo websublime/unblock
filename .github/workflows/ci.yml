@@ -17,9 +17,15 @@
 #   - rate-limit → T3.5 (P2) (NFR-18) — LANDED BELOW: the `RateLimited` mint + `Arc<Semaphore>`
 #     chokepoint AC (`tests/rate_limit.rs`); a cheap independent `-p unblock-mcp` leg — NOT riding the
 #     perf/scale corpus.
-# ONE job remains DEFERRED with its gating task (it depends on artefacts that do not exist yet):
+# The dist release pipeline (T3.6) adds THREE jobs. ONE lands here at T3.6 (P1):
+#   - verify-pins → T3.6 (NFR-9) — LANDED BELOW: `cargo xtask verify-pins` fails if any third-party
+#     `uses:` in `.github/workflows/*.yml` is not pinned to a 40-char SHA (backstops the standing
+#     NFR-9 re-pin duty; `dist` CLOBBERS the pins in the generated `release.yml` on every regen).
+# TWO jobs remain DEFERRED to T3.6 (P2) — they need the `no-network` scanner + the `--no-default-
+# features` confinement proof that ride the same later PR:
 #   - no-network  → T3.1/T3.6 (crate-scoped gate landed at T3.1/D27; the workspace-wide scan needs the
-#                              `unblock-cli` binary + the axoupdater/dist surface, T3.6)
+#                              `unblock-cli` binary + the axoupdater/dist surface, T3.6 P2)
+#   - feature-matrix → T3.6 (P2) (NFR-10/NFR-17) — `cargo build -p unblock-cli --no-default-features`.
 #
 # Feature policy (D15/NFR-10, ci-cd §2.2): the testkit clippy/test steps use TARGETED features
 # (`-p unblock-storage --features testkit`), never `--all-features` — `--all-features` resolves the
@@ -265,6 +271,20 @@ jobs:
           toolchain: 1.96.0
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - run: cargo xtask doc-lint
+
+  verify-pins:
+    name: verify-pins (NFR-9 action SHA-pinning)
+    # T3.6/D4 (ci-cd §2). Fails if any third-party `uses:` in `.github/workflows/*.yml` is not pinned
+    # to a 40-char commit SHA — backstops the standing NFR-9 re-pin duty (`dist` CLOBBERS the pins in
+    # `release.yml` on every regen; the floating `actions/attest@v4` in dist's template is the risk).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.96.0
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - run: cargo xtask verify-pins
 
   toolchain:
     name: toolchain (NFR-12 stable 1.96 --locked)

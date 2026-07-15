@@ -96,6 +96,11 @@ github-attestations = true
 # Per-artifact SHA256 checksum in dist-manifest.json — the SOLE client-side verify-before-swap gate
 # (NFR-17); set explicitly in the P1 dist config so a future `false` cannot silently remove the gate.
 checksum = "sha256"
+# We SHA-pin every `uses:` in the generated `release.yml` (NFR-9). `allow-dirty = ["ci"]` makes dist
+# (a) NOT fail `dist plan`/`build`/`host` on that drift — they run as steps INSIDE `release.yml`, so
+# without it the real release would refuse — and (b) refuse to regenerate the CI, protecting the pins
+# from being clobbered. `cargo xtask verify-pins` is the replacement freshness guard.
+allow-dirty = ["ci"]
 
 # MANDATORY force-include (every workspace crate is publish=false, so dist would otherwise ship ZERO
 # apps): mark the shipped `unblock` binary in crates/unblock-cli/Cargo.toml —
@@ -106,6 +111,24 @@ checksum = "sha256"
 > Exact key names track the pinned `dist` version (`0.32.0`, managed via `dist init`/`dist generate`); the
 > config lives in `dist-workspace.toml` `[dist]` (canonical since dist 0.24.0). The single distributed binary
 > is `unblock` (from `unblock-cli`), force-included via `[package.metadata.dist] dist = true` on that crate.
+> `dist init` also adds a `[profile.dist]` (`inherits = "release"`, `lto = "thin"`) to the root `Cargo.toml`
+> — REQUIRED, since the generated `release.yml` builds with `--profile dist`. dist derives the release App
+> from the **package** name (`unblock-cli`), so archives/installers/the axoupdater install receipt are named
+> `unblock-cli-*` even though the shipped binary is `unblock` (relevant to the P2 self-update receipt env).
+>
+> **P2 corrective (supersedes design-review MF-4 and the spec/plan §3 D7 `unblock` naming):** because the App-name
+> is the package name `unblock-cli`, the install receipt is `unblock-cli-receipt.json`. P2's G1 self-update fix MUST
+> call `AxoUpdater::new_for("unblock-cli")` (or `load_receipt_as("unblock-cli")`) and the D7 fixture MUST use
+> `unblock-cli-receipt.json` / `AXOUPDATER_APP_NAME=unblock-cli` — the constructor + receipt name MUST equal the
+> App-name P1 ships. (Miguel's GA branding ruling, 2026-07-15: accept `unblock-cli-*`, no package rename — dist
+> 0.32.0 offers no app-name override.)
+>
+> **Hand-applied post-generation edits to `release.yml`** (protected by `allow-dirty = ["ci"]`; a `dist generate`
+> would clobber them, so re-apply after any regen — `cargo xtask verify-pins` backstops the SHA-pins): (1) every
+> third-party `uses:` is SHA-pinned to a 40-char commit (NFR-9); (2) the 5 publish-step `GH_TOKEN` envs use
+> `${{ secrets.WS_GH_TOKEN }}` because the org restricts the default `GITHUB_TOKEN` (the `WS_GH_TOKEN` PAT needs
+> `contents: write`). The `actions/attest` provenance step is UNCHANGED — it uses the workflow OIDC identity
+> (`id-token`/`attestations: write`), not the PAT.
 
 ### 3.2 What it produces per release
 - Cross-platform archives for all 6 target triples (NFR-11: self-contained binary, no runtime system deps).

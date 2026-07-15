@@ -14,3 +14,8 @@ serde_json = { workspace = true }
 # Drives the `doc-lint` subcommand's regex-specified rule set (ci-cd §2.1). Already in the lock
 # transitively (tracing-subscriber env-filter) — direct use here adds no new transitive surface.
 regex = { workspace = true }
+
+[dev-dependencies]
+# Fixture trees for the `verify-pins` corpus + non-vacuity integration test (tests/verify_pins_corpus.rs).
+# Already a workspace dependency (cli/config/engine dev-dep it) — no new transitive surface.
+tempfile = { workspace = true }

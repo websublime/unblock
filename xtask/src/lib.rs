@@ -10,6 +10,8 @@
 //!   absolute-ms ceilings, D34) by reading criterion's `estimates.json`.
 //! - [`bench_compare::bench_compare`] reports the NFR-1 tier-i ADVISORY relative-10% delta against a
 //!   committed baseline (D34/F-1) — report-only, never fails a PR/nightly.
+//! - [`verify_pins::verify_pins`] fails if any third-party `uses:` in `.github/workflows/*.yml` is
+//!   not pinned to a 40-char commit SHA (NFR-9); [`verify_pins::scan_workflow`] is the testable core.
 //!
 //! The `xtask` binary (`src/main.rs`) is a thin dispatcher over this library.
 #![forbid(unsafe_code)]
@@ -18,3 +20,4 @@ pub mod bench_compare;
 pub mod bench_gate;
 pub mod doc_lint;
 pub mod layering;
+pub mod verify_pins;
