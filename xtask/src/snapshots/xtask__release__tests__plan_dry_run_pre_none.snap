@@ -1,0 +1,32 @@
+---
+source: xtask/src/release.rs
+expression: out
+---
+═══ unblock release ═══
+  ✓ on branch `main` (HEAD is `main`)
+  ✓ working tree is clean
+  ✓ local `main` is in sync with `origin/main`
+  ⚠ reminder: the publish step needs a `WS_GH_TOKEN` repo secret with `contents: write` (cannot be verified from here — see ci-cd §3.1).
+Release type:
+  1) pre-release (rc)
+  2) final
+Choose [1/2]: Version bump:
+  1) none (release current version as-is)
+  2) patch
+  3) minor
+  4) major
+Choose [1/2/3/4]: 
+┌─ Release plan ─────────────────────────┐
+│ version       : 1.0.0 → 1.0.0-rc.1     │
+│ tag           : v1.0.0-rc.1            │
+│ pre-release   : yes (rc)               │
+│ files changed : Cargo.toml, Cargo.lock │
+└────────────────────────────────────────┘
+IRREVERSIBLE: pushing v1.0.0-rc.1 triggers the public dist release and CANNOT be undone.
+
+[dry-run] would: set [workspace.package] version = "1.0.0-rc.1" in Cargo.toml
+[dry-run] would: cargo update --workspace
+[dry-run] would: git add -- Cargo.toml Cargo.lock && git commit -m "release: v1.0.0-rc.1"
+[dry-run] would: git tag -a v1.0.0-rc.1 -m "release v1.0.0-rc.1"
+[dry-run] would: git push --atomic origin main v1.0.0-rc.1
+[dry-run] no changes made; working tree untouched
