@@ -24,6 +24,7 @@
 //! [`tag_of`], [`compute_target`]); the git / cargo / filesystem effects go through the
 //! [`ReleaseEnv`] seam so the whole flow is testable against a fake (no real repo mutation).
 
+use std::ffi::OsStr;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -280,7 +281,8 @@ trait ReleaseEnv {
 struct GitEnv {
     /// Workspace root (holds `Cargo.toml`, the `.git` worktree).
     root: PathBuf,
-    /// The once-decided color choice (from `run()`), threaded into the stderr progress spinner.
+    /// The once-decided STDERR color choice (from `run()`, keyed on `stderr().is_terminal()`),
+    /// threaded into the stderr progress spinner.
     color: bool,
 }
 
@@ -423,12 +425,15 @@ impl ReleaseEnv for GitEnv {
 // ---------------------------------------------------------------------------------------------
 // Presentation (styling primitives over `anstyle` + a stderr progress spinner).
 //
-// Color is an EXPLICIT decision made ONCE in `run()` — from `stdout().is_terminal()` plus the
-// `NO_COLOR` / `CLICOLOR` / `CLICOLOR_FORCE` env signals — and THREADED through the flow; it is never
-// auto-detected from the output sink. With color off, `Painted` writes plain text (no ESC byte), so
-// the captured test output stays deterministic. `anstyle` is already in the lock via clap, so this
-// adds no new transitive surface (ci-cd §3.3). All styled output flows through the same `out`
-// writer; the spinner is the sole stderr writer (diagnostics → stderr, NFR-14).
+// Color is an EXPLICIT decision made ONCE in `run()` from the `NO_COLOR` / `CLICOLOR` /
+// `CLICOLOR_FORCE` env signals plus the SINK's own TTY-ness — and THREADED through the flow; it is
+// never auto-detected mid-write. Two INDEPENDENT decisions are made: the `out` (stdout) palette from
+// `stdout().is_terminal()`, and a SEPARATE stderr palette from `stderr().is_terminal()` for the
+// progress spinner + top-level error lines, so a redirected stderr (`2>log`) stays plain even when
+// stdout is a TTY. With color off, `Painted` writes plain text (no ESC byte), so the captured test
+// output stays deterministic. `anstyle` is already in the lock via clap, so this adds no new
+// transitive surface (ci-cd §3.3). All stdout styling flows through the same `out` writer; the
+// spinner is the sole stderr writer (diagnostics → stderr, NFR-14).
 // ---------------------------------------------------------------------------------------------
 
 /// A green "check passed" style.
@@ -515,21 +520,49 @@ fn resolve_color(
     }
 }
 
-/// Gather the env signals + `stdout().is_terminal()` and decide color once (see [`resolve_color`]).
-fn detect_color() -> bool {
-    let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
-    let clicolor_force = std::env::var_os("CLICOLOR_FORCE")
-        .is_some_and(|v| !v.is_empty() && v.to_str() != Some("0"));
-    let clicolor = match std::env::var_os("CLICOLOR") {
+/// Map the raw process env values (as `var_os` yields them) + a sink's TTY-ness to the color
+/// decision. PURE glue over [`resolve_color`] (so the env→color parsing is unit-tested apart from the
+/// process env): `NO_COLOR` counts only when NON-EMPTY; `CLICOLOR_FORCE` forces on only for a
+/// non-empty, non-`0` value; `CLICOLOR` maps `0`→off and any other non-empty value→on, while empty
+/// (or absent) is "unset" and falls through to the TTY. `OsStr` (not `str`) is kept so a non-UTF-8
+/// value maps exactly as the process reads it.
+fn color_from_env(
+    no_color: Option<&OsStr>,
+    clicolor_force: Option<&OsStr>,
+    clicolor: Option<&OsStr>,
+    is_terminal: bool,
+) -> bool {
+    let no_color = no_color.is_some_and(|v| !v.is_empty());
+    let clicolor_force = clicolor_force.is_some_and(|v| !v.is_empty() && v.to_str() != Some("0"));
+    let clicolor = match clicolor {
         Some(v) if v.is_empty() => None,
         Some(v) => Some(v.to_str() != Some("0")),
         None => None,
     };
-    resolve_color(
-        no_color,
-        clicolor_force,
-        clicolor,
+    resolve_color(no_color, clicolor_force, clicolor, is_terminal)
+}
+
+/// Read the env signals + `stdout().is_terminal()` and decide the STDOUT color once (the `out` sink);
+/// thin process-env glue over [`color_from_env`].
+fn detect_color() -> bool {
+    color_from_env(
+        std::env::var_os("NO_COLOR").as_deref(),
+        std::env::var_os("CLICOLOR_FORCE").as_deref(),
+        std::env::var_os("CLICOLOR").as_deref(),
         io::stdout().is_terminal(),
+    )
+}
+
+/// Read the env signals + `stderr().is_terminal()` and decide the STDERR color once (the progress
+/// spinner + top-level error lines). Keyed on STDERR's OWN TTY-ness — not stdout's — so a redirected
+/// stderr (`2>log`) stays plain even when stdout is a TTY. Thin process-env glue over
+/// [`color_from_env`].
+fn detect_err_color() -> bool {
+    color_from_env(
+        std::env::var_os("NO_COLOR").as_deref(),
+        std::env::var_os("CLICOLOR_FORCE").as_deref(),
+        std::env::var_os("CLICOLOR").as_deref(),
+        io::stderr().is_terminal(),
     )
 }
 
@@ -623,9 +656,15 @@ fn spinner_frame(tick: usize, label: &str, palette: Palette) -> String {
     format!("{} {label}…", palette.paint(STYLE_HEADER, frame))
 }
 
-/// The "step done" line printed after an animated slow step completes.
+/// The green "step done" success line — printed only after a slow step returns `Ok`.
 fn progress_done_line(label: &str, palette: Palette) -> String {
     format!("{} {label} done", palette.paint(STYLE_OK, "✓"))
+}
+
+/// The red "step failed" line — printed when a slow step returns `Err`, NEVER the green ✓ "done"
+/// success line (which would misreport a failed `git fetch` / `cargo update` as a success).
+fn progress_fail_line(label: &str, palette: Palette) -> String {
+    format!("{} {label} failed", palette.paint(STYLE_ERR, "✗"))
 }
 
 /// A background-thread spinner that renders frames to a writer until stopped, then clears its line
@@ -635,12 +674,16 @@ fn progress_done_line(label: &str, palette: Palette) -> String {
 struct Spinner {
     /// Signals the render thread to stop.
     stop: Arc<AtomicBool>,
+    /// The step OUTCOME, read by the render thread after it stops to choose the end line (green ✓
+    /// "done" vs red ✗ "failed"). Set by [`Spinner::stop`] BEFORE the stop flag is raised.
+    success: Arc<AtomicBool>,
     /// The render-thread handle, joined on stop / drop.
     handle: Option<thread::JoinHandle<()>>,
 }
 
 impl Spinner {
-    /// Spawn the render thread, drawing `label` frames to `writer` until [`Spinner::stop`].
+    /// Spawn the render thread, drawing `label` frames to `writer` until [`Spinner::stop`], which also
+    /// reports the step OUTCOME (done vs failed) on the cleared line.
     fn start<W: Write + Send + 'static>(
         mut writer: W,
         label: String,
@@ -648,34 +691,49 @@ impl Spinner {
         clear_width: usize,
     ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
+        // Default `true`: the `Drop` safety-net path (no explicit `stop`) reports "done", matching the
+        // prior behaviour; the normal path always calls `stop(success)` with the real outcome first.
+        let success = Arc::new(AtomicBool::new(true));
         let flag = Arc::clone(&stop);
+        let ok_flag = Arc::clone(&success);
         let handle = thread::spawn(move || {
             let mut tick = 0usize;
-            while !flag.load(Ordering::Relaxed) {
+            // `Acquire` pairs with the `Release` store in `join`, so once the loop observes the stop
+            // flag it is guaranteed to also observe the `success` value stored before it.
+            while !flag.load(Ordering::Acquire) {
                 let _ = write!(writer, "\r{}", spinner_frame(tick, &label, palette));
                 let _ = writer.flush();
                 tick = tick.wrapping_add(1);
                 thread::sleep(Duration::from_millis(SPIN_INTERVAL_MS));
             }
-            // Erase the spinner line, then report the step done, so the flow continues clean.
+            // Erase the spinner line, then report the step OUTCOME — a failed step gets the red ✗
+            // "failed" line, NEVER the green ✓ "done" success line — so the flow continues clean.
             let _ = write!(writer, "\r{}\r", " ".repeat(clear_width));
-            let _ = writeln!(writer, "{}", progress_done_line(&label, palette));
+            let end = if ok_flag.load(Ordering::Relaxed) {
+                progress_done_line(&label, palette)
+            } else {
+                progress_fail_line(&label, palette)
+            };
+            let _ = writeln!(writer, "{end}");
             let _ = writer.flush();
         });
         Spinner {
             stop,
+            success,
             handle: Some(handle),
         }
     }
 
-    /// Signal stop and join the render thread.
-    fn stop(mut self) {
+    /// Record the step `success`, then signal stop and join the render thread.
+    fn stop(mut self, success: bool) {
+        self.success.store(success, Ordering::Relaxed);
         self.join();
     }
 
     /// Idempotent stop+join used by both [`Spinner::stop`] and `Drop`.
     fn join(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
+        // `Release` publishes the `success` store (in `stop`) to the render thread's `Acquire` load.
+        self.stop.store(true, Ordering::Release);
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
@@ -688,25 +746,38 @@ impl Drop for Spinner {
     }
 }
 
-/// Run a slow blocking step while presenting progress on `err` (stderr in production). Animated when
-/// `is_tty` (a background thread renders frames + a "done" line), else a single static line is printed
-/// before the step. STDERR-only — it never touches the `out` sink (diagnostics → stderr, NFR-14).
-fn with_progress<W: Write + Send + 'static, T>(
+/// Run a slow blocking step while presenting progress on `err` (stderr in production), returning the
+/// step's `Result`. Animated when `is_tty` (a background thread renders frames, then an OUTCOME line
+/// on stop), else a static in-progress line + an outcome line around the step. The outcome line is the
+/// green ✓ "done" line ONLY when the step returns `Ok`; on `Err` it is the red ✗ "failed" line, so a
+/// failed step is NEVER shown as succeeded. STDERR-only — never touches the `out` sink (NFR-14).
+fn with_progress<W: Write + Send + 'static, T, E>(
     mut err: W,
     label: &str,
     palette: Palette,
     is_tty: bool,
-    slow: impl FnOnce() -> T,
-) -> T {
+    slow: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E> {
     if !is_tty {
+        // Non-TTY (redirected / CI): a static in-progress line, the step, then an outcome line — a
+        // failed step gets the red ✗ "failed" line, NEVER a green ✓, mirroring the animated branch.
         let _ = writeln!(err, "{}", progress_static_line(label, palette));
         let _ = err.flush();
-        return slow();
+        let result = slow();
+        let end = if result.is_ok() {
+            progress_done_line(label, palette)
+        } else {
+            progress_fail_line(label, palette)
+        };
+        let _ = writeln!(err, "{end}");
+        let _ = err.flush();
+        return result;
     }
     let clear_width = label.chars().count() + 3;
     let spinner = Spinner::start(err, label.to_owned(), palette, clear_width);
     let result = slow();
-    spinner.stop();
+    // Thread the OUTCOME into the stop path so the "done" / "failed" line reflects the real result.
+    spinner.stop(result.is_ok());
     result
 }
 
@@ -1003,9 +1074,15 @@ fn orchestrate(
 #[must_use]
 pub fn run() -> ExitCode {
     let dry_run = std::env::args().any(|a| a == "--dry-run");
-    // Decide color ONCE (from stdout's TTY-ness + the env signals) and thread it through the flow.
+    // STDOUT styling: decided ONCE from stdout's TTY-ness + the env signals, threaded through the
+    // flow's `out` sink.
     let palette = Palette {
         color: detect_color(),
+    };
+    // STDERR styling is a SEPARATE decision keyed on stderr's OWN TTY-ness, so a redirected stderr
+    // (`2>log`) stays plain even when stdout is a TTY. Used for the spinner + the error lines below.
+    let err_palette = Palette {
+        color: detect_err_color(),
     };
 
     let root = match workspace_root() {
@@ -1013,7 +1090,7 @@ pub fn run() -> ExitCode {
         Err(err) => {
             eprintln!(
                 "{}",
-                palette.paint(
+                err_palette.paint(
                     STYLE_ERR,
                     &format!("release: could not locate workspace root: {err}")
                 )
@@ -1023,7 +1100,7 @@ pub fn run() -> ExitCode {
     };
     let env = GitEnv {
         root,
-        color: palette.color,
+        color: err_palette.color,
     };
 
     let stdin = io::stdin();
@@ -1034,7 +1111,10 @@ pub fn run() -> ExitCode {
     match orchestrate(&env, &mut input, &mut out, dry_run, palette) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!("{}", palette.paint(STYLE_ERR, &format!("release: {err}")));
+            eprintln!(
+                "{}",
+                err_palette.paint(STYLE_ERR, &format!("release: {err}"))
+            );
             ExitCode::FAILURE
         }
     }
@@ -1605,6 +1685,35 @@ libsql = { version = \"0.9.30\" }
     }
 
     #[test]
+    fn color_from_env_maps_the_process_signals() {
+        // The env→color glue (`detect_color` / `detect_err_color` delegate here); `os` builds the
+        // `OsStr` a `var_os` read would yield.
+        let os = OsStr::new;
+        // NO_COLOR: only a NON-EMPTY value disables; EMPTY or ABSENT is "unset" (falls to the TTY).
+        assert!(!color_from_env(Some(os("1")), None, None, true)); // set, non-empty → off
+        assert!(color_from_env(Some(os("")), None, None, true)); // set but EMPTY → unset → TTY on
+        assert!(color_from_env(None, None, None, true)); // absent → follows TTY (on)
+        // NO_COLOR dominates even a TTY + CLICOLOR_FORCE.
+        assert!(!color_from_env(Some(os("1")), Some(os("1")), None, true));
+        // CLICOLOR_FORCE: forces on even without a TTY; a `0` or EMPTY value does NOT force.
+        assert!(color_from_env(None, Some(os("1")), None, false));
+        assert!(!color_from_env(None, Some(os("0")), None, false));
+        assert!(!color_from_env(None, Some(os("")), None, false));
+        // CLICOLOR: `0` disables even on a TTY; a non-empty non-`0` and "unset" both defer to the TTY.
+        assert!(!color_from_env(None, None, Some(os("0")), true));
+        assert!(color_from_env(None, None, Some(os("1")), true));
+        assert!(!color_from_env(None, None, Some(os("1")), false)); // clicolor=1 but no TTY → off
+        assert!(color_from_env(None, None, Some(os("")), true)); // EMPTY CLICOLOR → unset → TTY on
+        assert!(!color_from_env(None, None, Some(os("")), false));
+        // Precedence: CLICOLOR_FORCE overrides CLICOLOR=0 (and the missing TTY).
+        assert!(color_from_env(None, Some(os("1")), Some(os("0")), false));
+        // The IsTerminal fallback with every signal unset (redirected stderr `2>log` ⇒ is_terminal
+        // false ⇒ plain — the fix-4 guarantee).
+        assert!(color_from_env(None, None, None, true));
+        assert!(!color_from_env(None, None, None, false));
+    }
+
+    #[test]
     fn painted_emits_ansi_only_when_color_on() {
         let on = Palette { color: true };
         let off = Palette { color: false };
@@ -1634,6 +1743,14 @@ libsql = { version = \"0.9.30\" }
         assert!(
             progress_done_line("updating Cargo.lock", off).contains("updating Cargo.lock done")
         );
+        // The failure line names the step as `failed` (never `done`) and is styled red when color on.
+        let fail = progress_fail_line("updating Cargo.lock", off);
+        assert!(fail.contains("updating Cargo.lock failed"));
+        assert!(
+            !fail.contains("done"),
+            "a failure line must not say `done`: {fail}"
+        );
+        assert!(progress_fail_line("x", on).as_bytes().contains(&0x1b));
     }
 
     #[test]
@@ -1671,6 +1788,33 @@ libsql = { version = \"0.9.30\" }
         insta::assert_snapshot!("plan_dry_run_final_minor_color_on", out);
     }
 
+    #[test]
+    fn styled_real_run_pins_banner_and_success_ansi_when_color_on() {
+        let env = FakeEnv::ok();
+        // Both typed gates match `v1.1.0` and color is ON, so `execute()` renders the LOUD
+        // white-on-red IRREVERSIBLE banner (STYLE_LOUD) and the green success line (STYLE_OK) — this
+        // pins their ANSI so dropping the banner style/bg or the success color would go red.
+        let (res, out, calls) = drive_colored(&env, "2\n3\nv1.1.0\nv1.1.0\n", false, true);
+        assert!(res.is_ok(), "both confirmations should complete: {res:?}");
+        assert!(
+            out.as_bytes().contains(&0x1b),
+            "color-on real run must carry ANSI (ESC) bytes"
+        );
+        // The safety model is unchanged under color: the full ordered mutation sequence still fires.
+        assert_eq!(
+            calls,
+            vec![
+                "set_version 1.1.0".to_owned(),
+                "cargo_update".to_owned(),
+                "commit release: v1.1.0".to_owned(),
+                "tag v1.1.0".to_owned(),
+                "push_atomic main v1.1.0".to_owned(),
+            ],
+            "color must not perturb the mutation sequence"
+        );
+        insta::assert_snapshot!("real_run_full_stdout_color_on", out);
+    }
+
     /// A `Write` over a shared buffer so a test can capture BOTH the caller-thread (static) and the
     /// spinner-thread (animated) writes without touching the real stderr fd.
     struct SharedBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
@@ -1690,21 +1834,30 @@ libsql = { version = \"0.9.30\" }
     }
 
     #[test]
-    fn with_progress_static_branch_runs_step_and_prints_one_line() {
+    fn with_progress_static_branch_runs_step_and_reports_ok_outcome() {
         let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         // is_tty = false ⇒ the static-fallback branch runs inline on this thread.
-        let got = with_progress(
+        let got: Result<i32, String> = with_progress(
             SharedBuf(std::sync::Arc::clone(&buf)),
             "fetching origin",
             Palette { color: false },
             false,
-            || 5,
+            || Ok(5),
         );
-        assert_eq!(got, 5, "must return the slow step's value");
+        assert_eq!(got, Ok(5), "must return the slow step's Result");
         let s = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
         assert!(
             s.contains("fetching origin"),
             "static line must name the step:\n{s}"
+        );
+        // An OK step reports the green "done" line — never the "failed" line.
+        assert!(
+            s.contains("fetching origin done"),
+            "an OK static step reports done:\n{s}"
+        );
+        assert!(
+            !s.contains("failed"),
+            "an OK step must not report failed:\n{s}"
         );
         assert!(!s.as_bytes().contains(&0x1b), "color off ⇒ no ESC");
     }
@@ -1715,21 +1868,70 @@ libsql = { version = \"0.9.30\" }
         // is_tty = true ⇒ the spinner thread renders frames, then (on join) a "done" line. The
         // injected buffer proves the thread started, was joined cleanly, and reported completion —
         // with NO real-stderr leak.
-        let got = with_progress(
+        let got: Result<i32, String> = with_progress(
             SharedBuf(std::sync::Arc::clone(&buf)),
             "updating Cargo.lock",
             Palette { color: false },
             true,
             || {
                 thread::sleep(Duration::from_millis(5));
-                9
+                Ok(9)
             },
         );
-        assert_eq!(got, 9, "must return the slow step's value");
+        assert_eq!(got, Ok(9), "must return the slow step's Result");
         let s = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
         assert!(
             s.contains("updating Cargo.lock done"),
             "the animated path must clear + print a done line after joining:\n{s}"
+        );
+    }
+
+    #[test]
+    fn with_progress_failed_step_never_reports_success() {
+        // Animated branch (is_tty = true): a FAILING step must NOT print the green "✓ … done" success
+        // line — it prints the red ✗ "failed" line instead, and the `Err` propagates. Non-vacuous:
+        // revert the spinner's outcome threading and the `!… done` assert goes red.
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let got: Result<(), String> = with_progress(
+            SharedBuf(std::sync::Arc::clone(&buf)),
+            "fetching origin",
+            Palette { color: false },
+            true,
+            || Err("offline".to_owned()),
+        );
+        assert_eq!(
+            got,
+            Err("offline".to_owned()),
+            "the step error must propagate"
+        );
+        let s = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(
+            !s.contains("fetching origin done"),
+            "a FAILED animated step must not print the success `… done` line:\n{s}"
+        );
+        assert!(
+            s.contains("fetching origin failed"),
+            "a FAILED animated step should print the failure line:\n{s}"
+        );
+
+        // Static branch (is_tty = false): same guarantee.
+        let buf2 = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let got2: Result<(), String> = with_progress(
+            SharedBuf(std::sync::Arc::clone(&buf2)),
+            "updating Cargo.lock",
+            Palette { color: false },
+            false,
+            || Err("boom".to_owned()),
+        );
+        assert_eq!(got2, Err("boom".to_owned()));
+        let s2 = String::from_utf8(buf2.lock().unwrap().clone()).unwrap();
+        assert!(
+            !s2.contains("updating Cargo.lock done"),
+            "a FAILED static step must not print the success `… done` line:\n{s2}"
+        );
+        assert!(
+            s2.contains("updating Cargo.lock failed"),
+            "a FAILED static step should print the failure line:\n{s2}"
         );
     }
 
@@ -1744,6 +1946,6 @@ libsql = { version = \"0.9.30\" }
             20,
         );
         thread::sleep(Duration::from_millis(5));
-        spinner.stop();
+        spinner.stop(true);
     }
 }
