@@ -6,7 +6,7 @@
 - **Relates to:** PRD `docs/PRD.md` (NFR-9 supply-chain, NFR-11 portability, NFR-12 stable toolchain, NFR-17 self-update/signing, FR-25 self-update, D9 stable Rust), implementation plan §7 (cross-cutting CI).
 - **Tooling:** [`dist`](https://github.com/axodotdev/cargo-dist) (formerly `cargo-dist`) for the release/distribution pipeline.
 
-> **Locked decisions (this doc):** targets = mac + linux + windows on x86_64 **and** aarch64 (6 triples);
+> **Locked decisions (this doc):** targets = mac + linux on x86_64 **and** aarch64, windows on x86_64 (5 triples);
 > installers = **shell + powershell**; **self-update via `axoupdater` shipped in v1**; signing = **GitHub
 > artifact attestations**. (See PRD D17.)
 
@@ -61,7 +61,7 @@ Runs on `pull_request` and pushes to the default branch. Jobs (all on stable `1.
 
 `cargo xtask doc-lint` — a mechanical, offline, sub-second lint over a **fixed 19-file corpus** (`docs/PRD.md`; the six `docs/plans/*.md` — `00-roadmap`, `01-design-spine`, `README`, `STATUS`, `ci-cd-and-distribution`, `implementation-plan`; the 12 `docs/plans/crates/unblock-*.md` incl. fuzz). `docs/PROCESS.md` and `docs/plans/templates/*` are **out of corpus**. An existence-guard FAILs on any missing **or** unexpected corpus file (a smaller-than-expected corpus is a vacuous pass). Global guards: a `CommonMark` block-fence mask (all classes skip fenced lines), an inline-code-span index (class (c) fires only in-code), a never-finding glyph set (`● ◐ — ☑ ⊘ ☐`), and an approximate-number guard (`≈`/`~`). Findings are sorted `(file, line, class)` and emitted as `path:line: [x] msg` on stderr; clean ⇒ `doc-lint OK: 19 docs, 6 classes clean` on stdout, exit 0. It checks:
 
-- **(a) D-id coherence** — each `D-id` (D1..D35) appears with the **same** version tag, packaging, and verification scheme everywhere it is referenced (would have caught D12-vs-D17 self-update drift). *(The D-set is PRD-§4-data-driven: the lint parses the defined ids from the `| **Dx** |` rows and resolves membership against that set — the range is documentation, not a hard-coded regex; adding D35 to PRD §4 extends the set with no lint code change.)*
+- **(a) D-id coherence** — each `D-id` (D1..D36) appears with the **same** version tag, packaging, and verification scheme everywhere it is referenced (would have caught D12-vs-D17 self-update drift). *(The D-set is PRD-§4-data-driven: the lint parses the defined ids from the `| **Dx** |` rows and resolves membership against that set — the range is documentation, not a hard-coded regex; adding D36 to PRD §4 extends the set with no lint code change.)*
 - **(b) FR/NFR tier coherence** — each `FR-id`/`NFR-id` resolves to a PRD definition and carries a **consistent tier** (v1/v1.1/v1.2/v1.3/v1.4/v1.5) across all docs (would have caught the FR-25 version drift).
 - **(c) command-token spelling** — every user-facing `unblock <cmd>` token is spelled identically across PRD, roadmap, README, this doc, and the cli plan (the canonical self-update token is **`unblock update`**; the `self-update` Cargo feature name is deliberately distinct, per CF-K).
 - **(d) source-of-truth stamp** — the `PRD APPROVED vX.Y` stamp in every doc matches the PRD header revision (currently **v1.1**).
@@ -87,7 +87,7 @@ installers = ["shell", "powershell"]
 targets = [
   "x86_64-unknown-linux-gnu",  "aarch64-unknown-linux-gnu",
   "x86_64-apple-darwin",       "aarch64-apple-darwin",
-  "x86_64-pc-windows-msvc",    "aarch64-pc-windows-msvc",
+  "x86_64-pc-windows-msvc",
 ]
 # Self-update surface (axoupdater) — ships in v1 (FR-25)
 install-updater = true
@@ -131,7 +131,7 @@ allow-dirty = ["ci"]
 > (`id-token`/`attestations: write`), not the PAT.
 
 ### 3.2 What it produces per release
-- Cross-platform archives for all 6 target triples (NFR-11: self-contained binary, no runtime system deps).
+- Cross-platform archives for all 5 target triples (NFR-11: self-contained binary, no runtime system deps).
 - **shell** (`curl … | sh`) and **powershell** (`irm … | iex`) installers.
 - SHA256 checksums + a machine-readable `dist-manifest.json`.
 - **GitHub artifact attestations** (provenance) on every artifact, emitted by `actions/attest@v4` (NFR-17) — publish-side, verifiable out-of-band via `gh attestation verify`, not consulted on the auto-update path.
@@ -201,7 +201,7 @@ automates that step behind a strict, human-operated safety model.
 |---|---|
 | NFR-9 supply-chain | CI: clippy/forbid, `cargo audit` + `cargo deny`, committed `Cargo.lock`, SHA-pinned actions (incl. dist-generated workflow). |
 | NFR-10 minimize deps | `cargo deny` transitive budget; dropping the `self_update` reqwest/TLS stack in favour of `axoupdater`. |
-| NFR-11 portability | 6 target triples, single self-contained binary; (optional musl for fully-static Linux — see Open Items). |
+| NFR-11 portability | 5 target triples, single self-contained binary; (optional musl for fully-static Linux — see Open Items). |
 | NFR-12 stable toolchain | `toolchain` job pins `rust-toolchain.toml` to stable `1.96.0` and builds `--locked`; a green stable build is the gate (no nightly-only features). |
 | NFR-17 self-update/signing | publish-side attestations (`actions/attest@v4`, `gh attestation verify`); client verify-before-swap = the dist installer's SHA256 checksum (`dist-manifest.json`); no network on normal paths; the workspace-wide `no-network` symbol-scan job enforces confinement (whitelisting only the `self-update` axoupdater path). |
 | NFR-1/2/3 | `criterion` gate, 250k scale job, contention lab in CI. |
@@ -219,7 +219,7 @@ automates that step behind a strict, human-operated safety model.
 ## 7. Open items
 
 > **Out of v1 GA (D35):** the homebrew tap, npm installer, macOS notarization, and linux-musl below are all
-> deferred past v1 — shell + powershell installers across the 6 gnu/darwin/msvc triples cover the 1.0.0 GA.
+> deferred past v1 — shell + powershell installers across the 5 gnu/darwin/msvc triples cover the 1.0.0 GA.
 
 - **Homebrew tap** — add the `homebrew` installer + a `websublime/homebrew-tap` repo (deferred; shell/powershell cover v1).
 - **npm installer** — attractive because MCP clients are often Node (`npx unblock`); revisit post-v1 with an `@websublime` scope.

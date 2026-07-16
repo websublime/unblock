@@ -27,7 +27,7 @@ This directory holds the full planning corpus for the multi-crate Rust rewrite. 
 | [`crates/unblock-cli.md`](crates/unblock-cli.md) | L7. Reduced `unblock` binary — lifecycle/ops only (mcp/migrate/doctor/version/init/agents/`unblock update`), 0–8 exit-code boundary, cooperative shutdown. No domain features (D3). |
 | [`crates/unblock-fuzz.md`](crates/unblock-fuzz.md) | aux (unpublished). cargo-fuzz targets over the ingestion surfaces (content-hash, JSONL/bd import, config TOML, query filters, claim race). Sink crate; nothing depends on it. |
 | [`implementation-plan.md`](implementation-plan.md) | v1 walking-skeleton milestones M0–M3, task DAG (T-M.n), per-task acceptance criteria, MCP tool taxonomy. |
-| [`ci-cd-and-distribution.md`](ci-cd-and-distribution.md) | CI quality gate (from M0) + `dist` release pipeline at v1 GA: 6 target triples, shell+powershell installers, GitHub attestations, `axoupdater`-backed `unblock update` (D17). |
+| [`ci-cd-and-distribution.md`](ci-cd-and-distribution.md) | CI quality gate (from M0) + `dist` release pipeline at v1 GA: 5 target triples, shell+powershell installers, GitHub attestations, `axoupdater`-backed `unblock update` (D17). |
 
 **Total plan docs: 16** (1 roadmap + 1 spine + 12 crate plans + implementation plan + CI/CD plan).
 
