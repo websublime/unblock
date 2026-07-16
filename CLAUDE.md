@@ -14,7 +14,7 @@ codes are stable, a breaking change → 2.0.0. (Original source for reference on
 
 | Doc | Role |
 |---|---|
-| `docs/PRD.md` | Product truth — decisions (§4 D1..D35), FR/NFR, domain model, milestones. **APPROVED v1.1.** |
+| `docs/PRD.md` | Product truth — decisions (§4 D1..D36), FR/NFR, domain model, milestones. **APPROVED v1.1.** |
 | `docs/plans/01-design-spine.md` | **Authoritative interface contract** (types, `Storage` trait, `Session` API, MCP schemas, errors). |
 | `docs/plans/implementation-plan.md` | Task DAG M0–M3 (T-ids) + acceptance criteria. |
 | `docs/plans/STATUS.md` | **Live task registry** — what's done / in-progress / to-do (the system of record). |
@@ -95,5 +95,5 @@ create`); a human merges → on merge, flip the `STATUS.md` task to ☑ done.
 ## Build / CI / distribution
 
 Stable `cargo`; `cargo-audit` + `cargo-deny` (also bans any git crate, enforces the transitive budget); GitHub
-Actions pinned to 40-char SHAs. Release via **`dist`** (6 target triples, shell+powershell installers, GitHub
+Actions pinned to 40-char SHAs. Release via **`dist`** (5 target triples, shell+powershell installers, GitHub
 artifact attestations, `axoupdater`-backed `unblock update`). See `docs/plans/ci-cd-and-distribution.md`.

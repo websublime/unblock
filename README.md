@@ -45,8 +45,8 @@ model and no exit-code contract.
 
 ## Install
 
-Prebuilt installers are produced by [`dist`](https://github.com/axodotdev/cargo-dist) for six target
-triples (`x86_64`/`aarch64` on linux-gnu, macOS, and windows-msvc) — a single self-contained binary
+Prebuilt installers are produced by [`dist`](https://github.com/axodotdev/cargo-dist) for five target
+triples (`x86_64`/`aarch64` on linux-gnu and macOS, `x86_64` on windows-msvc) — a single self-contained binary
 with no runtime system dependencies.
 
 **Shell (Linux / macOS):**

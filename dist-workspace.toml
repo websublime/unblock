@@ -21,7 +21,6 @@ targets = [
     "x86_64-apple-darwin",
     "aarch64-apple-darwin",
     "x86_64-pc-windows-msvc",
-    "aarch64-pc-windows-msvc",
 ]
 # Self-update surface (axoupdater) — ships in v1 (FR-25).
 install-updater = true

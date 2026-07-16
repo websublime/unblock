@@ -100,7 +100,7 @@ Use it to preview the exact version and tag a real run would produce.
 When the tag lands, `release.yml` (generated from `dist-workspace.toml [dist]`, dist `0.32.0`) builds
 and publishes:
 
-- Cross-platform **archives** for all six target triples (self-contained binary, no runtime system
+- Cross-platform **archives** for all five target triples (self-contained binary, no runtime system
   deps).
 - **shell** (`curl … | sh`) and **powershell** (`irm … | iex`) installers.
 - **SHA256 checksums** plus a machine-readable **`dist-manifest.json`** — the sole client-side
@@ -128,7 +128,7 @@ To cut GA once the release PR is merged and `main` is clean and synced:
 2. Run `cargo xtask release --dry-run` and confirm the plan targets `v1.0.0`.
 3. Run `cargo xtask release`, choose **final** / **none** (release `1.0.0` as-is), and type `v1.0.0`
    at both confirmations.
-4. Watch `release.yml` complete; verify the GitHub Release, the six archives, both installers,
+4. Watch `release.yml` complete; verify the GitHub Release, the five archives, both installers,
    `dist-manifest.json`, and the attestations. The `releases/latest/download/` installer links in the
    README resolve once this release is published.
 
