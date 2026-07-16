@@ -178,6 +178,16 @@ automates that step behind a strict, human-operated safety model.
   regenerates into `release.yml`. NFR-9 (committed `Cargo.lock`) is preserved: the bump commit includes
   the refreshed lock. Semver stability from GA is D35's rule — the helper is the mechanical way to cut
   the tags that honour it.
+- **Presentation (T3.8).** The helper's terminal output is styled with `anstyle` (already in the lock
+  via clap → no new dependency): a header banner, colored pass/fail pre-flight checks, a boxed release
+  plan (with the version diff + tag emphasized), a loud red IRREVERSIBLE banner before the typed gate,
+  and colored success/abort lines. Color is decided ONCE from `stdout` (honouring `NO_COLOR`, `CLICOLOR`,
+  `CLICOLOR_FORCE`) and auto-disables on a non-TTY or when `NO_COLOR` is set — styling is a pure
+  presentation layer over the same output sink, so the safety model is UNCHANGED (numbered menus stay
+  numeric; the typed-tag double-confirmation stays free-text; `--dry-run` mutates nothing; the pre-flight
+  order and the atomic push are as above). The two slow steps (`git fetch`, `cargo update`) show a
+  TTY-gated spinner that degrades to a single static line off a TTY; the spinner and all diagnostics go
+  to **stderr**, structured output to **stdout** (NFR-14).
 
 ## 4. Self-update via `axoupdater` (FR-25, v1)
 
