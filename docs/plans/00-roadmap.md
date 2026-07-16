@@ -82,7 +82,7 @@ shape (only additive `contract_version` bumps).
 ### Lands (FRs)
 | FR | Capability | Crates |
 |---|---|---|
-| FR-6 | **Organization:** labels (rename/list-all), threaded comments (add/list), epic rollups + auto-close-eligibility | model, storage, engine, mcp |
+| FR-6 | **Organization (v1.1 remainder):** labels (rename/list-all), epic rollups + auto-close-eligibility. *(**Comments graduated to v1 — D37**: FLAT full-CRUD comments — add/list/update/delete — over the dedicated `comment` tool, landing at T3.9 and HOLDING the `v1.0.0` GA tag; NOT the "threaded (add/list)" v1.1 sketch.)* | model, storage, engine, mcp |
 | FR-1c (D20 seams) | **Restore extensions:** cascade-restore (needs a delete-batch identity to avoid over-reviving independently-tombstoned children) + TTL-refusal of expired tombstones (`deletions_retention_days`, reserved/unenforced in v1) | model, storage, engine, mcp |
 | FR-18 | **Swarm coordination diagnostics:** `scheduler` (ranked, explainable `unblock.scheduler.v1`); `coordination status` (`unblock.coordination.v1`, read-only stale-claim diagnosis). Purely DB-state-derived (Agent Mail dropped, PRD §12) | policy, engine, mcp |
 | FR-19 | **Workflow gates:** policy-driven (`.unblock/policy.toml`) transition gates (ci_green / min_reviewers / security_sign_off) | policy, config, engine, mcp |
@@ -396,7 +396,8 @@ Legend: ● lands · ◐ extended/hardened · ✗ = dropped · blank = not landi
 | Defer/undefer (FR-3) | ● | | | | | | |
 | Query: list/ready/blocked/search/count/stale (FR-4) | ● | | | ◐ milestone filter | | | |
 | Typed deps + graph (FR-5) | ● | | | | | | |
-| Labels / comments / epic rollups (FR-6) | | ● | | | | | |
+| Comments — full CRUD add/list/update/delete (FR-6, D37) | ● | | | | | | |
+| Labels (rename/list-all) / epic rollups (FR-6) | | ● | | | | | |
 | JSONL export/import (FR-7/8) | ● | | | ◐ milestones/goals layout (lock design point) | | | ◐ DB-only option |
 | `bd` one-shot import (FR-26) | ● | | | | | | |
 | Shared engine + write Semaphore + read fast path (FR-9/10) | ● | | ◐ primary-serialized topology | | ◐ TTL | | |
