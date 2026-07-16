@@ -24,10 +24,15 @@
 //! [`tag_of`], [`compute_target`]); the git / cargo / filesystem effects go through the
 //! [`ReleaseEnv`] seam so the whole flow is testable against a fake (no real repo mutation).
 
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::Duration;
 
+use anstyle::{AnsiColor, Color, Style};
 use semver::{Prerelease, Version};
 
 /// The kind of release the operator chose.
@@ -275,6 +280,8 @@ trait ReleaseEnv {
 struct GitEnv {
     /// Workspace root (holds `Cargo.toml`, the `.git` worktree).
     root: PathBuf,
+    /// The once-decided color choice (from `run()`), threaded into the stderr progress spinner.
+    color: bool,
 }
 
 impl GitEnv {
@@ -317,7 +324,14 @@ impl ReleaseEnv for GitEnv {
     }
 
     fn fetch_origin(&self) -> Result<(), String> {
-        self.git_ok(&["fetch", "origin"]).map(|_| ())
+        // A slow blocking step — show a stderr spinner (TTY) / static line (non-TTY) while it runs.
+        with_progress(
+            io::stderr(),
+            "fetching origin",
+            Palette { color: self.color },
+            io::stderr().is_terminal(),
+            || self.git_ok(&["fetch", "origin"]).map(|_| ()),
+        )
     }
 
     fn main_matches_origin(&self) -> Result<bool, String> {
@@ -363,19 +377,28 @@ impl ReleaseEnv for GitEnv {
     }
 
     fn cargo_update_workspace(&self) -> Result<(), String> {
-        let out = Command::new("cargo")
-            .current_dir(&self.root)
-            .args(["update", "--workspace"])
-            .output()
-            .map_err(|e| format!("failed to spawn `cargo update --workspace`: {e}"))?;
-        if out.status.success() {
-            Ok(())
-        } else {
-            Err(format!(
-                "`cargo update --workspace` failed: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            ))
-        }
+        // A slow blocking step — show a stderr spinner (TTY) / static line (non-TTY) while it runs.
+        with_progress(
+            io::stderr(),
+            "updating Cargo.lock",
+            Palette { color: self.color },
+            io::stderr().is_terminal(),
+            || {
+                let out = Command::new("cargo")
+                    .current_dir(&self.root)
+                    .args(["update", "--workspace"])
+                    .output()
+                    .map_err(|e| format!("failed to spawn `cargo update --workspace`: {e}"))?;
+                if out.status.success() {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "`cargo update --workspace` failed: {}",
+                        String::from_utf8_lossy(&out.stderr).trim()
+                    ))
+                }
+            },
+        )
     }
 
     fn git_commit_all(&self, message: &str) -> Result<(), String> {
@@ -395,6 +418,296 @@ impl ReleaseEnv for GitEnv {
         self.git_ok(&["push", "--atomic", "origin", branch, tag])
             .map(|_| ())
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Presentation (styling primitives over `anstyle` + a stderr progress spinner).
+//
+// Color is an EXPLICIT decision made ONCE in `run()` — from `stdout().is_terminal()` plus the
+// `NO_COLOR` / `CLICOLOR` / `CLICOLOR_FORCE` env signals — and THREADED through the flow; it is never
+// auto-detected from the output sink. With color off, `Painted` writes plain text (no ESC byte), so
+// the captured test output stays deterministic. `anstyle` is already in the lock via clap, so this
+// adds no new transitive surface (ci-cd §3.3). All styled output flows through the same `out`
+// writer; the spinner is the sole stderr writer (diagnostics → stderr, NFR-14).
+// ---------------------------------------------------------------------------------------------
+
+/// A green "check passed" style.
+const STYLE_OK: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Green)));
+/// A red "check failed" / error style.
+const STYLE_ERR: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Red)));
+/// A yellow "warning / cannot verify" style.
+const STYLE_WARN: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Yellow)));
+/// A bold-cyan header / progress-glyph style.
+const STYLE_HEADER: Style = Style::new()
+    .bold()
+    .fg_color(Some(Color::Ansi(AnsiColor::Cyan)));
+/// A bold style used to emphasize the version diff and the tag inside the plan box.
+const STYLE_EMPHASIS: Style = Style::new().bold();
+/// A LOUD bold white-on-red style for the irreversible-publish banner.
+const STYLE_LOUD: Style = Style::new()
+    .bold()
+    .fg_color(Some(Color::Ansi(AnsiColor::BrightWhite)))
+    .bg_color(Some(Color::Ansi(AnsiColor::Red)));
+
+/// The animation frames for the stderr progress spinner (Braille dots — each a single visible column).
+const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/// The spinner redraw interval.
+const SPIN_INTERVAL_MS: u64 = 90;
+
+/// A once-decided color choice, threaded through the flow. `Copy` so it is cheap to pass by value.
+#[derive(Clone, Copy)]
+struct Palette {
+    /// Whether ANSI styling is emitted (decided once in `run()`; forced `false` in tests).
+    color: bool,
+}
+
+impl Palette {
+    /// Wrap `text` in `style`'s ANSI SGR codes when color is enabled; otherwise render it verbatim.
+    fn paint(self, style: Style, text: &str) -> Painted<'_> {
+        Painted {
+            style,
+            text,
+            color: self.color,
+        }
+    }
+}
+
+/// A `Display` fragment that emits `style` around `text` only when `color` is set. With color off it
+/// writes the bytes of `text` unchanged, guaranteeing NO ESC (`0x1b`) byte reaches the sink.
+struct Painted<'a> {
+    /// The style to apply when `color` is set.
+    style: Style,
+    /// The text to render.
+    text: &'a str,
+    /// Whether to emit the ANSI codes.
+    color: bool,
+}
+
+impl std::fmt::Display for Painted<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.color {
+            // `{style}` renders the enable sequence, `{style:#}` the reset (anstyle's Display).
+            write!(f, "{}{}{:#}", self.style, self.text, self.style)
+        } else {
+            f.write_str(self.text)
+        }
+    }
+}
+
+/// Resolve the color decision from the standard env signals + whether stdout is a TTY. PURE (so it is
+/// unit-tested): `NO_COLOR` disables unconditionally; `CLICOLOR_FORCE` then forces on; `CLICOLOR=0`
+/// disables; otherwise color follows the TTY (the informal `NO_COLOR` / `CLICOLOR` conventions).
+fn resolve_color(
+    no_color: bool,
+    clicolor_force: bool,
+    clicolor: Option<bool>,
+    is_tty: bool,
+) -> bool {
+    if no_color {
+        return false;
+    }
+    if clicolor_force {
+        return true;
+    }
+    match clicolor {
+        Some(false) => false,
+        Some(true) | None => is_tty,
+    }
+}
+
+/// Gather the env signals + `stdout().is_terminal()` and decide color once (see [`resolve_color`]).
+fn detect_color() -> bool {
+    let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
+    let clicolor_force = std::env::var_os("CLICOLOR_FORCE")
+        .is_some_and(|v| !v.is_empty() && v.to_str() != Some("0"));
+    let clicolor = match std::env::var_os("CLICOLOR") {
+        Some(v) if v.is_empty() => None,
+        Some(v) => Some(v.to_str() != Some("0")),
+        None => None,
+    };
+    resolve_color(
+        no_color,
+        clicolor_force,
+        clicolor,
+        io::stdout().is_terminal(),
+    )
+}
+
+/// The styled command banner.
+fn show_header(out: &mut dyn Write, palette: Palette) -> Result<(), String> {
+    writeln!(
+        out,
+        "{}",
+        palette.paint(STYLE_HEADER, "═══ unblock release ═══")
+    )
+    .map_err(|e| io_err(&e))
+}
+
+/// Emit a pre-flight check line: a green check or a red cross followed by `label`.
+fn check_line(out: &mut dyn Write, palette: Palette, ok: bool, label: &str) -> Result<(), String> {
+    let (glyph, style) = if ok {
+        ("✓", STYLE_OK)
+    } else {
+        ("✗", STYLE_ERR)
+    };
+    writeln!(out, "  {} {label}", palette.paint(style, glyph)).map_err(|e| io_err(&e))
+}
+
+/// A row inside the boxed release plan: `(label, value, emphasize?)`.
+type PlanRow<'a> = (&'a str, String, bool);
+
+/// Render the release plan as a boxed, aligned block; emphasized values are bold. Column widths are
+/// computed on the PLAIN text (visible columns), so the borders align even with color on.
+fn render_plan_box(out: &mut dyn Write, palette: Palette, rows: &[PlanRow]) -> Result<(), String> {
+    let label_w = rows
+        .iter()
+        .map(|(l, _, _)| l.chars().count())
+        .max()
+        .unwrap_or(0);
+    let plain: Vec<String> = rows
+        .iter()
+        .map(|(l, v, _)| format!("{l:<label_w$} : {v}"))
+        .collect();
+    let content_w = plain.iter().map(|p| p.chars().count()).max().unwrap_or(0);
+    let span = content_w + 2;
+    let title = " Release plan ";
+    let title_fill = span.saturating_sub(title.chars().count() + 1);
+    writeln!(out, "┌─{title}{}┐", "─".repeat(title_fill)).map_err(|e| io_err(&e))?;
+    for ((label, value, emphasize), plain_row) in rows.iter().zip(&plain) {
+        let style = if *emphasize {
+            STYLE_EMPHASIS
+        } else {
+            Style::new()
+        };
+        let pad = content_w - plain_row.chars().count();
+        writeln!(
+            out,
+            "│ {label:<label_w$} : {}{} │",
+            palette.paint(style, value),
+            " ".repeat(pad)
+        )
+        .map_err(|e| io_err(&e))?;
+    }
+    writeln!(out, "└{}┘", "─".repeat(span)).map_err(|e| io_err(&e))?;
+    Ok(())
+}
+
+/// The LOUD irreversible-publish banner shown before the typed confirmation gate (real runs only).
+fn irreversible_banner(out: &mut dyn Write, palette: Palette, tag: &str) -> Result<(), String> {
+    writeln!(out).map_err(|e| io_err(&e))?;
+    writeln!(
+        out,
+        "{}",
+        palette.paint(
+            STYLE_LOUD,
+            &format!("  !! IRREVERSIBLE PUBLISH — {tag} !!  ")
+        )
+    )
+    .map_err(|e| io_err(&e))?;
+    writeln!(
+        out,
+        "  This pushes the tag and triggers the public dist release; it CANNOT be undone."
+    )
+    .map_err(|e| io_err(&e))?;
+    writeln!(out).map_err(|e| io_err(&e))
+}
+
+/// The static line rendered for a slow step when stderr is NOT a TTY (the spinner's fallback).
+fn progress_static_line(label: &str, palette: Palette) -> String {
+    format!("{} {label}…", palette.paint(STYLE_HEADER, "•"))
+}
+
+/// One animated spinner frame for `tick`.
+fn spinner_frame(tick: usize, label: &str, palette: Palette) -> String {
+    let frame = SPINNER_FRAMES[tick % SPINNER_FRAMES.len()];
+    format!("{} {label}…", palette.paint(STYLE_HEADER, frame))
+}
+
+/// The "step done" line printed after an animated slow step completes.
+fn progress_done_line(label: &str, palette: Palette) -> String {
+    format!("{} {label} done", palette.paint(STYLE_OK, "✓"))
+}
+
+/// A background-thread spinner that renders frames to a writer until stopped, then clears its line
+/// and prints a "done" line. Owns the writer (moved onto the thread), so a test can inject a buffer
+/// while the real path passes `io::stderr()`. `#![forbid(unsafe_code)]` holds — pure std threading,
+/// no raw terminal mode.
+struct Spinner {
+    /// Signals the render thread to stop.
+    stop: Arc<AtomicBool>,
+    /// The render-thread handle, joined on stop / drop.
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl Spinner {
+    /// Spawn the render thread, drawing `label` frames to `writer` until [`Spinner::stop`].
+    fn start<W: Write + Send + 'static>(
+        mut writer: W,
+        label: String,
+        palette: Palette,
+        clear_width: usize,
+    ) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&stop);
+        let handle = thread::spawn(move || {
+            let mut tick = 0usize;
+            while !flag.load(Ordering::Relaxed) {
+                let _ = write!(writer, "\r{}", spinner_frame(tick, &label, palette));
+                let _ = writer.flush();
+                tick = tick.wrapping_add(1);
+                thread::sleep(Duration::from_millis(SPIN_INTERVAL_MS));
+            }
+            // Erase the spinner line, then report the step done, so the flow continues clean.
+            let _ = write!(writer, "\r{}\r", " ".repeat(clear_width));
+            let _ = writeln!(writer, "{}", progress_done_line(&label, palette));
+            let _ = writer.flush();
+        });
+        Spinner {
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    /// Signal stop and join the render thread.
+    fn stop(mut self) {
+        self.join();
+    }
+
+    /// Idempotent stop+join used by both [`Spinner::stop`] and `Drop`.
+    fn join(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for Spinner {
+    fn drop(&mut self) {
+        self.join();
+    }
+}
+
+/// Run a slow blocking step while presenting progress on `err` (stderr in production). Animated when
+/// `is_tty` (a background thread renders frames + a "done" line), else a single static line is printed
+/// before the step. STDERR-only — it never touches the `out` sink (diagnostics → stderr, NFR-14).
+fn with_progress<W: Write + Send + 'static, T>(
+    mut err: W,
+    label: &str,
+    palette: Palette,
+    is_tty: bool,
+    slow: impl FnOnce() -> T,
+) -> T {
+    if !is_tty {
+        let _ = writeln!(err, "{}", progress_static_line(label, palette));
+        let _ = err.flush();
+        return slow();
+    }
+    let clear_width = label.chars().count() + 3;
+    let spinner = Spinner::start(err, label.to_owned(), palette, clear_width);
+    let result = slow();
+    spinner.stop();
+    result
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -444,21 +757,37 @@ fn ask_line(input: &mut dyn BufRead, out: &mut dyn Write, prompt: &str) -> Resul
 ///
 /// # Errors
 /// Returns `Err` on the FIRST failed check (branch / cleanliness / divergence), before any mutation.
-fn preflight(env: &dyn ReleaseEnv, out: &mut dyn Write) -> Result<(), String> {
+fn preflight(env: &dyn ReleaseEnv, out: &mut dyn Write, palette: Palette) -> Result<(), String> {
     let branch = env.current_branch()?;
-    if branch != "main" {
+    let on_main = branch == "main";
+    check_line(
+        out,
+        palette,
+        on_main,
+        &format!("on branch `main` (HEAD is `{branch}`)"),
+    )?;
+    if !on_main {
         return Err(format!(
             "must be on `main` to cut a release, but HEAD is `{branch}` — checkout main first"
         ));
     }
-    if !env.working_tree_clean()? {
+    let clean = env.working_tree_clean()?;
+    check_line(out, palette, clean, "working tree is clean")?;
+    if !clean {
         return Err(
             "working tree is not clean (`git status --porcelain` is non-empty) — commit or stash first"
                 .to_owned(),
         );
     }
     env.fetch_origin()?;
-    if !env.main_matches_origin()? {
+    let synced = env.main_matches_origin()?;
+    check_line(
+        out,
+        palette,
+        synced,
+        "local `main` is in sync with `origin/main`",
+    )?;
+    if !synced {
         return Err(
             "local `main` has diverged from `origin/main` (behind or ahead) — sync before releasing"
                 .to_owned(),
@@ -466,37 +795,50 @@ fn preflight(env: &dyn ReleaseEnv, out: &mut dyn Write) -> Result<(), String> {
     }
     writeln!(
         out,
-        "reminder: the publish step needs a `WS_GH_TOKEN` repo secret with `contents: write` \
-         (cannot be verified from here — see ci-cd §3.1)."
+        "  {} reminder: the publish step needs a `WS_GH_TOKEN` repo secret with `contents: write` \
+         (cannot be verified from here — see ci-cd §3.1).",
+        palette.paint(STYLE_WARN, "⚠")
     )
     .map_err(|e| io_err(&e))?;
     Ok(())
 }
 
-/// Render the release plan (current → new, tag, pre-release?, files) with the irreversibility notice.
+/// Render the release plan (current → new, tag, pre-release?, files) as a boxed, aligned block with
+/// the version diff + tag emphasized, followed by the irreversibility notice.
 fn show_plan(
     out: &mut dyn Write,
     current: &Version,
     new: &Version,
     tag: &str,
     kind: Kind,
+    palette: Palette,
 ) -> Result<(), String> {
     let pre = if kind == Kind::PreRelease {
         "yes (rc)"
     } else {
         "no (final)"
     };
-    writeln!(out, "\nRelease plan:").map_err(|e| io_err(&e))?;
-    writeln!(out, "  current version : {current}").map_err(|e| io_err(&e))?;
-    writeln!(out, "  new version     : {new}").map_err(|e| io_err(&e))?;
-    writeln!(out, "  tag             : {tag}").map_err(|e| io_err(&e))?;
-    writeln!(out, "  pre-release     : {pre}").map_err(|e| io_err(&e))?;
-    writeln!(out, "  files changed   : Cargo.toml, Cargo.lock").map_err(|e| io_err(&e))?;
+    // Emphasized (bold) rows: the version diff and the tag. Plain rows: pre-release + files.
+    let rows: Vec<PlanRow> = vec![
+        ("version", format!("{current} → {new}"), true),
+        ("tag", tag.to_owned(), true),
+        ("pre-release", pre.to_owned(), false),
+        ("files changed", "Cargo.toml, Cargo.lock".to_owned(), false),
+    ];
+    writeln!(out).map_err(|e| io_err(&e))?;
+    render_plan_box(out, palette, &rows)?;
     writeln!(
         out,
-        "  IRREVERSIBLE: pushing {tag} triggers the public dist release and CANNOT be undone.\n"
+        "{}",
+        palette.paint(
+            STYLE_ERR,
+            &format!(
+                "IRREVERSIBLE: pushing {tag} triggers the public dist release and CANNOT be undone."
+            )
+        )
     )
     .map_err(|e| io_err(&e))?;
+    writeln!(out).map_err(|e| io_err(&e))?;
     Ok(())
 }
 
@@ -538,7 +880,9 @@ fn execute(
     out: &mut dyn Write,
     new: &Version,
     tag: &str,
+    palette: Palette,
 ) -> Result<(), String> {
+    irreversible_banner(out, palette, tag)?;
     let typed = ask_line(
         input,
         out,
@@ -578,7 +922,11 @@ fn execute(
     )?;
     writeln!(
         out,
-        "pushed {tag} to origin — the dist release workflow is now running."
+        "{}",
+        palette.paint(
+            STYLE_OK,
+            &format!("pushed {tag} to origin — the dist release workflow is now running.")
+        )
     )
     .map_err(|e| io_err(&e))?;
     Ok(())
@@ -597,8 +945,10 @@ fn orchestrate(
     input: &mut dyn BufRead,
     out: &mut dyn Write,
     dry_run: bool,
+    palette: Palette,
 ) -> Result<(), String> {
-    preflight(env, out)?;
+    show_header(out, palette)?;
+    preflight(env, out, palette)?;
 
     let kind = ask(input, out, KIND_PROMPT, parse_kind)?;
     let bump = ask(input, out, BUMP_PROMPT, parse_bump)?;
@@ -616,7 +966,7 @@ fn orchestrate(
         ));
     }
 
-    show_plan(out, &current, &new, &tag, kind)?;
+    show_plan(out, &current, &new, &tag, kind, palette)?;
 
     if dry_run {
         writeln!(
@@ -642,7 +992,7 @@ fn orchestrate(
         return Ok(());
     }
 
-    execute(env, input, out, &new, &tag)
+    execute(env, input, out, &new, &tag, palette)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -653,25 +1003,38 @@ fn orchestrate(
 #[must_use]
 pub fn run() -> ExitCode {
     let dry_run = std::env::args().any(|a| a == "--dry-run");
+    // Decide color ONCE (from stdout's TTY-ness + the env signals) and thread it through the flow.
+    let palette = Palette {
+        color: detect_color(),
+    };
 
     let root = match workspace_root() {
         Ok(root) => root,
         Err(err) => {
-            eprintln!("release: could not locate workspace root: {err}");
+            eprintln!(
+                "{}",
+                palette.paint(
+                    STYLE_ERR,
+                    &format!("release: could not locate workspace root: {err}")
+                )
+            );
             return ExitCode::FAILURE;
         }
     };
-    let env = GitEnv { root };
+    let env = GitEnv {
+        root,
+        color: palette.color,
+    };
 
     let stdin = io::stdin();
     let mut input = stdin.lock();
     let stdout = io::stdout();
     let mut out = stdout.lock();
 
-    match orchestrate(&env, &mut input, &mut out, dry_run) {
+    match orchestrate(&env, &mut input, &mut out, dry_run, palette) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!("release: {err}");
+            eprintln!("{}", palette.paint(STYLE_ERR, &format!("release: {err}")));
             ExitCode::FAILURE
         }
     }
@@ -933,15 +1296,27 @@ libsql = { version = \"0.9.30\" }
         }
     }
 
-    /// Run `orchestrate` with scripted stdin `answers`, returning `(result, stdout, mutation calls)`.
+    /// Run `orchestrate` with scripted stdin `answers` and color FORCED OFF, returning
+    /// `(result, stdout, mutation calls)`. Color off ⇒ the captured `Vec<u8>` stays plain +
+    /// deterministic (no ESC bytes), so the behavioral asserts + snapshots below are stable.
     fn drive(
         env: &FakeEnv,
         answers: &str,
         dry_run: bool,
     ) -> (Result<(), String>, String, Vec<String>) {
+        drive_colored(env, answers, dry_run, false)
+    }
+
+    /// [`drive`] with an explicit color choice (used to pin the styled ANSI shape with color ON).
+    fn drive_colored(
+        env: &FakeEnv,
+        answers: &str,
+        dry_run: bool,
+        color: bool,
+    ) -> (Result<(), String>, String, Vec<String>) {
         let mut input = io::Cursor::new(answers.as_bytes().to_vec());
         let mut out: Vec<u8> = Vec::new();
-        let res = orchestrate(env, &mut input, &mut out, dry_run);
+        let res = orchestrate(env, &mut input, &mut out, dry_run, Palette { color });
         (
             res,
             String::from_utf8(out).expect("utf8 output"),
@@ -963,6 +1338,8 @@ libsql = { version = \"0.9.30\" }
             "should print dry-run lines:\n{out}"
         );
         assert!(calls.is_empty(), "dry-run must not mutate, got {calls:?}");
+        // Pin the full reflowed (boxed) plan + dry-run shape, color OFF (plain + deterministic).
+        insta::assert_snapshot!("plan_dry_run_pre_none", out);
     }
 
     #[test]
@@ -970,20 +1347,15 @@ libsql = { version = \"0.9.30\" }
         let env = FakeEnv::ok();
         let (res, out, calls) = drive(&env, "2\n3\n", true);
         assert!(res.is_ok(), "dry-run final/minor should succeed: {res:?}");
-        assert!(
-            out.contains("tag             : v1.1.0"),
-            "plan tag should be v1.1.0:\n{out}"
-        );
-        assert!(
-            out.contains("pre-release     : no (final)"),
-            "plan should be final:\n{out}"
-        );
         // A final release carries no rc pre-release on the computed version/tag.
         assert!(
             !out.contains("v1.1.0-rc"),
             "final tag must not be an rc:\n{out}"
         );
         assert!(calls.is_empty(), "dry-run must not mutate, got {calls:?}");
+        // The reflowed plan alignment (formerly asserted as `tag             : v1.1.0` /
+        // `pre-release     : no (final)` substrings) is now pinned by snapshot, color OFF.
+        insta::assert_snapshot!("plan_dry_run_final_minor", out);
     }
 
     #[test]
@@ -1073,7 +1445,7 @@ libsql = { version = \"0.9.30\" }
     fn real_run_executes_full_sequence_on_both_confirmations() {
         let env = FakeEnv::ok();
         // Both typed gates match `v1.1.0` → the full mutation sequence runs (against the FAKE only).
-        let (res, _out, calls) = drive(&env, "2\n3\nv1.1.0\nv1.1.0\n", false);
+        let (res, out, calls) = drive(&env, "2\n3\nv1.1.0\nv1.1.0\n", false);
         assert!(
             res.is_ok(),
             "both confirmations should complete the flow: {res:?}"
@@ -1090,6 +1462,9 @@ libsql = { version = \"0.9.30\" }
             ],
             "the full ordered mutation sequence must fire exactly once, ending in ONE atomic push"
         );
+        // Pin the styled real-run stdout (color OFF): the loud IRREVERSIBLE banner, both typed-gate
+        // prompts, and the green success line.
+        insta::assert_snapshot!("real_run_full_stdout", out);
     }
 
     // ---- Fail-path coverage: an intermediate effect fails → the sequence STOPS with recovery guidance. ----
@@ -1206,5 +1581,169 @@ libsql = { version = \"0.9.30\" }
             !calls.iter().any(|c| c.starts_with("push")),
             "the atomic push must not have recorded on failure, got {calls:?}"
         );
+    }
+
+    // ---- Presentation: color decision, styling primitive, plan reflow, spinner. ----
+    //
+    // The seam + safety model is unchanged; these cover the T3.8 DX layer: color is decided once
+    // (never from the sink), color OFF emits ZERO ESC bytes (so tests stay deterministic), color ON
+    // pins the ANSI shape, and the stderr spinner is testable against an injected buffer.
+
+    #[test]
+    fn resolve_color_honours_the_standard_precedence() {
+        // NO_COLOR disables unconditionally — even with CLICOLOR_FORCE + a TTY.
+        assert!(!resolve_color(true, true, Some(true), true));
+        // CLICOLOR_FORCE forces ON even without a TTY and with CLICOLOR=0.
+        assert!(resolve_color(false, true, Some(false), false));
+        // CLICOLOR=0 disables on a TTY (no force).
+        assert!(!resolve_color(false, false, Some(false), true));
+        // Otherwise color follows the TTY (default + CLICOLOR=1 both still need the TTY).
+        assert!(resolve_color(false, false, None, true));
+        assert!(!resolve_color(false, false, None, false));
+        assert!(resolve_color(false, false, Some(true), true));
+        assert!(!resolve_color(false, false, Some(true), false));
+    }
+
+    #[test]
+    fn painted_emits_ansi_only_when_color_on() {
+        let on = Palette { color: true };
+        let off = Palette { color: false };
+        // Color ON wraps the text in an SGR sequence (contains ESC) and preserves the text.
+        let styled = on.paint(STYLE_ERR, "x").to_string();
+        assert!(styled.as_bytes().contains(&0x1b), "color on must emit ESC");
+        assert!(styled.contains('x'));
+        // Color OFF is byte-for-byte the plain text — the deterministic-test guarantee.
+        assert_eq!(off.paint(STYLE_ERR, "x").to_string(), "x");
+    }
+
+    #[test]
+    fn spinner_and_progress_lines_track_color() {
+        let on = Palette { color: true };
+        let off = Palette { color: false };
+        assert!(
+            spinner_frame(0, "fetching origin", on)
+                .as_bytes()
+                .contains(&0x1b)
+        );
+        let plain = spinner_frame(3, "fetching origin", off);
+        assert!(!plain.as_bytes().contains(&0x1b));
+        assert!(plain.contains("fetching origin"));
+        // Frame index wraps over the frame set (no panic / index-out-of-bounds).
+        assert!(spinner_frame(SPINNER_FRAMES.len() + 2, "x", off).contains('x'));
+        assert!(progress_static_line("updating Cargo.lock", off).contains("updating Cargo.lock"));
+        assert!(
+            progress_done_line("updating Cargo.lock", off).contains("updating Cargo.lock done")
+        );
+    }
+
+    #[test]
+    fn plan_has_no_ansi_escape_when_color_off() {
+        // The invariant that keeps every snapshot + substring assert stable: color OFF ⇒ no ESC.
+        let env = FakeEnv::ok();
+        let (res, out, _calls) = drive(&env, "2\n3\n", true);
+        assert!(res.is_ok());
+        assert!(
+            !out.as_bytes().contains(&0x1b),
+            "color-off output must contain no ESC (0x1b) byte:\n{out:?}"
+        );
+    }
+
+    #[test]
+    fn real_run_success_has_no_ansi_escape_when_color_off() {
+        let env = FakeEnv::ok();
+        let (res, out, _calls) = drive(&env, "2\n3\nv1.1.0\nv1.1.0\n", false);
+        assert!(res.is_ok());
+        assert!(
+            !out.as_bytes().contains(&0x1b),
+            "color-off real-run output (banner + success) must contain no ESC byte:\n{out:?}"
+        );
+    }
+
+    #[test]
+    fn styled_plan_pins_the_ansi_shape_when_color_on() {
+        let env = FakeEnv::ok();
+        let (res, out, _calls) = drive_colored(&env, "2\n3\n", true, true);
+        assert!(res.is_ok());
+        assert!(
+            out.as_bytes().contains(&0x1b),
+            "color-on output must carry ANSI (ESC) bytes"
+        );
+        insta::assert_snapshot!("plan_dry_run_final_minor_color_on", out);
+    }
+
+    /// A `Write` over a shared buffer so a test can capture BOTH the caller-thread (static) and the
+    /// spinner-thread (animated) writes without touching the real stderr fd.
+    struct SharedBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl Write for SharedBuf {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let mut guard = self
+                .0
+                .lock()
+                .map_err(|_| io::Error::other("poisoned shared buffer"))?;
+            guard.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn with_progress_static_branch_runs_step_and_prints_one_line() {
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        // is_tty = false ⇒ the static-fallback branch runs inline on this thread.
+        let got = with_progress(
+            SharedBuf(std::sync::Arc::clone(&buf)),
+            "fetching origin",
+            Palette { color: false },
+            false,
+            || 5,
+        );
+        assert_eq!(got, 5, "must return the slow step's value");
+        let s = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(
+            s.contains("fetching origin"),
+            "static line must name the step:\n{s}"
+        );
+        assert!(!s.as_bytes().contains(&0x1b), "color off ⇒ no ESC");
+    }
+
+    #[test]
+    fn with_progress_animated_branch_runs_joins_and_reports_done() {
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        // is_tty = true ⇒ the spinner thread renders frames, then (on join) a "done" line. The
+        // injected buffer proves the thread started, was joined cleanly, and reported completion —
+        // with NO real-stderr leak.
+        let got = with_progress(
+            SharedBuf(std::sync::Arc::clone(&buf)),
+            "updating Cargo.lock",
+            Palette { color: false },
+            true,
+            || {
+                thread::sleep(Duration::from_millis(5));
+                9
+            },
+        );
+        assert_eq!(got, 9, "must return the slow step's value");
+        let s = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(
+            s.contains("updating Cargo.lock done"),
+            "the animated path must clear + print a done line after joining:\n{s}"
+        );
+    }
+
+    #[test]
+    fn spinner_starts_and_stops_without_deadlock() {
+        // Directly exercise the thread lifecycle against a sink (no output assertion needed): start,
+        // let it tick, stop → must join cleanly with no panic / deadlock. `Drop` is the safety net.
+        let spinner = Spinner::start(
+            io::sink(),
+            "fetching origin".to_owned(),
+            Palette { color: false },
+            20,
+        );
+        thread::sleep(Duration::from_millis(5));
+        spinner.stop();
     }
 }

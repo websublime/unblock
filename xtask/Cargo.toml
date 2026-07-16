@@ -18,8 +18,16 @@ regex = { workspace = true }
 # the lock (1.0.28) transitively — a direct xtask dep adds no new transitive surface. Not a
 # `[workspace.dependencies]` entry (only xtask needs it), so pinned to the major here.
 semver = "1"
+# Styling primitive for the `release` helper's TTY presentation (ci-cd §3.3): colored pre-flight
+# checks, the boxed plan, the irreversible banner, the spinner. Already in the lock (1.0.14) via clap
+# → anstyle, so a direct xtask dep adds ZERO new transitive surface. Only xtask needs it, so it is
+# pinned to the major here (not a `[workspace.dependencies]` entry).
+anstyle = "1"
 
 [dev-dependencies]
 # Fixture trees for the `verify-pins` corpus + non-vacuity integration test (tests/verify_pins_corpus.rs).
 # Already a workspace dependency (cli/config/engine dev-dep it) — no new transitive surface.
 tempfile = { workspace = true }
+# Snapshot-pins the `release` helper's styled output shapes (the reflowed plan box, color on/off).
+# Already a workspace dependency (cli/config/engine/policy/health dev-dep it) — no new transitive surface.
+insta = { workspace = true }
