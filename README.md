@@ -1,3 +1,5 @@
+![unblock — agent-first, MCP-first issue tracker](docs/assets/unblock-readme-banner.png)
+
 # unblock
 
 **Agent-first issue tracker — MCP-first.** A local-first, offline-capable, dependency-aware issue
