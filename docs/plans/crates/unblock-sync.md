@@ -71,7 +71,7 @@ pub enum SyncError { /* §error below; impl code()->ErrorCode */ }
 ### v1.1 (LOCKED) — additive
 
 - `append_interaction(path, &Interaction)` for FR-22 flight recorder (append-only `interactions.jsonl`, capture-only Tier-1 attribution). New file `src/audit.rs`. Roadmap §2 lists FR-22 touching `sync`.
-- Export gains comment lines (FR-6 organization) — no API shape change, only model hydration carries `comments`.
+- *(**Comment export/import graduated to v1 — D37**: JSONL export now emits a non-empty `Issue.comments` because storage hydrates comments on all read paths — no API shape change, only model hydration carries `comments`; `ImportReport.comments` already counts them (D24/F1). Re-bless the `unblock-sync` export snapshots; the redacted state (`redacted_at` + `"text":""`) serializes and round-trips. See the `src/jsonl.rs` row — `canonicalize_ts_in_value` recurses over `comments[].updated_at`/`redacted_at` automatically.)*
 
 ### v1.2 (PROPOSED) — additive seams only
 

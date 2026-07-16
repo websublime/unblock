@@ -122,6 +122,7 @@ pub enum EventType {
     Created, Updated, StatusChanged, PriorityChanged, AssigneeChanged,
     Commented, Closed, Reopened, DependencyAdded, DependencyRemoved,
     LabelAdded, LabelRemoved, Compacted, Deleted, Restored,
+    CommentEdited, CommentRedacted,   // D37 (v1) — comment update (provenance-preserving) / delete (soft-redact); wire "comment_edited"/"comment_redacted"
     Custom(String),
 }
 impl EventType { pub fn as_str(&self) -> &str; } // snake_case strings; JsonSchema = String.
@@ -187,7 +188,7 @@ pub struct Issue {
     // Relations (hydrated for export/display; not always columns)
     #[serde(default, skip_serializing_if = "Vec::is_empty")] pub labels: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")] pub dependencies: Vec<Dependency>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")] pub comments: Vec<Comment>,        // [v1.1] populated
+    #[serde(default, skip_serializing_if = "Vec::is_empty")] pub comments: Vec<Comment>,        // populated v1 (D37 — hydrated on all 7 read paths)
 }
 ```
 
@@ -207,12 +208,20 @@ pub struct Dependency {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
-pub struct Comment {                       // [v1.1] surface; type defined now
+pub struct Comment {                       // v1 surface (D37); FLAT (no threading — FORK-T)
     pub id: i64,
     pub issue_id: String,
-    pub author: String,
-    #[serde(rename = "text")] pub body: String,
+    pub author: String,                    // = the session actor at the MCP surface (FORK-M1b)
+    #[serde(rename = "text")] pub body: String,   // JSON key "text" (bd parity); masked to "" on redact
     pub created_at: DateTime<Utc>,
+    // D37 — provenance-preserving edit (D-D): None = never edited; Some = last-edit instant. `add` leaves this
+    //       NULL (create path is 4-col); ONLY `update` sets it = now.
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub updated_at: Option<DateTime<Utc>>,
+    // D37 — soft-redact (D-E): None = live; Some = redacted. The PRESENCE is the "is redacted" flag (mirrors the
+    //       tombstone `deleted_at`); on redact the row is KEPT + `body` masked to "". Wire redact form =
+    //       `redacted_at` present + `"text":""` (NO extra top-level bool). The CommentRedacted audit Event
+    //       RETAINS the original body (provenance — FORK-redact-wire).
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub redacted_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
@@ -244,7 +253,7 @@ pub struct EpicStatus {                    // [v1.1] derived rollup
 
 - **`content_hash`** — `compute_content_hash(&self) -> String`. SHA-256, lowercase hex, over a stable ordered, null-separated field set: `title, description, design, acceptance_criteria, notes, status.as_str(), priority.0, issue_type.as_str(), assignee, owner, created_by, external_ref, source_system, pinned, is_template`. **Excludes** `id`, `content_hash` (circular), relations (labels/deps/comments), all timestamps, tombstone fields, `estimated_minutes`, `due_at`, `defer_until`, `close_reason`, `closed_by_session`. `#[serde(skip)]` → never appears in JSONL; recomputed on load. Used for import dedup/idempotency (FR-26) and sync equality fast-path.
   - **Canonical byte stream (NORMATIVE — frozen; Q4 = KEEP, the model crate plan `unblock-model.md`).** Each field above is appended to the SHA-256 stream as `bytes(value) ++ 0x00` (a single `0x00` separator after *every* field, including the last). `None` → empty string `""`; a `false` boolean flag → empty string `""` while a `true` flag → its label (`"pinned"` / `"template"`); `priority` is the decimal integer of `priority.0` (e.g. `"2"`, **not** `"P2"`); the final digest is rendered lowercase `{:02x}` per byte (64 hex chars). **After `is_template`** the stream appends a **frozen 17-field Go-bd zero-value padding tail** so a Rust `content_hash` stays byte-for-byte identical to a `bd`-exported hash (FR-26 / D16 idempotent one-shot `bd` import). The tail, in exact order, is: `"" , false-flag("crystallizes")→"" , "" , "" , "0" , "" , "" , "" , "" , "" , "" , "" , "" , "" , "" , "" , ""` — i.e. **15 empty strings, one `"0"` (the Go `timeout` duration zero value) at position 5, and the single `false` crystallizes-flag at position 2** (which, being `false`, also serializes as `""`). Go-bd source-field correspondence (documentation only — Rust does not model these): `quality_score, crystallizes, await_type, await_id, timeout, holder, hook_bead, role_bead, agent_state, role_type, rig, mol_type, work_type, event_kind, actor, target, payload`. This tail is **frozen** and is locked by a golden `insta` hash snapshot (`tests/golden_hash.rs`); changing it would break `bd` import idempotency and is a breaking change requiring a spine amendment.
-- **`sync_equals(&self, other) -> bool`** — semantic equality for import/export boundaries. Compares the full synced payload (incl. `due_at`, `defer_until`, tombstone fields, compaction fields, and relations **order-independent**: labels deduped+sorted; deps and comments sorted by a fixed key tuple). Treats `compaction_level == None` as `0`. Ignores volatile audit-only fields. This is the import "is this line a no-op?" predicate, not derived `PartialEq`.
+- **`sync_equals(&self, other) -> bool`** — semantic equality for import/export boundaries. Compares the full synced payload (incl. `due_at`, `defer_until`, tombstone fields, compaction fields, and relations **order-independent**: labels deduped+sorted; deps and comments sorted by a fixed key tuple). Treats `compaction_level == None` as `0`. Ignores volatile audit-only fields. This is the import "is this line a no-op?" predicate, not derived `PartialEq`. **D37 (comments) — normative:** the comment comparator COMPARES `body` + `redacted_at` (real synced state) but IGNORES `updated_at` (volatile-audit-like, exactly as `Issue.updated_at` is ignored); `comment_sort_key` gains `redacted_at` (FORK-M2). `content_hash` is UNAFFECTED — comments are already excluded (above) — so a comment add/edit/redact NEVER moves it (FR-26 idempotency intact).
 - **bd import-normalize repairs (NOTE — D24/FR-26).** The one-shot `bd` import applies bd's 7 legacy-repair steps (dep-type legacy-underscore repair — a **GENERAL** rule per bd `normalize_issue` (`temp/beads_rust-main/src/sync/mod.rs:3822-3832`): for any `Custom` `dep_type`, `replace('_','-')` and adopt iff it parses to a known non-`Custom` `DependencyType` — repairing `parent_child`/`conditional_blocks`/`waits_for`/`discovered_from`/`replies_to`/`relates_to`/`caused_by` (all land in `Custom` because `DependencyType::parse_lowercased` recognizes only kebab forms); `parent_child`→`ParentChild` is the canonical EXAMPLE, not the whole rule; dependency dedup keep-latest; terminal-status text aliases `done`/`complete`/`completed`/`finished`/`resolved`→`Closed`; `-wisp-` id→`ephemeral=true`; `closed_at`=`updated_at` when terminal & none; `closed_at` cleared when non-terminal; `external_ref` blank/whitespace→`None` else trimmed) in `unblock-sync::bd_import` (L3) **BEFORE** the `content_hash` recompute and the funnel into the `import.rs` apply path. **Inter-repair ORDER is bd's SOURCE ORDER and is normative (SF-2):** the status-alias repair (`mod.rs:3873-3881`) MUST run BEFORE the `closed_at` set/clear repair (`mod.rs:3888-3896`), which tests `is_terminal()` — an aliased-terminal issue whose alias was not yet mapped keeps `closed_at` unset and diverges `sync_equals`. **Hash-recompute composition (SF-4):** after its 7 repairs `bd_import` calls the SHARED `jsonl::normalize()` (`crates/unblock-sync/src/jsonl.rs:97`) — which does labels sort/dedup + `updated_at>=created_at` clamp + the `content_hash` recompute — so the recompute includes the same shared steps bd folds into the SAME `normalize_issue` pass (`mod.rs:3816-3820`/`:3908-3913`) and the recomputed hash matches bd's stored hash byte-for-byte; `bd_import` does NOT recompute standalone. This is REQUIRED for FR-26 idempotency + cross-tool dedup: bd computes its stored hash after these repairs, so unblock must apply them before recompute to get a byte-identical hash. Repaired fields that are **hashed** (the spine §1.8 field set): `status`, `external_ref`. Repaired fields in **`sync_equals`** only: `dep_type`, `closed_at`, `ephemeral`, dependency count. The shared `jsonl::normalize()` order for the GENERIC `import_jsonl` path is **UNCHANGED** (it imports only unblock's own canonical exports, never legacy bd forms).
 - **Tombstone** — delete sets `status = Tombstone` + `deleted_at`/`deleted_by`/`delete_reason` (and `original_type` preserved). `is_expired_tombstone(retention_days: Option<u64>) -> bool` (TTL helper). Invariant: **import NEVER resurrects a tombstone** — a non-tombstone JSONL line for an id that is tombstoned in the DB is rejected/skipped, not applied.
 - **Restore (D20)** — the live, audited **INVERSE of delete** (satisfies FR-1c "recoverable"). A dedicated `Storage::restore_issue`/`Session::restore` un-tombstones a SOFT-deleted issue: it **clears `original_type`** (→ `None`), **NEVER touches `issue_type`** (the live `issue_type` on a tombstone is already correct — `into_tombstone` only snapshots, never mutates it), sets `status` **best-effort via `closed_at`** (`closed_at.is_some() ? Closed : Open` — only `closed_at` survives as the was-Closed signal; pre-delete status is not preserved), and **clears `closed_at` on a restore-to-non-terminal** (the Closed branch keeps it — both the signal and the CHECK-constraint satisfier). A round-trip helper `Issue::restore_from_tombstone` (the pure inverse of `into_tombstone`, no clock) backs it. TTL-aware refusal of an expired tombstone is a **v1.1 seam** (`deletions_retention_days` is reserved/unenforced in v1). Restore is a **live engine op, NOT an import** — it is **DISJOINT** from the import no-resurrection invariant above (which stays unchanged and import-path-scoped). See §3/§3.2.1/§4.1.
@@ -743,6 +752,19 @@ pub trait Storage: Send + Sync {
     //  dependency types (integrity/lint view) — D19, faithful to original detect_blocking_cycles
     //  (true) / detect_all_cycles (false).
 
+    // --- comments (FR-6, D37; analog of add_dependency/list_dependencies; each mutation writes its Event in the same tx) ---
+    async fn add_comment(&self, issue_id: &str, author: &str, body: &str, actor: &str)
+        -> Result<Comment, StorageError>;                                     // guard issue EXISTS (else IssueNotFound); Event(Commented); updated_at stays NULL
+    async fn list_comments(&self, issue_id: &str) -> Result<Vec<Comment>, StorageError>; // ORDER BY created_at ASC, id ASC
+    async fn update_comment(&self, comment_id: i64, body: &str, actor: &str)
+        -> Result<Comment, StorageError>;                                     // provenance-preserving (D-D): set updated_at=now; Event(CommentEdited)
+    async fn delete_comment(&self, comment_id: i64, actor: &str)
+        -> Result<Comment, StorageError>;                                     // soft-redact (D-E): KEEP row, mask body="", set redacted_at=now; Event(CommentRedacted); idempotent if already redacted
+    //  EXISTENCE guard (FORK-3): add_comment requires the target issue to exist (reject non-existent/tombstoned →
+    //  ErrorCode::IssueNotFound, FORK-E1 — NO new CommentNotFound code); a CLOSED issue is allowed (post-mortem).
+    //  update/delete guard the comment row exists → else IssueNotFound (reused). author threaded for the in-tx Event
+    //  (bd parity — the import/seed path carries comment.author; the engine passes author = self.actor, FORK-M1b).
+
     // --- hierarchical-id child allocation (FR-1a, D21) — the READ-half the engine allocator consumes ---
     async fn next_child_number(&self, parent_id: &str) -> Result<u32, StorageError>; // high-water+1 (§3.2.1)
     //  PRODUCTION method (T1.8): returns the next free child number for `parent.N` minting — the
@@ -1070,6 +1092,33 @@ The dependency ops (FR-5) — source-verified vs the original cycle machinery:
   `(issue_id, depends_on_id, dep_type)` edge → `DependencyNotFound` if absent; on success
   `Event(DependencyRemoved)`.
 
+The comment methods (FR-6, D37 — normative; every mutation runs inside one `with_immediate_tx` so the row +
+its `Event` commit together, FR-9):
+
+- **`add_comment(issue_id, author, body, actor)`** — **EXISTENCE guard first (FORK-3):** the target issue MUST
+  exist (a non-existent/tombstoned id → `ErrorCode::IssueNotFound`, FORK-E1 — NO `CommentNotFound`); a CLOSED
+  issue is ALLOWED (post-mortem). `INSERT INTO comments(issue_id, author, text, created_at) VALUES(…)` with
+  `created_at = now` and **`updated_at` left NULL** (the create path is create-time only — MUST-1: only `update`
+  ever sets `updated_at`); `append_event_in_tx(Commented, actor)`; bump `issues.updated_at` (FORK-S1, feeds
+  `stale`; NOT hashed); re-`SELECT` → the created `Comment`.
+- **`update_comment(comment_id, body, actor)` (provenance-preserving, D-D)** — guard the comment row exists →
+  else `IssueNotFound`; `UPDATE comments SET text=?, updated_at=now WHERE id=?`;
+  `append_event_in_tx(CommentEdited, old=Some(old_body), new=Some(new_body))`; bump `issues.updated_at`; re-`SELECT`
+  → the edited `Comment`. **In-place-replace-without-provenance is FORBIDDEN** — the `updated_at` bump + the
+  `CommentEdited` event ARE the provenance.
+- **`delete_comment(comment_id, actor)` (soft-redact, D-E)** — guard exists (idempotent no-op if ALREADY redacted,
+  mirroring `restore_issue`'s already-active no-op); `UPDATE comments SET redacted_at=now, text='' WHERE id=?`
+  (mask/clear the body, **KEEP the row**); `append_event_in_tx(CommentRedacted, old=Some(old_body), new=None)` — the
+  Event RETAINS the original body for provenance (FORK-redact-wire); bump `issues.updated_at`; re-`SELECT` → the
+  redacted `Comment` (`redacted_at` present + `"text":""`). A SINGLE deletion op, NOT hard-delete.
+- **`list_comments(issue_id)`** — `SELECT … FROM comments WHERE issue_id=? ORDER BY created_at ASC, id ASC`
+  (canonical order); reads on the read conn (no permit).
+- **Read hydration (all 7 read paths, D37).** `get_issue`/`get_issues`/list/ready/blocked/search/stale populate
+  `Issue.comments` (ordered `created_at ASC, id ASC`) via the shared batch `hydrate_ids` / single `hydrate`
+  accumulators — exactly how labels + deps hydrate today (T3.5.1). JSONL export now emits a non-empty
+  `Issue.comments` (previously always empty for lack of hydration), consistent with `ImportReport.comments` (§1.10,
+  D24); the redacted state (`redacted_at` + `"text":""`) serializes and round-trips.
+
 The hierarchical-id child allocation (FR-1a, D21) — the read-half of `parent.N` minting:
 
 - **`next_child_number(parent_id)` (T0.6 impl; PRODUCTION-CONSUMED from T1.8, D21) — returns the next
@@ -1085,10 +1134,10 @@ The hierarchical-id child allocation (FR-1a, D21) — the read-half of `parent.N
   already exists — T1.8 Implement promotes it from `pub(super)` to the trait impl and removes its
   `allow(dead_code)`.
 
-**EventType-per-mutation (the T0.7 oracle).** Model `EventType` = 15 named (Created, Updated,
+**EventType-per-mutation (the T0.7 oracle).** Model `EventType` = 17 named (Created, Updated,
 StatusChanged, PriorityChanged, AssigneeChanged, Commented, Closed, Reopened, DependencyAdded,
-DependencyRemoved, LabelAdded, LabelRemoved, Compacted, Deleted, Restored) + `Custom` — **no `Deferred`,
-no `Claimed`**. Each mutation emits exactly:
+DependencyRemoved, LabelAdded, LabelRemoved, Compacted, Deleted, Restored, **CommentEdited**, **CommentRedacted**
+— the last two D37/v1) + `Custom` — **no `Deferred`, no `Claimed`**. Each mutation emits exactly:
 
 | Mutation | Event(s) (in order) |
 |---|---|
@@ -1107,7 +1156,9 @@ no `Claimed`**. Each mutation emits exactly:
 | restore (tombstone → active) | `Restored` |
 | restore (already-active / missing target) | **none** |
 | add / remove dependency | `DependencyAdded` / `DependencyRemoved` |
-| comment | `Commented` |
+| comment add | `Commented` |
+| comment update (edit, D-D) | `CommentEdited` |
+| comment delete (soft-redact, D-E) | `CommentRedacted` |
 | add / remove label | `LabelAdded` / `LabelRemoved` |
 
 > **NOTE (restore carve-out — the T0.7 oracle is normative here).** `restore` (D20) is a **DEDICATED** path
@@ -1323,6 +1374,7 @@ impl Session {
     pub async fn count(&self, filters: &ListFilters, by: Option<CountGroupBy>) -> Result<Vec<CountBucket>, EngineError>;
     pub async fn stale(&self, older_than: DateTime<Utc>, filters: &ListFilters) -> Result<Vec<Issue>, EngineError>;
     pub async fn list_dependencies(&self, id: &str) -> Result<Vec<Dependency>, EngineError>; // backs dep `list` action (§5.3 Deps)
+    pub async fn list_comments(&self, id: &str) -> Result<Vec<Comment>, EngineError>; // FR-6/D37 — backs `comment list` (§5.2); no permit (FR-10)
     pub async fn dependency_tree(&self, id: &str) -> Result<DepTree, EngineError>;
     pub async fn dependency_graph(&self, roots: &[String]) -> Result<DepTree, EngineError>; // backs dep `graph` action (§5.2); empty roots = whole graph
     pub async fn detect_cycles(&self, blocking_only: bool) -> Result<Vec<Vec<String>>, EngineError>; // backs dep `cycles` action (§5.2); blocking_only filter (D19)
@@ -1412,6 +1464,11 @@ impl Session {
     pub async fn undefer(&self, id: &str) -> Result<Issue, EngineError>;
     pub async fn add_dep(&self, dep: &Dependency) -> Result<(), EngineError>;
     pub async fn remove_dep(&self, issue_id: &str, on: &str, ty: &DependencyType) -> Result<(), EngineError>;
+    // --- comments (FR-6, D37) — each mutation acquires the write permit (D14) + the D31 `.write.lock` for its whole tx;
+    //     the body is validated (non-empty trimmed / NUL-rejected) BEFORE the mutation; author = self.actor (FORK-M1b) ---
+    pub async fn add_comment(&self, issue_id: &str, body: &str) -> Result<Comment, EngineError>;   // author = self.actor
+    pub async fn update_comment(&self, comment_id: i64, body: &str) -> Result<Comment, EngineError>; // provenance-preserving (D-D)
+    pub async fn delete_comment(&self, comment_id: i64) -> Result<Comment, EngineError>;            // soft-redact (D-E)
     pub async fn close_with_suggestions(&self, id: &str, reason: Option<String>)
         -> Result<CloseOutcome, EngineError>; // returns newly-unblocked issues (FR-11)
 
@@ -1494,7 +1551,7 @@ impl Session {
 
 **rmcp 1.7** (`server`, `transport-io`) stdio server (`unblock mcp`), thin adapter over `Session`. **7 consolidated tools** (target ≤ 8), resources, prompts. Every tool input/output derives `JsonSchema` + `Serialize`/`Deserialize` — inputs AND outputs ride the schema bundle as per-tool `{input, output}` pairs (D25, §5.3/§5.4); args are schemars-validated with size/rate limits (NFR-18). Discovery (`capabilities`/`schema`) carries `contract_version` (FR-12), and BOTH discovery documents are covered by the single pinned `CONTRACT_HASH` drift gate (D22 clause 8 widened by D25 — §5.4).
 
-### 5.1 Tool taxonomy (7 tools)
+### 5.1 Tool taxonomy (7 tools shipped; → 8 at T3.9/D37 when `comment` lands)
 
 | # | Tool | Discriminator | Maps to |
 |---|---|---|---|
@@ -1505,6 +1562,13 @@ impl Session {
 | 5 | `dep` | `action: add\|remove\|list\|tree\|cycles\|graph` | FR-5 |
 | 6 | `sync` | `action: export\|import\|import_bd` | FR-7/8/26 |
 | 7 | `diagnostics` | `kind: stats\|info\|where\|version\|lint\|changelog\|orphans` | FR-15 |
+| 8 | `comment` *(lands T3.9, D37 — the DEDICATED comment tool, D-B; a distinct verb, NOT an `issue` arm)* | `action: add\|list\|update\|delete` | FR-6 |
+
+> **D37 — the 8th tool (`comment`).** A DEDICATED tool (D-B), the deliberate §6.6 exception (RK-3 budget now FULL at
+> 8 ≤ 8). It SUPERSEDES the earlier "`issue comment` sub-action" sketch (the `unblock-mcp.md` plan). Landing at
+> **T3.9** flips the live count 7→8 (and re-blesses the `list_tools`/`capabilities`/`schema_bundle` goldens + the
+> `agents_digest` ripple) and bumps `CONTRACT_VERSION` `unblock.mcp.v1.4`→`v1.5` with `CONTRACT_HASH` re-pinned —
+> the version-string flips + golden re-bless are T3.9 code deliverables, NOT this docs-only spec cascade.
 
 ### 5.2 Input shapes (schemars sketches)
 
@@ -1691,6 +1755,26 @@ strengthening the bundle test `every_tool_schema_is_an_object` to assert `input.
 `schema_bundle().<tool>.input` bytes, so it moves `CONTRACT_HASH` and forces a `CONTRACT_VERSION` bump (§5.4,
 jointly with the §5.3 output change).
 
+**`comment` input (FR-6, D37 — the 8th tool; lands T3.9).** A tagged-enum input modelled EXACTLY on the other
+tool inputs, carrying the CD-1 root `type:object` injection (§5.2a):
+
+```rust
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(tag = "action", rename_all = "snake_case")]
+#[schemars(extend("type" = "object"))]   // §5.2a — inputSchema root MUST be `type: object` (CD-1)
+pub enum CommentToolInput {
+    Add    { issue_id: String, body: String, #[serde(flatten)] attribution: Attribution },
+    List   { issue_id: String },
+    Update { comment_id: i64,  body: String, #[serde(flatten)] attribution: Attribution },
+    Delete { comment_id: i64,               #[serde(flatten)] attribution: Attribution }, // soft-redact (D-E)
+}
+```
+
+The tool body runs `self.preflight(&input)?` (NFR-18 quota) → match arm → the `Session` method (§4.1) →
+`ok_json`/`engine_err_json`. Author over MCP is `self.session.actor()` (no per-comment author — FORK-M1b). The
+`Attribution` flatten (capture-only `agent_name`/`harness`/`model`) mirrors the other mutating inputs. Body
+validation (non-empty trimmed / NUL-rejected) runs in the engine before the mutation (→ `ValidationFailed`).
+
 ### 5.3 Output shapes (D25/FORK-1B — per-tool, MATERIALIZED, NORMATIVE)
 
 The output surface is a family of REAL, mcp-owned types — the single output authority, not documentation.
@@ -1760,6 +1844,18 @@ pub enum DepOutput {
 #[derive(Serialize, JsonSchema)] pub struct DepRemoved { pub removed: bool }
 #[derive(Serialize, JsonSchema)] pub struct DepList { pub deps: Vec<Dependency> }        // CD-2 object-wrap: {"deps":[…]}
 #[derive(Serialize, JsonSchema)] pub struct CycleList { pub cycles: Vec<Vec<String>> }   // CD-2 object-wrap: {"cycles":[…]}
+
+// comment (FR-6, D37; lands T3.9) — one scalar arm (add/update/delete return the single affected Comment,
+// like IssueOutput::Issue covers create/show/reopen/restore) + one CD-2 object-wrapped list arm. `Comment` is
+// small (no Box needed). Redact wire form = the returned Comment with `redacted_at` present + `"text":""` (NO
+// extra top-level "redacted" bool — presence is the flag, mirroring the tombstone). `Comment` joins the
+// `unblock_model::{…}` import.
+#[derive(Serialize, JsonSchema)] #[serde(untagged)]
+pub enum CommentOutput {
+    Comment(Comment),            // add / update / delete(redact) — the single affected comment
+    Comments(CommentList),       // list — {"comments":[…]} object-wrap (CD-2, never a bare array)
+}
+#[derive(Serialize, JsonSchema)] pub struct CommentList { pub comments: Vec<Comment> }   // CD-2 object-wrap: {"comments":[…]}
 
 // sync — output = SyncOutput (G-23a): mcp-owned wrapper over the two model report DTOs.
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -1887,6 +1983,17 @@ gains an `ErrorCode` enum variant. So `CONTRACT_HASH` re-pins and `CONTRACT_VERS
 `unblock-error` `exit_code_table.rs` quadruple golden re-blessed. Spec-first: this clause lands first; the code
 follows in the paired implementation change (P2).
 
+**D37 comment surface (2026-07-16 — the gate firing as designed; lands T3.9).** D37 pulls the comment surface
+into v1 (§1.6/§1.7/§3.2/§4.1/§5.1/§5.2/§5.3). The version-coupled set moves on TWO axes: (1) the NEW dedicated
+`comment` tool adds a per-tool `{input,output}` pair (`schema_for!(CommentToolInput)` / `schema_for!(CommentOutput)`)
+to `schema_bundle()` and an 8th tool descriptor to `capabilities()`; (2) the `$defs/Comment` embedded inside the
+EXISTING `issue`/`query` OUTPUT schemas gains 2 properties (`updated_at`/`redacted_at`) — so EXISTING schema bytes
+move too (not merely a new pair). Both re-pin `CONTRACT_HASH` and bump `CONTRACT_VERSION`
+`unblock.mcp.v1.4` → `unblock.mcp.v1.5` (unblock-mcp `options.rs`), with the `capabilities`/`schema_bundle`/
+`list_tools` goldens + the D33 `agents_digest()` ripple re-blessed and the `contract_suite` re-run. `content_hash`
+is UNAFFECTED (§1.8) → FR-26 idempotency intact. Spec-first: this D37 clause + the §1.6/§1.7/§3.2/§4.1/§5.x design
+land FIRST (the docs-only cascade); the code + the version-string flip + the goldens re-bless follow at **T3.9**.
+
 **`agents_digest()` — a pure DERIVED VIEW, not a wire resource (T3.4.3/D33).** `unblock-mcp` additionally
 exposes `pub fn agents_digest() -> AgentsDigest` next to `schema_bundle()`: a CLI-friendly typed digest (the
 7 tools with their `oneOf`-derived actions + each action's FULL parameter surface — its required AND
@@ -1981,7 +2088,7 @@ All mutations flow through `Session` (FR-9) and the single write permit (D14); r
 Every error surfaced at L7 maps to exactly one `ErrorCode` and one 0–8 exit code per §2.3 (golden-snapshot pinned).
 
 ### 6.6 MCP tool-count budget
-MCP tool count stays ≤ 8; new domain surface extends existing tools by discriminator before adding tools (RK-3). D22's `create_bulk` is a NEW `action` arm on the existing `issue` tool (NOT a new tool) — the live `list_tools` golden (T2.3) keeps the count at 7.
+MCP tool count stays ≤ 8; new domain surface extends existing tools by discriminator before adding tools (RK-3). D22's `create_bulk` is a NEW `action` arm on the existing `issue` tool (NOT a new tool) — the live `list_tools` golden (T2.3) keeps the count at 7. **D37 (the `comment` tool):** the dedicated `comment` tool (D-B) is the deliberate exception to "extend before add" — a distinct domain verb, not an `issue` arm — bringing the count to **8 ≤ 8** at T3.9; the RK-3 budget is now **FULL** and any further domain surface must extend an existing tool by discriminator.
 
 ### 6.7 Safety / no-git / no-default-network
 `forbid(unsafe_code)`, no git crate / `Command::new("git")` anywhere (NFR-6/NFR-9); network/TLS only behind the non-default `remote` feature (D15) AND the default-on `self-update` axoupdater path (FR-25/D17), which the D5 no-network source-scan whitelists (NFR-10 names both).
