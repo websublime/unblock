@@ -8,7 +8,7 @@ or prompt over stdio; the `unblock` command-line binary is lifecycle/ops only.
 
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-> A ground-up, idiomatic, multi-crate **Rust** rewrite of the deprecated `beads_rust` tool. GA
+> A ground-up, idiomatic, multi-crate **Rust** tool. GA
 > **1.0.0** — semver stability applies from GA (D35): the MCP contract, CLI surface, and 0–8 exit
 > codes are stable; a breaking change bumps to 2.0.0.
 
