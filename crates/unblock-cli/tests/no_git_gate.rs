@@ -31,15 +31,20 @@ const FORBIDDEN_GIT: &[&str] = &[
 ];
 
 /// Network / self-update symbols that are ALLOWED only in a `self-update`-feature-gated context. Any
-/// occurrence must be reachable ONLY when `self-update` is enabled (i.e. in `commands/update.rs`, or
-/// on a `#[cfg(feature = "self-update")]`-guarded line). No un-gated network symbol may leak.
+/// occurrence must be reachable ONLY when `self-update` is enabled (i.e. the vetted `axoupdater` symbol
+/// in `commands/update.rs`, or on a `#[cfg(feature = "self-update")]`-guarded line). No un-gated network
+/// symbol may leak. Kept IDENTICAL to the workspace-wide `xtask::no_network` scanner's 6-symbol list.
 const NETWORK_SYMBOLS: &[&str] = &[
-    "axoupdater",
     "reqwest",
     "hyper::",
-    "TcpStream",
     "std::net::",
+    "TcpStream",
+    "rustls",
+    "axoupdater",
 ];
+
+/// The `self-update` feature gate attribute (exact spelling produced by the crate).
+const SELF_UPDATE_GATE: &str = "#[cfg(feature = \"self-update\")]";
 
 /// The crate `src/` root (from Cargo at compile time — no walk-up guessing).
 fn src_dir() -> PathBuf {
@@ -87,33 +92,29 @@ fn no_git_surface_in_the_cli_source() {
     }
 }
 
+// Symbol-scoped confinement (defense-in-depth): `commands/update.rs` is NOT skipped as a whole file —
+// only its vetted `axoupdater` symbol is exempt there; every OTHER network symbol (in ANY file) must be
+// a comment or sit inside a `#[cfg(feature = "self-update")]`-gated region. The soundness of the
+// `axoupdater`-in-`update.rs` exemption (that `mod update;` stays `self-update`-gated) is enforced by
+// `xtask::no_network::assert_update_mod_gated` + the `--no-default-features` feature-matrix build; this
+// crate-scoped tripwire does not re-assert the `mod` gate locally (parallel to its prior behavior).
 #[test]
 fn network_symbols_are_confined_behind_self_update() {
     let src = src_dir();
     for file in source_files(&src) {
         let text = std::fs::read_to_string(&file).expect("read source file");
-        let file_is_update = file.file_name().is_some_and(|n| n == "update.rs");
+        let is_update = file.file_name().is_some_and(|n| n == "update.rs");
         for symbol in NETWORK_SYMBOLS {
             if !text.contains(symbol) {
                 continue;
             }
-            // The whole `commands/update.rs` module is `#[cfg(feature = "self-update")]`-gated at its
-            // `mod` declaration (commands/mod.rs), so any network symbol there is confined by design.
-            if file_is_update {
-                continue;
-            }
-            // Elsewhere, EVERY line mentioning a network symbol must be feature-gated: the line (or a
-            // nearby line) must carry `#[cfg(feature = "self-update")]`. We enforce the stricter rule
-            // that such lines only appear inside a `self-update` cfg region — assert the file contains
-            // the gate and that no network symbol appears in an un-gated line.
-            for line in text.lines() {
+            for (idx, line) in text.lines().enumerate() {
                 if line.contains(symbol) {
-                    let gated_here = line.contains("self-update") // e.g. a doc/comment mentioning it
-                        || line.trim_start().starts_with("//"); // comments are inert
                     assert!(
-                        gated_here || is_cfg_gated_region(&text, line),
-                        "NFR-6/NFR-17: network symbol `{symbol}` appears un-gated in {}:\n  {line}\n\
-                         it must be confined behind `#[cfg(feature = \"self-update\")]`",
+                        line_is_confined(&text, line, idx, symbol, is_update),
+                        "NFR-6/NFR-17: network symbol `{symbol}` appears un-confined in {}:\n  {line}\n\
+                         it must be a comment, the vetted `axoupdater` symbol in the self-update-gated \
+                         updater module, or inside a `#[cfg(feature = \"self-update\")]`-gated region",
                         file.display()
                     );
                 }
@@ -122,58 +123,88 @@ fn network_symbols_are_confined_behind_self_update() {
     }
 }
 
-/// Whether `target` sits within a `#[cfg(feature = "self-update")]`-gated item — robust across BLANK
-/// LINES and doc-comment/attribute preludes (the earlier model reset on any blank line, so a gate
-/// separated from its symbol by a blank line was wrongly seen as un-gated).
+/// Whether a `line` (at index `idx`) containing network `symbol` (in file `is_update`) is a CONFINED
+/// reference rather than a leak: a comment, the vetted `axoupdater` symbol in the `self-update`-gated
+/// updater module, or a line inside a `#[cfg(feature = "self-update")]`-gated region. Anything else is a
+/// confinement leak. Extracted so the confinement policy is unit-testable (the
+/// `network_confinement_self_tests` below).
+fn line_is_confined(text: &str, line: &str, idx: usize, symbol: &str, is_update: bool) -> bool {
+    if line.trim_start().starts_with("//") {
+        return true; // comments are inert
+    }
+    if is_update && symbol == "axoupdater" {
+        return true; // update.rs may reference ONLY the vetted, module-gated axoupdater symbol
+    }
+    is_cfg_gated_region(text, idx)
+}
+
+/// Whether the line at `target_idx` sits within a `#[cfg(feature = "self-update")]`-gated item.
 ///
-/// # The model
+/// The gate applies to the item it immediately precedes and everything nested inside that item's block.
+/// We pair the gate attribute with the brace-depth of the item it opens and track the innermost
+/// enclosing gate. Hardened (v1.1) against three false-greens the earlier coarse scan carried:
+///  - **H1** an un-braced gated item (`use`/`const`/`type`/`static`/a field) no longer leaks its gate
+///    onto the next unrelated block: `armed` clears at the item's top-level `;` terminator, the item's
+///    top-level `,` (a struct field / enum variant separator, told apart from a generic `<…>` comma by a
+///    heuristic angle depth, and suppressed inside a `where`-clause whose bound commas are NOT item
+///    terminators, W1), or when the block enclosing the un-braced item closes without the item
+///    having opened its own block.
+///  - **H2** the target is matched by LINE INDEX, not by text, so two byte-identical lines (one gated,
+///    one not) are told apart.
+///  - **H3** braces/terminators inside string/char literals and `//`/`/* */` comments are ignored (a
+///    lightweight lexer blanks them before the brace scan), so a stray `{` in a string cannot inflate
+///    the depth.
 ///
-/// The gate applies to the **item it immediately precedes** and to everything nested inside that
-/// item's block. We track the innermost enclosing gate by pairing the `#[cfg(feature =
-/// "self-update")]` attribute with the brace-depth of the item it opens:
-///
-/// - When we see the gate attribute, we ARM it: the next `{` that opens a block records the
-///   depth at which the gated item begins (a doc comment or other attributes may sit between the gate
-///   and the `{` — blank lines included — and the arm survives them, unlike the old blank-line reset).
-/// - A `target` line is gated iff we are currently inside a block opened while a gate was armed (depth
-///   is at or below a recorded gate-open depth), so a following blank line no longer clears it.
-/// - When a gated block closes (`}` returns below its open depth), the gate stops applying — a later
-///   un-gated item is correctly seen as un-gated (so the scan still catches a genuine leak).
-///
-/// Brace counting on raw source is coarse (it ignores braces inside strings/comments), but the
-/// network symbols are confined to `commands/update.rs` (whole-module-gated, short-circuited before
-/// this fn) + inert doc comments, so this is a sound tripwire. The AUTHORITATIVE gate remains the
-/// `--no-default-features` build (see the module header).
-fn is_cfg_gated_region(text: &str, target: &str) -> bool {
-    let gate = "#[cfg(feature = \"self-update\")]";
-    if !text.contains(gate) {
+/// Coarse by design (a defense-in-depth tripwire, not a parser). Unrecognized gate forms over-flag (a
+/// safe, spurious finding). The one known UNDER-flag is a **tuple-struct paren-field sibling**
+/// (`struct S(#[cfg(feature = "self-update")] A, B)`): a tuple field comma sits inside `()`, textually
+/// indistinguishable from an fn-param comma without a real parser, so a gated tuple field's arm leaks to
+/// the next tuple field. Zero corpus exposure; the `--no-default-features` feature-matrix build is the
+/// authoritative confinement gate that closes it.
+fn is_cfg_gated_region(text: &str, target_idx: usize) -> bool {
+    if !text.contains(SELF_UPDATE_GATE) {
         return false;
     }
+    let mut depth: i32 = 0; // brace {} nesting
+    let mut group: i32 = 0; // () and [] nesting — to find a TOP-LEVEL ';'
+    let mut angle: i32 = 0; // generic <> nesting — to tell a generic ',' from a field/variant ','
+    let mut gated_depths: Vec<i32> = Vec::new(); // brace depths at which open gated items began
+    let mut armed = false; // a gate is pending, awaiting its item
+    let mut in_where = false; // inside the armed item's `where`-clause (its commas are not terminators)
+    let mut armed_depth: i32 = 0; // brace depth when the pending gate was armed
+    let mut block_comment: i32 = 0; // /* */ nesting carried across lines
 
-    let mut depth: i32 = 0;
-    // The brace-depths at which currently-open gated items began (a stack — nested gates possible).
-    let mut gated_depths: Vec<i32> = Vec::new();
-    // Whether the most recent attribute prelude armed a gate awaiting its opening `{`.
-    let mut armed = false;
-
-    for line in text.lines() {
-        let trimmed = line.trim_start();
-
-        // The target may itself be un-braced (e.g. a match arm / a field): it is gated iff we are
-        // already inside a gated item's block OR a gate is armed for the item this very line opens.
-        if line == target {
+    for (i, line) in text.lines().enumerate() {
+        if i == target_idx {
             return !gated_depths.is_empty() || armed;
         }
+        let in_comment_at_start = block_comment > 0;
+        let code = code_only(line, &mut block_comment);
 
-        if trimmed == gate {
+        // Arm on the EXACT gate attribute (never when the line began inside a block comment).
+        if !in_comment_at_start && line.trim_start() == SELF_UPDATE_GATE {
             armed = true;
+            armed_depth = depth;
+            in_where = false;
+            continue; // an attribute line opens no braces and terminates no item
         }
-
-        for ch in line.chars() {
+        // A where-clause's bound commas are NOT item terminators — suppress the `,`-disarm until the
+        // item's block opens, else a gated generic fn with a multi-line `where` is wrongly flagged (W1).
+        if armed && !in_where && has_where_keyword(&code) {
+            in_where = true;
+        }
+        let mut prev = ' '; // last significant code char — for <> generic detection (armed-window only)
+        for ch in code.chars() {
             match ch {
+                '(' | '[' => group += 1,
+                ')' | ']' => group = (group - 1).max(0), // F4: floor at 0 (a mis-lex can't drive it negative)
+                // Heuristic generic-angle depth. In the armed window (gate → item header) `<`/`>` are
+                // generics or the `->` arrow; count `<` only in a type position (after an ident / `>`),
+                // and `>` except in `->`. Purely to tell a generic `,` from a field/variant `,` (D1).
+                '<' if prev.is_ascii_alphanumeric() || prev == '_' || prev == '>' => angle += 1,
+                '>' if prev != '-' => angle = (angle - 1).max(0),
                 '{' => {
                     if armed {
-                        // This block belongs to the gated item; record the depth it opened at.
                         gated_depths.push(depth);
                         armed = false;
                     }
@@ -181,25 +212,175 @@ fn is_cfg_gated_region(text: &str, target: &str) -> bool {
                 }
                 '}' => {
                     depth -= 1;
-                    // Leaving a gated item's block clears its gate.
                     if gated_depths.last().is_some_and(|&d| depth <= d) {
                         gated_depths.pop();
                     }
+                    // The block enclosing an un-braced gated item closed → drop the stale arm (H1).
+                    if armed && depth < armed_depth {
+                        armed = false;
+                    }
                 }
+                // An un-braced gated item ends at its top-level `;` (use/const/type/static) …
+                ';' if armed && group == 0 => armed = false,
+                // … or a top-level `,` that is a struct FIELD / enum VARIANT separator — NOT a generic
+                // `<…>` comma (angle == 0) and NOT a fn-param comma (group == 0) (D1, H1 comma-sibling).
+                ',' if armed && group == 0 && angle == 0 && !in_where => armed = false,
                 _ => {}
+            }
+            if !ch.is_whitespace() {
+                prev = ch;
             }
         }
     }
     false
 }
 
-/// Self-tests for the hardened `is_cfg_gated_region` scanner — proving it (a) survives blank lines and
-/// doc-comment preludes between a gate and its symbol (the fragility SF-C fixes) AND (b) still catches
-/// a genuinely un-gated network symbol (defense-in-depth non-vacuity: the scan must not be a rubber
-/// stamp). These are the tripwire's own regression pins.
+/// Whether `code` contains the `where` keyword as a standalone word (a where-clause opener). Used to
+/// suppress the field/variant `,`-disarm inside a where-clause: its bound commas are NOT item
+/// terminators, so without this a gated generic fn with a `where` clause would disarm mid-signature and
+/// be spuriously flagged (a false-RED). `where` is a reserved keyword, so a word-boundary match is exact.
+fn has_where_keyword(code: &str) -> bool {
+    code.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .any(|w| w == "where")
+}
+
+/// Return `line` with `//`/`/* */` comment, `"…"`/raw-string, and `'…'` char-literal content removed,
+/// so a following brace/terminator scan sees only real code punctuation (H3). `block_comment` carries
+/// `/* */` nesting across lines. Lifetimes (`'a`) are emitted as harmless ticks (no braces/terminators).
+///
+/// Single-line coverage. The accepted lexer residuals are (a) a multi-line raw string and (b) a
+/// `\`-continuation multi-line normal string — BOTH mis-count only in the over-flag (false-RED)
+/// direction on the continuation line. The `group`/`angle` disarm counters are floored at 0 (D1/F4), so
+/// a stray unbalanced `)`/`]`/`>` cannot drive a disarm guard permanently false. The
+/// `--no-default-features` feature-matrix build remains the authoritative gate.
+fn code_only(line: &str, block_comment: &mut i32) -> String {
+    let b = line.as_bytes();
+    let mut out = String::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if *block_comment > 0 {
+            if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'*' {
+                *block_comment += 1;
+                i += 2;
+            } else if b[i] == b'*' && i + 1 < b.len() && b[i + 1] == b'/' {
+                *block_comment -= 1;
+                i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        match b[i] {
+            b'/' if i + 1 < b.len() && b[i + 1] == b'/' => break, // line comment: drop the rest
+            b'/' if i + 1 < b.len() && b[i + 1] == b'*' => {
+                *block_comment += 1;
+                i += 2;
+            }
+            b'r' if starts_raw_string(b, i) => i = skip_raw_string(b, i),
+            b'b' if i + 1 < b.len() && b[i + 1] == b'r' && starts_raw_string(b, i + 1) => {
+                i = skip_raw_string(b, i + 1);
+            }
+            b'"' => i = skip_string(b, i),
+            b'b' if i + 1 < b.len() && b[i + 1] == b'"' => i = skip_string(b, i + 1),
+            b'\'' => {
+                if let Some(next) = skip_char_literal(b, i) {
+                    i = next;
+                } else {
+                    out.push('\''); // a lifetime tick — harmless
+                    i += 1;
+                }
+            }
+            other if other.is_ascii() => {
+                out.push(char::from(other));
+                i += 1;
+            }
+            _ => i += 1, // non-ASCII (identifier bytes) — never structural punctuation
+        }
+    }
+    out
+}
+
+/// Whether a raw-string prefix (`r`, `r#`, `r##`, …) begins at `b[i] == b'r'` (i.e. `r` then `#`* then `"`).
+fn starts_raw_string(b: &[u8], i: usize) -> bool {
+    let mut j = i + 1;
+    while j < b.len() && b[j] == b'#' {
+        j += 1;
+    }
+    j < b.len() && b[j] == b'"'
+}
+
+/// Skip a raw string starting at `b[i] == b'r'`; return the index just past the closing `"#*` (or
+/// `b.len()` if unterminated on this line).
+fn skip_raw_string(b: &[u8], i: usize) -> usize {
+    let mut hashes: usize = 0;
+    let mut j = i + 1;
+    while j < b.len() && b[j] == b'#' {
+        hashes += 1;
+        j += 1;
+    }
+    j += 1; // past the opening '"'
+    while j < b.len() {
+        if b[j] == b'"' {
+            let mut end = j + 1;
+            let mut matched: usize = 0;
+            while matched < hashes && end < b.len() && b[end] == b'#' {
+                matched += 1;
+                end += 1;
+            }
+            if matched == hashes {
+                return end;
+            }
+        }
+        j += 1;
+    }
+    b.len()
+}
+
+/// Skip a normal/byte string starting at `b[i] == b'"'`; return the index just past the closing `"`.
+/// Honors `\"` escapes; returns `b.len()` if unterminated on this line.
+fn skip_string(b: &[u8], i: usize) -> usize {
+    let mut j = i + 1;
+    while j < b.len() {
+        match b[j] {
+            b'\\' => j += 2,
+            b'"' => return j + 1,
+            _ => j += 1,
+        }
+    }
+    b.len()
+}
+
+/// Skip a char literal at `b[i] == b'\''`; `Some(next)` past the closing `'` if it IS a char literal
+/// (`'x'`, `'\n'`, `'\''`, `'{'`, `'\u{7f}'`, …), or `None` if it is a lifetime tick (`'a`, `'static`).
+fn skip_char_literal(b: &[u8], i: usize) -> Option<usize> {
+    if i + 1 >= b.len() {
+        return None;
+    }
+    if b[i + 1] == b'\\' {
+        // escaped: the byte at i+2 is escaped content (possibly a quote); the closing quote is the next
+        // '\'' at or after i+3 (skips any `{`/`}` inside a `\u{..}` escape).
+        let mut j = i + 3;
+        while j < b.len() && b[j] != b'\'' {
+            j += 1;
+        }
+        return (j < b.len()).then_some(j + 1);
+    }
+    if i + 2 < b.len() && b[i + 2] == b'\'' {
+        return Some(i + 3); // plain 'x'
+    }
+    None // a lifetime
+}
+
+/// Self-tests for the hardened confinement policy — proving `is_cfg_gated_region` (a) survives blank
+/// lines and doc-comment preludes between a gate and its symbol AND (b) still catches a genuinely
+/// un-gated network symbol (defense-in-depth non-vacuity: the scan must not be a rubber stamp), the
+/// H1/H2/H3 lexer-hardening edge cases, and that `line_is_confined` closes both false-green escape
+/// vectors while still exempting the legit self-update path. These are the tripwire's own regression pins.
 #[cfg(test)]
-mod scanner_self_tests {
-    use super::is_cfg_gated_region;
+mod network_confinement_self_tests {
+    use super::{is_cfg_gated_region, line_is_confined};
+
+    // ---- `is_cfg_gated_region` — blank-line survival + ungated-sibling + no-gate (line-index targets). ----
 
     /// A gate separated from the symbol line by a BLANK LINE + a doc comment is still seen as gated —
     /// the exact case the old blank-line-reset model got wrong.
@@ -213,9 +394,9 @@ fn updater() {
     let client = reqwest::Client::new();
 }
 ";
-        let target = "    let client = reqwest::Client::new();";
+        // line 0 gate, 1 blank, 2 doc comment, 3 fn, 4 the target symbol.
         assert!(
-            is_cfg_gated_region(text, target),
+            is_cfg_gated_region(text, 4),
             "a gate must still apply across a blank line + doc comment (SF-C hardening)"
         );
     }
@@ -234,14 +415,13 @@ fn leaked() {
     let bad = reqwest::Client::new();
 }
 ";
-        let gated_line = "    let ok = reqwest::Client::new();";
-        let leaked_line = "    let bad = reqwest::Client::new();";
+        // line 2 the gated symbol, line 6 the un-gated sibling twin.
         assert!(
-            is_cfg_gated_region(text, gated_line),
+            is_cfg_gated_region(text, 2),
             "the symbol inside the gated fn is gated"
         );
         assert!(
-            !is_cfg_gated_region(text, leaked_line),
+            !is_cfg_gated_region(text, 6),
             "a symbol in an UN-gated sibling item must be seen as a leak (non-vacuous scan)"
         );
     }
@@ -250,10 +430,277 @@ fn leaked() {
     #[test]
     fn no_gate_in_file_is_never_gated() {
         let text = "fn f() {\n    let x = std::net::TcpStream::connect(\"h:1\");\n}\n";
-        let target = "    let x = std::net::TcpStream::connect(\"h:1\");";
+        // line 1 the target symbol.
         assert!(
-            !is_cfg_gated_region(text, target),
+            !is_cfg_gated_region(text, 1),
             "a network symbol with no gate anywhere is a leak"
         );
+    }
+
+    // ---- `is_cfg_gated_region` lexer hardening (H1/H2/H3) — line-index targets. ----
+
+    // H1 — a gated UN-BRACED item does NOT leak its gate onto the next block.
+    #[test]
+    fn h1_gated_use_does_not_leak_to_next_block() {
+        let text = "\
+#[cfg(feature = \"self-update\")]
+use reqwest::Client;
+fn leaked() {
+    let _ = std::net::TcpStream::connect(\"x\");
+}
+";
+        // line 0 gate, 1 use (gated item), 2 fn, 3 the target socket (must be UN-gated → a leak).
+        assert!(
+            is_cfg_gated_region(text, 1),
+            "the gated `use` line itself is gated"
+        );
+        assert!(
+            !is_cfg_gated_region(text, 3),
+            "the socket in the NEXT fn must NOT be gated (H1)"
+        );
+    }
+
+    // H1 — a gated field inside a struct block does NOT leak past the struct's close.
+    #[test]
+    fn h1_gated_field_does_not_leak_past_struct_close() {
+        let text = "\
+struct S {
+    #[cfg(feature = \"self-update\")]
+    updater: reqwest::Client,
+}
+fn leaked() {
+    let _ = std::net::TcpStream::connect(\"x\");
+}
+";
+        assert!(
+            !is_cfg_gated_region(text, 5),
+            "the socket after the struct must NOT be gated (H1)"
+        );
+    }
+
+    // H1 — a genuine MULTI-LINE gated fn signature stays gated (no false-RED regression from the H1 fix).
+    #[test]
+    fn h1_multiline_gated_signature_stays_gated() {
+        let text = "\
+#[cfg(feature = \"self-update\")]
+pub fn updater(
+    arg: u8,
+) -> u8 {
+    let _ = reqwest::Client::new();
+    arg
+}
+";
+        assert!(
+            is_cfg_gated_region(text, 4),
+            "a gated fn with a multi-line signature stays gated"
+        );
+    }
+
+    // D1 — a sibling field after a gated field does NOT inherit the gate (H1 comma-sibling closed).
+    #[test]
+    fn h1_gated_field_does_not_leak_to_sibling_field() {
+        let text = "\
+struct S {
+    #[cfg(feature = \"self-update\")]
+    a: u8,
+    b: reqwest::Client,
+}
+";
+        assert!(
+            !is_cfg_gated_region(text, 3),
+            "a sibling field after a gated field must NOT be gated (H1 comma-sibling)"
+        );
+    }
+
+    // D1 regression guard — a gated GENERIC fn signature stays gated (the angle guard protects it).
+    #[test]
+    fn h1_gated_generic_signature_stays_gated() {
+        let text = "\
+#[cfg(feature = \"self-update\")]
+fn f<T: Trait, U>() {
+    let _ = reqwest::Client::new();
+}
+";
+        assert!(
+            is_cfg_gated_region(text, 2),
+            "a gated generic fn signature stays gated (no comma-disarm regression)"
+        );
+    }
+
+    // W1 — a gated fn with a multi-line where-clause stays gated (the bound commas are suppressed).
+    #[test]
+    fn h1_gated_where_clause_signature_stays_gated() {
+        let text = "\
+#[cfg(feature = \"self-update\")]
+fn f<T, U>() -> T
+where
+    T: Default,
+    U: Clone,
+{
+    let _ = reqwest::Client::new();
+    T::default()
+}
+";
+        assert!(
+            is_cfg_gated_region(text, 6),
+            "a gated fn with a multi-line where-clause stays gated (W1, no false-RED)"
+        );
+    }
+
+    // KNOWN, DOCUMENTED RESIDUAL (not a bug to fix without a real parser): a tuple-struct paren-field
+    // sibling under-flags. Pinned so any future change to this behavior is surfaced, not silent. See the
+    // `is_cfg_gated_region` doc. Backstopped by the --no-default-features feature-matrix build.
+    #[test]
+    fn known_residual_tuple_struct_field_under_flags() {
+        let text = "\
+struct S(
+    #[cfg(feature = \"self-update\")]
+    A,
+    reqwest::Client,
+);
+";
+        assert!(
+            is_cfg_gated_region(text, 3),
+            "documents the known tuple-struct paren-field under-flag (lightweight-heuristic limit)"
+        );
+    }
+
+    // H2 — two byte-identical symbol lines (one gated, one not) are told apart by index.
+    #[test]
+    fn h2_identical_lines_are_distinguished_by_index() {
+        // line 2 sits inside a `self-update`-gated fn, line 5 in an un-gated sibling; the two symbol
+        // lines are BYTE-IDENTICAL. A text-keyed scan returns at the FIRST match and misclassifies
+        // line 5 as gated; an INDEX-keyed scan tells the byte-identical twins apart (H2).
+        let text = "\
+#[cfg(feature = \"self-update\")]
+fn gated() {
+    let _ = reqwest::Client::new();
+}
+fn leaked() {
+    let _ = reqwest::Client::new();
+}
+";
+        assert!(
+            is_cfg_gated_region(text, 2),
+            "the gated identical line is gated"
+        );
+        assert!(
+            !is_cfg_gated_region(text, 5),
+            "the un-gated byte-identical twin is NOT gated (H2)"
+        );
+    }
+
+    // H3 — a stray `{` inside a string in a gated block does not leak the gate past the block.
+    #[test]
+    fn h3_brace_in_string_does_not_miscount() {
+        let text = "\
+#[cfg(feature = \"self-update\")]
+fn ok() { let _ = \"{\"; }
+fn leaked() {
+    let _ = std::net::TcpStream::connect(\"x\");
+}
+";
+        assert!(
+            !is_cfg_gated_region(text, 3),
+            "a `{{` in a string must not inflate depth (H3)"
+        );
+    }
+
+    // H3 — a `{` inside a char literal (unbalanced) must not inflate depth.
+    #[test]
+    fn h3_brace_in_char_literal_does_not_miscount() {
+        let text = "\
+#[cfg(feature = \"self-update\")]
+fn ok() { let _ = '{'; }
+fn leaked() {
+    let _ = std::net::TcpStream::connect(\"x\");
+}
+";
+        assert!(
+            !is_cfg_gated_region(text, 3),
+            "a `{{` in a char literal must not inflate depth (H3)"
+        );
+    }
+
+    // H3 — a `{` inside a line comment WITHIN the gated block (unbalanced) must not inflate depth.
+    #[test]
+    fn h3_brace_in_line_comment_does_not_miscount() {
+        let text = "\
+#[cfg(feature = \"self-update\")]
+fn ok() {
+    let _ = 5; // {
+}
+fn leaked() {
+    let _ = std::net::TcpStream::connect(\"x\");
+}
+";
+        assert!(
+            !is_cfg_gated_region(text, 5),
+            "a `{{` in a line comment must not inflate depth (H3)"
+        );
+    }
+
+    // ---- `line_is_confined` — the two closed escape vectors + the legit self-update path. ----
+
+    // VECTOR 1: a std::net line with a self-update substring is NOT confined (no substring escape).
+    #[test]
+    fn self_update_substring_does_not_confine_a_raw_socket() {
+        let text =
+            "fn f() {\n    let _ = std::net::TcpStream::connect(\"self-update-host:1\");\n}\n";
+        let line = "    let _ = std::net::TcpStream::connect(\"self-update-host:1\");";
+        // the socket is on line index 1.
+        assert!(!line_is_confined(text, line, 1, "std::net::", false));
+        assert!(!line_is_confined(text, line, 1, "std::net::", true)); // not even in update.rs (not axoupdater)
+    }
+
+    // VECTOR 2: a raw socket in update.rs under a NON-self-update cfg is NOT confined (symbol-scoped).
+    #[test]
+    fn raw_socket_in_update_rs_is_not_confined() {
+        let text = "\
+#[cfg(feature = \"telemetry\")]
+fn beacon() {
+    let _ = std::net::TcpStream::connect(\"h:1\");
+}
+";
+        let line = "    let _ = std::net::TcpStream::connect(\"h:1\");";
+        // the socket is on line index 2.
+        assert!(!line_is_confined(text, line, 2, "std::net::", true));
+    }
+
+    // The vetted axoupdater symbol in update.rs IS confined (module-gated, symbol-scoped).
+    #[test]
+    fn axoupdater_in_update_rs_is_confined() {
+        let text = "use axoupdater::AxoUpdater;\n";
+        let line = "use axoupdater::AxoUpdater;";
+        assert!(line_is_confined(text, line, 0, "axoupdater", true));
+        assert!(!line_is_confined(text, line, 0, "axoupdater", false)); // NOT exempt outside update.rs w/o a gate
+    }
+
+    // A genuinely self-update-gated symbol is confined in ANY file.
+    #[test]
+    fn self_update_gated_symbol_is_confined_anywhere() {
+        let text = "\
+#[cfg(feature = \"self-update\")]
+fn updater() {
+    let _ = reqwest::Client::new();
+}
+";
+        let line = "    let _ = reqwest::Client::new();";
+        // the symbol is on line index 2.
+        assert!(line_is_confined(text, line, 2, "reqwest", false));
+    }
+
+    // R2 — a genuinely self-update-gated `axoupdater` line is confined too (symbol-specific, ANY file).
+    #[test]
+    fn self_update_gated_axoupdater_is_confined_anywhere() {
+        let text = "\
+#[cfg(feature = \"self-update\")]
+fn updater() {
+    let _ = axoupdater::AxoUpdater::new_for(\"x\");
+}
+";
+        let line = "    let _ = axoupdater::AxoUpdater::new_for(\"x\");";
+        // the symbol is on line index 2.
+        assert!(line_is_confined(text, line, 2, "axoupdater", false));
     }
 }
