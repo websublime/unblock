@@ -11,6 +11,7 @@ use unblock_model::{Comment, Dependency, Issue, IssueValidator, parse_id};
 use crate::error::{StorageError, map_libsql_err};
 use crate::filters::{DeleteMode, DeletePlan};
 
+use super::comments::COMMENT_COLUMNS;
 use super::events::append_event_in_tx;
 use super::ids::update_child_counter_in_tx;
 use super::mappers::{
@@ -317,13 +318,15 @@ async fn hydrate(conn: &Connection, issue: &mut Issue) -> Result<(), StorageErro
     }
     issue.dependencies = deps;
 
-    // Comments (D37) — canonical order `created_at ASC, id ASC` (spine §3.2.1).
+    // Comments (D37) — canonical order `created_at ASC, id ASC` (spine §3.2.1). The projection is the
+    // shared `COMMENT_COLUMNS` const — `comment_from_row` reads it POSITIONALLY, so it must not be
+    // re-spelled here.
+    let comments_sql = format!(
+        "SELECT {COMMENT_COLUMNS} FROM comments WHERE issue_id = ?1 \
+         ORDER BY created_at ASC, id ASC"
+    );
     let mut rows = conn
-        .query(
-            "SELECT id, issue_id, author, text, created_at, updated_at, redacted_at \
-             FROM comments WHERE issue_id = ?1 ORDER BY created_at ASC, id ASC",
-            libsql::params![issue.id.as_str()],
-        )
+        .query(&comments_sql, libsql::params![issue.id.as_str()])
         .await
         .map_err(map_libsql_err)?;
     let mut comments = Vec::new();
@@ -443,8 +446,7 @@ pub(super) async fn hydrate_ids(
         // so this SELECT deliberately keeps the natural column order rather than hoisting the
         // grouping key.
         let comments_sql = format!(
-            "SELECT id, issue_id, author, text, created_at, updated_at, redacted_at \
-             FROM comments WHERE issue_id IN ({placeholder_list}) \
+            "SELECT {COMMENT_COLUMNS} FROM comments WHERE issue_id IN ({placeholder_list}) \
              ORDER BY issue_id ASC, created_at ASC, id ASC"
         );
         let mut rows = conn
