@@ -149,6 +149,10 @@ pub(crate) const SCHEMA_SQL: &str = r"
         author TEXT NOT NULL,
         text TEXT NOT NULL,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        -- D37 — provenance-preserving edit (D-D) / soft-redact (D-E). Both nullable and part of
+        -- the BASELINE schema: CURRENT_SCHEMA_VERSION stays 1 and MIGRATIONS stays empty.
+        updated_at DATETIME,
+        redacted_at DATETIME,
         FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_comments_issue ON comments(issue_id);

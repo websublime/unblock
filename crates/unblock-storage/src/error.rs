@@ -34,6 +34,19 @@ pub enum StorageError {
         id: String,
     },
 
+    /// No comment exists for the given comment id (FR-6/D37).
+    ///
+    /// This StorageError-level variant maps ONTO the EXISTING [`ErrorCode::IssueNotFound`] — the
+    /// two levels are deliberately NOT 1:1 here (spine §3.1). FORK-E1 constrains the `ErrorCode`
+    /// taxonomy (it stays at 36, so no exit-code-table or error-golden movement), not the internal
+    /// enum; reusing `IssueNotFound { id }` here would render `issue 42 not found` when it was
+    /// **comment** 42 that was missing — actively misleading in an agent-first tracker.
+    #[snafu(display("comment not found: {id}"))]
+    CommentNotFound {
+        /// The comment id that matched no row (matches `Comment.id`'s own type).
+        id: i64,
+    },
+
     /// A partial id matched more than one issue (disambiguate and retry).
     #[snafu(display("ambiguous id: {id}"))]
     AmbiguousId {
@@ -149,7 +162,9 @@ pub enum StorageError {
 impl CodedError for StorageError {
     fn code(&self) -> ErrorCode {
         match self {
-            Self::IssueNotFound { .. } => ErrorCode::IssueNotFound,
+            // D37/FORK-E1: `CommentNotFound` REUSES the issue-not-found code — the taxonomy does
+            // not grow; only the StorageError level names the missing entity honestly.
+            Self::IssueNotFound { .. } | Self::CommentNotFound { .. } => ErrorCode::IssueNotFound,
             Self::AmbiguousId { .. } => ErrorCode::AmbiguousId,
             Self::IdCollision { .. } => ErrorCode::IdCollision,
             Self::InvalidId { .. } => ErrorCode::InvalidId,
@@ -186,6 +201,11 @@ impl CodedError for StorageError {
             Self::AlreadyClaimed { id, by } => {
                 map.insert("id".to_string(), Value::String(id.clone()));
                 map.insert("holder".to_string(), Value::String(by.clone()));
+            }
+            Self::CommentNotFound { id } => {
+                // The code() is IssueNotFound, but the context key stays honest about WHICH
+                // entity was missing (spine §3.1).
+                map.insert("comment_id".to_string(), Value::from(*id));
             }
             Self::CycleDetected { path } => {
                 map.insert("cycle_path".to_string(), Value::String(path.clone()));

@@ -6,14 +6,16 @@ use std::collections::{HashMap, HashSet};
 use chrono::Utc;
 use libsql::{Connection, Value, params_from_iter};
 
-use unblock_model::{Dependency, Issue, IssueValidator, parse_id};
+use unblock_model::{Comment, Dependency, Issue, IssueValidator, parse_id};
 
 use crate::error::{StorageError, map_libsql_err};
 use crate::filters::{DeleteMode, DeletePlan};
 
 use super::events::append_event_in_tx;
 use super::ids::update_child_counter_in_tx;
-use super::mappers::{ISSUE_COLUMNS, bind_issue, dependency_from_row, issue_from_row};
+use super::mappers::{
+    ISSUE_COLUMNS, bind_issue, comment_from_row, dependency_from_row, issue_from_row,
+};
 use super::{WriteHook, with_immediate_tx};
 
 /// Create an issue: validate, guard against `id/external_ref` collisions, insert the row + relations,
@@ -168,14 +170,23 @@ pub(super) async fn insert_issue_in_tx(
     }
 
     // Insert comments + Event(Commented) each.
+    //
+    // SIX columns, binding `updated_at` + `redacted_at` from the caller-supplied `Comment` (D37).
+    // This is the create/bulk/IMPORT seed path: it REPLAYS an existing comment and must persist
+    // whatever state it carries. Spine §3.2.1 MUST-1 ("only `update` ever sets `updated_at`") is
+    // scoped to `add_comment` ONLY — over-applying it here and leaving this INSERT at 4 columns
+    // silently drops both fields, so a redacted comment imports back UN-REDACTED.
     for comment in &issue.comments {
         tx.execute(
-            "INSERT INTO comments (issue_id, author, text, created_at) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO comments (issue_id, author, text, created_at, updated_at, redacted_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             libsql::params![
                 issue.id.as_str(),
                 comment.author.as_str(),
                 comment.body.as_str(),
                 comment.created_at.to_rfc3339(),
+                comment.updated_at.map(|ts| ts.to_rfc3339()),
+                comment.redacted_at.map(|ts| ts.to_rfc3339()),
             ],
         )
         .await
@@ -243,7 +254,7 @@ pub(super) async fn create_issues(
     .await
 }
 
-/// Fetch a single issue (hydrated with labels + dependencies), or `None` if absent.
+/// Fetch a single issue (hydrated with labels + dependencies + comments), or `None` if absent.
 pub(super) async fn get_issue(conn: &Connection, id: &str) -> Result<Option<Issue>, StorageError> {
     let sql = format!("SELECT {ISSUE_COLUMNS} FROM issues WHERE id = ?1");
     let mut rows = conn
@@ -273,7 +284,7 @@ pub(super) async fn get_issues(
     hydrate_ids(conn, ids).await
 }
 
-/// Hydrate an issue's `labels` (sorted) and `dependencies` from their tables.
+/// Hydrate an issue's `labels` (sorted), `dependencies` and `comments` from their tables.
 async fn hydrate(conn: &Connection, issue: &mut Issue) -> Result<(), StorageError> {
     // Labels.
     let mut rows = conn
@@ -305,6 +316,21 @@ async fn hydrate(conn: &Connection, issue: &mut Issue) -> Result<(), StorageErro
         deps.push(dependency_from_row(&row)?);
     }
     issue.dependencies = deps;
+
+    // Comments (D37) — canonical order `created_at ASC, id ASC` (spine §3.2.1).
+    let mut rows = conn
+        .query(
+            "SELECT id, issue_id, author, text, created_at, updated_at, redacted_at \
+             FROM comments WHERE issue_id = ?1 ORDER BY created_at ASC, id ASC",
+            libsql::params![issue.id.as_str()],
+        )
+        .await
+        .map_err(map_libsql_err)?;
+    let mut comments = Vec::new();
+    while let Some(row) = rows.next().await.map_err(map_libsql_err)? {
+        comments.push(comment_from_row(&row)?);
+    }
+    issue.comments = comments;
     Ok(())
 }
 
@@ -319,24 +345,26 @@ async fn hydrate(conn: &Connection, issue: &mut Issue) -> Result<(), StorageErro
 const HYDRATE_ID_CHUNK: usize = 900;
 
 /// Batch-hydrate an **already-ordered** id list into fully-populated [`Issue`]s (labels +
-/// dependencies), preserving the input order.
+/// dependencies + comments), preserving the input order.
 ///
-/// This replaces the historical per-id `get_issue` loop (`1 + 3N` queries) with a batched fetch:
-/// for each chunk of at most [`HYDRATE_ID_CHUNK`] ids it runs three `WHERE … IN (…)` queries — the
-/// issue rows, the labels, and the dependencies — and folds **every** chunk into ONE set of
-/// accumulators; reconstruction then maps over the full ordered `ids` exactly once. Query count is
-/// `1 + 3·⌈N/CHUNK⌉` per call (the `1` is the caller's id query), versus the old `1 + 3N`.
+/// This replaces the historical per-id `get_issue` loop (`1 + 4N` queries) with a batched fetch:
+/// for each chunk of at most [`HYDRATE_ID_CHUNK`] ids it runs four `WHERE … IN (…)` queries — the
+/// issue rows, the labels, the dependencies, and the comments (D37) — and folds **every** chunk
+/// into ONE set of accumulators; reconstruction then maps over the full ordered `ids` exactly once.
+/// Query count is `1 + 4·⌈N/CHUNK⌉` per call (the `1` is the caller's id query), versus `1 + 4N`.
 ///
 /// **Byte-identical** to the old loop (`get_issue` per id):
 /// - **outer order** — reassembly iterates `ids`, so the result order is the caller's id-query
 ///   order, never the arbitrary `IN`-result row order;
-/// - **label sort** (`label ASC`) and **dep sort** (`depends_on_id ASC, type ASC`) — preserved by
-///   the per-relation `ORDER BY`; the leading `issue_id` key only groups rows, leaving the same
-///   secondary keys to fully determine the intra-issue order the single-id `SELECT`s produced;
+/// - **label sort** (`label ASC`), **dep sort** (`depends_on_id ASC, type ASC`) and **comment
+///   sort** (`created_at ASC, id ASC`) — preserved by the per-relation `ORDER BY`; the leading
+///   `issue_id` key only groups rows, leaving the same secondary keys to fully determine the
+///   intra-issue order the single-id `SELECT`s produced;
 /// - **skip-absent** — an id whose issue row has vanished (a tombstone/hard-delete race between the
 ///   id query and hydration) is dropped by `filter_map` returning `None`, never a panic or a
 ///   placeholder (identical to the old `if let Some(issue) = get_issue(…)`);
-/// - **empty relations** — an issue with no labels/deps gets an empty `Vec` (`unwrap_or_default`);
+/// - **empty relations** — an issue with no labels/deps/comments gets an empty `Vec`
+///   (`unwrap_or_default`);
 /// - **empty id set** — an early `Ok(Vec::new())` guard (an `IN ()` is a SQL error).
 ///
 /// The ids are treated as a lookup set: they are unique on every read path (each derives them from
@@ -355,6 +383,7 @@ pub(super) async fn hydrate_ids(
     let mut issues: HashMap<String, Issue> = HashMap::with_capacity(ids.len());
     let mut labels: HashMap<String, Vec<String>> = HashMap::new();
     let mut deps: HashMap<String, Vec<Dependency>> = HashMap::new();
+    let mut comments: HashMap<String, Vec<Comment>> = HashMap::new();
 
     for chunk in ids.chunks(HYDRATE_ID_CHUNK) {
         let placeholder_list = placeholders(chunk.len());
@@ -400,12 +429,34 @@ pub(super) async fn hydrate_ids(
              ORDER BY issue_id ASC, depends_on_id ASC, type ASC"
         );
         let mut rows = conn
-            .query(&deps_sql, params_from_iter(params))
+            .query(&deps_sql, params_from_iter(params.clone()))
             .await
             .map_err(map_libsql_err)?;
         while let Some(row) = rows.next().await.map_err(map_libsql_err)? {
             let dep = dependency_from_row(&row)?;
             deps.entry(dep.issue_id.clone()).or_default().push(dep);
+        }
+
+        // Comments (D37) — grouped by issue_id, `created_at ASC, id ASC` within each (identical
+        // secondary ordering to the single-id `hydrate`). The projection column ORDER is the
+        // `comment_from_row` positional contract; note the mapper reads `issue_id` at ordinal 1,
+        // so this SELECT deliberately keeps the natural column order rather than hoisting the
+        // grouping key.
+        let comments_sql = format!(
+            "SELECT id, issue_id, author, text, created_at, updated_at, redacted_at \
+             FROM comments WHERE issue_id IN ({placeholder_list}) \
+             ORDER BY issue_id ASC, created_at ASC, id ASC"
+        );
+        let mut rows = conn
+            .query(&comments_sql, params_from_iter(params))
+            .await
+            .map_err(map_libsql_err)?;
+        while let Some(row) = rows.next().await.map_err(map_libsql_err)? {
+            let comment = comment_from_row(&row)?;
+            comments
+                .entry(comment.issue_id.clone())
+                .or_default()
+                .push(comment);
         }
     }
 
@@ -417,6 +468,7 @@ pub(super) async fn hydrate_ids(
             let mut issue = issues.remove(id)?;
             issue.labels = labels.remove(id).unwrap_or_default();
             issue.dependencies = deps.remove(id).unwrap_or_default();
+            issue.comments = comments.remove(id).unwrap_or_default();
             Some(issue)
         })
         .collect();
