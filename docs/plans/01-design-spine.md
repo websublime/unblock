@@ -269,6 +269,24 @@ impl IssueValidator { pub fn validate(issue: &Issue) -> Result<(), unblock_error
 // + rejects other control chars. CLI/MCP become later callers; the rule lives once here.
 pub fn validate_actor(actor: &str) -> Result<(), unblock_error::FieldError>;
 
+// Comment validation (FR-6/D37) — the model owns the comment rule set ONCE (the §1.9 single-home rule).
+// TWO entry points because the two engine call sites carry different field sets (spine §4.1):
+//   - `add_comment(issue_id, body)` has issue_id + author (= self.actor) + body -> validate_comment.
+//   - `update_comment(comment_id, body)` has ONLY a comment id + body — there is no issue_id on that path
+//     and no `Storage::get_comment(comment_id)` (§3.2) to fetch one — so it calls validate_body.
+// validate_comment DELEGATES the body rules to validate_body, so the body rule set stays single-homed
+// (never duplicated across the two entry points). This matches the mutation-time contract already stated
+// at §4.1 and §5.2: "the body is validated (non-empty trimmed / NUL-rejected) BEFORE the mutation".
+pub struct CommentValidator; // pure; no I/O.
+impl CommentValidator {
+    // body non-empty when trimmed [FieldError { field: "content" }] + reject NUL (SQLite compat);
+    // body otherwise UNBOUNDED (the L7 MCP `Quotas.max_string_len` 64 KiB is the transport cap).
+    pub fn validate_body(body: &str) -> Result<(), unblock_error::ModelError>;
+    // The add-path superset: calls validate_body, then author non-empty (trimmed) + <= ACTOR_MAX_CHARS,
+    // and issue_id non-empty.
+    pub fn validate_comment(issue_id: &str, author: &str, body: &str) -> Result<(), unblock_error::ModelError>;
+}
+
 // Shared contract type that BOTH policy and storage need lives here (CF-11):
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CacheKey(pub String); // ready/blocked projection cache key contract.
@@ -637,13 +655,14 @@ pub struct IssuePatch {
 
 **`close_reason` persistence (T1.2 Verify-gate, NORMATIVE).** `close_reason` is the nullable-text tri-state (`None` = leave unchanged; `Some(None)` = clear to the column default `''`; `Some(Some(s))` = set). `update_issue` persists it to the existing `close_reason TEXT DEFAULT ''` column (already projected by `ISSUE_COLUMNS`; `create_issue` already binds it from the `Issue`). The engine's `close_with_suggestions(id, reason)` (§4.1) builds a `status = Closed` patch carrying `close_reason` and persists it through `update_issue` under the write permit — the reason is **stored**, not tracing-only. The `close_reason` column is **not** part of the frozen `content_hash` (spine §1.8), so persisting it does not perturb import idempotency (FR-26).
 
-**`StorageError` (storage-owned; the §2.1 sketch made concrete — NORMATIVE).** The full v1 variant set and its `ErrorCode` mapping. It implements `unblock_error::CodedError` (NOT a bespoke inherent `code()`; §2.1 note), so the L7 boundary bridges it via the blanket `From<&E>` like every other crate enum. `Migration` is defined **concretely and minimally, model-backed**: `Migration { from: i32, to: i32, reason: String }` (`from`/`to` are `PRAGMA user_version` values, `i32` to match the schema-version type). `Backend { source: BackendOpaque }` absorbs the libsql error opaquely — no libsql type is ever public (spine §6 rule 2). `BackendOpaque` sanitizes its message **at construction** via `unblock_error::sanitize_message` and exposes only `Debug`/`Display`.
+**`StorageError` (storage-owned; the §2.1 sketch made concrete — NORMATIVE).** The full v1 variant set and its `ErrorCode` mapping. **`CommentNotFound { id: i64 }` (FR-6/D37) is a StorageError-level variant that maps ONTO the EXISTING `ErrorCode::IssueNotFound` — the two levels are deliberately NOT 1:1 here, and this is not a bug to "fix" back.** FORK-E1 constrains the **`ErrorCode` taxonomy** (no `CommentNotFound` *code*: the taxonomy stays at 36, no exit-code-table re-bless, no `oneOf`/error-golden movement) — it does not constrain the internal `StorageError` enum, and adding this variant satisfies FORK-E1 literally because it grows no `ErrorCode`. The variant exists because reuse at the StorageError level would force `IssueNotFound { id: comment_id.to_string() }`, whose `context()` key is `"id"` and whose `Display` renders `issue 42 not found` when it was **comment** 42 that was missing — actively misleading in an agent-first tracker. The `i64` field matches the comment row's own id type (`Comment.id`, §1.6); the field-bearing analog is `IssueNotFound`, **not** the fieldless `DependencyNotFound`. It implements `unblock_error::CodedError` (NOT a bespoke inherent `code()`; §2.1 note), so the L7 boundary bridges it via the blanket `From<&E>` like every other crate enum. `Migration` is defined **concretely and minimally, model-backed**: `Migration { from: i32, to: i32, reason: String }` (`from`/`to` are `PRAGMA user_version` values, `i32` to match the schema-version type). `Backend { source: BackendOpaque }` absorbs the libsql error opaquely — no libsql type is ever public (spine §6 rule 2). `BackendOpaque` sanitizes its message **at construction** via `unblock_error::sanitize_message` and exposes only `Debug`/`Display`.
 
 ```rust
 #[derive(Debug, snafu::Snafu)]
 #[snafu(visibility(pub(crate)))]
 pub enum StorageError {
     IssueNotFound { id: String },        // -> IssueNotFound
+    CommentNotFound { id: i64 },         // -> IssueNotFound (FR-6/D37; reuses the code, mints no new one)
     AmbiguousId { id: String },          // -> AmbiguousId
     IdCollision { id: String },          // -> IdCollision
     InvalidId { id: String },            // -> InvalidId
@@ -664,7 +683,9 @@ pub enum StorageError {
 // impl unblock_error::CodedError for StorageError { code() per the map; retryable() = default
 //   (code().is_retryable()); context() surfaces the structured payload agents need —
 //   AlreadyClaimed{by} -> context["holder"]; CycleDetected{path} -> context["cycle_path"];
-//   SchemaMismatch{found,expected}; IssueNotFound{id}; HasDependents{id}; IntegrityFailed{messages}; ... }
+//   SchemaMismatch{found,expected}; IssueNotFound{id}; CommentNotFound{id} -> context["comment_id"]
+//   (code() = IssueNotFound, but the context key stays honest about WHICH entity was missing);
+//   HasDependents{id}; IntegrityFailed{messages}; ... }
 //
 // pub struct BackendOpaque(String); // private inner; from_message() runs sanitize_message at construction;
 //   Debug + manual Display (sanitized text) + impl std::error::Error. No From<libsql::Error> until T0.6.
@@ -761,8 +782,11 @@ pub trait Storage: Send + Sync {
     async fn delete_comment(&self, comment_id: i64, actor: &str)
         -> Result<Comment, StorageError>;                                     // soft-redact (D-E): KEEP row, mask body="", set redacted_at=now; Event(CommentRedacted); idempotent if already redacted
     //  EXISTENCE guard (FORK-3): add_comment requires the target issue to exist (reject non-existent/tombstoned →
-    //  ErrorCode::IssueNotFound, FORK-E1 — NO new CommentNotFound code); a CLOSED issue is allowed (post-mortem).
-    //  update/delete guard the comment row exists → else IssueNotFound (reused). author threaded for the in-tx Event
+    //  StorageError::IssueNotFound → ErrorCode::IssueNotFound, FORK-E1 — NO new IssueNotFound-sibling ErrorCode);
+    //  a CLOSED issue is allowed (post-mortem).
+    //  update/delete guard the comment ROW exists → else StorageError::CommentNotFound { id: comment_id } (§3.1),
+    //  which maps to the SAME ErrorCode::IssueNotFound at L7 — the StorageError level names the missing entity
+    //  honestly; the ErrorCode taxonomy does not grow (FORK-E1). author threaded for the in-tx Event
     //  (bd parity — the import/seed path carries comment.author; the engine passes author = self.actor, FORK-M1b).
 
     // --- hierarchical-id child allocation (FR-1a, D21) — the READ-half the engine allocator consumes ---
@@ -1096,13 +1120,22 @@ The comment methods (FR-6, D37 — normative; every mutation runs inside one `wi
 its `Event` commit together, FR-9):
 
 - **`add_comment(issue_id, author, body, actor)`** — **EXISTENCE guard first (FORK-3):** the target issue MUST
-  exist (a non-existent/tombstoned id → `ErrorCode::IssueNotFound`, FORK-E1 — NO `CommentNotFound`); a CLOSED
-  issue is ALLOWED (post-mortem). `INSERT INTO comments(issue_id, author, text, created_at) VALUES(…)` with
-  `created_at = now` and **`updated_at` left NULL** (the create path is create-time only — MUST-1: only `update`
-  ever sets `updated_at`); `append_event_in_tx(Commented, actor)`; bump `issues.updated_at` (FORK-S1, feeds
-  `stale`; NOT hashed); re-`SELECT` → the created `Comment`.
+  exist (a non-existent/tombstoned id → `StorageError::IssueNotFound` → `ErrorCode::IssueNotFound`, FORK-E1 —
+  NO new ErrorCode); a CLOSED issue is ALLOWED (post-mortem). `INSERT INTO comments(issue_id, author, text,
+  created_at) VALUES(…)` with `created_at = now` and **`updated_at` left NULL** (the create path is create-time
+  only — MUST-1: only `update` ever sets `updated_at`); `append_event_in_tx(Commented, actor)`; bump
+  `issues.updated_at` (FORK-S1, feeds `stale`; NOT hashed); re-`SELECT` → the created `Comment`.
+  **MUST-1 SCOPE (NORMATIVE — read this before touching any other INSERT):** MUST-1 constrains **`add_comment`
+  ONLY**. It says nothing about the create/bulk/**import** seed path (`crud.rs::insert_issue_in_tx`), which
+  persists caller-supplied `Comment` values verbatim and therefore MUST bind `updated_at` **and** `redacted_at`
+  from the `Comment` it is given. Over-applying MUST-1 to that seed INSERT — leaving it 4-column — silently
+  drops both fields, so a redacted comment imports back **un-redacted** and the §3.2.1 round-trip guarantee
+  below (and the D37 import AC) become unreachable. The two paths are distinct: `add_comment` MINTS a new
+  comment (now, no updated_at); the seed path REPLAYS an existing one (whatever state it carries).
 - **`update_comment(comment_id, body, actor)` (provenance-preserving, D-D)** — guard the comment row exists →
-  else `IssueNotFound`; `UPDATE comments SET text=?, updated_at=now WHERE id=?`;
+  else `StorageError::CommentNotFound { id: comment_id }` (§3.1), which maps to `ErrorCode::IssueNotFound` at L7
+  (FORK-E1 — the code is REUSED; the StorageError variant is not);
+  `UPDATE comments SET text=?, updated_at=now WHERE id=?`;
   `append_event_in_tx(CommentEdited, old=Some(old_body), new=Some(new_body))`; bump `issues.updated_at`; re-`SELECT`
   → the edited `Comment`. **In-place-replace-without-provenance is FORBIDDEN** — the `updated_at` bump + the
   `CommentEdited` event ARE the provenance.
@@ -1549,13 +1582,13 @@ impl Session {
 
 ## 5. MCP schemas — `unblock-mcp` (L7)
 
-**rmcp 1.7** (`server`, `transport-io`) stdio server (`unblock mcp`), thin adapter over `Session`. **7 consolidated tools** (target ≤ 8), resources, prompts. Every tool input/output derives `JsonSchema` + `Serialize`/`Deserialize` — inputs AND outputs ride the schema bundle as per-tool `{input, output}` pairs (D25, §5.3/§5.4); args are schemars-validated with size/rate limits (NFR-18). Discovery (`capabilities`/`schema`) carries `contract_version` (FR-12), and BOTH discovery documents are covered by the single pinned `CONTRACT_HASH` drift gate (D22 clause 8 widened by D25 — §5.4).
+**rmcp 1.7** (`server`, `transport-io`) stdio server (`unblock mcp`), thin adapter over `Session`. **8 consolidated tools** (at the ≤ 8 target — `comment` is the 8th, D37/T3.9), resources, prompts. Every tool input/output derives `JsonSchema` + `Serialize`/`Deserialize` — inputs AND outputs ride the schema bundle as per-tool `{input, output}` pairs (D25, §5.3/§5.4); args are schemars-validated with size/rate limits (NFR-18). Discovery (`capabilities`/`schema`) carries `contract_version` (FR-12), and BOTH discovery documents are covered by the single pinned `CONTRACT_HASH` drift gate (D22 clause 8 widened by D25 — §5.4).
 
-### 5.1 Tool taxonomy (7 tools shipped; → 8 at T3.9/D37 when `comment` lands)
+### 5.1 Tool taxonomy (8 tools — `comment` is the 8th, landing with the T3.9/D37 code)
 
 | # | Tool | Discriminator | Maps to |
 |---|---|---|---|
-| 1 | `issue` | `action: create\|create_bulk\|show\|update\|close\|reopen\|delete\|restore` (D22 `create_bulk` is the 8th `issue` ACTION — a discriminator arm, so the **tool** count stays 7 ≤ 8, §6.6) | FR-1a/1b/1c |
+| 1 | `issue` | `action: create\|create_bulk\|show\|update\|close\|reopen\|delete\|restore` (D22 `create_bulk` is the 8th `issue` ACTION — a discriminator arm, so it does NOT grow the **tool** count, §6.6) | FR-1a/1b/1c |
 | 2 | `claim` | (none) | FR-2 |
 | 3 | `defer` | `action: defer\|undefer` | FR-3 |
 | 4 | `query` | `kind: list\|ready\|blocked\|search\|count\|stale` | FR-4 |
@@ -1749,7 +1782,7 @@ union is **preserved verbatim** — every branch is already `type: object` (the 
 instance validation is UNCHANGED; the root keyword is a **structural requirement of the MCP `inputSchema`
 contract**, not a validation change (no flattening, no lost per-variant `required` sets). `ClaimInput` (a plain
 struct) is already `type: object` and is untouched. Enforced by a conformance assertion that
-`tools[*].inputSchema.type == "object"` for all 7 tools over the live builder-vs-router duplex (§6.6) and by
+`tools[*].inputSchema.type == "object"` for all 8 tools over the live builder-vs-router duplex (§6.6) and by
 strengthening the bundle test `every_tool_schema_is_an_object` to assert `input.type == "object"` (not merely
 `is_object()`, which a `oneOf` root passes vacuously). The injected root key changes the published
 `schema_bundle().<tool>.input` bytes, so it moves `CONTRACT_HASH` and forces a `CONTRACT_VERSION` bump (§5.4,
@@ -1926,8 +1959,14 @@ pub struct ToolSchemas {
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SchemaBundle {
     pub contract_version: String,
-    // 7 × per-tool {input, output} (§5.1 order). Outputs (§5.3): issue=IssueOutput, claim=Issue,
-    // defer=Issue, query=QueryOutput, dep=DepOutput, sync=SyncOutput, diagnostics=DiagnosticReport.
+    // 8 × per-tool {input, output} (§5.1 order — D37 added `comment` LAST, after `diagnostics`).
+    // Outputs (§5.3): issue=IssueOutput, claim=Issue, defer=Issue, query=QueryOutput, dep=DepOutput,
+    // sync=SyncOutput, diagnostics=DiagnosticReport, comment=CommentOutput.
+    // NORMATIVE — the `comment` field POSITION is hash-visible: `SchemaBundle` is a struct (not a map), so
+    // serde emits its fields in DECLARATION order and `CONTRACT_HASH` digests those bytes. Declaring
+    // `comment` anywhere other than last reorders the serialized document and moves the hash for a reason
+    // unrelated to the new tool. It must be declared last, matching the §5.1 tool order and the
+    // `agents_digest` pairs array that walks this struct field-by-field (D33).
     pub issue: ToolSchemas,
     pub claim: ToolSchemas,
     pub defer: ToolSchemas,
@@ -1935,10 +1974,11 @@ pub struct SchemaBundle {
     pub dep: ToolSchemas,
     pub sync: ToolSchemas,
     pub diagnostics: ToolSchemas,
+    pub comment: ToolSchemas,   // D37 (FR-6) — the 8th tool; LAST (hash-visible position, see above)
     // D25 — the shared in-band error output every tool may return with `is_error = true` (FR-11):
     // schema_for!(StructuredError), published ONCE (the rmcp `is_error` flag is the channel
     // discriminator — folding it into each per-tool union would misstate the discriminator and
-    // duplicate one shape 7 times). Transitively via $defs the bundle pins IdOnly, the CD-2 list
+    // duplicate one shape 8 times). Transitively via $defs the bundle pins IdOnly, the CD-2 list
     // wrappers (IssueList/CountList/DepList/CycleList), SyncOutput, ExportReport/ImportReport,
     // CountBucket, CloseOutcome, DepTree, Dependency, DiagnosticReport, StructuredError, and Issue —
     // so the resource payloads above are pinned too.
@@ -1996,7 +2036,7 @@ land FIRST (the docs-only cascade); the code + the version-string flip + the gol
 
 **`agents_digest()` — a pure DERIVED VIEW, not a wire resource (T3.4.3/D33).** `unblock-mcp` additionally
 exposes `pub fn agents_digest() -> AgentsDigest` next to `schema_bundle()`: a CLI-friendly typed digest (the
-7 tools with their `oneOf`-derived actions + each action's FULL parameter surface — its required AND
+8 tools with their `oneOf`-derived actions + each action's FULL parameter surface — its required AND
 optional params, derived structurally from the `oneOf` arm and resolving an arm-root `$ref` one level for
 the delegated payload, e.g. `issue create` → `title` + its optional fields — the 5 resources, the 3
 prompts, and the `error_codes` map) computed STRUCTURALLY from `capabilities()` + `schema_bundle()`. It is
@@ -2056,7 +2096,7 @@ pub struct UpdateArgs { /* --check, --version <tag>, --yes */ }
 
 **init (D27/AF-3).** Creates exactly `.unblock/config.toml` (hand-written TOML — `ProjectConfig` is `Deserialize`-only — seeded with the `unblock_model::normalize_prefix`-normalized `--prefix`, default `ub`; the CLI takes a direct `unblock-model` dep) + a migrated empty `unblock.db` opened through `open_with_storage_with_cli` (FR-9 no-drift). NO `.gitignore`/`metadata.json`/`issues.jsonl` (D13/NFR-6/model-B). **Clobber guard:** refuse if `config.toml` OR `unblock.db` is already present without `--force` → a CLI-local `CliError::AlreadyInitialized` → `ErrorCode::AlreadyInitialized` (exit 2; `ConfigError` has no such variant). Reports a CLI-local `InitReport`.
 
-**agents (FR-14, D33).** A pure file op (SEPARATE from init): resolve-only open (`open_workspace_with_cli`, no DB) to find `workspace_dir`, then merge an idempotent managed AGENTS.md block (delimited markers) describing the MCP wiring (`unblock mcp`, stdio transport, tool set). The block is a FULL capabilities table rendered by the zero-arg `managed_block() -> String`, a THIN markdown renderer over `unblock_mcp::agents_digest()` (§5.4) — descriptor tables for the 7 tools / 5 resources / 3 prompts, per-tool actions with their FULL required+optional parameter surface, the error-code → exit-code/retryable map, and pointers to `unblock://schema` + `unblock://capabilities`. Writes a terse "wrote X" note to stderr.
+**agents (FR-14, D33).** A pure file op (SEPARATE from init): resolve-only open (`open_workspace_with_cli`, no DB) to find `workspace_dir`, then merge an idempotent managed AGENTS.md block (delimited markers) describing the MCP wiring (`unblock mcp`, stdio transport, tool set). The block is a FULL capabilities table rendered by the zero-arg `managed_block() -> String`, a THIN markdown renderer over `unblock_mcp::agents_digest()` (§5.4) — descriptor tables for the 8 tools / 5 resources / 3 prompts, per-tool actions with their FULL required+optional parameter surface, the error-code → exit-code/retryable map, and pointers to `unblock://schema` + `unblock://capabilities`. Writes a terse "wrote X" note to stderr.
 
 **error boundary (D27/AF-4).** `exit.rs` owns the 0–8 cast (there is no `From<ExitCode> for std::process::ExitCode` in `unblock-error`). Transparent-`CodedError` sources (`EngineError`/`ConfigError`/, with AF-4, `RenderError`) bridge via `(&err).into()`. `McpServerError` (`Transport`/`RunLoop`, `#[non_exhaustive]`) is mapped EXPLICITLY to `ErrorCode::InternalError` (exit 1) — an MCP-server failure is internal, not a user IoError (NOT exit 8). CLI-local variants: `AlreadyInitialized` (exit 2), scaffold/agents `Io` (exit 8). **NFR-14 + FR-11 split:** in json/robot the structured error renders to STDOUT (always valid JSON even on error); in plain a human `error[CODE]: message` line goes to STDERR.
 
