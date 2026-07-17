@@ -4,6 +4,14 @@
 - **Date:** 2026-06-19 (reconciled-for-build 2026-06-29, T2.2)
 - **One-line purpose:** The **PRIMARY** product surface — an `rmcp 1.7` stdio MCP server (`unblock mcp`) that exposes the engine as a consolidated **7-tool** taxonomy + resources + prompts, schemars-validated under quotas (NFR-18), discoverable via a `contract_version`-stamped capabilities/schema bundle (FR-12) — both discovery documents pinned by the one `CONTRACT_HASH` gate (D22/D25), with every error mapped to the structured `code`/`message`/`hint`/`retryable` boundary (FR-11). It is a **thin adapter** over `unblock-engine::Session` — no domain logic, no write orchestration (RK-2/FR-9/D14).
 
+> **Tool-count literals (D37, 2026-07-17) — read before "fixing" any count in this doc.** Every **7** here
+> (the `7-tool` taxonomy above, the `SchemaBundle`/`agents_digest` API rows, the `server.rs`/`schema.rs`/
+> `agents_digest.rs` file rows, the Tools section header) is the **SHIPPED** count and **stays 7**. D37
+> adds a dedicated **8th** tool, `comment` — specified as row 8 of the spine's §5.1 table and annotated
+> with its landing task **T3.9**. The T3.9 **code** PR flips every literal 7→8 **atomically with the
+> router that makes 8 true** (it owns the generic sweep); until then nothing in this corpus claims 8, so
+> the counts stay true against the code on both sides of the flip.
+
 ## Layer & dependencies
 
 - **Layer:** L7 (`mcp`), the top of the acyclic graph alongside `unblock-cli`. Must stay acyclic — nothing depends on `unblock-mcp`.
@@ -78,11 +86,6 @@ The `unblock-render` `parse_format` unknown-format-name defect (it returns `Rend
 | `src/error.rs` | Crate's snafu enum **for server lifecycle only** (transport bind failure, stdio I/O, server already running). Domain errors are NOT here — they flow in-band. Plus the **boundary mappers**: `engine_error_to_structured(&EngineError) -> StructuredError` (spine §2.4 / §5.6) and `to_rmcp_error_data` — the read_resource boundary split (T2.6/F-2): `IssueNotFound` → `ErrorData::resource_not_found` (-32002), everything else → `INTERNAL_ERROR` (-32603), structured payload attached as `data` on both arms. | `enum McpServerError` (snafu, `#[snafu(visibility(pub(crate)))]` except the public enum); `pub(crate) fn engine_error_to_structured`; `pub(crate) fn to_rmcp_error_data(&StructuredError) -> rmcp::model::ErrorData`. | v1 | unit: every `EngineError` variant maps to a stable `ErrorCode`; the -32002/-32603 mapper split (not-found vs internal, payload attached); message sanitization strips control chars. (The `code→{exit_code,retryable,hint_shape}` map is NOT golden-pinned here — it is value-pinned by the `contract_suite` capabilities golden + `CONTRACT_HASH`, cross-checked non-vacuously against `ErrorCode::ALL` through the serde wire round-trip in `tests/contract_suite.rs`, and independently pinned by unblock-error's `tests/exit_code_table.rs` quadruple golden.) |
 
 ### Tools (`src/tools/`) — 7 consolidated tools shipped; **→ 8 at T3.9** (D37 adds `comment`, spine §5.1)
-
-> **Tool-count literals (D37).** Every "7 tools" in this doc is the SHIPPED count and stays 7 until the
-> T3.9 CODE PR lands the `comment` router; that PR flips them all 7→8 **atomically with the code that
-> makes 8 true** (impl-plan T3.9 owns the sweep). The spine §5.1 table already lists `comment` as row 8,
-> annotated with its landing T-id — the target is specified, the count is not yet claimed.
 
 | Path | Responsibility | Key items (spine §5.2/§5.3 shapes — normative) | Version | Tests |
 |---|---|---|---|---|

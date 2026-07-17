@@ -93,7 +93,7 @@ Legend: ● new/major work · ◐ extended/hardened · (—) untouched.
 | `unblock-config` | ● discovery/merge/schema/env/cli/paths/context | ● db_layer/user_config/policy_path | ● `remote.rs` (feature `remote`) | (—) |
 | `unblock-engine` | ● Session lifecycle/read/write/interchange/shutdown | ● organization/coordination/gates/saved_queries/audit | ◐ `sync_topology.rs` | ◐ `compaction.rs` |
 | `unblock-render` | ● renderer/format/backends/sanitize | ◐ toon + v1.1 DTO views | (—) | ◐ `stream.rs` |
-| `unblock-mcp` | ● 7 tools + resources + prompts + server | ● discriminator growth + coordination resource | ◐ sync_status resource (feature) | ◐ batch/streaming/changes |
+| `unblock-mcp` | ● 7 tools (**→ 8 at T3.9**, D37 adds `comment`) + resources + prompts + server | ● discriminator growth + coordination resource | ◐ sync_status resource (feature) | ◐ batch/streaming/changes |
 | `unblock-cli` | ● mcp/migrate/doctor/version/init/agents + `unblock update` (FR-25, D17; axoupdater dep) | ● completions | (—) | (—) |
 | `unblock-fuzz` | ● content_hash/jsonl/sync_cycle/bd/query/config-smoke | ● config full + claim_race | ◐ remote_sync (feature) | ◐ scale_ingest |
 
@@ -114,6 +114,14 @@ Legend: ● new/major work · ◐ extended/hardened · (—) untouched.
 ---
 
 ## 5. Consistency report
+
+> **Note (2026-07-17, D37 comments pull-forward):** this report is the **dated record of the 2026-06-19
+> cross-check** — it is not rewritten when a later decision moves the corpus (same convention as the §3
+> resequence note). Its "7 tools" findings below (the headline and "MCP taxonomy = spine") remain
+> **accurate as written**: 7 is the SHIPPED tool count and the spine still frames it that way. D37 adds a
+> dedicated **8th** tool, `comment` — already listed as row 8 of the spine's §5.1 table, annotated with
+> its landing task **T3.9**. The count literals across this corpus flip 7→8 in the T3.9 **code** PR,
+> atomically with the router that makes 8 true; until then nothing here claims 8.
 
 The 16 documents were cross-checked for: (a) consumed APIs actually produced by a dependency and matching spine signatures; (b) acyclic graph matching PRD §8.1 (esp. storage = model+error only); (c) version coherence (no v1 file depending on a v1.2 feature); (d) MCP taxonomy matching the spine; (e) no duplicated/contradictory type definitions.
 
@@ -184,7 +192,7 @@ The 16 documents were cross-checked for: (a) consumed APIs actually produced by 
 ### What is consistent (verified, no change needed)
 
 - **Acyclic graph = PRD §8.1.** Every crate's declared `Depends-on` forms a strict forward edge set; `unblock-storage` depends on **model + error only** (CF-11 honored — `CacheKey` correctly placed in model); `unblock-fuzz` is a sink. No cycles, including the `model | error` L0 pair (single `model → error` edge, error has no in-workspace deps).
-- **MCP taxonomy = spine.** mcp plan ships exactly the spine §5.1 seven tools (`issue/claim/defer/query/dep/sync/diagnostics`) with matching discriminators, ≤ 8 budget, resources (§5.4) and prompts (§5.5) as specified; v1.1 grows by discriminator not by new tools (RK-3 honored).
+- **MCP taxonomy = spine.** mcp plan ships exactly the spine §5.1 seven tools (`issue/claim/defer/query/dep/sync/diagnostics`) with matching discriminators, ≤ 8 budget, resources (§5.4) and prompts (§5.5) as specified; v1.1 grows by discriminator not by new tools (RK-3 honored). *(**D37, 2026-07-17:** that §5.1 table now carries a row 8 — the dedicated `comment` tool, the deliberate "extend before add" exception, landing at **T3.9**. The seven shipped tools + discriminators above are unchanged; once `comment` lands the RK-3 budget is **FULL at 8 ≤ 8** and all further surface must extend an existing tool.)*
 - **Version coherence.** No v1 file depends on a v1.2/v1.4 feature: `remote` is consistently a non-default Cargo feature across storage/config/engine/health/mcp/fuzz; scale/1M and compaction are fenced to v1.4; the contention lab is correctly the M0 exit gate before any crate depends on storage.
 - **Error contract.** `ErrorCode` (incl. new `AlreadyClaimed`, dropped `YamlError`), the 0–8 exit table, `StructuredError` and `CodedError` are used identically by every per-crate snafu enum; the golden exit-code snapshot is dual-pinned (error crate + cli).
 - **Write-serialization contract (D14).** Exactly one home — engine's `Semaphore(1)`; storage relies on WAL + native busy_timeout; mcp/cli are thin adapters with no second lock. Reads bypass the permit everywhere (FR-10). Consistent across storage/engine/mcp/cli.
