@@ -98,9 +98,22 @@ impl Workspace {
 }
 
 /// A bare `Command` for the `unblock` binary (no cwd set). Callers set `current_dir`/`--dir`.
+///
+/// **Every** child spawned by this suite funnels through here, so discovery-affecting env is scrubbed
+/// at this ONE root: `CLAUDE_PROJECT_DIR` and `UNBLOCK_DIR` are host discovery inputs (D39/D10), and
+/// `UNBLOCK_ACTOR` seeds the default actor (FORK-4). Left inherited, a dev running the suite inside a
+/// dogfooded repo (a real `<repo>/.unblock` on disk) or under Claude Code (which injects
+/// `CLAUDE_PROJECT_DIR`) would have workspace discovery bind ProjectDir/ExplicitDir instead of the
+/// per-case tempdir — flipping the D39 startup-line tier assertion (and any actor-derived field) RED
+/// purely from the host shell. Scrubbing them keeps every spawn hermetic (module doc invariant); a
+/// case that WANTS one of these sets it back with `Command::env` (which wins over this removal).
 #[must_use]
 pub fn unblock() -> Command {
-    Command::cargo_bin("unblock").expect("locate the `unblock` binary")
+    let mut cmd = Command::cargo_bin("unblock").expect("locate the `unblock` binary");
+    cmd.env_remove("CLAUDE_PROJECT_DIR");
+    cmd.env_remove("UNBLOCK_DIR");
+    cmd.env_remove("UNBLOCK_ACTOR");
+    cmd
 }
 
 /// A `Command` for the `unblock` binary anchored at `dir` (its cwd) — used when the case wants a
@@ -363,9 +376,14 @@ impl McpClient {
 
     /// Block until the child's STDERR contains `marker`, returning the full snapshot (T3.2.1/D38).
     ///
-    /// The readiness barrier for the phases that happen BEFORE the run loop exists (so
-    /// [`ping_barrier`](Self::ping_barrier) cannot see them) — i.e. the `install()`-ordering markers.
-    /// Requires a `-vv` child ([`spawn_verbose`](Self::spawn_verbose)): the markers are `debug!`.
+    /// The readiness barrier for stderr lines emitted BEFORE the run loop exists (so
+    /// [`ping_barrier`](Self::ping_barrier) cannot see them). Two marker CLASSES flow through here,
+    /// with DIFFERENT verbosity requirements:
+    /// - the D39 startup-visibility line (`unblock: workspace bound to …`) is an UNCONDITIONAL direct
+    ///   stderr write — readable on a plain [`spawn`](Self::spawn) child, NO `-vv` needed; and
+    /// - the `install()`-ordering markers (`mcp: shutdown signal handling installed` /
+    ///   `mcp: workspace opened`) are `tracing::debug!`, so they require a `-vv` child
+    ///   ([`spawn_verbose`](Self::spawn_verbose)).
     ///
     /// # Panics
     /// If `marker` does not appear within `timeout`, or the child dies first.
@@ -385,7 +403,8 @@ impl McpClient {
             assert!(
                 Instant::now() < deadline,
                 "`{marker}` did not appear on the child's stderr within {timeout:?} \
-                 (is the child `-vv`? the markers are debug-level). Child stderr:\n{snapshot}"
+                 (the `install()`-ordering markers are debug-level — is the child `-vv`? — but the \
+                 D39 `workspace bound to` line is unconditional). Child stderr:\n{snapshot}"
             );
             std::thread::sleep(Duration::from_millis(10));
         }
