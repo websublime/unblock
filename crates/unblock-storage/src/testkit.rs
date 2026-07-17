@@ -35,8 +35,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
 
 use unblock_model::{
-    CountGroupBy, Dependency, DependencyType, Issue, IssueType, IssueValidator, ListFilters,
-    Priority, Status,
+    Comment, CountGroupBy, Dependency, DependencyType, Issue, IssueType, IssueValidator,
+    ListFilters, Priority, Status,
 };
 
 use crate::error::StorageError;
@@ -166,6 +166,13 @@ where
     contract_detect_cycles_generic(factory().await).await;
     contract_detect_cycles_positive(factory().await).await;
 
+    // Comments (FR-6, D37).
+    contract_add_comment(factory().await).await;
+    contract_list_comments_order(factory().await).await;
+    contract_update_comment_provenance(factory().await).await;
+    contract_delete_comment_soft_redact(factory().await).await;
+    contract_seed_comments_round_trip_state(factory().await).await;
+
     // Events.
     contract_list_events_order_oracle(factory().await).await;
 
@@ -223,6 +230,19 @@ fn dep(from: &str, to: &str, dep_type: DependencyType) -> Dependency {
         created_by: None,
         metadata: None,
         thread_id: None,
+    }
+}
+
+/// A comment fixture at the fixed epoch (a LIVE comment: never edited, never redacted).
+fn comment(id: i64, issue_id: &str, author: &str, body: &str) -> Comment {
+    Comment {
+        id,
+        issue_id: issue_id.to_string(),
+        author: author.to_string(),
+        body: body.to_string(),
+        created_at: ts(2026, 1, 1),
+        updated_at: None,
+        redacted_at: None,
     }
 }
 
@@ -2573,4 +2593,417 @@ fn seed_issue(i: usize, created: DateTime<Utc>) -> Issue {
         updated_at: created,
         ..Issue::default()
     }
+}
+
+// --------------------------------------------------------------------------------------------------
+// Comments (FR-6, D37 — spine §3.2/§3.2.1)
+// --------------------------------------------------------------------------------------------------
+
+/// `add_comment`: the FORK-3 existence guard, `Event(Commented)`, MUST-1 (`updated_at` stays NULL),
+/// the FORK-S1 `issues.updated_at` bump, and the FR-26 invariant that `content_hash` NEVER moves.
+pub async fn contract_add_comment<S: Storage>(storage: S) {
+    storage
+        .create_issue(&issue("ub-a", "a"), "x")
+        .await
+        .unwrap();
+
+    let before = storage.get_issue("ub-a").await.unwrap().expect("issue");
+    let hash_before = before.content_hash.clone();
+
+    let added = storage
+        .add_comment("ub-a", "alice", "first thought", "alice")
+        .await
+        .expect("add_comment");
+    assert_eq!(added.issue_id, "ub-a");
+    assert_eq!(added.author, "alice");
+    assert_eq!(added.body, "first thought");
+    // MUST-1: the create path is create-time only — ONLY `update` ever sets `updated_at`.
+    assert!(
+        added.updated_at.is_none(),
+        "add_comment must leave updated_at NULL (MUST-1), got {:?}",
+        added.updated_at
+    );
+    assert!(added.redacted_at.is_none(), "a new comment is live");
+
+    // Event(Commented) written in the SAME tx.
+    assert!(
+        event_types(&storage, "ub-a")
+            .await
+            .contains(&"commented".to_string()),
+        "add_comment must write Event(Commented)"
+    );
+
+    let after = storage.get_issue("ub-a").await.unwrap().expect("issue");
+    // FORK-S1: the owning issue's updated_at is bumped (feeds `stale`).
+    assert!(
+        after.updated_at > before.updated_at,
+        "add_comment must bump issues.updated_at (FORK-S1)"
+    );
+    // FR-26 / spine §1.8: comments are EXCLUDED from content_hash — it must not move.
+    assert_eq!(
+        after.content_hash, hash_before,
+        "a comment add must NEVER move content_hash (FR-26)"
+    );
+
+    // FORK-3 existence guard: an unknown issue id is IssueNotFound (the code is REUSED).
+    let missing = storage.add_comment("ub-nope", "alice", "hi", "alice").await;
+    assert!(
+        matches!(missing, Err(StorageError::IssueNotFound { .. })),
+        "add_comment on a missing issue must be IssueNotFound, got {missing:?}"
+    );
+
+    // FORK-3: a CLOSED issue is ALLOWED (post-mortem commentary).
+    let mut closed = issue("ub-closed", "closed");
+    closed.status = Status::Closed;
+    closed.closed_at = Some(ts(2026, 1, 2));
+    storage.create_issue(&closed, "x").await.unwrap();
+    storage
+        .add_comment("ub-closed", "alice", "post-mortem", "alice")
+        .await
+        .expect("a closed issue accepts comments (post-mortem)");
+
+    // FORK-3: a TOMBSTONED issue is rejected.
+    storage
+        .create_issue(&issue("ub-dead", "dead"), "x")
+        .await
+        .unwrap();
+    storage
+        .delete_issue(
+            &crate::filters::DeletePlan {
+                mode: crate::filters::DeleteMode::Tombstone,
+                targets: vec!["ub-dead".to_string()],
+                cascade_children: Vec::new(),
+            },
+            "x",
+        )
+        .await
+        .expect("tombstone");
+    let on_tombstone = storage.add_comment("ub-dead", "alice", "hi", "alice").await;
+    assert!(
+        matches!(on_tombstone, Err(StorageError::IssueNotFound { .. })),
+        "add_comment on a tombstone must be IssueNotFound, got {on_tombstone:?}"
+    );
+}
+
+/// `list_comments` returns the canonical order (`created_at ASC, id ASC`) and hydration populates
+/// `Issue.comments` in the SAME order on both the single and the batch read paths.
+pub async fn contract_list_comments_order<S: Storage>(storage: S) {
+    storage
+        .create_issue(&issue("ub-a", "a"), "x")
+        .await
+        .unwrap();
+    assert!(
+        storage.list_comments("ub-a").await.unwrap().is_empty(),
+        "no comments yet"
+    );
+
+    for body in ["one", "two", "three"] {
+        storage
+            .add_comment("ub-a", "alice", body, "alice")
+            .await
+            .unwrap();
+    }
+
+    let listed = storage.list_comments("ub-a").await.unwrap();
+    let bodies: Vec<&str> = listed.iter().map(|c| c.body.as_str()).collect();
+    assert_eq!(
+        bodies,
+        ["one", "two", "three"],
+        "list_comments is ordered created_at ASC, id ASC"
+    );
+
+    // Hydration — the single read path (get_issue).
+    let hydrated = storage.get_issue("ub-a").await.unwrap().expect("issue");
+    let hydrated_bodies: Vec<&str> = hydrated.comments.iter().map(|c| c.body.as_str()).collect();
+    assert_eq!(
+        hydrated_bodies,
+        ["one", "two", "three"],
+        "get_issue must hydrate Issue.comments in canonical order"
+    );
+
+    // Hydration — the BATCH read path (get_issues / hydrate_ids), incl. an issue with none.
+    storage
+        .create_issue(&issue("ub-b", "b"), "x")
+        .await
+        .unwrap();
+    let batch = storage
+        .get_issues(&["ub-a".to_string(), "ub-b".to_string()])
+        .await
+        .unwrap();
+    assert_eq!(batch.len(), 2);
+    assert_eq!(
+        batch[0]
+            .comments
+            .iter()
+            .map(|c| c.body.as_str())
+            .collect::<Vec<_>>(),
+        ["one", "two", "three"],
+        "the batch hydration path must populate Issue.comments identically"
+    );
+    assert!(
+        batch[1].comments.is_empty(),
+        "an issue with no comments hydrates an EMPTY vec, never a placeholder"
+    );
+
+    // Every collect_hydrated read path hydrates comments (list is the representative).
+    let listed_issues = storage.list_issues(&ListFilters::default()).await.unwrap();
+    let a = listed_issues
+        .iter()
+        .find(|i| i.id == "ub-a")
+        .expect("ub-a listed");
+    assert_eq!(
+        a.comments.len(),
+        3,
+        "the list read path must hydrate Issue.comments"
+    );
+}
+
+/// `update_comment` is PROVENANCE-PRESERVING (D-D): it sets `updated_at = now` and writes
+/// `Event(CommentEdited)` carrying old + new bodies. A missing row is `CommentNotFound`.
+pub async fn contract_update_comment_provenance<S: Storage>(storage: S) {
+    storage
+        .create_issue(&issue("ub-a", "a"), "x")
+        .await
+        .unwrap();
+    let added = storage
+        .add_comment("ub-a", "alice", "original", "alice")
+        .await
+        .unwrap();
+    let hash_before = storage
+        .get_issue("ub-a")
+        .await
+        .unwrap()
+        .expect("issue")
+        .content_hash;
+
+    let edited = storage
+        .update_comment(added.id, "revised", "bob")
+        .await
+        .expect("update_comment");
+    assert_eq!(edited.id, added.id);
+    assert_eq!(edited.body, "revised");
+    assert!(
+        edited.updated_at.is_some(),
+        "update_comment MUST set updated_at — the bump IS the provenance (in-place-replace-\
+         without-provenance is forbidden)"
+    );
+    assert!(edited.redacted_at.is_none(), "an edit does not redact");
+
+    // The 2nd half of the provenance: Event(CommentEdited). Reading it back through the storage
+    // event mapper also proves `parse_event_type` gained its arm rather than silently yielding
+    // Custom("comment_edited").
+    let events = storage.list_events("ub-a").await.expect("list_events");
+    let edit = events
+        .iter()
+        .find(|e| e.event_type == unblock_model::EventType::CommentEdited)
+        .expect("Event(CommentEdited) must be written in the same tx");
+    assert_eq!(edit.old_value.as_deref(), Some("original"));
+    assert_eq!(edit.new_value.as_deref(), Some("revised"));
+    assert!(
+        event_types(&storage, "ub-a")
+            .await
+            .contains(&"comment_edited".to_string()),
+        "the wire string must be comment_edited, never a Custom fallthrough"
+    );
+
+    // FR-26: an edit never moves content_hash.
+    assert_eq!(
+        storage
+            .get_issue("ub-a")
+            .await
+            .unwrap()
+            .expect("issue")
+            .content_hash,
+        hash_before,
+        "a comment edit must NEVER move content_hash (FR-26)"
+    );
+
+    // A missing comment row → CommentNotFound (which maps to ErrorCode::IssueNotFound at L7).
+    let missing = storage.update_comment(999_999, "x", "bob").await;
+    assert!(
+        matches!(missing, Err(StorageError::CommentNotFound { id }) if id == 999_999),
+        "update_comment on a missing row must be CommentNotFound, got {missing:?}"
+    );
+}
+
+/// `delete_comment` is a SOFT-REDACT (D-E): the row is KEPT, `text` masked to `""`, `redacted_at`
+/// set, and `Event(CommentRedacted)` RETAINS the original body. Idempotent when already redacted.
+pub async fn contract_delete_comment_soft_redact<S: Storage>(storage: S) {
+    storage
+        .create_issue(&issue("ub-a", "a"), "x")
+        .await
+        .unwrap();
+    let added = storage
+        .add_comment("ub-a", "alice", "sensitive", "alice")
+        .await
+        .unwrap();
+    let hash_before = storage
+        .get_issue("ub-a")
+        .await
+        .unwrap()
+        .expect("issue")
+        .content_hash;
+
+    let redacted = storage
+        .delete_comment(added.id, "bob")
+        .await
+        .expect("delete_comment");
+    assert_eq!(redacted.id, added.id);
+    assert_eq!(redacted.body, "", "the body is MASKED to the empty string");
+    assert!(
+        redacted.redacted_at.is_some(),
+        "the PRESENCE of redacted_at is the is-redacted flag"
+    );
+
+    // The row is KEPT — this is a soft-redact, NOT a hard delete.
+    let listed = storage.list_comments("ub-a").await.unwrap();
+    assert_eq!(listed.len(), 1, "soft-redact KEEPS the row");
+    assert_eq!(listed[0].body, "");
+    assert!(listed[0].redacted_at.is_some());
+
+    // Event(CommentRedacted) RETAINS the original body (provenance — FORK-redact-wire), and its
+    // wire string round-trips through parse_event_type rather than degrading to Custom.
+    let events = storage.list_events("ub-a").await.expect("list_events");
+    let redact = events
+        .iter()
+        .find(|e| e.event_type == unblock_model::EventType::CommentRedacted)
+        .expect("Event(CommentRedacted) must be written in the same tx");
+    assert_eq!(
+        redact.old_value.as_deref(),
+        Some("sensitive"),
+        "the audit event RETAINS the original body (provenance)"
+    );
+    assert_eq!(redact.new_value, None);
+    assert!(
+        event_types(&storage, "ub-a")
+            .await
+            .contains(&"comment_redacted".to_string()),
+        "the wire string must be comment_redacted, never a Custom fallthrough"
+    );
+
+    // FR-26: a redact never moves content_hash.
+    assert_eq!(
+        storage
+            .get_issue("ub-a")
+            .await
+            .unwrap()
+            .expect("issue")
+            .content_hash,
+        hash_before,
+        "a comment redact must NEVER move content_hash (FR-26)"
+    );
+
+    // Idempotent: redacting an ALREADY-redacted comment is a no-op (no second event).
+    let again = storage
+        .delete_comment(added.id, "bob")
+        .await
+        .expect("delete_comment is idempotent on an already-redacted comment");
+    assert_eq!(
+        again.redacted_at, redacted.redacted_at,
+        "the instant is kept"
+    );
+    let redact_count = event_types(&storage, "ub-a")
+        .await
+        .iter()
+        .filter(|e| *e == "comment_redacted")
+        .count();
+    assert_eq!(
+        redact_count, 1,
+        "an idempotent redact writes NO second event"
+    );
+
+    // A missing comment row → CommentNotFound.
+    let missing = storage.delete_comment(999_999, "bob").await;
+    assert!(
+        matches!(missing, Err(StorageError::CommentNotFound { id }) if id == 999_999),
+        "delete_comment on a missing row must be CommentNotFound, got {missing:?}"
+    );
+}
+
+/// The create/bulk/**import** SEED path persists caller-supplied `Comment` state VERBATIM — both
+/// `updated_at` and `redacted_at` survive the round-trip (spine §3.2.1 MUST-1 SCOPE).
+///
+/// **This case exists because nothing else reaches the seed `INSERT INTO comments`**
+/// (`crud::insert_issue_in_tx`, shared by `create_issue` AND `create_issues`): the sync fakes never
+/// execute it and every other seeded fixture is comment-less. It FAILS against the 4-column INSERT
+/// that MUST-1, over-applied beyond `add_comment`, would leave in place — under which a redacted
+/// comment imports back UN-REDACTED.
+pub async fn contract_seed_comments_round_trip_state<S: Storage>(storage: S) {
+    let edited_at = ts(2026, 2, 1);
+    let redacted_at = ts(2026, 3, 1);
+
+    let mut live = comment(0, "ub-a", "alice", "still here");
+    let mut edited = comment(0, "ub-a", "alice", "was revised");
+    edited.created_at = ts(2026, 1, 2);
+    edited.updated_at = Some(edited_at);
+    let mut gone = comment(0, "ub-a", "alice", String::new().as_str());
+    gone.created_at = ts(2026, 1, 3);
+    gone.redacted_at = Some(redacted_at);
+    live.created_at = ts(2026, 1, 1);
+
+    // (1) the single create path.
+    let mut seeded = issue("ub-a", "a");
+    seeded.comments = vec![live.clone(), edited.clone(), gone.clone()];
+    storage.create_issue(&seeded, "importer").await.unwrap();
+
+    let read_back = storage.get_issue("ub-a").await.unwrap().expect("issue");
+    assert_eq!(read_back.comments.len(), 3, "all seeded comments persist");
+    assert_eq!(
+        read_back.comments[0].updated_at, None,
+        "a live comment stays un-edited"
+    );
+    assert_eq!(
+        read_back.comments[0].redacted_at, None,
+        "a live comment stays live"
+    );
+    assert_eq!(
+        read_back.comments[1].updated_at,
+        Some(edited_at),
+        "the seed path must PRESERVE updated_at (it REPLAYS an existing comment; MUST-1 is scoped \
+         to add_comment ONLY)"
+    );
+    assert_eq!(
+        read_back.comments[2].redacted_at,
+        Some(redacted_at),
+        "the seed path must PRESERVE redacted_at — otherwise a redacted comment imports back \
+         UN-REDACTED"
+    );
+    assert_eq!(
+        read_back.comments[2].body, "",
+        "the masked body round-trips"
+    );
+
+    // (2) the ATOMIC BULK path (create_issues) — the real import apply path.
+    let mut bulk = issue("ub-b", "b");
+    let mut bulk_redacted = comment(0, "ub-b", "alice", String::new().as_str());
+    bulk_redacted.redacted_at = Some(redacted_at);
+    let mut bulk_edited = comment(0, "ub-b", "alice", "bulk revised");
+    bulk_edited.created_at = ts(2026, 1, 2);
+    bulk_edited.updated_at = Some(edited_at);
+    bulk.comments = vec![bulk_redacted, bulk_edited];
+    storage
+        .create_issues(&[bulk], "importer")
+        .await
+        .expect("bulk create with comments");
+
+    let bulk_back = storage.get_issue("ub-b").await.unwrap().expect("issue");
+    assert_eq!(bulk_back.comments.len(), 2);
+    assert_eq!(
+        bulk_back.comments[0].redacted_at,
+        Some(redacted_at),
+        "create_issues shares insert_issue_in_tx — redacted_at must survive the bulk path too"
+    );
+    assert_eq!(bulk_back.comments[1].updated_at, Some(edited_at));
+
+    // (3) sync_equals: a seeded issue round-trips its comment state semantically (FORK-M2 puts
+    //     redacted_at INTO the compare, so a dropped column would break this too).
+    let mut expected = seeded.clone();
+    // Ids are storage-minted; align them with what was read back before comparing.
+    for (want, got) in expected.comments.iter_mut().zip(read_back.comments.iter()) {
+        want.id = got.id;
+    }
+    assert!(
+        expected.sync_equals(&read_back),
+        "the seeded issue must round-trip its comment state under sync_equals"
+    );
 }

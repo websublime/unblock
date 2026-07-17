@@ -268,6 +268,11 @@ fn parse_event_type(value: &str) -> EventType {
         "compacted" => EventType::Compacted,
         "deleted" => EventType::Deleted,
         "restored" => EventType::Restored,
+        // D37 — WITHOUT these two arms the catch-all below silently degrades a comment_edited /
+        // comment_redacted row to Custom("comment_edited"), breaking the 17-named EventType oracle
+        // with no compile error. Guarded by `parse_event_type_covers_all_seventeen_named` below.
+        "comment_edited" => EventType::CommentEdited,
+        "comment_redacted" => EventType::CommentRedacted,
         other => EventType::Custom(other.to_string()),
     }
 }
@@ -296,8 +301,11 @@ pub(super) fn event_from_row(row: &Row) -> Result<Event, StorageError> {
     })
 }
 
-/// Map a `comments` row (`id, issue_id, author, text, created_at`) into a [`Comment`].
-#[allow(dead_code)] // surfaced at v1.1; the column shape is pinned now.
+/// Map a `comments` row (`id, issue_id, author, text, created_at, updated_at, redacted_at`) into a
+/// [`Comment`].
+///
+/// The two D37 columns are read by POSITIONAL ordinal (5/6) — the `PRAGMA table_info(comments)`
+/// column-order golden (`libsql/mod.rs`) is what guards that order.
 pub(super) fn comment_from_row(row: &Row) -> Result<Comment, StorageError> {
     let id = match row.get_value(0).map_err(crate::error::map_libsql_err)? {
         Value::Integer(i) => i,
@@ -309,12 +317,69 @@ pub(super) fn comment_from_row(row: &Row) -> Result<Comment, StorageError> {
         author: req_text(row, 2)?,
         body: req_text(row, 3)?,
         created_at: req_datetime(row, 4)?,
+        updated_at: opt_datetime(row, 5)?,
+        redacted_at: opt_datetime(row, 6)?,
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::ISSUE_COLUMNS;
+    use super::{ISSUE_COLUMNS, parse_event_type};
+    use unblock_model::EventType;
+
+    /// `parse_event_type` is storage's OWN wire→`EventType` map, SEPARATE from the model's
+    /// hand-rolled `Deserialize`. Its `other => Custom(..)` catch-all makes a missing arm
+    /// clippy-clean and test-silent: the row would read back as `Custom("comment_edited")`,
+    /// breaking the 17-named oracle. This test is the guard — it FAILS if either D37 arm is
+    /// dropped, and it fails again the next time the model gains a named variant without one.
+    #[test]
+    fn parse_event_type_covers_every_named_variant_and_never_falls_through_to_custom() {
+        const ALL_NAMED: [EventType; 17] = [
+            EventType::Created,
+            EventType::Updated,
+            EventType::StatusChanged,
+            EventType::PriorityChanged,
+            EventType::AssigneeChanged,
+            EventType::Commented,
+            EventType::Closed,
+            EventType::Reopened,
+            EventType::DependencyAdded,
+            EventType::DependencyRemoved,
+            EventType::LabelAdded,
+            EventType::LabelRemoved,
+            EventType::Compacted,
+            EventType::Deleted,
+            EventType::Restored,
+            EventType::CommentEdited,
+            EventType::CommentRedacted,
+        ];
+        for expected in ALL_NAMED {
+            let parsed = parse_event_type(expected.as_str());
+            assert!(
+                !matches!(parsed, EventType::Custom(_)),
+                "{} fell through to Custom — parse_event_type is missing its arm",
+                expected.as_str()
+            );
+            assert_eq!(parsed, expected);
+        }
+    }
+
+    #[test]
+    fn parse_event_type_maps_the_two_d37_comment_events() {
+        assert_eq!(parse_event_type("comment_edited"), EventType::CommentEdited);
+        assert_eq!(
+            parse_event_type("comment_redacted"),
+            EventType::CommentRedacted
+        );
+    }
+
+    #[test]
+    fn parse_event_type_unknown_still_becomes_custom() {
+        assert_eq!(
+            parse_event_type("frobnicated"),
+            EventType::Custom("frobnicated".to_string())
+        );
+    }
 
     #[test]
     fn issue_columns_has_38_entries() {

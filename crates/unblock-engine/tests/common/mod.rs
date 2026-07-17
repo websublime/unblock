@@ -401,6 +401,32 @@ pub mod parked {
         async fn list_dependencies(&self, id: &str) -> Result<Vec<Dependency>, StorageError> {
             self.inner.list_dependencies(id).await
         }
+        // --- comments (FR-6, D37) — DELEGATE: this double decorates a real `Storage`, exactly as it
+        // already does for `list_dependencies`/`next_child_number`. A stub here would silently
+        // decouple the decorated behaviour from the real one.
+        async fn add_comment(
+            &self,
+            issue_id: &str,
+            author: &str,
+            body: &str,
+            actor: &str,
+        ) -> Result<Comment, StorageError> {
+            self.inner.add_comment(issue_id, author, body, actor).await
+        }
+        async fn list_comments(&self, issue_id: &str) -> Result<Vec<Comment>, StorageError> {
+            self.inner.list_comments(issue_id).await
+        }
+        async fn update_comment(
+            &self,
+            comment_id: i64,
+            body: &str,
+            actor: &str,
+        ) -> Result<Comment, StorageError> {
+            self.inner.update_comment(comment_id, body, actor).await
+        }
+        async fn delete_comment(&self, comment_id: i64, actor: &str) -> Result<Comment, StorageError> {
+            self.inner.delete_comment(comment_id, actor).await
+        }
         async fn next_child_number(&self, parent_id: &str) -> Result<u32, StorageError> {
             self.inner.next_child_number(parent_id).await
         }
@@ -641,6 +667,32 @@ pub mod collide {
         async fn list_dependencies(&self, id: &str) -> Result<Vec<Dependency>, StorageError> {
             self.inner.list_dependencies(id).await
         }
+        // --- comments (FR-6, D37) — DELEGATE: this double decorates a real `Storage`, exactly as it
+        // already does for `list_dependencies`/`next_child_number`. A stub here would silently
+        // decouple the decorated behaviour from the real one.
+        async fn add_comment(
+            &self,
+            issue_id: &str,
+            author: &str,
+            body: &str,
+            actor: &str,
+        ) -> Result<Comment, StorageError> {
+            self.inner.add_comment(issue_id, author, body, actor).await
+        }
+        async fn list_comments(&self, issue_id: &str) -> Result<Vec<Comment>, StorageError> {
+            self.inner.list_comments(issue_id).await
+        }
+        async fn update_comment(
+            &self,
+            comment_id: i64,
+            body: &str,
+            actor: &str,
+        ) -> Result<Comment, StorageError> {
+            self.inner.update_comment(comment_id, body, actor).await
+        }
+        async fn delete_comment(&self, comment_id: i64, actor: &str) -> Result<Comment, StorageError> {
+            self.inner.delete_comment(comment_id, actor).await
+        }
         async fn next_child_number(&self, parent_id: &str) -> Result<u32, StorageError> {
             self.inner.next_child_number(parent_id).await
         }
@@ -850,6 +902,32 @@ pub mod race {
         }
         async fn list_dependencies(&self, id: &str) -> Result<Vec<Dependency>, StorageError> {
             self.inner.list_dependencies(id).await
+        }
+        // --- comments (FR-6, D37) — DELEGATE: this double decorates a real `Storage`, exactly as it
+        // already does for `list_dependencies`/`next_child_number`. A stub here would silently
+        // decouple the decorated behaviour from the real one.
+        async fn add_comment(
+            &self,
+            issue_id: &str,
+            author: &str,
+            body: &str,
+            actor: &str,
+        ) -> Result<Comment, StorageError> {
+            self.inner.add_comment(issue_id, author, body, actor).await
+        }
+        async fn list_comments(&self, issue_id: &str) -> Result<Vec<Comment>, StorageError> {
+            self.inner.list_comments(issue_id).await
+        }
+        async fn update_comment(
+            &self,
+            comment_id: i64,
+            body: &str,
+            actor: &str,
+        ) -> Result<Comment, StorageError> {
+            self.inner.update_comment(comment_id, body, actor).await
+        }
+        async fn delete_comment(&self, comment_id: i64, actor: &str) -> Result<Comment, StorageError> {
+            self.inner.delete_comment(comment_id, actor).await
         }
         async fn next_child_number(&self, parent_id: &str) -> Result<u32, StorageError> {
             self.inner.next_child_number(parent_id).await

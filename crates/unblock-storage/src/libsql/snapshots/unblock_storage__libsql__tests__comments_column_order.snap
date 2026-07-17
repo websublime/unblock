@@ -1,0 +1,13 @@
+---
+source: crates/unblock-storage/src/libsql/mod.rs
+expression: columns
+---
+[
+    "id",
+    "issue_id",
+    "author",
+    "text",
+    "created_at",
+    "updated_at",
+    "redacted_at",
+]
