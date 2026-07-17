@@ -48,6 +48,35 @@ pub enum McpServerError {
 }
 
 impl McpServerError {
+    /// Is this the rmcp **cancellation outcome** — i.e. a shutdown that was ASKED FOR, not a fault?
+    ///
+    /// `true` only for [`McpServerError::Transport`] wrapping `ServerInitializeError::Cancelled`,
+    /// which rmcp 1.7 returns from the OUTER `select!` arm of `serve_server_with_ct` when the
+    /// caller's `CancellationToken` cancels an INCOMPLETE `initialize` handshake (spine §0.1). It is
+    /// one of the two normal cooperative-shutdown outcomes (`Ok(())` is the other), so a caller that
+    /// already knows a signal was recorded can report it as routine rather than blaming the process
+    /// for obeying (D38 — the CLI's `commands/mcp.rs` routes it to `tracing::debug!` instead of an
+    /// `error[CODE]` stderr line, while a GENUINE post-signal error keeps that line).
+    ///
+    /// **Deliberately NARROW — this matches what was MEASURED, not a plausible story.** The observed
+    /// pre-handshake-signal child stderr is verbatim `failed to start the MCP server: Cancelled`.
+    /// `ConnectionClosed(_)` is NOT included: it is raised by the INNER handshake path when the peer
+    /// really hung up (a client that disconnects before `initialize` — an EOF, not a cancellation),
+    /// so folding it in here would make this predicate's NAME lie and would demote a real hangup.
+    /// Widening this set is a spec change (the D38 labelling clause), not an implementation detail.
+    ///
+    /// Additive on a `#[non_exhaustive]` enum: no variant is added or changed, so this is not a
+    /// contract event (no `CONTRACT_HASH`/`CONTRACT_VERSION` bump — D38).
+    #[must_use]
+    pub fn is_cancellation(&self) -> bool {
+        match self {
+            Self::Transport { source } => {
+                matches!(**source, rmcp::service::ServerInitializeError::Cancelled)
+            }
+            Self::RunLoop { .. } => false,
+        }
+    }
+
     /// Build a genuine [`McpServerError::Transport`] for tests (TEST-ONLY, `test-util` feature).
     ///
     /// Produces a REAL `ServerInitializeError::TransportError` (via the public
@@ -76,6 +105,24 @@ impl McpServerError {
         let init_err =
             ServerInitializeError::transport::<IoTransport>(io_err, "test-util transport");
         TransportSnafu.into_error(init_err)
+    }
+
+    /// Build a genuine CANCELLATION [`McpServerError::Transport`] for tests (TEST-ONLY,
+    /// `test-util` feature) — the REAL `ServerInitializeError::Cancelled` rmcp returns when a
+    /// cancel lands during the `initialize` handshake (spine §0.1), NOT a look-alike.
+    ///
+    /// Exists so `unblock-cli` can prove BOTH branches of the D38 post-signal diagnostic routing
+    /// (cancellation → `tracing::debug!`; genuine → the `error[CODE]` stderr line) against the same
+    /// error the live path produces. Same gating/rationale as
+    /// [`McpServerError::__transport_error`].
+    #[cfg(feature = "test-util")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __cancelled_error() -> Self {
+        use rmcp::service::ServerInitializeError;
+        use snafu::IntoError as _;
+
+        TransportSnafu.into_error(ServerInitializeError::Cancelled)
     }
 
     /// Build a genuine [`McpServerError::RunLoop`] for tests (TEST-ONLY, `test-util` feature).
@@ -219,5 +266,42 @@ mod tests {
             matches!(err, McpServerError::RunLoop { .. }),
             "the seam yields a genuine RunLoop variant"
         );
+    }
+
+    // -- D38 labelling clause: `is_cancellation()` — the cancellation class, NARROWLY. ------------
+
+    /// The rmcp CANCELLATION outcome IS the cancellation class: a cancel landing during the
+    /// `initialize` handshake is a shutdown that was asked for, not a fault. Inverting the predicate
+    /// turns this RED.
+    #[cfg(feature = "test-util")]
+    #[test]
+    fn cancelled_transport_is_the_cancellation_class() {
+        use super::McpServerError;
+        assert!(
+            McpServerError::__cancelled_error().is_cancellation(),
+            "Transport{{Cancelled}} is the cooperative-shutdown outcome (spine §0.1), not a fault"
+        );
+    }
+
+    /// A GENUINE transport failure (a real bind/IO fault) is NOT the cancellation class — it must
+    /// keep its `error[CODE]` stderr line even after a signal. Widening `is_cancellation()` to all
+    /// `Transport` errors (the tempting over-generalization) turns this RED.
+    #[cfg(feature = "test-util")]
+    #[test]
+    fn a_genuine_transport_failure_is_not_the_cancellation_class() {
+        use super::McpServerError;
+        assert!(
+            !McpServerError::__transport_error("connection reset").is_cancellation(),
+            "a REAL transport fault must never be demoted to routine-cancellation noise"
+        );
+    }
+
+    /// A run-loop join error (an aborted/panicked task) is never a cancellation — it is exactly the
+    /// genuine class that must stay loud.
+    #[cfg(feature = "test-util")]
+    #[tokio::test]
+    async fn a_run_loop_failure_is_not_the_cancellation_class() {
+        use super::McpServerError;
+        assert!(!McpServerError::__run_loop_error().await.is_cancellation());
     }
 }

@@ -141,8 +141,24 @@ impl McpClient {
     /// Spawn `unblock mcp` in `root` with piped stdio + a background-drained stderr (kept off stdout).
     #[must_use]
     pub fn spawn(root: &Path) -> Self {
+        Self::spawn_with_args(root, &[])
+    }
+
+    /// Spawn `unblock mcp` at DEBUG verbosity (`-vv`, `logging.rs`'s level map) — the T3.2.1/D38
+    /// peer of [`spawn`](Self::spawn) for the cases that assert on the child's `tracing::debug!`
+    /// output (the demoted cancellation-class diagnostic, and the `install()`-ordering markers).
+    /// `-v` is a clap `global` flag, so it is accepted after the subcommand.
+    #[must_use]
+    pub fn spawn_verbose(root: &Path) -> Self {
+        Self::spawn_with_args(root, &["-vv"])
+    }
+
+    /// Spawn `unblock mcp <args...>` in `root` with piped stdio + a background-drained stderr.
+    #[must_use]
+    pub fn spawn_with_args(root: &Path, args: &[&str]) -> Self {
         let mut child = unblock_in(root)
             .arg("mcp")
+            .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -300,6 +316,78 @@ impl McpClient {
             if value.get("id").and_then(Value::as_i64) == Some(id) {
                 return value;
             }
+        }
+    }
+
+    /// **The DETERMINISTIC pre-handshake readiness barrier (T3.2.1/D38).** Block until the server is
+    /// provably parked awaiting `initialize` — WITHOUT completing the handshake — by round-tripping a
+    /// JSON-RPC `ping`.
+    ///
+    /// The MCP lifecycle spec permits `ping` BEFORE `initialize`, and rmcp 1.7 implements it: its
+    /// handshake loop (`rmcp-1.7.0/src/service/server.rs` `serve_server_with_ct_inner`) answers a
+    /// `PingRequest` with an `EmptyResult` and LOOPS BACK to `expect_next_message` — it does not
+    /// break out to negotiate. (`VersionClampingTransport` passes it through untouched: the clamp
+    /// only rewrites `InitializeRequest`.) So receiving the ping response proves, IN-BAND:
+    /// 1. the run loop is up ⇒ `shutdown::install()` has ALREADY run (it precedes `run_mcp_server`),
+    ///    so a signal sent now is RECORDED, never delivered to the default disposition; and
+    /// 2. the stdio transport is bound and a FRESH blocking-pool `stdin` read is parked — the exact
+    ///    precondition of the D38 runtime-drop hang; and
+    /// 3. the `initialize` handshake is still INCOMPLETE — the `Err(Cancelled)` window under test.
+    ///
+    /// **This replaces a fixed 300ms sleep, which was FLAKY (measured RED 3/3 under CPU load: the
+    /// window expired while the child was still opening/migrating the DB, so the signal landed before
+    /// `install()` and killed it by default disposition → `left: None` = WIFSIGNALED, with an empty
+    /// child stderr).** Lengthening that sleep would only have moved the race; widening the assertion
+    /// to accept a signal-death would have been the prohibited vacuous fix. The predecessor's
+    /// docstring claimed "there is no in-band signal for 'rmcp is now awaiting initialize'" — that is
+    /// FALSE, and this is it.
+    ///
+    /// # Panics
+    /// If the child dies or does not answer the ping (either is a REAL defect: the server must stay
+    /// alive awaiting a client) — reporting the child's captured stderr.
+    pub fn ping_barrier(&mut self) {
+        assert!(
+            self.child.try_wait().expect("try_wait").is_none(),
+            "`unblock mcp` must stay alive awaiting `initialize`, but exited before the barrier. \
+             Child stderr:\n{}",
+            self.stderr_snapshot()
+        );
+        let resp = self.request("ping", &json!({}));
+        assert!(
+            resp.get("error").is_none(),
+            "a pre-initialize `ping` must be answered (the MCP lifecycle spec permits it and rmcp \
+             1.7 implements it) — got: {resp}. Child stderr:\n{}",
+            self.stderr_snapshot()
+        );
+    }
+
+    /// Block until the child's STDERR contains `marker`, returning the full snapshot (T3.2.1/D38).
+    ///
+    /// The readiness barrier for the phases that happen BEFORE the run loop exists (so
+    /// [`ping_barrier`](Self::ping_barrier) cannot see them) — i.e. the `install()`-ordering markers.
+    /// Requires a `-vv` child ([`spawn_verbose`](Self::spawn_verbose)): the markers are `debug!`.
+    ///
+    /// # Panics
+    /// If `marker` does not appear within `timeout`, or the child dies first.
+    pub fn wait_for_stderr(&mut self, marker: &str, timeout: Duration) -> String {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let snapshot = self.stderr_snapshot();
+            if snapshot.contains(marker) {
+                return snapshot;
+            }
+            if let Some(status) = self.child.try_wait().expect("try_wait") {
+                panic!(
+                    "the child exited ({status:?}) before emitting `{marker}` on stderr. \
+                     Child stderr:\n{snapshot}"
+                );
+            }
+            assert!(
+                Instant::now() < deadline,
+                "`{marker}` did not appear on the child's stderr within {timeout:?} \
+                 (is the child `-vv`? the markers are debug-level). Child stderr:\n{snapshot}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 

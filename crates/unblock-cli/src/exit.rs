@@ -126,7 +126,7 @@ fn to_structured(err: CliError) -> StructuredError {
 ///
 /// The 0–8 cast is CLI-owned: `ExitCode::from(structured.exit_code())`.
 #[must_use]
-pub fn into_exit(err: CliError, fmt: OutputFormat) -> ExitCode {
+pub(crate) fn into_exit(err: CliError, fmt: OutputFormat) -> ExitCode {
     let structured = to_structured(err);
     let exit = structured.exit_code();
 
@@ -150,32 +150,49 @@ pub fn into_exit(err: CliError, fmt: OutputFormat) -> ExitCode {
     ExitCode::from(exit)
 }
 
-/// Report a `CliError` as a human `error[CODE]: message` line on STDERR **without deciding the exit
-/// code** (D38, spine §5b) — the `mcp` signal path's diagnostic sink.
+/// Report a `CliError` as a human `error[CODE]: message` line on `out` **without deciding the exit
+/// code** (D38, spine §5b) — the `mcp` command's GENUINE-error diagnostic sink.
 ///
 /// When the FR-17 handle recorded a signal, `commands/mcp.rs` returns `Ok(Some(128+signo))`, which
-/// takes `run_with`'s Ok arm and so never reaches [`into_exit`]. Any cooperative-shutdown error is a
-/// CONSEQUENCE of the cancellation, not an independent fault: it must still be surfaced (never
-/// swallowed) but must not blame the process for obeying the signal. Routing through the same
-/// `to_structured` + [`emit_human`] pair as the error path keeps the two renderings from drifting
-/// (one sanitize site, one line shape). Always STDERR: on `mcp`, stdout is MCP framing ONLY (NFR-14),
-/// and FR-11's always-valid-JSON-on-stdout rule binds only the UNSIGNALLED `Err` path.
-pub(crate) fn emit_diagnostic(err: CliError) {
-    emit_human(&to_structured(err));
+/// takes `run_with`'s Ok arm and so never reaches [`into_exit`]; likewise the teardown error that
+/// the UNSIGNALLED path discards in favour of the root-cause run-loop error is returned by nobody.
+/// Such an error must still be surfaced (never swallowed) but must not blame the process for obeying
+/// the signal. Routing through the same `to_structured` + [`write_human`] pair as the error path
+/// keeps the two renderings from drifting (one sanitize site, one line shape).
+///
+/// **Why the sink is a PARAMETER and not a hard-coded `eprintln!`.** This function carries a
+/// NORMATIVE D38 clause ("genuine errors are surfaced, never swallowed") whose only proof is that
+/// the bytes are actually written. With the sink injected, the unit test drives THIS function
+/// against a buffer, so gutting it to a no-op turns that test RED — the mutation that previously
+/// SURVIVED the whole suite. A pure-formatter split would not achieve that: gutting the emitter
+/// would still leave the formatter's test green. Callers pass STDERR: on `mcp`, stdout is MCP
+/// framing ONLY (NFR-14), and FR-11's always-valid-JSON-on-stdout rule binds only the UNSIGNALLED
+/// `Err` path (which renders via [`into_exit`], not here).
+pub(crate) fn emit_diagnostic(err: CliError, out: &mut impl Write) {
+    // A diagnostic must never itself become a failure: a closed/failing stderr is not a reason to
+    // change the exit code we were asked to deliver.
+    let _ignored = write_human(&to_structured(err), out);
 }
 
 /// Write a human `error[CODE]: message` line to STDERR (NFR-14).
 fn emit_human(structured: &StructuredError) {
-    eprintln!(
+    let _ignored = write_human(structured, &mut std::io::stderr().lock());
+}
+
+/// Render the single human diagnostic line shape (`error[CODE]: message`) onto `out` — the ONE
+/// place that shape exists, shared by [`into_exit`]'s human arm and [`emit_diagnostic`].
+fn write_human(structured: &StructuredError, out: &mut impl Write) -> std::io::Result<()> {
+    writeln!(
+        out,
         "error[{}]: {}",
         structured.code.as_str(),
         structured.message
-    );
+    )
 }
 
 /// The success exit code (`0`).
 #[must_use]
-pub fn ok_exit() -> ExitCode {
+pub(crate) fn ok_exit() -> ExitCode {
     ExitCode::SUCCESS
 }
 
@@ -287,6 +304,61 @@ mod tests {
             8,
             "an MCP-server run-loop failure must NEVER be the user IoError exit 8"
         );
+    }
+
+    // -- D38 "never swallowed": `emit_diagnostic` actually WRITES the line. --------------------
+    //
+    // These drive `emit_diagnostic` ITSELF (against a buffer, via its injected sink) rather than a
+    // formatter helper, which is what makes them non-vacuous: gutting `emit_diagnostic` to a no-op
+    // — the mutation that SURVIVED the entire 54-test surface at the T3.2.1 Verify gate — leaves the
+    // buffer empty and turns them RED.
+
+    /// The post-signal / discarded GENUINE error is REPORTED as the human `error[CODE]: message`
+    /// line (NFR-14 shape), naming its code and its message. Gutting `emit_diagnostic` → RED.
+    #[test]
+    fn emit_diagnostic_writes_the_error_line() {
+        use super::emit_diagnostic;
+        let mut out = Vec::new();
+        emit_diagnostic(
+            CliError::Mcp {
+                source: unblock_mcp::McpServerError::__transport_error("connection reset"),
+            },
+            &mut out,
+        );
+        let line = String::from_utf8(out).expect("utf8 diagnostic");
+        assert!(
+            line.starts_with("error[INTERNAL_ERROR]: "),
+            "the D38 diagnostic keeps the NFR-14 `error[CODE]: message` shape, got `{line}`"
+        );
+        assert!(
+            line.contains("connection reset"),
+            "the underlying failure is NAMED, never swallowed: `{line}`"
+        );
+        assert!(
+            line.ends_with('\n'),
+            "one line, newline-terminated: `{line}`"
+        );
+    }
+
+    /// The sink is the ONLY output: `emit_diagnostic` decides no exit code and returns nothing — it
+    /// forwards each error's OWN code into the line (an `Io` error renders `IO_ERROR`, not a
+    /// hard-coded `INTERNAL_ERROR`).
+    #[test]
+    fn emit_diagnostic_forwards_each_errors_own_code() {
+        use super::emit_diagnostic;
+        let mut out = Vec::new();
+        emit_diagnostic(
+            CliError::Io {
+                source: std::io::Error::other("libsql close failed"),
+            },
+            &mut out,
+        );
+        let line = String::from_utf8(out).expect("utf8 diagnostic");
+        assert!(
+            line.starts_with("error[IO_ERROR]: "),
+            "a teardown IO fault renders its OWN code, got `{line}`"
+        );
+        assert!(line.contains("libsql close failed"), "`{line}`");
     }
 
     /// The structured payload for a `CliError::Mcp` renders with the `INTERNAL_ERROR` code + exit 1

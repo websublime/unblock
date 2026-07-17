@@ -11,14 +11,26 @@
 //! the runtime to a temporary, so that blocking drop is structurally unavoidable — which is exactly
 //! how a SIGTERM delivered before a client's `initialize` handshake used to hang the process forever
 //! (PRD §4/D38). Owning the runtime lets us dispose of it with [`Runtime::shutdown_background`],
-//! which CONSUMES it (so no `Drop` runs and nothing can block), on EVERY return path — `Ok`, `Err`,
-//! and the `128+signo` signal exit alike.
+//! which CONSUMES it (so no `Drop` runs and nothing can block).
+//!
+//! **Why [`ManuallyDrop`] and not a bare `let runtime` (the D38 no-hang invariant binds the PANIC
+//! path too).** Calling `shutdown_background()` after `block_on` covers only the paths that RETURN;
+//! it is dead code on an unwind. If `block_on` PANICS, that call is skipped and the `runtime` local
+//! is dropped by the unwinder instead — `Runtime::drop` → `BlockingPool::shutdown` → the same
+//! forever-block on the parked stdin read (measured: it hangs 4/4; `panic = "unwind"` in every
+//! profile of this workspace, so this is live, not theoretical). Wrapping the runtime in
+//! `ManuallyDrop` makes its `Drop` a NO-OP, so no unwind path can block: the panic propagates, the
+//! process exits 101, and the D31 `.write.lock` is released by the OS rather than stranded. The
+//! normal path then disposes explicitly via `ManuallyDrop::into_inner(..).shutdown_background()`.
+//! Both `ManuallyDrop::new` and `ManuallyDrop::into_inner` are SAFE (only `ManuallyDrop::drop` is
+//! `unsafe`), so `#![forbid(unsafe_code)]` holds.
 //!
 //! Nothing load-bearing is lost by not joining the pool: rmcp flushes its framing per-message before
 //! returning, `session.shutdown()` closes libsql INSIDE `block_on`, tracing writes to
 //! `std::io::stderr` with no `non_blocking` guard to flush, and `exit.rs` renders synchronously.
 #![forbid(unsafe_code)]
 
+use std::mem::ManuallyDrop;
 use std::process::ExitCode;
 
 use unblock_error::{ErrorCode, StructuredError};
@@ -34,13 +46,17 @@ fn main() -> ExitCode {
         Err(source) => return runtime_build_failure(&source),
     };
 
+    // D38 no-hang, the UNWIND half: from here on the runtime has a no-op `Drop`, so a panic inside
+    // `block_on` can never wedge the exit on `BlockingPool::shutdown` (see the module docs).
+    let runtime = ManuallyDrop::new(runtime);
+
     let code = runtime.block_on(unblock_cli::run());
 
-    // D38: dispose NON-BLOCKINGLY. `shutdown_background` consumes the runtime, so its blocking `Drop`
-    // never runs and a still-parked `tokio::io::stdin()` read can no longer wedge the exit. This must
-    // stay AFTER `block_on` (which already ran every await to completion, including the clean libsql
-    // close) and BEFORE returning the code.
-    runtime.shutdown_background();
+    // D38 no-hang, the RETURN half: dispose NON-BLOCKINGLY. `shutdown_background` consumes the
+    // runtime, so its blocking `Drop` never runs and a still-parked `tokio::io::stdin()` read can no
+    // longer wedge the exit. This must stay AFTER `block_on` (which already ran every await to
+    // completion, including the clean libsql close) and BEFORE returning the code.
+    ManuallyDrop::into_inner(runtime).shutdown_background();
 
     code
 }
