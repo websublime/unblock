@@ -2892,7 +2892,7 @@ checksum = "eaea85b334db583fe3274d12b4cd1880032beab409c0d774be044d4480ab9a94"
 
 [[package]]
 name = "unblock-cli"
-version = "1.0.0-rc.4"
+version = "1.0.0-rc.5"
 dependencies = [
  "assert_cmd",
  "axoupdater",
@@ -2922,7 +2922,7 @@ dependencies = [
 
 [[package]]
 name = "unblock-config"
-version = "1.0.0-rc.4"
+version = "1.0.0-rc.5"
 dependencies = [
  "chrono",
  "dunce",
@@ -2943,7 +2943,7 @@ dependencies = [
 
 [[package]]
 name = "unblock-engine"
-version = "1.0.0-rc.4"
+version = "1.0.0-rc.5"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2969,7 +2969,7 @@ dependencies = [
 
 [[package]]
 name = "unblock-error"
-version = "1.0.0-rc.4"
+version = "1.0.0-rc.5"
 dependencies = [
  "criterion",
  "insta",
@@ -2982,7 +2982,7 @@ dependencies = [
 
 [[package]]
 name = "unblock-fuzz"
-version = "1.0.0-rc.4"
+version = "1.0.0-rc.5"
 dependencies = [
  "chrono",
  "proptest",
@@ -2997,7 +2997,7 @@ dependencies = [
 
 [[package]]
 name = "unblock-health"
-version = "1.0.0-rc.4"
+version = "1.0.0-rc.5"
 dependencies = [
  "insta",
  "proptest",
@@ -3013,7 +3013,7 @@ dependencies = [
 
 [[package]]
 name = "unblock-mcp"
-version = "1.0.0-rc.4"
+version = "1.0.0-rc.5"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3041,7 +3041,7 @@ dependencies = [
 
 [[package]]
 name = "unblock-model"
-version = "1.0.0-rc.4"
+version = "1.0.0-rc.5"
 dependencies = [
  "chrono",
  "criterion",
@@ -3056,7 +3056,7 @@ dependencies = [
 
 [[package]]
 name = "unblock-policy"
-version = "1.0.0-rc.4"
+version = "1.0.0-rc.5"
 dependencies = [
  "chrono",
  "criterion",
@@ -3073,7 +3073,7 @@ dependencies = [
 
 [[package]]
 name = "unblock-render"
-version = "1.0.0-rc.4"
+version = "1.0.0-rc.5"
 dependencies = [
  "chrono",
  "criterion",
@@ -3089,7 +3089,7 @@ dependencies = [
 
 [[package]]
 name = "unblock-storage"
-version = "1.0.0-rc.4"
+version = "1.0.0-rc.5"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3109,7 +3109,7 @@ dependencies = [
 
 [[package]]
 name = "unblock-sync"
-version = "1.0.0-rc.4"
+version = "1.0.0-rc.5"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3708,7 +3708,7 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
 name = "xtask"
-version = "1.0.0-rc.4"
+version = "1.0.0-rc.5"
 dependencies = [
  "anstyle",
  "insta",
