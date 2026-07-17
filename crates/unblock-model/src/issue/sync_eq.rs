@@ -84,12 +84,17 @@ impl Issue {
             return false;
         }
 
-        // Comments: order-independent (5-key sort).
+        // Comments: order-independent (6-key sort) + a FIELD-WISE compare (D37/FORK-M2 — the
+        // derived `PartialEq` must NOT be used here: it would compare the volatile `updated_at`).
         let mut self_comments = self.comments.clone();
         self_comments.sort_by(comment_sort_key);
         let mut other_comments = other.comments.clone();
         other_comments.sort_by(comment_sort_key);
-        if self_comments != other_comments {
+        if !self_comments
+            .iter()
+            .zip(other_comments.iter())
+            .all(|(left, right)| comment_sync_equals(left, right))
+        {
             return false;
         }
 
@@ -120,14 +125,35 @@ fn comment_sort_key(
         .then_with(|| left.created_at.cmp(&right.created_at))
         .then_with(|| left.author.cmp(&right.author))
         .then_with(|| left.body.cmp(&right.body))
+        .then_with(|| left.redacted_at.cmp(&right.redacted_at))
         .then_with(|| left.id.cmp(&right.id))
+}
+
+/// Field-wise comment equality under SYNC semantics (spine §1.8, D37/FORK-M2).
+///
+/// Compares the real synced state — `id`/`issue_id`/`author`/`body`/`created_at`/`redacted_at` —
+/// but IGNORES the comment's `updated_at`, exactly as `Issue.updated_at` is ignored above: it is a
+/// volatile audit-only field (the `CommentEdited` event carries the provenance).
+///
+/// This deliberately does **not** use the derived `PartialEq` on [`crate::relations::Comment`],
+/// which would compare `updated_at` and break the FORK-M2 rule silently.
+fn comment_sync_equals(
+    left: &crate::relations::Comment,
+    right: &crate::relations::Comment,
+) -> bool {
+    left.id == right.id
+        && left.issue_id == right.issue_id
+        && left.author == right.author
+        && left.body == right.body
+        && left.created_at == right.created_at
+        && left.redacted_at == right.redacted_at
 }
 
 #[cfg(test)]
 mod tests {
     use crate::enums::DependencyType;
     use crate::issue::Issue;
-    use crate::relations::Dependency;
+    use crate::relations::{Comment, Dependency};
     use chrono::{TimeZone, Utc};
 
     fn base() -> Issue {
@@ -198,6 +224,70 @@ mod tests {
         a.dependencies = vec![dep("ub-x"), dep("ub-y")];
         let mut b = base();
         b.dependencies = vec![dep("ub-y"), dep("ub-x")];
+        assert!(a.sync_equals(&b));
+    }
+
+    // --- D37 / FORK-M2 -----------------------------------------------------------------------
+    //
+    // NON-VACUITY: `comment_updated_at_ignored` FAILS if `comment_sync_equals` is replaced by the
+    // derived `PartialEq` it superseded (that compare includes `updated_at`), and
+    // `comment_redacted_at_compared` FAILS if `redacted_at` is dropped from the comparator. Each
+    // pins one half of the FORK-M2 rule.
+
+    fn comment(id: i64) -> Comment {
+        Comment {
+            id,
+            issue_id: "ub-abc123".to_string(),
+            author: "alice".to_string(),
+            body: "hello".to_string(),
+            created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            updated_at: None,
+            redacted_at: None,
+        }
+    }
+
+    #[test]
+    fn comment_updated_at_ignored() {
+        let mut a = base();
+        a.comments = vec![comment(1)];
+        let mut b = base();
+        let mut edited = comment(1);
+        edited.updated_at = Some(Utc.with_ymd_and_hms(2099, 1, 1, 0, 0, 0).unwrap());
+        b.comments = vec![edited];
+        assert!(a.sync_equals(&b));
+    }
+
+    #[test]
+    fn comment_redacted_at_compared() {
+        let mut a = base();
+        a.comments = vec![comment(1)];
+        let mut b = base();
+        let mut redacted = comment(1);
+        redacted.redacted_at = Some(Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap());
+        redacted.body = String::new();
+        b.comments = vec![redacted];
+        assert!(!a.sync_equals(&b));
+    }
+
+    #[test]
+    fn comment_body_compared() {
+        let mut a = base();
+        a.comments = vec![comment(1)];
+        let mut b = base();
+        let mut other = comment(1);
+        other.body = "goodbye".to_string();
+        b.comments = vec![other];
+        assert!(!a.sync_equals(&b));
+    }
+
+    #[test]
+    fn comment_order_independent() {
+        let mut a = base();
+        let mut second = comment(2);
+        second.body = "second".to_string();
+        a.comments = vec![comment(1), second.clone()];
+        let mut b = base();
+        b.comments = vec![second, comment(1)];
         assert!(a.sync_equals(&b));
     }
 

@@ -51,6 +51,10 @@ pub enum EventType {
     Deleted,
     /// An issue was restored.
     Restored,
+    /// A comment was edited (D37/D-D — provenance-preserving update).
+    CommentEdited,
+    /// A comment was redacted (D37/D-E — soft-delete: row kept, body masked).
+    CommentRedacted,
     /// An open-enum tail variant for any unrecognised event (original case preserved).
     Custom(String),
 }
@@ -75,6 +79,8 @@ impl EventType {
             Self::Compacted => "compacted",
             Self::Deleted => "deleted",
             Self::Restored => "restored",
+            Self::CommentEdited => "comment_edited",
+            Self::CommentRedacted => "comment_redacted",
             Self::Custom(value) => value,
         }
     }
@@ -105,6 +111,8 @@ impl<'de> Deserialize<'de> for EventType {
             "compacted" => Self::Compacted,
             "deleted" => Self::Deleted,
             "restored" => Self::Restored,
+            "comment_edited" => Self::CommentEdited,
+            "comment_redacted" => Self::CommentRedacted,
             _ => Self::Custom(value),
         })
     }
@@ -125,7 +133,7 @@ impl JsonSchema for EventType {
 mod tests {
     use super::EventType;
 
-    const ALL_KNOWN: [EventType; 15] = [
+    const ALL_KNOWN: [EventType; 17] = [
         EventType::Created,
         EventType::Updated,
         EventType::StatusChanged,
@@ -141,6 +149,8 @@ mod tests {
         EventType::Compacted,
         EventType::Deleted,
         EventType::Restored,
+        EventType::CommentEdited,
+        EventType::CommentRedacted,
     ];
 
     #[test]
