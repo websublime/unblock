@@ -2145,3 +2145,41 @@ async fn repeated_identical_query_is_byte_identical_order() {
         "blocked order is byte-identical across runs"
     );
 }
+
+/// `Session::list_comments` round-trips added comments in canonical order and needs NO write
+/// permit (FR-10) — the read path stays open while a write permit is held.
+#[tokio::test]
+async fn list_comments_round_trips_in_canonical_order() {
+    let session = session().await;
+    session
+        .create(&issue("ub-a", Priority::MEDIUM, 1000))
+        .await
+        .expect("create");
+    session
+        .create(&issue("ub-b", Priority::MEDIUM, 1001))
+        .await
+        .expect("create");
+
+    for body in ["one", "two", "three"] {
+        session
+            .add_comment("ub-a", body)
+            .await
+            .expect("add_comment");
+    }
+
+    let comments = session.list_comments("ub-a").await.expect("list_comments");
+    let bodies: Vec<&str> = comments.iter().map(|c| c.body.as_str()).collect();
+    assert_eq!(bodies, ["one", "two", "three"]);
+    assert!(
+        session
+            .list_comments("ub-b")
+            .await
+            .expect("list")
+            .is_empty(),
+        "ub-b has no comments"
+    );
+
+    // The read paths hydrate Issue.comments (D37).
+    let hydrated = session.get("ub-a").await.expect("get").expect("issue");
+    assert_eq!(hydrated.comments.len(), 3, "get hydrates Issue.comments");
+}

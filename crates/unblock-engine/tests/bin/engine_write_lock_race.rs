@@ -29,7 +29,8 @@ use chrono::{DateTime, Utc};
 use unblock_config::{ConfigPaths, ResolvedConfig, WorkspaceContext};
 use unblock_engine::{EngineError, NewIssue, Session, SessionConfig};
 use unblock_model::{
-    CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue, ListFilters,
+    Comment, CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue,
+    ListFilters,
 };
 use unblock_storage::{
     DEFAULT_WRITE_LOCK_TIMEOUT_MS, DeletePlan, IssuePatch, LibsqlStorage, Storage, StorageError,
