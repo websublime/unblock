@@ -52,7 +52,7 @@ expression: json
       ]
     },
     "comments": {
-      "description": "Comments (hydrated for export/display; populated v1.1).",
+      "description": "Comments (hydrated for export/display on all read paths — D37).",
       "type": "array",
       "items": {
         "$ref": "#/$defs/Comment"
@@ -281,11 +281,11 @@ expression: json
   ],
   "$defs": {
     "Comment": {
-      "description": "A comment on an issue (spine §1.7; surface defined now, populated v1.1).",
+      "description": "A comment on an issue (spine §1.7; v1 surface — D37). Flat: no threading (FORK-T).",
       "type": "object",
       "properties": {
         "author": {
-          "description": "The comment author.",
+          "description": "The comment author (= the session actor at the MCP surface, FORK-M1b).",
           "type": "string"
         },
         "created_at": {
@@ -302,9 +302,25 @@ expression: json
           "description": "The issue this comment belongs to.",
           "type": "string"
         },
+        "redacted_at": {
+          "description": "Soft-redact marker (D37/D-E): `None` = live; `Some` = redacted.\n\nThe PRESENCE is the \"is redacted\" flag (mirroring the tombstone `deleted_at`); on redact the\nrow is KEPT and `body` is masked to `\"\"`. The `CommentRedacted` audit event retains the\noriginal body (provenance — FORK-redact-wire).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
         "text": {
-          "description": "The comment body (serialized under `\"text\"`).",
+          "description": "The comment body (serialized under `\"text\"`); masked to `\"\"` on redact.",
           "type": "string"
+        },
+        "updated_at": {
+          "description": "Provenance-preserving edit instant (D37/D-D): `None` = never edited; `Some` = last edit.\n\n`add`'s own INSERT is create-time-only — see spine §3.2.1 MUST-1 SCOPE.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
         }
       },
       "required": [

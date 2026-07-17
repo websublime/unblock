@@ -182,7 +182,7 @@ pub struct Issue {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependencies: Vec<Dependency>,
 
-    /// Comments (hydrated for export/display; populated v1.1).
+    /// Comments (hydrated for export/display on all read paths — D37).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub comments: Vec<Comment>,
 }
