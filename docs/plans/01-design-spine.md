@@ -270,20 +270,36 @@ impl IssueValidator { pub fn validate(issue: &Issue) -> Result<(), unblock_error
 pub fn validate_actor(actor: &str) -> Result<(), unblock_error::FieldError>;
 
 // Comment validation (FR-6/D37) — the model owns the comment rule set ONCE (the §1.9 single-home rule).
-// TWO entry points because the two engine call sites carry different field sets (spine §4.1):
+// TWO PUBLIC entry points because the two engine call sites carry different field sets (spine §4.1):
 //   - `add_comment(issue_id, body)` has issue_id + author (= self.actor) + body -> validate_comment.
 //   - `update_comment(comment_id, body)` has ONLY a comment id + body — there is no issue_id on that path
 //     and no `Storage::get_comment(comment_id)` (§3.2) to fetch one — so it calls validate_body.
-// validate_comment DELEGATES the body rules to validate_body, so the body rule set stays single-homed
-// (never duplicated across the two entry points). This matches the mutation-time contract already stated
-// at §4.1 and §5.2: "the body is validated (non-empty trimmed / NUL-rejected) BEFORE the mutation".
+// COMPOSITION (NORMATIVE — validate_comment must NOT call validate_body): validate_body returns an
+// ALREADY-SEALED Result, so the natural `validate_body(body)?` inside validate_comment would be
+// FAIL-FAST — the FR-11 wire `context["fields"]` would carry ONE entry where IssueValidator carries N,
+// silently breaking the D-E1 UNIFORM AGGREGATE carrier (§2.1). Instead BOTH public entry points call the
+// PRIVATE `body_rules`, each sealing its OWN aggregate: the body rule set stays single-homed AND every
+// CommentValidator error is a full multi-fault aggregate, exactly like `IssueValidator::validate`.
 pub struct CommentValidator; // pure; no I/O.
 impl CommentValidator {
+    // THE single home of the body rule set. Pushes into the CALLER's aggregate; never seals.
     // body non-empty when trimmed [FieldError { field: "content" }] + reject NUL (SQLite compat);
     // body otherwise UNBOUNDED (the L7 MCP `Quotas.max_string_len` 64 KiB is the transport cap).
+    fn body_rules(body: &str, fields: &mut Vec<unblock_error::FieldError>); // PRIVATE — mirrors the
+    // `fields: &mut Vec<FieldError>` helper shape IssueValidator already uses (one seal at the end).
+    // The update path: body only; seals its own ValidationFailed { fields }.
     pub fn validate_body(body: &str) -> Result<(), unblock_error::ModelError>;
-    // The add-path superset: calls validate_body, then author non-empty (trimmed) + <= ACTOR_MAX_CHARS,
-    // and issue_id non-empty.
+    // The add path: `body_rules` + author + issue_id ALL collected into ONE vec, sealed ONCE.
+    //   author  -> DELEGATES the bound/NUL/control-char rules to `validate_actor` above (their single
+    //     home), RELABELS the returned FieldError's `field` "actor" -> "author" (FieldError.field is a
+    //     pub String), and ADDS the non-empty-when-trimmed rule `validate_actor` deliberately does NOT
+    //     enforce (its contract: the RESOLVED actor is already non-empty via the config precedence
+    //     chain). So the bound stays ACTOR_MAX_CHARS = 200 CHARS — a deliberate adaptation of bd's
+    //     `len() > 200` BYTES-on-untrimmed rule; bd's `id <= 0` rule is DROPPED (the id is storage-minted
+    //     here, never caller-supplied).
+    //   issue_id -> non-empty when trimmed.
+    // The FieldError NAMES are WIRE CONTRACT (FR-11 `context["fields"][].field`, D-E1 §2.3; bd-compatible):
+    //   body -> "content"  ·  author -> "author"  ·  issue_id -> "issue_id".
     pub fn validate_comment(issue_id: &str, author: &str, body: &str) -> Result<(), unblock_error::ModelError>;
 }
 
@@ -1582,7 +1598,7 @@ impl Session {
 
 ## 5. MCP schemas — `unblock-mcp` (L7)
 
-**rmcp 1.7** (`server`, `transport-io`) stdio server (`unblock mcp`), thin adapter over `Session`. **8 consolidated tools** (at the ≤ 8 target — `comment` is the 8th, D37/T3.9), resources, prompts. Every tool input/output derives `JsonSchema` + `Serialize`/`Deserialize` — inputs AND outputs ride the schema bundle as per-tool `{input, output}` pairs (D25, §5.3/§5.4); args are schemars-validated with size/rate limits (NFR-18). Discovery (`capabilities`/`schema`) carries `contract_version` (FR-12), and BOTH discovery documents are covered by the single pinned `CONTRACT_HASH` drift gate (D22 clause 8 widened by D25 — §5.4).
+**rmcp 1.7** (`server`, `transport-io`) stdio server (`unblock mcp`), thin adapter over `Session`. **7 consolidated tools shipped; → 8 at T3.9** when the D37 `comment` tool lands (the ≤ 8 RK-3 ceiling — `comment` is the 8th, §5.1 row 8 / §6.6; the count literals across the corpus flip 7→8 in the T3.9 CODE PR, atomically with the router that makes 8 true). Resources, prompts. Every tool input/output derives `JsonSchema` + `Serialize`/`Deserialize` — inputs AND outputs ride the schema bundle as per-tool `{input, output}` pairs (D25, §5.3/§5.4); args are schemars-validated with size/rate limits (NFR-18). Discovery (`capabilities`/`schema`) carries `contract_version` (FR-12), and BOTH discovery documents are covered by the single pinned `CONTRACT_HASH` drift gate (D22 clause 8 widened by D25 — §5.4).
 
 ### 5.1 Tool taxonomy (8 tools — `comment` is the 8th, landing with the T3.9/D37 code)
 
@@ -1638,7 +1654,7 @@ pub enum IssueInput {
     // field); `notes`/`owner` are NOT on `Create` (no markdown section sets them — D22 — they stay update-only).
     CreateBulk { markdown: String },   // D22 — {action:"create_bulk", markdown:"..."}; inline document content (NOT a path)
     // D22 mapping: `CreateBulk` is the bulk-markdown import surface — a NEW discriminator on the EXISTING `issue`
-    // tool (keeps the tool count at 7, ≤ 8, §6.6 "extend before add"). The adapter:
+    // tool, so it does NOT grow the tool count (≤ 8, §6.6 "extend before add"). The adapter:
     //   (1) caps the parsed record count at `Quotas::max_batch` at the preflight (BEFORE any mint — the args-validation
     //       rule pinned in this section's intro above, `PRD NFR-18`);
     //   (2) parses + validates the WHOLE document via a pure mcp-owned `parse_bulk_markdown(&str)` helper —
