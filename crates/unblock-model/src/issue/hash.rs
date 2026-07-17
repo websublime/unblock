@@ -223,6 +223,67 @@ mod tests {
         assert_eq!(base, content_hash(&due));
     }
 
+    /// Spine §1.8 (NORMATIVE): the hash excludes RELATIONS — and `comments` is the one D37 made a live
+    /// MUTABLE relation. A comment add/edit/redact MUST NEVER move `content_hash`, or FR-26 `bd`-import
+    /// idempotency breaks (the hash is the dedup key). The sibling case above covers excluded SCALARS;
+    /// this covers the relation.
+    #[test]
+    fn content_hash_ignores_comments_relation() {
+        use crate::relations::Comment;
+
+        let base = content_hash(&make_test_issue());
+
+        let comment = |body: &str| Comment {
+            id: 1,
+            issue_id: "ub-test123".to_string(),
+            author: "tester".to_string(),
+            body: body.to_string(),
+            created_at: Utc.with_ymd_and_hms(2026, 1, 2, 0, 0, 0).unwrap(),
+            updated_at: None,
+            redacted_at: None,
+        };
+
+        // An ADDED comment does not move the hash.
+        let mut added = make_test_issue();
+        added.comments = vec![comment("a first comment")];
+        assert_eq!(base, content_hash(&added), "an added comment is excluded");
+
+        // An EDITED comment body (D-D) does not move the hash.
+        let mut edited = make_test_issue();
+        edited.comments = vec![comment("a DIFFERENT body")];
+        assert_eq!(base, content_hash(&edited), "a comment body is excluded");
+
+        // The D-D `updated_at` provenance bump does not move the hash.
+        let mut bumped = make_test_issue();
+        bumped.comments = vec![Comment {
+            updated_at: Some(Utc.with_ymd_and_hms(2027, 6, 6, 6, 6, 6).unwrap()),
+            ..comment("a first comment")
+        }];
+        assert_eq!(
+            base,
+            content_hash(&bumped),
+            "a comment updated_at is excluded"
+        );
+
+        // The D-E soft-redact (redacted_at set + body masked) does not move the hash.
+        let mut redacted = make_test_issue();
+        redacted.comments = vec![Comment {
+            body: String::new(),
+            redacted_at: Some(Utc.with_ymd_and_hms(2028, 3, 3, 3, 3, 3).unwrap()),
+            ..comment("a first comment")
+        }];
+        assert_eq!(
+            base,
+            content_hash(&redacted),
+            "a comment redacted_at is excluded"
+        );
+
+        // Multiple comments do not move the hash either (not a count/order artifact).
+        let mut many = make_test_issue();
+        many.comments = vec![comment("one"), comment("two"), comment("three")];
+        assert_eq!(base, content_hash(&many), "the comment SET is excluded");
+    }
+
     #[test]
     fn from_parts_equals_compute() {
         let issue = make_test_issue();
