@@ -113,11 +113,13 @@ pub(crate) fn discover_workspace(
         });
     }
 
-    // 3. CLAUDE_PROJECT_DIR (ambient project ROOT, D39): probe its `.unblock`/`_unblock` child exactly
-    //    like a `--dir` root. On a miss (no such child) fall THROUGH to the guarded walk-up — it is a
-    //    host hint, not a per-invocation user choice, so a miss must not hard-error.
+    // 3. CLAUDE_PROJECT_DIR (ambient project ROOT, D39): resolve it exactly like an explicit `--dir` —
+    //    it is the `unblock_dir` itself when it points straight AT a `.unblock`/`_unblock` dir, else
+    //    its `.unblock`/`_unblock` child (a workspace root), self-recognizing SYMMETRICALLY with
+    //    `resolve_explicit_dir`. On a miss (neither shape) fall THROUGH to the guarded walk-up — it is
+    //    a host hint, not a per-invocation user choice, so a miss must not hard-error.
     if let Some(root) = env_path(env, "CLAUDE_PROJECT_DIR")
-        && let Some(dir) = probe_workspace_root(&root)
+        && let Some(dir) = resolve_root_or_self(&root)
     {
         return Ok(DiscoveredWorkspace {
             unblock_dir: canonicalize_existing(&dir),
@@ -183,17 +185,7 @@ fn unblock_dir_from_db(db: &Path) -> Option<PathBuf> {
 /// If the path itself is named `.unblock`/`_unblock`, it is the workspace dir. Otherwise the path is
 /// treated as a workspace **root** and its `.unblock`/`_unblock` child is used. No walk-up (MF-2).
 fn resolve_explicit_dir(dir: &Path) -> Result<PathBuf, ConfigError> {
-    // The explicit path is itself the unblock dir.
-    if dir
-        .file_name()
-        .and_then(|n| n.to_str())
-        .is_some_and(is_unblock_dir_name)
-        && dir.is_dir()
-    {
-        return Ok(canonicalize_existing(dir));
-    }
-    // Or the explicit path is a workspace root holding `.unblock`/`_unblock`.
-    if let Some(candidate) = probe_workspace_root(dir) {
+    if let Some(candidate) = resolve_root_or_self(dir) {
         return Ok(canonicalize_existing(&candidate));
     }
     Err(ConfigError::InvalidValue {
@@ -203,10 +195,32 @@ fn resolve_explicit_dir(dir: &Path) -> Result<PathBuf, ConfigError> {
     })
 }
 
+/// Resolve a path aimed at a workspace to its `unblock_dir`, self-recognizing BOTH shapes (no
+/// walk-up): the path is the `unblock_dir` ITSELF when it is named `.unblock`/`_unblock` and is a
+/// directory, else it is a workspace **root** and its `.unblock`/`_unblock` child is used. Returns
+/// the (non-canonical — the caller canonicalizes) `unblock_dir` on a hit, else `None`; never errors.
+///
+/// Shared by explicit-`--dir` resolution ([`resolve_explicit_dir`]) and the D39 `CLAUDE_PROJECT_DIR`
+/// ROOT-probe so the two tiers self-recognize SYMMETRICALLY — a value pointing straight AT the
+/// `.unblock`/`_unblock` dir is honored by either, and the two cannot drift apart on that self-check.
+fn resolve_root_or_self(dir: &Path) -> Option<PathBuf> {
+    // The path is ITSELF the unblock dir.
+    if dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(is_unblock_dir_name)
+        && dir.is_dir()
+    {
+        return Some(dir.to_path_buf());
+    }
+    // Or the path is a workspace ROOT holding `.unblock`/`_unblock`.
+    probe_workspace_root(dir)
+}
+
 /// Probe `root` as a workspace ROOT: return its `.unblock`/`_unblock` child dir on a hit, else `None`.
 ///
-/// Shared by explicit-`--dir` root handling and the D39 `CLAUDE_PROJECT_DIR` tier. Returns the child
-/// path (non-canonical — the caller canonicalizes); never errors (a miss is a `None`, not a failure).
+/// The workspace-ROOT half of [`resolve_root_or_self`]. Returns the child path (non-canonical — the
+/// caller canonicalizes); never errors (a miss is a `None`, not a failure).
 fn probe_workspace_root(root: &Path) -> Option<PathBuf> {
     for name in [".unblock", "_unblock"] {
         let candidate = root.join(name);
@@ -550,6 +564,27 @@ mod tests {
     }
 
     #[test]
+    fn claude_project_dir_pointing_at_unblock_dir_itself() {
+        // Symmetry with `explicit_dir_pointing_at_unblock_dir_itself`: `CLAUDE_PROJECT_DIR` aimed
+        // STRAIGHT AT a `.unblock`/`_unblock` dir (not its parent root) self-recognizes and binds it
+        // directly, still as `ProjectDir`, no walk-up — the ROOT-probe tier resolves BOTH shapes just
+        // as `--dir` does. Before the FIX-3 self-check this MISSED (probe-child-only) and fell
+        // through to the walk-up.
+        let root = tempfile::tempdir().expect("tempdir");
+        let unblock = root.path().join(".unblock");
+        fs::create_dir_all(&unblock).expect("mkdir .unblock");
+
+        let env = MapEnv::new(&[("CLAUDE_PROJECT_DIR", unblock.to_str().expect("utf8"))]);
+        let discovered =
+            discover_workspace(None, &CliOverrides::default(), &env).expect("self-recognized");
+        assert_eq!(
+            discovered.unblock_dir,
+            unblock.canonicalize().expect("canon")
+        );
+        assert_eq!(discovered.source, WorkspaceSource::ProjectDir);
+    }
+
+    #[test]
     fn claude_project_dir_miss_falls_through_to_walk_up() {
         // CLAUDE_PROJECT_DIR points at a root with NO `.unblock` child; the `start` cwd DOES have one
         // → discovery FALLS THROUGH to the walk-up (source `WalkUp`), not a hard error.
@@ -616,6 +651,30 @@ mod tests {
         let cli = CliOverrides::new().with_db(db_ws.join(".unblock").join("unblock.db"));
         let env = MapEnv::new(&[("CLAUDE_PROJECT_DIR", project.to_str().expect("utf8"))]);
         let discovered = discover_workspace(None, &cli, &env).expect("db wins");
+        assert_eq!(
+            discovered.unblock_dir,
+            db_ws.join(".unblock").canonicalize().expect("canon")
+        );
+        assert_eq!(discovered.source, WorkspaceSource::ExplicitDb);
+    }
+
+    #[test]
+    fn db_override_wins_over_explicit_dir() {
+        // The top of the precedence chain, pinned directly: BOTH `--db` (under one workspace) and
+        // `--dir` (a DIFFERENT workspace) are set. `--db` derivation wins, so the bound dir is the
+        // db-derived one and the source is `ExplicitDb` — previously only covered transitively (via
+        // `db_override_wins_over_project_dir` + `explicit_dir_wins_over_project_dir`), never on the
+        // db>dir adjacency itself.
+        let root = tempfile::tempdir().expect("tempdir");
+        let db_ws = root.path().join("db_ws");
+        fs::create_dir_all(db_ws.join(".unblock")).expect("mkdir db .unblock");
+        let dir_ws = root.path().join("dir_ws");
+        fs::create_dir_all(dir_ws.join(".unblock")).expect("mkdir dir .unblock");
+
+        let cli = CliOverrides::new()
+            .with_db(db_ws.join(".unblock").join("unblock.db"))
+            .with_dir(&dir_ws);
+        let discovered = discover_workspace(None, &cli, &empty_env()).expect("db wins over dir");
         assert_eq!(
             discovered.unblock_dir,
             db_ws.join(".unblock").canonicalize().expect("canon")
