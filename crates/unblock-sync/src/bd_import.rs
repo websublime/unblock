@@ -125,7 +125,17 @@ const KNOWN_DEP_KEYS: &[&str] = &[
 /// Test-only (see [`KNOWN_DEP_KEYS`]): `dropped_fields` is top-level keys only, so the comment key
 /// set only backs the SF-6 drift guard.
 #[cfg(test)]
-const KNOWN_COMMENT_KEYS: &[&str] = &["id", "issue_id", "author", "text", "created_at"];
+const KNOWN_COMMENT_KEYS: &[&str] = &[
+    "id",
+    "issue_id",
+    "author",
+    "text",
+    "created_at",
+    // D37 — both are Option + skip-when-None, so a bd-shaped 5-field comment omits them entirely
+    // and they deserialize to None; they are KNOWN (never `dropped_fields`) when present.
+    "updated_at",
+    "redacted_at",
+];
 
 /// One-shot, best-effort `bd` → unblock import (FR-26/D16). **Skip-only** production semantics.
 ///
@@ -558,6 +568,8 @@ mod tests {
             author: "auth".into(),
             body: "b".into(),
             created_at: ts(1_700_000_000),
+            updated_at: Some(ts(1_700_000_100)),
+            redacted_at: Some(ts(1_700_000_200)),
         }];
         let value = serde_json::to_value(&issue).unwrap();
         let expected: HashSet<String> = KNOWN_ISSUE_KEYS.iter().map(|k| (*k).to_string()).collect();
@@ -586,12 +598,16 @@ mod tests {
 
     #[test]
     fn known_comment_keys_match_serde_field_set() {
+        // Both D37 fields must be Some: they are skip-when-None, so a None here would silently
+        // shrink the serde key set and let the KNOWN_COMMENT_KEYS drift-guard pass vacuously.
         let c = Comment {
             id: 1,
             issue_id: "bd-1".into(),
             author: "a".into(),
             body: "b".into(),
             created_at: ts(1_700_000_000),
+            updated_at: Some(ts(1_700_000_100)),
+            redacted_at: Some(ts(1_700_000_200)),
         };
         let value = serde_json::to_value(&c).unwrap();
         let expected: HashSet<String> = KNOWN_COMMENT_KEYS
