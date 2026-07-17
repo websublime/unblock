@@ -8,10 +8,38 @@ use chrono::{TimeZone, Utc};
 use serde_json::json;
 use unblock_error::{ErrorCode, StructuredError};
 use unblock_model::{
-    CountBucket, DepTree, DependencyType, DiagnosticFinding, DiagnosticKind, DiagnosticReport,
-    GraphEdge, Issue, OutputFormat, Status,
+    Comment, CountBucket, DepTree, DependencyType, DiagnosticFinding, DiagnosticKind,
+    DiagnosticReport, GraphEdge, Issue, OutputFormat, Status,
 };
 use unblock_render::{RenderOptions, renderer_for};
+
+/// The comment fixture (D37) — NON-VACUITY: it carries BOTH a LIVE comment (multi-line, so the
+/// `safe_md_multiline` path bites) AND a REDACTED one (`redacted_at.is_some()`, `text == ""`), so
+/// the plain/markdown Comments-section, the masked-marker and the `json`/`robot` serialization
+/// goldens all actually cover the surface instead of blessing a comment-empty no-op.
+fn comments() -> Vec<Comment> {
+    vec![
+        Comment {
+            id: 1,
+            issue_id: "ub-abc123".to_string(),
+            author: "alice".to_string(),
+            body: "a live comment\nwith a second line".to_string(),
+            created_at: Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 7).unwrap(),
+            updated_at: None,
+            redacted_at: None,
+        },
+        Comment {
+            id: 2,
+            issue_id: "ub-abc123".to_string(),
+            author: "bob".to_string(),
+            // The redact wire form: body masked to "" + redacted_at present (spine §1.7).
+            body: String::new(),
+            created_at: Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 8).unwrap(),
+            updated_at: None,
+            redacted_at: Some(Utc.with_ymd_and_hms(2026, 1, 3, 0, 0, 0).unwrap()),
+        },
+    ]
+}
 
 fn issue() -> Issue {
     Issue {
@@ -23,6 +51,7 @@ fn issue() -> Issue {
         created_at: Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 5).unwrap(),
         updated_at: Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 6).unwrap(),
         labels: vec!["docs".to_string()],
+        comments: comments(),
         ..Issue::default()
     }
 }

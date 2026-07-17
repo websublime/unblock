@@ -8,7 +8,9 @@
 //! description/notes use [`sanitize_text`] to keep line structure. Timestamps use [`fmt_ts`].
 
 use unblock_error::StructuredError;
-use unblock_model::{CountBucket, DepTree, DiagnosticReport, Issue, OutputFormat, Priority};
+use unblock_model::{
+    Comment, CountBucket, DepTree, DiagnosticReport, Issue, OutputFormat, Priority,
+};
 
 use crate::error::RenderError;
 use crate::format::fmt_ts;
@@ -85,7 +87,33 @@ impl PlainRenderer {
             // Multi-line content: preserve `\n`/`\t`, escape the rest.
             lines.push(format!("Description:\n{}", sanitize_text(description)));
         }
+        // Comments (FR-6/D37). A redacted comment renders the masked marker in place of its body.
+        if !issue.comments.is_empty() {
+            lines.push("Comments:".to_string());
+            for comment in &issue.comments {
+                lines.push(format!(
+                    "  [{}] {} at {}",
+                    comment.id,
+                    sanitize_inline(&comment.author),
+                    fmt_ts(comment.created_at),
+                ));
+                lines.push(format!("  {}", comment_body(comment)));
+            }
+        }
         lines.join("\n")
+    }
+}
+
+/// Render a comment body, or the masked marker when the comment is redacted (D37/D-E).
+///
+/// The redact marker form `[redacted <ts>]` is **NORMATIVE and shared verbatim with the markdown
+/// backend** (`backend/markdown.rs`) — it is renderer-generated CHROME, not user content, so it is
+/// emitted as-is and never routed through `sanitize_text` (the masked `text` is `""`: there is
+/// nothing to sanitize). The presence of `redacted_at` is the flag (spine §1.7).
+pub(crate) fn comment_body(comment: &Comment) -> String {
+    match comment.redacted_at {
+        Some(redacted_at) => format!("[redacted {}]", fmt_ts(redacted_at)),
+        None => sanitize_text(&comment.body).into_owned(),
     }
 }
 
@@ -267,7 +295,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use serde_json::json;
     use unblock_error::{ErrorCode, StructuredError};
-    use unblock_model::{Issue, Status};
+    use unblock_model::{Comment, Issue, Status};
 
     fn fixture() -> Issue {
         Issue {
@@ -322,5 +350,90 @@ mod tests {
         let out = r.structured_error(&err, &RenderOptions::default()).unwrap();
         assert!(out.stdout.contains("\\u{1b}"));
         assert!(!out.stdout.contains('\x1b'));
+    }
+
+    // --- comments (FR-6/D37) ---
+
+    fn comment(body: &str) -> Comment {
+        Comment {
+            id: 1,
+            issue_id: "ub-abc123".to_string(),
+            author: "alice".to_string(),
+            body: body.to_string(),
+            created_at: Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 7).unwrap(),
+            updated_at: None,
+            redacted_at: None,
+        }
+    }
+
+    fn issue_with(comments: Vec<Comment>) -> Issue {
+        Issue {
+            id: "ub-abc123".to_string(),
+            title: "t".to_string(),
+            created_at: Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 5).unwrap(),
+            updated_at: Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 6).unwrap(),
+            comments,
+            ..Issue::default()
+        }
+    }
+
+    /// NFR-18: a comment body carrying ESC/BEL is ESCAPED, never emitted raw into a terminal.
+    #[test]
+    fn comment_body_esc_is_escaped() {
+        let issue = issue_with(vec![comment("evil\x1b[2Jbody\x07")]);
+        let r = PlainRenderer::new(RenderOptions::default());
+        let out = r.issue(&issue, &RenderOptions::default()).unwrap();
+        assert!(
+            out.stdout.contains("\\u{1b}"),
+            "ESC must be escaped: {}",
+            out.stdout
+        );
+        assert!(!out.stdout.contains('\x1b'), "no raw ESC may reach stdout");
+        assert!(!out.stdout.contains('\x07'), "no raw BEL may reach stdout");
+    }
+
+    /// NFR-18: the comment AUTHOR is sanitized too (it is user-controlled on the import path).
+    #[test]
+    fn comment_author_esc_is_escaped() {
+        let mut c = comment("body");
+        c.author = "ali\x1b[2Jce".to_string();
+        let issue = issue_with(vec![c]);
+        let r = PlainRenderer::new(RenderOptions::default());
+        let out = r.issue(&issue, &RenderOptions::default()).unwrap();
+        assert!(!out.stdout.contains('\x1b'));
+    }
+
+    /// A multi-line comment body keeps its line structure (`sanitize_text`, not `sanitize_inline`).
+    #[test]
+    fn comment_body_is_multiline_sanitized() {
+        let issue = issue_with(vec![comment("line one\nline two")]);
+        let r = PlainRenderer::new(RenderOptions::default());
+        let out = r.issue(&issue, &RenderOptions::default()).unwrap();
+        assert!(out.stdout.contains("line one\nline two"), "{}", out.stdout);
+    }
+
+    /// D37/D-E: a redacted comment renders the masked marker, never its (masked) body.
+    #[test]
+    fn redacted_comment_renders_the_masked_marker() {
+        let mut c = comment("");
+        c.redacted_at = Some(Utc.with_ymd_and_hms(2026, 1, 3, 0, 0, 0).unwrap());
+        let issue = issue_with(vec![c]);
+        let r = PlainRenderer::new(RenderOptions::default());
+        let out = r.issue(&issue, &RenderOptions::default()).unwrap();
+        assert!(
+            out.stdout.contains("[redacted 2026-01-03T00:00:00Z]"),
+            "{}",
+            out.stdout
+        );
+    }
+
+    /// An issue with no comments emits NO Comments section (no empty header).
+    #[test]
+    fn no_comments_means_no_section() {
+        let r = PlainRenderer::new(RenderOptions::default());
+        let out = r
+            .issue(&issue_with(Vec::new()), &RenderOptions::default())
+            .unwrap();
+        assert!(!out.stdout.contains("Comments:"));
     }
 }
