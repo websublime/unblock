@@ -11,7 +11,10 @@
 //! - `list` → `Session::list_comments(issue_id)`, CD-2 object-wrapped as `{"comments":[…]}`.
 //! - `update` → `Session::update_comment(comment_id, body)`; provenance-preserving (D-D).
 //! - `delete` → `Session::delete_comment(comment_id)`; a SOFT-REDACT (D-E), never a hard delete:
-//!   the returned `Comment` carries `redacted_at` + `"text": ""`.
+//!   the returned `Comment` carries `redacted_at` + `"text": ""`. The `CommentRedacted` audit event
+//!   RETAINS the original body verbatim (spine §1.x FORK-redact-wire) — a mask, not cryptographic
+//!   erasure. The `delete` action description DISCLOSES this on the wire: an agent redacting a pasted
+//!   secret must still rotate it.
 //!
 //! Body validation (non-empty when trimmed / NUL-rejected) runs in the ENGINE before the mutation
 //! (→ `ValidationFailed`), so it stays single-homed in the model (spine §1.9).
@@ -67,7 +70,8 @@ pub(crate) enum CommentToolInput {
         #[serde(flatten)]
         attribution: Attribution,
     },
-    /// Delete a comment — a SOFT-REDACT: the row is kept, the body masked, `redacted_at` set.
+    /// Delete a comment — a SOFT-REDACT: the row is kept, the body masked, `redacted_at` set. The
+    /// original body is retained in the audit trail — a mask, not erasure.
     Delete {
         /// The comment id.
         comment_id: i64,

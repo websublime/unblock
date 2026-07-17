@@ -4228,7 +4228,7 @@ expression: schema_bundle()
           "type": "object"
         },
         {
-          "description": "Delete a comment — a SOFT-REDACT: the row is kept, the body masked, `redacted_at` set.",
+          "description": "Delete a comment — a SOFT-REDACT: the row is kept, the body masked, `redacted_at` set. The\noriginal body is retained in the audit trail — a mask, not erasure.",
           "properties": {
             "action": {
               "const": "delete",
