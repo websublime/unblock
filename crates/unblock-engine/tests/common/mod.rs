@@ -216,7 +216,7 @@ pub mod parked {
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::sync::Notify;
     use unblock_model::{
-        CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue,
+        Comment, CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue,
     };
     use unblock_storage::{DeletePlan, IssuePatch, ListFilters, StorageError};
 
@@ -424,7 +424,11 @@ pub mod parked {
         ) -> Result<Comment, StorageError> {
             self.inner.update_comment(comment_id, body, actor).await
         }
-        async fn delete_comment(&self, comment_id: i64, actor: &str) -> Result<Comment, StorageError> {
+        async fn delete_comment(
+            &self,
+            comment_id: i64,
+            actor: &str,
+        ) -> Result<Comment, StorageError> {
             self.inner.delete_comment(comment_id, actor).await
         }
         async fn next_child_number(&self, parent_id: &str) -> Result<u32, StorageError> {
@@ -478,7 +482,8 @@ pub mod collide {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use unblock_model::{
-        CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue, parse_id,
+        Comment, CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue,
+        parse_id,
     };
     use unblock_storage::{DeletePlan, IssuePatch, ListFilters, StorageError};
 
@@ -690,7 +695,11 @@ pub mod collide {
         ) -> Result<Comment, StorageError> {
             self.inner.update_comment(comment_id, body, actor).await
         }
-        async fn delete_comment(&self, comment_id: i64, actor: &str) -> Result<Comment, StorageError> {
+        async fn delete_comment(
+            &self,
+            comment_id: i64,
+            actor: &str,
+        ) -> Result<Comment, StorageError> {
             self.inner.delete_comment(comment_id, actor).await
         }
         async fn next_child_number(&self, parent_id: &str) -> Result<u32, StorageError> {
@@ -740,7 +749,7 @@ pub mod race {
     use chrono::{DateTime, Utc};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use unblock_model::{
-        CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue,
+        Comment, CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue,
     };
     use unblock_storage::{DeletePlan, IssuePatch, ListFilters, StorageError};
 
@@ -926,7 +935,11 @@ pub mod race {
         ) -> Result<Comment, StorageError> {
             self.inner.update_comment(comment_id, body, actor).await
         }
-        async fn delete_comment(&self, comment_id: i64, actor: &str) -> Result<Comment, StorageError> {
+        async fn delete_comment(
+            &self,
+            comment_id: i64,
+            actor: &str,
+        ) -> Result<Comment, StorageError> {
             self.inner.delete_comment(comment_id, actor).await
         }
         async fn next_child_number(&self, parent_id: &str) -> Result<u32, StorageError> {

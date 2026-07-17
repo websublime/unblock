@@ -170,7 +170,7 @@ pub mod recording {
     use async_trait::async_trait;
     use chrono::{DateTime, Utc};
     use unblock_model::{
-        CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue,
+        Comment, CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue,
     };
     use unblock_storage::{DeletePlan, IssuePatch, ListFilters, Storage, StorageError};
 
@@ -432,7 +432,7 @@ pub mod gated {
     use chrono::{DateTime, Utc};
     use tokio::sync::{Barrier, Semaphore};
     use unblock_model::{
-        CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue,
+        Comment, CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue,
     };
     use unblock_storage::{DeletePlan, IssuePatch, ListFilters, Storage, StorageError};
 
@@ -707,7 +707,7 @@ pub mod failing {
     use async_trait::async_trait;
     use chrono::{DateTime, Utc};
     use unblock_model::{
-        CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue,
+        Comment, CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue,
     };
     use unblock_storage::{DeletePlan, IssuePatch, ListFilters, Storage, StorageError};
 

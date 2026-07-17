@@ -12,7 +12,8 @@
 
 use chrono::{DateTime, Utc};
 use unblock_model::{
-    Dependency, DependencyType, Issue, IssueType, IssueValidator, Priority, Status,
+    Comment, CommentValidator, Dependency, DependencyType, Issue, IssueType, IssueValidator,
+    Priority, Status,
 };
 use unblock_policy::{BlockingEdge, ReadyContext, ReadyVerdict, is_ready};
 use unblock_storage::{DeletePlan, IssuePatch};
@@ -554,6 +555,61 @@ impl Session {
             .remove_dependency(issue_id, on, ty, &self.actor)
             .await?;
         Ok(())
+    }
+
+    // --- comments (FR-6, D37) ---
+    //
+    // Each mutation validates FIRST (the model owns the rule set — spine §1.9), then acquires the
+    // write permit (D14) + the D31 `.write.lock` for its whole transaction via `acquire()`.
+
+    /// Add a comment to an issue (FR-6/D37). Under the write permit.
+    ///
+    /// The author is `self.actor` (FORK-M1b — there is no per-comment author at the MCP surface).
+    /// Validation runs BEFORE the mutation via `CommentValidator::validate_comment`, the add-path
+    /// entry point: it carries `issue_id`, the resolved actor and the body, and returns ONE
+    /// multi-fault aggregate (spine §1.9).
+    ///
+    /// # Errors
+    /// - [`EngineError::Model`] if validation fails (aggregate `ValidationFailed`).
+    /// - [`EngineError::ShutdownInProgress`] / transparent storage source (incl. `IssueNotFound`
+    ///   when the target issue does not exist or is tombstoned — the FORK-3 guard).
+    pub async fn add_comment(&self, issue_id: &str, body: &str) -> Result<Comment> {
+        CommentValidator::validate_comment(issue_id, &self.actor, body)?;
+        let _guard = self.acquire().await?;
+        Ok(self
+            .storage
+            .add_comment(issue_id, &self.actor, body, &self.actor)
+            .await?)
+    }
+
+    /// Update a comment's body, preserving provenance (FR-6/D37, D-D). Under the write permit.
+    ///
+    /// Validation uses `CommentValidator::validate_body` — the update-path entry point: this path
+    /// carries ONLY a comment id and a body (there is no `issue_id` on it, and no
+    /// `Storage::get_comment` to fetch one — spine §1.9/§4.1, FORK 2).
+    ///
+    /// # Errors
+    /// - [`EngineError::Model`] if the body fails validation.
+    /// - [`EngineError::ShutdownInProgress`] / transparent storage source (incl. `CommentNotFound`).
+    pub async fn update_comment(&self, comment_id: i64, body: &str) -> Result<Comment> {
+        CommentValidator::validate_body(body)?;
+        let _guard = self.acquire().await?;
+        Ok(self
+            .storage
+            .update_comment(comment_id, body, &self.actor)
+            .await?)
+    }
+
+    /// Soft-redact a comment (FR-6/D37, D-E). Under the write permit.
+    ///
+    /// Validates nothing: this path carries no body (spine §1.9). Idempotent on an already-redacted
+    /// comment.
+    ///
+    /// # Errors
+    /// - [`EngineError::ShutdownInProgress`] / transparent storage source (incl. `CommentNotFound`).
+    pub async fn delete_comment(&self, comment_id: i64) -> Result<Comment> {
+        let _guard = self.acquire().await?;
+        Ok(self.storage.delete_comment(comment_id, &self.actor).await?)
     }
 
     /// Close an issue and report the issues it newly unblocked (FR-11).

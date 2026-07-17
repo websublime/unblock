@@ -1316,3 +1316,147 @@ fn assert_edge_round_trips(
         got.id
     );
 }
+
+// --------------------------------------------------------------------------------------------------
+// Comments (FR-6, D37) — engine-side validation + the delegation contract (spine §4.1)
+// --------------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn add_comment_uses_the_session_actor_as_author() {
+    let session = session().await;
+    session
+        .create(&issue("ub-a", Priority::MEDIUM, 1000))
+        .await
+        .expect("create");
+
+    let comment = session
+        .add_comment("ub-a", "a thought")
+        .await
+        .expect("add_comment");
+    // FORK-M1b: the author is the session actor — there is no per-comment author at this surface.
+    assert_eq!(comment.author, session.actor());
+    assert_eq!(comment.issue_id, "ub-a");
+    assert_eq!(comment.body, "a thought");
+    // MUST-1: add leaves updated_at NULL.
+    assert_eq!(comment.updated_at, None);
+    assert_eq!(comment.redacted_at, None);
+}
+
+#[tokio::test]
+async fn add_comment_validation_runs_in_engine_as_model_aggregate() {
+    let session = session().await;
+    session
+        .create(&issue("ub-a", Priority::MEDIUM, 1000))
+        .await
+        .expect("create");
+
+    // An empty body must surface as the ModelError aggregate (VALIDATION_FAILED, exit 4), and it
+    // must be rejected BEFORE the storage mutation.
+    let err = session
+        .add_comment("ub-a", "   ")
+        .await
+        .expect_err("empty body");
+    assert!(
+        matches!(err, EngineError::Model { .. }),
+        "must be the engine ModelError source, got {err:?}"
+    );
+    assert_eq!(err.code(), ErrorCode::ValidationFailed);
+    assert_eq!(err.code().exit_code(), 4);
+    assert!(
+        session
+            .list_comments("ub-a")
+            .await
+            .expect("list")
+            .is_empty(),
+        "a rejected body must never reach storage"
+    );
+
+    // A NUL body is rejected the same way.
+    assert_eq!(
+        session
+            .add_comment("ub-a", "a\0b")
+            .await
+            .expect_err("nul body")
+            .code(),
+        ErrorCode::ValidationFailed
+    );
+}
+
+#[tokio::test]
+async fn add_comment_on_a_missing_issue_is_issue_not_found() {
+    let session = session().await;
+    // FORK-3: the existence guard lives in storage and surfaces transparently; FORK-E1 keeps the
+    // code at the EXISTING IssueNotFound (the taxonomy does not grow).
+    let err = session
+        .add_comment("ub-nope", "hi")
+        .await
+        .expect_err("missing issue");
+    assert_eq!(err.code(), ErrorCode::IssueNotFound);
+}
+
+#[tokio::test]
+async fn update_comment_validates_the_body_only_and_preserves_provenance() {
+    let session = session().await;
+    session
+        .create(&issue("ub-a", Priority::MEDIUM, 1000))
+        .await
+        .expect("create");
+    let added = session.add_comment("ub-a", "original").await.expect("add");
+
+    // FORK 2: the update path carries no issue_id — validate_body is its entry point.
+    let err = session
+        .update_comment(added.id, "")
+        .await
+        .expect_err("empty body");
+    assert_eq!(err.code(), ErrorCode::ValidationFailed);
+
+    let edited = session
+        .update_comment(added.id, "revised")
+        .await
+        .expect("update_comment");
+    assert_eq!(edited.body, "revised");
+    assert!(
+        edited.updated_at.is_some(),
+        "the update sets updated_at — the bump IS the provenance (D-D)"
+    );
+}
+
+#[tokio::test]
+async fn update_comment_on_a_missing_row_maps_to_issue_not_found_at_the_boundary() {
+    let session = session().await;
+    // StorageError::CommentNotFound REUSES ErrorCode::IssueNotFound (FORK-E1 — the taxonomy stays
+    // at 36; no new code, no exit-table movement).
+    let err = session
+        .update_comment(999_999, "x")
+        .await
+        .expect_err("missing comment");
+    assert_eq!(err.code(), ErrorCode::IssueNotFound);
+    assert_eq!(err.code().exit_code(), ErrorCode::IssueNotFound.exit_code());
+}
+
+#[tokio::test]
+async fn delete_comment_soft_redacts_and_is_idempotent() {
+    let session = session().await;
+    session
+        .create(&issue("ub-a", Priority::MEDIUM, 1000))
+        .await
+        .expect("create");
+    let added = session.add_comment("ub-a", "sensitive").await.expect("add");
+
+    let redacted = session
+        .delete_comment(added.id)
+        .await
+        .expect("delete_comment");
+    assert_eq!(redacted.body, "", "the body is masked");
+    assert!(redacted.redacted_at.is_some());
+    // The row is KEPT (soft-redact, D-E), never hard-deleted.
+    let listed = session.list_comments("ub-a").await.expect("list");
+    assert_eq!(listed.len(), 1);
+
+    // Idempotent on an already-redacted comment (it validates nothing — no body on this path).
+    let again = session
+        .delete_comment(added.id)
+        .await
+        .expect("idempotent redact");
+    assert_eq!(again.redacted_at, redacted.redacted_at);
+}
