@@ -20,7 +20,7 @@ Descriptors (from `unblock://capabilities`):
 | Tool | Description |
 |---|---|
 | `issue` | Create, show, update, close, reopen, delete, or restore issues. |
-| `claim` | Atomically claim an issue for an assignee. |
+| `claim` | Atomically claim an issue for an assignee; the loser of a race is reported. |
 | `defer` | Defer an issue until a future timestamp, or undefer it. |
 | `query` | Query issues: list, ready, blocked, search, count, or stale. |
 | `dep` | Manage and query dependencies: add, remove, list, tree, cycles, or graph. |

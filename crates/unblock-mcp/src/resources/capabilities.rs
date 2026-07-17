@@ -84,7 +84,9 @@ fn tool_descriptors() -> Vec<ToolDescriptor> {
             "issue",
             "Create, show, update, close, reopen, delete, or restore issues.",
         ),
-        ("claim", "Atomically claim an issue for an assignee."),
+        // The shared constant — these bytes are contract and ship here AND in the
+        // `#[tool(description)]` attribute (the pair-compare in `contract_suite` keeps them equal).
+        ("claim", crate::tools::claim::CLAIM_TOOL_DESCRIPTION),
         (
             "defer",
             "Defer an issue until a future timestamp, or undefer it.",
