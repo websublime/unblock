@@ -215,7 +215,7 @@ pub struct Comment {                       // v1 surface (D37); FLAT (no threadi
     #[serde(rename = "text")] pub body: String,   // JSON key "text" (bd parity); masked to "" on redact
     pub created_at: DateTime<Utc>,
     // D37 — provenance-preserving edit (D-D): None = never edited; Some = last-edit instant. `add` leaves this
-    //       NULL (create path is 4-col); ONLY `update` sets it = now.
+    //       NULL (`add`'s own INSERT is create-time-only — see §3.2.1 MUST-1 SCOPE); ONLY `update` sets it = now.
     #[serde(default, skip_serializing_if = "Option::is_none")] pub updated_at: Option<DateTime<Utc>>,
     // D37 — soft-redact (D-E): None = live; Some = redacted. The PRESENCE is the "is redacted" flag (mirrors the
     //       tombstone `deleted_at`); on redact the row is KEPT + `body` masked to "". Wire redact form =
@@ -1598,9 +1598,9 @@ impl Session {
 
 ## 5. MCP schemas — `unblock-mcp` (L7)
 
-**rmcp 1.7** (`server`, `transport-io`) stdio server (`unblock mcp`), thin adapter over `Session`. **7 consolidated tools shipped; → 8 at T3.9** when the D37 `comment` tool lands (the ≤ 8 RK-3 ceiling — `comment` is the 8th, §5.1 row 8 / §6.6; the count literals across the corpus flip 7→8 in the T3.9 CODE PR, atomically with the router that makes 8 true). Resources, prompts. Every tool input/output derives `JsonSchema` + `Serialize`/`Deserialize` — inputs AND outputs ride the schema bundle as per-tool `{input, output}` pairs (D25, §5.3/§5.4); args are schemars-validated with size/rate limits (NFR-18). Discovery (`capabilities`/`schema`) carries `contract_version` (FR-12), and BOTH discovery documents are covered by the single pinned `CONTRACT_HASH` drift gate (D22 clause 8 widened by D25 — §5.4).
+**rmcp 1.7** (`server`, `transport-io`) stdio server (`unblock mcp`), thin adapter over `Session`. **8 consolidated tools** (the ≤ 8 RK-3 ceiling — the D37 `comment` tool landed at T3.9 as the 8th, §5.1 row 8 / §6.6, so the budget is now **FULL**). Resources, prompts. Every tool input/output derives `JsonSchema` + `Serialize`/`Deserialize` — inputs AND outputs ride the schema bundle as per-tool `{input, output}` pairs (D25, §5.3/§5.4); args are schemars-validated with size/rate limits (NFR-18). Discovery (`capabilities`/`schema`) carries `contract_version` (FR-12), and BOTH discovery documents are covered by the single pinned `CONTRACT_HASH` drift gate (D22 clause 8 widened by D25 — §5.4).
 
-### 5.1 Tool taxonomy (8 tools — `comment` is the 8th, landing with the T3.9/D37 code)
+### 5.1 Tool taxonomy (8 tools — `comment` is the 8th, landed with the T3.9/D37 code)
 
 | # | Tool | Discriminator | Maps to |
 |---|---|---|---|
@@ -1615,9 +1615,10 @@ impl Session {
 
 > **D37 — the 8th tool (`comment`).** A DEDICATED tool (D-B), the deliberate §6.6 exception (RK-3 budget now FULL at
 > 8 ≤ 8). It SUPERSEDES the earlier "`issue comment` sub-action" sketch (the `unblock-mcp.md` plan). Landing at
-> **T3.9** flips the live count 7→8 (and re-blesses the `list_tools`/`capabilities`/`schema_bundle` goldens + the
-> `agents_digest` ripple) and bumps `CONTRACT_VERSION` `unblock.mcp.v1.4`→`v1.5` with `CONTRACT_HASH` re-pinned —
-> the version-string flips + golden re-bless are T3.9 code deliverables, NOT this docs-only spec cascade.
+> **T3.9** flipped the live count 7→8 (re-blessing the `capabilities`/`schema_bundle` goldens + the
+> `agents_digest` ripple; `list_tools` is NOT a golden — it is the LIVE asserts in `tests/contract_suite.rs`, an
+> EDIT) and bumped `CONTRACT_VERSION` `unblock.mcp.v1.4`→`v1.5` with `CONTRACT_HASH` re-pinned — the
+> version-string flips + golden re-bless were T3.9 code deliverables, NOT the docs-only spec cascade.
 
 ### 5.2 Input shapes (schemars sketches)
 
@@ -2045,8 +2046,9 @@ into v1 (§1.6/§1.7/§3.2/§4.1/§5.1/§5.2/§5.3). The version-coupled set mov
 to `schema_bundle()` and an 8th tool descriptor to `capabilities()`; (2) the `$defs/Comment` embedded inside the
 EXISTING `issue`/`query` OUTPUT schemas gains 2 properties (`updated_at`/`redacted_at`) — so EXISTING schema bytes
 move too (not merely a new pair). Both re-pin `CONTRACT_HASH` and bump `CONTRACT_VERSION`
-`unblock.mcp.v1.4` → `unblock.mcp.v1.5` (unblock-mcp `options.rs`), with the `capabilities`/`schema_bundle`/
-`list_tools` goldens + the D33 `agents_digest()` ripple re-blessed and the `contract_suite` re-run. `content_hash`
+`unblock.mcp.v1.4` → `unblock.mcp.v1.5` (unblock-mcp `options.rs`), with the `capabilities`/`schema_bundle`
+goldens + the D33 `agents_digest()` ripple re-blessed (`list_tools` is a LIVE assert, not a golden) and the
+`contract_suite` re-run. `content_hash`
 is UNAFFECTED (§1.8) → FR-26 idempotency intact. Spec-first: this D37 clause + the §1.6/§1.7/§3.2/§4.1/§5.x design
 land FIRST (the docs-only cascade); the code + the version-string flip + the goldens re-bless follow at **T3.9**.
 
