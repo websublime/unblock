@@ -6,7 +6,7 @@ use std::io::Write;
 use std::path::Path;
 
 use chrono::{TimeZone, Utc};
-use unblock_model::{Issue, ListFilters, Status};
+use unblock_model::{Comment, Issue, ListFilters, Status};
 use unblock_sync::{
     CollisionPolicy, ExportOptions, ImportOptions, export_jsonl, import_jsonl, serialize_issue_line,
 };
@@ -471,6 +471,39 @@ impl Storage for RaceInjector {
     ) -> Result<Vec<unblock_model::Dependency>, unblock_storage::StorageError> {
         self.inner.list_dependencies(id).await
     }
+    // --- comments (FR-6, D37) — DELEGATE: this double decorates a real `Storage`, exactly as it
+    // already does for `list_dependencies`/`next_child_number`. A stub here would silently
+    // decouple the decorated behaviour from the real one.
+    async fn add_comment(
+        &self,
+        issue_id: &str,
+        author: &str,
+        body: &str,
+        actor: &str,
+    ) -> Result<unblock_model::Comment, unblock_storage::StorageError> {
+        self.inner.add_comment(issue_id, author, body, actor).await
+    }
+    async fn list_comments(
+        &self,
+        issue_id: &str,
+    ) -> Result<Vec<unblock_model::Comment>, unblock_storage::StorageError> {
+        self.inner.list_comments(issue_id).await
+    }
+    async fn update_comment(
+        &self,
+        comment_id: i64,
+        body: &str,
+        actor: &str,
+    ) -> Result<unblock_model::Comment, unblock_storage::StorageError> {
+        self.inner.update_comment(comment_id, body, actor).await
+    }
+    async fn delete_comment(
+        &self,
+        comment_id: i64,
+        actor: &str,
+    ) -> Result<unblock_model::Comment, unblock_storage::StorageError> {
+        self.inner.delete_comment(comment_id, actor).await
+    }
     async fn next_child_number(&self, p: &str) -> Result<u32, unblock_storage::StorageError> {
         self.inner.next_child_number(p).await
     }
@@ -528,4 +561,99 @@ async fn malformed_line_rejected_zero_writes() {
         unblock_sync::SyncError::ValidationFailed { .. }
     ));
     assert_eq!(count_rows(&storage).await, 0);
+}
+
+/// D37 — export → import round-trips an issue's COMMENTS, including the REDACTED state.
+///
+/// **Timestamp precision is deliberate (T-7):** every value here is SECOND-truncated.
+/// `serialize_issue_line` renders at second precision, and FORK-M2 puts `redacted_at` INTO the
+/// `sync_equals` comparator — a sub-second `redacted_at` would break this identity, and the
+/// tempting "fix" (dropping `redacted_at` from the comparator) would be a SILENT FORK-M2 violation.
+/// Sub-second precision belongs ONLY in `export_insta.rs`, where it proves the canonicalizer bites.
+///
+/// This is also the leg that makes the storage seed INSERT observable end-to-end: the import
+/// re-seeds via `create_issues` → `insert_issue_in_tx`, so a 4-column INSERT would land the
+/// redacted comment back UN-REDACTED and fail the `redacted_at` assert below.
+#[tokio::test]
+async fn export_then_import_round_trips_comments_including_the_redacted_state() {
+    let (_tmp, dir) = unblock_dir();
+    let ts = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+    let edited_at = Utc.with_ymd_and_hms(2026, 2, 1, 0, 0, 0).unwrap();
+    let redacted_at = Utc.with_ymd_and_hms(2026, 3, 1, 0, 0, 0).unwrap();
+
+    // A LIVE comment (edited) AND a REDACTED one — without both, this test is vacuous.
+    let mut seeded = issue("ub-1");
+    seeded.comments = vec![
+        Comment {
+            id: 0, // storage-minted on insert
+            issue_id: "ub-1".to_string(),
+            author: "alice".to_string(),
+            body: "a live comment".to_string(),
+            created_at: ts,
+            updated_at: Some(edited_at),
+            redacted_at: None,
+        },
+        Comment {
+            id: 0,
+            issue_id: "ub-1".to_string(),
+            author: "bob".to_string(),
+            body: String::new(), // the redact wire form: masked body...
+            created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 1).unwrap(),
+            updated_at: None,
+            redacted_at: Some(redacted_at), // ...+ redacted_at present
+        },
+    ];
+
+    let source = fresh_storage().await;
+    source.create_issue(&seeded, "t").await.unwrap();
+
+    let target = dir.join("issues.jsonl");
+    let report = export_jsonl(&source, &target, &dir, &ExportOptions::default())
+        .await
+        .expect("export");
+    assert_eq!(report.written, 1);
+
+    // The exported line actually carries the comments (the export is non-vacuous).
+    let exported = std::fs::read_to_string(&target).unwrap();
+    assert!(
+        exported.contains("\"comments\""),
+        "export must emit comments: {exported}"
+    );
+    assert!(
+        exported.contains("\"redacted_at\""),
+        "export must emit the redacted state"
+    );
+
+    // Import into a fresh DB.
+    let dest = fresh_storage().await;
+    let ir = import_jsonl(&dest, &target, &dir, "t", &ImportOptions::default())
+        .await
+        .expect("import");
+    assert_eq!(ir.imported, 1);
+
+    let from_source = source.get_issue("ub-1").await.unwrap().unwrap();
+    let from_dest = dest.get_issue("ub-1").await.unwrap().unwrap();
+
+    assert_eq!(from_dest.comments.len(), 2, "both comments round-trip");
+    assert_eq!(
+        from_dest.comments[0].updated_at,
+        Some(edited_at),
+        "the edited state must survive the round-trip (the seed INSERT binds updated_at)"
+    );
+    assert_eq!(
+        from_dest.comments[1].redacted_at,
+        Some(redacted_at),
+        "the REDACTED state must survive the round-trip — a redacted comment must never import \
+         back un-redacted"
+    );
+    assert_eq!(
+        from_dest.comments[1].body, "",
+        "the masked body round-trips"
+    );
+
+    // The full semantic identity (FORK-M2 compares body + redacted_at).
+    assert!(
+        from_source.sync_equals(&from_dest),
+        "export -> import must be a sync_equals identity over comments"
+    );
 }

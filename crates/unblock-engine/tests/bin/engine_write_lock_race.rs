@@ -29,7 +29,8 @@ use chrono::{DateTime, Utc};
 use unblock_config::{ConfigPaths, ResolvedConfig, WorkspaceContext};
 use unblock_engine::{EngineError, NewIssue, Session, SessionConfig};
 use unblock_model::{
-    CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue, ListFilters,
+    Comment, CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue,
+    ListFilters,
 };
 use unblock_storage::{
     DEFAULT_WRITE_LOCK_TIMEOUT_MS, DeletePlan, IssuePatch, LibsqlStorage, Storage, StorageError,
@@ -167,6 +168,32 @@ impl Storage for WidenedStorage {
     }
     async fn list_dependencies(&self, id: &str) -> Result<Vec<Dependency>, StorageError> {
         self.inner.list_dependencies(id).await
+    }
+    // --- comments (FR-6, D37) — DELEGATE: this double decorates a real `Storage`, exactly as it
+    // already does for `list_dependencies`/`next_child_number`. A stub here would silently
+    // decouple the decorated behaviour from the real one.
+    async fn add_comment(
+        &self,
+        issue_id: &str,
+        author: &str,
+        body: &str,
+        actor: &str,
+    ) -> Result<Comment, StorageError> {
+        self.inner.add_comment(issue_id, author, body, actor).await
+    }
+    async fn list_comments(&self, issue_id: &str) -> Result<Vec<Comment>, StorageError> {
+        self.inner.list_comments(issue_id).await
+    }
+    async fn update_comment(
+        &self,
+        comment_id: i64,
+        body: &str,
+        actor: &str,
+    ) -> Result<Comment, StorageError> {
+        self.inner.update_comment(comment_id, body, actor).await
+    }
+    async fn delete_comment(&self, comment_id: i64, actor: &str) -> Result<Comment, StorageError> {
+        self.inner.delete_comment(comment_id, actor).await
     }
     async fn dependency_tree(&self, id: &str) -> Result<DepTree, StorageError> {
         self.inner.dependency_tree(id).await

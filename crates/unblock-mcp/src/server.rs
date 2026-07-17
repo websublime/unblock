@@ -78,7 +78,7 @@ impl UnblockServer {
         }
     }
 
-    /// Aggregate the 7 tool routers into one (composed via `+`, spine §5.1).
+    /// Aggregate the 8 tool routers into one (composed via `+`, spine §5.1).
     fn aggregate_tool_router() -> ToolRouter<Self> {
         Self::issue_router()
             + Self::claim_router()
@@ -87,6 +87,7 @@ impl UnblockServer {
             + Self::dep_router()
             + Self::sync_router()
             + Self::diagnostics_router()
+            + Self::comment_router()
     }
 
     /// The NFR-18 quota preflight, run inside each tool body BEFORE any `Session` call.
@@ -171,8 +172,16 @@ impl ServerHandler for UnblockServer {
             .enable_resources()
             .build();
         let instructions = self.instructions.clone().unwrap_or_else(|| {
+            // The counts are DERIVED from `capabilities()` — never embedded literals. This string
+            // is the LIVE, agent-visible handshake and is not golden-pinned, so a hand-maintained
+            // literal here would silently ship a stale lie the moment the surface changes
+            // (`instructions_counts_match_capabilities` below is the backstop).
+            let caps = crate::resources::capabilities();
             format!(
-                "unblock MCP server (contract {CONTRACT_VERSION}). 7 tools, 5 resources, 3 prompts."
+                "unblock MCP server (contract {CONTRACT_VERSION}). {} tools, {} resources, {} prompts.",
+                caps.tools.len(),
+                caps.resources.len(),
+                caps.prompts.len(),
             )
         });
         ServerInfo::new(capabilities)

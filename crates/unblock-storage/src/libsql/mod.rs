@@ -22,6 +22,7 @@
 //! `busy_timeout = 0` and hand-rolled a flock + sleep backoff to dodge *frankensqlite*'s hot-spin;
 //! libsql ships real `SQLite`, whose native timeout resolves that defect by construction.
 
+mod comments;
 mod crud;
 mod deps;
 mod diagnostics;
@@ -56,7 +57,8 @@ use libsql::{Builder, Connection, Database, TransactionBehavior};
 use tokio::sync::Mutex;
 
 use unblock_model::{
-    CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue, ListFilters,
+    Comment, CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue,
+    ListFilters,
 };
 
 use crate::error::{StorageError, is_busy_locked, map_libsql_err};
@@ -756,6 +758,38 @@ impl Storage for LibsqlStorage {
         deps::list_dependencies(self.read(), id).await
     }
 
+    // --- comments (FR-6, D37; spine §3.2.1) ---
+
+    async fn add_comment(
+        &self,
+        issue_id: &str,
+        author: &str,
+        body: &str,
+        actor: &str,
+    ) -> Result<Comment, StorageError> {
+        let conn = self.write().await;
+        comments::add_comment(&conn, self.hook(), issue_id, author, body, actor).await
+    }
+
+    async fn list_comments(&self, issue_id: &str) -> Result<Vec<Comment>, StorageError> {
+        comments::list_comments(self.read(), issue_id).await
+    }
+
+    async fn update_comment(
+        &self,
+        comment_id: i64,
+        body: &str,
+        actor: &str,
+    ) -> Result<Comment, StorageError> {
+        let conn = self.write().await;
+        comments::update_comment(&conn, self.hook(), comment_id, body, actor).await
+    }
+
+    async fn delete_comment(&self, comment_id: i64, actor: &str) -> Result<Comment, StorageError> {
+        let conn = self.write().await;
+        comments::delete_comment(&conn, self.hook(), comment_id, actor).await
+    }
+
     async fn next_child_number(&self, parent_id: &str) -> Result<u32, StorageError> {
         // A pure read of the child-counter high-water mark (+1) — the read-half the engine allocator
         // consumes under the write permit (D21). Uses the read connection (WAL reader snapshot).
@@ -1054,6 +1088,32 @@ mod tests {
         }
         assert_eq!(columns.len(), 38, "issues must have 38 columns");
         insta::assert_debug_snapshot!("issues_column_order", columns);
+    }
+
+    /// `PRAGMA table_info(comments)` column order is golden-pinned (the 7-column ordinal sequence).
+    ///
+    /// This is LOAD-BEARING, not ceremony: `mappers::comment_from_row` reads every column — and the
+    /// two D37 columns (`updated_at`/`redacted_at`) in particular — by POSITIONAL ordinal, so
+    /// nothing else in the crate guards a `comments` column-order change.
+    #[tokio::test]
+    async fn comments_column_order_golden() {
+        let storage = LibsqlStorage::open_in_memory().await.expect("open");
+        storage.migrate().await.expect("migrate");
+        let conn = storage.read();
+
+        let mut rows = conn
+            .query("PRAGMA table_info(comments)", ())
+            .await
+            .expect("table_info");
+        let mut columns = Vec::new();
+        while let Some(row) = rows.next().await.expect("row") {
+            // table_info columns: cid, name, type, notnull, dflt_value, pk.
+            if let libsql::Value::Text(name) = row.get_value(1).expect("name") {
+                columns.push(name);
+            }
+        }
+        assert_eq!(columns.len(), 7, "comments must have 7 columns");
+        insta::assert_debug_snapshot!("comments_column_order", columns);
     }
 
     /// The `idx_%` index list is golden-pinned.

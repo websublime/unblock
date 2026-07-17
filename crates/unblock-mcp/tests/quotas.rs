@@ -59,6 +59,46 @@ async fn over_length_string_rejected_with_zero_storage_calls() {
     let _ = server.cancel().await;
 }
 
+/// Tool #8 `comment` (D37) enforces the SAME quota preflight: an over-length `body` is rejected with
+/// ZERO storage mutations.
+///
+/// **Why this case exists (a STRUCTURAL asymmetry, not redundancy with the `issue` case above).** The
+/// NFR-18 RATE limit lives in a pre-dispatch chokepoint (`server.rs::call_tool`) that no tool can
+/// bypass, so testing it once suffices. The QUOTA preflight is called INSIDE each tool body — a new
+/// tool that simply OMITS `self.preflight(&input)` is caught by NOTHING. This suite covered only the
+/// `issue` tool, so deleting the preflight from `tools/comment.rs` left the ENTIRE unblock-mcp suite
+/// green. That matters most here: `max_string_len` is the SOLE bound on a comment `body`, which is
+/// DELIBERATELY unbounded at the model layer (spine §1.9 — the L7 transport quota IS the cap).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn comment_over_length_body_rejected_with_zero_storage_calls() {
+    let quotas = Quotas {
+        max_string_len: 16,
+        ..lax_base()
+    };
+    let (session, spy) = session_recording().await;
+    let (client, server, _cancel) = connect_with_quotas(session, quotas, None).await;
+
+    let oversized_body = "x".repeat(64); // > max_string_len (16).
+    let (is_error, payload) = call_tool(
+        &client,
+        "comment",
+        json!({ "action": "add", "issue_id": "ub-1", "body": oversized_body }),
+    )
+    .await;
+
+    assert!(is_error, "an over-length comment body is an in-band error");
+    assert_eq!(payload["code"], "VALIDATION_FAILED");
+    assert_eq!(payload["context"]["kind"], "string");
+    assert_eq!(
+        spy.mutation_count(),
+        0,
+        "the comment tool's quota preflight fires BEFORE any Session/storage mutation",
+    );
+
+    let _ = client.cancel().await;
+    let _ = server.cancel().await;
+}
+
 /// An over-length ARRAY (more labels than `max_array_len`) is rejected at the preflight with ZERO
 /// storage mutations.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

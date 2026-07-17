@@ -26,13 +26,22 @@ fn arb_dep() -> impl Strategy<Value = Dependency> {
 }
 
 fn arb_comment() -> impl Strategy<Value = Comment> {
-    (1i64..1000, "[a-z]{1,8}", "[a-z ]{0,20}").prop_map(|(id, author, body)| Comment {
-        id,
-        issue_id: "ub-root".to_string(),
-        author,
-        body,
-        created_at: ts(),
-    })
+    (
+        1i64..1000,
+        "[a-z]{1,8}",
+        "[a-z ]{0,20}",
+        prop::option::of(Just(ts())),
+        prop::option::of(Just(ts())),
+    )
+        .prop_map(|(id, author, body, updated_at, redacted_at)| Comment {
+            id,
+            issue_id: "ub-root".to_string(),
+            author,
+            body,
+            created_at: ts(),
+            updated_at,
+            redacted_at,
+        })
 }
 
 fn arb_issue() -> impl Strategy<Value = Issue> {
@@ -84,6 +93,32 @@ proptest! {
         other.content_hash = Some("ignored".to_string());
         other.agent_context = Some("ignored".to_string());
         prop_assert!(issue.sync_equals(&other));
+    }
+
+    /// D37/FORK-M2: the comment comparator IGNORES `Comment.updated_at` (volatile-audit-like),
+    /// exactly as `Issue.updated_at` is ignored. Fails against a derived-`PartialEq` compare.
+    #[test]
+    fn comment_updated_at_ignored(issue in arb_issue()) {
+        let mut other = issue.clone();
+        for comment in &mut other.comments {
+            comment.updated_at = Some(Utc.with_ymd_and_hms(2099, 1, 1, 0, 0, 0).unwrap());
+        }
+        prop_assert!(issue.sync_equals(&other));
+    }
+
+    /// D37/FORK-M2: `redacted_at` IS real synced state and IS compared (the redact wire form is
+    /// `redacted_at` present + `"text":""`).
+    #[test]
+    fn comment_redacted_at_flip_breaks_equality(issue in arb_issue()) {
+        prop_assume!(!issue.comments.is_empty());
+        let mut other = issue.clone();
+        for comment in &mut other.comments {
+            comment.redacted_at = match comment.redacted_at {
+                None => Some(Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap()),
+                Some(_) => None,
+            };
+        }
+        prop_assert!(!issue.sync_equals(&other));
     }
 
     #[test]

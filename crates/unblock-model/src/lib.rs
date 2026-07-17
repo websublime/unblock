@@ -81,7 +81,7 @@ pub use results::{
 };
 pub use time::fmt_ts_secs;
 pub use validation::{
-    ACTOR_MAX_CHARS, CUSTOM_VARIANT_MAX_CHARS, ESTIMATED_MINUTES_MAX, EXTERNAL_REF_MAX_CHARS,
-    ISSUE_LABEL_MAX_COUNT, IssueValidator, LABEL_MAX_LEN, LabelValidator, TITLE_MAX_CHARS,
-    validate_actor,
+    ACTOR_MAX_CHARS, CUSTOM_VARIANT_MAX_CHARS, CommentValidator, ESTIMATED_MINUTES_MAX,
+    EXTERNAL_REF_MAX_CHARS, ISSUE_LABEL_MAX_COUNT, IssueValidator, LABEL_MAX_LEN, LabelValidator,
+    TITLE_MAX_CHARS, validate_actor,
 };

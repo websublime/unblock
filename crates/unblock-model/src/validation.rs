@@ -78,6 +78,97 @@ pub fn validate_actor(actor: &str) -> Result<(), FieldError> {
     Ok(())
 }
 
+/// Validates comment fields (FR-6/D37, spine §1.9). Pure; no I/O.
+///
+/// The model owns the comment rule set ONCE (the §1.9 single-home rule). There are **two** public
+/// entry points because the two engine call sites carry different field sets (spine §4.1):
+///
+/// * `Session::add_comment(issue_id, body)` has `issue_id` + `author` (= the session actor) + `body`
+///   → [`CommentValidator::validate_comment`];
+/// * `Session::update_comment(comment_id, body)` carries ONLY a comment id + a body — that path has
+///   no `issue_id` and there is no `Storage::get_comment(comment_id)` (spine §3.2) to fetch one →
+///   [`CommentValidator::validate_body`].
+///
+/// **Composition (NORMATIVE — `validate_comment` must NOT call `validate_body`):** `validate_body`
+/// returns an ALREADY-SEALED `Result`, so the natural `validate_body(body)?` inside
+/// `validate_comment` would be fail-fast — the FR-11 wire `context["fields"]` would carry ONE entry
+/// where [`IssueValidator::validate`] carries N, silently breaking the D-E1 uniform aggregate
+/// carrier (spine §2.1). Instead BOTH public entry points call the private `body_rules`, each
+/// sealing its own aggregate: the body rule set stays single-homed AND every `CommentValidator`
+/// error is a full multi-fault aggregate.
+pub struct CommentValidator;
+
+impl CommentValidator {
+    /// THE single home of the body rule set. Pushes into the CALLER's aggregate; never seals.
+    ///
+    /// The body must be non-empty when trimmed (`field: "content"` — bd wire parity) and NUL-free
+    /// (`SQLite` compatibility). It is otherwise UNBOUNDED: the L7 MCP `Quotas.max_string_len`
+    /// (64 KiB) is the transport cap.
+    fn body_rules(body: &str, fields: &mut Vec<FieldError>) {
+        if body.trim().is_empty() {
+            fields.push(FieldError::new("content", "cannot be empty"));
+        }
+        reject_nul("content", body, fields);
+    }
+
+    /// The update path (spine §4.1 `update_comment`): validate the body only.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModelError::ValidationFailed`] carrying one [`FieldError`] per violated body rule.
+    pub fn validate_body(body: &str) -> Result<(), ModelError> {
+        let mut fields: Vec<FieldError> = Vec::new();
+        Self::body_rules(body, &mut fields);
+        seal(fields)
+    }
+
+    /// The add path (spine §4.1 `add_comment`): the body rules PLUS `author` and `issue_id`, all
+    /// collected into ONE aggregate and sealed ONCE.
+    ///
+    /// The author rules DELEGATE the bound / NUL / control-char checks to [`validate_actor`] (their
+    /// single home) and RELABEL the returned [`FieldError`]'s `field` from `"actor"` to `"author"`,
+    /// ADDING the non-empty-when-trimmed rule `validate_actor` deliberately does not enforce (its
+    /// contract: the resolved actor is already non-empty via the config precedence chain). The
+    /// bound therefore stays [`ACTOR_MAX_CHARS`] **`char`s** — a deliberate adaptation of the Go
+    /// original's `len() > 200` bytes-on-untrimmed rule; the original's `id <= 0` rule is DROPPED
+    /// (the id is storage-minted here, never caller-supplied).
+    ///
+    /// The [`FieldError`] names are WIRE CONTRACT (FR-11 `context["fields"][].field`):
+    /// body → `"content"`, author → `"author"`, `issue_id` → `"issue_id"`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModelError::ValidationFailed`] carrying one [`FieldError`] per violated rule.
+    pub fn validate_comment(issue_id: &str, author: &str, body: &str) -> Result<(), ModelError> {
+        let mut fields: Vec<FieldError> = Vec::new();
+
+        if issue_id.trim().is_empty() {
+            fields.push(FieldError::new("issue_id", "cannot be empty"));
+        }
+
+        if author.trim().is_empty() {
+            fields.push(FieldError::new("author", "cannot be empty"));
+        }
+        if let Err(mut err) = validate_actor(author) {
+            err.field = "author".to_string();
+            fields.push(err);
+        }
+
+        Self::body_rules(body, &mut fields);
+
+        seal(fields)
+    }
+}
+
+/// Seal a collected aggregate into the uniform D-E1 carrier (spine §2.1).
+fn seal(fields: Vec<FieldError>) -> Result<(), ModelError> {
+    if fields.is_empty() {
+        Ok(())
+    } else {
+        Err(ModelError::ValidationFailed { fields })
+    }
+}
+
 /// Validates issue fields and invariants (spine §1.9). Pure; no I/O.
 pub struct IssueValidator;
 
@@ -326,7 +417,9 @@ impl LabelValidator {
 
 #[cfg(test)]
 mod tests {
-    use super::{ACTOR_MAX_CHARS, IssueValidator, LabelValidator, validate_actor};
+    use super::{
+        ACTOR_MAX_CHARS, CommentValidator, IssueValidator, LabelValidator, validate_actor,
+    };
     use crate::enums::{IssueType, Priority, Status};
     use crate::issue::Issue;
     use chrono::{TimeZone, Utc};
@@ -559,6 +652,137 @@ mod tests {
             let err = validate_actor(ctrl).expect_err("control char rejected");
             assert_eq!(err.field, "actor");
             assert_eq!(err.reason, "cannot contain control characters");
+        }
+    }
+
+    // --- CommentValidator (FR-6/D37, spine §1.9) -----------------------------------------------
+
+    fn comment_fields(result: Result<(), ModelError>) -> Vec<super::FieldError> {
+        match result {
+            Err(ModelError::ValidationFailed { fields }) => fields,
+            other => panic!("expected ValidationFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_body_accepts_a_normal_body() {
+        assert!(CommentValidator::validate_body("looks good to me").is_ok());
+    }
+
+    #[test]
+    fn validate_body_rejects_empty_trimmed_under_the_content_field() {
+        let fields = comment_fields(CommentValidator::validate_body("   \t "));
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].field, "content");
+        assert_eq!(fields[0].reason, "cannot be empty");
+    }
+
+    #[test]
+    fn validate_body_rejects_nul() {
+        let fields = comment_fields(CommentValidator::validate_body("a\0b"));
+        assert!(
+            fields
+                .iter()
+                .any(|f| f.field == "content" && f.reason == "cannot contain NUL bytes")
+        );
+    }
+
+    #[test]
+    fn validate_body_is_otherwise_unbounded() {
+        // The 64 KiB transport cap lives at the L7 MCP quota, not here.
+        assert!(CommentValidator::validate_body(&"x".repeat(100_000)).is_ok());
+    }
+
+    #[test]
+    fn validate_comment_accepts_a_well_formed_comment() {
+        assert!(CommentValidator::validate_comment("ub-abc123", "alice", "hi").is_ok());
+    }
+
+    #[test]
+    fn validate_comment_rejects_empty_issue_id() {
+        let fields = comment_fields(CommentValidator::validate_comment("  ", "alice", "hi"));
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].field, "issue_id");
+    }
+
+    #[test]
+    fn validate_comment_relabels_the_actor_rule_as_author() {
+        // Delegated to validate_actor, whose FieldError says "actor" — it MUST be relabelled.
+        let fields = comment_fields(CommentValidator::validate_comment(
+            "ub-abc123",
+            &"a".repeat(ACTOR_MAX_CHARS + 1),
+            "hi",
+        ));
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].field, "author");
+        assert_eq!(
+            fields[0].reason,
+            format!("exceeds {ACTOR_MAX_CHARS} characters")
+        );
+        assert!(
+            !fields.iter().any(|f| f.field == "actor"),
+            "the delegated FieldError must be relabelled author, never leak as actor"
+        );
+    }
+
+    #[test]
+    fn validate_comment_author_bound_is_char_counted_not_bytes() {
+        // 200 multibyte chars (well over 200 BYTES) passes — the deliberate adaptation of the Go
+        // original's `len() > 200` bytes rule.
+        assert!(
+            CommentValidator::validate_comment(
+                "ub-abc123",
+                &"\u{1f980}".repeat(ACTOR_MAX_CHARS),
+                "hi"
+            )
+            .is_ok()
+        );
+        assert!(
+            CommentValidator::validate_comment(
+                "ub-abc123",
+                &"\u{1f980}".repeat(ACTOR_MAX_CHARS + 1),
+                "hi"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn validate_comment_adds_the_author_non_empty_rule_validate_actor_omits() {
+        // validate_actor itself accepts "" (its contract: the resolved actor is already non-empty).
+        assert!(validate_actor("  ").is_ok());
+        let fields = comment_fields(CommentValidator::validate_comment("ub-abc123", "  ", "hi"));
+        assert!(
+            fields
+                .iter()
+                .any(|f| f.field == "author" && f.reason == "cannot be empty")
+        );
+    }
+
+    #[test]
+    fn validate_comment_is_a_multi_fault_aggregate_not_fail_fast() {
+        // D-E1 uniform aggregate carrier (spine §1.9 COMPOSITION): an empty body AND an
+        // over-length author must BOTH surface — 2 entries, not 1. This is exactly what
+        // `validate_comment(body)?`-style fail-fast composition would break.
+        let fields = comment_fields(CommentValidator::validate_comment(
+            "ub-abc123",
+            &"a".repeat(ACTOR_MAX_CHARS + 1),
+            "   ",
+        ));
+        assert_eq!(
+            fields.len(),
+            2,
+            "expected a 2-fault aggregate, got {fields:?}"
+        );
+        assert!(fields.iter().any(|f| f.field == "author"));
+        assert!(fields.iter().any(|f| f.field == "content"));
+    }
+
+    #[test]
+    fn validate_comment_collects_all_three_field_faults() {
+        let fields = comment_fields(CommentValidator::validate_comment("", "", ""));
+        for field in ["issue_id", "author", "content"] {
+            assert!(fields.iter().any(|f| f.field == field), "missing {field}");
         }
     }
 }

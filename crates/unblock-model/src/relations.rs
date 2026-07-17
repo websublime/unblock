@@ -42,20 +42,32 @@ pub struct Dependency {
     pub thread_id: Option<String>,
 }
 
-/// A comment on an issue (spine §1.7; surface defined now, populated v1.1).
+/// A comment on an issue (spine §1.7; v1 surface — D37). Flat: no threading (FORK-T).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct Comment {
     /// Stable comment id.
     pub id: i64,
     /// The issue this comment belongs to.
     pub issue_id: String,
-    /// The comment author.
+    /// The comment author (= the session actor at the MCP surface, FORK-M1b).
     pub author: String,
-    /// The comment body (serialized under `"text"`).
+    /// The comment body (serialized under `"text"`); masked to `""` on redact.
     #[serde(rename = "text")]
     pub body: String,
     /// Creation timestamp.
     pub created_at: DateTime<Utc>,
+    /// Provenance-preserving edit instant (D37/D-D): `None` = never edited; `Some` = last edit.
+    ///
+    /// `add`'s own INSERT is create-time-only — see spine §3.2.1 MUST-1 SCOPE.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<DateTime<Utc>>,
+    /// Soft-redact marker (D37/D-E): `None` = live; `Some` = redacted.
+    ///
+    /// The PRESENCE is the "is redacted" flag (mirroring the tombstone `deleted_at`); on redact the
+    /// row is KEPT and `body` is masked to `""`. The `CommentRedacted` audit event retains the
+    /// original body (provenance — FORK-redact-wire).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redacted_at: Option<DateTime<Utc>>,
 }
 
 /// An append-only audit event (spine §1.7), written transactionally inside a mutation.
@@ -164,8 +176,49 @@ mod tests {
             author: "tester".to_string(),
             body: "hello".to_string(),
             created_at: ts(),
+            updated_at: None,
+            redacted_at: None,
         };
         let value = serde_json::to_value(&comment).unwrap();
         assert_eq!(value["text"], "hello");
+        // D37/FORK-M1: both new fields skip-when-None (a bd-shaped 5-field comment stays 5-field).
+        assert!(value.get("updated_at").is_none());
+        assert!(value.get("redacted_at").is_none());
+    }
+
+    #[test]
+    fn comment_bd_shaped_five_field_json_roundtrips_absent_to_none() {
+        // FR-26 / D37: a bd-exported comment carries no `updated_at`/`redacted_at` — both must
+        // deserialize to None and round-trip back to a byte-identical 5-field document.
+        let json = r#"{
+            "id": 7,
+            "issue_id": "ub-a",
+            "author": "tester",
+            "text": "hello",
+            "created_at": "2026-01-01T00:00:00Z"
+        }"#;
+        let comment: Comment = serde_json::from_str(json).unwrap();
+        assert_eq!(comment.updated_at, None);
+        assert_eq!(comment.redacted_at, None);
+        let back = serde_json::to_value(&comment).unwrap();
+        assert_eq!(back.as_object().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn comment_redact_wire_form_is_redacted_at_present_plus_empty_text() {
+        // D37/D-E: the PRESENCE of `redacted_at` is the flag — no extra top-level bool.
+        let comment = Comment {
+            id: 1,
+            issue_id: "ub-a".to_string(),
+            author: "tester".to_string(),
+            body: String::new(),
+            created_at: ts(),
+            updated_at: None,
+            redacted_at: Some(ts()),
+        };
+        let value = serde_json::to_value(&comment).unwrap();
+        assert_eq!(value["text"], "");
+        assert!(value.get("redacted_at").is_some());
+        assert!(value.get("redacted").is_none());
     }
 }

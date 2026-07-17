@@ -15,11 +15,12 @@ use unblock_model::{DiagnosticReport, Issue};
 
 use crate::options::CONTRACT_VERSION;
 use crate::tools::claim::ClaimInput;
+use crate::tools::comment::CommentToolInput;
 use crate::tools::defer::DeferInput;
 use crate::tools::dep::DepToolInput;
 use crate::tools::diagnostics::DiagnosticsInput;
 use crate::tools::issue::IssueInput;
-use crate::tools::output::{DepOutput, IssueOutput, QueryOutput, SyncOutput};
+use crate::tools::output::{CommentOutput, DepOutput, IssueOutput, QueryOutput, SyncOutput};
 use crate::tools::query::QueryInput;
 use crate::tools::sync::SyncInput;
 
@@ -52,6 +53,16 @@ pub struct SchemaBundle {
     pub sync: ToolSchemas,
     /// The `diagnostics` tool input + output schemas (output = `DiagnosticReport`).
     pub diagnostics: ToolSchemas,
+    /// The `comment` tool input + output schemas (output = `CommentOutput`) — the 8th tool
+    /// (FR-6/D37).
+    ///
+    /// **NORMATIVE — this field's POSITION is hash-visible (spine §5.4).** `SchemaBundle` is a
+    /// struct, not a map, so serde emits its fields in DECLARATION order and `CONTRACT_HASH`
+    /// digests those bytes. `comment` must be declared LAST (after `diagnostics`), matching the
+    /// §5.1 tool order and the `agents_digest` pairs array that walks this struct field-by-field
+    /// (D33); anywhere else reorders the serialized document and moves the hash for a reason
+    /// unrelated to the new tool.
+    pub comment: ToolSchemas,
     /// The shared in-band error output (`StructuredError`) every tool may return with `is_error=true`
     /// (FR-11) — published ONCE, bundle-level (the rmcp `is_error` flag is the channel discriminator).
     pub error: Value,
@@ -90,6 +101,10 @@ pub fn schema_bundle() -> SchemaBundle {
             input: schema_for!(DiagnosticsInput).to_value(),
             output: schema_for!(DiagnosticReport).to_value(),
         },
+        comment: ToolSchemas {
+            input: schema_for!(CommentToolInput).to_value(),
+            output: schema_for!(CommentOutput).to_value(),
+        },
         error: schema_for!(StructuredError).to_value(),
     }
 }
@@ -115,12 +130,13 @@ mod tests {
             ("dep", &bundle.dep),
             ("sync", &bundle.sync),
             ("diagnostics", &bundle.diagnostics),
+            ("comment", &bundle.comment),
         ];
         for (name, pair) in pairs {
             // CD-1 (spine §5.2a, NORMATIVE): every published tool `inputSchema` root MUST carry
             // `"type": "object"` — NOT merely be a JSON object (a `oneOf` root is a JSON object but
             // omits the root `type`, which strict MCP clients reject for the WHOLE `tools/list`). The
-            // six tagged-enum inputs earn it via `#[schemars(extend("type" = "object"))]`; `ClaimInput`
+            // seven tagged-enum inputs earn it via `#[schemars(extend("type" = "object"))]`; `ClaimInput`
             // (a plain struct) already has it. Asserting `input["type"] == "object"` (not `is_object()`,
             // which passes vacuously for a bare `oneOf` root) is the mechanized CD-1 gate.
             assert_eq!(

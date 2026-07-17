@@ -11,7 +11,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 use unblock_model::{
-    CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue, ListFilters,
+    Comment, CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue,
+    ListFilters,
 };
 
 use crate::WriteLockGuard;
@@ -309,6 +310,57 @@ pub trait Storage: Send + Sync {
     async fn list_dependencies(&self, id: &str) -> Result<Vec<Dependency>, StorageError>;
 
     // ---------------------------------------------------------------------------------------------
+    // comments (FR-6, D37 — the analog of add_dependency/list_dependencies; spine §3.2/§3.2.1).
+    // Every mutation runs inside ONE `with_immediate_tx` so the row and its `Event` commit together
+    // (FR-9), and bumps `issues.updated_at` (FORK-S1 — feeds `stale`; NOT hashed).
+    // ---------------------------------------------------------------------------------------------
+
+    /// Add a comment, writing a transactional `Event(Commented)`.
+    ///
+    /// **Existence guard (FORK-3):** the target issue MUST exist — a non-existent or tombstoned id
+    /// yields [`StorageError::IssueNotFound`]. A CLOSED issue is ALLOWED (post-mortem commentary).
+    ///
+    /// The created comment's `updated_at` stays NULL: this path is create-time only (**MUST-1** —
+    /// only [`update_comment`](Storage::update_comment) ever sets `updated_at`). MUST-1 is scoped to
+    /// THIS method; the create/bulk/import seed path replays caller-supplied `Comment` values
+    /// verbatim and persists both `updated_at` and `redacted_at` (spine §3.2.1 MUST-1 SCOPE).
+    ///
+    /// `author` is threaded separately from `actor` for bd parity: the import/seed path carries the
+    /// comment's own author, while the engine passes `author = self.actor` (FORK-M1b).
+    async fn add_comment(
+        &self,
+        issue_id: &str,
+        author: &str,
+        body: &str,
+        actor: &str,
+    ) -> Result<Comment, StorageError>;
+
+    /// List the comments on `issue_id` in canonical order (`created_at ASC, id ASC`).
+    async fn list_comments(&self, issue_id: &str) -> Result<Vec<Comment>, StorageError>;
+
+    /// Update a comment's body, **preserving provenance** (D-D).
+    ///
+    /// Guards that the comment row exists → else [`StorageError::CommentNotFound`] (which maps to
+    /// the EXISTING `ErrorCode::IssueNotFound` at L7 — FORK-E1: the code is reused, the taxonomy
+    /// does not grow). Sets `updated_at = now` and writes `Event(CommentEdited)` carrying the old
+    /// and new bodies. In-place replacement WITHOUT provenance is forbidden: the `updated_at` bump
+    /// and the event ARE the provenance.
+    async fn update_comment(
+        &self,
+        comment_id: i64,
+        body: &str,
+        actor: &str,
+    ) -> Result<Comment, StorageError>;
+
+    /// **Soft-redact** a comment (D-E) — the single deletion op; never a hard delete.
+    ///
+    /// Guards that the comment row exists → else [`StorageError::CommentNotFound`]. KEEPS the row,
+    /// masks `text` to `""`, sets `redacted_at = now`, and writes `Event(CommentRedacted)` RETAINING
+    /// the original body for provenance (FORK-redact-wire). Idempotent: an already-redacted comment
+    /// is returned unchanged with no new event (mirroring `restore_issue`'s already-active no-op).
+    async fn delete_comment(&self, comment_id: i64, actor: &str) -> Result<Comment, StorageError>;
+
+    // ---------------------------------------------------------------------------------------------
     // hierarchical-id child allocation (FR-1a, D21) — the READ-half the engine allocator consumes
     // ---------------------------------------------------------------------------------------------
 
@@ -404,7 +456,8 @@ mod tests {
     use chrono::{DateTime, Utc};
     use std::sync::Arc;
     use unblock_model::{
-        CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue, ListFilters,
+        Comment, CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue,
+        ListFilters,
     };
 
     /// A backend-free [`Storage`] used only to prove the trait is implementable and object-safe.
@@ -550,6 +603,39 @@ mod tests {
 
         async fn list_dependencies(&self, _id: &str) -> Result<Vec<Dependency>, StorageError> {
             Ok(Vec::new())
+        }
+
+        // --- comments (FR-6, D37) — the NoopStorage posture: reads are empty, mutations are
+        // NotInitialized (exactly as it treats every other read/mutation pair).
+        async fn add_comment(
+            &self,
+            _issue_id: &str,
+            _author: &str,
+            _body: &str,
+            _actor: &str,
+        ) -> Result<Comment, StorageError> {
+            Err(StorageError::NotInitialized)
+        }
+
+        async fn list_comments(&self, _issue_id: &str) -> Result<Vec<Comment>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn update_comment(
+            &self,
+            _comment_id: i64,
+            _body: &str,
+            _actor: &str,
+        ) -> Result<Comment, StorageError> {
+            Err(StorageError::NotInitialized)
+        }
+
+        async fn delete_comment(
+            &self,
+            _comment_id: i64,
+            _actor: &str,
+        ) -> Result<Comment, StorageError> {
+            Err(StorageError::NotInitialized)
         }
 
         async fn next_child_number(&self, _parent_id: &str) -> Result<u32, StorageError> {

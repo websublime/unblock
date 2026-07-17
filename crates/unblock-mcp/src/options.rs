@@ -27,10 +27,14 @@ use tokio_util::sync::CancellationToken;
 /// schema-bundle bytes, so they ship JOINTLY as one bump) → `unblock.mcp.v1.4` (T3.5/D34 — the
 /// `ErrorCode::RateLimited` mint for the NFR-18 rate-limit chokepoint; the taxonomy grows 35→36, so
 /// `capabilities().error_codes` gains a descriptor AND `schema_bundle()`'s shared `ErrorCode` `oneOf`
-/// gains a `const`, moving both discovery documents' bytes). The `unblock.mcp.vN[.M]` family preserves
-/// the contract-id convention while the `.M` revision marks an additive contract change within the v1
-/// product.
-pub const CONTRACT_VERSION: &str = "unblock.mcp.v1.4";
+/// gains a `const`, moving both discovery documents' bytes) → `unblock.mcp.v1.5` (T3.9/D37 — the
+/// comment surface pulled forward into v1. The version-coupled set moves on TWO axes: the NEW 8th
+/// `comment` tool adds a per-tool `{input,output}` pair to `schema_bundle()` + an 8th
+/// `capabilities()` descriptor, AND the `$defs/Comment` embedded inside the EXISTING `issue`/`query`
+/// OUTPUT schemas gains 2 properties (`updated_at`/`redacted_at`) — so existing schema bytes move
+/// too, not merely a new pair). The `unblock.mcp.vN[.M]` family preserves the contract-id convention
+/// while the `.M` revision marks an additive contract change within the v1 product.
+pub const CONTRACT_VERSION: &str = "unblock.mcp.v1.5";
 
 /// The pinned SHA-256 digest of the ordered two-document tuple `(capabilities(), schema_bundle())` —
 /// the HASH-COUPLED half of the FR-12 drift gate (D22 widened by D25, `tests/contract_suite.rs`).
@@ -46,7 +50,7 @@ pub const CONTRACT_VERSION: &str = "unblock.mcp.v1.4";
 /// representation — any future dep enabling `serde_json/preserve_order` (feature unification, dev-deps
 /// included) reorders the schemars-generated maps and moves `CONTRACT_HASH` with NO contract change;
 /// if the gate fires with "nothing changed", check `Cargo.lock` feature unification first.
-pub const CONTRACT_HASH: &str = "eca90bb74d25f67effb41b94412f38facd456266cb7f799722ee0bf4e3e08640";
+pub const CONTRACT_HASH: &str = "ddd02b7bd4454d13c2e0d597acc6a1665f285877cefb30dc46a815de1d6a6c76";
 
 /// Untrusted-input limits enforced **before** any `Session` call (NFR-18).
 ///
@@ -132,7 +136,7 @@ mod tests {
     fn contract_version_is_the_bumped_v1_id() {
         // T3.5/D34: minting `ErrorCode::RateLimited` (35→36) grew BOTH discovery documents' bytes
         // (the error-code descriptor + the shared `ErrorCode` oneOf), so the contract bumped → v1.4.
-        assert_eq!(CONTRACT_VERSION, "unblock.mcp.v1.4");
+        assert_eq!(CONTRACT_VERSION, "unblock.mcp.v1.5");
     }
 
     #[test]

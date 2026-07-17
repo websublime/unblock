@@ -9,8 +9,8 @@
 
 use chrono::{DateTime, Utc};
 use unblock_model::{
-    CountBucket, CountGroupBy, DepTree, Dependency, DiagnosticKind, DiagnosticReport, Issue,
-    ListFilters,
+    Comment, CountBucket, CountGroupBy, DepTree, Dependency, DiagnosticKind, DiagnosticReport,
+    Issue, ListFilters,
 };
 
 use crate::diagnostics::{self, WorkspaceFacts};
@@ -107,6 +107,15 @@ impl Session {
     /// Forwards any storage failure.
     pub async fn list_dependencies(&self, id: &str) -> Result<Vec<Dependency>> {
         Ok(self.storage.list_dependencies(id).await?)
+    }
+
+    /// The comments on `id` in canonical order (`created_at ASC, id ASC`) — backs the `comment
+    /// list` action (FR-6/D37, spine §4.1). A read path: **no write permit** (FR-10).
+    ///
+    /// # Errors
+    /// Forwards any storage failure.
+    pub async fn list_comments(&self, id: &str) -> Result<Vec<Comment>> {
+        Ok(self.storage.list_comments(id).await?)
     }
 
     /// The dependency subtree rooted at `id`.

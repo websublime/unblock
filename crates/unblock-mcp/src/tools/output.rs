@@ -31,7 +31,7 @@ use rmcp::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use unblock_engine::DeleteMode;
 use unblock_model::{
-    CloseOutcome, CountBucket, DepTree, Dependency, ExportReport, ImportReport, Issue,
+    CloseOutcome, Comment, CountBucket, DepTree, Dependency, ExportReport, ImportReport, Issue,
 };
 
 /// The quick-create output: the minted id only (spine §5.3).
@@ -170,6 +170,31 @@ pub(crate) struct DepAdded {
 pub(crate) struct DepRemoved {
     /// Always `true` on a successful remove.
     pub removed: bool,
+}
+
+/// The `comment` tool success union (spine §5.3, FR-6/D37). `#[serde(untagged)]`.
+///
+/// One scalar arm — `add`/`update`/`delete` all return the single affected `Comment`, exactly as
+/// `IssueOutput::Issue` covers create/show/reopen/restore — plus one CD-2 object-wrapped list arm.
+/// `Comment` is small, so no `Box` is needed.
+///
+/// The **redact wire form** is simply the returned `Comment` with `redacted_at` present and
+/// `"text": ""` — there is NO extra top-level `"redacted"` bool: the presence of `redacted_at` IS
+/// the flag, mirroring the tombstone `deleted_at` (spine §1.7).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(untagged)]
+pub(crate) enum CommentOutput {
+    /// The single affected comment (`add` / `update` / `delete`-as-redact).
+    Comment(Comment),
+    /// The comments on an issue (`list`), CD-2 object-wrapped as `{"comments":[…]}`.
+    Comments(CommentList),
+}
+
+/// The CD-2 object-wrap for `comment{list}`: `{"comments":[…]}` (spine §5.3) — never a bare array.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub(crate) struct CommentList {
+    /// The comments on the issue, in canonical order (`created_at ASC, id ASC`).
+    pub comments: Vec<Comment>,
 }
 
 /// The `sync` tool output: an export or import report (spine §5.3, G-23a).

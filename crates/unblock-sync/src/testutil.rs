@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
 use unblock_model::{
-    CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue, ListFilters,
-    Status,
+    Comment, CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue,
+    ListFilters, Status,
 };
 use unblock_storage::{DeletePlan, IssuePatch, Storage, StorageError};
 
@@ -228,6 +228,36 @@ impl Storage for FakeStorage {
     }
     async fn list_dependencies(&self, _id: &str) -> Result<Vec<Dependency>, StorageError> {
         unimplemented!("FakeStorage::list_dependencies")
+    }
+    // --- comments (FR-6, D37) — `unimplemented!()` per this file's contract: sync never touches
+    // the comment methods, so a mis-wired call must be a LOUD test failure, never a silent stub
+    // (a silent `Ok(vec![])` here would make an export/round-trip assertion pass VACUOUSLY).
+    async fn add_comment(
+        &self,
+        _issue_id: &str,
+        _author: &str,
+        _body: &str,
+        _actor: &str,
+    ) -> Result<Comment, StorageError> {
+        unimplemented!("FakeStorage::add_comment")
+    }
+    async fn list_comments(&self, _issue_id: &str) -> Result<Vec<Comment>, StorageError> {
+        unimplemented!("FakeStorage::list_comments")
+    }
+    async fn update_comment(
+        &self,
+        _comment_id: i64,
+        _body: &str,
+        _actor: &str,
+    ) -> Result<Comment, StorageError> {
+        unimplemented!("FakeStorage::update_comment")
+    }
+    async fn delete_comment(
+        &self,
+        _comment_id: i64,
+        _actor: &str,
+    ) -> Result<Comment, StorageError> {
+        unimplemented!("FakeStorage::delete_comment")
     }
     async fn next_child_number(&self, _parent_id: &str) -> Result<u32, StorageError> {
         unimplemented!("FakeStorage::next_child_number")

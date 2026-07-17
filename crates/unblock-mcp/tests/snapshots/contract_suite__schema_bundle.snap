@@ -3,7 +3,7 @@ source: crates/unblock-mcp/tests/contract_suite.rs
 expression: schema_bundle()
 ---
 {
-  "contract_version": "unblock.mcp.v1.4",
+  "contract_version": "unblock.mcp.v1.5",
   "issue": {
     "input": {
       "$defs": {
@@ -693,10 +693,10 @@ expression: schema_bundle()
           "type": "object"
         },
         "Comment": {
-          "description": "A comment on an issue (spine §1.7; surface defined now, populated v1.1).",
+          "description": "A comment on an issue (spine §1.7; v1 surface — D37). Flat: no threading (FORK-T).",
           "properties": {
             "author": {
-              "description": "The comment author.",
+              "description": "The comment author (= the session actor at the MCP surface, FORK-M1b).",
               "type": "string"
             },
             "created_at": {
@@ -713,9 +713,25 @@ expression: schema_bundle()
               "description": "The issue this comment belongs to.",
               "type": "string"
             },
+            "redacted_at": {
+              "description": "Soft-redact marker (D37/D-E): `None` = live; `Some` = redacted.\n\nThe PRESENCE is the \"is redacted\" flag (mirroring the tombstone `deleted_at`); on redact the\nrow is KEPT and `body` is masked to `\"\"`. The `CommentRedacted` audit event retains the\noriginal body (provenance — FORK-redact-wire).",
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "text": {
-              "description": "The comment body (serialized under `\"text\"`).",
+              "description": "The comment body (serialized under `\"text\"`); masked to `\"\"` on redact.",
               "type": "string"
+            },
+            "updated_at": {
+              "description": "Provenance-preserving edit instant (D37/D-D): `None` = never edited; `Some` = last edit.\n\n`add`'s own INSERT is create-time-only — see spine §3.2.1 MUST-1 SCOPE.",
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
@@ -894,7 +910,7 @@ expression: schema_bundle()
               ]
             },
             "comments": {
-              "description": "Comments (hydrated for export/display; populated v1.1).",
+              "description": "Comments (hydrated for export/display on all read paths — D37).",
               "items": {
                 "$ref": "#/$defs/Comment"
               },
@@ -1226,10 +1242,10 @@ expression: schema_bundle()
     "output": {
       "$defs": {
         "Comment": {
-          "description": "A comment on an issue (spine §1.7; surface defined now, populated v1.1).",
+          "description": "A comment on an issue (spine §1.7; v1 surface — D37). Flat: no threading (FORK-T).",
           "properties": {
             "author": {
-              "description": "The comment author.",
+              "description": "The comment author (= the session actor at the MCP surface, FORK-M1b).",
               "type": "string"
             },
             "created_at": {
@@ -1246,9 +1262,25 @@ expression: schema_bundle()
               "description": "The issue this comment belongs to.",
               "type": "string"
             },
+            "redacted_at": {
+              "description": "Soft-redact marker (D37/D-E): `None` = live; `Some` = redacted.\n\nThe PRESENCE is the \"is redacted\" flag (mirroring the tombstone `deleted_at`); on redact the\nrow is KEPT and `body` is masked to `\"\"`. The `CommentRedacted` audit event retains the\noriginal body (provenance — FORK-redact-wire).",
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "text": {
-              "description": "The comment body (serialized under `\"text\"`).",
+              "description": "The comment body (serialized under `\"text\"`); masked to `\"\"` on redact.",
               "type": "string"
+            },
+            "updated_at": {
+              "description": "Provenance-preserving edit instant (D37/D-D): `None` = never edited; `Some` = last edit.\n\n`add`'s own INSERT is create-time-only — see spine §3.2.1 MUST-1 SCOPE.",
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
@@ -1372,7 +1404,7 @@ expression: schema_bundle()
           ]
         },
         "comments": {
-          "description": "Comments (hydrated for export/display; populated v1.1).",
+          "description": "Comments (hydrated for export/display on all read paths — D37).",
           "items": {
             "$ref": "#/$defs/Comment"
           },
@@ -1705,10 +1737,10 @@ expression: schema_bundle()
     "output": {
       "$defs": {
         "Comment": {
-          "description": "A comment on an issue (spine §1.7; surface defined now, populated v1.1).",
+          "description": "A comment on an issue (spine §1.7; v1 surface — D37). Flat: no threading (FORK-T).",
           "properties": {
             "author": {
-              "description": "The comment author.",
+              "description": "The comment author (= the session actor at the MCP surface, FORK-M1b).",
               "type": "string"
             },
             "created_at": {
@@ -1725,9 +1757,25 @@ expression: schema_bundle()
               "description": "The issue this comment belongs to.",
               "type": "string"
             },
+            "redacted_at": {
+              "description": "Soft-redact marker (D37/D-E): `None` = live; `Some` = redacted.\n\nThe PRESENCE is the \"is redacted\" flag (mirroring the tombstone `deleted_at`); on redact the\nrow is KEPT and `body` is masked to `\"\"`. The `CommentRedacted` audit event retains the\noriginal body (provenance — FORK-redact-wire).",
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "text": {
-              "description": "The comment body (serialized under `\"text\"`).",
+              "description": "The comment body (serialized under `\"text\"`); masked to `\"\"` on redact.",
               "type": "string"
+            },
+            "updated_at": {
+              "description": "Provenance-preserving edit instant (D37/D-D): `None` = never edited; `Some` = last edit.\n\n`add`'s own INSERT is create-time-only — see spine §3.2.1 MUST-1 SCOPE.",
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
@@ -1851,7 +1899,7 @@ expression: schema_bundle()
           ]
         },
         "comments": {
-          "description": "Comments (hydrated for export/display; populated v1.1).",
+          "description": "Comments (hydrated for export/display on all read paths — D37).",
           "items": {
             "$ref": "#/$defs/Comment"
           },
@@ -2850,10 +2898,10 @@ expression: schema_bundle()
     "output": {
       "$defs": {
         "Comment": {
-          "description": "A comment on an issue (spine §1.7; surface defined now, populated v1.1).",
+          "description": "A comment on an issue (spine §1.7; v1 surface — D37). Flat: no threading (FORK-T).",
           "properties": {
             "author": {
-              "description": "The comment author.",
+              "description": "The comment author (= the session actor at the MCP surface, FORK-M1b).",
               "type": "string"
             },
             "created_at": {
@@ -2870,9 +2918,25 @@ expression: schema_bundle()
               "description": "The issue this comment belongs to.",
               "type": "string"
             },
+            "redacted_at": {
+              "description": "Soft-redact marker (D37/D-E): `None` = live; `Some` = redacted.\n\nThe PRESENCE is the \"is redacted\" flag (mirroring the tombstone `deleted_at`); on redact the\nrow is KEPT and `body` is masked to `\"\"`. The `CommentRedacted` audit event retains the\noriginal body (provenance — FORK-redact-wire).",
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "text": {
-              "description": "The comment body (serialized under `\"text\"`).",
+              "description": "The comment body (serialized under `\"text\"`); masked to `\"\"` on redact.",
               "type": "string"
+            },
+            "updated_at": {
+              "description": "Provenance-preserving edit instant (D37/D-D): `None` = never edited; `Some` = last edit.\n\n`add`'s own INSERT is create-time-only — see spine §3.2.1 MUST-1 SCOPE.",
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
@@ -3020,7 +3084,7 @@ expression: schema_bundle()
               ]
             },
             "comments": {
-              "description": "Comments (hydrated for export/display; populated v1.1).",
+              "description": "Comments (hydrated for export/display on all read paths — D37).",
               "items": {
                 "$ref": "#/$defs/Comment"
               },
@@ -4043,6 +4107,256 @@ expression: schema_bundle()
       ],
       "title": "DiagnosticReport",
       "type": "object"
+    }
+  },
+  "comment": {
+    "input": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "The `comment` tool input (spine §5.2 — EXACT shape).",
+      "oneOf": [
+        {
+          "description": "Add a comment to an issue.",
+          "properties": {
+            "action": {
+              "const": "add",
+              "type": "string"
+            },
+            "agent_name": {
+              "default": null,
+              "description": "Self-reported agent name (capture-only).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "body": {
+              "description": "The comment body.",
+              "type": "string"
+            },
+            "harness": {
+              "default": null,
+              "description": "Self-reported harness identifier (capture-only).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "issue_id": {
+              "description": "The issue id to comment on.",
+              "type": "string"
+            },
+            "model": {
+              "default": null,
+              "description": "Self-reported model identifier (capture-only).",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "action",
+            "issue_id",
+            "body"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "List the comments on an issue.",
+          "properties": {
+            "action": {
+              "const": "list",
+              "type": "string"
+            },
+            "issue_id": {
+              "description": "The issue id.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "action",
+            "issue_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Update a comment's body (provenance-preserving: sets `updated_at`, audits the edit).",
+          "properties": {
+            "action": {
+              "const": "update",
+              "type": "string"
+            },
+            "agent_name": {
+              "default": null,
+              "description": "Self-reported agent name (capture-only).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "body": {
+              "description": "The new comment body.",
+              "type": "string"
+            },
+            "comment_id": {
+              "description": "The comment id.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "harness": {
+              "default": null,
+              "description": "Self-reported harness identifier (capture-only).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "model": {
+              "default": null,
+              "description": "Self-reported model identifier (capture-only).",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "action",
+            "comment_id",
+            "body"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Delete a comment — a SOFT-REDACT: the row is kept, the body masked, `redacted_at` set. The\noriginal body is retained in the audit trail — a mask, not erasure.",
+          "properties": {
+            "action": {
+              "const": "delete",
+              "type": "string"
+            },
+            "agent_name": {
+              "default": null,
+              "description": "Self-reported agent name (capture-only).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "comment_id": {
+              "description": "The comment id.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "harness": {
+              "default": null,
+              "description": "Self-reported harness identifier (capture-only).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "model": {
+              "default": null,
+              "description": "Self-reported model identifier (capture-only).",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "action",
+            "comment_id"
+          ],
+          "type": "object"
+        }
+      ],
+      "title": "CommentToolInput",
+      "type": "object"
+    },
+    "output": {
+      "$defs": {
+        "Comment": {
+          "description": "A comment on an issue (spine §1.7; v1 surface — D37). Flat: no threading (FORK-T).",
+          "properties": {
+            "author": {
+              "description": "The comment author (= the session actor at the MCP surface, FORK-M1b).",
+              "type": "string"
+            },
+            "created_at": {
+              "description": "Creation timestamp.",
+              "format": "date-time",
+              "type": "string"
+            },
+            "id": {
+              "description": "Stable comment id.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "issue_id": {
+              "description": "The issue this comment belongs to.",
+              "type": "string"
+            },
+            "redacted_at": {
+              "description": "Soft-redact marker (D37/D-E): `None` = live; `Some` = redacted.\n\nThe PRESENCE is the \"is redacted\" flag (mirroring the tombstone `deleted_at`); on redact the\nrow is KEPT and `body` is masked to `\"\"`. The `CommentRedacted` audit event retains the\noriginal body (provenance — FORK-redact-wire).",
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "text": {
+              "description": "The comment body (serialized under `\"text\"`); masked to `\"\"` on redact.",
+              "type": "string"
+            },
+            "updated_at": {
+              "description": "Provenance-preserving edit instant (D37/D-D): `None` = never edited; `Some` = last edit.\n\n`add`'s own INSERT is create-time-only — see spine §3.2.1 MUST-1 SCOPE.",
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "issue_id",
+            "author",
+            "text",
+            "created_at"
+          ],
+          "type": "object"
+        },
+        "CommentList": {
+          "description": "The CD-2 object-wrap for `comment{list}`: `{\"comments\":[…]}` (spine §5.3) — never a bare array.",
+          "properties": {
+            "comments": {
+              "description": "The comments on the issue, in canonical order (`created_at ASC, id ASC`).",
+              "items": {
+                "$ref": "#/$defs/Comment"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "comments"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Comment",
+          "description": "The single affected comment (`add` / `update` / `delete`-as-redact)."
+        },
+        {
+          "$ref": "#/$defs/CommentList",
+          "description": "The comments on an issue (`list`), CD-2 object-wrapped as `{\"comments\":[…]}`."
+        }
+      ],
+      "description": "The `comment` tool success union (spine §5.3, FR-6/D37). `#[serde(untagged)]`.\n\nOne scalar arm — `add`/`update`/`delete` all return the single affected `Comment`, exactly as\n`IssueOutput::Issue` covers create/show/reopen/restore — plus one CD-2 object-wrapped list arm.\n`Comment` is small, so no `Box` is needed.\n\nThe **redact wire form** is simply the returned `Comment` with `redacted_at` present and\n`\"text\": \"\"` — there is NO extra top-level `\"redacted\"` bool: the presence of `redacted_at` IS\nthe flag, mirroring the tombstone `deleted_at` (spine §1.7).",
+      "title": "CommentOutput"
     }
   },
   "error": {

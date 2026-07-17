@@ -39,6 +39,28 @@ async fn handshake_advertises_unblock_identity_and_default_instructions() {
         "default instructions summarize the surface, got: {instructions}"
     );
 
+    // The LIVE handshake counts must match the real surface. This string is agent-visible and NOT
+    // golden-pinned, so nothing else would catch it going stale (it read "7 tools" until D37 added
+    // the 8th); the builder now DERIVES the counts from `capabilities()` and this is the backstop.
+    let caps = unblock_mcp::capabilities();
+    assert!(
+        instructions.contains(&format!(
+            "{} tools, {} resources, {} prompts",
+            caps.tools.len(),
+            caps.resources.len(),
+            caps.prompts.len()
+        )),
+        "the handshake counts must match capabilities() ({} tools, {} resources, {} prompts), got: \
+         {instructions}",
+        caps.tools.len(),
+        caps.resources.len(),
+        caps.prompts.len()
+    );
+    assert!(
+        instructions.contains("8 tools"),
+        "the v1 surface is 8 tools (RK-3 FULL), got: {instructions}"
+    );
+
     let _ = client.cancel().await;
     let _ = server.cancel().await;
 }

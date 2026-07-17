@@ -1,6 +1,6 @@
 //! `unblock://capabilities` → [`Capabilities`] (spine §5.4, FR-12) — a pure builder (no `Session`).
 //!
-//! Lists the 7 tools, 5 resources, 3 prompts, and the full `ErrorCode`→exit-code/retryable map, all
+//! Lists the 8 tools, 5 resources, 3 prompts, and the full `ErrorCode`→exit-code/retryable map, all
 //! stamped with the mcp-owned [`crate::CONTRACT_VERSION`] (F-5). Pure so the CLI can dump the contract
 //! offline (FR-12) without a running server.
 
@@ -77,14 +77,16 @@ pub fn capabilities() -> Capabilities {
     }
 }
 
-/// The 7 tools (spine §5.1).
+/// The 8 tools (spine §5.1).
 fn tool_descriptors() -> Vec<ToolDescriptor> {
     [
         (
             "issue",
             "Create, show, update, close, reopen, delete, or restore issues.",
         ),
-        ("claim", "Atomically claim an issue for an assignee."),
+        // The shared constant — these bytes are contract and ship here AND in the
+        // `#[tool(description)]` attribute (the pair-compare in `contract_suite` keeps them equal).
+        ("claim", crate::tools::claim::CLAIM_TOOL_DESCRIPTION),
         (
             "defer",
             "Defer an issue until a future timestamp, or undefer it.",
@@ -105,6 +107,10 @@ fn tool_descriptors() -> Vec<ToolDescriptor> {
             "diagnostics",
             "Diagnostics: stats, info, where, version, lint, changelog, or orphans.",
         ),
+        // The 8th tool (FR-6/D37) — LAST, matching the §5.1 tool order. The description is the
+        // shared constant: these bytes are contract, and they ship here AND in the
+        // `#[tool(description)]` attribute with no test cross-checking the two.
+        ("comment", crate::tools::comment::COMMENT_TOOL_DESCRIPTION),
     ]
     .into_iter()
     .map(|(name, description)| ToolDescriptor {
@@ -187,8 +193,8 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_lists_the_seven_tools() {
-        assert_eq!(capabilities().tools.len(), 7);
+    fn capabilities_lists_the_eight_tools() {
+        assert_eq!(capabilities().tools.len(), 8);
     }
 
     #[test]
