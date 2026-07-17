@@ -103,7 +103,7 @@ pub fn agents_digest() -> AgentsDigest {
 
     // The ONE place tool identity crosses the two documents: pair each tool NAME with its input
     // schema by the spine §5.1 field order (`SchemaBundle` is a struct, not a map).
-    let inputs: [(&str, &Value); 7] = [
+    let inputs: [(&str, &Value); 8] = [
         ("issue", &bundle.issue.input),
         ("claim", &bundle.claim.input),
         ("defer", &bundle.defer.input),
@@ -111,6 +111,7 @@ pub fn agents_digest() -> AgentsDigest {
         ("dep", &bundle.dep.input),
         ("sync", &bundle.sync.input),
         ("diagnostics", &bundle.diagnostics.input),
+        ("comment", &bundle.comment.input),
     ];
 
     let tools = caps
@@ -121,7 +122,10 @@ pub fn agents_digest() -> AgentsDigest {
                 .iter()
                 .find(|pair| pair.0 == descriptor.name)
                 .map(|(_, input)| tool_actions(input))
-                .unwrap_or_default(); // unknown/renamed tool -> empty (never panics; caught by a test)
+                // An unknown/renamed tool -> empty actions (never panics). This SWALLOWS a missing
+                // pair above, so it is `every_tool_has_a_schema_pair` (below) — NOT this line —
+                // that catches a tool omitted from `inputs`.
+                .unwrap_or_default();
             ToolDigest {
                 name: descriptor.name,
                 description: descriptor.description,
@@ -290,6 +294,56 @@ fn resolve_arm_root_ref(
 mod tests {
     use super::agents_digest;
     use crate::options::CONTRACT_VERSION;
+
+    /// **THE DRIFT GUARD for the `inputs` pairs array.** Every tool in `capabilities()` MUST resolve
+    /// to a schema pair and therefore to a NON-EMPTY action list.
+    ///
+    /// Without this test, omitting a tool from the hard-coded `inputs: [(&str, &Value); N]` array is
+    /// SILENT: `find()` returns `None`, `unwrap_or_default()` swallows it, and the rendered
+    /// `AGENTS.md` ships that tool with an EMPTY actions table — no panic, no failure. That is
+    /// exactly how the 8th tool (`comment`, D37) would have shipped dark.
+    ///
+    /// Every v1 tool input is a tagged enum, so every tool has ≥ 1 action; a tool whose actions come
+    /// back empty is proof its pair is missing.
+    #[test]
+    fn every_tool_has_a_schema_pair_and_non_empty_actions() {
+        let digest = agents_digest();
+        assert_eq!(
+            digest.tools.len(),
+            8,
+            "the v1 surface is 8 tools (RK-3 FULL)"
+        );
+        for tool in &digest.tools {
+            assert!(
+                !tool.actions.is_empty(),
+                "tool `{}` has NO actions — it is missing from the agents_digest `inputs` pairs \
+                 array, so AGENTS.md would ship it with an empty table",
+                tool.name
+            );
+        }
+    }
+
+    /// The 8th tool (D37) renders its four real actions.
+    #[test]
+    fn comment_tool_lists_its_four_actions() {
+        let digest = agents_digest();
+        let comment = digest
+            .tools
+            .iter()
+            .find(|t| t.name == "comment")
+            .expect("the comment tool must be in the digest");
+        let names: Vec<&str> = comment
+            .actions
+            .iter()
+            .filter_map(|a| a.name.as_deref())
+            .collect();
+        for action in ["add", "list", "update", "delete"] {
+            assert!(
+                names.contains(&action),
+                "missing comment action {action}: {names:?}"
+            );
+        }
+    }
 
     /// The `issue` tool's actions must include BOTH `create` and `create_bulk` — the structural proof:
     /// `create_bulk` exists only as a `oneOf` arm, never in the tool's one-line description prose.

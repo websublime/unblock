@@ -1,6 +1,7 @@
-//! The 7 consolidated MCP tools (spine §5.1) + the shared quota preflight and JSON adapters.
+//! The 8 consolidated MCP tools (spine §5.1) + the shared quota preflight and JSON adapters.
 //!
-//! Each tool family is its own file (`issue`/`claim`/`defer`/`query`/`dep`/`sync`/`diagnostics`); the
+//! Each tool family is its own file (`issue`/`claim`/`defer`/`query`/`dep`/`sync`/`diagnostics`/
+//! `comment`); the
 //! tool functions live on [`crate::server::UnblockServer`] under one `#[tool_router]` (see
 //! `server.rs`). This module owns the cross-tool helpers:
 //!
@@ -11,6 +12,7 @@
 
 pub(crate) mod bulk_markdown;
 pub(crate) mod claim;
+pub(crate) mod comment;
 pub(crate) mod defer;
 pub(crate) mod dep;
 pub(crate) mod diagnostics;

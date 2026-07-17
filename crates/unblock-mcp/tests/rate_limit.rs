@@ -49,7 +49,7 @@ async fn rate_limit_chokepoint_is_the_live_tool_dispatch_path() {
         .list_all_tools()
         .await
         .expect("list_tools succeeds at 0 permits (discovery is not rate-limited)");
-    assert_eq!(tools.len(), 7, "discovery is not rate-limited");
+    assert_eq!(tools.len(), 8, "discovery is not rate-limited");
 
     // Every tool call is rejected in-band with RATE_LIMITED — the hand-written `call_tool` intercepts
     // before the router dispatch.

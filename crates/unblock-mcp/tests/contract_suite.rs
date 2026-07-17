@@ -101,19 +101,19 @@ fn schema_bundle_golden() {
 // Taxonomy conformance (PRD §12.2) — builder-vs-router parity over a LIVE duplex.
 // --------------------------------------------------------------------------------------------------
 
-/// The LIVE server advertises exactly the 7 tools the pure `capabilities()` builder lists, in the same
-/// set (builder-vs-router parity). The count is ≤ 8; `create_bulk` is an `issue`-tool discriminator,
-/// NOT an 8th tool.
+/// The LIVE server advertises exactly the 8 tools the pure `capabilities()` builder lists, in the same
+/// set (builder-vs-router parity). The RK-3 budget is now FULL at 8 ≤ 8 (`comment` is the 8th tool,
+/// D37; `create_bulk` remains an `issue`-tool discriminator, not a tool).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn live_list_tools_equals_the_builder_seven() {
+async fn live_list_tools_equals_the_builder_eight() {
     let session = session().await;
     let (client, server, _cancel) = connect(session).await;
 
     let tools = client.list_all_tools().await.expect("list_tools");
     assert_eq!(
         tools.len(),
-        7,
-        "exactly 7 tools (≤ 8; create_bulk is a discriminator)"
+        8,
+        "exactly 8 tools (RK-3 budget FULL at 8 ≤ 8; create_bulk is a discriminator)"
     );
 
     let mut live: Vec<String> = tools.into_iter().map(|t| t.name.to_string()).collect();
@@ -227,14 +227,14 @@ async fn live_resource_templates_and_prompts_match_the_builder() {
 /// input, so this invariant is unblock-owned: the six tagged-enum inputs earn it via
 /// `#[schemars(extend("type" = "object"))]`; `ClaimInput` already conforms. A strict TS-SDK client
 /// rejects the WHOLE `tools/list` if any single element omits the root `type`, so this asserts it for
-/// ALL 7 tools over the real router (not just the pure bundle builder).
+/// ALL 8 tools over the real router (not just the pure bundle builder).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_tools_input_schema_root_is_object() {
     let session = session().await;
     let (client, server, _cancel) = connect(session).await;
 
     let tools = client.list_all_tools().await.expect("list_tools");
-    assert_eq!(tools.len(), 7, "exactly 7 tools");
+    assert_eq!(tools.len(), 8, "exactly 8 tools");
     for tool in &tools {
         assert_eq!(
             tool.input_schema.get("type"),
@@ -327,6 +327,142 @@ async fn live_dep_list_and_cycles_structured_content_are_objects() {
         !cycles.is_array(),
         "dep cycles must never be a bare array (CD-2)"
     );
+
+    let _ = client.cancel().await;
+    let _ = server.cancel().await;
+}
+
+// --------------------------------------------------------------------------------------------------
+// The 8th tool — `comment` (FR-6/D37) over the LIVE router.
+// --------------------------------------------------------------------------------------------------
+
+/// The full `comment` lifecycle over the live wire: add -> list -> update -> delete(redact),
+/// pinning the CD-2 object-wrap and the D-E redact wire form.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_comment_add_list_update_delete_round_trip() {
+    let session = session().await;
+    let (client, server, _cancel) = connect(session).await;
+
+    let (is_error, created) = call_tool(
+        &client,
+        "issue",
+        json!({ "action": "create", "title": "seed", "quick": true }),
+    )
+    .await;
+    assert!(!is_error, "seed create must succeed");
+    let id = created["id"].as_str().expect("minted id").to_string();
+
+    // add -> the single affected Comment (the scalar arm, not a wrap).
+    let (is_error, added) = call_tool(
+        &client,
+        "comment",
+        json!({ "action": "add", "issue_id": id, "body": "first" }),
+    )
+    .await;
+    assert!(!is_error, "comment add must succeed: {added:?}");
+    assert_eq!(added["text"], json!("first"), "the body rides under `text`");
+    assert_eq!(added["issue_id"], json!(id));
+    // MUST-1: add leaves updated_at NULL, and it skips-when-None on the wire.
+    assert!(added.get("updated_at").is_none());
+    assert!(added.get("redacted_at").is_none());
+    let comment_id = added["id"].as_i64().expect("minted comment id");
+
+    // list -> CD-2 object-wrapped `{"comments":[…]}`, NEVER a bare array.
+    let (is_error, listed) = call_tool(
+        &client,
+        "comment",
+        json!({ "action": "list", "issue_id": id }),
+    )
+    .await;
+    assert!(!is_error, "comment list must succeed");
+    assert!(
+        listed
+            .get("comments")
+            .and_then(serde_json::Value::as_array)
+            .is_some(),
+        "comment list structuredContent MUST be object-wrapped `{{\"comments\":[…]}}` (CD-2), got \
+         {listed:?}"
+    );
+    assert!(
+        !listed.is_array(),
+        "comment list must never be a bare array (CD-2)"
+    );
+    assert_eq!(listed["comments"].as_array().expect("array").len(), 1);
+
+    // update -> provenance-preserving (D-D): the body changes AND updated_at appears.
+    let (is_error, edited) = call_tool(
+        &client,
+        "comment",
+        json!({ "action": "update", "comment_id": comment_id, "body": "revised" }),
+    )
+    .await;
+    assert!(!is_error, "comment update must succeed: {edited:?}");
+    assert_eq!(edited["text"], json!("revised"));
+    assert!(
+        edited.get("updated_at").is_some(),
+        "the update MUST surface updated_at — the bump IS the provenance (D-D)"
+    );
+
+    // delete -> the D-E redact wire form: redacted_at present + "text":"" and NO extra bool.
+    let (is_error, redacted) = call_tool(
+        &client,
+        "comment",
+        json!({ "action": "delete", "comment_id": comment_id }),
+    )
+    .await;
+    assert!(!is_error, "comment delete must succeed: {redacted:?}");
+    assert_eq!(redacted["text"], json!(""), "the body is masked to \"\"");
+    assert!(
+        redacted.get("redacted_at").is_some(),
+        "the PRESENCE of redacted_at is the flag"
+    );
+    assert!(
+        redacted.get("redacted").is_none(),
+        "there is NO extra top-level `redacted` bool (spine §5.3)"
+    );
+
+    // The row is KEPT — a soft-redact, never a hard delete.
+    let (_, after) = call_tool(
+        &client,
+        "comment",
+        json!({ "action": "list", "issue_id": id }),
+    )
+    .await;
+    assert_eq!(
+        after["comments"].as_array().expect("array").len(),
+        1,
+        "soft-redact KEEPS the row"
+    );
+
+    let _ = client.cancel().await;
+    let _ = server.cancel().await;
+}
+
+/// A `comment add` on a missing issue surfaces the in-band FR-11 error with the REUSED
+/// `ISSUE_NOT_FOUND` code (FORK-E1 — the `ErrorCode` taxonomy did not grow for D37).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_comment_add_missing_issue_is_in_band_issue_not_found() {
+    let session = session().await;
+    let (client, server, _cancel) = connect(session).await;
+
+    let (is_error, payload) = call_tool(
+        &client,
+        "comment",
+        json!({ "action": "add", "issue_id": "ub-nope", "body": "hi" }),
+    )
+    .await;
+    assert!(is_error, "a missing issue must be an in-band domain error");
+    assert_eq!(payload["code"], json!("ISSUE_NOT_FOUND"), "{payload:?}");
+
+    // An empty body is the engine's ValidationFailed aggregate, in-band.
+    let (is_error, payload) = call_tool(
+        &client,
+        "comment",
+        json!({ "action": "add", "issue_id": "ub-nope", "body": "   " }),
+    )
+    .await;
+    assert!(is_error);
+    assert_eq!(payload["code"], json!("VALIDATION_FAILED"), "{payload:?}");
 
     let _ = client.cancel().await;
     let _ = server.cancel().await;
