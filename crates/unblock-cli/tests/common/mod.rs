@@ -20,6 +20,7 @@ use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use assert_cmd::cargo::CommandCargoExt as _;
@@ -128,14 +129,36 @@ pub struct McpClient {
     /// Every non-empty stdout LINE the server produced (each must be valid JSON — NFR-14 guard).
     /// Only populated while `stdout` is still owned by this client (i.e. `read_response` ran).
     pub seen_lines: Vec<String>,
+    /// The child's STDERR, drained continuously by a background thread (T3.2.1/D38 — see
+    /// [`stderr_snapshot`](Self::stderr_snapshot)).
+    stderr: Arc<Mutex<String>>,
+    /// The child's STDOUT once [`capture_stdout`](McpClient::capture_stdout) has moved it into a
+    /// background capture thread (empty until then — the protocol cases own stdout themselves).
+    stdout_capture: Arc<Mutex<String>>,
 }
 
 impl McpClient {
-    /// Spawn `unblock mcp` in `root` with piped stdio + captured stderr (kept off stdout).
+    /// Spawn `unblock mcp` in `root` with piped stdio + a background-drained stderr (kept off stdout).
     #[must_use]
     pub fn spawn(root: &Path) -> Self {
+        Self::spawn_with_args(root, &[])
+    }
+
+    /// Spawn `unblock mcp` at DEBUG verbosity (`-vv`, `logging.rs`'s level map) — the T3.2.1/D38
+    /// peer of [`spawn`](Self::spawn) for the cases that assert on the child's `tracing::debug!`
+    /// output (the demoted cancellation-class diagnostic, and the `install()`-ordering markers).
+    /// `-v` is a clap `global` flag, so it is accepted after the subcommand.
+    #[must_use]
+    pub fn spawn_verbose(root: &Path) -> Self {
+        Self::spawn_with_args(root, &["-vv"])
+    }
+
+    /// Spawn `unblock mcp <args...>` in `root` with piped stdio + a background-drained stderr.
+    #[must_use]
+    pub fn spawn_with_args(root: &Path, args: &[&str]) -> Self {
         let mut child = unblock_in(root)
             .arg("mcp")
+            .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -143,12 +166,78 @@ impl McpClient {
             .expect("spawn `unblock mcp`");
         let stdin = child.stdin.take().expect("child stdin");
         let stdout = BufReader::new(child.stdout.take().expect("child stdout"));
+
+        // T3.2.1/D38 diagnosability: the child's stderr was previously PIPED AND NEVER READ, so every
+        // child-side diagnostic (`error[CODE]: message`, a panic, a tracing line) was destroyed —
+        // including in CI, which is a large part of why the pre-handshake hang went unnoticed for
+        // weeks behind a green suite. Drain it CONTINUOUSLY on a background thread (never at EOF only:
+        // a hung child never reaches EOF, and its stderr must still be readable) into a shared buffer
+        // the assertion messages can quote. Draining also guarantees a full stderr pipe can never
+        // stall the child mid-shutdown, which would itself masquerade as the hang under test.
+        let stderr = Arc::new(Mutex::new(String::new()));
+        if let Some(pipe) = child.stderr.take() {
+            let sink = Arc::clone(&stderr);
+            std::thread::spawn(move || drain_into(pipe, &sink));
+        }
+
         Self {
             child,
             stdin: Some(stdin),
             stdout: Some(stdout),
             next_id: 1,
             seen_lines: Vec::new(),
+            stderr,
+            stdout_capture: Arc::new(Mutex::new(String::new())),
+        }
+    }
+
+    /// Everything the child has written to STDERR so far (T3.2.1/D38). Quote this in EVERY failure
+    /// message of a case that drives a child: without it a child-side error is invisible and the case
+    /// reports only a bare exit code / timeout (the diagnosability gap D38 was hidden by).
+    #[must_use]
+    pub fn stderr_snapshot(&self) -> String {
+        snapshot(&self.stderr)
+    }
+
+    /// Move this client's STDOUT into a background CAPTURE thread, RETAINING every byte for
+    /// [`stdout_snapshot`](Self::stdout_snapshot) (T3.2.1/D38 — the FR-11 "always-valid JSON on
+    /// stdout" oracle for the unsignalled `Err` path). The retaining peer of
+    /// [`write_without_reading`](Self::write_without_reading), which DISCARDS what it drains.
+    ///
+    /// Like that method this consumes the stdout reader, so no further request/response traffic is
+    /// possible on this client afterwards — call it only on a case that just signals/waits.
+    pub fn capture_stdout(&mut self) {
+        if let Some(stdout) = self.stdout.take() {
+            let sink = Arc::clone(&self.stdout_capture);
+            std::thread::spawn(move || drain_into(stdout, &sink));
+        }
+    }
+
+    /// Everything the child has written to STDOUT since [`capture_stdout`](Self::capture_stdout)
+    /// (empty if it was never called).
+    #[must_use]
+    pub fn stdout_snapshot(&self) -> String {
+        snapshot(&self.stdout_capture)
+    }
+
+    /// Wait for the child to exit within `timeout`, returning its exit status — the [`wait_for`]
+    /// peer that, on a TIMEOUT (i.e. the D38 hang), reports the child's captured STDERR instead of a
+    /// bare "did not exit". Prefer this over [`wait_for`] whenever an `McpClient` owns the child.
+    ///
+    /// # Panics
+    /// If the child does not exit within `timeout` (the no-hang invariant, spine §5b).
+    pub fn wait_for(&mut self, timeout: Duration) -> std::process::ExitStatus {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(status) = self.child.try_wait().expect("try_wait") {
+                return status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "D38 no-hang invariant: the child did not exit within {timeout:?}. Child stderr:\n{}",
+                self.stderr_snapshot()
+            );
+            std::thread::sleep(Duration::from_millis(25));
         }
     }
 
@@ -230,6 +319,78 @@ impl McpClient {
         }
     }
 
+    /// **The DETERMINISTIC pre-handshake readiness barrier (T3.2.1/D38).** Block until the server is
+    /// provably parked awaiting `initialize` — WITHOUT completing the handshake — by round-tripping a
+    /// JSON-RPC `ping`.
+    ///
+    /// The MCP lifecycle spec permits `ping` BEFORE `initialize`, and rmcp 1.7 implements it: its
+    /// handshake loop (`rmcp-1.7.0/src/service/server.rs` `serve_server_with_ct_inner`) answers a
+    /// `PingRequest` with an `EmptyResult` and LOOPS BACK to `expect_next_message` — it does not
+    /// break out to negotiate. (`VersionClampingTransport` passes it through untouched: the clamp
+    /// only rewrites `InitializeRequest`.) So receiving the ping response proves, IN-BAND:
+    /// 1. the run loop is up ⇒ `shutdown::install()` has ALREADY run (it precedes `run_mcp_server`),
+    ///    so a signal sent now is RECORDED, never delivered to the default disposition; and
+    /// 2. the stdio transport is bound and a FRESH blocking-pool `stdin` read is parked — the exact
+    ///    precondition of the D38 runtime-drop hang; and
+    /// 3. the `initialize` handshake is still INCOMPLETE — the `Err(Cancelled)` window under test.
+    ///
+    /// **This replaces a fixed 300ms sleep, which was FLAKY (measured RED 3/3 under CPU load: the
+    /// window expired while the child was still opening/migrating the DB, so the signal landed before
+    /// `install()` and killed it by default disposition → `left: None` = WIFSIGNALED, with an empty
+    /// child stderr).** Lengthening that sleep would only have moved the race; widening the assertion
+    /// to accept a signal-death would have been the prohibited vacuous fix. The predecessor's
+    /// docstring claimed "there is no in-band signal for 'rmcp is now awaiting initialize'" — that is
+    /// FALSE, and this is it.
+    ///
+    /// # Panics
+    /// If the child dies or does not answer the ping (either is a REAL defect: the server must stay
+    /// alive awaiting a client) — reporting the child's captured stderr.
+    pub fn ping_barrier(&mut self) {
+        assert!(
+            self.child.try_wait().expect("try_wait").is_none(),
+            "`unblock mcp` must stay alive awaiting `initialize`, but exited before the barrier. \
+             Child stderr:\n{}",
+            self.stderr_snapshot()
+        );
+        let resp = self.request("ping", &json!({}));
+        assert!(
+            resp.get("error").is_none(),
+            "a pre-initialize `ping` must be answered (the MCP lifecycle spec permits it and rmcp \
+             1.7 implements it) — got: {resp}. Child stderr:\n{}",
+            self.stderr_snapshot()
+        );
+    }
+
+    /// Block until the child's STDERR contains `marker`, returning the full snapshot (T3.2.1/D38).
+    ///
+    /// The readiness barrier for the phases that happen BEFORE the run loop exists (so
+    /// [`ping_barrier`](Self::ping_barrier) cannot see them) — i.e. the `install()`-ordering markers.
+    /// Requires a `-vv` child ([`spawn_verbose`](Self::spawn_verbose)): the markers are `debug!`.
+    ///
+    /// # Panics
+    /// If `marker` does not appear within `timeout`, or the child dies first.
+    pub fn wait_for_stderr(&mut self, marker: &str, timeout: Duration) -> String {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let snapshot = self.stderr_snapshot();
+            if snapshot.contains(marker) {
+                return snapshot;
+            }
+            if let Some(status) = self.child.try_wait().expect("try_wait") {
+                panic!(
+                    "the child exited ({status:?}) before emitting `{marker}` on stderr. \
+                     Child stderr:\n{snapshot}"
+                );
+            }
+            assert!(
+                Instant::now() < deadline,
+                "`{marker}` did not appear on the child's stderr within {timeout:?} \
+                 (is the child `-vv`? the markers are debug-level). Child stderr:\n{snapshot}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     /// Complete the MCP `initialize` handshake, returning the `InitializeResult`.
     pub fn initialize(&mut self) -> Value {
         let result = self.request(
@@ -268,6 +429,33 @@ impl Drop for McpClient {
         // Best-effort: kill the child if a test bailed before shutting it down cleanly.
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+/// Read a background-drained capture buffer, tolerating a poisoned lock (a panicking drain thread
+/// must never turn a real assertion failure into a confusing second panic).
+fn snapshot(buffer: &Mutex<String>) -> String {
+    buffer.lock().map_or_else(
+        |poisoned| poisoned.into_inner().clone(),
+        |guard| guard.clone(),
+    )
+}
+
+/// Drain `pipe` line-by-line into `sink` until EOF (T3.2.1/D38) — backs [`McpClient`]'s stderr
+/// capture. Appends INCREMENTALLY (never `read_to_end`) so a still-running / HUNG child's stderr is
+/// already readable when a case's deadline fires — the whole point of capturing it.
+fn drain_into<R: std::io::Read>(pipe: R, sink: &Mutex<String>) {
+    let mut reader = BufReader::new(pipe);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => match sink.lock() {
+                Ok(mut guard) => guard.push_str(&line),
+                Err(poisoned) => poisoned.into_inner().push_str(&line),
+            },
+        }
     }
 }
 

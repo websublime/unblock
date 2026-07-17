@@ -2,10 +2,11 @@
 //! `doctor`, `version`, `init`, `agents`, `update` (D3). Thin routing + config flag-forwarding +
 //! tracing + the 0–8 exit-code boundary. Owns cooperative-shutdown signal install (FR-17, OQ-4).
 //!
-//! The `unblock` binary entry point ([`src/main.rs`]) is trivial: it builds a tokio runtime and calls
-//! [`run`], which parses argv, initializes stderr-only logging, dispatches to a command handler, and
-//! maps the outcome to a [`std::process::ExitCode`]. The library facade exists so the routing +
-//! exit-code boundary are testable via [`run_with`] without spawning a process.
+//! The `unblock` binary entry point ([`src/main.rs`]) holds exactly one responsibility: it OWNS the
+//! tokio runtime (building it, `block_on`-ing [`run`], then disposing of it NON-blockingly — the D38
+//! no-hang invariant, spine §5b). [`run`] parses argv, initializes stderr-only logging, dispatches to
+//! a command handler, and maps the outcome to a [`std::process::ExitCode`]. The library facade exists
+//! so the routing + exit-code boundary are testable via [`run_with`] without spawning a process.
 //!
 //! **The CLI is a pure `CliOverrides` forwarder** (config owns ALL layering — D27/AD-3); the ONE
 //! CLI-owned resolution seam is clap `env` binding. See `docs/plans/crates/unblock-cli.md` and the
@@ -31,9 +32,11 @@ pub use exit::CliError;
 
 /// Parse `std::env::args_os()`, dispatch, and return the process exit code.
 ///
-/// This is the entry point [`src/main.rs`] calls under `#[tokio::main]`. It never panics on a domain
-/// error — every failure is mapped to a [`StructuredError`](unblock_error::StructuredError) and its
-/// 0–8 exit code at the [`exit`] boundary (spine §2.4, conformance rule 6.5).
+/// This is the entry point [`src/main.rs`] `block_on`s on the runtime it OWNS (D38 — NOT
+/// `#[tokio::main]`, whose structurally unavoidable blocking runtime drop hung `unblock mcp`; see
+/// the `main.rs` module docs). It never panics on a domain error — every failure is mapped to a
+/// [`StructuredError`](unblock_error::StructuredError) and its 0–8 exit code at the [`exit`]
+/// boundary (spine §2.4, conformance rule 6.5).
 pub async fn run() -> ExitCode {
     run_with(std::env::args_os()).await
 }

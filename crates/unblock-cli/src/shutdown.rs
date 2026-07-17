@@ -2,8 +2,10 @@
 //! handling (a library must not hijack it, OQ-4).
 //!
 //! [`install`] returns a [`ShutdownHandle`] bundling:
-//! - a `tokio_util::sync::CancellationToken` (`token`) fed into `McpServerOptions.cancel` — a `cancel()`
-//!   drives `unblock_mcp::run_mcp_server` to return `Ok`;
+//! - a `tokio_util::sync::CancellationToken` (`token`) fed into `McpServerOptions.cancel` — a
+//!   `cancel()` drives `unblock_mcp::run_mcp_server` to return `Ok` if the rmcp `initialize`
+//!   handshake had completed, else `Err(Transport{Cancelled})` (spine §0.1 — BOTH are normal
+//!   cooperative-shutdown outcomes; D38);
 //! - an `Arc<AtomicBool>` (`flag`) wired into the engine via `Session::with_shutdown_flag` — the
 //!   engine reads it at mutation checkpoints (`Session::is_shutdown_requested`);
 //! - an `Arc<AtomicU8>` (`signalled`) recording `128 + signo` on the FIRST signal so `run_mcp_server` can
@@ -26,7 +28,8 @@ use tokio_util::sync::CancellationToken;
 /// The cooperative-shutdown handle handed to `run_mcp_server` (D27/AD-4).
 #[derive(Debug, Clone)]
 pub struct ShutdownHandle {
-    /// The cancellation token fed to `McpServerOptions.cancel` (a `cancel()` returns `run_mcp_server` cleanly).
+    /// The cancellation token fed to `McpServerOptions.cancel` (a `cancel()` returns `run_mcp_server`
+    /// via one of its two cooperative outcomes — `Ok` or `Err(Transport{Cancelled})`, D38).
     pub token: CancellationToken,
     /// The engine shutdown flag wired via `Session::with_shutdown_flag`.
     pub flag: Arc<AtomicBool>,

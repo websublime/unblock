@@ -19,16 +19,30 @@
 //!   vacuously via a validation-rejected (non-signal) doc.
 //! - **C2** — mid-write atomicity (~5 bounded rounds; a `#[ignore]`d ~80-round soak): a SIGTERM raced
 //!   against an UNREAD `create_bulk` response (background-drained, never read synchronously — a
-//!   signal-case guardrail). `count ∈ {0, N}`, never partial.
+//!   signal-case guardrail). `count ∈ {0, N}`, never partial, and the exit is exactly `143`.
+//!   **T3.2.1/D38 — corrected:** `6e5b72b` had widened this to accept exit 1 on the (FALSE) rationale
+//!   that the signal races a *blocked stdout pipe write*; `common::write_without_reading`
+//!   background-drains stdout to EOF precisely so the pipe can never block, so no such race exists.
+//!   The accepted exit 1 was the D38 defect itself. Re-tightened to `assert_eq!(Some(143))`.
 //! - **C3** — signo-generic exit codes: SIGINT → 130, SIGHUP → 129 (SIGTERM → 143 is covered by C1 /
 //!   `mcp_lifecycle.rs::sigterm_drives_clean_shutdown_with_exit_143`).
 //! - **C6** — second-signal escalation (race-based, invariant-only): SIGTERM then an ESRCH-tolerant
 //!   SIGINT ~1–2ms later. Asserts NO HANG and `code() ∈ {143, 130}` — NOT `Some(143)` alone: the two
 //!   signals sent that close together can both be pending, and the lower signo (INT) can win delivery,
-//!   so a CORRECT system may legitimately record 130. **Accepted gap:** this does NOT prove the
-//!   escalation LINE itself (`shutdown.rs`'s second-signal `process::exit`) — that branch is
-//!   e2e-indistinguishable from the cooperative exit (a 100-row bulk drains in ms) and is unit-covered
-//!   by `shutdown.rs::first_signal_semantics_fire_both_sinks`.
+//!   so a CORRECT system may legitimately record 130. Both are `128+signo`, so this is a legitimate
+//!   two-signal DELIVERY race and NOT to be "tightened" to an `assert_eq!` (that would be a false
+//!   pin); the standing prohibition — no `||`-widened acceptance of a NON-signal code — is untouched
+//!   by it. This case is what CAUGHT D38 (it flaked `Some(1)` in CI under load).
+//!   **Accepted gap (T3.2.1/D38 — EXTENDED/SHARPENED, not falsified):** the claim below stays TRUE
+//!   before and after the fix — C6 does not prove the escalation LINE itself (`shutdown.rs`'s
+//!   second-signal `process::exit`), which is e2e-indistinguishable from the cooperative exit (a
+//!   100-row bulk drains in ms) and is unit-covered by
+//!   `shutdown.rs::first_signal_semantics_fire_both_sinks`. What it OMITTED is that until T3.2.1 that
+//!   branch was the SOLE exit on the PRE-handshake signal path — i.e. load-bearing (the only thing
+//!   rescuing the D38 hang), not the mere backstop the wording implied. That is why the gap was worth
+//!   accepting for the *line* but never for the *behaviour*. Post-D38 it is a genuine backstop, and
+//!   the first-signal pre-handshake exit is proven deterministically by
+//!   `mcp_lifecycle.rs::a_signal_before_any_handshake_exits_128_plus_signo_and_never_hangs`.
 //! - **C-doctor** — after a clean C1-style round, `unblock doctor --output json` reports a clean
 //!   integrity header (reusing `migrate_doctor.rs`'s promoted `json_report`/`detail` helpers — no
 //!   invented report shape).
@@ -46,7 +60,7 @@ use std::time::Duration;
 
 use common::{
     McpClient, Workspace, bulk_markdown, detail, id_set, json_report, reopen_and_check,
-    send_signal, send_signal_tolerant, wait_for,
+    send_signal, send_signal_tolerant,
 };
 use serde_json::{Value, json};
 
@@ -91,11 +105,12 @@ async fn c1_sigterm_after_a_committed_bulk_is_durable_and_stdout_stays_json_only
 
     let pid = client.child.id();
     send_signal(pid, "TERM");
-    let status = wait_for(&mut client.child, Duration::from_secs(20));
+    let status = client.wait_for(Duration::from_secs(20));
     assert_eq!(
         status.code(),
         Some(143),
-        "SIGTERM after a committed write yields the conventional 128+15 exit"
+        "SIGTERM after a committed write yields the conventional 128+15 exit. Child stderr:\n{}",
+        client.stderr_snapshot()
     );
 
     // stdout-only-JSON (NFR-14): safe to assert here — C1 read every response synchronously, so no
@@ -136,18 +151,26 @@ async fn run_c2_round(round: usize) {
     std::thread::sleep(Duration::from_millis(jitter_ms(15)));
     let pid = client.child.id();
     send_signal(pid, "TERM");
-    let status = wait_for(&mut client.child, Duration::from_secs(20));
-    // A mid-write SIGTERM (against an UNREAD stdout pipe — a pathological client that stopped reading)
-    // races the cooperative shutdown against a blocked pipe write. Both outcomes are correct: the serve
-    // loop cancels cleanly (128+15 = 143), OR its blocked write errors during cancellation (the cli maps
-    // `McpServerError` → `InternalError` → exit 1). The load-bearing invariant is the DB atomicity
-    // asserted below (count 0-or-N, no WAL corruption) — never the exact exit code. A clean-success `0`
-    // on SIGTERM would be wrong; any code outside {143, 1} is a new signal worth investigating.
-    let code = status.code();
-    assert!(
-        code == Some(143) || code == Some(1),
-        "round {round}: mid-write SIGTERM must exit 143 (clean cancel) or 1 (write-path error during \
-         shutdown), got {code:?}"
+    let status = client.wait_for(Duration::from_secs(20));
+    // A mid-write SIGTERM is DETERMINISTIC in its exit code: the recorded signal takes precedence over
+    // whatever the MCP server run loop returned (D38 clause 1), so it is exactly 128+15 == 143.
+    //
+    // T3.2.1 corpus correction — this comment previously justified an `|| Some(1)` widening with "the
+    // signal races a BLOCKED PIPE WRITE against the cooperative shutdown, and the blocked write errors
+    // during cancellation". That rationale was FALSE: `common::write_without_reading`
+    // (`tests/common/mod.rs`) deliberately spawns a background thread that drains stdout to EOF
+    // precisely so an unread response can NEVER fill the OS pipe buffer or stall the child's write.
+    // The pipe cannot block, so no such race exists. The exit 1 that widening accepted was really the
+    // D38 defect (a cancel landing during/near the rmcp handshake → `Err(Cancelled)` → an early return
+    // PAST the signal guard → `InternalError`), i.e. a wrong causal story that hid a GA-blocking hang
+    // behind a green suite. Re-tightened to the exact code, never widened (CLAUDE.md: widening an
+    // assertion as the fix is the prohibited simplification).
+    assert_eq!(
+        status.code(),
+        Some(143),
+        "round {round}: a mid-write SIGTERM exits exactly 128+15 == 143 — the recorded signal takes \
+         precedence over the run loop's return (D38). Child stderr:\n{}",
+        client.stderr_snapshot()
     );
 
     let (problems, count) = reopen_and_check(ws.root()).await;
@@ -196,11 +219,12 @@ async fn c3_signo_generic_exit_codes_and_clean_integrity() {
 
         let pid = client.child.id();
         send_signal(pid, sig);
-        let status = wait_for(&mut client.child, Duration::from_secs(20));
+        let status = client.wait_for(Duration::from_secs(20));
         assert_eq!(
             status.code(),
             Some(code),
-            "sig {sig}: exit must be the conventional 128+signo == {code}"
+            "sig {sig}: exit must be the conventional 128+signo == {code}. Child stderr:\n{}",
+            client.stderr_snapshot()
         );
 
         let (problems, _count) = reopen_and_check(ws.root()).await;
@@ -236,12 +260,13 @@ async fn c6_second_signal_escalation_never_hangs_and_keeps_a_valid_exit_code() {
     send_signal_tolerant(pid, "INT");
 
     // A generous deadline proves there is NO HANG regardless of which signal's code got recorded.
-    let status = wait_for(&mut client.child, Duration::from_secs(20));
+    let status = client.wait_for(Duration::from_secs(20));
     let code = status.code();
     assert!(
         matches!(code, Some(143 | 130)),
         "the second signal must not corrupt the recorded exit code — both 143 (TERM) and 130 (INT) \
-         are valid 128+signo outcomes of this race, got {code:?}"
+         are valid 128+signo outcomes of this race, got {code:?}. Child stderr:\n{}",
+        client.stderr_snapshot()
     );
 
     // Hard-exit path guardrail: assert the exit code + the reopen invariant ONLY — NO stdout-only-JSON
@@ -276,8 +301,13 @@ async fn c_doctor_reports_clean_integrity_after_a_shutdown_round() {
 
     let pid = client.child.id();
     send_signal(pid, "TERM");
-    let status = wait_for(&mut client.child, Duration::from_secs(20));
-    assert_eq!(status.code(), Some(143));
+    let status = client.wait_for(Duration::from_secs(20));
+    assert_eq!(
+        status.code(),
+        Some(143),
+        "the round must end on the conventional 128+15 exit. Child stderr:\n{}",
+        client.stderr_snapshot()
+    );
     drop(client);
 
     // Reuses `migrate_doctor.rs`'s promoted `json_report`/`detail` helpers — asserts exit 0 (inside

@@ -306,11 +306,25 @@ fn rate_limited_error() -> StructuredError {
 /// Build, bind, and run the MCP stdio server until cancellation (FR-17).
 ///
 /// Binds the `transport-io` stdio transport and runs `serve_with_ct` with the caller's
-/// [`McpServerOptions::cancel`] token; a `cancel()` drains in-flight work and returns cleanly. The
-/// `session` is shared as `Arc<Session>` (the engine owns the write Semaphore, D14).
+/// [`McpServerOptions::cancel`] token. The `session` is shared as `Arc<Session>` (the engine owns the
+/// write Semaphore, D14).
+///
+/// # Cancellation is TWO-outcome (NORMATIVE — spine §0.1, D38)
+///
+/// A `cancel()` drains in-flight work and returns `Ok(())` **only if the rmcp `initialize` handshake
+/// had already completed**. rmcp's `serve_server_with_ct` wraps the WHOLE handshake in a `select!`
+/// against the token, so a cancel landing **during** the handshake instead returns
+/// [`McpServerError::Transport`] (wrapping `ServerInitializeError::Cancelled`).
+///
+/// **Both are normal cooperative-shutdown outcomes.** A caller MUST NOT treat that `Err` as an
+/// independent fault: it must still run its clean teardown (`Session::shutdown()`), and if a signal
+/// was recorded the exit is `128+signo` regardless of which outcome occurred (spine §5b — the CLI's
+/// `commands/mcp.rs` is the reference consumer). Assuming the unconditional `Ok` this doc previously
+/// claimed is what made `unblock mcp` hang forever on a pre-handshake SIGTERM (PRD §4/D38).
 ///
 /// # Errors
-/// - [`McpServerError::Transport`] if the rmcp service fails to initialize/bind.
+/// - [`McpServerError::Transport`] if the rmcp service fails to initialize/bind — **including the
+///   normal `Cancelled` outcome above**, which is a shutdown signal, not a failure.
 /// - [`McpServerError::RunLoop`] if the run loop ends abnormally (the background task is aborted).
 pub async fn run_mcp_server(
     session: Arc<Session>,
