@@ -127,7 +127,7 @@ unblock's product surface is MCP, so the goal is to get an MCP client spawning t
    with an arbitrary working directory; without it, `unblock mcp` walks up from the current directory
    to find `.unblock/`. (`--dir` also honours `UNBLOCK_DIR`, with `--dir` > `UNBLOCK_DIR`.)
 
-The contract id is **`unblock.mcp.v1.4`**. For machine-readable discovery, agents read the resources
+The contract id is **`unblock.mcp.v1.5`**. For machine-readable discovery, agents read the resources
 `unblock://capabilities` (the descriptor tables) and `unblock://schema` (the full JsonSchema bundle
 for every tool I/O). The topology is **child-per-client** (D31): each MCP client spawns its own
 `unblock mcp` child, and a cross-process advisory `.unblock/.write.lock` serializes writers across
@@ -135,7 +135,7 @@ clients.
 
 ## MCP surface
 
-The contract (`unblock.mcp.v1.4`) exposes **7 tools**, **5 resources**, and **3 prompts**.
+The contract (`unblock.mcp.v1.5`) exposes **8 tools**, **5 resources**, and **3 prompts**.
 
 | Tool | Actions |
 |---|---|
@@ -146,6 +146,7 @@ The contract (`unblock.mcp.v1.4`) exposes **7 tools**, **5 resources**, and **3 
 | `dep` | `add` · `remove` · `list` · `tree` · `cycles` · `graph` |
 | `sync` | `export` · `import` · `import_bd` (one-shot bd import) |
 | `diagnostics` | `stats` · `info` · `where` · `version` · `lint` · `changelog` · `orphans` |
+| `comment` | `add` · `list` · `update` · `delete` (soft-redact: the row is kept, the body masked) |
 
 **Resources:** `unblock://issues/{id}` · `unblock://issues/ready` · `unblock://issues/blocked` ·
 `unblock://capabilities` · `unblock://schema`.
