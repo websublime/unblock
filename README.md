@@ -102,9 +102,73 @@ unblock's product surface is MCP, so the goal is to get an MCP client spawning t
    ```
 
 3. **Register the server with your MCP client.** Point the client at the `unblock` binary over stdio.
-   Add this `mcpServers` entry (e.g. Claude Desktop or any stdio MCP client), using the **absolute**
-   path to the `.unblock` directory created in step 1 (from your project root, that is the output of
-   `pwd` followed by `/.unblock`):
+   **How you point at the workspace depends on where the config lives** — a config committed to the repo
+   (shared with your team) must NOT carry a machine-specific absolute path, while a per-user config that
+   lives outside any repo does need one. Pick the world that matches your client.
+
+   **A) Project-scoped, committed config (the default for a team).** These configs live inside the repo
+   and are committed, so every teammate on every machine gets the same wiring. They pass **no absolute
+   path**: `unblock` resolves the workspace from `CLAUDE_PROJECT_DIR` (which Claude Code sets in the
+   server's environment and `unblock` reads on startup), or from the working directory (VS Code / Cursor
+   set it to the workspace), falling back to a walk-up.
+
+   Claude Code — `.mcp.json` at the repo root:
+
+   ```json
+   {
+     "mcpServers": {
+       "unblock": {
+         "command": "unblock",
+         "args": ["mcp"]
+       }
+     }
+   }
+   ```
+
+   Do **not** write `"args": ["mcp", "--dir", "${CLAUDE_PROJECT_DIR}"]`: the `${…}` form is **not**
+   expanded inside `.mcp.json` (the variable lives in the spawned child's env, not a token Claude Code
+   substitutes into `args`), so it would reach `unblock` verbatim and fail. Omitting `--dir` is the
+   correct, committable form.
+
+   VS Code — `.vscode/mcp.json`, pinning the working directory to the workspace folder:
+
+   ```json
+   {
+     "servers": {
+       "unblock": {
+         "type": "stdio",
+         "command": "unblock",
+         "args": ["mcp"],
+         "cwd": "${workspaceFolder}"
+       }
+     }
+   }
+   ```
+
+   Cursor — `.cursor/mcp.json`; the path-free form is preferred (Cursor sets the working directory to the
+   project, and the walk-up finds `.unblock/`):
+
+   ```json
+   {
+     "mcpServers": {
+       "unblock": {
+         "command": "unblock",
+         "args": ["mcp"]
+       }
+     }
+   }
+   ```
+
+   If your Cursor version does not set the working directory to the project, use `"args": ["mcp", "--dir",
+   "${workspaceFolder}/.unblock"]` — but only if your Cursor expands `${workspaceFolder}` before spawning
+   (it resolves to each developer's own checkout, so the file stays portable); if it does not expand, drop
+   `--dir` and let the walk-up resolve it. Never commit a literal machine path here.
+
+   **B) User-global config, not committed (Claude Desktop).** Claude Desktop's config is per-user, lives
+   outside any repo (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS), sets no
+   `CLAUDE_PROJECT_DIR`, and is often spawned from `$HOME` — so an **absolute** `--dir` is the correct and
+   expected form here. Use the absolute path to the `.unblock` directory created in step 1 (the output of
+   `pwd` in your project root, followed by `/.unblock`):
 
    ```json
    {
@@ -122,10 +186,13 @@ unblock's product surface is MCP, so the goal is to get an MCP client spawning t
    > server fails to start (spawn `ENOENT`), replace `"command": "unblock"` with the absolute path from
    > `which unblock` (macOS/Linux) or `where.exe unblock` (Windows).
 
-4. **Let the client spawn the server.** On startup the client launches `unblock mcp --dir <…>` as a
-   stdio child and speaks MCP to it. Passing `--dir` is recommended because a client spawns the child
-   with an arbitrary working directory; without it, `unblock mcp` walks up from the current directory
-   to find `.unblock/`. (`--dir` also honours `UNBLOCK_DIR`, with `--dir` > `UNBLOCK_DIR`.)
+4. **Let the client spawn the server.** On startup the client launches `unblock mcp` as a stdio child and
+   speaks MCP to it. `unblock` resolves the workspace in this order: an explicit `--dir`/`--db` (or
+   `UNBLOCK_DIR`), then `CLAUDE_PROJECT_DIR` from its environment, then a bounded walk-up from the working
+   directory to the nearest `.unblock/`. Prefer one of the project-scoped forms above (or an absolute
+   `--dir` for a user-global client) rather than relying on the walk-up alone. On startup `unblock` reports
+   the workspace directory it bound **to stderr** (diagnostics only, NFR-14) — check that line to confirm
+   it opened the workspace you expected.
 
 The contract id is **`unblock.mcp.v1.5`**. For machine-readable discovery, agents read the resources
 `unblock://capabilities` (the descriptor tables) and `unblock://schema` (the full JsonSchema bundle
@@ -177,7 +244,10 @@ Command-specific flags: `init` takes `--prefix <PREFIX>` and `--force`; `update`
 **Global options** (present on every subcommand):
 
 - `--dir <DIR>` [env `UNBLOCK_DIR`] — the explicit workspace `.unblock/` directory (no walk-up;
-  `--dir` > `UNBLOCK_DIR`).
+  `--dir` > `UNBLOCK_DIR`). When neither is set, `unblock` reads `CLAUDE_PROJECT_DIR` from its environment
+  (injected by editors such as Claude Code, probed as a project root) and, failing that, walks up from the
+  working directory to the nearest `.unblock/`. Precedence: `--db` > `--dir`/`UNBLOCK_DIR` >
+  `CLAUDE_PROJECT_DIR` > bounded cwd walk-up.
 - `--actor <ACTOR>` [env `UNBLOCK_ACTOR`] — the actor override.
 - `-o, --output <FORMAT>` — one of `json|robot|plain|csv|markdown`.
 - `-v` / `-vv` / `-vvv` — increase verbosity (INFO/DEBUG/TRACE; logs go to **stderr only**, NFR-14);
