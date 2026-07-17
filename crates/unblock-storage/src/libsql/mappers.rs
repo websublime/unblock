@@ -301,8 +301,10 @@ pub(super) fn event_from_row(row: &Row) -> Result<Event, StorageError> {
     })
 }
 
-/// Map a `comments` row (`id, issue_id, author, text, created_at, updated_at, redacted_at`) into a
-/// [`Comment`].
+/// Map a `comments` row into a [`Comment`].
+///
+/// The projection this reads is `super::comments::COMMENT_COLUMNS` — the SINGLE source of the column
+/// order (deliberately not restated here: a stale copy in a doc comment is how the order drifts).
 ///
 /// The two D37 columns are read by POSITIONAL ordinal (5/6) — the `PRAGMA table_info(comments)`
 /// column-order golden (`libsql/mod.rs`) is what guards that order.

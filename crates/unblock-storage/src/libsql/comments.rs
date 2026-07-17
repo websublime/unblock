@@ -25,7 +25,13 @@ use super::mappers::comment_from_row;
 use super::{WriteHook, with_immediate_tx};
 
 /// The `comments` projection — the POSITIONAL contract `comment_from_row` reads (ordinals 0..=6).
-const COMMENT_COLUMNS: &str = "id, issue_id, author, text, created_at, updated_at, redacted_at";
+///
+/// **The SINGLE source of this column order.** `comment_from_row` maps by ORDINAL and every column is
+/// TEXT/NULL-ish, so a re-spelled literal that reorders two columns (e.g. `author`↔`text`) mis-maps
+/// SILENTLY instead of failing to compile. Every `comments` SELECT MUST interpolate this const rather
+/// than restate the list — `crud.rs`'s `hydrate`/`hydrate_ids` did restate it.
+pub(super) const COMMENT_COLUMNS: &str =
+    "id, issue_id, author, text, created_at, updated_at, redacted_at";
 
 /// Add a comment + `Event(Commented)` (spine §3.2.1).
 ///
@@ -56,13 +62,15 @@ pub(super) async fn add_comment(
             .await
             .map_err(map_libsql_err)?;
         let found = match rows.next().await.map_err(map_libsql_err)? {
-            Some(row) => {
-                let status = match row.get_value(0).map_err(map_libsql_err)? {
-                    libsql::Value::Text(status) => status,
-                    _ => String::new(),
-                };
-                status != "tombstone"
-            }
+            Some(row) => match row.get_value(0).map_err(map_libsql_err)? {
+                libsql::Value::Text(status) => status != "tombstone",
+                // FAIL CLOSED: `status` is declared TEXT NOT NULL with a CHECK (schema.rs), so a
+                // non-Text value is unreachable today. Should that ever change, an unreadable status
+                // must be treated as NOT found — the previous `String::new()` fallback compared
+                // `!= "tombstone"` and so yielded found=true, opening the guard on the exact input it
+                // could not understand.
+                _ => false,
+            },
             None => false,
         };
         drop(rows);
