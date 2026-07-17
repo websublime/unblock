@@ -150,6 +150,20 @@ pub fn into_exit(err: CliError, fmt: OutputFormat) -> ExitCode {
     ExitCode::from(exit)
 }
 
+/// Report a `CliError` as a human `error[CODE]: message` line on STDERR **without deciding the exit
+/// code** (D38, spine §5b) — the `mcp` signal path's diagnostic sink.
+///
+/// When the FR-17 handle recorded a signal, `commands/mcp.rs` returns `Ok(Some(128+signo))`, which
+/// takes `run_with`'s Ok arm and so never reaches [`into_exit`]. Any cooperative-shutdown error is a
+/// CONSEQUENCE of the cancellation, not an independent fault: it must still be surfaced (never
+/// swallowed) but must not blame the process for obeying the signal. Routing through the same
+/// `to_structured` + [`emit_human`] pair as the error path keeps the two renderings from drifting
+/// (one sanitize site, one line shape). Always STDERR: on `mcp`, stdout is MCP framing ONLY (NFR-14),
+/// and FR-11's always-valid-JSON-on-stdout rule binds only the UNSIGNALLED `Err` path.
+pub(crate) fn emit_diagnostic(err: CliError) {
+    emit_human(&to_structured(err));
+}
+
 /// Write a human `error[CODE]: message` line to STDERR (NFR-14).
 fn emit_human(structured: &StructuredError) {
     eprintln!(
