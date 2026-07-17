@@ -16,7 +16,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use unblock_config::{ConfigPaths, ResolvedConfig, WorkspaceContext};
+use unblock_config::{ConfigPaths, ResolvedConfig, WorkspaceContext, WorkspaceSource};
 use unblock_engine::{Session, SessionConfig};
 use unblock_model::{CountGroupBy, ListFilters};
 use unblock_storage::testkit::seed_corpus;
@@ -61,6 +61,7 @@ async fn build_session(n: usize) -> (Session, tempfile::TempDir) {
         actor: "scale".to_string(),
         config,
         paths,
+        source: WorkspaceSource::WalkUp,
     };
     let session = Session::open(ctx, SessionConfig::default())
         .await

@@ -53,7 +53,7 @@ pub fn session_config(ctx: &WorkspaceContext) -> SessionConfig {
 #[cfg(test)]
 mod tests {
     use super::session_config;
-    use unblock_config::{ConfigPaths, ResolvedConfig, WorkspaceContext};
+    use unblock_config::{ConfigPaths, ResolvedConfig, WorkspaceContext, WorkspaceSource};
     use unblock_storage::LibsqlStorage;
 
     async fn workspace_context(jsonl_export: bool) -> WorkspaceContext {
@@ -77,6 +77,7 @@ mod tests {
                 db_path,
                 jsonl_path: tmp.path().join("issues.jsonl"),
             },
+            source: WorkspaceSource::WalkUp,
         }
     }
 

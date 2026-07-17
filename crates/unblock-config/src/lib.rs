@@ -69,7 +69,7 @@ pub use context::{
     ResolvedContext, WorkspaceContext, open_with_storage, open_with_storage_with_cli,
     open_workspace, open_workspace_with_cli,
 };
-pub use discovery::{discover_optional_unblock_dir, discover_unblock_dir};
+pub use discovery::{WorkspaceSource, discover_optional_unblock_dir, discover_unblock_dir};
 pub use env::{EnvOverrides, EnvSource};
 pub use error::ConfigError;
 pub use keys::{KeyClass, RUNTIME_KEYS, RuntimeKey, STARTUP_KEYS, StartupKey, classify};

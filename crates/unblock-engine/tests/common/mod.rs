@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::{DateTime, TimeZone, Utc};
-use unblock_config::{ConfigPaths, ResolvedConfig, WorkspaceContext};
+use unblock_config::{ConfigPaths, ResolvedConfig, WorkspaceContext, WorkspaceSource};
 use unblock_engine::{Session, SessionConfig};
 use unblock_model::{Dependency, DependencyType, Issue, Priority, Status};
 use unblock_storage::{LibsqlStorage, Storage};
@@ -59,6 +59,7 @@ pub async fn session_over_in_dir(
         actor: "tester".to_string(),
         config,
         paths,
+        source: WorkspaceSource::WalkUp,
     };
     Session::open(ctx, cfg).await.expect("open session")
 }

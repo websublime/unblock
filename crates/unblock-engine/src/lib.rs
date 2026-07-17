@@ -34,7 +34,7 @@
 //!
 //! ```
 //! use std::sync::Arc;
-//! use unblock_config::{ConfigPaths, ResolvedConfig, WorkspaceContext};
+//! use unblock_config::{ConfigPaths, ResolvedConfig, WorkspaceContext, WorkspaceSource};
 //! use unblock_engine::{Session, SessionConfig};
 //! use unblock_model::Issue;
 //! use unblock_storage::{LibsqlStorage, Storage};
@@ -62,6 +62,7 @@
 //!         actor: "doctest".to_string(),
 //!         config,
 //!         paths,
+//!         source: WorkspaceSource::WalkUp,
 //!     };
 //!
 //!     let session = Session::open(ctx, SessionConfig::default()).await.expect("open session");

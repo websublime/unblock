@@ -12,7 +12,7 @@ use rmcp::model::CallToolRequestParams;
 use rmcp::service::{RoleClient, RoleServer, RunningService};
 use serde_json::{Map, Value};
 use tokio_util::sync::CancellationToken;
-use unblock_config::{ConfigPaths, ResolvedConfig, WorkspaceContext};
+use unblock_config::{ConfigPaths, ResolvedConfig, WorkspaceContext, WorkspaceSource};
 use unblock_engine::{Session, SessionConfig};
 use unblock_mcp::{Quotas, UnblockServer, mcp_server_duplex_for_test};
 use unblock_storage::{LibsqlStorage, Storage};
@@ -40,6 +40,7 @@ pub async fn session() -> Arc<Session> {
         actor: "tester".to_string(),
         config,
         paths,
+        source: WorkspaceSource::WalkUp,
     };
     Arc::new(
         Session::open(ctx, SessionConfig::default())
@@ -75,6 +76,7 @@ pub async fn session_recording() -> (Arc<Session>, Arc<recording::RecordingStora
         actor: "tester".to_string(),
         config,
         paths,
+        source: WorkspaceSource::WalkUp,
     };
     let session = Arc::new(
         Session::open(ctx, SessionConfig::default())
@@ -416,6 +418,7 @@ pub async fn session_gated(n: usize) -> (Arc<Session>, gated::Gate) {
         actor: "tester".to_string(),
         config,
         paths,
+        source: WorkspaceSource::WalkUp,
     };
     let session = Arc::new(
         Session::open(ctx, SessionConfig::default())
@@ -699,6 +702,7 @@ pub async fn session_failing_list() -> Arc<Session> {
         actor: "tester".to_string(),
         config,
         paths,
+        source: WorkspaceSource::WalkUp,
     };
     Arc::new(
         Session::open(ctx, SessionConfig::default())

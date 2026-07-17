@@ -33,7 +33,7 @@ mod gate {
     use tempfile::TempDir;
     use tokio::runtime::Runtime;
 
-    use unblock_config::{ConfigPaths, ResolvedConfig, WorkspaceContext};
+    use unblock_config::{ConfigPaths, ResolvedConfig, WorkspaceContext, WorkspaceSource};
     use unblock_engine::{ImportOptions, NewIssue, Session, SessionConfig};
     use unblock_model::ListFilters;
     use unblock_storage::testkit::seed_corpus;
@@ -89,6 +89,7 @@ mod gate {
             actor: "bench".to_string(),
             config,
             paths,
+            source: WorkspaceSource::WalkUp,
         };
         let session = Session::open(ctx, SessionConfig::default())
             .await

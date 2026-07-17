@@ -64,6 +64,8 @@ impl Session {
             actor,
             config,
             paths,
+            // The D39 discovery-tier tag is surfaced by the CLI at startup, not consumed by the engine.
+            source: _,
         } = ctx;
 
         let session = Self {
