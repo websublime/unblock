@@ -14,7 +14,7 @@ codes are stable, a breaking change → 2.0.0. (Original source for reference on
 
 | Doc | Role |
 |---|---|
-| `docs/PRD.md` | Product truth — decisions (§4 D1..D38), FR/NFR, domain model, milestones. **APPROVED v1.1.** |
+| `docs/PRD.md` | Product truth — decisions (§4 D1..D39), FR/NFR, domain model, milestones. **APPROVED v1.1.** |
 | `docs/plans/01-design-spine.md` | **Authoritative interface contract** (types, `Storage` trait, `Session` API, MCP schemas, errors). |
 | `docs/plans/implementation-plan.md` | Task DAG M0–M3 (T-ids) + acceptance criteria. |
 | `docs/plans/STATUS.md` | **Live task registry** — what's done / in-progress / to-do (the system of record). |
@@ -62,7 +62,9 @@ session** by default (template: `docs/plans/templates/drift-gap-report.md`).
 
 - Names: binary `unblock`; crates `unblock-*`; workspace dir `.unblock/`; DB `unblock.db`; optional export
   `issues.jsonl`; config `config.toml`; contract ids `unblock.*.v1`; env prefix `UNBLOCK_` (`UNBLOCK_DIR`,
-  `UNBLOCK_ACTOR`, `UNBLOCK_JSONL`, `UNBLOCK_OUTPUT_FORMAT`).
+  `UNBLOCK_ACTOR`, `UNBLOCK_JSONL`, `UNBLOCK_OUTPUT_FORMAT`). `CLAUDE_PROJECT_DIR` is a **read-only external
+  discovery input** (injected by Claude Code as the project root; consumed by workspace discovery, never emitted) —
+  DISTINCT from the `UNBLOCK_` prefix family (D10), honored as a ROOT-probe tier below `--dir`/`UNBLOCK_DIR` (D39).
 - Crates `unblock-*` are **workspace-internal (not published to crates.io)**; only the `unblock` binary ships (via `dist`).
 - Config is **TOML**. Output: **structured to stdout, diagnostics to stderr** (NFR-14); output shapes are
   snapshot-pinned (`insta`).

@@ -1265,6 +1265,17 @@ pub struct ConfigPaths {
 // (the prefix is config-derived, NOT a constant — faithful to the original `IdConfig::with_prefix`).
 pub struct ResolvedConfig { /* config-owned; see the unblock-config crate plan for the pinned field set */ }
 
+// WorkspaceSource is config-owned (DEFINED in unblock-config) — which precedence tier of workspace
+// discovery bound the dir (D39). Carried by BOTH contexts so the CLI can report the binding + tier
+// at startup (spine §4 discovery block, clause 3). ADDITIVE: not on the MCP wire contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceSource {
+    ExplicitDir,        // `--dir` / `UNBLOCK_DIR` (cli.dir)
+    ExplicitDb,         // `--db` derived the dir
+    ProjectDir,         // `CLAUDE_PROJECT_DIR` project-root probe (D39)
+    WalkUp,             // the guarded cwd walk-up
+}
+
 // (1) resolve-only — NO storage; discovery + resolved config only (for `where`, doctor pre-checks,
 //     completions, and anything that must not open/migrate the DB).
 #[derive(Debug, Clone)]
@@ -1273,6 +1284,7 @@ pub struct ResolvedContext {
     pub actor: String,                 // authoritative actor (§4.1) — NOT inside ResolvedConfig
     pub config: ResolvedConfig,        // config-owned (DEFINED in unblock-config)
     pub paths: ConfigPaths,            // config-owned: resolved `.unblock/` + db/jsonl paths (T1.3a)
+    pub source: WorkspaceSource,       // which discovery tier bound the dir (D39 — ADDITIVE)
 }
 pub async fn open_workspace(start: &Path) -> Result<ResolvedContext, ConfigError>;
 
@@ -1284,12 +1296,15 @@ pub struct WorkspaceContext {
     pub actor: String,                 // authoritative actor (§4.1) — NOT inside ResolvedConfig
     pub config: ResolvedConfig,        // config-owned (DEFINED in unblock-config)
     pub paths: ConfigPaths,            // config-owned: resolved `.unblock/` + db/jsonl paths (T1.3a)
+    pub source: WorkspaceSource,       // which discovery tier bound the dir (D39 — ADDITIVE)
 }
 pub async fn open_with_storage(start: &Path) -> Result<WorkspaceContext, ConfigError>;
 
 // (3) T1.3-ADDITIVE CLI overloads (FORK-1 — OVERLOAD model). The `&Path` facades above are PERMANENT and
 //     UNCHANGED; each DELEGATES to its `_with_cli` form passing `start` as the WALK-UP START parameter, NOT as
-//     `cli.dir`: `discover_unblock_dir(Some(start), &CliOverrides::default())`. (`cli.dir` is the EXPLICIT
+//     `cli.dir`: `discover_unblock_dir(Some(start), &CliOverrides::default(), &ProcessEnv)` (the third arg is the
+//     `EnvSource` for `CLAUDE_PROJECT_DIR`/`$HOME` — D39; internal signature only, the `&Path`/`_with_cli` public
+//     surface is unchanged). (`cli.dir` is the EXPLICIT
 //     `--dir`/`UNBLOCK_DIR` override — NO walk-up; `start` is the separate walk-up START — so the facades must
 //     leave `cli.dir` unset and thread `start` through the start param.)
 //     `CliOverrides` (the typed top precedence layer, config-owned) threads --dir/--db/--actor/--output-format
@@ -1306,7 +1321,8 @@ pub async fn open_with_storage_with_cli(cli: &CliOverrides) -> Result<WorkspaceC
 > `ResolvedConfig` filenames (`db_filename`/`jsonl_filename`). `workspace_dir` (the project **root** that contains
 > `.unblock/`) and `paths.unblock_dir` (= `workspace_dir/.unblock`) are **distinct and both intentional**. The task
 > performs **workspace upward discovery** from `start` (a dir named **`.unblock` OR `_unblock`** — the monorepo alias
-> for dot-dir-hostile environments, FORK-2/D8), libsql open + migrate via
+> for dot-dir-hostile environments, FORK-2/D8; the cwd walk-up is bounded by the D39 guard — see the discovery block
+> below), libsql open + migrate via
 > `unblock_storage::LibsqlStorage::open_local`, `Arc<dyn Storage>` construction, path resolution into `ConfigPaths`,
 > and actor resolution (T1.3a: `UNBLOCK_ACTOR` env → `$USER` → `"unblock"`). The **full layered resolution**
 > (CLI > env `UNBLOCK_*` > project `config.toml` > defaults) lands **additively at T1.3** — it replaces the
@@ -1324,13 +1340,75 @@ pub async fn open_with_storage_with_cli(cli: &CliOverrides) -> Result<WorkspaceC
 > T1.3 as **two ADDITIVE overloads** — `open_workspace_with_cli(cli: &CliOverrides)` /
 > `open_with_storage_with_cli(cli: &CliOverrides)` (block item (3) above) — **not** as a signature swap. The `&Path`
 > facades **delegate** to their `_with_cli` form passing `start` as the **walk-up START** parameter via
-> `discover_unblock_dir(Some(start), &CliOverrides::default())` — **NOT** as `cli.dir`. (`cli.dir` is the EXPLICIT
+> `discover_unblock_dir(Some(start), &CliOverrides::default(), &ProcessEnv)` — **NOT** as `cli.dir` (the third arg
+> is the `EnvSource` for `CLAUDE_PROJECT_DIR`/`$HOME`, D39 — internal signature only). (`cli.dir` is the EXPLICIT
 > `--dir`/`UNBLOCK_DIR` override, which **does not walk up**; the `&Path` facades want the walk-up-from-`start`
 > behaviour, so they leave `cli.dir` unset and route `start` through the discovery start parameter.) Every existing
 > caller keeps compiling unchanged and the engine (which binds to the **result** type
 > `WorkspaceContext`, never to a facade signature) is unaffected. (This reconciles the spine `&Path` ↔ config-plan
 > `&CliOverrides` drift by **overload addition**, not by sequencing/swapping the parameter — the `&Path` API never
 > goes away.)
+
+> **Workspace discovery precedence + walk-up guard + startup visibility (D39 — normative).** Discovery of the
+> workspace dir (named **`.unblock` OR `_unblock`**, FORK-2/D8) resolves through a single, total precedence chain
+> owned by `unblock-config::discover_unblock_dir` (the one home — MCP and CLI cannot drift, CF-D). Internally
+> `discover_unblock_dir` gains a THIRD parameter `env: &dyn EnvSource` (production `ProcessEnv`; tests `MapEnv`,
+> never the process-global env — NFR-16) and returns the winning tier alongside the dir (an internal
+> `DiscoveredWorkspace { unblock_dir, source: WorkspaceSource }`) so `unblock-config` can populate the context
+> `source` field. **The two `&Path` facades and the two `_with_cli` overloads are SIGNATURE-STABLE (FORK-1/MF-2):
+> the `env` and the `source` are carried BELOW/INSIDE them, never as a new public facade parameter.** From highest
+> to lowest:
+>
+> 1. **`--db`** (`cli.db`): an explicit database path under a `.unblock`/`_unblock` component **derives** that dir
+>    (original beads parity) — source `ExplicitDb`. **No walk-up.**
+> 2. **`--dir` / `UNBLOCK_DIR`** (`cli.dir`): the **explicit** workspace dir — used directly if itself named
+>    `.unblock`/`_unblock`, else treated as a workspace **root** whose `.unblock`/`_unblock` child is used (MF-2) —
+>    source `ExplicitDir`. **No walk-up.** `--dir` and `UNBLOCK_DIR` are **one slot**: the CLI binds `--dir` with
+>    clap `env = "UNBLOCK_DIR"`, so `--dir` > `UNBLOCK_DIR` is resolved before discovery and both arrive as `cli.dir`.
+> 3. **`CLAUDE_PROJECT_DIR`** (read from the **process environment** via the injectable `EnvSource`): the project
+>    root injected by an MCP host (e.g. Claude Code) into the spawned stdio child so a server can resolve
+>    project-relative paths without depending on the child's arbitrary working directory. It is treated as a
+>    workspace **ROOT** — its `.unblock`/`_unblock` child is probed with the SAME child-probe as a `--dir` root
+>    (`_unblock` alias + Seam C canonicalization), **no walk-up** — source `ProjectDir`. It is an **ambient hint**,
+>    not a per-invocation user choice: on a **miss** (root exists but has no `.unblock`/`_unblock` child) discovery
+>    **falls through to (4)** rather than hard-erroring. `CLAUDE_PROJECT_DIR` is read **only** here via the
+>    process-env seam — it is a foreign (non-`UNBLOCK_`) key and is **not** part of the `UNBLOCK_*`/`config.toml`/CLI
+>    layered config, so it never enters `EnvOverrides`/`ResolvedConfig`.
+> 4. **cwd walk-up** (the fallback): when (1)–(3) are all unset/miss, discovery walks **up the ancestors of the
+>    process current working directory** for the nearest `.unblock`/`_unblock` — source `WalkUp`. **The walk-up START
+>    is the process cwd** when no explicit `start` is supplied — the `_with_cli` overloads pass `start = None` (⇒ cwd)
+>    and the `&Path` facades pass their `start` as the walk-up seed. *(This closes a documented GAP: the prior spine
+>    never stated that the default walk-up origin is the process cwd.)*
+>
+> **Walk-up GUARD (normative).** The cwd walk-up (4) is **bounded**, not unbounded to the filesystem root. Ascending,
+> discovery **probes each ancestor** for `.unblock`/`_unblock` **FIRST** and then **stops at the first boundary**:
+> (i) an ancestor that is a **repository root** — detected by a plain filesystem existence check of a `.git` entry
+> (`dir.join(".git").exists()`, directory OR file — the latter catches worktree/submodule gitdir pointers) — and/or
+> (ii) the user's **home directory** (`$HOME`, `%USERPROFILE%` on Windows), read via the same `EnvSource` seam. The
+> boundary dir is itself **probed before the stop** (INCLUSIVE), so a repository-root `.unblock` and a deliberate
+> `$HOME/.unblock` **stay usable**; the guard forbids only ascending **above** the boundary. The `.git` check is a
+> `std::fs` stat on a path that happens to be named `.git`, **not** a git operation and links **no** git library —
+> D13/NFR-6 ("no git operations, no git library linked") is upheld. **Rationale (integrity):** an unbounded walk-up
+> silently binds a distant, unrelated `.unblock` (e.g. a stray `$HOME/.unblock`) when the current project has none —
+> a *silent-wrong-DB* hazard for a data-integrity tool. Bounding the ascent turns that into an explicit
+> `WorkspaceNotFound` (unchanged variant → `ErrorCode::NotInitialized`, exit 2). **Root markers = `.git` only in v1**
+> (`.hg`/`.svn`/`.jj` are an additive v1.1 follow-up). **Accepted residuals:** a `.unblock` in a parent ABOVE an
+> intermediate `.git` needs explicit `--dir`/`UNBLOCK_DIR`; `$HOME` is best-effort (a sparse GUI env with no
+> `HOME`/`USERPROFILE` disables only that arm; `.git` + the filesystem root still bound the walk); an at-boundary
+> stray `.unblock` still binds-then-reports (the startup line is its safeguard, not a hard reject).
+>
+> **Startup VISIBILITY (normative, NFR-14).** Whichever tier binds, `unblock mcp` reports the resolved workspace dir
+> and the winning tier at startup on **stderr** (never stdout — on `unblock mcp` stdout is MCP framing only, spine
+> §5b) via a single **unconditional** line (an `info!` is silent at the default WARN level), so an operator can
+> always see *which DB was bound and how*. It carries the `WorkspaceSource` populated by discovery (the `source`
+> field on both contexts above) and MUST NOT contain the substring `error[` (the mcp e2e asserts
+> `!stderr.contains("error[")`).
+>
+> **Threading — NO facade break (additive, NOT a D35 semver event).** `CLAUDE_PROJECT_DIR` and `$HOME` are read
+> **inside** resolution via the existing `EnvSource` seam exactly as actor resolution already reads
+> `UNBLOCK_ACTOR`/`$USER`. A newly-honored env var (nothing removed), the walk-up merely bounded (an integrity fix
+> on undefined-in-spec behaviour, not a stable-surface change), no new `ErrorCode`, the 0–8 exit table unchanged,
+> `CONTRACT_HASH`/`CONTRACT_VERSION` unmoved, and no new CLI flag. `roots` (SEP-2577) is rejected.
 
 **`unblock-engine` CONSUMES** a `WorkspaceContext` — it does **not** construct storage itself, and never sees an `Option<Arc<dyn Storage>>`. `Session::open` takes the already-built storage-bearing context; because `storage` is non-optional there is no unwrap and no None-path mismatch. The resolve-only `ResolvedContext` is for callers that must not touch the DB.
 
