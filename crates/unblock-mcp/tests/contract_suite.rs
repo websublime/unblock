@@ -101,9 +101,17 @@ fn schema_bundle_golden() {
 // Taxonomy conformance (PRD §12.2) — builder-vs-router parity over a LIVE duplex.
 // --------------------------------------------------------------------------------------------------
 
-/// The LIVE server advertises exactly the 8 tools the pure `capabilities()` builder lists, in the same
-/// set (builder-vs-router parity). The RK-3 budget is now FULL at 8 ≤ 8 (`comment` is the 8th tool,
-/// D37; `create_bulk` remains an `issue`-tool discriminator, not a tool).
+/// The LIVE server advertises exactly the 8 tools the pure `capabilities()` builder lists, with
+/// BYTE-IDENTICAL descriptions (builder-vs-router parity). The RK-3 budget is now FULL at 8 ≤ 8
+/// (`comment` is the 8th tool, D37; `create_bulk` remains an `issue`-tool discriminator, not a tool).
+///
+/// **Why (name, description) PAIRS, not names:** every tool description is contract bytes TWICE — once
+/// in the `capabilities()` descriptor (which `CONTRACT_HASH` digests) and once in the
+/// `#[tool(description = "…")]` attribute, which rmcp requires to be a LITERAL and which is what
+/// `tools/list` actually emits. Comparing names only let the two copies diverge silently: mutating a
+/// live attribute literal left this whole suite — `contract_hash_matches_the_pinned_gate` included —
+/// GREEN, because the hash digests the CONSTANT, not the wire. Pairs close that for ALL 8 tools at
+/// once, which matters most once the descriptions freeze under semver at GA (D35).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_list_tools_equals_the_builder_eight() {
     let session = session().await;
@@ -116,13 +124,29 @@ async fn live_list_tools_equals_the_builder_eight() {
         "exactly 8 tools (RK-3 budget FULL at 8 ≤ 8; create_bulk is a discriminator)"
     );
 
-    let mut live: Vec<String> = tools.into_iter().map(|t| t.name.to_string()).collect();
+    let mut live: Vec<(String, String)> = tools
+        .into_iter()
+        .map(|t| {
+            (
+                t.name.to_string(),
+                // A missing description is itself a drift from the builder (which always carries one),
+                // so map it to a sentinel rather than silently skipping the tool.
+                t.description
+                    .map_or_else(|| "<none>".to_string(), |d| d.to_string()),
+            )
+        })
+        .collect();
     live.sort();
-    let mut built: Vec<String> = capabilities().tools.into_iter().map(|t| t.name).collect();
+    let mut built: Vec<(String, String)> = capabilities()
+        .tools
+        .into_iter()
+        .map(|t| (t.name, t.description))
+        .collect();
     built.sort();
     assert_eq!(
         live, built,
-        "live router tool set == the pure capabilities() builder set"
+        "live router (name, description) set == the pure capabilities() builder set — the \
+         #[tool(description)] attribute literal and its descriptor constant MUST carry identical bytes"
     );
 
     let _ = client.cancel().await;

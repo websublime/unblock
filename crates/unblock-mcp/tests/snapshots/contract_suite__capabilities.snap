@@ -11,7 +11,7 @@ expression: capabilities()
     },
     {
       "name": "claim",
-      "description": "Atomically claim an issue for an assignee."
+      "description": "Atomically claim an issue for an assignee; the loser of a race is reported."
     },
     {
       "name": "defer",
