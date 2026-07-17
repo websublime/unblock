@@ -49,7 +49,7 @@
 use std::sync::Arc;
 
 use snafu::ResultExt;
-use unblock_config::{CliOverrides, open_with_storage_with_cli};
+use unblock_config::{CliOverrides, WorkspaceSource, open_with_storage_with_cli};
 use unblock_engine::Session;
 use unblock_mcp::{McpServerOptions, Quotas, run_mcp_server};
 
@@ -221,6 +221,15 @@ pub async fn run(_args: &McpArgs, overrides: &CliOverrides) -> Result<Option<u8>
     // of a cancellation — even if a signal races it — so it keeps its spine §2.3 0–8 code and must
     // NOT be masked as `128+signo`.
     let ctx = open_with_storage_with_cli(overrides).await?;
+    // D39 startup visibility (NFR-14): ALWAYS report which workspace dir was bound and by which
+    // discovery tier, on STDERR (an `info!` is silent at the default WARN level, so this is a
+    // deliberate direct emit — not tracing). On `mcp` stdout is MCP framing ONLY (spine §5b). The
+    // line never contains `error[` (the mcp e2e asserts `!stderr.contains("error[")`), so a routine
+    // binding is not mistaken for a fault.
+    emit_workspace_binding(
+        &workspace_binding_line(&ctx.paths.unblock_dir, ctx.source),
+        &mut std::io::stderr().lock(),
+    );
     tracing::debug!("mcp: workspace opened");
     let cfg = session_config(&ctx);
 
@@ -282,10 +291,34 @@ fn instructions() -> String {
     )
 }
 
+/// The D39 startup-visibility line: the bound workspace dir + the winning discovery tier. PURE (no
+/// I/O) so it is unit- and mutation-pinnable; [`emit_workspace_binding`] writes it verbatim. It must
+/// never contain `error[` (the mcp e2e asserts `!stderr.contains("error[")`, so a routine binding is
+/// not mistaken for a fault).
+fn workspace_binding_line(unblock_dir: &std::path::Path, source: WorkspaceSource) -> String {
+    format!(
+        "unblock: workspace bound to {} (via {})",
+        unblock_dir.display(),
+        source.label()
+    )
+}
+
+/// Write the D39 startup-visibility line to `out` (STDERR in production — NFR-14; on `mcp` stdout is
+/// MCP framing ONLY, spine §5b). The sink is a PARAMETER so a unit test proves the bytes are actually
+/// written (gutting this to a no-op turns the capture test RED). A failing stderr never changes the
+/// exit code — the diagnostic is best-effort.
+fn emit_workspace_binding(line: &str, out: &mut impl std::io::Write) {
+    let _ignored = writeln!(out, "{line}");
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{DiagnosticRoute, McpExit, diagnostic_route, instructions, resolve_mcp_exit};
+    use super::{
+        DiagnosticRoute, McpExit, diagnostic_route, emit_workspace_binding, instructions,
+        resolve_mcp_exit, workspace_binding_line,
+    };
     use crate::exit::CliError;
+    use unblock_config::WorkspaceSource;
     use unblock_error::ErrorCode;
 
     #[test]
@@ -293,6 +326,59 @@ mod tests {
         let text = instructions();
         assert!(text.contains(unblock_mcp::CONTRACT_VERSION));
         assert!(text.contains("MCP stdio"));
+    }
+
+    /// D39 (3): the startup line names BOTH the bound dir AND the winning tier, and never reads as a
+    /// fault (the mcp e2e asserts `!stderr.contains("error[")`). A mutation that drops the dir or the
+    /// tier from the format turns this RED.
+    #[test]
+    fn workspace_binding_line_names_the_dir_and_the_tier() {
+        let line = workspace_binding_line(
+            std::path::Path::new("/ws/.unblock"),
+            WorkspaceSource::ProjectDir,
+        );
+        assert!(
+            line.contains("workspace bound to /ws/.unblock"),
+            "the bound dir must be named: {line}"
+        );
+        assert!(
+            line.contains("via CLAUDE_PROJECT_DIR"),
+            "the winning tier must be named: {line}"
+        );
+        assert!(
+            !line.contains("error["),
+            "a routine binding must not read as a fault: {line}"
+        );
+    }
+
+    /// Each tier renders its human label — a mutation that collapses the labels turns this RED.
+    #[test]
+    fn workspace_binding_line_labels_every_tier() {
+        let dir = std::path::Path::new("/ws/.unblock");
+        assert!(
+            workspace_binding_line(dir, WorkspaceSource::ExplicitDir).contains("--dir/UNBLOCK_DIR")
+        );
+        assert!(workspace_binding_line(dir, WorkspaceSource::ExplicitDb).contains("--db"));
+        assert!(workspace_binding_line(dir, WorkspaceSource::WalkUp).contains("walk-up from cwd"));
+    }
+
+    /// The emitter actually WRITES the line to its sink (D39 visibility is only real if the bytes hit
+    /// stderr) — gutting `emit_workspace_binding` to a no-op turns this RED.
+    #[test]
+    fn emit_workspace_binding_writes_the_line() {
+        let mut out = Vec::new();
+        emit_workspace_binding(
+            &workspace_binding_line(
+                std::path::Path::new("/ws/.unblock"),
+                WorkspaceSource::WalkUp,
+            ),
+            &mut out,
+        );
+        let text = String::from_utf8(out).expect("utf8 line");
+        assert_eq!(
+            text, "unblock: workspace bound to /ws/.unblock (via walk-up from cwd)\n",
+            "one newline-terminated line, verbatim"
+        );
     }
 
     /// A REAL post-cancel run-loop error: the genuine `ServerInitializeError::Cancelled` rmcp

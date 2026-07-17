@@ -379,7 +379,7 @@ async fn create_with_caller_supplied_id_still_works() {
 /// Build a `Session` over `storage` with a config whose `id_prefix` is `prefix` (the rest defaulted).
 async fn session_with_prefix(storage: Arc<dyn Storage>, prefix: &str) -> Session {
     use std::path::PathBuf;
-    use unblock_config::{ConfigPaths, ResolvedConfig, WorkspaceContext};
+    use unblock_config::{ConfigPaths, ResolvedConfig, WorkspaceContext, WorkspaceSource};
 
     let workspace_dir = PathBuf::from("/tmp/unblock-test-ws");
     let unblock_dir = workspace_dir.join(".unblock");
@@ -398,6 +398,7 @@ async fn session_with_prefix(storage: Arc<dyn Storage>, prefix: &str) -> Session
         actor: "tester".to_string(),
         config,
         paths,
+        source: WorkspaceSource::WalkUp,
     };
     Session::open(ctx, SessionConfig::default())
         .await

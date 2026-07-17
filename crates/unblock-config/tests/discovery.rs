@@ -2,16 +2,35 @@
 //!
 //! Covers: nearest `.unblock`/`_unblock` walk-up; the explicit `--dir`/`--db` overrides (no walk-up,
 //! MF-2); `--db` derivation; symlink canonicalization + confinement (FORK-3); not-found. The env
-//! `UNBLOCK_DIR` override path is exercised through `CliOverrides::dir` (the env is parsed into the
-//! same explicit-dir slot by `EnvOverrides`; tests stay parallel-safe by injecting via `cli.dir`
-//! rather than mutating the process env).
+//! `UNBLOCK_DIR` override path is exercised through `CliOverrides::dir` (`UNBLOCK_DIR` reaches
+//! discovery via clap `cli.dir`, not `EnvOverrides` — D39). Discovery reads `CLAUDE_PROJECT_DIR`/`$HOME`
+//! through an injected `EnvSource`; these tests inject an empty [`MapEnv`] (no boundary) so the walk-up
+//! stays unbounded here, keeping the pre-D39 assertions — never the process env (NFR-16).
 
+use std::collections::HashMap;
 use std::fs;
 
 use unblock_config::{
-    CliOverrides, ConfigError, discover_optional_unblock_dir, discover_unblock_dir,
+    CliOverrides, ConfigError, EnvSource, discover_optional_unblock_dir, discover_unblock_dir,
     open_workspace_with_cli,
 };
+
+/// An injected [`EnvSource`] for the discovery integration suite — NEVER the process-global env
+/// (NFR-16: a host `$HOME` could otherwise bound a tempdir walk — the macOS-masks-Linux landmine).
+struct MapEnv(HashMap<String, String>);
+
+impl EnvSource for MapEnv {
+    fn get(&self, key: &str) -> Option<String> {
+        self.0.get(key).cloned()
+    }
+}
+
+/// The no-boundary env for the pre-D39 cases: no `CLAUDE_PROJECT_DIR`, no `$HOME` — so the walk is
+/// bounded only by a real `.git`/filesystem root (a clean tempdir has neither), keeping the existing
+/// walk-up assertions unchanged.
+fn empty_env() -> MapEnv {
+    MapEnv(HashMap::new())
+}
 
 #[test]
 fn walks_up_to_dot_unblock() {
@@ -21,7 +40,8 @@ fn walks_up_to_dot_unblock() {
     let nested = ws.join("a").join("b").join("c");
     fs::create_dir_all(&nested).expect("mkdir nested");
 
-    let found = discover_unblock_dir(Some(&nested), &CliOverrides::default()).expect("discover");
+    let found = discover_unblock_dir(Some(&nested), &CliOverrides::default(), &empty_env())
+        .expect("discover");
     assert_eq!(found, ws.join(".unblock").canonicalize().expect("canon"));
 }
 
@@ -34,7 +54,8 @@ fn walks_up_to_underscore_unblock_alias() {
     let nested = ws.join("nested");
     fs::create_dir_all(&nested).expect("mkdir nested");
 
-    let found = discover_unblock_dir(Some(&nested), &CliOverrides::default()).expect("discover");
+    let found = discover_unblock_dir(Some(&nested), &CliOverrides::default(), &empty_env())
+        .expect("discover");
     assert_eq!(found, ws.join("_unblock").canonicalize().expect("canon"));
 }
 
@@ -47,7 +68,7 @@ fn explicit_dir_override_is_used_directly_no_walk_up() {
     fs::create_dir_all(other.join(".unblock")).expect("other ws");
 
     let cli = CliOverrides::new().with_dir(&other);
-    let found = discover_unblock_dir(None, &cli).expect("explicit dir");
+    let found = discover_unblock_dir(None, &cli, &empty_env()).expect("explicit dir");
     assert_eq!(found, other.join(".unblock").canonicalize().expect("canon"));
 }
 
@@ -57,7 +78,7 @@ fn db_under_unblock_derives_the_dir() {
     let unblock = root.path().join(".unblock");
     fs::create_dir_all(&unblock).expect("mkdir");
     let cli = CliOverrides::new().with_db(unblock.join("unblock.db"));
-    let found = discover_unblock_dir(None, &cli).expect("derive from db");
+    let found = discover_unblock_dir(None, &cli, &empty_env()).expect("derive from db");
     assert_eq!(found, unblock.canonicalize().expect("canon"));
 }
 
@@ -67,7 +88,8 @@ fn not_found_yields_workspace_not_found() {
     let nested = root.path().join("x").join("y");
     fs::create_dir_all(&nested).expect("mkdir");
 
-    let err = discover_unblock_dir(Some(&nested), &CliOverrides::default()).expect_err("not found");
+    let err = discover_unblock_dir(Some(&nested), &CliOverrides::default(), &empty_env())
+        .expect_err("not found");
     match err {
         ConfigError::WorkspaceNotFound { .. } => {}
         other => panic!("expected WorkspaceNotFound, got {other:?}"),
@@ -80,7 +102,8 @@ fn optional_discovery_returns_none_without_db() {
     let nested = root.path().join("z");
     fs::create_dir_all(&nested).expect("mkdir");
     let result =
-        discover_optional_unblock_dir(Some(&nested), &CliOverrides::default()).expect("optional");
+        discover_optional_unblock_dir(Some(&nested), &CliOverrides::default(), &empty_env())
+            .expect("optional");
     assert!(result.is_none());
 }
 
@@ -96,7 +119,7 @@ fn symlinked_workspace_dir_is_canonicalized_and_confined() {
     std::os::unix::fs::symlink(&real, &link).expect("symlink");
 
     let cli = CliOverrides::new().with_dir(&link);
-    let found = discover_unblock_dir(None, &cli).expect("discover via symlink");
+    let found = discover_unblock_dir(None, &cli, &empty_env()).expect("discover via symlink");
     // The discovered dir resolves through `real`, never `link`.
     let canon_real = real.join(".unblock").canonicalize().expect("canon real");
     assert_eq!(found, canon_real);

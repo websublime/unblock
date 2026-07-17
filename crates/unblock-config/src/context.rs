@@ -12,7 +12,7 @@
 //!
 //! **Facade model (FORK-1).** The `&Path` facades ([`open_workspace`] / [`open_with_storage`]) are
 //! PERMANENT; they **delegate** to the additive `_with_cli` overloads passing `start` as the WALK-UP
-//! START parameter (`discover_unblock_dir(Some(start), &CliOverrides::default())`) — NOT as `cli.dir`
+//! START parameter (`discover_unblock_dir(Some(start), &CliOverrides::default(), &ProcessEnv)`) — NOT as `cli.dir`
 //! (MF-2). The full layered resolution (CLI > env `UNBLOCK_*` > project `config.toml` > defaults)
 //! runs in both forms (it replaces the T1.3a defaulting internals).
 
@@ -24,7 +24,7 @@ use unblock_storage::{LibsqlStorage, Storage};
 
 use crate::cli::CliOverrides;
 use crate::config::{ResolvedConfig, WorkspaceConfig};
-use crate::discovery::discover_unblock_dir;
+use crate::discovery::{WorkspaceSource, discover_workspace};
 use crate::env::{EnvOverrides, ProcessEnv};
 use crate::error::{ConfigError, DbOpenFailedSnafu, MigrationFailedSnafu};
 use crate::paths::ConfigPaths;
@@ -46,6 +46,8 @@ pub struct ResolvedContext {
     pub config: ResolvedConfig,
     /// The config-owned resolved `.unblock/` + db/jsonl paths.
     pub paths: ConfigPaths,
+    /// Which discovery tier bound the workspace dir (D39 — ADDITIVE). The CLI reports it at startup.
+    pub source: WorkspaceSource,
 }
 
 /// The storage-bearing context (CF-D, spine §4.1) — discovery + open/migrate libsql + the built
@@ -66,6 +68,8 @@ pub struct WorkspaceContext {
     pub config: ResolvedConfig,
     /// The config-owned resolved `.unblock/` + db/jsonl paths.
     pub paths: ConfigPaths,
+    /// Which discovery tier bound the workspace dir (D39 — ADDITIVE). The CLI reports it at startup.
+    pub source: WorkspaceSource,
 }
 
 /// The fully-resolved per-workspace config: the merged [`WorkspaceConfig`], the resolved actor, the
@@ -74,6 +78,7 @@ struct Resolution {
     workspace_dir: PathBuf,
     config: WorkspaceConfig,
     paths: ConfigPaths,
+    source: WorkspaceSource,
 }
 
 /// Run the shared discovery + layered resolution + path resolution for a given `start`/`cli`.
@@ -84,7 +89,11 @@ struct Resolution {
 /// the layered [`WorkspaceConfig::resolve`] produces the merged value (FORK-4 actor + Seam A
 /// validation). [`ConfigPaths::resolve`] then confines the artifact paths (Seam B).
 fn resolve_workspace(start: Option<&Path>, cli: &CliOverrides) -> Result<Resolution, ConfigError> {
-    let unblock_dir = discover_unblock_dir(start, cli)?;
+    // `CLAUDE_PROJECT_DIR`/`$HOME` are read via the process-env seam INSIDE discovery (D39); the
+    // `&Path`/`_with_cli` facades stay signature-stable. `source` is the winning discovery tier.
+    let discovered = discover_workspace(start, cli, &ProcessEnv)?;
+    let unblock_dir = discovered.unblock_dir;
+    let source = discovered.source;
     // workspace_dir is the project root that CONTAINS the `.unblock`/`_unblock` dir.
     let workspace_dir = unblock_dir
         .parent()
@@ -99,6 +108,7 @@ fn resolve_workspace(start: Option<&Path>, cli: &CliOverrides) -> Result<Resolut
         workspace_dir,
         config,
         paths,
+        source,
     })
 }
 
@@ -163,6 +173,7 @@ fn open_workspace_from(
         workspace_dir,
         config,
         paths,
+        source,
     } = resolve_workspace(start, cli)?;
     let actor = config.actor().to_string();
 
@@ -171,6 +182,7 @@ fn open_workspace_from(
         actor,
         config: config.into_resolved(),
         paths,
+        source,
     })
 }
 
@@ -183,6 +195,7 @@ async fn open_with_storage_from(
         workspace_dir,
         config,
         paths,
+        source,
     } = resolve_workspace(start, cli)?;
     let actor = config.actor().to_string();
 
@@ -204,5 +217,6 @@ async fn open_with_storage_from(
         actor,
         config: config.into_resolved(),
         paths,
+        source,
     })
 }

@@ -71,6 +71,41 @@ fn initialize_handshake_advertises_unblock_identity() {
     assert_eq!(status.code(), Some(0), "EOF drives a clean exit 0");
 }
 
+/// D39 (3) — startup VISIBILITY: `unblock mcp` reports the bound workspace dir AND the winning
+/// discovery tier on STDERR at startup, ALWAYS (no `-v` needed). Here the workspace is found by the
+/// cwd walk-up (the client spawns with `cwd = ws.root()`, no `--dir`), so the line names that tier.
+/// The line must NOT read as a fault (`error[`) — a routine binding is not an error.
+#[test]
+fn startup_reports_the_bound_workspace_on_stderr() {
+    let ws = Workspace::init();
+    let mut client = McpClient::spawn(ws.root());
+    // The startup line is emitted before any handshake — wait for it on the drained child stderr.
+    let stderr = client.wait_for_stderr("workspace bound to", Duration::from_secs(20));
+    assert!(
+        stderr.contains("unblock: workspace bound to"),
+        "the D39 startup line must name the bound dir: {stderr}"
+    );
+    assert!(
+        stderr.contains("(via walk-up from cwd)"),
+        "and the winning discovery tier (walk-up here): {stderr}"
+    );
+    assert!(
+        !stderr.contains("error["),
+        "a routine binding must not read as a fault: {stderr}"
+    );
+
+    // Complete the handshake before EOF so the clean exit-0 path is exercised (a pre-`initialize`
+    // EOF is the separate exit-1 case, not what this test is about).
+    client.initialize();
+    client.close_stdin();
+    let status = client.wait_for(Duration::from_secs(20));
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "EOF after a completed handshake drives a clean exit 0"
+    );
+}
+
 #[test]
 fn ready_claim_close_smoke_over_stdio() {
     let ws = Workspace::init();

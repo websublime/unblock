@@ -249,7 +249,7 @@ fn make_ctx(
     storage: std::sync::Arc<dyn unblock_storage::Storage>,
 ) -> unblock_config::WorkspaceContext {
     use std::path::PathBuf;
-    use unblock_config::{ConfigPaths, ResolvedConfig, WorkspaceContext};
+    use unblock_config::{ConfigPaths, ResolvedConfig, WorkspaceContext, WorkspaceSource};
     let workspace_dir = PathBuf::from("/tmp/unblock-test-ws");
     let unblock_dir = workspace_dir.join(".unblock");
     let config = ResolvedConfig::default();
@@ -264,5 +264,6 @@ fn make_ctx(
         actor: "tester".to_string(),
         config,
         paths,
+        source: WorkspaceSource::WalkUp,
     }
 }

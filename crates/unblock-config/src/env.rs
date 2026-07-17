@@ -1,7 +1,9 @@
 //! The `UNBLOCK_*` environment layer (single prefix, D10) and its injectable source.
 //!
-//! Parses `UNBLOCK_ACTOR`, `UNBLOCK_DIR`, `UNBLOCK_JSONL`, and `UNBLOCK_OUTPUT_FORMAT` into a typed
+//! Parses `UNBLOCK_ACTOR`, `UNBLOCK_JSONL`, and `UNBLOCK_OUTPUT_FORMAT` into a typed
 //! [`EnvOverrides`] (the second-highest precedence layer, below CLI and above the project TOML). The
+//! `UNBLOCK_DIR` key is NOT parsed here (D39): it reaches discovery only via clap `env = "UNBLOCK_DIR"`
+//! → `cli.dir` (a single explicit-dir route), so the earlier dead `EnvOverrides.dir` field was removed.
 //! `UNBLOCK_JSONL` key is a **boolean export toggle** (SF-6) — NOT a path (unlike the original
 //! `BEADS_JSONL`, which carried a path). `UNBLOCK_OUTPUT_FORMAT` deserializes via serde (SF-2):
 //! [`OutputFormat`] has no `FromStr`, so an unknown value is [`ConfigError::InvalidValue`] and an
@@ -11,8 +13,6 @@
 //! `actor.rs` re-uses it) so the suite is deterministic and parallel-safe — tests never touch the
 //! process-global env (`std::env::set_var` races, NFR-16). No legacy `BD_`/`BR_`/`BEADS_` keys are
 //! recognized (D10).
-
-use std::path::PathBuf;
 
 use unblock_model::OutputFormat;
 
@@ -42,8 +42,6 @@ impl EnvSource for ProcessEnv {
 pub struct EnvOverrides {
     /// `UNBLOCK_ACTOR` — the default actor (highest-but-one in the actor chain, FORK-4).
     pub actor: Option<String>,
-    /// `UNBLOCK_DIR` — the EXPLICIT workspace dir override (no walk-up; MF-2).
-    pub dir: Option<PathBuf>,
     /// `UNBLOCK_JSONL` — the boolean JSONL-export toggle (SF-6 — NOT a path).
     pub jsonl_export: Option<bool>,
     /// `UNBLOCK_OUTPUT_FORMAT` — the output format, deserialized via serde (SF-2).
@@ -64,7 +62,6 @@ impl EnvOverrides {
     /// `UNBLOCK_OUTPUT_FORMAT` is an unrecognized format.
     pub fn from_source(src: &dyn EnvSource) -> Result<Self, ConfigError> {
         let actor = non_empty(src.get("UNBLOCK_ACTOR"));
-        let dir = non_empty(src.get("UNBLOCK_DIR")).map(PathBuf::from);
         let jsonl_export = match non_empty(src.get("UNBLOCK_JSONL")) {
             Some(raw) => Some(parse_bool("UNBLOCK_JSONL", &raw)?),
             None => None,
@@ -78,7 +75,6 @@ impl EnvOverrides {
 
         Ok(Self {
             actor,
-            dir,
             jsonl_export,
             output_format,
             remote_url,
@@ -139,7 +135,6 @@ fn parse_output_format(key: &str, raw: &str) -> Result<OutputFormat, ConfigError
 mod tests {
     use super::{EnvOverrides, EnvSource};
     use std::collections::HashMap;
-    use std::path::PathBuf;
     use unblock_model::OutputFormat;
 
     struct MapEnv(HashMap<String, String>);
@@ -165,13 +160,11 @@ mod tests {
     fn parses_all_keys() {
         let env = MapEnv::new(&[
             ("UNBLOCK_ACTOR", "alice"),
-            ("UNBLOCK_DIR", "/ws/.unblock"),
             ("UNBLOCK_JSONL", "true"),
             ("UNBLOCK_OUTPUT_FORMAT", "robot"),
         ]);
         let ov = EnvOverrides::from_source(&env).expect("parse");
         assert_eq!(ov.actor.as_deref(), Some("alice"));
-        assert_eq!(ov.dir, Some(PathBuf::from("/ws/.unblock")));
         assert_eq!(ov.jsonl_export, Some(true));
         assert_eq!(ov.output_format, Some(OutputFormat::Robot));
     }
@@ -180,7 +173,6 @@ mod tests {
     fn empty_values_are_unset() {
         let env = MapEnv::new(&[
             ("UNBLOCK_ACTOR", "   "),
-            ("UNBLOCK_DIR", ""),
             ("UNBLOCK_JSONL", ""),
             ("UNBLOCK_OUTPUT_FORMAT", "  "),
         ]);

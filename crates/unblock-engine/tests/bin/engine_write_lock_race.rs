@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use unblock_config::{ConfigPaths, ResolvedConfig, WorkspaceContext};
+use unblock_config::{ConfigPaths, ResolvedConfig, WorkspaceContext, WorkspaceSource};
 use unblock_engine::{EngineError, NewIssue, Session, SessionConfig};
 use unblock_model::{
     Comment, CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue,
@@ -260,6 +260,7 @@ async fn main() {
         actor,
         config,
         paths,
+        source: WorkspaceSource::WalkUp,
     };
     let session = Session::open(ctx, SessionConfig::default())
         .await
