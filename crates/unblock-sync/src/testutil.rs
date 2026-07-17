@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
 use unblock_model::{
-    CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue, ListFilters,
-    Status,
+    Comment, CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue,
+    ListFilters, Status,
 };
 use unblock_storage::{DeletePlan, IssuePatch, Storage, StorageError};
 
@@ -252,7 +252,11 @@ impl Storage for FakeStorage {
     ) -> Result<Comment, StorageError> {
         unimplemented!("FakeStorage::update_comment")
     }
-    async fn delete_comment(&self, _comment_id: i64, _actor: &str) -> Result<Comment, StorageError> {
+    async fn delete_comment(
+        &self,
+        _comment_id: i64,
+        _actor: &str,
+    ) -> Result<Comment, StorageError> {
         unimplemented!("FakeStorage::delete_comment")
     }
     async fn next_child_number(&self, _parent_id: &str) -> Result<u32, StorageError> {
