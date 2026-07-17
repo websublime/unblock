@@ -8,14 +8,16 @@
 //! Timestamps use [`fmt_ts`].
 
 use unblock_error::StructuredError;
-use unblock_model::{CountBucket, DepTree, DiagnosticReport, Issue, OutputFormat, Priority};
+use unblock_model::{
+    Comment, CountBucket, DepTree, DiagnosticReport, Issue, OutputFormat, Priority,
+};
 
 use crate::backend::plain::context_value_string;
 use crate::error::RenderError;
 use crate::format::fmt_ts;
 use crate::options::{ContentType, RenderOptions, RenderOutput};
 use crate::renderer::Renderer;
-use crate::sanitize::sanitize_inline;
+use crate::sanitize::{sanitize_inline, sanitize_text};
 
 /// Escape markdown special characters — ported with the exact original char set
 /// (`temp/beads_rust-main/src/format/markdown.rs:365-380`).
@@ -41,6 +43,27 @@ pub(crate) fn escape_markdown(content: &str) -> String {
 /// Sanitize (terminal-control) then markdown-escape an untrusted string for safe embedding.
 fn safe_md(value: &str) -> String {
     escape_markdown(sanitize_inline(value).as_ref())
+}
+
+/// The MULTI-LINE sibling of [`safe_md`] (D37): sanitize with [`sanitize_text`] — which preserves
+/// `\n`/`\t` — then markdown-escape.
+///
+/// `safe_md` cannot be used for a comment body: it sanitizes with `sanitize_inline`, which escapes
+/// `\n` and would flatten a multi-line comment into a literal `\n` soup.
+fn safe_md_multiline(value: &str) -> String {
+    escape_markdown(sanitize_text(value).as_ref())
+}
+
+/// Render a comment body, or the masked marker when the comment is redacted (D37/D-E).
+///
+/// The `[redacted <ts>]` marker is the SAME literal form the plain backend emits (normative, one
+/// form across both backends). It is renderer-generated CHROME, not user content, so it is emitted
+/// VERBATIM — never through `escape_markdown`, whose bracket-escaping would mangle it.
+fn comment_body(comment: &Comment) -> String {
+    match comment.redacted_at {
+        Some(redacted_at) => format!("[redacted {}]", fmt_ts(redacted_at)),
+        None => safe_md_multiline(&comment.body),
+    }
 }
 
 /// The markdown renderer.
@@ -76,6 +99,21 @@ fn issue_detail(issue: &Issue) -> String {
     if let Some(description) = issue.description.as_deref() {
         lines.push(String::new());
         lines.push(safe_md(description));
+    }
+    // Comments (FR-6/D37).
+    if !issue.comments.is_empty() {
+        lines.push(String::new());
+        lines.push("### Comments".to_string());
+        for comment in &issue.comments {
+            lines.push(String::new());
+            lines.push(format!(
+                "- **{}** at {}",
+                safe_md(&comment.author),
+                fmt_ts(comment.created_at),
+            ));
+            lines.push(String::new());
+            lines.push(comment_body(comment));
+        }
     }
     lines.join("\n")
 }
@@ -241,7 +279,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use serde_json::json;
     use unblock_error::{ErrorCode, StructuredError};
-    use unblock_model::Issue;
+    use unblock_model::{Comment, Issue};
 
     fn fixture() -> Issue {
         Issue {
@@ -290,5 +328,88 @@ mod tests {
         // the `u{1b}` token rather than a literal control byte.
         assert!(!out.stdout.contains('\x1b'));
         assert!(out.stdout.contains("u\\{1b\\}"), "{}", out.stdout);
+    }
+
+    // --- comments (FR-6/D37) ---
+
+    fn comment(body: &str) -> Comment {
+        Comment {
+            id: 1,
+            issue_id: "ub-abc123".to_string(),
+            author: "alice".to_string(),
+            body: body.to_string(),
+            created_at: Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 7).unwrap(),
+            updated_at: None,
+            redacted_at: None,
+        }
+    }
+
+    fn fixture_with(comments: Vec<Comment>) -> Issue {
+        let mut issue = fixture();
+        issue.comments = comments;
+        issue
+    }
+
+    /// NFR-18: a comment body carrying ESC is escaped, never emitted raw.
+    #[test]
+    fn comment_body_esc_is_escaped() {
+        let r = MarkdownRenderer::new(RenderOptions::default());
+        let out = r
+            .issue(
+                &fixture_with(vec![comment("evil\x1b[2Jbody\x07")]),
+                &RenderOptions::default(),
+            )
+            .unwrap();
+        assert!(!out.stdout.contains('\x1b'), "no raw ESC may reach stdout");
+        assert!(!out.stdout.contains('\x07'), "no raw BEL may reach stdout");
+    }
+
+    /// `safe_md_multiline` PRESERVES the newlines `safe_md`/`sanitize_inline` would escape, while
+    /// still markdown-escaping the body. This test fails if the body is routed through `safe_md`.
+    #[test]
+    fn comment_body_keeps_newlines_and_is_markdown_escaped() {
+        let r = MarkdownRenderer::new(RenderOptions::default());
+        let out = r
+            .issue(
+                &fixture_with(vec![comment("pipe | one\nback `tick`")]),
+                &RenderOptions::default(),
+            )
+            .unwrap();
+        assert!(
+            out.stdout.contains("pipe \\| one\nback \\`tick\\`"),
+            "the body must keep its newline AND be markdown-escaped: {}",
+            out.stdout
+        );
+    }
+
+    /// D37/D-E: a redacted comment renders the marker VERBATIM — it is renderer chrome, so its
+    /// brackets must NOT be markdown-escaped (the plain backend emits the identical literal).
+    #[test]
+    fn redacted_comment_renders_the_unescaped_masked_marker() {
+        let mut c = comment("");
+        c.redacted_at = Some(Utc.with_ymd_and_hms(2026, 1, 3, 0, 0, 0).unwrap());
+        let r = MarkdownRenderer::new(RenderOptions::default());
+        let out = r
+            .issue(&fixture_with(vec![c]), &RenderOptions::default())
+            .unwrap();
+        assert!(
+            out.stdout.contains("[redacted 2026-01-03T00:00:00Z]"),
+            "{}",
+            out.stdout
+        );
+        assert!(
+            !out.stdout.contains("\\[redacted"),
+            "the marker is chrome — it must not be markdown-escaped: {}",
+            out.stdout
+        );
+    }
+
+    #[test]
+    fn no_comments_means_no_section() {
+        let r = MarkdownRenderer::new(RenderOptions::default());
+        let out = r
+            .issue(&fixture_with(Vec::new()), &RenderOptions::default())
+            .unwrap();
+        assert!(!out.stdout.contains("### Comments"));
     }
 }
