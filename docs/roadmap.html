@@ -1,0 +1,499 @@
+<title>unblock — product roadmap</title>
+<style>
+  :root {
+    --ground:#e9ecf0; --panel:#f6f7f9; --panel-2:#e1e5eb; --panel-3:#dde2e9;
+    --ink:#1b2430; --ink-dim:#586573; --ink-faint:#8791a0;
+    --hair:#d4dae2; --hair-strong:#c0c8d3;
+    --accent:#b95f14; --accent-soft:#d5843b; --accent-wash:rgba(185,95,20,.10);
+    --done:#2b8d57; --done-wash:rgba(43,141,87,.12);
+    --alert:#ad463f; --alert-wash:rgba(173,70,63,.10);
+    --shadow:0 1px 2px rgba(20,25,35,.05), 0 8px 24px rgba(20,25,35,.06);
+    --mono:ui-monospace,"SF Mono","JetBrains Mono","Cascadia Code",Menlo,Consolas,monospace;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --ground:#0f131a; --panel:#161b23; --panel-2:#1e242e; --panel-3:#232a35;
+      --ink:#e6e9ef; --ink-dim:#97a0ac; --ink-faint:#646e7c;
+      --hair:#252b36; --hair-strong:#353d4a;
+      --accent:#eb9b4d; --accent-soft:#c47e39; --accent-wash:rgba(235,155,77,.12);
+      --done:#54b57f; --done-wash:rgba(84,181,127,.14);
+      --alert:#d1706a; --alert-wash:rgba(209,112,106,.14);
+      --shadow:0 1px 2px rgba(0,0,0,.3), 0 10px 30px rgba(0,0,0,.35);
+    }
+  }
+  :root[data-theme="light"]{
+    --ground:#e9ecf0; --panel:#f6f7f9; --panel-2:#e1e5eb; --panel-3:#dde2e9;
+    --ink:#1b2430; --ink-dim:#586573; --ink-faint:#8791a0;
+    --hair:#d4dae2; --hair-strong:#c0c8d3;
+    --accent:#b95f14; --accent-soft:#d5843b; --accent-wash:rgba(185,95,20,.10);
+    --done:#2b8d57; --done-wash:rgba(43,141,87,.12);
+    --alert:#ad463f; --alert-wash:rgba(173,70,63,.10);
+    --shadow:0 1px 2px rgba(20,25,35,.05), 0 8px 24px rgba(20,25,35,.06);
+  }
+  :root[data-theme="dark"]{
+    --ground:#0f131a; --panel:#161b23; --panel-2:#1e242e; --panel-3:#232a35;
+    --ink:#e6e9ef; --ink-dim:#97a0ac; --ink-faint:#646e7c;
+    --hair:#252b36; --hair-strong:#353d4a;
+    --accent:#eb9b4d; --accent-soft:#c47e39; --accent-wash:rgba(235,155,77,.12);
+    --done:#54b57f; --done-wash:rgba(84,181,127,.14);
+    --alert:#d1706a; --alert-wash:rgba(209,112,106,.14);
+    --shadow:0 1px 2px rgba(0,0,0,.3), 0 10px 30px rgba(0,0,0,.35);
+  }
+
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--ground);color:var(--ink);font-family:var(--sans);
+    line-height:1.55;-webkit-font-smoothing:antialiased;
+    background-image:radial-gradient(circle at 1px 1px, var(--hair) 1px, transparent 0);
+    background-size:26px 26px;}
+  .wrap{max-width:1080px;margin:0 auto;padding:clamp(20px,5vw,56px) clamp(16px,4vw,40px) 72px;}
+  .mono{font-family:var(--mono)}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+  :focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:3px}
+
+  /* ---- masthead ---- */
+  .mast{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;
+    gap:18px;padding-bottom:20px;border-bottom:1px solid var(--hair-strong)}
+  .brand{display:flex;align-items:baseline;gap:2px}
+  .brand .word{font-family:var(--mono);font-weight:600;font-size:clamp(30px,6vw,44px);
+    letter-spacing:-.02em;color:var(--ink)}
+  .brand .cur{display:inline-block;width:.5em;height:1.02em;margin-left:.12em;
+    transform:translateY(.12em);background:var(--accent);border-radius:1px}
+  @media (prefers-reduced-motion:no-preference){.brand .cur{animation:blink 1.15s steps(1) infinite}}
+  @keyframes blink{50%{opacity:0}}
+  .mast .sub{font-family:var(--mono);font-size:12.5px;color:var(--ink-dim);
+    letter-spacing:.02em;margin-top:8px}
+  .mast .meta{text-align:right;font-family:var(--mono);font-size:12px;color:var(--ink-faint);
+    line-height:1.9}
+  .rel-chip{display:inline-flex;align-items:center;gap:8px;font-family:var(--mono);
+    font-size:12px;font-weight:600;color:var(--accent);background:var(--accent-wash);
+    border:1px solid color-mix(in srgb,var(--accent) 34%, transparent);
+    padding:5px 11px;border-radius:999px;letter-spacing:.01em}
+  .rel-chip .dot{width:7px;height:7px;border-radius:50%;background:var(--accent);
+    box-shadow:0 0 0 3px var(--accent-wash)}
+
+  /* ---- lead / verdict ---- */
+  .lead{margin:30px 0 8px}
+  .eyebrow{font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.18em;
+    text-transform:uppercase;color:var(--accent)}
+  .lead h1{font-size:clamp(21px,3.4vw,29px);line-height:1.25;margin:12px 0 10px;
+    font-weight:650;letter-spacing:-.015em;text-wrap:balance;max-width:26ch}
+  .lead p{margin:0;color:var(--ink-dim);max-width:64ch;font-size:15.5px}
+  .lead p b{color:var(--ink);font-weight:600}
+
+  /* ---- stat strip ---- */
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:26px 0 8px}
+  @media (max-width:720px){.stats{grid-template-columns:repeat(2,1fr)}}
+  .stat{background:var(--panel);border:1px solid var(--hair);border-radius:12px;
+    padding:15px 16px;box-shadow:var(--shadow)}
+  .stat .n{font-family:var(--mono);font-size:26px;font-weight:600;letter-spacing:-.02em;
+    color:var(--ink);font-variant-numeric:tabular-nums;display:flex;align-items:baseline;gap:6px}
+  .stat .n small{font-size:14px;color:var(--ink-faint);font-weight:500}
+  .stat .k{font-size:12px;color:var(--ink-dim);margin-top:4px}
+  .stat.good .n{color:var(--done)}
+  .stat.acc .n{color:var(--accent)}
+
+  /* ---- section frame ---- */
+  section{margin-top:52px}
+  .sec-head{display:flex;align-items:center;gap:14px;margin-bottom:20px}
+  .sec-head .idx{font-family:var(--mono);font-size:12px;color:var(--accent);font-weight:600;
+    border:1px solid color-mix(in srgb,var(--accent) 34%, transparent);border-radius:6px;
+    padding:3px 8px;flex:none}
+  .sec-head h2{font-size:18px;font-weight:650;letter-spacing:-.01em;margin:0}
+  .sec-head .rule{height:1px;background:var(--hair-strong);flex:1}
+  .sec-head .note{font-family:var(--mono);font-size:11.5px;color:var(--ink-faint)}
+
+  /* ---- release train ---- */
+  .train-scroll{overflow-x:auto;padding:8px 2px 4px;margin:0 -2px}
+  .train{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(118px,1fr);
+    gap:0;position:relative;min-width:760px}
+  .stn{position:relative;padding-top:52px;text-align:center}
+  .stn::before{content:"";position:absolute;top:15px;left:0;right:0;height:2px;
+    background:var(--hair-strong)}
+  .stn:first-child::before{left:50%}
+  .stn:last-child::before{right:50%}
+  .stn .node{position:absolute;top:8px;left:50%;transform:translateX(-50%);
+    width:17px;height:17px;border-radius:50%;background:var(--ground);
+    border:2px solid var(--hair-strong);z-index:2}
+  .stn.done::before{background:var(--done)}
+  .stn.done .node{background:var(--done);border-color:var(--done)}
+  .stn.ga .node{width:22px;height:22px;top:5px;background:var(--accent);border-color:var(--accent);
+    box-shadow:0 0 0 5px var(--accent-wash)}
+  .stn.ga::before{background:linear-gradient(90deg,var(--done),var(--accent))}
+  .stn.future .node{background:var(--ground);border-style:dashed;border-color:var(--ink-faint)}
+  .stn .ver{font-family:var(--mono);font-size:13px;font-weight:600;color:var(--ink);letter-spacing:-.01em}
+  .stn .thm{font-size:10.5px;color:var(--ink-dim);margin-top:3px;line-height:1.35;padding:0 6px}
+  .stn .tag{display:inline-block;margin-top:7px;font-family:var(--mono);font-size:9.5px;
+    font-weight:600;letter-spacing:.06em;text-transform:uppercase;padding:2px 6px;border-radius:5px}
+  .stn.done .tag{color:var(--done);background:var(--done-wash)}
+  .stn.ga .tag{color:var(--accent);background:var(--accent-wash)}
+  .stn.locked .tag{color:var(--ink-dim);background:var(--panel-2);border:1px solid var(--hair)}
+  .stn.future .tag{color:var(--ink-faint);background:transparent;border:1px dashed var(--hair-strong)}
+  .now-pin{position:absolute;top:-6px;left:50%;transform:translateX(-50%);
+    font-family:var(--mono);font-size:9.5px;font-weight:700;letter-spacing:.12em;
+    color:#fff;background:var(--accent);padding:2px 7px;border-radius:5px;white-space:nowrap;z-index:3}
+  .now-pin::after{content:"";position:absolute;bottom:-4px;left:50%;transform:translateX(-50%);
+    border:4px solid transparent;border-top-color:var(--accent);border-bottom:0}
+
+  /* ---- milestone grid (v1) ---- */
+  .ms-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
+  @media (max-width:820px){.ms-grid{grid-template-columns:repeat(2,1fr)}}
+  @media (max-width:460px){.ms-grid{grid-template-columns:1fr}}
+  .ms{background:var(--panel);border:1px solid var(--hair);border-radius:13px;padding:16px;
+    box-shadow:var(--shadow);position:relative;overflow:hidden}
+  .ms::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--done)}
+  .ms .top{display:flex;align-items:center;justify-content:space-between;gap:8px}
+  .ms .id{font-family:var(--mono);font-size:13px;font-weight:700;color:var(--ink)}
+  .ms .check{width:18px;height:18px;flex:none;color:var(--done)}
+  .ms .name{font-size:12.5px;color:var(--ink-dim);margin-top:2px;font-weight:500}
+  .ms .frs{font-family:var(--mono);font-size:10.5px;color:var(--ink-faint);margin-top:12px;
+    line-height:1.6;word-break:break-word}
+  .ms .gate{font-size:11.5px;color:var(--ink-dim);margin-top:12px;padding-top:11px;
+    border-top:1px solid var(--hair);line-height:1.45}
+  .ms .gate b{color:var(--done);font-weight:600}
+  .ms .count{position:absolute;top:14px;right:14px;font-family:var(--mono);font-size:10px;
+    color:var(--done);background:var(--done-wash);padding:2px 7px;border-radius:999px;font-weight:600}
+
+  /* ---- ga callout ---- */
+  .ga-box{margin-top:22px;background:var(--panel);border:1px solid color-mix(in srgb,var(--accent) 30%, var(--hair));
+    border-radius:14px;padding:20px 22px;box-shadow:var(--shadow);position:relative}
+  .ga-box::before{content:"";position:absolute;inset:0;border-radius:14px;
+    background:linear-gradient(120deg,var(--accent-wash),transparent 55%);pointer-events:none}
+  .ga-box h3{margin:0 0 4px;font-family:var(--mono);font-size:14px;font-weight:650;
+    color:var(--accent);display:flex;align-items:center;gap:9px}
+  .ga-box .g-sub{font-size:13px;color:var(--ink-dim);margin:0 0 15px}
+  .ga-steps{display:grid;grid-template-columns:1fr 1fr;gap:10px;position:relative}
+  @media (max-width:640px){.ga-steps{grid-template-columns:1fr}}
+  .g-step{display:flex;gap:11px;align-items:flex-start;font-size:13px;background:var(--panel-2);
+    border:1px solid var(--hair);border-radius:10px;padding:11px 13px}
+  .g-step .mk{font-family:var(--mono);font-size:11px;font-weight:700;flex:none;width:20px;height:20px;
+    display:grid;place-items:center;border-radius:50%}
+  .g-step.ok .mk{color:var(--done);background:var(--done-wash)}
+  .g-step.wait .mk{color:var(--accent);background:var(--accent-wash)}
+  .g-step .t{color:var(--ink)}
+  .g-step .t b{font-weight:600}
+  .g-step .t span{color:var(--ink-dim);display:block;font-size:11.5px;margin-top:1px}
+
+  /* ---- horizon cards ---- */
+  .cards{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media (max-width:760px){.cards{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--hair);border-radius:13px;padding:17px 18px;
+    box-shadow:var(--shadow);display:flex;flex-direction:column;gap:2px}
+  .card .ch{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .card .cv{font-family:var(--mono);font-size:15px;font-weight:700;color:var(--ink);letter-spacing:-.01em}
+  .card .status{font-family:var(--mono);font-size:9.5px;font-weight:700;letter-spacing:.07em;
+    text-transform:uppercase;padding:2px 7px;border-radius:5px}
+  .st-locked{color:var(--ink);background:var(--panel-3);border:1px solid var(--hair-strong)}
+  .st-prop{color:var(--ink-dim);background:transparent;border:1px dashed var(--hair-strong)}
+  .st-dir{color:var(--ink-faint);background:transparent;border:1px dashed var(--hair)}
+  .card .thm{font-size:13px;color:var(--accent);font-weight:600;margin:8px 0 2px}
+  .card .desc{font-size:13px;color:var(--ink-dim);margin:0}
+  .card ul{margin:11px 0 0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px}
+  .card li{font-size:12.5px;color:var(--ink);padding-left:16px;position:relative;line-height:1.4}
+  .card li::before{content:"";position:absolute;left:2px;top:8px;width:5px;height:5px;border-radius:1px;
+    background:var(--accent-soft)}
+  .card .crates{margin-top:13px;padding-top:11px;border-top:1px solid var(--hair);
+    font-family:var(--mono);font-size:10.5px;color:var(--ink-faint);line-height:1.6}
+  .card .crates b{color:var(--ink-dim);font-weight:600}
+  .card.dir{border-style:dashed}
+
+  /* ---- drift note ---- */
+  .drift{margin-top:22px;background:var(--alert-wash);border:1px solid color-mix(in srgb,var(--alert) 30%, transparent);
+    border-radius:12px;padding:15px 17px;display:flex;gap:13px;align-items:flex-start}
+  .drift svg{flex:none;color:var(--alert);width:20px;height:20px;margin-top:1px}
+  .drift .d-t{font-size:13.5px;color:var(--ink)}
+  .drift .d-t b{color:var(--alert);font-weight:650}
+  .drift .d-t code{font-family:var(--mono);font-size:12px;background:var(--panel);padding:1px 5px;
+    border-radius:4px;border:1px solid var(--hair)}
+  .drift .d-t span{display:block;color:var(--ink-dim);font-size:12.5px;margin-top:4px}
+
+  /* ---- legend + footer ---- */
+  .legend{display:flex;flex-wrap:wrap;gap:16px;margin-top:30px;padding:15px 18px;
+    background:var(--panel);border:1px solid var(--hair);border-radius:11px}
+  .lg{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--ink-dim)}
+  .lg .sw{width:13px;height:13px;border-radius:4px;flex:none}
+  .lg .sw.done{background:var(--done)} .lg .sw.now{background:var(--accent)}
+  .lg .sw.locked{background:var(--panel-3);border:1px solid var(--hair-strong)}
+  .lg .sw.prop{background:transparent;border:1px dashed var(--hair-strong)}
+  footer{margin-top:44px;padding-top:20px;border-top:1px solid var(--hair);
+    font-family:var(--mono);font-size:11px;color:var(--ink-faint);line-height:1.9}
+  footer b{color:var(--ink-dim);font-weight:600}
+
+  @media (prefers-reduced-motion:no-preference){
+    .reveal{opacity:0;transform:translateY(12px);animation:rise .6s ease forwards}
+    @keyframes rise{to{opacity:1;transform:none}}
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="mast">
+    <div>
+      <div class="brand"><span class="word">unblock</span><span class="cur" aria-hidden="true"></span></div>
+      <div class="sub">agent-first issue tracker · MCP-first · idiomatic Rust rewrite</div>
+    </div>
+    <div class="meta">
+      <span class="rel-chip"><span class="dot"></span>v1.0.0-rc.5 · GA imminent</span><br>
+      product roadmap<br>
+      state of play — 2026-07-17
+    </div>
+  </header>
+
+  <div class="lead reveal">
+    <div class="eyebrow">Where we are</div>
+    <h1>v1 is complete — GA 1.0.0 is one human step away.</h1>
+    <p>Not just one milestone: <b>all four v1 milestones (M0→M3) are merged — every task, T0.1 through T3.10</b>.
+      The three GA co-holders — comments (T3.9/D37), the FR-17 signal-exit fix (T3.2.1/D38) and workspace
+      discovery (T3.10/D39) — have all landed, and <b>rc.5 is cut</b>. What remains for GA is a <b>human step</b>,
+      not engineering: push the <span class="mono">v1.0.0</span> tag and run one end-to-end
+      <span class="mono">unblock update</span> smoke.</p>
+  </div>
+
+  <div class="stats reveal">
+    <div class="stat good"><div class="n">4<small>/ 4</small></div><div class="k">v1 milestones complete (M0–M3)</div></div>
+    <div class="stat good"><div class="n">40<small>done</small></div><div class="k">v1 tasks merged · 0 in flight — all of M0–M3</div></div>
+    <div class="stat acc"><div class="n mono">v1.5</div><div class="k">MCP contract shipping at GA (<span class="mono">unblock.mcp.v1.5</span>)</div></div>
+    <div class="stat acc"><div class="n">2<small>steps</small></div><div class="k">remaining to GA — both human-gated</div></div>
+  </div>
+
+  <!-- ============ RELEASE TRAIN ============ -->
+  <section class="reveal">
+    <div class="sec-head">
+      <span class="idx">01</span><h2>The release train</h2><div class="rule"></div>
+      <span class="note">v1 · v1.1 locked — v1.2+ proposed</span>
+    </div>
+    <div class="train-scroll">
+      <div class="train">
+        <div class="stn done">
+          <span class="node"></span>
+          <div class="ver">v1</div>
+          <div class="thm">Walking skeleton — the agent-first wedge</div>
+          <span class="tag">Shipped</span>
+        </div>
+        <div class="stn ga locked">
+          <span class="now-pin">YOU ARE HERE</span>
+          <span class="node"></span>
+          <div class="ver">GA 1.0.0</div>
+          <div class="thm">Tag push + update smoke (human gate)</div>
+          <span class="tag">Cutting</span>
+        </div>
+        <div class="stn locked">
+          <span class="node"></span>
+          <div class="ver">v1.1</div>
+          <div class="thm">Organization, coordination &amp; ergonomics</div>
+          <span class="tag">Locked</span>
+        </div>
+        <div class="stn future">
+          <span class="node"></span>
+          <div class="ver">v1.2</div>
+          <div class="thm">Shared state — many machines, one store</div>
+          <span class="tag">Proposed</span>
+        </div>
+        <div class="stn future">
+          <span class="node"></span>
+          <div class="ver">v1.3</div>
+          <div class="thm">Planning layer — goals + milestones</div>
+          <span class="tag">Proposed</span>
+        </div>
+        <div class="stn future">
+          <span class="node"></span>
+          <div class="ver">v1.4</div>
+          <div class="thm">Scale, swarm depth &amp; MCP richness</div>
+          <span class="tag">Proposed</span>
+        </div>
+        <div class="stn future">
+          <span class="node"></span>
+          <div class="ver">v1.5</div>
+          <div class="thm">Human surface — local TUI</div>
+          <span class="tag">Proposed</span>
+        </div>
+        <div class="stn future">
+          <span class="node"></span>
+          <div class="ver">v2+</div>
+          <div class="thm">Turso Sync · ACL · commercial PRO web</div>
+          <span class="tag">Direction</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ V1 MILESTONES ============ -->
+  <section class="reveal">
+    <div class="sec-head">
+      <span class="idx">02</span><h2>Inside v1 — the four milestones</h2><div class="rule"></div>
+      <span class="note">all gates PASS</span>
+    </div>
+    <div class="ms-grid">
+
+      <div class="ms">
+        <span class="count">T0.1–T0.9</span>
+        <div class="top"><span class="id">M0</span>
+          <svg class="check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-label="done"><path d="M20 6 9 17l-5-5"/></svg>
+        </div>
+        <div class="name">Foundation</div>
+        <div class="frs">model · error · storage<br>(Storage trait + libsql)</div>
+        <div class="gate">Gate: <b>Storage contract suite green + contention lab proves no hot-spin</b></div>
+      </div>
+
+      <div class="ms">
+        <span class="count">T1.1–T1.8</span>
+        <div class="top"><span class="id">M1</span>
+          <svg class="check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-label="done"><path d="M20 6 9 17l-5-5"/></svg>
+        </div>
+        <div class="name">Engine + core domain</div>
+        <div class="frs">FR-1·2·3·4·5 · 9·10<br>FR-13 (subset)</div>
+        <div class="gate">Gate: <b>engine mutations linearizable; CRUD/ready/dep via the internal API</b></div>
+      </div>
+
+      <div class="ms">
+        <span class="count">T2.1–T2.7</span>
+        <div class="top"><span class="id">M2</span>
+          <svg class="check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-label="done"><path d="M20 6 9 17l-5-5"/></svg>
+        </div>
+        <div class="name">MCP surface (primary)</div>
+        <div class="frs">FR-20·11·12<br>FR-7·8 · 26 · 15</div>
+        <div class="gate">Gate: <b>MCP client does ready→claim→close; a bd repo imports</b></div>
+      </div>
+
+      <div class="ms">
+        <span class="count">T3.1–T3.10</span>
+        <div class="top"><span class="id">M3</span>
+          <svg class="check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-label="done"><path d="M20 6 9 17l-5-5"/></svg>
+        </div>
+        <div class="name">Reliability + ops + GA</div>
+        <div class="frs">FR-14·13·16(lite) · 17·20·25<br>6 (D37) · discovery (D39)</div>
+        <div class="gate">Gate: <b>shutdown/failure-injection + perf budgets + rate-limit green; dist release; GA = 1.0.0</b></div>
+      </div>
+
+    </div>
+
+    <div class="ga-box">
+      <h3><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 22V4a2 2 0 0 1 2-2h9l1 2h4v11h-5l-1-2H6"/></svg>GA 1.0.0 — the finish line</h3>
+      <p class="g-sub">Engineering is done. The two remaining steps are deliberately reserved for a human (D35 / RELEASING.md).</p>
+      <div class="ga-steps">
+        <div class="g-step ok"><span class="mk">✓</span><div class="t"><b>All GA blockers merged</b><span>comments #422 (D37) · signal-exit #423 (D38) · discovery #424 (D39)</span></div></div>
+        <div class="g-step ok"><span class="mk">✓</span><div class="t"><b>Release candidate cut</b><span>v1.0.0-rc.5 — dist pipeline, 5 target triples (D36)</span></div></div>
+        <div class="g-step wait"><span class="mk">1</span><div class="t"><b>Push the <span class="mono" style="display:inline">v1.0.0</span> tag</b><span>human-gated; needs the WS_GH_TOKEN secret</span></div></div>
+        <div class="g-step wait"><span class="mk">2</span><div class="t"><b>End-to-end update smoke</b><span>run <span class="mono" style="display:inline">unblock update</span> on ≥1 triple (installer SHA256 + attestation)</span></div></div>
+      </div>
+    </div>
+
+    <div class="drift">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+      <div class="d-t"><b>Three tracking rows to reconcile.</b> <code>STATUS.md</code> still shows <b>T3.2.1</b> and <b>T3.8</b> as ◐ — both are merged on <span class="mono">main</span> (PR #423; <code>b44a3c9</code>) — and the T3.5.1 note still calls <b>PR #412</b> “open” though it merged 07-15. All three should read ☑.
+        <span>Cosmetic, non-blocking — the STATUS-lag class to fold into the next branch that touches STATUS.md. (Verified against <span class="mono">git log</span> / <span class="mono">gh</span>, not inferred.)</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ HORIZON ============ -->
+  <section class="reveal">
+    <div class="sec-head">
+      <span class="idx">03</span><h2>The horizon — v1.1 → v2+</h2><div class="rule"></div>
+      <span class="note">locked just-in-time, per version</span>
+    </div>
+    <div class="cards">
+
+      <div class="card">
+        <div class="ch"><span class="cv">v1.1</span><span class="status st-locked">Locked · backlog</span></div>
+        <div class="thm">Organization, coordination &amp; ergonomics</div>
+        <p class="desc">The ergonomics the thin slice deliberately deferred — additive only, no topology or contract-shape change.</p>
+        <ul>
+          <li>Labels (rename/list-all) + epic rollups &amp; auto-close</li>
+          <li>Full config (FR-13) + full health taxonomy (FR-16)</li>
+          <li>Scheduler &amp; coordination diagnostics (FR-18) · workflow gates (FR-19)</li>
+          <li>Saved queries · audit/flight-recorder · shell completions · TOON</li>
+        </ul>
+        <div class="crates"><b>touches</b> policy · health · config · engine · mcp · render · cli</div>
+      </div>
+
+      <div class="card">
+        <div class="ch"><span class="cv">v1.2</span><span class="status st-prop">Proposed</span></div>
+        <div class="thm">Shared state — one primary, many machines</div>
+        <p class="desc">Where unblock becomes a <i>team</i> product: mixed human+agent teams on one logical store (D28), via libsql embedded replicas.</p>
+        <ul>
+          <li>Remote/replica GA — reads local, all writes serialize at the primary</li>
+          <li>Join-existing-workspace onboarding + committed/secret config split</li>
+          <li>Credentials via env / OS keychain only · self-hosted sqld path</li>
+          <li>No multi-master, no offline queue — integrity first</li>
+        </ul>
+        <div class="crates"><b>heart</b> storage — + config · health · engine · mcp · cli</div>
+      </div>
+
+      <div class="card">
+        <div class="ch"><span class="cv">v1.3</span><span class="status st-prop">Proposed</span></div>
+        <div class="thm">Planning layer — goals + milestones</div>
+        <p class="desc">A clean semantic triad: <b>Goal = why</b> · <b>Epic = what</b> · <b>Milestone = when</b>. Pure-local, no network.</p>
+        <ul>
+          <li>First-class Milestone entity (one per issue) + derived rollups</li>
+          <li>Milestone-scoped <span class="mono">ready</span>/<span class="mono">list</span>/<span class="mono">changelog</span> — release-scoped ready-work</li>
+          <li>Slim first-class Goals (success-criteria; many-to-many links)</li>
+          <li>ONE consolidated <span class="mono">planning</span> MCP tool (additive bump)</li>
+        </ul>
+        <div class="crates"><b>touches</b> model · storage · engine · mcp · render · policy</div>
+      </div>
+
+      <div class="card">
+        <div class="ch"><span class="cv">v1.4</span><span class="status st-prop">Proposed</span></div>
+        <div class="thm">Scale, swarm depth &amp; MCP richness</div>
+        <p class="desc">From “correct at 250k” to “fast &amp; rich at 1M issues / 10k agents”; coordination goes from observing to helping.</p>
+        <ul>
+          <li>1M-issue perf as a CI hard gate (today: manual)</li>
+          <li>Active coordination — reclaim policy, claim TTL/heartbeat</li>
+          <li>Scheduler v2 (critical-path + milestone-due-date aware)</li>
+          <li>Streamable-HTTP transport (re-eval at lock) · compaction/archival</li>
+        </ul>
+        <div class="crates"><b>touches</b> storage · policy · engine · mcp · health · render</div>
+      </div>
+
+      <div class="card">
+        <div class="ch"><span class="cv">v1.5</span><span class="status st-prop">Proposed</span></div>
+        <div class="thm">Human surface — local TUI</div>
+        <p class="desc">An offline, terminal-native window for developers — a ratatui app that is itself an MCP client over stdio (no new transport, FR-9 preserved).</p>
+        <ul>
+          <li>Phase 1 read-only: ready queue, board, detail, swarm observability</li>
+          <li>Phase 2: claim/close/create via the same MCP tools, human as actor</li>
+          <li>100% Rust — no Node, no npm, no web assets</li>
+          <li>Dependency graphs excluded → they belong to the PRO web</li>
+        </ul>
+        <div class="crates"><b>new</b> unblock-tui (13th crate) · cli (tui command)</div>
+      </div>
+
+      <div class="card dir">
+        <div class="ch"><span class="cv">v2+</span><span class="status st-dir">Direction only</span></div>
+        <div class="thm">The long horizon</div>
+        <p class="desc">Credible but uncommitted — each either reverses a locked decision or awaits concrete external demand.</p>
+        <ul>
+          <li>Turso Sync / Turso DB backend (behind the Storage trait)</li>
+          <li>Fine-grained auth / ACL for shared stores</li>
+          <li>Commercial PRO web dashboard — static SPA + WASM domain core</li>
+          <li>Cross-project routing · DB-only mode</li>
+        </ul>
+        <div class="crates"><b>gate</b> a product decision per row — nothing scheduled</div>
+      </div>
+
+    </div>
+  </section>
+
+  <div class="legend reveal" aria-label="legend">
+    <div class="lg"><span class="sw done"></span>Shipped / merged</div>
+    <div class="lg"><span class="sw now"></span>Now — GA cutting</div>
+    <div class="lg"><span class="sw locked"></span>Locked (committed, not built)</div>
+    <div class="lg"><span class="sw prop"></span>Proposed / direction</div>
+  </div>
+
+  <footer>
+    <b>Sources of truth</b> — docs/plans/STATUS.md (live registry) · docs/plans/00-roadmap.md (version horizon) · docs/PRD.md §13/§14 (milestones + ship-gates)<br>
+    <b>Hierarchy</b> PRD &gt; design-spine &gt; crate plans · reconciled against git log (main @ 86ae202 · rc.5) on 2026-07-17
+  </footer>
+
+</div>
+
+<script>
+  // staggered reveal on load
+  (function(){
+    var els = document.querySelectorAll('.reveal');
+    els.forEach(function(el,i){ el.style.animationDelay = (i*80)+'ms'; });
+  })();
+</script>
