@@ -1,6 +1,6 @@
 # unblock — Version Roadmap
 
-- **Status:** v1 + v1.1 **LOCKED** (derived from APPROVED PRD); v1.2–v1.5 / v2-plus **PROPOSED** (for Miguel review)
+- **Status:** v1 + v1.1 **LOCKED** (derived from APPROVED PRD); v1.0.1 **PLANNED** (maintenance patch — the `v1.0.1` subsection of §1); v1.2–v1.5 / v2-plus **PROPOSED** (for Miguel review)
 - **Date:** 2026-06-19 · **v1.2–v1.5 resequence:** 2026-07-07 (session ratified by Miguel; audience decision minted as PRD §4 D28) · **post-GA v1.2+ resequence:** 2026-07-20 (Miguel-ratified; the PROPOSED v1.2–v1.5 order is reworked and a v1.0.1 maintenance-patch slot added — full mapping in roadmap §8, rationale + guardrail in PRD §4 D41)
 - **Owner:** Miguel Ramos
 - **Sources of truth:** `docs/PRD.md` (PRD APPROVED v1.1, §5 tiers / §11 scope / §13 phasing), `docs/plans/01-design-spine.md` (cross-crate interfaces — wins on any cross-crate type/signature disagreement), `docs/plans/implementation-plan.md` (v1 walking skeleton). Hierarchy: PRD > spine > crate plans. Grounding for deferred/later items: original `temp/beads_rust-main` feature inventory; UX grounding for the v1.4 TUI: the TUI-adopted subset of the 14 mockups under `temp/tentative-v2/docs/designs/` (**reference-only**, same status as `temp/beads_rust-main`; the graph / burnup screens there inform the v2+ PRO web instead — roadmap §7).
@@ -19,7 +19,7 @@
 - **Theme/Goal** — the one-line reason the release exists.
 - **Lands** — the FR/NFR ids and features delivered (FR ids trace to PRD §5; new proposed capabilities are tagged `[NEW]` and not yet PRD-blessed).
 - **Crates touched** — which of the 12 workspace crates (PRD §8.1) take work. The proposed v1.4 `unblock-tui` crate (roadmap §5/§9) would be a 13th; it is minted only at v1.4 lock (PRD §8.1 is unchanged until then).
-- **Status** — `LOCKED` (PRD-approved) or `PROPOSED` (review candidate). PROPOSED versions are **direction, locked just-in-time** as each nears its build window; every per-version tech/scope call below is **re-confirmed at that version's lock** with fresh research and real learnings.
+- **Status** — `LOCKED` (PRD-approved), `PLANNED` (scope agreed and committed but not a locked release plan — the v1.0.1 maintenance patch, §1), or `PROPOSED` (review candidate). PROPOSED versions are **direction, locked just-in-time** as each nears its build window; every per-version tech/scope call below is **re-confirmed at that version's lock** with fresh research and real learnings.
 
 Acyclic layering is invariant across all releases (PRD §8.1 / NFR-15):
 `model`/`error` → `policy` → `storage` → `sync`/`health` → `config` → `engine` → `render` → `mcp`/`cli`.
@@ -424,48 +424,48 @@ decision) before it can leave this list.
 
 ## 8. Feature-to-version matrix
 
-Legend: ● lands · ◐ extended/hardened · ✗ = dropped · blank = not landing · `[NEW]` not yet in PRD FR set · L=LOCKED, P=PROPOSED
+Legend: ● lands · ◐ extended/hardened · ✗ = dropped · blank = not landing · `[NEW]` not yet in PRD FR set · L=LOCKED, PL=PLANNED, P=PROPOSED
 
-| Feature / FR | v1 (L) | v1.1 (L) | v1.2 (P) | v1.3 (P) | v1.4 (P) | v1.5 (P) | v2+ (P) |
-|---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
-| Issue CRUD + tombstone delete (FR-1) | ● | | ◐ `milestone_id` | | | | |
-| Atomic claim (FR-2) | ● | | | ◐ cross-machine at primary | | ◐ TTL/heartbeat | |
-| Defer/undefer (FR-3) | ● | | | | | | |
-| Query: list/ready/blocked/search/count/stale (FR-4) | ● | | ◐ milestone filter | | | | |
-| Typed deps + graph (FR-5) | ● | | | | | | |
-| Comments — full CRUD add/list/update/delete (FR-6, D37) | ● | | | | | | |
-| Labels (rename/list-all) / epic rollups (FR-6) | | ● | | | | | |
-| JSONL export/import (FR-7/8) | ● | | ◐ milestones/goals layout (lock design point) | | | | ◐ DB-only option |
-| `bd` one-shot import (FR-26) | ● | | | | | | |
-| Shared engine + write Semaphore + read fast path (FR-9/10) | ● | | | ◐ primary-serialized topology | | ◐ TTL | |
-| Agent contract + exit codes + capabilities/schema (FR-11/12) | ● | | ◐ planning tool (additive bump) | | | ◐ richer | |
-| Layered config (FR-13) | ● subset | ● full | | ◐ remote keys + config split | | | |
-| Workspace bootstrap (FR-14) | ● | | | ◐ multi-ws + join-remote onboarding | | | |
-| Pure-DB diagnostics (FR-15) | ● | | ◐ milestone filters/counters | | | | |
-| Workspace health (FR-16) | ● lite | ● full | | ◐ sync health | | ◐ scale | |
-| Cooperative shutdown (FR-17) | ● | | | | | | |
-| Swarm coordination / scheduler (FR-18) | | ● diagnostics | | ◐ actor attribution | | ◐ active + v2 | |
-| Workflow gates (FR-19) | | ● | ◐ milestone-close gate (candidate) | | | | |
-| MCP stdio server (FR-20) | ● | ◐ surface | ◐ planning tool | ◐ sync resources | | ◐ batch/stream | ◐ other transports (unscheduled) |
-| Saved queries (FR-21) | | ● | | | | | |
-| Audit / flight recorder (FR-22) | | ● | | ◐ actor conventions | | | |
-| Shell completions (FR-23) | | ● | | | | | |
-| Cross-project routing (FR-24) | ✗ dropped | | | | | | ◐ reconsider |
-| Self-update (FR-25) | ● | | | | | | |
-| TOON output | | ● | | | | | |
-| **libsql remote/replica sync (embedded replicas)** `[NEW]` | (off, D15) | | | ● GA | | | ◐ Turso Sync candidate |
-| **Credential / keychain handling** `[NEW]` | | | | ● | | | |
-| **Join-existing-workspace onboarding** `[NEW]` | | | | ● | | | |
-| **Self-hosted sqld (documented + tested)** `[NEW]` | | | | ● | | | |
-| **Multi-workspace (sync-scoped)** `[NEW]` | | | | ● | | | |
-| **Milestones (first-class) + milestone-scoped queries** `[NEW]` | | | ● | | | | |
-| **Goals (first-class, slim)** `[NEW]` | | | ● | | | | |
-| **MCP streamable-HTTP transport** `[NEW]` | | | | | | | ◐ unscheduled |
-| **1M-issue perf as CI gate** `[NEW]` | (manual) | | | | | ● | |
-| **Compaction / archival activation** `[NEW]` | (fields only) | | | | | ● | |
-| **Local TUI — MCP client (stdio)** `[NEW]` | | | | | ● P1 read-only / P2 writes | | |
-| **Pluggable backends / hosted service** `[NEW]` | | | | | | | ◐ |
-| **Fine-grained auth/ACL (shared stores)** `[NEW]` | | | | | | | ◐ |
+| Feature / FR | v1 (L) | v1.0.1 (PL) | v1.1 (L) | v1.2 (P) | v1.3 (P) | v1.4 (P) | v1.5 (P) | v2+ (P) |
+|---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
+| Issue CRUD + tombstone delete (FR-1) | ● | | | ◐ `milestone_id` | | | | |
+| Atomic claim (FR-2) | ● | | | | ◐ cross-machine at primary | | ◐ TTL/heartbeat | |
+| Defer/undefer (FR-3) | ● | | | | | | | |
+| Query: list/ready/blocked/search/count/stale (FR-4) | ● | | | ◐ milestone filter | | | | |
+| Typed deps + graph (FR-5) | ● | | | | | | | |
+| Comments — full CRUD add/list/update/delete (FR-6, D37) | ● | ◐ `comment add` persistence fix + forward migration | | | | | | |
+| Labels (rename/list-all) / epic rollups (FR-6) | | | ● | | | | | |
+| JSONL export/import (FR-7/8) | ● | | | ◐ milestones/goals layout (lock design point) | | | | ◐ DB-only option |
+| `bd` one-shot import (FR-26) | ● | | | | | | | |
+| Shared engine + write Semaphore + read fast path (FR-9/10) | ● | | | | ◐ primary-serialized topology | | ◐ TTL | |
+| Agent contract + exit codes + capabilities/schema (FR-11/12) | ● | | | ◐ planning tool (additive bump) | | | ◐ richer | |
+| Layered config (FR-13) | ● subset | | ● full | | ◐ remote keys + config split | | | |
+| Workspace bootstrap (FR-14) | ● | | | | ◐ multi-ws + join-remote onboarding | | | |
+| Pure-DB diagnostics (FR-15) | ● | | | ◐ milestone filters/counters | | | | |
+| Workspace health (FR-16) | ● lite | | ● full | | ◐ sync health | | ◐ scale | |
+| Cooperative shutdown (FR-17) | ● | | | | | | | |
+| Swarm coordination / scheduler (FR-18) | | | ● diagnostics | | ◐ actor attribution | | ◐ active + v2 | |
+| Workflow gates (FR-19) | | | ● | ◐ milestone-close gate (candidate) | | | | |
+| MCP stdio server (FR-20) | ● | | ◐ surface | ◐ planning tool | ◐ sync resources | | ◐ batch/stream | ◐ other transports (unscheduled) |
+| Saved queries (FR-21) | | | ● | | | | | |
+| Audit / flight recorder (FR-22) | | | ● | | ◐ actor conventions | | | |
+| Shell completions (FR-23) | | | ● | | | | | |
+| Cross-project routing (FR-24) | ✗ dropped | | | | | | | ◐ reconsider |
+| Self-update (FR-25) | ● | ◐ end-to-end update smoke | | | | | | |
+| TOON output | | | ● | | | | | |
+| **libsql remote/replica sync (embedded replicas)** `[NEW]` | (off, D15) | | | | ● GA | | | ◐ Turso Sync candidate |
+| **Credential / keychain handling** `[NEW]` | | | | | ● | | | |
+| **Join-existing-workspace onboarding** `[NEW]` | | | | | ● | | | |
+| **Self-hosted sqld (documented + tested)** `[NEW]` | | | | | ● | | | |
+| **Multi-workspace (sync-scoped)** `[NEW]` | | | | | ● | | | |
+| **Milestones (first-class) + milestone-scoped queries** `[NEW]` | | | | ● | | | | |
+| **Goals (first-class, slim)** `[NEW]` | | | | ● | | | | |
+| **MCP streamable-HTTP transport** `[NEW]` | | | | | | | | ◐ unscheduled |
+| **1M-issue perf as CI gate** `[NEW]` | (manual) | | | | | | ● | |
+| **Compaction / archival activation** `[NEW]` | (fields only) | | | | | | ● | |
+| **Local TUI — MCP client (stdio)** `[NEW]` | | | | | | ● P1 read-only / P2 writes | | |
+| **Pluggable backends / hosted service** `[NEW]` | | | | | | | | ◐ |
+| **Fine-grained auth/ACL (shared stores)** `[NEW]` | | | | | | | | ◐ |
 
 ---
 
@@ -475,21 +475,21 @@ Legend (distinct from the roadmap §8 feature-matrix legend — here the glyphs 
 not feature-landing): ● substantial work in that release · ◐ incidental / hardening touch · blank = untouched.
 (So a crate can be ● here in a release where the roadmap §8 feature row is ◐ or blank — e.g. `unblock-health` is ● at v1.3 (substantial sync-diagnostics work) while its FR-16 feature-matrix row is only ◐ sync health.)
 
-| Crate | v1 | v1.1 | v1.2 | v1.3 | v1.4 | v1.5 | v2+ |
-|---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
-| `unblock-model` | ● | ● | ● | ◐ | | ◐ | |
-| `unblock-error` | ● | ● | | ◐ | | ◐ | |
-| `unblock-policy` | ● | ● | ◐ | | | ● | |
-| `unblock-storage` | ● | ◐ | ● | ● | | ● | ◐ |
-| `unblock-sync` | ● | ◐ | | ◐ | | ◐ | ◐ |
-| `unblock-health` | ● lite | ● full | | ● | | ● | |
-| `unblock-config` | ● subset | ● full | | ● | | | |
-| `unblock-engine` | ● | ● | ● | ● | | ● | |
-| `unblock-render` | ● | ● | ◐ | | | ◐ | |
-| `unblock-mcp` | ● | ● | ● | ◐ | | ● | ◐ |
-| `unblock-cli` | ● | ● | | ◐ | ◐ | | |
-| `unblock-fuzz` *(ingestion + bench harness)* | ● | | | | | ◐ | |
-| `unblock-tui` *(proposed — minted at v1.4 lock)* | | | | | ● | | |
+| Crate | v1 | v1.0.1 | v1.1 | v1.2 | v1.3 | v1.4 | v1.5 | v2+ |
+|---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
+| `unblock-model` | ● | | ● | ● | ◐ | | ◐ | |
+| `unblock-error` | ● | | ● | | ◐ | | ◐ | |
+| `unblock-policy` | ● | | ● | ◐ | | | ● | |
+| `unblock-storage` | ● | ● | ◐ | ● | ● | | ● | ◐ |
+| `unblock-sync` | ● | | ◐ | | ◐ | | ◐ | ◐ |
+| `unblock-health` | ● lite | | ● full | | ● | | ● | |
+| `unblock-config` | ● subset | | ● full | | ● | | | |
+| `unblock-engine` | ● | | ● | ● | ● | | ● | |
+| `unblock-render` | ● | | ● | ◐ | | | ◐ | |
+| `unblock-mcp` | ● | ◐ | ● | ● | ◐ | | ● | ◐ |
+| `unblock-cli` | ● | ◐ | ● | | ◐ | ◐ | | |
+| `unblock-fuzz` *(ingestion + bench harness)* | ● | | | | | | ◐ | |
+| `unblock-tui` *(proposed — minted at v1.4 lock)* | | | | | | ● | | |
 
 Notes:
 - **`unblock-tui`** is the proposed 13th workspace crate (L7 — a ratatui terminal app that is itself the **MCP
@@ -500,6 +500,9 @@ Notes:
   shapes); `unblock-mcp` itself takes **no new v1.4 work** (hence it is blank at v1.4 in the table above — the
   web-era ◐ was the retired HTTP-serving touch). It is minted only at v1.4 lock, when PRD §8.1 grows; until
   then the 12-crate set is unchanged.
+- **`v1.0.1`** is the maintenance-patch column (§1, PRD §4 D41): `unblock-storage` ● carries the comments
+  forward-migration, `unblock-mcp` ◐ the `comment add` persistence fix, `unblock-cli` ◐ the end-to-end
+  `unblock update` smoke. It adds no FR and re-tiers nothing — hence the sparse column.
 - **100% Rust, no Node:** the TUI adds **no npm/Node build stage** to `dist` and **no `ui` Cargo feature** —
   `cargo-deny` covers the whole tree and the binary gains no npm supply-chain surface. (The web dashboard's
   npm/Node ecosystem lives in the separate v2+ commercial PRO product — roadmap §7 — not the OSS tree.)
