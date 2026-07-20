@@ -23,7 +23,7 @@ use crate::schema::ProjectConfig;
 /// One precedence layer (highest → lowest in the order they appear in a `merge_layers` slice).
 ///
 /// v1.1 reserves `Db(ProjectConfig)` and `User(ProjectConfig)` slots between `Project` and
-/// `Defaults`; v1.2 reserves a remote slot. They are intentionally omitted from this v1 enum (SF-5).
+/// `Defaults`; v1.3 reserves a remote slot. They are intentionally omitted from this v1 enum (SF-5).
 pub(crate) enum ConfigLayer<'a> {
     /// The CLI override layer (highest precedence).
     Cli(&'a CliOverrides),

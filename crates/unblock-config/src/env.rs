@@ -46,9 +46,9 @@ pub struct EnvOverrides {
     pub jsonl_export: Option<bool>,
     /// `UNBLOCK_OUTPUT_FORMAT` — the output format, deserialized via serde (SF-2).
     pub output_format: Option<OutputFormat>,
-    /// `UNBLOCK_REMOTE_URL` — reserved for v1.2 (parsed but unused in v1).
+    /// `UNBLOCK_REMOTE_URL` — reserved for v1.3 (parsed but unused in v1).
     pub remote_url: Option<String>,
-    /// `UNBLOCK_AUTH_TOKEN` — reserved for v1.2 (parsed but unused in v1; the sanctioned credential
+    /// `UNBLOCK_AUTH_TOKEN` — reserved for v1.3 (parsed but unused in v1; the sanctioned credential
     /// path, never `config.toml` — NFR-18).
     pub auth_token: Option<String>,
 }

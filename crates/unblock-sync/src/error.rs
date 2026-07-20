@@ -83,7 +83,7 @@ pub enum SyncError {
         found: String,
     },
 
-    /// A semantic sync conflict (defined now; used at v1.2 reconciliation).
+    /// A semantic sync conflict (defined now; used at v1.3 reconciliation).
     #[snafu(display("sync conflict: {detail}"))]
     SyncConflict {
         /// The conflict detail.
