@@ -96,7 +96,7 @@ coordinator**, run adversarially.
 
 ## 6. Tracking, commits & PRs
 - **unblock (MCP) is the durable, cross-session system of record** for tasks — configured in `mcp.json` + `AGENTS.md`;
-  in a fresh session use the native `mcp__unblock-mcp__*` tools and read `unblock://capabilities` / `unblock://schema`
+  in a fresh session use the native `mcp__unblock__*` tools and read `unblock://capabilities` / `unblock://schema`
   for the surface. Its **git-backed record is `.unblock/issues.jsonl`** (the D5 committed JSONL export; the local
   `unblock.db` is gitignored). Harness Tasks = per-session execution. Update the unblock issue the moment a task
   changes state, and re-export `.unblock/issues.jsonl` (the `sync` tool's `export` action) in the **same commit** as

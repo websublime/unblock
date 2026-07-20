@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "unblock-mcp": {
+    "unblock": {
       "command": "cargo",
       "args": ["run", "--bin", "unblock", "mcp"]
     }
