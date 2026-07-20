@@ -9,6 +9,8 @@ target/
 *.db
 *.db-wal
 *.db-shm
+# Runtime cross-process advisory write lock (D31) — crash-released, never committed
+.unblock/.write.lock
 
 # Local environment
 .env
