@@ -55,7 +55,7 @@ Runs on `pull_request` and pushes to the default branch. Jobs (all on stable `1.
 
 ### 2.2 Targeted features vs `--all-features` (D15/NFR-10 — the M0 gate must not link TLS)
 
-`cargo tree -e features --all-features` resolves the libsql **`remote`** feature, which pulls `reqwest`/`hyper`/`rustls`/`hyper-rustls` into the build. Activating `--all-features` in the M0 quality gate would therefore compile the network/TLS surface that D15 keeps **off the default path** (NFR-10/NFR-17). So the testkit clippy/test steps use **targeted features** — `-p unblock-storage --features testkit` — which is verified TLS- and network-free (`testkit` pulls no deps). **Never `--all-features` in CI** until/unless the remote path is itself a tested target (v1.2).
+`cargo tree -e features --all-features` resolves the libsql **`remote`** feature, which pulls `reqwest`/`hyper`/`rustls`/`hyper-rustls` into the build. Activating `--all-features` in the M0 quality gate would therefore compile the network/TLS surface that D15 keeps **off the default path** (NFR-10/NFR-17). So the testkit clippy/test steps use **targeted features** — `-p unblock-storage --features testkit` — which is verified TLS- and network-free (`testkit` pulls no deps). **Never `--all-features` in CI** until/unless the remote path is itself a tested target (v1.3).
 
 ### 2.1 `doc-lint` — doc-corpus consistency lint
 

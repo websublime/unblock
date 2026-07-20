@@ -82,7 +82,7 @@ Edges point from dependent to dependency (downward). Every arrow is a strict for
 
 Legend: ● new/major work · ◐ extended/hardened · (—) untouched.
 
-| Crate | v1 (LOCKED) | v1.1 (LOCKED) | v1.2 (PROPOSED) | v1.4 (PROPOSED) |
+| Crate | v1 (LOCKED) | v1.1 (LOCKED) | v1.3 (PROPOSED) | v1.5 (PROPOSED) |
 |---|---|---|---|---|
 | `unblock-model` | ● all v1 types, hash/sync-eq/validation | ● Comment/EpicStatus populated | ◐ conditional `sync_state.rs` | ◐ `compaction.rs` helpers |
 | `unblock-error` | ● ErrorCode/StructuredError/ModelError | ● additive hints/context | ◐ remote ErrorCode variants | ◐ ClaimExpired/CompactionConflict |
@@ -97,7 +97,7 @@ Legend: ● new/major work · ◐ extended/hardened · (—) untouched.
 | `unblock-cli` | ● mcp/migrate/doctor/version/init/agents + `unblock update` (FR-25, D17; axoupdater dep) | ● completions | (—) | (—) |
 | `unblock-fuzz` | ● content_hash/jsonl/sync_cycle/bd/query/config-smoke | ● config full + claim_race | ◐ remote_sync (feature) | ◐ scale_ingest |
 
-> **Note (2026-07-07 resequence):** this per-crate table predates the full v1.2–v1.5 shape. Its last column — relabeled **v1.4 (PROPOSED)** — tracks the scale / swarm-coordination / MCP-richness work formerly numbered v1.3; the **new v1.3 planning layer** (milestones + goals) and the **v1.5 local TUI** are not yet represented as columns here. `00-roadmap.md` §3–§7 (and the roadmap §9 crate-impact table) is authoritative for the v1.2–v1.5 crate shape.
+> **Note (2026-07-20, D41 resequence):** this per-crate table predates the full v1.2–v1.5 shape, and its two PROPOSED columns are **relabeled, not re-scoped**: **v1.3 (PROPOSED)** carries the shared-state work (libsql remote/replica sync, credentials, multi-workspace) and **v1.5 (PROPOSED)** carries the scale / swarm-coordination / MCP-richness work — numbered v1.2 and v1.4 respectively before D41. The **v1.2 planning layer** (milestones + goals) and the **v1.4 local TUI** are not yet represented as columns here. `00-roadmap.md` §3–§7 (and the roadmap §9 crate-impact table) is authoritative for the v1.2–v1.5 crate shape.
 
 **Total files planned across the 12 crate plans:** ≈ **190 plan-enumerated files** (source + test + bench + fuzz-target rows in the FILE BREAKDOWN tables). Approximate per-crate counts: model ~24, error ~13, policy ~18, storage ~22, sync ~14, health ~17, config ~20, engine ~24, render ~21, mcp ~30, cli ~24, fuzz ~18. (Counts include `Cargo.toml`, every `src/` module, `tests/`, `benches/`, and fuzz targets listed for traceability; the exact number shifts as conditional/`[v1.x]` files are confirmed.)
 
@@ -107,7 +107,7 @@ Legend: ● new/major work · ◐ extended/hardened · (—) untouched.
 
 1. **Picking up a crate?** Read in this order: (a) the spine sections your crate produces/consumes, (b) your crate's file plan, (c) the roadmap row for the version you target. The bead/task description is **never** authoritative — the plan + spine are.
 2. **The spine wins.** If a crate plan and the spine disagree on a signature/type/field, the spine is correct; the discrepancy is a planning bug to fix (see §5). Any intentional interface change amends `01-design-spine.md` first, then the affected crate plans.
-3. **Version discipline.** Implement only the version you are assigned. v1/v1.1 are LOCKED (restate the PRD); v1.2+ are PROPOSED direction — do not pull a v1.2-feature dependency into a v1 file (the `remote` feature must stay off the default build, D15/NFR-10).
+3. **Version discipline.** Implement only the version you are assigned. v1/v1.1 are LOCKED (restate the PRD); v1.2+ are PROPOSED direction — do not pull a v1.3-feature dependency into a v1 file (the `remote` feature must stay off the default build, D15/NFR-10).
 4. **Acyclic layering is invariant.** Never introduce a dependency edge that points upward in §2. `unblock-storage` depends on **model + error only**; shared types both a lower and a sibling crate need live in `unblock-model` (the CF-11 rule).
 5. **Open questions (`Q*`/`OQ*`) per crate** are listed at the bottom of each plan and aggregated into the cross-crate items in §5 where they touch more than one crate. Resolve cross-crate Qs at the spine level before the dependent crate starts.
 
@@ -115,17 +115,17 @@ Legend: ● new/major work · ◐ extended/hardened · (—) untouched.
 
 ## 5. Consistency report
 
-> **Note (2026-07-17, D37 comments pull-forward):** this report is the **dated record of the 2026-06-19
-> cross-check** — it is not rewritten when a later decision moves the corpus (same convention as the §3
-> resequence note). Its two tool-count findings below (the headline and "MCP taxonomy = spine") were
+> **Note (2026-07-17, D37 comments pull-forward; reconciled 2026-07-20, D41):** this report is the **dated record of the 2026-06-19
+> cross-check**, but its factual claims are reconciled in place when a later decision moves the corpus
+> (D41, 2026-07-20). Its two tool-count findings below (the headline and "MCP taxonomy = spine") were
 > written when 7 was the shipped count. **T3.9 has since landed D37's dedicated 8th tool, `comment`**
 > (row 8 of the spine's §5.1 table), so the count literals were flipped 7→8 in that **code** PR —
 > atomically with the router that made 8 true, exactly as this note foretold. The findings' substance
 > (taxonomy = spine, same discriminators, ≤ 8 budget — now **FULL**) is unchanged.
 
-The 16 documents were cross-checked for: (a) consumed APIs actually produced by a dependency and matching spine signatures; (b) acyclic graph matching PRD §8.1 (esp. storage = model+error only); (c) version coherence (no v1 file depending on a v1.2 feature); (d) MCP taxonomy matching the spine; (e) no duplicated/contradictory type definitions.
+The 16 documents were cross-checked for: (a) consumed APIs actually produced by a dependency and matching spine signatures; (b) acyclic graph matching PRD §8.1 (esp. storage = model+error only); (c) version coherence (no v1 file depending on a v1.3 feature); (d) MCP taxonomy matching the spine; (e) no duplicated/contradictory type definitions.
 
-**Headline:** the dependency graph is **acyclic and matches PRD §8.1**; the MCP taxonomy **matches the spine** (8 tools ≤ 8, same discriminators); version tags are **coherent** (every `remote`/sync/scale item is correctly fenced to v1.2/v1.4 behind a non-default feature). The issues below were all **type-placement / spine-completeness** problems where multiple crate plans independently flagged the *same* gap and converged on the *same* fix — they are planning-level corrections to the spine, not contradictions between workers. **3 HIGH, 5 MEDIUM, 3 LOW — all 11 RESOLVED.** The CF-A (display-DTO relocation, incl. `DiagnosticFinding` re-export) and CF-J (`OutputFormat` single home) interface fixes are now **landed in the spine + crate docs** (re-verified by the G-6/G-7 close), so they are RESOLVED-and-landed, not RESOLVED-but-pending. **All 16 plan docs cross-checked** (1 roadmap + 1 spine + 12 crate plans + impl-plan + ci-cd); a CI `doc-lint` job (ci-cd §2 / §2.1) now mechanically guards the D-id / FR-tier / command-token / stamp / cross-ref / doc-count drift classes going forward.
+**Headline:** the dependency graph is **acyclic and matches PRD §8.1**; the MCP taxonomy **matches the spine** (8 tools ≤ 8, same discriminators); version tags are **coherent** (every `remote`/sync/scale item is correctly fenced to v1.3/v1.5 behind a non-default feature). The issues below were all **type-placement / spine-completeness** problems where multiple crate plans independently flagged the *same* gap and converged on the *same* fix — they are planning-level corrections to the spine, not contradictions between workers. **3 HIGH, 5 MEDIUM, 3 LOW — all 11 RESOLVED.** The CF-A (display-DTO relocation, incl. `DiagnosticFinding` re-export) and CF-J (`OutputFormat` single home) interface fixes are now **landed in the spine + crate docs** (re-verified by the G-6/G-7 close), so they are RESOLVED-and-landed, not RESOLVED-but-pending. **All 16 plan docs cross-checked** (1 roadmap + 1 spine + 12 crate plans + impl-plan + ci-cd); a CI `doc-lint` job (ci-cd §2 / §2.1) now mechanically guards the D-id / FR-tier / command-token / stamp / cross-ref / doc-count drift classes going forward.
 
 > **Update — 2026-06-19:** all 11 items below (CF-A..CF-K) are **RESOLVED**. The fixes were applied to the spine (`01-design-spine.md`) and to the affected crate docs: display/filter DTOs (`CountBucket`, `GraphEdge`, `DepTree`, `CloseOutcome`, `ExportReport`, `ImportReport`, `DiagnosticReport`/`DiagnosticFinding`/`DiagnosticKind`, `ListFilters`, `CountGroupBy`, `OutputFormat`) relocated to `unblock-model` with storage/engine re-exporting; workspace-open ownership pinned to `unblock-config` via `WorkspaceContext`; and the v1.1 `Storage` config/diagnostic-probe seams reserved as additive trait methods.
 
@@ -193,6 +193,6 @@ The 16 documents were cross-checked for: (a) consumed APIs actually produced by 
 
 - **Acyclic graph = PRD §8.1.** Every crate's declared `Depends-on` forms a strict forward edge set; `unblock-storage` depends on **model + error only** (CF-11 honored — `CacheKey` correctly placed in model); `unblock-fuzz` is a sink. No cycles, including the `model | error` L0 pair (single `model → error` edge, error has no in-workspace deps).
 - **MCP taxonomy = spine.** mcp plan ships exactly the spine §5.1 eight tools (`issue/claim/defer/query/dep/sync/diagnostics/comment`) with matching discriminators, ≤ 8 budget (FULL), resources (§5.4) and prompts (§5.5) as specified; v1.1 grows by discriminator not by new tools (RK-3 honored). *(**D37, 2026-07-17:** that §5.1 table now carries a row 8 — the dedicated `comment` tool, the deliberate "extend before add" exception, landing at **T3.9**. The seven shipped tools + discriminators above are unchanged; once `comment` lands the RK-3 budget is **FULL at 8 ≤ 8** and all further surface must extend an existing tool.)*
-- **Version coherence.** No v1 file depends on a v1.2/v1.4 feature: `remote` is consistently a non-default Cargo feature across storage/config/engine/health/mcp/fuzz; scale/1M and compaction are fenced to v1.4; the contention lab is correctly the M0 exit gate before any crate depends on storage.
+- **Version coherence.** No v1 file depends on a v1.3/v1.5 feature: `remote` is consistently a non-default Cargo feature across storage/config/engine/health/mcp/fuzz; scale/1M and compaction are fenced to v1.5; the contention lab is correctly the M0 exit gate before any crate depends on storage.
 - **Error contract.** `ErrorCode` (incl. new `AlreadyClaimed`, dropped `YamlError`), the 0–8 exit table, `StructuredError` and `CodedError` are used identically by every per-crate snafu enum; the golden exit-code snapshot is dual-pinned (error crate + cli).
 - **Write-serialization contract (D14).** Exactly one home — engine's `Semaphore(1)`; storage relies on WAL + native busy_timeout; mcp/cli are thin adapters with no second lock. Reads bypass the permit everywhere (FR-10). Consistent across storage/engine/mcp/cli.
