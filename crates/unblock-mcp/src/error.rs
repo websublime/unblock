@@ -60,10 +60,16 @@ impl McpServerError {
     ///
     /// **Deliberately NARROW — this matches what was MEASURED, not a plausible story.** The observed
     /// pre-handshake-signal child stderr is verbatim `failed to start the MCP server: Cancelled`.
-    /// `ConnectionClosed(_)` is NOT included: it is raised by the INNER handshake path when the peer
-    /// really hung up (a client that disconnects before `initialize` — an EOF, not a cancellation),
-    /// so folding it in here would make this predicate's NAME lie and would demote a real hangup.
-    /// Widening this set is a spec change (the D38 labelling clause), not an implementation detail.
+    /// `ConnectionClosed(_)` is NOT part of THIS predicate — it is the peer hanging up (a client that
+    /// disconnects before `initialize`, an EOF, not a cancellation), so folding it in here would make
+    /// this predicate's NAME lie. It has its OWN peer predicate [`is_pre_handshake_disconnect`]
+    /// ([`McpServerError::is_pre_handshake_disconnect`], D40); this one stays `Cancelled`-only.
+    ///
+    /// **Reconciled at D40 (T3.2.1 follow-up (b)):** an earlier draft said folding `ConnectionClosed`
+    /// in "would demote a real hangup". D40 does now demote the pre-`initialize` disconnect — but via
+    /// the SEPARATE predicate, and additionally flips its unsignalled exit code from 1 to 0 (a routine
+    /// peer disconnect is not an internal fault, spine §5b). `is_cancellation()` is unchanged; adding a
+    /// peer predicate rather than widening this one keeps the D38 "narrow and measured" discipline.
     ///
     /// Additive on a `#[non_exhaustive]` enum: no variant is added or changed, so this is not a
     /// contract event (no `CONTRACT_HASH`/`CONTRACT_VERSION` bump — D38).
@@ -73,6 +79,35 @@ impl McpServerError {
             Self::Transport { source } => {
                 matches!(**source, rmcp::service::ServerInitializeError::Cancelled)
             }
+            Self::RunLoop { .. } => false,
+        }
+    }
+
+    /// Is this the rmcp **pre-`initialize` peer disconnect** — i.e. the client closed the connection
+    /// before completing the MCP `initialize` handshake, with no internal fault?
+    ///
+    /// `true` only for [`McpServerError::Transport`] wrapping
+    /// `ServerInitializeError::ConnectionClosed(_)`. rmcp raises it from the handshake path's
+    /// `expect_next_message`, which maps the transport's `receive() == None` to `ConnectionClosed`.
+    /// `AsyncRwTransport::receive` returns `None` on a clean EOF, on a read IO error (which it logs via
+    /// `tracing::error!` FIRST — nothing swallowed), and on garbage-then-peer-close; ALL collapse here.
+    ///
+    /// This is the D40 (T3.2.1 follow-up (b)) seam: on the UNSIGNALLED path the CLI's `resolve_mcp_exit`
+    /// uses it to intercept the disconnect and delegate the exit code to `session.shutdown()` — a clean
+    /// teardown → exit 0 (a routine peer disconnect is not an internal fault, unifying with the
+    /// post-handshake EOF; spine §5b), a failing teardown still decides via its own 0–8 code. It is a
+    /// SEPARATE predicate from [`is_cancellation`](McpServerError::is_cancellation) (which stays
+    /// `Cancelled`-only): the two disjoint outcomes travel independently.
+    ///
+    /// Additive on a `#[non_exhaustive]` enum: no variant is added or changed (no
+    /// `CONTRACT_HASH`/`CONTRACT_VERSION` bump — D40).
+    #[must_use]
+    pub fn is_pre_handshake_disconnect(&self) -> bool {
+        match self {
+            Self::Transport { source } => matches!(
+                **source,
+                rmcp::service::ServerInitializeError::ConnectionClosed(_)
+            ),
             Self::RunLoop { .. } => false,
         }
     }
@@ -123,6 +158,26 @@ impl McpServerError {
         use snafu::IntoError as _;
 
         TransportSnafu.into_error(ServerInitializeError::Cancelled)
+    }
+
+    /// Build a genuine pre-`initialize` DISCONNECT [`McpServerError::Transport`] for tests (TEST-ONLY,
+    /// `test-util` feature) — the REAL `ServerInitializeError::ConnectionClosed(_)` rmcp returns when
+    /// the peer closes the connection before completing the `initialize` handshake (`receive() == None`
+    /// → `ConnectionClosed`), NOT a look-alike.
+    ///
+    /// Exists so `unblock-cli` can prove the D40 (T3.2.1 follow-up (b)) exit-0 delegation against the
+    /// same error the live path produces. Same gating/rationale as
+    /// [`McpServerError::__transport_error`].
+    #[cfg(feature = "test-util")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __connection_closed_error() -> Self {
+        use rmcp::service::ServerInitializeError;
+        use snafu::IntoError as _;
+
+        TransportSnafu.into_error(ServerInitializeError::ConnectionClosed(
+            "initialize request".to_string(),
+        ))
     }
 
     /// Build a genuine [`McpServerError::RunLoop`] for tests (TEST-ONLY, `test-util` feature).
@@ -303,5 +358,57 @@ mod tests {
     async fn a_run_loop_failure_is_not_the_cancellation_class() {
         use super::McpServerError;
         assert!(!McpServerError::__run_loop_error().await.is_cancellation());
+    }
+
+    // -- D40 (T3.2.1 follow-up (b)): `is_pre_handshake_disconnect()` — the disconnect class, NARROWLY. --
+
+    /// The pre-`initialize` peer DISCONNECT (`Transport{ConnectionClosed(_)}`) IS the disconnect class,
+    /// and the class is NARROW: a genuine transport fault, the handshake's `ExpectedInitializeRequest`
+    /// (the variant the `a_no_signal_run_loop_error_exits_1` e2e produces), and a run-loop join error
+    /// are all NOT the disconnect class. **Inverting `is_pre_handshake_disconnect` turns this RED**, and
+    /// so does widening it to any `Transport` (which would wrongly flip the genuine cases to exit 0).
+    /// The two predicates are also proven DISJOINT so `Cancelled` and `ConnectionClosed` route apart.
+    #[cfg(feature = "test-util")]
+    #[tokio::test]
+    async fn connection_closed_is_the_pre_handshake_disconnect_class_narrowly() {
+        use super::{McpServerError, TransportSnafu};
+        use rmcp::service::ServerInitializeError;
+        use snafu::IntoError as _;
+
+        // The disconnect IS the class.
+        assert!(
+            McpServerError::__connection_closed_error().is_pre_handshake_disconnect(),
+            "Transport{{ConnectionClosed}} is the pre-`initialize` peer disconnect (D40)"
+        );
+        // A REAL transport fault is NOT — it must keep its InternalError/exit-1 mapping, never flip to 0.
+        assert!(
+            !McpServerError::__transport_error("connection reset").is_pre_handshake_disconnect(),
+            "a REAL transport fault is not a routine disconnect"
+        );
+        // `ExpectedInitializeRequest` — a notification where the `initialize` request was expected — is
+        // a DISTINCT variant. It is what `a_no_signal_run_loop_error_exits_1` produces, so it must NOT
+        // be matched here (else that unsignalled Err would wrongly become exit 0).
+        let expected_init: McpServerError =
+            TransportSnafu.into_error(ServerInitializeError::ExpectedInitializeRequest(None));
+        assert!(
+            !expected_init.is_pre_handshake_disconnect(),
+            "ExpectedInitializeRequest is a distinct variant — it must NOT flip to exit 0"
+        );
+        // A run-loop join error is never a disconnect.
+        assert!(
+            !McpServerError::__run_loop_error()
+                .await
+                .is_pre_handshake_disconnect()
+        );
+
+        // The two predicates are DISJOINT: neither outcome is misclassified as the other.
+        assert!(
+            !McpServerError::__connection_closed_error().is_cancellation(),
+            "a disconnect is not a cancellation"
+        );
+        assert!(
+            !McpServerError::__cancelled_error().is_pre_handshake_disconnect(),
+            "a cancellation is not a disconnect"
+        );
     }
 }

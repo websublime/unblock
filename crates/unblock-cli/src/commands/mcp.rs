@@ -23,6 +23,16 @@
 //! unrelated DB fault. With NO signal recorded a genuine `Err` keeps `InternalError`/exit 1,
 //! rendered by `exit::into_exit` per FR-11 — never swallowed.
 //!
+//! **The unsignalled pre-`initialize` disconnect → exit 0 carve-out (D40, spine §5b).** One `Err` on
+//! the unsignalled path is NOT a genuine fault: an `Err(McpServerError::Transport{ConnectionClosed})`
+//! raised because the client closed the connection before completing the `initialize` handshake is a
+//! routine lifecycle event (child-per-client, D31 — a peer that probes then leaves). So
+//! [`resolve_mcp_exit`] intercepts it via [`unblock_mcp::McpServerError::is_pre_handshake_disconnect`]
+//! and DELEGATES the exit code to the teardown: a clean `session.shutdown()` → `Ok(None)`/exit 0
+//! (unifying with the post-handshake EOF), while a FAILING teardown still decides via its OWN 0–8 code
+//! (a libsql-close fault → exit 8 is NEVER masked into exit 0). The disconnect is carried as a
+//! `tracing::debug!` diagnostic (routed by [`diagnostic_route`], surfaced by `-vv`), never dropped.
+//!
 //! **How a reported error is LABELLED (D38 labelling clause).** "Never swallowed" is not "always
 //! shout": a post-signal `Err(Transport{Cancelled})` is the cooperative shutdown SUCCEEDING, so
 //! printing `error[INTERNAL_ERROR]` for it blames unblock for obeying — the very thing D38's
@@ -89,11 +99,28 @@ struct Diagnostic {
 /// wins the handshake race), so this helper IS the coverage seam for the `Stderr` branch.
 fn diagnostic_route(err: &CliError) -> DiagnosticRoute {
     match err {
-        // The ONLY demotion: a cancel that landed during the handshake (spine §0.1). Narrow by
-        // construction — `is_cancellation()` matches `Cancelled` alone, never a real transport fault.
-        CliError::Mcp { source } if source.is_cancellation() => DiagnosticRoute::Debug,
+        // TWO demotions, each narrow by construction: (i) a cancel that landed during the handshake
+        // (`is_cancellation()` matches `Cancelled` alone — spine §0.1), and (ii) the pre-`initialize`
+        // peer disconnect (`is_pre_handshake_disconnect()` matches `ConnectionClosed(_)` alone — D40).
+        // Both are routine cooperative-shutdown outcomes, not faults, so they go to `tracing::debug!`;
+        // neither predicate ever matches a real transport fault. (ii) also demotes a POST-signal
+        // disconnect, resolving the D38 residual NIT where `Transport{ConnectionClosed}` still shouted.
+        CliError::Mcp { source }
+            if source.is_cancellation() || source.is_pre_handshake_disconnect() =>
+        {
+            DiagnosticRoute::Debug
+        }
         _ => DiagnosticRoute::Stderr,
     }
+}
+
+/// Is `err` the pre-`initialize` peer disconnect (`Transport{ConnectionClosed}`)? The D40 seam
+/// [`resolve_mcp_exit`] uses to intercept the UNSIGNALLED disconnect and delegate the exit code to the
+/// teardown (a clean `session.shutdown()` → exit 0). PURE, so the interception is unit- and
+/// mutation-pinnable; narrow by construction — `is_pre_handshake_disconnect()` matches
+/// `ConnectionClosed(_)` alone, never `Cancelled` or a real transport fault.
+fn is_mcp_disconnect(err: &CliError) -> bool {
+    matches!(err, CliError::Mcp { source } if source.is_pre_handshake_disconnect())
 }
 
 /// Pair an error with its route (the classification step of [`resolve_mcp_exit`]).
@@ -160,6 +187,19 @@ fn resolve_mcp_exit(
         },
         // No signal: the outcome decides, and nothing it displaces may be lost.
         None => match (run, teardown) {
+            // D40 — the pre-`initialize` peer DISCONNECT is a routine lifecycle event, not a fault:
+            // the run loop returned `Err(Transport{ConnectionClosed})` because the client closed the
+            // connection before completing the `initialize` handshake. It must NOT cast to
+            // `InternalError`/exit 1 — instead DELEGATE the exit code to the teardown: a clean
+            // `session.shutdown()` → `Ok(None)`/exit 0 (unifying with the post-handshake EOF), while a
+            // FAILING teardown still decides via its OWN 0–8 code (`teardown.map(|()| None)` keeps the
+            // `Err`), so a libsql-close fault → exit 8 is NEVER masked into exit 0. The disconnect
+            // itself is carried as a Debug diagnostic (`diagnostic_route` demotes it), never dropped.
+            // This arm is FIRST so the disconnect is intercepted before the generic `(Err, _)` casts.
+            (Err(run_err), teardown) if is_mcp_disconnect(&run_err) => McpExit::Outcome {
+                outcome: teardown.map(|()| None),
+                diagnostics: vec![classify(run_err)],
+            },
             (Ok(()), Ok(())) => McpExit::Outcome {
                 outcome: Ok(None),
                 diagnostics: Vec::new(),
@@ -186,10 +226,14 @@ fn resolve_mcp_exit(
 /// MCP framing ONLY.
 fn report(diagnostic: Diagnostic) {
     match diagnostic.route {
+        // Rendered via Debug (`?`) rather than Display so the line NAMES the rmcp outcome it demoted
+        // (`Cancelled` / `ConnectionClosed`) and stays diagnosable — the two e2e peers assert on those
+        // variant names. The message covers BOTH demoted outcomes and retains "cooperative shutdown".
         DiagnosticRoute::Debug => tracing::debug!(
-            error = %diagnostic.error,
-            "the MCP run loop returned the cancellation outcome after a recorded signal — a normal \
-             cooperative shutdown (D38), not a fault"
+            error = ?diagnostic.error,
+            "the MCP run loop returned a cooperative-shutdown outcome — a post-signal cancellation \
+             (D38), or an unsignalled pre-`initialize` client disconnect (D40) — a normal cooperative \
+             shutdown, not a fault"
         ),
         DiagnosticRoute::Stderr => {
             crate::exit::emit_diagnostic(diagnostic.error, &mut std::io::stderr().lock());
@@ -396,6 +440,17 @@ mod tests {
     fn genuine_run_error() -> CliError {
         CliError::Mcp {
             source: unblock_mcp::McpServerError::__transport_error("connection reset"),
+        }
+    }
+
+    /// A REAL pre-`initialize` DISCONNECT run-loop error: the genuine
+    /// `ServerInitializeError::ConnectionClosed` rmcp returns when the peer closes the connection
+    /// before completing the handshake (`receive()==None`), built through the same `test-util` seam.
+    /// This is the D40 disconnect class → routes to `tracing::debug!` and, on the unsignalled path,
+    /// delegates the exit code to the teardown.
+    fn disconnect_run_error() -> CliError {
+        CliError::Mcp {
+            source: unblock_mcp::McpServerError::__connection_closed_error(),
         }
     }
 
@@ -638,5 +693,89 @@ mod tests {
             } => assert!(diagnostics.is_empty(), "a clean exit says nothing"),
             other => panic!("a clean EOF shutdown is exit 0: {other:?}"),
         }
+    }
+
+    // -- D40 (T3.2.1 follow-up (b)): unsignalled pre-`initialize` disconnect → the teardown decides. --
+
+    /// D40 — with NO signal, an unsignalled pre-`initialize` DISCONNECT does NOT cast to exit 1: it is
+    /// intercepted and the exit code is DELEGATED to the teardown. With a clean `session.shutdown()`
+    /// the command exits 0 (`Ok(None)`), and the disconnect is still REPORTED as a Debug diagnostic
+    /// (demoted, never dropped) — unifying with the post-handshake EOF exit 0.
+    #[test]
+    fn an_unsignalled_pre_handshake_disconnect_with_a_clean_teardown_exits_0() {
+        match resolve_mcp_exit(None, Err(disconnect_run_error()), Ok(())) {
+            McpExit::Outcome {
+                outcome: Ok(None),
+                diagnostics,
+            } => {
+                assert_eq!(
+                    diagnostics.len(),
+                    1,
+                    "the disconnect is REPORTED (never dropped), just not as the exit code"
+                );
+                assert_eq!(
+                    diagnostics[0].route,
+                    DiagnosticRoute::Debug,
+                    "a routine pre-`initialize` disconnect is demoted to -vv debug, not shouted"
+                );
+                assert_eq!(diagnostics[0].error.code(), ErrorCode::InternalError);
+            }
+            other => panic!("a clean-teardown disconnect must be exit 0 (D40): {other:?}"),
+        }
+    }
+
+    /// D40 — the load-bearing correctness case: the interception DELEGATES to the teardown, it does NOT
+    /// blanket `Ok(None)`. A pre-`initialize` disconnect whose `session.shutdown()` ALSO fails must let
+    /// the TEARDOWN decide the exit code (exit 8 / `IoError` here), NEVER masking a libsql-close fault
+    /// into exit 0. **A blanket-`Ok(None)` mutation in the interception arm turns THIS red.** The
+    /// disconnect is still reported as a Debug diagnostic (never swallowed).
+    #[test]
+    fn an_unsignalled_disconnect_with_a_failing_teardown_lets_the_teardown_decide() {
+        match resolve_mcp_exit(None, Err(disconnect_run_error()), Err(teardown_error())) {
+            McpExit::Outcome {
+                outcome: Err(err),
+                diagnostics,
+            } => {
+                assert_eq!(
+                    err.code(),
+                    ErrorCode::IoError,
+                    "a failing teardown decides via its OWN 0–8 code — the disconnect never masks it"
+                );
+                assert_eq!(
+                    err.code().exit_code(),
+                    8,
+                    "a libsql-close fault must still exit 8, NEVER be swallowed into exit 0 (D40)"
+                );
+                assert_eq!(
+                    diagnostics.len(),
+                    1,
+                    "and the disconnect is still REPORTED as a diagnostic"
+                );
+                assert_eq!(
+                    diagnostics[0].route,
+                    DiagnosticRoute::Debug,
+                    "the disconnect itself is the routine outcome — demoted"
+                );
+                assert_eq!(diagnostics[0].error.code(), ErrorCode::InternalError);
+            }
+            other => panic!("a failing teardown must decide the code, not exit 0 (D40): {other:?}"),
+        }
+    }
+
+    /// D40 routing at the pure helper: a pre-`initialize` disconnect is demoted to `Debug` exactly like
+    /// a cancellation, while genuine faults stay `Stderr`. Reverting the `diagnostic_route` extension
+    /// (dropping the `is_pre_handshake_disconnect()` guard) turns this RED.
+    #[test]
+    fn diagnostic_route_demotes_the_pre_handshake_disconnect() {
+        assert_eq!(
+            diagnostic_route(&disconnect_run_error()),
+            DiagnosticRoute::Debug,
+            "a pre-`initialize` disconnect is a routine cooperative-shutdown outcome (D40)"
+        );
+        assert_eq!(
+            diagnostic_route(&genuine_run_error()),
+            DiagnosticRoute::Stderr,
+            "a genuine transport fault is NOT demoted"
+        );
     }
 }
