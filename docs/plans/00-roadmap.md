@@ -179,7 +179,13 @@ up **once the local core is hardened AND the planning schema (v1.2) is settled**
 (PRD §4 D41): the additive planning tables are far cheaper to land on one local primary than to migrate across
 version-skewed replicas afterward. **A mandatory "Turso Sync vs embedded replicas — fresh Rust-SDK/engine
 maturity check" gate is folded into the v1.3 lock** (embedded replicas are now the vendor-*legacy* path; Turso
-Sync is the vendor-recommended-but-*beta* path — the lock re-runs this call with fresh research).
+Sync is the vendor-recommended-but-*beta* path — the lock re-runs this call with fresh research). **A SECOND
+axis — research this FIRST (Miguel, 2026-07-20; tracked as issue `ub-w3a`):** WHERE the primary lives —
+**self-hosted libsql/sqld** (run the libsql server yourself per its USER_GUIDE —
+`github.com/tursodatabase/libsql/blob/main/docs/USER_GUIDE.md` — Docker-local to experiment NOW, self-deploy
+later; company data stays self-governed) **vs the managed Turso Cloud**. Miguel's steer: prefer self-hosted
+(kick off a Docker-local spike early to de-risk the largest lift); Turso Cloud is the fallback if self-hosting
+isn't viable.
 
 **Tech default (decided 2026-07-07; re-confirmed at v1.3 lock):** build v1.3 on **libsql embedded replicas** —
 production-supported today, and the vendor's own "battle-tested foundation" recommendation for mission-critical
