@@ -20,7 +20,7 @@ codes are stable, a breaking change → 2.0.0. (Original source for reference on
 | **unblock (MCP)** — tracker | **System of record for tasks** (dogfooded) — next-ready/status/deps live here, not in a doc. Git record: `.unblock/issues.jsonl`; wiring + tool surface: `.mcp.json` / `AGENTS.md` / `unblock://capabilities`. |
 | `docs/plans/STATUS.md` | **Retired pointer stub** — task tracking moved to unblock (MCP); the v1 M0–M3 registry is preserved in the file's git history. |
 | `docs/plans/crates/unblock-*.md` | Per-file plan for each crate. |
-| `docs/plans/00-roadmap.md` | v1/v1.1 LOCKED; v1.2–v1.5/v2+ PROPOSED. |
+| `docs/plans/00-roadmap.md` | v1/v1.1 LOCKED; v1.0.1 PLANNED; v1.2–v1.5/v2+ PROPOSED. |
 | `docs/plans/ci-cd-and-distribution.md` | CI gates + `dist` release + the doc-lint. |
 
 **Rule:** the spine is the **reference** on interface disagreements — but a plan↔spine drift is reconciled **with
