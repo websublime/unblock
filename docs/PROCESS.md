@@ -100,8 +100,8 @@ coordinator**, run adversarially.
   for the surface. Its **git-backed record is `.unblock/issues.jsonl`** (the D5 committed JSONL export; the local
   `unblock.db` is gitignored). Harness Tasks = per-session execution. Update the unblock issue the moment a task
   changes state, and re-export `.unblock/issues.jsonl` (the `sync` tool's `export` action) in the **same commit** as
-  the work. **D5 model B** — manual export/import, no 3-way merge or locks; until the v1.2 shared remote, concurrent
-  sessions reconcile `.unblock/issues.jsonl` by hand.
+  the work. **D5 model B** — manual export/import, no 3-way merge or locks; until the shared-state release
+  (00-roadmap.md §4), concurrent sessions reconcile `.unblock/issues.jsonl` by hand.
 - **Every outcome is a comment on the task's issue.** Each phase/analysis result for a task — the Understand map, the
   Decide rationale + Miguel's fork resolutions, each gate verdict (design Review / Verify) with its must-fixes, the
   Implement summary, the findings, and the Track/merge result — is recorded as a **comment** on the task's unblock

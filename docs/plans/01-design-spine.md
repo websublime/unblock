@@ -1008,7 +1008,7 @@ between an earlier prose description and the source are resolved **in favour of 
   escaping on the needle). A `filters.text_contains` FILTER (distinct from the search needle) keeps the
   `LIKE ? ESCAPE '\'` form over `title`. Cap **50** when `filters.limit` is unset. `ORDER BY priority
   ASC, created_at DESC, id ASC` (the no-explicit-sort tail). The `sort`/`reverse` branches are deferred
-  to v1.x; FTS5 to v1.4.
+  to v1.x; FTS5 to v1.5.
 - **`count_issues` — `ORDER BY k ASC`** over the group key (`status` / `issue_type` /
   `COALESCE(assignee,'')` / `CAST(priority AS TEXT)` / `labels.label`); ungrouped (`by=None`) returns a
   single `key="total"` bucket. The `Label` group-by JOINs the labels table and therefore
