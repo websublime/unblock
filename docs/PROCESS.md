@@ -89,7 +89,7 @@ coordinator**, run adversarially.
 - **Drift/gap policy:** any drift or gap is **reported and, by default, resolved in the same session** — never
   deferred or left to accumulate (that is exactly how the 24-finding pile formed). Report it with the template
   `docs/plans/templates/drift-gap-report.md` so every coordinator/session uses the same shape; land the fixes in the
-  real docs and log the outcome in **unblock** (the tracker) + the commit (git is the archive — don't keep standalone reports).
+  real docs and log the outcome as a **comment** on the task's unblock issue + the commit (git is the archive — don't keep standalone reports).
 - **Spine is the reference; resolution is collaborative.** On a plan↔spine interface disagreement the spine is the
   authoritative reference, but the fix is a **review → iterate → adjust loop with Miguel**: usually the plan is
   updated to match the spine, but the drift may reveal a *spine* bug. **Never silently overwrite a plan or the spine.**
@@ -102,6 +102,12 @@ coordinator**, run adversarially.
   changes state, and re-export `.unblock/issues.jsonl` (the `sync` tool's `export` action) in the **same commit** as
   the work. **D5 model B** — manual export/import, no 3-way merge or locks; until the v1.2 shared remote, concurrent
   sessions reconcile `.unblock/issues.jsonl` by hand.
+- **Every outcome is a comment on the task's issue.** Each phase/analysis result for a task — the Understand map, the
+  Decide rationale + Miguel's fork resolutions, each gate verdict (design Review / Verify) with its must-fixes, the
+  Implement summary, the findings, and the Track/merge result — is recorded as a **comment** on the task's unblock
+  issue (the `comment` tool). The comment thread IS the durable, auditable per-task narrative that the verbose
+  `STATUS.md` rows used to carry; `.unblock/issues.jsonl` snapshots it into git (re-export in the **same commit** as
+  the work).
 - **Branch off `main`** — never commit directly to `main`. Branch name: `t<mid>.<n>-<slug>` (e.g. `t0.6-libsql-impl`).
 - A change may be committed only **after both gates pass** (design Review **and** Verify). The Track team
   (`git-workflow-manager`) makes **Conventional Commits** (`feat`/`fix`/`docs`/`refactor`/`test`/`chore`/`ci`…),

@@ -92,7 +92,10 @@ it assigns teams (incl. **Implement**), awaits outcomes, and decides/acts — it
 one-line/trivial edits. Substantive, multi-file, and multi-crate work (including scaffolding) is **always** a spawned
 team, which writes in an **isolated worktree** (never in the shared tree). **Track work in unblock over MCP**
 (configured in `mcp.json` + `AGENTS.md`): take the next **ready** task via the `query` tool (`ready` action; ready =
-all deps satisfied) and register/update it via the `issue` (+ `comment`) tools — **not** in a doc. Branch off `main`.
+all deps satisfied) and register/update it via the `issue` (+ `comment`) tools — **not** in a doc. **Every outcome is
+a comment on the task's issue** — each phase result (Understand map, Decide rationale + Miguel's forks, each gate
+verdict + must-fixes, Implement summary, findings, Track/merge result) lands as a `comment`; that thread IS the
+durable per-task narrative the old verbose `STATUS.md` rows carried. Branch off `main`.
 A change ships only after the **design Review** and the **Verify quality gate** (each ≥3 agents) pass → **Conventional,
 atomic commits** (`git-workflow-manager`), re-exporting the git record `.unblock/issues.jsonl` (the `sync` tool's
 `export` action) in the **same commit** as the work → **Claude opens the PR** (`gh pr create`); a human merges → on
