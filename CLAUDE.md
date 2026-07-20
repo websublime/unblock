@@ -17,7 +17,7 @@ codes are stable, a breaking change → 2.0.0. (Original source for reference on
 | `docs/PRD.md` | Product truth — decisions (§4 D1..D41), FR/NFR, domain model, milestones. **APPROVED v1.1.** |
 | `docs/plans/01-design-spine.md` | **Authoritative interface contract** (types, `Storage` trait, `Session` API, MCP schemas, errors). |
 | `docs/plans/implementation-plan.md` | Task DAG M0–M3 (T-ids) + acceptance criteria. |
-| **unblock (MCP)** — tracker | **System of record for tasks** (dogfooded) — next-ready/status/deps live here, not in a doc. Git record: `.unblock/issues.jsonl`; wiring + tool surface: `mcp.json` / `AGENTS.md` / `unblock://capabilities`. |
+| **unblock (MCP)** — tracker | **System of record for tasks** (dogfooded) — next-ready/status/deps live here, not in a doc. Git record: `.unblock/issues.jsonl`; wiring + tool surface: `.mcp.json` / `AGENTS.md` / `unblock://capabilities`. |
 | `docs/plans/STATUS.md` | **Retired pointer stub** — task tracking moved to unblock (MCP); the v1 M0–M3 registry is preserved in the file's git history. |
 | `docs/plans/crates/unblock-*.md` | Per-file plan for each crate. |
 | `docs/plans/00-roadmap.md` | v1/v1.1 LOCKED; v1.2–v1.5/v2+ PROPOSED. |
@@ -91,7 +91,7 @@ Essentials: every lifecycle phase runs as a **hand-picked team** (PROCESS.md §4
 it assigns teams (incl. **Implement**), awaits outcomes, and decides/acts — it hand-writes only conversational or
 one-line/trivial edits. Substantive, multi-file, and multi-crate work (including scaffolding) is **always** a spawned
 team, which writes in an **isolated worktree** (never in the shared tree). **Track work in unblock over MCP**
-(configured in `mcp.json` + `AGENTS.md`): take the next **ready** task via the `query` tool (`ready` action; ready =
+(configured in `.mcp.json` + `AGENTS.md`): take the next **ready** task via the `query` tool (`ready` action; ready =
 all deps satisfied) and register/update it via the `issue` (+ `comment`) tools — **not** in a doc. **Every outcome is
 a comment on the task's issue** — each phase result (Understand map, Decide rationale + Miguel's forks, each gate
 verdict + must-fixes, Implement summary, findings, Track/merge result) lands as a `comment`; that thread IS the

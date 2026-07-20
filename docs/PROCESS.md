@@ -95,7 +95,7 @@ coordinator**, run adversarially.
   updated to match the spine, but the drift may reveal a *spine* bug. **Never silently overwrite a plan or the spine.**
 
 ## 6. Tracking, commits & PRs
-- **unblock (MCP) is the durable, cross-session system of record** for tasks — configured in `mcp.json` + `AGENTS.md`;
+- **unblock (MCP) is the durable, cross-session system of record** for tasks — configured in `.mcp.json` + `AGENTS.md`;
   in a fresh session use the native `mcp__unblock__*` tools and read `unblock://capabilities` / `unblock://schema`
   for the surface. Its **git-backed record is `.unblock/issues.jsonl`** (the D5 committed JSONL export; the local
   `unblock.db` is gitignored). Harness Tasks = per-session execution. Update the unblock issue the moment a task

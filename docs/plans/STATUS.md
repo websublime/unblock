@@ -1,7 +1,7 @@
 # unblock — Build STATUS (retired pointer stub)
 
 **Task tracking has moved to unblock (MCP).** This project now dogfoods its own tracker: the system of
-record for what is done / in progress / to do is **unblock over MCP** (server wired in `mcp.json` +
+record for what is done / in progress / to do is **unblock over MCP** (server wired in `.mcp.json` +
 `AGENTS.md`), not this file.
 
 - **Git-backed record:** `.unblock/issues.jsonl` — the D5 committed JSONL export (the local `unblock.db` stays
