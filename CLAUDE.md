@@ -17,7 +17,8 @@ codes are stable, a breaking change → 2.0.0. (Original source for reference on
 | `docs/PRD.md` | Product truth — decisions (§4 D1..D40), FR/NFR, domain model, milestones. **APPROVED v1.1.** |
 | `docs/plans/01-design-spine.md` | **Authoritative interface contract** (types, `Storage` trait, `Session` API, MCP schemas, errors). |
 | `docs/plans/implementation-plan.md` | Task DAG M0–M3 (T-ids) + acceptance criteria. |
-| `docs/plans/STATUS.md` | **Live task registry** — what's done / in-progress / to-do (the system of record). |
+| **unblock (MCP)** — tracker | **System of record for tasks** (dogfooded) — next-ready/status/deps live here, not in a doc. Git record: `.unblock/issues.jsonl`; wiring + tool surface: `mcp.json` / `AGENTS.md` / `unblock://capabilities`. |
+| `docs/plans/STATUS.md` | **Retired pointer stub** — task tracking moved to unblock (MCP); the v1 M0–M3 registry is preserved in the file's git history. |
 | `docs/plans/crates/unblock-*.md` | Per-file plan for each crate. |
 | `docs/plans/00-roadmap.md` | v1/v1.1 LOCKED; v1.2–v1.5/v2+ PROPOSED. |
 | `docs/plans/ci-cd-and-distribution.md` | CI gates + `dist` release + the doc-lint. |
@@ -89,10 +90,13 @@ Essentials: every lifecycle phase runs as a **hand-picked team** (PROCESS.md §4
 `multi-agent-coordinator`, spawned as a Workflow). **The main session is the *orchestrator*, not an implementer**:
 it assigns teams (incl. **Implement**), awaits outcomes, and decides/acts — it hand-writes only conversational or
 one-line/trivial edits. Substantive, multi-file, and multi-crate work (including scaffolding) is **always** a spawned
-team, which writes in an **isolated worktree** (never in the shared tree). Take the next **ready** task from
-`docs/plans/STATUS.md`. Branch off `main`. A change ships only after the **design Review** and the **Verify quality gate** (each ≥3
-agents) pass → **Conventional, atomic commits** (`git-workflow-manager`) → **Claude opens the PR** (`gh pr
-create`); a human merges → on merge, flip the `STATUS.md` task to ☑ done.
+team, which writes in an **isolated worktree** (never in the shared tree). **Track work in unblock over MCP**
+(configured in `mcp.json` + `AGENTS.md`): take the next **ready** task via the `query` tool (`ready` action; ready =
+all deps satisfied) and register/update it via the `issue` (+ `comment`) tools — **not** in a doc. Branch off `main`.
+A change ships only after the **design Review** and the **Verify quality gate** (each ≥3 agents) pass → **Conventional,
+atomic commits** (`git-workflow-manager`), re-exporting the git record `.unblock/issues.jsonl` (the `sync` tool's
+`export` action) in the **same commit** as the work → **Claude opens the PR** (`gh pr create`); a human merges → on
+merge, **close the unblock issue**.
 
 ## Build / CI / distribution
 

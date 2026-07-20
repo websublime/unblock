@@ -9,7 +9,8 @@ tool. **Never simplify the solution to make progress; if you reach that point, s
 
 ## 1. Doc topology & single source of truth
 - `PRD.md` = product truth · `01-design-spine.md` = **interface SSOT** · `crates/*.md` = how each crate is built ·
-  `STATUS.md` = live state · `00-roadmap.md` = when · `implementation-plan.md` = task DAG + AC.
+  **unblock (MCP) = live task state** (git record `.unblock/issues.jsonl`; wiring `AGENTS.md`) · `00-roadmap.md` = when ·
+  `implementation-plan.md` = task DAG + AC. (`STATUS.md` is now a retired pointer stub — history in git.)
 - **Hierarchy: PRD > spine > crate plans.** The spine wins on any cross-crate interface disagreement; a crate plan
   that diverges is the bug, not the spine.
 
@@ -17,12 +18,14 @@ tool. **Never simplify the solution to make progress; if you reach that point, s
 `understand → decide → spec/plan → review → implement → verify → track`.
 - **Spec-first on drift:** when reality diverges from the docs, fix the authoritative doc FIRST (spine for
   interfaces, PRD for product), then implement. Never let code and docs drift silently.
-- Pick the next **ready** task from `STATUS.md` (ready = all its deps are ☑); update its row in the **same commit**
-  as the work; a task is done only after it meets its PRD acceptance criteria **and** passed review.
+- Pick the next **ready** task from **unblock** via the `query` tool (`ready` action; ready = all its deps are
+  satisfied); register/update it via the `issue` (+ `comment`) tools and re-export the git record
+  `.unblock/issues.jsonl` (the `sync` tool's `export` action) in the **same commit** as the work; a task is done only
+  after it meets its PRD acceptance criteria **and** passed review.
 - **Lock versions just-in-time.** Review and lock a future version (v1.1, v1.2, …) only when the current version
   **nears completion**, using real learnings — not speculatively up front. Later versions stay PROPOSED *direction*
-  whose job is to shape the current version's **seams**, not to be planned in detail. (So `STATUS.md` decomposes
-  only the active version into tasks.)
+  whose job is to shape the current version's **seams**, not to be planned in detail. (So **unblock** carries
+  decomposed tasks only for the active version.)
 
 ## 3. Decisions
 - Every real decision gets a **D-id** in `PRD §4` with its rationale.
@@ -37,7 +40,7 @@ tool. **Never simplify the solution to make progress; if you reach that point, s
 - **Role separation — the main session is the *orchestrator*, not an implementer.** Miguel conducts the main
   session; the orchestrator (Claude) makes decisions *with* Miguel, **assigns the per-phase team as a Workflow —
   including the Implement phase** — awaits the outcome, then decides/acts on it. The main session edits files
-  **directly only** in conversation or genuinely trivial turns (a one-line fix, a `STATUS.md` status flip).
+  **directly only** in conversation or genuinely trivial turns (a one-line fix, an unblock `issue` status update).
   **Scaffolding, crate creation, and any multi-file / multi-crate change are always done by a spawned team — even
   when the spec is exact** (a well-specified change is *not* a trivial one). This keeps the orchestrator's context
   clean and makes every substantive change an auditable Workflow transcript instead of ad-hoc main-session edits.
@@ -81,28 +84,33 @@ coordinator**, run adversarially.
   adversarial passes (teams in §4). A phase/change is not locked until its gate's coordinator returns a pass.
 - **Gate failure loops back:** a failed gate returns the work to the prior phase (Verify → Implement; design
   Review → Spec/Plan). After **2 iterations** without a pass, **escalate to Miguel** rather than looping further.
-- Keep the README consistency report and `STATUS.md` current; re-run the gap/drift sweep after significant plan
-  changes.
+- Keep the README consistency report and the **unblock** task state current; re-run the gap/drift sweep after
+  significant plan changes.
 - **Drift/gap policy:** any drift or gap is **reported and, by default, resolved in the same session** — never
   deferred or left to accumulate (that is exactly how the 24-finding pile formed). Report it with the template
   `docs/plans/templates/drift-gap-report.md` so every coordinator/session uses the same shape; land the fixes in the
-  real docs and log the outcome in `STATUS.md` + the commit (git is the archive — don't keep standalone reports).
+  real docs and log the outcome in **unblock** (the tracker) + the commit (git is the archive — don't keep standalone reports).
 - **Spine is the reference; resolution is collaborative.** On a plan↔spine interface disagreement the spine is the
   authoritative reference, but the fix is a **review → iterate → adjust loop with Miguel**: usually the plan is
   updated to match the spine, but the drift may reveal a *spine* bug. **Never silently overwrite a plan or the spine.**
 
 ## 6. Tracking, commits & PRs
-- `STATUS.md` is the durable, cross-session **system of record**; harness Tasks = per-session execution. Update
-  STATUS.md the moment a task changes state.
+- **unblock (MCP) is the durable, cross-session system of record** for tasks — configured in `mcp.json` + `AGENTS.md`;
+  in a fresh session use the native `mcp__unblock-mcp__*` tools and read `unblock://capabilities` / `unblock://schema`
+  for the surface. Its **git-backed record is `.unblock/issues.jsonl`** (the D5 committed JSONL export; the local
+  `unblock.db` is gitignored). Harness Tasks = per-session execution. Update the unblock issue the moment a task
+  changes state, and re-export `.unblock/issues.jsonl` (the `sync` tool's `export` action) in the **same commit** as
+  the work. **D5 model B** — manual export/import, no 3-way merge or locks; until the v1.2 shared remote, concurrent
+  sessions reconcile `.unblock/issues.jsonl` by hand.
 - **Branch off `main`** — never commit directly to `main`. Branch name: `t<mid>.<n>-<slug>` (e.g. `t0.6-libsql-impl`).
 - A change may be committed only **after both gates pass** (design Review **and** Verify). The Track team
   (`git-workflow-manager`) makes **Conventional Commits** (`feat`/`fix`/`docs`/`refactor`/`test`/`chore`/`ci`…),
   **atomic** — one logical change per commit.
-- **Claude opens the PR** (`gh pr create`): summary + linked `STATUS.md` task + gate results. Claude does **not**
+- **Claude opens the PR** (`gh pr create`): summary + the linked **unblock** issue id + gate results. Claude does **not**
   merge — merging to `main` is a human gate (Miguel/an approver) unless Miguel says otherwise.
 - **One PR per task (T-id)** by default — atomic Conventional Commits within it; split a large task into sub-PRs
   only when it has genuinely independent, separately-reviewable parts.
-- **On PR merge → flip the task's `STATUS.md` row to ☑ done.** "Done" is tied to the merge, after both gates.
+- **On PR merge → close the unblock issue** (the `issue` tool's `close` action). "Done" is tied to the merge, after both gates.
 - **Bootstrap ends at T0.1.** Foundation docs are edited solo only until the first crate work begins; from **T0.1
   on, spec/plan/doc changes follow the same review → commit → PR discipline as code** (they are artifacts too).
 
