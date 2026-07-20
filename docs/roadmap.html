@@ -234,27 +234,27 @@
       <div class="sub">agent-first issue tracker · MCP-first · idiomatic Rust rewrite</div>
     </div>
     <div class="meta">
-      <span class="rel-chip"><span class="dot"></span>v1.0.0-rc.5 · GA imminent</span><br>
+      <span class="rel-chip"><span class="dot"></span>v1.0.0 · GA shipped 🎉</span><br>
       product roadmap<br>
-      state of play — 2026-07-17
+      GA day — 2026-07-20
     </div>
   </header>
 
   <div class="lead reveal">
     <div class="eyebrow">Where we are</div>
-    <h1>v1 is complete — GA 1.0.0 is one human step away.</h1>
-    <p>Not just one milestone: <b>all four v1 milestones (M0→M3) are merged — every task, T0.1 through T3.10</b>.
-      The three GA co-holders — comments (T3.9/D37), the FR-17 signal-exit fix (T3.2.1/D38) and workspace
-      discovery (T3.10/D39) — have all landed, and <b>rc.5 is cut</b>. What remains for GA is a <b>human step</b>,
-      not engineering: push the <span class="mono">v1.0.0</span> tag and run one end-to-end
-      <span class="mono">unblock update</span> smoke.</p>
+    <h1>v1 is shipped — GA 1.0.0 is published.</h1>
+    <p>All four v1 milestones (M0→M3) merged — <b>every task, T0.1 through T3.10</b>. The GA co-holders
+      (comments D37 · signal-exit D38 · workspace-discovery D39) plus the pre-tag exit-code fix
+      (D40) all landed, and <b>v1.0.0 is tagged, published, and marked <span class="mono">Latest</span></b> —
+      21 dist assets across 5 target triples, with Sigstore attestations. The finish line is crossed;
+      the road ahead is <b>v1.1</b>.</p>
   </div>
 
   <div class="stats reveal">
     <div class="stat good"><div class="n">4<small>/ 4</small></div><div class="k">v1 milestones complete (M0–M3)</div></div>
     <div class="stat good"><div class="n">40<small>done</small></div><div class="k">v1 tasks merged · 0 in flight — all of M0–M3</div></div>
     <div class="stat acc"><div class="n mono">v1.5</div><div class="k">MCP contract shipping at GA (<span class="mono">unblock.mcp.v1.5</span>)</div></div>
-    <div class="stat acc"><div class="n">2<small>steps</small></div><div class="k">remaining to GA — both human-gated</div></div>
+    <div class="stat good"><div class="n">✓<small>live</small></div><div class="k">v1.0.0 published — <span class="mono">Latest</span>, 21 assets / 5 triples</div></div>
   </div>
 
   <!-- ============ RELEASE TRAIN ============ -->
@@ -271,12 +271,12 @@
           <div class="thm">Walking skeleton — the agent-first wedge</div>
           <span class="tag">Shipped</span>
         </div>
-        <div class="stn ga locked">
-          <span class="now-pin">YOU ARE HERE</span>
+        <div class="stn ga done">
+          <span class="now-pin">SHIPPED</span>
           <span class="node"></span>
           <div class="ver">GA 1.0.0</div>
-          <div class="thm">Tag push + update smoke (human gate)</div>
-          <span class="tag">Cutting</span>
+          <div class="thm">Published · <span class="mono">Latest</span> · 5 triples + attestations</div>
+          <span class="tag">Shipped</span>
         </div>
         <div class="stn locked">
           <span class="node"></span>
@@ -369,20 +369,20 @@
     </div>
 
     <div class="ga-box">
-      <h3><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 22V4a2 2 0 0 1 2-2h9l1 2h4v11h-5l-1-2H6"/></svg>GA 1.0.0 — the finish line</h3>
-      <p class="g-sub">Engineering is done. The two remaining steps are deliberately reserved for a human (D35 / RELEASING.md).</p>
+      <h3><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 22V4a2 2 0 0 1 2-2h9l1 2h4v11h-5l-1-2H6"/></svg>GA 1.0.0 — shipped</h3>
+      <p class="g-sub">v1.0.0 is tagged, published and marked <span class="mono">Latest</span>. One post-GA validation remains — outside the frozen contract (a v1.0.1 patch if it ever regresses).</p>
       <div class="ga-steps">
-        <div class="g-step ok"><span class="mk">✓</span><div class="t"><b>All GA blockers merged</b><span>comments #422 (D37) · signal-exit #423 (D38) · discovery #424 (D39)</span></div></div>
-        <div class="g-step ok"><span class="mk">✓</span><div class="t"><b>Release candidate cut</b><span>v1.0.0-rc.5 — dist pipeline, 5 target triples (D36)</span></div></div>
-        <div class="g-step wait"><span class="mk">1</span><div class="t"><b>Push the <span class="mono" style="display:inline">v1.0.0</span> tag</b><span>human-gated; needs the WS_GH_TOKEN secret</span></div></div>
-        <div class="g-step wait"><span class="mk">2</span><div class="t"><b>End-to-end update smoke</b><span>run <span class="mono" style="display:inline">unblock update</span> on ≥1 triple (installer SHA256 + attestation)</span></div></div>
+        <div class="g-step ok"><span class="mk">✓</span><div class="t"><b>All GA blockers + the pre-tag exit fix merged</b><span>comments #422 (D37) · signal-exit #423 (D38) · discovery #424 (D39) · exit-code #425 (D40)</span></div></div>
+        <div class="g-step ok"><span class="mk">✓</span><div class="t"><b>Release pipeline green</b><span>rc.6 → v1.0.0 · 5 triples + Sigstore attestations (D36) · CI 17/17 · Release 9/9</span></div></div>
+        <div class="g-step ok"><span class="mk">✓</span><div class="t"><b><span class="mono" style="display:inline">v1.0.0</span> tag pushed &amp; published</b><span>marked <span class="mono" style="display:inline">Latest</span> · 21 dist assets · SHA256 + attestations verifiable</span></div></div>
+        <div class="g-step wait"><span class="mk">○</span><div class="t"><b>Post-GA: <span class="mono" style="display:inline">unblock update</span> full-swap smoke</b><span>the one path never run end-to-end; download → SHA256 verify → self_replace on ≥1 triple</span></div></div>
       </div>
     </div>
 
     <div class="drift">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-      <div class="d-t"><b>Three tracking rows to reconcile.</b> <code>STATUS.md</code> still shows <b>T3.2.1</b> and <b>T3.8</b> as ◐ — both are merged on <span class="mono">main</span> (PR #423; <code>b44a3c9</code>) — and the T3.5.1 note still calls <b>PR #412</b> “open” though it merged 07-15. All three should read ☑.
-        <span>Cosmetic, non-blocking — the STATUS-lag class to fold into the next branch that touches STATUS.md. (Verified against <span class="mono">git log</span> / <span class="mono">gh</span>, not inferred.)</span>
+      <div class="d-t"><b>Post-GA loose ends (all non-blocking, v1.1 / hardening).</b> The <span class="mono">unblock update</span> full-swap smoke is the one path never run end-to-end (fixable in a v1.0.1 patch — it is outside the frozen contract). Deferred hardening: D38 follow-ups (a)/(c), CD-6 (upstream rmcp), the <code>lock.rs::zero_timeout</code> flake, the §13/M3 doc cleanup.
+        <span>None touch the GA-frozen surface (contract <span class="mono">unblock.mcp.v1.5</span> / hash <span class="mono">ddd02b7b</span> / the 0–8 exit table). Next version to lock &amp; decompose: <b>v1.1</b>.</span>
       </div>
     </div>
   </section>
@@ -485,7 +485,7 @@
 
   <footer>
     <b>Sources of truth</b> — docs/plans/STATUS.md (live registry) · docs/plans/00-roadmap.md (version horizon) · docs/PRD.md §13/§14 (milestones + ship-gates)<br>
-    <b>Hierarchy</b> PRD &gt; design-spine &gt; crate plans · reconciled against git log (main @ 86ae202 · rc.5) on 2026-07-17
+    <b>Hierarchy</b> PRD &gt; design-spine &gt; crate plans · reconciled against git log (main @ a01c4d8 · v1.0.0 GA · release Latest) on 2026-07-20
   </footer>
 
 </div>
