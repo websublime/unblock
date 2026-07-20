@@ -34,6 +34,11 @@
 //!     (`a_no_signal_run_loop_error_exits_1_and_never_hangs`) — the OTHER half of the precedence:
 //!     the fix must not swallow unsignalled failures. It passes pre-fix (see its docs for the
 //!     measured reason); it guards against over-reach, and does not carry the no-hang proof.
+//! - **T3.2.1 follow-up (b) / D40 — the unsignalled pre-`initialize` client disconnect exits 0** (NOT
+//!   the pre-fix exit 1): a bare pre-`initialize` stdin close yields exit 0 via the same barrier
+//!   (`a_pre_handshake_client_disconnect_exits_0`, RED against the pre-fix binary — no `error[CODE]`
+//!   line at the default level), and its `-vv` peer proves the demoted `ConnectionClosed` disconnect
+//!   is still RECORDED at debug (`a_pre_handshake_client_disconnect_records_the_disconnect_at_debug_level`).
 //!
 //! The `mcp` stdio harness (`McpClient`/`send_signal`/`wait_for`) lives in `tests/common/mod.rs`
 //! (promoted there at T3.2 so the failure-injection suite can reuse it without duplication). Cases
@@ -324,15 +329,14 @@ fn shutdown_signal_handling_is_installed_before_the_workspace_opens() {
          hard-killed mid-flight. Child stderr:\n{stderr}"
     );
 
-    // Shut the child down through a COMPLETED handshake (the clean exit-0 path). Deliberately not an
-    // EOF here: closing stdin BEFORE `initialize` is the unsignalled EOF-pre-handshake path, which
-    // rmcp reports as `ConnectionClosed("initialize request")` → exit 1 (measured). That is
-    // spec-sanctioned (D38 scopes FR-11's stdout rule to the unsignalled `Err` path, and an
-    // unsignalled genuine `Err` keeps its 0–8 code) and is deliberately NOT re-labelled by the D38
-    // labelling clause: `is_cancellation()` matches `Cancelled` ONLY, so a real peer hangup is never
-    // demoted. Whether that NORMAL event should exit 0 instead of 1 is a GA CLI-surface question
-    // (D35), not this defect's — see `initialize_handshake_advertises_unblock_identity` for the
-    // post-handshake EOF contract.
+    // Shut the child down through a COMPLETED handshake (the clean exit-0 path). NOTE: closing stdin
+    // BEFORE `initialize` (the unsignalled pre-handshake disconnect) ALSO exits 0 now — rmcp reports
+    // it as `ConnectionClosed(_)` and D40 (T3.2.1 follow-up (b)) intercepts it in `resolve_mcp_exit`,
+    // delegating the exit code to the clean teardown → exit 0 (unifying with the post-handshake EOF).
+    // The deferred "GA CLI-surface question (D35)" of whether that NORMAL event should exit 0 is now
+    // ANSWERED by D40. This case deliberately keeps a COMPLETED handshake to keep proving the
+    // POST-handshake path; the bare pre-`initialize` disconnect → exit 0 is proven by
+    // `a_pre_handshake_client_disconnect_exits_0` below.
     client.initialize();
     client.close_stdin();
     let status = client.wait_for(Duration::from_secs(20));
@@ -433,5 +437,84 @@ fn a_no_signal_run_loop_error_exits_1_and_never_hangs() {
     assert_eq!(
         payload["code"], "INTERNAL_ERROR",
         "the run-loop failure surfaces as INTERNAL_ERROR (D27/AF-4), never swallowed: {payload}"
+    );
+}
+
+// ------------------------------------------------------------------------------------------------
+// T3.2.1 follow-up (b) / D40 — the unsignalled pre-`initialize` client disconnect exits 0.
+// ------------------------------------------------------------------------------------------------
+
+/// **D40 (T3.2.1 follow-up (b)) — a bare pre-`initialize` client disconnect exits 0; it FAILS (exit 1)
+/// against the pre-fix binary.** A client that connects, proves the server is up (a pre-`initialize`
+/// `ping`), then closes stdin WITHOUT ever sending `initialize` is a routine lifecycle event, not a
+/// fault: rmcp returns `Err(ServerInitializeError::ConnectionClosed(_))` (its `expect_next_message`
+/// maps the transport's `receive() == None` to `ConnectionClosed`), and D40's `resolve_mcp_exit`
+/// intercepts it (NO signal recorded) and DELEGATES the exit code to the clean teardown → exit 0,
+/// unifying with the already-blessed post-handshake EOF (`initialize_handshake_advertises_unblock_identity`).
+///
+/// Determinism comes from `McpClient::ping_barrier` (a pre-`initialize` `ping` round-trip proving the
+/// stdin read is PARKED mid-handshake), NOT a sleep — a sleep-based test would be vacuous. At the
+/// DEFAULT level the demoted disconnect is filtered out, so stderr carries NO `error[CODE]` line (a
+/// routine disconnect is not a fault). Routing the disconnect back to the stderr line turns the
+/// `error[` assertion RED; the blanket-`Ok(None)` vs teardown-delegation distinction is pinned by the
+/// `resolve_mcp_exit` unit tests in `commands/mcp.rs`.
+#[test]
+fn a_pre_handshake_client_disconnect_exits_0() {
+    let ws = Workspace::init();
+    let mut client = McpClient::spawn(ws.root());
+
+    // Prove the server is parked awaiting `initialize` (stdin read parked, handshake incomplete)
+    // WITHOUT completing the handshake, then close stdin so rmcp reads EOF pre-`initialize`.
+    client.ping_barrier();
+    client.close_stdin();
+
+    let status = client.wait_for(Duration::from_secs(20));
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "a pre-`initialize` client disconnect (no signal) must exit 0 (D40 — the unsignalled \
+         ConnectionClosed is intercepted and the code delegated to the clean teardown), NOT the \
+         pre-fix exit 1. Child stderr:\n{}",
+        client.stderr_snapshot()
+    );
+
+    let stderr = client.stderr_snapshot();
+    assert!(
+        !stderr.contains("error["),
+        "a routine pre-`initialize` disconnect must print NO `error[CODE]` line — it is the \
+         cooperative shutdown, not a fault (D40, demoted to -vv debug). Child stderr:\n{stderr}"
+    );
+}
+
+/// **D40 peer — the demoted disconnect is DEMOTED, not DROPPED.** The peer of the assertion above: at
+/// `-vv` the unsignalled pre-`initialize` disconnect MUST still be RECORDED (via `tracing::debug!`),
+/// naming the underlying rmcp `ConnectionClosed` outcome. Together the two pin both halves of "never
+/// swallowed, never shouted": gutting the `Debug` arm of `commands/mcp.rs::report` (or the routing/
+/// reporting that reaches it) turns THIS red, while routing the disconnect back to `error[CODE]` turns
+/// its default-level peer red.
+#[test]
+fn a_pre_handshake_client_disconnect_records_the_disconnect_at_debug_level() {
+    let ws = Workspace::init();
+    let mut client = McpClient::spawn_verbose(ws.root());
+    client.ping_barrier();
+    client.close_stdin();
+
+    let status = client.wait_for(Duration::from_secs(20));
+    assert_eq!(status.code(), Some(0), "still a clean exit 0 (D40)");
+
+    let stderr = client.stderr_snapshot();
+    assert!(
+        stderr.contains("cooperative shutdown"),
+        "the demoted disconnect must still be RECORDED at debug level (D40: reported, never \
+         swallowed — only quieter). Child stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("ConnectionClosed"),
+        "and it must NAME the rmcp outcome it demoted, so the shutdown stays diagnosable. Child \
+         stderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("error["),
+        "even at -vv it is a debug record, NOT an `error[CODE]` line. Child stderr:\n{stderr}"
     );
 }
