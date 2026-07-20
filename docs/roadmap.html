@@ -278,6 +278,12 @@
           <div class="thm">Published · <span class="mono">Latest</span> · 5 triples + attestations</div>
           <span class="tag">Shipped</span>
         </div>
+        <div class="stn future">
+          <span class="node"></span>
+          <div class="ver">v1.0.1</div>
+          <div class="thm">Maintenance patch — 2 fixes + update smoke</div>
+          <span class="tag">Patch</span>
+        </div>
         <div class="stn locked">
           <span class="node"></span>
           <div class="ver">v1.1</div>
@@ -287,31 +293,31 @@
         <div class="stn future">
           <span class="node"></span>
           <div class="ver">v1.2</div>
-          <div class="thm">Shared state — many machines, one store</div>
-          <span class="tag">Proposed</span>
-        </div>
-        <div class="stn future">
-          <span class="node"></span>
-          <div class="ver">v1.3</div>
           <div class="thm">Planning layer — goals + milestones</div>
           <span class="tag">Proposed</span>
         </div>
         <div class="stn future">
           <span class="node"></span>
-          <div class="ver">v1.4</div>
-          <div class="thm">Scale, swarm depth &amp; MCP richness</div>
+          <div class="ver">v1.3</div>
+          <div class="thm">Shared state — many machines, one store</div>
           <span class="tag">Proposed</span>
         </div>
         <div class="stn future">
           <span class="node"></span>
-          <div class="ver">v1.5</div>
+          <div class="ver">v1.4</div>
           <div class="thm">Human surface — local TUI</div>
           <span class="tag">Proposed</span>
         </div>
         <div class="stn future">
           <span class="node"></span>
+          <div class="ver">v1.5</div>
+          <div class="thm">Scale, swarm depth &amp; MCP richness</div>
+          <span class="tag">Proposed</span>
+        </div>
+        <div class="stn future">
+          <span class="node"></span>
           <div class="ver">v2+</div>
-          <div class="thm">Turso Sync · ACL · commercial PRO web</div>
+          <div class="thm">Turso Sync · ACL · PRO web · streamable-HTTP</div>
           <span class="tag">Direction</span>
         </div>
       </div>
@@ -390,10 +396,22 @@
   <!-- ============ HORIZON ============ -->
   <section class="reveal">
     <div class="sec-head">
-      <span class="idx">03</span><h2>The horizon — v1.1 → v2+</h2><div class="rule"></div>
-      <span class="note">locked just-in-time, per version</span>
+      <span class="idx">03</span><h2>The horizon — v1.0.1 → v2+</h2><div class="rule"></div>
+      <span class="note">resequenced D41 (2026-07-20) · locked just-in-time</span>
     </div>
     <div class="cards">
+
+      <div class="card">
+        <div class="ch"><span class="cv">v1.0.1</span><span class="status st-prop">Patch · planned</span></div>
+        <div class="thm">Maintenance patch</div>
+        <p class="desc">Orthogonal to the resequence — two dogfood defects + the one never-run GA validation.</p>
+        <ul>
+          <li>Fix: silent <span class="mono">comment add</span> no-op (returns OK, saves nothing)</li>
+          <li>Fix: no forward-migration for the comments schema (old DBs break)</li>
+          <li>Run the end-to-end <span class="mono">unblock update</span> full-swap smoke (FR-25)</li>
+        </ul>
+        <div class="crates"><b>surfaced by</b> dogfooding unblock as its own tracker</div>
+      </div>
 
       <div class="card">
         <div class="ch"><span class="cv">v1.1</span><span class="status st-locked">Locked · backlog</span></div>
@@ -410,54 +428,54 @@
 
       <div class="card">
         <div class="ch"><span class="cv">v1.2</span><span class="status st-prop">Proposed</span></div>
-        <div class="thm">Shared state — one primary, many machines</div>
-        <p class="desc">Where unblock becomes a <i>team</i> product: mixed human+agent teams on one logical store (D28), via libsql embedded replicas.</p>
-        <ul>
-          <li>Remote/replica GA — reads local, all writes serialize at the primary</li>
-          <li>Join-existing-workspace onboarding + committed/secret config split</li>
-          <li>Credentials via env / OS keychain only · self-hosted sqld path</li>
-          <li>No multi-master, no offline queue — integrity first</li>
-        </ul>
-        <div class="crates"><b>heart</b> storage — + config · health · engine · mcp · cli</div>
-      </div>
-
-      <div class="card">
-        <div class="ch"><span class="cv">v1.3</span><span class="status st-prop">Proposed</span></div>
         <div class="thm">Planning layer — goals + milestones</div>
-        <p class="desc">A clean semantic triad: <b>Goal = why</b> · <b>Epic = what</b> · <b>Milestone = when</b>. Pure-local, no network.</p>
+        <p class="desc">A clean semantic triad: <b>Goal = why</b> · <b>Epic = what</b> · <b>Milestone = when</b>. Pure-local — <b>pulled ahead of shared state</b> (D41: schema-before-distribution).</p>
         <ul>
           <li>First-class Milestone entity (one per issue) + derived rollups</li>
           <li>Milestone-scoped <span class="mono">ready</span>/<span class="mono">list</span>/<span class="mono">changelog</span> — release-scoped ready-work</li>
           <li>Slim first-class Goals (success-criteria; many-to-many links)</li>
-          <li>ONE consolidated <span class="mono">planning</span> MCP tool (additive bump)</li>
+          <li>ONE consolidated <span class="mono">planning</span> MCP tool (RK-3: 9th tool — resolve at lock)</li>
         </ul>
         <div class="crates"><b>touches</b> model · storage · engine · mcp · render · policy</div>
       </div>
 
       <div class="card">
+        <div class="ch"><span class="cv">v1.3</span><span class="status st-prop">Proposed</span></div>
+        <div class="thm">Shared state — one primary, many machines</div>
+        <p class="desc">Where unblock becomes a <i>team</i> product (D28) — the release right after planning, <b>guardrail-pinned</b>. Sync backend chosen at lock with a fresh maturity check.</p>
+        <ul>
+          <li>Turso Sync vs libsql embedded replicas — decided at lock (replicas now vendor-legacy)</li>
+          <li>Reads local, writes serialize at the primary · join-workspace onboarding</li>
+          <li>Credentials via env / OS keychain only · self-hosted sqld path</li>
+          <li>No multi-master — integrity first</li>
+        </ul>
+        <div class="crates"><b>heart</b> storage — + config · health · engine · mcp · cli</div>
+      </div>
+
+      <div class="card">
         <div class="ch"><span class="cv">v1.4</span><span class="status st-prop">Proposed</span></div>
+        <div class="thm">Human surface — local TUI</div>
+        <p class="desc">An offline, terminal-native window for developers — a ratatui app that is itself an MCP client over stdio (no new transport, FR-9 preserved). <b>Pulled forward from v1.5.</b></p>
+        <ul>
+          <li>Phase 1 read-only: ready queue, board, detail, swarm observability</li>
+          <li>Phase 2: claim/close/create via the same MCP tools, human as actor</li>
+          <li>Rides real planning (v1.2) + coordination (v1.1) data instead of shipping thin</li>
+          <li>100% Rust — no Node/npm; dependency graphs → the PRO web</li>
+        </ul>
+        <div class="crates"><b>new</b> unblock-tui (13th crate) · cli (tui command)</div>
+      </div>
+
+      <div class="card">
+        <div class="ch"><span class="cv">v1.5</span><span class="status st-prop">Proposed</span></div>
         <div class="thm">Scale, swarm depth &amp; MCP richness</div>
         <p class="desc">From “correct at 250k” to “fast &amp; rich at 1M issues / 10k agents”; coordination goes from observing to helping.</p>
         <ul>
           <li>1M-issue perf as a CI hard gate (today: manual)</li>
           <li>Active coordination — reclaim policy, claim TTL/heartbeat</li>
-          <li>Scheduler v2 (critical-path + milestone-due-date aware)</li>
-          <li>Streamable-HTTP transport (re-eval at lock) · compaction/archival</li>
+          <li>Scheduler v2 (critical-path + milestone-due-date aware — consumes v1.2 planning)</li>
+          <li>Richer MCP surface (batch/streaming, subscriptions) · compaction/archival</li>
         </ul>
         <div class="crates"><b>touches</b> storage · policy · engine · mcp · health · render</div>
-      </div>
-
-      <div class="card">
-        <div class="ch"><span class="cv">v1.5</span><span class="status st-prop">Proposed</span></div>
-        <div class="thm">Human surface — local TUI</div>
-        <p class="desc">An offline, terminal-native window for developers — a ratatui app that is itself an MCP client over stdio (no new transport, FR-9 preserved).</p>
-        <ul>
-          <li>Phase 1 read-only: ready queue, board, detail, swarm observability</li>
-          <li>Phase 2: claim/close/create via the same MCP tools, human as actor</li>
-          <li>100% Rust — no Node, no npm, no web assets</li>
-          <li>Dependency graphs excluded → they belong to the PRO web</li>
-        </ul>
-        <div class="crates"><b>new</b> unblock-tui (13th crate) · cli (tui command)</div>
       </div>
 
       <div class="card dir">
@@ -465,9 +483,9 @@
         <div class="thm">The long horizon</div>
         <p class="desc">Credible but uncommitted — each either reverses a locked decision or awaits concrete external demand.</p>
         <ul>
-          <li>Turso Sync / Turso DB backend (behind the Storage trait)</li>
           <li>Fine-grained auth / ACL for shared stores</li>
           <li>Commercial PRO web dashboard — static SPA + WASM domain core</li>
+          <li><b>Streamable-HTTP transport</b> (unscheduled — lost its UI-enabler rationale)</li>
           <li>Cross-project routing · DB-only mode</li>
         </ul>
         <div class="crates"><b>gate</b> a product decision per row — nothing scheduled</div>
@@ -485,7 +503,7 @@
 
   <footer>
     <b>Sources of truth</b> — docs/plans/STATUS.md (live registry) · docs/plans/00-roadmap.md (version horizon) · docs/PRD.md §13/§14 (milestones + ship-gates)<br>
-    <b>Hierarchy</b> PRD &gt; design-spine &gt; crate plans · reconciled against git log (main @ a01c4d8 · v1.0.0 GA · release Latest) on 2026-07-20
+    <b>Hierarchy</b> PRD &gt; design-spine &gt; crate plans · reconciled against git log (main @ 6c7d5d6 · v1.0.0 GA · v1.2+ resequenced D41) on 2026-07-20
   </footer>
 
 </div>
