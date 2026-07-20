@@ -153,7 +153,7 @@ pub(crate) const SUPPORTED_BACKEND: &str = "libsql";
 ///
 /// Built by [`WorkspaceConfig::resolve`] (the precedence engine) and validated by
 /// [`WorkspaceConfig::validate`]. `deletions_retention_days` and `backend` are
-/// **resolved-but-not-projected** (reserved — v1.1 / v1.2), not silently dropped (MF-3/MF-5).
+/// **resolved-but-not-projected** (reserved — v1.1 / v1.3), not silently dropped (MF-3/MF-5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceConfig {
     /// The resolved actor (FORK-4; bounded via [`unblock_model::validate_actor`]).
@@ -272,7 +272,7 @@ impl WorkspaceConfig {
     ///
     /// All validation runs in [`WorkspaceConfig::validate`] (called by [`WorkspaceConfig::resolve`])
     /// **before** this projection, so it adds no new error path. `deletions_retention_days` and
-    /// `backend` are **deliberately resolved-but-not-projected** (reserved — v1.1 / v1.2), not
+    /// `backend` are **deliberately resolved-but-not-projected** (reserved — v1.1 / v1.3), not
     /// silently dropped.
     #[must_use]
     pub fn into_resolved(self) -> ResolvedConfig {

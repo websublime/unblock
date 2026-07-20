@@ -7,7 +7,7 @@
 //! read paths (list/ready/count) stay bounded at scale, and `integrity_check()` is clean at 250k.
 //!
 //! The corpus is committed to under NFR-2. There is no numeric NFR-1 *budget* at 250k (the numeric
-//! budgets are the 1k/10k criterion tiers; the 1M corpus is a v1.4 gate), so the per-op guards here
+//! budgets are the 1k/10k criterion tiers; the 1M corpus is a v1.5 gate), so the per-op guards here
 //! are **generous boundedness guards** — they prove the paths do not blow up (an O(N)→O(N²)
 //! regression or a missing index would breach them by orders of magnitude) — and the real elapsed is
 //! printed for the record. list/ready use a realistic `limit` (agents page); an unbounded 250k
@@ -144,10 +144,10 @@ async fn scale_250k_reads_bounded_and_integrity_clean() {
     run_scale(SCALE_N).await;
 }
 
-/// The `#[ignore]`-gated soak variant (the v1.4 1M corpus; run on demand). Same shape at 4× scale —
+/// The `#[ignore]`-gated soak variant (the v1.5 1M corpus; run on demand). Same shape at 4× scale —
 /// proves the storage-direct seeder + read paths + integrity hold well past the v1 acceptance corpus.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "soak: 1M-issue corpus; run on demand (v1.4 gate), not per-PR"]
+#[ignore = "soak: 1M-issue corpus; run on demand (v1.5 gate), not per-PR"]
 async fn scale_1m_soak() {
     run_scale(1_000_000).await;
 }

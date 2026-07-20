@@ -168,9 +168,9 @@ async fn scale_250k_engine_reads_bounded_and_integrity_clean() {
     run_scale(SCALE_N).await;
 }
 
-/// The `#[ignore]`-gated soak variant (the v1.4 1M corpus; run on demand).
+/// The `#[ignore]`-gated soak variant (the v1.5 1M corpus; run on demand).
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "soak: 1M-issue corpus; run on demand (v1.4 gate), not per-PR"]
+#[ignore = "soak: 1M-issue corpus; run on demand (v1.5 gate), not per-PR"]
 async fn scale_1m_soak() {
     run_scale(1_000_000).await;
 }

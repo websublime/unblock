@@ -58,7 +58,7 @@ pub struct ProjectConfig {
     /// `write_lock_timeout_ms` (startup key, D31/T3.4.1 ADDITIVE) — the `.unblock/.write.lock` acquire
     /// timeout in ms. `None` → default `30_000`; threaded DOWN to `LibsqlStorage::open_local` at open.
     pub write_lock_timeout_ms: Option<u64>,
-    /// The `[remote]` table (v1.2 surface) — present here ONLY to **deny** an `auth_token` at
+    /// The `[remote]` table (v1.3 surface) — present here ONLY to **deny** an `auth_token` at
     /// parse (NFR-18). Any other `[remote]` keys flow into `RemoteTable::extra` (warn-only).
     pub remote: Option<RemoteTable>,
     /// Captured unknown top-level keys (SF-4): warned, never an error (forward-compat). A captured
@@ -67,7 +67,7 @@ pub struct ProjectConfig {
     pub extra: BTreeMap<String, toml::Value>,
 }
 
-/// The `[remote]` table — typed only to deny `auth_token` (NFR-18). v1.2 will give it real fields.
+/// The `[remote]` table — typed only to deny `auth_token` (NFR-18). v1.3 will give it real fields.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct RemoteTable {
     /// A forbidden libsql auth token (NFR-18): credentials never live in `config.toml`. If present
