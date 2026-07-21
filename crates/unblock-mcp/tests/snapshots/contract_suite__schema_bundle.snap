@@ -249,14 +249,14 @@ expression: schema_bundle()
         },
         {
           "additionalProperties": false,
-          "description": "Bulk-create issues from an inline markdown document (D22 — `{action:\"create_bulk\", markdown}`).\n\nThe `markdown` is INLINE content (NOT a path). The adapter parses it (all-or-nothing\npre-mutation), caps the record count at `Quotas::max_batch`, maps each `ParsedIssue` →\n`NewIssue` (carrying the symbolic dep/parent refs verbatim), and calls the ATOMIC\n`Session::create_bulk` — NOT a loop over `create_issue`. The engine mints all ids + resolves the\n2-phase intra-file dep/parent IN MEMORY + inserts the whole batch in ONE tx (rollback-on-any-\nfailure → ZERO writes). Output reuses `IssueOutput::Issues`.",
+          "description": "Bulk-create issues from an inline markdown document (D22 — `{action:\"create_bulk\", markdown}`).\n\nThe `markdown` is INLINE content (NOT a path). The adapter parses it (all-or-nothing\npre-mutation), caps the record count at `Quotas::max_batch`, maps each `ParsedIssue` →\n`NewIssue` (carrying the symbolic dep/parent refs verbatim), and calls the ATOMIC\n`Session::create_bulk` — NOT a loop over `create_issue`. The engine mints all ids + resolves the\n2-phase intra-file dep/parent IN MEMORY + inserts the whole batch in ONE tx (rollback-on-any-\nfailure → ZERO writes). Output reuses `IssueOutput::Issues`.\n\nThe document is REJECTED as a whole (`isError:true`, `VALIDATION_FAILED`, zero writes) when\nit contains: an unrecognized or empty `### ` section header; a `### ` section before the\nfirst `## `; or an invalid `### Priority` value. Each of these was previously accepted and\nits content silently discarded.",
           "properties": {
             "action": {
               "const": "create_bulk",
               "type": "string"
             },
             "markdown": {
-              "description": "The inline bulk-markdown document content.",
+              "description": "The inline bulk-markdown document content.\n\nEach issue starts with an H2 line `## Issue Title`. Per-issue fields are H3 sections,\ncase-insensitive, from this CLOSED set: `ID`, `Parent`, `Priority`, `Type`,\n`Description`, `Design`, `Acceptance Criteria` (alias `Acceptance`), `Assignee`,\n`Labels`, `Dependencies` (alias `Deps`), `Agent Context` (aliases `agent-context`,\n`agent_context`). Any other `### ` header rejects the whole document.\n\n`### ` always starts a NEW section — use `#### ` for a sub-heading inside a section body,\notherwise the enclosing section is terminated and the rest of it is lost.",
               "type": "string"
             }
           },

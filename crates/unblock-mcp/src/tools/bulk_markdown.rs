@@ -3,12 +3,24 @@
 //! `parse_markdown_file`: the MCP surface takes INLINE content, so the extension / path-traversal /
 //! symlink / size file guards are EXCLUDED — file ingestion + path confinement are a T3.1 CLI concern).
 //!
+//! **DELIBERATE DEVIATIONS FROM THE PORT (D42, v1.0.1).** The original accepted-and-discarded three
+//! classes of malformed input in silence; unblock's safe-import discipline (NFR-8) rejects them
+//! instead, in-band, before any write. D22 already set the precedent for overriding the port on this
+//! axis (its own row records the best-effort-`continue` deviation). The three are: an unrecognized
+//! `### ` section, a `### ` section before the first `## `, and — at the `issue.rs` mapping step —
+//! an invalid `### Priority` value.
+//!
 //! # Grammar (authoritative — do NOT reduce)
 //!
 //! - Each issue starts with an H2 line `## Issue Title`.
 //! - Per-issue sections are H3 lines `### Section Name` (case-insensitive set: ID, Parent, Priority,
 //!   Type, Description, Design, Acceptance Criteria / Acceptance, Assignee, Labels, Dependencies /
-//!   Deps, Agent Context / agent-context / `agent_context`). Unknown sections are ignored.
+//!   Deps, Agent Context / agent-context / `agent_context`). **An unrecognized `### Section` REJECTS
+//!   the whole document** (`ValidationFailed`, zero writes) — as does an EMPTY `### ` header, with a
+//!   distinct message. Note `### ` always starts a NEW section: use `#### ` for a sub-heading inside
+//!   a section body (`"#### Sub".strip_prefix("### ")` is `None`, so H4 stays plain content).
+//! - A `### ` section appearing **before the first `## `** REJECTS the document. Previously it was
+//!   consumed and discarded along with its body.
 //! - The **implicit-description quirk**: lines after the H2 before any H3 are description, but **only
 //!   the first non-empty line** is captured; an explicit `### Description` overrides it.
 //! - Dep encoding `type:id` / bare (→ `blocks`) / `external:…`, with an invalid-type prefix treated
@@ -69,27 +81,117 @@ enum Section {
     Labels,
     Dependencies,
     AgentContext,
-    Unknown,
+}
+
+/// The closed set of accepted `### Section` spellings, in the order [`Section::from_header`] matches
+/// them. Published on the wire ONLY through the rejection `hint` and the `markdown` field
+/// description — there is no other place a client can discover it, which is why the enumerating hint
+/// is load-bearing rather than cosmetic.
+const ACCEPTED_SECTIONS: &str = "id, parent, priority, type, description, design, \
+     acceptance criteria, acceptance, assignee, labels, dependencies, deps, agent context, \
+     agent-context, agent_context";
+
+/// The maximum number of characters of an echoed `### ` header text.
+///
+/// A header is otherwise bounded only by `Quotas::max_string_len` (the whole markdown document is
+/// ONE string), so an unbounded echo would amplify attacker-controlled text into the error payload.
+/// `StructuredError::from_code` sanitizes but does NOT truncate, and `with_context` does neither.
+const MAX_ECHOED_HEADER_CHARS: usize = 80;
+
+/// Truncate an echoed header on a char boundary. Sanitization happens downstream, in
+/// `StructuredError`'s constructors — truncate FIRST, so a cut can never land inside an escape.
+fn clip_header(header: &str) -> String {
+    if header.chars().count() <= MAX_ECHOED_HEADER_CHARS {
+        return header.to_string();
+    }
+    let kept: String = header.chars().take(MAX_ECHOED_HEADER_CHARS).collect();
+    format!("{kept}…[truncated]")
 }
 
 impl Section {
-    fn from_header(header: &str) -> Self {
+    /// Map an H3 header to its [`Section`], or REJECT.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `ValidationFailed` [`StructuredError`] for an EMPTY header (`kind =
+    /// "empty_section_header"`) or an unrecognized one (`kind = "unknown_section"`). Before D42 both
+    /// mapped to a `Section::Unknown` variant whose content was silently discarded.
+    ///
+    /// The two kinds are deliberately DISTINCT: an unnamed section and an unrecognized section are
+    /// different user errors, and only the second can be fixed by consulting the accepted-name list.
+    fn from_header(header: &str, line_no: usize) -> Result<Self, StructuredError> {
         let normalized = header.trim().to_lowercase();
         match normalized.as_str() {
-            "id" => Self::Id,
-            "parent" => Self::Parent,
-            "priority" => Self::Priority,
-            "type" => Self::Type,
-            "description" => Self::Description,
-            "design" => Self::Design,
-            "acceptance criteria" | "acceptance" => Self::AcceptanceCriteria,
-            "assignee" => Self::Assignee,
-            "labels" => Self::Labels,
-            "dependencies" | "deps" => Self::Dependencies,
-            "agent context" | "agent-context" | "agent_context" => Self::AgentContext,
-            _ => Self::Unknown,
+            "id" => Ok(Self::Id),
+            "parent" => Ok(Self::Parent),
+            "priority" => Ok(Self::Priority),
+            "type" => Ok(Self::Type),
+            "description" => Ok(Self::Description),
+            "design" => Ok(Self::Design),
+            "acceptance criteria" | "acceptance" => Ok(Self::AcceptanceCriteria),
+            "assignee" => Ok(Self::Assignee),
+            "labels" => Ok(Self::Labels),
+            "dependencies" | "deps" => Ok(Self::Dependencies),
+            "agent context" | "agent-context" | "agent_context" => Ok(Self::AgentContext),
+            "" => Err(empty_section_header(line_no)),
+            _ => Err(unknown_section(header, line_no)),
         }
     }
+}
+
+/// An EMPTY `### ` header (H3 marker, no name).
+///
+/// Before D42 `Section::from_header("")` yielded `Unknown`, i.e. `### ` was an *ignored* section —
+/// the same silent-drop class every other D42 rejection closes. Rejecting it keeps the grammar
+/// consistent; treating it as content would add a second special case whose only purpose is to keep
+/// a silent drop alive.
+fn empty_section_header(line_no: usize) -> StructuredError {
+    StructuredError::from_code(
+        ErrorCode::ValidationFailed,
+        format!("line {line_no}: an empty `### ` section header"),
+    )
+    .with_hint(format!(
+        "name the section — one of: {ACCEPTED_SECTIONS} (case-insensitive). \
+         `### ` always starts a NEW section; use `#### ` for a sub-heading inside a section body."
+    ))
+    .with_context("field", serde_json::json!("markdown"))
+    .with_context("kind", serde_json::json!("empty_section_header"))
+    .with_context("line", serde_json::json!(line_no))
+}
+
+/// An unrecognized `### Section` header. **Rejects the whole document (D42, SUPERSEDES D22 clause 2).**
+fn unknown_section(header: &str, line_no: usize) -> StructuredError {
+    let header = clip_header(header);
+    StructuredError::from_code(
+        ErrorCode::ValidationFailed,
+        format!("line {line_no}: unrecognized `### {header}` section"),
+    )
+    .with_hint(format!(
+        "accepted sections are: {ACCEPTED_SECTIONS} (case-insensitive). \
+         `### ` always starts a NEW section; use `#### ` for a sub-heading inside a section body."
+    ))
+    .with_context("field", serde_json::json!("markdown"))
+    .with_context("kind", serde_json::json!("unknown_section"))
+    .with_context("section", serde_json::json!(header))
+    .with_context("line", serde_json::json!(line_no))
+}
+
+/// A `### Section` appearing before the first `## Issue Title`.
+///
+/// Before D42 the H3 branch was gated on `if let Some(issue) = current_issue.as_mut()` and
+/// `continue`d regardless, so such a header AND its whole body were consumed and discarded while the
+/// parse returned `Ok`.
+fn section_before_first_issue(header: &str, line_no: usize) -> StructuredError {
+    let header = clip_header(header);
+    StructuredError::from_code(
+        ErrorCode::ValidationFailed,
+        format!("line {line_no}: `### {header}` appears before the first `## Issue Title`"),
+    )
+    .with_hint("a `### Section` must follow a `## Issue Title`; add the H2 header above it")
+    .with_context("field", serde_json::json!("markdown"))
+    .with_context("kind", serde_json::json!("section_before_issue"))
+    .with_context("section", serde_json::json!(header))
+    .with_context("line", serde_json::json!(line_no))
 }
 
 /// Parse bulk-markdown content into a list of [`ParsedIssue`]s (a byte-faithful port of
@@ -97,10 +199,18 @@ impl Section {
 ///
 /// # Errors
 ///
-/// Returns a `ValidationFailed` [`StructuredError`] when the content has non-whitespace text but no
-/// `## Title` header (faithful to the original's "no issues found" rejection). Otherwise the parse is
-/// total (it never rejects an individual record — the all-or-nothing batch rejection on bad
-/// references is the ENGINE's job at `create_bulk`).
+/// Returns a `ValidationFailed` [`StructuredError`], all-or-nothing and before any write, when:
+///
+/// - the content has non-whitespace text but no `## Title` header (`kind = "no_issues"`; faithful to
+///   the original's "no issues found" rejection);
+/// - a `### Section` appears before the first `## ` (`kind = "section_before_issue"`, D42);
+/// - a `### ` header is EMPTY (`kind = "empty_section_header"`, D42);
+/// - a `### Section` header is unrecognized (`kind = "unknown_section"`, D42 — SUPERSEDES D22
+///   clause 2, which specified that unknown H3 sections be ignored).
+///
+/// The pre-D42 wording — *"otherwise the parse is total (it never rejects an individual record)"* —
+/// is no longer true and has been removed rather than softened. The all-or-nothing batch rejection
+/// on bad *references* remains the ENGINE's job at `create_bulk`.
 pub(crate) fn parse_bulk_markdown(content: &str) -> Result<Vec<ParsedIssue>, StructuredError> {
     let has_non_whitespace_content = content.lines().any(|line| !line.trim().is_empty());
     let mut issues = Vec::new();
@@ -109,7 +219,8 @@ pub(crate) fn parse_bulk_markdown(content: &str) -> Result<Vec<ParsedIssue>, Str
     let mut section_lines: Vec<String> = Vec::new();
     let mut captured_implicit_desc = false;
 
-    for line in content.lines() {
+    for (index, line) in content.lines().enumerate() {
+        let line_no = index + 1;
         // Check for H2 (new issue).
         if let Some(stripped) = line.strip_prefix("## ") {
             // Save the previous issue.
@@ -132,15 +243,20 @@ pub(crate) fn parse_bulk_markdown(content: &str) -> Result<Vec<ParsedIssue>, Str
 
         // Check for H3 (section header).
         if let Some(stripped) = line.strip_prefix("### ") {
-            if let Some(issue) = current_issue.as_mut() {
-                // Apply the previous section.
-                apply_section_to_issue(issue, current_section, &section_lines);
+            let header = stripped.trim();
+            // D42: the STRUCTURAL check must precede `from_header`, so `### Bogus` before the first
+            // H2 reports the actionable error (the missing H2), not the unknown-section one.
+            let Some(issue) = current_issue.as_mut() else {
+                return Err(section_before_first_issue(header, line_no));
+            };
+            // Apply the previous section.
+            apply_section_to_issue(issue, current_section, &section_lines);
 
-                // Start the new section.
-                let header = stripped.trim();
-                current_section = Section::from_header(header);
-                section_lines.clear();
-            }
+            // Start the new section. `?` fires at the offending line during the SINGLE pass — no
+            // pre-scan is needed, and the existing call order (parse -> batch quota ->
+            // Session::create_bulk) already guarantees zero writes.
+            current_section = Section::from_header(header, line_no)?;
+            section_lines.clear();
             continue;
         }
 
@@ -168,7 +284,9 @@ pub(crate) fn parse_bulk_markdown(content: &str) -> Result<Vec<ParsedIssue>, Str
             ErrorCode::ValidationFailed,
             "no issues found; expected '## Title' headers",
         )
-        .with_hint("each issue starts with an H2 line: `## Issue Title`"));
+        .with_hint("each issue starts with an H2 line: `## Issue Title`")
+        .with_context("field", serde_json::json!("markdown"))
+        .with_context("kind", serde_json::json!("no_issues")));
     }
 
     Ok(issues)
@@ -199,7 +317,11 @@ fn apply_section_to_issue(issue: &mut ParsedIssue, section: Section, lines: &[St
         Section::Labels => issue.labels = split_list_content(&content),
         Section::Dependencies => issue.dependencies = split_dependency_content(&content),
         Section::AgentContext => issue.agent_context = Some(content),
-        Section::Unknown => {} // ignore unknown sections.
+        // D42: there is no `Section::Unknown` arm to write — the variant is DELETED, so the literal
+        // drop site cannot be re-created here by accident. That closes the ACCIDENTAL path only; the
+        // GUARANTEE is the `unknown_section_rejected` test, which turns RED under any re-introduction
+        // however it is spelled (including `.unwrap_or(Section::Description)` at the call site, which
+        // clippy pedantic does not ban).
     }
 }
 
@@ -311,7 +433,7 @@ fn is_marker_only_token(token: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{ParsedIssue, parse_bulk_markdown};
+    use super::{MAX_ECHOED_HEADER_CHARS, ParsedIssue, parse_bulk_markdown};
 
     fn parse(content: &str) -> Vec<ParsedIssue> {
         parse_bulk_markdown(content).expect("parse")
@@ -429,14 +551,127 @@ mod tests {
         assert_eq!(issues[0].issue_type.as_deref(), Some("task"));
     }
 
+    /// **THE INVERTED TEST (D42, R1-i).** This was `unknown_sections_ignored`, which asserted the
+    /// silent drop as CORRECT. It is now the load-bearing guarantee that the drop is gone.
+    ///
+    /// Deleting the `Section::Unknown` variant closes the ACCIDENTAL path — there is no arm left to
+    /// write, and no `None` branch for a future editor to fill with a default. That is a real
+    /// reduction in risk; it is NOT a proof. Nothing in the type system stops someone re-adding the
+    /// variant, and `Result` does not stop someone writing `.unwrap_or(Section::Description)` at the
+    /// call site — clippy pedantic does not ban `unwrap_or`, so CI would not catch that spelling.
+    /// **This test is the guarantee**: it turns RED under ANY re-introduction, however spelled.
     #[test]
-    fn unknown_sections_ignored() {
-        let content = "## Test Issue\n### Unknown Section\nThis content should be ignored.\n\n### Description\nThis is the actual description.\n";
-        let issues = parse(content);
+    fn unknown_section_rejected() {
+        let err =
+            parse_bulk_markdown("## T\n### Unknown Section\nignored?\n\n### Description\nreal\n")
+                .expect_err("an unrecognized `### ` section must REJECT the whole document");
+        assert_eq!(err.code, unblock_error::ErrorCode::ValidationFailed);
+        assert!(err.retryable, "VALIDATION_FAILED is retryable");
+        assert_eq!(err.context["kind"], "unknown_section");
+        assert_eq!(err.context["field"], "markdown");
         assert_eq!(
-            issues[0].description.as_deref(),
-            Some("This is the actual description.")
+            err.context["section"], "Unknown Section",
+            "the ORIGINAL case is preserved in the echoed header"
         );
+        assert_eq!(err.context["line"], 2);
+        let hint = err.hint.as_deref().expect("an enumerating hint");
+        assert!(hint.contains("acceptance criteria"), "{hint}");
+        assert!(
+            hint.contains("#### "),
+            "the H4 rule must be in the hint: {hint}"
+        );
+    }
+
+    /// Non-vacuity for `unknown_section_rejected`: every accepted spelling still parses, so the
+    /// rejection cannot over-fire, and the alias set is pinned against accidental narrowing.
+    #[test]
+    fn every_accepted_section_spelling_still_parses() {
+        /// `(header spelling, the field it must populate)`.
+        type Case = (&'static str, fn(&ParsedIssue) -> bool);
+        let cases: &[Case] = &[
+            ("ID", |i| i.stand_in_id.is_some()),
+            ("Parent", |i| i.parent.is_some()),
+            ("PRIORITY", |i| i.priority.is_some()),
+            ("Type", |i| i.issue_type.is_some()),
+            ("Description", |i| i.description.is_some()),
+            ("Design", |i| i.design.is_some()),
+            ("Acceptance Criteria", |i| i.acceptance_criteria.is_some()),
+            ("Acceptance", |i| i.acceptance_criteria.is_some()),
+            ("ASSIGNEE", |i| i.assignee.is_some()),
+            ("Labels", |i| !i.labels.is_empty()),
+            ("Dependencies", |i| !i.dependencies.is_empty()),
+            ("Deps", |i| !i.dependencies.is_empty()),
+            ("Agent Context", |i| i.agent_context.is_some()),
+            ("agent-context", |i| i.agent_context.is_some()),
+            ("agent_context", |i| i.agent_context.is_some()),
+        ];
+        for (header, populated) in cases {
+            let content = format!("## T\n### {header}\nvalue\n");
+            let issues = parse_bulk_markdown(&content)
+                .unwrap_or_else(|e| panic!("`### {header}` must still parse: {e:?}"));
+            assert!(
+                populated(&issues[0]),
+                "`### {header}` parsed but populated no field"
+            );
+        }
+    }
+
+    /// R4(ii): a KNOWN H3 before the first `## ` was consumed and discarded along with its body,
+    /// and the parse returned `Ok`. This fixture lost TWO complete sections before D42.
+    #[test]
+    fn known_section_before_the_first_issue_rejected() {
+        let err = parse_bulk_markdown(
+            "### ID\nstand-in-1\n### Priority\n0\n## Real Title\n### Type\ntask\n",
+        )
+        .expect_err("a `### ` before the first `## ` must REJECT");
+        assert_eq!(err.code, unblock_error::ErrorCode::ValidationFailed);
+        assert_eq!(err.context["kind"], "section_before_issue");
+        assert_eq!(err.context["section"], "ID");
+        assert_eq!(err.context["line"], 1);
+    }
+
+    /// The STRUCTURAL error must win over the unknown-section one: `### Bogus` before the first H2
+    /// reports the missing H2 (actionable), not "unrecognized section". Pins the ordering rule.
+    #[test]
+    fn structural_error_wins_over_unknown_section() {
+        let err = parse_bulk_markdown("### Bogus\nx\n## T\n").expect_err("must reject");
+        assert_eq!(
+            err.context["kind"], "section_before_issue",
+            "the `current_issue.is_none()` check MUST precede `Section::from_header`"
+        );
+    }
+
+    /// The empty `### ` header. Before D42 `Section::from_header("")` yielded `Unknown`, so `### `
+    /// was an IGNORED section — the same silent-drop class D42 closes. It is now rejected, with a
+    /// kind DISTINCT from the unknown-section one: an unnamed section and an unrecognized section
+    /// are different user errors and only the second is fixed by consulting the accepted-name list.
+    ///
+    /// `arbitrary_utf8_never_panics` covers this exact input but only asserts no-panic, so it stays
+    /// green under either behaviour — this test is the ONLY thing in the repo that can tell the two
+    /// apart. Deleting it silently evaporates the decision.
+    #[test]
+    fn empty_section_header_rejected_with_a_distinct_kind() {
+        let err = parse_bulk_markdown("## t\n### \n").expect_err("an empty `### ` must REJECT");
+        assert_eq!(err.code, unblock_error::ErrorCode::ValidationFailed);
+        assert_eq!(err.context["kind"], "empty_section_header");
+        assert_ne!(err.context["kind"], "unknown_section");
+        assert_eq!(err.context["line"], 2);
+    }
+
+    /// An over-long header is TRUNCATED before it enters `message`/`context.section`. The whole
+    /// markdown document is ONE string, so a header is otherwise bounded only by `max_string_len`.
+    #[test]
+    fn echoed_unknown_header_is_truncated() {
+        let header = "Z".repeat(4000);
+        let err = parse_bulk_markdown(&format!("## t\n### {header}\n")).expect_err("must reject");
+        let echoed = err.context["section"].as_str().expect("section");
+        assert!(
+            echoed.chars().count() <= MAX_ECHOED_HEADER_CHARS + 16,
+            "{}",
+            echoed.len()
+        );
+        assert!(echoed.ends_with("…[truncated]"));
+        assert!(err.message.len() < 200, "message len {}", err.message.len());
     }
 
     #[test]
@@ -508,11 +743,25 @@ mod tests {
         assert!(issues.is_empty());
     }
 
+    /// STRENGTHENED (D42). As written before, this passed under BOTH the old and the new code —
+    /// it only asserted the `ErrorCode`, which both paths share. It was therefore not evidence of
+    /// anything. Asserting `context.kind` is what makes it a test: this fixture now trips the
+    /// `section_before_issue` rejection, EARLIER than the "no issues found" path it used to reach.
     #[test]
     fn non_empty_without_header_rejects() {
         let err = parse_bulk_markdown("### Description\nNo issue header here.\n")
             .expect_err("must reject");
         assert_eq!(err.code, unblock_error::ErrorCode::ValidationFailed);
+        assert_eq!(err.context["kind"], "section_before_issue");
+    }
+
+    /// The pre-existing "no issues found" path is still reachable and still rejects — via content
+    /// that is neither an H2 nor an H3.
+    #[test]
+    fn prose_without_any_header_still_reports_no_issues() {
+        let err = parse_bulk_markdown("just some prose\n").expect_err("must reject");
+        assert_eq!(err.code, unblock_error::ErrorCode::ValidationFailed);
+        assert_eq!(err.context["kind"], "no_issues");
     }
 
     #[test]
