@@ -665,3 +665,82 @@ fn build_petgraph(
     }
     (digraph, id_of)
 }
+
+#[cfg(test)]
+mod d42_tests {
+    use crate::Storage;
+    use crate::libsql::LibsqlStorage;
+    use chrono::{TimeZone, Utc};
+    use unblock_model::{Dependency, DependencyType, Issue, Status};
+
+    fn issue(id: &str) -> Issue {
+        let ts = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        Issue {
+            id: id.to_string(),
+            title: format!("issue {id}"),
+            status: Status::Open,
+            created_at: ts,
+            updated_at: ts,
+            ..Issue::default()
+        }
+    }
+
+    /// **The RAW-COLUMN assertion — the ONLY place `NULL` and `'{}'` are distinguishable.**
+    ///
+    /// This exists because the D42 silent-drop mask defeats every test written against the `Storage`
+    /// trait: `DEFAULT '{}'` writes `'{}'` for an unbound value and `mappers::dependency_from_row`
+    /// coerces `'{}'` back to `None`, so binding `metadata.unwrap_or("{}")` instead of SQL NULL is
+    /// **completely invisible** through the public API — round-trips, JSONL exports and the `dep`
+    /// tool all agree. Verified by execution: that exact mutation left the whole NFR-16 contract
+    /// suite GREEN.
+    ///
+    /// It matters because the `!= "{}"` read filter is deliberate LEGACY TOLERANCE, not a semantic
+    /// rule. The day it is narrowed or removed, `'{}'` starts surfacing as `Some("{}")` on every
+    /// dep ever written by the mutated bind. Storing NULL keeps "absent" genuinely absent at rest.
+    ///
+    /// `read()` is `pub(super)`, so this assertion can only live inside the `libsql` module — which
+    /// is why it is a unit test here rather than a case in the backend-independent testkit.
+    #[tokio::test]
+    async fn absent_metadata_is_stored_as_sql_null_not_an_empty_json_object() {
+        let storage = LibsqlStorage::open_in_memory().await.expect("open");
+        storage.migrate().await.expect("migrate");
+        storage.create_issue(&issue("ub-a"), "t").await.expect("a");
+        storage.create_issue(&issue("ub-b"), "t").await.expect("b");
+
+        let ts = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        storage
+            .add_dependency(
+                &Dependency {
+                    issue_id: "ub-a".to_string(),
+                    depends_on_id: "ub-b".to_string(),
+                    dep_type: DependencyType::Blocks,
+                    created_at: ts,
+                    created_by: None,
+                    metadata: None,
+                    thread_id: None,
+                },
+                "t",
+            )
+            .await
+            .expect("add edge");
+
+        let mut rows = storage
+            .read()
+            .query(
+                "SELECT quote(metadata), quote(thread_id) FROM dependencies WHERE issue_id = ?1",
+                libsql::params!["ub-a"],
+            )
+            .await
+            .expect("query");
+        let row = rows.next().await.expect("step").expect("one row");
+        let metadata: String = row.get(0).expect("metadata");
+        let thread_id: String = row.get(1).expect("thread_id");
+        assert_eq!(
+            metadata, "NULL",
+            "an absent `metadata` MUST be stored as SQL NULL. Binding `unwrap_or(\"{{}}\")` instead \
+             is INVISIBLE through the Storage trait (the `!= \"{{}}\"` read filter coerces it back \
+             to None), so this raw-column assertion is the only thing that can see it."
+        );
+        assert_eq!(thread_id, "NULL", "same for `thread_id`");
+    }
+}
