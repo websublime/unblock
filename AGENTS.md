@@ -5,7 +5,7 @@ This workspace is tracked by **unblock**. Issue-data operations are exposed over
 `unblock` CLI is lifecycle/ops only.
 
 - Start the server: `unblock mcp` (MCP over stdio).
-- Contract: `unblock.mcp.v1.5`.
+- Contract: `unblock.mcp.v1.6`.
 - Machine-readable discovery: read `unblock://capabilities` (the source of these tables) and
 `unblock://schema` (the full JsonSchema bundle for every tool I/O).
 
