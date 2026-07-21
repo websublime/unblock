@@ -1056,6 +1056,46 @@ mod tests {
         }
     }
 
+    /// A 4+-space-INDENTED delimiter is an indented-code-block line, not a fence opener. Without the
+    /// indent guard this document would open a fence that never closes and be REJECTED.
+    /// (Mutation M1: `fence_delimiter`'s `> 3` guard.)
+    #[test]
+    fn an_indented_delimiter_does_not_open_a_fence() {
+        let issues = parse_bulk_markdown("## T\n### Design\n    ```\nplain text\n")
+            .expect("an indented ``` is code-block CONTENT, not a fence opener");
+        let design = issues[0].design.as_deref().expect("design");
+        assert!(design.contains("```"), "{design:?}");
+        assert!(design.ends_with("plain text"), "{design:?}");
+    }
+
+    /// A run SHORTER than 3 is not a fence delimiter at all — so a lone or doubled backtick line
+    /// leaves a following `### ` a REAL unknown section. (Mutation M2: the `run_len < 3` guard.)
+    #[test]
+    fn a_run_shorter_than_three_is_not_a_fence() {
+        for short in ["`", "``", "~", "~~"] {
+            let err = parse_bulk_markdown(&format!("## T\n### Design\n{short}\n### Bogus\nx\n"))
+                .expect_err("`### Bogus` is a real header: no fence was opened");
+            assert_eq!(
+                err.context["kind"], "unknown_section",
+                "`{short}` must not open a fence (an opened one would report \
+                 `unterminated_code_fence` instead)"
+            );
+        }
+    }
+
+    /// A TILDE fence is not closed by backticks, and vice versa. Without the marker check a
+    /// backtick delimiter inside a `~~~` block would close it and expose the following `### ` as a
+    /// header.
+    /// (Mutation M5: `closes_fence`'s `marker == open.marker`.)
+    #[test]
+    fn a_fence_is_only_closed_by_its_own_marker() {
+        let issues = parse_bulk_markdown("## T\n### Design\n~~~\n```\n### Bogus\n```\n~~~\n")
+            .expect("a ``` line must not close a ~~~ fence");
+        let design = issues[0].design.as_deref().expect("design");
+        assert!(design.contains("### Bogus"), "{design:?}");
+        assert!(design.ends_with("~~~"), "{design:?}");
+    }
+
     /// NON-VACUITY for every fence cell above: an unknown `### ` OUTSIDE any fence still rejects.
     /// Without this the fence work could silently degrade into "never reject anything".
     #[test]
