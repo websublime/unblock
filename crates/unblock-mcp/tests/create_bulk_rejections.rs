@@ -139,6 +139,86 @@ async fn unknown_section_is_rejected_like_an_unknown_argument() {
     assert_eq!(mutations, 0);
 }
 
+// --- MF-1: fenced code blocks, over the WIRE ------------------------------------------------------
+
+/// **MF-1 arm (a) at the wire.** The regression the first D42 cut introduced: a document whose
+/// section body embeds a markdown code sample containing a `### ` line was hard-rejected with
+/// `isError:true`, `context.kind == "unknown_section"`, `line: 8`, and ZERO writes — while `main`
+/// ACCEPTED it. The emitted hint ("use `#### `") was unactionable: the author controls their own
+/// headings but not the bytes of a code example. This repo's own docs are full of `### ` in fences.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_document_embedding_a_fenced_h3_is_accepted_with_its_content_intact() {
+    let markdown = "## Document the grammar\n\
+                    ### Type\ntask\n\
+                    ### Design\n\
+                    The importer accepts:\n\
+                    \n\
+                    ```markdown\n\
+                    ## Issue Title\n\
+                    ### Bogus Section\n\
+                    body\n\
+                    ```\n\
+                    \n\
+                    …and rejects anything else.\n";
+    let (is_error, payload, mutations) = create_bulk(markdown).await;
+    assert!(
+        !is_error,
+        "a fenced `### ` is CONTENT — rejecting it is a false positive on shipped GA behaviour: \
+         {payload}"
+    );
+    let issues = payload["issues"].as_array().expect("issues");
+    assert_eq!(
+        issues.len(),
+        1,
+        "the fenced `## ` must not split the record"
+    );
+    let design = issues[0]["design"].as_str().expect("design");
+    assert!(design.contains("### Bogus Section"), "{design:?}");
+    assert!(design.contains("## Issue Title"), "{design:?}");
+    assert!(
+        design.ends_with("…and rejects anything else."),
+        "{design:?}"
+    );
+    assert!(mutations > 0, "the document really was written");
+}
+
+/// **MF-1 arm (b) at the wire — the SILENT one.** A *known* section name inside a fence used to tear
+/// the fence in half and relocate the sample's bytes into another field with `isError:false`:
+/// `design` ended `"example:\n```"` and `description` became `"INSIDE-FENCE\n```"`. Both fields must
+/// now be one intact body, and `description` must come from the record's own prose only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fenced_known_section_no_longer_relocates_content_across_fields() {
+    let markdown = "## T\n### Design\nexample:\n```\n### Description\nINSIDE-FENCE\n```\n";
+    let (is_error, payload, _) = create_bulk(markdown).await;
+    assert!(!is_error, "{payload}");
+    let issue = &payload["issues"][0];
+    assert_eq!(
+        issue["design"].as_str(),
+        Some("example:\n```\n### Description\nINSIDE-FENCE\n```"),
+        "the fence body must stay ONE intact field"
+    );
+    assert!(
+        issue["description"].is_null(),
+        "no content may be relocated into `description`: {}",
+        issue["description"]
+    );
+}
+
+/// The unterminated-fence rejection reaches the wire in-band with ZERO writes, naming the OPENING
+/// line. NON-VACUITY for the two cells above: fence tracking did not degrade into "accept anything".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unterminated_fence_is_rejected_in_band_with_zero_mutations() {
+    let markdown = "## T\n### Design\n```\ncode\n## Another\n### Type\ntask\n";
+    let (is_error, payload, mutations) = create_bulk(markdown).await;
+    assert!(is_error, "{payload}");
+    assert_eq!(payload["code"], "VALIDATION_FAILED");
+    assert_eq!(payload["retryable"], true);
+    assert_eq!(payload["context"]["field"], "markdown");
+    assert_eq!(payload["context"]["kind"], "unterminated_code_fence");
+    assert_eq!(payload["context"]["line"], 3, "the OPENING line");
+    assert_eq!(mutations, 0);
+}
+
 /// NON-VACUITY across the whole file: a well-formed multi-record document still creates issues, so
 /// none of the rejections above is passing because `create_bulk` is broken outright.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
