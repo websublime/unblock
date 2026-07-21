@@ -426,6 +426,22 @@ impl McpClient {
         result["result"].clone()
     }
 
+    /// Call a tool and return the FULL JSON-RPC response envelope, error member included.
+    ///
+    /// [`Self::call_tool`] asserts the error member away, so it structurally cannot express the
+    /// D42 channel invariant (`resp["error"].is_none()` — a malformed ARGUMENT must arrive in-band
+    /// as `isError:true`, never as an out-of-band `-32602`). Use this for any cell that is about
+    /// WHICH channel a failure took.
+    pub fn call_tool_envelope(&mut self, name: &str, arguments: &Value) -> Value {
+        self.request("tools/call", &json!({"name": name, "arguments": arguments}))
+    }
+
+    /// Send a raw `tools/call` with hand-built `params` (so a cell can omit `arguments` entirely,
+    /// or set `_meta` / `task`, which [`Self::call_tool_envelope`] cannot).
+    pub fn call_tool_raw_params(&mut self, params: &Value) -> Value {
+        self.request("tools/call", params)
+    }
+
     /// Call a tool, returning `(is_error, structured_content)`.
     pub fn call_tool(&mut self, name: &str, arguments: &Value) -> (bool, Value) {
         let resp = self.request("tools/call", &json!({"name": name, "arguments": arguments}));
