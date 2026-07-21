@@ -83,15 +83,31 @@ pub(super) async fn add_dependency(
             });
         }
 
+        // D42: bind ALL SEVEN columns. The pre-D42 statement bound 5 while the read side
+        // (`mappers::dependency_from_row`) projected 7 — an asymmetry that made `metadata` and
+        // `thread_id` accepted, typed, schema-published and then DISCARDED. It survived to GA
+        // because it is DOUBLY masked: `DEFAULT '{}'` writes `'{}'` for an unbound value and the
+        // read filter coerces `'{}'` back to `None`, so "never bound" is indistinguishable from
+        // "explicitly absent" even by direct SQL inspection.
+        //
+        // Bind `None` as SQL NULL, NOT `'{}'`/`''`: `non_empty_text` maps NULL -> None, so
+        // `None -> NULL -> None` round-trips exactly, while `Some("{}") -> '{}' -> None` preserves
+        // the deliberate legacy coercion in `mappers.rs`. Do NOT "fix" that filter.
+        //
+        // Both columns are BASELINE-v1 (present in the original `SCHEMA_SQL`), so this needs no
+        // forward migration and no `schema_version` bump.
         tx.execute(
-            "INSERT INTO dependencies (issue_id, depends_on_id, type, created_at, created_by) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO dependencies (issue_id, depends_on_id, type, created_at, created_by, \
+             metadata, thread_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             libsql::params![
                 dep.issue_id.as_str(),
                 dep.depends_on_id.as_str(),
                 dep.dep_type.as_str(),
                 dep.created_at.to_rfc3339(),
                 dep.created_by.as_deref().unwrap_or(actor.as_str()),
+                dep.metadata.as_deref(),
+                dep.thread_id.as_deref(),
             ],
         )
         .await

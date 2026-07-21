@@ -145,15 +145,24 @@ pub(super) async fn insert_issue_in_tx(
         if !seen_deps.insert(dep.depends_on_id.as_str()) {
             continue;
         }
+        // D42: bind all 7 columns — see the note on the sibling INSERT in `deps.rs`. THIS site is
+        // the JSONL/bd import leg (`Session::create(&Issue)` carries a pre-built
+        // `Issue.dependencies`): without it, `export -> import -> export` is NOT a fixed point for
+        // a metadata-carrying dep, an FR-26/D5 fidelity bug. `apply_reparent` and the testkit
+        // helper deliberately STAY 5-column — they synthesise an edge with no user `Dependency`
+        // object, so the column DEFAULTs are correct there. Do not "fix" them for symmetry.
         tx.execute(
-            "INSERT INTO dependencies (issue_id, depends_on_id, type, created_at, created_by) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO dependencies (issue_id, depends_on_id, type, created_at, created_by, \
+             metadata, thread_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             libsql::params![
                 issue.id.as_str(),
                 dep.depends_on_id.as_str(),
                 dep.dep_type.as_str(),
                 dep.created_at.to_rfc3339(),
                 dep.created_by.as_deref().unwrap_or(actor),
+                dep.metadata.as_deref(),
+                dep.thread_id.as_deref(),
             ],
         )
         .await

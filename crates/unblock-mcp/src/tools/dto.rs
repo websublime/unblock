@@ -71,6 +71,10 @@ impl DepInput {
             created_at: now,
             created_by: Some(actor.to_string()),
             metadata: self.metadata,
+            // `thread_id` is DELIBERATELY not on the wire: `DepInput` has no such field and v1
+            // carries no threading surface. It is nevertheless BOUND at L2 (D42) so the storage
+            // INSERT is symmetric with the 7-column read projection — do not read that bind as dead
+            // code and delete it.
             thread_id: None,
         }
     }
