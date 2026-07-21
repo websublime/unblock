@@ -83,6 +83,9 @@ own repo plus the one release-pipeline gap never exercised end-to-end:
   quota measured a re-serialized TYPED value, so anything parked under an unknown key was never measured at
   all. Plus three out-of-seam silent drops in `issue create_bulk` (unknown `### ` section, invalid
   `### Priority`, `### ` before the first `## `) and `dep.metadata` / `dep.thread_id` being discarded at L2.
+  Closing those three required making the parser FENCE-AWARE, which in turn added a FIFTH `create_bulk`
+  rejection — an **unterminated code fence** — that, alone among them, rejects documents **GA v1.0.0
+  ACCEPTED**: a ratified behavioural break in a patch release (PRD D42 clause 4(iii)).
 - **Missing forward-migration for the comments schema** (P1) — the D37 comments tables need a forward migration
   so long-lived DBs (not just fresh-created ones) pick up the schema and a comment is **durably stored** there
   too (the D-feedback "editing an applied migration drifts long-lived DBs" lesson — ship a *forward* migration,
@@ -102,12 +105,15 @@ added or re-tiered, and the v1.2+ resequence below is untouched. But **D42 spans
 **additive `contract_version` bump to `unblock.mcp.v1.6`** (D35 permits additive `.M` bumps inside 1.x,
 so this stays v1.0.1-eligible and is **not** a 2.0.0 event) with a `CONTRACT_HASH` re-pin. It **inverts a
 shipped test that asserted a silent drop was correct** — `unknown_sections_ignored` becomes
-`unknown_section_rejected`. And it **newly rejects five previously-accepted input classes**: (1) an unknown or
+`unknown_section_rejected`. And it **newly rejects SIX previously-accepted input classes**: (1) an unknown or
 misspelled **tool argument** on any of the 8 tools; (2) an **unrecognized (or empty) `### ` markdown section**
 in `issue create_bulk`; (3) an **invalid `### Priority` value** (previously silently defaulted to P2); (4) a
 **`### ` section before the first `## ` heading** (previously consumed and discarded); (5) a `tools/call` whose
 **whole `params`** — now including `_meta` — exceeds the NFR-18 per-request cap, or that carries an object
-**key** longer than `max_string_len`. It also strengthens AC-level wording on existing must-FRs where a
+**key** longer than `max_string_len`; and (6) an **UNTERMINATED code fence** in `issue create_bulk`. Classes
+(1)–(4) reject only input that was previously DESTROYED IN SILENCE, so they are 1.x bug fixes. **Class (6) is
+not**: GA's parser had no fence tracking at all, so it ACCEPTED such documents — this one is a genuine
+behavioural break shipping in a PATCH release, ratified and stated plainly at PRD D42 clause 4(iii). It also strengthens AC-level wording on existing must-FRs where a
 shipped AC was unmet (FR-20, FR-12, NFR-18). **It adds no public API surface.**
 
 ---

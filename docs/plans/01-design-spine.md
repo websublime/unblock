@@ -1034,8 +1034,8 @@ The dependency ops (FR-5) — source-verified vs the original cycle machinery:
   `would_cycle_in_tx`, so the orientation fix below lands once.)
 - **Dependency edge PERSISTENCE (NORMATIVE — D42; the spine was previously SILENT here, which is
   exactly why a 5-column INSERT never read as a bug).** `add_dependency` and `create_issue` persist the
-  **FULL 6-field** `Dependency`: `issue_id`, `depends_on_id`, `dep_type`, `created_at`, `created_by`,
-  **`metadata`** and **`thread_id`**. The read projection was always 7-column; the write side bound 5,
+  **FULL 7-column** `Dependency`: `issue_id`, `depends_on_id`, `dep_type`, `created_at`, `created_by`,
+  **`metadata`** and **`thread_id`** (the row above said "6-field" while listing seven). The read projection was always 7-column; the write side bound 5,
   so `metadata`/`thread_id` were accepted, typed, schema-published — and DISCARDED. **`None` is stored
   as SQL NULL**, never `'{}'`/`''`, so `None → NULL → None` round-trips exactly; a stored `'{}'` reads
   back as `None` (deliberate legacy tolerance — do not remove that filter). Both columns are
@@ -1762,6 +1762,32 @@ pub enum IssueInput {
     //       pre-mutation"): a single malformed/unresolvable block rejects the ENTIRE batch with ONE
     //       `StructuredError{code: ValidationFailed, hint, context}` and ZERO writes (deviation from the original's
     //       best-effort per-issue `continue` — the PRD's safe-import discipline wins, NFR-8);
+    //       **PARSE-SIDE REJECTION SET (NORMATIVE — D42, v1.0.1; SUPERSEDES D22 clause 2).** "A single
+    //       malformed block" is no longer a hand-wave: `parse_bulk_markdown` rejects the WHOLE document, in-band
+    //       with an enumerating `hint` and ZERO writes, on ANY of the following FIVE causes (the `context.kind`
+    //       is the stable discriminator) —
+    //         (1) an **unrecognized `### ` section** header (`kind = "unknown_section"`);
+    //         (2) an **EMPTY `### ` header** (`kind = "empty_section_header"`, a distinct message);
+    //         (3) a **`### ` section before the first `## `** (`kind = "section_before_issue"`; it must WIN over (1));
+    //         (4) an **invalid `### Priority` value** (`kind = "section_value"` — raised at the `issue.rs` mapping
+    //             step, NOT in the parser; previously it silently defaulted to P2);
+    //         (5) an **UNTERMINATED fenced code block** (`kind = "unterminated_code_fence"`, naming the OPENING line).
+    //       Causes (1)–(4) reject only input GA DESTROYED IN SILENCE, so they are a 1.x bug fix (D37 precedent).
+    //       **Cause (5) is NOT: it rejects documents GA v1.0.0 ACCEPTED AND IMPORTED** — GA's parser had no fence
+    //       tracking at all, so an unclosed fence was invisible to it. The deviation is therefore from SHIPPED GA
+    //       BEHAVIOUR, not merely from CommonMark's "an unclosed fence runs to end of document" reading; it is a
+    //       behavioural break in a PATCH release, RATIFIED (PRD D42 clause 4(iii)) because that CommonMark reading
+    //       is itself the silent swallow D42 exists to kill — it would consume every later `## `/`### ` into one
+    //       section's body with `isError:false`.
+    //       **FENCE-AWARENESS is the necessary companion to (1)–(3), not an extra:** between an opening fence
+    //       (≤ 3 leading spaces, then a run of ≥ 3 backticks or tildes, then an optional info string — a backtick
+    //       fence whose info string contains a backtick does NOT open) and its closer (SAME marker, run at least as
+    //       long, NO info string), a `## `/`### ` line is CONTENT, never a header. Without it (1)–(3) would fire
+    //       FALSELY on any document embedding a markdown code sample, and a KNOWN section name inside a fence would
+    //       tear the sample in half and relocate its bytes into another field with `isError:false`. INDENTED code
+    //       blocks need no tracking (`strip_prefix("### ")` already fails on an indented line).
+    //       **PUBLISHED:** the `create_bulk` tool description AND the `markdown` field description enumerate all
+    //       FIVE rejections + the fence grammar + the closed section-name set (§5.4 ledger, D42);
     //   (3) builds a `Vec<NewIssue>` (field-faithful: title/parent/priority/type/description + the D22 markdown-captured
     //       `design`/`acceptance_criteria`/`assignee`/`agent_context`, plus the symbolic `### Dependencies`/`### Parent`
     //       refs carried for the engine to resolve) and calls the ATOMIC `Session::create_bulk(Vec<NewIssue>)` (§4.1) —
@@ -2153,7 +2179,9 @@ land FIRST (the docs-only cascade); the code + the version-string flip + the gol
 clause above records what GA shipped and is NOT renumbered. `#[serde(deny_unknown_fields)]` on all 13 input
 containers makes schemars emit `additionalProperties: false` per `oneOf` arm AND inline the tagged-enum newtype
 variant (`IssueInput::Create`) instead of `$ref`-ing `$defs/CreateInput`; the `create_bulk` doc-comment and the
-`markdown` field description are rewritten to publish the three new rejections and the closed section-name set.
+`markdown` field description are rewritten to publish the closed section-name set, the code-fence grammar,
+and ALL **FIVE** `create_bulk` rejections — including the UNTERMINATED-FENCE rejection, which rejects
+documents GA v1.0.0 ACCEPTED (D42 clause 4(iii)), so the break is discoverable from `tools/list` alone.
 All of that moves `schema_bundle()` bytes → `CONTRACT_HASH` re-pinned + the `schema_bundle` golden re-blessed.
 `capabilities()` moves only by its `contract_version` field (a FIELD description is not a TOOL description).
 Per D35 an additive `.M` bump inside 1.x is NON-breaking, so this ships in a PATCH release. D42 adds **no**
