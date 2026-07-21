@@ -3,7 +3,11 @@
 //! Maps to `Session::claim(id, assignee)`. The loser of a concurrent claim surfaces
 //! `ErrorCode::AlreadyClaimed` (retryable) via the in-band error channel.
 
-use rmcp::handler::server::wrapper::Parameters;
+// D42 SEAM: this is the CRATE-LOCAL `Parameters` (`crate::tools::args`), NOT rmcp's. It defers
+// deserialization so argument errors reach the FR-11 in-band channel instead of an out-of-band
+// `-32602`. The NAME IS LOAD-BEARING (rmcp-macros matches the ident `Parameters` to pick the
+// published inputSchema) — see `tools/args.rs`. Do NOT "fix" this back to rmcp's wrapper.
+use crate::tools::args::{Parameters, parse_args};
 use rmcp::model::CallToolResult;
 use rmcp::schemars::JsonSchema;
 use rmcp::tool;
@@ -26,6 +30,10 @@ pub(crate) const CLAIM_TOOL_DESCRIPTION: &str =
 
 /// The `claim` tool input (spine §5.2 — EXACT shape).
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
+// D42: `#[serde(deny_unknown_fields)]` — an unknown/misspelled argument is REJECTED in-band
+// instead of being silently dropped. NOT recursive and inert on a flatten TARGET: every nested
+// container needs its OWN attribute (see `tools/args.rs` + the CHECK-3 container guard).
+#[serde(deny_unknown_fields)]
 pub(crate) struct ClaimInput {
     /// The issue id to claim.
     pub id: String,
@@ -43,10 +51,15 @@ impl UnblockServer {
         name = "claim",
         description = "Atomically claim an issue for an assignee; the loser of a race is reported."
     )]
-    pub(crate) async fn claim(&self, Parameters(input): Parameters<ClaimInput>) -> CallToolResult {
-        if let Err(structured) = self.preflight(&input) {
-            return err_json(&structured);
-        }
+    pub(crate) async fn claim(&self, Parameters(raw, _): Parameters<ClaimInput>) -> CallToolResult {
+        // D42 PROLOGUE: the ONLY deserialization of tool arguments. The NFR-18 quota already
+        // ran once in `call_tool` over the whole `params`. `ClaimInput` carries
+        // `#[serde(deny_unknown_fields)]`, so an unknown/misspelled argument is REJECTED here,
+        // in-band, instead of being silently discarded.
+        let input: ClaimInput = match parse_args(raw) {
+            Ok(input) => input,
+            Err(structured) => return err_json(&structured),
+        };
         match self.session.claim(&input.id, &input.assignee).await {
             Ok(issue) => ok_json(&issue),
             Err(err) => engine_err_json(&err),

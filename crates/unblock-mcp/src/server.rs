@@ -24,7 +24,6 @@ use rmcp::model::{
 use rmcp::service::{RequestContext, RoleServer, RxJsonRpcMessage, TxJsonRpcMessage};
 use rmcp::transport::{Transport, stdio};
 use rmcp::{Service, ServiceExt};
-use serde::Serialize;
 use snafu::ResultExt;
 use tokio::sync::Semaphore;
 use unblock_engine::Session;
@@ -48,7 +47,7 @@ use crate::tools::{enforce_quota, err_json};
 pub struct UnblockServer {
     /// The single mutation home (FR-9). Every tool/resource call delegates to it.
     pub(crate) session: Arc<Session>,
-    /// The untrusted-input limits (NFR-18), enforced in [`UnblockServer::preflight`].
+    /// The untrusted-input limits (NFR-18), enforced in [`UnblockServer::enforce_request_quota`].
     pub(crate) quotas: Quotas,
     /// Optional human-readable instructions advertised to clients in [`UnblockServer::get_info`]
     /// (from `McpServerOptions::instructions`). `None` falls back to a generated default summary.
@@ -90,19 +89,32 @@ impl UnblockServer {
             + Self::comment_router()
     }
 
-    /// The NFR-18 quota preflight, run inside each tool body BEFORE any `Session` call.
+    /// The NFR-18 per-request quota check (D42), run **once in [`Self::call_tool`] before dispatch**.
     ///
-    /// Re-serializes the already-deserialized typed input and runs [`enforce_quota`]; an oversized
-    /// input is rejected in-band (it never reaches the engine). Returns `Err(structured)` on breach.
+    /// **"per-request bytes" is DEFINED as the serialized `tools/call` `params` object** — `name` +
+    /// `arguments` + `_meta` + `task` — excluding the JSON-RPC envelope (`jsonrpc`/`id`/`method`),
+    /// which is not reachable from `ServerHandler::call_tool`.
     ///
-    /// **Fail-closed:** if the typed input cannot be re-serialized for measurement, this returns an
-    /// in-band `InternalError` rather than letting an un-measurable input slip past the quota — the
-    /// untrusted-input boundary must never fail open (NFR-18).
-    pub(crate) fn preflight<T: Serialize>(&self, input: &T) -> Result<(), StructuredError> {
-        let value = serde_json::to_value(input).map_err(|err| {
+    /// This replaces the pre-D42 `preflight`, which measured the **re-serialized typed DTO**. That
+    /// was the defect (facet (c)): a payload parked under an unknown key never appeared in the typed
+    /// value, so it was never measured at all, while `#[serde(default)]` padding *was* counted.
+    ///
+    /// **The re-serialization here is NOT that defect.** Every `CallToolRequestParams` field is raw
+    /// JSON (`name: Cow<str>`, `arguments`/`task`: `Option<JsonObject>`, `meta: Option<Meta>` where
+    /// `Meta` is `#[serde(transparent)]` over a `JsonObject`), so `to_value` is lossless by
+    /// construction — pinned by `request_measurement_is_lossless`. The struct is `#[non_exhaustive]`,
+    /// so a future rmcp field is picked up automatically: the fail-safe direction.
+    ///
+    /// **Fail-closed:** an un-measurable request is rejected as an `InternalError` rather than waved
+    /// through — the untrusted-input boundary must never fail open (NFR-18).
+    pub(crate) fn enforce_request_quota(
+        &self,
+        request: &CallToolRequestParams,
+    ) -> Result<(), StructuredError> {
+        let value = serde_json::to_value(request).map_err(|err| {
             StructuredError::from_code(
-                unblock_error::ErrorCode::InternalError,
-                format!("failed to serialize input for quota measurement: {err}"),
+                ErrorCode::InternalError,
+                format!("failed to serialize request for quota measurement: {err}"),
             )
         })?;
         enforce_quota(&value, &self.quotas)
@@ -134,10 +146,14 @@ impl ServerHandler for UnblockServer {
     /// `rate_limit_chokepoint_is_the_live_tool_dispatch_path` assumption pin (`tests/rate_limit.rs`)
     /// fails LOUDLY if a future rmcp stops honouring that suppression, pointing maintainers straight here.
     ///
-    /// A non-blocking [`Semaphore::try_acquire`] gates the WHOLE dispatch: on a held permit it
-    /// replicates the macro's generated body EXACTLY ([`ToolCallContext::new`] +
-    /// `aggregate_tool_router().call`), holding the permit for the entire `.await` (dropped on return);
-    /// on saturation it FAST-FAILS in-band (MF-5 — tools have an in-band channel, unlike resources)
+    /// A non-blocking [`Semaphore::try_acquire`] gates the WHOLE dispatch: on a held permit it runs
+    /// the macro's generated body ([`ToolCallContext::new`] + `aggregate_tool_router().call`),
+    /// holding the permit for the entire `.await` (dropped on return). **Since D42 the body is no
+    /// longer byte-identical to the macro's**: [`Self::enforce_request_quota`] runs first, INSIDE the
+    /// permit. It is inside deliberately — the quota walk is O(request bytes) of CPU, so running it
+    /// above `try_acquire` would let unbounded concurrent oversized requests burn CPU outside the
+    /// D34-F5 bound, inverting the "the permit gates the WHOLE dispatch" invariant. On saturation it
+    /// FAST-FAILS in-band (MF-5 — tools have an in-band channel, unlike resources)
     /// with a retryable [`ErrorCode::RateLimited`] rather than backpressuring. The rate-limit
     /// `Semaphore` sits STRICTLY ABOVE the engine write `Semaphore(1)` (§4.2), so this non-blocking
     /// acquire can never join a wait cycle (deadlock-free vs D14/D31).
@@ -148,6 +164,15 @@ impl ServerHandler for UnblockServer {
     ) -> Result<CallToolResult, ErrorData> {
         match self.rate_limit.try_acquire() {
             Ok(_permit) => {
+                // D42: the NFR-18 quota chokepoint, over the WHOLE `params`, INSIDE the permit and
+                // BEFORE dispatch. Inside the permit because the walk is O(request bytes) of CPU —
+                // running it above `try_acquire` would let unbounded concurrent oversized requests
+                // burn CPU outside the D34-F5 bound, inverting the invariant documented above.
+                // `try_acquire` is non-blocking, so a rejected request holds a permit for
+                // microseconds.
+                if let Err(structured) = self.enforce_request_quota(&request) {
+                    return Ok(err_json(&structured));
+                }
                 let tcc = ToolCallContext::new(self, request, context);
                 Self::aggregate_tool_router().call(tcc).await
             }

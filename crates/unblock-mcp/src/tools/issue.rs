@@ -13,7 +13,11 @@
 //!   NOT `update`.
 
 use chrono::{DateTime, Utc};
-use rmcp::handler::server::wrapper::Parameters;
+// D42 SEAM: this is the CRATE-LOCAL `Parameters` (`crate::tools::args`), NOT rmcp's. It defers
+// deserialization so argument errors reach the FR-11 in-band channel instead of an out-of-band
+// `-32602`. The NAME IS LOAD-BEARING (rmcp-macros matches the ident `Parameters` to pick the
+// published inputSchema) — see `tools/args.rs`. Do NOT "fix" this back to rmcp's wrapper.
+use crate::tools::args::{Parameters, parse_args};
 use rmcp::model::CallToolResult;
 use rmcp::schemars::JsonSchema;
 use rmcp::tool;
@@ -34,6 +38,10 @@ use crate::tools::{engine_err_json, err_json, ok_json};
 // whole `tools/list`. schemars lowers this to a post-mutator that inserts `type: object` AFTER the
 // derived `oneOf` body — the union (and instance validation) is preserved verbatim.
 #[schemars(extend("type" = "object"))]
+// D42: `#[serde(deny_unknown_fields)]` — an unknown/misspelled argument is REJECTED in-band
+// instead of being silently dropped. NOT recursive and inert on a flatten TARGET: every nested
+// container needs its OWN attribute (see `tools/args.rs` + the CHECK-3 container guard).
+#[serde(deny_unknown_fields)]
 pub(crate) enum IssueInput {
     /// Create a new issue (interactive MINTING create, D21).
     ///
@@ -109,6 +117,10 @@ pub(crate) enum IssueInput {
 /// Mirrors the spine §5.2 `Create` fields; mapped to the engine-owned [`NewIssue`] (D21) minus the
 /// wire-only `quick`/`attribution` (which are not `NewIssue` fields).
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
+// D42: `#[serde(deny_unknown_fields)]` — an unknown/misspelled argument is REJECTED in-band
+// instead of being silently dropped. NOT recursive and inert on a flatten TARGET: every nested
+// container needs its OWN attribute (see `tools/args.rs` + the CHECK-3 container guard).
+#[serde(deny_unknown_fields)]
 pub(crate) struct CreateInput {
     /// The issue title (required).
     pub title: String,
@@ -159,7 +171,12 @@ pub(crate) struct CreateInput {
 /// Nullable text columns use `Option<Option<String>>` (`None` leave / `Some(None)` clear /
 /// `Some(Some)` set), mirroring the storage patch semantics (spine §3.1).
 #[derive(Debug, Default, Deserialize, Serialize, JsonSchema)]
-#[allow(clippy::option_option)] // outer=present, inner=clear-vs-set — mirrors IssuePatch.
+#[allow(clippy::option_option)]
+// outer=present, inner=clear-vs-set — mirrors IssuePatch.
+// D42: `#[serde(deny_unknown_fields)]` — an unknown/misspelled argument is REJECTED in-band
+// instead of being silently dropped. NOT recursive and inert on a flatten TARGET: every nested
+// container needs its OWN attribute (see `tools/args.rs` + the CHECK-3 container guard).
+#[serde(deny_unknown_fields)]
 pub(crate) struct PatchInput {
     #[serde(default)]
     title: Option<String>,
@@ -259,10 +276,15 @@ impl UnblockServer {
         name = "issue",
         description = "Create, show, update, close, reopen, delete, or restore issues."
     )]
-    pub(crate) async fn issue(&self, Parameters(input): Parameters<IssueInput>) -> CallToolResult {
-        if let Err(structured) = self.preflight(&input) {
-            return err_json(&structured);
-        }
+    pub(crate) async fn issue(&self, Parameters(raw, _): Parameters<IssueInput>) -> CallToolResult {
+        // D42 PROLOGUE: the ONLY deserialization of tool arguments. The NFR-18 quota already
+        // ran once in `call_tool` over the whole `params`. `IssueInput` carries
+        // `#[serde(deny_unknown_fields)]`, so an unknown/misspelled argument is REJECTED here,
+        // in-band, instead of being silently discarded.
+        let input: IssueInput = match parse_args(raw) {
+            Ok(input) => input,
+            Err(structured) => return err_json(&structured),
+        };
         match input {
             IssueInput::Create(create) => {
                 let CreateInput {

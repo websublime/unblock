@@ -5,15 +5,24 @@
 //! tool functions live on [`crate::server::UnblockServer`] under one `#[tool_router]` (see
 //! `server.rs`). This module owns the cross-tool helpers:
 //!
-//! - [`enforce_quota`] — the NFR-18 untrusted-input preflight, run **inside each tool body after
-//!   `Parameters<T>` deserialization and BEFORE any `Session` call** (rmcp has no stdio quota hook).
+//! - [`args`] — the **D42 argument seam**: a crate-local, deliberately name-shadowing `Parameters<T>`
+//!   that DEFERS deserialization, plus [`args::parse_args`], the single typed-parse chokepoint. Read
+//!   its module doc before touching any tool signature — the name `Parameters` is load-bearing.
+//! - [`enforce_quota`] — the NFR-18 untrusted-input check, run **once in
+//!   [`crate::server::UnblockServer::call_tool`] over the WHOLE `tools/call` `params`** (name +
+//!   arguments + `_meta` + `task`), inside the rate-limit permit and BEFORE dispatch (D42; rmcp has
+//!   no stdio quota hook). It is deliberately NOT re-run inside tool bodies — a second call would be
+//!   provably dead, since `params` strictly contains `arguments`.
 //! - [`ok_json`] / [`err_json`] — map a domain result to an rmcp `CallToolResult` that is always
 //!   valid JSON (success via `structured`, in-band domain error via `structured_error`, FR-11).
 
+pub(crate) mod args;
 pub(crate) mod bulk_markdown;
 pub(crate) mod claim;
 pub(crate) mod comment;
 pub(crate) mod defer;
+#[cfg(test)]
+mod deny_guard;
 pub(crate) mod dep;
 pub(crate) mod diagnostics;
 pub(crate) mod dto;
@@ -70,14 +79,18 @@ pub(crate) fn engine_err_json(err: &EngineError) -> CallToolResult {
     err_json(&engine_error_to_structured(err))
 }
 
-/// The untrusted-input quota preflight (NFR-18), run inside each tool body **before** the engine.
+/// The untrusted-input quota check (NFR-18), run **once per `tools/call`, before dispatch**.
 ///
 /// rmcp provides NO built-in request-size / array-length / string-length / batch cap on the stdio
-/// path, so this is the only enforcement point. It walks the already-deserialized JSON `args` and
-/// rejects, in-band, any input that exceeds a [`Quotas`] limit — so an oversized payload never
-/// reaches a `Session` call (the blast radius stays confined to the workspace).
+/// path, so this is the only enforcement point. Since D42 its argument is the **whole `tools/call`
+/// `params`** — `name` + `arguments` + `_meta` + `task` — serialized losslessly by
+/// [`crate::server::UnblockServer::enforce_request_quota`], NOT a re-serialized typed DTO. Measuring
+/// the typed DTO was the defect: a payload parked under an unknown key never appeared in it, so it
+/// was never measured (and `#[serde(default)]` padding was counted instead of the real bytes).
 ///
-/// Scope: this enforces `max_request_bytes`, `max_array_len`, and `max_string_len`. The
+/// Scope: this enforces `max_request_bytes`, `max_array_len`, `max_string_len` on values, **and
+/// `max_string_len` on object KEYS** (D42 — an unknown key could otherwise carry up to
+/// `max_request_bytes` unmeasured). The
 /// [`Quotas::max_batch`] cap (the bulk record-count limit, D22/T2.3) is enforced by
 /// [`enforce_batch_quota`] at the `create_bulk` action AFTER the markdown parse (before any mint),
 /// since it bounds the *parsed* record count, not a raw input array. `max_concurrent_requests` is an
@@ -130,7 +143,14 @@ fn check_value(value: &serde_json::Value, quotas: &Quotas) -> Result<(), Structu
             Ok(())
         }
         serde_json::Value::Object(map) => {
-            for v in map.values() {
+            // D42: measure the KEY too. The pre-D42 arm iterated `map.values()` only, so an unknown
+            // key could carry up to `max_request_bytes` of attacker text past the per-string cap.
+            // `serde_json::Map` iterates in BTreeMap (sorted) order by default, so the reported
+            // offending key is deterministic — same `preserve_order` caveat as `options.rs`.
+            for (key, v) in map {
+                if key.len() > quotas.max_string_len {
+                    return Err(over_quota("key", key.len(), quotas.max_string_len));
+                }
                 check_value(v, quotas)?;
             }
             Ok(())
@@ -209,9 +229,28 @@ mod tests {
             max_string_len: 4,
             ..Quotas::default()
         };
-        let args = serde_json::json!({"title": "way too long"});
+        // The KEY is deliberately short here. Since D42 `max_string_len` also bounds object keys,
+        // so a fixture whose key is itself over the limit would report `kind:"key"` and stop
+        // testing the value path at all.
+        let args = serde_json::json!({"t": "way too long"});
         let err = enforce_quota(&args, &quotas).expect_err("over string quota");
         assert_eq!(err.context["kind"], "string");
+    }
+
+    /// D42: an object KEY is measured against `max_string_len`. Before this, the `Object` arm
+    /// iterated `map.values()` only, so a key could carry up to `max_request_bytes` of unmeasured
+    /// attacker text (live-reproduced with a 100 000-byte key reaching the tool boundary).
+    #[test]
+    fn enforce_quota_rejects_over_length_object_key() {
+        let quotas = Quotas {
+            max_string_len: 4,
+            ..Quotas::default()
+        };
+        let args = serde_json::json!({"a_very_long_key": "ok"});
+        let err = enforce_quota(&args, &quotas).expect_err("over key quota");
+        assert_eq!(err.context["kind"], "key");
+        assert_eq!(err.context["actual"], 15);
+        assert_eq!(err.context["limit"], 4);
     }
 
     #[test]

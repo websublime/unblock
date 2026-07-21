@@ -23,6 +23,10 @@ use unblock_model::{Dependency, DependencyType, IssueType, ListFilters, Priority
 /// mcp-owned and **never enforced**. It flattens into mutating tool inputs so an agent can
 /// self-report `agent_name`/`harness`/`model`; the engine records it best-effort via the audit event.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+// D42: `#[serde(deny_unknown_fields)]` — an unknown/misspelled argument is REJECTED in-band
+// instead of being silently dropped. NOT recursive and inert on a flatten TARGET: every nested
+// container needs its OWN attribute (see `tools/args.rs` + the CHECK-3 container guard).
+#[serde(deny_unknown_fields)]
 pub(crate) struct Attribution {
     /// Self-reported agent name (capture-only).
     #[serde(default)]
@@ -41,6 +45,10 @@ pub(crate) struct Attribution {
 /// [`Dependency`] additionally carries a `created_at`/`created_by` — supplied by the adapter via
 /// [`DepInput::into_dependency`], not by the wire.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+// D42: `#[serde(deny_unknown_fields)]` — an unknown/misspelled argument is REJECTED in-band
+// instead of being silently dropped. NOT recursive and inert on a flatten TARGET: every nested
+// container needs its OWN attribute (see `tools/args.rs` + the CHECK-3 container guard).
+#[serde(deny_unknown_fields)]
 pub(crate) struct DepInput {
     /// The dependent issue id (source).
     pub issue_id: String,
@@ -73,6 +81,10 @@ impl DepInput {
 /// Every field is `#[serde(default)]` so a bare `{}` filter is valid (an unconstrained list). The
 /// total mapping [`FilterInput::into_list_filters`] is lossless on the supported fields.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+// D42: `#[serde(deny_unknown_fields)]` — an unknown/misspelled argument is REJECTED in-band
+// instead of being silently dropped. NOT recursive and inert on a flatten TARGET: every nested
+// container needs its OWN attribute (see `tools/args.rs` + the CHECK-3 container guard).
+#[serde(deny_unknown_fields)]
 pub(crate) struct FilterInput {
     /// Status OR-set (a match on ANY listed status).
     #[serde(default)]

@@ -3,12 +3,88 @@ source: crates/unblock-mcp/tests/contract_suite.rs
 expression: schema_bundle()
 ---
 {
-  "contract_version": "unblock.mcp.v1.5",
+  "contract_version": "unblock.mcp.v1.6",
   "issue": {
     "input": {
       "$defs": {
-        "CreateInput": {
-          "description": "The `create` action payload (boxed in [`IssueInput::Create`]).\n\nMirrors the spine §5.2 `Create` fields; mapped to the engine-owned [`NewIssue`] (D21) minus the\nwire-only `quick`/`attribution` (which are not `NewIssue` fields).",
+        "DeleteModeInput": {
+          "description": "The delete mode on the wire (spine §5.2 `DeleteModeInput` → [`DeleteMode`]).",
+          "oneOf": [
+            {
+              "const": "tombstone",
+              "description": "Soft-delete (default): tombstone the targets.",
+              "type": "string"
+            },
+            {
+              "const": "cascade",
+              "description": "Tombstone the targets and their children.",
+              "type": "string"
+            },
+            {
+              "const": "hard",
+              "description": "Permanently delete the rows.",
+              "type": "string"
+            },
+            {
+              "const": "dry_run",
+              "description": "Compute the plan only; mutate nothing.",
+              "type": "string"
+            }
+          ]
+        },
+        "DepInput": {
+          "additionalProperties": false,
+          "description": "A dependency edge on the wire (spine §5.2 `DepInput`).\n\nUsed both as a `query`/`dep`-tool edge input and as a `Create.deps` element. The model\n[`Dependency`] additionally carries a `created_at`/`created_by` — supplied by the adapter via\n[`DepInput::into_dependency`], not by the wire.",
+          "properties": {
+            "dep_type": {
+              "$ref": "#/$defs/DependencyType",
+              "description": "The dependency type."
+            },
+            "depends_on_id": {
+              "description": "The blocker issue id (target).",
+              "type": "string"
+            },
+            "issue_id": {
+              "description": "The dependent issue id (source).",
+              "type": "string"
+            },
+            "metadata": {
+              "default": null,
+              "description": "Optional JSON metadata for the edge.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "issue_id",
+            "depends_on_id",
+            "dep_type"
+          ],
+          "type": "object"
+        },
+        "DependencyType": {
+          "type": "string"
+        },
+        "IssueType": {
+          "type": "string"
+        },
+        "Priority": {
+          "description": "Issue priority (spine §1.2): a transparent newtype over `i32`, valid range `0..=4`.\n\nOrdering is numeric, so `CRITICAL < HIGH < MEDIUM < LOW < BACKLOG` — this is the order the\nhybrid ready-sort relies on. `Default` is [`Priority::MEDIUM`]. The wire form is the bare\ninteger (`#[serde(transparent)]`), and `Display` renders `\"P{n}\"`.\n\n# Examples\n\n```\nuse unblock_model::Priority;\nuse std::str::FromStr;\n\nassert_eq!(Priority::default(), Priority::MEDIUM);\nassert_eq!(Priority::CRITICAL.to_string(), \"P0\");\nassert_eq!(Priority::from_str(\"p1\").unwrap(), Priority::HIGH);\nassert!(Priority::from_str(\"P5\").is_err());\nassert!(Priority::CRITICAL < Priority::BACKLOG);\n```",
+          "format": "int32",
+          "type": "integer"
+        },
+        "Status": {
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "The `issue` tool input (spine §5.2 — EXACT shape; 7 actions).",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Create a new issue (interactive MINTING create, D21).\n\nThe payload is boxed (it is the largest variant) — the wire shape is unchanged: a newtype\nvariant over a `#[serde(flatten)]`-equivalent struct keeps `{action:\"create\", title, ...}`.",
           "properties": {
             "acceptance_criteria": {
               "default": null,
@@ -17,6 +93,10 @@ expression: schema_bundle()
                 "string",
                 "null"
               ]
+            },
+            "action": {
+              "const": "create",
+              "type": "string"
             },
             "agent_context": {
               "default": null,
@@ -162,99 +242,13 @@ expression: schema_bundle()
             }
           },
           "required": [
+            "action",
             "title"
           ],
           "type": "object"
         },
-        "DeleteModeInput": {
-          "description": "The delete mode on the wire (spine §5.2 `DeleteModeInput` → [`DeleteMode`]).",
-          "oneOf": [
-            {
-              "const": "tombstone",
-              "description": "Soft-delete (default): tombstone the targets.",
-              "type": "string"
-            },
-            {
-              "const": "cascade",
-              "description": "Tombstone the targets and their children.",
-              "type": "string"
-            },
-            {
-              "const": "hard",
-              "description": "Permanently delete the rows.",
-              "type": "string"
-            },
-            {
-              "const": "dry_run",
-              "description": "Compute the plan only; mutate nothing.",
-              "type": "string"
-            }
-          ]
-        },
-        "DepInput": {
-          "description": "A dependency edge on the wire (spine §5.2 `DepInput`).\n\nUsed both as a `query`/`dep`-tool edge input and as a `Create.deps` element. The model\n[`Dependency`] additionally carries a `created_at`/`created_by` — supplied by the adapter via\n[`DepInput::into_dependency`], not by the wire.",
-          "properties": {
-            "dep_type": {
-              "$ref": "#/$defs/DependencyType",
-              "description": "The dependency type."
-            },
-            "depends_on_id": {
-              "description": "The blocker issue id (target).",
-              "type": "string"
-            },
-            "issue_id": {
-              "description": "The dependent issue id (source).",
-              "type": "string"
-            },
-            "metadata": {
-              "default": null,
-              "description": "Optional JSON metadata for the edge.",
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          "required": [
-            "issue_id",
-            "depends_on_id",
-            "dep_type"
-          ],
-          "type": "object"
-        },
-        "DependencyType": {
-          "type": "string"
-        },
-        "IssueType": {
-          "type": "string"
-        },
-        "Priority": {
-          "description": "Issue priority (spine §1.2): a transparent newtype over `i32`, valid range `0..=4`.\n\nOrdering is numeric, so `CRITICAL < HIGH < MEDIUM < LOW < BACKLOG` — this is the order the\nhybrid ready-sort relies on. `Default` is [`Priority::MEDIUM`]. The wire form is the bare\ninteger (`#[serde(transparent)]`), and `Display` renders `\"P{n}\"`.\n\n# Examples\n\n```\nuse unblock_model::Priority;\nuse std::str::FromStr;\n\nassert_eq!(Priority::default(), Priority::MEDIUM);\nassert_eq!(Priority::CRITICAL.to_string(), \"P0\");\nassert_eq!(Priority::from_str(\"p1\").unwrap(), Priority::HIGH);\nassert!(Priority::from_str(\"P5\").is_err());\nassert!(Priority::CRITICAL < Priority::BACKLOG);\n```",
-          "format": "int32",
-          "type": "integer"
-        },
-        "Status": {
-          "type": "string"
-        }
-      },
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "The `issue` tool input (spine §5.2 — EXACT shape; 7 actions).",
-      "oneOf": [
         {
-          "$ref": "#/$defs/CreateInput",
-          "description": "Create a new issue (interactive MINTING create, D21).\n\nThe payload is boxed (it is the largest variant) — the wire shape is unchanged: a newtype\nvariant over a `#[serde(flatten)]`-equivalent struct keeps `{action:\"create\", title, ...}`.",
-          "properties": {
-            "action": {
-              "const": "create",
-              "type": "string"
-            }
-          },
-          "required": [
-            "action"
-          ],
-          "type": "object"
-        },
-        {
+          "additionalProperties": false,
           "description": "Bulk-create issues from an inline markdown document (D22 — `{action:\"create_bulk\", markdown}`).\n\nThe `markdown` is INLINE content (NOT a path). The adapter parses it (all-or-nothing\npre-mutation), caps the record count at `Quotas::max_batch`, maps each `ParsedIssue` →\n`NewIssue` (carrying the symbolic dep/parent refs verbatim), and calls the ATOMIC\n`Session::create_bulk` — NOT a loop over `create_issue`. The engine mints all ids + resolves the\n2-phase intra-file dep/parent IN MEMORY + inserts the whole batch in ONE tx (rollback-on-any-\nfailure → ZERO writes). Output reuses `IssueOutput::Issues`.",
           "properties": {
             "action": {
@@ -273,6 +267,7 @@ expression: schema_bundle()
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Show a single issue by id.",
           "properties": {
             "action": {
@@ -291,6 +286,7 @@ expression: schema_bundle()
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Update one or more issues with a patch.",
           "properties": {
             "acceptance_criteria": {
@@ -479,6 +475,7 @@ expression: schema_bundle()
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Close an issue, optionally surfacing the newly-unblocked set.",
           "properties": {
             "action": {
@@ -533,6 +530,7 @@ expression: schema_bundle()
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Reopen an issue (an `update` patch to a non-terminal status).",
           "properties": {
             "action": {
@@ -575,6 +573,7 @@ expression: schema_bundle()
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Delete one or more issues (tombstone/cascade/hard/dry-run).",
           "properties": {
             "action": {
@@ -624,6 +623,7 @@ expression: schema_bundle()
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Restore (un-tombstone) a single soft-deleted issue (D20).",
           "properties": {
             "action": {
@@ -1197,6 +1197,7 @@ expression: schema_bundle()
   "claim": {
     "input": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
       "description": "The `claim` tool input (spine §5.2 — EXACT shape).",
       "properties": {
         "agent_name": {
@@ -1641,6 +1642,7 @@ expression: schema_bundle()
       "description": "The `defer` tool input (spine §5.2 — EXACT shape).",
       "oneOf": [
         {
+          "additionalProperties": false,
           "description": "Defer the issue until a future timestamp.",
           "properties": {
             "action": {
@@ -1689,6 +1691,7 @@ expression: schema_bundle()
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Undefer the issue (clear `defer_until`).",
           "properties": {
             "action": {
@@ -2179,6 +2182,7 @@ expression: schema_bundle()
       "description": "The `query` tool input (spine §5.2 — EXACT shape).",
       "oneOf": [
         {
+          "additionalProperties": false,
           "description": "List issues matching the filters.",
           "properties": {
             "assignee": {
@@ -2294,6 +2298,7 @@ expression: schema_bundle()
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "The ready set (default-complete unless a limit is set).",
           "properties": {
             "assignee": {
@@ -2409,6 +2414,7 @@ expression: schema_bundle()
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "The blocked set.",
           "properties": {
             "assignee": {
@@ -2524,6 +2530,7 @@ expression: schema_bundle()
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Full-text search (default cap 50, applied by the engine).",
           "properties": {
             "assignee": {
@@ -2644,6 +2651,7 @@ expression: schema_bundle()
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Count issues, optionally grouped.",
           "properties": {
             "assignee": {
@@ -2771,6 +2779,7 @@ expression: schema_bundle()
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Stale issues (not updated since `older_than`).",
           "properties": {
             "assignee": {
@@ -3367,6 +3376,7 @@ expression: schema_bundle()
       "description": "The `dep` tool input (spine §5.2 — EXACT shape; was `DepInput2`).",
       "oneOf": [
         {
+          "additionalProperties": false,
           "description": "Add a dependency edge (cycle-rejecting).",
           "properties": {
             "action": {
@@ -3427,6 +3437,7 @@ expression: schema_bundle()
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Remove a dependency edge.",
           "properties": {
             "action": {
@@ -3479,6 +3490,7 @@ expression: schema_bundle()
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "List the direct edges declared by an issue.",
           "properties": {
             "action": {
@@ -3497,6 +3509,7 @@ expression: schema_bundle()
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "The dependency subtree rooted at an issue.",
           "properties": {
             "action": {
@@ -3515,6 +3528,7 @@ expression: schema_bundle()
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Detect dependency cycles.",
           "properties": {
             "action": {
@@ -3533,6 +3547,7 @@ expression: schema_bundle()
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "The dependency graph for a root set (empty roots = the whole graph).",
           "properties": {
             "action": {
@@ -3751,6 +3766,7 @@ expression: schema_bundle()
       "description": "The `sync` tool input (spine §5.2 — EXACT shape).",
       "oneOf": [
         {
+          "additionalProperties": false,
           "description": "Export the store to JSONL (default path `.unblock/issues.jsonl`).",
           "properties": {
             "action": {
@@ -3772,6 +3788,7 @@ expression: schema_bundle()
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Import JSONL.",
           "properties": {
             "action": {
@@ -3795,6 +3812,7 @@ expression: schema_bundle()
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "One-shot, idempotent `bd` import (D16).",
           "properties": {
             "action": {
@@ -3922,6 +3940,7 @@ expression: schema_bundle()
       "description": "The `diagnostics` tool input (spine §5.2 — EXACT shape; mirrors [`DiagnosticKind`]).",
       "oneOf": [
         {
+          "additionalProperties": false,
           "description": "Aggregate statistics.",
           "properties": {
             "kind": {
@@ -3935,6 +3954,7 @@ expression: schema_bundle()
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "General workspace info.",
           "properties": {
             "kind": {
@@ -3948,6 +3968,7 @@ expression: schema_bundle()
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Where the workspace lives.",
           "properties": {
             "kind": {
@@ -3961,6 +3982,7 @@ expression: schema_bundle()
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Version information (embeds the contract version).",
           "properties": {
             "kind": {
@@ -3974,6 +3996,7 @@ expression: schema_bundle()
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Lint findings.",
           "properties": {
             "kind": {
@@ -3987,6 +4010,7 @@ expression: schema_bundle()
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "The changelog of closed issues (the `since` window is T2.7; dropped here).",
           "properties": {
             "kind": {
@@ -4009,6 +4033,7 @@ expression: schema_bundle()
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Orphan candidates (FR-15).",
           "properties": {
             "kind": {
@@ -4115,6 +4140,7 @@ expression: schema_bundle()
       "description": "The `comment` tool input (spine §5.2 — EXACT shape).",
       "oneOf": [
         {
+          "additionalProperties": false,
           "description": "Add a comment to an issue.",
           "properties": {
             "action": {
@@ -4162,6 +4188,7 @@ expression: schema_bundle()
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "List the comments on an issue.",
           "properties": {
             "action": {
@@ -4180,6 +4207,7 @@ expression: schema_bundle()
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Update a comment's body (provenance-preserving: sets `updated_at`, audits the edit).",
           "properties": {
             "action": {
@@ -4228,6 +4256,7 @@ expression: schema_bundle()
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Delete a comment — a SOFT-REDACT: the row is kept, the body masked, `redacted_at` set. The\noriginal body is retained in the audit trail — a mask, not erasure.",
           "properties": {
             "action": {

@@ -609,3 +609,127 @@ async fn prompt_close_with_suggestions_golden() {
     let _ = client.cancel().await;
     let _ = server.cancel().await;
 }
+
+// --------------------------------------------------------------------------------------------------
+// D42 — the input-surface guards.
+// --------------------------------------------------------------------------------------------------
+
+/// The 8 tools' `input` schemas, sourced from the already-`pub` `schema_bundle()`.
+fn tool_input_schemas() -> Vec<(&'static str, serde_json::Value)> {
+    let b = schema_bundle();
+    vec![
+        ("issue", b.issue.input),
+        ("claim", b.claim.input),
+        ("defer", b.defer.input),
+        ("query", b.query.input),
+        ("dep", b.dep.input),
+        ("sync", b.sync.input),
+        ("diagnostics", b.diagnostics.input),
+        ("comment", b.comment.input),
+    ]
+}
+
+/// Walk every OBJECT subschema, asserting `additionalProperties: false`.
+///
+/// A composition/dispatch node — one with no `properties` of its own but an `oneOf`/`anyOf`/`allOf` —
+/// is exempt: the closure lives on its arms, which are walked. Everything else that declares
+/// `properties` must close itself.
+fn assert_closed(node: &serde_json::Value, path: &str, tool: &str, seen: &mut usize) {
+    if let Some(obj) = node.as_object() {
+        let has_props = obj.contains_key("properties");
+        let is_composition = obj.contains_key("oneOf")
+            || obj.contains_key("anyOf")
+            || obj.contains_key("allOf")
+            || obj.contains_key("$ref");
+        if has_props {
+            *seen += 1;
+            assert_eq!(
+                obj.get("additionalProperties"),
+                Some(&json!(false)),
+                "tool `{tool}`: the object subschema at `{path}` does NOT carry \
+                 `additionalProperties: false`. Every input container needs its OWN \
+                 `#[serde(deny_unknown_fields)]` — the attribute is NOT recursive, so a nested or \
+                 newly-added container silently leaves the unknown-field drop (facet (b)) live while \
+                 every rejection test stays green. There is deliberately NO allow-list here; an \
+                 exception would have to be added explicitly, with a written reason."
+            );
+        } else if !is_composition && obj.contains_key("type") {
+            // A leaf (string/integer/…): nothing to close.
+        }
+        for key in ["oneOf", "anyOf", "allOf"] {
+            if let Some(arms) = obj.get(key).and_then(serde_json::Value::as_array) {
+                for (i, arm) in arms.iter().enumerate() {
+                    assert_closed(arm, &format!("{path}.{key}[{i}]"), tool, seen);
+                }
+            }
+        }
+        for key in ["$defs", "properties"] {
+            if let Some(children) = obj.get(key).and_then(serde_json::Value::as_object) {
+                for (name, child) in children {
+                    assert_closed(child, &format!("{path}.{key}.{name}"), tool, seen);
+                }
+            }
+        }
+        if let Some(items) = obj.get("items") {
+            assert_closed(items, &format!("{path}.items"), tool, seen);
+        }
+    }
+}
+
+/// **The mechanical recursion guard (D42).** `#[serde(deny_unknown_fields)]` is not recursive and is
+/// inert on a flatten target, so a missed or future-added nested container leaves facet (b) live with
+/// a fully GREEN rejection matrix — the matrix only ever asserts rejection on paths it names. This is
+/// the only guard that survives a container added by a future contributor; prose sweeps do not.
+#[test]
+fn every_input_object_subschema_is_closed_to_unknown_properties() {
+    let mut total = 0usize;
+    for (tool, schema) in tool_input_schemas() {
+        let mut seen = 0usize;
+        assert_closed(&schema, "$", tool, &mut seen);
+        assert!(
+            seen > 0,
+            "tool `{tool}`: walked ZERO object subschemas — the walk is vacuous"
+        );
+        total += seen;
+    }
+    assert!(
+        total >= 8,
+        "walked only {total} object subschemas across 8 tools — the walk is vacuous"
+    );
+}
+
+/// **The anti-degradation pin (D42/FR-12).** `CONTRACT_HASH` digests the two discovery documents; it
+/// says nothing about what `tools/list` actually serves. `live_list_tools_equals_the_builder_eight`
+/// pins the `(name, description)` pairs and `live_tools_input_schema_root_is_object` pins the roots —
+/// this closes the residual: the live `inputSchema` BODY must equal `schema_bundle()`'s, byte for
+/// byte, for all 8 tools. It also closes the "rmcp's `schema_for_type` and our `schema_for!` agree by
+/// coincidence, with nothing pinning it" hazard, and makes `schema_bundle()` authoritative for what
+/// the recursion guard above is actually checking.
+///
+/// Do NOT restate this as "the hash covers `tools/list`" — it does not, and it does not need to.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_tools_input_schema_body_equals_the_bundle() {
+    let session = session().await;
+    let (client, server, _cancel) = connect(session).await;
+
+    let tools = client.list_all_tools().await.expect("list_tools");
+    let bundle = tool_input_schemas();
+    assert_eq!(tools.len(), bundle.len(), "exactly 8 tools");
+    for (name, expected) in bundle {
+        let live = tools
+            .iter()
+            .find(|t| t.name == name)
+            .unwrap_or_else(|| panic!("live tools/list is missing `{name}`"));
+        let live_schema = serde_json::Value::Object((*live.input_schema).clone());
+        assert_eq!(
+            live_schema, expected,
+            "tool `{name}`: the LIVE inputSchema body diverged from `schema_bundle()`. A degraded \
+             extractor (e.g. one whose type is not named `Parameters`, which collapses the schema to \
+             `schema_for_empty_input()`) shows up HERE and nowhere else — the two hashed discovery \
+             documents would stay byte-identical."
+        );
+    }
+
+    let _ = client.cancel().await;
+    let _ = server.cancel().await;
+}
