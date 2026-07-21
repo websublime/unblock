@@ -56,8 +56,22 @@ pub(crate) enum IssueInput {
     /// `Session::create_bulk` — NOT a loop over `create_issue`. The engine mints all ids + resolves the
     /// 2-phase intra-file dep/parent IN MEMORY + inserts the whole batch in ONE tx (rollback-on-any-
     /// failure → ZERO writes). Output reuses `IssueOutput::Issues`.
+    ///
+    /// The document is REJECTED as a whole (`isError:true`, `VALIDATION_FAILED`, zero writes) when
+    /// it contains: an unrecognized or empty `### ` section header; a `### ` section before the
+    /// first `## `; or an invalid `### Priority` value. Each of these was previously accepted and
+    /// its content silently discarded.
     CreateBulk {
         /// The inline bulk-markdown document content.
+        ///
+        /// Each issue starts with an H2 line `## Issue Title`. Per-issue fields are H3 sections,
+        /// case-insensitive, from this CLOSED set: `ID`, `Parent`, `Priority`, `Type`,
+        /// `Description`, `Design`, `Acceptance Criteria` (alias `Acceptance`), `Assignee`,
+        /// `Labels`, `Dependencies` (alias `Deps`), `Agent Context` (aliases `agent-context`,
+        /// `agent_context`). Any other `### ` header rejects the whole document.
+        ///
+        /// `### ` always starts a NEW section — use `#### ` for a sub-heading inside a section body,
+        /// otherwise the enclosing section is terminated and the rest of it is lost.
         markdown: String,
     },
     /// Show a single issue by id.
@@ -429,7 +443,20 @@ impl UnblockServer {
         }
 
         // (3) Map each ParsedIssue → NewIssue (carrying the symbolic refs verbatim for the engine).
-        let records: Vec<NewIssue> = parsed.into_iter().map(parsed_to_new_issue).collect();
+        // D42: the map is FALLIBLE — a present-but-invalid `### Priority` / `### Type` rejects the
+        // whole document here, still strictly BEFORE `Session::create_bulk`, so zero writes. The
+        // step order (parse -> batch quota -> map -> create_bulk) is PRESERVED deliberately: hoisting
+        // this above the quota would make an over-cap document with an invalid priority report
+        // `kind:"section_value"` instead of `kind:"batch"`.
+        let records: Vec<NewIssue> = match parsed
+            .into_iter()
+            .enumerate()
+            .map(|(index, record)| parsed_to_new_issue(record, index))
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(records) => records,
+            Err(structured) => return err_json(&structured),
+        };
 
         // (4) The ATOMIC bulk create (engine mints + resolves + one storage tx). Output = the CD-2
         // object-wrapped Vec (`{"issues":[…]}`).
@@ -440,22 +467,81 @@ impl UnblockServer {
     }
 }
 
+/// Parse a PRESENT `### Section` value, or reject it — `None` stays `None`.
+///
+/// `.transpose()` is what keeps an **absent** section legal while a **present-but-invalid** value
+/// errors. Both `priority` and `issue_type` go through this ONE helper so the two spellings cannot
+/// drift: today `IssueType::from_str` is infallible by construction (an unknown type is preserved as
+/// `IssueType::Custom`), so its `Err` arm is statically unreachable — which is exactly the point. If
+/// it ever becomes fallible, the value is REJECTED rather than silently defaulted, with no code
+/// change and no compile error to notice.
+///
+/// # Errors
+///
+/// `ValidationFailed` with `kind = "section_value"` plus the record `index` + `title` — a 50-record
+/// document whose error says only "invalid priority" is unactionable, which is the same usability
+/// failure as the silent drop it replaces.
+fn parse_section_value<T: std::str::FromStr>(
+    raw: Option<&str>,
+    index: usize,
+    title: &str,
+    section: &str,
+    hint: &str,
+) -> Result<Option<T>, unblock_error::StructuredError> {
+    raw.map(str::parse::<T>).transpose().map_err(|_| {
+        let value = raw.unwrap_or_default();
+        unblock_error::StructuredError::from_code(
+            unblock_error::ErrorCode::ValidationFailed,
+            format!("record {index} ({title}): `### {section}` value {value:?} rejected"),
+        )
+        .with_hint(hint)
+        .with_context("field", serde_json::json!("markdown"))
+        .with_context("kind", serde_json::json!("section_value"))
+        .with_context("index", serde_json::json!(index))
+        .with_context("title", serde_json::json!(title))
+        .with_context("section", serde_json::json!(section))
+        .with_context("value", serde_json::json!(value))
+    })
+}
+
 /// Map a parsed bulk-markdown record to the engine-owned [`NewIssue`] (D22). The dependency / parent
 /// references are carried VERBATIM (as `dep_refs` / symbolic `parent` / `stand_in_id`) — the ENGINE
-/// resolves them at `create_bulk`. The `priority` / `issue_type` strings are parsed leniently (an
-/// unparseable value falls back to the model default, surfaced by validation downstream if needed).
-fn parsed_to_new_issue(parsed: crate::tools::bulk_markdown::ParsedIssue) -> NewIssue {
-    NewIssue {
-        title: parsed.title,
+/// resolves them at `create_bulk`.
+///
+/// **D42:** the `priority` / `issue_type` strings are NO LONGER parsed leniently. The pre-D42
+/// `.and_then(|p| p.parse().ok())` collapsed an invalid `### Priority` to `None`, which
+/// `write.rs`'s `unwrap_or_default()` then turned into `MEDIUM` (P2) — the user asked for a
+/// priority, got P2, and got no error.
+///
+/// # Errors
+///
+/// `ValidationFailed` when a PRESENT `### Priority` / `### Type` value does not parse. Runs strictly
+/// before `Session::create_bulk`, so zero writes.
+fn parsed_to_new_issue(
+    parsed: crate::tools::bulk_markdown::ParsedIssue,
+    index: usize,
+) -> Result<NewIssue, unblock_error::StructuredError> {
+    // Bind the title BEFORE the struct literal: the error payload borrows it and it is moved in.
+    let title = parsed.title;
+    let issue_type = parse_section_value::<IssueType>(
+        parsed.issue_type.as_deref(),
+        index,
+        &title,
+        "Type",
+        "expected a known or custom issue type",
+    )?;
+    let priority = parse_section_value::<Priority>(
+        parsed.priority.as_deref(),
+        index,
+        &title,
+        "Priority",
+        "expected P0..P4 or 0..4",
+    )?;
+    Ok(NewIssue {
+        title,
         description: parsed.description,
-        issue_type: parsed
-            .issue_type
-            .as_deref()
-            .and_then(|t| t.parse::<IssueType>().ok()),
-        priority: parsed
-            .priority
-            .as_deref()
-            .and_then(|p| p.parse::<Priority>().ok()),
+        issue_type,
+        priority,
         labels: parsed.labels,
         parent: parsed.parent,
         slug: None,
@@ -466,7 +552,7 @@ fn parsed_to_new_issue(parsed: crate::tools::bulk_markdown::ParsedIssue) -> NewI
         stand_in_id: parsed.stand_in_id,
         dep_refs: parsed.dependencies,
         ..NewIssue::default()
-    }
+    })
 }
 
 /// Build the not-found structured error for a missing `show` target.

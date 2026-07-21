@@ -57,7 +57,7 @@ pub const CONTRACT_VERSION: &str = "unblock.mcp.v1.6";
 /// representation — any future dep enabling `serde_json/preserve_order` (feature unification, dev-deps
 /// included) reorders the schemars-generated maps and moves `CONTRACT_HASH` with NO contract change;
 /// if the gate fires with "nothing changed", check `Cargo.lock` feature unification first.
-pub const CONTRACT_HASH: &str = "b3303d43413a19efc1637b6d8bdef91dea725932eb3cb79c226c8b46c88fe351";
+pub const CONTRACT_HASH: &str = "295ab0298f65073c9e27676ffd18691f9b80bbe4f86569b1397601bf57fa1ccf";
 
 /// Untrusted-input limits enforced **before** any `Session` call (NFR-18).
 ///
