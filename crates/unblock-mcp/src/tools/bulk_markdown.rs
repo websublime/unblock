@@ -19,6 +19,18 @@
 //!   the whole document** (`ValidationFailed`, zero writes) — as does an EMPTY `### ` header, with a
 //!   distinct message. Note `### ` always starts a NEW section: use `#### ` for a sub-heading inside
 //!   a section body (`"#### Sub".strip_prefix("### ")` is `None`, so H4 stays plain content).
+//! - **CODE BLOCKS ARE OPAQUE.** `## ` / `### ` lines inside a FENCED code block are CONTENT, never
+//!   headers ([`fence_delimiter`]). Without this the D42 rejections above would be a false positive
+//!   on any document embedding a markdown code sample — an author controls their own headings but
+//!   NOT the bytes of a code example — and, worse, a *known* section name inside a fence would tear
+//!   the fence in half and relocate the sample's bytes into another field with `isError:false`.
+//!   **INDENTED code blocks need no tracking**: `strip_prefix("### ")` already fails on an indented
+//!   line, so their content was never mistaken for a header (pinned by
+//!   `an_indented_code_block_h3_is_already_content`).
+//! - An **UNTERMINATED fence REJECTS** (`kind = "unterminated_code_fence"`, naming the OPENING
+//!   line). This is a DELIBERATE deviation from `CommonMark`, which lets an unclosed fence run to the
+//!   end of the document: that reading would silently swallow every later `## `/`### ` into one
+//!   section — the exact silent-drop class D42 closes.
 //! - A `### ` section appearing **before the first `## `** REJECTS the document. Previously it was
 //!   consumed and discarded along with its body.
 //! - The **implicit-description quirk**: lines after the H2 before any H3 are description, but **only
@@ -168,12 +180,96 @@ fn unknown_section(header: &str, line_no: usize) -> StructuredError {
     )
     .with_hint(format!(
         "accepted sections are: {ACCEPTED_SECTIONS} (case-insensitive). \
-         `### ` always starts a NEW section; use `#### ` for a sub-heading inside a section body."
+         `### ` always starts a NEW section; use `#### ` for a sub-heading inside a section body, \
+         or wrap a code sample in a ``` fence — headers inside a fence are content."
     ))
     .with_context("field", serde_json::json!("markdown"))
     .with_context("kind", serde_json::json!("unknown_section"))
     .with_context("section", serde_json::json!(header))
     .with_context("line", serde_json::json!(line_no))
+}
+
+/// An OPEN fenced code block, carried as parser state through the single pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OpenFence {
+    /// The delimiter character — a backtick or a tilde. A tilde fence is NOT closed by backticks.
+    marker: char,
+    /// The delimiter run length of the OPENING fence. A closing run must be at least this long, so
+    /// a shorter run appearing inside the block (the usual way a sample nests a fence) is content.
+    run_len: usize,
+    /// The 1-based line the fence opened on — the actionable line for `unterminated_code_fence`.
+    line_no: usize,
+}
+
+/// Classify a line as a code-fence delimiter: `(marker, run length, info string)`.
+///
+/// Follows `CommonMark`'s fenced-code-block opener rules to the extent that they decide whether a line
+/// is a DELIMITER at all: up to 3 leading spaces of indentation, then a run of **at least 3**
+/// backticks or tildes, then an optional info string. Returns `None` for anything else.
+fn fence_delimiter(line: &str) -> Option<(char, usize, &str)> {
+    let rest = line.trim_start_matches(' ');
+    if line.len() - rest.len() > 3 {
+        // 4+ spaces makes it an INDENTED code block line, not a fence delimiter.
+        return None;
+    }
+    let marker = match rest.chars().next()? {
+        '`' => '`',
+        '~' => '~',
+        _ => return None,
+    };
+    let run_len = rest.chars().take_while(|c| *c == marker).count();
+    if run_len < 3 {
+        return None;
+    }
+    Some((marker, run_len, rest[run_len..].trim()))
+}
+
+/// Whether `line` OPENS a fenced code block, and with what delimiter.
+///
+/// `CommonMark` forbids a backtick in the info string of a backtick fence (it would be ambiguous with
+/// inline code), so such a line is ordinary content — pinned by
+/// `a_backtick_in_a_backtick_info_string_does_not_open_a_fence`.
+fn fence_opener(line: &str) -> Option<(char, usize)> {
+    let (marker, run_len, info) = fence_delimiter(line)?;
+    if marker == '`' && info.contains('`') {
+        return None;
+    }
+    Some((marker, run_len))
+}
+
+/// Whether `line` CLOSES `open`: the same marker, a run at least as long, and NO info string.
+fn closes_fence(line: &str, open: OpenFence) -> bool {
+    matches!(
+        fence_delimiter(line),
+        Some((marker, run_len, info))
+            if marker == open.marker && run_len >= open.run_len && info.is_empty()
+    )
+}
+
+/// A fenced code block opened and never closed.
+///
+/// `CommonMark` would let it run to EOF; unblock REJECTS instead, because that reading silently
+/// swallows every later `## `/`### ` into one section — the silent-drop class D42 closes. The
+/// reported line is the OPENING one: EOF is where the problem is detected, not where it is fixed.
+fn unterminated_code_fence(open: OpenFence) -> StructuredError {
+    let delimiter: String = std::iter::repeat_n(open.marker, open.run_len).collect();
+    StructuredError::from_code(
+        ErrorCode::ValidationFailed,
+        format!(
+            "line {}: unterminated `{delimiter}` code fence",
+            open.line_no
+        ),
+    )
+    .with_hint(format!(
+        "close the fence with a line of at least {} `{}` characters and nothing else. \
+         Inside a fence, ``` `## ` ``` and ``` `### ` ``` are content, not headers — an unclosed \
+         fence would silently swallow every later header into one section.",
+        open.run_len, open.marker
+    ))
+    .with_context("field", serde_json::json!("markdown"))
+    .with_context("kind", serde_json::json!("unterminated_code_fence"))
+    .with_context("fence", serde_json::json!(delimiter))
+    .with_context("line", serde_json::json!(open.line_no))
 }
 
 /// A `### Section` appearing before the first `## Issue Title`.
@@ -218,9 +314,44 @@ pub(crate) fn parse_bulk_markdown(content: &str) -> Result<Vec<ParsedIssue>, Str
     let mut current_section = Section::BeforeH3;
     let mut section_lines: Vec<String> = Vec::new();
     let mut captured_implicit_desc = false;
+    let mut open_fence: Option<OpenFence> = None;
 
     for (index, line) in content.lines().enumerate() {
         let line_no = index + 1;
+
+        // Fenced code blocks are OPAQUE: while one is open, NOTHING is a header. This runs before
+        // the H2/H3 checks precisely so `### ` inside a code sample stays content on both arms —
+        // neither rejected as an unknown section nor (worse) silently honoured as a known one.
+        if let Some(fence) = open_fence {
+            if closes_fence(line, fence) {
+                open_fence = None;
+            }
+            // The delimiter lines themselves are part of the body, verbatim.
+            collect_content_line(
+                line,
+                current_issue.is_some(),
+                current_section,
+                &mut section_lines,
+                &mut captured_implicit_desc,
+            );
+            continue;
+        }
+        if let Some((marker, run_len)) = fence_opener(line) {
+            open_fence = Some(OpenFence {
+                marker,
+                run_len,
+                line_no,
+            });
+            collect_content_line(
+                line,
+                current_issue.is_some(),
+                current_section,
+                &mut section_lines,
+                &mut captured_implicit_desc,
+            );
+            continue;
+        }
+
         // Check for H2 (new issue).
         if let Some(stripped) = line.strip_prefix("## ") {
             // Save the previous issue.
@@ -261,16 +392,19 @@ pub(crate) fn parse_bulk_markdown(content: &str) -> Result<Vec<ParsedIssue>, Str
         }
 
         // Collect content for the current section.
-        if current_issue.is_some() {
-            if current_section == Section::BeforeH3 {
-                if !captured_implicit_desc && !line.trim().is_empty() {
-                    section_lines.push(line.to_string());
-                    captured_implicit_desc = true;
-                }
-            } else {
-                section_lines.push(line.to_string());
-            }
-        }
+        collect_content_line(
+            line,
+            current_issue.is_some(),
+            current_section,
+            &mut section_lines,
+            &mut captured_implicit_desc,
+        );
+    }
+
+    // A fence that never closed. Checked BEFORE the "no issues found" arm so the actionable cause
+    // (the unclosed fence) wins over its symptom (everything after it became one section's body).
+    if let Some(fence) = open_fence {
+        return Err(unterminated_code_fence(fence));
     }
 
     // The last issue.
@@ -290,6 +424,31 @@ pub(crate) fn parse_bulk_markdown(content: &str) -> Result<Vec<ParsedIssue>, Str
     }
 
     Ok(issues)
+}
+
+/// Append a non-header line to the current section's buffer.
+///
+/// Extracted from the parse loop because the fence arms need the identical behaviour: a line inside
+/// a code block is collected exactly as any other content line, INCLUDING under the
+/// implicit-description quirk (`BeforeH3` keeps only the first non-empty line).
+fn collect_content_line(
+    line: &str,
+    in_issue: bool,
+    section: Section,
+    section_lines: &mut Vec<String>,
+    captured_implicit_desc: &mut bool,
+) {
+    if !in_issue {
+        return;
+    }
+    if section == Section::BeforeH3 {
+        if !*captured_implicit_desc && !line.trim().is_empty() {
+            section_lines.push(line.to_string());
+            *captured_implicit_desc = true;
+        }
+    } else {
+        section_lines.push(line.to_string());
+    }
 }
 
 /// Apply the collected section content to an issue (faithful to `apply_section_to_issue`).
@@ -762,6 +921,149 @@ mod tests {
         let err = parse_bulk_markdown("just some prose\n").expect_err("must reject");
         assert_eq!(err.code, unblock_error::ErrorCode::ValidationFailed);
         assert_eq!(err.context["kind"], "no_issues");
+    }
+
+    // --- MF-1: fenced code blocks -----------------------------------------------------------
+
+    /// **MF-1 arm (a) — the FALSE POSITIVE.** A section body containing a fenced code block whose
+    /// content happens to include a `### ` line was hard-REJECTED by the first D42 cut, with zero
+    /// writes, and the emitted hint ("use `#### `") was unactionable: the author does not control
+    /// the bytes of a code example. On `main` this document was ACCEPTED. It must be accepted
+    /// again, with the fence content INTACT.
+    #[test]
+    fn a_fenced_unknown_h3_is_content_not_a_section() {
+        let content = "## T\n### Design\nexample:\n```\n### Bogus Section\nbody\n```\ntail\n";
+        let issues = parse_bulk_markdown(content)
+            .expect("an H3 inside a fence is CONTENT — rejecting it is a false positive");
+        assert_eq!(issues.len(), 1);
+        let design = issues[0].design.as_deref().expect("design");
+        assert!(
+            design.contains("### Bogus Section"),
+            "the fenced H3 must survive verbatim: {design:?}"
+        );
+        assert!(design.contains("body"), "{design:?}");
+        assert!(design.ends_with("tail"), "{design:?}");
+    }
+
+    /// **MF-1 arm (b) — the SILENT CORRUPTION.** A *known* section name inside a fence used to tear
+    /// the fence in half and relocate the code sample's bytes into another field, with
+    /// `isError:false`. Executed against the pre-fix parser this produced `design` ending
+    /// `"example:\n```"` and `description == "INSIDE-FENCE\n```"`.
+    #[test]
+    fn a_fenced_known_h3_does_not_tear_the_fence_apart() {
+        let content = "## T\n### Design\nexample:\n```\n### Description\nINSIDE-FENCE\n```\n";
+        let issues = parse_bulk_markdown(content).expect("parse");
+        assert_eq!(issues.len(), 1);
+        assert_eq!(
+            issues[0].description, None,
+            "the fenced `### Description` must NOT relocate content into `description`"
+        );
+        let design = issues[0].design.as_deref().expect("design");
+        assert_eq!(design, "example:\n```\n### Description\nINSIDE-FENCE\n```");
+    }
+
+    /// An H2 inside a fence is content too — otherwise a code sample containing `## ` would silently
+    /// split one record into two.
+    #[test]
+    fn a_fenced_h2_does_not_start_a_new_issue() {
+        let issues =
+            parse_bulk_markdown("## T\n### Design\n```\n## Not A Title\n```\n").expect("parse");
+        assert_eq!(issues.len(), 1, "a fenced `## ` must not split the record");
+        assert_eq!(issues[0].title, "T");
+    }
+
+    /// Tilde fences, longer runs and info strings are all real `CommonMark` spellings.
+    #[test]
+    fn tilde_and_long_and_info_string_fences_are_all_tracked() {
+        for open in [
+            "~~~",
+            "~~~~~",
+            "```rust",
+            "````",
+            "```rust,ignore",
+            "   ```",
+        ] {
+            let close = if open.trim_start().starts_with('~') {
+                open.trim_start()
+            } else {
+                "```````"
+            };
+            let content = format!("## T\n### Design\n{open}\n### Bogus\n{close}\n");
+            let issues = parse_bulk_markdown(&content)
+                .unwrap_or_else(|e| panic!("fence `{open}` must open a code block: {e:?}"));
+            assert!(
+                issues[0]
+                    .design
+                    .as_deref()
+                    .is_some_and(|d| d.contains("### Bogus")),
+                "fence `{open}` did not protect its body"
+            );
+        }
+    }
+
+    /// A closing run must be at least as long as the opening one and carry no info string — so a
+    /// SHORTER run, or one with trailing text, does not close the block ("nesting" in the sense
+    /// `CommonMark` gives it).
+    #[test]
+    fn a_shorter_or_annotated_run_does_not_close_the_fence() {
+        let content = "## T\n### Design\n````\n```\n### Bogus\n``` still open\n````\n";
+        let issues = parse_bulk_markdown(content).expect("parse");
+        let design = issues[0].design.as_deref().expect("design");
+        assert!(design.contains("### Bogus"), "{design:?}");
+        assert!(design.contains("``` still open"), "{design:?}");
+    }
+
+    /// A backtick opening fence's info string may not itself contain a backtick (`CommonMark`), so
+    /// such a line is ordinary content and does NOT open a block.
+    #[test]
+    fn a_backtick_in_a_backtick_info_string_does_not_open_a_fence() {
+        // `### Bogus` here is a REAL unknown section: no fence was ever opened.
+        let err = parse_bulk_markdown("## T\n### Design\n``` a`b\n### Bogus\n")
+            .expect_err("no fence opened, so `### Bogus` is a genuine unknown section");
+        assert_eq!(err.context["kind"], "unknown_section");
+    }
+
+    /// An UNTERMINATED fence REJECTS. The alternative (`CommonMark`'s "runs to end of document") would
+    /// silently swallow every later `## `/`### ` into one section — exactly the silent-drop class
+    /// D42 exists to close. The rejection names the OPENING line, which is the actionable one.
+    #[test]
+    fn an_unterminated_fence_is_rejected_naming_the_opening_line() {
+        let err = parse_bulk_markdown("## T\n### Design\n```\ncode\n## Another\n### Type\ntask\n")
+            .expect_err("an unterminated fence must REJECT, never swallow the rest silently");
+        assert_eq!(err.code, unblock_error::ErrorCode::ValidationFailed);
+        assert_eq!(err.context["kind"], "unterminated_code_fence");
+        assert_eq!(err.context["field"], "markdown");
+        assert_eq!(err.context["line"], 3, "the OPENING line, not EOF");
+        assert!(err.hint.is_some_and(|h| h.contains("```")));
+    }
+
+    /// An indented code block needs no tracking: `strip_prefix("### ")` already fails on an indented
+    /// line, so its `### ` is content today and stays content. Pinned so a future `trim_start()` at
+    /// the header check cannot re-open the hole without turning this RED.
+    #[test]
+    fn an_indented_code_block_h3_is_already_content() {
+        for indent in ["    ", "\t", "      "] {
+            let content = format!("## T\n### Design\ntext\n\n{indent}### Bogus\n{indent}body\n");
+            let issues = parse_bulk_markdown(&content)
+                .unwrap_or_else(|e| panic!("indent {indent:?} must stay content: {e:?}"));
+            assert!(
+                issues[0]
+                    .design
+                    .as_deref()
+                    .is_some_and(|d| d.contains("### Bogus")),
+                "indent {indent:?} lost the indented-code H3"
+            );
+        }
+    }
+
+    /// NON-VACUITY for every fence cell above: an unknown `### ` OUTSIDE any fence still rejects.
+    /// Without this the fence work could silently degrade into "never reject anything".
+    #[test]
+    fn fence_tracking_does_not_disable_the_unknown_section_rejection() {
+        let err = parse_bulk_markdown("## T\n### Design\n```\ncode\n```\n### Bogus\nx\n")
+            .expect_err("a CLOSED fence must not suppress a later real unknown section");
+        assert_eq!(err.context["kind"], "unknown_section");
+        assert_eq!(err.context["line"], 6);
     }
 
     #[test]
