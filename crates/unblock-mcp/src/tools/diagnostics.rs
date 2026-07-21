@@ -12,7 +12,11 @@
 //! - No git (FR-15/NFR-6) — `diagnostics` is pure-DB.
 
 use chrono::{DateTime, Utc};
-use rmcp::handler::server::wrapper::Parameters;
+// D42 SEAM: this is the CRATE-LOCAL `Parameters` (`crate::tools::args`), NOT rmcp's. It defers
+// deserialization so argument errors reach the FR-11 in-band channel instead of an out-of-band
+// `-32602`. The NAME IS LOAD-BEARING (rmcp-macros matches the ident `Parameters` to pick the
+// published inputSchema) — see `tools/args.rs`. Do NOT "fix" this back to rmcp's wrapper.
+use crate::tools::args::{Parameters, parse_args};
 use rmcp::model::CallToolResult;
 use rmcp::schemars::JsonSchema;
 use rmcp::tool;
@@ -29,6 +33,10 @@ use crate::tools::{engine_err_json, err_json, ok_json};
 // §5.2a (CD-1): inject the root `"type": "object"` (the tagged-enum `oneOf` root omits it, which
 // strict MCP clients reject) — the union is preserved verbatim.
 #[schemars(extend("type" = "object"))]
+// D42: `#[serde(deny_unknown_fields)]` — an unknown/misspelled argument is REJECTED in-band
+// instead of being silently dropped. NOT recursive and inert on a flatten TARGET: every nested
+// container needs its OWN attribute (see `tools/args.rs` + the CHECK-3 container guard).
+#[serde(deny_unknown_fields)]
 pub(crate) enum DiagnosticsInput {
     /// Aggregate statistics.
     Stats {},
@@ -81,11 +89,16 @@ impl UnblockServer {
     )]
     pub(crate) async fn diagnostics(
         &self,
-        Parameters(input): Parameters<DiagnosticsInput>,
+        Parameters(raw, _): Parameters<DiagnosticsInput>,
     ) -> CallToolResult {
-        if let Err(structured) = self.preflight(&input) {
-            return err_json(&structured);
-        }
+        // D42 PROLOGUE: the ONLY deserialization of tool arguments. The NFR-18 quota already
+        // ran once in `call_tool` over the whole `params`. `DiagnosticsInput` carries
+        // `#[serde(deny_unknown_fields)]`, so an unknown/misspelled argument is REJECTED here,
+        // in-band, instead of being silently discarded.
+        let input: DiagnosticsInput = match parse_args(raw) {
+            Ok(input) => input,
+            Err(structured) => return err_json(&structured),
+        };
         let (kind, since) = input.to_kind_and_since();
         match self.session.diagnostics(kind, since).await {
             Ok(report) => ok_json(&with_contract_version(kind, report)),

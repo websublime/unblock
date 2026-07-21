@@ -10,7 +10,11 @@
 //! A cycle-rejecting `add` surfaces the engine's ordered cycle path naming every node (D2).
 
 use chrono::Utc;
-use rmcp::handler::server::wrapper::Parameters;
+// D42 SEAM: this is the CRATE-LOCAL `Parameters` (`crate::tools::args`), NOT rmcp's. It defers
+// deserialization so argument errors reach the FR-11 in-band channel instead of an out-of-band
+// `-32602`. The NAME IS LOAD-BEARING (rmcp-macros matches the ident `Parameters` to pick the
+// published inputSchema) — see `tools/args.rs`. Do NOT "fix" this back to rmcp's wrapper.
+use crate::tools::args::{Parameters, parse_args};
 use rmcp::model::CallToolResult;
 use rmcp::schemars::JsonSchema;
 use rmcp::tool;
@@ -33,6 +37,10 @@ fn default_true() -> bool {
 // §5.2a (CD-1): inject the root `"type": "object"` (the tagged-enum `oneOf` root omits it, which
 // strict MCP clients reject) — the union is preserved verbatim.
 #[schemars(extend("type" = "object"))]
+// D42: `#[serde(deny_unknown_fields)]` — an unknown/misspelled argument is REJECTED in-band
+// instead of being silently dropped. NOT recursive and inert on a flatten TARGET: every nested
+// container needs its OWN attribute (see `tools/args.rs` + the CHECK-3 container guard).
+#[serde(deny_unknown_fields)]
 pub(crate) enum DepToolInput {
     /// Add a dependency edge (cycle-rejecting).
     Add {
@@ -90,10 +98,15 @@ impl UnblockServer {
         name = "dep",
         description = "Manage and query dependencies: add, remove, list, tree, cycles, or graph."
     )]
-    pub(crate) async fn dep(&self, Parameters(input): Parameters<DepToolInput>) -> CallToolResult {
-        if let Err(structured) = self.preflight(&input) {
-            return err_json(&structured);
-        }
+    pub(crate) async fn dep(&self, Parameters(raw, _): Parameters<DepToolInput>) -> CallToolResult {
+        // D42 PROLOGUE: the ONLY deserialization of tool arguments. The NFR-18 quota already
+        // ran once in `call_tool` over the whole `params`. `DepToolInput` carries
+        // `#[serde(deny_unknown_fields)]`, so an unknown/misspelled argument is REJECTED here,
+        // in-band, instead of being silently discarded.
+        let input: DepToolInput = match parse_args(raw) {
+            Ok(input) => input,
+            Err(structured) => return err_json(&structured),
+        };
         match input {
             DepToolInput::Add {
                 issue_id,
