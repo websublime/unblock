@@ -474,44 +474,360 @@ mod tests {
         };
     }
 
-    /// **THE MF-2 INVARIANT, executed.** For every tool, every arm, and every field the hint
-    /// enumerates for that arm: a call carrying `{tag: value, field: …}` must NOT be rejected as an
-    /// `unknown_field`. A `type_mismatch` is fine — the point is that the field EXISTS.
+    // --- the probe corpus the MF-2 invariant is executed over ------------------------------------
+    //
+    // The first cut of this barrier built `{tag, field}` and NOTHING ELSE. On every arm that has a
+    // required field beyond the discriminant, serde reported `missing field` BEFORE it ever visited
+    // the probe key, so `assert_ne!(kind, "unknown_field")` passed without deciding anything:
+    // 100 of 220 cells were vacuous (all of dep/add, dep/remove, comment/add, comment/update, most
+    // of query/stale and issue/create). The masking was directly demonstrable —
+    // `{action:"close", title:"probe"}` is NOT reported as `unknown_field`, while
+    // `{action:"close", id:"ub-1", title:"probe"}` IS. The corpus below therefore fills each arm's
+    // REQUIRED fields from the published schema first, and `every_probe_cell_is_conclusive` asserts
+    // the mask rate stays at zero so the barrier cannot silently rot back.
+
+    /// Recursion bound for [`sample`]. `$defs` is not guaranteed acyclic and this walk is driven by
+    /// the published schema, so the depth is hard-bounded rather than trusted (same reasoning as
+    /// the production `MAX_REF_HOPS`).
+    const MAX_SAMPLE_DEPTH: usize = 8;
+
+    /// One `(arm, field)` probe and what the wire actually decided about it.
+    struct Cell {
+        /// `tool action=value field=name` — the human-readable cell id.
+        id: String,
+        /// The probed field was reported back as an `unknown_field`: the hint advertised a name the
+        /// SAME call rejects. This is the MF-2 defect.
+        rejected: bool,
+        /// The call failed on some OTHER field, so the probed field's acceptance was never decided.
+        /// A masked cell proves nothing — it is the vacuity this corpus exists to eliminate.
+        masked: bool,
+    }
+
+    /// A schema-shaped placeholder value for `schema`, so that filling a required field does not
+    /// itself become the reason the parse fails.
+    fn sample(
+        schema: &serde_json::Value,
+        defs: super::Defs<'_>,
+        depth: usize,
+    ) -> serde_json::Value {
+        if depth == 0 {
+            return serde_json::Value::Null;
+        }
+        let schema = super::resolve(schema, defs);
+        if let Some(constant) = schema.get("const") {
+            return constant.clone();
+        }
+        if let Some(first) = schema
+            .get("enum")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|values| values.iter().find(|value| !value.is_null()))
+        {
+            return first.clone();
+        }
+        let ty = match schema.get("type") {
+            Some(serde_json::Value::String(name)) => Some(name.as_str()),
+            Some(serde_json::Value::Array(names)) => names
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .find(|name| *name != "null"),
+            _ => None,
+        };
+        let format = schema.get("format").and_then(serde_json::Value::as_str);
+        match ty {
+            // A `DateTime<Utc>` is a `string` whose deserializer rejects "probe" with a chrono
+            // message that names NO field — which is exactly how `defer`, `query stale` and
+            // `diagnostics changelog` stayed masked even after their required keys were filled.
+            Some("string") if format == Some("date-time") => {
+                serde_json::json!("2026-01-01T00:00:00Z")
+            }
+            Some("string") => serde_json::json!("probe"),
+            Some("integer" | "number") => serde_json::json!(1),
+            Some("boolean") => serde_json::json!(false),
+            // An empty array satisfies every shipped `Vec<_>` without needing an element shape.
+            Some("array") => serde_json::json!([]),
+            Some("object") => serde_json::Value::Object(required_object(schema, defs, depth - 1)),
+            _ => {
+                // `Option<T>` / untagged alternations render as `anyOf`/`oneOf`; take the first
+                // alternative that yields anything.
+                for key in ["anyOf", "oneOf", "allOf"] {
+                    if let Some(alternatives) =
+                        schema.get(key).and_then(serde_json::Value::as_array)
+                    {
+                        for alternative in alternatives {
+                            let candidate = sample(alternative, defs, depth - 1);
+                            if !candidate.is_null() {
+                                return candidate;
+                            }
+                        }
+                    }
+                }
+                serde_json::Value::Null
+            }
+        }
+    }
+
+    /// Every REQUIRED property of `container`, filled with a schema-shaped [`sample`]. This is what
+    /// carries a probe past serde's `missing field` short-circuit and into the field decision.
+    fn required_object(
+        container: &serde_json::Value,
+        defs: super::Defs<'_>,
+        depth: usize,
+    ) -> serde_json::Map<String, serde_json::Value> {
+        let props = container
+            .get("properties")
+            .and_then(serde_json::Value::as_object);
+        let mut filled = serde_json::Map::new();
+        for name in container
+            .get("required")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+        {
+            let value = props.and_then(|props| props.get(name)).map_or_else(
+                || serde_json::json!("probe"),
+                |sub| sample(sub, defs, depth),
+            );
+            filled.insert(name.to_string(), value);
+        }
+        filled
+    }
+
+    /// Run one probe and classify what the wire decided about `field`.
+    fn probe<T: serde::de::DeserializeOwned + rmcp::schemars::JsonSchema + std::any::Any>(
+        id: String,
+        raw: serde_json::Map<String, serde_json::Value>,
+        field: &str,
+    ) -> Cell {
+        probe_nested::<T>(id, raw, &[field])
+    }
+
+    /// As [`probe`], but the cell's subject is a PATH of names (the nested-container clause probes
+    /// `deps` AND `deps[].metadata` in one call, and the hint is wrong if the wire rejects either).
+    fn probe_nested<T: serde::de::DeserializeOwned + rmcp::schemars::JsonSchema + std::any::Any>(
+        id: String,
+        raw: serde_json::Map<String, serde_json::Value>,
+        subject: &[&str],
+    ) -> Cell {
+        match super::parse_args::<T>(raw) {
+            // The whole path was accepted outright — maximally conclusive.
+            Ok(_) => Cell {
+                id,
+                rejected: false,
+                masked: false,
+            },
+            Err(err) => {
+                let blamed = err.context.get("field").and_then(serde_json::Value::as_str);
+                let kind = err.context.get("kind").and_then(serde_json::Value::as_str);
+                let on_subject = blamed.is_some_and(|name| subject.contains(&name));
+                Cell {
+                    id,
+                    rejected: kind == Some("unknown_field") && on_subject,
+                    // The parse died on something OUTSIDE the subject (or on nothing nameable), so
+                    // this cell never decided whether the subject is accepted.
+                    masked: !on_subject,
+                }
+            }
+        }
+    }
+
+    /// Probe every field the hint enumerates for `T` — the arm's own clause AND every nested
+    /// container clause (the "nested deps[] accepts: …" tail), which the first cut never touched
+    /// because `accepted_fields` splits on a semicolon and takes `.next()`.
+    ///
+    /// The arm schemas are re-derived HERE, straight from the published schema, rather than read
+    /// out of `HintIndex` — so a mutation to the production index cannot also move this oracle.
+    fn probe_tool<T: serde::de::DeserializeOwned + rmcp::schemars::JsonSchema + std::any::Any>(
+        tool: &str,
+        cells: &mut Vec<Cell>,
+    ) {
+        let schema = rmcp::handler::server::common::schema_for_type::<T>();
+        let defs = schema.get("$defs").and_then(serde_json::Value::as_object);
+        let index = super::hint_index_of::<T>();
+        let root = serde_json::Value::Object((*schema).clone());
+
+        // (arm label, the arm's own schema, the hint rendered for it).
+        let mut arms: Vec<(String, &serde_json::Value, &str)> = Vec::new();
+        let by_value;
+        if let Some(tag) = index.tag.as_deref() {
+            assert!(!index.arms.is_empty(), "{tool} has no arms");
+            let raw_arms = schema
+                .get("oneOf")
+                .and_then(serde_json::Value::as_array)
+                .unwrap_or_else(|| panic!("{tool} publishes a tag `{tag}` but no `oneOf`"));
+            by_value = raw_arms
+                .iter()
+                .filter_map(|arm| {
+                    let value = arm
+                        .get("properties")?
+                        .get(tag)?
+                        .get("const")?
+                        .as_str()?
+                        .to_string();
+                    Some((value, arm))
+                })
+                .collect::<std::collections::BTreeMap<_, _>>();
+            for (value, hint) in &index.arms {
+                let arm = by_value
+                    .get(value)
+                    .unwrap_or_else(|| panic!("{tool}: no `{tag}`=`{value}` arm in the schema"));
+                arms.push((format!("{tool} {tag}={value}"), arm, hint.as_str()));
+            }
+        } else {
+            // `claim` — the only non-union outer. Its whole surface is the root object.
+            arms.push((tool.to_string(), &root, index.fallback.as_str()));
+        }
+
+        for (label, arm, hint) in arms {
+            let base = required_object(arm, defs, MAX_SAMPLE_DEPTH);
+            let arm_props = arm.get("properties").and_then(serde_json::Value::as_object);
+
+            for field in accepted_fields(hint) {
+                let mut raw = base.clone();
+                // Probe with a value shaped for the field WHEN the arm actually declares it. A
+                // field the arm does NOT declare (which is exactly what a union-hint regression
+                // advertises) falls back to a bare string and is rejected as `unknown_field`.
+                let value = arm_props.and_then(|props| props.get(&field)).map_or_else(
+                    || serde_json::json!("probe"),
+                    |sub| sample(sub, defs, MAX_SAMPLE_DEPTH),
+                );
+                raw.insert(field.clone(), value);
+                cells.push(probe::<T>(format!("{label} field={field}"), raw, &field));
+            }
+
+            for (container, fields) in nested_clauses(hint) {
+                let (name, is_array) = container
+                    .strip_suffix("[]")
+                    .map_or_else(|| (container.as_str(), false), |stripped| (stripped, true));
+                // The container may itself be absent from the arm — that is exactly what a
+                // union-hint regression advertises — so it is PROBED, never asserted away: the
+                // wire then blames the container name and the cell is recorded as rejected.
+                let nested = arm_props
+                    .and_then(|props| props.get(name))
+                    .and_then(|sub| super::nested_container(sub, defs).map(|(_, p)| (sub, p)));
+                let nested_schema = nested.map(|(sub, nested_props)| {
+                    serde_json::Value::Object(
+                        std::iter::once((
+                            "properties".to_string(),
+                            serde_json::Value::Object(nested_props.clone()),
+                        ))
+                        .chain(nested_required(sub, defs).map(|required| {
+                            ("required".to_string(), serde_json::Value::Array(required))
+                        }))
+                        .collect(),
+                    )
+                });
+
+                for field in fields {
+                    let mut element = nested_schema
+                        .as_ref()
+                        .map(|schema| required_object(schema, defs, MAX_SAMPLE_DEPTH))
+                        .unwrap_or_default();
+                    let value = nested.and_then(|(_, props)| props.get(&field)).map_or_else(
+                        || serde_json::json!("probe"),
+                        |sub| sample(sub, defs, MAX_SAMPLE_DEPTH),
+                    );
+                    element.insert(field.clone(), value);
+                    let element = serde_json::Value::Object(element);
+
+                    let mut raw = base.clone();
+                    raw.insert(
+                        name.to_string(),
+                        if is_array {
+                            serde_json::Value::Array(vec![element])
+                        } else {
+                            element
+                        },
+                    );
+                    // The hint is wrong if EITHER the container or the nested field is rejected.
+                    cells.push(probe_nested::<T>(
+                        format!("{label} nested `{container}` field={field}"),
+                        raw,
+                        &[name, field.as_str()],
+                    ));
+                }
+            }
+        }
+    }
+
+    /// The `required` array of the container a hint clause names (array element or plain object).
+    fn nested_required(
+        sub: &serde_json::Value,
+        defs: super::Defs<'_>,
+    ) -> Option<Vec<serde_json::Value>> {
+        let sub = super::resolve(sub, defs);
+        let container = sub
+            .get("items")
+            .map_or(sub, |items| super::resolve(items, defs));
+        container
+            .get("required")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+    }
+
+    /// The whole probe corpus, over all 8 shipped tool inputs.
+    fn hint_probe_corpus() -> Vec<Cell> {
+        let mut cells = Vec::new();
+        macro_rules! run {
+            ($tool:expr, $ty:ty) => {
+                probe_tool::<$ty>($tool, &mut cells);
+            };
+        }
+        for_each_tool_input!(run);
+        cells
+    }
+
+    /// **THE MF-2 INVARIANT, executed.** For every tool, every arm, every field the hint enumerates
+    /// for that arm — and every field of every NESTED container clause — a call carrying the arm's
+    /// required fields plus that field must NOT be rejected as an `unknown_field`. A failure on
+    /// some other field is fine for this cell's verdict; a `type_mismatch` on the probed field
+    /// itself is fine too — the point is that the field EXISTS.
     ///
     /// The pre-fix derivation unioned the root with every `oneOf`/`anyOf`/`allOf` arm, so
     /// `issue{action:"show"}` advertised all 35 fields across the 7 arms and 33 of the 37 arms
     /// over-stated. This test turns RED under any return to that shape.
     #[test]
     fn no_arm_hint_ever_enumerates_a_field_the_same_call_rejects() {
-        // `claim` is the only non-union input; it has no arms and returns early. Its own field list
-        // is covered by `the_non_union_input_enumerates_only_fields_it_accepts`.
-        macro_rules! run {
-            ($tool:expr, $ty:ty) => {
-                (|| {
-                    let index = super::hint_index_of::<$ty>();
-                    let Some(tag) = index.tag.as_deref() else {
-                        return;
-                    };
-                    assert!(!index.arms.is_empty(), "{} has no arms", $tool);
-                    for (value, hint) in &index.arms {
-                        for field in accepted_fields(hint) {
-                            let mut raw = serde_json::Map::new();
-                            raw.insert(tag.to_string(), serde_json::json!(value));
-                            raw.insert(field.clone(), serde_json::json!("probe"));
-                            if let Err(err) = super::parse_args::<$ty>(raw) {
-                                assert_ne!(
-                                    err.context["kind"], "unknown_field",
-                                    "{} `{}`=`{}`: the hint advertises `{}`, which the SAME call \
-                                     rejects — the exact defect D42 exists to kill",
-                                    $tool, tag, value, field
-                                );
-                            }
-                        }
-                    }
-                })();
-            };
-        }
-        for_each_tool_input!(run);
+        let rejected = hint_probe_corpus()
+            .into_iter()
+            .filter(|cell| cell.rejected)
+            .map(|cell| cell.id)
+            .collect::<Vec<_>>();
+        assert!(
+            rejected.is_empty(),
+            "the hint advertises {} field(s) the SAME call rejects — the exact defect D42 exists \
+             to kill:\n  {}",
+            rejected.len(),
+            rejected.join("\n  ")
+        );
+    }
+
+    /// **The barrier on the barrier.** Every cell above must actually DECIDE the field it probes.
+    /// Without this the corpus can rot back into vacuity by nothing more than a new required field
+    /// on an arm: the parse would short-circuit on the missing key and
+    /// `no_arm_hint_ever_enumerates_a_field_the_same_call_rejects` would pass on an empty question.
+    #[test]
+    fn every_probe_cell_is_conclusive() {
+        let cells = hint_probe_corpus();
+        let masked = cells
+            .iter()
+            .filter(|cell| cell.masked)
+            .map(|cell| cell.id.clone())
+            .collect::<Vec<_>>();
+        assert!(
+            masked.is_empty(),
+            "{} of {} probe cells never reached the field decision, so the MF-2 invariant is \
+             asserted on nothing there:\n  {}",
+            masked.len(),
+            cells.len(),
+            masked.join("\n  ")
+        );
+        // Non-vacuity of the corpus ITSELF: 37 arms across 8 tools, plus the nested clauses.
+        assert!(
+            cells.len() >= 220,
+            "the corpus shrank to {} cells — arms or hint clauses stopped being probed",
+            cells.len()
+        );
     }
 
     /// The non-union input (`claim`) enumerates its own fields, and every one is accepted.
@@ -704,6 +1020,49 @@ mod tests {
             .filter(|s| !s.is_empty())
             .map(str::to_string)
             .collect()
+    }
+
+    /// Parse the NESTED clauses out of a rendered hint (each "nested … accepts: …" tail),
+    /// returning `(container name + suffix, fields)`.
+    ///
+    /// `accepted_fields` deliberately stops at the first `';'`, so without this the nested clauses
+    /// — the `items` traversal that MF-2 (b) added — were published but never probed.
+    fn nested_clauses(hint: &str) -> Vec<(String, Vec<String>)> {
+        hint.split("; nested `")
+            .skip(1)
+            .filter_map(|clause| {
+                let (name, rest) = clause.split_once("` accepts: ")?;
+                let fields = rest
+                    .split(';')
+                    .next()
+                    .unwrap_or_default()
+                    .split(", ")
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>();
+                Some((name.to_string(), fields))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_nested_clause_parser_reads_what_field_clauses_renders() {
+        let clauses = nested_clauses(
+            "for `action` = `create`, accepted fields: action, deps; \
+             nested `deps[]` accepts: issue_id, metadata; nested `x` accepts: alpha",
+        );
+        assert_eq!(
+            clauses,
+            vec![
+                (
+                    "deps[]".to_string(),
+                    vec!["issue_id".to_string(), "metadata".to_string()]
+                ),
+                ("x".to_string(), vec!["alpha".to_string()]),
+            ]
+        );
+        assert!(nested_clauses("accepted fields: a, b").is_empty());
     }
 
     #[test]
