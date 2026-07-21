@@ -3,12 +3,17 @@
 //! `parse_markdown_file`: the MCP surface takes INLINE content, so the extension / path-traversal /
 //! symlink / size file guards are EXCLUDED — file ingestion + path confinement are a T3.1 CLI concern).
 //!
-//! **DELIBERATE DEVIATIONS FROM THE PORT (D42, v1.0.1).** The original accepted-and-discarded three
+//! **DELIBERATE DEVIATIONS FROM THE PORT (D42, v1.0.1).** The original accepted-and-discarded four
 //! classes of malformed input in silence; unblock's safe-import discipline (NFR-8) rejects them
 //! instead, in-band, before any write. D22 already set the precedent for overriding the port on this
-//! axis (its own row records the best-effort-`continue` deviation). The three are: an unrecognized
-//! `### ` section, a `### ` section before the first `## `, and — at the `issue.rs` mapping step —
-//! an invalid `### Priority` value.
+//! axis (its own row records the best-effort-`continue` deviation). The four are: an unrecognized
+//! `### ` section, an EMPTY `### ` header, a `### ` section before the first `## `, and — at the
+//! `issue.rs` mapping step — an invalid `### Priority` value.
+//!
+//! **A FIFTH rejection is NOT of that class and must not be filed with them.** The UNTERMINATED
+//! fence (below) rejects documents GA v1.0.0 **ACCEPTED AND IMPORTED** — GA's parser carried no
+//! fence tracking at all — so it deviates from SHIPPED GA BEHAVIOUR, not merely from `CommonMark`:
+//! a behavioural break shipping in a PATCH release, RATIFIED at PRD D42 clause 4(iii).
 //!
 //! # Grammar (authoritative — do NOT reduce)
 //!
@@ -30,7 +35,11 @@
 //! - An **UNTERMINATED fence REJECTS** (`kind = "unterminated_code_fence"`, naming the OPENING
 //!   line). This is a DELIBERATE deviation from `CommonMark`, which lets an unclosed fence run to the
 //!   end of the document: that reading would silently swallow every later `## `/`### ` into one
-//!   section — the exact silent-drop class D42 closes.
+//!   section — the exact silent-drop class D42 closes. **It is ALSO a deviation from SHIPPED GA
+//!   BEHAVIOUR**, which is the stronger and more important statement: GA v1.0.0 ACCEPTED such
+//!   documents, so this is a behavioural break in a PATCH release, not a silent-drop closure.
+//!   Ratified at PRD D42 clause 4(iii) and PUBLISHED in the `create_bulk` + `markdown` wire
+//!   descriptions (`issue.rs`) — do not let those two descriptions drift from this grammar.
 //! - A `### ` section appearing **before the first `## `** REJECTS the document. Previously it was
 //!   consumed and discarded along with its body.
 //! - The **implicit-description quirk**: lines after the H2 before any H3 are description, but **only

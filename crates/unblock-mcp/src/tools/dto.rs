@@ -21,7 +21,18 @@ use unblock_model::{Dependency, DependencyType, IssueType, ListFilters, Priority
 ///
 /// Distinct from the policy enforcement type (`AttributionPolicy`, G-23e): this `Attribution` is
 /// mcp-owned and **never enforced**. It flattens into mutating tool inputs so an agent can
-/// self-report `agent_name`/`harness`/`model`; the engine records it best-effort via the audit event.
+/// self-report `agent_name`/`harness`/`model`.
+///
+/// # ⚠️ It is NOT persisted — capture-only means capture-only
+///
+/// Every tool arm destructures this as `attribution: _`. Nothing downstream consumes it: the L2
+/// event writer `crates/unblock-storage/src/libsql/events.rs:31` INSERTs **7** columns
+/// (`issue_id`, `event_type`, `actor`, `old_value`, `new_value`, `comment`, `created_at`) and binds
+/// **none** of `agent_name`/`harness`/`model`, while the read at `:62` DOES select them — so they
+/// read back `NULL`. Accepting it on the wire and dropping it is a **deliberate v1 deferral**, to be
+/// wired at L7 with **FR-22 [v1.1]**; tracked as `ub-lp9.22` and carved out at `docs/PRD.md` FR-20
+/// (i). Do not restate this field as "recorded best-effort via the audit event" — that claim was
+/// live here and false.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 // D42: `#[serde(deny_unknown_fields)]` — an unknown/misspelled argument is REJECTED in-band
 // instead of being silently dropped. NOT recursive and inert on a flatten TARGET: every nested
