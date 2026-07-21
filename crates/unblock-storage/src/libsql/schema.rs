@@ -15,6 +15,12 @@
 
 /// The current on-disk schema version stamped into `PRAGMA user_version`.
 ///
+/// **`dependencies.metadata` and `dependencies.thread_id` are BASELINE-v1** — present in the
+/// original `SCHEMA_SQL` since the first shipped release, so every database ever created by any
+/// shipped `unblock` already has them. A future migration must NOT `ALTER TABLE ADD COLUMN` either
+/// one: it would hard-error on every existing database. (They were merely never BOUND by the write
+/// side until D42; that was a code defect, not a schema gap.)
+///
 /// v1 baseline. `MIGRATIONS` (in `migrations.rs`) is empty: v1.0.0 is the first shipped schema, so
 /// there is no prior on-disk `user_version` to migrate from in v1 (CLAUDE.md). Any database whose
 /// `user_version` is **greater** than this is rejected with [`crate::StorageError::SchemaMismatch`].

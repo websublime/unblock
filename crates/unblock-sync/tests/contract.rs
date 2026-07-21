@@ -657,3 +657,96 @@ async fn export_then_import_round_trips_comments_including_the_redacted_state() 
         "export -> import must be a sync_equals identity over comments"
     );
 }
+
+// --------------------------------------------------------------------------------------------------
+// D42 — dep `metadata` is a JSONL fixed point (FR-26 / D5 fidelity).
+// --------------------------------------------------------------------------------------------------
+
+/// A dependency edge carrying metadata.
+fn dep_with_metadata(from: &str, to: &str, metadata: Option<&str>) -> unblock_model::Dependency {
+    let ts = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+    unblock_model::Dependency {
+        issue_id: from.to_string(),
+        depends_on_id: to.to_string(),
+        dep_type: unblock_model::DependencyType::Blocks,
+        created_at: ts,
+        created_by: None,
+        metadata: metadata.map(ToString::to_string),
+        thread_id: None,
+    }
+}
+
+/// `export -> import -> export` is BYTE-IDENTICAL for an issue whose dep carries `metadata`.
+///
+/// Before D42 it was NOT a fixed point: the import leg routes to `storage.create_issue`, whose
+/// 5-column dep INSERT dropped the field, so the second export emitted a dep object without it.
+/// This leg never goes through the engine's post-create dep loop, so it is unaffected by the
+/// separately-tracked `issue create {deps:[…]}` non-atomicity.
+#[tokio::test]
+async fn dep_metadata_survives_export_import_export() {
+    let (_tmp, dir) = unblock_dir();
+    let source = fresh_storage().await;
+    source.create_issue(&issue("ub-2"), "t").await.unwrap();
+    let mut carrier = issue("ub-1");
+    carrier.dependencies = vec![dep_with_metadata(
+        "ub-1",
+        "ub-2",
+        Some("{\"why\":\"KEEP\"}"),
+    )];
+    source.create_issue(&carrier, "t").await.unwrap();
+
+    let first = dir.join("issues.jsonl");
+    export_jsonl(&source, &first, &dir, &ExportOptions::default())
+        .await
+        .expect("export 1");
+    let first_bytes = std::fs::read(&first).expect("read 1");
+    assert!(
+        String::from_utf8_lossy(&first_bytes).contains("KEEP"),
+        "the FIRST export must already carry the metadata — otherwise this test is vacuous"
+    );
+
+    let dest = fresh_storage().await;
+    import_jsonl(&dest, &first, &dir, "t", &ImportOptions::default())
+        .await
+        .expect("import");
+
+    let second = dir.join("issues2.jsonl");
+    export_jsonl(&dest, &second, &dir, &ExportOptions::default())
+        .await
+        .expect("export 2");
+    assert_eq!(
+        first_bytes,
+        std::fs::read(&second).expect("read 2"),
+        "export -> import -> export must be a FIXED POINT for a metadata-carrying dep"
+    );
+}
+
+/// NEGATIVE control: an existing record whose dep has NO metadata does not change shape. The field
+/// is `skip_serializing_if = "Option::is_none"`, so only deps that actually carry metadata gain the
+/// key — the committed `.unblock/issues.jsonl` and the export golden stay byte-identical.
+#[tokio::test]
+async fn a_dep_without_metadata_still_emits_exactly_five_keys() {
+    let (_tmp, dir) = unblock_dir();
+    let storage = fresh_storage().await;
+    storage.create_issue(&issue("ub-2"), "t").await.unwrap();
+    let mut carrier = issue("ub-1");
+    carrier.dependencies = vec![dep_with_metadata("ub-1", "ub-2", None)];
+    storage.create_issue(&carrier, "t").await.unwrap();
+
+    let target = dir.join("issues.jsonl");
+    export_jsonl(&storage, &target, &dir, &ExportOptions::default())
+        .await
+        .expect("export");
+    let text = std::fs::read_to_string(&target).expect("read");
+    let line = text
+        .lines()
+        .find(|l| l.contains("\"ub-1\"") && l.contains("dependencies"))
+        .expect("the carrier line");
+    let value: serde_json::Value = serde_json::from_str(line).expect("parse");
+    let edge = value["dependencies"][0].as_object().expect("dep object");
+    assert!(
+        !edge.contains_key("metadata"),
+        "an absent metadata must stay ABSENT (binding `'{{}}'` instead of SQL NULL would add it): {edge:?}"
+    );
+    assert_eq!(edge.len(), 5, "the bd-shaped 5-field dep object: {edge:?}");
+}

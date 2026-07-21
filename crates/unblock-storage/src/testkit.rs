@@ -191,6 +191,12 @@ where
     contract_cascade_delete(factory().await).await;
     contract_hard_delete(factory().await).await;
 
+    // Dependency edge fields (D42).
+    contract_add_dependency_persists_metadata(factory().await).await;
+    contract_create_issue_persists_dep_metadata(factory().await).await;
+    contract_dep_metadata_null_vs_empty_object(factory().await).await;
+    contract_dep_thread_id_round_trip(factory().await).await;
+
     // Seam-backed: id child-counter high-water mark.
     contract_child_counter_high_water(factory().await).await;
 
@@ -3006,4 +3012,145 @@ pub async fn contract_seed_comments_round_trip_state<S: Storage>(storage: S) {
         expected.sync_equals(&read_back),
         "the seeded issue must round-trip its comment state under sync_equals"
     );
+}
+
+// --------------------------------------------------------------------------------------------------
+// D42 — `Dependency.metadata` / `.thread_id` round-trip (NFR-16).
+//
+// These are the ONLY thing making the L2 bind non-vacuous. Before D42 the write side bound 5 columns
+// while the read side projected 7, so both fields were accepted, typed, schema-published — and
+// DISCARDED. It survived to GA because the defect is DOUBLY masked: `DEFAULT '{}'` writes `'{}'` for
+// an unbound value and the read filter coerces `'{}'` back to `None`, making "never bound"
+// indistinguishable from "explicitly absent" even under direct SQL inspection. Every pre-existing
+// storage test constructs `metadata: None`, so the field had NEVER been round-trip tested.
+//
+// The two INSERT sites are tested INDEPENDENTLY on purpose: a partial fix (binding `deps.rs` but not
+// `crud.rs`) still looks correct through the `dep` tool while the JSONL import leg stays lossy. One
+// end-to-end test is NOT sufficient.
+// --------------------------------------------------------------------------------------------------
+
+/// A dependency edge carrying metadata.
+fn dep_with_metadata(from: &str, to: &str, metadata: Option<&str>) -> Dependency {
+    Dependency {
+        metadata: metadata.map(ToString::to_string),
+        ..dep(from, to, DependencyType::Blocks)
+    }
+}
+
+/// `add_dependency` (the `dep` tool leg) PERSISTS `metadata`. Fails against the 5-column INSERT.
+pub async fn contract_add_dependency_persists_metadata<S: Storage>(storage: S) {
+    storage
+        .create_issue(&issue("ub-a", "a"), "x")
+        .await
+        .unwrap();
+    storage
+        .create_issue(&issue("ub-b", "b"), "x")
+        .await
+        .unwrap();
+
+    storage
+        .add_dependency(
+            &dep_with_metadata("ub-a", "ub-b", Some("{\"why\":\"KEEP\"}")),
+            "x",
+        )
+        .await
+        .expect("add edge");
+
+    let deps = storage.list_dependencies("ub-a").await.expect("list");
+    assert_eq!(deps.len(), 1);
+    assert_eq!(
+        deps[0].metadata.as_deref(),
+        Some("{\"why\":\"KEEP\"}"),
+        "`add_dependency` must PERSIST `metadata` — a 5-column INSERT silently drops it and the \
+         `DEFAULT '{{}}'` + read-filter pair makes the loss invisible to direct SQL inspection"
+    );
+}
+
+/// `create_issue` with a PRE-BUILT `Issue.dependencies` (the JSONL / bd-import leg) persists
+/// `metadata`, on BOTH the single and the batch hydrate path. Fails against the 5-column INSERT.
+pub async fn contract_create_issue_persists_dep_metadata<S: Storage>(storage: S) {
+    storage
+        .create_issue(&issue("ub-b", "b"), "x")
+        .await
+        .unwrap();
+    let mut carrier = issue("ub-a", "a");
+    carrier.dependencies = vec![dep_with_metadata(
+        "ub-a",
+        "ub-b",
+        Some("{\"src\":\"jsonl\"}"),
+    )];
+    storage.create_issue(&carrier, "x").await.expect("create");
+
+    let hydrated = storage
+        .get_issue("ub-a")
+        .await
+        .expect("get")
+        .expect("present");
+    assert_eq!(
+        hydrated.dependencies[0].metadata.as_deref(),
+        Some("{\"src\":\"jsonl\"}"),
+        "the create path must persist dep `metadata` — otherwise `export -> import -> export` is \
+         NOT a fixed point for a metadata-carrying dep (an FR-26/D5 fidelity bug)"
+    );
+
+    // Second cell: the BATCH hydrate is a distinct read projection.
+    let batch = storage
+        .get_issues(&["ub-a".to_string()])
+        .await
+        .expect("batch");
+    assert_eq!(
+        batch[0].dependencies[0].metadata.as_deref(),
+        Some("{\"src\":\"jsonl\"}")
+    );
+}
+
+/// NULL vs `'{}'` discrimination. Guards against "fixing" the bind by writing `'{}'` instead of
+/// SQL NULL, and against deleting the deliberate legacy `!= "{}"` read coercion.
+pub async fn contract_dep_metadata_null_vs_empty_object<S: Storage>(storage: S) {
+    for (idx, (input, expected)) in [
+        (None, None),
+        // The documented legacy tolerance: a stored `'{}'` reads back as absent.
+        (Some("{}"), None),
+        (Some("{\"a\":1}"), Some("{\"a\":1}")),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let from = format!("ub-s{idx}");
+        let to = format!("ub-t{idx}");
+        storage.create_issue(&issue(&from, "s"), "x").await.unwrap();
+        storage.create_issue(&issue(&to, "t"), "x").await.unwrap();
+        storage
+            .add_dependency(&dep_with_metadata(&from, &to, input), "x")
+            .await
+            .expect("add edge");
+        let deps = storage.list_dependencies(&from).await.expect("list");
+        assert_eq!(
+            deps[0].metadata.as_deref(),
+            expected,
+            "metadata {input:?} must read back as {expected:?}"
+        );
+    }
+}
+
+/// `thread_id` round-trips at L2. It is NOT wire-reachable (`DepInput` has no such field and
+/// `into_dependency` hardcodes `None`), so this case is the ONLY thing that makes the `thread_id`
+/// bind verifiable rather than dead code.
+pub async fn contract_dep_thread_id_round_trip<S: Storage>(storage: S) {
+    storage
+        .create_issue(&issue("ub-a", "a"), "x")
+        .await
+        .unwrap();
+    storage
+        .create_issue(&issue("ub-b", "b"), "x")
+        .await
+        .unwrap();
+    let edge = Dependency {
+        thread_id: Some("thread-7".to_string()),
+        ..dep("ub-a", "ub-b", DependencyType::Blocks)
+    };
+    storage.add_dependency(&edge, "x").await.expect("add edge");
+
+    let deps = storage.list_dependencies("ub-a").await.expect("list");
+    assert_eq!(deps[0].thread_id.as_deref(), Some("thread-7"));
 }
