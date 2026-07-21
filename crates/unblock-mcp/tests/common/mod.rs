@@ -162,6 +162,38 @@ pub async fn call_tool(
     (is_error, structured)
 }
 
+/// Call a tool with an explicit `params._meta` (D42).
+///
+/// [`call_tool`] builds `CallToolRequestParams::new(name).with_arguments(args)` and structurally
+/// CANNOT set `_meta`, so it cannot exercise the params-scoped quota at all. `CallToolRequestParams`
+/// is `#[non_exhaustive]`, which blocks literal construction from an external test crate — public
+/// FIELD ASSIGNMENT is still allowed, and that is what this uses. The whole `_meta` test family
+/// depends on that being true; if it ever stops compiling, this helper is where it shows up.
+pub async fn call_tool_with_meta(
+    client: &RunningService<RoleClient, ()>,
+    name: &'static str,
+    args: Value,
+    meta: Value,
+) -> (bool, Value) {
+    let arguments: Map<String, Value> = match args {
+        Value::Object(map) => map,
+        _ => Map::new(),
+    };
+    let meta_map: Map<String, Value> = match meta {
+        Value::Object(map) => map,
+        _ => Map::new(),
+    };
+    let mut params = CallToolRequestParams::new(name).with_arguments(arguments);
+    params.meta = Some(rmcp::model::Meta(meta_map));
+    let result = client
+        .call_tool(params)
+        .await
+        .expect("tool call round-trips");
+    let is_error = result.is_error.unwrap_or(false);
+    let structured = result.structured_content.unwrap_or(Value::Null);
+    (is_error, structured)
+}
+
 /// A `Storage` decorator that COUNTS every mutating call (NFR-18 spy). It wraps a real inner backend
 /// and delegates everything; the only added effect is a per-mutation counter so an over-quota AC test
 /// can assert the preflight rejected an input BEFORE it reached any `Storage` mutation (zero calls).

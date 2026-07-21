@@ -105,18 +105,44 @@ impl UnblockServer {
     /// construction — pinned by `request_measurement_is_lossless`. The struct is `#[non_exhaustive]`,
     /// so a future rmcp field is picked up automatically: the fail-safe direction.
     ///
+    /// # `_meta` must be passed SEPARATELY — verified by execution, not assumed
+    ///
+    /// `request.meta` is **always `None` here.** rmcp's serve loop `std::mem::swap`s `_meta` out of
+    /// the request and into `RequestContext.meta` *before* `handle_request`
+    /// (`rmcp-1.7.0/src/service.rs:953`, comment: *"swap meta firstly, otherwise progress token will
+    /// be lost"*). So serializing the request alone measures `name` + `arguments` and **silently
+    /// misses the live `_meta` bypass** — a 300 KB `_meta` blob would still sail past the cap. This
+    /// was caught by a test that failed for exactly that reason; it is not a hypothetical.
+    ///
+    /// The caller therefore hands us `context.meta`, which is where the bytes actually are.
+    /// `params.task` needs no such treatment: rmcp rejects a present `task` with `-32602` before
+    /// `call_tool` (`TaskSupport::Forbidden` is the default), so it is not an exploitable channel —
+    /// we measure it anyway, for free, if a future rmcp starts admitting it.
+    ///
     /// **Fail-closed:** an un-measurable request is rejected as an `InternalError` rather than waved
     /// through — the untrusted-input boundary must never fail open (NFR-18).
     pub(crate) fn enforce_request_quota(
         &self,
         request: &CallToolRequestParams,
+        meta: &rmcp::model::Meta,
     ) -> Result<(), StructuredError> {
-        let value = serde_json::to_value(request).map_err(|err| {
+        let measurement_error = |err: &serde_json::Error| {
             StructuredError::from_code(
                 ErrorCode::InternalError,
                 format!("failed to serialize request for quota measurement: {err}"),
             )
-        })?;
+        };
+        let mut value = serde_json::to_value(request).map_err(|e| measurement_error(&e))?;
+        if !meta.is_empty()
+            && let Some(object) = value.as_object_mut()
+        {
+            // Re-attach under the wire name so an over-quota `_meta` is reported against the same
+            // key the client sent.
+            object.insert(
+                "_meta".to_string(),
+                serde_json::to_value(meta).map_err(|e| measurement_error(&e))?,
+            );
+        }
         enforce_quota(&value, &self.quotas)
     }
 
@@ -170,7 +196,12 @@ impl ServerHandler for UnblockServer {
                 // burn CPU outside the D34-F5 bound, inverting the invariant documented above.
                 // `try_acquire` is non-blocking, so a rejected request holds a permit for
                 // microseconds.
-                if let Err(structured) = self.enforce_request_quota(&request) {
+                //
+                // `context.meta` is passed explicitly: rmcp SWAPS `_meta` out of the request into
+                // the RequestContext before this method is called, so `request.meta` is always
+                // `None` here and measuring the request alone would miss the `_meta` channel
+                // entirely — which is the live bypass this piece exists to close.
+                if let Err(structured) = self.enforce_request_quota(&request, &context.meta) {
                     return Ok(err_json(&structured));
                 }
                 let tcc = ToolCallContext::new(self, request, context);
