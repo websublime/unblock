@@ -58,9 +58,15 @@ pub(crate) enum IssueInput {
     /// failure → ZERO writes). Output reuses `IssueOutput::Issues`.
     ///
     /// The document is REJECTED as a whole (`isError:true`, `VALIDATION_FAILED`, zero writes) when
-    /// it contains: an unrecognized or empty `### ` section header; a `### ` section before the
-    /// first `## `; or an invalid `### Priority` value. Each of these was previously accepted and
-    /// its content silently discarded.
+    /// it contains: an unrecognized `### ` section header; an EMPTY `### ` header; a `### ` section
+    /// before the first `## `; an invalid `### Priority` value; or a fenced code block that is
+    /// never closed. The first four were previously accepted and their content silently discarded.
+    ///
+    /// The fifth — the unterminated fence — is different, and is stated plainly rather than
+    /// footnoted: it REJECTS documents that GA 1.0.0 ACCEPTED. `CommonMark` lets an unclosed fence
+    /// run to the end of the document, which would swallow every later `## ` and `### ` into one
+    /// section's body; that is the same silent swallow the other four rejections exist to close, so
+    /// v1.0.1 rejects it instead — a behavioural break shipping in a PATCH release. Close the fence.
     CreateBulk {
         /// The inline bulk-markdown document content.
         ///
@@ -72,6 +78,16 @@ pub(crate) enum IssueInput {
         ///
         /// `### ` always starts a NEW section — use `#### ` for a sub-heading inside a section body,
         /// otherwise the enclosing section is terminated and the rest of it is lost.
+        ///
+        /// Fenced code blocks are OPAQUE: between an opening fence and its closer, `## ` and `### `
+        /// lines are CONTENT, not headers, so a markdown code sample cannot trip the section
+        /// rejections. A fence OPENS on a line carrying at most 3 leading spaces then a run of 3 or
+        /// more backticks or tildes, followed by an optional info string (for a backtick fence the
+        /// info string must contain no backtick, or the line is ordinary content). It CLOSES on a
+        /// line with the SAME marker, a run at least as long as the opener's, and no info string.
+        ///
+        /// **A fence that is never closed REJECTS the whole document**, naming the line it opened
+        /// on. This rejects input GA 1.0.0 accepted — see the `create_bulk` description.
         markdown: String,
     },
     /// Show a single issue by id.

@@ -39,8 +39,10 @@ use tokio_util::sync::CancellationToken;
 /// `unblock.mcp.v1.6` (v1.0.1/D42 — the MCP argument-boundary defect class. Every input container
 /// gains `#[serde(deny_unknown_fields)]`, so schemars emits `additionalProperties: false` per
 /// `oneOf` arm and the tagged-enum newtype arm is inlined rather than `$ref`-ed; the `create_bulk`
-/// doc-comment and the `markdown` field description are rewritten to publish the three new
-/// rejections and the closed section-name set. All of that moves `schema_bundle()` bytes. Per D35 an
+/// doc-comment and the `markdown` field description are rewritten to publish the closed
+/// section-name set, the code-fence grammar, and ALL FIVE `create_bulk` rejections — including the
+/// UNTERMINATED-FENCE rejection, which rejects documents GA 1.0.0 accepted (D42 clause 4(iii)).
+/// All of that moves `schema_bundle()` bytes. Per D35 an
 /// additive `.M` bump inside 1.x is NON-breaking, so this ships in the v1.0.1 patch — it is not a
 /// 2.0.0 event).
 pub const CONTRACT_VERSION: &str = "unblock.mcp.v1.6";
@@ -59,7 +61,7 @@ pub const CONTRACT_VERSION: &str = "unblock.mcp.v1.6";
 /// representation — any future dep enabling `serde_json/preserve_order` (feature unification, dev-deps
 /// included) reorders the schemars-generated maps and moves `CONTRACT_HASH` with NO contract change;
 /// if the gate fires with "nothing changed", check `Cargo.lock` feature unification first.
-pub const CONTRACT_HASH: &str = "295ab0298f65073c9e27676ffd18691f9b80bbe4f86569b1397601bf57fa1ccf";
+pub const CONTRACT_HASH: &str = "267e84e13312e09a1eebb2e38107bbece66fbc4aabe42fc3bdecd845b8f69672";
 
 /// Untrusted-input limits enforced **before** any `Session` call (NFR-18).
 ///
