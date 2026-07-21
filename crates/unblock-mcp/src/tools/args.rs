@@ -624,6 +624,73 @@ mod tests {
         for_each_tool_input!(run);
     }
 
+    /// `nested_container` must see through an `anyOf` alternation — which is how schemars renders an
+    /// `Option<NestedStruct>`. No SHIPPED input has that shape today, so without this cell the
+    /// alternation branch is dead code and a future `Option<DepInput>` field would silently drop out
+    /// of the hint. (Mutation M15.)
+    #[test]
+    fn a_nested_container_behind_an_any_of_is_still_found() {
+        let schema = serde_json::json!({
+            "anyOf": [{ "$ref": "#/$defs/Nested" }, { "type": "null" }]
+        });
+        let defs = serde_json::json!({
+            "Nested": { "type": "object", "properties": { "alpha": {}, "beta": {} } }
+        });
+        let defs = defs.as_object();
+        let (suffix, props) =
+            super::nested_container(&schema, defs).expect("the anyOf alternative is a container");
+        assert_eq!(suffix, "");
+        assert_eq!(props.keys().collect::<Vec<_>>(), vec!["alpha", "beta"]);
+    }
+
+    /// The discriminant must be a key every arm agrees on. A key that carries a `const` in only SOME
+    /// arms cannot select an arm from the payload, so taking the first const-bearing key of the
+    /// first arm would mis-key the whole index. No shipped schema exercises the disagreement (the
+    /// first const key IS the shared tag in all 8), so this is the only cell that covers it.
+    /// (Mutation M17.)
+    #[test]
+    fn the_discriminant_must_be_agreed_by_every_arm() {
+        let arms = vec![
+            serde_json::json!({"properties": {
+                "local": {"const": "only-here"}, "action": {"const": "a"}
+            }}),
+            serde_json::json!({"properties": { "action": {"const": "b"} }}),
+        ];
+        assert_eq!(
+            super::discriminant_of(&arms).as_deref(),
+            Some("action"),
+            "`local` is const in ONE arm only and must not be chosen"
+        );
+
+        let no_agreement = vec![
+            serde_json::json!({"properties": { "x": {"const": "a"} }}),
+            serde_json::json!({"properties": { "y": {"const": "b"} }}),
+        ];
+        assert_eq!(
+            super::discriminant_of(&no_agreement),
+            None,
+            "with no shared tag the index must fall back, never guess"
+        );
+    }
+
+    /// The index is MEMOIZED per `TypeId`. Without this the schema walk, the `BTreeMap` build and
+    /// every hint string are rebuilt on every rejection — the cost class MF-2 (c) exists to remove,
+    /// and a purely non-functional property no other cell can observe. (Mutation M21.)
+    #[test]
+    fn the_hint_index_is_memoized_per_type() {
+        let first = super::hint_index_of::<crate::tools::issue::IssueInput>();
+        let second = super::hint_index_of::<crate::tools::issue::IssueInput>();
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &second),
+            "a rejection must not rebuild the index"
+        );
+        let other = super::hint_index_of::<crate::tools::claim::ClaimInput>();
+        assert!(
+            !std::sync::Arc::ptr_eq(&first.clone(), &other),
+            "distinct types must not share an entry"
+        );
+    }
+
     /// Parse the field names out of a rendered hint clause (`…accepted fields: a, b, c…`).
     fn accepted_fields(hint: &str) -> Vec<String> {
         let Some(rest) = hint.split("accepted fields: ").nth(1) else {
