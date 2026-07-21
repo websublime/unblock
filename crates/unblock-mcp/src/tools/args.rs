@@ -40,6 +40,7 @@
 //! schema expression at 8 sites with no compiler coupling.
 
 use std::borrow::Cow;
+use std::fmt::Write as _;
 use std::marker::PhantomData;
 
 use rmcp::ErrorData;
@@ -141,55 +142,237 @@ fn kind_from_serde_message(message: &str) -> &'static str {
     }
 }
 
-/// The accepted top-level argument names for `T`, **DERIVED from the published schema**.
+/// The `$defs` map of a published schema, if it has one.
+type Defs<'a> = Option<&'a serde_json::Map<String, serde_json::Value>>;
+/// A JSON-Schema `properties` map.
+type Props<'a> = &'a serde_json::Map<String, serde_json::Value>;
+
+/// The maximum `$ref` hops followed when resolving a subschema. A `$defs` graph is not guaranteed
+/// acyclic, and this walk runs on attacker-reachable input, so the recursion is HARD-bounded rather
+/// than trusted.
+const MAX_REF_HOPS: usize = 8;
+
+/// The precomputed, per-type hint texts, **DERIVED from the published `inputSchema`**.
 ///
-/// Hand-maintained field lists rot silently; this reads the same `schema_for_type` output that
-/// `#[tool]` publishes as the `inputSchema`, so the hint can never enumerate a set the wire does not
-/// accept. Walks the root `properties` plus every `oneOf`/`anyOf`/`allOf` arm (resolving a `$ref`
-/// into `$defs`), which covers our tagged-enum inputs and their flattened targets.
+/// # Why this is not one flat field list
 ///
-/// Only ever called on the error path, and `schema_for_type` is thread-local-cached, so the cost is
-/// paid once per type per thread on the first rejection.
-fn known_fields_of<T: JsonSchema + std::any::Any>() -> String {
-    let schema = rmcp::handler::server::common::schema_for_type::<T>();
-    let root = serde_json::Value::Object((*schema).clone());
-    let mut names = std::collections::BTreeSet::new();
-    collect_properties(&root, &root, &mut names);
-    names.into_iter().collect::<Vec<_>>().join(", ")
+/// The previous shape unioned the root with EVERY `oneOf`/`anyOf`/`allOf` arm, so on a tagged-union
+/// input it enumerated every field of every action. That reintroduced the exact defect D42 exists to
+/// kill: `issue{action:"show", id, junk}` rejected `junk` while advertising all 35 fields across the
+/// 7 arms — and the follow-up `issue{action:"show", id, markdown}` the hint invited was then
+/// rejected by the same call. 33 of the 37 arms over-stated.
+///
+/// So the index is keyed by the DISCRIMINANT VALUE: the hint enumerates the MATCHED arm only. Per
+/// the D42 analysis the hint is one of only two signals that survive a flattening MCP client, so a
+/// hint that lists fields the wire rejects is worse than no hint.
+struct HintIndex {
+    /// The discriminant property name (`action` / `kind`), when the input is a tagged union.
+    tag: Option<String>,
+    /// Hint text per discriminant value.
+    arms: std::collections::BTreeMap<String, String>,
+    /// Used when the input is NOT a union, or when the tag is absent / not a string / unrecognized
+    /// — in which case the actionable information is the accepted TAG VALUES, not any field list.
+    fallback: String,
 }
 
-/// Collect the `properties` keys of `node` and of every composition arm below it.
-fn collect_properties(
-    node: &serde_json::Value,
-    root: &serde_json::Value,
-    out: &mut std::collections::BTreeSet<String>,
-) {
-    if let Some(props) = node
-        .get("properties")
-        .and_then(serde_json::Value::as_object)
-    {
-        out.extend(props.keys().cloned());
+impl HintIndex {
+    /// The hint text for `raw`.
+    ///
+    /// The returned `&str` borrows `self` ONLY (not `raw`), so the caller can look the hint up
+    /// while it still owns the raw arguments and then move them into the deserializer — which is
+    /// what keeps the OK path free of any extra allocation.
+    fn hint_for<'a>(&'a self, raw: &JsonObject) -> &'a str {
+        if let Some(tag) = self.tag.as_deref()
+            && let Some(value) = raw.get(tag).and_then(serde_json::Value::as_str)
+            && let Some(text) = self.arms.get(value)
+        {
+            return text;
+        }
+        &self.fallback
     }
-    if let Some(reference) = node.get("$ref").and_then(serde_json::Value::as_str)
-        && let Some(name) = reference.strip_prefix("#/$defs/")
-        && let Some(target) = root.get("$defs").and_then(|d| d.get(name))
-    {
-        collect_properties(target, root, out);
+}
+
+/// Follow `$ref` hops into `$defs`, bounded by [`MAX_REF_HOPS`].
+fn resolve<'a>(mut node: &'a serde_json::Value, defs: Defs<'a>) -> &'a serde_json::Value {
+    for _ in 0..MAX_REF_HOPS {
+        let Some(target) = node
+            .get("$ref")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|r| r.strip_prefix("#/$defs/"))
+            .and_then(|name| defs?.get(name))
+        else {
+            return node;
+        };
+        node = target;
     }
-    for key in ["oneOf", "anyOf", "allOf"] {
-        if let Some(arms) = node.get(key).and_then(serde_json::Value::as_array) {
-            for arm in arms {
-                collect_properties(arm, root, out);
+    node
+}
+
+/// The `properties` map of a nested CONTAINER reachable through `sub`, plus the suffix that names
+/// how it is reached (`"[]"` for an array element, `""` for a plain object).
+///
+/// **This is where `items` is traversed.** Without it a nested container is unreachable from the
+/// hint: `deps:[{…,"metadataa":"LOST"}]` is correctly REJECTED by `DepInput`'s own
+/// `deny_unknown_fields`, but the hint used to list the OUTER `issue` fields and omit `metadata`
+/// entirely — telling the caller to fix a field that was never the problem.
+fn nested_container<'a>(
+    sub: &'a serde_json::Value,
+    defs: Defs<'a>,
+) -> Option<(&'static str, Props<'a>)> {
+    let sub = resolve(sub, defs);
+    if let Some(items) = sub.get("items") {
+        let items = resolve(items, defs);
+        return items
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .map(|p| ("[]", p));
+    }
+    if let Some(props) = sub.get("properties").and_then(serde_json::Value::as_object) {
+        return Some(("", props));
+    }
+    // `Option<Nested>` renders as `anyOf: [{$ref: …}, {"type":"null"}]`.
+    for key in ["anyOf", "oneOf", "allOf"] {
+        if let Some(alternatives) = sub.get(key).and_then(serde_json::Value::as_array) {
+            for alternative in alternatives {
+                if let Some(found) = nested_container(alternative, defs) {
+                    return Some(found);
+                }
             }
         }
     }
+    None
+}
+
+/// Render the accepted-field clauses for one container: its own keys, then one clause per nested
+/// container reachable from them.
+fn field_clauses(props: Props<'_>, defs: Defs<'_>) -> String {
+    let own = props.keys().cloned().collect::<Vec<_>>().join(", ");
+    let mut text = format!("accepted fields: {own}");
+    for (name, sub) in props {
+        if let Some((suffix, nested)) = nested_container(sub, defs) {
+            let inner = nested.keys().cloned().collect::<Vec<_>>().join(", ");
+            let _ = write!(text, "; nested `{name}{suffix}` accepts: {inner}");
+        }
+    }
+    text
+}
+
+/// The discriminant property name shared by every arm — the key that carries a string `const` in
+/// ALL of them. Returns `None` if the arms do not agree, in which case no arm can be selected and
+/// the index falls back rather than guessing.
+fn discriminant_of(arms: &[serde_json::Value]) -> Option<String> {
+    let first = arms.first()?.get("properties")?.as_object()?;
+    let candidates = first
+        .iter()
+        .filter(|(_, sub)| {
+            sub.get("const")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+        })
+        .map(|(name, _)| name.clone());
+    candidates.into_iter().find(|candidate| {
+        arms.iter().all(|arm| {
+            arm.get("properties")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|p| p.get(candidate))
+                .and_then(|sub| sub.get("const"))
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+        })
+    })
+}
+
+/// Build the [`HintIndex`] for a published schema, **walking the `Arc<JsonObject>` IN PLACE**.
+///
+/// The previous cut did `serde_json::Value::Object((*schema).clone())` — a deep clone of a
+/// ~11 KB schema on EVERY rejection, measured at ~20 µs, i.e. ~100x the whole OK path and ~610 ns
+/// per attacker byte on a 42-byte malformed call. Nothing here clones the schema.
+fn build_hint_index(schema: &JsonObject) -> HintIndex {
+    let defs = schema.get("$defs").and_then(serde_json::Value::as_object);
+    let arms = schema.get("oneOf").and_then(serde_json::Value::as_array);
+
+    let Some(arms) = arms.filter(|a| !a.is_empty()) else {
+        let fallback = schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .map_or_else(
+                || "this tool takes no arguments".to_string(),
+                |props| field_clauses(props, defs),
+            );
+        return HintIndex {
+            tag: None,
+            arms: std::collections::BTreeMap::new(),
+            fallback,
+        };
+    };
+
+    let Some(tag) = discriminant_of(arms) else {
+        // An untagged union: no arm can be selected from the payload, so enumerate nothing rather
+        // than over-state. This is unreachable for the 8 shipped inputs (pinned by
+        // `every_shipped_tool_input_has_a_selectable_discriminant`).
+        return HintIndex {
+            tag: None,
+            arms: std::collections::BTreeMap::new(),
+            fallback: "check the argument names against the tool schema".to_string(),
+        };
+    };
+
+    let mut by_value = std::collections::BTreeMap::new();
+    for arm in arms {
+        let Some(props) = arm.get("properties").and_then(serde_json::Value::as_object) else {
+            continue;
+        };
+        let Some(value) = props
+            .get(&tag)
+            .and_then(|sub| sub.get("const"))
+            .and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+        by_value.insert(
+            value.to_string(),
+            format!("for `{tag}` = `{value}`, {}", field_clauses(props, defs)),
+        );
+    }
+
+    let values = by_value.keys().cloned().collect::<Vec<_>>().join(", ");
+    HintIndex {
+        fallback: format!("`{tag}` must be one of: {values}"),
+        tag: Some(tag),
+        arms: by_value,
+    }
+}
+
+/// The memoized [`HintIndex`] for `T`.
+///
+/// Mirrors the thread-local, `TypeId`-keyed memo `rmcp` uses for the schema itself
+/// (`rmcp-1.7.0/src/handler/server/common.rs:12-16`): the schema walk, the `BTreeMap` build and
+/// every hint string are produced ONCE per type per thread, so a rejection costs one map lookup and
+/// one `Arc` clone rather than a schema clone plus a full re-walk.
+fn hint_index_of<T: JsonSchema + std::any::Any>() -> std::sync::Arc<HintIndex> {
+    thread_local! {
+        static CACHE: std::cell::RefCell<
+            std::collections::HashMap<std::any::TypeId, std::sync::Arc<HintIndex>>,
+        > = std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    let key = std::any::TypeId::of::<T>();
+    CACHE.with(|cache| {
+        if let Some(index) = cache.borrow().get(&key) {
+            return index.clone();
+        }
+        let index = std::sync::Arc::new(build_hint_index(
+            &rmcp::handler::server::common::schema_for_type::<T>(),
+        ));
+        cache.borrow_mut().insert(key, index.clone());
+        index
+    })
 }
 
 /// Map a serde deserialization failure to the FR-11 in-band [`StructuredError`].
 ///
 /// The echoed text is **clipped before** it reaches `StructuredError::from_code` (which sanitizes),
 /// so an attacker-supplied 64 KiB field name cannot be amplified into the response (§3.5.3).
-fn args_error(err: &serde_json::Error, known_fields: &str) -> StructuredError {
+fn args_error(err: &serde_json::Error, hint: &str) -> StructuredError {
     let raw = err.to_string();
     let clipped = clip(&raw);
     let kind = kind_from_serde_message(&raw);
@@ -202,7 +385,7 @@ fn args_error(err: &serde_json::Error, known_fields: &str) -> StructuredError {
     // hint and the field descriptions are the ONLY two levers that survive a flattening MCP client,
     // so this is load-bearing, not cosmetic.
     .with_hint(format!(
-        "check the argument names against the tool schema; accepted fields: {known_fields}"
+        "check the argument names against the tool schema; {hint}"
     ))
     .with_context("kind", serde_json::json!(kind));
     if let Some(field) = field_from_serde_message(&raw) {
@@ -224,8 +407,12 @@ fn args_error(err: &serde_json::Error, known_fields: &str) -> StructuredError {
 pub(crate) fn parse_args<T: DeserializeOwned + JsonSchema + std::any::Any>(
     raw: JsonObject,
 ) -> Result<T, StructuredError> {
+    let index = hint_index_of::<T>();
+    // `hint` borrows `index`, NOT `raw` — so `raw` can still be moved into the deserializer and the
+    // OK path pays nothing beyond one memo lookup.
+    let hint = index.hint_for(&raw);
     serde_json::from_value::<T>(serde_json::Value::Object(raw))
-        .map_err(|err| args_error(&err, &known_fields_of::<T>()))
+        .map_err(|err| args_error(&err, hint))
 }
 
 #[cfg(test)]
@@ -268,6 +455,188 @@ mod tests {
             Some("body")
         );
         assert_eq!(field_from_serde_message("invalid type: integer"), None);
+    }
+
+    // --- MF-2: the hint must never advertise a field the same call rejects -----------------------
+
+    /// The 8 shipped tool inputs, as `(tool name, input type)`. Every cell below runs over ALL of
+    /// them, so a new tool cannot quietly skip the invariant.
+    macro_rules! for_each_tool_input {
+        ($mac:ident) => {
+            $mac!("issue", crate::tools::issue::IssueInput);
+            $mac!("claim", crate::tools::claim::ClaimInput);
+            $mac!("defer", crate::tools::defer::DeferInput);
+            $mac!("query", crate::tools::query::QueryInput);
+            $mac!("dep", crate::tools::dep::DepToolInput);
+            $mac!("sync", crate::tools::sync::SyncInput);
+            $mac!("diagnostics", crate::tools::diagnostics::DiagnosticsInput);
+            $mac!("comment", crate::tools::comment::CommentToolInput);
+        };
+    }
+
+    /// **THE MF-2 INVARIANT, executed.** For every tool, every arm, and every field the hint
+    /// enumerates for that arm: a call carrying `{tag: value, field: …}` must NOT be rejected as an
+    /// `unknown_field`. A `type_mismatch` is fine — the point is that the field EXISTS.
+    ///
+    /// The pre-fix derivation unioned the root with every `oneOf`/`anyOf`/`allOf` arm, so
+    /// `issue{action:"show"}` advertised all 35 fields across the 7 arms and 33 of the 37 arms
+    /// over-stated. This test turns RED under any return to that shape.
+    #[test]
+    fn no_arm_hint_ever_enumerates_a_field_the_same_call_rejects() {
+        // `claim` is the only non-union input; it has no arms and returns early. Its own field list
+        // is covered by `the_non_union_input_enumerates_only_fields_it_accepts`.
+        macro_rules! run {
+            ($tool:expr, $ty:ty) => {
+                (|| {
+                    let index = super::hint_index_of::<$ty>();
+                    let Some(tag) = index.tag.as_deref() else {
+                        return;
+                    };
+                    assert!(!index.arms.is_empty(), "{} has no arms", $tool);
+                    for (value, hint) in &index.arms {
+                        for field in accepted_fields(hint) {
+                            let mut raw = serde_json::Map::new();
+                            raw.insert(tag.to_string(), serde_json::json!(value));
+                            raw.insert(field.clone(), serde_json::json!("probe"));
+                            if let Err(err) = super::parse_args::<$ty>(raw) {
+                                assert_ne!(
+                                    err.context["kind"], "unknown_field",
+                                    "{} `{}`=`{}`: the hint advertises `{}`, which the SAME call \
+                                     rejects — the exact defect D42 exists to kill",
+                                    $tool, tag, value, field
+                                );
+                            }
+                        }
+                    }
+                })();
+            };
+        }
+        for_each_tool_input!(run);
+    }
+
+    /// The non-union input (`claim`) enumerates its own fields, and every one is accepted.
+    #[test]
+    fn the_non_union_input_enumerates_only_fields_it_accepts() {
+        let index = super::hint_index_of::<crate::tools::claim::ClaimInput>();
+        assert!(index.tag.is_none(), "`claim` is the only non-enum outer");
+        let fields = accepted_fields(&index.fallback);
+        assert!(fields.contains(&"id".to_string()), "{}", index.fallback);
+        for field in fields {
+            let mut raw = serde_json::Map::new();
+            raw.insert(field.clone(), serde_json::json!("probe"));
+            if let Err(err) = super::parse_args::<crate::tools::claim::ClaimInput>(raw) {
+                assert_ne!(err.context["kind"], "unknown_field", "claim: `{field}`");
+            }
+        }
+    }
+
+    /// NON-VACUITY + the concrete regression: `issue{action:"show"}` must enumerate the SHOW arm
+    /// only. Pre-fix it listed all 35 fields across the 7 arms, including `markdown` — which the
+    /// very next call with `{action:"show", markdown:"x"}` then rejected.
+    #[test]
+    fn the_show_arm_hint_is_the_show_arm_only() {
+        let mut raw = serde_json::Map::new();
+        raw.insert("action".into(), serde_json::json!("show"));
+        raw.insert("id".into(), serde_json::json!("ub-1"));
+        raw.insert("junk".into(), serde_json::json!(1));
+        let err = super::parse_args::<crate::tools::issue::IssueInput>(raw)
+            .expect_err("`junk` is an unknown field");
+        let hint = err.hint.as_deref().expect("hint");
+        assert_eq!(
+            accepted_fields(hint),
+            vec!["action".to_string(), "id".to_string()],
+            "{hint}"
+        );
+        assert!(
+            !hint.contains("markdown"),
+            "the pre-fix hint advertised `markdown` on `show`, and the follow-up call it invited \
+             was then rejected by the same tool: {hint}"
+        );
+    }
+
+    /// **MF-2 (b): `items` traversal.** `deps:[{…,"metadataa":"LOST"}]` is correctly rejected by
+    /// `DepInput`'s own `deny_unknown_fields`, but the pre-fix hint listed the OUTER `issue` fields
+    /// and OMITTED `metadata` — pointing the caller at the wrong container entirely.
+    #[test]
+    fn a_nested_container_is_reachable_from_the_hint() {
+        let mut raw = serde_json::Map::new();
+        raw.insert("action".into(), serde_json::json!("create"));
+        raw.insert("title".into(), serde_json::json!("t"));
+        raw.insert(
+            "deps".into(),
+            serde_json::json!([{
+                "issue_id": "a", "depends_on_id": "b", "dep_type": "blocks", "metadataa": "LOST"
+            }]),
+        );
+        let err = super::parse_args::<crate::tools::issue::IssueInput>(raw)
+            .expect_err("`metadataa` is an unknown field on DepInput");
+        assert_eq!(err.context["field"], "metadataa");
+        let hint = err.hint.as_deref().expect("hint");
+        assert!(
+            hint.contains("nested `deps[]` accepts:"),
+            "the nested container must be named: {hint}"
+        );
+        for field in ["issue_id", "depends_on_id", "dep_type", "metadata"] {
+            assert!(hint.contains(field), "`{field}` missing from: {hint}");
+        }
+    }
+
+    /// An ABSENT / unrecognized discriminant yields the accepted TAG VALUES — which is the
+    /// actionable information — never a union of every arm's fields.
+    #[test]
+    fn a_missing_or_unknown_tag_enumerates_the_accepted_tag_values() {
+        for tag_value in [serde_json::json!("bogus_action"), serde_json::json!(7)] {
+            let mut raw = serde_json::Map::new();
+            raw.insert("action".into(), tag_value.clone());
+            let err = super::parse_args::<crate::tools::issue::IssueInput>(raw)
+                .expect_err("not a known action");
+            let hint = err.hint.as_deref().expect("hint");
+            assert!(hint.contains("`action` must be one of:"), "{hint}");
+            assert!(hint.contains("create_bulk"), "{hint}");
+            assert!(
+                !hint.contains("markdown"),
+                "field names must not leak into the tag-value hint: {hint}"
+            );
+        }
+    }
+
+    /// Every shipped union input must expose a SELECTABLE discriminant; otherwise `build_hint_index`
+    /// silently degrades to the no-enumeration fallback and the hint stops being a signal at all.
+    #[test]
+    fn every_shipped_tool_input_has_a_selectable_discriminant() {
+        macro_rules! run {
+            ($tool:expr, $ty:ty) => {
+                (|| {
+                    let index = super::hint_index_of::<$ty>();
+                    if $tool == "claim" {
+                        assert!(index.tag.is_none(), "claim is the non-enum outer");
+                        return;
+                    }
+                    let tag = index
+                        .tag
+                        .as_deref()
+                        .unwrap_or_else(|| panic!("{} lost its discriminant", $tool));
+                    assert!(tag == "action" || tag == "kind", "{}: {tag}", $tool);
+                    assert!(!index.arms.is_empty(), "{}", $tool);
+                })();
+            };
+        }
+        for_each_tool_input!(run);
+    }
+
+    /// Parse the field names out of a rendered hint clause (`…accepted fields: a, b, c…`).
+    fn accepted_fields(hint: &str) -> Vec<String> {
+        let Some(rest) = hint.split("accepted fields: ").nth(1) else {
+            return Vec::new();
+        };
+        rest.split(';')
+            .next()
+            .unwrap_or_default()
+            .split(", ")
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect()
     }
 
     #[test]
