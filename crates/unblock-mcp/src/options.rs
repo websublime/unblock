@@ -32,9 +32,11 @@ use tokio_util::sync::CancellationToken;
 /// `comment` tool adds a per-tool `{input,output}` pair to `schema_bundle()` + an 8th
 /// `capabilities()` descriptor, AND the `$defs/Comment` embedded inside the EXISTING `issue`/`query`
 /// OUTPUT schemas gains 2 properties (`updated_at`/`redacted_at`) — so existing schema bytes move
-/// too, not merely a new pair). The `unblock.mcp.vN[.M]` family preserves the contract-id convention
-/// while the `.M` revision marks an additive contract change within the v1 product.
-/// → `unblock.mcp.v1.6` (v1.0.1/D42 — the MCP argument-boundary defect class. Every input container
+/// too, not merely a new pair) → `unblock.mcp.v1.6` (v1.0.1/D42 — see the clause below).
+/// The `unblock.mcp.vN[.M]` family preserves the contract-id convention while the `.M` revision
+/// marks an additive contract change within the v1 product.
+///
+/// `unblock.mcp.v1.6` (v1.0.1/D42 — the MCP argument-boundary defect class. Every input container
 /// gains `#[serde(deny_unknown_fields)]`, so schemars emits `additionalProperties: false` per
 /// `oneOf` arm and the tagged-enum newtype arm is inlined rather than `$ref`-ed; the `create_bulk`
 /// doc-comment and the `markdown` field description are rewritten to publish the three new

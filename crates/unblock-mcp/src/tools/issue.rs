@@ -508,7 +508,7 @@ fn parse_section_value<T: std::str::FromStr>(
 /// references are carried VERBATIM (as `dep_refs` / symbolic `parent` / `stand_in_id`) — the ENGINE
 /// resolves them at `create_bulk`.
 ///
-/// **D42:** the `priority` / `issue_type` strings are NO LONGER parsed leniently. The pre-D42
+/// **D42:** a present-but-invalid `priority` / `issue_type` string is now REJECTED. The pre-D42
 /// `.and_then(|p| p.parse().ok())` collapsed an invalid `### Priority` to `None`, which
 /// `write.rs`'s `unwrap_or_default()` then turned into `MEDIUM` (P2) — the user asked for a
 /// priority, got P2, and got no error.

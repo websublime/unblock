@@ -105,7 +105,7 @@ No domain types are re-exported; consumers needing them go through MCP. The four
 - **Integration tests (`assert_cmd` + `tempfile`):** real binary, real temp workspace, piped stdio for `mcp`. The MCP-server↔client and SIGTERM failure-injection cases are the reliability gate (NFR-5).
 - **proptest:** light — property over the exit-code mapping (every `ErrorCode` round-trips to a value in `0..=8`) and over `OutputFormat` precedence resolution (CLI > env > config > default holds for arbitrary layer combinations).
 - **No `criterion` benches in this crate.** CLI is not on a hot path; performance budgets (NFR-1/NFR-2) are owned by storage/engine. (If `mcp` startup latency becomes a metric per PRD §14, add a single startup-time bench in v1 — flagged as an open question, Q4.)
-- **fuzz:** none here; ingestion fuzzing lives in `unblock-fuzz` over model/sync/storage. The CLI's only untrusted input is argv (clap-validated) and stdin (handled by `unblock-mcp`'s schemars boundary, NFR-18).
+- **fuzz:** none here; ingestion fuzzing lives in `unblock-fuzz` over model/sync/storage. The CLI's only untrusted input is argv (clap-validated) and stdin (handled by `unblock-mcp`'s argument boundary — a quota check over the whole `tools/call` `params` plus a `deny_unknown_fields` typed parse (D42). NOTE the CLI's own stdin path is NOT covered by that params-scoped cap: it applies to MCP `tools/call` requests only, NFR-18).
 - **No-git static gate:** `tests/no_git_gate.rs` + workspace `cargo-deny` (NFR-6).
 
 ---

@@ -76,16 +76,39 @@ M0 Foundation → M1 Engine + core domain → M2 MCP surface → M3 Reliability 
 A small, orthogonal-to-the-resequence patch slot (recorded 2026-07-20; PRD §4 D41): a bugfix/maintenance
 release cut on top of GA **before** v1.1, carrying the concrete dogfood defects found running unblock on its
 own repo plus the one release-pipeline gap never exercised end-to-end:
-- **`comment add` silent no-op** (P0) — a dogfood-found defect where an add returns success but persists nothing
-  (the `add` payload field mismatch surfaced while recording outcomes-as-comments); fix so a comment is durably stored.
+- **MCP argument-boundary defect class** (P0, PRD §4 **D42**) — a class of boundary defects found while
+  dogfooding, of which the `comment add` payload-field mismatch was the symptom that surfaced first. Three
+  in-seam facets: argument errors ESCAPED the FR-11 structured channel as out-of-band `-32602`; unknown /
+  misspelled fields were SILENTLY DISCARDED with `isError:false` (real data loss); and the NFR-18 per-request
+  quota measured a re-serialized TYPED value, so anything parked under an unknown key was never measured at
+  all. Plus three out-of-seam silent drops in `issue create_bulk` (unknown `### ` section, invalid
+  `### Priority`, `### ` before the first `## `) and `dep.metadata` / `dep.thread_id` being discarded at L2.
 - **Missing forward-migration for the comments schema** (P1) — the D37 comments tables need a forward migration
-  so long-lived DBs (not just fresh-created ones) pick up the schema (the D-feedback "editing an applied
-  migration drifts long-lived DBs" lesson — ship a *forward* migration, never an in-place edit).
+  so long-lived DBs (not just fresh-created ones) pick up the schema and a comment is **durably stored** there
+  too (the D-feedback "editing an applied migration drifts long-lived DBs" lesson — ship a *forward* migration,
+  never an in-place edit). Independent of D42 and mergeable in either order; **hard constraint: that migration
+  must NOT `ALTER TABLE ADD COLUMN dependencies.metadata` / `.thread_id`** — both are BASELINE-v1 and already
+  present, so it would hard-error on every existing DB.
 - **`unblock update` end-to-end smoke** — the self-update path (FR-25, axoupdater → dist installer → SHA256
   check-before-swap) has never been run end-to-end against a real published release; add the smoke so the GA
   self-update promise is exercised, not just unit-asserted.
 
-This slot is **maintenance only** — no FR is added or re-tiered; it does not touch the v1.2+ resequence below.
+This slot is a **maintenance patch, but it is not "maintenance only"** — that framing is retired. No FR is
+added or re-tiered, and the v1.2+ resequence below is untouched. But **D42 spans two layers**: **L7
+`unblock-mcp`** (the argument seam, the `call_tool` quota chokepoint, the `create_bulk` parser) and **L2
+`unblock-storage`** (the `dependencies` INSERT now binds `metadata`/`thread_id`); `unblock-cli` and
+`unblock-sync` gain tests only, and **`unblock-engine` (L5) is deliberately NOT touched** — the related
+`issue create {deps:[…]}` non-atomicity is a pre-existing GA defect tracked separately. It carries an
+**additive `contract_version` bump to `unblock.mcp.v1.6`** (D35 permits additive `.M` bumps inside 1.x,
+so this stays v1.0.1-eligible and is **not** a 2.0.0 event) with a `CONTRACT_HASH` re-pin. It **inverts a
+shipped test that asserted a silent drop was correct** — `unknown_sections_ignored` becomes
+`unknown_section_rejected`. And it **newly rejects five previously-accepted input classes**: (1) an unknown or
+misspelled **tool argument** on any of the 8 tools; (2) an **unrecognized (or empty) `### ` markdown section**
+in `issue create_bulk`; (3) an **invalid `### Priority` value** (previously silently defaulted to P2); (4) a
+**`### ` section before the first `## ` heading** (previously consumed and discarded); (5) a `tools/call` whose
+**whole `params`** — now including `_meta` — exceeds the NFR-18 per-request cap, or that carries an object
+**key** longer than `max_string_len`. It also strengthens AC-level wording on existing must-FRs where a
+shipped AC was unmet (FR-20, FR-12, NFR-18). **It adds no public API surface.**
 
 ---
 
@@ -433,7 +456,7 @@ Legend: ● lands · ◐ extended/hardened · ✗ = dropped · blank = not landi
 | Defer/undefer (FR-3) | ● | | | | | | | |
 | Query: list/ready/blocked/search/count/stale (FR-4) | ● | | | ◐ milestone filter | | | | |
 | Typed deps + graph (FR-5) | ● | | | | | | | |
-| Comments — full CRUD add/list/update/delete (FR-6, D37) | ● | ◐ `comment add` persistence fix + forward migration | | | | | | |
+| Comments — full CRUD add/list/update/delete (FR-6, D37) | ● | ◐ comments forward migration | | | | | | |
 | Labels (rename/list-all) / epic rollups (FR-6) | | | ● | | | | | |
 | JSONL export/import (FR-7/8) | ● | | | ◐ milestones/goals layout (lock design point) | | | | ◐ DB-only option |
 | `bd` one-shot import (FR-26) | ● | | | | | | | |
@@ -446,7 +469,7 @@ Legend: ● lands · ◐ extended/hardened · ✗ = dropped · blank = not landi
 | Cooperative shutdown (FR-17) | ● | | | | | | | |
 | Swarm coordination / scheduler (FR-18) | | | ● diagnostics | | ◐ actor attribution | | ◐ active + v2 | |
 | Workflow gates (FR-19) | | | ● | ◐ milestone-close gate (candidate) | | | | |
-| MCP stdio server (FR-20) | ● | | ◐ surface | ◐ planning tool | ◐ sync resources | | ◐ batch/stream | ◐ other transports (unscheduled) |
+| MCP stdio server (FR-20) | ● | ◐ argument-boundary defect class (D42 — L7 seam + L2 dep fields; additive contract bump `v1.5`→`v1.6`) | ◐ surface | ◐ planning tool | ◐ sync resources | | ◐ batch/stream | ◐ other transports (unscheduled) |
 | Saved queries (FR-21) | | | ● | | | | | |
 | Audit / flight recorder (FR-22) | | | ● | | ◐ actor conventions | | | |
 | Shell completions (FR-23) | | | ● | | | | | |
@@ -500,9 +523,12 @@ Notes:
   shapes); `unblock-mcp` itself takes **no new v1.4 work** (hence it is blank at v1.4 in the table above — the
   web-era ◐ was the retired HTTP-serving touch). It is minted only at v1.4 lock, when PRD §8.1 grows; until
   then the 12-crate set is unchanged.
-- **`v1.0.1`** is the maintenance-patch column (§1, PRD §4 D41): `unblock-storage` ● carries the comments
-  forward-migration, `unblock-mcp` ◐ the `comment add` persistence fix, `unblock-cli` ◐ the end-to-end
-  `unblock update` smoke. It adds no FR and re-tiers nothing — hence the sparse column.
+- **`v1.0.1`** is the maintenance-patch column (§1, PRD §4 D41 + **D42**): `unblock-storage` ● carries the
+  comments forward-migration **and the D42 `dependencies` 7-column bind (`metadata`/`thread_id`)**,
+  `unblock-mcp` ◐ the D42 argument-boundary error-channel + strict-args fix + the three `create_bulk`
+  rejections, `unblock-cli` ◐ the end-to-end `unblock update` smoke **plus the D42 wire-level error-channel
+  matrix (tests only)**, `unblock-sync` tests only. **`unblock-engine` is NOT touched.** It adds no FR and
+  re-tiers nothing — hence the sparse column.
 - **100% Rust, no Node:** the TUI adds **no npm/Node build stage** to `dist` and **no `ui` Cargo feature** —
   `cargo-deny` covers the whole tree and the binary gains no npm supply-chain surface. (The web dashboard's
   npm/Node ecosystem lives in the separate v2+ commercial PRO product — roadmap §7 — not the OSS tree.)

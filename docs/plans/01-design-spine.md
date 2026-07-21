@@ -1032,6 +1032,21 @@ The dependency ops (FR-5) — source-verified vs the original cycle machinery:
   synthetic `a -> … -> a` placeholder (FR-5 AC). On success: insert + transactional
   `Event(DependencyAdded)`. (The reparent cycle-check, `crud.rs`, routes through the same
   `would_cycle_in_tx`, so the orientation fix below lands once.)
+- **Dependency edge PERSISTENCE (NORMATIVE — D42; the spine was previously SILENT here, which is
+  exactly why a 5-column INSERT never read as a bug).** `add_dependency` and `create_issue` persist the
+  **FULL 6-field** `Dependency`: `issue_id`, `depends_on_id`, `dep_type`, `created_at`, `created_by`,
+  **`metadata`** and **`thread_id`**. The read projection was always 7-column; the write side bound 5,
+  so `metadata`/`thread_id` were accepted, typed, schema-published — and DISCARDED. **`None` is stored
+  as SQL NULL**, never `'{}'`/`''`, so `None → NULL → None` round-trips exactly; a stored `'{}'` reads
+  back as `None` (deliberate legacy tolerance — do not remove that filter). Both columns are
+  **BASELINE-v1**: they are in the original `SCHEMA_SQL`, so no forward migration is needed and a
+  future migration must NOT `ALTER TABLE ADD COLUMN` either one (it would hard-error on every existing
+  database). `apply_reparent` and the storage testkit helper deliberately stay 5-column — they
+  synthesise an edge with no user `Dependency` object, so the column DEFAULTs are correct there.
+  **BOUND:** `Session::create_issue` inserts the issue and THEN loops `add_dependency` in a separate
+  call, so `issue create {deps:[…]}` is NON-ATOMIC and FK-fails (the client cannot supply the
+  server-minted id). That is a known PRE-EXISTING defect tracked separately, NOT endorsed here and NOT
+  fixed by D42 — no `dep.metadata` round-trip is claimed for that path.
 - **`would_cycle_in_tx` edge orientation (NORMATIVE — D4 correctness pin; `check_cycle`
   sqlite.rs:2440–2453 + `load_dependency_cycle_graph` sqlite.rs:11379–11387).** When building the
   gating cycle graph, the three blocking types (`blocks`/`conditional-blocks`/`waits-for`) are inserted
@@ -1680,7 +1695,7 @@ impl Session {
 
 ## 5. MCP schemas — `unblock-mcp` (L7)
 
-**rmcp 1.7** (`server`, `transport-io`) stdio server (`unblock mcp`), thin adapter over `Session`. **8 consolidated tools** (the ≤ 8 RK-3 ceiling — the D37 `comment` tool landed at T3.9 as the 8th, §5.1 row 8 / §6.6, so the budget is now **FULL**). Resources, prompts. Every tool input/output derives `JsonSchema` + `Serialize`/`Deserialize` — inputs AND outputs ride the schema bundle as per-tool `{input, output}` pairs (D25, §5.3/§5.4); args are schemars-validated with size/rate limits (NFR-18). Discovery (`capabilities`/`schema`) carries `contract_version` (FR-12), and BOTH discovery documents are covered by the single pinned `CONTRACT_HASH` drift gate (D22 clause 8 widened by D25 — §5.4).
+**rmcp 1.7** (`server`, `transport-io`) stdio server (`unblock mcp`), thin adapter over `Session`. **8 consolidated tools** (the ≤ 8 RK-3 ceiling — the D37 `comment` tool landed at T3.9 as the 8th, §5.1 row 8 / §6.6, so the budget is now **FULL**). Resources, prompts. Every tool input/output derives `JsonSchema` + `Serialize`/`Deserialize` — inputs AND outputs ride the schema bundle as per-tool `{input, output}` pairs (D25, §5.3/§5.4); args are quota-checked and strictly deserialized with size/rate limits (NFR-18). Discovery (`capabilities`/`schema`) carries `contract_version` (FR-12), and BOTH discovery documents are covered by the single pinned `CONTRACT_HASH` drift gate (D22 clause 8 widened by D25 — §5.4).
 
 ### 5.1 Tool taxonomy (8 tools — `comment` is the 8th, landed with the T3.9/D37 code)
 
@@ -2134,6 +2149,16 @@ goldens + the D33 `agents_digest()` ripple re-blessed (`list_tools` is a LIVE as
 is UNAFFECTED (§1.8) → FR-26 idempotency intact. Spec-first: this D37 clause + the §1.6/§1.7/§3.2/§4.1/§5.x design
 land FIRST (the docs-only cascade); the code + the version-string flip + the goldens re-bless follow at **T3.9**.
 
+**D42 (v1.0.1) — the contract bumps to `unblock.mcp.v1.6`.** A SIBLING entry appended to this ledger; the D37
+clause above records what GA shipped and is NOT renumbered. `#[serde(deny_unknown_fields)]` on all 13 input
+containers makes schemars emit `additionalProperties: false` per `oneOf` arm AND inline the tagged-enum newtype
+variant (`IssueInput::Create`) instead of `$ref`-ing `$defs/CreateInput`; the `create_bulk` doc-comment and the
+`markdown` field description are rewritten to publish the three new rejections and the closed section-name set.
+All of that moves `schema_bundle()` bytes → `CONTRACT_HASH` re-pinned + the `schema_bundle` golden re-blessed.
+`capabilities()` moves only by its `contract_version` field (a FIELD description is not a TOOL description).
+Per D35 an additive `.M` bump inside 1.x is NON-breaking, so this ships in a PATCH release. D42 adds **no**
+public API surface.
+
 **`agents_digest()` — a pure DERIVED VIEW, not a wire resource (T3.4.3/D33).** `unblock-mcp` additionally
 exposes `pub fn agents_digest() -> AgentsDigest` next to `schema_bundle()`: a CLI-friendly typed digest (the
 8 tools with their `oneOf`-derived actions + each action's FULL parameter surface — its required AND
@@ -2156,7 +2181,7 @@ close_with_suggestions -> close + surface newly-unblocked
 
 ### 5.6 Error mapping at the MCP boundary
 
-Any `EngineError` → `StructuredError` (§2.4) attached as rmcp tool error **data** (`code`/`message`/`hint`/`retryable`/`context`), parallel to the CLI 0–8 exit codes. A failed tool call still returns **valid JSON** (the shared in-band error output — `SchemaBundle.error`, `is_error=true`; §5.3/§5.4 D25). Oversized/invalid args are rejected by schemars validation before reaching the engine (NFR-18); blast radius confined to the workspace.
+Any `EngineError` → `StructuredError` (§2.4) attached as rmcp tool error **data** (`code`/`message`/`hint`/`retryable`/`context`), parallel to the CLI 0–8 exit codes. A failed tool call still returns **valid JSON** (the shared in-band error output — `SchemaBundle.error`, `is_error=true`; §5.3/§5.4 D25). **Argument-boundary contract (NORMATIVE, D42).** `schemars` is **codegen-only** — it publishes the `inputSchema` and there is **no runtime validator anywhere in the process**. Enforcement is two explicit steps at L7: (1) `enforce_quota` over the whole `tools/call` `params`, once, pre-dispatch, inside the rate-limit permit; (2) a typed parse under `#[serde(deny_unknown_fields)]` inside the tool body, reached via a crate-local DEFERRING `Parameters<T>` extractor whose `FromContextPart` impl is infallible — which is what makes rmcp's out-of-band `invalid_params` arm structurally unreachable for our 8 tools. Oversized, unknown-field and malformed **arguments** are therefore rejected **in-band** (`isError:true` + the FR-11 `StructuredError`, `retryable: true`) before reaching the engine; blast radius confined to the workspace. **SCOPED — these stay out-of-band protocol faults, because no seam under our control reaches them:** an unknown tool name, a **non-object `arguments`** (rmcp fails to deserialize `CallToolRequestParams` itself, so `call_tool` is never entered), and a present **`params.task`** (rejected by rmcp's default `TaskSupport::Forbidden` before `call_tool`). `ErrorData` remains reserved for exactly that class.
 
 **Rate-limit chokepoint (NFR-18 / D34-F5 — normative).** The `Quotas.max_concurrent_requests` cap is enforced
 by a single `Arc<Semaphore>` field on `UnblockServer` (built ONCE in `new`; the type derives `Clone`, so the
@@ -2168,7 +2193,7 @@ an **`ErrorData`** (JSON-RPC error) carrying the same `RateLimited` code. Exit 2
 backpressured (fast-fail is deterministic and bounds a pipelining agent immediately). The rate-limit
 `Semaphore(64)` sits STRICTLY ABOVE the engine write `Semaphore(1)` + the `.write.lock` (§4.2) — different
 semaphores, strict ordering, deadlock-free vs D14/D31. Prompts are excluded (pure builders, no `Session`). The
-per-request SIZE caps stay schemars/`enforce_quota` preflight checks mapping to `ValidationFailed` (a DISTINCT
+per-request SIZE caps stay `enforce_quota` checks — run ONCE in `call_tool` over the WHOLE `tools/call` `params` (`name` + `arguments` + `_meta` + `task`), inside the rate-limit permit and before dispatch (D42). NOTE this bounds what a request may DO, not the parsing work an oversized message costs: rmcp deserializes the whole message off the transport before any handler runs — mapping to `ValidationFailed` (a DISTINCT
 mechanism).
 
 ---
