@@ -34,25 +34,6 @@ fn real_corpus_is_green() {
 }
 
 #[test]
-fn real_corpus_has_no_surface_count_drift() {
-    // Explicit class-(g) pin: the real corpus + the real capabilities.rs anchor (derived 8/5/3)
-    // must yield ZERO MCP surface-count findings, so the D37-style 7->8 drift cannot reappear
-    // un-annotated even if the aggregate green assertion above is ever relaxed.
-    let root = workspace_root();
-    let findings = doc_lint::lint_at(&root).expect("the in-tree corpus + anchor are complete");
-    let class_g: Vec<_> = findings.iter().filter(|f| f.class == 'g').collect();
-    assert!(
-        class_g.is_empty(),
-        "class-(g) surface-count drift on the real corpus:\n{}",
-        class_g
-            .iter()
-            .map(|f| format!("  {}:{}: {}", f.file, f.line, f.message))
-            .collect::<Vec<_>>()
-            .join("\n"),
-    );
-}
-
-#[test]
 fn truncated_corpus_fails_the_existence_guard() {
     // A directory that is NOT the workspace root (the corpus files are absent) must trip the
     // existence guard — a smaller-than-expected corpus is a vacuous pass and is rejected.

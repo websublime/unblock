@@ -121,7 +121,16 @@ async fn live_list_tools_equals_the_builder_eight() {
     assert_eq!(
         tools.len(),
         8,
-        "exactly 8 tools (RK-3 budget FULL at 8 ≤ 8; create_bulk is a discriminator)"
+        "exactly 8 tools (RK-3 budget FULL at 8 ≤ 8; create_bulk is a discriminator). \
+         DOC LOCKSTEP — changing this count (8->9) means updating every LIVE doc site that cites \
+         the tool count: README.md (the `N tools / N resources / N prompts` triad), \
+         docs/plans/01-design-spine.md (§5.1 header + the `8 consolidated tools` line + the §5.4 \
+         agents-digest triad), docs/plans/README.md (the `unblock-mcp` crate-matrix row + the \
+         `MCP taxonomy = spine` note), docs/plans/crates/unblock-mcp.md (the one-line purpose, the \
+         `src/server.rs` row, the `### Tools` section header, and the tests/contract_suite.rs \
+         conformance row), and crates/unblock-mcp/CLAUDE.md (the header line). HISTORICAL/amendment \
+         lines are intentionally frozen — do NOT edit the PRD D37/D42 rows or the T2.3/T3.9 records \
+         (they record the pre-change count on purpose)."
     );
 
     let mut live: Vec<(String, String)> = tools
@@ -189,7 +198,19 @@ async fn live_resource_templates_and_prompts_match_the_builder() {
 
     // resources/list holds EXACTLY the four concrete (non-parameterized) URIs (CD-3).
     let resources = client.list_all_resources().await.expect("list_resources");
-    assert_eq!(resources.len(), 4, "exactly 4 concrete resources (CD-3)");
+    assert_eq!(
+        resources.len(),
+        4,
+        "exactly 4 concrete resources (CD-3). NOTE the doc-count nuance: the docs cite the TOTAL \
+         resource count of 5 (= these 4 concrete URIs + the 1 `issues/{{id}}` template, asserted by \
+         the `templates.len() == 1` pin earlier in this test), \
+         NOT this concrete 4 — adding a concrete resource moves BOTH this pin (4->5) and the \
+         documented total (5->6). DOC LOCKSTEP — the LIVE doc sites citing the resource count: \
+         README.md (the `5 resources` in the surface triad), docs/plans/01-design-spine.md (§5.4 + \
+         the §5.4 agents-digest triad `5 resources`), docs/plans/crates/unblock-mcp.md (the \
+         `agents_digest` row, the `src/server.rs` row, and the conformance row that splits it as \
+         `4 concrete + 1 template`). Historical/amendment lines stay frozen."
+    );
     let mut concrete_uris: Vec<String> = resources.iter().map(|r| r.raw.uri.clone()).collect();
     concrete_uris.sort();
     assert_eq!(
@@ -227,7 +248,15 @@ async fn live_resource_templates_and_prompts_match_the_builder() {
     );
 
     let prompts = client.list_all_prompts().await.expect("list_prompts");
-    assert_eq!(prompts.len(), 3, "exactly 3 prompts");
+    assert_eq!(
+        prompts.len(),
+        3,
+        "exactly 3 prompts. DOC LOCKSTEP — a count change means updating every LIVE doc site that \
+         cites the prompt count: README.md (the `3 prompts` in the surface triad), \
+         docs/plans/01-design-spine.md (§5.5 + the §5.4 agents-digest triad), \
+         docs/plans/crates/unblock-mcp.md (the `src/server.rs` row, the `src/prompts/mod.rs` row, \
+         and the conformance row). Historical/amendment lines stay frozen."
+    );
     let mut live_prompts: Vec<String> = prompts.into_iter().map(|p| p.name).collect();
     live_prompts.sort();
     let mut built_prompts: Vec<String> =
@@ -258,7 +287,17 @@ async fn live_tools_input_schema_root_is_object() {
     let (client, server, _cancel) = connect(session).await;
 
     let tools = client.list_all_tools().await.expect("list_tools");
-    assert_eq!(tools.len(), 8, "exactly 8 tools");
+    assert_eq!(
+        tools.len(),
+        8,
+        "exactly 8 tools. DOC LOCKSTEP — a count change means updating every LIVE doc site that \
+         cites the tool count: README.md (the surface triad), docs/plans/01-design-spine.md (§5.1 \
+         header + `8 consolidated tools` + the §5.4 agents-digest triad), docs/plans/README.md \
+         (the `unblock-mcp` crate-matrix row + the `MCP taxonomy = spine` note), \
+         docs/plans/crates/unblock-mcp.md (purpose + `src/server.rs` row + `### Tools` header + the \
+         conformance row), crates/unblock-mcp/CLAUDE.md. Historical PRD D37/D42 + T2.3/T3.9 lines \
+         are frozen — leave them."
+    );
     for tool in &tools {
         assert_eq!(
             tool.input_schema.get("type"),
@@ -714,7 +753,17 @@ async fn live_tools_input_schema_body_equals_the_bundle() {
 
     let tools = client.list_all_tools().await.expect("list_tools");
     let bundle = tool_input_schemas();
-    assert_eq!(tools.len(), bundle.len(), "exactly 8 tools");
+    assert_eq!(
+        tools.len(),
+        bundle.len(),
+        "exactly 8 tools. DOC LOCKSTEP — a count change means updating every LIVE doc site that \
+         cites the tool count: README.md (the surface triad), docs/plans/01-design-spine.md (§5.1 \
+         header + `8 consolidated tools` + the §5.4 agents-digest triad), docs/plans/README.md \
+         (the `unblock-mcp` crate-matrix row + the `MCP taxonomy = spine` note), \
+         docs/plans/crates/unblock-mcp.md (purpose + `src/server.rs` row + `### Tools` header + the \
+         conformance row), crates/unblock-mcp/CLAUDE.md. Historical PRD D37/D42 + T2.3/T3.9 lines \
+         are frozen — leave them."
+    );
     for (name, expected) in bundle {
         let live = tools
             .iter()
