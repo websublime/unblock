@@ -42,6 +42,11 @@ use tokio_util::sync::CancellationToken;
 /// doc-comment and the `markdown` field description are rewritten to publish the closed
 /// section-name set, the code-fence grammar, and ALL FIVE `create_bulk` rejections — including the
 /// UNTERMINATED-FENCE rejection, which rejects documents GA 1.0.0 accepted (D42 clause 4(iii)).
+/// ALSO in this bump: the `IssueInput` doc-comment — PUBLISHED as the `issue` `inputSchema`
+/// `description`, so it is contract bytes, not a comment — is corrected from "7 actions" to
+/// "8 actions". It had understated the accepted surface since D22 added `create_bulk` (the 8th
+/// ACTION on the ONE `issue` tool, spine §5.1 row 1 — distinct from D37's 8th TOOL). Same defect
+/// class D42 exists to close: published bytes that lie about what the boundary accepts.
 /// All of that moves `schema_bundle()` bytes. Per D35 an
 /// additive `.M` bump inside 1.x is NON-breaking, so this ships in the v1.0.1 patch — it is not a
 /// 2.0.0 event).
@@ -61,7 +66,7 @@ pub const CONTRACT_VERSION: &str = "unblock.mcp.v1.6";
 /// representation — any future dep enabling `serde_json/preserve_order` (feature unification, dev-deps
 /// included) reorders the schemars-generated maps and moves `CONTRACT_HASH` with NO contract change;
 /// if the gate fires with "nothing changed", check `Cargo.lock` feature unification first.
-pub const CONTRACT_HASH: &str = "267e84e13312e09a1eebb2e38107bbece66fbc4aabe42fc3bdecd845b8f69672";
+pub const CONTRACT_HASH: &str = "90333219ef02222a786c4ff967e33753415b678c749169faa4b82940f7b40c8c";
 
 /// Untrusted-input limits enforced **before** any `Session` call (NFR-18).
 ///
