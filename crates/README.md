@@ -37,7 +37,7 @@ storage + policy). `unblock-fuzz` is an unpublished member (fuzz harness over in
 | `unblock-config` | L4 | Layered TOML, `.unblock/` discovery, builds the `Arc<dyn Storage>` (CF-D) |
 | `unblock-engine` | L5 | `Session`; in-process write `Semaphore` (D14); reads bypass it (FR-10) |
 | `unblock-render` | L6 | json/robot/plain/csv/markdown (TOON v1.1); stdout/stderr discipline |
-| `unblock-mcp` | L7 | **Primary** surface: rmcp stdio server, 7-tool taxonomy + resources + prompts |
+| `unblock-mcp` | L7 | **Primary** surface: rmcp stdio server, 8-tool taxonomy + resources + prompts |
 | `unblock-cli` | L7 | The `unblock` binary: mcp/migrate/doctor/version/init/agents/update |
 | `unblock-fuzz` | — | Unpublished; `cargo-fuzz` targets over model/sync/storage ingestion |
 

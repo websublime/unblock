@@ -12,7 +12,7 @@
 //!    and a version bump without a document change is also caught (both documents embed
 //!    `contract_version`).
 //! 3. **Taxonomy conformance (PRD §12.2):** over a LIVE `mcp_server_duplex_for_test` duplex the
-//!    `list_tools` (≤ 8 — exactly 7, `create_bulk` is a discriminator NOT a tool) / resources (the
+//!    `list_tools` (≤ 8 — exactly 8, `create_bulk` is a discriminator NOT a tool) / resources (the
 //!    CD-3 split: 4 concrete via `resources/list` + 1 `{id}` template via `resources/templates/list`)
 //!    / prompts (3) sets EQUAL the pure `capabilities()` builder set (builder-vs-router parity — the
 //!    builder cannot silently drift from what the server actually serves).

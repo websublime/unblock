@@ -1,7 +1,9 @@
-//! Tool **#1 `issue`** — the 7-action issue lifecycle (spine §5.1/§5.2).
+//! Tool **#1 `issue`** — the 8-action issue lifecycle (spine §5.1/§5.2).
 //!
-//! Actions: `create` / `show` / `update` / `close` / `reopen` / `delete` / `restore`, mapped to
-//! `Session::{create_issue, get, update, close_with_suggestions, update, delete, restore}`.
+//! Actions: `create` / `create_bulk` / `show` / `update` / `close` / `reopen` / `delete` / `restore`,
+//! mapped to `Session::{create_issue, create_bulk, get, update, close_with_suggestions, update,
+//! delete, restore}`. `create_bulk` (D22) is the 8th ACTION — a discriminator arm on this ONE tool,
+//! so it does NOT grow the tool count (spine §5.1/§6.6).
 //!
 //! - `create` maps [`IssueInput::Create`] → the engine-owned [`unblock_engine::NewIssue`] and calls
 //!   the **MINTING** `Session::create_issue` (D21 — the engine mints the id under the write permit).
@@ -30,7 +32,7 @@ use crate::tools::dto::{Attribution, DepInput};
 use crate::tools::output::{DeleteModeOutput, DeletePlanOutput, IdOnly, IssueList, IssueOutput};
 use crate::tools::{engine_err_json, err_json, ok_json};
 
-/// The `issue` tool input (spine §5.2 — EXACT shape; 7 actions).
+/// The `issue` tool input (spine §5.2 — EXACT shape; 8 actions).
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "action", rename_all = "snake_case")]
 // §5.2a (CD-1): inject the root `"type": "object"` so the published inputSchema is MCP-conformant. A

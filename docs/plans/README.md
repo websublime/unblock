@@ -13,7 +13,7 @@ This directory holds the full planning corpus for the multi-crate Rust rewrite. 
 | Doc | One-line description |
 |---|---|
 | [`00-roadmap.md`](00-roadmap.md) | Version roadmap v1 → v2+: theme/FRs/crates-touched per release; v1+v1.1 LOCKED, v1.2+ PROPOSED. Feature-to-version + crate-impact matrices. |
-| [`01-design-spine.md`](01-design-spine.md) | **AUTHORITATIVE** cross-crate interface contract for v1: domain types, error taxonomy + 0–8 exit table, `Storage` trait, `Session` API, MCP 7-tool schemas, conformance rules. |
+| [`01-design-spine.md`](01-design-spine.md) | **AUTHORITATIVE** cross-crate interface contract for v1: domain types, error taxonomy + 0–8 exit table, `Storage` trait, `Session` API, MCP 8-tool schemas, conformance rules. |
 | [`crates/unblock-model.md`](crates/unblock-model.md) | L0 leaf. Pure domain types (Issue/enums/Dependency/Event), content-hash / sync-equality / tombstone semantics, `IssueValidator`, `CacheKey`. No I/O. |
 | [`crates/unblock-error.md`](crates/unblock-error.md) | L0 leaf. Shared boundary vocabulary: `ErrorCode`, 0–8 exit table, `StructuredError`, `CodedError` trait, `ModelError`, message sanitization. Zero internal deps. |
 | [`crates/unblock-policy.md`](crates/unblock-policy.md) | L1 pure. Versioned decision contracts: ready hybrid-sort comparator, scheduler/coordination/gates evaluators, inheritance, S3-FIFO cache kernel. Depends on model+error only. |

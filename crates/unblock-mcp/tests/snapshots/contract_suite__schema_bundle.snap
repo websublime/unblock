@@ -80,7 +80,7 @@ expression: schema_bundle()
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "The `issue` tool input (spine §5.2 — EXACT shape; 7 actions).",
+      "description": "The `issue` tool input (spine §5.2 — EXACT shape; 8 actions).",
       "oneOf": [
         {
           "additionalProperties": false,

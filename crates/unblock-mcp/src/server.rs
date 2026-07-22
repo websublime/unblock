@@ -4,7 +4,7 @@
 //! The single `impl ServerHandler for UnblockServer` STACKS `#[tool_handler]` + `#[prompt_handler]`
 //! (each detects the other as a sibling and the hand-written `get_info`, so neither emits its own)
 //! plus the HAND-WRITTEN `get_info` / `list_resources` / `list_resource_templates` / `read_resource`
-//! (rmcp has no resource macro). The tool routers from the 7 tool files compose via `+`; the prompt
+//! (rmcp has no resource macro). The tool routers from the 8 tool modules compose via `+`; the prompt
 //! router comes from `prompts::mod`. Holding `Arc<Session>`, the server is a thin adapter — the engine
 //! owns the write Semaphore (D14), so there is no write orchestration here.
 
