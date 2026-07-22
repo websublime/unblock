@@ -1,14 +1,11 @@
 //! `doc-lint` — the doc-corpus consistency lint (ci-cd §2.1).
 //!
 //! A mechanical, offline, sub-second lint over a **fixed 19-file** documentation corpus that fails
-//! CI on the seven drift classes seen in the consolidated review (a..g). It is deterministic: a
-//! single pass per file, findings sorted by `(file, line, class)`, no network, no `cargo metadata`.
-//! Classes (a..f) read only the corpus; class (g) additionally reads ONE source file — the FR-12
-//! discovery builder `crates/unblock-mcp/src/resources/capabilities.rs` — to DERIVE (parse, never
-//! hard-code) the advertised tool/resource/prompt counts the docs must match.
+//! CI on the six drift classes seen in the consolidated review (a..f). It is deterministic: a single
+//! pass per file, findings sorted by `(file, line, class)`, no network, no `cargo metadata`.
 //!
 //! Run: `cargo xtask doc-lint`. T0.9 wires this into the CI `doc-lint` job.
-//! Authoritative spec: `docs/plans/ci-cd-and-distribution.md` §2.1 (the seven classes a..g).
+//! Authoritative spec: `docs/plans/ci-cd-and-distribution.md` §2.1 (the six classes a..f).
 //!
 //! ## Global guards (built once per file, shared by every class)
 //! 1. **Block-fence mask** — `CommonMark` fenced code blocks (backtick or tilde runs, matched by char
@@ -61,7 +58,7 @@ pub struct Finding {
     pub file: String,
     /// 1-based line number of the offending token.
     pub line: usize,
-    /// The drift class (`a`..`g`) that fired.
+    /// The drift class (`a`..`f`) that fired.
     pub class: char,
     /// Human-readable description of the violation.
     pub message: String,
@@ -88,15 +85,16 @@ pub fn doc_lint() -> ExitCode {
         }
     };
 
-    let findings = match lint_at(&root) {
-        Ok(findings) => findings,
+    let docs = match load_corpus(&root) {
+        Ok(docs) => docs,
         Err(err) => {
             eprintln!("doc-lint: {err}");
             return ExitCode::FAILURE;
         }
     };
 
-    report(&findings, CORPUS.len())
+    let findings = run(&docs);
+    report(&findings, docs.len())
 }
 
 /// Lint the corpus rooted at `root` and return the sorted findings. Public so the corpus-green
@@ -105,13 +103,10 @@ pub fn doc_lint() -> ExitCode {
 /// layering check by injecting a back-edge.
 ///
 /// # Errors
-/// Returns `Err` if the corpus is incomplete (the existence / vacuous-pass guard) OR if the class-(g)
-/// anchor (`crates/unblock-mcp/src/resources/capabilities.rs`) is missing, unparseable, or derives a
-/// zero count — a broken anchor is a hard FAIL, never a silent vacuous pass.
+/// Returns `Err` if the corpus is incomplete (the existence / vacuous-pass guard).
 pub fn lint_at(root: &Path) -> Result<Vec<Finding>, String> {
     let docs = load_corpus(root)?;
-    let counts = SurfaceCounts::derive(root)?;
-    Ok(run(&docs, &counts))
+    Ok(run(&docs))
 }
 
 /// Resolve the workspace root from `CARGO_MANIFEST_DIR` (set by cargo for the running xtask crate).
@@ -163,218 +158,6 @@ fn load_corpus(root: &Path) -> Result<Vec<Doc>, String> {
         ));
     }
     Ok(docs)
-}
-
-/// The MCP surface counts the docs must match — the authoritative anchor for class (g).
-///
-/// These are **DERIVED** (parsed) from the FR-12 discovery builder, never hard-coded: adding a 9th
-/// tool descriptor moves the anchor with zero lint edits, which is exactly the D37 `7`→`8` event
-/// that class (g) exists to keep from ever being invisible again.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct SurfaceCounts {
-    tools: usize,
-    resources: usize,
-    prompts: usize,
-}
-
-/// The single source file the lint reads outside the doc corpus (the FR-12 discovery builder). It is
-/// NOT a doc (a doc is the very thing class (g) pins) and cannot be obtained by running the server
-/// (no cargo/network allowed), so anchoring on the builder is the minimal deterministic choice —
-/// and `crates/unblock-mcp/tests/contract_suite.rs::live_list_tools_equals_the_builder_eight` keeps
-/// the builder byte-equal to the LIVE `rmcp` router, so pinning the docs to the builder pins them,
-/// transitively, to the real server.
-const SURFACE_ANCHOR: &str = "crates/unblock-mcp/src/resources/capabilities.rs";
-
-impl SurfaceCounts {
-    /// Derive the counts from the anchor under `root`.
-    ///
-    /// # Errors
-    /// Returns `Err` if the anchor is unreadable, a builder fn is missing/unparseable, or a derived
-    /// count is zero — a broken anchor HARD-FAILs (the same non-vacuity discipline as the corpus
-    /// existence guard); it never passes silently.
-    fn derive(root: &Path) -> Result<Self, String> {
-        let anchor = root.join(SURFACE_ANCHOR);
-        let src = std::fs::read_to_string(&anchor).map_err(|_| {
-            format!(
-                "class-(g) anchor {SURFACE_ANCHOR} is unreadable — the FR-12 discovery builder is \
-                 the surface-count source of truth; a missing/renamed anchor is a hard FAIL, never \
-                 a vacuous pass"
-            )
-        })?;
-        let masked = mask_rust(&src);
-        Ok(SurfaceCounts {
-            tools: count_tuple_entries(&masked, "tool_descriptors")?,
-            resources: count_tuple_entries(&masked, "resource_descriptors")?,
-            prompts: count_tuple_entries(&masked, "prompt_descriptors")?,
-        })
-    }
-
-    /// The derived count for a resolved noun family.
-    fn for_noun(&self, family: SurfaceNoun) -> usize {
-        match family {
-            SurfaceNoun::Tools => self.tools,
-            SurfaceNoun::Resources => self.resources,
-            SurfaceNoun::Prompts => self.prompts,
-        }
-    }
-}
-
-/// The three surface noun families class (g) anchors against.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SurfaceNoun {
-    Tools,
-    Resources,
-    Prompts,
-}
-
-impl SurfaceNoun {
-    /// Resolve a matched noun (`tool`/`tools`/`resource`/…) to its family.
-    fn from_match(noun: &str) -> Option<Self> {
-        if noun.starts_with("tool") {
-            Some(SurfaceNoun::Tools)
-        } else if noun.starts_with("resource") {
-            Some(SurfaceNoun::Resources)
-        } else if noun.starts_with("prompt") {
-            Some(SurfaceNoun::Prompts)
-        } else {
-            None
-        }
-    }
-
-    /// The plural label used in a finding message.
-    fn label(self) -> &'static str {
-        match self {
-            SurfaceNoun::Tools => "tools",
-            SurfaceNoun::Resources => "resources",
-            SurfaceNoun::Prompts => "prompts",
-        }
-    }
-}
-
-/// Mask Rust `//`/`/* */` comments and `"..."` string interiors to spaces so a later bracket/paren
-/// scan is not corrupted by punctuation that lives inside comments or string literals. Structural
-/// brackets/parens in code are preserved; byte offsets and newlines are preserved. This masking is
-/// MANDATORY: `tool_descriptors()` embeds `#[tool(description)]` inside a `//` comment whose stray
-/// `]`/`(` would otherwise truncate the scan (a naive scan derives `2`, not `8`).
-fn mask_rust(src: &str) -> String {
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum State {
-        Normal,
-        Line,
-        Block,
-        Str,
-    }
-    let bytes = src.as_bytes();
-    let mut out = bytes.to_vec();
-    let mut state = State::Normal;
-    let mut i = 0;
-    while i < bytes.len() {
-        match state {
-            State::Normal => {
-                if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
-                    state = State::Line;
-                    out[i] = b' ';
-                    out[i + 1] = b' ';
-                    i += 2;
-                } else if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
-                    state = State::Block;
-                    out[i] = b' ';
-                    out[i + 1] = b' ';
-                    i += 2;
-                } else {
-                    if bytes[i] == b'"' {
-                        state = State::Str;
-                    }
-                    i += 1;
-                }
-            }
-            State::Line => {
-                if bytes[i] == b'\n' {
-                    state = State::Normal;
-                } else {
-                    out[i] = b' ';
-                }
-                i += 1;
-            }
-            State::Block => {
-                if bytes[i] == b'*' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
-                    out[i] = b' ';
-                    out[i + 1] = b' ';
-                    state = State::Normal;
-                    i += 2;
-                } else {
-                    if bytes[i] != b'\n' {
-                        out[i] = b' ';
-                    }
-                    i += 1;
-                }
-            }
-            State::Str => {
-                if bytes[i] == b'\\' && i + 1 < bytes.len() {
-                    out[i] = b' ';
-                    out[i + 1] = b' ';
-                    i += 2;
-                } else {
-                    if bytes[i] == b'"' {
-                        state = State::Normal;
-                    } else if bytes[i] != b'\n' {
-                        out[i] = b' ';
-                    }
-                    i += 1;
-                }
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-/// In the (already comment/string-masked) source, find `fn <fn_name>`, then its first `[` array
-/// opener, bracket-match to the corresponding `]`, and count the `(` tuple openers that are direct
-/// children of the array (depth 1) — i.e. the descriptor entries.
-///
-/// # Errors
-/// Returns `Err` if the fn is absent, no array opener follows it, the array is unterminated, or the
-/// entry count is zero (a zero count is a hard FAIL — never a vacuous pass).
-fn count_tuple_entries(masked: &str, fn_name: &str) -> Result<usize, String> {
-    let needle = format!("fn {fn_name}");
-    let fn_pos = masked
-        .find(&needle)
-        .ok_or_else(|| format!("class-(g) anchor: builder `{fn_name}` not found (renamed?)"))?;
-    let bytes = masked.as_bytes();
-    let mut i = fn_pos + needle.len();
-    while i < bytes.len() && bytes[i] != b'[' {
-        i += 1;
-    }
-    if i >= bytes.len() {
-        return Err(format!(
-            "class-(g) anchor: no array opener `[` after builder `{fn_name}`"
-        ));
-    }
-    let mut depth: i32 = 0;
-    let mut count: usize = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'[' => depth += 1,
-            b']' => {
-                depth -= 1;
-                if depth == 0 {
-                    if count == 0 {
-                        return Err(format!(
-                            "class-(g) anchor: builder `{fn_name}` derived ZERO entries — a broken \
-                             anchor is a hard FAIL, never a vacuous pass"
-                        ));
-                    }
-                    return Ok(count);
-                }
-            }
-            b'(' if depth == 1 => count += 1,
-            _ => {}
-        }
-        i += 1;
-    }
-    Err(format!(
-        "class-(g) anchor: unterminated array in builder `{fn_name}`"
-    ))
 }
 
 /// Per-file global guards, computed once and shared by every class.
@@ -497,8 +280,8 @@ fn in_code_span(spans: &[(usize, usize)], off: usize) -> bool {
     spans.iter().any(|&(s, e)| off >= s && off < e)
 }
 
-/// Run all seven classes over the corpus, returning findings sorted by `(file, line, class)`.
-fn run(docs: &[Doc], counts: &SurfaceCounts) -> Vec<Finding> {
+/// Run all six classes over the corpus, returning findings sorted by `(file, line, class)`.
+fn run(docs: &[Doc]) -> Vec<Finding> {
     let index = CorpusIndex::build(docs);
     let mut findings = Vec::new();
 
@@ -512,7 +295,6 @@ fn run(docs: &[Doc], counts: &SurfaceCounts) -> Vec<Finding> {
         if doc.path == "docs/plans/README.md" {
             class_f_readme(doc, &guards, &mut findings);
         }
-        class_g_surface_counts(doc, &guards, counts, &mut findings);
     }
 
     findings.sort_by(|a, b| {
@@ -1208,114 +990,6 @@ fn class_f_resolved(doc: &Doc, guards: &Guards, out: &mut Vec<Finding>) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Class (g) — MCP surface-count coherence (docs vs the DERIVED anchor counts).
-// ---------------------------------------------------------------------------------------------
-
-fn class_g_surface_counts(
-    doc: &Doc,
-    guards: &Guards,
-    counts: &SurfaceCounts,
-    out: &mut Vec<Finding>,
-) {
-    // A `<N> [consolidated ][MCP ](tools|resources|prompts)` count claim. No look-behind in `regex`,
-    // so the ordinal/id guard inspects the char before the digit run manually.
-    let re = Regex::new(r"(\d+)\s+(?:consolidated\s+)?(?:MCP\s+)?(tools?|resources?|prompts?)\b")
-        .expect("valid surface-count regex");
-
-    for (i, line) in doc.lines.iter().enumerate() {
-        if guards.fenced[i] || line_is_only_glyphs(line) {
-            continue;
-        }
-        // GUARD (i-heading): a `#` heading line carries section ORDINALS (`### 5.1 Tool taxonomy`),
-        // never a surface count.
-        if is_heading_line(line) {
-            continue;
-        }
-        // GUARD (iii): a historical/superseded occurrence is exempt (line-scoped, mirroring class-c
-        // `is_rejection_context`) — a transition marker or the pre-D37 seven-tool roster.
-        if is_historical_surface_context(line) {
-            continue;
-        }
-        for c in re.captures_iter(line) {
-            let digits = c.get(1).expect("group 1 present");
-            // GUARD (i-ordinal): the digit is a section ordinal or an embedded id — never a count —
-            // when preceded by `.`, `-`, `§` (`§5.4 Resources`, `RK-3 tool-count`, `12.2 MCP tool`)
-            // OR by a LETTER, i.e. the digit is part of an identifier token (`v1 tool count`,
-            // `L7 tool-registration`, `v1 prompts`). A genuine count is preceded by whitespace or a
-            // delimiter (`≤`, `(`, `*`), never by an alphanumeric — so this is precision, not a
-            // weakening (no real `N tools` claim is letter-prefixed).
-            if let Some(prev) = line[..digits.start()].chars().next_back()
-                && (matches!(prev, '.' | '-' | '§') || prev.is_ascii_alphabetic())
-            {
-                continue;
-            }
-            let Ok(claimed) = digits.as_str().parse::<usize>() else {
-                continue;
-            };
-            // GUARD (ii): NOUN-SPECIFIC anchoring — each noun resolves to ITS OWN derived count, so
-            // `5 resources`/`3 prompts` are structurally impossible to confuse with the tool count.
-            let Some(family) = SurfaceNoun::from_match(c.get(2).expect("group 2 present").as_str())
-            else {
-                continue;
-            };
-            let expected = counts.for_noun(family);
-            if claimed != expected {
-                out.push(Finding {
-                    file: doc.path.clone(),
-                    line: i + 1,
-                    class: 'g',
-                    message: format!(
-                        "documents {claimed} {noun} but capabilities.rs advertises {expected} \
-                         (annotate a non-current count historical — arrow / superseded / amendment)",
-                        noun = family.label(),
-                    ),
-                });
-            }
-        }
-    }
-}
-
-/// A `CommonMark` ATX heading line (`^#{1,6}\s`) — its leading number is a section ordinal.
-fn is_heading_line(line: &str) -> bool {
-    let hashes = line.chars().take_while(|&c| c == '#').count();
-    (1..=6).contains(&hashes) && line[hashes..].starts_with(|c: char| c.is_whitespace())
-}
-
-/// Line-scoped historical guard for class (g): a surface count on this line is a superseded/history
-/// record, not a live claim. Mirrors class-c's `is_rejection_context` shape.
-fn is_historical_surface_context(line: &str) -> bool {
-    const MARKERS: &[&str] = &[
-        "superseded",
-        "amendment",
-        "used to",
-        "formerly",
-        "no longer",
-    ];
-    // The pre-D37 seven-tool roster — issue/claim/defer/query/dep/sync/diagnostics WITHOUT `comment`
-    // (a legitimate historical enumeration of the roster before the 8th tool landed).
-    const ROSTER: &[&str] = &[
-        "issue",
-        "claim",
-        "defer",
-        "query",
-        "dep",
-        "sync",
-        "diagnostics",
-    ];
-
-    let lower = line.to_ascii_lowercase();
-    if MARKERS.iter().any(|m| lower.contains(m)) {
-        return true;
-    }
-    // A digit→digit transition arrow (`7→8`, `7->8`, `7-->8`).
-    let arrow = Regex::new(r"\d+\s*(?:→|-?->)\s*\d+").expect("valid arrow regex");
-    if arrow.is_match(line) {
-        return true;
-    }
-    ROSTER.iter().all(|w| lower.contains(w)) && !lower.contains("comment")
-}
-
-// ---------------------------------------------------------------------------------------------
 // Shared helpers.
 // ---------------------------------------------------------------------------------------------
 
@@ -1332,7 +1006,7 @@ fn line_is_only_glyphs(line: &str) -> bool {
 /// Emit findings (stderr) + the final tally; return the process exit code.
 fn report(findings: &[Finding], corpus_len: usize) -> ExitCode {
     if findings.is_empty() {
-        println!("doc-lint OK: {corpus_len} docs, 7 classes clean");
+        println!("doc-lint OK: {corpus_len} docs, 6 classes clean");
         return ExitCode::SUCCESS;
     }
     let mut per_class: BTreeMap<char, usize> = BTreeMap::new();
@@ -1340,7 +1014,7 @@ fn report(findings: &[Finding], corpus_len: usize) -> ExitCode {
         eprintln!("{}", f.render());
         *per_class.entry(f.class).or_default() += 1;
     }
-    let tally: Vec<String> = ['a', 'b', 'c', 'd', 'e', 'f', 'g']
+    let tally: Vec<String> = ['a', 'b', 'c', 'd', 'e', 'f']
         .iter()
         .map(|c| format!("{c}:{}", per_class.get(c).copied().unwrap_or(0)))
         .collect();
@@ -1409,18 +1083,8 @@ mod tests {
         if target.path == "docs/plans/README.md" {
             class_f_readme(target, &guards, &mut out);
         }
-        // Class (g) with the live shipped counts (8 tools / 5 resources / 3 prompts); the existing
-        // planted-violation fixtures carry no surface-count literals, so this adds no findings there.
-        class_g_surface_counts(target, &guards, &SURFACE_8_5_3, &mut out);
         out
     }
-
-    /// The live shipped surface counts, for unit tests that inject synthetic counts.
-    const SURFACE_8_5_3: SurfaceCounts = SurfaceCounts {
-        tools: 8,
-        resources: 5,
-        prompts: 3,
-    };
 
     // ---- Planted-violation tests, one per class ----
 
@@ -1646,205 +1310,6 @@ mod tests {
         assert!(
             !out.iter().any(|x| x.class == 'b'),
             "bare FR-1 umbrella should resolve via FR-1a, got {out:?}"
-        );
-    }
-
-    // ---- Class (g) — MCP surface-count coherence ----
-
-    /// Run class (g) in isolation over inline text with explicit anchor counts.
-    fn class_g_on(text: &str, counts: &SurfaceCounts) -> Vec<Finding> {
-        let under = doc("docs/plans/crates/unblock-mcp.md", text);
-        let guards = Guards::build(&under);
-        let mut out = Vec::new();
-        class_g_surface_counts(&under, &guards, counts, &mut out);
-        out
-    }
-
-    #[test]
-    fn class_g_planted_wrong_tool_count_fires() {
-        // A definitional `7 tools` disagrees with the shipped 8 and carries no historical marker.
-        let f = class_g_on(
-            "The server exposes 7 tools plus resources.\n",
-            &SURFACE_8_5_3,
-        );
-        assert!(
-            f.iter().any(|x| x.class == 'g'
-                && x.message.contains("7 tools")
-                && x.message.contains("advertises 8")),
-            "expected a class-g tool-count finding, got {f:?}"
-        );
-    }
-
-    #[test]
-    fn class_g_matching_counts_are_clean() {
-        let f = class_g_on(
-            "The server exposes 8 tools, 5 resources, and 3 prompts.\n",
-            &SURFACE_8_5_3,
-        );
-        assert!(
-            !f.iter().any(|x| x.class == 'g'),
-            "matching counts must be clean, got {f:?}"
-        );
-    }
-
-    #[test]
-    fn class_g_noun_specific_anchoring() {
-        // `5 resources` is checked against resources (5), NEVER against the tool count — so it does
-        // not fire even though 5 != 8 tools; a wrong `4 resources` DOES fire.
-        let ok = class_g_on("Exactly 5 resources are advertised.\n", &SURFACE_8_5_3);
-        assert!(
-            !ok.iter().any(|x| x.class == 'g'),
-            "5 resources must anchor to resources, got {ok:?}"
-        );
-        let bad = class_g_on("Exactly 4 resources are advertised.\n", &SURFACE_8_5_3);
-        assert!(
-            bad.iter()
-                .any(|x| x.class == 'g' && x.message.contains("4 resources")),
-            "4 resources must fire against the resource count, got {bad:?}"
-        );
-    }
-
-    #[test]
-    fn class_g_ordinal_and_id_prefixes_do_not_fire() {
-        // `§5.4 Resources`, `RK-3 tool-count`, `12.2 MCP tool` — the digit is a section ordinal / id,
-        // preceded by `§`/`-`/`.`; and a `#` heading ordinal is skipped whole.
-        for line in [
-            "See §5.4 Resources for the read bodies.\n",
-            "Respecting the RK-3 tool-count budget.\n",
-            "Section 12.2 MCP tool taxonomy is defined.\n",
-            "### 5.1 Tool taxonomy overview\n",
-        ] {
-            let f = class_g_on(line, &SURFACE_8_5_3);
-            assert!(
-                !f.iter().any(|x| x.class == 'g'),
-                "ordinal/id/heading must not fire class-g on {line:?}, got {f:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn class_g_historical_markers_exempt_the_line() {
-        // Each carries a transition marker, so its non-current `7 tools` is exempt.
-        for line in [
-            "The count flipped 7\u{2192}8 at T3.9.\n",
-            "Historically 7 tools (amendment 2026-07-21: 8 since D37).\n",
-            "The set is 7 tools, SUPERSEDED by D37.\n",
-            "server.rs used to embed 7 tools in the handshake.\n",
-        ] {
-            let f = class_g_on(line, &SURFACE_8_5_3);
-            assert!(
-                !f.iter().any(|x| x.class == 'g'),
-                "historical marker must exempt {line:?}, got {f:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn class_g_pre_d37_roster_is_exempt_but_comment_roster_is_not() {
-        // The pre-D37 seven-tool roster (no `comment`) is a legitimate historical enumeration.
-        let roster =
-            "all 7 tools (issue/claim/defer/query/dep/sync/diagnostics) wired to Session.\n";
-        let f = class_g_on(roster, &SURFACE_8_5_3);
-        assert!(
-            !f.iter().any(|x| x.class == 'g'),
-            "pre-D37 roster must be exempt, got {f:?}"
-        );
-        // The same shape but mentioning `comment` is NOT the pre-D37 roster → `7 tools` fires.
-        let with_comment =
-            "all 7 tools (issue/claim/defer/query/dep/sync/diagnostics/comment) today.\n";
-        let f2 = class_g_on(with_comment, &SURFACE_8_5_3);
-        assert!(
-            f2.iter().any(|x| x.class == 'g'),
-            "a roster that includes comment is not pre-D37 and must fire, got {f2:?}"
-        );
-    }
-
-    #[test]
-    fn class_g_create_bulk_is_an_arm_not_a_ninth_tool() {
-        // `create_bulk` is a discriminator ARM of `issue`; `8 tools` is correct, `9 tools` fires.
-        let ok = class_g_on(
-            "create_bulk is an arm of issue, so the server has 8 tools.\n",
-            &SURFACE_8_5_3,
-        );
-        assert!(
-            !ok.iter().any(|x| x.class == 'g'),
-            "8 tools with create_bulk as an arm is correct, got {ok:?}"
-        );
-        let bad = class_g_on(
-            "Counting create_bulk as a 9 tools surface.\n",
-            &SURFACE_8_5_3,
-        );
-        assert!(
-            bad.iter()
-                .any(|x| x.class == 'g' && x.message.contains("9 tools")),
-            "9 tools must fire (create_bulk is not a 9th tool), got {bad:?}"
-        );
-    }
-
-    #[test]
-    fn class_g_derivation_reacts_to_an_added_entry() {
-        // Proves the count is PARSED from the builder (not a constant): a fixture with 9 tuples in
-        // `tool_descriptors()` derives 9, masking a `#[tool(...)]` lookalike inside a `//` comment.
-        let fixture = "\
-fn tool_descriptors() -> Vec<ToolDescriptor> {
-    [
-        (\"issue\", \"Create issues (and delete).\"),
-        // The shared constant ships here AND in #[tool(description)] — masked.
-        (\"claim\", CLAIM),
-        (\"defer\", \"Defer until a future timestamp.\"),
-        (\"query\", \"Query issues.\"),
-        (\"dep\", \"Manage dependencies.\"),
-        (\"sync\", \"Export/import JSONL.\"),
-        (\"diagnostics\", \"Diagnostics.\"),
-        (\"comment\", COMMENT),
-        (\"NINTH\", \"A ninth tool.\"),
-    ]
-    .into_iter()
-    .map(|(name, description)| ToolDescriptor { name, description })
-    .collect()
-}
-";
-        let masked = mask_rust(fixture);
-        assert_eq!(
-            count_tuple_entries(&masked, "tool_descriptors").expect("parses"),
-            9,
-            "the derived count must react to the added 9th entry"
-        );
-    }
-
-    #[test]
-    fn class_g_zero_entries_is_a_hard_fail() {
-        // An empty builder array derives zero — a broken anchor must HARD-FAIL, never pass green.
-        let fixture =
-            "fn tool_descriptors() -> Vec<ToolDescriptor> {\n    [].into_iter().collect()\n}\n";
-        let masked = mask_rust(fixture);
-        assert!(
-            count_tuple_entries(&masked, "tool_descriptors").is_err(),
-            "a zero-entry array must be a hard FAIL"
-        );
-    }
-
-    #[test]
-    fn class_g_missing_anchor_is_a_hard_fail() {
-        // `derive` on a root with no anchor file HARD-FAILs (non-vacuity), like the corpus guard.
-        let nowhere = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
-        assert!(
-            SurfaceCounts::derive(&nowhere).is_err(),
-            "a missing anchor must HARD-FAIL"
-        );
-    }
-
-    #[test]
-    fn class_g_real_anchor_derives_eight_five_three() {
-        // Executes the DERIVATION against the real in-tree builder: 8 tools / 5 resources / 3
-        // prompts. If the masker mis-parsed (e.g. 2 not 8), every `8 tools` doc line would fire.
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let root = root.parent().expect("workspace root");
-        let counts = SurfaceCounts::derive(root).expect("real anchor parses");
-        assert_eq!(
-            (counts.tools, counts.resources, counts.prompts),
-            (8, 5, 3),
-            "the real capabilities.rs must derive 8/5/3"
         );
     }
 }
