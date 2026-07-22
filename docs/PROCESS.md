@@ -29,8 +29,20 @@ tool. **Never simplify the solution to make progress; if you reach that point, s
 
 ## 3. Decisions
 - Every real decision gets a **D-id** in `PRD §4` with its rationale.
+- **New D-id vs inline amendment** (when a shipped D-clause changes). A D-id marks a *decision* (a distinct
+  motivation), never a change-event — so a clause change never earns a D-id just to log it. Discriminate by
+  motivation: a **consequence/refinement of the SAME decision** (intent preserved — a forward-refinement/correction,
+  *not* a reversal) is an **inline addendum/amendment on the existing row, riding that D-id — no new D-id, no D-range
+  bump** (D29 F5-A: "an ADDENDUM to D29, NOT a new D-id — the D1..D29 range is unchanged"). A change **driven by a
+  NEW, separately-motivated decision** rides **that decision's own new D-id**, recorded with **reciprocal cross-refs
+  in BOTH rows** (new row "SUPERSEDES/CORRECTS Dnn clause X"; old row an inline "SUPERSEDED/amended by Dnn" note —
+  never a silent overwrite), and minting the new D-id triggers the **D-range bump** at its 3 sites (`CLAUDE.md`,
+  ci-cd §2.1(a), the `xtask/src/doc_lint.rs` comment). A clause **reversal that falls out of a new decision rides
+  that new decision's D-id** and needs none of its own — worked example: `create_bulk`'s D22-clause-2 reversal
+  shipped correctly with no separate D-id (D42, its own decision, SUPERSEDES D22 clause 2, with reciprocal pointers
+  at both rows).
 - **Decision-change checklist** — when a D-id, FR tier, or command/name surface changes, update *in one commit*: the
-  decision row + any superseded sibling, PRD (§5/§6/§11/§12/§13/§14), roadmap, README, ci-cd, impl-plan, the owning
+  decision row + any superseded sibling (carrying the reciprocal cross-refs the rule above requires), PRD (§5/§6/§11/§12/§13/§14), roadmap, README, ci-cd, impl-plan, the owning
   crate plan, and the spine. It is not "done" until a grep for the old framing/version/name returns **zero live
   hits**. The CI doc-lint (`ci-cd-and-distribution.md §2.1`) enforces the recurring classes.
 - **Confirm genuine forks with Miguel** before acting; use the question tool for real choices, not for defaults you
