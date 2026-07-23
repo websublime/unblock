@@ -19,6 +19,35 @@
       "Bash(wc:*)"
     ]
   },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit|mcp__acp__Write|mcp__acp__Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/scripts/hooks/knowledge-memories-write-guard.py",
+            "timeout": 15
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/scripts/hooks/knowledge-memories-bash-guard.py",
+            "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/scripts/hooks/pr-create-run-report-gate.py",
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  },
   "enabledPlugins": {
     "mister-anderson@websublime-mister-anderson": false
   },
