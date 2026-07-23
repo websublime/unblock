@@ -273,6 +273,10 @@ jobs:
           toolchain: 1.96.0
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - run: cargo xtask doc-lint
+      # k1..k6: .knowledge structural lint — SEPARATE corpus from the 19-file normative lint (ci-cd §2.3)
+      - run: cargo xtask knowledge-lint
+      # Executable proof of the shared gate predicate — every rule arm, exits 0/1/2.
+      - run: scripts/knowledge/tests/run-report-gate-selftest.sh
 
   verify-pins:
     name: verify-pins (NFR-9 action SHA-pinning)
@@ -367,3 +371,19 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2.0.20
         with:
           command: check
+
+  run-report-gate:
+    name: run-report-gate (.knowledge run-report on substantive PRs)
+    # Decision 7(ii): a substantive PR must carry its wiki run-report in the SAME diff. The predicate is
+    # STRUCTURAL (scripts/knowledge/run-report-gate.sh — the same file the pr-create hook runs): no label,
+    # no manual bypass. Dependabot is exempt by machine identity keyed on the PR AUTHOR login (immutable
+    # PR metadata — github.actor would flip to whoever re-triggers CI on a bot PR and deadlock the
+    # required check); its skipped required check counts as success. Spec: ci-cd-and-distribution.md §2.3.
+    if: github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0   # full history so merge-base(origin/<base>, HEAD) resolves
+      - name: run-report gate (shared predicate)
+        run: scripts/knowledge/run-report-gate.sh "origin/${GITHUB_BASE_REF}"
