@@ -5,8 +5,10 @@ Policy: drifts/gaps are reported and, BY DEFAULT, resolved IN THE SAME SESSION �
 Miguel → adjust. Don't defer or let them accumulate. The spine is the interface reference, but a plan↔spine
 disagreement is reconciled WITH Miguel (usually the plan is fixed to match the spine; the drift may instead
 expose a spine bug) — never overwrite either side silently.
-Where it lives: this is a working artifact for the session. Land the fixes in the real docs, log the outcome in
-STATUS.md + the commit, and let git be the archive — do NOT keep standalone resolved reports.
+Where it lives: this is a working artifact for the session. Land the fixes in the real docs, log the outcome as a
+comment on the task's unblock issue + the commit, and let git be the archive — do NOT keep standalone resolved
+reports (the run-report in `.knowledge/wiki/runs/` — PROCESS.md §8 — is the sanctioned descriptive record of the
+session, not a resolution home).
 -->
 
 # Drift / Gap Report — <scope>  (<YYYY-MM-DD>)
@@ -32,7 +34,7 @@ STATUS.md + the commit, and let git be the archive — do NOT keep standalone re
 ## Resolution
 
 - **Resolved this session:** <n>/<total>.  **Deferred (with explicit reason + where tracked):** <… or none>.
-- **Docs touched:** <…>   ·   **STATUS.md updated:** <rows>   ·   **Commit/PR:** <ref>
+- **Docs touched:** <…>   ·   **Issue comment posted:** <ub-id>   ·   **Commit/PR:** <ref>
 - **Verdict:** <corpus consistent / residuals listed above>
 
 ## Prevention (only if a NEW recurring class)

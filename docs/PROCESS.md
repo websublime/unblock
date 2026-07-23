@@ -20,7 +20,8 @@ tool. **Never simplify the solution to make progress; if you reach that point, s
   interfaces, PRD for product), then implement. Never let code and docs drift silently.
 - Pick the next **ready** task from **unblock** via the `query` tool (`ready` action; ready = all its deps are
   satisfied); register/update it via the `issue` (+ `comment`) tools and re-export the git record
-  `.unblock/issues.jsonl` (the `sync` tool's `export` action) in the **same commit** as the work; a task is done only
+  `.unblock/issues.jsonl` (the `sync` tool's `export` action) in the **same commit** as the work — plus the
+  wiki run-report (§8) when the work is substantive; a task is done only
   after it meets its PRD acceptance criteria **and** passed review.
 - **Lock versions just-in-time.** Review and lock a future version (v1.1, v1.2, …) only when the current version
   **nears completion**, using real learnings — not speculatively up front. Later versions stay PROPOSED *direction*
@@ -101,7 +102,9 @@ coordinator**, run adversarially.
 - **Drift/gap policy:** any drift or gap is **reported and, by default, resolved in the same session** — never
   deferred or left to accumulate (that is exactly how the 24-finding pile formed). Report it with the template
   `docs/plans/templates/drift-gap-report.md` so every coordinator/session uses the same shape; land the fixes in the
-  real docs and log the outcome as a **comment** on the task's unblock issue + the commit (git is the archive — don't keep standalone reports).
+  real docs and log the outcome as a **comment** on the task's unblock issue + the commit (git is the archive —
+  don't keep standalone reports; the ONE sanctioned descriptive archive is `.knowledge/wiki/runs/` (§8): a
+  run-report describes a past run — normative resolutions still land in the authoritative docs + the issue comment).
 - **Spine is the reference; resolution is collaborative.** On a plan↔spine interface disagreement the spine is the
   authoritative reference, but the fix is a **review → iterate → adjust loop with Miguel**: usually the plan is
   updated to match the spine, but the drift may reveal a *spine* bug. **Never silently overwrite a plan or the spine.**
@@ -112,14 +115,15 @@ coordinator**, run adversarially.
   for the surface. Its **git-backed record is `.unblock/issues.jsonl`** (the D5 committed JSONL export; the local
   `unblock.db` is gitignored). Harness Tasks = per-session execution. Update the unblock issue the moment a task
   changes state, and re-export `.unblock/issues.jsonl` (the `sync` tool's `export` action) in the **same commit** as
-  the work. **D5 model B** — manual export/import, no 3-way merge or locks; until the shared-state release
+  the work — for substantive work, the wiki run-report (`.knowledge/wiki/runs/`, §8) lands in that same
+  commit/PR too. **D5 model B** — manual export/import, no 3-way merge or locks; until the shared-state release
   (00-roadmap.md §4), concurrent sessions reconcile `.unblock/issues.jsonl` by hand.
 - **Every outcome is a comment on the task's issue.** Each phase/analysis result for a task — the Understand map, the
   Decide rationale + Miguel's fork resolutions, each gate verdict (design Review / Verify) with its must-fixes, the
   Implement summary, the findings, and the Track/merge result — is recorded as a **comment** on the task's unblock
   issue (the `comment` tool). The comment thread IS the durable, auditable per-task narrative that the verbose
   `STATUS.md` rows used to carry; `.unblock/issues.jsonl` snapshots it into git (re-export in the **same commit** as
-  the work).
+  the work, with the wiki run-report — §8 — when the work is substantive).
 - **Branch off `main`** — never commit directly to `main`. Branch name: `t<mid>.<n>-<slug>` (e.g. `t0.6-libsql-impl`).
 - A change may be committed only **after both gates pass** (design Review **and** Verify). The Track team
   (`git-workflow-manager`) makes **Conventional Commits** (`feat`/`fix`/`docs`/`refactor`/`test`/`chore`/`ci`…),
@@ -132,6 +136,42 @@ coordinator**, run adversarially.
 - **Bootstrap ends at T0.1.** Foundation docs are edited solo only until the first crate work begins; from **T0.1
   on, spec/plan/doc changes follow the same review → commit → PR discipline as code** (they are artifacts too).
 
-## 7. Language & artifacts
+## 7. Language, clarity & artifacts
 - **Converse in Portuguese; write all artifacts (code, docs, comments) in English.**
 - In always-on docs (`CLAUDE.md`, this file): pointers over prose — they cost context every session.
+- **Self-contained prose to Miguel.** Anything addressed to him — phase reports, gate verdicts, fork
+  questions, PR bodies, issue comments — must be resolvable from that message alone. Session-local ids
+  (mutant ids like M10, must-fix ids like MF-2, briefing rules like R8, lens indices, facet letters) are
+  expanded on first mention; durable ids (D-id, T-id, FR/NFR, `ub-*`, layer numbers) carry a one-clause
+  anchor on first mention. A code the reader cannot resolve from the message is a **defect of the
+  report**, not a style choice.
+- **Fork questions name their object.** Each option describes the concrete thing it decides — never only
+  a code coined earlier in the session. Coordinator briefs require findings as `file:line` + a one-line
+  plain description; the orchestrator translates any residual code before relaying.
+
+## 8. Knowledge layer — `.knowledge/` (descriptive, never normative)
+- **What it is:** the repo-public knowledge layer. `memories/` = atomic facts (one per file: frontmatter
+  `name`/`description`/`type` + body) with a curated one-liner `index.md`; `wiki/` = `runs/` (one
+  run-report per significant session or team run) + `topics/` (operational runbooks) + a categorized
+  `index.md`. Templates: `docs/plans/templates/run-report.md` / `topic-page.md`. Format contract
+  (migration-friendly to the roadmap §7 docs-in-DB row — `.knowledge` is its file-based
+  precursor): markdown + flat frontmatter, stable kebab-case slugs, index-as-data.
+- **Never normative.** The hierarchy is unchanged (**PRD > spine > crate plans**); nothing normative may
+  originate in `.knowledge` — it records how things went and behave, never rules, interfaces, or
+  decisions (this guards the standing no-standalone-design-docs rule). The repo is public: nothing
+  personal or strategic enters it.
+- **Entry criterion (wiki page):** a future session would plausibly need it, AND it lives in no
+  normative doc (and must stay out of them), AND it exceeds one issue's comment thread. Issue comments
+  remain the per-task spine — short, self-contained (§7), linking the run-report for depth.
+- **Run-report duties:** a MANDATORY glossary — every session-local id used in the report's prose or in
+  the run's issue comments is defined: what it is in words + where it lives (`file:line`, doc §, issue
+  id) — plus mandatory Context (gate/round/branch/PR), What & why, Outcome, Gotchas, and Links sections.
+- **Same-commit rule (extends §6):** substantive work + the `.unblock/issues.jsonl` re-export + the wiki
+  run-report land in the SAME commit/PR. *Substantive* here is the gate's structural diff predicate
+  (`ci-cd-and-distribution.md` §2.3) — a distinct, stricter sense than §4's team-sizing use: every code
+  change is gate-substantive, including a §4-legitimate solo one-liner.
+- **Enforcement is hard — failures block, never warn; no manual bypass, no discretionary label:** three
+  layers — `cargo xtask knowledge-lint` (checks k1–k6), the required `run-report-gate` CI job (the
+  structural substantive-PR predicate; the pr-create hook runs the same script), and PreToolUse hooks
+  (memories curation, sanctioned `memory-retire.sh` removal, `gh pr create`). Full normative spec:
+  `ci-cd-and-distribution.md` §2.3.
