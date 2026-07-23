@@ -26,8 +26,11 @@ if r.returncode != 0:
 top = r.stdout.strip()
 mb = re.search(r'--base[=\s]+(\S+)', cmd)
 base_ref = f"origin/{mb.group(1)}" if mb else "origin/main"
-g = subprocess.run([f"{top}/scripts/knowledge/run-report-gate.sh", base_ref],
-                   cwd=cwd, capture_output=True, text=True)
+try:
+    g = subprocess.run([f"{top}/scripts/knowledge/run-report-gate.sh", base_ref],
+                       cwd=cwd, capture_output=True, text=True)
+except OSError as e:
+    deny(f"cannot launch the run-report gate script ({e}); failing closed")
 sys.stderr.write(g.stderr)
 if g.returncode == 0:
     sys.exit(0)
