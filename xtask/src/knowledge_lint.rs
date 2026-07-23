@@ -457,10 +457,20 @@ fn is_md(name: &str) -> bool {
     Path::new(name).extension().is_some_and(|e| e == "md")
 }
 
+/// Is the file at `root/rel` exactly zero bytes? An I/O error is a structure-guard `Err`
+/// (fail-closed): a check that cannot read its input must block, never skip.
+fn is_empty_file(root: &Path, rel: &str) -> Result<bool, String> {
+    std::fs::metadata(root.join(rel))
+        .map(|m| m.len() == 0)
+        .map_err(|_| format!("knowledge structure incomplete — unreadable file: {rel} (FAIL)"))
+}
+
 /// Walk `.knowledge/`, emitting k2 stray/non-md/subdir findings and collecting content pages.
-/// `.gitkeep` placeholders inside content dirs are skipped: git cannot represent an empty
-/// directory, and the seed `wiki/topics/` ships empty — the placeholder is the sanctioned
-/// tree-preserving exception (flagged at landing; everything else non-md still fails k2).
+/// One narrow exception: exactly a ZERO-BYTE `.gitkeep` in `.knowledge/wiki/topics` is skipped —
+/// git cannot track that empty seed dir, so the placeholder keeps the structure guard green on a
+/// fresh clone. Anything else named `.gitkeep` (a non-empty one, or one in `memories/` or
+/// `wiki/runs/`) falls through to the k2 stray-non-markdown finding, so the fail-closed k2 rule is
+/// never softened (a `.gitkeep` cannot smuggle un-enforced bytes into the tree).
 fn walk_knowledge(root: &Path, findings: &mut Vec<Finding>) -> Result<KnowledgeTree, String> {
     let stray = |rel: String, findings: &mut Vec<Finding>| {
         findings.push(Finding {
@@ -507,8 +517,14 @@ fn walk_knowledge(root: &Path, findings: &mut Vec<Finding>) -> Result<KnowledgeT
                     check: Check::K2Orphan,
                     message: format!("subdirectory '{rel}' not allowed (flat layout)"),
                 });
-            } else if name == ".gitkeep" {
-                // Sanctioned empty-dir placeholder (see the function doc).
+            } else if name == ".gitkeep"
+                && dir == ".knowledge/wiki/topics"
+                && is_empty_file(root, &rel)?
+            {
+                // Sanctioned zero-byte tree-preserving placeholder — and ONLY that: exactly a
+                // zero-byte `.gitkeep` in `wiki/topics`. A non-empty `.gitkeep`, or one in
+                // `memories/`/`wiki/runs/`, short-circuits past this arm and falls through to the
+                // k2 stray-non-markdown finding below (fail-closed; see the function doc).
             } else if !is_md(&name) {
                 findings.push(Finding {
                     file: rel.clone(),
@@ -1502,12 +1518,61 @@ mod tests {
 
     #[test]
     fn gitkeep_placeholder_is_not_a_stray() {
+        // (d) The sole sanctioned case: a ZERO-BYTE `.gitkeep` in `wiki/topics/` is skipped.
         let dir = fixture();
         write(dir.path(), ".knowledge/wiki/topics/.gitkeep", "");
         let f = lint(&dir).expect("guard clean");
         assert!(
             f.is_empty(),
-            "a .gitkeep placeholder must be skipped, got {f:?}"
+            "an empty wiki/topics/.gitkeep placeholder must be skipped, got {f:?}"
+        );
+    }
+
+    #[test]
+    fn nonempty_gitkeep_in_topics_is_rejected() {
+        // (a) A `.gitkeep` in the sanctioned dir but carrying bytes must NOT be exempt — it falls
+        // through to the k2 stray-non-markdown finding (a `.gitkeep` cannot smuggle content).
+        let dir = fixture();
+        write(
+            dir.path(),
+            ".knowledge/wiki/topics/.gitkeep",
+            "a paragraph of un-enforced prose\n",
+        );
+        let f = lint(&dir).expect("guard clean");
+        assert!(
+            f.iter().any(|x| x.check == Check::K2Orphan
+                && x.file == ".knowledge/wiki/topics/.gitkeep"
+                && x.message.contains("unindexable non-markdown")),
+            "a NON-EMPTY wiki/topics/.gitkeep must be a k2 finding: {f:?}"
+        );
+    }
+
+    #[test]
+    fn gitkeep_in_memories_is_rejected() {
+        // (b) Even an EMPTY `.gitkeep` outside `wiki/topics/` is not exempt — the dir restriction
+        // must hold (emptiness alone does not license the skip).
+        let dir = fixture();
+        write(dir.path(), ".knowledge/memories/.gitkeep", "");
+        let f = lint(&dir).expect("guard clean");
+        assert!(
+            f.iter().any(|x| x.check == Check::K2Orphan
+                && x.file == ".knowledge/memories/.gitkeep"
+                && x.message.contains("unindexable non-markdown")),
+            "a .gitkeep in memories/ must be a k2 finding: {f:?}"
+        );
+    }
+
+    #[test]
+    fn gitkeep_in_runs_is_rejected() {
+        // (c) An EMPTY `.gitkeep` in `wiki/runs/` is likewise not exempt (dir restriction).
+        let dir = fixture();
+        write(dir.path(), ".knowledge/wiki/runs/.gitkeep", "");
+        let f = lint(&dir).expect("guard clean");
+        assert!(
+            f.iter().any(|x| x.check == Check::K2Orphan
+                && x.file == ".knowledge/wiki/runs/.gitkeep"
+                && x.message.contains("unindexable non-markdown")),
+            "a .gitkeep in wiki/runs/ must be a k2 finding: {f:?}"
         );
     }
 
