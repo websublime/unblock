@@ -36,7 +36,7 @@ Runs on `pull_request` and pushes to the default branch. Jobs (all on stable `1.
 | `audit` | `cargo audit` (advisories; catches e.g. an archived retry crate) | NFR-3, NFR-9 | **M0 (T0.9)** |
 | `deny` | `cargo deny check` (licenses, bans, sources, advisories; **no-git ban**: no git crate in tree; transitive budget) | NFR-6, NFR-9, NFR-10 | **M0 (T0.9)** |
 | `toolchain` | pin `rust-toolchain.toml` to **stable `1.96.0`** and build the workspace with `--locked`; a green stable build (no nightly-only features) is the gate. Fails if any crate requires nightly. | NFR-12 | **M0 (T0.9)** |
-| `doc-lint` | `cargo xtask doc-lint` — **doc-corpus consistency lint** (see §2.1) over the fixed 19-file corpus; catches the D-id / FR-tier / command-token / stamp / cross-ref / doc-count drift classes. | — | **M0 (T0.9)** |
+| `doc-lint` | `cargo xtask doc-lint` — **doc-corpus consistency lint** (see §2.1) over the fixed 19-file corpus; catches the D-id / FR-tier / command-token / stamp / cross-ref / doc-count drift classes. Plus the knowledge-layer steps (§2.3): `cargo xtask knowledge-lint` (k1..k6, separate corpus) + `scripts/knowledge/tests/run-report-gate-selftest.sh` (the gate predicate's executable proof). | — | **M0 (T0.9)** |
 | `fuzz-smoke` | short `cargo fuzz` run on the 8 ingestion targets, on a **scheduled** (nightly) workflow (`fuzz-smoke.yml`): nightly-`2026-04-01` (= rustc 1.96.0-nightly) + libFuzzer for the targets, plus a separate stable-1.96 step that runs the two `#[ignore]`d contention-lab controls (forced-spin, WAL-negative) to keep the M0 gate proven non-vacuous. Both controls are **core-independent** so they are non-flaky on the 4-vCPU runner: the forced-spin control asserts a busy-retry + CPU-burn (`cpu/wall`) hot-spin signature (not just `R > ceiling`), and the WAL-negative control drives a fixed write total — see `unblock-storage.md` and `STATUS.md` T0.8. Failure routing at M0 = just go red; `workflow_dispatch` allows a manual re-run; no issue-opening. **Repair note (post-T1.3):** this leg was effectively **DOA since T0.7/T0.9** — the former `nightly-2024-10-31` pin (cargo 1.84) predated edition 2024 (>= 1.85) + let-chains (>= 1.88) so the `unblock-*` tree could not parse, and the nested `fuzz/Cargo.toml` lacked an empty `[workspace]` table so `cargo fuzz` could not build it directly. Re-pinned to `nightly-2026-04-01` (>= the stable 1.96 target) + the `[workspace]` table added; the unwatched cron is now repaired. | NFR-16 | **M0 (T0.9)** — nightly schedule |
 | `bench-gate` | HYBRID `criterion` gate (D34): a hard per-PR **generous absolute-ms** budget on a pinned ≥2-vCPU runner (`benches/storage.rs`, `benches/engine.rs` + the existing policy/render `criterion` benches wired into the SAME gate, F-7 — `cargo xtask bench-gate`) plus the **advisory/nightly 10% relative-regression report** (`cargo xtask bench-compare` vs the committed `xtask/bench-baseline.json`, homed in the `fuzz-smoke` `perf-advisory` leg, **report-only — never fails a PR/nightly**) | NFR-1 | **landed at T3.5 (P1)**; the read ceilings were **re-tightened + the advisory relative-10% leg landed at T3.5.1** (once batch hydration fixed the `collect_hydrated` N+1) |
 | `scale` | 250k-issue corpus (storage-direct, validated but non-minted — D34) under the child-per-client topology (D14+D31); a **timed integration test** (`crates/unblock-storage/tests/scale.rs` + `crates/unblock-engine/tests/scale.rs`), NOT a `criterion` bench — per-PR with an explicit timeout + an `#[ignore]`-gated soak variant | NFR-2 | **owned by / lands at T3.5 (P1)** (the 250k corpus harness/`seed_corpus` is built at T3.5) |
@@ -45,6 +45,7 @@ Runs on `pull_request` and pushes to the default branch. Jobs (all on stable `1.
 | `rate-limit` | single-MCP-server rate-limit assertions (NFR-18 rate-limit half — the `Arc<Semaphore>` chokepoint + minted `RateLimited`, D34); a cheap, **independent** `-p unblock-mcp` leg (`crates/unblock-mcp/tests/rate_limit.rs`) | NFR-18 | **LANDED at T3.5 (P2)** |
 | `feature-matrix` | `cargo build -p unblock-cli --no-default-features --locked` (proves `axoupdater`/`reqwest`/`hyper` are unreachable when the `self-update` feature is off — the AUTHORITATIVE confinement proof) **plus** the default-on leg; pinned checkout/toolchain(`1.96.0`)/rust-cache | NFR-10, NFR-17 | **lands at T3.6 (P2)** |
 | `verify-pins` | `cargo xtask verify-pins` — fails if any `uses:` in `.github/workflows/release.yml` (or `ci.yml`) is not pinned to a 40-char commit SHA. `dist` CLOBBERS the generated pins on every regen, so this backstops the standing NFR-9 re-pin duty; it MUST cover `actions/attest@v4` (a floating major in dist's template). | NFR-9 | **lands at T3.6 (P1)** |
+| `run-report-gate` | `scripts/knowledge/run-report-gate.sh "origin/${GITHUB_BASE_REF}"` — the structural substantive-PR predicate + run-report requirement (§2.3.3); PR-only, toolchain-free; dependabot exempt by PR-author identity; required check on `main` (flip sequenced at §2.3.3) | — | knowledge-layer landing PR (post-GA) |
 
 > **The standalone `contention` NFR-3 job is folded into `storage-testkit` at M0** — the contention lab is the M0 exit gate (T0.8) and runs as `--test contention_lab` under `storage-testkit`; the separately-owned long-lived stress half is the deferred `stress-integrity` job (T3.4).
 
@@ -67,6 +68,657 @@ Runs on `pull_request` and pushes to the default branch. Jobs (all on stable `1.
 - **(d) source-of-truth stamp** — the `PRD APPROVED vX.Y` stamp in every doc matches the PRD header revision (currently **v1.1**).
 - **(e) cross-ref resolution** — every `§N.M` cross-reference resolves to an existing anchor.
 - **(f) doc-count & RESOLVED claims** — the doc-count and "RESOLVED" claims in the README consistency report match the actual file set.
+
+### 2.3 Knowledge layer — format contract, knowledge-lint, run-report gate & hooks
+
+The repo-public knowledge layer `.knowledge/` (memories + wiki run-reports/topics — descriptive, never
+normative; process rules in `docs/PROCESS.md` section 8) is machine-enforced from day 1: failures BLOCK,
+never warn — no manual bypass, no discretionary label. Three layers: (i) `cargo xtask knowledge-lint`
+(§2.3.2), a step in the `doc-lint` job; (ii) the `run-report-gate` required CI job (§2.3.3) — every PR is
+classified by a structural substantive-PR predicate, and a substantive PR must carry its wiki
+run-report in the same commit/PR as the work; (iii) PreToolUse hooks (§2.3.4), which run the SAME predicate script before
+`gh pr create`. CI is the unbypassable server-side floor; hooks are the early in-session net; no rule
+exists only in a hook. §2.3.5 records the accepted residuals by name.
+
+#### 2.3.1 Format contract — scaffold, slugs, frontmatter schemas, index grammars, consts
+
+**Tree (exact; no other files or subdirectories are valid — enforced by the §2.3.2 structure guard and
+k2):**
+
+```
+.knowledge/
+├── memories/
+│   ├── index.md                      # curated one-liner index of every memory (data, not prose)
+│   └── <slug>.md                     # one atomic fact per file (frontmatter + body)
+└── wiki/
+    ├── index.md                      # categorized index: ## Runs + ## Topics (### <category>)
+    ├── runs/
+    │   └── <YYYY-MM-DD>-<slug>.md    # one run-report per significant session / team run
+    └── topics/
+        └── <slug>.md                 # operational runbooks (descriptive, never normative)
+```
+
+Layout is **flat** (no subdirectories inside `memories/`, `runs/`, `topics/`). Bootstrap minimum: both
+`index.md` files exist. Skeleton entry lines in the grammar blocks below are ILLUSTRATIVE; seed indexes
+ship with EMPTY entry lists (plus exactly the first run-report's entry under `## Runs`). Templates do
+NOT live inside `.knowledge/` — they are `docs/plans/templates/run-report.md` / `topic-page.md`
+(copy-don't-edit), keeping every lint corpus template-free.
+
+**Slug & filename rules:** slug grammar `[a-z0-9][a-z0-9-]*` (kebab-case, ASCII); filename =
+`<slug>.md`; run-report filename = `<YYYY-MM-DD>-<slug>.md` with frontmatter `name` = the full
+date-prefixed stem. Frontmatter `name` MUST equal the filename stem (k5). Slugs are **immutable once
+merged** — a rename is a retire-and-recreate (the slug is a future DB primary key).
+
+**Index formats (index-as-data):** indexes are curated by hand but machine-checked — every non-entry
+line is skeleton, every entry line obeys one exact grammar, link-text = target stem, and the one-liner
+MUST equal the page's frontmatter `description` verbatim (trim-equal): the index is a projection of
+page data, so drift is a lint failure (k1). `memories/index.md` is a flat list with an inline
+backticked type token — one grammar per line, one parser, the type already data on the line:
+
+```
+# Memory index
+
+One line per memory; the line's one-liner equals the memory's frontmatter description.
+
+- [<slug>](<slug>.md) `<type>` — <description>
+```
+
+`wiki/index.md` has **exactly two H2 sections** (`## Runs`, `## Topics` — any other H2 is a k4
+finding) with `### <category>` subheadings under `## Topics`, one per category **in use**, drawn from
+the 7-value category enum; every topic is listed under the heading matching its frontmatter `category`
+(k4). `## Runs` is newest-first by convention (ordering is NOT lint-checked):
+
+```
+# Wiki index
+
+Descriptive only — never normative (PRD > spine > crate plans is unchanged).
+
+## Runs
+
+- [<YYYY-MM-DD>-<slug>](runs/<YYYY-MM-DD>-<slug>.md) — <description>
+
+## Topics
+
+### <category>
+
+- [<slug>](topics/<slug>.md) — <description>
+```
+
+**Frontmatter schemas (per kind; deny-unknown per kind):** a `---`-fenced block starting at byte 0;
+**flat scalar `key: value` lines only** (plus the one inline list below); nested/indented YAML = k3.
+Unknown keys (per kind) = k3 — strict now, so the DB migration never meets surprise columns. No YAML
+dependency: this shape is parsed with `regex` (cargo-deny transitive budget untouched). Memory pages
+carry exactly `name` (== stem), `description` (== the index one-liner, verbatim), `type`. Run-reports
+add `date` (== the filename date prefix, k3), `branch` (or `-`), `pr` (number or `-` — `-` at commit
+time is valid: the PR number does not exist yet when the same-commit rule lands the report; backfill is
+optional), and `issues` (inline flat list of `ub-*` ids; `[]` invalid — a run with no issue is not a
+significant run; each id must resolve, k4). Topics add `category`.
+
+**Canonical value consts** (owned by `xtask/src/knowledge_lint.rs`; extending an enum is a normal,
+PR-visible, reviewed change to the lint const AND this section — never an ad-hoc new value; the
+`CANONICAL_VERBS` precedent from doc-lint class (c)):
+
+- memory `type`: `gotcha` (a trap/failure mode) \| `recipe` (a sequence that worked) \| `reference` (a
+  stable tool/API/format fact) \| `environment` (a local/CI/runner fact). The 4-value set is
+  deliberately descriptive-only — no decision/constraint kinds, which would invite normative content.
+- wiki page `type` per dir: `run` (`wiki/runs/*`) \| `topic` (`wiki/topics/*`).
+- topic `category` (7): `orchestration` \| `git-and-worktrees` \| `ci-and-quality-gates` \|
+  `testing-and-benches` \| `release-and-distribution` \| `mcp-and-agents` \| `environment-and-tooling`.
+- glossary empty-body sentinel (the template and the lint agree on ONE literal): the exact sentence
+  `No session-local ids were used in this run.`
+
+**Format contract (migration-friendliness; binding on any future change here):** markdown + flat
+frontmatter only (frontmatter keys are future DB columns; `type` is the discriminator); slugs are
+stable primary keys; indexes are data (a future importer parses them or regenerates them from
+frontmatter with zero information loss); no content in `.knowledge/` may become load-bearing for any
+normative process — the docs-in-DB migration must be able to lift it wholesale without touching
+PRD/spine/plans. The referenced end-state is the roadmap §7 docs-in-DB row (process-knowledge storage —
+distinct from the product "memory screen" DISCARDED at roadmap §5).
+
+#### 2.3.2 Layer (i): cargo xtask knowledge-lint (checks k1..k6)
+
+**Fit + separation guarantee.** The knowledge lint mirrors the doc-lint shape in a **sibling module**
+`xtask/src/knowledge_lint.rs` (`knowledge_lint()` entry, testable `lint_at(root)` core, findings
+sorted `(file, line, check)`) — it does NOT extend the 19-file corpus. Three separation invariants:
+(1) the doc-lint corpus never contains a `.knowledge/**` path (pinned by a corpus-test assertion);
+(2) `knowledge_lint.rs` reads only `.knowledge/**` plus the out-of-tree point-reads specified below;
+neither module calls the other's class functions; (3) doc-lint classes a..f must NOT run over
+`.knowledge` — a run-report legitimately quotes superseded ids, old tiers, dead command spellings, and
+foreign session-local codes; descriptive history is not drift. The k-prefix keeps a knowledge finding
+from ever reading as a doc-lint a–f finding. Helper reuse, not duplication: the fence mask and
+code-span index are shared `pub(crate)` helpers, so a fenced example of an index entry or frontmatter
+block can never create a phantom entry/page. Report lines (exact): green
+`knowledge-lint OK: <N> pages, 6 checks clean`; red: each finding to stderr as
+`path:line: [kN] message`, then `knowledge-lint: <N> findings (k1:<a> k2:<b> k3:<c> k4:<d> k5:<e> k6:<f>)`,
+exit FAILURE.
+
+**Corpus model + structure guard.** The knowledge corpus is **dynamic** (discovered by walking
+`.knowledge/`), but the skeleton is fixed and guarded: `lint_at` returns `Err` (hard FAIL, before any
+check runs) unless `memories/index.md`, `wiki/index.md`, `wiki/runs/` and `wiki/topics/` all exist —
+message `knowledge structure incomplete — missing: <comma-list> (an absent skeleton is a vacuous pass;
+FAIL)`. Unreadable files are also guard `Err`s. Empty entry lists are valid; a missing tree is not.
+Content pages = `memories/*.md` (excluding `index.md`) ∪ `wiki/runs/*.md` ∪ `wiki/topics/*.md`.
+
+**Out-of-tree point-reads (fully specified; a literal implementation must NOT fail open):** every read
+resolves against `lint_at`'s root (no cwd dependence). An absent or unreadable `.unblock/issues.jsonl`
+or `CLAUDE.md` — or any absent/unreadable repo-local member of the `@`-import closure — is a
+structure-guard `Err` (message `knowledge structure incomplete — missing: <path> (out-of-tree read; a
+vacuous k4 pass is not a pass; FAIL)`): a k4 that cannot read its inputs must block, never skip. Each
+non-empty export line is parsed as a JSON object with `serde_json` (already a direct xtask dependency);
+the record id is the **top-level `id` field only** — the real export nests `comments[].id` (numeric)
+and `comments[].issue_id`, and ids also appear in prose, so a whole-line substring/regex grep is
+FORBIDDEN. A line that does not parse as a JSON object with a string `id` ⇒ guard `Err` (corrupt
+export, fail-closed); a `comments` field that is present but malformed — not an array, or a member
+lacking a string `text` — is likewise a guard `Err` (an absent `comments` key = legitimately zero
+comments). k4 issues-resolve = set-membership of each cited `issues:` id in the collected
+top-level-id set — exact string equality, no prefix/substring matching. The `@`-import closure starts
+at `CLAUDE.md`, collects `@<path>` references outside fence masks and code spans, resolves repo-local
+targets against the root, and recurses with a visited set, max depth 5 (Claude Code's own import-hop
+cap); home-dir and root-external targets are outside repo jurisdiction and are skipped. Any closure
+member whose text `@`-imports a target whose ROOT-RESOLVED path lies under `.knowledge` (relative,
+`./`-relative, and root-internal absolute spellings alike) ⇒ the k4 no-import finding below.
+
+**Export retention invariant (a D5 export-contract rider):** *An id, once exported to
+`.unblock/issues.jsonl`, persists in the export forever — PRD D12 reserves compaction fields in the
+model, and any future export compaction MUST preserve every id record (tombstoned at most, never
+dropped), or it is a breaking change to this gate.* Without it, k4 issues-resolve would create a
+referential edge from immutable descriptive history into the live export with no stated guarantee.
+
+**The six checks — conditions and exact messages.** All checks skip fenced lines and code spans.
+Attribution: k1/k4 index-side findings carry the index file + entry/heading line; k3/k5/k6 findings
+carry the page + offending line (line 1 for whole-file conditions); k2 findings carry the offending
+file, line 1.
+
+**k1 — index→file resolution** (fires in the index files):
+
+| Condition | Exact message |
+|---|---|
+| entry link target does not exist | `index entry '<target>' does not resolve to a file` |
+| two entries resolve to one target | `duplicate index entry for '<target>'` |
+| target escapes the owning content dir (`..`, absolute, wrong dir) | `index entry '<target>' escapes its content dir` |
+| link-shaped line fails the memories grammar | ``malformed index entry (expected '- [slug](slug.md) `type` — one-liner')`` |
+| link-shaped line fails the wiki grammar | `malformed index entry (expected '- [name](path.md) — one-liner')` |
+| link-text ≠ target stem | `index entry link-text '<text>' != target stem '<stem>'` |
+| one-liner ≠ page `description` (trim-equal) | `index one-liner differs from the page's frontmatter description` |
+
+**k2 — file→index (orphans) + structural strays:**
+
+| Condition | Exact message |
+|---|---|
+| content page not listed exactly once in its index | `page not listed in <index>` |
+| file under `.knowledge/` outside the skeleton + content dirs | `stray file '<path>' outside the content dirs` |
+| non-`.md` file in a content dir | `unindexable non-markdown file '<path>'` |
+| subdirectory in a content dir | `subdirectory '<path>' not allowed (flat layout)` |
+
+(One tree-preservation exception, flagged at landing: a file named exactly `.gitkeep` directly inside a
+content dir is skipped — git cannot represent an empty directory, and the seed `wiki/topics/` ships
+empty; everything else non-md still fails k2.)
+
+**k3 — frontmatter validity** (content pages; index files are exempt from frontmatter):
+
+| Condition | Exact message |
+|---|---|
+| no frontmatter block at byte 0 | `missing frontmatter block ('---' ... '---')` |
+| unterminated frontmatter | `frontmatter not closed with '---'` |
+| required key absent (per kind, §2.3.1) | `frontmatter missing required key '<key>'` |
+| empty value | `frontmatter key '<key>' has an empty value` |
+| unknown key (per kind) | `frontmatter unknown key '<key>' (allowed for <kind>: <list>)` |
+| non-flat / non-`key: value` line | `malformed frontmatter line (expected flat 'key: value')` |
+| run `issues:` not an inline non-empty `[..]` list | `'issues' must be a non-empty inline list of ub-* ids` |
+| run `date` ≠ filename date prefix | `frontmatter date '<d>' != filename date prefix '<p>'` |
+
+**k4 — enum, category & value agreement:**
+
+| Condition | Exact message |
+|---|---|
+| memory `type` not canonical | `type '<t>' is not a canonical memory type (gotcha\|recipe\|reference\|environment)` |
+| wiki page `type` ≠ its dir's kind | `page in <dir> must have type '<expected>', found '<t>'` |
+| topic `category` not canonical | `category '<c>' is not a canonical topic category` |
+| `wiki/index.md` H2 set ≠ exactly `Runs`,`Topics` | `wiki index section '## <h>' is not canonical (expected exactly: Runs, Topics)` |
+| `### <h>` under `## Topics` not canonical | `wiki index category heading '### <h>' is not canonical` |
+| topic listed under H3 ≠ its frontmatter `category` | `'<target>' indexed under '### <heading>' but frontmatter says category '<c>'` |
+| run/topic listed under the wrong H2 | `'<target>' indexed under '## <section>' but lives in <dir>` |
+| memories-index inline type token ≠ page `type` | `'<target>' indexed with type '<tok>' but frontmatter says '<t>'` |
+| run `issues:` id absent from `.unblock/issues.jsonl` | `run cites issue '<id>' not present in .unblock/issues.jsonl` |
+| any file in the `CLAUDE.md` `@`-import closure `@`-imports `.knowledge` content | `<file> must not @-import .knowledge content (decision 10 — @-import closure)` |
+
+The issues-resolve check is the cheap, offline anti-stub tie to the tracker (a report citing an
+unregistered task fails until the task is registered and exported in the same PR). The no-import check
+scans the **closure**, not `CLAUDE.md` alone: `@`-imports nest, so an `@.knowledge` line added to
+`docs/PROCESS.md` (already imported by `CLAUDE.md`) would achieve the forbidden always-on import — and
+that 1-line M-only edit is docs-class trivial, so no gate would see it; only this lint catches it,
+permanently.
+
+**k5 — slug/filename:**
+
+| Condition | Exact message |
+|---|---|
+| filename stem fails the slug grammar | `filename '<file>' is not a valid slug ([a-z0-9][a-z0-9-]*)` |
+| runs filename lacks the date prefix | `run filename must be YYYY-MM-DD-<slug>.md` |
+| frontmatter `name` ≠ filename stem | `frontmatter name '<n>' != filename stem '<stem>'` |
+
+**k6 — run-report mandatory sections** (decision 3):
+
+| Condition | Exact message |
+|---|---|
+| any of the six H2s missing (`## Context`, `## What & why`, `## Outcome`, `## Gotchas`, `## Glossary`, `## Links`) | `run-report missing mandatory section '## <name>'` |
+| a mandatory section has an empty body | `section '## <name>' is empty` |
+| Glossary body lacks both ≥1 DATA row and the exact sentinel | `'## Glossary' must contain >=1 glossary DATA row or exactly: "No session-local ids were used in this run."` |
+
+**"DATA row" defined (normative for this text AND the unit tests):** within the Glossary's contiguous
+`\|`-table block, a DATA row is a `\|`-delimited line that is (a) **not the block's first row** (the
+header), (b) **not a separator row** (every cell matches `^\s*:?-+:?\s*$`), and (c) **not an
+all-placeholder row** (every cell empty or matching `^\s*<[^>]*>\s*$`). Under this definition the
+template's own header, separator, and placeholder lines count as ZERO rows — a template-copied glossary
+fails k6 instead of degrading the mandatory glossary to "the heading exists".
+
+**k6 token-coverage rules (decision 3's "or in the run's issue comments" — hard, temporal; both rules
+block, never warn):** two rules share the session-local-id pattern const `SESSION_LOCAL_ID_RE`,
+normatively defined at §2.3.3 rule 1a (single-sourced; the Rust const and the gate script's sh const
+must equal that literal — the §2.3.3 selftest pins the script side and this doc, a unit test pins the
+Rust side):
+
+1. *Report-body coverage:* every body token matching the pattern (fence mask + code spans applied)
+   must have a Glossary DATA row whose id cell equals it — message
+   `session-local id '<tok>' has no glossary row`.
+2. *Comment coverage — temporally scoped:* for each id in the run's `issues:` list, collect that
+   record's `comments[].text` bodies from `.unblock/issues.jsonl` (same parse as above) and apply the
+   same token rule — message `session-local id '<tok>' (from issue '<id>' comments) has no glossary row`.
+   **Temporal scope (normative):** the scan considers ONLY comments whose `created_at` is ≤ the
+   report's date. The report's date source is its frontmatter `date:` field (== the filename date
+   prefix, enforced by k3); the boundary is INCLUSIVE at end-of-day UTC — a comment stamped anywhere
+   on the report's own date, including a timestamp exactly equal to the boundary, is IN scope. Later
+   comments are OUT of scope by construction, so a frozen report never goes retroactively red when
+   later phases post gate-verdict comments on the same issue; codes coined by a later comment are owed
+   by THAT comment's own PR — rule 1a (§2.3.3) makes it substantive, so it brings its own report +
+   glossary. Amending a report later (the gate's deliberate `A\|M` path) does not widen its scope:
+   `date` stays pinned to the filename (k3/k5). A scanned comment member lacking a string
+   `created_at`, or one whose value does not parse as a date/datetime, ⇒ structure-guard `Err`
+   (fail-closed — never a silent skip).
+
+Known tuning constraint (recorded — not a defeater): durable repo tokens (`M0`–`M3` milestones,
+roadmap `R` rows) collide with the pattern; the remedy is tuning the ONE declared const (a reviewed,
+self-gated change), never per-file discretion.
+
+**CI wiring + budget:** offline, deterministic, sub-second, single pass per file (same budget class as
+doc-lint) — **one added step** in the existing `doc-lint` job, directly after `cargo xtask doc-lint`
+(a step in the existing job: identical always-on blocking property, one toolchain spin-up saved; the
+gate of §2.3.3 IS its own job because it is PR-only and toolchain-free).
+
+**Tests (the doc-lint proof pattern):** every planted fixture root ships the two out-of-tree stubs (a
+minimal `CLAUDE.md` importing a stub `docs/PROCESS.md`, and a synthetic one-line export mirroring the
+real record shape — nested numeric `comments[].id` + `issue_id` + the `created_at` timestamp the
+rule-2 temporal scope reads). Unit tests: ≥1 planted violation per check k1..k6 + no-false-positive
+guards (fenced example frontmatter/index entries are skipped; `index.md` needs no frontmatter; a valid
+sentinel-glossary run passes); the DATA-row fixtures (header+separator only → finding;
+all-placeholder row → finding; one real DATA row → pass; exact sentinel → pass); the issues-resolve
+fixtures (a resolving id; a ghost id → finding; an id appearing ONLY in export prose → finding —
+proves field-anchored resolution); the closure fixtures (a planted `@.knowledge` import in the fixture
+`docs/PROCESS.md` → finding attributed there; the same text fenced → no finding); the guard fixtures
+(absent export / absent `CLAUDE.md` / a non-JSON export line / an absent closure member → `Err`); the
+token-coverage fixtures (a body token with no matching DATA row → finding; the same with the row →
+pass; an in-scope comment coining an unglossaried token → finding; the SAME comment re-stamped AFTER
+the report's date → NO finding — the temporal-boundary pin, equal-timestamp variant IN scope; a
+scanned comment lacking `created_at` → `Err`); and the const-equality test (the Rust
+`SESSION_LOCAL_ID_RE` const equals the gate script's literal). Integration
+(`xtask/tests/knowledge_lint_corpus.rs`): `real_knowledge_is_green` (zero findings at the real repo
+root, exercising the real point-reads) and `missing_skeleton_fails_the_structure_guard` (non-vacuity).
+The corpus-separation pin lives in `xtask/tests/doc_lint_corpus.rs`.
+
+#### 2.3.3 Layer (ii): the run-report-gate CI job — the substantive-PR predicate
+
+The predicate is POSIX sh + git, deliberately not an xtask: the gate job runs with no toolchain, and a
+PreToolUse hook cannot afford a cargo build. **ONE predicate file,
+`scripts/knowledge/run-report-gate.sh` (0755), is the single source of truth executed verbatim by BOTH
+callers** (this CI job and the pr-create hook — zero drift). Exit codes: `0` pass · `1` BLOCK · `2`
+cannot evaluate (fail-closed); both callers treat non-zero as a block. Every knowledge script is
+kebab-case, and the CI job + predicate file share the exact token `run-report-gate`.
+
+**The predicate (normative).** Evaluated over the diff listing
+`git diff --name-only --diff-filter=ACDM --no-renames <merge-base(base_ref, HEAD)>..HEAD` (+
+`--numstat` for sizes). **Classification always runs on a `--no-renames` listing:** with rename
+detection on, only the NEW name of a rename is listed, so a `git mv` of a repo doc into `.knowledge/`
+would ride the neutral strip — under `--no-renames` a rename decomposes to D+A, each classified
+fail-closed. Rename detection is kept ONLY where sizing/shape needs it: the rule-7 run-report numstat,
+where it is the HARDER choice (a renamed old report surfaces as `R`, excluded from `A\|M`). **First
+matching rule wins per file; anything unclassified is SUBSTANTIVE (fail-closed). No labels, no human
+discretion, no bypass input of any kind.**
+
+1. **Neutral strip** (a path class never makes a diff substantive; rule 1a below can):
+   `.knowledge/**`, `.unblock/issues.jsonl`. Empty set after stripping AND rule 1a clean → **pass**
+   (wiki-gardening, memory-curation, code-free tracker-export PRs). The strip is deliberately narrow —
+   any other committed `.unblock` file is unexpected and fails closed; there is no `.gitignore`
+   exemption either (unclassified → substantive).
+
+   **1a. Comment-coining export trigger** (closes the export-only escape): the sessions that coin the
+   MOST session-local codes (failed gate rounds, decide-only sessions) commit ONLY the export — so
+   before the strip may pass a diff, the export's CONTENT diff is scanned: if an ADDED line contains a
+   `"comments"`-bearing record carrying a token that matches `SESSION_LOCAL_ID_RE` and does NOT appear
+   in the paired REMOVED line for the same record id (new-code detection; an added record with no
+   removed pair counts all its matches as new), the diff is **SUBSTANTIVE** — it coins durable
+   session-local codes, so the run-report (whose glossary duty covers the run's comments) is due in
+   the same PR. **`SESSION_LOCAL_ID_RE` — the session-local-id pattern const, normatively defined
+   HERE** (one value, three citation sites that must stay equal: this text / the sh const in
+   `run-report-gate.sh`, pinned by the selftest below / the k6 token-coverage Rust const, pinned by a
+   unit test): `(^|[^A-Za-z0-9-])(MF|CF|M|R|F|A)-?[0-9]+([^0-9]|$)` — the prefix set, optional
+   hyphen, digits, non-word context on both sides. Pairing note: on a raw export line the JSON-syntax
+   substring `"id":"<val>"` can only be a real string-valued key literally named `id`, so the first
+   such match is the record id, used ONLY as the new-vs-old pairing key; a mis-pairing errs toward
+   firing (fail-closed). Known friction (fail-closed by design): durable tokens colliding with the
+   pattern in a NEW comment make the PR substantive; tunable ONLY at the const (`scripts/**` →
+   self-gated; residual R-F5, §2.3.5). Codes already present in the record's previous version never
+   re-trigger.
+2. **Pure dependency-bump shape:** every remaining path ∈ `{**/Cargo.toml, Cargo.lock}` → **pass**
+   (covers human and dependabot cargo bumps structurally — no label).
+3. **Always-substantive classes** (any one file → SUBSTANTIVE): `crates/**`, `xtask/**`, `fuzz/**`,
+   `scripts/**`, `migrations/**`, `.github/**`, `.claude/**`, `.mcp.json`, `*.rs`, `*.sql`, `*.sh`,
+   `*.py`, `rust-toolchain{,.toml}`, any `*.toml` that is not a Cargo manifest (so `deny.toml`,
+   `dist-workspace.toml` count), a Cargo manifest **mixed** with non-manifest changes, and any binary
+   file. Deliberate stance: every code change already runs the two ≥3-agent gates, so the report
+   content exists by process — a 1-line code fix ships a short report, and that is intended.
+   **Self-gating:** `scripts/**` is in this class, so weakening the gate is itself gated; so are the
+   hooks (`.claude/**`) and CI (`.github/**`). There is deliberately NO workflow-pin trivial class —
+   repointing a `uses:` SHA is a supply-chain edit; `.github/**`, `.claude/**` and `.mcp.json` stay
+   always-substantive for non-bot actors (a hook-defanging PR must face its own gate). Note the arm
+   ORDER: `crates/**` precedes the docs class, so a crate README edit rides the code class.
+4. **Docs class** (`*.md` anywhere not already matched above, `LICENSE*`) — trivial **iff all three**
+   hold: (a) no added/removed line matches a PRD-definition pattern — `\|\s*\*\*D[0-9]+\*\*\s*\|` (a
+   PRD §4 D-row) or `^\s*-\s*\*\*(FR|NFR)-[0-9]+` (a PRD §5/§6 def line) — a contract-definition
+   change is substantive at ANY size; (b) every file's status is `M` (an Added/Deleted/Renamed doc is
+   a new/removed/moved artifact); (c) total added+deleted lines across the class (numstat; binary `-`
+   counts as 1000, fail-closed) **< 20**. Otherwise → SUBSTANTIVE. The `< 20` floor is the typo-fix
+   door; the const sits at the top of the script, and editing the script is `scripts/**` →
+   substantive → self-gated.
+5. **Fail-closed fallthrough:** any path not classified above → SUBSTANTIVE.
+6. **Dependabot:** exempted **structurally by machine identity at the CI job level**, keyed on the
+   **PR author login** — `github.event.pull_request.user.login != 'dependabot[bot]'` — never on
+   `github.actor` (the EVENT actor: a human re-triggering CI on a dependabot PR would flip the actor,
+   run the gate against `.github/**` with no run-report possible, and deadlock the required check; the
+   author login is immutable PR metadata). A bot identity is metadata, not a discretionary label;
+   GitHub counts a skipped required check as passing. This covers dependabot's GHA pin bumps, which
+   would otherwise hit rule 3 via `.github/**`.
+7. **Requirement when SUBSTANTIVE:** the diff must contain ≥1 file matching
+   `.knowledge/wiki/runs/*.md` — **top-level only** (the `:(glob)` pathspec magic is required: git's
+   default pathspec `*` DOES cross `/`, so a stray nested file would otherwise qualify; k2
+   independently rejects the subdir) — with status `A` or `M` **and ≥ 10 added lines** (numstat, with
+   rename detection deliberately kept: a renamed old report is `R`, excluded; a binary report's `-`
+   numstat is excluded too). Absent → BLOCK. `M` legitimately lets a follow-up PR amend its run's
+   report; the ≥ 10-added-lines floor stops a one-char touch. Report *validity* (frontmatter,
+   glossary, index entry) is knowledge-lint's business (§2.3.2); report-content QUALITY is a named
+   residual (§2.3.5, R-B4) — not overclaimed here.
+
+**The exact CI job** (in `.github/workflows/ci.yml`; pure git + POSIX sh — no toolchain, no cache; the
+job costs seconds; PR-only, since the predicate needs a base branch and pushes to `main` already carry
+a merged, gated PR):
+
+```yaml
+  run-report-gate:
+    name: run-report-gate (.knowledge run-report on substantive PRs)
+    # Decision 7(ii): a substantive PR must carry its wiki run-report in the SAME diff. The predicate is
+    # STRUCTURAL (scripts/knowledge/run-report-gate.sh — the same file the pr-create hook runs): no label,
+    # no manual bypass. Dependabot is exempt by machine identity keyed on the PR AUTHOR login (immutable
+    # PR metadata — github.actor would flip to whoever re-triggers CI on a bot PR and deadlock the
+    # required check); its skipped required check counts as success. Spec: ci-cd-and-distribution.md §2.3.
+    if: github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0   # full history so merge-base(origin/<base>, HEAD) resolves
+      - name: run-report gate (shared predicate)
+        run: scripts/knowledge/run-report-gate.sh "origin/${GITHUB_BASE_REF}"
+```
+
+**Branch-protection sequencing (the flip is server-side state; it cannot ride the PR):** owner
+**Miguel** (repo admin); timing **immediately AFTER the landing PR merges — never before** (flipped
+before the merge, every other open PR shows a permanently "Expected" check and cannot merge — only
+`if:`-skipped runs of an EXISTING job count as success; never flipped, a red gate does not block the
+merge button and the hard floor is silently a warn). Action: add `run-report-gate` to the `main`
+branch-protection required status checks and enable **enforcement for administrators**. Verification
+(run, don't assume): `gh api repos/{owner}/{repo}/branches/main/protection --jq
+'.required_status_checks.contexts'` must list `run-report-gate`, and `--jq '.enforce_admins.enabled'`
+must print `true`. Interim-window residual (stated, not softened): between the landing merge and the
+flip, the job RUNS and reds on violating PRs but does not yet block the merge button; the window is
+minutes long, owned by Miguel, verified by the `gh api` read, and recorded in the landing run-report.
+
+**Gate self-test harness — `scripts/knowledge/tests/run-report-gate-selftest.sh` (0755).** The gate
+script is the single most load-bearing decision-7 artifact, so it ships with its own executable
+proof: a **fixture-repo harness**, pure POSIX sh + git, offline and deterministic — for each case,
+build a throwaway repo under `mktemp -d`, apply the case's diff on a branch, run the gate, and assert
+**both** the exit code and a distinguishing stderr rationale substring. It also greps the script's
+`SESSION_LOCAL_ID_RE=` line against the rule-1a literal above AND greps this doc for the identical
+literal (the single-sourcing pin). Mandatory case matrix — every arm of the script (each of the 14
+rule-3 case-globs, the `*.toml`/manifest-mixed/docs/fallthrough arms, rules 1/1a/2, 4a–4c including
+4c's binary fail-closed arm, and rule 7 including its binary numstat exclusion) and all three exit
+codes; the `.md`-inside-dir cases double as case-arm ORDER pins — a `.md` under an always-substantive
+dir must ride rule 3, never the docs class (the dependabot exemption is job-level `if:` metadata,
+outside the script):
+
+| # | Case | Expect |
+|---|------|--------|
+| 1 | empty diff | 0 |
+| 2 | `.knowledge/` page + export touch, no new comment codes | 0 (`only neutral paths`) |
+| 3 | export-only diff whose added comment coins a new `MF-9`-style token | 1 (rule 1a, no report) |
+| 4 | case 3 + a qualifying run-report | 0 |
+| 5 | export record rewrite where the token already existed in the removed line | 0 (no re-trigger) |
+| 6 | `Cargo.toml` + `Cargo.lock` only | 0 (`pure manifest`) |
+| 7–20 | one case per rule-3 case-glob (all 14): `crates/` README `.md` (order pin: `crates/**` beats the docs class) · `xtask/` `.md` (order pin) · `fuzz/` `.md` (order pin) · `scripts/` file (self-gating) · `migrations/` `.md` (order pin) · `.github/` `.md` (e.g. `PULL_REQUEST_TEMPLATE.md` — order pin) · `.claude/settings.json` · `.mcp.json` · root `*.rs` · root `*.sql` · root `*.sh` · root `*.py` · bare `rust-toolchain` · `rust-toolchain.toml` | 1 each (stderr names the `always-substantive path`) |
+| 21 | `deny.toml` (the non-manifest `*.toml` arm) | 1 |
+| 22 | `Cargo.toml` mixed with a doc | 1 (manifest-mixed) |
+| 23 | unclassified `foo.xyz` | 1 (fail-closed fallthrough) |
+| 24 | doc M-only adding a `\| **D9** \|` row | 1 (4a) |
+| 25 | doc M-only adding a `- **FR-3**` line | 1 (4a) |
+| 26 | new doc (A) | 1 (4b) |
+| 27 | deleted doc (D) | 1 (4b) |
+| 28 | `git mv` doc → doc (rename decomposition) | 1 (4b) |
+| 29 | `git mv` repo-doc → `.knowledge/wiki/topics/x.md` (the D side is classified) | 1 (4b) |
+| 30 | 25-line M-only doc edit | 1 (4c) |
+| 31 | 5-line M-only doc edit | 0 (trivial) |
+| 32 | binary-content `.md` file, M-only (numstat `-` → counted as 1000) | 1 (4c binary arm, fail-closed) |
+| 33 | substantive + report with only 3 added lines | 1 (10-line floor) |
+| 34 | substantive + `git mv` old report → new name, zero added lines | 1 (renames stay excluded) |
+| 35 | substantive + only a NESTED `.knowledge/wiki/runs/sub/x.md` report | 1 (`:(glob)` pin) |
+| 36 | substantive + only a BINARY-content run-report (numstat `-`) | 1 (rule-7 binary exclusion) |
+| 37 | nonexistent base-ref | 2 (`cannot compute merge-base`) |
+| 38 | substantive + qualifying report (≥10 added lines, top-level) | 0 |
+
+CI wiring (always-on, blocking): one step appended to the existing `doc-lint` job, directly after the
+knowledge-lint step of §2.3.2 (it needs only git + sh; the job's toolchain is irrelevant to it).
+
+#### 2.3.4 Layer (iii): PreToolUse hooks + the sanctioned retire flow
+
+Hooks are **hard**: every deny is exit code 2 (stderr goes back to the model), and every script
+**fails closed** — an unparsable payload or a git error is a deny with a diagnostic, never a
+warn-and-pass. **Environmental scope, stated precisely:** that fail-closed property holds once a
+script RUNS. Claude Code blocks only on exit 2 — a missing script file, an absent `python3`, or an
+unset `$CLAUDE_PROJECT_DIR` surfaces as a NON-blocking hook error (environmental fail-open), and
+non-Claude-Code clients (SDK/stdio harnesses) execute no hooks at all. That residual is named at
+§2.3.5 R-B9; its compensations are the CI authority (every hook rule has a server-side backstop — no
+rule exists only in a hook) and the landing-PR hook smoke tests (one deliberate denied canary per
+hook, recorded in the first run-report). Hooks live in the checked-in project settings
+(`.claude/settings.json`), so worktree sessions inherit them. Miguel's own terminal is outside hook
+jurisdiction by construction — that, plus the sanctioned-flow scripts, is the "sanctioned flow".
+`$CLAUDE_PROJECT_DIR` is the documented read-only project-root input (CLAUDE.md conventions) — these
+hooks are a sanctioned consumer. Python3 is used for robust JSON parsing (`Bash(python3:*)` is already
+in the repo allowlist; no jq dependency).
+
+**Hooks JSON** (the top-level `"hooks"` key in `.claude/settings.json`, sibling of `"permissions"`;
+each script reads the hook payload JSON on stdin — `tool_name`, `tool_input`, `cwd`; exit 0 allows,
+exit 2 BLOCKS and surfaces stderr to the model):
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit|mcp__acp__Write|mcp__acp__Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/scripts/hooks/knowledge-memories-write-guard.py",
+            "timeout": 15
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/scripts/hooks/knowledge-memories-bash-guard.py",
+            "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/scripts/hooks/pr-create-run-report-gate.py",
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Hook matchers are full-match regexes and `mcp__acp__Write`/`mcp__acp__Edit` are allowlisted tools in
+this repo's settings, so the write-guard matcher must name them — a schema-valid wholesale overwrite
+of a curated memory via `mcp__acp__Write` would otherwise pass every other layer (lint green — the new
+content is valid; gate neutral — `.knowledge/**` is stripped). For memories the hook is the ONLY
+pre-commit layer.
+
+**`scripts/hooks/knowledge-memories-write-guard.py`** — Write/Edit protection of `memories/**`. Paths
+are normalized cwd-aware BEFORE the marker check (a relative path or a `..`-hop must not slip the
+substring marker). Rule table:
+
+| Operation on `.knowledge/memories/**` | Verdict |
+|---|---|
+| `Write` to a NEW file (memory creation) | allow |
+| `Edit`/`MultiEdit` on any memory file or `index.md` (surgical curation) | allow |
+| `Write` over an EXISTING memory file (wholesale overwrite) | **deny** — "use Edit" |
+| `mcp__acp__Write` / `mcp__acp__Edit` | same verdicts as `Write` / `Edit` respectively |
+| `Write` over `index.md` (regenerating the curated index) | allow (derived data; k1/k2/k4 re-validate it) |
+| any Write/Edit to a NESTED path under `memories/` | **deny** (flat layout; k2 backstops) |
+| a matched tool call with NO recognizable path field, or a relative path with no `cwd` | **deny** (fail closed) |
+
+**`scripts/hooks/knowledge-memories-bash-guard.py`** — destructive-Bash protection. Deny model,
+ordered so the allowlist is reachable: (1) **SANCTIONED first** — exactly one un-chained
+`memory-retire.sh <slug>` invocation → allow (the arg pattern is the slug grammar; the script itself
+re-validates and rejects `index`). (2) **Trigger B — pathless destructive shapes**, denied even with
+NO `.knowledge` mention (uncommitted memories have NO other layer: CI and the lint see committed state
+only): any `git clean` (it removes untracked files), and any **recursive `rm`** whose cwd-resolved
+target is the repo root, an ancestor of it, `/`, `~`, or `.knowledge`/anything under it. (3) **Trigger
+A — `.knowledge` prefix scan:** a command that mentions `.knowledge` (ANY part of the tree — covering
+the parent-dir shape and the split-context `cd .knowledge && rm …` shape) AND carries **mutation
+capability** is denied; pure reads pass. Mutation capability = hard verbs (`rm unlink rmdir mv cp dd
+tee shred truncate install ln touch chmod chown rsync xargs eval`); conditional (`sed`/`perl` only
+with `-i`; `find` only with `-delete`/`-exec`; `git` only with destructive verbs); interpreters with
+the path in scope; any `>`/`>>` redirection targeting the tree.
+
+**`scripts/knowledge/memory-retire.sh`** — the sanctioned destructive flow. The sanctioned flow is ONE
+atomic script (file + index consistent, exact hook allowlist, stages-never-commits) rather than a
+two-step de-index-first flow. It (a) rejects the slug `index` explicitly (slug-grammar-valid, so an
+exclusion is required); (b) re-validates the slug grammar itself (the hook allowlist is NOT the
+enforcement point — the script also runs outside hook jurisdiction); (c) is ordered so NO partial
+destructive state survives a mid-script failure: validation + the new index content (pure computation,
+written off to the side) come first; mutations run last with the destructive file removal FINAL. Exits:
+3 usage · 4 no-such-memory / broken tree · 5 invalid slug. A pre-existing missing index entry produces
+a stderr diagnostic (an NFR-14-class note about an already-k2-visible orphan state), not a failure —
+the blocking layer (k1/k2) re-validates the post-retire tree on the next lint run.
+
+**`scripts/hooks/pr-create-run-report-gate.py`** — gates `gh pr create` on the run-report by
+delegating verdict AND requirement to `scripts/knowledge/run-report-gate.sh` — **the same file CI
+runs** (zero drift). `gh api` is allowlisted in the repo settings, so the API pulls-POST shape must be
+intercepted too. It evaluates against the local `origin/main` (or the parsed `--base`) without
+fetching — no network in hooks; CI recomputes authoritatively. Known residuals: hooks guard the agent
+flow, not a human terminal; a `gh pr create -R <other-repo>` still runs this repo's predicate
+(harmless); CI remains the authoritative backstop; Write/Edit-tool protection of `wiki/**` is
+consciously out of scope (memories-only; shell-side destructive commands naming `.knowledge` ARE
+denied by trigger A; a runs deletion still surfaces via k1/k2 + the PR diff) — revisiting it is a
+recorded open follow-up of the epic.
+
+#### 2.3.5 Accepted residuals & bypass closures
+
+False positives (cost = friction, never data loss):
+
+- **R-F1** A docs-only sweep ≥ 20 lines demands a run-report. Closure: that scale of sweep IS a
+  session worth 10 report lines; the budget const is edited only via a `scripts/**` change — itself
+  substantive, so the knob is self-gated. No discretion path added.
+- **R-F2** Bash read-pipelines mixing a mutating verb with the memories path are denied. Closure: the
+  deny message instructs splitting the command; fail-closed is the approved posture; a zero-risk
+  workaround always exists.
+- **R-F3** Fenced examples of frontmatter/index entries inside pages could trip k-checks. Closure: the
+  reused fence mask skips fenced lines by construction; pinned by a no-false-positive unit test.
+- **R-F4** `gh pr create` against a non-main base mis-computes the diff. Closure: the hook parses
+  `--base`; the house rule is base=main anyway; CI recomputes authoritatively from the base ref.
+- **R-F5** Durable tokens colliding with `SESSION_LOCAL_ID_RE` (`M0`–`M3` milestones, roadmap `R`
+  rows) in a NEW issue comment make an export-only PR substantive → a run-report is demanded for a
+  session that coined nothing. Closure: fail-closed friction by design (a report for such a session is
+  cheap and the glossary sentinel is one line); the pattern is ONE declared const, tunable only via a
+  `scripts/**` change — itself substantive, so the knob is self-gated. The same tuning constraint
+  applies to the k6 token-coverage const.
+
+Bypass surfaces (each with its closing layer):
+
+- **R-B1** An agent edits `.claude/settings.json` or `scripts/**` to defang hooks. Closure: hooks are
+  the early net, **CI is the authority** — `run-report-gate` + `knowledge-lint` run server-side, and
+  any such edit is itself SUBSTANTIVE (rule 3), demanding a run-report that documents the change in
+  front of the human merger. System-prompt rules already forbid agent permission/config changes.
+- **R-B2** A manifest-only dependency ADDITION passes as trivial (rule 2). Closure: an unused
+  dependency is inert; using it requires `*.rs` changes → substantive then; `cargo-audit`/`cargo-deny`
+  still gate the PR. Accepted residual.
+- **R-B3** A crafted < 20-line spec change dodges rule 4c. Closure: rule 4a fires on any D-row /
+  FR/NFR definition line regardless of size; the design-Review gate (process layer) owns residual
+  semantics — the predicate is a structural backstop, not the only reviewer. Same stance for a
+  < 20-line M-only stance edit to `CLAUDE.md`/`docs/PROCESS.md`/`AGENTS.md` (docs class). Accepted
+  residual.
+- **R-B4** The ONE ownership site for report-content quality: touching an old run-report to satisfy
+  the gate, or shipping a frontmatter-valid report with placeholder bodies — both survive the machine.
+  Closure: the ≥ 10-added-lines floor stops the one-char touch; a junk paste passes the floor but sits
+  in the PR diff under human merge — and knowledge-lint keeps the page schema-valid. Accepted
+  residual, NARROWED by the k6 token-coverage rules (§2.3.2): token-bearing junk now needs matching
+  glossary DATA rows; token-FREE placeholder padding remains the residual. Optional hardening recorded
+  and NOT adopted day-1: counting the 10-line floor over non-heading, non-frontmatter added lines —
+  adopt only if dogfooding shows padding (a `scripts/**` change, self-gated).
+- **R-B5** Obfuscated destructive Bash (variable indirection; `git filter-repo`). Closure: the guard
+  catches the plain parent-dir, pathless, and split-context shapes; the surviving residual is
+  variable-indirection obfuscation, which is not a shape agents emit innocently. The durable invariant
+  is CI-side — a landed deletion breaks k1/k2 unless the index was updated too, and either way the PR
+  diff shows it to the merger. Hooks are defense-in-depth by design.
+- **R-B6** PR created via raw `curl` to the GitHub API. Closure: `curl` is not in the repo allowlist →
+  a permission prompt (a human decision); the `gh api` pulls-POST shape IS intercepted; the CI gate
+  still fails the PR itself.
+- **R-B7** Worktree paths evade path-anchored patterns. Closure: all matchers are
+  substring/suffix-based, so worktree absolute paths match; worktrees inherit the checked-in hooks and
+  scripts.
+- **R-B8** Pushing more commits after `gh pr create` (report deleted post-creation). Closure: CI
+  re-runs the gate on every push to the PR; the hook is only the early check.
+- **R-B9** Hooks fail OPEN environmentally: Claude Code blocks only on exit 2, so a missing script
+  file, an absent `python3`, or an unset `$CLAUDE_PROJECT_DIR` is a NON-blocking hook error, and
+  non-Claude-Code clients (SDK/stdio harnesses) run no hooks at all. Closure: no rule exists only in a
+  hook — CI (`knowledge-lint` + `run-report-gate` + the selftest) is the server-side authority for
+  every hook-guarded rule EXCEPT pre-commit protection of uncommitted memories, whose practical
+  exposure is in-session (where the landing-PR smoke canaries prove the hooks execute) — plus normal
+  traffic exercises the hooks every session, so silent environmental rot surfaces immediately.
+  Accepted residual, named — not softened (no warn path is added anywhere).
+- **R-B10** The road not taken on glossary depth, recorded with its true cost: under a
+  presence-only k6 (shape checks alone), nothing machine-checks that comment-coined codes have
+  glossary rows, NOR that report-body-used codes have glossary rows — the shape check ties no row to
+  any token, so a report could assert codes directly above a factually-false sentinel and stay green.
+  The selected depth (the k6 token-coverage rules of §2.3.2, hard + temporal) closes that; bare facet
+  letters (e.g. "arm A") are an inherent bound of ANY digit-anchored pattern and remain duty-only
+  (the duty lives in `docs/PROCESS.md` section 8).
+- **R-B11** Rule 1a's comment-coining scan keys on `"comments"`-bearing added export lines — so a
+  brand-new record exported WITHOUT a `"comments"` key whose `description` prose coins session-local
+  codes escapes rule 1a (a record WITH the key is scanned whole-line, fail-closed). Closure: the
+  process flow makes every outcome an issue comment, so a description-only coining record is not a
+  shape the sanctioned flow emits; such a PR still faces every other predicate rule; and the k6
+  comment scan re-covers the codes the moment any in-scope comment cites them. Accepted residual,
+  named — no warn path added.
+
+Consciously out of scope (per the approved design): Write/Edit-tool protection of `wiki/**`
+(memories-only; shell-side destructive commands on the whole `.knowledge` tree ARE denied; a runs
+deletion still surfaces via k1/k2 + the PR diff), and any private-memory migration content (a separate
+epic task).
 
 ## 3. Release / distribution pipeline (`dist`) — at v1 GA
 

@@ -22,6 +22,7 @@ codes are stable, a breaking change → 2.0.0. (Original source for reference on
 | `docs/plans/crates/unblock-*.md` | Per-file plan for each crate. |
 | `docs/plans/00-roadmap.md` | v1/v1.1 LOCKED; v1.0.1 PLANNED; v1.2–v1.5/v2+ PROPOSED. |
 | `docs/plans/ci-cd-and-distribution.md` | CI gates + `dist` release + the doc-lint. |
+| `.knowledge/` | **Descriptive knowledge layer — never normative** (hierarchy unchanged: PRD > spine > crate plans): `memories/` atomic facts + `wiki/` run-reports & topic runbooks, each with a curated `index.md`. Rules & enforcement (hard): `PROCESS.md` §8. |
 
 **Rule:** the spine is the **reference** on interface disagreements — but a plan↔spine drift is reconciled **with
 Miguel** (review → iterate → adjust): usually the plan is fixed to match the spine, but the drift may expose a
@@ -98,7 +99,8 @@ verdict + must-fixes, Implement summary, findings, Track/merge result) lands as 
 durable per-task narrative the old verbose `STATUS.md` rows carried. Branch off `main`.
 A change ships only after the **design Review** and the **Verify quality gate** (each ≥3 agents) pass → **Conventional,
 atomic commits** (`git-workflow-manager`), re-exporting the git record `.unblock/issues.jsonl` (the `sync` tool's
-`export` action) in the **same commit** as the work → **Claude opens the PR** (`gh pr create`); a human merges → on
+`export` action) — plus the wiki run-report for substantive work (PROCESS.md §8) — in the **same commit** as the
+work → **Claude opens the PR** (`gh pr create`); a human merges → on
 merge, **close the unblock issue**.
 
 ## Build / CI / distribution
