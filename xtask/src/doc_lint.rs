@@ -26,7 +26,9 @@ use regex::Regex;
 
 /// The fixed, ordered 19-file corpus (paths relative to the workspace root). The existence-guard
 /// FAILs on any missing **or** extra file — a corpus smaller than this is a vacuous pass.
-const CORPUS: &[&str] = &[
+/// Public so the corpus test can pin the separation invariant: no knowledge-layer path ever
+/// enters this corpus (the knowledge lint owns that tree — ci-cd §2.3).
+pub const CORPUS: &[&str] = &[
     "docs/PRD.md",
     "docs/plans/00-roadmap.md",
     "docs/plans/01-design-spine.md",
@@ -177,8 +179,9 @@ impl Guards {
 
 /// `CommonMark` block-fence mask: a fence opens on a line whose first non-space run is a run of >= 3
 /// backticks or tildes, and closes on the next line with a matching char and a run length >= the
-/// opener's. Opener + closer + the body are all masked.
-fn fence_mask(lines: &[String]) -> Vec<bool> {
+/// opener's. Opener + closer + the body are all masked. `pub(crate)` so `knowledge_lint` reuses the
+/// exact same guard (a fenced example can never create a phantom page/entry in either lint).
+pub(crate) fn fence_mask(lines: &[String]) -> Vec<bool> {
     let mut mask = vec![false; lines.len()];
     let mut open: Option<(char, usize)> = None;
     for (i, raw) in lines.iter().enumerate() {
@@ -226,8 +229,9 @@ fn info_string(s: &str, ch: char) -> &str {
 
 /// Inline-code spans on a line: byte ranges delimited by matched backtick runs (`CommonMark`: a run of
 /// N backticks opens a span closed by the next run of exactly N backticks). Returns the spans as
-/// `(start, end)` byte offsets covering the code content (delimiters excluded).
-fn code_spans(line: &str) -> Vec<(usize, usize)> {
+/// `(start, end)` byte offsets covering the code content (delimiters excluded). `pub(crate)` for the
+/// same `knowledge_lint` reuse as [`fence_mask`].
+pub(crate) fn code_spans(line: &str) -> Vec<(usize, usize)> {
     let bytes = line.as_bytes();
     let mut spans = Vec::new();
     let mut i = 0;

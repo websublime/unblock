@@ -34,6 +34,18 @@ fn real_corpus_is_green() {
 }
 
 #[test]
+fn corpus_never_contains_knowledge_paths() {
+    // Separation invariant (ci-cd §2.3): the normative a..f corpus and the knowledge corpus never
+    // overlap — doc-lint classes must NOT run over `.knowledge` (descriptive history is not drift).
+    assert!(
+        doc_lint::CORPUS
+            .iter()
+            .all(|p| !p.starts_with(".knowledge")),
+        "no .knowledge/** path may enter the doc-lint corpus"
+    );
+}
+
+#[test]
 fn truncated_corpus_fails_the_existence_guard() {
     // A directory that is NOT the workspace root (the corpus files are absent) must trip the
     // existence guard — a smaller-than-expected corpus is a vacuous pass and is rejected.
