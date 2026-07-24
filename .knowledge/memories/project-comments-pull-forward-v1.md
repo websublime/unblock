@@ -1,6 +1,6 @@
 ---
 name: project-comments-pull-forward-v1
-description: MERGED 2026-07-17 — T3.9 comments (D37) landed on main (rebase, 823487d), CI 17/17 green; only open item = flip the STATUS.md T3.9 row ◐→☑ (blocked from a direct-to-main commit; fold into the next branch touching STATUS)
+description: MERGED 2026-07-17 — T3.9 comments (D37) landed on main (rebase, 823487d), CI green
 type: reference
 ---
 
@@ -45,10 +45,11 @@ FLAT not threaded (FORK-T).
 - **Spec-first pass DONE** — 10 docs-only commits (`a857e64`..`ab616f7`), **0 `.rs`**, doc-lint green. The design
   gate ran 2 adversarial iterations (7 must-fixes → 1 → closed; the last hand-fixed by the orchestrator with
   Miguel's authorisation, per PROCESS §4 trivial-edit + §5 escalate-at-2).
-- **Implementation in flight** — SINGLE implementer, isolated worktree, incremental commits. The crates are ONE
-  compile unit: the 4 trait methods break all **12** `impl Storage for` blocks at once (not 11 — `GateStorage` at
-  unblock-mcp/tests/common/mod.rs:466 is the missed 12th), and the stub idiom is **per-site** (sync's 2
-  FakeStorages use `unimplemented!`; the RaceInjector at contract.rs:322 must DELEGATE).
+- **Implementation landed** — SINGLE implementer, isolated worktree, incremental commits, merged into main via
+  rebase (`823487d`). The crates were ONE compile unit: the 4 trait methods broke all **12** `impl Storage for`
+  blocks at once (not 11 — `GateStorage` at unblock-mcp/tests/common/mod.rs:466 was the missed 12th), and the
+  stub idiom was **per-site** (sync's 2 FakeStorages used `unimplemented!`; the RaceInjector at contract.rs:322
+  delegated).
 
 ## The silent traps (compile clean + clippy clean + CI green, while shipping broken software)
 Why the checklist itself was untrustworthy: [[feedback-task-checklists-rot-run-understand-first]].
@@ -66,15 +67,3 @@ Why the checklist itself was untrustworthy: [[feedback-task-checklists-rot-run-u
   `redacted_at` in the compare → a blanket sub-second fixture reddens `roundtrip_proptest` + `contract.rs:83`, and
   the tempting fix (drop `redacted_at`) is a silent FORK-M2 violation. Sub-second ONLY for the export_insta
   canonicalizer non-vacuity golden.
-
-## Watch on Verify
-- **Bench-gate likely REAL, not the known flake:** `hydrate_ids` goes `1+3·⌈N/900⌉`→`1+4·⌈N/900⌉` (~33% more
-  round-trips on all 5 read paths) against ceilings T3.5.1 just re-tightened. Do NOT `rerun --failed` by reflex; do
-  NOT widen a ceiling in this PR — cf. [[reference-bench-gate-cmp-ready-sort-250k-flaky]].
-- **Goldens that must NOT move:** `golden_hash__canonical_content_hash.snap` (FR-26), the exit-code/error goldens
-  (FORK-E1), the csv goldens + the 15-col pin (FORK-R1), help_snapshots (FORK-R2).
-- **testkit gate:** `tests/contract.rs` is `#![cfg(feature="testkit")]` → a bare `-p unblock-storage` compiles the
-  NFR-16 cases to NOTHING. Probe workspace-scoped `--all-features`, mirroring the **17**-job CI (11 is the stale M0
-  count) — see [[feedback-implementer-probe-must-include-cargo-fmt]].
-- **Zero-live-hits** must be scoped `git grep -n "unblock\.mcp\.v1\.4"`; a bare `-nw v1.4` collides with the product
-  roadmap version + frozen history — see [[feedback-rename-zero-live-hits-needs-git-grep-w-allfiles]].

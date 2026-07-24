@@ -175,3 +175,6 @@ coordinator**, run adversarially.
   structural substantive-PR predicate; the pr-create hook runs the same script), and PreToolUse hooks
   (memories curation, sanctioned `memory-retire.sh` removal, `gh pr create`). Full normative spec:
   `ci-cd-and-distribution.md` §2.3.
+- **The recurring consolidation sweep** (staleness/contradiction/duplicate across `.knowledge/` — the
+  SEMANTIC layer above the structural `knowledge-lint`) is a runbook, not a rule: see the wiki topic
+  `.knowledge/wiki/topics/knowledge-gardener.md`.

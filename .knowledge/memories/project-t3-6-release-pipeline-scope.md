@@ -56,68 +56,36 @@ builds the RELEASE PRODUCER + workspace-wide enforcement, NOT the command. Deliv
    publish-side provenance. D7 tests the REAL mechanism (checksum/receipt rejection), not a nonexistent
    attestation check.
 
+**GA branding + self-update gotcha (durable — Miguel's decision 2026-07-15):** the dist App-name and
+release artifacts are `unblock-cli` (installer `unblock-cli-installer.sh`, receipt `unblock-cli-receipt.json`),
+while the binary and command stay `unblock` — NO package rename (dist has no app-name override, and renaming
+would break the `unblock-*` crate convention). Consequently the self-update path calls
+`AxoUpdater::new_for("unblock-cli")` + `load_receipt()` — `unblock-cli`, NOT `unblock` (the dist App-name IS
+the package name); a mismatch makes `unblock update` refuse in the field even with CI green. Normative home:
+ci-cd §3.1.
+
 **T3.6 DONE (2026-07-15):** all 3 PRs merged (PR-0 #413 / P1 #414 / P2 #415), STATUS T3.6 ☑ (direct docs(status) commit
 to main `1f5eba6` — Miguel confirmed direct-flip is the repo convention for post-merge bookkeeping; the hard rule
 "never commit to main" is about WORK). Closes M3/GA build. Remaining: T3.7 (README, the LAST v1 build task, ready) +
 the human `v1.0.0` tag cut.
 
-**RELEASE HELPER — `cargo xtask release` = [PR #416](https://github.com/websublime/unblock/pull/416) OPEN** (2026-07-16,
-Miguel-requested). Interactive: pre-release(rc)/final + bump none/patch/minor/major → computes version → bumps root
-`Cargo.toml` `[workspace.package] version` + `cargo update --workspace` → commit `release: v<ver>` → annotated tag →
-`git push --atomic origin main <tag>` (both-or-neither). Safety: pre-flight (main/clean/synced/tag-absent-local∪remote)
-+ TWO typed-tag confirmations (fail-closed) + `--dry-run` + a required-token warning. tag==version by construction; non-forced
-push. `semver` reused from lock. Verify PASS_WITH_CHANGES→GO (3 lenses); 5 must-fixes applied (atomic push, recovery
-guidance on intermediate-failure, 5 fail-path tests via FakeEnv, scoped `git add -- Cargo.toml Cargo.lock`, half-state
-docs). 61 xtask tests. ⚠️ A semantic-search skill's spawn-time injection HIJACKED the first implementer spawn (0 tool_uses);
-a hardened anti-hijack guard naming the exact injection text as an attack + "zero tool calls = failure" defeated it —
-see [[reference-cocoindex-spawn-injection-hijacks-subagents]]. After #416 merges + the release token is set: `cargo xtask release`
-→ `v1.0.0-rc.1` shake-out (validates the never-run pipeline) → `v1.0.0` = GA.
+**RELEASE HELPER — `cargo xtask release` (MERGED via [PR #416](https://github.com/websublime/unblock/pull/416),
+2026-07-16, Miguel-requested).** Interactive: pre-release(rc)/final + bump none/patch/minor/major → computes
+version → bumps root `Cargo.toml` `[workspace.package] version` + `cargo update --workspace` → commit
+`release: v<ver>` → annotated tag → `git push --atomic origin main <tag>` (both-or-neither). Safety: pre-flight
+(main/clean/synced/tag-absent-local∪remote) + TWO typed-tag confirmations (fail-closed) + `--dry-run` + a
+required-token warning. tag==version by construction; non-forced push. `semver` reused from lock. Verify
+PASS_WITH_CHANGES→GO (3 lenses); 5 must-fixes applied (atomic push, recovery guidance on intermediate-failure,
+5 fail-path tests via FakeEnv, scoped `git add -- Cargo.toml Cargo.lock`, half-state docs). 61 xtask tests. ⚠️ A
+semantic-search skill's spawn-time injection HIJACKED the first implementer spawn (0 tool_uses); a hardened
+anti-hijack guard naming the exact injection text as an attack + "zero tool calls = failure" defeated it — see
+[[reference-cocoindex-spawn-injection-hijacks-subagents]]. This tool cut both the `v1.0.0-rc.1` shake-out and
+the `v1.0.0` GA tag.
 
 **Current facts (pre-T3.6, historical):** version `0.1.0`, no git tags, workflows = ci.yml + fuzz-smoke.yml (no release.yml), no dist
 config anywhere. dist renamed `dist` (was cargo-dist) v0.24.0; crates.io package still `cargo-dist`. Docs-host
 `opensource.axo.dev` is DEAD → `axodotdev.github.io/cargo-dist/book`.
 
-**PROGRESS (2026-07-15):** Understand + Decide + Spec/Plan + design Review (PASS_WITH_CHANGES, 9 must-fixes) all DONE.
-Ships as a **3-PR linear stack** (each off main after the prior MERGES — human gate between them):
-- **PR-0 `t3.6-ga-spec-cascade` = [PR #413](https://github.com/websublime/unblock/pull/413) OPEN** (commit 47b797a off 29c919d).
-  The spec-first doc cascade: mint D35 (max was D34), NFR-17 reframe on all live client-verifies sites, 1.0.0 posture
-  flip, ci-cd reconciles (0.32.0/dist-workspace.toml/attest@v4/channels-out/no-network+feature-matrix+verify-pins job
-  rows), `Cargo.toml` 0.1.0→1.0.0. Verify PASS_WITH_CHANGES→GO (doc-lint 19 docs green, 112 tests, 0 snapshot drift,
-  bare `git grep -ni attestation` backstop clean). **Awaiting Miguel's merge.**
-- **P1 `t3.6-dist-pipeline` = [PR #414](https://github.com/websublime/unblock/pull/414) OPEN** (commit 73a79df off
-  172027e). D1 dist config (`dist-workspace.toml`) + D2 `dist=true` on unblock-cli + `[profile.dist]` + D3 release.yml
-  + D4 SHA-pin (all 7 pins gh-api-verified) + MF-5 `verify-pins` xtask+job + MF-6 `checksum="sha256"` + `allow-dirty=["ci"]`.
-  Verify PASS_WITH_CHANGES→GO (4 lenses incl supply-chain security). **Awaiting Miguel's merge.** Built with a scratch
-  cargo-dist 0.32.0. **NEW Miguel decisions (2026-07-15):**
-  (a) **BRANDING: accept `unblock-cli-*` GA artifacts** (installer `unblock-cli-installer.sh`, archives/receipt
-  `unblock-cli-*`), binary+command stay `unblock`, NO package rename (dist 0.32.0 has no app-name override; rename
-  would break the `unblock-*` crate convention). (b) **Release token scoping**: the org restricts the default token → the
-  5 publish-step envs in release.yml use a dedicated repo secret (needs `contents: write`); `actions/attest`
-  UNCHANGED (workflow OIDC id-token/attestations:write, not the PAT). Both are hand-applied post-gen edits protected by
-  `allow-dirty` (a `dist generate` clobbers them — re-apply after any regen; verify-pins backstops the SHA-pins).
-- **P2 `t3.6-confinement-verify` = [PR #415](https://github.com/websublime/unblock/pull/415) OPEN** (commit a8492ef off
-  51c37e2). Verify PASS_WITH_CHANGES→GO (4 lenses incl network-confinement /security-review). One must-fix caught +
-  fixed: **MF-P2-1** = the `--dry-run` path always lied "update available" (query_new_version never returns None) +
-  skipped the receipt-eligibility guard → fixed to drive both branches by is_update_needed() + 2 regression tests;
-  focused-re-verified green. D7 confirmed hermetic/non-vacuous/honest vs axoupdater 0.10.0 source; feature-matrix
-  authoritative. Real seam corrected: base-URL override = `UNBLOCK_CLI_INSTALLER_GHE_BASE_URL` (spec-plan guessed
-  `UNBLOCK_INSTALLER...` — wrong). **Awaiting Miguel's merge → flips STATUS T3.6 ☑, closes T3.6 + M3/GA.**
-  Tracked v1.1 follow-up (task chip): harden the no-network whitelist false-green vector (std::net + "self-update"
-  substring; inherited unchanged from merged T3.1 no_git_gate.rs; no real leak today — feature-matrix proves it).
-  **v1.0.0 TAG-CUT RUNBOOK (human, post all-3-merge):** (1) a repo secret with `contents: write`; (2)
-  `git tag v1.0.0 && git push origin v1.0.0`; (3) REAL end-to-end `unblock update` smoke on ≥1 triple (exercises dist
-  installer SHA256 + attestation — the half D7 does NOT cover); (4) confirm published receipt = `unblock-cli-receipt.json`
-  + release App = `unblock-cli` (mismatch → real self-update refuses in the field even with CI green).
-- ~~P2 original plan~~ D5 no-network xtask + D6 --no-default-features job + **G1 fix
-  = `AxoUpdater::new_for("unblock-cli")` + `load_receipt()`** ⚠️ NOTE: `unblock-cli` NOT `unblock` — the dist App-name
-  is the package name (P1 finding; MF-4's original `unblock` is SUPERSEDED, recorded in ci-cd §3.1). Makes FR-25 work
-  (currently non-functional). + **MF-3 D7 test** (receipt fixture = `unblock-cli-receipt.json`, `AXOUPDATER_APP_NAME=
-  unblock-cli`; assert via sentinel-file/child-stderr + shebang+exec-bit, NOT the broken InstallFailed{stdout} path)
-  + **MF-1 code half** (cli.rs:106 clap `about` reframe + re-bless help_top_level.snap/help_update.snap). Verify adds
-  /security-review. P2 tooling: reuse a scratch dist 0.32.0 binary if needed.
-Deferred should-fix (tracked, non-blocking): unblock-mcp.md:28 `pre-1.0`/`v1.3` residual (historical rationale, NOT
-a posture-flip miss — left to avoid frozen-history over-reach). Full artefacts in scratchpad: t36-understand-brief.md,
-t36-spec-plan-package.md, t36-design-review-verdict.md, t36-pr0-verify-verdict.md.
 Related: [[project-t3-5-perf-budgets-scope]] (prior M3 3-PR pattern), [[project-harness-worktree-bases-off-main]]
 (P1/P2 worktrees base off main — ff-merge not needed since each starts after prior merges),
 [[feedback-rename-zero-live-hits-needs-git-grep-w-allfiles]] (the MF-1 blocker was exactly this lesson).

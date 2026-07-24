@@ -1,0 +1,41 @@
+name: knowledge-gardener-reminder
+
+# Weekly reminder to run the .knowledge gardener sweep (ub-knowledge-layer-e4s.5).
+# The sweep itself is a SUPERVISED session task, NOT autonomous work — this job only ensures a
+# standing reminder issue exists so a human/session runs the documented runbook with review.
+# Runbook: .knowledge/wiki/topics/knowledge-gardener.md
+#
+# No `uses:` actions here (pure `gh` CLI over the built-in token) — nothing to SHA-pin (verify-pins).
+
+on:
+  schedule:
+    - cron: '0 9 * * 1' # Mondays 09:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  issues: write
+
+concurrency:
+  group: knowledge-gardener-reminder
+  cancel-in-progress: false
+
+jobs:
+  remind:
+    name: ensure a standing gardener-sweep reminder issue
+    runs-on: ubuntu-latest
+    steps:
+      - name: open a reminder issue if none is open
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          open_count="$(gh issue list --repo "$REPO" --state open --limit 100 \
+            --json title --jq '[.[] | select(.title | test("gardener sweep"; "i"))] | length')"
+          if [ "$open_count" != "0" ]; then
+            echo "A gardener-sweep reminder issue is already open ($open_count) — nothing to do."
+            exit 0
+          fi
+          gh issue create --repo "$REPO" \
+            --title '🌿 Weekly .knowledge gardener sweep due' \
+            --body $'Run the knowledge-gardener sweep over `.knowledge/`: staleness, contradictions (page-to-page and page-to-normative-doc), duplicate merges, and index hygiene. Then land the fixes plus a run-report via a PR.\n\nRunbook: `.knowledge/wiki/topics/knowledge-gardener.md`\n\nThis is a SUPERVISED task — a session runs it with a human in the loop (per ub-knowledge-layer-e4s.5). Close this issue when the sweep has landed; the next Monday a fresh reminder opens only if none is still open.'

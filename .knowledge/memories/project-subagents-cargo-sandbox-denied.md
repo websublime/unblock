@@ -1,6 +1,6 @@
 ---
 name: project-subagents-cargo-sandbox-denied
-description: Whether a subagent inside an isolated git worktree can run cargo is SESSION-DEPENDENT (permission inheritance), NOT a fixed rule. It WORKED in the 2026-06-26 T1.3 session (worktrees under .claude/worktrees/<id>-1/, covered by Bash(cargo *) + Write(repo/**)); an earlier session saw it DENIED. Probe at task start; only fall back to main-session verify if a worktree cargo probe is actually denied.
+description: worktree-subagent cargo capability is session-dependent — probe first, fall back to main-session verify if denied.
 type: environment
 ---
 

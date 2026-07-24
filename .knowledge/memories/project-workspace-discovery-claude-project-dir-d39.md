@@ -4,7 +4,7 @@ description: D39/T3.10 workspace-discovery fix — adopt CLAUDE_PROJECT_DIR + wa
 type: reference
 ---
 
-**ACTIVE (2026-07-17).** Miguel challenged the README telling users to register the MCP server with an
+**D39/T3.10 (2026-07-17).** Miguel challenged the README telling users to register the MCP server with an
 absolute `--dir` path in a committed config (every dev rewrites it → git clobber war). Investigation
 (4-agent workflow) found:
 
@@ -31,12 +31,8 @@ visibility** (bound the ascent at $HOME and/or `.git` filesystem existence check
 — AND always report the bound dir to stderr, NFR-14); (3) lands BEFORE GA on the **D37/T3.9 train** (v1.0.0
 tag already HELD by D37).
 
-**Ids:** next free decision = **D39** (D38 = FR-17 signal-exit fix, current branch). Proposed task **T3.10**
-(pending Spec team's justification). Branch off `main`.
-
-**Lifecycle state:** Understand ✅ + Decide ✅ (Miguel). Spec/Plan + design-Review **workflow in flight**
-(3 writers → 3 reviewers → coordinator; drafts in scratchpad `spec-out/`). Awaiting coordinator's GENUINE
-FORKS list to bring back to Miguel before locking the spec, then Implement → Verify → Track.
+**Ids:** the decision minted as **D39** (D38 = the FR-17 signal-exit fix, landed on its own branch). Task
+**T3.10**. Branch off `main`.
 
 **Design-Review gate DONE (2026-07-17, 3 adversarial reviewers + coordinator): all 3 drafts GO-with-must-fixes,
 none REDO.** Drafts in scratchpad `spec-out/{spine-and-impl,prd-and-track,readme}.md`.
@@ -75,12 +71,11 @@ all RED), full 6-gate CI probe green (fmt/clippy/test/insta-no-rebless/doc-lint 
 executing test. Coordinator caught that the docs reviewer (project-manager, NO Bash) reviewed the DRAFTS not the
 commit and its "blockers" were all FALSE-in-commit — see [[reference-project-manager-agent-has-no-bash]].
 
-**Finalization IN FLIGHT** (micro Implement loop): rebase the 2 D39 commits onto current **rc.4 main** (D38/PR#423
-merged + rc.4 bump — touches only Cargo.toml/lock, so clean cherry-pick `b5745c4..9ae693f`), + fold: (must) scrub
-`CLAUDE_PROJECT_DIR`/`UNBLOCK_DIR` in the e2e spawn helper (host-env-bleed flake class — the dogfooded repo has a
-`.unblock/`, so the `(via walk-up from cwd)` assert goes RED if those vars are set); (fast-follow) a `db>dir`
-precedence test + CLAUDE_PROJECT_DIR self-recognition symmetry (accept a value pointing AT a `.unblock` dir, mirroring
-`resolve_explicit_dir`) + a stale `wait_for_stderr` doc fix. Then re-probe.
+Finalization rebased the 2 D39 commits onto `rc.4` main (D38/PR#423 merged + the rc.4 bump — a clean cherry-pick)
+and folded a host-env-bleed flake fix: scrub `CLAUDE_PROJECT_DIR`/`UNBLOCK_DIR` in the e2e spawn helper, since the
+dogfooded repo has a `.unblock/` and those vars leaking in flips the `(via walk-up from cwd)` assertion RED. Also
+folded a `db>dir` precedence test, CLAUDE_PROJECT_DIR self-recognition symmetry (accept a value pointing AT a
+`.unblock` dir, mirroring `resolve_explicit_dir`), and a stale `wait_for_stderr` doc fix.
 
 **✅ MERGED & CLOSED — [PR #424](https://github.com/websublime/unblock/pull/424) MERGED into main (merge commit
 `73973f2`, 2026-07-17).** Local main synced to origin/main; all session worktrees + branches pruned; leak-clean.

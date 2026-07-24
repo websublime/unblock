@@ -1,14 +1,14 @@
 ---
 name: project-roadmap-resequence-2026-07
-description: Post-GA roadmap iteration (2026-07-20) — decisions to land in 00-roadmap.md + PRD; DECIDED so far + pending items
+description: Post-GA roadmap resequence (2026-07-20) — LANDED as PRD D41: v1.2↔v1.3 swap (planning before shared state), v1.0.1 patch slot, streamable-HTTP deferred, TUI pulled forward to v1.4
 type: reference
 ---
 
-**⭐ ACTIVE — post-GA roadmap iteration (2026-07-20, Miguel).** v1.1 STAYS as-is; the v1.2+ PROPOSED
-sequence is being reordered/clarified one item at a time. Decisions accumulate here and LAND together in
-one spec-first cascade (00-roadmap.md + a PRD §4 D-id) at the end of the pass — NOT piecemeal (avoids
-repeated edits to the same roadmap sections). Relates to [[project-dogfood-unblock-is-the-tracker]] (this
-iteration is happening WHILE dogfooding surfaced the planning need).
+**Post-GA roadmap iteration (2026-07-20, Miguel) — LANDED as D41.** v1.1 stayed as-is; the v1.2+ PROPOSED
+sequence was reordered/clarified. The decisions landed together in one spec-first cascade (00-roadmap.md + PRD
+§4 D41) — NOT piecemeal (avoids repeated edits to the same roadmap sections). Relates to
+[[project-dogfood-unblock-is-the-tracker]] (this iteration happened while dogfooding surfaced the planning
+need).
 
 ## DECIDED
 - **SWAP v1.2 ↔ v1.3 (2026-07-20, Miguel):** the PLANNING layer (goals + milestones + the consolidated
@@ -38,7 +38,7 @@ iteration is happening WHILE dogfooding surfaced the planning need).
   can't sit between planning and shared-state → it becomes **v1.4** (ahead of scale), and Scale slips to v1.5.
   At v1.4 the TUI has all it needs (swarm=v1.1 FR-18/22, milestone board=v1.2 planning, data=v1.3 shared-state).
 
-## FINAL RESEQUENCED ORDER (PROPOSED — to land)
+## Final resequenced order (landed — D41)
 v1.0.1 patch (2 bugs + smoke) · v1.1 org/ergonomics (unchanged) · **v1.2 Planning** · **v1.3 Shared state** ·
 **v1.4 Local TUI** · **v1.5 Scale & swarm depth** (streamable-HTTP removed) · v2+ (+ streamable-HTTP unscheduled).
 The whole resequence = ONE new PRD §4 **D41** + the roadmap rewrite. **✅ LANDED — D41 → main `de6450e`** (2026-07-20;
@@ -60,7 +60,7 @@ remedy is durable storage where `ub-lp9.12` says structured error — **opposite
 - **Turso Sync vs embedded replicas** — bake a MANDATORY "fresh Rust-SDK/engine maturity check" gate into
   the shared-state lock (either way). May now build directly on Turso Sync.
 
-## DOC CHANGES the SWAP forces (to land in the spec-first cascade)
+## DOC CHANGES the SWAP forced (landed in the spec-first cascade)
 00-roadmap.md: swap §3 (shared-state) ↔ §4 (planning) incl. SUBSTANTIVE "why now" rewrites (planning's
 justification flips from "with shared state real" → dogfood-demand + schema-before-distribution); update §5
 (v1.4 "once shared state is real" pointer — the scheduler-v2-consumes-planning dep is UNAFFECTED), §6 (v1.5

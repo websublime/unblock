@@ -1,6 +1,6 @@
 ---
 name: feedback-verify-reviewers-mutate-shared-tree
-description: Verify-gate reviewers reading an uncommitted change in the SHARED tree may mutate source in place (mutation-testing) despite read-only instructions; hand off via a scratchpad patch and reset+re-apply before commit
+description: Verify-gate reviewers pointed at the SHARED checkout — even a SINGLE reviewer, no parallelism needed — may mutate source in place (mutation-testing) despite read-only instructions; hand off via a scratchpad patch and reset+re-apply before commit
 type: gotcha
 ---
 
@@ -13,4 +13,4 @@ When a Verify/Review workflow's reviewer agents are pointed at an **uncommitted*
 2. Before committing at Track: `git reset --hard HEAD` (discard whatever the reviewers left), **re-apply the scratchpad patch**, and **assert byte/md5 equality** of the critical files against the Verify-gate's recorded canonical hashes; then a **clean rebuild** (`cargo clean -p <crate>` to clear stale-incremental glitches) + the full cargo battery before commit.
 3. Alternatively, isolate Verify reviewers in their own worktree with the patch applied (but read-only-in-shared + scratchpad-patch handoff is simpler and was sufficient).
 
-The scratchpad-patch handoff also cleanly bridges separate workflows (Spec→Review→Implement→Verify) without fragile cross-worktree branch merges. See [[project-subagents-cargo-sandbox-denied]] and [[project-harness-worktree-bases-off-main]].
+The scratchpad-patch handoff also cleanly bridges separate workflows (Spec→Review→Implement→Verify) without fragile cross-worktree branch merges. **Distinct axis from [[feedback-parallel-verify-agents-share-one-worktree-clobber]]:** that one is a multi-agent RACE inside one isolated worktree; this one fires with a single reviewer in the SHARED checkout. See also [[project-subagents-cargo-sandbox-denied]] and [[project-harness-worktree-bases-off-main]].
