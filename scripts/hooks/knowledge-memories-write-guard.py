@@ -2,8 +2,8 @@
 """PreToolUse guard: .knowledge/memories/** — deny destructive Write overwrites (ci-cd §2.3)."""
 import json, os, sys
 
-WRITE_TOOLS = {"Write", "mcp__acp__Write"}           # wholesale-overwrite capability
-EDIT_TOOLS = {"Edit", "MultiEdit", "mcp__acp__Edit"}
+WRITE_TOOLS = {"Write"}                               # wholesale-overwrite capability
+EDIT_TOOLS = {"Edit", "MultiEdit"}
 
 def deny(msg):
     print(f"knowledge memories write-guard: {msg}", file=sys.stderr)
@@ -19,9 +19,9 @@ if tool not in WRITE_TOOLS | EDIT_TOOLS:
     sys.exit(0)  # not a write-capable tool (defensive; the matcher already scopes)
 ti = p.get("tool_input") or {}
 path = ""
-for key in ("file_path", "path", "abs_path"):  # acp bridge payloads carry the same file_path shape;
-    if ti.get(key):                            # the fallbacks absorb bridge drift — the smoke
-        path = str(ti[key])                    # canary verifies against a live payload at landing
+for key in ("file_path", "path", "abs_path"):  # tolerate frontends that vary the path key; the
+    if ti.get(key):                            # fallbacks fall through to the fail-closed deny below
+        path = str(ti[key])                    # when a matched tool presents no recognizable path.
         break
 if not path:
     deny(f"tool '{tool}' presented no recognizable path field; failing closed")

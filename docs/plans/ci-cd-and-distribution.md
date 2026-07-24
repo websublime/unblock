@@ -551,7 +551,7 @@ exit 2 BLOCKS and surfaces stderr to the model):
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Write|Edit|MultiEdit|mcp__acp__Write|mcp__acp__Edit",
+        "matcher": "Write|Edit|MultiEdit",
         "hooks": [
           {
             "type": "command",
@@ -580,11 +580,10 @@ exit 2 BLOCKS and surfaces stderr to the model):
 }
 ```
 
-Hook matchers are full-match regexes and `mcp__acp__Write`/`mcp__acp__Edit` are allowlisted tools in
-this repo's settings, so the write-guard matcher must name them — a schema-valid wholesale overwrite
-of a curated memory via `mcp__acp__Write` would otherwise pass every other layer (lint green — the new
-content is valid; gate neutral — `.knowledge/**` is stripped). For memories the hook is the ONLY
-pre-commit layer.
+Hook matchers are full-match regexes naming this repo's write-capable tools (`Write`, `Edit`,
+`MultiEdit`) — a schema-valid wholesale overwrite of a curated memory would otherwise pass every other
+layer (lint green — the new content is valid; gate neutral — `.knowledge/**` is stripped). For memories
+the hook is the ONLY pre-commit layer.
 
 **`scripts/hooks/knowledge-memories-write-guard.py`** — Write/Edit protection of `memories/**`. Paths
 are normalized cwd-aware BEFORE the marker check (a relative path or a `..`-hop must not slip the
@@ -595,7 +594,6 @@ substring marker). Rule table:
 | `Write` to a NEW file (memory creation) | allow |
 | `Edit`/`MultiEdit` on any memory file or `index.md` (surgical curation) | allow |
 | `Write` over an EXISTING memory file (wholesale overwrite) | **deny** — "use Edit" |
-| `mcp__acp__Write` / `mcp__acp__Edit` | same verdicts as `Write` / `Edit` respectively |
 | `Write` over `index.md` (regenerating the curated index) | allow (derived data; k1/k2/k4 re-validate it) |
 | any Write/Edit to a NESTED path under `memories/` | **deny** (flat layout; k2 backstops) |
 | a matched tool call with NO recognizable path field, or a relative path with no `cwd` | **deny** (fail closed) |

@@ -2,8 +2,6 @@
   "includeCoAuthoredBy": false,
   "permissions": {
     "allow": [
-      "mcp__acp__Write",
-      "mcp__acp__Edit",
       "Edit(/Users/ramosmig/Public/WS-Labs/unblock/**)",
       "Write(/Users/ramosmig/Public/WS-Labs/unblock/**)",
       "Bash(find:*)",
@@ -22,7 +20,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Write|Edit|MultiEdit|mcp__acp__Write|mcp__acp__Edit",
+        "matcher": "Write|Edit|MultiEdit",
         "hooks": [
           {
             "type": "command",
