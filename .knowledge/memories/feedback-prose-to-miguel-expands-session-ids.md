@@ -1,0 +1,11 @@
+---
+name: feedback-prose-to-miguel-expands-session-ids
+description: Prose/questions to Miguel must expand session-local ids (M10, MF-2, R8, "lens 3", facet (b)) on first mention — the codes die with the session; grep proved zero hits in the durable record.
+type: gotcha
+---
+
+Miguel flagged a v1.0.1 Verify-gate orchestrator report (2026-07-21) as cryptic: it leaned on session-local codes — mutant "M10", must-fix "MF-2", briefing rules "R7/R8", "lens 3/4", "facet (b)", layer "L2" — with no expansion, and he could not tell what they referred to. Empirical check: grep for M10 / MF-2 / "facet (b)" / "lens 3|4" over `.unblock/issues.jsonl` returned ZERO hits — those codes exist only in the originating session's context (and its workflow journal), so neither Miguel nor any future session can resolve them.
+
+**Why:** Session-local ids are free for the writer (the referent sits in their context) and unresolvable for the reader. Miguel reads asynchronously, one message at a time, and his role IS the human gate (fork decisions, gate validation) — cryptic prose disables precisely that role. Worse, the codes leak into issue comments, breaking the auditability promise that justified retiring STATUS.md ("every outcome is a comment").
+
+**How to apply:** In every message, AskUserQuestion fork, PR body, or unblock issue comment addressed to Miguel: on first mention, expand each session-local id (mutant numbers, "MF-n", briefing rules "R-n", lens indices, facet letters) into what it is in words + where it lives (file:line, doc §, issue id); the short code may be reused afterwards within the same message. Durable ids (D-id, T-id, FR/NFR, ub-*, layer numbers) get a one-clause anchor on first mention ("D41 — the version resequence", "L2 (storage)"). Question options must name the concrete object they decide, never only a code. Require workflow coordinators to return findings as file:line + one-line plain description, and translate any residual code when relaying. Self-test before sending: "is every code in this message resolvable from the message alone + durable docs?" Accepted by Miguel 2026-07-21; landing via the .knowledge layer epic (unblock issue ub-knowledge-layer-e4s). Related: [[feedback-derived-counts-die-in-prose-plans]].
