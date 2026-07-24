@@ -54,7 +54,7 @@ PR #401 (branch `impl-mcp-cd1-cd2-v13-contract`) = the paired CODE, single `unbl
 on the 6 enums + IssueList/CountList/DepList/CycleList wrappers + all construction sites + CONTRACT_HASH re-pin
 (`1bd36281…29572`) + goldens re-blessed + tests (strengthened every_tool_schema_is_an_object, T-1 live root-type
 gate, CD-2 structuredContent-is-object gates) + tracking flips (crate-plan F-5/F-7, STATUS). Verify gate PASS
-(4-lens incl MCP-input security), full CI probe green — OPEN, MERGEABLE, awaiting Miguel's merge.
+(4-lens incl MCP-input security), full CI probe green — MERGED into main.
 GOTCHA: the impl workflow's single implementer left its work UNCOMMITTED in the worktree (branch at main SHA,
 `main..HEAD` empty) — recover by committing the worktree working-tree state to a real branch BEFORE the harness
 reclaims it (uncommitted worktree state is NOT guaranteed to persist; commits are). See
@@ -66,7 +66,7 @@ CD-4 nuance (Miguel-ratified Option 1): a pure `ServerHandler::initialize` overr
 rmcp 1.7 (the serve-loop re-derives the wire protocolVersion as a LEXICAL min(client,handler) AFTER the handler),
 so the fix is a `VersionClampingTransport` decorator clamping unsupported inbound versions to ProtocolVersion::LATEST
 before negotiation — correct but coupled to an rmcp internal.
-CD-6 (harden CD-4): the assumption-pin PART is in PR #404 (open) — a `serve_duplex_unclamped_for_test` helper
+CD-6 (harden CD-4): the assumption-pin PART landed via PR #404 — a `serve_duplex_unclamped_for_test` helper
 (feature=test-util, doc(hidden), bypasses the sole `VersionClampingTransport` wrap site) + a pin asserting rmcp 1.7
 echoes an unsupported below-latest version ("1999-01-01") VERBATIM (non-vacuous: only holds if no clamp ran) + a
 `KNOWN_VERSIONS`/`LATEST` set pin. Verify gate PASS (3-lens, all confirm non-vacuous). **Still open:** the CD-6

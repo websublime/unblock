@@ -1,13 +1,15 @@
 ---
 name: project-knowledge-layer-docs-in-db-exploration
-description: Exploring a docs-in-DB "planner" end-state for unblock (2026-07-08) — staged proposal, resolved objections, spike results, pending formalization
+description: Exploring a docs-in-DB "planner" end-state for unblock (2026-07-08) — staged proposal, resolved objections, spike results; the roadmap §7 candidate row exists and the file-based .knowledge/ precursor has landed
 type: reference
 ---
 
 Exploring evolving unblock from issue tracker into a full planner where documents
 (PRD/specs/plans, doc types) live in the DB with issues linking directly (2026-07-08 session).
-Not yet formalized — no roadmap row / D-id minted yet; next step offered: roadmap §7 candidate row
-("Knowledge layer") + Stage-1 fork recorded for v1.3 lock + Decide team (with project-idea-validator).
+**Formalized:** the roadmap now carries a `§7` "Docs-in-DB process-knowledge storage" v2+ candidate row
+(`00-roadmap.md`), and the file-based `.knowledge/` precursor (memories + wiki run-reports/topics) has LANDED
+(PROCESS.md §8) — see [[project-dogfood-unblock-is-the-tracker]]. The Stage-1 fork below (a native DB-backed
+`Document` entity) still awaits its lock, deferred to whichever version takes up the roadmap candidate.
 
 State of the debate:
 - Agreed: attachments are NOT embedded in the DB — sidecar CAS (`.unblock/attachments/` by hash, metadata in DB).
@@ -50,10 +52,10 @@ content_hash registry doubles as the incremental-recompile change-feed; for agen
 LLM is optional (expose the tree over MCP, the client IS the LLM — local LLM only for compile + human
 TUI query). Flatten formats first (markdown-first; PDF/multimodal is the swamp), not just features.
 Google OKF v0.1 (markdown + YAML frontmatter, `type` required; Karpathy LLM-wiki-inspired; repo
-GoogleCloudPlatform/knowledge-catalog) is the cheapest high-value piece: adopt it NOW as the format for
-`.knowledge/` (the .knowledge layer epic, unblock issue ub-knowledge-layer-e4s — spec ub-knowledge-layer-e4s.1
-in progress) and later as the doc-type format of the DB knowledge layer; interop by FORMAT, not code parity
-with a moving upstream.
+GoogleCloudPlatform/knowledge-catalog) is the cheapest high-value piece: adopted as the format for
+`.knowledge/` (the .knowledge layer epic, unblock issue `ub-knowledge-layer-e4s` — the file-based precursor has
+landed; query the live tracker for the epic's current subtask state) and intended later as the doc-type format
+of the DB knowledge layer; interop by FORMAT, not code parity with a moving upstream.
 
 End-state vision sketch (2026-07-22) — a high-level final-product picture:
 - CLI: init/tracker(know=new)/migrate/agents/update/version/ui(tui) — i.e. today's `mcp` command

@@ -1,6 +1,6 @@
 ---
 name: project-d38b-eof-prehandshake-exit-code
-description: D38(b)/proposed-D40 — EOF-before-MCP-handshake exit code ratified to 0 (was 1); pre-GA, implementing now
+description: D40 — EOF-before-MCP-handshake exit code ratified to 0 (was 1); landed via PR #425
 type: reference
 ---
 
@@ -40,16 +40,15 @@ bare pre-init stdin close → exit 0 + a `resolve_mcp_exit` unit case); spine §
 doc-lint-clean; D-range `D1..D39`→`D1..D40` at the 3 sites: CLAUDE.md, ci-cd §2.1(a), xtask/src/doc_lint.rs).
 
 **Lifecycle: ✅ MERGED & CLOSED (2026-07-20).** [PR #425](https://github.com/websublime/unblock/pull/425)
-rebase-merged into main (`5829044` docs + `178a3d8` code); STATUS T3.2.1 follow-up (b) flipped landing→merged
-(`bbad707`, pushed direct to main). Local main synced to origin, worktree + both branches pruned, tree clean.
-Understand+Decide → design Review
-(PASS_WITH_MUSTFIX, all folded — the top must-fix: the disconnect arm must DELEGATE to teardown, never
-blanket `Ok(None)`, so a failing `session.shutdown()` still decides via its 0–8 code) → Implement (single
-implementer, worktree, 2 commits `f7bae16` docs + `7cf0aac` code on branch `d40-eof-exit-0` off `e4491c4`)
-→ Verify (PASS, 0 must-fix, coordinator re-verified on-disk "No material surviving mutation found"). The
-authoritative probe was green (fmt/clippy/test(cli+mcp)/doc-lint 19·6/check-layering); one teardown-absorption
-mutant (blanket-Ok(None)) + one predicate-narrowness mutant (`!matches!`) both confirmed genuine test-RED then
-reverted. **[PR #425](https://github.com/websublime/unblock/pull/425) OPEN** (Claude opened; human merges). On
-merge: flip STATUS T3.2.1 follow-up (b) → resolved. Goldens + `CONTRACT_HASH ddd02b7b`/`unblock.mcp.v1.5`
-UNMOVED. 3 non-blocking residual nits deferred (teardown_error() docstring Engine-vs-Io; D38-row inline
-annotation; signalled-disconnect combo unit). Relates to [[project-t3-6-release-pipeline-scope]] (GA tag).
+rebase-merged into main (`5829044` docs + `178a3d8` code). Local main synced to origin, worktree + both
+branches pruned, tree clean. Understand+Decide → design Review (PASS_WITH_MUSTFIX, all folded — the top
+must-fix: the disconnect arm must DELEGATE to teardown, never blanket `Ok(None)`, so a failing
+`session.shutdown()` still decides via its 0–8 code) → Implement (single implementer, worktree, 2 commits
+`f7bae16` docs + `7cf0aac` code on branch `d40-eof-exit-0` off `e4491c4`) → Verify (PASS, 0 must-fix,
+coordinator re-verified on-disk "No material surviving mutation found"). The authoritative probe was green
+(fmt/clippy/test(cli+mcp)/doc-lint 19·6/check-layering); one teardown-absorption mutant (blanket-Ok(None)) +
+one predicate-narrowness mutant (`!matches!`) both confirmed genuine test-RED then reverted. Goldens +
+`CONTRACT_HASH ddd02b7b`/`unblock.mcp.v1.5` were UNMOVED at the time of this merge (the contract has since
+moved on with later work — see [[project-dogfood-unblock-is-the-tracker]] for the current version). 3
+non-blocking residual nits were deferred (teardown_error() docstring Engine-vs-Io; D38-row inline annotation;
+signalled-disconnect combo unit). Relates to [[project-t3-6-release-pipeline-scope]] (GA tag).

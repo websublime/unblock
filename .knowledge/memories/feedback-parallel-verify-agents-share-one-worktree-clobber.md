@@ -1,6 +1,6 @@
 ---
 name: feedback-parallel-verify-agents-share-one-worktree-clobber
-description: Parallel revert-based Verify agents pointed at ONE isolated worktree clobber each other's mutations → spurious RED; give each its own throwaway worktree
+description: Multiple parallel Verify agents sharing ONE isolated worktree RACE and clobber each other's revert-based mutations (a different hazard than a single reviewer in the shared tree) → spurious RED; give each its own throwaway worktree
 type: gotcha
 ---
 

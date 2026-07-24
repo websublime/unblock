@@ -34,10 +34,10 @@ merge, reconcile by hand until the v1.2 shared remote.
 → `rm -rf .unblock/` (clean wipe, NOT just the .db) → `unblock init --prefix ub` (config + migrated v1 DB)
 → seed via the mcp server. Just deleting the `.db` + reusing an old workspace can hit stale-schema breakage.
 
-**Current tracker state:** epic **`ub-lp9`** "v1.1 — Organization, coordination & ergonomics" + 9 FR backlog
-children `ub-lp9.1..9` (FR-6/13/16/18/19/21/22/23/TOON) + `ub-lp9.10` (the repoint chore, **CLOSED**). Child
-ids are `parent.N` and **parenting is id-only** (no `parent_id` column; the JSONL is still faithful). **Labels
-reject `.`** (alphanumeric/-/_/: only) → used `v1-1` not `v1.1`.
+**Tracker mechanics (durable):** child issue ids are `parent.N` and **parenting is id-only** (no `parent_id`
+column; the JSONL export is still faithful). **Labels reject `.`** (alphanumeric/-/_/: only) → use `v1-1` not
+`v1.1`. For the current epic/task state, query the live tracker (unblock over MCP; the `query`/`issue` tools) —
+this memory does not carry a point-in-time snapshot.
 
 **Tool arg gotchas (verify EVERY mutation via list/export — an OK is not proof):** `comment add` field is
 **`body`** (NOT `content`; DB col is `text`) + `issue_id`; `issue create` uses `title`/`issue_type`/`parent`/
@@ -55,7 +55,9 @@ reject `.`** (alphanumeric/-/_/: only) → used `v1-1` not `v1.1`.
    Silent data-loss risk for an agent-first tracker → confirm (rmcp arg-leniency vs unblock handling) → v1.0.1/v1.1.
 4. ✅ `.write.lock` (D31 runtime lock) is now gitignored.
 
-**Reference:** the doc-lint CORPUS is ONLY `docs/plans/STATUS.md` + `docs/plans/README.md` (NOT CLAUDE.md /
-PROCESS.md) — `xtask/src/doc_lint.rs` CORPUS. (Corrects an earlier "CLAUDE/PROCESS are in the corpus" assumption.)
+**Reference:** the doc-lint CORPUS is the FIXED 19-file set — `docs/PRD.md` + the 6 `docs/plans/*.md` files
+(`00-roadmap.md`, `01-design-spine.md`, `README.md`, `STATUS.md`, `ci-cd-and-distribution.md`,
+`implementation-plan.md`) + all 12 `docs/plans/crates/unblock-*.md` crate plans (NOT CLAUDE.md / PROCESS.md) —
+per `xtask/src/doc_lint.rs` `CORPUS`.
 
 Relates to [[project-t3-6-release-pipeline-scope]] (GA).
