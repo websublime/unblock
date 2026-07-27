@@ -49,32 +49,11 @@ use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::model::JsonObject;
 use rmcp::schemars::JsonSchema;
 use serde::de::DeserializeOwned;
-use unblock_error::{ErrorCode, StructuredError};
-
-/// The maximum number of bytes of attacker-controlled text echoed back into an error payload.
-///
-/// **This is a SOFT bound.** [`unblock_error::sanitize_message`] runs *after* the clip and escapes
-/// control characters at up to ~6 bytes each (`\x1b` → `\u{1b}`), so the final `message` is bounded
-/// at roughly `6 * MAX_ECHOED_BYTES` ≈ 768 B, not 128 B. Clipping BEFORE sanitizing is deliberate:
-/// clipping after could cut inside an escape sequence and yield a misleading fragment.
-pub(crate) const MAX_ECHOED_BYTES: usize = 128;
-
-/// The marker appended to clipped text.
-pub(crate) const TRUNCATION_MARKER: &str = "…[truncated]";
-
-/// Clip attacker-controlled text to [`MAX_ECHOED_BYTES`] on a char boundary.
-///
-/// Returns the input borrowed when it already fits, so the common path allocates nothing.
-pub(crate) fn clip(s: &str) -> Cow<'_, str> {
-    if s.len() <= MAX_ECHOED_BYTES {
-        return Cow::Borrowed(s);
-    }
-    let mut end = MAX_ECHOED_BYTES;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    Cow::Owned(format!("{}{TRUNCATION_MARKER}", &s[..end]))
-}
+// `clip` + its two bound constants are SHARED (D43): they were crate-local here until the
+// duplicate-key scan gave `unblock-sync`'s `bd` line parser the same attacker-echo problem. Two
+// copies of a security helper is drift, so the single definition now lives beside the scanner in
+// `unblock-error` (L0) — `crates/unblock-error/src/sanitize.rs`.
+use unblock_error::{ErrorCode, StructuredError, clip};
 
 /// The crate-local, **deferring** parameter extractor. See the module doc — **the name is
 /// load-bearing and must stay `Parameters`.**
@@ -417,32 +396,11 @@ pub(crate) fn parse_args<T: DeserializeOwned + JsonSchema + std::any::Any>(
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_ECHOED_BYTES, TRUNCATION_MARKER, args_error, clip, field_from_serde_message};
-
-    #[test]
-    fn clip_leaves_short_text_untouched() {
-        assert_eq!(clip("short"), "short");
-    }
-
-    #[test]
-    fn clip_truncates_on_a_char_boundary() {
-        let long = "é".repeat(500);
-        let clipped = clip(&long);
-        assert!(clipped.ends_with(TRUNCATION_MARKER));
-        assert!(clipped.len() <= MAX_ECHOED_BYTES + TRUNCATION_MARKER.len());
-        // Truncating mid-`é` would have produced invalid UTF-8 (a panic on the slice); reaching
-        // here at all proves the boundary walk worked. Also assert the kept prefix is intact.
-        let kept = clipped.strip_suffix(TRUNCATION_MARKER).expect("marker");
-        assert!(
-            kept.chars().all(|c| c == 'é'),
-            "kept prefix must be whole chars"
-        );
-        assert_eq!(
-            kept.len() % 2,
-            0,
-            "`é` is 2 bytes; a mid-char cut would be odd"
-        );
-    }
+    // `clip`/`MAX_ECHOED_BYTES`/`TRUNCATION_MARKER` moved to `unblock-error` with the D43 scanner;
+    // the helper's OWN unit cells moved with it. What stays here is what is about THIS seam: that
+    // `args_error` actually applies the bound (see `oversized_field_name_is_clipped_in_message`).
+    use super::{args_error, field_from_serde_message};
+    use unblock_error::{MAX_ECHOED_BYTES, TRUNCATION_MARKER};
 
     #[test]
     fn field_is_extracted_from_the_serde_message() {

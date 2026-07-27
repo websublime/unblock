@@ -3,9 +3,11 @@
 //! This is the deepest leaf crate: it has **no** in-workspace dependencies. It owns the stable
 //! [`ErrorCode`] enum, the 0–8 exit-code table, the [`StructuredError`] JSON payload, the
 //! [`CodedError`] bridge every per-crate error enum implements, the concrete [`ModelError`] that
-//! `unblock-model` returns, terminal-message sanitization ([`sanitize_message`]), and the agent
-//! self-correction hint helpers. Per the spine §2, mapping a composed error to an `ErrorCode` and
-//! a 0–8 exit code happens only at the L7 boundary; this crate just provides the vocabulary.
+//! `unblock-model` returns, terminal-message sanitization ([`sanitize_message`]), the shared
+//! attacker-echo bound ([`clip`]), the byte-level duplicate-JSON-key scanner ([`dup_key`], D43),
+//! and the agent self-correction hint helpers. Per the spine §2, mapping a composed error to an
+//! `ErrorCode` and a 0–8 exit code happens only at the L7 boundary; this crate just provides the
+//! vocabulary.
 //!
 //! See `docs/plans/crates/unblock-error.md` for the per-file plan and `docs/plans/01-design-spine.md`
 //! §2 for the interface contract.
@@ -32,6 +34,7 @@
 
 mod code;
 mod coded;
+pub mod dup_key;
 mod hints;
 mod model;
 mod sanitize;
@@ -45,7 +48,7 @@ pub use hints::{
     find_similar_ids, levenshtein_distance,
 };
 pub use model::{FieldError, ModelError};
-pub use sanitize::sanitize_message;
+pub use sanitize::{MAX_ECHOED_BYTES, TRUNCATION_MARKER, clip, sanitize_message};
 pub use structured::{ExitCode, StructuredError};
 
 /// The `tracing` target every reliability event/span is emitted on (NFR-13/D30).
