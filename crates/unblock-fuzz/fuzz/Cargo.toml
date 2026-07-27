@@ -82,6 +82,14 @@ test = false
 doc = false
 bench = false
 
+# --- error targets (D43) ---
+[[bin]]
+name = "dup_scan"
+path = "fuzz_targets/dup_scan.rs"
+test = false
+doc = false
+bench = false
+
 # --- storage targets ---
 [[bin]]
 name = "query_filters"

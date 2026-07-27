@@ -11,8 +11,9 @@ use std::path::PathBuf;
 use proptest::prelude::*;
 
 use unblock_fuzz::{
-    run_content_hash_case, run_cycle_detect_case, run_enum_deserialize_case, run_id_alloc_case,
-    run_issue_ingest_case, run_parse_id_case, run_query_filters_case, run_sanitize_case,
+    run_content_hash_case, run_cycle_detect_case, run_dup_scan_case, run_enum_deserialize_case,
+    run_id_alloc_case, run_issue_ingest_case, run_parse_id_case, run_query_filters_case,
+    run_sanitize_case,
 };
 
 /// The nested cargo-fuzz package's corpus root (sibling of the member crate's `src/`).
@@ -81,6 +82,11 @@ fn replay_sanitize() {
 }
 
 #[test]
+fn replay_dup_scan() {
+    replay_corpus("dup_scan", run_dup_scan_case);
+}
+
+#[test]
 fn replay_query_filters() {
     replay_corpus("query_filters", run_query_filters_case);
 }
@@ -123,6 +129,30 @@ proptest! {
     #[test]
     fn smoke_sanitize(bytes in prop::collection::vec(any::<u8>(), 0..256)) {
         prop_assert!(run_sanitize_case(&bytes).is_ok());
+    }
+
+    /// Random BYTES rarely produce valid JSON, so this leg mostly exercises the fail-closed
+    /// `Indeterminate` path (and its "never stricter than rmcp" guard). The `Duplicate` arm is
+    /// reached by the committed seeds and by the fixed-seed generator inside the core's own unit
+    /// suite, which asserts an explicit minimum-duplicate floor.
+    #[test]
+    fn smoke_dup_scan(bytes in prop::collection::vec(any::<u8>(), 0..256)) {
+        prop_assert!(run_dup_scan_case(&bytes).is_ok());
+    }
+
+    /// A grammar-shaped generator, so the `Clean`/`Duplicate` arms are genuinely reached rather
+    /// than left to chance.
+    #[test]
+    fn smoke_dup_scan_wellformed(
+        keys in prop::collection::vec("[a-c]{1,3}", 1..8),
+    ) {
+        let members: Vec<String> = keys
+            .iter()
+            .enumerate()
+            .map(|(index, key)| format!("\"{key}\":{index}"))
+            .collect();
+        let document = format!("{{\"params\":{{{}}}}}", members.join(","));
+        prop_assert!(run_dup_scan_case(document.as_bytes()).is_ok());
     }
 }
 

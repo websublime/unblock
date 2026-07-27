@@ -2986,6 +2986,8 @@ version = "1.0.1-rc.2"
 dependencies = [
  "chrono",
  "proptest",
+ "rmcp",
+ "serde",
  "serde_json",
  "snafu",
  "tempfile",
