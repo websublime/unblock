@@ -14,7 +14,9 @@ use serde_json::{Map, Value};
 use tokio_util::sync::CancellationToken;
 use unblock_config::{ConfigPaths, ResolvedConfig, WorkspaceContext, WorkspaceSource};
 use unblock_engine::{Session, SessionConfig};
-use unblock_mcp::{Quotas, UnblockServer, mcp_server_duplex_for_test};
+use unblock_mcp::{
+    Quotas, UnblockServer, mcp_server_duplex_for_test, mcp_server_duplex_unclamped_for_test,
+};
 use unblock_storage::{LibsqlStorage, Storage};
 
 /// Build an `Arc<Session>` over a fresh in-memory libsql backend (migrated), wired into a synthetic
@@ -127,12 +129,16 @@ pub async fn connect_with_quotas(
     CancellationToken,
 ) {
     let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+    // D43: the server helper takes the byte streams themselves (the scanning transport owns the
+    // read framing), so a single duplex stream is split here.
+    let (server_read, server_write) = tokio::io::split(server_io);
     let cancel = CancellationToken::new();
     let server_task = tokio::spawn(mcp_server_duplex_for_test(
         session,
         quotas,
         instructions,
-        server_io,
+        server_read,
+        server_write,
         cancel.clone(),
     ));
     let client = ().serve(client_io).await.expect("client initializes");
@@ -192,6 +198,196 @@ pub async fn call_tool_with_meta(
     let is_error = result.is_error.unwrap_or(false);
     let structured = result.structured_content.unwrap_or(Value::Null);
     (is_error, structured)
+}
+
+/// A RAW duplex MCP client — writes exact bytes, reads exact lines (D43).
+///
+/// # Why the rmcp client cannot be used here
+///
+/// An rmcp `RunningService<RoleClient, _>` serializes its request params through `serde_json`, which
+/// builds a `Map` first — so it **structurally cannot emit a duplicate key**, the one input the D43
+/// suite exists to test. This client therefore owns the framing itself and writes the cell text
+/// verbatim.
+pub struct RawDuplexClient {
+    writer: tokio::io::WriteHalf<tokio::io::DuplexStream>,
+    reader: tokio::io::BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>,
+    next_id: i64,
+    /// Every response id observed, in arrival order (drives `saw_response_for`).
+    seen_ids: Vec<i64>,
+}
+
+impl RawDuplexClient {
+    /// Allocate the next request id.
+    pub fn next_request_id(&mut self) -> i64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
+    /// Write EXACT bytes plus a newline — no serde anywhere on this path.
+    pub async fn write_raw_line(&mut self, line: &str) {
+        use tokio::io::AsyncWriteExt as _;
+        self.writer
+            .write_all(line.as_bytes())
+            .await
+            .expect("write frame");
+        self.writer.write_all(b"\n").await.expect("write newline");
+        self.writer.flush().await.expect("flush");
+    }
+
+    /// Read newline-delimited lines until the response with `id` arrives.
+    ///
+    /// Every line read must be valid JSON (the NFR-14 stdout-framing guard).
+    pub async fn read_response(&mut self, id: i64) -> Value {
+        use tokio::io::AsyncBufReadExt as _;
+        loop {
+            let mut line = String::new();
+            let read = self
+                .reader
+                .read_line(&mut line)
+                .await
+                .expect("read server line");
+            assert!(read > 0, "the server closed before answering id={id}");
+            let trimmed = line.trim_end_matches(['\n', '\r']);
+            if trimmed.is_empty() {
+                continue;
+            }
+            let value: Value = serde_json::from_str(trimmed)
+                .unwrap_or_else(|e| panic!("every server line must be JSON-RPC framing: {e}"));
+            if let Some(seen) = value.get("id").and_then(Value::as_i64) {
+                self.seen_ids.push(seen);
+                if seen == id {
+                    return value;
+                }
+            }
+        }
+    }
+
+    /// Write a raw frame and block for its response.
+    pub async fn request_raw(&mut self, id: i64, raw: &str) -> Value {
+        self.write_raw_line(raw).await;
+        self.read_response(id).await
+    }
+
+    /// Send a normal (serde-built) JSON-RPC request and read its response.
+    pub async fn request(&mut self, method: &str, params: Value) -> Value {
+        let id = self.next_request_id();
+        let frame = serde_json::json!({"jsonrpc":"2.0","id":id,"method":method,"params":params});
+        let line = serde_json::to_string(&frame).expect("serialize request");
+        self.request_raw(id, &line).await
+    }
+
+    /// Call a tool with serde-built arguments, returning the response ENVELOPE.
+    pub async fn call_tool(&mut self, tool: &str, arguments: Value) -> Value {
+        self.request(
+            "tools/call",
+            serde_json::json!({"name": tool, "arguments": arguments}),
+        )
+        .await
+    }
+
+    /// Was a response with `id` ever observed? (The deterministic, timeout-free "no response at
+    /// all" probe: send the frame, then a known-good SENTINEL request, read the sentinel, then ask
+    /// this.)
+    #[must_use]
+    pub fn saw_response_for(&self, id: i64) -> bool {
+        self.seen_ids.contains(&id)
+    }
+
+    /// Drive the `initialize` handshake by hand.
+    async fn initialize(&mut self) -> Value {
+        let id = self.next_request_id();
+        let frame = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": rmcp::model::ProtocolVersion::LATEST,
+                "capabilities": {},
+                "clientInfo": {"name": "raw-duplex-test-client", "version": "0"},
+            }
+        });
+        let line = serde_json::to_string(&frame).expect("serialize initialize");
+        let response = self.request_raw(id, &line).await;
+        let note = serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"});
+        self.write_raw_line(&serde_json::to_string(&note).expect("serialize notification"))
+            .await;
+        response
+    }
+}
+
+/// Spin up the real server over a duplex pair and return an INITIALIZED raw client.
+///
+/// Routes through [`mcp_server_duplex_for_test`], i.e. through `run_mcp_server_handler` — the SAME
+/// path `run_mcp_server` uses — so the D43 scanning transport IS installed.
+pub async fn connect_raw(
+    session: Arc<Session>,
+    quotas: Quotas,
+) -> (
+    RawDuplexClient,
+    RunningService<RoleServer, UnblockServer>,
+    CancellationToken,
+) {
+    let (server_io, client_io) = tokio::io::duplex(1024 * 1024);
+    let (server_read, server_write) = tokio::io::split(server_io);
+    let cancel = CancellationToken::new();
+    let server_task = tokio::spawn(mcp_server_duplex_for_test(
+        session,
+        quotas,
+        None,
+        server_read,
+        server_write,
+        cancel.clone(),
+    ));
+    let mut client = raw_client(client_io);
+    client.initialize().await;
+    let server = server_task
+        .await
+        .expect("server task joins")
+        .expect("server starts over duplex");
+    (client, server, cancel)
+}
+
+/// Like [`connect_raw`], but over the CD-6 RAW rmcp serve path
+/// ([`mcp_server_duplex_unclamped_for_test`]) — which installs **NO** duplicate-key scan.
+///
+/// This is the only in-tree path that reaches a handler with NO verdict, so it is the executable
+/// witness for the fail-closed ABSENT arm. Without it that arm — "the whole security property" —
+/// would ship with zero coverage.
+pub async fn connect_raw_unscanned(
+    session: Arc<Session>,
+    quotas: Quotas,
+) -> (
+    RawDuplexClient,
+    RunningService<RoleServer, UnblockServer>,
+    CancellationToken,
+) {
+    let (server_io, client_io) = tokio::io::duplex(1024 * 1024);
+    let cancel = CancellationToken::new();
+    let server_task = tokio::spawn(mcp_server_duplex_unclamped_for_test(
+        session,
+        quotas,
+        None,
+        server_io,
+        cancel.clone(),
+    ));
+    let mut client = raw_client(client_io);
+    client.initialize().await;
+    let server = server_task
+        .await
+        .expect("server task joins")
+        .expect("server starts over duplex");
+    (client, server, cancel)
+}
+
+fn raw_client(client_io: tokio::io::DuplexStream) -> RawDuplexClient {
+    let (client_read, client_write) = tokio::io::split(client_io);
+    RawDuplexClient {
+        writer: client_write,
+        reader: tokio::io::BufReader::new(client_read),
+        next_id: 1,
+        seen_ids: Vec::new(),
+    }
 }
 
 /// A `Storage` decorator that COUNTS every mutating call (NFR-18 spy). It wraps a real inner backend

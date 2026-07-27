@@ -32,7 +32,9 @@ use unblock_error::{ErrorCode, StructuredError};
 use crate::error::{McpServerError, RunLoopSnafu, TransportSnafu};
 use crate::options::{CONTRACT_VERSION, McpServerOptions, Quotas};
 use crate::resources::{self, ResourceUri, capabilities, schema_bundle};
+use crate::tools::args::{duplicate_key_error, indeterminate_frame_error, unscanned_frame_error};
 use crate::tools::{enforce_quota, err_json};
+use crate::wire::{DupScanningTransport, ParamsScan};
 
 /// The MCP server handler — a thin adapter over [`Session`] (spine §5).
 ///
@@ -190,6 +192,13 @@ impl ServerHandler for UnblockServer {
     ) -> Result<CallToolResult, ErrorData> {
         match self.rate_limit.try_acquire() {
             Ok(_permit) => {
+                // D43: the duplicate-JSON-key gate, FIRST — before the quota. The scan itself
+                // already ran at the transport (`crate::wire`), so this is O(1); it goes first
+                // because a frame whose MEANING is ambiguous must be reported as such, not masked
+                // as over-quota. Inside the permit for the same D34-F5 reason the quota walk is.
+                if let Err(structured) = frame_scan_gate(&context.extensions) {
+                    return Ok(err_json(&structured));
+                }
                 // D42: the NFR-18 quota chokepoint, over the WHOLE `params`, INSIDE the permit and
                 // BEFORE dispatch. Inside the permit because the walk is O(request bytes) of CPU —
                 // running it above `try_acquire` would let unbounded concurrent oversized requests
@@ -347,6 +356,38 @@ impl ServerHandler for UnblockServer {
     }
 }
 
+/// **The D43 duplicate-key gate — the single ENFORCEMENT site.**
+///
+/// The scanning transport ([`crate::wire::DupScanningTransport`]) stamps a [`ParamsScan`] verdict on
+/// EVERY decoded request, `resources/*` and `prompts/*` included, because the scan runs on the raw
+/// bytes before rmcp even classifies the method. The verdict is **consulted here and nowhere else**:
+/// only `tools/call` has an in-band channel (FR-11), so gating another method would have to answer
+/// out-of-band, reopening the `-32602` arm that `crates/unblock-cli/tests/error_channel.rs` exists
+/// to keep shut. Non-`tools/call` methods therefore carry a stamped-but-unenforced verdict — a
+/// documented residual, not an oversight. (`read_resource` was probed: a duplicated `uri` does not
+/// execute last-wins; it falls to the already non-executing `-32601` class.)
+///
+/// **All three non-`Clean` arms reject, INCLUDING the absent one.** `Extensions` starts empty, so
+/// treating absent as clean would make any un-scanned path fail OPEN. The one in-tree path that
+/// reaches a handler with no verdict is the test-only, `test-util`-gated
+/// [`mcp_server_duplex_unclamped_for_test`] (deliberately raw — see its docs); that path is what
+/// makes this arm executably testable instead of merely asserted.
+///
+/// Reads `context.extensions` DIRECTLY rather than through rmcp's `Extension<T>` extractor: that
+/// extractor's absent arm is `ErrorData::invalid_params(...)` ⇒ **`-32602`**, i.e. exactly the
+/// out-of-band arm this whole design keeps shut.
+///
+/// # Errors
+/// The FR-11 [`StructuredError`] for the offending verdict (see [`crate::tools::args`]).
+fn frame_scan_gate(extensions: &rmcp::model::Extensions) -> Result<(), StructuredError> {
+    match extensions.get::<ParamsScan>() {
+        Some(ParamsScan::Clean) => Ok(()),
+        Some(ParamsScan::Duplicate { key, path }) => Err(duplicate_key_error(key, path)),
+        Some(ParamsScan::Indeterminate) => Err(indeterminate_frame_error()),
+        None => Err(unscanned_frame_error()),
+    }
+}
+
 /// Build the NFR-18 rate-limit reject (D34-F5): a retryable [`ErrorCode::RateLimited`] structured
 /// error, surfaced when the `max_concurrent_requests` cap is saturated. Emitted in-band for tools
 /// (`err_json`) and out-of-band as `ErrorData` for resources (MF-5) — both carry this SAME payload
@@ -387,26 +428,40 @@ pub async fn run_mcp_server(
     opts: McpServerOptions,
 ) -> Result<(), McpServerError> {
     let server = UnblockServer::new(session, opts.quotas, opts.instructions);
-    let running = run_mcp_server_handler(server, stdio(), opts.cancel).await?;
+    let (read, write) = stdio();
+    let running = run_mcp_server_handler(server, read, write, opts.cancel).await?;
     running.waiting().await.context(RunLoopSnafu)?;
     Ok(())
 }
 
-/// Generic over the transport so the lifecycle test can drive an in-memory duplex transport.
+/// Generic over the BYTE STREAMS so the lifecycle test can drive an in-memory duplex pair.
 ///
-/// The transport is wrapped in a [`VersionClampingTransport`] (CD-4) so the SAME protocol-version
-/// clamp guards both the shipped stdio [`run_mcp_server`] and the test [`mcp_server_duplex_for_test`] path.
-async fn run_mcp_server_handler<T, E, A>(
+/// # Why the bound is byte-level since D43
+///
+/// It used to take an `IntoTransport`. It cannot any more: the duplicate-key scan has to see the
+/// raw frame bytes BEFORE `serde_json` collapses a duplicated key, and no `Transport` decorator can
+/// — `receive()` hands a decorator an already-parsed message. So this function now OWNS the read
+/// framing, via [`DupScanningTransport`].
+///
+/// The two wrappers compose **scan innermost, clamp outermost**: the CD-4 clamp only mutates
+/// `initialize` params and passes the message through, so the `Extensions` the scan stamped survive
+/// it. Inverting them would work too, but this order keeps the clamp reading exactly the message
+/// rmcp's serve loop will.
+///
+/// [`run_mcp_server`]'s public 2-argument signature is UNCHANGED by this — the byte-level bound is
+/// confined to this private function and the two `test-util` duplex helpers.
+async fn run_mcp_server_handler<R, W>(
     server: UnblockServer,
-    transport: T,
+    read: R,
+    write: W,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<rmcp::service::RunningService<RoleServer, UnblockServer>, McpServerError>
 where
     UnblockServer: Service<RoleServer>,
-    T: rmcp::transport::IntoTransport<RoleServer, E, A>,
-    E: std::error::Error + Send + Sync + 'static,
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let transport = VersionClampingTransport::new(transport.into_transport());
+    let transport = VersionClampingTransport::new(DupScanningTransport::new(read, write));
     server
         .serve_with_ct(transport, cancel)
         .await
@@ -504,30 +559,35 @@ fn clamp_unsupported_initialize_version(message: &mut ClientJsonRpcMessage) {
     }
 }
 
-/// Build and run the server over an arbitrary in-memory transport (TEST-ONLY, `test-util` feature).
+/// Build and run the server over an arbitrary in-memory byte-stream pair (TEST-ONLY, `test-util`).
 ///
 /// Drives the **same** `UnblockServer` + `serve_with_ct` path as [`run_mcp_server`], but over a caller-
-/// supplied duplex transport instead of stdio — so the M2 lifecycle exit-gate (`tests/lifecycle.rs`)
+/// supplied duplex pair instead of stdio — so the M2 lifecycle exit-gate (`tests/lifecycle.rs`)
 /// can run a full in-process MCP client/server flow without touching real stdio. Feature-gated and
 /// `#[doc(hidden)]` so it never widens the shipped public surface.
+///
+/// Since D43 it takes a `(read, write)` PAIR rather than an `IntoTransport`: the scanning transport
+/// owns the read framing, so it must be handed the byte streams themselves. A caller holding a
+/// single duplex stream splits it with `tokio::io::split`.
 ///
 /// # Errors
 /// - [`McpServerError::Transport`] if the rmcp service fails to initialize over the transport.
 #[cfg(feature = "test-util")]
 #[doc(hidden)]
-pub async fn mcp_server_duplex_for_test<T, E, A>(
+pub async fn mcp_server_duplex_for_test<R, W>(
     session: Arc<Session>,
     quotas: Quotas,
     instructions: Option<String>,
-    transport: T,
+    read: R,
+    write: W,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<rmcp::service::RunningService<RoleServer, UnblockServer>, McpServerError>
 where
-    T: rmcp::transport::IntoTransport<RoleServer, E, A>,
-    E: std::error::Error + Send + Sync + 'static,
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let server = UnblockServer::new(session, quotas, instructions);
-    run_mcp_server_handler(server, transport, cancel).await
+    run_mcp_server_handler(server, read, write, cancel).await
 }
 
 /// Build and run the server over an arbitrary in-memory transport WITHOUT the
@@ -539,7 +599,13 @@ where
 /// `protocol_version` pin (`tests/protocol_version.rs`) can observe — and fail loudly on a change to —
 /// rmcp 1.7's UN-guarded serve-loop version negotiation that [`clamp_unsupported_initialize_version`]
 /// compensates for. NEVER route a shipped path through this: it deliberately reproduces the
-/// spec-non-conformant echo of an unsupported requested version.
+/// spec-non-conformant echo of an unsupported requested version — **and, since D43, it also installs
+/// NO duplicate-key scan**, so every request reaching a handler through it carries NO
+/// [`ParamsScan`] verdict at all.
+///
+/// That second property is deliberate and kept: this helper's whole purpose is to be the RAW rmcp
+/// serve path, and wrapping it would both destroy the CD-6 pin and remove the only honest in-tree
+/// witness that [`frame_scan_gate`]'s fail-closed ABSENT arm actually fires (`tests/`).
 ///
 /// # Errors
 /// - [`McpServerError::Transport`] if the rmcp service fails to initialize over the transport.
@@ -574,10 +640,109 @@ fn unknown_resource(uri: &str) -> StructuredError {
 
 #[cfg(test)]
 mod tests {
-    use super::UnblockServer;
+    use super::{ParamsScan, UnblockServer, frame_scan_gate};
     use crate::options::Quotas;
+    use rmcp::model::Extensions;
+    use unblock_error::ErrorCode;
 
     const fn assert_send_sync<T: Send + Sync + 'static>() {}
+
+    /// **The `Indeterminate ⇒ reject` arm — its only executable coverage.**
+    ///
+    /// The wire path cannot reach this arm: the shapes that make the scanner indeterminate
+    /// (malformed JSON, non-UTF-8, nesting past the 128-level recursion limit) also fail rmcp's own
+    /// parse, so the frame is answered `-32700` and never reaches `call_tool`. The arm is
+    /// defence-in-depth, which is exactly why it needs a direct pin — an uncovered fail-closed arm
+    /// is one refactor away from silently becoming fail-open.
+    ///
+    /// This lives IN-CRATE because `ParamsScan` and `frame_scan_gate` are both crate-private: an
+    /// external `tests/*.rs` binary is a separate compilation unit and could not construct the
+    /// verdict at all.
+    #[test]
+    fn frame_scan_gate_rejects_an_indeterminate_verdict() {
+        let mut extensions = Extensions::new();
+        extensions.insert(ParamsScan::Indeterminate);
+        let error = frame_scan_gate(&extensions).expect_err("indeterminate must REJECT");
+        assert_eq!(error.code, ErrorCode::ValidationFailed);
+        assert_eq!(
+            error.context.get("kind").and_then(|v| v.as_str()),
+            Some("indeterminate_frame")
+        );
+    }
+
+    /// The ABSENT verdict rejects — an empty `Extensions` is the DEFAULT state, so the opposite
+    /// encoding would make every un-scanned path fail OPEN.
+    #[test]
+    fn frame_scan_gate_rejects_an_absent_verdict() {
+        let error = frame_scan_gate(&Extensions::new()).expect_err("absent must REJECT");
+        assert_eq!(error.code, ErrorCode::InternalError);
+        assert_eq!(
+            error.context.get("kind").and_then(|v| v.as_str()),
+            Some("unscanned_frame")
+        );
+        assert!(!error.retryable, "an un-scanned frame is not transient");
+    }
+
+    /// A duplicate verdict rejects and NAMES both the key and its RFC 6901 pointer.
+    #[test]
+    fn frame_scan_gate_rejects_a_duplicate_and_names_the_pointer() {
+        let mut extensions = Extensions::new();
+        extensions.insert(ParamsScan::Duplicate {
+            key: "action".to_string(),
+            path: "/arguments/deps/0".to_string(),
+        });
+        let error = frame_scan_gate(&extensions).expect_err("duplicate must REJECT");
+        assert_eq!(error.code, ErrorCode::ValidationFailed);
+        assert_eq!(
+            error.context.get("kind").and_then(|v| v.as_str()),
+            Some("duplicate_key")
+        );
+        assert_eq!(
+            error.context.get("field").and_then(|v| v.as_str()),
+            Some("action")
+        );
+        assert_eq!(
+            error.context.get("path").and_then(|v| v.as_str()),
+            Some("/arguments/deps/0")
+        );
+    }
+
+    /// A clean verdict proceeds — without this the gate could "pass" by rejecting everything.
+    #[test]
+    fn frame_scan_gate_admits_a_clean_verdict() {
+        let mut extensions = Extensions::new();
+        extensions.insert(ParamsScan::Clean);
+        assert!(frame_scan_gate(&extensions).is_ok());
+    }
+
+    /// An oversized attacker key/pointer is CLIPPED before it is echoed.
+    ///
+    /// `with_context` performs no sanitization at all, so the caller is the only bound — and the
+    /// pointer is clipped ASSEMBLED, never per segment (many short segments could otherwise sum to
+    /// an unbounded total).
+    #[test]
+    fn an_oversized_duplicate_payload_is_clipped() {
+        let mut extensions = Extensions::new();
+        extensions.insert(ParamsScan::Duplicate {
+            key: "k".repeat(64 * 1024),
+            path: format!("/{}", vec!["seg"; 4096].join("/")),
+        });
+        let error = frame_scan_gate(&extensions).expect_err("duplicate must REJECT");
+        let bound = unblock_error::MAX_ECHOED_BYTES + unblock_error::TRUNCATION_MARKER.len();
+        for field in ["field", "path"] {
+            let echoed = error.context[field].as_str().unwrap_or_default();
+            assert!(
+                echoed.len() <= bound,
+                "`context.{field}` echoed {} bytes, over the {bound}-byte bound",
+                echoed.len()
+            );
+        }
+        assert!(
+            error.message.len() <= 6 * unblock_error::MAX_ECHOED_BYTES + 128,
+            "the message must stay bounded too: {} bytes",
+            error.message.len()
+        );
+    }
 
     #[test]
     fn unblock_server_is_send_sync() {

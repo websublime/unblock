@@ -35,12 +35,17 @@ async fn negotiated_version(
     requested: ProtocolVersion,
 ) -> ProtocolVersion {
     let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+    // D43: the clamped helper takes the byte streams themselves — the scanning transport owns the
+    // read framing. (The UNCLAMPED helper below still takes an `IntoTransport`: it deliberately
+    // installs no scan at all.)
+    let (server_read, server_write) = tokio::io::split(server_io);
     let cancel = CancellationToken::new();
     let server_task = tokio::spawn(mcp_server_duplex_for_test(
         session,
         Quotas::default(),
         None,
-        server_io,
+        server_read,
+        server_write,
         cancel.clone(),
     ));
 

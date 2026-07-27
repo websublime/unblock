@@ -373,6 +373,64 @@ fn args_error(err: &serde_json::Error, hint: &str) -> StructuredError {
     structured
 }
 
+/// The D43 in-band reject for a frame whose `params` subtree carries a DUPLICATE JSON KEY.
+///
+/// Reuses [`ErrorCode::ValidationFailed`] — minting a variant would move `ErrorCode::ALL`, which
+/// `capabilities().error_codes` is built from, which `CONTRACT_HASH` digests: a breaking contract
+/// change under the GA freeze, for a patch-release defect fix. The duplicate-key KIND therefore
+/// rides `context.kind`, a free-form slot that is hash-neutral.
+///
+/// Both echoed values are [`clip`]ped **before** they are attached: `from_code` sanitizes but does
+/// not bound, and `with_context` does neither — the caller is the only bound on a `context` value.
+/// `path` is clipped as an ALREADY-ASSEMBLED pointer (never per segment: many short segments could
+/// otherwise still sum to an unbounded total).
+pub(crate) fn duplicate_key_error(key: &str, path: &str) -> StructuredError {
+    let key = clip(key);
+    StructuredError::from_code(
+        ErrorCode::ValidationFailed,
+        format!("invalid tool arguments: duplicate JSON key `{key}` in the request `params`"),
+    )
+    .with_hint(format!(
+        "a JSON object key may appear at most once; `{key}` appears more than once inside the \
+         request, so the request was AMBIGUOUS and was NOT executed. Send each key exactly once \
+         and resend."
+    ))
+    .with_context("kind", serde_json::json!("duplicate_key"))
+    .with_context("field", serde_json::json!(key.as_ref()))
+    // NEW slot: a nested duplicate is otherwise unlocatable — `field` alone cannot say WHICH
+    // object carried it.
+    .with_context("path", serde_json::json!(clip(path).as_ref()))
+}
+
+/// The D43 in-band reject for a frame the scanner could not resolve to a verdict.
+///
+/// Fail-closed: an ambiguous frame is refused, never waved through.
+pub(crate) fn indeterminate_frame_error() -> StructuredError {
+    StructuredError::from_code(
+        ErrorCode::ValidationFailed,
+        "tool arguments could not be unambiguously scanned; refusing to execute",
+    )
+    .with_hint(
+        "the request bytes could not be tokenized to a duplicate-key decision (malformed JSON, \
+         non-UTF-8, or nesting past the parser's depth limit). Send a well-formed request.",
+    )
+    .with_context("kind", serde_json::json!("indeterminate_frame"))
+}
+
+/// The D43 in-band reject for a frame that carries **no** verdict at all.
+///
+/// **This arm is the whole security property.** `Extensions` starts EMPTY, so "absent ⇒ clean"
+/// would make any path that reaches a handler without traversing the scanning transport fail
+/// **OPEN**. It mirrors the stance already written for the quota preflight: an un-measurable
+/// request is rejected, because the untrusted-input boundary must never fail open.
+pub(crate) fn unscanned_frame_error() -> StructuredError {
+    StructuredError::from_code(
+        ErrorCode::InternalError,
+        "tool arguments were not scanned for wire ambiguity; refusing to execute",
+    )
+    .with_context("kind", serde_json::json!("unscanned_frame"))
+}
+
 /// Deserialize the raw arguments into `T`, mapping any failure to the in-band structured error.
 ///
 /// This is the **only** deserialization of tool arguments in the process — it simply MOVED out of

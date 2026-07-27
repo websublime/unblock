@@ -28,7 +28,12 @@ unblock-model = { workspace = true }
 unblock-error = { workspace = true }
 rmcp = { workspace = true }
 # The cooperative-shutdown token for rmcp's `serve_with_ct` (FR-17). rmcp re-exports nothing for it.
-tokio-util = { workspace = true }
+# `codec` (D43): the D43 scanning transport encodes outbound frames through rmcp's OWN public
+# `JsonRpcMessageCodec`, so the bytes it writes are identical to `AsyncRwTransport`'s BY
+# CONSTRUCTION rather than by test. That needs `tokio_util::codec::Encoder` + `tokio_util::bytes`.
+# rmcp's `transport-async-rw` (implied by `server`) already activates this feature, so declaring it
+# here adds ZERO crates to the lock — it only stops us depending on someone else's activation.
+tokio-util = { workspace = true, features = ["codec"] }
 schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
