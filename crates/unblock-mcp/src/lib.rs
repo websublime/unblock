@@ -1,6 +1,7 @@
 //! `unblock-mcp` (L7) — the PRIMARY product surface: an `rmcp` stdio MCP server (`unblock mcp`)
-//! exposing the engine as the consolidated 8-tool taxonomy + resources + prompts, quota-checked and
-//! strictly deserialized at the boundary
+//! exposing the engine as the consolidated 8-tool taxonomy + resources + prompts,
+//! duplicate-key-scanned at the transport before parse (D43), quota-checked and strictly
+//! deserialized at the boundary
 //! under quotas (NFR-18), discoverable via a `contract_version`-stamped bundle (FR-12), every error
 //! mapped to the structured boundary (FR-11). A thin adapter over `Session` (no write orchestration).
 //! See `docs/plans/crates/unblock-mcp.md`.
@@ -31,6 +32,14 @@ mod prompts;
 mod resources;
 mod server;
 mod tools;
+mod wire;
+
+// The D43 duplicate-key case corpus, declared ONCE and consumed by BOTH this crate's duplex suite
+// and `unblock-cli`'s raw-stdio suite (which spawns the real binary and cannot live here). Test-only,
+// feature-gated, `#[doc(hidden)]` — never compiled into a shipped build.
+#[cfg(feature = "test-util")]
+#[doc(hidden)]
+pub mod duplicate_key_corpus;
 
 pub use error::McpServerError;
 pub use options::{CONTRACT_HASH, CONTRACT_VERSION, McpServerOptions, Quotas};
