@@ -284,3 +284,233 @@ async fn bd_import_refuses_parent_traversal_path() {
         "{err:?}"
     );
 }
+
+// -------------------------------------------------------------------------------------------
+// D43 — DUPLICATE JSON KEYS on the `bd` line parse.
+//
+// This is the SECOND instance of the root cause the MCP transport closes. `serde_json::from_str`
+// collapses a duplicated key last-wins while building the `Value`, so a `bd` record whose text says
+// one thing imports as another — and `dropped_fields` cannot see it BY CONSTRUCTION, because the
+// key-diff runs over the already-collapsed map.
+// -------------------------------------------------------------------------------------------
+
+/// The hand-written duplicate-key case catalogue.
+///
+/// It is deliberately NOT an importable export: `//` lines carry the case names and the
+/// never-regenerate warning, so the suite stages each case individually.
+const DUP_FIXTURE: &str = include_str!("fixtures/bd_export_duplicate_keys.jsonl");
+
+/// `(case name, json line)` for every non-comment line, in file order. The LAST entry is the clean
+/// control.
+fn duplicate_key_cases() -> Vec<(String, String)> {
+    let mut cases = Vec::new();
+    let mut pending = String::new();
+    for line in DUP_FIXTURE.lines() {
+        if let Some(rest) = line.strip_prefix("// CASE: ") {
+            pending = rest.to_string();
+        } else if let Some(rest) = line.strip_prefix("// CLEAN CONTROL") {
+            pending = format!("CLEAN CONTROL{rest}");
+        } else if !line.starts_with("//") && !line.trim().is_empty() {
+            cases.push((std::mem::take(&mut pending), line.to_string()));
+        }
+    }
+    cases
+}
+
+/// Stage `lines` as a confined `.unblock/issues.jsonl` and return `(tempdir, dir, path)`.
+fn stage_lines(lines: &[&str]) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join(".unblock");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("issues.jsonl");
+    std::fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
+    (tmp, dir, path)
+}
+
+/// **The MECHANICAL never-regenerated guard.**
+///
+/// A header comment is not executable. If this fixture is ever round-tripped through a serializer
+/// every duplicate collapses to ONE occurrence and the whole suite goes green against input it can
+/// no longer express. This asserts the duplicates are still physically there.
+#[test]
+fn every_fixture_duplicate_line_carries_its_key_exactly_twice() {
+    let expected_keys = [
+        ("bd-d1", "id"),
+        ("bd-d2", "status"),
+        ("bd-d3", "depends_on_id"),
+        ("bd-d4", "text"),
+        ("bd-d5", "author"),
+    ];
+    let cases = duplicate_key_cases();
+    assert_eq!(
+        cases.len(),
+        expected_keys.len() + 1,
+        "the catalogue must hold one line per case plus the clean control: {cases:?}"
+    );
+    for (id, key) in expected_keys {
+        let line = cases
+            .iter()
+            .find(|(_, text)| text.contains(&format!("\"{id}\"")))
+            .unwrap_or_else(|| panic!("case {id} missing from the catalogue"))
+            .1
+            .clone();
+        assert_eq!(
+            line.matches(&format!("\"{key}\"")).count(),
+            2,
+            "case {id}: `{key}` must appear EXACTLY twice — a serializer round-trip would have \
+             collapsed it to once and this fixture would silently stop testing anything: {line}"
+        );
+    }
+    assert!(
+        DUP_FIXTURE.contains("NEVER REGENERATE THIS FILE THROUGH A SERIALIZER"),
+        "the fixture must keep its warning header"
+    );
+}
+
+/// Every duplicate-key case is REJECTED, LINE-NUMBERED, with ZERO writes.
+///
+/// Each case is staged BEHIND a clean control line, so the reported line number is a real one (2) —
+/// not the trivial 1 a single-line file would always produce — and the zero-writes assertion is a
+/// real all-or-nothing claim: the control line ahead of it WOULD have imported.
+#[tokio::test]
+async fn bd_import_rejects_every_duplicate_key_line_with_zero_writes() {
+    let cases = duplicate_key_cases();
+    let (control_name, control) = cases.last().cloned().expect("clean control");
+    assert!(
+        control_name.starts_with("CLEAN CONTROL"),
+        "the LAST catalogue entry must be the clean control, got `{control_name}`"
+    );
+
+    let expected_key = |id: &str| match id {
+        "bd-d1" => "id",
+        "bd-d2" => "status",
+        "bd-d3" => "depends_on_id",
+        "bd-d4" => "text",
+        _ => "author",
+    };
+
+    for (name, line) in cases.iter().take(cases.len() - 1) {
+        let (_tmp, dir, path) = stage_lines(&[&control, line]);
+        let storage = fresh_storage().await;
+        let err = import_bd(&storage, &path, &dir, "importer")
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{name}: a duplicate-key line MUST be rejected"));
+        match err {
+            unblock_sync::SyncError::DuplicateKey {
+                line: line_no,
+                ref key,
+                ..
+            } => {
+                assert_eq!(line_no, 2, "{name}: the REAL line number must be reported");
+                let id = line.split('"').nth(3).unwrap_or_default().to_string();
+                assert_eq!(
+                    key,
+                    expected_key(&id),
+                    "{name}: the duplicated key is named"
+                );
+            }
+            other => panic!("{name}: expected DuplicateKey, got {other:?}"),
+        }
+        assert_eq!(
+            count_rows(&storage).await,
+            0,
+            "{name}: ZERO writes — the clean control line ahead of the duplicate must not land \
+             either (all-or-nothing)"
+        );
+    }
+}
+
+/// A line the scanner cannot resolve is refused FAIL-CLOSED, with its own variant.
+///
+/// Reusing `DuplicateKey` with empty strings here would report a duplicate that may not exist —
+/// telling the operator something false about their data.
+#[tokio::test]
+async fn bd_import_refuses_an_unscannable_line_fail_closed() {
+    let cases = duplicate_key_cases();
+    let (_, control) = cases.last().cloned().expect("clean control");
+    // Nesting past serde_json's 128-level recursion limit: neither the scanner nor the parser can
+    // resolve it, so the scan is INDETERMINATE and the line is refused rather than waved through.
+    let deep = format!("{}{}", "[".repeat(200), "]".repeat(200));
+    let (_tmp, dir, path) = stage_lines(&[&control, &deep]);
+    let storage = fresh_storage().await;
+    let err = import_bd(&storage, &path, &dir, "importer")
+        .await
+        .expect_err("an unscannable line must be refused");
+    assert!(
+        matches!(err, unblock_sync::SyncError::IndeterminateLine { line: 2 }),
+        "{err:?}"
+    );
+    assert_eq!(count_rows(&storage).await, 0, "zero writes on reject");
+}
+
+/// The clean control still imports, with an unchanged `dropped_fields` report.
+///
+/// The ACCEPT half of the discipline: without it every rejection cell could pass for the wrong
+/// reason (a scanner that refuses EVERYTHING) and prove nothing.
+#[tokio::test]
+async fn bd_import_still_accepts_the_clean_control_line() {
+    let cases = duplicate_key_cases();
+    let (_, control) = cases.last().cloned().expect("clean control");
+    let (_tmp, dir, path) = stage_lines(&[&control]);
+    let storage = fresh_storage().await;
+    let report = import_bd(&storage, &path, &dir, "importer")
+        .await
+        .expect("the clean control must import");
+    assert_eq!(report.imported, 1, "{report:?}");
+    assert_eq!(
+        report.dropped_fields,
+        vec!["legacy_field".to_string()],
+        "the advisory dropped-fields report is unchanged by D43: {report:?}"
+    );
+    assert_eq!(count_rows(&storage).await, 1);
+}
+
+/// **The generic-JSONL IMMUNITY PIN.**
+///
+/// `parse_issue_line` deserializes straight into `Issue`, a plain derived struct, so `serde_derive`'s
+/// generated `visit_map` already errors with ``duplicate field `id` ``. That immunity is a DERIVE
+/// ARTEFACT: adding a `#[serde(flatten)]` or a `serde_json::Value`-typed field to `Issue` would
+/// destroy it SILENTLY, with no test failure anywhere — which is what this pin exists to prevent.
+///
+/// It drives the PRODUCTION entry points, deliberately never naming the internal `from_str::<Issue>`
+/// call: a test written against that call independently re-implements it and therefore cannot
+/// observe the refactor it claims to catch.
+#[tokio::test]
+async fn the_generic_jsonl_path_is_immune_to_duplicate_keys() {
+    let duplicate = r#"{"id":"ub-a","title":"t","status":"open","priority":2,"issue_type":"task","created_at":"2023-11-14T22:13:20Z","updated_at":"2023-11-14T22:13:20Z","id":"ub-EVIL"}"#;
+    assert_eq!(
+        duplicate.matches("\"id\"").count(),
+        2,
+        "non-vacuity: the pin's own input must really carry the duplicate"
+    );
+
+    let err = unblock_sync::parse_issue_line(duplicate, 7)
+        .expect_err("a duplicated field must be REJECTED, never last-wins collapsed");
+    assert!(
+        matches!(err, unblock_sync::SyncError::JsonlParse { line: 7, .. }),
+        "{err:?}"
+    );
+
+    // ... and end-to-end through the import orchestrator, with zero writes.
+    let clean = r#"{"id":"ub-ok","title":"ok","status":"open","priority":2,"issue_type":"task","created_at":"2023-11-14T22:13:20Z","updated_at":"2023-11-14T22:13:20Z"}"#;
+    let (_tmp, dir, path) = stage_lines(&[clean, duplicate]);
+    let storage = fresh_storage().await;
+    let err = unblock_sync::import_jsonl(
+        &storage,
+        &path,
+        &dir,
+        "importer",
+        &unblock_sync::ImportOptions::default(),
+    )
+    .await
+    .expect_err("import_jsonl must reject the duplicate-key line");
+    assert!(
+        matches!(
+            err,
+            unblock_sync::SyncError::ValidationFailed { line: 2, .. }
+        ),
+        "{err:?}"
+    );
+    assert_eq!(count_rows(&storage).await, 0, "zero writes on reject");
+}
