@@ -44,6 +44,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use serde_json::Value;
+use unblock_error::dup_key::{self, DupScan};
 use unblock_model::{DependencyType, ImportReport, Issue, IssueValidator, Status};
 use unblock_storage::Storage;
 
@@ -293,6 +294,35 @@ fn read_bd_records(path: &Path) -> Result<MappedBd, SyncError> {
             continue; // blank lines are skipped.
         }
 
+        // D43 — the DUPLICATE-KEY scan, on the EXACT bytes `from_str` is about to see.
+        //
+        // It must run HERE, before the parse: `serde_json::Map` collapses a duplicated key
+        // last-wins, so by the time a `Value` exists the ambiguity is gone. This is the second
+        // instance of the same root cause the MCP transport closes; `bd` records are attacker- (or
+        // at least foreign-tool-) supplied, and a duplicated `id`/`status` silently imports a
+        // DIFFERENT record than the file's text states.
+        //
+        // `trimmed`, not `&buf`: `buf` still carries the newline and any leading whitespace, and the
+        // scanner must see byte-for-byte what the parser sees.
+        match dup_key::scan(trimmed.as_bytes(), &[]) {
+            DupScan::Clean => {}
+            DupScan::Duplicate { key, path } => {
+                // Both echoed values are CLIPPED: a `bd` line is bounded only by
+                // `read_line_bounded`, so a ~MB key is constructible, and `SyncError` has no
+                // sanitizing chokepoint of its own the way `StructuredError` does.
+                return Err(SyncError::DuplicateKey {
+                    line: line_no,
+                    key: unblock_error::clip(&key).into_owned(),
+                    path: unblock_error::clip(&path).into_owned(),
+                });
+            }
+            // FAIL-CLOSED: an unresolvable line is refused, never waved through. Its own variant,
+            // so the operator is not told a duplicate was proven when it was not.
+            DupScan::Indeterminate => {
+                return Err(SyncError::IndeterminateLine { line: line_no });
+            }
+        }
+
         let value: Value =
             serde_json::from_str(trimmed).map_err(|source| SyncError::JsonlParse {
                 line: line_no,
@@ -332,6 +362,15 @@ fn read_bd_records(path: &Path) -> Result<MappedBd, SyncError> {
 
 /// Map one bd-export JSON `Value` into a repaired [`Issue`] + its unknown-top-level `dropped_fields`.
 ///
+/// # ⚠️ `dropped_fields` is NOT a duplicate-key channel (D43)
+///
+/// The key-diff below runs before `from_value` — but **after** the caller's
+/// `serde_json::from_str::<Value>` has already collapsed any duplicated key LAST-WINS. A duplicated
+/// key is therefore invisible to this report **by construction**: the `Map` it iterates has one
+/// entry per key no matter how many the line carried. That is the gap, and it is why the D43 scan
+/// runs at the LINE PARSE in [`read_bd_records`], not here. `dropped_fields` remains what it always
+/// was: an advisory record of IGNORED keys, never a rejection channel.
+///
 /// The key-diff runs BEFORE `from_value` (serde silently discards unknowns). After deserialization the
 /// 7 bd repairs run in bd's SOURCE ORDER, then the shared [`crate::jsonl::normalize`] recomputes the
 /// hash. `dropped_fields` are the raw top-level `Value` keys not in [`KNOWN_ISSUE_KEYS`] (nested
@@ -348,6 +387,9 @@ fn read_bd_records(path: &Path) -> Result<MappedBd, SyncError> {
 pub(crate) fn map_bd_record(value: Value) -> Result<(Issue, Vec<String>), SyncError> {
     // (a) diff the raw TOP-LEVEL keys against the known Issue key set BEFORE `from_value` (serde
     //     silently discards unknowns — Issue does not set `deny_unknown_fields`).
+    //     D43: "before `from_value`" is NOT "before the collapse" — the caller's `from_str::<Value>`
+    //     already merged any duplicated key last-wins, so this diff can never see one. Detection
+    //     lives at the line parse in `read_bd_records`.
     let known: HashSet<&str> = KNOWN_ISSUE_KEYS.iter().copied().collect();
     let mut dropped: Vec<String> = Vec::new();
     if let Value::Object(map) = &value {
@@ -492,6 +534,44 @@ mod tests {
 
     fn ts(secs: i64) -> chrono::DateTime<Utc> {
         Utc.timestamp_opt(secs, 0).unwrap()
+    }
+
+    /// **D43 — WHY the scan cannot live in `map_bd_record`.**
+    ///
+    /// This documents the defect rather than the fix: by the time a `Value` exists, the duplicate is
+    /// GONE. `map_bd_record` receives that already-collapsed `Value`, so it can neither detect the
+    /// duplicate nor report it through `dropped_fields` — the key-diff it runs sees one entry per
+    /// key no matter how many the line carried. If someone ever proposes "just check inside
+    /// `map_bd_record`", this test is the answer.
+    #[test]
+    fn map_bd_record_cannot_see_a_duplicate_key_by_construction() {
+        let line = r#"{"id":"bd-1","title":"t","status":"open","priority":2,"issue_type":"task","created_at":"2023-11-14T22:13:20Z","updated_at":"2023-11-14T22:13:20Z","id":"bd-EVIL"}"#;
+        assert_eq!(
+            line.matches("\"id\"").count(),
+            2,
+            "non-vacuity: the input must really carry the duplicate"
+        );
+
+        let value: serde_json::Value = serde_json::from_str(line).expect("parses");
+        // The collapse has ALREADY happened: one entry, holding the LAST occurrence.
+        assert_eq!(
+            value.as_object().map(serde_json::Map::len),
+            Some(7),
+            "serde_json merged the two `id` members into one"
+        );
+        assert_eq!(value["id"], "bd-EVIL", "last-wins");
+
+        let (issue, dropped) = map_bd_record(value).expect("maps");
+        assert_eq!(
+            issue.id, "bd-EVIL",
+            "the record the text says is `bd-1` maps to `bd-EVIL` — the harm, in one assertion"
+        );
+        assert!(
+            dropped.is_empty(),
+            "and `dropped_fields` reports NOTHING: it diffs the already-collapsed map, so a \
+             duplicated key is invisible to it BY CONSTRUCTION. That is why D43 scans the raw \
+             LINE BYTES in `read_bd_records`, upstream of this function."
+        );
     }
 
     fn base(id: &str) -> Issue {

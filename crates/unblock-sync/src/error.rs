@@ -67,6 +67,44 @@ pub enum SyncError {
         id: String,
     },
 
+    /// A line carries a DUPLICATE JSON KEY, so its meaning is ambiguous (D43).
+    ///
+    /// The line is REJECTED, never last-wins collapsed. `serde_json` builds its `Map` by
+    /// overwriting, so `{"id":"a","id":"b"}` silently becomes `b` — a record whose text says one
+    /// thing and imports as another. That is invisible to the `dropped_fields` report **by
+    /// construction**: the key-diff runs over the ALREADY-COLLAPSED `Value`.
+    ///
+    /// `key` and `path` are the DECODED duplicated key and an RFC 6901 pointer to the object that
+    /// carries it, both `clip`ped — a `bd` line is bounded only by the per-line cap, so a
+    /// megabyte-long key is constructible and this enum has no sanitizing chokepoint of its own.
+    ///
+    /// Maps to the EXISTING `ErrorCode::JsonlParseError` (exit-6): no new code, hash-neutral.
+    #[snafu(display("duplicate JSON key '{key}' at line {line} (path '{path}')"))]
+    DuplicateKey {
+        /// The 1-based line number.
+        line: usize,
+        /// The decoded duplicated key (clipped).
+        key: String,
+        /// An RFC 6901 pointer to the object carrying the duplicate, relative to the line's root
+        /// (empty for a top-level duplicate). Clipped.
+        path: String,
+    },
+
+    /// A line could not be scanned to a duplicate-key decision (D43) — FAIL-CLOSED.
+    ///
+    /// Distinct from [`SyncError::DuplicateKey`] so the operator is told the truth: the line was
+    /// refused because its meaning could not be established, not because a duplicate was proven.
+    /// Reusing `DuplicateKey` with empty strings would report a duplicate that may not exist.
+    ///
+    /// Maps to the EXISTING `ErrorCode::JsonlParseError` (exit-6): no new code, hash-neutral.
+    #[snafu(display(
+        "line {line} could not be unambiguously scanned for duplicate JSON keys; refusing to import"
+    ))]
+    IndeterminateLine {
+        /// The 1-based line number.
+        line: usize,
+    },
+
     /// An import found an existing id under [`crate::CollisionPolicy::Error`] (D23).
     #[snafu(display("import collision on existing id '{id}'"))]
     ImportCollision {
@@ -157,7 +195,8 @@ impl SyncError {
     ///
     /// exit-6 (JSONL/sync): `PathTraversal`, `ExternalOverrideWithoutReason` (both →
     /// `PathTraversal`), `ConflictMarkers`, `JsonlParse`, `ValidationFailed`, `DuplicateId`,
-    /// `LineTooLong` → JSONL parse class; `ImportCollision`; `PrefixMismatch`; `SyncConflict`.
+    /// `DuplicateKey`, `IndeterminateLine` (both D43), `LineTooLong` → JSONL parse class;
+    /// `ImportCollision`; `PrefixMismatch`; `SyncConflict`.
     /// exit-8 (I/O): `Io`, `FileTooLarge` → `IoError`; `JsonEncode` → `JsonError`. The `Storage`
     /// source forwards its own code.
     #[must_use]
@@ -170,6 +209,8 @@ impl SyncError {
             Self::JsonlParse { .. }
             | Self::ValidationFailed { .. }
             | Self::DuplicateId { .. }
+            | Self::DuplicateKey { .. }
+            | Self::IndeterminateLine { .. }
             | Self::LineTooLong { .. } => ErrorCode::JsonlParseError,
             Self::ImportCollision { .. } => ErrorCode::ImportCollision,
             Self::PrefixMismatch { .. } => ErrorCode::PrefixMismatch,

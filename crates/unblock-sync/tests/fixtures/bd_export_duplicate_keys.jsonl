@@ -1,0 +1,24 @@
+// D43 duplicate-key `bd` fixture. HAND-WRITTEN, BYTE-SIGNIFICANT.
+//
+// *** NEVER REGENERATE THIS FILE THROUGH A SERIALIZER. ***
+// serde_json (and every other JSON writer) builds a Map before emitting, and a Map holds one
+// entry per key -- so a round-trip SILENTLY DELETES every duplicate below and turns the whole
+// suite green against input it can no longer express. The header is not the guard: the suite
+// asserts mechanically that each duplicate-key line carries its key exactly TWICE.
+//
+// Line numbering below is 1-based INCLUDING these comment lines, because the importer counts
+// physical lines. Comment lines are not valid JSON, so each fixture is staged INDIVIDUALLY by
+// the suite rather than imported as a whole file.
+//
+// CASE: duplicate id -- IDENTITY SUBSTITUTION: the text says bd-d1, GA imported bd-EVIL
+{"id":"bd-d1","title":"identity substitution","status":"open","priority":2,"issue_type":"task","created_at":"2023-11-14T22:13:20Z","updated_at":"2023-11-14T22:13:20Z","id":"bd-EVIL"}
+// CASE: duplicate status -- a record the text closes imports OPEN
+{"id":"bd-d2","title":"status substitution","status":"closed","priority":2,"issue_type":"task","created_at":"2023-11-14T22:13:20Z","updated_at":"2023-11-14T22:13:20Z","closed_at":"2023-11-15T00:00:00Z","status":"open"}
+// CASE: duplicate INSIDE dependencies[] -- nested, depth 3
+{"id":"bd-d3","title":"nested dependency dup","status":"open","priority":2,"issue_type":"task","created_at":"2023-11-14T22:13:20Z","updated_at":"2023-11-14T22:13:20Z","dependencies":[{"issue_id":"bd-d3","depends_on_id":"bd-x","type":"blocks","created_at":"2023-11-14T22:13:20Z","depends_on_id":"bd-y"}]}
+// CASE: duplicate INSIDE comments[] -- nested, depth 3
+{"id":"bd-d4","title":"nested comment dup","status":"open","priority":2,"issue_type":"task","created_at":"2023-11-14T22:13:20Z","updated_at":"2023-11-14T22:13:20Z","comments":[{"id":1,"issue_id":"bd-d4","text":"harmless","author":"bd","created_at":"2023-11-14T22:13:20Z","text":"INJECTED"}]}
+// CASE: duplicate at depth >= 3 inside a nested comment object
+{"id":"bd-d5","title":"depth three dup","status":"open","priority":2,"issue_type":"task","created_at":"2023-11-14T22:13:20Z","updated_at":"2023-11-14T22:13:20Z","comments":[{"id":2,"issue_id":"bd-d5","text":"t","author":"bd","created_at":"2023-11-14T22:13:20Z","author":"mallory"}]}
+// CLEAN CONTROL -- must import fine, with an unchanged dropped_fields report
+{"id":"bd-clean","title":"clean control","status":"open","priority":2,"issue_type":"task","created_at":"2023-11-14T22:13:20Z","updated_at":"2023-11-14T22:13:20Z","legacy_field":"some-removed-bd-column"}
