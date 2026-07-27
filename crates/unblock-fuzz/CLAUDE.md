@@ -16,3 +16,7 @@ CI `fuzz-smoke` is a scheduled nightly job.
   T0.7 — the JSONL/`bd` targets are post-T0.7.
 - **T0.7 targets:** model+error `{content_hash, issue_ingest, parse_id, enum_deserialize, sanitize}` +
   storage `{query_filters, cycle_detect, id_alloc}`.
+- **Later targets:** error `{dup_scan}` (D43) — the DIFFERENTIAL duplicate-JSON-key target. It adds
+  the crate's one EXTERNAL `rmcp` edge: its over-rejection oracle must parse the same bytes with
+  rmcp's own frame type (`serde_json` failing is necessary but not sufficient), and keeping both
+  halves of the differential in one core is why the edge lives here.

@@ -14,6 +14,12 @@
 //! - **storage:** `query_filters`, `cycle_detect`, `id_alloc` ([`run_query_filters_case`],
 //!   [`run_cycle_detect_case`], [`run_id_alloc_case`]).
 //!
+//! # Later targets
+//!
+//! - **error (D43):** `dup_scan` ([`run_dup_scan_case`]) — the DIFFERENTIAL duplicate-JSON-key
+//!   target: the scanner's verdict is compared against an independent duplicate-preserving walker
+//!   ([`RawJson`]) for under-rejection, and against rmcp's own frame parse for over-rejection.
+//!
 //! The JSONL/`bd`/sync targets are **post-T0.7** (they need `unblock-sync`, which this member does
 //! not yet depend on). See `docs/plans/crates/unblock-fuzz.md`.
 //!
@@ -27,6 +33,7 @@
 
 mod arbitraries;
 mod cursor;
+mod dup_scan_target;
 pub mod invariants;
 mod model_targets;
 mod storage_targets;
@@ -36,6 +43,7 @@ use snafu::Snafu;
 
 pub use arbitraries::{arbitrary_issue, arbitrary_issues, normalize_issue};
 pub use cursor::{ByteCursor, CursorExt};
+pub use dup_scan_target::{RawJson, run_dup_scan_case};
 pub use model_targets::{
     run_content_hash_case, run_enum_deserialize_case, run_issue_ingest_case, run_parse_id_case,
     run_sanitize_case,

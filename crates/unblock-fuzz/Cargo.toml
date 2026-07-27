@@ -20,6 +20,14 @@ unblock-model = { workspace = true }
 unblock-error = { workspace = true }
 unblock-storage = { workspace = true, features = ["testkit"] }
 
+# D43 — REQUIRED by the `dup_scan` differential core, not incidental. Its over-rejection oracle must
+# parse the SAME bytes with rmcp's own `RxJsonRpcMessage<RoleServer>`: `serde_json` failing is
+# necessary but NOT sufficient, because the scanner has to be judged against the parser the frame is
+# actually routed through. Keeping BOTH halves of the differential in one `run_<t>_case` core is why
+# this edge lives here rather than being split into a test in another crate. `rmcp` is EXTERNAL, so
+# the NFR-15 layering check (which constrains internal workspace edges only) does not see it.
+rmcp = { workspace = true }
+
 # Drives the async `Storage` trait from the sync target entrypoint via a per-case current-thread
 # runtime (`tokio_block_on`, OQ-1 RESOLVED). `features = ["full"]` via the workspace dep — libsql's
 # async needs more than `["rt", "macros"]`, so the member escalates to the workspace tokio
@@ -29,6 +37,9 @@ tokio = { workspace = true }
 tempfile = { workspace = true }
 # JSON parse/serialize for the content_hash transport round-trips + issue_ingest.
 serde_json = { workspace = true }
+# The hand-written duplicate-preserving `RawJson` deserializer the D43 differential core compares
+# against (it cannot be `serde_json::Value` — a `Map` collapses exactly the input under test).
+serde = { workspace = true }
 # Timestamps for the arbitrary issue/dependency builders.
 chrono = { workspace = true }
 # Local `FuzzError` enum (workspace convention; `?`-friendly From conversions).
