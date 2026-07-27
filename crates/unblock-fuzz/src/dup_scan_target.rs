@@ -54,6 +54,22 @@ pub enum RawJson {
 }
 
 impl RawJson {
+    /// Every value stored under `name` at the ROOT of this document, in source order.
+    ///
+    /// Plural because duplicates survive here: a document with two `params` members yields both, and
+    /// the scanner scans both (the fail-closed direction), so the oracle must consider both too.
+    #[must_use]
+    pub fn members_named(&self, name: &str) -> Vec<&RawJson> {
+        match self {
+            Self::Object(members) => members
+                .iter()
+                .filter(|(key, _)| key == name)
+                .map(|(_, value)| value)
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// Does any object in this document carry two members with the same decoded name?
     #[must_use]
     pub fn has_duplicate_member(&self) -> bool {
@@ -157,8 +173,9 @@ impl<'de> Visitor<'de> for RawJsonVisitor {
 /// 3. if the document does NOT parse, the verdict is never `Clean` (fail-closed);
 /// 4. `Indeterminate` implies rmcp's OWN `RxJsonRpcMessage<RoleServer>` parse of the same bytes also
 ///    fails — the scanner is never stricter than the parser the frame is routed through;
-/// 5. the MCP scan root (`params`) is total on the same bytes, and its verdict can only be `Clean`
-///    where the whole-document verdict is (the sub-tree is a subset of the document).
+/// 5. the MCP scan root (`params`) is total, and — when the document parses — its verdict matches
+///    the walker **on that subtree**. It is deliberately NOT coupled to the whole-document verdict:
+///    see the comment at the assertion, and the counter-example this target found.
 ///
 /// # Errors
 ///
@@ -217,15 +234,47 @@ pub fn run_dup_scan_case(data: &[u8]) -> Result<(), FuzzError> {
         );
     }
 
-    // (5) the MCP scan root is total, and never MORE permissive than the whole-document root for
-    //     the same bytes (a subtree cannot contain a duplicate the whole document does not).
+    // (5) the MCP scan root, judged against the walker on the SAME subtree.
+    //
+    // ⚠️ It is judged against the WALKER, not against the whole-document verdict, and that is not a
+    // detail. The obvious-looking invariant "a duplicate inside `params` implies a duplicate of the
+    // whole document" is **FALSE**, and this target found the counter-example within 60 seconds: the
+    // two roots do not examine the same bytes. The whole-document scan must DECODE every string it
+    // walks, so a frame carrying invalid UTF-8 in, say, `method` makes it INDETERMINATE — while the
+    // `params` scan skips that member with `IgnoredAny` (which does not validate UTF-8) and reaches
+    // a real duplicate inside `params`. Neither verdict implies the other; only the walker can
+    // adjudicate, one subtree at a time.
+    //
+    // The divergence is harmless in production for the reason the whole design turns on: such a
+    // frame fails rmcp's own parse too, so it is answered `-32700` and never reaches `call_tool`.
     let params_verdict = scan(data, &["params"]);
-    if matches!(params_verdict, DupScan::Duplicate { .. }) {
-        assert!(
-            matches!(verdict, DupScan::Duplicate { .. }),
-            "a duplicate inside `params` must also be a duplicate of the whole document"
-        );
+    if let Ok(document) = serde_json::from_slice::<RawJson>(body) {
+        // Every occurrence, because the scanner scans every occurrence of a repeated root key.
+        let subtrees = document.members_named("params");
+        let expected = subtrees
+            .iter()
+            .any(|subtree| subtree.has_duplicate_member());
+        match &params_verdict {
+            DupScan::Duplicate { .. } => assert!(
+                expected,
+                "OVER-REJECTION at the `params` root: the scanner reported a duplicate the \
+                 independent walker does not see in that subtree"
+            ),
+            DupScan::Clean => assert!(
+                !expected,
+                "UNDER-REJECTION at the `params` root: the walker sees a duplicate inside `params` \
+                 that the scanner reported CLEAN — this is the MCP security failure"
+            ),
+            DupScan::Indeterminate => panic!(
+                "the document parses cleanly, so the `params` verdict must be decidable, not \
+                 INDETERMINATE"
+            ),
+        }
     }
+    // When the document does NOT parse, no sound claim couples the two roots: the `params` scan may
+    // legitimately be decisive on a subtree whose siblings are garbage. Totality is the only
+    // property left, and reaching this line is what asserts it. Fail-open is not a risk there —
+    // a document the walker cannot parse is one rmcp cannot parse either, so it never executes.
 
     Ok(())
 }
