@@ -273,6 +273,10 @@ jobs:
           toolchain: 1.96.0
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - run: cargo xtask doc-lint
+      # D43 zero-live-hits: no doc may still claim the argument boundary is safe without naming the
+      # duplicate-key scan, and no doc may still frame that class as open. A predicate, not a count —
+      # it also self-tests that every allow-list entry still matches something.
+      - run: scripts/checks/d43-argument-boundary-claims.sh
       # k1..k6: .knowledge structural lint — SEPARATE corpus from the 19-file normative lint (ci-cd §2.3)
       - run: cargo xtask knowledge-lint
       # Executable proof of the shared gate predicate — every rule arm, exits 0/1/2.

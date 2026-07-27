@@ -30,7 +30,13 @@
 //!
 //! `dropped_fields` = unknown TOP-LEVEL keys, via [`map_bd_record`] diffing the raw JSON keys against
 //! the known `Issue`/`Dependency`/`Comment` key set BEFORE `from_value::<Issue>` (serde silently
-//! discards unknowns — neither struct sets `deny_unknown_fields`). **bd ids are preserved verbatim**
+//! discards unknowns — neither struct sets `deny_unknown_fields`). **⚠️ "Before `from_value`" is NOT
+//! "before the collapse" (D43):** the line has already been parsed to a `Value` by then, and a
+//! `serde_json::Map` merges a DUPLICATED key last-wins during that parse — so `dropped_fields` can
+//! never surface one, by construction. That is why the duplicate-key scan runs at the LINE PARSE in
+//! [`read_bd_records`], on the exact bytes `from_str` is about to see, rejecting with
+//! [`SyncError::DuplicateKey`] or (fail-closed) [`SyncError::IndeterminateLine`].
+//! **bd ids are preserved verbatim**
 //! (no remap/reject; `content_hash` excludes `id`, so preserving is idempotency-safe;
 //! [`SyncError::PrefixMismatch`] stays a reserved v1 seam — remap is deferred to v1.1).
 //!
