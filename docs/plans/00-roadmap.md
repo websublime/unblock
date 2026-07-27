@@ -86,6 +86,15 @@ own repo plus the one release-pipeline gap never exercised end-to-end:
   Closing those three required making the parser FENCE-AWARE, which in turn added a FIFTH `create_bulk`
   rejection — an **unterminated code fence** — that, alone among them, rejects documents **GA v1.0.0
   ACCEPTED**: a ratified behavioural break in a patch release (PRD D42 clause 4(iii)).
+- **Duplicate-JSON-key defect class** (P0, PRD §4 **D43**) — a SEPARATE root cause from D42, also
+  found by dogfooding, and the more dangerous of the two: a duplicated key inside a request was
+  collapsed LAST-WINS while the frame was decoded, so a frame whose TEXT read as one action
+  EXECUTED a different one, with `isError:false`. The live repro tombstoned a real issue. It has
+  **two instances**: the MCP `tools/call` `params` subtree (the WHOLE request, `_meta` included —
+  not `arguments` alone) and the `sync{action:"import_bd"}` line parse, where a duplicated
+  `id`/`status` imported a different record than the file's text stated. D42 could not have caught
+  it: `deny_unknown_fields` operates on the parsed object, and the collapse happens while that
+  object is BUILT — which is why D42 correctly carved it out rather than claiming it closed.
 - **Missing forward-migration for the comments schema** (P1) — the D37 comments tables need a forward migration
   so long-lived DBs (not just fresh-created ones) pick up the schema and a comment is **durably stored** there
   too (the D-feedback "editing an applied migration drifts long-lived DBs" lesson — ship a *forward* migration,
@@ -101,19 +110,19 @@ added or re-tiered, and the v1.2+ resequence below is untouched. But **D42 spans
 `unblock-mcp`** (the argument seam, the `call_tool` quota chokepoint, the `create_bulk` parser) and **L2
 `unblock-storage`** (the `dependencies` INSERT now binds `metadata`/`thread_id`); `unblock-cli` and
 `unblock-sync` gain tests only, and **`unblock-engine` (L5) is deliberately NOT touched** — the related
-`issue create {deps:[…]}` non-atomicity is a pre-existing GA defect tracked separately. It carries an
+`issue create {deps:[…]}` non-atomicity is a pre-existing GA defect tracked separately. **D43 spans THREE crates and, unlike D42, `unblock-sync` gains CODE and not only tests:** `unblock-mcp` (L7 — an owned scanning transport + the single gate), `unblock-error` (L0 — the shared scanner and the shared attacker-echo bound) and `unblock-sync` (L3 — the `bd` line parse); `unblock-cli` gains wire tests only and `unblock-engine` is again untouched. It carries an
 **additive `contract_version` bump to `unblock.mcp.v1.6`** (D35 permits additive `.M` bumps inside 1.x,
-so this stays v1.0.1-eligible and is **not** a 2.0.0 event) with a `CONTRACT_HASH` re-pin. It **inverts a
+so this stays v1.0.1-eligible and is **not** a 2.0.0 event) with a `CONTRACT_HASH` re-pin. **D43 carries NO contract bump at all** — it mints no `ErrorCode` and moves no schema byte, so `unblock.mcp.v1.6` stands and `CONTRACT_HASH` is not re-pinned. It **inverts a
 shipped test that asserted a silent drop was correct** — `unknown_sections_ignored` becomes
-`unknown_section_rejected`. And it **newly rejects SIX previously-accepted input classes**: (1) an unknown or
+`unknown_section_rejected`. And it **newly rejects SEVEN previously-accepted input classes**: (1) an unknown or
 misspelled **tool argument** on any of the 8 tools; (2) an **unrecognized (or empty) `### ` markdown section**
 in `issue create_bulk`; (3) an **invalid `### Priority` value** (previously silently defaulted to P2); (4) a
 **`### ` section before the first `## ` heading** (previously consumed and discarded); (5) a `tools/call` whose
 **whole `params`** — now including `_meta` — exceeds the NFR-18 per-request cap, or that carries an object
-**key** longer than `max_string_len`; and (6) an **UNTERMINATED code fence** in `issue create_bulk`. Classes
+**key** longer than `max_string_len`; (6) an **UNTERMINATED code fence** in `issue create_bulk`; and **(7) a `tools/call` (or a `bd` import line) carrying a DUPLICATE JSON KEY anywhere inside `params` (`_meta` included), at any depth (D43)**. Classes
 (1)–(4) reject only input that was previously DESTROYED IN SILENCE, so they are 1.x bug fixes. **Class (6) is
 not**: GA's parser had no fence tracking at all, so it ACCEPTED such documents — this one is a genuine
-behavioural break shipping in a PATCH release, ratified and stated plainly at PRD D42 clause 4(iii). It also strengthens AC-level wording on existing must-FRs where a
+behavioural break shipping in a PATCH release, ratified and stated plainly at PRD D42 clause 4(iii). **Class (7) files with the BUG FIXES, not with (6):** it rejects input GA EXECUTED WITH THE WRONG SEMANTICS — the frame said create and deleted — which is not something a consumer could deliberately rely on, so converting it into a loud in-band rejection is a fix within 1.x. It also strengthens AC-level wording on existing must-FRs where a
 shipped AC was unmet (FR-20, FR-12, NFR-18). **It adds no public API surface.**
 
 ---
@@ -476,7 +485,7 @@ Legend: ● lands · ◐ extended/hardened · ✗ = dropped · blank = not landi
 | Cooperative shutdown (FR-17) | ● | | | | | | | |
 | Swarm coordination / scheduler (FR-18) | | | ● diagnostics | | ◐ actor attribution | | ◐ active + v2 | |
 | Workflow gates (FR-19) | | | ● | ◐ milestone-close gate (candidate) | | | | |
-| MCP stdio server (FR-20) | ● | ◐ argument-boundary defect class (D42 — L7 seam + L2 dep fields; additive contract bump `v1.5`→`v1.6`) | ◐ surface | ◐ planning tool | ◐ sync resources | | ◐ batch/stream | ◐ other transports (unscheduled) |
+| MCP stdio server (FR-20) | ● | ◐ argument-boundary defect class (D42 — L7 seam + L2 dep fields; additive contract bump `v1.5`→`v1.6`) + duplicate-key rejection (D43 — an owned scanning transport; NO contract bump) | ◐ surface | ◐ planning tool | ◐ sync resources | | ◐ batch/stream | ◐ other transports (unscheduled) |
 | Saved queries (FR-21) | | | ● | | | | | |
 | Audit / flight recorder (FR-22) | | | ● | | ◐ actor conventions | | | |
 | Shell completions (FR-23) | | | ● | | | | | |
@@ -532,7 +541,7 @@ Notes:
   then the 12-crate set is unchanged.
 - **`v1.0.1`** is the maintenance-patch column (§1, PRD §4 D41 + **D42**): `unblock-storage` ● carries the
   comments forward-migration **and the D42 `dependencies` 7-column bind (`metadata`/`thread_id`)**,
-  `unblock-mcp` ◐ the D42 argument-boundary error-channel + strict-args fix + the three `create_bulk`
+  `unblock-mcp` ◐ the D43 duplicate-key scanning transport + the D42 argument-boundary error-channel + strict-args fix + the three `create_bulk`
   rejections, `unblock-cli` ◐ the end-to-end `unblock update` smoke **plus the D42 wire-level error-channel
   matrix (tests only)**, `unblock-sync` tests only. **`unblock-engine` is NOT touched.** It adds no FR and
   re-tiers nothing — hence the sparse column.

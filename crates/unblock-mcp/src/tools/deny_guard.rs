@@ -28,6 +28,22 @@
 //!
 //! A missing attribute on ANY container in this table turns its REJECT case RED. That is the
 //! observable both-directions property the mutation table exercises, one row per container.
+//!
+//! # What these cases do NOT model — and why a duplicate-key case here is FORBIDDEN as evidence
+//!
+//! Every case below drives `serde_json::from_str::<T>` on a **string**. Production never does that:
+//! it reaches `T` from an **already-parsed** `JsonObject` that rmcp built while decoding the frame,
+//! downstream of the transport. For unknown-field denial the two are equivalent, which is what makes
+//! this file valid evidence for D42.
+//!
+//! For a DUPLICATE JSON KEY they are **not** equivalent, and the difference is the whole defect: the
+//! collapse happens while the `Map` is BUILT, so a case written here would exercise a `from_str` this
+//! seam never performs and would pass or fail for a reason unrelated to production. Such a case is
+//! therefore forbidden as evidence. The duplicate-key regression lives where the bytes are — at the
+//! wire (`crates/unblock-cli/tests/duplicate_key_frames.rs`) and at the duplex verdict level
+//! (`crates/unblock-mcp/tests/duplicate_key_duplex.rs`) — under D43. This is a sibling caveat to the
+//! "a static grep cannot decide the deny property" argument above: the wrong harness is as vacuous
+//! as the wrong technique.
 
 #![cfg(test)]
 

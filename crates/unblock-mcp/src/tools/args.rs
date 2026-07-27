@@ -38,6 +38,28 @@
 //! The documented fallback, if a future review rejects the shadowing, is
 //! `#[tool(input_schema = …)]` with a freely-named extractor — it works, but it duplicates the
 //! schema expression at 8 sites with no compiler coupling.
+//!
+//! # What this seam CANNOT see (D43)
+//!
+//! *(Unrelated to the sentence just above about `#[tool(input_schema = …)]` "duplicating" a schema
+//! expression — that is a different word wearing the same letters. This section is about DUPLICATE
+//! JSON KEYS.)*
+//!
+//! [`Parameters::from_context_part`] takes `context.arguments` — a `serde_json::Map` **rmcp already
+//! built** inside `from_slice::<ClientJsonRpcMessage>` while decoding the frame. A duplicated JSON
+//! key is collapsed **last-wins** at that build, so the shadowed member is destroyed *before this
+//! type exists*: neither the extractor, nor [`parse_args`], nor `#[serde(deny_unknown_fields)]` can
+//! ever observe it. **No fix can live here.**
+//!
+//! Detection therefore lives in the scanning transport (`crates/unblock-mcp/src/wire.rs`), which
+//! owns the read framing, and arrives as a verdict on `RequestContext.extensions`. The gate is
+//! `crate::server::frame_scan_gate`, and **an ABSENT verdict rejects** — an empty `Extensions` is
+//! the default state, so the opposite encoding would fail OPEN.
+//!
+//! **Do NOT use rmcp's `Extension<T>` extractor to read it.** Its absent arm is
+//! `ErrorData::invalid_params(format!("missing extension {}", type_name::<T>()), None)` ⇒ a
+//! **`-32602`** — exactly the out-of-band arm this whole seam exists to keep shut, and the one
+//! `crates/unblock-cli/tests/error_channel.rs` pins closed. Read `context.extensions` directly.
 
 use std::borrow::Cow;
 use std::fmt::Write as _;

@@ -407,6 +407,7 @@
         <p class="desc">Orthogonal to the resequence — the dogfood-found defect set (widened by D42, the MCP argument-boundary class) + the one never-run GA validation.</p>
         <ul>
           <li>Fix: MCP argument boundary (D42) — errors escaped the structured channel; unknown fields were silently dropped; the per-request quota missed anything under an unknown key</li>
+          <li>Fix: DUPLICATE JSON keys (D43) — a duplicated key collapsed last-wins while the frame was decoded, so a request whose text read as one action executed a different one; now rejected in-band, on the MCP <span class="mono">tools/call</span> path and on <span class="mono">bd</span> import lines</li>
           <li>Fix: <span class="mono">create_bulk</span> silent markdown drops + <span class="mono">dep.metadata</span> discarded at L2</li>
           <li>Fix: no forward-migration for the comments schema (old DBs break)</li>
           <li>Run the end-to-end <span class="mono">unblock update</span> full-swap smoke (FR-25)</li>
