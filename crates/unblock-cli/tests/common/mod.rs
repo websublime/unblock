@@ -442,6 +442,55 @@ impl McpClient {
         self.request("tools/call", params)
     }
 
+    // -- D43 RAW-BYTES capability -------------------------------------------------------------
+    //
+    // Everything above round-trips through `serde_json::to_string(&Value)`, which builds a `Map`
+    // first and therefore **structurally cannot emit a duplicate key** — the one input the D43
+    // suite exists to test. `json!` cannot either. These four methods are the only way to put
+    // arbitrary bytes on the wire.
+
+    /// Allocate the next request id (the same counter the serde-built helpers use, so raw and
+    /// normal traffic can be interleaved on one connection).
+    pub fn next_request_id(&mut self) -> i64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
+    /// Write EXACT bytes plus a newline. NO serde on this path.
+    pub fn write_raw_line(&mut self, line: &str) {
+        let stdin = self.stdin.as_mut().expect("stdin still open");
+        stdin
+            .write_all(line.as_bytes())
+            .expect("write raw frame to child stdin");
+        stdin.write_all(b"\n").expect("write newline");
+        stdin.flush().expect("flush child stdin");
+    }
+
+    /// Write a raw frame and block for the response with `id`.
+    ///
+    /// Routes through the same `read_response`, so the NFR-14 "every stdout line is JSON" guard
+    /// still applies to whatever the server answers.
+    pub fn request_raw(&mut self, id: i64, raw: &str) -> Value {
+        self.write_raw_line(raw);
+        self.read_response(id)
+    }
+
+    /// Was a response with `id` ever seen on this connection?
+    ///
+    /// The deterministic, TIMEOUT-FREE probe for "no response at all": send the frame, then a
+    /// known-good SENTINEL request with a fresh id, read the sentinel's response, then ask this. No
+    /// sleeps, no threads, no flake.
+    #[must_use]
+    pub fn saw_response_for(&self, id: i64) -> bool {
+        self.seen_lines.iter().any(|line| {
+            serde_json::from_str::<Value>(line)
+                .ok()
+                .and_then(|value| value.get("id").and_then(Value::as_i64))
+                == Some(id)
+        })
+    }
+
     /// Call a tool, returning `(is_error, structured_content)`.
     pub fn call_tool(&mut self, name: &str, arguments: &Value) -> (bool, Value) {
         let resp = self.request("tools/call", &json!({"name": name, "arguments": arguments}));

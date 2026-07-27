@@ -106,9 +106,9 @@ pub const CELLS: &[FlipCell] = &[
     FlipCell {
         id: "T5 sync{export->import}",
         tool: "sync",
-        arguments_text: r#"{"action":"export","path":"dup-key-cell.jsonl","action":"import"}"#,
-        shown: r#"{"action":"export","path":"dup-key-cell.jsonl"}"#,
-        hidden: r#"{"action":"import","path":"dup-key-cell.jsonl"}"#,
+        arguments_text: r#"{"action":"export","path":".unblock/dup-key-cell.jsonl","action":"import"}"#,
+        shown: r#"{"action":"export","path":".unblock/dup-key-cell.jsonl"}"#,
+        hidden: r#"{"action":"import","path":".unblock/dup-key-cell.jsonl"}"#,
         duplicated_key: "action",
         pointer: "/arguments",
         kind: FlipKind::TagFlip,
