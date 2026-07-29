@@ -445,10 +445,10 @@ async fn g3_every_published_union_arm_is_covered_or_explicitly_exempt() {
     /// so covering one arm per tool proves the mechanism; these are exempt because covering them
     /// adds fixtures without adding a distinct failure mode.
     const EXEMPT: &[&str] = &[
-        // `comment:list` and `comment:delete` are NOT here: cell T8's one-sided tag flip covers
-        // them (it reads as `list` and collapses into `delete`).
+        // `comment:list`/`comment:delete` and `defer:undefer`/`defer:defer` are NOT here: the two
+        // one-sided tag-flip cells cover them — T8 reads as `list` and collapses into `delete`,
+        // T9 reads as `undefer` and collapses into `defer`.
         "comment:update",
-        "defer:undefer",
         "dep:list",
         "dep:tree",
         "dep:cycles",

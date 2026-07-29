@@ -446,20 +446,38 @@ pub(crate) fn indeterminate_frame_error() -> StructuredError {
 /// **OPEN**. It mirrors the stance already written for the quota preflight: an un-measurable
 /// request is rejected, because the untrusted-input boundary must never fail open.
 ///
-/// It carries a `hint` like its two siblings: the hint is one of only two signals that survive a
-/// flattening MCP client (the D42 analysis), and this is the one rejection a caller cannot act on
-/// by editing its request — so saying WHOSE fault it is, is the only useful thing to say.
+/// **It carries NO `hint`, unlike its two siblings — they are a DIFFERENT code class.** Both of
+/// those emit [`ErrorCode::ValidationFailed`], whose advertised `hint_shape` is `ContextualText`;
+/// this one emits [`ErrorCode::InternalError`], whose advertised shape is `HintShape::None`
+/// ("no production site attaches a hint to this code"). The spine's **Honesty rule (NORMATIVE,
+/// §2.2)** lets a code move off `None` only when a real production hint site ships in the SAME
+/// change — so shipping a hint here without moving the shape would falsify the taxonomy this
+/// server machine-publishes in `capabilities().error_codes` and freezes under `CONTRACT_HASH`
+/// (moving that shape is a GA-frozen contract change, D35, not this fix's to make).
+///
+/// The diagnostic is therefore carried in `context` instead, losing nothing: `context` is a
+/// free-form `serde_json::Map` (spine §2.4) that no descriptor hashes. It still says WHOSE fault it
+/// is, which is the only useful thing to say about the one rejection a caller cannot act on by
+/// editing its request.
+///
+/// The same rule is already applied verbatim one crate-module over, at
+/// `crate::server::rate_limited_error` ("Attaches NO `hint` — the code's `hint_shape` is `None` …
+/// so a hint here would break that taxonomy"). This is that precedent, not an exception to it.
 pub(crate) fn unscanned_frame_error() -> StructuredError {
     StructuredError::from_code(
         ErrorCode::InternalError,
         "tool arguments were not scanned for wire ambiguity; refusing to execute",
     )
-    .with_hint(
-        "this is a SERVER-side wiring fault, not a malformed request: the frame reached the tool \
-         boundary without passing the duplicate-key scan, and an unscanned frame is refused rather \
-         than trusted. Resending the same request will not help — report it against the server.",
-    )
     .with_context("kind", serde_json::json!("unscanned_frame"))
+    .with_context(
+        "diagnostic",
+        serde_json::json!(
+            "this is a SERVER-side wiring fault, not a malformed request: the frame reached the \
+             tool boundary without passing the duplicate-key scan, and an unscanned frame is \
+             refused rather than trusted. Resending the same request will not help — report it \
+             against the server."
+        ),
+    )
 }
 
 /// Deserialize the raw arguments into `T`, mapping any failure to the in-band structured error.
