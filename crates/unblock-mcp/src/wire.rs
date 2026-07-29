@@ -416,9 +416,14 @@ mod tests {
         // -- the four entries that actually EXERCISE the forked compatibility filter --------------
         //
         // Each one FAILS the typed parse, which is the only way into the filter. Without them the
-        // ~56 forked lines below `should_ignore_notification` run zero times in this suite. They
-        // are chosen so that EACH ARM is separately load-bearing: F15 dies if arm 1 is inverted,
-        // F17 dies if arm 2 is neutered, F16 dies if either over-ignores.
+        // ~56 forked lines below `should_ignore_notification` run zero times in this suite.
+        //
+        // What the CORPUS pins, exactly: F17 dies if arm 2 is neutered, and F16 dies if either arm
+        // over-ignores. It does NOT see an arm-1 INVERSION: that makes F15 gain a -32700 and F16
+        // lose one, and the two replies are byte-identical at the same stream position, so the
+        // written bytes still match rmcp's and the differential stays green. Arm 1 is pinned
+        // instead by the in-module cell `the_compatibility_filter_is_entered_and_discriminates`,
+        // which asserts each frame's verdict directly rather than through the reply stream.
         //
         // F14 — an unknown notification whose `params` are a SCALAR: `CustomNotification` flattens
         // `_meta` out of `params` and so requires a map. Ignored, NOT -32700.

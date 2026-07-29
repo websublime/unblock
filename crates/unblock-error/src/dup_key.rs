@@ -900,12 +900,14 @@ mod tests {
             );
             // THE INSTRUMENT ITSELF, pinned — the budget above cannot do it. That budget is also
             // satisfied by a counter MOVED OUT of `ObjectKey::eq` to the probe's call site (one
-            // plausible refactor), which records exactly 1.0 comparisons per decoded key, passes
-            // every existing cell, and re-creates the very vacuity this counter exists to kill —
-            // it stays green even compounded with a pairwise container, which then reads ~k/2
-            // instead of ~k²/2. A real hash probe compares FEWER keys than it decodes (measured:
-            // ~0.1 per key), so strict inequality separates a probe-work counter from a
-            // decode-work one.
+            // plausible refactor), which records exactly 1.0 comparisons per decoded key and
+            // re-creates the very vacuity this counter exists to kill: before the assertion below
+            // it passed every cell, INCLUDING when compounded with a pairwise container — the
+            // relocated counter reads ~k (one per decoded key) whatever the container does, so the
+            // budget above sees k, not ~k²/2, and never fires. A real hash probe compares FEWER
+            // keys than it decodes (measured: ~0.1 per key), so strict inequality separates a
+            // probe-work counter from a decode-work one and kills both the relocation alone and
+            // the compounded case.
             assert!(
                 stats.key_comparisons < stats.keys_examined,
                 "{label}: the counter must measure PROBE work, not DECODE work — {} comparisons \
