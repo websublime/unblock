@@ -31,7 +31,7 @@ mod common;
 
 use common::{McpClient, Workspace};
 use serde_json::{Value, json};
-use unblock_mcp::duplicate_key_corpus::{CELLS, instantiate, raw_tools_call};
+use unblock_mcp::duplicate_key_corpus::{CELLS, instantiate, parses_as_tool_input, raw_tools_call};
 
 /// Spawn an initialized MCP child over a fresh workspace.
 fn client(ws: &Workspace) -> McpClient {
@@ -185,11 +185,16 @@ fn every_corpus_cell_is_rejected_in_band_with_zero_effect() {
     }
 }
 
-/// **The ACCEPT half.** Every cell's SHOWN arm, with the duplicate deleted, must EXECUTE.
+/// **The ACCEPT half.** With the duplicate deleted, the frame must stop being refused AS A
+/// DUPLICATE — and, for every cell whose shown arm is schema-clean, it must EXECUTE.
 ///
 /// Without it a rejection cell can pass for the wrong reason — a renamed field, a changed tag, or a
 /// scanner that simply refuses everything — and the reject half proves nothing. This is the same
 /// discipline the D42 deny-guard states for its own cases.
+///
+/// The ONE-SIDED cell (T8) cannot execute its shown arm by construction — that arm is the one the
+/// published schema rejects — so it takes the second branch, which is a real assertion rather than
+/// a skip: the refusal must change REASON once the duplicate is gone.
 #[test]
 fn the_shown_arm_of_every_cell_still_executes_when_the_duplicate_is_removed() {
     for cell in CELLS {
@@ -216,12 +221,35 @@ fn the_shown_arm_of_every_cell_still_executes_when_the_duplicate_is_removed() {
             "{}: the accept half must not fault: {resp}",
             cell.id
         );
-        assert_ne!(
-            resp["result"]["isError"], true,
-            "{}: the SHOWN arm must EXECUTE once the duplicate is removed — otherwise the reject \
-             half above proves nothing about duplicates: {resp}",
-            cell.id
-        );
+
+        // Which assertion applies is DERIVED from the live schema, never hand-listed: a cell whose
+        // shown arm the schema accepts must execute; a one-sided cell's shown arm cannot.
+        let shown_value: Value = serde_json::from_str(&arguments)
+            .unwrap_or_else(|e| panic!("{}: the accept half must be valid JSON: {e}", cell.id));
+        if parses_as_tool_input(cell.tool, &shown_value).is_ok() {
+            assert_ne!(
+                resp["result"]["isError"], true,
+                "{}: the SHOWN arm must EXECUTE once the duplicate is removed — otherwise the \
+                 reject half above proves nothing about duplicates: {resp}",
+                cell.id
+            );
+        } else {
+            // The one-sided cell. Its shown arm is refused by the schema, so what must be proved is
+            // that the DUPLICATE was the reject half's reason: with the duplicate removed, the same
+            // frame must no longer come back as `duplicate_key`.
+            assert_eq!(
+                resp["result"]["isError"], true,
+                "{}: this cell's SHOWN arm is not schema-clean, so it must be refused — if it now \
+                 executes, the corpus flag is stale: {resp}",
+                cell.id
+            );
+            assert_ne!(
+                resp["result"]["structuredContent"]["context"]["kind"], "duplicate_key",
+                "{}: with the duplicate REMOVED the refusal must change reason; still \
+                 `duplicate_key` means the reject half never depended on the duplicate: {resp}",
+                cell.id
+            );
+        }
     }
 }
 

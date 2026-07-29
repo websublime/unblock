@@ -31,11 +31,16 @@
 //! byte-different spans — and every hand-written test still passes against it. Keys are therefore
 //! compared **DECODED**.
 //!
-//! Per-object detection uses a pooled `HashSet<String>` of decoded keys — O(k) per object with
-//! exact string equality, so there is no hash-collision arm and no probabilistic verdict.
+//! Per-object detection uses a pooled `HashSet` of decoded keys — O(k) per object with exact
+//! string equality, so there is no hash-collision arm and no probabilistic verdict. The set's
+//! element type ([`ObjectKey`]) counts the key comparisons its own `PartialEq` performs, which is
+//! what makes the complexity-shape unit cell a real guard rather than a tautology (see
+//! [`ScanStats`]).
 
+use std::cell::Cell;
 use std::collections::HashSet;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 
 use serde::de::{self, DeserializeSeed, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
 
@@ -127,23 +132,82 @@ pub fn scan(bytes: &[u8], at: &[&str]) -> DupScan {
 /// Work counters recorded by one [`scan`], for complexity-shape assertions.
 ///
 /// Crate-internal: the public contract is the verdict, not the counters. They exist so the unit
-/// suite can assert the scan's complexity CLASS deterministically (no wall-clock bench): a
-/// regression from the pooled `HashSet` (O(k) per object) to a pairwise comparison (O(k²)) is
-/// observable as a non-linear `keys_examined` ratio across two frame sizes.
+/// suite can assert the scan's complexity CLASS deterministically (no wall-clock bench).
+///
+/// **Which counter carries that claim matters.** [`ScanStats::keys_examined`] cannot: it is
+/// incremented once per key DECODED, *before* the membership probe, so it equals the key count
+/// under ANY membership algorithm — a regression from the pooled `HashSet` (O(1) comparisons per
+/// probe) to a pairwise scan (O(k) per probe) leaves it byte-for-byte identical. The complexity
+/// claim therefore rides [`ScanStats::key_comparisons`], which counts the key EQUALITY comparisons
+/// the probes actually perform ([`ObjectKey`]'s `PartialEq`, i.e. inside the probe rather than at
+/// its call site), so a pairwise regression shows up as O(k²) comparison work and fails the cell.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[allow(
     dead_code,
     reason = "the counters are read by the complexity-shape unit cells in this module"
 )]
 pub(crate) struct ScanStats {
-    /// Object keys decoded and looked up (the per-key comparison-work counter).
+    /// Object keys DECODED — one per `next_key`, counted before the membership probe. A pure
+    /// measure of the INPUT: it is `k` under any algorithm and says nothing about probe work.
     pub(crate) keys_examined: usize,
+    /// Key EQUALITY comparisons performed inside the per-object membership probes and inserts.
+    /// THIS is the complexity-shape counter (see the type doc).
+    pub(crate) key_comparisons: usize,
     /// Object frames entered.
     pub(crate) objects_examined: usize,
     /// The deepest container nesting reached inside the scan root.
     pub(crate) max_depth: usize,
     /// Input bytes the parser consumed (BOM excluded). Never exceeds the input length.
     pub(crate) bytes_examined: usize,
+}
+
+thread_local! {
+    /// Every key equality comparison [`ObjectKey`] has performed on this thread.
+    ///
+    /// `PartialEq::eq` cannot reach the active [`ScanState`], so the count rides a thread-local and
+    /// [`scan_with_stats`] records the DELTA across one scan — a delta rather than a reset, so a
+    /// nested or interleaved scan on the same thread cannot corrupt an outer one's reading.
+    static KEY_COMPARISONS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// The running per-thread key-comparison count.
+fn key_comparisons() -> usize {
+    KEY_COMPARISONS.with(Cell::get)
+}
+
+/// A decoded object key whose EQUALITY COMPARISONS ARE COUNTED.
+///
+/// The newtype exists for exactly one reason: it makes the complexity-shape guard real. A hash-set
+/// probe compares a bounded number of keys per lookup and a linear scan compares O(k) — and **no
+/// counter incremented at the call site can tell those apart**, because both perform exactly one
+/// probe per decoded key. Counting inside `eq` measures the work the probe itself does, so
+/// swapping the pooled `HashSet` for a pairwise container turns the unit cell RED instead of
+/// leaving it vacuously green.
+struct ObjectKey(String);
+
+impl ObjectKey {
+    /// Unwrap the decoded key (used on the short-circuit path, for the verdict and the pointer).
+    fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl PartialEq for ObjectKey {
+    fn eq(&self, other: &Self) -> bool {
+        KEY_COMPARISONS.with(|count| count.set(count.get().saturating_add(1)));
+        self.0 == other.0
+    }
+}
+
+impl Eq for ObjectKey {}
+
+/// Delegated to the inner `String`, by hand: DERIVING `Hash` beside a manual `PartialEq` is the
+/// `derived_hash_with_manual_eq` defect — the two must stay consistent by construction, because
+/// `HashSet` relies on `a == b ⇒ hash(a) == hash(b)`.
+impl Hash for ObjectKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
 }
 
 /// One RFC 6901 pointer segment on the path from the scan root to a duplicate's container.
@@ -168,7 +232,7 @@ struct ScanState {
     /// from a genuine parse failure.
     found: Option<Found>,
     /// Reused per-object key sets — one allocation amortised across every object in the document.
-    pool: Vec<HashSet<String>>,
+    pool: Vec<HashSet<ObjectKey>>,
     /// The current container nesting depth inside the scan root.
     depth: usize,
     /// Work counters.
@@ -426,11 +490,14 @@ impl<'de> Visitor<'de> for ScanVisitor<'_> {
             };
             let Some(key) = next else { break };
             state.stats.keys_examined += 1;
+            // The comparisons this probe performs are counted INSIDE `ObjectKey::eq`, which is the
+            // only place that can distinguish an O(1) hash probe from an O(k) pairwise scan.
+            let key = ObjectKey(key);
 
             if seen.contains(&key) {
                 // THE defect: exact equality on the DECODED key — this is where `serde_json`'s own
                 // `Map::insert` would silently overwrite the earlier member.
-                state.record(key);
+                state.record(key.into_inner());
                 state.pool.push(seen);
                 return Err(de::Error::custom(SHORT_CIRCUIT));
             }
@@ -438,7 +505,7 @@ impl<'de> Visitor<'de> for ScanVisitor<'_> {
             // Descend BEFORE inserting so `key` is still owned here and can be attached to the
             // pointer if the duplicate turns out to be nested inside this member's value.
             if let Err(err) = map.next_value_seed(ScanSeed { state: &mut *state }) {
-                state.push_segment(Segment::Key(key));
+                state.push_segment(Segment::Key(key.into_inner()));
                 state.pool.push(seen);
                 return Err(err);
             }
@@ -456,6 +523,7 @@ pub(crate) fn scan_with_stats(bytes: &[u8], at: &[&str]) -> (DupScan, ScanStats)
     // Exactly one BOM, prefix only — so the scanner and the downstream parser see the SAME document.
     let body = bytes.strip_prefix(UTF8_BOM.as_slice()).unwrap_or(bytes);
 
+    let comparisons_before = key_comparisons();
     let mut state = ScanState::new();
     let mut deserializer = serde_json::Deserializer::from_slice(body);
     let mut outcome = PathSeed {
@@ -471,6 +539,9 @@ pub(crate) fn scan_with_stats(bytes: &[u8], at: &[&str]) -> (DupScan, ScanStats)
     }
 
     let mut counters = state.stats;
+    // The DELTA over this scan (see `KEY_COMPARISONS`): saturating, because the running per-thread
+    // total is itself saturating and a saturated total would otherwise underflow the subtraction.
+    counters.key_comparisons = key_comparisons().saturating_sub(comparisons_before);
     let verdict = match outcome {
         Ok(()) => {
             counters.bytes_examined = body.len();
@@ -790,40 +861,82 @@ mod tests {
         value.to_string()
     }
 
+    /// A comparison budget per decoded key. A pooled `HashSet` spends O(1) comparisons per probe
+    /// (empirically well under one, since a probe only compares on a control-byte match); this
+    /// leaves generous room for that while sitting three orders of magnitude below the ~k²/2 a
+    /// pairwise container would spend.
+    const COMPARISONS_PER_KEY_CEILING: usize = 4;
+
     #[test]
-    fn key_comparison_work_is_linear_not_quadratic() {
-        // `bytes_examined <= frame_len` alone does NOT bound comparison work: a regression from the
-        // pooled `HashSet` (O(k)) to a pairwise scan (O(k^2)) leaves the byte count unchanged. So
-        // compare the per-key counter across two frame sizes and assert the RATIO stays linear.
+    fn key_membership_work_is_linear_not_quadratic() {
+        // WHICH COUNTER IS ASSERTED IS THE WHOLE CELL. `keys_examined` is incremented once per key
+        // DECODED, before the probe, so it equals k under any algorithm — asserting a linear ratio
+        // on it is true by construction and a `HashSet` -> `Vec` regression stays green. The real
+        // guard is `key_comparisons`, counted inside `ObjectKey::eq` (i.e. inside the probe).
         let small = stats_for_distinct_keys(10_000);
         let large = stats_for_distinct_keys(20_000);
-        assert_eq!(small.keys_examined, 10_000);
-        assert_eq!(large.keys_examined, 20_000);
+        assert_eq!(small.keys_examined, 10_000, "sanity: every key is decoded");
+        assert_eq!(large.keys_examined, 20_000, "sanity: every key is decoded");
+
+        // A pairwise regression spends ~k²/2 comparisons — 5.0e7 and 2.0e8 at these two sizes,
+        // against ceilings of 4.0e4 and 8.0e4. The arm dies by three orders of magnitude, not by a
+        // tuned constant. A ratio between the two sizes is deliberately NOT asserted: with a hash
+        // set the absolute counts are small and driven by 7-bit control-byte collisions, so their
+        // ratio is noise, while the per-key BUDGET below is exactly the linear/quadratic
+        // discriminator.
+        for (label, stats) in [("10k", small), ("20k", large)] {
+            assert!(
+                stats.key_comparisons <= COMPARISONS_PER_KEY_CEILING * stats.keys_examined,
+                "{label}: membership work must be LINEAR in the key count — {} comparisons for {} \
+                 keys exceeds the {COMPARISONS_PER_KEY_CEILING}x budget (a pairwise scan would \
+                 spend ~{})",
+                stats.key_comparisons,
+                stats.keys_examined,
+                stats.keys_examined * stats.keys_examined / 2
+            );
+        }
+    }
+
+    #[test]
+    fn the_comparison_counter_is_wired_to_the_probe() {
+        // NON-VACUITY for the budget above: a counter stuck at zero satisfies any linear bound. A
+        // duplicate can only be detected BY a successful comparison, so this scan must record one.
+        let (verdict, stats) = scan_with_stats(br#"{"params":{"a":1,"a":2}}"#, PARAMS);
+        assert!(matches!(verdict, DupScan::Duplicate { .. }));
         assert!(
-            large.keys_examined <= small.keys_examined * 3,
-            "doubling the key count must roughly DOUBLE the comparison work (O(k)), not \
-             quadruple it (O(k^2)); observed {} vs {}",
-            large.keys_examined,
-            small.keys_examined
+            stats.key_comparisons >= 1,
+            "detecting a duplicate REQUIRES comparing the two keys, so the counter cannot be 0: \
+             {stats:?}"
         );
     }
 
     #[test]
-    fn bytes_examined_never_exceeds_the_frame_length() {
+    fn bytes_examined_tracks_the_parse_and_short_circuits_at_the_first_duplicate() {
         let clean = frame(r#"{"name":"issue","arguments":{"action":"list"}}"#);
         let (verdict, stats) = scan_with_stats(clean.as_bytes(), PARAMS);
         assert_eq!(verdict, DupScan::Clean);
         assert_eq!(stats.bytes_examined, clean.len());
 
-        // A 100 KiB pad AHEAD of the duplicate. The scan short-circuits at the second occurrence,
-        // so it examines no more bytes than the frame carries.
+        // A 100 KiB pad AFTER the duplicate. Asserting `bytes_examined <= frame_len` here would be
+        // TAUTOLOGICAL — the recording site clamps the error column with `.min(body.len())` — so
+        // the real property is asserted instead: the scan stops AT the second `a`, before the pad,
+        // rather than tokenizing the rest of the document.
         let pad = "x".repeat(100 * 1024);
-        let padded = frame(&format!(r#"{{"pad":"{pad}","a":1,"a":2}}"#));
+        let padded = frame(&format!(r#"{{"a":1,"a":2,"pad":"{pad}"}}"#));
+        let up_to_the_pad = frame(r#"{"a":1,"a":2,"pad":""}"#);
+        assert_eq!(
+            padded.len(),
+            up_to_the_pad.len() + pad.len(),
+            "the two frames must differ ONLY by the pad, else the bound below is arbitrary"
+        );
+
         let (verdict, stats) = scan_with_stats(padded.as_bytes(), PARAMS);
         assert!(matches!(verdict, DupScan::Duplicate { .. }));
         assert!(
-            stats.bytes_examined <= padded.len(),
-            "examined {} of {} bytes",
+            stats.bytes_examined <= up_to_the_pad.len(),
+            "the scan must SHORT-CIRCUIT at the duplicate (byte {}), not read the 100 KiB pad \
+             behind it: examined {} of {} bytes",
+            up_to_the_pad.len(),
             stats.bytes_examined,
             padded.len()
         );
