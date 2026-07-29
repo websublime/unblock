@@ -83,7 +83,9 @@ pub struct FlipCell {
 /// five tagged tools DO carry a both-arms-clean tag flip.)
 ///
 /// A **ONE-SIDED** tag flip is constructible for them, and it is the dangerous half — the arm that
-/// EXECUTES is the schema-clean one — so it is covered too, by cell `T8` below.
+/// EXECUTES is the schema-clean one — so BOTH are covered too, one cell each: `comment` by `T8`
+/// and `defer` by `T9` below. (An earlier revision claimed the pair was covered while only
+/// `comment` had a cell; `defer`'s flip was equally constructible and had none.)
 pub const CELLS: &[FlipCell] = &[
     // -- §4.1 tag flips ---------------------------------------------------------------------
     FlipCell {
@@ -186,6 +188,24 @@ pub const CELLS: &[FlipCell] = &[
         arguments_text: r#"{"action":"list","comment_id":1,"action":"delete"}"#,
         shown: r#"{"action":"list","comment_id":1}"#,
         hidden: r#"{"action":"delete","comment_id":1}"#,
+        duplicated_key: "action",
+        pointer: "/arguments",
+        kind: FlipKind::TagFlip,
+        both_arms_schema_clean: false,
+        shown_arm_mutates: false,
+    },
+    // `defer`'s one-sided tag flip — the second tool the type-level note names, and equally
+    // constructible: the text reads as an `undefer` (clearing a defer) while `serde_json` BUILDS a
+    // `defer` that hides the issue until the year 2999. The `until` member is what makes it
+    // one-sided: it is REQUIRED by the executing arm and UNKNOWN to the shown one, which
+    // `deny_unknown_fields` (D42) refuses. Without this cell the class was covered by `comment`
+    // alone while the prose claimed both.
+    FlipCell {
+        id: "T9 defer{undefer->defer, one-sided}",
+        tool: "defer",
+        arguments_text: r#"{"action":"undefer","id":"{ID}","until":"2999-12-31T23:59:59Z","action":"defer"}"#,
+        shown: r#"{"action":"undefer","id":"{ID}","until":"2999-12-31T23:59:59Z"}"#,
+        hidden: r#"{"action":"defer","id":"{ID}","until":"2999-12-31T23:59:59Z"}"#,
         duplicated_key: "action",
         pointer: "/arguments",
         kind: FlipKind::TagFlip,

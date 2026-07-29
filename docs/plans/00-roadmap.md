@@ -122,8 +122,10 @@ in `issue create_bulk`; (3) an **invalid `### Priority` value** (previously sile
 **key** longer than `max_string_len`; (6) an **UNTERMINATED code fence** in `issue create_bulk`; and **(7) a `tools/call` (or a `bd` import line) carrying a DUPLICATE JSON KEY anywhere inside `params` (`_meta` included), at any depth (D43)**. Classes
 (1)–(4) reject only input that was previously DESTROYED IN SILENCE, so they are 1.x bug fixes. **Class (6) is
 not**: GA's parser had no fence tracking at all, so it ACCEPTED such documents — this one is a genuine
-behavioural break shipping in a PATCH release, ratified and stated plainly at PRD D42 clause 4(iii). **Class (7) files with the BUG FIXES, not with (6):** it rejects input GA EXECUTED WITH THE WRONG SEMANTICS — the frame said create and deleted — which is not something a consumer could deliberately rely on, so converting it into a loud in-band rejection is a fix within 1.x. It also strengthens AC-level wording on existing must-FRs where a
-shipped AC was unmet (FR-20, FR-12, NFR-18). **It adds no public API surface.**
+behavioural break shipping in a PATCH release, ratified and stated plainly at PRD D42 clause 4(iii). **Class (7) files with the BUG FIXES, not with (6):** it rejects input GA EXECUTED WITH THE WRONG SEMANTICS — the frame said create and deleted — which is not something a consumer could deliberately rely on, so converting it into a loud in-band rejection is a fix within 1.x. **D42 also strengthens AC-level wording on existing must-FRs where a
+shipped AC was unmet (FR-20, FR-12, NFR-18), and D43 strengthens that same wording at FR-20 and NFR-18** — FR-12 is D42's alone, since only D42 moves `contract_version`. **Neither adds outward
+surface:** no new tool, command, `ErrorCode` or schema field (D43's new items — the shared `dup_key` scanner and the shared flip corpus — are workspace-internal, and the `unblock-*` crates are
+not published).
 
 ---
 

@@ -48,9 +48,12 @@
 //! `AsyncRwTransport::new_server` AND to [`DupScanningTransport`], asserting identical `receive()`
 //! sequences and identical bytes written — but a corpus of frames that all parse cleanly executes
 //! ZERO of the forked filter lines and stays green with the whole branch deleted. The corpus
-//! therefore carries entries that FAIL the typed parse (F14/F15/F16), and
-//! `the_compatibility_filter_is_entered_and_discriminates` pins the filter's arms directly. Those
-//! two together are what stands between an rmcp bump and a silent framing divergence.
+//! therefore carries entries that FAIL the typed parse — F15 (the id-less non-standard-method arm),
+//! F17 (the `notifications/*`-prefix arm, reachable ONLY with an `id` present) and F14/F16 (the
+//! ignored and not-ignored sides) — and `the_compatibility_filter_is_entered_and_discriminates`
+//! drives those same arms directly. Those two together are what stands between an rmcp bump and a
+//! silent framing divergence; neither alone suffices, because each covers a mutation the other
+//! survives.
 //!
 //! The WRITE half does not fork anything: it encodes through rmcp's own public
 //! [`JsonRpcMessageCodec`], so the emitted bytes are identical by construction rather than by test.
@@ -410,10 +413,12 @@ mod tests {
         bom_note
             .extend_from_slice(br#"{"jsonrpc":"2.0","method":"notifications/foo","params":{}}"#);
         corpus.push(bom_note);
-        // -- the three entries that actually EXERCISE the forked compatibility filter -------------
+        // -- the four entries that actually EXERCISE the forked compatibility filter --------------
         //
         // Each one FAILS the typed parse, which is the only way into the filter. Without them the
-        // ~56 forked lines below `should_ignore_notification` run zero times in this suite.
+        // ~56 forked lines below `should_ignore_notification` run zero times in this suite. They
+        // are chosen so that EACH ARM is separately load-bearing: F15 dies if arm 1 is inverted,
+        // F17 dies if arm 2 is neutered, F16 dies if either over-ignores.
         //
         // F14 — an unknown notification whose `params` are a SCALAR: `CustomNotification` flattens
         // `_meta` out of `params` and so requires a map. Ignored, NOT -32700.
@@ -425,6 +430,13 @@ mod tests {
         // F16 — the OVER-ignoring direction: a STANDARD notification with unusable `params` must
         // still be a -32700, not a silent drop. Both arms must decline it.
         corpus.push(br#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":5}"#.to_vec());
+        // F17 — ignored ONLY by the filter's SECOND arm: it carries an `id`, so the first arm
+        // declines it (it is not a notification), and only the `notifications/*`-prefix arm can
+        // ignore it. rmcp ignores it, so we must too. WITHOUT this entry arm 2 is dead code under
+        // test — replacing its whole `matches!` with `false` leaves the suite green while the fork
+        // silently answers -32700 to a frame rmcp drops.
+        corpus
+            .push(br#"{"jsonrpc":"2.0","id":17,"method":"notifications/foo","params":5}"#.to_vec());
         // F9 — an unknown method WITH an id: delivered (the handler answers -32601).
         corpus.push(br#"{"jsonrpc":"2.0","id":9,"method":"nope/nope","params":{}}"#.to_vec());
         // F10 — non-UTF-8 bytes: -32700 + recovery.
@@ -499,8 +511,10 @@ mod tests {
     ///
     /// Feed ONE byte corpus to rmcp's `AsyncRwTransport` and to our `DupScanningTransport` and
     /// assert identical `receive()` sequences AND identical bytes written (the `-32700` replies,
-    /// with the id OMITTED, and recovery on the next line). This is the only thing standing between
-    /// an rmcp bump and a silent framing divergence.
+    /// with the id OMITTED, and recovery on the next line). This differential pin, TOGETHER WITH
+    /// the arm-by-arm cell below (`the_compatibility_filter_is_entered_and_discriminates`), is
+    /// what stands between an rmcp bump and a silent framing divergence — neither alone suffices,
+    /// which is the module doc's standing note at the top of this file.
     #[tokio::test]
     async fn cd7_framing_is_identical_to_rmcp_async_rw_transport() {
         let corpus = framing_corpus();
@@ -559,6 +573,11 @@ mod tests {
     /// well-formed `params` object included — never fails it. A suite without frames of this shape
     /// leaves `should_ignore_notification`, `is_standard_method` and `is_standard_notification`
     /// executing zero times, and stays green with `Ok(None)` replaced by `unreachable!()`.
+    ///
+    /// "Arm by arm" is meant literally, and each arm has its own killer frame: F15 is ignored ONLY
+    /// by the first arm (no `id` + a non-standard method) and F17 ONLY by the second (the
+    /// `notifications/*` prefix, reachable only once an `id` has taken the first arm out of play),
+    /// so neutering either arm alone turns this cell RED.
     #[test]
     fn the_compatibility_filter_is_entered_and_discriminates() {
         fn parse(line: &[u8]) -> Result<Option<RxJsonRpcMessage<RoleServer>>, serde_json::Error> {
@@ -603,11 +622,28 @@ mod tests {
             "a malformed STANDARD notification must not be silently swallowed"
         );
 
-        // A REQUEST is never filtered: it carries an `id`, so the first arm declines it, and a
-        // swallowed request would leave the client waiting on a response that never comes.
+        // F17 — filtered by the SECOND arm alone, and the ONLY frame here that is. It carries an
+        // `id`, so `is_notification` is false and the first arm declines it; only the
+        // `notifications/*`-prefix arm can ignore it. That rmcp swallows an ID-CARRYING frame at
+        // all is rmcp's behaviour, not ours — the fork must reproduce it, so this is the cell that
+        // dies when arm 2 is neutered.
+        assert!(
+            matches!(
+                parse(br#"{"jsonrpc":"2.0","id":17,"method":"notifications/foo","params":5}"#),
+                Ok(None)
+            ),
+            "an id-carrying `notifications/*` frame rmcp cannot type must be IGNORED exactly as \
+             rmcp ignores it — answering -32700 here is a framing divergence"
+        );
+
+        // A request OUTSIDE the `notifications/` prefix is never filtered: the `id` makes the first
+        // arm decline it and the prefix test makes the second decline it too, so it surfaces as
+        // -32700 rather than leaving the client waiting on a response that never comes. (F17 above
+        // is the deliberate exception rmcp itself defines, and only inside that prefix.)
         assert!(
             parse(br#"{"jsonrpc":"2.0","id":1,"method":"nope/nope","params":5}"#).is_err(),
-            "a request must never be ignored — the client is waiting on its id"
+            "a request outside `notifications/*` must never be ignored — the client is waiting on \
+             its id"
         );
     }
 

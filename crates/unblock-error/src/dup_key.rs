@@ -885,6 +885,10 @@ mod tests {
         // ratio is noise, while the per-key BUDGET below is exactly the linear/quadratic
         // discriminator.
         for (label, stats) in [("10k", small), ("20k", large)] {
+            // ORDER MATTERS: the ALGORITHM bound is asserted first, so a pairwise regression is
+            // reported as the quadratic blow-up it is. The INSTRUMENT bound below sits inside this
+            // one, and reversing them would make every quadratic failure print the instrument's
+            // diagnosis instead of the real cause.
             assert!(
                 stats.key_comparisons <= COMPARISONS_PER_KEY_CEILING * stats.keys_examined,
                 "{label}: membership work must be LINEAR in the key count — {} comparisons for {} \
@@ -893,6 +897,23 @@ mod tests {
                 stats.key_comparisons,
                 stats.keys_examined,
                 stats.keys_examined * stats.keys_examined / 2
+            );
+            // THE INSTRUMENT ITSELF, pinned — the budget above cannot do it. That budget is also
+            // satisfied by a counter MOVED OUT of `ObjectKey::eq` to the probe's call site (one
+            // plausible refactor), which records exactly 1.0 comparisons per decoded key, passes
+            // every existing cell, and re-creates the very vacuity this counter exists to kill —
+            // it stays green even compounded with a pairwise container, which then reads ~k/2
+            // instead of ~k²/2. A real hash probe compares FEWER keys than it decodes (measured:
+            // ~0.1 per key), so strict inequality separates a probe-work counter from a
+            // decode-work one.
+            assert!(
+                stats.key_comparisons < stats.keys_examined,
+                "{label}: the counter must measure PROBE work, not DECODE work — {} comparisons \
+                 for {} decoded keys is at least one per key, which is what counting at the \
+                 probe's CALL SITE (instead of inside `ObjectKey::eq`) produces; a hash probe \
+                 compares fewer keys than it decodes",
+                stats.key_comparisons,
+                stats.keys_examined
             );
         }
     }
