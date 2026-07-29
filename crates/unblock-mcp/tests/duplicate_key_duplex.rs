@@ -306,6 +306,21 @@ async fn an_unscanned_path_is_rejected_fail_closed() {
         payload["retryable"], false,
         "an un-scanned frame is not a transient condition: {payload}"
     );
+    // The HINT-SHAPE honesty rule, pinned on the producer (spine §2.4). `INTERNAL_ERROR` advertises
+    // `hint_shape: "none"` in the capabilities error map, and that value is frozen in the contract
+    // snapshot — so this site must attach NO `hint`. Nothing else observes it: the contract suite
+    // compares the descriptor to the const fn and never sees a produced payload, so without these
+    // two lines a hint could be re-added here and no test would notice.
+    assert!(
+        payload["hint"].is_null(),
+        "INTERNAL_ERROR advertises hint_shape `none`; attaching a hint here breaks the taxonomy \
+         it publishes on the wire: {payload}"
+    );
+    assert!(
+        payload["context"]["diagnostic"].is_string(),
+        "the wiring diagnostic must survive on the free-form `context` (which is not hashed), \
+         not be dropped along with the hint: {payload}"
+    );
 
     // The effect oracle, read over the SCANNED connection: the create must NOT have run.
     let after = scanned
