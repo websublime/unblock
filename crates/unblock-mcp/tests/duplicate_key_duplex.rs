@@ -377,6 +377,26 @@ fn g1_every_cell_is_a_real_schema_clean_flip() {
                  UNRELATED reason and the cell proves nothing about D43. Got {hidden_parses:?}",
                 cell.id
             );
+        } else {
+            // THE `false` BRANCH IS LIVE TOO. A flag nothing checks is a flag that silently
+            // switches the assertions above off, so a cell claiming "not both arms are clean" has
+            // to really be that shape: the SHOWN arm rejected by the published schema, and the
+            // HIDDEN one — the arm `serde_json` actually builds, and the only reason the cell is
+            // dangerous — accepted by it.
+            assert!(
+                shown_parses.is_err(),
+                "{}: the cell claims `both_arms_schema_clean: false`, but its SHOWN arm parses \
+                 fine. If the HIDDEN arm parses too, flip the flag to `true` (and get the stronger \
+                 guard); if the HIDDEN arm is the broken one, the cell's collapse cannot execute \
+                 and it demonstrates nothing.",
+                cell.id
+            );
+            assert!(
+                hidden_parses.is_ok(),
+                "{}: a ONE-SIDED flip is only harmful when what serde BUILDS runs — the HIDDEN arm \
+                 must be schema-clean. Got {hidden_parses:?}",
+                cell.id
+            );
         }
     }
 }
@@ -425,9 +445,9 @@ async fn g3_every_published_union_arm_is_covered_or_explicitly_exempt() {
     /// so covering one arm per tool proves the mechanism; these are exempt because covering them
     /// adds fixtures without adding a distinct failure mode.
     const EXEMPT: &[&str] = &[
-        "comment:list",
+        // `comment:list` and `comment:delete` are NOT here: cell T8's one-sided tag flip covers
+        // them (it reads as `list` and collapses into `delete`).
         "comment:update",
-        "comment:delete",
         "defer:undefer",
         "dep:list",
         "dep:tree",

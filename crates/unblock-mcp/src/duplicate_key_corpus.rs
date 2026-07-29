@@ -58,9 +58,12 @@ pub struct FlipCell {
     pub kind: FlipKind,
     /// Whether BOTH arms deserialize cleanly against the tool's published input type.
     ///
-    /// Asserted against reality by the non-vacuity guard, so it cannot silently rot: a cell claiming
-    /// `true` whose hidden arm stops parsing (a schema change) turns the guard RED instead of
-    /// quietly degrading into "the duplicate was rejected for an unrelated reason".
+    /// Asserted against reality by the non-vacuity guard, so it cannot silently rot — in BOTH
+    /// directions: a cell claiming `true` whose hidden arm stops parsing (a schema change) turns
+    /// the guard RED instead of quietly degrading into "the duplicate was rejected for an
+    /// unrelated reason", and a cell claiming `false` must really have a SHOWN arm the schema
+    /// rejects and a HIDDEN arm it accepts (a `false` that nothing checks would be a flag that
+    /// silently switches the guard off).
     pub both_arms_schema_clean: bool,
     /// Whether the SHOWN arm mutates the store (drives which control assertions a suite runs).
     pub shown_arm_mutates: bool,
@@ -68,15 +71,19 @@ pub struct FlipCell {
 
 /// The corpus.
 ///
-/// # Coverage note — `comment` and `defer` carry NO schema-clean TAG flip
+/// # Coverage note — `comment` and `defer` carry no BOTH-ARMS-schema-clean TAG flip
 ///
-/// A tag flip is only schema-clean when the two arms accept the SAME field set, because every input
-/// container carries `#[serde(deny_unknown_fields)]` (D42) and the flattened `Attribution` denies
-/// unknowns too. `comment`'s four arms are `add{issue_id,body}`, `list{issue_id}`,
-/// `update{comment_id,body}`, `delete{comment_id}` — no two accept the same fields. `defer`'s two
-/// arms differ by the required `until`. Those two tools are therefore covered by a
-/// [`FlipKind::FieldSubstitution`] cell, which is a real, schema-clean, harmful flip; the tag flip
-/// is UNCONSTRUCTIBLE for them, not omitted. (The other five tagged tools DO carry a tag flip.)
+/// A tag flip is only schema-clean **on both arms** when the two arms accept the SAME field set,
+/// because every input container carries `#[serde(deny_unknown_fields)]` (D42) and the flattened
+/// `Attribution` denies unknowns too. `comment`'s four arms are `add{issue_id,body}`,
+/// `list{issue_id}`, `update{comment_id,body}`, `delete{comment_id}` — no two accept the same
+/// fields. `defer`'s two arms differ by the required `until`. So for those two tools **no
+/// both-arms-schema-clean tag flip is constructible**, and they are covered by a
+/// [`FlipKind::FieldSubstitution`] cell, which is a real, schema-clean, harmful flip. (The other
+/// five tagged tools DO carry a both-arms-clean tag flip.)
+///
+/// A **ONE-SIDED** tag flip is constructible for them, and it is the dangerous half — the arm that
+/// EXECUTES is the schema-clean one — so it is covered too, by cell `T8` below.
 pub const CELLS: &[FlipCell] = &[
     // -- §4.1 tag flips ---------------------------------------------------------------------
     FlipCell {
@@ -163,6 +170,27 @@ pub const CELLS: &[FlipCell] = &[
         kind: FlipKind::FieldSubstitution,
         both_arms_schema_clean: true,
         shown_arm_mutates: true,
+    },
+    // -- a ONE-SIDED tag flip: only the HIDDEN (executing) arm is schema-clean -----------------
+    //
+    // The type-level note above says `comment` has no BOTH-arms-clean tag flip. It does have a
+    // one-sided one, and this is the harmful orientation: the text reads as a read-only `list`,
+    // while what `serde_json` BUILDS is a `delete` — an executing soft-redact.
+    //
+    // It also discriminates something no other cell does: WHERE the gate sits. The frame is
+    // refused before `parse_args` ever runs, so a gate moved after the parse would hand this
+    // (perfectly schema-clean) `delete` straight to the tool body.
+    FlipCell {
+        id: "T8 comment{list->delete, one-sided}",
+        tool: "comment",
+        arguments_text: r#"{"action":"list","comment_id":1,"action":"delete"}"#,
+        shown: r#"{"action":"list","comment_id":1}"#,
+        hidden: r#"{"action":"delete","comment_id":1}"#,
+        duplicated_key: "action",
+        pointer: "/arguments",
+        kind: FlipKind::TagFlip,
+        both_arms_schema_clean: false,
+        shown_arm_mutates: false,
     },
     // -- §4.2 `claim` (the 8th tool, non-union) ------------------------------------------------
     FlipCell {

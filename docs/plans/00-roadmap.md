@@ -110,11 +110,11 @@ added or re-tiered, and the v1.2+ resequence below is untouched. But **D42 spans
 `unblock-mcp`** (the argument seam, the `call_tool` quota chokepoint, the `create_bulk` parser) and **L2
 `unblock-storage`** (the `dependencies` INSERT now binds `metadata`/`thread_id`); `unblock-cli` and
 `unblock-sync` gain tests only, and **`unblock-engine` (L5) is deliberately NOT touched** — the related
-`issue create {deps:[…]}` non-atomicity is a pre-existing GA defect tracked separately. **D43 spans THREE crates and, unlike D42, `unblock-sync` gains CODE and not only tests:** `unblock-mcp` (L7 — an owned scanning transport + the single gate), `unblock-error` (L0 — the shared scanner and the shared attacker-echo bound) and `unblock-sync` (L3 — the `bd` line parse); `unblock-cli` gains wire tests only and `unblock-engine` is again untouched. It carries an
+`issue create {deps:[…]}` non-atomicity is a pre-existing GA defect tracked separately. **D43 spans THREE crates and, unlike D42, `unblock-sync` gains CODE and not only tests:** `unblock-mcp` (L7 — an owned scanning transport + the single gate), `unblock-error` (L0 — the shared scanner and the shared attacker-echo bound) and `unblock-sync` (L3 — the `bd` line parse); `unblock-cli` gains wire tests only and `unblock-engine` is again untouched. D42 carries an
 **additive `contract_version` bump to `unblock.mcp.v1.6`** (D35 permits additive `.M` bumps inside 1.x,
-so this stays v1.0.1-eligible and is **not** a 2.0.0 event) with a `CONTRACT_HASH` re-pin. **D43 carries NO contract bump at all** — it mints no `ErrorCode` and moves no schema byte, so `unblock.mcp.v1.6` stands and `CONTRACT_HASH` is not re-pinned. It **inverts a
+so this stays v1.0.1-eligible and is **not** a 2.0.0 event) with a `CONTRACT_HASH` re-pin. **D43 carries NO contract bump at all** — it mints no `ErrorCode` and moves no schema byte, so `unblock.mcp.v1.6` stands and `CONTRACT_HASH` is not re-pinned. D42 also **inverts a
 shipped test that asserted a silent drop was correct** — `unknown_sections_ignored` becomes
-`unknown_section_rejected`. And it **newly rejects SEVEN previously-accepted input classes**: (1) an unknown or
+`unknown_section_rejected`. And together they **newly reject SEVEN previously-accepted input classes**: (1) an unknown or
 misspelled **tool argument** on any of the 8 tools; (2) an **unrecognized (or empty) `### ` markdown section**
 in `issue create_bulk`; (3) an **invalid `### Priority` value** (previously silently defaulted to P2); (4) a
 **`### ` section before the first `## ` heading** (previously consumed and discarded); (5) a `tools/call` whose

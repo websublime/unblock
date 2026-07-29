@@ -34,12 +34,23 @@
 //! `AsyncRwTransport`'s framing helpers (`try_parse_with_compatibility`, `should_ignore_notification`,
 //! `is_standard_method`, `is_standard_notification`, `without_carriage_return`) are all PRIVATE to
 //! rmcp's `transport::async_rw` module, so reproducing the read contract means re-implementing them.
-//! Dropping the compatibility filter would make us answer `-32700` to an unknown client
-//! *notification* — a JSON-RPC violation and an interop regression. The fork is pinned by the
-//! **differential harness** at the bottom of this file (the CD-6 assumption-pin pattern): one byte
-//! corpus is fed to `AsyncRwTransport::new_server` AND to [`DupScanningTransport`], asserting
-//! identical `receive()` sequences and identical bytes written. That pin is the only thing standing
-//! between an rmcp bump and a silent framing divergence.
+//!
+//! **The compatibility filter runs only AFTER the typed parse has already failed** (the mechanism
+//! stated at [`should_ignore_notification`]). So it is *not* what makes an unknown notification
+//! work: a `notifications/whatever` frame with a well-formed `params` object is accepted by rmcp's
+//! own catch-all `CustomNotification` and DELIVERED, never reaching the filter. What the filter
+//! governs is the narrower class rmcp cannot type at all — an LSP-style `$/cancelRequest`, or a
+//! `notifications/*` frame whose `params` are not an object. Dropping it would answer `-32700` to
+//! frames rmcp silently ignores: a JSON-RPC violation and an interop regression.
+//!
+//! That mechanism dictates how the fork must be pinned. The **differential harness** at the bottom
+//! of this file (the CD-6 assumption-pin pattern) feeds ONE byte corpus to
+//! `AsyncRwTransport::new_server` AND to [`DupScanningTransport`], asserting identical `receive()`
+//! sequences and identical bytes written — but a corpus of frames that all parse cleanly executes
+//! ZERO of the forked filter lines and stays green with the whole branch deleted. The corpus
+//! therefore carries entries that FAIL the typed parse (F14/F15/F16), and
+//! `the_compatibility_filter_is_entered_and_discriminates` pins the filter's arms directly. Those
+//! two together are what stands between an rmcp bump and a silent framing divergence.
 //!
 //! The WRITE half does not fork anything: it encodes through rmcp's own public
 //! [`JsonRpcMessageCodec`], so the emitted bytes are identical by construction rather than by test.
@@ -389,13 +400,31 @@ mod tests {
         corpus.push(Vec::new());
         // F6 — a whitespace-only line: NOT empty, so it parses and fails => -32700 + recovery.
         corpus.push(b"   ".to_vec());
-        // F8 — an unknown notification: silently ignored, NOT -32700.
+        // F8 — an unknown notification with a WELL-FORMED `params` object. It does NOT reach the
+        // compatibility filter: rmcp's catch-all `CustomNotification` types it, so the frame is
+        // DELIVERED (and the filter only runs on a typed-parse failure).
         corpus.push(br#"{"jsonrpc":"2.0","method":"notifications/foo","params":{}}"#.to_vec());
-        // F12 — a BOM-prefixed unknown notification: ignored identically to F8.
+        // F12 — the same frame BOM-prefixed: delivered identically to F8, which is what pins the
+        // BOM strip as happening before the typed parse.
         let mut bom_note = b"\xEF\xBB\xBF".to_vec();
         bom_note
             .extend_from_slice(br#"{"jsonrpc":"2.0","method":"notifications/foo","params":{}}"#);
         corpus.push(bom_note);
+        // -- the three entries that actually EXERCISE the forked compatibility filter -------------
+        //
+        // Each one FAILS the typed parse, which is the only way into the filter. Without them the
+        // ~56 forked lines below `should_ignore_notification` run zero times in this suite.
+        //
+        // F14 — an unknown notification whose `params` are a SCALAR: `CustomNotification` flattens
+        // `_meta` out of `params` and so requires a map. Ignored, NOT -32700.
+        corpus.push(br#"{"jsonrpc":"2.0","method":"notifications/foo","params":5}"#.to_vec());
+        // F15 — LSP-style traffic (`$/cancelRequest`), same scalar `params`. Ignored ONLY by the
+        // filter's first arm (no `id` + a non-standard method); its method does not start with
+        // `notifications/`, so the second arm would let it through as a -32700.
+        corpus.push(br#"{"jsonrpc":"2.0","method":"$/cancelRequest","params":5}"#.to_vec());
+        // F16 — the OVER-ignoring direction: a STANDARD notification with unusable `params` must
+        // still be a -32700, not a silent drop. Both arms must decline it.
+        corpus.push(br#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":5}"#.to_vec());
         // F9 — an unknown method WITH an id: delivered (the handler answers -32601).
         corpus.push(br#"{"jsonrpc":"2.0","id":9,"method":"nope/nope","params":{}}"#.to_vec());
         // F10 — non-UTF-8 bytes: -32700 + recovery.
@@ -519,6 +548,66 @@ mod tests {
         assert!(
             !String::from_utf8_lossy(&our_written).contains("\"id\":null"),
             "the -32700 reply must OMIT the id, not send a null one"
+        );
+    }
+
+    /// **The forked compatibility filter, pinned arm by arm.**
+    ///
+    /// The differential harness above proves our framing MATCHES rmcp's; this proves the forked
+    /// filter is REACHED and DISCRIMINATES. It is a separate cell because the filter runs only
+    /// after the typed parse fails, and ordinary traffic — an unknown notification with a
+    /// well-formed `params` object included — never fails it. A suite without frames of this shape
+    /// leaves `should_ignore_notification`, `is_standard_method` and `is_standard_notification`
+    /// executing zero times, and stays green with `Ok(None)` replaced by `unreachable!()`.
+    #[test]
+    fn the_compatibility_filter_is_entered_and_discriminates() {
+        fn parse(line: &[u8]) -> Result<Option<RxJsonRpcMessage<RoleServer>>, serde_json::Error> {
+            super::try_parse_with_compatibility::<RxJsonRpcMessage<RoleServer>>(line)
+        }
+
+        // NOT filtered: the typed parse SUCCEEDS (rmcp's catch-all `CustomNotification`), so the
+        // filter is never consulted and the frame is delivered. This is the F8/F12 corpus path,
+        // and the reason those two entries alone cannot cover the fork.
+        assert!(
+            matches!(
+                parse(br#"{"jsonrpc":"2.0","method":"notifications/foo","params":{}}"#),
+                Ok(Some(_))
+            ),
+            "an unknown notification with an object `params` is DELIVERED, not filtered"
+        );
+
+        // F14 — filtered: scalar `params` fails the typed parse; no `id` + a non-standard method.
+        assert!(
+            matches!(
+                parse(br#"{"jsonrpc":"2.0","method":"notifications/foo","params":5}"#),
+                Ok(None)
+            ),
+            "an unknown notification rmcp cannot type must be IGNORED, never answered -32700"
+        );
+
+        // F15 — filtered by the FIRST arm alone: `$/cancelRequest` does not start with
+        // `notifications/`, so the second arm declines it. This is the frame that dies if that arm
+        // is inverted.
+        assert!(
+            matches!(
+                parse(br#"{"jsonrpc":"2.0","method":"$/cancelRequest","params":5}"#),
+                Ok(None)
+            ),
+            "LSP-style client traffic must be IGNORED (rmcp does), not answered -32700"
+        );
+
+        // F16 — NOT filtered, the over-ignoring direction: a STANDARD notification with unusable
+        // `params` is a real client defect and must surface as -32700, not vanish.
+        assert!(
+            parse(br#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":5}"#).is_err(),
+            "a malformed STANDARD notification must not be silently swallowed"
+        );
+
+        // A REQUEST is never filtered: it carries an `id`, so the first arm declines it, and a
+        // swallowed request would leave the client waiting on a response that never comes.
+        assert!(
+            parse(br#"{"jsonrpc":"2.0","id":1,"method":"nope/nope","params":5}"#).is_err(),
+            "a request must never be ignored — the client is waiting on its id"
         );
     }
 
