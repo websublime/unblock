@@ -393,22 +393,37 @@ async fn self_dependency_still_wins_over_duplicate_on_the_create_path() {
 /// The returned issue carries its declared edge, anchored on the id the SERVER minted, with the
 /// declared `metadata` intact and the session actor stamped as `created_by`.
 ///
-/// MUTANT KILLED (the headline defect): an engine that leaves `Issue.dependencies` empty. The
-/// create then succeeds and returns an edgeless issue — precisely the GA behaviour, and precisely
-/// what `dependencies.len() == 1` refuses.
+/// MUTANT KILLED (the headline defect): an engine that leaves `Issue.dependencies` empty
+/// (`.take(0).collect()` at `crates/unblock-engine/src/session/write.rs:221`). The create then
+/// succeeds and returns an edgeless issue — precisely the GA behaviour, and precisely what
+/// `dependencies.len() == 1` refuses. Verified: applied, this cell went red.
 ///
-/// MUTANT KILLED (anchoring): an engine that stamps anything other than the minted id — an empty
-/// string via `unwrap_or_default`, or a value taken from the caller. The assertion
-/// `dependencies[0].issue_id == created.id` is the whole D44 anchoring contract in one line.
+/// MUTANT KILLED (metadata): a mapping that drops `NewDep.metadata` on the way to `Dependency`
+/// (`metadata: None` at `crates/unblock-engine/src/session/write.rs:218`). That loss is DOUBLY
+/// masked at L2 — a DEFAULT empty-object on write, a matching coercion on read — so nothing but an
+/// explicit round-trip assertion can see it, which is how the same class survived to GA once
+/// already. Verified: applied, this cell was the ONLY one of the nine here that went red.
 ///
-/// MUTANT KILLED (metadata): a mapping that drops `NewDep.metadata` on the way to `Dependency`.
-/// That loss is DOUBLY masked at L2 — a DEFAULT empty-object on write, a matching coercion on
-/// read — so nothing but an explicit round-trip assertion can see it, which is how the same class
-/// survived to GA once already.
+/// NO MUTANT KILLED (anchoring) — and this file previously claimed otherwise. The assertion
+/// `dependencies[0].issue_id == created.id` below CANNOT fail, for a structural reason: `created`
+/// is a RE-READ, and the re-read hydrates edges with
+/// `SELECT … FROM dependencies WHERE issue_id = ?1` bound to the issue's own id
+/// (`crates/unblock-storage/src/libsql/crud.rs:408`), then reads the `issue_id` column back off
+/// that very row. Every hydrated edge is therefore anchored on the issue that hydrated it BY
+/// CONSTRUCTION, whatever L5 or L2 stamped. Proven, not argued: all three anchoring mutants at
+/// `write.rs:213` (`String::new()`, `dep.depends_on_id.clone()`, a literal `"ub-not-me-1"`) leave
+/// this cell GREEN — each killed exactly one test workspace-wide, and it was
+/// [`the_engine_stamps_the_minted_id_and_the_session_actor_before_storage_sees_the_edges`], never
+/// this one. What survives here is the `len() == 1` half: it is a genuine end-to-end pin that the
+/// edge is REACHABLE under the minted id, which is why the assertion is kept — but it is not an
+/// anchoring pin, and calling it "the whole D44 anchoring contract in one line" was false.
 ///
-/// MUTANT KILLED (actor): leaving `created_by` unstamped. D44 moved that stamping from the L7
-/// adapter to L5, and an engine that forgot it would silently drop attribution the `dep` tool
-/// still records.
+/// NO MUTANT KILLED (actor) — likewise previously claimed here. `created_by: None` at
+/// `write.rs:217` leaves this cell GREEN, because L2 binds
+/// `dep.created_by.as_deref().unwrap_or(actor)` (`crud.rs:252`) and so supplies the very actor the
+/// engine omitted. Verified workspace-wide: that mutant killed exactly one test, the sibling cell
+/// named above. The `created_by == "tester"` assertion below pins the END-TO-END attribution
+/// (either layer may deliver it); the ENGINE's own stamp is pinned only by that sibling.
 #[tokio::test]
 async fn a_declared_edge_round_trips_anchored_on_the_minted_id() {
     let session = session().await;
@@ -430,7 +445,10 @@ async fn a_declared_edge_round_trips_anchored_on_the_minted_id() {
     let landed = &created.dependencies[0];
     assert_eq!(
         landed.issue_id, created.id,
-        "the edge is anchored on the MINTED id — never on anything a caller could choose"
+        "the edge came back REACHABLE under the minted id. NB this comparison is structurally \
+         unfailable on a re-read (hydration filters by `issue_id`, crud.rs:408) — the ENGINE's \
+         anchor is pinned by \
+         `the_engine_stamps_the_minted_id_and_the_session_actor_before_storage_sees_the_edges`"
     );
     assert_eq!(landed.depends_on_id, blocker.id);
     assert_eq!(landed.dep_type, DependencyType::Blocks);
@@ -443,7 +461,9 @@ async fn a_declared_edge_round_trips_anchored_on_the_minted_id() {
     assert_eq!(
         landed.created_by.as_deref(),
         Some("tester"),
-        "the engine stamps the SESSION actor when it seeds the edge (D44 moved this from L7)"
+        "the SESSION actor is attributed END-TO-END (D44 moved the stamp from L7 to L5). NB L2's \
+         `unwrap_or(actor)` fallback (crud.rs:252) also satisfies this, so it does NOT pin the \
+         engine's own stamp — that is the sibling cell's job"
     );
 
     // And it is DURABLE, not merely present on the returned object.
@@ -453,6 +473,125 @@ async fn a_declared_edge_round_trips_anchored_on_the_minted_id() {
         .expect("get")
         .expect("exists");
     assert_eq!(reread.dependencies, created.dependencies);
+}
+
+// ------------------------------------------------------------------------------------------------
+// (5b) THE STAMP ITSELF — observed at the layer that is normatively required to make it
+// ------------------------------------------------------------------------------------------------
+
+/// The `Issue` the ENGINE hands to `Storage::create_issue` already carries every declared edge
+/// anchored on the MINTED id and authored by the SESSION actor — before storage sees it.
+///
+/// # Why this cell is not redundant with the happy path above
+///
+/// Every other assertion in this file (and in `unblock-mcp/tests/dep_metadata.rs`) observes a
+/// PERSISTED, re-read edge, and the persisted edge cannot see layer 5's stamp at all, because layer
+/// 2 overwrites both fields on the way down:
+///   * `crates/unblock-storage/src/libsql/crud.rs:248` binds `issue.id` into `dependencies.issue_id`
+///     and never reads `dep.issue_id` — the engine's anchor is DISCARDED and silently replaced with
+///     the correct one;
+///   * `crud.rs:252` binds `dep.created_by.as_deref().unwrap_or(actor)` — an absent engine stamp
+///     falls back to the very actor the engine would have written.
+/// `Session::create_issue` then returns a re-read of that repaired row — and the re-read cannot
+/// expose a bad anchor even in principle, because it hydrates edges with
+/// `… FROM dependencies WHERE issue_id = ?1` bound to the issue's own id (`crud.rs:408`) and then
+/// reads the `issue_id` column back off that row, so a hydrated edge is anchored on its own issue BY
+/// CONSTRUCTION. So an engine that stamped an empty string, a foreign id, a literal wrong id, or no
+/// author at all produces byte-identical observable output. The guarantee would still hold in
+/// practice — but it would hold one layer BELOW where the spec places it, and the normative clause
+/// itself would be untested. Capturing the argument is the only vantage point that sees layer 5.
+///
+/// Each mutant below was applied to a pristine tree and run against the WHOLE workspace
+/// (`cargo test --workspace --all-targets --no-fail-fast`). Every one produced exactly the same
+/// result: `1539 passed; 1 failed`, and the single failure was THIS cell. That is the evidence for
+/// both halves of the claim — the mutant dies here, and it dies NOWHERE ELSE, which is precisely why
+/// the happy-path cell above no longer claims to catch it.
+///
+/// MUTANT KILLED (empty anchor): `issue_id: String::new()` at
+/// `crates/unblock-engine/src/session/write.rs:213` (the `unwrap_or_default` shape).
+///
+/// MUTANT KILLED (foreign anchor): `issue_id: dep.depends_on_id.clone()` at the same line — the edge
+/// anchored on its own target, which is the misattachment class D44 exists to make unrepresentable.
+///
+/// MUTANT KILLED (literal wrong anchor): `issue_id: "ub-not-me-1".to_string()` at the same line.
+///
+/// MUTANT KILLED (unstamped author): `created_by: None` at `write.rs:217`.
+///
+/// NOT COVERED HERE, stated so the next reader does not assume it: the `create_bulk` path stamps the
+/// same two fields at `write.rs:437`/`:441` (and `:453`/`:457` for resolved `dep_refs`). Those are a
+/// DIFFERENT clause with their own cells; no mutant of them was run for this test, so nothing in this
+/// comment should be read as covering them.
+#[tokio::test]
+async fn the_engine_stamps_the_minted_id_and_the_session_actor_before_storage_sees_the_edges() {
+    let (session, counting) = counting_session().await;
+
+    let mut targets = Vec::new();
+    for title in ["blocker one", "blocker two"] {
+        targets.push(session.create_issue(record(title)).await.expect("seed").id);
+    }
+
+    let created = session
+        .create_issue(NewIssue {
+            deps: vec![
+                edge(&targets[0], DependencyType::Blocks),
+                edge(&targets[1], DependencyType::WaitsFor),
+            ],
+            ..record("declares two edges")
+        })
+        .await
+        .expect("create with two declared edges");
+
+    let handed = counting
+        .captured_creates()
+        .pop()
+        .expect("the create reached storage");
+
+    // The chain the clause actually asserts: the id the CALLER is handed is the id on the row the
+    // ENGINE built, and that same id is the anchor the ENGINE put on every declared edge.
+    assert_eq!(
+        handed.id, created.id,
+        "the row handed to storage carries the id the caller is returned"
+    );
+    assert_eq!(
+        handed.dependencies.len(),
+        2,
+        "both declared edges were SEEDED onto the built issue — this cell is vacuous without them: \
+         {:?}",
+        handed.dependencies
+    );
+
+    for seeded in &handed.dependencies {
+        assert_eq!(
+            seeded.issue_id, created.id,
+            "the ENGINE anchors each declared edge on the MINTED id, before storage re-anchors it: \
+             {seeded:?}"
+        );
+        assert_eq!(
+            seeded.created_by.as_deref(),
+            Some("tester"),
+            "the ENGINE stamps the session actor as the edge author, before storage's `unwrap_or` \
+             fallback can supply it: {seeded:?}"
+        );
+        // The remaining two fields of the same spine clause. These are NOT masked by layer 2 (it
+        // binds them straight through), so they are pinned here only to cover the clause whole.
+        assert_eq!(
+            seeded.created_at, handed.created_at,
+            "the edge carries the create's OWN `now`, not a second clock read: {seeded:?}"
+        );
+        assert!(
+            seeded.thread_id.is_none(),
+            "a create-declared edge belongs to no comment thread: {seeded:?}"
+        );
+    }
+
+    // And the targets are the declared ones, in declaration order — so "anchored correctly" is not
+    // being satisfied by some degenerate seeding that lost the payload.
+    let landed_targets: Vec<&str> = handed
+        .dependencies
+        .iter()
+        .map(|d| d.depends_on_id.as_str())
+        .collect();
+    assert_eq!(landed_targets, vec![&targets[0], &targets[1]]);
 }
 
 // ------------------------------------------------------------------------------------------------

@@ -24,6 +24,10 @@
 #   R-n   REQUIRED landing — a site the cascade MUST have reached. A forbidden-thing REMOVAL is only
 #         proven when its replacement is pinned; without these the check passes vacuously on a tree
 #         where the retired sentences were simply deleted and nothing correct replaced them.
+#   RC-n  CONTRACT-VERSION landing — a site that PUBLISHES the contract id, pinned against the one
+#         knob below. Three predicate kinds (presence / EXCLUSIVE / row-anchored); see that table's
+#         own header for which file needs which, and for the three green gates the two doc-side rows
+#         were added to close.
 #
 # KNOWN LIMITATION, stated rather than hidden: docs/PRD.md §4 is ONE PHYSICAL LINE per decision row, so
 # a `D44` anywhere in the D42 row satisfies every `escape` family on that line. That is intended — a
@@ -43,6 +47,11 @@ SELF='scripts/checks/d44-create-deps-claims.sh'
 # The ONE knob in this file: the contract version D44 ships. Change it here and nowhere else if the
 # Decide phase settles on a different `.M`.
 CONTRACT_RE='unblock\.mcp\.v1\.7'
+
+# The FAMILY the knob belongs to — ANY published contract id, current or retired. This is not a second
+# copy of the knob: it is what makes an `EXCLUSIVE` row (below) able to say "no OTHER version literal
+# may appear here", which is the only shape that catches a STALE version rather than a MISSING one.
+CONTRACT_FAMILY_RE='unblock\.mcp\.v1\.[0-9]+'
 
 # =================================================================================================
 # FORBIDDEN FRAMING — `code@mode@regex@second`
@@ -170,10 +179,40 @@ R28@.unblock/issues.jsonl@ub-lp9\.25@the co-shipped dangling-blocker issue EXIST
 R29@crates/unblock-engine/tests/create_bulk.rs@D44@the bulk-create test file NAMES D44 — the SPELLING-INDEPENDENT pin (obligation 3 in the header above) over the one file where the retired D22 clause is dense and WRAPS across a line break; zero matches pre-D44, so it cannot pass vacuously
 "
 
-# Contract-version landings are separate only because they share one knob.
+# =================================================================================================
+# CONTRACT-VERSION LANDINGS — `code@path@selector@what it proves`
+#
+# Separate from REQUIRE only because every row shares one knob (`CONTRACT_RE`).
+#
+# The `selector` field chooses the PREDICATE, because "the contract id is current here" is three
+# different questions in three different kinds of file:
+#
+#   (empty)      PRESENCE — the file must name the current version somewhere. Correct where the file
+#                LEGITIMATELY also names retired ones: `options.rs` documents the whole bump chain in
+#                the const's doc-comment, so an exclusive rule would block on its own history.
+#
+#   EXCLUSIVE    NO OTHER version literal may appear in the file at all, and the current one must.
+#                For prose that makes PRESENT-TENSE claims to users and keeps no history: README.md
+#                says "the contract id is X" twice, and a stale X there is a published lie.
+#
+#   <regex>      ROW-ANCHORED — at least one line matches the regex, and EVERY line that matches it
+#                also names the current version. For a file whose DECLARING line sits among lines that
+#                legitimately name older versions: `docs/plans/crates/unblock-mcp.md` records the bump
+#                CHAIN inside its own CONTRACT_VERSION row, so only that row can be pinned, not the
+#                file.
+#
+# WHY README.md AND THE CRATE PLAN ARE HERE — the reason this table was extended rather than left at
+# its two code rows. Both files shipped this cascade still publishing `unblock.mcp.v1.6` while the code
+# emitted `v1.7`, and THREE green gates missed it: this check pinned only the two code files; the
+# doc-lint corpus is a fixed 19-file list that does not contain README.md at all
+# (xtask/src/doc_lint.rs:31); and neither doc-lint nor knowledge-lint has any rule class that fires on
+# a stale version literal. A version bump is a cascade like any other — every site that PUBLISHES the
+# id needs a named predicate, or the sites nobody re-greps rot silently.
 REQUIRE_CONTRACT="
-RC1@crates/unblock-mcp/src/options.rs@the CONTRACT_VERSION const moved (D44 changes DepInput's published shape)
-RC2@crates/unblock-mcp/tests/public_api.rs@the second, independent CONTRACT_VERSION pin moved with it
+RC1@crates/unblock-mcp/src/options.rs@@the CONTRACT_VERSION const moved (D44 changes DepInput's published shape); PRESENCE, because this const's doc-comment documents the whole retired bump chain
+RC2@crates/unblock-mcp/tests/public_api.rs@@the second, independent CONTRACT_VERSION pin moved with it
+RC3@README.md@EXCLUSIVE@the most user-facing document in the repo publishes the contract id twice (:197, :205) as a present-tense claim and keeps no bump history, so NO retired id may survive there
+RC4@docs/plans/crates/unblock-mcp.md@^\| .pub const CONTRACT_VERSION@the OWNING crate plan's CONTRACT_VERSION row DECLARES the current id (the PROCESS.md §3 decision-change checklist names the owning crate plan explicitly); row-anchored, because that row also records the bump chain, and the file names v1.7 elsewhere — so a file-level presence check would pass on the stale row
 "
 
 blocked=0
@@ -250,14 +289,36 @@ check_landings() {
     git grep -q -I -E "$re" -- "$path" 2>/dev/null \
       || printf '%s\n' "$path: [$code] the D44 cascade never landed here — no line matches /$re/ ($reason)"
   done
-  printf '%s\n' "$REQUIRE_CONTRACT" | while IFS='@' read -r code path reason; do
+  printf '%s\n' "$REQUIRE_CONTRACT" | while IFS='@' read -r code path selector reason; do
     [ -n "$code" ] || continue
     if [ ! -f "$path" ]; then
       printf '%s\n' "$path: [$code] REQUIRED cascade target is missing from the tree ($reason)"
       continue
     fi
-    git grep -q -I -E "$CONTRACT_RE" -- "$path" 2>/dev/null \
-      || printf '%s\n' "$path: [$code] no line matches /$CONTRACT_RE/ ($reason)"
+    # Every kind first demands the CURRENT id be present, so no row can pass on an empty file.
+    if ! git grep -q -I -E "$CONTRACT_RE" -- "$path" 2>/dev/null; then
+      printf '%s\n' "$path: [$code] no line matches /$CONTRACT_RE/ ($reason)"
+      continue
+    fi
+    if [ "$selector" = "EXCLUSIVE" ]; then
+      # Any version literal that is NOT the current one is a stale published id.
+      stale="$(git grep -h -I -E "$CONTRACT_FAMILY_RE" -- "$path" 2>/dev/null \
+                 | grep -o -E "$CONTRACT_FAMILY_RE" | grep -v -E "^$CONTRACT_RE\$" | sort -u)"
+      if [ -n "$stale" ]; then
+        printf '%s\n' "$path: [$code] a RETIRED contract id survives here: $(printf '%s' "$stale" | tr '\n' ' ') ($reason)"
+      fi
+    elif [ -n "$selector" ]; then
+      # Row-anchored: the declaring line(s) must themselves name the current id.
+      rows="$(git grep -n -I -E "$selector" -- "$path" 2>/dev/null)"
+      if [ -z "$rows" ]; then
+        printf '%s\n' "$path: [$code] the anchor line /$selector/ no longer exists, so this pin now proves NOTHING ($reason)"
+      else
+        stale_rows="$(printf '%s\n' "$rows" | grep -v -E "$CONTRACT_RE" | cut -d: -f2)"
+        if [ -n "$stale_rows" ]; then
+          printf '%s\n' "$path: [$code] the declaring row(s) at line(s) $(printf '%s' "$stale_rows" | tr '\n' ' ') do not name /$CONTRACT_RE/ ($reason)"
+        fi
+      fi
+    fi
   done
 }
 
@@ -314,6 +375,17 @@ fi
 fam_count="$(printf '%s\n' "$FAMILIES$SUBJECT_FAMILIES" | grep -c '^F[0-9]')"
 if [ "$fam_count" -lt 16 ]; then
   say "BLOCKED — the forbidden-framing table has $fam_count families; it shipped with 16. A family was dropped."
+  blocked=1
+fi
+
+# -------------------------------------------------------------------------------------------------
+# SELF-TEST 3 — same guard for the contract-version table, which shipped with 4 rows. It is stated
+# separately because that table was extended from 2 to 4 precisely BECAUSE two publishing sites had no
+# predicate; silently dropping a row would restore the blind spot this check exists to close.
+# -------------------------------------------------------------------------------------------------
+rc_count="$(printf '%s\n' "$REQUIRE_CONTRACT" | grep -c '^RC[0-9]')"
+if [ "$rc_count" -lt 4 ]; then
+  say "BLOCKED — the contract-version table has $rc_count rows; it shipped with 4. A publishing site lost its pin."
   blocked=1
 fi
 
