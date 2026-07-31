@@ -3133,9 +3133,9 @@ pub async fn contract_dep_metadata_null_vs_empty_object<S: Storage>(storage: S) 
     }
 }
 
-/// `thread_id` round-trips at L2. It is NOT wire-reachable (`DepInput` has no such field and
-/// `into_dependency` hardcodes `None`), so this case is the ONLY thing that makes the `thread_id`
-/// bind verifiable rather than dead code.
+/// `thread_id` round-trips at L2. It is NOT wire-reachable (no MCP input carries such a field, and
+/// the `dep` tool's `build_add_dependency` — the L7 construction site — hardcodes `None`), so this
+/// case is the ONLY thing that makes the `thread_id` bind verifiable rather than dead code.
 pub async fn contract_dep_thread_id_round_trip<S: Storage>(storage: S) {
     storage
         .create_issue(&issue("ub-a", "a"), "x")

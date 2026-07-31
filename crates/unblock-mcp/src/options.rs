@@ -32,7 +32,8 @@ use tokio_util::sync::CancellationToken;
 /// `comment` tool adds a per-tool `{input,output}` pair to `schema_bundle()` + an 8th
 /// `capabilities()` descriptor, AND the `$defs/Comment` embedded inside the EXISTING `issue`/`query`
 /// OUTPUT schemas gains 2 properties (`updated_at`/`redacted_at`) — so existing schema bytes move
-/// too, not merely a new pair) → `unblock.mcp.v1.6` (v1.0.1/D42 — see the clause below).
+/// too, not merely a new pair) → `unblock.mcp.v1.6` (v1.0.1/D42 — see the clause below) →
+/// `unblock.mcp.v1.7` (v1.0.1/D44 — see the second clause below).
 /// The `unblock.mcp.vN[.M]` family preserves the contract-id convention while the `.M` revision
 /// marks an additive contract change within the v1 product.
 ///
@@ -50,7 +51,20 @@ use tokio_util::sync::CancellationToken;
 /// All of that moves `schema_bundle()` bytes. Per D35 an
 /// additive `.M` bump inside 1.x is NON-breaking, so this ships in the v1.0.1 patch — it is not a
 /// 2.0.0 event).
-pub const CONTRACT_VERSION: &str = "unblock.mcp.v1.6";
+///
+/// `unblock.mcp.v1.7` (v1.0.1/D44 — `issue create {deps:[…]}` becomes one atomic, correctly
+/// anchored act. On the wire, `$defs/DepInput.issue_id` is relaxed from REQUIRED to OPTIONAL and its
+/// description is rewritten to say it MUST be omitted on the create arm (a present value is rejected
+/// with `VALIDATION_FAILED`); `CreateInput.deps` gains the description it never had. A `required`
+/// list and a property description are BOTH schema bytes, so `schema_bundle()` moves.
+/// `$defs/DepInput` is `$ref`-ed from exactly ONE site — the `issue` tool's `create.deps` items — so
+/// the `dep` tool's published schema does NOT move even though that tool changed most in code.
+/// `capabilities()` moves only by this field. D44 mints NO `ErrorCode` (the rejection rides the
+/// existing `ValidationFailed`), so the 36-code map and the 0–8 exit-code table are byte-unchanged.
+/// The schema movement is a pure WIDENING; the ratified behavioural break rides the RUNTIME rule,
+/// the same shape D42 shipped with. Per D35 an additive `.M` bump inside 1.x is NON-breaking, so
+/// this too ships in the v1.0.1 patch — it is not a 2.0.0 event).
+pub const CONTRACT_VERSION: &str = "unblock.mcp.v1.7";
 
 /// The pinned SHA-256 digest of the ordered two-document tuple `(capabilities(), schema_bundle())` —
 /// the HASH-COUPLED half of the FR-12 drift gate (D22 widened by D25, `tests/contract_suite.rs`).
@@ -66,7 +80,7 @@ pub const CONTRACT_VERSION: &str = "unblock.mcp.v1.6";
 /// representation — any future dep enabling `serde_json/preserve_order` (feature unification, dev-deps
 /// included) reorders the schemars-generated maps and moves `CONTRACT_HASH` with NO contract change;
 /// if the gate fires with "nothing changed", check `Cargo.lock` feature unification first.
-pub const CONTRACT_HASH: &str = "90333219ef02222a786c4ff967e33753415b678c749169faa4b82940f7b40c8c";
+pub const CONTRACT_HASH: &str = "53328305ebe8949c56bc678ffebc2bbcf40c879d225a97e2571cf4f5b27ef854";
 
 /// Untrusted-input limits enforced **before** any `Session` call (NFR-18).
 ///
@@ -170,9 +184,10 @@ mod tests {
 
     #[test]
     fn contract_version_is_the_bumped_v1_id() {
-        // v1.0.1/D42: `deny_unknown_fields` on every input container emits `additionalProperties:
-        // false` into `schema_bundle()`, so the contract bumped → v1.6 (additive, D35).
-        assert_eq!(CONTRACT_VERSION, "unblock.mcp.v1.6");
+        // v1.0.1/D44: `$defs/DepInput.issue_id` is relaxed to OPTIONAL with a rewritten description
+        // and `CreateInput.deps` gains one, so `schema_bundle()` moves again → v1.7 (additive, D35;
+        // it follows v1.6, which D42's `deny_unknown_fields` widening earned).
+        assert_eq!(CONTRACT_VERSION, "unblock.mcp.v1.7");
     }
 
     #[test]

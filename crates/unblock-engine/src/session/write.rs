@@ -24,6 +24,31 @@ use crate::report::CloseOutcome;
 use crate::session::Session;
 use crate::session::ids::NewIssueSeed;
 
+/// A dependency edge DECLARED on a create — engine-owned, with the SOURCE deliberately ABSENT
+/// (D44, spine §4.1).
+///
+/// The source of a create-time edge is the issue being created, whose id the engine mints (D21), so
+/// the field could only ever hold ONE correct value and the client cannot derive it. Making the type
+/// **incapable** of carrying a source is the STRUCTURAL half of D44: a foreign `issue_id` cannot
+/// reach L5 at all, so the misattachment class is UNREPRESENTABLE rather than merely unreached.
+///
+/// [`Session::create_issue`] stamps `issue_id = <the just-minted id>`, `created_at = now`,
+/// `created_by = <session actor>` and `thread_id = None` when it seeds each `Issue.dependencies`
+/// element — so the actor/timestamp stamping lives at L5, where the `Session` owns the actor, not at
+/// the L7 adapter. The model [`Dependency`] KEEPS its `issue_id`: that is the persisted + read
+/// shape, where the source is real.
+#[derive(Debug, Clone)]
+pub struct NewDep {
+    /// The BLOCKER (target). `external:*` targets stay legal — D44 claims nothing about target
+    /// existence (that is tracked separately as `ub-lp9.25`).
+    pub depends_on_id: String,
+    /// The edge type.
+    pub dep_type: DependencyType,
+    /// Optional JSON metadata for the edge (it round-trips since D42's 7-column bind; since D44 on
+    /// the create path too).
+    pub metadata: Option<String>,
+}
+
 /// The input to the MINTING create path [`Session::create_issue`] (engine-owned, D21).
 ///
 /// Carries the domain fields of an **interactive** create MINUS the id — the engine mints the id
@@ -44,8 +69,12 @@ pub struct NewIssue {
     pub labels: Vec<String>,
     /// `Some(parent)` mints the hierarchical `parent.N` id via `Storage::next_child_number`.
     pub parent: Option<String>,
-    /// Dependency edges to add in/after the same write tx.
-    pub deps: Vec<Dependency>,
+    /// The dependency edges declared on this create — SOURCE-LESS ([`NewDep`], D44).
+    ///
+    /// [`Session::create_issue`] stamps the MINTED id onto each element and SEEDS them onto the
+    /// built [`Issue::dependencies`], so the row and every one of its edges commit in the ONE
+    /// `storage.create_issue` transaction. There is no follow-up edge pass.
+    pub deps: Vec<NewDep>,
     /// An optional due date.
     pub due_at: Option<DateTime<Utc>>,
     /// An optional defer-until date.
@@ -133,17 +162,31 @@ impl Session {
     /// method does **not** catch it and re-mint. (The probe loop is collision-avoidance, not
     /// post-insert retry.)
     ///
-    /// Steps under the permit: (1) mint the id (probing storage); (2) build the candidate `Issue`
-    /// (minted id + `new` fields + engine defaults: `created_by = actor`,
-    /// `created_at = updated_at = now`); (3) run the full [`IssueValidator::validate`] (the same gate
-    /// `create` runs — `ModelError` surfaces as [`EngineError::Model`]); (4) `storage.create_issue`;
-    /// (5) add each `new.deps` edge; (6) re-read via `get_issue` and return the hydrated `Issue`.
+    /// # Dependency edges (NORMATIVE — D44)
+    ///
+    /// Each [`NewDep`] in `new.deps` is stamped with `issue_id = the just-minted id` (plus
+    /// `created_at = now`, `created_by = actor`, `thread_id = None`) and SEEDED onto the built
+    /// `Issue.dependencies`. The source is ALWAYS the issue being created and is NEVER taken from
+    /// the client — which is why [`NewDep`] has no source field at all. `storage.create_issue` then
+    /// writes the row, its labels, EVERY edge and every event in ONE transaction and applies the
+    /// create-specific duplicate + gating-cycle guards, so the create is all-or-nothing: any
+    /// rejection (self, duplicate, cycle, backend) leaves ZERO rows — no orphan issue, no prefix of
+    /// edges. There is NO post-insert edge pass. Storage re-anchors seeded edges on `issue.id`
+    /// anyway, so the two halves agree by construction.
+    ///
+    /// Steps under the permit: (1) mint the id (probing storage); (2) stamp + seed the declared
+    /// edges with the minted id; (3) build the candidate `Issue` (minted id + `new` fields + the
+    /// seeded edges + engine defaults: `created_by = actor`, `created_at = updated_at = now`);
+    /// (4) run the full [`IssueValidator::validate`] (the same gate `create` runs — `ModelError`
+    /// surfaces as [`EngineError::Model`]); (5) `storage.create_issue` — the ONE transaction;
+    /// (6) re-read via `get_issue` and return the hydrated `Issue`.
     ///
     /// # Errors
     /// - [`EngineError::Model`] if the built issue fails validation (aggregate `ValidationFailed`).
     /// - [`EngineError::ShutdownInProgress`] if a shutdown is in progress.
     /// - The transparent storage source on any backend failure (id collision after a probe race,
-    ///   `external_ref` collision, a dependency cycle, a missing parent for the child counter, etc.).
+    ///   `external_ref` collision, a self/duplicate/cycle edge rejection, a missing parent for the
+    ///   child counter, etc.) — ZERO rows persist.
     pub async fn create_issue(&self, new: NewIssue) -> Result<Issue> {
         let _guard = self.acquire().await?;
 
@@ -159,9 +202,27 @@ impl Session {
         };
         let id = self.allocate_id(&seed).await?;
 
-        // (2) Build the candidate Issue (minted id + new fields + engine defaults). The D22
-        //     markdown-captured fields map 1:1 onto the same-named built-`Issue` fields (field-wiring
-        //     only; the domain `Issue` already carries them — NO model change).
+        // (2) Stamp the MINTED id onto every declared edge and seed them onto the built Issue (D44).
+        //     `NewDep` carries no source, so the anchor cannot come from the client: it is always the
+        //     issue being created. These ride `Issue.dependencies` into step (5)'s ONE transaction —
+        //     there is no post-insert edge pass.
+        let dependencies: Vec<Dependency> = new
+            .deps
+            .into_iter()
+            .map(|dep| Dependency {
+                issue_id: id.clone(),
+                depends_on_id: dep.depends_on_id,
+                dep_type: dep.dep_type,
+                created_at: now,
+                created_by: Some(self.actor.clone()),
+                metadata: dep.metadata,
+                thread_id: None,
+            })
+            .collect();
+
+        // (3) Build the candidate Issue (minted id + new fields + the seeded edges + engine
+        //     defaults). The D22 markdown-captured fields map 1:1 onto the same-named built-`Issue`
+        //     fields (field-wiring only; the domain `Issue` already carries them — NO model change).
         let issue = Issue {
             id: id.clone(),
             title: new.title,
@@ -181,22 +242,20 @@ impl Session {
             acceptance_criteria: new.acceptance_criteria,
             assignee: new.assignee,
             agent_context: new.agent_context,
+            dependencies,
             ..Issue::default()
         };
 
-        // (3) Validate the built issue the SAME way `create` validates (storage is validation-free).
+        // (4) Validate the built issue the SAME way `create` validates (storage is validation-free).
         IssueValidator::validate(&issue)?;
 
-        // (4) Insert the row + Event(Created) transactionally. The probe loop already chose a free id
-        //     under the held permit, so storage's IdCollision guard only fires for an out-of-band race
-        //     — and when it does, the `?` PROPAGATES it (no catch-and-re-mint at the insert).
+        // (5) Insert the row + its labels + EVERY seeded edge + every event in the ONE storage
+        //     transaction (D44 — the write side of a mutation is exactly one transaction, spine
+        //     §4.2). The probe loop already chose a free id under the held permit, so storage's
+        //     IdCollision guard only fires for an out-of-band race — and when it does, the `?`
+        //     PROPAGATES it (no catch-and-re-mint at the insert). A duplicate or gating-cycle edge is
+        //     rejected by the create-specific guards inside that same tx, which rolls back whole.
         self.storage.create_issue(&issue, &self.actor).await?;
-
-        // (5) Add the dependency edges in/after the same write tx (parent is already encoded in the
-        //     id; `deps` are explicit edges). Each writes its own transactional Event(DependencyAdded).
-        for dep in &new.deps {
-            self.storage.add_dependency(dep, &self.actor).await?;
-        }
 
         // (6) Re-read the hydrated issue (labels/deps populated) and return it.
         self.storage
@@ -362,9 +421,28 @@ impl Session {
             let resolved_edges = resolve_dep_refs(record, &id, maps, minted_id_of, storage_resolve)
                 .map_err(validation_failed)?;
 
-            // Merge the already-resolved `deps` (verbatim) with the resolved `dep_refs` edges, deduped
-            // by depends_on_id (storage also dedups, but keep the built Issue clean).
-            let mut dependencies: Vec<Dependency> = record.deps.clone();
+            // Merge the already-resolved `deps` with the resolved `dep_refs` edges, deduped by
+            // depends_on_id (storage also dedups, but keep the built Issue clean).
+            //
+            // D44: `record.deps` carries the SOURCE-LESS `NewDep`, so each element is stamped with
+            // the MINTED id here — the same rule the resolved `dep_refs` edges below already used.
+            // Pre-D44 this site copied a caller-supplied `Dependency` VERBATIM, so the built object
+            // could name a foreign source while the INSERT re-anchored the row on the minted id
+            // anyway (the two disagreed). BULK SEMANTICS ARE UNCHANGED by that: `create_bulk` keeps
+            // the shared body's dedup-and-continue and its deliberate absence of a cycle guard.
+            let mut dependencies: Vec<Dependency> = record
+                .deps
+                .iter()
+                .map(|dep| Dependency {
+                    issue_id: id.clone(),
+                    depends_on_id: dep.depends_on_id.clone(),
+                    dep_type: dep.dep_type.clone(),
+                    created_at: now,
+                    created_by: Some(self.actor.clone()),
+                    metadata: dep.metadata.clone(),
+                    thread_id: None,
+                })
+                .collect();
             let mut seen: std::collections::HashSet<String> = dependencies
                 .iter()
                 .map(|d| d.depends_on_id.clone())

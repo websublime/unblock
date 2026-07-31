@@ -4,18 +4,20 @@
 //!   enforced** here (the policy gate type is the distinct `AttributionPolicy`, G-23e).
 //! - [`FilterInput`] — mirrors `ListFilters` (spine §1.10); [`FilterInput::into_list_filters`] is the
 //!   total conversion into the engine-facing [`unblock_model::ListFilters`].
-//! - [`DepInput`] — a dependency edge on the wire (`issue_id` / `depends_on_id` / `dep_type`);
-//!   [`DepInput::into_dependency`] builds the model [`unblock_model::Dependency`] under a supplied
-//!   actor/timestamp.
+//! - [`DepInput`] — the create-arm edge input: an element of the `issue` tool's `create.deps` array,
+//!   and nothing else. [`DepInput::into_new_dep`] maps it to the engine-owned, SOURCE-LESS
+//!   [`unblock_engine::NewDep`], which the engine anchors on the id it mints (D44). There is
+//!   deliberately NO conversion from this type to a model [`unblock_model::Dependency`] — see the
+//!   type's own doc-comment.
 //!
 //! The result/display DTOs returned through the spine §5.3 per-tool outputs (`CountBucket`, `DepTree`,
 //! `CloseOutcome`, `ExportReport`, `ImportReport`, `DiagnosticReport`) are the spine §1.10 types
 //! **sourced from `unblock-model`** (CF-A/CF-B) and serialized as-is — never redefined here.
 
-use chrono::{DateTime, Utc};
 use rmcp::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use unblock_model::{Dependency, DependencyType, IssueType, ListFilters, Priority, Status};
+use unblock_engine::NewDep;
+use unblock_model::{DependencyType, IssueType, ListFilters, Priority, Status};
 
 /// MCP wire attribution — capture-only Tier-1 metadata (spine §5.2).
 ///
@@ -50,19 +52,26 @@ pub(crate) struct Attribution {
     pub model: Option<String>,
 }
 
-/// A dependency edge on the wire (spine §5.2 `DepInput`).
+/// A dependency edge declared on `issue create` (spine §5.2 `DepInput`).
 ///
-/// Used both as a `query`/`dep`-tool edge input and as a `Create.deps` element. The model
-/// [`Dependency`] additionally carries a `created_at`/`created_by` — supplied by the adapter via
-/// [`DepInput::into_dependency`], not by the wire.
+/// It is an element of the `issue` tool's `create.deps` array and nothing else. The edge is sourced
+/// on the issue that call is creating — the server mints that id (D21) — so the adapter maps this to
+/// the engine-owned, SOURCE-LESS `NewDep` and the engine stamps the minted id, the actor and the
+/// timestamp when it seeds the edge onto the new issue.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 // D42: `#[serde(deny_unknown_fields)]` — an unknown/misspelled argument is REJECTED in-band
 // instead of being silently dropped. NOT recursive and inert on a flatten TARGET: every nested
 // container needs its OWN attribute (see `tools/args.rs` + the CHECK-3 container guard).
 #[serde(deny_unknown_fields)]
 pub(crate) struct DepInput {
-    /// The dependent issue id (source).
-    pub issue_id: String,
+    /// The dependent issue id. **OPTIONAL, and on `issue create` it MUST be omitted.** The edge is
+    /// sourced on the issue this call is creating, whose id the SERVER mints (D21) — so the field has
+    /// exactly one correct value and the client cannot derive it. A PRESENT value is REJECTED with
+    /// `VALIDATION_FAILED` and a field hint naming `deps[i].issue_id`; it is NEVER silently ignored
+    /// and NEVER applied to the issue it names. An explicit JSON `null` is an ABSENCE, and is
+    /// accepted.
+    #[serde(default)]
+    pub issue_id: Option<String>,
     /// The blocker issue id (target).
     pub depends_on_id: String,
     /// The dependency type.
@@ -73,20 +82,27 @@ pub(crate) struct DepInput {
 }
 
 impl DepInput {
-    /// Build the model [`Dependency`] from this wire edge, supplying the actor + timestamp.
-    pub(crate) fn into_dependency(self, actor: &str, now: DateTime<Utc>) -> Dependency {
-        Dependency {
-            issue_id: self.issue_id,
-            depends_on_id: self.depends_on_id,
-            dep_type: self.dep_type,
-            created_at: now,
-            created_by: Some(actor.to_string()),
-            metadata: self.metadata,
-            // `thread_id` is DELIBERATELY not on the wire: `DepInput` has no such field and v1
-            // carries no threading surface. It is nevertheless BOUND at L2 (D42) so the storage
-            // INSERT is symmetric with the 7-column read projection — do not read that bind as dead
-            // code and delete it.
-            thread_id: None,
+    /// Map this wire edge to the engine-owned, SOURCE-LESS [`NewDep`] (D44, spine §4.1/§5.2).
+    ///
+    /// `issue_id` is DROPPED here and is never read for an edge source on any path: it exists on the
+    /// wire only so a create that carries one can be REJECTED in-band by the `issue` tool's create
+    /// arm (which runs BEFORE this mapping), rather than have the value silently ignored. Because
+    /// [`NewDep`] cannot carry a source at all, a foreign anchor is unrepresentable below L7.
+    ///
+    /// `created_at`/`created_by` are deliberately NOT supplied here: on the create arm the ENGINE
+    /// stamps them from the session actor when it seeds `Issue.dependencies`, because only the engine
+    /// knows the minted id they belong to.
+    pub(crate) fn into_new_dep(self) -> NewDep {
+        let Self {
+            issue_id: _,
+            depends_on_id,
+            dep_type,
+            metadata,
+        } = self;
+        NewDep {
+            depends_on_id,
+            dep_type,
+            metadata,
         }
     }
 }
@@ -166,9 +182,8 @@ impl FilterInput {
 
 #[cfg(test)]
 mod tests {
-    use super::{Attribution, DepInput, FilterInput};
-    use chrono::{TimeZone, Utc};
-    use unblock_model::{DependencyType, Priority, Status};
+    use super::{Attribution, FilterInput};
+    use unblock_model::{Priority, Status};
 
     #[test]
     fn attribution_default_is_all_none() {
@@ -204,22 +219,5 @@ mod tests {
         assert_eq!(filters.priority_min, Some(Priority::HIGH));
         assert!(filters.include_deferred);
         assert_eq!(filters.limit, Some(7));
-    }
-
-    #[test]
-    fn dep_input_builds_dependency_with_actor_and_ts() {
-        let now = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-        let dep = DepInput {
-            issue_id: "ub-a".to_string(),
-            depends_on_id: "ub-b".to_string(),
-            dep_type: DependencyType::Blocks,
-            metadata: None,
-        }
-        .into_dependency("tester", now);
-        assert_eq!(dep.issue_id, "ub-a");
-        assert_eq!(dep.depends_on_id, "ub-b");
-        assert_eq!(dep.dep_type, DependencyType::Blocks);
-        assert_eq!(dep.created_by.as_deref(), Some("tester"));
-        assert_eq!(dep.created_at, now);
     }
 }

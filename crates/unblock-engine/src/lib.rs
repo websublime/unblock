@@ -104,7 +104,7 @@ mod shutdown;
 // --- engine-owned public surface ---
 pub use error::{EngineError, Result};
 pub use logging::{RELIABILITY_TARGET, TracingOptions, init_tracing};
-pub use session::write::NewIssue;
+pub use session::write::{NewDep, NewIssue};
 pub use session::{MigrateOutcome, Session, SessionConfig};
 pub use shutdown::is_shutdown_requested;
 

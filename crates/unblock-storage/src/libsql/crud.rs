@@ -27,7 +27,17 @@ use super::{WriteHook, with_immediate_tx};
 ///
 /// The per-record body is the shared [`insert_issue_in_tx`] helper — so the single-create path and the
 /// atomic bulk path ([`create_issues`]) run **identical** in-tx logic (one source of truth, spine
-/// §3.2.1 / crate plan §3.3). This wrapper just opens its OWN one-shot `with_immediate_tx`.
+/// §3.2.1 / crate plan §3.3). This wrapper opens its OWN one-shot `with_immediate_tx`, which also
+/// writes the labels, the comments and the seeded `Issue.dependencies` — so the row and its edges
+/// commit as ONE indivisible act (D44).
+///
+/// **The two create-specific guards live in THIS wrapper's tx, never in the shared body** (D44,
+/// spine §3.2.1): [`reject_duplicate_declared_edges`] and [`reject_declared_gating_cycles`]. The
+/// shared body is also the bulk (`create_issues`) and therefore the JSONL/`bd` IMPORT body, and a
+/// guard there could make an already-exported D5 record un-importable. Precedence:
+/// `IdCollision` → `external_ref` collision → `SelfDependency` → `DuplicateDependency` →
+/// `CycleDetected`; the first three fire inside the shared body while it stages, the last two after.
+/// Any of them rolls the whole tx back → ZERO rows (no issue, no edges, no events).
 pub(super) async fn create_issue(
     conn: &Connection,
     hook: WriteHook<'_>,
@@ -45,10 +55,89 @@ pub(super) async fn create_issue(
 
     with_immediate_tx(conn, hook, |tx| async move {
         insert_issue_in_tx(&tx, &issue, &content_hash, actor).await?;
+        // D44 create-specific guards, in the published precedence order. They are placed AROUND the
+        // shared body's call, in this method's own tx — see this function's doc-comment for why they
+        // may not move inside it.
+        reject_duplicate_declared_edges(&issue)?;
+        reject_declared_gating_cycles(&tx, &issue).await?;
         let id = issue.id.clone();
         Ok((id, tx))
     })
     .await
+}
+
+/// D44 create-specific guard (a) — reject a `depends_on_id` REPEATED within the ONE declared
+/// `Issue.dependencies` list, instead of silently skipping the second copy.
+///
+/// **An IN-MEMORY scan that reads NO transaction state.** The key is the SEMANTICS
+/// [`super::deps::add_dependency`] uses — the `(source, target)` pair, type-INSENSITIVE: one target
+/// may appear at most once whatever its `dep_type` — but explicitly **NOT its SQL**.
+/// `add_dependency`'s key is a transaction QUERY (`deps.rs`), and transliterating it onto this path
+/// is unimplementable in BOTH orderings: run before staging it sees nothing; run after staging it
+/// matches the row this very tx just staged, so it would fire on EVERY create. And it could never
+/// see the real offender either way, because the shared body `continue`s past a repeated target — so
+/// the transaction never holds evidence of the second copy. The declared list is the ONLY place that
+/// evidence exists.
+///
+/// Its placement AFTER staging is dictated only by the published precedence (an `IdCollision`, an
+/// `external_ref` collision or a `SelfDependency` must still win); the scan itself queries nothing,
+/// which is exactly why post-staging placement is sound here and fatal for a SQL key.
+///
+/// The rejection does not name the offending array index: with all-or-nothing there is no prefix to
+/// describe, and element-level detail is an L7 `hint` concern.
+fn reject_duplicate_declared_edges(issue: &Issue) -> Result<(), StorageError> {
+    let mut seen: HashSet<&str> = HashSet::new();
+    for dep in &issue.dependencies {
+        if !seen.insert(dep.depends_on_id.as_str()) {
+            return Err(StorageError::DuplicateDependency);
+        }
+    }
+    Ok(())
+}
+
+/// D44 create-specific guard (b) — reject a declared GATING edge that closes a cycle, evaluated
+/// AFTER the row and ALL its edges are staged in `tx`.
+///
+/// **The check is normative as a PROPERTY, not as a call site: every gating edge is checked against a
+/// transaction-visible graph that ALREADY CONTAINS the create's OTHER edges** (spine §3.2.1). That is
+/// why the graph is loaded ONCE, from inside the caller's transaction and after staging — a
+/// per-element pre-check run before anything is staged is NON-CONFORMING and unsound under the D4
+/// orientation: a create carrying a `parent-child` dep (an IN-edge `P -> N` under the D4 reversal)
+/// plus a gating dep (an OUT-edge `N -> X`) closes a cycle whenever `X -> … -> P` already exists, and
+/// neither element would see the other. Order within `Issue.dependencies` is therefore irrelevant.
+///
+/// It uses the SAME [`super::deps::would_cycle_in_graph`] reachability that `add_dependency` uses (via
+/// [`super::deps::would_cycle_in_tx`]), so the D4 orientation and the REAL ordered cycle path naming
+/// every node land once for both paths.
+async fn reject_declared_gating_cycles(
+    tx: &libsql::Transaction,
+    issue: &Issue,
+) -> Result<(), StorageError> {
+    if !issue
+        .dependencies
+        .iter()
+        .any(|dep| dep.dep_type.affects_ready_work())
+    {
+        return Ok(());
+    }
+
+    let mut graph = super::deps::load_gating_graph_in_tx(tx).await?;
+    for dep in &issue.dependencies {
+        if !dep.dep_type.affects_ready_work() {
+            continue;
+        }
+        if let Some(cycle) = super::deps::would_cycle_in_graph(
+            &mut graph,
+            &issue.id,
+            &dep.depends_on_id,
+            &dep.dep_type,
+        ) {
+            return Err(StorageError::CycleDetected {
+                path: super::deps::render_cycle_path(&cycle),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Insert ONE fully-formed `Issue` inside the caller's already-open transaction (the shared per-record
