@@ -95,6 +95,29 @@ own repo plus the one release-pipeline gap never exercised end-to-end:
   `id`/`status` imported a different record than the file's text stated. D42 could not have caught
   it: `deny_unknown_fields` operates on the parsed object, and the collapse happens while that
   object is BUILT — which is why D42 correctly carved it out rather than claiming it closed.
+- **`issue create {deps:[…]}` — non-atomic create + client-anchored edges** (P0, PRD §4 **D44**) — the third
+  dogfood-found class, and the one that corrupts a SECOND issue: the engine committed the issue row and then
+  wrote each declared edge in an independent follow-up transaction binding the CLIENT's `deps[].issue_id`. A
+  bogus id failed on that foreign key AFTER committing an edge-less orphan the `ready` query immediately
+  offered; an id naming an EXISTING OTHER issue returned `isError:false` and wrote the edge onto that third
+  party, which silently dropped out of `ready` with its `updated_at`/`content_hash` unmoved while the created
+  issue got ZERO edges; and every other rejection committed the row plus the prefix of edges before the
+  failing element. D44 seeds the edges onto the issue being created and commits them in the SAME transaction
+  as the row (all-or-nothing), makes `deps[].issue_id` OPTIONAL and REJECTS a present value, and restores the
+  duplicate + gating-cycle guards on a CREATE-SPECIFIC leg so `create_bulk` and the D5/`bd` import keep their
+  exact semantics. It carries an additive `contract_version` bump to `unblock.mcp.v1.7`. **What it explicitly
+  does NOT close:** a `depends_on_id` naming a non-existent issue still plants an unresolvable blocker — a
+  schema-shaped class split out to `ub-lp9.25` in this same slot, and one D44 makes MORE reachable, since the
+  foreign-key failure that used to mask it no longer occurs. That widening is precisely why `ub-lp9.25` is not
+  deferred but cut TOGETHER with D44 — see the next bullet.
+- **Dangling BLOCKER id on every edge-writing path** (P0, tracker `ub-lp9.25`, no D-id — a defect repair, not a
+  product decision) — a `depends_on_id` naming an issue that does not exist is accepted with `isError:false`
+  and plants a permanently unresolvable blocker. `dependencies.depends_on_id` deliberately carries NO foreign
+  key (an `external:*` target is legitimate), so the repair is an application-level in-transaction existence
+  check with an `external:` carve-out, on the three entry points that write an edge — plus a `doctor` view
+  that can LIST the dangling blockers already written into live workspaces, which nothing in D44 repairs.
+  It **ships in this SAME 1.0.1 cut as a co-requisite of `ub-lp9.20`/D44**, per Miguel's ruling: D44 strictly
+  increases exposure to this class, so a release carrying D44 without it would ship a wider hole than GA did.
 - **Missing forward-migration for the comments schema** (P1) — the D37 comments tables need a forward migration
   so long-lived DBs (not just fresh-created ones) pick up the schema and a comment is **durably stored** there
   too (the D-feedback "editing an applied migration drifts long-lived DBs" lesson — ship a *forward* migration,
@@ -109,10 +132,16 @@ This slot is a **maintenance patch, but it is not "maintenance only"** — that 
 added or re-tiered, and the v1.2+ resequence below is untouched. But **D42 spans two layers**: **L7
 `unblock-mcp`** (the argument seam, the `call_tool` quota chokepoint, the `create_bulk` parser) and **L2
 `unblock-storage`** (the `dependencies` INSERT now binds `metadata`/`thread_id`); `unblock-cli` and
-`unblock-sync` gain tests only, and **`unblock-engine` (L5) is deliberately NOT touched** — the related
-`issue create {deps:[…]}` non-atomicity is a pre-existing GA defect tracked separately. **D43 spans THREE crates and, unlike D42, `unblock-sync` gains CODE and not only tests:** `unblock-mcp` (L7 — an owned scanning transport + the single gate), `unblock-error` (L0 — the shared scanner and the shared attacker-echo bound) and `unblock-sync` (L3 — the `bd` line parse); `unblock-cli` gains wire tests only and `unblock-engine` is again untouched. D42 carries an
+`unblock-sync` gain tests only, and **within D42's own scope `unblock-engine` (L5) is deliberately NOT touched** —
+the related `issue create {deps:[…]}` class is closed one decision later, by **D44** (below), which DOES land in
+`unblock-engine`. **D43 spans THREE crates and, unlike D42, `unblock-sync` gains CODE and not only tests:** `unblock-mcp` (L7 — an owned scanning transport + the single gate), `unblock-error` (L0 — the shared scanner and the shared attacker-echo bound) and `unblock-sync` (L3 — the `bd` line parse); `unblock-cli` gains wire tests only and, within D43's own scope, `unblock-engine` is again untouched. **D44 is the
+v1.0.1 decision that DOES touch L5:** it spans `unblock-engine` (L5 — the seeded edges + the source-less `NewDep`
+carrier), `unblock-storage` (L2 — the create-specific guards + the `Storage` trait doc correction, with the trait
+SIGNATURE and every implementor's METHOD SET unchanged — no `impl Storage` block gains, loses or re-types a
+method — while the SHIPPED libsql `create_issue` BODY does gain those guards) and `unblock-mcp` (L7 — the optional-and-rejected `deps[].issue_id`,
+the wire descriptions and the contract bump); `unblock-cli` and `unblock-sync` gain tests only. D42 carries an
 **additive `contract_version` bump to `unblock.mcp.v1.6`** (D35 permits additive `.M` bumps inside 1.x,
-so this stays v1.0.1-eligible and is **not** a 2.0.0 event) with a `CONTRACT_HASH` re-pin. **D43 carries NO contract bump at all** — it mints no `ErrorCode` and moves no schema byte, so `unblock.mcp.v1.6` stands and `CONTRACT_HASH` is not re-pinned. D42 also **inverts a
+so this stays v1.0.1-eligible and is **not** a 2.0.0 event) with a `CONTRACT_HASH` re-pin. **D43 carries NO contract bump at all** — it mints no `ErrorCode` and moves no schema byte, so `unblock.mcp.v1.6` stands and `CONTRACT_HASH` is not re-pinned. **D44 carries a FURTHER additive bump to `unblock.mcp.v1.7`** with its own `CONTRACT_HASH` re-pin (relaxing `$defs/DepInput.issue_id` out of `required` and rewriting its description both move `schema_bundle()` bytes), mints no `ErrorCode`, and — like D42 clause 4(iii) — ratifies a behavioural break in a patch release: every GA-schema-valid `issue create` document carrying `deps[].issue_id` now returns `VALIDATION_FAILED` with zero writes, because on that path no such payload ever did what its author asked. D42 also **inverts a
 shipped test that asserted a silent drop was correct** — `unknown_sections_ignored` becomes
 `unknown_section_rejected`. And together they **newly reject SEVEN previously-accepted input classes**: (1) an unknown or
 misspelled **tool argument** on any of the 8 tools; (2) an **unrecognized (or empty) `### ` markdown section**
@@ -469,11 +498,11 @@ Legend: ● lands · ◐ extended/hardened · ✗ = dropped · blank = not landi
 
 | Feature / FR | v1 (L) | v1.0.1 (PL) | v1.1 (L) | v1.2 (P) | v1.3 (P) | v1.4 (P) | v1.5 (P) | v2+ (P) |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
-| Issue CRUD + tombstone delete (FR-1) | ● | | | ◐ `milestone_id` | | | | |
+| Issue CRUD + tombstone delete (FR-1) | ● | ◐ D44 atomic create-with-deps | | ◐ `milestone_id` | | | | |
 | Atomic claim (FR-2) | ● | | | | ◐ cross-machine at primary | | ◐ TTL/heartbeat | |
 | Defer/undefer (FR-3) | ● | | | | | | | |
 | Query: list/ready/blocked/search/count/stale (FR-4) | ● | | | ◐ milestone filter | | | | |
-| Typed deps + graph (FR-5) | ● | | | | | | | |
+| Typed deps + graph (FR-5) | ● | ◐ D44 create-declared edges | | | | | | |
 | Comments — full CRUD add/list/update/delete (FR-6, D37) | ● | ◐ comments forward migration | | | | | | |
 | Labels (rename/list-all) / epic rollups (FR-6) | | | ● | | | | | |
 | JSONL export/import (FR-7/8) | ● | | | ◐ milestones/goals layout (lock design point) | | | | ◐ DB-only option |
@@ -525,7 +554,7 @@ not feature-landing): ● substantial work in that release · ◐ incidental / h
 | `unblock-sync` | ● | | ◐ | | ◐ | | ◐ | ◐ |
 | `unblock-health` | ● lite | | ● full | | ● | | ● | |
 | `unblock-config` | ● subset | | ● full | | ● | | | |
-| `unblock-engine` | ● | | ● | ● | ● | | ● | |
+| `unblock-engine` | ● | ● | ● | ● | ● | | ● | |
 | `unblock-render` | ● | | ● | ◐ | | | ◐ | |
 | `unblock-mcp` | ● | ◐ | ● | ● | ◐ | | ● | ◐ |
 | `unblock-cli` | ● | ◐ | ● | | ◐ | ◐ | | |
@@ -545,8 +574,11 @@ Notes:
   comments forward-migration **and the D42 `dependencies` 7-column bind (`metadata`/`thread_id`)**,
   `unblock-mcp` ◐ the D43 duplicate-key scanning transport + the D42 argument-boundary error-channel + strict-args fix + the three `create_bulk`
   rejections, `unblock-cli` ◐ the end-to-end `unblock update` smoke **plus the D42 wire-level error-channel
-  matrix (tests only)**, `unblock-sync` tests only. **`unblock-engine` is NOT touched.** It adds no FR and
-  re-tiers nothing — hence the sparse column.
+  matrix (tests only)**, `unblock-sync` tests only. **`unblock-engine` ● carries the D44 one-transaction
+  create-with-deps repair** (the seeded, source-less edge carrier on `NewIssue` + the deleted follow-up edge
+  pass) — the FIRST v1.0.1 decision to touch L5. The note that stood here was D42/D43-scoped — `unblock-engine` is NOT touched — and D44 supersedes it.
+  The column still adds no FR and re-tiers nothing (D44 strengthens
+  the FR-1a and FR-5 acceptance criteria rather than adding a requirement) — hence it stays sparse.
 - **100% Rust, no Node:** the TUI adds **no npm/Node build stage** to `dist` and **no `ui` Cargo feature** —
   `cargo-deny` covers the whole tree and the binary gains no npm supply-chain surface. (The web dashboard's
   npm/Node ecosystem lives in the separate v2+ commercial PRO product — roadmap §7 — not the OSS tree.)

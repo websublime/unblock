@@ -747,13 +747,25 @@ pub trait Storage: Send + Sync {
 
     // --- issue CRUD (mutations carry actor + optional Tier-1 attribution; write Event(s) transactionally) ---
     async fn create_issue(&self, issue: &Issue, actor: &str) -> Result<String, StorageError>; // returns id
+    //  ONE `BEGIN IMMEDIATE` tx: the row + `Event(Created)` + the child-counter bump + the SEEDED
+    //  relations — labels, `Issue.dependencies` and comments — with their per-relation events. The
+    //  dependency edges are RE-ANCHORED: the INSERT binds `issue.id` as the source column and IGNORES
+    //  `Dependency.issue_id`, so a seeded edge can never land on another issue. Carries the D44
+    //  create-specific duplicate + gating-cycle guards, which `create_issues` deliberately does NOT
+    //  (§3.2.1). SIGNATURE UNCHANGED by D44 — the edges ride `Issue.dependencies`, so no `impl
+    //  Storage` block gains, loses or re-types a method and every implementor's METHOD SET stands.
+    //  What DOES move is the shipped libsql BODY of this method (`crud.rs:31-52`): it is where the
+    //  create-specific guards land. A doc that says "no impl moves" without that distinction is the
+    //  same omission the pre-D44 doc-comment made.
     async fn create_issues(&self, issues: &[Issue], actor: &str) -> Result<(), StorageError>;  // D22/T2.3 — ATOMIC bulk insert
     //  Inserts the WHOLE slice in ONE `BEGIN IMMEDIATE` tx: every row + its `Event(Created)` + per-relation
     //  events + the seeded dependency edges + child-counter bumps, committed ONCE. ANY failure on ANY record
     //  (id/`external_ref` collision, FK/CHECK violation, backend error) ROLLS BACK the entire tx — ZERO rows
     //  persisted (no partial batch). The engine `Session::create_bulk` (§4.1) mints all ids + resolves intra-batch
     //  deps under the write permit BEFORE calling this, so storage receives fully-formed `Issue`s with resolved
-    //  ids/edges. `create_issue` (single) and `create(&Issue)` (import) are UNCHANGED. §3.2.1.
+    //  ids/edges. `create_issues` is UNCHANGED by D44 (it is also the JSONL/`bd` import body); the earlier
+    //  "`create_issue` (single) and `create(&Issue)` (import) are UNCHANGED" clause is SUPERSEDED by D44,
+    //  which gives the SINGLE create the same all-or-nothing property plus the create-specific guards. §3.2.1.
     async fn get_issue(&self, id: &str) -> Result<Option<Issue>, StorageError>;               // hydrated (labels/deps)
     async fn get_issues(&self, ids: &[String]) -> Result<Vec<Issue>, StorageError>;
     async fn update_issue(&self, id: &str, patch: &IssuePatch, actor: &str) -> Result<Issue, StorageError>;
@@ -864,7 +876,58 @@ between an earlier prose description and the source are resolved **in favour of 
   **stores** `content_hash` but **never short-circuits on it**. The FR-26 idempotency note belongs to the
   **import path** (`unblock-sync`), not to `create_issue`. Inserts the row + `Event(Created)` in one tx;
   hierarchical ids bump the `child_counters` row in-tx; per-relation `Event(LabelAdded)`/
-  `Event(DependencyAdded)`/`Event(Commented)` are recorded for any seeded relations. **Storage receives an
+  `Event(DependencyAdded)`/`Event(Commented)` are recorded for any seeded relations. **Seeded
+  `Issue.dependencies` are persisted in THAT SAME tx, RE-ANCHORED (NORMATIVE — D42 wrote the 7 columns;
+  D44 makes the anchoring a contract).** The edge INSERT binds `issue.id` as the `issue_id` (source)
+  column and reads ONLY `depends_on_id`/`dep_type`/`created_at`/`created_by`/`metadata`/`thread_id` from
+  the element — a `Dependency.issue_id` carried on the object is IGNORED, never written, and can never
+  reach another issue's graph. This is not incidental: it is the property that makes the single create
+  path safe, and it MUST be pinned by the NFR-16 contract suite (a `create_issue` whose
+  `dependencies[0].issue_id` deliberately names ANOTHER existing issue lands the row on `issue.id` and
+  leaves that issue's edge set byte-unchanged).
+  **Create-specific guard set (NORMATIVE — D44).** Both guards live inside THIS method's own tx — i.e.
+  in the `create_issue` wrapper, NOT in the shared per-record body. **Their ordering requirements
+  DIFFER and are specified separately; they are not one phase.**
+  **(a) Duplicate edge — an IN-MEMORY scan over the declared list; it reads NO transaction state.** A
+  `depends_on_id` repeated within the ONE `Issue.dependencies` list being created is rejected with
+  `DuplicateDependency` — NOT silently skipped. The key is the SEMANTICS `add_dependency` uses (the
+  (source, target) pair, type-INSENSITIVE: one target may appear at most once whatever its `dep_type`),
+  but explicitly **NOT its SQL**. `add_dependency`'s key is a transaction QUERY
+  (`crates/unblock-storage/src/libsql/deps.rs:61-70`), and transliterating that query onto this path is
+  NON-CONFORMING and unimplementable in BOTH orderings: run before staging it sees nothing; run after
+  staging it matches the row the same tx just staged, so it would fire on EVERY create — and it can
+  never see the real offender either way, because the shared body SKIPS the duplicate on the way in
+  (`crud.rs:145-147` `continue`s on a repeated target), so the transaction never holds evidence of the
+  second copy. The in-memory list is the ONLY place that evidence exists. Its PLACEMENT in the sequence
+  is fixed by the published precedence below (it runs after the staging step, so an `IdCollision`, an
+  `external_ref` collision or a `SelfDependency` still wins) — but placement is all staging gives it:
+  the scan itself queries no tx, which is precisely why post-staging placement is sound for (a) and
+  fatal for a transliterated SQL key.
+  **(b) Gating cycle — evaluated AFTER the row and all its edges are staged in that tx.** Each seeded
+  GATING edge (the 4 `affects_ready_work` types) is checked with the SAME `would_cycle_in_tx`
+  `add_dependency` uses, so the D4 orientation and the REAL ordered cycle path land once. THIS guard is
+  the sole reason the post-staging ordering exists, and the next sentence is that reason.
+  **The check is specified as a PROPERTY, not a call site: every gating edge is checked
+  against a tx-visible graph that ALREADY CONTAINS the create's OTHER edges.** A per-element pre-check
+  run before anything is staged is NON-CONFORMING and unsound — a create carrying a `parent-child` dep
+  (an IN-edge `P -> N` under the D4 reversal) plus a gating dep (an OUT-edge `N -> X`) closes a cycle
+  whenever `X -> … -> P` already exists, and neither element sees the other. Order in `deps[]` is
+  therefore irrelevant. `SelfDependency` is UNCHANGED — the shared body already compares
+  `dep.depends_on_id == issue.id`, which is the correct comparison, and it fires during the staging step,
+  so the published precedence is `IdCollision` → `external_ref` collision → `SelfDependency` →
+  `DuplicateDependency` → `CycleDetected`, matching `add_dependency`'s self → duplicate → cycle with the
+  id guards still first. NO new `StorageError` variant and NO new `ErrorCode` are minted, and the
+  rejection does not name the offending array index: with all-or-nothing there is no prefix to describe,
+  and element-level detail, if ever wanted, is an L7 `hint` concern. ANY of these rejections rolls the
+  whole tx back → ZERO rows: no issue, no edges, no events. **SCOPE — both engine callers, neither
+  import leg:** these guards are a property of `Storage::create_issue`, so they apply to the minting
+  `Session::create_issue` AND to the id-preserving `Session::create(&Issue)` (§4.1). They do NOT reach
+  bulk create or the JSONL/`bd` import, which route through `create_issues` (§4.1 `create_bulk`;
+  `unblock-sync` calls `Storage::create_issues` directly). **The shared per-record body is UNCHANGED** —
+  its dedup-and-continue and its absence of a cycle check STAY, because `create_issues` is that body's
+  other caller: `create_bulk` today commits a genuine mutual cycle atomically, and moving the guard into
+  the shared body could make an already-exported D5 record un-importable. Changing bulk/import semantics
+  is explicitly OUT of D44's scope. **Storage receives an
   already-allocated `Issue.id` — it does NOT mint (D21).** For the interactive create path the id is minted
   by the **engine** id-allocator (D21) under the write permit and the resulting `Issue` is handed here; for
   the import/internal path the caller supplies the id (`Session::create`). The id-collision guard above is the
@@ -893,7 +956,11 @@ between an earlier prose description and the source are resolved **in favour of 
   (against committed state + the in-batch minted set) avoids collisions, but an out-of-band writer that races a row
   in between the probe and this commit still surfaces `IdCollision` here — and because it is inside the one tx, it
   rolls back the WHOLE batch (never a partial commit). This is the design that closes the partial-batch hole a loop
-  over single `create_issue` calls would leave; the single `create_issue`/`create` paths are UNCHANGED.
+  over single `create_issue` calls would leave. **The D22 "the single `create_issue`/`create` paths are UNCHANGED" clause is SUPERSEDED by D44**
+  (PRD §4): D44 extends the same all-or-nothing property to the SINGLE create by
+  seeding the edges onto the built `Issue` instead of writing them in a follow-up pass after the insert.
+  `create_issues` itself — and therefore bulk create and the JSONL/`bd` import leg — is UNCHANGED by D44,
+  including its dedup-and-continue edge handling and its deliberate absence of a cycle check.
 - **`update_issue` (sqlite.rs:2496–2509, 2572–2870) — per-field event granularity; empty diff is a
   full skip.** An empty patch (or one that changes nothing) returns the issue unchanged and writes **no
   `SET`, no `updated_at`, no `Event`** (`if set_clauses.is_empty() { return Ok }`). `updated_at` advances
@@ -1031,7 +1098,11 @@ The dependency ops (FR-5) — source-verified vs the original cycle machinery:
   `find_cycle_path` DFS over the just-built graph (which already contains the prospective edge) — NOT a
   synthetic `a -> … -> a` placeholder (FR-5 AC). On success: insert + transactional
   `Event(DependencyAdded)`. (The reparent cycle-check, `crud.rs`, routes through the same
-  `would_cycle_in_tx`, so the orientation fix below lands once.)
+  `would_cycle_in_tx`, so the orientation fix below lands once. **Since D44 there is a THIRD caller** —
+  the create-specific guard inside `Storage::create_issue`'s own tx, which checks each seeded gating
+  edge with the SAME function and therefore inherits the same D4 orientation and the same REAL ordered
+  cycle path. It is deliberately NOT in the shared per-record insert body, so `create_issues` — bulk
+  create and the JSONL/`bd` import leg — keeps its current, guard-free semantics.)
 - **Dependency edge PERSISTENCE (NORMATIVE — D42; the spine was previously SILENT here, which is
   exactly why a 5-column INSERT never read as a bug).** `add_dependency` and `create_issue` persist the
   **FULL 7-column** `Dependency`: `issue_id`, `depends_on_id`, `dep_type`, `created_at`, `created_by`,
@@ -1043,10 +1114,34 @@ The dependency ops (FR-5) — source-verified vs the original cycle machinery:
   future migration must NOT `ALTER TABLE ADD COLUMN` either one (it would hard-error on every existing
   database). `apply_reparent` and the storage testkit helper deliberately stay 5-column — they
   synthesise an edge with no user `Dependency` object, so the column DEFAULTs are correct there.
-  **BOUND:** `Session::create_issue` inserts the issue and THEN loops `add_dependency` in a separate
-  call, so `issue create {deps:[…]}` is NON-ATOMIC and FK-fails (the client cannot supply the
-  server-minted id). That is a known PRE-EXISTING defect tracked separately, NOT endorsed here and NOT
-  fixed by D42 — no `dep.metadata` round-trip is claimed for that path.
+  **CLOSED by D44 (v1.0.1) — this REPLACES the D42 "BOUND" carve-out, which is RETIRED.** D42 recorded
+  that `Session::create_issue` inserted the issue and THEN wrote each declared edge through a separate
+  `Storage::add_dependency` call, and scoped the consequences out. That carve-out was also INCOMPLETE:
+  it named only the foreign-key symptom and never the silent class. For the record, the pre-D44
+  behaviour had THREE outcomes, all reproduced live on 1.0.1-rc.2 — (i) a `deps[].issue_id` naming a
+  NON-EXISTENT issue returned a database error naming a foreign-key failure with the issue row ALREADY
+  COMMITTED, orphaned with zero edges and immediately offered by `ready`; (ii) a `deps[].issue_id`
+  naming an EXISTING but UNRELATED issue returned `isError:false` while the edge landed on that
+  unrelated issue, silently dropping it out of the ready set without moving its `updated_at` or
+  `content_hash`, and the newly created issue got ZERO edges; (iii) every non-foreign-key rejection
+  (cycle / self / duplicate) still committed the issue row plus the PREFIX of edges before the failing
+  element, under one error naming neither the index nor the count. **D44 makes the single create path
+  atomic and correctly anchored:** the engine seeds the built `Issue`'s `dependencies` and
+  `Storage::create_issue` writes the row, its labels, EVERY edge and every event in the ONE
+  `BEGIN IMMEDIATE` transaction it already opens — the same seeded per-record body the bulk primitive
+  uses, which BINDS `issue.id` as the edge source and never reads `dep.issue_id`. So a `deps` element
+  can only ever attach to the issue being created; a failure on ANY element rolls back the WHOLE create
+  (ZERO rows — no orphan issue, no prefix of edges). The engine writes no follow-up edge pass after the
+  insert. `dep.metadata` and `dep.thread_id` now round-trip on this path too (the 7-column bind above is
+  the same code), so the D42 no-round-trip disclaimer for `issue create {deps:[…]}` is retired with it.
+  Wire consequence (§5.2): `deps[].issue_id` becomes OPTIONAL and MUST be omitted — the create arm
+  sources the edge implicitly (D44 strict implicit ownership). Guard parity on this path is NORMATIVE
+  and specified in the `create_issue` row of this section — restoring it is part of D44, not a
+  follow-up. **Still out of scope, tracked as `ub-lp9.25`:** `depends_on_id` has NO foreign key
+  (deliberately — `external:*` targets are legitimate), so a NON-EXISTENT BLOCKER id is still accepted
+  on this and on every other edge-writing path. D44 claims nothing about it — but the window is not
+  left open: `ub-lp9.25` ships in the SAME v1.0.1 cut as `ub-lp9.20` (Miguel's ruling), because D44
+  widens that class by removing the `issue_id` foreign-key failure that used to mask a bogus target.
 - **`would_cycle_in_tx` edge orientation (NORMATIVE — D4 correctness pin; `check_cycle`
   sqlite.rs:2440–2453 + `load_dependency_cycle_graph` sqlite.rs:11379–11387).** When building the
   gating cycle graph, the three blocking types (`blocks`/`conditional-blocks`/`waits-for`) are inserted
@@ -1475,7 +1570,9 @@ pub struct NewIssue {
     pub priority: Option<Priority>,               // None -> model default
     pub labels: Vec<String>,
     pub parent: Option<String>,                   // Some -> hierarchical `parent.N` via next_child_number
-    pub deps: Vec<Dependency>,                    // added as edges in/after the same tx
+    pub deps: Vec<NewDep>,                        // D44 — SOURCE-LESS edges; seeded onto the built
+                                                  // `Issue.dependencies` and written in the SAME tx as
+                                                  // the row (never a follow-up edge pass).
     pub due_at: Option<DateTime<Utc>>,
     pub defer_until: Option<DateTime<Utc>>,
     pub estimated_minutes: Option<i32>,
@@ -1503,6 +1600,31 @@ pub struct NewIssue {
     //     storage order; `blocked-by`→`blocks` flipped at the edge-build step), then merges the resolved
     //     edges with the already-resolved `deps`. §5.2 (`CreateBulk` adapter) builds these; §4.1
     //     `create_bulk` resolves them.
+}
+
+// NewDep is ENGINE-owned (defined in unblock-engine, next to NewIssue; D44) — a dependency edge declared
+// on a create, with the SOURCE deliberately ABSENT. The source is the issue being created, whose id the
+// engine mints (D21), so the field could only ever hold one correct value and the client cannot derive
+// it. Making the type incapable of carrying a source is the STRUCTURAL half of D44: a foreign `issue_id`
+// cannot reach L5 at all, so the misattachment class is UNREPRESENTABLE rather than merely unreached.
+// `create_issue` stamps `issue_id = <minted id>`, `created_at = now`, `created_by = <session actor>` and
+// `thread_id = None` when it builds each `Issue.dependencies` element — so the actor/timestamp stamping
+// moves from the L7 adapter to L5, where the Session owns the actor. The model `Dependency` (§1.7) KEEPS
+// its `issue_id`: it is the persisted + read shape, where the source is real. `create_bulk` builds its
+// `Issue.dependencies` from the SAME type (it merges `record.deps` with its resolved `dep_refs`, both
+// stamped with the minted id), which also removes a pre-D44 mismatch INSIDE the engine: `create_bulk`
+// copies `record.deps` VERBATIM into the BUILT `Issue` it hands to storage
+// (`crates/unblock-engine/src/session/write.rs:367`), so a caller-supplied `issue_id` reached L2 on that
+// object while the INSERT re-anchored the row on the minted id anyway — the built object and the
+// persisted row disagreed. NO claim is made about the RETURNED object: `create_bulk` discards the built
+// issues and returns rows re-read from storage (`write.rs:272-283` — `get_issues(&ids)` then a by-id
+// projection), so a supplied `issue_id` never reached a caller and never could.
+#[derive(Debug, Clone)]
+pub struct NewDep {
+    pub depends_on_id: String,        // the BLOCKER (target). `external:*` targets stay legal — D44 claims
+                                      // nothing about target existence (that is `ub-lp9.25`).
+    pub dep_type: DependencyType,
+    pub metadata: Option<String>,     // round-trips since D42's 7-column bind; since D44 on THIS path too
 }
 
 impl Session {
@@ -1538,8 +1660,14 @@ impl Session {
     pub async fn create(&self, issue: &Issue) -> Result<String, EngineError>;
     //   CALLER-SUPPLIED id — the IMPORT/INTERNAL path. It does NOT mint: it validates the given `Issue`
     //   (incl. its `id`) and inserts it, preserving the id so `content_hash`-keyed import idempotency
-    //   (FR-26) is byte-stable. The bulk-markdown / JSONL / bd-import paths build an `Issue` and call this.
-    //   Tombstones/imported rows reach storage with their original ids ONLY through here. STAYS (D21).
+    //   (FR-26) is byte-stable. It delegates to `Storage::create_issue` — the SINGLE-record tx — so since
+    //   D44 it also carries that method's create-specific duplicate + gating-cycle guards (§3.2.1) and its
+    //   seeded edges are re-anchored to the supplied id. **CORRECTION (D44, stale since D22/T2.3): the
+    //   bulk-markdown, JSONL and `bd`-import paths do NOT call this.** `Session::create_bulk` (below) and
+    //   `unblock-sync`'s `import_jsonl`/`import_bd` both call the ATOMIC `Storage::create_issues`, which is
+    //   why D44's create-specific guards provably cannot change bulk or import semantics. This method is
+    //   the id-preserving SINGLE-record path, and tombstones/imported rows reach storage with their
+    //   original ids through it or through `create_issues`. STAYS (D21).
     pub async fn create_issue(&self, new: NewIssue) -> Result<Issue, EngineError>; // D21 — the MINTING create path
     //   INTERACTIVE create (MCP/CLI quick-create + full create). MINTS the id under the write permit (D21):
     //   - root id `ub-<hash>` (faithful `bd` adaptive-base36) or, with `new.slug`, `ub-<slug>-<hash>` — the slug
@@ -1550,12 +1678,24 @@ impl Session {
     //   - with `new.parent`, the hierarchical `parent.N` via the `Storage::next_child_number(parent)` trait method (§3.2);
     //   the candidate is probed against storage via `get_issue(id).await?.is_some()` (there is no `Storage::exists`) and the mint→probe→insert is ATOMIC under the SAME
     //   permit (so two concurrent creates under one parent cannot mint the same `parent.N` — this is WHY
-    //   minting is the engine's job, NOT an L7 adapter's; FR-9 single mutation home). It resolves `new.deps`
-    //   into edges added in/after the same tx, then returns the created `Issue` (the MCP quick-create extracts
-    //   `.id`). It maps the markdown-captured fields `design`/`acceptance_criteria`/`assignee`/`agent_context`
+    //   minting is the engine's job, NOT an L7 adapter's; FR-9 single mutation home). **Dependency edges
+    //   (NORMATIVE — D44):** it SEEDS each `new.deps` element onto the built `Issue.dependencies`, stamping
+    //   `issue_id = the just-minted id` (plus `created_at = now`, `created_by = actor`, `thread_id = None`) —
+    //   the source is ALWAYS the issue being created and is NEVER taken from the client, which is why
+    //   `NewDep` has no source field at all. `storage.create_issue` then writes the row, its labels, EVERY
+    //   edge and every event in ONE transaction, and applies the create-specific duplicate + gating-cycle
+    //   guards (§3.2.1), so the create is all-or-nothing: any rejection (self, duplicate, cycle, backend)
+    //   leaves ZERO rows — no orphan issue, no prefix of edges. There is NO post-insert edge pass; the
+    //   pre-D44 shape wrote each edge in its own INDEPENDENT transaction and is DELETED.
+    //   `Storage::create_issue` re-anchors seeded edges anyway (§3.2.1), so the two halves agree by
+    //   construction. It then returns the created `Issue`, hydrated — `dependencies[i].issue_id` equals the
+    //   returned `.id` and `metadata` round-trips (the MCP quick-create extracts `.id`).
+    //   It maps the markdown-captured fields `design`/`acceptance_criteria`/`assignee`/`agent_context`
     //   (D22) onto the built `Issue` fields of the same name (the domain `Issue` §1.6 already carries them — no
-    //   model change). `Session::create(&Issue)` is UNCHANGED (the id-preserving import path already accepts a
-    //   fully-built `Issue` with those fields). NAME: `create_issue` parallels `Storage::create_issue` (engine mints + delegates to storage);
+    //   model change). `Session::create(&Issue)` is UNCHANGED **BY D22** (the id-preserving import path already
+    //   accepts a fully-built `Issue` with those fields) — D44 DOES change it: it now carries
+    //   `Storage::create_issue`'s create-specific duplicate + gating-cycle guards (its own row above; §3.2.1).
+    //   NAME: `create_issue` parallels `Storage::create_issue` (engine mints + delegates to storage);
     //   the two live in DIFFERENT namespaces (`Session::` vs the `Storage` trait), so the name does not clash.
     //   The pure candidate compute (hash/seed/adaptive-length/slug-normalize) lives in unblock-model `id.rs`;
     //   the stateful collision-retry loop + the existence probe (`get_issue(id).await?.is_some()`, NOT a `Storage::exists`) and the `next_child_number` read live in the engine allocator.
@@ -1595,8 +1735,14 @@ impl Session {
     //   ON ANY FAILURE (mint exhaustion, an unresolved ref that slipped validation, a raced `IdCollision`, any storage
     //   error) the whole tx ROLLS BACK → ZERO issues persisted → the caller gets ONE `EngineError`/`StructuredError`.
     //   This is the TRUE all-or-nothing (parse-validation AND mint/insert atomicity), NEVER a partial commit. The MCP
-    //   `create_bulk` adapter (§5.2) calls THIS — NOT a loop over `create_issue`. The single-record `create_issue`/
-    //   `create(&Issue)` paths are UNCHANGED (this is additive).
+    //   `create_bulk` adapter (§5.2) calls THIS — NOT a loop over `create_issue`. **The "the single-record
+    //   `create_issue`/`create(&Issue)` paths are UNCHANGED" clause is SUPERSEDED by D44** — the single create is
+    //   now all-or-nothing too (edges seeded onto the built `Issue`, one tx; §3.2.1 + the `create_issue` row there).
+    //   `create_bulk`'s OWN semantics are UNCHANGED by D44: it keeps the shared body's dedup-and-continue on a
+    //   repeated `depends_on_id` and it still has NO cycle guard, deliberately — that body is also the JSONL/`bd`
+    //   import body, and adding a guard there could make an already-exported D5 record un-importable. Step (4)'s
+    //   built edges now carry the engine-owned `NewDep` (§4.1), so a bulk record's edges are stamped with the
+    //   MINTED id in memory as well as on the row (they were already re-anchored on the row).
     pub async fn update(&self, id: &str, patch: &IssuePatch) -> Result<Issue, EngineError>;
     pub async fn delete(&self, plan: &DeletePlan) -> Result<DeletePlan, EngineError>;
     pub async fn restore(&self, id: &str) -> Result<Issue, EngineError>; // FR-1c recovery (D20) — un-tombstone
@@ -1675,7 +1821,7 @@ impl Session {
 // CloseOutcome / ImportReport / ExportReport are defined in unblock-model §1.10 and
 // re-exported here (CF-A) — NOT redefined. CountBucket / GraphEdge / DepTree /
 // DiagnosticReport / DiagnosticFinding / DiagnosticKind likewise come from unblock-model
-// via the same re-export. SessionConfig + ImportOptions + NewIssue (D21) + MigrateOutcome
+// via the same re-export. SessionConfig + ImportOptions + NewIssue (D21) + NewDep (D44) + MigrateOutcome
 // (D27/AF-2) are engine-owned (above); MigrateOutcome is a plain engine-local return (no
 // JsonSchema, NOT a §1.10 DTO), exported from unblock-engine like the peer ImportOptions
 // (the TRUE engine-local peer — a plain engine-defined return, no JsonSchema; contrast
@@ -1684,11 +1830,11 @@ impl Session {
 
 ### 4.2 Write-serialization contract (D14 + D31 — normative)
 
-- **(L5, in-process)** One `Arc<tokio::sync::Semaphore>` with **1 permit** per `Session`. Every mutation `acquire()`s the single permit for the **entire** storage transaction, then releases — serializing all in-process writers (linearizable per FR-9).
+- **(L5, in-process)** One `Arc<tokio::sync::Semaphore>` with **1 permit** per `Session`. Every mutation `acquire()`s the single permit for the **entire MUTATION** — every storage call it makes, reads included — then releases, serializing all in-process writers (linearizable per FR-9). **One-transaction invariant (NORMATIVE — D44).** The WRITE side of a mutation is EXACTLY ONE storage transaction; a mutation may run read probes before or after it, but never a SECOND write transaction. Rationale: the permit and the `.write.lock` give mutual exclusion ONLY — no rollback, no undo log, no compensating action (see the cancel-safety bullet) — so a mutation spanning two write transactions can be interrupted between them and leave a half-state that no lock and no cancel-safety property can undo. `Session::create_issue` was the ONE violation (the row insert, then one independent edge transaction per declared dep) and D44 collapses it into the single `Storage::create_issue` transaction. **`Session::migrate` is the ONE carve-out**: it deliberately bypasses `with_immediate_tx` and holds the EXCLUSIVE `.write.lock` (timeout=0, fail-fast) for the whole command (§3.2), so its multi-statement shape is governed by the migration contract, not by this bullet.
 - **(L2, cross-process — D31)** Under the permit, the engine ALSO acquires the storage advisory `.unblock/.write.lock` guard (`Storage::acquire_write_lock`, spine §3.2) for the **WHOLE mutation** — the SAME span as the permit, covering the `next_child_number` allocation READ AND the write tx — so two MCP-server children (the SUPPORTED child-per-client topology, D31) cannot both mint the same `parent.N` or interleave writes across processes. Acquire order: permit → `.write.lock` → write-conn Mutex → `BEGIN IMMEDIATE`; release inner-first. The permit and the file lock COMPOSE (both retained); the Semaphore is NOT dropped. A NESTED acquire by the current in-process holder is a re-entrant no-op guard (owns/releases nothing) via the MF4 in-memory held-marker (`WriteLock.held`, the faithful port of beads `write_lock_already_held`), so the holder never self-contends on its own per-fd advisory lock (an internal L2 detail, no public-surface change).
 - **Reads NEVER touch either lock** (FR-10): they run concurrently against libsql WAL readers while a write holds the permit + the file lock.
 - **Supported topology = child-per-client (multiple MCP servers, D31).** The D14 "in-process only / exactly one MCP server per workspace / multiple MCP servers not supported" clause is RETIRED — cross-process write serialization is the restored `.unblock/.write.lock` advisory lock (an L2 storage primitive), with `BEGIN IMMEDIATE` + native `busy_timeout` as the WAL-level backstop. `migrate` acquires the EXCLUSIVE lock (timeout=0 fail-fast) for the whole command, unconditionally; the v1-lite read-only `doctor` takes no lock. NFS/SMB/9p void it (documented residual — no fs-type detection).
-- Permit acquisition is **uncancel-safe across the tx boundary**: a dropped future before commit must release the permit AND the file lock (RAII on both guards) and leave the DB committed-or-rolled-back (no partial state) — verified by the SIGTERM-mid-write failure-injection test (NFR-5). *(This is cancel-safety of the write **tx**. Its peer — cancel-safety of the **process exit** (the D38 no-hang invariant: no return path may block on a runtime drop with a parked stdin read) — is specified in §5b, `mcp`.)*
+- Permit acquisition is **uncancel-safe across the tx boundary**: a dropped future before commit must release the permit AND the file lock (RAII on both guards) and leave the DB committed-or-rolled-back (no partial state) — verified by the SIGTERM-mid-write failure-injection test (NFR-5). **"No partial state" is a per-MUTATION claim, and it holds only because of the one-transaction invariant above.** Pre-D44 it held per transaction and FAILED per operation on `Session::create_issue`: a future cancelled between two edge transactions committed the issue plus the edges written so far and returned NO error to anyone at all. Any future mutation that would need two write transactions must be redesigned, not documented around. *(This is cancel-safety of the write **tx**. Its peer — cancel-safety of the **process exit** (the D38 no-hang invariant: no return path may block on a runtime drop with a parked stdin read) — is specified in §5b, `mcp`.)*
 - Property test (FR-9): interleaved mutations through the engine are linearizable; MCP and CLI produce identical results for the same op.
 
 ---
@@ -1731,7 +1877,8 @@ pub enum IssueInput {
         #[serde(default)] priority: Option<Priority>,
         #[serde(default)] labels: Vec<String>,
         #[serde(default)] parent: Option<String>,
-        #[serde(default)] deps: Vec<DepInput>,
+        #[serde(default)] deps: Vec<DepInput>,   // D44 — each element's SOURCE is implicit (the issue
+                                                 // being created); see the DepInput block below.
         #[serde(default)] due_at: Option<DateTime<Utc>>,
         #[serde(default)] defer_until: Option<DateTime<Utc>>,
         #[serde(default)] estimated_minutes: Option<i32>,
@@ -1836,6 +1983,114 @@ pub enum IssueInput {
     // `Event(Restored)` (§3.2.1 `restore_issue` / §4.1 `Session::restore`). The interface
     // lands now; the `issue`-tool MCP adapter wires this action at T2.2.
 }
+
+// DepInput — the ONLY wire shape for a dependency edge declared on `issue create`.
+//
+// EXCLUSIVITY IS A SCHEMA CLAIM, NOT A RUST ONE — the distinction is load-bearing and D44 states both
+// halves. Schema half (TRUE, and the half the contract rides on): `$defs/DepInput` is `$ref`-ed from
+// exactly ONE site, the `issue` tool's `create.deps` array items, so the `dep` tool's published flat
+// `Add`/`Remove` arms do NOT move. Rust half (FALSE pre-D44, and the reason this block is normative):
+// the TYPE is constructed in code by the `dep` tool — `crates/unblock-mcp/src/tools/dep.rs:120-126`
+// builds a `DepInput` literal out of `DepToolInput::Add`'s own REQUIRED `issue_id: String` and calls
+// `DepInput::into_dependency(&actor, now)` (`crates/unblock-mcp/src/tools/dto.rs:75-90`), which assigns
+// `self.issue_id` straight into the model `Dependency`'s `String` field (`dto.rs:79`).
+//
+// RESOLUTION (NORMATIVE — D44 decides this; it is NOT left to the implementer). Retyping `issue_id` to
+// `Option<String>` is a COMPILE BREAK at that call site, and the mechanical repair an implementer
+// reaches for — `unwrap_or_default()` — would write an EMPTY-STRING edge source on the `dep add` path,
+// re-introducing the exact class D44 exists to close, on a path that is currently correct. So:
+//   * The `dep` tool STOPS routing through `DepInput`. `DepToolInput::Add` builds the model
+//     `Dependency` DIRECTLY from its own fields — where `issue_id` is a real, required, client-KNOWN,
+//     pre-existing issue id, which is why that arm keeps it (§5.2 `DepToolInput`).
+//   * `DepInput::into_dependency` is DELETED with its last PRODUCTION caller. Its OTHER production
+//     caller is the create arm (`crates/unblock-mcp/src/tools/issue.rs:353`), which D44 replaces with
+//     the `DepInput` -> `NewDep` map. A THIRD call site exists and is named rather than elided: the
+//     unit test at `dto.rs:218`, item (f) below, which MOVES to the new construction site — so after
+//     D44 the method has no callers at all. Deleting it is what makes the misattachment
+//     class UNREPRESENTABLE rather than merely documented: no function exists that can turn a
+//     `DepInput` into a model `Dependency` at L7.
+//   * EVERY SURVIVING MENTION RIDES ALONG IN THE SAME CHANGE. Enumerated site by site rather than
+//     summarised as a count, because THERE IS NO `cargo doc`/RUSTDOC STEP ANYWHERE IN
+//     `.github/workflows/` — a broken intra-doc link left behind by this deletion does not even warn,
+//     let alone block, so nothing but this list will catch one.
+//     The mention set is exactly `git grep -n into_dependency -- crates/` MINUS the `fn` signature that
+//     is being deleted (`dto.rs:77`) — SEVEN lines, (a)..(g) below — plus ONE non-mention ride-along,
+//     (h), which the deletion strands even though it never names the method. Each is dispositioned:
+//       (a) `crates/unblock-mcp/src/tools/dep.rs:126` — CALL SITE. Retired by the clause above: the
+//           `dep` tool builds the model `Dependency` directly from `DepToolInput::Add`'s own fields.
+//       (b) `crates/unblock-mcp/src/tools/issue.rs:353` — CALL SITE. Retired by the clause above: the
+//           create arm becomes the `DepInput` -> `NewDep` map.
+//       (c) `crates/unblock-mcp/src/tools/dto.rs:8` — the MODULE doc's intra-doc link, today
+//           "[`DepInput::into_dependency`] builds the model [`unblock_model::Dependency`] under a
+//           supplied actor/timestamp". REWRITTEN (not merely unlinked) to describe `DepInput` as what
+//           it becomes: the create-arm edge input the `issue` adapter maps to the source-less `NewDep`.
+//       (d) `crates/unblock-mcp/src/tools/dto.rs:53-57` — the STRUCT doc. **THIS ONE IS PUBLISHED
+//           CONTRACT BYTES, NOT AN ORDINARY COMMENT.** `JsonSchema` emits it VERBATIM as
+//           `$defs/DepInput.description`; it is pinned in the golden at (e). Its live sentence — that
+//           the type is "used both as a `query`/`dep`-tool edge input" AND as an element of the `issue`
+//           tool's `create.deps` array, its `created_at`/`created_by` "supplied by the adapter via
+//           [`DepInput::into_dependency`]" — is FALSE on BOTH halves once this resolution lands, and
+//           the attribution is spelled out because part of it does NOT belong to D44: the `query`
+//           mention is ALREADY false at HEAD (`git grep -w DepInput -- crates/unblock-mcp/src` finds no
+//           `query.rs` use at all — a pre-existing doc defect this rewrite also repairs); D44 makes the
+//           `dep` half false, since that tool stops routing through the type; and D44 deletes the
+//           method the second half names. After D44 the type is an element of that ONE array and
+//           nothing else. Rewriting it MOVES the
+//           `schema_bundle()` bytes,
+//           so it is part of the clause-(6) `unblock.mcp.v1.7` bump + golden re-bless, NOT an
+//           incidental edit. A reader who treats it as an ordinary comment leaves a FALSE description
+//           in the PUBLISHED schema — the precise class D44 clause (6) exists to refuse.
+//       (e) `crates/unblock-mcp/tests/snapshots/contract_suite__schema_bundle.snap:37` — the golden
+//           that carries (d) verbatim. Re-blessed WITH the bump, never silently (clause 6).
+//       (f) `crates/unblock-mcp/src/tools/dto.rs:218` — inside the unit test
+//           `dep_input_builds_dependency_with_actor_and_ts` (`dto.rs:209-224`), which MOVES to cover
+//           the new `dep.rs` construction site. The cited range runs to `:224` on purpose: `:219-223`
+//           are the five assertions that actually have to move, and a range stopping at the
+//           `.into_dependency(…)` call at `:218` would relocate the fixture without its checks.
+//       (g) `crates/unblock-storage/src/testkit.rs:3136-3137` — a doc reference explaining that
+//           `into_dependency` hardcodes `thread_id: None`; RE-POINTED at the new construction site.
+//       (h) the D42 `thread_id: None` rationale comment (`dto.rs:85-89`) — it names no method, so no
+//           grep for `into_dependency` finds it, yet it lives INSIDE the deleted body. It moves
+//           VERBATIM to the new construction site in `dep.rs`: it exists to stop a reader deleting a
+//           bind that is otherwise read as dead code, and losing it re-opens that hazard.
+//   * `deny_guard.rs:236`'s `assert_denies_unknown_fields::<DepInput>` STAYS and still compiles: an
+//     `Option` field deserializes a PRESENT value happily — rejecting it is the adapter's job, never
+//     serde's, which is exactly why clause (2)'s rule is an adapter rule.
+//   * **PROHIBITED, named because it is the patch of least resistance:** `DepInput.issue_id` must NEVER
+//     be defaulted to `""` — no `unwrap_or_default()`, no `unwrap_or("")`, no `Option::take().unwrap_or`
+//     — anywhere. The field is read for EXACTLY ONE purpose: `is_some()` -> reject (clause 2). It is
+//     never read for an edge source, on any path.
+// NORMATIVE — D44:
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]        // D42 — NOT recursive; every nested container carries its own
+pub struct DepInput {
+    /// The dependent issue id. **OPTIONAL, and on `issue create` it MUST be omitted.** The edge is
+    /// sourced on the issue this call is creating, whose id the SERVER mints (D21) — so the field has
+    /// exactly one correct value and the client cannot derive it. A PRESENT value is REJECTED with
+    /// `VALIDATION_FAILED` and a field hint naming `deps[i].issue_id`; it is NEVER silently ignored and
+    /// NEVER applied to the issue it names. An explicit JSON `null` is an ABSENCE, and is accepted.
+    #[serde(default)] issue_id: Option<String>,
+    /// The blocker issue id (target).
+    depends_on_id: String,
+    dep_type: DependencyType,
+    #[serde(default)] metadata: Option<String>,   // round-trips since D42's 7-column bind; since D44 on
+                                                  // the create path too
+}
+// D44 mapping (dependency edges): the `issue`-tool adapter maps each `DepInput` to the engine-owned,
+// SOURCE-LESS `NewDep` (§4.1). Because `NewDep` cannot carry a source, a present `issue_id` has nowhere to
+// go and is rejected AT THE ADAPTER — before any mint, before the write permit — so a rejected create
+// persists nothing BY CONSTRUCTION, not by rollback. The rule is SYNTACTIC (any present value), because
+// the id is minted at L5 AFTER the adapter has built `NewIssue`, so an equality test against the minted id
+// is not a question the boundary can ask. ON THE CREATE ARM ONLY, `created_at`/`created_by` are no longer
+// stamped at L7: the engine stamps them from the session actor when it seeds `Issue.dependencies` (§4.1).
+// The `dep` tool's own `add` arm still stamps both at L7 (`dep.rs:126` — `now` + the session actor), and
+// D44 does not move that; it is a cross-issue edge on an EXISTING source, not a create. The one direction a single
+// call can express is therefore "the new issue is BLOCKED BY an existing one"; "create an issue that BLOCKS
+// an existing one" is a create followed by `dep {action:add}` — the dedicated cross-issue tool, which
+// anchors correctly by design, and which the rejection hint must name. That cost is ACCEPTED and stated
+// openly (PRD D44): it is not a regression, because that direction is not expressible on ANY create surface
+// today (the bulk surface has no way to state it either, and every such single-create payload today is a
+// foreign-key error with a committed orphan or a silent misattachment).
 
 #[derive(Deserialize, JsonSchema)]
 pub struct ClaimInput { pub id: String, pub assignee: String, #[serde(flatten)] pub attribution: Attribution }
@@ -2199,6 +2454,39 @@ defect fix. The cost is that the class is filterable only by `context.kind == "d
 v1.1 candidate, disclosed rather than hidden. D43 adds **no** public API surface (the public
 `run_mcp_server(Arc<Session>, McpServerOptions)` signature is unchanged; the byte-level bound change is
 confined to a private function and two `test-util` helpers).
+
+**D44 (v1.0.1) — the contract bumps to `unblock.mcp.v1.7`.** A SIBLING entry appended to this ledger; the
+D42 and D43 clauses above record what shipped before and are NOT renumbered. D44 makes the single
+`issue create {deps:[…]}` path atomic and correctly anchored (§3.2.1, §4.1) and, on the wire, relaxes
+`$defs/DepInput.issue_id` from REQUIRED to OPTIONAL with a rewritten description saying it MUST be omitted
+on the create arm. `$defs/DepInput` is `$ref`-ed from exactly ONE site — the `issue` tool's `create.deps`
+array items — so the `dep` tool's published schema does NOT move; but a `required` list and a property
+description are both schema bytes, so `schema_bundle()` moves → `CONTRACT_HASH` re-pinned + the
+`schema_bundle` golden re-blessed. `capabilities()` moves only by its `contract_version` field (a FIELD
+description is not a TOOL description). `agents_digest()` is a pure derived view (D33, below), and the managed `AGENTS.md` capabilities table is
+BYTE-IDENTICAL after D44 — it does NOT regenerate. `effective_params`
+(`crates/unblock-mcp/src/resources/agents_digest.rs:232-253`) merges a node's own
+`properties`/`required[]` with the arm-ROOT `$ref` only; a PROPERTY-level `$ref` — which is what
+`create.deps`'s items are — is never resolved, only the property KEY is collected (its own doc-comment
+says so at `:224-228`). So the digest never descends into `$defs`, `AGENTS.md:32` already lists `deps`
+as an OPTIONAL param of `issue create` and has never published `DepInput`'s internal fields, and D44
+moves only `$defs/DepInput`'s requiredness. The ONE `AGENTS.md` byte that moves is the contract line
+(`AGENTS.md:8`), via `AgentsDigest.contract_version` — derived, therefore NOT an extra version event. D44 mints **no** `ErrorCode` (the rejection rides the
+existing `VALIDATION_FAILED`; the storage-side guards reuse `SelfDependency`/`DuplicateDependency`/
+`CycleDetected`), so `ErrorCode::ALL`, `capabilities().error_codes` and the 0–8 exit-code table are all
+unchanged. D44 adds **no** public API surface: `Storage`'s signatures are untouched — the edges ride
+`Issue.dependencies`, which `Storage::create_issue` already persists — so no `impl Storage` block gains,
+loses or re-types a method and every implementor's METHOD SET is unchanged. That is a claim about
+SURFACES only: the shipped libsql `create_issue` BODY (`crud.rs:31-52`) does gain the create-specific
+guards, and the engine's `RaceInjector` test double gains an `add_dependency` counter
+(`crates/unblock-engine/tests/common/mod.rs:899-900`); the
+engine-side change is the new engine-owned `NewDep` plus `NewIssue.deps`'s element type, both inside
+unpublished workspace-internal crates. Per D35 an additive `.M` bump inside 1.x is NON-breaking, so this
+ships in a PATCH release — the same reasoning D42 clause 4(iii) used to ship a fence-aware `create_bulk`
+rejection of documents GA v1.0.0 accepted. **The ratified behavioural change is stated openly:** a create
+whose `deps[].issue_id` names a third party now returns `VALIDATION_FAILED` instead of silently rewriting
+that party's dependency graph, and one whose `deps[].issue_id` names a non-existent id now returns
+`VALIDATION_FAILED` with NOTHING persisted instead of a foreign-key error with a committed orphan.
 
 **`agents_digest()` — a pure DERIVED VIEW, not a wire resource (T3.4.3/D33).** `unblock-mcp` additionally
 exposes `pub fn agents_digest() -> AgentsDigest` next to `schema_bundle()`: a CLI-friendly typed digest (the

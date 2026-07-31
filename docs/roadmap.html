@@ -376,7 +376,7 @@
 
     <div class="ga-box">
       <h3><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 22V4a2 2 0 0 1 2-2h9l1 2h4v11h-5l-1-2H6"/></svg>GA 1.0.0 — shipped</h3>
-      <p class="g-sub">v1.0.0 is tagged, published and marked <span class="mono">Latest</span>. One post-GA validation remains. NOTE the v1.0.1 patch is NOT entirely outside the versioned contract: D42 carries an additive <span class="mono">contract_version</span> bump to <span class="mono">unblock.mcp.v1.6</span> (D35-legal inside 1.x).</p>
+      <p class="g-sub">v1.0.0 is tagged, published and marked <span class="mono">Latest</span>. One post-GA validation remains. NOTE the v1.0.1 patch is NOT entirely outside the versioned contract: D42 carries an additive <span class="mono">contract_version</span> bump to <span class="mono">unblock.mcp.v1.6</span> and D44 a further one to <span class="mono">unblock.mcp.v1.7</span> (both D35-legal inside 1.x).</p>
       <div class="ga-steps">
         <div class="g-step ok"><span class="mk">✓</span><div class="t"><b>All GA blockers + the pre-tag exit fix merged</b><span>comments #422 (D37) · signal-exit #423 (D38) · discovery #424 (D39) · exit-code #425 (D40)</span></div></div>
         <div class="g-step ok"><span class="mk">✓</span><div class="t"><b>Release pipeline green</b><span>rc.6 → v1.0.0 · 5 triples + Sigstore attestations (D36) · CI 17/17 · Release 9/9</span></div></div>
@@ -388,7 +388,7 @@
     <div class="drift">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
       <div class="d-t"><b>Post-GA loose ends (all non-blocking, v1.1 / hardening).</b> The <span class="mono">unblock update</span> full-swap smoke is the one path never run end-to-end (fixable in a v1.0.1 patch — that smoke itself is outside the frozen contract, though the same patch does carry the D42 additive contract bump). Deferred hardening: D38 follow-ups (a)/(c), CD-6 (upstream rmcp), the <code>lock.rs::zero_timeout</code> flake, the §13/M3 doc cleanup.
-        <span>v1.0.1 DOES touch the versioned MCP contract: D42 bumps it to <span class="mono">unblock.mcp.v1.6</span> and re-pins <span class="mono">CONTRACT_HASH</span>. That is an ADDITIVE <span class="mono">.M</span> bump inside 1.x (D35), so it stays patch-eligible and is not a 2.0.0 event; the 0–8 exit table and the CLI surface are untouched. Next version to lock &amp; decompose: <b>v1.1</b>.</span>
+        <span>v1.0.1 DOES touch the versioned MCP contract: D42 bumps it to <span class="mono">unblock.mcp.v1.6</span> and D44 bumps it again to <span class="mono">unblock.mcp.v1.7</span>, each re-pinning <span class="mono">CONTRACT_HASH</span>. Both are ADDITIVE <span class="mono">.M</span> bumps inside 1.x (D35), so they stay patch-eligible and are not a 2.0.0 event; the 0–8 exit table and the CLI surface are untouched. Next version to lock &amp; decompose: <b>v1.1</b>.</span>
       </div>
     </div>
   </section>
@@ -409,6 +409,8 @@
           <li>Fix: MCP argument boundary (D42) — errors escaped the structured channel; unknown fields were silently dropped; the per-request quota missed anything under an unknown key</li>
           <li>Fix: DUPLICATE JSON keys (D43) — a duplicated key collapsed last-wins while the frame was decoded, so a request whose text read as one action executed a different one; now rejected in-band, on the MCP <span class="mono">tools/call</span> path and on <span class="mono">bd</span> import lines</li>
           <li>Fix: <span class="mono">create_bulk</span> silent markdown drops + <span class="mono">dep.metadata</span> discarded at L2</li>
+          <li>Fix: <span class="mono">issue create</span> with deps (D44) — the issue committed first and each declared edge landed in its own follow-up transaction, anchored on an id the client had to guess: a wrong guess left an edge-less orphan, an existing-but-wrong guess silently rewrote a THIRD issue&rsquo;s dependency graph. Now one transaction, the edge source implicit (the field is omitted, a supplied one is rejected), with the cycle and duplicate guards restored — bulk create and import untouched</li>
+          <li>Fix: dangling BLOCKER id on every edge-writing path — a <span class="mono">depends_on_id</span> naming an issue that does not exist is accepted with <span class="mono">isError:false</span> and plants a permanently unresolvable blocker; now an in-transaction existence check with an <span class="mono">external:</span> carve-out, plus a <span class="mono">doctor</span> view that lists the dangling blockers already written into live workspaces. Cut TOGETHER with D44, as its co-requisite: D44 removes the foreign-key failure that used to mask a bogus blocker id, so a release carrying D44 without this one would ship a wider hole than GA did</li>
           <li>Fix: no forward-migration for the comments schema (old DBs break)</li>
           <li>Run the end-to-end <span class="mono">unblock update</span> full-swap smoke (FR-25)</li>
         </ul>

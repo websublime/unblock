@@ -277,6 +277,10 @@ jobs:
       # duplicate-key scan, and no doc may still frame that class as open. A predicate, not a count —
       # it also self-tests that every allow-list entry still matches something.
       - run: scripts/checks/d43-argument-boundary-claims.sh
+      # D44 zero-live-hits: no doc, doc-comment, golden or test may still describe `issue create` with
+      # deps as a multi-transaction, client-anchored path, and every cascade site must have landed. A
+      # predicate, not a count — it also self-tests its allow-list and its own family table.
+      - run: scripts/checks/d44-create-deps-claims.sh
       # k1..k6: .knowledge structural lint — SEPARATE corpus from the 19-file normative lint (ci-cd §2.3)
       - run: cargo xtask knowledge-lint
       # Executable proof of the shared gate predicate — every rule arm, exits 0/1/2.
