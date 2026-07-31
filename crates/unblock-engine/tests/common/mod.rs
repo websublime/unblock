@@ -745,10 +745,15 @@ pub mod collide {
 /// vs `create_issue` vs `add_dependency` calls so a test can prove the engine routes the bulk through
 /// ONE atomic `create_issues` (not N `create_issue` calls) and — since D44 — that the MINTING single
 /// create routes through ONE `create_issue` and makes ZERO separate `add_dependency` calls.
+///
+/// Since D44 it additionally CAPTURES a clone of every `Issue` handed to `create_issue`, which is the
+/// only vantage point from which layer 5's own edge stamping is observable at all — see
+/// [`RaceInjector::captured_creates`].
 pub mod race {
     use super::{Arc, Storage};
     use async_trait::async_trait;
     use chrono::{DateTime, Utc};
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use unblock_model::{
         Comment, CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue,
@@ -763,6 +768,7 @@ pub mod race {
         create_issues_calls: AtomicUsize,
         create_issue_calls: AtomicUsize,
         add_dependency_calls: AtomicUsize,
+        captured_creates: Mutex<Vec<Issue>>,
     }
 
     impl RaceInjector {
@@ -776,6 +782,7 @@ pub mod race {
                 create_issues_calls: AtomicUsize::new(0),
                 create_issue_calls: AtomicUsize::new(0),
                 add_dependency_calls: AtomicUsize::new(0),
+                captured_creates: Mutex::new(Vec::new()),
             })
         }
 
@@ -802,6 +809,27 @@ pub mod race {
         pub fn dep_calls(&self) -> usize {
             self.add_dependency_calls.load(Ordering::SeqCst)
         }
+
+        /// Every `Issue` value handed to `Storage::create_issue`, in call order, cloned AS THE
+        /// ENGINE BUILT IT — before storage touches it (D44).
+        ///
+        /// This exists because layer 5's edge stamping is otherwise INVISIBLE to the whole suite.
+        /// The libsql `create_issue` body RE-ANCHORS every seeded edge on the row it is writing
+        /// (`crates/unblock-storage/src/libsql/crud.rs:248` binds `issue.id`, never `dep.issue_id`)
+        /// and falls back to the call's `actor` for an absent `dep.created_by` (:252) — and
+        /// `Session::create_issue` returns a RE-READ of the persisted row. So every assertion made
+        /// on a returned or re-read issue observes what LAYER 2 wrote, and an engine that stamped an
+        /// empty string, a foreign id, or no actor at all onto `Dependency.issue_id` /
+        /// `Dependency.created_by` would be repaired on the way down and pass the entire workspace.
+        /// The spine pins that stamping on the ENGINE, so the engine is where it has to be observed:
+        /// capturing the argument is the only vantage point that sees layer 5's own output.
+        #[must_use]
+        pub fn captured_creates(&self) -> Vec<Issue> {
+            self.captured_creates
+                .lock()
+                .expect("captured_creates mutex")
+                .clone()
+        }
     }
 
     #[async_trait]
@@ -821,6 +849,12 @@ pub mod race {
 
         async fn create_issue(&self, issue: &Issue, actor: &str) -> Result<String, StorageError> {
             self.create_issue_calls.fetch_add(1, Ordering::SeqCst);
+            // Capture BEFORE delegating: the inner libsql body re-anchors the seeded edges, so this
+            // clone is the only record of what the engine itself built (D44).
+            self.captured_creates
+                .lock()
+                .expect("captured_creates mutex")
+                .push(issue.clone());
             self.inner.create_issue(issue, actor).await
         }
 

@@ -274,7 +274,9 @@ async fn an_explicit_null_dep_source_is_an_absence_and_is_accepted() {
     assert_eq!(edges.len(), 1, "the declared edge landed: {payload}");
     assert_eq!(
         edges[0]["issue_id"], created,
-        "and it is anchored on the MINTED id: {payload}"
+        "and the edge comes back REACHABLE under the minted id. NB same caveat as the canonical-form \
+         cell below: this comparison is structurally unfailable once the edge exists, so it pins the \
+         null-is-omitted ACCEPTANCE, not the engine's anchor: {payload}"
     );
 
     let _ = client.cancel().await;
@@ -295,9 +297,19 @@ async fn an_explicit_null_dep_source_is_an_absence_and_is_accepted() {
 /// way to the engine carrier. At L2 that loss is masked in both directions, so only a wire-level
 /// round-trip assertion can see it.
 ///
-/// MUTANT KILLED (wrong anchor): an engine stamping anything other than the minted id. The
-/// `issue_id` on the returned edge is compared against the returned `id`, which is the entire
-/// implicit-ownership contract expressed at the boundary the client actually sees.
+/// NO MUTANT KILLED (wrong anchor) — this comment previously claimed one, and it was false. An
+/// engine stamping anything other than the minted id does NOT turn this cell red. The returned
+/// `dependencies` are hydrated by `… FROM dependencies WHERE issue_id = ?1` bound to the issue's own
+/// id (`crates/unblock-storage/src/libsql/crud.rs:408`), reading the `issue_id` column back off that
+/// same row, and the INSERT one layer up already re-anchored it on `issue.id` (`crud.rs:248`,
+/// ignoring whatever the engine put there). So `edges[0]["issue_id"] == created` below holds BY
+/// CONSTRUCTION. Proven, not argued: all three anchoring mutants at
+/// `crates/unblock-engine/src/session/write.rs:213` (`String::new()`, `dep.depends_on_id.clone()`, a
+/// literal `"ub-not-me-1"`) were each run against the WHOLE workspace and each killed exactly ONE
+/// test — `the_engine_stamps_the_minted_id_and_the_session_actor_before_storage_sees_the_edges` in
+/// `crates/unblock-engine/tests/create_deps.rs` — leaving this file entirely green. The engine's own
+/// anchor is observable only by capturing the value handed to `Storage::create_issue`, which no
+/// wire-level test can do; that is why the pin lives in the engine cell and not here.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_create_with_an_omitted_dep_source_round_trips_the_edge_and_its_metadata() {
     let session = session().await;
@@ -326,7 +338,9 @@ async fn a_create_with_an_omitted_dep_source_round_trips_the_edge_and_its_metada
     assert_eq!(edges.len(), 1, "the declared edge landed: {payload}");
     assert_eq!(
         edges[0]["issue_id"], created,
-        "anchored on the MINTED id: {payload}"
+        "the edge comes back REACHABLE under the minted id. NB structurally unfailable once the \
+         edge exists (hydration filters by `issue_id`, crud.rs:408) — the ENGINE's anchor is pinned \
+         in unblock-engine's `create_deps.rs`, not here: {payload}"
     );
     assert_eq!(edges[0]["depends_on_id"], blocker.as_str(), "{payload}");
     assert_eq!(
