@@ -678,10 +678,16 @@ fn dep_with_metadata(from: &str, to: &str, metadata: Option<&str>) -> unblock_mo
 
 /// `export -> import -> export` is BYTE-IDENTICAL for an issue whose dep carries `metadata`.
 ///
-/// Before D42 it was NOT a fixed point: the import leg routes to `storage.create_issue`, whose
-/// 5-column dep INSERT dropped the field, so the second export emitted a dep object without it.
-/// This leg never goes through the engine's post-create dep loop, so it is unaffected by the
-/// separately-tracked `issue create {deps:[…]}` non-atomicity.
+/// Before D42 it was NOT a fixed point: the 5-column dep INSERT in the shared per-record body
+/// dropped the field, so the second export emitted a dep object without it.
+///
+/// The import leg enters storage through `create_issues` (`import.rs`, pinned there by an assertion
+/// that `create_issue_calls` stays at zero) - NOT through the single-record `create_issue`. That
+/// distinction is load-bearing since D44: the create-specific duplicate and gating-cycle guards D44
+/// restored live in the `create_issue` wrapper only, so import semantics are unchanged and an
+/// already-exported record stays importable. The storage testkit case
+/// `contract_create_issues_still_dedups_and_still_admits_a_cycle` is what fails if they ever move
+/// into the shared body.
 #[tokio::test]
 async fn dep_metadata_survives_export_import_export() {
     let (_tmp, dir) = unblock_dir();
@@ -749,4 +755,57 @@ async fn a_dep_without_metadata_still_emits_exactly_five_keys() {
         "an absent metadata must stay ABSENT (binding `'{{}}'` instead of SQL NULL would add it): {edge:?}"
     );
     assert_eq!(edge.len(), 5, "the bd-shaped 5-field dep object: {edge:?}");
+}
+
+// --------------------------------------------------------------------------------------------------
+// D44 - the IMPORT leg is unchanged (PRD §4 D44 clause 3)
+// --------------------------------------------------------------------------------------------------
+
+/// An already-exported record whose edges form a MUTUAL GATING CYCLE still round-trips through
+/// `export -> import` untouched.
+///
+/// D44 restored two guards on the single-record create path - a duplicate-edge rejection and a
+/// gating-cycle rejection. Both were placed in the `create_issue` wrapper and explicitly NOT in the
+/// shared per-record body, because that body is also the body `create_issues` runs, and
+/// `create_issues` is where BOTH import legs enter storage. A guard there would make a record that
+/// unblock itself exported un-importable - a data-integrity tool refusing to restore its own
+/// committed record.
+///
+/// MUTANT KILLED: moving `reject_declared_gating_cycles` from the `create_issue` wrapper into
+/// `insert_issue_in_tx`. The `import_jsonl` call below then returns `CycleDetected` and the imported
+/// count assertion never runs. This is the sync-layer half of the same guard-placement pin the
+/// storage testkit case `contract_create_issues_still_dedups_and_still_admits_a_cycle` carries; both
+/// exist because the failure mode is silent everywhere else - moving a guard INWARD only makes the
+/// create stricter, so every create-path test stays green.
+#[tokio::test]
+async fn a_record_carrying_a_gating_cycle_still_imports() {
+    let (_tmp, dir) = unblock_dir();
+    let source = fresh_storage().await;
+
+    let mut a = issue("ub-cyc-a");
+    a.dependencies = vec![dep_with_metadata("ub-cyc-a", "ub-cyc-b", None)];
+    let mut b = issue("ub-cyc-b");
+    b.dependencies = vec![dep_with_metadata("ub-cyc-b", "ub-cyc-a", None)];
+    source
+        .create_issues(&[a, b], "t")
+        .await
+        .expect("the bulk path commits a mutual gating cycle - unchanged by D44");
+
+    let path = dir.join("issues.jsonl");
+    export_jsonl(&source, &path, &dir, &ExportOptions::default())
+        .await
+        .expect("export");
+
+    let dest = fresh_storage().await;
+    let report = import_jsonl(&dest, &path, &dir, "t", &ImportOptions::default())
+        .await
+        .expect("an exported record must stay importable - D44 changed NOTHING on this leg");
+    assert_eq!(report.imported, 2, "both records landed");
+
+    let restored = dest.list_dependencies("ub-cyc-a").await.expect("list");
+    assert_eq!(
+        restored.len(),
+        1,
+        "and the cyclic edge came back with it, so this test is not vacuous: {restored:?}"
+    );
 }

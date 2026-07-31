@@ -9,20 +9,26 @@
 //! (parent cycle, self-dependency, self-parent, ambiguous, unresolved, marker-only) each →
 //! `ValidationFailed` + ZERO writes; the `blocked-by`→`blocks` alias flip at the edge step; the D22
 //! create-surface field fidelity on `create_issue`; the fault-injection rollback (an out-of-band
-//! racer → whole-batch rollback → ZERO persisted); and that single `create_issue`/`create(&Issue)`
-//! are unchanged.
+//! racer -> whole-batch rollback -> ZERO persisted); and - since D44 - that `create_bulk` and the
+//! `create_issues` body it shares with the D5 import legs keep their OWN semantics: a repeated
+//! target is still deduped rather than rejected, and a mutual gating cycle is still committed.
+//!
+//! The D22 clause that used to close this list - that the single-record create paths were left
+//! alone - is SUPERSEDED by D44, which extended the same one-transaction, all-or-nothing property
+//! to the single create and gave it two create-specific guards this file exists to keep OUT of the
+//! shared body.
 
 mod common;
 
 use std::sync::Arc;
 
-use unblock_engine::{EngineError, NewIssue, Session, SessionConfig};
+use unblock_engine::{EngineError, NewDep, NewIssue, Session, SessionConfig};
 use unblock_error::{CodedError, ErrorCode};
 use unblock_model::{DependencyType, ListFilters, parse_id};
 use unblock_storage::{LibsqlStorage, Storage};
 
 use common::race::RaceInjector;
-use common::session;
+use common::{add_blocks, session};
 
 /// A bare `NewIssue` with just a title (bulk-shape; carriers default empty).
 fn bulk_record(title: &str) -> NewIssue {
@@ -400,12 +406,23 @@ async fn out_of_band_racer_rolls_back_whole_batch() {
 }
 
 // --------------------------------------------------------------------------------------------------
-// Single-create paths unchanged
-// --------------------------------------------------------------------------------------------------
+// Both single-record create paths still work (D44 changed HOW, not WHETHER)
+// -------------------------------------------------------------------------------------------------
 
-/// `create_issue` (single) and `create(&Issue)` (import) still work — the bulk path is additive.
+/// `create_issue` (single, minting) and `create(&Issue)` (id-preserving) both still create.
+///
+/// The retired framing here claimed those two paths were UNCHANGED and that the bulk path was merely
+/// additive. D44 SUPERSEDES that D22 clause: the single create now seeds its declared edges into the
+/// same one transaction the bulk path has always used, and gained two create-specific guards. What
+/// this cell still pins is the part that did not change - a minting create yields a ROOT id, and the
+/// id-preserving create keeps the caller id.
+///
+/// MUTANT KILLED: a D44 repair that routed the minting create through `create_bulk` to reuse the
+/// seeded insert. Ids would still round-trip, but `create_issue` would stop being the single-record
+/// path the guards hang on - and `create_bulk_still_dedups_and_still_admits_a_cycle` below would then
+/// disagree with the storage contract suite about which body carries them.
 #[tokio::test]
-async fn single_create_paths_unchanged() {
+async fn both_single_record_create_paths_still_create() {
     let s = session().await;
     let minted = s
         .create_issue(bulk_record("single"))
@@ -429,4 +446,85 @@ async fn empty_batch_is_noop_ok() {
     let created = s.create_bulk(vec![]).await.expect("empty batch Ok");
     assert!(created.is_empty());
     assert_eq!(count_all(&s).await, 0);
+}
+
+// --------------------------------------------------------------------------------------------------
+// D44 non-regression: `create_bulk` keeps its OWN semantics
+// --------------------------------------------------------------------------------------------------
+
+/// `create_bulk` still DEDUPS a repeated target and still ADMITS a gating cycle - the two things the
+/// single create now refuses.
+///
+/// D44 restored a duplicate-edge rejection and a gating-cycle rejection on the single-record create
+/// path, and placed BOTH in the `Storage::create_issue` wrapper rather than in the shared per-record
+/// body. The reason is this method: `create_bulk` enters storage through `create_issues`, which runs
+/// that shared body - and so do both D5 import legs. A guard there would let unblock export a record
+/// it can no longer import.
+///
+/// The two fixtures are deliberately the SAME shapes the single-create cells reject
+/// (`crates/unblock-engine/tests/create_deps.rs`), so the contrast is exact rather than approximate.
+///
+/// MUTANT KILLED: moving either guard from the `create_issue` wrapper into `insert_issue_in_tx`. The
+/// duplicate move fails the first half, the cycle move fails the second. Neither is visible to any
+/// other test in this workspace, because moving a guard INWARD only ever makes the single create
+/// stricter - every create-path assertion stays green while the import leg quietly breaks.
+#[tokio::test]
+async fn create_bulk_still_dedups_and_still_admits_a_cycle() {
+    let s = session().await;
+
+    // (1) A repeated target inside ONE bulk record: deduped-and-continued, NOT rejected.
+    let target = s
+        .create_issue(bulk_record("bulk target"))
+        .await
+        .expect("target");
+    let mut dup = bulk_record("repeats one target");
+    dup.deps = vec![
+        NewDep {
+            depends_on_id: target.id.clone(),
+            dep_type: DependencyType::Blocks,
+            metadata: None,
+        },
+        NewDep {
+            depends_on_id: target.id.clone(),
+            dep_type: DependencyType::WaitsFor,
+            metadata: None,
+        },
+    ];
+    let created = s.create_bulk(vec![dup]).await.expect(
+        "bulk must still accept a repeated target - dedup-and-continue is D5 import policy",
+    );
+    assert_eq!(
+        created[0].dependencies.len(),
+        1,
+        "the shared body writes the first copy and skips the second: {:?}",
+        created[0].dependencies
+    );
+
+    // (2) A batch record whose declared edges close a gating cycle: still committed.
+    let parent = s.create_issue(bulk_record("P")).await.expect("P");
+    let far = s.create_issue(bulk_record("X")).await.expect("X");
+    add_blocks(&s, &far.id, &parent.id).await;
+
+    let mut closes = bulk_record("closes a gating cycle");
+    closes.deps = vec![
+        NewDep {
+            depends_on_id: parent.id.clone(),
+            dep_type: DependencyType::ParentChild,
+            metadata: None,
+        },
+        NewDep {
+            depends_on_id: far.id.clone(),
+            dep_type: DependencyType::Blocks,
+            metadata: None,
+        },
+    ];
+    s.create_bulk(vec![closes]).await.expect(
+        "bulk must still commit a gating cycle - the single create refuses this exact shape",
+    );
+
+    let cycles = s.detect_cycles(true).await.expect("detect");
+    assert!(
+        !cycles.is_empty(),
+        "the cycle really was persisted, so this cell is not vacuous: {cycles:?}"
+    );
 }

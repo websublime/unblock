@@ -3,7 +3,7 @@ source: crates/unblock-mcp/tests/contract_suite.rs
 expression: schema_bundle()
 ---
 {
-  "contract_version": "unblock.mcp.v1.6",
+  "contract_version": "unblock.mcp.v1.7",
   "issue": {
     "input": {
       "$defs": {
@@ -34,7 +34,7 @@ expression: schema_bundle()
         },
         "DepInput": {
           "additionalProperties": false,
-          "description": "A dependency edge on the wire (spine §5.2 `DepInput`).\n\nUsed both as a `query`/`dep`-tool edge input and as a `Create.deps` element. The model\n[`Dependency`] additionally carries a `created_at`/`created_by` — supplied by the adapter via\n[`DepInput::into_dependency`], not by the wire.",
+          "description": "A dependency edge declared on `issue create` (spine §5.2 `DepInput`).\n\nIt is an element of the `issue` tool's `create.deps` array and nothing else. The edge is sourced\non the issue that call is creating — the server mints that id (D21) — so the adapter maps this to\nthe engine-owned, SOURCE-LESS `NewDep` and the engine stamps the minted id, the actor and the\ntimestamp when it seeds the edge onto the new issue.",
           "properties": {
             "dep_type": {
               "$ref": "#/$defs/DependencyType",
@@ -45,8 +45,12 @@ expression: schema_bundle()
               "type": "string"
             },
             "issue_id": {
-              "description": "The dependent issue id (source).",
-              "type": "string"
+              "default": null,
+              "description": "The dependent issue id. **OPTIONAL, and on `issue create` it MUST be omitted.** The edge is\nsourced on the issue this call is creating, whose id the SERVER mints (D21) — so the field has\nexactly one correct value and the client cannot derive it. A PRESENT value is REJECTED with\n`VALIDATION_FAILED` and a field hint naming `deps[i].issue_id`; it is NEVER silently ignored\nand NEVER applied to the issue it names. An explicit JSON `null` is an ABSENCE, and is\naccepted.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "metadata": {
               "default": null,
@@ -58,7 +62,6 @@ expression: schema_bundle()
             }
           },
           "required": [
-            "issue_id",
             "depends_on_id",
             "dep_type"
           ],
@@ -132,6 +135,7 @@ expression: schema_bundle()
             },
             "deps": {
               "default": [],
+              "description": "Dependency edges to declare on the new issue. Each element means \"the issue being created\ndepends on `depends_on_id`\" — the edge is ALWAYS sourced on the new issue, so\n`deps[].issue_id` MUST be omitted (a present value is rejected). To make the new issue BLOCK\nan existing one instead, create it first, then call `dep {action:\"add\"}`.",
               "items": {
                 "$ref": "#/$defs/DepInput"
               },
