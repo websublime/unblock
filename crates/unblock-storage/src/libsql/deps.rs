@@ -330,14 +330,35 @@ pub(super) async fn detect_cycles(
 /// adds three `parent-child` edges that close a cycle yet all succeed); unblock's own parent→child
 /// blocked propagation (`query.rs` pass 3) requires the consistent reversal so a mixed or
 /// `parent-child`-only cycle is caught at add-time, matching the `reparent_*_cycle_is_rejected`
-/// regression guards. Both `add_dependency` and `apply_reparent` route through here, so the
-/// orientation + the real-path reconstruction land once.
+/// regression guards. `add_dependency` and `apply_reparent` route through here and — since D44 — the
+/// create-specific guard in `crud.rs` routes through this function's two halves
+/// ([`load_gating_graph_in_tx`] + [`would_cycle_in_graph`]), so the orientation + the real-path
+/// reconstruction land once for all three.
 pub(super) async fn would_cycle_in_tx(
     tx: &libsql::Transaction,
     issue_id: &str,
     depends_on_id: &str,
     dep_type: &DependencyType,
 ) -> Result<Option<Vec<String>>, StorageError> {
+    let mut graph = load_gating_graph_in_tx(tx).await?;
+    Ok(would_cycle_in_graph(
+        &mut graph,
+        issue_id,
+        depends_on_id,
+        dep_type,
+    ))
+}
+
+/// Load the gating graph VISIBLE IN `tx` — the loading half of [`would_cycle_in_tx`], split out so a
+/// caller checking SEVERAL prospective edges against the same transaction state can load it ONCE
+/// (D44's create-specific guard, `crud.rs`). Behaviour-neutral: [`would_cycle_in_tx`] is this
+/// function followed by [`would_cycle_in_graph`].
+///
+/// The rows are read INSIDE the caller's transaction, so anything that transaction has already
+/// staged is part of the returned graph.
+pub(super) async fn load_gating_graph_in_tx(
+    tx: &libsql::Transaction,
+) -> Result<BTreeMap<String, Vec<String>>, StorageError> {
     // Load the existing gating edges WITH their type (the type is required so `parent-child` can be
     // inserted reversed — D4/GATE-MUST-1; a type-erased load could not orient the graph).
     let placeholders: Vec<String> = (1..=GATING_TYPES.len()).map(|i| format!("?{i}")).collect();
@@ -370,8 +391,22 @@ pub(super) async fn would_cycle_in_tx(
 
     // Build the gating graph from the EXISTING rows (the add-time guard is always gating, matching
     // the original hardwired `blocking_only=true`), with `parent-child` reversed.
-    let mut graph = build_gating_graph_from_typed(&edges, true);
+    Ok(build_gating_graph_from_typed(&edges, true))
+}
 
+/// Whether adding the gating edge `(issue_id, depends_on_id)` of type `dep_type` closes a cycle in
+/// an ALREADY-LOADED `graph` — the pure half of [`would_cycle_in_tx`] (see that function's
+/// orientation contract, which this carries verbatim).
+///
+/// The prospective edge is inserted into `graph` before the reachability probe, so a caller checking
+/// several edges against one loaded graph accumulates them: each later edge is checked against a
+/// graph that already contains the earlier ones.
+pub(super) fn would_cycle_in_graph(
+    graph: &mut BTreeMap<String, Vec<String>>,
+    issue_id: &str,
+    depends_on_id: &str,
+    dep_type: &DependencyType,
+) -> Option<Vec<String>> {
     // Orient the prospective edge the same way an existing row of its own type would be oriented.
     let prospective_is_parent_child = dep_type.as_str() == PARENT_CHILD;
     let (graph_from, graph_to) = if prospective_is_parent_child {
@@ -386,11 +421,11 @@ pub(super) async fn would_cycle_in_tx(
     // `graph_to` over the rest of the graph (there is a path `graph_to -> … -> graph_from`).
     // Reconstruct that real ordered path and prepend `graph_from` so the witness is the full ordered
     // cycle `[graph_from, graph_to, …, graph_from]`.
-    Ok(find_cycle_path(&graph, graph_from, graph_to).map(|tail| {
+    find_cycle_path(graph, graph_from, graph_to).map(|tail| {
         let mut cycle = vec![graph_from.to_string()];
         cycle.extend(tail);
         cycle
-    }))
+    })
 }
 
 /// Render an ordered cycle witness as the `a -> b -> c -> a` path string carried by

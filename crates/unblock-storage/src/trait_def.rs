@@ -89,13 +89,27 @@ pub trait Storage: Send + Sync {
     // issue CRUD (mutations carry the actor + optional Tier-1 attribution; write Event(s) in-tx)
     // ---------------------------------------------------------------------------------------------
 
-    /// Create an issue, returning its allocated id.
+    /// Create an issue **and its seeded relations**, returning its allocated id.
     ///
     /// Validates via the model `IssueValidator`, guards against id/`external_ref` collisions, inserts
     /// the row, and writes an `Event(Created)` in the same transaction. `actor` is the attributed
     /// author. There is **NO** content-hash dedup here — the hash is computed and stored (a dedup
     /// cache column) but never short-circuits an insert; FR-26 import idempotency lives in
     /// `unblock-sync` (get-then-skip via `sync_equals`), not in storage. (Matches `crud.rs`.)
+    ///
+    /// **It persists the SEEDED relations in that SAME transaction** — the labels, the comments and
+    /// `Issue.dependencies`, each with its per-relation event. Saying only "inserts the row" is how
+    /// the D44 defect was mis-sized, so the dependency contract is spelled out here: the edge INSERT
+    /// **binds `issue.id` as the source column** and reads only
+    /// `depends_on_id`/`dep_type`/`created_at`/`created_by`/`metadata`/`thread_id` from each element —
+    /// a `Dependency.issue_id` carried on the object is IGNORED, never written, and can never reach
+    /// another issue's graph. So the row and every declared edge commit as ONE indivisible act.
+    ///
+    /// **Create-specific guards (D44):** a `depends_on_id` repeated within the declared list is
+    /// rejected with [`StorageError::DuplicateDependency`], and a declared gating edge that closes a
+    /// cycle with [`StorageError::CycleDetected`] carrying the real ordered path. Any rejection —
+    /// including [`StorageError::SelfDependency`] — rolls the whole transaction back to ZERO rows: no
+    /// issue, no edges, no events. [`Storage::create_issues`] deliberately carries NEITHER guard.
     async fn create_issue(&self, issue: &Issue, actor: &str) -> Result<String, StorageError>;
 
     /// Create the WHOLE slice in **exactly ONE** `BEGIN IMMEDIATE` transaction (D22/T2.3, spine
@@ -110,8 +124,13 @@ pub trait Storage: Send + Sync {
     /// violation, backend error) rolls back the entire transaction — **ZERO rows persist** (never a
     /// partial batch). A dependency edge pointing at a sibling minted earlier in the SAME batch
     /// resolves because both rows live in the one uncommitted tx. It is **NEVER** a loop of
-    /// `create_issue` (that would be N independent transactions = a partial-commit hole). The single
-    /// `create_issue`/`create(&Issue)` paths are UNCHANGED.
+    /// `create_issue` (that would be N independent transactions = a partial-commit hole).
+    ///
+    /// **It shares the per-record body with [`Storage::create_issue`] but NOT that method's
+    /// create-specific guards (D44):** a repeated `depends_on_id` keeps being deduped-and-skipped
+    /// here and there is deliberately NO cycle check, because this body is also the JSONL/`bd` IMPORT
+    /// body — a guard here could make an already-exported D5 record un-importable. Bulk and import
+    /// semantics are therefore exactly what they were before D44.
     async fn create_issues(&self, issues: &[Issue], actor: &str) -> Result<(), StorageError>;
 
     /// Fetch a single issue by id, hydrated with its labels and dependencies.

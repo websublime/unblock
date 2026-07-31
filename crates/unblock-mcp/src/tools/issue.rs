@@ -25,6 +25,7 @@ use rmcp::schemars::JsonSchema;
 use rmcp::tool;
 use serde::{Deserialize, Serialize};
 use unblock_engine::{DeleteMode, DeletePlan, IssuePatch, NewIssue};
+use unblock_error::{ErrorCode, StructuredError, clip};
 use unblock_model::{IssueType, Priority, Status};
 
 use crate::server::UnblockServer;
@@ -166,6 +167,10 @@ pub(crate) struct CreateInput {
     pub labels: Vec<String>,
     #[serde(default)]
     pub parent: Option<String>,
+    /// Dependency edges to declare on the new issue. Each element means "the issue being created
+    /// depends on `depends_on_id`" — the edge is ALWAYS sourced on the new issue, so
+    /// `deps[].issue_id` MUST be omitted (a present value is rejected). To make the new issue BLOCK
+    /// an existing one instead, create it first, then call `dep {action:"add"}`.
     #[serde(default)]
     pub deps: Vec<DepInput>,
     #[serde(default)]
@@ -301,6 +306,40 @@ impl DeleteModeInput {
     }
 }
 
+/// The D44 in-band reject for an `issue create` whose `deps[index]` carries an `issue_id`.
+///
+/// Reuses [`ErrorCode::ValidationFailed`] — D44 mints NO new code, so `ErrorCode::ALL`,
+/// `capabilities().error_codes` and the 0–8 exit-code table are all unchanged; the discriminator
+/// rides `context.kind`, a free-form slot no descriptor hashes.
+///
+/// The rule this enforces is SYNTACTIC: ANY present value is rejected, never silently ignored and
+/// never applied to the issue it names. Input destroyed in silence cannot be something a consumer
+/// deliberately relies on, and the only two clients that send one are a client repeating the GA
+/// required-field shape (which this hint tells to drop the field) and a client deliberately mutating
+/// a third party — which is the corruption D44 closes.
+///
+/// The echoed value is [`clip`]ped BEFORE it reaches `StructuredError::from_code` (which sanitizes
+/// but does not bound), so an attacker-supplied oversized id cannot be amplified into the response —
+/// the same bound every other D42/D43 rejection applies.
+fn create_dep_source_rejected(index: usize, source: &str) -> StructuredError {
+    let path = format!("deps[{index}].issue_id");
+    let source = clip(source);
+    StructuredError::from_code(
+        ErrorCode::ValidationFailed,
+        format!("invalid tool arguments: `{path}` must be omitted on `issue create` (got `{source}`)"),
+    )
+    .with_hint(format!(
+        "a dependency declared on `issue create` is ALWAYS sourced on the issue this call is \
+         creating, and the SERVER mints that id — so `{path}` has exactly one correct value and you \
+         cannot derive it. Omit the field and resend; the edge will be anchored on the new issue. \
+         To make the new issue BLOCK an existing one instead, create it first and then call \
+         `dep {{action:\"add\"}}`, which anchors a cross-issue edge on an id you already have. \
+         NOTHING was created by this call."
+    ))
+    .with_context("kind", serde_json::json!("dep_source_not_allowed"))
+    .with_context("field", serde_json::json!(path))
+}
+
 #[rmcp::tool_router(router = issue_router, vis = "pub(crate)")]
 impl UnblockServer {
     /// Create, inspect, or mutate issues (the 7-action issue lifecycle, FR-1a/1b/1c).
@@ -339,8 +378,20 @@ impl UnblockServer {
                     quick,
                     attribution: _,
                 } = *create;
-                let now = Utc::now();
-                let actor = self.session.actor().to_string();
+                // D44 — STRICT IMPLICIT OWNERSHIP. A `deps[i].issue_id` PRESENT on the wire is
+                // REJECTED right here, at the adapter, BEFORE the `NewIssue` is built — so before any
+                // mint and before the write permit, and a rejected create therefore persists nothing
+                // BY CONSTRUCTION, not by rollback. The rule is SYNTACTIC (any present value), not
+                // semantic: the id is minted at L5 AFTER this mapping runs, so the boundary cannot
+                // compare against it. An explicit JSON `null` deserializes to an ABSENCE and is
+                // accepted — it is the JSON spelling of "omitted".
+                if let Some((index, source)) = deps
+                    .iter()
+                    .enumerate()
+                    .find_map(|(i, dep)| dep.issue_id.as_deref().map(|source| (i, source)))
+                {
+                    return err_json(&create_dep_source_rejected(index, source));
+                }
                 let new = NewIssue {
                     title,
                     description,
@@ -348,10 +399,10 @@ impl UnblockServer {
                     priority,
                     labels,
                     parent,
-                    deps: deps
-                        .into_iter()
-                        .map(|d| d.into_dependency(&actor, now))
-                        .collect(),
+                    // Each wire edge becomes the engine-owned, SOURCE-LESS `NewDep`: the engine
+                    // anchors it on the id it is about to mint, and stamps the actor + timestamp
+                    // there (D44 — on THIS arm they are no longer stamped at L7).
+                    deps: deps.into_iter().map(DepInput::into_new_dep).collect(),
                     due_at,
                     defer_until,
                     estimated_minutes,

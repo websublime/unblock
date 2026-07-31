@@ -9,7 +9,7 @@
 //!
 //! A cycle-rejecting `add` surfaces the engine's ordered cycle path naming every node (D2).
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 // D42 SEAM: this is the CRATE-LOCAL `Parameters` (`crate::tools::args`), NOT rmcp's. It defers
 // deserialization so argument errors reach the FR-11 in-band channel instead of an out-of-band
 // `-32602`. The NAME IS LOAD-BEARING (rmcp-macros matches the ident `Parameters` to pick the
@@ -19,7 +19,7 @@ use rmcp::model::CallToolResult;
 use rmcp::schemars::JsonSchema;
 use rmcp::tool;
 use serde::{Deserialize, Serialize};
-use unblock_model::DependencyType;
+use unblock_model::{Dependency, DependencyType};
 
 use crate::server::UnblockServer;
 use crate::tools::dto::Attribution;
@@ -29,6 +29,35 @@ use crate::tools::{engine_err_json, err_json, ok_json};
 /// serde default for [`DepToolInput::Cycles::blocking_only`] (wire-only; the trait takes a bare bool).
 fn default_true() -> bool {
     true
+}
+
+/// Build the model [`Dependency`] for the `add` arm from that arm's OWN fields, under the supplied
+/// actor + timestamp (D44 — this arm no longer routes through the create-arm `DepInput`).
+///
+/// This is a CROSS-ISSUE edge on an EXISTING source: `issue_id` is a real, required, client-known,
+/// pre-existing issue id, so it is the one place where an edge source legitimately comes from the
+/// wire. The create arm is the opposite case and rejects a supplied source outright.
+fn build_add_dependency(
+    issue_id: String,
+    depends_on_id: String,
+    dep_type: DependencyType,
+    metadata: Option<String>,
+    actor: &str,
+    now: DateTime<Utc>,
+) -> Dependency {
+    Dependency {
+        issue_id,
+        depends_on_id,
+        dep_type,
+        created_at: now,
+        created_by: Some(actor.to_string()),
+        metadata,
+        // `thread_id` is DELIBERATELY not on the wire: neither this arm nor `DepInput` has such a
+        // field and v1 carries no threading surface. It is nevertheless BOUND at L2 (D42) so the
+        // storage INSERT is symmetric with the 7-column read projection — do not read that bind as
+        // dead code and delete it.
+        thread_id: None,
+    }
 }
 
 /// The `dep` tool input (spine §5.2 — EXACT shape; was `DepInput2`).
@@ -117,13 +146,13 @@ impl UnblockServer {
             } => {
                 let now = Utc::now();
                 let actor = self.session.actor().to_string();
-                let dep = crate::tools::dto::DepInput {
-                    issue_id,
-                    depends_on_id,
-                    dep_type,
-                    metadata,
-                }
-                .into_dependency(&actor, now);
+                // D44: this arm builds the model `Dependency` DIRECTLY from its own fields and no
+                // longer routes through the create-arm `DepInput`. Here `issue_id` is a real,
+                // REQUIRED, pre-existing, client-KNOWN issue id — a cross-issue edge on an EXISTING
+                // source, not a create — which is why this arm keeps the field while the `issue`
+                // tool's create arm rejects it. The published `dep` schema does NOT move.
+                let dep =
+                    build_add_dependency(issue_id, depends_on_id, dep_type, metadata, &actor, now);
                 match self.session.add_dep(&dep).await {
                     Ok(()) => ok_json(&DepOutput::Added(DepAdded { added: true })),
                     Err(err) => engine_err_json(&err),
@@ -161,5 +190,33 @@ impl UnblockServer {
                 Err(err) => engine_err_json(&err),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_add_dependency;
+    use chrono::{TimeZone, Utc};
+    use unblock_model::DependencyType;
+
+    /// The `add` arm stamps the actor + timestamp onto an edge whose SOURCE comes from the wire.
+    /// Moved here with the D44 code move (it covered `DepInput::into_dependency`, which is deleted).
+    #[test]
+    fn dep_add_builds_dependency_with_actor_and_ts() {
+        let now = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let dep = build_add_dependency(
+            "ub-a".to_string(),
+            "ub-b".to_string(),
+            DependencyType::Blocks,
+            None,
+            "tester",
+            now,
+        );
+        assert_eq!(dep.issue_id, "ub-a");
+        assert_eq!(dep.depends_on_id, "ub-b");
+        assert_eq!(dep.dep_type, DependencyType::Blocks);
+        assert_eq!(dep.created_by.as_deref(), Some("tester"));
+        assert_eq!(dep.created_at, now);
+        assert!(dep.thread_id.is_none());
     }
 }
