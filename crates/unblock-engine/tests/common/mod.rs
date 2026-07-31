@@ -742,8 +742,9 @@ pub mod collide {
 /// one-tx insert then hits the in-tx `IdCollision` and ROLLS BACK the whole batch — the precise
 /// "an out-of-band writer races a row in between the probe and the commit" scenario the spec's
 /// atomicity backstop describes. Every other call is a pure delegate. It also COUNTS `create_issues`
-/// vs `create_issue` calls so a test can prove the engine routes the bulk through ONE atomic
-/// `create_issues` (not N `create_issue` calls).
+/// vs `create_issue` vs `add_dependency` calls so a test can prove the engine routes the bulk through
+/// ONE atomic `create_issues` (not N `create_issue` calls) and — since D44 — that the MINTING single
+/// create routes through ONE `create_issue` and makes ZERO separate `add_dependency` calls.
 pub mod race {
     use super::{Arc, Storage};
     use async_trait::async_trait;
@@ -761,6 +762,7 @@ pub mod race {
         armed: AtomicBool,
         create_issues_calls: AtomicUsize,
         create_issue_calls: AtomicUsize,
+        add_dependency_calls: AtomicUsize,
     }
 
     impl RaceInjector {
@@ -773,6 +775,7 @@ pub mod race {
                 armed: AtomicBool::new(true),
                 create_issues_calls: AtomicUsize::new(0),
                 create_issue_calls: AtomicUsize::new(0),
+                add_dependency_calls: AtomicUsize::new(0),
             })
         }
 
@@ -786,6 +789,18 @@ pub mod race {
         #[must_use]
         pub fn single_calls(&self) -> usize {
             self.create_issue_calls.load(Ordering::SeqCst)
+        }
+
+        /// How many `add_dependency` calls were made (D44).
+        ///
+        /// This counter exists so a test can prove a NEGATIVE: that `Session::create_issue` writes
+        /// its declared edges by SEEDING them onto the `Issue` handed to `create_issue` — inside
+        /// that ONE transaction — and never through a follow-up per-edge pass. The pre-D44 shape
+        /// made exactly `deps.len()` calls here, each its own independent transaction, so this is
+        /// the counter whose value the repair moves from N to 0.
+        #[must_use]
+        pub fn dep_calls(&self) -> usize {
+            self.add_dependency_calls.load(Ordering::SeqCst)
         }
     }
 
@@ -896,7 +911,11 @@ pub mod race {
         ) -> Result<Vec<Issue>, StorageError> {
             self.inner.stale_issues(older_than, filters).await
         }
+        // COUNTED (D44): the create path must never reach this. `dep {action:"add"}` and
+        // `Session::add_dependency` still do, which is why it delegates rather than panicking —
+        // a panic here would make the double unusable for every other suite.
         async fn add_dependency(&self, dep: &Dependency, actor: &str) -> Result<(), StorageError> {
+            self.add_dependency_calls.fetch_add(1, Ordering::SeqCst);
             self.inner.add_dependency(dep, actor).await
         }
         async fn remove_dependency(

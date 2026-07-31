@@ -197,6 +197,13 @@ where
     contract_dep_metadata_null_vs_empty_object(factory().await).await;
     contract_dep_thread_id_round_trip(factory().await).await;
 
+    // D44 — the create-with-deps contract: implicit edge ownership, the create-specific guards,
+    // and the BULK/IMPORT non-regression that proves those guards did NOT move into the shared body.
+    contract_create_issue_reanchors_a_foreign_edge_source(factory().await).await;
+    contract_create_issue_rejects_a_duplicate_declared_edge(factory().await).await;
+    contract_create_issue_rejects_a_declared_gating_cycle(factory().await).await;
+    contract_create_issues_still_dedups_and_still_admits_a_cycle(factory().await).await;
+
     // Seam-backed: id child-counter high-water mark.
     contract_child_counter_high_water(factory().await).await;
 
@@ -3153,4 +3160,200 @@ pub async fn contract_dep_thread_id_round_trip<S: Storage>(storage: S) {
 
     let deps = storage.list_dependencies("ub-a").await.expect("list");
     assert_eq!(deps[0].thread_id.as_deref(), Some("thread-7"));
+}
+
+// --------------------------------------------------------------------------------------------------
+// D44 — `create_issue` with seeded `Issue.dependencies` (spine §3.2.1)
+// --------------------------------------------------------------------------------------------------
+
+/// A `create_issue` whose `dependencies[0].issue_id` deliberately names ANOTHER EXISTING issue lands
+/// the edge on `issue.id` and leaves that other issue byte-unchanged.
+///
+/// The spine makes this an explicit NFR-16 obligation: the re-anchoring is "the property that makes
+/// the single create path safe, and it MUST be pinned by the contract suite".
+///
+/// MUTANT KILLED: an INSERT that binds `dep.issue_id` instead of `issue.id` as the edge source. That
+/// is the misattachment defect itself, live-reproduced at GA over the JSON-RPC wire: the edge lands
+/// on the third party, which silently drops out of the ready set while its `updated_at` does not
+/// move, so no staleness or change-detection query ever signals it. Both halves are asserted here —
+/// where the edge DID land, and that the victim graph is untouched — because either alone is
+/// satisfied by an implementation that simply drops the edge.
+pub async fn contract_create_issue_reanchors_a_foreign_edge_source<S: Storage>(storage: S) {
+    storage
+        .create_issue(&issue("ub-victim", "an unrelated third party"), "x")
+        .await
+        .expect("victim");
+    storage
+        .create_issue(&issue("ub-target", "the blocker"), "x")
+        .await
+        .expect("target");
+
+    let victim_before = storage
+        .get_issue("ub-victim")
+        .await
+        .expect("get")
+        .expect("exists");
+
+    let mut carrier = issue("ub-new", "the issue being created");
+    carrier.dependencies = vec![dep("ub-victim", "ub-target", DependencyType::Blocks)];
+    storage.create_issue(&carrier, "x").await.expect("create");
+
+    let landed = storage.list_dependencies("ub-new").await.expect("list new");
+    assert_eq!(landed.len(), 1, "the seeded edge is persisted");
+    assert_eq!(
+        landed[0].issue_id, "ub-new",
+        "the edge MUST be anchored on the row being created, never on the id carried by the object"
+    );
+    assert_eq!(landed[0].depends_on_id, "ub-target");
+
+    assert!(
+        storage
+            .list_dependencies("ub-victim")
+            .await
+            .expect("list victim")
+            .is_empty(),
+        "the named third party must gain NO edge at all"
+    );
+    let victim_after = storage
+        .get_issue("ub-victim")
+        .await
+        .expect("get")
+        .expect("exists");
+    assert_eq!(
+        victim_before, victim_after,
+        "the third party row must be byte-unchanged, `updated_at` and `content_hash` included"
+    );
+}
+
+/// `create_issue` REJECTS a `depends_on_id` repeated inside the ONE declared list, and persists
+/// nothing. The two elements carry different `dep_type`s: the key is the `(source, target)` pair,
+/// type-INSENSITIVE, matching `add_dependency`.
+///
+/// MUTANT KILLED: dropping the create-specific duplicate guard and letting the shared per-record
+/// body handle it. That body `continue`s past a repeated target, so the create would return `Ok`
+/// having written ONE edge where two were declared — the exact silent-skip this guard restores.
+pub async fn contract_create_issue_rejects_a_duplicate_declared_edge<S: Storage>(storage: S) {
+    storage
+        .create_issue(&issue("ub-target", "target"), "x")
+        .await
+        .expect("target");
+
+    let mut carrier = issue("ub-dup", "declares one target twice");
+    carrier.dependencies = vec![
+        dep("ub-dup", "ub-target", DependencyType::Blocks),
+        dep("ub-dup", "ub-target", DependencyType::WaitsFor),
+    ];
+    let err = storage
+        .create_issue(&carrier, "x")
+        .await
+        .expect_err("a repeated target is a duplicate edge");
+    assert!(
+        matches!(err, StorageError::DuplicateDependency),
+        "expected DuplicateDependency, got {err:?}"
+    );
+    assert!(
+        storage.get_issue("ub-dup").await.expect("get").is_none(),
+        "the rejected create persists ZERO rows — not even an edgeless issue"
+    );
+}
+
+/// `create_issue` REJECTS declared gating edges that close a cycle, and persists nothing.
+///
+/// The fixture is the mixed-orientation case (spine §3.2.1 guard (b)): a `parent-child` element
+/// gives the new node an IN-edge and a `blocks` element an OUT-edge, and only together do they close
+/// `new -> far -> parent -> new`.
+///
+/// MUTANT KILLED: dropping the create-specific gating guard, which the seeded path never had — the
+/// create would then commit a genuine ready-gating cycle that `dep {action:"add"}` refuses to build
+/// one edge at a time.
+pub async fn contract_create_issue_rejects_a_declared_gating_cycle<S: Storage>(storage: S) {
+    storage
+        .create_issue(&issue("ub-p", "parent"), "x")
+        .await
+        .expect("p");
+    let mut far = issue("ub-x", "far");
+    far.dependencies = vec![dep("ub-x", "ub-p", DependencyType::Blocks)];
+    storage.create_issue(&far, "x").await.expect("x");
+
+    let mut carrier = issue("ub-n", "closes the cycle");
+    carrier.dependencies = vec![
+        dep("ub-n", "ub-p", DependencyType::ParentChild),
+        dep("ub-n", "ub-x", DependencyType::Blocks),
+    ];
+    let err = storage
+        .create_issue(&carrier, "x")
+        .await
+        .expect_err("the declared edges close a gating cycle");
+    match err {
+        StorageError::CycleDetected { ref path } => {
+            for node in ["ub-n", "ub-x", "ub-p"] {
+                assert!(
+                    path.contains(node),
+                    "the cycle path must name every node ({node} missing): {path}"
+                );
+            }
+        }
+        other => panic!("expected CycleDetected, got {other:?}"),
+    }
+    assert!(
+        storage.get_issue("ub-n").await.expect("get").is_none(),
+        "the rejected create persists ZERO rows"
+    );
+}
+
+/// THE SILENT-REGRESSION CATCHER. `create_issues` — the shared bulk/import body — keeps BOTH of the
+/// behaviours `create_issue` now refuses: it still DEDUPS a repeated target with a silent skip, and
+/// it still ADMITS a genuine mutual gating cycle, atomically.
+///
+/// This is the one cell in the suite whose job is to fail when a future edit tidies the two
+/// create-specific guards into `insert_issue_in_tx`. That edit is invisible everywhere else — every
+/// D44 cell above would stay green, because moving a guard INWARD only makes the create stricter.
+/// What it silently breaks is the D5 import leg, which enters through this method
+/// (`unblock-sync`, `import.rs`): an already-exported record carrying either shape would stop being
+/// importable, so a data-integrity tool would have made its own committed record un-restorable.
+/// PRD D44 clause (3) states the constraint; this asserts it.
+///
+/// MUTANT KILLED: moving `reject_duplicate_declared_edges` or `reject_declared_gating_cycles` from
+/// the `create_issue` wrapper into the shared per-record body. The first assertion below goes red on
+/// the duplicate move, the second on the cycle move.
+pub async fn contract_create_issues_still_dedups_and_still_admits_a_cycle<S: Storage>(storage: S) {
+    storage
+        .create_issue(&issue("ub-bulk-t", "bulk target"), "x")
+        .await
+        .expect("target");
+
+    // (1) A repeated target inside ONE record: deduped-and-continued, NOT rejected.
+    let mut dup = issue("ub-bulk-dup", "repeats one target");
+    dup.dependencies = vec![
+        dep("ub-bulk-dup", "ub-bulk-t", DependencyType::Blocks),
+        dep("ub-bulk-dup", "ub-bulk-t", DependencyType::WaitsFor),
+    ];
+    storage.create_issues(&[dup], "x").await.expect(
+        "bulk must still accept a repeated target (dedup-and-continue is D5 import policy)",
+    );
+    assert_eq!(
+        storage
+            .list_dependencies("ub-bulk-dup")
+            .await
+            .expect("list")
+            .len(),
+        1,
+        "the shared body writes the first copy and skips the second — unchanged by D44"
+    );
+
+    // (2) A genuine MUTUAL gating cycle across two records of one batch: committed atomically.
+    let mut a = issue("ub-bulk-a", "a");
+    a.dependencies = vec![dep("ub-bulk-a", "ub-bulk-b", DependencyType::Blocks)];
+    let mut b = issue("ub-bulk-b", "b");
+    b.dependencies = vec![dep("ub-bulk-b", "ub-bulk-a", DependencyType::Blocks)];
+    storage.create_issues(&[a, b], "x").await.expect(
+        "bulk must still commit a mutual gating cycle — moving the guard here could make an \
+                 ALREADY-EXPORTED D5 record un-importable",
+    );
+
+    let cycles = storage.detect_cycles(true).await.expect("detect");
+    assert!(
+        !cycles.is_empty(),
+        "the cycle really was persisted, so this cell is not vacuous: {cycles:?}"
+    );
 }

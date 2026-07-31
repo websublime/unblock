@@ -275,12 +275,19 @@ pub const CELLS: &[FlipCell] = &[
         shown_arm_mutates: true,
     },
     // -- §4.4 nested (an object nested in an ARRAY, depth 3) -----------------------------------
+    //
+    // D44 — the element carries NO `issue_id`. On `issue create` a declared edge is ALWAYS sourced
+    // on the issue this call is minting, so a PRESENT `deps[i].issue_id` is refused by the adapter
+    // with `VALIDATION_FAILED`/`dep_source_not_allowed` (spine §5.2 `DepInput`). This cell exists to
+    // exercise a DUPLICATE `dep_type` nested at depth 3, and its accept half must EXECUTE — so it
+    // must not also carry an independently-illegal field, or the accept half would be refused for
+    // the wrong reason and the duplicate-key half would prove nothing.
     FlipCell {
         id: "N2 issue{create deps[0].dep_type}",
         tool: "issue",
-        arguments_text: r#"{"action":"create","title":"nested dup","deps":[{"issue_id":"{ID}","depends_on_id":"{ID2}","dep_type":"blocks","dep_type":"discovered-from"}]}"#,
-        shown: r#"{"action":"create","title":"nested dup","deps":[{"issue_id":"{ID}","depends_on_id":"{ID2}","dep_type":"blocks"}]}"#,
-        hidden: r#"{"action":"create","title":"nested dup","deps":[{"issue_id":"{ID}","depends_on_id":"{ID2}","dep_type":"discovered-from"}]}"#,
+        arguments_text: r#"{"action":"create","title":"nested dup","deps":[{"depends_on_id":"{ID2}","dep_type":"blocks","dep_type":"discovered-from"}]}"#,
+        shown: r#"{"action":"create","title":"nested dup","deps":[{"depends_on_id":"{ID2}","dep_type":"blocks"}]}"#,
+        hidden: r#"{"action":"create","title":"nested dup","deps":[{"depends_on_id":"{ID2}","dep_type":"discovered-from"}]}"#,
         duplicated_key: "dep_type",
         pointer: "/arguments/deps/0",
         kind: FlipKind::Nested,
