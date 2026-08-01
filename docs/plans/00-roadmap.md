@@ -106,16 +106,65 @@ own repo plus the one release-pipeline gap never exercised end-to-end:
   as the row (all-or-nothing), makes `deps[].issue_id` OPTIONAL and REJECTS a present value, and restores the
   duplicate + gating-cycle guards on a CREATE-SPECIFIC leg so `create_bulk` and the D5/`bd` import keep their
   exact semantics. It carries an additive `contract_version` bump to `unblock.mcp.v1.7`. **What it explicitly
-  does NOT close:** a `depends_on_id` naming a non-existent issue still plants an unresolvable blocker — a
-  schema-shaped class split out to `ub-lp9.25` in this same slot, and one D44 makes MORE reachable, since the
-  foreign-key failure that used to mask it no longer occurs. That widening is precisely why `ub-lp9.25` is not
-  deferred but cut TOGETHER with D44 — see the next bullet.
-- **Dangling BLOCKER id on every edge-writing path** (P0, tracker `ub-lp9.25`, no D-id — a defect repair, not a
-  product decision) — a `depends_on_id` naming an issue that does not exist is accepted with `isError:false`
-  and plants a permanently unresolvable blocker. `dependencies.depends_on_id` deliberately carries NO foreign
-  key (an `external:*` target is legitimate), so the repair is an application-level in-transaction existence
-  check with an `external:` carve-out, on the three entry points that write an edge — plus a `doctor` view
-  that can LIST the dangling blockers already written into live workspaces, which nothing in D44 repairs.
+  does NOT close:** a `depends_on_id` naming a non-existent issue still plants an unresolvable blocker — an
+  APPLICATION-LEVEL class (the column keeps NO foreign key, deliberately, because an external target is a
+  legitimate blocker, so no schema change is authorised) split out to `ub-lp9.25` / **D45** in this same
+  slot, and one D44 makes MORE reachable, since the foreign-key failure that used to mask it no longer
+  occurs. That widening is precisely why `ub-lp9.25` / **D45** is not deferred but cut TOGETHER with D44 —
+  see the next bullet.
+- **Dangling BLOCKER id on every edge-writing path** (P0, tracker `ub-lp9.25`, PRD §4 **D45**) — a
+  `depends_on_id` naming an issue that does not exist is accepted with `isError:false` and plants a
+  permanently unresolvable blocker. `dependencies.depends_on_id` deliberately carries NO foreign key (an
+  `external:*` target is legitimate), so the repair is an application-level, in-transaction existence check
+  with an `external:` carve-out. **`ub-lp9.25` / D45 closes ALL FIVE entry points that write an edge** —
+  this slot published a smaller count before D45, and Miguel's 2026-07-31 ruling corrects it in the same
+  commit rather than renumbering it: `issue create {deps}`, `dep {action:"add"}`, the D5 JSONL + `bd` import
+  leg, `issue update {parent}` (the **reparent** path, `ub-lp9.25` / D45) and `issue create_bulk`.
+  It gets there with ONE guard rather than five copies: the check is bodied in the
+  SHARED per-record insert body — the body `create_issue`, `create_bulk` and both import legs all pass
+  through — with sibling guards at `add_dependency` and `apply_reparent`. **That placement REVERSES a clause
+  D44 published:** D44 scoped the shared body out because a guard there could make an already-exported D5
+  record un-importable, so D45 does not wave the hazard away — it removes the CAUSE (see the exporter repair
+  below). A reversal rides a NEW decision id under `docs/PROCESS.md` section 3, which is why this repair mints
+  **D45** with reciprocal cross-refs in both PRD rows.
+  **The guard is BATCH-AWARE:** a target is acceptable when a row with that id exists in the database **or**
+  belongs to any record staged by the same transaction — a forward reference inside one import file is legal
+  today, and a per-record check would refuse it by input ORDER alone.
+  **The EXPORT CORPUS widens in the same change, so `unblock-sync` gains CODE and not only tests:** the
+  corpus filter drops ephemeral / `-wisp-` ROWS while still emitting the edges pointing at them, so the
+  exporter could produce a file its own importer would refuse. **The repair is NOT to drop that edge** —
+  an issue blocked by an ephemeral row is BLOCKED today, so dropping the edge would silently turn blocked
+  work into READY work in the destination workspace. Instead the corpus is closed under its BLOCKERS: a
+  row the filter excluded travels with the export whenever it stands in a non-external dependency
+  relation with a kept row **in EITHER direction** — the rule is about ROWS, not about one row's
+  out-edges, because the `parent-child` edge is stored on the CHILD while the blocked-set query's second
+  pass blocks the epic PARENT through it, so an out-only walk left a kept epic arriving READY (measured;
+  §9 and spine §1.10 carry the derivation) — transitively, terminating on cycles, with its `ephemeral`
+  flag serialized verbatim
+  (an external target pulls nothing — it is no row at all). Miguel ruled this on 2026-08-01, and because it
+  REVERSES D23's unconditional ephemeral exclusion, D45 carries reciprocal SUPERSEDES pointers on both PRD
+  rows. **The exporter drops nothing and repairs nothing, so a workspace that ALREADY holds a dangling edge
+  exports a file the guarded import REFUSES**, naming the first offending `(dependent, target)` pair — the
+  correct behaviour (it refuses to launder corruption), disclosed rather than discovered, with the new
+  `dangling` diagnostic as the named remedy.
+  **The `external:` prefix gets its first normative definition and is ASCII-CASE-INSENSITIVE**, as ONE
+  shared predicate in `unblock-model` (L0 — the only layer both `unblock-storage` and `unblock-engine` may
+  depend on). The principle: the write guard must never be stricter than the read side, and the ready/blocked
+  SQL already treats an uppercase `EXTERNAL:` target as an external blocker. Two consequences are stated
+  plainly rather than footnoted: `issue create_bulk` **stops rejecting a correctly-spelled `external:`
+  dependency reference** — a RELAXATION of a spine-pinned rejection on a GA-shipped path, covered by no test
+  today, so nothing in CI goes red to announce it — and an `external:` **parent** stays representable (one
+  shared predicate, no per-edge-type special-casing).
+  **The listing view is a NEW `dangling` action on the existing `diagnostics` MCP tool**, so an agent can ask
+  for exactly this, **plus the same findings folded into the command-line `doctor` report**. No ninth tool is
+  added (the 8-tool budget stays full and unmoved) and **`unblock-health` is NOT touched**: D29 clause F3
+  keeps `run_doctor` pure, non-async and storage-free, and D45 preserves that clause by composing the
+  DB-derived findings in the ENGINE and folding them into the report — exactly as the engine already folds
+  in the jsonl-conflict-marker file-state anomaly. The new action moves `schema_bundle()` and
+  `capabilities()` bytes, so **D45 carries a further additive `contract_version` bump, to
+  `unblock.mcp.v1.8`**, with its own `CONTRACT_HASH` re-pin. It mints **no** `ErrorCode` — the refusal rides
+  the existing `ISSUE_NOT_FOUND` through a new internal `StorageError` variant — so the 0–8 exit table is
+  untouched.
   It **ships in this SAME 1.0.1 cut as a co-requisite of `ub-lp9.20`/D44**, per Miguel's ruling: D44 strictly
   increases exposure to this class, so a release carrying D44 without it would ship a wider hole than GA did.
 - **Missing forward-migration for the comments schema** (P1) — the D37 comments tables need a forward migration
@@ -139,9 +188,9 @@ v1.0.1 decision that DOES touch L5:** it spans `unblock-engine` (L5 — the seed
 carrier), `unblock-storage` (L2 — the create-specific guards + the `Storage` trait doc correction, with the trait
 SIGNATURE and every implementor's METHOD SET unchanged — no `impl Storage` block gains, loses or re-types a
 method — while the SHIPPED libsql `create_issue` BODY does gain those guards) and `unblock-mcp` (L7 — the optional-and-rejected `deps[].issue_id`,
-the wire descriptions and the contract bump); `unblock-cli` and `unblock-sync` gain tests only. D42 carries an
+the wire descriptions and the contract bump); within D44's own scope `unblock-cli` and `unblock-sync` gain tests only. **D45 is the WIDEST of the five and the one that finally moves L0:** it spans `unblock-model` (L0 — the single case-insensitive `external:` predicate, the only layer both `unblock-storage` and `unblock-engine` may depend on, plus the new `DiagnosticKind` variant), `unblock-storage` (L2 — the batch-aware target-existence guard in the SHARED per-record insert body plus its `add_dependency`/`apply_reparent` siblings, and one new internal `StorageError` variant on an EXISTING `ErrorCode`), `unblock-sync` (L3 — the exporter must stop emitting an edge whose target row it dropped; **CODE, not tests only**), `unblock-engine` (L5 — the composed dangling-edge listing, its fold into `doctor`, and the `create_bulk` `external:` relaxation), `unblock-mcp` (L7 — the new `dangling` diagnostics action + the contract bump) and `unblock-cli` (L7 — the `doctor` report fold). **`unblock-health` is deliberately NOT touched by D45** — D29 clause F3 keeps `run_doctor` pure, non-async and storage-free, and D45 preserves that clause by composing the DB-derived findings in the engine instead of reversing a second shipped clause. D42 carries an
 **additive `contract_version` bump to `unblock.mcp.v1.6`** (D35 permits additive `.M` bumps inside 1.x,
-so this stays v1.0.1-eligible and is **not** a 2.0.0 event) with a `CONTRACT_HASH` re-pin. **D43 carries NO contract bump at all** — it mints no `ErrorCode` and moves no schema byte, so `unblock.mcp.v1.6` stands and `CONTRACT_HASH` is not re-pinned. **D44 carries a FURTHER additive bump to `unblock.mcp.v1.7`** with its own `CONTRACT_HASH` re-pin (relaxing `$defs/DepInput.issue_id` out of `required` and rewriting its description both move `schema_bundle()` bytes), mints no `ErrorCode`, and — like D42 clause 4(iii) — ratifies a behavioural break in a patch release: every GA-schema-valid `issue create` document carrying `deps[].issue_id` now returns `VALIDATION_FAILED` with zero writes, because on that path no such payload ever did what its author asked. D42 also **inverts a
+so this stays v1.0.1-eligible and is **not** a 2.0.0 event) with a `CONTRACT_HASH` re-pin. **D43 carries NO contract bump at all** — it mints no `ErrorCode` and moves no schema byte, so `unblock.mcp.v1.6` stands and `CONTRACT_HASH` is not re-pinned. **D44 carries a FURTHER additive bump to `unblock.mcp.v1.7`** with its own `CONTRACT_HASH` re-pin (relaxing `$defs/DepInput.issue_id` out of `required` and rewriting its description both move `schema_bundle()` bytes), mints no `ErrorCode`, and — like D42 clause 4(iii) — ratifies a behavioural break in a patch release: every GA-schema-valid `issue create` document carrying `deps[].issue_id` now returns `VALIDATION_FAILED` with zero writes, because on that path no such payload ever did what its author asked. **D45 carries a FURTHER additive bump again, to `unblock.mcp.v1.8`**, with its own `CONTRACT_HASH` re-pin: the new `dangling` action adds a `oneOf` arm to the `diagnostics` tool INPUT, its OUTPUT's `DiagnosticKind` gains an enum member, and the tool DESCRIPTION is rewritten to name the new action — all three move published bytes, and a tool description is version-coupled in its `capabilities()` copy. D45 mints no `ErrorCode` either (the refusal rides the existing `ISSUE_NOT_FOUND`), adds no MCP tool (the 8-tool budget stands, full and unmoved) and changes no `Storage` trait signature. Per D35 an additive `.M` inside 1.x is non-breaking, so all three bumps stay patch-eligible. D42 also **inverts a
 shipped test that asserted a silent drop was correct** — `unknown_sections_ignored` becomes
 `unknown_section_rejected`. And together they **newly reject SEVEN previously-accepted input classes**: (1) an unknown or
 misspelled **tool argument** on any of the 8 tools; (2) an **unrecognized (or empty) `### ` markdown section**
@@ -151,10 +200,10 @@ in `issue create_bulk`; (3) an **invalid `### Priority` value** (previously sile
 **key** longer than `max_string_len`; (6) an **UNTERMINATED code fence** in `issue create_bulk`; and **(7) a `tools/call` (or a `bd` import line) carrying a DUPLICATE JSON KEY anywhere inside `params` (`_meta` included), at any depth (D43)**. Classes
 (1)–(4) reject only input that was previously DESTROYED IN SILENCE, so they are 1.x bug fixes. **Class (6) is
 not**: GA's parser had no fence tracking at all, so it ACCEPTED such documents — this one is a genuine
-behavioural break shipping in a PATCH release, ratified and stated plainly at PRD D42 clause 4(iii). **Class (7) files with the BUG FIXES, not with (6):** it rejects input GA EXECUTED WITH THE WRONG SEMANTICS — the frame said create and deleted — which is not something a consumer could deliberately rely on, so converting it into a loud in-band rejection is a fix within 1.x. **D42 also strengthens AC-level wording on existing must-FRs where a
-shipped AC was unmet (FR-20, FR-12, NFR-18), and D43 strengthens that same wording at FR-20 and NFR-18** — FR-12 is D42's alone, since only D42 moves `contract_version`. **Neither adds outward
-surface:** no new tool, command, `ErrorCode` or schema field (D43's new items — the shared `dup_key` scanner and the shared flip corpus — are workspace-internal, and the `unblock-*` crates are
-not published).
+behavioural break shipping in a PATCH release, ratified and stated plainly at PRD D42 clause 4(iii). **Class (7) files with the BUG FIXES, not with (6):** it rejects input GA EXECUTED WITH THE WRONG SEMANTICS — the frame said create and deleted — which is not something a consumer could deliberately rely on, so converting it into a loud in-band rejection is a fix within 1.x. **D45 adds an EIGHTH, a NINTH and a TENTH newly-rejected class, and they are ITS OWN, not D42's or D43's:** (8) an edge write on the FOUR paths that accepted it silently — `issue create {deps}`, `dep {action:"add"}`, `issue update {parent}`, or the D5 JSONL / `bd` import leg — naming a blocker id that exists neither in the database nor anywhere in the same staged batch, and that is not an `external:` target, now returns `ISSUE_NOT_FOUND` with ZERO rows written. **`issue create_bulk` is deliberately NOT in class (8):** that path already refuses an unknown reference today, whole-batch, with `VALIDATION_FAILED` from the L5 resolver — the very batch-aware predicate D45 generalises — and it KEEPS that code; what D45 adds there is the in-transaction guard closing the race over its pre-transaction probe, so it is the class's TEMPLATE rather than a hole. (9) A JSONL or `bd` file carrying such an edge is rejected WHOLE-BATCH rather than imported, naming the first offending `(dependent, target)` pair (the `bd` importer's shipped repairs do not drop such an edge, and D45 deliberately adds no repair arm: the exporter may widen its own corpus, the importer may never invent one). (10) A `dep {action:"add"}` whose edge SOURCE names no issue now returns `ISSUE_NOT_FOUND` (exit 3) instead of an opaque `DATABASE_ERROR` (exit 2) from the source-column foreign key — a re-banding, not a new refusal, closing the asymmetry where one typo returned two different codes depending on which field carried it. **All three file with class (6), not with the bug fixes:** GA ACCEPTED this input (or, for (10), reported it dishonestly), so they are ratified behavioural breaks in a patch release, stated plainly here and in the D45 decision row. In the OTHER direction D45 RELAXES one shipped rejection — `issue create_bulk` now ACCEPTS a correctly-spelled `external:` dependency reference it refuses today, which no test covers, so nothing goes red to announce it. **D42 also strengthens AC-level wording on existing must-FRs where a
+shipped AC was unmet (FR-20, FR-12, NFR-18), and D43 strengthens that same wording at FR-20 and NFR-18** — **within the D42/D43 pair** FR-12 is D42's alone, since D43 moves no `contract_version`; D44 and D45 each move it again, so that clause scopes the pair and never the whole slot. **D45 strengthens the acceptance criteria of FR-5 (a declared blocker must denote something), FR-7 (an export may not emit an edge whose target row it dropped), FR-15 (the new `dangling` diagnostics action) and FR-16 (the same findings in the doctor-lite report)** rather than adding or re-tiering a requirement. **Neither of D42 and D43 adds outward
+surface** — the subject of this clause is that pair, not the slot: no new tool, command, `ErrorCode` or schema field (D43's new items — the shared `dup_key` scanner and the shared flip corpus — are workspace-internal, and the `unblock-*` crates are
+not published). **D45 DOES add outward surface** — a new `dangling` action arm on the `diagnostics` tool, and therefore a new `oneOf` arm plus a `DiagnosticKind` enum member in the published schema — while still adding no new tool, no new command and no new `ErrorCode`.
 
 ---
 
@@ -502,21 +551,21 @@ Legend: ● lands · ◐ extended/hardened · ✗ = dropped · blank = not landi
 | Atomic claim (FR-2) | ● | | | | ◐ cross-machine at primary | | ◐ TTL/heartbeat | |
 | Defer/undefer (FR-3) | ● | | | | | | | |
 | Query: list/ready/blocked/search/count/stale (FR-4) | ● | | | ◐ milestone filter | | | | |
-| Typed deps + graph (FR-5) | ● | ◐ D44 create-declared edges | | | | | | |
+| Typed deps + graph (FR-5) | ● | ◐ D44 create-declared edges + ◐ D45 guarded blocker targets (5 paths) | | | | | | |
 | Comments — full CRUD add/list/update/delete (FR-6, D37) | ● | ◐ comments forward migration | | | | | | |
 | Labels (rename/list-all) / epic rollups (FR-6) | | | ● | | | | | |
-| JSONL export/import (FR-7/8) | ● | | | ◐ milestones/goals layout (lock design point) | | | | ◐ DB-only option |
+| JSONL export/import (FR-7/8) | ● | ◐ D45 export corpus closed under its blockers | | ◐ milestones/goals layout (lock design point) | | | | ◐ DB-only option |
 | `bd` one-shot import (FR-26) | ● | | | | | | | |
 | Shared engine + write Semaphore + read fast path (FR-9/10) | ● | | | | ◐ primary-serialized topology | | ◐ TTL | |
 | Agent contract + exit codes + capabilities/schema (FR-11/12) | ● | | | ◐ planning tool (additive bump) | | | ◐ richer | |
 | Layered config (FR-13) | ● subset | | ● full | | ◐ remote keys + config split | | | |
 | Workspace bootstrap (FR-14) | ● | | | | ◐ multi-ws + join-remote onboarding | | | |
-| Pure-DB diagnostics (FR-15) | ● | | | ◐ milestone filters/counters | | | | |
-| Workspace health (FR-16) | ● lite | | ● full | | ◐ sync health | | ◐ scale | |
+| Pure-DB diagnostics (FR-15) | ● | ◐ D45 `dangling` action | | ◐ milestone filters/counters | | | | |
+| Workspace health (FR-16) | ● lite | ◐ D45 dangling findings folded into doctor-lite | ● full | | ◐ sync health | | ◐ scale | |
 | Cooperative shutdown (FR-17) | ● | | | | | | | |
 | Swarm coordination / scheduler (FR-18) | | | ● diagnostics | | ◐ actor attribution | | ◐ active + v2 | |
 | Workflow gates (FR-19) | | | ● | ◐ milestone-close gate (candidate) | | | | |
-| MCP stdio server (FR-20) | ● | ◐ argument-boundary defect class (D42 — L7 seam + L2 dep fields; additive contract bump `v1.5`→`v1.6`) + duplicate-key rejection (D43 — an owned scanning transport; NO contract bump) | ◐ surface | ◐ planning tool | ◐ sync resources | | ◐ batch/stream | ◐ other transports (unscheduled) |
+| MCP stdio server (FR-20) | ● | ◐ argument-boundary defect class (D42 — L7 seam + L2 dep fields; additive contract bump `v1.5`→`v1.6`) + duplicate-key rejection (D43 — an owned scanning transport; NO contract bump) + a NEW `dangling` diagnostics action (D45 — additive contract bump `v1.7`→`v1.8`) | ◐ surface | ◐ planning tool | ◐ sync resources | | ◐ batch/stream | ◐ other transports (unscheduled) |
 | Saved queries (FR-21) | | | ● | | | | | |
 | Audit / flight recorder (FR-22) | | | ● | | ◐ actor conventions | | | |
 | Shell completions (FR-23) | | | ● | | | | | |
@@ -547,16 +596,16 @@ not feature-landing): ● substantial work in that release · ◐ incidental / h
 
 | Crate | v1 | v1.0.1 | v1.1 | v1.2 | v1.3 | v1.4 | v1.5 | v2+ |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
-| `unblock-model` | ● | | ● | ● | ◐ | | ◐ | |
+| `unblock-model` | ● | ◐ | ● | ● | ◐ | | ◐ | |
 | `unblock-error` | ● | | ● | | ◐ | | ◐ | |
 | `unblock-policy` | ● | | ● | ◐ | | | ● | |
 | `unblock-storage` | ● | ● | ◐ | ● | ● | | ● | ◐ |
-| `unblock-sync` | ● | | ◐ | | ◐ | | ◐ | ◐ |
+| `unblock-sync` | ● | ● | ◐ | | ◐ | | ◐ | ◐ |
 | `unblock-health` | ● lite | | ● full | | ● | | ● | |
 | `unblock-config` | ● subset | | ● full | | ● | | | |
 | `unblock-engine` | ● | ● | ● | ● | ● | | ● | |
 | `unblock-render` | ● | | ● | ◐ | | | ◐ | |
-| `unblock-mcp` | ● | ◐ | ● | ● | ◐ | | ● | ◐ |
+| `unblock-mcp` | ● | ● | ● | ● | ◐ | | ● | ◐ |
 | `unblock-cli` | ● | ◐ | ● | | ◐ | ◐ | | |
 | `unblock-fuzz` *(ingestion + bench harness)* | ● | | | | | | ◐ | |
 | `unblock-tui` *(proposed — minted at v1.4 lock)* | | | | | | ● | | |
@@ -572,13 +621,33 @@ Notes:
   then the 12-crate set is unchanged.
 - **`v1.0.1`** is the maintenance-patch column (§1, PRD §4 D41 + **D42**): `unblock-storage` ● carries the
   comments forward-migration **and the D42 `dependencies` 7-column bind (`metadata`/`thread_id`)**,
-  `unblock-mcp` ◐ the D43 duplicate-key scanning transport + the D42 argument-boundary error-channel + strict-args fix + the three `create_bulk`
+  `unblock-mcp` the D43 duplicate-key scanning transport + the D42 argument-boundary error-channel + strict-args fix + the three `create_bulk`
   rejections, `unblock-cli` ◐ the end-to-end `unblock update` smoke **plus the D42 wire-level error-channel
-  matrix (tests only)**, `unblock-sync` tests only. **`unblock-engine` ● carries the D44 one-transaction
+  matrix (tests only)**. **`unblock-engine` ● carries the D44 one-transaction
   create-with-deps repair** (the seeded, source-less edge carrier on `NewIssue` + the deleted follow-up edge
   pass) — the FIRST v1.0.1 decision to touch L5. The note that stood here was D42/D43-scoped — `unblock-engine` is NOT touched — and D44 supersedes it.
+  **D45 (`ub-lp9.25`) moves three more cells, and it RETIRES the claim this note carried that `unblock-sync`
+  gains tests only:** `unblock-sync` ● now gains **CODE** — the export corpus must WIDEN to the transitive
+  closure of its blockers, retaining a row the corpus filter dropped whenever that row stands in a
+  non-external dependency relation with a kept row in EITHER direction — a kept row depends on it, or IT
+  depends on a kept row (the incoming case is forced: a `parent-child` edge is stored on the CHILD's row
+  and is what makes an epic PARENT blocked) —
+  which is what keeps every exported file importable under D45's guard WITHOUT converting blocked work into
+  ready work (dropping the edge instead would do exactly that, which is why Miguel ruled it out); `unblock-model` ◐ gains the one shared, ASCII-case-insensitive `external:` predicate (L0 is
+  the only layer both `unblock-storage` and `unblock-engine` may depend on) plus the new `DiagnosticKind`
+  variant; and `unblock-mcp` moves from ◐ to **●** — a NEW `dangling` action on the `diagnostics` tool is
+  outward surface, not a hardening touch, and it carries the additive `unblock.mcp.v1.8` bump with its
+  `CONTRACT_HASH` re-pin. `unblock-storage` ● and `unblock-engine` ● absorb D45's target-existence guard and
+  its composed dangling-edge listing plus the `doctor` fold; `unblock-cli` ◐ absorbs the `doctor`-report
+  fold. **Two cells deliberately do NOT move.** `unblock-health` stays blank: D29 clause F3 keeps
+  `run_doctor` pure, non-async and storage-free, and D45 preserves that clause by composing the DB-derived
+  findings in the engine — moving the cell without moving the code would be a lie, and moving the code would
+  reverse a second shipped clause. `unblock-error` stays blank: D45 mints no `ErrorCode`; its new variant is
+  an internal `StorageError` mapped onto the existing `ISSUE_NOT_FOUND`.
   The column still adds no FR and re-tiers nothing (D44 strengthens
-  the FR-1a and FR-5 acceptance criteria rather than adding a requirement) — hence it stays sparse.
+  the FR-1a and FR-5 acceptance criteria, and D45 strengthens FR-5, FR-7, FR-15 and FR-16, rather than
+  adding a requirement) — but with six crates carrying work it is **no longer sparse**, and that framing is
+  retired here rather than restated.
 - **100% Rust, no Node:** the TUI adds **no npm/Node build stage** to `dist` and **no `ui` Cargo feature** —
   `cargo-deny` covers the whole tree and the binary gains no npm supply-chain surface. (The web dashboard's
   npm/Node ecosystem lives in the separate v2+ commercial PRO product — roadmap §7 — not the OSS tree.)

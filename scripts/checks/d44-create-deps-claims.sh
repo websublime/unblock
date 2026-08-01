@@ -48,6 +48,21 @@ SELF='scripts/checks/d44-create-deps-claims.sh'
 # Decide phase settles on a different `.M`.
 CONTRACT_RE='unblock\.mcp\.v1\.7'
 
+# The LIVE D-id range, pinned at its 3 bump sites (R16/R18 file-level, RW1 ROW-ANCHORED). It tracks the
+# CURRENT range and never a frozen historical one, so minting a new D-id moves THIS ONE LINE instead of
+# three table rows.
+#
+# WHY ONE OF THE THREE IS ROW-ANCHORED AND THE OTHER TWO ARE NOT. A file-level token check proves the
+# literal is SOMEWHERE in the file. That is sufficient for `CLAUDE.md` and `xtask/src/doc_lint.rs`, which
+# carry exactly one occurrence each (the bump site itself). It is NOT sufficient for
+# `docs/plans/ci-cd-and-distribution.md`, which also DESCRIBES this pin in prose: while that prose quoted
+# the live literal, reverting the normative class-(a) statement to the previous range left the file-level
+# check GREEN — the prose satisfied it. D45 hit exactly that. Two things fix it together and both are
+# required: the ci-cd prose now names the range instead of quoting it, and its row moved to REQUIRE_ROW
+# below, anchored on the class-(a) statement itself. Neither alone is enough — prose drifts back, and an
+# anchor on a line carrying two occurrences would be satisfied by the wrong one.
+RANGE_RE='D1\.\.D45'
+
 # The FAMILY the knob belongs to — ANY published contract id, current or retired. This is not a second
 # copy of the knob: it is what makes an `EXCLUSIVE` row (below) able to say "no OTHER version literal
 # may appear here", which is the only shape that catches a STALE version rather than a MISSING one.
@@ -163,9 +178,8 @@ R12@docs/roadmap.html@D44@the RENDERED roadmap lists D44 in its v1.0.1 card (out
 R13@docs/plans/crates/unblock-engine.md@D44@the engine crate plan records the repaired create contract
 R14@docs/plans/crates/unblock-storage.md@D44@the storage crate plan records the seeded-edge/anchoring rule
 R15@docs/plans/crates/unblock-mcp.md@D44@the mcp crate plan documents the create-arm deps semantics
-R16@CLAUDE.md@D1\.\.D44@D-range bump site 1 of 3
-R17@docs/plans/ci-cd-and-distribution.md@D1\.\.D44@D-range bump site 2 of 3
-R18@xtask/src/doc_lint.rs@D1\.\.D44@D-range bump site 3 of 3
+R16@CLAUDE.md@$RANGE_RE@D-range bump site 1 of 3 (the LIVE range — knob: RANGE_RE). File-level is sound here: this file carries exactly ONE occurrence, the bump site itself
+R18@xtask/src/doc_lint.rs@$RANGE_RE@D-range bump site 3 of 3 (the LIVE range — knob: RANGE_RE). File-level is sound here for the same reason; site 2 is ROW-ANCHORED at RW1 below, because ci-cd also describes this pin in prose
 R19@crates/unblock-storage/src/trait_def.rs@Issue\.dependencies@the Storage trait doc states create_issue persists the seeded edges
 R20@docs/plans/ci-cd-and-distribution.md@d44-create-deps-claims@this gate is SPECIFIED, not merely wired
 R21@.github/workflows/ci.yml@d44-create-deps-claims@this gate actually RUNS in the required doc-lint job
@@ -177,6 +191,22 @@ R26@crates/unblock-mcp/tests/dep_metadata.rs@\[.dependencies.\]@the same test as
 R27@crates/unblock-sync/tests/contract.rs@import leg (routes|enters).{0,60}create_issues@the import-leg pin names the ACTUAL entry point (import.rs:279 calls create_issues, NOT create_issue) instead of being cleared by a bare D44 token
 R28@.unblock/issues.jsonl@ub-lp9\.25@the co-shipped dangling-blocker issue EXISTS in the committed tracker record: PRD/spine/roadmap all cite it as a 1.0.1 co-requisite (Miguel ruling), and a cited-but-nonexistent id is how a co-ship commitment evaporates
 R29@crates/unblock-engine/tests/create_bulk.rs@D44@the bulk-create test file NAMES D44 — the SPELLING-INDEPENDENT pin (obligation 3 in the header above) over the one file where the retired D22 clause is dense and WRAPS across a line break; zero matches pre-D44, so it cannot pass vacuously
+"
+
+# =================================================================================================
+# ROW-ANCHORED LANDINGS — `code@path@anchor@regex@what it proves`
+#
+# Semantics (the same predicate `REQUIRE_CONTRACT`'s row-anchored selector uses, generalised off the
+# contract knob): at least ONE line in `path` must match `anchor`, and EVERY line matching `anchor` must
+# ALSO match `regex`. A vanished anchor is a FAILURE, never a pass — an anchor that no longer exists
+# proves nothing, and silently proving nothing is how a pin rots.
+#
+# This table exists because a file-level presence check is the WRONG predicate for a document that both
+# CARRIES a normative literal and DESCRIBES the pin that reads it. See the RANGE_RE header above for the
+# concrete miss it repairs.
+# =================================================================================================
+REQUIRE_ROW="
+RW1@docs/plans/ci-cd-and-distribution.md@\*\*\(a\) D-id coherence\*\*@$RANGE_RE@D-range bump site 2 of 3, LOCATED on the class-(a) statement itself — the ONE place in that file allowed to quote the live range, so no explanatory prose can satisfy this pin
 "
 
 # =================================================================================================
@@ -289,6 +319,22 @@ check_landings() {
     git grep -q -I -E "$re" -- "$path" 2>/dev/null \
       || printf '%s\n' "$path: [$code] the D44 cascade never landed here — no line matches /$re/ ($reason)"
   done
+  printf '%s\n' "$REQUIRE_ROW" | while IFS='@' read -r code path anchor re reason; do
+    [ -n "$code" ] || continue
+    if [ ! -f "$path" ]; then
+      printf '%s\n' "$path: [$code] REQUIRED cascade target is missing from the tree ($reason)"
+      continue
+    fi
+    rows="$(git grep -n -I -E "$anchor" -- "$path" 2>/dev/null)"
+    if [ -z "$rows" ]; then
+      printf '%s\n' "$path: [$code] the anchor line /$anchor/ no longer exists, so this pin now proves NOTHING ($reason)"
+      continue
+    fi
+    bad="$(printf '%s\n' "$rows" | grep -v -E "$re" | cut -d: -f2)"
+    if [ -n "$bad" ]; then
+      printf '%s\n' "$path: [$code] the anchored line(s) $(printf '%s' "$bad" | tr '\n' ' ') do not match /$re/ ($reason)"
+    fi
+  done
   printf '%s\n' "$REQUIRE_CONTRACT" | while IFS='@' read -r code path selector reason; do
     [ -n "$code" ] || continue
     if [ ! -f "$path" ]; then
@@ -386,6 +432,16 @@ fi
 rc_count="$(printf '%s\n' "$REQUIRE_CONTRACT" | grep -c '^RC[0-9]')"
 if [ "$rc_count" -lt 4 ]; then
   say "BLOCKED — the contract-version table has $rc_count rows; it shipped with 4. A publishing site lost its pin."
+  blocked=1
+fi
+
+# -------------------------------------------------------------------------------------------------
+# SELF-TEST 4 — same guard for the ROW-ANCHORED table, which shipped with 1 row. Deleting that row is
+# how the D-range pin on ci-cd would silently revert to the file-level check that passed VACUOUSLY.
+# -------------------------------------------------------------------------------------------------
+rw_count="$(printf '%s\n' "$REQUIRE_ROW" | grep -c '^RW[0-9]')"
+if [ "$rw_count" -lt 1 ]; then
+  say "BLOCKED — the row-anchored table has $rw_count rows; it shipped with 1. A LOCATED pin was downgraded or dropped."
   blocked=1
 fi
 
