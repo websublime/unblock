@@ -306,7 +306,48 @@ impl CommentValidator {
 // Shared contract type that BOTH policy and storage need lives here (CF-11):
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CacheKey(pub String); // ready/blocked projection cache key contract.
+
+// --- external dependency TARGET (NORMATIVE — D45; the SINGLE Rust home) ---
+// Until D45 this concept had no definition anywhere: no FR, no NFR and no D-id named it, and its
+// only normative statements were three parentheticals (§3.2.1 `blocked_issues`, §3.2.1's D44 scope
+// note, §4.1 `NewDep.depends_on_id`). It was open-coded in two DISAGREEING dialects — Rust
+// `starts_with("external:")` (case-SENSITIVE, `crates/unblock-engine/src/session/bulk.rs:271`) and
+// SQL `NOT LIKE 'external:%'` (ASCII-case-INSENSITIVE, `crates/unblock-storage/src/libsql/query.rs:292`,
+// `:316`, `:317`, `:350`, `:351`) — so `EXTERNAL:jira-1` was an external blocker to the ready query
+// and an ordinary id to the bulk parser. D45 pins ONE predicate and one case rule.
+
+/// The reserved dependency-TARGET prefix, exactly these 9 bytes, lowercase in its canonical form.
+/// A `depends_on_id` carrying it names a blocker OUTSIDE this workspace (a ticket in another
+/// system). It is a LEGITIMATE target that no row can ever satisfy — which is why
+/// `dependencies.depends_on_id` deliberately carries NO foreign key (§3.2.1) and why the
+/// ready/blocked passes exclude it (§3.2.1 `blocked_issues`).
+pub const EXTERNAL_TARGET_PREFIX: &str = "external:";
+
+/// Whether a dependency TARGET (`Dependency.depends_on_id`, `NewDep.depends_on_id`, a parsed
+/// `dep_ref`) names an external blocker.
+///
+/// **ASCII-case-INSENSITIVE (NORMATIVE — D45):** `external:`, `External:` and `EXTERNAL:` are the
+/// same target class. This is not a taste choice — it is forced by invariant (4) below.
+/// The byte comparison is EXACTLY equivalent to the SQL twin `depends_on_id LIKE 'external:%'`:
+/// SQLite's `LIKE` folds ASCII only, the prefix contains no non-ASCII byte, and an ASCII byte is
+/// always exactly one character — so the two accept precisely the same set of strings, including
+/// on non-ASCII near-misses (fullwidth `ＥＸＴＥＲＮＡＬ:`, dotless `ı`), which BOTH reject.
+#[must_use]
+pub fn is_external_target(target: &str) -> bool {
+    let p = EXTERNAL_TARGET_PREFIX.as_bytes();
+    let t = target.as_bytes();
+    t.len() >= p.len() && t[..p.len()].eq_ignore_ascii_case(p)
+}
 ```
+
+**External-target invariants (NORMATIVE — D45).**
+
+1. **`unblock-model` (L0) is the only lawful home.** The predicate must be reachable from BOTH `unblock-storage` (L2 — the in-transaction write guard, §3.2.1), `unblock-sync` (L3 — the export blocker-closure walk, which must NOT follow an `external:` target because that is not a row, §1.10) and `unblock-engine` (L5 — the bulk dep-ref resolver and the dangling-dependency diagnostic, §4.1). `unblock-storage` may depend on model + error ONLY (`xtask/src/layering.rs`), so any home above L0 is a layering violation. It sits in `unblock-model` `src/id.rs`, beside `parse_id`, and is re-exported flat from `lib.rs` like every other model helper.
+2. **`parse_id` is UNCHANGED.** `parse_id("external:jira-123")` yields prefix `external:jira` and keeps doing so (`crates/unblock-model/src/id.rs:457-458`): an external target is not an unblock id and is never parsed as one. `is_external_target` is orthogonal to id parsing — it classifies a dependency TARGET STRING, never an issue id.
+3. **A SQL twin REMAINS, because SQL cannot call Rust — so the single home is PARTIAL BY CONSTRUCTION, and both halves agree only BY CONTRACT.** The five `NOT LIKE 'external:%'` predicates in `crates/unblock-storage/src/libsql/query.rs` (`:292`, `:316`, `:317`, `:350`, `:351`) stay; the spine states the split rather than pretending the Rust `fn` is the only site. The two halves are kept honest by an obligation, not by hope: the NFR-16 Storage contract suite MUST carry an EQUIVALENCE cell that, for a fixed probe corpus, asserts `is_external_target(s)` equals the verdict the DATABASE ITSELF returns for `SELECT ?1 LIKE 'external:%'`. The corpus is pinned here so it cannot silently shrink: `""`, `"external"`, `"external:"`, `"external:jira-1"`, `"EXTERNAL:jira-1"`, `"ExTeRnAl:jira-1"`, `"externally:x"`, `"externaL:"`, `" external:x"` (leading space), `"ub-external:x"`, and two non-ASCII near-misses (`"ＥＸＴＥＲＮＡＬ:x"`, `"externaı:x"`). A future change to either side that breaks the equivalence turns that cell red.
+4. **The write guard is NEVER stricter than the read side (the invariant that decides the case rule).** For every target string `t`: if the ready/blocked SQL treats `t` as external and therefore never blocking (§3.2.1 `blocked_issues`), then `is_external_target(t)` MUST be true. A guard that rejected a `t` the read side already treats as a legitimate external blocker would refuse a write the store is happy to serve — the exact asymmetry the two open-coded dialects had shipped. Since the SQL side is ASCII-case-insensitive TODAY and is not being narrowed in a patch release (that would be a behaviour change on a GA-frozen read path, D35), the Rust predicate is case-insensitive. The invariant is DIRECTIONAL: the read side may be looser than the guard in the future, never the reverse.
+5. **Every open-coded recognition is retired — and the swap at the PARSER is a REFACTOR, not the behaviour change.** `crates/unblock-engine/src/session/bulk.rs:271` calls `is_external_target` instead of `starts_with("external:")`. **Stated precisely, because an implementer who edits only this line ships nothing:** for `EXTERNAL:jira-1` the shipped `parse_dependency` (`bulk.rs:270-284`) already falls to its else-branch, splits on `:`, finds `validate_dependency_type("EXTERNAL")` FALSE (it resolves to `DependencyType::Custom`, `bulk.rs:249-255`), and returns `("blocks", "EXTERNAL:jira-1")` — byte-identical to the external branch modulo `trim`. So the swap is observationally a NO-OP at this site; it is required because a single predicate is the only way to stop the two dialects re-diverging, not because it changes an output. **What actually delivers the case-insensitivity and the external relaxation is the RESOLVER carve-out** specified at §5.2 rejection-set item (b) and the matching skip in the engine's pre-transaction probe (`crates/unblock-engine/src/session/write.rs:497-522`): an `is_external_target` ref is carried VERBATIM and never resolved against anything. That is the behaviour change; this invariant is its precondition.
+6. **The carve-out is per-TARGET, never per-EDGE-TYPE.** `is_external_target` is applied to every dependency target on every path, including a `parent-child` target — so an `external:` PARENT is legal (§3.2.1 `update_issue`). A carve-out honoured for some edge types and refused for others would recreate exactly the two-dialect split this clause abolishes.
 
 ### 1.10 Query/result contract types (CF-A/CF-B/CF-C — defined here, re-exported by upper crates)
 
@@ -375,7 +416,17 @@ pub struct ExportReport  { pub written: usize, pub path: PathBuf } // PathBuf: J
 // --- diagnostics (CF-B: defined normatively here; referenced by engine/render/mcp) ---
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum DiagnosticKind { Stats, Info, Where, Version, Lint, Changelog, Orphans } // mirrors §5.2 DiagnosticsInput kinds
+pub enum DiagnosticKind { Stats, Info, Where, Version, Lint, Changelog, Orphans, Dangling } // mirrors §5.2 DiagnosticsInput kinds
+// D45 — the `///` doc comment on the `Dangling` variant is CONTRACT BYTES here too (schemars lifts it
+// into the variant `description` that rides `schema_bundle()`); it is pinned byte-for-byte by the contract
+// snapshot, and re-wording it re-cuts `CONTRACT_HASH` — see the matching note on §5.2's `DiagnosticsInput`.
+// D45 — `Dangling` (wire `"dangling"`, the plain-noun form the seven siblings use) is APPENDED,
+// never inserted mid-list: schemars emits the variants in declaration order and `CONTRACT_HASH`
+// digests those bytes, so a mid-list insertion would move the digest for a reason unrelated to the
+// new kind (the same rule §5.4 pins for `SchemaBundle` field position). §5.2's `DiagnosticsInput`
+// gains its arm LAST for the same reason, keeping the two mirrored. The variant is MINTED rather
+// than reusing `Lint`: both options bump the contract anyway (§5.4 D45), and reusing `Lint` would
+// make `DiagnosticReport.kind` DECLARE a kind the report is not — a lie on a published field.
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct DiagnosticReport { pub kind: DiagnosticKind, pub findings: Vec<DiagnosticFinding> }
@@ -383,7 +434,44 @@ pub struct DiagnosticReport { pub kind: DiagnosticKind, pub findings: Vec<Diagno
 pub struct DiagnosticFinding { pub label: String, pub detail: String } // generic key/value finding row
 ```
 
-`ExportReport.written` counts every serialized issue line in the export corpus, which — per FORK-1/D23 — INCLUDES closed and tombstone rows (`ListFilters { include_closed: true, include_tombstone: true, .. }`) and EXCLUDES ephemeral / `-wisp-` rows. All emitted `DateTime<Utc>` fields are rendered via `unblock_model::fmt_ts_secs` (CF-TS) so export bytes are deterministic and byte-coherent with render (D-OQ-B).
+`ExportReport.written` counts every serialized issue line in the export corpus, which — per FORK-1/D23 — INCLUDES closed and tombstone rows (`ListFilters { include_closed: true, include_tombstone: true, .. }`) and EXCLUDES ephemeral / `-wisp-` rows — **the exclusion being CONDITIONAL since D45: an ephemeral / `-wisp-` row that stands in a non-external dependency relation with an exported row — in EITHER direction, so notably one that BLOCKS an exported row — stops counting as excluded, transitively (the blocker closure below, which SUPERSEDES D23's unconditional exclusion).**
+
+**Export is CLOSED UNDER ITS BLOCKERS (NORMATIVE — D45; Miguel's ruling, 2026-08-01). The exporter DROPS NOTHING — the CORPUS widens.** The corpus filter drops ROWS; until D45 it did not drop the EDGES POINTING AT THEM, so an edge from a kept issue to an ephemeral or `-wisp-` issue was still serialized on the kept issue's line while its target's line was gone (`crates/unblock-sync/src/export.rs:76-77` — `issues.retain(…)` filters rows only).
+
+**Dropping that edge was examined and REJECTED, on measured evidence.** `live_blocked_ids` pass 1 (`crates/unblock-storage/src/libsql/query.rs:288-294`) is a LEFT JOIN whose predicate is `(i.status NOT IN ('closed','tombstone') OR i.id IS NULL)` with **no ephemeral exclusion**, so an issue whose blocker is ephemeral is BLOCKED today. Pass 2 (`:305-317`) carries no ephemeral exclusion either, so an EPIC with an ephemeral open child is BLOCKED today as well — the shape the rule below has to follow the edge BACKWARDS to preserve. An exporter that dropped either edge would hand the destination workspace a READY issue that is not ready — a data-integrity tool silently converting blocked work into available work, on the one promise the tool exists to keep.
+
+**The rule, stated over ROWS — because blockedness is NOT a function of a row's own edge list (Miguel's ruling, 2026-08-01).** A row the D23 retain excluded **stops counting as excluded** the moment it stands in a non-external dependency relation with a row in the working set, **in EITHER direction** — most importantly, **an ephemeral or `-wisp-` row that BLOCKS something exported is exported**. AFTER the D23 row retain and BEFORE serialization the exporter therefore computes the **TRANSITIVE CLOSURE of the kept set over non-external dependency edges, followed in BOTH directions**, over the rows of the pre-retain `list_issues` result:
+
+- **OUT** — a row in the working set carries a `depends_on_id` for which `unblock_model::is_external_target` is FALSE (§1.9) and which names an excluded row: that row is ADDED.
+- **IN** — an excluded row carries a `depends_on_id` (likewise non-external) naming a row in the working set: that excluded row is ADDED.
+
+Every newly added row is then examined the same way, in BOTH directions, until a full pass adds nothing. The final corpus is serialized in `id ASC` order exactly as before.
+
+**The IN direction is FORCED by measurement, not added for symmetry, and an OUT-only closure is NON-CONFORMING.** An edge is stored on exactly ONE row — `dependencies.issue_id` — and hydration is `FROM dependencies WHERE issue_id = ?1` (`crates/unblock-storage/src/libsql/crud.rs:408`), so an edge is serialized ONLY on that row's line. Blockedness, however, flows along an edge in both directions: `live_blocked_ids` **pass 2** (`crates/unblock-storage/src/libsql/query.rs:305-317`) marks the **PARENT** (`d.depends_on_id`) blocked because it is an epic with a non-terminal CHILD, and — exactly like pass 1 — it carries **no ephemeral exclusion**, while the `parent-child` edge lives on the **CHILD's** line. So a KEPT epic with an EXCLUDED open child is BLOCKED in the source workspace; its own dependency list is empty; an OUT-only closure has nothing to follow, the child never travels, and the epic arrives **READY** in the destination — after which **pass 3** (`propagate_blocked_to_children`, `query.rs:341`) propagates that ready-ness down to every kept child of the epic. That is the same silent blocked→ready conversion this whole clause exists to forbid, arriving through the other side of the edge. **The IN direction is also what keeps the "drops nothing" claim literally true of EDGES:** an edge stored on an excluded row's line and pointing INTO the corpus would otherwise vanish with its row, and `export → import → export` would not reach a fixed point.
+
+**Both directions are UNIFORM over every dependency type — no gating carve-out.** Restricting the IN direction to the `affects_ready_work` types would reintroduce exactly the per-edge-type special-casing §1.9 and §3.2.1 refuse, and it would still lose a non-gating edge stored on the excluded row's line. The closure is over ids that could denote rows, not over a privileged subset of edge kinds.
+
+Three properties are NORMATIVE:
+
+1. **Termination is structural, not incidental.** The working set only GROWS and the pre-retain row set is finite, so a pass that adds nothing ends the walk and a dependency CYCLE through excluded rows terminates by construction. **The specified shape is a WORKLIST over the still-excluded rows, re-scanned whenever the working set grows** — an OUT-only queue drained once per newly-added id is NOT sufficient any more, because under the IN direction a row becomes eligible when some OTHER row is pulled in, not when its own edges are visited. A naive recursive re-walk of the whole set is likewise not the specified shape.
+2. **A pulled-in row is serialized VERBATIM — its `ephemeral` flag included.** The closure changes WHICH rows are written, never WHAT a row says. Rewriting `ephemeral: true` to `false` on the way out would make the destination workspace disagree with the source about a stored field, and the next export from the destination would then legitimately keep the row for a different reason.
+3. **An `external:` id pulls NOTHING and is pulled by NOTHING**, in either direction, because it is not a row at all (§1.9) — there has never been an issue row for it to serialize, and no row can be reached through it. The closure is over ids that could denote rows.
+
+**This is what reconciles the D45 write guard with D5 portability, and it is the reason the guard may live in the shared per-record insert body at all.** The resulting property is the one an import needs, stated exactly: **every file `sync export` produces is importable into an EMPTY workspace under the D45 guard, PROVIDED the source workspace holds no dangling edge**, because every surviving edge points either at a row inside the SAME file or at an external target — and the guard's batch arm (§3.2.1) accepts an intra-file target regardless of line order, so the property holds without any ordering requirement on the export. A SECOND property rides with it and is the one the measured evidence forces: **an issue BLOCKED before the export is BLOCKED after importing that export.** **That property is TRUE AS STATED only because the closure runs in BOTH directions, and the derivation is short enough to write down:** blockedness has exactly three sources (`live_blocked_ids`), and each is now preserved. Pass 1 reads the blocked row's OWN edge, which is serialized on its line, and the OUT direction guarantees the target row travels with it. Pass 2 reads an edge stored on the CHILD's line to mark the PARENT blocked, and the IN direction guarantees an excluded child of a kept epic travels. Pass 3 propagates only from rows already blocked by passes 1–2 along `parent-child` edges stored on the child's line, so it reproduces once those two do. A closure that followed OUT-edges alone would satisfy the first source and silently break the other two. Without the closure, the guard would refuse files this repository's own exporter produces — the exact hazard §3.2.1's D44 scoping clause named ("moving the guard into the shared body could make an already-exported D5 record un-importable"). D45 does not wave that hazard away; it removes its cause.
+
+**DISCLOSED CONSEQUENCE — the exporter does not repair, so it CAN emit a file the guarded import refuses.** A workspace that ALREADY carries a dangling edge (an edge whose target names no row anywhere) exports that edge unchanged; the closure has nothing to pull for it in EITHER direction, since a dangling target is not a row. The import then REFUSES the whole file with `BlockerNotFound` → `ISSUE_NOT_FOUND`, naming the FIRST offending `(dependent, target)` pair — both ids are already carried by the variant (§3.1), so the message is sufficient to repair the source file by hand. **That refusal is the correct behaviour and is stated as a rule, not as an accident: the EXPORTER may WIDEN its corpus (it is closing a file it owns, under its own corpus rule); the IMPORTER may never INVENT one (it is ingesting a claim it cannot verify).** An exporter permitted to silently repair would put an edge-dropper on the write side while D45 refuses one on the ingest side, and it would launder precisely the class the `dangling` diagnostic (§3.2.1) exists to surface. The named remedy is that diagnostic: enumerate the offending edges, fix them, then export.
+
+**SECOND DISCLOSED CONSEQUENCE — an export file may now carry ephemeral / `-wisp-` LINES.** That is an observable change to `sync export` bytes and it is why D45 **SUPERSEDES** D23 sub-decision (1)'s unconditional `exclude ephemeral/-wisp-` rather than refining it (PRD §4, D45 clause (5) and the reciprocal note on the D23 row). `ExportReport.written` is unchanged in MEANING — it still counts serialized issue LINES — but its value can now be larger for the same retained set. **The IN direction widens it FURTHER than out-edges alone would:** an excluded row is now written not only when something exported depends on it, but also when IT depends on something exported — the epic's ephemeral child being the shape that forces it.
+
+**An `external:` target is NOT a dangling edge, and it is ABSENT FROM EVERY EXPORT BY CONSTRUCTION** — not because it is filtered out, but because there has never been an issue ROW for it to serialize: it names a ticket in another system. So the closure property above is "every surviving edge points inside the file **or** is external", never "every surviving edge has a line in the file", and the D45 diagnostic (§3.2.1 `dangling`) never reports one.
+
+**NO new interchange LOSS (a claim the earlier draft got backwards, corrected here rather than left standing).** Because the target now travels with the edge, `export → import → export` PRESERVES an edge whose target is ephemeral or `-wisp-`; D45 adds nothing to the two already-disclosed losses (a dependency `metadata` of literal `"{}"` reading back as `None`; the `bd` import dropping both comment fields, §3.2.1). It does NOT touch the D42 dependency fixed point (§3.2.1: `None → NULL → None` round-trips exactly) — that clause is about a KEPT edge's columns and is unchanged; nor the `include_tombstone` round-trip clause above, which is about ROWS (and a tombstone TARGET counts as existing under the D45 guard, so it was never at risk). What the PRD carve-out records instead is the REFUSAL consequence above: an export of an already-dangling workspace produces a file the guarded import rejects.
+
+**Observability, contract-neutral.** `ExportReport` does NOT gain a field — it is a §1.10 contract DTO surfaced through `SyncOutput` (§5.3), and any field change moves schema bytes (§5.4). The closure is instead reported once per export on the existing NFR-13/D30 `unblock.reliability` target from `unblock-sync`, with the standardized field set (`operation = "export"`, `path`, `result = "blocker-closure-widened"`, `reason = "<n> row(s) outside the corpus filter retained as dependency targets"`). **FIRE CONDITION, PINNED:** the emission is CONDITIONAL on `n > 0`, exactly like the sibling `external-path-force-override` emission in the same file. An unconditional emission would write a `0 row(s)` INFO on every export, and this repository re-exports `.unblock/issues.jsonl` on every commit — the literal reading of "reported once per export" is therefore not the specified one, and this sentence exists so nobody implements it.
+
+**NFR-16 consequence — the round-trip obligation, with a HOME (an obligation whose only named suite cannot host it is prose).** The property is: **for any corpus the tool itself produced, `export → import into an EMPTY workspace` SUCCEEDS under the D45 guard, the KEPT edge set is preserved, and any issue that was BLOCKED before the export is BLOCKED after it.** It is asserted in **`crates/unblock-sync/tests/contract.rs`** — the crate-level integration suite that already drives the REAL `unblock-storage` libsql impl end to end — and it needs **TWO** blockedness cells, not one, because one cell per closure DIRECTION is what makes the property non-vacuous: (a) a kept issue blocked by an EXCLUDED blocker (the OUT direction, a `live_blocked_ids` pass-1 shape), and (b) **a kept EPIC with an excluded, non-terminal `parent-child` CHILD** (the IN direction, a pass-2 shape) — cell (b) passes in BOTH worlds unless the closure follows incoming edges, so it is the one that kills the OUT-only mutant. Each asserts the dependent is still in `blocked`, never `ready`, after the round trip. The NFR-16 storage contract suite carries the guard-side half (a `create_issues` batch whose record declares a target present neither in the batch nor in storage is refused whole-batch, ZERO rows). **`crates/unblock-sync/tests/roundtrip_proptest.rs` CANNOT host it, and "constrain its generator" is a NO-OP:** that suite's `parse_of_serialize_is_sync_equals` (`:115`) is a pure `serialize_issue_line` → `parse_issue_line` → `sync_equals` identity that never touches `Storage`, never exports and never imports, so its `arb_dependency` (`:28`) already emits targets that are essentially always dangling and nothing goes red — no guard runs there. That generator therefore stays as it is; the strengthened property lives where storage, export and import are all real.
+
+All emitted `DateTime<Utc>` fields are rendered via `unblock_model::fmt_ts_secs` (CF-TS) so export bytes are deterministic and byte-coherent with render (D-OQ-B).
 
 **`ImportReport.dependencies`/`.comments` (D24/F1)** count the relation/comment rows migrated by the one-shot `bd` import, tallied on the POST-repair, POST-dedup record (faithful to bd's `record_imported_relation_counts`, `temp/beads_rust-main/src/sync/mod.rs:4611-4614`); both default to `0` on the generic `import_jsonl` path (it never tallies them). **Count plumbing (MF-2, option (a)):** the shared `unblock-sync::apply_records` (D24/F5) builds+returns the report with `imported`/`skipped`/`dropped_fields` set and `dependencies:0, comments:0`; EACH CALLER finalizes the two counts on the returned report — `import_jsonl` leaves them `0`, `import_bd` sets them to its tallies — so the seam carries no deps/comments params (see the sync `import.rs` row). Since `ImportReport` has NO `Default` derive, the two added fields force an Implement ripple: re-bless the JsonSchema golden `crates/unblock-model/tests/snapshots/schema_snapshots__import_report.snap` (3→5 properties) + update every 3-field struct literal (`import.rs:167`/`:180`, `results.rs:157-161`, `output.rs:57-61`, the new `bd_import.rs` constructor). Definition/re-export home = `unblock-model` (spine §1.10). Additive; NOT part of any MCP tool input `JsonSchema` (it rides in the mcp-owned `SyncOutput`), so **no `CONTRACT_VERSION` bump** — verified against `schema_bundle()` (the golden re-bless is the model snapshot, not the `schema_bundle` hash). **Forward note (T2.6/D25):** superseded going forward — the D25 bundle carries the per-tool output schemas (`sync` output = `SyncOutput`), so ANY future `ImportReport`/`ExportReport` field change moves `CONTRACT_HASH` and forces a `CONTRACT_VERSION` bump. The T2.5 ruling stays valid for its time.
 
@@ -675,7 +763,7 @@ pub struct IssuePatch {
 
 **`close_reason` persistence (T1.2 Verify-gate, NORMATIVE).** `close_reason` is the nullable-text tri-state (`None` = leave unchanged; `Some(None)` = clear to the column default `''`; `Some(Some(s))` = set). `update_issue` persists it to the existing `close_reason TEXT DEFAULT ''` column (already projected by `ISSUE_COLUMNS`; `create_issue` already binds it from the `Issue`). The engine's `close_with_suggestions(id, reason)` (§4.1) builds a `status = Closed` patch carrying `close_reason` and persists it through `update_issue` under the write permit — the reason is **stored**, not tracing-only. The `close_reason` column is **not** part of the frozen `content_hash` (spine §1.8), so persisting it does not perturb import idempotency (FR-26).
 
-**`StorageError` (storage-owned; the §2.1 sketch made concrete — NORMATIVE).** The full v1 variant set and its `ErrorCode` mapping. **`CommentNotFound { id: i64 }` (FR-6/D37) is a StorageError-level variant that maps ONTO the EXISTING `ErrorCode::IssueNotFound` — the two levels are deliberately NOT 1:1 here, and this is not a bug to "fix" back.** FORK-E1 constrains the **`ErrorCode` taxonomy** (no `CommentNotFound` *code*: the taxonomy stays at 36, no exit-code-table re-bless, no `oneOf`/error-golden movement) — it does not constrain the internal `StorageError` enum, and adding this variant satisfies FORK-E1 literally because it grows no `ErrorCode`. The variant exists because reuse at the StorageError level would force `IssueNotFound { id: comment_id.to_string() }`, whose `context()` key is `"id"` and whose `Display` renders `issue 42 not found` when it was **comment** 42 that was missing — actively misleading in an agent-first tracker. The `i64` field matches the comment row's own id type (`Comment.id`, §1.6); the field-bearing analog is `IssueNotFound`, **not** the fieldless `DependencyNotFound`. It implements `unblock_error::CodedError` (NOT a bespoke inherent `code()`; §2.1 note), so the L7 boundary bridges it via the blanket `From<&E>` like every other crate enum. `Migration` is defined **concretely and minimally, model-backed**: `Migration { from: i32, to: i32, reason: String }` (`from`/`to` are `PRAGMA user_version` values, `i32` to match the schema-version type). `Backend { source: BackendOpaque }` absorbs the libsql error opaquely — no libsql type is ever public (spine §6 rule 2). `BackendOpaque` sanitizes its message **at construction** via `unblock_error::sanitize_message` and exposes only `Debug`/`Display`.
+**`StorageError` (storage-owned; the §2.1 sketch made concrete — NORMATIVE).** The full v1 variant set and its `ErrorCode` mapping. **`CommentNotFound { id: i64 }` (FR-6/D37) is a StorageError-level variant that maps ONTO the EXISTING `ErrorCode::IssueNotFound` — the two levels are deliberately NOT 1:1 here, and this is not a bug to "fix" back.** FORK-E1 constrains the **`ErrorCode` taxonomy** (no `CommentNotFound` *code*: the taxonomy stays at 36, no exit-code-table re-bless, no `oneOf`/error-golden movement) — it does not constrain the internal `StorageError` enum, and adding this variant satisfies FORK-E1 literally because it grows no `ErrorCode`. The variant exists because reuse at the StorageError level would force `IssueNotFound { id: comment_id.to_string() }`, whose `context()` key is `"id"` and whose `Display` renders `issue 42 not found` when it was **comment** 42 that was missing — actively misleading in an agent-first tracker. The `i64` field matches the comment row's own id type (`Comment.id`, §1.6); the field-bearing analog is `IssueNotFound`, **not** the fieldless `DependencyNotFound`. It implements `unblock_error::CodedError` (NOT a bespoke inherent `code()`; §2.1 note), so the L7 boundary bridges it via the blanket `From<&E>` like every other crate enum. `Migration` is defined **concretely and minimally, model-backed**: `Migration { from: i32, to: i32, reason: String }` (`from`/`to` are `PRAGMA user_version` values, `i32` to match the schema-version type). `Backend { source: BackendOpaque }` absorbs the libsql error opaquely — no libsql type is ever public (spine §6 rule 2). `BackendOpaque` sanitizes its message **at construction** via `unblock_error::sanitize_message` and exposes only `Debug`/`Display`. **`BlockerNotFound { issue_id: String, depends_on_id: String }` (D45) is the second variant of the same shape, and for the same reason.** It maps onto the EXISTING `ErrorCode::IssueNotFound`; FORK-E1 is satisfied literally, because the `ErrorCode` taxonomy does not grow (it stays at 36 — no exit-code-table re-bless, no `capabilities().error_codes` movement, no `CONTRACT_HASH` movement **from this variant**). It carries BOTH ids because both are load-bearing on a batch path: on an import of 500 records, `depends_on_id` alone would name the phantom without naming which record declared it. `Display` renders **`issue {issue_id} declares a dependency target that does not exist: {depends_on_id}`** — deliberately NEUTRAL about the edge KIND, because the guard runs over the DISTINCT target set of every declared dependency (`DependencyType` has 11 named variants plus `Custom`, of which only 4 gate ready work) and over `apply_reparent`, whose target is a PARENT. Rendering "blocker" there would be misleading in exactly the way this same paragraph rejects two sentences above when justifying `CommentNotFound`. The VARIANT keeps the name `BlockerNotFound` (it is internal, and the never-ready blocker case is the class's motivation); the user-visible STRING does not claim it. `context()` surfaces `context["issue_id"]` and `context["blocker_id"]` — the key is `blocker_id`, NOT `id`, so the payload stays honest about WHICH entity was missing (the same discipline `CommentNotFound` uses with `context["comment_id"]`). Adding context KEYS moves no schema byte: `StructuredError.context` is a free-form `serde_json::Map` (§2.4), the same mechanism D43 used for its `context.kind` discriminator (§5.4).
 
 ```rust
 #[derive(Debug, snafu::Snafu)]
@@ -693,6 +781,7 @@ pub enum StorageError {
     AlreadyClaimed { id: String, by: String },     // -> AlreadyClaimed (FR-2 loser; `by` = current holder, re-read in-tx)
     CycleDetected { path: String },      // -> CycleDetected
     DependencyNotFound,                  // -> DependencyNotFound
+    BlockerNotFound { issue_id: String, depends_on_id: String }, // -> IssueNotFound (D45; reuses the code, mints none)
     HasDependents { id: String },        // -> HasDependents
     SelfDependency,                      // -> SelfDependency
     DuplicateDependency,                 // -> DuplicateDependency
@@ -705,11 +794,23 @@ pub enum StorageError {
 //   AlreadyClaimed{by} -> context["holder"]; CycleDetected{path} -> context["cycle_path"];
 //   SchemaMismatch{found,expected}; IssueNotFound{id}; CommentNotFound{id} -> context["comment_id"]
 //   (code() = IssueNotFound, but the context key stays honest about WHICH entity was missing);
+//   BlockerNotFound{issue_id,depends_on_id} -> context["issue_id"] + context["blocker_id"] (D45 —
+//   same discipline: code() = IssueNotFound, the keys name the declaring row AND the phantom target);
 //   HasDependents{id}; IntegrityFailed{messages}; ... }
 //
 // pub struct BackendOpaque(String); // private inner; from_message() runs sanitize_message at construction;
 //   Debug + manual Display (sanitized text) + impl std::error::Error. No From<libsql::Error> until T0.6.
 ```
+
+**Why `BlockerNotFound` rides `IssueNotFound` and not the other two (NORMATIVE rationale — D45; the choice is a CONTRACT, because it decides the exit code a CLI caller observes).** No new `ErrorCode` is minted: post-GA the spine already calls that a BREAKING contract change shipped in a patch release (§5.4, D43's stated reason for refusing), and both live v1.0.1 precedents refused. Three existing codes were genuinely in play:
+
+- **`DependencyNotFound` (exit 5).** Its published doc already says "the dependency target was not found", which reads like an exact fit — and it is the trap. **The name is already taken by a different meaning:** it is what `remove_dependency` returns when the DELETE matches zero rows (§3.2.1 `list_dependencies`/`remove_dependency`; `crates/unblock-storage/src/libsql/deps.rs`), i.e. "the EDGE does not exist". Reusing it would make one code mean both "the edge you asked me to delete is not there" and "the issue you named as a blocker does not exist", leaving an agent no way to tell them apart — a machine-filterability regression on a code that is currently unambiguous. REJECTED.
+- **`ValidationFailed` (exit 4).** What D44's own wire rejection uses and what `create_bulk`'s existing unresolved-reference rejection already produces. REJECTED on two grounds: it is published as **retryable** (§2.2 retryable set), which is a lie here — retrying the identical call cannot succeed, nothing is transient; and its published `HintShape` is `ContextualText`, so it cannot carry the one hint that actually helps.
+- **`IssueNotFound` (exit 3). CHOSEN.** (i) It is the FORK-E1 precedent applied verbatim — the sanctioned shape for a not-found sibling is a new `StorageError` variant onto this code, and `CommentNotFound` already rides it. (ii) It is the ONLY code whose published `HintShape` is `SimilarIds` (§2.2), i.e. the did-you-mean family backed by the real `find_similar_ids` site — and a typo'd or hallucinated blocker id is this defect's dominant cause, so the one code with a near-miss suggestion shape is the one that fits. (iii) It is non-retryable, which is the honest signal. (iv) Exit 3 (Issue/operational) is a defensible bucket: the fault is that an ISSUE was not found, which is exactly what exit 3 means. **The trade, stated plainly:** a caller filtering on the CODE alone cannot distinguish "the issue you addressed does not exist" from "the blocker you named does not exist" — that distinction lives in `context["blocker_id"]`, whose presence is the discriminator. That is the same cost `CommentNotFound` already pays, accepted for the same reason: a taxonomy break in a patch release costs more.
+
+**Hint (NORMATIVE, so no shape moves either way).** Attaching a hint on this path is OPTIONAL in this cut; IF one is attached it MUST be the `SimilarIds` family already published for `IssueNotFound` (a `find_similar_ids` fold over the blocker id, `context["similar_ids"]`). No `hint_shape` byte moves in either case, so §2.2's honesty rule — a code may move off `HintShape::None` only when a real production hint site ships — is not engaged.
+
+**The one divergence, stated rather than hidden.** `Session::create_bulk` rejects an UNRESOLVABLE dependency REFERENCE at L5, before storage is reached, and keeps `ValidationFailed` (§5.2 rejection-set item (b)). That is a different question from D45's: a bulk `### Dependencies` entry may be a title, a stand-in handle or an id, and "this reference resolves to no target at all" is a parse/resolution fault. `BlockerNotFound`/`ISSUE_NOT_FOUND` fires for a RESOLVED id that names no row. The two coexist deliberately; neither is a fallback for the other.
 
 ### 3.2 The trait
 
@@ -833,7 +934,9 @@ pub trait Storage: Send + Sync {
 
     // --- diagnostics support (FR-15, pure-DB; no git) ---
     // D26 (T2.7): changelog/lint/orphans add NO new Storage method — the engine composes them from the
-    //   reads already declared here + list/ready/blocked/count/dependency_tree. `closed_since` is already
+    //   reads already declared here + list/ready/blocked/count/dependency_tree. D45's `dangling` kind
+    //   follows the SAME pattern and likewise adds NO trait method (it differences `dependency_graph(&[])`
+    //   against a fully-inclusive `list_issues` id set — §3.2.1), so no `impl Storage` and no test fake moves. `closed_since` is already
     //   `since`-windowed; `orphan_candidates` is already status-agnostic. The bd-faithful `stats` diagnostic
     //   is the ONE exception: `epics_eligible_for_closure` needs a per-epic parent-child child rollup that
     //   no existing read composes, so a faithful port adds ONE purely-additive pure-DB aggregate primitive —
@@ -916,7 +1019,13 @@ between an earlier prose description and the source are resolved **in favour of 
   `dep.depends_on_id == issue.id`, which is the correct comparison, and it fires during the staging step,
   so the published precedence is `IdCollision` → `external_ref` collision → `SelfDependency` →
   `DuplicateDependency` → `CycleDetected`, matching `add_dependency`'s self → duplicate → cycle with the
-  id guards still first. NO new `StorageError` variant and NO new `ErrorCode` are minted, and the
+  id guards still first. **AMENDED by D45 (v1.0.1): the chain gains ONE link — `BlockerNotFound` is
+  INSERTED between `SelfDependency` and `DuplicateDependency`** (`IdCollision` → `external_ref` collision →
+  `SelfDependency` → **`BlockerNotFound`** → `DuplicateDependency` → `CycleDetected`); every pair D44
+  published keeps its order (`SelfDependency` still beats `DuplicateDependency`), no shipped rejection is
+  re-ranked, and the rationale — including why the rank is FORCED by where D45 bodies the guard, and why
+  the alternative placement was rejected — is in the **Dependency-TARGET existence** bullet below. NO new `StorageError` variant and NO new `ErrorCode` are minted **by D44** (D45 mints
+  the internal `StorageError::BlockerNotFound` and still mints no `ErrorCode` — §3.1), and the
   rejection does not name the offending array index: with all-or-nothing there is no prefix to describe,
   and element-level detail, if ever wanted, is an L7 `hint` concern. ANY of these rejections rolls the
   whole tx back → ZERO rows: no issue, no edges, no events. **SCOPE — both engine callers, neither
@@ -927,7 +1036,15 @@ between an earlier prose description and the source are resolved **in favour of 
   its dedup-and-continue and its absence of a cycle check STAY, because `create_issues` is that body's
   other caller: `create_bulk` today commits a genuine mutual cycle atomically, and moving the guard into
   the shared body could make an already-exported D5 record un-importable. Changing bulk/import semantics
-  is explicitly OUT of D44's scope. **Storage receives an
+  is explicitly OUT of D44's scope.
+  **AMENDED by D45 (v1.0.1) — PARTIALLY SUPERSEDED; kept here as the record of what D44 scoped, never
+  silently overwritten.** The dedup-and-continue and the absence of a CYCLE check still stay, exactly as
+  written. What changes is the blanket "UNCHANGED": the shared body now DOES carry the D45
+  dependency-target existence guard (the **Dependency-TARGET existence** bullet below), which is what
+  makes that guard total over all five edge-writing entry points. The un-importability hazard this clause
+  named is not waved away — D45 removes its CAUSE by widening the export corpus to the transitive closure
+  of its blockers (§1.10), so every file the exporter produces satisfies the guard whenever the source
+  workspace itself holds no dangling edge. **Storage receives an
   already-allocated `Issue.id` — it does NOT mint (D21).** For the interactive create path the id is minted
   by the **engine** id-allocator (D21) under the write permit and the resulting `Issue` is handed here; for
   the import/internal path the caller supplies the id (`Session::create`). The id-collision guard above is the
@@ -960,7 +1077,115 @@ between an earlier prose description and the source are resolved **in favour of 
   (PRD §4): D44 extends the same all-or-nothing property to the SINGLE create by
   seeding the edges onto the built `Issue` instead of writing them in a follow-up pass after the insert.
   `create_issues` itself — and therefore bulk create and the JSONL/`bd` import leg — is UNCHANGED by D44,
-  including its dedup-and-continue edge handling and its deliberate absence of a cycle check.
+  including its dedup-and-continue edge handling and its deliberate absence of a cycle check — see the
+  D45 bullet below for the ONE guard that body DID gain afterwards.
+- **Dependency-TARGET existence (NORMATIVE — D45; the ONE guard that binds EVERY edge-writing path).**
+  A `depends_on_id` that names no issue and is not an external target is REJECTED with
+  `StorageError::BlockerNotFound { issue_id, depends_on_id }` → `ErrorCode::IssueNotFound` (exit 3, §3.1).
+  The check is bodied in the SHARED per-record insert body (`insert_issue_in_tx`,
+  `crates/unblock-storage/src/libsql/crud.rs:157`), which is what makes it TOTAL: that body is the only
+  edge-writing site `Storage::create_issue` (the minting create AND the id-preserving
+  `Session::create(&Issue)`) and `Storage::create_issues` (bulk create AND the JSONL/`bd` import leg) all
+  pass through. The two sibling edge-writing bodies — `add_dependency`
+  (`crates/unblock-storage/src/libsql/deps.rs`) and `apply_reparent` (`crud.rs:972-1032`) — carry the SAME
+  rule at their own sites (their rows below), which is what closes the count at **FIVE entry points**:
+  `issue create {deps}`, `dep add`, `issue update {parent}` (reparent), `issue create_bulk`, and the
+  JSONL/`bd` import leg. **This SUPERSEDES the D44 scoping clause that deliberately left the shared body
+  alone — the reciprocal note sits on that clause in the `create_issue` row above, which is KEPT as the
+  record of D44's scope.**
+  - **PREDICATE (batch-aware — a per-record check is NON-CONFORMING).** A target is acceptable iff
+    `unblock_model::is_external_target(target)` (§1.9, ASCII-case-insensitive) **OR** a row with that id is
+    visible to the CALLER'S transaction **OR** the id belongs to ANY record staged by the same transaction.
+    The third arm is not a convenience: `create_issues` stages records sequentially inside ONE transaction,
+    so an intra-batch edge resolves only because the sibling was minted EARLIER. A naive per-record
+    in-transaction `SELECT` therefore accepts a BACKWARD reference and rejects a FORWARD one (record A
+    declaring an edge to record Z later in the same file) — an ordering-dependent refusal of a legal
+    import, which no caller can predict and no file author can avoid. Mechanically, the batch arm is the
+    id set of the slice handed to `create_issues`, computed BEFORE the transaction opens and passed into
+    the shared body — **never the id set of the parsed FILE**, a silently WEAKER reading: the D5 import
+    hands `create_issues` the SKIP-FILTERED `create_subset` (`crates/unblock-sync/src/import.rs:279`), which
+    is safe ONLY because every Skip reason implies the row already exists and is therefore covered by the
+    database arm. That dependency is stated so a future Skip reason for a NON-existent row cannot turn a
+    legal file into an order-dependent refusal. `create_issue` passes the singleton set of the one id it is
+    inserting; **that arm is provably DEAD on the singleton path** (the only target it could match is the
+    issue's own id, which `SelfDependency` rejects first during staging) — specified for uniformity of the
+    shared body, and deliberately NOT worth a test.
+  - **IN-TRANSACTION is load-bearing.** The check runs inside the caller's already-open `BEGIN IMMEDIATE`
+    transaction, never as a pre-transaction probe. A probe (the shape the engine's `probe_storage_dep_refs`
+    uses, `crates/unblock-engine/src/session/write.rs`) is racy against a concurrent delete/tombstone: the
+    D14 in-process permit and the D31 `.write.lock` narrow that window but do not close it, because the
+    SUPPORTED topology is child-per-client (§4.2), i.e. another PROCESS may legitimately be writing.
+    `libsql::Transaction` never leaves `unblock-storage` (§6.2), so an in-transaction check is bodied at
+    **L2 by construction**; only the POLICY of which paths run it could ever live higher, and D45 answers
+    that with "all of them".
+  - **A TOMBSTONE TARGET COUNTS AS EXISTING** — deliberately, and deliberately UNLIKE `add_comment`'s
+    FORK-3 rule (§3.2.1 `add_comment`, which rejects a tombstoned issue). The export corpus includes
+    tombstones (`include_tombstone: true`, D23, §1.10), so an edge to a tombstoned blocker is a normal,
+    round-trippable fact; refusing it would make a conforming export un-importable — the precise failure
+    D45 also addresses on the export side by widening the corpus (§1.10). The existence query is therefore status-agnostic:
+    `SELECT 1 FROM issues WHERE id = ?1 LIMIT 1`.
+  - **DISTINCT targets, evaluated as ONE post-staging pass.** The pass walks the DISTINCT `depends_on_id`
+    set of the record's declared `Issue.dependencies`, so a repeated target is reported once, and it runs
+    AFTER the record's staging loop has finished — which is what makes the published precedence below TRUE
+    rather than approximate (a check interleaved into the staging loop would let element 1's missing target
+    beat element 2's self-dependency).
+  - **An EMPTY or whitespace `depends_on_id` is refused by this guard** (it is not external and names no
+    row) — the storage-side half of the empty-string edge hazard. The SOURCE half stays where it is: §5.2's
+    PROHIBITED clause forbidding `DepInput.issue_id` from ever being defaulted to `""` is a WIRE rule and
+    is NOT superseded by this guard.
+  - **RANK IN THE PUBLISHED PRECEDENCE CHAIN (NORMATIVE — precedence is OBSERVABLE BEHAVIOUR, so it is
+    PUBLISHED, never appended silently, and the published rank MUST be one the specified placement can
+    produce).** The chain becomes, on every path that has the relevant guards:
+    `IdCollision` → `external_ref` collision → `SelfDependency` → **`BlockerNotFound`** →
+    `DuplicateDependency` → `CycleDetected`.
+    The rank is CHOSEN, and the FIRST reason is implementability: (i) it sits AFTER `SelfDependency`
+    because a self-edge names the very row being created — reporting it as a missing blocker would be a
+    lie, and D44 already pins `SelfDependency` as firing during staging; (ii) it sits BEFORE
+    `DuplicateDependency` because **that is the only rank the placement in the shared body can produce.**
+    D44's duplicate and cycle guards live in the `create_issue` WRAPPER, AROUND the shared-body call
+    (`crates/unblock-storage/src/libsql/crud.rs:57` `insert_issue_in_tx`, then `:61`
+    `reject_duplicate_declared_edges`, then `:62` `reject_declared_gating_cycles`), so on the create path
+    a missing target NECESSARILY fires before a duplicate. Publishing the opposite pair would publish an
+    order the code cannot produce, and an input that both repeats a target and names a missing one is
+    trivially constructible, so the discrepancy is observable rather than theoretical. The alternative was
+    examined and REJECTED on the merits: moving `reject_duplicate_declared_edges` ahead of the
+    `insert_issue_in_tx` call would put `DuplicateDependency` ahead of `IdCollision`, the `external_ref`
+    collision AND `SelfDependency` — all three fire inside the shared body — inverting THREE published
+    pairs in order to preserve one. **No already-published pair moves under the chosen rank:**
+    `SelfDependency` → `DuplicateDependency` is preserved exactly; the new link is INSERTED between them.
+    The rank is also defensible on its own terms — existence of an endpoint is prior to any relational
+    question about the edge SET, and a duplicate declaration is a statement about that set; (iii) it sits
+    BEFORE `CycleDetected` because a cycle is a RELATIONAL question about a graph and presupposes that both
+    endpoints denote real nodes — a target that does not exist cannot participate in a cycle, so a cycle
+    witness naming a phantom node would report a derived defect while hiding the primary one; (iv) it sits
+    after the two id guards because a row must exist before its edges mean anything. The rank is UNIFORM
+    across paths, and uniformity is ACHIEVED, not assumed: on `create_issue` it falls out of the shared-body
+    placement; on `add_dependency` it is achieved by placing the existence query AFTER the self check and
+    BEFORE the duplicate query; on `apply_reparent` there is no duplicate guard, so the chain reads
+    self → `BlockerNotFound` → cycle. On the import/bulk leg the chain simply ends at `BlockerNotFound`
+    (that path has neither the duplicate nor the cycle guard — `create_issues` above).
+    **PER-RECORD SCOPING (stated because an NFR-16 cell written from an absolute reading is record-order
+    flaky).** The rank orders the rejections WITHIN one record. `create_issues` runs each record's full body
+    before the next begins, so record 1's `BlockerNotFound` legitimately beats record 2's `SelfDependency`
+    — already true of `IdCollision`, hence not a regression, but a cell asserting a cross-record winner must
+    fix the record order it asserts about.
+    **ONE SHIPPED REJECTION CHANGES CODE, and it is named rather than discovered later:** on
+    `add_dependency`, re-adding an edge that ALREADY exists and whose target is dangling now returns
+    `IssueNotFound` where GA returned `DuplicateDependency`. It is reachable only on already-corrupt data —
+    the population D45 exists to surface — and it is listed in the §5.4 ledger.
+    **REQUIRED LANDING — the D44 doc-comment that publishes this chain in PROSE.**
+    `crates/unblock-storage/src/libsql/crud.rs:34-40` states the old chain and adds "the first three fire
+    inside the shared body while it stages, the last two after"; both halves move with D45 (the shared body
+    now also fires `BlockerNotFound`, AFTER staging and before the wrapper's two guards). Left unedited it
+    becomes a false comment in a green suite, which is why it is a gate landing and not an implementer's
+    discretion.
+  - **ANY rejection rolls the whole transaction back → ZERO rows** — no issue, no edges, no events, and on
+    the batch paths no partial batch. This is the existing `with_immediate_tx` property, not a new one.
+  - **No `Storage` trait signature changes.** The batch id set is an internal `pub(super)` parameter of the
+    shared body; every `impl Storage` METHOD SET is unchanged, so no test fake moves.
+  - **The schema is UNCHANGED** — no foreign key, no `CHECK`, no trigger on `dependencies.depends_on_id`.
+    The guard is APPLICATION-LEVEL by necessity: an external target is a legitimate value that no row can
+    ever satisfy, so a foreign key would forbid the very thing §1.9 defines as legal.
 - **`update_issue` (sqlite.rs:2496–2509, 2572–2870) — per-field event granularity; empty diff is a
   full skip.** An empty patch (or one that changes nothing) returns the issue unchanged and writes **no
   `SET`, no `updated_at`, no `Event`** (`if set_clauses.is_empty() { return Ok }`). `updated_at` advances
@@ -972,6 +1197,22 @@ between an earlier prose description and the source are resolved **in favour of 
   (see the `restore_issue` carve-out below). This guard is what makes `restore` STRUCTURALLY separate from the
   reopen=update mapping (§5.2) and is cited by the §3.2.1 `restore_issue` step, the §4.1 `Session::restore` seam
   note, and the §5.2 `Reopen`/`Restore` notes — all of which point HERE as the normative source.
+  **Reparent target existence (NORMATIVE — D45; the 4th edge-writing entry point).** `apply_reparent`
+  (`crates/unblock-storage/src/libsql/crud.rs:972-1032`) writes a `parent-child` edge to whatever string
+  the patch carries, guarded today only by self and cycle. It now carries the same in-transaction
+  existence guard, in the same precedence position (self → **`BlockerNotFound`** → cycle — the reparent
+  path has no duplicate guard, so the link lands directly before the cycle check), using the `row_exists`
+  helper already present at `crud.rs:1328` and already used in-transaction there. **Honest scoping:** a
+  dangling `parent-child` edge does NOT produce the never-ready symptom — `blocked_issues` pass 1
+  restricts to `blocks`/`conditional-blocks`/`waits-for`, pass 2 is an INNER join that yields no row for a
+  missing parent, and pass 3 seeds strictly from the already-blocked set, so a phantom parent is never a
+  seed. It is nevertheless a real integrity defect: it is hydrated onto the issue, it is exported, it is
+  written with `isError:false`, and the D45 `dangling` diagnostic LISTS it — so leaving it unguarded would
+  let the tool that reports the defect be used to create the defects it reports. **`external:` as a
+  PARENT is LEGAL:** `is_external_target` (§1.9) applies here too — one shared predicate, no
+  per-edge-type special-casing — so an `external:` parent remains representable exactly as it is today.
+  Narrowing it (refusing an external parent as nonsense) would be a NEW restriction on a GA-shipped path
+  and would fork the predicate into per-edge-type dialects, which §1.9 invariant (6) forbids.
 - **`delete_issue` (sqlite.rs:2952–3015) — delegate to the model `Issue::into_tombstone`** (which sets
   `status = Tombstone` + `deleted_*` and preserves `original_type`), then bump `updated_at = now` and
   recompute `content_hash`. **`Event(Deleted)` is written ONLY when the prior status was non-terminal**
@@ -1091,7 +1332,16 @@ The dependency ops (FR-5) — source-verified vs the original cycle machinery:
 
 - **`add_dependency` (cycle rejection: `would_create_cycle`/`check_cycle` sqlite.rs:2286,2440;
   `find_cycle_graph_path` sqlite.rs:10664) — rejects a *gating* cycle with the REAL ordered path.**
-  Guards `SelfDependency` then `DuplicateDependency`, then builds the gating graph **including the
+  Guards `SelfDependency` then `DuplicateDependency` — **REORDERED by D45 (v1.0.1): the sequence becomes
+  `SelfDependency` (UNMOVED — it stays exactly where it ships, pre-transaction; see the SOURCE bullet
+  below), then the SOURCE existence check, then `BlockerNotFound` (the same in-transaction
+  TARGET-existence rule the shared insert body carries, with the same `is_external_target` carve-out
+  (§1.9) and the same status-agnostic query; its "batch" is the single prospective edge), then
+  `DuplicateDependency`.** The target check sits BEFORE the duplicate query so ONE published chain
+  describes every path (the create path cannot produce the other order — the RANK bullet above), which
+  costs two queries swapped inside one transaction and nothing else. Its one observable consequence is
+  named in the §5.4 ledger: re-adding an ALREADY-PRESENT edge whose target is dangling now returns
+  `ISSUE_NOT_FOUND` instead of `DuplicateDependency`, reachable only on already-corrupt data. Then builds the gating graph **including the
   prospective edge** (private `petgraph`, `would_cycle_in_tx`) over the 4 `affects_ready_work` types.
   If the new edge closes a gating cycle it is rejected with `CycleDetected { path }` where `path` is
   the **actual ordered cycle, naming every node** (e.g. `a -> b -> c -> a`), reconstructed by a private
@@ -1102,7 +1352,40 @@ The dependency ops (FR-5) — source-verified vs the original cycle machinery:
   the create-specific guard inside `Storage::create_issue`'s own tx, which checks each seeded gating
   edge with the SAME function and therefore inherits the same D4 orientation and the same REAL ordered
   cycle path. It is deliberately NOT in the shared per-record insert body, so `create_issues` — bulk
-  create and the JSONL/`bd` import leg — keeps its current, guard-free semantics.)
+  create and the JSONL/`bd` import leg — keeps its current absence of a CYCLE check. **NARROWED by D45:
+  that body is no longer "guard-free" in general — since D45 it carries the dependency-target existence
+  guard (the `Dependency-TARGET existence` bullet in this section). This sentence is about the CYCLE
+  guard and stays true of it.**)
+  **The edge SOURCE is guarded TOO, in this cut (NORMATIVE — D45; the design-Review open question, CLOSED
+  here, not shipped half-open).** The schema puts `FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE
+  CASCADE` on the SOURCE column under `PRAGMA foreign_keys = ON`, so as shipped a non-existent SOURCE is
+  refused as an opaque backend error → `ErrorCode::DatabaseError` (exit 2, and NOT retryable — the
+  `is_retryable` set at `crates/unblock-error/src/code.rs:335-348`, enumerated in §2.3, does not contain
+  it) while a
+  non-existent TARGET now yields `ISSUE_NOT_FOUND` (exit 3, also non-retryable). Leaving that means ONE tool
+  call with ONE typo'd id returns two different codes and two different exit codes depending on which
+  FIELD carried the typo — and only the source's looks unretryable-by-accident rather than by design, on
+  the path an agent uses most. `add_dependency` therefore probes the SOURCE first, inside the same
+  transaction, and returns the **EXISTING `StorageError::IssueNotFound { id }`** — no variant is minted,
+  because the missing thing genuinely IS the addressed issue, so that variant's `Display` and its
+  `context["id"]` are already honest (the very test `CommentNotFound` failed and had to mint for).
+  **It ranks IMMEDIATELY AFTER `SelfDependency`, NOT first, and the rank published here is the rank the
+  code executes.** The shipped self check returns at `crates/unblock-storage/src/libsql/deps.rs:53-55`,
+  BEFORE `with_immediate_tx` opens at `:59`, so a probe specified in-transaction cannot precede it;
+  publishing "source first" would publish an order no implementation can produce, and a `dep add` naming
+  the SAME non-existent id in both fields would return `SELF_DEPENDENCY` where the text promised
+  `ISSUE_NOT_FOUND`. **`SelfDependency` is deliberately NOT relocated into the transaction — stated so
+  the next reader does not re-derive that wrong fix:** it needs no transaction to answer, moving it would
+  invert a pair D44 already published in order to rescue a published sentence, and it would falsify the
+  "two queries swapped inside one transaction and nothing else" cost claim above. The two guards sit
+  adjacent because they ask the same kind of question — is this edge well-formed at all: first "are the
+  two ids distinct", then "does the source row exist" — and a row must still exist before its edges mean
+  anything, which is why the source probe precedes every RELATIONAL question about the edge set
+  (`BlockerNotFound`, `DuplicateDependency`, `CycleDetected`). **Mechanically it is
+  `row_exists`** (`crates/unblock-storage/src/libsql/crud.rs:1328`), already present and already used
+  in-transaction — but declared with NO visibility modifier, hence private to `crud`. **Promoting it to
+  `pub(super)` (or inlining an equivalent one-line query in `deps.rs`) is a LANDING of this change, not an
+  inference left to the implementer.** The new rejection is recorded in the §5.4 behavioural-change ledger.
 - **Dependency edge PERSISTENCE (NORMATIVE — D42; the spine was previously SILENT here, which is
   exactly why a 5-column INSERT never read as a bug).** `add_dependency` and `create_issue` persist the
   **FULL 7-column** `Dependency`: `issue_id`, `depends_on_id`, `dep_type`, `created_at`, `created_by`,
@@ -1137,11 +1420,14 @@ The dependency ops (FR-5) — source-verified vs the original cycle machinery:
   Wire consequence (§5.2): `deps[].issue_id` becomes OPTIONAL and MUST be omitted — the create arm
   sources the edge implicitly (D44 strict implicit ownership). Guard parity on this path is NORMATIVE
   and specified in the `create_issue` row of this section — restoring it is part of D44, not a
-  follow-up. **Still out of scope, tracked as `ub-lp9.25`:** `depends_on_id` has NO foreign key
-  (deliberately — `external:*` targets are legitimate), so a NON-EXISTENT BLOCKER id is still accepted
-  on this and on every other edge-writing path. D44 claims nothing about it — but the window is not
-  left open: `ub-lp9.25` ships in the SAME v1.0.1 cut as `ub-lp9.20` (Miguel's ruling), because D44
-  widens that class by removing the `issue_id` foreign-key failure that used to mask a bogus target.
+  follow-up. **CLOSED by D45 (v1.0.1) — the `ub-lp9.25` forward reference is DISCHARGED, not deleted.**
+  For the record of what D44 shipped: `depends_on_id` has NO foreign key (deliberately — an external
+  target is legitimate, and since D45 it is DEFINED, §1.9), so at D44 a NON-EXISTENT BLOCKER id was
+  still accepted on this and on every other edge-writing path, and D44 claimed nothing about it. D45
+  closes the class in the SAME v1.0.1 cut, as Miguel ruled, because D44 widened it by removing the
+  `issue_id` foreign-key failure that used to mask a bogus target. The rule now lives in the
+  **Dependency-TARGET existence** bullet of this section (application-level, in-transaction, batch-aware,
+  with the §1.9 external carve-out); the schema is UNCHANGED — no foreign key, no CHECK, no trigger.
 - **`would_cycle_in_tx` edge orientation (NORMATIVE — D4 correctness pin; `check_cycle`
   sqlite.rs:2440–2453 + `load_dependency_cycle_graph` sqlite.rs:11379–11387).** When building the
   gating cycle graph, the three blocking types (`blocks`/`conditional-blocks`/`waits-for`) are inserted
@@ -1180,8 +1466,9 @@ The dependency ops (FR-5) — source-verified vs the original cycle machinery:
   (gating-only) lives ONLY on the MCP wire (`DepToolInput::Cycles`, §5.2 `#[serde(default = "default_true")]`)**
   — the same input-default-vs-method-arg asymmetry as `DiagnosticsInput::Changelog{since}` (wire
   `#[serde(default)]`) vs the bare `since` arg on `diagnostics(kind, since)` (D26/OQ-1).
-- **`diagnostics(kind, since)` (FR-15, pure-DB — D26; no git, NFR-6).** The 7-kind read path composes
-  ONLY existing `Storage` reads for changelog/lint/orphans — NO new trait method there. **`stats`** = the
+- **`diagnostics(kind, since)` (FR-15, pure-DB — D26; no git, NFR-6).** The read path — **7 kinds through
+  D44, EIGHT since D45's `dangling` (below)** — composes
+  ONLY existing `Storage` reads for changelog/lint/orphans/dangling — NO new trait method there. **`stats`** = the
   bd-faithful `StatsSummary` (`temp/beads_rust-main/src/cli/commands/stats.rs:376-499`): `list_issues` +
   `count_issues` over the widest-visibility filters → per-status tallies
   (open/in_progress/closed/deferred/draft/tombstone), `pinned` (`pinned=1` col OR `Pinned` status),
@@ -1225,9 +1512,54 @@ The dependency ops (FR-5) — source-verified vs the original cycle machinery:
   `sqlite.rs:4014`; `closed_since` stays shared/unchanged — the template filter is an engine-side composition
   step, NOT a widening of the shared read). **`orphans`** = `orphan_candidates()` — **status-agnostic**
   (every row whose `external_ref` matches the commit-hash shape; NOT bd's `status IN ('open','in_progress')`
-  narrowing — the faithful FR-15 reading). Every kind emits generic `DiagnosticFinding{label,detail}` rows
-  (§1.10 / §5.3), so the enrichment does NOT touch the mcp schema bundle (no `CONTRACT_VERSION` bump —
-  §5.4/D25). **Emission order (NFR-14 insta):** stats findings in the fixed order `open, in_progress,
+  narrowing — the faithful FR-15 reading). **`dangling` (D45)** = the dependency edges whose target denotes
+  nothing — the read view of the class the D45 write guard now refuses, so a workspace that already
+  accumulated such edges can enumerate them. **Composed in the ENGINE from TWO EXISTING `Storage` reads —
+  NO new trait method** (the D26 composition pattern applied literally, so no `Storage` signature moves and
+  no test fake churns): `dependency_graph(&[])` (empty roots = the WHOLE graph, this section) whose loader
+  is a bare `SELECT issue_id, depends_on_id, type FROM dependencies` with NO join — which is precisely why
+  dangling edges SURVIVE into the returned `DepTree` — differenced against the id set from `list_issues`. A
+  `GraphEdge` is a finding iff its `to` is neither in that id set nor `is_external_target` (§1.9 — an
+  external target is a legitimate blocker, never a finding).
+  - **TRAP, pinned normatively: the id set MUST come from FULLY-INCLUSIVE filters** —
+    `ListFilters { include_closed: true, include_deferred: true, include_tombstone: true, .. }`. With the
+    DEFAULT filters (which exclude closed/tombstone) every CLOSED blocker would be reported as dangling — a
+    diagnostic that fabricates its own findings.
+    **This corpus is DELIBERATELY WIDER than the EXPORT corpus, and the two must NEVER be conflated.**
+    The export corpus is the D23 retain PLUS D45's blocker closure (§1.10) — still narrower than "every
+    row", since an ephemeral / `-wisp-` row nothing depends on is still not exported. This set is every row
+    in the database, full stop. Consequently **an edge whose target is an ephemeral / `-wisp-` row is NOT a
+    dangling finding** — the row exists. An implementer who reads this set as "the export corpus" reports
+    every such edge as a false finding, which is precisely the self-fabricating diagnostic this trap exists
+    to prevent.
+  - **FINDING SHAPE (NORMATIVE — it is snapshot-pinned output).** `DiagnosticFinding` has exactly two
+    `String` fields (§1.10), so the three facts a reader needs — the dependent, the phantom target, and the
+    EDGE TYPE — are encoded into them. The edge type is not decoration: it is what distinguishes a
+    permanently-stuck issue (`blocks`/`conditional-blocks`/`waits-for`) from a merely-phantom parent
+    (`parent-child`), which does not gate ready work at all. Pinned format:
+    `label` = the DEPENDENT issue id (the row carrying the broken edge); `detail` =
+    `format!("{dep_type} -> {target}")`, where `{dep_type}` is `DependencyType::as_str()` (e.g. `blocks`,
+    `parent-child`) and `{target}` is the raw `depends_on_id`. Example: label `ub-lp9`, detail
+    `blocks -> ub-ghost`. One finding per dangling EDGE.
+  - **ORDER (PINNED for NFR-14):** the findings are sorted by **`(issue_id, dep_type, depends_on_id)`** —
+    dependent id ASC, then dependency type ASC, then target ASC. This is a DELIBERATE re-sort in the
+    engine, NOT the order `dependency_graph` returns (that read sorts by `(from, to, dep_type)`, this
+    section) — the engine re-sorts so the output groups a dependent's broken edges by kind. The triple is a
+    TOTAL order over the result set because the `dependencies` primary key is `(issue_id, depends_on_id)`,
+    so no two rows share all three components.
+  - **ADVISORY, no write permit** (FR-10): it is a read. The race window between the two reads is
+    acceptable for an advisory report.
+  - **COST, measured or a v1.1 seam.** Two reads plus O(N) memory, versus the one-query alternative (the
+    `blocked_issues` LEFT-JOIN shape with the predicate inverted — `i.id IS NULL` AND not external), which
+    would cost a new trait method and every fake implementation. The composition is chosen for this cut; if
+    a workspace at the scale the 250k ready-sort bench targets shows a real cost, the single-query
+    primitive is an ADDITIVE v1.1 seam.
+  Every kind emits generic `DiagnosticFinding{label,detail}` rows
+  (§1.10 / §5.3), so the per-kind ENRICHMENT does NOT touch the mcp schema bundle (no `CONTRACT_VERSION`
+  bump — §5.4/D25). **D45 is the one exception, and it is an exception about the KIND ENUM, not about the
+  finding rows:** adding the `dangling` kind grows `DiagnosticKind` (§1.10) and `DiagnosticsInput` (§5.2),
+  which ARE hashed bundle bytes — hence the `unblock.mcp.v1.8` bump recorded in the §5.4 ledger. The
+  finding ROWS stay generic, exactly as this clause says. **Emission order (NFR-14 insta):** stats findings in the fixed order `open, in_progress,
   blocked, closed, ready, deferred, draft, tombstone, pinned, epics_eligible, [avg_lead_time_hours], total`
   (`avg_lead_time_hours` ABSENT when `None`); lint findings outer = issue id ASC, inner = missing sections in
   the fixed required-section DECLARATION order (Bug: `## Steps to Reproduce` THEN `## Acceptance Criteria`);
@@ -1621,8 +1953,13 @@ pub struct NewIssue {
 // projection), so a supplied `issue_id` never reached a caller and never could.
 #[derive(Debug, Clone)]
 pub struct NewDep {
-    pub depends_on_id: String,        // the BLOCKER (target). `external:*` targets stay legal — D44 claims
-                                      // nothing about target existence (that is `ub-lp9.25`).
+    pub depends_on_id: String,        // the BLOCKER (target). An external target stays legal and is now
+                                      // DEFINED by `unblock_model::is_external_target` (§1.9, D45,
+                                      // ASCII-case-insensitive). Target EXISTENCE is GUARDED since D45:
+                                      // any other target must be visible to the create's own transaction
+                                      // or staged by it, else `StorageError::BlockerNotFound` ->
+                                      // `ISSUE_NOT_FOUND` and ZERO rows (§3.2.1). D44's open forward
+                                      // reference to `ub-lp9.25` is DISCHARGED by D45.
     pub dep_type: DependencyType,
     pub metadata: Option<String>,     // round-trips since D42's 7-column bind; since D44 on THIS path too
 }
@@ -1740,7 +2077,14 @@ impl Session {
     //   now all-or-nothing too (edges seeded onto the built `Issue`, one tx; §3.2.1 + the `create_issue` row there).
     //   `create_bulk`'s OWN semantics are UNCHANGED by D44: it keeps the shared body's dedup-and-continue on a
     //   repeated `depends_on_id` and it still has NO cycle guard, deliberately — that body is also the JSONL/`bd`
-    //   import body, and adding a guard there could make an already-exported D5 record un-importable. Step (4)'s
+    //   import body, and adding a guard there could make an already-exported D5 record un-importable.
+    //   **AMENDED by D45 (v1.0.1) — PARTIALLY SUPERSEDED (kept as the record of D44's scope).** The
+    //   dedup-and-continue and the absence of a CYCLE guard still stand; the shared body now DOES carry the
+    //   D45 dependency-target existence guard (§3.2.1), so `create_bulk` and the import leg are covered too.
+    //   The un-importability hazard is not waved away — D45 removes its CAUSE by closing the export under its
+    //   edges (§1.10). D45 also RELAXES one shipped `create_bulk` rejection: a correctly-spelled `external:`
+    //   dependency reference is now ACCEPTED verbatim instead of rejecting the whole batch (§5.2 item (b)).
+    //   Step (4)'s
     //   built edges now carry the engine-owned `NewDep` (§4.1), so a bulk record's edges are stamped with the
     //   MINTED id in memory as well as on the row (they were already re-anchored on the row).
     pub async fn update(&self, id: &str, patch: &IssuePatch) -> Result<Issue, EngineError>;
@@ -1791,7 +2135,8 @@ impl Session {
     //   `false` post-open — an honest idempotent signal, not a phantom applied-list. Backs the cli `migrate` command.
     //
     // (OQ-2 RESOLVED: doctor + recover ARE part of the public Session surface.)
-    // PRECISION NOTE (T2.2): the mcp `diagnostics` TOOL (§5.1, the 7-kind read path) maps to
+    // PRECISION NOTE (T2.2): the mcp `diagnostics` TOOL (§5.1, the 7-kind read path — EIGHT kinds since
+    //   D45 added `dangling`, §3.2.1) maps to
     //   `Session::diagnostics(kind, since)` above (BUILD-now, pure-DB; `since` threads the changelog window
     //   — D26/OQ-1) — it is DISTINCT from `doctor()`/`recover()`
     //   here (the T3.3 health seam, FeatureNotWired{"health"} until then). The mcp diagnostics tool does NOT
@@ -1813,7 +2158,7 @@ impl Session {
     //   Healthy/Drifted/Recoverable/Unsafe taxonomy + `--repair` + `.unblock/.recovery/` evidence land ADDITIVELY
     //   over the `doctor()`/`recover()` seam at **v1.1**; `recover()` stays FeatureNotWired through v1. (Earlier
     //   prose put the cli→doctor() routing at T3.1 — that is the T3.3 refinement, not a T3.1 fact.)
-    pub async fn doctor(&self) -> Result<DiagnosticReport, EngineError>;  // FR-15/FR-16. v1 pre-T3.3 = SIGNATURE only (returns EngineError::FeatureNotWired{feature:"health"}); **T3.3 (HEALTH-LITE, D29) wires the LITE aggregation** — integrity_check rows + pure file-state classification via unblock-health `run_doctor` → DoctorReport, mapped onto DiagnosticReport REUSING DiagnosticKind::Info (NO new model variant, NO §1.10/CONTRACT_HASH change — F2). The cli doctor routes through this from T3.3 (see the note above).
+    pub async fn doctor(&self) -> Result<DiagnosticReport, EngineError>;  // FR-15/FR-16. v1 pre-T3.3 = SIGNATURE only (returns EngineError::FeatureNotWired{feature:"health"}); **T3.3 (HEALTH-LITE, D29) wires the LITE aggregation** — integrity_check rows + pure file-state classification via unblock-health `run_doctor` → DoctorReport, mapped onto DiagnosticReport REUSING DiagnosticKind::Info (NO new model variant, NO §1.10/CONTRACT_HASH change — F2). The cli doctor routes through this from T3.3 (see the note above). **D45 — the dangling-dependency findings are FOLDED IN HERE, in the ENGINE.** `Session::doctor()` additionally awaits the SAME engine-side composition `diagnostics(Dangling)` uses (ONE home, §3.2.1 — not a second implementation) and APPENDS its findings, in that composition's pinned `(issue_id, dep_type, depends_on_id)` order, to the `DiagnosticKind::Info` report AFTER the file-state anomalies (deterministic overall order, NFR-14). The report's `kind` stays `Info` — the fold changes no §1.10 byte; the `Dangling` KIND exists for the `diagnostics` tool arm, where the response must declare what it is. **`unblock_health::run_doctor` is NOT given a third argument and its signature does NOT change, and `unblock-health` gains NO `unblock-storage` dependency:** the list is DB-derived, and D29 clause F3 makes `run_doctor` PURE, non-async and storage-free — that clause is PRESERVED, not reversed. Composing in the engine fold is exactly how the engine already folds in the pure file-state anomalies; passing DB rows into `run_doctor` would REVERSE a shipped clause and would need its own decision id, which D45 deliberately does not mint (it already carries one reversal — the shared-insert-body placement). **D45 — COST, stated rather than discovered later.** The fold is UNCONDITIONAL on every `doctor()` call, and the composition differences a whole-graph edge load against a FULLY-INCLUSIVE `list_issues` (closed + deferred + tombstone — the default filters would report every CLOSED blocker as dangling), which hydrates labels, dependencies and comments for every row merely to derive an id SET. So `doctor()` gains O(rows + edges) work and O(rows) peak memory it did not have, on a command whose whole point is to be safe to run on a sick workspace. The single-query alternative (one `LEFT JOIN … WHERE i.id IS NULL` excluding external targets, costing a new `Storage` method and 8+ test fakes) is DEFERRED to v1.1 **with an obligation, not an opinion**: the implementation commit MEASURES the composed path on the existing large-workspace fixture and records the number, because the repo's only bench gate covers the ready-sort at 250k issues and reaches nothing on this path. **Feature-gate placement, previously MIS-stated and corrected here:** `Session::doctor()` is NOT `#[cfg]`-gated. The method is declared UNCONDITIONALLY (`crates/unblock-engine/src/session/lifecycle.rs:167-184`); only its two BODY blocks carry the gate — a `#[cfg(feature = "health")]` block that composes the report and a `#[cfg(not(feature = "health"))]` block that returns `EngineError::FeatureNotWired { feature: "health" }` — which is why `crates/unblock-cli/src/commands/doctor.rs:43` calls it with no `cfg` of its own. **So the fold lands INSIDE the existing `#[cfg(feature = "health")]` body block, immediately before its `Ok(…)`**, and the `not(health)` block keeps returning `FeatureNotWired` untouched. **The shared dangling COMPOSITION itself is UN-GATED, and that is load-bearing rather than incidental:** it is the same engine-side composition the `diagnostics {kind:"dangling"}` arm calls, and that arm's dispatch (`crates/unblock-engine/src/diagnostics.rs:49-57`) carries no feature gate at all — putting the composition under the `health` cfg would fail to COMPILE the new arm in a `--no-default-features` build. The cost note above is therefore a statement about a `health`-enabled `doctor()` run; the MCP action pays the same cost in every build.
     pub async fn recover(&self) -> Result<DiagnosticReport, EngineError>; // attempt repair (WAL checkpoint, reindex; reports actions taken). STAYS EngineError::FeatureNotWired{feature:"health"} through v1 (F1/D29) — its body (`--repair` + the `.unblock/.recovery/` evidence writer + the rich repair taxonomy) is **v1.1**, NOT T3.3; wiring a hollow "nothing repaired" report would be the faked success FeatureNotWired forbids.
     pub async fn shutdown(&self) -> Result<(), EngineError>; // flush + close libsql cleanly (FR-17). D38: MUST be reached on BOTH cooperative-shutdown returns of run_mcp_server (Ok AND a post-cancel Err(Transport{Cancelled})) — an Err(Cancelled) never skips the clean libsql close (§0.1/§5b).
 }
@@ -1853,7 +2198,7 @@ impl Session {
 | 4 | `query` | `kind: list\|ready\|blocked\|search\|count\|stale` | FR-4 |
 | 5 | `dep` | `action: add\|remove\|list\|tree\|cycles\|graph` | FR-5 |
 | 6 | `sync` | `action: export\|import\|import_bd` | FR-7/8/26 |
-| 7 | `diagnostics` | `kind: stats\|info\|where\|version\|lint\|changelog\|orphans` | FR-15 |
+| 7 | `diagnostics` | `kind: stats\|info\|where\|version\|lint\|changelog\|orphans\|dangling` (D45 — `dangling` is the 8th `diagnostics` KIND, a discriminator arm, so it does NOT grow the **tool** count, §6.6; no ninth tool is created) | FR-15 |
 | 8 | `comment` *(lands T3.9, D37 — the DEDICATED comment tool, D-B; a distinct verb, NOT an `issue` arm)* | `action: add\|list\|update\|delete` | FR-6 |
 
 > **D37 — the 8th tool (`comment`).** A DEDICATED tool (D-B), the deliberate §6.6 exception (RK-3 budget now FULL at
@@ -1947,7 +2292,20 @@ pub enum IssueInput {
     //       SET (all-or-nothing, faithful-but-STRICTER than the original's per-record `continue`/`eprintln!` skip): the
     //       engine rejects the ENTIRE batch with ONE `StructuredError{code: ValidationFailed}` (ZERO writes) on ANY of —
     //       (a) an **ambiguous** intra-file ref (a title/stand-in matching >1 record, original `create.rs:1131`/`:1174`);
-    //       (b) an **unresolved** ref (no stand-in/title/storage match, original `create.rs:1135`/`:1216`);
+    //       (b) an **unresolved** ref (no stand-in/title/storage match, original `create.rs:1135`/`:1216`) —
+    //       **EXCEPT an EXTERNAL target (NORMATIVE — D45): a `dep_ref` for which
+    //       `unblock_model::is_external_target` holds (§1.9) is NOT resolved against anything. It is carried
+    //       VERBATIM as the edge target and can never be "unresolved".** This is a stated RELAXATION of a
+    //       GA-shipped, normatively-pinned rejection on a spine-pinned path, not a clarification: today
+    //       `parse_dependency` keeps the whole `external:…` string as the id, the engine's storage probe
+    //       probes it as an issue id, misses, and the resolver rejects the ENTIRE batch — so `create_bulk` is
+    //       the one path that currently refuses a legitimate external blocker, contradicting the
+    //       external-targets-are-legitimate premise the rest of the system is built on. No test covers that
+    //       behaviour, so nothing in CI will go red to announce the change; it is recorded HERE and in the
+    //       §5.4 D45 ledger entry instead. The engine's pre-transaction probe
+    //       (`crates/unblock-engine/src/session/write.rs`) SKIPS external targets accordingly, and the
+    //       remaining unresolved-reference rejection keeps `ValidationFailed` (§3.1 — a resolution fault,
+    //       distinct from D45's resolved-but-absent id, which is `BlockerNotFound`/`ISSUE_NOT_FOUND`);
     //       (c) a **self-dependency** (a record's resolved dep id == its own minted id, original `create.rs:1227` skip);
     //       (d) a **self-parent** (a record's resolved parent id == its own minted id, original `create.rs:1144` skip);
     //       (e) a **marker-only / empty** dep ref (a `-`/`*`/`+` token or empty after strip, original `create.rs:1234`/
@@ -2143,7 +2501,21 @@ pub enum SyncInput {
 #[schemars(extend("type" = "object"))]   // §5.2a — inputSchema root MUST be `type: object` (CD-1)
 pub enum DiagnosticsInput {
     Stats {}, Info {}, Where {}, Version {}, Lint {}, Changelog { #[serde(default)] since: Option<DateTime<Utc>> }, Orphans {},
+    Dangling {},   // D45 — wire kind `"dangling"`; NO parameters (the report is always workspace-wide);
+                   // declared LAST (hash-visible position, §1.10/§5.4), mirroring `DiagnosticKind::Dangling`.
+                   // D45 — the `///` DOC COMMENT on this arm is CONTRACT BYTES, exactly as the sibling arms'
+                   // are: schemars lifts a variant doc comment into the arm's `description`, which rides
+                   // `schema_bundle()`, which `CONTRACT_HASH` digests. It is therefore PINNED byte-for-byte
+                   // by the contract snapshot on BOTH sides — here and on `DiagnosticKind::Dangling` (§1.10)
+                   // — and re-wording it, even harmlessly, RE-CUTS the hash and is a contract change, never
+                   // a comment tidy-up. Pinning the variant NAME and the wire spelling while leaving its
+                   // description unpinned is precisely the omission that lets prose drift inside a hash the
+                   // suite still calls stable.
 }
+// D45 tool DESCRIPTION (contract bytes, duplicated: the `#[tool(description)]` wire literal AND the
+// `capabilities()` descriptor copy, which is version-coupled — §5.4): it becomes
+// "Diagnostics: stats, info, where, version, lint, changelog, orphans, or dangling." Both copies move
+// together, with the `capabilities`/`schema_bundle` goldens and the live (name, description) assert.
 
 // MCP WIRE attribution (capture-only Tier-1 metadata on the wire). Distinct from the
 // policy gate type (G-23e): unblock-policy's enforcement type is named `AttributionPolicy`
@@ -2291,9 +2663,11 @@ pub enum CommentOutput {
 pub enum SyncOutput { Export(ExportReport), Import(ImportReport) }
 
 // diagnostics — output = DiagnosticReport (§1.10). v1 per-kind findings are ADVISORY generic
-// DiagnosticFinding{label,detail} rows (D26/OQ-2): stats/lint/changelog/orphans express every
+// DiagnosticFinding{label,detail} rows (D26/OQ-2): stats/lint/changelog/orphans/dangling express every
 // counter/warning/entry as {label,detail}, so the taxonomy enrichment stays inside the existing
-// schema (NO CONTRACT_VERSION bump). A richer/nested per-kind DTO is a v1.1 structure seam — it
+// schema (NO CONTRACT_VERSION bump). D45's `dangling` kind reuses that generic ROW shape unchanged
+// (label = the dependent issue id, detail = "<dep_type> -> <missing target id>", §3.2.1) — but it DOES
+// add an enum member to `DiagnosticKind`, which is a hashed bundle byte, hence the §5.4 D45 bump. A richer/nested per-kind DTO is a v1.1 structure seam — it
 // WOULD enter the hashed bundle (§5.4) and force a version bump, so it is deliberately deferred.
 
 // The in-band ERROR output is NOT an arm of any union: every tool may return a `StructuredError` with
@@ -2488,6 +2862,80 @@ whose `deps[].issue_id` names a third party now returns `VALIDATION_FAILED` inst
 that party's dependency graph, and one whose `deps[].issue_id` names a non-existent id now returns
 `VALIDATION_FAILED` with NOTHING persisted instead of a foreign-key error with a committed orphan.
 
+**D45 (v1.0.1) — the contract bumps to `unblock.mcp.v1.8`.** A SIBLING entry appended to this ledger; the
+D42, D43 and D44 clauses above record what shipped before and are NOT renumbered. Neither the D44 version
+nor this bump has been released, so the cost is the re-pin and the goldens, not a client migration. D45
+guards the dependency TARGET on every edge-writing path (§3.2.1), defines the `external:` predicate once in
+`unblock-model` (§1.9), widens the export corpus to the transitive closure of its blockers (§1.10), and adds a `dangling` diagnostics kind
+(§1.10 / §5.2 / §3.2.1). **What moves:** (1) `schema_bundle()` moves on TWO axes — the `diagnostics` tool
+INPUT gains a `oneOf` arm (`{"kind":"dangling"}`) and the `diagnostics` tool OUTPUT's
+`$defs/DiagnosticKind` gains an enum member, so EXISTING schema bytes move, not merely a new arm;
+(2) `capabilities()` moves by more than `contract_version` this time — the `diagnostics` TOOL DESCRIPTION
+is rewritten to name the new kind, and a tool description IS version-coupled in its capabilities-document
+copy. So `CONTRACT_HASH` is re-pinned and `CONTRACT_VERSION` bumps to `unblock.mcp.v1.8` (unblock-mcp
+`options.rs`), with the `capabilities` and `schema_bundle` goldens re-blessed, the live
+`(name, description)` tool assert in `contract_suite.rs` updated (an assert, not a golden), and the
+corresponding `unblock-model` `DiagnosticReport`/`DiagnosticKind` schema golden re-blessed.
+**`agents_digest()` DOES move here — unlike D44.** It is a pure derived view outside the version-coupled
+set, but it walks each tool's `oneOf` arms to publish actions and parameters (D33), so the managed
+`AGENTS.md` capabilities table gains a `dangling` action row in addition to the derived contract line and
+the rewritten tool description. `unblock agents` must be re-run and the regenerated `AGENTS.md` must land
+in the SAME commit; D44's "BYTE-IDENTICAL after the change, it does NOT regenerate" claim is specific to
+D44 and does not carry over. D45 mints **no** `ErrorCode` (the guard rides the existing `ISSUE_NOT_FOUND`
+via the new internal `StorageError::BlockerNotFound`, §3.1), so `ErrorCode::ALL` stays at 36,
+`capabilities().error_codes` is unchanged and the 0–8 exit-code table (§2.3) is untouched. D45 adds **no**
+MCP tool — the new surface is a KIND arm on the existing `diagnostics` tool, so the RK-3 budget (§6.6)
+stands at 8 ≤ 8, FULL and unmoved. D45 adds **no** public API surface: every `Storage` trait signature is
+unchanged (the batch id set is an internal `pub(super)` parameter of the shared insert body),
+`unblock_health::run_doctor`'s signature is unchanged (D29 clause F3 — pure, non-async, storage-free —
+STANDS, the DB-derived findings being composed in the ENGINE instead, §4.1), and `unblock_model` gains one
+`const` + one `fn` in a workspace-internal crate. Per D35 an additive `.M` bump inside 1.x is
+NON-breaking, so this ships in a PATCH release. **The ratified behavioural changes are stated openly, not
+footnoted:** (i) a create, a `dep add`, a reparent or a JSONL/`bd` import naming a blocker
+that does not exist now returns `ISSUE_NOT_FOUND` with NOTHING persisted, instead of `isError:false` and a
+permanently unresolvable blocker. **`issue create_bulk` is DELIBERATELY ABSENT from (i), and the omission
+is the accurate statement:** that path ALREADY refuses an unknown reference today, whole-batch, with
+`ValidationFailed` from the L5 resolver (`crates/unblock-engine/src/session/bulk.rs:378-388` — "no batch or
+storage match"), which is exactly the batch-aware predicate (batch set ∪ storage) D45 generalises to every
+path; nothing is persisted there today either. `create_bulk` is therefore D45's TEMPLATE, not a hole. What
+D45 changes there is (a) the §3.2.1 guard closes the TOCTOU race between that PRE-transaction probe
+(`crates/unblock-engine/src/session/write.rs:497-522`) and the commit, and (b) change (ii) below relaxes
+its one real defect. **Its user-visible rejection for a genuinely unknown id STAYS `ValidationFailed`** —
+the resolver runs first and is unchanged for that case (the "one divergence" paragraph in §3.1 and §5.2
+rejection-set item (b) say so); publishing `ISSUE_NOT_FOUND` there would name a code the path cannot
+return, and the acceptance cell written from it would be unwritable without a race harness;
+(ii) `issue create_bulk` now ACCEPTS a correctly-spelled `external:`
+dependency reference, which it rejects today (whole-batch) — a RELAXATION of a normatively-pinned
+rejection on a GA-shipped path, covered by no test today, so no test will go red to announce it;
+(iii) an `external:` target is recognised case-INSENSITIVELY everywhere (§1.9), so `EXTERNAL:jira-1` in a
+bulk `### Dependencies` section is now an external ref rather than an ordinary id — delivered by the
+RESOLVER carve-out (§5.2 item (b)), not by the parser swap, which is observationally a no-op (§1.9
+invariant 5); (iv) `sync export` now WRITES ephemeral / `-wisp-` rows standing in a non-external dependency relation with a kept row IN EITHER DIRECTION — not merely the ones a kept row depends on, since the `parent-child` edge lives on the CHILD while the blocked-set query blocks the epic PARENT through it (the
+blocker closure, §1.10), so an export file may carry lines it never carried before — and an export of a
+workspace that ALREADY holds a dangling edge produces a file the guarded import REFUSES whole-batch,
+naming the first offending `(dependent, target)` pair. The exporter drops nothing and repairs nothing;
+(v) a foreign `bd`/JSONL file carrying a dangling edge is now REJECTED whole-batch
+rather than imported (`bd_import`'s repairs do not drop such an edge). **Item (v) is DECIDED — REJECT, not
+repair — on a stated principle rather than by omission: the EXPORTER may WIDEN its corpus (it is closing a
+file it owns); the IMPORTER may never INVENT one (it is ingesting a claim it cannot verify).** Repair would
+put a silent edge-dropper on an INGEST path, which is the same silence D45 exists to close. The accepted
+cost: a one-shot `bd` migration can now fail whole-batch on data the user cannot edit inside unblock, with
+no `--repair` escape in this cut — which is why the refusal MUST name the first offending
+`(dependent, target)` pair (both ids are already in the variant, §3.1), so the source file is repairable
+from the message alone. `sync import {dry_run:true}` still reports a clean plan for such a file, because
+the dry-run arm returns before `create_issues` (`crates/unblock-sync/src/import.rs:265-274` vs `:279`); the
+divergence is ACCEPTED and disclosed for this cut, with the `dangling` action as the real pre-flight;
+(vi) `dep {action:"add"}` now guards its edge SOURCE as well, returning the EXISTING
+`ISSUE_NOT_FOUND` (exit 3) where GA returned an opaque `DATABASE_ERROR` (exit 2) from the source-column
+foreign key — the asymmetry a single typo could otherwise expose, closed in the same cut (§3.2.1
+`add_dependency`); and (vii) on `add_dependency`, re-adding an ALREADY-PRESENT edge whose target is
+dangling now returns `ISSUE_NOT_FOUND` where GA returned `VALIDATION_FAILED`/`DuplicateDependency`,
+because the target check is ranked before the duplicate query so ONE precedence chain describes every path
+(§3.2.1 RANK bullet). It is reachable only on already-corrupt data. **The guard newly refuses NON-GATING
+edges too:** a `dep add` of a `related` (or any of the 11 named types plus `Custom`) edge to a
+non-existent id is a NEW rejection, not only the `blocks` family — stated here because the class is
+introduced as a never-ready defect, and most edge types do not gate ready work at all.
+
 **`agents_digest()` — a pure DERIVED VIEW, not a wire resource (T3.4.3/D33).** `unblock-mcp` additionally
 exposes `pub fn agents_digest() -> AgentsDigest` next to `schema_bundle()`: a CLI-friendly typed digest (the
 8 tools with their `oneOf`-derived actions + each action's FULL parameter surface — its required AND
@@ -2550,7 +2998,7 @@ stdout carries ONLY MCP framing (logging is stderr-only, NFR-14). **Supported to
 
 **migrate (D27/AF-2).** Opens the context (the facade already migrates on open), opens the `Session`, calls the NEW `Session::migrate() -> MigrateOutcome` (§4.1) under the write permit, builds a CLI-local `MigrateReport { database, schema_from, schema_to, applied }`, maps it onto a `DiagnosticReport { kind: Info, findings }` and emits via `Renderer::diagnostics`. Exit 0 on success; a newer-than-build DB → transparent `SchemaMismatch` → exit 2. Idempotent (`applied` normally `false` post-open).
 
-**doctor (D27/AF-1 — doctor-LITE).** Opens the `Session` and composes `diagnostics(Stats|Lint|Info)` + the NEW `Session::integrity_check()` read (§4.1) into a CLI-local `DoctorReport`, mapped onto a `DiagnosticReport { kind: Info, findings }`. At T3.1 it does NOT call `Session::doctor()`/`recover()` (the `health` seam); at **T3.3 (HEALTH-LITE, D29/F4)** it ROUTES through the now-wired `Session::doctor()` (adding file-state anomalies). **Non-zero exit only on detected corruption:** a non-empty `integrity_check` → `ErrorCode::DatabaseError` (exit 2; §2.3 unchanged, no new code); Lint/orphan findings are advisory (no exit flip); else exit 0. `--repair` + the full taxonomy land at **v1.1**.
+**doctor (D27/AF-1 — doctor-LITE).** Opens the `Session` and composes `diagnostics(Stats|Lint|Info)` + the NEW `Session::integrity_check()` read (§4.1) into a CLI-local `DoctorReport`, mapped onto a `DiagnosticReport { kind: Info, findings }`. At T3.1 it does NOT call `Session::doctor()`/`recover()` (the `health` seam); at **T3.3 (HEALTH-LITE, D29/F4)** it ROUTES through the now-wired `Session::doctor()` (adding file-state anomalies). **Since D45 that same route also carries the dangling-dependency findings** — composed in the ENGINE (§4.1 `doctor()`; `unblock-health` is NOT touched, D29 clause F3 preserved), so the CLI report lists exactly what the `diagnostics {kind:"dangling"}` MCP action lists, in the same pinned order, with no second implementation. **Non-zero exit only on detected corruption:** a non-empty `integrity_check` → `ErrorCode::DatabaseError` (exit 2; §2.3 unchanged, no new code); Lint/orphan **and D45 dangling-dependency** findings are advisory (no exit flip); else exit 0. The advisory classification is deliberate: a dangling edge is a repairable DATA fact, not database corruption, and flipping the exit would change the mutation-pinned `doctor_exit` behaviour on a GA-frozen CLI surface in a patch release (D35). `--repair` + the full taxonomy land at **v1.1**.
 
 **version (D27/AD-5).** Runs with NO workspace. Emits `VersionReport { version, build, commit: Option<_>, rustc: Option<_>, target: Option<_>, features }` from `build.rs`-emitted `option_env!("UNBLOCK_BUILD_*")` (absent = `None`) — NO git invocation / git crate / network / GitHub update-check (NFR-6/D13; the update-check lives only in `unblock update`). Rendered via the same to-`DiagnosticReport` path (kind `Version`).
 
@@ -2588,7 +3036,7 @@ All mutations flow through `Session` (FR-9) and the single write permit (D14); r
 Every error surfaced at L7 maps to exactly one `ErrorCode` and one 0–8 exit code per §2.3 (golden-snapshot pinned).
 
 ### 6.6 MCP tool-count budget
-MCP tool count stays ≤ 8; new domain surface extends existing tools by discriminator before adding tools (RK-3). D22's `create_bulk` is a NEW `action` arm on the existing `issue` tool (NOT a new tool) — the live `list_tools` golden (T2.3) keeps the count at 7. **D37 (the `comment` tool):** the dedicated `comment` tool (D-B) is the deliberate exception to "extend before add" — a distinct domain verb, not an `issue` arm — bringing the count to **8 ≤ 8** at T3.9; the RK-3 budget is now **FULL** and any further domain surface must extend an existing tool by discriminator.
+MCP tool count stays ≤ 8; new domain surface extends existing tools by discriminator before adding tools (RK-3). D22's `create_bulk` is a NEW `action` arm on the existing `issue` tool (NOT a new tool) — the live `list_tools` golden (T2.3) keeps the count at 7. **D37 (the `comment` tool):** the dedicated `comment` tool (D-B) is the deliberate exception to "extend before add" — a distinct domain verb, not an `issue` arm — bringing the count to **8 ≤ 8** at T3.9; the RK-3 budget is now **FULL** and any further domain surface must extend an existing tool by discriminator. **D45 is the first surface to land under that FULL budget and it obeys the rule literally:** the dangling-dependency listing is a new `kind` arm on the existing `diagnostics` tool (§5.1 row 7 / §5.2), NOT a ninth tool — the count stays **8 ≤ 8** and the live `list_tools` assert does not move.
 
 ### 6.7 Safety / no-git / no-default-network
 `forbid(unsafe_code)`, no git crate / `Command::new("git")` anywhere (NFR-6/NFR-9); network/TLS only behind the non-default `remote` feature (D15) AND the default-on `self-update` axoupdater path (FR-25/D17), which the D5 no-network source-scan whitelists (NFR-10 names both).

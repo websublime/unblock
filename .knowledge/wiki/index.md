@@ -10,6 +10,7 @@ Descriptive only — never normative (PRD > spine > crate plans is unchanged).
 - [2026-07-24-knowledge-gardener-sweep](runs/2026-07-24-knowledge-gardener-sweep.md) — The inaugural knowledge-gardener sweep — the first semantic consolidation pass over .knowledge/, plus standing up the gardener runbook and its weekly reminder.
 - [2026-07-29-duplicate-key-execution-flip](runs/2026-07-29-duplicate-key-execution-flip.md) — Closing the duplicate-JSON-key execution flip — a frame that read as one action executed another; three design-gate rounds, an owned scanning transport, and a fix proven against the original exploit.
 - [2026-07-31-create-deps-atomicity](runs/2026-07-31-create-deps-atomicity.md) — Making a create with declared dependencies one indivisible act — a silent third-party graph corruption nobody had recorded, four spec-repair rounds against an unbounded prose sweep, and a mutation pass that caught a structurally unfailable assertion.
+- [2026-08-01-dangling-blocker-spec](runs/2026-08-01-dangling-blocker-spec.md) — Specifying the dangling dependency-target guard (decision D45) — a design gate that failed TWICE (eleven blocking findings, then ten more), two Miguel rulings that first reversed the exporter repair into a corpus widening and then forced that widening to follow incoming edges as well, and two open questions closed rather than shipped half-open.
 
 ## Topics
 
