@@ -3,7 +3,7 @@ source: crates/unblock-mcp/tests/contract_suite.rs
 expression: capabilities()
 ---
 {
-  "contract_version": "unblock.mcp.v1.7",
+  "contract_version": "unblock.mcp.v1.8",
   "tools": [
     {
       "name": "issue",
@@ -31,7 +31,7 @@ expression: capabilities()
     },
     {
       "name": "diagnostics",
-      "description": "Diagnostics: stats, info, where, version, lint, changelog, or orphans."
+      "description": "Diagnostics: stats, info, where, version, lint, changelog, orphans, or dangling."
     },
     {
       "name": "comment",

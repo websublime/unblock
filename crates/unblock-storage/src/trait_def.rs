@@ -110,6 +110,14 @@ pub trait Storage: Send + Sync {
     /// cycle with [`StorageError::CycleDetected`] carrying the real ordered path. Any rejection —
     /// including [`StorageError::SelfDependency`] — rolls the whole transaction back to ZERO rows: no
     /// issue, no edges, no events. [`Storage::create_issues`] deliberately carries NEITHER guard.
+    ///
+    /// **Dependency-TARGET existence (D45)** is a guard of the SHARED per-record body, so unlike the
+    /// two above it DOES reach [`Storage::create_issues`]: a `depends_on_id` that names no row and is
+    /// not an `external:` target is rejected with [`StorageError::BlockerNotFound`] (mapped onto the
+    /// existing `ErrorCode::IssueNotFound`). The full published precedence on this path is
+    /// `IdCollision` → `external_ref` collision → `SelfDependency` → `BlockerNotFound` →
+    /// `DuplicateDependency` → `CycleDetected`; the rank is FORCED by that placement, since the two
+    /// D44 guards run in the wrapper AROUND the shared body.
     async fn create_issue(&self, issue: &Issue, actor: &str) -> Result<String, StorageError>;
 
     /// Create the WHOLE slice in **exactly ONE** `BEGIN IMMEDIATE` transaction (D22/T2.3, spine
@@ -129,8 +137,17 @@ pub trait Storage: Send + Sync {
     /// **It shares the per-record body with [`Storage::create_issue`] but NOT that method's
     /// create-specific guards (D44):** a repeated `depends_on_id` keeps being deduped-and-skipped
     /// here and there is deliberately NO cycle check, because this body is also the JSONL/`bd` IMPORT
-    /// body — a guard here could make an already-exported D5 record un-importable. Bulk and import
-    /// semantics are therefore exactly what they were before D44.
+    /// body — a guard here could make an already-exported D5 record un-importable.
+    ///
+    /// **AMENDED by D45:** the two D44 guards above still do not reach this method, but the shared
+    /// body now carries ONE that does — the dependency-TARGET existence check. A `depends_on_id` that
+    /// names no row, does not belong to any record of THIS slice, and is not an `external:` target is
+    /// rejected with [`StorageError::BlockerNotFound`], rolling the WHOLE batch back. The slice's own
+    /// id set is the third arm of that predicate, so a record may name a sibling appearing LATER in
+    /// the same slice (a forward reference) exactly as it may name an earlier one — record order
+    /// never decides acceptance. The un-importability hazard is not waved away: D45 removes its CAUSE
+    /// by closing the `unblock-sync` export corpus under its blockers, so any file the exporter
+    /// produces from a workspace with no dangling edge satisfies this guard.
     async fn create_issues(&self, issues: &[Issue], actor: &str) -> Result<(), StorageError>;
 
     /// Fetch a single issue by id, hydrated with its labels and dependencies.
@@ -149,7 +166,11 @@ pub trait Storage: Send + Sync {
     /// Writes **one `Event` per changed field** in the same transaction (so the audit log records
     /// exactly what changed). A **no-op update** (a patch that changes nothing) writes **no
     /// `Event`** and leaves `updated_at` unchanged. A `parent` change is cycle-checked (rejected
-    /// with [`StorageError::CycleDetected`] carrying the path).
+    /// with [`StorageError::CycleDetected`] carrying the path) and, since D45, existence-checked: a
+    /// parent that names no row and is not an `external:` target is rejected with
+    /// [`StorageError::BlockerNotFound`] (the chain on this path is self → `BlockerNotFound` → cycle,
+    /// there being no duplicate guard here). An `external:` PARENT stays legal — the carve-out is
+    /// per-TARGET, never per-edge-type.
     async fn update_issue(
         &self,
         id: &str,
@@ -314,6 +335,16 @@ pub trait Storage: Send + Sync {
     /// (`Blocks` | `ParentChild` | `ConditionalBlocks` | `WaitsFor`); a new edge that would close a
     /// cycle over that gating set is rejected with [`StorageError::CycleDetected`] carrying the
     /// concrete `path`. A non-gating edge (e.g. `Related`) never creates a ready-gating cycle.
+    ///
+    /// **BOTH endpoints are guarded in-transaction (D45), and the ORDER is published:**
+    /// `SelfDependency` → SOURCE existence → `BlockerNotFound` → `DuplicateDependency` →
+    /// `CycleDetected`. A source that names no row yields the EXISTING
+    /// [`StorageError::IssueNotFound`] (the missing thing genuinely IS the addressed issue); a target
+    /// that names no row and is not an `external:` target yields [`StorageError::BlockerNotFound`].
+    /// The target probe sits BEFORE the duplicate query so ONE chain describes every write path,
+    /// which has one observable consequence: re-adding an ALREADY-PRESENT edge whose target is
+    /// dangling now returns `IssueNotFound` where GA returned `DuplicateDependency` (reachable only
+    /// on already-corrupt data).
     async fn add_dependency(&self, dep: &Dependency, actor: &str) -> Result<(), StorageError>;
 
     /// Remove a dependency edge, writing a transactional `Event(DependencyRemoved)`.

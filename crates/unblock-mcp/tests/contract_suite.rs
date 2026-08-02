@@ -162,6 +162,90 @@ async fn live_list_tools_equals_the_builder_eight() {
     let _ = server.cancel().await;
 }
 
+/// **D45 — the `diagnostics` tool description, pinned BYTE-FOR-BYTE.**
+///
+/// `live_list_tools_equals_the_builder_eight` above proves the two copies AGREE with each other; it
+/// says nothing about WHAT they say. An edit that moved BOTH copies in step — the wire
+/// `#[tool(description)]` literal and the `DIAGNOSTICS_TOOL_DESCRIPTION` constant the
+/// `capabilities()` descriptor is built from — would keep that cell green while silently rewriting
+/// published contract bytes; `CONTRACT_HASH` would move too, but a re-bless plus a re-pin is exactly
+/// the motion a careless change makes. This cell forces the bytes themselves to be a deliberate act.
+///
+/// The description is asserted through the BUILDER (`capabilities()`), which is the copy the hash
+/// digests; the pair-compare above transfers the pin to the live wire literal.
+///
+/// MUTANT KILLED: dropping `dangling` from either copy (this cell goes red on the builder copy; the
+/// pair-compare goes red if only one copy moved), and any re-wording of the other seven kinds.
+#[test]
+fn the_diagnostics_tool_description_names_all_eight_kinds() {
+    let described = capabilities()
+        .tools
+        .into_iter()
+        .find(|t| t.name == "diagnostics")
+        .expect("the diagnostics tool is one of the eight")
+        .description;
+    assert_eq!(
+        described,
+        "Diagnostics: stats, info, where, version, lint, changelog, orphans, or dangling.",
+        "the diagnostics tool description is CONTRACT BYTES (spine §5.2, D45) and ships in TWO \
+         places — this constant-backed capabilities() copy and the #[tool(description)] wire \
+         literal; changing it is a contract act that re-cuts CONTRACT_HASH"
+    );
+}
+
+/// **D45 — the `dangling` INPUT arm is declared LAST and carries NO parameters.**
+///
+/// Both facts are contract, and neither is implied by the description pin above. schemars emits
+/// `oneOf` arms in DECLARATION order and `CONTRACT_HASH` digests those bytes, so a mid-list
+/// insertion moves the digest for a reason unrelated to the new kind (spine §5.2 / §1.10); and the
+/// arm publishing no properties is what pins "the report is always workspace-wide".
+///
+/// MUTANT KILLED: declaring `Dangling {}` anywhere but last in `DiagnosticsInput` (the position
+/// assertion goes red), and giving the arm a parameter (the property-set assertion goes red — the
+/// only property an empty arm carries is the `kind` tag itself).
+#[test]
+fn the_dangling_diagnostics_arm_is_declared_last_and_takes_no_parameters() {
+    let input = schema_bundle().diagnostics.input;
+    let arms = input["oneOf"]
+        .as_array()
+        .expect("the diagnostics input is a tagged-enum oneOf");
+
+    let kinds: Vec<&str> = arms
+        .iter()
+        .filter_map(|a| a["properties"]["kind"]["const"].as_str())
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            "stats",
+            "info",
+            "where",
+            "version",
+            "lint",
+            "changelog",
+            "orphans",
+            "dangling",
+        ],
+        "the EIGHT kinds in DECLARATION order — `dangling` is APPENDED LAST (D45), never inserted"
+    );
+
+    let dangling = arms
+        .iter()
+        .find(|a| a["properties"]["kind"]["const"] == "dangling")
+        .expect("the dangling arm");
+    let properties: Vec<&String> = dangling["properties"]
+        .as_object()
+        .expect("an object arm (CD-1)")
+        .keys()
+        .collect();
+    assert_eq!(
+        properties,
+        vec!["kind"],
+        "the dangling arm carries NO parameters — the discriminator tag is its only property \
+         (the report is always workspace-wide, D45)"
+    );
+}
+
 /// CD-3 (MCP spec): the LIVE server splits its five resources by shape — the FOUR concrete
 /// (non-parameterized) URIs ride `resources/list`, the ONE genuine `{id}` template rides
 /// `resources/templates/list` — and the UNION still equals the pure `capabilities()` builder's five

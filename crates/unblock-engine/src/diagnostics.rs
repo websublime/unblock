@@ -3,11 +3,11 @@
 //!
 //! The `DiagnosticKind`/`DiagnosticReport`/`DiagnosticFinding` types are **defined in
 //! `unblock-model`** (spine §1.10, CF-B) and re-exported (never redefined here) so `unblock-render`
-//! (model + error only) can format them. The seven landed kinds — `Stats|Info|Where|Version|Lint|
-//! Changelog|Orphans` — are the caller-supplied **input** (this is the BUILD-now read path; contrast
-//! `doctor()`/`recover()`, the `health` seam: `doctor()` is wired at T3.3/HEALTH-LITE and REUSES the
-//! existing `DiagnosticKind::Info` for its lite report — no new variant, D29/F2 — while `recover()`
-//! stays `FeatureNotWired` for its v1.1 repair body).
+//! (model + error only) can format them. The EIGHT landed kinds — `Stats|Info|Where|Version|Lint|
+//! Changelog|Orphans|Dangling` (the eighth added by D45) — are the caller-supplied **input** (this is
+//! the BUILD-now read path; contrast `doctor()`/`recover()`, the `health` seam: `doctor()` is wired
+//! at T3.3/HEALTH-LITE and REUSES the existing `DiagnosticKind::Info` for its lite report — no new
+//! variant, D29/F2 — while `recover()` stays `FeatureNotWired` for its v1.1 repair body).
 //!
 //! Every derivation is **pure-DB** (counts, `epic_child_rollup`, `closed_since`, `orphan_candidates`,
 //! `list`/`ready`/`blocked` reads) — it **never** shells to git or touches the network (FR-15 /
@@ -54,6 +54,11 @@ pub(crate) async fn diagnostics(
         DiagnosticKind::Lint => lint(storage).await?,
         DiagnosticKind::Changelog => changelog(storage, since).await?,
         DiagnosticKind::Orphans => orphans(storage).await?,
+        // D45 — the ONE home is `dangling_findings`; `Session::doctor()` folds in the SAME call
+        // rather than recomputing, so a second implementation cannot exist. This arm carries NO
+        // feature gate (it must compile in a `--no-default-features` build), which is why the
+        // composition itself is un-gated even though the `doctor` fold sits under `health`.
+        DiagnosticKind::Dangling => dangling_findings(storage).await?,
     };
     Ok(DiagnosticReport { kind, findings })
 }
@@ -354,6 +359,87 @@ async fn orphans(storage: &dyn Storage) -> Result<Vec<DiagnosticFinding>> {
         .collect())
 }
 
+/// The dangling dependency edges: every stored edge whose target denotes **nothing** (D45,
+/// NORMATIVE — spine §3.2.1 `dangling`). This is the read view of the class the D45 write guard now
+/// refuses, so a workspace that already accumulated such edges can enumerate them.
+///
+/// **THIS IS THE ONE HOME.** Both the `diagnostics {kind:"dangling"}` action and the
+/// [`Session::doctor()`](crate::Session::doctor) fold call THIS function; neither recomputes. The fn
+/// is deliberately UN-GATED by any feature: the `diagnostics` dispatch arm above carries no gate, so
+/// putting this under `#[cfg(feature = "health")]` would fail to compile a `--no-default-features`
+/// build.
+///
+/// # Composed from TWO EXISTING `Storage` reads — NO new trait method
+///
+/// The D26 composition pattern applied literally, so no `Storage` signature moves and no test fake
+/// churns: `dependency_graph(&[])` (empty roots = the WHOLE graph), whose loader is a bare
+/// `SELECT issue_id, depends_on_id, type FROM dependencies` with **no join** — which is precisely
+/// why dangling edges SURVIVE into the returned tree — differenced against the id set from
+/// `list_issues`. An edge is a finding iff its target is neither in that id set nor
+/// [`unblock_model::is_external_target`] (§1.9 — an external target is a legitimate blocker outside
+/// this workspace, never a finding).
+///
+/// # TRAP, pinned NORMATIVELY: the id set comes from FULLY-INCLUSIVE filters
+///
+/// [`all_visibility_filters`] sets `include_closed`, `include_deferred` **and** `include_tombstone`.
+/// With the DEFAULT filters (which exclude closed and tombstone) every CLOSED blocker would be
+/// reported as dangling — a diagnostic that fabricates its own findings.
+///
+/// **That corpus is DELIBERATELY WIDER than the EXPORT corpus and the two must NEVER be conflated.**
+/// The export corpus is the D23 retain plus D45's blocker closure (`unblock-sync`), which still omits
+/// an ephemeral / `-wisp-` row nothing depends on. This set is EVERY row in the database, full stop —
+/// so an edge whose target is an ephemeral row is **NOT** a dangling finding: the row exists.
+///
+/// # Finding shape and ORDER (both snapshot-pinned output, NFR-14)
+///
+/// `label` = the DEPENDENT issue id; `detail` = `"<dep_type> -> <missing target id>"`. The edge type
+/// is not decoration — it is what distinguishes a permanently-stuck issue (`blocks`) from a merely
+/// phantom parent (`parent-child`), which does not gate ready work at all. One finding per dangling
+/// EDGE, sorted by `(issue_id, dep_type, depends_on_id)` — a DELIBERATE re-sort, not the
+/// `(from, to, dep_type)` order `dependency_graph` returns, so a dependent's broken edges group by
+/// kind. The triple is a TOTAL order over the result set because the `dependencies` primary key is
+/// `(issue_id, depends_on_id)`.
+///
+/// ADVISORY and permit-free (FR-10): it is a read, and the race window between the two reads is
+/// acceptable for an advisory report.
+///
+/// # Errors
+///
+/// Forwards any [`StorageError`](unblock_storage::StorageError) from either read as the transparent
+/// [`EngineError`](crate::EngineError) source.
+pub(crate) async fn dangling_findings(storage: &dyn Storage) -> Result<Vec<DiagnosticFinding>> {
+    // Read 1: the WHOLE dependency graph. Its loader does no join, so dangling edges survive.
+    let graph = storage.dependency_graph(&[]).await?;
+    // Read 2: EVERY row in the database — the fully-inclusive id set (see the TRAP above).
+    let existing: std::collections::HashSet<String> = storage
+        .list_issues(&all_visibility_filters())
+        .await?
+        .into_iter()
+        .map(|issue| issue.id)
+        .collect();
+
+    let mut dangling: Vec<unblock_model::GraphEdge> = graph
+        .edges
+        .into_iter()
+        .filter(|e| !existing.contains(&e.to) && !unblock_model::is_external_target(&e.to))
+        .collect();
+    // PINNED order: (issue_id, dep_type, depends_on_id).
+    dangling.sort_by(|a, b| {
+        a.from
+            .cmp(&b.from)
+            .then_with(|| a.dep_type.as_str().cmp(b.dep_type.as_str()))
+            .then_with(|| a.to.cmp(&b.to))
+    });
+
+    Ok(dangling
+        .into_iter()
+        .map(|e| DiagnosticFinding {
+            label: e.from,
+            detail: format!("{} -> {}", e.dep_type.as_str(), e.to),
+        })
+        .collect())
+}
+
 /// A `ListFilters` that counts the WHOLE store (closed + deferred included) — for `Info`.
 fn all_inclusive_filters() -> ListFilters {
     ListFilters {
@@ -364,7 +450,9 @@ fn all_inclusive_filters() -> ListFilters {
 }
 
 /// A `ListFilters` at the WIDEST visibility — closed + deferred + tombstone included — for the bd
-/// stats scan (`list_stats_summary_issues` sees the whole table). `include_tombstone:true` (with
+/// stats scan (`list_stats_summary_issues` sees the whole table) **and for the D45
+/// [`dangling_findings`] existing-id set, where the full inclusivity is NORMATIVE** (with the default
+/// filters every CLOSED blocker would be reported as dangling). `include_tombstone:true` (with
 /// `include_closed:true`) routes to the all-statuses branch, so the per-status tally carries a
 /// tombstone bucket and the widest hydration sees every row (pinned/epic/lead-time in-memory).
 fn all_visibility_filters() -> ListFilters {

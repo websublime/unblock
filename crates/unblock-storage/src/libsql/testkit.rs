@@ -13,8 +13,14 @@
 //!   `child_counters` high-water mark for a parent (via `ids::next_child_number`) so the suite can
 //!   assert the counter advances monotonically past the children created through the public
 //!   `create_issue`.
+//! - [`testkit_sql_matches_external_prefix`](StorageTestkit::testkit_sql_matches_external_prefix)
+//!   (D45) evaluates the SQL twin of the `external:` predicate — `SELECT ?1 LIKE 'external:%'` — in
+//!   the DATABASE, so the suite can assert it agrees with the Rust
+//!   [`unblock_model::is_external_target`] the write guard calls. The two halves exist only because
+//!   SQL cannot call Rust, and they agree by CONTRACT; this seam is what makes a future divergence
+//!   go red instead of shipping.
 //!
-//! Both are compiled only under `#[cfg(any(test, feature = "testkit"))]`; they never enter a
+//! All are compiled only under `#[cfg(any(test, feature = "testkit"))]`; they never enter a
 //! production build.
 
 use async_trait::async_trait;
@@ -57,6 +63,27 @@ impl StorageTestkit for LibsqlStorage {
         // therefore `next - 1`; `None` means no child has ever been allocated under `parent_id`.
         let next = next_child_number(self.read(), parent_id).await?;
         Ok(next.checked_sub(1).filter(|&hw| hw > 0))
+    }
+
+    async fn testkit_sql_matches_external_prefix(&self, probe: &str) -> Result<bool, StorageError> {
+        // The LITERAL SQL twin of `unblock_model::is_external_target` (D45, spine §1.9): the same
+        // `LIKE 'external:%'` the ready/blocked queries carry, evaluated by the DATABASE so the
+        // contract suite can assert the two halves agree instead of hoping they do.
+        let mut rows = self
+            .read()
+            .query("SELECT ?1 LIKE 'external:%'", params![probe])
+            .await
+            .map_err(map_libsql_err)?;
+        let Some(row) = rows.next().await.map_err(map_libsql_err)? else {
+            // A bare `SELECT <expr>` always yields exactly one row; absence is a backend fault.
+            return Err(StorageError::Backend {
+                source: crate::error::BackendOpaque::from_message(
+                    "SELECT ?1 LIKE 'external:%' returned no row",
+                ),
+            });
+        };
+        // SQLite renders a boolean as INTEGER 0/1.
+        Ok(row.get::<i64>(0).map_err(map_libsql_err)? != 0)
     }
 
     // --- T0.8 contention-lab instrumentation seams -----------------------------------------------

@@ -35,9 +35,24 @@ use super::{WriteHook, with_immediate_tx};
 /// spine §3.2.1): [`reject_duplicate_declared_edges`] and [`reject_declared_gating_cycles`]. The
 /// shared body is also the bulk (`create_issues`) and therefore the JSONL/`bd` IMPORT body, and a
 /// guard there could make an already-exported D5 record un-importable. Precedence:
-/// `IdCollision` → `external_ref` collision → `SelfDependency` → `DuplicateDependency` →
-/// `CycleDetected`; the first three fire inside the shared body while it stages, the last two after.
-/// Any of them rolls the whole tx back → ZERO rows (no issue, no edges, no events).
+/// `IdCollision` → `external_ref` collision → `SelfDependency` → **`BlockerNotFound`** →
+/// `DuplicateDependency` → `CycleDetected`; the first FOUR fire inside the shared body — the first
+/// three while it stages, `BlockerNotFound` in its post-staging target-existence pass — and the last
+/// two after, in this wrapper. Any of them rolls the whole tx back → ZERO rows (no issue, no edges,
+/// no events).
+///
+/// **AMENDED by D45 (v1.0.1) — PARTIALLY SUPERSEDING the D44 clause above, which is kept as the
+/// record of what D44 scoped rather than overwritten.** The dedup-and-continue and the absence of a
+/// CYCLE check in the shared body still stand exactly as written. What changed is the blanket
+/// "never in the shared body": that body now carries exactly ONE guard, the batch-aware
+/// dependency-TARGET existence check (see [`insert_issue_in_tx`]), which is what makes that guard
+/// total over every edge-writing entry point. The un-importability hazard is not waved away — D45
+/// removes its CAUSE by closing the export corpus under its blockers (`unblock-sync`), so every file
+/// the exporter produces satisfies the guard whenever the source workspace holds no dangling edge.
+/// The `BlockerNotFound` rank is FORCED by that placement: the guard is in the shared body while
+/// D44's duplicate and cycle guards are in this wrapper AROUND it, so a missing target NECESSARILY
+/// fires before a duplicate — publishing the opposite pair would publish an order the code cannot
+/// produce.
 pub(super) async fn create_issue(
     conn: &Connection,
     hook: WriteHook<'_>,
@@ -51,10 +66,15 @@ pub(super) async fn create_issue(
     })?;
 
     let content_hash = issue.compute_content_hash();
+    // D45 — the "batch" of a single create is the ONE id it is inserting, computed BEFORE the tx
+    // opens (spine §3.2.1). That arm is provably DEAD here: the only target it could match is the
+    // issue's own id, which `SelfDependency` rejects first while the body stages. It is passed for
+    // uniformity of the shared body.
+    let batch_ids: HashSet<&str> = std::iter::once(issue.id.as_str()).collect();
     let issue = issue.clone();
 
     with_immediate_tx(conn, hook, |tx| async move {
-        insert_issue_in_tx(&tx, &issue, &content_hash, actor).await?;
+        insert_issue_in_tx(&tx, &issue, &content_hash, actor, &batch_ids).await?;
         // D44 create-specific guards, in the published precedence order. They are placed AROUND the
         // shared body's call, in this method's own tx — see this function's doc-comment for why they
         // may not move inside it.
@@ -153,12 +173,52 @@ async fn reject_declared_gating_cycles(
 /// ONE `with_immediate_tx`; on any `Err` the caller's tx rolls back the WHOLE batch (ZERO rows
 /// persist). Both `create_issue` (its own one-shot tx) and `create_issues` (the ONE shared tx, looped)
 /// call this — never each other.
+///
+/// # The D45 dependency-TARGET existence guard (v1.0.1, NORMATIVE — spine §3.2.1)
+///
+/// Since D45 this body carries exactly ONE guard beyond the staging work: a declared `depends_on_id`
+/// is acceptable **iff** [`unblock_model::is_external_target`] holds for it (§1.9, ASCII-case
+/// insensitive), **OR** a row with that id is visible to the CALLER'S transaction, **OR** the id
+/// belongs to any record staged by that same transaction (`batch_ids`). Otherwise the record is
+/// rejected with [`StorageError::BlockerNotFound`], which maps onto the EXISTING
+/// `ErrorCode::IssueNotFound` — no `ErrorCode` is minted, and the schema is UNCHANGED (no foreign
+/// key, no `CHECK`, no trigger: an `external:` target is a legitimate value no row can ever satisfy,
+/// so a foreign key would forbid the very thing §1.9 defines as legal).
+///
+/// Four properties of that guard are load-bearing, and each is a separate way to get it wrong:
+///
+/// - **BATCH-AWARE — a per-record check is NON-CONFORMING.** `create_issues` stages records
+///   sequentially inside ONE transaction, so an intra-batch edge resolves only because the sibling
+///   was staged EARLIER. A naive per-record `SELECT` therefore accepts a BACKWARD reference and
+///   rejects a FORWARD one (record A naming record Z later in the same file) — an order-dependent
+///   refusal of a legal import that no caller can predict and no file author can avoid. `batch_ids`
+///   is the id set of the slice handed to `create_issues`, computed BEFORE the transaction opens —
+///   **never the id set of the parsed FILE**, a silently weaker reading (the D5 import hands the
+///   SKIP-FILTERED subset, which is safe only because every Skip reason implies the row already
+///   exists and is therefore covered by the database arm).
+/// - **IN-TRANSACTION is load-bearing.** The check runs inside the caller's already-open
+///   `BEGIN IMMEDIATE`, never as a pre-transaction probe: a probe is racy against a concurrent
+///   delete/tombstone, and the supported topology is child-per-client, i.e. another PROCESS may
+///   legitimately be writing.
+/// - **A TOMBSTONE TARGET COUNTS AS EXISTING** — deliberately, and deliberately unlike
+///   `add_comment`'s FORK-3 rule. The export corpus includes tombstones, so an edge to a tombstoned
+///   blocker is a normal, round-trippable fact; refusing it would make a conforming export
+///   un-importable. The existence query is therefore status-agnostic.
+/// - **DISTINCT targets, ONE post-staging pass.** The pass walks the DISTINCT `depends_on_id` set of
+///   the record's declared dependencies in declaration order (so a repeated target is checked once,
+///   and the reported pair is deterministic), and it runs AFTER the staging loop — which is what
+///   makes the published precedence TRUE rather than approximate: a check interleaved into the
+///   staging loop would let element 1's missing target beat element 2's `SelfDependency`.
+///
+/// An EMPTY or whitespace `depends_on_id` is refused by this guard as a side effect (it is not
+/// external and names no row).
 #[allow(clippy::too_many_lines)] // one cohesive record body: row + labels + deps + comments + events
 pub(super) async fn insert_issue_in_tx(
     tx: &libsql::Transaction,
     issue: &Issue,
     content_hash: &str,
     actor: &str,
+    batch_ids: &HashSet<&str>,
 ) -> Result<(), StorageError> {
     // Guard 1: id collision.
     if row_exists(tx, "SELECT 1 FROM issues WHERE id = ?1 LIMIT 1", &issue.id).await? {
@@ -268,6 +328,39 @@ pub(super) async fn insert_issue_in_tx(
         .await?;
     }
 
+    // D45 — the dependency-TARGET existence pass. ONE post-staging pass over the DISTINCT declared
+    // targets, in declaration order; see this function's doc-comment for why each of those words is
+    // load-bearing. It runs AFTER the staging loop above, so `SelfDependency` (which fires during
+    // staging) still wins, and BEFORE the `create_issue` wrapper's duplicate/cycle guards, which run
+    // after this whole body returns — that is the published rank
+    // `SelfDependency` -> `BlockerNotFound` -> `DuplicateDependency` -> `CycleDetected`.
+    let mut checked_targets: HashSet<&str> = HashSet::new();
+    for dep in &issue.dependencies {
+        let target = dep.depends_on_id.as_str();
+        if !checked_targets.insert(target) {
+            continue; // a repeated target is checked once (DISTINCT set).
+        }
+        // Arm 1: an external target is a LEGITIMATE blocker outside this workspace, which no row can
+        // ever satisfy (spine §1.9). ONE shared predicate, applied per-TARGET and never
+        // per-edge-type — so an `external:` PARENT is legal too.
+        if unblock_model::is_external_target(target) {
+            continue;
+        }
+        // Arm 2: the id belongs to a record staged by this same transaction (the batch arm).
+        if batch_ids.contains(target) {
+            continue;
+        }
+        // Arm 3: a row with that id is visible to the caller's transaction. STATUS-AGNOSTIC, so a
+        // TOMBSTONE target counts as existing.
+        if row_exists(tx, "SELECT 1 FROM issues WHERE id = ?1 LIMIT 1", target).await? {
+            continue;
+        }
+        return Err(StorageError::BlockerNotFound {
+            issue_id: issue.id.clone(),
+            depends_on_id: target.to_string(),
+        });
+    }
+
     // Insert comments + Event(Commented) each.
     //
     // SIX columns, binding `updated_at` + `redacted_at` from the caller-supplied `Comment` (D37).
@@ -335,6 +428,12 @@ pub(super) async fn insert_issue_in_tx(
 /// both rows live in the one uncommitted tx. Same-parent siblings arrive with ALREADY-DISTINCT
 /// `parent.N` ids (the engine mints them via its in-batch per-parent counter); the per-record
 /// `child_counters` UPSERT (high-water MAX) lands each row's `N` monotonically regardless of order.
+///
+/// **D45 (v1.0.1):** the id set of the WHOLE slice is computed here, before the transaction opens,
+/// and handed to every per-record call of the shared body — that is what makes the dependency-TARGET
+/// existence guard batch-aware, so a FORWARD reference (record A naming record Z later in the same
+/// file) is accepted exactly like a backward one. A per-record `SELECT` alone would refuse a legal
+/// import by input ORDER (see [`insert_issue_in_tx`]).
 pub(super) async fn create_issues(
     conn: &Connection,
     hook: WriteHook<'_>,
@@ -343,10 +442,13 @@ pub(super) async fn create_issues(
 ) -> Result<(), StorageError> {
     // Pre-compute each content hash before entering the tx (no clone of the slice; the helper borrows).
     let hashes: Vec<String> = issues.iter().map(Issue::compute_content_hash).collect();
+    // D45 — the batch arm of the target-existence guard: every id this slice will stage, known
+    // BEFORE the tx opens so record order cannot matter.
+    let batch_ids: HashSet<&str> = issues.iter().map(|issue| issue.id.as_str()).collect();
 
     with_immediate_tx(conn, hook, |tx| async move {
         for (issue, content_hash) in issues.iter().zip(hashes.iter()) {
-            insert_issue_in_tx(&tx, issue, content_hash, actor).await?;
+            insert_issue_in_tx(&tx, issue, content_hash, actor, &batch_ids).await?;
         }
         Ok(((), tx))
     })
@@ -1007,6 +1109,30 @@ async fn apply_reparent(
         if parent_id == id {
             return Err(StorageError::SelfDependency);
         }
+        // D45 (v1.0.1) — the 4th edge-writing entry point carries the SAME in-transaction
+        // dependency-TARGET existence guard, in the same precedence position: this path has no
+        // duplicate guard, so the chain reads self -> `BlockerNotFound` -> cycle. It reuses the
+        // `row_exists` helper already used in-transaction in this module, and the status-agnostic
+        // query (a tombstone parent counts as existing).
+        //
+        // An `external:` PARENT stays LEGAL under the ONE shared predicate — the carve-out is
+        // per-TARGET, never per-edge-type (spine §1.9 invariant 6); narrowing it here would be a NEW
+        // restriction on a GA-shipped path and would fork the predicate into per-edge-type dialects.
+        //
+        // HONEST SCOPING: a dangling `parent-child` edge does NOT produce the never-ready symptom
+        // (blocked pass 1 restricts to the 3 blocking types, pass 2 is an INNER join that yields no
+        // row for a missing parent, pass 3 seeds only from the already-blocked set). It is still a
+        // real integrity defect: it is hydrated onto the issue, it is exported, it is written with
+        // `isError:false`, and the D45 `dangling` diagnostic LISTS it — so leaving it unguarded
+        // would let the tool that reports the defect be used to create the defects it reports.
+        if !unblock_model::is_external_target(&parent_id)
+            && !row_exists(tx, "SELECT 1 FROM issues WHERE id = ?1 LIMIT 1", &parent_id).await?
+        {
+            return Err(StorageError::BlockerNotFound {
+                issue_id: id.to_string(),
+                depends_on_id: parent_id,
+            });
+        }
         // Cycle check over the gating graph (a parent-child edge gates ready work). Reuses the same
         // `would_cycle_in_tx` as `add_dependency`, so the reparent cycle path is the REAL ordered
         // path naming every node — built from the SAME detecting graph, not a synthetic
@@ -1325,7 +1451,11 @@ fn placeholders(n: usize) -> String {
 }
 
 /// Whether a 1-parameter existence query returns a row.
-async fn row_exists(
+///
+/// `pub(super)` since D45: the sibling edge-writing body [`super::deps::add_dependency`] runs the
+/// same in-transaction existence probes (the edge SOURCE and the dependency TARGET), and promoting
+/// the one helper is preferred over inlining a second copy of the query.
+pub(super) async fn row_exists(
     tx: &libsql::Transaction,
     sql: &str,
     param: &str,

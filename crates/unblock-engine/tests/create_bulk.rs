@@ -250,6 +250,187 @@ async fn rejects_marker_only_reference() {
 }
 
 // --------------------------------------------------------------------------------------------------
+// D45 — the EXTERNAL dependency carve-out on `create_bulk` (a BEHAVIOUR CHANGE on a shipped path)
+// --------------------------------------------------------------------------------------------------
+//
+// **Read `rejects_unresolved_reference` above first: THAT is what `external:jira-1` used to do.**
+// Until D45 `create_bulk` was the ONE path that refused a legitimate external blocker whole-batch
+// with `ValidationFailed` — the parser kept the whole `external:…` string as the id, the engine's
+// storage probe probed it as an issue id, missed, and the resolver rejected everything. No test
+// covered that, so nothing in CI would have gone red to announce the relaxation. These cells are
+// that announcement, and each would have FAILED before D45.
+
+/// `external:jira-1` is carried VERBATIM as the edge target — resolved against nothing, never
+/// "unresolved" (spine §5.2 rejection-set item (b), §1.9 invariant 5).
+///
+/// MUTANT KILLED: deleting the carve-out arms in `resolve_dep_refs` — the batch reverts to a
+/// whole-batch `ValidationFailed` with ZERO rows, which is exactly the shipped pre-D45 behaviour
+/// this cell exists to retire.
+///
+/// **NOT a mutant of this cell (measured):** deleting either `is_external_target` skip in
+/// `Session::probe_storage_dep_refs`. The probe's result is only consulted where the resolver
+/// reaches its id lookup, and the carve-out short-circuits before that — so the batch is still
+/// accepted and this cell stays green. That skip is pinned by
+/// `an_external_ref_is_never_probed_against_storage` alone, which is why that cell exists.
+#[tokio::test]
+async fn create_bulk_accepts_a_lowercase_external_dependency() {
+    let s = session().await;
+    let mut a = bulk_record("Waiting on another tracker");
+    a.dep_refs = vec!["external:jira-1".to_string()];
+    let created = s
+        .create_bulk(vec![a])
+        .await
+        .expect("an external blocker is LEGITIMATE — D45 relaxes the pre-D45 whole-batch refusal");
+
+    let deps = s.list_dependencies(&created[0].id).await.expect("deps");
+    assert_eq!(deps.len(), 1, "the external edge persisted");
+    assert_eq!(
+        deps[0].depends_on_id, "external:jira-1",
+        "carried VERBATIM — never rewritten, never resolved"
+    );
+    assert_eq!(deps[0].dep_type, DependencyType::Blocks);
+}
+
+/// The predicate is ASCII-CASE-INSENSITIVE, so `EXTERNAL:jira-1` is the SAME target class (spine
+/// §1.9: the case rule is FORCED by the read side, whose SQL `LIKE 'external:%'` already folds ASCII
+/// — a write guard stricter than the read side would refuse writes the store is happy to serve).
+///
+/// MUTANT KILLED — and the SITE is part of the claim, because a per-site edit here proves nothing:
+/// reverting the SHARED layer-0 predicate `unblock_model::is_external_target` to a case-SENSITIVE
+/// `starts_with("external:")`. `EXTERNAL:jira-1` then falls through every carve-out at once, is
+/// probed as an issue id, misses storage, and the whole batch is rejected.
+///
+/// **What is NOT a mutant, stated so no one records a kill that did not happen:** flipping the
+/// predicate at ONE of its call sites. The three engine sites (`parse_dependency`, and the two
+/// carve-out arms in `resolve_dep_refs`) are mutually redundant on this input — the whole-ref arm,
+/// the parse fallthrough and the id-half arm each catch it independently, so removing any one alone
+/// leaves the batch accepted and this cell green. That redundancy is exactly why the case rule is
+/// pinned ONCE at layer 0 and why the claim belongs there.
+#[tokio::test]
+async fn create_bulk_accepts_an_uppercase_external_dependency() {
+    let s = session().await;
+    let mut a = bulk_record("Waiting on another tracker, shouted");
+    a.dep_refs = vec!["EXTERNAL:jira-1".to_string()];
+    let created = s
+        .create_bulk(vec![a])
+        .await
+        .expect("`EXTERNAL:` is the same target class as `external:` — ASCII-case-insensitive");
+
+    let deps = s.list_dependencies(&created[0].id).await.expect("deps");
+    assert_eq!(deps.len(), 1);
+    assert_eq!(
+        deps[0].depends_on_id, "EXTERNAL:jira-1",
+        "the SPELLING is preserved verbatim; only the CLASSIFICATION is case-insensitive"
+    );
+}
+
+/// An EXPLICITLY TYPED external ref (`waits-for:external:jira-1`) keeps ITS type and is still carried
+/// verbatim: the carve-out is per-TARGET, never per-EDGE-TYPE (spine §1.9 invariant 6).
+///
+/// MUTANT KILLED: applying the carve-out only to a whole-ref match, which drops the id-half arm and
+/// sends `external:jira-1` back into resolution.
+#[tokio::test]
+async fn create_bulk_accepts_an_explicitly_typed_external_dependency() {
+    let s = session().await;
+    let mut a = bulk_record("Waiting on another tracker, typed");
+    a.dep_refs = vec!["waits-for:external:jira-1".to_string()];
+    let created = s.create_bulk(vec![a]).await.expect("typed external ref");
+
+    let deps = s.list_dependencies(&created[0].id).await.expect("deps");
+    assert_eq!(deps.len(), 1);
+    assert_eq!(deps[0].depends_on_id, "external:jira-1");
+    assert_eq!(
+        deps[0].dep_type,
+        DependencyType::WaitsFor,
+        "the declared type survives — the carve-out is per-TARGET, not per-EDGE-TYPE"
+    );
+}
+
+/// **The relaxation is SCOPED, and this cell is what keeps it scoped.** A genuinely unknown id is
+/// still refused whole-batch with `ValidationFailed` — the L5 resolver rejects first, and that stays
+/// the shipped, published code for this path (it is NOT `ISSUE_NOT_FOUND`; claiming otherwise would
+/// publish a code `create_bulk` cannot return).
+///
+/// MUTANT KILLED: widening the carve-out to any ref containing `external` (e.g. `starts_with`
+/// dropped for a `contains`), or making it unconditional.
+#[tokio::test]
+async fn create_bulk_still_refuses_a_near_miss_that_is_not_an_external_target() {
+    // `externally:x` and `ub-external:x` are NOT external targets (spine §1.9's pinned probe corpus).
+    let mut a = bulk_record("Near miss");
+    a.dep_refs = vec!["externally:jira-1".to_string()];
+    assert_rejected_zero_writes(vec![a]).await;
+
+    let mut b = bulk_record("Other near miss");
+    b.dep_refs = vec!["ub-external:jira-1".to_string()];
+    assert_rejected_zero_writes(vec![b]).await;
+}
+
+/// **"NOT resolved against ANYTHING" is literal, and this is the cell that makes it literal.** An
+/// external ref is short-circuited BEFORE the intra-batch map lookup, so it stays an external edge
+/// even when a sibling record in the same batch is titled exactly `external:jira-1`.
+///
+/// MUTANT KILLED: moving the carve-out AFTER the raw-string `maps.lookup(dep_str)` — the ref then
+/// resolves INTRA-BATCH to the sibling's minted id, and the edge silently stops being external. That
+/// mutant is invisible to every other cell in this section, because none of them has a batch record
+/// whose title collides with the external ref.
+#[tokio::test]
+async fn an_external_ref_is_not_resolved_against_a_colliding_batch_title() {
+    let s = session().await;
+    let decoy = bulk_record("external:jira-1"); // a record whose TITLE is the external ref
+    let mut dependent = bulk_record("Depends on the external ticket");
+    dependent.dep_refs = vec!["external:jira-1".to_string()];
+
+    let created = s
+        .create_bulk(vec![decoy, dependent])
+        .await
+        .expect("bulk create");
+    let deps = s.list_dependencies(&created[1].id).await.expect("deps");
+    assert_eq!(deps.len(), 1);
+    assert_eq!(
+        deps[0].depends_on_id, "external:jira-1",
+        "the external ref is carried VERBATIM, NOT resolved to the colliding sibling's minted id {}",
+        created[0].id
+    );
+}
+
+/// **The pre-transaction probe SKIPS an external ref**, and this cell is the only vantage point that
+/// sees it: with the resolver carve-out in place a probe of `external:jira-1` would merely miss and be
+/// ignored, so the created batch looks identical either way. The pre-D45 whole-batch refusal grew out
+/// of exactly that unobservable miss, which is why the skip is pinned rather than trusted.
+///
+/// MUTANT KILLED: deleting the ID-HALF `is_external_target` skip in
+/// `Session::probe_storage_dep_refs` (the second one, after `dep_ref_id`) — `external:jira-2` then
+/// appears in the probed-id list. **Measured, not assumed:** deleting the WHOLE-REF skip (the first
+/// one) leaves this cell GREEN, because `dep_ref_id` returns an unrecognised type prefix's ref
+/// unchanged, so the id-half skip catches the bare `external:jira-1` on its own. The two are
+/// therefore NOT independently pinned by this cell, and an earlier "either skip" claim here was
+/// wrong; the whole-ref skip earns its place by running before the work, not by being observable.
+#[tokio::test]
+async fn an_external_ref_is_never_probed_against_storage() {
+    let inner = LibsqlStorage::open_in_memory().await.expect("open");
+    inner.migrate().await.expect("migrate");
+    let injector = RaceInjector::new(Arc::new(inner) as Arc<dyn Storage>, "unused-race-id");
+    let s = common::session_over(
+        injector.clone() as Arc<dyn Storage>,
+        SessionConfig::default(),
+    )
+    .await;
+
+    let mut a = bulk_record("Depends on two external tickets");
+    a.dep_refs = vec![
+        "external:jira-1".to_string(),
+        "waits-for:external:jira-2".to_string(),
+    ];
+    s.create_bulk(vec![a]).await.expect("bulk create");
+
+    let probed = injector.probed_ids();
+    assert!(
+        !probed.iter().any(|id| id.contains("jira-")),
+        "an external ref must never be probed as an issue id: {probed:?}"
+    );
+}
+
+// --------------------------------------------------------------------------------------------------
 // blocked-by alias flip (the engine edge step, NOT the parser)
 // --------------------------------------------------------------------------------------------------
 

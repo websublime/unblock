@@ -156,14 +156,36 @@ impl Session {
     /// **T3.3 (HEALTH-LITE, D29) wires the lite body**: it composes `integrity_check()` rows + the pure
     /// file-state classification from `unblock-health` (`run_doctor`) into a `DoctorReport`, then maps it
     /// onto a [`DiagnosticReport`] **reusing the existing `DiagnosticKind::Info`** (F2 — NO new model
-    /// variant, no spine §1.10 / `CONTRACT_HASH` change; the landed `DiagnosticKind` set —
-    /// `Stats|Info|Where|Version|Lint|Changelog|Orphans` — is unchanged). The cli `doctor` command routes
+    /// variant, no spine §1.10 / `CONTRACT_HASH` change). The cli `doctor` command routes
     /// through this wired `doctor()` from T3.3 (F4). The full 4-state taxonomy + `--repair` are **v1.1**.
+    ///
+    /// **D45 — the DANGLING-dependency findings are FOLDED IN HERE, in the ENGINE.** `doctor()`
+    /// additionally awaits the SAME composition the `diagnostics {kind:"dangling"}` action uses
+    /// ([`crate::diagnostics::dangling_findings`] — ONE home, never a second implementation) and
+    /// APPENDS its findings, in that composition's pinned `(issue_id, dep_type, depends_on_id)`
+    /// order, AFTER the file-state anomalies (a deterministic overall order, NFR-14). The report's
+    /// `kind` stays `Info` — the fold moves no spine §1.10 byte; the `Dangling` KIND exists for the
+    /// `diagnostics` tool arm, where the response must declare what it is.
+    ///
+    /// **`unblock_health::run_doctor` is NOT given a third argument, its signature does NOT change,
+    /// and `unblock-health` gains NO `unblock-storage` dependency:** the list is DB-derived and D29
+    /// clause F3 makes `run_doctor` PURE, non-async and storage-free — that clause is PRESERVED, not
+    /// reversed. Composing in the engine fold is exactly how the engine already folds in the pure
+    /// file-state anomalies; passing DB rows into `run_doctor` would reverse a shipped clause.
+    ///
+    /// **D45 — COST, stated rather than discovered later.** The fold is UNCONDITIONAL on every
+    /// `doctor()` call, and the composition differences a whole-graph edge load against a
+    /// FULLY-INCLUSIVE `list_issues` (closed + deferred + tombstone) that hydrates labels,
+    /// dependencies and comments for every row merely to derive an id SET. So `doctor()` gains
+    /// O(rows + edges) work and O(rows) peak memory it did not have. The single-query alternative
+    /// (one `LEFT JOIN … WHERE i.id IS NULL` excluding external targets) costs a new `Storage` method
+    /// and every fake implementing it, and is DEFERRED to v1.1.
     ///
     /// # Errors
     ///
     /// - [`EngineError::FeatureNotWired`] (`feature: "health"`) until the T3.3 wiring lands; thereafter
-    ///   the transparent `Health { source: HealthError }` variant on a health failure.
+    ///   the transparent `Health { source: HealthError }` variant on a health failure, or the
+    ///   transparent storage source from the D45 dangling composition's two reads.
     #[cfg_attr(not(feature = "health"), allow(clippy::unused_async))] // no await without health
     pub async fn doctor(&self) -> Result<DiagnosticReport> {
         #[cfg(feature = "health")]
@@ -175,7 +197,14 @@ impl Session {
             // only await.
             let integrity_rows = self.integrity_check().await?;
             let report = unblock_health::run_doctor(&integrity_rows, &self.health_paths())?;
-            Ok(doctor_report_to_diagnostic(&report))
+            let mut diagnostic = doctor_report_to_diagnostic(&report);
+            // D45: the dangling-dependency fold. The SAME engine-side composition the `dangling`
+            // diagnostics action calls — one home — appended AFTER the file-state anomalies, in its
+            // own pinned order. No write permit: both halves are reads (FR-10).
+            diagnostic
+                .findings
+                .extend(crate::diagnostics::dangling_findings(self.storage.as_ref()).await?);
+            Ok(diagnostic)
         }
         #[cfg(not(feature = "health"))]
         {

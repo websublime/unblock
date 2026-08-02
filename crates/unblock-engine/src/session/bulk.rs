@@ -267,8 +267,18 @@ fn parse_dep_type(dep_type: &str) -> unblock_model::DependencyType {
 /// `type:id` keeps the type; an INVALID type prefix is treated as part of the id (a title with a
 /// colon) with the default `blocks` type. The `blocked-by` type string is PRESERVED verbatim here —
 /// the engine flips it to `blocks` at the edge-build step (`resolve_dep_refs`).
+///
+/// **D45 — the external test is [`unblock_model::is_external_target`], the ONE predicate (spine
+/// §1.9), never an open-coded case-SENSITIVE `starts_with("external:")`.** Stated precisely, because
+/// an implementer who edits only this line ships nothing: for `EXTERNAL:jira-1` the shipped code
+/// already fell to the `split_once` branch, found `validate_dependency_type("EXTERNAL")` FALSE (it
+/// resolves to `DependencyType::Custom`) and returned `("blocks", "EXTERNAL:jira-1")` — byte-identical
+/// to the external branch modulo `trim`. So the swap is observationally a NO-OP AT THIS SITE; it is
+/// required because a single predicate is the only way to stop two dialects of one concept from
+/// re-diverging. What actually delivers the relaxation is the carve-out in [`resolve_dep_refs`] and
+/// the matching skip in the engine's pre-transaction probe.
 fn parse_dependency(dep_str: &str) -> (String, String) {
-    if dep_str.starts_with("external:") {
+    if unblock_model::is_external_target(dep_str) {
         ("blocks".to_string(), dep_str.to_string())
     } else if let Some((type_part, id_part)) = dep_str.split_once(':') {
         let type_part = type_part.trim();
@@ -307,6 +317,28 @@ pub(crate) struct ResolvedEdge {
 /// `own_id` is the resolving record's own minted id (for the self-dependency check). `minted_id_of`
 /// maps batch-record index → minted id. `storage_resolve` reports the storage id for a non-intra-batch
 /// reference (`Some(id)` if a pre-existing row resolves, `None` if it does not).
+///
+/// # D45 — the EXTERNAL carve-out (spine §5.2 rejection-set item (b), NORMATIVE)
+///
+/// A `dep_ref` for which [`unblock_model::is_external_target`] holds is **NOT resolved against
+/// anything**: it is carried VERBATIM as the edge target and can never be "unresolved". The check
+/// runs BEFORE the intra-batch map lookup for exactly that reason, and again on the id-half after
+/// [`parse_dependency`] so `blocks:external:jira-1` is covered too.
+///
+/// **This is a stated RELAXATION of a GA-shipped, spine-pinned rejection, not a clarification.**
+/// Until D45 `parse_dependency` kept the whole `external:…` string as the id, the engine's storage
+/// probe probed it as an issue id, missed, and this resolver rejected the ENTIRE batch — so
+/// `create_bulk` was the one path that refused a legitimate external blocker, contradicting the
+/// external-targets-are-legitimate premise the rest of the system is built on. **No test covered that
+/// behaviour, so nothing in CI would have gone red to announce the change**; the cells in
+/// `tests/create_bulk.rs` are what now pin it in both spellings.
+///
+/// The remaining unresolved-reference rejection keeps `ValidationFailed` (a resolution fault),
+/// distinct from D45's resolved-but-absent id, which is `BlockerNotFound`/`ISSUE_NOT_FOUND` at L2.
+// One cohesive per-ref resolution ladder (external carve-out -> intra-batch -> parse -> storage ->
+// the reject set), faithful to `create.rs:1164-1252`. Splitting it would scatter a rejection ORDER
+// that is itself the contract.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn resolve_dep_refs(
     record: &NewIssue,
     own_id: &str,
@@ -316,6 +348,15 @@ pub(crate) fn resolve_dep_refs(
 ) -> Result<Vec<ResolvedEdge>, Vec<FieldError>> {
     let mut edges = Vec::new();
     for dep_str in &record.dep_refs {
+        // (0) D45 — an EXTERNAL target is resolved against NOTHING and carried verbatim. It precedes
+        // the intra-batch lookup because "not resolved against anything" is the literal rule.
+        if unblock_model::is_external_target(dep_str) {
+            edges.push(ResolvedEdge {
+                depends_on_id: dep_str.clone(),
+                dep_type: unblock_model::DependencyType::Blocks,
+            });
+            continue;
+        }
         // (1) Raw string against the intra-batch maps (titles with colons resolve here).
         let (dep_type, resolved_id): (unblock_model::DependencyType, String) = if let Some(
             resolution,
@@ -354,6 +395,16 @@ pub(crate) fn resolve_dep_refs(
             } else {
                 parse_dep_type(&ty_str)
             };
+            // D45 — the same carve-out on the ID HALF, so an explicitly typed
+            // `waits-for:external:jira-1` is carried verbatim with ITS type. Reached only when the
+            // whole ref was not already external (arm (0) above).
+            if unblock_model::is_external_target(&dep_id) {
+                edges.push(ResolvedEdge {
+                    depends_on_id: dep_id,
+                    dep_type: ty,
+                });
+                continue;
+            }
             let resolved = match maps.lookup(&dep_id) {
                 Some(RefResolution::Resolved(idx)) => {
                     minted_id_of.get(&idx).cloned().ok_or_else(|| {

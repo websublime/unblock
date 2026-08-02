@@ -404,12 +404,78 @@ pub fn child_id(parent_id: &str, child_number: u32) -> String {
     format!("{parent_id}.{child_number}")
 }
 
+// --- external dependency TARGET (NORMATIVE — D45; the SINGLE Rust home; spine §1.9) ---
+//
+// Until D45 this concept had no definition anywhere, and it was open-coded in two DISAGREEING
+// dialects — a case-SENSITIVE Rust `starts_with("external:")` in the engine's bulk dep-ref parser and
+// an ASCII-case-INSENSITIVE SQL `NOT LIKE 'external:%'` in the storage ready/blocked queries — so
+// `EXTERNAL:jira-1` was an external blocker to the ready query and an ordinary id to the bulk parser.
+// D45 pins ONE predicate and one case rule, HERE, because L0 is the only layer BOTH `unblock-storage`
+// (L2 — the in-transaction write guard) and `unblock-engine` (L5 — the bulk dep-ref resolver and the
+// dangling-dependency diagnostic) may depend on.
+
+/// The reserved dependency-TARGET prefix, exactly these 9 bytes, lowercase in its canonical form.
+///
+/// A `depends_on_id` carrying it names a blocker OUTSIDE this workspace (a ticket in another system).
+/// It is a LEGITIMATE target that no row can ever satisfy — which is why `dependencies.depends_on_id`
+/// deliberately carries NO foreign key (spine §3.2.1) and why the ready/blocked passes exclude it.
+pub const EXTERNAL_TARGET_PREFIX: &str = "external:";
+
+/// Whether a dependency TARGET (`Dependency.depends_on_id`, `NewDep.depends_on_id`, a parsed
+/// `dep_ref`) names an external blocker.
+///
+/// **ASCII-case-INSENSITIVE (NORMATIVE — D45):** `external:`, `External:` and `EXTERNAL:` are the
+/// same target class. This is not a taste choice — it is forced by invariant (4) below.
+/// The byte comparison is EXACTLY equivalent to the SQL twin `depends_on_id LIKE 'external:%'`:
+/// `SQLite`'s `LIKE` folds ASCII only, the prefix contains no non-ASCII byte, and an ASCII byte is
+/// always exactly one character — so the two accept precisely the same set of strings, including
+/// on non-ASCII near-misses (fullwidth `ＥＸＴＥＲＮＡＬ:`, dotless `ı`), which BOTH reject.
+///
+/// # External-target invariants (NORMATIVE — D45, spine §1.9)
+///
+/// 1. **`unblock-model` (L0) is the only lawful home** — see the module note above; any home higher
+///    up is a layering violation, since `unblock-storage` may depend on model + error only.
+/// 2. **[`parse_id`] is UNCHANGED.** `parse_id("external:jira-123")` yields prefix `external:jira`
+///    and keeps doing so: an external target is not an unblock id and is never parsed as one. This
+///    predicate classifies a dependency TARGET STRING, never an issue id.
+/// 3. **A SQL twin REMAINS, because SQL cannot call Rust** — the five `NOT LIKE 'external:%'`
+///    predicates in `unblock-storage`'s query layer stay, so the single home is PARTIAL BY
+///    CONSTRUCTION and the two halves agree only BY CONTRACT. They are kept honest by the NFR-16
+///    Storage contract suite's equivalence cell, which asserts this function equals the verdict the
+///    DATABASE itself returns for `SELECT ?1 LIKE 'external:%'` over a pinned probe corpus.
+/// 4. **The write guard is NEVER stricter than the read side.** For every target `t`: if the
+///    ready/blocked SQL treats `t` as external and therefore never blocking, then
+///    `is_external_target(t)` MUST be true. Since the SQL side is ASCII-case-insensitive today and is
+///    not being narrowed in a patch release, this predicate is case-insensitive. The invariant is
+///    DIRECTIONAL: the read side may be looser than the guard in future, never the reverse.
+/// 5. **Every open-coded recognition is retired** — one predicate is the only way to stop the two
+///    dialects re-diverging.
+/// 6. **The carve-out is per-TARGET, never per-EDGE-TYPE.** It applies to every dependency target on
+///    every path, including a `parent-child` target — so an `external:` PARENT is legal.
+///
+/// # Examples
+///
+/// ```
+/// use unblock_model::is_external_target;
+///
+/// assert!(is_external_target("external:jira-1"));
+/// assert!(is_external_target("EXTERNAL:jira-1")); // ASCII case folds, exactly like SQL `LIKE`
+/// assert!(!is_external_target("externally:x")); // the 9-byte prefix must match in full
+/// assert!(!is_external_target(" external:x")); // no trimming — a leading space is not the prefix
+/// ```
+#[must_use]
+pub fn is_external_target(target: &str) -> bool {
+    let p = EXTERNAL_TARGET_PREFIX.as_bytes();
+    let t = target.as_bytes();
+    t.len() >= p.len() && t[..p.len()].eq_ignore_ascii_case(p)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_ID_LENGTH, MAX_ID_PREFIX_LEN, MAX_SLUG_LEN, base36_encode, child_id, compute_id_hash,
-        generate_id_seed, is_valid_id_format, normalize_prefix, normalize_slug,
-        normalize_slug_for_prefix, optimal_hash_length, parse_id,
+        EXTERNAL_TARGET_PREFIX, MAX_ID_LENGTH, MAX_ID_PREFIX_LEN, MAX_SLUG_LEN, base36_encode,
+        child_id, compute_id_hash, generate_id_seed, is_external_target, is_valid_id_format,
+        normalize_prefix, normalize_slug, normalize_slug_for_prefix, optimal_hash_length, parse_id,
     };
     use chrono::Utc;
     use proptest::prelude::*;
@@ -672,6 +738,69 @@ mod tests {
         assert_eq!(parsed.hash, hash);
     }
 
+    // --- D45: the ONE shared external dependency-TARGET predicate (spine §1.9) ---
+
+    /// The prefix is exactly the 9 canonical lowercase bytes — it is a wire-visible constant, so a
+    /// silent re-spelling (a trailing space, a `-` separator) must go red here.
+    #[test]
+    fn external_target_prefix_is_the_nine_canonical_bytes() {
+        assert_eq!(EXTERNAL_TARGET_PREFIX, "external:");
+        assert_eq!(EXTERNAL_TARGET_PREFIX.len(), 9);
+    }
+
+    /// The probe corpus pinned in spine §1.9 invariant (3) — the SAME corpus the NFR-16 storage
+    /// contract suite runs against the DATABASE's own `LIKE 'external:%'`. This half asserts the Rust
+    /// verdicts; the storage cell asserts the two halves agree.
+    ///
+    /// MUTANT KILLED: a case-SENSITIVE `starts_with(EXTERNAL_TARGET_PREFIX)` — the shipped engine
+    /// dialect. `EXTERNAL:jira-1` and `ExTeRnAl:jira-1` turn this red, and they are exactly the
+    /// strings the ready/blocked SQL already treats as external, so the guard would be STRICTER than
+    /// the read side (invariant 4 violated).
+    #[test]
+    fn is_external_target_pinned_probe_corpus() {
+        // Accepted: the prefix matches in full, in any ASCII case.
+        for accepted in [
+            "external:",
+            "external:jira-1",
+            "EXTERNAL:jira-1",
+            "ExTeRnAl:jira-1",
+            "externaL:",
+        ] {
+            assert!(
+                is_external_target(accepted),
+                "{accepted:?} must be recognised as an external target"
+            );
+        }
+
+        // Rejected: no prefix, a partial prefix, a prefix that is not at byte 0, and the two
+        // non-ASCII near-misses (fullwidth letters, the dotless `ı`) — SQLite's `LIKE` folds ASCII
+        // ONLY, so a Unicode case-folding implementation would accept these and diverge from SQL.
+        for rejected in [
+            "",
+            "external",
+            "externally:x",
+            " external:x",
+            "ub-external:x",
+            "ＥＸＴＥＲＮＡＬ:x",
+            "externaı:x",
+        ] {
+            assert!(
+                !is_external_target(rejected),
+                "{rejected:?} must NOT be recognised as an external target"
+            );
+        }
+    }
+
+    /// The predicate classifies a TARGET string and never touches id parsing: `parse_id` keeps its
+    /// shipped answer for an `external:`-prefixed string (spine §1.9 invariant 2).
+    #[test]
+    fn is_external_target_is_orthogonal_to_parse_id() {
+        let parsed =
+            parse_id("external:jira-123").expect("an external string still parses as today");
+        assert_eq!(parsed.prefix, "external:jira");
+        assert!(is_external_target("external:jira-123"));
+    }
+
     // --- proptest: arbitrary input never panics; output shape invariants hold ---
 
     proptest::proptest! {
@@ -709,6 +838,15 @@ mod tests {
         #[test]
         fn generate_id_seed_never_panics(title in ".*", nonce in any::<u32>()) {
             let _ = generate_id_seed(&title, None, None, Utc::now(), nonce);
+        }
+
+        /// D45: the predicate never panics on arbitrary (incl. non-ASCII, sub-prefix-length) input,
+        /// and it agrees with the naive ASCII-lowercased `starts_with` on every string — the
+        /// property that makes it byte-equivalent to SQL `LIKE 'external:%'`.
+        #[test]
+        fn is_external_target_matches_ascii_lowercased_prefix(s in ".*") {
+            let expected = s.to_ascii_lowercase().starts_with(EXTERNAL_TARGET_PREFIX);
+            prop_assert_eq!(is_external_target(&s), expected);
         }
     }
 }

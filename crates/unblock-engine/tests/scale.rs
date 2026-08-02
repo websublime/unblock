@@ -159,7 +159,65 @@ async fn run_scale(n: usize) {
         "integrity_check must be clean at {n}: {problems:?}"
     );
 
+    #[cfg(feature = "health")]
+    measure_d45_doctor_cost(&session, n).await;
+
     drop(session);
+}
+
+/// D45 — the doctor COST measurement the spine makes an obligation OF THE IMPLEMENTATION COMMIT
+/// (`docs/plans/01-design-spine.md`, the `Session::doctor()` row, "D45 — COST, stated rather than
+/// discovered later"): the deferral of the single-query `LEFT JOIN` alternative to v1.1 is
+/// conditional on this number existing, on THIS fixture, rather than on an opinion. It is REPORTED,
+/// not asserted against a budget — the repo's only bench gate covers the ready-sort and reaches
+/// nothing on this path, so a first number is what the clause asks for.
+///
+/// Two timings, because the clause is about what the FOLD added:
+/// - `diagnostics(Dangling)` is the fold's exact added work (ONE home — `doctor()` awaits the SAME
+///   composition rather than recomputing);
+/// - `doctor()` is the composed total, so `doctor − dangling` is the pre-D45 doctor.
+///
+/// HONESTY BOUND, recorded in the spine clause too: `seed_corpus` writes rows with NO dependencies,
+/// so this corpus has an EMPTY `dependencies` table and the number below is the ROW half (the
+/// fully-inclusive `list_issues` hydration) alone. A workspace with a real edge graph pays MORE.
+#[cfg(feature = "health")]
+async fn measure_d45_doctor_cost(session: &Session, n: usize) {
+    use unblock_model::DiagnosticKind;
+
+    let t = Instant::now();
+    let dangling = session
+        .diagnostics(DiagnosticKind::Dangling, None)
+        .await
+        .expect("diagnostics(dangling)");
+    let dangling_elapsed = t.elapsed();
+    eprintln!(
+        "engine scale: D45 diagnostics(dangling) findings={} in {dangling_elapsed:?}",
+        dangling.findings.len()
+    );
+
+    let t = Instant::now();
+    let doctor = session.doctor().await.expect("doctor");
+    let doctor_elapsed = t.elapsed();
+    eprintln!(
+        "engine scale: D45 doctor() (integrity + file-state + the dangling fold) findings={} in \
+         {doctor_elapsed:?}",
+        doctor.findings.len()
+    );
+    eprintln!(
+        "engine scale: D45 doctor() fold share = {dangling_elapsed:?} of {doctor_elapsed:?} at {n} \
+         issues"
+    );
+
+    assert!(
+        dangling.findings.is_empty(),
+        "the seeded corpus has no dangling edge: {:?}",
+        dangling.findings
+    );
+    // Boundedness only (the same generous guard the reads above use) — NOT an NFR budget.
+    assert!(
+        doctor_elapsed < READ_GUARD,
+        "doctor() at {n} exceeded the boundedness guard: {doctor_elapsed:?}"
+    );
 }
 
 /// The per-PR NFR-2 gate through the engine read path: 250k issues, bounded reads, clean integrity.

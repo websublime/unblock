@@ -259,7 +259,7 @@ async fn k_of_n_mid_batch_failure_rolls_back_whole_batch() {
     // loop would have committed before the colliding record) are NOT persisted.
     let (_tmp, dir) = unblock_dir();
     let inner = std::sync::Arc::new(fresh_storage().await);
-    let storage = RaceInjector::new(inner.clone(), "ub-2");
+    let storage = StorageInjector::racing_create_issues(inner.clone(), "ub-2");
 
     let lines = vec![
         serialize_issue_line(&issue("ub-1")).unwrap(),
@@ -293,23 +293,53 @@ async fn k_of_n_mid_batch_failure_rolls_back_whole_batch() {
     // the atomicity proof.
 }
 
-/// A `Storage` decorator that injects an out-of-band racing commit before the FIRST `create_issues`
-/// delegation (mirrors the engine's `RaceInjector`), forcing the in-tx `IdCollision` → whole-batch
-/// rollback. Every other call is a pure delegate.
-struct RaceInjector {
+/// A `Storage` decorator over REAL libsql with two independent injection modes, each disarmed unless
+/// its constructor is used. Every other call is a pure delegate, so the decorated behaviour can never
+/// drift from the real one.
+///
+/// 1. [`racing_create_issues`](StorageInjector::racing_create_issues) — commit an out-of-band row
+///    that collides with a classified-NEW id just before the FIRST `create_issues` delegation
+///    (mirrors the engine's `RaceInjector`), forcing the in-tx `IdCollision` → whole-batch rollback.
+/// 2. [`already_dangling_edge`](StorageInjector::already_dangling_edge) (D45) — splice a dangling
+///    dependency onto a hydrated row returned by `list_issues`, modelling a workspace that ALREADY
+///    carries an edge whose target names no row. **The decorator is the only way to reach that
+///    state from this crate, and that is the point of D45:** every write path in `unblock-storage`
+///    now refuses to CREATE such an edge, and `DeleteMode::Hard` explicitly cleans `depends_on_id`
+///    references, so an already-corrupt workspace is no longer constructible through the public API.
+///    Since `export_jsonl`'s ONLY storage read is `list_issues`, a decorator that returns exactly the
+///    rows such a workspace would hydrate is behaviourally identical at the exporter's boundary; the
+///    IMPORT half of that cell runs against unmodified real libsql.
+struct StorageInjector {
     inner: std::sync::Arc<LibsqlStorage>,
     race_id: String,
     armed: std::sync::atomic::AtomicBool,
     create_issues_calls: std::sync::atomic::AtomicUsize,
+    /// D45: `(row id, dangling target)` spliced onto that row's hydrated dependency list.
+    dangling: Option<(String, String)>,
 }
 
-impl RaceInjector {
-    fn new(inner: std::sync::Arc<LibsqlStorage>, race_id: &str) -> Self {
+impl StorageInjector {
+    fn racing_create_issues(inner: std::sync::Arc<LibsqlStorage>, race_id: &str) -> Self {
         Self {
             inner,
             race_id: race_id.to_string(),
             armed: std::sync::atomic::AtomicBool::new(true),
             create_issues_calls: std::sync::atomic::AtomicUsize::new(0),
+            dangling: None,
+        }
+    }
+    /// D45: model a workspace already carrying `issue_id --blocks--> missing_target`.
+    fn already_dangling_edge(
+        inner: std::sync::Arc<LibsqlStorage>,
+        issue_id: &str,
+        missing_target: &str,
+    ) -> Self {
+        Self {
+            inner,
+            race_id: String::new(),
+            armed: std::sync::atomic::AtomicBool::new(false),
+            create_issues_calls: std::sync::atomic::AtomicUsize::new(0),
+            dangling: Some((issue_id.to_string(), missing_target.to_string())),
         }
     }
     fn create_issues_calls(&self) -> usize {
@@ -319,7 +349,7 @@ impl RaceInjector {
 }
 
 #[async_trait::async_trait]
-impl Storage for RaceInjector {
+impl Storage for StorageInjector {
     async fn create_issues(
         &self,
         issues: &[Issue],
@@ -342,7 +372,23 @@ impl Storage for RaceInjector {
         &self,
         f: &ListFilters,
     ) -> Result<Vec<Issue>, unblock_storage::StorageError> {
-        self.inner.list_issues(f).await
+        let mut rows = self.inner.list_issues(f).await?;
+        if let Some((id, target)) = self.dangling.as_ref() {
+            for row in &mut rows {
+                if &row.id == id {
+                    row.dependencies.push(unblock_model::Dependency {
+                        issue_id: row.id.clone(),
+                        depends_on_id: target.clone(),
+                        dep_type: unblock_model::DependencyType::Blocks,
+                        created_at: row.created_at,
+                        created_by: Some("t".to_string()),
+                        metadata: None,
+                        thread_id: None,
+                    });
+                }
+            }
+        }
+        Ok(rows)
     }
     async fn migrate(&self) -> Result<(), unblock_storage::StorageError> {
         self.inner.migrate().await
@@ -808,4 +854,222 @@ async fn a_record_carrying_a_gating_cycle_still_imports() {
         1,
         "and the cyclic edge came back with it, so this test is not vacuous: {restored:?}"
     );
+}
+
+// ---- D45: the export corpus is CLOSED UNDER ITS BLOCKERS, proven end-to-end ---------------------
+//
+// The NFR-16 round-trip obligation, with a HOME (spine §1.10): **for any corpus the tool itself
+// produced, `export -> import into an EMPTY workspace` SUCCEEDS under the D45 guard, the KEPT edge
+// set is preserved, and any issue that was BLOCKED before the export is BLOCKED after it.**
+//
+// It needs TWO cells, one per closure DIRECTION, and that is what makes the property non-vacuous:
+// the OUT cell alone passes under an OUT-only closure, so the IN cell is the one that kills that
+// mutant. `tests/roundtrip_proptest.rs` CANNOT host this — its `parse_of_serialize_is_sync_equals`
+// is a pure serialize -> parse identity that never touches `Storage`, never exports and never
+// imports, so constraining its `arb_dependency` generator would be a NO-OP, which is why that
+// generator is deliberately left as it is.
+
+/// An EPHEMERAL sample issue (the D23 retain drops it; the D45 closure decides whether it travels).
+fn ephemeral_issue(id: &str) -> Issue {
+    Issue {
+        ephemeral: true,
+        ..issue(id)
+    }
+}
+
+/// A `blocks` / `parent-child` / … edge `source -> target`, timestamped like [`issue`].
+fn edge(
+    source: &str,
+    target: &str,
+    dep_type: unblock_model::DependencyType,
+) -> unblock_model::Dependency {
+    unblock_model::Dependency {
+        issue_id: source.to_string(),
+        depends_on_id: target.to_string(),
+        dep_type,
+        created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+        created_by: Some("t".to_string()),
+        metadata: None,
+        thread_id: None,
+    }
+}
+
+/// Whether `id` is in the live dependency-blocked set (`live_blocked_ids`, the three passes).
+async fn is_blocked(storage: &LibsqlStorage, id: &str) -> bool {
+    storage
+        .blocked_issues(&ListFilters::default())
+        .await
+        .expect("blocked")
+        .iter()
+        .any(|i| i.id == id)
+}
+
+/// Whether `id` is in the ready set.
+async fn is_ready(storage: &LibsqlStorage, id: &str) -> bool {
+    storage
+        .ready_issues(&ListFilters::default())
+        .await
+        .expect("ready")
+        .iter()
+        .any(|i| i.id == id)
+}
+
+/// **OUT direction (a `live_blocked_ids` pass-1 shape).** A KEPT issue blocked by an EPHEMERAL
+/// blocker: the excluded blocker travels with the export, the import into an EMPTY workspace
+/// SUCCEEDS under the D45 guard, the kept edge set is preserved, and the dependent is STILL BLOCKED.
+///
+/// MUTANT KILLED: deleting the closure. The file then carries `ub-1`'s edge with no `ub-eph` line,
+/// and the guarded import REFUSES the whole file — this cell goes red at the import, which is
+/// precisely the "unblock's own exporter emits a file its own importer rejects" hazard D45 removes.
+#[tokio::test]
+async fn a_kept_issue_blocked_by_an_ephemeral_blocker_is_still_blocked_after_a_round_trip() {
+    let (_tmp, dir) = unblock_dir();
+    let source = fresh_storage().await;
+    source
+        .create_issue(&ephemeral_issue("ub-eph"), "t")
+        .await
+        .unwrap();
+    let mut dependent = issue("ub-1");
+    dependent.dependencies = vec![edge(
+        "ub-1",
+        "ub-eph",
+        unblock_model::DependencyType::Blocks,
+    )];
+    source.create_issue(&dependent, "t").await.unwrap();
+
+    // NON-VACUOUS precondition: an ephemeral blocker BLOCKS today (pass 1 has no ephemeral exclusion).
+    assert!(
+        is_blocked(&source, "ub-1").await,
+        "blocked BEFORE the export"
+    );
+
+    let path = dir.join("issues.jsonl");
+    let report = export_jsonl(&source, &path, &dir, &ExportOptions::default())
+        .await
+        .expect("export");
+    assert_eq!(report.written, 2, "the ephemeral blocker travels too");
+
+    let dest = fresh_storage().await;
+    let imported = import_jsonl(&dest, &path, &dir, "t", &ImportOptions::default())
+        .await
+        .expect("every file the exporter produces must import under the D45 guard");
+    assert_eq!(imported.imported, 2);
+
+    // The kept edge set is preserved …
+    let restored = dest.list_dependencies("ub-1").await.expect("list");
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0].depends_on_id, "ub-eph");
+    // … and the blockedness with it.
+    assert!(
+        is_blocked(&dest, "ub-1").await,
+        "blocked AFTER the round trip"
+    );
+    assert!(!is_ready(&dest, "ub-1").await, "and never ready");
+}
+
+/// **IN direction (a `live_blocked_ids` pass-2 shape) — THE cell that kills the OUT-only mutant.**
+/// A KEPT EPIC whose non-terminal `parent-child` CHILD is EPHEMERAL. The edge is stored on the
+/// CHILD's row (`WHERE issue_id = ?1`), so the epic's own line names nothing and an OUT-only closure
+/// has nothing to follow — yet pass 2 blocks the epic PARENT through that very edge, so the epic
+/// would arrive READY in the destination and pass 3 would propagate that ready-ness downwards.
+///
+/// MUTANT KILLED: an OUT-only closure. Every other cell in this file passes under it; this one does
+/// not — the export drops to 1 line, the import SUCCEEDS (no dangling edge is left behind), and the
+/// epic comes back READY. That silent blocked -> ready conversion is why the ruling exists.
+#[tokio::test]
+async fn a_kept_epic_with_an_ephemeral_child_is_still_blocked_after_a_round_trip() {
+    let (_tmp, dir) = unblock_dir();
+    let source = fresh_storage().await;
+    let mut epic = issue("ub-epic");
+    epic.issue_type = unblock_model::IssueType::Epic;
+    source.create_issue(&epic, "t").await.unwrap();
+
+    let mut child = ephemeral_issue("ub-eph-child");
+    child.dependencies = vec![edge(
+        "ub-eph-child",
+        "ub-epic",
+        unblock_model::DependencyType::ParentChild,
+    )];
+    source.create_issue(&child, "t").await.unwrap();
+
+    // NON-VACUOUS precondition: pass 2 blocks the epic through an edge on the CHILD's row.
+    assert!(
+        is_blocked(&source, "ub-epic").await,
+        "the epic is blocked BEFORE the export by its open child"
+    );
+
+    let path = dir.join("issues.jsonl");
+    let report = export_jsonl(&source, &path, &dir, &ExportOptions::default())
+        .await
+        .expect("export");
+    assert_eq!(
+        report.written, 2,
+        "the excluded CHILD travels because it BLOCKS the kept epic (the IN direction)"
+    );
+
+    let dest = fresh_storage().await;
+    let imported = import_jsonl(&dest, &path, &dir, "t", &ImportOptions::default())
+        .await
+        .expect("import");
+    assert_eq!(imported.imported, 2);
+
+    let restored = dest.list_dependencies("ub-eph-child").await.expect("list");
+    assert_eq!(restored.len(), 1, "the parent-child edge came back");
+    assert_eq!(restored[0].depends_on_id, "ub-epic");
+    assert!(
+        is_blocked(&dest, "ub-epic").await,
+        "the epic is STILL blocked after the round trip"
+    );
+    assert!(!is_ready(&dest, "ub-epic").await, "and never ready");
+}
+
+/// **The DISCLOSED CONSEQUENCE, pinned as such (spine §1.10).** The exporter does not repair, so a
+/// workspace that ALREADY carries a dangling edge exports it unchanged — and the guarded import then
+/// REFUSES the whole file, naming the first offending `(dependent, target)` pair. That refusal is
+/// CORRECT: the exporter may WIDEN its corpus (it owns the file), the importer may never INVENT one.
+///
+/// The already-dangling source workspace is modelled by a [`StorageInjector`] over REAL libsql,
+/// because D45 makes every write path refuse to CREATE such an edge (see that type's doc). The
+/// IMPORT half runs against unmodified real libsql, which is where the guard actually fires.
+///
+/// MUTANT KILLED: an exporter that silently drops the offending edge (the "obvious" repair D45
+/// rejects) — the import would then succeed and every assertion below the export goes red.
+#[tokio::test]
+async fn an_already_dangling_workspace_exports_fine_and_the_guarded_import_refuses_it() {
+    let (_tmp, dir) = unblock_dir();
+    let inner = std::sync::Arc::new(fresh_storage().await);
+    inner.create_issue(&issue("ub-1"), "t").await.unwrap();
+    let source = StorageInjector::already_dangling_edge(inner.clone(), "ub-1", "ub-ghost");
+
+    let path = dir.join("issues.jsonl");
+    let report = export_jsonl(&source, &path, &dir, &ExportOptions::default())
+        .await
+        .expect("the exporter does not repair — it exports fine");
+    assert_eq!(report.written, 1, "a dangling target is no row to pull");
+    assert!(
+        std::fs::read_to_string(&path).unwrap().contains("ub-ghost"),
+        "the dangling edge is WRITTEN, not laundered"
+    );
+
+    let dest = fresh_storage().await;
+    let err = import_jsonl(&dest, &path, &dir, "t", &ImportOptions::default())
+        .await
+        .expect_err("the guarded import must refuse a dangling edge whole-batch");
+    let unblock_sync::SyncError::Storage { source } = &err else {
+        panic!("expected the transparent storage source, got {err:?}");
+    };
+    assert!(
+        matches!(
+            source,
+            unblock_storage::StorageError::BlockerNotFound { issue_id, depends_on_id }
+                if issue_id == "ub-1" && depends_on_id == "ub-ghost"
+        ),
+        "the refusal must NAME the first offending (dependent, target) pair: {source:?}"
+    );
+    assert_eq!(
+        unblock_error::CodedError::code(source),
+        unblock_error::ErrorCode::IssueNotFound,
+        "and ride the EXISTING ISSUE_NOT_FOUND code — D45 mints none"
+    );
+    assert_eq!(count_rows(&dest).await, 0, "ZERO rows written");
 }

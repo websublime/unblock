@@ -11,7 +11,7 @@ use unblock_mcp::{
 #[test]
 fn public_types_and_consts_resolve() {
     // Consts + builders are usable offline.
-    assert_eq!(CONTRACT_VERSION, "unblock.mcp.v1.7");
+    assert_eq!(CONTRACT_VERSION, "unblock.mcp.v1.8");
     assert_eq!(
         CONTRACT_HASH.len(),
         64,
