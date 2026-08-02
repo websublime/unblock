@@ -503,6 +503,21 @@ fn push_unique(neighbours: &mut Vec<String>, id: &str) {
     }
 }
 
+/// Parse a STORED `dependencies.type` string into a [`DependencyType`], infallibly.
+///
+/// `DependencyType::from_str` is itself infallible (an unknown type parses to `Custom`), so the `Err`
+/// arm is unreachable — but to keep this panic-free on a library path the impossible `Err` maps to a
+/// `Custom` sink rather than the former `unwrap_or(Blocks)`, which was dead code that could have
+/// fabricated a phantom gating `Blocks` edge from a malformed stored type (D5/GATE-NIT-4).
+///
+/// SHARED (D45): [`load_all_edges`] and the `dangling_dependencies` read (`diagnostics.rs`) both go
+/// through it, so that rule cannot fork into two dialects of "what a malformed stored type means".
+pub(super) fn parse_dep_type(type_str: &str) -> DependencyType {
+    type_str
+        .parse::<DependencyType>()
+        .unwrap_or_else(|_| DependencyType::Custom(type_str.to_string()))
+}
+
 /// Load every dependency edge (`issue_id, depends_on_id, dep_type`) from the table.
 async fn load_all_edges(
     conn: &Connection,
@@ -522,15 +537,7 @@ async fn load_all_edges(
         let Value::Text(type_str) = row.get_value(2).map_err(map_libsql_err)? else {
             continue;
         };
-        // `DependencyType::from_str` is infallible (an unknown type parses to `Custom`), so the Err
-        // arm is unreachable — but to keep this panic-free in a lib path we map the impossible Err to
-        // a `Custom` sink rather than the former `unwrap_or(Blocks)`, which was dead code that could
-        // have fabricated a phantom gating `Blocks` edge from a malformed stored type
-        // (D5/GATE-NIT-4).
-        let dep_type = type_str
-            .parse::<DependencyType>()
-            .unwrap_or_else(|_| DependencyType::Custom(type_str.clone()));
-        out.push((issue_id, depends_on, dep_type));
+        out.push((issue_id, depends_on, parse_dep_type(&type_str)));
     }
     Ok(out)
 }

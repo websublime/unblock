@@ -57,8 +57,8 @@ use libsql::{Builder, Connection, Database, TransactionBehavior};
 use tokio::sync::Mutex;
 
 use unblock_model::{
-    Comment, CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue,
-    ListFilters,
+    Comment, CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, GraphEdge,
+    Issue, ListFilters,
 };
 
 use crate::error::{StorageError, is_busy_locked, map_libsql_err};
@@ -822,6 +822,10 @@ impl Storage for LibsqlStorage {
 
     async fn orphan_candidates(&self) -> Result<Vec<Issue>, StorageError> {
         diagnostics::orphan_candidates(self.read()).await
+    }
+
+    async fn dangling_dependencies(&self) -> Result<Vec<GraphEdge>, StorageError> {
+        diagnostics::dangling_dependencies(self.read()).await
     }
 }
 

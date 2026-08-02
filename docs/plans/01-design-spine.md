@@ -344,7 +344,7 @@ pub fn is_external_target(target: &str) -> bool {
 
 1. **`unblock-model` (L0) is the only lawful home.** The predicate must be reachable from BOTH `unblock-storage` (L2 — the in-transaction write guard, §3.2.1), `unblock-sync` (L3 — the export blocker-closure walk, which must NOT follow an `external:` target because that is not a row, §1.10) and `unblock-engine` (L5 — the bulk dep-ref resolver and the dangling-dependency diagnostic, §4.1). `unblock-storage` may depend on model + error ONLY (`xtask/src/layering.rs`), so any home above L0 is a layering violation. It sits in `unblock-model` `src/id.rs`, beside `parse_id`, and is re-exported flat from `lib.rs` like every other model helper.
 2. **`parse_id` is UNCHANGED.** `parse_id("external:jira-123")` yields prefix `external:jira` and keeps doing so (`crates/unblock-model/src/id.rs:457-458`): an external target is not an unblock id and is never parsed as one. `is_external_target` is orthogonal to id parsing — it classifies a dependency TARGET STRING, never an issue id.
-3. **A SQL twin REMAINS, because SQL cannot call Rust — so the single home is PARTIAL BY CONSTRUCTION, and both halves agree only BY CONTRACT.** The five `NOT LIKE 'external:%'` predicates in `crates/unblock-storage/src/libsql/query.rs` (`:292`, `:316`, `:317`, `:350`, `:351`) stay; the spine states the split rather than pretending the Rust `fn` is the only site. The two halves are kept honest by an obligation, not by hope: the NFR-16 Storage contract suite MUST carry an EQUIVALENCE cell that, for a fixed probe corpus, asserts `is_external_target(s)` equals the verdict the DATABASE ITSELF returns for `SELECT ?1 LIKE 'external:%'`. The corpus is pinned here so it cannot silently shrink: `""`, `"external"`, `"external:"`, `"external:jira-1"`, `"EXTERNAL:jira-1"`, `"ExTeRnAl:jira-1"`, `"externally:x"`, `"externaL:"`, `" external:x"` (leading space), `"ub-external:x"`, and two non-ASCII near-misses (`"ＥＸＴＥＲＮＡＬ:x"`, `"externaı:x"`). A future change to either side that breaks the equivalence turns that cell red.
+3. **A SQL twin REMAINS, because SQL cannot call Rust — so the single home is PARTIAL BY CONSTRUCTION, and both halves agree only BY CONTRACT.** The `NOT LIKE 'external:%'` predicates in `crates/unblock-storage/src/libsql`'s query layer stay — five in `query.rs` (the ready/blocked/propagation shapes) and, since the 2026-08-02 amendment of the `dangling` clause (§3.2.1), one more in the `dangling_dependencies` read. **The count is deliberately NOT the pin here** — a derived count in prose is exactly the class this repository has watched rot; the PIN is the equivalence obligation below, which holds for EVERY site because it interrogates the database's own `LIKE`. What matters is the RULE: every SQL site spells the carve-out as `NOT LIKE 'external:%'` and none open-codes another form. the spine states the split rather than pretending the Rust `fn` is the only site. The two halves are kept honest by an obligation, not by hope: the NFR-16 Storage contract suite MUST carry an EQUIVALENCE cell that, for a fixed probe corpus, asserts `is_external_target(s)` equals the verdict the DATABASE ITSELF returns for `SELECT ?1 LIKE 'external:%'`. The corpus is pinned here so it cannot silently shrink: `""`, `"external"`, `"external:"`, `"external:jira-1"`, `"EXTERNAL:jira-1"`, `"ExTeRnAl:jira-1"`, `"externally:x"`, `"externaL:"`, `" external:x"` (leading space), `"ub-external:x"`, and two non-ASCII near-misses (`"ＥＸＴＥＲＮＡＬ:x"`, `"externaı:x"`). A future change to either side that breaks the equivalence turns that cell red.
 4. **The write guard is NEVER stricter than the read side (the invariant that decides the case rule).** For every target string `t`: if the ready/blocked SQL treats `t` as external and therefore never blocking (§3.2.1 `blocked_issues`), then `is_external_target(t)` MUST be true. A guard that rejected a `t` the read side already treats as a legitimate external blocker would refuse a write the store is happy to serve — the exact asymmetry the two open-coded dialects had shipped. Since the SQL side is ASCII-case-insensitive TODAY and is not being narrowed in a patch release (that would be a behaviour change on a GA-frozen read path, D35), the Rust predicate is case-insensitive. The invariant is DIRECTIONAL: the read side may be looser than the guard in the future, never the reverse.
 5. **Every open-coded recognition is retired — and the swap at the PARSER is a REFACTOR, not the behaviour change.** `crates/unblock-engine/src/session/bulk.rs:271` calls `is_external_target` instead of `starts_with("external:")`. **Stated precisely, because an implementer who edits only this line ships nothing:** for `EXTERNAL:jira-1` the shipped `parse_dependency` (`bulk.rs:270-284`) already falls to its else-branch, splits on `:`, finds `validate_dependency_type("EXTERNAL")` FALSE (it resolves to `DependencyType::Custom`, `bulk.rs:249-255`), and returns `("blocks", "EXTERNAL:jira-1")` — byte-identical to the external branch modulo `trim`. So the swap is observationally a NO-OP at this site; it is required because a single predicate is the only way to stop the two dialects re-diverging, not because it changes an output. **What actually delivers the case-insensitivity and the external relaxation is the RESOLVER carve-out** specified at §5.2 rejection-set item (b) and the matching skip in the engine's pre-transaction probe (`crates/unblock-engine/src/session/write.rs:497-522`): an `is_external_target` ref is carried VERBATIM and never resolved against anything. That is the behaviour change; this invariant is its precondition.
 6. **The carve-out is per-TARGET, never per-EDGE-TYPE.** `is_external_target` is applied to every dependency target on every path, including a `parent-child` target — so an `external:` PARENT is legal (§3.2.1 `update_issue`). A carve-out honoured for some edge types and refused for others would recreate exactly the two-dialect split this clause abolishes.
@@ -934,9 +934,14 @@ pub trait Storage: Send + Sync {
 
     // --- diagnostics support (FR-15, pure-DB; no git) ---
     // D26 (T2.7): changelog/lint/orphans add NO new Storage method — the engine composes them from the
-    //   reads already declared here + list/ready/blocked/count/dependency_tree. D45's `dangling` kind
-    //   follows the SAME pattern and likewise adds NO trait method (it differences `dependency_graph(&[])`
-    //   against a fully-inclusive `list_issues` id set — §3.2.1), so no `impl Storage` and no test fake moves. `closed_since` is already
+    //   reads already declared here + list/ready/blocked/count/dependency_tree. D45's `dangling` kind was
+    //   ORIGINALLY specified to follow the SAME pattern ("likewise adds NO trait method — it differences
+    //   `dependency_graph(&[])` against a fully-inclusive `list_issues` id set, so no `impl Storage` and no
+    //   test fake moves"). AMENDED 2026-08-02, riding D45: that composition cost 10.72s at 250k rows and
+    //   took doctor() over the 15s scale guard, so it becomes ONE query behind ONE method,
+    //   `dangling_dependencies()` below (§3.2.1 `dangling` carries the numbers and the SQL). EVERY
+    //   `impl Storage` block gains it — the same enumerate-by-impl-SITE cost `schema_version` and the D37
+    //   comment methods paid. `closed_since` is already
     //   `since`-windowed; `orphan_candidates` is already status-agnostic. The bd-faithful `stats` diagnostic
     //   is the ONE exception: `epics_eligible_for_closure` needs a per-epic parent-child child rollup that
     //   no existing read composes, so a faithful port adds ONE purely-additive pure-DB aggregate primitive —
@@ -957,6 +962,12 @@ pub trait Storage: Send + Sync {
     async fn epic_child_rollup(&self) -> Result<Vec<(String, (usize, usize))>, StorageError>; // stats: per-epic (child_total, child_closed_or_tombstone), ORDER BY epic id
     async fn closed_since(&self, since: Option<DateTime<Utc>>) -> Result<Vec<Issue>, StorageError>; // changelog
     async fn orphan_candidates(&self) -> Result<Vec<Issue>, StorageError>;  // external_ref matches commit pattern
+    // D45, AMENDED 2026-08-02: the `dangling` diagnostic's ONE read. LEFT JOIN dependencies -> issues,
+    //   keeping ONLY the edges whose target row is ABSENT (`WHERE i.id IS NULL`), `external:` targets
+    //   excluded by the SQL twin of §1.9's predicate, ordered `(issue_id, type, depends_on_id)` IN SQL so
+    //   the engine forwards the rows unsorted. The join predicate tests EXISTENCE ALONE — never status:
+    //   a closed/deferred/tombstoned blocker EXISTS and is NOT dangling (§3.2.1 `dangling`, the TRAP).
+    async fn dangling_dependencies(&self) -> Result<Vec<GraphEdge>, StorageError>;
 
     // --- [v1.1] reserved seams (CF-E: additive; depended on by config db-layer + health full-taxonomy) ---
     //   These are reserved now so unblock-config can read persisted config from the DB layer
@@ -1181,8 +1192,11 @@ between an earlier prose description and the source are resolved **in favour of 
     discretion.
   - **ANY rejection rolls the whole transaction back → ZERO rows** — no issue, no edges, no events, and on
     the batch paths no partial batch. This is the existing `with_immediate_tx` property, not a new one.
-  - **No `Storage` trait signature changes.** The batch id set is an internal `pub(super)` parameter of the
-    shared body; every `impl Storage` METHOD SET is unchanged, so no test fake moves.
+  - **No `Storage` trait signature changes FROM THE GUARD.** The batch id set is an internal `pub(super)`
+    parameter of the shared body; no `impl Storage` METHOD SET moves on account of the guard. **Scope
+    correction (2026-08-02, riding D45): the LISTING view is a different matter — it adds ONE method,
+    `dangling_dependencies()` (§3.2 / §3.2.1 `dangling`), which every implementor gains. The claim above is
+    about the WRITE guard and was never a claim about D45 as a whole.**
   - **The schema is UNCHANGED** — no foreign key, no `CHECK`, no trigger on `dependencies.depends_on_id`.
     The guard is APPLICATION-LEVEL by necessity: an external target is a legitimate value that no row can
     ever satisfy, so a foreign key would forbid the very thing §1.9 defines as legal.
@@ -1468,7 +1482,10 @@ The dependency ops (FR-5) — source-verified vs the original cycle machinery:
   `#[serde(default)]`) vs the bare `since` arg on `diagnostics(kind, since)` (D26/OQ-1).
 - **`diagnostics(kind, since)` (FR-15, pure-DB — D26; no git, NFR-6).** The read path — **7 kinds through
   D44, EIGHT since D45's `dangling` (below)** — composes
-  ONLY existing `Storage` reads for changelog/lint/orphans/dangling — NO new trait method there. **`stats`** = the
+  ONLY existing `Storage` reads for changelog/lint/orphans — NO new trait method there. **`dangling` is the ONE
+  exception among those four, and it is named here rather than left to the clause below: since the 2026-08-02
+  amendment it reads ONE dedicated `Storage` method, `dangling_dependencies()` (§3.2), because the two-read
+  composition originally specified could not hold at 250k rows — the measured numbers are in that clause.** **`stats`** = the
   bd-faithful `StatsSummary` (`temp/beads_rust-main/src/cli/commands/stats.rs:376-499`): `list_issues` +
   `count_issues` over the widest-visibility filters → per-status tallies
   (open/in_progress/closed/deferred/draft/tombstone), `pinned` (`pinned=1` col OR `Pinned` status),
@@ -1514,24 +1531,65 @@ The dependency ops (FR-5) — source-verified vs the original cycle machinery:
   (every row whose `external_ref` matches the commit-hash shape; NOT bd's `status IN ('open','in_progress')`
   narrowing — the faithful FR-15 reading). **`dangling` (D45)** = the dependency edges whose target denotes
   nothing — the read view of the class the D45 write guard now refuses, so a workspace that already
-  accumulated such edges can enumerate them. **Composed in the ENGINE from TWO EXISTING `Storage` reads —
-  NO new trait method** (the D26 composition pattern applied literally, so no `Storage` signature moves and
-  no test fake churns): `dependency_graph(&[])` (empty roots = the WHOLE graph, this section) whose loader
-  is a bare `SELECT issue_id, depends_on_id, type FROM dependencies` with NO join — which is precisely why
-  dangling edges SURVIVE into the returned `DepTree` — differenced against the id set from `list_issues`. A
-  `GraphEdge` is a finding iff its `to` is neither in that id set nor `is_external_target` (§1.9 — an
-  external target is a legitimate blocker, never a finding).
-  - **TRAP, pinned normatively: the id set MUST come from FULLY-INCLUSIVE filters** —
-    `ListFilters { include_closed: true, include_deferred: true, include_tombstone: true, .. }`. With the
-    DEFAULT filters (which exclude closed/tombstone) every CLOSED blocker would be reported as dangling — a
-    diagnostic that fabricates its own findings.
-    **This corpus is DELIBERATELY WIDER than the EXPORT corpus, and the two must NEVER be conflated.**
+  accumulated such edges can enumerate them.
+  - **AMENDED 2026-08-02 — ONE SQL QUERY behind ONE new `Storage` method, replacing the two-read
+    composition. This rides D45 and mints no new D-id** (`docs/PROCESS.md` §3: same decision, same view,
+    same finding shape, same order, same trap — a forward correction of THIS clause's mechanism, not a
+    reversal of its intent).
+    **The SUPERSEDED text, kept visible rather than overwritten, read:** "Composed in the ENGINE from TWO
+    EXISTING `Storage` reads — NO new trait method (the D26 composition pattern applied literally, so no
+    `Storage` signature moves and no test fake churns): `dependency_graph(&[])` (empty roots = the WHOLE
+    graph) whose loader is a bare `SELECT issue_id, depends_on_id, type FROM dependencies` with NO join —
+    which is precisely why dangling edges SURVIVE into the returned `DepTree` — differenced against the id
+    set from `list_issues`."
+    **Every word of that reasoning was TRUE; what it never had was a measured cost.** The 250k `scale` gate
+    supplied one, and it is the reason for this amendment, stated in numbers rather than in adjectives:
+    at 250 000 rows `integrity_check` (pre-existing) cost **5.51 s**, the dangling fold added **10.72 s**,
+    and `doctor()` totalled **16.31 s** against the 15 s boundedness guard — a RED required job. The cause
+    is STRUCTURAL, not a threshold to nudge: the composition reads the WHOLE dependency graph and then EVERY
+    issue row through fully-inclusive filters — hydrating labels, dependencies and comments for each row
+    merely to derive an id SET — and diffs them in memory, i.e. two full scans and O(rows) peak memory.
+    The standalone `diagnostics {kind:"dangling"}` action pays the SAME 10.72 s; the `doctor` fold is merely
+    where a test happened to watch it. **Miguel ruled (2026-08-02) that the composition moves into ONE SQL
+    query.** Raising the guard and dropping the fold were both offered and both REJECTED: the guard did its
+    job, and dropping the fold would leave the agent-facing action just as slow with nothing watching it.
+    **The v1.1 deferral this clause used to record is therefore CANCELLED — the single-query alternative it
+    named is what ships, in v1.0.1, at its stated price of one trait method and its implementors.**
+  - **THE READ (NORMATIVE).** ONE additive `Storage` method — `dangling_dependencies() -> Vec<GraphEdge>`
+    (§3.2, declared in the diagnostics block) — returns exactly the finding set. The engine maps it to
+    findings and does NOTHING else: no second read, no id set, no in-memory difference, no re-sort. The
+    libsql body is ONE statement, a LEFT JOIN from the edge table to the issue table keeping only the rows
+    whose target row is ABSENT:
+    ```sql
+    SELECT d.issue_id, d.depends_on_id, d.type
+      FROM dependencies d
+      LEFT JOIN issues i ON i.id = d.depends_on_id
+     WHERE i.id IS NULL
+       AND d.depends_on_id NOT LIKE 'external:%'
+     ORDER BY d.issue_id ASC, d.type ASC, d.depends_on_id ASC
+    ```
+  - **TRAP, CARRIED FORWARD INTO ITS SQL FORM — it did not go away, it changed shape, and this is the single
+    easiest way to ship a query that lies.** The old form was "the id set MUST come from FULLY-INCLUSIVE
+    filters (`include_closed`/`include_deferred`/`include_tombstone` all true), because the DEFAULT filters
+    exclude closed and tombstone and every CLOSED blocker would then be reported as dangling — a diagnostic
+    that fabricates its own findings". In SQL that becomes: **the join predicate is `i.id = d.depends_on_id`
+    and NOTHING ELSE, and the `WHERE` tests `i.id IS NULL` and NOTHING ELSE. Existence ALONE. Never status.**
+    Adding `AND i.status NOT IN ('closed','tombstone')` to the ON clause (or any status/visibility term to
+    the WHERE) reintroduces exactly the retired defect through a new door: a closed, deferred or tombstoned
+    blocker ROW EXISTS, so its edge is not dangling, and reporting it fabricates findings.
+    **The corpus is still DELIBERATELY WIDER than the EXPORT corpus, and the two must NEVER be conflated.**
     The export corpus is the D23 retain PLUS D45's blocker closure (§1.10) — still narrower than "every
-    row", since an ephemeral / `-wisp-` row nothing depends on is still not exported. This set is every row
-    in the database, full stop. Consequently **an edge whose target is an ephemeral / `-wisp-` row is NOT a
-    dangling finding** — the row exists. An implementer who reads this set as "the export corpus" reports
-    every such edge as a false finding, which is precisely the self-fabricating diagnostic this trap exists
-    to prevent.
+    row", since an ephemeral / `-wisp-` row nothing depends on is still not exported. The join sees every
+    row in the `issues` table, full stop. Consequently **an edge whose target is an ephemeral / `-wisp-` row
+    is NOT a dangling finding** — the row exists. An implementer who narrows the join to "the export corpus"
+    reports every such edge as a false finding, which is precisely the self-fabricating diagnostic this trap
+    exists to prevent.
+  - **THE `external:` CARVE-OUT IS THE SQL TWIN, and the two halves must agree EXACTLY (§1.9 invariant 3).**
+    `NOT LIKE 'external:%'` is the same ASCII-case-INSENSITIVE predicate `unblock_model::is_external_target`
+    implements in Rust, and this query is one of its SQL homes — so the §1.9 equivalence obligation, and the
+    NFR-16 contract cell that asks the DATABASE for its own verdict over the pinned probe corpus, cover this
+    path unchanged. An `external:` target is a legitimate blocker outside this workspace and is NEVER a
+    finding, in EITHER spelling.
   - **FINDING SHAPE (NORMATIVE — it is snapshot-pinned output).** `DiagnosticFinding` has exactly two
     `String` fields (§1.10), so the three facts a reader needs — the dependent, the phantom target, and the
     EDGE TYPE — are encoded into them. The edge type is not decoration: it is what distinguishes a
@@ -1541,19 +1599,24 @@ The dependency ops (FR-5) — source-verified vs the original cycle machinery:
     `format!("{dep_type} -> {target}")`, where `{dep_type}` is `DependencyType::as_str()` (e.g. `blocks`,
     `parent-child`) and `{target}` is the raw `depends_on_id`. Example: label `ub-lp9`, detail
     `blocks -> ub-ghost`. One finding per dangling EDGE.
-  - **ORDER (PINNED for NFR-14):** the findings are sorted by **`(issue_id, dep_type, depends_on_id)`** —
-    dependent id ASC, then dependency type ASC, then target ASC. This is a DELIBERATE re-sort in the
-    engine, NOT the order `dependency_graph` returns (that read sorts by `(from, to, dep_type)`, this
-    section) — the engine re-sorts so the output groups a dependent's broken edges by kind. The triple is a
-    TOTAL order over the result set because the `dependencies` primary key is `(issue_id, depends_on_id)`,
-    so no two rows share all three components.
-  - **ADVISORY, no write permit** (FR-10): it is a read. The race window between the two reads is
-    acceptable for an advisory report.
-  - **COST, measured or a v1.1 seam.** Two reads plus O(N) memory, versus the one-query alternative (the
-    `blocked_issues` LEFT-JOIN shape with the predicate inverted — `i.id IS NULL` AND not external), which
-    would cost a new trait method and every fake implementation. The composition is chosen for this cut; if
-    a workspace at the scale the 250k ready-sort bench targets shows a real cost, the single-query
-    primitive is an ADDITIVE v1.1 seam.
+  - **ORDER (PINNED for NFR-14) — and since the amendment it is pinned IN SQL, by the `ORDER BY` above.**
+    The findings are ordered by **`(issue_id, dep_type, depends_on_id)`** — dependent id ASC, then
+    dependency type ASC, then target ASC — so the output groups a dependent's broken edges by kind. This is
+    still DELIBERATELY not the `(from, to, dep_type)` order `dependency_graph` returns (that read is
+    unrelated to this one now). The triple is a TOTAL order over the result set because the `dependencies`
+    primary key is `(issue_id, depends_on_id)`, so no two rows share all three components. **The `type`
+    column stores exactly `DependencyType::as_str()`, and `SQLite`'s default `BINARY` collation compares
+    those bytes exactly as Rust's `str` `Ord` does — so the SQL order and the retired engine-side re-sort
+    are the same order, not merely a similar one.** The engine therefore forwards the rows AS RETURNED; it
+    MUST NOT re-sort, because a redundant re-sort would mask a broken `ORDER BY`.
+  - **ADVISORY, no write permit** (FR-10): it is a read. Since the amendment it is ONE statement, so the
+    two-read race window the earlier text accepted no longer exists — the result is a single consistent
+    snapshot.
+  - **COST — the amendment's whole point, so it is measured, not asserted.** ONE indexed join instead of two
+    full scans plus O(rows) memory. The obligation to MEASURE stands and is discharged where it always was:
+    the reporting pair of timings inside `run_scale` (`crates/unblock-engine/tests/scale.rs`), re-derived on
+    every `scale` run rather than living only in prose. The current numbers are recorded in the
+    `Session::doctor()` row (§4.1).
   Every kind emits generic `DiagnosticFinding{label,detail}` rows
   (§1.10 / §5.3), so the per-kind ENRICHMENT does NOT touch the mcp schema bundle (no `CONTRACT_VERSION`
   bump — §5.4/D25). **D45 is the one exception, and it is an exception about the KIND ENUM, not about the
@@ -2158,7 +2221,7 @@ impl Session {
     //   Healthy/Drifted/Recoverable/Unsafe taxonomy + `--repair` + `.unblock/.recovery/` evidence land ADDITIVELY
     //   over the `doctor()`/`recover()` seam at **v1.1**; `recover()` stays FeatureNotWired through v1. (Earlier
     //   prose put the cli→doctor() routing at T3.1 — that is the T3.3 refinement, not a T3.1 fact.)
-    pub async fn doctor(&self) -> Result<DiagnosticReport, EngineError>;  // FR-15/FR-16. v1 pre-T3.3 = SIGNATURE only (returns EngineError::FeatureNotWired{feature:"health"}); **T3.3 (HEALTH-LITE, D29) wires the LITE aggregation** — integrity_check rows + pure file-state classification via unblock-health `run_doctor` → DoctorReport, mapped onto DiagnosticReport REUSING DiagnosticKind::Info (NO new model variant, NO §1.10/CONTRACT_HASH change — F2). The cli doctor routes through this from T3.3 (see the note above). **D45 — the dangling-dependency findings are FOLDED IN HERE, in the ENGINE.** `Session::doctor()` additionally awaits the SAME engine-side composition `diagnostics(Dangling)` uses (ONE home, §3.2.1 — not a second implementation) and APPENDS its findings, in that composition's pinned `(issue_id, dep_type, depends_on_id)` order, to the `DiagnosticKind::Info` report AFTER the file-state anomalies (deterministic overall order, NFR-14). The report's `kind` stays `Info` — the fold changes no §1.10 byte; the `Dangling` KIND exists for the `diagnostics` tool arm, where the response must declare what it is. **`unblock_health::run_doctor` is NOT given a third argument and its signature does NOT change, and `unblock-health` gains NO `unblock-storage` dependency:** the list is DB-derived, and D29 clause F3 makes `run_doctor` PURE, non-async and storage-free — that clause is PRESERVED, not reversed. Composing in the engine fold is exactly how the engine already folds in the pure file-state anomalies; passing DB rows into `run_doctor` would REVERSE a shipped clause and would need its own decision id, which D45 deliberately does not mint (it already carries one reversal — the shared-insert-body placement). **D45 — COST, stated rather than discovered later.** The fold is UNCONDITIONAL on every `doctor()` call, and the composition differences a whole-graph edge load against a FULLY-INCLUSIVE `list_issues` (closed + deferred + tombstone — the default filters would report every CLOSED blocker as dangling), which hydrates labels, dependencies and comments for every row merely to derive an id SET. So `doctor()` gains O(rows + edges) work and O(rows) peak memory it did not have, on a command whose whole point is to be safe to run on a sick workspace. The single-query alternative (one `LEFT JOIN … WHERE i.id IS NULL` excluding external targets, costing a new `Storage` method and 8+ test fakes) is DEFERRED to v1.1 **with an obligation, not an opinion**: the implementation commit MEASURES the composed path on the existing large-workspace fixture and records the number, because the repo's only bench gate covers the ready-sort at 250k issues and reaches nothing on this path. **THE OBLIGATION IS DISCHARGED — the measured numbers, recorded here rather than in a report that can go stale.** Fixture: the EXISTING large-workspace fixture `crates/unblock-engine/tests/scale.rs` (NFR-2, the storage-direct 250k `seed_corpus`), dev profile, run as the CI `scale` job runs it (`cargo test -p unblock-engine --features testkit --test scale`); the measurement is a REPORTING pair of timings inside `run_scale` (`diagnostics(Dangling)` = the fold's exact added work, since `doctor()` awaits the SAME composition; then `doctor()` = the composed total), so it is re-derived on every `scale` run instead of living only in prose. **At 250k rows, three runs: the fold costs 4.51s / 4.55s / 4.65s and the composed `doctor()` costs 7.00s / 7.05s / 7.12s, of which the pre-D45 half (`integrity_check` + the pure file-state classification) is 2.47s / 2.48s / 2.53s — so the fold roughly TRIPLES `doctor()` at 250k, and it is the dominant term.** The macOS/laptop absolute values are not a budget (the cell asserts only the existing generous boundedness guard, never a ceiling); the RATIO and the shape are the finding. **Two honesty bounds on that number, stated so a later reader does not over-trust it:** (a) `seed_corpus` writes rows with NO dependencies, labels or comments, so the 250k corpus has an EMPTY `dependencies` table — the measured 4.5s is the ROW half (the fully-inclusive `list_issues` hydration) alone, and the edge half is measured at zero; a workspace with a real edge graph pays MORE, never less; (b) the fold is a read pair with no write permit, so the cost is latency on the caller, not lock hold time. This is the evidence the v1.1 deferral rests on: at the corpus size this repo commits to supporting, `doctor()` triples — the single-query alternative is worth its `Storage` method, and it is not worth it before v1.1. **Feature-gate placement, previously MIS-stated and corrected here:** `Session::doctor()` is NOT `#[cfg]`-gated. The method is declared UNCONDITIONALLY (`crates/unblock-engine/src/session/lifecycle.rs:167-184`); only its two BODY blocks carry the gate — a `#[cfg(feature = "health")]` block that composes the report and a `#[cfg(not(feature = "health"))]` block that returns `EngineError::FeatureNotWired { feature: "health" }` — which is why `crates/unblock-cli/src/commands/doctor.rs:43` calls it with no `cfg` of its own. **So the fold lands INSIDE the existing `#[cfg(feature = "health")]` body block, immediately before its `Ok(…)`**, and the `not(health)` block keeps returning `FeatureNotWired` untouched. **The shared dangling COMPOSITION itself is UN-GATED, and that is load-bearing rather than incidental:** it is the same engine-side composition the `diagnostics {kind:"dangling"}` arm calls, and that arm's dispatch (`crates/unblock-engine/src/diagnostics.rs:49-57`) carries no feature gate at all — putting the composition under the `health` cfg would fail to COMPILE the new arm in a `--no-default-features` build. The cost note above is therefore a statement about a `health`-enabled `doctor()` run; the MCP action pays the same cost in every build.
+    pub async fn doctor(&self) -> Result<DiagnosticReport, EngineError>;  // FR-15/FR-16. v1 pre-T3.3 = SIGNATURE only (returns EngineError::FeatureNotWired{feature:"health"}); **T3.3 (HEALTH-LITE, D29) wires the LITE aggregation** — integrity_check rows + pure file-state classification via unblock-health `run_doctor` → DoctorReport, mapped onto DiagnosticReport REUSING DiagnosticKind::Info (NO new model variant, NO §1.10/CONTRACT_HASH change — F2). The cli doctor routes through this from T3.3 (see the note above). **D45 — the dangling-dependency findings are FOLDED IN HERE, in the ENGINE.** `Session::doctor()` additionally awaits the SAME engine-side ONE HOME `diagnostics(Dangling)` uses (§3.2.1 — not a second implementation; since the 2026-08-02 amendment that home is a thin map over the ONE read `Storage::dangling_dependencies()`, which is why keeping it a single home costs nothing) and APPENDS its findings, in the pinned `(issue_id, dep_type, depends_on_id)` order the read's `ORDER BY` produces, to the `DiagnosticKind::Info` report AFTER the file-state anomalies (deterministic overall order, NFR-14). The report's `kind` stays `Info` — the fold changes no §1.10 byte; the `Dangling` KIND exists for the `diagnostics` tool arm, where the response must declare what it is. **`unblock_health::run_doctor` is NOT given a third argument and its signature does NOT change, and `unblock-health` gains NO `unblock-storage` dependency:** the list is DB-derived, and D29 clause F3 makes `run_doctor` PURE, non-async and storage-free — that clause is PRESERVED, not reversed. Composing in the engine fold is exactly how the engine already folds in the pure file-state anomalies; passing DB rows into `run_doctor` would REVERSE a shipped clause and would need its own decision id, which D45 deliberately does not mint (it already carries one reversal — the shared-insert-body placement). **D45 — COST, stated rather than discovered later. AMENDED 2026-08-02: the deferral this paragraph recorded is CANCELLED and the fold is now ONE SQL query.** The fold is UNCONDITIONAL on every `doctor()` call, so its cost sits on a command whose whole point is to be safe to run on a sick workspace. **The SUPERSEDED design and its SUPERSEDED numbers, kept visible rather than overwritten, because they are the evidence that forced the change:** the fold used to difference a whole-graph edge load against a FULLY-INCLUSIVE `list_issues` (closed + deferred + tombstone), hydrating labels, dependencies and comments for every row merely to derive an id SET — O(rows + edges) work and O(rows) peak memory — and the single-query alternative (one `LEFT JOIN … WHERE i.id IS NULL` excluding external targets, costing a new `Storage` method and its implementors) was DEFERRED to v1.1 on a LAPTOP measurement of "the fold costs 4.51s / 4.55s / 4.65s and the composed `doctor()` costs 7.00s / 7.05s / 7.12s, of which the pre-D45 half is 2.47s / 2.48s / 2.53s". **Those numbers UNDERSTATED the cost, and the CI `scale` job — not a review — is what caught it:** on the CI runner the same 250k fixture measured `integrity_check` **5.51 s**, the fold **10.72 s**, and `doctor()` **16.31 s** against the 15 s boundedness guard, i.e. a RED required job. A laptop number is not a gate; the gate is the gate. **Miguel ruled (2026-08-02) that the composition moves into ONE SQL query**, rejecting both alternatives offered (raise the guard — no, the guard did its job; drop the fold — no, the standalone `diagnostics {kind:"dangling"}` action pays the identical 10.72 s and would then have nothing watching it). The mechanism, the SQL and the carried-forward TRAP are in §3.2.1 `dangling`; the read is `Storage::dangling_dependencies()` (§3.2). **THE MEASUREMENT OBLIGATION IS UNCHANGED AND STILL DISCHARGED IN CODE, not in prose that can go stale.** Fixture: the EXISTING large-workspace fixture `crates/unblock-engine/tests/scale.rs` (NFR-2, the storage-direct 250k `seed_corpus`), dev profile, run as the CI `scale` job runs it (`cargo test -p unblock-engine --features testkit --test scale`); the measurement is a REPORTING pair of timings inside `run_scale` (`diagnostics(Dangling)` = the fold's exact added work, since `doctor()` awaits the SAME read; then `doctor()` = the composed total), re-derived on every `scale` run. **POST-AMENDMENT, at 250k rows, three runs on the SAME laptop class the superseded 4.51s/7.00s pair was taken on (so the two are directly comparable): the fold costs 88.7µs / 88.4µs / 88.7µs and the composed `doctor()` costs 2.529s / 2.567s / 2.520s, of which `integrity_check` alone is 2.516s / 2.542s / 2.533s. The fold went from 4.51s to 88.7µs — a ~51 000x reduction — and `doctor()` is now `integrity_check` plus roughly a tenth of a millisecond: the fold is ~0.004% of the total and has stopped being a term in it.** The CI runner measured `integrity_check` about 2.2x slower than this machine (5.51s vs 2.52s), so the same ratio puts CI's `doctor()` near 5.6s against the unchanged 15s guard. The absolute values are environment-dependent and are not a budget (the cell asserts only the existing generous boundedness guard, never a ceiling); the SHAPE is the finding — a full-corpus hydration became a single join over the edge table, so the fold's cost stopped scaling with the ROW count. **Two honesty bounds, stated so a later reader does not over-trust the number:** (a) `seed_corpus` writes rows with NO dependencies, so the 250k corpus has an EMPTY `dependencies` table — the query's driving table is empty here, and a workspace with a real edge graph pays more, though now proportionally to the EDGE count rather than to the ROW count, which is the point of the change; (b) the fold is a read with no write permit, so the cost is latency on the caller, not lock hold time. **Feature-gate placement, previously MIS-stated and corrected here:** `Session::doctor()` is NOT `#[cfg]`-gated. The method is declared UNCONDITIONALLY (`crates/unblock-engine/src/session/lifecycle.rs:167-184`); only its two BODY blocks carry the gate — a `#[cfg(feature = "health")]` block that composes the report and a `#[cfg(not(feature = "health"))]` block that returns `EngineError::FeatureNotWired { feature: "health" }` — which is why `crates/unblock-cli/src/commands/doctor.rs:43` calls it with no `cfg` of its own. **So the fold lands INSIDE the existing `#[cfg(feature = "health")]` body block, immediately before its `Ok(…)`**, and the `not(health)` block keeps returning `FeatureNotWired` untouched. **The shared dangling ONE HOME itself is UN-GATED, and that is load-bearing rather than incidental:** it is the same engine fn the `diagnostics {kind:"dangling"}` arm calls, and that arm's dispatch (`crates/unblock-engine/src/diagnostics.rs:49-57`) carries no feature gate at all — putting the composition under the `health` cfg would fail to COMPILE the new arm in a `--no-default-features` build. The cost note above is therefore a statement about a `health`-enabled `doctor()` run; the MCP action pays the same cost in every build.
     pub async fn recover(&self) -> Result<DiagnosticReport, EngineError>; // attempt repair (WAL checkpoint, reindex; reports actions taken). STAYS EngineError::FeatureNotWired{feature:"health"} through v1 (F1/D29) — its body (`--repair` + the `.unblock/.recovery/` evidence writer + the rich repair taxonomy) is **v1.1**, NOT T3.3; wiring a hollow "nothing repaired" report would be the faked success FeatureNotWired forbids.
     pub async fn shutdown(&self) -> Result<(), EngineError>; // flush + close libsql cleanly (FR-17). D38: MUST be reached on BOTH cooperative-shutdown returns of run_mcp_server (Ok AND a post-cancel Err(Transport{Cancelled})) — an Err(Cancelled) never skips the clean libsql close (§0.1/§5b).
 }

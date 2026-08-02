@@ -6,7 +6,7 @@ use std::io::Write;
 use std::path::Path;
 
 use chrono::{TimeZone, Utc};
-use unblock_model::{Comment, Issue, ListFilters, Status};
+use unblock_model::{Comment, GraphEdge, Issue, ListFilters, Status};
 use unblock_sync::{
     CollisionPolicy, ExportOptions, ImportOptions, export_jsonl, import_jsonl, serialize_issue_line,
 };
@@ -590,6 +590,11 @@ impl Storage for StorageInjector {
     }
     async fn orphan_candidates(&self) -> Result<Vec<Issue>, unblock_storage::StorageError> {
         self.inner.orphan_candidates().await
+    }
+
+    // D45 (amended 2026-08-02): a non-gated read — delegate, like every other one.
+    async fn dangling_dependencies(&self) -> Result<Vec<GraphEdge>, unblock_storage::StorageError> {
+        self.inner.dangling_dependencies().await
     }
 }
 

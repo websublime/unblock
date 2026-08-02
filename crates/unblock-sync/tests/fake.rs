@@ -14,8 +14,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
 use unblock_model::{
-    Comment, CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue,
-    ListFilters, Status,
+    Comment, CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, GraphEdge,
+    Issue, ListFilters, Status,
 };
 use unblock_storage::{DeletePlan, IssuePatch, Storage, StorageError};
 
@@ -267,5 +267,37 @@ impl Storage for FakeStorage {
     }
     async fn orphan_candidates(&self) -> Result<Vec<Issue>, StorageError> {
         unimplemented!("FakeStorage::orphan_candidates")
+    }
+
+    /// D45 (amended 2026-08-02) — answered HONESTLY over the rows this double already holds, NOT
+    /// stubbed. `unimplemented!()` is this file's idiom for a method sync never drives, and
+    /// `Ok(Vec::new())` would be worse: a double that always answers "this workspace is clean" makes
+    /// every dangling assertion in the crate vacuously green. The edge set is each row's own
+    /// `dependencies`; an edge is dangling iff no row carries its target — EXISTENCE alone, never
+    /// status, so a closed or tombstoned target counts as existing — with `external:` targets excluded
+    /// through the ONE shared L0 predicate. Ordered `(issue_id, dep_type, depends_on_id)`, like the
+    /// real read's SQL.
+    async fn dangling_dependencies(&self) -> Result<Vec<GraphEdge>, StorageError> {
+        let rows = self.rows.lock().expect("rows lock");
+        let mut out: Vec<GraphEdge> = rows
+            .iter()
+            .flat_map(|(id, issue)| {
+                issue.dependencies.iter().map(move |dep| GraphEdge {
+                    // The row is the edge's anchored source (the real backend re-anchors a declared
+                    // edge onto the row it inserts).
+                    from: id.clone(),
+                    to: dep.depends_on_id.clone(),
+                    dep_type: dep.dep_type.clone(),
+                })
+            })
+            .filter(|e| !rows.contains_key(&e.to) && !unblock_model::is_external_target(&e.to))
+            .collect();
+        out.sort_by(|a, b| {
+            a.from
+                .cmp(&b.from)
+                .then_with(|| a.dep_type.as_str().cmp(b.dep_type.as_str()))
+                .then_with(|| a.to.cmp(&b.to))
+        });
+        Ok(out)
     }
 }

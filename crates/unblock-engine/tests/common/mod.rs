@@ -217,7 +217,8 @@ pub mod parked {
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::sync::Notify;
     use unblock_model::{
-        Comment, CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue,
+        Comment, CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, GraphEdge,
+        Issue,
     };
     use unblock_storage::{DeletePlan, IssuePatch, ListFilters, StorageError};
 
@@ -462,6 +463,11 @@ pub mod parked {
         async fn orphan_candidates(&self) -> Result<Vec<Issue>, StorageError> {
             self.inner.orphan_candidates().await
         }
+
+        // D45 (amended 2026-08-02): a non-gated read — delegate, like every other one.
+        async fn dangling_dependencies(&self) -> Result<Vec<GraphEdge>, StorageError> {
+            self.inner.dangling_dependencies().await
+        }
     }
 }
 
@@ -483,8 +489,8 @@ pub mod collide {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use unblock_model::{
-        Comment, CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue,
-        parse_id,
+        Comment, CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, GraphEdge,
+        Issue, parse_id,
     };
     use unblock_storage::{DeletePlan, IssuePatch, ListFilters, StorageError};
 
@@ -733,6 +739,11 @@ pub mod collide {
         async fn orphan_candidates(&self) -> Result<Vec<Issue>, StorageError> {
             self.inner.orphan_candidates().await
         }
+
+        // D45 (amended 2026-08-02): a non-gated read — delegate, like every other one.
+        async fn dangling_dependencies(&self) -> Result<Vec<GraphEdge>, StorageError> {
+            self.inner.dangling_dependencies().await
+        }
     }
 }
 
@@ -756,7 +767,8 @@ pub mod race {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use unblock_model::{
-        Comment, CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue,
+        Comment, CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, GraphEdge,
+        Issue,
     };
     use unblock_storage::{DeletePlan, IssuePatch, ListFilters, StorageError};
 
@@ -1045,6 +1057,11 @@ pub mod race {
         }
         async fn orphan_candidates(&self) -> Result<Vec<Issue>, StorageError> {
             self.inner.orphan_candidates().await
+        }
+
+        // D45 (amended 2026-08-02): a non-gated read — delegate, like every other one.
+        async fn dangling_dependencies(&self) -> Result<Vec<GraphEdge>, StorageError> {
+            self.inner.dangling_dependencies().await
         }
     }
 }
