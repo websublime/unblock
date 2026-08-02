@@ -251,28 +251,37 @@ fn a_create_whose_declared_edges_are_refused_leaves_the_store_untouched() {
     assert_eq!(status.code(), Some(0), "clean EOF exit 0");
 }
 
-/// THE ACCEPTANCE-CRITERION CELL: a create whose `deps` reference a NON-EXISTENT blocker, driven at
-/// the wire, pinning exactly what D44 guarantees for that input and nothing more.
+/// THE ACCEPTANCE-CRITERION CELL, REWRITTEN AT D45: a create whose `deps` reference a NON-EXISTENT
+/// blocker is REFUSED at the wire, with `ISSUE_NOT_FOUND` and zero writes.
 ///
-/// What D44 guarantees, and what is asserted: the create is ONE act - either the issue and its edge
-/// are both there or neither is - and the edge is anchored on the id the server minted, never on
-/// anything the caller chose. At GA this same payload was the loud outcome (1): a foreign-key failure
-/// on the SOURCE column, raised after the issue row had already committed, edgeless and already in
-/// the ready set. That is what these assertions refuse.
+/// # Why this cell was rewritten rather than re-balanced (D45, tracker `ub-lp9.25`)
 ///
-/// What is deliberately NOT asserted, so this cell cannot be misread as a claim: whether a
-/// `depends_on_id` naming an issue that does not exist should be REFUSED. It is not refused today,
-/// and D44 explicitly scopes that class out - it is a different defect with a different shape (the
-/// blocker column carries no foreign key BY DESIGN, because `external:` targets are legitimate) and
-/// it is tracked as `ub-lp9.25`, ruled to ship in the same 1.0.1 cut. When `ub-lp9.25` lands, the
-/// call below starts failing and this cell is REWRITTEN to assert the refusal plus zero writes - its
-/// failure at that point is the signal, not a regression.
+/// It shipped at D44 written to ANTICIPATE this change, branching on `is_error`: one branch for the
+/// then-current acceptance, one for the refusal to come. That shape is exactly the defect this
+/// repository has shipped before - a cell that passes in BOTH worlds. Once the refusal landed, the
+/// error branch asserted only that the issue count had not moved, which D45's whole-transaction
+/// rollback satisfies trivially, the D44 anchoring assertions in the other branch became dead code,
+/// and the docstring ("it is not refused today ... when `ub-lp9.25` lands, this cell is REWRITTEN")
+/// became false prose in a green suite. So the branch is DELETED, not re-balanced: the refusal is
+/// asserted UNCONDITIONALLY.
 ///
-/// MUTANT KILLED: the GA shape on this exact payload - a follow-up edge pass anchored on a
-/// client-supplied source. It produced an error frame plus a committed, edgeless, ready orphan; here
-/// the call succeeds, the edge is present, and it is anchored on the minted id.
+/// What D45 guarantees here, and what is asserted: a `depends_on_id` that names no issue row and is
+/// not an `external:` target is rejected INSIDE the create transaction (`insert_issue_in_tx`, the
+/// shared per-record insert body), so nothing at all is persisted - no issue, no edge - and the
+/// error names BOTH ids, the dependent and the missing target, because on a batch path the target
+/// alone does not say which record declared it. D44's own guarantee is preserved by construction and
+/// is still pinned by the three sibling cells above: the create is ONE act, and a declared edge is
+/// anchored on the minted id.
+///
+/// MUTANT KILLED: deleting the target-existence guard from the shared per-record insert body
+/// (`crates/unblock-storage/src/libsql/crud.rs`). The call then succeeds, `is_error` goes red, and
+/// the mint count goes red with it.
+///
+/// MUTANT KILLED (the weaker variant this rewrite exists to forbid): re-introducing the `is_error`
+/// branch. Any build that ACCEPTS this payload now fails on the first assertion instead of silently
+/// taking the other arm.
 #[test]
-fn a_create_whose_blocker_does_not_exist_is_still_one_act_anchored_on_the_minted_id() {
+fn a_create_whose_blocker_does_not_exist_is_refused_and_persists_nothing() {
     let ws = Workspace::init();
     let mut client = McpClient::spawn(ws.root());
     client.initialize();
@@ -288,33 +297,38 @@ fn a_create_whose_blocker_does_not_exist_is_still_one_act_anchored_on_the_minted
         }),
     );
 
-    // ONE act: the outcome is all-or-nothing, never a row without its edge.
-    if is_error {
-        assert_eq!(
-            count(&mut client),
-            count_before,
-            "if the create fails it must persist NOTHING: {payload}"
-        );
-    } else {
-        let id = issue_id(&payload);
-        assert_eq!(
-            count(&mut client),
-            count_before + 1,
-            "exactly one issue was created: {payload}"
-        );
-        let (_, edges) = client.call_tool("dep", &json!({"action": "list", "id": id}));
-        let listed = edges["deps"].as_array().expect("deps");
-        assert_eq!(
-            listed.len(),
-            1,
-            "the issue and its declared edge landed together - never the row alone: {edges}"
-        );
-        assert_eq!(
-            listed[0]["issue_id"], id,
-            "and the edge is anchored on the MINTED id, not on any caller-chosen source: {edges}"
-        );
-        assert_eq!(listed[0]["depends_on_id"], "ub-no-such-issue", "{edges}");
-    }
+    assert!(
+        is_error,
+        "a declared blocker that names no row and is not an `external:` target must be REFUSED \
+         (D45): {payload}"
+    );
+    assert_eq!(payload["code"], "ISSUE_NOT_FOUND", "{payload}");
+    assert_eq!(
+        payload["context"]["blocker_id"], "ub-no-such-issue",
+        "the refusal names the MISSING TARGET so the caller can fix the input from the message \
+         alone: {payload}"
+    );
+    assert!(
+        payload["context"]["issue_id"].is_string(),
+        "and it names the DEPENDENT that declared the edge - on a batch path the target alone does \
+         not say which record carried it: {payload}"
+    );
+
+    // ZERO writes: no issue...
+    assert_eq!(
+        count(&mut client),
+        count_before,
+        "a refused create persists NOTHING - the guard runs INSIDE the create transaction: {payload}"
+    );
+    // ...and no edge anywhere, which `dep {action:"cycles"}` would surface as a graph the store
+    // still carries. The whole-graph read is the only client-visible way to ask "is there an edge I
+    // cannot see from any issue", since the refused issue has no id to list edges for.
+    let (_, graph) = client.call_tool("dep", &json!({"action": "graph"}));
+    assert_eq!(
+        graph["edges"].as_array().map(Vec::len),
+        Some(0),
+        "and no edge survived the rollback: {graph}"
+    );
 
     client.close_stdin();
     let status = common::wait_for(&mut client.child, std::time::Duration::from_secs(20));

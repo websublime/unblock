@@ -44,6 +44,35 @@ const PARENT_CHILD: &str = "parent-child";
 /// Rejects [`StorageError::SelfDependency`] and [`StorageError::DuplicateDependency`]. If the edge is
 /// gating (`affects_ready_work`) and would close a cycle over the gating set, rejects
 /// [`StorageError::CycleDetected`] with the concrete path.
+///
+/// # D45 (v1.0.1) — both ENDPOINTS are guarded in-transaction, and the ORDER is published
+///
+/// The full sequence on this path is
+/// `SelfDependency` → SOURCE existence → `BlockerNotFound` → `DuplicateDependency` →
+/// `CycleDetected`, and it is the sequence the code below executes.
+///
+/// - **`SelfDependency` is UNMOVED.** It answers without a transaction and returns BEFORE
+///   `with_immediate_tx` opens, so an in-transaction probe cannot precede it. Publishing
+///   "source first" would publish an order no implementation can produce, and a `dep add` naming the
+///   SAME non-existent id in both fields would return `SELF_DEPENDENCY` where the text promised
+///   `ISSUE_NOT_FOUND`. Relocating it into the transaction is the wrong fix: it needs none, and it
+///   would invert a pair D44 already published.
+/// - **The SOURCE is guarded too, and with the EXISTING [`StorageError::IssueNotFound`]** — no
+///   variant is minted, because the missing thing genuinely IS the addressed issue, so that
+///   variant's `Display` and its `context["id"]` are already honest. As shipped, the schema's
+///   `FOREIGN KEY (issue_id)` refused a non-existent source as an opaque backend error
+///   (`DatabaseError`, exit 2), so ONE call with ONE typo returned two different codes and two exit
+///   codes depending on which FIELD carried it.
+/// - **The TARGET check is MOVED to sit AFTER the self/source checks and BEFORE the duplicate
+///   query** — two queries deliberately swapped inside one transaction so that ONE published
+///   precedence chain describes every path (the create path cannot produce the other order: its
+///   duplicate guard lives in the `create_issue` wrapper AROUND the shared body that carries this
+///   rule). Its "batch" is the single prospective edge; the `is_external_target` carve-out and the
+///   status-agnostic query are the same ones the shared insert body uses.
+/// - **ONE SHIPPED REJECTION CHANGES, named rather than discovered later:** re-adding an edge that
+///   ALREADY exists and whose target is dangling now returns `IssueNotFound` where GA returned
+///   `DuplicateDependency`. It is reachable only on already-corrupt data — the very population D45
+///   exists to surface — and it is listed in the spine §5.4 behavioural-change ledger.
 pub(super) async fn add_dependency(
     conn: &Connection,
     hook: WriteHook<'_>,
@@ -57,6 +86,38 @@ pub(super) async fn add_dependency(
     let actor = actor.to_string();
 
     with_immediate_tx(conn, hook, |tx| async move {
+        // D45: the edge SOURCE must exist. In-transaction (never a pre-tx probe — racy against a
+        // concurrent delete under the child-per-client topology), and it precedes every RELATIONAL
+        // question about the edge set, because a row must exist before its edges mean anything.
+        if !super::crud::row_exists(
+            &tx,
+            "SELECT 1 FROM issues WHERE id = ?1 LIMIT 1",
+            &dep.issue_id,
+        )
+        .await?
+        {
+            return Err(StorageError::IssueNotFound {
+                id: dep.issue_id.clone(),
+            });
+        }
+
+        // D45: the edge TARGET must exist, unless it is an external blocker (spine §1.9 — the ONE
+        // shared ASCII-case-insensitive predicate, applied per-TARGET, never per-edge-type). The
+        // query is STATUS-AGNOSTIC, so a tombstoned target counts as existing.
+        if !unblock_model::is_external_target(&dep.depends_on_id)
+            && !super::crud::row_exists(
+                &tx,
+                "SELECT 1 FROM issues WHERE id = ?1 LIMIT 1",
+                &dep.depends_on_id,
+            )
+            .await?
+        {
+            return Err(StorageError::BlockerNotFound {
+                issue_id: dep.issue_id.clone(),
+                depends_on_id: dep.depends_on_id.clone(),
+            });
+        }
+
         // Duplicate edge?
         let mut rows = tx
             .query(

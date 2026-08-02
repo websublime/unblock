@@ -473,6 +473,13 @@ async fn g3_every_published_union_arm_is_covered_or_explicitly_exempt() {
         "diagnostics:version",
         "diagnostics:lint",
         "diagnostics:changelog",
+        // D45 (v1.0.1) — the 8th `diagnostics` kind. Exempt on the SAME ground as its five
+        // siblings above and no new one: a duplicate-key flip is a property of the FRAME, and this
+        // arm is parameterless, so it carries strictly less argument surface than the two
+        // `diagnostics` arms the corpus already exercises. This entry is a CONSCIOUS exemption, not
+        // a silent one — G3 derives the uncovered set from the live schema, so the arm appeared
+        // here by itself the moment it was published.
+        "diagnostics:dangling",
         "issue:create_bulk",
         "issue:reopen",
         "issue:restore",

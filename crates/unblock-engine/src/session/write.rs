@@ -494,6 +494,14 @@ impl Session {
     /// Probe committed storage once per distinct non-intra-batch dependency reference, returning a
     /// `ref → Option<resolved_id>` map [`create_bulk`](Session::create_bulk) step 4 consults. A
     /// reference matching a batch record is excluded (it resolves intra-batch, not via storage).
+    ///
+    /// **D45 — an EXTERNAL target is SKIPPED here, and this skip is half of the relaxation** (spine
+    /// §1.9 invariant 5 / §5.2 item (b)): `external:jira-1` names a ticket in ANOTHER system, so
+    /// probing it as an issue id can only ever miss, and the miss is what made `create_bulk` reject
+    /// the whole batch. The resolver carries such a ref verbatim, so the probe must not manufacture a
+    /// `None` for it. This is ALSO the pre-transaction probe the D45 guard's in-transaction placement
+    /// exists to backstop: this probe is racy against a concurrent delete, and the L2 guard is what
+    /// actually closes that window.
     async fn probe_storage_dep_refs(
         &self,
         records: &[NewIssue],
@@ -503,10 +511,16 @@ impl Session {
         let mut candidates: std::collections::HashSet<String> = std::collections::HashSet::new();
         for record in records {
             for dep_str in &record.dep_refs {
+                if unblock_model::is_external_target(dep_str) {
+                    continue; // D45: never resolved against anything.
+                }
                 if maps.lookup(dep_str).is_some() {
                     continue; // resolves intra-batch (incl. titles with colons) — not a storage probe.
                 }
                 let dep_id = crate::session::bulk::dep_ref_id(dep_str);
+                if unblock_model::is_external_target(&dep_id) {
+                    continue; // D45: the id-half of an explicitly typed external ref.
+                }
                 if maps.lookup(&dep_id).is_none() {
                     candidates.insert(dep_id);
                 }

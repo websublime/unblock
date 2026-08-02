@@ -100,6 +100,19 @@ pub enum DiagnosticKind {
     Changelog,
     /// Orphan candidates (FR-15).
     Orphans,
+    /// The dependency edges whose target denotes nothing (D45).
+    //
+    // D45 — the `///` doc comment ABOVE is CONTRACT BYTES (spine §1.10): schemars lifts it into the
+    // variant `description` that rides `schema_bundle()`, which `CONTRACT_HASH` digests. Re-wording
+    // it, even harmlessly, RE-CUTS the hash and is a contract change, never a comment tidy-up.
+    //
+    // D45 — `Dangling` is APPENDED, never inserted mid-list: schemars emits the variants in
+    // DECLARATION order and `CONTRACT_HASH` digests those bytes, so a mid-list insertion would move
+    // the digest for a reason unrelated to the new kind. §5.2's `DiagnosticsInput` gains its arm LAST
+    // for the same reason, keeping the two mirrored. The variant is MINTED rather than reusing
+    // `Lint`: both options bump the contract anyway, and reusing `Lint` would make
+    // `DiagnosticReport.kind` DECLARE a kind the report is not — a lie on a published field.
+    Dangling,
 }
 
 /// A diagnostic report — a kind plus a list of findings (CF-B).
@@ -193,6 +206,67 @@ mod tests {
         let k = DiagnosticKind::Stats;
         let copy = k; // `Copy`, so `k` is still usable below.
         assert_eq!(k, copy);
+    }
+
+    /// D45 — the `DiagnosticKind` taxonomy is EIGHT kinds, `Dangling` is LAST, and its `description`
+    /// carries the exact contract bytes.
+    ///
+    /// Asserted over the GENERATED SCHEMA, not over a hand-written list: schemars emits the variants
+    /// in DECLARATION order into the `oneOf` array, and that array is what `CONTRACT_HASH` digests
+    /// downstream. A name-SET assertion (or a re-blessed snapshot) would not catch a mid-list
+    /// insertion; reading the generated order does.
+    ///
+    /// MUTANTS KILLED: (a) declaring `Dangling` anywhere but last (e.g. beside `Lint`) — the
+    /// position assertion goes red while every name-set check stays green; (b) re-wording the
+    /// variant's `///` doc comment, which is contract bytes lifted into `description`; (c) changing
+    /// the wire spelling away from the plain noun `dangling`.
+    #[test]
+    fn diagnostic_kind_taxonomy_is_eight_with_dangling_last() {
+        let schema = serde_json::to_value(schemars::schema_for!(DiagnosticKind)).unwrap();
+        let variants = schema["oneOf"]
+            .as_array()
+            .expect("a unit-only enum schema is a `oneOf` array");
+        assert_eq!(
+            variants.len(),
+            8,
+            "the spine §5.2 taxonomy is EIGHT kinds since D45"
+        );
+
+        let spellings: Vec<&str> = variants
+            .iter()
+            .map(|v| v["const"].as_str().expect("each arm has a const spelling"))
+            .collect();
+        assert_eq!(
+            spellings,
+            [
+                "stats",
+                "info",
+                "where",
+                "version",
+                "lint",
+                "changelog",
+                "orphans",
+                "dangling",
+            ],
+            "declaration order is hash-visible: `dangling` is APPENDED last, never inserted"
+        );
+
+        let last = variants.last().expect("eight arms");
+        assert_eq!(
+            last["description"].as_str(),
+            Some("The dependency edges whose target denotes nothing (D45)."),
+            "the `Dangling` doc comment is CONTRACT BYTES — re-wording it re-cuts CONTRACT_HASH"
+        );
+
+        // The Rust value and the wire spelling agree in both directions.
+        assert_eq!(
+            serde_json::to_string(&DiagnosticKind::Dangling).unwrap(),
+            "\"dangling\""
+        );
+        assert_eq!(
+            serde_json::from_str::<DiagnosticKind>("\"dangling\"").unwrap(),
+            DiagnosticKind::Dangling
+        );
     }
 
     #[test]

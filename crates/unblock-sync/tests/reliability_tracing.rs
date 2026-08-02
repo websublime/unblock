@@ -4,7 +4,12 @@
 //!   INFO) emits EXACTLY ONE event carrying all four field VALUES;
 //! - `tracing_capture_reliability_detail_debug`: the REACHABLE per-skip import detail
 //!   (`reliability_detail!` DEBUG) emits EXACTLY ONE event carrying all four field VALUES — the DEBUG
-//!   arm that only the INFO arm previously had a capturing test for.
+//!   arm that only the INFO arm previously had a capturing test for;
+//! - `export_blocker_closure_widening_emits_one_info` / `..._is_silent_when_the_closure_added_nothing`
+//!   (D45): the export blocker-closure widening emits ONE INFO with all four field VALUES **and only
+//!   when it actually added a row** — the fire condition is `n > 0`, pinned because an unconditional
+//!   emitter would write a `0 row(s)` INFO on every export and this repository re-exports
+//!   `.unblock/issues.jsonl` on every commit.
 //!
 //! Capture is the D30 dep-free FALLBACK (not `tracing-capture`, not `tracing-test`): a hand-rolled
 //! `tracing_subscriber::Layer` + `field::Visit` records the four structured field VALUES into a map
@@ -28,7 +33,10 @@ use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::LookupSpan;
 
-use unblock_sync::{ImportOptions, SyncError, import_jsonl, serialize_issue_line};
+use unblock_model::{Dependency, DependencyType, Issue};
+use unblock_sync::{
+    ExportOptions, ImportOptions, SyncError, export_jsonl, import_jsonl, serialize_issue_line,
+};
 
 mod fake;
 use fake::{FakeStorage, sample_issue, tombstone_of};
@@ -224,5 +232,118 @@ async fn tracing_capture_reliability_detail_debug() {
         ev.fields.get("reason").map(String::as_str),
         Some("tombstone protection"),
         "reason VALUE carries the skip cause"
+    );
+}
+
+// ---- D45: the export blocker-closure widening emission ------------------------------------------
+
+/// Capture every `unblock.reliability` event raised while exporting `issues`.
+async fn capture_export_reliability(issues: Vec<Issue>) -> Vec<Captured> {
+    let captured: Arc<Mutex<Vec<Captured>>> = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::registry().with(CaptureLayer(captured.clone()));
+    let guard = tracing::subscriber::set_default(subscriber);
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let unblock = dir.path().join(".unblock");
+    std::fs::create_dir_all(&unblock).expect("create .unblock");
+    let path = unblock.join("issues.jsonl");
+
+    let storage = FakeStorage::with_issues(issues);
+    export_jsonl(&storage, &path, &unblock, &ExportOptions::default())
+        .await
+        .expect("export");
+
+    drop(guard);
+    let events = captured.lock().expect("capture lock");
+    events
+        .iter()
+        .filter(|c| c.target == unblock_error::RELIABILITY_TARGET)
+        .cloned()
+        .collect()
+}
+
+/// An `ub-1 --blocks--> ub-eph` corpus where `ub-eph` is ephemeral (so the D23 retain drops it and
+/// the D45 closure pulls it back).
+fn kept_issue_blocked_by_an_ephemeral_row() -> Vec<Issue> {
+    let ts = chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 1, 1, 0, 0, 0).unwrap();
+    let edge = Dependency {
+        issue_id: "ub-1".to_string(),
+        depends_on_id: "ub-eph".to_string(),
+        dep_type: DependencyType::Blocks,
+        created_at: ts,
+        created_by: Some("t".to_string()),
+        metadata: None,
+        thread_id: None,
+    };
+    vec![
+        Issue {
+            dependencies: vec![edge],
+            ..sample_issue("ub-1")
+        },
+        Issue {
+            ephemeral: true,
+            ..sample_issue("ub-eph")
+        },
+    ]
+}
+
+/// The widening emits EXACTLY ONE INFO on `unblock.reliability` carrying all FOUR field VALUES
+/// (`operation`/`path`/`result`/`reason`), with the row COUNT in `reason` (spine §1.10).
+///
+/// MUTANT KILLED: deleting the emission, or dropping any of the four fields from its body.
+#[tokio::test]
+async fn export_blocker_closure_widening_emits_one_info() {
+    let reliability = capture_export_reliability(kept_issue_blocked_by_an_ephemeral_row()).await;
+
+    assert_eq!(
+        reliability.len(),
+        1,
+        "exactly one reliability event expected, got {reliability:?}"
+    );
+    let ev = &reliability[0];
+    assert_eq!(ev.level, Level::INFO, "a guard activation is INFO");
+    assert_eq!(
+        ev.fields.get("operation").map(String::as_str),
+        Some("export"),
+        "operation VALUE"
+    );
+    assert_eq!(
+        ev.fields.get("result").map(String::as_str),
+        Some("blocker-closure-widened"),
+        "result VALUE"
+    );
+    assert!(
+        ev.fields
+            .get("path")
+            .is_some_and(|p| p.ends_with("issues.jsonl")),
+        "path VALUE names the export file, got {:?}",
+        ev.fields.get("path")
+    );
+    assert_eq!(
+        ev.fields.get("reason").map(String::as_str),
+        Some("1 row(s) outside the corpus filter retained as dependency targets"),
+        "reason VALUE carries the widening COUNT"
+    );
+}
+
+/// **The FIRE CONDITION, pinned by ABSENCE.** An export whose closure added NOTHING emits NO
+/// reliability event at all.
+///
+/// MUTANT KILLED: an unconditional emitter (drop the `if widened > 0` guard in `export.rs`), which
+/// would write a `0 row(s)` INFO on every single export — including the `.unblock/issues.jsonl`
+/// re-export this repository performs on every commit.
+#[tokio::test]
+async fn export_blocker_closure_is_silent_when_the_closure_added_nothing() {
+    let reliability = capture_export_reliability(vec![
+        sample_issue("ub-1"),
+        Issue {
+            ephemeral: true,
+            ..sample_issue("ub-eph")
+        },
+    ])
+    .await;
+    assert!(
+        reliability.is_empty(),
+        "a closure-free export must emit NOTHING, got {reliability:?}"
     );
 }

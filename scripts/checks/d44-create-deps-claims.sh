@@ -44,9 +44,21 @@ cd "$(git rev-parse --show-toplevel)" || { say "cannot cd to the repo root"; exi
 
 SELF='scripts/checks/d44-create-deps-claims.sh'
 
-# The ONE knob in this file: the contract version D44 ships. Change it here and nowhere else if the
-# Decide phase settles on a different `.M`.
-CONTRACT_RE='unblock\.mcp\.v1\.7'
+# The ONE knob in this file: the LIVE contract version. Change it here and nowhere else.
+#
+# WHY IT MOVES WHEN A LATER DECISION BUMPS THE CONTRACT, even though this is the D44 gate. The four
+# `REQUIRE_CONTRACT` rows below assert that the four PUBLISHING sites (the code constant, its
+# independent test pin, README.md and the owning crate plan's declaring row) all name the SAME id —
+# and two of them are EXCLUSIVE/ROW-ANCHORED, i.e. they fail on a STALE literal, not merely a missing
+# one. So the moment any decision bumps the contract, those sites move and THIS required job goes red
+# for a reason having nothing to do with D44 unless this one line moves in the SAME commit. It is
+# therefore pinned to the LIVE id, never to a frozen historical one — the same discipline `RANGE_RE`
+# below already uses. D45 (v1.0.1, the dangling dependency-TARGET guard) bumped it
+# `unblock.mcp.v1.7` -> `unblock.mcp.v1.8`, and this edit rode the D45 IMPLEMENTATION commit, which is
+# where the code constant and the re-blessed goldens move (`RANGE_RE` differs: it guards prose, so it
+# rides the SPEC commit that mints the id). Both couplings are enumerated in
+# `docs/plans/ci-cd-and-distribution.md` §2.1 so neither is rediscovered as a mystery failure.
+CONTRACT_RE='unblock\.mcp\.v1\.8'
 
 # The LIVE D-id range, pinned at its 3 bump sites (R16/R18 file-level, RW1 ROW-ANCHORED). It tracks the
 # CURRENT range and never a frozen historical one, so minting a new D-id moves THIS ONE LINE instead of

@@ -80,6 +80,11 @@ expression: json
           "description": "Orphan candidates (FR-15).",
           "type": "string",
           "const": "orphans"
+        },
+        {
+          "description": "The dependency edges whose target denotes nothing (D45).",
+          "type": "string",
+          "const": "dangling"
         }
       ]
     }

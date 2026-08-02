@@ -769,6 +769,7 @@ pub mod race {
         create_issue_calls: AtomicUsize,
         add_dependency_calls: AtomicUsize,
         captured_creates: Mutex<Vec<Issue>>,
+        probed_ids: Mutex<Vec<String>>,
     }
 
     impl RaceInjector {
@@ -783,7 +784,21 @@ pub mod race {
                 create_issue_calls: AtomicUsize::new(0),
                 add_dependency_calls: AtomicUsize::new(0),
                 captured_creates: Mutex::new(Vec::new()),
+                probed_ids: Mutex::new(Vec::new()),
             })
+        }
+
+        /// Every id handed to `Storage::get_issue`, in call order (D45).
+        ///
+        /// This exists to prove a NEGATIVE that is invisible from the RESULT: that
+        /// `create_bulk`'s pre-transaction `probe_storage_dep_refs` SKIPS an `external:` dependency
+        /// reference instead of probing it as an issue id. With the resolver carve-out in place, a
+        /// probe of `external:jira-1` would simply miss and be ignored, so the created batch looks
+        /// identical either way — and the pre-D45 whole-batch refusal grew out of exactly that
+        /// unobservable miss. Recording the probed ids is the only vantage point that sees it.
+        #[must_use]
+        pub fn probed_ids(&self) -> Vec<String> {
+            self.probed_ids.lock().expect("probed_ids mutex").clone()
         }
 
         /// How many `create_issues` (bulk) calls were made.
@@ -873,6 +888,11 @@ pub mod race {
             self.inner.acquire_write_lock().await
         }
         async fn get_issue(&self, id: &str) -> Result<Option<Issue>, StorageError> {
+            // D45: record every probed id so a test can prove an `external:` ref was NEVER probed.
+            self.probed_ids
+                .lock()
+                .expect("probed_ids mutex")
+                .push(id.to_string());
             self.inner.get_issue(id).await
         }
         async fn get_issues(&self, ids: &[String]) -> Result<Vec<Issue>, StorageError> {

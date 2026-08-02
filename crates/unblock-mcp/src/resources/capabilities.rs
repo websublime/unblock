@@ -103,9 +103,13 @@ fn tool_descriptors() -> Vec<ToolDescriptor> {
             "sync",
             "Export/import the issue store as JSONL, or one-shot import a bd export.",
         ),
+        // D45 REWROTE these bytes to name the new `dangling` kind, which is one of the two axes
+        // that force the `unblock.mcp.v1.8` bump. Sourced from the shared constant — these bytes
+        // are contract and ship here AND in the `#[tool(description)]` attribute (the pair-compare
+        // in `contract_suite` keeps them equal).
         (
             "diagnostics",
-            "Diagnostics: stats, info, where, version, lint, changelog, or orphans.",
+            crate::tools::diagnostics::DIAGNOSTICS_TOOL_DESCRIPTION,
         ),
         // The 8th tool (FR-6/D37) — LAST, matching the §5.1 tool order. The description is the
         // shared constant: these bytes are contract, and they ship here AND in the

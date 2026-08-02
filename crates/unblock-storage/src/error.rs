@@ -115,6 +115,33 @@ pub enum StorageError {
     #[snafu(display("dependency target not found"))]
     DependencyNotFound,
 
+    /// A declared dependency TARGET names no issue and is not an `external:` target (D45).
+    ///
+    /// The SECOND StorageError-level variant that maps ONTO the EXISTING
+    /// [`ErrorCode::IssueNotFound`], for the same reason [`StorageError::CommentNotFound`] does
+    /// (spine §3.1): FORK-E1 constrains the `ErrorCode` taxonomy (it stays at 36 — no exit-code-table
+    /// re-bless, no error-golden churn), not the internal enum. `DependencyNotFound` is deliberately
+    /// NOT reused: its published meaning is already "the EDGE does not exist" (from
+    /// `remove_dependency`), and one code meaning both would leave an agent no way to tell them
+    /// apart. `ValidationFailed` is not reused either — it is published as RETRYABLE, which would be
+    /// a lie here (retrying the identical call cannot succeed).
+    ///
+    /// BOTH ids are carried because both are load-bearing on a batch path: on an import of 500
+    /// records, `depends_on_id` alone would name the phantom without naming which record declared it.
+    /// The `Display` text is deliberately NEUTRAL about the edge KIND — the guard runs over the
+    /// distinct target set of EVERY declared dependency type and over the reparent path, whose target
+    /// is a PARENT, so rendering "blocker" there would be misleading in exactly the way the
+    /// `CommentNotFound` rationale rejects.
+    #[snafu(display(
+        "issue {issue_id} declares a dependency target that does not exist: {depends_on_id}"
+    ))]
+    BlockerNotFound {
+        /// The issue that declared the edge (the dependent).
+        issue_id: String,
+        /// The dependency target that matched no row.
+        depends_on_id: String,
+    },
+
     /// The issue cannot be removed/modified because other issues depend on it.
     #[snafu(display("issue {id} has dependents"))]
     HasDependents {
@@ -163,8 +190,12 @@ impl CodedError for StorageError {
     fn code(&self) -> ErrorCode {
         match self {
             // D37/FORK-E1: `CommentNotFound` REUSES the issue-not-found code — the taxonomy does
-            // not grow; only the StorageError level names the missing entity honestly.
-            Self::IssueNotFound { .. } | Self::CommentNotFound { .. } => ErrorCode::IssueNotFound,
+            // not grow; only the StorageError level names the missing entity honestly. D45 adds
+            // `BlockerNotFound` as the SECOND variant of that shape, for the same reason: no
+            // `ErrorCode` is minted, so the 36-code map and the 0–8 exit table are byte-unchanged.
+            Self::IssueNotFound { .. }
+            | Self::CommentNotFound { .. }
+            | Self::BlockerNotFound { .. } => ErrorCode::IssueNotFound,
             Self::AmbiguousId { .. } => ErrorCode::AmbiguousId,
             Self::IdCollision { .. } => ErrorCode::IdCollision,
             Self::InvalidId { .. } => ErrorCode::InvalidId,
@@ -206,6 +237,21 @@ impl CodedError for StorageError {
                 // The code() is IssueNotFound, but the context key stays honest about WHICH
                 // entity was missing (spine §3.1).
                 map.insert("comment_id".to_string(), Value::from(*id));
+            }
+            Self::BlockerNotFound {
+                issue_id,
+                depends_on_id,
+            } => {
+                // D45 — the same discipline `CommentNotFound` uses: code() is IssueNotFound, but the
+                // keys stay honest about WHICH entity was missing. The key is `blocker_id`, NOT
+                // `id`, and `issue_id` names the record that DECLARED the edge (load-bearing on a
+                // batch path). Adding context KEYS moves no schema byte — `context` is a free-form
+                // map (spine §2.4).
+                map.insert("issue_id".to_string(), Value::String(issue_id.clone()));
+                map.insert(
+                    "blocker_id".to_string(),
+                    Value::String(depends_on_id.clone()),
+                );
             }
             Self::CycleDetected { path } => {
                 map.insert("cycle_path".to_string(), Value::String(path.clone()));
@@ -374,6 +420,17 @@ mod tests {
                 ErrorCode::DependencyNotFound,
             ),
             (
+                StorageError::CommentNotFound { id: 42 },
+                ErrorCode::IssueNotFound,
+            ),
+            (
+                StorageError::BlockerNotFound {
+                    issue_id: "ub-1".into(),
+                    depends_on_id: "ub-ghost".into(),
+                },
+                ErrorCode::IssueNotFound,
+            ),
+            (
                 StorageError::HasDependents { id: "ub-1".into() },
                 ErrorCode::HasDependents,
             ),
@@ -438,6 +495,10 @@ mod tests {
             StorageError::HasDependents { id: "ub-1".into() },
             StorageError::SelfDependency,
             StorageError::DuplicateDependency,
+            StorageError::BlockerNotFound {
+                issue_id: "ub-1".into(),
+                depends_on_id: "ub-ghost".into(),
+            },
             StorageError::Backend {
                 source: BackendOpaque::from_message("x"),
             },
@@ -467,6 +528,40 @@ mod tests {
         assert!(structured.retryable);
         assert_eq!(structured.context["holder"], "winner");
         assert_eq!(structured.context["id"], "ub-42");
+    }
+
+    /// D45 — `BlockerNotFound` rides `IssueNotFound` (no `ErrorCode` minted), is NOT retryable, and
+    /// its `context` keys stay honest: `blocker_id` for the phantom target (NEVER `id`) plus
+    /// `issue_id` for the record that declared the edge. The `Display` text is edge-kind-NEUTRAL.
+    ///
+    /// MUTANTS KILLED: mapping the variant onto `DependencyNotFound` (whose published meaning is
+    /// "the EDGE does not exist") or onto the RETRYABLE `ValidationFailed`; surfacing the target
+    /// under the key `id`, which would claim the ADDRESSED issue was the missing one; dropping
+    /// `issue_id`, which on a 500-record import leaves the phantom unattributed; and rendering
+    /// "blocker" in the message, which lies on the reparent path where the target is a PARENT.
+    #[test]
+    fn blocker_not_found_rides_issue_not_found_with_honest_context() {
+        let err = StorageError::BlockerNotFound {
+            issue_id: "ub-dependent".into(),
+            depends_on_id: "ub-ghost".into(),
+        };
+        assert_eq!(err.code(), ErrorCode::IssueNotFound);
+        assert!(!err.retryable(), "nothing here is transient");
+
+        let structured: StructuredError = (&err).into();
+        assert_eq!(structured.code, ErrorCode::IssueNotFound);
+        assert_eq!(structured.context["blocker_id"], "ub-ghost");
+        assert_eq!(structured.context["issue_id"], "ub-dependent");
+        assert!(
+            !structured.context.contains_key("id"),
+            "the key must NOT be `id` — that would name the addressed issue, not the phantom"
+        );
+
+        assert_eq!(
+            err.to_string(),
+            "issue ub-dependent declares a dependency target that does not exist: ub-ghost",
+            "the user-visible string is NEUTRAL about the edge kind (the guard also covers reparent)"
+        );
     }
 
     /// `CycleDetected{path}` surfaces as `context["cycle_path"]`.

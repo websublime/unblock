@@ -250,3 +250,110 @@ fn corrupt_db(db: &std::path::Path) {
     f.write_all(&garbage).expect("corrupt");
     f.flush().expect("flush");
 }
+
+/// **D45 — the `doctor` FOLD, at the CLI boundary.** A workspace carrying a dangling dependency edge
+/// LISTS it in the `doctor` report, with the pinned finding shape, and STILL exits 0.
+///
+/// The shape is a decision, not decoration, because it is what a human reads and what a snapshot
+/// pins: `label` = the DEPENDENT issue id, `detail` = `"<dep_type> -> <missing target id>"`. The
+/// edge TYPE is in there because it is what distinguishes a permanently-stuck issue (a `blocks`
+/// target that will never close) from a merely phantom parent.
+///
+/// The exit stays 0 because the findings are ADVISORY: a dangling edge is a repairable DATA fact,
+/// not database corruption, and flipping the exit would change GA-frozen CLI behaviour in a patch
+/// release. `json_report` asserts exit 0, so a passing call already proves that.
+///
+/// **How the edge is planted, and why not through the product.** Since D45 there is no supported
+/// path that writes one — that is the entire point of the change — so the corrupt state has to be
+/// reached under the guard. This uses the raw-libsql precedent already established in this file by
+/// `stamp_user_version`: the ISSUE is created through the real engine (nothing about the row is
+/// fabricated), and only the EDGE is inserted directly. The engine-side cell for the same
+/// composition lives in `crates/unblock-engine/tests/dangling.rs` behind the `testkit` feature and
+/// runs in the required `storage-testkit` CI job; this one is its CLI-boundary twin, and because it
+/// needs no feature gate it runs in the ordinary workspace test job.
+///
+/// MUTANT KILLED: deleting the dangling fold from `Session::doctor()`
+/// (`crates/unblock-engine/src/session/lifecycle.rs`) — the finding disappears and the label/detail
+/// assertion goes red.
+///
+/// MUTANT KILLED: flipping the fold to a non-advisory exit — `json_report` fails on the exit code.
+#[test]
+fn doctor_lists_a_planted_dangling_edge_yet_exits_0() {
+    let ws = Workspace::init();
+    seed_issue(&ws, "ub-dangler");
+    plant_dangling_edge(&ws, "ub-dangler", "ub-ghost", "blocks");
+
+    let report = json_report(&ws, &["doctor", "--output", "json"]);
+    assert_eq!(
+        report["kind"], "info",
+        "the fold REUSES Info — the `Dangling` KIND exists for the `diagnostics` tool arm, where \
+         the response must declare what it is; report: {report}"
+    );
+    assert_eq!(
+        detail(&report, "ub-dangler"),
+        Some("blocks -> ub-ghost"),
+        "the pinned finding shape: label = the DEPENDENT, detail = `<dep_type> -> <missing \
+         target>`; report: {report}"
+    );
+    assert_eq!(
+        detail(&report, "integrity"),
+        Some("ok"),
+        "a dangling edge is a DATA fact, not corruption — integrity is still clean; report: {report}"
+    );
+}
+
+/// Create one real issue through the engine (the same `Session` the CLI opens), so the only
+/// fabricated thing in the workspace is the edge planted next.
+fn seed_issue(ws: &Workspace, id: &str) {
+    use unblock_config::{CliOverrides, open_with_storage_with_cli};
+    use unblock_engine::{Session, SessionConfig};
+    use unblock_model::{Issue, Status};
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build a current-thread runtime");
+    rt.block_on(async {
+        let overrides = CliOverrides::new().with_dir(ws.unblock_dir());
+        let ctx = open_with_storage_with_cli(&overrides)
+            .await
+            .expect("open the workspace via the config facade");
+        let session = Session::open(ctx, SessionConfig::default())
+            .await
+            .expect("open a session");
+        // `Issue::default()` stamps both timestamps at `Utc::now()`, so this row needs no clock of
+        // its own (the cli crate carries no `chrono` dependency).
+        let issue = Issue {
+            id: id.to_string(),
+            title: format!("issue {id}"),
+            status: Status::Open,
+            ..Issue::default()
+        };
+        session.create(&issue).await.expect("create the issue");
+        drop(session);
+    });
+}
+
+/// Insert a dependency row DIRECTLY, bypassing every guard — the only way to reach the
+/// already-corrupt state the `dangling` view exists to enumerate (see the cell's docstring). The
+/// connection is dropped before the CLI child opens the file, so there is no writer contention.
+fn plant_dangling_edge(ws: &Workspace, source: &str, target: &str, dep_type: &str) {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build a current-thread runtime");
+    rt.block_on(async {
+        let database = libsql::Builder::new_local(ws.db_path())
+            .build()
+            .await
+            .expect("open the workspace db");
+        let conn = database.connect().expect("connect");
+        conn.execute(
+            "INSERT INTO dependencies (issue_id, depends_on_id, type, created_at, created_by) \
+             VALUES (?1, ?2, ?3, '2026-08-01T00:00:00Z', 'planted')",
+            libsql::params![source, target, dep_type],
+        )
+        .await
+        .expect("plant the dangling edge");
+    });
+}

@@ -3,7 +3,7 @@ source: crates/unblock-mcp/tests/contract_suite.rs
 expression: schema_bundle()
 ---
 {
-  "contract_version": "unblock.mcp.v1.7",
+  "contract_version": "unblock.mcp.v1.8",
   "issue": {
     "input": {
       "$defs": {
@@ -4049,6 +4049,20 @@ expression: schema_bundle()
             "kind"
           ],
           "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The dependency edges whose target denotes nothing (D45).",
+          "properties": {
+            "kind": {
+              "const": "dangling",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
         }
       ],
       "title": "DiagnosticsInput",
@@ -4110,6 +4124,11 @@ expression: schema_bundle()
             {
               "const": "orphans",
               "description": "Orphan candidates (FR-15).",
+              "type": "string"
+            },
+            {
+              "const": "dangling",
+              "description": "The dependency edges whose target denotes nothing (D45).",
               "type": "string"
             }
           ]

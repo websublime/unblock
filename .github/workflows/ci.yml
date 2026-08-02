@@ -118,6 +118,13 @@ jobs:
         run: cargo test -p unblock-storage --features testkit --locked --test contract
       - name: NFR-3 contention lab (M0 gate)
         run: cargo test -p unblock-storage --features testkit --locked --test contention_lab
+      # D45 (v1.0.1) — the `dangling` diagnostics kind + the `doctor` fold. The edge is PLANTED via
+      # the storage testkit seam, but the findings are COMPOSED IN THE ENGINE, so neither step above
+      # can reach them and the cell would otherwise be green by NON-EXECUTION. The engine's EXISTING
+      # `testkit` feature already forwards to `unblock-storage/testkit` (no new feature surface).
+      # Specified in ci-cd-and-distribution.md §2.1 (the D45 sub-check), which is normative here.
+      - name: D45 dangling diagnostics + doctor fold (engine testkit)
+        run: cargo test -p unblock-engine --features testkit --locked --test dangling
 
   stress-integrity:
     name: stress-integrity (NFR-5 long-lived/interleaved + NFR-4 fault-injection)
@@ -281,6 +288,14 @@ jobs:
       # deps as a multi-transaction, client-anchored path, and every cascade site must have landed. A
       # predicate, not a count — it also self-tests its allow-list and its own family table.
       - run: scripts/checks/d44-create-deps-claims.sh
+      # D45 (`ub-lp9.25`) zero-live-hits: no doc, doc-comment, golden or test may still undercount the
+      # edge-writing paths, deny the decision id this repair mints, frame the class as one the schema
+      # should close, or leave the spine's forward references declaring it open — and every cascade site
+      # must have landed, IN CODE as well as in prose. A negative sweep alone cannot prove a count is
+      # gone (a wrapped line is unfindable in principle), so every family is paired with a positive,
+      # spelling-independent landing keyed on a durable identifier. It also self-tests its allow-list
+      # and every one of its five rule tables.
+      - run: scripts/checks/ub-lp9.25-dangling-blocker-claims.sh
       # k1..k6: .knowledge structural lint — SEPARATE corpus from the 19-file normative lint (ci-cd §2.3)
       - run: cargo xtask knowledge-lint
       # Executable proof of the shared gate predicate — every rule arm, exits 0/1/2.

@@ -8,14 +8,18 @@
 //!
 //! # Why a seam trait
 //!
-//! Two contract properties are not reachable through the public surface alone:
+//! Three contract properties are not reachable through the public surface alone:
 //!
 //! - [`Storage::detect_cycles`](crate::Storage::detect_cycles)' **positive** path — the public
 //!   [`add_dependency`](crate::Storage::add_dependency) *rejects* a gating-cycle edge with
-//!   `CycleDetected`, so a stored cycle can only be planted by bypassing that guard; and
-//! - the **id child-counter high-water mark**, an internal allocation invariant.
+//!   `CycleDetected`, so a stored cycle can only be planted by bypassing that guard (since D45 the
+//!   same seam is what plants a DANGLING edge, which every write path now refuses);
+//! - the **id child-counter high-water mark**, an internal allocation invariant; and
+//! - the **SQL half of the `external:` predicate** (D45) — the write guard calls the Rust
+//!   [`unblock_model::is_external_target`] while the ready/blocked queries carry
+//!   `NOT LIKE 'external:%'`, and only the backend can answer for its own half.
 //!
-//! [`StorageTestkit`] exposes exactly those two seams, gated behind
+//! [`StorageTestkit`] exposes exactly those seams, gated behind
 //! `#[cfg(any(test, feature = "testkit"))]`, so they never widen the production surface.
 //!
 //! # Structure
@@ -63,6 +67,19 @@ pub trait StorageTestkit: Storage {
     /// Lets the suite assert the id child-counter advances monotonically past the hierarchical
     /// children created through the public [`Storage::create_issue`].
     async fn testkit_child_high_water(&self, parent_id: &str) -> Result<Option<u32>, StorageError>;
+
+    /// Ask the BACKEND ITSELF whether `probe` matches the SQL external-target twin — for `SQLite`,
+    /// literally `SELECT ?1 LIKE 'external:%'` (D45, spine §1.9 invariant 3).
+    ///
+    /// The `external:` predicate has TWO homes by construction: the Rust
+    /// [`unblock_model::is_external_target`] the write guard calls, and the `NOT LIKE 'external:%'`
+    /// predicates the ready/blocked queries carry — because SQL cannot call Rust. They agree only BY
+    /// CONTRACT, and this seam is what turns that contract into a red test: the suite asserts the two
+    /// verdicts are equal over a probe corpus pinned in the spine. Without it the suite could only
+    /// assert the Rust half against itself, which proves nothing about the divergence D45 exists to
+    /// abolish. A backend whose external-target SQL is spelled differently answers with ITS OWN
+    /// predicate — the obligation is the equivalence, not the syntax.
+    async fn testkit_sql_matches_external_prefix(&self, probe: &str) -> Result<bool, StorageError>;
 
     // --- T0.8 contention-lab instrumentation seams (RK-1 / NFR-3) ---------------------------------
     //
@@ -203,6 +220,23 @@ where
     contract_create_issue_rejects_a_duplicate_declared_edge(factory().await).await;
     contract_create_issue_rejects_a_declared_gating_cycle(factory().await).await;
     contract_create_issues_still_dedups_and_still_admits_a_cycle(factory().await).await;
+
+    // D45 — the dependency-TARGET existence guard, on every L2 edge-writing body, plus the
+    // batch-awareness the import leg depends on, the external/tombstone carve-outs, the published
+    // precedence chain, the L2 read the `dangling` diagnostic composes, and the §1.9 Rust/SQL
+    // equivalence obligation.
+    contract_create_issue_refuses_a_phantom_target(factory().await).await;
+    contract_create_issues_refuses_a_phantom_target_whole_batch(factory().await).await;
+    contract_create_issues_accepts_an_intra_batch_reference_in_both_directions(factory().await)
+        .await;
+    contract_add_dependency_guards_both_endpoints(factory().await).await;
+    contract_reparent_refuses_a_phantom_parent(factory().await).await;
+    contract_external_target_is_accepted_on_every_write_path(factory().await).await;
+    contract_tombstoned_target_counts_as_existing(factory().await).await;
+    contract_blocker_not_found_precedence(factory().await).await;
+    contract_dangling_duplicate_edge_reports_the_missing_target(factory().await).await;
+    contract_dangling_edges_survive_the_whole_graph_read(factory().await).await;
+    contract_external_predicate_matches_the_sql_twin(factory().await).await;
 
     // Seam-backed: id child-counter high-water mark.
     contract_child_counter_high_water(factory().await).await;
@@ -3355,5 +3389,628 @@ pub async fn contract_create_issues_still_dedups_and_still_admits_a_cycle<S: Sto
     assert!(
         !cycles.is_empty(),
         "the cycle really was persisted, so this cell is not vacuous: {cycles:?}"
+    );
+}
+
+// --------------------------------------------------------------------------------------------------
+// D45 (v1.0.1) — the dependency-TARGET existence guard (spine §1.9 / §3.2.1)
+// --------------------------------------------------------------------------------------------------
+//
+// `dependencies.depends_on_id` carries NO foreign key — deliberately, because an `external:` target
+// is a legitimate blocker no row can ever satisfy — so an edge naming an issue that does not exist
+// used to be written with `isError:false`, planting a blocker that can never be created and therefore
+// never closed. D45 closes the class application-level, in-transaction, on EVERY edge-writing path.
+// The cells below cover the three L2 write bodies (the shared per-record insert body, `add_dependency`
+// and `apply_reparent`), the batch-awareness the import leg depends on, the external/tombstone
+// carve-outs, the published precedence chain, and the §1.9 Rust/SQL equivalence obligation.
+
+/// `create_issue` REFUSES a declared target that names no row, with `BlockerNotFound` carrying BOTH
+/// ids, and persists ZERO rows.
+///
+/// MUTANT KILLED: deleting the target-existence pass from the shared per-record insert body — the
+/// create then returns `Ok` and the issue is born with a blocker that can never be created and
+/// therefore never closed (the D45 defect itself). The zero-rows half is asserted separately because
+/// an implementation that rejected AFTER committing the row would satisfy the code assertion alone.
+pub async fn contract_create_issue_refuses_a_phantom_target<S: Storage>(storage: S) {
+    let mut carrier = issue("ub-dep", "names a blocker that does not exist");
+    carrier.dependencies = vec![dep("ub-dep", "ub-ghost", DependencyType::Blocks)];
+
+    let err = storage
+        .create_issue(&carrier, "x")
+        .await
+        .expect_err("a target that names no row is refused");
+    match err {
+        StorageError::BlockerNotFound {
+            ref issue_id,
+            ref depends_on_id,
+        } => {
+            assert_eq!(issue_id, "ub-dep", "the DECLARING record must be named");
+            assert_eq!(
+                depends_on_id, "ub-ghost",
+                "the phantom target must be named"
+            );
+        }
+        other => panic!("expected BlockerNotFound, got {other:?}"),
+    }
+    assert!(
+        storage.get_issue("ub-dep").await.expect("get").is_none(),
+        "the rejected create persists ZERO rows — not even an edgeless issue"
+    );
+}
+
+/// `create_issues` — the shared bulk/import body — REFUSES the WHOLE batch when any record declares a
+/// target present neither in the batch nor in storage, leaving ZERO rows.
+///
+/// This is the NFR-16 obligation the spine names explicitly, and it is the storage-level proof of the
+/// guard on the bulk/import leg: the `create_bulk` path rejects an unknown REFERENCE at L5 with
+/// `VALIDATION_FAILED` and never reaches this body, so without this cell the shared-body guard would
+/// have no direct coverage at all.
+///
+/// MUTANT KILLED: bodying the guard in the `create_issue` WRAPPER instead of the shared body. Every
+/// single-create cell would stay green while bulk and the JSONL/`bd` import leg — the paths that
+/// actually ingest foreign data — kept writing phantom blockers.
+pub async fn contract_create_issues_refuses_a_phantom_target_whole_batch<S: Storage>(storage: S) {
+    let clean = issue("ub-batch-ok", "a perfectly good record");
+    let mut broken = issue("ub-batch-bad", "names a phantom");
+    broken.dependencies = vec![dep("ub-batch-bad", "ub-ghost", DependencyType::Blocks)];
+
+    let err = storage
+        .create_issues(&[clean, broken], "x")
+        .await
+        .expect_err("a phantom target refuses the batch");
+    assert!(
+        matches!(err, StorageError::BlockerNotFound { .. }),
+        "expected BlockerNotFound, got {err:?}"
+    );
+
+    for id in ["ub-batch-ok", "ub-batch-bad"] {
+        assert!(
+            storage.get_issue(id).await.expect("get").is_none(),
+            "the whole batch rolls back — {id} must not survive the refusal"
+        );
+    }
+    assert_eq!(
+        count_all(&storage).await,
+        0,
+        "ZERO rows persist: not even the record staged BEFORE the offending one"
+    );
+}
+
+/// The guard is BATCH-AWARE in BOTH directions: a record may name a sibling staged EARLIER in the
+/// same batch (backward) **and** one appearing LATER in it (forward).
+///
+/// MUTANT KILLED: a naive per-record in-transaction `SELECT` with no batch arm. It accepts the
+/// BACKWARD reference and refuses the FORWARD one, so the suite would still look half-green — an
+/// ordering-dependent refusal of a legal import that no file author can avoid and no caller can
+/// predict. The forward assertion is the one that kills it; the backward one keeps the cell honest
+/// about what already worked.
+pub async fn contract_create_issues_accepts_an_intra_batch_reference_in_both_directions<
+    S: Storage,
+>(
+    storage: S,
+) {
+    // Record A names Z, which appears LATER in the same slice (the forward reference); record C
+    // names A, which appeared EARLIER (the backward one).
+    let mut a = issue("ub-fwd-a", "names a record later in the file");
+    a.dependencies = vec![dep("ub-fwd-a", "ub-fwd-z", DependencyType::Blocks)];
+    let z = issue("ub-fwd-z", "the later record");
+    let mut c = issue("ub-fwd-c", "names a record earlier in the file");
+    c.dependencies = vec![dep("ub-fwd-c", "ub-fwd-a", DependencyType::Blocks)];
+
+    storage
+        .create_issues(&[a, z, c], "x")
+        .await
+        .expect("an intra-batch reference is legal in BOTH directions, whatever the record order");
+
+    assert_eq!(
+        storage
+            .list_dependencies("ub-fwd-a")
+            .await
+            .expect("list")
+            .len(),
+        1,
+        "the FORWARD edge is persisted"
+    );
+    assert_eq!(
+        storage
+            .list_dependencies("ub-fwd-c")
+            .await
+            .expect("list")
+            .len(),
+        1,
+        "the BACKWARD edge is persisted"
+    );
+}
+
+/// `add_dependency` guards BOTH endpoints in-transaction, with the published codes: a missing SOURCE
+/// is the EXISTING `IssueNotFound` (the missing thing genuinely IS the addressed issue), a missing
+/// TARGET is `BlockerNotFound`, and when both are missing the SOURCE wins.
+///
+/// MUTANTS KILLED: (a) dropping the target probe — the phantom blocker lands with `isError:false`;
+/// (b) dropping the source probe — a typo in the source field returns the schema's opaque foreign-key
+/// failure (`DatabaseError`, exit 2) while the same typo in the target field returns exit 3, so ONE
+/// call with ONE typo yields two codes depending on which FIELD carried it; (c) minting a new variant
+/// for the source instead of reusing `IssueNotFound`, which the third assertion pins by CODE.
+pub async fn contract_add_dependency_guards_both_endpoints<S: Storage>(storage: S) {
+    storage
+        .create_issue(&issue("ub-real", "a real row"), "x")
+        .await
+        .expect("real");
+
+    // Missing TARGET.
+    let err = storage
+        .add_dependency(&dep("ub-real", "ub-ghost", DependencyType::Blocks), "x")
+        .await
+        .expect_err("a target that names no row is refused");
+    match err {
+        StorageError::BlockerNotFound {
+            ref issue_id,
+            ref depends_on_id,
+        } => {
+            assert_eq!(issue_id, "ub-real");
+            assert_eq!(depends_on_id, "ub-ghost");
+        }
+        other => panic!("expected BlockerNotFound for a missing target, got {other:?}"),
+    }
+    assert!(
+        storage
+            .list_dependencies("ub-real")
+            .await
+            .expect("list")
+            .is_empty(),
+        "the refused edge is not written"
+    );
+
+    // Missing SOURCE (target exists) -> the EXISTING IssueNotFound, never a minted variant.
+    let err = storage
+        .add_dependency(&dep("ub-nobody", "ub-real", DependencyType::Blocks), "x")
+        .await
+        .expect_err("a source that names no row is refused");
+    match err {
+        StorageError::IssueNotFound { ref id } => assert_eq!(id, "ub-nobody"),
+        other => panic!("expected IssueNotFound for a missing source, got {other:?}"),
+    }
+
+    // BOTH missing -> the SOURCE wins (a row must exist before its edges mean anything).
+    let err = storage
+        .add_dependency(&dep("ub-nobody", "ub-ghost", DependencyType::Blocks), "x")
+        .await
+        .expect_err("both endpoints missing is still refused");
+    assert!(
+        matches!(err, StorageError::IssueNotFound { ref id } if id == "ub-nobody"),
+        "the SOURCE probe precedes the TARGET probe, got {err:?}"
+    );
+}
+
+/// The reparent path (`update_issue { parent }`) carries the same guard: a parent that names no row
+/// is `BlockerNotFound`, and the whole update rolls back.
+///
+/// MUTANT KILLED: leaving `apply_reparent` unguarded because a dangling `parent-child` edge does not
+/// produce the never-ready symptom. It is still hydrated onto the issue, still exported, still
+/// written with `isError:false`, and still LISTED by the `dangling` diagnostic — so an unguarded
+/// reparent lets the tool that reports the defect be used to create the defects it reports.
+pub async fn contract_reparent_refuses_a_phantom_parent<S: Storage>(storage: S) {
+    storage
+        .create_issue(&issue("ub-child", "a child looking for a parent"), "x")
+        .await
+        .expect("child");
+    let before = storage
+        .get_issue("ub-child")
+        .await
+        .expect("get")
+        .expect("exists");
+
+    let patch = IssuePatch {
+        parent: Some(Some("ub-ghost-parent".to_string())),
+        ..IssuePatch::default()
+    };
+    let err = storage
+        .update_issue("ub-child", &patch, "x")
+        .await
+        .expect_err("a parent that names no row is refused");
+    match err {
+        StorageError::BlockerNotFound {
+            ref issue_id,
+            ref depends_on_id,
+        } => {
+            assert_eq!(issue_id, "ub-child");
+            assert_eq!(depends_on_id, "ub-ghost-parent");
+        }
+        other => panic!("expected BlockerNotFound, got {other:?}"),
+    }
+
+    assert!(
+        storage
+            .list_dependencies("ub-child")
+            .await
+            .expect("list")
+            .is_empty(),
+        "no parent-child edge is written"
+    );
+    assert_eq!(
+        storage.get_issue("ub-child").await.expect("get"),
+        Some(before),
+        "the whole update rolls back — the row is byte-unchanged"
+    );
+}
+
+/// An `external:` target is ACCEPTED on every L2 write path, in BOTH ASCII spellings, INCLUDING as a
+/// PARENT.
+///
+/// An external target names a ticket in another system: it is a legitimate blocker that no row can
+/// ever satisfy, which is exactly why the column carries no foreign key and why the guard has to be
+/// application-level.
+///
+/// The AC (`docs/plans/implementation-plan.md`, T1.6 D45 item (3)) is stated **per PATH**, not per
+/// suite: each of the four L2 legs below carries BOTH the `external:` and the `EXTERNAL:` spelling,
+/// so no leg is covered by a sibling leg's spelling.
+///
+/// MUTANTS KILLED: (a) a guard with no carve-out at all — every external blocker becomes unwritable,
+/// breaking a GA-shipped shape; (b) a case-SENSITIVE `starts_with`, the shipped engine dialect, under
+/// which `EXTERNAL:jira-1` is refused by the write guard while the ready/blocked SQL already treats
+/// it as external — the write guard would be STRICTER than the read side (spine §1.9 invariant 4);
+/// (c) a carve-out applied per-EDGE-TYPE, which the `parent` leg catches by refusing an external
+/// PARENT that is legal today. Mutant (b) kills the UPPER-spelled cell on every leg *independently*
+/// — proven by a ladder that lowered each earlier leg's upper spelling in turn and read the offending
+/// id out of the panic, so no leg's cell is shadowed by an earlier leg's failure.
+pub async fn contract_external_target_is_accepted_on_every_write_path<S: Storage>(storage: S) {
+    // (1) The shared insert body, via the single create — both spellings, on one record.
+    let mut carrier = issue("ub-ext", "blocked by two foreign tickets");
+    carrier.dependencies = vec![
+        dep("ub-ext", "external:jira-1", DependencyType::Blocks),
+        dep("ub-ext", "EXTERNAL:jira-2", DependencyType::Blocks),
+    ];
+    storage
+        .create_issue(&carrier, "x")
+        .await
+        .expect("an external target is legal on create, in either ASCII case");
+    assert_eq!(
+        storage
+            .list_dependencies("ub-ext")
+            .await
+            .expect("list")
+            .len(),
+        2
+    );
+
+    // (2) The shared insert body, via the bulk/import leg — BOTH spellings on this path too (the
+    // AC is per-PATH, not per-suite), plus the mixed spelling that only an ASCII-case-INSENSITIVE
+    // predicate accepts.
+    let mut bulk = issue("ub-ext-bulk", "imported with a foreign blocker");
+    bulk.dependencies = vec![
+        dep("ub-ext-bulk", "external:jira-3", DependencyType::WaitsFor),
+        dep("ub-ext-bulk", "EXTERNAL:jira-3b", DependencyType::WaitsFor),
+        dep("ub-ext-bulk", "ExTeRnAl:jira-3c", DependencyType::WaitsFor),
+    ];
+    storage
+        .create_issues(&[bulk], "x")
+        .await
+        .expect("an external target is legal on the bulk/import leg, in either ASCII case");
+    assert_eq!(
+        storage
+            .list_dependencies("ub-ext-bulk")
+            .await
+            .expect("list")
+            .len(),
+        3,
+        "every external spelling is persisted on the bulk/import leg"
+    );
+
+    // (3) `add_dependency` — both spellings.
+    storage
+        .add_dependency(
+            &dep("ub-ext", "external:jira-4", DependencyType::Blocks),
+            "x",
+        )
+        .await
+        .expect("an external target is legal on dep add");
+    storage
+        .add_dependency(
+            &dep("ub-ext", "EXTERNAL:jira-4b", DependencyType::Blocks),
+            "x",
+        )
+        .await
+        .expect("an external target is legal on dep add in the UPPER spelling too");
+
+    // (4) Reparent — an `external:` PARENT stays legal: the carve-out is per-TARGET, NEVER
+    // per-edge-type (spine §1.9 invariant 6). Both spellings, one reparent each (the second
+    // replaces the first parent edge).
+    let lower_patch = IssuePatch {
+        parent: Some(Some("external:jira-5-lower".to_string())),
+        ..IssuePatch::default()
+    };
+    storage
+        .update_issue("ub-ext-bulk", &lower_patch, "x")
+        .await
+        .expect("an external PARENT is legal in the LOWER spelling");
+    assert!(
+        storage
+            .list_dependencies("ub-ext-bulk")
+            .await
+            .expect("list")
+            .iter()
+            .any(|d| d.depends_on_id == "external:jira-5-lower"
+                && d.dep_type == DependencyType::ParentChild),
+        "the lower-spelled external parent edge is persisted verbatim"
+    );
+    let patch = IssuePatch {
+        parent: Some(Some("EXTERNAL:jira-5".to_string())),
+        ..IssuePatch::default()
+    };
+    storage
+        .update_issue("ub-ext-bulk", &patch, "x")
+        .await
+        .expect("an external PARENT stays representable exactly as it is today");
+    assert!(
+        storage
+            .list_dependencies("ub-ext-bulk")
+            .await
+            .expect("list")
+            .iter()
+            .any(|d| d.depends_on_id == "EXTERNAL:jira-5"
+                && d.dep_type == DependencyType::ParentChild),
+        "the external parent edge is persisted verbatim"
+    );
+}
+
+/// A TOMBSTONED target COUNTS AS EXISTING — deliberately, and deliberately UNLIKE `add_comment`'s
+/// FORK-3 rule, which rejects a tombstoned issue.
+///
+/// The export corpus includes tombstones, so an edge to a tombstoned blocker is a normal,
+/// round-trippable fact. Refusing it would make a conforming export un-importable — the precise
+/// failure D45 also addresses on the export side.
+///
+/// MUTANT KILLED: a status-aware existence query (`… AND status != 'tombstone'`, or reusing the
+/// default-visibility filter). Every cell above stays green under it; only this one goes red, and the
+/// damage it does is silent until someone re-imports their own export.
+pub async fn contract_tombstoned_target_counts_as_existing<S: Storage>(storage: S) {
+    storage
+        .create_issue(&issue("ub-dead", "about to be tombstoned"), "x")
+        .await
+        .expect("target");
+    let plan = DeletePlan {
+        mode: DeleteMode::Tombstone,
+        targets: vec!["ub-dead".to_string()],
+        cascade_children: Vec::new(),
+    };
+    storage.delete_issue(&plan, "x").await.expect("tombstone");
+
+    // Via the shared insert body.
+    let mut carrier = issue("ub-live", "depends on a tombstoned blocker");
+    carrier.dependencies = vec![dep("ub-live", "ub-dead", DependencyType::Blocks)];
+    storage
+        .create_issue(&carrier, "x")
+        .await
+        .expect("an edge to a TOMBSTONED blocker is a normal, round-trippable fact");
+
+    // Via `add_dependency`.
+    storage
+        .create_issue(&issue("ub-live2", "another dependent"), "x")
+        .await
+        .expect("live2");
+    storage
+        .add_dependency(&dep("ub-live2", "ub-dead", DependencyType::WaitsFor), "x")
+        .await
+        .expect("the existence query is STATUS-AGNOSTIC on dep add too");
+}
+
+/// The PUBLISHED precedence chain is ASSERTED, not assumed:
+/// `SelfDependency` → `BlockerNotFound` → `DuplicateDependency` → `CycleDetected`.
+///
+/// Precedence is OBSERVABLE BEHAVIOUR, so every neighbouring pair is exercised with an input that
+/// violates both rules at once.
+///
+/// MUTANTS KILLED: (a) interleaving the target-existence check INTO the staging loop instead of
+/// running it as ONE post-staging pass — element 1's missing target would then beat element 2's
+/// self-dependency, which the first case detects by deliberately putting the phantom FIRST in the
+/// declared list; (b) running the existence pass after the wrapper's duplicate guard, which the
+/// second case detects; (c) running it after the cycle guard, which the third detects — a cycle
+/// witness naming a phantom node reports a derived defect while hiding the primary one.
+pub async fn contract_blocker_not_found_precedence<S: Storage>(storage: S) {
+    // (a) `SelfDependency` beats `BlockerNotFound`, even with the phantom declared FIRST.
+    let mut selfish = issue("ub-prec-self", "names a phantom, then itself");
+    selfish.dependencies = vec![
+        dep("ub-prec-self", "ub-ghost", DependencyType::Blocks),
+        dep("ub-prec-self", "ub-prec-self", DependencyType::Blocks),
+    ];
+    let err = storage
+        .create_issue(&selfish, "x")
+        .await
+        .expect_err("refused");
+    assert!(
+        matches!(err, StorageError::SelfDependency),
+        "SelfDependency fires during staging and still wins when the phantom is declared FIRST — \
+         the existence check is ONE POST-staging pass, not an interleaved one. Got {err:?}"
+    );
+
+    // (b) `BlockerNotFound` beats `DuplicateDependency` (the rank the shared-body placement forces).
+    let mut dup = issue("ub-prec-dup", "repeats one phantom target");
+    dup.dependencies = vec![
+        dep("ub-prec-dup", "ub-ghost", DependencyType::Blocks),
+        dep("ub-prec-dup", "ub-ghost", DependencyType::WaitsFor),
+    ];
+    let err = storage.create_issue(&dup, "x").await.expect_err("refused");
+    assert!(
+        matches!(err, StorageError::BlockerNotFound { .. }),
+        "a missing target NECESSARILY precedes a duplicate on the create path, got {err:?}"
+    );
+
+    // (c) `BlockerNotFound` beats `CycleDetected`: endpoint existence is prior to any relational
+    // question about the graph.
+    storage
+        .create_issue(&issue("ub-prec-p", "parent"), "x")
+        .await
+        .expect("p");
+    let mut far = issue("ub-prec-x", "far");
+    far.dependencies = vec![dep("ub-prec-x", "ub-prec-p", DependencyType::Blocks)];
+    storage.create_issue(&far, "x").await.expect("x");
+
+    let mut cyclic = issue("ub-prec-n", "closes a cycle AND names a phantom");
+    cyclic.dependencies = vec![
+        dep("ub-prec-n", "ub-prec-p", DependencyType::ParentChild),
+        dep("ub-prec-n", "ub-prec-x", DependencyType::Blocks),
+        dep("ub-prec-n", "ub-ghost", DependencyType::Blocks),
+    ];
+    let err = storage
+        .create_issue(&cyclic, "x")
+        .await
+        .expect_err("refused");
+    assert!(
+        matches!(err, StorageError::BlockerNotFound { .. }),
+        "a target that does not exist cannot participate in a cycle, got {err:?}"
+    );
+}
+
+/// THE ONE SHIPPED REJECTION D45 CHANGES, pinned rather than discovered later: on `add_dependency`,
+/// re-adding an edge that ALREADY exists and whose target is DANGLING now returns `BlockerNotFound`
+/// (`ISSUE_NOT_FOUND`) where GA returned `DuplicateDependency`.
+///
+/// It is reachable only on already-corrupt data — exactly the population D45 exists to surface — and
+/// it is the observable consequence of moving the target probe AHEAD of the duplicate query so that
+/// ONE published chain describes every path.
+///
+/// MUTANT KILLED: leaving the target probe AFTER the duplicate query on this path. Every other cell
+/// stays green (the duplicate query only fires on an edge that already exists), while `add_dependency`
+/// and `create_issue` would publish contradictory precedence for the same pair of rules.
+pub async fn contract_dangling_duplicate_edge_reports_the_missing_target<S>(storage: S)
+where
+    S: Storage + StorageTestkit,
+{
+    storage
+        .create_issue(
+            &issue("ub-corrupt", "carries a pre-existing dangling edge"),
+            "x",
+        )
+        .await
+        .expect("source");
+    // Plant the dangling edge through the seam — every guarded write path now refuses to create one,
+    // which is the point of D45; the corrupt state can only pre-date the guard.
+    storage
+        .testkit_insert_raw_edge(&dep("ub-corrupt", "ub-ghost", DependencyType::Blocks))
+        .await
+        .expect("plant the pre-existing dangling edge");
+
+    let err = storage
+        .add_dependency(&dep("ub-corrupt", "ub-ghost", DependencyType::Blocks), "x")
+        .await
+        .expect_err("re-adding the dangling edge is refused");
+    assert!(
+        matches!(err, StorageError::BlockerNotFound { .. }),
+        "the TARGET probe runs BEFORE the duplicate query, so the primary defect is reported, \
+         not the derived one. Got {err:?}"
+    );
+}
+
+/// A DANGLING edge SURVIVES into the whole-graph read (`dependency_graph(&[])`) — the L2 half of the
+/// `dangling` diagnostic, which the engine composes by differencing this edge set against the id set
+/// from a fully-inclusive `list_issues`.
+///
+/// The survival is not incidental: the loader is a bare `SELECT issue_id, depends_on_id, type FROM
+/// dependencies` with NO join, which is precisely why a broken edge reaches the caller. That is also
+/// why the diagnostic needs NO new `Storage` method.
+///
+/// MUTANT KILLED: "tidying" the whole-graph loader into a join against `issues` (or filtering out
+/// unresolvable targets). Every other graph cell stays green — every edge in them resolves — while
+/// the `dangling` diagnostic silently returns nothing and a broken workspace reports itself healthy.
+pub async fn contract_dangling_edges_survive_the_whole_graph_read<S>(storage: S)
+where
+    S: Storage + StorageTestkit,
+{
+    storage
+        .create_issue(&issue("ub-g-a", "a"), "x")
+        .await
+        .expect("a");
+    storage
+        .create_issue(&issue("ub-g-b", "b"), "x")
+        .await
+        .expect("b");
+    // One resolvable edge, one dangling edge, one external edge.
+    storage
+        .add_dependency(&dep("ub-g-a", "ub-g-b", DependencyType::Blocks), "x")
+        .await
+        .expect("resolvable");
+    storage
+        .testkit_insert_raw_edge(&dep("ub-g-a", "ub-ghost", DependencyType::Blocks))
+        .await
+        .expect("plant a dangling edge");
+    storage
+        .add_dependency(
+            &dep("ub-g-b", "external:jira-9", DependencyType::Blocks),
+            "x",
+        )
+        .await
+        .expect("external");
+
+    let graph = storage.dependency_graph(&[]).await.expect("whole graph");
+    let targets: Vec<&str> = graph.edges.iter().map(|e| e.to.as_str()).collect();
+    assert!(
+        targets.contains(&"ub-ghost"),
+        "the whole-graph read must NOT resolve away a dangling edge — the `dangling` diagnostic \
+         differences this set against the id set. Got {targets:?}"
+    );
+    assert!(
+        targets.contains(&"external:jira-9"),
+        "an external target also survives the read; classifying it is the engine's job, not the \
+         loader's. Got {targets:?}"
+    );
+    assert!(targets.contains(&"ub-g-b"), "resolvable edges survive too");
+}
+
+/// The §1.9 EQUIVALENCE obligation: the Rust `is_external_target` and the SQL twin
+/// `LIKE 'external:%'` accept precisely the same strings, over a probe corpus PINNED in the spine so
+/// it cannot silently shrink.
+///
+/// The `external:` predicate has two homes by construction — SQL cannot call Rust — and they agree
+/// only BY CONTRACT. This cell is that contract's teeth: it asks the DATABASE ITSELF for its verdict
+/// and compares. The corpus deliberately includes both ASCII cases, a partial prefix, a
+/// leading-space form, an embedded form and two non-ASCII near-misses (fullwidth letters, the dotless
+/// `ı`) — `SQLite`'s `LIKE` folds ASCII ONLY.
+///
+/// MUTANTS KILLED: a case-SENSITIVE Rust predicate (the two uppercase probes go red — and that is
+/// the exact asymmetry the two shipped dialects had, where the write guard would be STRICTER than
+/// the read side); a Unicode case-FOLDING predicate (the two non-ASCII near-misses go red); and any
+/// future narrowing of either half.
+pub async fn contract_external_predicate_matches_the_sql_twin<S>(storage: S)
+where
+    S: Storage + StorageTestkit,
+{
+    // The corpus is pinned in spine §1.9 invariant (3).
+    let corpus = [
+        "",
+        "external",
+        "external:",
+        "external:jira-1",
+        "EXTERNAL:jira-1",
+        "ExTeRnAl:jira-1",
+        "externally:x",
+        "externaL:",
+        " external:x",
+        "ub-external:x",
+        "ＥＸＴＥＲＮＡＬ:x",
+        "externaı:x",
+    ];
+
+    for probe in corpus {
+        let rust = unblock_model::is_external_target(probe);
+        let sql = storage
+            .testkit_sql_matches_external_prefix(probe)
+            .await
+            .expect("the backend answers its own external-target predicate");
+        assert_eq!(
+            rust, sql,
+            "the Rust write-guard predicate and the SQL read-side twin disagree on {probe:?} \
+             (rust={rust}, sql={sql}) — a write the store is happy to serve would be refused, or \
+             a phantom blocker would slip past the guard"
+        );
+    }
+
+    // Non-vacuity: the corpus must exercise BOTH verdicts, or an always-false predicate would pass.
+    assert!(
+        corpus.iter().any(|p| unblock_model::is_external_target(p)),
+        "the corpus must contain at least one external target"
+    );
+    assert!(
+        corpus.iter().any(|p| !unblock_model::is_external_target(p)),
+        "the corpus must contain at least one non-external target"
     );
 }

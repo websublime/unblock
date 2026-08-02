@@ -33,7 +33,8 @@ use tokio_util::sync::CancellationToken;
 /// `capabilities()` descriptor, AND the `$defs/Comment` embedded inside the EXISTING `issue`/`query`
 /// OUTPUT schemas gains 2 properties (`updated_at`/`redacted_at`) — so existing schema bytes move
 /// too, not merely a new pair) → `unblock.mcp.v1.6` (v1.0.1/D42 — see the clause below) →
-/// `unblock.mcp.v1.7` (v1.0.1/D44 — see the second clause below).
+/// `unblock.mcp.v1.7` (v1.0.1/D44 — see the second clause below) → `unblock.mcp.v1.8`
+/// (v1.0.1/D45 — see the third clause below).
 /// The `unblock.mcp.vN[.M]` family preserves the contract-id convention while the `.M` revision
 /// marks an additive contract change within the v1 product.
 ///
@@ -64,7 +65,26 @@ use tokio_util::sync::CancellationToken;
 /// The schema movement is a pure WIDENING; the ratified behavioural break rides the RUNTIME rule,
 /// the same shape D42 shipped with. Per D35 an additive `.M` bump inside 1.x is NON-breaking, so
 /// this too ships in the v1.0.1 patch — it is not a 2.0.0 event).
-pub const CONTRACT_VERSION: &str = "unblock.mcp.v1.7";
+///
+/// `unblock.mcp.v1.8` (v1.0.1/D45 — the DANGLING dependency-TARGET class. The contract moves on
+/// TWO axes, which is why the FR-12 hash-coupled gate fires BY DESIGN: (1) `schema_bundle()` — the
+/// `diagnostics` tool INPUT gains a `oneOf` arm (`{"kind":"dangling"}`) and the same tool's OUTPUT
+/// `$defs/DiagnosticKind` gains an enum member, so EXISTING schema bytes move, not merely a new
+/// arm; (2) `capabilities()` moves by MORE than `contract_version` this time — the `diagnostics`
+/// TOOL DESCRIPTION is rewritten to name the new kind, and a tool description IS version-coupled in
+/// its capabilities-document copy. `DiagnosticKind` GROWS a `Dangling` variant rather than reusing
+/// `Lint` (both options bump the contract anyway, and a report declaring a kind that lies about
+/// what it carries is a defect the free option does not have), APPENDED LAST because schemars emits
+/// variants in declaration order and the digest covers those bytes. D45 mints NO `ErrorCode` — the
+/// new refusal rides the existing `ISSUE_NOT_FOUND` via the internal
+/// `StorageError::BlockerNotFound` — so `ErrorCode::ALL` stays at 36, `capabilities().error_codes`
+/// is byte-unchanged and no 0–8 exit-code row moves. D45 adds NO tool: the new surface is a KIND arm
+/// on the EXISTING `diagnostics` tool, so the RK-3 budget (spine §6.6) stands at 8 ≤ 8, FULL and
+/// unmoved. UNLIKE D44, `agents_digest()` DOES move — it walks each tool's `oneOf` arms to publish
+/// actions, so the managed `AGENTS.md` table gains a `dangling` action row and must be REGENERATED
+/// by `unblock agents` in this same commit, never hand-edited. Per D35 an additive `.M` bump inside
+/// 1.x is NON-breaking, so this too ships in the v1.0.1 patch — it is not a 2.0.0 event).
+pub const CONTRACT_VERSION: &str = "unblock.mcp.v1.8";
 
 /// The pinned SHA-256 digest of the ordered two-document tuple `(capabilities(), schema_bundle())` —
 /// the HASH-COUPLED half of the FR-12 drift gate (D22 widened by D25, `tests/contract_suite.rs`).
@@ -80,7 +100,11 @@ pub const CONTRACT_VERSION: &str = "unblock.mcp.v1.7";
 /// representation — any future dep enabling `serde_json/preserve_order` (feature unification, dev-deps
 /// included) reorders the schemars-generated maps and moves `CONTRACT_HASH` with NO contract change;
 /// if the gate fires with "nothing changed", check `Cargo.lock` feature unification first.
-pub const CONTRACT_HASH: &str = "53328305ebe8949c56bc678ffebc2bbcf40c879d225a97e2571cf4f5b27ef854";
+// D45 (v1.0.1) re-pin: the `diagnostics` INPUT gained a `{"kind":"dangling"}` `oneOf` arm, its
+// OUTPUT's `$defs/DiagnosticKind` gained an enum member and the tool DESCRIPTION was rewritten — two
+// axes on `schema_bundle()` plus one on `capabilities()`, so the gate fired BY DESIGN and this pin
+// moved WITH the `unblock.mcp.v1.8` bump and the two re-blessed goldens, never alone.
+pub const CONTRACT_HASH: &str = "a8d8c3cc6d8e12db65073c1103e63754a2f88c38e396839f5d18e6f7abdbbf9c";
 
 /// Untrusted-input limits enforced **before** any `Session` call (NFR-18).
 ///
@@ -184,10 +208,11 @@ mod tests {
 
     #[test]
     fn contract_version_is_the_bumped_v1_id() {
-        // v1.0.1/D44: `$defs/DepInput.issue_id` is relaxed to OPTIONAL with a rewritten description
-        // and `CreateInput.deps` gains one, so `schema_bundle()` moves again → v1.7 (additive, D35;
-        // it follows v1.6, which D42's `deny_unknown_fields` widening earned).
-        assert_eq!(CONTRACT_VERSION, "unblock.mcp.v1.7");
+        // v1.0.1/D45: the `diagnostics` tool INPUT gains a `{"kind":"dangling"}` `oneOf` arm, its
+        // OUTPUT's `$defs/DiagnosticKind` gains an enum member, and the tool DESCRIPTION is
+        // rewritten to name the new kind — `schema_bundle()` AND `capabilities()` both move → v1.8
+        // (additive, D35; it follows v1.7, which D44's `DepInput` relaxation earned).
+        assert_eq!(CONTRACT_VERSION, "unblock.mcp.v1.8");
     }
 
     #[test]

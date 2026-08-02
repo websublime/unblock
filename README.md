@@ -194,7 +194,7 @@ unblock's product surface is MCP, so the goal is to get an MCP client spawning t
    the workspace directory it bound **to stderr** (diagnostics only, NFR-14) — check that line to confirm
    it opened the workspace you expected.
 
-The contract id is **`unblock.mcp.v1.7`**. For machine-readable discovery, agents read the resources
+The contract id is **`unblock.mcp.v1.8`**. For machine-readable discovery, agents read the resources
 `unblock://capabilities` (the descriptor tables) and `unblock://schema` (the full JsonSchema bundle
 for every tool I/O). The topology is **child-per-client** (D31): each MCP client spawns its own
 `unblock mcp` child, and a cross-process advisory `.unblock/.write.lock` serializes writers across
@@ -202,7 +202,7 @@ clients.
 
 ## MCP surface
 
-The contract (`unblock.mcp.v1.7`) exposes **8 tools**, **5 resources**, and **3 prompts**.
+The contract (`unblock.mcp.v1.8`) exposes **8 tools**, **5 resources**, and **3 prompts**.
 
 | Tool | Actions |
 |---|---|
@@ -212,7 +212,7 @@ The contract (`unblock.mcp.v1.7`) exposes **8 tools**, **5 resources**, and **3 
 | `query` | `list` · `ready` · `blocked` · `search` · `count` · `stale` (with filters) |
 | `dep` | `add` · `remove` · `list` · `tree` · `cycles` · `graph` |
 | `sync` | `export` · `import` · `import_bd` (one-shot bd import) |
-| `diagnostics` | `stats` · `info` · `where` · `version` · `lint` · `changelog` · `orphans` |
+| `diagnostics` | `stats` · `info` · `where` · `version` · `lint` · `changelog` · `orphans` · `dangling` (dependency edges whose target does not exist) |
 | `comment` | `add` · `list` · `update` · `delete` (soft-redact: the row is kept, the body masked) |
 
 **Resources:** `unblock://issues/{id}` · `unblock://issues/ready` · `unblock://issues/blocked` ·
