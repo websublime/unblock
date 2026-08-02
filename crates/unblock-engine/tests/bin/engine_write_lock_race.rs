@@ -29,8 +29,8 @@ use chrono::{DateTime, Utc};
 use unblock_config::{ConfigPaths, ResolvedConfig, WorkspaceContext, WorkspaceSource};
 use unblock_engine::{EngineError, NewIssue, Session, SessionConfig};
 use unblock_model::{
-    Comment, CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue,
-    ListFilters,
+    Comment, CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, GraphEdge,
+    Issue, ListFilters,
 };
 use unblock_storage::{
     DEFAULT_WRITE_LOCK_TIMEOUT_MS, DeletePlan, IssuePatch, LibsqlStorage, Storage, StorageError,
@@ -215,6 +215,11 @@ impl Storage for WidenedStorage {
     }
     async fn orphan_candidates(&self) -> Result<Vec<Issue>, StorageError> {
         self.inner.orphan_candidates().await
+    }
+
+    // D45 (amended 2026-08-02): a non-gated read — delegate, like every other one.
+    async fn dangling_dependencies(&self) -> Result<Vec<GraphEdge>, StorageError> {
+        self.inner.dangling_dependencies().await
     }
 }
 

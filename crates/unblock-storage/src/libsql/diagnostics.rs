@@ -6,11 +6,12 @@
 use chrono::{DateTime, Utc};
 use libsql::{Connection, Value};
 
-use unblock_model::Issue;
+use unblock_model::{GraphEdge, Issue};
 
 use crate::error::{StorageError, map_libsql_err};
 
 use super::crud::get_issue;
+use super::deps::parse_dep_type;
 use super::mappers::{ISSUE_COLUMNS, issue_from_row};
 
 /// Run `PRAGMA integrity_check`, returning the raw problem rows.
@@ -78,6 +79,76 @@ pub(super) async fn epic_child_rollup(
             _ => 0,
         };
         out.push((epic, (total, closed)));
+    }
+    Ok(out)
+}
+
+/// Every stored dependency edge whose TARGET denotes **nothing** — the D45 `dangling` diagnostic's
+/// ONE read (spine §3.2.1 `dangling`, as AMENDED 2026-08-02; trait contract in `trait_def.rs`).
+///
+/// ONE statement replaces the engine-side composition D45 first specified (whole-graph edge load
+/// differenced against a fully-inclusive `list_issues` id set), which measured **10.72 s** at 250k
+/// rows and took `Session::doctor()` to **16.31 s** against a 15 s boundedness guard.
+///
+/// # The join predicate is EXISTENCE ALONE — never status
+///
+/// `LEFT JOIN issues i ON i.id = d.depends_on_id` + `WHERE i.id IS NULL` selects exactly the edges
+/// whose target has NO row. **Adding a status term to either clause** (`AND i.status NOT IN
+/// ('closed','tombstone')` being the obvious one) **reintroduces the retired D45 defect through a new
+/// door:** a closed / deferred / tombstoned blocker row EXISTS, so its edge is not dangling, and
+/// reporting it makes the diagnostic fabricate its own findings. The corpus is therefore every row in
+/// `issues`, deliberately WIDER than the export corpus — an edge into an ephemeral / `-wisp-` row is
+/// NOT dangling, because the row exists.
+///
+/// # `NOT LIKE 'external:%'` is the SQL twin, not a second dialect
+///
+/// It is the same ASCII-case-insensitive predicate `unblock_model::is_external_target` implements
+/// (spine §1.9 invariant 3): `SQLite`'s `LIKE` folds ASCII only and the prefix is pure ASCII, so the
+/// two accept precisely the same strings — including on the non-ASCII near-misses both reject. The
+/// NFR-16 contract suite's equivalence cell asks the DATABASE itself and keeps the halves honest.
+///
+/// # The ORDER is pinned HERE
+///
+/// `ORDER BY d.issue_id, d.type, d.depends_on_id` IS the finding order (NFR-14, snapshot-pinned).
+/// The `type` column stores exactly `DependencyType::as_str()`, and `SQLite`'s default `BINARY`
+/// collation compares those bytes exactly as Rust's `str` `Ord` does — so the caller forwards the
+/// rows AS RETURNED and must NOT re-sort, since a redundant re-sort would mask a broken `ORDER BY`.
+///
+/// Pure-DB; never shells to git (NFR-6).
+pub(super) async fn dangling_dependencies(
+    conn: &Connection,
+) -> Result<Vec<GraphEdge>, StorageError> {
+    let mut rows = conn
+        .query(
+            "SELECT d.issue_id, d.depends_on_id, d.type \
+             FROM dependencies d \
+             LEFT JOIN issues i ON i.id = d.depends_on_id \
+             WHERE i.id IS NULL \
+               AND d.depends_on_id NOT LIKE 'external:%' \
+             ORDER BY d.issue_id ASC, d.type ASC, d.depends_on_id ASC",
+            (),
+        )
+        .await
+        .map_err(map_libsql_err)?;
+
+    let mut out = Vec::new();
+    while let Some(row) = rows.next().await.map_err(map_libsql_err)? {
+        let Value::Text(issue_id) = row.get_value(0).map_err(map_libsql_err)? else {
+            continue;
+        };
+        let Value::Text(depends_on) = row.get_value(1).map_err(map_libsql_err)? else {
+            continue;
+        };
+        let Value::Text(type_str) = row.get_value(2).map_err(map_libsql_err)? else {
+            continue;
+        };
+        out.push(GraphEdge {
+            from: issue_id,
+            to: depends_on,
+            // SHARED with the whole-graph loader: an unknown stored type is `Custom`, never a
+            // fabricated gating `Blocks` (D5/GATE-NIT-4).
+            dep_type: parse_dep_type(&type_str),
+        });
     }
     Ok(out)
 }

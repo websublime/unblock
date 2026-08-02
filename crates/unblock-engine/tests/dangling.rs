@@ -6,7 +6,7 @@
 //! `#[cfg(any(test, feature = "testkit"))]` in `unblock-storage` — the D45 write guard now refuses to
 //! create such an edge through every public path, and `DeleteMode::Hard` explicitly cleans
 //! `depends_on_id` references, so an already-corrupt workspace is otherwise unreachable. The findings,
-//! however, are composed in the ENGINE, so the shipped storage-only testkit steps
+//! however, are surfaced through the ENGINE, so the shipped storage-only testkit steps
 //! (`cargo test -p unblock-storage --features testkit --test contract` / `--test contention_lab`)
 //! can never reach them. **This cell would therefore execute in NO CI job — be green by
 //! non-execution — unless a job is named, so one is:** the required `storage-testkit` job carries
@@ -111,16 +111,18 @@ async fn the_dangling_action_lists_a_planted_edge_with_the_pinned_shape() {
     );
 }
 
-/// The findings are ordered by `(issue_id, dep_type, depends_on_id)` — a DELIBERATE re-sort in the
-/// engine, NOT the `(from, to, dep_type)` order `dependency_graph` returns, so a dependent's broken
-/// edges group by KIND (NFR-14 — this is snapshot-pinned output).
+/// The findings are ordered by `(issue_id, dep_type, depends_on_id)`, so a dependent's broken edges
+/// group by KIND (NFR-14 — this is snapshot-pinned output). Since the 2026-08-02 amendment that order
+/// is produced by the read's own SQL `ORDER BY` and the engine forwards the rows unsorted; before it,
+/// the engine re-sorted `dependency_graph`'s `(from, to, dep_type)` output. The ASSERTION is
+/// unchanged, which is the point: it pins the ORDER, not the mechanism that produces it.
 ///
-/// NON-VACUOUS BY CONSTRUCTION: the planted set is chosen so the two orders DISAGREE. Under
-/// `(from, to, dep_type)` `ub-1` would emit `parent-child -> ub-aaa` before `blocks -> ub-zzz`
-/// (`ub-aaa` < `ub-zzz`); under the pinned order `blocks` precedes `parent-child`.
+/// NON-VACUOUS BY CONSTRUCTION: the planted set is chosen so the pinned order DISAGREES with an
+/// order keyed on the target. By target, `ub-1` would emit `parent-child -> ub-aaa` before
+/// `blocks -> ub-zzz` (`ub-aaa` < `ub-zzz`); under the pinned order `blocks` precedes `parent-child`.
 ///
-/// MUTANT KILLED: forwarding `dependency_graph`'s own order, or sorting on the rendered `detail`
-/// string instead of the triple.
+/// MUTANT KILLED: dropping or mis-keying the SQL `ORDER BY` (e.g. `ORDER BY d.issue_id,
+/// d.depends_on_id`), or sorting on the rendered `detail` string instead of the triple.
 #[tokio::test]
 async fn the_dangling_findings_are_ordered_by_issue_then_type_then_target() {
     let (s, store) = session_and_store().await;
@@ -144,13 +146,18 @@ async fn the_dangling_findings_are_ordered_by_issue_then_type_then_target() {
     );
 }
 
-/// **THE TRAP, pinned normatively.** The existing-id set MUST come from FULLY-INCLUSIVE filters
-/// (`include_closed` + `include_deferred` + `include_tombstone`, all true). With the DEFAULT filters
-/// — which exclude closed and tombstone — every CLOSED blocker would be reported as dangling: a
-/// diagnostic that fabricates its own findings.
+/// **THE TRAP, pinned normatively — it survived the 2026-08-02 amendment by changing SHAPE.** Its
+/// retired form: the existing-id set MUST come from FULLY-INCLUSIVE filters (`include_closed` +
+/// `include_deferred` + `include_tombstone`, all true), because with the DEFAULT filters — which
+/// exclude closed and tombstone — every CLOSED blocker would be reported as dangling: a diagnostic
+/// that fabricates its own findings. Its SQL form, now live: **the LEFT JOIN matches on EXISTENCE
+/// ALONE (`ON i.id = d.depends_on_id`, `WHERE i.id IS NULL`) and NEVER on status.**
 ///
-/// MUTANT KILLED: `all_visibility_filters()` swapped for `ListFilters::default()` in
-/// `dangling_findings`. All THREE legitimate targets below then surface as false findings.
+/// MUTANT KILLED (live): making that join status-aware — e.g. `AND i.status NOT IN
+/// ('closed','tombstone')` in the `ON` clause of `dangling_dependencies`
+/// (`crates/unblock-storage/src/libsql/diagnostics.rs`). The closed and tombstoned targets below then
+/// surface as false findings. MUTANT KILLED (retired form, same cell): `all_visibility_filters()`
+/// swapped for `ListFilters::default()` in the pre-amendment engine composition.
 #[tokio::test]
 async fn a_closed_deferred_or_tombstoned_blocker_is_not_dangling() {
     let (s, _store) = session_and_store().await;
@@ -204,9 +211,10 @@ async fn a_closed_deferred_or_tombstoned_blocker_is_not_dangling() {
 /// An `external:` target is NEVER a finding, in EITHER spelling (spine §1.9: it names a blocker
 /// outside this workspace, which is legitimate and which no row could ever satisfy).
 ///
-/// MUTANT KILLED: dropping the `is_external_target` filter from the composition — both edges below
-/// become false findings — and, separately, a case-SENSITIVE predicate, which lets the `EXTERNAL:`
-/// spelling through while the ready/blocked SQL already treats it as external.
+/// MUTANT KILLED: dropping the `NOT LIKE 'external:%'` term from the `dangling_dependencies` read —
+/// both edges below become false findings — and, separately, narrowing that carve-out to a
+/// case-SENSITIVE match, which lets the `EXTERNAL:` spelling through while the ready/blocked SQL
+/// already treats it as external (§1.9 invariant 4).
 #[tokio::test]
 async fn an_external_target_is_never_a_dangling_finding() {
     let (s, store) = session_and_store().await;
@@ -230,8 +238,8 @@ async fn an_external_target_is_never_a_dangling_finding() {
 /// exists. Reading the id set as "what `sync export` writes" reports every such edge as a false
 /// finding: the same self-fabrication as the default-filters mutant, from the other side.
 ///
-/// MUTANT KILLED: sourcing the id set from the export corpus (the D23 retain + the D45 blocker
-/// closure) instead of every row in the database.
+/// MUTANT KILLED: narrowing the read's corpus to the export corpus (the D23 retain + the D45 blocker
+/// closure) instead of every row in the `issues` table.
 #[tokio::test]
 async fn an_edge_to_an_ephemeral_or_wisp_row_is_not_dangling() {
     let (s, _store) = session_and_store().await;
@@ -276,8 +284,8 @@ async fn an_edge_to_an_ephemeral_or_wisp_row_is_not_dangling() {
 }
 
 /// A clean workspace reports NOTHING — the diagnostic does not invent findings out of a healthy
-/// graph. Without this cell, a composition that returned an empty list unconditionally would pass the
-/// three negative cells above.
+/// graph. Without this cell, a read that returned an empty list unconditionally would pass the three
+/// negative cells above.
 #[tokio::test]
 async fn a_clean_workspace_reports_no_dangling_edges() {
     let (s, _store) = session_and_store().await;
@@ -297,8 +305,8 @@ async fn a_clean_workspace_reports_no_dangling_edges() {
 /// rows — while the report's `kind` stays `Info` (the fold moves no spine §1.10 byte).
 ///
 /// The equality against `diagnostics(Dangling)` is what pins ONE HOME: a second implementation in
-/// `lifecycle.rs` would have to reproduce the composition, the fully-inclusive filters, the external
-/// carve-out AND the sort to keep this green.
+/// `lifecycle.rs` would have to reproduce the read, its existence-only selection, its external
+/// carve-out AND its order to keep this green.
 ///
 /// MUTANT KILLED: deleting the fold (the tail rows vanish); folding the rows in BEFORE the file-state
 /// anomalies (the suffix assertion goes red); or flipping the report `kind` to `Dangling`.

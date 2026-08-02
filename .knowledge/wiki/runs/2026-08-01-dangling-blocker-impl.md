@@ -1,6 +1,6 @@
 ---
 name: 2026-08-01-dangling-blocker-impl
-description: Implementing the dangling dependency-target guard (decision D45) — three parallel implementers behind a design gate that had already failed twice, seventeen mutation kills an independent lens reproduced one by one, three claimed kills honestly declared equivalent instead, and the two costs the specification refused to accept an opinion about.
+description: Implementing the dangling dependency-target guard (decision D45) — three parallel implementers behind a design gate that had already failed twice, seventeen mutation kills an independent lens reproduced one by one, three claimed kills honestly declared equivalent instead, the two costs the specification refused to accept an opinion about, and a second round in which the 250k scale gate rejected one of those costs and the listing view was amended into a single SQL query.
 type: run
 date: 2026-08-01
 branch: ub-lp9.25-dangling-blocker
@@ -117,6 +117,78 @@ guard, the carve-out, the closure or the contract. One (a verbatim-duplicated D-
    amendment is recorded as the first follow-up rather than an optional one.
 4. **This report** (MF-4), with the `.unblock/issues.jsonl` re-export, per `docs/PROCESS.md` §6/§8.
 
+### Round 2 (2026-08-02) — the scale gate rejected the cost that measurement had just recorded
+
+Everything above stood except its conclusion. **The must-fix-1 measurement above was taken on a
+laptop; CI took its own, and CI's is the one that counts.** On the runner the same 250k fixture
+reported `integrity_check` **5.51s**, the dangling fold **10.72s** and `doctor()` **16.31s** — over
+the 15s boundedness guard the cell has always asserted, so the required `scale` job went RED while
+every other gate was green. The laptop had reported roughly half of that (fold 4.51s, `doctor()`
+7.00s) and had been read as evidence the composition was affordable for v1.0.1. It was not.
+
+**The cause was structural, not a threshold to nudge**, and the diagnosis is the reason no threshold
+was touched: the composition read the WHOLE dependency graph and then EVERY issue row through
+fully-inclusive filters — hydrating each row's labels, dependencies and comments merely to derive an
+id SET — and differenced them in memory. Two full scans and `O(rows)` peak memory. The `doctor` fold
+was simply where a test happened to be watching: the agent-facing `diagnostics {kind:"dangling"}`
+action paid the identical 10.72s with nothing watching it at all.
+
+**Miguel ruled on 2026-08-02: move the composition into ONE SQL query.** He was offered raising the
+guard and dropping the fold, and rejected both — the guard did its job, and dropping the fold would
+have left the action just as slow and unwatched.
+
+Spec-first, because the specification pinned the OPPOSITE and that pin had survived three adversarial
+rounds. The amendment rides D45 and mints no new decision id (`docs/PROCESS.md` §3: same view, same
+finding shape, same order, same trap — the MECHANISM changes, the intent does not), and every
+superseded clause is left visibly superseded rather than overwritten: `docs/PRD.md` §4 D45 clause (6)
+(plus its FR-15/FR-16 rows and its scope statement, which had said no implementor's method set moves),
+`docs/plans/01-design-spine.md` (the §4.1 `dangling` clause, the trait declaration block, the
+`Session::doctor()` COST paragraph, and the §3.2.1 bullet whose "no trait signature changes" claim is
+now explicitly scoped to the WRITE guard), `docs/plans/crates/unblock-engine.md`,
+`docs/plans/crates/unblock-storage.md` and the T2.7 acceptance criteria in
+`docs/plans/implementation-plan.md`.
+
+Then the code: **one additive `Storage` method, `dangling_dependencies() -> Vec<GraphEdge>`**, whose
+libsql body is a single `LEFT JOIN issues i ON i.id = d.depends_on_id WHERE i.id IS NULL AND
+d.depends_on_id NOT LIKE 'external:%' ORDER BY d.issue_id, d.type, d.depends_on_id`. Twelve `impl
+Storage` blocks gained it. The engine's `dangling_findings` stayed the ONE HOME and became a thin map
+— second read gone, id set gone, in-memory difference gone, **and the re-sort deleted deliberately**,
+because a redundant engine-side sort would mask a broken `ORDER BY`.
+
+**The trap survived the rewrite by changing shape, which was the whole risk of this round.** The
+retired clause warned that the id set had to be FULLY INCLUSIVE, since default filters exclude closed
+and tombstoned rows and would report every CLOSED blocker as dangling. In SQL that becomes: the join
+matches on EXISTENCE ALONE and never on status. A single `AND i.status NOT IN ('closed','tombstone')`
+in the `ON` clause reintroduces the identical defect, and it is the most natural thing in the world to
+write. It is now stated in the trait doc, the query doc, both crate plans, the PRD, the spine, the
+acceptance criteria and the gate — and, more usefully, it is **mutation-proved**: with that term added,
+`a_closed_deferred_or_tombstoned_blocker_is_not_dangling`
+(`crates/unblock-engine/tests/dangling.rs`) reports `blocks -> ub-closed` and `blocks -> ub-tombstoned`
+as findings, and the new NFR-16 contract case
+`contract_dangling_dependencies_lists_only_absent_targets`
+(`crates/unblock-storage/src/testkit.rs`) fails the same way at layer 2. Both were run red, then the
+file was restored from a `cp` backup and verified by md5.
+
+**The new numbers, on the same laptop class as the superseded pair so the two are comparable: the fold
+costs 88.7µs / 88.4µs / 88.7µs and `doctor()` costs 2.529s / 2.567s / 2.520s, of which
+`integrity_check` alone is 2.516s / 2.542s / 2.533s.** The fold went from 4.51s to 88.7µs and is now
+~0.004% of `doctor()`: it has stopped being a term. **The 15s guard was not relaxed** — which is the
+only reason those numbers mean anything.
+
+Two fakes were given HONEST implementations rather than convenient ones. The `unblock-sync`
+`FakeStorage` doubles (`src/testutil.rs`, `tests/fake.rs`) answer over the rows they already hold; the
+file idiom for an undriven method there is `unimplemented!()`, and `Ok(Vec::new())` would have been
+worse than either — a double that always answers "this workspace is clean" makes every dangling
+assertion in that crate vacuously green. The other nine sites are decorators and delegate, as they do
+for every non-gated read.
+
+The claim gate moved with the code, since two of its code-side rows would otherwise have certified the
+retired design: `scripts/checks/ub-lp9.25-dangling-blocker-claims.sh` gained **PC13** (the join clause)
+and **PC14** (the `ORDER BY`), its code-side floor went 12 → 14, and its specification paragraph in
+`docs/plans/ci-cd-and-distribution.md` §2.1 gained the matching rules. The existing engine row (PC8)
+keeps its anchor — the ONE HOME did not move, only the work behind it — but its rationale no longer
+claims a two-read composition.
+
 **On the mutation discipline, including where it did not pay off.** Every coverage claim in this
 change names the mutant it kills in its own body, and an independent Verify lens re-ran all seventeen
 of them with md5-verified restores: 17 of 17 reproduced, zero false kills, zero cells passing in both
@@ -157,7 +229,15 @@ publishing the precedence chain as per-RECORD with a cross-record cell; and deci
 - **The 250k scale fixture seeds rows with no dependencies, labels or comments**
   (`crates/unblock-storage/src/testkit.rs`, `seed_corpus`), so the measured doctor cost is the
   row-hydration half with the edge half measured at exactly zero. Any future reader comparing against
-  a real workspace will see a larger number, never a smaller one.
+  a real workspace will see a larger number, never a smaller one. **Round 2 note:** after the SQL
+  amendment the same bound points the other way — the empty `dependencies` table is now the query's
+  DRIVING table, so a real edge graph costs more in proportion to its EDGE count rather than its ROW
+  count, which is exactly what the amendment bought.
+- **A laptop measurement is not a gate, and this task learned it the expensive way.** The cost number
+  the specification obliged this commit to record was taken locally and understated CI by roughly 2x
+  on the same fixture (fold 4.51s vs 10.72s), which was the difference between "affordable, defer the
+  alternative to v1.1" and a RED required job. When a number is being used to justify a design choice,
+  take it where the gate runs, or state the environment loudly enough that nobody reads it as a budget.
 - **The adversarial export corpus only reaches the quadratic branch if the ids ascend ALONG the
   chain.** With the natural ordering the first pass drains the whole set and the same row and edge
   count runs ~100× faster — which is precisely why two Verify lenses measured the same code and
@@ -191,6 +271,8 @@ row.
 | SF-4 | Verify should-fix four: D45 `file:line` citations into files D45 edits are stale | across the D45 spec cascade in `docs/` |
 | the case-sensitive mutant | the shared external-target predicate reverted to a case-SENSITIVE prefix comparison; kills every upper-spelled carve-out cell | `unblock_model::is_external_target`, `crates/unblock-model/src/id.rs` |
 | the no-carve-out mutant | the same predicate forced to answer "not external" for every input; kills every external cell, lower spellings included | same function |
+| the status-aware-join mutant | round 2's mutant: `AND i.status NOT IN ('closed','tombstone')` appended to the new read's `ON` clause, so a CLOSED or TOMBSTONED blocker's edge is reported as dangling — the retired fully-inclusive-filters trap returning in SQL form | `dangling_dependencies`, `crates/unblock-storage/src/libsql/diagnostics.rs`; killed by `crates/unblock-engine/tests/dangling.rs` and by `contract_dangling_dependencies_lists_only_absent_targets` in `crates/unblock-storage/src/testkit.rs` |
+| PC8 / PC13 / PC14 | rows of the claim gate's code-side table: the engine ONE HOME, the new read's join clause, and its `ORDER BY` | `scripts/checks/ub-lp9.25-dangling-blocker-claims.sh`, specified in `docs/plans/ci-cd-and-distribution.md` §2.1 |
 
 ## Links
 

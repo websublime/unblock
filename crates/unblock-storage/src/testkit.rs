@@ -236,6 +236,7 @@ where
     contract_blocker_not_found_precedence(factory().await).await;
     contract_dangling_duplicate_edge_reports_the_missing_target(factory().await).await;
     contract_dangling_edges_survive_the_whole_graph_read(factory().await).await;
+    contract_dangling_dependencies_lists_only_absent_targets(factory().await).await;
     contract_external_predicate_matches_the_sql_twin(factory().await).await;
 
     // Seam-backed: id child-counter high-water mark.
@@ -3901,17 +3902,23 @@ where
     );
 }
 
-/// A DANGLING edge SURVIVES into the whole-graph read (`dependency_graph(&[])`) — the L2 half of the
-/// `dangling` diagnostic, which the engine composes by differencing this edge set against the id set
-/// from a fully-inclusive `list_issues`.
+/// A DANGLING edge SURVIVES into the whole-graph read (`dependency_graph(&[])`).
 ///
 /// The survival is not incidental: the loader is a bare `SELECT issue_id, depends_on_id, type FROM
-/// dependencies` with NO join, which is precisely why a broken edge reaches the caller. That is also
-/// why the diagnostic needs NO new `Storage` method.
+/// dependencies` with NO join, which is precisely why a broken edge reaches the caller.
+///
+/// **Its stated PURPOSE changed on 2026-08-02 and the docstring moves with it rather than becoming
+/// false prose in a green suite.** This cell was written as "the L2 half of the `dangling`
+/// diagnostic, which the engine composes by differencing this edge set against a fully-inclusive
+/// `list_issues` id set — which is also why the diagnostic needs NO new `Storage` method". That
+/// composition is SUPERSEDED (it cost 10.72s at 250k rows): the diagnostic now has its own read,
+/// `dangling_dependencies`, pinned by the cell below. What survives here is a property of the
+/// `dep graph` SURFACE itself: the whole-graph read reports the edges a workspace actually holds, and
+/// a broken one is a fact about that workspace, not a row to be quietly resolved away.
 ///
 /// MUTANT KILLED: "tidying" the whole-graph loader into a join against `issues` (or filtering out
 /// unresolvable targets). Every other graph cell stays green — every edge in them resolves — while
-/// the `dangling` diagnostic silently returns nothing and a broken workspace reports itself healthy.
+/// `dep {action:"graph"}` silently under-reports a corrupt workspace's real shape.
 pub async fn contract_dangling_edges_survive_the_whole_graph_read<S>(storage: S)
 where
     S: Storage + StorageTestkit,
@@ -3954,6 +3961,159 @@ where
          loader's. Got {targets:?}"
     );
     assert!(targets.contains(&"ub-g-b"), "resolvable edges survive too");
+}
+
+/// **The D45 `dangling` view's ONE read** (`dangling_dependencies`, spine §3.2 / §3.2.1 as AMENDED
+/// 2026-08-02): a LEFT JOIN returning ONLY the edges whose target row is ABSENT.
+///
+/// The amendment replaced a two-read engine composition that cost 10.72s at 250k rows and took
+/// `doctor()` past the 15s `scale` guard. Its correctness rules did NOT change shape-for-shape, so
+/// this cell asserts all four at once, on one corpus:
+///
+/// MUTANTS KILLED:
+/// 1. **A STATUS-AWARE JOIN** — the single easiest way to ship a query that lies, and the SQL form of
+///    the trap the retired wording carried ("the id set MUST come from FULLY-INCLUSIVE filters, or
+///    every CLOSED blocker is reported as dangling"). Adding `AND i.status NOT IN
+///    ('closed','tombstone')` to the `ON`/`WHERE` makes the CLOSED and TOMBSTONED blockers below
+///    surface as false findings. Both are here, plus a DEFERRED one, because a mutant that excludes
+///    only one status class must still go red.
+/// 2. **Dropping `NOT LIKE 'external:%'`** — the two `external:` edges become false findings; the
+///    UPPERCASE spelling additionally kills a case-SENSITIVE narrowing of that predicate (`SQLite`'s
+///    `LIKE` folds ASCII, and §1.9 invariant 4 forbids the write guard being stricter than the read).
+/// 3. **Returning every edge** (dropping `WHERE i.id IS NULL`, i.e. an inner-join/no-filter read) —
+///    the resolvable edge appears.
+/// 4. **Losing the `ORDER BY`, or ordering on the wrong columns.** The planted set is chosen so the
+///    pinned `(issue_id, type, depends_on_id)` order DISAGREES with `(issue_id, depends_on_id)`:
+///    `ub-d-a` carries `parent-child -> ub-aaa` and `blocks -> ub-zzz`, so target-order would put
+///    `ub-aaa` first while the pinned order puts `blocks` first.
+#[allow(clippy::too_many_lines)] // one corpus, four mutants: splitting it would split the pins
+pub async fn contract_dangling_dependencies_lists_only_absent_targets<S>(storage: S)
+where
+    S: Storage + StorageTestkit,
+{
+    for (id, title) in [
+        ("ub-d-a", "dependent"),
+        ("ub-d-b", "live blocker"),
+        ("ub-d-closed", "closed blocker"),
+        ("ub-d-deferred", "deferred blocker"),
+        ("ub-d-dead", "tombstoned blocker"),
+    ] {
+        storage
+            .create_issue(&issue(id, title), "x")
+            .await
+            .expect(id);
+    }
+
+    // Legitimate edges: a live, a CLOSED, a DEFERRED and a TOMBSTONED blocker — every one of those
+    // rows EXISTS, so none of these is dangling.
+    for (target, ty) in [
+        ("ub-d-b", DependencyType::Blocks),
+        ("ub-d-closed", DependencyType::Blocks),
+        ("ub-d-deferred", DependencyType::Blocks),
+        ("ub-d-dead", DependencyType::Blocks),
+    ] {
+        storage
+            .add_dependency(&dep("ub-d-a", target, ty), "x")
+            .await
+            .expect("an edge to an EXISTING row");
+    }
+    // External targets, in BOTH ASCII cases — legitimate blockers outside this workspace.
+    storage
+        .add_dependency(
+            &dep("ub-d-a", "external:jira-1", DependencyType::WaitsFor),
+            "x",
+        )
+        .await
+        .expect("external lower");
+    storage
+        .add_dependency(
+            &dep("ub-d-b", "EXTERNAL:jira-2", DependencyType::WaitsFor),
+            "x",
+        )
+        .await
+        .expect("external upper");
+
+    // Now make three of those targets non-active — WITHOUT deleting their rows.
+    storage
+        .update_issue(
+            "ub-d-closed",
+            &IssuePatch {
+                status: Some(Status::Closed),
+                ..IssuePatch::default()
+            },
+            "x",
+        )
+        .await
+        .expect("close");
+    storage
+        .update_issue(
+            "ub-d-deferred",
+            &IssuePatch {
+                status: Some(Status::Deferred),
+                ..IssuePatch::default()
+            },
+            "x",
+        )
+        .await
+        .expect("defer");
+    storage
+        .delete_issue(
+            &DeletePlan {
+                mode: DeleteMode::Tombstone,
+                targets: vec!["ub-d-dead".to_string()],
+                cascade_children: Vec::new(),
+            },
+            "x",
+        )
+        .await
+        .expect("tombstone");
+
+    // The genuinely broken edges — plantable only through the testkit seam, since the D45 write
+    // guard refuses to create them through every public path.
+    storage
+        .testkit_insert_raw_edge(&dep("ub-d-a", "ub-zzz", DependencyType::Blocks))
+        .await
+        .expect("plant");
+    storage
+        .testkit_insert_raw_edge(&dep("ub-d-a", "ub-aaa", DependencyType::ParentChild))
+        .await
+        .expect("plant");
+    storage
+        .testkit_insert_raw_edge(&dep("ub-d-b", "ub-mmm", DependencyType::WaitsFor))
+        .await
+        .expect("plant");
+
+    let found: Vec<(String, String, String)> = storage
+        .dangling_dependencies()
+        .await
+        .expect("dangling_dependencies")
+        .into_iter()
+        .map(|e| (e.from, e.dep_type.as_str().to_string(), e.to))
+        .collect();
+
+    assert_eq!(
+        found,
+        vec![
+            (
+                "ub-d-a".to_string(),
+                "blocks".to_string(),
+                "ub-zzz".to_string()
+            ),
+            (
+                "ub-d-a".to_string(),
+                "parent-child".to_string(),
+                "ub-aaa".to_string()
+            ),
+            (
+                "ub-d-b".to_string(),
+                "waits-for".to_string(),
+                "ub-mmm".to_string()
+            ),
+        ],
+        "ONLY the absent-target edges, in the pinned (issue_id, dep_type, depends_on_id) order. A \
+         closed / deferred / tombstoned blocker EXISTS and is NOT dangling; an `external:` target \
+         never is, in either case"
+    );
 }
 
 /// The §1.9 EQUIVALENCE obligation: the Rust `is_external_target` and the SQL twin

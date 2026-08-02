@@ -400,7 +400,8 @@ pub mod recording {
     use async_trait::async_trait;
     use chrono::{DateTime, Utc};
     use unblock_model::{
-        Comment, CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue,
+        Comment, CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, GraphEdge,
+        Issue,
     };
     use unblock_storage::{DeletePlan, IssuePatch, ListFilters, Storage, StorageError};
 
@@ -615,6 +616,11 @@ pub mod recording {
         async fn orphan_candidates(&self) -> Result<Vec<Issue>, StorageError> {
             self.inner.orphan_candidates().await
         }
+
+        // D45 (amended 2026-08-02): a non-gated read — delegate, like every other one.
+        async fn dangling_dependencies(&self) -> Result<Vec<GraphEdge>, StorageError> {
+            self.inner.dangling_dependencies().await
+        }
     }
 }
 
@@ -667,7 +673,8 @@ pub mod gated {
     use chrono::{DateTime, Utc};
     use tokio::sync::{Barrier, Semaphore};
     use unblock_model::{
-        Comment, CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue,
+        Comment, CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, GraphEdge,
+        Issue,
     };
     use unblock_storage::{DeletePlan, IssuePatch, ListFilters, Storage, StorageError};
 
@@ -902,6 +909,11 @@ pub mod gated {
         async fn orphan_candidates(&self) -> Result<Vec<Issue>, StorageError> {
             self.inner.orphan_candidates().await
         }
+
+        // D45 (amended 2026-08-02): a non-gated read — delegate, like every other one.
+        async fn dangling_dependencies(&self) -> Result<Vec<GraphEdge>, StorageError> {
+            self.inner.dangling_dependencies().await
+        }
     }
 }
 
@@ -947,7 +959,8 @@ pub mod failing {
     use async_trait::async_trait;
     use chrono::{DateTime, Utc};
     use unblock_model::{
-        Comment, CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue,
+        Comment, CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, GraphEdge,
+        Issue,
     };
     use unblock_storage::{DeletePlan, IssuePatch, ListFilters, Storage, StorageError};
 
@@ -1131,6 +1144,11 @@ pub mod failing {
         }
         async fn orphan_candidates(&self) -> Result<Vec<Issue>, StorageError> {
             self.inner.orphan_candidates().await
+        }
+
+        // D45 (amended 2026-08-02): a non-gated read — delegate, like every other one.
+        async fn dangling_dependencies(&self) -> Result<Vec<GraphEdge>, StorageError> {
+            self.inner.dangling_dependencies().await
         }
     }
 }

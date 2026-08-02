@@ -369,69 +369,53 @@ async fn orphans(storage: &dyn Storage) -> Result<Vec<DiagnosticFinding>> {
 /// putting this under `#[cfg(feature = "health")]` would fail to compile a `--no-default-features`
 /// build.
 ///
-/// # Composed from TWO EXISTING `Storage` reads — NO new trait method
+/// # ONE `Storage` read — [`Storage::dangling_dependencies`] (AMENDED 2026-08-02, riding D45)
 ///
-/// The D26 composition pattern applied literally, so no `Storage` signature moves and no test fake
-/// churns: `dependency_graph(&[])` (empty roots = the WHOLE graph), whose loader is a bare
-/// `SELECT issue_id, depends_on_id, type FROM dependencies` with **no join** — which is precisely
-/// why dangling edges SURVIVE into the returned tree — differenced against the id set from
-/// `list_issues`. An edge is a finding iff its target is neither in that id set nor
-/// [`unblock_model::is_external_target`] (§1.9 — an external target is a legitimate blocker outside
-/// this workspace, never a finding).
+/// D45 originally specified this as a TWO-read engine composition, deliberately, to avoid growing
+/// the trait: `dependency_graph(&[])` (whose loader does no join, so dangling edges survive into the
+/// returned tree) differenced against the id set from a fully-inclusive `list_issues`. That
+/// reasoning was sound and unmeasured. The 250k `scale` gate measured it: the composition cost
+/// **10.72 s** — two full scans plus `O(rows)` peak memory, hydrating every row's labels,
+/// dependencies and comments merely to derive an id SET — taking `doctor()` to **16.31 s** against
+/// the 15 s boundedness guard, i.e. a RED required job, and the standalone action paid the same cost
+/// unwatched. Miguel ruled it into ONE SQL query.
 ///
-/// # TRAP, pinned NORMATIVELY: the id set comes from FULLY-INCLUSIVE filters
+/// So this fn is now a THIN MAP: the read returns exactly the finding set, already filtered and
+/// already ordered, and this fn only renders it. **No second read, no id set, no in-memory
+/// difference, and NO re-sort** — a redundant sort here would mask a broken `ORDER BY` in the query.
 ///
-/// [`all_visibility_filters`] sets `include_closed`, `include_deferred` **and** `include_tombstone`.
-/// With the DEFAULT filters (which exclude closed and tombstone) every CLOSED blocker would be
-/// reported as dangling — a diagnostic that fabricates its own findings.
+/// # The rules the read owns (stated here because this is where a reader looks for them)
 ///
-/// **That corpus is DELIBERATELY WIDER than the EXPORT corpus and the two must NEVER be conflated.**
-/// The export corpus is the D23 retain plus D45's blocker closure (`unblock-sync`), which still omits
-/// an ephemeral / `-wisp-` row nothing depends on. This set is EVERY row in the database, full stop —
-/// so an edge whose target is an ephemeral row is **NOT** a dangling finding: the row exists.
+/// - **Selection is EXISTENCE ALONE, never status** — a closed / deferred / tombstoned blocker row
+///   EXISTS, so its edge is NOT dangling. That is the D45 trap in its SQL form; the retired
+///   engine-side form was "the id set MUST come from FULLY-INCLUSIVE filters, or every CLOSED
+///   blocker is reported as dangling".
+/// - **The corpus is EVERY row in the database**, DELIBERATELY WIDER than the EXPORT corpus (the D23
+///   retain plus D45's blocker closure, which still omits an ephemeral / `-wisp-` row nothing
+///   depends on) — so an edge whose target is an ephemeral row is **NOT** a finding: the row exists.
+/// - **`external:` targets are excluded** by the SQL twin of [`unblock_model::is_external_target`]
+///   (§1.9 — an external target is a legitimate blocker outside this workspace, never a finding).
 ///
 /// # Finding shape and ORDER (both snapshot-pinned output, NFR-14)
 ///
 /// `label` = the DEPENDENT issue id; `detail` = `"<dep_type> -> <missing target id>"`. The edge type
 /// is not decoration — it is what distinguishes a permanently-stuck issue (`blocks`) from a merely
 /// phantom parent (`parent-child`), which does not gate ready work at all. One finding per dangling
-/// EDGE, sorted by `(issue_id, dep_type, depends_on_id)` — a DELIBERATE re-sort, not the
-/// `(from, to, dep_type)` order `dependency_graph` returns, so a dependent's broken edges group by
-/// kind. The triple is a TOTAL order over the result set because the `dependencies` primary key is
-/// `(issue_id, depends_on_id)`.
+/// EDGE, in the read's `(issue_id, dep_type, depends_on_id)` order, so a dependent's broken edges
+/// group by kind. The triple is a TOTAL order over the result set because the `dependencies` primary
+/// key is `(issue_id, depends_on_id)`.
 ///
-/// ADVISORY and permit-free (FR-10): it is a read, and the race window between the two reads is
-/// acceptable for an advisory report.
+/// ADVISORY and permit-free (FR-10): it is a read — and, since the amendment, a SINGLE statement, so
+/// the two-read race window the earlier text accepted no longer exists.
 ///
 /// # Errors
 ///
-/// Forwards any [`StorageError`](unblock_storage::StorageError) from either read as the transparent
+/// Forwards any [`StorageError`](unblock_storage::StorageError) from the read as the transparent
 /// [`EngineError`](crate::EngineError) source.
 pub(crate) async fn dangling_findings(storage: &dyn Storage) -> Result<Vec<DiagnosticFinding>> {
-    // Read 1: the WHOLE dependency graph. Its loader does no join, so dangling edges survive.
-    let graph = storage.dependency_graph(&[]).await?;
-    // Read 2: EVERY row in the database — the fully-inclusive id set (see the TRAP above).
-    let existing: std::collections::HashSet<String> = storage
-        .list_issues(&all_visibility_filters())
+    Ok(storage
+        .dangling_dependencies()
         .await?
-        .into_iter()
-        .map(|issue| issue.id)
-        .collect();
-
-    let mut dangling: Vec<unblock_model::GraphEdge> = graph
-        .edges
-        .into_iter()
-        .filter(|e| !existing.contains(&e.to) && !unblock_model::is_external_target(&e.to))
-        .collect();
-    // PINNED order: (issue_id, dep_type, depends_on_id).
-    dangling.sort_by(|a, b| {
-        a.from
-            .cmp(&b.from)
-            .then_with(|| a.dep_type.as_str().cmp(b.dep_type.as_str()))
-            .then_with(|| a.to.cmp(&b.to))
-    });
-
-    Ok(dangling
         .into_iter()
         .map(|e| DiagnosticFinding {
             label: e.from,
@@ -450,11 +434,13 @@ fn all_inclusive_filters() -> ListFilters {
 }
 
 /// A `ListFilters` at the WIDEST visibility — closed + deferred + tombstone included — for the bd
-/// stats scan (`list_stats_summary_issues` sees the whole table) **and for the D45
-/// [`dangling_findings`] existing-id set, where the full inclusivity is NORMATIVE** (with the default
-/// filters every CLOSED blocker would be reported as dangling). `include_tombstone:true` (with
+/// stats scan (`list_stats_summary_issues` sees the whole table). `include_tombstone:true` (with
 /// `include_closed:true`) routes to the all-statuses branch, so the per-status tally carries a
 /// tombstone bucket and the widest hydration sees every row (pinned/epic/lead-time in-memory).
+///
+/// It is no longer the D45 `dangling` corpus: since the 2026-08-02 amendment that view is ONE SQL
+/// read whose join tests target EXISTENCE alone (see [`dangling_findings`]). The same *rule* — a
+/// closed / tombstoned blocker EXISTS and is not dangling — is now enforced in the query.
 fn all_visibility_filters() -> ListFilters {
     ListFilters {
         include_closed: true,

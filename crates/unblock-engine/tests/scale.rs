@@ -165,21 +165,28 @@ async fn run_scale(n: usize) {
     drop(session);
 }
 
-/// D45 — the doctor COST measurement the spine makes an obligation OF THE IMPLEMENTATION COMMIT
-/// (`docs/plans/01-design-spine.md`, the `Session::doctor()` row, "D45 — COST, stated rather than
-/// discovered later"): the deferral of the single-query `LEFT JOIN` alternative to v1.1 is
-/// conditional on this number existing, on THIS fixture, rather than on an opinion. It is REPORTED,
-/// not asserted against a budget — the repo's only bench gate covers the ready-sort and reaches
-/// nothing on this path, so a first number is what the clause asks for.
+/// D45 — the doctor COST measurement the spine makes a standing obligation
+/// (`docs/plans/01-design-spine.md`, the `Session::doctor()` row, "D45 — COST"): the number lives in
+/// a test that re-derives it on every run, not in prose that can go stale.
 ///
-/// Two timings, because the clause is about what the FOLD added:
+/// **This measurement is why the D45 listing view is ONE SQL query.** As first shipped the fold was a
+/// two-read engine composition (whole-graph edges differenced against a fully-inclusive `list_issues`
+/// id set). THIS cell measured it on CI at 250k rows — `integrity_check` 5.51s, the fold 10.72s,
+/// `doctor()` 16.31s — and the last of those tripped the `READ_GUARD` assertion below, turning a
+/// required job RED. A laptop run had reported roughly half that and had been taken as evidence the
+/// composition was affordable. The composition is now one `Storage::dangling_dependencies()` read.
+/// **The guard was NOT relaxed to accommodate any of this**, which is the only reason the number
+/// below can be trusted.
+///
+/// Two timings, because the clause is about what the FOLD adds:
 /// - `diagnostics(Dangling)` is the fold's exact added work (ONE home — `doctor()` awaits the SAME
-///   composition rather than recomputing);
+///   fn rather than recomputing);
 /// - `doctor()` is the composed total, so `doctor − dangling` is the pre-D45 doctor.
 ///
 /// HONESTY BOUND, recorded in the spine clause too: `seed_corpus` writes rows with NO dependencies,
-/// so this corpus has an EMPTY `dependencies` table and the number below is the ROW half (the
-/// fully-inclusive `list_issues` hydration) alone. A workspace with a real edge graph pays MORE.
+/// so this corpus has an EMPTY `dependencies` table — the driving table of the new query. A workspace
+/// with a real edge graph pays more, but now in proportion to its EDGE count rather than its ROW
+/// count, which is exactly what the amendment bought.
 #[cfg(feature = "health")]
 async fn measure_d45_doctor_cost(session: &Session, n: usize) {
     use unblock_model::DiagnosticKind;

@@ -11,8 +11,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 use unblock_model::{
-    Comment, CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue,
-    ListFilters,
+    Comment, CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, GraphEdge,
+    Issue, ListFilters,
 };
 
 use crate::WriteLockGuard;
@@ -480,6 +480,46 @@ pub trait Storage: Send + Sync {
     /// caller (health/diagnostics) decides what to do with the candidates.
     async fn orphan_candidates(&self) -> Result<Vec<Issue>, StorageError>;
 
+    /// Every stored dependency edge whose TARGET denotes **nothing** — the D45 `dangling` diagnostic's
+    /// ONE read (spine §3.2 / §3.2.1 `dangling`, as AMENDED 2026-08-02).
+    ///
+    /// The returned [`GraphEdge`]s ARE the finding set: `from` = the dependent issue id (the row
+    /// carrying the broken edge), `to` = the phantom target, `dep_type` = the edge type. The caller
+    /// maps them to findings and does nothing else — no second read, no id set, no in-memory
+    /// difference, and **no re-sort**.
+    ///
+    /// # Why this is a trait method at all (it was specified NOT to be)
+    ///
+    /// D45 originally composed this view in the engine from `dependency_graph(&[])` differenced
+    /// against a fully-inclusive `list_issues` id set, precisely to avoid growing the trait. That
+    /// reasoning was sound and unmeasured: at 250 000 rows the composition cost **10.72 s** — two full
+    /// scans plus `O(rows)` peak memory, hydrating every row's labels, dependencies and comments
+    /// merely to derive an id SET — and took `Session::doctor()` to **16.31 s** against the 15 s
+    /// boundedness guard in `crates/unblock-engine/tests/scale.rs`, i.e. a RED required job. One query
+    /// replaces it.
+    ///
+    /// # Contract (NORMATIVE)
+    ///
+    /// - **Selection is EXISTENCE ALONE.** An edge is returned iff no `issues` row carries its
+    ///   `depends_on_id`. **Never** filter on the target's STATUS: a closed, deferred or tombstoned
+    ///   blocker row EXISTS, so its edge is NOT dangling. This is the D45 trap in its SQL form — the
+    ///   retired wording said "the id set MUST come from FULLY-INCLUSIVE filters, or every CLOSED
+    ///   blocker is reported as dangling"; a status-aware join is the same self-fabricating diagnostic
+    ///   through a new door.
+    /// - **`external:` targets are EXCLUDED**, with the same ASCII-case-INSENSITIVE semantics as
+    ///   [`unblock_model::is_external_target`] (spine §1.9 invariant 3 — the SQL twin is
+    ///   `NOT LIKE 'external:%'`, and the two halves are kept honest by the NFR-16 contract suite's
+    ///   equivalence cell). An external target names a ticket in another system: a legitimate blocker
+    ///   no row could ever satisfy, never a finding.
+    /// - **The corpus is EVERY row in the store**, deliberately WIDER than the export corpus — so an
+    ///   edge into an ephemeral / `-wisp-` row is NOT dangling, because the row exists.
+    /// - **ORDER is PINNED and produced by the implementation**, `(issue_id, dep_type, depends_on_id)`
+    ///   ascending — snapshot-pinned output (NFR-14). The triple is a total order: the `dependencies`
+    ///   primary key is `(issue_id, depends_on_id)`, so no two rows share all three components.
+    ///
+    /// Pure-DB; **never** shells to git (NFR-6). A store with no broken edge returns `Ok(Vec::new())`.
+    async fn dangling_dependencies(&self) -> Result<Vec<GraphEdge>, StorageError>;
+
     // ---------------------------------------------------------------------------------------------
     // [v1.1] reserved seams (CF-E; spine §3.2) — additive, depended on by config db-layer +
     //         health full-taxonomy. Kept COMMENTED (not live default methods) so the seam is
@@ -506,8 +546,8 @@ mod tests {
     use chrono::{DateTime, Utc};
     use std::sync::Arc;
     use unblock_model::{
-        Comment, CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, Issue,
-        ListFilters,
+        Comment, CountBucket, CountGroupBy, DepTree, Dependency, DependencyType, Event, GraphEdge,
+        Issue, ListFilters,
     };
 
     /// A backend-free [`Storage`] used only to prove the trait is implementable and object-safe.
@@ -730,6 +770,12 @@ mod tests {
         }
 
         async fn orphan_candidates(&self) -> Result<Vec<Issue>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        // An empty store HAS no edges, so `Ok(Vec::new())` is the HONEST answer here — not a stub
+        // that happens to look clean (D45, spine §3.2 `dangling_dependencies`).
+        async fn dangling_dependencies(&self) -> Result<Vec<GraphEdge>, StorageError> {
             Ok(Vec::new())
         }
     }

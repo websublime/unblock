@@ -226,7 +226,14 @@ P25@crates/unblock-cli/tests/create_deps_wire.rs@D45@EVERY REMOVAL PINS ITS REPL
 #
 # Coverage is one row per guarded SQL body (the three bodies the five wire entry points funnel through),
 # plus the exporter, plus the shared L0 predicate and its case rule, plus its two non-storage callers,
-# plus the new `dangling` action in all three of the places its bytes live.
+# plus the new `dangling` action in all three of the places its bytes live, plus (since the 2026-08-02
+# amendment) the two clauses of the SQL read that replaced the engine-side two-read composition.
+#
+# WHY THE AMENDMENT EARNED ITS OWN ROWS AND DID NOT JUST EDIT PC8's PROSE. PC8 keys on `fn
+# dangling_findings`, which the amendment did not move — the ONE HOME is unchanged; only the WORK behind
+# it moved. So PC8 alone would go green on a tree where the fn still exists and does the old, slow thing.
+# PC13/PC14 are the rows that cannot: both had ZERO matches before the amendment, because this file
+# carried no join and no ORDER BY over `dependencies` at all.
 # =================================================================================================
 REQUIRE_CODE="
 PC1@crates/unblock-model/src/id.rs@pub fn is_external_target@the ONE shared external: predicate EXISTS at L0 — the only layer both unblock-storage (L2) and unblock-engine (L5) may depend on. MUTANT KILLED: deleting it and re-opening the two disagreeing dialects
@@ -236,7 +243,9 @@ PC4@crates/unblock-storage/src/libsql/crud.rs@is_external_target\(&parent_id\)@G
 PC5@crates/unblock-storage/src/libsql/deps.rs@is_external_target\(&dep\.depends_on_id\)@GUARDED BODY 3 of 3 — add_dependency, the 'dep {action:\"add\"}' path. MUTANT KILLED: deleting the TARGET guard from the dependency-add body, the endpoint the original defect report reproduced live over the wire
 PC6@crates/unblock-sync/src/export.rs@fn corpus_closed_under_blockers@the exporter DROPS NOTHING: the corpus widens to the transitive closure of its blockers. MUTANT KILLED: the 'obvious' repair D45 rejects — filtering the dangling EDGE out of the exported line, which would silently convert BLOCKED work into READY work in the destination workspace
 PC7@crates/unblock-engine/src/session/bulk.rs@is_external_target@the BULK RESOLVER shares the ONE predicate. MUTANT KILLED: restoring the case-SENSITIVE starts_with(\"external:\") here, which is where the two dialects disagreed — EXTERNAL:jira-1 was an external blocker to the ready query and an ordinary id to this parser
-PC8@crates/unblock-engine/src/diagnostics.rs@fn dangling_findings@the listing view is COMPOSED ONCE IN THE ENGINE from two existing reads, which is what keeps unblock-health's D29-F3 purity clause (run_doctor stays pure, non-async, storage-free) intact. MUTANT KILLED: making health storage-aware, i.e. reversing a second shipped clause
+PC8@crates/unblock-engine/src/diagnostics.rs@fn dangling_findings@the listing view has ONE HOME IN THE ENGINE, shared by the diagnostics action and the doctor fold, which is what keeps unblock-health's D29-F3 purity clause (run_doctor stays pure, non-async, storage-free) intact. MUTANT KILLED: making health storage-aware, i.e. reversing a second shipped clause. (Its 2026-08-02 amendment moved the WORK behind this fn into one SQL read — PC13/PC14 — but not the home; the anchor is unchanged because the home is)
+PC13@crates/unblock-storage/src/libsql/diagnostics.rs@LEFT JOIN issues i ON i\.id = d\.depends_on_id@the 2026-08-02 amendment LANDED: the listing view is ONE query whose join tests target EXISTENCE ALONE. This is the code-side tooth for the amendment itself — before it, this file had no join at all. MUTANT KILLED: appending a status term to that ON clause (AND i.status NOT IN ('closed','tombstone')), which reports every CLOSED and TOMBSTONED blocker as dangling — the retired FULLY-INCLUSIVE-filters trap returning through a new door. The row pins the join SPELLING because that is the line the mutant edits; the BEHAVIOUR is pinned by two independent cells (crates/unblock-engine/tests/dangling.rs and the NFR-16 contract case), both measured RED under that mutant
+PC14@crates/unblock-storage/src/libsql/diagnostics.rs@ORDER BY d\.issue_id ASC, d\.type ASC, d\.depends_on_id ASC@the PINNED finding order moved INTO the SQL when the engine-side re-sort was deleted, so the snapshot-stable output (NFR-14) now depends on this clause alone. MUTANT KILLED: dropping the ORDER BY, or keying it on (issue_id, depends_on_id) — the engine no longer re-sorts, deliberately, because a redundant sort would mask exactly this
 PC9@crates/unblock-model/src/results.rs@Dangling@DiagnosticKind GREW a Dangling variant rather than reusing Lint. MUTANT KILLED: reusing an existing kind, so a response would declare a kind that lies about what it carries
 PC10@crates/unblock-mcp/src/tools/diagnostics.rs@description = \"Diagnostics:[^\"]*dangling@the tool DESCRIPTION is contract bytes TWICE and this is copy 1 of 2 — the #\[tool(description)\] WIRE literal (rmcp requires a literal there, so the shared const cannot be used in the attribute). MUTANT KILLED: adding the action while leaving the published description naming only the seven GA kinds
 PC11@crates/unblock-mcp/src/resources/capabilities.rs@DIAGNOSTICS_TOOL_DESCRIPTION@copy 2 of 2 — the capabilities() descriptor, which CONTRACT_HASH digests. It is SOURCED FROM THE SHARED CONST, which is the mechanism that makes the two copies AGREE. MUTANT KILLED: hand-copying the bytes here, after which the two copies drift independently and only one of them is what tools/list serves
@@ -507,7 +516,7 @@ rc_count="$(count_rows "$REQUIRE_CONTRACT" '^RC[0-9]')"
 
 check_table_floor 'forbidden-framing (N)' "$n_count" 5 || blocked=1
 check_table_floor 'required-landing (P)' "$p_count" 25 || blocked=1
-check_table_floor 'code-side teeth (PC)' "$pc_count" 12 || blocked=1
+check_table_floor 'code-side teeth (PC)' "$pc_count" 14 || blocked=1
 check_table_floor 'row-anchored (Q)' "$q_count" 7 || blocked=1
 check_table_floor 'contract-version (RC)' "$rc_count" 6 || blocked=1
 
