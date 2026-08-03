@@ -53,10 +53,10 @@ say() { printf 'd46-claims: %s\n' "$*" >&2; }
 git rev-parse --show-toplevel >/dev/null 2>&1 || { say "not a git repository"; exit 2; }
 cd "$(git rev-parse --show-toplevel)" || { say "cannot cd to the repo root"; exit 2; }
 
-# The LIVE D-id range, in its TWO spellings — the third shipped required check script to carry this
-# knob, which is why docs/PROCESS.md §3 and ci-cd §2.1(a) now enumerate SIX bump sites rather than
-# five. It tracks the LIVE range, never a frozen historical one: the day a D47 is minted, the three
-# prose sites and every script knob move together or a required step goes red.
+# The LIVE D-id range, in its TWO spellings. It tracks the LIVE range, never a frozen historical one:
+# the day a D47 is minted, every file `docs/PROCESS.md` §3 enumerates moves with it or a required step
+# goes red. §3 deliberately states that cascade as a LIST WITH NO COUNT — a derived count rotted there
+# five times — and the Q rows below are what make the list self-checking.
 #
 # WHY TWO SPELLINGS. `xtask/src/doc_lint.rs`'s bump site is ONE physical line carrying BOTH halves: the
 # prose range `(D1..D46)` and the tokenizer's regex ALTERNATION `\bD(46|45|44|…)\b`. Pinning only the
@@ -64,6 +64,15 @@ cd "$(git rev-parse --show-toplevel)" || { say "cannot cd to the repo root"; exi
 # the id it is being told exists.
 RANGE_RE='D1\.\.D46'
 RANGE_ALT_RE='D\(46\|45\|'
+
+# The SAME two spellings as they appear INSIDE a sibling script's knob line, where each backslash is a
+# literal byte rather than a regex operator. DERIVED, never hand-written a second time: a second copy of
+# the range in this file would be a second thing to bump, which is the rot this whole clause exists to
+# stop. `printf '%s'` never interprets its ARGUMENT, so the value passes through untouched; `sed` then
+# turns each `\` into `\\\`, i.e. ERE for "a literal backslash followed by the escaped char".
+knob_re() { printf '%s' "$1" | sed 's/\\/\\\\\\/g'; }
+RANGE_KNOB_RE="$(knob_re "$RANGE_RE")"
+RANGE_KNOB_ALT_RE="$(knob_re "$RANGE_ALT_RE")"
 
 # =================================================================================================
 # REQUIRED LANDINGS — `code@path@regex@what it proves`
@@ -109,16 +118,26 @@ P10@crates/unblock-storage/src/libsql/migrations.rs@\(\"redacted_at\", \"DATETIM
 # =================================================================================================
 # ROW-ANCHORED LANDINGS — `code@path@anchor@regex@what it proves`
 #
-# Q1..Q4 are the three D-range bump sites, all anchored on their own normative line. A file-level token
+# Q1..Q4 are the PROSE D-range bump sites, all anchored on their own normative line. A file-level token
 #       check proves the literal is SOMEWHERE in the file, so a document that ALSO discusses the range
 #       in explanatory prose passes with its NORMATIVE statement still carrying the retired literal —
 #       a defect D45 actually hit on ci-cd-and-distribution.md.
+# Q5..Q7 are the SIBLING SCRIPTS' live-range knobs, and they are what makes `docs/PROCESS.md` §3's
+#       count-free ENUMERATION self-checking: every file that list names is pinned against the range
+#       this script holds, so a bump that skips one file, or a list that omits one, goes red instead of
+#       rotting silently. THIS script's own knob has NO row, deliberately and not by oversight: it is
+#       the REFERENCE the other rows are compared against, so a self-row could never fail. The cover is
+#       complete either way — bump this knob alone and Q1..Q7 go red; bump everything but this knob and
+#       Q1..Q7 go red too. Do not "restore" a self-row; it would be vacuous by construction.
 # =================================================================================================
 REQUIRE_ROW="
-Q1@CLAUDE.md@^\| .docs/PRD\.md. \| Product truth@$RANGE_RE@D-range bump site 1 of 3, LOCATED on the document-map row that states the range
-Q2@docs/plans/ci-cd-and-distribution.md@\*\*\(a\) D-id coherence\*\*@$RANGE_RE@D-range bump site 2 of 3, LOCATED on the class-(a) statement — the ONE place in that file allowed to quote the live range
-Q3@xtask/src/doc_lint.rs@Spec tokenizes@$RANGE_RE@D-range bump site 3 of 3, half 1 of 2: the PROSE range on the tokenizer comment line
-Q4@xtask/src/doc_lint.rs@Spec tokenizes@$RANGE_ALT_RE@site 3 of 3, half 2 of 2: the TOKENIZER ALTERNATION on that same line
+Q1@CLAUDE.md@^\| .docs/PRD\.md. \| Product truth@$RANGE_RE@PROSE D-range bump site, LOCATED on the document-map row that states the range
+Q2@docs/plans/ci-cd-and-distribution.md@\*\*\(a\) D-id coherence\*\*@$RANGE_RE@PROSE D-range bump site, LOCATED on the class-(a) statement — the ONE place in that file allowed to quote the live range
+Q3@xtask/src/doc_lint.rs@Spec tokenizes@$RANGE_RE@PROSE D-range bump site, half 1 of 2: the PROSE range on the tokenizer comment line
+Q4@xtask/src/doc_lint.rs@Spec tokenizes@$RANGE_ALT_RE@…half 2 of 2: the TOKENIZER ALTERNATION on that same line
+Q5@scripts/checks/d44-create-deps-claims.sh@^RANGE_RE=@$RANGE_KNOB_RE@the D44 sibling's live-range knob carries the SAME range as this script — anchored on the knob line, so the file's own prose about the knob cannot satisfy the pin
+Q6@scripts/checks/ub-lp9.25-dangling-blocker-claims.sh@^RANGE_RE=@$RANGE_KNOB_RE@the D45 sibling's live-range knob, same anchoring and same reason
+Q7@scripts/checks/ub-lp9.25-dangling-blocker-claims.sh@^RANGE_ALT_RE=@$RANGE_KNOB_ALT_RE@…and that sibling's ALTERNATION knob, which is a separate line and therefore a separate way to be half-bumped
 "
 
 blocked=0
@@ -184,8 +203,8 @@ p_count="$(count_rows "$REQUIRE" '^P[0-9]')"
 q_count="$(count_rows "$REQUIRE_ROW" '^Q[0-9]')"
 
 check_table_floor 'required-landing (P)' "$p_count" 10 || blocked=1
-check_table_floor 'row-anchored (Q)' "$q_count" 4 || blocked=1
+check_table_floor 'row-anchored (Q)' "$q_count" 7 || blocked=1
 
 [ "$blocked" = "0" ] || exit 1
-say "OK — both D46 compile-time assertions and the sentinel-subject binding are still in the tree, the two schema-version constants carry their D46 values, the ladder's step still names both post-baseline columns, the pre-open stamp is captured AND consumed, the tracker record names the decision, and the live D-range is current at all three prose sites."
+say "OK — both D46 compile-time assertions and the sentinel-subject binding are still in the tree, the two schema-version constants carry their D46 values, the ladder's step still names both post-baseline columns, the pre-open stamp is captured AND consumed, the tracker record names the decision, and the live D-range is current at every prose site and every sibling script knob the PROCESS.md §3 list enumerates."
 exit 0
