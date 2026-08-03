@@ -83,6 +83,13 @@ insta = { workspace = true }
 serde_json = { workspace = true }
 # Temp `.unblock/` workspaces for the config-facade harness path.
 tempfile = { workspace = true }
+# TEST-ONLY (D46): the `doctor` schema-findings cell re-stamps a MIGRATED file-backed workspace to
+# the BASELINE `PRAGMA user_version` through a raw libsql open — the only way to make the observed
+# stamp and the version this build expects genuinely DIFFER, which is what stops that pair of
+# findings from being pinned by a comparison of one value against itself. Same seam
+# `crates/unblock-cli/tests/migrate_doctor.rs` already uses, same feature set as the storage crate's
+# private backend dep (bundled SQLite, no TLS/network — RK-4). Never linked into the shipped binary.
+libsql = { workspace = true }
 # NFR-1 HYBRID engine-overhead perf gate (T3.5/D34): `benches/engine.rs`. Already declared
 # workspace-wide (root Cargo.toml, `features=[async_tokio]`); adds no NEW transitive surface.
 criterion = { workspace = true }

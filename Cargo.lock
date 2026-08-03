@@ -2949,6 +2949,7 @@ dependencies = [
  "chrono",
  "criterion",
  "insta",
+ "libsql",
  "proptest",
  "schemars",
  "serde",
