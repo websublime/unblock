@@ -634,9 +634,28 @@ impl ErrorCode {
     //     StaticText     -> InvalidPriority | InvalidStatus | InvalidType
     //                       (ModelError::hint() -> the pinned PRIORITY_DETAIL_HINT /
     //                        VALID_STATUS_HINT / VALID_TYPE_HINT constants, hints.rs)
-    //     ContextualText -> ValidationFailed                     (site-composed guidance: the mcp
-    //                       over-quota + bulk-markdown-parse hints)
-    //     None           -> every other code (the remaining 31 of 36)
+    //     ContextualText -> ValidationFailed | SchemaMismatch    (site-composed guidance: the mcp
+    //                       over-quota + bulk-markdown-parse hints; and, since D46 (v1.0.1), the
+    //                       STALE-SCHEMA self-correction hint — see the D46 note below)
+    //     None           -> every other code (the remaining 30 of 36)
+    //   D46 (v1.0.1) — `SchemaMismatch` MOVES OFF `None`, and the shape is `ContextualText` rather
+    //   than `StaticText` for a reason that is a FACT about this code, not a preference: ONE code
+    //   serves TWO OPPOSITE directions. A database BELOW this build's version (or a stamp that lies
+    //   about its shape) must be told to run `unblock migrate`; a database ABOVE it must be told to
+    //   upgrade the binary — the D46 backward direction, see §3.2 clause (vi). A fixed per-code text
+    //   would be wrong for one of them, so the hint is composed per failure rather than per code: it
+    //   says WHAT HAPPENED (the stamp found, the version expected, and — on the lying-stamp path — the
+    //   columns actually missing) and WHAT TO RUN. THE PRODUCTION SITE, named: a new `hint()` on
+    //   `impl CodedError for StorageError` (`unblock-storage`, `src/error.rs`), rendering the failing
+    //   variant's own fields — and `ConfigError` FORWARDS it on `DbOpenFailed`/`MigrationFailed`, the
+    //   way it already forwards `code()`, because the D46 step runs implicitly on OPEN and that
+    //   boundary would otherwise drop it. The §2.2 honesty rule is satisfied because the production
+    //   hint site ships in the SAME change — and the forwarding arm is part of what "ships" means
+    //   here: a hint the normative path discards is not a production hint site. COST, stated because it is a published-byte move and not
+    //   free: `hint_shape` rides the mcp `capabilities()` error map, so this re-pins `CONTRACT_HASH`
+    //   and bumps `CONTRACT_VERSION` `unblock.mcp.v1.8` -> `unblock.mcp.v1.9` (§5.4 ledger). Under
+    //   D35 an additive `.M` bump inside 1.x is NON-breaking, and this is the FOURTH such bump in the
+    //   v1.0.1 slot (v1.6/D42, v1.7/D44, v1.8/D45, v1.9/D46).
     pub const fn static_hint(self) -> Option<&'static str>; // the fixed text for StaticText codes,
     //   None otherwise. The SINGLE source of the fixed hint texts (`ModelError::hint` delegates
     //   here), so `hint_shape() == StaticText ⟺ static_hint().is_some()` holds by construction.
@@ -819,10 +838,114 @@ pub enum StorageError {
 pub trait Storage: Send + Sync {
     // --- lifecycle ---
     async fn migrate(&self) -> Result<(), StorageError>;
+    //  THE MIGRATION CONTRACT (D46, v1.0.1 — NORMATIVE). Bring the on-disk schema to
+    //  CURRENT_SCHEMA_VERSION, idempotently, and stamp it: ordered forward steps, lowest first. Note what
+    //  cannot substitute for one — SCHEMA_SQL is `CREATE … IF NOT EXISTS` throughout, so RE-APPLYING IT
+    //  CAN NEVER ADD A COLUMN. Re-application is not a repair mechanism; a step is.
+    //  (0) THE FROZEN-BASELINE DISCIPLINE — THE RULE A FUTURE STEP AUTHOR NEEDS, so read it first.
+    //      SCHEMA_SQL IS FROZEN at the shape it had when the ladder began: a 5-column `comments`
+    //      table (id, issue_id, author, text, created_at). ADDING A STEP DOES NOT PERMIT EDITING
+    //      SCHEMA_SQL — the two are ALTERNATIVES, never a pair. Every element added after the
+    //      baseline exists ONLY as a step; the constant deliberately no longer describes the current
+    //      schema, and a reader who needs that shape REPLAYS the ladder over it. A fresh database is
+    //      created at the BASELINE, stamped BASELINE_SCHEMA_VERSION, and then FALLS THROUGH the
+    //      ladder like any other, so THERE IS EXACTLY ONE PATH to the current shape and every fresh
+    //      install exercises every step. That is the point: this defect existed because the fresh
+    //      path worked while the ladder path was never exercised even once.
+    //  (i) THE INVARIANT — A STAMPED VERSION IMPLIES A KNOWN SHAPE. From step 3 onward every step applies
+    //      its DDL UNCONDITIONALLY, because the version it advances FROM denotes exactly one physical
+    //      shape. A step MUST NOT inspect the database to decide what to do. This is the sentence whose
+    //      absence caused the defect D46 repairs: stamp 1 was allowed to mean two different `comments`
+    //      tables, so a binary could not tell a stale database from a current one. (0) IS WHAT MAKES
+    //      THIS PROVABLE RATHER THAN ASSERTED: since SCHEMA_SQL never carries a post-baseline column,
+    //      no fresh database can already have one, and no other creation path exists — so a database
+    //      stamped N has run exactly steps BASELINE+1..=N and its shape IS their composition. Were
+    //      the DDL allowed to grow in place alongside the ladder, the first step whose column was
+    //      also added to the DDL would hard-error `duplicate column name` on every fresh install.
+    //  (ii) THE ONE-TIME EXCEPTION — step 2, and NO other step, ever. Stamp 1 covers TWO physical shapes
+    //      (`comments` with 5 columns before 2026-07-17; 7 from `v1.0.0-rc.4` on, because D37 edited the
+    //      baseline CREATE TABLE in place instead of shipping a step). Step 2 therefore SENSES the shape
+    //      before it acts — one `PRAGMA table_info(comments)`, adding only the columns actually absent —
+    //      and it is carried by an UNPARAMETERISED, single-purpose step kind precisely so that a later
+    //      step cannot reuse it. THE SENSING IS LOAD-BEARING ON THE LARGEST HALF OF THE POPULATION,
+    //      NOT A HISTORICAL COURTESY: an existing GA database carries all SEVEN columns and is stamped
+    //      1, so under (0) it falls through the ladder and REACHES STEP 2 WITH THE COLUMNS ALREADY
+    //      PRESENT. Step 2 is the one step whose FROM-version does not denote one shape — the debt it
+    //      pays off. COPYING ITS SHAPE INTO A STEP 3 OR LATER IS A CONTRACT VIOLATION, not a
+    //      style choice. Once every stamp-1 database has become stamp-2, (i) holds for every version this
+    //      product will ever write; there is no second exception and none may be minted.
+    //  (iii) ATOMICITY — a step's DDL and its `PRAGMA user_version` write commit TOGETHER in ONE
+    //      `BEGIN IMMEDIATE`. A step that applied DDL and stamped separately could crash between them and
+    //      manufacture a third shape, which is exactly the ambiguity (i) exists to forbid.
+    //  (iv) WHEN IT RUNS (the D46 policy, binding on every future step). IMPLICIT ON OPEN is permitted
+    //      ONLY for an ADDITIVE/nullable step: the config open facade already migrates on open (FR-9
+    //      single open path) and already holds the D31 advisory `.write.lock` across the version read and
+    //      the run, so real DDL there introduces no new lock discipline. A DESTRUCTIVE, DATA-REWRITING or
+    //      LONG-RUNNING step is EXPLICIT-ONLY, gated behind the `unblock migrate` command — it may not
+    //      run inside an `unblock mcp` startup an agent never asked for. THE STEP'S CLASS decides, never
+    //      the caller's convenience.
+    //  (v) A STAMP THAT LIES IS AN ERROR, never a silent read failure. `migrate` ends on EVERY path —
+    //      including the already-at-current early return — by witnessing the NEWEST step's own columns,
+    //      returning `StorageError::Migration` (→ `SchemaMismatch`, exit 2) naming what is missing. It is
+    //      a bounded per-step POSTCONDITION: its result never decides which DDL to run (only step 2 ever
+    //      decides anything from a probe), and it is NOT a conformance comparison of the live schema
+    //      against SCHEMA_SQL — that is deliberately out of scope (PRD §4, D46).
+    //      THE ERROR CARRIES A HINT (NORMATIVE — D46). "Actionable" is delivered literally: the failure
+    //      attaches a `StructuredError.hint` (§2.4) saying WHAT HAPPENED and WHAT TO RUN — the stamp
+    //      found, the version this build expects, the columns actually missing on the lying-stamp path,
+    //      and the ONE command that repairs it. It is NOT a per-code constant, because this code also
+    //      serves the opposite direction ((vi)) where the remedy is the opposite instruction.
+    //      WHO COMPOSES IT — named, because "at the site" names nothing: a NEW `hint()` method on
+    //      `impl CodedError for StorageError` (crate `unblock-storage`, `src/error.rs`, beside the
+    //      existing `code()`/`context()` arms), rendering the FIELDS of the failing variant —
+    //      `Migration { from, to, reason }` here, `SchemaMismatch { found, expected }` on the (vi)
+    //      direction — which `src/libsql/migrations.rs` populates at the failure site.
+    //      WHERE IT WOULD OTHERWISE BE LOST — the (iv) implicit-on-open path runs through
+    //      `unblock-config`'s open facade, whose `impl CodedError for ConfigError` implements only
+    //      `code()`, so the trait DEFAULT `hint() -> None` (§2.1 `CodedError`) drops it before
+    //      `StructuredError` is built. `ConfigError` therefore FORWARDS `source.hint()` on its
+    //      `DbOpenFailed`/`MigrationFailed` variants, mirroring the `code()` forward those two
+    //      already share. `EngineError` needs no change: it already forwards its storage source's
+    //      hint. Publishing the shape while emitting no hint is not an option — it is this
+    //      decision's own failure mode in the contract's clothes.
+    //      The hint may NOT advise a recovery the product cannot perform in that state —
+    //      concretely, "export and re-import" is invalid while the shape is stale, because `sync export`
+    //      is itself among the tools a stale `comments` table breaks. COST, accepted and stated:
+    //      `SchemaMismatch` moves off `HintShape::None` onto `ContextualText` (§2.2), a published byte in
+    //      `capabilities().error_codes`, so `CONTRACT_VERSION` bumps `unblock.mcp.v1.8` -> `v1.9` with a
+    //      `CONTRACT_HASH` re-pin (§5.4 ledger) — additive, hence non-breaking under D35.
+    //  (vi) THE TWO ENDS. A DB stamped NEWER than this build → `SchemaMismatch` (unchanged; §4.1) —
+    //      which, since D46 bumps the stamp, is now a REACHABLE direction and not a hypothetical: a GA
+    //      1.0.0 binary meeting a database this ladder moved to 2 REFUSES it with exit 2. PRD §4 D46
+    //      records that this is NOT a breaking change under D35 (D35's stable set is the MCP contract,
+    //      the CLI lifecycle surface and the 0–8 exit codes — the ON-DISK SCHEMA is not among them), and
+    //      refusing with a clear error is the CORRECT behaviour, strictly better than misreading. A DB
+    //      stamped 0 that ALREADY carries tables takes the BASELINE stamp and then FALLS THROUGH the
+    //      ladder — never the current stamp directly, which would assert a shape nobody verified and put
+    //      the database beyond the reach of the very step that repairs it. Under (0) that is ALSO the
+    //      rule for a TRULY EMPTY database: it is created at the baseline, stamped BASELINE, and falls
+    //      through, so a FRESH INITIALISATION GENUINELY APPLIES A STEP — `migrate` on an unmigrated
+    //      store reports `from: 0`, `to: CURRENT`, `applied: true`, and no caller may assume a fresh
+    //      database applies nothing. WHAT `Session::migrate` SEES IS NOT WHAT THE COMMAND REPORTS —
+    //      D46 clause (10), which CORRECTS the rule this clause carried until 2026-08-03. The ENGINE
+    //      half is unchanged: on a workspace the facade already migrated, `Session::migrate` still
+    //      returns `from == to`, `applied: false`, because the facade ran the ladder before it read
+    //      `from`. The `unblock migrate` COMMAND no longer renders that: the facade RECORDS the stamp
+    //      it read BEFORE migrating on `WorkspaceContext::schema_version_before_migrate` (§4 CF-D) and
+    //      the command reports the PRE-OPEN delta — a stale database `1`→`2` `applied: true`, a
+    //      never-migrated one `0`→`2` `applied: true`. §5b `migrate` carries the mechanism.
+    //  (vii) THE OBLIGATION THIS CONTRACT DISCHARGES is NFR-19 (PRD §6): a released binary MUST open a
+    //      database written by any earlier released binary, by migrating it forward. Before D46 nothing
+    //      in the tree stated that, which is the root cause of the defect CLASS rather than of this
+    //      instance — a numbered requirement is what a test suite and a gate can cite.
+
     async fn integrity_check(&self) -> Result<Vec<String>, StorageError>; // libsql integrity_check rows
     async fn schema_version(&self) -> Result<i64, StorageError>;           // D27/AF-2 (T3.1) — PRAGMA user_version, PURE READ
-    //  Read the current on-disk schema version (a fresh/unstamped DB reports 0; a migrated DB at the current
-    //  baseline reports CURRENT_SCHEMA_VERSION). A pure read (no write permit, no migration side-effect) so the
+    //  Read the current on-disk schema version (an UNSTAMPED DB — one never migrated — reports 0; a migrated DB
+    //  reports CURRENT_SCHEMA_VERSION. Since D46 that is NOT the same as "the version SCHEMA_SQL creates": the
+    //  DDL is frozen at BASELINE_SCHEMA_VERSION and a freshly created DB reaches CURRENT by running the ladder,
+    //  so 0 -> CURRENT is a real migration even on a brand-new file — see the `migrate` contract, clause (0)).
+    //  A pure read (no write permit, no migration side-effect) so the
     //  engine can report `migrate`'s from→to delta without re-opening. Backend-agnostic `i64` (the on-disk value is
     //  a PRAGMA integer; libsql's internal helper is i32 but the trait keeps the wider type so no backend width
     //  leaks — the libsql impl widens with `i64::from(current_user_version(..))`). Every `Storage` impl states it
@@ -1804,6 +1927,15 @@ pub struct WorkspaceContext {
     pub config: ResolvedConfig,        // config-owned (DEFINED in unblock-config)
     pub paths: ConfigPaths,            // config-owned: resolved `.unblock/` + db/jsonl paths (T1.3a)
     pub source: WorkspaceSource,       // which discovery tier bound the dir (D39 — ADDITIVE)
+    pub schema_version_before_migrate: i64, // D46 clause (10) — ADDITIVE. `PRAGMA user_version` read via the
+                                       // EXISTING pure `Storage::schema_version()` (§3.2) BETWEEN
+                                       // `LibsqlStorage::open_local` and this facade's own `migrate()` —
+                                       // the ONLY moment it is observable, because the facade migrates on
+                                       // open (FR-9 single open path) and every later reader therefore sees
+                                       // the POST-repair stamp. `0` on a never-migrated database. Consumed
+                                       // by the cli `migrate` command (§5b); the ENGINE ignores it exactly
+                                       // as it ignores `source` (the D39 precedent — `Session::open`
+                                       // destructures it to `_`), so no L4→L5 contract moves.
 }
 pub async fn open_with_storage(start: &Path) -> Result<WorkspaceContext, ConfigError>;
 
@@ -2190,12 +2322,22 @@ impl Session {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct MigrateOutcome { pub from: i64, pub to: i64, pub applied: bool }
     pub async fn migrate(&self) -> Result<MigrateOutcome, EngineError>; // D27/AF-2 (T3.1) — additive engine passthrough
-    //   Ensure the schema is at the current baseline, idempotently, and report the from→to delta. Runs UNDER the
+    //   Ensure the schema is at CURRENT_SCHEMA_VERSION, idempotently, and report the from→to delta. Runs UNDER the
     //   single write permit (D14 — migration is a write-path op): reads `from = storage.schema_version()`, runs the
     //   idempotent `storage.migrate()` (a no-op on a current DB), re-reads `to`, returns `{from, to, applied: from!=to}`.
     //   A DB stamped NEWER than this build surfaces the transparent `StorageError::SchemaMismatch` (→ exit 2), never a
     //   fake success. Because the config open facade migrates on open (FR-9 single open path), `applied` is normally
-    //   `false` post-open — an honest idempotent signal, not a phantom applied-list. Backs the cli `migrate` command.
+    //   `false` post-open — an honest idempotent signal, not a phantom applied-list. **D46: `applied: false` is NOT a
+    //   property of a fresh workspace, only of an already-opened one.** Under §3.2 clause (0) a never-migrated store
+    //   reports `from: 0`, `to: CURRENT`, `applied: true`, because a fresh database is created at the BASELINE and
+    //   reaches the current shape by running the ladder. **D46 clause (10) — THIS TYPE IS UNCHANGED, AND THE CLI
+    //   NO LONGER RENDERS ALL OF IT.** `from` keeps its published meaning — the stamp THIS call observed under the
+    //   permit — so it is `== to` on a facade-opened workspace and there is no honest pre-open delta to be had here.
+    //   The cli `migrate` command therefore takes `schema_from`/`applied` from
+    //   `WorkspaceContext::schema_version_before_migrate` (§4 CF-D) and only `schema_to` from `to` above. Widening
+    //   `MigrateOutcome.from` to mean the pre-open stamp was REJECTED: it would make an engine type report a
+    //   version its own call never observed, and would falsify the idempotence cell that pins `from == to` post-open.
+    //   Backs the cli `migrate` command (§5b).
     //
     // (OQ-2 RESOLVED: doctor + recover ARE part of the public Session surface.)
     // PRECISION NOTE (T2.2): the mcp `diagnostics` TOOL (§5.1, the 7-kind read path — EIGHT kinds since
@@ -2221,7 +2363,7 @@ impl Session {
     //   Healthy/Drifted/Recoverable/Unsafe taxonomy + `--repair` + `.unblock/.recovery/` evidence land ADDITIVELY
     //   over the `doctor()`/`recover()` seam at **v1.1**; `recover()` stays FeatureNotWired through v1. (Earlier
     //   prose put the cli→doctor() routing at T3.1 — that is the T3.3 refinement, not a T3.1 fact.)
-    pub async fn doctor(&self) -> Result<DiagnosticReport, EngineError>;  // FR-15/FR-16. v1 pre-T3.3 = SIGNATURE only (returns EngineError::FeatureNotWired{feature:"health"}); **T3.3 (HEALTH-LITE, D29) wires the LITE aggregation** — integrity_check rows + pure file-state classification via unblock-health `run_doctor` → DoctorReport, mapped onto DiagnosticReport REUSING DiagnosticKind::Info (NO new model variant, NO §1.10/CONTRACT_HASH change — F2). The cli doctor routes through this from T3.3 (see the note above). **D45 — the dangling-dependency findings are FOLDED IN HERE, in the ENGINE.** `Session::doctor()` additionally awaits the SAME engine-side ONE HOME `diagnostics(Dangling)` uses (§3.2.1 — not a second implementation; since the 2026-08-02 amendment that home is a thin map over the ONE read `Storage::dangling_dependencies()`, which is why keeping it a single home costs nothing) and APPENDS its findings, in the pinned `(issue_id, dep_type, depends_on_id)` order the read's `ORDER BY` produces, to the `DiagnosticKind::Info` report AFTER the file-state anomalies (deterministic overall order, NFR-14). The report's `kind` stays `Info` — the fold changes no §1.10 byte; the `Dangling` KIND exists for the `diagnostics` tool arm, where the response must declare what it is. **`unblock_health::run_doctor` is NOT given a third argument and its signature does NOT change, and `unblock-health` gains NO `unblock-storage` dependency:** the list is DB-derived, and D29 clause F3 makes `run_doctor` PURE, non-async and storage-free — that clause is PRESERVED, not reversed. Composing in the engine fold is exactly how the engine already folds in the pure file-state anomalies; passing DB rows into `run_doctor` would REVERSE a shipped clause and would need its own decision id, which D45 deliberately does not mint (it already carries one reversal — the shared-insert-body placement). **D45 — COST, stated rather than discovered later. AMENDED 2026-08-02: the deferral this paragraph recorded is CANCELLED and the fold is now ONE SQL query.** The fold is UNCONDITIONAL on every `doctor()` call, so its cost sits on a command whose whole point is to be safe to run on a sick workspace. **The SUPERSEDED design and its SUPERSEDED numbers, kept visible rather than overwritten, because they are the evidence that forced the change:** the fold used to difference a whole-graph edge load against a FULLY-INCLUSIVE `list_issues` (closed + deferred + tombstone), hydrating labels, dependencies and comments for every row merely to derive an id SET — O(rows + edges) work and O(rows) peak memory — and the single-query alternative (one `LEFT JOIN … WHERE i.id IS NULL` excluding external targets, costing a new `Storage` method and its implementors) was DEFERRED to v1.1 on a LAPTOP measurement of "the fold costs 4.51s / 4.55s / 4.65s and the composed `doctor()` costs 7.00s / 7.05s / 7.12s, of which the pre-D45 half is 2.47s / 2.48s / 2.53s". **Those numbers UNDERSTATED the cost, and the CI `scale` job — not a review — is what caught it:** on the CI runner the same 250k fixture measured `integrity_check` **5.51 s**, the fold **10.72 s**, and `doctor()` **16.31 s** against the 15 s boundedness guard, i.e. a RED required job. A laptop number is not a gate; the gate is the gate. **Miguel ruled (2026-08-02) that the composition moves into ONE SQL query**, rejecting both alternatives offered (raise the guard — no, the guard did its job; drop the fold — no, the standalone `diagnostics {kind:"dangling"}` action pays the identical 10.72 s and would then have nothing watching it). The mechanism, the SQL and the carried-forward TRAP are in §3.2.1 `dangling`; the read is `Storage::dangling_dependencies()` (§3.2). **THE MEASUREMENT OBLIGATION IS UNCHANGED AND STILL DISCHARGED IN CODE, not in prose that can go stale.** Fixture: the EXISTING large-workspace fixture `crates/unblock-engine/tests/scale.rs` (NFR-2, the storage-direct 250k `seed_corpus`), dev profile, run as the CI `scale` job runs it (`cargo test -p unblock-engine --features testkit --test scale`); the measurement is a REPORTING pair of timings inside `run_scale` (`diagnostics(Dangling)` = the fold's exact added work, since `doctor()` awaits the SAME read; then `doctor()` = the composed total), re-derived on every `scale` run. **POST-AMENDMENT, at 250k rows, three runs on the SAME laptop class the superseded 4.51s/7.00s pair was taken on (so the two are directly comparable): the fold costs 88.7µs / 88.4µs / 88.7µs and the composed `doctor()` costs 2.529s / 2.567s / 2.520s, of which `integrity_check` alone is 2.516s / 2.542s / 2.533s. The fold went from 4.51s to 88.7µs — a ~51 000x reduction — and `doctor()` is now `integrity_check` plus roughly a tenth of a millisecond: the fold is ~0.004% of the total and has stopped being a term in it.** The CI runner measured `integrity_check` about 2.2x slower than this machine (5.51s vs 2.52s), so the same ratio puts CI's `doctor()` near 5.6s against the unchanged 15s guard. The absolute values are environment-dependent and are not a budget (the cell asserts only the existing generous boundedness guard, never a ceiling); the SHAPE is the finding — a full-corpus hydration became a single join over the edge table, so the fold's cost stopped scaling with the ROW count. **Two honesty bounds, stated so a later reader does not over-trust the number:** (a) `seed_corpus` writes rows with NO dependencies, so the 250k corpus has an EMPTY `dependencies` table — the query's driving table is empty here, and a workspace with a real edge graph pays more, though now proportionally to the EDGE count rather than to the ROW count, which is the point of the change; (b) the fold is a read with no write permit, so the cost is latency on the caller, not lock hold time. **Feature-gate placement, previously MIS-stated and corrected here:** `Session::doctor()` is NOT `#[cfg]`-gated. The method is declared UNCONDITIONALLY (`crates/unblock-engine/src/session/lifecycle.rs:167-184`); only its two BODY blocks carry the gate — a `#[cfg(feature = "health")]` block that composes the report and a `#[cfg(not(feature = "health"))]` block that returns `EngineError::FeatureNotWired { feature: "health" }` — which is why `crates/unblock-cli/src/commands/doctor.rs:43` calls it with no `cfg` of its own. **So the fold lands INSIDE the existing `#[cfg(feature = "health")]` body block, immediately before its `Ok(…)`**, and the `not(health)` block keeps returning `FeatureNotWired` untouched. **The shared dangling ONE HOME itself is UN-GATED, and that is load-bearing rather than incidental:** it is the same engine fn the `diagnostics {kind:"dangling"}` arm calls, and that arm's dispatch (`crates/unblock-engine/src/diagnostics.rs:49-57`) carries no feature gate at all — putting the composition under the `health` cfg would fail to COMPILE the new arm in a `--no-default-features` build. The cost note above is therefore a statement about a `health`-enabled `doctor()` run; the MCP action pays the same cost in every build.
+    pub async fn doctor(&self) -> Result<DiagnosticReport, EngineError>;  // FR-15/FR-16. v1 pre-T3.3 = SIGNATURE only (returns EngineError::FeatureNotWired{feature:"health"}); **T3.3 (HEALTH-LITE, D29) wires the LITE aggregation** — integrity_check rows + pure file-state classification via unblock-health `run_doctor` → DoctorReport, mapped onto DiagnosticReport REUSING DiagnosticKind::Info (NO new model variant, NO §1.10/CONTRACT_HASH change — F2). The cli doctor routes through this from T3.3 (see the note above). **D45 — the dangling-dependency findings are FOLDED IN HERE, in the ENGINE.** `Session::doctor()` additionally awaits the SAME engine-side ONE HOME `diagnostics(Dangling)` uses (§3.2.1 — not a second implementation; since the 2026-08-02 amendment that home is a thin map over the ONE read `Storage::dangling_dependencies()`, which is why keeping it a single home costs nothing) and APPENDS its findings, in the pinned `(issue_id, dep_type, depends_on_id)` order the read's `ORDER BY` produces, to the `DiagnosticKind::Info` report AFTER the file-state anomalies (deterministic overall order, NFR-14). **D46 (v1.0.1) — this SAME body additionally folds in TWO ADVISORY schema-version findings (the stamp observed on disk, the version this build expects) over the EXISTING pure `Storage::schema_version()` read (§3.2), and their PLACEMENT IS NORMATIVE: BETWEEN the file-state anomalies and the D45 dangling rows, so the DANGLING BLOCK REMAINS THE REPORT'S TRAILING SUFFIX.** That is a RULING (2026-08-03 design gate), not a preference, and its reason is a shipped required cell rather than aesthetics: `crates/unblock-engine/tests/dangling.rs:337-341` asserts the dangling rows are that suffix and its `:311-312` docstring names "folding the rows in BEFORE the file-state anomalies (the suffix assertion goes red)" among the mutants it kills — so appending the D46 rows AFTER the block would redden a required CI step, and relaxing the suffix to a subsequence would retire that D45 mutation proof for no gain. The two findings are ADVISORY (they report two integers and COMPARE nothing), so the exit rule and `doctor_exit` are byte-identical and `unblock-health` is AGAIN not touched (D29 clause F3 preserved). The report's `kind` stays `Info` — the fold changes no §1.10 byte; the `Dangling` KIND exists for the `diagnostics` tool arm, where the response must declare what it is. **`unblock_health::run_doctor` is NOT given a third argument and its signature does NOT change, and `unblock-health` gains NO `unblock-storage` dependency:** the list is DB-derived, and D29 clause F3 makes `run_doctor` PURE, non-async and storage-free — that clause is PRESERVED, not reversed. Composing in the engine fold is exactly how the engine already folds in the pure file-state anomalies; passing DB rows into `run_doctor` would REVERSE a shipped clause and would need its own decision id, which D45 deliberately does not mint (it already carries one reversal — the shared-insert-body placement). **D45 — COST, stated rather than discovered later. AMENDED 2026-08-02: the deferral this paragraph recorded is CANCELLED and the fold is now ONE SQL query.** The fold is UNCONDITIONAL on every `doctor()` call, so its cost sits on a command whose whole point is to be safe to run on a sick workspace. **The SUPERSEDED design and its SUPERSEDED numbers, kept visible rather than overwritten, because they are the evidence that forced the change:** the fold used to difference a whole-graph edge load against a FULLY-INCLUSIVE `list_issues` (closed + deferred + tombstone), hydrating labels, dependencies and comments for every row merely to derive an id SET — O(rows + edges) work and O(rows) peak memory — and the single-query alternative (one `LEFT JOIN … WHERE i.id IS NULL` excluding external targets, costing a new `Storage` method and its implementors) was DEFERRED to v1.1 on a LAPTOP measurement of "the fold costs 4.51s / 4.55s / 4.65s and the composed `doctor()` costs 7.00s / 7.05s / 7.12s, of which the pre-D45 half is 2.47s / 2.48s / 2.53s". **Those numbers UNDERSTATED the cost, and the CI `scale` job — not a review — is what caught it:** on the CI runner the same 250k fixture measured `integrity_check` **5.51 s**, the fold **10.72 s**, and `doctor()` **16.31 s** against the 15 s boundedness guard, i.e. a RED required job. A laptop number is not a gate; the gate is the gate. **Miguel ruled (2026-08-02) that the composition moves into ONE SQL query**, rejecting both alternatives offered (raise the guard — no, the guard did its job; drop the fold — no, the standalone `diagnostics {kind:"dangling"}` action pays the identical 10.72 s and would then have nothing watching it). The mechanism, the SQL and the carried-forward TRAP are in §3.2.1 `dangling`; the read is `Storage::dangling_dependencies()` (§3.2). **THE MEASUREMENT OBLIGATION IS UNCHANGED AND STILL DISCHARGED IN CODE, not in prose that can go stale.** Fixture: the EXISTING large-workspace fixture `crates/unblock-engine/tests/scale.rs` (NFR-2, the storage-direct 250k `seed_corpus`), dev profile, run as the CI `scale` job runs it (`cargo test -p unblock-engine --features testkit --test scale`); the measurement is a REPORTING pair of timings inside `run_scale` (`diagnostics(Dangling)` = the fold's exact added work, since `doctor()` awaits the SAME read; then `doctor()` = the composed total), re-derived on every `scale` run. **POST-AMENDMENT, at 250k rows, three runs on the SAME laptop class the superseded 4.51s/7.00s pair was taken on (so the two are directly comparable): the fold costs 88.7µs / 88.4µs / 88.7µs and the composed `doctor()` costs 2.529s / 2.567s / 2.520s, of which `integrity_check` alone is 2.516s / 2.542s / 2.533s. The fold went from 4.51s to 88.7µs — a ~51 000x reduction — and `doctor()` is now `integrity_check` plus roughly a tenth of a millisecond: the fold is ~0.004% of the total and has stopped being a term in it.** The CI runner measured `integrity_check` about 2.2x slower than this machine (5.51s vs 2.52s), so the same ratio puts CI's `doctor()` near 5.6s against the unchanged 15s guard. The absolute values are environment-dependent and are not a budget (the cell asserts only the existing generous boundedness guard, never a ceiling); the SHAPE is the finding — a full-corpus hydration became a single join over the edge table, so the fold's cost stopped scaling with the ROW count. **Two honesty bounds, stated so a later reader does not over-trust the number:** (a) `seed_corpus` writes rows with NO dependencies, so the 250k corpus has an EMPTY `dependencies` table — the query's driving table is empty here, and a workspace with a real edge graph pays more, though now proportionally to the EDGE count rather than to the ROW count, which is the point of the change; (b) the fold is a read with no write permit, so the cost is latency on the caller, not lock hold time. **Feature-gate placement, previously MIS-stated and corrected here:** `Session::doctor()` is NOT `#[cfg]`-gated. The method is declared UNCONDITIONALLY (`crates/unblock-engine/src/session/lifecycle.rs:167-184`); only its two BODY blocks carry the gate — a `#[cfg(feature = "health")]` block that composes the report and a `#[cfg(not(feature = "health"))]` block that returns `EngineError::FeatureNotWired { feature: "health" }` — which is why `crates/unblock-cli/src/commands/doctor.rs:43` calls it with no `cfg` of its own. **So the fold lands INSIDE the existing `#[cfg(feature = "health")]` body block, immediately before its `Ok(…)`**, and the `not(health)` block keeps returning `FeatureNotWired` untouched. **The shared dangling ONE HOME itself is UN-GATED, and that is load-bearing rather than incidental:** it is the same engine fn the `diagnostics {kind:"dangling"}` arm calls, and that arm's dispatch (`crates/unblock-engine/src/diagnostics.rs:49-57`) carries no feature gate at all — putting the composition under the `health` cfg would fail to COMPILE the new arm in a `--no-default-features` build. The cost note above is therefore a statement about a `health`-enabled `doctor()` run; the MCP action pays the same cost in every build.
     pub async fn recover(&self) -> Result<DiagnosticReport, EngineError>; // attempt repair (WAL checkpoint, reindex; reports actions taken). STAYS EngineError::FeatureNotWired{feature:"health"} through v1 (F1/D29) — its body (`--repair` + the `.unblock/.recovery/` evidence writer + the rich repair taxonomy) is **v1.1**, NOT T3.3; wiring a hollow "nothing repaired" report would be the faked success FeatureNotWired forbids.
     pub async fn shutdown(&self) -> Result<(), EngineError>; // flush + close libsql cleanly (FR-17). D38: MUST be reached on BOTH cooperative-shutdown returns of run_mcp_server (Ok AND a post-cancel Err(Transport{Cancelled})) — an Err(Cancelled) never skips the clean libsql close (§0.1/§5b).
 }
@@ -2999,6 +3141,41 @@ edges too:** a `dep add` of a `related` (or any of the 11 named types plus `Cust
 non-existent id is a NEW rejection, not only the `blocks` family — stated here because the class is
 introduced as a never-ready defect, and most edge types do not gate ready work at all.
 
+**D46 (v1.0.1) — the contract bumps to `unblock.mcp.v1.9`.** A SIBLING entry appended to this ledger; the
+D42, D43, D44 and D45 clauses above record what shipped before and are NOT renumbered. D46 is a STORAGE
+decision — the `comments` forward migration (§3.2) — and almost all of it moves no published byte: the
+on-disk schema never enters `schema_bundle()`, `MigrateOutcome` sits outside the contract surface, and the
+two new `doctor` findings are `label`/`detail` pairs inside the already-published `DiagnosticKind::Info`
+report, so no model DTO and no tool schema changes. **ONE thing moves, and it is deliberate rather than
+incidental:** D46 attaches a self-correction HINT to the stale-schema failure, which takes
+`ErrorCode::SchemaMismatch` off `HintShape::None` and onto `ContextualText` (§2.2). A `hint_shape` is
+published per code in `capabilities().error_codes`, so `capabilities()` moves by more than
+`contract_version` — exactly the D25 gate firing as designed — while `schema_bundle()` moves ONLY by its
+own `contract_version` field (the shared `error` schema publishes the `StructuredError` SHAPE, and `hint`
+is already an `Option<String>` property there; no hint VALUE and no `hint_shape` value is a schema byte).
+So `CONTRACT_HASH` is re-pinned and `CONTRACT_VERSION` bumps to `unblock.mcp.v1.9` (unblock-mcp
+`options.rs`), with the `capabilities` golden re-blessed, the `schema_bundle` golden re-blessed for its
+`contract_version` line, and unblock-error's independent quadruple golden (`tests/exit_code_table.rs`)
+re-blessed for the one moved `hint_shape` — that suite's shape TALLY moves with it (`ContextualText` 1→2,
+`None` 31→30). **`agents_digest()` does NOT move — the D44 case, not the D45 one, and for a stated reason:**
+its `ErrorCodeDigest` deliberately omits `hint_shape` (`crates/unblock-mcp/src/resources/agents_digest.rs:88`),
+publishing only `code`/`exit_code`/`retryable`, so the managed `AGENTS.md` error table is byte-identical;
+the ONE `AGENTS.md` byte that moves is the derived contract line, so `unblock agents` is re-run and its
+snapshot twin re-blessed, but no table row changes. D46 mints **no** `ErrorCode` (the hint rides the
+EXISTING `SchemaMismatch`, and `StorageError::Migration` already maps onto it), so `ErrorCode::ALL` stays
+at 36 and the 0–8 exit-code table (§2.3) is untouched; D46 adds **no** MCP tool (the RK-3 budget §6.6
+stands at 8 ≤ 8) and **no** resource, prompt or public API surface — `Storage::migrate` and
+`Storage::schema_version` keep their shipped signatures, the ladder and the step kind being crate-private.
+Per D35 an additive `.M` bump inside 1.x is NON-breaking, so this ships in a PATCH release, and the bump
+rides the IMPLEMENTATION commit with the code constant and the re-blessed goldens — never a spec-only
+commit ahead of them — because `options.rs`, `public_api.rs`, `README.md`, the crate plan's declaring row
+and the two contract snapshots are all asserted against each other (the D45 precedent, stated verbatim
+there). **The ratified behavioural change is stated openly:** a client that met an opaque
+`DATABASE_ERROR`/`retryable:false` with no hint on a stale database now meets `SCHEMA_MISMATCH` (exit 2)
+carrying a hint that names what happened and what to run — and, in the other direction, a build meeting a
+database stamped ABOVE it refuses with the same code and a hint telling it to upgrade the binary (§3.2
+clause (vi); PRD §4 D46 records that this direction is NOT a D35 break).
+
 **`agents_digest()` — a pure DERIVED VIEW, not a wire resource (T3.4.3/D33).** `unblock-mcp` additionally
 exposes `pub fn agents_digest() -> AgentsDigest` next to `schema_bundle()`: a CLI-friendly typed digest (the
 8 tools with their `oneOf`-derived actions + each action's FULL parameter surface — its required AND
@@ -3059,9 +3236,9 @@ pub struct UpdateArgs { /* --check, --version <tag>, --yes */ }
 
 stdout carries ONLY MCP framing (logging is stderr-only, NFR-14). **Supported topology = child-per-client, multiple MCP servers (D31)** — the D14 single-MCP-server-per-workspace clause is RETIRED (§4.2); cross-process writes serialize on the `.unblock/.write.lock`.
 
-**migrate (D27/AF-2).** Opens the context (the facade already migrates on open), opens the `Session`, calls the NEW `Session::migrate() -> MigrateOutcome` (§4.1) under the write permit, builds a CLI-local `MigrateReport { database, schema_from, schema_to, applied }`, maps it onto a `DiagnosticReport { kind: Info, findings }` and emits via `Renderer::diagnostics`. Exit 0 on success; a newer-than-build DB → transparent `SchemaMismatch` → exit 2. Idempotent (`applied` normally `false` post-open).
+**migrate (D27/AF-2).** Opens the context (the facade already migrates on open), opens the `Session`, calls the NEW `Session::migrate() -> MigrateOutcome` (§4.1) under the write permit, builds a CLI-local `MigrateReport { database, schema_from, schema_to, applied }`, maps it onto a `DiagnosticReport { kind: Info, findings }` and emits via `Renderer::diagnostics`. Exit 0 on success; a newer-than-build DB → transparent `SchemaMismatch` → exit 2. Idempotent. **Since D46 (v1.0.1) the OTHER direction is stated too, because it is the direction that was silently broken — AND THIS COMMAND WAS STRUCTURALLY UNABLE TO REPORT IT:** a database written by an EARLIER release is migrated FORWARD by the §3.2 ladder, implicit on open (NFR-19) — but the open facade runs that ladder BEFORE `Session::migrate` reads `from` (`crates/unblock-config/src/context.rs` `open_with_storage_from`, then `crates/unblock-engine/src/session/lifecycle.rs` `Session::migrate`), so the outcome this command used to render could only ever be `from == to`, `applied: false`, on the very database D46 exists to repair. **Miguel ruled (2026-08-03) that the blind spot is WIDENED, not accepted — D46 clause (10).** The facade RECORDS the stamp it read before migrating, on the ADDITIVE `WorkspaceContext::schema_version_before_migrate` (§4 CF-D), and this command COMPOSES its report from that value plus the engine outcome: `schema_from` = the pre-open stamp (copied out of `ctx` before `Session::open` consumes it, exactly as `paths.db_path` and `config.output_format` already are), `schema_to` = `MigrateOutcome.to` (re-read under the D14 write permit), `applied` = the two differ. `MigrateReport`'s FIELDS are unchanged and `MigrateOutcome` is unchanged; what moves is where two of the four values COME FROM — so this command now composes rather than passes through, said plainly here because the pre-ruling text claimed it computed nothing. **THREE observable cases, and they get the SAME treatment:** a STALE database (stamped `1`, five-column `comments`) reports `1`→`2` `applied: true`; a NEVER-MIGRATED database (the facade's `open_local` has just created the file — stamp `0`) reports `0`→`2` `applied: true`, which §3.2 clause (vi) makes a genuine case rather than a curiosity; an ALREADY-CURRENT workspace — every workspace `unblock init` or any earlier command has opened, and every second run of this command — reports `2`→`2` `applied: false`. `applied: false` therefore means EXACTLY "the stamp did not move across this command's own open", never "nothing was wrong". A stamp that LIES (a database at the current version whose shape is not the current shape) still surfaces as `StorageError::Migration` → the EXISTING `SchemaMismatch` → **exit 2 on EVERY path, including the already-at-current early return**, carrying a hint that names what is missing and what to run (§2.2, §3.2 clause (v)) — a shape fault is never reported as a green delta. **The blast radius is bounded and stated rather than assumed:** `Session::migrate`/`MigrateOutcome` have exactly ONE production consumer, this command; nothing on the MCP surface calls migrate (the CLI is lifecycle/ops only, D3) and `MigrateOutcome` sits outside the published contract (§5.4), so no wire byte moves and no MCP client can observe the widening.
 
-**doctor (D27/AF-1 — doctor-LITE).** Opens the `Session` and composes `diagnostics(Stats|Lint|Info)` + the NEW `Session::integrity_check()` read (§4.1) into a CLI-local `DoctorReport`, mapped onto a `DiagnosticReport { kind: Info, findings }`. At T3.1 it does NOT call `Session::doctor()`/`recover()` (the `health` seam); at **T3.3 (HEALTH-LITE, D29/F4)** it ROUTES through the now-wired `Session::doctor()` (adding file-state anomalies). **Since D45 that same route also carries the dangling-dependency findings** — composed in the ENGINE (§4.1 `doctor()`; `unblock-health` is NOT touched, D29 clause F3 preserved), so the CLI report lists exactly what the `diagnostics {kind:"dangling"}` MCP action lists, in the same pinned order, with no second implementation. **Non-zero exit only on detected corruption:** a non-empty `integrity_check` → `ErrorCode::DatabaseError` (exit 2; §2.3 unchanged, no new code); Lint/orphan **and D45 dangling-dependency** findings are advisory (no exit flip); else exit 0. The advisory classification is deliberate: a dangling edge is a repairable DATA fact, not database corruption, and flipping the exit would change the mutation-pinned `doctor_exit` behaviour on a GA-frozen CLI surface in a patch release (D35). `--repair` + the full taxonomy land at **v1.1**.
+**doctor (D27/AF-1 — doctor-LITE).** Opens the `Session` and composes `diagnostics(Stats|Lint|Info)` + the NEW `Session::integrity_check()` read (§4.1) into a CLI-local `DoctorReport`, mapped onto a `DiagnosticReport { kind: Info, findings }`. At T3.1 it does NOT call `Session::doctor()`/`recover()` (the `health` seam); at **T3.3 (HEALTH-LITE, D29/F4)** it ROUTES through the now-wired `Session::doctor()` (adding file-state anomalies). **Since D45 that same route also carries the dangling-dependency findings** — composed in the ENGINE (§4.1 `doctor()`; `unblock-health` is NOT touched, D29 clause F3 preserved), so the CLI report lists exactly what the `diagnostics {kind:"dangling"}` MCP action lists, in the same pinned order, with no second implementation. **Since D46 (v1.0.1) that same route ALSO carries TWO schema-version findings — the stamp OBSERVED ON DISK and the version THIS BUILD EXPECTS** — composed in the ENGINE (§4.1 `doctor()`) over the EXISTING pure `Storage::schema_version()` read (§3.2), with `unblock-health` again untouched (D29 clause F3 preserved) and no second read path invented in the CLI. **THEIR PLACEMENT IS NORMATIVE (§4.1 `doctor()` carries the same statement): the two schema rows sit AFTER the file-state anomalies and BEFORE the D45 dangling block, which REMAINS the report's trailing suffix** (deterministic overall order, NFR-14) — ruled at the 2026-08-03 design gate because `crates/unblock-engine/tests/dangling.rs:337-341` asserts that suffix and its `:311-312` docstring names the mutant the assertion kills, so appending AFTER the block would redden a required CI step and the cheap repair would retire a live D45 proof. They exist so `doctor` can no longer print `healthy` without also printing the number that would contradict it — the D46 false-green half; they COMPARE nothing and are deliberately **not** a schema-conformance check. **Non-zero exit only on detected corruption:** a non-empty `integrity_check` → `ErrorCode::DatabaseError` (exit 2; §2.3 unchanged, no new code); Lint/orphan, **D45 dangling-dependency and D46 schema-version** findings are advisory (no exit flip); else exit 0. **The D46 findings change the exit rule by exactly zero bytes** — `doctor_exit` stays byte-identical and mutation-pinned, for the same GA-freeze reason the D45 findings did. The advisory classification is deliberate: a dangling edge is a repairable DATA fact, not database corruption, and flipping the exit would change the mutation-pinned `doctor_exit` behaviour on a GA-frozen CLI surface in a patch release (D35). `--repair` + the full taxonomy land at **v1.1**.
 
 **version (D27/AD-5).** Runs with NO workspace. Emits `VersionReport { version, build, commit: Option<_>, rustc: Option<_>, target: Option<_>, features }` from `build.rs`-emitted `option_env!("UNBLOCK_BUILD_*")` (absent = `None`) — NO git invocation / git crate / network / GitHub update-check (NFR-6/D13; the update-check lives only in `unblock update`). Rendered via the same to-`DiagnosticReport` path (kind `Version`).
 
